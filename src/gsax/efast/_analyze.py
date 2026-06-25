@@ -31,7 +31,7 @@ def _compute_indices(Y_curve: Array, N: int, M: int, omega_0: int) -> tuple[Arra
         (S1, ST) scalar arrays.
     """
     f = jnp.fft.fft(Y_curve)
-    Sp = jnp.abs(f[1 : N // 2 + 1]) ** 2 / N**2
+    Sp = jnp.abs(f[1 : (N + 1) // 2]) ** 2 / N**2
     V = 2.0 * jnp.sum(Sp)
 
     harmonics = jnp.arange(1, M + 1) * omega_0
