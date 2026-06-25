@@ -1,6 +1,7 @@
 # HDMR
 
-The canonical API reference now lives at [API Reference](/api/).
+The HDMR module lives at `gsax.hdmr`. The canonical API reference now lives at
+[API Reference](/api/).
 
 Jump directly to:
 

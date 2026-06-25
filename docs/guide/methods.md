@@ -1,6 +1,6 @@
 # Methods
 
-gsax implements two complementary approaches to variance-based global sensitivity analysis (GSA). Both methods decompose the variance of a model's output into contributions attributable to individual input parameters and their interactions, enabling practitioners to identify which parameters drive model behaviour and which are effectively unidentifiable from available measurements.
+gsax implements three complementary approaches to variance-based global sensitivity analysis (GSA). All methods decompose the variance of a model's output into contributions attributable to individual input parameters and their interactions, enabling practitioners to identify which parameters drive model behaviour and which are effectively unidentifiable from available measurements.
 
 ## Background: Variance-Based Sensitivity Analysis
 
@@ -139,8 +139,9 @@ This distinction is important in practice because many real-world models have co
 3. The ANCOVA decomposition splits each component's variance into structural ($S_a$) and correlative ($S_b$) parts. Total-order indices ($S_T$) sum contributions from all terms involving a given parameter.
 
 When HDMR prenormalization is enabled, the fitted surrogate is trained on the
-standardized outputs but `emulate_hdmr()` maps predictions back to the original
-output scale before returning them.
+standardized outputs but `gsax.hdmr.emulate()` (or the top-level alias
+`gsax.emulate_hdmr()`) maps predictions back to the original output scale
+before returning them.
 
 ### Index summary
 
@@ -154,18 +155,37 @@ output scale before returning them.
 **When to use HDMR:**
 - Model evaluations are expensive and you want to reuse existing runs (no structured design needed)
 - Inputs may be correlated (Sobol' assumes independent inputs)
-- You need a surrogate/emulator for fast prediction at new inputs (`emulate_hdmr`)
+- You need a surrogate/emulator for fast prediction at new inputs (`gsax.hdmr.emulate`)
+
+## PCE (Polynomial Chaos Expansion)
+
+PCE takes a spectral approach: it fits an orthogonal polynomial surrogate to `(X, Y)` data and then reads Sobol indices directly from the expansion coefficients (Sudret, 2008). The polynomial basis follows the Wiener-Askey scheme: Legendre polynomials for uniform inputs, Hermite polynomials for Gaussian inputs.
+
+### How to use it
+
+1. You provide any set of $(X, Y)$ pairs (scalar output only in this version).
+2. `gsax.analyze_pce()` maps inputs to the appropriate reference domain, builds the design matrix from a total-degree multi-index, and fits coefficients via regularized least squares.
+3. Sobol indices ($S_1$, $S_T$, $S_2$) are computed analytically from the squared coefficients.
+4. Leave-one-out cross-validation RMSE quantifies surrogate accuracy.
+
+**When to use PCE:**
+- You want analytical Sobol indices without Monte Carlo sampling noise
+- Your model is smooth enough to be well-approximated by low-order polynomials
+- You have mixed uniform and Gaussian inputs (the Wiener-Askey scheme selects the optimal basis automatically)
+- You need a fast emulator for scalar-output models
 
 ## Choosing Between Them
 
-| Consideration | Sobol' | HDMR |
-|---------------|--------|------|
-| Sampling requirement | Structured Saltelli design, $N(D+2)$ evaluations | Any $(X, Y)$ pairs |
-| Input independence | Assumed | Handled via ANCOVA decomposition |
-| Surrogate/emulator | No | Yes (`emulate_hdmr`) |
-| Accuracy | Exact (given enough samples) | Depends on B-spline fit quality |
-| Second-order indices | Direct estimation from cross-matrices | From interaction component functions |
-| Interaction detection | Via $S_2$ and the gap $S_T - S_1$ | Via explicit interaction component functions |
+| Consideration | Sobol' | HDMR | PCE |
+|---------------|--------|------|-----|
+| Sampling requirement | Structured Saltelli design, $N(D+2)$ evaluations | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs |
+| Input independence | Assumed | Handled via ANCOVA decomposition | Assumed |
+| Surrogate/emulator | No | Yes (`emulate_hdmr`) | Yes (`emulate_pce`) |
+| Accuracy | Exact (given enough samples) | Depends on B-spline fit quality | Depends on polynomial fit quality |
+| Second-order indices | Direct estimation from cross-matrices | From interaction component functions | Analytical from coefficients |
+| Interaction detection | Via $S_2$ and the gap $S_T - S_1$ | Via explicit interaction component functions | Via $S_2$ from coefficients |
+| Output shapes | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar only |
+| Input distributions | Uniform + Gaussian | Uniform only | Uniform + Gaussian |
 
 ## Output Shapes
 
@@ -193,3 +213,4 @@ Time-series outputs are particularly useful for dynamic models, where the evolut
 - Jansen, M.J.W. (1999). Analysis of variance designs for model output. *Computer Physics Communications*, 117(1-2), 35-43.
 - Li, G., Rabitz, H., Yelvington, P.E., Oluwole, O.O., Bacon, F., Kolb, C.E., & Schoendorf, J. (2010). Global sensitivity analysis for systems with independent and/or correlated inputs. *Journal of Physical Chemistry A*, 114(19), 6022-6032.
 - Rabitz, H. & Alis, O. (1999). General foundations of high-dimensional model representations. *Journal of Mathematical Chemistry*, 25(2-3), 197-233.
+- Sudret, B. (2008). Global sensitivity analysis using polynomial chaos expansions. *Reliability Engineering & System Safety*, 93(7), 964-979.

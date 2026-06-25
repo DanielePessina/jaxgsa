@@ -1,10 +1,11 @@
 # API Reference
 
 This is the canonical reference for the exported `gsax` surface. The package has
-two workflows:
+three workflows:
 
 - Sobol: `sample()` -> `analyze()`
 - RS-HDMR: `analyze_hdmr()` -> `emulate_hdmr()`
+- PCE: `analyze_pce()` -> `emulate_pce()`
 
 Related docs:
 
@@ -13,6 +14,27 @@ Related docs:
 - [Examples](/examples/basic)
 - [Advanced Workflow](/examples/advanced-workflow)
 - [xarray Output](/examples/xarray)
+
+## Package Structure
+
+Since v0.6.0, `gsax` is organized into subpackages:
+
+| Subpackage | Contents |
+| --- | --- |
+| `gsax.sobol` | `analyze`, `SAResult` |
+| `gsax.hdmr` | `analyze`, `emulate`, `HDMRResult`, `HDMREmulator` |
+| `gsax.pce` | `analyze`, `emulate`, `PCEResult` |
+
+You can import from the subpackages directly:
+
+```python
+from gsax.sobol import analyze
+from gsax.hdmr import analyze as analyze_hdmr, emulate as emulate_hdmr
+from gsax.pce import analyze as analyze_pce, emulate as emulate_pce
+```
+
+All public symbols are also re-exported from the top-level `gsax` namespace for
+convenience, so `import gsax; gsax.analyze(...)` still works.
 
 ## Exported Surface
 
@@ -30,6 +52,9 @@ Top-level exports from `gsax`:
 - [`emulate_hdmr`](#emulate_hdmr)
 - [`HDMRResult`](#hdmrresult)
 - [`HDMREmulator`](#hdmremulator)
+- [`analyze_pce`](#analyze_pce)
+- [`emulate_pce`](#emulate_pce)
+- [`PCEResult`](#pceresult)
 
 ## Problem Definition
 
@@ -626,3 +651,123 @@ Related links:
 - [Methods](/guide/methods)
 - [RS-HDMR Example](/examples/hdmr)
 - [Advanced Workflow](/examples/advanced-workflow)
+
+## PCE Workflow
+
+<a id="analyze_pce"></a>
+### `analyze_pce()`
+
+Compute Sobol indices via Polynomial Chaos Expansion. Fits an orthogonal
+polynomial surrogate to `(X, Y)` data and extracts first-order, total-order,
+and second-order indices analytically from the expansion coefficients
+(Sudret, 2008).
+
+```python
+def analyze_pce(
+    problem: Problem,
+    X: Array,
+    Y: Array,
+    *,
+    order: int = 3,
+    ridge: float = 1e-8,
+    fit_ratio: float = 0.5,
+) -> PCEResult
+```
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `problem` | `Problem` | required | Parameter names and distributions. |
+| `X` | `Array` | required | Input array with shape `(N, D)`. |
+| `Y` | `Array` | required | Output array with shape `(N,)` (scalar output only). |
+| `order` | `int` | `3` | Maximum total polynomial degree. Automatically reduced if the number of terms would exceed `fit_ratio * N`. |
+| `ridge` | `float` | `1e-8` | Tikhonov regularization parameter for least-squares fit. |
+| `fit_ratio` | `float` | `0.5` | Maximum ratio of terms to samples before the order is reduced. |
+
+Validation and behavior:
+
+- `Y` must be 1D. Multi-output and time-series outputs are not yet supported.
+- `X.shape[1]` must match `problem.num_vars`.
+- Uniform and truncated-Gaussian inputs use Legendre polynomials on `[-1, 1]`.
+- Untruncated Gaussian inputs use Hermite polynomials standardized to `N(0, 1)`.
+- The polynomial order is automatically reduced when the term count would
+  exceed `fit_ratio * N` to prevent overfitting.
+
+Returns: [`PCEResult`](#pceresult)
+
+<a id="emulate_pce"></a>
+### `emulate_pce()`
+
+Predict at new input points using the fitted PCE.
+
+```python
+def emulate_pce(result: PCEResult, X_new: Array) -> Array
+```
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `result` | `PCEResult` | Result from `analyze_pce()`. |
+| `X_new` | `Array` | New input points with shape `(N_new, D)`. |
+
+Returns `(N_new,)` predicted outputs.
+
+<a id="pceresult"></a>
+### `PCEResult`
+
+Dataclass holding PCE-derived Sobol indices and fitted expansion coefficients.
+
+```python
+@dataclass
+class PCEResult:
+    S1: Array
+    ST: Array
+    S2: Array
+    problem: Problem
+    coefficients: Array
+    multi_index: np.ndarray
+    order: int
+    loo_rmse: Array | None = None
+```
+
+| Field | Shape | Description |
+| --- | --- | --- |
+| `S1` | `(D,)` | First-order Sobol indices. |
+| `ST` | `(D,)` | Total-order Sobol indices. |
+| `S2` | `(D, D)` | Second-order interaction matrix with `NaN` diagonal. |
+| `coefficients` | `(n_terms,)` | Fitted PCE coefficients. |
+| `multi_index` | `(n_terms, D)` | Multi-index array mapping terms to polynomial degrees. |
+| `order` | `int` | Effective total polynomial degree used (may be less than requested). |
+| `loo_rmse` | `scalar or None` | Leave-one-out cross-validation RMSE. |
+
+<a id="pceresult-to_dataset"></a>
+#### `PCEResult.to_dataset()`
+
+```python
+ds = result.to_dataset()
+```
+
+Converts PCE results to a labeled `xarray.Dataset` with `param` coordinates.
+Includes `S1`, `ST`, `S2` (with `param_i` / `param_j` dimensions), and
+`loo_rmse` when available.
+
+Minimal example:
+
+```python
+import gsax
+from gsax.benchmarks.ishigami import PROBLEM, evaluate
+from gsax.pce import analyze, emulate
+
+sampling_result = gsax.sample(PROBLEM, n_samples=4096, seed=42)
+X = sampling_result.samples
+Y = evaluate(X)
+
+result = analyze(PROBLEM, X, Y, order=4)
+Y_pred = emulate(result, X[:5])
+
+print(result.S1)
+print(result.ST)
+print(result.loo_rmse)
+```
+
+Related links:
+
+- [Methods](/guide/methods)

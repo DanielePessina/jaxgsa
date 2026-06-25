@@ -4,7 +4,7 @@
 
 **[Documentation](https://danielepessina.github.io/gsax/)**
 
-`gsax` computes variance-based sensitivity indices entirely in JAX, giving you GPU/TPU acceleration and JIT compilation for free. It provides two complementary methods: **Sobol indices** (via Saltelli sampling) and **RS-HDMR** (surrogate-based, works with any input-output pairs).
+`gsax` computes variance-based sensitivity indices entirely in JAX, giving you GPU/TPU acceleration and JIT compilation for free. It provides three complementary methods: **Sobol indices** (via Saltelli sampling), **RS-HDMR** (surrogate-based, works with any input-output pairs), and **PCE** (Polynomial Chaos Expansion with analytical Sobol indices).
 
 ## Features
 
@@ -17,6 +17,11 @@
   - B-spline surrogate with ANCOVA decomposition (Sa, Sb, S, ST)
   - Built-in emulator for prediction at new inputs
   - S1/ST properties for direct comparison with Sobol results
+- **PCE** (Polynomial Chaos Expansion)
+  - Analytical Sobol indices from orthogonal polynomial coefficients (Sudret, 2008)
+  - Wiener-Askey scheme: Legendre for uniform, Hermite for Gaussian inputs
+  - Built-in emulator and leave-one-out cross-validation RMSE
+  - Scalar output only in this version
 - Supports scalar, multi-output, and time-series model outputs from the start
 - Bootstrap confidence intervals with JAX-accelerated resampling
 - Optional `prenormalize=True` mode for SALib-style output standardization before
@@ -281,14 +286,18 @@ Use it for:
 - parameter, field, and shape contracts
 - validation and error behavior
 - `to_dataset()` labeling rules
-- Sobol and RS-HDMR workflow examples
+- Sobol, RS-HDMR, and PCE workflow examples
 
 Quick map:
 
 - `Problem`
 - `sample` / `SamplingResult` / `load`
-- `analyze` / `SAResult`
-- `analyze_hdmr` / `emulate_hdmr` / `HDMRResult` / `HDMREmulator`
+- `gsax.sobol`: `analyze` / `SAResult`
+- `gsax.hdmr`: `analyze` / `emulate` / `HDMRResult` / `HDMREmulator`
+- `gsax.pce`: `analyze` / `emulate` / `PCEResult`
+
+All symbols are also re-exported from the top-level `gsax` namespace
+(`gsax.analyze()`, `gsax.analyze_hdmr()`, `gsax.analyze_pce()`, etc.).
 
 For runnable walkthroughs, start with the
 [Getting Started guide](https://danielepessina.github.io/gsax/guide/getting-started)

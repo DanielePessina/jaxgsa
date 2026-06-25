@@ -82,7 +82,7 @@ expanded Saltelli layout cannot be reconstructed with an identity mapping alone.
 Start with the core workflow, then branch into the example that matches your
 next problem:
 
-- [Methods](/guide/methods) -- compare Sobol sampling and RS-HDMR before choosing a workflow
+- [Methods](/guide/methods) -- compare Sobol sampling, RS-HDMR, and PCE before choosing a workflow
 - [Basic Example (Ishigami)](/examples/basic) -- run the canonical scalar-output Sobol analysis end to end
 - [Non-Uniform Inputs](/examples/non-uniform-inputs) -- mix uniform, Gaussian, and truncated Gaussian Sobol marginals in one `Problem`
 - [Save and Reload Samples](/examples/save-load) -- persist a `SamplingResult` and reuse it across runs

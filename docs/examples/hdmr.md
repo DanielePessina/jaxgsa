@@ -3,20 +3,35 @@
 Use HDMR when you already have arbitrary `(X, Y)` pairs or when you want a
 surrogate that can predict at new inputs.
 
+## Import style
+
+The HDMR module lives at `gsax.hdmr`. You can import it directly or use the
+top-level convenience aliases:
+
+```python
+# Subpackage import (preferred for HDMR-focused scripts)
+from gsax.hdmr import analyze, emulate
+
+# Or use the top-level re-exports
+import gsax
+# gsax.analyze_hdmr(...)
+# gsax.emulate_hdmr(...)
+```
+
 ## Sensitivity analysis from random samples
 
 ```python
 import jax
 import jax.numpy as jnp
-import gsax
 from gsax.benchmarks.ishigami import PROBLEM, evaluate
+from gsax.hdmr import analyze, emulate
 
 key = jax.random.PRNGKey(42)
 bounds = jnp.array(PROBLEM.bounds)
 X = jax.random.uniform(key, (2000, 3), minval=bounds[:, 0], maxval=bounds[:, 1])
 Y = evaluate(X)
 
-result = gsax.analyze_hdmr(
+result = analyze(
     PROBLEM,
     X,
     Y,
@@ -36,7 +51,7 @@ print("RMSE:", result.rmse)
 ## Use the emulator
 
 ```python
-Y_pred = gsax.emulate_hdmr(result, X[:5])
+Y_pred = emulate(result, X[:5])
 print("Prediction shape:", Y_pred.shape)
 print("Absolute residuals:", jnp.abs(Y[:5] - Y_pred))
 ```
