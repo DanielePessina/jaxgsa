@@ -15,9 +15,9 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from scipy.stats import norm, truncnorm
 
 from gsax.problem import Problem
+from gsax.sampling import _transform_samples
 
 
 def _assign_frequencies(D: int, omega_0: int, M: int) -> np.ndarray:
@@ -37,26 +37,6 @@ def _assign_frequencies(D: int, omega_0: int, M: int) -> np.ndarray:
     if m >= D - 1:
         return np.floor(np.linspace(1, m, D - 1)).astype(np.int64)
     return (np.arange(D - 1) % m + 1).astype(np.int64)
-
-
-def _transform_column(
-    unit_values: np.ndarray,
-    dist: str,
-    first: float,
-    second: float,
-    lo: float | None,
-    hi: float | None,
-) -> np.ndarray:
-    """Map unit-interval samples to the target distribution."""
-    clipped = np.clip(unit_values, 1e-12, 1.0 - 1e-12)
-    if dist == "uniform":
-        return clipped * (second - first) + first
-    std = math.sqrt(second)
-    if lo is None and hi is None:
-        return first + std * norm.ppf(clipped)
-    a = -np.inf if lo is None else (lo - first) / std
-    b = np.inf if hi is None else (hi - first) / std
-    return truncnorm.ppf(clipped, a=a, b=b, loc=first, scale=std)
 
 
 def sample(
@@ -82,6 +62,9 @@ def sample(
     Returns:
         (N * D, D) sample array in the problem's physical units.
     """
+    if M < 1:
+        raise ValueError(f"M must be >= 1, got {M}")
+
     D = problem.num_vars
     if N <= 4 * M**2:
         raise ValueError(f"N must be > 4*M^2 = {4 * M**2}, got {N}")
@@ -108,8 +91,6 @@ def sample(
                 np.sin(omega[j] * s + phi)
             )
 
-    for j in range(D):
-        dist, first, second, lo, hi = problem.input_specs[j]
-        X[:, j] = _transform_column(X[:, j], dist, first, second, lo, hi)
+    X = _transform_samples(problem, X)
 
     return X

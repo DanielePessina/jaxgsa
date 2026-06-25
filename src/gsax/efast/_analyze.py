@@ -11,6 +11,8 @@ References:
 
 from __future__ import annotations
 
+import warnings
+
 import jax.numpy as jnp
 from jax import Array
 
@@ -50,9 +52,6 @@ def analyze(
     Y: Array,
     *,
     M: int = 4,
-    num_resamples: int = 0,
-    conf_level: float = 0.95,
-    seed: int | None = None,
 ) -> EFASTResult:
     """Compute eFAST sensitivity indices from model outputs.
 
@@ -61,17 +60,24 @@ def analyze(
         Y: (N * D,) model outputs evaluated at eFAST samples. The
             samples must have been generated with the same M.
         M: Interference factor used during sampling. Default 4.
-        num_resamples: Number of bootstrap resamples for confidence
-            intervals. Set to 0 (default) to skip.
-        conf_level: Confidence level for bootstrap CIs. Default 0.95.
-        seed: Random seed for bootstrap reproducibility.
 
     Returns:
-        EFASTResult with S1, ST, and optional confidence intervals.
+        EFASTResult with S1 and ST indices.
     """
+    if M < 1:
+        raise ValueError(f"M must be >= 1, got {M}")
+
     Y = jnp.asarray(Y)
     if Y.ndim != 1:
         raise ValueError(f"eFAST currently supports scalar output (Y.ndim=1), got {Y.ndim}")
+
+    if not jnp.all(jnp.isfinite(Y)):
+        n_bad = int(jnp.sum(~jnp.isfinite(Y)))
+        warnings.warn(
+            f"eFAST: Y contains {n_bad} non-finite values (NaN/Inf) "
+            "which will propagate into indices",
+            stacklevel=2,
+        )
 
     D = problem.num_vars
     if Y.size % D != 0:
@@ -94,56 +100,17 @@ def analyze(
     S1 = jnp.stack(S1_vals)
     ST = jnp.stack(ST_vals)
 
-    S1_conf = None
-    ST_conf = None
-    if num_resamples > 0:
-        S1_conf, ST_conf = _bootstrap_ci(
-            Y, D, N, M, omega_0, num_resamples, conf_level, seed
+    if jnp.any((S1 > 1.0) | (S1 < 0.0)) or jnp.any((ST > 1.0) | (ST < 0.0)):
+        warnings.warn(
+            "eFAST: some indices are outside [0, 1], suggesting "
+            "insufficient samples or near-zero output variance",
+            stacklevel=2,
         )
 
     return EFASTResult(
         S1=S1,
         ST=ST,
         problem=problem,
-        S1_conf=S1_conf,
-        ST_conf=ST_conf,
         omega_0=omega_0,
         M=M,
     )
-
-
-def _bootstrap_ci(
-    Y: Array,
-    D: int,
-    N: int,
-    M: int,
-    omega_0: int,
-    num_resamples: int,
-    conf_level: float,
-    seed: int | None,
-) -> tuple[Array, Array]:
-    """Compute bootstrap confidence half-widths for S1 and ST."""
-    import numpy as np
-
-    rng = np.random.default_rng(seed)
-    n_sub = max(4 * M**2 + 1, N // 2)
-
-    s1_boot = np.zeros((num_resamples, D))
-    st_boot = np.zeros((num_resamples, D))
-
-    for r in range(num_resamples):
-        for i in range(D):
-            Y_curve = np.asarray(Y[i * N : (i + 1) * N])
-            idx = rng.choice(N, size=n_sub, replace=True)
-            Y_rs = jnp.asarray(Y_curve[idx])
-            omega_rs = (n_sub - 1) // (2 * M)
-            s1, st = _compute_indices(Y_rs, n_sub, M, omega_rs)
-            s1_boot[r, i] = float(s1)
-            st_boot[r, i] = float(st)
-
-    from scipy.stats import norm
-
-    z = norm.ppf(0.5 + conf_level / 2.0)
-    S1_conf = jnp.asarray(z * np.std(s1_boot, axis=0, ddof=1))
-    ST_conf = jnp.asarray(z * np.std(st_boot, axis=0, ddof=1))
-    return S1_conf, ST_conf

@@ -21,8 +21,6 @@ class EFASTResult:
         S1: (D,) first-order indices.
         ST: (D,) total-order indices.
         problem: Problem definition used for the analysis.
-        S1_conf: (D,) half-width of bootstrap CI for S1, or None.
-        ST_conf: (D,) half-width of bootstrap CI for ST, or None.
         omega_0: The primary frequency used in the analysis.
         M: The interference factor (number of harmonics summed).
     """
@@ -30,8 +28,6 @@ class EFASTResult:
     S1: Array
     ST: Array
     problem: Problem
-    S1_conf: Array | None = None
-    ST_conf: Array | None = None
     omega_0: int = 0
     M: int = 4
 
@@ -43,8 +39,4 @@ class EFASTResult:
             "S1": ("param", np.asarray(self.S1)),
             "ST": ("param", np.asarray(self.ST)),
         }
-        if self.S1_conf is not None:
-            data_vars["S1_conf"] = ("param", np.asarray(self.S1_conf))
-        if self.ST_conf is not None:
-            data_vars["ST_conf"] = ("param", np.asarray(self.ST_conf))
         return xr.Dataset(data_vars, coords=coords)

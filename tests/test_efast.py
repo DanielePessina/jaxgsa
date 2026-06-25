@@ -113,7 +113,7 @@ class TestAnalysis:
         assert ishigami_efast_result.ST.shape == (3,)
 
     def test_no_s2(self, ishigami_efast_result):
-        assert not hasattr(ishigami_efast_result, "S2") or True
+        assert not hasattr(ishigami_efast_result, "S2")
 
     def test_omega_and_m(self, ishigami_efast_result):
         assert ishigami_efast_result.M == 4
@@ -129,20 +129,12 @@ class TestAnalysis:
         with pytest.raises(ValueError, match="multiple"):
             analyze(problem, jnp.ones(7))
 
-
-class TestBootstrap:
-    def test_confidence_intervals(self):
-        X = sample(ishigami.PROBLEM, N=513, M=4, seed=42)
-        Y = ishigami.evaluate(jnp.asarray(X))
-        result = analyze(
-            ishigami.PROBLEM, jnp.asarray(Y), M=4, num_resamples=50, seed=10
-        )
-        assert result.S1_conf is not None
-        assert result.ST_conf is not None
-        assert result.S1_conf.shape == (3,)
-        assert result.ST_conf.shape == (3,)
-        assert np.all(np.asarray(result.S1_conf) > 0)
-        assert np.all(np.asarray(result.ST_conf) > 0)
+    def test_invalid_m_raises(self):
+        problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
+        X = sample(problem, N=257, M=4, seed=1)
+        Y = jnp.ones(X.shape[0])
+        with pytest.raises(ValueError, match="M must be >= 1"):
+            analyze(problem, Y, M=0)
 
 
 class TestFrequencyAssignment:
