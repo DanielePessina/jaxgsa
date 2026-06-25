@@ -293,6 +293,7 @@ def sample(
     problem: Problem,
     n_samples: int,
     *,
+    base_n: int | None = None,
     calc_second_order: bool = True,
     scramble: bool = True,
     seed: int | np.random.Generator | None = None,
@@ -309,6 +310,12 @@ def sample(
     Args:
         problem: Problem definition with parameter names and bounds.
         n_samples: Minimum desired number of unique model evaluations.
+            Ignored when ``base_n`` is provided.
+        base_n: If given, use this exact Sobol base size (must be a power
+            of 2) instead of searching for one. The expanded Saltelli
+            design will have ``base_n * (2*D + 2)`` rows (second order)
+            or ``base_n * (D + 2)`` rows (first/total only). This gives
+            direct control over the sampling budget.
         calc_second_order: If ``True``, include BA cross-matrices so that
             second-order Sobol indices can be computed.  This increases
             the expanded Saltelli step from ``D + 2`` to ``2*D + 2``.
@@ -324,32 +331,43 @@ def sample(
     """
     D = problem.num_vars
     step = _saltelli_step(D, calc_second_order)
-    target_n = max(1, n_samples)
-    # Start from the smallest power-of-two Sobol base size that could plausibly
-    # satisfy the requested unique budget if there were no duplicates.
-    base_n = _next_power_of_2(math.ceil(target_n / step))
 
-    while True:
-        expanded_samples_unit = _build_expanded_samples(
-            D,
-            base_n,
-            calc_second_order=calc_second_order,
-            scramble=scramble,
-            seed=seed,
-        )
-        expanded_samples = _transform_samples(problem, expanded_samples_unit)
-        unique_samples, expanded_to_unique = _stable_unique_rows(expanded_samples)
-        # Low-dimensional Saltelli designs can contain exact duplicate rows.
-        # Keep increasing base_n until the user-facing matrix is large enough.
-        if unique_samples.shape[0] >= target_n:
-            break
-        base_n *= 2
+    if base_n is not None:
+        if base_n < 1 or (base_n & (base_n - 1)) != 0:
+            raise ValueError(f"base_n must be a power of 2, got {base_n}")
+        target_n = None
+    else:
+        target_n = max(1, n_samples)
+        base_n = _next_power_of_2(math.ceil(target_n / step))
+
+    expanded_samples_unit = _build_expanded_samples(
+        D,
+        base_n,
+        calc_second_order=calc_second_order,
+        scramble=scramble,
+        seed=seed,
+    )
+    expanded_samples = _transform_samples(problem, expanded_samples_unit)
+    unique_samples, expanded_to_unique = _stable_unique_rows(expanded_samples)
+
+    if target_n is not None:
+        while unique_samples.shape[0] < target_n:
+            base_n *= 2
+            expanded_samples_unit = _build_expanded_samples(
+                D,
+                base_n,
+                calc_second_order=calc_second_order,
+                scramble=scramble,
+                seed=seed,
+            )
+            expanded_samples = _transform_samples(problem, expanded_samples_unit)
+            unique_samples, expanded_to_unique = _stable_unique_rows(expanded_samples)
 
     sample_ids = np.arange(unique_samples.shape[0], dtype=np.int64)
     if verbose:
         _print_sampling_summary(
             n_params=D,
-            target_n=target_n,
+            target_n=target_n if target_n is not None else unique_samples.shape[0],
             unique_n=unique_samples.shape[0],
             expanded_n_total=expanded_samples.shape[0],
             base_n=base_n,
