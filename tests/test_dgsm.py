@@ -1,0 +1,366 @@
+"""Tests for DGSM (derivative-based global sensitivity measures)."""
+
+from __future__ import annotations
+
+import math
+
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+from gsax.benchmarks import ishigami, linear
+from gsax.dgsm import analyze
+from gsax.dgsm._poincare import axis_constants, marginal_variance, poincare_constant
+from gsax.problem import GaussianInputSpec, Problem
+from gsax.sampling import sample_mc
+
+A, B = 7.0, 0.1
+
+
+def _ishigami_single(x):
+    """Unbatched Ishigami: (3,) -> (1,)."""
+    return jnp.array(
+        [jnp.sin(x[0]) + A * jnp.sin(x[1]) ** 2 + B * x[2] ** 4 * jnp.sin(x[0])]
+    )
+
+
+def _linear_single(x):
+    """Unbatched linear: (3,) -> (1,)."""
+    c = jnp.array([1.0, 2.0, 3.0])
+    return jnp.array([jnp.dot(c, x)])
+
+
+def _multi_output(x):
+    """Unbatched multi-output: (3,) -> (2,)."""
+    c = jnp.array([1.0, 2.0, 3.0])
+    return jnp.array([jnp.dot(c, x), jnp.sum(x**2)])
+
+
+@pytest.fixture(scope="module")
+def ishigami_dgsm_result():
+    """DGSM result for Ishigami benchmark."""
+    X = sample_mc(ishigami.PROBLEM, N=50_000, seed=42)
+    return analyze(ishigami.PROBLEM, _ishigami_single, jnp.asarray(X))
+
+
+@pytest.fixture(scope="module")
+def linear_dgsm_result():
+    """DGSM result for linear benchmark."""
+    X = sample_mc(linear.PROBLEM, N=10_000, seed=123)
+    return analyze(linear.PROBLEM, _linear_single, jnp.asarray(X))
+
+
+class TestPoincare:
+    def test_uniform_constant(self):
+        spec = ("uniform", -math.pi, math.pi, None, None)
+        C = poincare_constant(spec)
+        assert C == pytest.approx((2 * math.pi) ** 2 / math.pi**2)
+        assert C == pytest.approx(4.0)
+
+    def test_gaussian_constant(self):
+        spec = ("gaussian", 0.0, 1.5, None, None)
+        assert poincare_constant(spec) == pytest.approx(1.5)
+
+    def test_truncated_gaussian_spectral(self):
+        spec = ("gaussian", 0.0, 1.0, -3.0, 3.0)
+        C = poincare_constant(spec)
+        assert C < 1.0
+        assert C > 0.0
+
+    def test_spectral_recovers_uniform(self):
+        from gsax.dgsm._poincare import _truncnorm_poincare
+
+        got = _truncnorm_poincare(0.0, 1e6, -math.pi, math.pi, 512)
+        assert got == pytest.approx(4.0, rel=2e-3)
+
+    def test_spectral_wide_gaussian_collapses_to_sigma2(self):
+        from gsax.dgsm._poincare import _truncnorm_poincare
+
+        sigma = 1.3
+        got = _truncnorm_poincare(0.0, sigma, -6 * sigma, 6 * sigma, 700)
+        assert got == pytest.approx(sigma**2, rel=3e-2)
+
+
+class TestMarginalVariance:
+    def test_uniform(self):
+        spec = ("uniform", 0.0, 1.0, None, None)
+        assert marginal_variance(spec) == pytest.approx(1.0 / 12.0)
+
+    def test_uniform_wide(self):
+        spec = ("uniform", -math.pi, math.pi, None, None)
+        assert marginal_variance(spec) == pytest.approx(
+            (2 * math.pi) ** 2 / 12.0
+        )
+
+    def test_gaussian(self):
+        spec = ("gaussian", 0.0, 2.5, None, None)
+        assert marginal_variance(spec) == pytest.approx(2.5)
+
+    def test_truncated_gaussian(self):
+        spec = ("gaussian", 0.0, 1.0, -1.0, 1.0)
+        v = marginal_variance(spec)
+        assert 0 < v < 1.0
+
+
+class TestAxisConstants:
+    def test_shapes(self):
+        problem = Problem(names=("a", "b", "c"), bounds=((0, 1), (0, 1), (0, 1)))
+        C, Var = axis_constants(problem)
+        assert C.shape == (3,)
+        assert Var.shape == (3,)
+
+    def test_uniform_values(self):
+        problem = Problem(names=("x",), bounds=((0.0, 1.0),))
+        C, Var = axis_constants(problem)
+        assert C[0] == pytest.approx(1.0 / math.pi**2)
+        assert Var[0] == pytest.approx(1.0 / 12.0)
+
+
+class TestSampleMC:
+    def test_shape(self):
+        problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
+        X = sample_mc(problem, N=100, seed=1)
+        assert X.shape == (100, 2)
+
+    def test_within_bounds(self):
+        problem = Problem(names=("a", "b"), bounds=((2.0, 5.0), (-1.0, 3.0)))
+        X = sample_mc(problem, N=1000, seed=2)
+        assert np.all(X[:, 0] >= 2.0 - 1e-10)
+        assert np.all(X[:, 0] <= 5.0 + 1e-10)
+        assert np.all(X[:, 1] >= -1.0 - 1e-10)
+        assert np.all(X[:, 1] <= 3.0 + 1e-10)
+
+    def test_reproducible(self):
+        problem = Problem(names=("x1",), bounds=((0, 1),))
+        X1 = sample_mc(problem, N=50, seed=99)
+        X2 = sample_mc(problem, N=50, seed=99)
+        np.testing.assert_array_equal(X1, X2)
+
+    def test_gaussian_inputs(self):
+        problem = Problem.from_dict(
+            {
+                "x1": (0.0, 1.0),
+                "x2": GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0),
+            }
+        )
+        X = sample_mc(problem, N=500, seed=3)
+        assert X.shape == (500, 2)
+        assert np.all(X[:, 0] >= 0.0 - 1e-10)
+        assert np.all(X[:, 0] <= 1.0 + 1e-10)
+
+
+class TestLinearDGSM:
+    def test_nu_exact(self, linear_dgsm_result):
+        """Linear f(x) = c . x => df/dx_i = c_i => nu_i = c_i^2 exactly."""
+        nu = np.asarray(linear_dgsm_result.nu)
+        assert nu.shape == (1, 3)
+        c = np.array([1.0, 2.0, 3.0])
+        np.testing.assert_allclose(nu[0], c**2, atol=1e-5)
+
+    def test_sigma_exact(self, linear_dgsm_result):
+        """Linear f(x) = c . x => E[df/dx_i] = c_i exactly."""
+        sigma = np.asarray(linear_dgsm_result.sigma)
+        c = np.array([1.0, 2.0, 3.0])
+        np.testing.assert_allclose(sigma[0], c, atol=1e-5)
+
+    def test_upper_bound_geq_st(self, linear_dgsm_result):
+        upper = np.asarray(linear_dgsm_result.upper_bound)
+        ST = np.array(linear.ANALYTICAL_ST)
+        assert np.all(upper[0] >= ST - 1e-3)
+
+    def test_lower_bound_close_to_st(self, linear_dgsm_result):
+        """For a linear model, the lower bound should approximate ST closely."""
+        lower = np.asarray(linear_dgsm_result.lower_bound)
+        ST = np.array(linear.ANALYTICAL_ST)
+        # MC noise in Var(Y) means the bound can slightly exceed analytical ST
+        np.testing.assert_allclose(lower[0], ST, rtol=0.05)
+
+    def test_bracket_contains_st(self, linear_dgsm_result):
+        """The DGSM bracket [lower, upper] should approximately contain ST."""
+        lower = np.asarray(linear_dgsm_result.lower_bound)[0]
+        upper = np.asarray(linear_dgsm_result.upper_bound)[0]
+        ST = np.array(linear.ANALYTICAL_ST)
+        # MC noise tolerance: bounds are exact in expectation, noisy in practice
+        for i in range(3):
+            assert lower[i] <= ST[i] + 0.02, f"lower[{i}]={lower[i]:.4f} > ST={ST[i]:.4f}"
+            assert upper[i] >= ST[i] - 0.02, f"upper[{i}]={upper[i]:.4f} < ST={ST[i]:.4f}"
+
+
+class TestIshigamiDGSM:
+    def test_nu_analytic(self, ishigami_dgsm_result):
+        """Compare nu against analytically derived Ishigami DGSM."""
+        pi = math.pi
+        nu_analytic = np.array(
+            [
+                0.5 * (1 + 2 * B * pi**4 / 5 + B**2 * pi**8 / 9),
+                A**2 / 2,
+                8 * B**2 * pi**6 / 7,
+            ]
+        )
+        nu = np.asarray(ishigami_dgsm_result.nu)[0]
+        np.testing.assert_allclose(nu, nu_analytic, rtol=3e-2)
+
+    def test_upper_bound_holds(self, ishigami_dgsm_result):
+        upper = np.asarray(ishigami_dgsm_result.upper_bound)[0]
+        ST = np.array(ishigami.ANALYTICAL_ST)
+        assert np.all(upper >= ST - 1e-2)
+
+    def test_lower_bound_holds(self, ishigami_dgsm_result):
+        lower = np.asarray(ishigami_dgsm_result.lower_bound)[0]
+        ST = np.array(ishigami.ANALYTICAL_ST)
+        assert np.all(lower <= ST + 1e-2)
+
+
+class TestMultiOutput:
+    def test_shapes(self):
+        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
+        X = sample_mc(problem, N=500, seed=7)
+        result = analyze(problem, _multi_output, jnp.asarray(X))
+        assert result.nu.shape == (2, 3)
+        assert result.sigma.shape == (2, 3)
+        assert result.upper_bound.shape == (2, 3)
+        assert result.lower_bound.shape == (2, 3)
+        assert result.var_y.shape == (2,)
+
+    def test_linear_output_matches_scalar(self):
+        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
+        X = sample_mc(problem, N=2000, seed=8)
+        Xj = jnp.asarray(X)
+        result_multi = analyze(problem, _multi_output, Xj)
+        result_linear = analyze(problem, _linear_single, Xj)
+        np.testing.assert_allclose(
+            np.asarray(result_multi.nu)[0],
+            np.asarray(result_linear.nu)[0],
+            atol=1e-5,
+        )
+
+
+class TestScalarOutput:
+    def test_scalar_fn(self):
+        """fn returning a scalar () instead of (1,) should work."""
+
+        def f_scalar(x):
+            return jnp.dot(jnp.array([1.0, 2.0, 3.0]), x)
+
+        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
+        X = sample_mc(problem, N=500, seed=9)
+        result = analyze(problem, f_scalar, jnp.asarray(X))
+        assert result.nu.shape == (1, 3)
+        c = np.array([1.0, 2.0, 3.0])
+        np.testing.assert_allclose(np.asarray(result.nu)[0], c**2, atol=1e-4)
+
+
+class TestPrecomputed:
+    def test_precomputed_matches_autodiff(self):
+        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
+        X = sample_mc(problem, N=1000, seed=10)
+        Xj = jnp.asarray(X)
+        result_auto = analyze(problem, _linear_single, Xj)
+
+        import jax
+
+        jacfn = jax.vmap(jax.jacrev(_linear_single))
+        dfdx = jacfn(Xj)
+        Y = jax.vmap(_linear_single)(Xj)
+
+        result_pre = analyze(problem, Y=Y, dfdx=dfdx)
+        np.testing.assert_allclose(
+            np.asarray(result_auto.nu), np.asarray(result_pre.nu), atol=1e-5
+        )
+        np.testing.assert_allclose(
+            np.asarray(result_auto.sigma), np.asarray(result_pre.sigma), atol=1e-5
+        )
+
+    def test_missing_args_raises(self):
+        problem = Problem(names=("x",), bounds=((0, 1),))
+        with pytest.raises(ValueError, match="Provide either"):
+            analyze(problem)
+
+
+class TestChunked:
+    def test_chunked_matches_unchunked(self):
+        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
+        X = sample_mc(problem, N=500, seed=11)
+        Xj = jnp.asarray(X)
+        result_full = analyze(problem, _linear_single, Xj)
+        result_chunked = analyze(problem, _linear_single, Xj, chunk_size=100)
+        np.testing.assert_allclose(
+            np.asarray(result_full.nu),
+            np.asarray(result_chunked.nu),
+            atol=1e-5,
+        )
+
+    def test_ragged_chunk_matches(self):
+        """N not divisible by chunk_size should still produce correct results."""
+        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
+        X = sample_mc(problem, N=503, seed=14)
+        Xj = jnp.asarray(X)
+        result_full = analyze(problem, _linear_single, Xj)
+        result_ragged = analyze(problem, _linear_single, Xj, chunk_size=100)
+        np.testing.assert_allclose(
+            np.asarray(result_full.nu),
+            np.asarray(result_ragged.nu),
+            atol=1e-5,
+        )
+
+
+class TestValidation:
+    def test_x_wrong_ndim(self):
+        problem = Problem(names=("x",), bounds=((0, 1),))
+        with pytest.raises(ValueError, match="2-D"):
+            analyze(problem, _linear_single, jnp.ones(10))
+
+    def test_x_wrong_columns(self):
+        problem = Problem(names=("x",), bounds=((0, 1),))
+        with pytest.raises(ValueError, match="columns"):
+            analyze(problem, _linear_single, jnp.ones((10, 3)))
+
+    def test_dfdx_wrong_ndim(self):
+        problem = Problem(names=("x",), bounds=((0, 1),))
+        with pytest.raises(ValueError, match="ndim"):
+            analyze(problem, Y=jnp.ones(10), dfdx=jnp.ones(10))
+
+    def test_dfdx_wrong_columns(self):
+        problem = Problem(names=("x",), bounds=((0, 1),))
+        with pytest.raises(ValueError, match="last dimension"):
+            analyze(problem, Y=jnp.ones(10), dfdx=jnp.ones((10, 3)))
+
+    def test_dfdx_row_mismatch(self):
+        problem = Problem(names=("x",), bounds=((0, 1),))
+        with pytest.raises(ValueError, match="rows"):
+            analyze(problem, Y=jnp.ones(10), dfdx=jnp.ones((5, 1)))
+
+    def test_sample_mc_n_zero_raises(self):
+        problem = Problem(names=("x",), bounds=((0, 1),))
+        with pytest.raises(ValueError, match="N must be >= 1"):
+            sample_mc(problem, N=0)
+
+
+class TestToDataset:
+    def test_scalar_output(self, linear_dgsm_result):
+        ds = linear_dgsm_result.to_dataset()
+        assert "nu" in ds.data_vars
+        assert "sigma" in ds.data_vars
+        assert "upper_bound" in ds.data_vars
+        assert "lower_bound" in ds.data_vars
+        assert list(ds.coords["param"].values) == list(linear.PROBLEM.names)
+        assert "output" not in ds.dims
+
+    def test_multi_output(self):
+        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
+        X = sample_mc(problem, N=200, seed=12)
+        result = analyze(problem, _multi_output, jnp.asarray(X))
+        ds = result.to_dataset()
+        assert "output" in ds.dims
+        assert ds["nu"].shape == (2, 3)
+
+    def test_output_names_used(self):
+        problem = Problem(
+            names=("x1", "x2", "x3"),
+            bounds=((0, 1), (0, 1), (0, 1)),
+            output_names=("temp", "pressure"),
+        )
+        X = sample_mc(problem, N=200, seed=13)
+        result = analyze(problem, _multi_output, jnp.asarray(X))
+        ds = result.to_dataset()
+        assert list(ds.coords["output"].values) == ["temp", "pressure"]

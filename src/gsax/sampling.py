@@ -306,6 +306,32 @@ def _print_sampling_summary(
     )
 
 
+def sample_mc(
+    problem: Problem,
+    N: int,
+    *,
+    seed: int | np.random.Generator | None = None,
+) -> np.ndarray:
+    """Generate plain Monte Carlo samples from the input distributions.
+
+    Unlike Saltelli/Sobol sampling, these have no quasi-random structure.
+    Suitable for methods that need i.i.d. draws (e.g. DGSM).
+
+    Args:
+        problem: Problem definition with parameter distributions.
+        N: Number of samples. Must be >= 1.
+        seed: Random seed or generator for reproducibility.
+
+    Returns:
+        (N, D) sample array in the problem's physical units.
+    """
+    if N < 1:
+        raise ValueError(f"N must be >= 1, got {N}")
+    rng = np.random.default_rng(seed)
+    samples_unit = rng.random((N, problem.num_vars))
+    return _transform_samples(problem, samples_unit)
+
+
 def sample(
     problem: Problem,
     n_samples: int,

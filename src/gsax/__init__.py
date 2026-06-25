@@ -1,3 +1,5 @@
+from gsax.dgsm import DGSMResult
+from gsax.dgsm import analyze as analyze_dgsm
 from gsax.efast import EFASTResult
 from gsax.efast import analyze as analyze_efast
 from gsax.efast import sample as sample_efast
@@ -8,10 +10,11 @@ from gsax.pce import PCEResult
 from gsax.pce import analyze as analyze_pce
 from gsax.pce import emulate as emulate_pce
 from gsax.problem import GaussianInputSpec, Problem, UniformInputSpec
-from gsax.sampling import SamplingResult, load, sample
+from gsax.sampling import SamplingResult, load, sample, sample_mc
 from gsax.sobol import SAResult, analyze
 
 __all__ = [
+    "DGSMResult",
     "EFASTResult",
     "HDMREmulator",
     "HDMRResult",
@@ -22,6 +25,7 @@ __all__ = [
     "SamplingResult",
     "UniformInputSpec",
     "analyze",
+    "analyze_dgsm",
     "analyze_efast",
     "analyze_hdmr",
     "analyze_pce",
@@ -30,4 +34,5 @@ __all__ = [
     "load",
     "sample",
     "sample_efast",
+    "sample_mc",
 ]
