@@ -1,0 +1,115 @@
+"""eFAST (extended FAST) sampling via sinusoidal search curves.
+
+Generates samples along ergodic search curves in the input space using
+incommensurate frequencies, one curve per parameter. Each curve assigns
+the highest frequency omega_0 to the parameter of interest and lower
+complementary frequencies to the remaining parameters.
+
+References:
+    Saltelli, Tarantola & Chan (1999). Technometrics 41(1):39-56.
+    Cukier et al. (1973). J. Chem. Phys. 59(8):3873-3878.
+"""
+
+from __future__ import annotations
+
+import math
+
+import numpy as np
+from scipy.stats import norm, truncnorm
+
+from gsax.problem import Problem
+
+
+def _assign_frequencies(D: int, omega_0: int, M: int) -> np.ndarray:
+    """Assign complementary frequencies for D-1 non-focal parameters.
+
+    Args:
+        D: Number of parameters.
+        omega_0: Primary frequency for the focal parameter.
+        M: Interference factor.
+
+    Returns:
+        (D-1,) array of complementary frequencies.
+    """
+    if D == 1:
+        return np.array([], dtype=np.int64)
+    m = omega_0 // (2 * M)
+    if m >= D - 1:
+        return np.floor(np.linspace(1, m, D - 1)).astype(np.int64)
+    return (np.arange(D - 1) % m + 1).astype(np.int64)
+
+
+def _transform_column(
+    unit_values: np.ndarray,
+    dist: str,
+    first: float,
+    second: float,
+    lo: float | None,
+    hi: float | None,
+) -> np.ndarray:
+    """Map unit-interval samples to the target distribution."""
+    clipped = np.clip(unit_values, 1e-12, 1.0 - 1e-12)
+    if dist == "uniform":
+        return clipped * (second - first) + first
+    std = math.sqrt(second)
+    if lo is None and hi is None:
+        return first + std * norm.ppf(clipped)
+    a = -np.inf if lo is None else (lo - first) / std
+    b = np.inf if hi is None else (hi - first) / std
+    return truncnorm.ppf(clipped, a=a, b=b, loc=first, scale=std)
+
+
+def sample(
+    problem: Problem,
+    N: int,
+    *,
+    M: int = 4,
+    seed: int | np.random.Generator | None = None,
+) -> np.ndarray:
+    """Generate eFAST samples along sinusoidal search curves.
+
+    For each of the D parameters, generates N samples along a search
+    curve where the focal parameter oscillates at frequency omega_0
+    and complementary parameters oscillate at lower frequencies. The
+    total output has shape (N * D, D).
+
+    Args:
+        problem: Problem definition with parameter distributions.
+        N: Number of samples per search curve. Must satisfy N > 4*M^2.
+        M: Interference factor (number of harmonics). Default 4.
+        seed: Random seed for phase shift reproducibility.
+
+    Returns:
+        (N * D, D) sample array in the problem's physical units.
+    """
+    D = problem.num_vars
+    if N <= 4 * M**2:
+        raise ValueError(f"N must be > 4*M^2 = {4 * M**2}, got {N}")
+
+    rng = np.random.default_rng(seed)
+
+    omega_0 = (N - 1) // (2 * M)
+    omega_compl = _assign_frequencies(D, omega_0, M)
+
+    s = (2 * math.pi / N) * np.arange(N)
+    X = np.zeros((N * D, D))
+
+    for i in range(D):
+        omega = np.zeros(D, dtype=np.int64)
+        omega[i] = omega_0
+        idx = [j for j in range(D) if j != i]
+        omega[idx] = omega_compl
+
+        phi = 2 * math.pi * rng.random()
+
+        row_slice = slice(i * N, (i + 1) * N)
+        for j in range(D):
+            X[row_slice, j] = 0.5 + (1.0 / math.pi) * np.arcsin(
+                np.sin(omega[j] * s + phi)
+            )
+
+    for j in range(D):
+        dist, first, second, lo, hi = problem.input_specs[j]
+        X[:, j] = _transform_column(X[:, j], dist, first, second, lo, hi)
+
+    return X
