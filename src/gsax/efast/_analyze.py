@@ -5,6 +5,12 @@ Fourier-transformed. First-order indices are estimated from the power
 at harmonics of the focal frequency omega_0, and total-order indices
 from the complementary low-frequency content.
 
+Array shape conventions used throughout:
+    N  — number of samples per search curve
+    D  — number of input parameters
+    T  — number of time steps (singleton-squeezed when absent)
+    K  — number of output variables (singleton-squeezed when absent)
+
 References:
     Saltelli, Tarantola & Chan (1999). Technometrics 41(1):39-56.
 """
@@ -12,10 +18,13 @@ References:
 from __future__ import annotations
 
 import warnings
+from functools import lru_cache
 
+import jax
 import jax.numpy as jnp
 from jax import Array
 
+from gsax._normalization import _prenormalize_outputs, _prepare_Y, _warn_zero_variance_slices
 from gsax.efast._result import EFASTResult
 from gsax.problem import Problem
 
@@ -56,19 +65,46 @@ def _compute_indices(Y_curve: Array, N: int, M: int, omega_0: int) -> tuple[Arra
     return S1, ST
 
 
+# ---------------------------------------------------------------------------
+# Cached JIT kernels
+# ---------------------------------------------------------------------------
+
+# Closure captures concrete (N, M, omega_0) so jnp.arange() sees Python ints,
+# not JAX tracers. vmap only traces the Y_curve argument.
+
+
+@lru_cache(maxsize=4)
+def _get_efast_kernel(N: int, M: int, omega_0: int, batched: bool):
+    """Cache JIT-compiled eFAST kernels, optionally vmapped for batched path."""
+    def kernel(Y_curve: Array) -> tuple[Array, Array]:
+        return _compute_indices(Y_curve, N, M, omega_0)
+
+    if batched:
+        return jax.jit(jax.vmap(kernel))
+    return jax.jit(kernel)
+
+
 def analyze(
     problem: Problem,
     Y: Array,
     *,
     M: int = 4,
+    prenormalize: bool = False,
+    chunk_size: int = 2048,
 ) -> EFASTResult:
     """Compute eFAST sensitivity indices from model outputs.
 
     Args:
         problem: Problem definition with D parameters.
-        Y: (N * D,) model outputs evaluated at eFAST samples. The
-            samples must have been generated with the same M.
+        Y: Model outputs evaluated at eFAST samples. Accepted shapes:
+            - ``(N*D,)`` for scalar output
+            - ``(N*D, K)`` for K output variables
+            - ``(N*D, T, K)`` for K outputs over T time steps
         M: Interference factor used during sampling. Default 4.
+        prenormalize: If True, center and scale each output slice to
+            unit variance before computing indices.
+        chunk_size: Maximum number of output slices to process in one
+            vmapped batch. Caps peak device memory.
 
     Returns:
         EFASTResult with S1 and ST indices.
@@ -77,8 +113,6 @@ def analyze(
         raise ValueError(f"M must be >= 1, got {M}")
 
     Y = jnp.asarray(Y)
-    if Y.ndim != 1:
-        raise ValueError(f"eFAST currently supports scalar output (Y.ndim=1), got {Y.ndim}")
 
     if not jnp.all(jnp.isfinite(Y)):
         n_bad = int(jnp.sum(~jnp.isfinite(Y)))
@@ -89,27 +123,67 @@ def analyze(
         )
 
     D = problem.num_vars
-    if Y.size % D != 0:
+
+    # Detect scalar output before _prepare_Y adds singleton dims
+    is_scalar = Y.ndim == 1
+
+    # Promote to canonical (N*D, T, K) shape
+    Y, squeeze_time, squeeze_output = _prepare_Y(Y)
+
+    if Y.shape[0] % D != 0:
         raise ValueError(
-            f"Y length ({Y.size}) must be a multiple of D ({D})"
+            f"Y leading dimension ({Y.shape[0]}) must be a multiple of D ({D})"
         )
-    N = Y.size // D
+    N = Y.shape[0] // D
+
+    if prenormalize:
+        Y, _, _, _ = _prenormalize_outputs(Y)
+
+    _warn_zero_variance_slices(Y, output_names=problem.output_names)
 
     # Recompute omega_0 from N to match the value used during sampling
     omega_0 = (N - 1) // (2 * M)
 
-    S1_vals = []
-    ST_vals = []
+    _, T, K = Y.shape
 
-    # Each parameter i has its own search curve of length N stored contiguously in Y
-    for i in range(D):
-        Y_curve = Y[i * N : (i + 1) * N]
-        s1, st = _compute_indices(Y_curve, N, M, omega_0)
-        S1_vals.append(s1)
-        ST_vals.append(st)
+    # Split contiguous search curves into (D, N, T, K)
+    Y_reshaped = Y.reshape(D, N, T, K)
 
-    S1 = jnp.stack(S1_vals)
-    ST = jnp.stack(ST_vals)
+    if is_scalar:
+        # Scalar path: squeeze trailing singletons, vmap over D curves only
+        Y_curves = Y_reshaped[:, :, 0, 0]  # (D, N)
+        kernel = _get_efast_kernel(N, M, omega_0, batched=True)
+        S1, ST = kernel(Y_curves)  # each (D,)
+    else:
+        # Batched path: flatten (D, T, K) into a single vmap axis
+        Y_batched = Y_reshaped.transpose(0, 2, 3, 1).reshape(D * T * K, N)
+
+        total = D * T * K
+        cs = min(chunk_size, total)
+        batched = _get_efast_kernel(N, M, omega_0, batched=True)
+
+        s1_parts: list[Array] = []
+        st_parts: list[Array] = []
+        for start in range(0, total, cs):
+            end = min(start + cs, total)
+            s1_chunk, st_chunk = batched(Y_batched[start:end])
+            s1_parts.append(s1_chunk)
+            st_parts.append(st_chunk)
+
+        S1_flat = jnp.concatenate(s1_parts)  # (D*T*K,)
+        ST_flat = jnp.concatenate(st_parts)
+
+        # Reshape to (D, T, K) then transpose to (T, K, D) convention
+        S1 = S1_flat.reshape(D, T, K).transpose(1, 2, 0)
+        ST = ST_flat.reshape(D, T, K).transpose(1, 2, 0)
+
+        # Squeeze singleton dims that _prepare_Y inserted
+        if squeeze_time and squeeze_output:
+            S1 = S1[0, 0]
+            ST = ST[0, 0]
+        elif squeeze_time:
+            S1 = S1[0]
+            ST = ST[0]
 
     # Indices outside [0,1] indicate the frequency decomposition didn't converge
     if jnp.any((S1 > 1.0) | (S1 < 0.0)) or jnp.any((ST > 1.0) | (ST < 0.0)):

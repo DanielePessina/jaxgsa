@@ -174,22 +174,73 @@ PCE takes a spectral approach: it fits an orthogonal polynomial surrogate to `(X
 - You have mixed uniform and Gaussian inputs (the Wiener-Askey scheme selects the optimal basis automatically)
 - You need a fast emulator for scalar-output models
 
+## eFAST (Extended Fourier Amplitude Sensitivity Test)
+
+eFAST uses a frequency-based variance decomposition to compute first-order and total-order Sobol indices. Instead of the pick-and-freeze design used by Saltelli sampling, eFAST evaluates the model along **sinusoidal search curves** in the input space, then applies the discrete Fourier transform to extract variance contributions from the spectral content of the model output.
+
+### How it works
+
+For each parameter $i$, eFAST constructs a search curve by assigning the highest frequency $\omega_0$ to parameter $i$ (the "focal" parameter) and lower complementary frequencies $\omega_j$ to all other parameters. The model is evaluated at $N$ points along each curve, yielding one output vector per parameter.
+
+The Fourier power spectrum of the output along each curve is then decomposed:
+
+**First-order index** — the fraction of total variance captured by harmonics of $\omega_0$:
+
+$$
+S_i = \frac{D_1}{V} = \frac{\sum_{p=1}^{M} |F_{p\omega_0}|^2}{V}
+$$
+
+where $V$ is the total variance (via Parseval's theorem) and $M$ is the interference factor controlling how many harmonics are summed.
+
+**Total-order index** — the complement of the low-frequency (non-focal) variance:
+
+$$
+S_{T_i} = 1 - \frac{D_t}{V} = 1 - \frac{\sum_{k < \omega_0/2} |F_k|^2}{V}
+$$
+
+The low-frequency content below $\omega_0/2$ is driven entirely by the complementary parameters' slower oscillations, so subtracting it from unity gives the total effect of the focal parameter including all its interactions.
+
+### How to use it
+
+1. `gsax.sample_efast()` (or `efast.sample()`) generates search-curve samples with shape `(N * D, D)`, where each contiguous block of $N$ rows corresponds to one parameter's search curve.
+2. You evaluate your model on all `N * D` rows.
+3. `gsax.analyze_efast()` (or `efast.analyze()`) splits the output by curve, computes the Fourier spectrum for each, and extracts S1 and ST indices.
+
+### Index summary
+
+| Index | Meaning |
+|-------|---------|
+| $S_1(i)$ | Fraction of output variance from the focal parameter's harmonics (main effect). |
+| $S_T(i)$ | Total effect including interactions, computed as $1 - D_t / V$. |
+
+eFAST does **not** produce second-order ($S_2$) interaction indices. If pairwise interactions are needed, use the Sobol workflow instead.
+
+**When to use eFAST:**
+- You only need S1 and ST (no S2 required)
+- You want a simpler sampling design without the Saltelli cross-matrix structure
+- You are screening a large number of parameters
+- The total cost is $N \times D$ evaluations, which can be lower than Saltelli's $N(D+2)$ when $N$ is chosen smaller than the Saltelli base count
+
+### Reference
+
+Saltelli, A., Tarantola, S. & Chan, K.P.-S. (1999). A quantitative model-independent method for global sensitivity analysis of model output. *Technometrics*, 41(1), 39-56.
+
 ## Choosing Between Them
 
-| Consideration | Sobol' | HDMR | PCE |
-|---------------|--------|------|-----|
-| Sampling requirement | Structured Saltelli design, $N(D+2)$ evaluations | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs |
-| Input independence | Assumed | Handled via ANCOVA decomposition | Assumed |
-| Surrogate/emulator | No | Yes (`emulate_hdmr`) | Yes (`emulate_pce`) |
-| Accuracy | Exact (given enough samples) | Depends on B-spline fit quality | Depends on polynomial fit quality |
-| Second-order indices | Direct estimation from cross-matrices | From interaction component functions | Analytical from coefficients |
-| Interaction detection | Via $S_2$ and the gap $S_T - S_1$ | Via explicit interaction component functions | Via $S_2$ from coefficients |
-| Output shapes | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar only |
-| Input distributions | Uniform + Gaussian | Uniform only | Uniform + Gaussian |
+| Consideration | Sobol' | HDMR | PCE | eFAST |
+|---------------|--------|------|-----|-------|
+| Sampling requirement | Structured Saltelli design, $N(D+2)$ evaluations | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Search curves, $N \times D$ evaluations |
+| Input independence | Assumed | Handled via ANCOVA decomposition | Assumed | Assumed |
+| Surrogate/emulator | No | Yes (`emulate_hdmr`) | Yes (`emulate_pce`) | No |
+| Accuracy | Exact (given enough samples) | Depends on B-spline fit quality | Depends on polynomial fit quality | Exact (given enough samples) |
+| Second-order indices | Direct estimation from cross-matrices | From interaction component functions | Analytical from coefficients | Not available |
+| Interaction detection | Via $S_2$ and the gap $S_T - S_1$ | Via explicit interaction component functions | Via $S_2$ from coefficients | Via the gap $S_T - S_1$ only |
+| Output shapes | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar only | Scalar, multi-output, time-series |
+| Input distributions | Uniform + Gaussian | Uniform only | Uniform + Gaussian | Uniform + Gaussian |
 
 ## Output Shapes
 
-Both methods support scalar, multi-output, and time-series outputs. The shape of `Y` determines the shape of all returned index arrays:
+Sobol, HDMR, and eFAST all support scalar, multi-output, and time-series outputs. The shape of `Y` determines the shape of all returned index arrays:
 
 | Y shape | S1 / ST shape | S2 shape |
 |---------|---------------|----------|
@@ -214,3 +265,4 @@ Time-series outputs are particularly useful for dynamic models, where the evolut
 - Li, G., Rabitz, H., Yelvington, P.E., Oluwole, O.O., Bacon, F., Kolb, C.E., & Schoendorf, J. (2010). Global sensitivity analysis for systems with independent and/or correlated inputs. *Journal of Physical Chemistry A*, 114(19), 6022-6032.
 - Rabitz, H. & Alis, O. (1999). General foundations of high-dimensional model representations. *Journal of Mathematical Chemistry*, 25(2-3), 197-233.
 - Sudret, B. (2008). Global sensitivity analysis using polynomial chaos expansions. *Reliability Engineering & System Safety*, 93(7), 964-979.
+- Saltelli, A., Tarantola, S. & Chan, K.P.-S. (1999). A quantitative model-independent method for global sensitivity analysis of model output. *Technometrics*, 41(1), 39-56.

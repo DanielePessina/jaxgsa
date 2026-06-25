@@ -1,11 +1,12 @@
 # API Reference
 
 This is the canonical reference for the exported `gsax` surface. The package has
-three workflows:
+four workflows:
 
 - Sobol: `sample()` -> `analyze()`
 - RS-HDMR: `analyze_hdmr()` -> `emulate_hdmr()`
 - PCE: `analyze_pce()` -> `emulate_pce()`
+- eFAST: `sample_efast()` -> `analyze_efast()`
 
 Related docs:
 
@@ -24,6 +25,7 @@ Since v0.6.0, `gsax` is organized into subpackages:
 | `gsax.sobol` | `analyze`, `SAResult` |
 | `gsax.hdmr` | `analyze`, `emulate`, `HDMRResult`, `HDMREmulator` |
 | `gsax.pce` | `analyze`, `emulate`, `PCEResult` |
+| `gsax.efast` | `sample`, `analyze`, `EFASTResult` |
 
 You can import from the subpackages directly:
 
@@ -31,6 +33,7 @@ You can import from the subpackages directly:
 from gsax.sobol import analyze
 from gsax.hdmr import analyze as analyze_hdmr, emulate as emulate_hdmr
 from gsax.pce import analyze as analyze_pce, emulate as emulate_pce
+from gsax.efast import sample as sample_efast, analyze as analyze_efast
 ```
 
 All public symbols are also re-exported from the top-level `gsax` namespace for
@@ -55,6 +58,9 @@ Top-level exports from `gsax`:
 - [`analyze_pce`](#analyze_pce)
 - [`emulate_pce`](#emulate_pce)
 - [`PCEResult`](#pceresult)
+- [`sample_efast`](#sample-efast)
+- [`analyze_efast`](#analyze-efast)
+- [`EFASTResult`](#efastresult)
 
 ## Problem Definition
 
@@ -771,3 +777,166 @@ print(result.loo_rmse)
 Related links:
 
 - [Methods](/guide/methods)
+
+## eFAST Workflow
+
+<a id="sample-efast"></a>
+### `sample_efast()` {#sample-efast}
+
+Generate eFAST samples along sinusoidal search curves.
+
+```python
+def sample_efast(
+    problem: Problem,
+    N: int,
+    *,
+    M: int = 4,
+    seed: int | np.random.Generator | None = None,
+) -> np.ndarray
+```
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `problem` | `Problem` | required | Parameter space definition. |
+| `N` | `int` | required | Number of samples per search curve. Must satisfy `N > 4*M^2`. |
+| `M` | `int` | `4` | Interference factor (number of harmonics). |
+| `seed` | `int \| np.random.Generator \| None` | `None` | Seed or NumPy generator for reproducibility. |
+
+Returns: `np.ndarray` with shape `(N * D, D)`.
+
+Shape and behavior:
+
+- For each of the D parameters, generates N samples along a search curve where
+  the focal parameter oscillates at the primary frequency omega_0 and the
+  remaining parameters oscillate at lower complementary frequencies.
+- The total output is the concatenation of all D search curves.
+- Samples are transformed from `[0, 1]` into the problem's physical parameter
+  space using CDF-based transforms matching the declared input distributions.
+- The primary frequency omega_0 is computed as `(N - 1) // (2 * M)`.
+
+Minimal example:
+
+```python
+from gsax import efast
+from gsax.benchmarks.ishigami import PROBLEM
+
+X = efast.sample(PROBLEM, N=4096, M=4, seed=42)
+print(X.shape)  # (12288, 3)
+```
+
+<a id="analyze-efast"></a>
+### `analyze_efast()` {#analyze-efast}
+
+Compute eFAST first-order and total-order sensitivity indices from model
+outputs evaluated on eFAST samples.
+
+```python
+def analyze_efast(
+    problem: Problem,
+    Y: Array,
+    *,
+    M: int = 4,
+    prenormalize: bool = False,
+    chunk_size: int = 2048,
+) -> EFASTResult
+```
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `problem` | `Problem` | required | Problem definition with D parameters. |
+| `Y` | `Array` | required | Model outputs evaluated at eFAST samples. |
+| `M` | `int` | `4` | Interference factor used during sampling. |
+| `prenormalize` | `bool` | `False` | Center and scale each output slice to unit variance before computing indices. |
+| `chunk_size` | `int` | `2048` | Maximum number of output slices per vmapped batch. |
+
+Accepted output shapes:
+
+- `(N*D,)` for scalar output
+- `(N*D, K)` for K output variables
+- `(N*D, T, K)` for K outputs over T time steps
+
+Validation and behavior:
+
+- A 2D array is always interpreted as `(N*D, K)`, never `(N*D, T)`.
+- For a time-series with one output, reshape to `(N*D, T, 1)`.
+- The leading dimension of `Y` must be a multiple of `problem.num_vars`.
+- `M` must match the value used during sampling.
+- Non-finite values in `Y` will propagate into the computed indices.
+- Zero-variance output slices emit warnings.
+- Indices outside `[0, 1]` indicate insufficient samples or near-zero output variance.
+
+Returns: [`EFASTResult`](#efastresult)
+
+<a id="efastresult"></a>
+### `EFASTResult` {#efastresult}
+
+Dataclass holding eFAST sensitivity indices.
+
+```python
+@dataclass
+class EFASTResult:
+    S1: Array
+    ST: Array
+    problem: Problem
+    omega_0: int = 0
+    M: int = 4
+```
+
+| Field | Shape | Description |
+| --- | --- | --- |
+| `S1` | `(D,)` / `(K, D)` / `(T, K, D)` | First-order Sobol indices from Fourier amplitudes at harmonics of omega_0. |
+| `ST` | same as `S1` | Total-order Sobol indices from complementary frequencies. |
+| `problem` | `Problem` | Problem definition used for the analysis. |
+| `omega_0` | `int` | Primary frequency used in the Fourier decomposition. |
+| `M` | `int` | Interference factor (number of harmonics summed). |
+
+Shape contract:
+
+| `Y` shape passed to `analyze_efast()` | `S1` / `ST` |
+| --- | --- |
+| `(N*D,)` | `(D,)` |
+| `(N*D, K)` | `(K, D)` |
+| `(N*D, T, K)` | `(T, K, D)` |
+
+eFAST does not produce second-order (S2) indices.
+
+<a id="efastresult-to_dataset"></a>
+#### `EFASTResult.to_dataset()`
+
+```python
+ds = result.to_dataset(time_coords=None)
+```
+
+Converts eFAST results to a labeled `xarray.Dataset`.
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `time_coords` | `list \| np.ndarray \| None` | `None` | Coordinate values for the time dimension on 3D results. |
+
+Behavior:
+
+- Uses `problem.names` for `param` coordinates.
+- Uses `problem.output_names` when available, otherwise `y0`, `y1`, and so on.
+- For 3D results, defaults to integer time indices when `time_coords` is not provided.
+- The dataset contains only `S1` and `ST` variables (no `S2`).
+
+Minimal example:
+
+```python
+import jax.numpy as jnp
+from gsax import efast
+from gsax.benchmarks.ishigami import PROBLEM, evaluate
+
+X = efast.sample(PROBLEM, N=4096, seed=42)
+Y = evaluate(jnp.asarray(X))
+result = efast.analyze(PROBLEM, Y)
+
+print(result.S1)
+print(result.ST)
+```
+
+Related links:
+
+- [eFAST Example](/examples/efast)
+- [Methods](/guide/methods)
+- [xarray Output](/examples/xarray)

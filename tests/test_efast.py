@@ -119,11 +119,6 @@ class TestAnalysis:
         assert ishigami_efast_result.M == 4
         assert ishigami_efast_result.omega_0 > 0
 
-    def test_invalid_y_ndim(self):
-        problem = Problem(names=("x",), bounds=((0, 1),))
-        with pytest.raises(ValueError, match="ndim"):
-            analyze(problem, jnp.ones((10, 2)))
-
     def test_invalid_y_length(self):
         problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
         with pytest.raises(ValueError, match="multiple"):
@@ -169,6 +164,152 @@ class TestComputeIndices:
         Y = jnp.asarray(np.sin(omega * s))
         s1, st = _compute_indices(Y, N, 4, omega)
         assert float(s1) > 0.9
+
+
+class TestMultiOutputShapes:
+    """Tests for multi-output and time-series Y shapes."""
+
+    @pytest.fixture(scope="class")
+    def ishigami_multi(self):
+        """Ishigami scalar result and multi-output Y (K=3)."""
+        X = sample(ishigami.PROBLEM, N=4096, M=4, seed=42)
+        Y = ishigami.evaluate(jnp.asarray(X))
+        scalar_result = analyze(ishigami.PROBLEM, jnp.asarray(Y), M=4)
+        Y_multi = jnp.stack([Y, 2 * Y, 0.5 * Y], axis=-1)
+        return Y, Y_multi, scalar_result
+
+    def test_2d_multi_output(self, ishigami_multi):
+        """Y shape (N*D, K) produces S1/ST shape (K, D)."""
+        _, Y_multi, _ = ishigami_multi
+        result = analyze(ishigami.PROBLEM, Y_multi, M=4)
+        D = ishigami.PROBLEM.num_vars
+        K = 3
+        assert result.S1.shape == (K, D)
+        assert result.ST.shape == (K, D)
+
+    def test_3d_time_series(self, ishigami_multi):
+        """Y shape (N*D, T, K) produces S1/ST shape (T, K, D)."""
+        Y_scalar, _, _ = ishigami_multi
+        T, K = 5, 2
+        slices = []
+        for t in range(T):
+            scale_0 = float(t + 1)
+            scale_1 = float(t + 1) * 0.5
+            slices.append(jnp.stack([scale_0 * Y_scalar, scale_1 * Y_scalar], axis=-1))
+        Y_3d = jnp.stack(slices, axis=1)  # (N*D, T, K)
+        result = analyze(ishigami.PROBLEM, Y_3d, M=4)
+        D = ishigami.PROBLEM.num_vars
+        assert result.S1.shape == (T, K, D)
+        assert result.ST.shape == (T, K, D)
+
+    def test_scalar_unchanged(self, ishigami_multi):
+        """1-D Y still produces (D,) indices."""
+        Y_scalar, _, scalar_result = ishigami_multi
+        D = ishigami.PROBLEM.num_vars
+        assert scalar_result.S1.shape == (D,)
+        assert scalar_result.ST.shape == (D,)
+
+
+class TestMultiOutputAccuracy:
+    """Scaled copies of Ishigami must produce the same indices as scalar."""
+
+    def test_multi_output_accuracy(self):
+        X = sample(ishigami.PROBLEM, N=4096, M=4, seed=42)
+        Y = ishigami.evaluate(jnp.asarray(X))
+        scalar_result = analyze(ishigami.PROBLEM, jnp.asarray(Y), M=4)
+        Y_multi = jnp.stack([Y, 2 * Y, 0.5 * Y], axis=-1)
+        multi_result = analyze(ishigami.PROBLEM, Y_multi, M=4)
+        np.testing.assert_allclose(
+            multi_result.S1[0], scalar_result.S1, atol=1e-5
+        )
+        np.testing.assert_allclose(
+            multi_result.ST[0], scalar_result.ST, atol=1e-5
+        )
+
+
+class TestPrenormalize:
+    """Prenormalize should handle large constant offsets."""
+
+    def test_prenormalize(self):
+        X = sample(ishigami.PROBLEM, N=4096, M=4, seed=42)
+        Y = ishigami.evaluate(jnp.asarray(X))
+        baseline = analyze(ishigami.PROBLEM, jnp.asarray(Y), M=4)
+        Y_shifted = Y + 1e6
+        result = analyze(
+            ishigami.PROBLEM, jnp.asarray(Y_shifted), M=4, prenormalize=True
+        )
+        np.testing.assert_allclose(
+            np.asarray(result.S1), np.asarray(baseline.S1), atol=0.02
+        )
+        np.testing.assert_allclose(
+            np.asarray(result.ST), np.asarray(baseline.ST), atol=0.02
+        )
+
+
+class TestChunkSize:
+    """Chunk size should not affect results."""
+
+    def test_chunk_size(self):
+        X = sample(ishigami.PROBLEM, N=4096, M=4, seed=42)
+        Y = ishigami.evaluate(jnp.asarray(X))
+        Y_multi = jnp.stack([Y, 2 * Y, 0.5 * Y], axis=-1)
+        default_result = analyze(ishigami.PROBLEM, Y_multi, M=4)
+        chunked_result = analyze(
+            ishigami.PROBLEM, Y_multi, M=4, chunk_size=1
+        )
+        np.testing.assert_allclose(
+            np.asarray(chunked_result.S1),
+            np.asarray(default_result.S1),
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            np.asarray(chunked_result.ST),
+            np.asarray(default_result.ST),
+            atol=1e-6,
+        )
+
+
+class TestToDatasetMultiOutput:
+    """Tests for to_dataset with multi-output and time-series results."""
+
+    def test_2d_dataset(self):
+        """Multi-output result exports with ('output', 'param') dims."""
+        X = sample(ishigami.PROBLEM, N=4096, M=4, seed=42)
+        Y = ishigami.evaluate(jnp.asarray(X))
+        Y_multi = jnp.stack([Y, 2 * Y, 0.5 * Y], axis=-1)
+        result = analyze(ishigami.PROBLEM, Y_multi, M=4)
+        ds = result.to_dataset()
+        assert set(ds["S1"].dims) == {"output", "param"}
+        assert list(ds.coords["param"].values) == list(ishigami.PROBLEM.names)
+        assert len(ds.coords["output"]) == 3
+
+    def test_3d_dataset_with_time_coords(self):
+        """Time-series result exports with ('time', 'output', 'param') dims."""
+        X = sample(ishigami.PROBLEM, N=4096, M=4, seed=42)
+        Y = ishigami.evaluate(jnp.asarray(X))
+        T = 5
+        slices = []
+        for t in range(T):
+            slices.append(
+                jnp.stack([float(t + 1) * Y, float(t + 1) * 0.5 * Y], axis=-1)
+            )
+        Y_3d = jnp.stack(slices, axis=1)
+        result = analyze(ishigami.PROBLEM, Y_3d, M=4)
+        time_coords = [0.0, 0.1, 0.2, 0.3, 0.4]
+        ds = result.to_dataset(time_coords=time_coords)
+        assert set(ds["S1"].dims) == {"time", "output", "param"}
+        assert list(ds.coords["time"].values) == time_coords
+        assert list(ds.coords["param"].values) == list(ishigami.PROBLEM.names)
+
+    def test_repr(self):
+        """repr() includes shape info."""
+        X = sample(ishigami.PROBLEM, N=4096, M=4, seed=42)
+        Y = ishigami.evaluate(jnp.asarray(X))
+        Y_multi = jnp.stack([Y, 2 * Y], axis=-1)
+        result = analyze(ishigami.PROBLEM, Y_multi, M=4)
+        r = repr(result)
+        assert "EFASTResult" in r
+        assert "S1" in r
 
 
 class TestToDataset:
