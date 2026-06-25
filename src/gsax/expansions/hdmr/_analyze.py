@@ -14,6 +14,7 @@ import numpy as np
 from jax import Array
 
 from gsax._normalization import _prenormalize_outputs, _prepare_Y, _warn_zero_variance_slices
+from gsax._transforms import cdf_to_unit_interval
 from gsax.expansions.hdmr._engine import (
     _build_B1,
     _build_B2,
@@ -26,16 +27,8 @@ from gsax.problem import Problem
 
 
 def _normalize_X(X: Array, problem: Problem) -> Array:
-    """Normalize X to [0, 1] using problem bounds."""
-    if problem.bounds is None:
-        raise ValueError(
-            "analyze_hdmr currently requires finite uniform bounds; "
-            "non-uniform input specs are not supported."
-        )
-    bounds = jnp.array(problem.bounds)  # (D, 2)
-    lo = bounds[:, 0]
-    hi = bounds[:, 1]
-    return (X - lo) / (hi - lo)
+    """Normalize X to [0, 1] via per-dimension marginal CDF."""
+    return cdf_to_unit_interval(X, problem)
 
 
 @lru_cache(maxsize=None)
@@ -209,11 +202,6 @@ def analyze_hdmr(
     N, D = X.shape
     if D != problem.num_vars:
         raise ValueError(f"X has {D} columns but problem defines {problem.num_vars} parameters")
-    if problem.has_non_uniform_inputs:
-        raise ValueError(
-            "analyze_hdmr currently requires finite uniform bounds; "
-            "non-uniform input specs are not supported."
-        )
     if N < 300:
         raise ValueError(f"Need at least 300 samples, got {N}")
     if maxorder not in (1, 2, 3):

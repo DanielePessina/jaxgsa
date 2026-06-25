@@ -276,7 +276,8 @@ def test_chunk_size_regression_3d(ishigami_data):
     )
 
 
-def test_hdmr_rejects_non_uniform_problem_specs():
+def test_hdmr_accepts_gaussian_inputs():
+    """HDMR should accept mixed uniform/Gaussian problems via CDF mapping."""
     problem = PROBLEM.from_dict(
         {
             "x1": (0.0, 1.0),
@@ -284,11 +285,16 @@ def test_hdmr_rejects_non_uniform_problem_specs():
             "x3": (0.0, 1.0),
         }
     )
-    X = jnp.ones((300, 3))
-    Y = jnp.ones(300)
-
-    with pytest.raises(ValueError, match="finite uniform bounds"):
-        analyze_hdmr(problem, X, Y)
+    key = jax.random.PRNGKey(99)
+    N = 500
+    x1 = jax.random.uniform(key, (N,), minval=0.0, maxval=1.0)
+    x2 = jax.random.normal(jax.random.PRNGKey(100), (N,))
+    x3 = jax.random.uniform(jax.random.PRNGKey(101), (N,), minval=0.0, maxval=1.0)
+    X = jnp.column_stack([x1, x2, x3])
+    Y = X[:, 0] + X[:, 1] ** 2 + X[:, 2]
+    result = analyze_hdmr(problem, X, Y, maxorder=1)
+    assert result.S1.shape == (3,)
+    assert result.ST.shape == (3,)
 
 
 def test_repeated_calls_identical(ishigami_data):
