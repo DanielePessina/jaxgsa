@@ -25,6 +25,7 @@ from scipy.stats.qmc import Sobol
 
 from gsax.problem import Problem, _normalized_input_to_dict
 
+# Supported serialization formats for SamplingResult.save/load
 _SAMPLE_FORMATS = {"csv", "txt", "xlsx", "parquet", "pkl"}
 
 
@@ -101,6 +102,8 @@ class SamplingResult:
         _write_samples(df, sample_path, format)
 
         # --- identity mapping check ---
+        # If expanded_to_unique is just 0..N-1, no duplicates exist;
+        # skip writing the .npz file in that case.
         identity = bool(
             np.array_equal(
                 self.expanded_to_unique,
@@ -149,6 +152,7 @@ def _next_power_of_2(n: int) -> int:
 
 def _saltelli_step(n_params: int, calc_second_order: bool) -> int:
     """Return the number of expanded Saltelli rows per base Sobol point."""
+    # Saltelli step = A + D*AB [+ D*BA] + B = D+2 [or 2D+2]
     return 2 * n_params + 2 if calc_second_order else n_params + 2
 
 
@@ -166,6 +170,7 @@ def _build_expanded_samples(
     construction collapses in low dimensions. Deduplication happens later.
     """
     D = n_params
+    # Draw from a 2D-dimensional Sobol sequence; first D dims become matrix A, last D become B
     sampler = Sobol(d=2 * D, scramble=scramble, seed=seed)
     base = sampler.random(base_n)
 
@@ -226,6 +231,7 @@ def _transform_gaussian(
 
 def _transform_samples(problem: Problem, samples_unit: np.ndarray) -> np.ndarray:
     """Transform unit-cube Sobol samples into the problem's declared marginals."""
+    # Pre-allocate output; each column is filled independently by its marginal's inverse CDF
     transformed = np.empty_like(samples_unit, dtype=np.float64)
 
     for idx, spec in enumerate(problem.input_specs):
@@ -252,6 +258,7 @@ def _stable_unique_rows(samples: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         maps each original row position in ``samples`` back to the retained
         unique row index.
     """
+    # Ensure C-contiguous layout so tobytes() gives a consistent byte representation
     samples = np.ascontiguousarray(samples)
     unique_rows: list[np.ndarray] = []
     expanded_to_unique = np.empty(samples.shape[0], dtype=np.int64)
@@ -340,14 +347,18 @@ def sample(
         later Sobol analysis.
     """
     D = problem.num_vars
+    # Rows per base point -- determines the ratio between base_n and total expanded rows
     step = _saltelli_step(D, calc_second_order)
 
     if base_n is not None:
+        # Power-of-2 check via bit trick (only one bit set)
         if base_n < 1 or (base_n & (base_n - 1)) != 0:
             raise ValueError(f"base_n must be a power of 2, got {base_n}")
         target_n = None
     else:
         target_n = max(1, n_samples)
+        # Estimate initial base_n from requested unique count,
+        # rounding up to next power of 2 (Sobol sequence requirement).
         base_n = _next_power_of_2(math.ceil(target_n / step))
 
     expanded_samples_unit = _build_expanded_samples(
@@ -361,6 +372,8 @@ def sample(
     unique_samples, expanded_to_unique = _stable_unique_rows(expanded_samples)
 
     if target_n is not None:
+        # Deduplication may reduce unique count below target;
+        # double base_n and rebuild until we have enough.
         while unique_samples.shape[0] < target_n:
             base_n *= 2
             expanded_samples_unit = _build_expanded_samples(
@@ -439,6 +452,7 @@ def _read_samples(path: Path, fmt: str) -> np.ndarray:
         with open(path) as f:
             n_cols = len(f.readline().split())
         arr = np.loadtxt(path, skiprows=1)
+        # loadtxt returns 1-D for single-row or single-column files; reshape based on header count
         if arr.ndim == 1:
             if n_cols == 1:
                 arr = arr.reshape(-1, 1)
@@ -487,6 +501,7 @@ def load(path: str | Path, *, format: str = "csv") -> SamplingResult:
     output_names = (
         tuple(prob_meta["output_names"]) if prob_meta["output_names"] is not None else None
     )
+    # Prefer rich input_specs (supports Gaussian); fall back to legacy bounds-only format
     if "input_specs" in prob_meta and prob_meta["input_specs"] is not None:
         from gsax.problem import _normalize_input_spec
 

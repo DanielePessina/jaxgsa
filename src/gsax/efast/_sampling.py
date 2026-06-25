@@ -33,6 +33,8 @@ def _assign_frequencies(D: int, omega_0: int, M: int) -> np.ndarray:
     """
     if D == 1:
         return np.array([], dtype=np.int64)
+    # Spread D-1 complementary frequencies evenly in [1, omega_0/(2M)];
+    # if fewer available slots than parameters, wrap cyclically.
     m = omega_0 // (2 * M)
     if m >= D - 1:
         return np.floor(np.linspace(1, m, D - 1)).astype(np.int64)
@@ -71,26 +73,34 @@ def sample(
 
     rng = np.random.default_rng(seed)
 
+    # Max integer frequency fitting N samples while keeping M harmonics below Nyquist.
     omega_0 = (N - 1) // (2 * M)
     omega_compl = _assign_frequencies(D, omega_0, M)
 
+    # Parametric variable s in [0, 2pi) — uniform grid along the search curve.
     s = (2 * math.pi / N) * np.arange(N)
     X = np.zeros((N * D, D))
 
     for i in range(D):
+        # Focal param i gets omega_0 (highest freq = most variation = identifiable);
+        # remaining params get lower complementary frequencies.
         omega = np.zeros(D, dtype=np.int64)
         omega[i] = omega_0
         idx = [j for j in range(D) if j != i]
         omega[idx] = omega_compl
 
+        # Random phase breaks symmetry so each curve samples a different cross-section.
         phi = 2 * math.pi * rng.random()
 
         row_slice = slice(i * N, (i + 1) * N)
         for j in range(D):
+            # Cukier's transform: arcsin(sin(w*s+phi))/pi + 0.5 maps sinusoidal
+            # oscillation to uniform [0,1] marginals (otherwise arcsine-shaped).
             X[row_slice, j] = 0.5 + (1.0 / math.pi) * np.arcsin(
                 np.sin(omega[j] * s + phi)
             )
 
+    # CDF-based transform: map [0,1] samples to the problem's physical parameter space.
     X = _transform_samples(problem, X)
 
     return X

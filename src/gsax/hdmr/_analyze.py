@@ -34,16 +34,24 @@ def _normalize_X(X: Array, problem: Problem) -> Array:
 @lru_cache(maxsize=None)
 def _get_hdmr_static_data(D: int, maxorder: int, m: int) -> tuple:
     """Cache host-side HDMR term metadata and basis index tables."""
+    # Enumerate all parameter index combinations up to maxorder.
+    # c1: single dimensions, c2: pairs, c3: triples.
     c1 = tuple(range(D))
     c2 = tuple(itertools.combinations(range(D), 2)) if maxorder >= 2 else tuple()
     c3 = tuple(itertools.combinations(range(D), 3)) if maxorder >= 3 else tuple()
     n1 = D
     n2 = len(c2)
     n3 = len(c3)
+    # Total number of HDMR component functions across all active orders.
     n = n1 + n2 + n3
+    # m1 = basis functions per dimension (m intervals + 3 for cubic B-spline
+    # boundary support); m2, m3 = tensor-product basis sizes for orders 2, 3.
     m1 = m + 3
     m2 = m1**2
     m3 = m1**3
+    # beta tables enumerate all multi-index pairs/triples into the 1-D basis.
+    # They turn the tensor product into a flat index -> (i, j[, k]) lookup
+    # so the basis can be built via gather + elementwise multiply.
     beta2 = (
         np.asarray(list(itertools.product(range(m1), repeat=2)), dtype=np.int32)
         if n2 > 0
@@ -67,6 +75,9 @@ def _get_batched_hdmr_kernel(
     N: int,
 ):
     """Cache the final batched HDMR wrapper by semantic signature."""
+    # Caching by (D, maxorder, m, maxiter, lambdax, N) avoids re-tracing the
+    # JIT+vmap wrapper when analyze_hdmr is called repeatedly with the same
+    # structural parameters but different data.
     _, _, _, n1, n2, n3, n, m1, m2, m3, _, _ = _get_hdmr_static_data(D, maxorder, m)
     kernel = _make_hdmr_kernel(
         maxorder,
@@ -111,13 +122,15 @@ def _compute_ST(
     # ST_j = S_j + sum_{i<j or j<i} S_{ij} + sum_{i<j<k, j in {i,j,k}} S_{ijk}
     # i.e. total-order for param j includes its first-order term plus every
     # interaction term (2nd and 3rd order) that contains j.
-    ST = S[..., :n1]  # First order terms map 1:1 to parameters.
+    ST = S[..., :n1]  # First-order terms map 1:1 to parameters.
 
+    # Scatter-add each 2nd-order term S_{ab} to both parameters a and b.
     n2 = c2.shape[0]
     S2 = S[..., n1 : n1 + n2]
     ST = ST.at[..., c2[:, 0]].add(S2)
     ST = ST.at[..., c2[:, 1]].add(S2)
 
+    # Scatter-add each 3rd-order term S_{abc} to all three participating params.
     S3 = S[..., n1 + n2 :]
     ST = ST.at[..., c3[:, 0]].add(S3)
     ST = ST.at[..., c3[:, 1]].add(S3)
@@ -208,6 +221,8 @@ def analyze_hdmr(
     N, D = X.shape
     if D != problem.num_vars:
         raise ValueError(f"X has {D} columns but problem defines {problem.num_vars} parameters")
+    # B-spline regression with backfitting needs a reasonable sample size
+    # to avoid overfitting; 300 is a practical lower bound.
     if N < 300:
         raise ValueError(f"Need at least 300 samples, got {N}")
     if maxorder not in (1, 2, 3):
@@ -224,33 +239,40 @@ def analyze_hdmr(
         raise ValueError(f"chunk_size must be >= 1, got {chunk_size}")
     lambdax = float(lambdax)
 
-    # Build terms
+    # Build term metadata (cached on host; only computed once per D/maxorder/m).
     c1, c2, c3, n1, n2, n3, n, m1, m2, m3, beta2_host, beta3_host = _get_hdmr_static_data(
         D,
         maxorder,
         m,
     )
     term_labels = _build_term_labels(problem, c1, c2, c3)
+    # Transfer index tables to device; empty arrays for inactive orders.
     c2_idx = jnp.asarray(c2, dtype=int) if n2 > 0 else jnp.zeros((0, 2), dtype=int)
     c3_idx = jnp.asarray(c3, dtype=int) if n3 > 0 else jnp.zeros((0, 3), dtype=int)
     beta2 = jnp.asarray(beta2_host, dtype=int)
     beta3 = jnp.asarray(beta3_host, dtype=int)
 
-    # Normalize X
+    # CDF transform: maps each dimension's marginal to U[0,1] so the B-spline
+    # basis operates on a uniform domain regardless of the original distribution.
     X_n = _normalize_X(X, problem)
 
-    # Build B-spline bases
+    # Build B-spline bases for all orders. Bases are shared across output
+    # slices (only Y changes), so they are computed once here.
     B1 = _build_B1(X_n, m)  # (N, m1, D)
     B2 = _build_B2(B1, c2_idx, beta2) if n2 > 0 else jnp.zeros((N, 1, 1))
     B3 = _build_B3(B1, c3_idx, beta3) if n3 > 0 else jnp.zeros((N, 1, 1))
 
-    # Precompute F critical values
+    # F critical values at alpha=0.95, precomputed outside JIT to avoid
+    # re-running the bisection solver on every vmap lane.
     f_crits = _compute_f_crits(0.95, m1, m2, m3, N)
 
-    # Promote Y to 3D
+    # Promote Y to canonical (N, T, K) layout; track which dims were singleton
+    # so the output arrays can be squeezed back to the user's original shape.
     Y_3d, squeeze_time, squeeze_output = _prepare_Y(Y)
     _, T, K_out = Y_3d.shape
     if prenormalize:
+        # Standardize each (t, k) slice to zero-mean, unit-variance before
+        # fitting. The scale factors are stored so emulate_hdmr can invert.
         Y_3d, y_mean, y_std, _ = _prenormalize_outputs(Y_3d)
     else:
         y_mean = jnp.zeros(Y_3d.shape[1:], dtype=Y_3d.dtype)
@@ -265,6 +287,8 @@ def analyze_hdmr(
     total = T * K_out
     cs = min(chunk_size, total)
 
+    # Accumulate chunk results; select_sum aggregates F-test pass counts
+    # across chunks to report how many output slices found each term significant.
     sa_parts, sb_parts, s_parts, rmse_parts = [], [], [], []
     c1_parts, c2_parts, c3_parts, f0_parts = [], [], [], []
     select_sum = jnp.zeros(n)
@@ -277,6 +301,8 @@ def analyze_hdmr(
         lambdax,
         N,
     )
+    # Process output slices in chunks to bound peak device memory when T*K
+    # is large. Each chunk is a vmap batch of independent HDMR fits.
     for start in range(0, total, cs):
         end = min(start + cs, total)
         sa, sb, s, sel, rmse_val, c1_coef, c2_coef, c3_coef, f0_val = batched_kernel(
@@ -298,10 +324,11 @@ def analyze_hdmr(
         if n3 > 0:
             c3_parts.append(c3_coef)
 
-    # Reshape to (T, K, n_terms) / (T, K, D)
+    # Reassemble chunks into the full (T, K, n_terms) index arrays.
     Sa_out = jnp.concatenate(sa_parts).reshape(T, K_out, n)
     Sb_out = jnp.concatenate(sb_parts).reshape(T, K_out, n)
     S_out = jnp.concatenate(s_parts).reshape(T, K_out, n)
+    # Aggregate per-term S into per-parameter total-order indices.
     ST_out = _compute_ST(S_out, c2_idx, c3_idx, n1)
 
     # Squeeze
@@ -363,7 +390,7 @@ def analyze_hdmr(
     )
     y_std_out = jnp.squeeze(y_std_out, axis=-1)
 
-    # Build emulator dict
+    # Bundle all fitted state needed to reconstruct predictions at new points.
     emulator: HDMREmulator = {
         "C1": C1_out,
         "C2": C2_out,
@@ -387,6 +414,8 @@ def analyze_hdmr(
         terms=term_labels,
         emulator=emulator,
         select=select_sum,
+        # RMSE is computed on the standardized scale inside the kernel;
+        # multiply by y_std to report it on the original output scale.
         rmse=_reshape_emulator_value(
             jnp.concatenate(rmse_parts), T, K_out, squeeze_time, squeeze_output
         )
@@ -439,10 +468,11 @@ def emulate_hdmr(result: HDMRResult, X_new: Array) -> Array:
     y_mean = em["y_mean"]
     y_std = em["y_std"]
 
-    # Normalize
+    # Apply the same CDF -> [0,1] transform used during fitting.
     X_n = _normalize_X(X_new, result.problem)
 
-    # Build bases and compute predictions
+    # Reconstruct prediction as f0 + sum of component functions.
+    # Start with first-order: sum_j B1_j @ C1_j.
     B1 = _build_B1(X_n, em["m"])  # (N_new, m1, D)
     Y_total = _emulator_contract(B1, C1)
 
@@ -472,7 +502,9 @@ def emulate_hdmr(result: HDMRResult, X_new: Array) -> Array:
         )
         Y_total = Y_total + _emulator_contract(B3, em["C3"])
 
+    # Add grand mean to recover the full surrogate prediction.
     Y_pred = Y_total + f0
+    # Undo the standardization applied during fitting, if any.
     if prenormalize:
         Y_pred = Y_pred * y_std + y_mean
     return Y_pred

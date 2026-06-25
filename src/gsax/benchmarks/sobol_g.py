@@ -20,6 +20,8 @@ from jax import Array
 
 from gsax.problem import Problem
 
+# a_j=0 => maximally influential; a_j=99 => nearly inert.
+# This mix creates 4 tiers: dominant (x1), moderate (x2), weak (x3-x4), negligible (x5-x8).
 DEFAULT_A = (0.0, 1.0, 4.5, 9.0, 99.0, 99.0, 99.0, 99.0)
 
 PROBLEM = Problem.from_dict({f"x{i + 1}": (0.0, 1.0) for i in range(len(DEFAULT_A))})
@@ -40,6 +42,8 @@ def evaluate(X: Array, a: tuple[float, ...] = DEFAULT_A) -> Array:
         Array of shape ``(N,)`` with function values.
     """
     a_arr = jnp.asarray(a)
+    # Each factor (|4x_j-2|+a_j)/(1+a_j) is mean-1 and variance 1/(3(1+a_j)^2).
+    # The product form means ALL subsets of inputs interact (no purely additive structure).
     return jnp.prod((jnp.abs(4.0 * X - 2.0) + a_arr) / (1.0 + a_arr), axis=1)
 
 
@@ -67,20 +71,24 @@ def analytical_indices(
     a_arr = np.asarray(a, dtype=float)
     D = len(a_arr)
 
-    # Closed-form: Vi = 1/(3(1+a_j)^2) from integrating Var((|4U-2|+a)/(1+a))
+    # Each factor's variance: Vi = Var(g_j) = 1/(3(1+a_j)^2), from integrating
+    # Var((|4U-2|+a)/(1+a)) over U~Uniform[0,1].
     Vi = 1.0 / (3.0 * (1.0 + a_arr) ** 2)
-    # Multiplicative separability: V(Y) = prod(1 + V_j) - 1
+    # Total variance via multiplicative ANOVA: V(Y) = prod(1 + V_j) - 1,
+    # because the factors are independent and each has mean 1.
     VY = np.prod(1.0 + Vi) - 1.0
 
     S1 = Vi / VY
 
-    # ST_j = V_j * prod_{k!=j}(1 + V_k) / V(Y): main effect times all
-    # interaction products involving j (multiplicative model identity)
+    # Total-order index includes all interactions containing x_j.
+    # For a product model: ST_j = V_j * prod_{k!=j}(1 + V_k) / V(Y).
     ST = np.empty(D)
     for j in range(D):
         others = np.prod(1.0 + np.delete(Vi, j))
         ST[j] = Vi[j] * others / VY
 
+    # Second-order interaction S2_jk = V_j * V_k / V(Y), a direct consequence
+    # of the multiplicative structure (each pair's joint effect factorizes).
     S2 = np.full((D, D), np.nan)
     for j in range(D):
         for k in range(j + 1, D):

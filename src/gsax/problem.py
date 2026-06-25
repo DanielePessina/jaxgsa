@@ -24,7 +24,10 @@ class GaussianInputSpec(TypedDict):
     high: NotRequired[float]
 
 
+# Public-facing union type -- users pass one of these per parameter.
 InputSpecValue: TypeAlias = tuple[float, float] | UniformInputSpec | GaussianInputSpec
+# Internal canonical form: (dist, param1, param2, lo_bound, hi_bound).
+# For uniform: param1=low, param2=high. For gaussian: param1=mean, param2=variance.
 _NormalizedInputSpec: TypeAlias = tuple[
     Literal["uniform", "gaussian"],
     float,
@@ -47,6 +50,7 @@ def _make_uniform_spec(low: float, high: float) -> _NormalizedInputSpec:
     """Validate and normalize a uniform input specification."""
     low = float(low)
     high = float(high)
+    # `not <` instead of `>=` to also catch NaN (NaN comparisons are always False).
     if not low < high:
         raise ValueError(f"Uniform input requires low < high, got {(low, high)!r}")
     return ("uniform", low, high, None, None)
@@ -60,6 +64,7 @@ def _make_gaussian_spec(
     high: float | None = None,
 ) -> _NormalizedInputSpec:
     """Validate and normalize a Gaussian input specification."""
+    # Coerce to Python float to prevent JAX tracers or numpy scalars from leaking into metadata.
     mean = float(mean)
     variance = float(variance)
     low = None if low is None else float(low)
@@ -75,7 +80,7 @@ def _make_gaussian_spec(
 
 def _normalize_input_spec(spec: InputSpecValue) -> _NormalizedInputSpec:
     """Normalize tuple or TypedDict user input into a private immutable spec."""
-    if isinstance(spec, tuple):
+    if isinstance(spec, tuple):  # bare (low, high) tuple is shorthand for uniform
         if len(spec) != 2:
             raise ValueError("Tuple input specs must have exactly two values: (low, high)")
         return _make_uniform_spec(spec[0], spec[1])
@@ -97,6 +102,8 @@ def _derive_bounds(
     input_specs: tuple[_NormalizedInputSpec, ...],
 ) -> tuple[tuple[float, float], ...] | None:
     """Return finite bounds for uniform-only problems, otherwise ``None``."""
+    # Bounds only meaningful for uniform-only problems; Gaussian inputs have
+    # infinite (or truncated) support that doesn't map to simple lo/hi bounds.
     bounds: list[tuple[float, float]] = []
     for dist, first, second, _, _ in input_specs:
         if dist != "uniform":
@@ -111,6 +118,7 @@ def _normalized_input_to_dict(spec: _NormalizedInputSpec) -> UniformInputSpec | 
     if dist == "uniform":
         return UniformInputSpec(dist="uniform", low=first, high=second)
 
+    # Reconstruct the TypedDict for JSON serialization (used by SamplingResult.save).
     payload: GaussianInputSpec = GaussianInputSpec(
         dist="gaussian",
         mean=first,
@@ -123,6 +131,7 @@ def _normalized_input_to_dict(spec: _NormalizedInputSpec) -> UniformInputSpec | 
     return payload
 
 
+# frozen for hashability and safety; init=False because we define a custom __init__ for validation.
 @dataclass(frozen=True, init=False)
 class Problem:
     """Parameter names and optional finite bounds for a sensitivity problem.
@@ -208,7 +217,7 @@ class Problem:
                 f"{len(names)} and {len(input_specs)}"
             )
 
-        obj = object.__new__(cls)
+        obj = object.__new__(cls)  # bypass __init__ to construct from already-validated specs
         obj._set_fields(
             names=tuple(names),
             input_specs=tuple(input_specs),
@@ -224,6 +233,7 @@ class Problem:
         output_names: tuple[str, ...] | None,
     ) -> None:
         """Assign validated frozen dataclass fields in one place."""
+        # Bypass frozen dataclass protection -- only called during construction.
         object.__setattr__(self, "names", names)
         object.__setattr__(self, "bounds", _derive_bounds(input_specs))
         object.__setattr__(self, "output_names", _normalize_output_names(output_names))

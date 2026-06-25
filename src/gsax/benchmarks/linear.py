@@ -16,6 +16,8 @@ from jax import Array
 
 from gsax.problem import Problem
 
+# Increasing weights (1, 2, 3) test whether the method correctly ranks
+# input importance: x3 should have the largest index, x1 the smallest.
 DEFAULT_COEFFS = (1.0, 2.0, 3.0)
 DEFAULT_BOUNDS = ((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))
 
@@ -41,6 +43,7 @@ def evaluate(
     Returns:
         Array of shape ``(N,)`` with function values.
     """
+    # Matrix-vector multiply: vectorized weighted sum across all N samples at once.
     return X @ jnp.asarray(coeffs)
 
 
@@ -77,6 +80,8 @@ def analytical_indices(
     S1 = Vi / VY
     ST = S1.copy()
 
+    # Diagonal is NaN by convention (S2_jj is undefined); off-diagonals are
+    # exactly zero because a purely additive model has no interactions.
     S2 = np.full((D, D), np.nan)
     for j in range(D):
         for k in range(j + 1, D):

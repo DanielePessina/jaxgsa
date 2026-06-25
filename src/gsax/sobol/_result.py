@@ -71,13 +71,15 @@ class SAResult:
         output_names = self.problem.output_names
         ndim = self.S1.ndim
 
-        # Determine dims and coords based on shape
+        # Map result ndim back to xarray dimensions.  The squeeze logic in
+        # _analyze removes singleton T and/or K dims, so ndim tells us which
+        # combination of (time, output, param) axes are present.
         if ndim == 1:
-            # (D,) — scalar output, no time
+            # (D,) -- scalar output, no time; simplest case
             dims_s1 = ("param",)
             coords: dict = {"param": param_names}
         elif ndim == 2:
-            # (K, D)
+            # (K, D) -- multiple outputs, single time step
             K = self.S1.shape[0]
             if output_names is not None and len(output_names) != K:
                 msg = f"output_names length {len(output_names)} != K={K}"
@@ -86,7 +88,7 @@ class SAResult:
             dims_s1 = ("output", "param")
             coords = {"param": param_names, "output": onames}
         elif ndim == 3:
-            # (T, K, D)
+            # (T, K, D) -- full time-resolved, multi-output case
             T, K = self.S1.shape[0], self.S1.shape[1]
             if output_names is not None and len(output_names) != K:
                 msg = f"output_names length {len(output_names)} != K={K}"
@@ -104,14 +106,16 @@ class SAResult:
             "ST": (dims_s1, np.asarray(self.ST)),
         }
 
-        # S2: replace last dim (param) with (param_i, param_j)
+        # S2 has two parameter axes (interaction between param_i and param_j),
+        # so it uses separate coordinate names to avoid an xarray dimension clash.
         if self.S2 is not None:
             dims_s2 = (*dims_s1[:-1], "param_i", "param_j")
             data_vars["S2"] = (dims_s2, np.asarray(self.S2))
             coords["param_i"] = param_names
             coords["param_j"] = param_names
 
-        # Confidence intervals: split [lower, upper] into separate variables
+        # Split the (2, ...) confidence arrays into *_lower and *_upper
+        # variables so users can select bounds without integer indexing.
         for name, arr in [
             ("S1", self.S1_conf),
             ("ST", self.ST_conf),

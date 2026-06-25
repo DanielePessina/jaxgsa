@@ -100,6 +100,8 @@ class HDMRResult:
         output_names = self.problem.output_names
         ndim = self.Sa.ndim
 
+        # Infer dimension layout from the number of axes that survived
+        # squeezing: 1D = scalar output, 2D = multi-output, 3D = time-series.
         if ndim == 1:
             dims_term = ("term",)
             dims_param = ("param",)
@@ -132,6 +134,8 @@ class HDMRResult:
             msg = f"Unexpected Sa.ndim={ndim}"
             raise ValueError(msg)
 
+        # Sa/Sb/S are indexed by term (including interactions); ST is indexed
+        # by parameter, so it needs a different dimension coordinate.
         data_vars: dict = {
             "Sa": (dims_term, np.asarray(self.Sa)),
             "Sb": (dims_term, np.asarray(self.Sb)),
@@ -143,6 +147,8 @@ class HDMRResult:
             data_vars["select"] = (("term",), np.asarray(self.select))
 
         if self.rmse is not None:
+            # RMSE dimensions mirror the squeezed output layout:
+            # scalar -> (), vector -> (output,), matrix -> (time, output).
             rmse_np = np.asarray(self.rmse)
             if rmse_np.ndim == 0:
                 data_vars["rmse"] = ((), rmse_np)

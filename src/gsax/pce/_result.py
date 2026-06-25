@@ -50,12 +50,15 @@ class PCEResult:
     def to_dataset(self) -> xr.Dataset:
         """Convert results to a labeled xarray Dataset."""
         param_names = list(self.problem.names)
+        # S1 and ST are 1-D vectors indexed by parameter name.
         coords: dict = {"param": param_names}
         data_vars: dict = {
             "S1": (("param",), np.asarray(self.S1)),
             "ST": (("param",), np.asarray(self.ST)),
         }
 
+        # S2 is a symmetric (D x D) matrix; separate coord names (param_i, param_j)
+        # avoid xarray dimension-name conflicts with the 1-D "param" coord.
         data_vars["S2"] = (
             ("param_i", "param_j"),
             np.asarray(self.S2),
@@ -63,6 +66,7 @@ class PCEResult:
         coords["param_i"] = param_names
         coords["param_j"] = param_names
 
+        # LOO RMSE is a scalar diagnostic (no dimensions).
         if self.loo_rmse is not None:
             data_vars["loo_rmse"] = ((), np.asarray(self.loo_rmse))
 

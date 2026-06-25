@@ -47,7 +47,9 @@ def first_order(A: Array, AB_j: Array, B: Array) -> Array:
     # for a more robust variance estimate: Var(Y) ~ var(concat(A, B)).
     y = jnp.concatenate([A, B])
     var = jnp.var(y)
+    # B*(AB_j - A) isolates how changing only parameter j (A->B) shifts output
     numerator = jnp.mean(B * (AB_j - A))
+    # Zero variance means constant output; index is undefined, not zero
     return jnp.where(var == 0, jnp.nan, numerator / var)
 
 
@@ -70,7 +72,8 @@ def total_order(A: Array, AB_j: Array, B: Array) -> Array:
     y = jnp.concatenate([A, B])
     var = jnp.var(y)
     # Jansen (1999) estimator: ST_j = E[(A - AB_j)^2] / (2 Var(Y)).
-    # Measures residual variance when all parameters except j are fixed.
+    # Measures total variance attributable to param j (including interactions).
+    # Preferred over Sobol (1993) because it is non-negative by construction.
     numerator = 0.5 * jnp.mean((A - AB_j) ** 2)
     return jnp.where(var == 0, jnp.nan, numerator / var)
 
@@ -98,7 +101,9 @@ def second_order(A: Array, AB_j: Array, AB_k: Array, BA_j: Array, B: Array) -> A
     """
     y = jnp.concatenate([A, B])
     var = jnp.var(y)
+    # V_jk estimates the joint variance contribution of params j and k
     Vjk = jnp.where(var == 0, jnp.nan, jnp.mean(BA_j * AB_k - A * B) / var)
+    # Subtract marginal effects to isolate the pure interaction
     Sj = first_order(A, AB_j, B)
     Sk = first_order(A, AB_k, B)
     # Sobol ANOVA decomposition: the second-order interaction is the joint
@@ -108,7 +113,11 @@ def second_order(A: Array, AB_j: Array, AB_k: Array, BA_j: Array, B: Array) -> A
 
 
 # ---------------------------------------------------------------------------
-# Fused kernels: compute variance ONCE, derive all indices from it
+# Fused kernels: compute variance ONCE, derive all indices from it.
+# The per-parameter functions above recompute pooled var(concat(A,B)) for
+# every parameter j independently.  These fused variants compute it once
+# and vectorise all D parameters via broadcasting, giving D-fold savings
+# on the most expensive reduction and enabling efficient JIT compilation.
 # ---------------------------------------------------------------------------
 
 
@@ -131,12 +140,16 @@ def _fused_first_total(A: Array, AB: Array, B: Array) -> tuple[Array, Array]:
     pooled_mean = (jnp.mean(A) + jnp.mean(B)) / 2.0
     A_c = A - pooled_mean
     B_c = B - pooled_mean
+    # Divide by 2N (not 2N-1) to match jnp.var's default ddof=0 convention
     var = (jnp.sum(A_c**2) + jnp.sum(B_c**2)) / (2 * N)
+    # Pre-invert once; multiply is cheaper than D separate divides in XLA
     inv_var = jnp.where(var == 0, jnp.nan, 1.0 / var)
 
     # [:, None] broadcasts (N,) to (N, 1), computing all D indices at once
     # without vmap: each column j of AB is paired with the full A and B.
+    # Saltelli (2010) S1 estimator: E[B * (AB_j - A)] / Var(Y)
     S1 = jnp.mean(B[:, None] * (AB - A[:, None]), axis=0) * inv_var  # (D,)
+    # Jansen (1999) ST estimator: E[(A - AB_j)^2] / (2 Var(Y))
     ST = 0.5 * jnp.mean((A[:, None] - AB) ** 2, axis=0) * inv_var  # (D,)
 
     return S1, ST
@@ -165,12 +178,14 @@ def _fused_second_order(A: Array, AB: Array, BA: Array, B: Array) -> tuple[Array
     var = (jnp.sum(A_c**2) + jnp.sum(B_c**2)) / (2 * N)
     inv_var = jnp.where(var == 0, jnp.nan, 1.0 / var)
 
+    # S1 and ST use the same Saltelli/Jansen estimators as _fused_first_total
     S1 = jnp.mean(B[:, None] * (AB - A[:, None]), axis=0) * inv_var  # (D,)
     ST = 0.5 * jnp.mean((A[:, None] - AB) ** 2, axis=0) * inv_var  # (D,)
 
     # Outer-product trick: BA[:,j] * AB[:,k] for all (j,k) pairs at once.
     # BA[:, :, None] is (N,D,1), AB[:, None, :] is (N,1,D); their product
     # is (N,D,D), giving the full joint-variance matrix V_jk in one pass.
+    # This avoids a nested loop over D*D pairs that would be JIT-hostile.
     Vjk = jnp.mean(
         BA[:, :, None] * AB[:, None, :] - (A * B)[:, None, None],
         axis=0,

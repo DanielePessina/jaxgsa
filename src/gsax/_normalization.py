@@ -20,11 +20,13 @@ def _prepare_Y(
     """
     squeeze_time = False
     squeeze_output = False
-    if Y.ndim == 1:
+    # Normalize to 3-D so downstream kernels always see (samples, T, K)
+    # without shape-dependent branching.
+    if Y.ndim == 1:  # scalar output per sample -- both T and K are singleton
         Y = Y[:, None, None]
         squeeze_time = True
         squeeze_output = True
-    elif Y.ndim == 2:
+    elif Y.ndim == 2:  # multi-output but single timestep -- only T is singleton
         Y = Y[:, None, :]
         squeeze_time = True
     return Y, squeeze_time, squeeze_output
@@ -43,9 +45,11 @@ def _warn_zero_variance_slices(
     """
     import warnings
 
+    # Collapse trailing dims so variance is computed per (t, k) slice.
     flat = Y.reshape(Y.shape[0], -1)
     n_outputs = flat.shape[1]
 
+    # Recover K from the original shape to map flat indices back to named outputs.
     trailing = Y.shape[1:]
     if len(trailing) == 0:
         K = 1
@@ -64,6 +68,8 @@ def _warn_zero_variance_slices(
             return f"k={k} ('{output_names[k]}')"
         return f"k={k}"
 
+    # Sample variance along axis 0; zero means the output is constant
+    # and Sobol indices become 0/0 = NaN.
     var_per_slice = jnp.var(flat, axis=0)
     zero_mask = var_per_slice == 0
     n_zero = int(jnp.sum(zero_mask))
@@ -79,11 +85,12 @@ def _warn_zero_variance_slices(
         warnings.warn(msg, stacklevel=2)
         return
 
+    # Materialize indices eagerly -- this is a rare warning path, not a hot loop.
     zero_indices = [int(i) for i in jnp.where(zero_mask)[0]]
 
-    if len(trailing) == 1:
+    if len(trailing) == 1:  # single-timestep: flat index equals output index k
         labels = [_fmt_k(k) for k in zero_indices]
-        if len(labels) > 5:
+        if len(labels) > 5:  # cap displayed labels to keep warnings readable
             shown = ", ".join(labels[:5])
             extra = f"... and {len(labels) - 5} more"
             label_str = f"{shown}, {extra}"
@@ -94,13 +101,13 @@ def _warn_zero_variance_slices(
             f"({label_str}) — corresponding indices will be NaN",
             stacklevel=2,
         )
-    elif len(trailing) == 2:
+    elif len(trailing) == 2:  # multi-timestep: flat index encodes (t, k) in row-major order
         affected = []
         for idx in zero_indices:
             # divmod decomposes flat index into (time_step, output_column)
             t, k = divmod(idx, K)
             affected.append(f"(t={t}, {_fmt_k(k)})")
-        if len(affected) > 5:
+        if len(affected) > 5:  # cap displayed labels to keep warnings readable
             shown = ", ".join(affected[:5])
             extra = f"... and {len(affected) - 5} more"
             label_str = f"{shown}, {extra}"
@@ -129,6 +136,9 @@ def _prenormalize_outputs(Y: Array) -> tuple[Array, Array, Array, Array]:
             - ``safe_scale`` is the divisor actually used, with zeros replaced
               by ``1.0`` to avoid division by zero.
     """
+    # Centering + scaling stabilizes Sobol variance estimators when output
+    # magnitudes vary across slices (prevents large-magnitude slices from
+    # dominating numerical precision).
     y_mean = jnp.mean(Y, axis=0)
     y_std = jnp.std(Y, axis=0)
     # Replace zero std with 1.0 so division doesn't produce NaN; the

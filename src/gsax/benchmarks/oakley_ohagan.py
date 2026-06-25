@@ -32,10 +32,12 @@ from jax import Array
 
 from gsax.problem import Problem
 
+# 15 dimensions — high enough to stress-test scalability and to span
+# a wide range of importance levels (some inputs are nearly inert).
 D = 15
 DEFAULT_SIGMA = 1.0
 
-# Published coefficients (psa_example.txt).
+# Published coefficients from Oakley & O'Hagan (2004, Table 1 / psa_example.txt).
 # fmt: off
 _M = np.array([
     [-0.0225, -0.185, 0.134, 0.369, 0.172, 0.137, -0.44, -0.0814, 0.713, -0.444, 0.504, -0.0241, -0.0459, 0.217, 0.0559],
@@ -55,17 +57,23 @@ _M = np.array([
     [0.0415, -0.26, 0.464, -0.361, -0.95, -0.165, 0.00309, 0.0528, 0.225, 0.384, 0.456, -0.186, 0.00823, 0.167, 0.16],
 ], dtype=float)
 
+# Coefficients for linear, sin, and cos terms respectively.
+# Magnitudes increase toward higher indices, creating a natural importance
+# gradient: x11-x15 dominate, x1-x5 are nearly inert, x6-x10 intermediate.
 _A1 = np.array([0.0118, 0.0456, 0.2297, 0.0393, 0.1177, 0.3865, 0.3897, 0.6061, 0.6159, 0.4005, 1.0741, 1.1474, 0.788, 1.1242, 1.1982], dtype=float)
 _A2 = np.array([0.4341, 0.0887, 0.0512, 0.3233, 0.1489, 1.036, 0.9892, 0.9672, 0.8977, 0.8083, 1.8426, 2.4712, 2.3946, 2.0045, 2.2621], dtype=float)
 _A3 = np.array([0.1044, 0.2057, 0.0774, 0.273, 0.1253, 0.7526, 0.857, 1.0331, 0.8388, 0.797, 2.2145, 2.0382, 2.4004, 2.0541, 1.9845], dtype=float)
 # fmt: on
 
+# Reference S1 values from the original paper; useful for cross-checking
+# our analytical derivation against the published table.
 PUBLISHED_S1 = np.array([
     0.00156, 0.000186, 0.001307, 0.003045, 0.002905,
     0.023035, 0.024151, 0.026517, 0.046036, 0.014945,
     0.101823, 0.135708, 0.101989, 0.105169, 0.122818,
 ])
 
+# Gaussian inputs (not uniform) -- one of few SA benchmarks with non-uniform distributions.
 PROBLEM = Problem.from_dict({
     f"x{i + 1}": {"dist": "gaussian", "mean": 0.0, "variance": DEFAULT_SIGMA**2}
     for i in range(D)
@@ -85,11 +93,13 @@ def evaluate(X: Array, sigma: float = DEFAULT_SIGMA) -> Array:
         Array of shape ``(N,)`` with function values.
     """
     Xj = jnp.asarray(X)
+    # Four additive components: linear a1^T x, trigonometric a2^T sin(x) + a3^T cos(x),
+    # and the quadratic form x^T M x which introduces all pairwise interactions.
     return (
         Xj @ jnp.asarray(_A1)
         + jnp.sin(Xj) @ jnp.asarray(_A2)
         + jnp.cos(Xj) @ jnp.asarray(_A3)
-        # Vectorized quadratic form: einsum computes x^T M x for each of N samples
+        # Batched quadratic form: einsum contracts x_i * M_ij * x_j per sample row.
         + jnp.einsum("ni,ij,nj->n", Xj, jnp.asarray(_M), Xj)
     )
 
@@ -113,13 +123,15 @@ def analytical_indices(
         arrays and total_variance is the scalar unconditional variance.
     """
     s2 = sigma**2
-    # E[sin(X)] and E[sin^2(X)] moments under X ~ N(0, sigma^2) yield
-    # exp(-sigma^2/2) and exp(-2*sigma^2) respectively
-    es = np.exp(-0.5 * s2)
-    es2 = np.exp(-2.0 * s2)
+    # Gaussian moment-generating-function identities for X ~ N(0, s2):
+    # E[sin X] = 0, E[cos X] = exp(-s2/2), E[sin^2 X] = (1 - exp(-2s2))/2
+    es = np.exp(-0.5 * s2)   # = E[cos X], used in cross-covariances
+    es2 = np.exp(-2.0 * s2)  # appears in Var[sin X] and Var[cos X]
 
-    # 4x4 covariance block Sigma for (x, sin x, cos x, x^2) under Gaussian
-    # inputs: Vi = a_i^T Sigma a_i gives each input's variance contribution
+    # Covariance matrix of the feature vector (x, sin x, cos x, x^2) for X~N(0,s2).
+    # Block-diagonal: (x, sin x) decouple from (cos x, x^2) because odd/even symmetry.
+    # Each input's main-effect variance is Vi = c_i^T * cov_block * c_i
+    # where c_i = [a1_i, a2_i, a3_i, M_ii].
     cov_block = np.array([
         [s2,      s2 * es,          0.0,                  0.0],
         [s2 * es, (1 - es2) / 2,    0.0,                  0.0],
@@ -127,6 +139,7 @@ def analytical_indices(
         [0.0,     0.0,              -s2**2 * es,           2 * s2**2],
     ])
 
+    # Main-effect variance for each input: quadratic form c_i^T Sigma c_i
     Vi = np.array([
         np.array([_A1[i], _A2[i], _A3[i], _M[i, i]])
         @ cov_block
@@ -134,14 +147,15 @@ def analytical_indices(
         for i in range(D)
     ])
 
-    # Off-diagonal quadratic terms x_i*x_k contribute interaction variance.
-    # Vpair_ik = ((M_ik + M_ki) * sigma^2)^2
+    # Off-diagonal cross-terms x_i*x_k from the quadratic form contribute
+    # interaction variance Vpair_ik = ((M_ik + M_ki) * s2)^2 (symmetrized).
     Vpair = ((_M + _M.T) * s2) ** 2
-    np.fill_diagonal(Vpair, 0.0)
+    np.fill_diagonal(Vpair, 0.0)  # diagonal already captured in Vi via M_ii
 
-    # ST_i includes Vi (main) plus all pairwise interactions involving i
+    # Total variance = sum of all main effects + sum of all unique pairwise interactions.
     total_var = float(Vi.sum() + np.triu(Vpair, 1).sum())
     S1 = Vi / total_var
+    # ST_i = main effect + all pairwise interactions involving input i
     ST = (Vi + Vpair.sum(axis=1)) / total_var
 
     return S1, ST, total_var

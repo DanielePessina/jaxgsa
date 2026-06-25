@@ -34,6 +34,9 @@ from gsax.sobol._result import SAResult
 # ---------------------------------------------------------------------------
 
 
+# lru_cache ensures each (calc_second_order,) variant is JIT-compiled exactly
+# once across the process lifetime, avoiding repeated tracing overhead.
+
 @lru_cache(maxsize=None)
 def _get_scalar_kernel(calc_second_order: bool):
     """Cache JIT-compiled fused kernels for the scalar (T*K=1) path."""
@@ -45,6 +48,7 @@ def _get_scalar_kernel(calc_second_order: bool):
 @lru_cache(maxsize=None)
 def _get_batched_kernel(calc_second_order: bool):
     """Cache JIT-compiled batched kernels for the multi-output path."""
+    # vmap over axis 0 maps fused kernels across T*K output slices in parallel
     if calc_second_order:
         return jax.jit(jax.vmap(_fused_second_order, in_axes=(0, 0, 0, 0)))
     return jax.jit(jax.vmap(_fused_first_total, in_axes=(0, 0, 0)))
@@ -75,6 +79,7 @@ def _drop_nonfinite(Y: Array, step: int) -> tuple[Array, int]:
     # indivisible sampling unit; a single NaN in any row invalidates the
     # whole group, so we mask at the group level, not per row.
     grouped = Y[: base_n * step].reshape(base_n, step, *trailing)
+    # Flatten each group to a single row for an efficient all-finite check
     finite_mask = jnp.all(jnp.isfinite(grouped.reshape(base_n, -1)), axis=1)
 
     n_good = int(jnp.sum(finite_mask))
@@ -82,6 +87,8 @@ def _drop_nonfinite(Y: Array, step: int) -> tuple[Array, int]:
     if n_dropped > 0:
         import numpy as np
 
+        # Boolean indexing (variable-length output) is not supported by JAX JIT,
+        # so we round-trip through NumPy for the filtering step.
         mask_np = np.asarray(finite_mask)
         grouped_clean = jnp.asarray(np.asarray(grouped)[mask_np])
         Y_clean = grouped_clean.reshape(n_good * step, *trailing)
@@ -100,6 +107,8 @@ def _count_nans(
         "ST": int(jnp.sum(jnp.isnan(ST))),
     }
     if S2 is not None:
+        # Diagonal of S2 is intentionally NaN (self-interaction undefined),
+        # so only count off-diagonal NaNs as genuine computation failures.
         off_diag_mask = ~jnp.eye(S2.shape[-1], dtype=bool)
         counts["S2"] = int(jnp.sum(jnp.isnan(S2) & off_diag_mask))
     return counts
@@ -114,14 +123,18 @@ def _bootstrap_ci_endpoints(
     ci_method: Literal["quantile", "gaussian"],
 ) -> tuple[Array, Array]:
     """Convert bootstrap draws into lower and upper endpoint arrays."""
+    # Split the two-tailed CI: e.g. conf_level=0.95 -> alpha=0.025 per tail
     alpha = (1.0 - conf_level) / 2.0
     if ci_method == "quantile":
+        # Non-parametric: read endpoints directly from the empirical bootstrap
+        # distribution.  No normality assumption, but needs enough resamples.
         percentiles = jnp.array([alpha * 100, (1.0 - alpha) * 100])
         endpoints = jnp.nanpercentile(bootstrap_draws, percentiles, axis=0)
         return endpoints[0], endpoints[1]
 
-    # ndtri is the inverse normal CDF (quantile function): z = Φ⁻¹(1-α/2).
-    # CI = estimate ± z·σ_boot.  nanstd tolerates degenerate bootstrap
+    # Parametric (Gaussian) CI: assumes the bootstrap distribution is normal.
+    # ndtri is the inverse normal CDF (quantile function): z = Phi^-1(1-alpha/2).
+    # CI = estimate +/- z * sigma_boot.  nanstd tolerates degenerate bootstrap
     # resamples that collapse to a single unique value and produce NaN.
     z_score = jax.scipy.special.ndtri(1.0 - alpha)
     bootstrap_sd = jnp.nanstd(bootstrap_draws, axis=0)
@@ -141,6 +154,10 @@ def _separate_output_values(
     base_n = n_total // step
     trailing = Y.shape[1:]
 
+    # Reshape-based extraction: one reshape converts the flat output vector
+    # into (base_n, step, ...) groups, then simple slicing pulls A/B/AB/BA.
+    # This is much faster than D separate stride-slices + a stack.
+    #
     # Saltelli row layout within each group of `step` rows:
     #   [0]=A, [1..D]=AB_j (A with col j from B), [D+1..2D]=BA_j (B with
     #   col j from A), [2D+1]=B.  For first-order only, BA is omitted and
@@ -161,24 +178,33 @@ def _separate_output_values(
 
 def _normalize_s2_matrix(S2: Array) -> Array:
     """Symmetrise the S2 matrix and set diagonal entries to NaN."""
-    # S2_{jk} = S2_{kj} by symmetry of the variance decomposition, so we
-    # keep only the upper triangle and mirror it.  Diagonal is NaN because
-    # self-interaction S2_{jj} is undefined.
+    # The fused kernel computes the full (D,D) matrix, but only the upper
+    # triangle S2_{j<k} is meaningful; the lower triangle has a different
+    # numerical path and slight floating-point drift.  We canonicalise by
+    # keeping the upper triangle and mirroring it.
     D = S2.shape[-1]
     upper = jnp.triu(S2, k=1)
     mirrored = upper + jnp.swapaxes(upper, -1, -2)
+    # Diagonal S2_{jj} (self-interaction) is undefined in Sobol ANOVA
     diag_mask = jnp.eye(D, dtype=bool)
     return jnp.where(diag_mask, jnp.nan, mirrored)
 
 
 
 def _expand_unique_outputs(sampling_result: SamplingResult, Y: Array) -> Array:
-    """Rebuild expanded Saltelli outputs from unique user-evaluated outputs."""
+    """Rebuild expanded Saltelli outputs from unique user-evaluated outputs.
+
+    Saltelli sampling produces duplicate rows (e.g. row 0 of every AB_j group
+    is the same as A when j=0). The sampler deduplicates before returning
+    samples to the user, so Y has only unique rows. This function maps them
+    back to the full interleaved layout the estimators expect.
+    """
     if Y.shape[0] != sampling_result.n_total:
         raise ValueError(
             f"Y.shape[0] must match sampling_result.n_total ({sampling_result.n_total}), "
             f"got {Y.shape[0]}"
         )
+    # expanded_to_unique[i] gives the unique-row index for expanded position i
     expanded_to_unique = jnp.asarray(sampling_result.expanded_to_unique)
     return jnp.take(Y, expanded_to_unique, axis=0)
 
@@ -193,7 +219,12 @@ def _squeeze_results(
     ST_conf: Array | None = None,
     S2_conf: Array | None = None,
 ) -> tuple[Array, Array, Array | None, Array | None, Array | None, Array | None]:
-    """Remove singleton T and/or K dimensions that _prepare_Y inserted."""
+    """Remove singleton T and/or K dimensions that _prepare_Y inserted.
+
+    _prepare_Y always promotes Y to 3-D (N,T,K) for uniform kernel code.
+    After computation, we undo that promotion so results match the user's
+    original output shape (e.g. (D,) for scalar, (K,D) for multi-output).
+    """
     if squeeze_time and squeeze_output:
         S1 = S1[0, 0]
         ST = ST[0, 0]
@@ -230,9 +261,11 @@ def _analyze_no_bootstrap(
     D = sampling_result.n_params
     calc_second_order = sampling_result.calc_second_order
 
-    # Check if this is the scalar case BEFORE promoting to 3D
+    # Detect scalar output before _prepare_Y adds singleton T and K dims.
+    # The scalar path skips vmap entirely, saving tracing and dispatch cost.
     is_scalar = Y.ndim == 1
 
+    # Promote to uniform 3-D shape (N, T, K) so downstream code is shape-agnostic
     Y, squeeze_time, squeeze_output = _prepare_Y(Y)
     _, T, K = Y.shape
 
@@ -242,8 +275,9 @@ def _analyze_no_bootstrap(
     total = T * K
 
     if is_scalar:
-        # Fast scalar path: no vmap overhead, direct fused kernel
-        # A: (N, 1, 1) -> (N,), AB: (N, D, 1, 1) -> (N, D)
+        # Scalar path (T*K=1): call the fused kernel directly on 1-D arrays.
+        # This avoids vmap dispatch overhead and produces a simpler XLA graph.
+        # Squeeze trailing (1,1) dims added by _prepare_Y.
         a = A[:, 0, 0]
         b = B[:, 0, 0]
         ab = AB[:, :, 0, 0]
@@ -268,8 +302,9 @@ def _analyze_no_bootstrap(
             nan_counts=nan_counts,
         )
 
-    # (N,T,K) -> transpose -> (T,K,N) -> reshape -> (T*K, N): flatten
-    # time x output into a single batch dimension for vmapped kernels.
+    # Batched path (T*K > 1): flatten (T, K) into a single batch dimension
+    # so vmap processes all output slices in one vectorised call.
+    # (N,T,K) -> transpose -> (T,K,N) -> reshape -> (T*K, N)
     # AB is (N,D,T,K) so its transpose puts (T,K) first then (N,D).
     A_flat = A.transpose(1, 2, 0).reshape(T * K, base_n)
     B_flat = B.transpose(1, 2, 0).reshape(T * K, base_n)
@@ -277,6 +312,7 @@ def _analyze_no_bootstrap(
 
     if chunk_size < 1:
         raise ValueError(f"chunk_size must be >= 1, got {chunk_size}")
+    # Chunk the T*K batches to cap peak memory when many outputs exist
     cs = min(chunk_size, total)
 
     if calc_second_order:
@@ -340,7 +376,13 @@ def _analyze_bootstrap(
     key: Array,
     chunk_size: int,
 ) -> SAResult:
-    """Bootstrap path: loop over (T, K) combos, vmap over R resamples."""
+    """Bootstrap path: loop over (T, K) combos, vmap over R resamples.
+
+    Unlike the no-bootstrap path which vmaps over output slices, here we loop
+    over (T, K) in Python and vmap over R resamples within each slice.  This
+    trades some Python-loop overhead for bounded memory: each vmap call
+    materialises R copies of a single (N,) or (N,D) slice, not R * T * K.
+    """
     from gsax.sobol._bootstrap import _bootstrap_first_total, _bootstrap_second_order
 
     Y, squeeze_time, squeeze_output = _prepare_Y(Y)
@@ -351,8 +393,11 @@ def _analyze_bootstrap(
     A, B, AB, BA = _separate_output_values(Y, D, calc_second_order)
     base_n = A.shape[0]
 
+    # Pre-generate all R bootstrap index sets (sampling with replacement).
+    # Shared across (T, K) slices so every output sees the same resamples.
     indices = jax.random.randint(key, shape=(num_resamples, base_n), minval=0, maxval=base_n)
 
+    # Reuse the scalar (non-vmapped) kernels for point estimates per slice
     jit_ft = _get_scalar_kernel(False)
     jit_so = _get_scalar_kernel(True)
 
@@ -363,6 +408,7 @@ def _analyze_bootstrap(
 
     for t in range(T):
         for k in range(K):
+            # Extract 1-D slice for this (time, output) combo
             a = A[:, t, k]
             b = B[:, t, k]
             ab = AB[:, :, t, k]
@@ -409,9 +455,11 @@ def _analyze_bootstrap(
             ST_lo_list.append(st_lo)
             ST_hi_list.append(st_hi)
 
+    # Reassemble per-slice results into (T, K, D) arrays
     S1_out = jnp.stack(S1_list).reshape(T, K, D)
     ST_out = jnp.stack(ST_list).reshape(T, K, D)
 
+    # Confidence intervals: stack [lower, upper] into leading dim of size 2
     S1_conf = jnp.stack(
         [
             jnp.stack(S1_lo_list).reshape(T, K, D),
@@ -517,11 +565,14 @@ def analyze(
             S1_conf, ST_conf, S2_conf — (2, ...) CI bounds or None
     """
     Y = jnp.asarray(Y)
+    # Map user-evaluated unique outputs back to the full Saltelli interleaving
     Y = _expand_unique_outputs(sampling_result, Y)
 
     D = sampling_result.n_params
+    # step = rows per Saltelli group: D+2 (first-order only) or 2D+2 (with S2)
     step = _saltelli_step(D, sampling_result.calc_second_order)
 
+    # Remove entire Saltelli groups containing NaN/Inf before analysis
     Y, n_dropped = _drop_nonfinite(Y, step)
     if n_dropped > 0:
         import warnings

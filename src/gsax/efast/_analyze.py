@@ -32,17 +32,26 @@ def _compute_indices(Y_curve: Array, N: int, M: int, omega_0: int) -> tuple[Arra
     Returns:
         (S1, ST) scalar arrays.
     """
+    # Discrete Fourier spectrum of the model output along one search curve
     f = jnp.fft.fft(Y_curve)
+    # One-sided power spectrum: |F_k|^2/N^2, positive freqs only (skip DC at k=0)
     Sp = jnp.abs(f[1 : (N + 1) // 2]) ** 2 / N**2
+    # Total variance via Parseval's theorem; factor 2 accounts for symmetric negative freqs
     V = 2.0 * jnp.sum(Sp)
 
+    # First-order partial variance: sum power at harmonics p*omega_0, p=1..M.
+    # These frequencies carry variance attributable solely to the focal parameter.
     harmonics = jnp.arange(1, M + 1) * omega_0
     D1 = 2.0 * jnp.sum(Sp[harmonics - 1])
 
+    # Complementary variance: power at low frequencies [0, omega_0/2).
+    # Driven by the complementary (non-focal) parameters' lower frequencies.
     compl_range = jnp.arange(omega_0 // 2)
     Dt = 2.0 * jnp.sum(Sp[compl_range])
 
+    # S1: fraction of total variance from the focal parameter alone
     S1 = jnp.where(V == 0, jnp.nan, D1 / V)
+    # ST: 1 - (complementary share) = total effect including all interactions
     ST = jnp.where(V == 0, jnp.nan, 1.0 - Dt / V)
     return S1, ST
 
@@ -86,11 +95,13 @@ def analyze(
         )
     N = Y.size // D
 
+    # Recompute omega_0 from N to match the value used during sampling
     omega_0 = (N - 1) // (2 * M)
 
     S1_vals = []
     ST_vals = []
 
+    # Each parameter i has its own search curve of length N stored contiguously in Y
     for i in range(D):
         Y_curve = Y[i * N : (i + 1) * N]
         s1, st = _compute_indices(Y_curve, N, M, omega_0)
@@ -100,6 +111,7 @@ def analyze(
     S1 = jnp.stack(S1_vals)
     ST = jnp.stack(ST_vals)
 
+    # Indices outside [0,1] indicate the frequency decomposition didn't converge
     if jnp.any((S1 > 1.0) | (S1 < 0.0)) or jnp.any((ST > 1.0) | (ST < 0.0)):
         warnings.warn(
             "eFAST: some indices are outside [0, 1], suggesting "

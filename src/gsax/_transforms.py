@@ -24,10 +24,12 @@ def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
     Returns:
         (N, D) array with each column in [0, 1].
     """
+    # Lazy import: scipy is heavy and only needed for Gaussian marginals;
+    # keeps the JAX-only uniform path lightweight.
     from scipy.stats import norm, truncnorm
 
     D = problem.num_vars
-    cols = []
+    cols = []  # one column per dimension, stacked at the end into (N, D)
 
     # CDF-to-unit-interval mapping: apply F(x) per dimension so each column
     # lands in (0, 1).  For Gaussian inputs, standardised truncation bounds
@@ -36,8 +38,9 @@ def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
     # so downstream inverse transforms (ppf) never receive exactly 0 or 1.
     for d in range(D):
         dist, first, second, lo, hi = problem.input_specs[d]
-        if dist == "uniform":
+        if dist == "uniform":  # affine map (x - lo)/(hi - lo) is the CDF of U(lo, hi)
             cols.append((X[:, d] - first) / (second - first))
+        # Truncated Gaussian -- need scipy because JAX lacks a truncnorm CDF.
         elif lo is not None or hi is not None:
             mean, variance = first, second
             std = float(jnp.sqrt(variance))
@@ -47,10 +50,10 @@ def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
                 truncnorm.cdf(np.asarray(X[:, d]), a=a, b=b, loc=mean, scale=std)
             )
             cols.append(jnp.clip(u, 1e-12, 1.0 - 1e-12))
-        else:
+        else:  # unbounded Gaussian -- scipy avoids JAX tracing overhead for host-side transforms
             mean, variance = first, second
             std = float(jnp.sqrt(variance))
             u = jnp.asarray(norm.cdf(np.asarray(X[:, d]), loc=mean, scale=std))
             cols.append(jnp.clip(u, 1e-12, 1.0 - 1e-12))
 
-    return jnp.column_stack(cols)
+    return jnp.column_stack(cols)  # reassemble per-dimension columns into (N, D)

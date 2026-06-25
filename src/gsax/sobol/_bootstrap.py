@@ -27,6 +27,8 @@ from jax import Array
 
 from gsax.sobol._indices import _fused_first_total, _fused_second_order
 
+# @jax.jit is applied directly (not via lru_cache) because these functions
+# have a fixed signature — no configuration parameter to dispatch on.
 
 @jax.jit
 def _resample_ft(idx_chunk: Array, A: Array, AB: Array, B: Array):
@@ -44,11 +46,12 @@ def _resample_ft(idx_chunk: Array, A: Array, AB: Array, B: Array):
         ST: (C, D) total-order indices per resample.
     """
 
-    # Inside vmap, idx has shape (N,); A[idx] gathers N rows via advanced
-    # indexing — each vmapped call processes one bootstrap resample.
+    # Closure over A, AB, B lets vmap vary only the index vector per resample.
+    # A[idx] gathers N rows with replacement — the core of bootstrap resampling.
     def single(idx):
         return _fused_first_total(A[idx], AB[idx], B[idx])
 
+    # vmap maps `single` across C index sets in parallel on the accelerator
     return jax.vmap(single)(idx_chunk)
 
 
@@ -69,8 +72,7 @@ def _resample_so(idx_chunk: Array, A: Array, AB: Array, BA: Array, B: Array):
         S2: (C, D, D) second-order indices per resample.
     """
 
-    # Inside vmap, idx has shape (N,); A[idx] gathers N rows via advanced
-    # indexing — each vmapped call processes one bootstrap resample.
+    # Same closure+vmap pattern as _resample_ft, extended to include BA
     def single(idx):
         return _fused_second_order(A[idx], AB[idx], BA[idx], B[idx])
 
@@ -99,16 +101,16 @@ def _bootstrap_first_total(
     """
     R = indices.shape[0]
     s1_parts, st_parts = [], []
-    cs = min(chunk_size, R)  # clamp to R so we never slice past the end
+    # Clamp chunk_size to R to avoid empty trailing slices
+    cs = min(chunk_size, R)
     for start in range(0, R, cs):
         end = min(start + cs, R)
-        # indices[start:end]: (C, N) where C = end - start <= chunk_size
+        # Process C resamples via vmap; chunking bounds peak device memory
         s1, st = _resample_ft(indices[start:end], A, AB, B)
-        # s1, st: each (C, D)
         s1_parts.append(s1)
         st_parts.append(st)
 
-    # Concatenate chunks along the resample axis → (R, D)
+    # Concatenate chunks along the resample axis -> (R, D)
     return jnp.concatenate(s1_parts), jnp.concatenate(st_parts)
 
 
@@ -135,17 +137,16 @@ def _bootstrap_second_order(
     """
     R = indices.shape[0]
     s1_parts, st_parts, s2_parts = [], [], []
-    cs = min(chunk_size, R)  # clamp to R so we never slice past the end
+    cs = min(chunk_size, R)
     for start in range(0, R, cs):
         end = min(start + cs, R)
-        # indices[start:end]: (C, N) where C = end - start <= chunk_size
+        # Same chunked-vmap strategy as _bootstrap_first_total
         s1, st, s2 = _resample_so(indices[start:end], A, AB, BA, B)
-        # s1: (C, D), st: (C, D), s2: (C, D, D)
         s1_parts.append(s1)
         st_parts.append(st)
         s2_parts.append(s2)
 
-    # Concatenate chunks along the resample axis → (R, ...) for each output
+    # Concatenate chunks along the resample axis -> (R, ...) for each output
     return (
         jnp.concatenate(s1_parts),  # (R, D)
         jnp.concatenate(st_parts),  # (R, D)
