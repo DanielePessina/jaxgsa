@@ -1,6 +1,6 @@
 # Methods
 
-gsax implements three complementary approaches to variance-based global sensitivity analysis (GSA). All methods decompose the variance of a model's output into contributions attributable to individual input parameters and their interactions, enabling practitioners to identify which parameters drive model behaviour and which are effectively unidentifiable from available measurements.
+gsax implements five complementary approaches to global sensitivity analysis (GSA). The variance-based methods (Sobol', HDMR, PCE, eFAST) decompose the variance of a model's output into contributions attributable to individual input parameters and their interactions, while the derivative-based method (DGSM) uses autodiff to bound total Sobol indices directly from partial derivatives. Together, these enable practitioners to identify which parameters drive model behaviour and which are effectively unidentifiable from available measurements.
 
 ## Background: Variance-Based Sensitivity Analysis
 
@@ -225,18 +225,102 @@ eFAST does **not** produce second-order ($S_2$) interaction indices. If pairwise
 
 Saltelli, A., Tarantola, S. & Chan, K.P.-S. (1999). A quantitative model-independent method for global sensitivity analysis of model output. *Technometrics*, 41(1), 39-56.
 
+## DGSM (Derivative-based Global Sensitivity Measures)
+
+DGSM computes sensitivity information directly from the **partial derivatives** of the model output with respect to each input parameter. Unlike Sobol' or eFAST, which decompose output variance via structured sampling, DGSM exploits JAX's reverse-mode automatic differentiation to obtain exact gradients and then derives **bounds** on the total Sobol index $S_T$.
+
+### The DGSM Moments
+
+For a model $f(\mathbf{X})$ with $D$ inputs, DGSM computes two statistics for each parameter $i$:
+
+**Mean squared derivative** (importance measure):
+
+$$
+\nu_i = \mathbb{E}\left[\left(\frac{\partial f}{\partial X_i}\right)^2\right]
+$$
+
+**Mean derivative**:
+
+$$
+\sigma_i = \mathbb{E}\left[\frac{\partial f}{\partial X_i}\right]
+$$
+
+These moments are estimated from $N$ i.i.d. Monte Carlo samples. Because DGSM uses `jax.jacrev` (reverse-mode autodiff), the cost of computing the full Jacobian for all $D$ inputs in a single pass is comparable to a single model evaluation, making DGSM particularly efficient for high-dimensional problems.
+
+### Bounds on the Total Sobol Index
+
+DGSM does not compute Sobol indices directly. Instead, it provides an **upper bound** and a **lower bound** on the total-order index $S_{T_i}$.
+
+**Poincaré upper bound** (Sobol' & Kucherenko, 2009):
+
+$$
+S_{T_i} \leq \frac{C(p_i) \cdot \nu_i}{\mathrm{Var}(Y)}
+$$
+
+where $C(p_i)$ is the **Poincaré constant** of the $i$-th input's marginal distribution.
+
+**Kucherenko–Song lower bound** (Kucherenko & Song, 2016):
+
+$$
+S_{T_i} \geq \frac{\mathrm{Var}(X_i) \cdot \sigma_i^2}{\mathrm{Var}(Y)}
+$$
+
+When the upper and lower bounds are close, DGSM gives a tight bracket on $S_T$ without the cost of a full Sobol analysis.
+
+### Poincaré Constants by Distribution
+
+The Poincaré constant depends on the marginal distribution of each input:
+
+| Distribution | Poincaré Constant $C$ |
+|---|---|
+| Uniform $[a, b]$ | $(b - a)^2 / \pi^2$ |
+| Gaussian $\mathcal{N}(\mu, \sigma^2)$ | $\sigma^2$ |
+| Truncated Normal | Spectral solve (P1 finite-element Neumann eigenproblem) |
+
+For truncated normal inputs, the constant is computed numerically by solving a weighted eigenproblem on a finite-element grid. gsax handles this automatically when the input spec declares truncation bounds.
+
+### How to use it
+
+1. `gsax.sample_mc()` generates plain Monte Carlo samples from the declared input distributions.
+2. You pass your JAX-differentiable function and the samples to `gsax.analyze_dgsm()`.
+3. Internally, `jax.jacrev` computes the Jacobian via reverse-mode autodiff, and the DGSM moments and bounds are derived.
+4. The returned `DGSMResult` contains `nu`, `sigma`, `upper_bound`, `lower_bound`, and `var_y`.
+
+Alternatively, if the Jacobian has been computed externally (e.g. for non-JAX models), you can pass pre-computed `Y` and `dfdx` arrays directly.
+
+### Index summary
+
+| Field | Meaning |
+|-------|---------|
+| $\nu_i$ | Mean squared derivative: $\mathbb{E}[(\partial f / \partial X_i)^2]$. Higher values indicate stronger influence. |
+| $\sigma_i$ | Mean derivative: $\mathbb{E}[\partial f / \partial X_i]$. Non-zero when the effect is non-symmetric. |
+| Upper bound | Poincaré bound: $C_i \cdot \nu_i / \mathrm{Var}(Y)$. Conservative upper bound on $S_T$. |
+| Lower bound | Kucherenko–Song bound: $\mathrm{Var}(X_i) \cdot \sigma_i^2 / \mathrm{Var}(Y)$. Guaranteed lower bound on $S_T$. |
+
+**When to use DGSM:**
+- You have a JAX-differentiable model and want fast screening without the cost of Saltelli or eFAST sampling
+- You want bounds on $S_T$ rather than exact indices
+- You are screening a large number of parameters where autodiff is cheaper than structured designs
+- You want a quick sanity check before running a full Sobol analysis
+
+### References
+
+- Sobol', I.M. & Kucherenko, S. (2009). Derivative based global sensitivity measures and their link with global sensitivity indices. *Mathematics and Computers in Simulation*, 79(10), 3009-3017.
+- Kucherenko, S. & Song, S. (2016). Derivative-based global sensitivity measures and their link with Sobol' sensitivity indices. *Reliability Engineering & System Safety*, 148, 81-95.
+- Lamboni, M., Iooss, B., Popelin, A.-L. & Gamboa, F. (2013). Derivative-based global sensitivity measures: General links with Sobol' indices and numerical tests. *Mathematics and Computers in Simulation*, 87, 44-54.
+
 ## Choosing Between Them
 
-| Consideration | Sobol' | HDMR | PCE | eFAST |
-|---------------|--------|------|-----|-------|
-| Sampling requirement | Structured Saltelli design, $N(D+2)$ evaluations | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Search curves, $N \times D$ evaluations |
-| Input independence | Assumed | Handled via ANCOVA decomposition | Assumed | Assumed |
-| Surrogate/emulator | No | Yes (`emulate_hdmr`) | Yes (`emulate_pce`) | No |
-| Accuracy | Exact (given enough samples) | Depends on B-spline fit quality | Depends on polynomial fit quality | Exact (given enough samples) |
-| Second-order indices | Direct estimation from cross-matrices | From interaction component functions | Analytical from coefficients | Not available |
-| Interaction detection | Via $S_2$ and the gap $S_T - S_1$ | Via explicit interaction component functions | Via $S_2$ from coefficients | Via the gap $S_T - S_1$ only |
-| Output shapes | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar only | Scalar, multi-output, time-series |
-| Input distributions | Uniform + Gaussian | Uniform only | Uniform + Gaussian | Uniform + Gaussian |
+| Consideration | Sobol' | HDMR | PCE | eFAST | DGSM |
+|---------------|--------|------|-----|-------|------|
+| Sampling requirement | Structured Saltelli design, $N(D+2)$ evaluations | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Search curves, $N \times D$ evaluations | Plain MC, $N$ evaluations + autodiff |
+| Input independence | Assumed | Handled via ANCOVA decomposition | Assumed | Assumed | Assumed |
+| Surrogate/emulator | No | Yes (`emulate_hdmr`) | Yes (`emulate_pce`) | No | No |
+| Accuracy | Exact (given enough samples) | Depends on B-spline fit quality | Depends on polynomial fit quality | Exact (given enough samples) | Bounds on $S_T$, not exact indices |
+| Second-order indices | Direct estimation from cross-matrices | From interaction component functions | Analytical from coefficients | Not available | Not available |
+| Interaction detection | Via $S_2$ and the gap $S_T - S_1$ | Via explicit interaction component functions | Via $S_2$ from coefficients | Via the gap $S_T - S_1$ only | Not available (bounds only) |
+| Output shapes | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar only | Scalar, multi-output, time-series | Scalar, multi-output |
+| Input distributions | Uniform + Gaussian | Uniform only | Uniform + Gaussian | Uniform + Gaussian | Uniform + Gaussian (+ truncated Normal) |
 
 ## Output Shapes
 
@@ -251,6 +335,8 @@ Sobol, HDMR, and eFAST all support scalar, multi-output, and time-series outputs
 D is always the last axis. Confidence interval arrays (when using bootstrap) prepend a leading dimension of 2 for `[lower, upper]`.
 
 Time-series outputs are particularly useful for dynamic models, where the evolution of sensitivity indices over time can reveal which parameters dominate at different stages of a process — for example, a parameter that is highly influential early in a batch but negligible later.
+
+DGSM returns arrays of shape `(T, D)` where `T` is the number of output components. For scalar-output models, `T = 1`. DGSM does not use the `(N, T, K)` convention; instead, multi-output functions produce `(T,)` outputs per sample and the result arrays are always `(T, D)`.
 
 ## Data Cleaning
 

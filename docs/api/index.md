@@ -1,12 +1,13 @@
 # API Reference
 
 This is the canonical reference for the exported `gsax` surface. The package has
-four workflows:
+five workflows:
 
 - Sobol: `sample()` -> `analyze()`
 - RS-HDMR: `analyze_hdmr()` -> `emulate_hdmr()`
 - PCE: `analyze_pce()` -> `emulate_pce()`
 - eFAST: `sample_efast()` -> `analyze_efast()`
+- DGSM: `sample_mc()` -> `analyze_dgsm()`
 
 Related docs:
 
@@ -26,6 +27,7 @@ Since v0.6.0, `gsax` is organized into subpackages:
 | `gsax.hdmr` | `analyze`, `emulate`, `HDMRResult`, `HDMREmulator` |
 | `gsax.pce` | `analyze`, `emulate`, `PCEResult` |
 | `gsax.efast` | `sample`, `analyze`, `EFASTResult` |
+| `gsax.dgsm` | `analyze`, `DGSMResult`, `poincare_constant`, `axis_constants` |
 
 You can import from the subpackages directly:
 
@@ -34,6 +36,7 @@ from gsax.sobol import analyze
 from gsax.hdmr import analyze as analyze_hdmr, emulate as emulate_hdmr
 from gsax.pce import analyze as analyze_pce, emulate as emulate_pce
 from gsax.efast import sample as sample_efast, analyze as analyze_efast
+from gsax.dgsm import analyze as analyze_dgsm
 ```
 
 All public symbols are also re-exported from the top-level `gsax` namespace for
@@ -61,6 +64,9 @@ Top-level exports from `gsax`:
 - [`sample_efast`](#sample-efast)
 - [`analyze_efast`](#analyze-efast)
 - [`EFASTResult`](#efastresult)
+- [`sample_mc`](#sample-mc)
+- [`analyze_dgsm`](#analyze-dgsm)
+- [`DGSMResult`](#dgsmresult)
 
 ## Problem Definition
 
@@ -940,3 +946,177 @@ Related links:
 - [eFAST Example](/examples/efast)
 - [Methods](/guide/methods)
 - [xarray Output](/examples/xarray)
+
+## DGSM Workflow
+
+<a id="sample-mc"></a>
+### `sample_mc()` {#sample-mc}
+
+Generate plain Monte Carlo samples from the declared input distributions.
+Unlike Sobol/Saltelli sampling, these samples have no quasi-random structure.
+Suitable for DGSM and other methods that require i.i.d. draws.
+
+```python
+def sample_mc(
+    problem: Problem,
+    N: int,
+    *,
+    seed: int | np.random.Generator | None = None,
+) -> np.ndarray
+```
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `problem` | `Problem` | required | Parameter space definition with distributions. |
+| `N` | `int` | required | Number of samples. Must be >= 1. |
+| `seed` | `int \| np.random.Generator \| None` | `None` | Seed or NumPy generator for reproducibility. |
+
+Returns: `np.ndarray` with shape `(N, D)`.
+
+Shape and behavior:
+
+- Each row is an i.i.d. draw from the joint input distribution defined by the
+  problem's parameter specs.
+- Uniform inputs are drawn uniformly on `[low, high]`.
+- Gaussian inputs use inverse-CDF transforms, with truncated normal when
+  truncation bounds are present.
+- The returned array is in the problem's physical units, not the unit cube.
+
+Minimal example:
+
+```python
+import gsax
+from gsax.benchmarks.ishigami import PROBLEM
+
+X = gsax.sample_mc(PROBLEM, N=10000, seed=42)
+print(X.shape)  # (10000, 3)
+```
+
+<a id="analyze-dgsm"></a>
+### `analyze_dgsm()` {#analyze-dgsm}
+
+Compute DGSM sensitivity measures and Sobol index bounds from a
+JAX-differentiable function or pre-computed Jacobians.
+
+Two calling conventions are supported:
+
+**Autodiff path** (primary): pass `fn` and `X`. The function is differentiated
+via `jax.jacrev` and evaluated to obtain both the Jacobian and forward outputs.
+
+**Pre-computed path**: pass `Y` and `dfdx`. Useful when the model is not
+JAX-differentiable or when the Jacobian has been computed externally.
+
+```python
+def analyze_dgsm(
+    problem: Problem,
+    fn: Callable | None = None,
+    X: Array | None = None,
+    *,
+    Y: Array | None = None,
+    dfdx: Array | None = None,
+    chunk_size: int | None = None,
+) -> DGSMResult
+```
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `problem` | `Problem` | required | Problem definition with D parameters. |
+| `fn` | `Callable \| None` | `None` | JAX-differentiable function `(D,) -> ()` or `(D,) -> (T,)`. |
+| `X` | `Array \| None` | `None` | Sample matrix `(N, D)` in the problem's physical units. |
+| `Y` | `Array \| None` | `None` | Pre-computed forward outputs `(N,)` or `(N, T)`. |
+| `dfdx` | `Array \| None` | `None` | Pre-computed Jacobian `(N, D)` or `(N, T, D)`. |
+| `chunk_size` | `int \| None` | `None` | Batch size for autodiff to limit peak memory. |
+
+Validation and behavior:
+
+- Provide either `(fn, X)` for the autodiff path or `(Y, dfdx)` for the
+  pre-computed path. Providing neither or mixing raises `ValueError`.
+- `X.shape[1]` must match `problem.num_vars`.
+- `fn` must accept a 1D array of shape `(D,)` and return a scalar `()` or
+  a 1D array `(T,)`.
+- When `chunk_size` is set, the autodiff path processes samples in batches,
+  padding the last chunk to avoid JIT recompilation.
+- For the pre-computed path, `dfdx` may be `(N, D)` for scalar output or
+  `(N, T, D)` for multi-output, and `Y` row count must match.
+- Zero-variance outputs produce `NaN` bounds (division by zero guarded).
+- A warning is emitted when upper bounds fall below lower bounds, suggesting
+  insufficient samples.
+
+Returns: [`DGSMResult`](#dgsmresult)
+
+Minimal example:
+
+```python
+import jax.numpy as jnp
+import gsax
+from gsax.benchmarks.ishigami import PROBLEM, evaluate
+
+X = gsax.sample_mc(PROBLEM, N=10000, seed=42)
+result = gsax.analyze_dgsm(PROBLEM, evaluate, jnp.asarray(X))
+
+print(result.nu)           # (1, 3) — importance measures
+print(result.upper_bound)  # (1, 3) — Poincaré upper bounds on ST
+print(result.lower_bound)  # (1, 3) — Kucherenko-Song lower bounds on ST
+```
+
+<a id="dgsmresult"></a>
+### `DGSMResult` {#dgsmresult}
+
+Dataclass holding DGSM sensitivity measures and Sobol index bounds.
+
+```python
+@dataclass
+class DGSMResult:
+    nu: Array
+    sigma: Array
+    upper_bound: Array
+    lower_bound: Array
+    var_y: Array
+    problem: Problem
+```
+
+| Field | Shape | Description |
+| --- | --- | --- |
+| `nu` | `(T, D)` | $\mathbb{E}[(\partial f / \partial X_i)^2]$, the DGSM importance measure. |
+| `sigma` | `(T, D)` | $\mathbb{E}[\partial f / \partial X_i]$, the mean partial derivative. |
+| `upper_bound` | `(T, D)` | $C_i \cdot \nu_i / \mathrm{Var}(Y)$, Poincaré upper bound on $S_T$. |
+| `lower_bound` | `(T, D)` | $\mathrm{Var}(X_i) \cdot \sigma_i^2 / \mathrm{Var}(Y)$, Kucherenko–Song lower bound on $S_T$. |
+| `var_y` | `(T,)` | Output variance per component. |
+| `problem` | `Problem` | Problem definition used for the analysis. |
+
+Shape contract: `T` is the number of output components. For scalar-output
+models (`fn: (D,) -> ()`), `T = 1`.
+
+<a id="dgsmresult-to_dataset"></a>
+#### `DGSMResult.to_dataset()`
+
+```python
+ds = result.to_dataset()
+```
+
+Converts DGSM results to a labeled `xarray.Dataset`.
+
+Behavior:
+
+- For scalar output (`T = 1`), variables have dimension `(param,)`.
+- For multi-output (`T > 1`), variables have dimensions `(output, param)`.
+- Uses `problem.names` for `param` coordinates.
+- Uses `problem.output_names` when available, otherwise integer indices.
+- Dataset contains `nu`, `sigma`, `upper_bound`, and `lower_bound` variables.
+
+Minimal example:
+
+```python
+import jax.numpy as jnp
+import gsax
+from gsax.benchmarks.ishigami import PROBLEM, evaluate
+
+X = gsax.sample_mc(PROBLEM, N=10000, seed=42)
+result = gsax.analyze_dgsm(PROBLEM, evaluate, jnp.asarray(X))
+ds = result.to_dataset()
+print(ds)
+```
+
+Related links:
+
+- [Methods](/guide/methods)
