@@ -203,11 +203,11 @@ def _bootstrap_ci_endpoints(
     alpha = (1.0 - conf_level) / 2.0
     if ci_method == "quantile":
         percentiles = jnp.array([alpha * 100, (1.0 - alpha) * 100])
-        endpoints = jnp.percentile(bootstrap_draws, percentiles, axis=0)
+        endpoints = jnp.nanpercentile(bootstrap_draws, percentiles, axis=0)
         return endpoints[0], endpoints[1]
 
     z_score = jax.scipy.special.ndtri(1.0 - alpha)
-    bootstrap_sd = jnp.std(bootstrap_draws, axis=0)
+    bootstrap_sd = jnp.nanstd(bootstrap_draws, axis=0)
     half_width = z_score * bootstrap_sd
     return estimate - half_width, estimate + half_width
 
