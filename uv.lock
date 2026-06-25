@@ -301,6 +301,9 @@ requires-dist = [
 ]
 provides-extras = ["dev", "xlsx", "parquet", "all", "notebook"]
 
+[package.metadata.requires-dev]
+dev = []
+
 [[package]]
 name = "h11"
 version = "0.16.0"

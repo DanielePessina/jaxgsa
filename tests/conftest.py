@@ -8,6 +8,8 @@ import gsax
 from gsax.benchmarks import ishigami, linear, oakley_ohagan, sobol_g
 
 
+# Sobol estimation error scales as O(1/sqrt(N)).  Higher-dimensional or more
+# complex models need proportionally larger sample sizes for convergence.
 @pytest.fixture(scope="session")
 def ishigami_sobol_result():
     """Ishigami Sobol analysis result (session-scoped, computed once)."""
@@ -49,6 +51,8 @@ def sobol_g_result():
     return gsax.analyze(sr, Y)
 
 
+# Oakley-O'Hagan has 15 Gaussian inputs with correlated interactions,
+# requiring ~2^14 * 32 samples for stable convergence of S1 and ST.
 @pytest.fixture(scope="session")
 def oakley_sobol_result():
     """Oakley & O'Hagan Sobol analysis result (session-scoped, first-order only)."""

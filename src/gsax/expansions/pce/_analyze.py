@@ -26,6 +26,8 @@ def _map_to_reference(X: Array, problem: Problem) -> tuple[Array, tuple[str, ...
     D = problem.num_vars
     U = cdf_to_unit_interval(X, problem)
 
+    # Wiener-Askey scheme: uniform inputs -> Legendre basis on [-1, 1];
+    # Gaussian inputs -> Hermite basis on (-inf, inf), standardized to N(0,1).
     cols = []
     input_types: list[str] = []
     for d in range(D):
@@ -46,6 +48,8 @@ def _auto_order(D: int, N: int, max_order: int, fit_ratio: float) -> int:
     """Reduce polynomial order so the term count fits within the sample budget."""
     from math import comb
 
+    # Reduce order until C(D+p, p) <= fit_ratio * N to prevent overfitting
+    # when the design matrix would have more columns than rows.
     cap = max(1, int(fit_ratio * N))
     order = max_order
     while order >= 1 and comb(D + order, order) > cap:

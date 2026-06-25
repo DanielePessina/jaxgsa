@@ -81,6 +81,9 @@ def _get_batched_hdmr_kernel(
         lambdax,
         N,
     )
+    # in_axes=(None, None, None, 0, None): B1/B2/B3 basis matrices and f_crits
+    # are shared across all output slices, while Y is batched along axis 0 so
+    # each (T*K) output slice gets its own response vector.
     return jax.jit(jax.vmap(kernel, in_axes=(None, None, None, 0, None)))
 
 
@@ -105,6 +108,9 @@ def _compute_ST(
     n1: int,
 ) -> Array:
     """Compute total-order indices by summing S over terms involving each param."""
+    # ST_j = S_j + sum_{i<j or j<i} S_{ij} + sum_{i<j<k, j in {i,j,k}} S_{ijk}
+    # i.e. total-order for param j includes its first-order term plus every
+    # interaction term (2nd and 3rd order) that contains j.
     ST = S[..., :n1]  # First order terms map 1:1 to parameters.
 
     n2 = c2.shape[0]
@@ -252,6 +258,9 @@ def analyze_hdmr(
 
     _warn_zero_variance_slices(Y_3d, output_names=problem.output_names)
 
+    # (N,T,K) -> (T,K,N) -> (T*K, N): move sample axis last, then flatten
+    # time x output into a single batch dim so each row is an independent
+    # response vector for the vmapped kernel.
     Y_flat = Y_3d.transpose(1, 2, 0).reshape(T * K_out, N)
     total = T * K_out
     cs = min(chunk_size, total)
@@ -391,6 +400,10 @@ def _emulator_contract(B: Array, C: Array) -> Array:
     Dispatches on C.ndim to handle scalar (m, j), multi-output (K, m, j),
     and time-series (T, K, m, j) coefficient layouts.
     """
+    # Dispatch on C.ndim to handle different output layouts:
+    #   2D (m, j):      scalar output   -> einsum("rmj,mj->rj")   -> sum over j terms
+    #   3D (K, m, j):   multi-output    -> einsum("rmj,kmj->rkj") -> sum over j terms
+    #   4D (T, K, m, j): time-series    -> einsum("rmj,tkmj->rtkj") -> sum over j terms
     if C.ndim == 2:
         return jnp.sum(jnp.einsum("rmj,mj->rj", B, C), axis=1)
     if C.ndim == 3:

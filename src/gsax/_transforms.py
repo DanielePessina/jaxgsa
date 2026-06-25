@@ -29,6 +29,11 @@ def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
     D = problem.num_vars
     cols = []
 
+    # CDF-to-unit-interval mapping: apply F(x) per dimension so each column
+    # lands in (0, 1).  For Gaussian inputs, standardised truncation bounds
+    # a=(lo-mu)/sigma, b=(hi-mu)/sigma follow scipy's truncnorm convention.
+    # Clipping output to (1e-12, 1-1e-12) keeps values in the open interval
+    # so downstream inverse transforms (ppf) never receive exactly 0 or 1.
     for d in range(D):
         dist, first, second, lo, hi = problem._input_specs[d]
         if dist == "uniform":

@@ -83,6 +83,8 @@ class TestLinear:
         """Verify the analytical formulas directly."""
         S1, ST, S2 = linear.analytical_indices()
         np.testing.assert_allclose(S1, ST)
+        # Linear model f = c . x with c = [1,2,3] and uniform inputs (Var = 1/12).
+        # S1_j = c_j^2 * Var(x_j) / sum(c_k^2 * Var(x_k)) = c_j^2 / sum(c_k^2) = c_j^2 / 14.
         np.testing.assert_allclose(S1, [1.0 / 14, 4.0 / 14, 9.0 / 14])
         off_diag = S2[np.triu_indices_from(S2, k=1)]
         np.testing.assert_allclose(off_diag, 0.0)
@@ -120,6 +122,8 @@ class TestSobolG:
     def test_analytical_indices_consistency(self):
         """Verify analytical formulas: S1 sums to < 1, ST sums to > 1."""
         S1, ST, S2 = sobol_g.analytical_indices()
+        # S1 < 1: interaction terms absorb variance not captured by first-order effects.
+        # ST > 1: each interaction is counted in every participating variable's total index.
         assert S1.sum() < 1.0
         assert ST.sum() > 1.0
         assert np.all(ST >= S1)
@@ -128,6 +132,7 @@ class TestSobolG:
 
     def test_analytical_degenerate(self):
         """When all a=0, each factor is equally important."""
+        # All a_j = 0 makes the G-function symmetric in all inputs, so S1_j = 1/D.
         S1, ST, _ = sobol_g.analytical_indices(a=(0.0, 0.0, 0.0))
         np.testing.assert_allclose(S1, S1[0], atol=1e-10)
         np.testing.assert_allclose(ST, ST[0], atol=1e-10)

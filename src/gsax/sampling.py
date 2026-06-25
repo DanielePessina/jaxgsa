@@ -142,6 +142,8 @@ def _next_power_of_2(n: int) -> int:
     """Return the smallest power of 2 that is >= *n*."""
     if n <= 0:
         return 1
+    # Bit-length trick: (n-1).bit_length() gives the position of the highest
+    # set bit, so 1 << that yields the smallest power of 2 >= n.
     return 1 << (n - 1).bit_length()
 
 
@@ -171,10 +173,13 @@ def _build_expanded_samples(
     # matrices A and B, each with shape (base_n, D).
     A = base[:, :D]
     B = base[:, D:]
+    # Saltelli interleaved layout per base point i:
+    #   [A_i, AB_0, ..., AB_{D-1}, BA_0, ..., BA_{D-1}, B_i]
+    # AB_j = A with column j replaced by B's column j (and vice-versa for BA_j).
+    # .copy() prevents aliasing: without it, overwriting element j would mutate
+    # the original A[i] or B[i] row shared across iterations.
     rows = []
     for i in range(base_n):
-        # Emit the Saltelli group for base point i:
-        # [A_i, AB_i_0, ..., AB_i_{D-1}, (BA_i_0, ..., BA_i_{D-1}), B_i]
         rows.append(A[i])
         for j in range(D):
             AB_j = A[i].copy()
@@ -204,11 +209,16 @@ def _transform_gaussian(
     high: float | None,
 ) -> np.ndarray:
     """Transform unit-interval samples into Gaussian or truncated Gaussian values."""
+    # Inverse-CDF sampling (probability integral transform): if U ~ Uniform(0,1)
+    # then F^{-1}(U) ~ F.  Clipping to (1e-12, 1-1e-12) prevents ppf (percent-
+    # point function = quantile = inverse CDF) from returning +/-inf at boundaries.
     clipped = np.clip(unit_values, 1e-12, 1.0 - 1e-12)
     std = math.sqrt(variance)
     if low is None and high is None:
         return mean + std * norm.ppf(clipped)
 
+    # Standardised truncation bounds a=(lo-mu)/sigma, b=(hi-mu)/sigma follow
+    # scipy's truncnorm convention (standard-normal scale).
     a = -np.inf if low is None else (low - mean) / std
     b = np.inf if high is None else (high - mean) / std
     return truncnorm.ppf(clipped, a=a, b=b, loc=mean, scale=std)

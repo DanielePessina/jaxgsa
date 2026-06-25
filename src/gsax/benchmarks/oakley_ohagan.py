@@ -89,6 +89,7 @@ def evaluate(X: Array, sigma: float = DEFAULT_SIGMA) -> Array:
         Xj @ jnp.asarray(_A1)
         + jnp.sin(Xj) @ jnp.asarray(_A2)
         + jnp.cos(Xj) @ jnp.asarray(_A3)
+        # Vectorized quadratic form: einsum computes x^T M x for each of N samples
         + jnp.einsum("ni,ij,nj->n", Xj, jnp.asarray(_M), Xj)
     )
 
@@ -112,9 +113,13 @@ def analytical_indices(
         arrays and total_variance is the scalar unconditional variance.
     """
     s2 = sigma**2
+    # E[sin(X)] and E[sin^2(X)] moments under X ~ N(0, sigma^2) yield
+    # exp(-sigma^2/2) and exp(-2*sigma^2) respectively
     es = np.exp(-0.5 * s2)
     es2 = np.exp(-2.0 * s2)
 
+    # 4x4 covariance block Sigma for (x, sin x, cos x, x^2) under Gaussian
+    # inputs: Vi = a_i^T Sigma a_i gives each input's variance contribution
     cov_block = np.array([
         [s2,      s2 * es,          0.0,                  0.0],
         [s2 * es, (1 - es2) / 2,    0.0,                  0.0],
@@ -129,9 +134,12 @@ def analytical_indices(
         for i in range(D)
     ])
 
+    # Off-diagonal quadratic terms x_i*x_k contribute interaction variance.
+    # Vpair_ik = ((M_ik + M_ki) * sigma^2)^2
     Vpair = ((_M + _M.T) * s2) ** 2
     np.fill_diagonal(Vpair, 0.0)
 
+    # ST_i includes Vi (main) plus all pairwise interactions involving i
     total_var = float(Vi.sum() + np.triu(Vpair, 1).sum())
     S1 = Vi / total_var
     ST = (Vi + Vpair.sum(axis=1)) / total_var

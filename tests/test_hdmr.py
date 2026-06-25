@@ -16,6 +16,9 @@ from gsax.expansions.hdmr import emulate as emulate_hdmr
 from gsax.problem import GaussianInputSpec
 
 
+# HDMR builds polynomial surrogates that approximate the true function, so
+# tolerances (~30% for S1) are wider than for Sobol sampling methods which
+# converge to exact values with sufficient samples.
 def _assert_matches_analytical_s1_st(S1: np.ndarray, ST: np.ndarray) -> None:
     """Assert HDMR first- and total-order indices track Ishigami analytics."""
     for i, expected in enumerate(ANALYTICAL_S1):
@@ -90,7 +93,8 @@ def test_shapes_1d(ishigami_data):
         m=2,
     )
     D = PROBLEM.num_vars
-    n_terms = D + D * (D - 1) // 2  # D + C(D,2)
+    # First-order terms (D) + second-order interactions C(D,2) = D(D-1)/2.
+    n_terms = D + D * (D - 1) // 2
     assert result.Sa.shape == (n_terms,)
     assert result.Sb.shape == (n_terms,)
     assert result.S.shape == (n_terms,)

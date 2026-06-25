@@ -67,11 +67,15 @@ def analytical_indices(
     a_arr = np.asarray(a, dtype=float)
     D = len(a_arr)
 
+    # Closed-form: Vi = 1/(3(1+a_j)^2) from integrating Var((|4U-2|+a)/(1+a))
     Vi = 1.0 / (3.0 * (1.0 + a_arr) ** 2)
+    # Multiplicative separability: V(Y) = prod(1 + V_j) - 1
     VY = np.prod(1.0 + Vi) - 1.0
 
     S1 = Vi / VY
 
+    # ST_j = V_j * prod_{k!=j}(1 + V_k) / V(Y): main effect times all
+    # interaction products involving j (multiplicative model identity)
     ST = np.empty(D)
     for j in range(D):
         others = np.prod(1.0 + np.delete(Vi, j))

@@ -34,7 +34,9 @@ def _bspline_basis(x: Array, m: int) -> Array:
     # u = x*m - (k_i - 2) where k_i = i - 1, so u = x*m - i + 3
     u = x[:, None] * m - i[None, :] + 3.0
 
-    # Standard cubic B-spline on support [0, 4]
+    # Cubic B-spline N_3(u): four degree-3 polynomial segments on support
+    # intervals [0,1), [1,2), [2,3), [3,4). The partition of unity property
+    # (sum of all basis values = 1) follows from the Cox-de Boor recursion.
     p1 = u**3 / 6.0
     p2 = (-3 * u**3 + 12 * u**2 - 12 * u + 4) / 6.0
     p3 = (3 * u**3 - 24 * u**2 + 60 * u - 44) / 6.0
@@ -57,6 +59,8 @@ def _bspline_basis(x: Array, m: int) -> Array:
             ),
         ),
     )
+    # Scale by m^3: SALib convention so that integral over [0,1] of each basis
+    # function is O(1) regardless of the number of knot intervals m.
     return jnp.maximum(val * (m**3), 0.0)
 
 
@@ -86,6 +90,9 @@ def _build_B2(B1: Array, c2: Array, beta: Array) -> Array:
     Returns:
         B2: (N, m1^2, n2) second-order basis.
     """
+    # beta maps each flat index in [0, m1^2) to a pair of 1D basis indices,
+    # replacing the explicit outer product B_i(x_a) otimes B_j(x_b) with
+    # column-gather + elementwise multiply: phi_{ij}(x) = B_i(x_a) * B_j(x_b).
     left = B1[:, :, c2[:, 0]][:, beta[:, 0], :]  # (N, m2, n2)
     right = B1[:, :, c2[:, 1]][:, beta[:, 1], :]  # (N, m2, n2)
     return left * right
@@ -151,7 +158,10 @@ def _fit_first_order(
     # Initial individual fit: C1[:, j] = T1[j] @ Y_res
     C1 = jnp.einsum("jmr,r->jm", T1, Y_res).T  # (m1, n1)
 
-    # Backfitting via while_loop
+    # Coordinate-descent backfitting (Breiman & Friedman, 1985): cycle over
+    # dimensions j = 1..D. Each step solves for C_j against the partial
+    # residual r_j = Y - sum_{k != j} B_k C_k (leave-one-out). Converges
+    # when max |delta C_j|^2 across all j falls below tolerance.
     var_old = jnp.sum(jnp.square(C1), axis=0)  # (n1,)
 
     def _update_j(C1: Array, j: int) -> tuple[Array, None]:
@@ -240,16 +250,19 @@ def _ancova(Y: Array, Y_em: Array, V_Y: Array) -> tuple[Array, Array, Array]:
         Sa: (n,) structural (uncorrelated) contribution.
         Sb: (n,) correlative contribution.
     """
-    # Structural: variance of each emulated term / total variance
+    # ANCOVA decomposition (Li et al., 2010). Three sensitivity measures:
+    #   Sa = Var(f_j) / Var(Y)         -- structural (uncorrelated) contribution
+    #   S  = Cov(f_j, Y) / Var(Y)      -- total (correlated) contribution
+    #   Sb = S - Sa = Cov(f_j, sum_{k!=j} f_k) / Var(Y) -- correlative part
+    # When inputs are independent, Sb -> 0 and S -> Sa.
     V_Y = jnp.maximum(V_Y, 1e-30)
     Sa = jnp.var(Y_em, axis=0) / V_Y  # (n,)
 
-    # Total: covariance of each emulated term with actual Y / total variance
     Y_em_c = Y_em - jnp.mean(Y_em, axis=0, keepdims=True)
     Y_c = Y - jnp.mean(Y)
     S = jnp.mean(Y_em_c * Y_c[:, None], axis=0) / V_Y  # (n,)
 
-    # Correlative: covariance of each term with sum of all other terms / V_Y
+    # Sb = Cov(f_j, sum_{k!=j} f_k) / Var(Y), measures inter-term correlation
     Y0 = jnp.sum(Y_em, axis=1)  # (R,)
     Y0_minus = Y0[:, None] - Y_em  # (R, n)
     Y0m_c = Y0_minus - jnp.mean(Y0_minus, axis=0, keepdims=True)
@@ -326,7 +339,10 @@ def _f_test(
     Returns:
         select: (n,) binary array, 1.0 if term is significant.
     """
-    # Null residuals per order: each order's null includes all lower-order terms
+    # F-test for incremental model selection (Li et al., 2002).
+    # Null model SSR0 includes all lower-order terms but excludes term i.
+    # F = ((SSR0 - SSR1) / p) / (SSR1 / (N - p)), where p = number of basis
+    # coefficients in term i. Reject H0 (term insignificant) when F > F_crit.
     Y_res_order0 = Y - f0
     Y_res_order1 = Y_res_order0 - jnp.sum(Y_em[:, :n1], axis=1)
     Y_res_order2 = Y_res_order1 - jnp.sum(Y_em[:, n1 : n1 + n2], axis=1)

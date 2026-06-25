@@ -44,6 +44,8 @@ def _resample_ft(idx_chunk: Array, A: Array, AB: Array, B: Array):
         ST: (C, D) total-order indices per resample.
     """
 
+    # Inside vmap, idx has shape (N,); A[idx] gathers N rows via advanced
+    # indexing — each vmapped call processes one bootstrap resample.
     def single(idx):
         return _fused_first_total(A[idx], AB[idx], B[idx])
 
@@ -67,6 +69,8 @@ def _resample_so(idx_chunk: Array, A: Array, AB: Array, BA: Array, B: Array):
         S2: (C, D, D) second-order indices per resample.
     """
 
+    # Inside vmap, idx has shape (N,); A[idx] gathers N rows via advanced
+    # indexing — each vmapped call processes one bootstrap resample.
     def single(idx):
         return _fused_second_order(A[idx], AB[idx], BA[idx], B[idx])
 

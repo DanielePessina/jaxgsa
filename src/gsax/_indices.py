@@ -43,6 +43,8 @@ def first_order(A: Array, AB_j: Array, B: Array) -> Array:
     Returns:
         Scalar Array with the first-order index S1_j.
     """
+    # Pool A and B (identically distributed) to double effective sample size
+    # for a more robust variance estimate: Var(Y) ~ var(concat(A, B)).
     y = jnp.concatenate([A, B])
     var = jnp.var(y)
     numerator = jnp.mean(B * (AB_j - A))
@@ -67,6 +69,8 @@ def total_order(A: Array, AB_j: Array, B: Array) -> Array:
     """
     y = jnp.concatenate([A, B])
     var = jnp.var(y)
+    # Jansen (1999) estimator: ST_j = E[(A - AB_j)^2] / (2 Var(Y)).
+    # Measures residual variance when all parameters except j are fixed.
     numerator = 0.5 * jnp.mean((A - AB_j) ** 2)
     return jnp.where(var == 0, jnp.nan, numerator / var)
 
@@ -97,6 +101,9 @@ def second_order(A: Array, AB_j: Array, AB_k: Array, BA_j: Array, B: Array) -> A
     Vjk = jnp.where(var == 0, jnp.nan, jnp.mean(BA_j * AB_k - A * B) / var)
     Sj = first_order(A, AB_j, B)
     Sk = first_order(A, AB_k, B)
+    # Sobol ANOVA decomposition: the second-order interaction is the joint
+    # variance contribution V_jk minus both marginal first-order effects,
+    # isolating the purely synergistic effect between parameters j and k.
     return Vjk - Sj - Sk
 
 
@@ -118,12 +125,17 @@ def _fused_first_total(A: Array, AB: Array, B: Array) -> tuple[Array, Array]:
         ST: (D,) total-order Sobol indices.
     """
     N = A.shape[0]
+    # Centered-sum variance: Var = E[(x - mu)^2] over pooled A, B.
+    # Centering before squaring avoids catastrophic cancellation that
+    # afflicts the naive E[x^2] - E[x]^2 form for large-magnitude outputs.
     pooled_mean = (jnp.mean(A) + jnp.mean(B)) / 2.0
     A_c = A - pooled_mean
     B_c = B - pooled_mean
     var = (jnp.sum(A_c**2) + jnp.sum(B_c**2)) / (2 * N)
     inv_var = jnp.where(var == 0, jnp.nan, 1.0 / var)
 
+    # [:, None] broadcasts (N,) to (N, 1), computing all D indices at once
+    # without vmap: each column j of AB is paired with the full A and B.
     S1 = jnp.mean(B[:, None] * (AB - A[:, None]), axis=0) * inv_var  # (D,)
     ST = 0.5 * jnp.mean((A[:, None] - AB) ** 2, axis=0) * inv_var  # (D,)
 
@@ -146,6 +158,7 @@ def _fused_second_order(A: Array, AB: Array, BA: Array, B: Array) -> tuple[Array
     """
     N = A.shape[0]
 
+    # Centered-sum variance (see _fused_first_total for rationale).
     pooled_mean = (jnp.mean(A) + jnp.mean(B)) / 2.0
     A_c = A - pooled_mean
     B_c = B - pooled_mean
@@ -155,11 +168,15 @@ def _fused_second_order(A: Array, AB: Array, BA: Array, B: Array) -> tuple[Array
     S1 = jnp.mean(B[:, None] * (AB - A[:, None]), axis=0) * inv_var  # (D,)
     ST = 0.5 * jnp.mean((A[:, None] - AB) ** 2, axis=0) * inv_var  # (D,)
 
-    # Vjk: element-wise difference before summation to avoid cancellation
+    # Outer-product trick: BA[:,j] * AB[:,k] for all (j,k) pairs at once.
+    # BA[:, :, None] is (N,D,1), AB[:, None, :] is (N,1,D); their product
+    # is (N,D,D), giving the full joint-variance matrix V_jk in one pass.
     Vjk = jnp.mean(
         BA[:, :, None] * AB[:, None, :] - (A * B)[:, None, None],
         axis=0,
     ) * inv_var  # (D, D)
+    # ANOVA decomposition via broadcasting: S1[:, None] is (D,1) and
+    # S1[None, :] is (1,D), subtracting marginal effects from all (D,D) pairs.
     S2 = Vjk - S1[:, None] - S1[None, :]  # (D, D)
 
     return S1, ST, S2

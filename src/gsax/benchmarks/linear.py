@@ -67,10 +67,13 @@ def analytical_indices(
     """
     c = np.asarray(coeffs, dtype=float)
     D = len(c)
+    # Var(Uniform[lo, hi]) = (hi - lo)^2 / 12
     var_x = np.array([(hi - lo) ** 2 / 12.0 for lo, hi in bounds])
+    # Variance propagation for linear functions: Vi = c_j^2 * Var(x_j)
     Vi = c**2 * var_x
     VY = Vi.sum()
 
+    # Purely additive model => no interactions => S1 = ST and sum(S1) = 1
     S1 = Vi / VY
     ST = S1.copy()
 

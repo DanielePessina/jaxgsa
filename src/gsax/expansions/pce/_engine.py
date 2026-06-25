@@ -32,6 +32,8 @@ def _legendre_1d(x: Array, max_degree: int) -> Array:
     if max_degree >= 1:
         P = P.at[:, 1].set(x)
 
+    # Three-term recurrence: P_{n+1}(x) = ((2n+1)·x·P_n − n·P_{n-1}) / (n+1).
+    # Numerically stable vs. direct polynomial evaluation (Bonnet's recursion).
     for n in range(1, max_degree):
         P = P.at[:, n + 1].set(
             ((2 * n + 1) * x * P[:, n] - n * P[:, n - 1]) / (n + 1)
@@ -60,6 +62,8 @@ def _hermite_1d(x: Array, max_degree: int) -> Array:
     if max_degree >= 1:
         H = H.at[:, 1].set(x)
 
+    # Probabilist's Hermite recurrence: He_{n+1}(x) = x·He_n(x) − n·He_{n-1}(x).
+    # The 1/sqrt(n!) normalization below makes them orthonormal w.r.t. N(0,1).
     for n in range(1, max_degree):
         H = H.at[:, n + 1].set(x * H[:, n] - n * H[:, n - 1])
 
@@ -81,6 +85,9 @@ def build_multi_index(D: int, p: int) -> np.ndarray:
     Returns:
         (n_terms, D) integer array where n_terms = C(D+p, p).
     """
+    # Enumerate all D-tuples alpha with |alpha| = sum(alpha_i) <= p (graded
+    # total-degree set). Sorted by (total degree, lexicographic) for consistent
+    # ordering. Total count = C(D+p, p) by stars-and-bars.
     indices: list[tuple[int, ...]] = []
 
     def _recurse(depth: int, remaining: int, current: list[int]) -> None:
@@ -124,8 +131,9 @@ def build_design_matrix(
         else:
             basis_1d.append(_hermite_1d(X[:, d], max_degree))
 
+    # Tensor-product basis: Psi_alpha(x) = prod_{d=1}^{D} phi_{alpha_d}(x_d).
+    # The multi-index alpha selects which 1-D polynomial degree per dimension.
     mi = jnp.asarray(multi_index)
-    # Stack per-dimension lookups into (D, N, n_terms), then fused product
     stacked = jnp.stack([basis_1d[d][:, mi[:, d]] for d in range(D)])
     return jnp.prod(stacked, axis=0)
 
@@ -177,14 +185,15 @@ def sobol_from_coefficients(
     active = mi > 0  # (n_terms, D) bool
     active_count = np.sum(active, axis=1)  # (n_terms,)
 
-    # S1_i: terms where only x_i is active
+    # Sobol indices from PCE coefficients (Sudret, 2008):
+    # S1_i  = sum(c_alpha^2 : only x_i active) / Var
+    # ST_i  = sum(c_alpha^2 : x_i active, possibly with others) / Var
+    # S2_ij = sum(c_alpha^2 : exactly x_i and x_j active) / Var
     only_i_mask = active & (active_count[:, None] == 1)  # (n_terms, D)
     S1 = jnp.asarray(c2 @ only_i_mask) * inv_var  # (D,)
 
-    # ST_i: terms where x_i is active (any combination)
     ST = jnp.asarray(c2 @ active) * inv_var  # (D,)
 
-    # S2_{ij}: terms where exactly x_i and x_j are active
     S2 = jnp.full((D, D), jnp.nan)
     pair_mask = active_count == 2  # (n_terms,)
     for i in range(D):
@@ -214,6 +223,8 @@ def loo_error(
     Returns:
         Scalar LOO RMSE.
     """
+    # LOO via leverage identity: e_LOO_i = (y_i - y_hat_i) / (1 - H_ii),
+    # H = Phi (Phi^T Phi + lambda I)^{-1} Phi^T.  Avoids refitting N times.
     residuals = Y - Phi @ coefficients
     gram = Phi.T @ Phi
     if ridge > 0:

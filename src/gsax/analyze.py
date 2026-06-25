@@ -71,6 +71,9 @@ def _drop_nonfinite(Y: Array, step: int) -> tuple[Array, int]:
     base_n = n_total // step
     trailing = Y.shape[1:]
 
+    # Each Saltelli group [A_i, AB_{i,0}, …, AB_{i,D-1}, B_i] is an
+    # indivisible sampling unit; a single NaN in any row invalidates the
+    # whole group, so we mask at the group level, not per row.
     grouped = Y[: base_n * step].reshape(base_n, step, *trailing)
     finite_mask = jnp.all(jnp.isfinite(grouped.reshape(base_n, -1)), axis=1)
 
@@ -117,6 +120,9 @@ def _bootstrap_ci_endpoints(
         endpoints = jnp.nanpercentile(bootstrap_draws, percentiles, axis=0)
         return endpoints[0], endpoints[1]
 
+    # ndtri is the inverse normal CDF (quantile function): z = Φ⁻¹(1-α/2).
+    # CI = estimate ± z·σ_boot.  nanstd tolerates degenerate bootstrap
+    # resamples that collapse to a single unique value and produce NaN.
     z_score = jax.scipy.special.ndtri(1.0 - alpha)
     bootstrap_sd = jnp.nanstd(bootstrap_draws, axis=0)
     half_width = z_score * bootstrap_sd
@@ -135,7 +141,10 @@ def _separate_output_values(
     base_n = n_total // step
     trailing = Y.shape[1:]
 
-    # Reshape to (base_n, step, ...) then slice
+    # Saltelli row layout within each group of `step` rows:
+    #   [0]=A, [1..D]=AB_j (A with col j from B), [D+1..2D]=BA_j (B with
+    #   col j from A), [2D+1]=B.  For first-order only, BA is omitted and
+    #   step = D+2 with B at position [D+1].
     grouped = Y.reshape(base_n, step, *trailing)
 
     A = grouped[:, 0]  # (N, ...)
@@ -152,6 +161,9 @@ def _separate_output_values(
 
 def _normalize_s2_matrix(S2: Array) -> Array:
     """Symmetrise the S2 matrix and set diagonal entries to NaN."""
+    # S2_{jk} = S2_{kj} by symmetry of the variance decomposition, so we
+    # keep only the upper triangle and mirror it.  Diagonal is NaN because
+    # self-interaction S2_{jj} is undefined.
     D = S2.shape[-1]
     upper = jnp.triu(S2, k=1)
     mirrored = upper + jnp.swapaxes(upper, -1, -2)
@@ -256,7 +268,9 @@ def _analyze_no_bootstrap(
             nan_counts=nan_counts,
         )
 
-    # Multi-output path: vmap fused kernel over T*K batches
+    # (N,T,K) -> transpose -> (T,K,N) -> reshape -> (T*K, N): flatten
+    # time x output into a single batch dimension for vmapped kernels.
+    # AB is (N,D,T,K) so its transpose puts (T,K) first then (N,D).
     A_flat = A.transpose(1, 2, 0).reshape(T * K, base_n)
     B_flat = B.transpose(1, 2, 0).reshape(T * K, base_n)
     AB_flat = AB.transpose(2, 3, 0, 1).reshape(T * K, base_n, D)

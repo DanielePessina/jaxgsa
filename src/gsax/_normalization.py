@@ -97,6 +97,7 @@ def _warn_zero_variance_slices(
     elif len(trailing) == 2:
         affected = []
         for idx in zero_indices:
+            # divmod decomposes flat index into (time_step, output_column)
             t, k = divmod(idx, K)
             affected.append(f"(t={t}, {_fmt_k(k)})")
         if len(affected) > 5:
@@ -130,6 +131,8 @@ def _prenormalize_outputs(Y: Array) -> tuple[Array, Array, Array, Array]:
     """
     y_mean = jnp.mean(Y, axis=0)
     y_std = jnp.std(Y, axis=0)
+    # Replace zero std with 1.0 so division doesn't produce NaN; the
+    # corresponding zero-variance output slices remain all-zero after scaling.
     safe_scale = jnp.where(y_std == 0, jnp.ones_like(y_std), y_std)
     Y_norm = (Y - y_mean) / safe_scale
     return Y_norm, y_mean, y_std, safe_scale
