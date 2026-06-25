@@ -118,18 +118,13 @@ def _fused_first_total(A: Array, AB: Array, B: Array) -> tuple[Array, Array]:
         ST: (D,) total-order Sobol indices.
     """
     N = A.shape[0]
-    # Compute pooled variance once
-    mean_A = jnp.mean(A)
-    mean_B = jnp.mean(B)
-    pooled_mean = (mean_A + mean_B) / 2.0
-    var = (jnp.sum(A**2) + jnp.sum(B**2)) / (2 * N) - pooled_mean**2
+    pooled_mean = (jnp.mean(A) + jnp.mean(B)) / 2.0
+    A_c = A - pooled_mean
+    B_c = B - pooled_mean
+    var = (jnp.sum(A_c**2) + jnp.sum(B_c**2)) / (2 * N)
     inv_var = jnp.where(var == 0, jnp.nan, 1.0 / var)
 
-    # S1: E[B * (AB_j - A)] / var  for each j
-    # AB: (N, D), B: (N,), A: (N,)
     S1 = jnp.mean(B[:, None] * (AB - A[:, None]), axis=0) * inv_var  # (D,)
-
-    # ST: 0.5 * E[(A - AB_j)^2] / var  for each j
     ST = 0.5 * jnp.mean((A[:, None] - AB) ** 2, axis=0) * inv_var  # (D,)
 
     return S1, ST
@@ -150,26 +145,21 @@ def _fused_second_order(A: Array, AB: Array, BA: Array, B: Array) -> tuple[Array
         S2: (D, D) second-order interaction indices (upper triangle valid).
     """
     N = A.shape[0]
-    D = AB.shape[1]
 
-    # Compute pooled variance once
-    mean_A = jnp.mean(A)
-    mean_B = jnp.mean(B)
-    pooled_mean = (mean_A + mean_B) / 2.0
-    var = (jnp.sum(A**2) + jnp.sum(B**2)) / (2 * N) - pooled_mean**2
+    pooled_mean = (jnp.mean(A) + jnp.mean(B)) / 2.0
+    A_c = A - pooled_mean
+    B_c = B - pooled_mean
+    var = (jnp.sum(A_c**2) + jnp.sum(B_c**2)) / (2 * N)
     inv_var = jnp.where(var == 0, jnp.nan, 1.0 / var)
 
-    # S1: E[B * (AB_j - A)] / var  for each j — vectorized over D
     S1 = jnp.mean(B[:, None] * (AB - A[:, None]), axis=0) * inv_var  # (D,)
-
-    # ST: 0.5 * E[(A - AB_j)^2] / var  for each j — vectorized over D
     ST = 0.5 * jnp.mean((A[:, None] - AB) ** 2, axis=0) * inv_var  # (D,)
 
-    # S2[j,k] = E[BA_j * AB_k - A * B] / var - S1_j - S1_k
-    # BA: (N, D), AB: (N, D)
-    # Vjk[j,k] = mean(BA[:,j] * AB[:,k] - A * B) / var
-    AB_prod = jnp.mean(A * B)  # scalar
-    Vjk = (jnp.einsum("nj,nk->jk", BA, AB) / N - AB_prod) * inv_var  # (D, D)
+    # Vjk: element-wise difference before summation to avoid cancellation
+    Vjk = jnp.mean(
+        BA[:, :, None] * AB[:, None, :] - (A * B)[:, None, None],
+        axis=0,
+    ) * inv_var  # (D, D)
     S2 = Vjk - S1[:, None] - S1[None, :]  # (D, D)
 
     return S1, ST, S2
