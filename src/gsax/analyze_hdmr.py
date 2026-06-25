@@ -20,7 +20,7 @@ from gsax._hdmr import (
     _compute_f_crits,
     _make_hdmr_kernel,
 )
-from gsax._normalization import _prenormalize_outputs
+from gsax._normalization import _prenormalize_outputs, _prepare_Y, _warn_zero_variance_slices
 from gsax.problem import Problem
 from gsax.results_hdmr import HDMREmulator, HDMRResult
 
@@ -126,19 +126,6 @@ def _compute_ST(
 
     return ST
 
-
-def _prepare_Y(Y: Array) -> tuple[Array, bool, bool]:
-    """Promote Y to 3-D (N, T, K). Same pattern as analyze._prepare_Y."""
-    squeeze_time = False
-    squeeze_output = False
-    if Y.ndim == 1:
-        Y = Y[:, None, None]
-        squeeze_time = True
-        squeeze_output = True
-    elif Y.ndim == 2:
-        Y = Y[:, None, :]
-        squeeze_time = True
-    return Y, squeeze_time, squeeze_output
 
 
 def _squeeze_hdmr(
@@ -274,8 +261,6 @@ def analyze_hdmr(
     else:
         y_mean = jnp.zeros(Y_3d.shape[1:], dtype=Y_3d.dtype)
         y_std = jnp.ones(Y_3d.shape[1:], dtype=Y_3d.dtype)
-
-    from gsax.analyze import _warn_zero_variance_slices
 
     _warn_zero_variance_slices(Y_3d, output_names=problem.output_names)
 
