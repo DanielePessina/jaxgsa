@@ -326,25 +326,38 @@ def _f_test(
     Returns:
         select: (n,) binary array, 1.0 if term is significant.
     """
-    Y_res0 = Y - f0
-    SSR0 = jnp.sum(jnp.square(Y_res0))
+    # Null residuals per order: each order's null includes all lower-order terms
+    Y_res_order0 = Y - f0
+    Y_res_order1 = Y_res_order0 - jnp.sum(Y_em[:, :n1], axis=1)
+    Y_res_order2 = Y_res_order1 - jnp.sum(Y_em[:, n1 : n1 + n2], axis=1)
+
+    SSR_nulls = jnp.array([
+        jnp.sum(jnp.square(Y_res_order0)),
+        jnp.sum(jnp.square(Y_res_order1)),
+        jnp.sum(jnp.square(Y_res_order2)),
+    ])
 
     term_idx = jnp.arange(n)
-    # Assign basis size per term based on order
     p1 = jnp.where(
         term_idx < n1,
         m1,
         jnp.where(term_idx < n1 + n2, m2, m3),
     ).astype(jnp.float32)
-    # Assign critical value per term
     f_crit_per_term = jnp.where(
         term_idx < n1,
         f_crits[0],
         jnp.where(term_idx < n1 + n2, f_crits[1], f_crits[2]),
     )
+    order_idx = jnp.where(term_idx < n1, 0, jnp.where(term_idx < n1 + n2, 1, 2))
 
     def _test_term(i: int) -> Array:
-        Y_res1 = Y_res0 - Y_em[:, i]
+        SSR0 = SSR_nulls[order_idx[i]]
+        Y_res_null = jnp.where(
+            order_idx[i] == 0,
+            Y_res_order0,
+            jnp.where(order_idx[i] == 1, Y_res_order1, Y_res_order2),
+        )
+        Y_res1 = Y_res_null - Y_em[:, i]
         SSR1 = jnp.sum(jnp.square(Y_res1))
         p = p1[i]
         R_minus_p = jnp.maximum(R - p, 1.0)
