@@ -408,9 +408,14 @@ def _read_samples(path: Path, fmt: str) -> np.ndarray:
     if fmt == "csv":
         return pd.read_csv(path).values
     elif fmt == "txt":
+        with open(path) as f:
+            n_cols = len(f.readline().split())
         arr = np.loadtxt(path, skiprows=1)
         if arr.ndim == 1:
-            arr = arr.reshape(-1, 1)
+            if n_cols == 1:
+                arr = arr.reshape(-1, 1)
+            else:
+                arr = arr.reshape(1, -1)
         return arr
     elif fmt == "xlsx":
         try:
