@@ -4,8 +4,8 @@ import jax.numpy as jnp
 import pytest
 
 import gsax
-from gsax._indices import first_order, second_order, total_order
 from gsax.problem import Problem
+from gsax.sobol._indices import first_order, second_order, total_order
 
 
 @pytest.fixture()

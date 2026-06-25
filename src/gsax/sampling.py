@@ -117,7 +117,7 @@ class SamplingResult:
                 if self.problem.bounds is not None
                 else None,
                 "input_specs": [
-                    _normalized_input_to_dict(spec) for spec in self.problem._input_specs
+                    _normalized_input_to_dict(spec) for spec in self.problem.input_specs
                 ],
                 "output_names": list(self.problem.output_names)
                 if self.problem.output_names is not None
@@ -228,7 +228,7 @@ def _transform_samples(problem: Problem, samples_unit: np.ndarray) -> np.ndarray
     """Transform unit-cube Sobol samples into the problem's declared marginals."""
     transformed = np.empty_like(samples_unit, dtype=np.float64)
 
-    for idx, spec in enumerate(problem._input_specs):
+    for idx, spec in enumerate(problem.input_specs):
         dist, first, second, low, high = spec
         if dist == "uniform":
             transformed[:, idx] = _transform_uniform(samples_unit[:, idx], first, second)

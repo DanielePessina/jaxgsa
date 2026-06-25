@@ -6,9 +6,9 @@ import numpy as np
 import pytest
 
 import gsax
-from gsax.expansions.hdmr import HDMRResult
+from gsax.hdmr import HDMRResult
 from gsax.problem import Problem
-from gsax.results import SAResult
+from gsax.sobol._result import SAResult
 
 
 @pytest.fixture

@@ -11,8 +11,8 @@ from gsax.benchmarks.ishigami import (
     PROBLEM,
     evaluate,
 )
-from gsax.expansions.hdmr import analyze as analyze_hdmr
-from gsax.expansions.hdmr import emulate as emulate_hdmr
+from gsax.hdmr import analyze as analyze_hdmr
+from gsax.hdmr import emulate as emulate_hdmr
 from gsax.problem import GaussianInputSpec
 
 

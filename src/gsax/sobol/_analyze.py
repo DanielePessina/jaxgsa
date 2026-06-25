@@ -21,13 +21,13 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from gsax._indices import (
+from gsax._normalization import _prenormalize_outputs, _prepare_Y, _warn_zero_variance_slices
+from gsax.sampling import SamplingResult, _saltelli_step
+from gsax.sobol._indices import (
     _fused_first_total,
     _fused_second_order,
 )
-from gsax._normalization import _prenormalize_outputs, _prepare_Y, _warn_zero_variance_slices
-from gsax.results import SAResult
-from gsax.sampling import SamplingResult, _saltelli_step
+from gsax.sobol._result import SAResult
 
 # ---------------------------------------------------------------------------
 # Cached JIT kernels
@@ -341,7 +341,7 @@ def _analyze_bootstrap(
     chunk_size: int,
 ) -> SAResult:
     """Bootstrap path: loop over (T, K) combos, vmap over R resamples."""
-    from gsax._bootstrap import _bootstrap_first_total, _bootstrap_second_order
+    from gsax.sobol._bootstrap import _bootstrap_first_total, _bootstrap_second_order
 
     Y, squeeze_time, squeeze_output = _prepare_Y(Y)
     D = sampling_result.n_params

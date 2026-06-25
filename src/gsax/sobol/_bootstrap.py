@@ -25,7 +25,7 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from gsax._indices import _fused_first_total, _fused_second_order
+from gsax.sobol._indices import _fused_first_total, _fused_second_order
 
 
 @jax.jit

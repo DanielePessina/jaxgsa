@@ -230,6 +230,11 @@ class Problem:
         object.__setattr__(self, "_input_specs", input_specs)
 
     @property
+    def input_specs(self) -> tuple[_NormalizedInputSpec, ...]:
+        """Normalized input distribution specs for each parameter."""
+        return self._input_specs
+
+    @property
     def has_non_uniform_inputs(self) -> bool:
         """Return ``True`` when any parameter uses a non-uniform marginal."""
         return any(spec[0] != "uniform" for spec in self._input_specs)

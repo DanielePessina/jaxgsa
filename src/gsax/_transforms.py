@@ -35,7 +35,7 @@ def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
     # Clipping output to (1e-12, 1-1e-12) keeps values in the open interval
     # so downstream inverse transforms (ppf) never receive exactly 0 or 1.
     for d in range(D):
-        dist, first, second, lo, hi = problem._input_specs[d]
+        dist, first, second, lo, hi = problem.input_specs[d]
         if dist == "uniform":
             cols.append((X[:, d] - first) / (second - first))
         elif lo is not None or hi is not None:

@@ -6,14 +6,14 @@ import jax.numpy as jnp
 from jax import Array
 
 from gsax._transforms import cdf_to_unit_interval
-from gsax.expansions.pce._engine import (
+from gsax.pce._engine import (
     build_design_matrix,
     build_multi_index,
     fit_coefficients,
     loo_error,
     sobol_from_coefficients,
 )
-from gsax.expansions.pce._result import PCEResult
+from gsax.pce._result import PCEResult
 from gsax.problem import Problem
 
 
@@ -31,7 +31,7 @@ def _map_to_reference(X: Array, problem: Problem) -> tuple[Array, tuple[str, ...
     cols = []
     input_types: list[str] = []
     for d in range(D):
-        dist, first, second, lo, hi = problem._input_specs[d]
+        dist, first, second, lo, hi = problem.input_specs[d]
         if dist == "uniform" or lo is not None or hi is not None:
             cols.append(2.0 * U[:, d] - 1.0)
             input_types.append("uniform")

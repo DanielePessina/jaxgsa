@@ -15,14 +15,14 @@ from jax import Array
 
 from gsax._normalization import _prenormalize_outputs, _prepare_Y, _warn_zero_variance_slices
 from gsax._transforms import cdf_to_unit_interval
-from gsax.expansions.hdmr._engine import (
+from gsax.hdmr._engine import (
     _build_B1,
     _build_B2,
     _build_B3,
     _compute_f_crits,
     _make_hdmr_kernel,
 )
-from gsax.expansions.hdmr._result import HDMREmulator, HDMRResult
+from gsax.hdmr._result import HDMREmulator, HDMRResult
 from gsax.problem import Problem
 
 
