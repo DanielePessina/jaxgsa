@@ -627,6 +627,14 @@ def analyze(
         )
         if Y.shape[0] == 0:
             raise ValueError("All samples contain non-finite values")
+        _MIN_GROUPS = 10
+        if remaining < _MIN_GROUPS:
+            warnings.warn(
+                f"gsax: only {remaining} sample groups remain after dropping "
+                f"non-finite values — results may be statistically unreliable "
+                f"(recommend >= {_MIN_GROUPS})",
+                stacklevel=2,
+            )
 
     if prenormalize:
         Y, _, _, _ = _prenormalize_outputs(Y)
