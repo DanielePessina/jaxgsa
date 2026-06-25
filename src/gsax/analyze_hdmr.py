@@ -231,8 +231,14 @@ def analyze_hdmr(
         raise ValueError(f"Need at least 300 samples, got {N}")
     if maxorder not in (1, 2, 3):
         raise ValueError(f"maxorder must be 1, 2, or 3, got {maxorder}")
-    if D == 2 and maxorder > 2:
-        raise ValueError("maxorder must be <= 2 when D = 2")
+    if D < maxorder:
+        import warnings
+
+        maxorder = min(maxorder, D)
+        warnings.warn(
+            f"gsax: maxorder clamped to {maxorder} (need D >= maxorder, got D={D})",
+            stacklevel=2,
+        )
     if chunk_size < 1:
         raise ValueError(f"chunk_size must be >= 1, got {chunk_size}")
     lambdax = float(lambdax)
