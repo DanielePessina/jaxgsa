@@ -19,14 +19,11 @@ from typing import Literal
 
 import jax
 import jax.numpy as jnp
-from jax import Array, vmap
+from jax import Array
 
 from gsax._indices import (
     _fused_first_total,
     _fused_second_order,
-    first_order,
-    second_order,
-    total_order,
 )
 from gsax._normalization import _prenormalize_outputs
 from gsax.results import SAResult
@@ -51,22 +48,6 @@ def _get_batched_kernel(calc_second_order: bool):
     if calc_second_order:
         return jax.jit(jax.vmap(_fused_second_order, in_axes=(0, 0, 0, 0)))
     return jax.jit(jax.vmap(_fused_first_total, in_axes=(0, 0, 0)))
-
-
-@lru_cache(maxsize=None)
-def _get_no_bootstrap_batched_kernel(calc_second_order: bool):
-    """Legacy: cache final batched Sobol wrappers keyed only on order flag."""
-    if calc_second_order:
-        return jax.jit(jax.vmap(_kernel_second_order, in_axes=(0, 0, 0, 0)))
-    return jax.jit(jax.vmap(_kernel_first_total, in_axes=(0, 0, 0)))
-
-
-@lru_cache(maxsize=None)
-def _get_bootstrap_point_kernel(calc_second_order: bool):
-    """Cache bootstrap point-estimate kernels separately from no-bootstrap wrappers."""
-    if calc_second_order:
-        return jax.jit(_kernel_second_order)
-    return jax.jit(_kernel_first_total)
 
 
 def _drop_nonfinite(Y: Array, step: int) -> tuple[Array, int]:
@@ -256,42 +237,6 @@ def _separate_output_values(
 
     return A, B, AB, BA
 
-
-def _kernel_first_total(A: Array, AB: Array, B: Array) -> tuple[Array, Array]:
-    """Jittable kernel that computes first-order and total-order Sobol indices.
-
-    Uses vmap over the parameter dimension D so that all D indices are
-    computed in a single vectorised call rather than a Python loop.
-
-    Args:
-        A:  (N,) model outputs evaluated at the A base matrix.
-        AB: (N, D) model outputs from each cross-matrix AB_j.
-        B:  (N,) model outputs evaluated at the B base matrix.
-
-    Returns:
-        S1: (D,) first-order Sobol indices.
-        ST: (D,) total-order Sobol indices.
-    """
-    D = AB.shape[1]
-    S1 = vmap(lambda j: first_order(A, AB[:, j], B))(jnp.arange(D))
-    ST = vmap(lambda j: total_order(A, AB[:, j], B))(jnp.arange(D))
-    return S1, ST
-
-
-def _kernel_second_order(A: Array, AB: Array, BA: Array, B: Array) -> tuple[Array, Array, Array]:
-    """Jittable kernel for first-, total-, and second-order Sobol indices."""
-    D = AB.shape[1]
-    S1 = vmap(lambda j: first_order(A, AB[:, j], B))(jnp.arange(D))
-    ST = vmap(lambda j: total_order(A, AB[:, j], B))(jnp.arange(D))
-
-    def s2_row(j):
-        def s2_elem(k):
-            return second_order(A, AB[:, j], AB[:, k], BA[:, j], B)
-
-        return vmap(s2_elem)(jnp.arange(D))
-
-    S2 = vmap(s2_row)(jnp.arange(D))
-    return S1, ST, S2
 
 
 def _normalize_s2_matrix(S2: Array) -> Array:
@@ -498,9 +443,8 @@ def _analyze_bootstrap(
 
     indices = jax.random.randint(key, shape=(num_resamples, base_n), minval=0, maxval=base_n)
 
-    jit_ft = _get_bootstrap_point_kernel(False)
-    if calc_second_order:
-        jit_so = _get_bootstrap_point_kernel(True)
+    jit_ft = _get_scalar_kernel(False)
+    jit_so = _get_scalar_kernel(True)
 
     S1_list, ST_list = [], []
     S1_lo_list, S1_hi_list = [], []

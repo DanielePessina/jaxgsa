@@ -25,15 +25,12 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from gsax.analyze import _kernel_first_total, _kernel_second_order
+from gsax._indices import _fused_first_total, _fused_second_order
 
 
 @jax.jit
 def _resample_ft(idx_chunk: Array, A: Array, AB: Array, B: Array):
     """Vectorised first/total-order Sobol computation for one chunk of resamples.
-
-    For each index set in the chunk, gathers the resampled rows from A, AB, B
-    and delegates to ``_kernel_first_total`` to compute S1 and ST.
 
     Args:
         idx_chunk: (C, N) bootstrap index sets for this chunk, where
@@ -48,20 +45,14 @@ def _resample_ft(idx_chunk: Array, A: Array, AB: Array, B: Array):
     """
 
     def single(idx):
-        # idx: (N,) — one set of resampled row indices
-        # A[idx]: (N,), AB[idx]: (N, D), B[idx]: (N,)
-        return _kernel_first_total(A[idx], AB[idx], B[idx])
+        return _fused_first_total(A[idx], AB[idx], B[idx])
 
-    # vmap over the C index sets in this chunk → (C, D) for each output
     return jax.vmap(single)(idx_chunk)
 
 
 @jax.jit
 def _resample_so(idx_chunk: Array, A: Array, AB: Array, BA: Array, B: Array):
     """Vectorised second-order Sobol computation for one chunk of resamples.
-
-    Same gathering strategy as ``_resample_ft`` but also includes BA matrices
-    needed for second-order index estimation.
 
     Args:
         idx_chunk: (C, N) bootstrap index sets for this chunk.
@@ -77,11 +68,8 @@ def _resample_so(idx_chunk: Array, A: Array, AB: Array, BA: Array, B: Array):
     """
 
     def single(idx):
-        # idx: (N,) — gather resampled rows from all four output arrays
-        # A[idx]: (N,), AB[idx]: (N, D), BA[idx]: (N, D), B[idx]: (N,)
-        return _kernel_second_order(A[idx], AB[idx], BA[idx], B[idx])
+        return _fused_second_order(A[idx], AB[idx], BA[idx], B[idx])
 
-    # vmap over the C index sets → (C, D), (C, D), (C, D, D)
     return jax.vmap(single)(idx_chunk)
 
 
