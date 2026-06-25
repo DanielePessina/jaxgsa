@@ -5,13 +5,14 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from gsax.analyze_hdmr import analyze_hdmr, emulate_hdmr
 from gsax.benchmarks.ishigami import (
     ANALYTICAL_S1,
     ANALYTICAL_ST,
     PROBLEM,
     evaluate,
 )
+from gsax.expansions.hdmr import analyze as analyze_hdmr
+from gsax.expansions.hdmr import emulate as emulate_hdmr
 from gsax.problem import GaussianInputSpec
 
 

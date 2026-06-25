@@ -13,16 +13,16 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
-from gsax._hdmr import (
+from gsax._normalization import _prenormalize_outputs, _prepare_Y, _warn_zero_variance_slices
+from gsax.expansions.hdmr._engine import (
     _build_B1,
     _build_B2,
     _build_B3,
     _compute_f_crits,
     _make_hdmr_kernel,
 )
-from gsax._normalization import _prenormalize_outputs, _prepare_Y, _warn_zero_variance_slices
+from gsax.expansions.hdmr._result import HDMREmulator, HDMRResult
 from gsax.problem import Problem
-from gsax.results_hdmr import HDMREmulator, HDMRResult
 
 
 def _normalize_X(X: Array, problem: Problem) -> Array:
