@@ -1,6 +1,5 @@
 """Shared test fixtures for gsax tests."""
 
-import jax
 import jax.numpy as jnp
 import pytest
 
@@ -16,17 +15,6 @@ def ishigami_sobol_result():
     sr = gsax.sample(ishigami.PROBLEM, n_samples=2**14 * 8, seed=42, verbose=False)
     Y = ishigami.evaluate(jnp.asarray(sr.samples))
     return gsax.analyze(sr, Y)
-
-
-@pytest.fixture(scope="session")
-def ishigami_hdmr_data():
-    """Random (X, Y) pair for Ishigami HDMR tests (session-scoped)."""
-    key = jax.random.PRNGKey(42)
-    N = 2000
-    bounds = jnp.array(ishigami.PROBLEM.bounds)
-    X = jax.random.uniform(key, shape=(N, 3), minval=bounds[:, 0], maxval=bounds[:, 1])
-    Y = ishigami.evaluate(X)
-    return X, Y
 
 
 @pytest.fixture(scope="session")
