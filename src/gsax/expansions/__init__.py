@@ -4,6 +4,6 @@ Each submodule provides ``analyze()`` and ``emulate()`` entry points
 that work with arbitrary (X, Y) pairs — no structured sampling required.
 """
 
-from gsax.expansions import hdmr
+from gsax.expansions import hdmr, pce
 
-__all__ = ["hdmr"]
+__all__ = ["hdmr", "pce"]
