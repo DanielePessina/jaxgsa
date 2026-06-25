@@ -7,7 +7,7 @@ benchmarks.
 
 import numpy as np
 
-from gsax.benchmarks import ishigami, linear, sobol_g
+from gsax.benchmarks import ishigami, linear, oakley_ohagan, sobol_g
 
 # ---------------------------------------------------------------------------
 # Ishigami
@@ -131,3 +131,49 @@ class TestSobolG:
         S1, ST, _ = sobol_g.analytical_indices(a=(0.0, 0.0, 0.0))
         np.testing.assert_allclose(S1, S1[0], atol=1e-10)
         np.testing.assert_allclose(ST, ST[0], atol=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# Oakley & O'Hagan
+# ---------------------------------------------------------------------------
+
+
+class TestOakleyOHagan:
+    def test_s1(self, oakley_sobol_result):
+        S1 = np.asarray(oakley_sobol_result.S1)
+        for i, expected in enumerate(oakley_ohagan.ANALYTICAL_S1):
+            if expected < 0.005:
+                assert abs(S1[i]) < 0.02, f"S1[{i}]={S1[i]:.4f}, expected ~{expected:.4f}"
+            else:
+                rel = abs(S1[i] - expected) / expected
+                assert rel < 0.15, f"S1[{i}]={S1[i]:.4f}, expected {expected:.4f}, rel={rel:.3f}"
+
+    def test_st(self, oakley_sobol_result):
+        ST = np.asarray(oakley_sobol_result.ST)
+        for i, expected in enumerate(oakley_ohagan.ANALYTICAL_ST):
+            if expected < 0.005:
+                assert abs(ST[i]) < 0.02, f"ST[{i}]={ST[i]:.4f}, expected ~{expected:.4f}"
+            else:
+                rel = abs(ST[i] - expected) / expected
+                assert rel < 0.15, f"ST[{i}]={ST[i]:.4f}, expected {expected:.4f}, rel={rel:.3f}"
+
+    def test_st_geq_s1(self, oakley_sobol_result):
+        S1 = np.asarray(oakley_sobol_result.S1)
+        ST = np.asarray(oakley_sobol_result.ST)
+        assert np.all(ST >= S1 - 0.02)
+
+    def test_analytical_matches_published(self):
+        """Analytical closed-form S1 matches Oakley & O'Hagan (2004) Table."""
+        S1, _, _ = oakley_ohagan.analytical_indices(sigma=1.0)
+        np.testing.assert_allclose(S1, oakley_ohagan.PUBLISHED_S1, atol=2e-5)
+
+    def test_ranking_preserved(self, oakley_sobol_result):
+        """Most/least important parameters should match analytical ranking."""
+        S1 = np.asarray(oakley_sobol_result.S1)
+        analytical_rank = np.argsort(oakley_ohagan.ANALYTICAL_S1)
+        computed_rank = np.argsort(S1)
+        top3_analytical = set(analytical_rank[-3:])
+        top3_computed = set(computed_rank[-3:])
+        assert top3_analytical == top3_computed, (
+            f"Top-3 mismatch: analytical={top3_analytical}, computed={top3_computed}"
+        )

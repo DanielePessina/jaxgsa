@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import pytest
 
 import gsax
-from gsax.benchmarks import ishigami, linear, sobol_g
+from gsax.benchmarks import ishigami, linear, oakley_ohagan, sobol_g
 
 
 @pytest.fixture(scope="session")
@@ -46,4 +46,18 @@ def sobol_g_result():
         verbose=False,
     )
     Y = sobol_g.evaluate(jnp.asarray(sr.samples))
+    return gsax.analyze(sr, Y)
+
+
+@pytest.fixture(scope="session")
+def oakley_sobol_result():
+    """Oakley & O'Hagan Sobol analysis result (session-scoped, first-order only)."""
+    sr = gsax.sample(
+        oakley_ohagan.PROBLEM,
+        n_samples=2**14 * 32,
+        calc_second_order=False,
+        seed=789,
+        verbose=False,
+    )
+    Y = oakley_ohagan.evaluate(jnp.asarray(sr.samples))
     return gsax.analyze(sr, Y)
