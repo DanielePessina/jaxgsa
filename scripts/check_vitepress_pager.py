@@ -26,6 +26,8 @@ SECTIONS = {
         "hdmr",
         "advanced-workflow",
         "efast",
+        "dgsm",
+        "pce",
         "batch_reactor",
     ],
 }
