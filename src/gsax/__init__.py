@@ -1,6 +1,8 @@
 from gsax.dgsm import DGSMResult
 from gsax.dgsm import analyze as analyze_dgsm
 from gsax.efast import EFASTResult
+from gsax.hsic import HSICResult
+from gsax.hsic import analyze as analyze_hsic
 from gsax.efast import analyze as analyze_efast
 from gsax.efast import sample as sample_efast
 from gsax.hdmr import HDMREmulator, HDMRResult
@@ -18,6 +20,7 @@ __all__ = [
     "EFASTResult",
     "HDMREmulator",
     "HDMRResult",
+    "HSICResult",
     "GaussianInputSpec",
     "PCEResult",
     "Problem",
@@ -27,6 +30,7 @@ __all__ = [
     "analyze",
     "analyze_dgsm",
     "analyze_efast",
+    "analyze_hsic",
     "analyze_hdmr",
     "analyze_pce",
     "downsample",
