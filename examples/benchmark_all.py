@@ -59,12 +59,25 @@ def _imports():
 
     warnings.filterwarnings("ignore", category=DeprecationWarning)
     plt.rcParams["figure.dpi"] = 150
-
     return (
-        gsax, jax, jnp, json, mo, np, os, plt, time, warnings,
+        gsax,
+        jax,
+        jnp,
+        json,
+        mo,
+        np,
+        os,
+        salib_dgsm_mod,
+        salib_fast_mod,
+        salib_fast_sampler,
+        salib_finite_diff,
+        salib_hdmr_mod,
+        salib_s1,
+        salib_sep,
+        salib_st,
         sample_mc,
-        salib_dgsm_mod, salib_fast_mod, salib_fast_sampler,
-        salib_finite_diff, salib_hdmr_mod, salib_s1, salib_sep, salib_st,
+        time,
+        warnings,
     )
 
 
@@ -153,9 +166,17 @@ def _config(gsax, jax, jnp, np, os, time):
         return _best
 
     return (
-        BASE_N, BENCH_PROBLEM, CACHE_PATH, D_PARAMS, N_REPEATS,
-        SALIB_PROBLEM, SCENARIOS, best_of, coupled_oscillators,
-        expand_sobol, make_unbatched,
+        BASE_N,
+        BENCH_PROBLEM,
+        CACHE_PATH,
+        D_PARAMS,
+        N_REPEATS,
+        SALIB_PROBLEM,
+        SCENARIOS,
+        best_of,
+        coupled_oscillators,
+        expand_sobol,
+        make_unbatched,
     )
 
 
@@ -168,13 +189,35 @@ def _run_button(mo):
 
 @app.cell
 def _benchmark(
+    BASE_N,
+    BENCH_PROBLEM,
+    CACHE_PATH,
+    D_PARAMS,
+    N_REPEATS,
+    SALIB_PROBLEM,
+    SCENARIOS,
+    best_of,
+    coupled_oscillators,
+    expand_sobol,
+    gsax,
+    jax,
+    jnp,
+    json,
+    make_unbatched,
+    np,
+    os,
     run_btn,
-    BASE_N, BENCH_PROBLEM, CACHE_PATH, D_PARAMS, N_REPEATS,
-    SALIB_PROBLEM, SCENARIOS, best_of, coupled_oscillators,
-    expand_sobol, make_unbatched,
-    gsax, jax, jnp, json, np, os, sample_mc, time, warnings,
-    salib_dgsm_mod, salib_fast_mod, salib_fast_sampler,
-    salib_finite_diff, salib_hdmr_mod, salib_s1, salib_sep, salib_st,
+    salib_dgsm_mod,
+    salib_fast_mod,
+    salib_fast_sampler,
+    salib_finite_diff,
+    salib_hdmr_mod,
+    salib_s1,
+    salib_sep,
+    salib_st,
+    sample_mc,
+    time,
+    warnings,
 ):
     # Try cache first when button not pressed
     _from_cache = False
@@ -395,16 +438,12 @@ def _benchmark(
             json.dump(_all, _f, indent=2)
 
         all_results = _all
-
     return (all_results,)
 
 
 @app.cell(hide_code=True)
 def _table(all_results, mo):
-    if all_results is None:
-        mo.md("*Press the button above to run benchmarks.*")
-        return
-
+    mo.stop(all_results is None, mo.md("*Press the button above to run benchmarks.*"))
     _header = (
         "| Method | Scenario | gsax (ms) | SALib (ms)"
         " | Speedup |\n"
@@ -414,9 +453,7 @@ def _table(all_results, mo):
     for _r in all_results:
         _g = _r["gsax_ms"]
         _s = _r["salib_ms"]
-        _sp = (
-            f"**{_s / _g:.1f}x**" if _g > 0 else "---"
-        )
+        _sp = f"**{_s / _g:.1f}x**" if _g > 0 else "---"
         _lines.append(
             f"| {_r['method']} | {_r['scenario']} "
             f"| {_g:.1f} | {_s:.1f} | {_sp} |"
@@ -431,10 +468,8 @@ def _table(all_results, mo):
 
 
 @app.cell(hide_code=True)
-def _speedup_chart(all_results, np, plt):
-    if all_results is None:
-        return
-
+def _speedup_chart(all_results, mo, np, plt):
+    mo.stop(all_results is None)
     _methods = ["Sobol", "eFAST", "DGSM*", "HDMR"]
     _scenarios = ["1x1", "1x6", "50x1", "50x6"]
     _speedups = {}
@@ -478,10 +513,8 @@ def _speedup_chart(all_results, np, plt):
 
 
 @app.cell(hide_code=True)
-def _scaling_chart(all_results, plt):
-    if all_results is None:
-        return
-
+def _scaling_chart(all_results, mo, plt):
+    mo.stop(all_results is None)
     _tk = {"1x1": 1, "1x6": 6, "50x1": 50, "50x6": 300}
     _methods = ["Sobol", "eFAST", "DGSM*", "HDMR"]
     _colors = {
