@@ -136,7 +136,7 @@ def _bootstrap_ci_endpoints(
     # CI = estimate +/- z * sigma_boot.  nanstd tolerates degenerate bootstrap
     # resamples that collapse to a single unique value and produce NaN.
     z_score = jax.scipy.special.ndtri(1.0 - alpha)
-    bootstrap_sd = jnp.nanstd(bootstrap_draws, axis=0)
+    bootstrap_sd = jnp.nanstd(bootstrap_draws, axis=0, ddof=1)
     half_width = z_score * bootstrap_sd
     return estimate - half_width, estimate + half_width
 
