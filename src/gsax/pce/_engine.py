@@ -36,9 +36,7 @@ def _legendre_1d(x: Array, max_degree: int) -> Array:
     # Three-term recurrence: P_{n+1}(x) = ((2n+1)·x·P_n − n·P_{n-1}) / (n+1).
     # Numerically stable vs. direct polynomial evaluation (Bonnet's recursion).
     for n in range(1, max_degree):
-        P = P.at[:, n + 1].set(
-            ((2 * n + 1) * x * P[:, n] - n * P[:, n - 1]) / (n + 1)
-        )
+        P = P.at[:, n + 1].set(((2 * n + 1) * x * P[:, n] - n * P[:, n - 1]) / (n + 1))
 
     # Orthonormalize: ||P_k||^2 = 2/(2k+1) under the uniform measure on [-1,1],
     # so multiplying by sqrt(2k+1) gives unit-norm basis functions.
@@ -233,7 +231,11 @@ def sobol_from_coefficients(
 
 
 def loo_error(
-    Phi: Array, Y: Array, coefficients: Array, ridge: float = 0.0
+    Phi: Array,
+    Y: Array,
+    coefficients: Array,
+    ridge: float = 0.0,
+    gram_inv_PhiT: Array | None = None,
 ) -> Array:
     """Efficient leave-one-out cross-validation error from the hat matrix.
 
@@ -245,20 +247,19 @@ def loo_error(
         Y: (N,) outputs.
         coefficients: (n_terms,) fitted coefficients.
         ridge: Tikhonov parameter used during fitting.
+        gram_inv_PhiT: Pre-computed ``(Phi^T Phi + ridge*I)^{-1} Phi^T``.
+            If provided, avoids recomputing the Gram factorization.
 
     Returns:
         Scalar LOO RMSE.
     """
-    # LOO via leverage identity: e_LOO_i = (y_i - y_hat_i) / (1 - H_ii),
-    # H = Phi (Phi^T Phi + lambda I)^{-1} Phi^T.  Avoids refitting N times.
     residuals = Y - Phi @ coefficients
-    gram = Phi.T @ Phi
-    if ridge > 0:
-        gram = gram + ridge * jnp.eye(gram.shape[0])
-    # Solve once for (Gram)^{-1} Phi^T rather than inverting Gram explicitly.
-    gram_inv_PhiT = jnp.linalg.solve(gram, Phi.T)  # (P, N)
-    # Diagonal of H via row-wise dot products (avoids forming full N x N matrix).
-    leverage = jnp.sum(Phi * gram_inv_PhiT.T, axis=1)  # H_ii
-    # Clamp denominator to avoid division by zero for high-leverage points.
-    loo_residuals = residuals / jnp.maximum(1.0 - leverage, 1e-10)
+    if gram_inv_PhiT is None:
+        gram = Phi.T @ Phi
+        if ridge > 0:
+            gram = gram + ridge * jnp.eye(gram.shape[0])
+        gram_inv_PhiT = jnp.linalg.solve(gram, Phi.T)
+    leverage = jnp.sum(Phi * gram_inv_PhiT.T, axis=1)
+    leverage = jnp.clip(leverage, 0.0, 1.0 - 1e-10)
+    loo_residuals = residuals / (1.0 - leverage)
     return jnp.sqrt(jnp.mean(loo_residuals**2))

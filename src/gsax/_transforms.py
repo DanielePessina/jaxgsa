@@ -24,9 +24,8 @@ def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
     Returns:
         (N, D) array with each column in [0, 1].
     """
-    # Lazy import: scipy is heavy and only needed for Gaussian marginals;
-    # keeps the JAX-only uniform path lightweight.
-    from scipy.stats import norm, truncnorm
+    from jax.scipy.stats import norm as jax_norm
+    from scipy.stats import truncnorm
 
     D = problem.num_vars
     cols = []  # one column per dimension, stacked at the end into (N, D)
@@ -46,14 +45,12 @@ def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
             std = float(jnp.sqrt(variance))
             a = -np.inf if lo is None else (lo - mean) / std
             b = np.inf if hi is None else (hi - mean) / std
-            u = jnp.asarray(
-                truncnorm.cdf(np.asarray(X[:, d]), a=a, b=b, loc=mean, scale=std)
-            )
+            u = jnp.asarray(truncnorm.cdf(np.asarray(X[:, d]), a=a, b=b, loc=mean, scale=std))
             cols.append(jnp.clip(u, 1e-12, 1.0 - 1e-12))
-        else:  # unbounded Gaussian -- scipy avoids JAX tracing overhead for host-side transforms
+        else:  # unbounded Gaussian -- stays on device via jax.scipy
             mean, variance = first, second
             std = float(jnp.sqrt(variance))
-            u = jnp.asarray(norm.cdf(np.asarray(X[:, d]), loc=mean, scale=std))
+            u = jax_norm.cdf(X[:, d], loc=mean, scale=std)
             cols.append(jnp.clip(u, 1e-12, 1.0 - 1e-12))
 
     return jnp.column_stack(cols)  # reassemble per-dimension columns into (N, D)

@@ -76,6 +76,7 @@ def _compute_indices(Y_curve: Array, N: int, M: int, omega_0: int) -> tuple[Arra
 @lru_cache(maxsize=4)
 def _get_efast_kernel(N: int, M: int, omega_0: int, batched: bool):
     """Cache JIT-compiled eFAST kernels, optionally vmapped for batched path."""
+
     def kernel(Y_curve: Array) -> tuple[Array, Array]:
         return _compute_indices(Y_curve, N, M, omega_0)
 
@@ -131,9 +132,7 @@ def analyze(
     Y, squeeze_time, squeeze_output = _prepare_Y(Y)
 
     if Y.shape[0] % D != 0:
-        raise ValueError(
-            f"Y leading dimension ({Y.shape[0]}) must be a multiple of D ({D})"
-        )
+        raise ValueError(f"Y leading dimension ({Y.shape[0]}) must be a multiple of D ({D})")
     N = Y.shape[0] // D
 
     if prenormalize:
@@ -148,6 +147,18 @@ def analyze(
 
     # Split contiguous search curves into (D, N, T, K)
     Y_reshaped = Y.reshape(D, N, T, K)
+
+    # Per-curve zero-variance check: the global _warn_zero_variance_slices above
+    # can miss curves where a single parameter has no effect (V=0 on that curve
+    # alone), producing silent NaN indices.
+    per_curve_var = jnp.var(Y_reshaped, axis=1)  # (D, T, K)
+    n_zero_curves = int(jnp.sum(per_curve_var == 0))
+    if n_zero_curves > 0:
+        warnings.warn(
+            f"eFAST: {n_zero_curves} search-curve/output slice(s) have zero "
+            "variance — corresponding indices will be NaN",
+            stacklevel=2,
+        )
 
     if is_scalar:
         # Scalar path: squeeze trailing singletons, vmap over D curves only

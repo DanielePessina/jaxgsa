@@ -46,16 +46,21 @@ def _compute_moments(
     Returns:
         (Y, sigma, nu) where Y is (N,) or (N, T), sigma and nu are (T, D).
     """
+
     # Reverse-mode Jacobian is efficient when T (outputs) < D (inputs).
-    # JIT compiles once per unique input shape; vmap vectorises over samples.
-    jacfn = jax.jit(jax.vmap(jax.jacrev(fn)))
-    evalfn = jax.jit(jax.vmap(fn))
+    # has_aux=True returns both Jacobian and forward output from a single
+    # forward+backward pass, avoiding a redundant model evaluation.
+    def _fn_aux(x: Array) -> tuple[Array, Array]:
+        y = fn(x)
+        return y, y
+
+    combined = jax.jit(jax.vmap(jax.jacrev(_fn_aux, has_aux=True)))
 
     N = X.shape[0]
 
     if not chunk_size or chunk_size <= 0 or N <= chunk_size:
-        Y = evalfn(X)
-        jac = _promote_jac(jacfn(X))
+        jac_raw, Y = combined(X)
+        jac = _promote_jac(jac_raw)
         return Y, jnp.mean(jac, axis=0), jnp.mean(jac**2, axis=0)
 
     # Chunked path: accumulate running sums to bound peak memory.
@@ -71,14 +76,12 @@ def _compute_moments(
         X_chunk = X[start:end]
         if actual_len < chunk_size:
             pad_size = chunk_size - actual_len
-            X_chunk = jnp.concatenate(
-                [X_chunk, jnp.zeros((pad_size, X.shape[1]))], axis=0
-            )
+            X_chunk = jnp.concatenate([X_chunk, jnp.zeros((pad_size, X.shape[1]))], axis=0)
 
-        Y_chunk = evalfn(X_chunk)[:actual_len]
-        Y_parts.append(Y_chunk)
+        jac_raw, Y_chunk_full = combined(X_chunk)
+        Y_parts.append(Y_chunk_full[:actual_len])
 
-        jac = _promote_jac(jacfn(X_chunk))[:actual_len]
+        jac = _promote_jac(jac_raw)[:actual_len]
         sj = jnp.sum(jac, axis=0)
         sj2 = jnp.sum(jac**2, axis=0)
         sum_jac = sj if sum_jac is None else sum_jac + sj
@@ -128,9 +131,7 @@ def analyze(
         if X.ndim != 2:
             raise ValueError(f"X must be 2-D (N, D), got ndim={X.ndim}")
         if X.shape[1] != D:
-            raise ValueError(
-                f"X has {X.shape[1]} columns but problem has {D} parameters"
-            )
+            raise ValueError(f"X has {X.shape[1]} columns but problem has {D} parameters")
         Y_out, sigma, nu = _compute_moments(fn, X, chunk_size=chunk_size)
     elif Y is not None and dfdx is not None:
         # Pre-computed path: user supplies Jacobian and forward outputs directly
@@ -139,13 +140,10 @@ def analyze(
         if dfdx_arr.ndim == 2:
             dfdx_arr = dfdx_arr[:, None, :]  # scalar -> (N, 1, D)
         if dfdx_arr.ndim != 3:
-            raise ValueError(
-                f"dfdx must be 2-D (N, D) or 3-D (N, T, D), got ndim={dfdx_arr.ndim}"
-            )
+            raise ValueError(f"dfdx must be 2-D (N, D) or 3-D (N, T, D), got ndim={dfdx_arr.ndim}")
         if dfdx_arr.shape[-1] != D:
             raise ValueError(
-                f"dfdx last dimension ({dfdx_arr.shape[-1]}) must match "
-                f"problem.num_vars ({D})"
+                f"dfdx last dimension ({dfdx_arr.shape[-1]}) must match problem.num_vars ({D})"
             )
         if dfdx_arr.shape[0] != Y_out.shape[0]:
             raise ValueError(

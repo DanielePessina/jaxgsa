@@ -6,6 +6,7 @@ import numpy as np
 import xarray as xr
 from jax import Array
 
+from gsax._normalization import _default_output_names
 from gsax.problem import Problem
 
 
@@ -44,11 +45,7 @@ class DGSMResult:
         param_names = list(self.problem.names)
         T = np.asarray(self.nu).shape[0]
 
-        output_coord = (
-            list(self.problem.output_names)
-            if self.problem.output_names is not None
-            else list(range(T))
-        )
+        output_coord = _default_output_names(T, self.problem)
 
         if T == 1:
             coords: dict = {"param": param_names}

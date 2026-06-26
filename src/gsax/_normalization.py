@@ -2,8 +2,30 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import jax.numpy as jnp
 from jax import Array
+
+if TYPE_CHECKING:
+    from gsax.problem import Problem
+
+
+def _default_output_names(K: int, problem: Problem) -> list[str]:
+    """Resolve output coordinate labels, defaulting to y0, y1, ...
+
+    Args:
+        K: Number of output variables.
+        problem: Problem definition (may carry output_names).
+
+    Returns:
+        List of K string labels.
+    """
+    if problem.output_names is not None:
+        if len(problem.output_names) != K:
+            raise ValueError(f"output_names length {len(problem.output_names)} != K={K}")
+        return list(problem.output_names)
+    return [f"y{i}" for i in range(K)]
 
 
 def _prepare_Y(

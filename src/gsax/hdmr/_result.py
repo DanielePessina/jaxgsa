@@ -7,6 +7,7 @@ import numpy as np
 import xarray as xr
 from jax import Array
 
+from gsax._normalization import _default_output_names
 from gsax.problem import Problem
 
 
@@ -97,30 +98,20 @@ class HDMRResult:
         """
         param_names = list(self.problem.names)
         term_labels = list(self.terms)
-        output_names = self.problem.output_names
         ndim = self.Sa.ndim
 
-        # Infer dimension layout from the number of axes that survived
-        # squeezing: 1D = scalar output, 2D = multi-output, 3D = time-series.
         if ndim == 1:
             dims_term = ("term",)
             dims_param = ("param",)
             coords: dict = {"term": term_labels, "param": param_names}
         elif ndim == 2:
-            K = self.Sa.shape[0]
-            if output_names is not None and len(output_names) != K:
-                msg = f"output_names length {len(output_names)} != K={K}"
-                raise ValueError(msg)
-            onames = list(output_names) if output_names else [f"y{i}" for i in range(K)]
+            onames = _default_output_names(self.Sa.shape[0], self.problem)
             dims_term = ("output", "term")
             dims_param = ("output", "param")
             coords = {"term": term_labels, "param": param_names, "output": onames}
         elif ndim == 3:
-            T, K = self.Sa.shape[0], self.Sa.shape[1]
-            if output_names is not None and len(output_names) != K:
-                msg = f"output_names length {len(output_names)} != K={K}"
-                raise ValueError(msg)
-            onames = list(output_names) if output_names else [f"y{i}" for i in range(K)]
+            T = self.Sa.shape[0]
+            onames = _default_output_names(self.Sa.shape[1], self.problem)
             tcoords = list(time_coords) if time_coords is not None else list(range(T))
             dims_term = ("time", "output", "term")
             dims_param = ("time", "output", "param")

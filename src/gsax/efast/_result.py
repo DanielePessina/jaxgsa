@@ -6,6 +6,7 @@ import numpy as np
 import xarray as xr
 from jax import Array
 
+from gsax._normalization import _default_output_names
 from gsax.problem import Problem
 
 
@@ -21,7 +22,7 @@ class EFASTResult:
     or ``(K, D)`` when the time dimension is squeezed, where *K* is the
     number of outputs and *D* the number of parameters.
 
-    Args:
+    Attributes:
         S1: First-order indices — ``(D,)``, ``(K, D)``, or ``(T, K, D)``.
         ST: Total-order indices — same shape as S1.
         problem: Problem definition used for the analysis.
@@ -54,26 +55,18 @@ class EFASTResult:
             An ``xr.Dataset`` with variables ``S1`` and ``ST``.
         """
         param_names = list(self.problem.names)
-        output_names = self.problem.output_names
         ndim = self.S1.ndim
 
         if ndim == 1:
             dims_s1 = ("param",)
             coords: dict = {"param": param_names}
         elif ndim == 2:
-            K = self.S1.shape[0]
-            if output_names is not None and len(output_names) != K:
-                msg = f"output_names length {len(output_names)} != K={K}"
-                raise ValueError(msg)
-            onames = list(output_names) if output_names else [f"y{i}" for i in range(K)]
+            onames = _default_output_names(self.S1.shape[0], self.problem)
             dims_s1 = ("output", "param")
             coords = {"param": param_names, "output": onames}
         elif ndim == 3:
-            T, K = self.S1.shape[0], self.S1.shape[1]
-            if output_names is not None and len(output_names) != K:
-                msg = f"output_names length {len(output_names)} != K={K}"
-                raise ValueError(msg)
-            onames = list(output_names) if output_names else [f"y{i}" for i in range(K)]
+            T = self.S1.shape[0]
+            onames = _default_output_names(self.S1.shape[1], self.problem)
             tcoords = list(time_coords) if time_coords is not None else list(range(T))
             dims_s1 = ("time", "output", "param")
             coords = {"param": param_names, "output": onames, "time": tcoords}

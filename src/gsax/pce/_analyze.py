@@ -5,11 +5,9 @@ from __future__ import annotations
 import jax.numpy as jnp
 from jax import Array
 
-from gsax._transforms import cdf_to_unit_interval
 from gsax.pce._engine import (
     build_design_matrix,
     build_multi_index,
-    fit_coefficients,
     loo_error,
     sobol_from_coefficients,
 )
@@ -23,27 +21,31 @@ def _map_to_reference(X: Array, problem: Problem) -> tuple[Array, tuple[str, ...
     Uniform and truncated-Gaussian inputs use Legendre (mapped to [-1,1]).
     Untruncated Gaussian inputs use Hermite (standardized to N(0,1)).
     """
-    D = problem.num_vars
-    # Transform all inputs to their CDF (probability integral transform) first,
-    # giving a common [0,1] representation regardless of original distribution.
-    U = cdf_to_unit_interval(X, problem)
+    import numpy as np
+    from scipy.stats import truncnorm
 
-    # Wiener-Askey scheme: uniform inputs -> Legendre basis on [-1, 1];
-    # Gaussian inputs -> Hermite basis on (-inf, inf), standardized to N(0,1).
+    D = problem.num_vars
     cols = []
     input_types: list[str] = []
     for d in range(D):
         dist, first, second, lo, hi = problem.input_specs[d]
-        if dist == "uniform" or lo is not None or hi is not None:
-            # Truncated Gaussians also use Legendre: truncation makes the
-            # support bounded, so Legendre is optimal (Wiener-Askey scheme).
-            cols.append(2.0 * U[:, d] - 1.0)
+        if dist == "uniform":
+            cols.append(2.0 * (X[:, d] - first) / (second - first) - 1.0)
+            input_types.append("uniform")
+        elif lo is not None or hi is not None:
+            mean, variance = first, second
+            std = float(jnp.sqrt(variance))
+            a_std = -np.inf if lo is None else (lo - mean) / std
+            b_std = np.inf if hi is None else (hi - mean) / std
+            u = jnp.asarray(
+                truncnorm.cdf(np.asarray(X[:, d]), a=a_std, b=b_std, loc=mean, scale=std)
+            )
+            u = jnp.clip(u, 1e-12, 1.0 - 1e-12)
+            cols.append(2.0 * u - 1.0)
             input_types.append("uniform")
         else:
-            # Untruncated Gaussian: standardize to N(0,1) for Hermite basis.
             mean, variance = first, second
-            std = jnp.sqrt(variance)
-            cols.append((X[:, d] - mean) / std)
+            cols.append((X[:, d] - mean) / jnp.sqrt(variance))
             input_types.append("gaussian")
 
     return jnp.column_stack(cols), tuple(input_types)
@@ -100,9 +102,7 @@ def analyze_pce(
 
     N, D = X.shape
     if D != problem.num_vars:
-        raise ValueError(
-            f"X has {D} columns but problem defines {problem.num_vars} parameters"
-        )
+        raise ValueError(f"X has {D} columns but problem defines {problem.num_vars} parameters")
 
     # Cap polynomial order so n_terms <= fit_ratio * N (prevents overfitting).
     effective_order = _auto_order(D, N, order, fit_ratio)
@@ -111,14 +111,18 @@ def analyze_pce(
     # Map inputs to reference domain and build the orthonormal design matrix.
     X_ref, input_types = _map_to_reference(X, problem)
     Phi = build_design_matrix(X_ref, mi, input_types, effective_order)
-    coeffs = fit_coefficients(Phi, Y, ridge=ridge)
+
+    # Compute Gram factorization once, reused for both fitting and LOO.
+    gram = Phi.T @ Phi + ridge * jnp.eye(Phi.shape[1])
+    gram_inv_PhiT = jnp.linalg.solve(gram, Phi.T)
+    coeffs = gram_inv_PhiT @ Y
 
     # Sobol indices are extracted analytically from the coefficients (Sudret 2008)
     # -- no additional Monte Carlo sampling needed.
     S1, ST, S2 = sobol_from_coefficients(coeffs, mi)
 
     # LOO RMSE as a cheap goodness-of-fit diagnostic (no resampling needed).
-    loo = loo_error(Phi, Y, coeffs, ridge=ridge)
+    loo = loo_error(Phi, Y, coeffs, gram_inv_PhiT=gram_inv_PhiT)
 
     return PCEResult(
         S1=S1,

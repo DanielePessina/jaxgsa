@@ -42,15 +42,16 @@ def poincare_constant(spec: _NormalizedInputSpec, *, grid: int = 512) -> float:
         return (second - first) ** 2 / math.pi**2
     if dist == "gaussian":
         sigma2 = second
-        if low is None or high is None:
+        if low is None and high is None:
             return sigma2
-        return _truncnorm_poincare(first, math.sqrt(sigma2), low, high, grid)
+        std = math.sqrt(sigma2)
+        fallback_lo = first - 8 * std if low is None else low
+        fallback_hi = first + 8 * std if high is None else high
+        return _truncnorm_poincare(first, std, fallback_lo, fallback_hi, grid)
     raise ValueError(f"Unknown distribution type {dist!r}")
 
 
-def _truncnorm_poincare(
-    mu: float, sigma: float, a: float, b: float, grid: int
-) -> float:
+def _truncnorm_poincare(mu: float, sigma: float, a: float, b: float, grid: int) -> float:
     """Optimal Poincare constant of N(mu, sigma^2) truncated to [a, b].
 
     Solves the weighted Neumann eigenproblem ``int rho g' h' = lam int rho g h``
@@ -78,12 +79,8 @@ def _truncnorm_poincare(
     mass = np.zeros((n, n))
     for e in range(grid):
         we, he = w[e], h[e]
-        stiff[e : e + 2, e : e + 2] += (we / he) * np.array(
-            [[1.0, -1.0], [-1.0, 1.0]]
-        )
-        mass[e : e + 2, e : e + 2] += (we * he / 6.0) * np.array(
-            [[2.0, 1.0], [1.0, 2.0]]
-        )
+        stiff[e : e + 2, e : e + 2] += (we / he) * np.array([[1.0, -1.0], [-1.0, 1.0]])
+        mass[e : e + 2, e : e + 2] += (we * he / 6.0) * np.array([[2.0, 1.0], [1.0, 2.0]])
     vals = np.sort(eigh(stiff, mass, eigvals_only=True))
     return float(1.0 / vals[1])
 
@@ -105,12 +102,12 @@ def marginal_variance(spec: _NormalizedInputSpec) -> float:
         return (second - first) ** 2 / 12.0
     if dist == "gaussian":
         sigma2 = second
-        if low is None or high is None:
+        if low is None and high is None:
             return sigma2
         mu = first
         sd = math.sqrt(sigma2)
-        a_std = (low - mu) / sd
-        b_std = (high - mu) / sd
+        a_std = -np.inf if low is None else (low - mu) / sd
+        b_std = np.inf if high is None else (high - mu) / sd
         return float(truncnorm.var(a_std, b_std, loc=mu, scale=sd))
     raise ValueError(f"Unknown distribution type {dist!r}")
 

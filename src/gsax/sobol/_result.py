@@ -6,6 +6,7 @@ import numpy as np
 import xarray as xr
 from jax import Array
 
+from gsax._normalization import _default_output_names
 from gsax.problem import Problem
 
 
@@ -68,32 +69,18 @@ class SAResult:
             ``S2``, ``S1_lower/upper``, ``ST_lower/upper``, ``S2_lower/upper``.
         """
         param_names = list(self.problem.names)
-        output_names = self.problem.output_names
         ndim = self.S1.ndim
 
-        # Map result ndim back to xarray dimensions.  The squeeze logic in
-        # _analyze removes singleton T and/or K dims, so ndim tells us which
-        # combination of (time, output, param) axes are present.
         if ndim == 1:
-            # (D,) -- scalar output, no time; simplest case
             dims_s1 = ("param",)
             coords: dict = {"param": param_names}
         elif ndim == 2:
-            # (K, D) -- multiple outputs, single time step
-            K = self.S1.shape[0]
-            if output_names is not None and len(output_names) != K:
-                msg = f"output_names length {len(output_names)} != K={K}"
-                raise ValueError(msg)
-            onames = list(output_names) if output_names else [f"y{i}" for i in range(K)]
+            onames = _default_output_names(self.S1.shape[0], self.problem)
             dims_s1 = ("output", "param")
             coords = {"param": param_names, "output": onames}
         elif ndim == 3:
-            # (T, K, D) -- full time-resolved, multi-output case
-            T, K = self.S1.shape[0], self.S1.shape[1]
-            if output_names is not None and len(output_names) != K:
-                msg = f"output_names length {len(output_names)} != K={K}"
-                raise ValueError(msg)
-            onames = list(output_names) if output_names else [f"y{i}" for i in range(K)]
+            T = self.S1.shape[0]
+            onames = _default_output_names(self.S1.shape[1], self.problem)
             tcoords = list(time_coords) if time_coords is not None else list(range(T))
             dims_s1 = ("time", "output", "param")
             coords = {"param": param_names, "output": onames, "time": tcoords}
