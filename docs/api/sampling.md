@@ -9,6 +9,9 @@ Jump directly to:
 - [`SamplingResult.n_total`](/api/#samplingresult-n_total)
 - [`SamplingResult.samples_df`](/api/#samplingresult-samples_df)
 - [`SamplingResult.save()`](/api/#samplingresult-save)
+- [`SamplingResult.downsample()`](/api/#samplingresult-downsample)
+- [`downsample()`](/api/#downsample)
+- [`verify_prefix()`](/api/#verify_prefix)
 - [`load()`](/api/#load)
 
 Related docs:

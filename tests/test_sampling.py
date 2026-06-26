@@ -1,8 +1,15 @@
 import numpy as np
+import pytest
 from scipy.stats import truncnorm
 
 from gsax.problem import GaussianInputSpec, Problem, UniformInputSpec
-from gsax.sampling import _next_power_of_2, _saltelli_step, sample
+from gsax.sampling import (
+    _next_power_of_2,
+    _saltelli_step,
+    downsample,
+    sample,
+    verify_prefix,
+)
 
 
 def test_next_power_of_2():
@@ -212,3 +219,187 @@ def test_two_sided_truncated_gaussian_matches_target_variance_formula():
     b = (1.5 - 0.5) / std
     expected = truncnorm.var(a, b, loc=0.5, scale=std)
     assert abs(observed - expected) < 0.03
+
+
+# ---------------------------------------------------------------------------
+# Prefix downsampling tests
+# ---------------------------------------------------------------------------
+
+
+class TestSamplingResultDownsample:
+    """Tests for SamplingResult.downsample()."""
+
+    def _make_sr(self, D: int = 3, base_n: int = 32, second_order: bool = True, seed: int = 42):
+        names = {f"x{i}": (0.0, 1.0) for i in range(D)}
+        p = Problem.from_dict(names)
+        return sample(
+            p, n_samples=1, base_n=base_n, calc_second_order=second_order, seed=seed, verbose=False
+        )
+
+    def test_identity_when_same_base_n(self):
+        sr = self._make_sr(base_n=16)
+        assert sr.downsample(16) is sr
+
+    def test_samples_are_prefix(self):
+        sr_full = self._make_sr(base_n=64)
+        sr_small = sr_full.downsample(16)
+        assert np.array_equal(sr_small.samples, sr_full.samples[: sr_small.n_total])
+
+    def test_expanded_n_total_matches_step(self):
+        sr_full = self._make_sr(D=4, base_n=32, second_order=True)
+        sr_small = sr_full.downsample(8)
+        step = _saltelli_step(4, True)
+        assert sr_small.expanded_n_total == 8 * step
+
+    def test_expanded_to_unique_is_consistent(self):
+        sr_full = self._make_sr(base_n=64)
+        sr_small = sr_full.downsample(16)
+        assert sr_small.expanded_to_unique.shape == (sr_small.expanded_n_total,)
+        assert sr_small.expanded_to_unique.max() < sr_small.n_total
+
+    def test_base_n_stored(self):
+        sr_full = self._make_sr(base_n=32)
+        sr_small = sr_full.downsample(8)
+        assert sr_small.base_n == 8
+
+    def test_multiple_rungs_are_nested(self):
+        sr_full = self._make_sr(base_n=64)
+        sr_32 = sr_full.downsample(32)
+        sr_16 = sr_full.downsample(16)
+        sr_8 = sr_full.downsample(8)
+        assert sr_8.n_total <= sr_16.n_total <= sr_32.n_total <= sr_full.n_total
+        assert np.array_equal(sr_8.samples, sr_16.samples[: sr_8.n_total])
+        assert np.array_equal(sr_16.samples, sr_32.samples[: sr_16.n_total])
+
+    def test_first_order_only(self):
+        sr_full = self._make_sr(base_n=32, second_order=False)
+        sr_small = sr_full.downsample(8)
+        step = _saltelli_step(3, False)
+        assert sr_small.expanded_n_total == 8 * step
+        assert sr_small.calc_second_order is False
+
+    def test_upsample_raises(self):
+        sr = self._make_sr(base_n=16)
+        with pytest.raises(ValueError, match="Cannot upsample"):
+            sr.downsample(32)
+
+    def test_non_power_of_two_raises(self):
+        sr = self._make_sr(base_n=16)
+        with pytest.raises(ValueError, match="power of 2"):
+            sr.downsample(12)
+
+    def test_single_param_with_duplicates(self):
+        sr_full = self._make_sr(D=1, base_n=32, second_order=True)
+        sr_small = sr_full.downsample(8)
+        reconstructed = sr_small.samples[sr_small.expanded_to_unique]
+        assert reconstructed.shape == (sr_small.expanded_n_total, 1)
+
+    def test_problem_preserved(self):
+        sr_full = self._make_sr()
+        sr_small = sr_full.downsample(8)
+        assert sr_small.problem is sr_full.problem
+        assert sr_small.n_params == sr_full.n_params
+
+    def test_with_Y_returns_tuple(self):
+        sr_full = self._make_sr(base_n=32)
+        Y = np.arange(sr_full.n_total * 4, dtype=np.float64).reshape(sr_full.n_total, 4)
+        sr_small, Y_small = sr_full.downsample(8, Y)
+        assert Y_small.shape == (sr_small.n_total, 4)
+        assert np.array_equal(Y_small, Y[: sr_small.n_total])
+
+    def test_with_Y_identity_returns_same_Y(self):
+        sr_full = self._make_sr(base_n=16)
+        Y = np.ones((sr_full.n_total, 3))
+        sr_same, Y_same = sr_full.downsample(16, Y)
+        assert sr_same is sr_full
+        assert Y_same is Y
+
+    def test_with_Y_misaligned_raises(self):
+        sr_full = self._make_sr(base_n=32)
+        Y_wrong = np.zeros((sr_full.n_total + 5, 3))
+        with pytest.raises(ValueError, match="does not match n_total"):
+            sr_full.downsample(8, Y_wrong)
+
+    def test_samples_do_not_share_memory(self):
+        sr_full = self._make_sr(base_n=32)
+        sr_small = sr_full.downsample(8)
+        assert not np.shares_memory(sr_full.samples, sr_small.samples)
+
+    def test_Y_does_not_share_memory(self):
+        sr_full = self._make_sr(base_n=32)
+        Y = np.ones((sr_full.n_total, 3))
+        _, Y_small = sr_full.downsample(8, Y)
+        assert not np.shares_memory(Y, Y_small)
+
+
+class TestDownsampleFunction:
+    """Tests for the module-level downsample(sr, Y, base_n) function."""
+
+    def _make_sr_and_Y(self, D: int = 3, base_n: int = 32, T: int = 5, seed: int = 42):
+        names = {f"x{i}": (0.0, 1.0) for i in range(D)}
+        p = Problem.from_dict(names)
+        sr = sample(p, n_samples=1, base_n=base_n, seed=seed, verbose=False)
+        Y = np.arange(sr.n_total * T, dtype=np.float64).reshape(sr.n_total, T)
+        return sr, Y
+
+    def test_returns_prefix_slices(self):
+        sr_full, Y_full = self._make_sr_and_Y(base_n=32)
+        sr_small, Y_small = downsample(sr_full, Y_full, 8)
+        assert np.array_equal(Y_small, Y_full[: sr_small.n_total])
+        assert np.array_equal(sr_small.samples, sr_full.samples[: sr_small.n_total])
+
+    def test_Y_misaligned_raises(self):
+        sr_full, _ = self._make_sr_and_Y(base_n=32)
+        Y_wrong = np.zeros((sr_full.n_total + 3, 5))
+        with pytest.raises(ValueError, match="does not match n_total"):
+            downsample(sr_full, Y_wrong, 8)
+
+    def test_preserves_trailing_dims(self):
+        names = {f"x{i}": (0.0, 1.0) for i in range(3)}
+        p = Problem.from_dict(names)
+        sr = sample(p, n_samples=1, base_n=16, seed=0, verbose=False)
+        Y = np.random.default_rng(0).standard_normal((sr.n_total, 4, 2))
+        sr_small, Y_small = downsample(sr, Y, 4)
+        assert Y_small.shape == (sr_small.n_total, 4, 2)
+        assert np.array_equal(Y_small, Y[: sr_small.n_total])
+
+
+class TestVerifyPrefix:
+    """Tests for verify_prefix() validation."""
+
+    def test_sobol_prefix_passes(self):
+        p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0), "x3": (0.0, 1.0)})
+        verify_prefix(p, 8, 64, seed=42)
+
+    def test_sobol_prefix_first_order_only(self):
+        p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
+        verify_prefix(p, 4, 32, calc_second_order=False, seed=7)
+
+    def test_different_seeds_may_fail(self):
+        p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0), "x3": (0.0, 1.0)})
+        sr_a = sample(p, n_samples=1, base_n=8, seed=0, verbose=False)
+        sr_b = sample(p, n_samples=1, base_n=32, seed=99, verbose=False)
+        assert not np.array_equal(sr_a.samples, sr_b.samples[: sr_a.n_total])
+
+    def test_small_gt_large_raises(self):
+        p = Problem.from_dict({"x1": (0.0, 1.0)})
+        with pytest.raises(ValueError, match="base_n_small.*base_n_large"):
+            verify_prefix(p, 32, 8, seed=0)
+
+    def test_non_int_seed_raises(self):
+        p = Problem.from_dict({"x1": (0.0, 1.0)})
+        with pytest.raises(TypeError, match="must be an int"):
+            verify_prefix(p, 4, 16, seed=None)  # type: ignore[arg-type]
+
+    def test_default_seed_works(self):
+        p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
+        verify_prefix(p, 4, 32)
+
+    def test_mixed_distributions(self):
+        p = Problem.from_dict(
+            {
+                "u": (0.0, 1.0),
+                "g": GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0),
+            }
+        )
+        verify_prefix(p, 4, 32, seed=123)

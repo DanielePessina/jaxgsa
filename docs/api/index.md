@@ -51,6 +51,8 @@ Top-level exports from `gsax`:
 - [`Problem`](#problem)
 - [`sample`](#sample)
 - [`SamplingResult`](#samplingresult)
+- [`downsample`](#downsample)
+- [`verify_prefix`](#verify_prefix)
 - [`load`](#load)
 - [`analyze`](#analyze)
 - [`SAResult`](#saresult)
@@ -302,6 +304,131 @@ Behavior and validation:
 - Writes `path.npz` only when `expanded_to_unique` is not the identity mapping.
 - Raises `ValueError` for unsupported formats.
 - `xlsx` requires `openpyxl`; `parquet` requires `pyarrow`.
+
+<a id="samplingresult-downsample"></a>
+#### `SamplingResult.downsample()`
+
+Return a smaller `SamplingResult` by prefix-slicing to a lower `base_n`.
+Optionally pass `Y` (model outputs aligned with `samples`) to get the
+corresponding output slice back, similar to how
+`sklearn.model_selection.train_test_split` accepts both *X* and *y*.
+
+```python
+# Without Y — returns SamplingResult
+sr_small = sampling_result.downsample(base_n=8)
+
+# With Y — returns (SamplingResult, Y_small)
+sr_small, Y_small = sampling_result.downsample(base_n=8, Y=Y_full)
+```
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `base_n` | `int` | required | Target base size (power of 2, `<= self.base_n`). |
+| `Y` | `np.ndarray \| None` | `None` | Model outputs with shape `(n_total, ...)`. When provided, the matching prefix is returned alongside the new result. |
+
+Returns: `SamplingResult` when called without `Y`, or `(SamplingResult, np.ndarray)` when `Y` is provided.
+
+Why this works:
+
+- Sobol sequences are **prefix-nested**: at a fixed seed and scramble, the
+  first *K* base points of a draw with *N > K* base points are bit-identical
+  to drawing *K* base points directly.
+- This means you can simulate the model once at the largest `base_n` and
+  recover exact results for any smaller power-of-2 `base_n` by slicing — no
+  re-simulation needed.
+- This property does **not** hold for Latin Hypercube Sampling (LHS), whose
+  stratification depends on *N*.
+
+Validation:
+
+- `base_n` must be a power of 2 and `<= self.base_n`.
+- When `Y` is provided, it must have at least as many rows as the downsampled
+  design requires.
+- If `base_n == self.base_n`, the same object is returned (no copy).
+
+Minimal example:
+
+```python
+import gsax
+from gsax.benchmarks.ishigami import PROBLEM, evaluate
+
+# Sample at the largest rung
+sr_full = gsax.sample(PROBLEM, n_samples=1, base_n=1024, seed=42)
+Y_full = evaluate(sr_full.samples)
+
+# Downsample to smaller rungs — no re-simulation
+for base_n in [512, 256, 128, 64]:
+    sr_k, Y_k = sr_full.downsample(base_n, Y_full)
+    result = gsax.analyze(sr_k, Y_k)
+    print(f"base_n={base_n:4d}  S1={result.S1}")
+```
+
+<a id="downsample"></a>
+### `downsample()`
+
+Module-level convenience wrapper around `SamplingResult.downsample()` that
+always takes `Y` and returns both the downsampled result and the output slice.
+
+```python
+def downsample(
+    sr: SamplingResult,
+    Y: np.ndarray,
+    base_n: int,
+) -> tuple[SamplingResult, np.ndarray]
+```
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `sr` | `SamplingResult` | Result from the largest rung. |
+| `Y` | `np.ndarray` | Model outputs aligned with `sr.samples`, shape `(sr.n_total, ...)`. |
+| `base_n` | `int` | Target base size (power of 2, `<= sr.base_n`). |
+
+Returns: `(sr_small, Y_small)`.
+
+Equivalent to `sr.downsample(base_n, Y)`.
+
+<a id="verify_prefix"></a>
+### `verify_prefix()`
+
+Assert that a smaller Sobol design is a bit-exact prefix of a larger one at
+the same seed. This validates the mathematical property that makes
+`SamplingResult.downsample()` correct.
+
+```python
+def verify_prefix(
+    problem: Problem,
+    base_n_small: int,
+    base_n_large: int,
+    *,
+    calc_second_order: bool = True,
+    scramble: bool = True,
+    seed: int = 0,
+    atol: float = 0.0,
+) -> None
+```
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `problem` | `Problem` | required | Problem definition (bounds and distributions). |
+| `base_n_small` | `int` | required | Smaller base size (power of 2). |
+| `base_n_large` | `int` | required | Larger base size (power of 2, `>= base_n_small`). |
+| `calc_second_order` | `bool` | `True` | Saltelli layout order (must match both draws). |
+| `scramble` | `bool` | `True` | Whether Owen scrambling is applied (must match both draws). |
+| `seed` | `int` | `0` | Integer seed shared by both draws. Must be an `int` so that both `Sobol` engines receive the same Owen scramble. |
+| `atol` | `float` | `0.0` | Absolute tolerance; `0.0` demands bit-exact agreement. |
+
+Raises `ValueError` if `base_n_small > base_n_large` or `seed` is not an
+integer. Raises `AssertionError` if the prefix property is violated.
+
+Minimal example:
+
+```python
+import gsax
+from gsax.benchmarks.ishigami import PROBLEM
+
+# Verify that base_n=64 is a prefix of base_n=512 at seed 42
+gsax.verify_prefix(PROBLEM, 64, 512, seed=42)
+```
 
 <a id="load"></a>
 ### `load()`

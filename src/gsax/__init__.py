@@ -10,7 +10,7 @@ from gsax.pce import PCEResult
 from gsax.pce import analyze as analyze_pce
 from gsax.pce import emulate as emulate_pce
 from gsax.problem import GaussianInputSpec, Problem, UniformInputSpec
-from gsax.sampling import SamplingResult, load, sample, sample_mc
+from gsax.sampling import SamplingResult, downsample, load, sample, sample_mc, verify_prefix
 from gsax.sobol import SAResult, analyze
 
 __all__ = [
@@ -29,10 +29,12 @@ __all__ = [
     "analyze_efast",
     "analyze_hdmr",
     "analyze_pce",
+    "downsample",
     "emulate_hdmr",
     "emulate_pce",
     "load",
     "sample",
     "sample_efast",
     "sample_mc",
+    "verify_prefix",
 ]

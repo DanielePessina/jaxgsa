@@ -17,6 +17,7 @@ import math
 from dataclasses import dataclass
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
+from typing import overload
 
 import numpy as np
 import pandas as pd
@@ -65,6 +66,77 @@ class SamplingResult:
     def n_total(self) -> int:
         """Number of unique rows in ``samples``."""
         return self.samples.shape[0]
+
+    @overload
+    def downsample(self, base_n: int) -> SamplingResult: ...
+
+    @overload
+    def downsample(self, base_n: int, Y: np.ndarray) -> tuple[SamplingResult, np.ndarray]: ...
+
+    def downsample(
+        self, base_n: int, Y: np.ndarray | None = None
+    ) -> SamplingResult | tuple[SamplingResult, np.ndarray]:
+        """Return a smaller ``SamplingResult`` by prefix-slicing to a lower ``base_n``.
+
+        Sobol sequences are prefix-nested: the first *K* base points of a
+        draw with *N > K* base points are bit-identical to drawing *K*
+        base points directly (same seed and scramble).  This means you can
+        simulate the model once at the largest ``base_n`` and recover exact
+        results for any smaller power-of-2 ``base_n`` by slicing — no
+        re-simulation needed.
+
+        Optionally pass ``Y`` (model outputs aligned with ``samples``) to
+        get the corresponding output slice back — similar to how
+        ``sklearn.model_selection.train_test_split`` accepts both *X* and
+        *y*.
+
+        This property does **not** hold for Latin Hypercube Sampling (LHS),
+        whose stratification depends on *N*.
+
+        Args:
+            base_n: Target base size (must be a power of 2 and
+                ``<= self.base_n``).
+            Y: Model outputs with shape ``(n_total, ...)``.  When provided,
+                the matching prefix is returned alongside the new result.
+
+        Returns:
+            ``SamplingResult`` when called without ``Y``, or
+            ``(SamplingResult, Y_small)`` when ``Y`` is provided.
+
+        Raises:
+            ValueError: If ``base_n`` is not a power of 2, exceeds
+                ``self.base_n``, or ``Y`` has too few rows.
+        """
+        if not _is_power_of_2(base_n):
+            raise ValueError(f"base_n must be a power of 2, got {base_n}")
+        if base_n > self.base_n:
+            raise ValueError(
+                f"Cannot upsample: requested base_n={base_n} > current base_n={self.base_n}"
+            )
+        if Y is not None and Y.shape[0] != self.n_total:
+            raise ValueError(f"Y.shape[0]={Y.shape[0]} does not match n_total={self.n_total}")
+        if base_n == self.base_n:
+            return (self, Y) if Y is not None else self
+
+        step = _saltelli_step(self.n_params, self.calc_second_order)
+        new_expanded_n = base_n * step
+        new_exp2uniq = self.expanded_to_unique[:new_expanded_n]
+        n_unique_new = int(new_exp2uniq.max()) + 1
+
+        sr_small = SamplingResult(
+            samples=self.samples[:n_unique_new].copy(),
+            sample_ids=np.arange(n_unique_new, dtype=np.int64),
+            expanded_n_total=new_expanded_n,
+            expanded_to_unique=new_exp2uniq.copy(),
+            base_n=base_n,
+            n_params=self.n_params,
+            calc_second_order=self.calc_second_order,
+            problem=self.problem,
+        )
+
+        if Y is not None:
+            return sr_small, Y[:n_unique_new].copy()
+        return sr_small
 
     @property
     def samples_df(self) -> pd.DataFrame:
@@ -139,6 +211,11 @@ class SamplingResult:
         if not identity:
             npz_path = stem.with_suffix(".npz")
             np.savez_compressed(npz_path, expanded_to_unique=self.expanded_to_unique)
+
+
+def _is_power_of_2(n: int) -> bool:
+    """Check whether *n* is a positive power of 2."""
+    return n >= 1 and (n & (n - 1)) == 0
 
 
 def _next_power_of_2(n: int) -> int:
@@ -377,8 +454,7 @@ def sample(
     step = _saltelli_step(D, calc_second_order)
 
     if base_n is not None:
-        # Power-of-2 check via bit trick (only one bit set)
-        if base_n < 1 or (base_n & (base_n - 1)) != 0:
+        if not _is_power_of_2(base_n):
             raise ValueError(f"base_n must be a power of 2, got {base_n}")
         target_n = None
     else:
@@ -434,6 +510,107 @@ def sample(
         calc_second_order=calc_second_order,
         problem=problem,
     )
+
+
+# ---------------------------------------------------------------------------
+# Prefix downsampling
+# ---------------------------------------------------------------------------
+
+
+def downsample(
+    sr: SamplingResult,
+    Y: np.ndarray,
+    base_n: int,
+) -> tuple[SamplingResult, np.ndarray]:
+    """Downsample a Sobol design and its model outputs to a smaller ``base_n``.
+
+    Convenience wrapper around :meth:`SamplingResult.downsample`.  Sobol
+    sequences are prefix-nested at a fixed seed: the unique rows for a
+    smaller ``base_n`` are an exact prefix of those for any larger ``base_n``.
+    This lets you simulate the model once at the largest rung and recover exact
+    results for every smaller power-of-2 rung by slicing — no re-simulation.
+
+    Args:
+        sr: ``SamplingResult`` from the largest rung.
+        Y: Model outputs aligned with ``sr.samples``, shape
+            ``(sr.n_total, ...)``  (any trailing dimensions are preserved).
+        base_n: Target base size (power of 2, ``<= sr.base_n``).
+
+    Returns:
+        ``(sr_small, Y_small)`` — a new ``SamplingResult`` and the
+        corresponding prefix of ``Y``.
+
+    Raises:
+        ValueError: If ``base_n`` is invalid, ``Y`` is misaligned with
+            ``sr``, or ``Y`` has too few rows.
+    """
+    return sr.downsample(base_n, Y)
+
+
+def verify_prefix(
+    problem: Problem,
+    base_n_small: int,
+    base_n_large: int,
+    *,
+    calc_second_order: bool = True,
+    scramble: bool = True,
+    seed: int = 0,
+    atol: float = 0.0,
+) -> None:
+    """Assert that a smaller Sobol design is a bit-exact prefix of a larger one.
+
+    This validates the mathematical property that makes
+    :meth:`SamplingResult.downsample` correct: the unique sample rows for
+    ``base_n_small`` at a given seed are identical to the leading rows of the
+    design drawn at ``base_n_large`` with the same seed.
+
+    Args:
+        problem: Problem definition (bounds and distributions).
+        base_n_small: Smaller base size (power of 2).
+        base_n_large: Larger base size (power of 2, ``>= base_n_small``).
+        calc_second_order: Saltelli layout order (must match both draws).
+        scramble: Whether Owen scrambling is applied (must match both draws).
+        seed: Integer seed shared by both draws.  Must be an ``int`` so
+            that the two independent ``Sobol`` engines receive the same
+            Owen scramble.
+        atol: Absolute tolerance; ``0.0`` demands bit-exact agreement.
+
+    Raises:
+        ValueError: If ``base_n_small > base_n_large`` or ``seed`` is not
+            an integer.
+        AssertionError: If the prefix property is violated.
+    """
+    if not isinstance(seed, int):
+        raise TypeError(
+            f"seed must be an int for reproducible prefix verification, got {type(seed).__name__}"
+        )
+    if base_n_small > base_n_large:
+        raise ValueError(f"base_n_small={base_n_small} > base_n_large={base_n_large}")
+    sr_s = sample(
+        problem,
+        n_samples=1,
+        base_n=base_n_small,
+        calc_second_order=calc_second_order,
+        scramble=scramble,
+        seed=seed,
+        verbose=False,
+    )
+    sr_l = sample(
+        problem,
+        n_samples=1,
+        base_n=base_n_large,
+        calc_second_order=calc_second_order,
+        scramble=scramble,
+        seed=seed,
+        verbose=False,
+    )
+    n_s = sr_s.n_total
+    if not np.allclose(sr_s.samples, sr_l.samples[:n_s], atol=atol, rtol=0.0):
+        raise AssertionError(
+            f"base_n={base_n_small} is not a prefix of "
+            f"base_n={base_n_large} at seed={seed}; "
+            f"downsampling would be invalid."
+        )
 
 
 # ---------------------------------------------------------------------------
