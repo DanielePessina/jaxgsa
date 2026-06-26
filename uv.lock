@@ -281,6 +281,11 @@ xlsx = [
     { name = "openpyxl" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "marimo" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "jax", specifier = ">=0.4" },
@@ -302,7 +307,7 @@ requires-dist = [
 provides-extras = ["dev", "xlsx", "parquet", "all", "notebook"]
 
 [package.metadata.requires-dev]
-dev = []
+dev = [{ name = "marimo", specifier = ">=0.23.4" }]
 
 [[package]]
 name = "h11"
