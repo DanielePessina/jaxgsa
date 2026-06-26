@@ -28,8 +28,8 @@ features:
     details: Persist unique sample matrices plus Saltelli reconstruction metadata with `SamplingResult.save()` and reload them later with `gsax.load()`.
   - title: Multi-Output & Time-Series
     details: Pass scalar, (N, K), or (N, T, K) outputs. All indices are computed in a single vectorized pass.
-  - title: Up to 929× Faster than SALib
-    details: Fused JIT kernels and vectorized execution replace Python loops. 4.7× faster even on scalar outputs, up to 929× on multi-output workloads.
+  - title: Up to 766× Faster than SALib
+    details: Fused JIT kernels and vectorized execution replace Python loops. Sobol up to 19× faster, HDMR up to 766× on multi-output workloads.
 ---
 
 `gsax`'s Sobol sampling and analysis workflow is heavily drawn from [SALib](https://salib.readthedocs.io/), adapted here into a JAX-first implementation focused on JIT compilation, accelerator execution, and multi-output workloads.

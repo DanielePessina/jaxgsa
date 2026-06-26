@@ -11,7 +11,7 @@
 - **Sobol indices** via Saltelli sampling with Sobol quasi-random sequences (`scipy.stats.qmc`)
   - First-order (S1), total-order (ST), and second-order (S2) indices
   - Fused JIT kernels and chunked `jit(vmap(...))` execution for bounded memory on large output grids
-  - [**4.7× to 929× faster than SALib**](#benchmark-results) across all output shapes
+  - [**Up to 718× faster than SALib**](#benchmark-results) (HDMR on multi-output workloads)
 - **RS-HDMR** (Random Sampling High-Dimensional Model Representation)
   - Works with **any** set of (X, Y) pairs — no structured sampling required
   - B-spline surrogate with ANCOVA decomposition (Sa, Sb, S, ST)
@@ -332,24 +332,44 @@ See [LICENSE](LICENSE) for details.
 
 gsax vs SALib on a coupled-oscillator model (D=5 parameters, N=1024 base samples). Post-JIT steady-state timings, best of 5, Apple M3 Pro CPU.
 
-SALib timings include its internal default resampling. See the [detailed benchmarks](https://danielepessina.github.io/gsax/guide/benchmarks) for split tables (no bootstrap vs 300 bootstrap).
+### Sobol — point estimates (no bootstrap)
 
 | Scenario (T×K) | Method | gsax (ms) | SALib (ms) | Speedup |
 |---|---|---:|---:|---:|
-| 1×1 | analyze (no S2) | 0.6 | 13.2 | **20.7×** |
-| 1×1 | analyze (S2) | 0.9 | 36.7 | **43.0×** |
-| 1×1 | analyze_hdmr | 17.8 | 83.1 | **4.7×** |
-| 1×6 | analyze (no S2) | 0.9 | 80.9 | **88.2×** |
-| 1×6 | analyze (S2) | 1.3 | 280.4 | **216.6×** |
-| 1×6 | analyze_hdmr | 19.3 | 501.4 | **26.0×** |
-| 50×1 | analyze (no S2) | 2.2 | 661.8 | **300.4×** |
-| 50×1 | analyze (S2) | 3.8 | 2092.2 | **554.7×** |
-| 50×1 | analyze_hdmr | 23.2 | 4024.6 | **173.5×** |
-| 50×6 | analyze (no S2) | 7.6 | 4442.1 | **582.6×** |
-| 50×6 | analyze (S2) | 14.3 | 13289.2 | **929.2×** |
-| 50×6 | analyze_hdmr | 38.5 | 29115.3 | **757.1×** |
+| 1×1 | analyze (no S2) | 0.8 | 0.2 | 0.3× |
+| 1×1 | analyze (S2) | 0.9 | 0.9 | **1.0×** |
+| 1×6 | analyze (no S2) | 1.0 | 1.4 | **1.4×** |
+| 1×6 | analyze (S2) | 1.5 | 5.3 | **3.5×** |
+| 50×1 | analyze (no S2) | 2.8 | 12.3 | **4.4×** |
+| 50×1 | analyze (S2) | 4.9 | 45.8 | **9.4×** |
+| 50×6 | analyze (no S2) | 8.8 | 74.3 | **8.5×** |
+| 50×6 | analyze (S2) | 14.8 | 276.6 | **18.7×** |
 
-Correctness is validated against analytical Ishigami solutions and SALib on every run. Full benchmark script: [`benchmark_salib.py`](https://github.com/DanielePessina/gsax/blob/dev/benchmark_salib.py). See the [docs](https://danielepessina.github.io/gsax/guide/benchmarks) for methodology details.
+### Sobol — 300 bootstrap resamples
+
+| Scenario (T×K) | Method | gsax (ms) | SALib (ms) | Speedup |
+|---|---|---:|---:|---:|
+| 1×1 | analyze (no S2) | 5.2 | 28.5 | **5.5×** |
+| 1×1 | analyze (S2) | 8.5 | 80.0 | **9.4×** |
+| 1×6 | analyze (no S2) | 17.0 | 162.8 | **9.6×** |
+| 1×6 | analyze (S2) | 36.4 | 490.5 | **13.5×** |
+| 50×1 | analyze (no S2) | 121.7 | 1434.9 | **11.8×** |
+| 50×1 | analyze (S2) | 280.6 | 4142.0 | **14.8×** |
+| 50×6 | analyze (no S2) | 726.1 | 9384.2 | **12.9×** |
+| 50×6 | analyze (S2) | 1666.7 | 26596.8 | **16.0×** |
+
+### HDMR
+
+| Scenario (T×K) | gsax (ms) | SALib (ms) | Speedup |
+|---|---:|---:|---:|
+| 1×1 | 17.6 | 89.5 | **5.1×** |
+| 1×6 | 19.0 | 508.6 | **26.7×** |
+| 50×1 | 22.3 | 3990.5 | **178.7×** |
+| 50×6 | 37.0 | 28345.8 | **766.3×** |
+
+The speedup grows with output dimensionality because SALib loops over each (T, K) slice in Python while gsax vectorizes with `jax.vmap`. With bootstrap, JIT reuse across resamples adds further gains.
+
+Correctness is validated against analytical Ishigami solutions and SALib on every run. Full benchmark script: [`benchmark_salib.py`](https://github.com/DanielePessina/gsax/blob/master/benchmark_salib.py). See the [docs](https://danielepessina.github.io/gsax/guide/benchmarks) for methodology details.
 
 ```bash
 uv run python benchmark_salib.py
