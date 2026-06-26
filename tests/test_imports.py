@@ -43,3 +43,31 @@ def test_re_exports_are_same_objects():
     assert gsax.analyze is sobol_analyze
     assert gsax.analyze_hdmr is hdmr_analyze
     assert gsax.analyze_pce is pce_analyze
+
+
+def test_dgsm_re_exports():
+    import gsax
+
+    assert callable(gsax.analyze_dgsm)
+    assert isinstance(gsax.DGSMResult, type)
+
+
+def test_efast_re_exports():
+    import gsax
+
+    assert callable(gsax.analyze_efast)
+    assert callable(gsax.sample_efast)
+    assert isinstance(gsax.EFASTResult, type)
+
+
+def test_sampling_re_exports():
+    import gsax
+
+    assert callable(gsax.sample_mc)
+
+
+def test_problem_re_exports():
+    import gsax
+
+    assert isinstance(gsax.GaussianInputSpec, type)
+    assert isinstance(gsax.UniformInputSpec, type)

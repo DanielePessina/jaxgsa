@@ -37,15 +37,6 @@ _NormalizedInputSpec: TypeAlias = tuple[
 ]
 
 
-def _normalize_output_names(
-    output_names: tuple[str, ...] | None,
-) -> tuple[str, ...] | None:
-    """Normalize optional output names into an immutable tuple."""
-    if output_names is None:
-        return None
-    return tuple(output_names)
-
-
 def _make_uniform_spec(low: float, high: float) -> _NormalizedInputSpec:
     """Validate and normalize a uniform input specification."""
     low = float(low)
@@ -191,11 +182,6 @@ class Problem:
         """
         names = tuple(params.keys())
         input_specs = tuple(_normalize_input_spec(spec) for spec in params.values())
-        if len(names) != len(input_specs):
-            raise ValueError(
-                "names and input specs must have the same length, got "
-                f"{len(names)} and {len(input_specs)}"
-            )
         return cls._from_normalized_inputs(
             names=names,
             input_specs=input_specs,
@@ -236,7 +222,8 @@ class Problem:
         # Bypass frozen dataclass protection -- only called during construction.
         object.__setattr__(self, "names", names)
         object.__setattr__(self, "bounds", _derive_bounds(input_specs))
-        object.__setattr__(self, "output_names", _normalize_output_names(output_names))
+        normalized = tuple(output_names) if output_names is not None else None
+        object.__setattr__(self, "output_names", normalized)
         object.__setattr__(self, "_input_specs", input_specs)
 
     @property

@@ -1,8 +1,95 @@
 # Benchmarks
 
+## Test Functions
+
+gsax ships with analytical benchmark functions in `gsax.benchmarks`. Each
+submodule provides a `PROBLEM` definition, a batched `evaluate(X)` function,
+precomputed `ANALYTICAL_S1` / `ANALYTICAL_ST` / `ANALYTICAL_S2` arrays, and
+an `analytical_indices(...)` function for custom parameters.
+
+### `gsax.benchmarks.ishigami`
+
+The Ishigami function: $f(x) = \sin(x_1) + A \sin^2(x_2) + B x_3^4 \sin(x_1)$
+with $x_i \sim U[-\pi, \pi]$.
+
+A standard 3-parameter benchmark. Parameter $x_3$ has zero first-order effect
+but contributes through a higher-order interaction with $x_1$, making it a
+good test for methods that must distinguish $S_1 = 0$ from $S_T > 0$.
+
+| Export | Description |
+| --- | --- |
+| `PROBLEM` | 3 uniform inputs on $[-\pi, \pi]$ |
+| `evaluate(X, A=7.0, B=0.1)` | `(N, 3) -> (N,)` |
+| `analytical_indices(A=7.0, B=0.1)` | Returns `(S1, ST, S2)` arrays |
+| `ANALYTICAL_S1`, `ANALYTICAL_ST`, `ANALYTICAL_S2` | Precomputed for default A=7, B=0.1 |
+
+### `gsax.benchmarks.sobol_g`
+
+The Sobol G-function: $g(\mathbf{x}) = \prod_{j=1}^{D} \frac{|4x_j - 2| + a_j}{1 + a_j}$
+with $x_j \sim U[0, 1]$.
+
+An 8-dimensional multiplicative benchmark. The `a` vector controls each
+parameter's importance: $a_j = 0$ makes $x_j$ maximally influential, large
+$a_j$ makes it nearly inert. The default creates four importance tiers.
+
+| Export | Description |
+| --- | --- |
+| `PROBLEM` | 8 uniform inputs on $[0, 1]$ |
+| `evaluate(X, a=DEFAULT_A)` | `(N, 8) -> (N,)` |
+| `analytical_indices(a=DEFAULT_A)` | Returns `(S1, ST, S2)` arrays |
+| `ANALYTICAL_S1`, `ANALYTICAL_ST`, `ANALYTICAL_S2` | Precomputed for default `a` |
+
+### `gsax.benchmarks.linear`
+
+Linear additive model: $f(\mathbf{x}) = \sum_{j} c_j x_j$ with $x_j \sim U[0, 1]$.
+
+The simplest benchmark. Because the model is purely additive, $S_1 = S_T$ and
+all second-order interactions are exactly zero. Useful for verifying that a
+method correctly identifies zero interactions.
+
+| Export | Description |
+| --- | --- |
+| `PROBLEM` | 3 uniform inputs on $[0, 1]$, coefficients $(1, 2, 3)$ |
+| `evaluate(X, coeffs=(1.0, 2.0, 3.0))` | `(N, 3) -> (N,)` |
+| `analytical_indices(coeffs, bounds)` | Returns `(S1, ST, S2)` arrays |
+| `ANALYTICAL_S1`, `ANALYTICAL_ST`, `ANALYTICAL_S2` | Precomputed for default coefficients |
+
+### `gsax.benchmarks.oakley_ohagan`
+
+Oakley and O'Hagan (2004) 15-dimensional Gaussian-input benchmark:
+$f(\mathbf{x}) = \mathbf{a}_1^\top \mathbf{x} + \mathbf{a}_2^\top \sin(\mathbf{x}) + \mathbf{a}_3^\top \cos(\mathbf{x}) + \mathbf{x}^\top M \mathbf{x}$
+with $x_i \sim \mathcal{N}(0, \sigma^2)$.
+
+One of the few standard SA benchmarks with Gaussian (non-uniform) inputs. The
+quadratic form introduces all pairwise interactions. Coefficient magnitudes
+create a natural importance gradient across the 15 dimensions.
+
+| Export | Description |
+| --- | --- |
+| `PROBLEM` | 15 Gaussian inputs, $\mathcal{N}(0, 1)$ |
+| `evaluate(X)` | `(N, 15) -> (N,)` |
+| `analytical_indices(sigma=1.0)` | Returns `(S1, ST, S2)` arrays |
+| `ANALYTICAL_S1`, `ANALYTICAL_ST`, `ANALYTICAL_S2` | Precomputed for $\sigma = 1$ |
+
+### Usage
+
+```python
+from gsax.benchmarks import ishigami
+from gsax import sample, analyze
+
+sr = sample(ishigami.PROBLEM, 4096)
+Y = ishigami.evaluate(sr.samples)
+result = analyze(sr, Y)
+
+# Compare against analytical values
+print("S1 error:", abs(result.S1 - ishigami.ANALYTICAL_S1).max())
+```
+
+## Timing Results
+
 gsax is benchmarked against [SALib](https://salib.readthedocs.io/) on a coupled-oscillator model with varying output shapes. All timings are **post-JIT** (steady-state), best of 5 iterations, on the same hardware and data.
 
-## Results
+### Results
 
 The benchmark evaluates three methods — `analyze` (Sobol, first/total order only), `analyze` (Sobol with second-order), and `analyze_hdmr` — across four output-shape scenarios, with and without bootstrap confidence intervals.
 

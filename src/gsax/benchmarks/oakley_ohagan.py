@@ -80,14 +80,11 @@ PROBLEM = Problem.from_dict({
 })
 
 
-def evaluate(X: Array, sigma: float = DEFAULT_SIGMA) -> Array:
+def evaluate(X: Array) -> Array:
     """Evaluate the Oakley & O'Hagan function.
 
     Args:
         X: Input array of shape ``(N, 15)`` with ``x_i ~ N(0, sigma^2)``.
-        sigma: Standard deviation of each input (only affects the
-            problem definition, not the function itself — pass the same
-            sigma used when generating samples).
 
     Returns:
         Array of shape ``(N,)`` with function values.
@@ -106,8 +103,8 @@ def evaluate(X: Array, sigma: float = DEFAULT_SIGMA) -> Array:
 
 def analytical_indices(
     sigma: float = DEFAULT_SIGMA,
-) -> tuple[np.ndarray, np.ndarray, float]:
-    """Compute analytical first-order and total-order Sobol indices.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Compute analytical first-order, total-order, and second-order Sobol indices.
 
     Each input enters through the block ``(x, sin x, cos x, x^2)``
     (main effect) plus off-diagonal quadratic cross-terms (pairwise
@@ -119,8 +116,8 @@ def analytical_indices(
         sigma: Standard deviation of each input.
 
     Returns:
-        ``(S1, ST, total_variance)`` where S1 and ST are ``(15,)``
-        arrays and total_variance is the scalar unconditional variance.
+        ``(S1, ST, S2)`` where S1 and ST are ``(15,)`` arrays and S2 is
+        a ``(15, 15)`` symmetric matrix with NaN on the diagonal.
     """
     s2 = sigma**2
     # Gaussian moment-generating-function identities for X ~ N(0, s2):
@@ -158,7 +155,15 @@ def analytical_indices(
     # ST_i = main effect + all pairwise interactions involving input i
     ST = (Vi + Vpair.sum(axis=1)) / total_var
 
-    return S1, ST, total_var
+    # Second-order interaction matrix: S2_ij = Vpair_ij / total_var.
+    S2 = np.full((D, D), np.nan)
+    for j in range(D):
+        for k in range(j + 1, D):
+            val = Vpair[j, k] / total_var
+            S2[j, k] = val
+            S2[k, j] = val
+
+    return S1, ST, S2
 
 
-ANALYTICAL_S1, ANALYTICAL_ST, ANALYTICAL_VAR = analytical_indices()
+ANALYTICAL_S1, ANALYTICAL_ST, ANALYTICAL_S2 = analytical_indices()

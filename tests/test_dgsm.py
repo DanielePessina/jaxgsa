@@ -8,7 +8,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from gsax.benchmarks import ishigami, linear
+from gsax.benchmarks import ishigami, linear, sobol_g
 from gsax.dgsm import analyze
 from gsax.dgsm._poincare import axis_constants, marginal_variance, poincare_constant
 from gsax.problem import GaussianInputSpec, Problem
@@ -19,9 +19,7 @@ A, B = 7.0, 0.1
 
 def _ishigami_single(x):
     """Unbatched Ishigami: (3,) -> (1,)."""
-    return jnp.array(
-        [jnp.sin(x[0]) + A * jnp.sin(x[1]) ** 2 + B * x[2] ** 4 * jnp.sin(x[0])]
-    )
+    return jnp.array([jnp.sin(x[0]) + A * jnp.sin(x[1]) ** 2 + B * x[2] ** 4 * jnp.sin(x[0])])
 
 
 def _linear_single(x):
@@ -34,6 +32,13 @@ def _multi_output(x):
     """Unbatched multi-output: (3,) -> (2,)."""
     c = jnp.array([1.0, 2.0, 3.0])
     return jnp.array([jnp.dot(c, x), jnp.sum(x**2)])
+
+
+def _sobol_g_single(x):
+    """Unbatched Sobol G-function: (8,) -> ()."""
+    a = jnp.array([0.0, 1.0, 4.5, 9.0, 99.0, 99.0, 99.0, 99.0])
+    terms = (jnp.abs(4.0 * x - 2.0) + a) / (1.0 + a)
+    return jnp.prod(terms)
 
 
 @pytest.fixture(scope="module")
@@ -88,9 +93,7 @@ class TestMarginalVariance:
 
     def test_uniform_wide(self):
         spec = ("uniform", -math.pi, math.pi, None, None)
-        assert marginal_variance(spec) == pytest.approx(
-            (2 * math.pi) ** 2 / 12.0
-        )
+        assert marginal_variance(spec) == pytest.approx((2 * math.pi) ** 2 / 12.0)
 
     def test_gaussian(self):
         spec = ("gaussian", 0.0, 2.5, None, None)
@@ -237,7 +240,7 @@ class TestMultiOutput:
 
 class TestScalarOutput:
     def test_scalar_fn(self):
-        """fn returning a scalar () instead of (1,) should work."""
+        """fn returning a scalar () instead of (1,) should squeeze to (D,)."""
 
         def f_scalar(x):
             return jnp.dot(jnp.array([1.0, 2.0, 3.0]), x)
@@ -245,9 +248,13 @@ class TestScalarOutput:
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
         X = sample_mc(problem, N=500, seed=9)
         result = analyze(problem, f_scalar, jnp.asarray(X))
-        assert result.nu.shape == (1, 3)
+        assert result.nu.shape == (3,)
+        assert result.sigma.shape == (3,)
+        assert result.upper_bound.shape == (3,)
+        assert result.lower_bound.shape == (3,)
+        assert result.var_y.shape == ()
         c = np.array([1.0, 2.0, 3.0])
-        np.testing.assert_allclose(np.asarray(result.nu)[0], c**2, atol=1e-4)
+        np.testing.assert_allclose(np.asarray(result.nu), c**2, atol=1e-4)
 
 
 class TestPrecomputed:
@@ -337,8 +344,16 @@ class TestValidation:
 
 
 class TestToDataset:
-    def test_scalar_output(self, linear_dgsm_result):
-        ds = linear_dgsm_result.to_dataset()
+    def test_scalar_output(self):
+        """Truly scalar fn (returning ()) produces a dataset with no output dim."""
+
+        def f_scalar(x):
+            return jnp.dot(jnp.array([1.0, 2.0, 3.0]), x)
+
+        problem = linear.PROBLEM
+        X = sample_mc(problem, N=500, seed=42)
+        result = analyze(problem, f_scalar, jnp.asarray(X))
+        ds = result.to_dataset()
         assert "nu" in ds.data_vars
         assert "sigma" in ds.data_vars
         assert "upper_bound" in ds.data_vars
@@ -364,3 +379,41 @@ class TestToDataset:
         result = analyze(problem, _multi_output, jnp.asarray(X))
         ds = result.to_dataset()
         assert list(ds.coords["output"].values) == ["temp", "pressure"]
+
+
+class TestSobolGDGSM:
+    @pytest.fixture(scope="module")
+    def sobol_g_dgsm_result(self):
+        """DGSM result for Sobol G-function benchmark."""
+        X = sample_mc(sobol_g.PROBLEM, N=50_000, seed=42)
+        return analyze(sobol_g.PROBLEM, _sobol_g_single, jnp.asarray(X))
+
+    def test_upper_bound_holds(self, sobol_g_dgsm_result):
+        upper = np.asarray(sobol_g_dgsm_result.upper_bound)
+        ST = np.array(sobol_g.ANALYTICAL_ST)
+        for i in range(8):
+            assert upper[i] >= ST[i] - 0.02, f"upper[{i}]={upper[i]:.4f} < ST={ST[i]:.4f}"
+
+    def test_lower_bound_holds(self, sobol_g_dgsm_result):
+        lower = np.asarray(sobol_g_dgsm_result.lower_bound)
+        ST = np.array(sobol_g.ANALYTICAL_ST)
+        for i in range(4):
+            assert lower[i] <= ST[i] + 0.02, f"lower[{i}]={lower[i]:.4f} > ST={ST[i]:.4f}"
+
+    def test_ranking(self, sobol_g_dgsm_result):
+        nu = np.asarray(sobol_g_dgsm_result.nu)
+        assert nu[0] > nu[1] > nu[2] > nu[3]
+
+
+def test_single_param():
+    problem = Problem(names=("x",), bounds=((0.0, 1.0),))
+    X = sample_mc(problem, N=5000, seed=1)
+
+    def fn(x):
+        return jnp.sin(x[0])
+
+    result = analyze(problem, fn, jnp.asarray(X))
+    assert result.nu.shape == (1,)
+    assert result.sigma.shape == (1,)
+    assert result.upper_bound.shape == (1,)
+    assert result.lower_bound.shape == (1,)

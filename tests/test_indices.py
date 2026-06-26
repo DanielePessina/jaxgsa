@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from gsax.sobol._indices import first_order, second_order, total_order
 
@@ -31,19 +32,49 @@ def test_second_order_jit():
     assert jnp.isfinite(result)
 
 
-def test_first_order_known_value():
-    # If AB_j == A, then S1_j should be ~0 (no sensitivity to param j)
-    A = jnp.array([1.0, 2.0, 3.0, 4.0, 5.0])
-    B = jnp.array([5.0, 4.0, 3.0, 2.0, 1.0])
-    AB_j = A  # no change → no sensitivity
-    result = first_order(A, AB_j, B)
-    assert jnp.abs(result) < 0.01
+class TestKnownValues:
+    """Tests that verify actual computed values from the Sobol index estimators
+    using large random samples for statistical robustness."""
 
+    def _random_data(self, n: int = 10_000):
+        """Generate reproducible random A and B arrays."""
+        rng = np.random.default_rng(42)
+        A = jnp.array(rng.standard_normal(n))
+        B = jnp.array(rng.standard_normal(n))
+        return A, B
 
-def test_total_order_known_value():
-    # If AB_j == A, then ST_j should be ~0
-    A = jnp.array([1.0, 2.0, 3.0, 4.0, 5.0])
-    B = jnp.array([5.0, 4.0, 3.0, 2.0, 1.0])
-    AB_j = A
-    result = total_order(A, AB_j, B)
-    assert jnp.abs(result) < 0.01
+    def test_first_order_no_sensitivity(self):
+        """When AB_j == A (replacing param j has no effect), S1_j should be ~0."""
+        A, B = self._random_data()
+        result = first_order(A, A, B)
+        assert jnp.abs(result) < 0.01
+
+    def test_first_order_full_sensitivity(self):
+        """When AB_j == B (full replacement), S1_j should be high (>0.8)."""
+        A, B = self._random_data()
+        result = first_order(A, B, B)
+        assert result > 0.8
+
+    def test_total_order_no_sensitivity(self):
+        """When AB_j == A (no change from replacing param j), ST_j should be ~0."""
+        A, B = self._random_data()
+        result = total_order(A, A, B)
+        assert jnp.abs(result) < 0.01
+
+    def test_total_order_full_sensitivity(self):
+        """When AB_j == B (full replacement), ST_j should be high."""
+        A, B = self._random_data()
+        result = total_order(A, B, B)
+        assert result > 0.8
+
+    def test_second_order_independent(self):
+        """When no parameter has any effect, S2 should be ~0.
+
+        If param j has no sensitivity, AB_j = A (replacing col j of A with
+        col j of B has no effect on output) and BA_j = B (replacing col j
+        of B with col j of A has no effect on B-based output).
+        """
+        A, B = self._random_data()
+        # AB_j = A, AB_k = A (no first-order effects), BA_j = B
+        result = second_order(A, A, A, B, B)
+        assert jnp.abs(result) < 0.01

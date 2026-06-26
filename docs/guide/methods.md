@@ -104,7 +104,7 @@ returns endpoint arrays rather than SALib's symmetric confidence widths.
 | $S_T(i)$ | Fraction of output variance due to parameter $i$ including all its interactions. $S_T \geq S_1$ always. |
 | $S_2(i,j)$ | Fraction of output variance due to the pairwise interaction between $i$ and $j$, beyond their individual effects. |
 
-**When to use Sobol':** You can afford the structured Saltelli sampling design ($N(D+2)$ evaluations) and want exact, model-free variance decomposition with independent inputs.
+**When to use Sobol':** You can afford the structured Saltelli sampling design ($N(D+2)$ for first/total only, $N(2D+2)$ with second-order (default)) and want exact, model-free variance decomposition with independent inputs.
 
 ## RS-HDMR (Random Sampling High-Dimensional Model Representation)
 
@@ -159,7 +159,7 @@ before returning them.
 
 ## PCE (Polynomial Chaos Expansion)
 
-PCE takes a spectral approach: it fits an orthogonal polynomial surrogate to `(X, Y)` data and then reads Sobol indices directly from the expansion coefficients (Sudret, 2008). The polynomial basis follows the Wiener-Askey scheme: Legendre polynomials for uniform inputs, Hermite polynomials for Gaussian inputs.
+PCE takes a spectral approach: it fits an orthogonal polynomial surrogate to `(X, Y)` data and then reads Sobol indices directly from the expansion coefficients (Sudret, 2008). The polynomial basis follows the Wiener-Askey scheme: Legendre polynomials for uniform inputs, Hermite polynomials for unbounded Gaussian inputs; truncated Gaussian inputs use Legendre polynomials after CDF mapping to [-1, 1].
 
 ### How to use it
 
@@ -195,10 +195,10 @@ where $V$ is the total variance (via Parseval's theorem) and $M$ is the interfer
 **Total-order index** — the complement of the low-frequency (non-focal) variance:
 
 $$
-S_{T_i} = 1 - \frac{D_t}{V} = 1 - \frac{\sum_{k < \omega_0/2} |F_k|^2}{V}
+S_{T_i} = 1 - \frac{D_t}{V} = 1 - \frac{\sum_{k \leq \lfloor\omega_0/2\rfloor} |F_k|^2}{V}
 $$
 
-The low-frequency content below $\omega_0/2$ is driven entirely by the complementary parameters' slower oscillations, so subtracting it from unity gives the total effect of the focal parameter including all its interactions.
+The low-frequency content at or below $\lfloor\omega_0/2\rfloor$ is driven entirely by the complementary parameters' slower oscillations, so subtracting it from unity gives the total effect of the focal parameter including all its interactions.
 
 ### How to use it
 
@@ -219,7 +219,7 @@ eFAST does **not** produce second-order ($S_2$) interaction indices. If pairwise
 - You only need S1 and ST (no S2 required)
 - You want a simpler sampling design without the Saltelli cross-matrix structure
 - You are screening a large number of parameters
-- The total cost is $N \times D$ evaluations, which can be lower than Saltelli's $N(D+2)$ when $N$ is chosen smaller than the Saltelli base count
+- The total cost is $N \times D$ evaluations, which can be lower than Saltelli's $N(D+2)$ for first/total only, $N(2D+2)$ with second-order (default), when $N$ is chosen smaller than the Saltelli base count
 
 ### Reference
 
@@ -313,14 +313,14 @@ Alternatively, if the Jacobian has been computed externally (e.g. for non-JAX mo
 
 | Consideration | Sobol' | HDMR | PCE | eFAST | DGSM |
 |---------------|--------|------|-----|-------|------|
-| Sampling requirement | Structured Saltelli design, $N(D+2)$ evaluations | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Search curves, $N \times D$ evaluations | Plain MC, $N$ evaluations + autodiff |
+| Sampling requirement | Structured Saltelli design, $N(2D+2)$ evaluations (default) | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Search curves, $N \times D$ evaluations | Plain MC, $N$ evaluations + autodiff |
 | Input independence | Assumed | Handled via ANCOVA decomposition | Assumed | Assumed | Assumed |
 | Surrogate/emulator | No | Yes (`emulate_hdmr`) | Yes (`emulate_pce`) | No | No |
 | Accuracy | Exact (given enough samples) | Depends on B-spline fit quality | Depends on polynomial fit quality | Exact (given enough samples) | Bounds on $S_T$, not exact indices |
 | Second-order indices | Direct estimation from cross-matrices | From interaction component functions | Analytical from coefficients | Not available | Not available |
 | Interaction detection | Via $S_2$ and the gap $S_T - S_1$ | Via explicit interaction component functions | Via $S_2$ from coefficients | Via the gap $S_T - S_1$ only | Not available (bounds only) |
 | Output shapes | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar only | Scalar, multi-output, time-series | Scalar, multi-output |
-| Input distributions | Uniform + Gaussian | Uniform only | Uniform + Gaussian | Uniform + Gaussian | Uniform + Gaussian (+ truncated Normal) |
+| Input distributions | Uniform + Gaussian | Any (via CDF mapping) | Uniform + Gaussian | Uniform + Gaussian | Uniform + Gaussian (+ truncated Normal) |
 
 ## Output Shapes
 

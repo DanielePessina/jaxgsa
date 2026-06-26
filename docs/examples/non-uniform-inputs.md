@@ -104,8 +104,8 @@ Expected behavior:
   expected and signals that the problem is not finite-bounds-only anymore.
 - Save/load still works for mixed problems. The JSON metadata records the
   declared input specs so `gsax.load()` can reconstruct the same marginals.
-- `analyze_hdmr()` does not yet support non-uniform specs, even if a Gaussian
-  also has finite truncation bounds.
+- `analyze_hdmr()` supports non-uniform inputs (Gaussian, truncated Gaussian)
+  via CDF mapping to `[0, 1]` before surrogate fitting.
 
 ## See also
 

@@ -83,11 +83,9 @@ def _ishigami_md(mo):
 @app.cell
 def _ishigami_fn(jnp):
     def ishigami_fn(x):
-        """Unbatched Ishigami: (3,) -> (1,)."""
+        """Unbatched Ishigami: (3,) -> ()."""
         A, B = 7.0, 0.1
-        return jnp.array([
-            jnp.sin(x[0]) + A * jnp.sin(x[1]) ** 2 + B * x[2] ** 4 * jnp.sin(x[0])
-        ])
+        return jnp.sin(x[0]) + A * jnp.sin(x[1]) ** 2 + B * x[2] ** 4 * jnp.sin(x[0])
 
     return (ishigami_fn,)
 
@@ -96,72 +94,50 @@ def _ishigami_fn(jnp):
 def _ishigami_dgsm(gsax, ishigami, ishigami_fn, jnp, sample_mc):
     X_ish = sample_mc(ishigami.PROBLEM, N=50_000, seed=42)
     result_ish = gsax.analyze_dgsm(ishigami.PROBLEM, ishigami_fn, jnp.asarray(X_ish))
-    return X_ish, result_ish
+    return (result_ish,)
 
 
 @app.cell(hide_code=True)
 def _ishigami_plot(ishigami, np, plt, result_ish):
-    ST_analytical = np.array(ishigami.ANALYTICAL_ST)
-    upper = np.asarray(result_ish.upper_bound)[0]
-    lower = np.asarray(result_ish.lower_bound)[0]
-    names = list(ishigami.PROBLEM.names)
+    _st = np.array(ishigami.ANALYTICAL_ST)
+    _ub = np.asarray(result_ish.upper_bound)
+    _lb = np.asarray(result_ish.lower_bound)
+    _names = list(ishigami.PROBLEM.names)
 
-    fig, ax = plt.subplots(figsize=(7, 4.5), dpi=150)
-    x_pos = np.arange(len(names))
-    bar_width = 0.25
+    _fig, _ax = plt.subplots(figsize=(7, 4.5), dpi=150)
+    _xp = np.arange(len(_names))
+    _bw = 0.25
 
-    ax.bar(
-        x_pos - bar_width,
-        lower,
-        bar_width,
-        label="Lower bound",
-        color="#2196F3",
-        alpha=0.85,
-    )
-    ax.bar(
-        x_pos,
-        ST_analytical,
-        bar_width,
-        label="Analytical $S_T$",
-        color="#4CAF50",
-        alpha=0.85,
-    )
-    ax.bar(
-        x_pos + bar_width,
-        upper,
-        bar_width,
-        label="Upper bound",
-        color="#FF9800",
-        alpha=0.85,
-    )
+    _ax.bar(_xp - _bw, _lb, _bw, label="Lower bound", color="#2196F3", alpha=0.85)
+    _ax.bar(_xp, _st, _bw, label="Analytical $S_T$", color="#4CAF50", alpha=0.85)
+    _ax.bar(_xp + _bw, _ub, _bw, label="Upper bound", color="#FF9800", alpha=0.85)
 
-    ax.set_xlabel("Parameter")
-    ax.set_ylabel("Sensitivity index")
-    ax.set_title("Ishigami: DGSM bounds vs analytical $S_T$")
-    ax.set_xticks(x_pos)
-    ax.set_xticklabels(names)
-    ax.legend()
-    ax.set_ylim(0, max(upper) * 1.15)
-    fig.tight_layout()
-    fig
-
-    return (fig,)
+    _ax.set_xlabel("Parameter")
+    _ax.set_ylabel("Sensitivity index")
+    _ax.set_title("Ishigami: DGSM bounds vs analytical $S_T$")
+    _ax.set_xticks(_xp)
+    _ax.set_xticklabels(_names)
+    _ax.legend()
+    _ax.set_ylim(0, max(_ub) * 1.15)
+    _fig.tight_layout()
+    _fig
+    return
 
 
 @app.cell(hide_code=True)
 def _ishigami_table(ishigami, mo, np, result_ish):
-    ST = np.array(ishigami.ANALYTICAL_ST)
-    nu = np.asarray(result_ish.nu)[0]
-    sigma = np.asarray(result_ish.sigma)[0]
-    lower = np.asarray(result_ish.lower_bound)[0]
-    upper = np.asarray(result_ish.upper_bound)[0]
-    names = list(ishigami.PROBLEM.names)
+    _st = np.array(ishigami.ANALYTICAL_ST)
+    _nu = np.asarray(result_ish.nu)
+    _sigma = np.asarray(result_ish.sigma)
+    _lb = np.asarray(result_ish.lower_bound)
+    _ub = np.asarray(result_ish.upper_bound)
+    _names = list(ishigami.PROBLEM.names)
 
     rows = []
-    for i, name in enumerate(names):
+    for i, name in enumerate(_names):
         rows.append(
-            f"| {name} | {nu[i]:.4f} | {sigma[i]:+.4f} | "
-            f"{lower[i]:.4f} | {ST[i]:.4f} | {upper[i]:.4f} |"
+            f"| {name} | {_nu[i]:.4f} | {_sigma[i]:+.4f} | "
+            f"{_lb[i]:.4f} | {_st[i]:.4f} | {_ub[i]:.4f} |"
         )
     table = (
         "| Param | $\\nu_i$ | $\\sigma_i$ | Lower | $S_T$ | Upper |\n"
@@ -197,9 +173,9 @@ def _linear_md(mo):
 @app.cell
 def _linear_fn(jnp):
     def linear_fn(x):
-        """Unbatched linear: (3,) -> (1,)."""
+        """Unbatched linear: (3,) -> ()."""
         c = jnp.array([1.0, 2.0, 3.0])
-        return jnp.array([jnp.dot(c, x)])
+        return jnp.dot(c, x)
 
     return (linear_fn,)
 
@@ -208,56 +184,34 @@ def _linear_fn(jnp):
 def _linear_dgsm(gsax, jnp, linear, linear_fn, sample_mc):
     X_lin = sample_mc(linear.PROBLEM, N=10_000, seed=123)
     result_lin = gsax.analyze_dgsm(linear.PROBLEM, linear_fn, jnp.asarray(X_lin))
-    return X_lin, result_lin
+    return (result_lin,)
 
 
 @app.cell(hide_code=True)
 def _linear_plot(linear, np, plt, result_lin):
-    ST_analytical = np.array(linear.ANALYTICAL_ST)
-    upper = np.asarray(result_lin.upper_bound)[0]
-    lower = np.asarray(result_lin.lower_bound)[0]
-    names = list(linear.PROBLEM.names)
+    _st = np.array(linear.ANALYTICAL_ST)
+    _ub = np.asarray(result_lin.upper_bound)
+    _lb = np.asarray(result_lin.lower_bound)
+    _names = list(linear.PROBLEM.names)
 
-    fig, ax = plt.subplots(figsize=(7, 4.5), dpi=150)
-    x_pos = np.arange(len(names))
-    bar_width = 0.25
+    _fig, _ax = plt.subplots(figsize=(7, 4.5), dpi=150)
+    _xp = np.arange(len(_names))
+    _bw = 0.25
 
-    ax.bar(
-        x_pos - bar_width,
-        lower,
-        bar_width,
-        label="Lower bound",
-        color="#2196F3",
-        alpha=0.85,
-    )
-    ax.bar(
-        x_pos,
-        ST_analytical,
-        bar_width,
-        label="Analytical $S_T$",
-        color="#4CAF50",
-        alpha=0.85,
-    )
-    ax.bar(
-        x_pos + bar_width,
-        upper,
-        bar_width,
-        label="Upper bound",
-        color="#FF9800",
-        alpha=0.85,
-    )
+    _ax.bar(_xp - _bw, _lb, _bw, label="Lower bound", color="#2196F3", alpha=0.85)
+    _ax.bar(_xp, _st, _bw, label="Analytical $S_T$", color="#4CAF50", alpha=0.85)
+    _ax.bar(_xp + _bw, _ub, _bw, label="Upper bound", color="#FF9800", alpha=0.85)
 
-    ax.set_xlabel("Parameter")
-    ax.set_ylabel("Sensitivity index")
-    ax.set_title("Linear model: DGSM bounds collapse to exact $S_T$")
-    ax.set_xticks(x_pos)
-    ax.set_xticklabels(names)
-    ax.legend()
-    ax.set_ylim(0, max(upper) * 1.15)
-    fig.tight_layout()
-    fig
-
-    return (fig,)
+    _ax.set_xlabel("Parameter")
+    _ax.set_ylabel("Sensitivity index")
+    _ax.set_title("Linear model: DGSM bounds collapse to exact $S_T$")
+    _ax.set_xticks(_xp)
+    _ax.set_xticklabels(_names)
+    _ax.legend()
+    _ax.set_ylim(0, max(_ub) * 1.15)
+    _fig.tight_layout()
+    _fig
+    return
 
 
 @app.cell(hide_code=True)
@@ -295,8 +249,8 @@ def _outro(mo):
        derivatives simultaneously — no structured sampling design needed.
     2. **Bounds**: The Poincare upper bound and Kucherenko-Song lower
        bound bracket the total Sobol index without computing it exactly.
-    3. **Multi-output**: All measures have shape $(T, D)$, handling
-       scalar and time-series outputs uniformly.
+    3. **Multi-output**: All measures have shape $(K, D)$, handling
+       scalar and multi-output models uniformly.
 
     For exact Sobol indices, use `gsax.analyze()` (Saltelli sampling)
     or `gsax.analyze_pce()` (polynomial chaos expansion).

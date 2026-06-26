@@ -37,7 +37,7 @@ class TestIshigami:
             S2[np.triu_indices_from(S2, k=1)],
             S2[(np.triu_indices_from(S2, k=1)[1], np.triu_indices_from(S2, k=1)[0])],
         )
-        expected_02 = ishigami.ANALYTICAL_S2[(0, 2)]
+        expected_02 = ishigami.ANALYTICAL_S2[0, 2]
         rel = abs(S2[0, 2] - expected_02) / expected_02
         assert rel < 0.10, f"S2[0,2]={S2[0, 2]:.4f}, expected {expected_02}"
 
@@ -169,8 +169,11 @@ class TestOakleyOHagan:
 
     def test_analytical_matches_published(self):
         """Analytical closed-form S1 matches Oakley & O'Hagan (2004) Table."""
-        S1, _, _ = oakley_ohagan.analytical_indices(sigma=1.0)
+        S1, _, S2 = oakley_ohagan.analytical_indices(sigma=1.0)
         np.testing.assert_allclose(S1, oakley_ohagan.PUBLISHED_S1, atol=2e-5)
+        # S2 should be a (15, 15) matrix with NaN diagonal
+        assert S2.shape == (15, 15)
+        assert np.all(np.isnan(np.diag(S2)))
 
     def test_ranking_preserved(self, oakley_sobol_result):
         """Most/least important parameters should match analytical ranking."""

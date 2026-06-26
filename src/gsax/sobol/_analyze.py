@@ -107,10 +107,9 @@ def _count_nans(
         "ST": int(jnp.sum(jnp.isnan(ST))),
     }
     if S2 is not None:
-        # Diagonal of S2 is intentionally NaN (self-interaction undefined),
-        # so only count off-diagonal NaNs as genuine computation failures.
-        off_diag_mask = ~jnp.eye(S2.shape[-1], dtype=bool)
-        counts["S2"] = int(jnp.sum(jnp.isnan(S2) & off_diag_mask))
+        D = S2.shape[-1]
+        upper = jnp.triu(jnp.ones((*S2.shape[:-2], D, D), dtype=bool), k=1)
+        counts["S2"] = int(jnp.sum(jnp.isnan(S2) & upper))
     return counts
 
 

@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from gsax.benchmarks import ishigami, linear
+from gsax.benchmarks import ishigami, linear, sobol_g
 from gsax.efast import EFASTResult, analyze, sample
 from gsax.efast._analyze import _compute_indices
 from gsax.efast._sampling import _assign_frequencies
@@ -113,7 +113,7 @@ class TestAnalysis:
         assert ishigami_efast_result.ST.shape == (3,)
 
     def test_no_s2(self, ishigami_efast_result):
-        assert not hasattr(ishigami_efast_result, "S2")
+        assert set(vars(ishigami_efast_result).keys()) == {"S1", "ST", "problem", "omega_0", "M"}
 
     def test_omega_and_m(self, ishigami_efast_result):
         assert ishigami_efast_result.M == 4
@@ -154,8 +154,8 @@ class TestComputeIndices:
         """Constant Y has no meaningful variance; indices should be near zero or NaN."""
         Y = jnp.ones(257)
         s1, st = _compute_indices(Y, 257, 4, 32)
-        assert jnp.isnan(s1) or abs(float(s1)) < 0.2
-        assert jnp.isnan(st) or float(st) < 1.1
+        assert jnp.isnan(s1) or abs(float(s1)) < 0.1
+        assert jnp.isnan(st) or float(st) < 1.0
 
     def test_single_frequency(self):
         N = 257
@@ -318,3 +318,58 @@ class TestToDataset:
         assert "S1" in ds.data_vars
         assert "ST" in ds.data_vars
         assert list(ds.coords["param"].values) == list(ishigami.PROBLEM.names)
+
+
+class TestSobolGAccuracy:
+    """Validate eFAST against the Sobol G-function benchmark (8-D)."""
+
+    @pytest.fixture(scope="module")
+    def sobol_g_result(self):
+        """eFAST result for Sobol G-function benchmark."""
+        X = sample(sobol_g.PROBLEM, N=4096, M=4, seed=42)
+        Y = sobol_g.evaluate(jnp.asarray(X))
+        return analyze(sobol_g.PROBLEM, jnp.asarray(Y), M=4)
+
+    def test_s1(self, sobol_g_result):
+        S1 = np.asarray(sobol_g_result.S1)
+        analytical = np.asarray(sobol_g.ANALYTICAL_S1)
+        for i in range(len(analytical)):
+            if analytical[i] > 0.01:
+                rel = abs(S1[i] - analytical[i]) / analytical[i]
+                assert rel < 0.20, (
+                    f"S1[{i}]={S1[i]:.4f}, expected {analytical[i]:.4f}, "
+                    f"rel error {rel:.2%}"
+                )
+            else:
+                assert abs(S1[i]) < 0.02, (
+                    f"S1[{i}]={S1[i]:.4f}, expected ~0"
+                )
+
+    def test_st(self, sobol_g_result):
+        ST = np.asarray(sobol_g_result.ST)
+        analytical = np.asarray(sobol_g.ANALYTICAL_ST)
+        for i in range(len(analytical)):
+            if analytical[i] > 0.01:
+                rel = abs(ST[i] - analytical[i]) / analytical[i]
+                assert rel < 0.20, (
+                    f"ST[{i}]={ST[i]:.4f}, expected {analytical[i]:.4f}, "
+                    f"rel error {rel:.2%}"
+                )
+
+    def test_ranking(self, sobol_g_result):
+        """First three params should be ordered by importance (a_j = 0, 1, 4.5)."""
+        S1 = np.asarray(sobol_g_result.S1)
+        assert S1[0] > S1[1], f"S1[0]={S1[0]:.4f} should be > S1[1]={S1[1]:.4f}"
+        assert S1[1] > S1[2], f"S1[1]={S1[1]:.4f} should be > S1[2]={S1[2]:.4f}"
+
+
+def test_single_param():
+    """D=1 edge case: single parameter problem."""
+    problem = Problem(names=("x",), bounds=((0.0, 1.0),))
+    X = sample(problem, N=257, M=4, seed=1)
+    Y = jnp.sin(jnp.asarray(X[:, 0]))
+    result = analyze(problem, Y, M=4)
+    assert result.S1.shape == (1,)
+    assert result.ST.shape == (1,)
+    assert float(result.S1[0]) > 0.5
+    assert float(result.ST[0]) > 0.5

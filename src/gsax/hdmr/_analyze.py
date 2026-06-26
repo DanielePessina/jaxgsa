@@ -26,11 +26,6 @@ from gsax.hdmr._result import HDMREmulator, HDMRResult
 from gsax.problem import Problem
 
 
-def _normalize_X(X: Array, problem: Problem) -> Array:
-    """Normalize X to [0, 1] via per-dimension marginal CDF."""
-    return cdf_to_unit_interval(X, problem)
-
-
 @lru_cache(maxsize=None)
 def _get_hdmr_static_data(D: int, maxorder: int, m: int) -> tuple:
     """Cache host-side HDMR term metadata and basis index tables."""
@@ -254,7 +249,7 @@ def analyze_hdmr(
 
     # CDF transform: maps each dimension's marginal to U[0,1] so the B-spline
     # basis operates on a uniform domain regardless of the original distribution.
-    X_n = _normalize_X(X, problem)
+    X_n = cdf_to_unit_interval(X, problem)
 
     # Build B-spline bases for all orders. Bases are shared across output
     # slices (only Y changes), so they are computed once here.
@@ -373,22 +368,15 @@ def analyze_hdmr(
         squeeze_time,
         squeeze_output,
     )
-    y_mean_out = _reshape_emulator_value(
-        y_mean.reshape(T * K_out, 1),
-        T,
-        K_out,
-        squeeze_time,
-        squeeze_output,
-    )
-    y_mean_out = jnp.squeeze(y_mean_out, axis=-1)
-    y_std_out = _reshape_emulator_value(
-        y_std.reshape(T * K_out, 1),
-        T,
-        K_out,
-        squeeze_time,
-        squeeze_output,
-    )
-    y_std_out = jnp.squeeze(y_std_out, axis=-1)
+    if squeeze_time and squeeze_output:
+        y_mean_out = y_mean[0, 0]
+        y_std_out = y_std[0, 0]
+    elif squeeze_time:
+        y_mean_out = y_mean[0]
+        y_std_out = y_std[0]
+    else:
+        y_mean_out = y_mean
+        y_std_out = y_std
 
     # Bundle all fitted state needed to reconstruct predictions at new points.
     emulator: HDMREmulator = {
@@ -469,7 +457,7 @@ def emulate_hdmr(result: HDMRResult, X_new: Array) -> Array:
     y_std = em["y_std"]
 
     # Apply the same CDF -> [0,1] transform used during fitting.
-    X_n = _normalize_X(X_new, result.problem)
+    X_n = cdf_to_unit_interval(X_new, result.problem)
 
     # Reconstruct prediction as f0 + sum of component functions.
     # Start with first-order: sum_j B1_j @ C1_j.

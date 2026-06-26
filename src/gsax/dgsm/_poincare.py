@@ -13,7 +13,7 @@ Poincare constants by marginal type:
 
 References:
     Sobol' & Kucherenko (2009). Math. Comp. Sim. 79:3009-3017.
-    Lamboni et al. (2013). Math. Comp. Sim. 93:53-61.
+    Lamboni et al. (2013). Math. Comp. Sim. 87:44-54.
     Roustant et al. (2017). Stat. Comp. 27:879-894.
 """
 

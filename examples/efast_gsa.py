@@ -54,7 +54,6 @@ def _imports():
     from gsax.benchmarks import ishigami, sobol_g
 
     plt.rcParams["figure.dpi"] = 150
-
     return Problem, efast, ishigami, jnp, mo, np, plt, sobol_g
 
 
@@ -88,12 +87,11 @@ def _ishigami_analysis(efast, ishigami, jnp):
 
     ishi_result = efast.analyze(ishi_problem, Y_ishi, M=4)
     print(ishi_result)
-
     return ishi_problem, ishi_result
 
 
 @app.cell
-def _ishigami_plot(ishigami, ishi_problem, ishi_result, np, plt):
+def _ishigami_plot(ishi_problem, ishi_result, ishigami, np, plt):
     _names = list(ishi_problem.names)
     _s1 = np.asarray(ishi_result.S1)
     _st = np.asarray(ishi_result.ST)
@@ -169,7 +167,6 @@ def _sobol_g_analysis(efast, jnp, sobol_g):
 
     sg_result = efast.analyze(sg_problem, Y_sg, M=4)
     print(sg_result)
-
     return sg_problem, sg_result
 
 
@@ -254,7 +251,6 @@ def _multi_output_analysis(efast, ishigami, jnp):
 
     multi_result = efast.analyze(multi_problem, Y_multi, M=4)
     print(multi_result)
-
     return multi_problem, multi_result
 
 
@@ -357,7 +353,6 @@ def _timeseries_analysis(damped_oscillator, efast, jnp, ts_problem, ts_times):
 
     ts_result = efast.analyze(ts_problem, Y_ts, M=4)
     print(ts_result)
-
     return (ts_result,)
 
 
@@ -441,8 +436,7 @@ def _xarray_export(ishi_result, np, ts_result, ts_times):
 
     ds_ts = ts_result.to_dataset(time_coords=np.asarray(ts_times))
     print("Time-series dataset:\n", ds_ts)
-
-    return ds_scalar, ds_ts
+    return
 
 
 @app.cell(hide_code=True)

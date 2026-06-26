@@ -14,16 +14,16 @@ from gsax.problem import Problem
 class DGSMResult:
     """Derivative-based global sensitivity measures and Sobol index bounds.
 
-    All index arrays have shape (T, D) where T is the number of outputs
-    and D is the number of input parameters. For scalar-output models,
-    T = 1.
+    For scalar-output models, index arrays have shape ``(D,)`` and
+    ``var_y`` is a scalar.  For multi-output models, index arrays have
+    shape ``(K, D)`` and ``var_y`` has shape ``(K,)``.
 
     Attributes:
         nu: E[(df/dx_i)^2], the DGSM importance measure.
         sigma: E[df/dx_i], the mean partial derivative.
         upper_bound: C_i * nu_i / Var(Y), Poincare upper bound on ST.
         lower_bound: Var_i * sigma_i^2 / Var(Y), Kucherenko-Song lower bound on ST.
-        var_y: Output variance, shape (T,).
+        var_y: Output variance.
         problem: Problem definition used for the analysis.
     """
 
@@ -39,28 +39,33 @@ class DGSMResult:
 
         Returns:
             Dataset with variables nu, sigma, upper_bound, lower_bound.
-            For scalar output (T=1), dimensions are (param,).
-            For multi-output (T>1), dimensions are (output, param).
+            For scalar output, dimensions are ``(param,)``.
+            For multi-output, dimensions are ``(output, param)``.
         """
         param_names = list(self.problem.names)
-        T = np.asarray(self.nu).shape[0]
+        nu_arr = np.asarray(self.nu)
+        ndim = nu_arr.ndim
 
-        output_coord = _default_output_names(T, self.problem)
-
-        if T == 1:
+        if ndim == 1:
+            # Scalar output: fields are (D,)
             coords: dict = {"param": param_names}
             data_vars: dict = {
-                "nu": ("param", np.asarray(self.nu)[0]),
-                "sigma": ("param", np.asarray(self.sigma)[0]),
-                "upper_bound": ("param", np.asarray(self.upper_bound)[0]),
-                "lower_bound": ("param", np.asarray(self.lower_bound)[0]),
+                "nu": ("param", nu_arr),
+                "sigma": ("param", np.asarray(self.sigma)),
+                "upper_bound": ("param", np.asarray(self.upper_bound)),
+                "lower_bound": ("param", np.asarray(self.lower_bound)),
             }
-        else:
+        elif ndim == 2:
+            # Multi-output: fields are (K, D)
+            K = nu_arr.shape[0]
+            output_coord = _default_output_names(K, self.problem)
             coords = {"output": output_coord, "param": param_names}
             data_vars = {
-                "nu": (("output", "param"), np.asarray(self.nu)),
+                "nu": (("output", "param"), nu_arr),
                 "sigma": (("output", "param"), np.asarray(self.sigma)),
                 "upper_bound": (("output", "param"), np.asarray(self.upper_bound)),
                 "lower_bound": (("output", "param"), np.asarray(self.lower_bound)),
             }
+        else:
+            raise ValueError(f"Unexpected nu.ndim={ndim}")
         return xr.Dataset(data_vars, coords=coords)

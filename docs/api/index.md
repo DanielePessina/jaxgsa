@@ -196,6 +196,7 @@ def sample(
     calc_second_order: bool = True,
     scramble: bool = True,
     seed: int | np.random.Generator | None = None,
+    base_n: int | None = None,
     verbose: bool = True,
 ) -> SamplingResult
 ```
@@ -207,6 +208,7 @@ def sample(
 | `calc_second_order` | `bool` | `True` | Include BA blocks so `S2` can be computed later. |
 | `scramble` | `bool` | `True` | Apply Owen scrambling to the Sobol sequence. |
 | `seed` | `int \| np.random.Generator \| None` | `None` | Seed or NumPy generator for reproducibility. |
+| `base_n` | `int \| None` | `None` | Explicit Sobol base count (power of 2). When `None`, derived automatically from `n_samples`. |
 | `verbose` | `bool` | `True` | Print a compact sampling summary. |
 
 Returns: [`SamplingResult`](#samplingresult)
@@ -513,8 +515,8 @@ def analyze_hdmr(
 Validation and behavior:
 
 - `X.shape[1]` must match `problem.num_vars`.
-- `problem` must have finite uniform bounds; non-uniform specs are not
-  supported by HDMR in this version.
+- Non-uniform inputs (Gaussian, truncated Gaussian) are supported via CDF
+  mapping to `[0, 1]` before surrogate fitting.
 - At least 300 rows are required or `ValueError` is raised.
 - `maxorder` must be 1, 2, or 3.
 - When `D == 2`, `maxorder` cannot exceed 2.
@@ -1049,14 +1051,17 @@ Minimal example:
 ```python
 import jax.numpy as jnp
 import gsax
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
+from gsax.benchmarks.ishigami import PROBLEM
+
+def ishigami(x):
+    return jnp.sin(x[0]) + 7.0 * jnp.sin(x[1])**2 + 0.1 * x[2]**4 * jnp.sin(x[0])
 
 X = gsax.sample_mc(PROBLEM, N=10000, seed=42)
-result = gsax.analyze_dgsm(PROBLEM, evaluate, jnp.asarray(X))
+result = gsax.analyze_dgsm(PROBLEM, ishigami, jnp.asarray(X))
 
-print(result.nu)           # (1, 3) — importance measures
-print(result.upper_bound)  # (1, 3) — Poincaré upper bounds on ST
-print(result.lower_bound)  # (1, 3) — Kucherenko-Song lower bounds on ST
+print(result.nu)           # (3,) — importance measures
+print(result.upper_bound)  # (3,) — Poincaré upper bounds on ST
+print(result.lower_bound)  # (3,) — Kucherenko-Song lower bounds on ST
 ```
 
 <a id="dgsmresult"></a>
@@ -1077,15 +1082,15 @@ class DGSMResult:
 
 | Field | Shape | Description |
 | --- | --- | --- |
-| `nu` | `(T, D)` | $\mathbb{E}[(\partial f / \partial X_i)^2]$, the DGSM importance measure. |
-| `sigma` | `(T, D)` | $\mathbb{E}[\partial f / \partial X_i]$, the mean partial derivative. |
-| `upper_bound` | `(T, D)` | $C_i \cdot \nu_i / \mathrm{Var}(Y)$, Poincaré upper bound on $S_T$. |
-| `lower_bound` | `(T, D)` | $\mathrm{Var}(X_i) \cdot \sigma_i^2 / \mathrm{Var}(Y)$, Kucherenko–Song lower bound on $S_T$. |
-| `var_y` | `(T,)` | Output variance per component. |
+| `nu` | `(D,)` / `(K, D)` | $\mathbb{E}[(\partial f / \partial X_i)^2]$, the DGSM importance measure. |
+| `sigma` | `(D,)` / `(K, D)` | $\mathbb{E}[\partial f / \partial X_i]$, the mean partial derivative. |
+| `upper_bound` | `(D,)` / `(K, D)` | $C_i \cdot \nu_i / \mathrm{Var}(Y)$, Poincaré upper bound on $S_T$. |
+| `lower_bound` | `(D,)` / `(K, D)` | $\mathrm{Var}(X_i) \cdot \sigma_i^2 / \mathrm{Var}(Y)$, Kucherenko–Song lower bound on $S_T$. |
+| `var_y` | `()` / `(K,)` | Output variance (scalar for single output, per-component for multi-output). |
 | `problem` | `Problem` | Problem definition used for the analysis. |
 
-Shape contract: `T` is the number of output components. For scalar-output
-models (`fn: (D,) -> ()`), `T = 1`.
+Shape contract: scalar-output models (`fn: (D,) -> ()`) produce `(D,)` index
+arrays; multi-output models (`fn: (D,) -> (K,)`) produce `(K, D)`.
 
 <a id="dgsmresult-to_dataset"></a>
 #### `DGSMResult.to_dataset()`
@@ -1109,14 +1114,63 @@ Minimal example:
 ```python
 import jax.numpy as jnp
 import gsax
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
+from gsax.benchmarks.ishigami import PROBLEM
+
+def ishigami(x):
+    return jnp.sin(x[0]) + 7.0 * jnp.sin(x[1])**2 + 0.1 * x[2]**4 * jnp.sin(x[0])
 
 X = gsax.sample_mc(PROBLEM, N=10000, seed=42)
-result = gsax.analyze_dgsm(PROBLEM, evaluate, jnp.asarray(X))
+result = gsax.analyze_dgsm(PROBLEM, ishigami, jnp.asarray(X))
 ds = result.to_dataset()
 print(ds)
 ```
 
+### `poincare_constant()`
+
+Compute the Poincare constant $C(p)$ for a single marginal distribution.
+
+```python
+def poincare_constant(
+    spec: _NormalizedInputSpec,
+    *,
+    grid: int = 512,
+) -> float
+```
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `spec` | `_NormalizedInputSpec` | required | Normalized input spec tuple `(dist, first, second, low, high)`. |
+| `grid` | `int` | `512` | Number of P1 elements for truncated-Normal spectral solve. |
+
+Poincare constants by distribution:
+
+| Distribution | $C_i$ |
+| --- | --- |
+| Uniform $[a, b]$ | $(b - a)^2 / \pi^2$ |
+| Gaussian $\mathcal{N}(\mu, \sigma^2)$ | $\sigma^2$ |
+| Truncated Normal | Spectral solve (P1 FEM Neumann eigenproblem) |
+
+### `axis_constants()`
+
+Compute per-axis Poincare constants and marginal variances from a `Problem`.
+
+```python
+def axis_constants(problem: Problem) -> tuple[np.ndarray, np.ndarray]
+```
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `problem` | `Problem` | Problem definition with D parameters. |
+
+Returns a tuple `(C, Var)` where both arrays have shape `(D,)`:
+
+- `C[i]` is the Poincare constant of the i-th input's marginal.
+- `Var[i]` is the marginal variance of the i-th input.
+
+These are used internally by `analyze_dgsm()` to compute the upper and lower
+bounds on total Sobol indices.
+
 Related links:
 
+- [DGSM Example](/examples/dgsm)
 - [Methods](/guide/methods)

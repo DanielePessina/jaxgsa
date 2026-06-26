@@ -4,6 +4,8 @@ A standard benchmark with 3 input parameters (x1, x2, x3) and known
 analytical Sobol indices, commonly used to validate sensitivity analysis methods.
 """
 
+from __future__ import annotations
+
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
@@ -20,13 +22,74 @@ PROBLEM = Problem.from_dict(
     }
 )
 
-# Analytical solutions for A=7, B=0.1.
+
+def analytical_indices(
+    A: float = 7.0, B: float = 0.1
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Compute analytical first-order, total-order, and second-order Sobol indices.
+
+    For the Ishigami function ``f(x) = sin(x1) + A*sin^2(x2) + B*x3^4*sin(x1)``
+    with ``x_i ~ U[-pi, pi]``, the ANOVA decomposition is available in closed
+    form using Gaussian moment identities for uniform trig integrals.
+
+    The main-effect variances are:
+
+    - ``V1 = (1 + B*pi^4/5)^2 / 2``
+    - ``V2 = A^2 / 8``
+    - ``V3 = 0``
+
+    The only pairwise interaction is between x1 and x3:
+
+    - ``V13 = 8 * B^2 * pi^8 / 225``
+
+    And the total variance:
+
+    - ``V = 1/2 + B*pi^4/5 + B^2*pi^8/18 + A^2/8``
+
+    Args:
+        A: Model parameter controlling the second-order term.
+        B: Model parameter controlling the higher-order interaction term.
+
+    Returns:
+        ``(S1, ST, S2)`` where S1 and ST are ``(3,)`` arrays and S2 is
+        a ``(3, 3)`` symmetric matrix with NaN on the diagonal.
+    """
+    pi4 = np.pi**4
+    pi8 = np.pi**8
+
+    # Main-effect variances from the ANOVA decomposition.
+    V1 = 0.5 * (1.0 + B * pi4 / 5.0) ** 2
+    V2 = A**2 / 8.0
+    V3 = 0.0
+
+    # x1-x3 interaction variance (the B*x3^4*sin(x1) cross-term).
+    V13 = 8.0 * B**2 * pi8 / 225.0
+
+    # Total variance = sum of all partial variances.
+    VY = 0.5 + B * pi4 / 5.0 + B**2 * pi8 / 18.0 + A**2 / 8.0
+
+    Vi = np.array([V1, V2, V3])
+    S1 = Vi / VY
+
+    # Total-order: main effect + all interactions involving that input.
+    ST = np.array([V1 + V13, V2, V13]) / VY
+
+    # Second-order interaction matrix: only (0, 2) and (2, 0) are nonzero.
+    S2 = np.full((3, 3), np.nan)
+    S2[0, 1] = 0.0
+    S2[1, 0] = 0.0
+    S2[0, 2] = V13 / VY
+    S2[2, 0] = V13 / VY
+    S2[1, 2] = 0.0
+    S2[2, 1] = 0.0
+
+    return S1, ST, S2
+
+
+# Precomputed analytical solutions for A=7, B=0.1.
 # x3 has zero first-order effect (enters only through the B*x3^4*sin(x1) interaction),
 # making it a good test for methods that must distinguish S1=0 from ST>0.
-ANALYTICAL_S1 = [0.3139, 0.4424, 0.0]
-ANALYTICAL_ST = [0.5576, 0.4424, 0.2437]
-# Only the x1-x3 pair interacts (via the B*x3^4*sin(x1) term); all other pairs are zero.
-ANALYTICAL_S2 = {(0, 2): 0.2437}
+ANALYTICAL_S1, ANALYTICAL_ST, ANALYTICAL_S2 = analytical_indices()
 
 
 def evaluate(X: Array, A: float = 7.0, B: float = 0.1) -> Array:

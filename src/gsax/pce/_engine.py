@@ -148,31 +148,6 @@ def build_design_matrix(
     return jnp.prod(stacked, axis=0)
 
 
-def fit_coefficients(
-    Phi: Array,
-    Y: Array,
-    ridge: float = 0.0,
-) -> Array:
-    """Fit PCE coefficients by regularized least squares.
-
-    Args:
-        Phi: (N, n_terms) design matrix.
-        Y: (N,) output values.
-        ridge: Tikhonov regularization parameter (0 = unregularized).
-
-    Returns:
-        (n_terms,) coefficient vector.
-    """
-    # Normal equations: c = (Phi^T Phi + lambda I)^{-1} Phi^T Y.
-    # Using solve instead of explicit inverse for better numerical stability.
-    gram = Phi.T @ Phi
-    if ridge > 0:
-        # Tikhonov regularization: shifts eigenvalues away from zero,
-        # stabilizing ill-conditioned Gram matrices from sparse designs.
-        gram = gram + ridge * jnp.eye(gram.shape[0])
-    return jnp.linalg.solve(gram, Phi.T @ Y)
-
-
 def sobol_from_coefficients(
     coefficients: Array,
     multi_index: np.ndarray,
@@ -222,7 +197,7 @@ def sobol_from_coefficients(
     for i in range(D):
         for j in range(i + 1, D):
             mask = active[:, i] & active[:, j] & pair_mask
-            val = jnp.sum(c2[mask]) * inv_var
+            val = jnp.sum(c2 * mask) * inv_var
             # Symmetric: S2_{ij} = S2_{ji}.
             S2 = S2.at[i, j].set(val)
             S2 = S2.at[j, i].set(val)

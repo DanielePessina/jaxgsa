@@ -45,8 +45,9 @@ def _compute_indices(Y_curve: Array, N: int, M: int, omega_0: int) -> tuple[Arra
     f = jnp.fft.fft(Y_curve)
     # One-sided power spectrum: |F_k|^2/N^2, positive freqs only (skip DC at k=0)
     Sp = jnp.abs(f[1 : (N + 1) // 2]) ** 2 / N**2
-    # Total variance via Parseval's theorem; factor 2 accounts for symmetric negative freqs
     V = 2.0 * jnp.sum(Sp)
+    if N % 2 == 0:
+        V = V + jnp.abs(f[N // 2]) ** 2 / N**2
 
     # First-order partial variance: sum power at harmonics p*omega_0, p=1..M.
     # These frequencies carry variance attributable solely to the focal parameter.
@@ -177,9 +178,13 @@ def analyze(
         st_parts: list[Array] = []
         for start in range(0, total, cs):
             end = min(start + cs, total)
-            s1_chunk, st_chunk = batched(Y_batched[start:end])
-            s1_parts.append(s1_chunk)
-            st_parts.append(st_chunk)
+            actual = end - start
+            batch = Y_batched[start:end]
+            if actual < cs:
+                batch = jnp.concatenate([batch, jnp.zeros((cs - actual, N))], axis=0)
+            s1_chunk, st_chunk = batched(batch)
+            s1_parts.append(s1_chunk[:actual])
+            st_parts.append(st_chunk[:actual])
 
         S1_flat = jnp.concatenate(s1_parts)  # (D*T*K,)
         ST_flat = jnp.concatenate(st_parts)
@@ -189,10 +194,7 @@ def analyze(
         ST = ST_flat.reshape(D, T, K).transpose(1, 2, 0)
 
         # Squeeze singleton dims that _prepare_Y inserted
-        if squeeze_time and squeeze_output:
-            S1 = S1[0, 0]
-            ST = ST[0, 0]
-        elif squeeze_time:
+        if squeeze_time:
             S1 = S1[0]
             ST = ST[0]
 

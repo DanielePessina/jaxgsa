@@ -4,7 +4,7 @@
 
 **[Documentation](https://danielepessina.github.io/gsax/)**
 
-`gsax` computes variance-based sensitivity indices entirely in JAX, giving you GPU/TPU acceleration and JIT compilation for free. It provides three complementary methods: **Sobol indices** (via Saltelli sampling), **RS-HDMR** (surrogate-based, works with any input-output pairs), and **PCE** (Polynomial Chaos Expansion with analytical Sobol indices).
+`gsax` computes variance-based sensitivity indices entirely in JAX, giving you GPU/TPU acceleration and JIT compilation for free. It provides five complementary methods: **Sobol indices** (via Saltelli sampling), **RS-HDMR** (surrogate-based, works with any input-output pairs), **PCE** (Polynomial Chaos Expansion with analytical Sobol indices), **eFAST** (Extended Fourier Amplitude Sensitivity Test), and **DGSM** (Derivative-based Global Sensitivity Measures via JAX autodiff).
 
 ## Features
 
@@ -22,6 +22,14 @@
   - Wiener-Askey scheme: Legendre for uniform, Hermite for Gaussian inputs
   - Built-in emulator and leave-one-out cross-validation RMSE
   - Scalar output only in this version
+- **eFAST** (Extended Fourier Amplitude Sensitivity Test)
+  - Frequency-based S1 and ST via sinusoidal search curves and Fourier decomposition
+  - Supports scalar, multi-output, and time-series outputs
+  - Simple N x D sampling design, no cross-matrix structure needed
+- **DGSM** (Derivative-based Global Sensitivity Measures)
+  - Upper and lower bounds on total Sobol index via JAX reverse-mode autodiff
+  - Poincare constants for uniform, Gaussian, and truncated Gaussian inputs
+  - Pre-computed Jacobian path for non-JAX models
 - Supports scalar, multi-output, and time-series model outputs from the start
 - Bootstrap confidence intervals with JAX-accelerated resampling
 - Optional `prenormalize=True` mode for SALib-style output standardization before
@@ -286,7 +294,7 @@ Use it for:
 - parameter, field, and shape contracts
 - validation and error behavior
 - `to_dataset()` labeling rules
-- Sobol, RS-HDMR, and PCE workflow examples
+- Sobol, RS-HDMR, PCE, eFAST, and DGSM workflow examples
 
 Quick map:
 
@@ -295,9 +303,12 @@ Quick map:
 - `gsax.sobol`: `analyze` / `SAResult`
 - `gsax.hdmr`: `analyze` / `emulate` / `HDMRResult` / `HDMREmulator`
 - `gsax.pce`: `analyze` / `emulate` / `PCEResult`
+- `gsax.efast`: `sample` / `analyze` / `EFASTResult`
+- `gsax.dgsm`: `analyze` / `DGSMResult` / `poincare_constant` / `axis_constants`
 
 All symbols are also re-exported from the top-level `gsax` namespace
-(`gsax.analyze()`, `gsax.analyze_hdmr()`, `gsax.analyze_pce()`, etc.).
+(`gsax.analyze()`, `gsax.analyze_hdmr()`, `gsax.analyze_pce()`,
+`gsax.sample_efast()`, `gsax.analyze_efast()`, `gsax.analyze_dgsm()`, etc.).
 
 For runnable walkthroughs, start with the
 [Getting Started guide](https://danielepessina.github.io/gsax/guide/getting-started)
@@ -320,6 +331,8 @@ See [LICENSE](LICENSE) for details.
 ## Benchmark Results
 
 gsax vs SALib on a coupled-oscillator model (D=5 parameters, N=1024 base samples). Post-JIT steady-state timings, best of 5, Apple M3 Pro CPU.
+
+SALib timings include its internal default resampling. See the [detailed benchmarks](https://danielepessina.github.io/gsax/guide/benchmarks) for split tables (no bootstrap vs 300 bootstrap).
 
 | Scenario (T×K) | Method | gsax (ms) | SALib (ms) | Speedup |
 |---|---|---:|---:|---:|

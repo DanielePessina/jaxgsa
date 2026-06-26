@@ -16,7 +16,6 @@ from gsax.pce._engine import (
     _legendre_1d,
     build_design_matrix,
     build_multi_index,
-    fit_coefficients,
     loo_error,
     sobol_from_coefficients,
 )
@@ -460,19 +459,6 @@ class TestEngine:
         """First row of the multi-index should be the zero vector."""
         mi = build_multi_index(3, 3)
         np.testing.assert_array_equal(mi[0], [0, 0, 0])
-
-    def test_fit_coefficients_recovers_known(self):
-        """Least-squares fit should recover known coefficients exactly."""
-        key = jax.random.PRNGKey(55)
-        N = 100
-        x = jax.random.uniform(key, shape=(N, 1), minval=-1.0, maxval=1.0)
-        P = _legendre_1d(x[:, 0], 3)
-        true_coeffs = jnp.array([1.0, 2.0, -0.5, 0.3])
-        Y = P @ true_coeffs
-        recovered = fit_coefficients(P, Y, ridge=0.0)
-        np.testing.assert_allclose(
-            np.asarray(recovered), np.asarray(true_coeffs), atol=1e-5
-        )
 
     def test_sobol_from_coefficients_single_var(self):
         """With only one active dimension, S1 and ST should be [1]."""

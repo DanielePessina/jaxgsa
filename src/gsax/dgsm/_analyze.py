@@ -7,7 +7,7 @@ Kucherenko-Song lower bounds on the total Sobol index ST.
 References:
     Sobol' & Kucherenko (2009). Math. Comp. Sim. 79:3009-3017.
     Kucherenko & Song (2016). Rel. Eng. Sys. Safety 148:81-95.
-    Lamboni et al. (2013). Math. Comp. Sim. 93:53-61.
+    Lamboni et al. (2013). Math. Comp. Sim. 87:44-54.
 """
 
 from __future__ import annotations
@@ -28,7 +28,9 @@ def _promote_jac(jac: Array) -> Array:
     """Promote scalar-output Jacobian (N, D) to (N, 1, D) for uniform handling."""
     if jac.ndim == 2:
         return jac[:, None, :]
-    return jac
+    if jac.ndim == 3:
+        return jac
+    raise ValueError(f"Jacobian must be 2-D (N, D) or 3-D (N, K, D), got ndim={jac.ndim}")
 
 
 def _compute_moments(
@@ -39,15 +41,15 @@ def _compute_moments(
     """Compute DGSM moments and forward outputs via reverse-mode autodiff.
 
     Args:
-        fn: JAX-differentiable function (D,) -> () or (D,) -> (T,).
+        fn: JAX-differentiable function (D,) -> () or (D,) -> (K,).
         X: Sample matrix (N, D).
         chunk_size: If given, process in batches to limit memory.
 
     Returns:
-        (Y, sigma, nu) where Y is (N,) or (N, T), sigma and nu are (T, D).
+        (Y, sigma, nu) where Y is (N,) or (N, K), sigma and nu are (K, D).
     """
 
-    # Reverse-mode Jacobian is efficient when T (outputs) < D (inputs).
+    # Reverse-mode Jacobian is efficient when K (outputs) < D (inputs).
     # has_aux=True returns both Jacobian and forward output from a single
     # forward+backward pass, avoiding a redundant model evaluation.
     def _fn_aux(x: Array) -> tuple[Array, Array]:
@@ -115,10 +117,10 @@ def analyze(
 
     Args:
         problem: Problem definition with D parameters.
-        fn: JAX-differentiable function ``(D,) -> ()`` or ``(D,) -> (T,)``.
+        fn: JAX-differentiable function ``(D,) -> ()`` or ``(D,) -> (K,)``.
         X: Sample matrix ``(N, D)`` in the problem's physical units.
-        Y: Forward model outputs ``(N,)`` or ``(N, T)``.
-        dfdx: Pre-computed Jacobian ``(N, D)`` or ``(N, T, D)``.
+        Y: Forward model outputs ``(N,)`` or ``(N, K)``.
+        dfdx: Pre-computed Jacobian ``(N, D)`` or ``(N, K, D)``.
         chunk_size: Batch size for autodiff (limits memory).
 
     Returns:
@@ -140,7 +142,7 @@ def analyze(
         if dfdx_arr.ndim == 2:
             dfdx_arr = dfdx_arr[:, None, :]  # scalar -> (N, 1, D)
         if dfdx_arr.ndim != 3:
-            raise ValueError(f"dfdx must be 2-D (N, D) or 3-D (N, T, D), got ndim={dfdx_arr.ndim}")
+            raise ValueError(f"dfdx must be 2-D (N, D) or 3-D (N, K, D), got ndim={dfdx_arr.ndim}")
         if dfdx_arr.shape[-1] != D:
             raise ValueError(
                 f"dfdx last dimension ({dfdx_arr.shape[-1]}) must match problem.num_vars ({D})"
@@ -148,6 +150,12 @@ def analyze(
         if dfdx_arr.shape[0] != Y_out.shape[0]:
             raise ValueError(
                 f"dfdx rows ({dfdx_arr.shape[0]}) must match Y rows ({Y_out.shape[0]})"
+            )
+        expected_K = Y_out.shape[1] if Y_out.ndim > 1 else 1
+        if dfdx_arr.shape[1] != expected_K:
+            raise ValueError(
+                f"dfdx output dimension ({dfdx_arr.shape[1]}) must match "
+                f"Y output dimension ({expected_K})"
             )
         sigma = jnp.mean(dfdx_arr, axis=0)  # E[df/dx_i]
         nu = jnp.mean(dfdx_arr**2, axis=0)  # E[(df/dx_i)^2]
@@ -164,7 +172,7 @@ def analyze(
 
     # Guard against zero variance (constant output) -> NaN bounds
     denom = jnp.where(var_y == 0, jnp.nan, var_y)
-    denom = denom[:, None]  # (T, 1) for broadcasting with (T, D)
+    denom = denom[:, None]  # (K, 1) for broadcasting with (K, D)
 
     # Upper: ST_i <= C_i * nu_i / Var(Y)  (Sobol-Kucherenko inequality)
     upper = C_jnp[None, :] * nu / denom
@@ -178,6 +186,14 @@ def analyze(
             "insufficient samples or numerical issues",
             stacklevel=2,
         )
+
+    # Squeeze scalar output: (1, D) -> (D,) for consistency with Sobol/eFAST
+    if Y_out.ndim == 1:
+        sigma = sigma[0]  # (1, D) -> (D,)
+        nu = nu[0]
+        upper = upper[0]
+        lower = lower[0]
+        var_y = var_y[0]  # (1,) -> scalar
 
     return DGSMResult(
         nu=nu,

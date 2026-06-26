@@ -31,6 +31,8 @@ export default defineConfig({
         { text: 'RS-HDMR', link: '/examples/hdmr' },
         { text: 'Advanced Workflow', link: '/examples/advanced-workflow' },
         { text: 'eFAST', link: '/examples/efast' },
+        { text: 'DGSM', link: '/examples/dgsm' },
+        { text: 'PCE', link: '/examples/pce' },
         { text: 'Batch Reactor (notebook)', link: '/examples/batch_reactor' },
       ],
       '/api/': [
