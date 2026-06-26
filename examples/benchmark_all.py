@@ -23,9 +23,9 @@ def _intro(mo):
     Performance comparison across **four SA methods**: Sobol, eFAST,
     DGSM, and HDMR on a coupled-oscillator model (D=5).
 
-    **What's timed:** `analyze()` calls only — model evaluation and
-    sampling are excluded.  DGSM gsax timing includes autodiff
-    (inherent to the method).
+    **What's timed:** `analyze()` calls only — model evaluation,
+    sampling, and gradient computation are all pre-computed and
+    excluded from the timer.
 
     Press **Run benchmarks** below to execute.  Results are cached in
     a JSON file so subsequent loads skip the computation.
@@ -67,6 +67,7 @@ def _imports():
         mo,
         np,
         os,
+        plt,
         salib_dgsm_mod,
         salib_fast_mod,
         salib_fast_sampler,
@@ -333,24 +334,37 @@ def _benchmark(
                 "gsax_ms": _g, "salib_ms": _sb * 1e3,
             })
 
-        # === DGSM ===
+        # === DGSM (pre-computed path for both) ===
         for _label, _T, _K in SCENARIOS:
             _Xmc = jnp.asarray(
                 sample_mc(BENCH_PROBLEM, 2048, seed=42),
             )
             _fn = make_unbatched(_T, _K)
 
+            # Pre-compute Y and Jacobian via autodiff (outside timer)
+            _r0 = gsax.analyze_dgsm(BENCH_PROBLEM, _fn, _Xmc)
+            jax.block_until_ready(_r0.nu)
+            _Ydgsm = coupled_oscillators(_Xmc, _T, _K)
+            jax.block_until_ready(_Ydgsm)
+            _jac_fn = jax.jit(jax.vmap(jax.jacrev(_fn)))
+            _dfdx = _jac_fn(_Xmc)
+            jax.block_until_ready(_dfdx)
+
+            # gsax: pre-computed path (analysis only)
             gsax.analyze_dgsm(
-                BENCH_PROBLEM, _fn, _Xmc,
+                BENCH_PROBLEM, Y=_Ydgsm, dfdx=_dfdx,
             ).nu.block_until_ready()
             _gb = float("inf")
             for _ in range(N_REPEATS):
                 _t0 = time.perf_counter()
-                _r = gsax.analyze_dgsm(BENCH_PROBLEM, _fn, _Xmc)
+                _r = gsax.analyze_dgsm(
+                    BENCH_PROBLEM, Y=_Ydgsm, dfdx=_dfdx,
+                )
                 jax.block_until_ready(_r.nu)
                 _gb = min(_gb, time.perf_counter() - _t0)
             _g = _gb * 1e3
 
+            # SALib: finite-diff samples + analysis only
             _Xfd = salib_finite_diff.sample(
                 SALIB_PROBLEM, 2048, delta=0.01,
             )
@@ -382,7 +396,7 @@ def _benchmark(
                 _sb = min(_sb, time.perf_counter() - _t0)
 
             _all.append({
-                "method": "DGSM*", "scenario": _label,
+                "method": "DGSM", "scenario": _label,
                 "gsax_ms": _g, "salib_ms": _sb * 1e3,
             })
 
@@ -460,8 +474,8 @@ def _table(all_results, mo):
         )
     mo.md(
         "## Results\n\n"
-        "Best-of-3 wall-clock ms (analysis only). "
-        "DGSM* gsax includes autodiff.\n\n"
+        "Best-of-3 wall-clock ms (analysis only, "
+        "model eval + gradients excluded).\n\n"
         + "\n".join(_lines)
     )
     return
@@ -470,7 +484,7 @@ def _table(all_results, mo):
 @app.cell(hide_code=True)
 def _speedup_chart(all_results, mo, np, plt):
     mo.stop(all_results is None)
-    _methods = ["Sobol", "eFAST", "DGSM*", "HDMR"]
+    _methods = ["Sobol", "eFAST", "DGSM", "HDMR"]
     _scenarios = ["1x1", "1x6", "50x1", "50x6"]
     _speedups = {}
     for _r in all_results:
@@ -516,14 +530,14 @@ def _speedup_chart(all_results, mo, np, plt):
 def _scaling_chart(all_results, mo, plt):
     mo.stop(all_results is None)
     _tk = {"1x1": 1, "1x6": 6, "50x1": 50, "50x6": 300}
-    _methods = ["Sobol", "eFAST", "DGSM*", "HDMR"]
+    _methods = ["Sobol", "eFAST", "DGSM", "HDMR"]
     _colors = {
         "Sobol": "C0", "eFAST": "C1",
-        "DGSM*": "C2", "HDMR": "C3",
+        "DGSM": "C2", "HDMR": "C3",
     }
     _markers = {
         "Sobol": "o", "eFAST": "s",
-        "DGSM*": "^", "HDMR": "D",
+        "DGSM": "^", "HDMR": "D",
     }
 
     _by_method = {}
@@ -576,8 +590,8 @@ def _summary(mo):
       per slice; gsax vmaps the entire B-spline fit
     - **eFAST speedup is moderate** — SALib's FFT is
       already fast; gsax gains from fused JIT + vmap
-    - **DGSM is apples-to-oranges** — gsax uses autodiff;
-      SALib uses finite differences
+    - **DGSM** — both use pre-computed gradients; gsax
+      vectorizes moment computation across outputs
     - **Scalar outputs (1x1)** — SALib can be faster due
       to JIT compilation overhead in gsax
 
