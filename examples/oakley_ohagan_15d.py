@@ -249,7 +249,7 @@ def _hdmr_md(mo):
 @app.cell
 def _hdmr_analysis(gsax, jax, jnp, oakley_ohagan, problem):
     _key = jax.random.key(0)
-    X_hd = jax.random.normal(_key, (3000, 15))
+    X_hd = jax.random.normal(_key, (3000, problem.num_vars))
     Y_hd = oakley_ohagan.evaluate(jnp.asarray(X_hd))
 
     hdmr_result = gsax.analyze_hdmr(problem, X_hd, Y_hd, maxorder=2, m=2)
