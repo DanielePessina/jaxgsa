@@ -8,6 +8,7 @@ five workflows:
 - PCE: `analyze_pce()` -> `emulate_pce()`
 - eFAST: `sample_efast()` -> `analyze_efast()`
 - DGSM: `sample_mc()` -> `analyze_dgsm()`
+- HSIC: `sample_mc()` -> `analyze_hsic()`
 
 Related docs:
 
@@ -28,6 +29,7 @@ Since v0.6.0, `gsax` is organized into subpackages:
 | `gsax.pce` | `analyze`, `emulate`, `PCEResult` |
 | `gsax.efast` | `sample`, `analyze`, `EFASTResult` |
 | `gsax.dgsm` | `analyze`, `DGSMResult`, `poincare_constant`, `axis_constants` |
+| `gsax.hsic` | `analyze`, `HSICResult` |
 
 You can import from the subpackages directly:
 
@@ -37,6 +39,7 @@ from gsax.hdmr import analyze as analyze_hdmr, emulate as emulate_hdmr
 from gsax.pce import analyze as analyze_pce, emulate as emulate_pce
 from gsax.efast import sample as sample_efast, analyze as analyze_efast
 from gsax.dgsm import analyze as analyze_dgsm
+from gsax.hsic import analyze as analyze_hsic
 ```
 
 All public symbols are also re-exported from the top-level `gsax` namespace for
@@ -69,6 +72,8 @@ Top-level exports from `gsax`:
 - [`sample_mc`](#sample-mc)
 - [`analyze_dgsm`](#analyze-dgsm)
 - [`DGSMResult`](#dgsmresult)
+- [`analyze_hsic`](#analyze-hsic)
+- [`HSICResult`](#hsicresult)
 
 ## Problem Definition
 
@@ -1301,3 +1306,114 @@ Related links:
 
 - [DGSM Example](/examples/dgsm)
 - [Methods](/guide/methods)
+
+---
+
+## HSIC (Kernel-Based Sensitivity Analysis)
+
+<a id="analyze-hsic"></a>
+### `analyze_hsic()` {#analyze-hsic}
+
+Compute HSIC (Hilbert-Schmidt Independence Criterion) sensitivity indices
+from arbitrary (X, Y) sample pairs using Gaussian RBF kernels.
+
+```python
+def analyze_hsic(
+    problem: Problem,
+    X: Array,
+    Y: Array,
+    *,
+    n_perms: int = 200,
+    seed: int = 0,
+    bandwidth: float | None = None,
+    chunk_size: int | None = None,
+    prenormalize: bool = False,
+) -> HSICResult
+```
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `problem` | `Problem` | required | Problem definition with D parameters. |
+| `X` | `Array` | required | Input sample matrix `(N, D)` in physical units. |
+| `Y` | `Array` | required | Model output `(N,)`, `(N, K)`, or `(N, T, K)`. |
+| `n_perms` | `int` | `200` | Number of permutations for p-value computation. |
+| `seed` | `int` | `0` | Random seed for permutation test reproducibility. |
+| `bandwidth` | `float \| None` | `None` | Fixed kernel bandwidth. `None` uses the median heuristic. |
+| `chunk_size` | `int \| None` | `None` | Block size for N×N kernel matrix computation. |
+| `prenormalize` | `bool` | `False` | If `True`, standardize Y before analysis. |
+
+Validation and behavior:
+
+- `X` must be 2-D with `X.shape[1] == problem.num_vars`.
+- `X` and `Y` must have the same number of rows.
+- `n_perms` must be >= 1.
+- Inputs are transformed to [0, 1] via their marginal CDF before kernel
+  computation, ensuring comparable bandwidths across dimensions.
+- Uses the biased V-statistic HSIC estimator with an efficient trace formula.
+- P-values use the Phipson-Smyth correction: `(count + 1) / (n_perms + 1)`.
+
+Returns: [`HSICResult`](#hsicresult)
+
+Minimal example:
+
+```python
+import jax.numpy as jnp
+import gsax
+from gsax.benchmarks.ishigami import PROBLEM
+
+X = gsax.sample_mc(PROBLEM, N=2048, seed=42)
+Y = gsax.benchmarks.ishigami.evaluate(jnp.asarray(X))
+result = gsax.analyze_hsic(PROBLEM, jnp.asarray(X), Y)
+
+print(result.R2_HSIC)   # (3,) — normalized first-order indices
+print(result.T_HSIC)     # (3,) — total-order indices
+print(result.p_values)   # (3,) — permutation p-values
+```
+
+<a id="hsicresult"></a>
+### `HSICResult` {#hsicresult}
+
+Dataclass holding HSIC sensitivity analysis results.
+
+```python
+@dataclass
+class HSICResult:
+    R2_HSIC: Array
+    T_HSIC: Array
+    p_values: Array
+    hsic_raw: Array
+    problem: Problem
+```
+
+| Field | Shape | Description |
+| --- | --- | --- |
+| `R2_HSIC` | `(D,)` / `(K, D)` / `(T, K, D)` | Normalized first-order HSIC index (CKA normalization), in [0, 1]. |
+| `T_HSIC` | `(D,)` / `(K, D)` / `(T, K, D)` | Total-order HSIC index via complement product kernels. |
+| `p_values` | `(D,)` / `(K, D)` / `(T, K, D)` | Permutation p-values for R2_HSIC (Phipson-Smyth corrected). |
+| `hsic_raw` | `(D,)` / `(K, D)` / `(T, K, D)` | Unnormalized HSIC(X_i, Y) values. |
+| `problem` | `Problem` | Problem definition used for the analysis. |
+
+Shape contract follows the same convention as other gsax methods:
+
+| `Y` shape passed to `analyze_hsic()` | Index shapes |
+| --- | --- |
+| `(N,)` | `(D,)` |
+| `(N, K)` | `(K, D)` |
+| `(N, T, K)` | `(T, K, D)` |
+
+<a id="hsicresult-to_dataset"></a>
+#### `HSICResult.to_dataset()`
+
+```python
+ds = result.to_dataset(time_coords=None)
+```
+
+Converts HSIC results to a labeled `xarray.Dataset`.
+
+Behavior:
+
+- For scalar output, variables have dimension `(param,)`.
+- For multi-output, variables have dimensions `(output, param)`.
+- For time-series multi-output, variables have dimensions `(time, output, param)`.
+- Uses `problem.names` for `param` coordinates.
+- Dataset contains `R2_HSIC`, `T_HSIC`, `p_values`, and `hsic_raw` variables.

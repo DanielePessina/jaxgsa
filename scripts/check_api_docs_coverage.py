@@ -19,6 +19,7 @@ CLASS_FILES = {
     "PCEResult": ROOT / "src" / "gsax" / "pce" / "_result.py",
     "EFASTResult": ROOT / "src" / "gsax" / "efast" / "_result.py",
     "DGSMResult": ROOT / "src" / "gsax" / "dgsm" / "_result.py",
+    "HSICResult": ROOT / "src" / "gsax" / "hsic" / "_result.py",
 }
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 HTML_ID_RE = re.compile(r'<a\s+id="([^"]+)"', re.IGNORECASE)
