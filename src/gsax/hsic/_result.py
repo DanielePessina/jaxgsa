@@ -20,7 +20,7 @@ class HSICResult:
 
     Attributes:
         R2_HSIC: Normalized first-order HSIC index in [0, 1].
-        T_HSIC: Total-order HSIC index in [0, 1].
+        T_HSIC: Total-order HSIC index.
         p_values: Permutation p-values for R2_HSIC.
         hsic_raw: Unnormalized HSIC(X_i, Y) values.
         problem: Problem definition used for the analysis.
@@ -31,6 +31,16 @@ class HSICResult:
     p_values: Array
     hsic_raw: Array
     problem: Problem
+
+    def __repr__(self) -> str:
+        """Return a concise summary showing index shapes."""
+        shapes = {
+            "R2_HSIC": self.R2_HSIC.shape,
+            "T_HSIC": self.T_HSIC.shape,
+            "p_values": self.p_values.shape,
+            "hsic_raw": self.hsic_raw.shape,
+        }
+        return f"HSICResult({shapes})"
 
     def to_dataset(
         self,

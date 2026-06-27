@@ -242,6 +242,11 @@ class TestValidation:
         with pytest.raises(ValueError, match="rows"):
             analyze(problem, jnp.ones((10, 1)), jnp.ones(5))
 
+    def test_n_perms_zero_raises(self):
+        problem = Problem(names=("x",), bounds=((0, 1),))
+        with pytest.raises(ValueError, match="n_perms"):
+            analyze(problem, jnp.ones((10, 1)), jnp.ones(10), n_perms=0)
+
 
 class TestToDataset:
     def test_scalar_output(self, linear_hsic_result):
