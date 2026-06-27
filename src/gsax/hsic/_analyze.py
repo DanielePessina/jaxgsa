@@ -4,6 +4,12 @@ Computes R2-HSIC (normalized first-order) and Total HSIC indices from
 arbitrary (X, Y) sample pairs using Gaussian RBF kernels with the
 median heuristic for bandwidth selection.
 
+The V-statistic HSIC estimator with centering matrix H is equivalent
+to using augmented kernels k*(x,x') = 1 + k(x,x') because HK*H = HKH.
+This means the theoretical guarantees from Larsen & Alexanderian (2026)
+— monotonicity under marginalization — hold without explicitly
+constructing augmented kernels.
+
 References:
     Gretton et al. (2005). JMLR 6:2075-2129.
     Da Veiga (2015). Rel. Eng. Sys. Safety 142:346-362.
@@ -11,6 +17,8 @@ References:
 """
 
 from __future__ import annotations
+
+import math
 
 import jax
 import jax.numpy as jnp
@@ -22,11 +30,30 @@ from gsax.hsic._result import HSICResult
 from gsax.problem import Problem
 
 
+def _median_bandwidth_sq(dists_sq: Array) -> Array:
+    """Compute squared bandwidth from a pairwise squared-distance matrix.
+
+    Uses the upper triangle (excluding diagonal) to avoid bias from
+    the N diagonal zeros per the standard median heuristic definition.
+
+    Args:
+        dists_sq: (N, N) pairwise squared distances.
+
+    Returns:
+        Scalar median of off-diagonal squared distances, floored at 1e-20.
+    """
+    n = dists_sq.shape[0]
+    idx = jnp.triu_indices(n, k=1)
+    upper = dists_sq[idx]
+    return jnp.maximum(jnp.median(upper), 1e-20)
+
+
 def _build_kernel_median(x: Array) -> Array:
     """Build Gaussian RBF kernel matrix with median heuristic bandwidth.
 
     Computes pairwise squared distances once and derives both the
-    bandwidth (via the median heuristic) and the kernel matrix.
+    bandwidth (via the median heuristic on upper-triangle distances)
+    and the kernel matrix.
 
     Args:
         x: 1-D array of N values.
@@ -35,8 +62,8 @@ def _build_kernel_median(x: Array) -> Array:
         (N, N) kernel matrix.
     """
     dists_sq = (x[:, None] - x[None, :]) ** 2
-    sigma = jnp.sqrt(jnp.maximum(jnp.median(dists_sq), 1e-20))
-    return jnp.exp(-dists_sq / (2.0 * sigma**2))
+    median_sq = _median_bandwidth_sq(dists_sq)
+    return jnp.exp(-dists_sq / (2.0 * median_sq))
 
 
 def _build_kernel_fixed(x: Array, sigma: Array) -> Array:
@@ -74,7 +101,7 @@ def _build_kernel_chunked(x: Array, sigma: Array, chunk_size: int) -> Array:
 
 
 def _median_bandwidth(x: Array) -> Array:
-    """Compute bandwidth via the median heuristic.
+    """Compute bandwidth via the median heuristic (upper triangle only).
 
     Args:
         x: 1-D array of N values.
@@ -83,7 +110,7 @@ def _median_bandwidth(x: Array) -> Array:
         Scalar bandwidth sigma.
     """
     dists_sq = (x[:, None] - x[None, :]) ** 2
-    return jnp.sqrt(jnp.maximum(jnp.median(dists_sq), 1e-20))
+    return jnp.sqrt(_median_bandwidth_sq(dists_sq))
 
 
 def _hsic_v(K: Array, L: Array) -> Array:
@@ -93,6 +120,11 @@ def _hsic_v(K: Array, L: Array) -> Array:
         HSIC = U/n^2 - 2V/n^3 + W/n^4
     where U = sum(K*L), V = sum(colsums(K)*colsums(L)), W = sum(K)*sum(L).
 
+    Precision follows the input kernel dtype. When ``jax_enable_x64``
+    is active, kernels are float64 and the subtraction avoids
+    cancellation. In float32 mode the bias is negligible for
+    typical sample sizes (N < 10000).
+
     Args:
         K: (N, N) kernel matrix.
         L: (N, N) kernel matrix.
@@ -101,13 +133,17 @@ def _hsic_v(K: Array, L: Array) -> Array:
         Scalar HSIC value.
     """
     n = K.shape[0]
-    n_f = jnp.asarray(n, dtype=K.dtype)
-    U = jnp.sum(K * L)
-    col_K = jnp.sum(K, axis=0)
-    col_L = jnp.sum(L, axis=0)
+    orig_dtype = K.dtype
+    n_f = jnp.asarray(n, dtype=orig_dtype)
+    Kc = K
+    Lc = L
+    U = jnp.sum(Kc * Lc)
+    col_K = jnp.sum(Kc, axis=0)
+    col_L = jnp.sum(Lc, axis=0)
     V = jnp.dot(col_K, col_L)
-    W = jnp.sum(K) * jnp.sum(L)
-    return U / n_f**2 - 2.0 * V / n_f**3 + W / n_f**4
+    W = jnp.sum(Kc) * jnp.sum(Lc)
+    result = U / n_f**2 - 2.0 * V / n_f**3 + W / n_f**4
+    return result.astype(orig_dtype)
 
 
 def _build_input_kernels(
@@ -144,6 +180,35 @@ def _build_input_kernels(
             Ki = _build_kernel_chunked(xi, sigma, chunk_size)
         Ks.append(Ki)
     return Ks
+
+
+def _complement_kernels(Ks: list[Array]) -> list[Array]:
+    """Build complement product kernels via prefix-suffix products.
+
+    For each dimension d, the complement kernel is the Hadamard product
+    of all input kernels except d. This avoids element-wise division
+    which is numerically unsafe when kernel entries underflow.
+
+    Args:
+        Ks: List of D kernel matrices, each (N, N).
+
+    Returns:
+        List of D complement kernel matrices, each (N, N).
+    """
+    D = len(Ks)
+    if D == 1:
+        return [jnp.ones_like(Ks[0])]
+
+    # prefix[i] = product of Ks[0..i-1], suffix[i] = product of Ks[i+1..D-1]
+    prefix = [jnp.ones_like(Ks[0])] * D
+    for i in range(1, D):
+        prefix[i] = prefix[i - 1] * Ks[i - 1]
+
+    suffix = [jnp.ones_like(Ks[0])] * D
+    for i in range(D - 2, -1, -1):
+        suffix[i] = suffix[i + 1] * Ks[i + 1]
+
+    return [prefix[d] * suffix[d] for d in range(D)]
 
 
 def _compute_slice(
@@ -205,14 +270,14 @@ def _compute_slice(
     hsic_xys_arr = jnp.stack(hsic_xys)
     r2_arr = jnp.stack(r2s)
 
-    # Total HSIC via complement product kernel
+    # Total HSIC via complement product kernels (no division)
     hsic_full = _hsic_v(K_full, L)
     hsic_full_safe = jnp.where(jnp.abs(hsic_full) < 1e-30, jnp.nan, hsic_full)
 
+    K_compls = _complement_kernels(Ks)
     t_hsics = []
     for d in range(D):
-        K_compl = K_full / jnp.maximum(Ks[d], 1e-30)
-        hsic_compl = _hsic_v(K_compl, L)
+        hsic_compl = _hsic_v(K_compls[d], L)
         t_hsics.append(1.0 - hsic_compl / hsic_full_safe)
 
     t_arr = jnp.stack(t_hsics)
@@ -248,6 +313,8 @@ def analyze(
         problem: Problem definition with D parameters.
         X: Input sample matrix ``(N, D)`` in physical units.
         Y: Model output ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
+            For outputs with large magnitude, set ``prenormalize=True``
+            to avoid float overflow in distance computation.
         n_perms: Number of permutations for p-value computation.
         seed: Random seed for permutation test reproducibility.
         bandwidth: Fixed kernel bandwidth. None uses the median heuristic.
@@ -260,7 +327,8 @@ def analyze(
 
     Raises:
         ValueError: If X is not 2-D, column count doesn't match problem,
-            row counts of X and Y differ, or n_perms < 1.
+            row counts of X and Y differ, n_perms < 1, or bandwidth
+            is non-positive / non-finite.
     """
     D = problem.num_vars
     X = jnp.asarray(X)
@@ -268,6 +336,8 @@ def analyze(
 
     if n_perms < 1:
         raise ValueError(f"n_perms must be >= 1, got {n_perms}")
+    if bandwidth is not None and (bandwidth <= 0 or not math.isfinite(bandwidth)):
+        raise ValueError(f"bandwidth must be positive and finite, got {bandwidth}")
     if X.ndim != 2:
         raise ValueError(f"X must be 2-D (N, D), got ndim={X.ndim}")
     if X.shape[1] != D:

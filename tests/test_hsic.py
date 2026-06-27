@@ -247,6 +247,26 @@ class TestValidation:
         with pytest.raises(ValueError, match="n_perms"):
             analyze(problem, jnp.ones((10, 1)), jnp.ones(10), n_perms=0)
 
+    def test_bandwidth_zero_raises(self):
+        problem = Problem(names=("x",), bounds=((0, 1),))
+        with pytest.raises(ValueError, match="bandwidth"):
+            analyze(problem, jnp.ones((10, 1)), jnp.ones(10), bandwidth=0.0)
+
+    def test_bandwidth_negative_raises(self):
+        problem = Problem(names=("x",), bounds=((0, 1),))
+        with pytest.raises(ValueError, match="bandwidth"):
+            analyze(problem, jnp.ones((10, 1)), jnp.ones(10), bandwidth=-1.0)
+
+    def test_bandwidth_nan_raises(self):
+        problem = Problem(names=("x",), bounds=((0, 1),))
+        with pytest.raises(ValueError, match="bandwidth"):
+            analyze(problem, jnp.ones((10, 1)), jnp.ones(10), bandwidth=float("nan"))
+
+    def test_bandwidth_inf_raises(self):
+        problem = Problem(names=("x",), bounds=((0, 1),))
+        with pytest.raises(ValueError, match="bandwidth"):
+            analyze(problem, jnp.ones((10, 1)), jnp.ones(10), bandwidth=float("inf"))
+
 
 class TestToDataset:
     def test_scalar_output(self, linear_hsic_result):
