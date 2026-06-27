@@ -28,6 +28,7 @@ SECTIONS = {
         "efast",
         "dgsm",
         "pce",
+        "hsic",
         "batch_reactor",
     ],
 }
