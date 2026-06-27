@@ -8,6 +8,7 @@ five workflows:
 - PCE: `analyze_pce()` -> `emulate_pce()`
 - eFAST: `sample_efast()` -> `analyze_efast()`
 - DGSM: `sample_mc()` -> `analyze_dgsm()`
+- PAWN: `sample_mc()` -> `analyze_pawn()`
 
 Related docs:
 
@@ -28,6 +29,7 @@ Since v0.6.0, `gsax` is organized into subpackages:
 | `gsax.pce` | `analyze`, `emulate`, `PCEResult` |
 | `gsax.efast` | `sample`, `analyze`, `EFASTResult` |
 | `gsax.dgsm` | `analyze`, `DGSMResult`, `poincare_constant`, `axis_constants` |
+| `gsax.pawn` | `analyze`, `PAWNResult` |
 
 You can import from the subpackages directly:
 
@@ -69,6 +71,8 @@ Top-level exports from `gsax`:
 - [`sample_mc`](#sample-mc)
 - [`analyze_dgsm`](#analyze-dgsm)
 - [`DGSMResult`](#dgsmresult)
+- [`analyze_pawn`](#analyze-pawn)
+- [`PAWNResult`](#pawnresult)
 
 ## Problem Definition
 
@@ -1301,3 +1305,87 @@ Related links:
 
 - [DGSM Example](/examples/dgsm)
 - [Methods](/guide/methods)
+
+## PAWN Workflow
+
+<a id="analyze-pawn"></a>
+### `analyze_pawn()` {#analyze-pawn}
+
+Compute PAWN sensitivity indices via KS distances between unconditional and
+conditional output CDFs (Pianosi & Wagener, 2015).
+
+```python
+def analyze_pawn(
+    problem: Problem,
+    X: Array,
+    Y: Array,
+    *,
+    n_bins: int = 10,
+    statistic: Literal["median", "max", "mean"] = "median",
+    n_bootstrap: int = 0,
+    conf_level: float = 0.95,
+    seed: int = 0,
+    chunk_size: int = 2048,
+) -> PAWNResult
+```
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `problem` | `Problem` | required | Problem definition with D parameters. |
+| `X` | `Array` | required | Input sample matrix `(N, D)`. |
+| `Y` | `Array` | required | Model output `(N,)`, `(N, K)`, or `(N, T, K)`. |
+| `n_bins` | `int` | `10` | Number of equal-width conditioning bins per input. |
+| `statistic` | `Literal["median", "max", "mean"]` | `"median"` | Aggregation of KS values across bins. |
+| `n_bootstrap` | `int` | `0` | Number of bootstrap resamples for confidence intervals. Set to 0 to skip. |
+| `conf_level` | `float` | `0.95` | Confidence level for bootstrap intervals. |
+| `seed` | `int` | `0` | Random seed for bootstrap resampling. |
+| `chunk_size` | `int` | `2048` | Unused, kept for API consistency. |
+
+Validation and behavior:
+
+- `X.shape[1]` must match `problem.num_vars`.
+- Inputs are transformed to `[0, 1]` via CDF mapping before binning.
+- The unconditional CDF uses all Y values. Conditional CDFs use subsets
+  where each input falls in a bin.
+- Empty bins are skipped during aggregation.
+- `statistic` must be one of `"median"`, `"max"`, or `"mean"`.
+
+Returns: [`PAWNResult`](#pawnresult)
+
+<a id="pawnresult"></a>
+### `PAWNResult` {#pawnresult}
+
+Dataclass holding PAWN sensitivity indices and optional bootstrap intervals.
+
+```python
+@dataclass
+class PAWNResult:
+    pawn: Array
+    pawn_conf: Array | None
+    problem: Problem
+```
+
+| Field | Shape | Description |
+| --- | --- | --- |
+| `pawn` | `(D,)` / `(K, D)` / `(T, K, D)` | PAWN sensitivity index per parameter. |
+| `pawn_conf` | `(2, ...)` or `None` | Bootstrap confidence interval `[lower, upper]`, or `None` when `n_bootstrap=0`. |
+| `problem` | `Problem` | Problem definition used for the analysis. |
+
+<a id="pawnresult-to_dataset"></a>
+#### `PAWNResult.to_dataset()`
+
+```python
+ds = result.to_dataset(time_coords=None)
+```
+
+Converts PAWN results to a labeled `xarray.Dataset`.
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `time_coords` | `list \| np.ndarray \| None` | `None` | Coordinate values for the time dimension on 3D results. |
+
+Behavior:
+
+- Uses `problem.names` for `param` coordinates.
+- Uses `problem.output_names` when available, otherwise `y0`, `y1`, and so on.
+- When `pawn_conf` is present, splits into `pawn_lower` and `pawn_upper` variables.

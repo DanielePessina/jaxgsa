@@ -6,6 +6,8 @@ from gsax.efast import sample as sample_efast
 from gsax.hdmr import HDMREmulator, HDMRResult
 from gsax.hdmr import analyze as analyze_hdmr
 from gsax.hdmr import emulate as emulate_hdmr
+from gsax.pawn import PAWNResult
+from gsax.pawn import analyze as analyze_pawn
 from gsax.pce import PCEResult
 from gsax.pce import analyze as analyze_pce
 from gsax.pce import emulate as emulate_pce
@@ -19,6 +21,7 @@ __all__ = [
     "HDMREmulator",
     "HDMRResult",
     "GaussianInputSpec",
+    "PAWNResult",
     "PCEResult",
     "Problem",
     "SAResult",
@@ -28,6 +31,7 @@ __all__ = [
     "analyze_dgsm",
     "analyze_efast",
     "analyze_hdmr",
+    "analyze_pawn",
     "analyze_pce",
     "downsample",
     "emulate_hdmr",

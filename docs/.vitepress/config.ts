@@ -33,6 +33,7 @@ export default defineConfig({
         { text: 'eFAST', link: '/examples/efast' },
         { text: 'DGSM', link: '/examples/dgsm' },
         { text: 'PCE', link: '/examples/pce' },
+        { text: 'PAWN', link: '/examples/pawn' },
         { text: 'Batch Reactor (notebook)', link: '/examples/batch_reactor' },
       ],
       '/api/': [
