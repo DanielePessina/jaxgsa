@@ -57,10 +57,12 @@ class TestLinearHSIC:
         assert np.all(r2 >= 0.0)
         assert np.all(r2 <= 1.0 + 1e-6)
 
-    def test_total_finite(self, linear_hsic_result):
-        """Total indices should be finite (may go slightly negative for additive models)."""
+    def test_total_bounded(self, linear_hsic_result):
+        """With augmented kernels, total indices should be in [0, 1] for additive models."""
         t = np.asarray(linear_hsic_result.T_HSIC)
         assert np.all(np.isfinite(t))
+        assert np.all(t >= -0.1)
+        assert np.all(t <= 1.0 + 0.1)
 
     def test_all_significant(self, linear_hsic_result):
         """All inputs are influential in the linear model."""
@@ -267,6 +269,11 @@ class TestValidation:
         with pytest.raises(ValueError, match="bandwidth"):
             analyze(problem, jnp.ones((10, 1)), jnp.ones(10), bandwidth=float("inf"))
 
+    def test_too_few_samples_raises(self):
+        problem = Problem(names=("x",), bounds=((0, 1),))
+        with pytest.raises(ValueError, match="N must be"):
+            analyze(problem, jnp.ones((2, 1)), jnp.ones(2))
+
 
 class TestToDataset:
     def test_scalar_output(self, linear_hsic_result):
@@ -346,3 +353,41 @@ class TestIndependentInput:
         assert r2[0] > r2[1] * 3.0
         p = np.asarray(result.p_values)
         assert p[0] < 0.05
+        assert p[1] > 0.05
+
+    def test_irrelevant_input_total_near_zero(self):
+        """Total HSIC for an irrelevant input should be near zero."""
+        problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
+        X = sample_mc(problem, N=1024, seed=21)
+        Xj = jnp.asarray(X)
+        Y = Xj[:, 0]
+        result = analyze(problem, Xj, Y, n_perms=20, seed=21)
+        t = np.asarray(result.T_HSIC)
+        assert t[0] > 0.5
+        assert abs(t[1]) < 0.3
+
+
+class TestSingleParamTotal:
+    def test_d1_total_equals_one(self):
+        """With D=1, the complement is ones → T_HSIC should be ~1.0."""
+        problem = Problem(names=("x",), bounds=((0.0, 1.0),))
+        X = sample_mc(problem, N=512, seed=22)
+        Xj = jnp.asarray(X)
+        Y = jnp.sin(Xj[:, 0])
+        result = analyze(problem, Xj, Y, n_perms=20, seed=22)
+        t = np.asarray(result.T_HSIC)
+        assert t[0] > 0.8
+
+
+class TestZeroVarianceOutput:
+    def test_constant_output_produces_nan(self):
+        """Constant Y should produce NaN indices, consistent with the warning."""
+        problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
+        X = sample_mc(problem, N=64, seed=23)
+        Xj = jnp.asarray(X)
+        Y = jnp.ones(64)
+        result = analyze(problem, Xj, Y, n_perms=5, seed=23)
+        r2 = np.asarray(result.R2_HSIC)
+        t = np.asarray(result.T_HSIC)
+        assert np.all(np.isnan(r2))
+        assert np.all(np.isnan(t))

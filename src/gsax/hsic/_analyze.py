@@ -4,11 +4,10 @@ Computes R2-HSIC (normalized first-order) and Total HSIC indices from
 arbitrary (X, Y) sample pairs using Gaussian RBF kernels with the
 median heuristic for bandwidth selection.
 
-The V-statistic HSIC estimator with centering matrix H is equivalent
-to using augmented kernels k*(x,x') = 1 + k(x,x') because HK*H = HKH.
-This means the theoretical guarantees from Larsen & Alexanderian (2026)
-— monotonicity under marginalization — hold without explicitly
-constructing augmented kernels.
+For total HSIC, augmented kernels k*(x,x') = 1 + k_c(x,x') are used
+per Larsen & Alexanderian (2026), where k_c is the centered kernel.
+The product of augmented kernels captures all interaction orders,
+not just the highest, giving correct total indices for additive models.
 
 References:
     Gretton et al. (2005). JMLR 6:2075-2129.
@@ -28,6 +27,8 @@ from gsax._normalization import _prenormalize_outputs, _prepare_Y, _warn_zero_va
 from gsax._transforms import cdf_to_unit_interval
 from gsax.hsic._result import HSICResult
 from gsax.problem import Problem
+
+_MIN_SAMPLES = 4
 
 
 def _median_bandwidth_sq(dists_sq: Array) -> Array:
@@ -50,10 +51,6 @@ def _median_bandwidth_sq(dists_sq: Array) -> Array:
 
 def _build_kernel_median(x: Array) -> Array:
     """Build Gaussian RBF kernel matrix with median heuristic bandwidth.
-
-    Computes pairwise squared distances once and derives both the
-    bandwidth (via the median heuristic on upper-triangle distances)
-    and the kernel matrix.
 
     Args:
         x: 1-D array of N values.
@@ -113,17 +110,27 @@ def _median_bandwidth(x: Array) -> Array:
     return jnp.sqrt(_median_bandwidth_sq(dists_sq))
 
 
+def _center_kernel(K: Array) -> Array:
+    """Center a kernel matrix: K_c = HKH where H = I - (1/n)11^T.
+
+    Args:
+        K: (N, N) kernel matrix.
+
+    Returns:
+        (N, N) centered kernel matrix.
+    """
+    row_mean = jnp.mean(K, axis=1, keepdims=True)
+    col_mean = jnp.mean(K, axis=0, keepdims=True)
+    grand_mean = jnp.mean(K)
+    return K - row_mean - col_mean + grand_mean
+
+
 def _hsic_v(K: Array, L: Array) -> Array:
     """Biased V-statistic HSIC estimator.
 
     Uses the efficient trace formula avoiding explicit centering matrices:
         HSIC = U/n^2 - 2V/n^3 + W/n^4
     where U = sum(K*L), V = sum(colsums(K)*colsums(L)), W = sum(K)*sum(L).
-
-    Precision follows the input kernel dtype. When ``jax_enable_x64``
-    is active, kernels are float64 and the subtraction avoids
-    cancellation. In float32 mode the bias is negligible for
-    typical sample sizes (N < 10000).
 
     Args:
         K: (N, N) kernel matrix.
@@ -133,17 +140,44 @@ def _hsic_v(K: Array, L: Array) -> Array:
         Scalar HSIC value.
     """
     n = K.shape[0]
-    orig_dtype = K.dtype
-    n_f = jnp.asarray(n, dtype=orig_dtype)
-    Kc = K
-    Lc = L
-    U = jnp.sum(Kc * Lc)
-    col_K = jnp.sum(Kc, axis=0)
-    col_L = jnp.sum(Lc, axis=0)
+    n_f = jnp.asarray(n, dtype=K.dtype)
+    U = jnp.sum(K * L)
+    col_K = jnp.sum(K, axis=0)
+    col_L = jnp.sum(L, axis=0)
     V = jnp.dot(col_K, col_L)
-    W = jnp.sum(Kc) * jnp.sum(Lc)
-    result = U / n_f**2 - 2.0 * V / n_f**3 + W / n_f**4
-    return result.astype(orig_dtype)
+    W = jnp.sum(K) * jnp.sum(L)
+    return U / n_f**2 - 2.0 * V / n_f**3 + W / n_f**4
+
+
+def _build_one_kernel(
+    x: Array,
+    bandwidth: float | None,
+    chunk_size: int | None,
+    N: int,
+) -> Array:
+    """Build a single kernel matrix with the appropriate strategy.
+
+    Args:
+        x: 1-D array of N values.
+        bandwidth: Fixed bandwidth or None for median heuristic.
+        chunk_size: Block size for kernel matrix, or None.
+        N: Sample count (used for chunking decision).
+
+    Returns:
+        (N, N) kernel matrix.
+    """
+    use_chunked = chunk_size is not None and chunk_size > 0 and N > chunk_size
+    if bandwidth is None and not use_chunked:
+        return _build_kernel_median(x)
+    if bandwidth is not None and not use_chunked:
+        return _build_kernel_fixed(x, jnp.asarray(bandwidth, dtype=x.dtype))
+    if bandwidth is None:
+        sigma = _median_bandwidth(x)
+    else:
+        sigma = jnp.asarray(bandwidth, dtype=x.dtype)
+    if chunk_size is None:
+        raise ValueError("chunk_size must not be None in chunked path")
+    return _build_kernel_chunked(x, sigma, chunk_size)
 
 
 def _build_input_kernels(
@@ -162,44 +196,40 @@ def _build_input_kernels(
         List of D kernel matrices, each (N, N).
     """
     N, D = X_unit.shape
-    use_chunked = chunk_size is not None and chunk_size > 0 and N > chunk_size
-
-    Ks: list[Array] = []
-    for d in range(D):
-        xi = X_unit[:, d]
-        if bandwidth is None and not use_chunked:
-            Ki = _build_kernel_median(xi)
-        elif bandwidth is not None and not use_chunked:
-            Ki = _build_kernel_fixed(xi, jnp.asarray(bandwidth, dtype=xi.dtype))
-        else:
-            if bandwidth is None:
-                sigma = _median_bandwidth(xi)
-            else:
-                sigma = jnp.asarray(bandwidth, dtype=xi.dtype)
-            assert chunk_size is not None
-            Ki = _build_kernel_chunked(xi, sigma, chunk_size)
-        Ks.append(Ki)
-    return Ks
+    return [_build_one_kernel(X_unit[:, d], bandwidth, chunk_size, N) for d in range(D)]
 
 
-def _complement_kernels(Ks: list[Array]) -> list[Array]:
-    """Build complement product kernels via prefix-suffix products.
+def _augmented_kernels(Ks: list[Array]) -> list[Array]:
+    """Build augmented kernels: K*_d = 1 + center(K_d).
 
-    For each dimension d, the complement kernel is the Hadamard product
-    of all input kernels except d. This avoids element-wise division
-    which is numerically unsafe when kernel entries underflow.
+    The augmented kernel includes a constant term so that the product
+    of augmented kernels captures all interaction orders, not just the
+    highest. This is required for correct total HSIC indices.
+
+    Args:
+        Ks: List of D raw kernel matrices.
+
+    Returns:
+        List of D augmented kernel matrices.
+    """
+    return [jnp.ones_like(K) + _center_kernel(K) for K in Ks]
+
+
+def _complement_kernels(Ks: list[Array]) -> tuple[Array, list[Array]]:
+    """Build full product and complement product kernels via prefix-suffix.
 
     Args:
         Ks: List of D kernel matrices, each (N, N).
 
     Returns:
-        List of D complement kernel matrices, each (N, N).
+        Tuple of (K_full, complements) where K_full is the Hadamard
+        product of all Ks, and complements[d] is the product of all
+        Ks except d.
     """
     D = len(Ks)
     if D == 1:
-        return [jnp.ones_like(Ks[0])]
+        return Ks[0], [jnp.ones_like(Ks[0])]
 
-    # prefix[i] = product of Ks[0..i-1], suffix[i] = product of Ks[i+1..D-1]
     prefix = [jnp.ones_like(Ks[0])] * D
     for i in range(1, D):
         prefix[i] = prefix[i - 1] * Ks[i - 1]
@@ -208,11 +238,15 @@ def _complement_kernels(Ks: list[Array]) -> list[Array]:
     for i in range(D - 2, -1, -1):
         suffix[i] = suffix[i + 1] * Ks[i + 1]
 
-    return [prefix[d] * suffix[d] for d in range(D)]
+    K_full = prefix[-1] * Ks[-1]
+    compls = [prefix[d] * suffix[d] for d in range(D)]
+    return K_full, compls
 
 
 def _compute_slice(
     Ks: list[Array],
+    K_aug_full: Array,
+    K_aug_compls: list[Array],
     y_col: Array,
     bandwidth: float | None,
     key: Array,
@@ -221,11 +255,10 @@ def _compute_slice(
 ) -> tuple[Array, Array, Array, Array]:
     """Compute HSIC indices for a single (t, k) output slice.
 
-    Uses pre-built input kernel matrices and builds only the output
-    kernel per slice.
-
     Args:
-        Ks: Pre-built input kernel matrices, one per input dimension.
+        Ks: Pre-built raw input kernel matrices.
+        K_aug_full: Product of all augmented input kernels.
+        K_aug_compls: Complement augmented kernels (one per input).
         y_col: (N,) single output column.
         bandwidth: Fixed bandwidth or None for median heuristic.
         key: PRNG key for permutation test.
@@ -237,59 +270,49 @@ def _compute_slice(
     """
     N = y_col.shape[0]
     D = len(Ks)
-    use_chunked = chunk_size is not None and chunk_size > 0 and N > chunk_size
 
-    if bandwidth is None and not use_chunked:
-        L = _build_kernel_median(y_col)
-    elif bandwidth is not None and not use_chunked:
-        L = _build_kernel_fixed(y_col, jnp.asarray(bandwidth, dtype=y_col.dtype))
-    else:
-        if bandwidth is None:
-            sigma = _median_bandwidth(y_col)
-        else:
-            sigma = jnp.asarray(bandwidth, dtype=y_col.dtype)
-        assert chunk_size is not None
-        L = _build_kernel_chunked(y_col, sigma, chunk_size)
-
+    L = _build_one_kernel(y_col, bandwidth, chunk_size, N)
     hsic_yy = _hsic_v(L, L)
+    eps = jnp.finfo(L.dtype).eps
 
+    # First-order R2-HSIC using raw kernels
+    # NaN when hsic_yy ≈ 0 (zero-variance output)
+    zero_var = hsic_yy < eps
     hsic_xys: list[Array] = []
     r2s: list[Array] = []
-    K_full = jnp.ones((N, N), dtype=Ks[0].dtype)
 
     for d in range(D):
-        Ki = Ks[d]
-        hsic_xy = _hsic_v(Ki, L)
-        hsic_xx = _hsic_v(Ki, Ki)
-        denom = jnp.sqrt(jnp.maximum(hsic_xx * hsic_yy, 1e-30))
+        hsic_xy = _hsic_v(Ks[d], L)
+        hsic_xx = _hsic_v(Ks[d], Ks[d])
+        denom = jnp.sqrt(jnp.maximum(hsic_xx * hsic_yy, eps**2))
+        r2 = jnp.where(zero_var, jnp.nan, hsic_xy / denom)
 
         hsic_xys.append(hsic_xy)
-        r2s.append(hsic_xy / denom)
-        K_full = K_full * Ki
+        r2s.append(r2)
 
     hsic_xys_arr = jnp.stack(hsic_xys)
     r2_arr = jnp.stack(r2s)
 
-    # Total HSIC via complement product kernels (no division)
-    hsic_full = _hsic_v(K_full, L)
-    hsic_full_safe = jnp.where(jnp.abs(hsic_full) < 1e-30, jnp.nan, hsic_full)
+    # Total HSIC using augmented product kernels
+    hsic_full = _hsic_v(K_aug_full, L)
+    full_thresh = jnp.maximum(jnp.abs(hsic_full) * eps * 100, eps)
+    hsic_full_safe = jnp.where(jnp.abs(hsic_full) < full_thresh, jnp.nan, hsic_full)
 
-    K_compls = _complement_kernels(Ks)
     t_hsics = []
     for d in range(D):
-        hsic_compl = _hsic_v(K_compls[d], L)
-        t_hsics.append(1.0 - hsic_compl / hsic_full_safe)
+        hsic_compl = _hsic_v(K_aug_compls[d], L)
+        t_hsics.append(jnp.where(zero_var, jnp.nan, 1.0 - hsic_compl / hsic_full_safe))
 
     t_arr = jnp.stack(t_hsics)
 
-    # Permutation test using cached kernel matrices (Phipson-Smyth correction)
+    # Permutation test (Phipson-Smyth correction)
     perm_keys = jax.random.split(key, n_perms)
-    null_counts = jnp.zeros(D)
+    null_counts = jnp.zeros(D, dtype=hsic_xys_arr.dtype)
     for pkey in perm_keys:
         perm = jax.random.permutation(pkey, N)
         L_perm = L[perm][:, perm]
         perm_hsics = jnp.stack([_hsic_v(Ks[d], L_perm) for d in range(D)])
-        null_counts = null_counts + (perm_hsics >= hsic_xys_arr).astype(jnp.float32)
+        null_counts = null_counts + (perm_hsics >= hsic_xys_arr).astype(hsic_xys_arr.dtype)
 
     p_vals = (null_counts + 1.0) / (n_perms + 1.0)
 
@@ -327,8 +350,8 @@ def analyze(
 
     Raises:
         ValueError: If X is not 2-D, column count doesn't match problem,
-            row counts of X and Y differ, n_perms < 1, or bandwidth
-            is non-positive / non-finite.
+            row counts of X and Y differ, n_perms < 1, N < 4, or
+            bandwidth is non-positive / non-finite.
     """
     D = problem.num_vars
     X = jnp.asarray(X)
@@ -344,6 +367,10 @@ def analyze(
         raise ValueError(f"X has {X.shape[1]} columns but problem has {D} parameters")
     if X.shape[0] != Y.shape[0]:
         raise ValueError(f"X has {X.shape[0]} rows but Y has {Y.shape[0]} rows")
+    if X.shape[0] < _MIN_SAMPLES:
+        raise ValueError(
+            f"N must be >= {_MIN_SAMPLES} for HSIC, got {X.shape[0]}"
+        )
 
     _warn_zero_variance_slices(Y, problem.output_names)
 
@@ -357,8 +384,10 @@ def analyze(
 
     key = jax.random.key(seed)
 
-    # Build input kernels once — they depend only on X_unit, not Y.
+    # Build input kernels and augmented products once (independent of Y).
     Ks = _build_input_kernels(X_unit, bandwidth, chunk_size)
+    Ks_aug = _augmented_kernels(Ks)
+    K_aug_full, K_aug_compls = _complement_kernels(Ks_aug)
 
     r2_all = jnp.empty((T, K, D))
     t_all = jnp.empty((T, K, D))
@@ -371,7 +400,8 @@ def analyze(
             y_col = Y_3d[:, t, k]
 
             r2, t_hsic, p_vals, raw = _compute_slice(
-                Ks, y_col, bandwidth, subkey, n_perms, chunk_size
+                Ks, K_aug_full, K_aug_compls,
+                y_col, bandwidth, subkey, n_perms, chunk_size,
             )
 
             r2_all = r2_all.at[t, k].set(r2)

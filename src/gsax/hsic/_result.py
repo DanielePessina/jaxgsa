@@ -1,5 +1,7 @@
 """Defines the HSICResult dataclass for kernel-based sensitivity analysis."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 
 import numpy as np
