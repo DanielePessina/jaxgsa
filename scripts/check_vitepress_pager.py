@@ -29,6 +29,7 @@ SECTIONS = {
         "dgsm",
         "pce",
         "hsic",
+        "pawn",
         "batch_reactor",
     ],
 }

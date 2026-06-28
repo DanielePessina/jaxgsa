@@ -34,6 +34,7 @@ export default defineConfig({
         { text: 'DGSM', link: '/examples/dgsm' },
         { text: 'PCE', link: '/examples/pce' },
         { text: 'HSIC', link: '/examples/hsic' },
+        { text: 'PAWN', link: '/examples/pawn' },
         { text: 'Batch Reactor (notebook)', link: '/examples/batch_reactor' },
       ],
       '/api/': [
