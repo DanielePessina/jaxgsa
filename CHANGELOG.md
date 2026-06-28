@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.0
+
+### New features
+
+- Add `gsax.pawn` subpackage: PAWN distribution-based sensitivity analysis
+  (Pianosi & Wagener, 2015) using Kolmogorov-Smirnov distances between
+  unconditional and conditional output CDFs. Includes `analyze_pawn()` and
+  `PAWNResult` with configurable binning (`n_bins`), three aggregation
+  statistics (median/max/mean), and bootstrap confidence intervals.
+- PAWN supports all output shapes: scalar `(N,)`, multi-output `(N, K)`,
+  and time-series `(N, T, K)`.
+- CDF-space binning for proper handling of Gaussian and truncated inputs.
+- `PAWNResult.to_dataset()` for labeled xarray export.
+
 ## 0.6.0
 
 ### Breaking changes
