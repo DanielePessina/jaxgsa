@@ -12,6 +12,7 @@ References:
 
 from __future__ import annotations
 
+import warnings
 from typing import Literal
 
 import jax
@@ -85,7 +86,11 @@ def _pawn_single_output(
             ks_values.append(ks)
 
         if len(ks_values) == 0:
-            indices.append(jnp.float32(0.0))
+            warnings.warn(
+                f"PAWN: all bins empty for parameter {d}, returning NaN",
+                stacklevel=3,
+            )
+            indices.append(jnp.float32(jnp.nan))
             continue
 
         ks_arr = jnp.stack(ks_values)
@@ -100,8 +105,7 @@ def _pawn_single_output(
 
 
 def _pawn_core(
-    problem: Problem,
-    X: Array,
+    X_u01: Array,
     Y_3d: Array,
     n_bins: int,
     statistic: Literal["median", "max", "mean"],
@@ -109,8 +113,7 @@ def _pawn_core(
     """Core PAWN computation over all (T, K) output slices.
 
     Args:
-        problem: Problem definition.
-        X: Input samples ``(N, D)`` in physical units.
+        X_u01: Unit-interval inputs ``(N, D)``.
         Y_3d: Output array promoted to ``(N, T, K)``.
         n_bins: Number of bins per input dimension.
         statistic: Aggregation method across bins.
@@ -119,8 +122,7 @@ def _pawn_core(
         PAWN indices ``(T, K, D)``.
     """
     _, T, K = Y_3d.shape
-    D = problem.num_vars
-    X_u01 = cdf_to_unit_interval(X, problem)
+    D = X_u01.shape[1]
 
     result = jnp.zeros((T, K, D))
 
@@ -177,10 +179,15 @@ def analyze(
         raise ValueError(f"X has {X.shape[0]} rows but Y has {Y.shape[0]} rows")
     if statistic not in ("median", "max", "mean"):
         raise ValueError(f"statistic must be 'median', 'max', or 'mean', got {statistic!r}")
+    if n_bins < 2:
+        raise ValueError(f"n_bins must be >= 2, got {n_bins}")
+    if not 0 < conf_level < 1:
+        raise ValueError(f"conf_level must be in (0, 1), got {conf_level}")
 
     Y_3d, squeeze_time, squeeze_output = _prepare_Y(Y)
+    X_u01 = cdf_to_unit_interval(X, problem)
 
-    pawn_3d = _pawn_core(problem, X, Y_3d, n_bins, statistic)
+    pawn_3d = _pawn_core(X_u01, Y_3d, n_bins, statistic)
 
     pawn_conf: Array | None = None
     if n_bootstrap > 0:
@@ -190,9 +197,7 @@ def analyze(
         for _ in range(n_bootstrap):
             key, subkey = jax.random.split(key)
             idx = jax.random.choice(subkey, N, shape=(N,), replace=True)
-            X_boot = X[idx]
-            Y_boot = Y_3d[idx]
-            boot_pawn = _pawn_core(problem, X_boot, Y_boot, n_bins, statistic)
+            boot_pawn = _pawn_core(X_u01[idx], Y_3d[idx], n_bins, statistic)
             boot_draws.append(boot_pawn)
 
         boot_stack = jnp.stack(boot_draws, axis=0)

@@ -77,7 +77,7 @@ class TestPAWNSALibComparison:
         )
         gsax_pawn = np.asarray(gsax_result.pawn)
 
-        np.testing.assert_allclose(gsax_pawn, salib_median, atol=0.15)
+        np.testing.assert_allclose(gsax_pawn, salib_median, atol=0.01)
 
 
 class TestPAWNStatistics:
