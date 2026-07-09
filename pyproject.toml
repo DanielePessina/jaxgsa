@@ -1,0 +1,63 @@
+[project]
+name = "gsax"
+version = "0.1.0"
+description = "Global Sensitivity Analysis in JAX"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Daniele Pessina", email = "danielepessina99@gmail.com" }]
+keywords = [
+    "sensitivity-analysis",
+    "global-sensitivity-analysis",
+    "sobol",
+    "hdmr",
+    "pce",
+    "hsic",
+    "pawn",
+    "jax",
+    "uncertainty-quantification",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Typing :: Typed",
+]
+dependencies = [
+    "jax>=0.4",
+    "jaxlib>=0.4",
+    "pandas>=3.0.1",
+    "scipy>=1.10",
+    "xarray>=2026.2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/DanielePessina/gsax"
+Repository = "https://github.com/DanielePessina/gsax"
+Documentation = "https://danielepessina.github.io/gsax/"
+Issues = "https://github.com/DanielePessina/gsax/issues"
+Changelog = "https://github.com/DanielePessina/gsax/blob/master/CHANGELOG.md"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.4", "ty>=0.0.21", "SALib>=1.4"]
+xlsx = ["openpyxl>=3.1"]
+parquet = ["pyarrow>=14"]
+all = ["openpyxl>=3.1", "pyarrow>=14"]
+notebook = [
+    "marimo>=0.23.4",
+    "matplotlib>=3.10.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "marimo>=0.23.4",
+]

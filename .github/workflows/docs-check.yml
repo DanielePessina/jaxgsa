@@ -1,0 +1,39 @@
+name: Check Docs
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/docs-check.yml"
+      - ".github/workflows/docs.yml"
+      - "README.md"
+      - "docs/**"
+      - "scripts/check_api_docs_coverage.py"
+      - "scripts/check_vitepress_pager.py"
+      - "src/gsax/**"
+  push:
+    branches:
+      - master
+    paths:
+      - ".github/workflows/docs-check.yml"
+      - ".github/workflows/docs.yml"
+      - "README.md"
+      - "docs/**"
+      - "scripts/check_api_docs_coverage.py"
+      - "scripts/check_vitepress_pager.py"
+      - "src/gsax/**"
+
+jobs:
+  docs-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: docs
+      - run: npm run docs:check
+        working-directory: docs
