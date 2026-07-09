@@ -2,6 +2,7 @@
 
 **Global Sensitivity Analysis in JAX**
 
+[![PyPI](https://img.shields.io/pypi/v/gsax)](https://pypi.org/project/gsax/)
 [![CI](https://github.com/DanielePessina/gsax/actions/workflows/ci.yml/badge.svg)](https://github.com/DanielePessina/gsax/actions/workflows/ci.yml)
 [![Documentation](https://img.shields.io/badge/docs-online-blue)](https://danielepessina.github.io/gsax/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -53,10 +54,18 @@
 ## Installation
 
 ```bash
+pip install gsax
+# or, with uv:
+uv add gsax
+```
+
+To install the latest development version from GitHub:
+
+```bash
 pip install git+https://github.com/DanielePessina/gsax.git
 ```
 
-Or for development:
+For local development:
 
 ```bash
 git clone https://github.com/DanielePessina/gsax.git
