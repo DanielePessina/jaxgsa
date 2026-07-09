@@ -131,6 +131,8 @@ def _problems_md(mo):
 
 @app.cell
 def _config(ishigami, jax, jnp, np, oakley_ohagan, os, time):
+    import dataclasses
+
     N_REPEATS = 3
     ISHI_BASE_N = 1024
     OAKH_BASE_N = 512
@@ -261,12 +263,11 @@ def _config(ishigami, jax, jnp, np, oakley_ohagan, os, time):
         for _ in range(n):
             _t0 = time.perf_counter()
             _r = fn()
-            if hasattr(_r, "S1"):
-                jax.block_until_ready(_r.S1)
-            elif hasattr(_r, "Sa"):
-                jax.block_until_ready(_r.Sa)
-            elif hasattr(_r, "nu"):
-                jax.block_until_ready(_r.nu)
+            # Block EVERY array the result holds — point estimates AND the
+            # bootstrap CI arrays (S1_conf, ST_conf, S2_conf) — so no async
+            # device work leaks out of the timed region.
+            _leaves = [getattr(_r, _f.name) for _f in dataclasses.fields(_r)]
+            jax.block_until_ready([_x for _x in _leaves if _x is not None])
             _best = min(_best, time.perf_counter() - _t0)
         return _best
 

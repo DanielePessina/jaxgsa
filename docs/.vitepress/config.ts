@@ -20,6 +20,7 @@ export default defineConfig({
         { text: 'Getting Started', link: '/guide/getting-started' },
         { text: 'Methods', link: '/guide/methods' },
         { text: 'Benchmarks', link: '/guide/benchmarks' },
+        { text: 'Configuration', link: '/guide/configuration' },
       ],
       '/examples/': [
         { text: 'Basic (Ishigami)', link: '/examples/basic' },
