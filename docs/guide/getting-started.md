@@ -3,15 +3,23 @@
 ## Installation
 
 ```bash
-pip install git+https://github.com/danielepessina/gsax.git
+pip install gsax
+# or, with uv:
+uv add gsax
 ```
 
-For development:
+To install the latest development version from GitHub:
 
 ```bash
-git clone https://github.com/danielepessina/gsax.git
+pip install git+https://github.com/DanielePessina/gsax.git
+```
+
+For local development:
+
+```bash
+git clone https://github.com/DanielePessina/gsax.git
 cd gsax
-pip install -e ".[dev]"
+uv sync --extra dev   # or: pip install -e ".[dev]"
 ```
 
 ## Quick Start

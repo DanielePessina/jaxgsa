@@ -174,7 +174,7 @@ def _fit_first_order(
     # Track squared norms of coefficient vectors to detect convergence.
     var_old = jnp.sum(jnp.square(C1), axis=0)  # (n1,)
 
-    def _update_j(C1: Array, j: int) -> tuple[Array, None]:
+    def _update_j(C1: Array, j: int | Array) -> tuple[Array, None]:
         # Partial residual: remove all contributions then add back dim j,
         # so we solve for C_j against Y minus every other component.
         all_contrib = jnp.einsum("rmj,mj->r", B1, C1)  # (R,)
@@ -402,7 +402,7 @@ def _f_test(
     )
     order_idx = jnp.where(term_idx < n1, 0, jnp.where(term_idx < n1 + n2, 1, 2))
 
-    def _test_term(i: int) -> Array:
+    def _test_term(i: int | Array) -> Array:
         # Compare SSR with vs without term i: large reduction -> significant.
         SSR0 = SSR_nulls[order_idx[i]]
         Y_res_null = jnp.where(
