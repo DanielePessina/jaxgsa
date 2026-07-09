@@ -15,7 +15,7 @@ PAGER_RE = re.compile(
 )
 BASE_RE = re.compile(r"base:\s*['\"]([^'\"]+)['\"]")
 SECTIONS = {
-    "guide": ["getting-started", "methods", "benchmarks"],
+    "guide": ["getting-started", "methods", "benchmarks", "configuration"],
     "examples": [
         "basic",
         "non-uniform-inputs",

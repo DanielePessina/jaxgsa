@@ -1,6 +1,6 @@
 [project]
 name = "gsax"
-version = "0.1.1"
+version = "0.1.2"
 description = "Global Sensitivity Analysis in JAX"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -29,8 +29,8 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "jax>=0.4",
-    "jaxlib>=0.4",
+    "jax>=0.6",
+    "jaxlib>=0.6",
     "pandas>=3.0.1",
     "scipy>=1.10",
     "xarray>=2026.2.0",
@@ -60,4 +60,19 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "marimo>=0.23.4",
+]
+
+[tool.pytest.ini_options]
+# Surface deprecations early: promote every DeprecationWarning/FutureWarning to
+# a test failure so upcoming API removals (JAX especially) are caught in CI
+# instead of passing silently. Module-scoping does NOT work for this — JAX emits
+# its deprecations with a stacklevel pointing at the *caller* (gsax/tests), not
+# at a `jax.*` module — so we go global and ignore-list the known, non-actionable
+# third-party deprecations we don't control. Ignore entries come last so they
+# take precedence over the blanket `error` rules above.
+filterwarnings = [
+    "error::DeprecationWarning",
+    "error::FutureWarning",
+    # pytest's own "class-scoped fixture as instance method" deprecation.
+    "ignore::DeprecationWarning:_pytest",
 ]

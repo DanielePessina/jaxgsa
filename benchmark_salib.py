@@ -320,6 +320,10 @@ SCENARIOS = [
 
 
 N_TIMING_ITERS = 5
+# SALib's HDMR path costs ~1 s per output slice, so a smaller best-of-N keeps
+# the total run bounded; its run-to-run variance is negligible next to the
+# multi-second mean, unlike the ms-scale gsax runs that N_TIMING_ITERS de-noises.
+N_SALIB_HDMR_ITERS = 2
 SOBOL_RESAMPLE_COUNTS = (0, 300)
 SOBOL_BOOTSTRAP_SEED = 123
 
@@ -347,10 +351,15 @@ def _block_hdmr_result(result) -> None:
         jax.block_until_ready(result.rmse)
 
 
-def _best_of_n(fn, block_result) -> float:
-    """Return the best wall time across N_TIMING_ITERS identical runs."""
+def _best_of_n(fn, block_result, iters: int = N_TIMING_ITERS) -> float:
+    """Return the best wall time across ``iters`` identical runs.
+
+    Best-of-N reporting de-noises OS-scheduler jitter, which dominates the
+    ms-scale gsax runs. Slow (multi-second) paths may pass a smaller ``iters``
+    to keep the total benchmark runtime bounded.
+    """
     best = float("inf")
-    for _ in range(N_TIMING_ITERS):
+    for _ in range(iters):
         t0 = time.perf_counter()
         result = fn()
         block_result(result)
@@ -463,9 +472,8 @@ def _time_gsax_hdmr(problem, X_jax, Y_jax) -> float:
     )
 
 
-def _time_salib_hdmr(salib_problem, X_np, Y_np, T: int, K: int) -> float:
-    """Time SALib hdmr.analyze, looping over T*K slices."""
-    t0 = time.perf_counter()
+def _salib_hdmr_slices(salib_problem, X_np, Y_np, T: int, K: int) -> None:
+    """Run SALib hdmr.analyze across all T*K output slices."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
         if T == 1 and K == 1:
@@ -493,7 +501,43 @@ def _time_salib_hdmr(salib_problem, X_np, Y_np, T: int, K: int) -> float:
                         maxiter=100,
                         print_to_console=False,
                     )
-    return time.perf_counter() - t0
+
+
+def _time_salib_hdmr(salib_problem, X_np, Y_np, T: int, K: int) -> float:
+    """Time SALib hdmr.analyze with best-of-N timing symmetric to the gsax path.
+
+    SALib is pure NumPy/SciPy (no JIT, so no warmup is needed). Uses the smaller
+    ``N_SALIB_HDMR_ITERS`` because each HDMR slice costs ~1 s and its run-to-run
+    variance is tiny relative to the mean.
+    """
+    return _best_of_n(
+        lambda: _salib_hdmr_slices(salib_problem, X_np, Y_np, T, K),
+        lambda _unused: None,
+        iters=N_SALIB_HDMR_ITERS,
+    )
+
+
+def _print_timing_table(title: str, rows, *, method_width: int) -> None:
+    """Print one gsax-vs-SALib timing table.
+
+    Args:
+        title: Header line printed above the table.
+        rows: Iterable of ``(scenario, method, gsax_ms, salib_ms, speedup)``.
+        method_width: Column width for the method label (Sobol labels are wider
+            than HDMR's). The separator length is derived from the header so the
+            two never drift out of sync.
+    """
+    header = (
+        f"{'Scenario (TxK)':<16} {'Method':<{method_width}} "
+        f"{'gsax (ms)':>12} {'SALib (ms)':>12} {'speedup':>10}"
+    )
+    print(f"\n{title}")
+    print(header)
+    print("-" * len(header))
+    for scenario, method, g_ms, s_ms, sp in rows:
+        print(
+            f"{scenario:<16} {method:<{method_width}} {g_ms:>10.1f}   {s_ms:>10.1f}   {sp:>8.1f}x"
+        )
 
 
 def benchmark_timing(base_n: int = 1024) -> None:
@@ -544,6 +588,8 @@ def benchmark_timing(base_n: int = 1024) -> None:
         scenario_hdmr_data[(scenario_label, T, K)] = (X_hdmr_np, X_hdmr_jax, Y_hdmr_jax, Y_hdmr_np)
 
     # --- JIT warmup for gsax (exact timing shapes) ---
+    # Pre-compile every kernel the timing loop reuses, so the reported numbers are
+    # post-JIT steady-state and the one-off XLA compile is excluded.
     print("\nWarming up gsax JIT ...", end=" ", flush=True)
     for scenario_label, T, K in SCENARIOS:
         for calc_s2 in (False, True):
@@ -557,13 +603,7 @@ def benchmark_timing(base_n: int = 1024) -> None:
 
         _, X_hdmr_jax, Y_hdmr_jax, _ = scenario_hdmr_data[(scenario_label, T, K)]
         _block_hdmr_result(
-            gsax.analyze_hdmr(
-                BENCH_PROBLEM,
-                X_hdmr_jax,
-                Y_hdmr_jax,
-                maxorder=2,
-                m=2,
-            )
+            gsax.analyze_hdmr(BENCH_PROBLEM, X_hdmr_jax, Y_hdmr_jax, maxorder=2, m=2)
         )
     print("done.")
 
@@ -611,26 +651,12 @@ def benchmark_timing(base_n: int = 1024) -> None:
         speedup = s_time / g_time if g_time > 0 else float("inf")
         hdmr_rows.append((scenario_label, "analyze_hdmr", g_time * 1e3, s_time * 1e3, speedup))
 
-    # --- Print timing table ---
+    # --- Print timing tables (post-JIT steady-state; one-off compile excluded) ---
     for num_resamples in SOBOL_RESAMPLE_COUNTS:
         label = "NO BOOTSTRAP" if num_resamples == 0 else f"{num_resamples} BOOTSTRAPS"
-        print(f"\nSOBOL TIMING — {label}")
-        print(
-            f"{'Scenario (TxK)':<16} {'Method':<30} {'gsax (ms)':>12} "
-            f"{'SALib (ms)':>12} {'speedup':>10}"
-        )
-        print("-" * 84)
-        for scenario, method, g_ms, s_ms, sp in sobol_rows[num_resamples]:
-            print(f"{scenario:<16} {method:<30} {g_ms:>10.1f}   {s_ms:>10.1f}   {sp:>8.1f}x")
+        _print_timing_table(f"SOBOL TIMING — {label}", sobol_rows[num_resamples], method_width=30)
 
-    print("\nHDMR TIMING")
-    print(
-        f"{'Scenario (TxK)':<16} {'Method':<20} {'gsax (ms)':>12} "
-        f"{'SALib (ms)':>12} {'speedup':>10}"
-    )
-    print("-" * 72)
-    for scenario, method, g_ms, s_ms, sp in hdmr_rows:
-        print(f"{scenario:<16} {method:<20} {g_ms:>10.1f}   {s_ms:>10.1f}   {sp:>8.1f}x")
+    _print_timing_table("HDMR TIMING", hdmr_rows, method_width=20)
 
 
 # ---------------------------------------------------------------------------

@@ -1,3 +1,4 @@
+from gsax._config import enable_compilation_cache
 from gsax.dgsm import DGSMResult
 from gsax.dgsm import analyze as analyze_dgsm
 from gsax.efast import EFASTResult
@@ -40,6 +41,7 @@ __all__ = [
     "downsample",
     "emulate_hdmr",
     "emulate_pce",
+    "enable_compilation_cache",
     "load",
     "sample",
     "sample_efast",

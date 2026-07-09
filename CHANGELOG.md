@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.1.2
+
+### Added
+
+- `gsax.enable_compilation_cache(path, ...)` — opt-in helper that enables JAX's
+  persistent, on-disk compilation cache so compiled kernels are reused across
+  process restarts (parameter sweeps, CI, HPC batches).
+- Configuration guide covering double precision (`jax_enable_x64`) for
+  precision-sensitive Sobol/HSIC estimators and the compilation cache.
+
+### Changed
+
+- Raise the minimum JAX/jaxlib version to 0.6 — the oldest release the test
+  suite is validated against (previously advertised 0.4 but never tested there).
+- Benchmark harness times the SALib HDMR path with the same best-of-N method as
+  the other paths and refreshes the published tables (measured on Apple M1 Pro,
+  JAX 0.10.2); the one-off XLA compile is documented as excluded from the
+  steady-state numbers.
+- The test suite now promotes `DeprecationWarning`/`FutureWarning` to errors
+  (ignore-listing known third-party ones), so upcoming API removals — JAX API
+  changes especially — surface in CI instead of passing silently.
+
+### Fixed
+
+- Benchmark timing helper in `examples/benchmark_all.py` now synchronizes every
+  result array (including bootstrap confidence intervals) before stopping the
+  timer, so no async device work leaks out of the timed region.
+
 ## 0.1.1
 
 ### Fixed

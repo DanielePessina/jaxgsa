@@ -59,6 +59,7 @@ Top-level exports from `gsax`:
 - [`downsample`](#downsample)
 - [`verify_prefix`](#verify_prefix)
 - [`load`](#load)
+- [`enable_compilation_cache`](#enable_compilation_cache)
 - [`analyze`](#analyze)
 - [`SAResult`](#saresult)
 - [`analyze_hdmr`](#analyze_hdmr)
@@ -1507,3 +1508,35 @@ Behavior:
 - Uses `problem.names` for `param` coordinates.
 - Uses `problem.output_names` when available, otherwise `y0`, `y1`, and so on.
 - When `pawn_conf` is present, splits into `pawn_lower` and `pawn_upper` variables.
+
+## Configuration
+
+<a id="enable_compilation_cache"></a>
+### `enable_compilation_cache()`
+
+```python
+cache_dir = gsax.enable_compilation_cache(
+    path,
+    *,
+    min_compile_time_secs=1.0,
+    min_entry_size_bytes=0,
+)
+```
+
+Opt-in helper that enables JAX's persistent, on-disk compilation cache so compiled
+kernels are reused across process restarts (parameter sweeps, CI, HPC batches).
+Call it once, before your first `gsax.analyze*` call. Returns the absolute cache
+directory path that was configured.
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `path` | `str \| Path` | — | On-disk cache directory. `~` is expanded and the result is resolved to an absolute path; created lazily by JAX on the first cache write. |
+| `min_compile_time_secs` | `float` | `1.0` | Only cache executables whose compilation took at least this long, so trivial kernels are skipped. |
+| `min_entry_size_bytes` | `int` | `0` | Minimum serialized executable size to cache (coerced to `int`). `0` allows a filesystem-specific default. |
+
+**Warning:** the cache directory is effectively executable — anyone who can write
+to it can make this process load and run arbitrary compiled code. Never point it
+at a world-writable or shared, untrusted location.
+
+See the [Configuration guide](/guide/configuration) for details, including
+double-precision (`jax_enable_x64`) guidance.

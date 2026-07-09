@@ -87,48 +87,48 @@ print("S1 error:", abs(result.S1 - ishigami.ANALYTICAL_S1).max())
 
 ## Timing Results
 
-gsax is benchmarked against [SALib](https://salib.readthedocs.io/) on a coupled-oscillator model with varying output shapes. All timings are **post-JIT** (steady-state), best of 5 iterations, on the same hardware and data.
+gsax is benchmarked against [SALib](https://salib.readthedocs.io/) on a coupled-oscillator model with varying output shapes. Every timing is the best of 5 runs, except the slow SALib HDMR path (best of 2), on the same hardware and data. gsax figures are **post-JIT** (steady-state): the one-off XLA compile (~0.3–1.1 s depending on scenario) is paid once per process and excluded, while SALib (pure NumPy/SciPy) requires no compilation.
 
 ### Results
 
 The benchmark evaluates three methods — `analyze` (Sobol, first/total order only), `analyze` (Sobol with second-order), and `analyze_hdmr` — across four output-shape scenarios, with and without bootstrap confidence intervals.
 
-**Machine:** Apple M3 Pro, CPU only (no GPU), JAX 0.5.x, Python 3.12.
+**Machine:** Apple M1 Pro, CPU only (no GPU), JAX 0.10.2, Python 3.12.
 
 ### Sobol — no bootstrap
 
 | Scenario (T×K) | Method | gsax (ms) | SALib (ms) | Speedup |
 |---|---|---:|---:|---:|
-| 1×1 | analyze (no S2) | 0.8 | 0.2 | **0.3×** |
-| 1×1 | analyze (S2) | 0.9 | 0.9 | **1.0×** |
-| 1×6 | analyze (no S2) | 1.0 | 1.4 | **1.4×** |
-| 1×6 | analyze (S2) | 1.5 | 5.3 | **3.5×** |
-| 50×1 | analyze (no S2) | 2.8 | 12.3 | **4.4×** |
-| 50×1 | analyze (S2) | 4.9 | 45.8 | **9.4×** |
-| 50×6 | analyze (no S2) | 8.8 | 74.3 | **8.5×** |
-| 50×6 | analyze (S2) | 14.8 | 276.6 | **18.7×** |
+| 1×1 | analyze (no S2) | 0.7 | 0.2 | **0.3×** |
+| 1×1 | analyze (S2) | 0.9 | 0.9 | **0.9×** |
+| 1×6 | analyze (no S2) | 0.9 | 1.4 | **1.5×** |
+| 1×6 | analyze (S2) | 1.5 | 5.5 | **3.6×** |
+| 50×1 | analyze (no S2) | 3.0 | 12.4 | **4.1×** |
+| 50×1 | analyze (S2) | 3.7 | 46.7 | **12.5×** |
+| 50×6 | analyze (no S2) | 12.1 | 73.4 | **6.1×** |
+| 50×6 | analyze (S2) | 17.4 | 274.8 | **15.8×** |
 
 ### Sobol — 300 bootstrap resamples
 
 | Scenario (T×K) | Method | gsax (ms) | SALib (ms) | Speedup |
 |---|---|---:|---:|---:|
-| 1×1 | analyze (no S2) | 5.2 | 28.5 | **5.5×** |
-| 1×1 | analyze (S2) | 8.5 | 80.0 | **9.4×** |
-| 1×6 | analyze (no S2) | 17.0 | 162.8 | **9.6×** |
-| 1×6 | analyze (S2) | 36.4 | 490.5 | **13.5×** |
-| 50×1 | analyze (no S2) | 121.7 | 1434.9 | **11.8×** |
-| 50×1 | analyze (S2) | 280.6 | 4142.0 | **14.8×** |
-| 50×6 | analyze (no S2) | 726.1 | 9384.2 | **12.9×** |
-| 50×6 | analyze (S2) | 1666.7 | 26596.8 | **16.0×** |
+| 1×1 | analyze (no S2) | 8.2 | 22.2 | **2.7×** |
+| 1×1 | analyze (S2) | 11.1 | 88.4 | **8.0×** |
+| 1×6 | analyze (no S2) | 36.0 | 143.5 | **4.0×** |
+| 1×6 | analyze (S2) | 51.6 | 471.4 | **9.1×** |
+| 50×1 | analyze (no S2) | 283.4 | 1208.1 | **4.3×** |
+| 50×1 | analyze (S2) | 414.7 | 3536.2 | **8.5×** |
+| 50×6 | analyze (no S2) | 1955.7 | 7544.9 | **3.9×** |
+| 50×6 | analyze (S2) | 2721.1 | 22933.8 | **8.4×** |
 
 ### HDMR
 
 | Scenario (T×K) | Method | gsax (ms) | SALib (ms) | Speedup |
 |---|---|---:|---:|---:|
-| 1×1 | analyze_hdmr | 17.6 | 89.5 | **5.1×** |
-| 1×6 | analyze_hdmr | 19.0 | 508.6 | **26.7×** |
-| 50×1 | analyze_hdmr | 22.3 | 3990.5 | **178.7×** |
-| 50×6 | analyze_hdmr | 37.0 | 28345.8 | **766.3×** |
+| 1×1 | analyze_hdmr | 18.3 | 89.3 | **4.9×** |
+| 1×6 | analyze_hdmr | 18.8 | 506.1 | **26.9×** |
+| 50×1 | analyze_hdmr | 20.9 | 4000.7 | **191.6×** |
+| 50×6 | analyze_hdmr | 39.0 | 26063.1 | **667.7×** |
 
 ## Why gsax is faster
 
@@ -153,10 +153,10 @@ The speedup grows with T×K because SALib's per-slice overhead is linear while g
 
 ## Reproducing
 
-The full benchmark script is at [`benchmark_salib.py`](https://github.com/DanielePessina/gsax/blob/dev/benchmark_salib.py) in the repository root. Run it locally:
+The full benchmark script is at [`benchmark_salib.py`](https://github.com/DanielePessina/gsax/blob/master/benchmark_salib.py) in the repository root. It needs SALib, which ships in the `dev` extra. Run it locally:
 
 ```bash
-uv run python benchmark_salib.py
+uv run --extra dev benchmark_salib.py
 ```
 
 It first runs correctness checks (Ishigami function, exact match with SALib), then prints the timing table above. Your numbers will vary by hardware.
