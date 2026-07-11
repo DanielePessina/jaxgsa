@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import warnings
+
 import jax.numpy as jnp
 from jax import Array
 
+from gsax._normalization import _warn_zero_variance_slices
 from gsax.pce._engine import (
     build_design_matrix,
     build_multi_index,
@@ -104,8 +107,19 @@ def analyze_pce(
     if D != problem.num_vars:
         raise ValueError(f"X has {D} columns but problem defines {problem.num_vars} parameters")
 
+    # A constant output makes every index 0/0 = NaN; warn once up front.
+    _warn_zero_variance_slices(Y)
+
     # Cap polynomial order so n_terms <= fit_ratio * N (prevents overfitting).
     effective_order = _auto_order(D, N, order, fit_ratio)
+    if effective_order < order:
+        # The fit is silently coarser than requested; surface it so callers
+        # do not mistake a truncated expansion for the order they asked for.
+        warnings.warn(
+            f"gsax: PCE order reduced from {order} to {effective_order} to keep the "
+            f"term count within the sample budget (fit_ratio={fit_ratio}, N={N})",
+            stacklevel=2,
+        )
     mi = build_multi_index(D, effective_order)
 
     # Map inputs to reference domain and build the orthonormal design matrix.

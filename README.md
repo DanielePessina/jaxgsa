@@ -30,7 +30,7 @@
   - Fair, game-theoretic allocation of output variance — each interaction's variance split equally among its participants
   - Computed **analytically** from a fitted RS-HDMR (default) or PCE surrogate: no permutation Monte Carlo, no extra model runs
   - Works with **any** set of (X, Y) pairs; returns Sh alongside S1 and ST from the same surrogate (S1 <= Sh <= ST)
-  - Assumes independent inputs (v1); Sh sums to the surrogate's explained-variance fraction
+  - Assumes independent inputs (v1); Sh sums to 1, and `explained_variance` reports the fraction of Var(Y) the surrogate captured
 - **eFAST** (Extended Fourier Amplitude Sensitivity Test)
   - Frequency-based S1 and ST via sinusoidal search curves and Fourier decomposition
   - Supports scalar, multi-output, and time-series outputs
@@ -206,10 +206,11 @@ X = gsax.sample_mc(PROBLEM, N=2000, seed=42)
 Y = evaluate(jnp.asarray(X))
 
 result = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y)  # backend="hdmr" default
-print("Sh:", result.Sh)        # (D,) Shapley effects
-print("sum:", result.Sh.sum()) # ≈ surrogate's explained-variance fraction
-print("S1:", result.S1)        # (D,) first-order, same surrogate
-print("ST:", result.ST)        # (D,) total-order — S1 <= Sh <= ST per parameter
+print("Sh:", result.Sh)              # (D,) Shapley effects
+print("sum:", result.Sh.sum())       # == 1 (Shapley efficiency property)
+print("explained:", result.explained_variance)  # fraction of Var(Y) captured
+print("S1:", result.S1)              # (D,) first-order, same surrogate
+print("ST:", result.ST)              # (D,) total-order — S1 <= Sh <= ST per parameter
 
 # PCE backend (scalar Y only) with PCE-only knobs
 result_pce = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y, backend="pce", order=4)

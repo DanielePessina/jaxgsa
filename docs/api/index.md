@@ -993,9 +993,30 @@ Validation and behavior:
 - **Independent inputs are assumed** (v1 limitation; dependent-input Shapley
   effects are future work). Under independence, `S1 <= Sh <= ST` holds per
   parameter and interaction variance is split fairly among participants.
-- Indices are normalized by the **empirical** `Var(Y)`, not the surrogate
-  variance, so `Sh.sum()` (over the parameter axis) equals the surrogate's
-  explained-variance fraction — close to 1 for a good fit, below 1 otherwise.
+- `Sh`, `S1`, and `ST` are normalized by the surrogate's **total decomposed
+  variance** `sum_u V_u`, not the empirical `Var(Y)`, so `Sh.sum()` (over the
+  parameter axis) is exactly 1 — the Shapley efficiency property (Owen 2014).
+  How much of the output variance the surrogate captured is reported separately
+  in [`explained_variance`](#shapleyresult).
+- For `backend="pce"` this normalization coincides with `analyze_pce`, so
+  shapley's `S1`/`ST` match `analyze_pce`'s exactly. For `backend="hdmr"` the
+  indices differ from `analyze_hdmr`'s (which normalize by `Var(Y)`) by a factor
+  of `explained_variance` — multiply shapley's HDMR `S1`/`ST` by
+  `explained_variance` to recover the `analyze_hdmr` scale. Shapley's HDMR `ST`
+  is also built from the structural ANCOVA terms only and excludes the
+  correlative `Sb` part (which is ~0 under the independence assumption).
+- A `UserWarning` is emitted when `explained_variance` is far from 1 (below
+  ~0.5 = poor fit, or above ~1.3 = an overfit surrogate over-counting shared
+  variance). The Shapley effects still sum to 1 but may be unreliable.
+- A `UserWarning` is emitted (by the underlying `analyze_pce`) when the PCE
+  polynomial order is silently reduced to fit the sample budget.
+- A constant / zero-variance output yields `NaN` indices for **both** backends,
+  plus the standard zero-variance `UserWarning`.
+- The default `backend="hdmr"` inherits `analyze_hdmr`'s constraints: at least
+  300 samples are required (else `ValueError`), `maxorder` must be in
+  `{1, 2, 3}`, `maxorder` is clamped with a warning when `D < maxorder`, and a
+  2-D `Y` is always interpreted as `(N, K)` — a single-output time series must
+  be reshaped to `(N, T, 1)`.
 - Interactions above `maxorder` (HDMR) or the polynomial order (PCE) are
   absent from the allocation.
 
@@ -1013,10 +1034,11 @@ Y = evaluate(jnp.asarray(X))
 
 result = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y)
 
-print(result.Sh)        # (3,) — Shapley effects
-print(result.Sh.sum())  # ≈ explained-variance fraction of the surrogate
-print(result.S1)        # (3,) — first-order, same surrogate
-print(result.ST)        # (3,) — total-order, same surrogate
+print(result.Sh)                  # (3,) — Shapley effects
+print(result.Sh.sum())            # == 1 (Shapley efficiency property)
+print(result.explained_variance)  # sum_u V_u / Var(Y) — surrogate fit quality
+print(result.S1)                  # (3,) — first-order, same surrogate
+print(result.ST)                  # (3,) — total-order, same surrogate
 
 # PCE backend with PCE-only knobs
 result_pce = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y, backend="pce", order=4)
@@ -1037,15 +1059,19 @@ class ShapleyResult:
     ST: Array
     problem: Problem
     backend: str
+    explained_variance: Array
+    order: int
 ```
 
 | Field | Shape | Description |
 | --- | --- | --- |
-| `Sh` | `(D,)` / `(K, D)` / `(T, K, D)` | Shapley effects: fair per-parameter share of output variance. |
+| `Sh` | `(D,)` / `(K, D)` / `(T, K, D)` | Shapley effects: fair per-parameter share of decomposed variance. Sums to 1 along the parameter axis. |
 | `S1` | same as `Sh` | First-order indices from the same surrogate. |
 | `ST` | same as `Sh` | Total-order indices from the same surrogate. |
 | `problem` | `Problem` | Problem definition used for the analysis. |
 | `backend` | `str` | Surrogate backend used, `"hdmr"` or `"pce"`. |
+| `explained_variance` | `()` / `(K,)` / `(T, K)` | Fraction of `Var(Y)` the surrogate captured, `sum_u V_u / Var(Y)`. Close to 1 for a good fit, below 1 when truncation or fit error leaves variance unexplained, above 1 when an overfit surrogate over-counts shared variance. |
+| `order` | `int` | Effective surrogate order actually used — the polynomial degree for `"pce"` (may be reduced from the requested value to fit the sample budget) or the HDMR expansion order for `"hdmr"`. |
 
 Shape contract:
 
@@ -1055,8 +1081,10 @@ Shape contract:
 | `(N, K)` (HDMR backend only) | `(K, D)` |
 | `(N, T, K)` (HDMR backend only) | `(T, K, D)` |
 
-All indices are normalized by the empirical output variance, so summing `Sh`
-over the parameter axis gives the surrogate's explained-variance fraction.
+All indices are normalized by the surrogate's total decomposed variance
+`sum_u V_u`, so summing `Sh` over the parameter axis is exactly 1 (the Shapley
+efficiency property). The `explained_variance` field separately reports the
+fraction of `Var(Y)` the surrogate captured.
 
 <a id="shapleyresult-to_dataset"></a>
 #### `ShapleyResult.to_dataset()`
@@ -1076,6 +1104,9 @@ Behavior:
 
 - Data variables `Sh`, `S1`, and `ST` on dims `("param",)`,
   `("output", "param")`, or `("time", "output", "param")`.
+- Also emits an `explained_variance` data variable on the squeezed output
+  layout with no `param` axis: dims `()` (scalar), `("output",)`, or
+  `("time", "output")`.
 - Uses `problem.names` for `param` coordinates.
 - Uses `problem.output_names` when available, otherwise `y0`, `y1`, and so on.
 - For 3D results, defaults to integer time indices when `time_coords` is not

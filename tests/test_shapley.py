@@ -90,14 +90,15 @@ def test_build_membership():
 def test_hdmr_ishigami_vs_analytical(ishigami_hdmr_shapley):
     Sh = np.asarray(ishigami_hdmr_shapley.Sh)
     np.testing.assert_allclose(Sh, ishigami.ANALYTICAL_SHAPLEY, atol=0.12)
-    # Normalized by empirical Var(Y): the sum is the explained fraction (<= ~1).
-    assert 0.8 < Sh.sum() <= 1.02
+    # Sh is normalized to sum to 1; the fit quality lives in explained_variance.
+    assert abs(Sh.sum() - 1.0) < 1e-5
+    assert 0.8 < float(ishigami_hdmr_shapley.explained_variance) <= 1.02
 
 
 def test_pce_ishigami_vs_analytical(ishigami_pce_shapley):
     Sh = np.asarray(ishigami_pce_shapley.Sh)
     np.testing.assert_allclose(Sh, ishigami.ANALYTICAL_SHAPLEY, atol=0.01)
-    assert abs(Sh.sum() - 1.0) < 0.02
+    assert abs(Sh.sum() - 1.0) < 1e-5
 
 
 @pytest.mark.parametrize("backend,kwargs", [("hdmr", {}), ("pce", {"order": 2})])
@@ -186,8 +187,9 @@ def test_time_series_shapes(linear_data):
 def test_to_dataset_scalar(ishigami_pce_shapley):
     ds = ishigami_pce_shapley.to_dataset()
     assert isinstance(ds, xr.Dataset)
-    assert set(ds.data_vars) == {"Sh", "S1", "ST"}
+    assert set(ds.data_vars) == {"Sh", "S1", "ST", "explained_variance"}
     assert ds["Sh"].dims == ("param",)
+    assert ds["explained_variance"].dims == ()
     assert list(ds.coords["param"].values) == list(ishigami.PROBLEM.names)
 
 
@@ -204,3 +206,75 @@ def test_repr(ishigami_pce_shapley):
     text = repr(ishigami_pce_shapley)
     assert "ShapleyResult" in text
     assert "pce" in text
+
+
+# ---------------------------------------------------------------------------
+# Normalization contract and fit diagnostics (regression tests)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("fixture", ["ishigami_hdmr_shapley", "ishigami_pce_shapley"])
+def test_sh_sums_to_one(fixture, request):
+    """Efficiency property: Sh sums to exactly 1 regardless of backend/fit."""
+    result = request.getfixturevalue(fixture)
+    np.testing.assert_allclose(float(np.asarray(result.Sh).sum()), 1.0, atol=1e-5)
+
+
+def test_pce_overfit_sums_to_one_and_flags(ishigami_data):
+    """An overfit PCE keeps Sh summing to 1; the overshoot shows in ev + warns."""
+    X, Y = ishigami_data
+    Xs, Ys = X[:64], Y[:64]
+    with pytest.warns(UserWarning, match="explained_variance exceeds"):
+        result = gsax.analyze_shapley(
+            ishigami.PROBLEM, Xs, Ys, backend="pce", order=5, fit_ratio=0.9
+        )
+    np.testing.assert_allclose(float(np.asarray(result.Sh).sum()), 1.0, atol=1e-4)
+    # The over-counted variance surfaces in the diagnostic, not the sum.
+    assert float(result.explained_variance) > 1.3
+
+
+def test_pce_shapley_matches_analyze_pce(ishigami_data):
+    """The PCE backend's S1/ST coincide with analyze_pce on the identical fit."""
+    X, Y = ishigami_data
+    sh = gsax.analyze_shapley(ishigami.PROBLEM, X, Y, backend="pce", order=9)
+    pce = gsax.analyze_pce(ishigami.PROBLEM, X, Y, order=9)
+    np.testing.assert_allclose(np.asarray(sh.S1), np.asarray(pce.S1), atol=1e-5)
+    np.testing.assert_allclose(np.asarray(sh.ST), np.asarray(pce.ST), atol=1e-5)
+
+
+def test_pce_order_reduction_surfaced():
+    """A silently-reduced PCE order is both warned about and exposed on the result."""
+    X = jnp.asarray(gsax.sample_mc(ishigami.PROBLEM, 200, seed=11))
+    Y = ishigami.evaluate(X)
+    # For N=200 (fit_ratio=0.5) the order-7 term count exceeds the budget,
+    # so the fit is silently coarsened -- which must now be visible.
+    with pytest.warns(UserWarning, match="order reduced"):
+        result = gsax.analyze_shapley(ishigami.PROBLEM, X, Y, backend="pce", order=7)
+    assert result.order < 7
+
+
+def test_hdmr_order_field(ishigami_hdmr_shapley):
+    """The HDMR backend reports its expansion order."""
+    assert ishigami_hdmr_shapley.order == 2
+
+
+@pytest.mark.parametrize("backend", ["hdmr", "pce"])
+def test_constant_output_nan_and_warns(ishigami_data, backend):
+    """Constant Y yields NaN indices and a zero-variance warning for both backends."""
+    X, _ = ishigami_data
+    Yc = jnp.full(X.shape[0], 5.0)
+    with pytest.warns(UserWarning, match="zero variance"):
+        result = gsax.analyze_shapley(ishigami.PROBLEM, X, Yc, backend=backend)
+    assert np.all(np.isnan(np.asarray(result.Sh)))
+    assert np.all(np.isnan(np.asarray(result.S1)))
+    assert np.all(np.isnan(np.asarray(result.ST)))
+    assert np.isnan(float(result.explained_variance))
+
+
+def test_multi_output_explained_variance_per_slice(ishigami_data):
+    """explained_variance is reported per output slice and Sh sums to 1 per slice."""
+    X, Y = ishigami_data
+    Y2 = jnp.stack([Y, 3.0 * Y], axis=1)
+    result = gsax.analyze_shapley(ishigami.PROBLEM, X, Y2)
+    assert result.explained_variance.shape == (2,)
+    np.testing.assert_allclose(np.asarray(result.Sh).sum(axis=-1), 1.0, atol=1e-5)

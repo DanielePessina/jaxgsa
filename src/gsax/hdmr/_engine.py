@@ -276,20 +276,23 @@ def _ancova(Y: Array, Y_em: Array, V_Y: Array) -> tuple[Array, Array, Array]:
     #   S  = Cov(f_j, Y) / Var(Y)      -- total (correlated) contribution
     #   Sb = S - Sa = Cov(f_j, sum_{k!=j} f_k) / Var(Y) -- correlative part
     # When inputs are independent, Sb -> 0 and S -> Sa.
-    # Guard against division by zero for constant-output slices.
-    V_Y = jnp.maximum(V_Y, 1e-30)
-    Sa = jnp.var(Y_em, axis=0) / V_Y  # (n,)
+    # A constant-output slice has V_Y == 0, so every index is 0/0. Emit NaN
+    # (matching Sobol and the "all indices will be NaN" zero-variance warning)
+    # rather than silent zeros; the safe denominator only avoids the inf.
+    zero_var = V_Y == 0
+    V_Y_safe = jnp.maximum(V_Y, 1e-30)
+    Sa = jnp.where(zero_var, jnp.nan, jnp.var(Y_em, axis=0) / V_Y_safe)  # (n,)
 
     Y_em_c = Y_em - jnp.mean(Y_em, axis=0, keepdims=True)
     Y_c = Y - jnp.mean(Y)
-    S = jnp.mean(Y_em_c * Y_c[:, None], axis=0) / V_Y  # (n,)
+    S = jnp.where(zero_var, jnp.nan, jnp.mean(Y_em_c * Y_c[:, None], axis=0) / V_Y_safe)  # (n,)
 
     # Sb = Cov(f_j, sum_{k!=j} f_k) / Var(Y): cross-covariance of each term
     # with the sum of all other terms. Non-zero Sb flags correlated inputs.
     Y0 = jnp.sum(Y_em, axis=1)  # (R,) total emulator prediction (sans f0)
     Y0_minus = Y0[:, None] - Y_em  # (R, n) leave-one-out sums
     Y0m_c = Y0_minus - jnp.mean(Y0_minus, axis=0, keepdims=True)
-    Sb = jnp.mean(Y_em_c * Y0m_c, axis=0) / V_Y  # (n,)
+    Sb = jnp.where(zero_var, jnp.nan, jnp.mean(Y_em_c * Y0m_c, axis=0) / V_Y_safe)  # (n,)
 
     return S, Sa, Sb
 

@@ -189,7 +189,7 @@ $$
 so a main-effect variance $V_i$ is attributed entirely to parameter $i$, a pairwise interaction variance $V_{ij}$ is split half-and-half between $i$ and $j$, and so on. Under independent inputs this yields:
 
 - **Bracketing**: $S_{1,i} \leq \mathrm{Sh}_i \leq S_{T,i}$ — the Shapley effect always lies between the first-order and total-order Sobol indices.
-- **Exact partition**: unlike $S_1$ (which omits interactions, so $\sum_i S_{1,i} \leq 1$) and $S_T$ (which counts each interaction once per participant, so $\sum_i S_{T,i} \geq 1$), Shapley effects split every interaction fairly and sum to the explained variance with no gaps or double counting.
+- **Exact partition**: unlike $S_1$ (which omits interactions, so $\sum_i S_{1,i} \leq 1$) and $S_T$ (which counts each interaction once per participant, so $\sum_i S_{T,i} \geq 1$), Shapley effects split every interaction fairly and sum to exactly 1 with no gaps or double counting.
 
 **Independence assumption (v1 limitation)**: gsax currently assumes **independent inputs**. The Shapley value is particularly attractive for dependent inputs — where Sobol indices lose their clean interpretation — but the dependent-input formulation requires conditional-variance estimation and is future work. Do not rely on the indices when inputs are strongly correlated.
 
@@ -200,7 +200,7 @@ gsax computes Shapley effects **analytically** from a fitted surrogate's varianc
 - **`backend="hdmr"`** (default) fits the RS-HDMR B-spline surrogate and uses the structural ($S_a$) variances of its component functions as the partial variances $V_u$, truncated at `maxorder`.
 - **`backend="pce"`** fits a polynomial chaos expansion and groups the squared orthonormal coefficients by the support of their multi-index (Sudret, 2008) — exact within the fitted polynomial.
 
-Normalization is by the **empirical variance of $Y$**, not the surrogate's own variance. As a consequence, $\sum_i \mathrm{Sh}_i$ equals the surrogate's explained-variance fraction: close to 1 for a good fit, and visibly below 1 otherwise — an honest indicator of truncation and fit error rather than a silently renormalized result. Interactions above `maxorder` (HDMR) or the polynomial order (PCE) are absent from the allocation.
+Normalization is by the surrogate's **total decomposed variance** $\sum_u V_u$, so $\sum_i \mathrm{Sh}_i = 1$ exactly — the Shapley efficiency property (Owen, 2014). $S_1$ and $S_T$ from the same surrogate use the same denominator, so for `backend="pce"` they match `analyze_pce` exactly, while for `backend="hdmr"` they differ from `analyze_hdmr` (which normalizes by $\mathrm{Var}(Y)$) by a factor of `explained_variance`. How much of the *output* variance the surrogate actually captured is reported separately in the `explained_variance` field, $\sum_u V_u / \mathrm{Var}(Y)$: close to 1 for a good fit, below 1 when truncation or fit error leaves variance unexplained, and above 1 when an overfit surrogate over-counts shared variance — an honest diagnostic rather than a silently renormalized result. A `UserWarning` is emitted when it strays far from 1. Interactions above `maxorder` (HDMR) or the polynomial order (PCE) are absent from the allocation.
 
 ### How to use it
 
@@ -218,10 +218,12 @@ Y = evaluate(jnp.asarray(X))
 
 # HDMR backend (default) — supports scalar, multi-output, time-series Y
 result = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y)
-print("Sh:", result.Sh)        # (D,) Shapley effects
-print("sum:", result.Sh.sum()) # ≈ surrogate's explained-variance fraction
-print("S1:", result.S1)        # first-order, same surrogate
-print("ST:", result.ST)        # total-order, same surrogate
+print("Sh:", result.Sh)              # (D,) Shapley effects
+print("sum:", result.Sh.sum())       # == 1 (Shapley efficiency property)
+print("explained:", result.explained_variance)  # sum_u V_u / Var(Y) — fit quality
+print("order:", result.order)        # effective surrogate order used
+print("S1:", result.S1)              # first-order, same surrogate
+print("ST:", result.ST)              # total-order, same surrogate
 
 # PCE backend — scalar Y only, PCE-only knobs
 result_pce = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y, backend="pce", order=4)
@@ -233,12 +235,13 @@ Backend-specific keyword arguments are validated: explicitly setting a knob that
 
 | Index | Meaning |
 |-------|---------|
-| $\mathrm{Sh}(i)$ | Shapley effect: parameter $i$'s fair share of output variance, including an equal split of every interaction it participates in. $\sum_i \mathrm{Sh}_i$ equals the surrogate's explained-variance fraction. |
+| $\mathrm{Sh}(i)$ | Shapley effect: parameter $i$'s fair share of decomposed variance, including an equal split of every interaction it participates in. $\sum_i \mathrm{Sh}_i = 1$ exactly (Shapley efficiency). |
 | $S_1(i)$ | First-order index from the same surrogate (main effect only). |
 | $S_T(i)$ | Total-order index from the same surrogate (main effect plus all interactions counted in full). |
+| `explained_variance` | Fraction of $\mathrm{Var}(Y)$ the surrogate captured, $\sum_u V_u / \mathrm{Var}(Y)$ — a separate fit-quality diagnostic, not a per-parameter index. |
 
 **When to use Shapley effects:**
-- You want a single, fairly allocated importance score per parameter that sums to the explained variance (e.g. for ranking, reporting, or budget allocation)
+- You want a single, fairly allocated importance score per parameter that sums to exactly 1 (e.g. for ranking, reporting, or budget allocation), with a separate `explained_variance` diagnostic reporting how much output variance the surrogate captured
 - Interactions matter and you want them attributed to their participants rather than omitted ($S_1$) or double-counted ($S_T$)
 - You have existing $(X, Y)$ pairs and want analytical indices without permutation Monte Carlo noise
 - Your inputs are independent (required in this version)

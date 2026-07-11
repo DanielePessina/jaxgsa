@@ -10,13 +10,25 @@
   variance decomposition instead of permutation Monte Carlo. Two backends:
   `"hdmr"` (default; RS-HDMR component-function variances, supports scalar,
   multi-output, and time-series outputs) and `"pce"` (subset variances read
-  off orthonormal polynomial coefficients, scalar outputs). Results carry
-  `Sh` alongside `S1`/`ST` from the same surrogate, all normalized by the
-  empirical output variance so the sum reports the explained-variance
-  fraction. Assumes independent inputs.
+  off orthonormal polynomial coefficients, scalar outputs). Indices are
+  normalized by the surrogate's total decomposed variance, so `Sh` sums to
+  exactly 1 (the Shapley efficiency property); the `explained_variance` field
+  reports the fraction of `Var(Y)` the surrogate captured, and the `order`
+  field the effective surrogate order used. For the `"pce"` backend `S1`/`ST`
+  match `analyze_pce` exactly. A `UserWarning` flags a pathological fit
+  (`explained_variance` far from 1). Assumes independent inputs.
 - Closed-form analytical Shapley values (`ANALYTICAL_SHAPLEY`,
   `analytical_shapley(...)`) for the Ishigami, linear, and Sobol-G
   benchmarks, used to validate the new method.
+
+### Changed
+
+- RS-HDMR now returns `NaN` sensitivity indices (with the existing
+  zero-variance warning) for constant-output slices, matching the
+  package-wide convention used by Sobol and PCE, instead of silent zeros.
+- `analyze_pce` now emits a `UserWarning` when the requested polynomial
+  `order` is automatically reduced to fit the sample budget, and warns on a
+  constant (zero-variance) output.
 
 ## 0.1.2
 

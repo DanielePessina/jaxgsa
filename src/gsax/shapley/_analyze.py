@@ -8,9 +8,11 @@ permutation Monte Carlo. Assumes independent inputs.
 
 from __future__ import annotations
 
+import warnings
 from typing import Literal
 
 import jax.numpy as jnp
+import numpy as np
 from jax import Array
 
 from gsax.hdmr._analyze import analyze_hdmr
@@ -18,6 +20,13 @@ from gsax.pce._analyze import analyze_pce
 from gsax.problem import Problem
 from gsax.shapley._engine import build_membership, shapley_from_variances
 from gsax.shapley._result import ShapleyResult
+
+# explained_variance outside [_POORFIT, _OVERFIT] flags an untrustworthy fit:
+# below -> much of Var(Y) is unexplained (truncation/poor fit); above -> the
+# surrogate's partial variances over-count Var(Y) (typically overfitting).
+# The Shapley effects still sum to 1 either way.
+_POORFIT_THRESHOLD = 0.5
+_OVERFIT_THRESHOLD = 1.3
 
 # Backend defaults, applied when the corresponding kwarg is left as None.
 # They mirror the signatures of analyze_hdmr / analyze_pce exactly.
@@ -97,11 +106,27 @@ def analyze_shapley(
 
     Inputs are assumed independent. Under independence the Shapley
     effects satisfy ``S1_i <= Sh_i <= ST_i`` and split each interaction's
-    variance equally among its participants. All indices are normalized
-    by the empirical ``Var(Y)``, so their sum equals the surrogate's
-    explained-variance fraction; interactions beyond the surrogate's
-    truncation order (``maxorder`` / ``order``) are absent from the
-    allocation.
+    variance equally among its participants. Indices are normalized by the
+    surrogate's total decomposed variance ``sum_u V_u``, so ``Sh`` sums to
+    exactly 1 (the efficiency property; Owen 2014). How much of ``Var(Y)``
+    the surrogate captured is reported separately as
+    ``ShapleyResult.explained_variance`` (close to 1 for a good fit, below 1
+    when truncation leaves variance unexplained, above 1 when an overfit
+    surrogate over-counts shared variance); a ``UserWarning`` is emitted when
+    it is far from 1. Interactions beyond the surrogate's truncation order
+    (``maxorder`` / ``order``) are absent from the allocation.
+
+    For ``backend="pce"`` this normalization coincides with ``analyze_pce``,
+    so ``S1``/``ST`` match it exactly. For ``backend="hdmr"`` the indices
+    differ from ``analyze_hdmr``'s (which normalize by ``Var(Y)``) by a
+    factor of ``explained_variance``; the total-order ``ST`` is built from the
+    structural ANCOVA terms only and excludes the correlative ``Sb`` part
+    (zero under the independence assumption).
+
+    The ``"hdmr"`` backend inherits ``analyze_hdmr``'s input contract: it
+    requires at least 300 samples, ``maxorder`` in ``{1, 2, 3}`` (clamped with
+    a warning when ``D < maxorder``), and a 2-D ``Y`` is always read as
+    ``(N, K)`` -- reshape a single-output time series to ``(N, T, 1)``.
 
     Args:
         problem: Parameter names and distributions.
@@ -123,8 +148,9 @@ def analyze_shapley(
         fit_ratio: PCE-only; maximum terms-to-samples ratio. Defaults to 0.5.
 
     Returns:
-        ShapleyResult with ``Sh``, ``S1``, and ``ST`` (all normalized by
-        empirical output variance), the problem, and the backend name.
+        ShapleyResult with ``Sh`` (summing to 1), the bracketing ``S1``/``ST``
+        from the same decomposition, ``explained_variance``, the effective
+        surrogate ``order``, the problem, and the backend name.
 
     Raises:
         ValueError: If ``backend`` is unknown, or a kwarg belonging to the
@@ -143,6 +169,10 @@ def analyze_shapley(
         pce_kwargs={"order": order, "ridge": ridge, "fit_ratio": fit_ratio},
     )
 
+    # Per-output-slice variance of the raw outputs, used to normalize the PCE
+    # explained fraction and to flag constant (zero-variance) slices uniformly.
+    total_var = jnp.var(jnp.asarray(Y), axis=0)
+
     if backend == "hdmr":
         result = analyze_hdmr(problem, X, Y, **resolved)
         emulator = result.emulator
@@ -153,21 +183,64 @@ def analyze_shapley(
         subsets: list[tuple[int, ...]] = [(i,) for i in range(problem.num_vars)]
         subsets += [tuple(u) for u in emulator["c2"]]
         subsets += [tuple(u) for u in emulator["c3"]]
-        # Sa is each component function's variance / Var(Y): exactly the
-        # normalized partial variances the Shapley formula needs.
-        V = result.Sa
+        membership = build_membership(subsets, problem.num_vars)
+        # Sa_j = Var(f_j)/Var(Y): partial variances already divided by Var(Y),
+        # so their sum over terms is the explained-variance fraction directly.
+        partial = result.Sa
+        explained_variance = partial.sum(axis=-1)
+        effective_order = emulator["maxorder"]
     else:
         pce_result = analyze_pce(problem, X, Y, **resolved)
-        # Orthonormality makes each squared coefficient the partial variance
-        # of its basis function; the constant term (row 0) carries none.
+        # Orthonormality makes each squared coefficient a partial variance;
+        # the constant term (row 0) carries none. multi_index[1:] > 0 IS the
+        # membership matrix, so no tuple round-trip is needed.
         partial = pce_result.coefficients[1:] ** 2
-        active = pce_result.multi_index[1:] > 0  # (n_terms - 1, D)
-        subsets = [tuple(int(d) for d in row.nonzero()[0]) for row in active]
-        total_var = jnp.var(jnp.asarray(Y))
-        inv_var = jnp.where(total_var == 0, jnp.nan, 1.0 / total_var)
-        V = partial * inv_var
+        membership = np.asarray(pce_result.multi_index[1:] > 0)
+        explained_variance = jnp.where(total_var == 0, jnp.nan, partial.sum(axis=-1) / total_var)
+        effective_order = pce_result.order
 
-    membership = build_membership(subsets, problem.num_vars)
+    # Normalize the partial variances to sum to 1 so Sh satisfies the Shapley
+    # efficiency property (Owen 2014); explained_variance carries the
+    # fit-quality signal separately. A constant output slice (total_var == 0,
+    # which a ridge-regularized PCE fit leaves tiny-but-nonzero) or a degenerate
+    # decomposition (sum 0 / NaN) yields NaN indices, matching the backends.
+    v_total = partial.sum(axis=-1, keepdims=True)
+    degenerate = (v_total == 0) | ~jnp.isfinite(v_total) | (total_var[..., None] == 0)
+    V = jnp.where(degenerate, jnp.nan, partial / jnp.where(degenerate, 1.0, v_total))
+
     Sh, S1, ST = shapley_from_variances(V, membership)
+    _warn_pathological_fit(explained_variance)
 
-    return ShapleyResult(Sh=Sh, S1=S1, ST=ST, problem=problem, backend=backend)
+    return ShapleyResult(
+        Sh=Sh,
+        S1=S1,
+        ST=ST,
+        problem=problem,
+        backend=backend,
+        explained_variance=explained_variance,
+        order=int(effective_order),
+    )
+
+
+def _warn_pathological_fit(explained_variance: Array) -> None:
+    """Warn when the surrogate fit is too poor or overfit to trust the indices.
+
+    Args:
+        explained_variance: ``sum_u V_u / Var(Y)`` per output slice. NaN slices
+            (constant output) already warned via the backend and do not
+            re-trigger here, since NaN comparisons are False.
+    """
+    ev = jnp.asarray(explained_variance)
+    if bool(jnp.any(ev > _OVERFIT_THRESHOLD)):
+        warnings.warn(
+            f"gsax: surrogate explained_variance exceeds {_OVERFIT_THRESHOLD} "
+            "(partial variances over-count Var(Y), typically overfitting); "
+            "Shapley effects still sum to 1 but may be unreliable.",
+            stacklevel=3,
+        )
+    elif bool(jnp.any(ev < _POORFIT_THRESHOLD)):
+        warnings.warn(
+            f"gsax: surrogate explained_variance is below {_POORFIT_THRESHOLD} "
+            "(much of Var(Y) is unexplained); Shapley effects may be unreliable.",
+            stacklevel=3,
+        )
