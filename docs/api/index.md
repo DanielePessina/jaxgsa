@@ -1,11 +1,12 @@
 # API Reference
 
 This is the canonical reference for the exported `gsax` surface. The package has
-seven workflows:
+eight workflows:
 
 - Sobol: `sample()` -> `analyze()`
 - RS-HDMR: `analyze_hdmr()` -> `emulate_hdmr()`
 - PCE: `analyze_pce()` -> `emulate_pce()`
+- Shapley effects: `analyze_shapley()`
 - eFAST: `sample_efast()` -> `analyze_efast()`
 - DGSM: `sample_mc()` -> `analyze_dgsm()`
 - HSIC: `sample_mc()` -> `analyze_hsic()`
@@ -28,6 +29,7 @@ Since v0.6.0, `gsax` is organized into subpackages:
 | `gsax.sobol` | `analyze`, `SAResult` |
 | `gsax.hdmr` | `analyze`, `emulate`, `HDMRResult`, `HDMREmulator` |
 | `gsax.pce` | `analyze`, `emulate`, `PCEResult` |
+| `gsax.shapley` | `analyze`, `ShapleyResult` |
 | `gsax.efast` | `sample`, `analyze`, `EFASTResult` |
 | `gsax.dgsm` | `analyze`, `DGSMResult`, `poincare_constant`, `axis_constants` |
 | `gsax.hsic` | `analyze`, `HSICResult` |
@@ -39,6 +41,7 @@ You can import from the subpackages directly:
 from gsax.sobol import analyze
 from gsax.hdmr import analyze as analyze_hdmr, emulate as emulate_hdmr
 from gsax.pce import analyze as analyze_pce, emulate as emulate_pce
+from gsax.shapley import analyze as analyze_shapley
 from gsax.efast import sample as sample_efast, analyze as analyze_efast
 from gsax.dgsm import analyze as analyze_dgsm
 from gsax.hsic import analyze as analyze_hsic
@@ -69,6 +72,8 @@ Top-level exports from `gsax`:
 - [`analyze_pce`](#analyze_pce)
 - [`emulate_pce`](#emulate_pce)
 - [`PCEResult`](#pceresult)
+- [`analyze_shapley`](#analyze_shapley)
+- [`ShapleyResult`](#shapleyresult)
 - [`sample_efast`](#sample-efast)
 - [`analyze_efast`](#analyze-efast)
 - [`EFASTResult`](#efastresult)
@@ -918,6 +923,163 @@ print(result.S1)
 print(result.ST)
 print(result.loo_rmse)
 ```
+
+Related links:
+
+- [Methods](/guide/methods)
+
+## Shapley Effects Workflow
+
+<a id="analyze_shapley"></a>
+### `analyze_shapley()`
+
+Compute Shapley effects — a fair, game-theoretic allocation of output variance
+across inputs (Owen, 2014; Song, Nelson & Staum, 2016) — analytically from the
+variance decomposition of a fitted surrogate. The default backend fits an
+RS-HDMR B-spline surrogate and allocates its structural component-function
+variances; the PCE backend groups squared orthonormal polynomial coefficients
+by multi-index support (Sudret, 2008).
+
+```python
+def analyze_shapley(
+    problem: Problem,
+    X: Array,
+    Y: Array,
+    *,
+    backend: Literal["hdmr", "pce"] = "hdmr",
+    # HDMR-only knobs (None -> backend default):
+    prenormalize: bool | None = None,
+    maxorder: int | None = None,
+    maxiter: int | None = None,
+    m: int | None = None,
+    lambdax: float | None = None,
+    chunk_size: int | None = None,
+    # PCE-only knobs (None -> backend default):
+    order: int | None = None,
+    ridge: float | None = None,
+    fit_ratio: float | None = None,
+) -> ShapleyResult
+```
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `problem` | `Problem` | required | Parameter names and distributions. |
+| `X` | `Array` | required | Input array with shape `(N, D)` (given-data; no structured design needed). |
+| `Y` | `Array` | required | Output array. `backend="hdmr"`: `(N,)`, `(N, K)`, or `(N, T, K)`. `backend="pce"`: `(N,)` scalar only. |
+| `backend` | `Literal["hdmr", "pce"]` | `"hdmr"` | Surrogate whose variance decomposition is allocated. |
+| `prenormalize` | `bool \| None` | `None` (`False`) | HDMR only. SALib-style output standardization before fitting. |
+| `maxorder` | `int \| None` | `None` (`2`) | HDMR only. Maximum HDMR expansion order. |
+| `maxiter` | `int \| None` | `None` (`100`) | HDMR only. Maximum backfitting iterations. |
+| `m` | `int \| None` | `None` (`2`) | HDMR only. Number of B-spline intervals. |
+| `lambdax` | `float \| None` | `None` (`0.01`) | HDMR only. Tikhonov regularization strength. |
+| `chunk_size` | `int \| None` | `None` (`2048`) | HDMR only. Maximum `(T, K)` combinations per batch. |
+| `order` | `int \| None` | `None` (`3`) | PCE only. Maximum total polynomial degree. |
+| `ridge` | `float \| None` | `None` (`1e-8`) | PCE only. Tikhonov regularization for the least-squares fit. |
+| `fit_ratio` | `float \| None` | `None` (`0.5`) | PCE only. Maximum ratio of terms to samples before order reduction. |
+
+Validation and behavior:
+
+- Explicitly setting a knob that belongs to the non-selected backend raises
+  `ValueError` (e.g. `backend="pce"` with `maxorder=3`, or `backend="hdmr"`
+  with `order=4`). Knobs left as `None` fall back to the backend defaults
+  shown in parentheses.
+- `X.shape[1]` must match `problem.num_vars`.
+- With `backend="pce"`, `Y` must be 1D. Multi-output and time-series outputs
+  require `backend="hdmr"`.
+- Shapley effects are computed **analytically** from the surrogate's variance
+  decomposition — no permutation Monte Carlo. Each partial variance $V_u$ is
+  split equally among the $|u|$ parameters in its interaction set:
+  $\mathrm{Sh}_i = \sum_{u \ni i} V_u / |u|$.
+- **Independent inputs are assumed** (v1 limitation; dependent-input Shapley
+  effects are future work). Under independence, `S1 <= Sh <= ST` holds per
+  parameter and interaction variance is split fairly among participants.
+- Indices are normalized by the **empirical** `Var(Y)`, not the surrogate
+  variance, so `Sh.sum()` (over the parameter axis) equals the surrogate's
+  explained-variance fraction — close to 1 for a good fit, below 1 otherwise.
+- Interactions above `maxorder` (HDMR) or the polynomial order (PCE) are
+  absent from the allocation.
+
+Returns: [`ShapleyResult`](#shapleyresult)
+
+Minimal example:
+
+```python
+import jax.numpy as jnp
+import gsax
+from gsax.benchmarks.ishigami import PROBLEM, evaluate
+
+X = gsax.sample_mc(PROBLEM, N=2000, seed=42)
+Y = evaluate(jnp.asarray(X))
+
+result = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y)
+
+print(result.Sh)        # (3,) — Shapley effects
+print(result.Sh.sum())  # ≈ explained-variance fraction of the surrogate
+print(result.S1)        # (3,) — first-order, same surrogate
+print(result.ST)        # (3,) — total-order, same surrogate
+
+# PCE backend with PCE-only knobs
+result_pce = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y, backend="pce", order=4)
+```
+
+<a id="shapleyresult"></a>
+### `ShapleyResult`
+
+Dataclass holding Shapley effects alongside the first-order and total-order
+indices derived from the same surrogate, so the ordering `S1 <= Sh <= ST` is
+visible at a glance.
+
+```python
+@dataclass
+class ShapleyResult:
+    Sh: Array
+    S1: Array
+    ST: Array
+    problem: Problem
+    backend: str
+```
+
+| Field | Shape | Description |
+| --- | --- | --- |
+| `Sh` | `(D,)` / `(K, D)` / `(T, K, D)` | Shapley effects: fair per-parameter share of output variance. |
+| `S1` | same as `Sh` | First-order indices from the same surrogate. |
+| `ST` | same as `Sh` | Total-order indices from the same surrogate. |
+| `problem` | `Problem` | Problem definition used for the analysis. |
+| `backend` | `str` | Surrogate backend used, `"hdmr"` or `"pce"`. |
+
+Shape contract:
+
+| `Y` shape passed to `analyze_shapley()` | `Sh` / `S1` / `ST` |
+| --- | --- |
+| `(N,)` | `(D,)` |
+| `(N, K)` (HDMR backend only) | `(K, D)` |
+| `(N, T, K)` (HDMR backend only) | `(T, K, D)` |
+
+All indices are normalized by the empirical output variance, so summing `Sh`
+over the parameter axis gives the surrogate's explained-variance fraction.
+
+<a id="shapleyresult-to_dataset"></a>
+#### `ShapleyResult.to_dataset()`
+
+```python
+ds = result.to_dataset(time_coords=None)
+```
+
+Converts Shapley results to a labeled `xarray.Dataset`, matching every other
+gsax result.
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `time_coords` | `list \| np.ndarray \| None` | `None` | Coordinate values for the time dimension on 3D results. |
+
+Behavior:
+
+- Data variables `Sh`, `S1`, and `ST` on dims `("param",)`,
+  `("output", "param")`, or `("time", "output", "param")`.
+- Uses `problem.names` for `param` coordinates.
+- Uses `problem.output_names` when available, otherwise `y0`, `y1`, and so on.
+- For 3D results, defaults to integer time indices when `time_coords` is not
+  provided.
 
 Related links:
 

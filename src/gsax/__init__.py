@@ -16,6 +16,8 @@ from gsax.pce import analyze as analyze_pce
 from gsax.pce import emulate as emulate_pce
 from gsax.problem import GaussianInputSpec, Problem, UniformInputSpec
 from gsax.sampling import SamplingResult, downsample, load, sample, sample_mc, verify_prefix
+from gsax.shapley import ShapleyResult
+from gsax.shapley import analyze as analyze_shapley
 from gsax.sobol import SAResult, analyze
 
 __all__ = [
@@ -30,6 +32,7 @@ __all__ = [
     "Problem",
     "SAResult",
     "SamplingResult",
+    "ShapleyResult",
     "UniformInputSpec",
     "analyze",
     "analyze_dgsm",
@@ -38,6 +41,7 @@ __all__ = [
     "analyze_hsic",
     "analyze_pawn",
     "analyze_pce",
+    "analyze_shapley",
     "downsample",
     "emulate_hdmr",
     "emulate_pce",

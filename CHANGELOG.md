@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.0
+
+### Added
+
+- **Shapley effects** (`gsax.analyze_shapley`, `ShapleyResult`) — global
+  Shapley-value allocation of output variance across inputs (Owen 2014;
+  Song, Nelson & Staum 2016), computed analytically from a fitted surrogate's
+  variance decomposition instead of permutation Monte Carlo. Two backends:
+  `"hdmr"` (default; RS-HDMR component-function variances, supports scalar,
+  multi-output, and time-series outputs) and `"pce"` (subset variances read
+  off orthonormal polynomial coefficients, scalar outputs). Results carry
+  `Sh` alongside `S1`/`ST` from the same surrogate, all normalized by the
+  empirical output variance so the sum reports the explained-variance
+  fraction. Assumes independent inputs.
+- Closed-form analytical Shapley values (`ANALYTICAL_SHAPLEY`,
+  `analytical_shapley(...)`) for the Ishigami, linear, and Sobol-G
+  benchmarks, used to validate the new method.
+
 ## 0.1.2
 
 ### Added

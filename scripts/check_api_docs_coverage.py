@@ -17,6 +17,7 @@ CLASS_FILES = {
     "SAResult": ROOT / "src" / "gsax" / "sobol" / "_result.py",
     "HDMRResult": ROOT / "src" / "gsax" / "hdmr" / "_result.py",
     "PCEResult": ROOT / "src" / "gsax" / "pce" / "_result.py",
+    "ShapleyResult": ROOT / "src" / "gsax" / "shapley" / "_result.py",
     "EFASTResult": ROOT / "src" / "gsax" / "efast" / "_result.py",
     "DGSMResult": ROOT / "src" / "gsax" / "dgsm" / "_result.py",
     "PAWNResult": ROOT / "src" / "gsax" / "pawn" / "_result.py",
