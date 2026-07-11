@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org)
 
-`gsax` computes global sensitivity indices entirely in JAX, giving you GPU/TPU acceleration and JIT compilation for free. It provides seven complementary methods: **Sobol indices** (via Saltelli sampling), **RS-HDMR** (surrogate-based, works with any input-output pairs), **PCE** (Polynomial Chaos Expansion with analytical Sobol indices), **eFAST** (Extended Fourier Amplitude Sensitivity Test), **DGSM** (Derivative-based Global Sensitivity Measures via JAX autodiff), **HSIC** (the Hilbert–Schmidt Independence Criterion, a kernel-based dependence measure), and **PAWN** (a moment-independent method based on output CDFs, after Pianosi & Wagener, 2015).
+`gsax` computes global sensitivity indices entirely in JAX, giving you GPU/TPU acceleration and JIT compilation for free. It provides eight complementary methods: **Sobol indices** (via Saltelli sampling), **RS-HDMR** (surrogate-based, works with any input-output pairs), **PCE** (Polynomial Chaos Expansion with analytical Sobol indices), **eFAST** (Extended Fourier Amplitude Sensitivity Test), **DGSM** (Derivative-based Global Sensitivity Measures via JAX autodiff), **HSIC** (the Hilbert–Schmidt Independence Criterion, a kernel-based dependence measure), **PAWN** (a moment-independent method based on output CDFs, after Pianosi & Wagener, 2015), and the **Borgonovo delta** (a moment-independent, density-based importance measure, after Borgonovo, 2007).
 
 ## Features
 
@@ -42,6 +42,10 @@
   - Kolmogorov–Smirnov distance between unconditional and conditional output CDFs
   - Tie-aware KS matching `scipy.stats.ks_2samp` for discrete/continuous outputs
   - Median / max / mean aggregation with bootstrap confidence intervals
+- **Borgonovo delta** — moment-independent, density-based sensitivity (Borgonovo, 2007)
+  - Plischke et al. (2013) given-data estimator: works with **any** set of (X, Y) pairs
+  - Bias-corrected delta plus the given-data first-order Sobol S1 (SALib-compatible)
+  - Percentile bootstrap confidence intervals
 - Supports scalar, multi-output, and time-series model outputs from the start
 - Bootstrap confidence intervals with JAX-accelerated resampling
 - Optional `prenormalize=True` mode for SALib-style output standardization before
@@ -221,6 +225,26 @@ Y = evaluate(jnp.asarray(X))
 
 result = gsax.analyze_pawn(PROBLEM, jnp.asarray(X), Y, statistic="median")
 print("PAWN:", result.pawn)  # (D,) median KS distance across conditioning bins
+```
+
+### Borgonovo delta (density-based, moment-independent)
+
+The Borgonovo delta measures the expected L1 shift of the **entire output
+density** when an input is fixed. The Plischke et al. (2013) given-data
+estimator works on any (X, Y) pairs and also returns the given-data
+first-order Sobol index from the same partition.
+
+```python
+import jax.numpy as jnp
+import gsax
+from gsax.benchmarks.ishigami import PROBLEM, evaluate
+
+X = gsax.sample_mc(PROBLEM, N=5000, seed=42)
+Y = evaluate(jnp.asarray(X))
+
+result = gsax.analyze_borgonovo(PROBLEM, jnp.asarray(X), Y)
+print("delta:", result.delta)  # (D,) bias-corrected delta indices
+print("S1:", result.S1)        # (D,) given-data first-order Sobol
 ```
 
 ## Usage

@@ -1,6 +1,6 @@
 # Methods
 
-gsax implements seven complementary approaches to global sensitivity analysis (GSA). The variance-based methods (Sobol', HDMR, PCE, eFAST) decompose the variance of a model's output into contributions attributable to individual input parameters and their interactions; the derivative-based method (DGSM) uses autodiff to bound total Sobol indices directly from partial derivatives; and the dependence-based methods (HSIC, PAWN) quantify sensitivity without decomposing variance — HSIC through kernel-based dependence measures and PAWN through shifts in the output's cumulative distribution. Together, these enable practitioners to identify which parameters drive model behaviour and which are effectively unidentifiable from available measurements.
+gsax implements eight complementary approaches to global sensitivity analysis (GSA). The variance-based methods (Sobol', HDMR, PCE, eFAST) decompose the variance of a model's output into contributions attributable to individual input parameters and their interactions; the derivative-based method (DGSM) uses autodiff to bound total Sobol indices directly from partial derivatives; and the dependence-based methods (HSIC, PAWN, Borgonovo delta) quantify sensitivity without decomposing variance — HSIC through kernel-based dependence measures, PAWN through shifts in the output's cumulative distribution, and Borgonovo delta through shifts in the output's probability density. Together, these enable practitioners to identify which parameters drive model behaviour and which are effectively unidentifiable from available measurements.
 
 ## Background: Variance-Based Sensitivity Analysis
 
@@ -417,18 +417,70 @@ The number of bins (`n_bins`, default 10) trades conditioning resolution against
 
 Pianosi, F. & Wagener, T. (2015). A simple and efficient method for global sensitivity analysis based on cumulative distribution functions. *Environmental Modelling & Software*, 67, 1-11.
 
+## Borgonovo Delta (Density-Based Sensitivity)
+
+Borgonovo's $\delta$ index is the second **moment-independent** method in gsax. Where PAWN summarises the distributional shift by the largest gap between CDFs, $\delta$ measures the expected **L1 distance between the entire output density** and the output density conditional on an input (Borgonovo, 2007):
+
+$$
+\delta_i = \frac{1}{2}\,\mathbb{E}_{X_i}\!\left[\int \left| f_Y(y) - f_{Y \mid X_i}(y) \right| \mathrm{d}y \right]
+$$
+
+The index lies in $[0, 1]$: it is $0$ when fixing $X_i$ never changes the output distribution, and $1$ when the output is a deterministic function of $X_i$ alone. Because it compares whole densities rather than variances, $\delta$ captures influence carried through tails, skewness, or multimodality that variance-based indices underweight, and it is invariant under monotone transformations of the output. Like HSIC and PAWN, it is a **given-data** method: any $(X, Y)$ pairs work, with no independence assumption on the inputs.
+
+### How it works
+
+gsax implements the given-data estimator of Plischke, Borgonovo & Smith (2013):
+
+1. For each input, the samples are ordered by that input's rank and split into $M$ **equal-frequency classes**. By default $M$ follows the Plischke sample-size heuristic (roughly $N^{2/7}$, at most 48 classes); override it with `n_classes`.
+2. The unconditional density $f_Y$ and each class-conditional density $f_{Y \mid X_i \in \mathcal{C}_m}$ are estimated by **Gaussian KDE** with Silverman bandwidths on a fixed grid of `grid_size` points spanning $[\min Y, \max Y]$.
+3. The L1 distances are integrated with the trapezoid rule and averaged with class weights, giving the plug-in estimate
+
+$$
+\hat{\delta}_i = \sum_{m=1}^{M} \frac{n_m}{2N} \int \left| \hat{f}_Y(y) - \hat{f}_{Y \mid X_i \in \mathcal{C}_m}(y) \right| \mathrm{d}y
+$$
+
+The plug-in estimate is **biased upward** at finite $N$, so by default gsax applies Plischke's bootstrap bias reduction $2\hat{\delta}_i - \overline{\hat{\delta}_i^{(b)}}$ over `n_bootstrap` resamples, with percentile confidence intervals from the same replicates. The same class partition also yields the **given-data first-order Sobol index** (variance of the class means over the total variance) at negligible extra cost, so every analysis returns both $\delta$ and $S_1$.
+
+The estimator matches `SALib.analyze.delta` (same equal-frequency rank partition, class-count heuristic, Silverman KDE factors, and 100-point output grid) with two differences: the central estimate is computed on the original sample — deterministic given the data, where SALib evaluates it on a random resample — and a constant output column yields $\delta = S_1 = 0$ instead of an error.
+
+### How to use it
+
+1. `gsax.sample_mc()` generates plain Monte Carlo samples (any sampling strategy works — no structured design is required).
+2. You evaluate your model on the samples.
+3. `gsax.analyze_borgonovo()` partitions each input into rank classes and computes $\delta$, $S_1$, and their bootstrap intervals in a single JIT-compiled kernel, vmapped over output columns and scanned over bootstrap replicates.
+
+Set `n_bootstrap=0` to skip bias correction and confidence intervals (raw plug-in estimate), or `bias_correct=False` to keep the intervals but report the uncorrected estimate. For large time-series outputs, lower `chunk_size` to bound peak memory, which scales with `chunk_size * D * N * grid_size`.
+
+### Index summary
+
+| Index | Meaning |
+|-------|---------|
+| $\delta(i)$ | Expected L1 distance between the unconditional and conditional output densities for input $i$, in $[0, 1]$. Higher means stronger influence on the output distribution; $0$ means no influence at all. |
+| $S_1(i)$ | Given-data first-order Sobol index from the same class partition — the variance-based view of the same conditioning, for comparison at no extra cost. |
+
+**When to use Borgonovo delta:**
+- You care about influence on the whole output distribution — tails, skewness, multimodality — not just variance
+- You want a moment-independent index with a fixed $[0, 1]$ scale, invariant under monotone output transforms
+- You have existing $(X, Y)$ pairs from any sampling strategy, possibly with correlated inputs
+- You use `SALib.analyze.delta` and want a deterministic, JIT-compiled equivalent that also handles multi-output and time-series `Y`
+
+### Reference
+
+- Borgonovo, E. (2007). A new uncertainty importance measure. *Reliability Engineering & System Safety*, 92(6), 771-784.
+- Plischke, E., Borgonovo, E. & Smith, C.L. (2013). Global sensitivity measures from given data. *European Journal of Operational Research*, 226(3), 536-550.
+
 ## Choosing Between Them
 
-| Consideration | Sobol' | HDMR | PCE | eFAST | DGSM | HSIC | PAWN |
-|---------------|--------|------|-----|-------|------|------|------|
-| Sampling requirement | Structured Saltelli design, $N(2D+2)$ evaluations (default) | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Search curves, $N \times D$ evaluations | Plain MC, $N$ evaluations + autodiff | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs |
-| Input independence | Assumed | Handled via ANCOVA decomposition | Assumed | Assumed | Assumed | Not assumed | Not assumed |
-| Surrogate/emulator | No | Yes (`emulate_hdmr`) | Yes (`emulate_pce`) | No | No | No | No |
-| Accuracy | Exact (given enough samples) | Depends on B-spline fit quality | Depends on polynomial fit quality | Exact (given enough samples) | Bounds on $S_T$, not exact indices | Dependence measure, not variance fractions | Distributional (KS) distance, not variance fractions |
-| Second-order indices | Direct estimation from cross-matrices | From interaction component functions | Analytical from coefficients | Not available | Not available | Not available | Not available |
-| Interaction detection | Via $S_2$ and the gap $S_T - S_1$ | Via explicit interaction component functions | Via $S_2$ from coefficients | Via the gap $S_T - S_1$ only | Not available (bounds only) | Via the Total HSIC − R2-HSIC gap | Not available (first-order only) |
-| Output shapes | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar only | Scalar, multi-output, time-series | Scalar, multi-output | Scalar, multi-output, time-series | Scalar, multi-output, time-series |
-| Input distributions | Uniform + Gaussian | Any (via CDF mapping) | Uniform + Gaussian | Uniform + Gaussian | Uniform + Gaussian (+ truncated Normal) | Any (via CDF mapping) | Any (via CDF mapping) |
+| Consideration | Sobol' | HDMR | PCE | eFAST | DGSM | HSIC | PAWN | Borgonovo delta |
+|---------------|--------|------|-----|-------|------|------|------|-----------------|
+| Sampling requirement | Structured Saltelli design, $N(2D+2)$ evaluations (default) | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Search curves, $N \times D$ evaluations | Plain MC, $N$ evaluations + autodiff | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs |
+| Input independence | Assumed | Handled via ANCOVA decomposition | Assumed | Assumed | Assumed | Not assumed | Not assumed | Not assumed |
+| Surrogate/emulator | No | Yes (`emulate_hdmr`) | Yes (`emulate_pce`) | No | No | No | No | No |
+| Accuracy | Exact (given enough samples) | Depends on B-spline fit quality | Depends on polynomial fit quality | Exact (given enough samples) | Bounds on $S_T$, not exact indices | Dependence measure, not variance fractions | Distributional (KS) distance, not variance fractions | Distributional (L1) distance, not variance fractions |
+| Second-order indices | Direct estimation from cross-matrices | From interaction component functions | Analytical from coefficients | Not available | Not available | Not available | Not available | Not available |
+| Interaction detection | Via $S_2$ and the gap $S_T - S_1$ | Via explicit interaction component functions | Via $S_2$ from coefficients | Via the gap $S_T - S_1$ only | Not available (bounds only) | Via the Total HSIC − R2-HSIC gap | Not available (first-order only) | Not available (the $\delta - S_1$ gap flags influence beyond first-order variance) |
+| Output shapes | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar only | Scalar, multi-output, time-series | Scalar, multi-output | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series |
+| Input distributions | Uniform + Gaussian | Any (via CDF mapping) | Uniform + Gaussian | Uniform + Gaussian | Uniform + Gaussian (+ truncated Normal) | Any (via CDF mapping) | Any (via CDF mapping) | Any (rank-based classes) |
 
 ## Output Shapes
 
