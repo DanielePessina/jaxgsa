@@ -521,6 +521,22 @@ class TestValidation:
         with pytest.raises(ValueError, match="n_total"):
             analyze(sr, jnp.ones(sr.n_total + 3))
 
+    def test_y_wrong_ndim_raises(self):
+        """4-D Y is outside the (n,), (n,K), (n,T,K) contract and must error."""
+        for D in (1, 3):
+            problem = Problem(names=tuple(f"x{i}" for i in range(D)), bounds=((0.0, 1.0),) * D)
+            sr = sample(problem, n_trajectories=5, seed=1, verbose=False)
+            with pytest.raises(ValueError, match="1, 2, or 3 dimensions"):
+                analyze(sr, jnp.ones((sr.n_total, 2, 3, 5)))
+
+    def test_zero_variance_warns_measures_are_zero(self):
+        """Constant output warns about 0 measures (not NaN) and returns zeros."""
+        sr = sample(UNIT_PROBLEM, n_trajectories=10, seed=1, verbose=False)
+        with pytest.warns(UserWarning, match="zero variance.*will be 0"):
+            res = analyze(sr, jnp.full(sr.n_total, 7.0))
+        np.testing.assert_array_equal(np.asarray(res.mu_star), np.zeros(3))
+        assert not np.any(np.isnan(np.asarray(res.mu_star)))
+
     def test_nonfinite_trajectory_dropped(self):
         """Poisoning one radial trajectory must drop exactly that trajectory."""
         sr = sample(ishigami.PROBLEM, n_trajectories=12, method="radial", seed=8, verbose=False)

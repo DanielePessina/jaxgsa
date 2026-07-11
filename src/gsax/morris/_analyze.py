@@ -14,13 +14,15 @@ Array shape conventions used throughout:
     R  — number of bootstrap resamples
 """
 
+import warnings
 from typing import Literal
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import Array
 
-from gsax._normalization import _prenormalize_outputs, _prepare_Y, _warn_zero_variance_slices
+from gsax._normalization import _prenormalize_outputs, _prepare_Y
 from gsax.morris._result import MorrisResult
 from gsax.morris._sampling import MorrisSamplingResult
 from gsax.sobol._analyze import _bootstrap_ci_endpoints
@@ -28,6 +30,12 @@ from gsax.sobol._analyze import _bootstrap_ci_endpoints
 # Minimum trajectories for statistically meaningful screening measures;
 # only enforced as a warning when non-finite cleaning shrinks the design.
 _MIN_TRAJECTORIES = 10
+
+# Peak-memory budget (in array elements) for one bootstrap chunk. Each resample
+# gathers a full (r, D, T, K) copy of the elementary effects, so the batch size
+# is capped by output volume — not just the resample count — to keep
+# multi-output / time-series runs from exhausting device memory.
+_BOOTSTRAP_ELEMENT_BUDGET = 64_000_000  # ~256 MB at float32
 
 
 def _stats_from_ee(ee: Array) -> tuple[Array, Array, Array]:
@@ -128,12 +136,12 @@ def _drop_nonfinite_trajectories(
     if n_dropped == 0:
         return Y, idx_after, idx_before, delta, 0
 
-    import numpy as np
-
-    # Boolean indexing (variable-length output) is not supported by JAX JIT,
-    # so we round-trip through NumPy for the filtering step.
+    # finite_mask is a small (r,) host array; keep the large output tensor on
+    # device by gathering the surviving trajectory blocks with jnp.take.
     keep = np.flatnonzero(np.asarray(finite_mask))
-    Y_clean = jnp.asarray(np.asarray(grouped)[keep]).reshape(n_good * rows_per_traj, *trailing)
+    Y_clean = jnp.take(grouped, jnp.asarray(keep), axis=0).reshape(
+        n_good * rows_per_traj, *trailing
+    )
 
     # Global indices encode trajectory-block offsets; recompute them for the
     # compacted layout: local offset within the block is invariant.
@@ -189,7 +197,8 @@ def analyze(
     Elementary effects are computed in unit-cube coordinates, so ``mu_star``
     is directly comparable across parameters regardless of their physical
     ranges; use :meth:`MorrisResult.to_physical_units` for derivative-scale
-    values.
+    values (uniform-marginal problems only — it raises for problems with
+    Gaussian marginals, whose inverse-CDF transform is nonlinear).
 
     Args:
         sampling_result: Result from ``gsax.sample_morris()`` containing the
@@ -199,7 +208,8 @@ def analyze(
                 (n_total,)       — scalar output, single time step
                 (n_total, K)     — K outputs, single time step
                 (n_total, T, K)  — K outputs over T time steps
-            where ``n_total`` is the unique row count.
+            where ``n_total`` is the unique row count. Any other number of
+            dimensions raises ``ValueError``.
         prenormalize: When ``True``, standardize each output slice to mean 0
             and unit standard deviation over the expanded sample axis before
             computing elementary effects, making measures comparable across
@@ -212,8 +222,10 @@ def analyze(
             percentiles) or ``"gaussian"`` (symmetric around the estimate).
         key: JAX PRNG key for bootstrap randomness. Required when
             ``num_resamples > 0``.
-        chunk_size: Number of bootstrap resamples processed per vmap batch,
-            bounding peak memory. Defaults to 2048.
+        chunk_size: Upper bound on bootstrap resamples processed per vmap
+            batch. The effective batch is reduced further for large
+            multi-output / time-series outputs so peak memory stays bounded.
+            Defaults to 2048.
 
     Returns:
         MorrisResult containing:
@@ -221,16 +233,26 @@ def analyze(
             mu_star  — mean absolute elementary effect, same shape
             sigma    — standard deviation of elementary effects, same shape
             mu_conf, mu_star_conf, sigma_conf — (2, ...) CI bounds or None
+
+    Raises:
+        ValueError: If ``Y`` does not have 1, 2, or 3 dimensions; if ``Y``'s
+            first axis does not match ``sampling_result.n_total``; if fewer
+            than 2 trajectories survive non-finite cleaning; if ``ci_method``
+            is invalid; if ``num_resamples > 0`` but ``key`` is ``None``; or
+            if ``chunk_size < 1``.
     """
     Y = jnp.asarray(Y)
+    if Y.ndim not in (1, 2, 3):
+        raise ValueError(
+            "Y must have 1, 2, or 3 dimensions — (n_total,), (n_total, K), or "
+            f"(n_total, T, K); got a {Y.ndim}-D array of shape {Y.shape}"
+        )
     # Map user-evaluated unique outputs back to the full expanded layout
     Y = _expand_unique_outputs(sampling_result, Y)
     Y, squeeze_time, squeeze_output = _prepare_Y(Y)
 
     Y, idx_after, idx_before, delta, n_dropped = _drop_nonfinite_trajectories(Y, sampling_result)
     if n_dropped > 0:
-        import warnings
-
         remaining = sampling_result.n_trajectories - n_dropped
         pct = 100.0 * n_dropped / sampling_result.n_trajectories
         warnings.warn(
@@ -251,7 +273,24 @@ def analyze(
     if prenormalize:
         Y, _, _, _ = _prenormalize_outputs(Y)
 
-    _warn_zero_variance_slices(Y, output_names=sampling_result.problem.output_names)
+    # Constant output slices yield elementary effects of exactly 0 (0/delta),
+    # so the screening measures come out 0 — not NaN as in variance-based
+    # methods. Warn with the Morris-correct consequence, and report a plain
+    # slice count rather than fabricating (t, k) labels for the singleton time
+    # axis that _prepare_Y inserts.
+    slice_var = jnp.var(Y.reshape(Y.shape[0], -1), axis=0)
+    n_zero = int(jnp.sum(slice_var == 0))
+    if n_zero > 0:
+        which = (
+            "output has"
+            if slice_var.shape[0] == 1
+            else f"{n_zero}/{slice_var.shape[0]} output slice(s) have"
+        )
+        warnings.warn(
+            f"gsax: {which} zero variance — the corresponding screening "
+            "measures (mu, mu_star, sigma) will be 0",
+            stacklevel=2,
+        )
 
     if ci_method not in {"quantile", "gaussian"}:
         raise ValueError("ci_method must be one of {'quantile', 'gaussian'}")
@@ -269,16 +308,26 @@ def analyze(
 
         if chunk_size < 1:
             raise ValueError(f"chunk_size must be >= 1, got {chunk_size}")
-        cs = min(chunk_size, num_resamples)
+        # Cap the batch by both the user's chunk_size and an element budget:
+        # one chunk materialises cs copies of the (r, D, T, K) effects tensor,
+        # so large T*K would otherwise blow past device memory at chunk_size.
+        per_sample = int(np.prod(ee.shape))  # r * D * T * K
+        mem_cap = max(1, _BOOTSTRAP_ELEMENT_BUDGET // max(per_sample, 1))
+        cs = max(1, min(chunk_size, num_resamples, mem_cap))
         mu_parts, mu_star_parts, sigma_parts = [], [], []
         for start in range(0, num_resamples, cs):
             end = min(start + cs, num_resamples)
-            # Chunked vmap bounds peak memory: each chunk materialises C
-            # resampled copies of ee, not all R at once.
-            m, ms, sd = _resample_stats(indices[start:end], ee)
-            mu_parts.append(m)
-            mu_star_parts.append(ms)
-            sigma_parts.append(sd)
+            n_real = end - start
+            idx_chunk = indices[start:end]
+            if n_real < cs:
+                # Pad the final ragged chunk back up to cs so _resample_stats
+                # only ever compiles one shape; the padding rows are sliced off.
+                pad = jnp.broadcast_to(idx_chunk[:1], (cs - n_real, idx_chunk.shape[1]))
+                idx_chunk = jnp.concatenate([idx_chunk, pad], axis=0)
+            m, ms, sd = _resample_stats(idx_chunk, ee)
+            mu_parts.append(m[:n_real])
+            mu_star_parts.append(ms[:n_real])
+            sigma_parts.append(sd[:n_real])
 
         conf_pairs = []
         for estimate, parts in [

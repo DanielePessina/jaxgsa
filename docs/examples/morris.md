@@ -181,9 +181,17 @@ Elementary effects are computed in unit-cube coordinates, so mu_star is
 directly comparable across parameters regardless of their physical ranges.
 `to_physical_units()` returns a rescaled copy — each measure is divided by
 the parameter range `high - low`, giving per-physical-unit
-(derivative-scale) effects comparable to DGSM's mean derivative:
+(derivative-scale) effects comparable to DGSM's mean derivative. It requires
+a uniform-marginal problem (unlike the Gaussian example above):
 
 ```python
+import jax.numpy as jnp
+import gsax
+from gsax.benchmarks.ishigami import PROBLEM, evaluate
+
+sr = gsax.sample_morris(PROBLEM, n_trajectories=50, seed=42)
+result = gsax.analyze_morris(sr, evaluate(jnp.asarray(sr.samples)))
+
 physical = result.to_physical_units()
 print(physical.space)    # "physical" (the original result stays "unit")
 print(physical.mu_star)  # per-physical-unit effects

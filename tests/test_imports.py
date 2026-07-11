@@ -60,6 +60,15 @@ def test_efast_re_exports():
     assert isinstance(gsax.EFASTResult, type)
 
 
+def test_morris_re_exports():
+    import gsax
+
+    assert callable(gsax.analyze_morris)
+    assert callable(gsax.sample_morris)
+    assert isinstance(gsax.MorrisResult, type)
+    assert isinstance(gsax.MorrisSamplingResult, type)
+
+
 def test_sampling_re_exports():
     import gsax
 

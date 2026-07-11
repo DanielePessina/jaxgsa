@@ -25,6 +25,7 @@ import warnings
 from dataclasses import dataclass
 from typing import Literal, overload
 
+import jax.numpy as jnp
 import numpy as np
 from scipy.stats.qmc import Sobol
 
@@ -36,9 +37,21 @@ from gsax.sampling import _next_power_of_2, _stable_unique_rows, _transform_samp
 # Campolongo et al. (2011) recommend a shift of 4 positions.
 _RADIAL_SHIFT = 4
 
-# Smallest |delta| accepted for a radial elementary effect; below this the
-# finite difference is numerically meaningless.
-_MIN_RADIAL_DELTA = 1e-9
+
+def _min_radial_delta() -> float:
+    """Smallest |delta| a radial step may have before it is unmeasurable.
+
+    A radial elementary effect is ``(f(a with b_i) - f(a)) / (b_i - a_i)``. If
+    ``|b_i - a_i|`` is near the floating-point resolution the model actually
+    runs at, the two evaluation rows round to the same value and the effect
+    degenerates to ``0`` or amplified rounding noise. JAX defaults to float32
+    (float64 only when x64 is enabled), so the guard tracks the JAX default
+    dtype rather than the float64 design array.
+
+    Returns:
+        ``10 * eps`` of the JAX default floating dtype.
+    """
+    return 10.0 * float(np.finfo(jnp.zeros(1).dtype).eps)
 
 
 @dataclass(frozen=True)
@@ -48,7 +61,6 @@ class MorrisSamplingResult:
     Attributes:
         samples: Unique rows to evaluate with the user's model, shape
             ``(n_unique, D)`` in the problem's physical units.
-        sample_ids: Stable integer identifiers aligned 1:1 with ``samples``.
         expanded_n_total: Row count of the full expanded design before
             deduplication, always ``n_trajectories * (D + 1)``.
         expanded_to_unique: Integer index map of shape ``(expanded_n_total,)``
@@ -68,7 +80,6 @@ class MorrisSamplingResult:
     """
 
     samples: np.ndarray  # shape (n_unique, D), scaled to bounds
-    sample_ids: np.ndarray
     expanded_n_total: int
     expanded_to_unique: np.ndarray
     n_trajectories: int
@@ -101,9 +112,11 @@ class MorrisSamplingResult:
         Trajectories are generated sequentially from independent draws
         (trajectory design) or from prefix-nested Sobol' points (radial
         design), so the first *m* trajectories of an *r*-trajectory run are
-        identical to drawing *m* trajectories directly with the same seed.
-        Simulate once at the largest ``n_trajectories`` and slice down —
-        no re-simulation needed.
+        identical to drawing *m* trajectories directly with the same integer
+        seed. Simulate once at the largest ``n_trajectories`` and slice down —
+        no re-simulation needed. (This holds for an ``int`` or ``None`` seed; a
+        reused ``np.random.Generator`` advances its state between calls and so
+        is not prefix-nested.)
 
         Optionally pass ``Y`` (model outputs aligned with ``samples``) to get
         the corresponding output slice back.
@@ -141,7 +154,6 @@ class MorrisSamplingResult:
 
         sr_small = MorrisSamplingResult(
             samples=self.samples[:n_unique_new].copy(),
-            sample_ids=np.arange(n_unique_new, dtype=np.int64),
             expanded_n_total=new_expanded_n,
             expanded_to_unique=new_exp2uniq.copy(),
             n_trajectories=n_trajectories,
@@ -235,39 +247,41 @@ def _build_radial(
         Same tuple layout as :func:`_build_trajectories`.
 
     Raises:
-        ValueError: If any |delta| falls below ``_MIN_RADIAL_DELTA``.
+        ValueError: If any ``|delta|`` falls below the working float-precision
+            floor (see :func:`_min_radial_delta`).
     """
     D = n_params
+    r = n_trajectories
     sampler = Sobol(d=2 * D, scramble=scramble, seed=seed)
     # Draw a power-of-2 count (scipy warns otherwise) and slice; Sobol'
     # prefixes are bit-identical, so the extra rows change nothing.
-    draws = sampler.random(_next_power_of_2(n_trajectories + _RADIAL_SHIFT))
-    a = draws[:n_trajectories, :D]
-    b = draws[_RADIAL_SHIFT : n_trajectories + _RADIAL_SHIFT, D:]
+    draws = sampler.random(_next_power_of_2(r + _RADIAL_SHIFT))
+    a = draws[:r, :D]
+    b = draws[_RADIAL_SHIFT : r + _RADIAL_SHIFT, D:]
 
     ee_delta = b - a
-    tiny = np.abs(ee_delta) < _MIN_RADIAL_DELTA
+    min_delta = _min_radial_delta()
+    tiny = np.abs(ee_delta) < min_delta
     if np.any(tiny):
         j, i = np.argwhere(tiny)[0]
         raise ValueError(
             f"Radial design produced a near-zero step |delta|={abs(ee_delta[j, i]):.2e} "
-            f"for trajectory {j}, parameter {i}; the elementary effect would be "
-            "numerically meaningless. Use scramble=True or a different seed."
+            f"(below the float-precision floor {min_delta:.1e}) for trajectory {j}, "
+            f"parameter {i}; the elementary effect would be numerically meaningless. "
+            "Use scramble=True or a different seed."
         )
 
-    expanded_unit = np.empty((n_trajectories * (D + 1), D), dtype=np.float64)
-    ee_idx_after = np.empty((n_trajectories, D), dtype=np.int64)
-    ee_idx_before = np.empty((n_trajectories, D), dtype=np.int64)
+    # Star block j: row 0 is the base point a[j]; row 1+i is a[j] with only
+    # coordinate i swapped to b[j, i]. No randomness is consumed here, so the
+    # whole design is three vectorized assignments.
+    block = np.repeat(a[:, None, :], D + 1, axis=1)  # (r, D+1, D)
+    diag = np.arange(D)
+    block[:, 1 + diag, diag] = b  # swap coordinate i of star row 1+i
+    expanded_unit = block.reshape(r * (D + 1), D)
 
-    for j in range(n_trajectories):
-        offset = j * (D + 1)
-        expanded_unit[offset] = a[j]
-        for i in range(D):
-            row = a[j].copy()
-            row[i] = b[j, i]
-            expanded_unit[offset + 1 + i] = row
-            ee_idx_before[j, i] = offset
-            ee_idx_after[j, i] = offset + 1 + i
+    offsets = (np.arange(r) * (D + 1)).astype(np.int64)
+    ee_idx_before = np.broadcast_to(offsets[:, None], (r, D)).copy()
+    ee_idx_after = offsets[:, None] + 1 + diag.astype(np.int64)
 
     return expanded_unit, ee_idx_after, ee_idx_before, ee_delta
 
@@ -333,7 +347,11 @@ def sample(
             base points).
         scramble: Whether to Owen-scramble the Sobol' sequence (radial design
             only).
-        seed: Random seed or generator for reproducibility.
+        seed: Random seed or generator for reproducibility. Pass an ``int``
+            (or ``None``) to keep the prefix-nesting guarantee of
+            :meth:`MorrisSamplingResult.downsample`; a reused
+            ``np.random.Generator`` advances its state between calls and breaks
+            that nesting.
         truncation_quantile: Tail probability ``q`` excluded on each side of
             every Gaussian marginal's grid (default 0.005, probing the
             0.5%-99.5% quantile range). Applied to truncated Gaussians as
@@ -376,12 +394,14 @@ def sample(
         )
 
     if problem.has_non_uniform_inputs:
-        # Confine Gaussian coordinates to [q, 1-q] so the inverse CDF stays
-        # finite at the grid boundaries. The squash is deterministic, so
-        # bitwise deduplication and prefix-nesting are unaffected.
+        # Confine unbounded-support dimensions to [q, 1-q] so the inverse CDF
+        # stays finite at the grid boundaries. Uniform is the only bounded
+        # marginal today, so "not uniform" == "unbounded"; any future bounded
+        # distribution must be excluded from this mask. The squash is
+        # deterministic, so dedup and prefix-nesting are unaffected.
         q = truncation_quantile
-        gaussian_dims = np.array([spec[0] != "uniform" for spec in problem.input_specs])
-        expanded_unit[:, gaussian_dims] = q + expanded_unit[:, gaussian_dims] * (1.0 - 2.0 * q)
+        unbounded_dims = np.array([spec[0] != "uniform" for spec in problem.input_specs])
+        expanded_unit[:, unbounded_dims] = q + expanded_unit[:, unbounded_dims] * (1.0 - 2.0 * q)
 
     expanded_samples = _transform_samples(problem, expanded_unit)
     unique_samples, expanded_to_unique = _stable_unique_rows(expanded_samples)
@@ -398,7 +418,6 @@ def sample(
 
     return MorrisSamplingResult(
         samples=unique_samples,
-        sample_ids=np.arange(unique_samples.shape[0], dtype=np.int64),
         expanded_n_total=expanded_samples.shape[0],
         expanded_to_unique=expanded_to_unique,
         n_trajectories=n_trajectories,

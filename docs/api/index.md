@@ -1405,7 +1405,6 @@ design and locate each elementary effect inside it.
 @dataclass(frozen=True)
 class MorrisSamplingResult:
     samples: np.ndarray
-    sample_ids: np.ndarray
     expanded_n_total: int
     expanded_to_unique: np.ndarray
     n_trajectories: int
@@ -1421,7 +1420,6 @@ class MorrisSamplingResult:
 | Field | Type | Shape / Value | Description |
 | --- | --- | --- | --- |
 | `samples` | `np.ndarray` | `(n_unique, D)` | Unique rows to evaluate with your model, in the problem's physical units. |
-| `sample_ids` | `np.ndarray` | `(n_unique,)` | Stable integer identifiers aligned 1:1 with `samples`. |
 | `expanded_n_total` | `int` | `r * (D + 1)` | Row count of the full expanded design before deduplication. |
 | `expanded_to_unique` | `np.ndarray` | `(expanded_n_total,)` | Map from each expanded row to its row index in `samples`. |
 | `n_trajectories` | `int` | `r` | Number of trajectories, the Morris repetition unit. |
