@@ -1,6 +1,6 @@
 # Methods
 
-gsax implements seven complementary approaches to global sensitivity analysis (GSA). The variance-based methods (Sobol', HDMR, PCE, eFAST) decompose the variance of a model's output into contributions attributable to individual input parameters and their interactions; the derivative-based method (DGSM) uses autodiff to bound total Sobol indices directly from partial derivatives; and the dependence-based methods (HSIC, PAWN) quantify sensitivity without decomposing variance — HSIC through kernel-based dependence measures and PAWN through shifts in the output's cumulative distribution. Together, these enable practitioners to identify which parameters drive model behaviour and which are effectively unidentifiable from available measurements.
+gsax implements eight complementary approaches to global sensitivity analysis (GSA). The variance-based methods (Sobol', HDMR, PCE, eFAST) decompose the variance of a model's output into contributions attributable to individual input parameters and their interactions; the derivative-based method (DGSM) uses autodiff to bound total Sobol indices directly from partial derivatives; the screening method (Morris) ranks parameters cheaply from finite-difference elementary effects; and the dependence-based methods (HSIC, PAWN) quantify sensitivity without decomposing variance — HSIC through kernel-based dependence measures and PAWN through shifts in the output's cumulative distribution. Together, these enable practitioners to identify which parameters drive model behaviour and which are effectively unidentifiable from available measurements.
 
 ## Background: Variance-Based Sensitivity Analysis
 
@@ -309,6 +309,66 @@ Alternatively, if the Jacobian has been computed externally (e.g. for non-JAX mo
 - Kucherenko, S. & Song, S. (2016). Derivative-based global sensitivity measures and their link with Sobol' sensitivity indices. *Reliability Engineering & System Safety*, 148, 81-95.
 - Lamboni, M., Iooss, B., Popelin, A.-L. & Gamboa, F. (2013). Derivative-based global sensitivity measures: General links with Sobol' indices and numerical tests. *Mathematics and Computers in Simulation*, 87, 44-54.
 
+## Morris (Elementary Effects Screening)
+
+Morris is a global **screening** method — a globalized one-at-a-time (OAT) design. Instead of decomposing variance, it measures coarse finite-difference effects of each input at many locations spread across the whole input domain, then summarises them into cheap, robust importance measures. Its typical role is triage: with a fraction of the budget of a Sobol' analysis, Morris identifies which parameters are negligible and can be fixed before spending model evaluations on an exact variance decomposition.
+
+### How it works
+
+The design consists of $r$ **trajectories**, each a path of $D + 1$ points where consecutive points differ in exactly one coordinate. The total cost is therefore $r(D+1)$ model evaluations, and each trajectory contributes one **elementary effect** per input:
+
+$$
+EE_i = \frac{f(\mathbf{x} + \Delta \mathbf{e}_i) - f(\mathbf{x})}{\Delta}
+$$
+
+where $\mathbf{e}_i$ is the unit vector along input $i$ and $\Delta$ is the step in unit-cube coordinates. gsax implements two designs:
+
+- **Trajectory design** (Morris 1991, default): each trajectory is a random walk on a $p$-level grid (`num_levels`, default 4) with the canonical step $\Delta = p / (2(p-1))$, visiting inputs in a random order.
+- **Radial design** (Campolongo et al. 2011, `method="radial"`): star designs around scrambled-Sobol' base points, where each elementary effect compares a one-coordinate swap against the shared base point with a per-step $\Delta_i = b_i - a_i$.
+
+Both uniform and Gaussian marginals are supported. The design includes the unit-cube boundaries, which an unbounded inverse CDF would map to infinity, so each Gaussian coordinate is confined to $[q, 1-q]$ (`truncation_quantile`, default $q = 0.005$ — the 0.5%–99.5% quantile range) before the inverse-CDF transform; uniform marginals are untouched, and deduplication and prefix-nesting are unaffected.
+
+The $r$ elementary effects per input are reduced to three screening measures:
+
+- $\mu_i$ — the **mean** elementary effect. Sign cancellation can mask non-monotonic influence, which is why $\mu$ alone is unreliable.
+- $\mu^*_i$ — the mean **absolute** elementary effect (Campolongo et al. 2007), the headline importance measure and a good proxy for the total-order index $S_T$ ranking.
+- $\sigma_i$ — the standard deviation of the elementary effects (ddof=1). A large $\sigma_i$ relative to $\mu^*_i$ indicates nonlinearity or interactions with other inputs.
+
+The canonical output is the **$\mu^*$–$\sigma$ scatter plot**: parameters near the origin are negligible, parameters far along the $\mu^*$ axis are influential, and parameters high above the diagonal act mainly through nonlinearity or interactions.
+
+Morris is closely related to DGSM: as $\Delta \to 0$, $\mu^*_i \to \mathbb{E}|\partial f / \partial x_i|$, so Morris is the black-box, macro-step analog of gsax's DGSM — use DGSM when the model is JAX-differentiable, Morris when it is not.
+
+### How to use it
+
+1. `gsax.sample_morris()` builds the trajectories, removes exact duplicate rows (grid designs collide often in low dimensions, so this saves real model evaluations, just like Saltelli sampling), and returns only the unique rows.
+2. You evaluate your model on `sampling_result.samples`.
+3. `gsax.analyze_morris()` reconstructs the expanded design internally, drops trajectories containing non-finite values with a warning, and reduces one elementary effect per trajectory and parameter to $\mu$, $\mu^*$, and $\sigma$. Pass `num_resamples > 0` (with a JAX PRNG `key`) for bootstrap confidence intervals over trajectories.
+
+Elementary effects are computed in unit-cube coordinates, so $\mu^*$ is directly comparable across parameters regardless of their physical ranges; `MorrisResult.to_physical_units()` rescales to derivative-scale values in the problem's native units (uniform-marginal problems only — for Gaussian marginals the inverse-CDF transform is nonlinear, so the measures stay in grid coordinates). `MorrisSamplingResult.downsample()` prefix-slices to fewer trajectories without re-simulation, mirroring `SamplingResult.downsample()`.
+
+Compared to SALib's Morris implementation, gsax adds unique-row deduplication, vectorized multi-output and time-series analysis (SALib's Morris is scalar-only), bootstrap confidence intervals, the radial design, and prefix-nested downsampling.
+
+### Index summary
+
+| Measure | Meaning |
+|-------|---------|
+| $\mu(i)$ | Mean elementary effect. Sign cancellation can hide non-monotonic influence. |
+| $\mu^*(i)$ | Mean absolute elementary effect. Headline importance measure; proxy for the $S_T$ ranking. |
+| $\sigma(i)$ | Standard deviation of the elementary effects. Large $\sigma / \mu^*$ indicates nonlinearity or interactions. |
+
+**When to use Morris:**
+- You want a cheap screening pass before committing to a full Sobol' run
+- Your model is a black box (not JAX-differentiable, otherwise consider DGSM)
+- You have many parameters and a tight evaluation budget — the cost is $r(D+1)$ with $r$ typically 10-50
+- You only need a ranking and an interaction flag, not exact variance fractions
+
+### References
+
+- Morris, M.D. (1991). Factorial sampling plans for preliminary computational experiments. *Technometrics*, 33(2), 161-174.
+- Campolongo, F., Cariboni, J. & Saltelli, A. (2007). An effective screening design for sensitivity analysis of large models. *Environmental Modelling & Software*, 22(10), 1509-1518.
+- Campolongo, F., Cariboni, J. & Saltelli, A. (2011). From screening to quantitative sensitivity analysis. A unified approach. *Computer Physics Communications*, 182(4), 978-988.
+- Saltelli, A. et al. (2008). *Global Sensitivity Analysis: The Primer*, ch. 3. Wiley.
+
 ## HSIC (Hilbert–Schmidt Independence Criterion)
 
 HSIC takes a **kernel-based** view of sensitivity: instead of decomposing output variance, it measures the statistical *dependence* between each input and the output in a reproducing kernel Hilbert space (RKHS). By mapping inputs and outputs through Gaussian RBF kernels, HSIC detects **any** form of dependence — nonlinear, non-monotone, or heteroscedastic — that variance-based indices may underweight. Like RS-HDMR, it is a **given-data** method: it works with any set of $(X, Y)$ pairs and makes no independence assumption about the inputs.
@@ -419,20 +479,20 @@ Pianosi, F. & Wagener, T. (2015). A simple and efficient method for global sensi
 
 ## Choosing Between Them
 
-| Consideration | Sobol' | HDMR | PCE | eFAST | DGSM | HSIC | PAWN |
-|---------------|--------|------|-----|-------|------|------|------|
-| Sampling requirement | Structured Saltelli design, $N(2D+2)$ evaluations (default) | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Search curves, $N \times D$ evaluations | Plain MC, $N$ evaluations + autodiff | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs |
-| Input independence | Assumed | Handled via ANCOVA decomposition | Assumed | Assumed | Assumed | Not assumed | Not assumed |
-| Surrogate/emulator | No | Yes (`emulate_hdmr`) | Yes (`emulate_pce`) | No | No | No | No |
-| Accuracy | Exact (given enough samples) | Depends on B-spline fit quality | Depends on polynomial fit quality | Exact (given enough samples) | Bounds on $S_T$, not exact indices | Dependence measure, not variance fractions | Distributional (KS) distance, not variance fractions |
-| Second-order indices | Direct estimation from cross-matrices | From interaction component functions | Analytical from coefficients | Not available | Not available | Not available | Not available |
-| Interaction detection | Via $S_2$ and the gap $S_T - S_1$ | Via explicit interaction component functions | Via $S_2$ from coefficients | Via the gap $S_T - S_1$ only | Not available (bounds only) | Via the Total HSIC − R2-HSIC gap | Not available (first-order only) |
-| Output shapes | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar only | Scalar, multi-output, time-series | Scalar, multi-output | Scalar, multi-output, time-series | Scalar, multi-output, time-series |
-| Input distributions | Uniform + Gaussian | Any (via CDF mapping) | Uniform + Gaussian | Uniform + Gaussian | Uniform + Gaussian (+ truncated Normal) | Any (via CDF mapping) | Any (via CDF mapping) |
+| Consideration | Sobol' | HDMR | PCE | eFAST | DGSM | Morris | HSIC | PAWN |
+|---------------|--------|------|-----|-------|------|--------|------|------|
+| Sampling requirement | Structured Saltelli design, $N(2D+2)$ evaluations (default) | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Search curves, $N \times D$ evaluations | Plain MC, $N$ evaluations + autodiff | Trajectory or radial design, $r(D+1)$ evaluations (deduplicated) | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs |
+| Input independence | Assumed | Handled via ANCOVA decomposition | Assumed | Assumed | Assumed | Assumed | Not assumed | Not assumed |
+| Surrogate/emulator | No | Yes (`emulate_hdmr`) | Yes (`emulate_pce`) | No | No | No | No | No |
+| Accuracy | Exact (given enough samples) | Depends on B-spline fit quality | Depends on polynomial fit quality | Exact (given enough samples) | Bounds on $S_T$, not exact indices | Screening ranks ($\mu^*$ as $S_T$ proxy), not variance fractions | Dependence measure, not variance fractions | Distributional (KS) distance, not variance fractions |
+| Second-order indices | Direct estimation from cross-matrices | From interaction component functions | Analytical from coefficients | Not available | Not available | Not available | Not available | Not available |
+| Interaction detection | Via $S_2$ and the gap $S_T - S_1$ | Via explicit interaction component functions | Via $S_2$ from coefficients | Via the gap $S_T - S_1$ only | Not available (bounds only) | Via large $\sigma$ relative to $\mu^*$ (not pair-attributable) | Via the Total HSIC − R2-HSIC gap | Not available (first-order only) |
+| Output shapes | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar only | Scalar, multi-output, time-series | Scalar, multi-output | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series |
+| Input distributions | Uniform + Gaussian | Any (via CDF mapping) | Uniform + Gaussian | Uniform + Gaussian | Uniform + Gaussian (+ truncated Normal) | Uniform + Gaussian (truncated-quantile grid) | Any (via CDF mapping) | Any (via CDF mapping) |
 
 ## Output Shapes
 
-Sobol, HDMR, and eFAST all support scalar, multi-output, and time-series outputs. The shape of `Y` determines the shape of all returned index arrays:
+Sobol, HDMR, eFAST, and Morris all support scalar, multi-output, and time-series outputs. The shape of `Y` determines the shape of all returned index arrays (for Morris, read `S1 / ST` as `mu / mu_star / sigma`; Morris has no S2):
 
 | Y shape | S1 / ST shape | S2 shape |
 |---------|---------------|----------|

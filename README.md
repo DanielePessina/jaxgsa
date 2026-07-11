@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org)
 
-`gsax` computes global sensitivity indices entirely in JAX, giving you GPU/TPU acceleration and JIT compilation for free. It provides seven complementary methods: **Sobol indices** (via Saltelli sampling), **RS-HDMR** (surrogate-based, works with any input-output pairs), **PCE** (Polynomial Chaos Expansion with analytical Sobol indices), **eFAST** (Extended Fourier Amplitude Sensitivity Test), **DGSM** (Derivative-based Global Sensitivity Measures via JAX autodiff), **HSIC** (the Hilbert–Schmidt Independence Criterion, a kernel-based dependence measure), and **PAWN** (a moment-independent method based on output CDFs, after Pianosi & Wagener, 2015).
+`gsax` computes global sensitivity indices entirely in JAX, giving you GPU/TPU acceleration and JIT compilation for free. It provides eight complementary methods: **Sobol indices** (via Saltelli sampling), **RS-HDMR** (surrogate-based, works with any input-output pairs), **PCE** (Polynomial Chaos Expansion with analytical Sobol indices), **eFAST** (Extended Fourier Amplitude Sensitivity Test), **DGSM** (Derivative-based Global Sensitivity Measures via JAX autodiff), **Morris** (elementary-effects screening with trajectory and radial designs), **HSIC** (the Hilbert–Schmidt Independence Criterion, a kernel-based dependence measure), and **PAWN** (a moment-independent method based on output CDFs, after Pianosi & Wagener, 2015).
 
 ## Features
 
@@ -34,6 +34,10 @@
   - Upper and lower bounds on total Sobol index via JAX reverse-mode autodiff
   - Poincare constants for uniform, Gaussian, and truncated Gaussian inputs
   - Pre-computed Jacobian path for non-JAX models
+- **Morris** (elementary-effects screening)
+  - Globalized one-at-a-time screening: mu_star importance ranking and sigma interaction flag at `r * (D + 1)` cost
+  - Trajectory (Morris, 1991) and radial (Campolongo et al., 2011) designs with unique-row deduplication
+  - Bootstrap confidence intervals over trajectories and prefix-nested trajectory downsampling
 - **HSIC** (Hilbert–Schmidt Independence Criterion)
   - Kernel-based dependence: normalized first-order (R2-HSIC) and Total HSIC indices
   - Works with **any** set of (X, Y) pairs — Gaussian RBF kernels with the median heuristic
@@ -223,6 +227,26 @@ result = gsax.analyze_pawn(PROBLEM, jnp.asarray(X), Y, statistic="median")
 print("PAWN:", result.pawn)  # (D,) median KS distance across conditioning bins
 ```
 
+### Morris (elementary-effects screening)
+
+Morris ranks parameters from coarse finite-difference effects sampled across
+the whole domain — a cheap screening pass before a full Sobol run. Exact
+duplicate design rows are removed, so you evaluate fewer than `r * (D + 1)`
+points.
+
+```python
+import jax.numpy as jnp
+import gsax
+from gsax.benchmarks.ishigami import PROBLEM, evaluate
+
+sr = gsax.sample_morris(PROBLEM, n_trajectories=50, seed=42)
+Y = evaluate(jnp.asarray(sr.samples))
+
+result = gsax.analyze_morris(sr, Y)
+print("mu_star:", result.mu_star)  # (D,) mean |elementary effect| — importance
+print("sigma:", result.sigma)      # (D,) spread — nonlinearity/interactions
+```
+
 ## Usage
 
 ### Define a problem
@@ -388,7 +412,7 @@ Use it for:
 - parameter, field, and shape contracts
 - validation and error behavior
 - `to_dataset()` labeling rules
-- Sobol, RS-HDMR, PCE, eFAST, DGSM, HSIC, and PAWN workflow examples
+- Sobol, RS-HDMR, PCE, eFAST, DGSM, Morris, HSIC, and PAWN workflow examples
 
 Quick map:
 
@@ -399,13 +423,15 @@ Quick map:
 - `gsax.pce`: `analyze` / `emulate` / `PCEResult`
 - `gsax.efast`: `sample` / `analyze` / `EFASTResult`
 - `gsax.dgsm`: `analyze` / `DGSMResult` / `poincare_constant` / `axis_constants`
+- `gsax.morris`: `sample` / `analyze` / `MorrisResult` / `MorrisSamplingResult`
 - `gsax.hsic`: `analyze` / `HSICResult`
 - `gsax.pawn`: `analyze` / `PAWNResult`
 
 All symbols are also re-exported from the top-level `gsax` namespace
 (`gsax.analyze()`, `gsax.analyze_hdmr()`, `gsax.analyze_pce()`,
 `gsax.sample_efast()`, `gsax.analyze_efast()`, `gsax.analyze_dgsm()`,
-`gsax.analyze_hsic()`, `gsax.analyze_pawn()`, etc.).
+`gsax.sample_morris()`, `gsax.analyze_morris()`, `gsax.analyze_hsic()`,
+`gsax.analyze_pawn()`, etc.).
 
 For runnable walkthroughs, start with the
 [Getting Started guide](https://danielepessina.github.io/gsax/guide/getting-started)

@@ -9,6 +9,9 @@ from gsax.hdmr import analyze as analyze_hdmr
 from gsax.hdmr import emulate as emulate_hdmr
 from gsax.hsic import HSICResult
 from gsax.hsic import analyze as analyze_hsic
+from gsax.morris import MorrisResult, MorrisSamplingResult
+from gsax.morris import analyze as analyze_morris
+from gsax.morris import sample as sample_morris
 from gsax.pawn import PAWNResult
 from gsax.pawn import analyze as analyze_pawn
 from gsax.pce import PCEResult
@@ -25,6 +28,8 @@ __all__ = [
     "HDMREmulator",
     "HDMRResult",
     "HSICResult",
+    "MorrisResult",
+    "MorrisSamplingResult",
     "PAWNResult",
     "PCEResult",
     "Problem",
@@ -36,6 +41,7 @@ __all__ = [
     "analyze_efast",
     "analyze_hdmr",
     "analyze_hsic",
+    "analyze_morris",
     "analyze_pawn",
     "analyze_pce",
     "downsample",
@@ -46,5 +52,6 @@ __all__ = [
     "sample",
     "sample_efast",
     "sample_mc",
+    "sample_morris",
     "verify_prefix",
 ]

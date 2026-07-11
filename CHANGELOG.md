@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Morris** elementary-effects screening as an eighth method
+  (`gsax.morris`, re-exported as `gsax.sample_morris()` /
+  `gsax.analyze_morris()`): globalized one-at-a-time screening that reduces
+  `r * (D + 1)` model evaluations to mu, mu_star (importance ranking), and
+  sigma (nonlinearity/interaction flag), with
+  - trajectory (Morris, 1991) and radial (Campolongo et al., 2011,
+    scrambled-Sobol' star) designs;
+  - uniform and Gaussian marginals — Gaussian coordinates are confined to a
+    truncated-quantile grid (`truncation_quantile`, default 0.005) so the
+    design probes the 0.5%–99.5% quantile range instead of unbounded tails;
+  - unique-row deduplication, so grid collisions across trajectories do not
+    cost real model evaluations (same contract as Saltelli `sample()`);
+  - scalar, multi-output, and time-series outputs, non-finite trajectory
+    cleaning, and bootstrap confidence intervals over trajectories;
+  - `MorrisSamplingResult.downsample()` prefix-slicing to fewer trajectories
+    without re-simulation, and `MorrisResult.to_physical_units()` /
+    `to_dataset()` for derivative-scale measures and labeled xarray export.
+
 ## 0.1.2
 
 ### Added

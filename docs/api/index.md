@@ -1,13 +1,14 @@
 # API Reference
 
 This is the canonical reference for the exported `gsax` surface. The package has
-seven workflows:
+eight workflows:
 
 - Sobol: `sample()` -> `analyze()`
 - RS-HDMR: `analyze_hdmr()` -> `emulate_hdmr()`
 - PCE: `analyze_pce()` -> `emulate_pce()`
 - eFAST: `sample_efast()` -> `analyze_efast()`
 - DGSM: `sample_mc()` -> `analyze_dgsm()`
+- Morris: `sample_morris()` -> `analyze_morris()`
 - HSIC: `sample_mc()` -> `analyze_hsic()`
 - PAWN: `sample_mc()` -> `analyze_pawn()`
 
@@ -30,6 +31,7 @@ Since v0.6.0, `gsax` is organized into subpackages:
 | `gsax.pce` | `analyze`, `emulate`, `PCEResult` |
 | `gsax.efast` | `sample`, `analyze`, `EFASTResult` |
 | `gsax.dgsm` | `analyze`, `DGSMResult`, `poincare_constant`, `axis_constants` |
+| `gsax.morris` | `sample`, `analyze`, `MorrisResult`, `MorrisSamplingResult` |
 | `gsax.hsic` | `analyze`, `HSICResult` |
 | `gsax.pawn` | `analyze`, `PAWNResult` |
 
@@ -41,6 +43,7 @@ from gsax.hdmr import analyze as analyze_hdmr, emulate as emulate_hdmr
 from gsax.pce import analyze as analyze_pce, emulate as emulate_pce
 from gsax.efast import sample as sample_efast, analyze as analyze_efast
 from gsax.dgsm import analyze as analyze_dgsm
+from gsax.morris import sample as sample_morris, analyze as analyze_morris
 from gsax.hsic import analyze as analyze_hsic
 ```
 
@@ -75,6 +78,10 @@ Top-level exports from `gsax`:
 - [`sample_mc`](#sample-mc)
 - [`analyze_dgsm`](#analyze-dgsm)
 - [`DGSMResult`](#dgsmresult)
+- [`sample_morris`](#sample-morris)
+- [`analyze_morris`](#analyze-morris)
+- [`MorrisSamplingResult`](#morrissamplingresult)
+- [`MorrisResult`](#morrisresult)
 - [`analyze_hsic`](#analyze-hsic)
 - [`HSICResult`](#hsicresult)
 - [`analyze_pawn`](#analyze-pawn)
@@ -1311,6 +1318,346 @@ Related links:
 
 - [DGSM Example](/examples/dgsm)
 - [Methods](/guide/methods)
+
+---
+
+## Morris Workflow
+
+<a id="sample-morris"></a>
+### `sample_morris()` {#sample-morris}
+
+Generate unique Morris elementary-effects samples for model evaluation.
+
+```python
+def sample_morris(
+    problem: Problem,
+    n_trajectories: int,
+    *,
+    num_levels: int = 4,
+    method: Literal["trajectory", "radial"] = "trajectory",
+    scramble: bool = True,
+    seed: int | np.random.Generator | None = None,
+    truncation_quantile: float = 0.005,
+    verbose: bool = True,
+) -> MorrisSamplingResult
+```
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `problem` | `Problem` | required | Problem definition with uniform and/or Gaussian marginals. |
+| `n_trajectories` | `int` | required | Number of trajectories r (>= 2). Each contributes one elementary effect per parameter; typical screening uses 10-50. |
+| `num_levels` | `int` | `4` | Grid levels `p` for the trajectory design (step `delta = p / (2 * (p - 1))`). Ignored by the radial design. |
+| `method` | `Literal["trajectory", "radial"]` | `"trajectory"` | `"trajectory"` (Morris 1991 grid walks) or `"radial"` (Campolongo 2011 star designs around scrambled-Sobol' base points). |
+| `scramble` | `bool` | `True` | Whether to Owen-scramble the Sobol' sequence (radial design only). |
+| `seed` | `int \| np.random.Generator \| None` | `None` | Seed or NumPy generator for reproducibility. |
+| `truncation_quantile` | `float` | `0.005` | Tail probability `q` excluded on each side of every Gaussian marginal's grid (the default probes the 0.5%-99.5% quantile range). Applied to truncated Gaussians as well for consistency; ignored for uniform marginals. Must be in `(0, 0.5)`. |
+| `verbose` | `bool` | `True` | Print a short summary including how many duplicate rows were removed. |
+
+Returns: [`MorrisSamplingResult`](#morrissamplingresult)
+
+Shape and behavior:
+
+- Builds `n_trajectories` one-at-a-time paths of `D + 1` points each, so the
+  expanded design always has `n_trajectories * (D + 1)` rows.
+- Like Sobol' `sample()`, exact duplicate rows are removed while preserving
+  first-occurrence order, and only the unique rows are returned for
+  evaluation. Trajectory points live on a coarse `num_levels` grid, so
+  duplicates across trajectories are common in low dimensions and
+  deduplication saves real model evaluations.
+- Gaussian marginals are supported through a truncated-quantile grid: the
+  Morris design includes the unit-cube boundaries, which an unbounded inverse
+  CDF maps to infinity, so for each Gaussian parameter the unit-cube
+  coordinate is confined to `[q, 1 - q]` (`q = truncation_quantile`) before
+  the transform. Applied to truncated Gaussians as well for consistency;
+  uniform marginals are untouched. Deduplication and prefix-nesting are
+  unaffected.
+- Elementary effects remain per unit of the original grid coordinate;
+  `MorrisResult.to_physical_units()` is unavailable for problems with
+  non-uniform marginals because the transform is nonlinear.
+- Trajectory design: even `num_levels` values make all grid levels equally
+  probable; odd values trigger a warning.
+- Radial design: base and auxiliary points come from a scrambled Sobol'
+  sequence; a near-zero step raises `ValueError` (use `scramble=True` or a
+  different seed).
+- `n_trajectories < 2`, `num_levels < 2`, an unknown `method`, or
+  `truncation_quantile` outside `(0, 0.5)` raise `ValueError`.
+
+Minimal example:
+
+```python
+import jax.numpy as jnp
+import gsax
+from gsax.benchmarks.ishigami import PROBLEM, evaluate
+
+sampling_result = gsax.sample_morris(PROBLEM, n_trajectories=50, seed=42)
+Y = evaluate(jnp.asarray(sampling_result.samples))
+result = gsax.analyze_morris(sampling_result, Y)
+```
+
+<a id="morrissamplingresult"></a>
+### `MorrisSamplingResult` {#morrissamplingresult}
+
+Immutable dataclass returned by `sample_morris()`. It carries the unique rows
+plus the metadata needed for `analyze_morris()` to reconstruct the expanded
+design and locate each elementary effect inside it.
+
+```python
+@dataclass(frozen=True)
+class MorrisSamplingResult:
+    samples: np.ndarray
+    sample_ids: np.ndarray
+    expanded_n_total: int
+    expanded_to_unique: np.ndarray
+    n_trajectories: int
+    num_levels: int
+    method: Literal["trajectory", "radial"]
+    ee_idx_after: np.ndarray
+    ee_idx_before: np.ndarray
+    ee_delta: np.ndarray
+    n_params: int
+    problem: Problem
+```
+
+| Field | Type | Shape / Value | Description |
+| --- | --- | --- | --- |
+| `samples` | `np.ndarray` | `(n_unique, D)` | Unique rows to evaluate with your model, in the problem's physical units. |
+| `sample_ids` | `np.ndarray` | `(n_unique,)` | Stable integer identifiers aligned 1:1 with `samples`. |
+| `expanded_n_total` | `int` | `r * (D + 1)` | Row count of the full expanded design before deduplication. |
+| `expanded_to_unique` | `np.ndarray` | `(expanded_n_total,)` | Map from each expanded row to its row index in `samples`. |
+| `n_trajectories` | `int` | `r` | Number of trajectories, the Morris repetition unit. |
+| `num_levels` | `int` | `p` | Grid levels used by the trajectory design (unused by the radial design). |
+| `method` | `Literal["trajectory", "radial"]` | | Design generator. |
+| `ee_idx_after` | `np.ndarray` | `(r, D)` | Expanded-row index of the perturbed point of each elementary effect. |
+| `ee_idx_before` | `np.ndarray` | `(r, D)` | Expanded-row index of the reference point of each elementary effect. |
+| `ee_delta` | `np.ndarray` | `(r, D)` | Signed unit-cube step of each elementary effect, so that `EE = (Y[after] - Y[before]) / delta`. |
+| `n_params` | `int` | `D` | Number of problem dimensions. |
+| `problem` | `Problem` | | Problem used to transform the samples. |
+
+<a id="morrissamplingresult-n_total"></a>
+#### `MorrisSamplingResult.n_total`
+
+Property returning `samples.shape[0]`, i.e. the unique-row count.
+
+<a id="morrissamplingresult-downsample"></a>
+#### `MorrisSamplingResult.downsample()`
+
+Return a smaller `MorrisSamplingResult` by prefix-slicing to fewer
+trajectories. Optionally pass `Y` (model outputs aligned with `samples`) to get
+the corresponding output slice back, just like `SamplingResult.downsample()`.
+
+```python
+# Without Y — returns MorrisSamplingResult
+sr_small = sampling_result.downsample(n_trajectories=25)
+
+# With Y — returns (MorrisSamplingResult, Y_small)
+sr_small, Y_small = sampling_result.downsample(n_trajectories=25, Y=Y_full)
+```
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `n_trajectories` | `int` | required | Target trajectory count (`2 <= m <= r`). |
+| `Y` | `np.ndarray \| None` | `None` | Model outputs with shape `(n_total, ...)`. When provided, the matching prefix is returned alongside the new result. |
+
+Returns: `MorrisSamplingResult` when called without `Y`, or
+`(MorrisSamplingResult, np.ndarray)` when `Y` is provided.
+
+Why this works:
+
+- Trajectories are generated sequentially from independent draws (trajectory
+  design) or from prefix-nested Sobol' points (radial design), so the first
+  *m* trajectories of an *r*-trajectory run are identical to drawing *m*
+  trajectories directly with the same seed.
+- This means you can simulate the model once at the largest `n_trajectories`
+  and recover exact results for any smaller trajectory count by slicing — no
+  re-simulation needed.
+
+Validation:
+
+- `n_trajectories` must satisfy `2 <= n_trajectories <= self.n_trajectories`.
+- When `Y` is provided, `Y.shape[0]` must match `n_total`.
+- If `n_trajectories == self.n_trajectories`, the same object is returned
+  (no copy).
+
+Minimal example:
+
+```python
+import jax.numpy as jnp
+import gsax
+from gsax.benchmarks.ishigami import PROBLEM, evaluate
+
+# Sample at the largest rung
+sr_full = gsax.sample_morris(PROBLEM, n_trajectories=100, seed=42)
+Y_full = evaluate(jnp.asarray(sr_full.samples))
+
+# Downsample to smaller rungs — no re-simulation
+for r in [50, 25, 10]:
+    sr_r, Y_r = sr_full.downsample(r, Y_full)
+    result = gsax.analyze_morris(sr_r, Y_r)
+    print(f"r={r:3d}  mu_star={result.mu_star}")
+```
+
+<a id="analyze-morris"></a>
+### `analyze_morris()` {#analyze-morris}
+
+Compute Morris elementary-effects screening measures (mu, mu_star, sigma) from
+model outputs evaluated on `MorrisSamplingResult.samples`.
+
+```python
+def analyze_morris(
+    sampling_result: MorrisSamplingResult,
+    Y: Array,
+    *,
+    prenormalize: bool = False,
+    num_resamples: int = 0,
+    conf_level: float = 0.95,
+    ci_method: Literal["quantile", "gaussian"] = "quantile",
+    key: Array | None = None,
+    chunk_size: int = 2048,
+) -> MorrisResult
+```
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `sampling_result` | `MorrisSamplingResult` | required | Result from `sample_morris()`. |
+| `Y` | `Array` | required | Model outputs on the unique rows in `sampling_result.samples`. |
+| `prenormalize` | `bool` | `False` | Standardize each output slice to mean 0 and unit standard deviation over the expanded sample axis before computing elementary effects. |
+| `num_resamples` | `int` | `0` | Number of bootstrap resamples (over trajectories, with replacement) for confidence intervals. |
+| `conf_level` | `float` | `0.95` | Confidence level for bootstrap intervals. |
+| `ci_method` | `Literal["quantile", "gaussian"]` | `"quantile"` | Bootstrap CI endpoint method. `quantile` returns percentile endpoints; `gaussian` returns symmetric endpoints around the estimate. |
+| `key` | `Array \| None` | `None` | Required JAX PRNG key when `num_resamples > 0`. |
+| `chunk_size` | `int` | `2048` | Bootstrap resamples per vmap batch, bounding peak memory. |
+
+Accepted output shapes:
+
+- `(n_total,)` for scalar output
+- `(n_total, K)` for multi-output
+- `(n_total, T, K)` for time-series multi-output
+
+Validation and behavior:
+
+- `Y.shape[0]` must match `sampling_result.n_total` (the unique-row count);
+  the expanded layout is reconstructed internally.
+- A 2D array is always interpreted as `(N, K)`, never `(N, T)`. For a
+  time-series with one output, reshape to `(N, T, 1)`.
+- Elementary effects are computed in unit-cube coordinates, so `mu_star` is
+  directly comparable across parameters regardless of their physical ranges;
+  use `MorrisResult.to_physical_units()` for derivative-scale values
+  (uniform-marginal problems only).
+- Trajectories containing any non-finite value (NaN/Inf) are dropped as whole
+  blocks with a warning. Fewer than 2 remaining trajectories raise
+  `ValueError`; fewer than 10 trigger a statistical-reliability warning.
+- When `prenormalize=True`, `Y` is centered and scaled once per output slice
+  over the expanded sample axis after non-finite cleanup.
+- If `num_resamples > 0`, `key` is required or `ValueError` is raised.
+  Bootstrap resampling is over trajectories, with replacement.
+- Zero-variance output slices emit warnings.
+
+Returns: [`MorrisResult`](#morrisresult)
+
+<a id="morrisresult"></a>
+### `MorrisResult` {#morrisresult}
+
+Dataclass holding Morris elementary-effects screening measures.
+
+```python
+@dataclass
+class MorrisResult:
+    mu: Array
+    mu_star: Array
+    sigma: Array
+    problem: Problem
+    mu_conf: Array | None = None
+    mu_star_conf: Array | None = None
+    sigma_conf: Array | None = None
+    space: Literal["unit", "physical"] = "unit"
+```
+
+| Field | Shape | Description |
+| --- | --- | --- |
+| `mu` | `(D,)` / `(K, D)` / `(T, K, D)` | Mean elementary effect; sign cancellation can mask non-monotonic influence. |
+| `mu_star` | same as `mu` | Mean absolute elementary effect (Campolongo et al. 2007), the headline importance measure and a proxy for total-order ranking. |
+| `sigma` | same as `mu` | Standard deviation of the elementary effects (ddof=1); large values relative to `mu_star` indicate nonlinearity or interactions. |
+| `mu_conf`, `mu_star_conf`, `sigma_conf` | `(2, ...)` or `None` | Bootstrap lower and upper bounds. |
+| `problem` | `Problem` | Problem definition used for the analysis. |
+| `space` | `Literal["unit", "physical"]` | Coordinate space of the measures, `"unit"` (default) or `"physical"`. |
+
+Shape contract:
+
+| `Y` shape passed to `analyze_morris()` | `mu` / `mu_star` / `sigma` |
+| --- | --- |
+| `(N,)` | `(D,)` |
+| `(N, K)` | `(K, D)` |
+| `(N, T, K)` | `(T, K, D)` |
+
+Morris does not produce Sobol indices; `mu_star` ranks parameters as a proxy
+for total-order importance. Confidence interval arrays, when present, prepend
+a leading dimension of 2 for `[lower, upper]`.
+
+<a id="morrisresult-to_physical_units"></a>
+#### `MorrisResult.to_physical_units()`
+
+```python
+physical = result.to_physical_units()
+```
+
+Returns a copy with all measures rescaled to physical input units
+(`space == "physical"`).
+
+Behavior:
+
+- Unit-cube elementary effects divide the output change by a step in `[0, 1]`
+  coordinates; dividing each measure by the parameter range `high - low`
+  converts it to a per-physical-unit (derivative-scale) effect, comparable to
+  DGSM's mean derivative.
+- Raises `ValueError` if the result is already in physical units.
+- Raises `ValueError` for problems with non-uniform (Gaussian) marginals:
+  the inverse-CDF transform is nonlinear, so there is no single per-parameter
+  range to rescale by (`problem.bounds` is `None`). Measures for such
+  problems stay in grid coordinates.
+
+<a id="morrisresult-to_dataset"></a>
+#### `MorrisResult.to_dataset()`
+
+```python
+ds = result.to_dataset(time_coords=None)
+```
+
+Converts Morris results to a labeled `xarray.Dataset`.
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `time_coords` | `list \| np.ndarray \| None` | `None` | Coordinate values for the time dimension on 3D results. |
+
+Behavior:
+
+- Uses `problem.names` for `param` coordinates.
+- Uses `problem.output_names` when available, otherwise `y0`, `y1`, and so on.
+- The dataset contains `mu`, `mu_star`, and `sigma` variables, plus
+  `*_lower` / `*_upper` variables when bootstrap CIs are present.
+- Records the coordinate space in the `space` dataset attribute
+  (`"unit"` or `"physical"`).
+
+Minimal example:
+
+```python
+import jax.numpy as jnp
+import gsax
+from gsax.benchmarks.ishigami import PROBLEM, evaluate
+
+sampling_result = gsax.sample_morris(PROBLEM, n_trajectories=50, seed=42)
+Y = evaluate(jnp.asarray(sampling_result.samples))
+result = gsax.analyze_morris(sampling_result, Y)
+
+print(result.mu_star)  # (3,) — importance ranking
+print(result.sigma)    # (3,) — nonlinearity / interactions
+print(result.to_dataset())
+```
+
+Related links:
+
+- [Morris Example](/examples/morris)
+- [Methods](/guide/methods)
+- [xarray Output](/examples/xarray)
 
 ---
 

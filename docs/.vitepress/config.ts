@@ -33,6 +33,7 @@ export default defineConfig({
         { text: 'Advanced Workflow', link: '/examples/advanced-workflow' },
         { text: 'eFAST', link: '/examples/efast' },
         { text: 'DGSM', link: '/examples/dgsm' },
+        { text: 'Morris', link: '/examples/morris' },
         { text: 'PCE', link: '/examples/pce' },
         { text: 'HSIC', link: '/examples/hsic' },
         { text: 'PAWN', link: '/examples/pawn' },

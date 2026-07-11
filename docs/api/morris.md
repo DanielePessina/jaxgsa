@@ -1,0 +1,18 @@
+# Morris
+
+The canonical API reference now lives at [API Reference](/api/).
+
+Jump directly to:
+
+- [`sample_morris()`](/api/#sample-morris)
+- [`analyze_morris()`](/api/#analyze-morris)
+- [`MorrisSamplingResult`](/api/#morrissamplingresult)
+- [`MorrisSamplingResult.downsample()`](/api/#morrissamplingresult-downsample)
+- [`MorrisResult`](/api/#morrisresult)
+- [`MorrisResult.to_physical_units()`](/api/#morrisresult-to_physical_units)
+- [`MorrisResult.to_dataset()`](/api/#morrisresult-to_dataset)
+
+Related docs:
+
+- [Morris Example](/examples/morris)
+- [Methods](/guide/methods)

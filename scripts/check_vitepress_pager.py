@@ -27,6 +27,7 @@ SECTIONS = {
         "advanced-workflow",
         "efast",
         "dgsm",
+        "morris",
         "pce",
         "hsic",
         "pawn",
