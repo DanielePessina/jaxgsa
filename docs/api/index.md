@@ -44,6 +44,8 @@ from gsax.pce import analyze as analyze_pce, emulate as emulate_pce
 from gsax.efast import sample as sample_efast, analyze as analyze_efast
 from gsax.dgsm import analyze as analyze_dgsm
 from gsax.hsic import analyze as analyze_hsic
+from gsax.pawn import analyze as analyze_pawn
+from gsax.borgonovo import analyze as analyze_borgonovo
 ```
 
 All public symbols are also re-exported from the top-level `gsax` namespace for
@@ -1609,7 +1611,7 @@ class DeltaResult:
 
 | Field | Shape | Description |
 | --- | --- | --- |
-| `delta` | `(D,)` / `(K, D)` / `(T, K, D)` | Borgonovo delta index per parameter, in [0, 1] (bias-corrected when the analysis ran with `bias_correct=True` and `n_bootstrap > 0`). |
+| `delta` | `(D,)` / `(K, D)` / `(T, K, D)` | Borgonovo delta index per parameter. The underlying index and the raw plug-in estimate lie in [0, 1]; the default bias-corrected estimate (`2*d_hat - mean(d_boot)`, and the lower bound of `delta_conf`) can fall marginally below 0 for weak or near-noninfluential inputs at small N. Bias-corrected when the analysis ran with `bias_correct=True` and `n_bootstrap > 0`. |
 | `delta_conf` | `(2, ...)` or `None` | Percentile bootstrap confidence interval `[lower, upper]`, or `None` when `n_bootstrap=0`. |
 | `S1` | `(D,)` / `(K, D)` / `(T, K, D)` | Given-data first-order Sobol index per parameter. |
 | `S1_conf` | `(2, ...)` or `None` | Percentile bootstrap confidence interval `[lower, upper]`, or `None` when `n_bootstrap=0`. |

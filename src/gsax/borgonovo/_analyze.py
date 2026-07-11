@@ -12,16 +12,24 @@ The plug-in estimator is biased upward at finite N, so by default the
 central estimate is bias-corrected with bootstrap resamples
 (``2*d_hat - mean(d_boot)``, Plischke et al. eqn 30) where ``d_hat`` is
 computed on the original sample; percentile confidence intervals come from
-the same replicates. Class-partition constants depend only on static
-``(N, M)``, so a single JIT-compiled kernel (one compilation per unique
-``(N, M, grid_size, bandwidth)`` and batch shape) is vmapped over the
-flattened ``T*K`` output columns and scanned over bootstrap replicates.
+the same replicates. The original sample and the bootstrap replicates run
+through a single scanned path (the original sample is replicate 0, gathered
+via the identity permutation), so the point estimate and its interval are
+always computed under identical conventions. Class-partition indices are
+built once (per input, for every replicate) and reused across output-column
+chunks; the JIT-compiled per-column kernel is cached only on the scalar
+estimator settings ``(grid_size, bandwidth)`` so it captures no
+sample-sized constants.
 
 Estimator details mirror ``SALib.analyze.delta`` (equal-frequency ordinal
 rank partition, Plischke class-count heuristic, Silverman KDE factors,
-100-point output grid) except that the central estimate uses the original
-sample rather than a bootstrap resample, and a constant output column
-yields ``delta = S1 = 0`` instead of an error.
+100-point output grid) with three deliberate differences: the central
+estimate uses the original sample rather than a bootstrap resample
+(deterministic given the data); a constant output column yields
+``delta = S1 = 0`` instead of an error; and a bootstrap replicate that
+happens to be constant (reachable for rare-event outputs) contributes the
+point estimate rather than a spurious zero, so it neither adds nor removes
+bias (SALib raises ``LinAlgError`` on such data).
 
 References:
     Borgonovo (2007). A new uncertainty importance measure.
@@ -42,12 +50,18 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
-from gsax._normalization import _prepare_Y
+from gsax._normalization import _prepare_Y, _squeeze_output_axes, _validate_xy_inputs
 from gsax.borgonovo._result import DeltaResult
 from gsax.problem import Problem
 
 _SQRT_2PI = math.sqrt(2.0 * math.pi)
 _MAX_CLASSES = 48
+# Target element budget for the default per-chunk working set. The dominant
+# intermediate is the conditional-KDE tensor whose size scales as
+# ``chunk_columns * D * N * grid_size`` (class count M times padding P is ~N),
+# so the default chunk width is chosen to keep it near this many float32
+# elements (~256 MB).
+_CHUNK_ELEM_BUDGET = 1 << 26
 
 
 def _plischke_n_classes(n_samples: int) -> int:
@@ -63,7 +77,7 @@ def _plischke_n_classes(n_samples: int) -> int:
         Number of equal-frequency classes M.
     """
     exponent = 2.0 / (7.0 + np.tanh((1500.0 - n_samples) / 500.0))
-    return int(np.round(min(int(np.ceil(n_samples**exponent)), _MAX_CLASSES)))
+    return min(int(np.ceil(n_samples**exponent)), _MAX_CLASSES)
 
 
 def _class_layout(N: int, M: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -95,82 +109,100 @@ def _class_layout(N: int, M: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return take, mask, sizes
 
 
-@lru_cache(maxsize=32)
-def _get_delta_kernel(N: int, M: int, grid_size: int, bw_factor: float | None):
-    """Return a JIT-compiled delta/S1 kernel for static estimator settings.
+@jax.jit
+def _build_class_indices(X: Array, all_idx: Array, take: Array) -> Array:
+    """Global sample indices of every class, for every replicate.
+
+    Computed once (never per output-column chunk) so the per-column kernel
+    never re-ranks the inputs.
 
     Args:
-        N: Number of samples (static; fixes the class layout).
-        M: Number of equal-frequency classes (static).
+        X: Input sample matrix ``(N, D)``.
+        all_idx: Replicate row indices ``(R, N)`` (row 0 is the identity).
+        take: Static per-class gather indices ``(M, P)`` from
+            :func:`_class_layout`.
+
+    Returns:
+        Class indices ``(R, D, M, P)`` into the original sample.
+    """
+
+    def _one_replicate(r: Array) -> Array:
+        # Rank on the ORIGINAL X (never downcast): ordinal ranks == a stable
+        # argsort, so each class is a contiguous slice of the rank-sorted
+        # resample; gathering ``r[orders]`` yields global indices of the
+        # class members.
+        orders = jnp.argsort(X[r], axis=0)  # (N, D)
+        return r[orders].T[:, take]  # (D, M, P)
+
+    return jax.vmap(_one_replicate)(all_idx)
+
+
+@lru_cache(maxsize=32)
+def _get_delta_kernel(grid_size: int, bw_factor: float | None):
+    """Return a JIT-compiled delta/S1 kernel for static estimator settings.
+
+    The kernel is cached only on the scalar settings that change tracing
+    (grid size and the bandwidth branch); sample-sized data (inputs, class
+    indices, masks) are passed as runtime arguments, so nothing of size
+    ``O(N)`` is captured or baked into the compiled executable.
+
+    Args:
         grid_size: Number of output-grid points for the KDE (static).
         bw_factor: KDE bandwidth factor multiplying the sample standard
             deviation, or ``None`` for the per-class Silverman rule.
 
     Returns:
-        A jitted callable ``(X (N, D), Y_cols (N, C), boot_idx (B, N)) ->
-        (d_hat (C, D), s1_hat (C, D), d_boot (B, C, D), s1_boot (B, C, D))``
-        computing plug-in estimates on the original sample and on each
-        bootstrap replicate.
+        A jitted callable ``(Y_cols (N, C), all_idx (R, N),
+        all_cls_idx (R, D, M, P), mask (M, P), counts (M,)) ->
+        (d (R, C, D), s1 (R, C, D), degenerate (R, C))`` giving plug-in
+        estimates for every replicate and a per-replicate/per-column flag
+        marking constant resamples.
     """
-    take_np, mask_np, sizes_np = _class_layout(N, M)
-    take = jnp.asarray(take_np)
 
     def _bandwidths(counts: Array, std: Array) -> Array:
-        """Per-class KDE bandwidths (Silverman rule or fixed factor)."""
-        if bw_factor is None:
-            factor = (0.75 * counts) ** (-0.2)
-        else:
-            factor = bw_factor
+        """Per-class (or full-sample) KDE bandwidths."""
+        factor = (0.75 * counts) ** (-0.2) if bw_factor is None else bw_factor
         return factor * std
 
     def _kde_full(y: Array, grid: Array) -> Array:
         """Gaussian KDE of a full column ``y (N,)`` on ``grid (G,)``."""
+        n = y.shape[0]
         std = jnp.std(y, ddof=1)
-        h = _bandwidths(jnp.asarray(float(N), dtype=y.dtype), std)
+        h = _bandwidths(jnp.asarray(float(n), dtype=y.dtype), std)
         safe_h = jnp.where(h > 0, h, 1.0)
         u = (grid[:, None] - y[None, :]) / safe_h
-        f = jnp.exp(-0.5 * u * u).sum(axis=1) / (N * safe_h * _SQRT_2PI)
-        # Zero-bandwidth (constant data) mirrors SALib's degenerate-class
-        # treatment: the density is dropped from the integrand.
+        f = jnp.exp(-0.5 * u * u).sum(axis=1) / (n * safe_h * _SQRT_2PI)
+        # Zero bandwidth (constant data) drops the density from the
+        # integrand, mirroring SALib's degenerate-class treatment.
         return jnp.where(h > 0, f, 0.0)
 
-    def _impl(X: Array, Y_cols: Array, boot_idx: Array):
+    def _impl(
+        Y_cols: Array,
+        all_idx: Array,
+        all_cls_idx: Array,
+        mask: Array,
+        counts: Array,
+    ):
         dtype = jnp.result_type(Y_cols.dtype, jnp.float32)
-        X = X.astype(dtype)
         Y_cols = Y_cols.astype(dtype)
-        mask = jnp.asarray(mask_np, dtype=dtype)
-        counts = jnp.asarray(sizes_np, dtype=dtype)
+        mask = mask.astype(dtype)
+        counts = counts.astype(dtype)
+        n_total = counts.sum()  # == N
 
-        # Output grids depend only on the original sample and are reused
-        # for every bootstrap replicate (SALib does the same).
+        # Output grids depend only on the original sample and are reused for
+        # every replicate (SALib does the same).
         y_min = Y_cols.min(axis=0)
         y_max = Y_cols.max(axis=0)
         steps = jnp.linspace(0.0, 1.0, grid_size, dtype=dtype)
         grids = y_min[:, None] + steps[None, :] * (y_max - y_min)[:, None]  # (C, G)
 
-        def _col_stats(
-            y: Array,
-            grid: Array,
-            fy: Array,
-            cls_idx: Array,
-            y_mean: Array,
-            y_var: Array,
-        ) -> tuple[Array, Array]:
-            """Delta and S1 for one column given class gather indices.
+        def _col_stats(y: Array, grid: Array, r: Array, cls_idx: Array):
+            """Delta, S1, and a degeneracy flag for one column/replicate."""
+            y_r = y[r]  # resampled column
+            fy = _kde_full(y_r, grid)
+            degenerate = y_r.max() == y_r.min()
 
-            Args:
-                y: Original output column ``(N,)`` (gathered via ``cls_idx``).
-                grid: Output grid ``(G,)``.
-                fy: Unconditional KDE on the grid ``(G,)``.
-                cls_idx: Global sample indices per input and class
-                    ``(D, M, P)``.
-                y_mean: Mean of the (re)sampled column.
-                y_var: Population variance of the (re)sampled column.
-
-            Returns:
-                ``(delta, s1)`` plug-in estimates, each ``(D,)``.
-            """
-            y_cls = y[cls_idx]  # (D, M, P)
+            y_cls = y[cls_idx]  # (D, M, P) resampled class members
             mean = (y_cls * mask).sum(axis=-1) / counts  # (D, M)
             dev = (y_cls - mean[..., None]) * mask
             var = (dev**2).sum(axis=-1) / jnp.maximum(counts - 1.0, 1.0)
@@ -183,64 +215,26 @@ def _get_delta_kernel(N: int, M: int, grid_size: int, bw_factor: float | None):
             fyc = jnp.where((h > 0)[..., None], fyc, 0.0)  # (D, M, G)
 
             l1 = jnp.trapezoid(jnp.abs(fy[None, None, :] - fyc), grid, axis=-1)
-            delta = (counts[None, :] / (2.0 * N) * l1).sum(axis=-1)  # (D,)
+            delta = (counts[None, :] / (2.0 * n_total) * l1).sum(axis=-1)  # (D,)
 
-            Vi = (counts[None, :] / N * (mean - y_mean) ** 2).sum(axis=-1)
-            s1 = jnp.where(y_var > 0, Vi / jnp.where(y_var > 0, y_var, 1.0), 0.0)
-            return delta, s1
+            y_mean = y_r.mean()
+            y_var = jnp.var(y_r)
+            safe_var = jnp.where(y_var > 0, y_var, 1.0)
+            Vi = (counts[None, :] / n_total * (mean - y_mean) ** 2).sum(axis=-1)
+            s1 = jnp.where(y_var > 0, Vi / safe_var, 0.0)
+            return delta, s1, degenerate
 
-        fy0 = jax.vmap(_kde_full)(Y_cols.T, grids)  # (C, G)
-        # Ordinal ranks == stable argsort; classes are contiguous slices of
-        # the rank-sorted sample, so gathering ``order[take]`` yields global
-        # indices of each class's members.
-        orders0 = jnp.argsort(X, axis=0)  # (N, D)
-        cls_idx0 = orders0.T[:, take]  # (D, M, P)
-        d_hat, s1_hat = jax.vmap(
-            lambda y, grid, fy: _col_stats(y, grid, fy, cls_idx0, y.mean(), jnp.var(y))
-        )(Y_cols.T, grids, fy0)
+        def _one_replicate(carry, xs):
+            r, cls_idx = xs
+            d, s1, degen = jax.vmap(lambda y, grid: _col_stats(y, grid, r, cls_idx))(
+                Y_cols.T, grids
+            )
+            return carry, (d, s1, degen)
 
-        def _boot_step(carry: None, r: Array):
-            """Plug-in estimates on one bootstrap replicate ``r (N,)``."""
-            orders_b = jnp.argsort(X[r], axis=0)
-            # Composing the resample with its sort order gives global
-            # indices, so columns are gathered without materializing X[r]
-            # per column.
-            cls_idx_b = r[orders_b].T[:, take]  # (D, M, P)
-
-            def _one_col(y: Array, grid: Array) -> tuple[Array, Array]:
-                y_b = y[r]
-                fy_b = _kde_full(y_b, grid)
-                return _col_stats(y, grid, fy_b, cls_idx_b, y_b.mean(), jnp.var(y_b))
-
-            return carry, jax.vmap(_one_col)(Y_cols.T, grids)
-
-        if boot_idx.shape[0] > 0:
-            _, (d_boot, s1_boot) = jax.lax.scan(_boot_step, None, boot_idx)
-        else:
-            d_boot = jnp.zeros((0,) + d_hat.shape, dtype=dtype)
-            s1_boot = jnp.zeros((0,) + s1_hat.shape, dtype=dtype)
-
-        return d_hat, s1_hat, d_boot, s1_boot
+        _, (d_all, s1_all, degen_all) = jax.lax.scan(_one_replicate, None, (all_idx, all_cls_idx))
+        return d_all, s1_all, degen_all
 
     return jax.jit(_impl)
-
-
-def _squeeze_result(arr: Array, squeeze_time: bool, squeeze_output: bool) -> Array:
-    """Remove the singleton T/K axes inserted by ``_prepare_Y``.
-
-    Args:
-        arr: Index array shaped ``(..., T, K, D)``.
-        squeeze_time: Whether the time axis was inserted.
-        squeeze_output: Whether the output axis was inserted.
-
-    Returns:
-        Array with the inserted singleton axes removed.
-    """
-    if squeeze_time and squeeze_output:
-        return arr[..., 0, 0, :]
-    if squeeze_time:
-        return arr[..., 0, :, :]
-    return arr
 
 
 def analyze(
@@ -255,7 +249,7 @@ def analyze(
     conf_level: float = 0.95,
     bias_correct: bool = True,
     seed: int = 0,
-    chunk_size: int = 2048,
+    chunk_size: int | None = None,
 ) -> DeltaResult:
     """Compute Borgonovo delta and given-data first-order Sobol indices.
 
@@ -281,33 +275,31 @@ def analyze(
             SALib).
         seed: Random seed for bootstrap resampling.
         chunk_size: Number of flattened ``T*K`` output columns processed
-            per kernel call. Peak memory scales with
-            ``chunk_size * D * N * grid_size``; lower it for large
-            time-series outputs.
+            per kernel call. ``None`` picks a memory-aware default from the
+            sample size; pass an explicit positive integer to override.
+            Peak memory scales with ``chunk_size * D * N * grid_size``.
 
     Returns:
         DeltaResult with delta and S1 indices and optional confidence
-        intervals. A constant output column yields ``delta = S1 = 0``
+        intervals. The underlying delta index is defined on ``[0, 1]`` and
+        the plug-in estimate stays in that range, but the default
+        bias-corrected estimate (and its confidence bounds) can fall
+        marginally below 0 for weak/near-noninfluential inputs at small
+        sample sizes. A constant output column yields ``delta = S1 = 0``
         (SALib raises an error in this case).
 
     Raises:
         ValueError: If X is not 2-D, its column count does not match the
-            problem, X and Y have differing row counts, ``n_classes`` is
-            not in ``[2, N]``, ``grid_size < 2``, ``bandwidth`` is neither
-            ``"silverman"`` nor a positive float, ``n_bootstrap < 0``,
-            ``conf_level`` is not in ``(0, 1)``, or ``chunk_size < 1``.
+            problem, Y is not 1-D/2-D/3-D, X and Y have differing row
+            counts, ``n_classes`` is not in ``[2, N]``, ``grid_size < 2``,
+            ``bandwidth`` is neither ``"silverman"`` nor a positive float,
+            ``n_bootstrap < 0``, ``conf_level`` is not in ``(0, 1)``, or
+            ``chunk_size`` is not a positive integer.
     """
     X = jnp.asarray(X)
     Y = jnp.asarray(Y)
 
-    if X.ndim != 2:
-        raise ValueError(f"X must be 2-D (N, D), got ndim={X.ndim}")
-    if X.shape[1] != problem.num_vars:
-        raise ValueError(
-            f"X has {X.shape[1]} columns but problem has {problem.num_vars} parameters"
-        )
-    if X.shape[0] != Y.shape[0]:
-        raise ValueError(f"X has {X.shape[0]} rows but Y has {Y.shape[0]} rows")
+    _validate_xy_inputs(problem, X, Y)
 
     N = X.shape[0]
     if n_classes is None:
@@ -318,76 +310,127 @@ def analyze(
         M = int(n_classes)
     if grid_size < 2:
         raise ValueError(f"grid_size must be >= 2, got {grid_size}")
-    if bandwidth == "silverman":
-        bw_factor = None
-    else:
-        bw_factor = float(bandwidth)
-        if not bw_factor > 0:
-            raise ValueError(
-                f"bandwidth must be 'silverman' or a positive float, got {bandwidth!r}"
-            )
+    bw_factor = _resolve_bandwidth(bandwidth)
     if n_bootstrap < 0:
         raise ValueError(f"n_bootstrap must be >= 0, got {n_bootstrap}")
     if not 0 < conf_level < 1:
         raise ValueError(f"conf_level must be in (0, 1), got {conf_level}")
-    if chunk_size < 1:
-        raise ValueError(f"chunk_size must be >= 1, got {chunk_size}")
 
     Y_3d, squeeze_time, squeeze_output = _prepare_Y(Y)
     _, T, K = Y_3d.shape
+    D = problem.num_vars
     Y_cols = Y_3d.reshape(N, T * K)
 
-    if n_bootstrap > 0:
-        boot_idx = jax.random.randint(jax.random.PRNGKey(seed), (n_bootstrap, N), 0, N)
-    else:
-        boot_idx = jnp.zeros((0, N), dtype=jnp.int32)
+    if chunk_size is None:
+        chunk_size = max(1, _CHUNK_ELEM_BUDGET // (D * N * grid_size))
+    elif chunk_size < 1:
+        raise ValueError(f"chunk_size must be >= 1, got {chunk_size}")
 
-    kernel = _get_delta_kernel(N, M, grid_size, bw_factor)
+    # Replicate 0 is the identity permutation (the original sample); the
+    # remaining rows are the bootstrap resamples. Building them together
+    # means the point estimate and its interval share one code path.
+    identity = jnp.arange(N, dtype=jnp.int32)[None, :]
+    if n_bootstrap > 0:
+        boot = jax.random.randint(
+            jax.random.PRNGKey(seed), (n_bootstrap, N), 0, N, dtype=jnp.int32
+        )
+        all_idx = jnp.concatenate([identity, boot], axis=0)
+    else:
+        all_idx = identity
+    R = all_idx.shape[0]
+
+    take_np, mask_np, sizes_np = _class_layout(N, M)
+    take = jnp.asarray(take_np)
+    mask = jnp.asarray(mask_np)
+    counts = jnp.asarray(sizes_np)
+
+    # Rank the inputs once for every replicate (never per output-column
+    # chunk), then reuse the class indices across chunks.
+    all_cls_idx = _build_class_indices(X, all_idx, take)
+
+    kernel = _get_delta_kernel(grid_size, bw_factor)
 
     total = T * K
     cs = min(chunk_size, total)
-    d_parts, s1_parts, db_parts, s1b_parts = [], [], [], []
+    d_parts, s1_parts, degen_parts = [], [], []
     for start in range(0, total, cs):
-        d, s1, d_b, s1_b = kernel(X, Y_cols[:, start : start + cs], boot_idx)
+        d, s1, degen = kernel(Y_cols[:, start : start + cs], all_idx, all_cls_idx, mask, counts)
         d_parts.append(d)
         s1_parts.append(s1)
-        db_parts.append(d_b)
-        s1b_parts.append(s1_b)
+        degen_parts.append(degen)
 
-    D = problem.num_vars
-    d_hat = jnp.concatenate(d_parts, axis=0).reshape(T, K, D)
-    S1 = jnp.concatenate(s1_parts, axis=0).reshape(T, K, D)
+    d_all = jnp.concatenate(d_parts, axis=1).reshape(R, T, K, D)
+    s1_all = jnp.concatenate(s1_parts, axis=1).reshape(R, T, K, D)
+    degen_all = jnp.concatenate(degen_parts, axis=1).reshape(R, T, K)
+
+    d_hat = d_all[0]
+    S1 = s1_all[0]
 
     delta_conf: Array | None = None
     S1_conf: Array | None = None
     if n_bootstrap > 0:
-        d_boot = jnp.concatenate(db_parts, axis=1).reshape(n_bootstrap, T, K, D)
-        s1_boot = jnp.concatenate(s1b_parts, axis=1).reshape(n_bootstrap, T, K, D)
+        # A constant bootstrap resample carries no information; replace its
+        # degenerate zero with the point estimate so it neither inflates nor
+        # deflates the bias correction (constant whole columns still give 0).
+        degen_boot = degen_all[1:, ..., None]
+        d_boot = jnp.where(degen_boot, d_hat[None], d_all[1:])
+        s1_boot = jnp.where(degen_boot, S1[None], s1_all[1:])
 
         if bias_correct:
-            # Plischke eqn 30 with d_hat on the original sample: the
-            # corrected replicates average to 2*d_hat - mean(d_boot).
+            # Plischke eqn 30 with d_hat on the original sample.
             d_reps = 2.0 * d_hat[None] - d_boot
-            delta = d_reps.mean(axis=0)
+            delta = jnp.nanmean(d_reps, axis=0)
         else:
             d_reps = d_boot
             delta = d_hat
 
         alpha = (1.0 - conf_level) / 2.0
         percentiles = jnp.array([alpha * 100, (1.0 - alpha) * 100])
-        delta_conf = _squeeze_result(
-            jnp.percentile(d_reps, percentiles, axis=0), squeeze_time, squeeze_output
+        delta_conf = _squeeze_output_axes(
+            jnp.nanpercentile(d_reps, percentiles, axis=0), squeeze_time, squeeze_output
         )
-        S1_conf = _squeeze_result(
-            jnp.percentile(s1_boot, percentiles, axis=0), squeeze_time, squeeze_output
+        S1_conf = _squeeze_output_axes(
+            jnp.nanpercentile(s1_boot, percentiles, axis=0), squeeze_time, squeeze_output
         )
     else:
         delta = d_hat
 
     return DeltaResult(
-        delta=_squeeze_result(delta, squeeze_time, squeeze_output),
+        delta=_squeeze_output_axes(delta, squeeze_time, squeeze_output),
         delta_conf=delta_conf,
-        S1=_squeeze_result(S1, squeeze_time, squeeze_output),
+        S1=_squeeze_output_axes(S1, squeeze_time, squeeze_output),
         S1_conf=S1_conf,
         problem=problem,
     )
+
+
+def _resolve_bandwidth(bandwidth: float | Literal["silverman"]) -> float | None:
+    """Validate the ``bandwidth`` argument and return the KDE factor.
+
+    Args:
+        bandwidth: ``"silverman"`` for the per-class Silverman rule, or a
+            positive real factor.
+
+    Returns:
+        ``None`` for the Silverman rule, otherwise the float factor.
+
+    Raises:
+        ValueError: If ``bandwidth`` is not ``"silverman"`` or a positive
+            real number (booleans are rejected).
+    """
+    if isinstance(bandwidth, str):
+        if bandwidth == "silverman":
+            return None
+        raise ValueError(f"bandwidth must be 'silverman' or a positive float, got {bandwidth!r}")
+    # bool is an int subclass but is never a meaningful bandwidth factor.
+    if isinstance(bandwidth, bool):
+        raise ValueError(f"bandwidth must be 'silverman' or a positive float, got {bandwidth!r}")
+    try:
+        factor = float(bandwidth)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"bandwidth must be 'silverman' or a positive float, got {bandwidth!r}"
+        ) from None
+    if not factor > 0:
+        raise ValueError(f"bandwidth must be 'silverman' or a positive float, got {bandwidth!r}")
+    return factor

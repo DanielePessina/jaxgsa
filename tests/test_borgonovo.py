@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -131,6 +133,9 @@ class TestDeltaSALibComparison:
 class TestGaussianLinearBenchmark:
     def test_analytical_delta_matches_brute_force(self):
         """Closed-form Gaussian L1 + quadrature vs dense numeric integration."""
+        # scipy.integrate.trapezoid works on numpy 1.x and 2.x (np.trapezoid
+        # is 2.0-only), so this test does not force a numpy>=2 floor.
+        from scipy.integrate import trapezoid
         from scipy.stats import norm
 
         c = np.asarray(gaussian_linear.DEFAULT_COEFFS)
@@ -145,14 +150,12 @@ class TestGaussianLinearBenchmark:
             f_y = norm.pdf(ys, scale=np.sqrt(var_y))
             l1 = np.array(
                 [
-                    np.trapezoid(
-                        np.abs(f_y - norm.pdf(ys, loc=c[i] * x, scale=np.sqrt(v_cond))), ys
-                    )
+                    trapezoid(np.abs(f_y - norm.pdf(ys, loc=c[i] * x, scale=np.sqrt(v_cond))), ys)
                     for x in xs
                 ]
             )
             w = norm.pdf(xs, scale=np.sqrt(v[i]))
-            brute[i] = 0.5 * np.trapezoid(l1 * w, xs)
+            brute[i] = 0.5 * trapezoid(l1 * w, xs)
 
         np.testing.assert_allclose(gaussian_linear.ANALYTICAL_DELTA, brute, atol=1e-4)
 
@@ -161,6 +164,19 @@ class TestGaussianLinearBenchmark:
         delta = gaussian_linear.analytical_delta(coeffs=(0.0, 1.0, 2.0))
         assert delta[0] == 0.0
         assert np.all(delta[1:] > 0.0)
+
+    def test_analytical_delta_zero_variance(self):
+        """A constant (zero-variance) input yields delta 0, not NaN."""
+        delta = gaussian_linear.analytical_delta(coeffs=(1.0, 2.0, 3.0), variances=(0.0, 1.0, 1.0))
+        assert np.all(np.isfinite(delta))
+        assert delta[0] == 0.0
+        assert np.all(delta[1:] > 0.0)
+
+    def test_analytical_delta_tiny_coefficient_finite(self):
+        """A near-zero coefficient stays finite (no 1/v1-1/v2 cancellation)."""
+        delta = gaussian_linear.analytical_delta(coeffs=(1e-9, 1.0, 2.0))
+        assert np.all(np.isfinite(delta))
+        assert delta[0] >= 0.0
 
     def test_estimator_converges_to_analytical_delta(self, gaussian_linear_data):
         X, Y = gaussian_linear_data
@@ -356,3 +372,98 @@ class TestPlischkeHeuristic:
 
     def test_saturates_at_48(self):
         assert _plischke_n_classes(10**6) == 48
+
+
+class TestDeltaRegression:
+    """Regression coverage for confirmed code-review findings."""
+
+    def test_rare_event_bias_correction_not_inflated(self):
+        """A rare-event output must not make the bias correction inflate delta.
+
+        Constant bootstrap resamples (frequent when Y is a rare-event
+        indicator) previously contributed spurious zero replicates, dragging
+        ``mean(d_boot)`` below ``d_hat`` and pushing the corrected estimate
+        *above* the plug-in value for an input whose true delta is ~0.
+        """
+        X = jnp.asarray(sample_mc(ishigami.PROBLEM, N=1000, seed=1))
+        Y_np = np.zeros(1000)
+        Y_np[np.random.default_rng(0).integers(1000)] = 1.0
+        Y = jnp.asarray(Y_np)
+        plug = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0)
+        corrected = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=200, seed=0)
+        c = np.asarray(corrected.delta)
+        assert np.all(np.isfinite(c))
+        assert np.all(c <= np.asarray(plug.delta) + 0.02)
+
+    def test_ranking_uses_original_x_under_x64(self):
+        """Ranks must be computed on the original X, not a Y-dtype downcast.
+
+        Runs in a subprocess so enabling x64 cannot leak into the rest of
+        the suite. With float64 X carrying structure below the float32 ulp
+        and a float32 Y, the dominant input's delta must stay large.
+        """
+        import subprocess
+        import sys
+        import textwrap
+
+        script = textwrap.dedent(
+            """
+            import jax
+            jax.config.update("jax_enable_x64", True)
+            import numpy as np
+            import jax.numpy as jnp
+            from gsax.benchmarks import ishigami
+            from gsax.borgonovo import analyze
+
+            rng = np.random.default_rng(0)
+            N = 1500
+            x0 = 1e9 + rng.random(N)  # ulp ~64 at 1e9 >> unit spacing
+            X = np.stack([x0, rng.random(N), rng.random(N)], axis=1)
+            Y = np.sin(2 * np.pi * (x0 - 1e9))
+            d32 = np.asarray(
+                analyze(ishigami.PROBLEM, jnp.asarray(X),
+                        jnp.asarray(Y, dtype=jnp.float32), n_bootstrap=0).delta
+            )
+            d64 = np.asarray(
+                analyze(ishigami.PROBLEM, jnp.asarray(X),
+                        jnp.asarray(Y, dtype=jnp.float64), n_bootstrap=0).delta
+            )
+            assert d32[0] > 0.3, d32
+            assert np.allclose(d32, d64, atol=1e-4), (d32, d64)
+            """
+        )
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+
+
+class TestDeltaBandwidthValidation:
+    def test_unknown_string_bandwidth_message(self, ishigami_data):
+        X, Y = ishigami_data
+        # cast so the deliberately invalid value (a string other than
+        # "silverman") exercises runtime validation without a static type error.
+        with pytest.raises(ValueError, match="'silverman' or a positive float"):
+            analyze(ishigami.PROBLEM, X, Y, bandwidth=cast(float, "scott"))
+
+    def test_bool_bandwidth_rejected(self, ishigami_data):
+        X, Y = ishigami_data
+        # bool is an int subclass; cast so the runtime rejection is exercised
+        # without a static type error.
+        with pytest.raises(ValueError, match="'silverman' or a positive float"):
+            analyze(ishigami.PROBLEM, X, Y, bandwidth=cast(float, True))
+
+    def test_float_bandwidth_accepted(self, ishigami_data):
+        X, Y = ishigami_data
+        result = analyze(ishigami.PROBLEM, X, Y, bandwidth=0.5, n_bootstrap=0)
+        assert np.all(np.isfinite(np.asarray(result.delta)))
+
+
+class TestDeltaYNdimValidation:
+    def test_rejects_4d_y(self, ishigami_data):
+        X, _ = ishigami_data
+        with pytest.raises(ValueError, match="Y must be 1-D"):
+            analyze(ishigami.PROBLEM, X, jnp.ones((X.shape[0], 2, 3, 4)))
+
+    def test_rejects_0d_y(self, ishigami_data):
+        X, _ = ishigami_data
+        with pytest.raises(ValueError, match="Y must be 1-D"):
+            analyze(ishigami.PROBLEM, X, jnp.asarray(3.0))

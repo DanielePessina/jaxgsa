@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import jax.numpy as jnp
+import numpy as np
 from jax import Array
 
 if TYPE_CHECKING:
@@ -26,6 +27,97 @@ def _default_output_names(K: int, problem: Problem) -> list[str]:
             raise ValueError(f"output_names length {len(problem.output_names)} != K={K}")
         return list(problem.output_names)
     return [f"y{i}" for i in range(K)]
+
+
+def _validate_xy_inputs(problem: Problem, X: Array, Y: Array) -> None:
+    """Validate the shared ``(problem, X, Y)`` contract of given-data methods.
+
+    Args:
+        problem: Problem definition with ``num_vars`` parameters.
+        X: Input sample matrix, expected shape ``(N, D)``.
+        Y: Model output, expected 1-D, 2-D, or 3-D with ``N`` leading rows.
+
+    Raises:
+        ValueError: If X is not 2-D, its column count does not match the
+            problem, Y is not 1-D/2-D/3-D, or X and Y have differing row
+            counts.
+    """
+    if X.ndim != 2:
+        raise ValueError(f"X must be 2-D (N, D), got ndim={X.ndim}")
+    if X.shape[1] != problem.num_vars:
+        raise ValueError(
+            f"X has {X.shape[1]} columns but problem has {problem.num_vars} parameters"
+        )
+    if Y.ndim not in (1, 2, 3):
+        raise ValueError(f"Y must be 1-D (N,), 2-D (N, K), or 3-D (N, T, K), got ndim={Y.ndim}")
+    if X.shape[0] != Y.shape[0]:
+        raise ValueError(f"X has {X.shape[0]} rows but Y has {Y.shape[0]} rows")
+
+
+def _squeeze_output_axes(arr: Array, squeeze_time: bool, squeeze_output: bool) -> Array:
+    """Remove the singleton T/K axes that ``_prepare_Y`` inserted.
+
+    Works for both point-estimate arrays shaped ``(..., T, K, D)`` and
+    confidence arrays with a leading ``[lower, upper]`` axis, because the
+    trailing ``(T, K, D)`` layout is addressed with negative indices.
+
+    Args:
+        arr: Array whose last three axes are ``(T, K, D)``.
+        squeeze_time: Whether the T axis was inserted (drop it).
+        squeeze_output: Whether the K axis was inserted (drop it).
+
+    Returns:
+        The array with the inserted singleton axes removed.
+    """
+    if squeeze_time and squeeze_output:
+        return arr[..., 0, 0, :]
+    if squeeze_time:
+        return arr[..., 0, :, :]
+    return arr
+
+
+def _dims_and_coords(
+    ndim: int,
+    shape: tuple[int, ...],
+    problem: Problem,
+    time_coords: "np.ndarray | list | None" = None,
+) -> tuple[tuple[str, ...], dict]:
+    """Resolve xarray dimension names and coordinates for a result array.
+
+    Shared by every result class's ``to_dataset`` so the ``param`` /
+    ``output`` / ``time`` schema stays consistent across methods.
+
+    Args:
+        ndim: Number of dimensions of the index array (1, 2, or 3).
+        shape: Shape of the index array; used to recover K (and T).
+        problem: Problem definition supplying parameter and output names.
+        time_coords: Optional coordinate values for the time dimension when
+            ``ndim == 3``; defaults to integer indices.
+
+    Returns:
+        A tuple ``(dims, coords)`` suitable for constructing an
+        ``xr.Dataset``.
+
+    Raises:
+        ValueError: If ``ndim`` is not 1, 2, or 3.
+    """
+    param_names = list(problem.names)
+    if ndim == 1:
+        return ("param",), {"param": param_names}
+    if ndim == 2:
+        K = shape[0]
+        onames = _default_output_names(K, problem)
+        return ("output", "param"), {"output": onames, "param": param_names}
+    if ndim == 3:
+        T = shape[0]
+        K = shape[1]
+        onames = _default_output_names(K, problem)
+        tcoords = list(time_coords) if time_coords is not None else list(range(T))
+        return (
+            ("time", "output", "param"),
+            {"time": tcoords, "output": onames, "param": param_names},
+        )
+    raise ValueError(f"Unexpected index array ndim={ndim}")
 
 
 def _prepare_Y(

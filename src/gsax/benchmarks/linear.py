@@ -47,6 +47,48 @@ def evaluate(
     return X @ jnp.asarray(coeffs)
 
 
+def _additive_sobol_indices(
+    coeffs: np.ndarray,
+    var_x: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Sobol indices for a purely additive linear model ``Y = sum c_j x_j``.
+
+    Shared by the uniform (:mod:`~gsax.benchmarks.linear`) and Gaussian
+    (:mod:`~gsax.benchmarks.gaussian_linear`) benchmarks, which differ only in
+    how ``var_x`` is derived from the input distributions:
+
+    .. math::
+        V_j = c_j^2 \\operatorname{Var}(x_j), \\quad
+        S_{1,j} = S_{T,j} = V_j / V(Y), \\quad
+        S_{2,jk} = 0
+
+    Args:
+        coeffs: Coefficient per dimension.
+        var_x: Variance of each independent input.
+
+    Returns:
+        ``(S1, ST, S2)`` where S1 == ST (no interactions) and S2 is
+        all-zero off-diagonal with NaN on the diagonal.
+    """
+    c = np.asarray(coeffs, dtype=float)
+    var_x = np.asarray(var_x, dtype=float)
+    D = len(c)
+    # Variance propagation for linear functions: Vi = c_j^2 * Var(x_j)
+    Vi = c**2 * var_x
+    VY = Vi.sum()
+
+    # Purely additive model => no interactions => S1 = ST and sum(S1) = 1
+    S1 = Vi / VY
+    ST = S1.copy()
+
+    # Diagonal is NaN by convention (S2_jj is undefined); off-diagonals are
+    # exactly zero because a purely additive model has no interactions.
+    S2 = np.zeros((D, D))
+    np.fill_diagonal(S2, np.nan)
+
+    return S1, ST, S2
+
+
 def analytical_indices(
     coeffs: tuple[float, ...] = DEFAULT_COEFFS,
     bounds: tuple[tuple[float, float], ...] = DEFAULT_BOUNDS,
@@ -69,26 +111,9 @@ def analytical_indices(
         all-zero off-diagonal with NaN on the diagonal.
     """
     c = np.asarray(coeffs, dtype=float)
-    D = len(c)
     # Var(Uniform[lo, hi]) = (hi - lo)^2 / 12
     var_x = np.array([(hi - lo) ** 2 / 12.0 for lo, hi in bounds])
-    # Variance propagation for linear functions: Vi = c_j^2 * Var(x_j)
-    Vi = c**2 * var_x
-    VY = Vi.sum()
-
-    # Purely additive model => no interactions => S1 = ST and sum(S1) = 1
-    S1 = Vi / VY
-    ST = S1.copy()
-
-    # Diagonal is NaN by convention (S2_jj is undefined); off-diagonals are
-    # exactly zero because a purely additive model has no interactions.
-    S2 = np.full((D, D), np.nan)
-    for j in range(D):
-        for k in range(j + 1, D):
-            S2[j, k] = 0.0
-            S2[k, j] = 0.0
-
-    return S1, ST, S2
+    return _additive_sobol_indices(c, var_x)
 
 
 ANALYTICAL_S1, ANALYTICAL_ST, ANALYTICAL_S2 = analytical_indices()

@@ -15,11 +15,12 @@ Useful for:
 
 import math
 
-import jax.numpy as jnp
 import numpy as np
 from jax import Array
 from scipy.stats import norm
 
+from gsax.benchmarks.linear import _additive_sobol_indices
+from gsax.benchmarks.linear import evaluate as _linear_evaluate
 from gsax.problem import GaussianInputSpec, Problem
 
 # Increasing weights (1, 2, 3) test whether the method correctly ranks
@@ -41,6 +42,10 @@ def evaluate(
 ) -> Array:
     """Evaluate the Gaussian linear additive model.
 
+    A weighted sum of the inputs, identical to
+    :func:`gsax.benchmarks.linear.evaluate`; kept here as a thin wrapper so the
+    Gaussian benchmark exposes ``evaluate`` under its own module namespace.
+
     .. math::
         f(\\mathbf{x}) = \\sum_{j=1}^{D} c_j \\, x_j
 
@@ -51,7 +56,7 @@ def evaluate(
     Returns:
         Array of shape ``(N,)`` with function values.
     """
-    return X @ jnp.asarray(coeffs)
+    return _linear_evaluate(X, coeffs)
 
 
 def analytical_indices(
@@ -77,25 +82,12 @@ def analytical_indices(
         ``(S1, ST, S2)`` where S1 == ST (no interactions) and S2 is
         all-zero off-diagonal with NaN on the diagonal.
     """
-    c = np.asarray(coeffs, dtype=float)
-    var_x = np.asarray(variances, dtype=float)
-    D = len(c)
-    # Variance propagation for linear functions: Vi = c_j^2 * Var(x_j)
-    Vi = c**2 * var_x
-    VY = Vi.sum()
-
-    S1 = Vi / VY
-    ST = S1.copy()
-
-    # Diagonal is NaN by convention (S2_jj is undefined); off-diagonals are
-    # exactly zero because a purely additive model has no interactions.
-    S2 = np.full((D, D), np.nan)
-    for j in range(D):
-        for k in range(j + 1, D):
-            S2[j, k] = 0.0
-            S2[k, j] = 0.0
-
-    return S1, ST, S2
+    # The Gaussian marginals feed their variances straight into the shared
+    # additive-model formula (the uniform benchmark derives var_x from bounds).
+    return _additive_sobol_indices(
+        np.asarray(coeffs, dtype=float),
+        np.asarray(variances, dtype=float),
+    )
 
 
 def _gaussian_l1(
@@ -104,7 +96,7 @@ def _gaussian_l1(
     mu2: np.ndarray,
     v2: float,
 ) -> np.ndarray:
-    """L1 distance between ``N(mu1, v1)`` and each ``N(mu2[k], v2)``, ``v1 != v2``.
+    """L1 distance between ``N(mu1, v1)`` and each ``N(mu2[k], v2)``.
 
     Two Gaussian densities with distinct variances cross at exactly two
     points (the roots of the quadratic obtained from equating log-densities);
@@ -112,16 +104,30 @@ def _gaussian_l1(
     densities integrate to one, the L1 distance is twice the absolute
     difference of the CDF increments over the crossing interval.
 
+    When the variances coincide (within a small relative tolerance) that
+    quadratic degenerates because ``a = 1/v1 - 1/v2 -> 0`` (its roots become
+    ``0/0 -> NaN``). Equal-variance Gaussians differ only in mean and cross
+    once, at the midpoint, so the L1 distance has the closed form
+    ``2 * (2 * Phi(|mu2 - mu1| / (2 * sqrt(v))) - 1)`` -- exactly 0 when the
+    means also coincide.
+
     Args:
         mu1: Mean of the first Gaussian.
         v1: Variance of the first Gaussian.
         mu2: Means of the second Gaussian (vectorized).
-        v2: Variance of the second Gaussian, distinct from ``v1``.
+        v2: Variance of the second Gaussian.
 
     Returns:
         Array of L1 distances, same shape as ``mu2``, each in ``[0, 2]``.
     """
     mu2 = np.asarray(mu2, dtype=float)
+
+    # Equal (or numerically indistinguishable) variances: the two-root formula
+    # below divides by a -> 0, so use the single-crossing closed form instead.
+    if abs(v1 - v2) <= 1e-9 * max(v1, v2):
+        s = math.sqrt(0.5 * (v1 + v2))
+        return 2.0 * (2.0 * norm.cdf(np.abs(mu2 - mu1) / (2.0 * s)) - 1.0)
+
     # Equate log-densities: (y-mu1)^2/v1 + ln v1 = (y-mu2)^2/v2 + ln v2
     a = 1.0 / v1 - 1.0 / v2
     b = -2.0 * (mu1 / v1 - mu2 / v2)
@@ -177,8 +183,10 @@ def analytical_delta(
 
     delta = np.zeros(len(c))
     for i, (ci, vi) in enumerate(zip(c, var_x)):
-        if ci == 0.0:
-            continue  # conditional == unconditional -> delta is exactly 0
+        if ci == 0.0 or vi == 0.0:
+            # A zero coefficient or a constant (zero-variance) input leaves the
+            # conditional density unchanged -> delta is exactly 0.
+            continue
         v_cond = var_y - ci**2 * vi
         if v_cond <= 0.0:
             # Y is a deterministic function of X_i alone: the conditional

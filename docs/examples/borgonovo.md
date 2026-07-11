@@ -47,8 +47,12 @@ print("delta:", result.delta)  # (3,)
 print("S1:   ", result.S1)     # (3,)
 ```
 
-The delta index is in [0, 1]: 0 means fixing the input never changes the
-output distribution, higher values mean stronger influence. On Ishigami,
+The delta index lies in [0, 1] (as do the true index and the raw plug-in
+estimate): 0 means fixing the input never changes the output distribution,
+higher values mean stronger influence. The default bias-corrected estimate
+returned in `result.delta` — and the bounds of `result.delta_conf` — can dip
+marginally below 0 for weak or near-noninfluential inputs at small N; that is
+expected from the bias correction, not an error. On Ishigami,
 `x3` has a first-order Sobol index near zero (it acts only through an
 interaction with `x1`), yet its delta index is clearly positive — fixing
 `x3` reshapes the output density even though it does not shift the

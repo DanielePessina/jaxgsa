@@ -6,7 +6,7 @@ import numpy as np
 import xarray as xr
 from jax import Array
 
-from gsax._normalization import _default_output_names
+from gsax._normalization import _dims_and_coords
 from gsax.problem import Problem
 
 
@@ -51,26 +51,9 @@ class DeltaResult:
             optionally ``delta_lower`` / ``delta_upper`` /
             ``S1_lower`` / ``S1_upper``.
         """
-        param_names = list(self.problem.names)
-        ndim = self.delta.ndim
-
-        if ndim == 1:
-            dims = ("param",)
-            coords: dict = {"param": param_names}
-        elif ndim == 2:
-            K = self.delta.shape[0]
-            onames = _default_output_names(K, self.problem)
-            dims = ("output", "param")
-            coords = {"output": onames, "param": param_names}
-        elif ndim == 3:
-            T = self.delta.shape[0]
-            K = self.delta.shape[1]
-            onames = _default_output_names(K, self.problem)
-            tcoords = list(time_coords) if time_coords is not None else list(range(T))
-            dims = ("time", "output", "param")
-            coords = {"time": tcoords, "output": onames, "param": param_names}
-        else:
-            raise ValueError(f"Unexpected delta.ndim={ndim}")
+        dims, coords = _dims_and_coords(
+            self.delta.ndim, self.delta.shape, self.problem, time_coords
+        )
 
         data_vars: dict = {
             "delta": (dims, np.asarray(self.delta)),

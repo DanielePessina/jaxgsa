@@ -412,7 +412,7 @@ Use it for:
 - parameter, field, and shape contracts
 - validation and error behavior
 - `to_dataset()` labeling rules
-- Sobol, RS-HDMR, PCE, eFAST, DGSM, HSIC, and PAWN workflow examples
+- Sobol, RS-HDMR, PCE, eFAST, DGSM, HSIC, PAWN, and Borgonovo delta workflow examples
 
 Quick map:
 
@@ -425,11 +425,12 @@ Quick map:
 - `gsax.dgsm`: `analyze` / `DGSMResult` / `poincare_constant` / `axis_constants`
 - `gsax.hsic`: `analyze` / `HSICResult`
 - `gsax.pawn`: `analyze` / `PAWNResult`
+- `gsax.borgonovo`: `analyze` / `DeltaResult`
 
 All symbols are also re-exported from the top-level `gsax` namespace
 (`gsax.analyze()`, `gsax.analyze_hdmr()`, `gsax.analyze_pce()`,
 `gsax.sample_efast()`, `gsax.analyze_efast()`, `gsax.analyze_dgsm()`,
-`gsax.analyze_hsic()`, `gsax.analyze_pawn()`, etc.).
+`gsax.analyze_hsic()`, `gsax.analyze_pawn()`, `gsax.analyze_borgonovo()`, etc.).
 
 For runnable walkthroughs, start with the
 [Getting Started guide](https://danielepessina.github.io/gsax/guide/getting-started)
@@ -456,7 +457,7 @@ See [LICENSE](LICENSE) for details.
 
 ## Benchmark Results
 
-gsax vs SALib on a coupled-oscillator model (D=5 parameters, N=1024 base samples), Apple M1 Pro CPU, JAX 0.10.2. Every timing is the best of 5 runs, except the slow SALib HDMR path (best of 2). gsax figures are post-JIT steady-state: the one-off XLA compile — roughly 0.3–1.1 s depending on scenario — is paid once per process and excluded here, whereas SALib (pure NumPy/SciPy) requires no compilation. Benchmarks cover the two methods with a direct SALib counterpart (Sobol and RS-HDMR); the other methods (PCE, eFAST, DGSM, HSIC, PAWN) are validated for correctness but not timed here.
+gsax vs SALib on a coupled-oscillator model (D=5 parameters, N=1024 base samples), Apple M1 Pro CPU, JAX 0.10.2. Every timing is the best of 5 runs, except the slow SALib HDMR path (best of 2). gsax figures are post-JIT steady-state: the one-off XLA compile — roughly 0.3–1.1 s depending on scenario — is paid once per process and excluded here, whereas SALib (pure NumPy/SciPy) requires no compilation. The timing tables below cover the two methods timed against SALib here (Sobol and RS-HDMR); the other methods (PCE, eFAST, DGSM, HSIC, PAWN, and Borgonovo delta) are validated for correctness but not timed here. Borgonovo delta also has a direct SALib counterpart, `SALib.analyze.delta`, and is validated against it in the test suite.
 
 ### Sobol — point estimates (no bootstrap)
 
