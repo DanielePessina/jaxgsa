@@ -6,7 +6,7 @@ import numpy as np
 import xarray as xr
 from jax import Array
 
-from gsax._normalization import _default_output_names
+from gsax._normalization import _dims_and_coords
 from gsax.problem import Problem
 
 
@@ -68,25 +68,8 @@ class SAResult:
             An ``xr.Dataset`` with variables ``S1``, ``ST``, and optionally
             ``S2``, ``S1_lower/upper``, ``ST_lower/upper``, ``S2_lower/upper``.
         """
+        dims_s1, coords = _dims_and_coords(self.S1.ndim, self.S1.shape, self.problem, time_coords)
         param_names = list(self.problem.names)
-        ndim = self.S1.ndim
-
-        if ndim == 1:
-            dims_s1 = ("param",)
-            coords: dict = {"param": param_names}
-        elif ndim == 2:
-            onames = _default_output_names(self.S1.shape[0], self.problem)
-            dims_s1 = ("output", "param")
-            coords = {"param": param_names, "output": onames}
-        elif ndim == 3:
-            T = self.S1.shape[0]
-            onames = _default_output_names(self.S1.shape[1], self.problem)
-            tcoords = list(time_coords) if time_coords is not None else list(range(T))
-            dims_s1 = ("time", "output", "param")
-            coords = {"param": param_names, "output": onames, "time": tcoords}
-        else:
-            msg = f"Unexpected S1.ndim={ndim}"
-            raise ValueError(msg)
 
         data_vars: dict = {
             "S1": (dims_s1, np.asarray(self.S1)),

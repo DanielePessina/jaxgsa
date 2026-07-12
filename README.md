@@ -28,7 +28,7 @@
   - Scalar outputs only
 - **Shapley effects** (Owen, 2014; Song, Nelson & Staum, 2016)
   - Fair, game-theoretic allocation of output variance — each interaction's variance split equally among its participants
-  - Computed **analytically** from a fitted RS-HDMR (default) or PCE surrogate: no permutation Monte Carlo, no extra model runs
+  - Computed **analytically** from a fitted PCE (default) or RS-HDMR surrogate: no permutation Monte Carlo, no extra model runs
   - Works with **any** set of (X, Y) pairs; returns Sh alongside S1 and ST from the same surrogate (S1 <= Sh <= ST)
   - Assumes independent inputs (v1); Sh sums to 1, and `explained_variance` reports the fraction of Var(Y) the surrogate captured
 - **eFAST** (Extended Fourier Amplitude Sensitivity Test)
@@ -202,7 +202,7 @@ Y_pred = gsax.emulate_pce(result, X)  # use the fit as an emulator
 
 Shapley effects split the output variance fairly among the inputs — each
 interaction's variance is shared equally by its participants — computed
-analytically from a fitted RS-HDMR (default) or PCE surrogate, with no
+analytically from a fitted PCE (default) or RS-HDMR surrogate, with no
 permutation Monte Carlo. Inputs are assumed independent in this version.
 
 ```python
@@ -213,7 +213,7 @@ from gsax.benchmarks.ishigami import PROBLEM, evaluate
 X = gsax.sample_mc(PROBLEM, N=2000, seed=42)
 Y = evaluate(jnp.asarray(X))
 
-result = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y)  # backend="hdmr" default
+result = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y)  # backend="pce" default
 print("Sh:", result.Sh)              # (D,) Shapley effects
 print("sum:", result.Sh.sum())       # == 1 (Shapley efficiency property)
 print("explained:", result.explained_variance)  # fraction of Var(Y) captured
@@ -515,7 +515,7 @@ See [LICENSE](LICENSE) for details.
 
 ## Benchmark Results
 
-gsax vs SALib on a coupled-oscillator model (D=5 parameters, N=1024 base samples), Apple M1 Pro CPU, JAX 0.10.2. Every timing is the best of 5 runs, except the slow SALib HDMR path (best of 2). gsax figures are post-JIT steady-state: the one-off XLA compile — roughly 0.3–1.1 s depending on scenario — is paid once per process and excluded here, whereas SALib (pure NumPy/SciPy) requires no compilation. The timing tables below cover the two methods timed against SALib here (Sobol and RS-HDMR); the other methods (PCE, eFAST, DGSM, HSIC, PAWN, and Borgonovo delta) are validated for correctness but not timed here. Borgonovo delta also has a direct SALib counterpart, `SALib.analyze.delta`, and is validated against it in the test suite.
+gsax vs SALib on a coupled-oscillator model (D=5 parameters, N=1024 base samples), Apple M1 Pro CPU, JAX 0.10.2. Every timing is the best of 5 runs, except the slow SALib HDMR path (best of 2). gsax figures are post-JIT steady-state: the one-off XLA compile — roughly 0.3–1.1 s depending on scenario — is paid once per process and excluded here, whereas SALib (pure NumPy/SciPy) requires no compilation. The timing tables below cover the two methods timed against SALib here (Sobol and RS-HDMR); the other methods (PCE, Shapley, eFAST, DGSM, Morris, HSIC, PAWN, and Borgonovo delta) are validated for correctness but not timed here. Borgonovo delta also has a direct SALib counterpart, `SALib.analyze.delta`, and is validated against it in the test suite.
 
 ### Sobol — point estimates (no bootstrap)
 

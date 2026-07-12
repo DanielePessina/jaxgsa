@@ -1,7 +1,7 @@
 # API Reference
 
 This is the canonical reference for the exported `gsax` surface. The package has
-eight workflows:
+ten workflows:
 
 - Sobol: `sample()` -> `analyze()`
 - RS-HDMR: `analyze_hdmr()` -> `emulate_hdmr()`
@@ -24,7 +24,7 @@ Related docs:
 
 ## Package Structure
 
-Since v0.6.0, `gsax` is organized into subpackages:
+`gsax` is organized into subpackages:
 
 | Subpackage | Contents |
 | --- | --- |
@@ -948,10 +948,10 @@ Related links:
 
 Compute Shapley effects — a fair, game-theoretic allocation of output variance
 across inputs (Owen, 2014; Song, Nelson & Staum, 2016) — analytically from the
-variance decomposition of a fitted surrogate. The default backend fits an
-RS-HDMR B-spline surrogate and allocates its structural component-function
-variances; the PCE backend groups squared orthonormal polynomial coefficients
-by multi-index support (Sudret, 2008).
+variance decomposition of a fitted surrogate. The default PCE backend groups
+squared orthonormal polynomial coefficients by multi-index support
+(Sudret, 2008); the HDMR backend fits an RS-HDMR B-spline surrogate and
+allocates its structural component-function variances.
 
 ```python
 def analyze_shapley(
@@ -959,7 +959,7 @@ def analyze_shapley(
     X: Array,
     Y: Array,
     *,
-    backend: Literal["hdmr", "pce"] = "hdmr",
+    backend: Literal["hdmr", "pce"] = "pce",
     # HDMR-only knobs (None -> backend default):
     prenormalize: bool | None = None,
     maxorder: int | None = None,
@@ -979,7 +979,7 @@ def analyze_shapley(
 | `problem` | `Problem` | required | Parameter names and distributions. |
 | `X` | `Array` | required | Input array with shape `(N, D)` (given-data; no structured design needed). |
 | `Y` | `Array` | required | Output array. `backend="hdmr"`: `(N,)`, `(N, K)`, or `(N, T, K)`. `backend="pce"`: `(N,)` scalar only. |
-| `backend` | `Literal["hdmr", "pce"]` | `"hdmr"` | Surrogate whose variance decomposition is allocated. |
+| `backend` | `Literal["hdmr", "pce"]` | `"pce"` | Surrogate whose variance decomposition is allocated. |
 | `prenormalize` | `bool \| None` | `None` (`False`) | HDMR only. SALib-style output standardization before fitting. |
 | `maxorder` | `int \| None` | `None` (`2`) | HDMR only. Maximum HDMR expansion order. |
 | `maxiter` | `int \| None` | `None` (`100`) | HDMR only. Maximum backfitting iterations. |
@@ -997,8 +997,8 @@ Validation and behavior:
   with `order=4`). Knobs left as `None` fall back to the backend defaults
   shown in parentheses.
 - `X.shape[1]` must match `problem.num_vars`.
-- With `backend="pce"`, `Y` must be 1D. Multi-output and time-series outputs
-  require `backend="hdmr"`.
+- With `backend="pce"` (the default), `Y` must be 1D. Multi-output and
+  time-series outputs require `backend="hdmr"`.
 - Shapley effects are computed **analytically** from the surrogate's variance
   decomposition — no permutation Monte Carlo. Each partial variance $V_u$ is
   split equally among the $|u|$ parameters in its interaction set:
@@ -1025,7 +1025,7 @@ Validation and behavior:
   polynomial order is silently reduced to fit the sample budget.
 - A constant / zero-variance output yields `NaN` indices for **both** backends,
   plus the standard zero-variance `UserWarning`.
-- The default `backend="hdmr"` inherits `analyze_hdmr`'s constraints: at least
+- `backend="hdmr"` inherits `analyze_hdmr`'s constraints: at least
   300 samples are required (else `ValueError`), `maxorder` must be in
   `{1, 2, 3}`, `maxorder` is clamped with a warning when `D < maxorder`, and a
   2-D `Y` is always interpreted as `(N, K)` — a single-output time series must
@@ -1053,8 +1053,8 @@ print(result.explained_variance)  # sum_u V_u / Var(Y) — surrogate fit quality
 print(result.S1)                  # (3,) — first-order, same surrogate
 print(result.ST)                  # (3,) — total-order, same surrogate
 
-# PCE backend with PCE-only knobs
-result_pce = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y, backend="pce", order=4)
+# HDMR backend (multi-output / time-series Y) with HDMR-only knobs
+result_hdmr = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y, backend="hdmr", maxorder=2)
 ```
 
 <a id="shapleyresult"></a>

@@ -17,6 +17,7 @@ from gsax._normalization import (
     _prenormalize_outputs,
     _prepare_Y,
     _squeeze_output_axes,
+    _validate_xy_inputs,
     _warn_zero_variance_slices,
 )
 from gsax._transforms import cdf_to_unit_interval
@@ -210,9 +211,8 @@ def analyze_hdmr(
     X = jnp.asarray(X)
     Y = jnp.asarray(Y)
 
+    _validate_xy_inputs(problem, X, Y)
     N, D = X.shape
-    if D != problem.num_vars:
-        raise ValueError(f"X has {D} columns but problem defines {problem.num_vars} parameters")
     # B-spline regression with backfitting needs a reasonable sample size
     # to avoid overfitting; 300 is a practical lower bound.
     if N < 300:

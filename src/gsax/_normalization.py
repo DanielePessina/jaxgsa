@@ -29,6 +29,25 @@ def _default_output_names(K: int, problem: Problem) -> list[str]:
     return [f"y{i}" for i in range(K)]
 
 
+def _validate_x(problem: Problem, X: Array) -> None:
+    """Validate the shared ``(N, D)`` input-matrix contract.
+
+    Args:
+        problem: Problem definition with ``num_vars`` parameters.
+        X: Input sample matrix, expected shape ``(N, D)``.
+
+    Raises:
+        ValueError: If X is not 2-D or its column count does not match the
+            problem.
+    """
+    if X.ndim != 2:
+        raise ValueError(f"X must be 2-D (N, D), got ndim={X.ndim}")
+    if X.shape[1] != problem.num_vars:
+        raise ValueError(
+            f"X has {X.shape[1]} columns but problem has {problem.num_vars} parameters"
+        )
+
+
 def _validate_xy_inputs(problem: Problem, X: Array, Y: Array) -> None:
     """Validate the shared ``(problem, X, Y)`` contract of given-data methods.
 
@@ -42,12 +61,7 @@ def _validate_xy_inputs(problem: Problem, X: Array, Y: Array) -> None:
             problem, Y is not 1-D/2-D/3-D, or X and Y have differing row
             counts.
     """
-    if X.ndim != 2:
-        raise ValueError(f"X must be 2-D (N, D), got ndim={X.ndim}")
-    if X.shape[1] != problem.num_vars:
-        raise ValueError(
-            f"X has {X.shape[1]} columns but problem has {problem.num_vars} parameters"
-        )
+    _validate_x(problem, X)
     if Y.ndim not in (1, 2, 3):
         raise ValueError(f"Y must be 1-D (N,), 2-D (N, K), or 3-D (N, T, K), got ndim={Y.ndim}")
     if X.shape[0] != Y.shape[0]:

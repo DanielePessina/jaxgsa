@@ -7,7 +7,7 @@ import warnings
 import jax.numpy as jnp
 from jax import Array
 
-from gsax._normalization import _warn_zero_variance_slices
+from gsax._normalization import _validate_x, _warn_zero_variance_slices
 from gsax.pce._engine import (
     build_design_matrix,
     build_multi_index,
@@ -103,9 +103,8 @@ def analyze_pce(
             f"PCE currently supports scalar output only (Y.ndim must be 1), got {Y.ndim}"
         )
 
+    _validate_x(problem, X)
     N, D = X.shape
-    if D != problem.num_vars:
-        raise ValueError(f"X has {D} columns but problem defines {problem.num_vars} parameters")
 
     # A constant output makes every index 0/0 = NaN; warn once up front.
     _warn_zero_variance_slices(Y)

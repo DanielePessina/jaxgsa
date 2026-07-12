@@ -22,10 +22,10 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
-from gsax._normalization import _prenormalize_outputs, _prepare_Y
+from gsax._bootstrap import _bootstrap_ci_endpoints
+from gsax._normalization import _prenormalize_outputs, _prepare_Y, _squeeze_output_axes
 from gsax.morris._result import MorrisResult
 from gsax.morris._sampling import MorrisSamplingResult
-from gsax.sobol._analyze import _bootstrap_ci_endpoints
 
 # Minimum trajectories for statistically meaningful screening measures;
 # only enforced as a warning when non-finite cleaning shrinks the design.
@@ -167,15 +167,6 @@ def _expand_unique_outputs(sampling_result: MorrisSamplingResult, Y: Array) -> A
     return jnp.take(Y, expanded_to_unique, axis=0)
 
 
-def _squeeze_stat(arr: Array, squeeze_time: bool, squeeze_output: bool) -> Array:
-    """Remove singleton T and/or K dimensions that _prepare_Y inserted."""
-    if squeeze_time and squeeze_output:
-        return arr[..., 0, 0, :]
-    if squeeze_time:
-        return arr[..., 0, :, :]
-    return arr
-
-
 def analyze(
     sampling_result: MorrisSamplingResult,
     Y: Array,
@@ -241,6 +232,10 @@ def analyze(
             is invalid; if ``num_resamples > 0`` but ``key`` is ``None``; or
             if ``chunk_size < 1``.
     """
+    if ci_method not in {"quantile", "gaussian"}:
+        raise ValueError("ci_method must be one of {'quantile', 'gaussian'}")
+    if chunk_size < 1:
+        raise ValueError(f"chunk_size must be >= 1, got {chunk_size}")
     Y = jnp.asarray(Y)
     if Y.ndim not in (1, 2, 3):
         raise ValueError(
@@ -292,9 +287,6 @@ def analyze(
             stacklevel=2,
         )
 
-    if ci_method not in {"quantile", "gaussian"}:
-        raise ValueError("ci_method must be one of {'quantile', 'gaussian'}")
-
     ee = _elementary_effects(Y, idx_after, idx_before, delta)  # (r, D, T, K)
     mu, mu_star, sigma = _stats_from_ee(ee)  # each (T, K, D)
 
@@ -306,8 +298,6 @@ def analyze(
         # Pre-generate all R bootstrap index sets (sampling with replacement)
         indices = jax.random.randint(key, shape=(num_resamples, r), minval=0, maxval=r)
 
-        if chunk_size < 1:
-            raise ValueError(f"chunk_size must be >= 1, got {chunk_size}")
         # Cap the batch by both the user's chunk_size and an element budget:
         # one chunk materialises cs copies of the (r, D, T, K) effects tensor,
         # so large T*K would otherwise blow past device memory at chunk_size.
@@ -342,13 +332,13 @@ def analyze(
             conf_pairs.append(jnp.stack([lower, upper]))
         mu_conf, mu_star_conf, sigma_conf = conf_pairs
 
-    mu = _squeeze_stat(mu, squeeze_time, squeeze_output)
-    mu_star = _squeeze_stat(mu_star, squeeze_time, squeeze_output)
-    sigma = _squeeze_stat(sigma, squeeze_time, squeeze_output)
+    mu = _squeeze_output_axes(mu, squeeze_time, squeeze_output)
+    mu_star = _squeeze_output_axes(mu_star, squeeze_time, squeeze_output)
+    sigma = _squeeze_output_axes(sigma, squeeze_time, squeeze_output)
     if mu_conf is not None and mu_star_conf is not None and sigma_conf is not None:
-        mu_conf = _squeeze_stat(mu_conf, squeeze_time, squeeze_output)
-        mu_star_conf = _squeeze_stat(mu_star_conf, squeeze_time, squeeze_output)
-        sigma_conf = _squeeze_stat(sigma_conf, squeeze_time, squeeze_output)
+        mu_conf = _squeeze_output_axes(mu_conf, squeeze_time, squeeze_output)
+        mu_star_conf = _squeeze_output_axes(mu_star_conf, squeeze_time, squeeze_output)
+        sigma_conf = _squeeze_output_axes(sigma_conf, squeeze_time, squeeze_output)
 
     return MorrisResult(
         mu=mu,

@@ -50,6 +50,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from gsax._bootstrap import _percentile_ci
 from gsax._normalization import _prepare_Y, _squeeze_output_axes, _validate_xy_inputs
 from gsax.borgonovo._result import DeltaResult
 from gsax.problem import Problem
@@ -384,13 +385,11 @@ def analyze(
             d_reps = d_boot
             delta = d_hat
 
-        alpha = (1.0 - conf_level) / 2.0
-        percentiles = jnp.array([alpha * 100, (1.0 - alpha) * 100])
         delta_conf = _squeeze_output_axes(
-            jnp.nanpercentile(d_reps, percentiles, axis=0), squeeze_time, squeeze_output
+            _percentile_ci(d_reps, conf_level), squeeze_time, squeeze_output
         )
         S1_conf = _squeeze_output_axes(
-            jnp.nanpercentile(s1_boot, percentiles, axis=0), squeeze_time, squeeze_output
+            _percentile_ci(s1_boot, conf_level), squeeze_time, squeeze_output
         )
     else:
         delta = d_hat

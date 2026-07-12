@@ -19,6 +19,7 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
+from gsax._normalization import _validate_x
 from gsax.dgsm._poincare import axis_constants
 from gsax.dgsm._result import DGSMResult
 from gsax.problem import Problem
@@ -130,10 +131,7 @@ def analyze(
 
     if fn is not None and X is not None:
         X = jnp.asarray(X)
-        if X.ndim != 2:
-            raise ValueError(f"X must be 2-D (N, D), got ndim={X.ndim}")
-        if X.shape[1] != D:
-            raise ValueError(f"X has {X.shape[1]} columns but problem has {D} parameters")
+        _validate_x(problem, X)
         Y_out, sigma, nu = _compute_moments(fn, X, chunk_size=chunk_size)
     elif Y is not None and dfdx is not None:
         # Pre-computed path: user supplies Jacobian and forward outputs directly

@@ -25,9 +25,9 @@
   Shapley-value allocation of output variance across inputs (Owen 2014;
   Song, Nelson & Staum 2016), computed analytically from a fitted surrogate's
   variance decomposition instead of permutation Monte Carlo. Two backends:
-  `"hdmr"` (default; RS-HDMR component-function variances, supports scalar,
-  multi-output, and time-series outputs) and `"pce"` (subset variances read
-  off orthonormal polynomial coefficients, scalar outputs). Indices are
+  `"pce"` (default; subset variances read off orthonormal polynomial
+  coefficients, scalar outputs) and `"hdmr"` (RS-HDMR component-function
+  variances, supports scalar, multi-output, and time-series outputs). Indices are
   normalized by the surrogate's total decomposed variance, so `Sh` sums to
   exactly 1 (the Shapley efficiency property); the `explained_variance` field
   reports the fraction of `Var(Y)` the surrogate captured, and the `order`
@@ -58,6 +58,20 @@
 - `analyze_pce` now emits a `UserWarning` when the requested polynomial
   `order` is automatically reduced to fit the sample budget, and warns on a
   constant (zero-variance) output.
+- Input-validation errors are now uniform across methods: RS-HDMR, PCE, and
+  DGSM share the same `X`/`Y` contract checks (and error messages) as the
+  given-data methods, and RS-HDMR now also rejects `X`/`Y` row-count
+  mismatches up front.
+
+### Internal
+
+- Bootstrap confidence-interval helpers moved to a shared `gsax._bootstrap`
+  module (previously private to `gsax.sobol` and cross-imported by Morris);
+  PAWN and Borgonovo now reuse the same percentile-CI implementation.
+- All result classes (`SAResult`, `EFASTResult`, `MorrisResult`,
+  `ShapleyResult`) now build their `to_dataset()` dims/coords through the
+  shared `_dims_and_coords` helper instead of hand-rolling the
+  `param`/`output`/`time` schema.
 
 ## 0.1.2
 

@@ -31,6 +31,7 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
+from gsax._bootstrap import _percentile_ci
 from gsax._normalization import _prepare_Y, _squeeze_output_axes, _validate_xy_inputs
 from gsax._transforms import cdf_to_unit_interval
 from gsax.pawn._result import PAWNResult
@@ -254,9 +255,7 @@ def analyze(
             boot_draws.append(boot_pawn)
 
         boot_stack = jnp.stack(boot_draws, axis=0)
-        alpha = (1.0 - conf_level) / 2.0
-        percentiles = jnp.array([alpha * 100, (1.0 - alpha) * 100])
-        pawn_conf_3d = jnp.nanpercentile(boot_stack, percentiles, axis=0)
+        pawn_conf_3d = _percentile_ci(boot_stack, conf_level)
 
         pawn_conf = _squeeze_output_axes(pawn_conf_3d, squeeze_time, squeeze_output)
 

@@ -13,8 +13,11 @@ keywords = [
     "sobol",
     "hdmr",
     "pce",
+    "shapley",
+    "morris",
     "hsic",
     "pawn",
+    "borgonovo",
     "jax",
     "uncertainty-quantification",
 ]

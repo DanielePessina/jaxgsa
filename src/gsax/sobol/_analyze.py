@@ -21,6 +21,7 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
+from gsax._bootstrap import _bootstrap_ci_endpoints
 from gsax._normalization import _prenormalize_outputs, _prepare_Y, _warn_zero_variance_slices
 from gsax.sampling import SamplingResult, _saltelli_step
 from gsax.sobol._indices import (
@@ -112,33 +113,6 @@ def _count_nans(
         upper = jnp.triu(jnp.ones((*S2.shape[:-2], D, D), dtype=bool), k=1)
         counts["S2"] = int(jnp.sum(jnp.isnan(S2) & upper))
     return counts
-
-
-def _bootstrap_ci_endpoints(
-    estimate: Array,
-    bootstrap_draws: Array,
-    *,
-    conf_level: float,
-    ci_method: Literal["quantile", "gaussian"],
-) -> tuple[Array, Array]:
-    """Convert bootstrap draws into lower and upper endpoint arrays."""
-    # Split the two-tailed CI: e.g. conf_level=0.95 -> alpha=0.025 per tail
-    alpha = (1.0 - conf_level) / 2.0
-    if ci_method == "quantile":
-        # Non-parametric: read endpoints directly from the empirical bootstrap
-        # distribution.  No normality assumption, but needs enough resamples.
-        percentiles = jnp.array([alpha * 100, (1.0 - alpha) * 100])
-        endpoints = jnp.nanpercentile(bootstrap_draws, percentiles, axis=0)
-        return endpoints[0], endpoints[1]
-
-    # Parametric (Gaussian) CI: assumes the bootstrap distribution is normal.
-    # ndtri is the inverse normal CDF (quantile function): z = Phi^-1(1-alpha/2).
-    # CI = estimate +/- z * sigma_boot.  nanstd tolerates degenerate bootstrap
-    # resamples that collapse to a single unique value and produce NaN.
-    z_score = jax.scipy.special.ndtri(1.0 - alpha)
-    bootstrap_sd = jnp.nanstd(bootstrap_draws, axis=0, ddof=1)
-    half_width = z_score * bootstrap_sd
-    return estimate - half_width, estimate + half_width
 
 
 def _separate_output_values(

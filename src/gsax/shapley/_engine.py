@@ -43,8 +43,9 @@ def shapley_from_variances(
 
     Args:
         V: ``(..., n_terms)`` variance fraction of each modelled ANOVA term,
-            already normalized by the total output variance. Leading
-            dimensions (output, time) are batched through unchanged.
+            already normalized so the modelled terms sum to 1 (divided by the
+            total decomposed variance ``sum_u V_u``). Leading dimensions
+            (output, time) are batched through unchanged.
         membership: ``(n_terms, D)`` boolean membership matrix from
             :func:`build_membership`.
 

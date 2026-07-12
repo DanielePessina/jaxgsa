@@ -197,8 +197,8 @@ so a main-effect variance $V_i$ is attributed entirely to parameter $i$, a pairw
 
 gsax computes Shapley effects **analytically** from a fitted surrogate's variance decomposition — no permutation Monte Carlo, no conditional-variance sampling, and no external `shap` dependency:
 
-- **`backend="hdmr"`** (default) fits the RS-HDMR B-spline surrogate and uses the structural ($S_a$) variances of its component functions as the partial variances $V_u$, truncated at `maxorder`.
-- **`backend="pce"`** fits a polynomial chaos expansion and groups the squared orthonormal coefficients by the support of their multi-index (Sudret, 2008) — exact within the fitted polynomial.
+- **`backend="pce"`** (default) fits a polynomial chaos expansion and groups the squared orthonormal coefficients by the support of their multi-index (Sudret, 2008) — exact within the fitted polynomial. Scalar outputs only.
+- **`backend="hdmr"`** fits the RS-HDMR B-spline surrogate and uses the structural ($S_a$) variances of its component functions as the partial variances $V_u$, truncated at `maxorder`. Supports multi-output and time-series `Y`.
 
 Normalization is by the surrogate's **total decomposed variance** $\sum_u V_u$, so $\sum_i \mathrm{Sh}_i = 1$ exactly — the Shapley efficiency property (Owen, 2014). $S_1$ and $S_T$ from the same surrogate use the same denominator, so for `backend="pce"` they match `analyze_pce` exactly, while for `backend="hdmr"` they differ from `analyze_hdmr` (which normalizes by $\mathrm{Var}(Y)$) by a factor of `explained_variance`. How much of the *output* variance the surrogate actually captured is reported separately in the `explained_variance` field, $\sum_u V_u / \mathrm{Var}(Y)$: close to 1 for a good fit, below 1 when truncation or fit error leaves variance unexplained, and above 1 when an overfit surrogate over-counts shared variance — an honest diagnostic rather than a silently renormalized result. A `UserWarning` is emitted when it strays far from 1. Interactions above `maxorder` (HDMR) or the polynomial order (PCE) are absent from the allocation.
 
@@ -216,7 +216,7 @@ from gsax.benchmarks.ishigami import PROBLEM, evaluate
 X = gsax.sample_mc(PROBLEM, N=2000, seed=42)
 Y = evaluate(jnp.asarray(X))
 
-# HDMR backend (default) — supports scalar, multi-output, time-series Y
+# PCE backend (default) — exact within the fitted polynomial, scalar Y only
 result = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y)
 print("Sh:", result.Sh)              # (D,) Shapley effects
 print("sum:", result.Sh.sum())       # == 1 (Shapley efficiency property)
@@ -225,8 +225,8 @@ print("order:", result.order)        # effective surrogate order used
 print("S1:", result.S1)              # first-order, same surrogate
 print("ST:", result.ST)              # total-order, same surrogate
 
-# PCE backend — scalar Y only, PCE-only knobs
-result_pce = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y, backend="pce", order=4)
+# HDMR backend — supports scalar, multi-output, time-series Y; HDMR-only knobs
+result_hdmr = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y, backend="hdmr", maxorder=2)
 ```
 
 Backend-specific keyword arguments are validated: explicitly setting a knob that belongs to the non-selected backend (e.g. `backend="pce"` with `maxorder=3`) raises `ValueError`.
@@ -579,7 +579,7 @@ $$
 
 The plug-in estimate is **biased upward** at finite $N$, so by default gsax applies Plischke's bootstrap bias reduction $2\hat{\delta}_i - \overline{\hat{\delta}_i^{(b)}}$ over `n_bootstrap` resamples, with percentile confidence intervals from the same replicates. Because this correction subtracts a bootstrap mean from twice the plug-in estimate, the reported $\delta$ (and its percentile-interval bounds) can fall marginally below $0$ for weak or near-noninfluential inputs at small $N$, even though the true index and the plug-in estimate both lie in $[0, 1]$. The same class partition also yields the **given-data first-order Sobol index** (variance of the class means over the total variance) at negligible extra cost, so every analysis returns both $\delta$ and $S_1$.
 
-The estimator matches `SALib.analyze.delta` (same equal-frequency rank partition, class-count heuristic, Silverman KDE factors, and 100-point output grid) with two differences: the central estimate is computed on the original sample — deterministic given the data, where SALib evaluates it on a random resample — and a constant output column yields $\delta = S_1 = 0$ instead of an error.
+The estimator matches `SALib.analyze.delta` (same equal-frequency rank partition, class-count heuristic, Silverman KDE factors, and 100-point output grid) with three differences: the central estimate is computed on the original sample — deterministic given the data, where SALib evaluates it on a random resample; a constant output column yields $\delta = S_1 = 0$ instead of an error; and a bootstrap replicate that happens to be constant (reachable for rare-event outputs) contributes the point estimate rather than a spurious zero, where SALib raises `LinAlgError`.
 
 ### How to use it
 
@@ -622,7 +622,7 @@ Set `n_bootstrap=0` to skip bias correction and confidence intervals (raw plug-i
 
 ## Output Shapes
 
-Sobol, HDMR, eFAST, Shapley (with the default HDMR backend), and Morris all support scalar, multi-output, and time-series outputs. The shape of `Y` determines the shape of all returned index arrays (for Morris, read `S1 / ST` as `mu / mu_star / sigma`; Morris has no S2):
+Sobol, HDMR, eFAST, Shapley (with the `hdmr` backend), and Morris all support scalar, multi-output, and time-series outputs. The shape of `Y` determines the shape of all returned index arrays (for Morris, read `S1 / ST` as `mu / mu_star / sigma`; Morris has no S2):
 
 | Y shape | S1 / ST shape | S2 shape |
 |---------|---------------|----------|

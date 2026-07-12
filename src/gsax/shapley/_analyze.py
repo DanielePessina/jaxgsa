@@ -84,7 +84,7 @@ def analyze_shapley(
     X: Array,
     Y: Array,
     *,
-    backend: Literal["hdmr", "pce"] = "hdmr",
+    backend: Literal["hdmr", "pce"] = "pce",
     prenormalize: bool | None = None,
     maxorder: int | None = None,
     maxiter: int | None = None,
@@ -131,12 +131,13 @@ def analyze_shapley(
     Args:
         problem: Parameter names and distributions.
         X: (N, D) input samples.
-        Y: Model outputs. ``backend="hdmr"`` accepts (N,), (N, K), or
-            (N, T, K); ``backend="pce"`` accepts scalar (N,) only.
+        Y: Model outputs. ``backend="pce"`` accepts scalar (N,) only;
+            ``backend="hdmr"`` accepts (N,), (N, K), or (N, T, K).
         backend: Surrogate providing the variance decomposition.
-            ``"hdmr"`` (default) fits B-spline component functions and
-            supports all output shapes; ``"pce"`` reads subset variances
-            off orthonormal polynomial coefficients (Sudret, 2008).
+            ``"pce"`` (default) reads subset variances off orthonormal
+            polynomial coefficients (Sudret, 2008) — exact for the fitted
+            polynomial, scalar outputs only; ``"hdmr"`` fits B-spline
+            component functions and supports all output shapes.
         prenormalize: HDMR-only; see ``analyze_hdmr``. Defaults to False.
         maxorder: HDMR-only; maximum expansion order (1-3). Defaults to 2.
         maxiter: HDMR-only; backfitting iterations. Defaults to 100.
@@ -153,8 +154,9 @@ def analyze_shapley(
         surrogate ``order``, the problem, and the backend name.
 
     Raises:
-        ValueError: If ``backend`` is unknown, or a kwarg belonging to the
-            non-selected backend is explicitly set.
+        ValueError: If ``backend`` is unknown, a kwarg belonging to the
+            non-selected backend is explicitly set, or ``backend="pce"``
+            (the default) is given a non-scalar ``Y``.
     """
     resolved = _resolve_backend_kwargs(
         backend,
@@ -186,10 +188,18 @@ def analyze_shapley(
         membership = build_membership(subsets, problem.num_vars)
         # Sa_j = Var(f_j)/Var(Y): partial variances already divided by Var(Y),
         # so their sum over terms is the explained-variance fraction directly.
+        # No zero-variance guard needed here: _ancova already emits NaN Sa for
+        # constant output slices, which propagates through the sum.
         partial = result.Sa
         explained_variance = partial.sum(axis=-1)
         effective_order = emulator["maxorder"]
     else:
+        if jnp.asarray(Y).ndim != 1:
+            raise ValueError(
+                f"backend='pce' supports scalar (N,) outputs only, got Y.ndim="
+                f"{jnp.asarray(Y).ndim}; use backend='hdmr' for multi-output "
+                "or time-series Y"
+            )
         pce_result = analyze_pce(problem, X, Y, **resolved)
         # Orthonormality makes each squared coefficient a partial variance;
         # the constant term (row 0) carries none. multi_index[1:] > 0 IS the
