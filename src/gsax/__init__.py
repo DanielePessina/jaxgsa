@@ -1,4 +1,6 @@
 from gsax._config import enable_compilation_cache
+from gsax.borgonovo import DeltaResult
+from gsax.borgonovo import analyze as analyze_borgonovo
 from gsax.dgsm import DGSMResult
 from gsax.dgsm import analyze as analyze_dgsm
 from gsax.efast import EFASTResult
@@ -20,6 +22,7 @@ from gsax.sobol import SAResult, analyze
 
 __all__ = [
     "DGSMResult",
+    "DeltaResult",
     "EFASTResult",
     "GaussianInputSpec",
     "HDMREmulator",
@@ -32,6 +35,7 @@ __all__ = [
     "SamplingResult",
     "UniformInputSpec",
     "analyze",
+    "analyze_borgonovo",
     "analyze_dgsm",
     "analyze_efast",
     "analyze_hdmr",

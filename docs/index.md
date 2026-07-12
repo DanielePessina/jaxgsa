@@ -4,7 +4,7 @@ layout: home
 hero:
   name: gsax
   text: Global Sensitivity Analysis in JAX
-  tagline: GPU-accelerated Sobol indices, RS-HDMR, PCE, eFAST, and DGSM with JIT compilation, vectorized bootstrap, and multi-output support.
+  tagline: GPU-accelerated Sobol indices, RS-HDMR, PCE, eFAST, DGSM, HSIC, PAWN, and Borgonovo delta with JIT compilation, vectorized bootstrap, and multi-output support.
   actions:
     - theme: brand
       text: Get Started
@@ -24,6 +24,12 @@ features:
     details: Extended Fourier Amplitude Sensitivity Test. Frequency-based S1 and ST via sinusoidal search curves. Supports scalar, multi-output, and time-series outputs.
   - title: DGSM
     details: Derivative-based Global Sensitivity Measures via JAX autodiff. Computes Poincare upper bounds and Kucherenko-Song lower bounds on total Sobol index ST.
+  - title: HSIC
+    details: Kernel-based dependence via the Hilbert–Schmidt Independence Criterion. Detects nonlinear, non-monotone, and heteroscedastic dependence with permutation p-values; works with any (X, Y) pairs.
+  - title: PAWN
+    details: Moment-independent, CDF-based sensitivity via Kolmogorov–Smirnov distances between the unconditional and conditional output distributions.
+  - title: Borgonovo Delta
+    details: Moment-independent, density-based importance measure (Borgonovo, 2007). The Plischke et al. (2013) given-data estimator returns the delta index plus the given-data first-order Sobol S1 from any (X, Y) pairs, with bootstrap bias correction and confidence intervals.
   - title: Save & Reload Samples
     details: Persist unique sample matrices plus Saltelli reconstruction metadata with `SamplingResult.save()` and reload them later with `gsax.load()`.
   - title: Multi-Output & Time-Series

@@ -24,7 +24,13 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from gsax._normalization import _prenormalize_outputs, _prepare_Y, _warn_zero_variance_slices
+from gsax._normalization import (
+    _prenormalize_outputs,
+    _prepare_Y,
+    _squeeze_output_axes,
+    _validate_xy_inputs,
+    _warn_zero_variance_slices,
+)
 from gsax._transforms import cdf_to_unit_interval
 from gsax.hsic._result import HSICResult
 from gsax.problem import Problem
@@ -392,12 +398,7 @@ def analyze(
         raise ValueError(f"n_perms must be >= 1, got {n_perms}")
     if bandwidth is not None and (bandwidth <= 0 or not math.isfinite(bandwidth)):
         raise ValueError(f"bandwidth must be positive and finite, got {bandwidth}")
-    if X.ndim != 2:
-        raise ValueError(f"X must be 2-D (N, D), got ndim={X.ndim}")
-    if X.shape[1] != D:
-        raise ValueError(f"X has {X.shape[1]} columns but problem has {D} parameters")
-    if X.shape[0] != Y.shape[0]:
-        raise ValueError(f"X has {X.shape[0]} rows but Y has {Y.shape[0]} rows")
+    _validate_xy_inputs(problem, X, Y)
     if X.shape[0] < _MIN_SAMPLES:
         raise ValueError(f"N must be >= {_MIN_SAMPLES} for HSIC, got {X.shape[0]}")
 
@@ -451,16 +452,10 @@ def analyze(
             p_all = p_all.at[t, k].set(p_vals)
             raw_all = raw_all.at[t, k].set(raw)
 
-    if squeeze_time and squeeze_output:
-        r2_all = r2_all[0, 0]
-        t_all = t_all[0, 0]
-        p_all = p_all[0, 0]
-        raw_all = raw_all[0, 0]
-    elif squeeze_time:
-        r2_all = r2_all[0]
-        t_all = t_all[0]
-        p_all = p_all[0]
-        raw_all = raw_all[0]
+    r2_all = _squeeze_output_axes(r2_all, squeeze_time, squeeze_output)
+    t_all = _squeeze_output_axes(t_all, squeeze_time, squeeze_output)
+    p_all = _squeeze_output_axes(p_all, squeeze_time, squeeze_output)
+    raw_all = _squeeze_output_axes(raw_all, squeeze_time, squeeze_output)
 
     return HSICResult(
         R2_HSIC=r2_all,

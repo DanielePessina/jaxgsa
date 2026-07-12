@@ -21,6 +21,7 @@ CLASS_FILES = {
     "DGSMResult": ROOT / "src" / "gsax" / "dgsm" / "_result.py",
     "PAWNResult": ROOT / "src" / "gsax" / "pawn" / "_result.py",
     "HSICResult": ROOT / "src" / "gsax" / "hsic" / "_result.py",
+    "DeltaResult": ROOT / "src" / "gsax" / "borgonovo" / "_result.py",
 }
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 HTML_ID_RE = re.compile(r'<a\s+id="([^"]+)"', re.IGNORECASE)

@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `gsax.borgonovo` subpackage — moment-independent, density-based sensitivity via
+  the Plischke, Borgonovo & Smith (2013) given-data estimator of Borgonovo's
+  (2007) delta index. `analyze` (top-level alias `analyze_borgonovo`) returns both
+  the delta index and the given-data first-order Sobol `S1` from the same
+  rank-class partition, with bootstrap bias correction (`2*d_hat - mean(d_boot)`)
+  and percentile confidence intervals. Works with any `(X, Y)` pairs and supports
+  scalar, multi-output, and time-series outputs.
+- `DeltaResult` dataclass holding the delta and `S1` indices with optional
+  bootstrap intervals and a `to_dataset()` xarray export.
+- `gsax.benchmarks.gaussian_linear` — a Gaussian linear additive benchmark whose
+  Gaussian marginals give the Borgonovo delta index a semi-analytic solution
+  (`ANALYTICAL_DELTA`), for ground-truth validation of the delta estimator.
+
 ## 0.1.2
 
 ### Added
