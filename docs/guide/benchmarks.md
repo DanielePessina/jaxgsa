@@ -54,6 +54,25 @@ method correctly identifies zero interactions.
 | `analytical_indices(coeffs, bounds)` | Returns `(S1, ST, S2)` arrays |
 | `ANALYTICAL_S1`, `ANALYTICAL_ST`, `ANALYTICAL_S2` | Precomputed for default coefficients |
 
+### `gsax.benchmarks.gaussian_linear`
+
+Gaussian linear additive model: $f(\mathbf{x}) = \sum_{j} c_j x_j$ with
+$x_j \sim \mathcal{N}(0, \sigma_j^2)$.
+
+Like `linear` it is purely additive ($S_1 = S_T$, zero interactions), but the
+Gaussian marginals make the output and every conditional output Gaussian too,
+so the Borgonovo delta index has a semi-analytic solution (closed-form L1
+distance between Gaussians plus 1-D Gauss-Hermite quadrature). This is the
+ground-truth benchmark for moment-independent (delta) estimators.
+
+| Export | Description |
+| --- | --- |
+| `PROBLEM` | 3 Gaussian inputs, $\mathcal{N}(0, 1)$, coefficients $(1, 2, 3)$ |
+| `evaluate(X, coeffs=(1.0, 2.0, 3.0))` | `(N, 3) -> (N,)` |
+| `analytical_indices(coeffs, variances)` | Returns `(S1, ST, S2)` arrays |
+| `analytical_delta(coeffs, variances, quad_order=61)` | Returns Borgonovo delta indices `(D,)` |
+| `ANALYTICAL_S1`, `ANALYTICAL_ST`, `ANALYTICAL_S2`, `ANALYTICAL_DELTA` | Precomputed for default coefficients |
+
 ### `gsax.benchmarks.oakley_ohagan`
 
 Oakley and O'Hagan (2004) 15-dimensional Gaussian-input benchmark:

@@ -17,6 +17,6 @@ Example::
     result = analyze(sr, Y)
 """
 
-from gsax.benchmarks import ishigami, linear, oakley_ohagan, sobol_g
+from gsax.benchmarks import gaussian_linear, ishigami, linear, oakley_ohagan, sobol_g
 
-__all__ = ["ishigami", "linear", "oakley_ohagan", "sobol_g"]
+__all__ = ["gaussian_linear", "ishigami", "linear", "oakley_ohagan", "sobol_g"]

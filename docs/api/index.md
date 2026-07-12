@@ -11,6 +11,7 @@ eight workflows:
 - DGSM: `sample_mc()` -> `analyze_dgsm()`
 - HSIC: `sample_mc()` -> `analyze_hsic()`
 - PAWN: `sample_mc()` -> `analyze_pawn()`
+- Borgonovo delta: `sample_mc()` -> `analyze_borgonovo()`
 
 Related docs:
 
@@ -34,6 +35,7 @@ Since v0.6.0, `gsax` is organized into subpackages:
 | `gsax.dgsm` | `analyze`, `DGSMResult`, `poincare_constant`, `axis_constants` |
 | `gsax.hsic` | `analyze`, `HSICResult` |
 | `gsax.pawn` | `analyze`, `PAWNResult` |
+| `gsax.borgonovo` | `analyze`, `DeltaResult` |
 
 You can import from the subpackages directly:
 
@@ -45,6 +47,8 @@ from gsax.shapley import analyze as analyze_shapley
 from gsax.efast import sample as sample_efast, analyze as analyze_efast
 from gsax.dgsm import analyze as analyze_dgsm
 from gsax.hsic import analyze as analyze_hsic
+from gsax.pawn import analyze as analyze_pawn
+from gsax.borgonovo import analyze as analyze_borgonovo
 ```
 
 All public symbols are also re-exported from the top-level `gsax` namespace for
@@ -84,6 +88,8 @@ Top-level exports from `gsax`:
 - [`HSICResult`](#hsicresult)
 - [`analyze_pawn`](#analyze-pawn)
 - [`PAWNResult`](#pawnresult)
+- [`analyze_borgonovo`](#analyze-borgonovo)
+- [`DeltaResult`](#deltaresult)
 
 ## Problem Definition
 
@@ -1701,6 +1707,136 @@ Behavior:
 - Uses `problem.names` for `param` coordinates.
 - Uses `problem.output_names` when available, otherwise `y0`, `y1`, and so on.
 - When `pawn_conf` is present, splits into `pawn_lower` and `pawn_upper` variables.
+
+---
+
+## Borgonovo Delta Workflow
+
+<a id="analyze-borgonovo"></a>
+### `analyze_borgonovo()` {#analyze-borgonovo}
+
+Compute Borgonovo delta (moment-independent) sensitivity indices and given-data
+first-order Sobol indices via the Plischke, Borgonovo & Smith (2013) given-data
+estimator.
+
+```python
+def analyze_borgonovo(
+    problem: Problem,
+    X: Array,
+    Y: Array,
+    *,
+    n_classes: int | None = None,
+    grid_size: int = 100,
+    bandwidth: float | Literal["silverman"] = "silverman",
+    n_bootstrap: int = 100,
+    conf_level: float = 0.95,
+    bias_correct: bool = True,
+    seed: int = 0,
+    chunk_size: int = 2048,
+) -> DeltaResult
+```
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `problem` | `Problem` | required | Problem definition with D parameters. |
+| `X` | `Array` | required | Input sample matrix `(N, D)`. |
+| `Y` | `Array` | required | Model output `(N,)`, `(N, K)`, or `(N, T, K)`. |
+| `n_classes` | `int \| None` | `None` | Number of equal-frequency conditioning classes per input. `None` selects the Plischke sample-size heuristic (SALib-identical, at most 48 classes). |
+| `grid_size` | `int` | `100` | Number of points of the output grid the densities are compared on (spanning `[Y.min(), Y.max()]` per column). |
+| `bandwidth` | `float \| Literal["silverman"]` | `"silverman"` | KDE bandwidth rule: `"silverman"` for the per-class Silverman factor, or a positive float used directly as the factor multiplying the sample standard deviation. |
+| `n_bootstrap` | `int` | `100` | Number of bootstrap resamples for bias correction and confidence intervals. Set to 0 to skip both. |
+| `conf_level` | `float` | `0.95` | Confidence level for percentile bootstrap intervals. |
+| `bias_correct` | `bool` | `True` | Apply the Plischke bias reduction `2*d_hat - mean(d_boot)` to the delta estimate (requires `n_bootstrap > 0`). |
+| `seed` | `int` | `0` | Random seed for bootstrap resampling. |
+| `chunk_size` | `int` | `2048` | Number of flattened `T*K` output columns processed per kernel call. Peak memory scales with `chunk_size * D * N * grid_size`. |
+
+Validation and behavior:
+
+- `X` must be 2-D with `X.shape[1] == problem.num_vars`, and `X` and `Y` must
+  have the same number of rows.
+- Explicit `n_classes` values must lie in `[2, N]`; `grid_size` must be >= 2.
+- Samples are partitioned into equal-frequency classes by each input's rank;
+  unconditional and per-class conditional output densities are estimated by
+  Gaussian KDE and compared by trapezoidal L1 integration.
+- With `n_bootstrap > 0` and `bias_correct=True` (the defaults), the delta
+  estimate is bias-corrected as `2*d_hat - mean(d_boot)`, where `d_hat` is
+  computed on the original sample; percentile confidence intervals come from
+  the same replicates. `S1` is never bias-corrected (matching SALib).
+- With `n_bootstrap=0`, the raw plug-in estimate is returned and
+  `delta_conf` / `S1_conf` are `None`.
+- Matches `SALib.analyze.delta` (same partition rule, class-count heuristic,
+  Silverman KDE factors, and 100-point grid), but the central estimate is
+  deterministic given the data (SALib uses a random resample), and a constant
+  output column yields `delta = S1 = 0` instead of an error.
+
+Returns: [`DeltaResult`](#deltaresult)
+
+Minimal example:
+
+```python
+import jax.numpy as jnp
+import gsax
+from gsax.benchmarks.ishigami import PROBLEM
+
+X = gsax.sample_mc(PROBLEM, N=5000, seed=42)
+Y = gsax.benchmarks.ishigami.evaluate(jnp.asarray(X))
+result = gsax.analyze_borgonovo(PROBLEM, jnp.asarray(X), Y)
+
+print(result.delta)  # (3,) — moment-independent delta indices
+print(result.S1)     # (3,) — given-data first-order Sobol indices
+```
+
+<a id="deltaresult"></a>
+### `DeltaResult` {#deltaresult}
+
+Dataclass holding Borgonovo delta indices, the given-data first-order Sobol
+indices from the same class partition, and optional bootstrap intervals.
+
+```python
+@dataclass
+class DeltaResult:
+    delta: Array
+    delta_conf: Array | None
+    S1: Array
+    S1_conf: Array | None
+    problem: Problem
+```
+
+| Field | Shape | Description |
+| --- | --- | --- |
+| `delta` | `(D,)` / `(K, D)` / `(T, K, D)` | Borgonovo delta index per parameter. The underlying index and the raw plug-in estimate lie in [0, 1]; the default bias-corrected estimate (`2*d_hat - mean(d_boot)`, and the lower bound of `delta_conf`) can fall marginally below 0 for weak or near-noninfluential inputs at small N. Bias-corrected when the analysis ran with `bias_correct=True` and `n_bootstrap > 0`. |
+| `delta_conf` | `(2, ...)` or `None` | Percentile bootstrap confidence interval `[lower, upper]`, or `None` when `n_bootstrap=0`. |
+| `S1` | `(D,)` / `(K, D)` / `(T, K, D)` | Given-data first-order Sobol index per parameter. |
+| `S1_conf` | `(2, ...)` or `None` | Percentile bootstrap confidence interval `[lower, upper]`, or `None` when `n_bootstrap=0`. |
+| `problem` | `Problem` | Problem definition used for the analysis. |
+
+Shape contract follows the same convention as other gsax methods:
+
+| `Y` shape passed to `analyze_borgonovo()` | Index shapes |
+| --- | --- |
+| `(N,)` | `(D,)` |
+| `(N, K)` | `(K, D)` |
+| `(N, T, K)` | `(T, K, D)` |
+
+<a id="deltaresult-to_dataset"></a>
+#### `DeltaResult.to_dataset()`
+
+```python
+ds = result.to_dataset(time_coords=None)
+```
+
+Converts Borgonovo delta results to a labeled `xarray.Dataset`.
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `time_coords` | `list \| np.ndarray \| None` | `None` | Coordinate values for the time dimension on 3D results. |
+
+Behavior:
+
+- Uses `problem.names` for `param` coordinates.
+- Uses `problem.output_names` when available, otherwise `y0`, `y1`, and so on.
+- Dataset contains `delta` and `S1` variables; when confidence intervals are
+  present, adds `delta_lower` / `delta_upper` and `S1_lower` / `S1_upper`.
 
 ## Configuration
 

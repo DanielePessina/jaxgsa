@@ -8,7 +8,7 @@ import numpy as np
 import xarray as xr
 from jax import Array
 
-from gsax._normalization import _default_output_names
+from gsax._normalization import _dims_and_coords
 from gsax.problem import Problem
 
 
@@ -57,27 +57,8 @@ class HSICResult:
         Returns:
             Dataset with variables R2_HSIC, T_HSIC, p_values, hsic_raw.
         """
-        param_names = list(self.problem.names)
         r2_arr = np.asarray(self.R2_HSIC)
-        ndim = r2_arr.ndim
-
-        if ndim == 1:
-            dims = ("param",)
-            coords: dict = {"param": param_names}
-        elif ndim == 2:
-            K = r2_arr.shape[0]
-            onames = _default_output_names(K, self.problem)
-            dims = ("output", "param")
-            coords = {"output": onames, "param": param_names}
-        elif ndim == 3:
-            T = r2_arr.shape[0]
-            K = r2_arr.shape[1]
-            onames = _default_output_names(K, self.problem)
-            tcoords = list(time_coords) if time_coords is not None else list(range(T))
-            dims = ("time", "output", "param")
-            coords = {"time": tcoords, "output": onames, "param": param_names}
-        else:
-            raise ValueError(f"Unexpected R2_HSIC.ndim={ndim}")
+        dims, coords = _dims_and_coords(r2_arr.ndim, r2_arr.shape, self.problem, time_coords)
 
         data_vars: dict = {
             "R2_HSIC": (dims, r2_arr),

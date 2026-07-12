@@ -30,6 +30,7 @@ SECTIONS = {
         "pce",
         "hsic",
         "pawn",
+        "borgonovo",
         "batch_reactor",
     ],
 }

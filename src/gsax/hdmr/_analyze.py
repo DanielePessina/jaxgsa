@@ -13,7 +13,12 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
-from gsax._normalization import _prenormalize_outputs, _prepare_Y, _warn_zero_variance_slices
+from gsax._normalization import (
+    _prenormalize_outputs,
+    _prepare_Y,
+    _squeeze_output_axes,
+    _warn_zero_variance_slices,
+)
 from gsax._transforms import cdf_to_unit_interval
 from gsax.hdmr._engine import (
     _build_B1,
@@ -143,14 +148,7 @@ def _squeeze_hdmr(
     squeeze_output: bool,
 ) -> tuple:
     """Remove singleton T/K dims from HDMR result arrays."""
-    arrays = [Sa, Sb, S, ST]
-
-    if squeeze_time and squeeze_output:
-        arrays = [a[0, 0] for a in arrays]
-    elif squeeze_time:
-        arrays = [a[0] for a in arrays]
-
-    return tuple(arrays)
+    return tuple(_squeeze_output_axes(a, squeeze_time, squeeze_output) for a in (Sa, Sb, S, ST))
 
 
 def _reshape_emulator_value(
