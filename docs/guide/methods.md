@@ -33,7 +33,7 @@ Common situations:
 | Sampling requirement | Structured Saltelli design, $N(2D+2)$ evaluations (default) | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Search curves, $N \times D$ evaluations | Plain MC, $N$ evaluations + autodiff | Trajectory or radial design, $r(D+1)$ evaluations (deduplicated) | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs |
 | Input independence | Assumed | Handled via ANCOVA decomposition | Assumed | Assumed (dependent-input Shapley is future work) | Assumed | Assumed | Assumed | Not assumed | Not assumed | Not assumed |
 | Input distributions | Uniform + Gaussian | Uniform + Gaussian (via CDF mapping) | Uniform + Gaussian | Uniform + Gaussian (both backends) | Uniform + Gaussian | Uniform + Gaussian (+ truncated Normal) | Uniform + Gaussian (truncated-quantile grid) | Uniform + Gaussian (via CDF mapping) | Uniform + Gaussian (via CDF mapping) | Any (rank-based classes; marginals not used) |
-| Output shapes | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar only | Scalar, multi-output, time-series (`hdmr` backend); scalar only (`pce`) | Scalar, multi-output, time-series | Scalar, multi-output | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series |
+| Output shapes | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series (both backends) | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series |
 | What the numbers mean | Exact variance fractions (given enough samples) | Variance fractions from a B-spline surrogate (fit-dependent) | Variance fractions from a polynomial surrogate (fit-dependent) | Exact allocation within the fitted surrogate; depends on fit quality | Exact variance fractions (given enough samples) | Bounds on $S_T$, not exact indices | Screening ranks ($\mu^*$ as $S_T$ proxy), not variance fractions | Dependence measure, not variance fractions | Distributional (KS) distance, not variance fractions | Distributional (L1) distance, not variance fractions |
 | Second-order indices | Direct estimation from cross-matrices | From interaction component functions | Analytical from coefficients | Not available (interaction variance folded into $\mathrm{Sh}$) | Not available | Not available | Not available | Not available | Not available | Not available |
 | Interaction detection | Via $S_2$ and the gap $S_T - S_1$ | Via explicit interaction component functions | Via $S_2$ from coefficients | Via the gaps $\mathrm{Sh} - S_1$ and $S_T - \mathrm{Sh}$ | Via the gap $S_T - S_1$ only | Not available (bounds only) | Via large $\sigma$ relative to $\mu^*$ (not pair-attributable) | Via the Total HSIC − R2-HSIC gap | Not available (first-order only) | Not available (the $\delta - S_1$ gap flags influence beyond first-order variance) |
@@ -184,11 +184,11 @@ When prenormalization is enabled, the surrogate is trained on standardized outpu
 
 ## PCE (Polynomial Chaos Expansion)
 
-PCE is the second given-data, surrogate-based route to Sobol indices: it fits an orthogonal polynomial surrogate to $(X, Y)$ data and reads the indices directly from the expansion coefficients (Sudret, 2008), with no Monte Carlo estimation noise. Pick it when your model is smooth and your output is scalar. The polynomial basis follows the Wiener-Askey scheme: Legendre polynomials for uniform inputs, Hermite polynomials for unbounded Gaussian inputs; truncated Gaussian inputs use Legendre polynomials after CDF mapping to $[-1, 1]$.
+PCE is the second given-data, surrogate-based route to Sobol indices: it fits an orthogonal polynomial surrogate to $(X, Y)$ data and reads the indices directly from the expansion coefficients (Sudret, 2008), with no Monte Carlo estimation noise. Pick it when your model is smooth. The polynomial basis follows the Wiener-Askey scheme: Legendre polynomials for uniform inputs, Hermite polynomials for unbounded Gaussian inputs; truncated Gaussian inputs use Legendre polynomials after CDF mapping to $[-1, 1]$.
 
 ### How to use it
 
-1. You provide any set of $(X, Y)$ pairs (scalar output only in this version).
+1. You provide any set of $(X, Y)$ pairs; `Y` may be scalar `(N,)`, multi-output `(N, K)`, or time-series `(N, T, K)` — all output slices share one polynomial basis and are fitted in a single solve.
 2. `gsax.analyze_pce()` maps inputs to the appropriate reference domain, builds the design matrix from a total-degree multi-index, and fits coefficients via regularized least squares.
 3. Sobol indices ($S_1$, $S_T$, $S_2$) are computed analytically from the squared coefficients.
 4. Leave-one-out cross-validation RMSE quantifies surrogate accuracy.
@@ -197,7 +197,7 @@ PCE is the second given-data, surrogate-based route to Sobol indices: it fits an
 - You want analytical Sobol indices without Monte Carlo sampling noise
 - Your model is smooth enough to be well-approximated by low-order polynomials
 - You have mixed uniform and Gaussian inputs (the Wiener-Askey scheme selects the appropriate basis automatically)
-- You need a fast emulator for scalar-output models
+- You need a fast emulator (`emulate_pce` mirrors the training output layout)
 
 ## Shapley Effects
 
@@ -222,8 +222,10 @@ so a main-effect variance $V_i$ is attributed entirely to parameter $i$, a pairw
 
 gsax computes Shapley effects **analytically** from a fitted surrogate's variance decomposition — no permutation Monte Carlo, no conditional-variance sampling, and no external `shap` dependency:
 
-- **`backend="pce"`** (default) fits a polynomial chaos expansion and groups the squared orthonormal coefficients by the support of their multi-index (Sudret, 2008) — exact within the fitted polynomial. Scalar outputs only.
-- **`backend="hdmr"`** fits the RS-HDMR B-spline surrogate and uses the structural ($S_a$) variances of its component functions as the partial variances $V_u$, truncated at `maxorder`. Supports multi-output and time-series `Y`.
+- **`backend="pce"`** (default) fits a polynomial chaos expansion and groups the squared orthonormal coefficients by the support of their multi-index (Sudret, 2008) — exact within the fitted polynomial.
+- **`backend="hdmr"`** fits the RS-HDMR B-spline surrogate and uses the structural ($S_a$) variances of its component functions as the partial variances $V_u$, truncated at `maxorder`.
+
+Both backends accept scalar `(N,)`, multi-output `(N, K)`, and time-series `(N, T, K)` `Y`.
 
 Normalization is by the surrogate's **total decomposed variance** $\sum_u V_u$, so $\sum_i \mathrm{Sh}_i = 1$ exactly — the Shapley efficiency property (Owen, 2014). $S_1$ and $S_T$ from the same surrogate use the same denominator, so for `backend="pce"` they match `analyze_pce` exactly, while for `backend="hdmr"` they differ from `analyze_hdmr` (which normalizes by $\mathrm{Var}(Y)$) by a factor of `explained_variance`.
 
@@ -243,7 +245,7 @@ from gsax.benchmarks.ishigami import PROBLEM, evaluate
 X = gsax.sample_mc(PROBLEM, N=2000, seed=42)
 Y = evaluate(jnp.asarray(X))
 
-# PCE backend (default) — exact within the fitted polynomial, scalar Y only
+# PCE backend (default) — exact within the fitted polynomial
 result = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y)
 print("Sh:", result.Sh)              # (D,) Shapley effects
 print("sum:", result.Sh.sum())       # == 1 (Shapley efficiency property)
@@ -252,7 +254,7 @@ print("order:", result.order)        # effective surrogate order used
 print("S1:", result.S1)              # first-order, same surrogate
 print("ST:", result.ST)              # total-order, same surrogate
 
-# HDMR backend — supports scalar, multi-output, time-series Y; HDMR-only knobs
+# HDMR backend — B-spline surrogate; HDMR-only knobs
 result_hdmr = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y, backend="hdmr", maxorder=2)
 ```
 
@@ -638,7 +640,7 @@ Set `n_bootstrap=0` to skip bias correction and confidence intervals (raw plug-i
 
 ## Output Shapes
 
-Sobol, HDMR, eFAST, Shapley (with the `hdmr` backend), and Morris all support scalar, multi-output, and time-series outputs. The shape of `Y` determines the shape of all returned index arrays (for Morris, read `S1 / ST` as `mu / mu_star / sigma`; Morris has no S2):
+All ten methods share the same output contract: scalar, multi-output, and time-series outputs. The shape of `Y` determines the shape of all returned index arrays (read `S1 / ST` as the method's per-parameter measures — `mu / mu_star / sigma` for Morris, `nu / sigma` and the bounds for DGSM; only Sobol and PCE produce S2):
 
 | Y shape | S1 / ST shape | S2 shape |
 |---------|---------------|----------|
@@ -648,9 +650,11 @@ Sobol, HDMR, eFAST, Shapley (with the `hdmr` backend), and Morris all support sc
 
 D is always the last axis. Confidence interval arrays (when using bootstrap) prepend a leading dimension of 2 for `[lower, upper]`.
 
-Time-series outputs are particularly useful for dynamic models, where the evolution of sensitivity indices over time can reveal which parameters dominate at different stages of a process — for example, a parameter that is highly influential early in a batch but negligible later.
+How a 2-D `Y` is read depends on `problem.output_names`. Without it, a 2-D `Y` is always `(N, K)` — multiple outputs, no time dimension. With exactly **one** entry in `output_names`, a 2-D `Y` is read as `(N, T)` — T timepoints of that single labeled output — and flows through as `(N, T, 1)`, keeping the labeled output axis in results. With several entries, the column count must equal `len(output_names)`.
 
-DGSM returns arrays of shape `(T, D)` where `T` is the number of output components. For scalar-output models, `T = 1`. DGSM does not use the `(N, T, K)` convention; instead, multi-output functions produce `(T,)` outputs per sample and the result arrays are always `(T, D)`.
+You need not pass exactly the canonical layout: every public entry point resolves `Y` through the same inference ladder. Exact canonical shapes pass silently; unambiguously recoverable layouts — a transposed `(K, N)` array, or a 3-D `(N, K, T)` array whose middle axis matches `len(output_names)` — are fixed with a `UserWarning` naming the transformation; ambiguous layouts raise. gsax never guesses.
+
+Time-series outputs are particularly useful for dynamic models, where the evolution of sensitivity indices over time can reveal which parameters dominate at different stages of a process — for example, a parameter that is highly influential early in a batch but negligible later.
 
 ## Data Cleaning
 

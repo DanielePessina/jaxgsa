@@ -65,8 +65,12 @@ print(snapshot_result.S1[1, :])
 - `(N,)` means scalar output.
 - `(N, K)` means multiple outputs with no time dimension.
 - `(N, T, K)` means time-series multi-output.
-- A 2D array is always treated as `(N, K)`, never `(N, T)`.
-- For a time-series with one output, reshape to `(N, T, 1)`.
+- Without `problem.output_names`, a 2D array is always treated as `(N, K)`.
+- With exactly one entry in `problem.output_names`, a 2D array is treated as
+  `(N, T)` — timepoints of that single output — and flows through as
+  `(N, T, 1)`. Passing a pre-reshaped `(N, T, 1)` array also works.
+- Obvious layout mistakes (e.g. a transposed array) are fixed with a
+  `UserWarning`; ambiguous layouts raise.
 
 ## Single-output edge case
 

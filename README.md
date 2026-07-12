@@ -27,7 +27,7 @@ Ten complementary methods are included: **Sobol indices** (the standard variance
   - Analytical Sobol indices from orthogonal polynomial coefficients (Sudret, 2008)
   - Wiener-Askey scheme: Legendre for uniform, Hermite for Gaussian inputs
   - Built-in emulator and leave-one-out cross-validation RMSE
-  - Scalar outputs only
+  - Scalar, multi-output, and time-series outputs — all output slices share one basis, fitted in a single multi-right-hand-side solve
 - **Shapley effects** (Owen, 2014; Song, Nelson & Staum, 2016)
   - Fair, game-theoretic allocation of output variance — each interaction's variance split equally among its participants
   - Computed **analytically** from a fitted PCE (default) or RS-HDMR surrogate: no permutation Monte Carlo, no extra model runs
@@ -57,7 +57,7 @@ Ten complementary methods are included: **Sobol indices** (the standard variance
   - Plischke et al. (2013) given-data estimator: works with **any** set of (X, Y) pairs
   - Bias-corrected delta plus the given-data first-order Sobol S1 (SALib-compatible)
   - Percentile bootstrap confidence intervals
-- Supports scalar, multi-output, and time-series model outputs from the start
+- All ten methods accept scalar `(N,)`, multi-output `(N, K)`, and time-series `(N, T, K)` outputs, with smart layout inference: pass `output_names` on the problem and gsax disambiguates 2-D/3-D layouts, fixing obvious transposes with a warning and raising on ambiguity
 - Bootstrap confidence intervals with JAX-accelerated resampling
 - Optional `prenormalize=True` mode for SALib-style output standardization before
   Sobol or HDMR analysis
@@ -232,8 +232,8 @@ print("explained:", result.explained_variance)  # fraction of Var(Y) captured
 print("S1:", result.S1)              # (D,) first-order, same surrogate
 print("ST:", result.ST)              # (D,) total-order — S1 <= Sh <= ST per parameter
 
-# The default backend="pce" handles scalar Y; switch to backend="hdmr"
-# for multi-output or time-series Y
+# Both backends accept scalar (N,), multi-output (N, K), and
+# time-series (N, T, K) Y; backend="hdmr" swaps in the B-spline surrogate
 result_hdmr = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y, backend="hdmr")
 ```
 
@@ -390,8 +390,12 @@ and `parquet` requires `pyarrow`.
 #   - (n_total, K)     multi-output (K outputs, no time dimension)
 #   - (n_total, T, K)  time-series multi-output (T timesteps, K outputs)
 #
-# Important: a 2D array is always interpreted as (N, K), never (N, T).
-# If you have time-series with a single output, reshape to (N, T, 1).
+# How a 2D array is read depends on problem.output_names:
+#   - without output_names, (N, M) is read as (N, K) — M outputs;
+#   - with exactly ONE entry in output_names, (N, M) is read as (N, T) —
+#     T timepoints of that single output — and flows through as (N, T, 1).
+# Obvious layout mistakes (e.g. a transposed (K, N) array) are fixed with
+# a UserWarning naming the transformation; ambiguous layouts raise.
 # If you have a single output with no time, just pass a 1D array (N,).
 Y = my_model(sampling_result.samples)
 
@@ -450,7 +454,7 @@ result = gsax.analyze(sampling_result, Y)
 
 ### Edge cases: single output or single timestep
 
-A 2D array is **always** interpreted as `(N, K)` — multiple outputs, no time dimension. This matters when your model has only one output or only one timestep:
+How a 2D array is interpreted depends on `problem.output_names`. Without it, a 2D array is `(N, K)` — multiple outputs, no time dimension. With exactly **one** entry in `output_names`, a 2D array is `(N, T)` — timepoints of that single output — and flows through as `(N, T, 1)`:
 
 ```python
 # Single output, no time dimension — pass a 1D array
@@ -458,11 +462,15 @@ Y = my_model(X)          # shape (n_total,)
 result = gsax.analyze(sampling_result, Y)
 # result.S1.shape == (D,)
 
-# Single output WITH time dimension — reshape to (N, T, 1)
+# Single output WITH time dimension — reshape to (N, T, 1) ...
 Y = my_model(X)          # shape (n_total, T) — e.g. 50 timesteps
 Y = Y[:, :, None]        # reshape to (n_total, 50, 1)
 result = gsax.analyze(sampling_result, Y)
 # result.S1.shape == (50, 1, D)  — (T, K=1, D)
+
+# ... or set output_names=["y"] on the problem and pass (N, T) directly:
+# with exactly one output name, a 2D array is read as timepoints of that
+# output and produces the same (50, 1, D) result.
 
 # Multiple outputs, single timestep — just pass (N, K)
 Y = my_model(X)          # shape (n_total, 4) — 4 outputs
@@ -470,6 +478,8 @@ result = gsax.analyze(sampling_result, Y)
 # result.S1.shape == (4, D)  — (K, D)
 # No need for a time dimension; (N, 1, 4) also works but is unnecessary.
 ```
+
+gsax also resolves layouts that are off but unambiguously recoverable — a transposed `(K, N)` array, or a 3D `(N, K, T)` array whose middle axis matches `len(output_names)` — fixing them with a `UserWarning` that names the transformation. Ambiguous layouts raise; gsax never guesses.
 
 ---
 

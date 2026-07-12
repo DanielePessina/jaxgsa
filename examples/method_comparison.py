@@ -31,7 +31,7 @@ def _intro(mo):
     | **Sobol** (Saltelli) | S1, ST, S2 via variance decomposition |
     | **eFAST** | S1, ST via Fourier amplitude decomposition |
     | **HDMR** | S1, ST via B-spline surrogate (ANCOVA) |
-    | **PCE** | S1, ST, S2 via polynomial chaos expansion (scalar output only) |
+    | **PCE** | S1, ST, S2 via polynomial chaos expansion |
     | **DGSM** | Bounds on ST via derivative-based measures |
     | **Morris** | mu*, sigma screening measures (proxy for the ST *ranking*) |
     | **Shapley** | Sh fair variance shares (sum to 1) from a PCE surrogate, plus S1, ST |
@@ -653,7 +653,7 @@ def _summary(mo):
     | **eFAST** | **Screening** at lower cost ($N \times D$ evals). |
     | **DGSM** | **Differentiable models** via JAX autodiff. |
     | **HDMR** | **Arbitrary (X, Y) data**, no structured sampling. |
-    | **PCE** | **Emulation** with a reusable polynomial surrogate (scalar output only). |
+    | **PCE** | **Emulation** with a reusable polynomial surrogate. |
     | **Morris** | **Cheapest screening** — factor fixing at $r(D+1)$ evals before dedup. |
     | **Shapley** | **Fair variance shares** summing to 1 — interaction attribution. |
     | **Borgonovo delta** | **Moment-independent** influence on the whole output density. |

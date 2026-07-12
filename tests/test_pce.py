@@ -230,13 +230,13 @@ class TestAutoOrder:
 class TestInputValidation:
     """PCE should raise ValueError for invalid inputs."""
 
-    def test_y_ndim_not_one_raises(self):
-        """Y with ndim != 1 should raise ValueError."""
+    def test_y_ndim_4_raises(self):
+        """4-D Y is outside the (N,), (N, K), (N, T, K) contract."""
         problem = linear.PROBLEM
         X = jnp.ones((10, 3))
-        Y_2d = jnp.ones((10, 2))
-        with pytest.raises(ValueError, match="Y.ndim must be 1"):
-            pce.analyze(problem, X, Y_2d)
+        Y_4d = jnp.ones((10, 2, 2, 2))
+        with pytest.raises(ValueError, match="Y must be 1-D"):
+            pce.analyze(problem, X, Y_4d)
 
     def test_x_column_mismatch_raises(self):
         """X with wrong number of columns should raise ValueError."""
@@ -445,3 +445,105 @@ class TestEngine:
         # Only one variable, so S1 = ST = 1.0
         np.testing.assert_allclose(float(S1[0]), 1.0, atol=1e-10)
         np.testing.assert_allclose(float(ST[0]), 1.0, atol=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# 8. Multi-output and time-series support
+# ---------------------------------------------------------------------------
+
+
+class TestMultiOutput:
+    """PCE fits every (t, k) output slice against one shared basis."""
+
+    def test_multi_output_shapes(self, linear_pce_data):
+        X, Y = linear_pce_data
+        Y2 = jnp.stack([Y, 2.0 * Y + 1.0], axis=-1)
+        result = pce.analyze(linear.PROBLEM, X, Y2, order=2)
+        n_terms = result.multi_index.shape[0]
+        assert result.S1.shape == (2, 3)
+        assert result.ST.shape == (2, 3)
+        assert result.S2.shape == (2, 3, 3)
+        assert result.coefficients.shape == (2, n_terms)
+        assert result.loo_rmse is not None and result.loo_rmse.shape == (2,)
+
+    def test_time_series_shapes(self, linear_pce_data):
+        X, Y = linear_pce_data
+        Y2 = jnp.stack([Y, 2.0 * Y + 1.0], axis=-1)  # (N, K=2)
+        Y3 = jnp.stack([Y2, 0.5 * Y2], axis=1)  # (N, T=2, K=2)
+        result = pce.analyze(linear.PROBLEM, X, Y3, order=2)
+        n_terms = result.multi_index.shape[0]
+        assert result.S1.shape == (2, 2, 3)
+        assert result.S2.shape == (2, 2, 3, 3)
+        assert result.coefficients.shape == (2, 2, n_terms)
+        assert result.loo_rmse is not None and result.loo_rmse.shape == (2, 2)
+
+    def test_slices_match_scalar_run(self, linear_pce_data, linear_pce_result):
+        """Each column of a multi-output run equals the standalone scalar run."""
+        X, Y = linear_pce_data
+        Y2 = jnp.stack([Y, 2.0 * Y + 1.0], axis=-1)
+        multi = pce.analyze(linear.PROBLEM, X, Y2, order=2)
+        scalar = linear_pce_result
+        # Column 0 is the untouched Y. The multi-RHS matmul reduces in a
+        # different order than the scalar matvec, so agreement is to float32
+        # noise, not bit-exact.
+        np.testing.assert_allclose(
+            multi.coefficients[0], scalar.coefficients, rtol=1e-5, atol=1e-6
+        )
+        assert scalar.loo_rmse is not None and multi.loo_rmse is not None
+        # The linear model is exactly representable, so both LOO values are
+        # float32 noise around zero — compare absolutely, not relatively.
+        np.testing.assert_allclose(float(multi.loo_rmse[0]), float(scalar.loo_rmse), atol=1e-5)
+        # Indices are invariant under the affine map of column 1.
+        for k in range(2):
+            np.testing.assert_allclose(multi.S1[k], scalar.S1, rtol=1e-5, atol=1e-6)
+            np.testing.assert_allclose(multi.ST[k], scalar.ST, rtol=1e-5, atol=1e-6)
+            np.testing.assert_allclose(
+                multi.S2[k][~np.eye(3, dtype=bool)],
+                np.asarray(scalar.S2)[~np.eye(3, dtype=bool)],
+                atol=1e-6,
+            )
+
+    def test_emulate_multi_output_round_trip(self, linear_pce_data):
+        """emulate_pce mirrors the training layout and reproduces linear Y."""
+        X, Y = linear_pce_data
+        Y2 = jnp.stack([Y, 2.0 * Y + 1.0], axis=-1)
+        Y3 = jnp.stack([Y2, 0.5 * Y2], axis=1)
+        res2 = pce.analyze(linear.PROBLEM, X, Y2, order=2)
+        res3 = pce.analyze(linear.PROBLEM, X, Y3, order=2)
+        pred2 = pce.emulate(res2, X[:50])
+        pred3 = pce.emulate(res3, X[:50])
+        assert pred2.shape == (50, 2)
+        assert pred3.shape == (50, 2, 2)
+        # The linear benchmark is exactly representable at order 2.
+        np.testing.assert_allclose(np.asarray(pred2), np.asarray(Y2[:50]), rtol=1e-5)
+        np.testing.assert_allclose(np.asarray(pred3), np.asarray(Y3[:50]), rtol=1e-5)
+
+    def test_to_dataset_multi_output(self, linear_pce_data):
+        X, Y = linear_pce_data
+        Y2 = jnp.stack([Y, 2.0 * Y], axis=-1)
+        ds = pce.analyze(linear.PROBLEM, X, Y2, order=2).to_dataset()
+        assert ds["S1"].dims == ("output", "param")
+        assert ds["S2"].dims == ("output", "param_i", "param_j")
+        assert ds["loo_rmse"].dims == ("output",)
+
+    def test_to_dataset_time_series_with_coords(self, linear_pce_data):
+        X, Y = linear_pce_data
+        Y3 = jnp.stack([jnp.stack([Y, 2.0 * Y], axis=-1)] * 2, axis=1)
+        ds = pce.analyze(linear.PROBLEM, X, Y3, order=2).to_dataset(time_coords=[0.0, 0.5])
+        assert ds["S1"].dims == ("time", "output", "param")
+        assert ds["S2"].dims == ("time", "output", "param_i", "param_j")
+        assert ds["loo_rmse"].dims == ("time", "output")
+        np.testing.assert_allclose(ds.coords["time"].values, [0.0, 0.5])
+
+    def test_batched_engine_matches_scalar_loop(self):
+        """The einsum-based extraction equals per-slice scalar calls."""
+        rng = np.random.default_rng(7)
+        mi = build_multi_index(3, 3)
+        coeffs = jnp.asarray(rng.normal(size=(2, 4, mi.shape[0])))
+        S1b, STb, S2b = sobol_from_coefficients(coeffs, mi)
+        for t in range(2):
+            for k in range(4):
+                S1s, STs, S2s = sobol_from_coefficients(coeffs[t, k], mi)
+                np.testing.assert_allclose(np.asarray(S1b[t, k]), np.asarray(S1s), rtol=1e-12)
+                np.testing.assert_allclose(np.asarray(STb[t, k]), np.asarray(STs), rtol=1e-12)
+                np.testing.assert_allclose(np.asarray(S2b[t, k]), np.asarray(S2s), rtol=1e-12)

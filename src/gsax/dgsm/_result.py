@@ -6,7 +6,7 @@ import numpy as np
 import xarray as xr
 from jax import Array
 
-from gsax._normalization import _default_output_names
+from gsax._normalization import _dims_and_coords
 from gsax.problem import Problem
 
 
@@ -18,9 +18,10 @@ class DGSMResult:
     ``ST_i`` of each input: an input whose upper bound is near zero is
     provably negligible, while a large lower bound certifies importance.
 
-    For scalar-output models, index arrays have shape ``(D,)`` and
-    ``var_y`` is a scalar.  For multi-output models, index arrays have
-    shape ``(K, D)`` and ``var_y`` has shape ``(K,)``.
+    Index arrays mirror the output layout: shape ``(D,)`` with scalar
+    ``var_y`` for scalar-output models, ``(K, D)`` with ``(K,)`` ``var_y``
+    for multi-output, and ``(T, K, D)`` with ``(T, K)`` ``var_y`` for
+    time-series outputs.
 
     Attributes:
         nu: ``E[(df/dx_i)^2]``, the mean squared partial derivative over
@@ -42,38 +43,24 @@ class DGSMResult:
     var_y: Array
     problem: Problem
 
-    def to_dataset(self) -> xr.Dataset:
+    def to_dataset(self, time_coords: np.ndarray | list | None = None) -> xr.Dataset:
         """Convert results to a labeled xarray Dataset.
 
-        Returns:
-            Dataset with variables nu, sigma, upper_bound, lower_bound.
-            For scalar output, dimensions are ``(param,)``.
-            For multi-output, dimensions are ``(output, param)``.
-        """
-        param_names = list(self.problem.names)
-        nu_arr = np.asarray(self.nu)
-        ndim = nu_arr.ndim
+        Args:
+            time_coords: Optional coordinate values for the ``time``
+                dimension of time-series results; defaults to ``0..T-1``.
 
-        if ndim == 1:
-            # Scalar output: fields are (D,)
-            coords: dict = {"param": param_names}
-            data_vars: dict = {
-                "nu": ("param", nu_arr),
-                "sigma": ("param", np.asarray(self.sigma)),
-                "upper_bound": ("param", np.asarray(self.upper_bound)),
-                "lower_bound": ("param", np.asarray(self.lower_bound)),
-            }
-        elif ndim == 2:
-            # Multi-output: fields are (K, D)
-            K = nu_arr.shape[0]
-            output_coord = _default_output_names(K, self.problem)
-            coords = {"output": output_coord, "param": param_names}
-            data_vars = {
-                "nu": (("output", "param"), nu_arr),
-                "sigma": (("output", "param"), np.asarray(self.sigma)),
-                "upper_bound": (("output", "param"), np.asarray(self.upper_bound)),
-                "lower_bound": (("output", "param"), np.asarray(self.lower_bound)),
-            }
-        else:
-            raise ValueError(f"Unexpected nu.ndim={ndim}")
+        Returns:
+            Dataset with variables nu, sigma, upper_bound, lower_bound on
+            dims ``(param,)`` / ``(output, param)`` / ``(time, output,
+            param)`` matching the result shapes.
+        """
+        nu_arr = np.asarray(self.nu)
+        dims, coords = _dims_and_coords(nu_arr.ndim, nu_arr.shape, self.problem, time_coords)
+        data_vars: dict = {
+            "nu": (dims, nu_arr),
+            "sigma": (dims, np.asarray(self.sigma)),
+            "upper_bound": (dims, np.asarray(self.upper_bound)),
+            "lower_bound": (dims, np.asarray(self.lower_bound)),
+        }
         return xr.Dataset(data_vars, coords=coords)

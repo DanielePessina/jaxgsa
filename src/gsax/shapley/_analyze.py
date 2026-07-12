@@ -15,6 +15,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from gsax._normalization import _validate_xy_inputs
 from gsax.hdmr._analyze import analyze_hdmr
 from gsax.pce._analyze import analyze_pce
 from gsax.problem import Problem
@@ -124,20 +125,20 @@ def analyze_shapley(
     (zero under the independence assumption).
 
     The ``"hdmr"`` backend inherits ``analyze_hdmr``'s input contract: it
-    requires at least 300 samples, ``maxorder`` in ``{1, 2, 3}`` (clamped with
-    a warning when ``D < maxorder``), and a 2-D ``Y`` is always read as
-    ``(N, K)`` -- reshape a single-output time series to ``(N, T, 1)``.
+    requires at least 300 samples and ``maxorder`` in ``{1, 2, 3}`` (clamped
+    with a warning when ``D < maxorder``).
 
     Args:
         problem: Parameter names and distributions.
         X: (N, D) input samples.
-        Y: Model outputs. ``backend="pce"`` accepts scalar (N,) only;
-            ``backend="hdmr"`` accepts (N,), (N, K), or (N, T, K).
+        Y: Model outputs — (N,) scalar, (N, K) multi-output, or (N, T, K)
+            time-series; both backends accept all three, and indices are
+            computed independently per (t, k) slice.
         backend: Surrogate providing the variance decomposition.
             ``"pce"`` (default) reads subset variances off orthonormal
             polynomial coefficients (Sudret, 2008) — exact for the fitted
-            polynomial, scalar outputs only; ``"hdmr"`` fits B-spline
-            component functions and supports all output shapes.
+            polynomial; ``"hdmr"`` fits B-spline component functions and
+            additionally separates correlation-induced variance.
         prenormalize: HDMR-only; see ``analyze_hdmr``. Defaults to False.
         maxorder: HDMR-only; maximum expansion order (1-3). Defaults to 2.
         maxiter: HDMR-only; backfitting iterations. Defaults to 100.
@@ -155,8 +156,8 @@ def analyze_shapley(
 
     Raises:
         ValueError: If ``backend`` is unknown, a kwarg belonging to the
-            non-selected backend is explicitly set, or ``backend="pce"``
-            (the default) is given a non-scalar ``Y``.
+            non-selected backend is explicitly set, or ``Y``'s layout cannot
+            be resolved against ``X``'s row count.
     """
     resolved = _resolve_backend_kwargs(
         backend,
@@ -171,9 +172,13 @@ def analyze_shapley(
         pce_kwargs={"order": order, "ridge": ridge, "fit_ratio": fit_ratio},
     )
 
+    # Resolve Y to the canonical layout ONCE, here, so total_var below and the
+    # backend's own (idempotent) inference agree on which axes are slices.
+    Y = _validate_xy_inputs(problem, jnp.asarray(X), jnp.asarray(Y))
+
     # Per-output-slice variance of the raw outputs, used to normalize the PCE
     # explained fraction and to flag constant (zero-variance) slices uniformly.
-    total_var = jnp.var(jnp.asarray(Y), axis=0)
+    total_var = jnp.var(Y, axis=0)
 
     if backend == "hdmr":
         result = analyze_hdmr(problem, X, Y, **resolved)
@@ -194,17 +199,13 @@ def analyze_shapley(
         explained_variance = partial.sum(axis=-1)
         effective_order = emulator["maxorder"]
     else:
-        if jnp.asarray(Y).ndim != 1:
-            raise ValueError(
-                f"backend='pce' supports scalar (N,) outputs only, got Y.ndim="
-                f"{jnp.asarray(Y).ndim}; use backend='hdmr' for multi-output "
-                "or time-series Y"
-            )
         pce_result = analyze_pce(problem, X, Y, **resolved)
         # Orthonormality makes each squared coefficient a partial variance;
-        # the constant term (row 0) carries none. multi_index[1:] > 0 IS the
-        # membership matrix, so no tuple round-trip is needed.
-        partial = pce_result.coefficients[1:] ** 2
+        # the constant term (index 0 on the trailing term axis) carries none.
+        # multi_index[1:] > 0 IS the membership matrix, so no tuple
+        # round-trip is needed. coefficients are terms-last, so this and the
+        # shared normalization below are batched over any leading slice dims.
+        partial = pce_result.coefficients[..., 1:] ** 2
         membership = np.asarray(pce_result.multi_index[1:] > 0)
         explained_variance = jnp.where(total_var == 0, jnp.nan, partial.sum(axis=-1) / total_var)
         effective_order = pce_result.order

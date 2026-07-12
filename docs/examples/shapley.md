@@ -180,11 +180,13 @@ For time-series results, pass `time_coords` to label the time dimension.
 | Y shape | backend | Sh / S1 / ST shape | explained_variance |
 |---------|---------|--------------------|--------------------|
 | `(N,)` | pce or hdmr | `(D,)` | `()` |
-| `(N, K)` | hdmr only | `(K, D)` | `(K,)` |
-| `(N, T, K)` | hdmr only | `(T, K, D)` | `(T, K)` |
+| `(N, K)` | pce or hdmr | `(K, D)` | `(K,)` |
+| `(N, T, K)` | pce or hdmr | `(T, K, D)` | `(T, K)` |
 
-D is always the last axis. A 2D `Y` is always read as `(N, K)`; reshape a
-single-output time series to `(N, T, 1)`.
+D is always the last axis. Without `problem.output_names`, a 2D `Y` is always
+read as `(N, K)`; with exactly one entry in `output_names`, a 2D `Y` is read
+as `(N, T)` — timepoints of that single output — and flows through as
+`(N, T, 1)`. Passing a pre-reshaped `(N, T, 1)` array also works.
 
 ## Practical caveats
 
@@ -192,9 +194,8 @@ single-output time series to `(N, T, 1)`.
   attractive for dependent inputs, but the dependent-input formulation
   needs conditional-variance estimation and is future work — do not rely
   on the indices when inputs are strongly correlated.
-- `backend="pce"` accepts scalar `(N,)` outputs only and raises
-  `ValueError` otherwise; use `backend="hdmr"` for multi-output or
-  time-series `Y`.
+- Both backends accept scalar `(N,)`, multi-output `(N, K)`, and
+  time-series `(N, T, K)` `Y`.
 - Interactions beyond the surrogate's truncation (`order` for PCE,
   `maxorder` for HDMR) are absent from the allocation — raise the order
   until `explained_variance` stabilizes near 1.

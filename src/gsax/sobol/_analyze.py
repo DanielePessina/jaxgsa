@@ -22,7 +22,12 @@ import jax.numpy as jnp
 from jax import Array
 
 from gsax._bootstrap import _bootstrap_ci_endpoints
-from gsax._normalization import _prenormalize_outputs, _prepare_Y, _warn_zero_variance_slices
+from gsax._normalization import (
+    _infer_output_layout,
+    _prenormalize_outputs,
+    _prepare_Y,
+    _warn_zero_variance_slices,
+)
 from gsax.sampling import SamplingResult, _saltelli_step
 from gsax.sobol._indices import (
     _fused_first_total,
@@ -564,7 +569,12 @@ def analyze(
             S1_conf, ST_conf, S2_conf — (2, ...) [lower, upper] CI bounds,
                  or None when ``num_resamples == 0``
     """
-    Y = jnp.asarray(Y)
+    # Resolve the user-supplied layout (sample axis first, labeled output axis
+    # last) against the unique design rows, BEFORE any expansion or resampling
+    # so every downstream stage sees canonical axes.
+    Y = _infer_output_layout(
+        Y, sampling_result.problem, int(sampling_result.samples.shape[0])
+    )
     # Map user-evaluated unique outputs back to the full Saltelli interleaving
     Y = _expand_unique_outputs(sampling_result, Y)
 

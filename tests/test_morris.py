@@ -518,7 +518,7 @@ class TestToDataset:
 class TestValidation:
     def test_y_length_mismatch_raises(self):
         sr = sample(UNIT_PROBLEM, n_trajectories=5, seed=1, verbose=False)
-        with pytest.raises(ValueError, match="n_total"):
+        with pytest.raises(ValueError, match="sample rows"):
             analyze(sr, jnp.ones(sr.n_total + 3))
 
     def test_y_wrong_ndim_raises(self):

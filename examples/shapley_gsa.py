@@ -87,10 +87,10 @@ def _ishigami_md(mo):
     3. **Analyse** — `gsax.analyze_shapley` fits the surrogate backend
        and reads the Shapley allocation off its variance decomposition.
 
-    The default `backend="pce"` is exact *within the fitted polynomial*
-    and accepts scalar outputs only.  Ishigami's sines need a degree-8
-    polynomial — the default `order=3` under-fits here (explained
-    variance $\approx 0.47$) and would trip the fit warning shown later.
+    The default `backend="pce"` is exact *within the fitted
+    polynomial*.  Ishigami's sines need a degree-8 polynomial — the
+    default `order=3` under-fits here (explained variance
+    $\approx 0.47$) and would trip the fit warning shown later.
     """)
     return
 
@@ -250,10 +250,11 @@ def _hdmr_md(mo):
     mo.md(r"""
     ## HDMR backend — multi-output Y
 
-    `backend="pce"` is scalar-only.  For multi-output `(N, K)` or
-    time-series `(N, T, K)` outputs, switch to `backend="hdmr"`: it fits
-    the RS-HDMR B-spline surrogate and uses its structural (ANCOVA)
-    component variances as the $V_u$.  The second output below,
+    Both backends accept multi-output `(N, K)` and time-series
+    `(N, T, K)` outputs.  `backend="hdmr"` fits the RS-HDMR B-spline
+    surrogate instead and uses its structural (ANCOVA) component
+    variances as the $V_u$ — the machinery built for correlated-input
+    separation.  The second output below,
     $\sum_i x_i^2$, is purely additive — no interactions to share — so
     its three indices coincide: $S_1 = \mathrm{Sh} = S_T = 1/3$ per
     input.  Each output row of $\mathrm{Sh}$ still sums to exactly 1.
@@ -294,10 +295,12 @@ def _interpretation(mo):
       fraction of $\mathrm{Var}(Y)$ — the sweep shows the warning firing
       below 0.5 and the shares converging as the fit improves.  Always
       check it before trusting the allocation.
-    - **Backend choice.**  `"pce"` (default) is exact within the fitted
-      polynomial and scalar-only; `"hdmr"` handles multi-output and
-      time-series `Y` and truncates at `maxorder`.  Both assume
-      independent inputs (a v1 limitation).
+    - **Backend choice.**  Both backends handle scalar, multi-output,
+      and time-series `Y`.  `"pce"` (default) is exact within the fitted
+      polynomial; `"hdmr"` truncates at `maxorder` and remains the
+      choice when you want the B-spline surrogate's ANCOVA
+      (correlated-input) separation.  Both assume independent inputs
+      (a v1 limitation).
     """)
     return
 

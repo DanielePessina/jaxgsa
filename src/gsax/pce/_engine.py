@@ -152,15 +152,20 @@ def sobol_from_coefficients(
 ) -> tuple[Array, Array, Array]:
     """Compute Sobol indices from PCE coefficients (Sudret 2008).
 
+    Batched over any leading output-slice dims: the term axis is always last,
+    and every reduction contracts it in a single vectorized operation (masked
+    matmuls and one einsum) — no Python loop over slices or parameter pairs.
+
     Args:
-        coefficients: (n_terms,) expansion coefficients.
-        multi_index: (n_terms, D) multi-index array.
+        coefficients: (..., n_terms) expansion coefficients; leading dims are
+            output slices (e.g. (T, K) for time-series outputs).
+        multi_index: (n_terms, D) multi-index array, shared by all slices.
 
     Returns:
         (S1, ST, S2) where:
-            S1: (D,) first-order indices.
-            ST: (D,) total-order indices.
-            S2: (D, D) second-order interaction indices (NaN diagonal).
+            S1: (..., D) first-order indices.
+            ST: (..., D) total-order indices.
+            S2: (..., D, D) second-order interaction indices (NaN diagonal).
     """
     mi = np.asarray(multi_index)
     D = mi.shape[1]
@@ -168,9 +173,10 @@ def sobol_from_coefficients(
     # contributed by the basis function Psi_alpha (Parseval's identity).
     c2 = jnp.asarray(coefficients) ** 2
 
-    # Total variance = sum of all c_alpha^2 excluding the constant term (alpha=0).
-    total_var = jnp.sum(c2[1:])
-    # Guard against zero-variance models (constant output).
+    # Total variance = sum of all c_alpha^2 excluding the constant term
+    # (alpha=0), per output slice.
+    total_var = jnp.sum(c2[..., 1:], axis=-1)
+    # Guard against zero-variance slices (constant output).
     inv_var = jnp.where(total_var == 0, jnp.nan, 1.0 / total_var)
 
     # "Active" means variable d has nonzero degree in multi-index alpha.
@@ -184,21 +190,21 @@ def sobol_from_coefficients(
 
     # First-order: terms where exactly one variable is active.
     only_i_mask = active & (active_count[:, None] == 1)  # (n_terms, D)
-    S1 = jnp.asarray(c2 @ only_i_mask) * inv_var  # (D,)
+    S1 = jnp.asarray(c2 @ only_i_mask) * inv_var[..., None]  # (..., D)
 
     # Total-order: all terms where variable i participates (any interaction order).
-    ST = jnp.asarray(c2 @ active) * inv_var  # (D,)
+    ST = jnp.asarray(c2 @ active) * inv_var[..., None]  # (..., D)
 
-    # Second-order: terms where exactly variables i and j are active (no others).
-    S2 = jnp.full((D, D), jnp.nan)
-    pair_mask = active_count == 2  # (n_terms,)
-    for i in range(D):
-        for j in range(i + 1, D):
-            mask = active[:, i] & active[:, j] & pair_mask
-            val = jnp.sum(c2 * mask) * inv_var
-            # Symmetric: S2_{ij} = S2_{ji}.
-            S2 = S2.at[i, j].set(val)
-            S2 = S2.at[j, i].set(val)
+    # Second-order: pair-membership tensor P[t, i, j] = True iff term t
+    # activates exactly x_i and x_j. Built in numpy at trace time — it costs
+    # n_terms * D^2 bools, small at this package's D/order regime — so the
+    # extraction is one einsum over the term axis for every slice and pair at
+    # once, instead of a Python loop over pairs.
+    pair = active[:, :, None] & active[:, None, :] & (active_count == 2)[:, None, None]
+    pair[:, np.arange(D), np.arange(D)] = False  # (n_terms, D, D)
+    S2 = jnp.einsum("...t,tij->...ij", c2, pair) * inv_var[..., None, None]
+    # The diagonal is not a pair index; keep it NaN, matching SAResult's S2.
+    S2 = jnp.where(jnp.eye(D, dtype=bool), jnp.nan, S2)
 
     return S1, ST, S2
 
@@ -215,18 +221,22 @@ def loo_error(
     Uses the identity: ``e_LOO_i = (Y_i - Phi_i @ c) / (1 - H_ii)``
     where ``H = Phi @ (Phi^T Phi + ridge*I)^{-1} @ Phi^T``.
 
+    The leverage ``H_ii`` depends only on ``Phi``, so a single hat-matrix
+    diagonal serves every output slice; residuals broadcast over trailing
+    slice columns.
+
     Args:
         Phi: (N, n_terms) design matrix.
-        Y: (N,) outputs.
-        coefficients: (n_terms,) fitted coefficients.
+        Y: (N,) outputs, or (N, M) with one column per output slice.
+        coefficients: (n_terms,) fitted coefficients, or (n_terms, M).
         ridge: Tikhonov parameter used during fitting.
         gram_inv_PhiT: Pre-computed ``(Phi^T Phi + ridge*I)^{-1} Phi^T``.
             If provided, avoids recomputing the Gram factorization.
 
     Returns:
-        Scalar LOO RMSE.
+        Scalar LOO RMSE for 1-D ``Y``, or (M,) per-slice LOO RMSE for 2-D.
     """
-    residuals = Y - Phi @ coefficients
+    residuals = Y - Phi @ coefficients  # (N,) or (N, M)
     if gram_inv_PhiT is None:
         gram = Phi.T @ Phi
         if ridge > 0:
@@ -236,5 +246,8 @@ def loo_error(
     leverage = jnp.sum(Phi * gram_inv_PhiT.T, axis=1)
     # A leverage of exactly 1 (interpolated point) would divide by zero below.
     leverage = jnp.clip(leverage, 0.0, 1.0 - 1e-10)
-    loo_residuals = residuals / (1.0 - leverage)
-    return jnp.sqrt(jnp.mean(loo_residuals**2))
+    denom = 1.0 - leverage
+    if residuals.ndim == 2:
+        denom = denom[:, None]  # broadcast the shared leverage over slices
+    loo_residuals = residuals / denom
+    return jnp.sqrt(jnp.mean(loo_residuals**2, axis=0))

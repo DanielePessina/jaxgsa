@@ -195,9 +195,9 @@ def analyze_hdmr(
     Args:
         problem: Parameter names and distributions.
         X: (N, D) input samples.
-        Y: (N,), (N, K), or (N, T, K) model outputs. A 2D array is always
-            interpreted as (N, K); for time-series with a single output,
-            reshape to (N, T, 1).
+        Y: (N,), (N, K), or (N, T, K) model outputs. A 2D array is read as
+            (N, K) unless ``problem.output_names`` has exactly one entry, in
+            which case the columns are T timepoints of that single output.
         prenormalize: When ``True``, standardize each output slice over the
             sample axis (subtract mean, divide by standard deviation) before
             fitting, which puts disparate output magnitudes on an equal
@@ -235,7 +235,7 @@ def analyze_hdmr(
     X = jnp.asarray(X)
     Y = jnp.asarray(Y)
 
-    _validate_xy_inputs(problem, X, Y)
+    Y = _validate_xy_inputs(problem, X, Y)
     N, D = X.shape
     # B-spline regression with backfitting needs a reasonable sample size
     # to avoid overfitting; 300 is a practical lower bound.

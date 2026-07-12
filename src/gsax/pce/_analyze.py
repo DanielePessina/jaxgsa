@@ -7,7 +7,12 @@ import warnings
 import jax.numpy as jnp
 from jax import Array
 
-from gsax._normalization import _validate_x, _warn_zero_variance_slices
+from gsax._normalization import (
+    _prepare_Y,
+    _squeeze_output_axes,
+    _validate_xy_inputs,
+    _warn_zero_variance_slices,
+)
 from gsax.pce._engine import (
     build_design_matrix,
     build_multi_index,
@@ -99,8 +104,10 @@ def analyze_pce(
     Args:
         problem: Parameter names and distributions.
         X: (N, D) input samples.
-        Y: (N,) model outputs (scalar output only; for multi-output or
-            time-series data use ``gsax.hdmr``).
+        Y: Model outputs — (N,) scalar, (N, K) multi-output, or (N, T, K)
+            time-series. All slices share one basis and are fitted in a
+            single multi-right-hand-side solve; indices are computed
+            independently per (t, k) slice.
         order: Maximum total polynomial degree. Higher orders capture
             sharper nonlinearity and higher-order interactions, but the
             term count C(D+order, order) grows fast and needs more samples
@@ -114,27 +121,26 @@ def analyze_pce(
             conservative, less overfit-prone fit).
 
     Returns:
-        PCEResult with S1, ST, S2, the fitted coefficients and multi-index
-        (usable with ``emulate_pce``), the effective ``order``, and the
-        leave-one-out RMSE goodness-of-fit diagnostic.
+        PCEResult with S1, ST, S2 (shaped ``(..., D)`` / ``(..., D, D)`` with
+        leading output/time dims mirroring ``Y``), the fitted coefficients and
+        multi-index (usable with ``emulate_pce``), the effective ``order``,
+        and the per-slice leave-one-out RMSE goodness-of-fit diagnostic.
 
     Raises:
-        ValueError: If ``Y`` is not 1-D, or ``X`` fails validation against
-            ``problem``.
+        ValueError: If ``X`` fails validation against ``problem`` or ``Y``'s
+            layout cannot be resolved against ``X``'s row count.
     """
     X = jnp.asarray(X)
-    Y = jnp.asarray(Y)
-
-    if Y.ndim != 1:
-        raise ValueError(
-            f"PCE currently supports scalar output only (Y.ndim must be 1), got {Y.ndim}"
-        )
-
-    _validate_x(problem, X)
+    Y = _validate_xy_inputs(problem, X, jnp.asarray(Y))
     N, D = X.shape
 
-    # A constant output makes every index 0/0 = NaN; warn once up front.
-    _warn_zero_variance_slices(Y)
+    # Canonicalize to (N, T, K); the fit and extraction below are batched
+    # over the flattened (T, K) slice grid in single vectorized operations.
+    Y_3d, squeeze_time, squeeze_output = _prepare_Y(Y)
+    _, T, K = Y_3d.shape
+
+    # A constant output slice makes every index 0/0 = NaN; warn once up front.
+    _warn_zero_variance_slices(Y_3d, output_names=problem.output_names)
 
     # Cap polynomial order so n_terms <= fit_ratio * N (prevents overfitting).
     effective_order = _auto_order(D, N, order, fit_ratio)
@@ -155,14 +161,33 @@ def analyze_pce(
     # Compute Gram factorization once, reused for both fitting and LOO.
     gram = Phi.T @ Phi + ridge * jnp.eye(Phi.shape[1])
     gram_inv_PhiT = jnp.linalg.solve(gram, Phi.T)
-    coeffs = gram_inv_PhiT @ Y
+    # The basis is identical for every output slice (the effective order
+    # depends only on N and D), so fitting all T*K slices is ONE shared solve
+    # with multiple right-hand sides -- a single vectorized matmul, no loops.
+    Y_flat = Y_3d.reshape(N, T * K)  # column t*K + k is slice (t, k)
+    coeffs_flat = gram_inv_PhiT @ Y_flat  # (n_terms, T*K)
+    # Terms-last layout, matching HDMR's Sa convention (slices lead).
+    coeffs = coeffs_flat.T.reshape(T, K, coeffs_flat.shape[0])
 
-    # Sobol indices are extracted analytically from the coefficients (Sudret 2008)
-    # -- no additional Monte Carlo sampling needed.
-    S1, ST, S2 = sobol_from_coefficients(coeffs, mi)
+    # Sobol indices are extracted analytically from the coefficients
+    # (Sudret 2008), batched over all slices -- no extra sampling, no loops.
+    S1, ST, S2 = sobol_from_coefficients(coeffs, mi)  # (T,K,D), (T,K,D,D)
 
-    # LOO RMSE as a cheap goodness-of-fit diagnostic (no resampling needed).
-    loo = loo_error(Phi, Y, coeffs, gram_inv_PhiT=gram_inv_PhiT)
+    # Per-slice LOO RMSE as a cheap goodness-of-fit diagnostic; the
+    # hat-matrix leverage is shared by every slice.
+    loo = loo_error(Phi, Y_flat, coeffs_flat, gram_inv_PhiT=gram_inv_PhiT)
+    loo = loo.reshape(T, K)
+
+    # Drop the singleton axes _prepare_Y inserted. S1/ST/coeffs end in
+    # (T, K, per-slice) and use the shared helper; S2 (extra trailing D) and
+    # loo (no trailing axis) are squeezed positionally.
+    S1 = _squeeze_output_axes(S1, squeeze_time, squeeze_output)
+    ST = _squeeze_output_axes(ST, squeeze_time, squeeze_output)
+    coeffs = _squeeze_output_axes(coeffs, squeeze_time, squeeze_output)
+    if squeeze_time and squeeze_output:
+        S2, loo = S2[0, 0], loo[0, 0]
+    elif squeeze_time:
+        S2, loo = S2[0], loo[0]
 
     return PCEResult(
         S1=S1,
@@ -189,11 +214,13 @@ def emulate_pce(result: PCEResult, X_new: Array) -> Array:
             the ``X`` passed to ``analyze_pce``.
 
     Returns:
-        (N_new,) predicted outputs.
+        Predicted outputs mirroring the training ``Y`` layout: ``(N_new,)``,
+        ``(N_new, K)``, or ``(N_new, T, K)``.
     """
     X_new = jnp.asarray(X_new)
 
     X_ref, input_types = _map_to_reference(X_new, result.problem)
     Phi = build_design_matrix(X_ref, result.multi_index, input_types, result.order)
-    # Prediction is a simple matrix-vector product: Y = Phi @ c (polynomial surrogate).
-    return Phi @ result.coefficients
+    # Prediction contracts the term axis (last on coefficients) for every
+    # output slice at once: Y = Phi @ c per slice, one einsum.
+    return jnp.einsum("nt,...t->n...", Phi, result.coefficients)

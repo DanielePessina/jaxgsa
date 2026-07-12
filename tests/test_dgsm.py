@@ -417,3 +417,94 @@ def test_single_param():
     assert result.sigma.shape == (1,)
     assert result.upper_bound.shape == (1,)
     assert result.lower_bound.shape == (1,)
+
+
+# ---------------------------------------------------------------------------
+# Time-series outputs
+# ---------------------------------------------------------------------------
+
+
+class TestTimeSeries:
+    """DGSM supports (D,) -> (T, K) functions and 4-D precomputed Jacobians."""
+
+    @staticmethod
+    def _fn_scalar(x):
+        return jnp.sum(x**2) + 2.0 * x[0]
+
+    # linear.PROBLEM has D=3 inputs; draw plain MC samples the same way the
+    # other DGSM tests do.
+
+    @classmethod
+    def _fn_ts(cls, x):
+        base = cls._fn_scalar(x)
+        # (T=3, K=2): affine images of one scalar model so every slice has
+        # identical (normalized) sensitivity structure.
+        scale = jnp.array([[1.0, 2.0], [0.5, 1.0], [3.0, 0.1]])
+        return scale * base
+
+    def _X(self, n=512):
+        return jnp.asarray(sample_mc(linear.PROBLEM, N=n, seed=3))
+
+    def test_time_series_fn_shapes(self):
+        X = self._X()
+        result = analyze(linear.PROBLEM, self._fn_ts, X)
+        assert result.nu.shape == (3, 2, 3)
+        assert result.sigma.shape == (3, 2, 3)
+        assert result.upper_bound.shape == (3, 2, 3)
+        assert result.lower_bound.shape == (3, 2, 3)
+        assert result.var_y.shape == (3, 2)
+
+    def test_time_series_slices_match_scalar(self):
+        X = self._X()
+        ts = analyze(linear.PROBLEM, self._fn_ts, X)
+        scalar = analyze(linear.PROBLEM, self._fn_scalar, X)
+        # Bounds are scale-invariant (nu and Var(Y) scale together).
+        for t in range(3):
+            for k in range(2):
+                np.testing.assert_allclose(
+                    np.asarray(ts.upper_bound[t, k]),
+                    np.asarray(scalar.upper_bound),
+                    rtol=1e-4,
+                )
+                np.testing.assert_allclose(
+                    np.asarray(ts.lower_bound[t, k]),
+                    np.asarray(scalar.lower_bound),
+                    rtol=1e-4,
+                )
+
+    def test_precomputed_4d_matches_autodiff(self):
+        import jax
+
+        X = self._X()
+        auto = analyze(linear.PROBLEM, self._fn_ts, X)
+        Y = jax.vmap(self._fn_ts)(X)
+        dfdx = jax.vmap(jax.jacrev(self._fn_ts))(X)  # (N, T, K, D)
+        pre = analyze(linear.PROBLEM, Y=Y, dfdx=dfdx)
+        np.testing.assert_allclose(np.asarray(pre.nu), np.asarray(auto.nu), rtol=1e-5)
+        np.testing.assert_allclose(
+            np.asarray(pre.upper_bound), np.asarray(auto.upper_bound), rtol=1e-5
+        )
+
+    def test_mismatched_y_dfdx_ndim_raises(self):
+        import jax
+
+        X = self._X(64)
+        Y = jax.vmap(self._fn_ts)(X)  # (N, T, K)
+        dfdx_3d = jax.vmap(jax.jacrev(self._fn_scalar))(X)[:, None, :]  # (N, 1, D)
+        with pytest.raises(ValueError, match="ndim"):
+            analyze(linear.PROBLEM, Y=Y, dfdx=dfdx_3d)
+
+    def test_chunked_time_series_matches_unchunked(self):
+        X = self._X(200)
+        full = analyze(linear.PROBLEM, self._fn_ts, X)
+        chunked = analyze(linear.PROBLEM, self._fn_ts, X, chunk_size=64)
+        np.testing.assert_allclose(np.asarray(chunked.nu), np.asarray(full.nu), rtol=1e-5)
+        np.testing.assert_allclose(np.asarray(chunked.sigma), np.asarray(full.sigma), rtol=1e-4)
+
+    def test_to_dataset_time_series(self):
+        X = self._X()
+        ds = analyze(linear.PROBLEM, self._fn_ts, X).to_dataset(
+            time_coords=[0.0, 0.5, 1.0]
+        )
+        assert ds["nu"].dims == ("time", "output", "param")
+        np.testing.assert_allclose(ds.coords["time"].values, [0.0, 0.5, 1.0])

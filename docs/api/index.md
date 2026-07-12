@@ -10,7 +10,7 @@ model on them, then analyze the outputs:
 - RS-HDMR: `analyze_hdmr()` -> `emulate_hdmr()` — sensitivity indices from any
   existing `(X, Y)` data, plus a reusable spline surrogate.
 - PCE: `analyze_pce()` -> `emulate_pce()` — Sobol indices computed analytically
-  from a polynomial surrogate. Efficient for smooth, scalar outputs.
+  from a polynomial surrogate. Efficient for smooth outputs.
 - Shapley effects: `analyze_shapley()` — a fair split of output variance across
   parameters that always sums to 1.
 - eFAST: `sample_efast()` -> `analyze_efast()` — frequency-based first- and
@@ -46,8 +46,23 @@ Array shapes throughout this reference use four letters:
 | `T` | Number of time steps for time-series outputs. |
 
 Model outputs `Y` are `(N,)` for a scalar output, `(N, K)` for multi-output,
-or `(N, T, K)` for time-series multi-output. A 2D `Y` is always interpreted as
-`(N, K)`, never `(N, T)`; reshape a single-output time series to `(N, T, 1)`.
+or `(N, T, K)` for time-series multi-output — the same contract across all
+ten methods. How a 2D `Y` is read depends on `problem.output_names`:
+
+- Without `output_names`, a 2D `Y` is always `(N, K)`, never `(N, T)`.
+- With exactly **one** entry in `output_names`, a 2D `Y` is read as `(N, T)`
+  — T timepoints of that single labeled output — and flows through as
+  `(N, T, 1)`.
+- With several entries, the column count must equal `len(output_names)`.
+
+You need not pass exactly the canonical layout. Every public entry point
+resolves `Y` from two signals — the expected sample count identifies the
+sample axis, and `len(problem.output_names)` (when set) identifies the output
+axis — through the same ladder: exact canonical shapes pass silently,
+unambiguously recoverable layouts (e.g. a transposed `(K, N)` array) are fixed
+with a `UserWarning` naming the transformation, and ambiguous layouts raise —
+gsax never guesses.
+
 Result arrays mirror the output layout: `(D,)`, `(K, D)`, or `(T, K, D)`. Each
 entry below states which shapes it accepts.
 
@@ -554,8 +569,11 @@ Accepted output shapes:
 
 Validation and behavior:
 
-- A 2D array is always interpreted as `(N, K)`, never `(N, T)`.
-- For a time-series with one output, reshape to `(N, T, 1)`.
+- A 2D array follows the package-wide label rule (see
+  [Shape Conventions](#shape-conventions)): `(N, K)` without
+  `problem.output_names`, `(N, T)` timepoints of the single labeled output
+  when `output_names` has exactly one entry. A single-output time series can
+  also be passed pre-reshaped as `(N, T, 1)`.
 - When `prenormalize=True`, `Y` is centered and scaled once per output slice
   over the sample axis after Saltelli reconstruction and non-finite-group
   cleanup.
@@ -707,7 +725,10 @@ Validation and behavior:
 - `maxorder` must be 1, 2, or 3.
 - When `D == 2`, `maxorder` cannot exceed 2.
 - `chunk_size` must be at least 1.
-- A 2D output array is always treated as `(N, K)`.
+- A 2D output array follows the package-wide label rule (see
+  [Shape Conventions](#shape-conventions)): `(N, K)` without
+  `problem.output_names`, `(N, T)` timepoints of the single labeled output
+  when `output_names` has exactly one entry.
 - When `prenormalize=True`, `Y` is centered and scaled once per output slice
   over the sample axis before surrogate fitting.
 
@@ -878,14 +899,16 @@ def analyze_pce(
 | --- | --- | --- | --- |
 | `problem` | `Problem` | required | Parameter names and distributions. |
 | `X` | `Array` | required | Input array with shape `(N, D)`. Any sampling scheme works; no structured design is needed. |
-| `Y` | `Array` | required | Output array with shape `(N,)` (scalar output only). |
+| `Y` | `Array` | required | Output array with shape `(N,)`, `(N, K)`, or `(N, T, K)`. All output slices share one polynomial basis and are fitted in a single multi-right-hand-side solve. |
 | `order` | `int` | `3` | Maximum total polynomial degree. 3-5 is typical for smooth models; check `loo_rmse` before trusting a higher order. Automatically reduced if the number of terms would exceed `fit_ratio * N`. |
 | `ridge` | `float` | `1e-8` | Tikhonov regularization parameter for the least-squares fit. Increase if the fit is ill-conditioned. |
 | `fit_ratio` | `float` | `0.5` | Maximum ratio of terms to samples before the order is reduced. Lower it for a more conservative (less overfit-prone) expansion. |
 
 Validation and behavior:
 
-- `Y` must be 1D. Multi-output and time-series outputs are not yet supported.
+- `Y` may be `(N,)`, `(N, K)`, or `(N, T, K)`; 2D `Y` follows the package-wide
+  label rule (see [Shape Conventions](#shape-conventions)). All output slices
+  share a single basis and a single effective `order`.
 - `X.shape[1]` must match `problem.num_vars`.
 - Uniform and truncated-Gaussian inputs use Legendre polynomials on `[-1, 1]`.
 - Untruncated Gaussian inputs use Hermite polynomials standardized to `N(0, 1)`.
@@ -908,7 +931,8 @@ def emulate_pce(result: PCEResult, X_new: Array) -> Array
 | `result` | `PCEResult` | Result from `analyze_pce()`. |
 | `X_new` | `Array` | New input points with shape `(N_new, D)`. |
 
-Returns `(N_new,)` predicted outputs.
+Returns predictions mirroring the training output layout: `(N_new,)`,
+`(N_new, K)`, or `(N_new, T, K)`.
 
 <a id="pceresult"></a>
 ### `PCEResult`
@@ -930,24 +954,30 @@ class PCEResult:
 
 | Field | Shape | Description |
 | --- | --- | --- |
-| `S1` | `(D,)` | First-order Sobol indices. |
-| `ST` | `(D,)` | Total-order Sobol indices. |
-| `S2` | `(D, D)` | Second-order interaction matrix with `NaN` diagonal. |
-| `coefficients` | `(n_terms,)` | Fitted PCE coefficients. |
-| `multi_index` | `(n_terms, D)` | Multi-index array mapping terms to polynomial degrees. |
-| `order` | `int` | Effective total polynomial degree used (may be less than requested). |
-| `loo_rmse` | `scalar or None` | Leave-one-out cross-validation RMSE. |
+| `S1` | `(D,)` / `(K, D)` / `(T, K, D)` | First-order Sobol indices; leading axes mirror the output layout. |
+| `ST` | `(D,)` / `(K, D)` / `(T, K, D)` | Total-order Sobol indices. |
+| `S2` | `(D, D)` / `(K, D, D)` / `(T, K, D, D)` | Second-order interaction matrix with `NaN` diagonal. |
+| `coefficients` | `(n_terms,)` / `(K, n_terms)` / `(T, K, n_terms)` | Fitted PCE coefficients, term axis last. |
+| `multi_index` | `(n_terms, D)` | Multi-index array mapping terms to polynomial degrees (shared by all slices). |
+| `order` | `int` | Effective total polynomial degree used (may be less than requested). A single int — all output slices share one basis. |
+| `loo_rmse` | `()` / `(K,)` / `(T, K)` or `None` | Leave-one-out cross-validation RMSE per output slice. |
 
 <a id="pceresult-to_dataset"></a>
 #### `PCEResult.to_dataset()`
 
 ```python
-ds = result.to_dataset()
+ds = result.to_dataset(time_coords=None)
 ```
 
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `time_coords` | `list \| np.ndarray \| None` | `None` | Coordinate values for the time dimension on 3D results. Defaults to integer time indices. |
+
 Converts PCE results to a labeled `xarray.Dataset` with `param` coordinates.
-Includes `S1`, `ST`, `S2` (with `param_i` / `param_j` dimensions), and
-`loo_rmse` when available.
+`S1` and `ST` are on dims `("param",)`, `("output", "param")`, or
+`("time", "output", "param")` depending on the output layout; `S2` uses
+`param_i` / `param_j` in place of `param`; `loo_rmse` (when available) uses
+only the leading dims — `()`, `("output",)`, or `("time", "output")`.
 
 Minimal example:
 
@@ -1010,7 +1040,7 @@ def analyze_shapley(
 | --- | --- | --- | --- |
 | `problem` | `Problem` | required | Parameter names and distributions. |
 | `X` | `Array` | required | Input array with shape `(N, D)` (given-data; no structured design needed). |
-| `Y` | `Array` | required | Output array. `backend="hdmr"`: `(N,)`, `(N, K)`, or `(N, T, K)`. `backend="pce"`: `(N,)` scalar only. |
+| `Y` | `Array` | required | Output array: `(N,)`, `(N, K)`, or `(N, T, K)` — both backends. |
 | `backend` | `Literal["hdmr", "pce"]` | `"pce"` | Surrogate whose variance decomposition is allocated. |
 | `prenormalize` | `bool \| None` | `None` (`False`) | HDMR only. SALib-style output standardization before fitting. |
 | `maxorder` | `int \| None` | `None` (`2`) | HDMR only. Maximum HDMR expansion order. |
@@ -1029,8 +1059,9 @@ Validation and behavior:
   with `order=4`). Knobs left as `None` fall back to the backend defaults
   shown in parentheses.
 - `X.shape[1]` must match `problem.num_vars`.
-- With `backend="pce"` (the default), `Y` must be 1D. Multi-output and
-  time-series outputs require `backend="hdmr"`.
+- Both backends accept `(N,)`, `(N, K)`, and `(N, T, K)` outputs; 2D `Y`
+  follows the package-wide label rule (see
+  [Shape Conventions](#shape-conventions)).
 - Shapley effects are computed **analytically** from the surrogate's variance
   decomposition — no permutation Monte Carlo. Each partial variance $V_u$ is
   split equally among the $|u|$ parameters in its interaction set:
@@ -1059,9 +1090,7 @@ Validation and behavior:
   plus the standard zero-variance `UserWarning`.
 - `backend="hdmr"` inherits `analyze_hdmr`'s constraints: at least
   300 samples are required (else `ValueError`), `maxorder` must be in
-  `{1, 2, 3}`, `maxorder` is clamped with a warning when `D < maxorder`, and a
-  2-D `Y` is always interpreted as `(N, K)` — a single-output time series must
-  be reshaped to `(N, T, 1)`.
+  `{1, 2, 3}`, and `maxorder` is clamped with a warning when `D < maxorder`.
 - Interactions above `maxorder` (HDMR) or the polynomial order (PCE) are
   absent from the allocation.
 
@@ -1085,7 +1114,7 @@ print(result.explained_variance)  # sum_u V_u / Var(Y) — surrogate fit quality
 print(result.S1)                  # (3,) — first-order, same surrogate
 print(result.ST)                  # (3,) — total-order, same surrogate
 
-# HDMR backend (multi-output / time-series Y) with HDMR-only knobs
+# HDMR backend (B-spline surrogate) with HDMR-only knobs
 result_hdmr = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y, backend="hdmr", maxorder=2)
 ```
 
@@ -1123,8 +1152,8 @@ Shape contract:
 | `Y` shape passed to `analyze_shapley()` | `Sh` / `S1` / `ST` |
 | --- | --- |
 | `(N,)` | `(D,)` |
-| `(N, K)` (HDMR backend only) | `(K, D)` |
-| `(N, T, K)` (HDMR backend only) | `(T, K, D)` |
+| `(N, K)` | `(K, D)` |
+| `(N, T, K)` | `(T, K, D)` |
 
 All indices are normalized by the surrogate's total decomposed variance
 `sum_u V_u`, so summing `Sh` over the parameter axis is exactly 1 (the Shapley
@@ -1241,8 +1270,11 @@ Accepted output shapes:
 
 Validation and behavior:
 
-- A 2D array is always interpreted as `(N*D, K)`, never `(N*D, T)`.
-- For a time-series with one output, reshape to `(N*D, T, 1)`.
+- A 2D array follows the package-wide label rule (see
+  [Shape Conventions](#shape-conventions)): `(N*D, K)` without
+  `problem.output_names`, `(N*D, T)` timepoints of the single labeled output
+  when `output_names` has exactly one entry. A single-output time series can
+  also be passed pre-reshaped as `(N*D, T, 1)`.
 - The leading dimension of `Y` must be a multiple of `problem.num_vars`.
 - `M` must match the value used during sampling.
 - Non-finite values in `Y` will propagate into the computed indices.
@@ -1400,10 +1432,10 @@ def analyze_dgsm(
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
 | `problem` | `Problem` | required | Problem definition with D parameters. |
-| `fn` | `Callable \| None` | `None` | JAX-differentiable function `(D,) -> ()` or `(D,) -> (K,)`. |
+| `fn` | `Callable \| None` | `None` | JAX-differentiable function returning `()`, `(K,)`, or `(T, K)` per sample. |
 | `X` | `Array \| None` | `None` | Sample matrix `(N, D)` in the problem's physical units, e.g. from `sample_mc()`. |
-| `Y` | `Array \| None` | `None` | Pre-computed forward outputs `(N,)` or `(N, K)`. |
-| `dfdx` | `Array \| None` | `None` | Pre-computed Jacobian `(N, D)` or `(N, K, D)`. |
+| `Y` | `Array \| None` | `None` | Pre-computed forward outputs `(N,)`, `(N, K)`, or `(N, T, K)`. |
+| `dfdx` | `Array \| None` | `None` | Pre-computed Jacobian `(N, D)`, `(N, K, D)`, or `(N, T, K, D)`; must satisfy `dfdx.ndim == Y.ndim + 1`. |
 | `chunk_size` | `int \| None` | `None` | Batch size for autodiff. Set it when differentiating a large model over many samples exhausts device memory. |
 
 Validation and behavior:
@@ -1411,12 +1443,16 @@ Validation and behavior:
 - Provide either `(fn, X)` for the autodiff path or `(Y, dfdx)` for the
   pre-computed path. Providing neither or mixing raises `ValueError`.
 - `X.shape[1]` must match `problem.num_vars`.
-- `fn` must accept a 1D array of shape `(D,)` and return a scalar `()` or
-  a 1D array `(K,)`.
+- `fn` must accept a 1D array of shape `(D,)` and return a scalar `()`, a
+  1D array, or a 2D array `(T, K)` per sample. A 1D return follows the same
+  label rule as 2D `Y` elsewhere: with exactly one entry in
+  `problem.output_names` it is read as `(T,)` timepoints of that single
+  output; otherwise it is `(K,)` outputs.
 - When `chunk_size` is set, the autodiff path processes samples in batches,
   padding the last chunk to avoid JIT recompilation.
-- For the pre-computed path, `dfdx` may be `(N, D)` for scalar output or
-  `(N, K, D)` for multi-output, and `Y` row count must match.
+- For the pre-computed path, `dfdx` may be `(N, D)` for scalar output,
+  `(N, K, D)` for multi-output, or `(N, T, K, D)` for time-series output.
+  `dfdx.ndim` must equal `Y.ndim + 1`, and the `Y` row count must match.
 - Zero-variance outputs produce `NaN` bounds (division by zero guarded).
 - A warning is emitted when upper bounds fall below lower bounds, suggesting
   insufficient samples.
@@ -1459,29 +1495,35 @@ class DGSMResult:
 
 | Field | Shape | Description |
 | --- | --- | --- |
-| `nu` | `(D,)` / `(K, D)` | $\mathbb{E}[(\partial f / \partial X_i)^2]$, the DGSM importance measure. |
-| `sigma` | `(D,)` / `(K, D)` | $\mathbb{E}[\partial f / \partial X_i]$, the mean partial derivative. |
-| `upper_bound` | `(D,)` / `(K, D)` | $C_i \cdot \nu_i / \mathrm{Var}(Y)$, Poincaré upper bound on $S_T$. |
-| `lower_bound` | `(D,)` / `(K, D)` | $\mathrm{Var}(X_i) \cdot \sigma_i^2 / \mathrm{Var}(Y)$, Kucherenko–Song lower bound on $S_T$. |
-| `var_y` | `()` / `(K,)` | Output variance (scalar for single output, per-component for multi-output). |
+| `nu` | `(D,)` / `(K, D)` / `(T, K, D)` | $\mathbb{E}[(\partial f / \partial X_i)^2]$, the DGSM importance measure. |
+| `sigma` | `(D,)` / `(K, D)` / `(T, K, D)` | $\mathbb{E}[\partial f / \partial X_i]$, the mean partial derivative. |
+| `upper_bound` | `(D,)` / `(K, D)` / `(T, K, D)` | $C_i \cdot \nu_i / \mathrm{Var}(Y)$, Poincaré upper bound on $S_T$. |
+| `lower_bound` | `(D,)` / `(K, D)` / `(T, K, D)` | $\mathrm{Var}(X_i) \cdot \sigma_i^2 / \mathrm{Var}(Y)$, Kucherenko–Song lower bound on $S_T$. |
+| `var_y` | `()` / `(K,)` / `(T, K)` | Output variance per output slice. |
 | `problem` | `Problem` | Problem definition used for the analysis. |
 
-Shape contract: scalar-output models (`fn: (D,) -> ()`) produce `(D,)` index
-arrays; multi-output models (`fn: (D,) -> (K,)`) produce `(K, D)`.
+Shape contract: scalar-output models (`fn` returning `()`) produce `(D,)`
+index arrays; multi-output models (`fn` returning `(K,)`) produce `(K, D)`;
+time-series models (`fn` returning `(T, K)`) produce `(T, K, D)`.
 
 <a id="dgsmresult-to_dataset"></a>
 #### `DGSMResult.to_dataset()`
 
 ```python
-ds = result.to_dataset()
+ds = result.to_dataset(time_coords=None)
 ```
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `time_coords` | `list \| np.ndarray \| None` | `None` | Coordinate values for the time dimension on 3D results. Defaults to integer time indices. |
 
 Converts DGSM results to a labeled `xarray.Dataset`.
 
 Behavior:
 
 - For scalar output, variables have dimension `(param,)`.
-- For multi-output (`K > 1`), variables have dimensions `(output, param)`.
+- For multi-output, variables have dimensions `(output, param)`.
+- For time-series output, variables have dimensions `(time, output, param)`.
 - Uses `problem.names` for `param` coordinates.
 - Uses `problem.output_names` when available, otherwise `y0`, `y1`, and so on.
 - Dataset contains `nu`, `sigma`, `upper_bound`, and `lower_bound` variables.
@@ -1768,8 +1810,11 @@ Validation and behavior:
 
 - `Y.shape[0]` must match `sampling_result.n_total` (the unique-row count);
   the expanded layout is reconstructed internally.
-- A 2D array is always interpreted as `(N, K)`, never `(N, T)`. For a
-  time-series with one output, reshape to `(N, T, 1)`.
+- A 2D array follows the package-wide label rule (see
+  [Shape Conventions](#shape-conventions)): `(N, K)` without
+  `problem.output_names`, `(N, T)` timepoints of the single labeled output
+  when `output_names` has exactly one entry. A single-output time series can
+  also be passed pre-reshaped as `(N, T, 1)`.
 - Elementary effects are computed in unit-cube coordinates, so `mu_star` is
   directly comparable across parameters regardless of their physical ranges;
   use `MorrisResult.to_physical_units()` for derivative-scale values

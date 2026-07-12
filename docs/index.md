@@ -18,7 +18,7 @@ features:
   - title: RS-HDMR
     details: Fits a spline surrogate to any existing (X, Y) data and reads Sobol-compatible indices off it, with a built-in emulator. Pick it when your model runs already exist and a structured design isn't an option.
   - title: PCE
-    details: Fits an orthogonal-polynomial surrogate and computes Sobol indices exactly from its coefficients. Very sample-efficient for smooth models with a scalar output.
+    details: Fits an orthogonal-polynomial surrogate and computes Sobol indices exactly from its coefficients. Very sample-efficient for smooth models.
   - title: Shapley Effects
     details: Splits output variance fairly among inputs — each interaction shared equally by its participants — so the effects sum to exactly 1. Computed analytically from a fitted PCE (default) or RS-HDMR surrogate, with no extra model runs.
   - title: eFAST
@@ -36,7 +36,7 @@ features:
   - title: Save & Reload Samples
     details: Persist a sample set with SamplingResult.save(), evaluate your model elsewhere, and reload with gsax.load() — the analysis metadata travels with the samples.
   - title: Multi-Output & Time-Series
-    details: Pass scalar, (N, K), or (N, T, K) outputs and get indices for every output and timestep in a single vectorized pass.
+    details: Pass scalar, (N, K), or (N, T, K) outputs to any of the ten methods and get indices for every output and timestep in a single vectorized pass. Set output_names and gsax disambiguates 2-D layouts, fixing obvious transposes with a warning.
   - title: Up to 668× Faster than SALib
     details: Fused JIT kernels and vectorized execution replace Python loops. Sobol up to 15.8× faster, HDMR up to 668× on multi-output workloads.
 ---

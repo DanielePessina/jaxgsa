@@ -259,7 +259,7 @@ def analyze(
     X = jnp.asarray(X)
     Y = jnp.asarray(Y)
 
-    _validate_xy_inputs(problem, X, Y)
+    Y = _validate_xy_inputs(problem, X, Y)
     if statistic not in ("median", "max", "mean"):
         raise ValueError(f"statistic must be 'median', 'max', or 'mean', got {statistic!r}")
     if n_bins < 2:

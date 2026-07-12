@@ -48,24 +48,128 @@ def _validate_x(problem: Problem, X: Array) -> None:
         )
 
 
-def _validate_xy_inputs(problem: Problem, X: Array, Y: Array) -> None:
+def _infer_output_layout(
+    Y: Array,
+    problem: Problem,
+    n_expected: int | None,
+) -> Array:
+    """Resolve a user-supplied output array to the canonical axis layout.
+
+    gsax's canonical layouts are ``(n,)``, ``(n, K)``, and ``(n, T, K)``, but
+    users do not always hand over exactly that. This helper infers the
+    semantic axes from the two signals available at every public entry point:
+    the expected sample count ``n_expected`` identifies the sample axis, and
+    ``len(problem.output_names)`` (when set) identifies the output axis K; a
+    remaining axis is time. The ladder is strict — exact canonical shapes pass
+    silently, unambiguously recoverable layouts are fixed with a
+    ``UserWarning`` naming the transformation, and ambiguous ones raise. It
+    never guesses.
+
+    Rules, in order:
+      1. Sample axis: if ``Y.shape[0] != n_expected`` but exactly one axis has
+         that length, it is moved first (with a warning); no matching axis
+         raises. When the leading axis already matches, position is trusted
+         even if another axis coincidentally matches too.
+      2. 2-D ``(n, M)``: with exactly one entry in ``problem.output_names``,
+         the columns are T timepoints of that single output and Y is reshaped
+         to ``(n, M, 1)``. With several entries, ``M`` must equal
+         ``len(output_names)`` (multi-output). Without ``output_names``, 2-D
+         always means ``(n, K)``.
+      3. 3-D ``(n, A, B)``: expected ``(n, T, K)``. If ``output_names`` is set
+         and only the middle axis matches its length, the trailing axes are
+         swapped (with a warning); if neither trailing axis matches, raises.
+
+    Args:
+        Y: User-supplied output array, 1-D to 3-D.
+        problem: Problem definition; ``output_names`` (when set) pins K.
+        n_expected: Expected sample count (X rows for given-data methods, the
+            design's unique row count for Sobol/Morris), or ``None`` when the
+            caller cannot know it independently (rule 1 is skipped).
+
+    Returns:
+        ``Y`` in canonical layout: ``(n,)``, ``(n, K)``, or ``(n, T, K)``.
+
+    Raises:
+        ValueError: If ``Y`` is not 1-D/2-D/3-D, no axis matches the expected
+            sample rows, or a labeled output axis cannot be located.
+    """
+    import warnings
+
+    Y = jnp.asarray(Y)
+    if Y.ndim not in (1, 2, 3):
+        raise ValueError(f"Y must be 1-D (N,), 2-D (N, K), or 3-D (N, T, K), got ndim={Y.ndim}")
+
+    if n_expected is not None and Y.shape[0] != n_expected:
+        matches = [ax for ax, size in enumerate(Y.shape) if size == n_expected]
+        if len(matches) == 1:
+            warnings.warn(
+                f"gsax: Y has shape {tuple(Y.shape)} but {n_expected} sample rows were "
+                f"expected; interpreting axis {matches[0]} as the sample axis and "
+                "moving it first",
+                stacklevel=3,
+            )
+            Y = jnp.moveaxis(Y, matches[0], 0)
+        else:
+            ambiguity = "no unambiguous" if matches else "no"
+            raise ValueError(
+                f"Y has shape {tuple(Y.shape)} with {ambiguity} axis matching the "
+                f"expected {n_expected} sample rows; pass Y as (n,), (n, K), or "
+                f"(n, T, K) with n={n_expected}"
+            )
+
+    K_labeled = len(problem.output_names) if problem.output_names is not None else None
+
+    if Y.ndim == 2 and K_labeled is not None:
+        M = Y.shape[1]
+        if K_labeled == 1:
+            # One labeled output: the columns are timepoints, not outputs.
+            # Flow as genuine (n, T, 1) so results keep the labeled output axis.
+            Y = Y[:, :, None]
+        elif M != K_labeled:
+            raise ValueError(
+                f"Y has {M} columns but problem.output_names lists {K_labeled} "
+                "outputs; a 2-D Y must have one column per named output "
+                "(pass (n, T, K) for multi-output time series)"
+            )
+    elif Y.ndim == 3 and K_labeled is not None and Y.shape[2] != K_labeled:
+        if Y.shape[1] == K_labeled:
+            warnings.warn(
+                f"gsax: Y has shape {tuple(Y.shape)} but only its middle axis "
+                f"matches the {K_labeled} named outputs; interpreting Y as "
+                "(n, K, T) and swapping the trailing axes to (n, T, K)",
+                stacklevel=3,
+            )
+            Y = jnp.swapaxes(Y, 1, 2)
+        else:
+            raise ValueError(
+                f"3-D Y has shape {tuple(Y.shape)} but no trailing axis matches "
+                f"the {K_labeled} entries in problem.output_names; expected "
+                "(n, T, K)"
+            )
+    return Y
+
+
+def _validate_xy_inputs(problem: Problem, X: Array, Y: Array) -> Array:
     """Validate the shared ``(problem, X, Y)`` contract of given-data methods.
+
+    Validates X and resolves Y to the canonical layout via
+    :func:`_infer_output_layout`, using X's row count as the expected sample
+    count. Callers must use the returned Y.
 
     Args:
         problem: Problem definition with ``num_vars`` parameters.
         X: Input sample matrix, expected shape ``(N, D)``.
-        Y: Model output, expected 1-D, 2-D, or 3-D with ``N`` leading rows.
+        Y: Model output, 1-D, 2-D, or 3-D (layout inferred when recoverable).
+
+    Returns:
+        ``Y`` in canonical ``(N,)`` / ``(N, K)`` / ``(N, T, K)`` layout.
 
     Raises:
         ValueError: If X is not 2-D, its column count does not match the
-            problem, Y is not 1-D/2-D/3-D, or X and Y have differing row
-            counts.
+            problem, or Y's layout cannot be resolved against X's row count.
     """
     _validate_x(problem, X)
-    if Y.ndim not in (1, 2, 3):
-        raise ValueError(f"Y must be 1-D (N,), 2-D (N, K), or 3-D (N, T, K), got ndim={Y.ndim}")
-    if X.shape[0] != Y.shape[0]:
-        raise ValueError(f"X has {X.shape[0]} rows but Y has {Y.shape[0]} rows")
+    return _infer_output_layout(Y, problem, int(X.shape[0]))
 
 
 def _squeeze_output_axes(arr: Array, squeeze_time: bool, squeeze_output: bool) -> Array:

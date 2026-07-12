@@ -24,7 +24,12 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from gsax._normalization import _prenormalize_outputs, _prepare_Y, _warn_zero_variance_slices
+from gsax._normalization import (
+    _infer_output_layout,
+    _prenormalize_outputs,
+    _prepare_Y,
+    _warn_zero_variance_slices,
+)
 from gsax.efast._result import EFASTResult
 from gsax.problem import Problem
 
@@ -145,6 +150,11 @@ def analyze(
         )
 
     D = problem.num_vars
+
+    # Resolve the user-supplied layout from the output labels. eFAST cannot
+    # know its sample count independently (rows are N*D with N free), so only
+    # the label-based rules apply here.
+    Y = _infer_output_layout(Y, problem, None)
 
     # Detect scalar output before _prepare_Y adds singleton dims
     is_scalar = Y.ndim == 1

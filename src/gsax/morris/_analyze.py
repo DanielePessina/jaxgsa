@@ -23,7 +23,12 @@ import numpy as np
 from jax import Array
 
 from gsax._bootstrap import _bootstrap_ci_endpoints
-from gsax._normalization import _prenormalize_outputs, _prepare_Y, _squeeze_output_axes
+from gsax._normalization import (
+    _infer_output_layout,
+    _prenormalize_outputs,
+    _prepare_Y,
+    _squeeze_output_axes,
+)
 from gsax.morris._result import MorrisResult
 from gsax.morris._sampling import MorrisSamplingResult
 
@@ -246,6 +251,12 @@ def analyze(
             "Y must have 1, 2, or 3 dimensions — (n_total,), (n_total, K), or "
             f"(n_total, T, K); got a {Y.ndim}-D array of shape {Y.shape}"
         )
+    # Resolve the user-supplied layout (sample axis first, labeled output axis
+    # last) against the unique design rows, BEFORE expansion and bootstrap so
+    # every downstream stage sees canonical axes.
+    Y = _infer_output_layout(
+        Y, sampling_result.problem, int(sampling_result.samples.shape[0])
+    )
     # Map user-evaluated unique outputs back to the full expanded layout
     Y = _expand_unique_outputs(sampling_result, Y)
     Y, squeeze_time, squeeze_output = _prepare_Y(Y)
