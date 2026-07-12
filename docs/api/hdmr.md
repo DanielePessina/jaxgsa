@@ -1,7 +1,9 @@
 # HDMR
 
-The HDMR module lives at `gsax.hdmr`. The canonical API reference now lives at
-[API Reference](/api/).
+RS-HDMR fits a B-spline surrogate to arbitrary `(X, Y)` data, yielding ANCOVA
+sensitivity indices and a reusable emulator. The module lives at `gsax.hdmr`.
+
+The canonical API reference now lives at [API Reference](/api/).
 
 Jump directly to:
 

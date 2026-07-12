@@ -7,7 +7,12 @@ from typing import Literal, NotRequired, TypeAlias, TypedDict
 
 
 class UniformInputSpec(TypedDict):
-    """TypedDict describing a uniform input distribution."""
+    """Uniform marginal distribution between ``low`` and ``high``.
+
+    Pass to :meth:`Problem.from_dict` as
+    ``{"dist": "uniform", "low": 0.0, "high": 1.0}``; a bare ``(low, high)``
+    tuple is accepted as shorthand for the same thing.
+    """
 
     dist: Literal["uniform"]
     low: float
@@ -15,7 +20,12 @@ class UniformInputSpec(TypedDict):
 
 
 class GaussianInputSpec(TypedDict):
-    """TypedDict describing a Gaussian input distribution."""
+    """Gaussian (normal) marginal distribution, optionally truncated.
+
+    Note that ``variance`` is the variance, not the standard deviation.
+    Provide ``low`` and/or ``high`` to truncate the support; omit both for an
+    unbounded Gaussian.
+    """
 
     dist: Literal["gaussian"]
     mean: float
@@ -125,10 +135,24 @@ def _normalized_input_to_dict(spec: _NormalizedInputSpec) -> UniformInputSpec | 
 # frozen for hashability and safety; init=False because we define a custom __init__ for validation.
 @dataclass(frozen=True, init=False)
 class Problem:
-    """Parameter names and optional finite bounds for a sensitivity problem.
+    """Immutable description of a model's uncertain input parameters.
 
-    The direct constructor accepts uniform marginals only. Use
-    :meth:`from_dict` when you need mixed uniform and Gaussian marginals.
+    Every gsax sampling and analysis function takes a ``Problem`` that names
+    the input parameters (in the order the model expects them) and gives each
+    one a marginal distribution. Instances are frozen, so one ``Problem`` can
+    safely be shared across analyses.
+
+    The direct constructor accepts uniform marginals only, given as finite
+    ``(low, high)`` bounds. Use :meth:`from_dict` when you need mixed uniform
+    and Gaussian marginals.
+
+    Attributes:
+        names: Parameter names in model-input order.
+        bounds: Per-parameter ``(low, high)`` tuples when every marginal is
+            uniform, or ``None`` as soon as any marginal is Gaussian (whose
+            support has no meaningful finite bounds).
+        output_names: Optional labels for the model's outputs, used to name
+            the ``output`` coordinate in ``to_dataset()`` exports.
     """
 
     names: tuple[str, ...]
@@ -146,7 +170,9 @@ class Problem:
 
         Args:
             names: Parameter names in model-input order.
-            bounds: Inclusive lower and upper bounds for each parameter.
+            bounds: One ``(low, high)`` pair per parameter, in the same order
+                as ``names``. Each parameter is sampled uniformly between its
+                bounds.
             output_names: Optional output labels used by ``to_dataset()``.
         """
         normalized_names = tuple(names)
@@ -170,11 +196,16 @@ class Problem:
         params: dict[str, InputSpecValue],
         output_names: tuple[str, ...] | None = None,
     ) -> "Problem":
-        """Create a ``Problem`` from tuple or TypedDict parameter specs.
+        """Create a ``Problem`` from per-parameter distribution specs.
+
+        This is the most general constructor: it accepts any mix of uniform
+        and Gaussian marginals. Parameter order follows the dict's insertion
+        order, which must match the column order of the model's input matrix.
 
         Args:
             params: Mapping from parameter name to one of:
-                ``(low, high)``, ``UniformInputSpec``, or ``GaussianInputSpec``.
+                a ``(low, high)`` tuple (shorthand for uniform),
+                a :class:`UniformInputSpec`, or a :class:`GaussianInputSpec`.
             output_names: Optional output labels used by ``to_dataset()``.
 
         Returns:

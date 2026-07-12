@@ -75,7 +75,10 @@ def _problem_md(mo):
     - **x11--x15**: dominant parameters
 
     The quadratic form $\mathbf{x}^\top M \mathbf{x}$ introduces pairwise
-    interactions, so $S_{T_i} > S_{1_i}$ for most parameters.
+    interactions. As a result each input's total-order index $S_T$ (its
+    variance share including all interactions) exceeds its first-order
+    index $S_1$ (the share it explains alone) for most parameters —
+    which is also why $\sum_i S_1 < 1$ in the printout below.
     """)
     return
 
@@ -241,7 +244,9 @@ def _hdmr_md(mo):
 
     RS-HDMR works from **arbitrary samples** — no structured design needed.
     We draw 3000 i.i.d. Gaussian samples and fit a B-spline surrogate with
-    second-order interactions (`maxorder=2`).
+    second-order interactions (`maxorder=2`).  There is no dedicated plot
+    for this run; its indices join the method-comparison chart further
+    down.
     """)
     return
 
@@ -477,9 +482,10 @@ def _summary(mo):
       For Gaussian inputs the Poincare constant $C_i = \sigma^2$ yields
       tighter upper bounds than uniform distributions.
 
-    The Oakley & O'Hagan benchmark demonstrates that gsax's methods
-    scale comfortably to moderate dimensionality and handle non-uniform
-    input distributions without special configuration.
+    In short: fifteen dimensions and Gaussian marginals need no special
+    configuration in gsax.  Pick the method by what you have — a
+    structured sampling budget (eFAST), an existing dataset (RS-HDMR),
+    or a differentiable model (DGSM).
     """)
     return
 

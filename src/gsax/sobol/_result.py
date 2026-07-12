@@ -12,29 +12,38 @@ from gsax.problem import Problem
 
 @dataclass
 class SAResult:
-    """Sobol sensitivity analysis results.
+    """Sobol sensitivity analysis results, returned by :func:`gsax.analyze`.
 
     Stores first-order (S1), total-order (ST), and optionally second-order (S2)
-    Sobol indices, with optional bootstrap confidence intervals.
+    Sobol indices, with optional bootstrap confidence intervals. Use
+    :meth:`to_dataset` to get a labeled xarray view keyed by parameter (and
+    output/time) names.
 
-    Shapes follow the convention ``(T, K, D)`` for time-resolved analyses or
-    ``(K, D)`` when the time dimension is squeezed, where *K* is the number of
-    outputs and *D* the number of parameters.
+    Index shapes mirror the shape of the analyzed output Y: ``(D,)`` for a
+    scalar output, ``(K, D)`` for multi-output, or ``(T, K, D)`` for
+    time-resolved analyses, where *D* is the number of parameters, *K* the
+    number of outputs, and *T* the number of time steps.
 
     ``S2`` is stored as a symmetric ``(..., D, D)`` matrix. Only the upper
     triangle is estimated directly; the lower triangle mirrors it for
-    convenience, and the diagonal is undefined and therefore set to ``NaN``.
+    convenience, and the diagonal (a parameter's interaction with itself) is
+    undefined and therefore set to ``NaN``.
 
     Confidence interval arrays (``*_conf``) have an extra leading dimension of
     size 2 representing ``[lower, upper]`` bounds. ``S2_conf`` follows the same
     symmetric-with-``NaN``-diagonal contract as ``S2``.
+
+    ``nan_counts`` reports how many entries of each index array are NaN
+    (typically caused by zero-variance output slices), keyed by index name.
+    For ``S2`` only the directly estimated upper triangle is counted, so the
+    always-NaN diagonal does not inflate the count.
     """
 
-    S1: Array  # (T, K, D) or (K, D) if time squeezed
-    ST: Array
+    S1: Array  # (D,), (K, D), or (T, K, D) — matches the analyzed Y shape
+    ST: Array  # same shape as S1
     S2: Array | None  # (..., D, D), symmetric, diagonal NaN, None if not computed
     problem: Problem
-    S1_conf: Array | None = None  # (2, T, K, D) or squeezed; [lower, upper]
+    S1_conf: Array | None = None  # (2, *S1.shape); [lower, upper]
     ST_conf: Array | None = None
     S2_conf: Array | None = None
     nan_counts: dict[str, int] | None = None

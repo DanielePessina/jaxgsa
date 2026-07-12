@@ -15,20 +15,28 @@ from gsax.problem import Problem
 class PCEResult:
     """Polynomial chaos expansion sensitivity analysis results.
 
-    Stores first-order (S1) and total-order (ST) Sobol indices computed
-    analytically from the expansion coefficients, plus the fitted
-    coefficients and multi-index for emulation.
+    Stores Sobol indices computed analytically from the expansion
+    coefficients, plus the fitted coefficients and multi-index so the
+    surrogate can be reused for prediction via ``pce.emulate``.
 
     Attributes:
-        S1: First-order Sobol indices, shape ``(D,)``.
-        ST: Total-order Sobol indices, shape ``(D,)``.
+        S1: First-order Sobol indices, shape ``(D,)``. Fraction of output
+            variance explained by each parameter acting alone.
+        ST: Total-order Sobol indices, shape ``(D,)``. Fraction of output
+            variance involving each parameter, interactions included;
+            ``ST - S1`` measures how strongly a parameter interacts.
         S2: Second-order interaction indices, shape ``(D, D)`` with NaN
             on the diagonal. Upper and lower triangles are symmetric.
         problem: Problem definition.
         coefficients: Fitted PCE coefficients, shape ``(n_terms,)``.
-        multi_index: Multi-index array, shape ``(n_terms, D)``.
-        order: Total polynomial degree used.
-        loo_rmse: Leave-one-out cross-validation RMSE, or None.
+            ``coefficients[0]`` is the constant (mean) term.
+        multi_index: Per-term polynomial degrees, shape ``(n_terms, D)``;
+            row ``t`` gives the degree of each input in term ``t``.
+        order: Effective total polynomial degree used (may be lower than
+            requested if the sample budget forced a reduction).
+        loo_rmse: Leave-one-out cross-validation RMSE, or None. In the
+            units of ``Y``; compare against ``Y.std()`` -- a ratio near or
+            above 1 means the surrogate (and its indices) is unreliable.
     """
 
     S1: Array

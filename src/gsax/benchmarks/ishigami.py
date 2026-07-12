@@ -1,7 +1,10 @@
 """Ishigami test function for sensitivity analysis benchmarking.
 
-A standard benchmark with 3 input parameters (x1, x2, x3) and known
-analytical Sobol indices, commonly used to validate sensitivity analysis methods.
+A standard 3-parameter benchmark with known analytical Sobol indices,
+widely used to validate sensitivity analysis methods. It is nonlinear
+and non-monotonic, and x3 influences the output *only* through its
+interaction with x1 (S1 = 0 but ST > 0), which makes it a sharp test of
+whether a method separates first-order from total-order effects.
 """
 
 from __future__ import annotations
@@ -47,8 +50,9 @@ def analytical_indices(
     - ``V = 1/2 + B*pi^4/5 + B^2*pi^8/18 + A^2/8``
 
     Args:
-        A: Model parameter controlling the second-order term.
-        B: Model parameter controlling the higher-order interaction term.
+        A: Amplitude of the ``sin^2(x2)`` term (the main effect of x2).
+        B: Coefficient of the ``x3^4*sin(x1)`` term, which drives the
+            x1-x3 interaction.
 
     Returns:
         ``(S1, ST, S2)`` where S1 and ST are ``(3,)`` arrays and S2 is
@@ -105,8 +109,9 @@ def analytical_shapley(A: float = 7.0, B: float = 0.1) -> np.ndarray:
     holds elementwise, and the effects sum to 1 exactly.
 
     Args:
-        A: Model parameter controlling the second-order term.
-        B: Model parameter controlling the higher-order interaction term.
+        A: Amplitude of the ``sin^2(x2)`` term (the main effect of x2).
+        B: Coefficient of the ``x3^4*sin(x1)`` term, which drives the
+            x1-x3 interaction.
 
     Returns:
         ``(3,)`` array of Shapley effects for x1, x2, x3.
@@ -139,8 +144,9 @@ def evaluate(X: Array, A: float = 7.0, B: float = 0.1) -> Array:
 
     Args:
         X: Input array of shape ``(N, 3)`` with columns x1, x2, x3.
-        A: Model parameter controlling the second-order term.
-        B: Model parameter controlling the higher-order interaction term.
+        A: Amplitude of the ``sin^2(x2)`` term (the main effect of x2).
+        B: Coefficient of the ``x3^4*sin(x1)`` term, which drives the
+            x1-x3 interaction.
 
     Returns:
         Array of shape ``(N,)`` with the function output for each sample.

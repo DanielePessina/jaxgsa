@@ -106,6 +106,23 @@ def analyze(
 ) -> DGSMResult:
     """Compute DGSM sensitivity indices and Sobol index bounds.
 
+    DGSM ranks inputs by how strongly the output reacts to them on
+    average: ``nu_i = E[(df/dx_i)^2]``, the mean squared partial
+    derivative over the input distribution. It is the natural pick when
+    the model is JAX-differentiable, because one autodiff sweep over an
+    ordinary Monte Carlo sample replaces a dedicated Sobol design. The
+    moments are converted into a bracket on the total Sobol index:
+
+    - **Upper bound** (Poincare / Sobol-Kucherenko inequality):
+      ``ST_i <= C_i * nu_i / Var(Y)``, where ``C_i`` is the Poincare
+      constant of input i's marginal distribution — the sharpest factor
+      for which the inequality holds (see :mod:`gsax.dgsm._poincare`).
+    - **Lower bound** (Kucherenko-Song):
+      ``ST_i >= Var(x_i) * sigma_i^2 / Var(Y)`` with
+      ``sigma_i = E[df/dx_i]``, the mean (signed) derivative.
+
+    An input whose upper bound is near zero is provably negligible.
+
     Two calling conventions are supported:
 
     **Autodiff path** (primary): pass ``fn`` and ``X``. The function is
@@ -122,10 +139,17 @@ def analyze(
         X: Sample matrix ``(N, D)`` in the problem's physical units.
         Y: Forward model outputs ``(N,)`` or ``(N, K)``.
         dfdx: Pre-computed Jacobian ``(N, D)`` or ``(N, K, D)``.
-        chunk_size: Batch size for autodiff (limits memory).
+        chunk_size: Batch size for the autodiff path; the Jacobian is
+            accumulated in chunks of this many samples to bound peak
+            memory. None (default) processes all N samples at once.
 
     Returns:
         DGSMResult with nu, sigma, upper_bound, lower_bound, and var_y.
+
+    Raises:
+        ValueError: If neither ``(fn, X)`` nor ``(Y, dfdx)`` is provided,
+            or if ``dfdx`` has an unexpected shape or does not match
+            ``Y`` / the problem dimension.
     """
     D = problem.num_vars
 

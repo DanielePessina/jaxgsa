@@ -1,3 +1,20 @@
+"""gsax: global sensitivity analysis in JAX.
+
+Typical workflow:
+
+1. Define a :class:`Problem` naming each model input and its distribution.
+2. Draw input samples — :func:`sample` for Sobol/Saltelli designs,
+   :func:`sample_morris` for Morris screening, :func:`sample_mc` for plain
+   Monte Carlo. Given-data methods (PAWN, HSIC, Borgonovo, ...) accept any
+   ``(N, D)`` input matrix, so no dedicated sampler is needed.
+3. Evaluate your model at the returned samples to obtain outputs ``Y``.
+4. Call the matching analysis function: :func:`analyze` for Sobol indices,
+   or one of the ``analyze_*`` entry points for the other methods.
+
+Every analysis returns a result dataclass (``SAResult``, ``MorrisResult``,
+...) with a ``to_dataset()`` method for labeled xarray export.
+"""
+
 from gsax._config import enable_compilation_cache
 from gsax.borgonovo import DeltaResult
 from gsax.borgonovo import analyze as analyze_borgonovo

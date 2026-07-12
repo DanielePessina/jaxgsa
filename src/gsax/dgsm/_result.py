@@ -14,15 +14,23 @@ from gsax.problem import Problem
 class DGSMResult:
     """Derivative-based global sensitivity measures and Sobol index bounds.
 
+    ``upper_bound`` and ``lower_bound`` bracket the total Sobol index
+    ``ST_i`` of each input: an input whose upper bound is near zero is
+    provably negligible, while a large lower bound certifies importance.
+
     For scalar-output models, index arrays have shape ``(D,)`` and
     ``var_y`` is a scalar.  For multi-output models, index arrays have
     shape ``(K, D)`` and ``var_y`` has shape ``(K,)``.
 
     Attributes:
-        nu: E[(df/dx_i)^2], the DGSM importance measure.
-        sigma: E[df/dx_i], the mean partial derivative.
-        upper_bound: C_i * nu_i / Var(Y), Poincare upper bound on ST.
-        lower_bound: Var_i * sigma_i^2 / Var(Y), Kucherenko-Song lower bound on ST.
+        nu: ``E[(df/dx_i)^2]``, the mean squared partial derivative over
+            the input distribution — the DGSM importance measure.
+        sigma: ``E[df/dx_i]``, the mean (signed) partial derivative; its
+            sign indicates the average direction of the effect.
+        upper_bound: ``C_i * nu_i / Var(Y)``, the Poincare upper bound on
+            ST (``C_i`` is the Poincare constant of input i's marginal).
+        lower_bound: ``Var(x_i) * sigma_i^2 / Var(Y)``, the
+            Kucherenko-Song lower bound on ST.
         var_y: Output variance.
         problem: Problem definition used for the analysis.
     """

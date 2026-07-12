@@ -77,10 +77,12 @@ def _ishigami_md(mo):
     The Ishigami function $f(x_1, x_2, x_3) = \sin x_1 + 7\sin^2 x_2
     + 0.1\,x_3^4 \sin x_1$ has three inputs uniform on $[-\pi, \pi]$ and
     a single interaction term — the $x_1$–$x_3$ pair.  The workflow is
-    the given-data one shared by HDMR, PCE, HSIC, PAWN, and Borgonovo:
+    the *given-data* one shared by HDMR, PCE, HSIC, PAWN, and Borgonovo
+    — it consumes whatever $(X, Y)$ data you already have, with no
+    method-specific sampling design:
 
-    1. **Sample** — any $(X, Y)$ pairs work; `gsax.sample_mc` draws plain
-       Monte Carlo points (no structured design needed).
+    1. **Sample** — here `gsax.sample_mc` draws plain Monte Carlo
+       points, but any sampling scheme would do.
     2. **Evaluate** — run the model on the samples.
     3. **Analyse** — `gsax.analyze_shapley` fits the surrogate backend
        and reads the Shapley allocation off its variance decomposition.

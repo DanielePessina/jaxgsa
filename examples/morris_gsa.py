@@ -357,7 +357,7 @@ def _interpretation(mo):
       derivative-like quantity, not a variance share — treat it as a
       proxy for the $S_T$ *ranking* and follow up with a variance-based
       method (Sobol, eFAST) on the surviving parameters.
-    - **Deduplication is free money.**  The verbose sampler line showed
+    - **Deduplication costs nothing.**  The verbose sampler line showed
       400 expanded rows collapsing to 64 unique evaluations (84% saved)
       on the 4-level grid — screening three parameters cost fewer model
       runs than a single Saltelli block.

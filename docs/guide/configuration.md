@@ -1,10 +1,12 @@
 # Configuration
 
-gsax runs on JAX and inherits JAX's runtime defaults. Two of those defaults are
-worth revisiting for sensitivity-analysis workloads: **numerical precision** and
-**compilation caching**. Both are opt-in and off by default, because they mutate
-global, process-wide state that the host application may also depend on. This
-page documents when to enable each and how.
+gsax needs no configuration to get started — the defaults are fine for most
+workloads, and you can safely skip this page at first. It runs on JAX and
+inherits JAX's runtime defaults, two of which are worth revisiting for
+sensitivity-analysis workloads: **numerical precision** and **compilation
+caching**. Both are opt-in and off by default, because they mutate global,
+process-wide state that the host application may also depend on. This page
+documents when to enable each and how.
 
 ## Precision (float32 vs float64)
 
@@ -34,7 +36,7 @@ import gsax  # arrays created after the flag is set now honour float64
 Setting the flag after JAX has already initialised arrays has no effect on those
 arrays, which is why the order matters.
 
-Double precision is not free. `x64` roughly **doubles memory use** and is
+Double precision is not free. Enabling x64 roughly **doubles memory use** and is
 **substantially slower on GPU and TPU**, where 32-bit throughput dominates the
 hardware. It is also a **global, process-wide** setting: every array in the
 process is affected, not just gsax's.

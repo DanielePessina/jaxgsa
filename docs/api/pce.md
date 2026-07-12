@@ -1,5 +1,8 @@
 # PCE
 
+Polynomial chaos expansion: Sobol indices computed analytically from a fitted
+orthogonal-polynomial surrogate. Efficient for smooth, scalar outputs.
+
 The canonical API reference now lives at [API Reference](/api/).
 
 Jump directly to:

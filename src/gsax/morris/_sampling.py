@@ -320,11 +320,17 @@ def sample(
 ) -> MorrisSamplingResult:
     """Generate unique Morris elementary-effects samples for model evaluation.
 
-    Builds ``n_trajectories`` one-at-a-time paths of ``D + 1`` points each
-    (``n_trajectories * (D + 1)`` expanded rows), removes exact duplicate rows
-    while preserving first-occurrence order, and returns only the unique rows
-    for the user to evaluate. :func:`gsax.morris.analyze` reconstructs the
-    expanded layout internally.
+    Morris screening ranks inputs by one-at-a-time finite differences
+    (elementary effects) spread across the whole input domain — the usual
+    first step for weeding out unimportant parameters before a more
+    expensive variance-based analysis. Each trajectory perturbs every
+    parameter exactly once, so the full design costs
+    ``n_trajectories * (D + 1)`` model evaluations at most.
+
+    This function builds those ``n_trajectories`` paths of ``D + 1`` points
+    each, removes exact duplicate rows while preserving first-occurrence
+    order, and returns only the unique rows for the user to evaluate.
+    :func:`gsax.morris.analyze` reconstructs the expanded layout internally.
 
     Gaussian marginals are supported through a truncated-quantile grid: the
     Morris design includes the unit-cube boundaries, which an unbounded
@@ -337,14 +343,19 @@ def sample(
     Args:
         problem: Problem definition with uniform and/or Gaussian marginals.
         n_trajectories: Number of trajectories r (>= 2). Each contributes one
-            elementary effect per parameter; typical screening uses 10-50.
+            elementary effect per parameter, so r is the sample size behind
+            every screening measure: more trajectories tighten the mu_star
+            ranking (and any bootstrap CIs) at proportionally more model
+            evaluations. Typical screening uses 10-50.
         num_levels: Grid levels ``p`` for the trajectory design (default 4,
             step ``delta = p / (2 * (p - 1))``). Even values make all levels
             equally probable; odd values trigger a warning. Ignored by the
             radial design.
         method: ``"trajectory"`` (Morris 1991 grid walks, default) or
             ``"radial"`` (Campolongo 2011 star designs around scrambled-Sobol'
-            base points).
+            base points). The radial design spreads points quasi-randomly
+            instead of on a coarse grid and has no ``num_levels`` to choose,
+            at the cost of fewer duplicate rows to deduplicate.
         scramble: Whether to Owen-scramble the Sobol' sequence (radial design
             only).
         seed: Random seed or generator for reproducibility. Pass an ``int``

@@ -183,30 +183,54 @@ def analyze_hdmr(
 ) -> HDMRResult:
     """Compute sensitivity indices via RS-HDMR with B-spline surrogate modelling.
 
-    Works with **any** set of (X, Y) pairs -- no structured sampling required.
-    Decomposes the input-output relationship into hierarchical component
-    functions using B-spline regression, then derives ANCOVA-based sensitivity
-    indices.
+    Works with **any** set of (X, Y) pairs -- no structured sampling required,
+    so it suits existing datasets and expensive models where Sobol/eFAST
+    sampling schemes are unaffordable. Decomposes the input-output
+    relationship into hierarchical component functions (one per parameter,
+    parameter pair, ...) via B-spline regression, then derives ANCOVA-based
+    sensitivity indices from the fitted components. Unlike pure Sobol
+    estimators, the ANCOVA split into structural (Sa) and correlative (Sb)
+    parts remains meaningful when inputs are correlated.
 
     Args:
-        problem: Parameter names and bounds.
+        problem: Parameter names and distributions.
         X: (N, D) input samples.
         Y: (N,), (N, K), or (N, T, K) model outputs. A 2D array is always
             interpreted as (N, K); for time-series with a single output,
             reshape to (N, T, 1).
         prenormalize: When ``True``, standardize each output slice over the
-            sample axis before fitting the surrogate by subtracting its mean
-            and dividing by its standard deviation once globally. The fitted
-            emulator is still returned on the original output scale. Defaults
-            to ``False``.
-        maxorder: Maximum HDMR expansion order (1, 2, or 3).
-        maxiter: Maximum backfitting iterations for first-order terms.
-        m: Number of B-spline intervals (basis size = m + 3 per dimension).
-        lambdax: Tikhonov regularization parameter.
-        chunk_size: Maximum number of (T, K) output combos per vmap batch.
+            sample axis (subtract mean, divide by standard deviation) before
+            fitting, which puts disparate output magnitudes on an equal
+            numerical footing. The indices are ratios and unaffected;
+            predictions from the returned emulator are still on the original
+            output scale. Defaults to ``False``.
+        maxorder: Maximum HDMR expansion order (1, 2, or 3): the largest
+            interaction size modelled. Order 2 (default) captures pairwise
+            interactions; 3 adds triples but the term count and fit cost grow
+            combinatorially. Clamped to D (with a warning) when D < maxorder.
+        maxiter: Maximum backfitting iterations for the first-order terms.
+            The default rarely needs raising; iteration stops early once the
+            coefficients stop changing.
+        m: Number of B-spline intervals per dimension (basis size m + 3).
+            Larger m resolves sharper features of the component functions but
+            multiplies the coefficient count (per-term basis grows as
+            (m+3)^order) and needs more samples to avoid overfitting.
+        lambdax: Tikhonov regularization strength. Increase for noisy Y or
+            small N (smoother, more stable components); decrease if genuine
+            sharp features are being oversmoothed.
+        chunk_size: Maximum number of (T, K) output slices fitted per vmap
+            batch. Caps peak device memory for large T*K; smaller values
+            trade speed for memory.
 
     Returns:
-        HDMRResult with Sa, Sb, S, ST, emulator, etc.
+        HDMRResult with per-term indices Sa, Sb, S, per-parameter ST,
+        human-readable term labels, F-test selection counts, the fitted
+        emulator (usable with ``emulate_hdmr``), and its RMSE.
+
+    Raises:
+        ValueError: If ``N < 300``, ``maxorder`` is not 1/2/3,
+            ``chunk_size < 1``, or (X, Y) fail validation against
+            ``problem``.
     """
     X = jnp.asarray(X)
     Y = jnp.asarray(Y)

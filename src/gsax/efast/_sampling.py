@@ -50,19 +50,30 @@ def sample(
 ) -> np.ndarray:
     """Generate eFAST samples along sinusoidal search curves.
 
-    For each of the D parameters, generates N samples along a search
-    curve where the focal parameter oscillates at frequency omega_0
-    and complementary parameters oscillate at lower frequencies. The
-    total output has shape (N * D, D).
+    For each of the D parameters, generates N samples along a search curve
+    where the focal parameter oscillates at the highest frequency omega_0
+    and the others at lower complementary frequencies. Evaluate the model
+    on every row (N * D runs total) and pass the outputs to
+    ``efast.analyze`` with the same ``M``, keeping the rows in order.
 
     Args:
         problem: Problem definition with parameter distributions.
         N: Number of samples per search curve. Must satisfy N > 4*M^2.
-        M: Interference factor (number of harmonics). Default 4.
-        seed: Random seed for phase shift reproducibility.
+            Larger N raises omega_0 = (N-1)//(2M), separating the focal
+            parameter's harmonics further from the complementary
+            frequencies and improving index accuracy, at the cost of
+            proportionally more model runs.
+        M: Interference factor -- how many harmonics of omega_0 are
+            credited to the focal parameter during analysis. Default 4
+            (the standard choice; rarely needs changing).
+        seed: Random seed for phase-shift reproducibility.
 
     Returns:
-        (N * D, D) sample array in the problem's physical units.
+        (N * D, D) sample array in the problem's physical units. Rows
+        ``i*N:(i+1)*N`` form the search curve for parameter ``i``.
+
+    Raises:
+        ValueError: If ``M < 1`` or ``N <= 4*M^2``.
     """
     if M < 1:
         raise ValueError(f"M must be >= 1, got {M}")

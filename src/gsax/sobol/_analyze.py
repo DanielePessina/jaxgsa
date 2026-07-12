@@ -103,7 +103,12 @@ def _count_nans(
     ST: Array,
     S2: Array | None,
 ) -> dict[str, int]:
-    """Count NaN values in computed Sobol index arrays (no reporting)."""
+    """Count NaN values per index array; callers decide whether to report.
+
+    For S2, only the strict upper triangle is counted — the diagonal is NaN
+    by construction (see ``_normalize_s2_matrix``) and would inflate the
+    count.
+    """
     counts: dict[str, int] = {
         "S1": int(jnp.sum(jnp.isnan(S1))),
         "ST": int(jnp.sum(jnp.isnan(ST))),
@@ -120,7 +125,15 @@ def _separate_output_values(
 ) -> tuple[Array, Array, Array, Array | None]:
     """De-interleave flat Saltelli output rows into A, B, AB, BA matrices.
 
-    Uses reshape-based extraction instead of per-parameter slicing for speed.
+    Args:
+        Y: Expanded outputs, shape (N * step, ...) with rows in Saltelli
+            group order.
+        D: Number of input parameters.
+        calc_second_order: Whether the layout includes BA blocks.
+
+    Returns:
+        (A, B, AB, BA) with shapes (N, ...), (N, ...), (N, D, ...), and
+        (N, D, ...) respectively; BA is None when second order is off.
     """
     step = 2 * D + 2 if calc_second_order else D + 2
     n_total = Y.shape[0]
@@ -165,10 +178,10 @@ def _normalize_s2_matrix(S2: Array) -> Array:
 def _expand_unique_outputs(sampling_result: SamplingResult, Y: Array) -> Array:
     """Rebuild expanded Saltelli outputs from unique user-evaluated outputs.
 
-    Saltelli sampling produces duplicate rows (e.g. row 0 of every AB_j group
-    is the same as A when j=0). The sampler deduplicates before returning
-    samples to the user, so Y has only unique rows. This function maps them
-    back to the full interleaved layout the estimators expect.
+    The sampler deduplicates the Saltelli design before returning samples to
+    the user, so Y has only unique rows (shape ``(n_total, ...)``). This
+    function gathers them back into the full interleaved layout the
+    estimators expect, shape ``(expanded_n_total, ...)``.
     """
     if Y.shape[0] != sampling_result.n_total:
         raise ValueError(
@@ -494,29 +507,40 @@ def analyze(
 ) -> SAResult:
     """Compute Sobol sensitivity indices from model outputs using JAX.
 
-    This is the main entry point. It accepts model outputs Y evaluated at the
-    unique rows returned by ``gsax.sample()``, reconstructs the expanded
-    Saltelli ordering internally, cleans non-finite values, and dispatches to
-    either the fast no-bootstrap path or the bootstrap path depending on
-    ``num_resamples``.
+    This is the main entry point of the package. Sobol indices apportion the
+    variance of a model output among its input parameters: S1 (first-order)
+    is the fraction of output variance explained by each parameter alone, ST
+    (total-order) additionally includes all of its interactions with other
+    parameters, and S2 (second-order) isolates pairwise interactions.
+
+    The function accepts model outputs Y evaluated at the unique rows
+    returned by ``gsax.sample()``, reconstructs the expanded Saltelli
+    ordering internally, drops sample groups containing non-finite values
+    (with a warning), and dispatches to either the fast no-bootstrap path or
+    the bootstrap confidence-interval path depending on ``num_resamples``.
 
     Args:
         sampling_result: Result from ``gsax.sample()`` containing the unique
             sample matrix plus expansion metadata.
         Y: Model outputs evaluated at each unique row of
-            ``sampling_result.samples``. Accepted shapes:
+            ``sampling_result.samples``, in the same row order. Accepted
+            shapes:
                 (n_total,)       — scalar output, single time step
                 (n_total, K)     — K outputs, single time step
                 (n_total, T, K)  — K outputs over T time steps
-            where ``n_total`` is the unique row count.
+            where ``n_total`` is the unique row count. Indices are computed
+            independently for every (t, k) output slice.
         prenormalize: When ``True``, apply SALib-style global output
             standardization over the cleaned expanded sample axis before
             computing Sobol indices. Each output slice is centered to mean 0
             and scaled to unit standard deviation once, not per bootstrap
             resample. Defaults to ``False``.
-        num_resamples: R, the number of bootstrap resamples for confidence
-            intervals. Set to 0 (default) to skip bootstrap.
-        conf_level: Confidence level for bootstrap CIs (default 0.95).
+        num_resamples: R, the number of bootstrap resamples used to estimate
+            confidence intervals. Set to 0 (default) to skip the bootstrap
+            entirely; a few hundred resamples is typically enough for stable
+            intervals.
+        conf_level: Two-sided confidence level for bootstrap CIs
+            (default 0.95).
         ci_method: Bootstrap CI endpoint method. ``"quantile"`` returns
             percentile lower/upper endpoints from the bootstrap draws.
             ``"gaussian"`` returns symmetric gaussian lower/upper endpoints
@@ -524,16 +548,21 @@ def analyze(
             Both methods still return lower/upper bounds, not half-widths.
         key: JAX PRNG key for bootstrap randomness. Required when
             ``num_resamples > 0``.
-        chunk_size: Controls vmap batch size. In the no-bootstrap path this
-            is the number of (T, K) combos per batch; in the bootstrap path
-            it is the number of resamples per batch. Defaults to 2048.
+        chunk_size: Memory/speed trade-off for batched computation. In the
+            no-bootstrap path this is the number of (T, K) output slices per
+            vmap batch; in the bootstrap path it is the number of resamples
+            per batch. Lower it if you hit device out-of-memory errors.
+            Defaults to 2048.
 
     Returns:
         SAResult containing:
             S1 — first-order indices, shape (D,) / (K, D) / (T, K, D)
+                 for Y of shape (n,) / (n, K) / (n, T, K) respectively
             ST — total-order indices, same shape as S1
-            S2 — second-order indices (D, D) / ... or None
-            S1_conf, ST_conf, S2_conf — (2, ...) CI bounds or None
+            S2 — second-order indices with shape (..., D, D), or None when
+                 the design was drawn with ``calc_second_order=False``
+            S1_conf, ST_conf, S2_conf — (2, ...) [lower, upper] CI bounds,
+                 or None when ``num_resamples == 0``
     """
     Y = jnp.asarray(Y)
     # Map user-evaluated unique outputs back to the full Saltelli interleaving

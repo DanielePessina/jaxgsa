@@ -36,6 +36,12 @@ def _intro(mo):
     | **Morris** | mu*, sigma screening measures (proxy for the ST *ranking*) |
     | **Shapley** | Sh fair variance shares (sum to 1) from a PCE surrogate, plus S1, ST |
     | **Borgonovo delta** | delta moment-independent density shift, plus given-data S1 |
+
+    Jargon key: **S1** (first-order Sobol index) is the share of output
+    variance an input explains on its own; **ST** (total-order) adds
+    every interaction the input takes part in; **S2** is the extra share
+    a pair explains jointly. The remaining measures (mu*, Sh, delta)
+    live on their own scales and are defined in their sections below.
     """)
     return
 
@@ -652,7 +658,7 @@ def _summary(mo):
     | **Shapley** | **Fair variance shares** summing to 1 — interaction attribution. |
     | **Borgonovo delta** | **Moment-independent** influence on the whole output density. |
 
-    - **Sobol** is the gold standard when you can afford
+    - **Sobol** is the reference method when you can afford
       $N \times (2D+2)$ evaluations and need pairwise interactions.
     - **eFAST** trades second-order detail for a lower sample
       budget ($N \times D$), making it ideal for factor screening.
@@ -673,6 +679,12 @@ def _summary(mo):
     - **Borgonovo delta** looks beyond variance entirely: it measures
       how the full output density shifts when an input is fixed, and
       returns a given-data $S_1$ from the same conditioning for free.
+
+    Two gsax methods sit outside this comparison because they don't
+    estimate variance shares at all: **HSIC** (kernel-based dependence
+    indices) and **PAWN** (Kolmogorov–Smirnov distances between
+    conditional and unconditional output CDFs). Both are given-data
+    methods — see their docs pages for when to reach for them.
     """)
     return
 

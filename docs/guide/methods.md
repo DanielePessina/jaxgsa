@@ -1,18 +1,55 @@
 # Methods
 
-gsax implements ten complementary approaches to global sensitivity analysis (GSA). The variance-based methods (Sobol', HDMR, PCE, eFAST) decompose the variance of a model's output into contributions attributable to individual input parameters and their interactions; Shapley effects reallocate that variance decomposition into a single fair share per parameter using the Shapley value from game theory; the derivative-based method (DGSM) uses autodiff to bound total Sobol indices directly from partial derivatives; the screening method (Morris) ranks parameters cheaply from finite-difference elementary effects; and the dependence-based methods (HSIC, PAWN, Borgonovo delta) quantify sensitivity without decomposing variance — HSIC through kernel-based dependence measures, PAWN through shifts in the output's cumulative distribution, and Borgonovo delta through shifts in the output's probability density. Together, these enable practitioners to identify which parameters drive model behaviour and which are effectively unidentifiable from available measurements.
+gsax implements ten methods for global sensitivity analysis (GSA). All of them answer the same broad question — which input parameters actually drive my model's output? — but they differ in what exactly they measure, how many model evaluations they cost, and whether they need a dedicated sampling design or can work with data you already have.
+
+If you're new to the package, start with [Choosing a Method](#choosing-a-method), then jump to the section for the method you picked. Each method section opens with what it measures and when you'd choose it, followed by the estimator details.
+
+Throughout this page, $D$ is the number of input parameters and $N$ is a sample count.
+
+## Choosing a Method
+
+Three questions narrow the field quickly.
+
+**1. Can you still choose where to run the model?** Four methods need their own sampling design, which gsax generates for you: Sobol' (Saltelli matrices), eFAST (search curves), Morris (trajectories), and DGSM (plain Monte Carlo plus autodiff). The other six — HDMR, PCE, Shapley effects, HSIC, PAWN, and Borgonovo delta — are **given-data** methods: they accept any set of $(X, Y)$ pairs, including simulation runs you already have.
+
+**2. What should the number mean?** Variance-based methods (Sobol', HDMR, PCE, eFAST, Shapley) report *fractions of output variance* — "parameter 3 explains 40% of the output's spread". Screening methods (Morris, DGSM) trade that precision for cheap, reliable *rankings*. Moment-independent methods (HSIC, PAWN, Borgonovo delta) measure how strongly an input affects the *whole output distribution* — the right lens when your output is skewed or heavy-tailed and variance feels like the wrong summary.
+
+**3. What's your evaluation budget?** Sobol' needs $N(2D+2)$ model runs by default ($N$ typically 1024+). Morris needs only $r(D+1)$ with $r \approx 10\text{–}50$ trajectories. DGSM gets the whole gradient for roughly the price of one evaluation per sample point (JAX-differentiable models only). The given-data methods cost nothing beyond the runs you already have.
+
+Common situations:
+
+- **"I can run the model freely and want the standard variance decomposition."** Use [Sobol' via Saltelli sampling](#sobol-indices-via-saltelli-sampling) — the reference method, with first-order, total-order, and second-order indices.
+- **"My model is expensive and has many parameters."** Screen first with [Morris](#morris-elementary-effects-screening) ($r(D+1)$ runs), or with [DGSM](#dgsm-derivative-based-global-sensitivity-measures) if the model is JAX-differentiable. Fix the negligible parameters, then spend the remaining budget on Sobol' for the survivors.
+- **"I only have existing simulation data."** Any given-data method works. [HDMR](#rs-hdmr-random-sampling-high-dimensional-model-representation) or [PCE](#pce-polynomial-chaos-expansion) for variance-based indices via a surrogate; [HSIC](#hsic-hilbert–schmidt-independence-criterion), [PAWN](#pawn-cdf-based-sensitivity), or [Borgonovo delta](#borgonovo-delta-density-based-sensitivity) for distribution-based indices.
+- **"My inputs are correlated."** Sobol', PCE, eFAST, DGSM, Morris, and Shapley all assume independent inputs. Use HDMR (which separates structural from correlation-induced variance), or HSIC / PAWN / Borgonovo delta (which make no independence assumption).
+- **"My output distribution is skewed or heavy-tailed."** Use [PAWN](#pawn-cdf-based-sensitivity) or [Borgonovo delta](#borgonovo-delta-density-based-sensitivity) — both compare whole output distributions rather than variances.
+- **"I want one fair importance number per parameter that sums to 1."** Use [Shapley effects](#shapley-effects).
+- **"I also want a fast emulator of my model."** Use HDMR (`emulate_hdmr`) or PCE (`emulate_pce`).
+
+### Comparison table
+
+| Consideration | Sobol' | HDMR | PCE | Shapley | eFAST | DGSM | Morris | HSIC | PAWN | Borgonovo delta |
+|---------------|--------|------|-----|---------|-------|------|--------|------|------|-----------------|
+| Sampling requirement | Structured Saltelli design, $N(2D+2)$ evaluations (default) | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Search curves, $N \times D$ evaluations | Plain MC, $N$ evaluations + autodiff | Trajectory or radial design, $r(D+1)$ evaluations (deduplicated) | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs |
+| Input independence | Assumed | Handled via ANCOVA decomposition | Assumed | Assumed (dependent-input Shapley is future work) | Assumed | Assumed | Assumed | Not assumed | Not assumed | Not assumed |
+| Input distributions | Uniform + Gaussian | Uniform + Gaussian (via CDF mapping) | Uniform + Gaussian | Uniform + Gaussian (both backends) | Uniform + Gaussian | Uniform + Gaussian (+ truncated Normal) | Uniform + Gaussian (truncated-quantile grid) | Uniform + Gaussian (via CDF mapping) | Uniform + Gaussian (via CDF mapping) | Any (rank-based classes; marginals not used) |
+| Output shapes | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar only | Scalar, multi-output, time-series (`hdmr` backend); scalar only (`pce`) | Scalar, multi-output, time-series | Scalar, multi-output | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series |
+| What the numbers mean | Exact variance fractions (given enough samples) | Variance fractions from a B-spline surrogate (fit-dependent) | Variance fractions from a polynomial surrogate (fit-dependent) | Exact allocation within the fitted surrogate; depends on fit quality | Exact variance fractions (given enough samples) | Bounds on $S_T$, not exact indices | Screening ranks ($\mu^*$ as $S_T$ proxy), not variance fractions | Dependence measure, not variance fractions | Distributional (KS) distance, not variance fractions | Distributional (L1) distance, not variance fractions |
+| Second-order indices | Direct estimation from cross-matrices | From interaction component functions | Analytical from coefficients | Not available (interaction variance folded into $\mathrm{Sh}$) | Not available | Not available | Not available | Not available | Not available | Not available |
+| Interaction detection | Via $S_2$ and the gap $S_T - S_1$ | Via explicit interaction component functions | Via $S_2$ from coefficients | Via the gaps $\mathrm{Sh} - S_1$ and $S_T - \mathrm{Sh}$ | Via the gap $S_T - S_1$ only | Not available (bounds only) | Via large $\sigma$ relative to $\mu^*$ (not pair-attributable) | Via the Total HSIC − R2-HSIC gap | Not available (first-order only) | Not available (the $\delta - S_1$ gap flags influence beyond first-order variance) |
+| Surrogate/emulator | No | Yes (`emulate_hdmr`) | Yes (`emulate_pce`) | Fits HDMR or PCE internally (no emulator returned) | No | No | No | No | No | No |
 
 ## Background: Variance-Based Sensitivity Analysis
 
 ### Why Global Sensitivity Analysis?
 
-Unlike local sensitivity methods (e.g. partial derivatives at a nominal point), global sensitivity analysis explores the **entire parameter space** simultaneously. This is essential for non-linear models where parameter interactions and non-monotonic responses mean that local gradients can be misleading. GSA quantifies the contribution of each parameter to output uncertainty and reveals which parameters have the strongest influence on observable outputs. Parameters with negligible sensitivity indices are effectively unidentifiable from available measurements, while high sensitivity indices indicate parameters that are likely to be well-constrained by data.
+Unlike local sensitivity methods (e.g. partial derivatives at a nominal point), global sensitivity analysis explores the **entire parameter space**. This matters for non-linear models, where interactions and non-monotonic responses mean a gradient at one point can be misleading. GSA quantifies each parameter's contribution to output uncertainty across the whole input domain.
 
-In practice, GSA serves multiple roles:
+In practice, GSA serves several roles:
 
-- **Parameter identifiability**: Ranking parameters by their sensitivity indices before fitting reveals which parameters can realistically be estimated. Parameters with near-zero indices across all outputs are practically unidentifiable and may need to be fixed rather than estimated.
-- **Experimental design**: For time-series outputs, the evolution of sensitivity indices over time can guide the selection of optimal measurement times, ensuring data is collected when outputs are most sensitive to the parameters of interest.
-- **Model simplification**: If interaction indices are negligible, the model response is approximately additive, and simpler surrogate models may suffice.
+- **Parameter identifiability**: parameters with near-zero sensitivity across all outputs are effectively unidentifiable from data and may need to be fixed rather than estimated; high-sensitivity parameters are the ones data can constrain.
+- **Experimental design**: for time-series outputs, watching sensitivity indices evolve over time helps pick measurement times when outputs are most informative about the parameters of interest.
+- **Model simplification**: if interaction indices are negligible, the model response is approximately additive, and simpler surrogate models may suffice.
 
 ### The Hoeffding–Sobol' Decomposition
 
@@ -34,35 +71,35 @@ where $V_i = \mathrm{Var}[f_i(X_i)]$, $V_{ij} = \mathrm{Var}[f_{ij}(X_i, X_j)]$,
 
 Dividing each variance component by $\mathrm{Var}(Y)$ yields the **Sobol' sensitivity indices**:
 
-**First-order index** — the fraction of output variance explained by parameter $i$ alone (main effect):
+**First-order index** $S_i$ — the fraction of output variance you could remove by fixing parameter $i$ at its true value (its main effect, ignoring interactions):
 
 $$
 S_i = \frac{V_i}{\mathrm{Var}(Y)} = \frac{\mathrm{Var}_{X_i}[\mathbb{E}_{\mathbf{X}_{\sim i}}(Y \mid X_i)]}{\mathrm{Var}(Y)}
 $$
 
-**Second-order index** — the additional variance from the pairwise interaction between $i$ and $j$, beyond their individual main effects:
+**Second-order index** $S_{ij}$ — the additional variance from the pairwise interaction between $i$ and $j$, beyond their individual main effects:
 
 $$
 S_{ij} = \frac{V_{ij}}{\mathrm{Var}(Y)}
 $$
 
-**Total-order index** — the total contribution of parameter $i$, including all interactions of any order with any other parameters:
+**Total-order index** $S_{T_i}$ — the fraction of output variance parameter $i$ is involved in at all, counting every interaction it participates in. A parameter with $S_{T_i} \approx 0$ can safely be fixed:
 
 $$
 S_{T_i} = \frac{\mathbb{E}_{\mathbf{X}_{\sim i}}[\mathrm{Var}_{X_i}(Y \mid \mathbf{X}_{\sim i})]}{\mathrm{Var}(Y)} = 1 - \frac{\mathrm{Var}_{\mathbf{X}_{\sim i}}[\mathbb{E}_{X_i}(Y \mid \mathbf{X}_{\sim i})]}{\mathrm{Var}(Y)}
 $$
 
-where $\mathbf{X}_{\sim i}$ denotes all inputs except $X_i$. By construction, $S_{T_i} \geq S_i$ always holds, with equality when parameter $i$ has no interactions with other parameters. The gap $S_{T_i} - S_i$ quantifies the total interaction contribution of parameter $i$.
+where $\mathbf{X}_{\sim i}$ denotes all inputs except $X_i$. By construction, $S_{T_i} \geq S_i$ always holds, with equality when parameter $i$ has no interactions. The gap $S_{T_i} - S_i$ quantifies how much of parameter $i$'s influence comes through interactions.
 
 ## Sobol' Indices via Saltelli Sampling
 
-gsax uses the **Saltelli sampling scheme** (Saltelli 2002, 2010), which constructs a structured set of quasi-random sample matrices so that first-order ($S_1$), total-order ($S_T$), and second-order ($S_2$) indices can all be estimated from a single batch of model evaluations.
+This is the reference method and gsax's default workflow: exact, model-free variance decomposition with well-understood convergence. Pick it when you can afford a dedicated sampling design and your inputs are independent. gsax uses the **Saltelli sampling scheme** (Saltelli 2002, 2010), which arranges quasi-random sample matrices so that first-order ($S_1$), total-order ($S_T$), and second-order ($S_2$) indices can all be estimated from a single batch of model evaluations.
 
 ### The Pick-Freeze Sampling Scheme
 
 The method generates two independent $N \times D$ quasi-random sample matrices $\mathbf{A}$ and $\mathbf{B}$ using a Sobol' low-discrepancy sequence (via `scipy.stats.qmc.Sobol`). For each parameter $j$, a **cross-matrix** $\mathbf{AB}^{(j)}$ is constructed by taking all columns from $\mathbf{A}$ except column $j$, which is replaced by column $j$ from $\mathbf{B}$. This "pick-and-freeze" construction allows conditional expectations to be estimated via sample averages.
 
-The total computational cost is $N(D + 2)$ model evaluations for all $D$ first-order and $D$ total-order indices.
+The cost is $N(D + 2)$ model evaluations for all first-order and total-order indices, or $N(2D + 2)$ when second-order indices are included (`calc_second_order=True`, the default).
 
 ### Estimators
 
@@ -80,7 +117,7 @@ $$
 \hat{S}_{T_i} = \frac{\frac{1}{2N}\sum_{n=1}^{N}\left(f(\mathbf{A})_n - f(\mathbf{AB}^{(i)})_n\right)^2}{\mathrm{Var}(Y)}
 $$
 
-**Variance normalisation**: All estimators normalise by a pooled output variance computed over the concatenation of $\mathbf{A}$ and $\mathbf{B}$ outputs (i.e. $\mathrm{Var}([\mathbf{A}; \mathbf{B}])$ over $2N$ points). Pooling both base-sample vectors doubles the effective sample size and gives a more robust variance estimate.
+**Variance normalisation**: all estimators normalise by a pooled output variance computed over the concatenation of $\mathbf{A}$ and $\mathbf{B}$ outputs (i.e. $\mathrm{Var}([\mathbf{A}; \mathbf{B}])$ over $2N$ points). Pooling both base-sample vectors doubles the effective sample size and gives a more robust variance estimate.
 
 ### How to use it
 
@@ -88,13 +125,7 @@ $$
 2. You evaluate your model on `sampling_result.samples`.
 3. `gsax.analyze()` reconstructs the Saltelli layout internally and computes all indices in a single `jit(vmap(...))` pass.
 
-Optional: `gsax.analyze(..., prenormalize=True)` applies SALib-style output
-standardization once per output slice over the sample axis before computing the
-Sobol estimators. This changes the point-estimate path to align more closely
-with SALib. When bootstrapping, `ci_method="quantile"` reports percentile
-bootstrap lower/upper bounds, while `ci_method="gaussian"` reports symmetric
-gaussian lower/upper bounds from the bootstrap standard deviation. `gsax` still
-returns endpoint arrays rather than SALib's symmetric confidence widths.
+Two optional knobs align results with SALib. `gsax.analyze(..., prenormalize=True)` applies SALib-style output standardization once per output slice before computing the estimators, which changes the point-estimate path to match SALib more closely. When bootstrapping (`num_resamples > 0`), `ci_method="quantile"` reports percentile bootstrap bounds and `ci_method="gaussian"` reports symmetric bounds from the bootstrap standard deviation; either way, gsax returns explicit lower/upper endpoint arrays rather than SALib's symmetric confidence widths.
 
 ### Index summary
 
@@ -104,15 +135,15 @@ returns endpoint arrays rather than SALib's symmetric confidence widths.
 | $S_T(i)$ | Fraction of output variance due to parameter $i$ including all its interactions. $S_T \geq S_1$ always. |
 | $S_2(i,j)$ | Fraction of output variance due to the pairwise interaction between $i$ and $j$, beyond their individual effects. |
 
-**When to use Sobol':** You can afford the structured Saltelli sampling design ($N(D+2)$ for first/total only, $N(2D+2)$ with second-order (default)) and want exact, model-free variance decomposition with independent inputs.
+**When to use Sobol':** you can afford the structured Saltelli design — $N(D+2)$ evaluations for first/total only, $N(2D+2)$ with second-order (default) — and want exact, model-free variance decomposition with independent inputs.
 
 ## RS-HDMR (Random Sampling High-Dimensional Model Representation)
 
-RS-HDMR takes a fundamentally different approach: instead of requiring a structured sampling design, it constructs a **B-spline surrogate** from any set of input–output pairs and then derives sensitivity indices analytically from the surrogate's variance decomposition.
+RS-HDMR is a given-data, variance-based method: it fits a **B-spline surrogate** to any set of $(X, Y)$ pairs and derives sensitivity indices analytically from the surrogate's variance decomposition. Pick it when model runs are expensive and you want to reuse existing data, when your inputs may be correlated, or when you also want a fast emulator of the model.
 
 ### Theoretical Background
 
-High-Dimensional Model Representation (HDMR) exploits the observation that, for many practical problems, only the low-order interactions among input variables significantly influence the model output. The RS-HDMR variant constructs component functions from randomly sampled input–output data, rather than requiring structured grids. The model is decomposed as:
+High-Dimensional Model Representation (HDMR) exploits the observation that, for many practical problems, only the low-order interactions among input variables significantly influence the output. The RS-HDMR variant constructs component functions from randomly sampled input–output data, rather than requiring structured grids. The model is decomposed as:
 
 $$
 f(\mathbf{X}) \approx f_0 + \sum_{i} f_i(X_i) + \sum_{i<j} f_{ij}(X_i, X_j) + \sum_{i<j<k} f_{ijk}(X_i, X_j, X_k)
@@ -122,26 +153,20 @@ where each component function is expanded in a B-spline basis and fitted via bac
 
 ### ANCOVA Decomposition
 
-Unlike the classical Sobol' decomposition which assumes independent inputs, RS-HDMR uses an **ANCOVA (analysis of covariance) decomposition** that separates each component's variance into:
+Unlike the classical Sobol' decomposition, which assumes independent inputs, RS-HDMR uses an **ANCOVA (analysis of covariance) decomposition** that separates each component's variance into:
 
 - **Structural variance ($S_a$)**: the contribution that would remain if all inputs were independent — analogous to the classical Sobol' index.
 - **Correlative variance ($S_b$)**: the additional contribution arising from correlations between inputs.
 
-This distinction is important in practice because many real-world models have correlated inputs (e.g. coupled physical parameters), and conflating structural and correlative contributions can lead to misleading sensitivity rankings.
+This distinction matters because many real-world models have correlated inputs (e.g. coupled physical parameters), and conflating structural and correlative contributions can produce misleading sensitivity rankings.
 
 ### How to use it
 
-1. You provide any set of $(X, Y)$ pairs — no structured sampling design required.
-2. `gsax.analyze_hdmr()` normalises inputs to $[0, 1]$, optionally
-   standardises outputs once over the sample axis via
-   `prenormalize=True`, builds B-spline basis matrices, and fits component
-   functions via backfitting with Tikhonov regularisation.
+1. You provide any set of $(X, Y)$ pairs — no sampling design required.
+2. `gsax.analyze_hdmr()` maps inputs to $[0, 1]$ via their marginal CDFs, optionally standardises outputs once over the sample axis (`prenormalize=True`), builds B-spline basis matrices, and fits component functions via backfitting with Tikhonov regularisation.
 3. The ANCOVA decomposition splits each component's variance into structural ($S_a$) and correlative ($S_b$) parts. Total-order indices ($S_T$) sum contributions from all terms involving a given parameter.
 
-When HDMR prenormalization is enabled, the fitted surrogate is trained on the
-standardized outputs but `gsax.hdmr.emulate()` (or the top-level alias
-`gsax.emulate_hdmr()`) maps predictions back to the original output scale
-before returning them.
+When prenormalization is enabled, the surrogate is trained on standardized outputs, but `gsax.hdmr.emulate()` (or the top-level alias `gsax.emulate_hdmr()`) maps predictions back to the original output scale before returning them.
 
 ### Index summary
 
@@ -153,13 +178,13 @@ before returning them.
 | $S_T(i)$ | Total-order per parameter: sum of $S$ for all terms involving parameter $i$. |
 
 **When to use HDMR:**
-- Model evaluations are expensive and you want to reuse existing runs (no structured design needed)
+- Model evaluations are expensive and you want to reuse existing runs
 - Inputs may be correlated (Sobol' assumes independent inputs)
 - You need a surrogate/emulator for fast prediction at new inputs (`gsax.hdmr.emulate`)
 
 ## PCE (Polynomial Chaos Expansion)
 
-PCE takes a spectral approach: it fits an orthogonal polynomial surrogate to `(X, Y)` data and then reads Sobol indices directly from the expansion coefficients (Sudret, 2008). The polynomial basis follows the Wiener-Askey scheme: Legendre polynomials for uniform inputs, Hermite polynomials for unbounded Gaussian inputs; truncated Gaussian inputs use Legendre polynomials after CDF mapping to [-1, 1].
+PCE is the second given-data, surrogate-based route to Sobol indices: it fits an orthogonal polynomial surrogate to $(X, Y)$ data and reads the indices directly from the expansion coefficients (Sudret, 2008), with no Monte Carlo estimation noise. Pick it when your model is smooth and your output is scalar. The polynomial basis follows the Wiener-Askey scheme: Legendre polynomials for uniform inputs, Hermite polynomials for unbounded Gaussian inputs; truncated Gaussian inputs use Legendre polynomials after CDF mapping to $[-1, 1]$.
 
 ### How to use it
 
@@ -171,12 +196,12 @@ PCE takes a spectral approach: it fits an orthogonal polynomial surrogate to `(X
 **When to use PCE:**
 - You want analytical Sobol indices without Monte Carlo sampling noise
 - Your model is smooth enough to be well-approximated by low-order polynomials
-- You have mixed uniform and Gaussian inputs (the Wiener-Askey scheme selects the optimal basis automatically)
+- You have mixed uniform and Gaussian inputs (the Wiener-Askey scheme selects the appropriate basis automatically)
 - You need a fast emulator for scalar-output models
 
 ## Shapley Effects
 
-Shapley effects apply the **Shapley value** from cooperative game theory to variance-based sensitivity analysis: the output variance is treated as a payout to be divided fairly among the input parameters, viewed as players whose coalition worths are the partial variances of the ANOVA decomposition (Owen, 2014; Song, Nelson & Staum, 2016). Like RS-HDMR and PCE, this is a **given-data** method: it works with any set of $(X, Y)$ pairs and requires no structured sampling design.
+The Shapley effect $\mathrm{Sh}_i$ is a single, fairly allocated importance score per parameter: each parameter's share of the output variance, with every interaction split evenly among its participants, so the scores sum to exactly 1. Pick it when you need one defensible number per parameter — for ranking, reporting, or budget allocation — rather than the two-sided $S_1$/$S_T$ view. It applies the **Shapley value** from cooperative game theory to variance-based sensitivity analysis, treating the output variance as a payout divided among the inputs, viewed as players whose coalition worths are the partial variances of the ANOVA decomposition (Owen, 2014; Song, Nelson & Staum, 2016). Like HDMR and PCE, it is a given-data method: any set of $(X, Y)$ pairs works.
 
 ### Theoretical Background
 
@@ -200,12 +225,14 @@ gsax computes Shapley effects **analytically** from a fitted surrogate's varianc
 - **`backend="pce"`** (default) fits a polynomial chaos expansion and groups the squared orthonormal coefficients by the support of their multi-index (Sudret, 2008) — exact within the fitted polynomial. Scalar outputs only.
 - **`backend="hdmr"`** fits the RS-HDMR B-spline surrogate and uses the structural ($S_a$) variances of its component functions as the partial variances $V_u$, truncated at `maxorder`. Supports multi-output and time-series `Y`.
 
-Normalization is by the surrogate's **total decomposed variance** $\sum_u V_u$, so $\sum_i \mathrm{Sh}_i = 1$ exactly — the Shapley efficiency property (Owen, 2014). $S_1$ and $S_T$ from the same surrogate use the same denominator, so for `backend="pce"` they match `analyze_pce` exactly, while for `backend="hdmr"` they differ from `analyze_hdmr` (which normalizes by $\mathrm{Var}(Y)$) by a factor of `explained_variance`. How much of the *output* variance the surrogate actually captured is reported separately in the `explained_variance` field, $\sum_u V_u / \mathrm{Var}(Y)$: close to 1 for a good fit, below 1 when truncation or fit error leaves variance unexplained, and above 1 when an overfit surrogate over-counts shared variance — an honest diagnostic rather than a silently renormalized result. A `UserWarning` is emitted when it strays far from 1. Interactions above `maxorder` (HDMR) or the polynomial order (PCE) are absent from the allocation.
+Normalization is by the surrogate's **total decomposed variance** $\sum_u V_u$, so $\sum_i \mathrm{Sh}_i = 1$ exactly — the Shapley efficiency property (Owen, 2014). $S_1$ and $S_T$ from the same surrogate use the same denominator, so for `backend="pce"` they match `analyze_pce` exactly, while for `backend="hdmr"` they differ from `analyze_hdmr` (which normalizes by $\mathrm{Var}(Y)$) by a factor of `explained_variance`.
+
+How much of the *output* variance the surrogate actually captured is reported separately in the `explained_variance` field, $\sum_u V_u / \mathrm{Var}(Y)$: close to 1 for a good fit, below 1 when truncation or fit error leaves variance unexplained, and above 1 when an overfit surrogate over-counts shared variance — an honest diagnostic rather than a silently renormalized result. A `UserWarning` is emitted when it strays far from 1. Interactions above `maxorder` (HDMR) or the polynomial order (PCE) are absent from the allocation.
 
 ### How to use it
 
-1. You provide any set of $(X, Y)$ pairs — no structured sampling design required.
-2. `gsax.analyze_shapley()` fits the selected surrogate backend (`"hdmr"` or `"pce"`), extracts its variance decomposition, and allocates each partial variance equally among the parameters in its interaction set.
+1. You provide any set of $(X, Y)$ pairs — no sampling design required.
+2. `gsax.analyze_shapley()` fits the selected surrogate backend (`"pce"` or `"hdmr"`), extracts its variance decomposition, and allocates each partial variance equally among the parameters in its interaction set.
 3. The result carries `Sh` alongside `S1` and `ST` computed from the **same surrogate**, so the three indices are directly comparable and the ordering $S_1 \leq \mathrm{Sh} \leq S_T$ is visible at a glance.
 
 ```python
@@ -241,7 +268,7 @@ Backend-specific keyword arguments are validated: explicitly setting a knob that
 | `explained_variance` | Fraction of $\mathrm{Var}(Y)$ the surrogate captured, $\sum_u V_u / \mathrm{Var}(Y)$ — a separate fit-quality diagnostic, not a per-parameter index. |
 
 **When to use Shapley effects:**
-- You want a single, fairly allocated importance score per parameter that sums to exactly 1 (e.g. for ranking, reporting, or budget allocation), with a separate `explained_variance` diagnostic reporting how much output variance the surrogate captured
+- You want a single, fairly allocated importance score per parameter that sums to exactly 1 (e.g. for ranking, reporting, or budget allocation)
 - Interactions matter and you want them attributed to their participants rather than omitted ($S_1$) or double-counted ($S_T$)
 - You have existing $(X, Y)$ pairs and want analytical indices without permutation Monte Carlo noise
 - Your inputs are independent (required in this version)
@@ -254,7 +281,7 @@ Backend-specific keyword arguments are validated: explicitly setting a knob that
 
 ## eFAST (Extended Fourier Amplitude Sensitivity Test)
 
-eFAST uses a frequency-based variance decomposition to compute first-order and total-order Sobol indices. Instead of the pick-and-freeze design used by Saltelli sampling, eFAST evaluates the model along **sinusoidal search curves** in the input space, then applies the discrete Fourier transform to extract variance contributions from the spectral content of the model output.
+eFAST computes the same first-order and total-order Sobol indices as the Saltelli workflow, but through a frequency-based decomposition with a simpler sampling design of $N \times D$ evaluations. Pick it when you need $S_1$ and $S_T$ but not second-order indices. Instead of pick-and-freeze matrices, eFAST evaluates the model along **sinusoidal search curves** in the input space, then applies the discrete Fourier transform to extract variance contributions from the spectral content of the output.
 
 ### How it works
 
@@ -282,7 +309,7 @@ The low-frequency content at or below $\lfloor\omega_0/2\rfloor$ is driven entir
 
 1. `gsax.sample_efast()` (or `efast.sample()`) generates search-curve samples with shape `(N * D, D)`, where each contiguous block of $N$ rows corresponds to one parameter's search curve.
 2. You evaluate your model on all `N * D` rows.
-3. `gsax.analyze_efast()` (or `efast.analyze()`) splits the output by curve, computes the Fourier spectrum for each, and extracts S1 and ST indices.
+3. `gsax.analyze_efast()` (or `efast.analyze()`) splits the output by curve, computes the Fourier spectrum for each, and extracts $S_1$ and $S_T$ indices.
 
 ### Index summary
 
@@ -294,10 +321,10 @@ The low-frequency content at or below $\lfloor\omega_0/2\rfloor$ is driven entir
 eFAST does **not** produce second-order ($S_2$) interaction indices. If pairwise interactions are needed, use the Sobol workflow instead.
 
 **When to use eFAST:**
-- You only need S1 and ST (no S2 required)
+- You only need $S_1$ and $S_T$ (no $S_2$ required)
 - You want a simpler sampling design without the Saltelli cross-matrix structure
 - You are screening a large number of parameters
-- The total cost is $N \times D$ evaluations, which can be lower than Saltelli's $N(D+2)$ for first/total only, $N(2D+2)$ with second-order (default), when $N$ is chosen smaller than the Saltelli base count
+- The total cost is $N \times D$ evaluations, which can be lower than Saltelli's $N(D+2)$ (first/total only) or $N(2D+2)$ (with second-order, the default) when $N$ is chosen smaller than the Saltelli base count
 
 ### Reference
 
@@ -305,7 +332,7 @@ Saltelli, A., Tarantola, S. & Chan, K.P.-S. (1999). A quantitative model-indepen
 
 ## DGSM (Derivative-based Global Sensitivity Measures)
 
-DGSM computes sensitivity information directly from the **partial derivatives** of the model output with respect to each input parameter. Unlike Sobol' or eFAST, which decompose output variance via structured sampling, DGSM exploits JAX's reverse-mode automatic differentiation to obtain exact gradients and then derives **bounds** on the total Sobol index $S_T$.
+DGSM is the cheapest quantitative method when your model is JAX-differentiable: it uses exact gradients from automatic differentiation to compute **bounds** on the total Sobol index $S_T$, at roughly the cost of one model evaluation per sample point. Pick it as a fast screening or sanity-check step before committing to a full Sobol' analysis — or use Morris (below) if your model is a black box.
 
 ### The DGSM Moments
 
@@ -389,11 +416,11 @@ Alternatively, if the Jacobian has been computed externally (e.g. for non-JAX mo
 
 ## Morris (Elementary Effects Screening)
 
-Morris is a global **screening** method — a globalized one-at-a-time (OAT) design. Instead of decomposing variance, it measures coarse finite-difference effects of each input at many locations spread across the whole input domain, then summarises them into cheap, robust importance measures. Its typical role is triage: with a fraction of the budget of a Sobol' analysis, Morris identifies which parameters are negligible and can be fixed before spending model evaluations on an exact variance decomposition.
+Morris is a global **screening** method: with only $r(D+1)$ model evaluations ($r$ typically 10–50 trajectories), it ranks parameters and flags which ones are negligible. Pick it as a triage step for expensive black-box models — fix the parameters Morris rules out, then spend your remaining budget on an exact method like Sobol' for the survivors. Technically it is a globalized one-at-a-time (OAT) design: it measures coarse finite-difference effects of each input at many locations spread across the input domain, then summarises them into robust importance measures.
 
 ### How it works
 
-The design consists of $r$ **trajectories**, each a path of $D + 1$ points where consecutive points differ in exactly one coordinate. The total cost is therefore $r(D+1)$ model evaluations, and each trajectory contributes one **elementary effect** per input:
+The design consists of $r$ **trajectories**, each a path of $D + 1$ points where consecutive points differ in exactly one coordinate. Each trajectory contributes one **elementary effect** per input — a finite-difference slope:
 
 $$
 EE_i = \frac{f(\mathbf{x} + \Delta \mathbf{e}_i) - f(\mathbf{x})}{\Delta}
@@ -409,8 +436,8 @@ Both uniform and Gaussian marginals are supported. The design includes the unit-
 The $r$ elementary effects per input are reduced to three screening measures:
 
 - $\mu_i$ — the **mean** elementary effect. Sign cancellation can mask non-monotonic influence, which is why $\mu$ alone is unreliable.
-- $\mu^*_i$ — the mean **absolute** elementary effect (Campolongo et al. 2007), the headline importance measure and a good proxy for the total-order index $S_T$ ranking.
-- $\sigma_i$ — the standard deviation of the elementary effects (ddof=1). A large $\sigma_i$ relative to $\mu^*_i$ indicates nonlinearity or interactions with other inputs.
+- $\mu^*_i$ — the mean **absolute** elementary effect (Campolongo et al. 2007). This is the headline importance measure — read it as "how strongly does the output respond, on average, when this input moves?" — and a good proxy for the total-order index $S_T$ ranking.
+- $\sigma_i$ — the standard deviation of the elementary effects (ddof=1). A large $\sigma_i$ relative to $\mu^*_i$ means the effect of input $i$ changes across the domain, indicating nonlinearity or interactions with other inputs.
 
 The canonical output is the **$\mu^*$–$\sigma$ scatter plot**: parameters near the origin are negligible, parameters far along the $\mu^*$ axis are influential, and parameters high above the diagonal act mainly through nonlinearity or interactions.
 
@@ -436,7 +463,7 @@ Compared to SALib's Morris implementation, gsax adds unique-row deduplication, v
 
 **When to use Morris:**
 - You want a cheap screening pass before committing to a full Sobol' run
-- Your model is a black box (not JAX-differentiable, otherwise consider DGSM)
+- Your model is a black box (not JAX-differentiable — otherwise consider DGSM)
 - You have many parameters and a tight evaluation budget — the cost is $r(D+1)$ with $r$ typically 10-50
 - You only need a ranking and an interaction flag, not exact variance fractions
 
@@ -449,7 +476,7 @@ Compared to SALib's Morris implementation, gsax adds unique-row deduplication, v
 
 ## HSIC (Hilbert–Schmidt Independence Criterion)
 
-HSIC takes a **kernel-based** view of sensitivity: instead of decomposing output variance, it measures the statistical *dependence* between each input and the output in a reproducing kernel Hilbert space (RKHS). By mapping inputs and outputs through Gaussian RBF kernels, HSIC detects **any** form of dependence — nonlinear, non-monotone, or heteroscedastic — that variance-based indices may underweight. Like RS-HDMR, it is a **given-data** method: it works with any set of $(X, Y)$ pairs and makes no independence assumption about the inputs.
+HSIC measures the statistical **dependence** between each input and the output — any dependence, including nonlinear, non-monotone, and heteroscedastic effects that variance-based indices can underweight. Pick it when you suspect your model's behaviour isn't well summarised by variance, when your inputs may be correlated, or when you want statistical significance tests attached to the indices. It works in a reproducing kernel Hilbert space (RKHS), mapping inputs and outputs through Gaussian RBF kernels. Like HDMR, it is a given-data method: any set of $(X, Y)$ pairs works, with no independence assumption on the inputs.
 
 ### The HSIC Dependence Measure
 
@@ -465,7 +492,7 @@ where $\mathbf{H}$ is the centering matrix. For characteristic kernels, $\mathrm
 
 gsax reports two normalised indices per parameter.
 
-**R2-HSIC** (first-order) — the normalised dependence between input $i$ and the output, analogous to a kernel correlation coefficient (centred kernel alignment):
+**R2-HSIC** (first-order) — the normalised dependence between input $i$ and the output, in $[0, 1]$; read it as a kernel analogue of a squared correlation coefficient (centred kernel alignment):
 
 $$
 R^2_{\mathrm{HSIC}, i} = \frac{\widehat{\mathrm{HSIC}}(X_i, Y)}{\sqrt{\widehat{\mathrm{HSIC}}(X_i, X_i)\,\widehat{\mathrm{HSIC}}(Y, Y)}}
@@ -509,7 +536,7 @@ HSIC is $O(N^2)$ in time and memory because it forms $N \times N$ kernel matrice
 
 ## PAWN (CDF-Based Sensitivity)
 
-PAWN takes a **distribution-based** (moment-independent) view: rather than asking how much of the output *variance* an input explains, it asks how much the **entire output distribution** shifts when that input is held fixed. It compares the unconditional output CDF against conditional CDFs obtained by fixing each input within a bin, using the **Kolmogorov–Smirnov (KS) distance** as the measure of separation (Pianosi & Wagener, 2015). Like HSIC and RS-HDMR, it is a given-data method that works with any $(X, Y)$ pairs and assumes no particular sampling design.
+PAWN asks a different question from the variance-based methods: not "how much variance does this input explain?" but "how much does the **entire output distribution** shift when this input is held fixed?". Pick it when you care about tails, skewness, or other distributional features that variance misses. It compares the unconditional output CDF against conditional CDFs obtained by fixing each input within a bin, using the **Kolmogorov–Smirnov (KS) distance** as the measure of separation (Pianosi & Wagener, 2015). Like HSIC and HDMR, it is a given-data method: any $(X, Y)$ pairs work, with no independence assumption on the inputs.
 
 ### The KS Distance
 
@@ -557,13 +584,13 @@ Pianosi, F. & Wagener, T. (2015). A simple and efficient method for global sensi
 
 ## Borgonovo Delta (Density-Based Sensitivity)
 
-Borgonovo's $\delta$ index is the second **moment-independent** method in gsax. Where PAWN summarises the distributional shift by the largest gap between CDFs, $\delta$ measures the expected **L1 distance between the entire output density** and the output density conditional on an input (Borgonovo, 2007):
+Borgonovo's $\delta$ index is the second **moment-independent** method in gsax, and the natural companion to PAWN: where PAWN summarises a distributional shift by the largest gap between CDFs, $\delta$ measures the expected **L1 distance between the entire output density** and the output density conditional on an input (Borgonovo, 2007). Pick it when you want a distribution-based index on a fixed $[0, 1]$ scale, or as a drop-in, faster replacement for `SALib.analyze.delta`:
 
 $$
 \delta_i = \frac{1}{2}\,\mathbb{E}_{X_i}\!\left[\int \left| f_Y(y) - f_{Y \mid X_i}(y) \right| \mathrm{d}y \right]
 $$
 
-The index lies in $[0, 1]$: it is $0$ when fixing $X_i$ never changes the output distribution, and $1$ when the output is a deterministic function of $X_i$ alone. Because it compares whole densities rather than variances, $\delta$ captures influence carried through tails, skewness, or multimodality that variance-based indices underweight, and it is invariant under monotone transformations of the output. Like HSIC and PAWN, it is a **given-data** method: any $(X, Y)$ pairs work, with no independence assumption on the inputs.
+The index is $0$ when fixing $X_i$ never changes the output distribution, and $1$ when the output is a deterministic function of $X_i$ alone. Because it compares whole densities rather than variances, $\delta$ captures influence carried through tails, skewness, or multimodality that variance-based indices underweight, and it is invariant under monotone transformations of the output. Like HSIC and PAWN, it is a given-data method: any $(X, Y)$ pairs work, with no independence assumption on the inputs.
 
 ### How it works
 
@@ -577,7 +604,9 @@ $$
 \hat{\delta}_i = \sum_{m=1}^{M} \frac{n_m}{2N} \int \left| \hat{f}_Y(y) - \hat{f}_{Y \mid X_i \in \mathcal{C}_m}(y) \right| \mathrm{d}y
 $$
 
-The plug-in estimate is **biased upward** at finite $N$, so by default gsax applies Plischke's bootstrap bias reduction $2\hat{\delta}_i - \overline{\hat{\delta}_i^{(b)}}$ over `n_bootstrap` resamples, with percentile confidence intervals from the same replicates. Because this correction subtracts a bootstrap mean from twice the plug-in estimate, the reported $\delta$ (and its percentile-interval bounds) can fall marginally below $0$ for weak or near-noninfluential inputs at small $N$, even though the true index and the plug-in estimate both lie in $[0, 1]$. The same class partition also yields the **given-data first-order Sobol index** (variance of the class means over the total variance) at negligible extra cost, so every analysis returns both $\delta$ and $S_1$.
+The plug-in estimate is **biased upward** at finite $N$, so by default gsax applies Plischke's bootstrap bias reduction $2\hat{\delta}_i - \overline{\hat{\delta}_i^{(b)}}$ over `n_bootstrap` resamples, with percentile confidence intervals from the same replicates. Because this correction subtracts a bootstrap mean from twice the plug-in estimate, the reported $\delta$ (and its percentile-interval bounds) can fall marginally below $0$ for weak or near-noninfluential inputs at small $N$, even though the true index and the plug-in estimate both lie in $[0, 1]$.
+
+The same class partition also yields the **given-data first-order Sobol index** (variance of the class means over the total variance) at negligible extra cost, so every analysis returns both $\delta$ and $S_1$.
 
 The estimator matches `SALib.analyze.delta` (same equal-frequency rank partition, class-count heuristic, Silverman KDE factors, and 100-point output grid) with three differences: the central estimate is computed on the original sample — deterministic given the data, where SALib evaluates it on a random resample; a constant output column yields $\delta = S_1 = 0$ instead of an error; and a bootstrap replicate that happens to be constant (reachable for rare-event outputs) contributes the point estimate rather than a spurious zero, where SALib raises `LinAlgError`.
 
@@ -606,19 +635,6 @@ Set `n_bootstrap=0` to skip bias correction and confidence intervals (raw plug-i
 
 - Borgonovo, E. (2007). A new uncertainty importance measure. *Reliability Engineering & System Safety*, 92(6), 771-784.
 - Plischke, E., Borgonovo, E. & Smith, C.L. (2013). Global sensitivity measures from given data. *European Journal of Operational Research*, 226(3), 536-550.
-
-## Choosing Between Them
-
-| Consideration | Sobol' | HDMR | PCE | Shapley | eFAST | DGSM | Morris | HSIC | PAWN | Borgonovo delta |
-|---------------|--------|------|-----|---------|-------|------|--------|------|------|-----------------|
-| Sampling requirement | Structured Saltelli design, $N(2D+2)$ evaluations (default) | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Search curves, $N \times D$ evaluations | Plain MC, $N$ evaluations + autodiff | Trajectory or radial design, $r(D+1)$ evaluations (deduplicated) | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs |
-| Input independence | Assumed | Handled via ANCOVA decomposition | Assumed | Assumed (dependent-input Shapley is future work) | Assumed | Assumed | Assumed | Not assumed | Not assumed | Not assumed |
-| Surrogate/emulator | No | Yes (`emulate_hdmr`) | Yes (`emulate_pce`) | Fits HDMR or PCE internally (no emulator returned) | No | No | No | No | No | No |
-| Accuracy | Exact (given enough samples) | Depends on B-spline fit quality | Depends on polynomial fit quality | Exact allocation within the fitted surrogate; depends on fit quality | Exact (given enough samples) | Bounds on $S_T$, not exact indices | Screening ranks ($\mu^*$ as $S_T$ proxy), not variance fractions | Dependence measure, not variance fractions | Distributional (KS) distance, not variance fractions | Distributional (L1) distance, not variance fractions |
-| Second-order indices | Direct estimation from cross-matrices | From interaction component functions | Analytical from coefficients | Not available (interaction variance folded into $\mathrm{Sh}$) | Not available | Not available | Not available | Not available | Not available | Not available |
-| Interaction detection | Via $S_2$ and the gap $S_T - S_1$ | Via explicit interaction component functions | Via $S_2$ from coefficients | Via the gaps $\mathrm{Sh} - S_1$ and $S_T - \mathrm{Sh}$ | Via the gap $S_T - S_1$ only | Not available (bounds only) | Via large $\sigma$ relative to $\mu^*$ (not pair-attributable) | Via the Total HSIC − R2-HSIC gap | Not available (first-order only) | Not available (the $\delta - S_1$ gap flags influence beyond first-order variance) |
-| Output shapes | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar only | Scalar, multi-output, time-series (`hdmr` backend); scalar only (`pce`) | Scalar, multi-output, time-series | Scalar, multi-output | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series |
-| Input distributions | Uniform + Gaussian | Any (via CDF mapping) | Uniform + Gaussian | Follows backend: any (`hdmr`), uniform + Gaussian (`pce`) | Uniform + Gaussian | Uniform + Gaussian (+ truncated Normal) | Uniform + Gaussian (truncated-quantile grid) | Any (via CDF mapping) | Any (via CDF mapping) | Any (rank-based classes) |
 
 ## Output Shapes
 

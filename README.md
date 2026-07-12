@@ -8,12 +8,14 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org)
 
-`gsax` computes global sensitivity indices entirely in JAX, giving you GPU/TPU acceleration and JIT compilation for free. It provides ten complementary methods: **Sobol indices** (via Saltelli sampling), **RS-HDMR** (surrogate-based, works with any input-output pairs), **PCE** (Polynomial Chaos Expansion with analytical Sobol indices), **Shapley effects** (fair, game-theoretic allocation of output variance, computed analytically from an HDMR or PCE surrogate), **eFAST** (Extended Fourier Amplitude Sensitivity Test), **DGSM** (Derivative-based Global Sensitivity Measures via JAX autodiff), **Morris** (elementary-effects screening with trajectory and radial designs), **HSIC** (the Hilbert–Schmidt Independence Criterion, a kernel-based dependence measure), **PAWN** (a moment-independent method based on output CDFs, after Pianosi & Wagener, 2015), and the **Borgonovo delta** (a moment-independent, density-based importance measure, after Borgonovo, 2007).
+`gsax` tells you which of your model's inputs actually drive its output. You give it input samples and the outputs your model produced for them; it returns sensitivity indices that rank the inputs and expose interactions. Everything is computed in JAX, so analyses are JIT-compiled and run on CPU, GPU, or TPU without code changes.
+
+Ten complementary methods are included: **Sobol indices** (the standard variance decomposition, via Saltelli sampling), **RS-HDMR** and **PCE** (surrogate-based — they fit a cheap approximation of your model to any existing input–output pairs and read the indices off the fit), **Shapley effects** (a fair, game-theoretic split of the output variance, computed analytically from a PCE or HDMR surrogate), **eFAST** (Fourier-based S1 and ST), **DGSM** (derivative-based bounds via JAX autodiff), **Morris** (cheap elementary-effects screening to discard unimportant inputs early), **HSIC** (kernel-based dependence detection), and two moment-independent measures that look at the whole output distribution rather than just its variance: **PAWN** (CDF-based, Pianosi & Wagener, 2015) and the **Borgonovo delta** (density-based, Borgonovo, 2007).
 
 ## Features
 
 - **Sobol indices** via Saltelli sampling with Sobol quasi-random sequences (`scipy.stats.qmc`)
-  - First-order (S1), total-order (ST), and second-order (S2) indices
+  - First-order (S1: an input's direct share of output variance), total-order (ST: including all its interactions), and second-order (S2: pairwise interactions)
   - Fused JIT kernels and chunked `jit(vmap(...))` execution for bounded memory on large output grids
   - [**Up to 668× faster than SALib**](#benchmark-results) (HDMR on multi-output workloads)
 - **RS-HDMR** (Random Sampling High-Dimensional Model Representation)
@@ -40,7 +42,7 @@
   - Poincare constants for uniform, Gaussian, and truncated Gaussian inputs
   - Pre-computed Jacobian path for non-JAX models
 - **Morris** (elementary-effects screening)
-  - Globalized one-at-a-time screening: mu_star importance ranking and sigma interaction flag at `r * (D + 1)` cost
+  - Globalized one-at-a-time screening: mu_star importance ranking and sigma interaction flag from only `r * (D + 1)` model runs (r trajectories, D inputs)
   - Trajectory (Morris, 1991) and radial (Campolongo et al., 2011) designs with unique-row deduplication
   - Bootstrap confidence intervals over trajectories and prefix-nested trajectory downsampling
 - **HSIC** (Hilbert–Schmidt Independence Criterion)
@@ -92,8 +94,8 @@ gsax inherits JAX's runtime defaults. Two optional knobs, documented in full in
 the [Configuration guide](https://danielepessina.github.io/gsax/guide/configuration):
 
 - **Double precision** — JAX defaults to float32 and silently downcasts `float64`.
-  For precision-sensitive Sobol/HSIC work, enable x64 *before the first array is
-  created*: `jax.config.update("jax_enable_x64", True)`.
+  For precision-sensitive Sobol/HSIC work, enable 64-bit floats *before the first
+  array is created*: `jax.config.update("jax_enable_x64", True)`.
 - **Persistent compilation cache** — reuse compiled kernels across process
   restarts (sweeps, CI, HPC) by calling
   `gsax.enable_compilation_cache("~/.cache/gsax-jax")` once, before your first analysis.
@@ -106,7 +108,7 @@ from gsax.benchmarks.ishigami import PROBLEM, evaluate
 
 # 1. Generate unique Sobol/Saltelli samples
 sampling_result = gsax.sample(PROBLEM, n_samples=4096, seed=42)
-# sampling_result.samples.shape == (n_total, D)  where n_total is the unique row count
+# sampling_result.samples.shape == (n_total, D)  — D parameters, n_total unique rows
 # sampling_result.expanded_n_total is the internal Saltelli row count used by analyze()
 # by default, sample() also prints a short summary of unique vs expanded rows
 
@@ -136,7 +138,17 @@ First-order indices (S1): [~0.31, ~0.44, ~0.00]
 Total-order indices (ST): [~0.56, ~0.44, ~0.24]
 ```
 
+Each index is a fraction of the output variance. S1 is an input's direct
+effect; ST also counts every interaction it takes part in. Here `x2` has the
+largest direct effect, while `x3` has no direct effect at all (S1 ≈ 0) but
+still matters through its interaction with `x1` (ST ≈ 0.24) — `result.S2`
+shows which pairs are responsible.
+
 ### RS-HDMR (surrogate-based)
+
+RS-HDMR fits a surrogate — a cheap spline approximation of your model — to any
+existing (X, Y) pairs and computes the indices from the fit. Use it when your
+model runs already exist and rerunning on a Saltelli design isn't an option.
 
 ```python
 import jax
@@ -157,7 +169,7 @@ result = gsax.analyze_hdmr(
     PROBLEM, X, Y,
     maxorder=2,
     prenormalize=False,  # default; set True for SALib-style output standardization
-    chunk_size=64,  # optional: limit T*K vmap batch size for memory control
+    chunk_size=64,  # optional: cap the vmap batch (timesteps x outputs) for memory control
 )
 
 # Sobol-compatible first-order and total-order indices
@@ -220,8 +232,9 @@ print("explained:", result.explained_variance)  # fraction of Var(Y) captured
 print("S1:", result.S1)              # (D,) first-order, same surrogate
 print("ST:", result.ST)              # (D,) total-order — S1 <= Sh <= ST per parameter
 
-# PCE backend (scalar Y only) with PCE-only knobs
-result_pce = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y, backend="pce", order=4)
+# The default backend="pce" handles scalar Y; switch to backend="hdmr"
+# for multi-output or time-series Y
+result_hdmr = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y, backend="hdmr")
 ```
 
 ### HSIC (kernel-based dependence)
@@ -246,9 +259,12 @@ print("p-values:", result.p_values)  # permutation-test significance
 
 ### PAWN (distribution/CDF-based)
 
-PAWN measures how much the **entire output CDF** shifts when an input is fixed,
-using the Kolmogorov–Smirnov distance between the unconditional and conditional
-distributions. It is moment-independent and needs no structured sampling.
+PAWN measures how much the **entire output distribution** (its CDF) shifts when
+an input is fixed, using the Kolmogorov–Smirnov distance between the
+unconditional and conditional distributions. Because it looks at the whole
+distribution rather than just the variance ("moment-independent"), it catches
+effects on tails and extremes that Sobol indices can miss. No structured
+sampling is needed.
 
 ```python
 import jax.numpy as jnp
@@ -284,10 +300,11 @@ print("sigma:", result.sigma)      # (D,) spread — nonlinearity/interactions
 
 ### Borgonovo delta (density-based, moment-independent)
 
-The Borgonovo delta measures the expected L1 shift of the **entire output
-density** when an input is fixed. The Plischke et al. (2013) given-data
-estimator works on any (X, Y) pairs and also returns the given-data
-first-order Sobol index from the same partition.
+The Borgonovo delta measures the average shift of the **entire output
+density** when an input is fixed — moment-independent like PAWN, but
+density-based. The Plischke et al. (2013) "given-data" estimator works on any
+existing (X, Y) pairs, no special sampling design required, and also returns
+the first-order Sobol index estimated from the same data partition.
 
 ```python
 import jax.numpy as jnp
@@ -390,13 +407,13 @@ result = gsax.analyze(
 # result.S2            — second-order interactions (None if not computed)
 ```
 
-Set `prenormalize=True` when you want global output standardization over the
-sample axis before analysis. The default `False` preserves the current gsax
-behavior. When bootstrapping with `num_resamples > 0`, use
-`ci_method="quantile"` for percentile bootstrap lower/upper endpoints or
-`ci_method="gaussian"` for symmetric gaussian lower/upper endpoints computed
-from the bootstrap standard deviation. Both options still return endpoint
-arrays, not SALib-style confidence half-widths, even when `prenormalize=True`.
+`prenormalize=True` standardizes the outputs over the sample axis before
+analysis, SALib-style; the default `False` analyzes the raw outputs. For
+confidence intervals, set `num_resamples > 0` and choose how the bootstrap
+distribution is summarized: `ci_method="quantile"` gives percentile
+lower/upper endpoints, `ci_method="gaussian"` gives symmetric endpoints from
+the bootstrap standard deviation. Either way gsax returns endpoint arrays,
+not SALib-style confidence half-widths — even when `prenormalize=True`.
 
 ### Multi-output models
 

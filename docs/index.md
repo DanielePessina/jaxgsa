@@ -12,32 +12,31 @@ hero:
     - theme: alt
       text: API Reference
       link: /api/problem
-
 features:
   - title: Sobol Indices
-    details: First-order, total-order, and second-order indices via Saltelli sampling with Sobol quasi-random sequences.
+    details: The standard variance-based method — first-order (S1), total-order (ST), and second-order (S2) shares of output variance. Pick it when you can choose where to evaluate your model.
   - title: RS-HDMR
-    details: Surrogate-based sensitivity analysis that works with any (X, Y) pairs. Includes a built-in emulator for prediction.
+    details: Fits a spline surrogate to any existing (X, Y) data and reads Sobol-compatible indices off it, with a built-in emulator. Pick it when your model runs already exist and a structured design isn't an option.
   - title: PCE
-    details: Polynomial Chaos Expansion with analytical Sobol indices from expansion coefficients. Wiener-Askey optimal basis for uniform and Gaussian inputs.
+    details: Fits an orthogonal-polynomial surrogate and computes Sobol indices exactly from its coefficients. Very sample-efficient for smooth models with a scalar output.
   - title: Shapley Effects
-    details: Fair, game-theoretic allocation of output variance — each interaction's variance split equally among its participants. Computed analytically from a fitted PCE (default) or RS-HDMR surrogate, with Sh summing to 1 alongside S1 and ST from the same fit.
+    details: Splits output variance fairly among inputs — each interaction shared equally by its participants — so the effects sum to exactly 1. Computed analytically from a fitted PCE (default) or RS-HDMR surrogate, with no extra model runs.
   - title: eFAST
-    details: Extended Fourier Amplitude Sensitivity Test. Frequency-based S1 and ST via sinusoidal search curves. Supports scalar, multi-output, and time-series outputs.
+    details: Estimates S1 and ST from the Fourier spectrum of the output along sinusoidal search curves. A classic alternative to Saltelli sampling that needs only a plain N × D design.
   - title: DGSM
-    details: Derivative-based Global Sensitivity Measures via JAX autodiff. Computes Poincare upper bounds and Kucherenko-Song lower bounds on total Sobol index ST.
+    details: Bounds the total Sobol index from model derivatives, obtained through JAX autodiff. A cheap screening option when your model is differentiable.
   - title: Morris Screening
-    details: Globalized one-at-a-time elementary-effects screening — mu_star importance ranking and sigma interaction flag at r * (D + 1) cost. Trajectory and radial designs with unique-row deduplication and bootstrap confidence intervals.
+    details: Coarse one-at-a-time screening that ranks inputs (mu_star) and flags nonlinearity or interactions (sigma) from very few model runs. Use it to discard unimportant inputs before a full Sobol study.
   - title: HSIC
-    details: Kernel-based dependence via the Hilbert–Schmidt Independence Criterion. Detects nonlinear, non-monotone, and heteroscedastic dependence with permutation p-values; works with any (X, Y) pairs.
+    details: Kernel-based measure that detects any statistical dependence — nonlinear, non-monotone, or heteroscedastic — from any (X, Y) pairs, with permutation p-values. Works even with correlated inputs.
   - title: PAWN
-    details: Moment-independent, CDF-based sensitivity via Kolmogorov–Smirnov distances between the unconditional and conditional output distributions.
+    details: Measures how much the whole output distribution (its CDF) shifts when an input is fixed, capturing effects that variance-based indices miss. Useful when tails and extremes matter, not just spread.
   - title: Borgonovo Delta
-    details: Moment-independent, density-based importance measure (Borgonovo, 2007). The Plischke et al. (2013) given-data estimator returns the delta index plus the given-data first-order Sobol S1 from any (X, Y) pairs, with bootstrap bias correction and confidence intervals.
+    details: Measures the shift of the entire output density when an input is fixed — moment-independent like PAWN, but density-based. The given-data estimator works on any (X, Y) pairs and includes bootstrap confidence intervals.
   - title: Save & Reload Samples
-    details: Persist unique sample matrices plus Saltelli reconstruction metadata with `SamplingResult.save()` and reload them later with `gsax.load()`.
+    details: Persist a sample set with SamplingResult.save(), evaluate your model elsewhere, and reload with gsax.load() — the analysis metadata travels with the samples.
   - title: Multi-Output & Time-Series
-    details: Pass scalar, (N, K), or (N, T, K) outputs. All indices are computed in a single vectorized pass.
+    details: Pass scalar, (N, K), or (N, T, K) outputs and get indices for every output and timestep in a single vectorized pass.
   - title: Up to 668× Faster than SALib
     details: Fused JIT kernels and vectorized execution replace Python loops. Sobol up to 15.8× faster, HDMR up to 668× on multi-output workloads.
 ---

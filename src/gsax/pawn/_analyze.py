@@ -1,8 +1,15 @@
 """PAWN analysis: distribution-based sensitivity via KS distances.
 
-Computes the Kolmogorov-Smirnov distance between the unconditional
-output CDF and the conditional CDF when each input is fixed in a bin.
+Computes the Kolmogorov-Smirnov (KS) distance — the largest vertical gap
+between two empirical CDFs — between the unconditional output CDF and
+the conditional CDF when each input is confined to a bin of its range.
 The PAWN index aggregates KS values across bins via median, max, or mean.
+
+Array shape conventions used throughout:
+    N  — number of samples
+    D  — number of input parameters
+    T  — number of time steps (singleton-squeezed when absent)
+    K  — number of output variables (singleton-squeezed when absent)
 
 The KS computation is vectorized: each output column is sorted once, and
 the unconditional and per-bin conditional ECDFs are compared only at
@@ -203,13 +210,35 @@ def analyze(
 ) -> PAWNResult:
     """Compute PAWN sensitivity indices.
 
+    PAWN measures how much fixing an input changes the whole output
+    *distribution*, not just its variance. For each input, the samples
+    are split into ``n_bins`` conditioning bins (equal-width on the
+    CDF-transformed unit interval, i.e. equal-probability under the
+    input's marginal), and each bin's conditional output CDF is compared
+    with the unconditional CDF via the Kolmogorov-Smirnov (KS) statistic
+    — the largest vertical gap between the two CDFs, a number in [0, 1].
+    The per-bin KS values are then aggregated (median by default) into
+    one index per input: 0 means the input has no effect on the output
+    distribution; larger values mean stronger influence.
+
+    It is a given-data method — any (X, Y) sample works, with no special
+    design — and a good pick when the output is skewed or multimodal, so
+    that variance-based indices summarize its uncertainty poorly.
+
     Args:
         problem: Problem definition with D parameters.
         X: Input sample matrix ``(N, D)``.
         Y: Model output ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
-        n_bins: Number of equal-width conditioning bins per input.
-        statistic: Aggregation of KS values across bins
-            (``"median"``, ``"max"``, or ``"mean"``).
+        n_bins: Number of conditioning bins per input (equal-probability
+            under each input's marginal). More bins condition each input
+            more tightly but leave fewer samples per bin (roughly
+            ``N / n_bins``), making each KS value noisier; the default
+            of 10 suits N in the thousands.
+        statistic: Aggregation of KS values across bins. ``"median"``
+            (default) is robust to a few noisy bins; ``"max"`` is the
+            conservative choice for screening out non-influential inputs
+            (an input is negligible only if *no* bin shifts the output);
+            ``"mean"`` weights all bins equally.
         n_bootstrap: Number of bootstrap resamples for confidence
             intervals. Set to 0 to skip.
         conf_level: Confidence level for bootstrap intervals.

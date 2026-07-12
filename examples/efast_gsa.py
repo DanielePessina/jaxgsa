@@ -74,6 +74,12 @@ def _ishigami_md(mo):
     2. **Evaluate** — run the model on all sample points.
     3. **Analyse** — `efast.analyze` recovers $S_1$ and $S_T$ from the
        Fourier spectrum.
+
+    In the bar chart below, each estimated bar should land on its paler
+    analytical twin. Note $x_3$: its $S_1$ is essentially zero yet its
+    $S_T$ is not — it influences the output only through its
+    interaction with $x_1$, which $S_T$ captures and $S_1$ by
+    construction cannot.
     """)
     return
 
@@ -153,7 +159,9 @@ def _sobol_g_md(mo):
     indices are known in closed form.  Inputs with small $a_j$ coefficients
     are important; large $a_j$ suppresses the factor almost entirely.
     With the default coefficients $(0, 1, 4.5, 9, 99, 99, 99, 99)$, only
-    the first four inputs carry meaningful sensitivity.
+    the first four inputs carry meaningful sensitivity — the chart below
+    should show the last four bars pinned near zero, matching the
+    analytical values.
     """)
     return
 

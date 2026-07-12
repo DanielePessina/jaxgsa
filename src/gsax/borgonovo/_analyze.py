@@ -254,6 +254,17 @@ def analyze(
 ) -> DeltaResult:
     """Compute Borgonovo delta and given-data first-order Sobol indices.
 
+    The delta index measures how much knowing an input's value shifts the
+    *entire* output density: ``delta_i`` is (half) the expected L1
+    distance between the unconditional output density and the density
+    conditional on x_i. It lies in [0, 1] — 0 means the output
+    distribution is unaffected by x_i, 1 means it is fully determined by
+    it. Because delta compares whole densities rather than variances
+    ("moment-independent"), it captures influence on tails and shape that
+    Sobol indices miss, and it needs no special sampling design: any
+    (X, Y) sample works. A given-data first-order Sobol index S1 is
+    returned from the same partition at negligible extra cost.
+
     Args:
         problem: Problem definition with D parameters.
         X: Input sample matrix ``(N, D)``.

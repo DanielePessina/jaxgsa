@@ -183,7 +183,11 @@ def analyze(
     Accepts model outputs Y evaluated at the unique rows returned by
     ``gsax.sample_morris()``, reconstructs the expanded design internally,
     drops trajectories containing non-finite values, and reduces one
-    elementary effect per trajectory and parameter to mu, mu_star, and sigma.
+    elementary effect per trajectory and parameter to three measures:
+    rank parameters by ``mu_star`` (mean absolute effect, the headline
+    importance measure); a ``sigma`` (spread of effects) that is large
+    relative to ``mu_star`` flags nonlinearity or interactions; ``mu``
+    keeps the effect sign but can cancel for non-monotonic responses.
 
     Elementary effects are computed in unit-cube coordinates, so ``mu_star``
     is directly comparable across parameters regardless of their physical

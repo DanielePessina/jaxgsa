@@ -1,8 +1,12 @@
 """Derivative-based Global Sensitivity Measures (DGSM).
 
-Computes sensitivity measures from partial derivatives of the model
-via reverse-mode autodiff, and derives Poincare upper bounds and
-Kucherenko-Song lower bounds on total Sobol indices.
+DGSM ranks inputs by the mean squared partial derivative
+``nu_i = E[(df/dx_i)^2]`` averaged over the input distribution — cheap
+to obtain via reverse-mode autodiff when the model is written in JAX.
+A Poincare inequality turns ``nu_i`` into an upper bound on the total
+Sobol index ``ST_i``, and the Kucherenko-Song inequality turns the mean
+derivative ``E[df/dx_i]`` into a lower bound, so one derivative sample
+brackets ST at a fraction of the cost of a Sobol design.
 
 Example::
 

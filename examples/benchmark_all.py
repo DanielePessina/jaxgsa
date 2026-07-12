@@ -1034,8 +1034,9 @@ def _findings(mo):
     - **DGSM note** — gsax uses pre-computed Jacobians (autodiff
       excluded); SALib's `analyze()` includes finite-difference
       computation since it has no pre-computed path
-    - **Scalar outputs (1x1)** — SALib can match or beat gsax due
-      to JIT compilation overhead
+    - **Scalar outputs (1x1)** — SALib can match or beat gsax: the
+      analysis itself is tiny, so JAX's fixed per-call overhead
+      dominates the timing
     - **Bootstrap scales efficiently in gsax** — JIT reuse across
       resamples means 10x more resamples costs far less than 10x
       more time; CI width narrows as $\sim 1/\sqrt{B}$

@@ -89,9 +89,6 @@ def build_multi_index(D: int, p: int) -> np.ndarray:
     Returns:
         (n_terms, D) integer array where n_terms = C(D+p, p).
     """
-    # Enumerate all D-tuples alpha with |alpha| = sum(alpha_i) <= p (graded
-    # total-degree set). Sorted by (total degree, lexicographic) for consistent
-    # ordering. Total count = C(D+p, p) by stars-and-bars.
     indices: list[tuple[int, ...]] = []
 
     # Depth-first enumeration: at each dimension, assign degree 0..remaining,
@@ -108,6 +105,7 @@ def build_multi_index(D: int, p: int) -> np.ndarray:
     _recurse(0, p, [])
     # Sort by (total degree, lex) so the constant term is always index 0.
     result = np.array(sorted(indices, key=lambda a: (sum(a), a)), dtype=np.int32)
+    # Sanity check: the graded set has exactly C(D+p, p) members (stars-and-bars).
     assert result.shape[0] == comb(D + p, p)
     return result
 
@@ -234,7 +232,9 @@ def loo_error(
         if ridge > 0:
             gram = gram + ridge * jnp.eye(gram.shape[0])
         gram_inv_PhiT = jnp.linalg.solve(gram, Phi.T)
+    # H_ii without forming the full N x N hat matrix: diag(Phi @ gram_inv_PhiT).
     leverage = jnp.sum(Phi * gram_inv_PhiT.T, axis=1)
+    # A leverage of exactly 1 (interpolated point) would divide by zero below.
     leverage = jnp.clip(leverage, 0.0, 1.0 - 1e-10)
     loo_residuals = residuals / (1.0 - leverage)
     return jnp.sqrt(jnp.mean(loo_residuals**2))

@@ -1,5 +1,15 @@
 # Getting Started
 
+gsax answers a practical question: **which of your model's inputs actually
+drive its output?** You give it a set of input samples and the outputs your
+model produced for them; it returns sensitivity indices that rank the inputs
+and expose interactions between them. Everything is computed in JAX, so the
+analysis is JIT-compiled and runs on CPU, GPU, or TPU without code changes.
+
+This page walks through one complete analysis with Sobol indices, the most
+widely used method. Once it runs, the [Methods guide](/guide/methods) explains
+how to choose among the ten methods gsax provides.
+
 ## Installation
 
 ```bash
@@ -22,32 +32,65 @@ cd gsax
 uv sync --extra dev   # or: pip install -e ".[dev]"
 ```
 
-## Quick Start
+## Your First Analysis
+
+The workflow has four steps: define the problem, generate samples, evaluate
+your model, analyze. The model here is the Ishigami function, a standard test
+function whose sensitivity indices are known exactly — replace it with your
+own.
 
 ```python
+import jax.numpy as jnp
 import gsax
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
 
-# 1. Generate unique Sobol/Saltelli samples
-sampling_result = gsax.sample(PROBLEM, n_samples=4096, seed=42)
+# 1. Define the problem: parameter names and their ranges
+problem = gsax.Problem.from_dict({
+    "x1": (-jnp.pi, jnp.pi),
+    "x2": (-jnp.pi, jnp.pi),
+    "x3": (-jnp.pi, jnp.pi),
+})
 
-# 2. Evaluate your model on the unique samples
-Y = evaluate(sampling_result.samples)
+# 2. Generate input samples. Sobol analysis needs a specific sample layout
+#    (a Saltelli design), so use gsax.sample() rather than random points.
+sampling_result = gsax.sample(problem, n_samples=4096, seed=42)
 
-# 3. Compute Sobol indices
+# 3. Evaluate your model at each sampled input
+def model(X):  # Ishigami test function — swap in your own model here
+    return (
+        jnp.sin(X[:, 0])
+        + 7.0 * jnp.sin(X[:, 1]) ** 2
+        + 0.1 * X[:, 2] ** 4 * jnp.sin(X[:, 0])
+    )
+
+Y = model(sampling_result.samples)  # one output value per sample row
+
+# 4. Compute Sobol indices
 result = gsax.analyze(sampling_result, Y)
 
 print("S1:", result.S1)   # first-order indices
 print("ST:", result.ST)   # total-order indices
-print("S2:", result.S2)   # second-order interaction matrix
 ```
 
-Expected output (Ishigami function, A=7, B=0.1):
+Expected output:
 
 ```
 S1: [~0.31, ~0.44, ~0.00]
 ST: [~0.56, ~0.44, ~0.24]
 ```
+
+## Reading the Results
+
+Each index is a fraction of the output variance, one value per parameter:
+
+- **S1 (first-order)** is the share of output variance each input explains
+  *on its own*. Here `x2` has the largest direct effect (~0.44).
+- **ST (total-order)** adds every interaction the input takes part in. It's
+  the right number for asking "can I fix this input to a constant?" — an
+  input with ST near zero doesn't matter at all.
+- The **gap between ST and S1** is that input's interaction share. `x3` is
+  the interesting case: S1 ≈ 0 (no effect alone) but ST ≈ 0.24, so it matters
+  only through its interaction with `x1`. `result.S2` holds the pairwise
+  interaction matrix if you want to see which pairs are responsible.
 
 ## Define a Problem
 
@@ -63,14 +106,17 @@ problem = Problem.from_dict({
 })
 ```
 
-For mixed Sobol inputs, `Problem.from_dict(...)` also accepts tagged
+Plain `(low, high)` tuples mean uniform inputs. For Gaussian or truncated
+Gaussian Sobol inputs, `Problem.from_dict(...)` also accepts tagged
 distribution specs. See [Non-Uniform Inputs](/examples/non-uniform-inputs) for
 the full `TypedDict` form and the Gaussian truncation rules.
 
 ## Save and Reuse Samples
 
-`gsax.sample()` returns a `SamplingResult` that you can persist and reload
-later without losing the metadata needed by `gsax.analyze()`:
+Generating samples and evaluating the model are often separate steps — the
+model may run on a cluster, or take hours. `gsax.sample()` returns a
+`SamplingResult` that you can persist and reload later without losing the
+metadata `gsax.analyze()` needs:
 
 ```python
 sampling_result = gsax.sample(problem, n_samples=4096, seed=42)

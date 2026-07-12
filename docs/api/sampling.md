@@ -1,5 +1,8 @@
 # Sampling
 
+Sobol/Saltelli sample generation for the Sobol workflow, plus prefix-nested
+downsampling and save/load round-trips.
+
 The canonical API reference now lives at [API Reference](/api/).
 
 Jump directly to:

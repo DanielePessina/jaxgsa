@@ -1,5 +1,8 @@
 # PAWN
 
+Distribution-based sensitivity indices from Kolmogorov-Smirnov distances
+between conditional and unconditional output CDFs.
+
 The canonical API reference now lives at [API Reference](/api/).
 
 Jump directly to:

@@ -1,7 +1,10 @@
 """Borgonovo delta sensitivity analysis (Borgonovo, 2007).
 
-Computes moment-independent sensitivity indices from given data using
-the Plischke, Borgonovo & Smith (2013) estimator: the class-averaged L1
+The delta index measures how much learning an input's value shifts the
+*entire* output density — not just its variance — so it captures
+influence on tails and shape that variance-based indices miss
+("moment-independent"). It is estimated from given data via the
+Plischke, Borgonovo & Smith (2013) estimator: the class-averaged L1
 distance between the unconditional output density and the output density
 conditional on each input, plus the given-data first-order Sobol index
 from the same partition.

@@ -14,11 +14,19 @@ from gsax.problem import Problem
 class PAWNResult:
     """PAWN sensitivity analysis results.
 
-    Stores the PAWN index (median/max/mean KS distance across bins)
-    and optional bootstrap confidence intervals.
+    Stores the PAWN index — the Kolmogorov-Smirnov distance between the
+    unconditional output CDF and the CDF conditional on each input,
+    aggregated (median/max/mean) across conditioning bins — plus optional
+    bootstrap confidence intervals.
+
+    For scalar-output models, ``pawn`` has shape ``(D,)``; for
+    multi-output models ``(K, D)``; for time-series analyses
+    ``(T, K, D)``. ``pawn_conf`` adds a leading axis of size 2.
 
     Attributes:
-        pawn: PAWN sensitivity index per parameter.
+        pawn: PAWN sensitivity index per parameter, in [0, 1]. 0 means
+            fixing the input leaves the output distribution unchanged
+            (non-influential); larger values mean stronger influence.
         pawn_conf: Bootstrap confidence interval ``[lower, upper]``,
             or ``None`` when ``n_bootstrap=0``.
         problem: Problem definition used for the analysis.

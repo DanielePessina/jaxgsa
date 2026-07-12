@@ -21,8 +21,18 @@ from gsax.problem import Problem
 def _map_to_reference(X: Array, problem: Problem) -> tuple[Array, tuple[str, ...]]:
     """Map physical inputs to the orthogonal polynomial reference domain.
 
-    Uniform and truncated-Gaussian inputs use Legendre (mapped to [-1,1]).
-    Untruncated Gaussian inputs use Hermite (standardized to N(0,1)).
+    Uniform and truncated-Gaussian inputs use Legendre (mapped to [-1, 1];
+    truncated Gaussians go through their CDF first, so the mapped values are
+    uniform). Untruncated Gaussian inputs use Hermite (standardized to N(0,1)).
+
+    Args:
+        X: (N, D) inputs in physical units.
+        problem: Problem whose ``input_specs`` decide the per-dimension map.
+
+    Returns:
+        Tuple of the (N, D) reference-domain inputs and a length-D tuple of
+        ``"uniform"`` / ``"gaussian"`` tags telling ``build_design_matrix``
+        which 1-D polynomial family each dimension needs.
     """
     import numpy as np
     from scipy.stats import truncnorm
@@ -76,24 +86,41 @@ def analyze_pce(
     ridge: float = 1e-8,
     fit_ratio: float = 0.5,
 ) -> PCEResult:
-    """Compute Sobol indices via polynomial chaos expansion.
+    """Compute Sobol indices via polynomial chaos expansion (PCE).
 
-    Fits an orthogonal polynomial surrogate to (X, Y) data and extracts
-    first-order, total-order, and second-order Sobol indices directly
-    from the expansion coefficients (Sudret, 2008).
+    Fits an orthogonal polynomial surrogate to arbitrary (X, Y) pairs -- no
+    structured sampling required -- and reads first-, total-, and second-order
+    Sobol indices directly off the expansion coefficients (Sudret, 2008), with
+    no extra model evaluations. Compared with Monte Carlo Sobol estimators,
+    PCE needs far fewer samples when the model response is smooth, but it only
+    captures effects the polynomial can represent: check
+    ``PCEResult.loo_rmse`` before trusting the indices.
 
     Args:
         problem: Parameter names and distributions.
         X: (N, D) input samples.
-        Y: (N,) model outputs (scalar output only).
-        order: Maximum total polynomial degree. Automatically reduced
-            if the number of terms would exceed ``fit_ratio * N``.
-        ridge: Tikhonov regularization parameter for least-squares fit.
-        fit_ratio: Maximum ratio of terms to samples before the order
-            is reduced.
+        Y: (N,) model outputs (scalar output only; for multi-output or
+            time-series data use ``gsax.hdmr``).
+        order: Maximum total polynomial degree. Higher orders capture
+            sharper nonlinearity and higher-order interactions, but the
+            term count C(D+order, order) grows fast and needs more samples
+            to fit. Automatically reduced (with a warning) if the term
+            count would exceed ``fit_ratio * N``.
+        ridge: Tikhonov regularization for the least-squares fit. The tiny
+            default only guards against a singular normal matrix; increase
+            it if coefficients look unstable (noisy Y, near-duplicate rows).
+        fit_ratio: Maximum ratio of terms to samples before ``order`` is
+            reduced. Lower values demand more samples per term (a more
+            conservative, less overfit-prone fit).
 
     Returns:
-        PCEResult with S1, ST, S2, fitted coefficients, and LOO RMSE.
+        PCEResult with S1, ST, S2, the fitted coefficients and multi-index
+        (usable with ``emulate_pce``), the effective ``order``, and the
+        leave-one-out RMSE goodness-of-fit diagnostic.
+
+    Raises:
+        ValueError: If ``Y`` is not 1-D, or ``X`` fails validation against
+            ``problem``.
     """
     X = jnp.asarray(X)
     Y = jnp.asarray(Y)
@@ -150,11 +177,16 @@ def analyze_pce(
 
 
 def emulate_pce(result: PCEResult, X_new: Array) -> Array:
-    """Predict at new input points using the fitted PCE.
+    """Predict at new input points using the fitted PCE surrogate.
+
+    Rebuilds the polynomial basis at ``X_new`` and applies the coefficients
+    fitted by ``analyze_pce`` -- no model evaluations are needed. Accuracy
+    degrades outside the input region the surrogate was fitted on.
 
     Args:
         result: PCEResult from ``analyze_pce``.
-        X_new: (N_new, D) new input points.
+        X_new: (N_new, D) new input points, in the same physical units as
+            the ``X`` passed to ``analyze_pce``.
 
     Returns:
         (N_new,) predicted outputs.

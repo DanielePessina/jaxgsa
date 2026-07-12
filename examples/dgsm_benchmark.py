@@ -24,8 +24,9 @@ def _intro(mo):
 
     DGSM computes sensitivity information from the **partial derivatives**
     of a model, rather than from variance decomposition. For
-    JAX-differentiable models, this is essentially free via reverse-mode
-    autodiff (`jax.jacrev`).
+    JAX-differentiable models the derivatives come cheaply: one
+    reverse-mode autodiff pass (`jax.jacrev`) yields all of them per
+    sample, with no structured sampling design.
 
     The key quantities are:
 
@@ -34,7 +35,9 @@ def _intro(mo):
     - $\sigma_i = \mathbb{E}\!\left[\frac{\partial f}{\partial x_i}\right]$
       — the mean partial derivative
 
-    These yield **two-sided bounds** on the total Sobol index $S_{T_i}$:
+    These yield **two-sided bounds** on the total Sobol index $S_{T_i}$
+    — the share of output variance attributable to $x_i$ including all
+    of its interactions:
 
     $$
     \frac{\mathrm{Var}(X_i) \cdot \sigma_i^2}{\mathrm{Var}(Y)}

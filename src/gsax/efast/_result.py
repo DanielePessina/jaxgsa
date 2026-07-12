@@ -18,9 +18,10 @@ class EFASTResult:
     via Fourier amplitude decomposition. eFAST does not produce
     second-order interaction indices.
 
-    Shapes follow the convention ``(T, K, D)`` for time-resolved analyses
-    or ``(K, D)`` when the time dimension is squeezed, where *K* is the
-    number of outputs and *D* the number of parameters.
+    Shapes follow the convention ``(T, K, D)`` for time-resolved analyses,
+    ``(K, D)`` when the time dimension is squeezed, or ``(D,)`` for scalar
+    output, where *K* is the number of outputs and *D* the number of
+    parameters.
 
     Attributes:
         S1: First-order indices — ``(D,)``, ``(K, D)``, or ``(T, K, D)``.
