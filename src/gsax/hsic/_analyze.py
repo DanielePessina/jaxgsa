@@ -422,7 +422,6 @@ def analyze(
     """
     D = problem.num_vars
     X = jnp.asarray(X)
-    Y = jnp.asarray(Y)
 
     if n_perms < 1:
         raise ValueError(f"n_perms must be >= 1, got {n_perms}")

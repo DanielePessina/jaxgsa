@@ -245,15 +245,10 @@ def analyze(
         raise ValueError("ci_method must be one of {'quantile', 'gaussian'}")
     if chunk_size < 1:
         raise ValueError(f"chunk_size must be >= 1, got {chunk_size}")
-    Y = jnp.asarray(Y)
-    if Y.ndim not in (1, 2, 3):
-        raise ValueError(
-            "Y must have 1, 2, or 3 dimensions — (n_total,), (n_total, K), or "
-            f"(n_total, T, K); got a {Y.ndim}-D array of shape {Y.shape}"
-        )
     # Resolve the user-supplied layout (sample axis first, labeled output axis
     # last) against the unique design rows, BEFORE expansion and bootstrap so
-    # every downstream stage sees canonical axes.
+    # every downstream stage sees canonical axes. _infer_output_layout also
+    # rejects a non-1/2/3-D Y.
     Y = _infer_output_layout(Y, sampling_result.problem, int(sampling_result.samples.shape[0]))
     # Map user-evaluated unique outputs back to the full expanded layout
     Y = _expand_unique_outputs(sampling_result, Y)

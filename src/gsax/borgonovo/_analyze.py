@@ -309,8 +309,6 @@ def analyze(
             ``chunk_size`` is not a positive integer.
     """
     X = jnp.asarray(X)
-    Y = jnp.asarray(Y)
-
     Y = _validate_xy_inputs(problem, X, Y)
 
     N = X.shape[0]
