@@ -536,7 +536,12 @@ class TestMultiOutput:
         np.testing.assert_allclose(ds.coords["time"].values, [0.0, 0.5])
 
     def test_batched_engine_matches_scalar_loop(self):
-        """The einsum-based extraction equals per-slice scalar calls."""
+        """The masked-matmul extraction equals per-slice scalar calls.
+
+        Batched and per-slice paths do the same float32 reductions but XLA may
+        fuse/order them differently, so compare at float32 precision rather than
+        demanding bitwise-identical lowering.
+        """
         rng = np.random.default_rng(7)
         mi = build_multi_index(3, 3)
         coeffs = jnp.asarray(rng.normal(size=(2, 4, mi.shape[0])))
@@ -544,9 +549,9 @@ class TestMultiOutput:
         for t in range(2):
             for k in range(4):
                 S1s, STs, S2s = sobol_from_coefficients(coeffs[t, k], mi)
-                np.testing.assert_allclose(np.asarray(S1b[t, k]), np.asarray(S1s), rtol=1e-12)
-                np.testing.assert_allclose(np.asarray(STb[t, k]), np.asarray(STs), rtol=1e-12)
-                np.testing.assert_allclose(np.asarray(S2b[t, k]), np.asarray(S2s), rtol=1e-12)
+                np.testing.assert_allclose(np.asarray(S1b[t, k]), np.asarray(S1s), rtol=1e-6)
+                np.testing.assert_allclose(np.asarray(STb[t, k]), np.asarray(STs), rtol=1e-6)
+                np.testing.assert_allclose(np.asarray(S2b[t, k]), np.asarray(S2s), rtol=1e-6)
 
     def test_emulate_mirrors_single_label_2d_training(self):
         """Training on (N, T) single-label Y yields (N_new, T) predictions."""
