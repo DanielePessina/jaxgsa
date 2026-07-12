@@ -16,7 +16,6 @@ import gsax
 from gsax._normalization import (
     LayoutOps,
     _infer_output_layout,
-    _infer_output_layout_ops,
     _warn_zero_variance_slices,
 )
 from gsax.problem import Problem
@@ -45,7 +44,7 @@ class TestSilentRung:
         Y = jnp.ones(shape)
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            out = _infer_output_layout(Y, problem, N)
+            out, _ = _infer_output_layout(Y, problem, N)
         assert out.shape == shape
 
     def test_square_positional_trust(self):
@@ -54,7 +53,7 @@ class TestSilentRung:
         Y = jnp.arange(N * N, dtype=jnp.float32).reshape(N, N)
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            out = _infer_output_layout(Y, UNLABELED, N)
+            out, _ = _infer_output_layout(Y, UNLABELED, N)
         np.testing.assert_array_equal(np.asarray(out), np.asarray(Y))
 
 
@@ -64,13 +63,13 @@ class TestWarnRung:
     def test_transposed_2d_moved(self):
         Y = jnp.arange(5 * N, dtype=jnp.float32).reshape(5, N)
         with pytest.warns(UserWarning, match="sample axis"):
-            out = _infer_output_layout(Y, UNLABELED, N)
+            out, _ = _infer_output_layout(Y, UNLABELED, N)
         np.testing.assert_array_equal(np.asarray(out), np.asarray(Y).T)
 
     def test_sample_axis_in_middle_3d(self):
         Y = jnp.arange(3 * N * 5, dtype=jnp.float32).reshape(3, N, 5)
         with pytest.warns(UserWarning, match="sample axis"):
-            out = _infer_output_layout(Y, UNLABELED, N)
+            out, _ = _infer_output_layout(Y, UNLABELED, N)
         assert out.shape == (N, 3, 5)
         np.testing.assert_array_equal(np.asarray(out), np.moveaxis(np.asarray(Y), 1, 0))
 
@@ -78,7 +77,7 @@ class TestWarnRung:
         """(n, K, T) with labels identifying the middle axis as K is swapped."""
         Y = jnp.arange(N * 2 * 7, dtype=jnp.float32).reshape(N, 2, 7)
         with pytest.warns(UserWarning, match="swapping"):
-            out = _infer_output_layout(Y, TWO_LABELS, N)
+            out, _ = _infer_output_layout(Y, TWO_LABELS, N)
         assert out.shape == (N, 7, 2)
         np.testing.assert_array_equal(np.asarray(out), np.swapaxes(np.asarray(Y), 1, 2))
 
@@ -87,7 +86,7 @@ class TestLabelRules:
     def test_2d_single_label_is_time(self):
         """(n, T) with exactly one named output flows as (n, T, 1)."""
         Y = jnp.arange(N * 6, dtype=jnp.float32).reshape(N, 6)
-        out = _infer_output_layout(Y, ONE_LABEL, N)
+        out, _ = _infer_output_layout(Y, ONE_LABEL, N)
         assert out.shape == (N, 6, 1)
         np.testing.assert_array_equal(np.asarray(out)[:, :, 0], np.asarray(Y))
 
@@ -96,7 +95,7 @@ class TestLabelRules:
         Y = jnp.arange(N, dtype=jnp.float32).reshape(N, 1)
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            out = _infer_output_layout(Y, ONE_LABEL, N)
+            out, _ = _infer_output_layout(Y, ONE_LABEL, N)
         assert out.shape == (N, 1)
 
     def test_2d_label_count_mismatch_raises(self):
@@ -117,27 +116,27 @@ class TestLabelRules:
 
 
 class TestLayoutOpsRecord:
-    """`_infer_output_layout_ops` reports the transforms it applied."""
+    """`_infer_output_layout` reports the transforms it applied."""
 
     def test_canonical_is_identity(self):
-        _, ops = _infer_output_layout_ops(jnp.ones((N, 5)), UNLABELED, N)
+        _, ops = _infer_output_layout(jnp.ones((N, 5)), UNLABELED, N)
         assert ops == LayoutOps()
 
     def test_records_sample_axis_move(self):
         Y = jnp.arange(5 * N, dtype=jnp.float32).reshape(5, N)
         with pytest.warns(UserWarning, match="sample axis"):
-            _, ops = _infer_output_layout_ops(Y, UNLABELED, N)
+            _, ops = _infer_output_layout(Y, UNLABELED, N)
         assert ops == LayoutOps(sample_axis=1)
 
     def test_records_inserted_output_axis(self):
         Y = jnp.arange(N * 6, dtype=jnp.float32).reshape(N, 6)
-        _, ops = _infer_output_layout_ops(Y, ONE_LABEL, N)
+        _, ops = _infer_output_layout(Y, ONE_LABEL, N)
         assert ops == LayoutOps(inserted_output_axis=True)
 
     def test_records_swapped_tk(self):
         Y = jnp.arange(N * 2 * 7, dtype=jnp.float32).reshape(N, 2, 7)
         with pytest.warns(UserWarning, match="swapping"):
-            _, ops = _infer_output_layout_ops(Y, TWO_LABELS, N)
+            _, ops = _infer_output_layout(Y, TWO_LABELS, N)
         assert ops == LayoutOps(swapped_tk=True)
 
 

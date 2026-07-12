@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 
 class LayoutOps(NamedTuple):
-    """Transformations :func:`_infer_output_layout_ops` applied to reach the
+    """Transformations :func:`_infer_output_layout` applied to reach the
     canonical layout, so companion arrays (a Jacobian, an emulator prediction)
     can be moved in lockstep instead of re-derived from shapes.
 
@@ -71,7 +71,7 @@ def _validate_x(problem: Problem, X: Array) -> None:
         )
 
 
-def _infer_output_layout_ops(
+def _infer_output_layout(
     Y: Array,
     problem: Problem,
     n_expected: int | None,
@@ -113,7 +113,7 @@ def _infer_output_layout_ops(
             caller cannot know it independently (rule 1 is skipped).
         stacklevel: Passed through to ``warnings.warn`` so the layout warnings
             point at the user's call site. Direct callers use the default 3;
-            the given-data wrappers pass 4 to skip their extra frame.
+            :func:`_validate_xy_inputs` passes 4 to skip its extra frame.
 
     Returns:
         A tuple ``(Y, ops)`` where ``Y`` is in canonical layout — ``(n,)``,
@@ -189,51 +189,13 @@ def _infer_output_layout_ops(
     return Y, LayoutOps(sample_axis, inserted_output_axis, swapped_tk)
 
 
-def _infer_output_layout(
-    Y: Array,
-    problem: Problem,
-    n_expected: int | None,
-    *,
-    stacklevel: int = 3,
-) -> Array:
-    """Canonical-layout shim returning only Y (see :func:`_infer_output_layout_ops`).
-
-    Keeps the historical three-positional-argument ``Array`` contract for
-    callers that do not need the ops record. The ``+1`` on ``stacklevel``
-    compensates for this extra frame so warnings still point at user code.
-    """
-    return _infer_output_layout_ops(Y, problem, n_expected, stacklevel=stacklevel + 1)[0]
-
-
-def _validate_xy_inputs_ops(problem: Problem, X: Array, Y: Array) -> tuple[Array, LayoutOps]:
-    """Validate the shared ``(problem, X, Y)`` contract, returning the ops record.
-
-    Like :func:`_validate_xy_inputs` but also returns the :class:`LayoutOps`
-    describing how Y was canonicalized, for callers (PCE, HDMR) that need to
-    mirror the layout on emulator predictions.
-
-    Args:
-        problem: Problem definition with ``num_vars`` parameters.
-        X: Input sample matrix, expected shape ``(N, D)``.
-        Y: Model output, 1-D, 2-D, or 3-D (layout inferred when recoverable).
-
-    Returns:
-        A tuple ``(Y, ops)`` with Y in canonical layout.
-
-    Raises:
-        ValueError: If X is not 2-D, its column count does not match the
-            problem, or Y's layout cannot be resolved against X's row count.
-    """
-    _validate_x(problem, X)
-    return _infer_output_layout_ops(Y, problem, int(X.shape[0]), stacklevel=4)
-
-
-def _validate_xy_inputs(problem: Problem, X: Array, Y: Array) -> Array:
+def _validate_xy_inputs(problem: Problem, X: Array, Y: Array) -> tuple[Array, LayoutOps]:
     """Validate the shared ``(problem, X, Y)`` contract of given-data methods.
 
     Validates X and resolves Y to the canonical layout via
-    :func:`_infer_output_layout_ops`, using X's row count as the expected
-    sample count. Callers must use the returned Y.
+    :func:`_infer_output_layout`, using X's row count as the expected sample
+    count. Callers must use the returned Y; those that don't need the layout
+    record unpack ``[0]``.
 
     Args:
         problem: Problem definition with ``num_vars`` parameters.
@@ -241,14 +203,15 @@ def _validate_xy_inputs(problem: Problem, X: Array, Y: Array) -> Array:
         Y: Model output, 1-D, 2-D, or 3-D (layout inferred when recoverable).
 
     Returns:
-        ``Y`` in canonical ``(N,)`` / ``(N, K)`` / ``(N, T, K)`` layout.
+        A tuple ``(Y, ops)`` with Y in canonical ``(N,)`` / ``(N, K)`` /
+        ``(N, T, K)`` layout and ``ops`` describing how it was canonicalized.
 
     Raises:
         ValueError: If X is not 2-D, its column count does not match the
             problem, or Y's layout cannot be resolved against X's row count.
     """
     _validate_x(problem, X)
-    return _infer_output_layout_ops(Y, problem, int(X.shape[0]), stacklevel=4)[0]
+    return _infer_output_layout(Y, problem, int(X.shape[0]), stacklevel=4)
 
 
 def _squeeze_output_axes(

@@ -12,7 +12,7 @@ from jax import Array
 from gsax._normalization import (
     _prepare_Y,
     _squeeze_output_axes,
-    _validate_xy_inputs_ops,
+    _validate_xy_inputs,
     _warn_zero_variance_slices,
 )
 from gsax.pce._engine import (
@@ -211,7 +211,7 @@ def analyze_pce(
             layout cannot be resolved against ``X``'s row count.
     """
     X = jnp.asarray(X)
-    Y, ops = _validate_xy_inputs_ops(problem, X, jnp.asarray(Y))
+    Y, ops = _validate_xy_inputs(problem, X, jnp.asarray(Y))
 
     # A constant output slice makes every index 0/0 = NaN; warn once up front.
     _warn_zero_variance_slices(_prepare_Y(Y)[0], output_names=problem.output_names)

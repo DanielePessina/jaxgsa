@@ -154,7 +154,7 @@ def analyze(
     # Resolve the user-supplied layout from the output labels. eFAST cannot
     # know its sample count independently (rows are N*D with N free), so only
     # the label-based rules apply here.
-    Y = _infer_output_layout(Y, problem, None)
+    Y, _ = _infer_output_layout(Y, problem, None)
 
     # Detect scalar output before _prepare_Y adds singleton dims
     is_scalar = Y.ndim == 1

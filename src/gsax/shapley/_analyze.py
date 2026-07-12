@@ -179,7 +179,7 @@ def analyze_shapley(
 
     # Resolve Y to the canonical layout ONCE, here, so total_var below agrees
     # with the fit cores (which we call directly, skipping their re-validation).
-    Y = _validate_xy_inputs(problem, jnp.asarray(X), jnp.asarray(Y))
+    Y, _ = _validate_xy_inputs(problem, jnp.asarray(X), jnp.asarray(Y))
 
     # Per-output-slice variance of the raw outputs, used to normalize the PCE
     # explained fraction and to flag constant (zero-variance) slices uniformly.

@@ -17,7 +17,7 @@ from gsax._normalization import (
     _prenormalize_outputs,
     _prepare_Y,
     _squeeze_output_axes,
-    _validate_xy_inputs_ops,
+    _validate_xy_inputs,
     _warn_zero_variance_slices,
 )
 from gsax._transforms import cdf_to_unit_interval
@@ -184,7 +184,7 @@ def analyze_hdmr(
     calls the core directly on an already-canonical Y to avoid re-validating.
     """
     X = jnp.asarray(X)
-    Y, ops = _validate_xy_inputs_ops(problem, X, jnp.asarray(Y))
+    Y, ops = _validate_xy_inputs(problem, X, jnp.asarray(Y))
     # A constant output slice makes every index 0/0 = NaN; warn once up front,
     # in the public wrapper only, so callers routing through the core (Shapley)
     # do not double-warn.

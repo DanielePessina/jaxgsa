@@ -249,7 +249,7 @@ def analyze(
     # last) against the unique design rows, BEFORE expansion and bootstrap so
     # every downstream stage sees canonical axes. _infer_output_layout also
     # rejects a non-1/2/3-D Y.
-    Y = _infer_output_layout(Y, sampling_result.problem, int(sampling_result.samples.shape[0]))
+    Y, _ = _infer_output_layout(Y, sampling_result.problem, int(sampling_result.samples.shape[0]))
     # Map user-evaluated unique outputs back to the full expanded layout
     Y = _expand_unique_outputs(sampling_result, Y)
     Y, squeeze_time, squeeze_output = _prepare_Y(Y)

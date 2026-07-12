@@ -21,7 +21,7 @@ from jax import Array
 
 from gsax._normalization import (
     LayoutOps,
-    _infer_output_layout_ops,
+    _infer_output_layout,
     _prepare_Y,
     _squeeze_output_axes,
     _validate_x,
@@ -60,7 +60,7 @@ def _apply_layout_ops(arr: Array, ops: LayoutOps, *, has_sample_axis: bool) -> A
     Args:
         arr: Array to realign — a ``(N, *slice, D)`` Jacobian
             (``has_sample_axis=True``) or a reduced ``(*slice, D)`` moment.
-        ops: The transformations :func:`_infer_output_layout_ops` applied to Y.
+        ops: The transformations :func:`_infer_output_layout` applied to Y.
         has_sample_axis: Whether ``arr`` carries Y's leading sample axis.
 
     Returns:
@@ -234,7 +234,7 @@ def analyze(
         # Resolve the fn output's semantic axes (e.g. 1-D output = timepoints
         # when a single output is named), then replay the same axis moves on the
         # already-reduced moments and promote them to canonical (T, K, D).
-        Y_infer, ops = _infer_output_layout_ops(Y_out, problem, int(X.shape[0]))
+        Y_infer, ops = _infer_output_layout(Y_out, problem, int(X.shape[0]))
         sigma = _promote_moments(_apply_layout_ops(sigma, ops, has_sample_axis=False))
         nu = _promote_moments(_apply_layout_ops(nu, ops, has_sample_axis=False))
     elif Y is not None and dfdx is not None:
@@ -255,7 +255,7 @@ def analyze(
         # user-supplied slice layout, so the same axis moves realign it before
         # promotion to canonical (N, T, K, D); the singleton pairing
         # ((N,) with (N, 1, D), (N, 1) with (N, D)) falls out of the promotion.
-        Y_infer, ops = _infer_output_layout_ops(Y_out, problem, int(dfdx_arr.shape[0]))
+        Y_infer, ops = _infer_output_layout(Y_out, problem, int(dfdx_arr.shape[0]))
         dfdx_arr = _promote_jac(_apply_layout_ops(dfdx_arr, ops, has_sample_axis=True))
         # One vectorized reduction over N covers every (t, k) slice at once.
         sigma = jnp.mean(dfdx_arr, axis=0)  # E[df/dx_i], (T, K, D)
