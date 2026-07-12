@@ -54,18 +54,26 @@
   `analyze_shapley` (`"pce"` backend), and `dgsm.analyze` gained
   multi-output/time-series support: PCE fits all output slices against one
   shared basis in a single multi-right-hand-side solve, and DGSM accepts
-  `(T, K)`-valued functions and 4-D precomputed Jacobians
-  (`dfdx.ndim == Y.ndim + 1`).
+  `(T, K)`-valued functions and precomputed Jacobians. A precomputed `dfdx`
+  must mirror `Y`'s layout with one extra trailing `(D,)` axis, and singleton
+  promotions are tolerated (`(N,)` pairs with `(N, 1, D)`, `(N, 1)` with
+  `(N, D)`); whatever axis moves layout inference applies to a transposed or
+  single-labeled `Y` are replayed on `dfdx`.
 - **Smart output-layout inference** at every public entry point. `Y` is
   resolved from two signals — the expected sample count identifies the sample
   axis, and `len(problem.output_names)` (when set) identifies the output
   axis — through a strict ladder: exact canonical shapes pass silently;
   unambiguously recoverable layouts (e.g. a transposed `(K, N)` array, or a
   3-D `(N, K, T)` array whose middle axis matches the labels) are fixed with
-  a `UserWarning` naming the transformation; ambiguous layouts raise. New
-  label rule: a 2-D `Y` with exactly **one** entry in `problem.output_names`
-  is read as `(N, T)` timepoints of that single output and flows as
-  `(N, T, 1)`; without `output_names`, 2-D `Y` still always means `(N, K)`.
+  a `UserWarning` naming the transformation; ambiguous layouts raise. The
+  warnings point at the user's call site (a corrected `stacklevel` across all
+  ten methods). Label rule: a 2-D `Y` of shape `(N, M)` with exactly **one**
+  entry in `problem.output_names` and `M > 1` is read as `M` timepoints of that
+  single output and flows as `(N, M, 1)`; a lone column `(N, 1)` stays canonical
+  as `(N, K=1)` (a scalar output, not a 1-timepoint series — pass `(N, 1, 1)`
+  for that). Without `output_names`, 2-D `Y` still always means `(N, K)`. A 1-D
+  `(N,)` `Y` is accepted as one output regardless of how many names the problem
+  lists.
 - `time_coords` parameter on `PCEResult.to_dataset()` and
   `DGSMResult.to_dataset()` for labeled time axes on 3-D results
   (dims `(time, output, param)`).
@@ -86,24 +94,29 @@
   `(..., D)`, `S2` is `(..., D, D)` with a `NaN` diagonal, `coefficients` is
   `(..., n_terms)` with the term axis last, and `loo_rmse` is per output slice
   (`()`, `(K,)`, or `(T, K)`). `order` remains a single int — all slices share
-  one basis. `emulate_pce` returns `(N_new,)`, `(N_new, K)`, or
-  `(N_new, T, K)` mirroring the training layout.
-- With exactly one entry in `problem.output_names`, a 2-D `Y` — including the
-  `(N, 1)` edge — now flows as time-series `(N, T, 1)` instead of multi-output
-  `(N, K=1)`, so results gain a time axis and datasets use
-  `(time, output, param)` dims.
-- PCE Sobol-index extraction is vectorized: a single einsum over the term axis
-  replaces the previous Python pair loop for `S2`.
+  one basis.
+- `emulate_pce` and `emulate_hdmr` mirror the original training-`Y` rank: a 2-D
+  `(N, T)` single-labeled training `Y` (fit internally as `(N, T, 1)`) now
+  predicts `(N_new, T)` rather than `(N_new, T, 1)`, so `pred - Y_train`
+  broadcasts as expected.
+- PCE Sobol-index extraction is vectorized end to end: `S1`/`ST`/`S2` are
+  masked matmuls over the term axis (`S2` uses an upper-triangle pair mask),
+  replacing the previous Python pair loop.
 
 ### Internal
 
 - Bootstrap confidence-interval helpers moved to a shared `gsax._bootstrap`
   module (previously private to `gsax.sobol` and cross-imported by Morris);
   PAWN and Borgonovo now reuse the same percentile-CI implementation.
-- All result classes (`SAResult`, `EFASTResult`, `MorrisResult`,
-  `ShapleyResult`) now build their `to_dataset()` dims/coords through the
-  shared `_dims_and_coords` helper instead of hand-rolling the
-  `param`/`output`/`time` schema.
+- All ten result classes now build their `to_dataset()` dims/coords through the
+  shared `_dims_and_coords` helper (including `HDMRResult`, whose per-term
+  arrays swap the trailing `param` dim for `term`), instead of hand-rolling the
+  `param`/`output`/`time` schema; the singleton-axis squeeze after analysis is
+  likewise a single shared `_squeeze_output_axes` helper.
+- `analyze_shapley` now fits through the shared PCE/HDMR cores directly: the
+  default `"pce"` backend reuses `analyze_pce`'s fit without recomputing the
+  `S2` einsum and LOO diagnostic it discards, and both backends validate `Y`
+  and warn about zero-variance slices exactly once.
 
 ## 0.1.2
 
