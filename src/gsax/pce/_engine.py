@@ -195,16 +195,18 @@ def sobol_from_coefficients(
     # Total-order: all terms where variable i participates (any interaction order).
     ST = jnp.asarray(c2 @ active) * inv_var[..., None]  # (..., D)
 
-    # Second-order: pair-membership tensor P[t, i, j] = True iff term t
-    # activates exactly x_i and x_j. Built in numpy at trace time — it costs
-    # n_terms * D^2 bools, small at this package's D/order regime — so the
-    # extraction is one einsum over the term axis for every slice and pair at
-    # once, instead of a Python loop over pairs.
-    pair = active[:, :, None] & active[:, None, :] & (active_count == 2)[:, None, None]
-    pair[:, np.arange(D), np.arange(D)] = False  # (n_terms, D, D)
-    S2 = jnp.einsum("...t,tij->...ij", c2, pair) * inv_var[..., None, None]
-    # The diagonal is not a pair index; keep it NaN, matching SAResult's S2.
-    S2 = jnp.where(jnp.eye(D, dtype=bool), jnp.nan, S2)
+    # Second-order: for each unordered pair (i < j), sum the c_alpha^2 of terms
+    # that activate exactly x_i and x_j. Enumerate the D*(D-1)/2 upper-triangle
+    # pairs once (numpy, at trace time), so extraction is a single masked matmul
+    # over the term axis — the same shape as S1/ST, and half the work of
+    # contracting the full symmetric (D, D) tensor.
+    iu, ju = np.triu_indices(D, k=1)  # (n_pairs,) each
+    pair_mask = active[:, iu] & active[:, ju] & (active_count == 2)[:, None]  # (n_terms, n_pairs)
+    s2_upper = jnp.asarray(c2 @ pair_mask) * inv_var[..., None]  # (..., n_pairs)
+    # Scatter into the symmetric matrix and mirror; the diagonal is not a pair
+    # index, so keep it NaN to match SAResult's S2.
+    S2 = jnp.full((*c2.shape[:-1], D, D), jnp.nan)
+    S2 = S2.at[..., iu, ju].set(s2_upper).at[..., ju, iu].set(s2_upper)
 
     return S1, ST, S2
 

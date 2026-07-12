@@ -547,3 +547,24 @@ class TestMultiOutput:
                 np.testing.assert_allclose(np.asarray(S1b[t, k]), np.asarray(S1s), rtol=1e-12)
                 np.testing.assert_allclose(np.asarray(STb[t, k]), np.asarray(STs), rtol=1e-12)
                 np.testing.assert_allclose(np.asarray(S2b[t, k]), np.asarray(S2s), rtol=1e-12)
+
+    def test_s2_pair_mask_matches_dense(self):
+        """The upper-triangle pair mask reproduces the dense symmetric einsum."""
+        rng = np.random.default_rng(11)
+        mi = build_multi_index(4, 3)
+        coeffs = np.asarray(rng.normal(size=(2, 3, mi.shape[0])), dtype=np.float64)
+
+        # Dense reference (the pre-optimization construction) in float64.
+        c2 = coeffs**2
+        active = mi > 0
+        active_count = active.sum(axis=1)
+        total_var = c2[..., 1:].sum(axis=-1)
+        inv_var = np.where(total_var == 0, np.nan, 1.0 / total_var)
+        D = mi.shape[1]
+        pair = active[:, :, None] & active[:, None, :] & (active_count == 2)[:, None, None]
+        pair[:, np.arange(D), np.arange(D)] = False
+        s2_dense = np.einsum("...t,tij->...ij", c2, pair) * inv_var[..., None, None]
+        s2_dense = np.where(np.eye(D, dtype=bool), np.nan, s2_dense)
+
+        _, _, S2 = sobol_from_coefficients(jnp.asarray(coeffs), mi)
+        np.testing.assert_allclose(np.asarray(S2), s2_dense, rtol=1e-5, equal_nan=True)
