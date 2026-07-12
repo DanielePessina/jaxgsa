@@ -44,8 +44,7 @@ def _promote_jac(jac: Array) -> Array:
     if jac.ndim == 4:  # (N, T, K, D) time series
         return jac
     raise ValueError(
-        f"Jacobian must be 2-D (N, D), 3-D (N, K, D), or 4-D (N, T, K, D), "
-        f"got ndim={jac.ndim}"
+        f"Jacobian must be 2-D (N, D), 3-D (N, K, D), or 4-D (N, T, K, D), got ndim={jac.ndim}"
     )
 
 

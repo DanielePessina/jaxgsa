@@ -503,8 +503,6 @@ class TestTimeSeries:
 
     def test_to_dataset_time_series(self):
         X = self._X()
-        ds = analyze(linear.PROBLEM, self._fn_ts, X).to_dataset(
-            time_coords=[0.0, 0.5, 1.0]
-        )
+        ds = analyze(linear.PROBLEM, self._fn_ts, X).to_dataset(time_coords=[0.0, 0.5, 1.0])
         assert ds["nu"].dims == ("time", "output", "param")
         np.testing.assert_allclose(ds.coords["time"].values, [0.0, 0.5, 1.0])

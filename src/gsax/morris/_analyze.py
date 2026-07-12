@@ -254,9 +254,7 @@ def analyze(
     # Resolve the user-supplied layout (sample axis first, labeled output axis
     # last) against the unique design rows, BEFORE expansion and bootstrap so
     # every downstream stage sees canonical axes.
-    Y = _infer_output_layout(
-        Y, sampling_result.problem, int(sampling_result.samples.shape[0])
-    )
+    Y = _infer_output_layout(Y, sampling_result.problem, int(sampling_result.samples.shape[0]))
     # Map user-evaluated unique outputs back to the full expanded layout
     Y = _expand_unique_outputs(sampling_result, Y)
     Y, squeeze_time, squeeze_output = _prepare_Y(Y)

@@ -17,12 +17,8 @@ from gsax._normalization import _infer_output_layout
 from gsax.problem import Problem
 
 UNLABELED = Problem(names=("x0", "x1", "x2"), bounds=((0.0, 1.0),) * 3)
-ONE_LABEL = Problem(
-    names=("x0", "x1", "x2"), bounds=((0.0, 1.0),) * 3, output_names=("pressure",)
-)
-TWO_LABELS = Problem(
-    names=("x0", "x1", "x2"), bounds=((0.0, 1.0),) * 3, output_names=("a", "b")
-)
+ONE_LABEL = Problem(names=("x0", "x1", "x2"), bounds=((0.0, 1.0),) * 3, output_names=("pressure",))
+TWO_LABELS = Problem(names=("x0", "x1", "x2"), bounds=((0.0, 1.0),) * 3, output_names=("a", "b"))
 
 N = 40
 
