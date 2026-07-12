@@ -17,6 +17,7 @@ from gsax._normalization import (
     LayoutOps,
     _infer_output_layout,
     _infer_output_layout_ops,
+    _warn_zero_variance_slices,
 )
 from gsax.problem import Problem
 
@@ -90,10 +91,24 @@ class TestLabelRules:
         assert out.shape == (N, 6, 1)
         np.testing.assert_array_equal(np.asarray(out)[:, :, 0], np.asarray(Y))
 
+    def test_2d_single_label_one_col_stays_output(self):
+        """(n, 1) with one named output is a scalar output, not a 1-step series."""
+        Y = jnp.arange(N, dtype=jnp.float32).reshape(N, 1)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            out = _infer_output_layout(Y, ONE_LABEL, N)
+        assert out.shape == (N, 1)
+
     def test_2d_label_count_mismatch_raises(self):
         Y = jnp.ones((N, 5))
         with pytest.raises(ValueError, match="output_names"):
             _infer_output_layout(Y, TWO_LABELS, N)
+
+    def test_zero_variance_label_mismatch_is_lenient(self):
+        """A 1-D Y under a multi-label problem is accepted; labels are skipped."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _warn_zero_variance_slices(jnp.arange(N, dtype=jnp.float32), output_names=("a", "b"))
 
     def test_3d_no_axis_matches_labels_raises(self):
         Y = jnp.ones((N, 5, 7))
@@ -192,6 +207,26 @@ class TestIntegration:
         # Same data as explicit (N, T, 1) — results must match exactly.
         explicit = gsax.analyze_hdmr(ONE_LABEL, X, Y2[:, :, None])
         np.testing.assert_allclose(np.asarray(result.ST), np.asarray(explicit.ST))
+
+    def test_single_label_n1_multi_output_dims(self):
+        """(N, 1) with one named output keeps a plain (output, param) dataset."""
+        X, base = self._xy(ONE_LABEL)
+        result = gsax.analyze_hdmr(ONE_LABEL, X, base[:, None])
+        assert result.ST.shape == (1, 3)
+        assert result.to_dataset()["ST"].dims == ("output", "param")
+
+    def test_1d_y_with_multi_labels_accepted(self):
+        """A 1-D Y is one output regardless of how many names the problem lists."""
+        X, base = self._xy(TWO_LABELS)
+        for analyze in (gsax.analyze_pce, gsax.analyze_hdmr):
+            res = analyze(TWO_LABELS, X, base)
+            assert res.S1.shape == (3,)
+        # HSIC has its own result shape; just confirm it does not raise.
+        assert gsax.analyze_hsic(TWO_LABELS, X, base).R2_HSIC.shape == (3,)
+        # A constant 1-D Y hits the zero-variance path that used to raise on the
+        # label-count mismatch; it must warn (about zero variance), not raise.
+        with pytest.warns(UserWarning, match="zero variance"):
+            gsax.analyze_pce(TWO_LABELS, X, jnp.zeros_like(base))
 
     def test_morris_bootstrap_conf_matches_canonical(self):
         """Inference happens before resampling: an inferred layout yields

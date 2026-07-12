@@ -95,9 +95,10 @@ def _infer_output_layout_ops(
          that length, it is moved first (with a warning); no matching axis
          raises. When the leading axis already matches, position is trusted
          even if another axis coincidentally matches too.
-      2. 2-D ``(n, M)``: with exactly one entry in ``problem.output_names``,
-         the columns are T timepoints of that single output and Y is reshaped
-         to ``(n, M, 1)``. With several entries, ``M`` must equal
+      2. 2-D ``(n, M)``: with exactly one entry in ``problem.output_names`` and
+         ``M > 1``, the columns are T timepoints of that single output and Y is
+         reshaped to ``(n, M, 1)``; a single column (``M == 1``) stays canonical
+         as ``(n, K=1)``. With several entries, ``M`` must equal
          ``len(output_names)`` (multi-output). Without ``output_names``, 2-D
          always means ``(n, K)``.
       3. 3-D ``(n, A, B)``: expected ``(n, T, K)``. If ``output_names`` is set
@@ -155,10 +156,14 @@ def _infer_output_layout_ops(
     if Y.ndim == 2 and K_labeled is not None:
         M = Y.shape[1]
         if K_labeled == 1:
-            # One labeled output: the columns are timepoints, not outputs.
-            # Flow as genuine (n, T, 1) so results keep the labeled output axis.
-            Y = Y[:, :, None]
-            inserted_output_axis = True
+            # One labeled output with several columns: the columns are
+            # timepoints, not outputs. Flow as genuine (n, T, 1) so results keep
+            # the labeled output axis. A lone column (M == 1) is left canonical
+            # as (n, K=1) — a single scalar output, not a 1-timepoint series
+            # (pass (n, 1, 1) explicitly for the latter).
+            if M > 1:
+                Y = Y[:, :, None]
+                inserted_output_axis = True
         elif M != K_labeled:
             raise ValueError(
                 f"Y has {M} columns but problem.output_names lists {K_labeled} "
@@ -375,9 +380,11 @@ def _warn_zero_variance_slices(
         K = trailing[1]
 
     if output_names is not None and len(output_names) != K:
-        raise ValueError(
-            f"len(output_names)={len(output_names)} does not match number of outputs K={K}"
-        )
+        # The labels describe a different output count than these slices carry
+        # (e.g. a 1-D Y under a multi-output problem, which layout inference
+        # accepts). They don't apply here, so fall back to k= indices rather
+        # than rejecting an otherwise valid call.
+        output_names = None
 
     def _fmt_k(k: int) -> str:
         if output_names is not None:
