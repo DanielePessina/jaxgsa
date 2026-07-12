@@ -50,10 +50,12 @@ or `(N, T, K)` for time-series multi-output — the same contract across all
 ten methods. How a 2D `Y` is read depends on `problem.output_names`:
 
 - Without `output_names`, a 2D `Y` is always `(N, K)`, never `(N, T)`.
-- With exactly **one** entry in `output_names`, a 2D `Y` is read as `(N, T)`
-  — T timepoints of that single labeled output — and flows through as
-  `(N, T, 1)`.
+- With exactly **one** entry in `output_names` and more than one column, a 2D
+  `(N, M)` `Y` is read as `M` timepoints of that single labeled output and
+  flows through as `(N, M, 1)`. A lone column `(N, 1)` stays a scalar output
+  `(N, K=1)` — pass `(N, 1, 1)` explicitly for a genuine 1-timepoint series.
 - With several entries, the column count must equal `len(output_names)`.
+- A 1D `(N,)` `Y` is one output regardless of how many names are declared.
 
 You need not pass exactly the canonical layout. Every public entry point
 resolves `Y` from two signals — the expected sample count identifies the
@@ -1435,7 +1437,7 @@ def analyze_dgsm(
 | `fn` | `Callable \| None` | `None` | JAX-differentiable function returning `()`, `(K,)`, or `(T, K)` per sample. |
 | `X` | `Array \| None` | `None` | Sample matrix `(N, D)` in the problem's physical units, e.g. from `sample_mc()`. |
 | `Y` | `Array \| None` | `None` | Pre-computed forward outputs `(N,)`, `(N, K)`, or `(N, T, K)`. |
-| `dfdx` | `Array \| None` | `None` | Pre-computed Jacobian `(N, D)`, `(N, K, D)`, or `(N, T, K, D)`; must satisfy `dfdx.ndim == Y.ndim + 1`. |
+| `dfdx` | `Array \| None` | `None` | Pre-computed Jacobian mirroring `Y`'s layout with one extra trailing `(D,)` axis: `(N, D)` for `(N,)` `Y`, `(N, K, D)` for `(N, K)`, `(N, T, K, D)` for `(N, T, K)`. Singleton promotions are tolerated (`(N,)` pairs with `(N, 1, D)`, `(N, 1)` with `(N, D)`). |
 | `chunk_size` | `int \| None` | `None` | Batch size for autodiff. Set it when differentiating a large model over many samples exhausts device memory. |
 
 Validation and behavior:
@@ -1450,9 +1452,12 @@ Validation and behavior:
   output; otherwise it is `(K,)` outputs.
 - When `chunk_size` is set, the autodiff path processes samples in batches,
   padding the last chunk to avoid JIT recompilation.
-- For the pre-computed path, `dfdx` may be `(N, D)` for scalar output,
-  `(N, K, D)` for multi-output, or `(N, T, K, D)` for time-series output.
-  `dfdx.ndim` must equal `Y.ndim + 1`, and the `Y` row count must match.
+- For the pre-computed path, `dfdx` mirrors `Y`'s layout with one extra
+  trailing `(D,)` axis: `(N, D)` for scalar output, `(N, K, D)` for
+  multi-output, or `(N, T, K, D)` for time-series output. Singleton promotions
+  are tolerated (`(N,)` with `(N, 1, D)`, `(N, 1)` with `(N, D)`), and whatever
+  axis moves layout inference applies to a transposed or single-labeled `Y` are
+  replayed on `dfdx`; the `Y` row count must match.
 - Zero-variance outputs produce `NaN` bounds (division by zero guarded).
 - A warning is emitted when upper bounds fall below lower bounds, suggesting
   insufficient samples.

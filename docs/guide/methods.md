@@ -650,7 +650,7 @@ All ten methods share the same output contract: scalar, multi-output, and time-s
 
 D is always the last axis. Confidence interval arrays (when using bootstrap) prepend a leading dimension of 2 for `[lower, upper]`.
 
-How a 2-D `Y` is read depends on `problem.output_names`. Without it, a 2-D `Y` is always `(N, K)` — multiple outputs, no time dimension. With exactly **one** entry in `output_names`, a 2-D `Y` is read as `(N, T)` — T timepoints of that single labeled output — and flows through as `(N, T, 1)`, keeping the labeled output axis in results. With several entries, the column count must equal `len(output_names)`.
+How a 2-D `Y` is read depends on `problem.output_names`. Without it, a 2-D `Y` is always `(N, K)` — multiple outputs, no time dimension. With exactly **one** entry in `output_names` and more than one column, a 2-D `(N, M)` `Y` is read as `M` timepoints of that single labeled output and flows through as `(N, M, 1)`, keeping the labeled output axis in results; a lone column `(N, 1)` stays a scalar output `(N, K=1)` (pass `(N, 1, 1)` explicitly for a genuine 1-timepoint series). With several entries, the column count must equal `len(output_names)`. A 1-D `(N,)` `Y` is one output regardless of how many names are declared.
 
 You need not pass exactly the canonical layout: every public entry point resolves `Y` through the same inference ladder. Exact canonical shapes pass silently; unambiguously recoverable layouts — a transposed `(K, N)` array, or a 3-D `(N, K, T)` array whose middle axis matches `len(output_names)` — are fixed with a `UserWarning` naming the transformation; ambiguous layouts raise. gsax never guesses.
 
