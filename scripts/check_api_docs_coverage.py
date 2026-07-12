@@ -22,6 +22,8 @@ CLASS_FILES = {
     "DGSMResult": ROOT / "src" / "gsax" / "dgsm" / "_result.py",
     "PAWNResult": ROOT / "src" / "gsax" / "pawn" / "_result.py",
     "HSICResult": ROOT / "src" / "gsax" / "hsic" / "_result.py",
+    "MorrisResult": ROOT / "src" / "gsax" / "morris" / "_result.py",
+    "MorrisSamplingResult": ROOT / "src" / "gsax" / "morris" / "_sampling.py",
     "DeltaResult": ROOT / "src" / "gsax" / "borgonovo" / "_result.py",
 }
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")

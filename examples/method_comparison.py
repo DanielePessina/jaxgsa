@@ -1,7 +1,8 @@
-"""Method comparison: five GSA approaches on the Ishigami benchmark.
+"""Method comparison: six GSA approaches on the Ishigami benchmark.
 
-Compares Sobol, eFAST, HDMR, PCE, and DGSM on the Ishigami function,
-a standard sensitivity analysis test case with known analytical indices.
+Compares Sobol, eFAST, HDMR, PCE, DGSM, and Morris on the Ishigami
+function, a standard sensitivity analysis test case with known
+analytical indices.
 
 Run interactively: ``uv run marimo edit examples/method_comparison.py``
 Run as script:     ``uv run python examples/method_comparison.py``
@@ -20,9 +21,9 @@ def _intro(mo):
     mo.md(r"""
     # GSA Method Comparison
 
-    **Five methods, one function — which to choose?**
+    **Six methods, one function — which to choose?**
 
-    This notebook runs five global sensitivity analysis methods on the
+    This notebook runs six global sensitivity analysis methods on the
     Ishigami function and compares their accuracy, cost, and speed:
 
     | Method | What it computes |
@@ -32,6 +33,7 @@ def _intro(mo):
     | **HDMR** | S1, ST via B-spline surrogate (ANCOVA) |
     | **PCE** | S1, ST, S2 via polynomial chaos expansion (scalar output only) |
     | **DGSM** | Bounds on ST via derivative-based measures |
+    | **Morris** | mu*, sigma screening measures (proxy for the ST *ranking*) |
     """)
     return
 
@@ -111,20 +113,32 @@ def _run_all(gsax, ishigami, ishigami_fn, jax, jnp, problem, time):
     jax.block_until_ready(result_dgsm.upper_bound)
     time_dgsm = time.perf_counter() - _t0
     n_evals_dgsm = len(_X_dgsm)
+
+    # --- Morris ---
+    _t0 = time.perf_counter()
+    sr_morris = gsax.sample_morris(problem, 100, seed=42)
+    _Y_morris = ishigami.evaluate(jnp.asarray(sr_morris.samples))
+    result_morris = gsax.analyze_morris(sr_morris, _Y_morris)
+    jax.block_until_ready(result_morris.mu_star)
+    time_morris = time.perf_counter() - _t0
+    n_evals_morris = sr_morris.n_total
     return (
         n_evals_dgsm,
         n_evals_efast,
         n_evals_hdmr,
+        n_evals_morris,
         n_evals_pce,
         n_evals_sobol,
         result_dgsm,
         result_efast,
         result_hdmr,
+        result_morris,
         result_pce,
         result_sobol,
         time_dgsm,
         time_efast,
         time_hdmr,
+        time_morris,
         time_pce,
         time_sobol,
     )
@@ -227,6 +241,61 @@ def _st_chart(
 
 
 @app.cell(hide_code=True)
+def _morris_md(mo):
+    mo.md(r"""
+    ### Morris screening (different scale)
+
+    Morris $\mu^*$ is the mean absolute elementary effect — a
+    **screening** measure on a derivative-like scale, not a variance
+    share. It is not directly comparable to $S_1$/$S_T$, so it is left
+    out of the index charts above. Normalizing $\mu^*$ to sum to one
+    supports a **ranking** check against the analytical $S_T$ shares —
+    the ranking ($x_1 > x_2 > x_3$) matches — but the normalized values
+    themselves carry no variance meaning.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _morris_chart(analytical_st, np, plt, problem, result_morris):
+    _names = list(problem.names)
+    _x = np.arange(len(_names))
+    _width = 0.38
+
+    _mu_star = np.asarray(result_morris.mu_star)
+    _mu_star_share = _mu_star / _mu_star.sum()
+    _st_ana = np.asarray(analytical_st)
+    _st_share = _st_ana / _st_ana.sum()
+
+    _fig, _ax = plt.subplots(figsize=(8, 5))
+    _ax.bar(
+        _x - _width / 2,
+        _mu_star_share,
+        _width,
+        color="#8c564b",
+        alpha=0.85,
+        label="Morris mu* (normalized)",
+    )
+    _ax.bar(
+        _x + _width / 2,
+        _st_share,
+        _width,
+        color="black",
+        alpha=0.35,
+        label="Analytical ST (normalized)",
+    )
+    _ax.set_xticks(_x)
+    _ax.set_xticklabels(_names)
+    _ax.set_ylabel("Share of total (ranking check only)")
+    _ax.set_title("Morris mu* vs analytical ST — normalized for ranking")
+    _ax.legend(frameon=False, fontsize=8)
+    _ax.grid(axis="y", alpha=0.3)
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell(hide_code=True)
 def _accuracy_table(
     analytical_s1,
     analytical_st,
@@ -234,6 +303,7 @@ def _accuracy_table(
     n_evals_dgsm,
     n_evals_efast,
     n_evals_hdmr,
+    n_evals_morris,
     n_evals_pce,
     n_evals_sobol,
     np,
@@ -245,6 +315,7 @@ def _accuracy_table(
     time_dgsm,
     time_efast,
     time_hdmr,
+    time_morris,
     time_pce,
     time_sobol,
 ):
@@ -290,6 +361,13 @@ def _accuracy_table(
             n_evals_dgsm,
             time_dgsm,
         ),
+        (
+            "Morris (screening)",
+            None,
+            None,
+            n_evals_morris,
+            time_morris,
+        ),
     ]
 
     _header = "| Method | S1 MAE | ST MAE | N evals | Wall time (s) |\n"
@@ -297,17 +375,24 @@ def _accuracy_table(
     _body = ""
     for _name, _s1e, _ste, _ne, _wt in _rows:
         _s1_str = f"{_s1e:.4f}" if _s1e is not None else "---"
-        _body += f"| {_name} | {_s1_str} | {_ste:.4f} | {_ne:,} | {_wt:.2f} |\n"
+        _st_str = f"{_ste:.4f}" if _ste is not None else "---"
+        _body += f"| {_name} | {_s1_str} | {_st_str} | {_ne:,} | {_wt:.2f} |\n"
 
     mo.md(
         "### Accuracy and cost comparison\n\n" + _header + _sep + _body + "\n"
         "S1 MAE and ST MAE are mean absolute errors versus the known analytical "
         "Ishigami indices. DGSM provides **bounds** on $S_T$ rather than point "
         "estimates, so the S1 column is not applicable and the ST column reports "
-        "the bound gap (MAE of the Poincare upper bound vs analytical $S_T$).\n\n"
-        "**Timing note:** Sobol and eFAST times are end-to-end (sample + evaluate "
-        "+ analyze). HDMR and PCE times are analyze-only (shared pre-computed "
-        "samples). DGSM time is analyze-only (internally evaluates via autodiff)."
+        "the bound gap (MAE of the Poincare upper bound vs analytical $S_T$). "
+        "Morris $\\mu^*$ is a screening measure on a different scale entirely "
+        "(mean absolute elementary effect, not a variance share), so neither MAE "
+        "column applies; see the normalized ranking check above. Its N evals is "
+        "the **unique** row count after grid deduplication (100 trajectories = "
+        "400 expanded rows).\n\n"
+        "**Timing note:** Sobol, eFAST, and Morris times are end-to-end (sample "
+        "+ evaluate + analyze). HDMR and PCE times are analyze-only (shared "
+        "pre-computed samples). DGSM time is analyze-only (internally evaluates "
+        "via autodiff)."
     )
     return
 
@@ -398,6 +483,7 @@ def _summary(mo):
     | **DGSM** | **Differentiable models** via JAX autodiff. |
     | **HDMR** | **Arbitrary (X, Y) data**, no structured sampling. |
     | **PCE** | **Emulation** with a reusable polynomial surrogate (scalar output only). |
+    | **Morris** | **Cheapest screening** — factor fixing at $r(D+1)$ evals before dedup. |
 
     - **Sobol** is the gold standard when you can afford
       $N \times (2D+2)$ evaluations and need pairwise interactions.
@@ -409,6 +495,10 @@ def _summary(mo):
       builds a B-spline surrogate for sensitivity decomposition.
     - **PCE** fits an orthogonal polynomial surrogate that doubles
       as a fast emulator for downstream prediction tasks.
+    - **Morris** ranks parameters for the lowest budget of all —
+      64 unique evaluations here after grid deduplication. Its $\mu^*$
+      proxies the $S_T$ *ranking* (not the variance shares); use it to
+      fix unimportant factors before a variance-based follow-up.
     """)
     return
 
