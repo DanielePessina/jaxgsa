@@ -31,7 +31,7 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from gsax._normalization import _prepare_Y
+from gsax._normalization import _prepare_Y, _squeeze_output_axes, _validate_xy_inputs
 from gsax._transforms import cdf_to_unit_interval
 from gsax.pawn._result import PAWNResult
 from gsax.problem import Problem
@@ -229,14 +229,7 @@ def analyze(
     X = jnp.asarray(X)
     Y = jnp.asarray(Y)
 
-    if X.ndim != 2:
-        raise ValueError(f"X must be 2-D (N, D), got ndim={X.ndim}")
-    if X.shape[1] != problem.num_vars:
-        raise ValueError(
-            f"X has {X.shape[1]} columns but problem has {problem.num_vars} parameters"
-        )
-    if X.shape[0] != Y.shape[0]:
-        raise ValueError(f"X has {X.shape[0]} rows but Y has {Y.shape[0]} rows")
+    _validate_xy_inputs(problem, X, Y)
     if statistic not in ("median", "max", "mean"):
         raise ValueError(f"statistic must be 'median', 'max', or 'mean', got {statistic!r}")
     if n_bins < 2:
@@ -265,19 +258,9 @@ def analyze(
         percentiles = jnp.array([alpha * 100, (1.0 - alpha) * 100])
         pawn_conf_3d = jnp.nanpercentile(boot_stack, percentiles, axis=0)
 
-        if squeeze_time and squeeze_output:
-            pawn_conf = pawn_conf_3d[:, 0, 0, :]
-        elif squeeze_time:
-            pawn_conf = pawn_conf_3d[:, 0, :, :]
-        else:
-            pawn_conf = pawn_conf_3d
+        pawn_conf = _squeeze_output_axes(pawn_conf_3d, squeeze_time, squeeze_output)
 
-    if squeeze_time and squeeze_output:
-        pawn_out = pawn_3d[0, 0, :]
-    elif squeeze_time:
-        pawn_out = pawn_3d[0, :, :]
-    else:
-        pawn_out = pawn_3d
+    pawn_out = _squeeze_output_axes(pawn_3d, squeeze_time, squeeze_output)
 
     return PAWNResult(
         pawn=pawn_out,

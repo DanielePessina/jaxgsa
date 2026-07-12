@@ -37,6 +37,7 @@ export default defineConfig({
         { text: 'PCE', link: '/examples/pce' },
         { text: 'HSIC', link: '/examples/hsic' },
         { text: 'PAWN', link: '/examples/pawn' },
+        { text: 'Borgonovo Delta', link: '/examples/borgonovo' },
         { text: 'Batch Reactor (notebook)', link: '/examples/batch_reactor' },
       ],
       '/api/': [

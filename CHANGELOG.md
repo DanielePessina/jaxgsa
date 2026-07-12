@@ -4,7 +4,7 @@
 
 ### Added
 
-- **Morris** elementary-effects screening as an eighth method
+- **Morris** elementary-effects screening
   (`gsax.morris`, re-exported as `gsax.sample_morris()` /
   `gsax.analyze_morris()`): globalized one-at-a-time screening that reduces
   `r * (D + 1)` model evaluations to mu, mu_star (importance ranking), and
@@ -21,6 +21,43 @@
   - `MorrisSamplingResult.downsample()` prefix-slicing to fewer trajectories
     without re-simulation, and `MorrisResult.to_physical_units()` /
     `to_dataset()` for derivative-scale measures and labeled xarray export.
+- **Shapley effects** (`gsax.analyze_shapley`, `ShapleyResult`) — global
+  Shapley-value allocation of output variance across inputs (Owen 2014;
+  Song, Nelson & Staum 2016), computed analytically from a fitted surrogate's
+  variance decomposition instead of permutation Monte Carlo. Two backends:
+  `"hdmr"` (default; RS-HDMR component-function variances, supports scalar,
+  multi-output, and time-series outputs) and `"pce"` (subset variances read
+  off orthonormal polynomial coefficients, scalar outputs). Indices are
+  normalized by the surrogate's total decomposed variance, so `Sh` sums to
+  exactly 1 (the Shapley efficiency property); the `explained_variance` field
+  reports the fraction of `Var(Y)` the surrogate captured, and the `order`
+  field the effective surrogate order used. For the `"pce"` backend `S1`/`ST`
+  match `analyze_pce` exactly. A `UserWarning` flags a pathological fit
+  (`explained_variance` far from 1). Assumes independent inputs.
+- Closed-form analytical Shapley values (`ANALYTICAL_SHAPLEY`,
+  `analytical_shapley(...)`) for the Ishigami, linear, and Sobol-G
+  benchmarks, used to validate the new method.
+- `gsax.borgonovo` subpackage — moment-independent, density-based sensitivity via
+  the Plischke, Borgonovo & Smith (2013) given-data estimator of Borgonovo's
+  (2007) delta index. `analyze` (top-level alias `analyze_borgonovo`) returns both
+  the delta index and the given-data first-order Sobol `S1` from the same
+  rank-class partition, with bootstrap bias correction (`2*d_hat - mean(d_boot)`)
+  and percentile confidence intervals. Works with any `(X, Y)` pairs and supports
+  scalar, multi-output, and time-series outputs.
+- `DeltaResult` dataclass holding the delta and `S1` indices with optional
+  bootstrap intervals and a `to_dataset()` xarray export.
+- `gsax.benchmarks.gaussian_linear` — a Gaussian linear additive benchmark whose
+  Gaussian marginals give the Borgonovo delta index a semi-analytic solution
+  (`ANALYTICAL_DELTA`), for ground-truth validation of the delta estimator.
+
+### Changed
+
+- RS-HDMR now returns `NaN` sensitivity indices (with the existing
+  zero-variance warning) for constant-output slices, matching the
+  package-wide convention used by Sobol and PCE, instead of silent zeros.
+- `analyze_pce` now emits a `UserWarning` when the requested polynomial
+  `order` is automatically reduced to fit the sample budget, and warns on a
+  constant (zero-variance) output.
 
 ## 0.1.2
 
