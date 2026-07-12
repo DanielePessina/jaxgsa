@@ -15,9 +15,14 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
-from gsax._normalization import _validate_xy_inputs
-from gsax.hdmr._analyze import analyze_hdmr
-from gsax.pce._analyze import analyze_pce
+from gsax._normalization import (
+    _prepare_Y,
+    _squeeze_output_axes,
+    _validate_xy_inputs,
+    _warn_zero_variance_slices,
+)
+from gsax.hdmr._analyze import _analyze_hdmr_core
+from gsax.pce._analyze import _fit_pce_core
 from gsax.problem import Problem
 from gsax.shapley._engine import build_membership, shapley_from_variances
 from gsax.shapley._result import ShapleyResult
@@ -172,19 +177,21 @@ def analyze_shapley(
         pce_kwargs={"order": order, "ridge": ridge, "fit_ratio": fit_ratio},
     )
 
-    # Resolve Y to the canonical layout ONCE, here, so total_var below and the
-    # backend's own (idempotent) inference agree on which axes are slices.
+    # Resolve Y to the canonical layout ONCE, here, so total_var below agrees
+    # with the fit cores (which we call directly, skipping their re-validation).
     Y = _validate_xy_inputs(problem, jnp.asarray(X), jnp.asarray(Y))
 
     # Per-output-slice variance of the raw outputs, used to normalize the PCE
     # explained fraction and to flag constant (zero-variance) slices uniformly.
     total_var = jnp.var(Y, axis=0)
+    # Warn once here for both backends; the cores below do not warn.
+    _warn_zero_variance_slices(_prepare_Y(Y)[0], output_names=problem.output_names)
 
     if backend == "hdmr":
-        result = analyze_hdmr(problem, X, Y, **resolved)
+        result = _analyze_hdmr_core(problem, jnp.asarray(X), Y, **resolved)
         emulator = result.emulator
-        if emulator is None:  # pragma: no cover - analyze_hdmr always sets it
-            raise RuntimeError("analyze_hdmr returned no emulator")
+        if emulator is None:  # pragma: no cover - the core always sets it
+            raise RuntimeError("HDMR core returned no emulator")
         # HDMR terms enumerate [singles, pairs, triples]; the emulator holds
         # the exact pair/triple index tuples used (post maxorder clamping).
         subsets: list[tuple[int, ...]] = [(i,) for i in range(problem.num_vars)]
@@ -199,16 +206,20 @@ def analyze_shapley(
         explained_variance = partial.sum(axis=-1)
         effective_order = emulator["maxorder"]
     else:
-        pce_result = analyze_pce(problem, X, Y, **resolved)
+        # Fit-only core: skips the S2 einsum and LOO diagnostic that analyze_pce
+        # would compute and Shapley would discard. Squeeze the coefficients with
+        # the fit's flags so their leading dims match total_var.
+        fit = _fit_pce_core(problem, jnp.asarray(X), Y, **resolved)
+        coeffs = _squeeze_output_axes(fit.coefficients, fit.squeeze_time, fit.squeeze_output)
         # Orthonormality makes each squared coefficient a partial variance;
         # the constant term (index 0 on the trailing term axis) carries none.
         # multi_index[1:] > 0 IS the membership matrix, so no tuple
         # round-trip is needed. coefficients are terms-last, so this and the
         # shared normalization below are batched over any leading slice dims.
-        partial = pce_result.coefficients[..., 1:] ** 2
-        membership = np.asarray(pce_result.multi_index[1:] > 0)
+        partial = coeffs[..., 1:] ** 2
+        membership = np.asarray(fit.multi_index[1:] > 0)
         explained_variance = jnp.where(total_var == 0, jnp.nan, partial.sum(axis=-1) / total_var)
-        effective_order = pce_result.order
+        effective_order = fit.order
 
     # Normalize the partial variances to sum to 1 so Sh satisfies the Shapley
     # efficiency property (Owen 2014); explained_variance carries the
