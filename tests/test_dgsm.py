@@ -283,6 +283,38 @@ class TestPrecomputed:
         with pytest.raises(ValueError, match="Provide either"):
             analyze(problem)
 
+    def test_singleton_pair_scalar(self):
+        """Y=(N,) pairs with both (N, D) and (N, 1, D) dfdx (singleton tolerance)."""
+        import jax
+
+        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1),) * 3)
+        X = jnp.asarray(sample_mc(problem, N=400, seed=7))
+
+        def fn(x):  # (3,) -> ()
+            return jnp.dot(jnp.array([1.0, 2.0, 3.0]), x)
+
+        Y = jax.vmap(fn)(X)  # (N,)
+        dfdx = jax.vmap(jax.jacrev(fn))(X)  # (N, D)
+        base = analyze(problem, Y=Y, dfdx=dfdx)
+        singleton = analyze(problem, Y=Y, dfdx=dfdx[:, None, :])  # (N, 1, D)
+        assert base.nu.shape == (3,)
+        np.testing.assert_allclose(np.asarray(singleton.nu), np.asarray(base.nu), rtol=1e-6)
+
+    def test_singleton_pair_2d(self):
+        """Y=(N, 1) pairs with (N, D) dfdx."""
+        import jax
+
+        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1),) * 3)
+        X = jnp.asarray(sample_mc(problem, N=400, seed=8))
+
+        def fn(x):
+            return jnp.dot(jnp.array([1.0, 2.0, 3.0]), x)
+
+        Y = jax.vmap(fn)(X)[:, None]  # (N, 1)
+        dfdx = jax.vmap(jax.jacrev(fn))(X)  # (N, D)
+        result = analyze(problem, Y=Y, dfdx=dfdx)
+        assert result.nu.shape == (1, 3)
+
 
 class TestChunked:
     def test_chunked_matches_unchunked(self):
@@ -493,6 +525,53 @@ class TestTimeSeries:
         dfdx_3d = jax.vmap(jax.jacrev(self._fn_scalar))(X)[:, None, :]  # (N, 1, D)
         with pytest.raises(ValueError, match="ndim"):
             analyze(linear.PROBLEM, Y=Y, dfdx=dfdx_3d)
+
+    def test_precomputed_swapped_layout_lockstep(self):
+        """Transposed Y+dfdx (labels force a T/K swap, T != K) match canonical."""
+        import jax
+
+        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1),) * 3, output_names=("a", "b"))
+        X = jnp.asarray(sample_mc(problem, N=400, seed=9))
+        Y = jax.vmap(self._fn_ts)(X)  # (N, T=3, K=2)
+        dfdx = jax.vmap(jax.jacrev(self._fn_ts))(X)  # (N, T, K, D)
+        canonical = analyze(problem, Y=Y, dfdx=dfdx)
+        with pytest.warns(UserWarning, match="swapping"):
+            swapped = analyze(
+                problem,
+                Y=jnp.swapaxes(Y, 1, 2),  # (N, K, T)
+                dfdx=jnp.swapaxes(dfdx, 1, 2),  # (N, K, T, D)
+            )
+        np.testing.assert_allclose(np.asarray(swapped.nu), np.asarray(canonical.nu), rtol=1e-5)
+        np.testing.assert_allclose(
+            np.asarray(swapped.upper_bound), np.asarray(canonical.upper_bound), rtol=1e-5
+        )
+
+    def test_precomputed_inconsistent_dfdx_raises(self):
+        """Canonical Y with a transposed dfdx (T != K) is rejected, not swapped."""
+        import jax
+
+        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1),) * 3, output_names=("a", "b"))
+        X = jnp.asarray(sample_mc(problem, N=64, seed=1))
+        Y = jax.vmap(self._fn_ts)(X)  # (N, 3, 2) canonical
+        dfdx = jax.vmap(jax.jacrev(self._fn_ts))(X)  # (N, 3, 2, D)
+        with pytest.raises(ValueError, match="incompatible"):
+            analyze(problem, Y=Y, dfdx=jnp.swapaxes(dfdx, 1, 2))  # (N, 2, 3, D)
+
+    def test_autodiff_single_label_1d_output_aligned(self):
+        """fn returning (T,) under a single-label problem yields (T, 1, D) moments."""
+        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1),) * 3, output_names=("p",))
+        X = jnp.asarray(sample_mc(problem, N=400, seed=2))
+
+        def fn(x):  # (3,) -> (T=4,)
+            base = jnp.dot(jnp.array([1.0, 2.0, 3.0]), x)
+            return jnp.array([1.0, 2.0, 0.5, 3.0]) * base
+
+        result = analyze(problem, fn, X)
+        assert result.nu.shape == (4, 1, 3)
+        # Affine images of one scalar model share the same normalized bound.
+        ub = np.asarray(result.upper_bound)
+        for t in range(1, 4):
+            np.testing.assert_allclose(ub[t, 0], ub[0, 0], rtol=1e-4)
 
     def test_chunked_time_series_matches_unchunked(self):
         X = self._X(200)

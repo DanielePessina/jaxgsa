@@ -20,7 +20,8 @@ import jax.numpy as jnp
 from jax import Array
 
 from gsax._normalization import (
-    _infer_output_layout,
+    LayoutOps,
+    _infer_output_layout_ops,
     _prepare_Y,
     _squeeze_output_axes,
     _validate_x,
@@ -48,6 +49,47 @@ def _promote_jac(jac: Array) -> Array:
     )
 
 
+def _apply_layout_ops(arr: Array, ops: LayoutOps, *, has_sample_axis: bool) -> Array:
+    """Replay Y's canonicalization on a companion array so it stays aligned.
+
+    ``arr`` mirrors Y's user-supplied slice layout, optionally with a leading
+    sample axis (a raw Jacobian) and always with extra trailing axes (the ``D``
+    derivative axis). Y's axis indices map 1:1 onto ``arr``'s slice axes because
+    ``D`` is pinned last, so the same move/insert/swap applies.
+
+    Args:
+        arr: Array to realign — a ``(N, *slice, D)`` Jacobian
+            (``has_sample_axis=True``) or a reduced ``(*slice, D)`` moment.
+        ops: The transformations :func:`_infer_output_layout_ops` applied to Y.
+        has_sample_axis: Whether ``arr`` carries Y's leading sample axis.
+
+    Returns:
+        ``arr`` with the same transformations applied to its slice axes.
+    """
+    off = 1 if has_sample_axis else 0
+    if has_sample_axis and ops.sample_axis is not None:
+        arr = jnp.moveaxis(arr, ops.sample_axis, 0)
+    if ops.inserted_output_axis:
+        arr = arr[..., None, :]  # insert singleton K just before the trailing D
+    if ops.swapped_tk:
+        arr = jnp.swapaxes(arr, off, off + 1)
+    return arr
+
+
+def _promote_moments(m: Array) -> Array:
+    """Promote a reduced moment ``(*slice, D)`` to canonical ``(T, K, D)``.
+
+    The reduced-space analog of :func:`_promote_jac` (which acts on the sample
+    axis too); used on the autodiff path where the moments are already averaged
+    over N before layout is known.
+    """
+    if m.ndim == 1:  # (D,) scalar output
+        return m[None, None, :]
+    if m.ndim == 2:  # (K, D) multi-output
+        return m[None, :, :]
+    return m  # (T, K, D) time series
+
+
 def _compute_moments(
     fn: Callable,
     X: Array,
@@ -67,8 +109,10 @@ def _compute_moments(
 
     Returns:
         (Y, sigma, nu) where Y is the stacked raw fn output ((N,), (N, K),
-        or (N, T, K)) and sigma / nu are (T, K, D) with positional slice
-        axes (singletons inserted where the fn output had none).
+        or (N, T, K)) and sigma / nu are the reduced raw moments carrying the
+        fn output's own slice axes: (D,), (K, D), or (T, K, D). Layout
+        canonicalization (promotion, label-driven axis moves) is applied in
+        ``analyze`` once the semantic axes are known.
     """
 
     # Reverse-mode Jacobian is efficient when K (outputs) < D (inputs).
@@ -83,8 +127,7 @@ def _compute_moments(
     N = X.shape[0]
 
     if not chunk_size or chunk_size <= 0 or N <= chunk_size:
-        jac_raw, Y = combined(X)
-        jac = _promote_jac(jac_raw)
+        jac, Y = combined(X)
         return Y, jnp.mean(jac, axis=0), jnp.mean(jac**2, axis=0)
 
     # Chunked path: accumulate running sums to bound peak memory.
@@ -102,10 +145,10 @@ def _compute_moments(
             pad_size = chunk_size - actual_len
             X_chunk = jnp.concatenate([X_chunk, jnp.zeros((pad_size, X.shape[1]))], axis=0)
 
-        jac_raw, Y_chunk_full = combined(X_chunk)
+        jac, Y_chunk_full = combined(X_chunk)
         Y_parts.append(Y_chunk_full[:actual_len])
 
-        jac = _promote_jac(jac_raw)[:actual_len]
+        jac = jac[:actual_len]
         sj = jnp.sum(jac, axis=0)
         sj2 = jnp.sum(jac**2, axis=0)
         sum_jac = sj if sum_jac is None else sum_jac + sj
@@ -163,8 +206,12 @@ def analyze(
             2-D ``Y`` everywhere in gsax.
         X: Sample matrix ``(N, D)`` in the problem's physical units.
         Y: Forward model outputs ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
-        dfdx: Pre-computed Jacobian ``(N, D)``, ``(N, K, D)``, or
-            ``(N, T, K, D)``; its ndim must be ``Y.ndim + 1``.
+        dfdx: Pre-computed Jacobian mirroring ``Y``'s layout with one extra
+            trailing ``(D,)`` axis: ``(N, D)`` for ``(N,)`` Y, ``(N, K, D)`` for
+            ``(N, K)``, ``(N, T, K, D)`` for ``(N, T, K)``. Singleton promotions
+            are tolerated — ``(N,)`` pairs with ``(N, 1, D)`` and ``(N, 1)``
+            with ``(N, D)``. Whatever axis moves layout inference applies to a
+            transposed or single-labeled ``Y`` are replayed on ``dfdx``.
         chunk_size: Batch size for the autodiff path; the Jacobian is
             accumulated in chunks of this many samples to bound peak
             memory. None (default) processes all N samples at once.
@@ -185,9 +232,11 @@ def analyze(
         _validate_x(problem, X)
         Y_out, sigma, nu = _compute_moments(fn, X, chunk_size=chunk_size)
         # Resolve the fn output's semantic axes (e.g. 1-D output = timepoints
-        # when a single output is named); the moments' positional slice axes
-        # are aligned to the canonical Y below.
-        Y_infer = _infer_output_layout(Y_out, problem, int(X.shape[0]))
+        # when a single output is named), then replay the same axis moves on the
+        # already-reduced moments and promote them to canonical (T, K, D).
+        Y_infer, ops = _infer_output_layout_ops(Y_out, problem, int(X.shape[0]))
+        sigma = _promote_moments(_apply_layout_ops(sigma, ops, has_sample_axis=False))
+        nu = _promote_moments(_apply_layout_ops(nu, ops, has_sample_axis=False))
     elif Y is not None and dfdx is not None:
         # Pre-computed path: user supplies Jacobian and forward outputs directly
         Y_out = jnp.asarray(Y)
@@ -197,38 +246,33 @@ def analyze(
                 f"dfdx must be 2-D (N, D), 3-D (N, K, D), or 4-D (N, T, K, D), "
                 f"got ndim={dfdx_arr.ndim}"
             )
-        if Y_out.ndim != dfdx_arr.ndim - 1:
-            raise ValueError(
-                f"dfdx ndim ({dfdx_arr.ndim}) must be Y ndim + 1: pair (N,) with "
-                "(N, D), (N, K) with (N, K, D), and (N, T, K) with (N, T, K, D)"
-            )
         if dfdx_arr.shape[-1] != D:
             raise ValueError(
                 f"dfdx last dimension ({dfdx_arr.shape[-1]}) must match problem.num_vars ({D})"
             )
         # Row consistency is enforced by the inference call: dfdx's leading
-        # axis is the expected sample count Y must match.
-        Y_infer = _infer_output_layout(Y_out, problem, int(dfdx_arr.shape[0]))
-        dfdx_arr = _promote_jac(dfdx_arr)
+        # axis is the expected sample count Y must match. dfdx mirrors Y's
+        # user-supplied slice layout, so the same axis moves realign it before
+        # promotion to canonical (N, T, K, D); the singleton pairing
+        # ((N,) with (N, 1, D), (N, 1) with (N, D)) falls out of the promotion.
+        Y_infer, ops = _infer_output_layout_ops(Y_out, problem, int(dfdx_arr.shape[0]))
+        dfdx_arr = _promote_jac(_apply_layout_ops(dfdx_arr, ops, has_sample_axis=True))
         # One vectorized reduction over N covers every (t, k) slice at once.
-        sigma = jnp.mean(dfdx_arr, axis=0)  # E[df/dx_i], (T, K, D) positional
+        sigma = jnp.mean(dfdx_arr, axis=0)  # E[df/dx_i], (T, K, D)
         nu = jnp.mean(dfdx_arr**2, axis=0)  # E[(df/dx_i)^2]
     else:
         raise ValueError("Provide either (fn, X) or (Y, dfdx)")
 
-    # Canonicalize Y to (N, T, K) and align the moments' positional slice
-    # axes with it. The only possible correction is a transpose of (T, K):
-    # inference reshapes a single-labeled 2-D Y to (n, T, 1) or swaps 3-D
-    # trailing axes, and both fire only when the two slice axes differ, so a
-    # plain shape comparison detects it.
+    # Canonicalize Y to (N, T, K). The moments were realigned in lockstep with
+    # Y's canonicalization above, so their slice axes must already match; a
+    # mismatch means dfdx did not mirror Y's layout (e.g. wrong ndim or a
+    # transposed Jacobian that inference could not recover), which we reject.
     Y_3d, squeeze_time, squeeze_output = _prepare_Y(Y_infer)
     if sigma.shape[:2] != Y_3d.shape[1:3]:
-        sigma = jnp.swapaxes(sigma, 0, 1)
-        nu = jnp.swapaxes(nu, 0, 1)
-    if sigma.shape[:2] != Y_3d.shape[1:3]:  # pragma: no cover - defensive
         raise ValueError(
-            f"dfdx output dimensions {sigma.shape[:2]} must match Y output "
-            f"dimensions {Y_3d.shape[1:3]}"
+            f"dfdx ndim/shape is incompatible with Y: derivative slice dims "
+            f"{sigma.shape[:2]} do not match Y's output dims {Y_3d.shape[1:3]}; "
+            "dfdx must mirror Y's layout with one extra trailing (D,) axis"
         )
 
     # Var(Y) per (t, k) output slice, denominator of both bounds.
