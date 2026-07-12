@@ -14,14 +14,21 @@ from gsax.problem import Problem
 class DeltaResult:
     """Borgonovo delta sensitivity analysis results.
 
-    Stores the moment-independent delta index and the given-data
-    first-order Sobol index computed from the same class partition,
-    with optional bootstrap confidence intervals.
+    Stores the moment-independent delta index — how much knowing an input
+    shifts the entire output density, on a [0, 1] scale — and the
+    given-data first-order Sobol index computed from the same class
+    partition, with optional bootstrap confidence intervals.
+
+    For scalar-output models, index arrays have shape ``(D,)``; for
+    multi-output models ``(K, D)``; for time-series analyses
+    ``(T, K, D)``. Confidence arrays add a leading axis of size 2.
 
     Attributes:
-        delta: Borgonovo delta index per parameter (bias-corrected when
-            the analysis ran with ``bias_correct=True`` and
-            ``n_bootstrap > 0``).
+        delta: Borgonovo delta index per parameter: 0 means the output
+            distribution is unaffected by the input, 1 means fully
+            determined by it (bias-corrected when the analysis ran with
+            ``bias_correct=True`` and ``n_bootstrap > 0``; the corrected
+            estimate can fall marginally below 0 for weak inputs).
         delta_conf: Percentile bootstrap confidence interval
             ``[lower, upper]``, or ``None`` when ``n_bootstrap=0``.
         S1: Given-data first-order Sobol index per parameter.

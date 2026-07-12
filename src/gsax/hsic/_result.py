@@ -21,10 +21,18 @@ class HSICResult:
     For time-series multi-output, index arrays have shape ``(T, K, D)``.
 
     Attributes:
-        R2_HSIC: Normalized first-order HSIC index in [0, 1].
-        T_HSIC: Total-order HSIC index.
-        p_values: Permutation p-values for R2_HSIC.
-        hsic_raw: Unnormalized HSIC(X_i, Y) values.
+        R2_HSIC: Normalized first-order HSIC index in [0, 1]:
+            ``HSIC(x_i, Y)`` divided by
+            ``sqrt(HSIC(x_i, x_i) * HSIC(Y, Y))``. 0 means the input and
+            output are independent; larger means stronger dependence.
+        T_HSIC: Total-order HSIC index: the fraction of the joint
+            dependence lost when input i is removed, so it also counts
+            influence carried through interactions (analogous to ST).
+        p_values: Permutation-test p-values for the null hypothesis that
+            ``x_i`` and ``Y`` are independent; small values mean the
+            detected dependence is unlikely to be sampling noise.
+        hsic_raw: Unnormalized HSIC(x_i, Y) values (kernel- and
+            scale-dependent; compare only within one analysis).
         problem: Problem definition used for the analysis.
     """
 

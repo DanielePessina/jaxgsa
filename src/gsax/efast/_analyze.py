@@ -24,7 +24,12 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from gsax._normalization import _prenormalize_outputs, _prepare_Y, _warn_zero_variance_slices
+from gsax._normalization import (
+    _infer_output_layout,
+    _prenormalize_outputs,
+    _prepare_Y,
+    _warn_zero_variance_slices,
+)
 from gsax.efast._result import EFASTResult
 from gsax.problem import Problem
 
@@ -54,8 +59,9 @@ def _compute_indices(Y_curve: Array, N: int, M: int, omega_0: int) -> tuple[Arra
     harmonics = jnp.arange(1, M + 1) * omega_0
     D1 = 2.0 * jnp.sum(Sp[harmonics - 1])
 
-    # Complementary variance: power at low frequencies [0, omega_0/2).
-    # Driven by the complementary (non-focal) parameters' lower frequencies.
+    # Complementary variance: power at frequencies 1..omega_0//2 (DC excluded;
+    # Sp[k] holds frequency k+1). Everything below omega_0/2 is driven by the
+    # complementary (non-focal) parameters' lower frequencies.
     compl_range = jnp.arange(omega_0 // 2)
     Dt = 2.0 * jnp.sum(Sp[compl_range])
 
@@ -94,22 +100,41 @@ def analyze(
     prenormalize: bool = False,
     chunk_size: int = 2048,
 ) -> EFASTResult:
-    """Compute eFAST sensitivity indices from model outputs.
+    """Compute eFAST first- and total-order sensitivity indices.
+
+    eFAST attributes output variance to each parameter from the Fourier
+    spectrum of the model output along that parameter's search curve --
+    a structured, deterministic alternative to Monte Carlo Sobol estimation
+    that yields S1 and ST (but no second-order indices) from ``N * D`` model
+    runs. ``Y`` must be the model evaluated row-by-row on the output of
+    ``efast.sample`` (same ``N``, same ``M``, rows in the same order);
+    the row count is used to reconstruct the sampling frequency.
 
     Args:
         problem: Problem definition with D parameters.
-        Y: Model outputs evaluated at eFAST samples. Accepted shapes:
+        Y: Model outputs evaluated at eFAST samples, rows in sample order.
+            Accepted shapes:
             - ``(N*D,)`` for scalar output
             - ``(N*D, K)`` for K output variables
             - ``(N*D, T, K)`` for K outputs over T time steps
-        M: Interference factor used during sampling. Default 4.
-        prenormalize: If True, center and scale each output slice to
-            unit variance before computing indices.
+        M: Interference factor. Must match the ``M`` used in
+            ``efast.sample``, otherwise the harmonics are misread and the
+            indices are meaningless. Default 4.
+        prenormalize: If True, center and scale each output slice to unit
+            variance before computing indices. The indices are ratios, so
+            this changes nothing mathematically; it only helps when raw
+            output magnitudes risk float overflow/underflow.
         chunk_size: Maximum number of output slices to process in one
-            vmapped batch. Caps peak device memory.
+            vmapped batch. Caps peak device memory for large ``T * K``;
+            smaller values trade speed for memory.
 
     Returns:
-        EFASTResult with S1 and ST indices.
+        EFASTResult with S1 and ST, shaped ``(D,)`` / ``(K, D)`` /
+        ``(T, K, D)`` to mirror the layout of ``Y``.
+
+    Raises:
+        ValueError: If ``M < 1`` or ``Y``'s leading dimension is not a
+            multiple of D.
     """
     if M < 1:
         raise ValueError(f"M must be >= 1, got {M}")
@@ -125,6 +150,11 @@ def analyze(
         )
 
     D = problem.num_vars
+
+    # Resolve the user-supplied layout from the output labels. eFAST cannot
+    # know its sample count independently (rows are N*D with N free), so only
+    # the label-based rules apply here.
+    Y, _ = _infer_output_layout(Y, problem, None)
 
     # Detect scalar output before _prepare_Y adds singleton dims
     is_scalar = Y.ndim == 1

@@ -21,7 +21,14 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from gsax._normalization import _prenormalize_outputs, _prepare_Y, _warn_zero_variance_slices
+from gsax._bootstrap import _bootstrap_ci_endpoints
+from gsax._normalization import (
+    _infer_output_layout,
+    _prenormalize_outputs,
+    _prepare_Y,
+    _squeeze_output_axes,
+    _warn_zero_variance_slices,
+)
 from gsax.sampling import SamplingResult, _saltelli_step
 from gsax.sobol._indices import (
     _fused_first_total,
@@ -102,7 +109,12 @@ def _count_nans(
     ST: Array,
     S2: Array | None,
 ) -> dict[str, int]:
-    """Count NaN values in computed Sobol index arrays (no reporting)."""
+    """Count NaN values per index array; callers decide whether to report.
+
+    For S2, only the strict upper triangle is counted — the diagonal is NaN
+    by construction (see ``_normalize_s2_matrix``) and would inflate the
+    count.
+    """
     counts: dict[str, int] = {
         "S1": int(jnp.sum(jnp.isnan(S1))),
         "ST": int(jnp.sum(jnp.isnan(ST))),
@@ -114,39 +126,20 @@ def _count_nans(
     return counts
 
 
-def _bootstrap_ci_endpoints(
-    estimate: Array,
-    bootstrap_draws: Array,
-    *,
-    conf_level: float,
-    ci_method: Literal["quantile", "gaussian"],
-) -> tuple[Array, Array]:
-    """Convert bootstrap draws into lower and upper endpoint arrays."""
-    # Split the two-tailed CI: e.g. conf_level=0.95 -> alpha=0.025 per tail
-    alpha = (1.0 - conf_level) / 2.0
-    if ci_method == "quantile":
-        # Non-parametric: read endpoints directly from the empirical bootstrap
-        # distribution.  No normality assumption, but needs enough resamples.
-        percentiles = jnp.array([alpha * 100, (1.0 - alpha) * 100])
-        endpoints = jnp.nanpercentile(bootstrap_draws, percentiles, axis=0)
-        return endpoints[0], endpoints[1]
-
-    # Parametric (Gaussian) CI: assumes the bootstrap distribution is normal.
-    # ndtri is the inverse normal CDF (quantile function): z = Phi^-1(1-alpha/2).
-    # CI = estimate +/- z * sigma_boot.  nanstd tolerates degenerate bootstrap
-    # resamples that collapse to a single unique value and produce NaN.
-    z_score = jax.scipy.special.ndtri(1.0 - alpha)
-    bootstrap_sd = jnp.nanstd(bootstrap_draws, axis=0, ddof=1)
-    half_width = z_score * bootstrap_sd
-    return estimate - half_width, estimate + half_width
-
-
 def _separate_output_values(
     Y: Array, D: int, calc_second_order: bool
 ) -> tuple[Array, Array, Array, Array | None]:
     """De-interleave flat Saltelli output rows into A, B, AB, BA matrices.
 
-    Uses reshape-based extraction instead of per-parameter slicing for speed.
+    Args:
+        Y: Expanded outputs, shape (N * step, ...) with rows in Saltelli
+            group order.
+        D: Number of input parameters.
+        calc_second_order: Whether the layout includes BA blocks.
+
+    Returns:
+        (A, B, AB, BA) with shapes (N, ...), (N, ...), (N, D, ...), and
+        (N, D, ...) respectively; BA is None when second order is off.
     """
     step = 2 * D + 2 if calc_second_order else D + 2
     n_total = Y.shape[0]
@@ -191,10 +184,10 @@ def _normalize_s2_matrix(S2: Array) -> Array:
 def _expand_unique_outputs(sampling_result: SamplingResult, Y: Array) -> Array:
     """Rebuild expanded Saltelli outputs from unique user-evaluated outputs.
 
-    Saltelli sampling produces duplicate rows (e.g. row 0 of every AB_j group
-    is the same as A when j=0). The sampler deduplicates before returning
-    samples to the user, so Y has only unique rows. This function maps them
-    back to the full interleaved layout the estimators expect.
+    The sampler deduplicates the Saltelli design before returning samples to
+    the user, so Y has only unique rows (shape ``(n_total, ...)``). This
+    function gathers them back into the full interleaved layout the
+    estimators expect, shape ``(expanded_n_total, ...)``.
     """
     if Y.shape[0] != sampling_result.n_total:
         raise ValueError(
@@ -204,47 +197,6 @@ def _expand_unique_outputs(sampling_result: SamplingResult, Y: Array) -> Array:
     # expanded_to_unique[i] gives the unique-row index for expanded position i
     expanded_to_unique = jnp.asarray(sampling_result.expanded_to_unique)
     return jnp.take(Y, expanded_to_unique, axis=0)
-
-
-def _squeeze_results(
-    S1: Array,
-    ST: Array,
-    S2: Array | None,
-    squeeze_time: bool,
-    squeeze_output: bool,
-    S1_conf: Array | None = None,
-    ST_conf: Array | None = None,
-    S2_conf: Array | None = None,
-) -> tuple[Array, Array, Array | None, Array | None, Array | None, Array | None]:
-    """Remove singleton T and/or K dimensions that _prepare_Y inserted.
-
-    _prepare_Y always promotes Y to 3-D (N,T,K) for uniform kernel code.
-    After computation, we undo that promotion so results match the user's
-    original output shape (e.g. (D,) for scalar, (K,D) for multi-output).
-    """
-    if squeeze_time and squeeze_output:
-        S1 = S1[0, 0]
-        ST = ST[0, 0]
-        if S2 is not None:
-            S2 = S2[0, 0]
-        if S1_conf is not None:
-            S1_conf = S1_conf[:, 0, 0]
-        if ST_conf is not None:
-            ST_conf = ST_conf[:, 0, 0]
-        if S2_conf is not None:
-            S2_conf = S2_conf[:, 0, 0]
-    elif squeeze_time:
-        S1 = S1[0]
-        ST = ST[0]
-        if S2 is not None:
-            S2 = S2[0]
-        if S1_conf is not None:
-            S1_conf = S1_conf[:, 0]
-        if ST_conf is not None:
-            ST_conf = ST_conf[:, 0]
-        if S2_conf is not None:
-            S2_conf = S2_conf[:, 0]
-    return S1, ST, S2, S1_conf, ST_conf, S2_conf
 
 
 def _analyze_no_bootstrap(
@@ -350,9 +302,10 @@ def _analyze_no_bootstrap(
         ST_out = jnp.concatenate(st_parts).reshape(T, K, D)
         S2_out = None
 
-    S1_out, ST_out, S2_out, _, _, _ = _squeeze_results(
-        S1_out, ST_out, S2_out, squeeze_time, squeeze_output
-    )
+    S1_out = _squeeze_output_axes(S1_out, squeeze_time, squeeze_output)
+    ST_out = _squeeze_output_axes(ST_out, squeeze_time, squeeze_output)
+    if S2_out is not None:
+        S2_out = _squeeze_output_axes(S2_out, squeeze_time, squeeze_output, n_trailing=2)
     nan_counts = _count_nans(S1_out, ST_out, S2_out)
     return SAResult(
         S1=S1_out,
@@ -484,16 +437,14 @@ def _analyze_bootstrap(
         S2_out = None
         S2_conf = None
 
-    S1_out, ST_out, S2_out, S1_conf, ST_conf, S2_conf = _squeeze_results(
-        S1_out,
-        ST_out,
-        S2_out,
-        squeeze_time,
-        squeeze_output,
-        S1_conf,
-        ST_conf,
-        S2_conf,
-    )
+    S1_out = _squeeze_output_axes(S1_out, squeeze_time, squeeze_output)
+    ST_out = _squeeze_output_axes(ST_out, squeeze_time, squeeze_output)
+    S1_conf = _squeeze_output_axes(S1_conf, squeeze_time, squeeze_output)
+    ST_conf = _squeeze_output_axes(ST_conf, squeeze_time, squeeze_output)
+    if S2_out is not None:
+        S2_out = _squeeze_output_axes(S2_out, squeeze_time, squeeze_output, n_trailing=2)
+    if S2_conf is not None:
+        S2_conf = _squeeze_output_axes(S2_conf, squeeze_time, squeeze_output, n_trailing=2)
     nan_counts = _count_nans(S1_out, ST_out, S2_out)
     return SAResult(
         S1=S1_out,
@@ -520,29 +471,40 @@ def analyze(
 ) -> SAResult:
     """Compute Sobol sensitivity indices from model outputs using JAX.
 
-    This is the main entry point. It accepts model outputs Y evaluated at the
-    unique rows returned by ``gsax.sample()``, reconstructs the expanded
-    Saltelli ordering internally, cleans non-finite values, and dispatches to
-    either the fast no-bootstrap path or the bootstrap path depending on
-    ``num_resamples``.
+    This is the main entry point of the package. Sobol indices apportion the
+    variance of a model output among its input parameters: S1 (first-order)
+    is the fraction of output variance explained by each parameter alone, ST
+    (total-order) additionally includes all of its interactions with other
+    parameters, and S2 (second-order) isolates pairwise interactions.
+
+    The function accepts model outputs Y evaluated at the unique rows
+    returned by ``gsax.sample()``, reconstructs the expanded Saltelli
+    ordering internally, drops sample groups containing non-finite values
+    (with a warning), and dispatches to either the fast no-bootstrap path or
+    the bootstrap confidence-interval path depending on ``num_resamples``.
 
     Args:
         sampling_result: Result from ``gsax.sample()`` containing the unique
             sample matrix plus expansion metadata.
         Y: Model outputs evaluated at each unique row of
-            ``sampling_result.samples``. Accepted shapes:
+            ``sampling_result.samples``, in the same row order. Accepted
+            shapes:
                 (n_total,)       — scalar output, single time step
                 (n_total, K)     — K outputs, single time step
                 (n_total, T, K)  — K outputs over T time steps
-            where ``n_total`` is the unique row count.
+            where ``n_total`` is the unique row count. Indices are computed
+            independently for every (t, k) output slice.
         prenormalize: When ``True``, apply SALib-style global output
             standardization over the cleaned expanded sample axis before
             computing Sobol indices. Each output slice is centered to mean 0
             and scaled to unit standard deviation once, not per bootstrap
             resample. Defaults to ``False``.
-        num_resamples: R, the number of bootstrap resamples for confidence
-            intervals. Set to 0 (default) to skip bootstrap.
-        conf_level: Confidence level for bootstrap CIs (default 0.95).
+        num_resamples: R, the number of bootstrap resamples used to estimate
+            confidence intervals. Set to 0 (default) to skip the bootstrap
+            entirely; a few hundred resamples is typically enough for stable
+            intervals.
+        conf_level: Two-sided confidence level for bootstrap CIs
+            (default 0.95).
         ci_method: Bootstrap CI endpoint method. ``"quantile"`` returns
             percentile lower/upper endpoints from the bootstrap draws.
             ``"gaussian"`` returns symmetric gaussian lower/upper endpoints
@@ -550,18 +512,26 @@ def analyze(
             Both methods still return lower/upper bounds, not half-widths.
         key: JAX PRNG key for bootstrap randomness. Required when
             ``num_resamples > 0``.
-        chunk_size: Controls vmap batch size. In the no-bootstrap path this
-            is the number of (T, K) combos per batch; in the bootstrap path
-            it is the number of resamples per batch. Defaults to 2048.
+        chunk_size: Memory/speed trade-off for batched computation. In the
+            no-bootstrap path this is the number of (T, K) output slices per
+            vmap batch; in the bootstrap path it is the number of resamples
+            per batch. Lower it if you hit device out-of-memory errors.
+            Defaults to 2048.
 
     Returns:
         SAResult containing:
             S1 — first-order indices, shape (D,) / (K, D) / (T, K, D)
+                 for Y of shape (n,) / (n, K) / (n, T, K) respectively
             ST — total-order indices, same shape as S1
-            S2 — second-order indices (D, D) / ... or None
-            S1_conf, ST_conf, S2_conf — (2, ...) CI bounds or None
+            S2 — second-order indices with shape (..., D, D), or None when
+                 the design was drawn with ``calc_second_order=False``
+            S1_conf, ST_conf, S2_conf — (2, ...) [lower, upper] CI bounds,
+                 or None when ``num_resamples == 0``
     """
-    Y = jnp.asarray(Y)
+    # Resolve the user-supplied layout (sample axis first, labeled output axis
+    # last) against the unique design rows, BEFORE any expansion or resampling
+    # so every downstream stage sees canonical axes.
+    Y, _ = _infer_output_layout(Y, sampling_result.problem, int(sampling_result.samples.shape[0]))
     # Map user-evaluated unique outputs back to the full Saltelli interleaving
     Y = _expand_unique_outputs(sampling_result, Y)
 

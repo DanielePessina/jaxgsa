@@ -25,7 +25,10 @@ def _intro(mo):
     over time**. Early transient behaviour may be dominated by different
     parameters than steady-state behaviour. By computing sensitivity indices
     at every time step we obtain a film rather than a snapshot of the
-    variance decomposition.
+    variance decomposition. Two Sobol indices carry the story: the
+    **first-order index** $S_1$ is the fraction of output variance a
+    parameter explains on its own, and the **total-order index** $S_T$
+    adds every interaction it takes part in.
 
     This notebook uses a **coupled damped oscillator** model whose output
     $y(t)$ depends on four physical parameters — amplitude, frequency,
@@ -128,6 +131,11 @@ def _sobol_md(mo):
     The result shapes are:
     - `S1`, `ST`: $(T, 1, D)$
     - `S1_conf`, `ST_conf`: $(2, T, 1, D)$
+
+    The two plots that follow trace $S_1(t)$ and $S_T(t)$ for each
+    parameter, with the bootstrap bands shaded. Watch how the curves
+    cross: whichever parameter's curve is on top dominates the output
+    variance at that moment.
     """)
     return
 
@@ -215,8 +223,9 @@ def _efast_md(mo):
     We run the same model through eFAST and overlay the time-resolved
     indices with the Sobol estimates. eFAST uses a frequency-based
     variance decomposition that is independent of the Saltelli sampling
-    scheme, so agreement between the two methods provides confidence in
-    the results.
+    scheme, so it acts as a cross-check. In the plot below, solid lines
+    are Sobol and dashed lines eFAST — where the two nearly coincide,
+    two unrelated estimators agree on the same indices.
     """)
     return
 
@@ -400,12 +409,11 @@ def _insight(mo):
       everything exponentially, so small changes in $\gamma$ produce
       large relative changes in $y$.
 
-    A single steady-state sensitivity analysis would only capture the
-    late-time picture and entirely miss the early dominance of amplitude
-    and coupling. Dynamic GSA gives engineers and modellers a complete
-    view of **when** each parameter matters, enabling targeted
-    experimental design and robust uncertainty quantification across
-    the full operating timeline.
+    A single steady-state analysis would capture only the late-time
+    picture and miss the early dominance of amplitude and coupling
+    entirely. Time-resolved indices show **when** each parameter
+    matters — useful when deciding which parameters deserve tighter
+    measurement or calibration at each stage of an experiment.
     """)
     return
 

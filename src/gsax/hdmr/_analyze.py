@@ -17,6 +17,7 @@ from gsax._normalization import (
     _prenormalize_outputs,
     _prepare_Y,
     _squeeze_output_axes,
+    _validate_xy_inputs,
     _warn_zero_variance_slices,
 )
 from gsax._transforms import cdf_to_unit_interval
@@ -160,12 +161,7 @@ def _reshape_emulator_value(
 ) -> Array:
     """Reshape flattened per-output emulator state back to the analyzed layout."""
     value = value.reshape((T, K_out) + value.shape[1:])
-
-    if squeeze_time and squeeze_output:
-        return value[0, 0]
-    if squeeze_time:
-        return value[0]
-    return value
+    return _squeeze_output_axes(value, squeeze_time, squeeze_output, n_trailing=value.ndim - 2)
 
 
 def analyze_hdmr(
@@ -180,39 +176,99 @@ def analyze_hdmr(
     lambdax: float = 0.01,
     chunk_size: int = 2048,
 ) -> HDMRResult:
-    """Compute sensitivity indices via RS-HDMR with B-spline surrogate modelling.
+    """Compute sensitivity indices via RS-HDMR (public entry point).
 
-    Works with **any** set of (X, Y) pairs -- no structured sampling required.
-    Decomposes the input-output relationship into hierarchical component
-    functions using B-spline regression, then derives ANCOVA-based sensitivity
-    indices.
-
-    Args:
-        problem: Parameter names and bounds.
-        X: (N, D) input samples.
-        Y: (N,), (N, K), or (N, T, K) model outputs. A 2D array is always
-            interpreted as (N, K); for time-series with a single output,
-            reshape to (N, T, 1).
-        prenormalize: When ``True``, standardize each output slice over the
-            sample axis before fitting the surrogate by subtracting its mean
-            and dividing by its standard deviation once globally. The fitted
-            emulator is still returned on the original output scale. Defaults
-            to ``False``.
-        maxorder: Maximum HDMR expansion order (1, 2, or 3).
-        maxiter: Maximum backfitting iterations for first-order terms.
-        m: Number of B-spline intervals (basis size = m + 3 per dimension).
-        lambdax: Tikhonov regularization parameter.
-        chunk_size: Maximum number of (T, K) output combos per vmap batch.
-
-    Returns:
-        HDMRResult with Sa, Sb, S, ST, emulator, etc.
+    Validates ``(X, Y)``, warns once about any zero-variance output slice, then
+    delegates to :func:`_analyze_hdmr_core`. See that function for the full
+    parameter and return documentation; ``analyze_shapley``'s HDMR backend
+    calls the core directly on an already-canonical Y to avoid re-validating.
     """
     X = jnp.asarray(X)
-    Y = jnp.asarray(Y)
+    Y, ops = _validate_xy_inputs(problem, X, jnp.asarray(Y))
+    # A constant output slice makes every index 0/0 = NaN; warn once up front,
+    # in the public wrapper only, so callers routing through the core (Shapley)
+    # do not double-warn.
+    _warn_zero_variance_slices(_prepare_Y(Y)[0], output_names=problem.output_names)
+    return _analyze_hdmr_core(
+        problem,
+        X,
+        Y,
+        prenormalize=prenormalize,
+        maxorder=maxorder,
+        maxiter=maxiter,
+        m=m,
+        lambdax=lambdax,
+        chunk_size=chunk_size,
+        inserted_output_axis=ops.inserted_output_axis,
+    )
 
+
+def _analyze_hdmr_core(
+    problem: Problem,
+    X: Array,
+    Y: Array,
+    *,
+    prenormalize: bool = False,
+    maxorder: int = 2,
+    maxiter: int = 100,
+    m: int = 2,
+    lambdax: float = 0.01,
+    chunk_size: int = 2048,
+    inserted_output_axis: bool = False,
+) -> HDMRResult:
+    """Fit RS-HDMR on an already-canonical Y (no re-validation, no warn).
+
+    Compute sensitivity indices via RS-HDMR with B-spline surrogate modelling.
+
+    Works with **any** set of (X, Y) pairs -- no structured sampling required,
+    so it suits existing datasets and expensive models where Sobol/eFAST
+    sampling schemes are unaffordable. Decomposes the input-output
+    relationship into hierarchical component functions (one per parameter,
+    parameter pair, ...) via B-spline regression, then derives ANCOVA-based
+    sensitivity indices from the fitted components. Unlike pure Sobol
+    estimators, the ANCOVA split into structural (Sa) and correlative (Sb)
+    parts remains meaningful when inputs are correlated.
+
+    Args:
+        problem: Parameter names and distributions.
+        X: (N, D) input samples.
+        Y: (N,), (N, K), or (N, T, K) model outputs. A 2D array is read as
+            (N, K) unless ``problem.output_names`` has exactly one entry, in
+            which case the columns are T timepoints of that single output.
+        prenormalize: When ``True``, standardize each output slice over the
+            sample axis (subtract mean, divide by standard deviation) before
+            fitting, which puts disparate output magnitudes on an equal
+            numerical footing. The indices are ratios and unaffected;
+            predictions from the returned emulator are still on the original
+            output scale. Defaults to ``False``.
+        maxorder: Maximum HDMR expansion order (1, 2, or 3): the largest
+            interaction size modelled. Order 2 (default) captures pairwise
+            interactions; 3 adds triples but the term count and fit cost grow
+            combinatorially. Clamped to D (with a warning) when D < maxorder.
+        maxiter: Maximum backfitting iterations for the first-order terms.
+            The default rarely needs raising; iteration stops early once the
+            coefficients stop changing.
+        m: Number of B-spline intervals per dimension (basis size m + 3).
+            Larger m resolves sharper features of the component functions but
+            multiplies the coefficient count (per-term basis grows as
+            (m+3)^order) and needs more samples to avoid overfitting.
+        lambdax: Tikhonov regularization strength. Increase for noisy Y or
+            small N (smoother, more stable components); decrease if genuine
+            sharp features are being oversmoothed.
+        chunk_size: Maximum number of (T, K) output slices fitted per vmap
+            batch. Caps peak device memory for large T*K; smaller values
+            trade speed for memory.
+
+    Returns:
+        HDMRResult with per-term indices Sa, Sb, S, per-parameter ST,
+        human-readable term labels, F-test selection counts, the fitted
+        emulator (usable with ``emulate_hdmr``), and its RMSE.
+
+    Raises:
+        ValueError: If ``N < 300``, ``maxorder`` is not 1/2/3, or
+            ``chunk_size < 1``.
+    """
     N, D = X.shape
-    if D != problem.num_vars:
-        raise ValueError(f"X has {D} columns but problem defines {problem.num_vars} parameters")
     # B-spline regression with backfitting needs a reasonable sample size
     # to avoid overfitting; 300 is a practical lower bound.
     if N < 300:
@@ -269,8 +325,6 @@ def analyze_hdmr(
     else:
         y_mean = jnp.zeros(Y_3d.shape[1:], dtype=Y_3d.dtype)
         y_std = jnp.ones(Y_3d.shape[1:], dtype=Y_3d.dtype)
-
-    _warn_zero_variance_slices(Y_3d, output_names=problem.output_names)
 
     # (N,T,K) -> (T,K,N) -> (T*K, N): move sample axis last, then flatten
     # time x output into a single batch dim so each row is an independent
@@ -365,15 +419,8 @@ def analyze_hdmr(
         squeeze_time,
         squeeze_output,
     )
-    if squeeze_time and squeeze_output:
-        y_mean_out = y_mean[0, 0]
-        y_std_out = y_std[0, 0]
-    elif squeeze_time:
-        y_mean_out = y_mean[0]
-        y_std_out = y_std[0]
-    else:
-        y_mean_out = y_mean
-        y_std_out = y_std
+    y_mean_out = _squeeze_output_axes(y_mean, squeeze_time, squeeze_output, n_trailing=0)
+    y_std_out = _squeeze_output_axes(y_std, squeeze_time, squeeze_output, n_trailing=0)
 
     # Bundle all fitted state needed to reconstruct predictions at new points.
     emulator: HDMREmulator = {
@@ -405,6 +452,7 @@ def analyze_hdmr(
             jnp.concatenate(rmse_parts), T, K_out, squeeze_time, squeeze_output
         )
         * y_std_out,
+        _inserted_output_axis=inserted_output_axis,
     )
 
 
@@ -492,4 +540,8 @@ def emulate_hdmr(result: HDMRResult, X_new: Array) -> Array:
     # Undo the standardization applied during fitting, if any.
     if prenormalize:
         Y_pred = Y_pred * y_std + y_mean
+    # If inference inserted a singleton K axis at fit time, drop it so the
+    # prediction mirrors the training Y's original (N_new, T) rank.
+    if result._inserted_output_axis:
+        Y_pred = Y_pred[..., 0]
     return Y_pred

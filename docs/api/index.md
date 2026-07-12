@@ -1,18 +1,30 @@
 # API Reference
 
-This is the canonical reference for the exported `gsax` surface. The package has
-eight workflows:
+This is the canonical reference for the exported `gsax` surface. The package
+has ten workflows. Each follows the same pattern — draw samples, evaluate your
+model on them, then analyze the outputs:
 
-- Sobol: `sample()` -> `analyze()`
-- RS-HDMR: `analyze_hdmr()` -> `emulate_hdmr()`
-- PCE: `analyze_pce()` -> `emulate_pce()`
-- Shapley effects: `analyze_shapley()`
-- eFAST: `sample_efast()` -> `analyze_efast()`
-- DGSM: `sample_mc()` -> `analyze_dgsm()`
-- Morris: `sample_morris()` -> `analyze_morris()`
-- HSIC: `sample_mc()` -> `analyze_hsic()`
-- PAWN: `sample_mc()` -> `analyze_pawn()`
-- Borgonovo delta: `sample_mc()` -> `analyze_borgonovo()`
+- Sobol: `sample()` -> `analyze()` — variance-based first-, total-, and
+  second-order indices. The standard choice when you can evaluate the model on
+  a dedicated sampling design.
+- RS-HDMR: `analyze_hdmr()` -> `emulate_hdmr()` — sensitivity indices from any
+  existing `(X, Y)` data, plus a reusable spline surrogate.
+- PCE: `analyze_pce()` -> `emulate_pce()` — Sobol indices computed analytically
+  from a polynomial surrogate. Efficient for smooth outputs.
+- Shapley effects: `analyze_shapley()` — a fair split of output variance across
+  parameters that always sums to 1.
+- eFAST: `sample_efast()` -> `analyze_efast()` — frequency-based first- and
+  total-order indices at low sample cost.
+- DGSM: `sample_mc()` -> `analyze_dgsm()` — derivative-based screening for
+  JAX-differentiable models, with bounds on total Sobol indices.
+- Morris: `sample_morris()` -> `analyze_morris()` — cheap elementary-effects
+  screening to rank many parameters before a more expensive analysis.
+- HSIC: `sample_mc()` -> `analyze_hsic()` — kernel dependence measures with
+  permutation p-values. Detects influence beyond variance.
+- PAWN: `sample_mc()` -> `analyze_pawn()` — distribution-based indices from
+  conditional output CDF distances.
+- Borgonovo delta: `sample_mc()` -> `analyze_borgonovo()` — moment-independent
+  indices from shifts in the full output density.
 
 Related docs:
 
@@ -22,9 +34,43 @@ Related docs:
 - [Advanced Workflow](/examples/advanced-workflow)
 - [xarray Output](/examples/xarray)
 
+## Shape Conventions
+
+Array shapes throughout this reference use four letters:
+
+| Letter | Meaning |
+| --- | --- |
+| `N` | Number of samples — the rows your model is evaluated on. |
+| `D` | Number of input parameters (`problem.num_vars`). |
+| `K` | Number of model outputs. |
+| `T` | Number of time steps for time-series outputs. |
+
+Model outputs `Y` are `(N,)` for a scalar output, `(N, K)` for multi-output,
+or `(N, T, K)` for time-series multi-output — the same contract across all
+ten methods. How a 2D `Y` is read depends on `problem.output_names`:
+
+- Without `output_names`, a 2D `Y` is always `(N, K)`, never `(N, T)`.
+- With exactly **one** entry in `output_names` and more than one column, a 2D
+  `(N, M)` `Y` is read as `M` timepoints of that single labeled output and
+  flows through as `(N, M, 1)`. A lone column `(N, 1)` stays a scalar output
+  `(N, K=1)` — pass `(N, 1, 1)` explicitly for a genuine 1-timepoint series.
+- With several entries, the column count must equal `len(output_names)`.
+- A 1D `(N,)` `Y` is one output regardless of how many names are declared.
+
+You need not pass exactly the canonical layout. Every public entry point
+resolves `Y` from two signals — the expected sample count identifies the
+sample axis, and `len(problem.output_names)` (when set) identifies the output
+axis — through the same ladder: exact canonical shapes pass silently,
+unambiguously recoverable layouts (e.g. a transposed `(K, N)` array) are fixed
+with a `UserWarning` naming the transformation, and ambiguous layouts raise —
+gsax never guesses.
+
+Result arrays mirror the output layout: `(D,)`, `(K, D)`, or `(T, K, D)`. Each
+entry below states which shapes it accepts.
+
 ## Package Structure
 
-Since v0.6.0, `gsax` is organized into subpackages:
+`gsax` is organized into subpackages:
 
 | Subpackage | Contents |
 | --- | --- |
@@ -223,10 +269,10 @@ def sample(
     problem: Problem,
     n_samples: int,
     *,
+    base_n: int | None = None,
     calc_second_order: bool = True,
     scramble: bool = True,
     seed: int | np.random.Generator | None = None,
-    base_n: int | None = None,
     verbose: bool = True,
 ) -> SamplingResult
 ```
@@ -234,11 +280,11 @@ def sample(
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
 | `problem` | `Problem` | required | Parameter space definition. |
-| `n_samples` | `int` | required | Minimum desired number of unique model evaluations. |
-| `calc_second_order` | `bool` | `True` | Include BA blocks so `S2` can be computed later. |
-| `scramble` | `bool` | `True` | Apply Owen scrambling to the Sobol sequence. |
+| `n_samples` | `int` | required | Minimum desired number of unique model evaluations. A few thousand is a reasonable starting point; the actual count is rounded up to fill a power-of-2 Saltelli design. |
+| `base_n` | `int \| None` | `None` | Explicit Sobol base count (power of 2). When `None`, derived automatically from `n_samples`. Set it directly when you plan to `downsample()` across known rungs. |
+| `calc_second_order` | `bool` | `True` | Include BA blocks so `S2` can be computed later. Disable to roughly halve the number of model evaluations when you only need `S1` and `ST`. |
+| `scramble` | `bool` | `True` | Apply Owen scrambling to the Sobol sequence. Keep it on unless you need an unscrambled sequence for comparison with other tools. |
 | `seed` | `int \| np.random.Generator \| None` | `None` | Seed or NumPy generator for reproducibility. |
-| `base_n` | `int \| None` | `None` | Explicit Sobol base count (power of 2). When `None`, derived automatically from `n_samples`. |
 | `verbose` | `bool` | `True` | Print a compact sampling summary. |
 
 Returns: [`SamplingResult`](#samplingresult)
@@ -292,7 +338,7 @@ class SamplingResult:
 | --- | --- | --- | --- |
 | `samples` | `np.ndarray` | `(n_total, D)` | Unique rows to evaluate with your model. |
 | `sample_ids` | `np.ndarray` | `(n_total,)` | Stable integer row IDs aligned with `samples`. |
-| `expanded_n_total` | `int` | `N * step` | Expanded Saltelli row count reconstructed internally by `analyze()`. |
+| `expanded_n_total` | `int` | `base_n * step` | Expanded Saltelli row count reconstructed internally by `analyze()`. |
 | `expanded_to_unique` | `np.ndarray` | `(expanded_n_total,)` | Map from expanded Saltelli rows back to `samples`. |
 | `base_n` | `int` | power of 2 | Base Sobol sample count. |
 | `n_params` | `int` | `D` | Number of parameters. |
@@ -510,12 +556,12 @@ def analyze(
 | --- | --- | --- | --- |
 | `sampling_result` | `SamplingResult` | required | Result from `sample()`. |
 | `Y` | `Array` | required | Model outputs on the unique rows in `sampling_result.samples`. |
-| `prenormalize` | `bool` | `False` | Apply SALib-style output standardization over the sample axis before analysis. |
-| `num_resamples` | `int` | `0` | Number of bootstrap resamples. |
+| `prenormalize` | `bool` | `False` | Apply SALib-style output standardization over the sample axis before analysis. Useful when outputs span very different scales. |
+| `num_resamples` | `int` | `0` | Number of bootstrap resamples. `0` skips confidence intervals; 100-1000 gives stable intervals at proportional cost. |
 | `conf_level` | `float` | `0.95` | Confidence level for bootstrap intervals. |
 | `ci_method` | `Literal["quantile", "gaussian"]` | `"quantile"` | Bootstrap CI summary method. `quantile` returns percentile endpoints; `gaussian` returns symmetric gaussian endpoints from bootstrap standard deviation. |
 | `key` | `Array \| None` | `None` | Required JAX PRNG key when `num_resamples > 0`. |
-| `chunk_size` | `int` | `2048` | `(T, K)` output combinations per batch on the no-bootstrap path. |
+| `chunk_size` | `int` | `2048` | `(T, K)` output combinations per batch on the no-bootstrap path. Lower it if a large time-series analysis exhausts device memory. |
 
 Accepted output shapes:
 
@@ -525,8 +571,11 @@ Accepted output shapes:
 
 Validation and behavior:
 
-- A 2D array is always interpreted as `(N, K)`, never `(N, T)`.
-- For a time-series with one output, reshape to `(N, T, 1)`.
+- A 2D array follows the package-wide label rule (see
+  [Shape Conventions](#shape-conventions)): `(N, K)` without
+  `problem.output_names`, `(N, T)` timepoints of the single labeled output
+  when `output_names` has exactly one entry. A single-output time series can
+  also be passed pre-reshaped as `(N, T, 1)`.
 - When `prenormalize=True`, `Y` is centered and scaled once per output slice
   over the sample axis after Saltelli reconstruction and non-finite-group
   cleanup.
@@ -638,7 +687,9 @@ Related links:
 ### `analyze_hdmr()`
 
 Fit an RS-HDMR surrogate on arbitrary `(X, Y)` pairs and derive ANCOVA-based
-sensitivity indices.
+sensitivity indices. Use it when you already have model runs (no structured
+design required) or when you also want a cheap emulator of the model via
+[`emulate_hdmr()`](#emulate_hdmr).
 
 ```python
 def analyze_hdmr(
@@ -658,14 +709,14 @@ def analyze_hdmr(
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
 | `problem` | `Problem` | required | Bounds and names used to normalize `X`. |
-| `X` | `Array` | required | Input array with shape `(N, D)`. |
+| `X` | `Array` | required | Input array with shape `(N, D)`. Any sampling scheme works; no structured design is needed. |
 | `Y` | `Array` | required | Output array with shape `(N,)`, `(N, K)`, or `(N, T, K)`. |
-| `prenormalize` | `bool` | `False` | Apply SALib-style output standardization over the sample axis before fitting. |
-| `maxorder` | `int` | `2` | Maximum HDMR expansion order. |
-| `maxiter` | `int` | `100` | Maximum backfitting iterations. |
-| `m` | `int` | `2` | Number of B-spline intervals. |
-| `lambdax` | `float` | `0.01` | Tikhonov regularization strength. |
-| `chunk_size` | `int` | `2048` | Maximum `(T, K)` combinations per batch. |
+| `prenormalize` | `bool` | `False` | Apply SALib-style output standardization over the sample axis before fitting. Useful when outputs span very different scales. |
+| `maxorder` | `int` | `2` | Maximum HDMR expansion order (1, 2, or 3). `2` captures pairwise interactions and is usually enough; `3` needs substantially more data. |
+| `maxiter` | `int` | `100` | Maximum backfitting iterations. Raise only if the fit has not converged. |
+| `m` | `int` | `2` | Number of B-spline intervals per input. More intervals resolve sharper component functions but need more samples to fit. |
+| `lambdax` | `float` | `0.01` | Tikhonov regularization strength. Increase if the surrogate oscillates or overfits. |
+| `chunk_size` | `int` | `2048` | Maximum `(T, K)` combinations per batch. Lower it if a large time-series fit exhausts device memory. |
 
 Validation and behavior:
 
@@ -676,7 +727,10 @@ Validation and behavior:
 - `maxorder` must be 1, 2, or 3.
 - When `D == 2`, `maxorder` cannot exceed 2.
 - `chunk_size` must be at least 1.
-- A 2D output array is always treated as `(N, K)`.
+- A 2D output array follows the package-wide label rule (see
+  [Shape Conventions](#shape-conventions)): `(N, K)` without
+  `problem.output_names`, `(N, T)` timepoints of the single labeled output
+  when `output_names` has exactly one entry.
 - When `prenormalize=True`, `Y` is centered and scaled once per output slice
   over the sample axis before surrogate fitting.
 
@@ -846,15 +900,17 @@ def analyze_pce(
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
 | `problem` | `Problem` | required | Parameter names and distributions. |
-| `X` | `Array` | required | Input array with shape `(N, D)`. |
-| `Y` | `Array` | required | Output array with shape `(N,)` (scalar output only). |
-| `order` | `int` | `3` | Maximum total polynomial degree. Automatically reduced if the number of terms would exceed `fit_ratio * N`. |
-| `ridge` | `float` | `1e-8` | Tikhonov regularization parameter for least-squares fit. |
-| `fit_ratio` | `float` | `0.5` | Maximum ratio of terms to samples before the order is reduced. |
+| `X` | `Array` | required | Input array with shape `(N, D)`. Any sampling scheme works; no structured design is needed. |
+| `Y` | `Array` | required | Output array with shape `(N,)`, `(N, K)`, or `(N, T, K)`. All output slices share one polynomial basis and are fitted in a single multi-right-hand-side solve. |
+| `order` | `int` | `3` | Maximum total polynomial degree. 3-5 is typical for smooth models; check `loo_rmse` before trusting a higher order. Automatically reduced if the number of terms would exceed `fit_ratio * N`. |
+| `ridge` | `float` | `1e-8` | Tikhonov regularization parameter for the least-squares fit. Increase if the fit is ill-conditioned. |
+| `fit_ratio` | `float` | `0.5` | Maximum ratio of terms to samples before the order is reduced. Lower it for a more conservative (less overfit-prone) expansion. |
 
 Validation and behavior:
 
-- `Y` must be 1D. Multi-output and time-series outputs are not yet supported.
+- `Y` may be `(N,)`, `(N, K)`, or `(N, T, K)`; 2D `Y` follows the package-wide
+  label rule (see [Shape Conventions](#shape-conventions)). All output slices
+  share a single basis and a single effective `order`.
 - `X.shape[1]` must match `problem.num_vars`.
 - Uniform and truncated-Gaussian inputs use Legendre polynomials on `[-1, 1]`.
 - Untruncated Gaussian inputs use Hermite polynomials standardized to `N(0, 1)`.
@@ -877,7 +933,8 @@ def emulate_pce(result: PCEResult, X_new: Array) -> Array
 | `result` | `PCEResult` | Result from `analyze_pce()`. |
 | `X_new` | `Array` | New input points with shape `(N_new, D)`. |
 
-Returns `(N_new,)` predicted outputs.
+Returns predictions mirroring the training output layout: `(N_new,)`,
+`(N_new, K)`, or `(N_new, T, K)`.
 
 <a id="pceresult"></a>
 ### `PCEResult`
@@ -899,24 +956,30 @@ class PCEResult:
 
 | Field | Shape | Description |
 | --- | --- | --- |
-| `S1` | `(D,)` | First-order Sobol indices. |
-| `ST` | `(D,)` | Total-order Sobol indices. |
-| `S2` | `(D, D)` | Second-order interaction matrix with `NaN` diagonal. |
-| `coefficients` | `(n_terms,)` | Fitted PCE coefficients. |
-| `multi_index` | `(n_terms, D)` | Multi-index array mapping terms to polynomial degrees. |
-| `order` | `int` | Effective total polynomial degree used (may be less than requested). |
-| `loo_rmse` | `scalar or None` | Leave-one-out cross-validation RMSE. |
+| `S1` | `(D,)` / `(K, D)` / `(T, K, D)` | First-order Sobol indices; leading axes mirror the output layout. |
+| `ST` | `(D,)` / `(K, D)` / `(T, K, D)` | Total-order Sobol indices. |
+| `S2` | `(D, D)` / `(K, D, D)` / `(T, K, D, D)` | Second-order interaction matrix with `NaN` diagonal. |
+| `coefficients` | `(n_terms,)` / `(K, n_terms)` / `(T, K, n_terms)` | Fitted PCE coefficients, term axis last. |
+| `multi_index` | `(n_terms, D)` | Multi-index array mapping terms to polynomial degrees (shared by all slices). |
+| `order` | `int` | Effective total polynomial degree used (may be less than requested). A single int — all output slices share one basis. |
+| `loo_rmse` | `()` / `(K,)` / `(T, K)` or `None` | Leave-one-out cross-validation RMSE per output slice. |
 
 <a id="pceresult-to_dataset"></a>
 #### `PCEResult.to_dataset()`
 
 ```python
-ds = result.to_dataset()
+ds = result.to_dataset(time_coords=None)
 ```
 
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `time_coords` | `list \| np.ndarray \| None` | `None` | Coordinate values for the time dimension on 3D results. Defaults to integer time indices. |
+
 Converts PCE results to a labeled `xarray.Dataset` with `param` coordinates.
-Includes `S1`, `ST`, `S2` (with `param_i` / `param_j` dimensions), and
-`loo_rmse` when available.
+`S1` and `ST` are on dims `("param",)`, `("output", "param")`, or
+`("time", "output", "param")` depending on the output layout; `S2` uses
+`param_i` / `param_j` in place of `param`; `loo_rmse` (when available) uses
+only the leading dims — `()`, `("output",)`, or `("time", "output")`.
 
 Minimal example:
 
@@ -939,6 +1002,7 @@ print(result.loo_rmse)
 
 Related links:
 
+- [PCE Example](/examples/pce)
 - [Methods](/guide/methods)
 
 ## Shapley Effects Workflow
@@ -948,10 +1012,10 @@ Related links:
 
 Compute Shapley effects — a fair, game-theoretic allocation of output variance
 across inputs (Owen, 2014; Song, Nelson & Staum, 2016) — analytically from the
-variance decomposition of a fitted surrogate. The default backend fits an
-RS-HDMR B-spline surrogate and allocates its structural component-function
-variances; the PCE backend groups squared orthonormal polynomial coefficients
-by multi-index support (Sudret, 2008).
+variance decomposition of a fitted surrogate. The default PCE backend groups
+squared orthonormal polynomial coefficients by multi-index support
+(Sudret, 2008); the HDMR backend fits an RS-HDMR B-spline surrogate and
+allocates its structural component-function variances.
 
 ```python
 def analyze_shapley(
@@ -959,7 +1023,7 @@ def analyze_shapley(
     X: Array,
     Y: Array,
     *,
-    backend: Literal["hdmr", "pce"] = "hdmr",
+    backend: Literal["hdmr", "pce"] = "pce",
     # HDMR-only knobs (None -> backend default):
     prenormalize: bool | None = None,
     maxorder: int | None = None,
@@ -978,8 +1042,8 @@ def analyze_shapley(
 | --- | --- | --- | --- |
 | `problem` | `Problem` | required | Parameter names and distributions. |
 | `X` | `Array` | required | Input array with shape `(N, D)` (given-data; no structured design needed). |
-| `Y` | `Array` | required | Output array. `backend="hdmr"`: `(N,)`, `(N, K)`, or `(N, T, K)`. `backend="pce"`: `(N,)` scalar only. |
-| `backend` | `Literal["hdmr", "pce"]` | `"hdmr"` | Surrogate whose variance decomposition is allocated. |
+| `Y` | `Array` | required | Output array: `(N,)`, `(N, K)`, or `(N, T, K)` — both backends. |
+| `backend` | `Literal["hdmr", "pce"]` | `"pce"` | Surrogate whose variance decomposition is allocated. |
 | `prenormalize` | `bool \| None` | `None` (`False`) | HDMR only. SALib-style output standardization before fitting. |
 | `maxorder` | `int \| None` | `None` (`2`) | HDMR only. Maximum HDMR expansion order. |
 | `maxiter` | `int \| None` | `None` (`100`) | HDMR only. Maximum backfitting iterations. |
@@ -997,8 +1061,9 @@ Validation and behavior:
   with `order=4`). Knobs left as `None` fall back to the backend defaults
   shown in parentheses.
 - `X.shape[1]` must match `problem.num_vars`.
-- With `backend="pce"`, `Y` must be 1D. Multi-output and time-series outputs
-  require `backend="hdmr"`.
+- Both backends accept `(N,)`, `(N, K)`, and `(N, T, K)` outputs; 2D `Y`
+  follows the package-wide label rule (see
+  [Shape Conventions](#shape-conventions)).
 - Shapley effects are computed **analytically** from the surrogate's variance
   decomposition — no permutation Monte Carlo. Each partial variance $V_u$ is
   split equally among the $|u|$ parameters in its interaction set:
@@ -1025,11 +1090,9 @@ Validation and behavior:
   polynomial order is silently reduced to fit the sample budget.
 - A constant / zero-variance output yields `NaN` indices for **both** backends,
   plus the standard zero-variance `UserWarning`.
-- The default `backend="hdmr"` inherits `analyze_hdmr`'s constraints: at least
+- `backend="hdmr"` inherits `analyze_hdmr`'s constraints: at least
   300 samples are required (else `ValueError`), `maxorder` must be in
-  `{1, 2, 3}`, `maxorder` is clamped with a warning when `D < maxorder`, and a
-  2-D `Y` is always interpreted as `(N, K)` — a single-output time series must
-  be reshaped to `(N, T, 1)`.
+  `{1, 2, 3}`, and `maxorder` is clamped with a warning when `D < maxorder`.
 - Interactions above `maxorder` (HDMR) or the polynomial order (PCE) are
   absent from the allocation.
 
@@ -1053,8 +1116,8 @@ print(result.explained_variance)  # sum_u V_u / Var(Y) — surrogate fit quality
 print(result.S1)                  # (3,) — first-order, same surrogate
 print(result.ST)                  # (3,) — total-order, same surrogate
 
-# PCE backend with PCE-only knobs
-result_pce = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y, backend="pce", order=4)
+# HDMR backend (B-spline surrogate) with HDMR-only knobs
+result_hdmr = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y, backend="hdmr", maxorder=2)
 ```
 
 <a id="shapleyresult"></a>
@@ -1091,8 +1154,8 @@ Shape contract:
 | `Y` shape passed to `analyze_shapley()` | `Sh` / `S1` / `ST` |
 | --- | --- |
 | `(N,)` | `(D,)` |
-| `(N, K)` (HDMR backend only) | `(K, D)` |
-| `(N, T, K)` (HDMR backend only) | `(T, K, D)` |
+| `(N, K)` | `(K, D)` |
+| `(N, T, K)` | `(T, K, D)` |
 
 All indices are normalized by the surrogate's total decomposed variance
 `sum_u V_u`, so summing `Sh` over the parameter axis is exactly 1 (the Shapley
@@ -1127,6 +1190,7 @@ Behavior:
 
 Related links:
 
+- [Shapley Example](/examples/shapley)
 - [Methods](/guide/methods)
 
 ## eFAST Workflow
@@ -1149,9 +1213,9 @@ def sample_efast(
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
 | `problem` | `Problem` | required | Parameter space definition. |
-| `N` | `int` | required | Number of samples per search curve. Must satisfy `N > 4*M^2`. |
-| `M` | `int` | `4` | Interference factor (number of harmonics). |
-| `seed` | `int \| np.random.Generator \| None` | `None` | Seed or NumPy generator for reproducibility. |
+| `N` | `int` | required | Number of samples per search curve; the model is evaluated `N * D` times in total. Must satisfy `N > 4*M^2`. |
+| `M` | `int` | `4` | Interference factor (number of harmonics summed per index). `4` is the standard choice; larger values separate frequencies better but raise the minimum `N`. |
+| `seed` | `int \| np.random.Generator \| None` | `None` | Seed or NumPy generator for the random phase shifts. |
 
 Returns: `np.ndarray` with shape `(N * D, D)`.
 
@@ -1195,10 +1259,10 @@ def analyze_efast(
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
 | `problem` | `Problem` | required | Problem definition with D parameters. |
-| `Y` | `Array` | required | Model outputs evaluated at eFAST samples. |
-| `M` | `int` | `4` | Interference factor used during sampling. |
-| `prenormalize` | `bool` | `False` | Center and scale each output slice to unit variance before computing indices. |
-| `chunk_size` | `int` | `2048` | Maximum number of output slices per vmapped batch. |
+| `Y` | `Array` | required | Model outputs evaluated at eFAST samples, in the row order returned by `sample_efast()`. |
+| `M` | `int` | `4` | Interference factor. Must match the value used during sampling. |
+| `prenormalize` | `bool` | `False` | Center and scale each output slice to unit variance before computing indices. Useful when outputs span very different scales. |
+| `chunk_size` | `int` | `2048` | Maximum number of output slices per vmapped batch. Lower it if a large time-series analysis exhausts device memory. |
 
 Accepted output shapes:
 
@@ -1208,8 +1272,11 @@ Accepted output shapes:
 
 Validation and behavior:
 
-- A 2D array is always interpreted as `(N*D, K)`, never `(N*D, T)`.
-- For a time-series with one output, reshape to `(N*D, T, 1)`.
+- A 2D array follows the package-wide label rule (see
+  [Shape Conventions](#shape-conventions)): `(N*D, K)` without
+  `problem.output_names`, `(N*D, T)` timepoints of the single labeled output
+  when `output_names` has exactly one entry. A single-output time series can
+  also be passed pre-reshaped as `(N*D, T, 1)`.
 - The leading dimension of `Y` must be a multiple of `problem.num_vars`.
 - `M` must match the value used during sampling.
 - Non-finite values in `Y` will propagate into the computed indices.
@@ -1299,7 +1366,8 @@ Related links:
 
 Generate plain Monte Carlo samples from the declared input distributions.
 Unlike Sobol/Saltelli sampling, these samples have no quasi-random structure.
-Suitable for DGSM and other methods that require i.i.d. draws.
+Use it for the given-data methods that accept arbitrary i.i.d. draws: DGSM,
+HSIC, PAWN, Borgonovo delta, and Shapley effects.
 
 ```python
 def sample_mc(
@@ -1366,23 +1434,30 @@ def analyze_dgsm(
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
 | `problem` | `Problem` | required | Problem definition with D parameters. |
-| `fn` | `Callable \| None` | `None` | JAX-differentiable function `(D,) -> ()` or `(D,) -> (T,)`. |
-| `X` | `Array \| None` | `None` | Sample matrix `(N, D)` in the problem's physical units. |
-| `Y` | `Array \| None` | `None` | Pre-computed forward outputs `(N,)` or `(N, T)`. |
-| `dfdx` | `Array \| None` | `None` | Pre-computed Jacobian `(N, D)` or `(N, T, D)`. |
-| `chunk_size` | `int \| None` | `None` | Batch size for autodiff to limit peak memory. |
+| `fn` | `Callable \| None` | `None` | JAX-differentiable function returning `()`, `(K,)`, or `(T, K)` per sample. |
+| `X` | `Array \| None` | `None` | Sample matrix `(N, D)` in the problem's physical units, e.g. from `sample_mc()`. |
+| `Y` | `Array \| None` | `None` | Pre-computed forward outputs `(N,)`, `(N, K)`, or `(N, T, K)`. |
+| `dfdx` | `Array \| None` | `None` | Pre-computed Jacobian mirroring `Y`'s layout with one extra trailing `(D,)` axis: `(N, D)` for `(N,)` `Y`, `(N, K, D)` for `(N, K)`, `(N, T, K, D)` for `(N, T, K)`. Singleton promotions are tolerated (`(N,)` pairs with `(N, 1, D)`, `(N, 1)` with `(N, D)`). |
+| `chunk_size` | `int \| None` | `None` | Batch size for autodiff. Set it when differentiating a large model over many samples exhausts device memory. |
 
 Validation and behavior:
 
 - Provide either `(fn, X)` for the autodiff path or `(Y, dfdx)` for the
   pre-computed path. Providing neither or mixing raises `ValueError`.
 - `X.shape[1]` must match `problem.num_vars`.
-- `fn` must accept a 1D array of shape `(D,)` and return a scalar `()` or
-  a 1D array `(T,)`.
+- `fn` must accept a 1D array of shape `(D,)` and return a scalar `()`, a
+  1D array, or a 2D array `(T, K)` per sample. A 1D return follows the same
+  label rule as 2D `Y` elsewhere: with exactly one entry in
+  `problem.output_names` it is read as `(T,)` timepoints of that single
+  output; otherwise it is `(K,)` outputs.
 - When `chunk_size` is set, the autodiff path processes samples in batches,
   padding the last chunk to avoid JIT recompilation.
-- For the pre-computed path, `dfdx` may be `(N, D)` for scalar output or
-  `(N, T, D)` for multi-output, and `Y` row count must match.
+- For the pre-computed path, `dfdx` mirrors `Y`'s layout with one extra
+  trailing `(D,)` axis: `(N, D)` for scalar output, `(N, K, D)` for
+  multi-output, or `(N, T, K, D)` for time-series output. Singleton promotions
+  are tolerated (`(N,)` with `(N, 1, D)`, `(N, 1)` with `(N, D)`), and whatever
+  axis moves layout inference applies to a transposed or single-labeled `Y` are
+  replayed on `dfdx`; the `Y` row count must match.
 - Zero-variance outputs produce `NaN` bounds (division by zero guarded).
 - A warning is emitted when upper bounds fall below lower bounds, suggesting
   insufficient samples.
@@ -1425,31 +1500,37 @@ class DGSMResult:
 
 | Field | Shape | Description |
 | --- | --- | --- |
-| `nu` | `(D,)` / `(K, D)` | $\mathbb{E}[(\partial f / \partial X_i)^2]$, the DGSM importance measure. |
-| `sigma` | `(D,)` / `(K, D)` | $\mathbb{E}[\partial f / \partial X_i]$, the mean partial derivative. |
-| `upper_bound` | `(D,)` / `(K, D)` | $C_i \cdot \nu_i / \mathrm{Var}(Y)$, Poincaré upper bound on $S_T$. |
-| `lower_bound` | `(D,)` / `(K, D)` | $\mathrm{Var}(X_i) \cdot \sigma_i^2 / \mathrm{Var}(Y)$, Kucherenko–Song lower bound on $S_T$. |
-| `var_y` | `()` / `(K,)` | Output variance (scalar for single output, per-component for multi-output). |
+| `nu` | `(D,)` / `(K, D)` / `(T, K, D)` | $\mathbb{E}[(\partial f / \partial X_i)^2]$, the DGSM importance measure. |
+| `sigma` | `(D,)` / `(K, D)` / `(T, K, D)` | $\mathbb{E}[\partial f / \partial X_i]$, the mean partial derivative. |
+| `upper_bound` | `(D,)` / `(K, D)` / `(T, K, D)` | $C_i \cdot \nu_i / \mathrm{Var}(Y)$, Poincaré upper bound on $S_T$. |
+| `lower_bound` | `(D,)` / `(K, D)` / `(T, K, D)` | $\mathrm{Var}(X_i) \cdot \sigma_i^2 / \mathrm{Var}(Y)$, Kucherenko–Song lower bound on $S_T$. |
+| `var_y` | `()` / `(K,)` / `(T, K)` | Output variance per output slice. |
 | `problem` | `Problem` | Problem definition used for the analysis. |
 
-Shape contract: scalar-output models (`fn: (D,) -> ()`) produce `(D,)` index
-arrays; multi-output models (`fn: (D,) -> (K,)`) produce `(K, D)`.
+Shape contract: scalar-output models (`fn` returning `()`) produce `(D,)`
+index arrays; multi-output models (`fn` returning `(K,)`) produce `(K, D)`;
+time-series models (`fn` returning `(T, K)`) produce `(T, K, D)`.
 
 <a id="dgsmresult-to_dataset"></a>
 #### `DGSMResult.to_dataset()`
 
 ```python
-ds = result.to_dataset()
+ds = result.to_dataset(time_coords=None)
 ```
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `time_coords` | `list \| np.ndarray \| None` | `None` | Coordinate values for the time dimension on 3D results. Defaults to integer time indices. |
 
 Converts DGSM results to a labeled `xarray.Dataset`.
 
 Behavior:
 
-- For scalar output (`T = 1`), variables have dimension `(param,)`.
-- For multi-output (`T > 1`), variables have dimensions `(output, param)`.
+- For scalar output, variables have dimension `(param,)`.
+- For multi-output, variables have dimensions `(output, param)`.
+- For time-series output, variables have dimensions `(time, output, param)`.
 - Uses `problem.names` for `param` coordinates.
-- Uses `problem.output_names` when available, otherwise integer indices.
+- Uses `problem.output_names` when available, otherwise `y0`, `y1`, and so on.
 - Dataset contains `nu`, `sigma`, `upper_bound`, and `lower_bound` variables.
 
 Minimal example:
@@ -1734,8 +1815,11 @@ Validation and behavior:
 
 - `Y.shape[0]` must match `sampling_result.n_total` (the unique-row count);
   the expanded layout is reconstructed internally.
-- A 2D array is always interpreted as `(N, K)`, never `(N, T)`. For a
-  time-series with one output, reshape to `(N, T, 1)`.
+- A 2D array follows the package-wide label rule (see
+  [Shape Conventions](#shape-conventions)): `(N, K)` without
+  `problem.output_names`, `(N, T)` timepoints of the single labeled output
+  when `output_names` has exactly one entry. A single-output time series can
+  also be passed pre-reshaped as `(N, T, 1)`.
 - Elementary effects are computed in unit-cube coordinates, so `mu_star` is
   directly comparable across parameters regardless of their physical ranges;
   use `MorrisResult.to_physical_units()` for derivative-scale values
@@ -1864,7 +1948,10 @@ Related links:
 ### `analyze_hsic()` {#analyze-hsic}
 
 Compute HSIC (Hilbert-Schmidt Independence Criterion) sensitivity indices
-from arbitrary (X, Y) sample pairs using Gaussian RBF kernels.
+from arbitrary `(X, Y)` sample pairs using Gaussian RBF kernels. HSIC measures
+statistical dependence rather than variance contribution, so it can flag
+inputs whose influence a variance-based method would miss; the permutation
+p-values give a significance test for screening out non-influential inputs.
 
 ```python
 def analyze_hsic(
@@ -1883,13 +1970,13 @@ def analyze_hsic(
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
 | `problem` | `Problem` | required | Problem definition with D parameters. |
-| `X` | `Array` | required | Input sample matrix `(N, D)` in physical units. |
+| `X` | `Array` | required | Input sample matrix `(N, D)` in physical units, e.g. from `sample_mc()`. |
 | `Y` | `Array` | required | Model output `(N,)`, `(N, K)`, or `(N, T, K)`. |
-| `n_perms` | `int` | `200` | Number of permutations for p-value computation. |
+| `n_perms` | `int` | `200` | Number of permutations for p-value computation. The smallest attainable p-value is `1 / (n_perms + 1)`, so raise it when you need finer significance resolution. |
 | `seed` | `int` | `0` | Random seed for permutation test reproducibility. |
-| `bandwidth` | `float \| None` | `None` | Fixed kernel bandwidth. `None` uses the median heuristic. |
-| `chunk_size` | `int \| None` | `None` | Block size for N×N kernel matrix computation. |
-| `prenormalize` | `bool` | `False` | If `True`, standardize Y before analysis. |
+| `bandwidth` | `float \| None` | `None` | Fixed kernel bandwidth. `None` uses the median heuristic, a robust default; set a float only to reproduce a specific kernel choice. |
+| `chunk_size` | `int \| None` | `None` | Block size for the N×N kernel matrix computation. Set it when large `N` exhausts device memory. |
+| `prenormalize` | `bool` | `False` | If `True`, standardize `Y` before analysis. Useful when outputs span very different scales. |
 
 Validation and behavior:
 
@@ -1967,6 +2054,11 @@ Behavior:
 - Uses `problem.names` for `param` coordinates.
 - Dataset contains `R2_HSIC`, `T_HSIC`, `p_values`, and `hsic_raw` variables.
 
+Related links:
+
+- [HSIC Example](/examples/hsic)
+- [Methods](/guide/methods)
+
 ---
 
 ## PAWN Workflow
@@ -1974,8 +2066,11 @@ Behavior:
 <a id="analyze-pawn"></a>
 ### `analyze_pawn()` {#analyze-pawn}
 
-Compute PAWN sensitivity indices via KS distances between unconditional and
-conditional output CDFs (Pianosi & Wagener, 2015).
+Compute PAWN sensitivity indices via Kolmogorov-Smirnov (KS) distances between
+unconditional and conditional output CDFs (Pianosi & Wagener, 2015). PAWN is
+moment-independent: it captures shifts anywhere in the output distribution
+(tails, skewness), not just variance, and works on arbitrary `(X, Y)` pairs
+with no structured design.
 
 ```python
 def analyze_pawn(
@@ -1995,14 +2090,14 @@ def analyze_pawn(
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
 | `problem` | `Problem` | required | Problem definition with D parameters. |
-| `X` | `Array` | required | Input sample matrix `(N, D)`. |
+| `X` | `Array` | required | Input sample matrix `(N, D)`, e.g. from `sample_mc()`. |
 | `Y` | `Array` | required | Model output `(N,)`, `(N, K)`, or `(N, T, K)`. |
-| `n_bins` | `int` | `10` | Number of equal-width conditioning bins per input. |
-| `statistic` | `Literal["median", "max", "mean"]` | `"median"` | Aggregation of KS values across bins. |
-| `n_bootstrap` | `int` | `0` | Number of bootstrap resamples for confidence intervals. Set to 0 to skip. |
+| `n_bins` | `int` | `10` | Number of equal-width conditioning bins per input. Each conditional CDF is estimated from roughly `N / n_bins` samples, so increase it only when `N` is large. |
+| `statistic` | `Literal["median", "max", "mean"]` | `"median"` | Aggregation of KS values across bins. `"median"` is robust to outlier bins; `"max"` captures the worst-case distribution shift. |
+| `n_bootstrap` | `int` | `0` | Number of bootstrap resamples for confidence intervals. Set to 0 to skip; 100-1000 gives stable intervals at proportional cost. |
 | `conf_level` | `float` | `0.95` | Confidence level for bootstrap intervals. |
 | `seed` | `int` | `0` | Random seed for bootstrap resampling. |
-| `chunk_size` | `int` | `2048` | Unused, kept for API consistency. |
+| `chunk_size` | `int` | `2048` | Accepted for signature parity with the other `analyze` functions; PAWN needs no batching, so it has no effect. |
 
 Validation and behavior:
 
@@ -2014,6 +2109,20 @@ Validation and behavior:
 - `statistic` must be one of `"median"`, `"max"`, or `"mean"`.
 
 Returns: [`PAWNResult`](#pawnresult)
+
+Minimal example:
+
+```python
+import jax.numpy as jnp
+import gsax
+from gsax.benchmarks.ishigami import PROBLEM, evaluate
+
+X = gsax.sample_mc(PROBLEM, N=5000, seed=42)
+Y = evaluate(jnp.asarray(X))
+result = gsax.analyze_pawn(PROBLEM, jnp.asarray(X), Y)
+
+print(result.pawn)  # (3,) — median KS distance per parameter
+```
 
 <a id="pawnresult"></a>
 ### `PAWNResult` {#pawnresult}
@@ -2053,6 +2162,11 @@ Behavior:
 - Uses `problem.output_names` when available, otherwise `y0`, `y1`, and so on.
 - When `pawn_conf` is present, splits into `pawn_lower` and `pawn_upper` variables.
 
+Related links:
+
+- [PAWN Example](/examples/pawn)
+- [Methods](/guide/methods)
+
 ---
 
 ## Borgonovo Delta Workflow
@@ -2062,7 +2176,9 @@ Behavior:
 
 Compute Borgonovo delta (moment-independent) sensitivity indices and given-data
 first-order Sobol indices via the Plischke, Borgonovo & Smith (2013) given-data
-estimator.
+estimator. Delta measures how much fixing an input shifts the entire output
+density, so it remains informative when variance is a poor summary of the
+output; it works on arbitrary `(X, Y)` pairs with no structured design.
 
 ```python
 def analyze_borgonovo(
@@ -2077,23 +2193,23 @@ def analyze_borgonovo(
     conf_level: float = 0.95,
     bias_correct: bool = True,
     seed: int = 0,
-    chunk_size: int = 2048,
+    chunk_size: int | None = None,
 ) -> DeltaResult
 ```
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
 | `problem` | `Problem` | required | Problem definition with D parameters. |
-| `X` | `Array` | required | Input sample matrix `(N, D)`. |
+| `X` | `Array` | required | Input sample matrix `(N, D)`, e.g. from `sample_mc()`. |
 | `Y` | `Array` | required | Model output `(N,)`, `(N, K)`, or `(N, T, K)`. |
-| `n_classes` | `int \| None` | `None` | Number of equal-frequency conditioning classes per input. `None` selects the Plischke sample-size heuristic (SALib-identical, at most 48 classes). |
-| `grid_size` | `int` | `100` | Number of points of the output grid the densities are compared on (spanning `[Y.min(), Y.max()]` per column). |
+| `n_classes` | `int \| None` | `None` | Number of equal-frequency conditioning classes per input. `None` selects the Plischke sample-size heuristic (SALib-identical, at most 48 classes); override only to match a specific study. |
+| `grid_size` | `int` | `100` | Number of points of the output grid the densities are compared on (spanning `[Y.min(), Y.max()]` per column). The default matches SALib. |
 | `bandwidth` | `float \| Literal["silverman"]` | `"silverman"` | KDE bandwidth rule: `"silverman"` for the per-class Silverman factor, or a positive float used directly as the factor multiplying the sample standard deviation. |
-| `n_bootstrap` | `int` | `100` | Number of bootstrap resamples for bias correction and confidence intervals. Set to 0 to skip both. |
+| `n_bootstrap` | `int` | `100` | Number of bootstrap resamples for bias correction and confidence intervals. Set to 0 to skip both and get the raw plug-in estimate. |
 | `conf_level` | `float` | `0.95` | Confidence level for percentile bootstrap intervals. |
 | `bias_correct` | `bool` | `True` | Apply the Plischke bias reduction `2*d_hat - mean(d_boot)` to the delta estimate (requires `n_bootstrap > 0`). |
 | `seed` | `int` | `0` | Random seed for bootstrap resampling. |
-| `chunk_size` | `int` | `2048` | Number of flattened `T*K` output columns processed per kernel call. Peak memory scales with `chunk_size * D * N * grid_size`. |
+| `chunk_size` | `int \| None` | `None` | Number of flattened `T*K` output columns processed per kernel call. `None` picks a memory-aware default from the sample size; pass a positive integer to override. Peak memory scales with `chunk_size * D * N * grid_size`. |
 
 Validation and behavior:
 
@@ -2182,6 +2298,11 @@ Behavior:
 - Uses `problem.output_names` when available, otherwise `y0`, `y1`, and so on.
 - Dataset contains `delta` and `S1` variables; when confidence intervals are
   present, adds `delta_lower` / `delta_upper` and `S1_lower` / `S1_upper`.
+
+Related links:
+
+- [Borgonovo Delta Example](/examples/borgonovo)
+- [Methods](/guide/methods)
 
 ## Configuration
 

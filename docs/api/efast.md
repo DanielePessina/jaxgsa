@@ -1,5 +1,8 @@
 # eFAST
 
+Fourier-based first- and total-order sensitivity indices from model outputs on
+sinusoidal search curves, at low sample cost.
+
 The canonical API reference now lives at [API Reference](/api/).
 
 Jump directly to:

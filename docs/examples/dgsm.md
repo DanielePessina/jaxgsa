@@ -2,7 +2,8 @@
 
 DGSM computes sensitivity information from the **partial derivatives** of a
 model, rather than from variance decomposition. For JAX-differentiable models
-this is essentially free via reverse-mode autodiff (`jax.jacrev`).
+the derivatives come cheaply: one reverse-mode autodiff pass (`jax.jacrev`)
+yields all of them per sample.
 
 The key quantities are the second moment of the partial derivative (importance
 measure, nu) and the mean partial derivative (sigma). These yield two-sided

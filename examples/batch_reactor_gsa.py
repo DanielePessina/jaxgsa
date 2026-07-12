@@ -50,10 +50,16 @@ def _intro(mo):
         \bigl(1 - e^{-(1/\tau + k)\,t}\bigr).
     $$
 
-    The notebook treats $C_A(t)$ as a time-series multi-output, runs
-    Sobol with bootstrap resampling **once**, and reads the indices off
-    as bar plots, a time-resolved sensitivity profile, and a pairwise
-    interaction heatmap.
+    Sobol analysis answers that question with three kinds of variance
+    share: the **first-order index** $S_1$ is the fraction of output
+    variance an input explains on its own, the **total-order index**
+    $S_T$ adds every interaction the input takes part in, and the
+    **second-order index** $S_{ij}$ isolates what a pair explains
+    jointly beyond their individual effects. The notebook treats
+    $C_A(t)$ as a time-series output, runs Sobol with bootstrap
+    resampling **once**, and reads the three off as bar plots, a
+    time-resolved sensitivity profile, and a pairwise interaction
+    heatmap.
     """)
     return
 

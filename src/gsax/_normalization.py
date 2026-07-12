@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import warnings
+from typing import TYPE_CHECKING, NamedTuple
 
 import jax.numpy as jnp
 import numpy as np
@@ -10,6 +11,28 @@ from jax import Array
 
 if TYPE_CHECKING:
     from gsax.problem import Problem
+
+
+class LayoutOps(NamedTuple):
+    """Transformations :func:`_infer_output_layout` applied to reach the
+    canonical layout, so companion arrays (a Jacobian, an emulator prediction)
+    can be moved in lockstep instead of re-derived from shapes.
+
+    The fields record, in application order:
+        sample_axis: axis moved to the front (rule 1), or ``None`` if unmoved.
+        inserted_output_axis: a singleton K axis was appended (rule 2, a single
+            labeled output with several columns: ``(n, T) -> (n, T, 1)``).
+        swapped_tk: the trailing two axes were exchanged (rule 3,
+            ``(n, K, T) -> (n, T, K)``).
+
+    An all-default ``LayoutOps()`` is the identity (Y was already canonical).
+    ``inserted_output_axis`` and ``swapped_tk`` are mutually exclusive (2-D vs
+    3-D branch).
+    """
+
+    sample_axis: int | None = None
+    inserted_output_axis: bool = False
+    swapped_tk: bool = False
 
 
 def _default_output_names(K: int, problem: Problem) -> list[str]:
@@ -29,18 +52,16 @@ def _default_output_names(K: int, problem: Problem) -> list[str]:
     return [f"y{i}" for i in range(K)]
 
 
-def _validate_xy_inputs(problem: Problem, X: Array, Y: Array) -> None:
-    """Validate the shared ``(problem, X, Y)`` contract of given-data methods.
+def _validate_x(problem: Problem, X: Array) -> None:
+    """Validate the shared ``(N, D)`` input-matrix contract.
 
     Args:
         problem: Problem definition with ``num_vars`` parameters.
         X: Input sample matrix, expected shape ``(N, D)``.
-        Y: Model output, expected 1-D, 2-D, or 3-D with ``N`` leading rows.
 
     Raises:
-        ValueError: If X is not 2-D, its column count does not match the
-            problem, Y is not 1-D/2-D/3-D, or X and Y have differing row
-            counts.
+        ValueError: If X is not 2-D or its column count does not match the
+            problem.
     """
     if X.ndim != 2:
         raise ValueError(f"X must be 2-D (N, D), got ndim={X.ndim}")
@@ -48,31 +69,182 @@ def _validate_xy_inputs(problem: Problem, X: Array, Y: Array) -> None:
         raise ValueError(
             f"X has {X.shape[1]} columns but problem has {problem.num_vars} parameters"
         )
-    if Y.ndim not in (1, 2, 3):
-        raise ValueError(f"Y must be 1-D (N,), 2-D (N, K), or 3-D (N, T, K), got ndim={Y.ndim}")
-    if X.shape[0] != Y.shape[0]:
-        raise ValueError(f"X has {X.shape[0]} rows but Y has {Y.shape[0]} rows")
 
 
-def _squeeze_output_axes(arr: Array, squeeze_time: bool, squeeze_output: bool) -> Array:
-    """Remove the singleton T/K axes that ``_prepare_Y`` inserted.
+def _infer_output_layout(
+    Y: Array,
+    problem: Problem,
+    n_expected: int | None,
+    *,
+    stacklevel: int = 3,
+) -> tuple[Array, LayoutOps]:
+    """Resolve a user-supplied output array to the canonical axis layout.
 
-    Works for both point-estimate arrays shaped ``(..., T, K, D)`` and
-    confidence arrays with a leading ``[lower, upper]`` axis, because the
-    trailing ``(T, K, D)`` layout is addressed with negative indices.
+    gsax's canonical layouts are ``(n,)``, ``(n, K)``, and ``(n, T, K)``, but
+    users do not always hand over exactly that. This helper infers the
+    semantic axes from the two signals available at every public entry point:
+    the expected sample count ``n_expected`` identifies the sample axis, and
+    ``len(problem.output_names)`` (when set) identifies the output axis K; a
+    remaining axis is time. The ladder is strict — exact canonical shapes pass
+    silently, unambiguously recoverable layouts are fixed with a
+    ``UserWarning`` naming the transformation, and ambiguous ones raise. It
+    never guesses.
+
+    Rules, in order:
+      1. Sample axis: if ``Y.shape[0] != n_expected`` but exactly one axis has
+         that length, it is moved first (with a warning); no matching axis
+         raises. When the leading axis already matches, position is trusted
+         even if another axis coincidentally matches too.
+      2. 2-D ``(n, M)``: with exactly one entry in ``problem.output_names`` and
+         ``M > 1``, the columns are T timepoints of that single output and Y is
+         reshaped to ``(n, M, 1)``; a single column (``M == 1``) stays canonical
+         as ``(n, K=1)``. With several entries, ``M`` must equal
+         ``len(output_names)`` (multi-output). Without ``output_names``, 2-D
+         always means ``(n, K)``.
+      3. 3-D ``(n, A, B)``: expected ``(n, T, K)``. If ``output_names`` is set
+         and only the middle axis matches its length, the trailing axes are
+         swapped (with a warning); if neither trailing axis matches, raises.
 
     Args:
-        arr: Array whose last three axes are ``(T, K, D)``.
+        Y: User-supplied output array, 1-D to 3-D.
+        problem: Problem definition; ``output_names`` (when set) pins K.
+        n_expected: Expected sample count (X rows for given-data methods, the
+            design's unique row count for Sobol/Morris), or ``None`` when the
+            caller cannot know it independently (rule 1 is skipped).
+        stacklevel: Passed through to ``warnings.warn`` so the layout warnings
+            point at the user's call site. Direct callers use the default 3;
+            :func:`_validate_xy_inputs` passes 4 to skip its extra frame.
+
+    Returns:
+        A tuple ``(Y, ops)`` where ``Y`` is in canonical layout — ``(n,)``,
+        ``(n, K)``, or ``(n, T, K)`` — and ``ops`` records the transformations
+        applied so companion arrays can be moved in lockstep.
+
+    Raises:
+        ValueError: If ``Y`` is not 1-D/2-D/3-D, no axis matches the expected
+            sample rows, or a labeled output axis cannot be located.
+    """
+    Y = jnp.asarray(Y)
+    if Y.ndim not in (1, 2, 3):
+        raise ValueError(f"Y must be 1-D (N,), 2-D (N, K), or 3-D (N, T, K), got ndim={Y.ndim}")
+
+    sample_axis: int | None = None
+    inserted_output_axis = False
+    swapped_tk = False
+
+    if n_expected is not None and Y.shape[0] != n_expected:
+        matches = [ax for ax, size in enumerate(Y.shape) if size == n_expected]
+        if len(matches) == 1:
+            warnings.warn(
+                f"gsax: Y has shape {tuple(Y.shape)} but {n_expected} sample rows were "
+                f"expected; interpreting axis {matches[0]} as the sample axis and "
+                "moving it first",
+                stacklevel=stacklevel,
+            )
+            sample_axis = matches[0]
+            Y = jnp.moveaxis(Y, matches[0], 0)
+        else:
+            ambiguity = "no unambiguous" if matches else "no"
+            raise ValueError(
+                f"Y has shape {tuple(Y.shape)} with {ambiguity} axis matching the "
+                f"expected {n_expected} sample rows; pass Y as (n,), (n, K), or "
+                f"(n, T, K) with n={n_expected}"
+            )
+
+    K_labeled = len(problem.output_names) if problem.output_names is not None else None
+
+    if Y.ndim == 2 and K_labeled is not None:
+        M = Y.shape[1]
+        if K_labeled == 1:
+            # One labeled output with several columns: the columns are
+            # timepoints, not outputs. Flow as genuine (n, T, 1) so results keep
+            # the labeled output axis. A lone column (M == 1) is left canonical
+            # as (n, K=1) — a single scalar output, not a 1-timepoint series
+            # (pass (n, 1, 1) explicitly for the latter).
+            if M > 1:
+                Y = Y[:, :, None]
+                inserted_output_axis = True
+        elif M != K_labeled:
+            raise ValueError(
+                f"Y has {M} columns but problem.output_names lists {K_labeled} "
+                "outputs; a 2-D Y must have one column per named output "
+                "(pass (n, T, K) for multi-output time series)"
+            )
+    elif Y.ndim == 3 and K_labeled is not None and Y.shape[2] != K_labeled:
+        if Y.shape[1] == K_labeled:
+            warnings.warn(
+                f"gsax: Y has shape {tuple(Y.shape)} but only its middle axis "
+                f"matches the {K_labeled} named outputs; interpreting Y as "
+                "(n, K, T) and swapping the trailing axes to (n, T, K)",
+                stacklevel=stacklevel,
+            )
+            Y = jnp.swapaxes(Y, 1, 2)
+            swapped_tk = True
+        else:
+            raise ValueError(
+                f"3-D Y has shape {tuple(Y.shape)} but no trailing axis matches "
+                f"the {K_labeled} entries in problem.output_names; expected "
+                "(n, T, K)"
+            )
+    return Y, LayoutOps(sample_axis, inserted_output_axis, swapped_tk)
+
+
+def _validate_xy_inputs(problem: Problem, X: Array, Y: Array) -> tuple[Array, LayoutOps]:
+    """Validate the shared ``(problem, X, Y)`` contract of given-data methods.
+
+    Validates X and resolves Y to the canonical layout via
+    :func:`_infer_output_layout`, using X's row count as the expected sample
+    count. Callers must use the returned Y; those that don't need the layout
+    record unpack ``[0]``.
+
+    Args:
+        problem: Problem definition with ``num_vars`` parameters.
+        X: Input sample matrix, expected shape ``(N, D)``.
+        Y: Model output, 1-D, 2-D, or 3-D (layout inferred when recoverable).
+
+    Returns:
+        A tuple ``(Y, ops)`` with Y in canonical ``(N,)`` / ``(N, K)`` /
+        ``(N, T, K)`` layout and ``ops`` describing how it was canonicalized.
+
+    Raises:
+        ValueError: If X is not 2-D, its column count does not match the
+            problem, or Y's layout cannot be resolved against X's row count.
+    """
+    _validate_x(problem, X)
+    return _infer_output_layout(Y, problem, int(X.shape[0]), stacklevel=4)
+
+
+def _squeeze_output_axes(
+    arr: Array,
+    squeeze_time: bool,
+    squeeze_output: bool,
+    *,
+    n_trailing: int = 1,
+) -> Array:
+    """Remove the singleton T/K axes that ``_prepare_Y`` inserted.
+
+    The ``(T, K)`` slice axes are located immediately before ``n_trailing``
+    trailing axes and addressed relative to the end, so any leading axes (a
+    confidence array's ``[lower, upper]`` axis, for example) ride through the
+    ``Ellipsis`` untouched. ``n_trailing`` says how many axes follow ``K``:
+    ``1`` for the usual ``(..., T, K, D)`` point/confidence arrays, ``2`` for
+    ``(..., T, K, D, D)`` pair matrices, and ``0`` for per-slice ``(..., T, K)``
+    scalars.
+
+    Args:
+        arr: Array whose axes are ``(..., T, K) + n_trailing`` trailing axes.
         squeeze_time: Whether the T axis was inserted (drop it).
         squeeze_output: Whether the K axis was inserted (drop it).
+        n_trailing: Number of axes after K.
 
     Returns:
         The array with the inserted singleton axes removed.
     """
+    tail = (slice(None),) * n_trailing
     if squeeze_time and squeeze_output:
-        return arr[..., 0, 0, :]
+        return arr[(Ellipsis, 0, 0) + tail]
     if squeeze_time:
-        return arr[..., 0, :, :]
+        return arr[(Ellipsis, 0, slice(None)) + tail]
     return arr
 
 
@@ -157,8 +329,6 @@ def _warn_zero_variance_slices(
             trailing dims are ``()``, ``(K,)``, or ``(T, K)``.
         output_names: Optional names for the K output dimension.
     """
-    import warnings
-
     # Collapse trailing dims so variance is computed per (t, k) slice.
     flat = Y.reshape(Y.shape[0], -1)
     n_outputs = flat.shape[1]
@@ -173,9 +343,11 @@ def _warn_zero_variance_slices(
         K = trailing[1]
 
     if output_names is not None and len(output_names) != K:
-        raise ValueError(
-            f"len(output_names)={len(output_names)} does not match number of outputs K={K}"
-        )
+        # The labels describe a different output count than these slices carry
+        # (e.g. a 1-D Y under a multi-output problem, which layout inference
+        # accepts). They don't apply here, so fall back to k= indices rather
+        # than rejecting an otherwise valid call.
+        output_names = None
 
     def _fmt_k(k: int) -> str:
         if output_names is not None:

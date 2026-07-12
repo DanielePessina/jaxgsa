@@ -1,8 +1,8 @@
-"""Method comparison: six GSA approaches on the Ishigami benchmark.
+"""Method comparison: eight GSA approaches on the Ishigami benchmark.
 
-Compares Sobol, eFAST, HDMR, PCE, DGSM, and Morris on the Ishigami
-function, a standard sensitivity analysis test case with known
-analytical indices.
+Compares Sobol, eFAST, HDMR, PCE, DGSM, Morris, Shapley effects, and
+Borgonovo delta on the Ishigami function, a standard sensitivity
+analysis test case with known analytical indices.
 
 Run interactively: ``uv run marimo edit examples/method_comparison.py``
 Run as script:     ``uv run python examples/method_comparison.py``
@@ -21,9 +21,9 @@ def _intro(mo):
     mo.md(r"""
     # GSA Method Comparison
 
-    **Six methods, one function — which to choose?**
+    **Eight methods, one function — which to choose?**
 
-    This notebook runs six global sensitivity analysis methods on the
+    This notebook runs eight global sensitivity analysis methods on the
     Ishigami function and compares their accuracy, cost, and speed:
 
     | Method | What it computes |
@@ -31,9 +31,17 @@ def _intro(mo):
     | **Sobol** (Saltelli) | S1, ST, S2 via variance decomposition |
     | **eFAST** | S1, ST via Fourier amplitude decomposition |
     | **HDMR** | S1, ST via B-spline surrogate (ANCOVA) |
-    | **PCE** | S1, ST, S2 via polynomial chaos expansion (scalar output only) |
+    | **PCE** | S1, ST, S2 via polynomial chaos expansion |
     | **DGSM** | Bounds on ST via derivative-based measures |
     | **Morris** | mu*, sigma screening measures (proxy for the ST *ranking*) |
+    | **Shapley** | Sh fair variance shares (sum to 1) from a PCE surrogate, plus S1, ST |
+    | **Borgonovo delta** | delta moment-independent density shift, plus given-data S1 |
+
+    Jargon key: **S1** (first-order Sobol index) is the share of output
+    variance an input explains on its own; **ST** (total-order) adds
+    every interaction the input takes part in; **S2** is the extra share
+    a pair explains jointly. The remaining measures (mu*, Sh, delta)
+    live on their own scales and are defined in their sections below.
     """)
     return
 
@@ -122,24 +130,44 @@ def _run_all(gsax, ishigami, ishigami_fn, jax, jnp, problem, time):
     jax.block_until_ready(result_morris.mu_star)
     time_morris = time.perf_counter() - _t0
     n_evals_morris = sr_morris.n_total
+
+    # --- Shapley (PCE backend, same data and order as the PCE run) ---
+    _t0 = time.perf_counter()
+    result_shapley = gsax.analyze_shapley(problem, _X_hdmr, _Y_hdmr, order=4)
+    jax.block_until_ready(result_shapley.Sh)
+    time_shapley = time.perf_counter() - _t0
+    n_evals_shapley = len(_X_hdmr)
+
+    # --- Borgonovo delta ---
+    _t0 = time.perf_counter()
+    result_borgonovo = gsax.analyze_borgonovo(problem, _X_hdmr, _Y_hdmr, seed=42)
+    jax.block_until_ready(result_borgonovo.delta)
+    time_borgonovo = time.perf_counter() - _t0
+    n_evals_borgonovo = len(_X_hdmr)
     return (
+        n_evals_borgonovo,
         n_evals_dgsm,
         n_evals_efast,
         n_evals_hdmr,
         n_evals_morris,
         n_evals_pce,
+        n_evals_shapley,
         n_evals_sobol,
+        result_borgonovo,
         result_dgsm,
         result_efast,
         result_hdmr,
         result_morris,
         result_pce,
+        result_shapley,
         result_sobol,
+        time_borgonovo,
         time_dgsm,
         time_efast,
         time_hdmr,
         time_morris,
         time_pce,
+        time_shapley,
         time_sobol,
     )
 
@@ -296,27 +324,151 @@ def _morris_chart(analytical_st, np, plt, problem, result_morris):
 
 
 @app.cell(hide_code=True)
+def _shapley_md(mo):
+    mo.md(r"""
+    ### Shapley effects (fair shares)
+
+    Shapley effects allocate variance **fairly**: each interaction's
+    variance is split equally among its participants, so the shares sum
+    to exactly 1. The run above reuses the PCE surrogate fit (same data,
+    same order), so its $S_1$/$S_T$ match the PCE row exactly — the new
+    information is $\mathrm{Sh}$ itself, checked here against the
+    analytical Ishigami Shapley effects. A degree-4 polynomial leaves
+    the $x_1$ share a little high; see ``examples/shapley_gsa.py`` for
+    the order-convergence study.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _shapley_chart(ishigami, np, plt, problem, result_shapley):
+    _names = list(problem.names)
+    _x = np.arange(len(_names))
+    _width = 0.38
+
+    _sh = np.asarray(result_shapley.Sh)
+    _sh_ana = np.asarray(ishigami.ANALYTICAL_SHAPLEY)
+
+    _fig, _ax = plt.subplots(figsize=(8, 5))
+    _ax.bar(
+        _x - _width / 2,
+        _sh,
+        _width,
+        color="#17becf",
+        alpha=0.85,
+        label="Shapley Sh (PCE backend)",
+    )
+    _ax.bar(
+        _x + _width / 2,
+        _sh_ana,
+        _width,
+        color="black",
+        alpha=0.35,
+        label="Analytical Sh",
+    )
+    _ax.set_xticks(_x)
+    _ax.set_xticklabels(_names)
+    _ax.set_ylabel("Sh (fair variance share)")
+    _ax.set_title("Shapley effects vs analytical (each sums to 1)")
+    _ax.legend(frameon=False, fontsize=8)
+    _ax.grid(axis="y", alpha=0.3)
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell(hide_code=True)
+def _borgonovo_md(mo):
+    mo.md(r"""
+    ### Borgonovo delta (different scale)
+
+    Borgonovo delta is **moment-independent**: it measures the expected
+    L1 shift of the entire output density when an input is fixed, on its
+    own [0, 1] scale — not a variance share, so it is left out of the
+    index charts above. The same conditioning also yields a given-data
+    first-order Sobol estimate for free, plotted against the analytical
+    $S_1$ as a sanity check. Note $x_3$: its $S_1$ is near zero, yet its
+    delta is clearly positive — fixing it reshapes the output density
+    through the $x_1 x_3$ interaction.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _borgonovo_chart(analytical_s1, np, plt, problem, result_borgonovo):
+    _names = list(problem.names)
+    _x = np.arange(len(_names))
+    _width = 0.38
+
+    _delta = np.asarray(result_borgonovo.delta)
+    _s1_given_data = np.asarray(result_borgonovo.S1)
+    _s1_ana = np.asarray(analytical_s1)
+
+    _fig, _ax = plt.subplots(figsize=(8, 5))
+    _ax.bar(
+        _x - _width / 2,
+        _delta,
+        _width,
+        color="#e377c2",
+        alpha=0.85,
+        label="Borgonovo delta",
+    )
+    _ax.bar(
+        _x + _width / 2,
+        _s1_given_data,
+        _width,
+        color="#7f7f7f",
+        alpha=0.85,
+        label="Given-data S1",
+    )
+    _ax.scatter(
+        _x,
+        _s1_ana,
+        marker="D",
+        color="black",
+        s=60,
+        zorder=5,
+        label="Analytical S1",
+    )
+    _ax.set_xticks(_x)
+    _ax.set_xticklabels(_names)
+    _ax.set_ylabel("index value")
+    _ax.set_title("Borgonovo delta and given-data S1")
+    _ax.legend(frameon=False, fontsize=8)
+    _ax.grid(axis="y", alpha=0.3)
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell(hide_code=True)
 def _accuracy_table(
     analytical_s1,
     analytical_st,
     mo,
+    n_evals_borgonovo,
     n_evals_dgsm,
     n_evals_efast,
     n_evals_hdmr,
     n_evals_morris,
     n_evals_pce,
+    n_evals_shapley,
     n_evals_sobol,
     np,
+    result_borgonovo,
     result_dgsm,
     result_efast,
     result_hdmr,
     result_pce,
+    result_shapley,
     result_sobol,
+    time_borgonovo,
     time_dgsm,
     time_efast,
     time_hdmr,
     time_morris,
     time_pce,
+    time_shapley,
     time_sobol,
 ):
     _s1_ana = np.asarray(analytical_s1)
@@ -368,6 +520,20 @@ def _accuracy_table(
             n_evals_morris,
             time_morris,
         ),
+        (
+            "Shapley (Sh)",
+            _mae(result_shapley.S1, _s1_ana),
+            _mae(result_shapley.ST, _st_ana),
+            n_evals_shapley,
+            time_shapley,
+        ),
+        (
+            "Borgonovo delta",
+            _mae(result_borgonovo.S1, _s1_ana),
+            None,
+            n_evals_borgonovo,
+            time_borgonovo,
+        ),
     ]
 
     _header = "| Method | S1 MAE | ST MAE | N evals | Wall time (s) |\n"
@@ -388,11 +554,16 @@ def _accuracy_table(
         "(mean absolute elementary effect, not a variance share), so neither MAE "
         "column applies; see the normalized ranking check above. Its N evals is "
         "the **unique** row count after grid deduplication (100 trajectories = "
-        "400 expanded rows).\n\n"
+        "400 expanded rows). Shapley's S1/ST come from the same PCE surrogate as "
+        "the PCE row (same data and order), so those MAEs coincide — its headline "
+        "index Sh is checked against the analytical Shapley effects in the "
+        "fair-shares chart above. Borgonovo's S1 MAE uses its given-data "
+        "first-order estimate; delta itself is moment-independent and on its own "
+        "scale, so the ST column does not apply.\n\n"
         "**Timing note:** Sobol, eFAST, and Morris times are end-to-end (sample "
-        "+ evaluate + analyze). HDMR and PCE times are analyze-only (shared "
-        "pre-computed samples). DGSM time is analyze-only (internally evaluates "
-        "via autodiff)."
+        "+ evaluate + analyze). HDMR, PCE, Shapley, and Borgonovo times are "
+        "analyze-only (shared pre-computed samples). DGSM time is analyze-only "
+        "(internally evaluates via autodiff)."
     )
     return
 
@@ -482,10 +653,12 @@ def _summary(mo):
     | **eFAST** | **Screening** at lower cost ($N \times D$ evals). |
     | **DGSM** | **Differentiable models** via JAX autodiff. |
     | **HDMR** | **Arbitrary (X, Y) data**, no structured sampling. |
-    | **PCE** | **Emulation** with a reusable polynomial surrogate (scalar output only). |
+    | **PCE** | **Emulation** with a reusable polynomial surrogate. |
     | **Morris** | **Cheapest screening** — factor fixing at $r(D+1)$ evals before dedup. |
+    | **Shapley** | **Fair variance shares** summing to 1 — interaction attribution. |
+    | **Borgonovo delta** | **Moment-independent** influence on the whole output density. |
 
-    - **Sobol** is the gold standard when you can afford
+    - **Sobol** is the reference method when you can afford
       $N \times (2D+2)$ evaluations and need pairwise interactions.
     - **eFAST** trades second-order detail for a lower sample
       budget ($N \times D$), making it ideal for factor screening.
@@ -499,6 +672,19 @@ def _summary(mo):
       64 unique evaluations here after grid deduplication. Its $\mu^*$
       proxies the $S_T$ *ranking* (not the variance shares); use it to
       fix unimportant factors before a variance-based follow-up.
+    - **Shapley** splits every interaction's variance fairly among its
+      participants, giving a single score per parameter that sums to
+      exactly 1 — computed analytically from a surrogate fit at zero
+      extra model runs.
+    - **Borgonovo delta** looks beyond variance entirely: it measures
+      how the full output density shifts when an input is fixed, and
+      returns a given-data $S_1$ from the same conditioning for free.
+
+    Two gsax methods sit outside this comparison because they don't
+    estimate variance shares at all: **HSIC** (kernel-based dependence
+    indices) and **PAWN** (Kolmogorov–Smirnov distances between
+    conditional and unconditional output CDFs). Both are given-data
+    methods — see their docs pages for when to reach for them.
     """)
     return
 

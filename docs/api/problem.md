@@ -1,5 +1,8 @@
 # Problem
 
+The `Problem` dataclass names your input parameters and gives each a marginal
+distribution. Every gsax sampling and analysis function takes one.
+
 The canonical API reference now lives at [API Reference](/api/).
 
 Jump directly to:

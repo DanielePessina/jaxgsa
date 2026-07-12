@@ -137,7 +137,7 @@ def _fit_first_order(
     """Fit first-order component functions via regularized least squares + backfitting.
 
     Args:
-        B1: (R, m1, n1) first-order basis (subsampled).
+        B1: (R, m1, n1) first-order basis, R = number of samples.
         Y_res: (R,) residuals (Y - f0).
         m1: number of basis functions per dimension.
         n1: number of first-order terms (= D).
@@ -232,9 +232,10 @@ def _fit_higher_order(
         Y_res_out: (R,) updated residuals.
         C: (m_basis, n_terms) coefficients.
     """
-    # Higher-order terms are fit in a single shot (no backfitting) because
-    # each tensor-product basis is orthogonal to other terms at the same order
-    # after the lower-order residual has been subtracted.
+    # Higher-order terms are fit in a single shot (no backfitting): each term
+    # is solved independently against the same lower-order residual. With
+    # lower-order structure already removed, same-order tensor-product terms
+    # overlap little, so one joint-free pass is accurate in practice.
     lam_eye = lambdax * jnp.eye(m_basis)
     # Normal equations per term: (B_j^T B_j + lambda*I) C_j = B_j^T Y_res
     BtB = jnp.einsum("rmj,rnj->jmn", B, B)  # (n_terms, m_basis, m_basis)
@@ -262,7 +263,7 @@ def _ancova(Y: Array, Y_em: Array, V_Y: Array) -> tuple[Array, Array, Array]:
     """ANCOVA decomposition of sensitivity indices.
 
     Args:
-        Y: (R,) model output (subsampled).
+        Y: (R,) model output.
         Y_em: (R, n) emulated term contributions.
         V_Y: scalar variance of Y.
 
@@ -427,7 +428,7 @@ def _f_test(
 
 
 # ---------------------------------------------------------------------------
-# Single bootstrap iteration kernel
+# Per-output-slice fitting kernel
 # ---------------------------------------------------------------------------
 
 
@@ -449,7 +450,11 @@ def _make_hdmr_kernel(
     All integer/float parameters are captured in the closure so they are
     concrete when this kernel is wrapped by a cached outer ``jit(vmap(...))``.
 
-    Returns a function: kernel(B1_sub, B2_sub, B3_sub, Y_sub, f_crits)
+    Returns a function ``kernel(B1, B2, B3, Y, f_crits)`` that fits one
+    output slice and returns the 9-tuple
+    ``(Sa, Sb, S, select, rmse, C1, C2, C3, f0)``. Every maxorder variant
+    returns the same 9-tuple shape (dummy C2/C3 for inactive orders) so
+    the caller's vmap/concatenation logic stays uniform.
     """
 
     # Each branch builds a kernel with the same 9-element return signature so

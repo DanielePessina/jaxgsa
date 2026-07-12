@@ -1,10 +1,14 @@
 """Poincare constants and marginal variances for DGSM bounds.
 
-The Sobol-Kucherenko inequality bounds the total Sobol index as
+The Poincare constant C(p) of a distribution p is the sharpest factor
+for which the Poincare inequality ``Var(g(X)) <= C(p) * E[g'(X)^2]``
+holds for every smooth function g. The Sobol-Kucherenko inequality
+applies it per input to bound the total Sobol index as
 
     ST_i <= C(p_i) * nu_i / Var(Y)
 
-where C(p_i) is the Poincare constant of the i-th marginal.
+where C(p_i) is the Poincare constant of the i-th marginal and
+``nu_i = E[(df/dx_i)^2]``.
 
 Poincare constants by marginal type:
     Uniform [a, b]:      C = (b - a)^2 / pi^2

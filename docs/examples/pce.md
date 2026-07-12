@@ -111,8 +111,9 @@ print(ds.loo_rmse)  # included when available
 
 ## Limitations
 
-- PCE currently supports **scalar output only** (`Y` must be 1D). Multi-output
-  and time-series outputs are not yet supported.
+- Multi-output `(N, K)` and time-series `(N, T, K)` `Y` are supported, but all
+  output slices share a single polynomial basis and a single effective `order`
+  (they are fitted together in one solve).
 - The polynomial order is automatically reduced when the term count would
   exceed `fit_ratio * N` to prevent overfitting.
 - Uniform and truncated-Gaussian inputs use Legendre polynomials; untruncated

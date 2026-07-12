@@ -253,8 +253,11 @@ When bootstrap CIs are present, the dataset also contains `mu_lower`,
 - `(n_total,)` means scalar output.
 - `(n_total, K)` means K output variables with no time dimension.
 - `(n_total, T, K)` means T time steps and K outputs.
-- A 2D array is always treated as `(n_total, K)`, never `(n_total, T)`.
-- For a time-series with one output, reshape to `(n_total, T, 1)`.
+- Without `problem.output_names`, a 2D array is always treated as
+  `(n_total, K)`.
+- With exactly one entry in `problem.output_names`, a 2D array is treated as
+  `(n_total, T)` — timepoints of that single output — and flows through as
+  `(n_total, T, 1)`. Passing a pre-reshaped `(n_total, T, 1)` array also works.
 
 | Y shape | mu / mu_star / sigma shape |
 |---------|----------------------------|

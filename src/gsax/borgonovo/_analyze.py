@@ -50,6 +50,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from gsax._bootstrap import _percentile_ci
 from gsax._normalization import _prepare_Y, _squeeze_output_axes, _validate_xy_inputs
 from gsax.borgonovo._result import DeltaResult
 from gsax.problem import Problem
@@ -253,6 +254,17 @@ def analyze(
 ) -> DeltaResult:
     """Compute Borgonovo delta and given-data first-order Sobol indices.
 
+    The delta index measures how much knowing an input's value shifts the
+    *entire* output density: ``delta_i`` is (half) the expected L1
+    distance between the unconditional output density and the density
+    conditional on x_i. It lies in [0, 1] — 0 means the output
+    distribution is unaffected by x_i, 1 means it is fully determined by
+    it. Because delta compares whole densities rather than variances
+    ("moment-independent"), it captures influence on tails and shape that
+    Sobol indices miss, and it needs no special sampling design: any
+    (X, Y) sample works. A given-data first-order Sobol index S1 is
+    returned from the same partition at negligible extra cost.
+
     Args:
         problem: Problem definition with D parameters.
         X: Input sample matrix ``(N, D)``.
@@ -297,9 +309,7 @@ def analyze(
             ``chunk_size`` is not a positive integer.
     """
     X = jnp.asarray(X)
-    Y = jnp.asarray(Y)
-
-    _validate_xy_inputs(problem, X, Y)
+    Y, _ = _validate_xy_inputs(problem, X, Y)
 
     N = X.shape[0]
     if n_classes is None:
@@ -384,13 +394,11 @@ def analyze(
             d_reps = d_boot
             delta = d_hat
 
-        alpha = (1.0 - conf_level) / 2.0
-        percentiles = jnp.array([alpha * 100, (1.0 - alpha) * 100])
         delta_conf = _squeeze_output_axes(
-            jnp.nanpercentile(d_reps, percentiles, axis=0), squeeze_time, squeeze_output
+            _percentile_ci(d_reps, conf_level), squeeze_time, squeeze_output
         )
         S1_conf = _squeeze_output_axes(
-            jnp.nanpercentile(s1_boot, percentiles, axis=0), squeeze_time, squeeze_output
+            _percentile_ci(s1_boot, conf_level), squeeze_time, squeeze_output
         )
     else:
         delta = d_hat

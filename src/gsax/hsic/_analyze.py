@@ -4,6 +4,12 @@ Computes R2-HSIC (normalized first-order) and Total HSIC indices from
 arbitrary (X, Y) sample pairs using Gaussian RBF kernels with the
 median heuristic for bandwidth selection.
 
+Array shape conventions used throughout:
+    N  — number of samples
+    D  — number of input parameters
+    T  — number of time steps (singleton-squeezed when absent)
+    K  — number of output variables (singleton-squeezed when absent)
+
 For total HSIC, augmented kernels k*(x,x') = 1 + k_c(x,x') are used
 per Larsen & Alexanderian (2026), where k_c is the centered kernel.
 The product of augmented kernels captures all interaction orders,
@@ -367,7 +373,24 @@ def analyze(
     chunk_size: int | None = None,
     prenormalize: bool = False,
 ) -> HSICResult:
-    """Compute HSIC sensitivity indices.
+    """Compute HSIC (Hilbert-Schmidt Independence Criterion) sensitivity indices.
+
+    HSIC quantifies the statistical dependence between each input and the
+    output using kernel embeddings, so it picks up nonlinear and
+    non-monotonic relationships that correlation-based screening misses.
+    It is a given-data method: any (X, Y) sample pair works — no special
+    sampling design is required. Two indices are reported:
+
+    - **R2-HSIC**: HSIC(x_i, Y) normalized by the geometric mean of the
+      self-similarities, ``HSIC(x_i, Y) / sqrt(HSIC(x_i, x_i) * HSIC(Y, Y))``.
+      Lies in [0, 1]; 0 means x_i and Y are independent (first-order view).
+    - **Total HSIC (T_HSIC)**: fraction of the joint dependence lost when
+      x_i is removed, analogous to a total-order Sobol index — it also
+      counts influence carried through interactions with other inputs.
+
+    A permutation test supplies p-values for the null hypothesis that
+    x_i and Y are independent, making HSIC useful for screening out
+    non-influential inputs with a significance level attached.
 
     Args:
         problem: Problem definition with D parameters.
@@ -375,12 +398,19 @@ def analyze(
         Y: Model output ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
             For outputs with large magnitude, set ``prenormalize=True``
             to avoid float overflow in distance computation.
-        n_perms: Number of permutations for p-value computation.
+        n_perms: Number of random permutations for the p-value test.
+            More permutations give finer p-value resolution (the smallest
+            attainable p-value is ``1 / (n_perms + 1)``) at linearly
+            higher cost; 200 (default) resolves down to p ~ 0.005.
         seed: Random seed for permutation test reproducibility.
-        bandwidth: Fixed kernel bandwidth. None uses the median heuristic.
-        chunk_size: Block size for N x N kernel matrix computation.
-            None computes the full matrix at once.
-        prenormalize: If True, standardize Y before analysis.
+        bandwidth: Fixed Gaussian-kernel bandwidth applied to all inputs
+            and the output. None (default) selects it per variable via the
+            median heuristic (median pairwise distance), a robust default.
+        chunk_size: Row-block size for building each ``(N, N)`` kernel
+            matrix, bounding peak memory for large N. None computes each
+            full matrix at once.
+        prenormalize: If True, standardize each output slice to mean 0 and
+            unit standard deviation before analysis.
 
     Returns:
         HSICResult with R2_HSIC, T_HSIC, p_values, and hsic_raw.
@@ -392,13 +422,12 @@ def analyze(
     """
     D = problem.num_vars
     X = jnp.asarray(X)
-    Y = jnp.asarray(Y)
 
     if n_perms < 1:
         raise ValueError(f"n_perms must be >= 1, got {n_perms}")
     if bandwidth is not None and (bandwidth <= 0 or not math.isfinite(bandwidth)):
         raise ValueError(f"bandwidth must be positive and finite, got {bandwidth}")
-    _validate_xy_inputs(problem, X, Y)
+    Y, _ = _validate_xy_inputs(problem, X, Y)
     if X.shape[0] < _MIN_SAMPLES:
         raise ValueError(f"N must be >= {_MIN_SAMPLES} for HSIC, got {X.shape[0]}")
 

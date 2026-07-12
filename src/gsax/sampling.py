@@ -34,10 +34,19 @@ _SAMPLE_FORMATS = {"csv", "txt", "xlsx", "parquet", "pkl"}
 class SamplingResult:
     """Unique Sobol samples plus metadata for Saltelli reconstruction.
 
+    Returned by :func:`gsax.sample`. Evaluate your model at every row of
+    ``samples`` (in order) and pass this object together with the outputs to
+    :func:`gsax.analyze`.
+
+    Note the two row counts: ``n_total`` is the number of *unique* rows you
+    must evaluate, while ``expanded_n_total`` is the (larger or equal) size of
+    the full Saltelli layout that the analysis reconstructs internally.
+
     Attributes:
         samples: Unique rows to evaluate with the user's model. Shape
-            ``(n_total, D)`` after transforming each Sobol marginal into the
-            problem's declared input distribution.
+            ``(n_total, D)`` where ``D`` is the number of parameters, in
+            physical units (each Sobol marginal transformed into the
+            problem's declared input distribution).
         sample_ids: Stable integer identifiers aligned 1:1 with ``samples``.
             Useful for joining model outputs back onto the sampling table.
         expanded_n_total: Row count of the full expanded Saltelli layout before
@@ -48,8 +57,8 @@ class SamplingResult:
         base_n: Number of base Sobol points used to construct the Saltelli
             design. Always a power of 2.
         n_params: Number of problem dimensions ``D``.
-        calc_second_order: Whether the expanded design includes BA blocks for
-            second-order Sobol indices.
+        calc_second_order: Whether the expanded design includes the extra
+            cross-matrices needed for second-order Sobol indices.
         problem: Problem definition used to transform the samples.
     """
 
@@ -152,7 +161,15 @@ class SamplingResult:
         return pd.DataFrame(data, copy=False)
 
     def save(self, path: str | Path, *, format: str = "csv") -> None:
-        """Serialize samples and metadata to disk.
+        """Serialize samples and metadata to disk for later :func:`gsax.load`.
+
+        Writes up to three sibling files sharing the same stem:
+
+        - ``<path>.<format>`` — the unique sample matrix, one column per
+          parameter.
+        - ``<path>.json`` — problem definition and Saltelli metadata.
+        - ``<path>.npz`` — the expanded-to-unique row map; omitted when the
+          design contains no duplicate rows.
 
         Args:
             path: File stem (no extension), e.g. ``"experiment"`` or
@@ -419,27 +436,39 @@ def sample(
     seed: int | np.random.Generator | None = None,
     verbose: bool = True,
 ) -> SamplingResult:
-    """Generate unique Sobol/Saltelli samples for model evaluation.
+    """Generate the input samples needed for Sobol analysis with ``gsax.analyze``.
 
-    The function first builds the standard expanded Saltelli design for a
-    candidate ``base_n``. It then removes exact duplicate rows while
-    preserving first-occurrence order. If the resulting unique matrix is still
-    smaller than the requested evaluation budget, ``base_n`` is doubled and
-    the process repeats until enough unique rows are available.
+    Typical usage: call this once, evaluate your model at every row of the
+    returned ``result.samples`` (shape ``(n_total, D)``), then pass the result
+    object and your outputs to :func:`gsax.analyze`.
+
+    Internally this builds a Saltelli design — the structured layout of base
+    and column-swapped sample matrices that Sobol index estimators require —
+    for a candidate ``base_n``, then removes exact duplicate rows while
+    preserving first-occurrence order (in low dimensions the Saltelli
+    construction repeats rows, and evaluating a model twice on the same input
+    is wasted work). If the unique matrix is still smaller than the requested
+    evaluation budget, ``base_n`` is doubled and the process repeats until
+    enough unique rows are available.
 
     Args:
-        problem: Problem definition with parameter names and bounds.
-        n_samples: Minimum desired number of unique model evaluations.
-            Ignored when ``base_n`` is provided.
+        problem: Problem definition with parameter names and distributions.
+        n_samples: Minimum desired number of unique model evaluations. The
+            returned design may contain somewhat more rows than this, never
+            fewer. Ignored when ``base_n`` is provided.
         base_n: If given, use this exact Sobol base size (must be a power
             of 2) instead of searching for one. The expanded Saltelli
             design will have ``base_n * (2*D + 2)`` rows (second order)
             or ``base_n * (D + 2)`` rows (first/total only). This gives
             direct control over the sampling budget.
-        calc_second_order: If ``True``, include BA cross-matrices so that
-            second-order Sobol indices can be computed.  This increases
-            the expanded Saltelli step from ``D + 2`` to ``2*D + 2``.
-        scramble: Whether to apply Owen scrambling to the Sobol sequence.
+        calc_second_order: If ``True`` (default), include the extra
+            cross-matrices needed to estimate second-order (pairwise
+            interaction) Sobol indices.  Set to ``False`` if you only need
+            first/total-order indices — it nearly halves the evaluation
+            budget (Saltelli step ``D + 2`` instead of ``2*D + 2``).
+        scramble: Whether to apply Owen scrambling to the Sobol sequence
+            (recommended; randomizes the sequence so different seeds give
+            statistically independent designs).
         seed: Random seed or generator for reproducibility.
         verbose: If ``True`` (default), print a short summary describing the
             requested unique count, returned unique count, expanded Saltelli
@@ -576,8 +605,8 @@ def verify_prefix(
         atol: Absolute tolerance; ``0.0`` demands bit-exact agreement.
 
     Raises:
-        ValueError: If ``base_n_small > base_n_large`` or ``seed`` is not
-            an integer.
+        TypeError: If ``seed`` is not an integer.
+        ValueError: If ``base_n_small > base_n_large``.
         AssertionError: If the prefix property is violated.
     """
     if not isinstance(seed, int):
@@ -683,6 +712,10 @@ def _read_samples(path: Path, fmt: str) -> np.ndarray:
 
 def load(path: str | Path, *, format: str = "csv") -> SamplingResult:
     """Load a previously saved :class:`SamplingResult` from disk.
+
+    Reads the samples file plus the ``.json`` metadata (and ``.npz`` row map,
+    if present) that :meth:`SamplingResult.save` wrote next to the stem, and
+    reconstructs a result equivalent to the one originally saved.
 
     Args:
         path: File stem (no extension) matching what was passed to

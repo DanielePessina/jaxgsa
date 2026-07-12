@@ -153,8 +153,10 @@ print(ds.ST.sel(output="velocity"))
 - `(N*D,)` means scalar output.
 - `(N*D, K)` means K output variables with no time dimension.
 - `(N*D, T, K)` means T time steps and K outputs.
-- A 2D array is always treated as `(N*D, K)`, never `(N*D, T)`.
-- For a time-series with one output, reshape to `(N*D, T, 1)`.
+- Without `problem.output_names`, a 2D array is always treated as `(N*D, K)`.
+- With exactly one entry in `problem.output_names`, a 2D array is treated as
+  `(N*D, T)` — timepoints of that single output — and flows through as
+  `(N*D, T, 1)`. Passing a pre-reshaped `(N*D, T, 1)` array also works.
 
 | Y shape | S1 / ST shape |
 |---------|---------------|

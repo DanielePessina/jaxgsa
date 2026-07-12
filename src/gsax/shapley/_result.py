@@ -8,7 +8,7 @@ import numpy as np
 import xarray as xr
 from jax import Array
 
-from gsax._normalization import _default_output_names
+from gsax._normalization import _dims_and_coords
 from gsax.problem import Problem
 
 
@@ -86,25 +86,7 @@ class ShapleyResult:
             scalar/per-output ``explained_variance`` on ``param`` (plus
             ``output``/``time``) dimensions.
         """
-        param_names = list(self.problem.names)
-        ndim = self.Sh.ndim
-
-        if ndim == 1:
-            dims = ("param",)
-            coords: dict = {"param": param_names}
-        elif ndim == 2:
-            onames = _default_output_names(self.Sh.shape[0], self.problem)
-            dims = ("output", "param")
-            coords = {"param": param_names, "output": onames}
-        elif ndim == 3:
-            T = self.Sh.shape[0]
-            onames = _default_output_names(self.Sh.shape[1], self.problem)
-            tcoords = list(time_coords) if time_coords is not None else list(range(T))
-            dims = ("time", "output", "param")
-            coords = {"param": param_names, "output": onames, "time": tcoords}
-        else:
-            msg = f"Unexpected Sh.ndim={ndim}"
-            raise ValueError(msg)
+        dims, coords = _dims_and_coords(self.Sh.ndim, self.Sh.shape, self.problem, time_coords)
 
         data_vars: dict = {
             "Sh": (dims, np.asarray(self.Sh)),

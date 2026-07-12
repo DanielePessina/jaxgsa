@@ -1,8 +1,11 @@
 """HSIC (Hilbert-Schmidt Independence Criterion) sensitivity analysis.
 
-Computes kernel-based sensitivity indices from arbitrary (X, Y) sample
-pairs. R2-HSIC measures first-order dependence; Total HSIC captures
-dependence through interactions.
+HSIC measures statistical dependence between each input and the output
+via kernel embeddings, so it detects nonlinear and non-monotonic
+relationships that correlation-based screening misses. It is a
+given-data method: any existing (X, Y) sample works, with no special
+sampling design. R2-HSIC is the normalized first-order index; Total
+HSIC additionally captures dependence carried through interactions.
 
 Example::
 

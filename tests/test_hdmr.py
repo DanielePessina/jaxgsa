@@ -532,6 +532,23 @@ def test_time_series_multi_output_emulator_preserves_axes(ishigami_data):
     assert not np.allclose(np.array(Y_pred[:, 0, 0]), np.array(Y_pred[:, 1, 0]))
 
 
+def test_emulate_mirrors_single_label_2d_training(ishigami_data):
+    """Training on (N, T) single-label Y yields (N_new, T) predictions."""
+    from gsax.problem import Problem
+
+    X, Y = ishigami_data
+    problem = Problem(names=PROBLEM.names, bounds=PROBLEM.bounds, output_names=("pressure",))
+    Y_2d = jnp.stack([Y, 2.0 * Y], axis=-1)  # (N, T=2) single label
+    result = analyze_hdmr(problem, X, Y_2d, maxorder=2, m=2)
+    pred = emulate_hdmr(result, X[:30])
+    assert pred.shape == (30, 2)
+    # Equivalent to explicit (N, T, 1) training, squeezing the K axis.
+    explicit = analyze_hdmr(problem, X, Y_2d[:, :, None], maxorder=2, m=2)
+    np.testing.assert_allclose(
+        np.asarray(pred), np.asarray(emulate_hdmr(explicit, X[:30])[..., 0]), rtol=1e-5
+    )
+
+
 def test_multi_output_emulator_preserves_non_proportional_outputs(ishigami_data):
     """Distinct outputs should keep distinct sensitivities and predictions."""
     X, Y = ishigami_data

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import xarray as xr
 from jax import Array
 
+from gsax._normalization import _dims_and_coords
 from gsax.problem import Problem
 
 
@@ -15,20 +16,35 @@ from gsax.problem import Problem
 class PCEResult:
     """Polynomial chaos expansion sensitivity analysis results.
 
-    Stores first-order (S1) and total-order (ST) Sobol indices computed
-    analytically from the expansion coefficients, plus the fitted
-    coefficients and multi-index for emulation.
+    Stores Sobol indices computed analytically from the expansion
+    coefficients, plus the fitted coefficients and multi-index so the
+    surrogate can be reused for prediction via ``pce.emulate``.
+
+    Index arrays mirror the layout of the ``Y`` passed to ``analyze_pce``:
+    leading dims are ``()`` for scalar ``(N,)`` outputs, ``(K,)`` for
+    multi-output ``(N, K)``, and ``(T, K)`` for time-series ``(N, T, K)``.
 
     Attributes:
-        S1: First-order Sobol indices, shape ``(D,)``.
-        ST: Total-order Sobol indices, shape ``(D,)``.
-        S2: Second-order interaction indices, shape ``(D, D)`` with NaN
+        S1: First-order Sobol indices, shape ``(..., D)``. Fraction of output
+            variance explained by each parameter acting alone.
+        ST: Total-order Sobol indices, shape ``(..., D)``. Fraction of output
+            variance involving each parameter, interactions included;
+            ``ST - S1`` measures how strongly a parameter interacts.
+        S2: Second-order interaction indices, shape ``(..., D, D)`` with NaN
             on the diagonal. Upper and lower triangles are symmetric.
         problem: Problem definition.
-        coefficients: Fitted PCE coefficients, shape ``(n_terms,)``.
-        multi_index: Multi-index array, shape ``(n_terms, D)``.
-        order: Total polynomial degree used.
-        loo_rmse: Leave-one-out cross-validation RMSE, or None.
+        coefficients: Fitted PCE coefficients, shape ``(..., n_terms)`` with
+            the term axis last. ``coefficients[..., 0]`` is the constant
+            (mean) term of each output slice; all slices share one basis.
+        multi_index: Per-term polynomial degrees, shape ``(n_terms, D)``;
+            row ``t`` gives the degree of each input in term ``t``.
+        order: Effective total polynomial degree used (may be lower than
+            requested if the sample budget forced a reduction). A single
+            int — the shared basis serves every output slice.
+        loo_rmse: Leave-one-out cross-validation RMSE per output slice
+            (shape ``(...)``: scalar / ``(K,)`` / ``(T, K)``), or None. In
+            the units of ``Y``; compare against ``Y.std()`` -- a ratio near
+            or above 1 means the surrogate (and its indices) is unreliable.
     """
 
     S1: Array
@@ -39,32 +55,43 @@ class PCEResult:
     multi_index: np.ndarray
     order: int
     loo_rmse: Array | None = None
+    # True when layout inference inserted the singleton output axis (a 2-D
+    # (N, T) Y under a single named output). emulate_pce squeezes it back so
+    # predictions mirror the training Y's rank.
+    _inserted_output_axis: bool = field(default=False, repr=False)
 
     def __repr__(self) -> str:
-        n_terms = self.coefficients.shape[0]
+        n_terms = self.coefficients.shape[-1]
         return f"PCEResult(D={len(self.problem.names)}, order={self.order}, n_terms={n_terms})"
 
-    def to_dataset(self) -> xr.Dataset:
-        """Convert results to a labeled xarray Dataset."""
-        param_names = list(self.problem.names)
-        # S1 and ST are 1-D vectors indexed by parameter name.
-        coords: dict = {"param": param_names}
+    def to_dataset(self, time_coords: np.ndarray | list | None = None) -> xr.Dataset:
+        """Convert results to a labeled xarray Dataset.
+
+        Args:
+            time_coords: Optional coordinate values for the ``time``
+                dimension of time-series results; defaults to ``0..T-1``.
+        """
+        s1 = np.asarray(self.S1)
+        dims, coords = _dims_and_coords(s1.ndim, s1.shape, self.problem, time_coords)
         data_vars: dict = {
-            "S1": (("param",), np.asarray(self.S1)),
-            "ST": (("param",), np.asarray(self.ST)),
+            "S1": (dims, s1),
+            "ST": (dims, np.asarray(self.ST)),
         }
 
-        # S2 is a symmetric (D x D) matrix; separate coord names (param_i, param_j)
-        # avoid xarray dimension-name conflicts with the 1-D "param" coord.
+        # S2 is a symmetric (..., D, D) matrix; separate coord names
+        # (param_i, param_j) avoid xarray dimension-name conflicts with the
+        # 1-D "param" coord used by S1/ST.
+        param_names = list(self.problem.names)
         data_vars["S2"] = (
-            ("param_i", "param_j"),
+            (*dims[:-1], "param_i", "param_j"),
             np.asarray(self.S2),
         )
         coords["param_i"] = param_names
         coords["param_j"] = param_names
 
-        # LOO RMSE is a scalar diagnostic (no dimensions).
+        # LOO RMSE is a per-slice diagnostic: no dims for scalar output,
+        # (output,) / (time, output) otherwise.
         if self.loo_rmse is not None:
-            data_vars["loo_rmse"] = ((), np.asarray(self.loo_rmse))
+            data_vars["loo_rmse"] = (dims[:-1], np.asarray(self.loo_rmse))
 
         return xr.Dataset(data_vars, coords=coords)

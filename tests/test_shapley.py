@@ -114,7 +114,7 @@ def test_linear_vs_analytical(linear_data, backend, kwargs):
 def test_hdmr_sobol_g_vs_analytical():
     X = jnp.asarray(gsax.sample_mc(sobol_g.PROBLEM, 8192, seed=456))
     Y = sobol_g.evaluate(X)
-    result = gsax.analyze_shapley(sobol_g.PROBLEM, X, Y)
+    result = gsax.analyze_shapley(sobol_g.PROBLEM, X, Y, backend="hdmr")
     np.testing.assert_allclose(np.asarray(result.Sh), sobol_g.ANALYTICAL_SHAPLEY, atol=0.1)
 
 
@@ -149,11 +149,25 @@ def test_unknown_backend_raises(linear_data):
         gsax.analyze_shapley(linear.PROBLEM, X, Y, backend="sobol")  # ty: ignore[invalid-argument-type]
 
 
-def test_pce_multi_output_raises(linear_data):
+def test_pce_multi_output_matches_scalar(linear_data):
+    """Each column of a multi-output pce run equals the standalone scalar run."""
     X, Y = linear_data
-    Y2 = jnp.stack([Y, 2.0 * Y], axis=1)
-    with pytest.raises(ValueError, match="scalar output only"):
-        gsax.analyze_shapley(linear.PROBLEM, X, Y2, backend="pce")
+    Y2 = jnp.stack([Y, 2.0 * Y + 1.0], axis=1)
+    multi = gsax.analyze_shapley(linear.PROBLEM, X, Y2, backend="pce", order=2)
+    scalar = gsax.analyze_shapley(linear.PROBLEM, X, Y, backend="pce", order=2)
+    assert multi.Sh.shape == (2, 3)
+    assert multi.explained_variance.shape == (2,)
+    for k in range(2):
+        np.testing.assert_allclose(multi.Sh[k], scalar.Sh, rtol=1e-5)
+        np.testing.assert_allclose(multi.S1[k], scalar.S1, rtol=1e-5)
+        np.testing.assert_allclose(multi.ST[k], scalar.ST, rtol=1e-5)
+    np.testing.assert_allclose(multi.Sh.sum(axis=-1), 1.0, rtol=1e-6)
+
+
+def test_default_backend_is_pce(linear_data):
+    X, Y = linear_data
+    result = gsax.analyze_shapley(linear.PROBLEM, X, Y, order=2)
+    assert result.backend == "pce"
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +179,7 @@ def test_multi_output_shapes(linear_data):
     X, Y = linear_data
     # Affine copies: indices are scale/shift invariant, so rows must match.
     Y2 = jnp.stack([Y, 2.0 * Y + 1.0], axis=1)
-    result = gsax.analyze_shapley(linear.PROBLEM, X, Y2)
+    result = gsax.analyze_shapley(linear.PROBLEM, X, Y2, backend="hdmr")
     assert result.Sh.shape == (2, 3)
     np.testing.assert_allclose(np.asarray(result.Sh[0]), np.asarray(result.Sh[1]), atol=1e-4)
 
@@ -173,7 +187,7 @@ def test_multi_output_shapes(linear_data):
 def test_time_series_shapes(linear_data):
     X, Y = linear_data
     Y3 = jnp.stack([jnp.stack([Y, 2.0 * Y], axis=1)] * 2, axis=1)  # (N, T=2, K=2)
-    result = gsax.analyze_shapley(linear.PROBLEM, X, Y3)
+    result = gsax.analyze_shapley(linear.PROBLEM, X, Y3, backend="hdmr")
     assert result.Sh.shape == (2, 2, 3)
     assert result.S1.shape == (2, 2, 3)
     assert result.ST.shape == (2, 2, 3)
@@ -196,7 +210,7 @@ def test_to_dataset_scalar(ishigami_pce_shapley):
 def test_to_dataset_time_series(linear_data):
     X, Y = linear_data
     Y3 = jnp.stack([jnp.stack([Y, 2.0 * Y], axis=1)] * 2, axis=1)
-    result = gsax.analyze_shapley(linear.PROBLEM, X, Y3)
+    result = gsax.analyze_shapley(linear.PROBLEM, X, Y3, backend="hdmr")
     ds = result.to_dataset(time_coords=[0.5, 1.5])
     assert ds["Sh"].dims == ("time", "output", "param")
     assert list(ds.coords["time"].values) == [0.5, 1.5]
@@ -275,6 +289,30 @@ def test_multi_output_explained_variance_per_slice(ishigami_data):
     """explained_variance is reported per output slice and Sh sums to 1 per slice."""
     X, Y = ishigami_data
     Y2 = jnp.stack([Y, 3.0 * Y], axis=1)
-    result = gsax.analyze_shapley(ishigami.PROBLEM, X, Y2)
+    result = gsax.analyze_shapley(ishigami.PROBLEM, X, Y2, backend="hdmr")
     assert result.explained_variance.shape == (2,)
     np.testing.assert_allclose(np.asarray(result.Sh).sum(axis=-1), 1.0, atol=1e-5)
+
+
+def test_pce_time_series_shapes_and_slices(linear_data):
+    """backend='pce' handles (N, T, K); each slice matches the scalar run."""
+    X, Y = linear_data
+    Y2 = jnp.stack([Y, 2.0 * Y + 1.0], axis=-1)  # (N, K=2)
+    Y3 = jnp.stack([Y2, 0.5 * Y2], axis=1)  # (N, T=2, K=2)
+    result = gsax.analyze_shapley(linear.PROBLEM, X, Y3, backend="pce", order=2)
+    scalar = gsax.analyze_shapley(linear.PROBLEM, X, Y, backend="pce", order=2)
+    assert result.Sh.shape == result.S1.shape == result.ST.shape == (2, 2, 3)
+    assert result.explained_variance.shape == (2, 2)
+    np.testing.assert_allclose(result.Sh.sum(axis=-1), 1.0, rtol=1e-6)
+    for t in range(2):
+        for k in range(2):
+            np.testing.assert_allclose(result.Sh[t, k], scalar.Sh, rtol=1e-5, atol=1e-6)
+
+
+def test_pce_time_series_to_dataset(linear_data):
+    X, Y = linear_data
+    Y3 = jnp.stack([jnp.stack([Y, 2.0 * Y], axis=-1)] * 2, axis=1)
+    result = gsax.analyze_shapley(linear.PROBLEM, X, Y3, backend="pce", order=2)
+    ds = result.to_dataset(time_coords=[0.1, 0.2])
+    assert ds["Sh"].dims == ("time", "output", "param")
+    np.testing.assert_allclose(ds.coords["time"].values, [0.1, 0.2])

@@ -6,35 +6,44 @@ import numpy as np
 import xarray as xr
 from jax import Array
 
-from gsax._normalization import _default_output_names
+from gsax._normalization import _dims_and_coords
 from gsax.problem import Problem
 
 
 @dataclass
 class SAResult:
-    """Sobol sensitivity analysis results.
+    """Sobol sensitivity analysis results, returned by :func:`gsax.analyze`.
 
     Stores first-order (S1), total-order (ST), and optionally second-order (S2)
-    Sobol indices, with optional bootstrap confidence intervals.
+    Sobol indices, with optional bootstrap confidence intervals. Use
+    :meth:`to_dataset` to get a labeled xarray view keyed by parameter (and
+    output/time) names.
 
-    Shapes follow the convention ``(T, K, D)`` for time-resolved analyses or
-    ``(K, D)`` when the time dimension is squeezed, where *K* is the number of
-    outputs and *D* the number of parameters.
+    Index shapes mirror the shape of the analyzed output Y: ``(D,)`` for a
+    scalar output, ``(K, D)`` for multi-output, or ``(T, K, D)`` for
+    time-resolved analyses, where *D* is the number of parameters, *K* the
+    number of outputs, and *T* the number of time steps.
 
     ``S2`` is stored as a symmetric ``(..., D, D)`` matrix. Only the upper
     triangle is estimated directly; the lower triangle mirrors it for
-    convenience, and the diagonal is undefined and therefore set to ``NaN``.
+    convenience, and the diagonal (a parameter's interaction with itself) is
+    undefined and therefore set to ``NaN``.
 
     Confidence interval arrays (``*_conf``) have an extra leading dimension of
     size 2 representing ``[lower, upper]`` bounds. ``S2_conf`` follows the same
     symmetric-with-``NaN``-diagonal contract as ``S2``.
+
+    ``nan_counts`` reports how many entries of each index array are NaN
+    (typically caused by zero-variance output slices), keyed by index name.
+    For ``S2`` only the directly estimated upper triangle is counted, so the
+    always-NaN diagonal does not inflate the count.
     """
 
-    S1: Array  # (T, K, D) or (K, D) if time squeezed
-    ST: Array
+    S1: Array  # (D,), (K, D), or (T, K, D) — matches the analyzed Y shape
+    ST: Array  # same shape as S1
     S2: Array | None  # (..., D, D), symmetric, diagonal NaN, None if not computed
     problem: Problem
-    S1_conf: Array | None = None  # (2, T, K, D) or squeezed; [lower, upper]
+    S1_conf: Array | None = None  # (2, *S1.shape); [lower, upper]
     ST_conf: Array | None = None
     S2_conf: Array | None = None
     nan_counts: dict[str, int] | None = None
@@ -68,25 +77,8 @@ class SAResult:
             An ``xr.Dataset`` with variables ``S1``, ``ST``, and optionally
             ``S2``, ``S1_lower/upper``, ``ST_lower/upper``, ``S2_lower/upper``.
         """
+        dims_s1, coords = _dims_and_coords(self.S1.ndim, self.S1.shape, self.problem, time_coords)
         param_names = list(self.problem.names)
-        ndim = self.S1.ndim
-
-        if ndim == 1:
-            dims_s1 = ("param",)
-            coords: dict = {"param": param_names}
-        elif ndim == 2:
-            onames = _default_output_names(self.S1.shape[0], self.problem)
-            dims_s1 = ("output", "param")
-            coords = {"param": param_names, "output": onames}
-        elif ndim == 3:
-            T = self.S1.shape[0]
-            onames = _default_output_names(self.S1.shape[1], self.problem)
-            tcoords = list(time_coords) if time_coords is not None else list(range(T))
-            dims_s1 = ("time", "output", "param")
-            coords = {"param": param_names, "output": onames, "time": tcoords}
-        else:
-            msg = f"Unexpected S1.ndim={ndim}"
-            raise ValueError(msg)
 
         data_vars: dict = {
             "S1": (dims_s1, np.asarray(self.S1)),

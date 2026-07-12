@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 ### Added
 
@@ -25,9 +25,9 @@
   Shapley-value allocation of output variance across inputs (Owen 2014;
   Song, Nelson & Staum 2016), computed analytically from a fitted surrogate's
   variance decomposition instead of permutation Monte Carlo. Two backends:
-  `"hdmr"` (default; RS-HDMR component-function variances, supports scalar,
-  multi-output, and time-series outputs) and `"pce"` (subset variances read
-  off orthonormal polynomial coefficients, scalar outputs). Indices are
+  `"pce"` (default; subset variances read off orthonormal polynomial
+  coefficients) and `"hdmr"` (RS-HDMR component-function variances); both
+  accept scalar, multi-output, and time-series outputs. Indices are
   normalized by the surrogate's total decomposed variance, so `Sh` sums to
   exactly 1 (the Shapley efficiency property); the `explained_variance` field
   reports the fraction of `Var(Y)` the surrogate captured, and the `order`
@@ -49,6 +49,34 @@
 - `gsax.benchmarks.gaussian_linear` — a Gaussian linear additive benchmark whose
   Gaussian marginals give the Borgonovo delta index a semi-analytic solution
   (`ANALYTICAL_DELTA`), for ground-truth validation of the delta estimator.
+- **Uniform output support across all ten methods** — every analyze entry point
+  now accepts `(N,)`, `(N, K)`, and `(N, T, K)` outputs. `analyze_pce`,
+  `analyze_shapley` (`"pce"` backend), and `dgsm.analyze` gained
+  multi-output/time-series support: PCE fits all output slices against one
+  shared basis in a single multi-right-hand-side solve, and DGSM accepts
+  `(T, K)`-valued functions and precomputed Jacobians. A precomputed `dfdx`
+  must mirror `Y`'s layout with one extra trailing `(D,)` axis, and singleton
+  promotions are tolerated (`(N,)` pairs with `(N, 1, D)`, `(N, 1)` with
+  `(N, D)`); whatever axis moves layout inference applies to a transposed or
+  single-labeled `Y` are replayed on `dfdx`.
+- **Smart output-layout inference** at every public entry point. `Y` is
+  resolved from two signals — the expected sample count identifies the sample
+  axis, and `len(problem.output_names)` (when set) identifies the output
+  axis — through a strict ladder: exact canonical shapes pass silently;
+  unambiguously recoverable layouts (e.g. a transposed `(K, N)` array, or a
+  3-D `(N, K, T)` array whose middle axis matches the labels) are fixed with
+  a `UserWarning` naming the transformation; ambiguous layouts raise. The
+  warnings point at the user's call site (a corrected `stacklevel` across all
+  ten methods). Label rule: a 2-D `Y` of shape `(N, M)` with exactly **one**
+  entry in `problem.output_names` and `M > 1` is read as `M` timepoints of that
+  single output and flows as `(N, M, 1)`; a lone column `(N, 1)` stays canonical
+  as `(N, K=1)` (a scalar output, not a 1-timepoint series — pass `(N, 1, 1)`
+  for that). Without `output_names`, 2-D `Y` still always means `(N, K)`. A 1-D
+  `(N,)` `Y` is accepted as one output regardless of how many names the problem
+  lists.
+- `time_coords` parameter on `PCEResult.to_dataset()` and
+  `DGSMResult.to_dataset()` for labeled time axes on 3-D results
+  (dims `(time, output, param)`).
 
 ### Changed
 
@@ -58,6 +86,37 @@
 - `analyze_pce` now emits a `UserWarning` when the requested polynomial
   `order` is automatically reduced to fit the sample budget, and warns on a
   constant (zero-variance) output.
+- Input-validation errors are now uniform across methods: RS-HDMR, PCE, and
+  DGSM share the same `X`/`Y` contract checks (and error messages) as the
+  given-data methods, and RS-HDMR now also rejects `X`/`Y` row-count
+  mismatches up front.
+- `PCEResult` field layouts now mirror the output layout: `S1`/`ST` are
+  `(..., D)`, `S2` is `(..., D, D)` with a `NaN` diagonal, `coefficients` is
+  `(..., n_terms)` with the term axis last, and `loo_rmse` is per output slice
+  (`()`, `(K,)`, or `(T, K)`). `order` remains a single int — all slices share
+  one basis.
+- `emulate_pce` and `emulate_hdmr` mirror the original training-`Y` rank: a 2-D
+  `(N, T)` single-labeled training `Y` (fit internally as `(N, T, 1)`) now
+  predicts `(N_new, T)` rather than `(N_new, T, 1)`, so `pred - Y_train`
+  broadcasts as expected.
+- PCE Sobol-index extraction is vectorized end to end: `S1`/`ST`/`S2` are
+  masked matmuls over the term axis (`S2` uses an upper-triangle pair mask),
+  replacing the previous Python pair loop.
+
+### Internal
+
+- Bootstrap confidence-interval helpers moved to a shared `gsax._bootstrap`
+  module (previously private to `gsax.sobol` and cross-imported by Morris);
+  PAWN and Borgonovo now reuse the same percentile-CI implementation.
+- All ten result classes now build their `to_dataset()` dims/coords through the
+  shared `_dims_and_coords` helper (including `HDMRResult`, whose per-term
+  arrays swap the trailing `param` dim for `term`), instead of hand-rolling the
+  `param`/`output`/`time` schema; the singleton-axis squeeze after analysis is
+  likewise a single shared `_squeeze_output_axes` helper.
+- `analyze_shapley` now fits through the shared PCE/HDMR cores directly: the
+  default `"pce"` backend reuses `analyze_pce`'s fit without recomputing the
+  `S2` einsum and LOO diagnostic it discards, and both backends validate `Y`
+  and warn about zero-variance slices exactly once.
 
 ## 0.1.2
 

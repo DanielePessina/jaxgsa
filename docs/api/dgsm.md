@@ -1,5 +1,8 @@
 # DGSM
 
+Derivative-based global sensitivity measures with Poincaré bounds on total
+Sobol indices. Requires a JAX-differentiable model or precomputed Jacobians.
+
 The canonical API reference now lives at [API Reference](/api/).
 
 Jump directly to:
