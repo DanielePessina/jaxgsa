@@ -597,16 +597,18 @@ def test_s1_accuracy(hdmr_result):
 
 
 def test_constant_y():
-    """Constant Y should not produce NaN indices."""
+    """Constant Y yields NaN indices and a warning (package-wide convention)."""
     N = 500
     D = PROBLEM.num_vars
     key = jax.random.PRNGKey(99)
     bounds = jnp.array(PROBLEM.bounds)
     X = jax.random.uniform(key, shape=(N, D), minval=bounds[:, 0], maxval=bounds[:, 1])
-    Y = jnp.ones(N) * 42.0  # constant output
-    result = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2)
-    assert not jnp.any(jnp.isnan(result.Sa))
-    assert not jnp.any(jnp.isnan(result.ST))
+    Y = jnp.full(N, 5.0)  # constant output (exactly zero variance)
+    with pytest.warns(UserWarning, match="zero variance"):
+        result = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2)
+    # Matches Sobol/PCE: 0/0 indices are NaN, not silent zeros.
+    assert jnp.all(jnp.isnan(result.Sa))
+    assert jnp.all(jnp.isnan(result.ST))
 
 
 def test_scalar_like_lambdax(ishigami_data):

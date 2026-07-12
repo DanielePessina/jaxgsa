@@ -14,6 +14,8 @@ References:
     Reliability Engineering & System Safety, 50(3):225-239.
 """
 
+from itertools import combinations
+
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
@@ -99,4 +101,43 @@ def analytical_indices(
     return S1, ST, S2
 
 
+def analytical_shapley(a: tuple[float, ...] = DEFAULT_A) -> np.ndarray:
+    """Compute analytical Shapley effects for the Sobol G-function.
+
+    For independent inputs (Owen, 2014) the Shapley effect of input j is
+
+    .. math::
+        \\mathrm{Sh}_j = \\frac{1}{V(Y)} \\sum_{u \\ni j} \\frac{V_u}{|u|}
+
+    summing over all non-empty subsets ``u`` containing j. The G-function's
+    multiplicative structure gives every partial variance in product form,
+    ``V_u = \\prod_{k \\in u} V_k``, so the sum is evaluated by exact
+    enumeration over all ``2^D - 1`` non-empty subsets.
+
+    Args:
+        a: Importance parameters.
+
+    Returns:
+        ``(D,)`` array of Shapley effects, summing to 1 exactly.
+    """
+    a_arr = np.asarray(a, dtype=float)
+    D = len(a_arr)
+
+    # Same per-factor variances and total variance as in analytical_indices.
+    Vi = 1.0 / (3.0 * (1.0 + a_arr) ** 2)
+    VY = np.prod(1.0 + Vi) - 1.0
+
+    # Each subset's partial variance V_u = prod_{k in u} V_k is split
+    # equally among its |u| members (the Shapley symmetric allocation).
+    Sh = np.zeros(D)
+    for size in range(1, D + 1):
+        for u in combinations(range(D), size):
+            share = np.prod(Vi[list(u)]) / size
+            for j in u:
+                Sh[j] += share
+
+    return Sh / VY
+
+
 ANALYTICAL_S1, ANALYTICAL_ST, ANALYTICAL_S2 = analytical_indices()
+ANALYTICAL_SHAPLEY = analytical_shapley()

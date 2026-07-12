@@ -116,4 +116,32 @@ def analytical_indices(
     return _additive_sobol_indices(c, var_x)
 
 
+def analytical_shapley(
+    coeffs: tuple[float, ...] = DEFAULT_COEFFS,
+    bounds: tuple[tuple[float, float], ...] = DEFAULT_BOUNDS,
+) -> np.ndarray:
+    """Compute analytical Shapley effects for the linear additive model.
+
+    For independent inputs (Owen, 2014) the Shapley effect of input j is
+    the average of its partial-variance shares over all subsets containing
+    it. A purely additive model has no interaction terms, so every share
+    beyond the main effect vanishes and the Shapley effects coincide
+    exactly with the first-order indices:
+
+    .. math::
+        \\mathrm{Sh}_j = S_{1,j} = c_j^2 \\operatorname{Var}(x_j) / V(Y)
+
+    Args:
+        coeffs: Coefficient per dimension.
+        bounds: ``(low, high)`` bounds for each uniform input.
+
+    Returns:
+        ``(D,)`` array of Shapley effects (identical to S1), summing to 1.
+    """
+    # No interactions => Shapley == first-order; reuse the S1 derivation.
+    S1, _, _ = analytical_indices(coeffs, bounds)
+    return S1
+
+
 ANALYTICAL_S1, ANALYTICAL_ST, ANALYTICAL_S2 = analytical_indices()
+ANALYTICAL_SHAPLEY = analytical_shapley()

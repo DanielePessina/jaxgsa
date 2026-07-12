@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org)
 
-`gsax` computes global sensitivity indices entirely in JAX, giving you GPU/TPU acceleration and JIT compilation for free. It provides eight complementary methods: **Sobol indices** (via Saltelli sampling), **RS-HDMR** (surrogate-based, works with any input-output pairs), **PCE** (Polynomial Chaos Expansion with analytical Sobol indices), **eFAST** (Extended Fourier Amplitude Sensitivity Test), **DGSM** (Derivative-based Global Sensitivity Measures via JAX autodiff), **HSIC** (the Hilbert–Schmidt Independence Criterion, a kernel-based dependence measure), **PAWN** (a moment-independent method based on output CDFs, after Pianosi & Wagener, 2015), and the **Borgonovo delta** (a moment-independent, density-based importance measure, after Borgonovo, 2007).
+`gsax` computes global sensitivity indices entirely in JAX, giving you GPU/TPU acceleration and JIT compilation for free. It provides nine complementary methods: **Sobol indices** (via Saltelli sampling), **RS-HDMR** (surrogate-based, works with any input-output pairs), **PCE** (Polynomial Chaos Expansion with analytical Sobol indices), **Shapley effects** (fair, game-theoretic allocation of output variance, computed analytically from an HDMR or PCE surrogate), **eFAST** (Extended Fourier Amplitude Sensitivity Test), **DGSM** (Derivative-based Global Sensitivity Measures via JAX autodiff), **HSIC** (the Hilbert–Schmidt Independence Criterion, a kernel-based dependence measure), **PAWN** (a moment-independent method based on output CDFs, after Pianosi & Wagener, 2015), and the **Borgonovo delta** (a moment-independent, density-based importance measure, after Borgonovo, 2007).
 
 ## Features
 
@@ -26,6 +26,11 @@
   - Wiener-Askey scheme: Legendre for uniform, Hermite for Gaussian inputs
   - Built-in emulator and leave-one-out cross-validation RMSE
   - Scalar outputs only
+- **Shapley effects** (Owen, 2014; Song, Nelson & Staum, 2016)
+  - Fair, game-theoretic allocation of output variance — each interaction's variance split equally among its participants
+  - Computed **analytically** from a fitted RS-HDMR (default) or PCE surrogate: no permutation Monte Carlo, no extra model runs
+  - Works with **any** set of (X, Y) pairs; returns Sh alongside S1 and ST from the same surrogate (S1 <= Sh <= ST)
+  - Assumes independent inputs (v1); Sh sums to 1, and `explained_variance` reports the fraction of Var(Y) the surrogate captured
 - **eFAST** (Extended Fourier Amplitude Sensitivity Test)
   - Frequency-based S1 and ST via sinusoidal search curves and Fourier decomposition
   - Supports scalar, multi-output, and time-series outputs
@@ -187,6 +192,32 @@ print("ST:", result.ST)              # (D,) total-order
 print("LOO RMSE:", result.loo_rmse)  # leave-one-out cross-validation error
 
 Y_pred = gsax.emulate_pce(result, X)  # use the fit as an emulator
+```
+
+### Shapley effects (fair variance allocation)
+
+Shapley effects split the output variance fairly among the inputs — each
+interaction's variance is shared equally by its participants — computed
+analytically from a fitted RS-HDMR (default) or PCE surrogate, with no
+permutation Monte Carlo. Inputs are assumed independent in this version.
+
+```python
+import jax.numpy as jnp
+import gsax
+from gsax.benchmarks.ishigami import PROBLEM, evaluate
+
+X = gsax.sample_mc(PROBLEM, N=2000, seed=42)
+Y = evaluate(jnp.asarray(X))
+
+result = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y)  # backend="hdmr" default
+print("Sh:", result.Sh)              # (D,) Shapley effects
+print("sum:", result.Sh.sum())       # == 1 (Shapley efficiency property)
+print("explained:", result.explained_variance)  # fraction of Var(Y) captured
+print("S1:", result.S1)              # (D,) first-order, same surrogate
+print("ST:", result.ST)              # (D,) total-order — S1 <= Sh <= ST per parameter
+
+# PCE backend (scalar Y only) with PCE-only knobs
+result_pce = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y, backend="pce", order=4)
 ```
 
 ### HSIC (kernel-based dependence)
@@ -412,7 +443,7 @@ Use it for:
 - parameter, field, and shape contracts
 - validation and error behavior
 - `to_dataset()` labeling rules
-- Sobol, RS-HDMR, PCE, eFAST, DGSM, HSIC, PAWN, and Borgonovo delta workflow examples
+- Sobol, RS-HDMR, PCE, Shapley, eFAST, DGSM, HSIC, PAWN, and Borgonovo delta workflow examples
 
 Quick map:
 
@@ -421,6 +452,7 @@ Quick map:
 - `gsax.sobol`: `analyze` / `SAResult`
 - `gsax.hdmr`: `analyze` / `emulate` / `HDMRResult` / `HDMREmulator`
 - `gsax.pce`: `analyze` / `emulate` / `PCEResult`
+- `gsax.shapley`: `analyze` / `ShapleyResult`
 - `gsax.efast`: `sample` / `analyze` / `EFASTResult`
 - `gsax.dgsm`: `analyze` / `DGSMResult` / `poincare_constant` / `axis_constants`
 - `gsax.hsic`: `analyze` / `HSICResult`
@@ -429,8 +461,9 @@ Quick map:
 
 All symbols are also re-exported from the top-level `gsax` namespace
 (`gsax.analyze()`, `gsax.analyze_hdmr()`, `gsax.analyze_pce()`,
-`gsax.sample_efast()`, `gsax.analyze_efast()`, `gsax.analyze_dgsm()`,
-`gsax.analyze_hsic()`, `gsax.analyze_pawn()`, `gsax.analyze_borgonovo()`, etc.).
+`gsax.analyze_shapley()`, `gsax.sample_efast()`, `gsax.analyze_efast()`,
+`gsax.analyze_dgsm()`, `gsax.analyze_hsic()`, `gsax.analyze_pawn()`,
+`gsax.analyze_borgonovo()`, etc.).
 
 For runnable walkthroughs, start with the
 [Getting Started guide](https://danielepessina.github.io/gsax/guide/getting-started)

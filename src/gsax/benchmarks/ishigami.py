@@ -86,10 +86,50 @@ def analytical_indices(
     return S1, ST, S2
 
 
+def analytical_shapley(A: float = 7.0, B: float = 0.1) -> np.ndarray:
+    """Compute analytical Shapley effects for the Ishigami function.
+
+    For independent inputs (Owen, 2014) the Shapley effect of input j is
+
+    - ``Sh_j = (1/V) * sum over subsets u containing j of V_u / |u|``
+
+    so each interaction variance is split equally among its participants.
+    The Ishigami decomposition has a single interaction term, the x1-x3
+    pair, whose variance ``V13`` is shared half-and-half:
+
+    - ``Sh1 = (V1 + V13/2) / V``
+    - ``Sh2 = V2 / V``
+    - ``Sh3 = (V13/2) / V``
+
+    Because the only interaction is one 2-way term, ``Sh = (S1 + ST) / 2``
+    holds elementwise, and the effects sum to 1 exactly.
+
+    Args:
+        A: Model parameter controlling the second-order term.
+        B: Model parameter controlling the higher-order interaction term.
+
+    Returns:
+        ``(3,)`` array of Shapley effects for x1, x2, x3.
+    """
+    pi4 = np.pi**4
+    pi8 = np.pi**8
+
+    # Same partial variances as in analytical_indices.
+    V1 = 0.5 * (1.0 + B * pi4 / 5.0) ** 2
+    V2 = A**2 / 8.0
+    V13 = 8.0 * B**2 * pi8 / 225.0
+    VY = 0.5 + B * pi4 / 5.0 + B**2 * pi8 / 18.0 + A**2 / 8.0
+
+    # The {1,3} interaction variance is split equally between x1 and x3.
+    return np.array([V1 + V13 / 2.0, V2, V13 / 2.0]) / VY
+
+
 # Precomputed analytical solutions for A=7, B=0.1.
 # x3 has zero first-order effect (enters only through the B*x3^4*sin(x1) interaction),
 # making it a good test for methods that must distinguish S1=0 from ST>0.
 ANALYTICAL_S1, ANALYTICAL_ST, ANALYTICAL_S2 = analytical_indices()
+# Shapley effects credit x3 with half the x1-x3 interaction, so 0 < Sh3 < ST3.
+ANALYTICAL_SHAPLEY = analytical_shapley()
 
 
 def evaluate(X: Array, A: float = 7.0, B: float = 0.1) -> Array:

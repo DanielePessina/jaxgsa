@@ -1,6 +1,6 @@
 # Methods
 
-gsax implements eight complementary approaches to global sensitivity analysis (GSA). The variance-based methods (Sobol', HDMR, PCE, eFAST) decompose the variance of a model's output into contributions attributable to individual input parameters and their interactions; the derivative-based method (DGSM) uses autodiff to bound total Sobol indices directly from partial derivatives; and the dependence-based methods (HSIC, PAWN, Borgonovo delta) quantify sensitivity without decomposing variance — HSIC through kernel-based dependence measures, PAWN through shifts in the output's cumulative distribution, and Borgonovo delta through shifts in the output's probability density. Together, these enable practitioners to identify which parameters drive model behaviour and which are effectively unidentifiable from available measurements.
+gsax implements nine complementary approaches to global sensitivity analysis (GSA). The variance-based methods (Sobol', HDMR, PCE, eFAST) decompose the variance of a model's output into contributions attributable to individual input parameters and their interactions; Shapley effects reallocate that variance decomposition into a single fair share per parameter using the Shapley value from game theory; the derivative-based method (DGSM) uses autodiff to bound total Sobol indices directly from partial derivatives; and the dependence-based methods (HSIC, PAWN, Borgonovo delta) quantify sensitivity without decomposing variance — HSIC through kernel-based dependence measures, PAWN through shifts in the output's cumulative distribution, and Borgonovo delta through shifts in the output's probability density. Together, these enable practitioners to identify which parameters drive model behaviour and which are effectively unidentifiable from available measurements.
 
 ## Background: Variance-Based Sensitivity Analysis
 
@@ -173,6 +173,84 @@ PCE takes a spectral approach: it fits an orthogonal polynomial surrogate to `(X
 - Your model is smooth enough to be well-approximated by low-order polynomials
 - You have mixed uniform and Gaussian inputs (the Wiener-Askey scheme selects the optimal basis automatically)
 - You need a fast emulator for scalar-output models
+
+## Shapley Effects
+
+Shapley effects apply the **Shapley value** from cooperative game theory to variance-based sensitivity analysis: the output variance is treated as a payout to be divided fairly among the input parameters, viewed as players whose coalition worths are the partial variances of the ANOVA decomposition (Owen, 2014; Song, Nelson & Staum, 2016). Like RS-HDMR and PCE, this is a **given-data** method: it works with any set of $(X, Y)$ pairs and requires no structured sampling design.
+
+### Theoretical Background
+
+For independent inputs, the Hoeffding–Sobol' decomposition splits the output variance into partial variances $V_u$ indexed by subsets $u \subseteq \{1, \ldots, D\}$ of the parameters. The Shapley effect of parameter $i$ allocates each interaction's variance equally among its participants:
+
+$$
+\mathrm{Sh}_i = \sum_{u \ni i} \frac{V_u}{|u|}
+$$
+
+so a main-effect variance $V_i$ is attributed entirely to parameter $i$, a pairwise interaction variance $V_{ij}$ is split half-and-half between $i$ and $j$, and so on. Under independent inputs this yields:
+
+- **Bracketing**: $S_{1,i} \leq \mathrm{Sh}_i \leq S_{T,i}$ — the Shapley effect always lies between the first-order and total-order Sobol indices.
+- **Exact partition**: unlike $S_1$ (which omits interactions, so $\sum_i S_{1,i} \leq 1$) and $S_T$ (which counts each interaction once per participant, so $\sum_i S_{T,i} \geq 1$), Shapley effects split every interaction fairly and sum to exactly 1 with no gaps or double counting.
+
+**Independence assumption (v1 limitation)**: gsax currently assumes **independent inputs**. The Shapley value is particularly attractive for dependent inputs — where Sobol indices lose their clean interpretation — but the dependent-input formulation requires conditional-variance estimation and is future work. Do not rely on the indices when inputs are strongly correlated.
+
+### How gsax computes them
+
+gsax computes Shapley effects **analytically** from a fitted surrogate's variance decomposition — no permutation Monte Carlo, no conditional-variance sampling, and no external `shap` dependency:
+
+- **`backend="hdmr"`** (default) fits the RS-HDMR B-spline surrogate and uses the structural ($S_a$) variances of its component functions as the partial variances $V_u$, truncated at `maxorder`.
+- **`backend="pce"`** fits a polynomial chaos expansion and groups the squared orthonormal coefficients by the support of their multi-index (Sudret, 2008) — exact within the fitted polynomial.
+
+Normalization is by the surrogate's **total decomposed variance** $\sum_u V_u$, so $\sum_i \mathrm{Sh}_i = 1$ exactly — the Shapley efficiency property (Owen, 2014). $S_1$ and $S_T$ from the same surrogate use the same denominator, so for `backend="pce"` they match `analyze_pce` exactly, while for `backend="hdmr"` they differ from `analyze_hdmr` (which normalizes by $\mathrm{Var}(Y)$) by a factor of `explained_variance`. How much of the *output* variance the surrogate actually captured is reported separately in the `explained_variance` field, $\sum_u V_u / \mathrm{Var}(Y)$: close to 1 for a good fit, below 1 when truncation or fit error leaves variance unexplained, and above 1 when an overfit surrogate over-counts shared variance — an honest diagnostic rather than a silently renormalized result. A `UserWarning` is emitted when it strays far from 1. Interactions above `maxorder` (HDMR) or the polynomial order (PCE) are absent from the allocation.
+
+### How to use it
+
+1. You provide any set of $(X, Y)$ pairs — no structured sampling design required.
+2. `gsax.analyze_shapley()` fits the selected surrogate backend (`"hdmr"` or `"pce"`), extracts its variance decomposition, and allocates each partial variance equally among the parameters in its interaction set.
+3. The result carries `Sh` alongside `S1` and `ST` computed from the **same surrogate**, so the three indices are directly comparable and the ordering $S_1 \leq \mathrm{Sh} \leq S_T$ is visible at a glance.
+
+```python
+import jax.numpy as jnp
+import gsax
+from gsax.benchmarks.ishigami import PROBLEM, evaluate
+
+X = gsax.sample_mc(PROBLEM, N=2000, seed=42)
+Y = evaluate(jnp.asarray(X))
+
+# HDMR backend (default) — supports scalar, multi-output, time-series Y
+result = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y)
+print("Sh:", result.Sh)              # (D,) Shapley effects
+print("sum:", result.Sh.sum())       # == 1 (Shapley efficiency property)
+print("explained:", result.explained_variance)  # sum_u V_u / Var(Y) — fit quality
+print("order:", result.order)        # effective surrogate order used
+print("S1:", result.S1)              # first-order, same surrogate
+print("ST:", result.ST)              # total-order, same surrogate
+
+# PCE backend — scalar Y only, PCE-only knobs
+result_pce = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y, backend="pce", order=4)
+```
+
+Backend-specific keyword arguments are validated: explicitly setting a knob that belongs to the non-selected backend (e.g. `backend="pce"` with `maxorder=3`) raises `ValueError`.
+
+### Index summary
+
+| Index | Meaning |
+|-------|---------|
+| $\mathrm{Sh}(i)$ | Shapley effect: parameter $i$'s fair share of decomposed variance, including an equal split of every interaction it participates in. $\sum_i \mathrm{Sh}_i = 1$ exactly (Shapley efficiency). |
+| $S_1(i)$ | First-order index from the same surrogate (main effect only). |
+| $S_T(i)$ | Total-order index from the same surrogate (main effect plus all interactions counted in full). |
+| `explained_variance` | Fraction of $\mathrm{Var}(Y)$ the surrogate captured, $\sum_u V_u / \mathrm{Var}(Y)$ — a separate fit-quality diagnostic, not a per-parameter index. |
+
+**When to use Shapley effects:**
+- You want a single, fairly allocated importance score per parameter that sums to exactly 1 (e.g. for ranking, reporting, or budget allocation), with a separate `explained_variance` diagnostic reporting how much output variance the surrogate captured
+- Interactions matter and you want them attributed to their participants rather than omitted ($S_1$) or double-counted ($S_T$)
+- You have existing $(X, Y)$ pairs and want analytical indices without permutation Monte Carlo noise
+- Your inputs are independent (required in this version)
+
+### References
+
+- Owen, A.B. (2014). Sobol' indices and Shapley value. *SIAM/ASA Journal on Uncertainty Quantification*, 2(1), 245-251.
+- Song, E., Nelson, B.L. & Staum, J. (2016). Shapley effects for global sensitivity analysis: Theory and computation. *SIAM/ASA Journal on Uncertainty Quantification*, 4(1), 1060-1083.
+- Sudret, B. (2008). Global sensitivity analysis using polynomial chaos expansions. *Reliability Engineering & System Safety*, 93(7), 964-979.
 
 ## eFAST (Extended Fourier Amplitude Sensitivity Test)
 
@@ -471,20 +549,20 @@ Set `n_bootstrap=0` to skip bias correction and confidence intervals (raw plug-i
 
 ## Choosing Between Them
 
-| Consideration | Sobol' | HDMR | PCE | eFAST | DGSM | HSIC | PAWN | Borgonovo delta |
-|---------------|--------|------|-----|-------|------|------|------|-----------------|
-| Sampling requirement | Structured Saltelli design, $N(2D+2)$ evaluations (default) | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Search curves, $N \times D$ evaluations | Plain MC, $N$ evaluations + autodiff | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs |
-| Input independence | Assumed | Handled via ANCOVA decomposition | Assumed | Assumed | Assumed | Not assumed | Not assumed | Not assumed |
-| Surrogate/emulator | No | Yes (`emulate_hdmr`) | Yes (`emulate_pce`) | No | No | No | No | No |
-| Accuracy | Exact (given enough samples) | Depends on B-spline fit quality | Depends on polynomial fit quality | Exact (given enough samples) | Bounds on $S_T$, not exact indices | Dependence measure, not variance fractions | Distributional (KS) distance, not variance fractions | Distributional (L1) distance, not variance fractions |
-| Second-order indices | Direct estimation from cross-matrices | From interaction component functions | Analytical from coefficients | Not available | Not available | Not available | Not available | Not available |
-| Interaction detection | Via $S_2$ and the gap $S_T - S_1$ | Via explicit interaction component functions | Via $S_2$ from coefficients | Via the gap $S_T - S_1$ only | Not available (bounds only) | Via the Total HSIC − R2-HSIC gap | Not available (first-order only) | Not available (the $\delta - S_1$ gap flags influence beyond first-order variance) |
-| Output shapes | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar only | Scalar, multi-output, time-series | Scalar, multi-output | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series |
-| Input distributions | Uniform + Gaussian | Any (via CDF mapping) | Uniform + Gaussian | Uniform + Gaussian | Uniform + Gaussian (+ truncated Normal) | Any (via CDF mapping) | Any (via CDF mapping) | Any (rank-based classes) |
+| Consideration | Sobol' | HDMR | PCE | Shapley | eFAST | DGSM | HSIC | PAWN | Borgonovo delta |
+|---------------|--------|------|-----|---------|-------|------|------|------|-----------------|
+| Sampling requirement | Structured Saltelli design, $N(2D+2)$ evaluations (default) | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Search curves, $N \times D$ evaluations | Plain MC, $N$ evaluations + autodiff | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs |
+| Input independence | Assumed | Handled via ANCOVA decomposition | Assumed | Assumed (dependent-input Shapley is future work) | Assumed | Assumed | Not assumed | Not assumed | Not assumed |
+| Surrogate/emulator | No | Yes (`emulate_hdmr`) | Yes (`emulate_pce`) | Fits HDMR or PCE internally (no emulator returned) | No | No | No | No | No |
+| Accuracy | Exact (given enough samples) | Depends on B-spline fit quality | Depends on polynomial fit quality | Exact allocation within the fitted surrogate; depends on fit quality | Exact (given enough samples) | Bounds on $S_T$, not exact indices | Dependence measure, not variance fractions | Distributional (KS) distance, not variance fractions | Distributional (L1) distance, not variance fractions |
+| Second-order indices | Direct estimation from cross-matrices | From interaction component functions | Analytical from coefficients | Not available (interaction variance folded into $\mathrm{Sh}$) | Not available | Not available | Not available | Not available | Not available |
+| Interaction detection | Via $S_2$ and the gap $S_T - S_1$ | Via explicit interaction component functions | Via $S_2$ from coefficients | Via the gaps $\mathrm{Sh} - S_1$ and $S_T - \mathrm{Sh}$ | Via the gap $S_T - S_1$ only | Not available (bounds only) | Via the Total HSIC − R2-HSIC gap | Not available (first-order only) | Not available (the $\delta - S_1$ gap flags influence beyond first-order variance) |
+| Output shapes | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar only | Scalar, multi-output, time-series (`hdmr` backend); scalar only (`pce`) | Scalar, multi-output, time-series | Scalar, multi-output | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series |
+| Input distributions | Uniform + Gaussian | Any (via CDF mapping) | Uniform + Gaussian | Follows backend: any (`hdmr`), uniform + Gaussian (`pce`) | Uniform + Gaussian | Uniform + Gaussian (+ truncated Normal) | Any (via CDF mapping) | Any (via CDF mapping) | Any (rank-based classes) |
 
 ## Output Shapes
 
-Sobol, HDMR, and eFAST all support scalar, multi-output, and time-series outputs. The shape of `Y` determines the shape of all returned index arrays:
+Sobol, HDMR, eFAST, and Shapley (with the default HDMR backend) all support scalar, multi-output, and time-series outputs. The shape of `Y` determines the shape of all returned index arrays:
 
 | Y shape | S1 / ST shape | S2 shape |
 |---------|---------------|----------|
@@ -511,4 +589,6 @@ DGSM returns arrays of shape `(T, D)` where `T` is the number of output componen
 - Li, G., Rabitz, H., Yelvington, P.E., Oluwole, O.O., Bacon, F., Kolb, C.E., & Schoendorf, J. (2010). Global sensitivity analysis for systems with independent and/or correlated inputs. *Journal of Physical Chemistry A*, 114(19), 6022-6032.
 - Rabitz, H. & Alis, O. (1999). General foundations of high-dimensional model representations. *Journal of Mathematical Chemistry*, 25(2-3), 197-233.
 - Sudret, B. (2008). Global sensitivity analysis using polynomial chaos expansions. *Reliability Engineering & System Safety*, 93(7), 964-979.
+- Owen, A.B. (2014). Sobol' indices and Shapley value. *SIAM/ASA Journal on Uncertainty Quantification*, 2(1), 245-251.
+- Song, E., Nelson, B.L. & Staum, J. (2016). Shapley effects for global sensitivity analysis: Theory and computation. *SIAM/ASA Journal on Uncertainty Quantification*, 4(1), 1060-1083.
 - Saltelli, A., Tarantola, S. & Chan, K.P.-S. (1999). A quantitative model-independent method for global sensitivity analysis of model output. *Technometrics*, 41(1), 39-56.
