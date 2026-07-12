@@ -12,7 +12,7 @@ from jax import Array
 from gsax._normalization import (
     _prepare_Y,
     _squeeze_output_axes,
-    _validate_xy_inputs,
+    _validate_xy_inputs_ops,
     _warn_zero_variance_slices,
 )
 from gsax.pce._engine import (
@@ -211,7 +211,7 @@ def analyze_pce(
             layout cannot be resolved against ``X``'s row count.
     """
     X = jnp.asarray(X)
-    Y = _validate_xy_inputs(problem, X, jnp.asarray(Y))
+    Y, ops = _validate_xy_inputs_ops(problem, X, jnp.asarray(Y))
 
     # A constant output slice makes every index 0/0 = NaN; warn once up front.
     _warn_zero_variance_slices(_prepare_Y(Y)[0], output_names=problem.output_names)
@@ -247,6 +247,7 @@ def analyze_pce(
         multi_index=fit.multi_index,
         order=fit.order,
         loo_rmse=loo,
+        _inserted_output_axis=ops.inserted_output_axis,
     )
 
 
@@ -272,4 +273,7 @@ def emulate_pce(result: PCEResult, X_new: Array) -> Array:
     Phi = build_design_matrix(X_ref, result.multi_index, input_types, result.order)
     # Prediction contracts the term axis (last on coefficients) for every
     # output slice at once: Y = Phi @ c per slice, one einsum.
-    return jnp.einsum("nt,...t->n...", Phi, result.coefficients)
+    pred = jnp.einsum("nt,...t->n...", Phi, result.coefficients)
+    # If inference inserted a singleton K axis at fit time, drop it so the
+    # prediction mirrors the training Y's original (N_new, T) rank.
+    return pred[..., 0] if result._inserted_output_axis else pred

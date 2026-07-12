@@ -548,6 +548,23 @@ class TestMultiOutput:
                 np.testing.assert_allclose(np.asarray(STb[t, k]), np.asarray(STs), rtol=1e-12)
                 np.testing.assert_allclose(np.asarray(S2b[t, k]), np.asarray(S2s), rtol=1e-12)
 
+    def test_emulate_mirrors_single_label_2d_training(self):
+        """Training on (N, T) single-label Y yields (N_new, T) predictions."""
+        problem = Problem(names=("x0", "x1", "x2"), bounds=((0.0, 1.0),) * 3, output_names=("p",))
+        key = jax.random.PRNGKey(4)
+        X = jax.random.uniform(key, shape=(500, 3))
+        base = jnp.sin(X[:, 0]) + 2.0 * X[:, 1]
+        Y = jnp.stack([base, 2.0 * base], axis=-1)  # (N, T=2) single label
+        result = pce.analyze(problem, X, Y)
+        X_new = jax.random.uniform(jax.random.PRNGKey(5), shape=(30, 3))
+        pred = pce.emulate(result, X_new)
+        assert pred.shape == (30, 2)
+        # Equivalent to explicit (N, T, 1) training, then squeezing the K axis.
+        explicit = pce.analyze(problem, X, Y[:, :, None])
+        np.testing.assert_allclose(
+            np.asarray(pred), np.asarray(pce.emulate(explicit, X_new)[..., 0]), rtol=1e-5
+        )
+
     def test_s2_pair_mask_matches_dense(self):
         """The upper-triangle pair mask reproduces the dense symmetric einsum."""
         rng = np.random.default_rng(11)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import xarray as xr
@@ -55,6 +55,10 @@ class PCEResult:
     multi_index: np.ndarray
     order: int
     loo_rmse: Array | None = None
+    # True when layout inference inserted the singleton output axis (a 2-D
+    # (N, T) Y under a single named output). emulate_pce squeezes it back so
+    # predictions mirror the training Y's rank.
+    _inserted_output_axis: bool = field(default=False, repr=False)
 
     def __repr__(self) -> str:
         n_terms = self.coefficients.shape[-1]

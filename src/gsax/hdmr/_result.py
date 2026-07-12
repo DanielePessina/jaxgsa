@@ -1,6 +1,6 @@
 """Defines the HDMRResult dataclass for RS-HDMR sensitivity analysis results."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TypedDict
 
 import numpy as np
@@ -77,6 +77,10 @@ class HDMRResult:
     emulator: HDMREmulator | None = None
     select: Array | None = None
     rmse: Array | None = None
+    # True when layout inference inserted the singleton output axis (a 2-D
+    # (N, T) Y under a single named output). emulate_hdmr squeezes it back so
+    # predictions mirror the training Y's rank.
+    _inserted_output_axis: bool = field(default=False, repr=False)
 
     @property
     def S1(self) -> Array:

@@ -17,7 +17,7 @@ from gsax._normalization import (
     _prenormalize_outputs,
     _prepare_Y,
     _squeeze_output_axes,
-    _validate_xy_inputs,
+    _validate_xy_inputs_ops,
     _warn_zero_variance_slices,
 )
 from gsax._transforms import cdf_to_unit_interval
@@ -176,7 +176,49 @@ def analyze_hdmr(
     lambdax: float = 0.01,
     chunk_size: int = 2048,
 ) -> HDMRResult:
-    """Compute sensitivity indices via RS-HDMR with B-spline surrogate modelling.
+    """Compute sensitivity indices via RS-HDMR (public entry point).
+
+    Validates ``(X, Y)``, warns once about any zero-variance output slice, then
+    delegates to :func:`_analyze_hdmr_core`. See that function for the full
+    parameter and return documentation; ``analyze_shapley``'s HDMR backend
+    calls the core directly on an already-canonical Y to avoid re-validating.
+    """
+    X = jnp.asarray(X)
+    Y, ops = _validate_xy_inputs_ops(problem, X, jnp.asarray(Y))
+    # A constant output slice makes every index 0/0 = NaN; warn once up front,
+    # in the public wrapper only, so callers routing through the core (Shapley)
+    # do not double-warn.
+    _warn_zero_variance_slices(_prepare_Y(Y)[0], output_names=problem.output_names)
+    return _analyze_hdmr_core(
+        problem,
+        X,
+        Y,
+        prenormalize=prenormalize,
+        maxorder=maxorder,
+        maxiter=maxiter,
+        m=m,
+        lambdax=lambdax,
+        chunk_size=chunk_size,
+        inserted_output_axis=ops.inserted_output_axis,
+    )
+
+
+def _analyze_hdmr_core(
+    problem: Problem,
+    X: Array,
+    Y: Array,
+    *,
+    prenormalize: bool = False,
+    maxorder: int = 2,
+    maxiter: int = 100,
+    m: int = 2,
+    lambdax: float = 0.01,
+    chunk_size: int = 2048,
+    inserted_output_axis: bool = False,
+) -> HDMRResult:
+    """Fit RS-HDMR on an already-canonical Y (no re-validation, no warn).
+
+    Compute sensitivity indices via RS-HDMR with B-spline surrogate modelling.
 
     Works with **any** set of (X, Y) pairs -- no structured sampling required,
     so it suits existing datasets and expensive models where Sobol/eFAST
@@ -223,14 +265,9 @@ def analyze_hdmr(
         emulator (usable with ``emulate_hdmr``), and its RMSE.
 
     Raises:
-        ValueError: If ``N < 300``, ``maxorder`` is not 1/2/3,
-            ``chunk_size < 1``, or (X, Y) fail validation against
-            ``problem``.
+        ValueError: If ``N < 300``, ``maxorder`` is not 1/2/3, or
+            ``chunk_size < 1``.
     """
-    X = jnp.asarray(X)
-    Y = jnp.asarray(Y)
-
-    Y = _validate_xy_inputs(problem, X, Y)
     N, D = X.shape
     # B-spline regression with backfitting needs a reasonable sample size
     # to avoid overfitting; 300 is a practical lower bound.
@@ -288,8 +325,6 @@ def analyze_hdmr(
     else:
         y_mean = jnp.zeros(Y_3d.shape[1:], dtype=Y_3d.dtype)
         y_std = jnp.ones(Y_3d.shape[1:], dtype=Y_3d.dtype)
-
-    _warn_zero_variance_slices(Y_3d, output_names=problem.output_names)
 
     # (N,T,K) -> (T,K,N) -> (T*K, N): move sample axis last, then flatten
     # time x output into a single batch dim so each row is an independent
@@ -417,6 +452,7 @@ def analyze_hdmr(
             jnp.concatenate(rmse_parts), T, K_out, squeeze_time, squeeze_output
         )
         * y_std_out,
+        _inserted_output_axis=inserted_output_axis,
     )
 
 
@@ -504,4 +540,8 @@ def emulate_hdmr(result: HDMRResult, X_new: Array) -> Array:
     # Undo the standardization applied during fitting, if any.
     if prenormalize:
         Y_pred = Y_pred * y_std + y_mean
+    # If inference inserted a singleton K axis at fit time, drop it so the
+    # prediction mirrors the training Y's original (N_new, T) rank.
+    if result._inserted_output_axis:
+        Y_pred = Y_pred[..., 0]
     return Y_pred
