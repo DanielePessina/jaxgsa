@@ -13,7 +13,11 @@ import numpy as np
 import pytest
 
 import gsax
-from gsax._normalization import _infer_output_layout
+from gsax._normalization import (
+    LayoutOps,
+    _infer_output_layout,
+    _infer_output_layout_ops,
+)
 from gsax.problem import Problem
 
 UNLABELED = Problem(names=("x0", "x1", "x2"), bounds=((0.0, 1.0),) * 3)
@@ -95,6 +99,51 @@ class TestLabelRules:
         Y = jnp.ones((N, 5, 7))
         with pytest.raises(ValueError, match="output_names"):
             _infer_output_layout(Y, TWO_LABELS, N)
+
+
+class TestLayoutOpsRecord:
+    """`_infer_output_layout_ops` reports the transforms it applied."""
+
+    def test_canonical_is_identity(self):
+        _, ops = _infer_output_layout_ops(jnp.ones((N, 5)), UNLABELED, N)
+        assert ops == LayoutOps()
+
+    def test_records_sample_axis_move(self):
+        Y = jnp.arange(5 * N, dtype=jnp.float32).reshape(5, N)
+        with pytest.warns(UserWarning, match="sample axis"):
+            _, ops = _infer_output_layout_ops(Y, UNLABELED, N)
+        assert ops == LayoutOps(sample_axis=1)
+
+    def test_records_inserted_output_axis(self):
+        Y = jnp.arange(N * 6, dtype=jnp.float32).reshape(N, 6)
+        _, ops = _infer_output_layout_ops(Y, ONE_LABEL, N)
+        assert ops == LayoutOps(inserted_output_axis=True)
+
+    def test_records_swapped_tk(self):
+        Y = jnp.arange(N * 2 * 7, dtype=jnp.float32).reshape(N, 2, 7)
+        with pytest.warns(UserWarning, match="swapping"):
+            _, ops = _infer_output_layout_ops(Y, TWO_LABELS, N)
+        assert ops == LayoutOps(swapped_tk=True)
+
+
+class TestWarningAttribution:
+    """Layout warnings point at the user's call site, not gsax internals."""
+
+    def test_direct_caller_points_at_user(self):
+        sr = gsax.sample_morris(UNLABELED, n_trajectories=8, seed=1, verbose=False)
+        base = jnp.sin(jnp.asarray(sr.samples) @ jnp.array([1.0, 2.0, 0.5]))
+        Y2 = jnp.stack([base, 2.0 * base], axis=-1)  # (n_total, 2)
+        with pytest.warns(UserWarning, match="sample axis") as rec:
+            gsax.analyze_morris(sr, Y2.T)
+        assert rec[0].filename == __file__
+
+    def test_wrapped_caller_points_at_user(self):
+        X = jnp.asarray(gsax.sample_mc(UNLABELED, 200, seed=3))
+        base = jnp.sin(X[:, 0]) + 2.0 * X[:, 1]
+        Y2 = jnp.stack([base, 2.0 * base], axis=-1)  # (N, 2)
+        with pytest.warns(UserWarning, match="sample axis") as rec:
+            gsax.analyze_pawn(UNLABELED, X, Y2.T)
+        assert rec[0].filename == __file__
 
 
 class TestRaiseRung:

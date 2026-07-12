@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import warnings
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import jax.numpy as jnp
 import numpy as np
@@ -11,6 +11,28 @@ from jax import Array
 
 if TYPE_CHECKING:
     from gsax.problem import Problem
+
+
+class LayoutOps(NamedTuple):
+    """Transformations :func:`_infer_output_layout_ops` applied to reach the
+    canonical layout, so companion arrays (a Jacobian, an emulator prediction)
+    can be moved in lockstep instead of re-derived from shapes.
+
+    The fields record, in application order:
+        sample_axis: axis moved to the front (rule 1), or ``None`` if unmoved.
+        inserted_output_axis: a singleton K axis was appended (rule 2, a single
+            labeled output with several columns: ``(n, T) -> (n, T, 1)``).
+        swapped_tk: the trailing two axes were exchanged (rule 3,
+            ``(n, K, T) -> (n, T, K)``).
+
+    An all-default ``LayoutOps()`` is the identity (Y was already canonical).
+    ``inserted_output_axis`` and ``swapped_tk`` are mutually exclusive (2-D vs
+    3-D branch).
+    """
+
+    sample_axis: int | None = None
+    inserted_output_axis: bool = False
+    swapped_tk: bool = False
 
 
 def _default_output_names(K: int, problem: Problem) -> list[str]:
@@ -49,11 +71,13 @@ def _validate_x(problem: Problem, X: Array) -> None:
         )
 
 
-def _infer_output_layout(
+def _infer_output_layout_ops(
     Y: Array,
     problem: Problem,
     n_expected: int | None,
-) -> Array:
+    *,
+    stacklevel: int = 3,
+) -> tuple[Array, LayoutOps]:
     """Resolve a user-supplied output array to the canonical axis layout.
 
     gsax's canonical layouts are ``(n,)``, ``(n, K)``, and ``(n, T, K)``, but
@@ -86,9 +110,14 @@ def _infer_output_layout(
         n_expected: Expected sample count (X rows for given-data methods, the
             design's unique row count for Sobol/Morris), or ``None`` when the
             caller cannot know it independently (rule 1 is skipped).
+        stacklevel: Passed through to ``warnings.warn`` so the layout warnings
+            point at the user's call site. Direct callers use the default 3;
+            the given-data wrappers pass 4 to skip their extra frame.
 
     Returns:
-        ``Y`` in canonical layout: ``(n,)``, ``(n, K)``, or ``(n, T, K)``.
+        A tuple ``(Y, ops)`` where ``Y`` is in canonical layout — ``(n,)``,
+        ``(n, K)``, or ``(n, T, K)`` — and ``ops`` records the transformations
+        applied so companion arrays can be moved in lockstep.
 
     Raises:
         ValueError: If ``Y`` is not 1-D/2-D/3-D, no axis matches the expected
@@ -98,6 +127,10 @@ def _infer_output_layout(
     if Y.ndim not in (1, 2, 3):
         raise ValueError(f"Y must be 1-D (N,), 2-D (N, K), or 3-D (N, T, K), got ndim={Y.ndim}")
 
+    sample_axis: int | None = None
+    inserted_output_axis = False
+    swapped_tk = False
+
     if n_expected is not None and Y.shape[0] != n_expected:
         matches = [ax for ax, size in enumerate(Y.shape) if size == n_expected]
         if len(matches) == 1:
@@ -105,8 +138,9 @@ def _infer_output_layout(
                 f"gsax: Y has shape {tuple(Y.shape)} but {n_expected} sample rows were "
                 f"expected; interpreting axis {matches[0]} as the sample axis and "
                 "moving it first",
-                stacklevel=3,
+                stacklevel=stacklevel,
             )
+            sample_axis = matches[0]
             Y = jnp.moveaxis(Y, matches[0], 0)
         else:
             ambiguity = "no unambiguous" if matches else "no"
@@ -124,6 +158,7 @@ def _infer_output_layout(
             # One labeled output: the columns are timepoints, not outputs.
             # Flow as genuine (n, T, 1) so results keep the labeled output axis.
             Y = Y[:, :, None]
+            inserted_output_axis = True
         elif M != K_labeled:
             raise ValueError(
                 f"Y has {M} columns but problem.output_names lists {K_labeled} "
@@ -136,24 +171,64 @@ def _infer_output_layout(
                 f"gsax: Y has shape {tuple(Y.shape)} but only its middle axis "
                 f"matches the {K_labeled} named outputs; interpreting Y as "
                 "(n, K, T) and swapping the trailing axes to (n, T, K)",
-                stacklevel=3,
+                stacklevel=stacklevel,
             )
             Y = jnp.swapaxes(Y, 1, 2)
+            swapped_tk = True
         else:
             raise ValueError(
                 f"3-D Y has shape {tuple(Y.shape)} but no trailing axis matches "
                 f"the {K_labeled} entries in problem.output_names; expected "
                 "(n, T, K)"
             )
-    return Y
+    return Y, LayoutOps(sample_axis, inserted_output_axis, swapped_tk)
+
+
+def _infer_output_layout(
+    Y: Array,
+    problem: Problem,
+    n_expected: int | None,
+    *,
+    stacklevel: int = 3,
+) -> Array:
+    """Canonical-layout shim returning only Y (see :func:`_infer_output_layout_ops`).
+
+    Keeps the historical three-positional-argument ``Array`` contract for
+    callers that do not need the ops record. The ``+1`` on ``stacklevel``
+    compensates for this extra frame so warnings still point at user code.
+    """
+    return _infer_output_layout_ops(Y, problem, n_expected, stacklevel=stacklevel + 1)[0]
+
+
+def _validate_xy_inputs_ops(problem: Problem, X: Array, Y: Array) -> tuple[Array, LayoutOps]:
+    """Validate the shared ``(problem, X, Y)`` contract, returning the ops record.
+
+    Like :func:`_validate_xy_inputs` but also returns the :class:`LayoutOps`
+    describing how Y was canonicalized, for callers (PCE, HDMR) that need to
+    mirror the layout on emulator predictions.
+
+    Args:
+        problem: Problem definition with ``num_vars`` parameters.
+        X: Input sample matrix, expected shape ``(N, D)``.
+        Y: Model output, 1-D, 2-D, or 3-D (layout inferred when recoverable).
+
+    Returns:
+        A tuple ``(Y, ops)`` with Y in canonical layout.
+
+    Raises:
+        ValueError: If X is not 2-D, its column count does not match the
+            problem, or Y's layout cannot be resolved against X's row count.
+    """
+    _validate_x(problem, X)
+    return _infer_output_layout_ops(Y, problem, int(X.shape[0]), stacklevel=4)
 
 
 def _validate_xy_inputs(problem: Problem, X: Array, Y: Array) -> Array:
     """Validate the shared ``(problem, X, Y)`` contract of given-data methods.
 
     Validates X and resolves Y to the canonical layout via
-    :func:`_infer_output_layout`, using X's row count as the expected sample
-    count. Callers must use the returned Y.
+    :func:`_infer_output_layout_ops`, using X's row count as the expected
+    sample count. Callers must use the returned Y.
 
     Args:
         problem: Problem definition with ``num_vars`` parameters.
@@ -168,7 +243,7 @@ def _validate_xy_inputs(problem: Problem, X: Array, Y: Array) -> Array:
             problem, or Y's layout cannot be resolved against X's row count.
     """
     _validate_x(problem, X)
-    return _infer_output_layout(Y, problem, int(X.shape[0]))
+    return _infer_output_layout_ops(Y, problem, int(X.shape[0]), stacklevel=4)[0]
 
 
 def _squeeze_output_axes(
