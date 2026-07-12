@@ -256,16 +256,13 @@ def analyze(
             stacklevel=2,
         )
 
-    # Drop the singleton axes _prepare_Y inserted, conf-array style; var_y
-    # has no trailing param axis and is squeezed positionally.
+    # Drop the singleton axes _prepare_Y inserted; var_y has no trailing param
+    # axis, so it passes n_trailing=0.
     sigma = _squeeze_output_axes(sigma, squeeze_time, squeeze_output)
     nu = _squeeze_output_axes(nu, squeeze_time, squeeze_output)
     upper = _squeeze_output_axes(upper, squeeze_time, squeeze_output)
     lower = _squeeze_output_axes(lower, squeeze_time, squeeze_output)
-    if squeeze_time and squeeze_output:
-        var_y = var_y[0, 0]
-    elif squeeze_time:
-        var_y = var_y[0]
+    var_y = _squeeze_output_axes(var_y, squeeze_time, squeeze_output, n_trailing=0)
 
     return DGSMResult(
         nu=nu,

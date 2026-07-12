@@ -161,12 +161,7 @@ def _reshape_emulator_value(
 ) -> Array:
     """Reshape flattened per-output emulator state back to the analyzed layout."""
     value = value.reshape((T, K_out) + value.shape[1:])
-
-    if squeeze_time and squeeze_output:
-        return value[0, 0]
-    if squeeze_time:
-        return value[0]
-    return value
+    return _squeeze_output_axes(value, squeeze_time, squeeze_output, n_trailing=value.ndim - 2)
 
 
 def analyze_hdmr(
@@ -389,15 +384,8 @@ def analyze_hdmr(
         squeeze_time,
         squeeze_output,
     )
-    if squeeze_time and squeeze_output:
-        y_mean_out = y_mean[0, 0]
-        y_std_out = y_std[0, 0]
-    elif squeeze_time:
-        y_mean_out = y_mean[0]
-        y_std_out = y_std[0]
-    else:
-        y_mean_out = y_mean
-        y_std_out = y_std
+    y_mean_out = _squeeze_output_axes(y_mean, squeeze_time, squeeze_output, n_trailing=0)
+    y_std_out = _squeeze_output_axes(y_std, squeeze_time, squeeze_output, n_trailing=0)
 
     # Bundle all fitted state needed to reconstruct predictions at new points.
     emulator: HDMREmulator = {

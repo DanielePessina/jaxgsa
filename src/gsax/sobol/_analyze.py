@@ -26,6 +26,7 @@ from gsax._normalization import (
     _infer_output_layout,
     _prenormalize_outputs,
     _prepare_Y,
+    _squeeze_output_axes,
     _warn_zero_variance_slices,
 )
 from gsax.sampling import SamplingResult, _saltelli_step
@@ -198,47 +199,6 @@ def _expand_unique_outputs(sampling_result: SamplingResult, Y: Array) -> Array:
     return jnp.take(Y, expanded_to_unique, axis=0)
 
 
-def _squeeze_results(
-    S1: Array,
-    ST: Array,
-    S2: Array | None,
-    squeeze_time: bool,
-    squeeze_output: bool,
-    S1_conf: Array | None = None,
-    ST_conf: Array | None = None,
-    S2_conf: Array | None = None,
-) -> tuple[Array, Array, Array | None, Array | None, Array | None, Array | None]:
-    """Remove singleton T and/or K dimensions that _prepare_Y inserted.
-
-    _prepare_Y always promotes Y to 3-D (N,T,K) for uniform kernel code.
-    After computation, we undo that promotion so results match the user's
-    original output shape (e.g. (D,) for scalar, (K,D) for multi-output).
-    """
-    if squeeze_time and squeeze_output:
-        S1 = S1[0, 0]
-        ST = ST[0, 0]
-        if S2 is not None:
-            S2 = S2[0, 0]
-        if S1_conf is not None:
-            S1_conf = S1_conf[:, 0, 0]
-        if ST_conf is not None:
-            ST_conf = ST_conf[:, 0, 0]
-        if S2_conf is not None:
-            S2_conf = S2_conf[:, 0, 0]
-    elif squeeze_time:
-        S1 = S1[0]
-        ST = ST[0]
-        if S2 is not None:
-            S2 = S2[0]
-        if S1_conf is not None:
-            S1_conf = S1_conf[:, 0]
-        if ST_conf is not None:
-            ST_conf = ST_conf[:, 0]
-        if S2_conf is not None:
-            S2_conf = S2_conf[:, 0]
-    return S1, ST, S2, S1_conf, ST_conf, S2_conf
-
-
 def _analyze_no_bootstrap(
     sampling_result: SamplingResult, Y: Array, *, chunk_size: int
 ) -> SAResult:
@@ -342,9 +302,10 @@ def _analyze_no_bootstrap(
         ST_out = jnp.concatenate(st_parts).reshape(T, K, D)
         S2_out = None
 
-    S1_out, ST_out, S2_out, _, _, _ = _squeeze_results(
-        S1_out, ST_out, S2_out, squeeze_time, squeeze_output
-    )
+    S1_out = _squeeze_output_axes(S1_out, squeeze_time, squeeze_output)
+    ST_out = _squeeze_output_axes(ST_out, squeeze_time, squeeze_output)
+    if S2_out is not None:
+        S2_out = _squeeze_output_axes(S2_out, squeeze_time, squeeze_output, n_trailing=2)
     nan_counts = _count_nans(S1_out, ST_out, S2_out)
     return SAResult(
         S1=S1_out,
@@ -476,16 +437,14 @@ def _analyze_bootstrap(
         S2_out = None
         S2_conf = None
 
-    S1_out, ST_out, S2_out, S1_conf, ST_conf, S2_conf = _squeeze_results(
-        S1_out,
-        ST_out,
-        S2_out,
-        squeeze_time,
-        squeeze_output,
-        S1_conf,
-        ST_conf,
-        S2_conf,
-    )
+    S1_out = _squeeze_output_axes(S1_out, squeeze_time, squeeze_output)
+    ST_out = _squeeze_output_axes(ST_out, squeeze_time, squeeze_output)
+    S1_conf = _squeeze_output_axes(S1_conf, squeeze_time, squeeze_output)
+    ST_conf = _squeeze_output_axes(ST_conf, squeeze_time, squeeze_output)
+    if S2_out is not None:
+        S2_out = _squeeze_output_axes(S2_out, squeeze_time, squeeze_output, n_trailing=2)
+    if S2_conf is not None:
+        S2_conf = _squeeze_output_axes(S2_conf, squeeze_time, squeeze_output, n_trailing=2)
     nan_counts = _count_nans(S1_out, ST_out, S2_out)
     return SAResult(
         S1=S1_out,

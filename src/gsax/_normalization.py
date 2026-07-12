@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING
 
 import jax.numpy as jnp
@@ -93,8 +94,6 @@ def _infer_output_layout(
         ValueError: If ``Y`` is not 1-D/2-D/3-D, no axis matches the expected
             sample rows, or a labeled output axis cannot be located.
     """
-    import warnings
-
     Y = jnp.asarray(Y)
     if Y.ndim not in (1, 2, 3):
         raise ValueError(f"Y must be 1-D (N,), 2-D (N, K), or 3-D (N, T, K), got ndim={Y.ndim}")
@@ -172,25 +171,37 @@ def _validate_xy_inputs(problem: Problem, X: Array, Y: Array) -> Array:
     return _infer_output_layout(Y, problem, int(X.shape[0]))
 
 
-def _squeeze_output_axes(arr: Array, squeeze_time: bool, squeeze_output: bool) -> Array:
+def _squeeze_output_axes(
+    arr: Array,
+    squeeze_time: bool,
+    squeeze_output: bool,
+    *,
+    n_trailing: int = 1,
+) -> Array:
     """Remove the singleton T/K axes that ``_prepare_Y`` inserted.
 
-    Works for both point-estimate arrays shaped ``(..., T, K, D)`` and
-    confidence arrays with a leading ``[lower, upper]`` axis, because the
-    trailing ``(T, K, D)`` layout is addressed with negative indices.
+    The ``(T, K)`` slice axes are located immediately before ``n_trailing``
+    trailing axes and addressed relative to the end, so any leading axes (a
+    confidence array's ``[lower, upper]`` axis, for example) ride through the
+    ``Ellipsis`` untouched. ``n_trailing`` says how many axes follow ``K``:
+    ``1`` for the usual ``(..., T, K, D)`` point/confidence arrays, ``2`` for
+    ``(..., T, K, D, D)`` pair matrices, and ``0`` for per-slice ``(..., T, K)``
+    scalars.
 
     Args:
-        arr: Array whose last three axes are ``(T, K, D)``.
+        arr: Array whose axes are ``(..., T, K) + n_trailing`` trailing axes.
         squeeze_time: Whether the T axis was inserted (drop it).
         squeeze_output: Whether the K axis was inserted (drop it).
+        n_trailing: Number of axes after K.
 
     Returns:
         The array with the inserted singleton axes removed.
     """
+    tail = (slice(None),) * n_trailing
     if squeeze_time and squeeze_output:
-        return arr[..., 0, 0, :]
+        return arr[(Ellipsis, 0, 0) + tail]
     if squeeze_time:
-        return arr[..., 0, :, :]
+        return arr[(Ellipsis, 0, slice(None)) + tail]
     return arr
 
 
@@ -275,8 +286,6 @@ def _warn_zero_variance_slices(
             trailing dims are ``()``, ``(K,)``, or ``(T, K)``.
         output_names: Optional names for the K output dimension.
     """
-    import warnings
-
     # Collapse trailing dims so variance is computed per (t, k) slice.
     flat = Y.reshape(Y.shape[0], -1)
     n_outputs = flat.shape[1]

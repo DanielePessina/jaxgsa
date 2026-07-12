@@ -179,15 +179,13 @@ def analyze_pce(
     loo = loo.reshape(T, K)
 
     # Drop the singleton axes _prepare_Y inserted. S1/ST/coeffs end in
-    # (T, K, per-slice) and use the shared helper; S2 (extra trailing D) and
-    # loo (no trailing axis) are squeezed positionally.
+    # (T, K, per-slice); S2 carries an extra trailing D and loo has no trailing
+    # per-slice axis, so they pass n_trailing=2 and 0 respectively.
     S1 = _squeeze_output_axes(S1, squeeze_time, squeeze_output)
     ST = _squeeze_output_axes(ST, squeeze_time, squeeze_output)
     coeffs = _squeeze_output_axes(coeffs, squeeze_time, squeeze_output)
-    if squeeze_time and squeeze_output:
-        S2, loo = S2[0, 0], loo[0, 0]
-    elif squeeze_time:
-        S2, loo = S2[0], loo[0]
+    S2 = _squeeze_output_axes(S2, squeeze_time, squeeze_output, n_trailing=2)
+    loo = _squeeze_output_axes(loo, squeeze_time, squeeze_output, n_trailing=0)
 
     return PCEResult(
         S1=S1,
