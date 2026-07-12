@@ -7,7 +7,7 @@ import numpy as np
 import xarray as xr
 from jax import Array
 
-from gsax._normalization import _default_output_names
+from gsax._normalization import _dims_and_coords
 from gsax.problem import Problem
 
 
@@ -120,37 +120,15 @@ class HDMRResult:
             An ``xr.Dataset`` with variables ``Sa``, ``Sb``, ``S``, ``ST``,
             and optionally ``select`` and ``rmse``.
         """
-        param_names = list(self.problem.names)
-        term_labels = list(self.terms)
-        ndim = self.Sa.ndim
+        # ST is indexed by parameter, exactly the shared param/output/time
+        # schema; Sa/Sb/S replace the trailing "param" with "term" (interaction
+        # components), and select/rmse drop it entirely.
+        dims_param, coords = _dims_and_coords(
+            self.Sa.ndim, self.Sa.shape, self.problem, time_coords
+        )
+        coords = {**coords, "term": list(self.terms)}
+        dims_term = (*dims_param[:-1], "term")
 
-        if ndim == 1:
-            dims_term = ("term",)
-            dims_param = ("param",)
-            coords: dict = {"term": term_labels, "param": param_names}
-        elif ndim == 2:
-            onames = _default_output_names(self.Sa.shape[0], self.problem)
-            dims_term = ("output", "term")
-            dims_param = ("output", "param")
-            coords = {"term": term_labels, "param": param_names, "output": onames}
-        elif ndim == 3:
-            T = self.Sa.shape[0]
-            onames = _default_output_names(self.Sa.shape[1], self.problem)
-            tcoords = list(time_coords) if time_coords is not None else list(range(T))
-            dims_term = ("time", "output", "term")
-            dims_param = ("time", "output", "param")
-            coords = {
-                "term": term_labels,
-                "param": param_names,
-                "output": onames,
-                "time": tcoords,
-            }
-        else:
-            msg = f"Unexpected Sa.ndim={ndim}"
-            raise ValueError(msg)
-
-        # Sa/Sb/S are indexed by term (including interactions); ST is indexed
-        # by parameter, so it needs a different dimension coordinate.
         data_vars: dict = {
             "Sa": (dims_term, np.asarray(self.Sa)),
             "Sb": (dims_term, np.asarray(self.Sb)),
@@ -162,14 +140,8 @@ class HDMRResult:
             data_vars["select"] = (("term",), np.asarray(self.select))
 
         if self.rmse is not None:
-            # RMSE dimensions mirror the squeezed output layout:
-            # scalar -> (), vector -> (output,), matrix -> (time, output).
-            rmse_np = np.asarray(self.rmse)
-            if rmse_np.ndim == 0:
-                data_vars["rmse"] = ((), rmse_np)
-            elif rmse_np.ndim == 1:
-                data_vars["rmse"] = (("output",), rmse_np)
-            else:
-                data_vars["rmse"] = (("time", "output"), rmse_np)
+            # RMSE has no param/term axis, so it uses the leading dims only:
+            # () / (output,) / (time, output).
+            data_vars["rmse"] = (dims_param[:-1], np.asarray(self.rmse))
 
         return xr.Dataset(data_vars, coords=coords)
