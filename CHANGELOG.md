@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Optional correlation-aware Shapley effects** via
+  `analyze_shapley(..., backend="hdmr", include_correlative=True)`. Folds the
+  correlative ANCOVA variance `Sb = Cov(f_j, sum_{k!=j} f_k)/Var(Y)` — already
+  computed by the HDMR backend but previously discarded — into the Shapley
+  allocation, so the indices credit variance shared through input correlation.
+  Correlation is read **empirically from the supplied `X`**; no joint
+  distribution, sampler, or model callable is required, and the flag is off by
+  default (existing results are unchanged). Consequences when enabled: indices
+  may be **negative** and `S1 <= Sh <= ST` need not hold (both expected under
+  dependence), while efficiency (`Sh` sums to 1) is preserved, and
+  `explained_variance` becomes the true emulator `Var(Y_hat)/Var(Y)`. This is
+  the given-data ANCOVA notion (Li et al., 2010), **not** the conditional-
+  variance Shapley estimator (Song, Nelson & Staum, 2016) — the two differ once
+  inputs are correlated. HDMR backend only; `include_correlative=True` with
+  `backend="pce"` raises `ValueError`. `ShapleyResult` gains an
+  `include_correlative` field (also surfaced as a `to_dataset()` attr).
+
 ## 0.2.0
 
 ### Added

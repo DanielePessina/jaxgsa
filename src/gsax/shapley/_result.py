@@ -52,6 +52,12 @@ class ShapleyResult:
         order: Effective surrogate order actually used -- the polynomial
             degree for ``"pce"`` (may be reduced from the requested value to
             fit the sample budget) or the HDMR expansion order for ``"hdmr"``.
+        include_correlative: Whether the correlative ANCOVA variance (``Sb``)
+            was folded into the allocation (HDMR backend only). When ``True``
+            the indices credit variance shared through input correlation, so
+            ``Sh``/``S1``/``ST`` may be **negative** and the ordering
+            ``S1 <= Sh <= ST`` need not hold; efficiency (``Sh`` sums to 1) is
+            preserved regardless.
     """
 
     Sh: Array
@@ -61,6 +67,7 @@ class ShapleyResult:
     backend: str
     explained_variance: Array
     order: int
+    include_correlative: bool = False
 
     def __repr__(self) -> str:
         """Return a concise summary showing index shapes."""
@@ -69,7 +76,10 @@ class ShapleyResult:
             "S1": self.S1.shape,
             "ST": self.ST.shape,
         }
-        return f"ShapleyResult({shapes}, backend={self.backend!r}, order={self.order})"
+        return (
+            f"ShapleyResult({shapes}, backend={self.backend!r}, order={self.order}, "
+            f"include_correlative={self.include_correlative})"
+        )
 
     def to_dataset(
         self,
@@ -104,4 +114,8 @@ class ShapleyResult:
         else:
             data_vars["explained_variance"] = (("time", "output"), ev)
 
-        return xr.Dataset(data_vars, coords=coords)
+        return xr.Dataset(
+            data_vars,
+            coords=coords,
+            attrs={"backend": self.backend, "include_correlative": self.include_correlative},
+        )

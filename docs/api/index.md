@@ -1024,6 +1024,7 @@ def analyze_shapley(
     Y: Array,
     *,
     backend: Literal["hdmr", "pce"] = "pce",
+    include_correlative: bool = False,
     # HDMR-only knobs (None -> backend default):
     prenormalize: bool | None = None,
     maxorder: int | None = None,
@@ -1044,6 +1045,7 @@ def analyze_shapley(
 | `X` | `Array` | required | Input array with shape `(N, D)` (given-data; no structured design needed). |
 | `Y` | `Array` | required | Output array: `(N,)`, `(N, K)`, or `(N, T, K)` — both backends. |
 | `backend` | `Literal["hdmr", "pce"]` | `"pce"` | Surrogate whose variance decomposition is allocated. |
+| `include_correlative` | `bool` | `False` | HDMR only. Fold the correlative ANCOVA variance `Sb` (read empirically from `X`) into the allocation; see the independence note below. |
 | `prenormalize` | `bool \| None` | `None` (`False`) | HDMR only. SALib-style output standardization before fitting. |
 | `maxorder` | `int \| None` | `None` (`2`) | HDMR only. Maximum HDMR expansion order. |
 | `maxiter` | `int \| None` | `None` (`100`) | HDMR only. Maximum backfitting iterations. |
@@ -1068,9 +1070,19 @@ Validation and behavior:
   decomposition — no permutation Monte Carlo. Each partial variance $V_u$ is
   split equally among the $|u|$ parameters in its interaction set:
   $\mathrm{Sh}_i = \sum_{u \ni i} V_u / |u|$.
-- **Independent inputs are assumed** (v1 limitation; dependent-input Shapley
-  effects are future work). Under independence, `S1 <= Sh <= ST` holds per
-  parameter and interaction variance is split fairly among participants.
+- **Independent inputs are assumed by default.** Under independence,
+  `S1 <= Sh <= ST` holds per parameter and interaction variance is split fairly
+  among participants.
+- `include_correlative=True` (HDMR backend only) folds in the correlative ANCOVA
+  variance `Sb = Cov(f_j, sum_{k!=j} f_k)/Var(Y)`, so the allocation reflects
+  correlation *present in the supplied `X`* — no joint distribution is declared,
+  it is read empirically from the samples. Indices may then be **negative** and
+  `S1 <= Sh <= ST` need not hold (both expected under dependence); efficiency
+  (`Sh.sum() == 1`) is preserved, and `explained_variance` becomes the true
+  emulator `Var(Y_hat)/Var(Y)`. This is the given-data ANCOVA notion, *not* the
+  conditional-variance Shapley estimator (Song, Nelson & Staum 2016) — the two
+  differ once inputs are correlated. Setting it with `backend="pce"` raises
+  `ValueError`.
 - `Sh`, `S1`, and `ST` are normalized by the surrogate's **total decomposed
   variance** `sum_u V_u`, not the empirical `Var(Y)`, so `Sh.sum()` (over the
   parameter axis) is exactly 1 — the Shapley efficiency property (Owen 2014).
@@ -1137,6 +1149,7 @@ class ShapleyResult:
     backend: str
     explained_variance: Array
     order: int
+    include_correlative: bool = False
 ```
 
 | Field | Shape | Description |
@@ -1148,6 +1161,7 @@ class ShapleyResult:
 | `backend` | `str` | Surrogate backend used, `"hdmr"` or `"pce"`. |
 | `explained_variance` | `()` / `(K,)` / `(T, K)` | Fraction of `Var(Y)` the surrogate captured, `sum_u V_u / Var(Y)`. Close to 1 for a good fit, below 1 when truncation or fit error leaves variance unexplained, above 1 when an overfit surrogate over-counts shared variance. |
 | `order` | `int` | Effective surrogate order actually used — the polynomial degree for `"pce"` (may be reduced from the requested value to fit the sample budget) or the HDMR expansion order for `"hdmr"`. |
+| `include_correlative` | `bool` | Whether the correlative ANCOVA variance (`Sb`) was folded in. When `True`, `Sh`/`S1`/`ST` may be negative and `S1 <= Sh <= ST` need not hold; efficiency (`Sh` sums to 1) still holds. Also exposed as a dataset attr by `to_dataset()`. |
 
 Shape contract:
 

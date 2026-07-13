@@ -91,6 +91,7 @@ def analyze_shapley(
     Y: Array,
     *,
     backend: Literal["hdmr", "pce"] = "pce",
+    include_correlative: bool = False,
     prenormalize: bool | None = None,
     maxorder: int | None = None,
     maxiter: int | None = None,
@@ -110,7 +111,7 @@ def analyze_shapley(
     surrogate's per-subset partial variances. No permutation sampling
     is involved.
 
-    Inputs are assumed independent. Under independence the Shapley
+    By default inputs are assumed independent. Under independence the Shapley
     effects satisfy ``S1_i <= Sh_i <= ST_i`` and split each interaction's
     variance equally among its participants. Indices are normalized by the
     surrogate's total decomposed variance ``sum_u V_u``, so ``Sh`` sums to
@@ -121,6 +122,20 @@ def analyze_shapley(
     surrogate over-counts shared variance); a ``UserWarning`` is emitted when
     it is far from 1. Interactions beyond the surrogate's truncation order
     (``maxorder`` / ``order``) are absent from the allocation.
+
+    Pass ``include_correlative=True`` (HDMR backend only) to additionally
+    credit the correlative ANCOVA variance ``Sb = Cov(f_j, sum_{k!=j} f_k) /
+    Var(Y)`` (Li et al. 2010), so the allocation reflects correlation *present
+    in the supplied ``X`` samples* -- no joint distribution is specified; it is
+    read empirically from the data. Two consequences follow: individual indices
+    may then be **negative** and the ordering ``S1 <= Sh <= ST`` need not hold
+    (both expected under dependence, not bugs), while efficiency (``Sh`` sums to
+    1) is preserved; and ``explained_variance`` becomes the true emulator
+    ``Var(Y_hat)/Var(Y)`` rather than the structural sum ``sum_j Sa_j``, which
+    over-counts under correlation. This is the given-data ANCOVA notion, not the
+    conditional-variance Shapley estimator (Song, Nelson & Staum 2016); the two
+    differ once inputs are correlated, so read the correlated indices as a
+    variance attribution, not as conditional-expectation Shapley values.
 
     For ``backend="pce"`` this normalization coincides with ``analyze_pce``,
     so ``S1``/``ST`` match it exactly. For ``backend="hdmr"`` the indices
@@ -144,6 +159,10 @@ def analyze_shapley(
             polynomial coefficients (Sudret, 2008) — exact for the fitted
             polynomial; ``"hdmr"`` fits B-spline component functions and
             additionally separates correlation-induced variance.
+        include_correlative: When ``True`` (requires ``backend="hdmr"``), fold
+            the correlative ANCOVA variance ``Sb`` into the allocation so the
+            indices reflect correlation in the supplied ``X`` (see above).
+            Defaults to False (independent-input allocation).
         prenormalize: HDMR-only; see ``analyze_hdmr``. Defaults to False.
         maxorder: HDMR-only; maximum expansion order (1-3). Defaults to 2.
         maxiter: HDMR-only; backfitting iterations. Defaults to 100.
@@ -161,9 +180,16 @@ def analyze_shapley(
 
     Raises:
         ValueError: If ``backend`` is unknown, a kwarg belonging to the
-            non-selected backend is explicitly set, or ``Y``'s layout cannot
-            be resolved against ``X``'s row count.
+            non-selected backend is explicitly set, ``include_correlative`` is
+            set with a non-HDMR backend, or ``Y``'s layout cannot be resolved
+            against ``X``'s row count.
     """
+    if include_correlative and backend != "hdmr":
+        raise ValueError(
+            "include_correlative=True requires backend='hdmr'; the PCE backend "
+            "assumes independent inputs and has no correlative (Sb) term."
+        )
+
     resolved = _resolve_backend_kwargs(
         backend,
         hdmr_kwargs={
@@ -203,6 +229,14 @@ def analyze_shapley(
         # No zero-variance guard needed here: _ancova already emits NaN Sa for
         # constant output slices, which propagates through the sum.
         partial = result.Sa
+        if include_correlative:
+            # Fold in the correlative ANCOVA share Sb (per term, possibly
+            # negative). Sa_j + Sb_j = Cov(f_j, Y_hat)/Var(Y), so the sum over
+            # terms telescopes to Var(Y_hat)/Var(Y) -- the true emulator R2,
+            # which is the correct explained fraction under correlation (the
+            # structural sum sum_j Sa_j double-counts). Sb aligns term-for-term
+            # with Sa (same _ancova call, same emulator columns).
+            partial = partial + result.Sb
         explained_variance = partial.sum(axis=-1)
         effective_order = emulator["maxorder"]
     else:
@@ -241,6 +275,7 @@ def analyze_shapley(
         backend=backend,
         explained_variance=explained_variance,
         order=int(effective_order),
+        include_correlative=include_correlative,
     )
 
 

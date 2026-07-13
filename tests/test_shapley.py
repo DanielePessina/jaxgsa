@@ -9,6 +9,7 @@ import xarray as xr
 
 import gsax
 from gsax.benchmarks import ishigami, linear, sobol_g
+from gsax.problem import GaussianInputSpec, Problem
 from gsax.shapley._engine import build_membership, shapley_from_variances
 
 # ---------------------------------------------------------------------------
@@ -265,6 +266,131 @@ def test_pce_order_reduction_surfaced():
     with pytest.warns(UserWarning, match="order reduced"):
         result = gsax.analyze_shapley(ishigami.PROBLEM, X, Y, backend="pce", order=7)
     assert result.order < 7
+
+
+# ---------------------------------------------------------------------------
+# Correlated inputs: optional ANCOVA (Sb) fold-in
+# ---------------------------------------------------------------------------
+
+
+def _correlated_gaussian(rho, coeffs=(1.0, 2.0), sigmas=(1.0, 1.0), *, n=16384, seed=0):
+    """Correlated Gaussian design + additive linear output.
+
+    Correlation enters purely through the samples (the empirical-from-X
+    contract): X = Z @ chol(Sigma).T with the declared marginals matching the
+    per-column variances, and Y = X @ coeffs.
+    """
+    d = len(coeffs)
+    problem = Problem.from_dict(
+        {
+            f"x{i}": GaussianInputSpec(dist="gaussian", mean=0.0, variance=sigmas[i] ** 2)
+            for i in range(d)
+        }
+    )
+    corr = np.eye(d)
+    corr[0, 1] = corr[1, 0] = rho
+    cov = np.outer(sigmas, sigmas) * corr
+    L = np.linalg.cholesky(cov)
+    X = np.random.default_rng(seed).standard_normal((n, d)) @ L.T
+    Y = X @ np.asarray(coeffs, dtype=float)
+    return problem, jnp.asarray(X), jnp.asarray(Y)
+
+
+def test_correlative_efficiency():
+    """Folding Sb in preserves the Shapley efficiency property (Sh sums to 1)."""
+    problem, X, Y = _correlated_gaussian(0.6)
+    res = gsax.analyze_shapley(problem, X, Y, backend="hdmr", include_correlative=True, m=5)
+    np.testing.assert_allclose(float(np.asarray(res.Sh).sum()), 1.0, atol=1e-4)
+
+
+def test_correlative_matches_ancova_closed_form():
+    """Additive linear-Gaussian: folded Sh matches the derived ANCOVA closed form.
+
+    For Y = c1 X1 + c2 X2 with correlation rho, a = c1 sigma1, b = c2 sigma2,
+    the Sa+Sb fold-in gives Sh1 = a(a+rho b)/Var(Y), Sh2 = b(b+rho a)/Var(Y)
+    (Var(Y) = a^2 + b^2 + 2 rho a b). This differs from the conditional-variance
+    Shapley by rho^2 (b^2 - a^2) / (2 Var(Y)) -- so it pins the ANCOVA notion,
+    not that estimator.
+    """
+    rho, (c1, c2), (s1, s2) = 0.5, (1.0, 2.0), (1.0, 1.0)
+    problem, X, Y = _correlated_gaussian(rho, (c1, c2), (s1, s2))
+    a, b = c1 * s1, c2 * s2
+    var_y = a**2 + b**2 + 2 * rho * a * b
+    expected = np.array([a * (a + rho * b), b * (b + rho * a)]) / var_y  # [2/7, 5/7]
+
+    res = gsax.analyze_shapley(problem, X, Y, backend="hdmr", include_correlative=True, m=5)
+    np.testing.assert_allclose(np.asarray(res.Sh), expected, atol=0.01)
+
+
+def test_correlative_matches_hdmr_sa_plus_sb():
+    """White-box: the fold-in reproduces the Shapley allocation of analyze_hdmr's
+    Sa+Sb exactly, independent of what the component functions are."""
+    problem, X, Y = _correlated_gaussian(0.5)
+    hd = gsax.analyze_hdmr(problem, X, Y, m=5)
+    subsets = [(i,) for i in range(problem.num_vars)]
+    subsets += [tuple(u) for u in hd.emulator["c2"]]
+    subsets += [tuple(u) for u in hd.emulator["c3"]]
+    membership = build_membership(subsets, problem.num_vars)
+    partial = np.asarray(hd.Sa) + np.asarray(hd.Sb)
+    V = partial / partial.sum()
+    sh_expected, _, _ = shapley_from_variances(jnp.asarray(V), membership)
+
+    res = gsax.analyze_shapley(problem, X, Y, backend="hdmr", include_correlative=True, m=5)
+    np.testing.assert_allclose(np.asarray(res.Sh), np.asarray(sh_expected), atol=1e-5)
+
+
+def test_correlative_reduces_to_structural_under_independence():
+    """With independent X (rho=0) folding Sb in is a no-op (Sb ~ 0), so the
+    result matches both the structural run and the analytic Shapley."""
+    problem, X, Y = _correlated_gaussian(0.0)
+    folded = gsax.analyze_shapley(problem, X, Y, backend="hdmr", include_correlative=True, m=5)
+    structural = gsax.analyze_shapley(
+        problem, X, Y, backend="hdmr", include_correlative=False, m=5
+    )
+    np.testing.assert_allclose(np.asarray(folded.Sh), np.asarray(structural.Sh), atol=5e-3)
+    # Analytic additive Shapley = S1 = c_j^2 var_j / Var(Y) = [1/5, 4/5].
+    np.testing.assert_allclose(np.asarray(folded.Sh), [0.2, 0.8], atol=0.01)
+
+
+def test_correlative_index_can_be_negative():
+    """Strong anti-correlation drives a correlated index negative; Sh still
+    sums to 1. Documents the signed-index behaviour."""
+    problem, X, Y = _correlated_gaussian(-0.8)
+    res = gsax.analyze_shapley(problem, X, Y, backend="hdmr", include_correlative=True, m=5)
+    Sh = np.asarray(res.Sh)
+    assert np.any(Sh < 0.0)
+    np.testing.assert_allclose(float(Sh.sum()), 1.0, atol=1e-4)
+
+
+def test_correlative_explained_variance_is_r2():
+    """Folded explained_variance equals the true emulator R^2 = Var(Y_hat)/Var(Y)
+    = sum_j S_j, not the structural sum sum_j Sa_j."""
+    problem, X, Y = _correlated_gaussian(0.5)
+    res = gsax.analyze_shapley(problem, X, Y, backend="hdmr", include_correlative=True, m=5)
+    hd = gsax.analyze_hdmr(problem, X, Y, m=5)
+    np.testing.assert_allclose(
+        float(res.explained_variance), float(np.asarray(hd.S).sum()), atol=1e-5
+    )
+    assert 0.0 < float(res.explained_variance) <= 1.05
+
+
+@pytest.mark.parametrize("backend", ["pce", None])
+def test_correlative_requires_hdmr(linear_data, backend):
+    """include_correlative is HDMR-only; the PCE backend (explicit or default)
+    raises rather than silently ignoring it."""
+    X, Y = linear_data
+    kwargs = {} if backend is None else {"backend": backend}
+    with pytest.raises(ValueError, match="hdmr"):
+        gsax.analyze_shapley(linear.PROBLEM, X, Y, include_correlative=True, **kwargs)
+
+
+def test_correlative_provenance_on_result_and_dataset():
+    """The result records the flag and surfaces it as a dataset attr."""
+    problem, X, Y = _correlated_gaussian(0.5)
+    res = gsax.analyze_shapley(problem, X, Y, backend="hdmr", include_correlative=True, m=5)
+    assert res.include_correlative is True
+    assert "include_correlative" in repr(res)
+    assert res.to_dataset().attrs["include_correlative"] is True
 
 
 def test_hdmr_order_field(ishigami_hdmr_shapley):
