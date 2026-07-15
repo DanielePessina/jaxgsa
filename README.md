@@ -325,14 +325,15 @@ print("S1:", result.S1)        # (D,) given-data first-order Sobol
 
 ### Optimal transport (Wasserstein-based, moment-independent)
 
-The OT index measures how far knowing an input moves the **entire output
-distribution**, as the class-averaged squared 2-Wasserstein distance between
-conditional and unconditional outputs on a [0, 1] scale (Borgonovo et al.,
-2024). Every index splits into an **advective** part (pure mean shift —
-exactly half the first-order Sobol index) and a **diffusive** part (changes
-in spread and shape), so you can see *how* an input matters, not just how
-much. Conditioning is rank-based: mixed uniform/Gaussian marginals and
-correlated inputs work unchanged.
+The OT index measures how far knowing an input moves the entire output
+distribution: the class-averaged squared 2-Wasserstein distance between
+conditional and unconditional outputs, on a [0, 1] scale (Borgonovo et al.,
+2024). Every index splits exactly into an **advective** part (mean shift,
+equal to half the first-order Sobol index) and a **diffusive** part (changes
+in spread and shape) — an input with a large advective part moves the
+output, one with a large diffusive part reshapes it. Conditioning is
+rank-based: mixed uniform/Gaussian marginals and correlated inputs work
+unchanged.
 
 ```python
 import jax.numpy as jnp
@@ -349,7 +350,7 @@ print("diffusive:", result.diffusive)  # spread/shape part
 
 # Time-series outputs: one index per input over each output's whole
 # trajectory (point-cloud transport via pure-JAX Sinkhorn)
-# result = gsax.analyze_optimal_transport(PROBLEM, X, Y_tk, mode="joint-over-time")
+# result = gsax.analyze_optimal_transport(PROBLEM, X, Y_tk, mode="trajectory")
 ```
 
 ## Usage

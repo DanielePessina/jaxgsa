@@ -8,7 +8,7 @@ analysis is JIT-compiled and runs on CPU, GPU, or TPU without code changes.
 
 This page walks through one complete analysis with Sobol indices, the most
 widely used method. Once it runs, the [Methods guide](/guide/methods) explains
-how to choose among the ten methods gsax provides.
+how to choose among the eleven methods gsax provides.
 
 ## Installation
 
@@ -136,7 +136,7 @@ expanded Saltelli layout cannot be reconstructed with an identity mapping alone.
 Start with the core workflow, then branch into the example that matches your
 next problem:
 
-- [Methods](/guide/methods) -- compare all ten methods before choosing a workflow
+- [Methods](/guide/methods) -- compare all eleven methods before choosing a workflow
 - [Basic Example (Ishigami)](/examples/basic) -- run the canonical scalar-output Sobol analysis end to end
 - [Non-Uniform Inputs](/examples/non-uniform-inputs) -- mix uniform, Gaussian, and truncated Gaussian Sobol marginals in one `Problem`
 - [Save and Reload Samples](/examples/save-load) -- persist a `SamplingResult` and reuse it across runs

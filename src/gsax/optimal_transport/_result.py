@@ -23,12 +23,12 @@ class OTResult:
 
     Index shapes depend on the analysis mode:
 
-    - ``"separate"``: one index per output column -- ``(D,)`` for scalar
+    - ``"univariate"``: one index per output column -- ``(D,)`` for scalar
       outputs, ``(K, D)`` for multi-output, ``(T, K, D)`` for time
       series.
-    - ``"joint"``: one index per input over the joint output
+    - ``"multivariate"``: one index per input over the joint output
       distribution -- ``(D,)``.
-    - ``"joint-over-time"``: one index per input per output, treating
+    - ``"trajectory"``: one index per input per output, treating
       each output's time course as a point cloud -- ``(K, D)``.
 
     Confidence arrays add a leading axis of size 2 (``[lower, upper]``).
@@ -56,8 +56,8 @@ class OTResult:
             clearly above this floor are indistinguishable from noise.
             Same shape as ``ot`` without the trailing parameter axis;
             ``None`` unless the analysis ran with ``dummy=True``.
-        mode: Analysis mode that produced these shapes (``"separate"``,
-            ``"joint"``, or ``"joint-over-time"``).
+        mode: Analysis mode that produced these shapes (``"univariate"``,
+            ``"multivariate"``, or ``"trajectory"``).
         problem: Problem definition used for the analysis.
     """
 

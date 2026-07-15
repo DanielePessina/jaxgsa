@@ -8,8 +8,9 @@ reacts to changes in spread, tails and shape that variance-based indices
 miss, and decomposes into an *advective* (location-shift) component --
 exactly half the given-data first-order Sobol index -- plus a
 *diffusive* (spread/shape) remainder. Scalar and per-column analyses use
-exact 1-D optimal transport (no solver); joint analyses over
-multivariate/time-series outputs use entropic (Sinkhorn) transport.
+exact 1-D optimal transport (no solver); the multivariate and
+trajectory modes transport output point clouds with entropic
+(Sinkhorn) regularization.
 Conditioning is rank-based, so any input marginals (uniform, Gaussian,
 mixed) and correlated inputs are supported.
 

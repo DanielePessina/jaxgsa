@@ -24,7 +24,7 @@ Common situations:
 - **"My inputs are correlated."** Sobol', PCE, eFAST, DGSM, Morris, and Shapley all assume independent inputs. Use HDMR (which separates structural from correlation-induced variance), or HSIC / PAWN / Borgonovo delta / optimal transport (which make no independence assumption).
 - **"My output distribution is skewed or heavy-tailed."** Use [PAWN](#pawn-cdf-based-sensitivity), [Borgonovo delta](#borgonovo-delta-density-based-sensitivity), or [optimal transport](#optimal-transport-wasserstein-based-sensitivity) — all compare whole output distributions rather than variances.
 - **"I want to know *how* an input matters — shift vs shape."** Use [optimal transport](#optimal-transport-wasserstein-based-sensitivity): its index decomposes exactly into an advective (mean-shift, $= S_1/2$) and a diffusive (spread/shape) component.
-- **"I want one number per input for a whole trajectory."** Use [optimal transport](#optimal-transport-wasserstein-based-sensitivity) with `mode="joint-over-time"` — point-cloud transport scores each input against the entire time course jointly.
+- **"I want one number per input for a whole trajectory."** Use [optimal transport](#optimal-transport-wasserstein-based-sensitivity) with `mode="trajectory"` — point-cloud transport scores each input against the entire time course jointly.
 - **"I want one fair importance number per parameter that sums to 1."** Use [Shapley effects](#shapley-effects).
 - **"I also want a fast emulator of my model."** Use HDMR (`emulate_hdmr`) or PCE (`emulate_pce`).
 
@@ -658,17 +658,17 @@ So the OT index subsumes the variance-based first-order view and quantifies what
 ### How it works
 
 1. For each input, samples are split into `n_partitions` **equal-frequency classes** by the input's rank (default 25). Rank-based conditioning is distribution-free: uniform, Gaussian, or mixed marginals work unchanged, and monotone input transforms change nothing. Correlated inputs are supported — the index then measures total, correlation-inclusive influence.
-2. Per class, $W_2^2$ between the conditional and unconditional output samples is computed. In the default `mode="separate"` (per output column) this uses the **closed form of 1-D optimal transport** — both empirical quantile functions evaluated at the $N$ uniform mass points via sorting, no iterative solver. The joint modes (`"joint"`, `"joint-over-time"`) treat the output vector as a **point cloud** and solve entropic transport with a pure-JAX log-domain **Sinkhorn** solver (regularization `epsilon`, reported cost is the unregularized $\langle P, C\rangle$).
-3. Class results are averaged with class-size weights and divided by $2\,\mathrm{Var}(Y)$ (joint modes: $2\,\mathrm{Tr}\,\mathrm{Cov}(Y)$, with per-column standardization on by default so no output dominates through its units).
+2. Per class, $W_2^2$ between the conditional and unconditional output samples is computed. In the default `mode="univariate"` (per output column) this uses the **closed form of 1-D optimal transport** — both empirical quantile functions evaluated at the $N$ uniform mass points via sorting, no iterative solver. The `"multivariate"` and `"trajectory"` modes treat the output vector as a **point cloud** and solve entropic transport with a pure-JAX log-domain **Sinkhorn** solver (regularization `epsilon`, reported cost is the unregularized $\langle P, C\rangle$).
+3. Class results are averaged with class-size weights and divided by $2\,\mathrm{Var}(Y)$ (point-cloud modes: $2\,\mathrm{Tr}\,\mathrm{Cov}(Y)$, with per-column standardization on by default so no output dominates through its units).
 
-Entropic and finite-sample bias keep joint-mode indices of irrelevant inputs strictly positive. Pass `dummy=True` to push a synthetic, provably independent input through the identical pipeline: its index (`ot_dummy`) is the irrelevance floor to compare against.
+Entropic and finite-sample bias keep point-cloud-mode indices of irrelevant inputs strictly positive. Pass `dummy=True` to run a synthetic, provably independent input through the same estimator: its index (`ot_dummy`) is the irrelevance floor to compare against.
 
 ### How to use it
 
 1. `gsax.sample_mc()` or any existing $(X, Y)$ data — no structured design required.
-2. `gsax.analyze_optimal_transport()` computes `ot`, `advective`, and `diffusive` per input (and per output column in `"separate"` mode), with optional stratified bootstrap confidence intervals.
+2. `gsax.analyze_optimal_transport()` computes `ot`, `advective`, and `diffusive` per input (and per output column in `"univariate"` mode), with optional stratified bootstrap confidence intervals.
 
-Pick the mode by the question: `"separate"` for per-column indices across `(N,)`/`(N, K)`/`(N, T, K)` outputs, `"joint"` for one index per input over the flattened joint output, `"joint-over-time"` for one index per input per output over the whole time course. Bootstrap in joint modes costs `n_bootstrap * D * n_partitions` Sinkhorn solves — keep it modest.
+Pick the mode by the question: `"univariate"` for per-column indices across `(N,)`/`(N, K)`/`(N, T, K)` outputs, `"multivariate"` for one index per input over the flattened joint output, `"trajectory"` for one index per input per output over the whole time course. Bootstrap in the point-cloud modes costs `n_bootstrap * D * n_partitions` Sinkhorn solves, so keep it modest.
 
 ### Index summary
 
@@ -682,7 +682,7 @@ Pick the mode by the question: `"separate"` for per-column indices across `(N,)`
 **When to use optimal transport:**
 - You want a moment-independent index that still ties exactly to the variance-based world
 - You want to distinguish inputs that *move* the output from inputs that *reshape* it
-- You want one index per input for a whole trajectory or multivariate output (joint modes)
+- You want one index per input for a whole trajectory or multivariate output (`multivariate` / `trajectory` modes)
 - Your inputs have mixed marginals or are correlated
 
 ### Reference

@@ -15,13 +15,13 @@
     advective (location-shift) component equals half the given-data
     first-order Sobol index, the diffusive remainder captures changes in
     spread, tails and shape;
-  - three output modes: `"separate"` (default; per output column via the
+  - three output modes: `"univariate"` (default; per output column via the
     closed-form 1-D sorted-quantile coupling — no iterative solver),
-    `"joint"` (one index per input over the flattened joint output as a
-    point cloud), and `"joint-over-time"` (one index per input per output
+    `"multivariate"` (one index per input over the flattened joint output as a
+    point cloud), and `"trajectory"` (one index per input per output
     over each output's whole time course), covering scalar, multi-output,
     and time-series `Y`;
-  - a pure-JAX **log-domain Sinkhorn** solver for the joint modes (entropic
+  - a pure-JAX **log-domain Sinkhorn** solver for the point-cloud modes (entropic
     regularization on the max-scaled cost, unregularized `<P, C>` reported,
     single post-hoc convergence warning), with per-output standardization
     on by default;
@@ -33,8 +33,8 @@
     entropic/finite-sample index floor;
   - percentile bootstrap confidence intervals sharing one scanned code path
     with the point estimate, and `OTResult.to_dataset()` xarray export.
-  Clean-room implementation from the published equations; numerics are
-  validated in the test suite against POT (`ot.wasserstein_1d`,
+  Implemented from the published equations; numerics are validated in
+  the test suite against POT (`ot.wasserstein_1d`,
   `ot.sinkhorn2`, `ot.emd2`; new `pot` dev extra), analytic Gaussian closed
   forms (new `gsax.benchmarks.gaussian_linear.ANALYTICAL_OT` constant), the
   published Ishigami anchor, and the `2 * advective == S1` identity.

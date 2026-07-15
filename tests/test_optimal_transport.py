@@ -47,7 +47,7 @@ class TestOTBasic:
         X, Y = ishigami_data
         result = analyze(ishigami.PROBLEM, X, Y)
         assert isinstance(result, OTResult)
-        assert result.mode == "separate"
+        assert result.mode == "univariate"
 
     def test_shape_scalar_output(self, ishigami_data):
         X, Y = ishigami_data
@@ -130,7 +130,7 @@ class TestOTPOTComparison:
         """Per-bin 1-D W2^2 vs POT in the exact regime (n_m divides N)."""
         ot = pytest.importorskip("ot")
         from gsax._partition import _build_class_indices, _class_layout
-        from gsax.optimal_transport._analyze import _ot_1d_kernel
+        from gsax.optimal_transport._analyze import _ot_1d_kernel, _quantile_ranks
 
         N, M = 1000, 25  # n_m = 40 divides N -> exact quantile coupling
         key = jax.random.PRNGKey(1)
@@ -141,7 +141,12 @@ class TestOTPOTComparison:
         all_idx = jnp.arange(N, dtype=jnp.int32)[None, :]
         cls_idx = _build_class_indices(X, all_idx, jnp.asarray(take))
         ot_idx, _, _, _ = _ot_1d_kernel(
-            Y[:, None], all_idx, cls_idx, jnp.asarray(mask), jnp.asarray(sizes)
+            Y[:, None],
+            all_idx,
+            cls_idx,
+            jnp.asarray(mask),
+            jnp.asarray(sizes),
+            jnp.asarray(_quantile_ranks(sizes, N)),
         )
 
         y_np = np.asarray(Y, dtype=np.float64)
@@ -188,16 +193,23 @@ class TestOTPOTComparison:
         assert prev == pytest.approx(emd, rel=0.25)  # loose: eps=0.008 is still biased
 
     def test_sinkhorn_pad_invariance(self):
-        """Padded target columns with -inf log-weight change nothing."""
+        """Padded target columns (zero mass, zeroed cost) change nothing.
+
+        Pads are clamped duplicates of a real sample, so the kernel zeroes
+        their cost columns before solving -- otherwise an outlier pad
+        would set the max-cost scale and change the effective epsilon.
+        This mimics that contract with deliberately extreme pad points.
+        """
         from gsax.optimal_transport._solver import _sinkhorn_w2
 
         rng = np.random.default_rng(3)
         N, P, P_pad, E = 100, 20, 27, 3
         Zu = rng.normal(size=(N, E))
         Zc = rng.normal(size=(P, E))
-        Zc_pad = np.vstack([Zc, np.zeros((P_pad - P, E))])
+        Zc_pad = np.vstack([Zc, np.full((P_pad - P, E), 50.0)])  # outlier pads
         C = ((Zu[:, None, :] - Zc[None, :, :]) ** 2).sum(-1)
         C_pad = ((Zu[:, None, :] - Zc_pad[None, :, :]) ** 2).sum(-1)
+        C_pad[:, P:] = 0.0  # the kernel's mask-zeroing of pad columns
         log_b = np.full(P_pad, -np.inf)
         log_b[:P] = -np.log(P)
 
@@ -316,35 +328,37 @@ class TestOTAnalytic:
         np.testing.assert_allclose(np.asarray(result.ot), expected, atol=0.02)
 
 
-class TestOTJoint:
-    def test_joint_shape(self, multi_output_data):
+class TestOTPointCloud:
+    def test_multivariate_shape(self, multi_output_data):
         X, Y2, _ = multi_output_data
-        result = analyze(ishigami.PROBLEM, X, Y2, mode="joint", n_partitions=10)
+        result = analyze(ishigami.PROBLEM, X, Y2, mode="multivariate", n_partitions=10)
         assert result.ot.shape == (3,)
-        assert result.mode == "joint"
+        assert result.mode == "multivariate"
 
-    def test_joint_over_time_shape(self, multi_output_data):
+    def test_trajectory_shape(self, multi_output_data):
         X, _, Y3 = multi_output_data
-        result = analyze(ishigami.PROBLEM, X, Y3, mode="joint-over-time", n_partitions=10)
+        result = analyze(ishigami.PROBLEM, X, Y3, mode="trajectory", n_partitions=10)
         assert result.ot.shape == (2, 3)  # (K, D)
-        assert result.mode == "joint-over-time"
+        assert result.mode == "trajectory"
 
-    def test_joint_decomposition_sums_to_total(self, multi_output_data):
+    def test_multivariate_decomposition_sums_to_total(self, multi_output_data):
         X, Y2, _ = multi_output_data
-        result = analyze(ishigami.PROBLEM, X, Y2, mode="joint", n_partitions=10)
+        result = analyze(ishigami.PROBLEM, X, Y2, mode="multivariate", n_partitions=10)
         np.testing.assert_allclose(
             np.asarray(result.ot),
             np.asarray(result.advective + result.diffusive),
             atol=1e-5,
         )
 
-    def test_joint_scalar_close_to_separate(self, ishigami_data):
-        """On scalar Y small-eps joint transport approaches the exact 1-D index."""
+    def test_multivariate_scalar_close_to_univariate(self, ishigami_data):
+        """On scalar Y small-eps small-eps point-cloud transport approaches the exact 1-D index."""
         X, Y = ishigami_data
-        # Subsample: the joint mode solves N x (N/M) transport problems.
+        # Subsample: the multivariate mode solves N x (N/M) transport problems.
         Xs, Ys = X[:2000], Y[:2000]
         sep = analyze(ishigami.PROBLEM, Xs, Ys, n_partitions=10)
-        joint = analyze(ishigami.PROBLEM, Xs, Ys, mode="joint", n_partitions=10, epsilon=0.005)
+        joint = analyze(
+            ishigami.PROBLEM, Xs, Ys, mode="multivariate", n_partitions=10, epsilon=0.005
+        )
         sep_ot = np.asarray(sep.ot)
         joint_ot = np.asarray(joint.ot)
         # Entropic + finite-sample bias is strictly upward.
@@ -354,9 +368,9 @@ class TestOTJoint:
     def test_standardize_matters_for_mismatched_scales(self, multi_output_data):
         X, Y2, _ = multi_output_data
         Y_scaled = Y2.at[:, 1].multiply(1e4)
-        r_std = analyze(ishigami.PROBLEM, X, Y_scaled, mode="joint", n_partitions=10)
+        r_std = analyze(ishigami.PROBLEM, X, Y_scaled, mode="multivariate", n_partitions=10)
         r_raw = analyze(
-            ishigami.PROBLEM, X, Y_scaled, mode="joint", n_partitions=10, standardize=False
+            ishigami.PROBLEM, X, Y_scaled, mode="multivariate", n_partitions=10, standardize=False
         )
         assert not np.allclose(np.asarray(r_std.ot), np.asarray(r_raw.ot), atol=1e-3)
 
@@ -367,7 +381,7 @@ class TestOTJoint:
                 ishigami.PROBLEM,
                 X[:500],
                 Y2[:500],
-                mode="joint",
+                mode="multivariate",
                 n_partitions=5,
                 max_iter=1,
             )
@@ -401,10 +415,15 @@ class TestOTBootstrap:
         assert r1.ot_conf is not None and r2.ot_conf is not None
         assert not np.array_equal(np.asarray(r1.ot_conf), np.asarray(r2.ot_conf))
 
-    def test_joint_bootstrap(self, multi_output_data):
+    def test_multivariate_bootstrap(self, multi_output_data):
         X, Y2, _ = multi_output_data
         result = analyze(
-            ishigami.PROBLEM, X[:1500], Y2[:1500], mode="joint", n_partitions=5, n_bootstrap=5
+            ishigami.PROBLEM,
+            X[:1500],
+            Y2[:1500],
+            mode="multivariate",
+            n_partitions=5,
+            n_bootstrap=5,
         )
         assert result.ot_conf is not None
         assert result.ot_conf.shape == (2, 3)
@@ -468,10 +487,10 @@ class TestOTEdgeCases:
         assert float(result.ot_dummy) < float(np.asarray(result.ot).min())
         assert float(result.ot_dummy) < 0.05
 
-    def test_dummy_joint_mode(self, multi_output_data):
+    def test_dummy_multivariate_mode(self, multi_output_data):
         X, Y2, _ = multi_output_data
         result = analyze(
-            ishigami.PROBLEM, X[:1500], Y2[:1500], mode="joint", n_partitions=5, dummy=True
+            ishigami.PROBLEM, X[:1500], Y2[:1500], mode="multivariate", n_partitions=5, dummy=True
         )
         assert result.ot_dummy is not None
         assert result.ot_dummy.shape == ()
@@ -497,12 +516,12 @@ class TestOTValidation:
         X, Y = ishigami_data
         # cast so the deliberately invalid literal exercises the runtime check
         with pytest.raises(ValueError, match="mode"):
-            analyze(ishigami.PROBLEM, X, Y, mode=cast(Literal["separate"], "sliced"))
+            analyze(ishigami.PROBLEM, X, Y, mode=cast(Literal["univariate"], "sliced"))
 
-    def test_joint_over_time_needs_3d(self, ishigami_data):
+    def test_trajectory_needs_3d(self, ishigami_data):
         X, Y = ishigami_data
-        with pytest.raises(ValueError, match="joint-over-time"):
-            analyze(ishigami.PROBLEM, X, Y, mode="joint-over-time")
+        with pytest.raises(ValueError, match="trajectory"):
+            analyze(ishigami.PROBLEM, X, Y, mode="trajectory")
 
     def test_bad_n_partitions(self, ishigami_data):
         X, Y = ishigami_data
@@ -548,7 +567,7 @@ class TestOTXarray:
         ds = analyze(ishigami.PROBLEM, X, Y).to_dataset()
         assert set(ds.data_vars) == {"ot", "advective", "diffusive"}
         assert ds["ot"].dims == ("param",)
-        assert ds.attrs["mode"] == "separate"
+        assert ds.attrs["mode"] == "univariate"
 
     def test_time_series_dims(self, multi_output_data):
         X, _, Y3 = multi_output_data
@@ -556,11 +575,11 @@ class TestOTXarray:
         assert ds["ot"].dims == ("time", "output", "param")
         assert list(ds.coords["time"].values) == [0.5, 1.0]
 
-    def test_joint_over_time_dims(self, multi_output_data):
+    def test_trajectory_dims(self, multi_output_data):
         X, _, Y3 = multi_output_data
-        ds = analyze(ishigami.PROBLEM, X, Y3, mode="joint-over-time", n_partitions=10).to_dataset()
+        ds = analyze(ishigami.PROBLEM, X, Y3, mode="trajectory", n_partitions=10).to_dataset()
         assert ds["ot"].dims == ("output", "param")
-        assert ds.attrs["mode"] == "joint-over-time"
+        assert ds.attrs["mode"] == "trajectory"
 
     def test_conf_and_dummy_vars(self, ishigami_data):
         X, Y = ishigami_data

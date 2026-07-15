@@ -3,9 +3,10 @@
 Implements the standard entropic-regularization scheme for discrete
 optimal transport (Cuturi 2013; Peyre & Cuturi 2019, "Computational
 Optimal Transport") with log-domain scaling updates for numerical
-stability. Used by the joint modes of :func:`gsax.optimal_transport.analyze`
+stability. Used by the multivariate and trajectory modes of
+:func:`gsax.optimal_transport.analyze`
 to transport the unconditional output point cloud onto each conditional
-class; the ``"separate"`` mode never needs a solver (1-D optimal transport
+class; the ``"univariate"`` mode never needs a solver (1-D optimal transport
 has a closed form via sorted quantiles).
 
 The solver is a pure jit/vmap-compatible function: it never raises on
@@ -27,6 +28,11 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 from jax.scipy.special import logsumexp
+
+# Iterations between convergence checks: measuring the marginal residual
+# costs as much as one scaling update, so checking every iteration would
+# tax the whole loop by ~50%.
+_CHECK_EVERY = 10
 
 
 def _sinkhorn_w2(
@@ -63,8 +69,9 @@ def _sinkhorn_w2(
 
     Returns:
         A tuple ``(cost, err)`` where ``cost`` is the transport cost
-        ``<P, C>`` on the original cost scale and ``err`` is the final L1
-        target-marginal violation (``err <= tol`` means converged).
+        ``<P, C>`` on the original cost scale and ``err`` is the L1
+        target-marginal violation at exit (``err <= tol`` means
+        converged; it is refreshed on the final iteration).
     """
     dtype = C.dtype
     N = C.shape[0]
@@ -74,20 +81,28 @@ def _sinkhorn_w2(
     log_K = -(C / c_max) / epsilon  # (N, P) log-kernel
     log_a = jnp.full((N,), -jnp.log(N), dtype=dtype)
 
-    def _err(state: tuple[Array, Array, Array, Array]) -> Array:
+    def _err(log_f: Array, log_g: Array) -> Array:
         """L1 violation of the target marginal of the implied plan."""
-        log_f, log_g, _, _ = state
         log_plan = log_f[:, None] + log_K + log_g[None, :]
         return jnp.abs(jnp.exp(logsumexp(log_plan, axis=0)) - b).sum()
 
     def _body(state: tuple[Array, Array, Array, Array]):
-        log_f, log_g, it, _ = state
+        log_f, log_g, it, err = state
         # Alternate scaling: after the f-update the source marginal is
         # exact, so convergence is measured on the target side.
         log_g = log_b - logsumexp(log_K + log_f[:, None], axis=0)
         log_f = log_a - logsumexp(log_K + log_g[None, :], axis=1)
-        state = (log_f, log_g, it + 1, state[3])
-        return (log_f, log_g, it + 1, _err(state))
+        it = it + 1
+        # Measuring the residual costs a third full (N, P) reduction per
+        # iteration, so amortize it: refresh every _CHECK_EVERY iterations
+        # and on the final one; the carried value persists in between (it
+        # is > tol by construction, or the loop would have exited).
+        err = jax.lax.cond(
+            (it % _CHECK_EVERY == 0) | (it >= max_iter),
+            lambda: _err(log_f, log_g),
+            lambda: err,
+        )
+        return (log_f, log_g, it, err)
 
     def _cond(state: tuple[Array, Array, Array, Array]) -> Array:
         _, _, it, err = state

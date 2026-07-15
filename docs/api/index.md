@@ -50,7 +50,7 @@ Array shapes throughout this reference use four letters:
 
 Model outputs `Y` are `(N,)` for a scalar output, `(N, K)` for multi-output,
 or `(N, T, K)` for time-series multi-output — the same contract across all
-ten methods. How a 2D `Y` is read depends on `problem.output_names`:
+eleven methods. How a 2D `Y` is read depends on `problem.output_names`:
 
 - Without `output_names`, a 2D `Y` is always `(N, K)`, never `(N, T)`.
 - With exactly **one** entry in `output_names` and more than one column, a 2D
@@ -2317,9 +2317,9 @@ Related links:
 ### `analyze_optimal_transport()` {#analyze-optimal-transport}
 
 Compute optimal-transport sensitivity indices (Borgonovo, Figalli, Plischke &
-Savaré, 2024) with an advective/diffusive decomposition, via a clean-room
-given-data estimator (numerically validated against POT and analytic closed
-forms).
+Savaré, 2024) with an advective/diffusive decomposition. Works on any
+(X, Y) sample; numerically validated against POT and analytic closed
+forms.
 
 ```python
 def analyze_optimal_transport(
@@ -2327,7 +2327,7 @@ def analyze_optimal_transport(
     X: Array,
     Y: Array,
     *,
-    mode: Literal["separate", "joint", "joint-over-time"] = "separate",
+    mode: Literal["univariate", "multivariate", "trajectory"] = "univariate",
     n_partitions: int = 25,
     standardize: bool = True,
     epsilon: float = 0.01,
@@ -2346,9 +2346,9 @@ def analyze_optimal_transport(
 | `problem` | `Problem` | — | Problem definition with D parameters. Marginals are not used (rank-based conditioning); correlated inputs are supported. |
 | `X` | `Array` | — | Input sample matrix `(N, D)` from any sampling strategy. |
 | `Y` | `Array` | — | Model output `(N,)`, `(N, K)`, or `(N, T, K)`. |
-| `mode` | `str` | `"separate"` | `"separate"`: exact 1-D transport per output column (indices `(T, K, D)`, squeezed). `"joint"`: one index per input over the flattened joint output (`(D,)`), entropic Sinkhorn. `"joint-over-time"`: one index per input per output over the whole time course (`(K, D)`); requires 3-D `Y`. |
+| `mode` | `str` | `"univariate"` | `"univariate"`: exact 1-D transport per output column (indices `(T, K, D)`, squeezed). `"multivariate"`: one index per input over the flattened joint output (`(D,)`), entropic Sinkhorn. `"trajectory"`: one index per input per output over the whole time course (`(K, D)`); requires 3-D `Y`. |
 | `n_partitions` | `int` | `25` | Equal-frequency conditioning classes per input. |
-| `standardize` | `bool` | `True` | Joint modes: divide each output column by its std before building the transport cost. Ignored in `"separate"`. |
+| `standardize` | `bool` | `True` | Joint modes: divide each output column by its std before building the transport cost. Ignored in `"univariate"`. |
 | `epsilon` | `float` | `0.01` | Joint modes: entropic regularization strength on the max-scaled cost. |
 | `max_iter` | `int` | `1000` | Joint modes: Sinkhorn iteration cap per solve. |
 | `tol` | `float \| None` | `None` | Joint modes: L1 target-marginal stopping tolerance. `None` = `1e-9` (float64) / `1e-6` (float32). One warning per analysis if any solve fails to converge. |
@@ -2356,7 +2356,7 @@ def analyze_optimal_transport(
 | `n_bootstrap` | `int` | `0` | Bootstrap resamples for confidence intervals (0 = skip). Joint modes solve `n_bootstrap * D * n_partitions` transport problems. |
 | `conf_level` | `float` | `0.95` | Confidence level for percentile intervals. |
 | `seed` | `int` | `0` | Seed for bootstrap resampling and the dummy input. |
-| `chunk_size` | `int \| None` | `None` | `"separate"` mode: output columns per kernel call (`None` = memory-aware default). Inert in joint modes. |
+| `chunk_size` | `int \| None` | `None` | `"univariate"` mode: output columns per kernel call (`None` = memory-aware default). Inert in the point-cloud modes. |
 
 Returns: [`OTResult`](#otresult)
 
@@ -2406,9 +2406,9 @@ Index shapes by mode and `Y`:
 
 | `mode` | `Y` shape | Index shapes |
 | --- | --- | --- |
-| `"separate"` | `(N,)` / `(N, K)` / `(N, T, K)` | `(D,)` / `(K, D)` / `(T, K, D)` |
-| `"joint"` | any | `(D,)` |
-| `"joint-over-time"` | `(N, T, K)` | `(K, D)` |
+| `"univariate"` | `(N,)` / `(N, K)` / `(N, T, K)` | `(D,)` / `(K, D)` / `(T, K, D)` |
+| `"multivariate"` | any | `(D,)` |
+| `"trajectory"` | `(N, T, K)` | `(K, D)` |
 
 <a id="otresult-to_dataset"></a>
 #### `OTResult.to_dataset()`
