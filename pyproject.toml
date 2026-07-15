@@ -1,6 +1,6 @@
 [project]
 name = "gsax"
-version = "0.2.0"
+version = "0.3.0b1"
 description = "Global Sensitivity Analysis in JAX"
 readme = "README.md"
 requires-python = ">=3.12"
