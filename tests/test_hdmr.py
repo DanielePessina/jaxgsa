@@ -731,6 +731,29 @@ def test_s3_property_maxorder_3(ishigami_data):
         assert S3[perm] == Sa[k]
 
 
+def test_s2_layout_derived_from_terms():
+    """S2 is derived from `terms`, so a hand-built result stays consistent."""
+    from gsax.hdmr._result import HDMRResult
+    from gsax.problem import Problem
+
+    problem = Problem(names=("x1", "x2", "x3"), bounds=((0.0, 1.0),) * 3)
+    # Sa carries a second-order "x1/x2" term; no index tables are passed.
+    result = HDMRResult(
+        Sa=jnp.array([1.0, 2.0, 3.0, 9.0]),
+        Sb=jnp.zeros(4),
+        S=jnp.ones(4),
+        ST=jnp.ones(3),
+        problem=problem,
+        terms=("x1", "x2", "x3", "x1/x2"),
+    )
+    S2 = np.array(result.S2)
+    # The (x1, x2) cell is populated from Sa[3], not silently left NaN.
+    assert S2[0, 1] == 9.0
+    assert S2[1, 0] == 9.0
+    assert np.all(np.isnan(np.diag(S2)))
+    assert np.isnan(S2[0, 2])  # (x1, x3) has no term -> NaN
+
+
 def test_s2_multi_output_shape(ishigami_data):
     """Multi-output S2 carries a leading output axis: (K, D, D)."""
     X, Y = ishigami_data

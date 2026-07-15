@@ -2,6 +2,7 @@
 
 import itertools
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import TypedDict
 
 import jax.numpy as jnp
@@ -87,12 +88,44 @@ class HDMRResult:
     # (N, T) Y under a single named output). emulate_hdmr squeezes it back so
     # predictions mirror the training Y's rank.
     _inserted_output_axis: bool = field(default=False, repr=False)
-    # Interaction term metadata backing the S2/S3 properties: parameter-index
-    # pairs/triples aligned with the second/third-order blocks of the term axis,
-    # and the first-order block size that separates them.
-    _c2: tuple[tuple[int, int], ...] = field(default=(), repr=False)
-    _c3: tuple[tuple[int, int, int], ...] = field(default=(), repr=False)
-    _n1: int = field(default=0, repr=False)
+    # Interaction-term layout backing the S2/S3 properties, derived in
+    # __post_init__ from `terms` (the single source of truth): the first-order
+    # block size and the parameter-index pairs/triples aligned with the second-
+    # and third-order blocks of the term axis.
+    _n1: int = field(default=0, init=False, repr=False)
+    _c2: tuple[tuple[int, int], ...] = field(default=(), init=False, repr=False)
+    _c3: tuple[tuple[int, int, int], ...] = field(default=(), init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Derive the interaction-term layout from ``terms`` and ``problem``.
+
+        ``terms`` already encodes the expansion structure (first-order labels
+        are parameter names; interactions join names with ``/``), so it is the
+        single source of truth. Parsing it here keeps ``S2``/``S3`` consistent
+        with ``terms`` for every construction path, rather than relying on
+        separately-passed index tables that could silently desync.
+        """
+        name_to_idx = {name: i for i, name in enumerate(self.problem.names)}
+        n1 = 0
+        c2: list[tuple[int, int]] = []
+        c3: list[tuple[int, int, int]] = []
+        for label in self.terms:
+            if label in name_to_idx:  # first-order term (a bare parameter name)
+                n1 += 1
+                continue
+            try:
+                idx = tuple(name_to_idx[part] for part in label.split("/"))
+            except KeyError:
+                # A parameter name itself contains "/", so the interaction label
+                # is ambiguous. Skip it; the corresponding S2/S3 cells stay NaN.
+                continue
+            if len(idx) == 2:
+                c2.append((idx[0], idx[1]))
+            elif len(idx) == 3:
+                c3.append((idx[0], idx[1], idx[2]))
+        self._n1 = n1
+        self._c2 = tuple(c2)
+        self._c3 = tuple(c3)
 
     @property
     def S1(self) -> Array:
@@ -108,7 +141,7 @@ class HDMRResult:
         D = self.problem.num_vars
         return self.Sa[..., :D]
 
-    @property
+    @cached_property
     def S2(self) -> Array:
         """Second-order structural Sobol indices as a symmetric matrix.
 
@@ -127,12 +160,14 @@ class HDMRResult:
         if n2 == 0:
             return out
         vals = self.Sa[..., self._n1 : self._n1 + n2]  # (..., n2)
-        for k, (i, j) in enumerate(self._c2):
-            out = out.at[..., i, j].set(vals[..., k])
-            out = out.at[..., j, i].set(vals[..., k])
+        pairs = jnp.asarray(self._c2)  # (n2, 2)
+        i, j = pairs[:, 0], pairs[:, 1]
+        # Two vectorized scatters fill both symmetric halves at once.
+        out = out.at[..., i, j].set(vals)
+        out = out.at[..., j, i].set(vals)
         return out
 
-    @property
+    @cached_property
     def S3(self) -> Array:
         """Third-order structural Sobol indices as a symmetric tensor.
 
@@ -154,10 +189,10 @@ class HDMRResult:
         if n3 == 0:
             return out
         vals = self.Sa[..., self._n1 + n2 :]  # (..., n3)
-        for k, combo in enumerate(self._c3):
-            # Fill all permutations so the tensor is fully symmetric.
-            for perm in itertools.permutations(combo):
-                out = out.at[(..., *perm)].set(vals[..., k])
+        combos = jnp.asarray(self._c3)  # (n3, 3)
+        # One vectorized scatter per axis permutation makes the tensor symmetric.
+        for a, b, c in itertools.permutations(range(3)):
+            out = out.at[..., combos[:, a], combos[:, b], combos[:, c]].set(vals)
         return out
 
     def __repr__(self) -> str:
@@ -182,8 +217,8 @@ class HDMRResult:
 
         Returns:
             An ``xr.Dataset`` with variables ``Sa``, ``Sb``, ``S``, ``ST``,
-            ``S2`` (and ``S3`` when third-order terms are present), and
-            optionally ``select`` and ``rmse``.
+            ``S2`` when second-order terms exist (and ``S3`` when third-order
+            terms exist), and optionally ``select`` and ``rmse``.
         """
         # ST is indexed by parameter, exactly the shared param/output/time
         # schema; Sa/Sb/S replace the trailing "param" with "term" (interaction
@@ -204,11 +239,13 @@ class HDMRResult:
         # S2/S3 are symmetric interaction tensors; their trailing axes each span
         # the parameters, so they get their own dim names (param_i/j/k) to avoid
         # clashing with the 1-D "param" coord, mirroring PCEResult.to_dataset.
+        # Each is emitted only when its expansion order has terms.
         param_names = list(self.problem.names)
         lead = dims_param[:-1]
-        data_vars["S2"] = ((*lead, "param_i", "param_j"), np.asarray(self.S2))
-        coords["param_i"] = param_names
-        coords["param_j"] = param_names
+        if len(self._c2) > 0:
+            data_vars["S2"] = ((*lead, "param_i", "param_j"), np.asarray(self.S2))
+            coords["param_i"] = param_names
+            coords["param_j"] = param_names
         if len(self._c3) > 0:
             data_vars["S3"] = (
                 (*lead, "param_i", "param_j", "param_k"),
