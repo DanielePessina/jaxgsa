@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **RS-HDMR interaction-index accessors** — `HDMRResult` now exposes `S2` and
+  `S3` properties that reshape the structural (`Sa`) second- and third-order
+  blocks into conventional Sobol-index layouts: a symmetric `(D, D)` matrix and
+  a symmetric `(D, D, D)` tensor (with leading output/time axes preserved, as
+  for `S1`). Cells with repeated indices, and any pair/triple absent from the
+  expansion (e.g. `maxorder < 2`/`< 3`), are `NaN`, matching `PCEResult.S2`.
+  `to_dataset()` gains `S2` (always) and `S3` (when third-order terms exist),
+  indexed by `param_i`/`param_j`/`param_k`.
+
 ## 0.2.0
 
 ### Added

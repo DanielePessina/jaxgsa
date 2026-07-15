@@ -651,3 +651,111 @@ def test_validation_errors():
 
     with pytest.raises(ValueError, match="chunk_size"):
         analyze_hdmr(PROBLEM, X, Y, chunk_size=0)
+
+
+# ---------------------------------------------------------------------------
+# S2 / S3 interaction-index properties
+# ---------------------------------------------------------------------------
+
+
+def _term_index(result, label: str) -> int:
+    """Return the position of a term label along the term axis."""
+    return result.terms.index(label)
+
+
+def test_s2_property_shape_and_symmetry(hdmr_result):
+    """S2 is a symmetric (D, D) matrix with a NaN diagonal."""
+    D = PROBLEM.num_vars
+    S2 = np.array(hdmr_result.S2)
+    assert S2.shape == (D, D)
+    # Diagonal has no pairwise term, so it stays NaN.
+    assert np.all(np.isnan(np.diag(S2)))
+    # Off-diagonal pairs are populated (Ishigami, maxorder=2) and symmetric.
+    offdiag = S2[~np.eye(D, dtype=bool)]
+    assert np.all(np.isfinite(offdiag))
+    np.testing.assert_array_equal(S2, S2.T)
+
+
+def test_s2_matches_term_slice(hdmr_result):
+    """Each S2[i, j] equals the Sa entry of the matching interaction term."""
+    names = PROBLEM.names
+    Sa = np.array(hdmr_result.Sa)
+    S2 = np.array(hdmr_result.S2)
+    D = PROBLEM.num_vars
+    for i in range(D):
+        for j in range(i + 1, D):
+            k = _term_index(hdmr_result, f"{names[i]}/{names[j]}")
+            assert S2[i, j] == Sa[k]
+            assert S2[j, i] == Sa[k]
+
+
+def test_s2_ishigami_dominant_pair(hdmr_result):
+    """Ishigami's x1-x3 interaction should dominate the S2 matrix."""
+    S2 = np.array(hdmr_result.S2)
+    # x1 (index 0) and x3 (index 2) carry Ishigami's only real interaction.
+    assert S2[0, 2] > S2[0, 1]
+    assert S2[0, 2] > S2[1, 2]
+
+
+def test_s2_s3_all_nan_when_maxorder_1(ishigami_data):
+    """With no interaction terms, S2 and S3 are entirely NaN."""
+    X, Y = ishigami_data
+    D = PROBLEM.num_vars
+    result = analyze_hdmr(PROBLEM, X, Y, maxorder=1, m=2)
+    assert result.S2.shape == (D, D)
+    assert bool(jnp.all(jnp.isnan(result.S2)))
+    assert result.S3.shape == (D, D, D)
+    assert bool(jnp.all(jnp.isnan(result.S3)))
+
+
+def test_s3_property_maxorder_3(ishigami_data):
+    """S3 is a symmetric (D, D, D) tensor matching the triple's Sa entry."""
+    X, Y = ishigami_data
+    names = PROBLEM.names
+    D = PROBLEM.num_vars
+    result = analyze_hdmr(PROBLEM, X, Y, maxorder=3, m=2)
+    S3 = np.array(result.S3)
+    Sa = np.array(result.Sa)
+    assert S3.shape == (D, D, D)
+
+    # Cells with any repeated axis have no term and stay NaN.
+    for i in range(D):
+        for j in range(D):
+            assert np.isnan(S3[i, i, j])
+            assert np.isnan(S3[i, j, i])
+            assert np.isnan(S3[j, i, i])
+
+    # The single D=3 triple (x1/x2/x3) is populated symmetrically.
+    k = _term_index(result, "/".join(names))
+    for perm in ((0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)):
+        assert S3[perm] == Sa[k]
+
+
+def test_s2_multi_output_shape(ishigami_data):
+    """Multi-output S2 carries a leading output axis: (K, D, D)."""
+    X, Y = ishigami_data
+    D = PROBLEM.num_vars
+    Y_multi = jnp.stack([Y, 2.0 * Y], axis=1)
+    result = analyze_hdmr(PROBLEM, X, Y_multi, maxorder=2, m=2)
+    assert result.S2.shape == (2, D, D)
+    # Both proportional outputs share the same interaction structure.
+    np.testing.assert_allclose(np.array(result.S2[0]), np.array(result.S2[1]), rtol=1e-6)
+
+
+def test_to_dataset_includes_s2_s3(ishigami_data):
+    """to_dataset exposes S2 always and S3 when third-order terms exist."""
+    X, Y = ishigami_data
+    D = PROBLEM.num_vars
+    names = list(PROBLEM.names)
+
+    ds2 = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2).to_dataset()
+    assert "S2" in ds2
+    assert ds2["S2"].dims == ("param_i", "param_j")
+    assert ds2["S2"].shape == (D, D)
+    assert list(ds2.coords["param_i"].values) == names
+    assert "S3" not in ds2
+
+    ds3 = analyze_hdmr(PROBLEM, X, Y, maxorder=3, m=2).to_dataset()
+    assert "S3" in ds3
+    assert ds3["S3"].dims == ("param_i", "param_j", "param_k")
+    assert ds3["S3"].shape == (D, D, D)
