@@ -11,6 +11,8 @@ Jump directly to:
 - [`emulate_hdmr()`](/api/#emulate_hdmr)
 - [`HDMRResult`](/api/#hdmrresult)
 - [`HDMRResult.S1`](/api/#hdmrresult-s1)
+- [`HDMRResult.S2`](/api/#hdmrresult-s2)
+- [`HDMRResult.S3`](/api/#hdmrresult-s3)
 - [`HDMRResult.to_dataset()`](/api/#hdmrresult-to_dataset)
 - [`HDMREmulator`](/api/#hdmremulator)
 

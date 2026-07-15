@@ -802,6 +802,34 @@ hdmr.S1  # shape matches hdmr.ST
 
 This is the Sobol-compatible first-order view of an HDMR fit.
 
+<a id="hdmrresult-s2"></a>
+#### `HDMRResult.S2`
+
+Property returning the second-order structural indices as a symmetric matrix,
+scattered from the pairwise HDMR terms:
+
+```python
+hdmr.S2  # (D, D) / (K, D, D) / (T, K, D, D)
+```
+
+Entry `[i, j]` is the structural variance fraction of the `(x_i, x_j)`
+interaction. The diagonal and any parameter pair absent from the expansion
+(e.g. `maxorder < 2`) are `NaN`, mirroring `PCEResult.S2`.
+
+<a id="hdmrresult-s3"></a>
+#### `HDMRResult.S3`
+
+Property returning the third-order structural indices as a symmetric tensor,
+scattered from the triple HDMR terms:
+
+```python
+hdmr.S3  # (D, D, D) (+ leading output/time axes)
+```
+
+Entry `[i, j, k]` is the structural variance fraction of the
+`(x_i, x_j, x_k)` interaction. Cells with any repeated axis, and any triple
+absent from the expansion (e.g. `maxorder < 3`), are `NaN`.
+
 <a id="hdmrresult-to_dataset"></a>
 #### `HDMRResult.to_dataset()`
 

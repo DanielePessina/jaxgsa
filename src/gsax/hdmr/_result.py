@@ -66,12 +66,6 @@ class HDMRResult:
         problem: Problem definition used for the analysis.
         terms: Human-readable term labels, e.g. ``("x1", "x2", "x1/x2")``;
             interaction terms join parameter names with ``/``.
-        c2: Second-order parameter-index pairs, aligned with the second-order
-            block of the term axis. Used by the ``S2`` property.
-        c3: Third-order parameter-index triples, aligned with the third-order
-            block of the term axis. Used by the ``S3`` property.
-        n1: Number of first-order terms -- the slice boundary that separates
-            first-order from higher-order blocks along the term axis.
         emulator: Fitted surrogate state for ``hdmr.emulate``, or None.
         select: F-test significance count per term, summed over the T*K
             output slices (max value T*K), or None. Low counts mark terms
@@ -86,9 +80,6 @@ class HDMRResult:
     ST: Array
     problem: Problem
     terms: tuple[str, ...]
-    c2: tuple[tuple[int, int], ...] = ()
-    c3: tuple[tuple[int, int, int], ...] = ()
-    n1: int = 0
     emulator: HDMREmulator | None = None
     select: Array | None = None
     rmse: Array | None = None
@@ -96,6 +87,12 @@ class HDMRResult:
     # (N, T) Y under a single named output). emulate_hdmr squeezes it back so
     # predictions mirror the training Y's rank.
     _inserted_output_axis: bool = field(default=False, repr=False)
+    # Interaction term metadata backing the S2/S3 properties: parameter-index
+    # pairs/triples aligned with the second/third-order blocks of the term axis,
+    # and the first-order block size that separates them.
+    _c2: tuple[tuple[int, int], ...] = field(default=(), repr=False)
+    _c3: tuple[tuple[int, int, int], ...] = field(default=(), repr=False)
+    _n1: int = field(default=0, repr=False)
 
     @property
     def S1(self) -> Array:
@@ -125,12 +122,12 @@ class HDMRResult:
             Array of shape ``(D, D)`` / ``(K, D, D)`` / ``(T, K, D, D)``.
         """
         D = self.problem.num_vars
-        n2 = len(self.c2)
+        n2 = len(self._c2)
         out = jnp.full(self.Sa.shape[:-1] + (D, D), jnp.nan, dtype=self.Sa.dtype)
         if n2 == 0:
             return out
-        vals = self.Sa[..., self.n1 : self.n1 + n2]  # (..., n2)
-        for k, (i, j) in enumerate(self.c2):
+        vals = self.Sa[..., self._n1 : self._n1 + n2]  # (..., n2)
+        for k, (i, j) in enumerate(self._c2):
             out = out.at[..., i, j].set(vals[..., k])
             out = out.at[..., j, i].set(vals[..., k])
         return out
@@ -151,13 +148,13 @@ class HDMRResult:
             ``(T, K, D, D, D)``.
         """
         D = self.problem.num_vars
-        n2 = len(self.c2)
-        n3 = len(self.c3)
+        n2 = len(self._c2)
+        n3 = len(self._c3)
         out = jnp.full(self.Sa.shape[:-1] + (D, D, D), jnp.nan, dtype=self.Sa.dtype)
         if n3 == 0:
             return out
-        vals = self.Sa[..., self.n1 + n2 :]  # (..., n3)
-        for k, combo in enumerate(self.c3):
+        vals = self.Sa[..., self._n1 + n2 :]  # (..., n3)
+        for k, combo in enumerate(self._c3):
             # Fill all permutations so the tensor is fully symmetric.
             for perm in itertools.permutations(combo):
                 out = out.at[(..., *perm)].set(vals[..., k])
@@ -212,7 +209,7 @@ class HDMRResult:
         data_vars["S2"] = ((*lead, "param_i", "param_j"), np.asarray(self.S2))
         coords["param_i"] = param_names
         coords["param_j"] = param_names
-        if len(self.c3) > 0:
+        if len(self._c3) > 0:
             data_vars["S3"] = (
                 (*lead, "param_i", "param_j", "param_k"),
                 np.asarray(self.S3),

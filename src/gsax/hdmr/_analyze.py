@@ -444,9 +444,9 @@ def _analyze_hdmr_core(
         ST=ST_out,
         problem=problem,
         terms=term_labels,
-        c2=tuple(c2),
-        c3=tuple(c3),
-        n1=n1,
+        _c2=tuple(c2),
+        _c3=tuple(c3),
+        _n1=n1,
         emulator=emulator,
         select=select_sum,
         # RMSE is computed on the standardized scale inside the kernel;
