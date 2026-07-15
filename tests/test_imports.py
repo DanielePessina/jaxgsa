@@ -79,6 +79,22 @@ def test_morris_re_exports():
     assert isinstance(gsax.MorrisSamplingResult, type)
 
 
+def test_optimal_transport_subpackage():
+    from gsax import optimal_transport
+
+    assert callable(optimal_transport.analyze)
+    assert isinstance(optimal_transport.OTResult, type)
+
+
+def test_optimal_transport_re_exports():
+    import gsax
+    from gsax.optimal_transport import analyze as ot_analyze
+
+    assert callable(gsax.analyze_optimal_transport)
+    assert gsax.analyze_optimal_transport is ot_analyze
+    assert isinstance(gsax.OTResult, type)
+
+
 def test_sampling_re_exports():
     import gsax
 

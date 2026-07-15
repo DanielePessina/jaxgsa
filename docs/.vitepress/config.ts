@@ -39,6 +39,7 @@ export default defineConfig({
         { text: 'HSIC', link: '/examples/hsic' },
         { text: 'PAWN', link: '/examples/pawn' },
         { text: 'Borgonovo Delta', link: '/examples/borgonovo' },
+        { text: 'Optimal Transport', link: '/examples/optimal-transport' },
         { text: 'Batch Reactor (notebook)', link: '/examples/batch_reactor' },
       ],
       '/api/': [

@@ -1,6 +1,6 @@
 # Methods
 
-gsax implements ten methods for global sensitivity analysis (GSA). All of them answer the same broad question — which input parameters actually drive my model's output? — but they differ in what exactly they measure, how many model evaluations they cost, and whether they need a dedicated sampling design or can work with data you already have.
+gsax implements eleven methods for global sensitivity analysis (GSA). All of them answer the same broad question — which input parameters actually drive my model's output? — but they differ in what exactly they measure, how many model evaluations they cost, and whether they need a dedicated sampling design or can work with data you already have.
 
 If you're new to the package, start with [Choosing a Method](#choosing-a-method), then jump to the section for the method you picked. Each method section opens with what it measures and when you'd choose it, followed by the estimator details.
 
@@ -10,9 +10,9 @@ Throughout this page, $D$ is the number of input parameters and $N$ is a sample 
 
 Three questions narrow the field quickly.
 
-**1. Can you still choose where to run the model?** Four methods need their own sampling design, which gsax generates for you: Sobol' (Saltelli matrices), eFAST (search curves), Morris (trajectories), and DGSM (plain Monte Carlo plus autodiff). The other six — HDMR, PCE, Shapley effects, HSIC, PAWN, and Borgonovo delta — are **given-data** methods: they accept any set of $(X, Y)$ pairs, including simulation runs you already have.
+**1. Can you still choose where to run the model?** Four methods need their own sampling design, which gsax generates for you: Sobol' (Saltelli matrices), eFAST (search curves), Morris (trajectories), and DGSM (plain Monte Carlo plus autodiff). The other seven — HDMR, PCE, Shapley effects, HSIC, PAWN, Borgonovo delta, and optimal transport — are **given-data** methods: they accept any set of $(X, Y)$ pairs, including simulation runs you already have.
 
-**2. What should the number mean?** Variance-based methods (Sobol', HDMR, PCE, eFAST, Shapley) report *fractions of output variance* — "parameter 3 explains 40% of the output's spread". Screening methods (Morris, DGSM) trade that precision for cheap, reliable *rankings*. Moment-independent methods (HSIC, PAWN, Borgonovo delta) measure how strongly an input affects the *whole output distribution* — the right lens when your output is skewed or heavy-tailed and variance feels like the wrong summary.
+**2. What should the number mean?** Variance-based methods (Sobol', HDMR, PCE, eFAST, Shapley) report *fractions of output variance* — "parameter 3 explains 40% of the output's spread". Screening methods (Morris, DGSM) trade that precision for cheap, reliable *rankings*. Moment-independent methods (HSIC, PAWN, Borgonovo delta, optimal transport) measure how strongly an input affects the *whole output distribution* — the right lens when your output is skewed or heavy-tailed and variance feels like the wrong summary; optimal transport additionally splits its index into a mean-shift and a shape-change part.
 
 **3. What's your evaluation budget?** Sobol' needs $N(2D+2)$ model runs by default ($N$ typically 1024+). Morris needs only $r(D+1)$ with $r \approx 10\text{–}50$ trajectories. DGSM gets the whole gradient for roughly the price of one evaluation per sample point (JAX-differentiable models only). The given-data methods cost nothing beyond the runs you already have.
 
@@ -20,24 +20,26 @@ Common situations:
 
 - **"I can run the model freely and want the standard variance decomposition."** Use [Sobol' via Saltelli sampling](#sobol-indices-via-saltelli-sampling) — the reference method, with first-order, total-order, and second-order indices.
 - **"My model is expensive and has many parameters."** Screen first with [Morris](#morris-elementary-effects-screening) ($r(D+1)$ runs), or with [DGSM](#dgsm-derivative-based-global-sensitivity-measures) if the model is JAX-differentiable. Fix the negligible parameters, then spend the remaining budget on Sobol' for the survivors.
-- **"I only have existing simulation data."** Any given-data method works. [HDMR](#rs-hdmr-random-sampling-high-dimensional-model-representation) or [PCE](#pce-polynomial-chaos-expansion) for variance-based indices via a surrogate; [HSIC](#hsic-hilbert–schmidt-independence-criterion), [PAWN](#pawn-cdf-based-sensitivity), or [Borgonovo delta](#borgonovo-delta-density-based-sensitivity) for distribution-based indices.
-- **"My inputs are correlated."** Sobol', PCE, eFAST, DGSM, Morris, and Shapley all assume independent inputs. Use HDMR (which separates structural from correlation-induced variance), or HSIC / PAWN / Borgonovo delta (which make no independence assumption).
-- **"My output distribution is skewed or heavy-tailed."** Use [PAWN](#pawn-cdf-based-sensitivity) or [Borgonovo delta](#borgonovo-delta-density-based-sensitivity) — both compare whole output distributions rather than variances.
+- **"I only have existing simulation data."** Any given-data method works. [HDMR](#rs-hdmr-random-sampling-high-dimensional-model-representation) or [PCE](#pce-polynomial-chaos-expansion) for variance-based indices via a surrogate; [HSIC](#hsic-hilbert–schmidt-independence-criterion), [PAWN](#pawn-cdf-based-sensitivity), [Borgonovo delta](#borgonovo-delta-density-based-sensitivity), or [optimal transport](#optimal-transport-wasserstein-based-sensitivity) for distribution-based indices.
+- **"My inputs are correlated."** Sobol', PCE, eFAST, DGSM, Morris, and Shapley all assume independent inputs. Use HDMR (which separates structural from correlation-induced variance), or HSIC / PAWN / Borgonovo delta / optimal transport (which make no independence assumption).
+- **"My output distribution is skewed or heavy-tailed."** Use [PAWN](#pawn-cdf-based-sensitivity), [Borgonovo delta](#borgonovo-delta-density-based-sensitivity), or [optimal transport](#optimal-transport-wasserstein-based-sensitivity) — all compare whole output distributions rather than variances.
+- **"I want to know *how* an input matters — shift vs shape."** Use [optimal transport](#optimal-transport-wasserstein-based-sensitivity): its index decomposes exactly into an advective (mean-shift, $= S_1/2$) and a diffusive (spread/shape) component.
+- **"I want one number per input for a whole trajectory."** Use [optimal transport](#optimal-transport-wasserstein-based-sensitivity) with `mode="joint-over-time"` — point-cloud transport scores each input against the entire time course jointly.
 - **"I want one fair importance number per parameter that sums to 1."** Use [Shapley effects](#shapley-effects).
 - **"I also want a fast emulator of my model."** Use HDMR (`emulate_hdmr`) or PCE (`emulate_pce`).
 
 ### Comparison table
 
-| Consideration | Sobol' | HDMR | PCE | Shapley | eFAST | DGSM | Morris | HSIC | PAWN | Borgonovo delta |
-|---------------|--------|------|-----|---------|-------|------|--------|------|------|-----------------|
-| Sampling requirement | Structured Saltelli design, $N(2D+2)$ evaluations (default) | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Search curves, $N \times D$ evaluations | Plain MC, $N$ evaluations + autodiff | Trajectory or radial design, $r(D+1)$ evaluations (deduplicated) | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs |
-| Input independence | Assumed | Handled via ANCOVA decomposition | Assumed | Assumed (dependent-input Shapley is future work) | Assumed | Assumed | Assumed | Not assumed | Not assumed | Not assumed |
-| Input distributions | Uniform + Gaussian | Uniform + Gaussian (via CDF mapping) | Uniform + Gaussian | Uniform + Gaussian (both backends) | Uniform + Gaussian | Uniform + Gaussian (+ truncated Normal) | Uniform + Gaussian (truncated-quantile grid) | Uniform + Gaussian (via CDF mapping) | Uniform + Gaussian (via CDF mapping) | Any (rank-based classes; marginals not used) |
-| Output shapes | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series (both backends) | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series |
-| What the numbers mean | Exact variance fractions (given enough samples) | Variance fractions from a B-spline surrogate (fit-dependent) | Variance fractions from a polynomial surrogate (fit-dependent) | Exact allocation within the fitted surrogate; depends on fit quality | Exact variance fractions (given enough samples) | Bounds on $S_T$, not exact indices | Screening ranks ($\mu^*$ as $S_T$ proxy), not variance fractions | Dependence measure, not variance fractions | Distributional (KS) distance, not variance fractions | Distributional (L1) distance, not variance fractions |
-| Second-order indices | Direct estimation from cross-matrices | From interaction component functions | Analytical from coefficients | Not available (interaction variance folded into $\mathrm{Sh}$) | Not available | Not available | Not available | Not available | Not available | Not available |
-| Interaction detection | Via $S_2$ and the gap $S_T - S_1$ | Via explicit interaction component functions | Via $S_2$ from coefficients | Via the gaps $\mathrm{Sh} - S_1$ and $S_T - \mathrm{Sh}$ | Via the gap $S_T - S_1$ only | Not available (bounds only) | Via large $\sigma$ relative to $\mu^*$ (not pair-attributable) | Via the Total HSIC − R2-HSIC gap | Not available (first-order only) | Not available (the $\delta - S_1$ gap flags influence beyond first-order variance) |
-| Surrogate/emulator | No | Yes (`emulate_hdmr`) | Yes (`emulate_pce`) | Fits HDMR or PCE internally (no emulator returned) | No | No | No | No | No | No |
+| Consideration | Sobol' | HDMR | PCE | Shapley | eFAST | DGSM | Morris | HSIC | PAWN | Borgonovo delta | Optimal transport |
+|---------------|--------|------|-----|---------|-------|------|--------|------|------|-----------------|------------------|
+| Sampling requirement | Structured Saltelli design, $N(2D+2)$ evaluations (default) | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Search curves, $N \times D$ evaluations | Plain MC, $N$ evaluations + autodiff | Trajectory or radial design, $r(D+1)$ evaluations (deduplicated) | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs |
+| Input independence | Assumed | Handled via ANCOVA decomposition | Assumed | Assumed (dependent-input Shapley is future work) | Assumed | Assumed | Assumed | Not assumed | Not assumed | Not assumed | Not assumed (measures total, correlation-inclusive influence) |
+| Input distributions | Uniform + Gaussian | Uniform + Gaussian (via CDF mapping) | Uniform + Gaussian | Uniform + Gaussian (both backends) | Uniform + Gaussian | Uniform + Gaussian (+ truncated Normal) | Uniform + Gaussian (truncated-quantile grid) | Uniform + Gaussian (via CDF mapping) | Uniform + Gaussian (via CDF mapping) | Any (rank-based classes; marginals not used) | Any (rank-based classes; marginals not used) |
+| Output shapes | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series (both backends) | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series; joint point-cloud modes over outputs/time |
+| What the numbers mean | Exact variance fractions (given enough samples) | Variance fractions from a B-spline surrogate (fit-dependent) | Variance fractions from a polynomial surrogate (fit-dependent) | Exact allocation within the fitted surrogate; depends on fit quality | Exact variance fractions (given enough samples) | Bounds on $S_T$, not exact indices | Screening ranks ($\mu^*$ as $S_T$ proxy), not variance fractions | Dependence measure, not variance fractions | Distributional (KS) distance, not variance fractions | Distributional (L1) distance, not variance fractions | Distributional ($W_2^2$) distance in $[0,1]$, split into mean-shift + shape parts |
+| Second-order indices | Direct estimation from cross-matrices | From interaction component functions | Analytical from coefficients | Not available (interaction variance folded into $\mathrm{Sh}$) | Not available | Not available | Not available | Not available | Not available | Not available | Not available |
+| Interaction detection | Via $S_2$ and the gap $S_T - S_1$ | Via explicit interaction component functions | Via $S_2$ from coefficients | Via the gaps $\mathrm{Sh} - S_1$ and $S_T - \mathrm{Sh}$ | Via the gap $S_T - S_1$ only | Not available (bounds only) | Via large $\sigma$ relative to $\mu^*$ (not pair-attributable) | Via the Total HSIC − R2-HSIC gap | Not available (first-order only) | Not available (the $\delta - S_1$ gap flags influence beyond first-order variance) | Not available (the diffusive component flags influence beyond mean shift) |
+| Surrogate/emulator | No | Yes (`emulate_hdmr`) | Yes (`emulate_pce`) | Fits HDMR or PCE internally (no emulator returned) | No | No | No | No | No | No | No |
 
 ## Background: Variance-Based Sensitivity Analysis
 
@@ -638,9 +640,58 @@ Set `n_bootstrap=0` to skip bias correction and confidence intervals (raw plug-i
 - Borgonovo, E. (2007). A new uncertainty importance measure. *Reliability Engineering & System Safety*, 92(6), 771-784.
 - Plischke, E., Borgonovo, E. & Smith, C.L. (2013). Global sensitivity measures from given data. *European Journal of Operational Research*, 226(3), 536-550.
 
+## Optimal Transport (Wasserstein-Based Sensitivity)
+
+The optimal-transport index (Borgonovo, Figalli, Plischke & Savaré, 2024) measures how far knowing an input moves the whole output distribution, using the squared 2-Wasserstein distance — the minimal quadratic "work" needed to transport the unconditional output distribution onto the conditional one:
+
+$$
+\iota_i = \frac{\mathbb{E}_{X_i}\!\left[ W_2^2\!\left(P_{Y \mid X_i},\, P_Y\right) \right]}{2\,\mathrm{Var}(Y)}
+$$
+
+The denominator is the theoretical maximum of the numerator, so $\iota_i \in [0, 1]$: $0$ means the output distribution never reacts to $X_i$, $1$ means it is fully determined by it. The defining feature is the exact decomposition of every index into
+
+- **advective** — the class-averaged squared shift of the conditional *mean*, which equals exactly half the given-data first-order Sobol index ($2 \cdot \mathrm{advective} = S_1$), and
+- **diffusive** — the remainder: changes in spread, tails, and shape.
+
+So the OT index subsumes the variance-based first-order view and quantifies what lies beyond it, on one scale.
+
+### How it works
+
+1. For each input, samples are split into `n_partitions` **equal-frequency classes** by the input's rank (default 25). Rank-based conditioning is distribution-free: uniform, Gaussian, or mixed marginals work unchanged, and monotone input transforms change nothing. Correlated inputs are supported — the index then measures total, correlation-inclusive influence.
+2. Per class, $W_2^2$ between the conditional and unconditional output samples is computed. In the default `mode="separate"` (per output column) this uses the **closed form of 1-D optimal transport** — both empirical quantile functions evaluated at the $N$ uniform mass points via sorting, no iterative solver. The joint modes (`"joint"`, `"joint-over-time"`) treat the output vector as a **point cloud** and solve entropic transport with a pure-JAX log-domain **Sinkhorn** solver (regularization `epsilon`, reported cost is the unregularized $\langle P, C\rangle$).
+3. Class results are averaged with class-size weights and divided by $2\,\mathrm{Var}(Y)$ (joint modes: $2\,\mathrm{Tr}\,\mathrm{Cov}(Y)$, with per-column standardization on by default so no output dominates through its units).
+
+Entropic and finite-sample bias keep joint-mode indices of irrelevant inputs strictly positive. Pass `dummy=True` to push a synthetic, provably independent input through the identical pipeline: its index (`ot_dummy`) is the irrelevance floor to compare against.
+
+### How to use it
+
+1. `gsax.sample_mc()` or any existing $(X, Y)$ data — no structured design required.
+2. `gsax.analyze_optimal_transport()` computes `ot`, `advective`, and `diffusive` per input (and per output column in `"separate"` mode), with optional stratified bootstrap confidence intervals.
+
+Pick the mode by the question: `"separate"` for per-column indices across `(N,)`/`(N, K)`/`(N, T, K)` outputs, `"joint"` for one index per input over the flattened joint output, `"joint-over-time"` for one index per input per output over the whole time course. Bootstrap in joint modes costs `n_bootstrap * D * n_partitions` Sinkhorn solves — keep it modest.
+
+### Index summary
+
+| Index | Meaning |
+|-------|---------|
+| $\iota(i)$ (`ot`) | Normalized expected $W_2^2$ between conditional and unconditional output distributions, in $[0, 1]$. |
+| `advective` | Mean-shift component; $2 \cdot \mathrm{advective}$ is the given-data first-order Sobol index. |
+| `diffusive` | Spread/shape component, `ot - advective`; flags influence invisible to the conditional mean. |
+| `ot_dummy` | Index of a synthetic independent input (with `dummy=True`) — the irrelevance floor. |
+
+**When to use optimal transport:**
+- You want a moment-independent index that still ties exactly to the variance-based world
+- You want to distinguish inputs that *move* the output from inputs that *reshape* it
+- You want one index per input for a whole trajectory or multivariate output (joint modes)
+- Your inputs have mixed marginals or are correlated
+
+### Reference
+
+- Borgonovo, E., Figalli, A., Plischke, E. & Savaré, G. (2024). Global sensitivity analysis via optimal transport. *Management Science*. doi:10.1287/mnsc.2023.01796
+
 ## Output Shapes
 
-All ten methods share the same output contract: scalar, multi-output, and time-series outputs. The shape of `Y` determines the shape of all returned index arrays (read `S1 / ST` as the method's per-parameter measures — `mu / mu_star / sigma` for Morris, `nu / sigma` and the bounds for DGSM; only Sobol and PCE produce S2):
+All eleven methods share the same output contract: scalar, multi-output, and time-series outputs. The shape of `Y` determines the shape of all returned index arrays (read `S1 / ST` as the method's per-parameter measures — `mu / mu_star / sigma` for Morris, `nu / sigma` and the bounds for DGSM; only Sobol and PCE produce S2):
 
 | Y shape | S1 / ST shape | S2 shape |
 |---------|---------------|----------|
@@ -672,3 +723,4 @@ Time-series outputs are particularly useful for dynamic models, where the evolut
 - Owen, A.B. (2014). Sobol' indices and Shapley value. *SIAM/ASA Journal on Uncertainty Quantification*, 2(1), 245-251.
 - Song, E., Nelson, B.L. & Staum, J. (2016). Shapley effects for global sensitivity analysis: Theory and computation. *SIAM/ASA Journal on Uncertainty Quantification*, 4(1), 1060-1083.
 - Saltelli, A., Tarantola, S. & Chan, K.P.-S. (1999). A quantitative model-independent method for global sensitivity analysis of model output. *Technometrics*, 41(1), 39-56.
+- Borgonovo, E., Figalli, A., Plischke, E. & Savaré, G. (2024). Global sensitivity analysis via optimal transport. *Management Science*. doi:10.1287/mnsc.2023.01796

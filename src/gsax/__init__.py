@@ -31,6 +31,8 @@ from gsax.hsic import analyze as analyze_hsic
 from gsax.morris import MorrisResult, MorrisSamplingResult
 from gsax.morris import analyze as analyze_morris
 from gsax.morris import sample as sample_morris
+from gsax.optimal_transport import OTResult
+from gsax.optimal_transport import analyze as analyze_optimal_transport
 from gsax.pawn import PAWNResult
 from gsax.pawn import analyze as analyze_pawn
 from gsax.pce import PCEResult
@@ -52,6 +54,7 @@ __all__ = [
     "HSICResult",
     "MorrisResult",
     "MorrisSamplingResult",
+    "OTResult",
     "PAWNResult",
     "PCEResult",
     "Problem",
@@ -66,6 +69,7 @@ __all__ = [
     "analyze_hdmr",
     "analyze_hsic",
     "analyze_morris",
+    "analyze_optimal_transport",
     "analyze_pawn",
     "analyze_pce",
     "analyze_shapley",

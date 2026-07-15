@@ -10,7 +10,7 @@
 
 `gsax` tells you which of your model's inputs actually drive its output. You give it input samples and the outputs your model produced for them; it returns sensitivity indices that rank the inputs and expose interactions. Everything is computed in JAX, so analyses are JIT-compiled and run on CPU, GPU, or TPU without code changes.
 
-Ten complementary methods are included: **Sobol indices** (the standard variance decomposition, via Saltelli sampling), **RS-HDMR** and **PCE** (surrogate-based — they fit a cheap approximation of your model to any existing input–output pairs and read the indices off the fit), **Shapley effects** (a fair, game-theoretic split of the output variance, computed analytically from a PCE or HDMR surrogate), **eFAST** (Fourier-based S1 and ST), **DGSM** (derivative-based bounds via JAX autodiff), **Morris** (cheap elementary-effects screening to discard unimportant inputs early), **HSIC** (kernel-based dependence detection), and two moment-independent measures that look at the whole output distribution rather than just its variance: **PAWN** (CDF-based, Pianosi & Wagener, 2015) and the **Borgonovo delta** (density-based, Borgonovo, 2007).
+Eleven complementary methods are included: **Sobol indices** (the standard variance decomposition, via Saltelli sampling), **RS-HDMR** and **PCE** (surrogate-based — they fit a cheap approximation of your model to any existing input–output pairs and read the indices off the fit), **Shapley effects** (a fair, game-theoretic split of the output variance, computed analytically from a PCE or HDMR surrogate), **eFAST** (Fourier-based S1 and ST), **DGSM** (derivative-based bounds via JAX autodiff), **Morris** (cheap elementary-effects screening to discard unimportant inputs early), **HSIC** (kernel-based dependence detection), and three moment-independent measures that look at the whole output distribution rather than just its variance: **PAWN** (CDF-based, Pianosi & Wagener, 2015), the **Borgonovo delta** (density-based, Borgonovo, 2007), and **optimal-transport indices** (Wasserstein-based with an advective/diffusive decomposition, Borgonovo et al., 2024).
 
 ## Features
 
@@ -57,7 +57,11 @@ Ten complementary methods are included: **Sobol indices** (the standard variance
   - Plischke et al. (2013) given-data estimator: works with **any** set of (X, Y) pairs
   - Bias-corrected delta plus the given-data first-order Sobol S1 (SALib-compatible)
   - Percentile bootstrap confidence intervals
-- All ten methods accept scalar `(N,)`, multi-output `(N, K)`, and time-series `(N, T, K)` outputs, with smart layout inference: pass `output_names` on the problem and gsax disambiguates 2-D/3-D layouts, fixing obvious transposes with a warning and raising on ambiguity
+- **Optimal transport** — Wasserstein-based distributional sensitivity (Borgonovo et al., 2024)
+  - Given-data estimator on **any** (X, Y) pairs; rank-based conditioning handles mixed uniform/Gaussian marginals and correlated inputs
+  - Advective (mean-shift, = S1/2) vs diffusive (spread/shape) decomposition of every index
+  - Per-column indices via exact 1-D transport (solver-free) plus joint point-cloud modes over multivariate/time-series outputs (pure-JAX log-domain Sinkhorn); dummy-input irrelevance baseline
+- All eleven methods accept scalar `(N,)`, multi-output `(N, K)`, and time-series `(N, T, K)` outputs, with smart layout inference: pass `output_names` on the problem and gsax disambiguates 2-D/3-D layouts, fixing obvious transposes with a warning and raising on ambiguity
 - Bootstrap confidence intervals with JAX-accelerated resampling
 - Optional `prenormalize=True` mode for SALib-style output standardization before
   Sobol or HDMR analysis
@@ -319,6 +323,35 @@ print("delta:", result.delta)  # (D,) bias-corrected delta indices
 print("S1:", result.S1)        # (D,) given-data first-order Sobol
 ```
 
+### Optimal transport (Wasserstein-based, moment-independent)
+
+The OT index measures how far knowing an input moves the **entire output
+distribution**, as the class-averaged squared 2-Wasserstein distance between
+conditional and unconditional outputs on a [0, 1] scale (Borgonovo et al.,
+2024). Every index splits into an **advective** part (pure mean shift —
+exactly half the first-order Sobol index) and a **diffusive** part (changes
+in spread and shape), so you can see *how* an input matters, not just how
+much. Conditioning is rank-based: mixed uniform/Gaussian marginals and
+correlated inputs work unchanged.
+
+```python
+import jax.numpy as jnp
+import gsax
+from gsax.benchmarks.ishigami import PROBLEM, evaluate
+
+X = gsax.sample_mc(PROBLEM, N=5000, seed=42)
+Y = evaluate(jnp.asarray(X))
+
+result = gsax.analyze_optimal_transport(PROBLEM, jnp.asarray(X), Y)
+print("ot:", result.ot)                # (D,) total index
+print("advective:", result.advective)  # mean-shift part (= S1 / 2)
+print("diffusive:", result.diffusive)  # spread/shape part
+
+# Time-series outputs: one index per input over each output's whole
+# trajectory (point-cloud transport via pure-JAX Sinkhorn)
+# result = gsax.analyze_optimal_transport(PROBLEM, X, Y_tk, mode="joint-over-time")
+```
+
 ## Usage
 
 ### Define a problem
@@ -494,7 +527,7 @@ Use it for:
 - parameter, field, and shape contracts
 - validation and error behavior
 - `to_dataset()` labeling rules
-- Sobol, RS-HDMR, PCE, Shapley, eFAST, DGSM, Morris, HSIC, PAWN, and Borgonovo delta workflow examples
+- Sobol, RS-HDMR, PCE, Shapley, eFAST, DGSM, Morris, HSIC, PAWN, Borgonovo delta, and optimal-transport workflow examples
 
 Quick map:
 
@@ -510,12 +543,14 @@ Quick map:
 - `gsax.hsic`: `analyze` / `HSICResult`
 - `gsax.pawn`: `analyze` / `PAWNResult`
 - `gsax.borgonovo`: `analyze` / `DeltaResult`
+- `gsax.optimal_transport`: `analyze` / `OTResult`
 
 All symbols are also re-exported from the top-level `gsax` namespace
 (`gsax.analyze()`, `gsax.analyze_hdmr()`, `gsax.analyze_pce()`,
 `gsax.analyze_shapley()`, `gsax.sample_efast()`, `gsax.analyze_efast()`,
 `gsax.analyze_dgsm()`, `gsax.sample_morris()`, `gsax.analyze_morris()`,
-`gsax.analyze_hsic()`, `gsax.analyze_pawn()`, `gsax.analyze_borgonovo()`, etc.).
+`gsax.analyze_hsic()`, `gsax.analyze_pawn()`, `gsax.analyze_borgonovo()`,
+`gsax.analyze_optimal_transport()`, etc.).
 
 For runnable walkthroughs, start with the
 [Getting Started guide](https://danielepessina.github.io/gsax/guide/getting-started)
@@ -542,7 +577,7 @@ See [LICENSE](LICENSE) for details.
 
 ## Benchmark Results
 
-gsax vs SALib on a coupled-oscillator model (D=5 parameters, N=1024 base samples), Apple M1 Pro CPU, JAX 0.10.2. Every timing is the best of 5 runs, except the slow SALib HDMR path (best of 2). gsax figures are post-JIT steady-state: the one-off XLA compile — roughly 0.3–1.1 s depending on scenario — is paid once per process and excluded here, whereas SALib (pure NumPy/SciPy) requires no compilation. The timing tables below cover the two methods timed against SALib here (Sobol and RS-HDMR); the other methods (PCE, Shapley, eFAST, DGSM, Morris, HSIC, PAWN, and Borgonovo delta) are validated for correctness but not timed here. Borgonovo delta also has a direct SALib counterpart, `SALib.analyze.delta`, and is validated against it in the test suite.
+gsax vs SALib on a coupled-oscillator model (D=5 parameters, N=1024 base samples), Apple M1 Pro CPU, JAX 0.10.2. Every timing is the best of 5 runs, except the slow SALib HDMR path (best of 2). gsax figures are post-JIT steady-state: the one-off XLA compile — roughly 0.3–1.1 s depending on scenario — is paid once per process and excluded here, whereas SALib (pure NumPy/SciPy) requires no compilation. The timing tables below cover the two methods timed against SALib here (Sobol and RS-HDMR); the other methods (PCE, Shapley, eFAST, DGSM, Morris, HSIC, PAWN, Borgonovo delta, and optimal transport) are validated for correctness but not timed here. Borgonovo delta also has a direct SALib counterpart, `SALib.analyze.delta`, and is validated against it in the test suite.
 
 ### Sobol — point estimates (no bootstrap)
 
