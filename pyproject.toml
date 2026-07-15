@@ -47,7 +47,13 @@ Issues = "https://github.com/DanielePessina/gsax/issues"
 Changelog = "https://github.com/DanielePessina/gsax/blob/master/CHANGELOG.md"
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.4", "ty>=0.0.21", "SALib>=1.4"]
+dev = [
+    "pytest>=8",
+    "ruff>=0.4",
+    "ty>=0.0.21",
+    "SALib>=1.4",
+    "pot>=0.9",
+]
 xlsx = ["openpyxl>=3.1"]
 parquet = ["pyarrow>=14"]
 all = ["openpyxl>=3.1", "pyarrow>=14"]

@@ -36,7 +36,7 @@ features:
   - title: Save & Reload Samples
     details: Persist a sample set with SamplingResult.save(), evaluate your model elsewhere, and reload with gsax.load() — the analysis metadata travels with the samples.
   - title: Multi-Output & Time-Series
-    details: Pass scalar, (N, K), or (N, T, K) outputs to any of the ten methods and get indices for every output and timestep in a single vectorized pass. Set output_names and gsax disambiguates 2-D layouts, fixing obvious transposes with a warning.
+    details: Pass scalar, (N, K), or (N, T, K) outputs to any of the eleven methods and get indices for every output and timestep in a single vectorized pass. Set output_names and gsax disambiguates 2-D layouts, fixing obvious transposes with a warning.
   - title: Up to 668× Faster than SALib
     details: Fused JIT kernels and vectorized execution replace Python loops. Sobol up to 15.8× faster, HDMR up to 668× on multi-output workloads.
 ---

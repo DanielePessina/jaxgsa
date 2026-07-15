@@ -33,6 +33,7 @@ SECTIONS = {
         "hsic",
         "pawn",
         "borgonovo",
+        "optimal-transport",
         "batch_reactor",
     ],
 }

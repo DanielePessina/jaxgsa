@@ -25,6 +25,9 @@ model on them, then analyze the outputs:
   conditional output CDF distances.
 - Borgonovo delta: `sample_mc()` -> `analyze_borgonovo()` — moment-independent
   indices from shifts in the full output density.
+- Optimal transport: `sample_mc()` -> `analyze_optimal_transport()` —
+  Wasserstein-based distributional indices with an advective/diffusive
+  decomposition.
 
 Related docs:
 
@@ -47,7 +50,7 @@ Array shapes throughout this reference use four letters:
 
 Model outputs `Y` are `(N,)` for a scalar output, `(N, K)` for multi-output,
 or `(N, T, K)` for time-series multi-output — the same contract across all
-ten methods. How a 2D `Y` is read depends on `problem.output_names`:
+eleven methods. How a 2D `Y` is read depends on `problem.output_names`:
 
 - Without `output_names`, a 2D `Y` is always `(N, K)`, never `(N, T)`.
 - With exactly **one** entry in `output_names` and more than one column, a 2D
@@ -84,6 +87,7 @@ entry below states which shapes it accepts.
 | `gsax.hsic` | `analyze`, `HSICResult` |
 | `gsax.pawn` | `analyze`, `PAWNResult` |
 | `gsax.borgonovo` | `analyze`, `DeltaResult` |
+| `gsax.optimal_transport` | `analyze`, `OTResult` |
 
 You can import from the subpackages directly:
 
@@ -98,6 +102,7 @@ from gsax.morris import sample as sample_morris, analyze as analyze_morris
 from gsax.hsic import analyze as analyze_hsic
 from gsax.pawn import analyze as analyze_pawn
 from gsax.borgonovo import analyze as analyze_borgonovo
+from gsax.optimal_transport import analyze as analyze_optimal_transport
 ```
 
 All public symbols are also re-exported from the top-level `gsax` namespace for
@@ -143,6 +148,8 @@ Top-level exports from `gsax`:
 - [`PAWNResult`](#pawnresult)
 - [`analyze_borgonovo`](#analyze-borgonovo)
 - [`DeltaResult`](#deltaresult)
+- [`analyze_optimal_transport`](#analyze-optimal-transport)
+- [`OTResult`](#otresult)
 
 ## Problem Definition
 
@@ -1367,7 +1374,7 @@ Related links:
 Generate plain Monte Carlo samples from the declared input distributions.
 Unlike Sobol/Saltelli sampling, these samples have no quasi-random structure.
 Use it for the given-data methods that accept arbitrary i.i.d. draws: DGSM,
-HSIC, PAWN, Borgonovo delta, and Shapley effects.
+HSIC, PAWN, Borgonovo delta, optimal transport, and Shapley effects.
 
 ```python
 def sample_mc(
@@ -2302,6 +2309,132 @@ Behavior:
 Related links:
 
 - [Borgonovo Delta Example](/examples/borgonovo)
+- [Methods](/guide/methods)
+
+## Optimal Transport Workflow
+
+<a id="analyze-optimal-transport"></a>
+### `analyze_optimal_transport()` {#analyze-optimal-transport}
+
+Compute optimal-transport sensitivity indices (Borgonovo, Figalli, Plischke &
+Savaré, 2024) with an advective/diffusive decomposition. Works on any
+(X, Y) sample; numerically validated against POT and analytic closed
+forms.
+
+```python
+def analyze_optimal_transport(
+    problem: Problem,
+    X: Array,
+    Y: Array,
+    *,
+    mode: Literal["univariate", "multivariate", "trajectory"] = "univariate",
+    n_partitions: int = 25,
+    standardize: bool = True,
+    epsilon: float = 0.01,
+    max_iter: int = 1000,
+    tol: float | None = None,
+    dummy: bool = False,
+    n_bootstrap: int = 0,
+    conf_level: float = 0.95,
+    seed: int = 0,
+    chunk_size: int | None = None,
+) -> OTResult
+```
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `problem` | `Problem` | — | Problem definition with D parameters. Marginals are not used (rank-based conditioning); correlated inputs are supported. |
+| `X` | `Array` | — | Input sample matrix `(N, D)` from any sampling strategy. |
+| `Y` | `Array` | — | Model output `(N,)`, `(N, K)`, or `(N, T, K)`. |
+| `mode` | `str` | `"univariate"` | `"univariate"`: exact 1-D transport per output column (indices `(T, K, D)`, squeezed). `"multivariate"`: one index per input over the flattened joint output (`(D,)`), entropic Sinkhorn. `"trajectory"`: one index per input per output over the whole time course (`(K, D)`); requires 3-D `Y`. |
+| `n_partitions` | `int` | `25` | Equal-frequency conditioning classes per input. |
+| `standardize` | `bool` | `True` | Joint modes: divide each output column by its std before building the transport cost. Ignored in `"univariate"`. |
+| `epsilon` | `float` | `0.01` | Joint modes: entropic regularization strength on the max-scaled cost. |
+| `max_iter` | `int` | `1000` | Joint modes: Sinkhorn iteration cap per solve. |
+| `tol` | `float \| None` | `None` | Joint modes: L1 target-marginal stopping tolerance. `None` = `1e-9` (float64) / `1e-6` (float32). One warning per analysis if any solve fails to converge. |
+| `dummy` | `bool` | `False` | Also score a synthetic independent input through the identical pipeline; its index is returned as `ot_dummy` (irrelevance floor). |
+| `n_bootstrap` | `int` | `0` | Bootstrap resamples for confidence intervals (0 = skip). Joint modes solve `n_bootstrap * D * n_partitions` transport problems. |
+| `conf_level` | `float` | `0.95` | Confidence level for percentile intervals. |
+| `seed` | `int` | `0` | Seed for bootstrap resampling and the dummy input. |
+| `chunk_size` | `int \| None` | `None` | `"univariate"` mode: output columns per kernel call (`None` = memory-aware default). Inert in the point-cloud modes. |
+
+Returns: [`OTResult`](#otresult)
+
+```python
+import jax.numpy as jnp
+import gsax
+from gsax.benchmarks.ishigami import PROBLEM, evaluate
+
+X = gsax.sample_mc(PROBLEM, N=8192, seed=42)
+Y = evaluate(jnp.asarray(X))
+result = gsax.analyze_optimal_transport(PROBLEM, jnp.asarray(X), Y)
+print(result.ot, result.advective, result.diffusive)
+```
+
+<a id="otresult"></a>
+### `OTResult` {#otresult}
+
+Dataclass holding the total OT index, its advective/diffusive decomposition,
+optional bootstrap confidence intervals, and the optional dummy baseline.
+
+```python
+@dataclass
+class OTResult:
+    ot: Array
+    ot_conf: Array | None
+    advective: Array
+    advective_conf: Array | None
+    diffusive: Array
+    diffusive_conf: Array | None
+    ot_dummy: Array | None
+    mode: str
+    problem: Problem
+```
+
+| Field | Shape | Description |
+| --- | --- | --- |
+| `ot` | `(D,)` / `(K, D)` / `(T, K, D)` | Total OT index in [0, 1]: 0 = output distribution unaffected by the input, 1 = fully determined by it. Constant output slices yield 0, not NaN. |
+| `ot_conf` | `(2, ...)` or `None` | Percentile bootstrap `[lower, upper]`; `None` when `n_bootstrap=0`. |
+| `advective` | same as `ot` | Mean-shift component; `2 * advective` equals the given-data first-order Sobol index. |
+| `advective_conf` | `(2, ...)` or `None` | Bootstrap interval for `advective`. |
+| `diffusive` | same as `ot` | Spread/shape component (`ot - advective`). |
+| `diffusive_conf` | `(2, ...)` or `None` | Bootstrap interval for `diffusive`. |
+| `ot_dummy` | `ot` shape minus the param axis, or `None` | Index of the synthetic independent input (`dummy=True`) — the irrelevance floor. |
+| `mode` | `str` | Analysis mode that produced these shapes. |
+
+Index shapes by mode and `Y`:
+
+| `mode` | `Y` shape | Index shapes |
+| --- | --- | --- |
+| `"univariate"` | `(N,)` / `(N, K)` / `(N, T, K)` | `(D,)` / `(K, D)` / `(T, K, D)` |
+| `"multivariate"` | any | `(D,)` |
+| `"trajectory"` | `(N, T, K)` | `(K, D)` |
+
+<a id="otresult-to_dataset"></a>
+#### `OTResult.to_dataset()`
+
+```python
+ds = result.to_dataset(time_coords=None)
+```
+
+Converts optimal-transport results to a labeled `xarray.Dataset`.
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `time_coords` | `list \| np.ndarray \| None` | `None` | Coordinate values for the time dimension on 3D results. |
+
+Behavior:
+
+- Uses `problem.names` for `param` coordinates, `problem.output_names` (or
+  `y0`, `y1`, ...) for `output`.
+- Dataset contains `ot`, `advective`, and `diffusive` variables; adds
+  `*_lower` / `*_upper` when confidence intervals are present and `ot_dummy`
+  when the dummy baseline was computed. The analysis mode is stored in
+  `attrs["mode"]`.
+
+Related links:
+
+- [Optimal Transport Example](/examples/optimal-transport)
 - [Methods](/guide/methods)
 
 ## Configuration

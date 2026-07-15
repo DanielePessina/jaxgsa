@@ -200,5 +200,57 @@ def analytical_delta(
     return delta
 
 
+def analytical_ot(
+    coeffs: tuple[float, ...] = DEFAULT_COEFFS,
+    variances: tuple[float, ...] = DEFAULT_VARIANCES,
+) -> np.ndarray:
+    """Compute optimal-transport sensitivity indices for the Gaussian linear model.
+
+    With ``Y ~ N(0, v)`` and ``Y | X_i = x ~ N(c_i x, v - c_i^2 s_i^2)``
+    (all Gaussian), the squared 2-Wasserstein distance between two
+    Gaussians is closed-form, ``(mu1 - mu2)^2 + (sqrt(v1) - sqrt(v2))^2``,
+    and the outer expectation over ``X_i`` is elementary
+    (``E[c_i^2 X_i^2] = c_i^2 s_i^2``):
+
+    .. math::
+        \\iota_i = \\frac{c_i^2 \\sigma_i^2
+            + (\\sqrt{v} - \\sqrt{v - c_i^2 \\sigma_i^2})^2}{2 v}
+
+    The first numerator term is the advective (mean-shift) part -- exactly
+    ``S1_i / 2`` after normalization -- and the second is the diffusive
+    (spread) part. This is the point-conditioning (``M -> infinity``)
+    limit of the partition estimator.
+
+    Args:
+        coeffs: Coefficient per dimension.
+        variances: Variance of each Gaussian input.
+
+    Returns:
+        Array of shape ``(D,)`` with OT indices in ``[0, 1]``.
+    """
+    c = np.asarray(coeffs, dtype=float)
+    var_x = np.asarray(variances, dtype=float)
+    var_y = float((c**2 * var_x).sum())
+
+    ot = np.zeros(len(c))
+    for i, (ci, vi) in enumerate(zip(c, var_x)):
+        if ci == 0.0 or vi == 0.0:
+            # A zero coefficient or a constant input leaves the conditional
+            # distribution unchanged -> the OT index is exactly 0.
+            continue
+        v_cond = var_y - ci**2 * vi
+        if v_cond <= 0.0:
+            # Y is a deterministic function of X_i alone: advective part
+            # c_i^2 s_i^2 = v and diffusive part (sqrt(v) - 0)^2 = v -> 1.
+            ot[i] = 1.0
+            continue
+        advective = ci**2 * vi
+        diffusive = (math.sqrt(var_y) - math.sqrt(v_cond)) ** 2
+        ot[i] = (advective + diffusive) / (2.0 * var_y)
+
+    return ot
+
+
 ANALYTICAL_S1, ANALYTICAL_ST, ANALYTICAL_S2 = analytical_indices()
 ANALYTICAL_DELTA = analytical_delta()
+ANALYTICAL_OT = analytical_ot()
