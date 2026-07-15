@@ -172,9 +172,11 @@ result = gsax.analyze_hdmr(
     chunk_size=64,  # optional: cap the vmap batch (timesteps x outputs) for memory control
 )
 
-# Sobol-compatible first-order and total-order indices
+# Sobol-compatible first-, second-, and total-order indices
 print("S1:", result.S1)   # Sa[:D] — structural first-order contribution
+print("S2:", result.S2)   # (D, D) symmetric second-order interaction matrix (NaN diagonal)
 print("ST:", result.ST)   # total-order per parameter
+# result.S3 is the (D, D, D) third-order tensor when maxorder=3
 
 # HDMR-specific: per-term decomposition
 print("Sa:", result.Sa)   # structural (uncorrelated) contribution per term

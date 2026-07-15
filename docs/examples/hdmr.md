@@ -41,6 +41,7 @@ result = analyze(
 )
 
 print("S1:", result.S1)
+print("S2:", result.S2)  # (D, D) second-order interaction matrix (NaN diagonal)
 print("ST:", result.ST)
 print("Terms:", result.terms)
 print("Sa:", result.Sa)
@@ -64,6 +65,9 @@ predictions on the original output scale.
 
 - `result.S1` is the structural first-order contribution extracted from
   `result.Sa`.
+- `result.S2` reshapes the pairwise terms into a symmetric `(D, D)` matrix
+  (`(D, D, D)` `result.S3` when `maxorder=3`); the diagonal and any pair absent
+  from the expansion are `NaN`, matching `PCEResult.S2`.
 - `result.ST` is the total contribution per parameter after summing all terms
   that involve that parameter.
 - `result.terms` tells you which columns in `Sa`, `Sb`, and `S` correspond to

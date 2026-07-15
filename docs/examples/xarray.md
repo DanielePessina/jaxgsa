@@ -93,11 +93,14 @@ print(ds_sobol.ST_lower.sel(output="velocity"))
 ## HDMR dataset
 
 `HDMRResult.to_dataset()` uses `term` for `Sa`, `Sb`, `S`, and `select`, while
-`ST` stays indexed by `param`.
+`ST` stays indexed by `param`. The second-order interaction matrix `S2` (and
+`S3` at `maxorder=3`) is indexed by `param_i`/`param_j`(/`param_k`), and each
+appears only when its expansion order has terms.
 
 ```python
 print(ds_hdmr.ST.sel(param="amplitude"))
 print(ds_hdmr.Sa.sel(term="amplitude/frequency"))
+print(ds_hdmr.S2.sel(param_i="amplitude", param_j="frequency"))
 print(ds_hdmr.rmse.sel(output="displacement"))
 ```
 
@@ -106,7 +109,8 @@ print(ds_hdmr.rmse.sel(output="displacement"))
 - If `problem.output_names` is omitted, outputs are labeled `y0`, `y1`, and so
   on.
 - Without `time_coords`, `to_dataset()` uses integer time indices.
-- Sobol `S2` becomes dataset variables with `param_i` and `param_j`.
+- Sobol, PCE, and HDMR `S2` become dataset variables with `param_i` and
+  `param_j` (HDMR `S3` adds `param_k`).
 - `select` and `rmse` only appear on the HDMR dataset when the result contains
   those fields.
 
