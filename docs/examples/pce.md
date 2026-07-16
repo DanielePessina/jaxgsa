@@ -93,6 +93,10 @@ Y_true = evaluate(X_new)
 print("Max error:", jnp.max(jnp.abs(Y_pred - Y_true)))
 ```
 
+Predictions are batched over rows of `X_new` automatically so very large
+prediction sets stay within a fixed transient-memory budget; pass
+`batch_size=` to control the batch length explicitly.
+
 ## xarray export
 
 `PCEResult.to_dataset()` converts results to a labeled `xarray.Dataset` with

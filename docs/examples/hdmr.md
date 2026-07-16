@@ -60,6 +60,10 @@ print("Absolute residuals:", jnp.abs(Y[:5] - Y_pred))
 sample axis before fitting the surrogate. The stored emulator still returns
 predictions on the original output scale.
 
+Predictions are batched over rows of `X_new` automatically so very large
+prediction sets stay within a fixed transient-memory budget; pass
+`batch_size=` to control the batch length explicitly.
+
 ## What to look at
 
 - `result.S1` is the structural first-order contribution extracted from

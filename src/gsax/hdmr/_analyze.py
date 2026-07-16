@@ -6,6 +6,8 @@ for prediction with the fitted surrogate.
 """
 
 import itertools
+import math
+from collections.abc import Callable
 from functools import lru_cache
 
 import jax
@@ -13,6 +15,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from gsax._batching import apply_batched, resolve_batch_size
 from gsax._normalization import (
     _prenormalize_outputs,
     _prepare_Y,
@@ -473,7 +476,7 @@ def _emulator_contract(B: Array, C: Array) -> Array:
     return jnp.sum(jnp.einsum("rmj,tkmj->rtkj", B, C), axis=3)
 
 
-def emulate_hdmr(result: HDMRResult, X_new: Array) -> Array:
+def emulate_hdmr(result: HDMRResult, X_new: Array, *, batch_size: int | None = None) -> Array:
     """Predict at new input points using the fitted HDMR surrogate.
 
     Note: This function is not JIT-compatible because ``HDMRResult`` is not a
@@ -482,6 +485,15 @@ def emulate_hdmr(result: HDMRResult, X_new: Array) -> Array:
     Args:
         result: HDMRResult from ``analyze_hdmr`` (must have ``emulator`` set).
         X_new: (N_new, D) new input points within the problem bounds.
+        batch_size: Rows of ``X_new`` to predict per batch. The B-spline
+            tensor-product bases are linear in the batch size with a large
+            per-row constant (up to ``m1^3`` floats per interaction term at
+            ``maxorder=3``), so single-shot evaluation at large ``N_new`` can
+            exhaust memory. ``None`` (default) derives a batch size from a
+            fixed transient-memory budget; pass ``batch_size >= N_new`` to
+            force a single-shot call. Each row's basis contraction is
+            independent, so batching only perturbs predictions at the level
+            of floating-point reassociation.
 
     Returns:
         Y_pred: (N_new,), (N_new, K), or (N_new, T, K) predicted outputs.
@@ -503,37 +515,45 @@ def emulate_hdmr(result: HDMRResult, X_new: Array) -> Array:
 
     # Apply the same CDF -> [0,1] transform used during fitting.
     X_n = cdf_to_unit_interval(X_new, result.problem)
+    N = X_n.shape[0]
 
-    # Reconstruct prediction as f0 + sum of component functions.
-    # Start with first-order: sum_j B1_j @ C1_j.
-    B1 = _build_B1(X_n, em["m"])  # (N_new, m1, D)
-    Y_total = _emulator_contract(B1, C1)
+    # Hoist the static basis index tables out of the per-batch path. Each
+    # higher_orders entry is (basis builder, term index table, tensor-product
+    # index table, coefficients) for one interaction order. Alongside, track
+    # the transient footprint per prediction row -- each basis tensor, its
+    # build temporaries (2 gathered factors for B2, 3 for B3), and the
+    # pre-sum einsum intermediate of _emulator_contract, (slices, n_terms).
+    m1 = C1.shape[-2]
+    D = C1.shape[-1]
+    slices = math.prod(C1.shape[:-2])
+    higher_orders: list[tuple[Callable[[Array, Array, Array], Array], Array, Array, Array]] = []
+    elems_per_row = m1 * D + slices * D
+    if maxorder >= 2:
+        *_, beta2_host, beta3_host = _get_hdmr_static_data(
+            result.problem.num_vars, maxorder, em["m"]
+        )
+        C2 = em["C2"]
+        if C2 is not None:
+            c2 = jnp.asarray(em["c2"], dtype=int)
+            higher_orders.append((_build_B2, c2, jnp.asarray(beta2_host, dtype=int), C2))
+            elems_per_row += (3 * m1**2 + slices) * len(em["c2"])
+        C3 = em["C3"]
+        if maxorder >= 3 and C3 is not None:
+            c3 = jnp.asarray(em["c3"], dtype=int)
+            higher_orders.append((_build_B3, c3, jnp.asarray(beta3_host, dtype=int), C3))
+            elems_per_row += (4 * m1**3 + slices) * len(em["c3"])
+    batch = resolve_batch_size(X_n.dtype.itemsize * elems_per_row, N, batch_size)
 
-    if maxorder >= 2 and em["C2"] is not None:
-        _, _, _, _, _, _, _, _, _, _, beta2_host, _ = _get_hdmr_static_data(
-            result.problem.num_vars,
-            maxorder,
-            em["m"],
-        )
-        B2 = _build_B2(
-            B1,
-            jnp.asarray(em["c2"], dtype=int),
-            jnp.asarray(beta2_host, dtype=int),
-        )
-        Y_total = Y_total + _emulator_contract(B2, em["C2"])
+    def _predict(X_chunk: Array) -> Array:
+        # Reconstruct prediction as f0 + sum of component functions.
+        # Start with first-order: sum_j B1_j @ C1_j.
+        B1 = _build_B1(X_chunk, em["m"])  # (batch, m1, D)
+        Y_total = _emulator_contract(B1, C1)
+        for build, c_idx, beta, C in higher_orders:
+            Y_total = Y_total + _emulator_contract(build(B1, c_idx, beta), C)
+        return Y_total
 
-    if maxorder >= 3 and em["C3"] is not None:
-        _, _, _, _, _, _, _, _, _, _, _, beta3_host = _get_hdmr_static_data(
-            result.problem.num_vars,
-            maxorder,
-            em["m"],
-        )
-        B3 = _build_B3(
-            B1,
-            jnp.asarray(em["c3"], dtype=int),
-            jnp.asarray(beta3_host, dtype=int),
-        )
-        Y_total = Y_total + _emulator_contract(B3, em["C3"])
+    Y_total = apply_batched(_predict, X_n, batch)
 
     # Add grand mean to recover the full surrogate prediction.
     Y_pred = Y_total + f0

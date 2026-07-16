@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import warnings
 from typing import NamedTuple
 
@@ -9,6 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from gsax._batching import apply_batched, resolve_batch_size
 from gsax._normalization import (
     _prepare_Y,
     _squeeze_output_axes,
@@ -251,7 +253,7 @@ def analyze_pce(
     )
 
 
-def emulate_pce(result: PCEResult, X_new: Array) -> Array:
+def emulate_pce(result: PCEResult, X_new: Array, *, batch_size: int | None = None) -> Array:
     """Predict at new input points using the fitted PCE surrogate.
 
     Rebuilds the polynomial basis at ``X_new`` and applies the coefficients
@@ -262,6 +264,14 @@ def emulate_pce(result: PCEResult, X_new: Array) -> Array:
         result: PCEResult from ``analyze_pce``.
         X_new: (N_new, D) new input points, in the same physical units as
             the ``X`` passed to ``analyze_pce``.
+        batch_size: Rows of ``X_new`` to predict per batch. The basis tensors
+            are linear in the batch size with a large per-row constant
+            (``~(D+2) * n_terms`` floats per row), so single-shot evaluation
+            at large ``N_new`` can exhaust memory. ``None`` (default) derives
+            a batch size from a fixed transient-memory budget; pass
+            ``batch_size >= N_new`` to force a single-shot call. Each row's
+            term contraction is independent, so batching only perturbs
+            predictions at the level of floating-point reassociation.
 
     Returns:
         Predicted outputs mirroring the training ``Y`` layout: ``(N_new,)``,
@@ -270,10 +280,21 @@ def emulate_pce(result: PCEResult, X_new: Array) -> Array:
     X_new = jnp.asarray(X_new)
 
     X_ref, input_types = _map_to_reference(X_new, result.problem)
-    Phi = build_design_matrix(X_ref, result.multi_index, input_types, result.order)
-    # Prediction contracts the term axis (last on coefficients) for every
-    # output slice at once: Y = Phi @ c per slice, one einsum.
-    pred = jnp.einsum("nt,...t->n...", Phi, result.coefficients)
+    N, D = X_ref.shape
+    n_terms = result.multi_index.shape[0]
+    # Transient footprint per row: the (D, batch, n_terms) stacked tensor in
+    # build_design_matrix dominates; +2 covers Phi and the product output.
+    slices = math.prod(result.coefficients.shape[:-1])
+    bytes_per_row = X_ref.dtype.itemsize * ((D + 2) * n_terms + slices)
+    batch = resolve_batch_size(bytes_per_row, N, batch_size)
+
+    def _predict(X_chunk: Array) -> Array:
+        Phi = build_design_matrix(X_chunk, result.multi_index, input_types, result.order)
+        # Prediction contracts the term axis (last on coefficients) for every
+        # output slice at once: Y = Phi @ c per slice, one einsum.
+        return jnp.einsum("nt,...t->n...", Phi, result.coefficients)
+
+    pred = apply_batched(_predict, X_ref, batch)
     # If inference inserted a singleton K axis at fit time, drop it so the
     # prediction mirrors the training Y's original (N_new, T) rank.
     return pred[..., 0] if result._inserted_output_axis else pred

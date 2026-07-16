@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `emulate_pce()` and `emulate_hdmr()` accept a `batch_size` keyword and now
+  batch forward predictions over rows of `X_new` by default, sized against a
+  512 MiB transient-memory budget. Single-shot evaluation materialized basis
+  tensors linear in `N_new` with a large per-row constant (polynomial terms /
+  B-spline tensor products), so large prediction sets could exhaust memory —
+  e.g. ~27 GB transient for a D=10, order-4 PCE at `N_new = 1e6`, now flat
+  ~650 MB. Pass an explicit `batch_size` to tune, or `batch_size >= N_new`
+  to force the old single-shot path. Predictions are unchanged up to
+  floating-point reassociation.
+
 ## 0.3.0b1
 
 ### Added
