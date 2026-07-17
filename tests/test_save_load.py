@@ -1,22 +1,44 @@
-"""Tests for the NPZ-only Sobol sampling persistence API."""
+"""Tests for the NPZ-only sampling persistence API (Sobol and Morris)."""
 
 import json
 
+import jax.numpy as jnp
 import numpy as np
+import pytest
 
 import gsax
+from gsax.morris import MorrisSamples
 from gsax.problem import GaussianInputSpec, Problem
 from gsax.sobol import SobolSamples
 
 
 def _assert_equal(left: SobolSamples, right: SobolSamples) -> None:
-    np.testing.assert_array_equal(left.samples, right.samples)
-    np.testing.assert_array_equal(left.sample_ids, right.sample_ids)
-    np.testing.assert_array_equal(left.expanded_to_unique, right.expanded_to_unique)
+    _assert_array_identical(left.samples, right.samples)
+    _assert_array_identical(left.sample_ids, right.sample_ids)
+    _assert_array_identical(left.expanded_to_unique, right.expanded_to_unique)
     assert left.n_expanded == right.n_expanded
     assert left.base_n == right.base_n
     assert left.n_params == right.n_params
     assert left.calc_second_order == right.calc_second_order
+    assert left.problem == right.problem
+
+
+def _assert_array_identical(left: np.ndarray, right: np.ndarray) -> None:
+    np.testing.assert_array_equal(left, right)
+    assert left.dtype == right.dtype
+
+
+def _assert_morris_equal(left: MorrisSamples, right: MorrisSamples) -> None:
+    _assert_array_identical(left.samples, right.samples)
+    _assert_array_identical(left.expanded_to_unique, right.expanded_to_unique)
+    _assert_array_identical(left.ee_idx_after, right.ee_idx_after)
+    _assert_array_identical(left.ee_idx_before, right.ee_idx_before)
+    _assert_array_identical(left.ee_delta, right.ee_delta)
+    assert left.n_expanded == right.n_expanded
+    assert left.n_trajectories == right.n_trajectories
+    assert left.num_levels == right.num_levels
+    assert left.method == right.method
+    assert left.n_params == right.n_params
     assert left.problem == right.problem
 
 
@@ -149,3 +171,125 @@ def test_metadata_records_gsax_version(tmp_path):
         meta = json.loads(data["metadata"].item())
     assert isinstance(meta["gsax_version"], str)
     assert meta["gsax_version"] != ""
+
+
+# ---------------------------------------------------------------------------
+# Morris persistence (via the shared UniqueDesignSamples base)
+# ---------------------------------------------------------------------------
+
+
+def _morris_problem() -> Problem:
+    return Problem.from_dict(
+        {
+            "uniform": (0.0, 1.0),
+            "gaussian": GaussianInputSpec(
+                dist="gaussian",
+                mean=1.0,
+                variance=4.0,
+                low=0.0,
+                high=3.0,
+            ),
+        },
+        output_names=("response",),
+    )
+
+
+@pytest.mark.parametrize("method", ["trajectory", "radial"])
+def test_morris_npz_round_trip(tmp_path, method):
+    samples = gsax.morris.sample(
+        _morris_problem(),
+        n_trajectories=8,
+        method=method,
+        seed=4,
+        verbose=False,
+    )
+
+    path = tmp_path / "morris_design"
+    samples.save(path)
+    loaded = MorrisSamples.load(path)
+
+    assert path.with_suffix(".npz").exists()
+    _assert_morris_equal(samples, loaded)
+
+
+def test_morris_downsampled_round_trip(tmp_path):
+    samples = gsax.morris.sample(
+        _morris_problem(),
+        n_trajectories=10,
+        seed=7,
+        verbose=False,
+    ).downsample(4)
+
+    path = tmp_path / "morris_small"
+    samples.save(path)
+    loaded = MorrisSamples.load(path)
+
+    _assert_morris_equal(samples, loaded)
+    assert loaded.n_trajectories == 4
+
+
+def test_morris_expand_outputs_after_load(tmp_path):
+    samples = gsax.morris.sample(
+        _morris_problem(),
+        n_trajectories=6,
+        seed=11,
+        verbose=False,
+    )
+    Y = jnp.arange(samples.n_runs, dtype=jnp.float32)
+
+    path = tmp_path / "morris_expand"
+    samples.save(path)
+    loaded = MorrisSamples.load(path)
+
+    expanded = loaded.expand_outputs(Y)
+    assert expanded.shape == (loaded.n_expanded,)
+    np.testing.assert_array_equal(np.asarray(expanded), np.asarray(samples.expand_outputs(Y)))
+
+
+def test_morris_identity_mapping_skips_index_array(tmp_path):
+    """Radial designs have no duplicate rows, so the index map is omitted."""
+    samples = gsax.morris.sample(
+        _morris_problem(),
+        n_trajectories=8,
+        method="radial",
+        seed=3,
+        verbose=False,
+    )
+    assert np.array_equal(samples.expanded_to_unique, np.arange(samples.n_expanded)), (
+        "test premise: radial designs should have no duplicate rows"
+    )
+
+    path = tmp_path / "morris_identity"
+    samples.save(path)
+
+    with np.load(tmp_path / "morris_identity.npz", allow_pickle=False) as data:
+        assert "expanded_to_unique" not in data.files
+        meta = json.loads(data["metadata"].item())
+    assert meta["identity_mapping"] is True
+    _assert_morris_equal(samples, MorrisSamples.load(path))
+
+
+def test_sobol_and_morris_share_metadata_schema(tmp_path):
+    """Both NPZ formats carry the same base-owned metadata keys."""
+    problem = _morris_problem()
+    sobol_samples = gsax.sobol.sample(problem, 32, seed=1, verbose=False)
+    morris_samples = gsax.morris.sample(problem, n_trajectories=6, seed=1, verbose=False)
+
+    sobol_samples.save(tmp_path / "schema_sobol")
+    morris_samples.save(tmp_path / "schema_morris")
+
+    metas = {}
+    for name in ("schema_sobol", "schema_morris"):
+        with np.load(tmp_path / f"{name}.npz", allow_pickle=False) as data:
+            assert "samples" in data.files
+            assert "metadata" in data.files
+            metas[name] = json.loads(data["metadata"].item())
+
+    common_keys = {"gsax_version", "problem", "n_expanded", "identity_mapping"}
+    for meta in metas.values():
+        assert common_keys <= set(meta)
+        assert set(meta["problem"]) == {"names", "input_specs", "output_names"}
+
+    # The shared (base-owned) part of the schema is identical across designs.
+    assert metas["schema_sobol"]["problem"] == metas["schema_morris"]["problem"]
+    assert metas["schema_sobol"]["gsax_version"] == metas["schema_morris"]["gsax_version"]

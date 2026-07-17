@@ -232,12 +232,12 @@ def _efast_md(mo):
 
 @app.cell
 def _efast_analysis(efast, jnp, oscillator, problem):
-    X_ef = efast.sample(problem, N=4096, M=4, seed=42)
-    Y_ef = oscillator(jnp.asarray(X_ef))
-    # Reshape (N*D, T) -> (N*D, T, 1) so gsax treats columns as time steps, not outputs
+    efast_samples = efast.sample(problem, n_per_curve=4096, M=4, seed=42)
+    Y_ef = oscillator(jnp.asarray(efast_samples.samples))
+    # Reshape (n_runs, T) -> (n_runs, T, 1) so gsax treats columns as time steps, not outputs
     Y_ef = Y_ef[..., None]
 
-    efast_result = efast.analyze(problem, Y_ef, M=4)
+    efast_result = efast.analyze(efast_samples, Y_ef)
     print(efast_result)
     return (efast_result,)
 

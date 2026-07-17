@@ -167,10 +167,10 @@ def _efast_md(mo):
 
 @app.cell
 def _efast_analysis(gsax, jnp, oakley_ohagan, problem):
-    X_ef = gsax.efast.sample(problem, N=4096, M=4, seed=42)
-    Y_ef = oakley_ohagan.evaluate(jnp.asarray(X_ef))
+    efast_samples = gsax.efast.sample(problem, n_per_curve=4096, M=4, seed=42)
+    Y_ef = oakley_ohagan.evaluate(jnp.asarray(efast_samples.samples))
 
-    efast_result = gsax.efast.analyze(problem, Y_ef, M=4)
+    efast_result = gsax.efast.analyze(efast_samples, Y_ef)
     print(efast_result)
     return (efast_result,)
 

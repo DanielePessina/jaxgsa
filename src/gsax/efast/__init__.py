@@ -8,13 +8,13 @@ Example::
 
     from gsax import efast
 
-    X = efast.sample(problem, N=4096, seed=42)
-    Y = model(X)
-    result = efast.analyze(problem, Y)
+    samples = efast.sample(problem, n_per_curve=4096, seed=42)
+    Y = model(samples.samples)
+    result = efast.analyze(samples, Y)
 """
 
 from gsax.efast._analyze import analyze
 from gsax.efast._result import EFASTResult
-from gsax.efast._sampling import sample
+from gsax.efast._sampling import EFASTSamples, sample
 
-__all__ = ["EFASTResult", "analyze", "sample"]
+__all__ = ["EFASTResult", "EFASTSamples", "analyze", "sample"]

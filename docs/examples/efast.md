@@ -28,16 +28,17 @@ import jax.numpy as jnp
 from gsax import efast
 from gsax.benchmarks.ishigami import PROBLEM, evaluate
 
-# Generate eFAST samples: N points per search curve, D curves total
-X = efast.sample(PROBLEM, N=4096, M=4, seed=42)
-print("X shape:", X.shape)  # (4096 * 3, 3) = (12288, 3)
+# Generate eFAST samples: n_per_curve points per search curve, D curves total
+samples = efast.sample(PROBLEM, n_per_curve=4096, M=4, seed=42)
+print("samples.samples shape:", samples.samples.shape)  # (4096 * 3, 3) = (12288, 3)
+print("n_runs:", samples.n_runs)  # 12288
 
 # Evaluate the model
-Y = evaluate(jnp.asarray(X))
+Y = evaluate(jnp.asarray(samples.samples))
 print("Y shape:", Y.shape)  # (12288,)
 
-# Compute eFAST indices
-result = efast.analyze(PROBLEM, Y, M=4)
+# Compute eFAST indices — M and the problem travel inside `samples`
+result = efast.analyze(samples, Y)
 
 print("S1:", result.S1)  # (D,) = (3,)
 print("ST:", result.ST)  # (D,) = (3,)
@@ -47,7 +48,7 @@ print("M:", result.M)
 
 ## Multi-output example
 
-When your model returns K outputs per sample, pass Y with shape `(N*D, K)`.
+When your model returns K outputs per sample, pass Y with shape `(n_runs, K)`.
 The resulting indices have shape `(K, D)`.
 
 ```python
@@ -71,14 +72,14 @@ def multi_output_model(X):
     damping = X[:, 2]
     displacement = amp * jnp.sin(freq) * jnp.exp(-damping)
     velocity = amp * jnp.cos(freq) * jnp.exp(-damping)
-    return jnp.stack([displacement, velocity], axis=-1)  # (N*D, K=2)
+    return jnp.stack([displacement, velocity], axis=-1)  # (n_runs, K=2)
 
 
-X = efast.sample(problem, N=4096, seed=42)
-Y = multi_output_model(jnp.asarray(X))
+samples = efast.sample(problem, n_per_curve=4096, seed=42)
+Y = multi_output_model(jnp.asarray(samples.samples))
 print("Y shape:", Y.shape)  # (12288, 2)
 
-result = efast.analyze(problem, Y, M=4)
+result = efast.analyze(samples, Y)
 print("S1 shape:", result.S1.shape)  # (K, D) = (2, 3)
 print("ST shape:", result.ST.shape)  # (K, D) = (2, 3)
 ```
@@ -86,7 +87,7 @@ print("ST shape:", result.ST.shape)  # (K, D) = (2, 3)
 ## Time-series example
 
 When your model returns T time steps and K outputs, pass Y with shape
-`(N*D, T, K)`. The resulting indices have shape `(T, K, D)`.
+`(n_runs, T, K)`. The resulting indices have shape `(T, K, D)`.
 
 ```python
 import jax.numpy as jnp
@@ -114,14 +115,14 @@ def time_series_model(X):
 
     displacement = amp * jnp.sin(2 * jnp.pi * freq * tt) * jnp.exp(-damping * tt)
     velocity = amp * jnp.cos(2 * jnp.pi * freq * tt) * jnp.exp(-damping * tt)
-    return jnp.stack([displacement, velocity], axis=-1)  # (N*D, T, K=2)
+    return jnp.stack([displacement, velocity], axis=-1)  # (n_runs, T, K=2)
 
 
-X = efast.sample(problem, N=4096, seed=42)
-Y = time_series_model(jnp.asarray(X))
+samples = efast.sample(problem, n_per_curve=4096, seed=42)
+Y = time_series_model(jnp.asarray(samples.samples))
 print("Y shape:", Y.shape)  # (12288, 20, 2)
 
-result = efast.analyze(problem, Y, M=4)
+result = efast.analyze(samples, Y)
 print("S1 shape:", result.S1.shape)  # (T, K, D) = (20, 2, 3)
 print("ST shape:", result.ST.shape)  # (T, K, D) = (20, 2, 3)
 ```
@@ -143,19 +144,22 @@ print(ds.ST.sel(output="velocity"))
 
 ## Shape rules
 
-- `(N*D,)` means scalar output.
-- `(N*D, K)` means K output variables with no time dimension.
-- `(N*D, T, K)` means T time steps and K outputs.
-- Without `problem.output_names`, a 2D array is always treated as `(N*D, K)`.
+Below, `n_runs = n_per_curve * D` is the total row count of the design
+(`samples.n_runs`); `analyze` rejects any `Y` whose leading dimension differs.
+
+- `(n_runs,)` means scalar output.
+- `(n_runs, K)` means K output variables with no time dimension.
+- `(n_runs, T, K)` means T time steps and K outputs.
+- Without `problem.output_names`, a 2D array is always treated as `(n_runs, K)`.
 - With exactly one entry in `problem.output_names`, a 2D array is treated as
-  `(N*D, T)` — timepoints of that single output — and flows through as
-  `(N*D, T, 1)`. Passing a pre-reshaped `(N*D, T, 1)` array also works.
+  `(n_runs, T)` — timepoints of that single output — and flows through as
+  `(n_runs, T, 1)`. Passing a pre-reshaped `(n_runs, T, 1)` array also works.
 
 | Y shape | S1 / ST shape |
 |---------|---------------|
-| `(N*D,)` | `(D,)` |
-| `(N*D, K)` | `(K, D)` |
-| `(N*D, T, K)` | `(T, K, D)` |
+| `(n_runs,)` | `(D,)` |
+| `(n_runs, K)` | `(K, D)` |
+| `(n_runs, T, K)` | `(T, K, D)` |
 
 D is always the last axis.
 
@@ -163,9 +167,11 @@ D is always the last axis.
 
 - eFAST does **not** produce S2 (second-order) indices. Use the Sobol workflow
   if you need pairwise interaction estimates.
-- The `M` parameter (interference factor) must match between `sample()` and
-  `analyze()`. The default is 4 for both.
-- `N` must satisfy `N > 4*M^2` (i.e. `N > 64` with the default `M=4`).
+- The `M` parameter (interference factor) is set once in `sample()` and travels
+  inside the returned `EFASTSamples`, so it can never be mismatched at
+  `analyze()` time. The default is 4.
+- `n_per_curve` must satisfy `n_per_curve > 4*M^2` (i.e. `n_per_curve > 64`
+  with the default `M=4`).
 - Indices outside `[0, 1]` indicate insufficient samples or near-zero output
   variance.
 

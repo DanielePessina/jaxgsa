@@ -89,12 +89,12 @@ def _run_all(gsax, ishigami, ishigami_fn, jax, jnp, problem, time):
 
     # --- eFAST ---
     _t0 = time.perf_counter()
-    _X_efast = gsax.efast.sample(problem, N=4096, M=4, seed=42)
-    _Y_efast = ishigami.evaluate(jnp.asarray(_X_efast))
-    result_efast = gsax.efast.analyze(problem, _Y_efast, M=4)
+    _efast_samples = gsax.efast.sample(problem, n_per_curve=4096, M=4, seed=42)
+    _Y_efast = ishigami.evaluate(jnp.asarray(_efast_samples.samples))
+    result_efast = gsax.efast.analyze(_efast_samples, _Y_efast)
     jax.block_until_ready(result_efast.S1)
     time_efast = time.perf_counter() - _t0
-    n_evals_efast = len(_X_efast)
+    n_evals_efast = _efast_samples.n_runs
 
     # --- HDMR ---
     _key = jax.random.PRNGKey(42)

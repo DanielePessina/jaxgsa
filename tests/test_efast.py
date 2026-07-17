@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from gsax.benchmarks import ishigami, linear, sobol_g
-from gsax.efast import EFASTResult, analyze, sample
+from gsax.efast import EFASTResult, EFASTSamples, analyze, sample
 from gsax.efast._analyze import _compute_indices
 from gsax.efast._sampling import _assign_frequencies
 from gsax.problem import GaussianInputSpec, Problem
@@ -14,17 +14,17 @@ from gsax.problem import GaussianInputSpec, Problem
 @pytest.fixture(scope="module")
 def ishigami_efast_result():
     """eFAST result for Ishigami benchmark."""
-    X = sample(ishigami.PROBLEM, N=4096, M=4, seed=42)
-    Y = ishigami.evaluate(jnp.asarray(X))
-    return analyze(ishigami.PROBLEM, jnp.asarray(Y), M=4)
+    sr = sample(ishigami.PROBLEM, n_per_curve=4096, M=4, seed=42)
+    Y = ishigami.evaluate(jnp.asarray(sr.samples))
+    return analyze(sr, jnp.asarray(Y))
 
 
 @pytest.fixture(scope="module")
 def linear_efast_result():
     """eFAST result for linear benchmark."""
-    X = sample(linear.PROBLEM, N=2048, M=4, seed=123)
-    Y = linear.evaluate(jnp.asarray(X))
-    return analyze(linear.PROBLEM, jnp.asarray(Y), M=4)
+    sr = sample(linear.PROBLEM, n_per_curve=2048, M=4, seed=123)
+    Y = linear.evaluate(jnp.asarray(sr.samples))
+    return analyze(sr, jnp.asarray(Y))
 
 
 class TestIshigamiAccuracy:
@@ -67,14 +67,23 @@ class TestLinearAccuracy:
 
 
 class TestSampling:
+    def test_returns_efast_samples(self):
+        problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
+        sr = sample(problem, n_per_curve=257, M=4, seed=1)
+        assert isinstance(sr, EFASTSamples)
+        assert sr.n_per_curve == 257
+        assert sr.M == 4
+        assert sr.problem is problem
+
     def test_shape(self):
         problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        X = sample(problem, N=257, M=4, seed=1)
-        assert X.shape == (257 * 2, 2)
+        sr = sample(problem, n_per_curve=257, M=4, seed=1)
+        assert sr.samples.shape == (257 * 2, 2)
+        assert sr.n_runs == 257 * 2
 
     def test_within_bounds(self):
         problem = Problem(names=("a", "b"), bounds=((2.0, 5.0), (-1.0, 3.0)))
-        X = sample(problem, N=257, M=4, seed=2)
+        X = sample(problem, n_per_curve=257, M=4, seed=2).samples
         assert np.all(X[:, 0] >= 2.0 - 1e-10)
         assert np.all(X[:, 0] <= 5.0 + 1e-10)
         assert np.all(X[:, 1] >= -1.0 - 1e-10)
@@ -83,7 +92,12 @@ class TestSampling:
     def test_n_too_small_raises(self):
         problem = Problem(names=("x",), bounds=((0, 1),))
         with pytest.raises(ValueError, match="4.*M.*2"):
-            sample(problem, N=64, M=4)
+            sample(problem, n_per_curve=64, M=4)
+
+    def test_invalid_m_raises(self):
+        problem = Problem(names=("x",), bounds=((0, 1),))
+        with pytest.raises(ValueError, match="M must be >= 1"):
+            sample(problem, n_per_curve=257, M=0)
 
     def test_gaussian_inputs(self):
         problem = Problem.from_dict(
@@ -92,16 +106,28 @@ class TestSampling:
                 "x2": GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0),
             }
         )
-        X = sample(problem, N=257, M=4, seed=3)
+        X = sample(problem, n_per_curve=257, M=4, seed=3).samples
         assert X.shape == (257 * 2, 2)
         assert np.all(X[:, 0] >= 0.0 - 1e-10)
         assert np.all(X[:, 0] <= 1.0 + 1e-10)
 
     def test_reproducible(self):
         problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        X1 = sample(problem, N=257, M=4, seed=99)
-        X2 = sample(problem, N=257, M=4, seed=99)
+        X1 = sample(problem, n_per_curve=257, M=4, seed=99).samples
+        X2 = sample(problem, n_per_curve=257, M=4, seed=99).samples
         np.testing.assert_array_equal(X1, X2)
+
+
+class TestEFASTSamplesValidation:
+    def test_inconsistent_shape_raises(self):
+        problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
+        with pytest.raises(ValueError, match="n_per_curve"):
+            EFASTSamples(samples=np.zeros((100, 2)), n_per_curve=257, M=4, problem=problem)
+
+    def test_invalid_m_raises(self):
+        problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
+        with pytest.raises(ValueError, match="M must be >= 1"):
+            EFASTSamples(samples=np.zeros((514, 2)), n_per_curve=257, M=0, problem=problem)
 
 
 class TestAnalysis:
@@ -119,17 +145,55 @@ class TestAnalysis:
         assert ishigami_efast_result.M == 4
         assert ishigami_efast_result.omega_0 > 0
 
-    def test_invalid_y_length(self):
+    def test_wrong_y_row_count_raises_with_both_numbers(self):
+        """A wrong Y row count names the given and required counts."""
         problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        with pytest.raises(ValueError, match="multiple"):
-            analyze(problem, jnp.ones(7))
+        sr = sample(problem, n_per_curve=257, M=4, seed=1)
+        with pytest.raises(ValueError, match=r"7 rows.*514"):
+            analyze(sr, jnp.ones(7))
 
-    def test_invalid_m_raises(self):
+    def test_transposed_y_raises(self):
+        """Y transposed to (K, n_runs) must be rejected, not reinterpreted."""
         problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        X = sample(problem, N=257, M=4, seed=1)
-        Y = jnp.ones(X.shape[0])
-        with pytest.raises(ValueError, match="M must be >= 1"):
-            analyze(problem, Y, M=0)
+        sr = sample(problem, n_per_curve=257, M=4, seed=1)
+        Y = jnp.ones((sr.n_runs, 3))
+        with pytest.raises(ValueError, match=r"3 rows.*514"):
+            analyze(sr, Y.T)
+
+
+class TestMConsistency:
+    """M travels inside EFASTSamples, so sample/analyze can never disagree."""
+
+    def test_analyze_uses_samples_m(self):
+        """A design built with M=6 is analyzed with 6 harmonics."""
+        sr = sample(ishigami.PROBLEM, n_per_curve=4096, M=6, seed=42)
+        Y = ishigami.evaluate(jnp.asarray(sr.samples))
+        result = analyze(sr, jnp.asarray(Y))
+
+        # Metadata threads through from the design, not from any analyze arg.
+        assert result.M == 6
+        assert result.omega_0 == (4096 - 1) // (2 * 6)
+
+        # The indices must equal a manual M=6 computation on curve 0 —
+        # proof analyze summed 6 harmonics of the M=6 omega_0.
+        n = sr.n_per_curve
+        omega_0 = (n - 1) // (2 * 6)
+        s1_manual, st_manual = _compute_indices(jnp.asarray(Y[:n]), n, 6, omega_0)
+        np.testing.assert_allclose(float(result.S1[0]), float(s1_manual), rtol=1e-6)
+        np.testing.assert_allclose(float(result.ST[0]), float(st_manual), rtol=1e-6)
+
+    def test_m6_still_accurate(self):
+        """With M carried in the design, M=6 indices stay accurate."""
+        sr = sample(ishigami.PROBLEM, n_per_curve=4096, M=6, seed=42)
+        Y = ishigami.evaluate(jnp.asarray(sr.samples))
+        result = analyze(sr, jnp.asarray(Y))
+        S1 = np.asarray(result.S1)
+        for i, expected in enumerate(ishigami.ANALYTICAL_S1):
+            if expected == 0.0:
+                assert abs(S1[i]) < 0.03, f"S1[{i}]={S1[i]:.4f}, expected ~0"
+            else:
+                rel = abs(S1[i] - expected) / expected
+                assert rel < 0.10, f"S1[{i}]={S1[i]:.4f}, expected {expected}"
 
 
 class TestFrequencyAssignment:
@@ -171,17 +235,17 @@ class TestMultiOutputShapes:
 
     @pytest.fixture(scope="class")
     def ishigami_multi(self):
-        """Ishigami scalar result and multi-output Y (K=3)."""
-        X = sample(ishigami.PROBLEM, N=4096, M=4, seed=42)
-        Y = ishigami.evaluate(jnp.asarray(X))
-        scalar_result = analyze(ishigami.PROBLEM, jnp.asarray(Y), M=4)
+        """Ishigami design, scalar result, and multi-output Y (K=3)."""
+        sr = sample(ishigami.PROBLEM, n_per_curve=4096, M=4, seed=42)
+        Y = ishigami.evaluate(jnp.asarray(sr.samples))
+        scalar_result = analyze(sr, jnp.asarray(Y))
         Y_multi = jnp.stack([Y, 2 * Y, 0.5 * Y], axis=-1)
-        return Y, Y_multi, scalar_result
+        return sr, Y, Y_multi, scalar_result
 
     def test_2d_multi_output(self, ishigami_multi):
         """Y shape (N*D, K) produces S1/ST shape (K, D)."""
-        _, Y_multi, _ = ishigami_multi
-        result = analyze(ishigami.PROBLEM, Y_multi, M=4)
+        sr, _, Y_multi, _ = ishigami_multi
+        result = analyze(sr, Y_multi)
         D = ishigami.PROBLEM.num_vars
         K = 3
         assert result.S1.shape == (K, D)
@@ -189,7 +253,7 @@ class TestMultiOutputShapes:
 
     def test_3d_time_series(self, ishigami_multi):
         """Y shape (N*D, T, K) produces S1/ST shape (T, K, D)."""
-        Y_scalar, _, _ = ishigami_multi
+        sr, Y_scalar, _, _ = ishigami_multi
         T, K = 5, 2
         slices = []
         for t in range(T):
@@ -197,14 +261,14 @@ class TestMultiOutputShapes:
             scale_1 = float(t + 1) * 0.5
             slices.append(jnp.stack([scale_0 * Y_scalar, scale_1 * Y_scalar], axis=-1))
         Y_3d = jnp.stack(slices, axis=1)  # (N*D, T, K)
-        result = analyze(ishigami.PROBLEM, Y_3d, M=4)
+        result = analyze(sr, Y_3d)
         D = ishigami.PROBLEM.num_vars
         assert result.S1.shape == (T, K, D)
         assert result.ST.shape == (T, K, D)
 
     def test_scalar_unchanged(self, ishigami_multi):
         """1-D Y still produces (D,) indices."""
-        Y_scalar, _, scalar_result = ishigami_multi
+        _, _, _, scalar_result = ishigami_multi
         D = ishigami.PROBLEM.num_vars
         assert scalar_result.S1.shape == (D,)
         assert scalar_result.ST.shape == (D,)
@@ -214,11 +278,11 @@ class TestMultiOutputAccuracy:
     """Scaled copies of Ishigami must produce the same indices as scalar."""
 
     def test_multi_output_accuracy(self):
-        X = sample(ishigami.PROBLEM, N=4096, M=4, seed=42)
-        Y = ishigami.evaluate(jnp.asarray(X))
-        scalar_result = analyze(ishigami.PROBLEM, jnp.asarray(Y), M=4)
+        sr = sample(ishigami.PROBLEM, n_per_curve=4096, M=4, seed=42)
+        Y = ishigami.evaluate(jnp.asarray(sr.samples))
+        scalar_result = analyze(sr, jnp.asarray(Y))
         Y_multi = jnp.stack([Y, 2 * Y, 0.5 * Y], axis=-1)
-        multi_result = analyze(ishigami.PROBLEM, Y_multi, M=4)
+        multi_result = analyze(sr, Y_multi)
         np.testing.assert_allclose(multi_result.S1[0], scalar_result.S1, atol=1e-5)
         np.testing.assert_allclose(multi_result.ST[0], scalar_result.ST, atol=1e-5)
 
@@ -227,11 +291,11 @@ class TestPrenormalize:
     """Prenormalize should handle large constant offsets."""
 
     def test_prenormalize(self):
-        X = sample(ishigami.PROBLEM, N=4096, M=4, seed=42)
-        Y = ishigami.evaluate(jnp.asarray(X))
-        baseline = analyze(ishigami.PROBLEM, jnp.asarray(Y), M=4)
+        sr = sample(ishigami.PROBLEM, n_per_curve=4096, M=4, seed=42)
+        Y = ishigami.evaluate(jnp.asarray(sr.samples))
+        baseline = analyze(sr, jnp.asarray(Y))
         Y_shifted = Y + 1e6
-        result = analyze(ishigami.PROBLEM, jnp.asarray(Y_shifted), M=4, prenormalize=True)
+        result = analyze(sr, jnp.asarray(Y_shifted), prenormalize=True)
         np.testing.assert_allclose(np.asarray(result.S1), np.asarray(baseline.S1), atol=0.02)
         np.testing.assert_allclose(np.asarray(result.ST), np.asarray(baseline.ST), atol=0.02)
 
@@ -240,11 +304,11 @@ class TestChunkSize:
     """Chunk size should not affect results."""
 
     def test_chunk_size(self):
-        X = sample(ishigami.PROBLEM, N=4096, M=4, seed=42)
-        Y = ishigami.evaluate(jnp.asarray(X))
+        sr = sample(ishigami.PROBLEM, n_per_curve=4096, M=4, seed=42)
+        Y = ishigami.evaluate(jnp.asarray(sr.samples))
         Y_multi = jnp.stack([Y, 2 * Y, 0.5 * Y], axis=-1)
-        default_result = analyze(ishigami.PROBLEM, Y_multi, M=4)
-        chunked_result = analyze(ishigami.PROBLEM, Y_multi, M=4, chunk_size=1)
+        default_result = analyze(sr, Y_multi)
+        chunked_result = analyze(sr, Y_multi, chunk_size=1)
         np.testing.assert_allclose(
             np.asarray(chunked_result.S1),
             np.asarray(default_result.S1),
@@ -262,10 +326,10 @@ class TestToDatasetMultiOutput:
 
     def test_2d_dataset(self):
         """Multi-output result exports with ('output', 'param') dims."""
-        X = sample(ishigami.PROBLEM, N=4096, M=4, seed=42)
-        Y = ishigami.evaluate(jnp.asarray(X))
+        sr = sample(ishigami.PROBLEM, n_per_curve=4096, M=4, seed=42)
+        Y = ishigami.evaluate(jnp.asarray(sr.samples))
         Y_multi = jnp.stack([Y, 2 * Y, 0.5 * Y], axis=-1)
-        result = analyze(ishigami.PROBLEM, Y_multi, M=4)
+        result = analyze(sr, Y_multi)
         ds = result.to_dataset()
         assert set(ds["S1"].dims) == {"output", "param"}
         assert list(ds.coords["param"].values) == list(ishigami.PROBLEM.names)
@@ -273,14 +337,14 @@ class TestToDatasetMultiOutput:
 
     def test_3d_dataset_with_time_coords(self):
         """Time-series result exports with ('time', 'output', 'param') dims."""
-        X = sample(ishigami.PROBLEM, N=4096, M=4, seed=42)
-        Y = ishigami.evaluate(jnp.asarray(X))
+        sr = sample(ishigami.PROBLEM, n_per_curve=4096, M=4, seed=42)
+        Y = ishigami.evaluate(jnp.asarray(sr.samples))
         T = 5
         slices = []
         for t in range(T):
             slices.append(jnp.stack([float(t + 1) * Y, float(t + 1) * 0.5 * Y], axis=-1))
         Y_3d = jnp.stack(slices, axis=1)
-        result = analyze(ishigami.PROBLEM, Y_3d, M=4)
+        result = analyze(sr, Y_3d)
         time_coords = [0.0, 0.1, 0.2, 0.3, 0.4]
         ds = result.to_dataset(time_coords=time_coords)
         assert set(ds["S1"].dims) == {"time", "output", "param"}
@@ -289,10 +353,10 @@ class TestToDatasetMultiOutput:
 
     def test_repr(self):
         """repr() includes shape info."""
-        X = sample(ishigami.PROBLEM, N=4096, M=4, seed=42)
-        Y = ishigami.evaluate(jnp.asarray(X))
+        sr = sample(ishigami.PROBLEM, n_per_curve=4096, M=4, seed=42)
+        Y = ishigami.evaluate(jnp.asarray(sr.samples))
         Y_multi = jnp.stack([Y, 2 * Y], axis=-1)
-        result = analyze(ishigami.PROBLEM, Y_multi, M=4)
+        result = analyze(sr, Y_multi)
         r = repr(result)
         assert "EFASTResult" in r
         assert "S1" in r
@@ -312,9 +376,9 @@ class TestSobolGAccuracy:
     @pytest.fixture(scope="module")
     def sobol_g_result(self):
         """eFAST result for Sobol G-function benchmark."""
-        X = sample(sobol_g.PROBLEM, N=4096, M=4, seed=42)
-        Y = sobol_g.evaluate(jnp.asarray(X))
-        return analyze(sobol_g.PROBLEM, jnp.asarray(Y), M=4)
+        sr = sample(sobol_g.PROBLEM, n_per_curve=4096, M=4, seed=42)
+        Y = sobol_g.evaluate(jnp.asarray(sr.samples))
+        return analyze(sr, jnp.asarray(Y))
 
     def test_s1(self, sobol_g_result):
         S1 = np.asarray(sobol_g_result.S1)
@@ -348,9 +412,9 @@ class TestSobolGAccuracy:
 def test_single_param():
     """D=1 edge case: single parameter problem."""
     problem = Problem(names=("x",), bounds=((0.0, 1.0),))
-    X = sample(problem, N=257, M=4, seed=1)
-    Y = jnp.sin(jnp.asarray(X[:, 0]))
-    result = analyze(problem, Y, M=4)
+    sr = sample(problem, n_per_curve=257, M=4, seed=1)
+    Y = jnp.sin(jnp.asarray(sr.samples[:, 0]))
+    result = analyze(sr, Y)
     assert result.S1.shape == (1,)
     assert result.ST.shape == (1,)
     assert float(result.S1[0]) > 0.5

@@ -1,20 +1,26 @@
-"""Shapley effects derived from fitted PCE and HDMR results."""
+"""Shared Shapley pipeline tail and the convenience ``analyze`` wrapper.
+
+``PCEResult.shapley`` and ``HDMRResult.shapley`` each supply their own
+variance decomposition (per-term partial variances plus term membership) and
+delegate the common tail -- normalization, Shapley allocation, fit-quality
+warning, result construction -- to :func:`_shapley_result_from_variances`.
+:func:`analyze` is a thin convenience over those result methods.
+"""
 
 from __future__ import annotations
 
 import warnings
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Literal
 
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
-from gsax.shapley._engine import build_membership, shapley_from_variances
+from gsax.shapley._engine import shapley_from_variances
 from gsax.shapley._result import ShapleyResult
 
 if TYPE_CHECKING:
-    from gsax.hdmr import HDMRResult
-    from gsax.pce import PCEResult
+    from gsax.problem import Problem
 
 _POORFIT_THRESHOLD = 0.5
 _OVERFIT_THRESHOLD = 1.3
@@ -52,8 +58,8 @@ def _warn_pathological_fit(explained_variance: Array) -> None:
     """Warn when a surrogate captured implausibly little or too much variance.
 
     The call chain is user -> ``PCEResult.shapley``/``HDMRResult.shapley`` ->
-    ``_shapley_from_*`` -> here, so ``stacklevel=4`` attributes the warning
-    to the user's frame.
+    ``_shapley_result_from_variances`` -> here, so ``stacklevel=4`` attributes
+    the warning to the user's frame.
     """
     ev = jnp.asarray(explained_variance)
     if bool(jnp.any(ev > _OVERFIT_THRESHOLD)):
@@ -70,54 +76,115 @@ def _warn_pathological_fit(explained_variance: Array) -> None:
         )
 
 
-def _shapley_from_pce(result: "PCEResult") -> ShapleyResult:
-    """Compute Shapley effects from fitted orthogonal polynomial coefficients."""
-    partial = result.coefficients[..., 1:] ** 2
-    membership = np.asarray(result.multi_index[1:] > 0)
-    explained = result.explained_variance
-    if explained is None:
-        raise ValueError("PCEResult does not contain explained-variance diagnostics")
-    normalized = _normalize_partial_variances(partial, explained, partial.sum(axis=-1))
-    Sh, S1, ST = shapley_from_variances(normalized, membership)
-    _warn_pathological_fit(explained)
-    return ShapleyResult(
-        Sh=Sh,
-        S1=S1,
-        ST=ST,
-        problem=result.problem,
-        backend="pce",
-        explained_variance=explained,
-        order=result.order,
-    )
-
-
-def _shapley_from_hdmr(
-    result: "HDMRResult",
+def _shapley_result_from_variances(
+    partial: Array,
+    membership: np.ndarray,
+    explained: Array,
     *,
-    include_correlative: bool,
+    total: Array,
+    problem: "Problem",
+    backend: Literal["hdmr", "pce"],
+    order: int,
+    include_correlative: bool = False,
 ) -> ShapleyResult:
-    """Compute structural or correlation-aware Shapley effects from HDMR terms."""
-    fit = result._fit
-    if fit is None:
-        raise ValueError("HDMRResult does not contain fitted surrogate state")
-    partial = result.Sa + result.Sb if include_correlative else result.Sa
-    subsets: list[tuple[int, ...]] = [(i,) for i in range(result.problem.num_vars)]
-    subsets.extend(result._c2)
-    subsets.extend(result._c3)
-    membership = build_membership(subsets, result.problem.num_vars)
-    # For HDMR the per-term sum doubles as the explained-variance diagnostic
-    # (indices are already output-variance fractions); compute it once.
-    explained = partial.sum(axis=-1)
-    normalized = _normalize_partial_variances(partial, explained, explained)
+    """Finish a Shapley analysis from a surrogate's variance decomposition.
+
+    The single shared tail of both ``shapley()`` result methods: normalize
+    the partial variances so the modelled terms sum to 1, allocate each
+    term's share equally among its participants, warn on a pathological fit,
+    and assemble the result. Callers perform their fitted-state precheck and
+    decomposition before delegating here.
+
+    Args:
+        partial: Per-term variance contributions, shape ``(..., n_terms)``.
+        membership: ``(n_terms, D)`` boolean matrix marking which parameters
+            participate in each term.
+        explained: Per-slice explained-variance diagnostic, shape ``(...,)``.
+        total: Pre-computed ``partial.sum(axis=-1)`` (for HDMR this is the
+            same array as ``explained``, so passing it avoids a recompute).
+        problem: Problem definition carried onto the result.
+        backend: Surrogate backend label, ``"hdmr"`` or ``"pce"``.
+        order: Effective surrogate order actually used.
+        include_correlative: Whether the correlative ANCOVA part was folded
+            into ``partial`` (HDMR only).
+
+    Returns:
+        ShapleyResult with ``Sh``/``S1``/``ST``, the diagnostic, and
+        provenance fields.
+
+    Warns:
+        UserWarning: If ``explained`` flags a pathological fit (well below
+            1, or above 1 -- overfit).
+    """
+    normalized = _normalize_partial_variances(partial, explained, total)
     Sh, S1, ST = shapley_from_variances(normalized, membership)
     _warn_pathological_fit(explained)
     return ShapleyResult(
         Sh=Sh,
         S1=S1,
         ST=ST,
-        problem=result.problem,
-        backend="hdmr",
+        problem=problem,
+        backend=backend,
         explained_variance=explained,
-        order=fit["maxorder"],
+        order=order,
         include_correlative=include_correlative,
     )
+
+
+def analyze(
+    problem: "Problem",
+    X: Array,
+    Y: Array,
+    *,
+    backend: Literal["pce", "hdmr"] = "pce",
+    include_correlative: bool = False,
+    **backend_kwargs: Any,
+) -> ShapleyResult:
+    """Fit a surrogate and return its Shapley effects (convenience wrapper).
+
+    This is literally ``gsax.pce.analyze(problem, X, Y, **kw).shapley()`` /
+    ``gsax.hdmr.analyze(problem, X, Y, **kw).shapley(include_correlative=...)``
+    depending on ``backend`` -- there is no separate Shapley pipeline. Prefer
+    the two-step form when you also want the fitted result (Sobol indices,
+    ``predict``, fit diagnostics); use this wrapper when only the Shapley
+    effects are needed.
+
+    Args:
+        problem: Parameter names and distributions.
+        X: (N, D) input samples.
+        Y: Model outputs -- (N,) scalar, (N, K) multi-output, or (N, T, K)
+            time-series.
+        backend: Surrogate providing the variance decomposition. ``"pce"``
+            (default) reads subset variances off orthonormal polynomial
+            coefficients; ``"hdmr"`` fits B-spline component functions and
+            additionally separates correlation-induced variance.
+        include_correlative: HDMR-only; fold the correlative ANCOVA part
+            (``Sb``) into the allocation. See ``HDMRResult.shapley``.
+        **backend_kwargs: Passed through unchanged to the selected backend's
+            ``analyze`` (e.g. ``order``/``ridge``/``fit_ratio`` for PCE,
+            ``maxorder``/``m``/``lambdax`` for HDMR).
+
+    Returns:
+        ShapleyResult, exactly as returned by the corresponding result
+        method.
+
+    Raises:
+        ValueError: If ``backend`` is unknown, ``include_correlative`` is
+            requested with the PCE backend, or the underlying ``analyze``
+            rejects its inputs.
+        TypeError: If ``backend_kwargs`` contains a keyword the selected
+            backend's ``analyze`` does not accept.
+    """
+    if backend == "pce":
+        if include_correlative:
+            raise ValueError("include_correlative requires backend='hdmr'")
+        from gsax.pce import analyze as analyze_pce
+
+        return analyze_pce(problem, X, Y, **backend_kwargs).shapley()
+    if backend == "hdmr":
+        from gsax.hdmr import analyze as analyze_hdmr
+
+        return analyze_hdmr(problem, X, Y, **backend_kwargs).shapley(
+            include_correlative=include_correlative
+        )
+    raise ValueError(f"backend must be 'pce' or 'hdmr', got {backend!r}")

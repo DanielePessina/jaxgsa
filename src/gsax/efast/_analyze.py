@@ -6,7 +6,7 @@ at harmonics of the focal frequency omega_0, and total-order indices
 from the complementary low-frequency content.
 
 Array shape conventions used throughout:
-    N  — number of samples per search curve
+    N  — number of samples per search curve (``n_per_curve``)
     D  — number of input parameters
     T  — number of time steps (singleton-squeezed when absent)
     K  — number of output variables (singleton-squeezed when absent)
@@ -31,7 +31,7 @@ from gsax._core.validation import (
     _warn_zero_variance_slices,
 )
 from gsax.efast._result import EFASTResult
-from gsax.problem import Problem
+from gsax.efast._sampling import EFASTSamples
 
 
 def _compute_indices(Y_curve: Array, N: int, M: int, omega_0: int) -> tuple[Array, Array]:
@@ -93,10 +93,9 @@ def _get_efast_kernel(N: int, M: int, omega_0: int, batched: bool):
 
 
 def analyze(
-    problem: Problem,
+    samples: EFASTSamples,
     Y: Array,
     *,
-    M: int = 4,
     prenormalize: bool = False,
     chunk_size: int = 2048,
 ) -> EFASTResult:
@@ -105,21 +104,21 @@ def analyze(
     eFAST attributes output variance to each parameter from the Fourier
     spectrum of the model output along that parameter's search curve --
     a structured, deterministic alternative to Monte Carlo Sobol estimation
-    that yields S1 and ST (but no second-order indices) from ``N * D`` model
-    runs. ``Y`` must be the model evaluated row-by-row on the output of
-    ``efast.sample`` (same ``N``, same ``M``, rows in the same order);
-    the row count is used to reconstruct the sampling frequency.
+    that yields S1 and ST (but no second-order indices) from
+    ``n_per_curve * D`` model runs. ``Y`` must be the model evaluated
+    row-by-row on ``samples.samples`` (rows in the same order); the design
+    metadata (``n_per_curve``, ``M``, ``problem``) is read from ``samples``
+    so it can never be mismatched with the sampling step.
 
     Args:
-        problem: Problem definition with D parameters.
-        Y: Model outputs evaluated at eFAST samples, rows in sample order.
-            Accepted shapes:
-            - ``(N*D,)`` for scalar output
-            - ``(N*D, K)`` for K output variables
-            - ``(N*D, T, K)`` for K outputs over T time steps
-        M: Interference factor. Must match the ``M`` used in
-            ``efast.sample``, otherwise the harmonics are misread and the
-            indices are meaningless. Default 4.
+        samples: Design returned by ``gsax.efast.sample()``, carrying the
+            sample matrix plus ``n_per_curve``, ``M``, and the problem.
+        Y: Model outputs evaluated at each row of ``samples.samples``, in
+            the same row order. Accepted shapes (``n_runs`` is
+            ``samples.n_runs = n_per_curve * D``):
+            - ``(n_runs,)`` for scalar output
+            - ``(n_runs, K)`` for K output variables
+            - ``(n_runs, T, K)`` for K outputs over T time steps
         prenormalize: If True, center and scale each output slice to unit
             variance before computing indices. The indices are ratios, so
             this changes nothing mathematically; it only helps when raw
@@ -133,13 +132,22 @@ def analyze(
         ``(T, K, D)`` to mirror the layout of ``Y``.
 
     Raises:
-        ValueError: If ``M < 1`` or ``Y``'s leading dimension is not a
-            multiple of D.
+        ValueError: If ``Y``'s leading dimension does not equal
+            ``samples.n_runs``, or ``Y`` has an invalid rank.
     """
-    if M < 1:
-        raise ValueError(f"M must be >= 1, got {M}")
+    problem = samples.problem
+    M = samples.M
+    D = problem.num_vars
+    N = samples.n_per_curve
 
     Y = jnp.asarray(Y)
+
+    if Y.ndim in (1, 2, 3) and Y.shape[0] != samples.n_runs:
+        raise ValueError(
+            f"Y has {Y.shape[0]} rows but this eFAST design requires "
+            f"n_runs = n_per_curve * D = {N} * {D} = {samples.n_runs}; "
+            "evaluate the model on every row of samples.samples, in order"
+        )
 
     if not jnp.all(jnp.isfinite(Y)):
         n_bad = int(jnp.sum(~jnp.isfinite(Y)))
@@ -149,9 +157,7 @@ def analyze(
             stacklevel=2,
         )
 
-    D = problem.num_vars
-
-    Y = _validate_output(Y, None, problem)
+    Y = _validate_output(Y, samples.n_runs, problem)
 
     # Detect scalar output before _prepare_Y adds singleton dims
     is_scalar = Y.ndim == 1
@@ -159,16 +165,13 @@ def analyze(
     # Promote to canonical (N*D, T, K) shape
     Y, squeeze_time, squeeze_output = _prepare_Y(Y)
 
-    if Y.shape[0] % D != 0:
-        raise ValueError(f"Y leading dimension ({Y.shape[0]}) must be a multiple of D ({D})")
-    N = Y.shape[0] // D
-
     if prenormalize:
         Y, _, _, _ = _prenormalize_outputs(Y)
 
     _warn_zero_variance_slices(Y, output_names=problem.output_names)
 
-    # Recompute omega_0 from N to match the value used during sampling
+    # Recompute omega_0 from the design's n_per_curve and M — the same
+    # formula sample() used, so the harmonics line up exactly.
     omega_0 = (N - 1) // (2 * M)
 
     _, T, K = Y.shape

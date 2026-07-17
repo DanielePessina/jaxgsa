@@ -12,17 +12,14 @@ expanded Saltelli design contains exact duplicate rows.
 
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import dataclass
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as _pkg_version
-from pathlib import Path
-from typing import overload
+from typing import Any, Mapping, overload
 
 import numpy as np
 from scipy.stats.qmc import Sobol
 
+from gsax._core.samples import UniqueDesignSamples
 from gsax._core.sampling import (
     _is_power_of_2,
     _next_power_of_2,
@@ -30,11 +27,11 @@ from gsax._core.sampling import (
     _stable_unique_rows,
     _transform_samples,
 )
-from gsax.problem import Problem, _normalized_input_to_dict
+from gsax.problem import Problem
 
 
 @dataclass(frozen=True)
-class SobolSamples:
+class SobolSamples(UniqueDesignSamples):
     """Unique Sobol samples plus metadata for Saltelli reconstruction.
 
     Returned by :func:`gsax.sobol.sample`. Evaluate your model at every row of
@@ -74,11 +71,6 @@ class SobolSamples:
     n_params: int
     calc_second_order: bool
     problem: Problem
-
-    @property
-    def n_runs(self) -> int:
-        """Number of unique rows in ``samples`` (model runs to evaluate)."""
-        return self.samples.shape[0]
 
     @overload
     def downsample(self, base_n: int) -> SobolSamples: ...
@@ -126,154 +118,59 @@ class SobolSamples:
             raise ValueError(
                 f"Cannot upsample: requested base_n={base_n} > current base_n={self.base_n}"
             )
-        if Y is not None and Y.shape[0] != self.n_runs:
-            raise ValueError(f"Y.shape[0]={Y.shape[0]} does not match n_runs={self.n_runs}")
+        self._validate_downsample_Y(Y)
         if base_n == self.base_n:
             return (self, Y) if Y is not None else self
 
         step = _saltelli_step(self.n_params, self.calc_second_order)
         new_expanded_n = base_n * step
-        new_exp2uniq = self.expanded_to_unique[:new_expanded_n]
-        n_unique_new = int(new_exp2uniq.max()) + 1
+        samples_small, new_exp2uniq, n_unique_new, Y_small = self._prefix_slice(new_expanded_n, Y)
 
         sr_small = SobolSamples(
-            samples=self.samples[:n_unique_new].copy(),
+            samples=samples_small,
             sample_ids=np.arange(n_unique_new, dtype=np.int64),
             n_expanded=new_expanded_n,
-            expanded_to_unique=new_exp2uniq.copy(),
+            expanded_to_unique=new_exp2uniq,
             base_n=base_n,
             n_params=self.n_params,
             calc_second_order=self.calc_second_order,
             problem=self.problem,
         )
 
-        if Y is not None:
-            return sr_small, Y[:n_unique_new].copy()
+        if Y_small is not None:
+            return sr_small, Y_small
         return sr_small
 
-    def save(self, path: str | Path) -> None:
-        """Save the full design to one compressed NPZ file.
+    def _extra_arrays(self) -> dict[str, np.ndarray]:
+        """Persist the sample identifiers alongside the base arrays."""
+        return {"sample_ids": self.sample_ids}
 
-        The file contains the unique sample matrix, the sample identifiers,
-        the Saltelli expansion map (omitted when it is a trivial identity
-        mapping, i.e. the design has no duplicate rows), and a JSON metadata
-        blob describing the problem definition, the design parameters, and
-        the gsax version that wrote the file.
-
-        Args:
-            path: Destination file path. If it does not already end in
-                ``.npz``, the suffix is appended (matching NumPy's ``savez``
-                convention), so the file written to disk may differ from the
-                exact string passed — e.g. ``"run.A"`` is saved as
-                ``"run.A.npz"``.
-        """
-        path = _npz_path(path)
-        try:
-            gsax_version = _pkg_version("gsax")
-        except PackageNotFoundError:
-            gsax_version = "unknown"
-        # Identity-mapping optimization: when no duplicate rows were removed,
-        # expanded_to_unique is exactly arange(n_expanded) (the common
-        # case in higher dimensions). Record a boolean flag instead of storing
-        # the full index array; load() reconstructs it with np.arange.
-        identity_mapping = bool(
-            np.array_equal(
-                self.expanded_to_unique,
-                np.arange(self.n_expanded, dtype=self.expanded_to_unique.dtype),
-            )
-        )
-        meta = {
-            "gsax_version": gsax_version,
-            "problem": {
-                "names": list(self.problem.names),
-                "input_specs": [
-                    _normalized_input_to_dict(spec) for spec in self.problem.input_specs
-                ],
-                "output_names": list(self.problem.output_names)
-                if self.problem.output_names is not None
-                else None,
-            },
-            "base_n": self.base_n,
-            "calc_second_order": self.calc_second_order,
-            "n_expanded": self.n_expanded,
-            "identity_mapping": identity_mapping,
-        }
-        metadata = np.asarray(json.dumps(meta))
-        if identity_mapping:
-            np.savez_compressed(
-                path,
-                samples=self.samples,
-                sample_ids=self.sample_ids,
-                metadata=metadata,
-            )
-        else:
-            np.savez_compressed(
-                path,
-                samples=self.samples,
-                sample_ids=self.sample_ids,
-                expanded_to_unique=self.expanded_to_unique,
-                metadata=metadata,
-            )
+    def _extra_metadata(self) -> dict[str, Any]:
+        """Persist the Saltelli design parameters in the metadata blob."""
+        return {"base_n": self.base_n, "calc_second_order": self.calc_second_order}
 
     @classmethod
-    def load(cls, path: str | Path) -> "SobolSamples":
-        """Load a design saved by :meth:`save`.
-
-        Args:
-            path: Path to the saved design. If it does not already end in
-                ``.npz``, the suffix is appended before opening (mirroring
-                the convention used by :meth:`save`), so the file read may
-                differ from the exact string passed.
-
-        Returns:
-            The reconstructed ``SobolSamples``, equal to the instance that
-            was saved.
-
-        Raises:
-            FileNotFoundError: If no file exists at the resolved path.
-            KeyError: If the file is missing required arrays or metadata
-                entries (i.e. it was not written by :meth:`save`).
-        """
-        from gsax.problem import _normalize_input_spec
-
-        with np.load(_npz_path(path), allow_pickle=False) as data:
-            meta = json.loads(data["metadata"].item())
-            problem_meta = meta["problem"]
-            output_names = problem_meta["output_names"]
-            problem = Problem._from_normalized_inputs(
-                names=tuple(problem_meta["names"]),
-                input_specs=tuple(
-                    _normalize_input_spec(spec) for spec in problem_meta["input_specs"]
-                ),
-                output_names=tuple(output_names) if output_names is not None else None,
-            )
-            n_expanded = int(meta["n_expanded"])
-            if meta["identity_mapping"]:
-                expanded_to_unique = np.arange(n_expanded, dtype=np.int64)
-            else:
-                expanded_to_unique = data["expanded_to_unique"]
-            return cls(
-                samples=data["samples"],
-                sample_ids=data["sample_ids"],
-                n_expanded=n_expanded,
-                expanded_to_unique=expanded_to_unique,
-                base_n=int(meta["base_n"]),
-                n_params=problem.num_vars,
-                calc_second_order=bool(meta["calc_second_order"]),
-                problem=problem,
-            )
-
-
-def _npz_path(path: str | Path) -> Path:
-    """Return a path with the canonical ``.npz`` suffix.
-
-    A missing suffix is *appended* (never substituted), matching NumPy's own
-    ``savez`` convention: ``"run.A"`` becomes ``"run.A.npz"``, not
-    ``"run.npz"``. Substituting via ``Path.with_suffix`` would make dotted
-    stems like ``"run.A"`` and ``"run.B"`` silently collide on disk.
-    """
-    path = Path(path)
-    return path if path.suffix == ".npz" else Path(str(path) + ".npz")
+    def _from_payload(
+        cls,
+        *,
+        samples: np.ndarray,
+        n_expanded: int,
+        expanded_to_unique: np.ndarray,
+        problem: Problem,
+        arrays: Mapping[str, np.ndarray],
+        meta: Mapping[str, Any],
+    ) -> SobolSamples:
+        """Rebuild a ``SobolSamples`` from a loaded NPZ payload."""
+        return cls(
+            samples=samples,
+            sample_ids=arrays["sample_ids"],
+            n_expanded=n_expanded,
+            expanded_to_unique=expanded_to_unique,
+            base_n=int(meta["base_n"]),
+            n_params=problem.num_vars,
+            calc_second_order=bool(meta["calc_second_order"]),
+            problem=problem,
+        )
 
 
 def _saltelli_step(n_params: int, calc_second_order: bool) -> int:

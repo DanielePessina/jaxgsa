@@ -13,25 +13,13 @@ from gsax.problem import GaussianInputSpec, Problem
 from gsax.shapley._engine import build_membership, shapley_from_variances
 
 
-def _analyze_shapley(
-    problem,
-    X,
-    Y,
-    *,
-    backend="pce",
-    include_correlative=False,
-    **kwargs,
-):
-    """Fit the selected surrogate and derive Shapley effects from its result."""
-    if backend == "pce":
-        if include_correlative:
-            raise ValueError("include_correlative requires an hdmr result")
-        return gsax.pce.analyze(problem, X, Y, **kwargs).shapley()
-    if backend == "hdmr":
-        return gsax.hdmr.analyze(problem, X, Y, **kwargs).shapley(
-            include_correlative=include_correlative
-        )
-    raise ValueError(f"unknown backend: {backend}")
+def _analyze_shapley(problem, X, Y, **kwargs):
+    """Fit the selected surrogate and derive Shapley effects from its result.
+
+    Routes through the public convenience wrapper so every test in this file
+    also exercises ``gsax.shapley.analyze``.
+    """
+    return gsax.shapley.analyze(problem, X, Y, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +156,40 @@ def test_default_backend_is_pce(linear_data):
     X, Y = linear_data
     result = _analyze_shapley(linear.PROBLEM, X, Y, order=2)
     assert result.backend == "pce"
+
+
+# ---------------------------------------------------------------------------
+# Convenience wrapper: gsax.shapley.analyze is literally analyze(...).shapley()
+# ---------------------------------------------------------------------------
+
+
+def test_analyze_wrapper_matches_result_method(linear_data):
+    """The wrapper is the same one-path pipeline as pce/hdmr.analyze().shapley()."""
+    X, Y = linear_data
+    via_wrapper = gsax.shapley.analyze(linear.PROBLEM, X, Y, backend="pce", order=2)
+    via_method = gsax.pce.analyze(linear.PROBLEM, X, Y, order=2).shapley()
+    np.testing.assert_array_equal(np.asarray(via_wrapper.Sh), np.asarray(via_method.Sh))
+    np.testing.assert_array_equal(np.asarray(via_wrapper.S1), np.asarray(via_method.S1))
+    np.testing.assert_array_equal(np.asarray(via_wrapper.ST), np.asarray(via_method.ST))
+    assert via_wrapper.backend == via_method.backend == "pce"
+    assert via_wrapper.order == via_method.order
+
+
+def test_analyze_wrapper_hdmr_matches_result_method(linear_data):
+    X, Y = linear_data
+    via_wrapper = gsax.shapley.analyze(linear.PROBLEM, X, Y, backend="hdmr", m=3)
+    via_method = gsax.hdmr.analyze(linear.PROBLEM, X, Y, m=3).shapley()
+    np.testing.assert_array_equal(np.asarray(via_wrapper.Sh), np.asarray(via_method.Sh))
+    assert via_wrapper.backend == "hdmr"
+
+
+def test_analyze_wrapper_unknown_backend_raises(linear_data):
+    X, Y = linear_data
+    # Built as a dict so the invalid literal exercises the runtime check
+    # without tripping the static Literal["pce", "hdmr"] annotation.
+    bad_kwargs: dict = {"backend": "spline"}
+    with pytest.raises(ValueError, match="backend"):
+        gsax.shapley.analyze(linear.PROBLEM, X, Y, **bad_kwargs)
 
 
 # ---------------------------------------------------------------------------

@@ -10,11 +10,10 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
-from gsax._core.batching import apply_batched, resolve_batch_size
+from gsax._core.surrogate import _PredictPlan
 from gsax._core.validation import (
     _prepare_Y,
     _squeeze_output_axes,
-    _validate_x,
     _validate_xy_inputs,
     _warn_zero_variance_slices,
 )
@@ -266,19 +265,16 @@ def analyze_pce(
     )
 
 
-def _predict_pce(result: PCEResult, X_new: Array, *, batch_size: int | None = None) -> Array:
-    """Evaluate the fitted PCE surrogate at new inputs.
+def _pce_predict_plan(result: PCEResult, X_new: Array) -> _PredictPlan:
+    """Build the prediction plan behind :meth:`PCEResult.predict`.
 
-    Implementation behind :meth:`PCEResult.predict`, which documents the
-    full contract. Rebuilds the polynomial basis at ``X_new`` and contracts
-    it with the fitted coefficients, in row batches sized against a
-    transient-memory budget.
+    Maps the (already validated) inputs to the polynomial reference domain
+    and packages the per-row transient cost together with a kernel that
+    rebuilds the basis and contracts it with the fitted coefficients; the
+    shared template in :class:`gsax._core.surrogate.SurrogateResult` runs
+    the kernel in row batches sized against a transient-memory budget.
     """
-    X_new = jnp.asarray(X_new)
-    _validate_x(result.problem, X_new)
-
     X_ref, input_types = _map_to_reference(X_new, result.problem)
-    N = X_ref.shape[0]
     n_terms = result.multi_index.shape[0]
     # Transient footprint per row: build_design_matrix accumulates a running
     # product, so at most the (batch, n_terms) accumulator, one gathered
@@ -286,7 +282,6 @@ def _predict_pce(result: PCEResult, X_new: Array, *, batch_size: int | None = No
     # (~3 * n_terms floats per row), plus the einsum output slices.
     slices = math.prod(result.coefficients.shape[:-1])
     bytes_per_row = X_ref.dtype.itemsize * (3 * n_terms + slices)
-    batch = resolve_batch_size(bytes_per_row, N, batch_size)
 
     def _predict(X_chunk: Array) -> Array:
         Phi = build_design_matrix(X_chunk, result.multi_index, input_types, result.order)
@@ -294,5 +289,4 @@ def _predict_pce(result: PCEResult, X_new: Array, *, batch_size: int | None = No
         # output slice at once: Y = Phi @ c per slice, one einsum.
         return jnp.einsum("nt,...t->n...", Phi, result.coefficients)
 
-    pred = apply_batched(_predict, X_ref, batch)
-    return pred
+    return _PredictPlan(X=X_ref, bytes_per_row=bytes_per_row, kernel=_predict)

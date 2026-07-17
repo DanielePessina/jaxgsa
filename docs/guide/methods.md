@@ -319,9 +319,9 @@ The low-frequency content at or below $\lfloor\omega_0/2\rfloor$ is driven entir
 
 ### How to use it
 
-1. `gsax.efast.sample()` (or `efast.sample()`) generates search-curve samples with shape `(N * D, D)`, where each contiguous block of $N$ rows corresponds to one parameter's search curve.
-2. You evaluate your model on all `N * D` rows.
-3. `gsax.efast.analyze()` (or `efast.analyze()`) splits the output by curve, computes the Fourier spectrum for each, and extracts $S_1$ and $S_T$ indices.
+1. `gsax.efast.sample(problem, n_per_curve, ...)` returns an `EFASTSamples` design whose `samples` array has shape `(n_per_curve * D, D)`, where each contiguous block of `n_per_curve` rows corresponds to one parameter's search curve.
+2. You evaluate your model on all `n_per_curve * D` rows of `samples.samples`, in order.
+3. `gsax.efast.analyze(samples, Y)` splits the output by curve, computes the Fourier spectrum for each, and extracts $S_1$ and $S_T$ indices. The interference factor `M` and the problem travel inside the `EFASTSamples` object, so they can never be mismatched between sampling and analysis.
 
 ### Index summary
 

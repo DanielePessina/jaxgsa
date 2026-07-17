@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 import xarray as xr
@@ -63,7 +64,7 @@ class ShapleyResult:
     S1: Array
     ST: Array
     problem: Problem
-    backend: str
+    backend: Literal["hdmr", "pce"]
     explained_variance: Array
     order: int
     include_correlative: bool = False

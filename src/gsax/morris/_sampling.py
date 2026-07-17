@@ -23,12 +23,13 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
-from typing import Literal, overload
+from typing import Any, Literal, Mapping, overload
 
 import jax.numpy as jnp
 import numpy as np
 from scipy.stats.qmc import Sobol
 
+from gsax._core.samples import UniqueDesignSamples
 from gsax._core.sampling import _next_power_of_2, _stable_unique_rows, _transform_samples
 from gsax.problem import Problem
 
@@ -55,7 +56,7 @@ def _min_radial_delta() -> float:
 
 
 @dataclass(frozen=True)
-class MorrisSamples:
+class MorrisSamples(UniqueDesignSamples):
     """Unique Morris samples plus metadata to locate elementary effects.
 
     Note the two row counts: ``n_runs`` is the number of *unique* rows you
@@ -95,11 +96,6 @@ class MorrisSamples:
     ee_delta: np.ndarray
     n_params: int
     problem: Problem
-
-    @property
-    def n_runs(self) -> int:
-        """Number of unique rows in ``samples`` (model runs to evaluate)."""
-        return self.samples.shape[0]
 
     @overload
     def downsample(self, n_trajectories: int) -> MorrisSamples: ...
@@ -146,21 +142,17 @@ class MorrisSamples:
                 f"Cannot upsample: requested n_trajectories={n_trajectories} > "
                 f"current n_trajectories={self.n_trajectories}"
             )
-        if Y is not None and Y.shape[0] != self.n_runs:
-            raise ValueError(f"Y.shape[0]={Y.shape[0]} does not match n_runs={self.n_runs}")
+        self._validate_downsample_Y(Y)
         if n_trajectories == self.n_trajectories:
             return (self, Y) if Y is not None else self
 
         new_expanded_n = n_trajectories * (self.n_params + 1)
-        new_exp2uniq = self.expanded_to_unique[:new_expanded_n]
-        # First-occurrence dedup order makes the unique index set of any
-        # expanded prefix itself a prefix, so max+1 recovers the unique count.
-        n_unique_new = int(new_exp2uniq.max()) + 1
+        samples_small, new_exp2uniq, _, Y_small = self._prefix_slice(new_expanded_n, Y)
 
         sr_small = MorrisSamples(
-            samples=self.samples[:n_unique_new].copy(),
+            samples=samples_small,
             n_expanded=new_expanded_n,
-            expanded_to_unique=new_exp2uniq.copy(),
+            expanded_to_unique=new_exp2uniq,
             n_trajectories=n_trajectories,
             num_levels=self.num_levels,
             method=self.method,
@@ -171,9 +163,54 @@ class MorrisSamples:
             problem=self.problem,
         )
 
-        if Y is not None:
-            return sr_small, Y[:n_unique_new].copy()
+        if Y_small is not None:
+            return sr_small, Y_small
         return sr_small
+
+    def _extra_arrays(self) -> dict[str, np.ndarray]:
+        """Persist the elementary-effect bookkeeping alongside the base arrays."""
+        return {
+            "ee_idx_after": self.ee_idx_after,
+            "ee_idx_before": self.ee_idx_before,
+            "ee_delta": self.ee_delta,
+        }
+
+    def _extra_metadata(self) -> dict[str, Any]:
+        """Persist the Morris design parameters in the metadata blob."""
+        return {
+            "n_trajectories": self.n_trajectories,
+            "num_levels": self.num_levels,
+            "method": self.method,
+        }
+
+    @classmethod
+    def _from_payload(
+        cls,
+        *,
+        samples: np.ndarray,
+        n_expanded: int,
+        expanded_to_unique: np.ndarray,
+        problem: Problem,
+        arrays: Mapping[str, np.ndarray],
+        meta: Mapping[str, Any],
+    ) -> MorrisSamples:
+        """Rebuild a ``MorrisSamples`` from a loaded NPZ payload."""
+        method = meta["method"]
+        if method not in ("trajectory", "radial"):
+            raise ValueError(f"method must be 'trajectory' or 'radial', got {method!r}")
+        return cls(
+            samples=samples,
+            n_expanded=n_expanded,
+            expanded_to_unique=expanded_to_unique,
+            n_trajectories=int(meta["n_trajectories"]),
+            num_levels=int(meta["num_levels"]),
+            method=method,
+            ee_idx_after=arrays["ee_idx_after"],
+            ee_idx_before=arrays["ee_idx_before"],
+            ee_delta=arrays["ee_delta"],
+            n_params=problem.num_vars,
+            problem=problem,
+        )
 
 
 def _build_trajectories(

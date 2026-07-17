@@ -16,6 +16,7 @@ from jax import Array
 
 from gsax import hdmr, pce
 from gsax._core.batching import apply_batched, resolve_batch_size
+from gsax._core.surrogate import SurrogateResult, _PredictPlan
 from gsax.problem import Problem
 
 D = 4
@@ -153,6 +154,64 @@ def test_apply_batched_host_buffer_matches_single_shot():
     assert isinstance(batched, jax.Array)
     assert batched.dtype == single.dtype
     np.testing.assert_allclose(np.asarray(batched), np.asarray(single), rtol=1e-6)
+
+
+class _FakeSurrogate(SurrogateResult):
+    """Minimal SurrogateResult: row sums, no real fit, records batch sizes."""
+
+    def __init__(self, problem: Problem) -> None:
+        self.problem = problem
+        self.batch_row_counts: list[int] = []
+
+    def _predict_plan(self, X: Array) -> _PredictPlan:
+        def kernel(chunk: Array) -> Array:
+            self.batch_row_counts.append(int(chunk.shape[0]))
+            return chunk.sum(axis=1)
+
+        return _PredictPlan(X=X, bytes_per_row=8, kernel=kernel)
+
+    def shapley(self):
+        raise NotImplementedError
+
+
+def test_surrogate_template_validates_and_batches(problem):
+    """The ABC's predict template engages validation and batching without a fit."""
+    fake = _FakeSurrogate(problem)
+    X = jnp.asarray(np.random.default_rng(2).uniform(-1.0, 1.0, size=(10, D)))
+
+    # Validation runs before any subclass code.
+    with pytest.raises(ValueError, match="2-D"):
+        fake.predict(X[:, 0])
+    with pytest.raises(ValueError, match="columns"):
+        fake.predict(jnp.concatenate([X, X], axis=1))
+    with pytest.raises(ValueError, match="batch_size"):
+        fake.predict(X, batch_size=0)
+    assert fake.batch_row_counts == []  # kernel never ran on invalid input
+
+    # Batching splits the rows exactly and reassembles the kernel outputs.
+    out = fake.predict(X, batch_size=4)
+    assert fake.batch_row_counts == [4, 4, 2]
+    np.testing.assert_allclose(np.asarray(out), np.asarray(X.sum(axis=1)), rtol=1e-6)
+
+
+def test_pce_hdmr_reject_wrong_shaped_x_identically(problem):
+    """Both result types reject malformed X with the same shared error."""
+    X, Y = _make_xy("scalar")
+    results = [pce.analyze(problem, X, Y, order=2), hdmr.analyze(problem, X, Y, maxorder=1)]
+
+    messages_1d = []
+    messages_wide = []
+    for result in results:
+        with pytest.raises(ValueError, match="2-D") as exc_1d:
+            result.predict(jnp.ones(10))
+        messages_1d.append(str(exc_1d.value))
+        with pytest.raises(ValueError, match="columns") as exc_wide:
+            result.predict(jnp.ones((10, D + 2)))
+        messages_wide.append(str(exc_wide.value))
+
+    # One shared validator, one wording: pce and hdmr messages are identical.
+    assert messages_1d[0] == messages_1d[1]
+    assert messages_wide[0] == messages_wide[1]
 
 
 def test_pce_batched_jit_compatible(problem):

@@ -464,24 +464,22 @@ def _benchmark(
             for _label, _T, _K in _scens:
                 _Xe = gsax.efast.sample(
                     _prob,
-                    N=2049,
+                    n_per_curve=2049,
                     M=4,
                     seed=42,
                 )
-                _Ye = _bfn(jnp.asarray(_Xe), _T, _K)
+                _Ye = _bfn(jnp.asarray(_Xe.samples), _T, _K)
                 jax.block_until_ready(_Ye)
 
                 gsax.efast.analyze(
-                    _prob,
+                    _Xe,
                     _Ye,
-                    M=4,
                 ).S1.block_until_ready()
                 _g = (
                     best_of(
-                        lambda Y=_Ye, p=_prob: gsax.efast.analyze(
-                            p,
+                        lambda Y=_Ye, sr=_Xe: gsax.efast.analyze(
+                            sr,
                             Y,
-                            M=4,
                         ),
                     )
                     * 1e3

@@ -9,6 +9,7 @@ import numpy as np
 import xarray as xr
 from jax import Array
 
+from gsax._core.surrogate import SurrogateResult, _PredictPlan
 from gsax._core.validation import _dims_and_coords
 from gsax.problem import Problem
 
@@ -17,7 +18,7 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class PCEResult:
+class PCEResult(SurrogateResult):
     """Polynomial chaos expansion sensitivity analysis results.
 
     Stores Sobol indices computed analytically from the expansion
@@ -68,38 +69,18 @@ class PCEResult:
     loo_rmse: Array | None = None
     explained_variance: Array | None = None
 
-    def predict(self, X: Array, *, batch_size: int | None = None) -> Array:
-        """Predict outputs at new input rows using the fitted expansion.
+    def _predict_plan(self, X: Array) -> _PredictPlan:
+        """Plan a batched evaluation of the fitted expansion at ``X``.
 
-        Rebuilds the polynomial basis at ``X`` and applies the coefficients
-        fitted by ``pce.analyze`` -- no model evaluations are needed.
-        Accuracy degrades outside the input region the surrogate was fitted
-        on.
-
-        Args:
-            X: (N_new, D) new input points, in the same physical units as
-                the ``X`` passed to ``pce.analyze``.
-            batch_size: Rows of ``X`` to predict per batch. The basis tensors
-                are linear in the batch size with a large per-row constant
-                (``~3 * n_terms`` floats per row), so single-shot evaluation
-                at large ``N_new`` can exhaust memory. ``None`` (default)
-                derives a batch size from a fixed transient-memory budget
-                (~512 MiB); an int fixes the rows per batch, and
-                ``batch_size >= N_new`` forces a single-shot call. Each row's
-                term contraction is independent, so batching only perturbs
-                predictions at the level of floating-point reassociation.
-
-        Returns:
-            Predicted outputs mirroring the training ``Y`` layout:
-            ``(N_new,)``, ``(N_new, K)``, or ``(N_new, T, K)``.
-
-        Raises:
-            ValueError: If ``X`` is not 2-D with one column per problem
-                parameter, or ``batch_size`` is not a positive integer.
+        Rebuilds the polynomial basis at ``X`` and contracts it with the
+        coefficients fitted by ``pce.analyze`` -- no model evaluations are
+        needed. The basis tensors carry ``~3 * n_terms`` transient floats
+        per prediction row, which prices the automatic batch size.
+        See :meth:`predict` for the full contract.
         """
-        from gsax.pce._analyze import _predict_pce
+        from gsax.pce._analyze import _pce_predict_plan
 
-        return _predict_pce(self, X, batch_size=batch_size)
+        return _pce_predict_plan(self, X)
 
     def shapley(self) -> "ShapleyResult":
         """Compute Shapley effects from this fitted PCE decomposition.
@@ -121,9 +102,24 @@ class PCEResult:
                 fit (well below 1, or above 1 -- overfit), making the Shapley
                 effects unreliable.
         """
-        from gsax.shapley._analyze import _shapley_from_pce
+        from gsax.shapley._analyze import _shapley_result_from_variances
 
-        return _shapley_from_pce(self)
+        explained = self.explained_variance
+        if explained is None:
+            raise ValueError("PCEResult does not contain explained-variance diagnostics")
+        # Orthonormality makes each squared non-constant coefficient a
+        # partial variance; multi_index[1:] > 0 IS the membership matrix.
+        partial = self.coefficients[..., 1:] ** 2
+        membership = np.asarray(self.multi_index[1:] > 0)
+        return _shapley_result_from_variances(
+            partial,
+            membership,
+            explained,
+            total=partial.sum(axis=-1),
+            problem=self.problem,
+            backend="pce",
+            order=self.order,
+        )
 
     def __repr__(self) -> str:
         n_terms = self.coefficients.shape[-1]

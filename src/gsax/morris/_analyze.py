@@ -161,17 +161,6 @@ def _drop_nonfinite_trajectories(
     return Y_clean, idx_after, idx_before, delta, n_dropped
 
 
-def _expand_unique_outputs(sampling_result: MorrisSamples, Y: Array) -> Array:
-    """Rebuild expanded Morris outputs from unique user-evaluated outputs."""
-    if Y.shape[0] != sampling_result.n_runs:
-        raise ValueError(
-            f"Y.shape[0] must match sampling_result.n_runs ({sampling_result.n_runs}), "
-            f"got {Y.shape[0]}"
-        )
-    expanded_to_unique = jnp.asarray(sampling_result.expanded_to_unique)
-    return jnp.take(Y, expanded_to_unique, axis=0)
-
-
 def analyze(
     sampling_result: MorrisSamples,
     Y: Array,
@@ -251,7 +240,7 @@ def analyze(
         sampling_result.problem,
     )
     # Map user-evaluated unique outputs back to the full expanded layout
-    Y = _expand_unique_outputs(sampling_result, Y)
+    Y = sampling_result.expand_outputs(Y)
     Y, squeeze_time, squeeze_output = _prepare_Y(Y)
 
     Y, idx_after, idx_before, delta, n_dropped = _drop_nonfinite_trajectories(Y, sampling_result)

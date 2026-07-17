@@ -10,6 +10,7 @@ import numpy as np
 import xarray as xr
 from jax import Array
 
+from gsax._core.surrogate import SurrogateResult, _PredictPlan
 from gsax._core.validation import _dims_and_coords
 from gsax.problem import Problem
 
@@ -37,7 +38,7 @@ class _HDMRFit(TypedDict):
 
 
 @dataclass
-class HDMRResult:
+class HDMRResult(SurrogateResult):
     """RS-HDMR (Random Sampling High-Dimensional Model Representation) results.
 
     Stores ANCOVA-decomposed sensitivity indices. Each *term* is one component
@@ -88,35 +89,23 @@ class HDMRResult:
     _c2: tuple[tuple[int, int], ...] = field(default=(), repr=False)
     _c3: tuple[tuple[int, int, int], ...] = field(default=(), repr=False)
 
-    def predict(self, X: Array, *, batch_size: int | None = None) -> Array:
-        """Predict outputs at new input rows using the fitted HDMR surrogate.
+    def _predict_plan(self, X: Array) -> _PredictPlan:
+        """Plan a batched evaluation of the fitted HDMR surrogate at ``X``.
 
-        Args:
-            X: ``(N_new, D)`` input points in physical units (the same
-                parameter space as the training ``X``); the CDF transform
-                used during fitting is re-applied internally.
-            batch_size: Rows of ``X`` predicted per batch. The B-spline
-                tensor-product bases carry a large per-row constant, so
-                single-shot evaluation at large ``N_new`` can exhaust
-                memory. ``None`` (default) derives a batch size from a
-                ~512 MiB transient-memory budget; pass
-                ``batch_size >= N_new`` to force a single-shot call.
-                Batching only perturbs predictions at the level of
-                floating-point reassociation.
-
-        Returns:
-            Predicted outputs whose shape mirrors the training ``Y``:
-            ``(N_new,)``, ``(N_new, K)``, or ``(N_new, T, K)``. When the fit
-            used ``prenormalize=True``, predictions are inverse-transformed
-            back to the original output scale.
+        Re-applies the CDF transform used during fitting and packages a
+        kernel that rebuilds the B-spline tensor-product bases (a large
+        per-row constant, up to ``m1^3`` floats per interaction term at
+        ``maxorder=3``) and contracts them with the fitted component
+        coefficients; when the fit used ``prenormalize=True``, the kernel
+        inverse-transforms predictions back to the original output scale.
+        See :meth:`predict` for the full contract.
 
         Raises:
-            ValueError: If ``X`` is not 2-D with ``D`` columns, or this
-                result carries no fitted surrogate state.
+            ValueError: If this result carries no fitted surrogate state.
         """
-        from gsax.hdmr._analyze import _predict_hdmr
+        from gsax.hdmr._analyze import _hdmr_predict_plan
 
-        return _predict_hdmr(self, X, batch_size=batch_size)
+        return _hdmr_predict_plan(self, X)
 
     def shapley(self, *, include_correlative: bool = False) -> "ShapleyResult":
         """Compute Shapley effects from this fitted HDMR decomposition.
@@ -139,9 +128,31 @@ class HDMRResult:
         Raises:
             ValueError: If this result carries no fitted surrogate state.
         """
-        from gsax.shapley._analyze import _shapley_from_hdmr
+        from gsax.shapley._analyze import _shapley_result_from_variances
+        from gsax.shapley._engine import build_membership
 
-        return _shapley_from_hdmr(self, include_correlative=include_correlative)
+        fit = self._fit
+        if fit is None:
+            raise ValueError("HDMRResult does not contain fitted surrogate state")
+        partial = self.Sa + self.Sb if include_correlative else self.Sa
+        subsets: list[tuple[int, ...]] = [(i,) for i in range(self.problem.num_vars)]
+        subsets.extend(self._c2)
+        subsets.extend(self._c3)
+        membership = build_membership(subsets, self.problem.num_vars)
+        # For HDMR the per-term sum doubles as the explained-variance
+        # diagnostic (indices are already output-variance fractions);
+        # compute it once and reuse it as the normalizer.
+        explained = partial.sum(axis=-1)
+        return _shapley_result_from_variances(
+            partial,
+            membership,
+            explained,
+            total=explained,
+            problem=self.problem,
+            backend="hdmr",
+            order=fit["maxorder"],
+            include_correlative=include_correlative,
+        )
 
     @property
     def S1(self) -> Array:

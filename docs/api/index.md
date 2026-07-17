@@ -87,7 +87,16 @@ correlative contributions.
 | `gsax.efast` | `sample` then `analyze` | `EFASTResult` |
 | `gsax.morris` | `sample` then `analyze` | `MorrisResult` |
 
-Morris sampling returns `gsax.morris.MorrisSamples`.
+Morris sampling returns `gsax.morris.MorrisSamples`. eFAST sampling returns
+`gsax.efast.EFASTSamples`, which carries the design metadata (`n_per_curve`,
+`M`, `problem`) into `gsax.efast.analyze(samples, Y)` so they can never be
+mismatched:
+
+```python
+samples = gsax.efast.sample(problem, n_per_curve=4096, seed=42)
+Y = model(samples.samples)
+result = gsax.efast.analyze(samples, Y)
+```
 
 ## Shapley Results
 

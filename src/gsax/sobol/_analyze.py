@@ -181,24 +181,6 @@ def _normalize_s2_matrix(S2: Array) -> Array:
     return jnp.where(diag_mask, jnp.nan, mirrored)
 
 
-def _expand_unique_outputs(sampling_result: SobolSamples, Y: Array) -> Array:
-    """Rebuild expanded Saltelli outputs from unique user-evaluated outputs.
-
-    The sampler deduplicates the Saltelli design before returning samples to
-    the user, so Y has only unique rows (shape ``(n_runs, ...)``). This
-    function gathers them back into the full interleaved layout the
-    estimators expect, shape ``(n_expanded, ...)``.
-    """
-    if Y.shape[0] != sampling_result.n_runs:
-        raise ValueError(
-            f"Y.shape[0] must match sampling_result.n_runs ({sampling_result.n_runs}), "
-            f"got {Y.shape[0]}"
-        )
-    # expanded_to_unique[i] gives the unique-row index for expanded position i
-    expanded_to_unique = jnp.asarray(sampling_result.expanded_to_unique)
-    return jnp.take(Y, expanded_to_unique, axis=0)
-
-
 def _analyze_no_bootstrap(
     sampling_result: SobolSamples, Y: Array, *, chunk_size: int
 ) -> SobolResult:
@@ -537,7 +519,7 @@ def analyze(
         sampling_result.problem,
     )
     # Map user-evaluated unique outputs back to the full Saltelli interleaving
-    Y = _expand_unique_outputs(sampling_result, Y)
+    Y = sampling_result.expand_outputs(Y)
 
     D = sampling_result.n_params
     # step = rows per Saltelli group: D+2 (first-order only) or 2D+2 (with S2)

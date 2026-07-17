@@ -68,12 +68,13 @@ def _ishigami_md(mo):
 
     The workflow is:
 
-    1. **Sample** — `efast.sample` generates the $N \times D$ search
-       curves (one per input, each of length $N$), stacked into a single
-       $(N \cdot D,\; D)$ matrix.
-    2. **Evaluate** — run the model on all sample points.
-    3. **Analyse** — `efast.analyze` recovers $S_1$ and $S_T$ from the
-       Fourier spectrum.
+    1. **Sample** — `efast.sample` generates $D$ search curves (one per
+       input, each of length `n_per_curve`), stacked into a single
+       $(n\_per\_curve \cdot D,\; D)$ matrix carried by an
+       `EFASTSamples` object together with `M` and the problem.
+    2. **Evaluate** — run the model on all rows of `samples.samples`.
+    3. **Analyse** — `efast.analyze(samples, Y)` recovers $S_1$ and $S_T$
+       from the Fourier spectrum.
 
     In the bar chart below, each estimated bar should land on its paler
     analytical twin. Note $x_3$: its $S_1$ is essentially zero yet its
@@ -88,10 +89,10 @@ def _ishigami_md(mo):
 def _ishigami_analysis(efast, ishigami, jnp):
     ishi_problem = ishigami.PROBLEM
 
-    X_ishi = efast.sample(ishi_problem, N=4096, M=4, seed=42)
-    Y_ishi = ishigami.evaluate(jnp.asarray(X_ishi))
+    ishi_samples = efast.sample(ishi_problem, n_per_curve=4096, M=4, seed=42)
+    Y_ishi = ishigami.evaluate(jnp.asarray(ishi_samples.samples))
 
-    ishi_result = efast.analyze(ishi_problem, Y_ishi, M=4)
+    ishi_result = efast.analyze(ishi_samples, Y_ishi)
     print(ishi_result)
     return ishi_problem, ishi_result
 
@@ -170,10 +171,10 @@ def _sobol_g_md(mo):
 def _sobol_g_analysis(efast, jnp, sobol_g):
     sg_problem = sobol_g.PROBLEM
 
-    X_sg = efast.sample(sg_problem, N=4096, M=4, seed=123)
-    Y_sg = sobol_g.evaluate(jnp.asarray(X_sg))
+    sg_samples = efast.sample(sg_problem, n_per_curve=4096, M=4, seed=123)
+    Y_sg = sobol_g.evaluate(jnp.asarray(sg_samples.samples))
 
-    sg_result = efast.analyze(sg_problem, Y_sg, M=4)
+    sg_result = efast.analyze(sg_samples, Y_sg)
     print(sg_result)
     return sg_problem, sg_result
 
@@ -252,12 +253,12 @@ def _multi_output_md(mo):
 def _multi_output_analysis(efast, ishigami, jnp):
     multi_problem = ishigami.PROBLEM
 
-    X_multi = efast.sample(multi_problem, N=4096, M=4, seed=7)
-    Y_full = ishigami.evaluate(jnp.asarray(X_multi))
+    multi_samples = efast.sample(multi_problem, n_per_curve=4096, M=4, seed=7)
+    Y_full = ishigami.evaluate(jnp.asarray(multi_samples.samples))
     Y_half = 0.5 * Y_full
-    Y_multi = jnp.stack([Y_full, Y_half], axis=-1)  # (N*D, 2)
+    Y_multi = jnp.stack([Y_full, Y_half], axis=-1)  # (n_runs, 2)
 
-    multi_result = efast.analyze(multi_problem, Y_multi, M=4)
+    multi_result = efast.analyze(multi_samples, Y_multi)
     print(multi_result)
     return multi_problem, multi_result
 
@@ -355,11 +356,11 @@ def _timeseries_model(Problem, jnp):
 
 @app.cell
 def _timeseries_analysis(damped_oscillator, efast, jnp, ts_problem, ts_times):
-    X_ts = efast.sample(ts_problem, N=4096, M=4, seed=99)
-    Y_ts = damped_oscillator(jnp.asarray(X_ts), ts_times)
-    Y_ts = Y_ts[..., None]  # (N*D, T, 1)
+    ts_samples = efast.sample(ts_problem, n_per_curve=4096, M=4, seed=99)
+    Y_ts = damped_oscillator(jnp.asarray(ts_samples.samples), ts_times)
+    Y_ts = Y_ts[..., None]  # (n_runs, T, 1)
 
-    ts_result = efast.analyze(ts_problem, Y_ts, M=4)
+    ts_result = efast.analyze(ts_samples, Y_ts)
     print(ts_result)
     return (ts_result,)
 
@@ -452,9 +453,9 @@ def _outro(mo):
     mo.md(r"""
     ## Summary
 
-    1. **Low sample cost.** eFAST uses $N \times D$ model evaluations
-       versus Saltelli's $N \times (2D + 2)$, making it attractive for
-       expensive simulators.
+    1. **Low sample cost.** eFAST uses `n_per_curve` $\times D$ model
+       evaluations versus Saltelli's $N \times (2D + 2)$, making it
+       attractive for expensive simulators.
     2. **Same API shape.** `efast.sample` + `efast.analyze` mirror the
        Sobol workflow; switching between the two is a one-line change.
     3. **Multi-output and time-series native.** Passing higher-dimensional

@@ -15,17 +15,13 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
-from gsax._core.batching import (
-    DEFAULT_EMULATE_BUDGET_BYTES,
-    apply_batched,
-    resolve_batch_size,
-)
+from gsax._core.batching import DEFAULT_EMULATE_BUDGET_BYTES
+from gsax._core.surrogate import _PredictPlan
 from gsax._core.transforms import cdf_to_unit_interval
 from gsax._core.validation import (
     _prenormalize_outputs,
     _prepare_Y,
     _squeeze_output_axes,
-    _validate_x,
     _validate_xy_inputs,
     _warn_zero_variance_slices,
 )
@@ -493,31 +489,23 @@ def _emulator_contract(B: Array, C: Array) -> Array:
     return jnp.sum(jnp.einsum("rmj,tkmj->rtkj", B, C), axis=3)
 
 
-def _predict_hdmr(result: HDMRResult, X_new: Array, *, batch_size: int | None = None) -> Array:
-    """Predict at new input points using the fitted HDMR surrogate.
+def _hdmr_predict_plan(result: HDMRResult, X_new: Array) -> _PredictPlan:
+    """Build the prediction plan behind :meth:`HDMRResult.predict`.
 
-    Note: This function is not JIT-compatible because ``HDMRResult`` is not a
+    Applies the same CDF -> [0,1] transform used during fitting to the
+    (already validated) inputs and packages the per-row transient cost
+    together with a kernel that reconstructs ``f0 + sum of component
+    functions``; the shared template in
+    :class:`gsax._core.surrogate.SurrogateResult` runs the kernel in row
+    batches sized against a transient-memory budget. The kernel also inverts
+    the output standardization when the fit used ``prenormalize=True``, so
+    batched predictions land on the original output scale.
+
+    Note: The kernel is not JIT-compatible because ``HDMRResult`` is not a
     registered JAX pytree type.
 
-    Args:
-        result: HDMRResult from :func:`gsax.hdmr.analyze` carrying fitted
-            surrogate state (``_fit``).
-        X_new: (N_new, D) new input points within the problem bounds.
-        batch_size: Rows of ``X_new`` to predict per batch. The B-spline
-            tensor-product bases are linear in the batch size with a large
-            per-row constant (up to ``m1^3`` floats per interaction term at
-            ``maxorder=3``), so single-shot evaluation at large ``N_new`` can
-            exhaust memory. ``None`` (default) derives a batch size from a
-            fixed transient-memory budget; pass ``batch_size >= N_new`` to
-            force a single-shot call. Each row's basis contraction is
-            independent, so batching only perturbs predictions at the level
-            of floating-point reassociation.
-
-    Returns:
-        Y_pred: (N_new,), (N_new, K), or (N_new, T, K) predicted outputs.
-            When the emulator was fit with ``prenormalize=True``, predictions
-            are inverse-transformed back to the original output scale before
-            being returned.
+    Raises:
+        ValueError: If ``result`` carries no fitted surrogate state.
     """
     em = result._fit
     if em is None:
@@ -525,8 +513,6 @@ def _predict_hdmr(result: HDMRResult, X_new: Array, *, batch_size: int | None = 
             "HDMRResult carries no fitted surrogate state; obtain results from gsax.hdmr.analyze()"
         )
 
-    X_new = jnp.asarray(X_new)
-    _validate_x(result.problem, X_new)
     maxorder = em["maxorder"]
     C1 = em["C1"]
     f0 = em["f0"]
@@ -536,7 +522,6 @@ def _predict_hdmr(result: HDMRResult, X_new: Array, *, batch_size: int | None = 
 
     # Apply the same CDF -> [0,1] transform used during fitting.
     X_n = cdf_to_unit_interval(X_new, result.problem)
-    N = X_n.shape[0]
 
     # Hoist the static basis index tables out of the per-batch path. Each
     # higher_orders entry is (basis builder, term index table, tensor-product
@@ -563,7 +548,6 @@ def _predict_hdmr(result: HDMRResult, X_new: Array, *, batch_size: int | None = 
             c3 = jnp.asarray(result._c3, dtype=int)
             higher_orders.append((_build_B3, c3, jnp.asarray(beta3_host, dtype=int), C3))
             elems_per_row += (4 * m1**3 + slices) * len(result._c3)
-    batch = resolve_batch_size(X_n.dtype.itemsize * elems_per_row, N, batch_size)
 
     def _predict(X_chunk: Array) -> Array:
         # Reconstruct prediction as f0 + sum of component functions.
@@ -572,13 +556,12 @@ def _predict_hdmr(result: HDMRResult, X_new: Array, *, batch_size: int | None = 
         Y_total = _emulator_contract(B1, C1)
         for build, c_idx, beta, C in higher_orders:
             Y_total = Y_total + _emulator_contract(build(B1, c_idx, beta), C)
-        return Y_total
+        # Add grand mean to recover the full surrogate prediction, then undo
+        # the standardization applied during fitting, if any. Both are
+        # elementwise per row, so doing them per batch matches single-shot.
+        Y_pred = Y_total + f0
+        if prenormalize:
+            Y_pred = Y_pred * y_std + y_mean
+        return Y_pred
 
-    Y_total = apply_batched(_predict, X_n, batch)
-
-    # Add grand mean to recover the full surrogate prediction.
-    Y_pred = Y_total + f0
-    # Undo the standardization applied during fitting, if any.
-    if prenormalize:
-        Y_pred = Y_pred * y_std + y_mean
-    return Y_pred
+    return _PredictPlan(X=X_n, bytes_per_row=X_n.dtype.itemsize * elems_per_row, kernel=_predict)

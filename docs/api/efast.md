@@ -9,6 +9,7 @@ Jump directly to:
 
 - [`gsax.efast.sample()`](/api/#structured-methods)
 - [`gsax.efast.analyze()`](/api/#structured-methods)
+- [`gsax.efast.EFASTSamples`](/api/#structured-methods)
 - [`gsax.efast.EFASTResult`](/api/#structured-methods)
 
 Related docs:
