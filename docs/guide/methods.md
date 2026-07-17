@@ -231,7 +231,7 @@ gsax computes Shapley effects **analytically** from a fitted surrogate's varianc
 
 Both backends accept scalar `(N,)`, multi-output `(N, K)`, and time-series `(N, T, K)` `Y`.
 
-Normalization is by the surrogate's **total decomposed variance** $\sum_u V_u$, so $\sum_i \mathrm{Sh}_i = 1$ exactly — the Shapley efficiency property (Owen, 2014). $S_1$ and $S_T$ from the same surrogate use the same denominator, so for `backend="pce"` they match `analyze_pce` exactly, while for `backend="hdmr"` they differ from `analyze_hdmr` (which normalizes by $\mathrm{Var}(Y)$) by a factor of `explained_variance`.
+Normalization is by the surrogate's **total decomposed variance** $\sum_u V_u$, so $\sum_i \mathrm{Sh}_i = 1$ exactly — the Shapley efficiency property (Owen, 2014). $S_1$ and $S_T$ from the same surrogate use the same denominator, so for `backend="pce"` they match `gsax.pce.analyze` exactly, while for `backend="hdmr"` they differ from `gsax.hdmr.analyze` (which normalizes by $\mathrm{Var}(Y)$) by a factor of `explained_variance`.
 
 How much of the *output* variance the surrogate actually captured is reported separately in the `explained_variance` field, $\sum_u V_u / \mathrm{Var}(Y)$: close to 1 for a good fit, below 1 when truncation or fit error leaves variance unexplained, and above 1 when an overfit surrogate over-counts shared variance — an honest diagnostic rather than a silently renormalized result. A `UserWarning` is emitted when it strays far from 1. Interactions above `maxorder` (HDMR) or the polynomial order (PCE) are absent from the allocation.
 

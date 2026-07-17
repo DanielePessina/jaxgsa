@@ -186,5 +186,5 @@ D is always the last axis of the index arrays.
   coefficients.
 - [Methods](/guide/methods) for the theory behind HSIC and when to choose it
   over other methods.
-- [API Reference](/api/#hsic-kernel-based-sensitivity-analysis) for full
+- [API Reference](/api/#given-data-methods) for full
   parameter documentation.

@@ -175,9 +175,9 @@ def analyze(
             ``(D,) -> (T, K)`` for time-series outputs.
         X: Sample matrix ``(N, D)`` in the problem's physical units.
         Y: Forward model outputs ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
-            dfdx: Pre-computed Jacobian mirroring ``Y``'s layout with one extra
-                trailing ``(D,)`` axis: ``(N, D)`` for ``(N,)`` Y, ``(N, K, D)`` for
-                ``(N, K)``, and ``(N, T, K, D)`` for ``(N, T, K)``.
+        dfdx: Pre-computed Jacobian mirroring ``Y``'s layout with one extra
+            trailing ``(D,)`` axis: ``(N, D)`` for ``(N,)`` Y, ``(N, K, D)`` for
+            ``(N, K)``, and ``(N, T, K, D)`` for ``(N, T, K)``.
         chunk_size: Batch size for the autodiff path; the Jacobian is
             accumulated in chunks of this many samples to bound peak
             memory. None (default) processes all N samples at once.

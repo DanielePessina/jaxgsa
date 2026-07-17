@@ -164,5 +164,5 @@ print(ds_plain)
 - [PAWN Example](/examples/pawn) for the CDF-based moment-independent
   method.
 - [Methods](/guide/methods) for a comparison of all methods.
-- [API Reference](/api/#borgonovo-delta-workflow) for full parameter
+- [API Reference](/api/#given-data-methods) for full parameter
   documentation.

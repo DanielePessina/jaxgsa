@@ -265,7 +265,7 @@ D is always the last axis.
 - Gaussian marginals are sampled on a truncated-quantile grid
   (`truncation_quantile`, default 0.005): the design would otherwise hit the
   unit-cube boundaries, which an unbounded inverse CDF maps to infinity.
-  `truncation_quantile` must be in `(0, 0.5)` or `sample_morris()` raises
+  `truncation_quantile` must be in `(0, 0.5)` or `gsax.morris.sample()` raises
   `ValueError`.
 - `to_physical_units()` raises `ValueError` for problems with Gaussian
   marginals — the inverse-CDF transform is nonlinear, so the measures stay
@@ -275,7 +275,7 @@ D is always the last axis.
   but cannot attribute them to specific pairs.
 - Even `num_levels` values (the default is 4) make all grid levels equally
   probable; odd values trigger a warning.
-- `Y` must be evaluated on `sr.samples` (the unique rows); `analyze_morris()`
+- `Y` must be evaluated on `sr.samples` (the unique rows); `gsax.morris.analyze()`
   reconstructs the expanded trajectory layout internally.
 - Trajectories containing any non-finite output (NaN/Inf) are dropped as
   whole blocks with a warning. Fewer than 2 remaining trajectories raise an
@@ -292,4 +292,4 @@ D is always the last axis.
   output, and time coordinate.
 - [Methods](/guide/methods) for the theory behind Morris and when to choose
   it over other methods.
-- [API Reference](/api/#morris-workflow) for full parameter documentation.
+- [API Reference](/api/#structured-methods) for full parameter documentation.

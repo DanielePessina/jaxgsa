@@ -37,7 +37,7 @@ DGSM requires an **unbatched** function with signature `(D,) -> ()` or
 used by Sobol, HDMR, and eFAST which accept `(N, D)` input arrays.
 
 The unbatched signature is needed because `jax.jacrev` differentiates a
-single-input function. Internally, `analyze_dgsm` vectorizes the autodiff
+single-input function. Internally, `gsax.dgsm.analyze` vectorizes the autodiff
 over all N samples.
 
 ## Scalar example (Ishigami)
@@ -127,7 +127,7 @@ D is always the last axis of the index arrays.
 
 - DGSM requires a **JAX-differentiable** function. If your model is not
   differentiable in JAX, you can pre-compute the Jacobian externally and pass
-  `Y` and `dfdx` arrays directly to `analyze_dgsm()`.
+  `Y` and `dfdx` arrays directly to `gsax.dgsm.analyze()`.
 - The Poincare upper bound can be loose for strongly nonlinear or non-monotone
   responses. The bound becomes tight when the model is nearly monotone in a
   given input.
@@ -145,4 +145,4 @@ D is always the last axis of the index arrays.
   coefficients.
 - [Methods](/guide/methods) for the theory behind DGSM and when to choose it
   over other methods.
-- [API Reference](/api/#dgsm-workflow) for full parameter documentation.
+- [API Reference](/api/#given-data-methods) for full parameter documentation.

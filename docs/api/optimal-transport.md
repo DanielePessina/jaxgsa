@@ -10,10 +10,9 @@ The canonical API reference now lives at [API Reference](/api/).
 
 Jump directly to:
 
-- [`monte_carlo()`](/api/#sample-mc)
-- [`analyze_optimal_transport()`](/api/#analyze-optimal-transport)
-- [`OTResult`](/api/#otresult)
-- [`OTResult.to_dataset()`](/api/#otresult-to_dataset)
+- [`gsax.sampling.monte_carlo()`](/api/#given-data-methods)
+- [`gsax.optimal_transport.analyze()`](/api/#given-data-methods)
+- [`gsax.optimal_transport.OTResult`](/api/#given-data-methods)
 
 Related docs:
 

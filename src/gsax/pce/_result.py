@@ -49,6 +49,13 @@ class PCEResult:
             (shape ``(...)``: scalar / ``(K,)`` / ``(T, K)``), or None. In
             the units of ``Y``; compare against ``Y.std()`` -- a ratio near
             or above 1 means the surrogate (and its indices) is unreliable.
+        explained_variance: Fraction of each output slice's sample variance
+            captured by the expansion (shape ``(...)``: scalar / ``(K,)`` /
+            ``(T, K)``, matching ``loo_rmse``), or None. Computed as the sum
+            of squared non-constant coefficients divided by ``Var(Y)`` for
+            that slice; NaN for constant (zero-variance) slices. Values well
+            below 1 mean the surrogate misses variance; values above 1 mean
+            it attributes more variance than the data holds (overfit).
     """
 
     S1: Array
@@ -62,13 +69,58 @@ class PCEResult:
     explained_variance: Array | None = None
 
     def predict(self, X: Array, *, batch_size: int | None = None) -> Array:
-        """Predict outputs at new input rows using the fitted expansion."""
+        """Predict outputs at new input rows using the fitted expansion.
+
+        Rebuilds the polynomial basis at ``X`` and applies the coefficients
+        fitted by ``pce.analyze`` -- no model evaluations are needed.
+        Accuracy degrades outside the input region the surrogate was fitted
+        on.
+
+        Args:
+            X: (N_new, D) new input points, in the same physical units as
+                the ``X`` passed to ``pce.analyze``.
+            batch_size: Rows of ``X`` to predict per batch. The basis tensors
+                are linear in the batch size with a large per-row constant
+                (``~3 * n_terms`` floats per row), so single-shot evaluation
+                at large ``N_new`` can exhaust memory. ``None`` (default)
+                derives a batch size from a fixed transient-memory budget
+                (~512 MiB); an int fixes the rows per batch, and
+                ``batch_size >= N_new`` forces a single-shot call. Each row's
+                term contraction is independent, so batching only perturbs
+                predictions at the level of floating-point reassociation.
+
+        Returns:
+            Predicted outputs mirroring the training ``Y`` layout:
+            ``(N_new,)``, ``(N_new, K)``, or ``(N_new, T, K)``.
+
+        Raises:
+            ValueError: If ``X`` is not 2-D with one column per problem
+                parameter, or ``batch_size`` is not a positive integer.
+        """
         from gsax.pce._analyze import _predict_pce
 
         return _predict_pce(self, X, batch_size=batch_size)
 
     def shapley(self) -> "ShapleyResult":
-        """Compute Shapley effects from this fitted PCE decomposition."""
+        """Compute Shapley effects from this fitted PCE decomposition.
+
+        Distributes each expansion term's variance contribution equally among
+        the parameters active in it -- no extra model evaluations or refit.
+
+        Returns:
+            ShapleyResult with per-parameter Shapley effects ``Sh`` (summing
+            to 1 per output slice), the matching ``S1``/``ST`` bounds, and
+            this result's ``explained_variance`` diagnostic.
+
+        Raises:
+            ValueError: If this result carries no ``explained_variance``
+                diagnostic (e.g. constructed by hand without one).
+
+        Warns:
+            UserWarning: If ``explained_variance`` indicates a pathological
+                fit (well below 1, or above 1 -- overfit), making the Shapley
+                effects unreliable.
+        """
         from gsax.shapley._analyze import _shapley_from_pce
 
         return _shapley_from_pce(self)

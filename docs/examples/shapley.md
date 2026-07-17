@@ -146,8 +146,8 @@ print(result_low.explained_variance)    # ~0.4 — do not trust these shares
 ```
 
 Because of this normalization, `backend="pce"` returns S1/ST that match
-`analyze_pce` exactly, while `backend="hdmr"` indices relate to
-`analyze_hdmr`'s (which normalize by `Var(Y)`) by a factor of
+`gsax.pce.analyze` exactly, while `backend="hdmr"` indices relate to
+`gsax.hdmr.analyze`'s (which normalize by `Var(Y)`) by a factor of
 `explained_variance`.
 
 ## xarray export
@@ -194,7 +194,7 @@ as `(N, T)` — timepoints of that single output — and flows through as
 - Interactions beyond the surrogate's truncation (`order` for PCE,
   `maxorder` for HDMR) are absent from the allocation — raise the order
   until `explained_variance` stabilizes near 1.
-- The HDMR backend inherits `analyze_hdmr`'s input contract: at least 300
+- The HDMR backend inherits `gsax.hdmr.analyze`'s input contract: at least 300
   samples and `maxorder` in `{1, 2, 3}` (clamped with a warning when
   `D < maxorder`).
 - Setting a keyword that belongs to the non-selected backend raises
@@ -211,5 +211,5 @@ as `(N, T)` — timepoints of that single output — and flows through as
   importance measure from the same given-data setting.
 - [Methods](/guide/methods) for the theory behind Shapley effects and when
   to choose them over S1/ST.
-- [API Reference](/api/#shapley-effects-workflow) for full parameter
+- [API Reference](/api/#shapley-results) for full parameter
   documentation.

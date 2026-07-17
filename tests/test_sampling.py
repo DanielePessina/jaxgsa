@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from scipy.stats import truncnorm
 
-from gsax.problem import GaussianInputSpec, Problem, UniformInputSpec
+from gsax.problem import GaussianInputSpec, InputSpecValue, Problem, UniformInputSpec
 from gsax.sobol import sample
 from gsax.sobol._sampling import _next_power_of_2, _saltelli_step
 
@@ -95,7 +95,7 @@ def test_sample_verbose_prints_summary(capsys):
     p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
     sample(p, n_samples=32, seed=42, verbose=True)
     out = capsys.readouterr().out
-    assert "gsax.sample:" in out
+    assert "gsax.sobol.sample:" in out
     assert "requested_unique>=" in out
     assert "returned_unique=" in out
     assert "duplicates_removed=" in out
@@ -216,7 +216,7 @@ class TestSamplingResultDownsample:
     """Tests for SobolSamples.downsample()."""
 
     def _make_sr(self, D: int = 3, base_n: int = 32, second_order: bool = True, seed: int = 42):
-        names = {f"x{i}": (0.0, 1.0) for i in range(D)}
+        names: dict[str, InputSpecValue] = {f"x{i}": (0.0, 1.0) for i in range(D)}
         p = Problem.from_dict(names)
         return sample(
             p, n_samples=1, base_n=base_n, calc_second_order=second_order, seed=seed, verbose=False
@@ -316,3 +316,29 @@ class TestSamplingResultDownsample:
         Y = np.ones((sr_full.n_total, 3))
         _, Y_small = sr_full.downsample(8, Y)
         assert not np.shares_memory(Y, Y_small)
+
+    def test_downsample_is_bit_identical_to_direct_draw(self):
+        """Prefix property: downsampling to K equals drawing K base points directly.
+
+        This backs the ``downsample`` docstring claim that the first K base
+        points of a draw with N > K base points are bit-identical to drawing
+        K base points with the same seed and scramble.
+        """
+        p = Problem.from_dict(
+            {
+                "uniform": UniformInputSpec(dist="uniform", low=-2.0, high=3.0),
+                "gaussian": GaussianInputSpec(
+                    dist="gaussian", mean=1.0, variance=4.0, low=-1.0, high=4.0
+                ),
+            }
+        )
+        N, K, seed = 64, 16, 1234
+
+        sr_small = sample(p, n_samples=1, base_n=N, seed=seed, verbose=False).downsample(K)
+        sr_direct = sample(p, n_samples=1, base_n=K, seed=seed, verbose=False)
+
+        np.testing.assert_array_equal(sr_small.samples, sr_direct.samples)
+        np.testing.assert_array_equal(sr_small.expanded_to_unique, sr_direct.expanded_to_unique)
+        np.testing.assert_array_equal(sr_small.sample_ids, sr_direct.sample_ids)
+        assert sr_small.expanded_n_total == sr_direct.expanded_n_total
+        assert sr_small.base_n == sr_direct.base_n == K

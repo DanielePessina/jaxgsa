@@ -83,8 +83,12 @@ def _build_B1(X_n: Array, m: int) -> Array:
     return B1_T.transpose(1, 2, 0)  # (N, m1, D)
 
 
+@jax.jit
 def _build_B2(B1: Array, c2: Array, beta: Array) -> Array:
     """Build second-order tensor product basis.
+
+    JIT-compiled so XLA fuses the two index gathers into the multiply instead
+    of materializing both (N, m2, n2) gather products as eager transients.
 
     Args:
         B1: (N, m1, D) first-order basis.
@@ -102,8 +106,13 @@ def _build_B2(B1: Array, c2: Array, beta: Array) -> Array:
     return left * right
 
 
+@jax.jit
 def _build_B3(B1: Array, c3: Array, beta: Array) -> Array:
     """Build third-order tensor product basis.
+
+    JIT-compiled so XLA fuses the three index gathers into the multiply
+    instead of materializing all (N, m3, n3) gather products as eager
+    transients.
 
     Args:
         B1: (N, m1, D) first-order basis.

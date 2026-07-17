@@ -15,11 +15,16 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
-from gsax._batching import apply_batched, resolve_batch_size
+from gsax._batching import (
+    DEFAULT_EMULATE_BUDGET_BYTES,
+    apply_batched,
+    resolve_batch_size,
+)
 from gsax._normalization import (
     _prenormalize_outputs,
     _prepare_Y,
     _squeeze_output_axes,
+    _validate_x,
     _validate_xy_inputs,
     _warn_zero_variance_slices,
 )
@@ -177,7 +182,7 @@ def analyze_hdmr(
     maxiter: int = 100,
     m: int = 2,
     lambdax: float = 0.01,
-    chunk_size: int = 2048,
+    chunk_size: int | None = None,
 ) -> HDMRResult:
     """Compute sensitivity indices via RS-HDMR (public entry point).
 
@@ -214,7 +219,7 @@ def _analyze_hdmr_core(
     maxiter: int = 100,
     m: int = 2,
     lambdax: float = 0.01,
-    chunk_size: int = 2048,
+    chunk_size: int | None = None,
 ) -> HDMRResult:
     """Fit RS-HDMR on an already-canonical Y (no re-validation, no warn).
 
@@ -257,16 +262,25 @@ def _analyze_hdmr_core(
             sharp features are being oversmoothed.
         chunk_size: Maximum number of (T, K) output slices fitted per vmap
             batch. Caps peak device memory for large T*K; smaller values
-            trade speed for memory.
+            trade speed for memory. ``None`` (default) derives the chunk
+            size from a ~512 MiB transient-memory budget, since the per-slice
+            cost inside the fitting kernel scales with ``N * n_terms``.
 
     Returns:
         HDMRResult with per-term indices Sa, Sb, S, per-parameter ST,
         human-readable term labels, F-test selection counts, the fitted
-        fitted surrogate state and its RMSE.
+        surrogate state and its RMSE.
 
     Raises:
-        ValueError: If ``N < 300``, ``maxorder`` is not 1/2/3, or
-            ``chunk_size < 1``.
+        ValueError: If ``N < 300``, ``maxorder`` is not 1/2/3, or an explicit
+            ``chunk_size < 1`` is passed.
+
+    Note:
+        Independently of ``chunk_size``, the fit materializes full-N B-spline
+        basis tensors of roughly ``N * (m+3)^2 * n2`` floats at order 2 and
+        ``N * (m+3)^3 * n3`` floats at order 3 (``n2``/``n3`` = number of
+        parameter pairs/triples), so large-N analyses with ``maxorder=3``
+        need memory planning.
     """
     N, D = X.shape
     # B-spline regression with backfitting needs a reasonable sample size
@@ -283,7 +297,7 @@ def _analyze_hdmr_core(
             f"gsax: maxorder clamped to {maxorder} (need D >= maxorder, got D={D})",
             stacklevel=2,
         )
-    if chunk_size < 1:
+    if chunk_size is not None and chunk_size < 1:
         raise ValueError(f"chunk_size must be >= 1, got {chunk_size}")
     lambdax = float(lambdax)
 
@@ -331,6 +345,13 @@ def _analyze_hdmr_core(
     # response vector for the vmapped kernel.
     Y_flat = Y_3d.transpose(1, 2, 0).reshape(T * K_out, N)
     total = T * K_out
+    if chunk_size is None:
+        # Peak per-lane transient inside the vmapped kernel is dominated by
+        # ~5 arrays of shape (chunk, N, n_terms) (Y_em, its centered copy,
+        # the leave-one-out sums Y0_minus, their centered copy, and slack),
+        # so derive the chunk count from a fixed bytes budget.
+        itemsize = Y_flat.dtype.itemsize
+        chunk_size = max(1, DEFAULT_EMULATE_BUDGET_BYTES // (5 * N * n * itemsize))
     cs = min(chunk_size, total)
 
     # Accumulate chunk results; select_sum aggregates F-test pass counts
@@ -433,8 +454,6 @@ def _analyze_hdmr_core(
         "y_std": y_std_out,
         "m": m,
         "maxorder": maxorder,
-        "c2": list(c2),
-        "c3": list(c3),
     }
 
     return HDMRResult(
@@ -481,7 +500,8 @@ def _predict_hdmr(result: HDMRResult, X_new: Array, *, batch_size: int | None = 
     registered JAX pytree type.
 
     Args:
-        result: HDMRResult from ``analyze_hdmr`` (must have ``emulator`` set).
+        result: HDMRResult from :func:`gsax.hdmr.analyze` carrying fitted
+            surrogate state (``_fit``).
         X_new: (N_new, D) new input points within the problem bounds.
         batch_size: Rows of ``X_new`` to predict per batch. The B-spline
             tensor-product bases are linear in the batch size with a large
@@ -501,9 +521,12 @@ def _predict_hdmr(result: HDMRResult, X_new: Array, *, batch_size: int | None = 
     """
     em = result._fit
     if em is None:
-        raise ValueError("HDMRResult has no emulator (emulator is None)")
+        raise ValueError(
+            "HDMRResult carries no fitted surrogate state; obtain results from gsax.hdmr.analyze()"
+        )
 
     X_new = jnp.asarray(X_new)
+    _validate_x(result.problem, X_new)
     maxorder = em["maxorder"]
     C1 = em["C1"]
     f0 = em["f0"]
@@ -532,14 +555,14 @@ def _predict_hdmr(result: HDMRResult, X_new: Array, *, batch_size: int | None = 
         )
         C2 = em["C2"]
         if C2 is not None:
-            c2 = jnp.asarray(em["c2"], dtype=int)
+            c2 = jnp.asarray(result._c2, dtype=int)
             higher_orders.append((_build_B2, c2, jnp.asarray(beta2_host, dtype=int), C2))
-            elems_per_row += (3 * m1**2 + slices) * len(em["c2"])
+            elems_per_row += (3 * m1**2 + slices) * len(result._c2)
         C3 = em["C3"]
         if maxorder >= 3 and C3 is not None:
-            c3 = jnp.asarray(em["c3"], dtype=int)
+            c3 = jnp.asarray(result._c3, dtype=int)
             higher_orders.append((_build_B3, c3, jnp.asarray(beta3_host, dtype=int), C3))
-            elems_per_row += (4 * m1**3 + slices) * len(em["c3"])
+            elems_per_row += (4 * m1**3 + slices) * len(result._c3)
     batch = resolve_batch_size(X_n.dtype.itemsize * elems_per_row, N, batch_size)
 
     def _predict(X_chunk: Array) -> Array:

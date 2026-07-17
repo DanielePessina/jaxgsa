@@ -7,10 +7,9 @@ The canonical API reference now lives at [API Reference](/api/).
 
 Jump directly to:
 
-- [`monte_carlo()`](/api/#sample-mc)
-- [`analyze_hsic()`](/api/#analyze-hsic)
-- [`HSICResult`](/api/#hsicresult)
-- [`HSICResult.to_dataset()`](/api/#hsicresult-to_dataset)
+- [`gsax.sampling.monte_carlo()`](/api/#given-data-methods)
+- [`gsax.hsic.analyze()`](/api/#given-data-methods)
+- [`gsax.hsic.HSICResult`](/api/#given-data-methods)
 
 Related docs:
 

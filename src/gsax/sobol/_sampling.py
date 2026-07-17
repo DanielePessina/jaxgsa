@@ -4,7 +4,7 @@ The public contract of this module is intentionally split in two layers:
 
 1. ``sample()`` returns only the unique rows that a user should evaluate.
 2. ``SobolSamples`` also carries enough metadata to reconstruct the full
-   expanded Saltelli layout later inside :func:`gsax.analyze`.
+   expanded Saltelli layout later inside :func:`gsax.sobol.analyze`.
 
 This avoids wasted model evaluations in low-dimensional cases where the
 expanded Saltelli design contains exact duplicate rows.
@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import overload
 
@@ -29,9 +31,9 @@ from gsax.problem import Problem, _normalized_input_to_dict
 class SobolSamples:
     """Unique Sobol samples plus metadata for Saltelli reconstruction.
 
-    Returned by :func:`gsax.sample`. Evaluate your model at every row of
+    Returned by :func:`gsax.sobol.sample`. Evaluate your model at every row of
     ``samples`` (in order) and pass this object together with the outputs to
-    :func:`gsax.analyze`.
+    :func:`gsax.sobol.analyze`.
 
     Note the two row counts: ``n_total`` is the number of *unique* rows you
     must evaluate, while ``expanded_n_total`` is the (larger or equal) size of
@@ -143,9 +145,38 @@ class SobolSamples:
         return sr_small
 
     def save(self, path: str | Path) -> None:
-        """Save the full design to one compressed NPZ file."""
+        """Save the full design to one compressed NPZ file.
+
+        The file contains the unique sample matrix, the sample identifiers,
+        the Saltelli expansion map (omitted when it is a trivial identity
+        mapping, i.e. the design has no duplicate rows), and a JSON metadata
+        blob describing the problem definition, the design parameters, and
+        the gsax version that wrote the file.
+
+        Args:
+            path: Destination file path. If it does not already end in
+                ``.npz``, the suffix is appended (matching NumPy's ``savez``
+                convention), so the file written to disk may differ from the
+                exact string passed — e.g. ``"run.A"`` is saved as
+                ``"run.A.npz"``.
+        """
         path = _npz_path(path)
+        try:
+            gsax_version = _pkg_version("gsax")
+        except PackageNotFoundError:
+            gsax_version = "unknown"
+        # Identity-mapping optimization: when no duplicate rows were removed,
+        # expanded_to_unique is exactly arange(expanded_n_total) (the common
+        # case in higher dimensions). Record a boolean flag instead of storing
+        # the full index array; load() reconstructs it with np.arange.
+        identity_mapping = bool(
+            np.array_equal(
+                self.expanded_to_unique,
+                np.arange(self.expanded_n_total, dtype=self.expanded_to_unique.dtype),
+            )
+        )
         meta = {
+            "gsax_version": gsax_version,
             "problem": {
                 "names": list(self.problem.names),
                 "input_specs": [
@@ -158,18 +189,44 @@ class SobolSamples:
             "base_n": self.base_n,
             "calc_second_order": self.calc_second_order,
             "expanded_n_total": self.expanded_n_total,
+            "identity_mapping": identity_mapping,
         }
-        np.savez_compressed(
-            path,
-            samples=self.samples,
-            sample_ids=self.sample_ids,
-            expanded_to_unique=self.expanded_to_unique,
-            metadata=np.asarray(json.dumps(meta)),
-        )
+        metadata = np.asarray(json.dumps(meta))
+        if identity_mapping:
+            np.savez_compressed(
+                path,
+                samples=self.samples,
+                sample_ids=self.sample_ids,
+                metadata=metadata,
+            )
+        else:
+            np.savez_compressed(
+                path,
+                samples=self.samples,
+                sample_ids=self.sample_ids,
+                expanded_to_unique=self.expanded_to_unique,
+                metadata=metadata,
+            )
 
     @classmethod
     def load(cls, path: str | Path) -> "SobolSamples":
-        """Load a design saved by :meth:`save`."""
+        """Load a design saved by :meth:`save`.
+
+        Args:
+            path: Path to the saved design. If it does not already end in
+                ``.npz``, the suffix is appended before opening (mirroring
+                the convention used by :meth:`save`), so the file read may
+                differ from the exact string passed.
+
+        Returns:
+            The reconstructed ``SobolSamples``, equal to the instance that
+            was saved.
+
+        Raises:
+            FileNotFoundError: If no file exists at the resolved path.
+            KeyError: If the file is missing required arrays or metadata
+                entries (i.e. it was not written by :meth:`save`).
+        """
         from gsax.problem import _normalize_input_spec
 
         with np.load(_npz_path(path), allow_pickle=False) as data:
@@ -183,11 +240,16 @@ class SobolSamples:
                 ),
                 output_names=tuple(output_names) if output_names is not None else None,
             )
+            expanded_n_total = int(meta["expanded_n_total"])
+            if meta["identity_mapping"]:
+                expanded_to_unique = np.arange(expanded_n_total, dtype=np.int64)
+            else:
+                expanded_to_unique = data["expanded_to_unique"]
             return cls(
-                samples=data["samples"].copy(),
-                sample_ids=data["sample_ids"].copy(),
-                expanded_n_total=int(meta["expanded_n_total"]),
-                expanded_to_unique=data["expanded_to_unique"].copy(),
+                samples=data["samples"],
+                sample_ids=data["sample_ids"],
+                expanded_n_total=expanded_n_total,
+                expanded_to_unique=expanded_to_unique,
                 base_n=int(meta["base_n"]),
                 n_params=problem.num_vars,
                 calc_second_order=bool(meta["calc_second_order"]),
@@ -196,9 +258,15 @@ class SobolSamples:
 
 
 def _npz_path(path: str | Path) -> Path:
-    """Return a path with the canonical ``.npz`` suffix."""
+    """Return a path with the canonical ``.npz`` suffix.
+
+    A missing suffix is *appended* (never substituted), matching NumPy's own
+    ``savez`` convention: ``"run.A"`` becomes ``"run.A.npz"``, not
+    ``"run.npz"``. Substituting via ``Path.with_suffix`` would make dotted
+    stems like ``"run.A"`` and ``"run.B"`` silently collide on disk.
+    """
     path = Path(path)
-    return path if path.suffix == ".npz" else path.with_suffix(".npz")
+    return path if path.suffix == ".npz" else Path(str(path) + ".npz")
 
 
 def _is_power_of_2(n: int) -> bool:
@@ -363,7 +431,7 @@ def _print_sampling_summary(
     duplicate_fraction = duplicates_removed / expanded_n_total if expanded_n_total else 0.0
     order_label = "second-order" if calc_second_order else "first/total-order"
     print(
-        "gsax.sample: "
+        "gsax.sobol.sample: "
         f"D={n_params}, mode={order_label}, base_n={base_n}, "
         f"requested_unique>={target_n}, returned_unique={unique_n}, "
         f"expanded_rows={expanded_n_total}, duplicates_removed={duplicates_removed} "
@@ -381,11 +449,11 @@ def sample(
     seed: int | np.random.Generator | None = None,
     verbose: bool = True,
 ) -> SobolSamples:
-    """Generate the input samples needed for Sobol analysis with ``gsax.analyze``.
+    """Generate the input samples needed for Sobol analysis with ``gsax.sobol.analyze``.
 
     Typical usage: call this once, evaluate your model at every row of the
     returned ``result.samples`` (shape ``(n_total, D)``), then pass the result
-    object and your outputs to :func:`gsax.analyze`.
+    object and your outputs to :func:`gsax.sobol.analyze`.
 
     Internally this builds a Saltelli design — the structured layout of base
     and column-swapped sample matrices that Sobol index estimators require —

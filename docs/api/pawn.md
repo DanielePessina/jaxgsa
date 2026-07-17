@@ -7,10 +7,9 @@ The canonical API reference now lives at [API Reference](/api/).
 
 Jump directly to:
 
-- [`monte_carlo()`](/api/#sample-mc)
-- [`analyze_pawn()`](/api/#analyze-pawn)
-- [`PAWNResult`](/api/#pawnresult)
-- [`PAWNResult.to_dataset()`](/api/#pawnresult-to_dataset)
+- [`gsax.sampling.monte_carlo()`](/api/#given-data-methods)
+- [`gsax.pawn.analyze()`](/api/#given-data-methods)
+- [`gsax.pawn.PAWNResult`](/api/#given-data-methods)
 
 Related docs:
 

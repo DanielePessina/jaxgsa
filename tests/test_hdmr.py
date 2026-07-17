@@ -111,8 +111,6 @@ def test_shapes_1d(ishigami_data):
         "y_std",
         "m",
         "maxorder",
-        "c2",
-        "c3",
     }
     assert result._fit["C1"].shape == (5, 3)
     assert result._fit["C2"] is not None
@@ -460,6 +458,18 @@ def test_emulator_reasonable(hdmr_result, ishigami_data):
     assert abs(float(jnp.mean(Y_pred)) - float(jnp.mean(Y))) < 1.0
 
 
+def test_predict_rejects_wrong_shaped_x(hdmr_result, ishigami_data):
+    """predict must validate X shape instead of silently clamping/truncating."""
+    X, _ = ishigami_data
+    with pytest.raises(ValueError, match="2-D"):
+        hdmr_result.predict(X[:, 0])  # 1-D input
+    D = PROBLEM.num_vars
+    X_wide = jnp.concatenate([X, X[:, :2]], axis=1)  # (N, D + 2)
+    assert X_wide.shape[1] == D + 2
+    with pytest.raises(ValueError, match="columns"):
+        hdmr_result.predict(X_wide)
+
+
 def test_prenormalize_emulator_predictions_and_rmse_stay_on_original_scale(ishigami_data):
     """prenormalized HDMR fits should still predict and report RMSE in original units."""
     X, Y = ishigami_data
@@ -595,8 +605,8 @@ def test_select_and_rmse(hdmr_result):
     assert hdmr_result.select is not None
     assert hdmr_result.rmse is not None
     assert hdmr_result.select.shape[0] > 0
-    assert isinstance(hdmr_result._fit["c2"], list)
-    assert isinstance(hdmr_result._fit["c3"], list)
+    assert isinstance(hdmr_result._c2, tuple)
+    assert isinstance(hdmr_result._c3, tuple)
 
 
 def test_s1_property(hdmr_result):

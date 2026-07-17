@@ -120,4 +120,4 @@ print(ds.loo_rmse)  # included when available
 - [DGSM](/examples/dgsm) for derivative-based sensitivity bounds.
 - [Methods](/guide/methods) for the theory behind PCE and when to choose it
   over other methods.
-- [API Reference](/api/#pce-workflow) for full parameter documentation.
+- [API Reference](/api/#given-data-methods) for full parameter documentation.

@@ -11,7 +11,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import jax.core
 import jax.numpy as jnp
+import numpy as np
 from jax import Array
 
 # Transient-memory budget (bytes) used to derive the automatic batch size.
@@ -49,11 +51,18 @@ def resolve_batch_size(
 
 
 def apply_batched(fn: Callable[[Array], Array], X: Array, batch_size: int) -> Array:
-    """Apply ``fn`` to row batches of ``X``, concatenating along axis 0.
+    """Apply ``fn`` to row batches of ``X``, assembling the rows along axis 0.
 
     ``fn`` must be row-independent: its output for a row may not depend on
     which other rows share the batch. ``batch_size >= X.shape[0]`` degrades
     to a plain single-shot call.
+
+    Each finished batch is staged into a host (NumPy) output buffer, so
+    device residency stays at one batch plus the final output — a device-side
+    chunk list followed by ``jnp.concatenate`` would instead hold the full
+    output twice. Under ``jax.jit`` tracing, host staging is impossible, so
+    the traced path falls back to a device concatenate (XLA owns buffer
+    lifetimes there anyway).
 
     Args:
         fn: Function mapping an ``(n, ...)`` input batch to an ``(n, ...)``
@@ -62,11 +71,19 @@ def apply_batched(fn: Callable[[Array], Array], X: Array, batch_size: int) -> Ar
         batch_size: Rows per batch, as returned by ``resolve_batch_size``.
 
     Returns:
-        ``fn(X)``, computed at most ``batch_size`` rows at a time.
+        ``fn(X)`` as a JAX array, computed at most ``batch_size`` rows at a
+        time.
     """
     n_rows = X.shape[0]
     if batch_size >= n_rows:
         return fn(X)
-    return jnp.concatenate(
-        [fn(X[i : i + batch_size]) for i in range(0, n_rows, batch_size)], axis=0
-    )
+    if isinstance(X, jax.core.Tracer):
+        return jnp.concatenate(
+            [fn(X[i : i + batch_size]) for i in range(0, n_rows, batch_size)], axis=0
+        )
+    first = fn(X[:batch_size])
+    out = np.empty((n_rows, *first.shape[1:]), dtype=first.dtype)
+    out[:batch_size] = np.asarray(first)
+    for i in range(batch_size, n_rows, batch_size):
+        out[i : i + batch_size] = np.asarray(fn(X[i : i + batch_size]))
+    return jnp.asarray(out)

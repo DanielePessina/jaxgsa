@@ -15,7 +15,7 @@ import pytest
 from jax import Array
 
 from gsax import hdmr, pce
-from gsax._batching import resolve_batch_size
+from gsax._batching import apply_batched, resolve_batch_size
 from gsax.problem import Problem
 
 D = 4
@@ -138,6 +138,21 @@ def test_resolve_batch_size_bounds():
     assert resolve_batch_size(10**12, 50, None) == 1
     # Auto: cheap rows fall back to single-shot.
     assert resolve_batch_size(8, 50, None) == 50
+
+
+def test_apply_batched_host_buffer_matches_single_shot():
+    """The host-staged batched path returns a jax Array identical to fn(X)."""
+    X = jnp.asarray(np.random.default_rng(3).normal(size=(11, 4)))
+
+    def fn(x: Array) -> Array:
+        return jnp.stack([x.sum(axis=1), x.prod(axis=1)], axis=-1)
+
+    single = fn(X)
+    # 4 does not divide 11, so the last batch is a short remainder.
+    batched = apply_batched(fn, X, 4)
+    assert isinstance(batched, jax.Array)
+    assert batched.dtype == single.dtype
+    np.testing.assert_allclose(np.asarray(batched), np.asarray(single), rtol=1e-6)
 
 
 def test_pce_batched_jit_compatible(problem):

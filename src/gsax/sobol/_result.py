@@ -12,7 +12,7 @@ from gsax.problem import Problem
 
 @dataclass
 class SobolResult:
-    """Sobol sensitivity analysis results, returned by :func:`gsax.analyze`.
+    """Sobol sensitivity analysis results, returned by :func:`gsax.sobol.analyze`.
 
     Stores first-order (S1), total-order (ST), and optionally second-order (S2)
     Sobol indices, with optional bootstrap confidence intervals. Use

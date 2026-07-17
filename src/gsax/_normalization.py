@@ -218,6 +218,7 @@ def _prepare_Y(
 def _warn_zero_variance_slices(
     Y: Array,
     output_names: tuple[str, ...] | None = None,
+    var_per_slice: Array | None = None,
 ) -> None:
     """Check for zero-variance output slices before analysis and warn.
 
@@ -225,6 +226,10 @@ def _warn_zero_variance_slices(
         Y: Model output array with shape ``(n_expanded, ...)`` where
             trailing dims are ``()``, ``(K,)``, or ``(T, K)``.
         output_names: Optional names for the K output dimension.
+        var_per_slice: Optional pre-computed per-slice sample variance of
+            ``Y`` over its first axis (any shape reshapeable to the flat
+            slice axis). Pass it when the caller already computed the same
+            variance, so it is not recomputed here.
     """
     # Collapse trailing dims so variance is computed per (t, k) slice.
     flat = Y.reshape(Y.shape[0], -1)
@@ -250,8 +255,9 @@ def _warn_zero_variance_slices(
 
     # Sample variance along axis 0; zero means the output is constant
     # and Sobol indices become 0/0 = NaN.
-    var_per_slice = jnp.var(flat, axis=0)
-    zero_mask = var_per_slice == 0
+    if var_per_slice is None:
+        var_per_slice = jnp.var(flat, axis=0)
+    zero_mask = var_per_slice.reshape(-1) == 0
     n_zero = int(jnp.sum(zero_mask))
 
     if n_zero == 0:

@@ -95,12 +95,12 @@ create a natural importance gradient across the 15 dimensions.
 ### Usage
 
 ```python
+import gsax
 from gsax.benchmarks import ishigami
-from gsax import sample, analyze
 
-sr = sample(ishigami.PROBLEM, 4096)
+sr = gsax.sobol.sample(ishigami.PROBLEM, n_samples=4096)
 Y = ishigami.evaluate(sr.samples)
-result = analyze(sr, Y)
+result = gsax.sobol.analyze(sr, Y)
 
 # Compare against analytical values
 print("S1 error:", abs(result.S1 - ishigami.ANALYTICAL_S1).max())
@@ -108,7 +108,7 @@ print("S1 error:", abs(result.S1 - ishigami.ANALYTICAL_S1).max())
 
 ## Timing Results
 
-gsax is benchmarked against [SALib](https://salib.readthedocs.io/) on a coupled-oscillator model with varying output shapes. What's timed is the **analysis step only** — computing indices from precomputed model outputs — not the model evaluations themselves. Three methods are compared: `analyze` (Sobol, first/total order only), `analyze` (Sobol with second-order), and `analyze_hdmr`, each across four output-shape scenarios (T timepoints × K outputs), with and without bootstrap confidence intervals.
+gsax is benchmarked against [SALib](https://salib.readthedocs.io/) on a coupled-oscillator model with varying output shapes. What's timed is the **analysis step only** — computing indices from precomputed model outputs — not the model evaluations themselves. Three methods are compared: `gsax.sobol.analyze` (first/total order only), `gsax.sobol.analyze` (with second-order), and `gsax.hdmr.analyze`, each across four output-shape scenarios (T timepoints × K outputs), with and without bootstrap confidence intervals.
 
 **Machine:** Apple M1 Pro, CPU only (no GPU), JAX 0.10.2, Python 3.12.
 
@@ -146,10 +146,10 @@ The short version: for a single scalar output without bootstrap, gsax and SALib 
 
 | Scenario (T×K) | Method | gsax (ms) | SALib (ms) | Speedup |
 |---|---|---:|---:|---:|
-| 1×1 | analyze_hdmr | 18.3 | 89.3 | **4.9×** |
-| 1×6 | analyze_hdmr | 18.8 | 506.1 | **26.9×** |
-| 50×1 | analyze_hdmr | 20.9 | 4000.7 | **191.6×** |
-| 50×6 | analyze_hdmr | 39.0 | 26063.1 | **667.7×** |
+| 1×1 | hdmr.analyze | 18.3 | 89.3 | **4.9×** |
+| 1×6 | hdmr.analyze | 18.8 | 506.1 | **26.9×** |
+| 50×1 | hdmr.analyze | 20.9 | 4000.7 | **191.6×** |
+| 50×6 | hdmr.analyze | 39.0 | 26063.1 | **667.7×** |
 
 ## Why gsax is faster
 

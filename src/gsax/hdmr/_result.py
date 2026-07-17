@@ -34,8 +34,6 @@ class _HDMRFit(TypedDict):
     y_std: Array
     m: int
     maxorder: int
-    c2: list[tuple[int, int]]
-    c3: list[tuple[int, int, int]]
 
 
 @dataclass
@@ -91,13 +89,56 @@ class HDMRResult:
     _c3: tuple[tuple[int, int, int], ...] = field(default=(), repr=False)
 
     def predict(self, X: Array, *, batch_size: int | None = None) -> Array:
-        """Predict outputs at new input rows using the fitted HDMR surrogate."""
+        """Predict outputs at new input rows using the fitted HDMR surrogate.
+
+        Args:
+            X: ``(N_new, D)`` input points in physical units (the same
+                parameter space as the training ``X``); the CDF transform
+                used during fitting is re-applied internally.
+            batch_size: Rows of ``X`` predicted per batch. The B-spline
+                tensor-product bases carry a large per-row constant, so
+                single-shot evaluation at large ``N_new`` can exhaust
+                memory. ``None`` (default) derives a batch size from a
+                ~512 MiB transient-memory budget; pass
+                ``batch_size >= N_new`` to force a single-shot call.
+                Batching only perturbs predictions at the level of
+                floating-point reassociation.
+
+        Returns:
+            Predicted outputs whose shape mirrors the training ``Y``:
+            ``(N_new,)``, ``(N_new, K)``, or ``(N_new, T, K)``. When the fit
+            used ``prenormalize=True``, predictions are inverse-transformed
+            back to the original output scale.
+
+        Raises:
+            ValueError: If ``X`` is not 2-D with ``D`` columns, or this
+                result carries no fitted surrogate state.
+        """
         from gsax.hdmr._analyze import _predict_hdmr
 
         return _predict_hdmr(self, X, batch_size=batch_size)
 
     def shapley(self, *, include_correlative: bool = False) -> "ShapleyResult":
-        """Compute Shapley effects from this fitted HDMR decomposition."""
+        """Compute Shapley effects from this fitted HDMR decomposition.
+
+        Allocates each fitted ANCOVA term's variance share equally among the
+        parameters participating in that term, yielding per-parameter Shapley
+        effects that sum to one.
+
+        Args:
+            include_correlative: When ``True``, allocate the total ANCOVA
+                contribution ``Sa + Sb`` (structural plus correlative
+                fold-in), which keeps the allocation meaningful under
+                correlated inputs. Defaults to ``False``, allocating the
+                structural part ``Sa`` only.
+
+        Returns:
+            ShapleyResult with per-parameter effects ``Sh`` (plus ``S1`` and
+            ``ST``) and explained-variance diagnostics.
+
+        Raises:
+            ValueError: If this result carries no fitted surrogate state.
+        """
         from gsax.shapley._analyze import _shapley_from_hdmr
 
         return _shapley_from_hdmr(self, include_correlative=include_correlative)
@@ -138,9 +179,11 @@ class HDMRResult:
         vals = self.Sa[..., n1 : n1 + n2]  # (..., n2)
         pairs = jnp.asarray(self._c2)  # (n2, 2)
         i, j = pairs[:, 0], pairs[:, 1]
-        # Two vectorized scatters fill both symmetric halves at once.
-        out = out.at[..., i, j].set(vals)
-        out = out.at[..., j, i].set(vals)
+        # A single vectorized scatter fills both symmetric halves at once
+        # (one full-tensor materialization instead of two).
+        rows = jnp.concatenate([i, j])
+        cols = jnp.concatenate([j, i])
+        out = out.at[..., rows, cols].set(jnp.concatenate([vals, vals], axis=-1))
         return out
 
     @cached_property
@@ -166,9 +209,15 @@ class HDMRResult:
             return out
         vals = self.Sa[..., self.problem.num_vars + n2 :]  # (..., n3)
         combos = jnp.asarray(self._c3)  # (n3, 3)
-        # One vectorized scatter per axis permutation makes the tensor symmetric.
-        for a, b, c in itertools.permutations(range(3)):
-            out = out.at[..., combos[:, a], combos[:, b], combos[:, c]].set(vals)
+        # Concatenate the six axis permutations of each index triple into one
+        # (6*n3,) index set so a single scatter makes the tensor symmetric
+        # (one full-tensor materialization instead of six sequential ones).
+        perms = list(itertools.permutations(range(3)))
+        ia = jnp.concatenate([combos[:, a] for a, _, _ in perms])
+        ib = jnp.concatenate([combos[:, b] for _, b, _ in perms])
+        ic = jnp.concatenate([combos[:, c] for _, _, c in perms])
+        vals6 = jnp.concatenate([vals] * len(perms), axis=-1)  # (..., 6*n3)
+        out = out.at[..., ia, ib, ic].set(vals6)
         return out
 
     def __repr__(self) -> str:

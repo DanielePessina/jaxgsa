@@ -104,7 +104,7 @@ Expected behavior:
   expected and signals that the problem is not finite-bounds-only anymore.
 - Save/load still works for mixed problems. The JSON metadata records the
   declared input specs so `SobolSamples.load()` reconstructs the same marginals.
-- `analyze_hdmr()` supports non-uniform inputs (Gaussian, truncated Gaussian)
+- `gsax.hdmr.analyze()` supports non-uniform inputs (Gaussian, truncated Gaussian)
   via CDF mapping to `[0, 1]` before surrogate fitting.
 
 ## See also

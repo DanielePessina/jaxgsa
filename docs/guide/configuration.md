@@ -58,13 +58,13 @@ The *persistent* on-disk cache goes one step further: it reuses compiled kernels
 compile again, so the on-disk cache is valuable for **parameter sweeps, CI jobs,
 and HPC batches** that re-run the same analysis shape many times.
 
-gsax exposes an opt-in helper. Call it **once, before your first
-`gsax.analyze*` call**, so the cache is active when the first compilation
-happens:
+gsax exposes an opt-in helper. Call it **once, before your first `analyze`
+call** (such as `gsax.sobol.analyze`), so the cache is active when the first
+compilation happens:
 
 ```python
 import gsax
-gsax.enable_compilation_cache("~/.cache/gsax-jax")
+gsax.config.enable_compilation_cache("~/.cache/gsax-jax")
 ```
 
 ### Signature

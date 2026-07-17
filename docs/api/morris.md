@@ -7,13 +7,10 @@ The canonical API reference now lives at [API Reference](/api/).
 
 Jump directly to:
 
-- [`sample_morris()`](/api/#sample-morris)
-- [`analyze_morris()`](/api/#analyze-morris)
-- [`MorrisSamples`](/api/#morrissamplingresult)
-- [`MorrisSamples.downsample()`](/api/#morrissamplingresult-downsample)
-- [`MorrisResult`](/api/#morrisresult)
-- [`MorrisResult.to_physical_units()`](/api/#morrisresult-to_physical_units)
-- [`MorrisResult.to_dataset()`](/api/#morrisresult-to_dataset)
+- [`gsax.morris.sample()`](/api/#structured-methods)
+- [`gsax.morris.analyze()`](/api/#structured-methods)
+- [`gsax.morris.MorrisSamples`](/api/#structured-methods)
+- [`gsax.morris.MorrisResult`](/api/#structured-methods)
 
 Related docs:
 

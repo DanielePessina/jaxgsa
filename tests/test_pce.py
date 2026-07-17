@@ -246,6 +246,17 @@ class TestInputValidation:
         with pytest.raises(ValueError, match="columns"):
             pce.analyze(problem, X, Y)
 
+    def test_predict_1d_x_raises(self, linear_pce_result):
+        """predict with a 1-D X must raise instead of silently truncating."""
+        with pytest.raises(ValueError, match="2-D"):
+            linear_pce_result.predict(jnp.ones(10))
+
+    def test_predict_x_column_mismatch_raises(self, linear_pce_result):
+        """predict with a wrong-width X must raise with a clear message."""
+        D = linear_pce_result.problem.num_vars
+        with pytest.raises(ValueError, match="columns"):
+            linear_pce_result.predict(jnp.ones((10, D + 2)))
+
 
 # ---------------------------------------------------------------------------
 # 6. S2 matrix properties

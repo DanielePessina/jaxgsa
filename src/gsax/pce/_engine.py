@@ -141,9 +141,14 @@ def build_design_matrix(
     # Tensor-product basis: Psi_alpha(x) = prod_{d=1}^{D} phi_{alpha_d}(x_d).
     # The multi-index alpha selects which 1-D polynomial degree per dimension.
     mi = jnp.asarray(multi_index)
-    # Index into the precomputed 1-D tables and multiply across dimensions.
-    stacked = jnp.stack([basis_1d[d][:, mi[:, d]] for d in range(D)])
-    return jnp.prod(stacked, axis=0)
+    # Index into the precomputed 1-D tables and multiply across dimensions as
+    # a running product: only the accumulator, one gathered (N, n_terms)
+    # factor, and the multiply output are live at a time (~3*N*n_terms
+    # floats), instead of stacking all D gathered factors at once.
+    Phi = basis_1d[0][:, mi[:, 0]]
+    for d in range(1, D):
+        Phi = Phi * basis_1d[d][:, mi[:, d]]
+    return Phi
 
 
 def sobol_from_coefficients(

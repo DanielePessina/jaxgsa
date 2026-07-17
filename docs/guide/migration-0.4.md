@@ -23,6 +23,7 @@ method namespaces. Replace root-level shortcuts with namespace calls:
 | `gsax.analyze_pawn(...)` | `gsax.pawn.analyze(...)` |
 | `gsax.analyze_borgonovo(...)` | `gsax.borgonovo.analyze(...)` |
 | `gsax.analyze_optimal_transport(...)` | `gsax.optimal_transport.analyze(...)` |
+| `gsax.enable_compilation_cache(...)` | `gsax.config.enable_compilation_cache(...)` |
 
 `monte_carlo` uses `n=...`, not `N=...`.
 
@@ -101,6 +102,18 @@ transpose detection and the single-output-name interpretation of `(N, T)` were
 removed. Use `(N, T, 1)` for one time-varying output.
 
 When `problem.output_names` is set, its length must match `K`.
+
+## DGSM Pre-computed Jacobians
+
+The `dfdx` contract of `gsax.dgsm.analyze` narrowed. In 0.3, singleton axes
+were paired loosely: `(N,)` outputs were accepted with a `(N, 1, D)` Jacobian,
+and `(N, 1)` outputs with a `(N, D)` Jacobian. Both tolerances were removed.
+`dfdx.ndim` must now equal `Y.ndim + 1`, with the leading axes matching `Y`
+exactly and the trailing axis of length `D`:
+
+- `(N,)` outputs require `(N, D)`;
+- `(N, K)` outputs require `(N, K, D)`;
+- `(N, T, K)` outputs require `(N, T, K, D)`.
 
 ## Sobol Persistence
 

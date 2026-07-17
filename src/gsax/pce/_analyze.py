@@ -14,6 +14,7 @@ from gsax._batching import apply_batched, resolve_batch_size
 from gsax._normalization import (
     _prepare_Y,
     _squeeze_output_axes,
+    _validate_x,
     _validate_xy_inputs,
     _warn_zero_variance_slices,
 )
@@ -214,8 +215,13 @@ def analyze_pce(
     X = jnp.asarray(X)
     Y = _validate_xy_inputs(problem, X, jnp.asarray(Y))
 
+    # Per-slice output variance, computed once and shared by the zero-variance
+    # warning and the explained-variance diagnostic below.
+    Y_3d = _prepare_Y(Y)[0]
+    total_var = jnp.var(Y_3d, axis=0)  # (T, K)
+
     # A constant output slice makes every index 0/0 = NaN; warn once up front.
-    _warn_zero_variance_slices(_prepare_Y(Y)[0], output_names=problem.output_names)
+    _warn_zero_variance_slices(Y_3d, output_names=problem.output_names, var_per_slice=total_var)
 
     fit = _fit_pce_core(problem, X, Y, order=order, ridge=ridge, fit_ratio=fit_ratio)
     squeeze_time, squeeze_output = fit.squeeze_time, fit.squeeze_output
@@ -229,7 +235,6 @@ def analyze_pce(
     # hat-matrix leverage is shared by every slice.
     loo = loo_error(fit.Phi, fit.Y_flat, fit.coeffs_flat, gram_inv_PhiT=fit.gram_inv_PhiT)
     loo = loo.reshape(T, K)
-    total_var = jnp.var(_prepare_Y(Y)[0], axis=0)
     partial_var = jnp.sum(fit.coefficients[..., 1:] ** 2, axis=-1)
     explained_variance = jnp.where(total_var == 0, jnp.nan, partial_var / total_var)
 
@@ -262,38 +267,25 @@ def analyze_pce(
 
 
 def _predict_pce(result: PCEResult, X_new: Array, *, batch_size: int | None = None) -> Array:
-    """Predict at new input points using the fitted PCE surrogate.
+    """Evaluate the fitted PCE surrogate at new inputs.
 
-    Rebuilds the polynomial basis at ``X_new`` and applies the coefficients
-    fitted by ``analyze_pce`` -- no model evaluations are needed. Accuracy
-    degrades outside the input region the surrogate was fitted on.
-
-    Args:
-        result: PCEResult from ``analyze_pce``.
-        X_new: (N_new, D) new input points, in the same physical units as
-            the ``X`` passed to ``analyze_pce``.
-        batch_size: Rows of ``X_new`` to predict per batch. The basis tensors
-            are linear in the batch size with a large per-row constant
-            (``~(D+2) * n_terms`` floats per row), so single-shot evaluation
-            at large ``N_new`` can exhaust memory. ``None`` (default) derives
-            a batch size from a fixed transient-memory budget; pass
-            ``batch_size >= N_new`` to force a single-shot call. Each row's
-            term contraction is independent, so batching only perturbs
-            predictions at the level of floating-point reassociation.
-
-    Returns:
-        Predicted outputs mirroring the training ``Y`` layout: ``(N_new,)``,
-        ``(N_new, K)``, or ``(N_new, T, K)``.
+    Implementation behind :meth:`PCEResult.predict`, which documents the
+    full contract. Rebuilds the polynomial basis at ``X_new`` and contracts
+    it with the fitted coefficients, in row batches sized against a
+    transient-memory budget.
     """
     X_new = jnp.asarray(X_new)
+    _validate_x(result.problem, X_new)
 
     X_ref, input_types = _map_to_reference(X_new, result.problem)
-    N, D = X_ref.shape
+    N = X_ref.shape[0]
     n_terms = result.multi_index.shape[0]
-    # Transient footprint per row: the (D, batch, n_terms) stacked tensor in
-    # build_design_matrix dominates; +2 covers Phi and the product output.
+    # Transient footprint per row: build_design_matrix accumulates a running
+    # product, so at most the (batch, n_terms) accumulator, one gathered
+    # (batch, n_terms) factor, and the multiply output are live at once
+    # (~3 * n_terms floats per row), plus the einsum output slices.
     slices = math.prod(result.coefficients.shape[:-1])
-    bytes_per_row = X_ref.dtype.itemsize * ((D + 2) * n_terms + slices)
+    bytes_per_row = X_ref.dtype.itemsize * (3 * n_terms + slices)
     batch = resolve_batch_size(bytes_per_row, N, batch_size)
 
     def _predict(X_chunk: Array) -> Array:

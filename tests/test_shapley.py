@@ -326,8 +326,8 @@ def test_correlative_matches_hdmr_sa_plus_sb():
     hd = gsax.hdmr.analyze(problem, X, Y, m=5)
     assert hd._fit is not None
     subsets: list[tuple[int, ...]] = [(i,) for i in range(problem.num_vars)]
-    subsets.extend(hd._fit["c2"])
-    subsets.extend(hd._fit["c3"])
+    subsets.extend(hd._c2)
+    subsets.extend(hd._c3)
     membership = build_membership(subsets, problem.num_vars)
     partial = np.asarray(hd.Sa) + np.asarray(hd.Sb)
     V = partial / partial.sum()

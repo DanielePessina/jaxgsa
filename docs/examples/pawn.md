@@ -161,4 +161,4 @@ print(ds_ci)  # includes pawn_lower and pawn_upper
 - [Basic Example](/examples/basic) for the Sobol variance-decomposition
   workflow.
 - [Methods](/guide/methods) for a comparison of all methods.
-- [API Reference](/api/#pawn-workflow) for full parameter documentation.
+- [API Reference](/api/#given-data-methods) for full parameter documentation.
