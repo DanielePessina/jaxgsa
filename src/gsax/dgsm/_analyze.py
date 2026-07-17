@@ -206,9 +206,7 @@ def analyze(
         dfdx_arr = jnp.asarray(dfdx)
         Y_valid = _validate_output(Y_out, int(dfdx_arr.shape[0]), problem)
         if dfdx_arr.ndim != Y_valid.ndim + 1:
-            raise ValueError(
-                "dfdx ndim must equal Y.ndim + 1 and end with the derivative axis"
-            )
+            raise ValueError("dfdx ndim must equal Y.ndim + 1 and end with the derivative axis")
         if dfdx_arr.shape[-1] != D:
             raise ValueError(
                 f"dfdx last dimension ({dfdx_arr.shape[-1]}) must match problem.num_vars ({D})"
