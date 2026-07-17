@@ -62,7 +62,7 @@ def _imports():
 
     import gsax
     from gsax.benchmarks import ishigami, oakley_ohagan
-    from gsax.sampling import sample_mc
+    from gsax.sampling import monte_carlo
 
     warnings.filterwarnings("ignore", category=DeprecationWarning)
     plt.rcParams["figure.dpi"] = 150
@@ -86,7 +86,7 @@ def _imports():
         salib_sep,
         salib_sobol_mod,
         salib_st,
-        sample_mc,
+        monte_carlo,
         time,
         warnings,
     )
@@ -352,7 +352,7 @@ def _benchmark(
     salib_slices,
     salib_sobol_mod,
     salib_st,
-    sample_mc,
+    monte_carlo,
     time,
     warnings,
 ):
@@ -404,7 +404,7 @@ def _benchmark(
 
             # ======== SOBOL ========
             for _label, _T, _K in _scens:
-                _sr = gsax.sample(
+                _sr = gsax.sobol.sample(
                     _prob,
                     _bn * _step,
                     seed=1,
@@ -415,10 +415,10 @@ def _benchmark(
                 jax.block_until_ready(_Yj)
                 _Ys = expand_sobol(_sr, _Yj)
 
-                gsax.analyze(_sr, _Yj).S1.block_until_ready()
+                gsax.sobol.analyze(_sr, _Yj).S1.block_until_ready()
                 _g = (
                     best_of(
-                        lambda sr=_sr, Y=_Yj: gsax.analyze(sr, Y),
+                        lambda sr=_sr, Y=_Yj: gsax.sobol.analyze(sr, Y),
                     )
                     * 1e3
                 )
@@ -462,7 +462,7 @@ def _benchmark(
 
             # ======== eFAST ========
             for _label, _T, _K in _scens:
-                _Xe = gsax.sample_efast(
+                _Xe = gsax.efast.sample(
                     _prob,
                     N=2049,
                     M=4,
@@ -471,14 +471,14 @@ def _benchmark(
                 _Ye = _bfn(jnp.asarray(_Xe), _T, _K)
                 jax.block_until_ready(_Ye)
 
-                gsax.analyze_efast(
+                gsax.efast.analyze(
                     _prob,
                     _Ye,
                     M=4,
                 ).S1.block_until_ready()
                 _g = (
                     best_of(
-                        lambda Y=_Ye, p=_prob: gsax.analyze_efast(
+                        lambda Y=_Ye, p=_prob: gsax.efast.analyze(
                             p,
                             Y,
                             M=4,
@@ -532,12 +532,12 @@ def _benchmark(
             # ======== DGSM (pre-computed path) ========
             for _label, _T, _K in _scens:
                 _Xmc = jnp.asarray(
-                    sample_mc(_prob, 2048, seed=42),
+                    monte_carlo(_prob, 2048, seed=42),
                 )
                 _fn = _ubfn(_T, _K)
 
                 # Warmup autodiff path
-                gsax.analyze_dgsm(
+                gsax.dgsm.analyze(
                     _prob,
                     _fn,
                     _Xmc,
@@ -552,7 +552,7 @@ def _benchmark(
                 jax.block_until_ready(_dfdx)
 
                 # gsax: pre-computed analysis only
-                gsax.analyze_dgsm(
+                gsax.dgsm.analyze(
                     _prob,
                     Y=_Yd,
                     dfdx=_dfdx,
@@ -560,7 +560,7 @@ def _benchmark(
                 _gb = float("inf")
                 for _ in range(N_REPEATS):
                     _t0 = time.perf_counter()
-                    _r = gsax.analyze_dgsm(
+                    _r = gsax.dgsm.analyze(
                         _prob,
                         Y=_Yd,
                         dfdx=_dfdx,
@@ -613,7 +613,7 @@ def _benchmark(
                 )
 
             # ======== HDMR ========
-            _Xmc_h = np.asarray(sample_mc(_prob, _bn, seed=42))
+            _Xmc_h = np.asarray(monte_carlo(_prob, _bn, seed=42))
             _Xjax_h = jnp.asarray(_Xmc_h)
 
             for _label, _T, _K in _scens:
@@ -621,7 +621,7 @@ def _benchmark(
                 jax.block_until_ready(_Yj)
                 _Ynp = np.asarray(_Yj)
 
-                gsax.analyze_hdmr(
+                gsax.hdmr.analyze(
                     _prob,
                     _Xjax_h,
                     _Yj,
@@ -630,7 +630,7 @@ def _benchmark(
                 ).Sa.block_until_ready()
                 _g = (
                     best_of(
-                        lambda X=_Xjax_h, Y=_Yj, p=_prob: gsax.analyze_hdmr(
+                        lambda X=_Xjax_h, Y=_Yj, p=_prob: gsax.hdmr.analyze(
                             p,
                             X,
                             Y,
@@ -684,7 +684,7 @@ def _benchmark(
         # ======== BOOTSTRAP COMPARISON (Ishigami 1x1 Sobol) ========
         _boot = {}
         _ishi_step = 2 * 3 + 2
-        _sr_b = gsax.sample(
+        _sr_b = gsax.sobol.sample(
             ISHI_PROB,
             ISHI_BASE_N * _ishi_step,
             seed=1,
@@ -698,7 +698,7 @@ def _benchmark(
         # gsax: 0, 100, 1000 resamples
         # Use prenormalize=True + ci_method="gaussian" to match SALib
         for _nr in [0, 100, 1000]:
-            gsax.analyze(
+            gsax.sobol.analyze(
                 _sr_b,
                 _Yb,
                 num_resamples=_nr,
@@ -708,7 +708,7 @@ def _benchmark(
             ).S1.block_until_ready()
             _g = (
                 best_of(
-                    lambda nr=_nr: gsax.analyze(
+                    lambda nr=_nr: gsax.sobol.analyze(
                         _sr_b,
                         _Yb,
                         num_resamples=nr,
@@ -721,7 +721,7 @@ def _benchmark(
             )
             _boot[f"gsax_{_nr}"] = _g
             if _nr > 0:
-                _r = gsax.analyze(
+                _r = gsax.sobol.analyze(
                     _sr_b,
                     _Yb,
                     num_resamples=_nr,

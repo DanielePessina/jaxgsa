@@ -34,7 +34,7 @@ features:
   - title: Borgonovo Delta
     details: Measures the shift of the entire output density when an input is fixed — moment-independent like PAWN, but density-based. The given-data estimator works on any (X, Y) pairs and includes bootstrap confidence intervals.
   - title: Save & Reload Samples
-    details: Persist a sample set with SamplingResult.save(), evaluate your model elsewhere, and reload with gsax.load() — the analysis metadata travels with the samples.
+    details: Persist a sample set with SobolSamples.save(), evaluate your model elsewhere, and reload with SobolSamples.load() — the analysis metadata travels with the samples.
   - title: Multi-Output & Time-Series
     details: Pass scalar, (N, K), or (N, T, K) outputs to any of the eleven methods and get indices for every output and timestep in a single vectorized pass. Set output_names and gsax disambiguates 2-D layouts, fixing obvious transposes with a warning.
   - title: Up to 668× Faster than SALib

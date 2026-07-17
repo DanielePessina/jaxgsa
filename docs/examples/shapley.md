@@ -25,17 +25,12 @@ Run it interactively with `uv run marimo edit examples/shapley_gsa.py`.
 
 ## Import style
 
-The Shapley module lives at `gsax.shapley`. You can import it directly or
-use the top-level convenience alias:
+Shapley effects are methods on fitted PCE and HDMR results:
 
 ```python
-# Subpackage import (preferred for Shapley-focused scripts)
-from gsax import shapley
-# shapley.analyze(...)
-
-# Or use the top-level re-export
 import gsax
-# gsax.analyze_shapley(...)
+# gsax.pce.analyze(...).shapley()
+# gsax.hdmr.analyze(...).shapley()
 ```
 
 ## Scalar example (Ishigami)
@@ -46,13 +41,13 @@ import gsax
 from gsax.benchmarks.ishigami import PROBLEM, evaluate
 
 # Any (X, Y) pairs work — no structured design required
-X = jnp.asarray(gsax.sample_mc(PROBLEM, N=2000, seed=42))
+X = jnp.asarray(gsax.sampling.monte_carlo(PROBLEM, n=2000, seed=42))
 Y = evaluate(X)
 
-# Default backend="pce": exact within the fitted polynomial, scalar Y only.
+# PCE effects are exact within the fitted polynomial.
 # Ishigami's sines need a degree-8 polynomial; the default order=3
 # under-fits here and would trigger the explained_variance warning.
-result = gsax.analyze_shapley(PROBLEM, X, Y, order=8)
+result = gsax.pce.analyze(PROBLEM, X, Y, order=8).shapley()
 
 print("Sh:", result.Sh)        # (D,) fair variance shares
 print("sum:", result.Sh.sum()) # exactly 1 (Shapley efficiency)
@@ -120,12 +115,12 @@ import jax.numpy as jnp
 import gsax
 from gsax.benchmarks.ishigami import PROBLEM, evaluate
 
-X = jnp.asarray(gsax.sample_mc(PROBLEM, N=2000, seed=42))
+X = jnp.asarray(gsax.sampling.monte_carlo(PROBLEM, n=2000, seed=42))
 Y1 = evaluate(X)
 Y2 = jnp.sum(X**2, axis=1)  # purely additive: S1 = Sh = ST = 1/3 each
 Y_multi = jnp.column_stack([Y1, Y2])
 
-result = gsax.analyze_shapley(PROBLEM, X, Y_multi, backend="hdmr")
+result = gsax.hdmr.analyze(PROBLEM, X, Y_multi).shapley()
 
 print("Sh shape:", result.Sh.shape)          # (K, D) = (2, 3)
 print("row sums:", result.Sh.sum(axis=-1))   # [1. 1.]
@@ -144,7 +139,7 @@ emitted when it drops below 0.5 or exceeds 1.3 — check it before trusting
 the allocation.
 
 ```python
-result_low = gsax.analyze_shapley(PROBLEM, X, Y1, order=2)
+result_low = gsax.pce.analyze(PROBLEM, X, Y1, order=2).shapley()
 # UserWarning: gsax: surrogate explained_variance is below 0.5 ...
 print(result_low.Sh.sum())              # still exactly 1
 print(result_low.explained_variance)    # ~0.4 — do not trust these shares

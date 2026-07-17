@@ -1,4 +1,4 @@
-"""Tests for xarray Dataset conversion of SAResult and HDMRResult."""
+"""Tests for xarray Dataset conversion of SobolResult and HDMRResult."""
 
 import jax
 import jax.numpy as jnp
@@ -8,7 +8,7 @@ import pytest
 import gsax
 from gsax.hdmr import HDMRResult
 from gsax.problem import Problem
-from gsax.sobol._result import SAResult
+from gsax.sobol._result import SobolResult
 
 
 @pytest.fixture
@@ -16,13 +16,13 @@ def problem():
     return Problem.from_dict({"x1": (0, 1), "x2": (0, 1), "x3": (0, 1)})
 
 
-# ── SAResult tests ──────────────────────────────────────────────────────────
+# ── SobolResult tests ──────────────────────────────────────────────────────────
 
 
 class TestSAResultToDataset:
     def test_1d(self, problem):
         """Scalar output → (param,) dims only."""
-        r = SAResult(
+        r = SobolResult(
             S1=jnp.array([0.1, 0.2, 0.3]),
             ST=jnp.array([0.4, 0.5, 0.6]),
             S2=None,
@@ -35,7 +35,7 @@ class TestSAResultToDataset:
 
     def test_2d_default_output_names(self, problem):
         """Multi-output → (output, param) with auto-generated y0, y1."""
-        r = SAResult(
+        r = SobolResult(
             S1=jnp.ones((2, 3)),
             ST=jnp.ones((2, 3)),
             S2=None,
@@ -47,7 +47,7 @@ class TestSAResultToDataset:
 
     def test_3d(self, problem):
         """Time-resolved → (time, output, param) with integer time coords."""
-        r = SAResult(
+        r = SobolResult(
             S1=jnp.ones((4, 2, 3)),
             ST=jnp.ones((4, 2, 3)),
             S2=None,
@@ -64,7 +64,7 @@ class TestSAResultToDataset:
             bounds=((0, 1), (0, 1)),
             output_names=("temp", "pressure"),
         )
-        r = SAResult(
+        r = SobolResult(
             S1=jnp.ones((2, 2)),
             ST=jnp.ones((2, 2)),
             S2=None,
@@ -75,7 +75,7 @@ class TestSAResultToDataset:
 
     def test_custom_time_coords(self, problem):
         """Float time coords passed to to_dataset()."""
-        r = SAResult(
+        r = SobolResult(
             S1=jnp.ones((3, 2, 3)),
             ST=jnp.ones((3, 2, 3)),
             S2=None,
@@ -87,7 +87,7 @@ class TestSAResultToDataset:
     def test_s2_dims(self, problem):
         """S2 uses (param_i, param_j) for last two dims."""
         D = 3
-        r = SAResult(
+        r = SobolResult(
             S1=jnp.ones(D),
             ST=jnp.ones(D),
             S2=jnp.ones((D, D)),
@@ -100,7 +100,7 @@ class TestSAResultToDataset:
     def test_confidence_intervals(self, problem):
         """CIs split into _lower/_upper variables."""
         D = 3
-        r = SAResult(
+        r = SobolResult(
             S1=jnp.ones(D),
             ST=jnp.ones(D),
             S2=None,
@@ -118,7 +118,7 @@ class TestSAResultToDataset:
     def test_s2_confidence(self, problem):
         """S2 CIs also split correctly."""
         D = 3
-        r = SAResult(
+        r = SobolResult(
             S1=jnp.ones(D),
             ST=jnp.ones(D),
             S2=jnp.ones((D, D)),
@@ -139,7 +139,7 @@ class TestSAResultToDataset:
             bounds=((0, 1), (0, 1)),
             output_names=("temp",),  # only 1, but K=2
         )
-        r = SAResult(
+        r = SobolResult(
             S1=jnp.ones((2, 2)),
             ST=jnp.ones((2, 2)),
             S2=None,
@@ -155,7 +155,7 @@ class TestSAResultToDataset:
             {"x1": (0.0, 1.0), "x2": (0.0, 1.0), "x3": (0.0, 1.0)},
             output_names=("response",),
         )
-        sampling_result = gsax.sample(
+        sampling_result = gsax.sobol.sample(
             problem,
             n_samples=256,
             calc_second_order=True,
@@ -165,7 +165,7 @@ class TestSAResultToDataset:
         X = jnp.asarray(sampling_result.samples)
         Y = 2.0 * X[:, 0] + 0.5 * X[:, 1] ** 2 + X[:, 0] * X[:, 2]
 
-        result = gsax.analyze(
+        result = gsax.sobol.analyze(
             sampling_result,
             Y,
             num_resamples=20,

@@ -61,13 +61,13 @@ Eleven complementary methods are included: **Sobol indices** (the standard varia
   - Given-data estimator on **any** (X, Y) pairs; rank-based conditioning handles mixed uniform/Gaussian marginals and correlated inputs
   - Advective (mean-shift, = S1/2) vs diffusive (spread/shape) decomposition of every index
   - Per-column indices via exact 1-D transport (solver-free) plus joint point-cloud modes over multivariate/time-series outputs (pure-JAX log-domain Sinkhorn); dummy-input irrelevance baseline
-- All eleven methods accept scalar `(N,)`, multi-output `(N, K)`, and time-series `(N, T, K)` outputs, with smart layout inference: pass `output_names` on the problem and gsax disambiguates 2-D/3-D layouts, fixing obvious transposes with a warning and raising on ambiguity
+- All eleven methods use one strict output contract: scalar `(N,)`, multi-output `(N, K)`, or time-series `(N, T, K)`
 - Bootstrap confidence intervals with JAX-accelerated resampling
 - Optional `prenormalize=True` mode for SALib-style output standardization before
   Sobol or HDMR analysis
 - Automatic data cleaning: non-finite values (NaN/Inf) are detected and dropped by group
 - **xarray integration** — `to_dataset()` on results for labeled, named dimensions (`param`, `output`, `time`)
-- Save and reload Sobol sample sets with metadata via `SamplingResult.save()` and `gsax.load()`
+- Save and reload Sobol sample sets as one NPZ file via `SobolSamples.save()` and `SobolSamples.load()`
 - Built-in Ishigami benchmark function with known analytical solutions
 
 ## Installation
@@ -102,7 +102,7 @@ the [Configuration guide](https://danielepessina.github.io/gsax/guide/configurat
   array is created*: `jax.config.update("jax_enable_x64", True)`.
 - **Persistent compilation cache** — reuse compiled kernels across process
   restarts (sweeps, CI, HPC) by calling
-  `gsax.enable_compilation_cache("~/.cache/gsax-jax")` once, before your first analysis.
+  `gsax.config.enable_compilation_cache("~/.cache/gsax-jax")` once, before your first analysis.
 
 ## Quick Start
 
@@ -111,7 +111,7 @@ import gsax
 from gsax.benchmarks.ishigami import PROBLEM, evaluate
 
 # 1. Generate unique Sobol/Saltelli samples
-sampling_result = gsax.sample(PROBLEM, n_samples=4096, seed=42)
+sampling_result = gsax.sobol.sample(PROBLEM, n_samples=4096, seed=42)
 # sampling_result.samples.shape == (n_total, D)  — D parameters, n_total unique rows
 # sampling_result.expanded_n_total is the internal Saltelli row count used by analyze()
 # by default, sample() also prints a short summary of unique vs expanded rows
@@ -120,7 +120,7 @@ sampling_result = gsax.sample(PROBLEM, n_samples=4096, seed=42)
 Y = evaluate(sampling_result.samples)  # Y.shape == (n_total,)
 
 # 3. Compute Sobol indices
-result = gsax.analyze(
+result = gsax.sobol.analyze(
     sampling_result,
     Y,
     prenormalize=False,  # default; set True for SALib-style output standardization
@@ -169,7 +169,7 @@ X = jax.random.uniform(key, (2000, 3), minval=bounds[:, 0], maxval=bounds[:, 1])
 Y = evaluate(X)  # Y.shape == (2000,)
 
 # 3. Compute HDMR sensitivity indices
-result = gsax.analyze_hdmr(
+result = gsax.hdmr.analyze(
     PROBLEM, X, Y,
     maxorder=2,
     prenormalize=False,  # default; set True for SALib-style output standardization
@@ -186,7 +186,7 @@ print("Sb:", result.Sb)   # correlative contribution per term
 print("Terms:", result.terms)  # ('x1', 'x2', 'x3', 'x1/x2', 'x1/x3', 'x2/x3')
 
 # 4. Use the fitted surrogate as an emulator
-Y_pred = gsax.emulate_hdmr(result, X)
+Y_pred = result.predict(X)
 # Y_pred stays on the original output scale even when prenormalize=True
 ```
 
@@ -206,12 +206,12 @@ bounds = jnp.array(PROBLEM.bounds)
 X = jax.random.uniform(key, (2000, 3), minval=bounds[:, 0], maxval=bounds[:, 1])
 Y = evaluate(X)
 
-result = gsax.analyze_pce(PROBLEM, X, Y, order=4)
+result = gsax.pce.analyze(PROBLEM, X, Y, order=4)
 print("S1:", result.S1)              # (D,) first-order
 print("ST:", result.ST)              # (D,) total-order
 print("LOO RMSE:", result.loo_rmse)  # leave-one-out cross-validation error
 
-Y_pred = gsax.emulate_pce(result, X)  # use the fit as an emulator
+Y_pred = result.predict(X)
 ```
 
 ### Shapley effects (fair variance allocation)
@@ -226,10 +226,10 @@ import jax.numpy as jnp
 import gsax
 from gsax.benchmarks.ishigami import PROBLEM, evaluate
 
-X = gsax.sample_mc(PROBLEM, N=2000, seed=42)
+X = gsax.sampling.monte_carlo(PROBLEM, n=2000, seed=42)
 Y = evaluate(jnp.asarray(X))
 
-result = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y)  # backend="pce" default
+result = gsax.pce.analyze(PROBLEM, jnp.asarray(X), Y).shapley()
 print("Sh:", result.Sh)              # (D,) Shapley effects
 print("sum:", result.Sh.sum())       # == 1 (Shapley efficiency property)
 print("explained:", result.explained_variance)  # fraction of Var(Y) captured
@@ -238,7 +238,7 @@ print("ST:", result.ST)              # (D,) total-order — S1 <= Sh <= ST per p
 
 # Both backends accept scalar (N,), multi-output (N, K), and
 # time-series (N, T, K) Y; backend="hdmr" swaps in the B-spline surrogate
-result_hdmr = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y, backend="hdmr")
+result_hdmr = gsax.hdmr.analyze(PROBLEM, jnp.asarray(X), Y).shapley()
 ```
 
 ### HSIC (kernel-based dependence)
@@ -252,10 +252,10 @@ import jax.numpy as jnp
 import gsax
 from gsax.benchmarks.ishigami import PROBLEM, evaluate
 
-X = gsax.sample_mc(PROBLEM, N=2000, seed=42)
+X = gsax.sampling.monte_carlo(PROBLEM, n=2000, seed=42)
 Y = evaluate(jnp.asarray(X))
 
-result = gsax.analyze_hsic(PROBLEM, jnp.asarray(X), Y)
+result = gsax.hsic.analyze(PROBLEM, jnp.asarray(X), Y)
 print("R2-HSIC:", result.R2_HSIC)    # (D,) normalized first-order dependence
 print("Total HSIC:", result.T_HSIC)  # (D,) dependence through interactions
 print("p-values:", result.p_values)  # permutation-test significance
@@ -275,10 +275,10 @@ import jax.numpy as jnp
 import gsax
 from gsax.benchmarks.ishigami import PROBLEM, evaluate
 
-X = gsax.sample_mc(PROBLEM, N=5000, seed=42)
+X = gsax.sampling.monte_carlo(PROBLEM, n=5000, seed=42)
 Y = evaluate(jnp.asarray(X))
 
-result = gsax.analyze_pawn(PROBLEM, jnp.asarray(X), Y, statistic="median")
+result = gsax.pawn.analyze(PROBLEM, jnp.asarray(X), Y, statistic="median")
 print("PAWN:", result.pawn)  # (D,) median KS distance across conditioning bins
 ```
 
@@ -294,10 +294,10 @@ import jax.numpy as jnp
 import gsax
 from gsax.benchmarks.ishigami import PROBLEM, evaluate
 
-sr = gsax.sample_morris(PROBLEM, n_trajectories=50, seed=42)
+sr = gsax.morris.sample(PROBLEM, n_trajectories=50, seed=42)
 Y = evaluate(jnp.asarray(sr.samples))
 
-result = gsax.analyze_morris(sr, Y)
+result = gsax.morris.analyze(sr, Y)
 print("mu_star:", result.mu_star)  # (D,) mean |elementary effect| — importance
 print("sigma:", result.sigma)      # (D,) spread — nonlinearity/interactions
 ```
@@ -315,10 +315,10 @@ import jax.numpy as jnp
 import gsax
 from gsax.benchmarks.ishigami import PROBLEM, evaluate
 
-X = gsax.sample_mc(PROBLEM, N=5000, seed=42)
+X = gsax.sampling.monte_carlo(PROBLEM, n=5000, seed=42)
 Y = evaluate(jnp.asarray(X))
 
-result = gsax.analyze_borgonovo(PROBLEM, jnp.asarray(X), Y)
+result = gsax.borgonovo.analyze(PROBLEM, jnp.asarray(X), Y)
 print("delta:", result.delta)  # (D,) bias-corrected delta indices
 print("S1:", result.S1)        # (D,) given-data first-order Sobol
 ```
@@ -340,17 +340,17 @@ import jax.numpy as jnp
 import gsax
 from gsax.benchmarks.ishigami import PROBLEM, evaluate
 
-X = gsax.sample_mc(PROBLEM, N=5000, seed=42)
+X = gsax.sampling.monte_carlo(PROBLEM, n=5000, seed=42)
 Y = evaluate(jnp.asarray(X))
 
-result = gsax.analyze_optimal_transport(PROBLEM, jnp.asarray(X), Y)
+result = gsax.optimal_transport.analyze(PROBLEM, jnp.asarray(X), Y)
 print("ot:", result.ot)                # (D,) total index
 print("advective:", result.advective)  # mean-shift part (= S1 / 2)
 print("diffusive:", result.diffusive)  # spread/shape part
 
 # Time-series outputs: one index per input over each output's whole
 # trajectory (point-cloud transport via pure-JAX Sinkhorn)
-# result = gsax.analyze_optimal_transport(PROBLEM, X, Y_tk, mode="trajectory")
+# result = gsax.optimal_transport.analyze(PROBLEM, X, Y_tk, mode="trajectory")
 ```
 
 ## Usage
@@ -379,7 +379,7 @@ problem = Problem(
 ### Generate samples
 
 ```python
-sampling_result = gsax.sample(
+sampling_result = gsax.sobol.sample(
     problem,
     n_samples=4096,          # minimum desired unique model evaluations
     calc_second_order=True,  # include second-order indices (default)
@@ -389,32 +389,24 @@ sampling_result = gsax.sample(
 )
 
 # sampling_result.samples is the unique NumPy array you pass to your model
-# sampling_result.samples_df is a pandas DataFrame with SampleID + parameter columns
 # sampling_result.expanded_n_total is the internal Saltelli row count
 ```
 
 ### Save and reload samples
 
 If you want to generate samples once and reuse them later, persist the
-`SamplingResult` to disk and reconstruct it with `gsax.load()`:
+`SobolSamples` to disk and reconstruct it with its class method:
 
 ```python
-sampling_result.save("runs/ishigami_samples", format="csv")
+sampling_result.save("runs/ishigami_samples")
 
-restored = gsax.load("runs/ishigami_samples", format="csv")
+restored = gsax.sobol.SobolSamples.load("runs/ishigami_samples")
 Y = my_model(restored.samples)
-result = gsax.analyze(restored, Y)
+result = gsax.sobol.analyze(restored, Y)
 ```
 
-`path` is a file stem, not a full filename. The call above writes:
-
-- `runs/ishigami_samples.csv` with the unique sample matrix
-- `runs/ishigami_samples.json` with problem and Saltelli metadata
-- `runs/ishigami_samples.npz` only when the internal expanded-to-unique mapping is non-trivial
-
-Supported formats are `csv`, `txt`, `xlsx`, `parquet`, and `pkl`. Use the
-same `format` value when calling `gsax.load()`. `xlsx` requires `openpyxl`,
-and `parquet` requires `pyarrow`.
+The call writes `runs/ishigami_samples.npz`, containing the unique sample
+matrix, problem definition, and Saltelli reconstruction metadata.
 
 ### Analyze results
 
@@ -424,16 +416,11 @@ and `parquet` requires `pyarrow`.
 #   - (n_total, K)     multi-output (K outputs, no time dimension)
 #   - (n_total, T, K)  time-series multi-output (T timesteps, K outputs)
 #
-# How a 2D array is read depends on problem.output_names:
-#   - without output_names, (N, M) is read as (N, K) — M outputs;
-#   - with exactly ONE entry in output_names, (N, M) is read as (N, T) —
-#     T timepoints of that single output — and flows through as (N, T, 1).
-# Obvious layout mistakes (e.g. a transposed (K, N) array) are fixed with
-# a UserWarning naming the transformation; ambiguous layouts raise.
-# If you have a single output with no time, just pass a 1D array (N,).
+# Axes are never inferred or transposed. Use (N, T, 1) for one
+# time-varying output and make len(problem.output_names) match K.
 Y = my_model(sampling_result.samples)
 
-result = gsax.analyze(
+result = gsax.sobol.analyze(
     sampling_result,
     Y,
     prenormalize=False,  # optional SALib-style output standardization
@@ -466,7 +453,7 @@ def multi_output_model(X):
     return jnp.column_stack([y1, y2])
 
 Y = multi_output_model(sampling_result.samples)  # (n_total, 2)
-result = gsax.analyze(sampling_result, Y)
+result = gsax.sobol.analyze(sampling_result, Y)
 # result.S1.shape == (2, 3)  — 2 outputs, 3 parameters (K, D)
 # result.ST.shape == (2, 3)  — (K, D)
 # result.S2.shape == (2, 3, 3)  — (K, D, D)
@@ -480,7 +467,7 @@ def time_series_model(X):
     ...
 
 Y = time_series_model(sampling_result.samples)  # (n_total, 50, 4)
-result = gsax.analyze(sampling_result, Y)
+result = gsax.sobol.analyze(sampling_result, Y)
 # result.S1.shape == (50, 4, D)  — (T, K, D)
 # result.ST.shape == (50, 4, D)  — (T, K, D)
 # result.S2.shape == (50, 4, D, D)  — (T, K, D, D)
@@ -493,13 +480,13 @@ How a 2D array is interpreted depends on `problem.output_names`. Without it, a 2
 ```python
 # Single output, no time dimension — pass a 1D array
 Y = my_model(X)          # shape (n_total,)
-result = gsax.analyze(sampling_result, Y)
+result = gsax.sobol.analyze(sampling_result, Y)
 # result.S1.shape == (D,)
 
 # Single output WITH time dimension — reshape to (N, T, 1) ...
 Y = my_model(X)          # shape (n_total, T) — e.g. 50 timesteps
 Y = Y[:, :, None]        # reshape to (n_total, 50, 1)
-result = gsax.analyze(sampling_result, Y)
+result = gsax.sobol.analyze(sampling_result, Y)
 # result.S1.shape == (50, 1, D)  — (T, K=1, D)
 
 # ... or set output_names=["y"] on the problem and pass (N, T) directly:
@@ -508,7 +495,7 @@ result = gsax.analyze(sampling_result, Y)
 
 # Multiple outputs, single timestep — just pass (N, K)
 Y = my_model(X)          # shape (n_total, 4) — 4 outputs
-result = gsax.analyze(sampling_result, Y)
+result = gsax.sobol.analyze(sampling_result, Y)
 # result.S1.shape == (4, D)  — (K, D)
 # No need for a time dimension; (N, 1, 4) also works but is unnecessary.
 ```
@@ -532,26 +519,23 @@ Use it for:
 
 Quick map:
 
-- `Problem`
-- `sample` / `SamplingResult` / `load`
-- `gsax.sobol`: `analyze` / `SAResult`
-- `gsax.hdmr`: `analyze` / `emulate` / `HDMRResult` / `HDMREmulator`
-- `gsax.pce`: `analyze` / `emulate` / `PCEResult`
-- `gsax.shapley`: `analyze` / `ShapleyResult`
+- `Problem`, `UniformInputSpec`, and `GaussianInputSpec`
+- `gsax.sobol`: `sample` / `analyze` / `SobolSamples` / `SobolResult`
+- `gsax.sampling`: `monte_carlo`
+- `gsax.hdmr`: `analyze` / `HDMRResult`
+- `gsax.pce`: `analyze` / `PCEResult`
+- `gsax.shapley`: `ShapleyResult`
 - `gsax.efast`: `sample` / `analyze` / `EFASTResult`
 - `gsax.dgsm`: `analyze` / `DGSMResult` / `poincare_constant` / `axis_constants`
-- `gsax.morris`: `sample` / `analyze` / `MorrisResult` / `MorrisSamplingResult`
+- `gsax.morris`: `sample` / `analyze` / `MorrisResult` / `MorrisSamples`
 - `gsax.hsic`: `analyze` / `HSICResult`
 - `gsax.pawn`: `analyze` / `PAWNResult`
 - `gsax.borgonovo`: `analyze` / `DeltaResult`
 - `gsax.optimal_transport`: `analyze` / `OTResult`
 
-All symbols are also re-exported from the top-level `gsax` namespace
-(`gsax.analyze()`, `gsax.analyze_hdmr()`, `gsax.analyze_pce()`,
-`gsax.analyze_shapley()`, `gsax.sample_efast()`, `gsax.analyze_efast()`,
-`gsax.analyze_dgsm()`, `gsax.sample_morris()`, `gsax.analyze_morris()`,
-`gsax.analyze_hsic()`, `gsax.analyze_pawn()`, `gsax.analyze_borgonovo()`,
-`gsax.analyze_optimal_transport()`, etc.).
+Commands are intentionally not duplicated at the package root. Use the method
+namespaces shown above. PCE and HDMR predictions and Shapley effects are result
+methods: `result.predict(...)` and `result.shapley(...)`.
 
 For runnable walkthroughs, start with the
 [Getting Started guide](https://danielepessina.github.io/gsax/guide/getting-started)
@@ -562,13 +546,12 @@ and the
 
 ## Dependencies
 
-Core runtime dependencies (installed automatically): `jax`, `jaxlib`, `pandas`,
-`scipy`, and `xarray`. See [`pyproject.toml`](pyproject.toml) for exact version
+Core runtime dependencies (installed automatically): `jax`, `jaxlib`, `scipy`,
+and `xarray`. See [`pyproject.toml`](pyproject.toml) for exact version
 bounds.
 
-Optional extras: `xlsx` (openpyxl), `parquet` (pyarrow), `notebook` (marimo,
-matplotlib), and `dev` (pytest, ruff, ty, SALib). Install with, e.g.,
-`pip install "gsax[all]"`.
+Optional extras: `notebook` (marimo, matplotlib) and `dev` (pytest, ruff, ty,
+SALib, POT).
 
 ## License
 

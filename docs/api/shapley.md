@@ -1,17 +1,17 @@
 # Shapley Effects
 
-A fair, game-theoretic split of output variance across parameters that always
-sums to 1, computed analytically from a fitted surrogate (PCE by default).
+`gsax.shapley` exposes the `ShapleyResult` type. Effects are derived from a
+fitted surrogate:
 
-The canonical API reference now lives at [API Reference](/api/).
+```python
+effects = gsax.pce.analyze(problem, X, Y).shapley()
+effects = gsax.hdmr.analyze(problem, X, Y).shapley()
+effects = gsax.hdmr.analyze(problem, X, Y).shapley(
+    include_correlative=True,
+)
+```
 
-Jump directly to:
+The result exposes `Sh`, `S1`, `ST`, `explained_variance`, fit provenance, and
+`to_dataset(...)`.
 
-- [`analyze_shapley()`](/api/#analyze_shapley)
-- [`ShapleyResult`](/api/#shapleyresult)
-- [`ShapleyResult.to_dataset()`](/api/#shapleyresult-to_dataset)
-
-Related docs:
-
-- [Shapley Example](/examples/shapley)
-- [Methods](/guide/methods)
+See the [Shapley example](/examples/shapley) and [API overview](/api/).

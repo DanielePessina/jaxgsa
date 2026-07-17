@@ -81,10 +81,10 @@ def _ishigami_md(mo):
     — it consumes whatever $(X, Y)$ data you already have, with no
     method-specific sampling design:
 
-    1. **Sample** — here `gsax.sample_mc` draws plain Monte Carlo
+    1. **Sample** — here `gsax.sampling.monte_carlo` draws plain Monte Carlo
        points, but any sampling scheme would do.
     2. **Evaluate** — run the model on the samples.
-    3. **Analyse** — `gsax.analyze_shapley` fits the surrogate backend
+    3. **Analyse** — fit PCE, then call `result.shapley()`
        and reads the Shapley allocation off its variance decomposition.
 
     The default `backend="pce"` is exact *within the fitted
@@ -99,10 +99,10 @@ def _ishigami_md(mo):
 def _ishigami_analysis(gsax, ishigami, jnp):
     shapley_problem = ishigami.PROBLEM
 
-    X = jnp.asarray(gsax.sample_mc(shapley_problem, N=2000, seed=42))
+    X = jnp.asarray(gsax.sampling.monte_carlo(shapley_problem, n=2000, seed=42))
     Y = ishigami.evaluate(X)
 
-    result = gsax.analyze_shapley(shapley_problem, X, Y, order=8)
+    result = gsax.pce.analyze(shapley_problem, X, Y, order=8).shapley()
 
     print("Sh:", result.Sh)
     print("S1:", result.S1)
@@ -201,7 +201,7 @@ def _order_sweep(X, Y, gsax, ishigami, np, shapley_problem):
     orders = (2, 3, 4, 6, 8)
     sweep = {}
     for _order in orders:
-        _r = gsax.analyze_shapley(shapley_problem, X, Y, order=_order)
+        _r = gsax.pce.analyze(shapley_problem, X, Y, order=_order).shapley()
         sweep[_order] = _r
         _err = float(np.max(np.abs(np.asarray(_r.Sh) - ishigami.ANALYTICAL_SHAPLEY)))
         print(
@@ -266,7 +266,7 @@ def _hdmr_md(mo):
 def _hdmr_multi(X, Y, gsax, jnp, shapley_problem):
     Y_multi = jnp.column_stack([Y, jnp.sum(X**2, axis=1)])  # (N, K=2)
 
-    result_hdmr = gsax.analyze_shapley(shapley_problem, X, Y_multi, backend="hdmr")
+    result_hdmr = gsax.hdmr.analyze(shapley_problem, X, Y_multi).shapley()
 
     print("Sh shape:", result_hdmr.Sh.shape)  # (K, D) = (2, 3)
     print("row sums:", result_hdmr.Sh.sum(axis=-1))  # each exactly 1

@@ -119,7 +119,7 @@ def _normalized_input_to_dict(spec: _NormalizedInputSpec) -> UniformInputSpec | 
     if dist == "uniform":
         return UniformInputSpec(dist="uniform", low=first, high=second)
 
-    # Reconstruct the TypedDict for JSON serialization (used by SamplingResult.save).
+    # Reconstruct the TypedDict for JSON serialization (used by SobolSamples.save).
     payload: GaussianInputSpec = GaussianInputSpec(
         dist="gaussian",
         mean=first,

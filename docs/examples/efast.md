@@ -13,19 +13,12 @@ When to use eFAST instead of Sobol:
 
 ## Import style
 
-The eFAST module lives at `gsax.efast`. You can import it directly or use the
-top-level convenience aliases:
+The eFAST module lives at `gsax.efast`:
 
 ```python
-# Subpackage import (preferred for eFAST-focused scripts)
 from gsax import efast
 # efast.sample(...)
 # efast.analyze(...)
-
-# Or use the top-level re-exports
-import gsax
-# gsax.sample_efast(...)
-# gsax.analyze_efast(...)
 ```
 
 ## Scalar example (Ishigami)

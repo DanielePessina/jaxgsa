@@ -8,8 +8,8 @@ The canonical API reference now lives at [API Reference](/api/).
 Jump directly to:
 
 - [`analyze()`](/api/#analyze)
-- [`SAResult`](/api/#saresult)
-- [`SAResult.to_dataset()`](/api/#saresult-to_dataset)
+- [`SobolResult`](/api/#saresult)
+- [`SobolResult.to_dataset()`](/api/#saresult-to_dataset)
 
 Related docs:
 

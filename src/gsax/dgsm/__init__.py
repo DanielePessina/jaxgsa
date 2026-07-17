@@ -11,9 +11,9 @@ brackets ST at a fraction of the cost of a Sobol design.
 Example::
 
     from gsax import dgsm
-    from gsax.sampling import sample_mc
+    from gsax.sampling import monte_carlo
 
-    X = sample_mc(problem, N=10000, seed=42)
+    X = monte_carlo(problem, n=10000, seed=42)
     result = dgsm.analyze(problem, fn, jnp.asarray(X))
 """
 

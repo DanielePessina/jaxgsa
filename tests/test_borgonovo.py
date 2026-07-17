@@ -11,14 +11,14 @@ import pytest
 from gsax.benchmarks import gaussian_linear, ishigami
 from gsax.borgonovo import DeltaResult, analyze
 from gsax.borgonovo._analyze import _plischke_n_classes
-from gsax.sampling import sample_mc
+from gsax.sampling import monte_carlo
 
 
 @pytest.fixture(scope="module")
 def ishigami_data():
     """Generate Ishigami test data."""
     N = 5000
-    X = jnp.asarray(sample_mc(ishigami.PROBLEM, N=N, seed=42))
+    X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=N, seed=42))
     Y = ishigami.evaluate(X)
     return X, Y
 
@@ -27,7 +27,7 @@ def ishigami_data():
 def gaussian_linear_data():
     """Generate Gaussian linear test data (large N for ground-truth checks)."""
     N = 32000
-    X = jnp.asarray(sample_mc(gaussian_linear.PROBLEM, N=N, seed=1))
+    X = jnp.asarray(monte_carlo(gaussian_linear.PROBLEM, n=N, seed=1))
     Y = gaussian_linear.evaluate(X)
     return X, Y
 
@@ -385,7 +385,7 @@ class TestDeltaRegression:
         ``mean(d_boot)`` below ``d_hat`` and pushing the corrected estimate
         *above* the plug-in value for an input whose true delta is ~0.
         """
-        X = jnp.asarray(sample_mc(ishigami.PROBLEM, N=1000, seed=1))
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=1000, seed=1))
         Y_np = np.zeros(1000)
         Y_np[np.random.default_rng(0).integers(1000)] = 1.0
         Y = jnp.asarray(Y_np)

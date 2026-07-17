@@ -10,7 +10,7 @@ The canonical API reference now lives at [API Reference](/api/).
 
 Jump directly to:
 
-- [`sample_mc()`](/api/#sample-mc)
+- [`monte_carlo()`](/api/#sample-mc)
 - [`analyze_optimal_transport()`](/api/#analyze-optimal-transport)
 - [`OTResult`](/api/#otresult)
 - [`OTResult.to_dataset()`](/api/#otresult-to_dataset)

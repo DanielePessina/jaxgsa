@@ -9,23 +9,23 @@ from scipy.stats import truncnorm
 import gsax
 from gsax.benchmarks.ishigami import ANALYTICAL_S1, ANALYTICAL_ST, PROBLEM, evaluate
 from gsax.problem import GaussianInputSpec
-from gsax.sampling import SamplingResult
+from gsax.sobol import SobolSamples
 
 
 @pytest.fixture(scope="module")
 def ishigami_bootstrap_result():
     """Run Ishigami analysis with bootstrap CIs once for all tests."""
-    sr = gsax.sample(PROBLEM, n_samples=2**14 * 8, seed=42, verbose=False)
+    sr = gsax.sobol.sample(PROBLEM, n_samples=2**14 * 8, seed=42, verbose=False)
     Y = evaluate(jnp.asarray(sr.samples))
-    return gsax.analyze(sr, Y, num_resamples=200, key=jax.random.key(0))
+    return gsax.sobol.analyze(sr, Y, num_resamples=200, key=jax.random.key(0))
 
 
 @pytest.fixture(scope="module")
 def ishigami_bootstrap_result_gaussian():
     """Run Ishigami analysis with gaussian bootstrap CIs once for all tests."""
-    sr = gsax.sample(PROBLEM, n_samples=2**14 * 8, seed=42, verbose=False)
+    sr = gsax.sobol.sample(PROBLEM, n_samples=2**14 * 8, seed=42, verbose=False)
     Y = evaluate(jnp.asarray(sr.samples))
-    return gsax.analyze(
+    return gsax.sobol.analyze(
         sr,
         Y,
         num_resamples=200,
@@ -86,11 +86,11 @@ def test_bootstrap_ci_contains_analytical(ishigami_bootstrap_result):
 
 def test_repeated_no_bootstrap_calls_identical():
     """Repeated identical no-bootstrap calls should return identical outputs."""
-    sr = gsax.sample(PROBLEM, n_samples=2**10, seed=7)
+    sr = gsax.sobol.sample(PROBLEM, n_samples=2**10, seed=7)
     Y = evaluate(jnp.asarray(sr.samples))
 
-    first = gsax.analyze(sr, Y)
-    second = gsax.analyze(sr, Y)
+    first = gsax.sobol.analyze(sr, Y)
+    second = gsax.sobol.analyze(sr, Y)
 
     np.testing.assert_allclose(np.asarray(first.S1), np.asarray(second.S1), rtol=1e-6, atol=1e-6)
     np.testing.assert_allclose(np.asarray(first.ST), np.asarray(second.ST), rtol=1e-6, atol=1e-6)
@@ -105,11 +105,11 @@ def test_repeated_no_bootstrap_calls_identical():
 
 def test_explicit_prenormalize_false_matches_default():
     """Explicit prenormalize=False should preserve the default Sobol path."""
-    sr = gsax.sample(PROBLEM, n_samples=2**10, seed=17, verbose=False)
+    sr = gsax.sobol.sample(PROBLEM, n_samples=2**10, seed=17, verbose=False)
     Y = evaluate(jnp.asarray(sr.samples))
 
-    default = gsax.analyze(sr, Y)
-    explicit = gsax.analyze(sr, Y, prenormalize=False)
+    default = gsax.sobol.analyze(sr, Y)
+    explicit = gsax.sobol.analyze(sr, Y, prenormalize=False)
 
     np.testing.assert_allclose(
         np.asarray(default.S1), np.asarray(explicit.S1), rtol=1e-6, atol=1e-6
@@ -128,12 +128,12 @@ def test_explicit_prenormalize_false_matches_default():
 
 def test_default_ci_method_matches_explicit_quantile():
     """The default bootstrap CI method should match explicit quantile mode."""
-    sr = gsax.sample(PROBLEM, n_samples=2**10, seed=31, verbose=False)
+    sr = gsax.sobol.sample(PROBLEM, n_samples=2**10, seed=31, verbose=False)
     Y = evaluate(jnp.asarray(sr.samples))
     key = jax.random.key(987)
 
-    default = gsax.analyze(sr, Y, num_resamples=20, key=key)
-    explicit = gsax.analyze(sr, Y, num_resamples=20, ci_method="quantile", key=key)
+    default = gsax.sobol.analyze(sr, Y, num_resamples=20, key=key)
+    explicit = gsax.sobol.analyze(sr, Y, num_resamples=20, ci_method="quantile", key=key)
 
     np.testing.assert_allclose(
         np.asarray(default.S1), np.asarray(explicit.S1), rtol=1e-6, atol=1e-6
@@ -171,20 +171,20 @@ def test_default_ci_method_matches_explicit_quantile():
 
 def test_invalid_ci_method_raises_value_error():
     """Unsupported ci_method values should raise before analysis dispatch."""
-    sr = gsax.sample(PROBLEM, n_samples=2**8, seed=37, verbose=False)
+    sr = gsax.sobol.sample(PROBLEM, n_samples=2**8, seed=37, verbose=False)
     Y = evaluate(jnp.asarray(sr.samples))
 
     with pytest.raises(ValueError, match="ci_method"):
-        gsax.analyze(sr, Y, ci_method=cast(Any, "unsupported"))
+        gsax.sobol.analyze(sr, Y, ci_method=cast(Any, "unsupported"))
 
 
 def test_supported_ci_method_is_accepted_without_bootstrap():
     """Supported ci_method values should be accepted and ignored without bootstrap."""
-    sr = gsax.sample(PROBLEM, n_samples=2**8, seed=41, verbose=False)
+    sr = gsax.sobol.sample(PROBLEM, n_samples=2**8, seed=41, verbose=False)
     Y = evaluate(jnp.asarray(sr.samples))
 
-    default = gsax.analyze(sr, Y)
-    gaussian = gsax.analyze(sr, Y, ci_method="gaussian")
+    default = gsax.sobol.analyze(sr, Y)
+    gaussian = gsax.sobol.analyze(sr, Y, ci_method="gaussian")
 
     np.testing.assert_allclose(
         np.asarray(default.S1), np.asarray(gaussian.S1), rtol=1e-6, atol=1e-6
@@ -206,12 +206,12 @@ def test_supported_ci_method_is_accepted_without_bootstrap():
 
 def test_prenormalize_point_estimates_are_offset_invariant():
     """prenormalize=True should make Sobol point estimates shift-invariant."""
-    sr = gsax.sample(PROBLEM, n_samples=2**10, seed=19, verbose=False)
+    sr = gsax.sobol.sample(PROBLEM, n_samples=2**10, seed=19, verbose=False)
     Y = evaluate(jnp.asarray(sr.samples))
     Y_shifted = Y + 123.0
 
-    base = gsax.analyze(sr, Y, prenormalize=True)
-    shifted = gsax.analyze(sr, Y_shifted, prenormalize=True)
+    base = gsax.sobol.analyze(sr, Y, prenormalize=True)
+    shifted = gsax.sobol.analyze(sr, Y_shifted, prenormalize=True)
 
     np.testing.assert_allclose(np.asarray(base.S1), np.asarray(shifted.S1), rtol=1e-6, atol=1e-6)
     np.testing.assert_allclose(np.asarray(base.ST), np.asarray(shifted.ST), rtol=1e-6, atol=1e-6)
@@ -226,12 +226,12 @@ def test_prenormalize_point_estimates_are_offset_invariant():
 
 def test_repeated_bootstrap_calls_identical():
     """Repeated identical bootstrap calls should preserve point estimates and CI shapes."""
-    sr = gsax.sample(PROBLEM, n_samples=2**10, seed=11)
+    sr = gsax.sobol.sample(PROBLEM, n_samples=2**10, seed=11)
     Y = evaluate(jnp.asarray(sr.samples))
     key = jax.random.key(123)
 
-    first = gsax.analyze(sr, Y, num_resamples=20, key=key)
-    second = gsax.analyze(sr, Y, num_resamples=20, key=key)
+    first = gsax.sobol.analyze(sr, Y, num_resamples=20, key=key)
+    second = gsax.sobol.analyze(sr, Y, num_resamples=20, key=key)
 
     np.testing.assert_allclose(np.asarray(first.S1), np.asarray(second.S1), rtol=1e-6, atol=1e-6)
     np.testing.assert_allclose(np.asarray(first.ST), np.asarray(second.ST), rtol=1e-6, atol=1e-6)
@@ -265,12 +265,12 @@ def test_repeated_bootstrap_calls_identical():
 
 def test_repeated_gaussian_bootstrap_calls_identical():
     """Repeated gaussian bootstrap calls should preserve point estimates and CI shapes."""
-    sr = gsax.sample(PROBLEM, n_samples=2**10, seed=43)
+    sr = gsax.sobol.sample(PROBLEM, n_samples=2**10, seed=43)
     Y = evaluate(jnp.asarray(sr.samples))
     key = jax.random.key(654)
 
-    first = gsax.analyze(sr, Y, num_resamples=20, ci_method="gaussian", key=key)
-    second = gsax.analyze(sr, Y, num_resamples=20, ci_method="gaussian", key=key)
+    first = gsax.sobol.analyze(sr, Y, num_resamples=20, ci_method="gaussian", key=key)
+    second = gsax.sobol.analyze(sr, Y, num_resamples=20, ci_method="gaussian", key=key)
 
     np.testing.assert_allclose(np.asarray(first.S1), np.asarray(second.S1), rtol=1e-6, atol=1e-6)
     np.testing.assert_allclose(np.asarray(first.ST), np.asarray(second.ST), rtol=1e-6, atol=1e-6)
@@ -317,7 +317,7 @@ def test_mixed_uniform_and_gaussian_linear_model_matches_analytical_indices():
         },
         output_names=("response",),
     )
-    sr = gsax.sample(
+    sr = gsax.sobol.sample(
         problem,
         n_samples=8192,
         calc_second_order=False,
@@ -328,7 +328,7 @@ def test_mixed_uniform_and_gaussian_linear_model_matches_analytical_indices():
     coeffs = jnp.array([1.5, -0.75, 2.0])
     X = jnp.asarray(sr.samples)
     Y = (X @ coeffs)[:, None, None]
-    result = gsax.analyze(sr, Y)
+    result = gsax.sobol.analyze(sr, Y)
 
     std = np.sqrt(1.44)
     a = (-0.5 - 0.5) / std
@@ -351,13 +351,13 @@ def test_mixed_uniform_and_gaussian_linear_model_matches_analytical_indices():
 
 def test_prenormalize_bootstrap_is_offset_invariant():
     """prenormalize=True should keep bootstrap outputs invariant to shifts in Y."""
-    sr = gsax.sample(PROBLEM, n_samples=2**10, seed=23, verbose=False)
+    sr = gsax.sobol.sample(PROBLEM, n_samples=2**10, seed=23, verbose=False)
     Y = evaluate(jnp.asarray(sr.samples))
     Y_shifted = Y + 123.0
     key = jax.random.key(321)
 
-    base = gsax.analyze(sr, Y, num_resamples=20, key=key, prenormalize=True)
-    shifted = gsax.analyze(sr, Y_shifted, num_resamples=20, key=key, prenormalize=True)
+    base = gsax.sobol.analyze(sr, Y, num_resamples=20, key=key, prenormalize=True)
+    shifted = gsax.sobol.analyze(sr, Y_shifted, num_resamples=20, key=key, prenormalize=True)
 
     np.testing.assert_allclose(np.asarray(base.S1), np.asarray(shifted.S1), rtol=1e-6, atol=1e-6)
     np.testing.assert_allclose(np.asarray(base.ST), np.asarray(shifted.ST), rtol=1e-6, atol=1e-6)
@@ -391,12 +391,12 @@ def test_prenormalize_bootstrap_is_offset_invariant():
 
 def test_prenormalize_gaussian_bootstrap_is_offset_invariant():
     """Gaussian bootstrap endpoints should remain shift-invariant with prenormalize=True."""
-    sr = gsax.sample(PROBLEM, n_samples=2**10, seed=47, verbose=False)
+    sr = gsax.sobol.sample(PROBLEM, n_samples=2**10, seed=47, verbose=False)
     Y = evaluate(jnp.asarray(sr.samples))
     Y_shifted = Y + 123.0
     key = jax.random.key(765)
 
-    base = gsax.analyze(
+    base = gsax.sobol.analyze(
         sr,
         Y,
         num_resamples=20,
@@ -404,7 +404,7 @@ def test_prenormalize_gaussian_bootstrap_is_offset_invariant():
         key=key,
         prenormalize=True,
     )
-    shifted = gsax.analyze(
+    shifted = gsax.sobol.analyze(
         sr,
         Y_shifted,
         num_resamples=20,
@@ -443,10 +443,10 @@ def test_prenormalize_gaussian_bootstrap_is_offset_invariant():
     )
 
 
-def _legacy_sampling_result(sr: SamplingResult) -> SamplingResult:
+def _legacy_sampling_result(sr: SobolSamples) -> SobolSamples:
     expanded_n_total = sr.expanded_n_total
     expanded_samples = sr.samples[sr.expanded_to_unique]
-    return SamplingResult(
+    return SobolSamples(
         samples=expanded_samples,
         sample_ids=np.arange(expanded_n_total, dtype=np.int64),
         expanded_n_total=expanded_n_total,
@@ -459,13 +459,13 @@ def _legacy_sampling_result(sr: SamplingResult) -> SamplingResult:
 
 
 def test_unique_analysis_matches_expanded_layout():
-    sr = gsax.sample(PROBLEM, n_samples=1024, seed=7, verbose=False)
+    sr = gsax.sobol.sample(PROBLEM, n_samples=1024, seed=7, verbose=False)
     Y_unique = evaluate(jnp.asarray(sr.samples))
-    result_unique = gsax.analyze(sr, Y_unique)
+    result_unique = gsax.sobol.analyze(sr, Y_unique)
 
     legacy_sr = _legacy_sampling_result(sr)
     Y_expanded = Y_unique[sr.expanded_to_unique]
-    result_expanded = gsax.analyze(legacy_sr, Y_expanded)
+    result_expanded = gsax.sobol.analyze(legacy_sr, Y_expanded)
 
     assert np.allclose(np.asarray(result_unique.S1), np.asarray(result_expanded.S1))
     assert np.allclose(np.asarray(result_unique.ST), np.asarray(result_expanded.ST))
@@ -477,14 +477,14 @@ def test_unique_analysis_matches_expanded_layout():
 
 
 def test_unique_bootstrap_matches_expanded_layout():
-    sr = gsax.sample(PROBLEM, n_samples=1024, seed=7, verbose=False)
+    sr = gsax.sobol.sample(PROBLEM, n_samples=1024, seed=7, verbose=False)
     Y_unique = evaluate(jnp.asarray(sr.samples))
     key = jax.random.key(123)
-    result_unique = gsax.analyze(sr, Y_unique, num_resamples=50, key=key)
+    result_unique = gsax.sobol.analyze(sr, Y_unique, num_resamples=50, key=key)
 
     legacy_sr = _legacy_sampling_result(sr)
     Y_expanded = Y_unique[sr.expanded_to_unique]
-    result_expanded = gsax.analyze(legacy_sr, Y_expanded, num_resamples=50, key=key)
+    result_expanded = gsax.sobol.analyze(legacy_sr, Y_expanded, num_resamples=50, key=key)
 
     assert np.allclose(np.asarray(result_unique.S1), np.asarray(result_expanded.S1))
     assert np.allclose(np.asarray(result_unique.ST), np.asarray(result_expanded.ST))
@@ -504,10 +504,10 @@ def test_unique_bootstrap_matches_expanded_layout():
 
 def test_unique_gaussian_bootstrap_matches_expanded_layout():
     """Gaussian bootstrap CIs should preserve unique-vs-expanded equivalence."""
-    sr = gsax.sample(PROBLEM, n_samples=1024, seed=53, verbose=False)
+    sr = gsax.sobol.sample(PROBLEM, n_samples=1024, seed=53, verbose=False)
     Y_unique = evaluate(jnp.asarray(sr.samples))
     key = jax.random.key(876)
-    result_unique = gsax.analyze(
+    result_unique = gsax.sobol.analyze(
         sr,
         Y_unique,
         num_resamples=50,
@@ -517,7 +517,7 @@ def test_unique_gaussian_bootstrap_matches_expanded_layout():
 
     legacy_sr = _legacy_sampling_result(sr)
     Y_expanded = Y_unique[sr.expanded_to_unique]
-    result_expanded = gsax.analyze(
+    result_expanded = gsax.sobol.analyze(
         legacy_sr,
         Y_expanded,
         num_resamples=50,
@@ -543,14 +543,14 @@ def test_unique_gaussian_bootstrap_matches_expanded_layout():
 
 def test_unique_bootstrap_prenormalize_matches_expanded_layout():
     """prenormalize=True should preserve unique-vs-expanded bootstrap equivalence."""
-    sr = gsax.sample(PROBLEM, n_samples=1024, seed=29, verbose=False)
+    sr = gsax.sobol.sample(PROBLEM, n_samples=1024, seed=29, verbose=False)
     Y_unique = evaluate(jnp.asarray(sr.samples))
     key = jax.random.key(456)
-    result_unique = gsax.analyze(sr, Y_unique, num_resamples=50, key=key, prenormalize=True)
+    result_unique = gsax.sobol.analyze(sr, Y_unique, num_resamples=50, key=key, prenormalize=True)
 
     legacy_sr = _legacy_sampling_result(sr)
     Y_expanded = Y_unique[sr.expanded_to_unique]
-    result_expanded = gsax.analyze(
+    result_expanded = gsax.sobol.analyze(
         legacy_sr,
         Y_expanded,
         num_resamples=50,
@@ -576,12 +576,12 @@ def test_unique_bootstrap_prenormalize_matches_expanded_layout():
 
 def test_gaussian_conf_shapes_match_quantile():
     """Gaussian CI arrays should keep the same shapes as quantile mode."""
-    sr = gsax.sample(PROBLEM, n_samples=2**10, seed=59, verbose=False)
+    sr = gsax.sobol.sample(PROBLEM, n_samples=2**10, seed=59, verbose=False)
     Y = evaluate(jnp.asarray(sr.samples))
     key = jax.random.key(111)
 
-    quantile = gsax.analyze(sr, Y, num_resamples=20, ci_method="quantile", key=key)
-    gaussian = gsax.analyze(sr, Y, num_resamples=20, ci_method="gaussian", key=key)
+    quantile = gsax.sobol.analyze(sr, Y, num_resamples=20, ci_method="quantile", key=key)
+    gaussian = gsax.sobol.analyze(sr, Y, num_resamples=20, ci_method="gaussian", key=key)
 
     assert quantile.S1_conf is not None
     assert quantile.ST_conf is not None
@@ -596,11 +596,11 @@ def test_gaussian_conf_shapes_match_quantile():
 
 def test_gaussian_and_quantile_bootstrap_endpoints_differ():
     """The ci_method switch should exercise distinct endpoint calculations."""
-    sr = gsax.sample(PROBLEM, n_samples=2**10, seed=61, verbose=False)
+    sr = gsax.sobol.sample(PROBLEM, n_samples=2**10, seed=61, verbose=False)
     Y = evaluate(jnp.asarray(sr.samples))
     key = jax.random.key(222)
 
-    quantile = gsax.analyze(sr, Y, num_resamples=50, ci_method="quantile", key=key)
-    gaussian = gsax.analyze(sr, Y, num_resamples=50, ci_method="gaussian", key=key)
+    quantile = gsax.sobol.analyze(sr, Y, num_resamples=50, ci_method="quantile", key=key)
+    gaussian = gsax.sobol.analyze(sr, Y, num_resamples=50, ci_method="gaussian", key=key)
 
     assert not np.allclose(np.asarray(gaussian.S1_conf), np.asarray(quantile.S1_conf))

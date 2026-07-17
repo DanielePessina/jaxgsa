@@ -26,7 +26,7 @@ from gsax import borgonovo
 
 # Or top-level
 import gsax
-# gsax.analyze_borgonovo(...)
+# gsax.borgonovo.analyze(...)
 ```
 
 ## Scalar example (Ishigami)
@@ -37,11 +37,11 @@ import gsax
 from gsax.benchmarks.ishigami import PROBLEM, evaluate
 
 # Generate Monte Carlo samples
-X = gsax.sample_mc(PROBLEM, N=5000, seed=42)
+X = gsax.sampling.monte_carlo(PROBLEM, n=5000, seed=42)
 Y = evaluate(jnp.asarray(X))
 
 # Compute delta and given-data S1 indices
-result = gsax.analyze_borgonovo(PROBLEM, jnp.asarray(X), Y)
+result = gsax.borgonovo.analyze(PROBLEM, jnp.asarray(X), Y)
 
 print("delta:", result.delta)  # (3,)
 print("S1:   ", result.S1)     # (3,)
@@ -67,7 +67,7 @@ bias-corrected with bootstrap resamples (Plischke et al., 2013) and
 percentile confidence intervals come from the same replicates.
 
 ```python
-result = gsax.analyze_borgonovo(
+result = gsax.borgonovo.analyze(
     PROBLEM, X, Y,
     n_bootstrap=100,
     conf_level=0.95,
@@ -96,9 +96,9 @@ import jax.numpy as jnp
 import gsax
 from gsax.benchmarks import gaussian_linear
 
-X = jnp.asarray(gsax.sample_mc(gaussian_linear.PROBLEM, N=8000, seed=42))
+X = jnp.asarray(gsax.sampling.monte_carlo(gaussian_linear.PROBLEM, n=8000, seed=42))
 Y = gaussian_linear.evaluate(X)
-result = gsax.analyze_borgonovo(gaussian_linear.PROBLEM, X, Y)
+result = gsax.borgonovo.analyze(gaussian_linear.PROBLEM, X, Y)
 
 print("estimated: ", result.delta)
 print("analytical:", gaussian_linear.ANALYTICAL_DELTA)
@@ -113,12 +113,12 @@ import jax.numpy as jnp
 import gsax
 from gsax.benchmarks.ishigami import PROBLEM, evaluate
 
-X = jnp.asarray(gsax.sample_mc(PROBLEM, N=3000, seed=42))
+X = jnp.asarray(gsax.sampling.monte_carlo(PROBLEM, n=3000, seed=42))
 Y1 = evaluate(X)
 Y2 = jnp.sum(X**2, axis=1)
 Y_multi = jnp.column_stack([Y1, Y2])
 
-result = gsax.analyze_borgonovo(PROBLEM, X, Y_multi)
+result = gsax.borgonovo.analyze(PROBLEM, X, Y_multi)
 print("delta shape:", result.delta.shape)  # (2, 3)
 ```
 
@@ -129,7 +129,7 @@ ds = result.to_dataset()
 print(ds)  # variables: delta, S1 (+ delta_lower/upper, S1_lower/upper with CIs)
 
 # Without bootstrap: only delta and S1
-result_plain = gsax.analyze_borgonovo(PROBLEM, X, Y1, n_bootstrap=0)
+result_plain = gsax.borgonovo.analyze(PROBLEM, X, Y1, n_bootstrap=0)
 ds_plain = result_plain.to_dataset()
 print(ds_plain)
 ```

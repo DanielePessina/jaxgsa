@@ -1,6 +1,6 @@
 [project]
 name = "gsax"
-version = "0.3.0b1"
+version = "0.4.0"
 description = "Global Sensitivity Analysis in JAX"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -34,7 +34,6 @@ classifiers = [
 dependencies = [
     "jax>=0.6",
     "jaxlib>=0.6",
-    "pandas>=3.0.1",
     "scipy>=1.10",
     "xarray>=2026.2.0",
 ]
@@ -54,9 +53,6 @@ dev = [
     "SALib>=1.4",
     "pot>=0.9",
 ]
-xlsx = ["openpyxl>=3.1"]
-parquet = ["pyarrow>=14"]
-all = ["openpyxl>=3.1", "pyarrow>=14"]
 notebook = [
     "marimo>=0.23.4",
     "matplotlib>=3.10.8",

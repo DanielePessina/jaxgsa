@@ -146,7 +146,7 @@ def _doe_md(mo):
     | $T$ | $[15,\, 35]$ | °C |
     | $\mathrm{pH}$ | $[4.5,\, 7.5]$ | — |
 
-    `gsax.sample(...)` returns a `SamplingResult` whose `.samples`
+    `gsax.sobol.sample(...)` returns a `SobolSamples` whose `.samples`
     attribute is the deduplicated unique-row sample matrix; gsax
     reconstructs the expanded Saltelli ordering internally inside
     `analyze`. Setting `calc_second_order=True` activates the extra
@@ -166,7 +166,7 @@ def _problem(gsax):
         output_names=("Ca",),
     )
 
-    sampling_result = gsax.sample(
+    sampling_result = gsax.sobol.sample(
         problem,
         n_samples=4096,
         seed=0,
@@ -232,7 +232,7 @@ def _analyze_md(mo):
     mo.md(r"""
     ## Sobol analysis with bootstrap
 
-    `gsax.analyze(...)` accepts the `(N, T, K)` output array and
+    `gsax.sobol.analyze(...)` accepts the `(N, T, K)` output array and
     returns indices with shape `(T, K, D)` for first-order, total-order
     and `(T, K, D, D)` for second-order. Passing `num_resamples > 0`
     together with a PRNG `key` switches on a vectorised non-parametric
@@ -248,7 +248,7 @@ def _analyze_md(mo):
 
 @app.cell
 def _analyze(Y, gsax, jax, sampling_result):
-    result = gsax.analyze(
+    result = gsax.sobol.analyze(
         sampling_result,
         Y,
         num_resamples=200,

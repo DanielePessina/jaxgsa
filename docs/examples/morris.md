@@ -21,19 +21,12 @@ Run it interactively with `uv run marimo edit examples/morris_gsa.py`.
 
 ## Import style
 
-The Morris module lives at `gsax.morris`. You can import it directly or use
-the top-level convenience aliases:
+The Morris module lives at `gsax.morris`:
 
 ```python
-# Subpackage import (preferred for Morris-focused scripts)
 from gsax import morris
 # morris.sample(...)
 # morris.analyze(...)
-
-# Or use the top-level re-exports
-import gsax
-# gsax.sample_morris(...)
-# gsax.analyze_morris(...)
 ```
 
 ## Scalar example (Ishigami)
@@ -46,7 +39,7 @@ from gsax.benchmarks.ishigami import PROBLEM, evaluate
 # Generate Morris trajectories: r trajectories of D+1 points each.
 # Only the unique rows are returned — exact duplicates across trajectories
 # are removed, so you evaluate fewer points than r * (D + 1).
-sr = gsax.sample_morris(PROBLEM, n_trajectories=50, num_levels=4, seed=42)
+sr = gsax.morris.sample(PROBLEM, n_trajectories=50, num_levels=4, seed=42)
 print("unique rows:", sr.n_total)          # <= 50 * (3 + 1) = 200
 print("expanded rows:", sr.expanded_n_total)  # 200
 
@@ -54,7 +47,7 @@ print("expanded rows:", sr.expanded_n_total)  # 200
 Y = evaluate(jnp.asarray(sr.samples))
 
 # Compute the screening measures
-result = gsax.analyze_morris(sr, Y)
+result = gsax.morris.analyze(sr, Y)
 
 print("mu:", result.mu)            # (D,) mean elementary effect (signed)
 print("mu_star:", result.mu_star)  # (D,) mean |elementary effect| — importance
@@ -85,7 +78,7 @@ Bootstrap confidence intervals over trajectories are available via
 ```python
 import jax
 
-result = gsax.analyze_morris(sr, Y, num_resamples=500, key=jax.random.key(0))
+result = gsax.morris.analyze(sr, Y, num_resamples=500, key=jax.random.key(0))
 print(result.mu_star_conf)  # (2, D) — [lower, upper] bounds
 ```
 
@@ -97,9 +90,9 @@ designs around scrambled-Sobol' base points, so the steps vary in size and
 no grid is involved:
 
 ```python
-sr_radial = gsax.sample_morris(PROBLEM, n_trajectories=50, method="radial", seed=42)
+sr_radial = gsax.morris.sample(PROBLEM, n_trajectories=50, method="radial", seed=42)
 Y_radial = evaluate(jnp.asarray(sr_radial.samples))
-result_radial = gsax.analyze_morris(sr_radial, Y_radial)
+result_radial = gsax.morris.analyze(sr_radial, Y_radial)
 print("mu_star (radial):", result_radial.mu_star)
 ```
 
@@ -136,10 +129,10 @@ def multi_output_model(X):
     return jnp.stack([displacement, velocity], axis=-1)  # (n_total, K=2)
 
 
-sr = gsax.sample_morris(problem, n_trajectories=50, seed=42)
+sr = gsax.morris.sample(problem, n_trajectories=50, seed=42)
 Y = multi_output_model(jnp.asarray(sr.samples))
 
-result = gsax.analyze_morris(sr, Y)
+result = gsax.morris.analyze(sr, Y)
 print("mu_star shape:", result.mu_star.shape)  # (K, D) = (2, 3)
 print("sigma shape:", result.sigma.shape)      # (K, D) = (2, 3)
 ```
@@ -164,11 +157,11 @@ problem = gsax.Problem.from_dict(
     }
 )
 
-sr = gsax.sample_morris(problem, n_trajectories=50, seed=42)
+sr = gsax.morris.sample(problem, n_trajectories=50, seed=42)
 X = jnp.asarray(sr.samples)
 Y = X[:, 0] + X[:, 1] ** 2
 
-result = gsax.analyze_morris(sr, Y)
+result = gsax.morris.analyze(sr, Y)
 print("mu_star:", result.mu_star)  # (2,)
 ```
 
@@ -189,8 +182,8 @@ import jax.numpy as jnp
 import gsax
 from gsax.benchmarks.ishigami import PROBLEM, evaluate
 
-sr = gsax.sample_morris(PROBLEM, n_trajectories=50, seed=42)
-result = gsax.analyze_morris(sr, evaluate(jnp.asarray(sr.samples)))
+sr = gsax.morris.sample(PROBLEM, n_trajectories=50, seed=42)
+result = gsax.morris.analyze(sr, evaluate(jnp.asarray(sr.samples)))
 
 physical = result.to_physical_units()
 print(physical.space)    # "physical" (the original result stays "unit")
@@ -214,16 +207,16 @@ import jax.numpy as jnp
 import gsax
 from gsax.benchmarks.ishigami import PROBLEM, evaluate
 
-sr_full = gsax.sample_morris(PROBLEM, n_trajectories=100, seed=42)
+sr_full = gsax.morris.sample(PROBLEM, n_trajectories=100, seed=42)
 Y_full = evaluate(jnp.asarray(sr_full.samples))
 
 for r in [50, 25, 10]:
     sr_r, Y_r = sr_full.downsample(r, Y_full)
-    result = gsax.analyze_morris(sr_r, Y_r)
+    result = gsax.morris.analyze(sr_r, Y_r)
     print(f"r={r:3d}  mu_star={result.mu_star}")
 ```
 
-This mirrors `SamplingResult.downsample()` for Sobol designs and is useful
+This mirrors `SobolSamples.downsample()` for Sobol designs and is useful
 for convergence checks: if the ranking is stable from 25 to 100 trajectories,
 25 would have sufficed.
 

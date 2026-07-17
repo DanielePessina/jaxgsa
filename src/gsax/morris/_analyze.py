@@ -24,13 +24,13 @@ from jax import Array
 
 from gsax._bootstrap import _bootstrap_ci_endpoints
 from gsax._normalization import (
-    _infer_output_layout,
     _prenormalize_outputs,
     _prepare_Y,
     _squeeze_output_axes,
+    _validate_output,
 )
 from gsax.morris._result import MorrisResult
-from gsax.morris._sampling import MorrisSamplingResult
+from gsax.morris._sampling import MorrisSamples
 
 # Minimum trajectories for statistically meaningful screening measures;
 # only enforced as a warning when non-finite cleaning shrinks the design.
@@ -108,7 +108,7 @@ def _resample_stats(idx_chunk: Array, ee: Array) -> tuple[Array, Array, Array]:
 
 
 def _drop_nonfinite_trajectories(
-    Y: Array, sampling_result: MorrisSamplingResult
+    Y: Array, sampling_result: MorrisSamples
 ) -> tuple[Array, Array, Array, Array, int]:
     """Drop entire trajectories that contain any non-finite (NaN/Inf) value.
 
@@ -161,7 +161,7 @@ def _drop_nonfinite_trajectories(
     return Y_clean, idx_after, idx_before, delta, n_dropped
 
 
-def _expand_unique_outputs(sampling_result: MorrisSamplingResult, Y: Array) -> Array:
+def _expand_unique_outputs(sampling_result: MorrisSamples, Y: Array) -> Array:
     """Rebuild expanded Morris outputs from unique user-evaluated outputs."""
     if Y.shape[0] != sampling_result.n_total:
         raise ValueError(
@@ -173,7 +173,7 @@ def _expand_unique_outputs(sampling_result: MorrisSamplingResult, Y: Array) -> A
 
 
 def analyze(
-    sampling_result: MorrisSamplingResult,
+    sampling_result: MorrisSamples,
     Y: Array,
     *,
     prenormalize: bool = False,
@@ -186,7 +186,7 @@ def analyze(
     """Compute Morris elementary-effects screening measures using JAX.
 
     Accepts model outputs Y evaluated at the unique rows returned by
-    ``gsax.sample_morris()``, reconstructs the expanded design internally,
+    ``gsax.morris.sample()``, reconstructs the expanded design internally,
     drops trajectories containing non-finite values, and reduces one
     elementary effect per trajectory and parameter to three measures:
     rank parameters by ``mu_star`` (mean absolute effect, the headline
@@ -201,7 +201,7 @@ def analyze(
     Gaussian marginals, whose inverse-CDF transform is nonlinear).
 
     Args:
-        sampling_result: Result from ``gsax.sample_morris()`` containing the
+        sampling_result: Result from ``gsax.morris.sample()`` containing the
             unique sample matrix plus elementary-effect bookkeeping.
         Y: Model outputs evaluated at each unique row of
             ``sampling_result.samples``. Accepted shapes:
@@ -245,11 +245,11 @@ def analyze(
         raise ValueError("ci_method must be one of {'quantile', 'gaussian'}")
     if chunk_size < 1:
         raise ValueError(f"chunk_size must be >= 1, got {chunk_size}")
-    # Resolve the user-supplied layout (sample axis first, labeled output axis
-    # last) against the unique design rows, BEFORE expansion and bootstrap so
-    # every downstream stage sees canonical axes. _infer_output_layout also
-    # rejects a non-1/2/3-D Y.
-    Y, _ = _infer_output_layout(Y, sampling_result.problem, int(sampling_result.samples.shape[0]))
+    Y = _validate_output(
+        Y,
+        int(sampling_result.samples.shape[0]),
+        sampling_result.problem,
+    )
     # Map user-evaluated unique outputs back to the full expanded layout
     Y = _expand_unique_outputs(sampling_result, Y)
     Y, squeeze_time, squeeze_output = _prepare_Y(Y)

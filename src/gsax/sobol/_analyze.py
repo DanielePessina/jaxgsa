@@ -23,18 +23,18 @@ from jax import Array
 
 from gsax._bootstrap import _bootstrap_ci_endpoints
 from gsax._normalization import (
-    _infer_output_layout,
     _prenormalize_outputs,
     _prepare_Y,
     _squeeze_output_axes,
+    _validate_output,
     _warn_zero_variance_slices,
 )
-from gsax.sampling import SamplingResult, _saltelli_step
 from gsax.sobol._indices import (
     _fused_first_total,
     _fused_second_order,
 )
-from gsax.sobol._result import SAResult
+from gsax.sobol._result import SobolResult
+from gsax.sobol._sampling import SobolSamples, _saltelli_step
 
 # ---------------------------------------------------------------------------
 # Cached JIT kernels
@@ -181,7 +181,7 @@ def _normalize_s2_matrix(S2: Array) -> Array:
     return jnp.where(diag_mask, jnp.nan, mirrored)
 
 
-def _expand_unique_outputs(sampling_result: SamplingResult, Y: Array) -> Array:
+def _expand_unique_outputs(sampling_result: SobolSamples, Y: Array) -> Array:
     """Rebuild expanded Saltelli outputs from unique user-evaluated outputs.
 
     The sampler deduplicates the Saltelli design before returning samples to
@@ -200,8 +200,8 @@ def _expand_unique_outputs(sampling_result: SamplingResult, Y: Array) -> Array:
 
 
 def _analyze_no_bootstrap(
-    sampling_result: SamplingResult, Y: Array, *, chunk_size: int
-) -> SAResult:
+    sampling_result: SobolSamples, Y: Array, *, chunk_size: int
+) -> SobolResult:
     """Compute Sobol indices with optimized kernel selection.
 
     For scalar output (T*K=1), uses a direct fused kernel that computes
@@ -243,7 +243,7 @@ def _analyze_no_bootstrap(
             S2_out = None
 
         nan_counts = _count_nans(S1_out, ST_out, S2_out)
-        return SAResult(
+        return SobolResult(
             S1=S1_out,
             ST=ST_out,
             S2=S2_out,
@@ -307,7 +307,7 @@ def _analyze_no_bootstrap(
     if S2_out is not None:
         S2_out = _squeeze_output_axes(S2_out, squeeze_time, squeeze_output, n_trailing=2)
     nan_counts = _count_nans(S1_out, ST_out, S2_out)
-    return SAResult(
+    return SobolResult(
         S1=S1_out,
         ST=ST_out,
         S2=S2_out,
@@ -317,7 +317,7 @@ def _analyze_no_bootstrap(
 
 
 def _analyze_bootstrap(
-    sampling_result: SamplingResult,
+    sampling_result: SobolSamples,
     Y: Array,
     *,
     num_resamples: int,
@@ -325,7 +325,7 @@ def _analyze_bootstrap(
     ci_method: Literal["quantile", "gaussian"],
     key: Array,
     chunk_size: int,
-) -> SAResult:
+) -> SobolResult:
     """Bootstrap path: loop over (T, K) combos, vmap over R resamples.
 
     Unlike the no-bootstrap path which vmaps over output slices, here we loop
@@ -446,7 +446,7 @@ def _analyze_bootstrap(
     if S2_conf is not None:
         S2_conf = _squeeze_output_axes(S2_conf, squeeze_time, squeeze_output, n_trailing=2)
     nan_counts = _count_nans(S1_out, ST_out, S2_out)
-    return SAResult(
+    return SobolResult(
         S1=S1_out,
         ST=ST_out,
         S2=S2_out,
@@ -459,7 +459,7 @@ def _analyze_bootstrap(
 
 
 def analyze(
-    sampling_result: SamplingResult,
+    sampling_result: SobolSamples,
     Y: Array,
     *,
     prenormalize: bool = False,
@@ -468,7 +468,7 @@ def analyze(
     ci_method: Literal["quantile", "gaussian"] = "quantile",
     key: Array | None = None,
     chunk_size: int = 2048,
-) -> SAResult:
+) -> SobolResult:
     """Compute Sobol sensitivity indices from model outputs using JAX.
 
     This is the main entry point of the package. Sobol indices apportion the
@@ -478,13 +478,13 @@ def analyze(
     parameters, and S2 (second-order) isolates pairwise interactions.
 
     The function accepts model outputs Y evaluated at the unique rows
-    returned by ``gsax.sample()``, reconstructs the expanded Saltelli
+    returned by ``gsax.sobol.sample()``, reconstructs the expanded Saltelli
     ordering internally, drops sample groups containing non-finite values
     (with a warning), and dispatches to either the fast no-bootstrap path or
     the bootstrap confidence-interval path depending on ``num_resamples``.
 
     Args:
-        sampling_result: Result from ``gsax.sample()`` containing the unique
+        sampling_result: Result from ``gsax.sobol.sample()`` containing the unique
             sample matrix plus expansion metadata.
         Y: Model outputs evaluated at each unique row of
             ``sampling_result.samples``, in the same row order. Accepted
@@ -519,7 +519,7 @@ def analyze(
             Defaults to 2048.
 
     Returns:
-        SAResult containing:
+        SobolResult containing:
             S1 — first-order indices, shape (D,) / (K, D) / (T, K, D)
                  for Y of shape (n,) / (n, K) / (n, T, K) respectively
             ST — total-order indices, same shape as S1
@@ -531,7 +531,11 @@ def analyze(
     # Resolve the user-supplied layout (sample axis first, labeled output axis
     # last) against the unique design rows, BEFORE any expansion or resampling
     # so every downstream stage sees canonical axes.
-    Y, _ = _infer_output_layout(Y, sampling_result.problem, int(sampling_result.samples.shape[0]))
+    Y = _validate_output(
+        Y,
+        int(sampling_result.samples.shape[0]),
+        sampling_result.problem,
+    )
     # Map user-evaluated unique outputs back to the full Saltelli interleaving
     Y = _expand_unique_outputs(sampling_result, Y)
 

@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.4.0
+
+### Changed
+
+- Replaced root-level command aliases with method namespaces such as
+  `gsax.sobol.sample`, `gsax.sobol.analyze`, `gsax.pce.analyze`, and
+  `gsax.hdmr.analyze`.
+- Moved surrogate prediction and Shapley derivation onto `PCEResult` and
+  `HDMRResult` through `predict(...)` and `shapley(...)`.
+- Enforced one output contract across methods: `(N,)`, `(N, K)`, or
+  `(N, T, K)`. Axis inference and automatic transposition were removed.
+- Renamed the main sampling/result types to `SobolSamples`, `SobolResult`, and
+  `MorrisSamples`.
+- Simplified Sobol persistence to one NPZ file through
+  `SobolSamples.save(...)` and `SobolSamples.load(...)`; removed pandas and
+  format-specific persistence dependencies.
+
+### Added
+
+- Correlation-aware HDMR Shapley effects with
+  `result.shapley(include_correlative=True)`.
+- Dense structural `HDMRResult.S2` and `HDMRResult.S3` interaction arrays.
+- Bounded-memory batched prediction for PCE and HDMR result objects.
+- A 0.3 to 0.4 API migration guide.
+
 ## 0.3.0b1
 
 ### Added
@@ -48,8 +73,8 @@
 ### Added
 
 - **Morris** elementary-effects screening
-  (`gsax.morris`, re-exported as `gsax.sample_morris()` /
-  `gsax.analyze_morris()`): globalized one-at-a-time screening that reduces
+  (`gsax.morris`, re-exported as `gsax.morris.sample()` /
+  `gsax.morris.analyze()`): globalized one-at-a-time screening that reduces
   `r * (D + 1)` model evaluations to mu, mu_star (importance ranking), and
   sigma (nonlinearity/interaction flag), with
   - trajectory (Morris, 1991) and radial (Campolongo et al., 2011,
@@ -61,7 +86,7 @@
     cost real model evaluations (same contract as Saltelli `sample()`);
   - scalar, multi-output, and time-series outputs, non-finite trajectory
     cleaning, and bootstrap confidence intervals over trajectories;
-  - `MorrisSamplingResult.downsample()` prefix-slicing to fewer trajectories
+  - `MorrisSamples.downsample()` prefix-slicing to fewer trajectories
     without re-simulation, and `MorrisResult.to_physical_units()` /
     `to_dataset()` for derivative-scale measures and labeled xarray export.
 - **Shapley effects** (`gsax.analyze_shapley`, `ShapleyResult`) — global
@@ -165,7 +190,7 @@
 
 ### Added
 
-- `gsax.enable_compilation_cache(path, ...)` — opt-in helper that enables JAX's
+- `gsax.config.enable_compilation_cache(path, ...)` — opt-in helper that enables JAX's
   persistent, on-disk compilation cache so compiled kernels are reused across
   process restarts (parameter sweeps, CI, HPC batches).
 - Configuration guide covering double precision (`jax_enable_x64`) for

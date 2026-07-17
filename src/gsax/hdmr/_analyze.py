@@ -1,11 +1,13 @@
 """RS-HDMR (Random Sampling High-Dimensional Model Representation) analysis.
 
-Provides ``analyze_hdmr`` for computing ANCOVA-based sensitivity indices from
-arbitrary (X, Y) pairs using B-spline surrogate modelling, and ``emulate_hdmr``
-for prediction with the fitted surrogate.
+Computes ANCOVA-based sensitivity indices from arbitrary ``(X, Y)`` pairs
+using B-spline surrogate modelling. The result retains the fitted surrogate
+for prediction and Shapley effects.
 """
 
 import itertools
+import math
+from collections.abc import Callable
 from functools import lru_cache
 
 import jax
@@ -13,6 +15,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from gsax._batching import apply_batched, resolve_batch_size
 from gsax._normalization import (
     _prenormalize_outputs,
     _prepare_Y,
@@ -28,7 +31,7 @@ from gsax.hdmr._engine import (
     _compute_f_crits,
     _make_hdmr_kernel,
 )
-from gsax.hdmr._result import HDMREmulator, HDMRResult
+from gsax.hdmr._result import HDMRResult, _HDMRFit
 from gsax.problem import Problem
 
 
@@ -180,11 +183,10 @@ def analyze_hdmr(
 
     Validates ``(X, Y)``, warns once about any zero-variance output slice, then
     delegates to :func:`_analyze_hdmr_core`. See that function for the full
-    parameter and return documentation; ``analyze_shapley``'s HDMR backend
-    calls the core directly on an already-canonical Y to avoid re-validating.
+    parameter and return documentation.
     """
     X = jnp.asarray(X)
-    Y, ops = _validate_xy_inputs(problem, X, jnp.asarray(Y))
+    Y = _validate_xy_inputs(problem, X, jnp.asarray(Y))
     # A constant output slice makes every index 0/0 = NaN; warn once up front,
     # in the public wrapper only, so callers routing through the core (Shapley)
     # do not double-warn.
@@ -199,7 +201,6 @@ def analyze_hdmr(
         m=m,
         lambdax=lambdax,
         chunk_size=chunk_size,
-        inserted_output_axis=ops.inserted_output_axis,
     )
 
 
@@ -214,7 +215,6 @@ def _analyze_hdmr_core(
     m: int = 2,
     lambdax: float = 0.01,
     chunk_size: int = 2048,
-    inserted_output_axis: bool = False,
 ) -> HDMRResult:
     """Fit RS-HDMR on an already-canonical Y (no re-validation, no warn).
 
@@ -262,7 +262,7 @@ def _analyze_hdmr_core(
     Returns:
         HDMRResult with per-term indices Sa, Sb, S, per-parameter ST,
         human-readable term labels, F-test selection counts, the fitted
-        emulator (usable with ``emulate_hdmr``), and its RMSE.
+        fitted surrogate state and its RMSE.
 
     Raises:
         ValueError: If ``N < 300``, ``maxorder`` is not 1/2/3, or
@@ -320,7 +320,7 @@ def _analyze_hdmr_core(
     _, T, K_out = Y_3d.shape
     if prenormalize:
         # Standardize each (t, k) slice to zero-mean, unit-variance before
-        # fitting. The scale factors are stored so emulate_hdmr can invert.
+        # fitting. The scale factors are stored so prediction can invert it.
         Y_3d, y_mean, y_std, _ = _prenormalize_outputs(Y_3d)
     else:
         y_mean = jnp.zeros(Y_3d.shape[1:], dtype=Y_3d.dtype)
@@ -423,7 +423,7 @@ def _analyze_hdmr_core(
     y_std_out = _squeeze_output_axes(y_std, squeeze_time, squeeze_output, n_trailing=0)
 
     # Bundle all fitted state needed to reconstruct predictions at new points.
-    emulator: HDMREmulator = {
+    fit_state: _HDMRFit = {
         "C1": C1_out,
         "C2": C2_out,
         "C3": C3_out,
@@ -444,7 +444,7 @@ def _analyze_hdmr_core(
         ST=ST_out,
         problem=problem,
         terms=term_labels,
-        emulator=emulator,
+        _fit=fit_state,
         select=select_sum,
         # RMSE is computed on the standardized scale inside the kernel;
         # multiply by y_std to report it on the original output scale.
@@ -452,7 +452,8 @@ def _analyze_hdmr_core(
             jnp.concatenate(rmse_parts), T, K_out, squeeze_time, squeeze_output
         )
         * y_std_out,
-        _inserted_output_axis=inserted_output_axis,
+        _c2=tuple(c2),
+        _c3=tuple(c3),
     )
 
 
@@ -473,7 +474,7 @@ def _emulator_contract(B: Array, C: Array) -> Array:
     return jnp.sum(jnp.einsum("rmj,tkmj->rtkj", B, C), axis=3)
 
 
-def emulate_hdmr(result: HDMRResult, X_new: Array) -> Array:
+def _predict_hdmr(result: HDMRResult, X_new: Array, *, batch_size: int | None = None) -> Array:
     """Predict at new input points using the fitted HDMR surrogate.
 
     Note: This function is not JIT-compatible because ``HDMRResult`` is not a
@@ -482,6 +483,15 @@ def emulate_hdmr(result: HDMRResult, X_new: Array) -> Array:
     Args:
         result: HDMRResult from ``analyze_hdmr`` (must have ``emulator`` set).
         X_new: (N_new, D) new input points within the problem bounds.
+        batch_size: Rows of ``X_new`` to predict per batch. The B-spline
+            tensor-product bases are linear in the batch size with a large
+            per-row constant (up to ``m1^3`` floats per interaction term at
+            ``maxorder=3``), so single-shot evaluation at large ``N_new`` can
+            exhaust memory. ``None`` (default) derives a batch size from a
+            fixed transient-memory budget; pass ``batch_size >= N_new`` to
+            force a single-shot call. Each row's basis contraction is
+            independent, so batching only perturbs predictions at the level
+            of floating-point reassociation.
 
     Returns:
         Y_pred: (N_new,), (N_new, K), or (N_new, T, K) predicted outputs.
@@ -489,7 +499,7 @@ def emulate_hdmr(result: HDMRResult, X_new: Array) -> Array:
             are inverse-transformed back to the original output scale before
             being returned.
     """
-    em = result.emulator
+    em = result._fit
     if em is None:
         raise ValueError("HDMRResult has no emulator (emulator is None)")
 
@@ -503,45 +513,49 @@ def emulate_hdmr(result: HDMRResult, X_new: Array) -> Array:
 
     # Apply the same CDF -> [0,1] transform used during fitting.
     X_n = cdf_to_unit_interval(X_new, result.problem)
+    N = X_n.shape[0]
 
-    # Reconstruct prediction as f0 + sum of component functions.
-    # Start with first-order: sum_j B1_j @ C1_j.
-    B1 = _build_B1(X_n, em["m"])  # (N_new, m1, D)
-    Y_total = _emulator_contract(B1, C1)
+    # Hoist the static basis index tables out of the per-batch path. Each
+    # higher_orders entry is (basis builder, term index table, tensor-product
+    # index table, coefficients) for one interaction order. Alongside, track
+    # the transient footprint per prediction row -- each basis tensor, its
+    # build temporaries (2 gathered factors for B2, 3 for B3), and the
+    # pre-sum einsum intermediate of _emulator_contract, (slices, n_terms).
+    m1 = C1.shape[-2]
+    D = C1.shape[-1]
+    slices = math.prod(C1.shape[:-2])
+    higher_orders: list[tuple[Callable[[Array, Array, Array], Array], Array, Array, Array]] = []
+    elems_per_row = m1 * D + slices * D
+    if maxorder >= 2:
+        *_, beta2_host, beta3_host = _get_hdmr_static_data(
+            result.problem.num_vars, maxorder, em["m"]
+        )
+        C2 = em["C2"]
+        if C2 is not None:
+            c2 = jnp.asarray(em["c2"], dtype=int)
+            higher_orders.append((_build_B2, c2, jnp.asarray(beta2_host, dtype=int), C2))
+            elems_per_row += (3 * m1**2 + slices) * len(em["c2"])
+        C3 = em["C3"]
+        if maxorder >= 3 and C3 is not None:
+            c3 = jnp.asarray(em["c3"], dtype=int)
+            higher_orders.append((_build_B3, c3, jnp.asarray(beta3_host, dtype=int), C3))
+            elems_per_row += (4 * m1**3 + slices) * len(em["c3"])
+    batch = resolve_batch_size(X_n.dtype.itemsize * elems_per_row, N, batch_size)
 
-    if maxorder >= 2 and em["C2"] is not None:
-        _, _, _, _, _, _, _, _, _, _, beta2_host, _ = _get_hdmr_static_data(
-            result.problem.num_vars,
-            maxorder,
-            em["m"],
-        )
-        B2 = _build_B2(
-            B1,
-            jnp.asarray(em["c2"], dtype=int),
-            jnp.asarray(beta2_host, dtype=int),
-        )
-        Y_total = Y_total + _emulator_contract(B2, em["C2"])
+    def _predict(X_chunk: Array) -> Array:
+        # Reconstruct prediction as f0 + sum of component functions.
+        # Start with first-order: sum_j B1_j @ C1_j.
+        B1 = _build_B1(X_chunk, em["m"])  # (batch, m1, D)
+        Y_total = _emulator_contract(B1, C1)
+        for build, c_idx, beta, C in higher_orders:
+            Y_total = Y_total + _emulator_contract(build(B1, c_idx, beta), C)
+        return Y_total
 
-    if maxorder >= 3 and em["C3"] is not None:
-        _, _, _, _, _, _, _, _, _, _, _, beta3_host = _get_hdmr_static_data(
-            result.problem.num_vars,
-            maxorder,
-            em["m"],
-        )
-        B3 = _build_B3(
-            B1,
-            jnp.asarray(em["c3"], dtype=int),
-            jnp.asarray(beta3_host, dtype=int),
-        )
-        Y_total = Y_total + _emulator_contract(B3, em["C3"])
+    Y_total = apply_batched(_predict, X_n, batch)
 
     # Add grand mean to recover the full surrogate prediction.
     Y_pred = Y_total + f0
     # Undo the standardization applied during fitting, if any.
     if prenormalize:
         Y_pred = Y_pred * y_std + y_mean
-    # If inference inserted a singleton K axis at fit time, drop it so the
-    # prediction mirrors the training Y's original (N_new, T) rank.
-    if result._inserted_output_axis:
-        Y_pred = Y_pred[..., 0]
     return Y_pred

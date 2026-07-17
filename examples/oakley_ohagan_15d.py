@@ -167,10 +167,10 @@ def _efast_md(mo):
 
 @app.cell
 def _efast_analysis(gsax, jnp, oakley_ohagan, problem):
-    X_ef = gsax.sample_efast(problem, N=4096, M=4, seed=42)
+    X_ef = gsax.efast.sample(problem, N=4096, M=4, seed=42)
     Y_ef = oakley_ohagan.evaluate(jnp.asarray(X_ef))
 
-    efast_result = gsax.analyze_efast(problem, Y_ef, M=4)
+    efast_result = gsax.efast.analyze(problem, Y_ef, M=4)
     print(efast_result)
     return (efast_result,)
 
@@ -257,7 +257,7 @@ def _hdmr_analysis(gsax, jax, jnp, oakley_ohagan, problem):
     X_hd = jax.random.normal(_key, (3000, problem.num_vars))
     Y_hd = oakley_ohagan.evaluate(jnp.asarray(X_hd))
 
-    hdmr_result = gsax.analyze_hdmr(problem, X_hd, Y_hd, maxorder=2, m=2)
+    hdmr_result = gsax.hdmr.analyze(problem, X_hd, Y_hd, maxorder=2, m=2)
     print(hdmr_result)
     return (hdmr_result,)
 
@@ -272,7 +272,7 @@ def _dgsm_md(mo):
     Gaussian inputs the Poincare constant is $C_i = \sigma^2 = 1$,
     which gives tighter bounds than uniform distributions.
 
-    We use `sample_mc` to generate i.i.d. samples from the Gaussian
+    We use `monte_carlo` to generate i.i.d. samples from the Gaussian
     input distributions.
     """)
     return
@@ -292,8 +292,8 @@ def _dgsm_fn(jnp, oakley_ohagan):
 
 @app.cell
 def _dgsm_analysis(gsax, jnp, oakley_fn, problem):
-    X_dg = gsax.sample_mc(problem, N=10000, seed=42)
-    dgsm_result = gsax.analyze_dgsm(problem, oakley_fn, jnp.asarray(X_dg))
+    X_dg = gsax.sampling.monte_carlo(problem, n=10000, seed=42)
+    dgsm_result = gsax.dgsm.analyze(problem, oakley_fn, jnp.asarray(X_dg))
     print(dgsm_result)
     return (dgsm_result,)
 

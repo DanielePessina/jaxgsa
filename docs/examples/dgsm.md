@@ -20,22 +20,15 @@ When to use DGSM:
 
 ## Import style
 
-The DGSM module lives at `gsax.dgsm`. You can import it directly or use the
-top-level convenience aliases:
+The DGSM module lives at `gsax.dgsm`:
 
 ```python
-# Subpackage import (preferred for DGSM-focused scripts)
 from gsax import dgsm
 # dgsm.analyze(...)
-
-# Or use the top-level re-exports
-import gsax
-# gsax.analyze_dgsm(...)
-# gsax.sample_mc(...)  # Monte Carlo sampling lives in gsax.sampling
 ```
 
-Note that `sample_mc` is in `gsax.sampling`, not in `gsax.dgsm`. It is
-re-exported at the top level as `gsax.sample_mc()`.
+Note that `monte_carlo` is in `gsax.sampling`, not in `gsax.dgsm`. It is
+called as `gsax.sampling.monte_carlo()`.
 
 ## Key difference from other methods
 
@@ -59,11 +52,11 @@ def ishigami(x):
     return jnp.sin(x[0]) + 7.0 * jnp.sin(x[1])**2 + 0.1 * x[2]**4 * jnp.sin(x[0])
 
 # Generate Monte Carlo samples
-X = gsax.sample_mc(PROBLEM, N=10000, seed=42)
+X = gsax.sampling.monte_carlo(PROBLEM, n=10000, seed=42)
 print("X shape:", X.shape)  # (10000, 3)
 
 # Compute DGSM indices
-result = gsax.analyze_dgsm(PROBLEM, ishigami, jnp.asarray(X))
+result = gsax.dgsm.analyze(PROBLEM, ishigami, jnp.asarray(X))
 
 print("nu:", result.nu)                # (D,) = (3,)
 print("sigma:", result.sigma)          # (D,) = (3,)
@@ -98,8 +91,8 @@ def multi_output_fn(x):
     return jnp.array([a, b])
 
 
-X = gsax.sample_mc(problem, N=10000, seed=42)
-result = gsax.analyze_dgsm(problem, multi_output_fn, jnp.asarray(X))
+X = gsax.sampling.monte_carlo(problem, n=10000, seed=42)
+result = gsax.dgsm.analyze(problem, multi_output_fn, jnp.asarray(X))
 
 print("nu shape:", result.nu.shape)            # (K, D) = (2, 3)
 print("upper_bound shape:", result.upper_bound.shape)  # (K, D) = (2, 3)

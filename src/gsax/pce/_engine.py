@@ -204,7 +204,7 @@ def sobol_from_coefficients(
     pair_mask = active[:, iu] & active[:, ju] & (active_count == 2)[:, None]  # (n_terms, n_pairs)
     s2_upper = jnp.asarray(c2 @ pair_mask) * inv_var[..., None]  # (..., n_pairs)
     # Scatter into the symmetric matrix and mirror; the diagonal is not a pair
-    # index, so keep it NaN to match SAResult's S2.
+    # index, so keep it NaN to match SobolResult's S2.
     S2 = jnp.full((*c2.shape[:-1], D, D), jnp.nan)
     S2 = S2.at[..., iu, ju].set(s2_upper).at[..., ju, iu].set(s2_upper)
 

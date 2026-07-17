@@ -7,7 +7,7 @@ The canonical API reference now lives at [API Reference](/api/).
 
 Jump directly to:
 
-- [`sample_mc()`](/api/#sample-mc)
+- [`monte_carlo()`](/api/#sample-mc)
 - [`analyze_dgsm()`](/api/#analyze-dgsm)
 - [`DGSMResult`](/api/#dgsmresult)
 - [`DGSMResult.to_dataset()`](/api/#dgsmresult-to_dataset)

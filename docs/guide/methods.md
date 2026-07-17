@@ -26,7 +26,7 @@ Common situations:
 - **"I want to know *how* an input matters — shift vs shape."** Use [optimal transport](#optimal-transport-wasserstein-based-sensitivity): its index decomposes exactly into an advective (mean-shift, $= S_1/2$) and a diffusive (spread/shape) component.
 - **"I want one number per input for a whole trajectory."** Use [optimal transport](#optimal-transport-wasserstein-based-sensitivity) with `mode="trajectory"` — point-cloud transport scores each input against the entire time course jointly.
 - **"I want one fair importance number per parameter that sums to 1."** Use [Shapley effects](#shapley-effects).
-- **"I also want a fast emulator of my model."** Use HDMR (`emulate_hdmr`) or PCE (`emulate_pce`).
+- **"I also want a fast surrogate of my model."** Use HDMR or PCE and call `result.predict(...)`.
 
 ### Comparison table
 
@@ -39,7 +39,7 @@ Common situations:
 | What the numbers mean | Exact variance fractions (given enough samples) | Variance fractions from a B-spline surrogate (fit-dependent) | Variance fractions from a polynomial surrogate (fit-dependent) | Exact allocation within the fitted surrogate; depends on fit quality | Exact variance fractions (given enough samples) | Bounds on $S_T$, not exact indices | Screening ranks ($\mu^*$ as $S_T$ proxy), not variance fractions | Dependence measure, not variance fractions | Distributional (KS) distance, not variance fractions | Distributional (L1) distance, not variance fractions | Distributional ($W_2^2$) distance in $[0,1]$, split into mean-shift + shape parts |
 | Second-order indices | Direct estimation from cross-matrices | From interaction component functions | Analytical from coefficients | Not available (interaction variance folded into $\mathrm{Sh}$) | Not available | Not available | Not available | Not available | Not available | Not available | Not available |
 | Interaction detection | Via $S_2$ and the gap $S_T - S_1$ | Via explicit interaction component functions | Via $S_2$ from coefficients | Via the gaps $\mathrm{Sh} - S_1$ and $S_T - \mathrm{Sh}$ | Via the gap $S_T - S_1$ only | Not available (bounds only) | Via large $\sigma$ relative to $\mu^*$ (not pair-attributable) | Via the Total HSIC − R2-HSIC gap | Not available (first-order only) | Not available (the $\delta - S_1$ gap flags influence beyond first-order variance) | Not available (the diffusive component flags influence beyond mean shift) |
-| Surrogate/emulator | No | Yes (`emulate_hdmr`) | Yes (`emulate_pce`) | Fits HDMR or PCE internally (no emulator returned) | No | No | No | No | No | No | No |
+| Reusable surrogate | No | Yes (`result.predict`) | Yes (`result.predict`) | Derived from either fitted result | No | No | No | No | No | No | No |
 
 ## Background: Variance-Based Sensitivity Analysis
 
@@ -123,11 +123,11 @@ $$
 
 ### How to use it
 
-1. `gsax.sample()` generates the Sobol' quasi-random sequence and builds the Saltelli cross-matrices. Duplicate rows are removed so your model only evaluates unique input points.
+1. `gsax.sobol.sample()` generates the Sobol' quasi-random sequence and builds the Saltelli cross-matrices. Duplicate rows are removed so your model only evaluates unique input points.
 2. You evaluate your model on `sampling_result.samples`.
-3. `gsax.analyze()` reconstructs the Saltelli layout internally and computes all indices in a single `jit(vmap(...))` pass.
+3. `gsax.sobol.analyze()` reconstructs the Saltelli layout internally and computes all indices in a single `jit(vmap(...))` pass.
 
-Two optional knobs align results with SALib. `gsax.analyze(..., prenormalize=True)` applies SALib-style output standardization once per output slice before computing the estimators, which changes the point-estimate path to match SALib more closely. When bootstrapping (`num_resamples > 0`), `ci_method="quantile"` reports percentile bootstrap bounds and `ci_method="gaussian"` reports symmetric bounds from the bootstrap standard deviation; either way, gsax returns explicit lower/upper endpoint arrays rather than SALib's symmetric confidence widths.
+Two optional knobs align results with SALib. `gsax.sobol.analyze(..., prenormalize=True)` applies SALib-style output standardization once per output slice before computing the estimators, which changes the point-estimate path to match SALib more closely. When bootstrapping (`num_resamples > 0`), `ci_method="quantile"` reports percentile bootstrap bounds and `ci_method="gaussian"` reports symmetric bounds from the bootstrap standard deviation; either way, gsax returns explicit lower/upper endpoint arrays rather than SALib's symmetric confidence widths.
 
 ### Index summary
 
@@ -165,10 +165,12 @@ This distinction matters because many real-world models have correlated inputs (
 ### How to use it
 
 1. You provide any set of $(X, Y)$ pairs — no sampling design required.
-2. `gsax.analyze_hdmr()` maps inputs to $[0, 1]$ via their marginal CDFs, optionally standardises outputs once over the sample axis (`prenormalize=True`), builds B-spline basis matrices, and fits component functions via backfitting with Tikhonov regularisation.
+2. `gsax.hdmr.analyze()` maps inputs to $[0, 1]$ via their marginal CDFs, optionally standardises outputs once over the sample axis (`prenormalize=True`), builds B-spline basis matrices, and fits component functions via backfitting with Tikhonov regularisation.
 3. The ANCOVA decomposition splits each component's variance into structural ($S_a$) and correlative ($S_b$) parts. Total-order indices ($S_T$) sum contributions from all terms involving a given parameter.
 
-When prenormalization is enabled, the surrogate is trained on standardized outputs, but `gsax.hdmr.emulate()` (or the top-level alias `gsax.emulate_hdmr()`) maps predictions back to the original output scale before returning them.
+When prenormalization is enabled, the surrogate is trained on standardized
+outputs, but `result.predict(...)` maps predictions back to the original output
+scale before returning them.
 
 ### Index summary
 
@@ -182,7 +184,7 @@ When prenormalization is enabled, the surrogate is trained on standardized outpu
 **When to use HDMR:**
 - Model evaluations are expensive and you want to reuse existing runs
 - Inputs may be correlated (Sobol' assumes independent inputs)
-- You need a surrogate/emulator for fast prediction at new inputs (`gsax.hdmr.emulate`)
+- You need a surrogate for fast prediction at new inputs (`result.predict`)
 
 ## PCE (Polynomial Chaos Expansion)
 
@@ -191,7 +193,7 @@ PCE is the second given-data, surrogate-based route to Sobol indices: it fits an
 ### How to use it
 
 1. You provide any set of $(X, Y)$ pairs; `Y` may be scalar `(N,)`, multi-output `(N, K)`, or time-series `(N, T, K)` — all output slices share one polynomial basis and are fitted in a single solve.
-2. `gsax.analyze_pce()` maps inputs to the appropriate reference domain, builds the design matrix from a total-degree multi-index, and fits coefficients via regularized least squares.
+2. `gsax.pce.analyze()` maps inputs to the appropriate reference domain, builds the design matrix from a total-degree multi-index, and fits coefficients via regularized least squares.
 3. Sobol indices ($S_1$, $S_T$, $S_2$) are computed analytically from the squared coefficients.
 4. Leave-one-out cross-validation RMSE quantifies surrogate accuracy.
 
@@ -199,7 +201,7 @@ PCE is the second given-data, surrogate-based route to Sobol indices: it fits an
 - You want analytical Sobol indices without Monte Carlo sampling noise
 - Your model is smooth enough to be well-approximated by low-order polynomials
 - You have mixed uniform and Gaussian inputs (the Wiener-Askey scheme selects the appropriate basis automatically)
-- You need a fast emulator (`emulate_pce` mirrors the training output layout)
+- You need a fast surrogate (`result.predict` mirrors the training output layout)
 
 ## Shapley Effects
 
@@ -236,7 +238,8 @@ How much of the *output* variance the surrogate actually captured is reported se
 ### How to use it
 
 1. You provide any set of $(X, Y)$ pairs — no sampling design required.
-2. `gsax.analyze_shapley()` fits the selected surrogate backend (`"pce"` or `"hdmr"`), extracts its variance decomposition, and allocates each partial variance equally among the parameters in its interaction set.
+2. Call `.shapley()` on a fitted PCE or HDMR result. Each partial variance is
+   allocated equally among the parameters in its interaction set.
 3. The result carries `Sh` alongside `S1` and `ST` computed from the **same surrogate**, so the three indices are directly comparable and the ordering $S_1 \leq \mathrm{Sh} \leq S_T$ is visible at a glance.
 
 ```python
@@ -244,11 +247,11 @@ import jax.numpy as jnp
 import gsax
 from gsax.benchmarks.ishigami import PROBLEM, evaluate
 
-X = gsax.sample_mc(PROBLEM, N=2000, seed=42)
+X = gsax.sampling.monte_carlo(PROBLEM, n=2000, seed=42)
 Y = evaluate(jnp.asarray(X))
 
 # PCE backend (default) — exact within the fitted polynomial
-result = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y)
+result = gsax.pce.analyze(PROBLEM, jnp.asarray(X), Y).shapley()
 print("Sh:", result.Sh)              # (D,) Shapley effects
 print("sum:", result.Sh.sum())       # == 1 (Shapley efficiency property)
 print("explained:", result.explained_variance)  # sum_u V_u / Var(Y) — fit quality
@@ -257,7 +260,12 @@ print("S1:", result.S1)              # first-order, same surrogate
 print("ST:", result.ST)              # total-order, same surrogate
 
 # HDMR backend — B-spline surrogate; HDMR-only knobs
-result_hdmr = gsax.analyze_shapley(PROBLEM, jnp.asarray(X), Y, backend="hdmr", maxorder=2)
+result_hdmr = gsax.hdmr.analyze(
+    PROBLEM,
+    jnp.asarray(X),
+    Y,
+    maxorder=2,
+).shapley()
 ```
 
 Backend-specific keyword arguments are validated: explicitly setting a knob that belongs to the non-selected backend (e.g. `backend="pce"` with `maxorder=3`) raises `ValueError`.
@@ -311,9 +319,9 @@ The low-frequency content at or below $\lfloor\omega_0/2\rfloor$ is driven entir
 
 ### How to use it
 
-1. `gsax.sample_efast()` (or `efast.sample()`) generates search-curve samples with shape `(N * D, D)`, where each contiguous block of $N$ rows corresponds to one parameter's search curve.
+1. `gsax.efast.sample()` (or `efast.sample()`) generates search-curve samples with shape `(N * D, D)`, where each contiguous block of $N$ rows corresponds to one parameter's search curve.
 2. You evaluate your model on all `N * D` rows.
-3. `gsax.analyze_efast()` (or `efast.analyze()`) splits the output by curve, computes the Fourier spectrum for each, and extracts $S_1$ and $S_T$ indices.
+3. `gsax.efast.analyze()` (or `efast.analyze()`) splits the output by curve, computes the Fourier spectrum for each, and extracts $S_1$ and $S_T$ indices.
 
 ### Index summary
 
@@ -390,8 +398,8 @@ For truncated normal inputs, the constant is computed numerically by solving a w
 
 ### How to use it
 
-1. `gsax.sample_mc()` generates plain Monte Carlo samples from the declared input distributions.
-2. You pass your JAX-differentiable function and the samples to `gsax.analyze_dgsm()`.
+1. `gsax.sampling.monte_carlo()` generates plain Monte Carlo samples from the declared input distributions.
+2. You pass your JAX-differentiable function and the samples to `gsax.dgsm.analyze()`.
 3. Internally, `jax.jacrev` computes the Jacobian via reverse-mode autodiff, and the DGSM moments and bounds are derived.
 4. The returned `DGSMResult` contains `nu`, `sigma`, `upper_bound`, `lower_bound`, and `var_y`.
 
@@ -449,11 +457,11 @@ Morris is closely related to DGSM: as $\Delta \to 0$, $\mu^*_i \to \mathbb{E}|\p
 
 ### How to use it
 
-1. `gsax.sample_morris()` builds the trajectories, removes exact duplicate rows (grid designs collide often in low dimensions, so this saves real model evaluations, just like Saltelli sampling), and returns only the unique rows.
+1. `gsax.morris.sample()` builds the trajectories, removes exact duplicate rows (grid designs collide often in low dimensions, so this saves real model evaluations, just like Saltelli sampling), and returns only the unique rows.
 2. You evaluate your model on `sampling_result.samples`.
-3. `gsax.analyze_morris()` reconstructs the expanded design internally, drops trajectories containing non-finite values with a warning, and reduces one elementary effect per trajectory and parameter to $\mu$, $\mu^*$, and $\sigma$. Pass `num_resamples > 0` (with a JAX PRNG `key`) for bootstrap confidence intervals over trajectories.
+3. `gsax.morris.analyze()` reconstructs the expanded design internally, drops trajectories containing non-finite values with a warning, and reduces one elementary effect per trajectory and parameter to $\mu$, $\mu^*$, and $\sigma$. Pass `num_resamples > 0` (with a JAX PRNG `key`) for bootstrap confidence intervals over trajectories.
 
-Elementary effects are computed in unit-cube coordinates, so $\mu^*$ is directly comparable across parameters regardless of their physical ranges; `MorrisResult.to_physical_units()` rescales to derivative-scale values in the problem's native units (uniform-marginal problems only — for Gaussian marginals the inverse-CDF transform is nonlinear, so the measures stay in grid coordinates). `MorrisSamplingResult.downsample()` prefix-slices to fewer trajectories without re-simulation, mirroring `SamplingResult.downsample()`.
+Elementary effects are computed in unit-cube coordinates, so $\mu^*$ is directly comparable across parameters regardless of their physical ranges; `MorrisResult.to_physical_units()` rescales to derivative-scale values in the problem's native units (uniform-marginal problems only — for Gaussian marginals the inverse-CDF transform is nonlinear, so the measures stay in grid coordinates). `MorrisSamples.downsample()` prefix-slices to fewer trajectories without re-simulation, mirroring `SobolSamples.downsample()`.
 
 Compared to SALib's Morris implementation, gsax adds unique-row deduplication, vectorized multi-output and time-series analysis (SALib's Morris is scalar-only), bootstrap confidence intervals, the radial design, and prefix-nested downsampling.
 
@@ -512,9 +520,9 @@ Because HSIC is a dependence measure rather than a variance fraction, gsax attac
 
 ### How to use it
 
-1. `gsax.sample_mc()` generates plain Monte Carlo samples — any sampling strategy works, since no structured design is required.
+1. `gsax.sampling.monte_carlo()` generates plain Monte Carlo samples — any sampling strategy works, since no structured design is required.
 2. You evaluate your model on the samples.
-3. `gsax.analyze_hsic()` transforms each input to $[0, 1]$ via its marginal CDF, builds the kernel matrices with the median heuristic, and computes all indices and p-values in a single JIT-compiled pass.
+3. `gsax.hsic.analyze()` transforms each input to $[0, 1]$ via its marginal CDF, builds the kernel matrices with the median heuristic, and computes all indices and p-values in a single JIT-compiled pass.
 
 HSIC is $O(N^2)$ in time and memory because it forms $N \times N$ kernel matrices; for large $N$, pass `chunk_size` to build them in row blocks and limit peak memory. For outputs of large magnitude, set `prenormalize=True` to standardise $Y$ before kernel construction.
 
@@ -564,9 +572,9 @@ Because it is built on CDFs rather than moments, the PAWN index is **moment-inde
 
 ### How to use it
 
-1. `gsax.sample_mc()` generates plain Monte Carlo samples (Monte Carlo, Latin Hypercube, or Sobol sequences all work — no structured design required).
+1. `gsax.sampling.monte_carlo()` generates plain Monte Carlo samples (Monte Carlo, Latin Hypercube, or Sobol sequences all work — no structured design required).
 2. You evaluate your model on the samples.
-3. `gsax.analyze_pawn()` maps each input to $[0, 1]$, assigns samples to bins, and computes the per-bin KS distances and their aggregate in a single JIT-compiled pass. Pass `n_bootstrap > 0` for bootstrap confidence intervals.
+3. `gsax.pawn.analyze()` maps each input to $[0, 1]$, assigns samples to bins, and computes the per-bin KS distances and their aggregate in a single JIT-compiled pass. Pass `n_bootstrap > 0` for bootstrap confidence intervals.
 
 The number of bins (`n_bins`, default 10) trades conditioning resolution against sample density per bin; with very few samples per bin the KS statistic becomes noisy, so increase $N$ or decrease `n_bins`.
 
@@ -616,9 +624,9 @@ The estimator matches `SALib.analyze.delta` (same equal-frequency rank partition
 
 ### How to use it
 
-1. `gsax.sample_mc()` generates plain Monte Carlo samples (any sampling strategy works — no structured design is required).
+1. `gsax.sampling.monte_carlo()` generates plain Monte Carlo samples (any sampling strategy works — no structured design is required).
 2. You evaluate your model on the samples.
-3. `gsax.analyze_borgonovo()` partitions each input into rank classes and computes $\delta$, $S_1$, and their bootstrap intervals in a single JIT-compiled kernel, vmapped over output columns and scanned over bootstrap replicates.
+3. `gsax.borgonovo.analyze()` partitions each input into rank classes and computes $\delta$, $S_1$, and their bootstrap intervals in a single JIT-compiled kernel, vmapped over output columns and scanned over bootstrap replicates.
 
 Set `n_bootstrap=0` to skip bias correction and confidence intervals (raw plug-in estimate), or `bias_correct=False` to keep the intervals but report the uncorrected estimate. For large time-series outputs, lower `chunk_size` to bound peak memory, which scales with `chunk_size * D * N * grid_size`.
 
@@ -665,8 +673,8 @@ Entropic and finite-sample bias keep point-cloud-mode indices of irrelevant inpu
 
 ### How to use it
 
-1. `gsax.sample_mc()` or any existing $(X, Y)$ data — no structured design required.
-2. `gsax.analyze_optimal_transport()` computes `ot`, `advective`, and `diffusive` per input (and per output column in `"univariate"` mode), with optional stratified bootstrap confidence intervals.
+1. `gsax.sampling.monte_carlo()` or any existing $(X, Y)$ data — no structured design required.
+2. `gsax.optimal_transport.analyze()` computes `ot`, `advective`, and `diffusive` per input (and per output column in `"univariate"` mode), with optional stratified bootstrap confidence intervals.
 
 Pick the mode by the question: `"univariate"` for per-column indices across `(N,)`/`(N, K)`/`(N, T, K)` outputs, `"multivariate"` for one index per input over the flattened joint output, `"trajectory"` for one index per input per output over the whole time course. Bootstrap in the point-cloud modes costs `n_bootstrap * D * n_partitions` Sinkhorn solves, so keep it modest.
 
@@ -709,7 +717,7 @@ Time-series outputs are particularly useful for dynamic models, where the evolut
 
 ## Data Cleaning
 
-`gsax.analyze()` automatically drops sample groups that contain non-finite values (NaN, Inf). The Saltelli layout requires groups of rows to stay together, so if any row in a group is non-finite, the entire group is removed. A message is printed when this happens. The `nan_counts` field on the result reports how many NaN values remain in the computed indices.
+`gsax.sobol.analyze()` automatically drops sample groups that contain non-finite values (NaN, Inf). The Saltelli layout requires groups of rows to stay together, so if any row in a group is non-finite, the entire group is removed. A message is printed when this happens. The `nan_counts` field on the result reports how many NaN values remain in the computed indices.
 
 ## References
 

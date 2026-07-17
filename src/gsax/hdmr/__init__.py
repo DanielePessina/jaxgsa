@@ -7,11 +7,10 @@ Example::
     from gsax import hdmr
 
     result = hdmr.analyze(problem, X, Y)
-    Y_pred = hdmr.emulate(result, X_new)
+    Y_pred = result.predict(X_new)
 """
 
 from gsax.hdmr._analyze import analyze_hdmr as analyze
-from gsax.hdmr._analyze import emulate_hdmr as emulate
-from gsax.hdmr._result import HDMREmulator, HDMRResult
+from gsax.hdmr._result import HDMRResult
 
-__all__ = ["HDMREmulator", "HDMRResult", "analyze", "emulate"]
+__all__ = ["HDMRResult", "analyze"]

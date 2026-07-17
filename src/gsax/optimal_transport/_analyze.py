@@ -414,7 +414,7 @@ def analyze(
             ``(0, 1)``, or ``chunk_size`` is not a positive integer.
     """
     X = jnp.asarray(X)
-    Y, _ = _validate_xy_inputs(problem, X, Y)
+    Y = _validate_xy_inputs(problem, X, Y)
 
     if mode not in _MODES:
         raise ValueError(f"mode must be one of {_MODES}, got {mode!r}")

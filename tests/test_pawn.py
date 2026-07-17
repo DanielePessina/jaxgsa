@@ -9,14 +9,14 @@ import pytest
 from gsax.benchmarks import ishigami
 from gsax.pawn import PAWNResult, analyze
 from gsax.problem import Problem
-from gsax.sampling import sample_mc
+from gsax.sampling import monte_carlo
 
 
 @pytest.fixture(scope="module")
 def ishigami_data():
     """Generate Ishigami test data."""
     N = 5000
-    X = jnp.asarray(sample_mc(ishigami.PROBLEM, N=N, seed=42))
+    X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=N, seed=42))
     Y = ishigami.evaluate(X)
     return X, Y
 
@@ -123,7 +123,7 @@ class TestPAWNMultiOutput:
             bounds=((-np.pi, np.pi), (-np.pi, np.pi), (-np.pi, np.pi)),
         )
         N = 2000
-        X = jnp.asarray(sample_mc(problem, N=N, seed=42))
+        X = jnp.asarray(monte_carlo(problem, n=N, seed=42))
         Y1 = ishigami.evaluate(X)
         Y2 = jnp.sum(X**2, axis=1)
         Y_multi = jnp.column_stack([Y1, Y2])
@@ -137,7 +137,7 @@ class TestPAWNMultiOutput:
             bounds=((-np.pi, np.pi), (-np.pi, np.pi), (-np.pi, np.pi)),
         )
         N = 2000
-        X = jnp.asarray(sample_mc(problem, N=N, seed=42))
+        X = jnp.asarray(monte_carlo(problem, n=N, seed=42))
         Y1 = ishigami.evaluate(X)
         Y2 = jnp.sum(X**2, axis=1)
         Y_3d = jnp.stack([jnp.column_stack([Y1, Y2]), jnp.column_stack([Y2, Y1])], axis=1)
@@ -162,7 +162,7 @@ class TestPAWNToDataset:
             bounds=((-np.pi, np.pi), (-np.pi, np.pi), (-np.pi, np.pi)),
         )
         N = 1000
-        X = jnp.asarray(sample_mc(problem, N=N, seed=42))
+        X = jnp.asarray(monte_carlo(problem, n=N, seed=42))
         Y1 = ishigami.evaluate(X)
         Y2 = jnp.sum(X**2, axis=1)
         Y_multi = jnp.column_stack([Y1, Y2])

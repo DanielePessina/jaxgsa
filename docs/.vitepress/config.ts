@@ -18,6 +18,7 @@ export default defineConfig({
     sidebar: {
       '/guide/': [
         { text: 'Getting Started', link: '/guide/getting-started' },
+        { text: 'Migrating to 0.4', link: '/guide/migration-0.4' },
         { text: 'Methods', link: '/guide/methods' },
         { text: 'Benchmarks', link: '/guide/benchmarks' },
         { text: 'Configuration', link: '/guide/configuration' },

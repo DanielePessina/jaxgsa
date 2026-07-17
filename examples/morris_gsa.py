@@ -76,11 +76,11 @@ def _ishigami_md(mo):
     + 0.1\,x_3^4 \sin x_1$ has three inputs uniform on $[-\pi, \pi]$.
     The workflow mirrors the other gsax methods:
 
-    1. **Sample** — `gsax.sample_morris` builds $r = 100$ trajectories on
+    1. **Sample** — `gsax.morris.sample` builds $r = 100$ trajectories on
        the default `num_levels=4` grid and returns only the **unique** rows
        to evaluate.
     2. **Evaluate** — run the model on `sr.samples`.
-    3. **Analyse** — `gsax.analyze_morris` reconstructs the expanded design
+    3. **Analyse** — `gsax.morris.analyze` reconstructs the expanded design
        internally and reduces the elementary effects.
 
     Watch the verbose summary line printed by the sampler: it reports the
@@ -96,10 +96,10 @@ def _ishigami_md(mo):
 def _ishigami_analysis(gsax, ishigami, jnp):
     morris_problem = ishigami.PROBLEM
 
-    sr_traj = gsax.sample_morris(morris_problem, 100, seed=42)
+    sr_traj = gsax.morris.sample(morris_problem, 100, seed=42)
     Y_traj = ishigami.evaluate(jnp.asarray(sr_traj.samples))
 
-    result_traj = gsax.analyze_morris(sr_traj, Y_traj)
+    result_traj = gsax.morris.analyze(sr_traj, Y_traj)
     print(result_traj.to_dataset())
     return Y_traj, morris_problem, result_traj, sr_traj
 
@@ -187,7 +187,7 @@ def _bootstrap_md(mo):
 
 @app.cell
 def _bootstrap(Y_traj, gsax, jax, morris_problem, np, plt, sr_traj):
-    result_ci = gsax.analyze_morris(
+    result_ci = gsax.morris.analyze(
         sr_traj,
         Y_traj,
         num_resamples=500,
@@ -253,9 +253,9 @@ def _radial_md(mo):
 
 @app.cell
 def _radial_comparison(gsax, ishigami, jnp, morris_problem, np, plt, result_traj):
-    sr_radial = gsax.sample_morris(morris_problem, 100, method="radial", seed=42)
+    sr_radial = gsax.morris.sample(morris_problem, 100, method="radial", seed=42)
     Y_radial = ishigami.evaluate(jnp.asarray(sr_radial.samples))
-    result_radial = gsax.analyze_morris(sr_radial, Y_radial)
+    result_radial = gsax.morris.analyze(sr_radial, Y_radial)
 
     _names = list(morris_problem.names)
     _x = np.arange(len(_names))
@@ -305,7 +305,7 @@ def _downsample_md(mo):
 @app.cell
 def _downsample(Y_traj, gsax, jnp, morris_problem, np, plt, result_traj, sr_traj):
     sr_25, Y_25 = sr_traj.downsample(25, np.asarray(Y_traj))
-    result_25 = gsax.analyze_morris(sr_25, jnp.asarray(Y_25))
+    result_25 = gsax.morris.analyze(sr_25, jnp.asarray(Y_25))
 
     _names = list(morris_problem.names)
     _mu_star_100 = np.asarray(result_traj.mu_star)

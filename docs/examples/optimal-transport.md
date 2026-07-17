@@ -39,7 +39,7 @@ from gsax import optimal_transport
 
 # Or top-level
 import gsax
-# gsax.analyze_optimal_transport(...)
+# gsax.optimal_transport.analyze(...)
 ```
 
 ## Scalar example (Ishigami)
@@ -49,10 +49,10 @@ import jax.numpy as jnp
 import gsax
 from gsax.benchmarks.ishigami import PROBLEM, evaluate
 
-X = gsax.sample_mc(PROBLEM, N=8192, seed=42)
+X = gsax.sampling.monte_carlo(PROBLEM, n=8192, seed=42)
 Y = evaluate(jnp.asarray(X))
 
-result = gsax.analyze_optimal_transport(PROBLEM, jnp.asarray(X), Y)
+result = gsax.optimal_transport.analyze(PROBLEM, jnp.asarray(X), Y)
 
 print("ot:       ", result.ot)         # (3,) total index
 print("advective:", result.advective)  # location-shift part
@@ -88,15 +88,15 @@ Y2 = jnp.stack([Y, Y**2], axis=1)        # (N, K=2)
 Y3 = jnp.stack([Y2, Y2 + 1.0], axis=1)   # (N, T=2, K=2)
 
 # Per-column indices (default): (K, D) / (T, K, D)
-r_uni = gsax.analyze_optimal_transport(PROBLEM, X, Y3)
+r_uni = gsax.optimal_transport.analyze(PROBLEM, X, Y3)
 print(r_uni.ot.shape)  # (2, 2, 3)
 
 # One index per input over the joint output distribution: (D,)
-r_mv = gsax.analyze_optimal_transport(PROBLEM, X, Y2, mode="multivariate")
+r_mv = gsax.optimal_transport.analyze(PROBLEM, X, Y2, mode="multivariate")
 print(r_mv.ot.shape)  # (3,)
 
 # One index per input per output, over each output's whole time course: (K, D)
-r_traj = gsax.analyze_optimal_transport(PROBLEM, X, Y3, mode="trajectory")
+r_traj = gsax.optimal_transport.analyze(PROBLEM, X, Y3, mode="trajectory")
 print(r_traj.ot.shape)  # (2, 3)
 ```
 
@@ -117,7 +117,7 @@ irrelevant input strictly above zero. Don't compare these indices
 against 0; compare them against an irrelevance baseline:
 
 ```python
-result = gsax.analyze_optimal_transport(
+result = gsax.optimal_transport.analyze(
     PROBLEM, X, Y2, mode="multivariate", dummy=True
 )
 print("indices:  ", result.ot)
@@ -133,7 +133,7 @@ less bias but more iterations.
 ## Bootstrap confidence intervals
 
 ```python
-result = gsax.analyze_optimal_transport(
+result = gsax.optimal_transport.analyze(
     PROBLEM, X, Y, n_bootstrap=200, conf_level=0.95, seed=0
 )
 print(result.ot_conf)         # (2, 3): [lower, upper]

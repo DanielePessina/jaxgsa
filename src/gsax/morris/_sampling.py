@@ -3,7 +3,7 @@
 Follows the same two-layer contract as :mod:`gsax.sampling`:
 
 1. ``sample()`` returns only the unique rows that a user should evaluate.
-2. ``MorrisSamplingResult`` carries enough metadata to reconstruct the full
+2. ``MorrisSamples`` carries enough metadata to reconstruct the full
    expanded design and to locate each elementary effect inside it.
 
 Both designs cost ``n_trajectories * (D + 1)`` expanded rows. Trajectory
@@ -30,7 +30,7 @@ import numpy as np
 from scipy.stats.qmc import Sobol
 
 from gsax.problem import Problem
-from gsax.sampling import _next_power_of_2, _stable_unique_rows, _transform_samples
+from gsax.sobol._sampling import _next_power_of_2, _stable_unique_rows, _transform_samples
 
 # Offset between the Sobol' draws used for radial base points (a) and
 # auxiliary points (b). Reusing draw i for both would give delta = 0;
@@ -55,7 +55,7 @@ def _min_radial_delta() -> float:
 
 
 @dataclass(frozen=True)
-class MorrisSamplingResult:
+class MorrisSamples:
     """Unique Morris samples plus metadata to locate elementary effects.
 
     Attributes:
@@ -97,16 +97,16 @@ class MorrisSamplingResult:
         return self.samples.shape[0]
 
     @overload
-    def downsample(self, n_trajectories: int) -> MorrisSamplingResult: ...
+    def downsample(self, n_trajectories: int) -> MorrisSamples: ...
 
     @overload
     def downsample(
         self, n_trajectories: int, Y: np.ndarray
-    ) -> tuple[MorrisSamplingResult, np.ndarray]: ...
+    ) -> tuple[MorrisSamples, np.ndarray]: ...
 
     def downsample(
         self, n_trajectories: int, Y: np.ndarray | None = None
-    ) -> MorrisSamplingResult | tuple[MorrisSamplingResult, np.ndarray]:
+    ) -> MorrisSamples | tuple[MorrisSamples, np.ndarray]:
         """Return a smaller result by prefix-slicing to fewer trajectories.
 
         Trajectories are generated sequentially from independent draws
@@ -127,8 +127,8 @@ class MorrisSamplingResult:
                 the matching prefix is returned alongside the new result.
 
         Returns:
-            ``MorrisSamplingResult`` when called without ``Y``, or
-            ``(MorrisSamplingResult, Y_small)`` when ``Y`` is provided.
+            ``MorrisSamples`` when called without ``Y``, or
+            ``(MorrisSamples, Y_small)`` when ``Y`` is provided.
 
         Raises:
             ValueError: If ``n_trajectories`` is out of range or ``Y`` has
@@ -152,7 +152,7 @@ class MorrisSamplingResult:
         # expanded prefix itself a prefix, so max+1 recovers the unique count.
         n_unique_new = int(new_exp2uniq.max()) + 1
 
-        sr_small = MorrisSamplingResult(
+        sr_small = MorrisSamples(
             samples=self.samples[:n_unique_new].copy(),
             expanded_n_total=new_expanded_n,
             expanded_to_unique=new_exp2uniq.copy(),
@@ -300,7 +300,7 @@ def _print_morris_summary(
     duplicate_fraction = duplicates_removed / expanded_n_total if expanded_n_total else 0.0
     levels_label = f", num_levels={num_levels}" if method == "trajectory" else ""
     print(
-        "gsax.sample_morris: "
+        "gsax.morris.sample: "
         f"D={n_params}, method={method}, n_trajectories={n_trajectories}{levels_label}, "
         f"expanded_rows={expanded_n_total}, returned_unique={unique_n}, "
         f"duplicates_removed={duplicates_removed} ({duplicate_fraction:.1%})"
@@ -317,7 +317,7 @@ def sample(
     seed: int | np.random.Generator | None = None,
     truncation_quantile: float = 0.005,
     verbose: bool = True,
-) -> MorrisSamplingResult:
+) -> MorrisSamples:
     """Generate unique Morris elementary-effects samples for model evaluation.
 
     Morris screening ranks inputs by one-at-a-time finite differences
@@ -360,7 +360,7 @@ def sample(
             only).
         seed: Random seed or generator for reproducibility. Pass an ``int``
             (or ``None``) to keep the prefix-nesting guarantee of
-            :meth:`MorrisSamplingResult.downsample`; a reused
+            :meth:`MorrisSamples.downsample`; a reused
             ``np.random.Generator`` advances its state between calls and breaks
             that nesting.
         truncation_quantile: Tail probability ``q`` excluded on each side of
@@ -371,7 +371,7 @@ def sample(
             many duplicate rows were removed.
 
     Returns:
-        MorrisSamplingResult with a unique sample matrix plus elementary-effect
+        MorrisSamples with a unique sample matrix plus elementary-effect
         bookkeeping for later analysis.
 
     Raises:
@@ -427,7 +427,7 @@ def sample(
             expanded_n_total=expanded_samples.shape[0],
         )
 
-    return MorrisSamplingResult(
+    return MorrisSamples(
         samples=unique_samples,
         expanded_n_total=expanded_samples.shape[0],
         expanded_to_unique=expanded_to_unique,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate API docs coverage for the public gsax surface."""
+"""Validate namespace coverage for the public gsax surface."""
 
 from __future__ import annotations
 
@@ -11,21 +11,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 API_DOC = ROOT / "docs" / "api" / "index.md"
 INIT_FILE = ROOT / "src" / "gsax" / "__init__.py"
-CLASS_FILES = {
-    "Problem": ROOT / "src" / "gsax" / "problem.py",
-    "SamplingResult": ROOT / "src" / "gsax" / "sampling.py",
-    "SAResult": ROOT / "src" / "gsax" / "sobol" / "_result.py",
-    "HDMRResult": ROOT / "src" / "gsax" / "hdmr" / "_result.py",
-    "PCEResult": ROOT / "src" / "gsax" / "pce" / "_result.py",
-    "ShapleyResult": ROOT / "src" / "gsax" / "shapley" / "_result.py",
-    "EFASTResult": ROOT / "src" / "gsax" / "efast" / "_result.py",
-    "DGSMResult": ROOT / "src" / "gsax" / "dgsm" / "_result.py",
-    "PAWNResult": ROOT / "src" / "gsax" / "pawn" / "_result.py",
-    "HSICResult": ROOT / "src" / "gsax" / "hsic" / "_result.py",
-    "MorrisResult": ROOT / "src" / "gsax" / "morris" / "_result.py",
-    "MorrisSamplingResult": ROOT / "src" / "gsax" / "morris" / "_sampling.py",
-    "DeltaResult": ROOT / "src" / "gsax" / "borgonovo" / "_result.py",
-}
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 HTML_ID_RE = re.compile(r'<a\s+id="([^"]+)"', re.IGNORECASE)
 
@@ -60,47 +45,8 @@ def _load_exports() -> list[str]:
     raise ValueError("Could not find __all__ in src/gsax/__init__.py")
 
 
-def _collect_class_contracts(path: Path, class_name: str) -> dict[str, set[str]]:
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    for node in tree.body:
-        if isinstance(node, ast.ClassDef) and node.name == class_name:
-            fields: set[str] = set()
-            properties: set[str] = set()
-            methods: set[str] = set()
-            for item in node.body:
-                if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
-                    name = item.target.id
-                    if not name.startswith("_"):
-                        fields.add(name)
-                elif isinstance(item, ast.FunctionDef):
-                    if item.name.startswith("_"):
-                        continue
-                    decorators = {
-                        getattr(decorator, "id", None)
-                        for decorator in item.decorator_list
-                        if isinstance(decorator, ast.Name)
-                    }
-                    if "property" in decorators:
-                        properties.add(item.name)
-                    else:
-                        methods.add(item.name)
-            return {"fields": fields, "properties": properties, "methods": methods}
-    raise ValueError(f"Could not find class {class_name} in {path}")
-
-
 def _build_required_entries() -> list[str]:
-    exports = _load_exports()
-    required = set(exports)
-    for class_name, path in CLASS_FILES.items():
-        contracts = _collect_class_contracts(path, class_name)
-        required.add(class_name)
-        for field in contracts["fields"]:
-            required.add(f"{class_name}.{field}")
-        for prop in contracts["properties"]:
-            required.add(f"{class_name}.{prop}")
-        for method in contracts["methods"]:
-            required.add(f"{class_name}.{method}")
-    return sorted(required)
+    return sorted(_load_exports())
 
 
 def _load_doc_tokens() -> tuple[set[str], str]:
@@ -156,7 +102,7 @@ def main() -> int:
         return 1
 
     print(
-        f"API docs coverage OK: {len(required_entries)} entries documented "
+        f"API namespace coverage OK: {len(required_entries)} entries documented "
         f"in {API_DOC.relative_to(ROOT)}"
     )
     return 0

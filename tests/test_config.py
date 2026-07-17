@@ -30,7 +30,7 @@ def test_enable_compilation_cache_sets_config(tmp_path):
     also confirms the three flag names are valid; the value read-backs confirm
     each was applied.
     """
-    returned = gsax.enable_compilation_cache(
+    returned = gsax.config.enable_compilation_cache(
         tmp_path, min_compile_time_secs=2.5, min_entry_size_bytes=128
     )
     assert returned == str(tmp_path)
@@ -45,5 +45,5 @@ def test_enable_compilation_cache_sets_config(tmp_path):
 def test_enable_compilation_cache_expands_user(tmp_path, monkeypatch):
     """A leading ``~`` in the path is expanded to the home directory."""
     monkeypatch.setenv("HOME", str(tmp_path))
-    returned = gsax.enable_compilation_cache("~/gsax-cache")
+    returned = gsax.config.enable_compilation_cache("~/gsax-cache")
     assert returned == str(tmp_path / "gsax-cache")

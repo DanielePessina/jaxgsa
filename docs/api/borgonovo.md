@@ -7,7 +7,7 @@ The canonical API reference now lives at [API Reference](/api/).
 
 Jump directly to:
 
-- [`sample_mc()`](/api/#sample-mc)
+- [`monte_carlo()`](/api/#sample-mc)
 - [`analyze_borgonovo()`](/api/#analyze-borgonovo)
 - [`DeltaResult`](/api/#deltaresult)
 - [`DeltaResult.to_dataset()`](/api/#deltaresult-to_dataset)

@@ -16,6 +16,6 @@ Example::
 
 from gsax.morris._analyze import analyze
 from gsax.morris._result import MorrisResult
-from gsax.morris._sampling import MorrisSamplingResult, sample
+from gsax.morris._sampling import MorrisSamples, sample
 
-__all__ = ["MorrisResult", "MorrisSamplingResult", "analyze", "sample"]
+__all__ = ["MorrisResult", "MorrisSamples", "analyze", "sample"]

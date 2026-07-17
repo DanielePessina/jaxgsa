@@ -1,18 +1,15 @@
 # PCE
 
-Polynomial chaos expansion: Sobol indices computed analytically from a fitted
-orthogonal-polynomial surrogate. Efficient for smooth outputs.
+`gsax.pce.analyze(problem, X, Y, ...)` fits a polynomial chaos expansion and
+returns `PCEResult`.
 
-The canonical API reference now lives at [API Reference](/api/).
+Important result operations:
 
-Jump directly to:
+- `result.predict(X_new, batch_size=None)`
+- `result.shapley()`
+- `result.to_dataset(time_coords=None)`
 
-- [`analyze_pce()`](/api/#analyze_pce)
-- [`emulate_pce()`](/api/#emulate_pce)
-- [`PCEResult`](/api/#pceresult)
-- [`PCEResult.to_dataset()`](/api/#pceresult-to_dataset)
+The result exposes `S1`, `ST`, `S2`, fitted coefficients, the multi-index,
+effective order, leave-one-out RMSE, and explained variance.
 
-Related docs:
-
-- [PCE Example](/examples/pce)
-- [Methods](/guide/methods)
+See the [PCE example](/examples/pce) and [API overview](/api/).

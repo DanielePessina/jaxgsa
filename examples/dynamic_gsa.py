@@ -54,10 +54,10 @@ def _imports():
 
     import gsax
     from gsax import efast
-    from gsax.sampling import sample_mc
+    from gsax.sampling import monte_carlo
 
     plt.rcParams["figure.dpi"] = 150
-    return efast, gsax, jax, jnp, mo, np, plt, sample_mc
+    return efast, gsax, jax, jnp, mo, np, plt, monte_carlo
 
 
 @app.cell(hide_code=True)
@@ -142,7 +142,7 @@ def _sobol_md(mo):
 
 @app.cell
 def _sobol_analysis(gsax, jax, jnp, oscillator, problem):
-    sampling_result = gsax.sample(
+    sampling_result = gsax.sobol.sample(
         problem,
         n_samples=4096,
         seed=0,
@@ -154,7 +154,7 @@ def _sobol_analysis(gsax, jax, jnp, oscillator, problem):
     # Reshape (N, T) -> (N, T, 1) so gsax treats columns as time steps, not outputs
     Y_sobol = Y_sobol[..., None]
 
-    sobol_result = gsax.analyze(
+    sobol_result = gsax.sobol.analyze(
         sampling_result,
         Y_sobol,
         num_resamples=200,
@@ -324,9 +324,9 @@ def _dgsm_fn(jnp, times):
 
 
 @app.cell
-def _dgsm_analysis(gsax, jnp, oscillator_unbatched, problem, sample_mc):
-    X_dgsm = sample_mc(problem, N=50_000, seed=7)
-    dgsm_result = gsax.analyze_dgsm(problem, oscillator_unbatched, jnp.asarray(X_dgsm))
+def _dgsm_analysis(gsax, jnp, oscillator_unbatched, problem, monte_carlo):
+    X_dgsm = monte_carlo(problem, n=50_000, seed=7)
+    dgsm_result = gsax.dgsm.analyze(problem, oscillator_unbatched, jnp.asarray(X_dgsm))
     print(dgsm_result)
     return (dgsm_result,)
 

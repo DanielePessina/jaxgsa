@@ -9,13 +9,13 @@ import pytest
 from gsax.benchmarks import ishigami, linear, sobol_g
 from gsax.hsic import HSICResult, analyze
 from gsax.problem import GaussianInputSpec, Problem
-from gsax.sampling import sample_mc
+from gsax.sampling import monte_carlo
 
 
 @pytest.fixture(scope="module")
 def linear_hsic_result():
     """HSIC result for linear benchmark."""
-    X = sample_mc(linear.PROBLEM, N=1024, seed=42)
+    X = monte_carlo(linear.PROBLEM, n=1024, seed=42)
     Y = linear.evaluate(jnp.asarray(X))
     return analyze(linear.PROBLEM, jnp.asarray(X), Y, seed=42, n_perms=100)
 
@@ -23,7 +23,7 @@ def linear_hsic_result():
 @pytest.fixture(scope="module")
 def ishigami_hsic_result():
     """HSIC result for Ishigami benchmark."""
-    X = sample_mc(ishigami.PROBLEM, N=1024, seed=42)
+    X = monte_carlo(ishigami.PROBLEM, n=1024, seed=42)
     Y = ishigami.evaluate(jnp.asarray(X))
     return analyze(ishigami.PROBLEM, jnp.asarray(X), Y, seed=42, n_perms=100)
 
@@ -31,7 +31,7 @@ def ishigami_hsic_result():
 @pytest.fixture(scope="module")
 def sobol_g_hsic_result():
     """HSIC result for Sobol G-function benchmark."""
-    X = sample_mc(sobol_g.PROBLEM, N=1024, seed=42)
+    X = monte_carlo(sobol_g.PROBLEM, n=1024, seed=42)
     Y = sobol_g.evaluate(jnp.asarray(X))
     return analyze(sobol_g.PROBLEM, jnp.asarray(X), Y, seed=42, n_perms=100)
 
@@ -116,7 +116,7 @@ class TestSobolGHSIC:
 class TestMultiOutput:
     def test_shapes(self):
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
-        X = sample_mc(problem, N=512, seed=7)
+        X = monte_carlo(problem, n=512, seed=7)
         Xj = jnp.asarray(X)
         Y = jnp.column_stack([Xj @ jnp.array([1.0, 2.0, 3.0]), jnp.sum(Xj**2, axis=1)])
         result = analyze(problem, Xj, Y, n_perms=50, seed=7)
@@ -127,7 +127,7 @@ class TestMultiOutput:
 
     def test_linear_output_matches_scalar(self):
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
-        X = sample_mc(problem, N=1024, seed=8)
+        X = monte_carlo(problem, n=1024, seed=8)
         Xj = jnp.asarray(X)
         Y_scalar = Xj @ jnp.array([1.0, 2.0, 3.0])
         Y_multi = jnp.column_stack([Y_scalar, jnp.sum(Xj**2, axis=1)])
@@ -143,7 +143,7 @@ class TestMultiOutput:
 class TestTimeSeries:
     def test_shapes_3d(self):
         problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        X = sample_mc(problem, N=256, seed=9)
+        X = monte_carlo(problem, n=256, seed=9)
         Xj = jnp.asarray(X)
         T, K = 3, 2
         Y = jnp.zeros((256, T, K))
@@ -158,7 +158,7 @@ class TestTimeSeries:
 class TestBandwidthOverride:
     def test_fixed_bandwidth(self):
         problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        X = sample_mc(problem, N=256, seed=10)
+        X = monte_carlo(problem, n=256, seed=10)
         Xj = jnp.asarray(X)
         Y = Xj[:, 0] * 2.0 + Xj[:, 1]
         r1 = analyze(problem, Xj, Y, bandwidth=0.3, n_perms=20, seed=10)
@@ -167,7 +167,7 @@ class TestBandwidthOverride:
 
     def test_different_bandwidth_different_result(self):
         problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        X = sample_mc(problem, N=256, seed=11)
+        X = monte_carlo(problem, n=256, seed=11)
         Xj = jnp.asarray(X)
         Y = Xj[:, 0] * 2.0 + Xj[:, 1]
         r1 = analyze(problem, Xj, Y, bandwidth=0.1, n_perms=20, seed=11)
@@ -178,7 +178,7 @@ class TestBandwidthOverride:
 class TestPrenormalize:
     def test_prenormalize_runs(self):
         problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        X = sample_mc(problem, N=256, seed=12)
+        X = monte_carlo(problem, n=256, seed=12)
         Xj = jnp.asarray(X)
         Y = Xj[:, 0] * 100.0 + Xj[:, 1]
         result = analyze(problem, Xj, Y, prenormalize=True, n_perms=20, seed=12)
@@ -188,7 +188,7 @@ class TestPrenormalize:
 class TestChunked:
     def test_chunked_matches_unchunked(self):
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
-        X = sample_mc(problem, N=512, seed=13)
+        X = monte_carlo(problem, n=512, seed=13)
         Xj = jnp.asarray(X)
         Y = linear.evaluate(Xj)
         r_full = analyze(problem, Xj, Y, n_perms=50, seed=13)
@@ -208,7 +208,7 @@ class TestChunked:
 class TestReproducibility:
     def test_same_seed_same_result(self):
         problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        X = sample_mc(problem, N=256, seed=14)
+        X = monte_carlo(problem, n=256, seed=14)
         Xj = jnp.asarray(X)
         Y = Xj[:, 0] + Xj[:, 1] ** 2
         r1 = analyze(problem, Xj, Y, seed=42, n_perms=50)
@@ -218,7 +218,7 @@ class TestReproducibility:
     def test_different_seed_may_differ(self):
         """Different seeds should produce different permutation sequences."""
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
-        X = sample_mc(problem, N=256, seed=15)
+        X = monte_carlo(problem, n=256, seed=15)
         Xj = jnp.asarray(X)
         # x3 is independent of Y, so its p-value is not pinned at 0
         Y = Xj[:, 0] * 0.5
@@ -291,7 +291,7 @@ class TestToDataset:
             bounds=((0, 1), (0, 1)),
             output_names=("temp", "pressure"),
         )
-        X = sample_mc(problem, N=256, seed=16)
+        X = monte_carlo(problem, n=256, seed=16)
         Xj = jnp.asarray(X)
         Y = jnp.column_stack([Xj[:, 0], Xj[:, 1]])
         result = analyze(problem, Xj, Y, n_perms=20, seed=16)
@@ -302,7 +302,7 @@ class TestToDataset:
 
     def test_timeseries_output(self):
         problem = Problem(names=("x1",), bounds=((0, 1),))
-        X = sample_mc(problem, N=128, seed=17)
+        X = monte_carlo(problem, n=128, seed=17)
         Xj = jnp.asarray(X)
         Y = jnp.ones((128, 2, 1)) * Xj[:, 0:1, None]
         result = analyze(problem, Xj, Y, n_perms=10, seed=17)
@@ -321,7 +321,7 @@ class TestGaussianInputs:
                 ),
             }
         )
-        X = sample_mc(problem, N=512, seed=18)
+        X = monte_carlo(problem, n=512, seed=18)
         Xj = jnp.asarray(X)
         Y = Xj[:, 0] * 2.0 + Xj[:, 1]
         result = analyze(problem, Xj, Y, n_perms=20, seed=18)
@@ -334,7 +334,7 @@ class TestGaussianInputs:
 class TestSingleParam:
     def test_single_input(self):
         problem = Problem(names=("x",), bounds=((0.0, 1.0),))
-        X = sample_mc(problem, N=512, seed=19)
+        X = monte_carlo(problem, n=512, seed=19)
         Xj = jnp.asarray(X)
         Y = jnp.sin(Xj[:, 0])
         result = analyze(problem, Xj, Y, n_perms=50, seed=19)
@@ -349,7 +349,7 @@ class TestIndependentInput:
     def test_independent_input_low_hsic(self):
         """An input independent of the output should have low R2-HSIC."""
         problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        X = sample_mc(problem, N=1024, seed=20)
+        X = monte_carlo(problem, n=1024, seed=20)
         Xj = jnp.asarray(X)
         Y = jnp.sin(Xj[:, 0] * 6.0)
         result = analyze(problem, Xj, Y, n_perms=100, seed=20)
@@ -362,7 +362,7 @@ class TestIndependentInput:
     def test_irrelevant_input_total_near_zero(self):
         """Total HSIC for an irrelevant input should be near zero."""
         problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        X = sample_mc(problem, N=1024, seed=21)
+        X = monte_carlo(problem, n=1024, seed=21)
         Xj = jnp.asarray(X)
         Y = Xj[:, 0]
         result = analyze(problem, Xj, Y, n_perms=20, seed=21)
@@ -375,7 +375,7 @@ class TestSingleParamTotal:
     def test_d1_total_equals_one(self):
         """With D=1, the complement is ones → T_HSIC should be ~1.0."""
         problem = Problem(names=("x",), bounds=((0.0, 1.0),))
-        X = sample_mc(problem, N=512, seed=22)
+        X = monte_carlo(problem, n=512, seed=22)
         Xj = jnp.asarray(X)
         Y = jnp.sin(Xj[:, 0])
         result = analyze(problem, Xj, Y, n_perms=20, seed=22)
@@ -387,7 +387,7 @@ class TestZeroVarianceOutput:
     def test_constant_output_produces_nan(self):
         """Constant Y should produce NaN indices, consistent with the warning."""
         problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        X = sample_mc(problem, N=64, seed=23)
+        X = monte_carlo(problem, n=64, seed=23)
         Xj = jnp.asarray(X)
         Y = jnp.ones(64)
         result = analyze(problem, Xj, Y, n_perms=5, seed=23)

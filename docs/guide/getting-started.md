@@ -51,8 +51,8 @@ problem = gsax.Problem.from_dict({
 })
 
 # 2. Generate input samples. Sobol analysis needs a specific sample layout
-#    (a Saltelli design), so use gsax.sample() rather than random points.
-sampling_result = gsax.sample(problem, n_samples=4096, seed=42)
+#    (a Saltelli design), so use gsax.sobol.sample() rather than random points.
+sampling_result = gsax.sobol.sample(problem, n_samples=4096, seed=42)
 
 # 3. Evaluate your model at each sampled input
 def model(X):  # Ishigami test function — swap in your own model here
@@ -65,7 +65,7 @@ def model(X):  # Ishigami test function — swap in your own model here
 Y = model(sampling_result.samples)  # one output value per sample row
 
 # 4. Compute Sobol indices
-result = gsax.analyze(sampling_result, Y)
+result = gsax.sobol.analyze(sampling_result, Y)
 
 print("S1:", result.S1)   # first-order indices
 print("ST:", result.ST)   # total-order indices
@@ -114,22 +114,21 @@ the full `TypedDict` form and the Gaussian truncation rules.
 ## Save and Reuse Samples
 
 Generating samples and evaluating the model are often separate steps — the
-model may run on a cluster, or take hours. `gsax.sample()` returns a
-`SamplingResult` that you can persist and reload later without losing the
-metadata `gsax.analyze()` needs:
+model may run on a cluster, or take hours. `gsax.sobol.sample()` returns a
+`SobolSamples` that you can persist and reload later without losing the
+metadata `gsax.sobol.analyze()` needs:
 
 ```python
-sampling_result = gsax.sample(problem, n_samples=4096, seed=42)
-sampling_result.save("runs/experiment", format="csv")
+sampling_result = gsax.sobol.sample(problem, n_samples=4096, seed=42)
+sampling_result.save("runs/experiment")
 
-restored = gsax.load("runs/experiment", format="csv")
+restored = gsax.sobol.SobolSamples.load("runs/experiment")
 Y = my_model(restored.samples)
-result = gsax.analyze(restored, Y)
+result = gsax.sobol.analyze(restored, Y)
 ```
 
-This writes a sample file such as `runs/experiment.csv`, a metadata file
-`runs/experiment.json`, and an optional `runs/experiment.npz` sidecar when the
-expanded Saltelli layout cannot be reconstructed with an identity mapping alone.
+This writes `runs/experiment.npz`, containing the sample matrix, problem
+definition, and Saltelli reconstruction metadata.
 
 ## What's Next?
 
@@ -137,9 +136,10 @@ Start with the core workflow, then branch into the example that matches your
 next problem:
 
 - [Methods](/guide/methods) -- compare all eleven methods before choosing a workflow
+- [Migrating to 0.4](/guide/migration-0.4) -- update sampling, analysis, prediction, and Shapley calls from 0.3
 - [Basic Example (Ishigami)](/examples/basic) -- run the canonical scalar-output Sobol analysis end to end
 - [Non-Uniform Inputs](/examples/non-uniform-inputs) -- mix uniform, Gaussian, and truncated Gaussian Sobol marginals in one `Problem`
-- [Save and Reload Samples](/examples/save-load) -- persist a `SamplingResult` and reuse it across runs
+- [Save and Reload Samples](/examples/save-load) -- persist a `SobolSamples` and reuse it across runs
 - [Bootstrap CIs](/examples/bootstrap) -- quantify uncertainty with confidence intervals around `S1`, `ST`, and `S2`
 - [Multi-Output & Time-Series](/examples/multi-output) -- move from scalar outputs to `(N, K)` and `(N, T, K)` analyses
 - [xarray Output](/examples/xarray) -- export labeled datasets with named parameters, outputs, and time coordinates

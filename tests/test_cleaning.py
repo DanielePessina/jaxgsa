@@ -49,10 +49,12 @@ def test_second_order_zero_variance():
 
 
 def test_constant_y_produces_nan_counts(simple_problem):
-    sr = gsax.sample(simple_problem, n_samples=64, seed=0, calc_second_order=False, verbose=False)
+    sr = gsax.sobol.sample(
+        simple_problem, n_samples=64, seed=0, calc_second_order=False, verbose=False
+    )
     Y = jnp.ones(sr.n_total)
     with pytest.warns(UserWarning, match="zero variance"):
-        result = gsax.analyze(sr, Y)
+        result = gsax.sobol.analyze(sr, Y)
     assert result.nan_counts is not None
     assert result.nan_counts["S1"] > 0
     assert result.nan_counts["ST"] > 0
@@ -61,10 +63,12 @@ def test_constant_y_produces_nan_counts(simple_problem):
 
 
 def test_constant_y_second_order_nan(simple_problem):
-    sr = gsax.sample(simple_problem, n_samples=64, seed=0, calc_second_order=True, verbose=False)
+    sr = gsax.sobol.sample(
+        simple_problem, n_samples=64, seed=0, calc_second_order=True, verbose=False
+    )
     Y = jnp.ones(sr.n_total)
     with pytest.warns(UserWarning, match="zero variance"):
-        result = gsax.analyze(sr, Y)
+        result = gsax.sobol.analyze(sr, Y)
     assert result.nan_counts is not None
     assert result.nan_counts["S2"] > 0
     assert jnp.all(jnp.isnan(result.S2))
@@ -74,28 +78,34 @@ def test_constant_y_second_order_nan(simple_problem):
 
 
 def test_drop_nonfinite_rows(simple_problem):
-    sr = gsax.sample(simple_problem, n_samples=64, seed=0, calc_second_order=False, verbose=False)
+    sr = gsax.sobol.sample(
+        simple_problem, n_samples=64, seed=0, calc_second_order=False, verbose=False
+    )
     Y = jnp.sin(jnp.sum(jnp.asarray(sr.samples), axis=1))
     # Inject NaN into the first group
     Y_bad = Y.at[0].set(jnp.nan)
     with pytest.warns(UserWarning, match="dropped"):
-        result = gsax.analyze(sr, Y_bad)
+        result = gsax.sobol.analyze(sr, Y_bad)
     # Should still produce finite results from remaining groups
     assert result.S1.shape == (3,)
 
 
 def test_all_nonfinite_raises(simple_problem):
-    sr = gsax.sample(simple_problem, n_samples=64, seed=0, calc_second_order=False, verbose=False)
+    sr = gsax.sobol.sample(
+        simple_problem, n_samples=64, seed=0, calc_second_order=False, verbose=False
+    )
     Y = jnp.full(sr.n_total, jnp.nan)
     with pytest.warns(UserWarning, match="dropped"):
         with pytest.raises(ValueError, match="All samples contain non-finite values"):
-            gsax.analyze(sr, Y)
+            gsax.sobol.analyze(sr, Y)
 
 
 def test_inf_values_dropped(simple_problem):
-    sr = gsax.sample(simple_problem, n_samples=64, seed=0, calc_second_order=False, verbose=False)
+    sr = gsax.sobol.sample(
+        simple_problem, n_samples=64, seed=0, calc_second_order=False, verbose=False
+    )
     Y = jnp.sin(jnp.sum(jnp.asarray(sr.samples), axis=1))
     Y_bad = Y.at[0].set(jnp.inf)
     with pytest.warns(UserWarning, match="dropped"):
-        result = gsax.analyze(sr, Y_bad)
+        result = gsax.sobol.analyze(sr, Y_bad)
     assert result.S1.shape == (3,)

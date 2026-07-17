@@ -25,7 +25,7 @@ the rendered output below.
   `gsax.Problem.from_dict(...)` and uniform marginals.
 - A closed-form batch reactor start-up trajectory used as the model — the kind of cheap
   surrogate you would plug a fitted mechanistic predictor into.
-- A single `gsax.analyze(..., num_resamples=200, key=...)` call to obtain
+- A single `gsax.sobol.analyze(..., num_resamples=200, key=...)` call to obtain
   $S_1$, $S_T$, $S_{ij}$ along with bootstrap 95 % confidence intervals.
 - Three plots that read the indices off:
   steady-state bar chart with CI error bars, time-resolved $S_1(t)$ and

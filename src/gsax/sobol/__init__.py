@@ -2,16 +2,16 @@
 
 Example::
 
-    from gsax.sobol import analyze
-    from gsax import sample, Problem
+    from gsax import Problem, sobol
 
     problem = Problem.from_dict({"x1": (0, 1), "x2": (0, 1)})
-    sr = sample(problem, n_samples=4096, seed=42)
+    sr = sobol.sample(problem, n_samples=4096, seed=42)
     Y = model(sr.samples)
-    result = analyze(sr, Y)
+    result = sobol.analyze(sr, Y)
 """
 
 from gsax.sobol._analyze import analyze
-from gsax.sobol._result import SAResult
+from gsax.sobol._result import SobolResult
+from gsax.sobol._sampling import SobolSamples, sample
 
-__all__ = ["SAResult", "analyze"]
+__all__ = ["SobolResult", "SobolSamples", "analyze", "sample"]

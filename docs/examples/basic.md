@@ -11,7 +11,7 @@ import gsax
 from gsax.benchmarks.ishigami import PROBLEM, evaluate
 
 # Generate Saltelli samples (unique rows only)
-sampling_result = gsax.sample(
+sampling_result = gsax.sobol.sample(
     PROBLEM,
     n_samples=4096,
     seed=42,
@@ -22,7 +22,7 @@ sampling_result = gsax.sample(
 Y = evaluate(sampling_result.samples)
 
 # Compute Sobol indices
-result = gsax.analyze(sampling_result, Y)
+result = gsax.sobol.analyze(sampling_result, Y)
 
 print("S1:", result.S1)
 print("ST:", result.ST)
@@ -45,19 +45,15 @@ ST: [~0.56, ~0.44, ~0.24]
 - `x3` has almost no main effect but still matters through interactions with
   `x1`.
 
-## Inspect the unique sample table
+## Export the unique sample matrix
 
-`sampling_result.samples_df` is useful when you want to export the sample
-matrix, join outputs back onto a run table, or audit which rows were actually
-evaluated.
+The core result stays a NumPy array. Export it with NumPy when another process
+needs a plain table:
 
 ```python
-df = sampling_result.samples_df
-print(df.head())
-#    SampleID        x1        x2        x3
-# 0         0 -1.234567  2.345678 -0.123456
-# 1         1  0.987654 -1.876543  3.012345
-# ...
+import numpy as np
+
+np.savetxt("samples.csv", sampling_result.samples, delimiter=",")
 ```
 
 ## Practical caveats
@@ -75,7 +71,7 @@ Follow these pages in order if you are learning the package:
 
 - [Non-Uniform Inputs](/examples/non-uniform-inputs) for mixed uniform,
   Gaussian, and truncated Gaussian Sobol marginals.
-- [Save and Reload Samples](/examples/save-load) for persisting `SamplingResult`
+- [Save and Reload Samples](/examples/save-load) for persisting `SobolSamples`
   plus Saltelli reconstruction metadata.
 - [Bootstrap Confidence Intervals](/examples/bootstrap) for uncertainty bounds
   and confidence-interval shapes.

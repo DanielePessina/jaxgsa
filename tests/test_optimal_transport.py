@@ -12,14 +12,14 @@ import pytest
 import gsax
 from gsax.benchmarks import gaussian_linear, ishigami
 from gsax.optimal_transport import OTResult, analyze
-from gsax.sampling import sample_mc
+from gsax.sampling import monte_carlo
 
 
 @pytest.fixture(scope="module")
 def ishigami_data():
     """Generate Ishigami test data (N large enough for the published anchor)."""
     N = 8192
-    X = jnp.asarray(sample_mc(ishigami.PROBLEM, N=N, seed=42))
+    X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=N, seed=42))
     Y = ishigami.evaluate(X)
     return X, Y
 
@@ -28,7 +28,7 @@ def ishigami_data():
 def gaussian_linear_data():
     """Generate Gaussian linear test data (large N for ground-truth checks)."""
     N = 32000
-    X = jnp.asarray(sample_mc(gaussian_linear.PROBLEM, N=N, seed=1))
+    X = jnp.asarray(monte_carlo(gaussian_linear.PROBLEM, n=N, seed=1))
     Y = gaussian_linear.evaluate(X)
     return X, Y
 
@@ -288,7 +288,7 @@ class TestOTAnalytic:
                 "xg": gsax.GaussianInputSpec(dist="gaussian", mean=0.0, variance=4.0),
             }
         )
-        X = jnp.asarray(sample_mc(problem, N=16000, seed=5))
+        X = jnp.asarray(monte_carlo(problem, n=16000, seed=5))
         Y = X[:, 0] + X[:, 1]
         result = analyze(problem, X, Y, n_partitions=40)
         ot = np.asarray(result.ot)

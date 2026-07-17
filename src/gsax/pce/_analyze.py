@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import warnings
 from typing import NamedTuple
 
@@ -9,6 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from gsax._batching import apply_batched, resolve_batch_size
 from gsax._normalization import (
     _prepare_Y,
     _squeeze_output_axes,
@@ -87,9 +89,8 @@ def _auto_order(D: int, N: int, max_order: int, fit_ratio: float) -> int:
 class _PCEFit(NamedTuple):
     """The shared PCE fit: coefficients and everything needed to reuse them.
 
-    ``analyze_pce`` derives Sobol indices and the LOO diagnostic from this;
-    ``analyze_shapley``'s PCE backend consumes only ``coefficients`` /
-    ``multi_index`` / ``order`` and skips the rest.
+    PCE analysis derives Sobol indices and the LOO diagnostic from this state;
+    :meth:`PCEResult.shapley` reuses its coefficients and multi-index.
     """
 
     coefficients: Array  # (T, K, n_terms), terms-last
@@ -203,7 +204,7 @@ def analyze_pce(
     Returns:
         PCEResult with S1, ST, S2 (shaped ``(..., D)`` / ``(..., D, D)`` with
         leading output/time dims mirroring ``Y``), the fitted coefficients and
-        multi-index (usable with ``emulate_pce``), the effective ``order``,
+        multi-index (reused by ``result.predict``), the effective ``order``,
         and the per-slice leave-one-out RMSE goodness-of-fit diagnostic.
 
     Raises:
@@ -211,7 +212,7 @@ def analyze_pce(
             layout cannot be resolved against ``X``'s row count.
     """
     X = jnp.asarray(X)
-    Y, ops = _validate_xy_inputs(problem, X, jnp.asarray(Y))
+    Y = _validate_xy_inputs(problem, X, jnp.asarray(Y))
 
     # A constant output slice makes every index 0/0 = NaN; warn once up front.
     _warn_zero_variance_slices(_prepare_Y(Y)[0], output_names=problem.output_names)
@@ -228,6 +229,9 @@ def analyze_pce(
     # hat-matrix leverage is shared by every slice.
     loo = loo_error(fit.Phi, fit.Y_flat, fit.coeffs_flat, gram_inv_PhiT=fit.gram_inv_PhiT)
     loo = loo.reshape(T, K)
+    total_var = jnp.var(_prepare_Y(Y)[0], axis=0)
+    partial_var = jnp.sum(fit.coefficients[..., 1:] ** 2, axis=-1)
+    explained_variance = jnp.where(total_var == 0, jnp.nan, partial_var / total_var)
 
     # Drop the singleton axes _prepare_Y inserted. S1/ST/coeffs end in
     # (T, K, per-slice); S2 carries an extra trailing D and loo has no trailing
@@ -237,6 +241,12 @@ def analyze_pce(
     coeffs = _squeeze_output_axes(fit.coefficients, squeeze_time, squeeze_output)
     S2 = _squeeze_output_axes(S2, squeeze_time, squeeze_output, n_trailing=2)
     loo = _squeeze_output_axes(loo, squeeze_time, squeeze_output, n_trailing=0)
+    explained_variance = _squeeze_output_axes(
+        explained_variance,
+        squeeze_time,
+        squeeze_output,
+        n_trailing=0,
+    )
 
     return PCEResult(
         S1=S1,
@@ -247,11 +257,11 @@ def analyze_pce(
         multi_index=fit.multi_index,
         order=fit.order,
         loo_rmse=loo,
-        _inserted_output_axis=ops.inserted_output_axis,
+        explained_variance=explained_variance,
     )
 
 
-def emulate_pce(result: PCEResult, X_new: Array) -> Array:
+def _predict_pce(result: PCEResult, X_new: Array, *, batch_size: int | None = None) -> Array:
     """Predict at new input points using the fitted PCE surrogate.
 
     Rebuilds the polynomial basis at ``X_new`` and applies the coefficients
@@ -262,6 +272,14 @@ def emulate_pce(result: PCEResult, X_new: Array) -> Array:
         result: PCEResult from ``analyze_pce``.
         X_new: (N_new, D) new input points, in the same physical units as
             the ``X`` passed to ``analyze_pce``.
+        batch_size: Rows of ``X_new`` to predict per batch. The basis tensors
+            are linear in the batch size with a large per-row constant
+            (``~(D+2) * n_terms`` floats per row), so single-shot evaluation
+            at large ``N_new`` can exhaust memory. ``None`` (default) derives
+            a batch size from a fixed transient-memory budget; pass
+            ``batch_size >= N_new`` to force a single-shot call. Each row's
+            term contraction is independent, so batching only perturbs
+            predictions at the level of floating-point reassociation.
 
     Returns:
         Predicted outputs mirroring the training ``Y`` layout: ``(N_new,)``,
@@ -270,10 +288,19 @@ def emulate_pce(result: PCEResult, X_new: Array) -> Array:
     X_new = jnp.asarray(X_new)
 
     X_ref, input_types = _map_to_reference(X_new, result.problem)
-    Phi = build_design_matrix(X_ref, result.multi_index, input_types, result.order)
-    # Prediction contracts the term axis (last on coefficients) for every
-    # output slice at once: Y = Phi @ c per slice, one einsum.
-    pred = jnp.einsum("nt,...t->n...", Phi, result.coefficients)
-    # If inference inserted a singleton K axis at fit time, drop it so the
-    # prediction mirrors the training Y's original (N_new, T) rank.
-    return pred[..., 0] if result._inserted_output_axis else pred
+    N, D = X_ref.shape
+    n_terms = result.multi_index.shape[0]
+    # Transient footprint per row: the (D, batch, n_terms) stacked tensor in
+    # build_design_matrix dominates; +2 covers Phi and the product output.
+    slices = math.prod(result.coefficients.shape[:-1])
+    bytes_per_row = X_ref.dtype.itemsize * ((D + 2) * n_terms + slices)
+    batch = resolve_batch_size(bytes_per_row, N, batch_size)
+
+    def _predict(X_chunk: Array) -> Array:
+        Phi = build_design_matrix(X_chunk, result.multi_index, input_types, result.order)
+        # Prediction contracts the term axis (last on coefficients) for every
+        # output slice at once: Y = Phi @ c per slice, one einsum.
+        return jnp.einsum("nt,...t->n...", Phi, result.coefficients)
+
+    pred = apply_batched(_predict, X_ref, batch)
+    return pred

@@ -10,9 +10,9 @@ or multimodal, where variance is a poor summary of uncertainty.
 Example::
 
     from gsax import pawn
-    from gsax.sampling import sample_mc
+    from gsax.sampling import monte_carlo
 
-    X = sample_mc(problem, N=5000, seed=42)
+    X = monte_carlo(problem, n=5000, seed=42)
     Y = model(X)
     result = pawn.analyze(problem, X, Y)
 """

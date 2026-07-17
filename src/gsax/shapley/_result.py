@@ -29,13 +29,12 @@ class ShapleyResult:
 
     Note that for the ``"hdmr"`` backend the indices are normalized by
     ``sum_u V_u`` rather than ``Var(Y)``, so they relate to
-    ``analyze_hdmr``'s indices by a factor of ``explained_variance`` (multiply
-    to recover the ``analyze_hdmr`` scale). For the ``"pce"`` backend the
-    normalization coincides with ``analyze_pce``, so S1/ST match it exactly.
+    HDMR indices by a factor of ``explained_variance`` (multiply to recover
+    the HDMR scale). For PCE, S1/ST match the fitted result exactly.
 
     Shapes follow the convention ``(T, K, D)`` for time-resolved analyses,
     ``(K, D)`` for multi-output, or ``(D,)`` for scalar output, matching
-    the layout of the ``Y`` passed to ``analyze_shapley``.
+    the layout of the ``Y`` used to fit the source surrogate.
 
     Attributes:
         Sh: Shapley effects, shape ``(D,)`` / ``(K, D)`` / ``(T, K, D)``.
@@ -52,6 +51,12 @@ class ShapleyResult:
         order: Effective surrogate order actually used -- the polynomial
             degree for ``"pce"`` (may be reduced from the requested value to
             fit the sample budget) or the HDMR expansion order for ``"hdmr"``.
+        include_correlative: Whether the correlative ANCOVA variance (``Sb``)
+            was folded into the allocation (HDMR backend only). When ``True``
+            the indices credit variance shared through input correlation, so
+            ``Sh``/``S1``/``ST`` may be **negative** and the ordering
+            ``S1 <= Sh <= ST`` need not hold; efficiency (``Sh`` sums to 1) is
+            preserved regardless.
     """
 
     Sh: Array
@@ -61,6 +66,7 @@ class ShapleyResult:
     backend: str
     explained_variance: Array
     order: int
+    include_correlative: bool = False
 
     def __repr__(self) -> str:
         """Return a concise summary showing index shapes."""
@@ -69,7 +75,10 @@ class ShapleyResult:
             "S1": self.S1.shape,
             "ST": self.ST.shape,
         }
-        return f"ShapleyResult({shapes}, backend={self.backend!r}, order={self.order})"
+        return (
+            f"ShapleyResult({shapes}, backend={self.backend!r}, order={self.order}, "
+            f"include_correlative={self.include_correlative})"
+        )
 
     def to_dataset(
         self,
@@ -104,4 +113,8 @@ class ShapleyResult:
         else:
             data_vars["explained_variance"] = (("time", "output"), ev)
 
-        return xr.Dataset(data_vars, coords=coords)
+        return xr.Dataset(
+            data_vars,
+            coords=coords,
+            attrs={"backend": self.backend, "include_correlative": self.include_correlative},
+        )

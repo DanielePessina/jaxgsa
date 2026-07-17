@@ -12,9 +12,9 @@ from the same partition.
 Example::
 
     from gsax import borgonovo
-    from gsax.sampling import sample_mc
+    from gsax.sampling import monte_carlo
 
-    X = sample_mc(problem, N=5000, seed=42)
+    X = monte_carlo(problem, n=5000, seed=42)
     Y = model(X)
     result = borgonovo.analyze(problem, X, Y)
 """

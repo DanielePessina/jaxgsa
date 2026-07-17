@@ -23,7 +23,7 @@ from gsax import pawn
 
 # Or top-level
 import gsax
-# gsax.analyze_pawn(...)
+# gsax.pawn.analyze(...)
 ```
 
 ## Scalar example (Ishigami)
@@ -34,11 +34,11 @@ import gsax
 from gsax.benchmarks.ishigami import PROBLEM, evaluate
 
 # Generate Monte Carlo samples
-X = gsax.sample_mc(PROBLEM, N=5000, seed=42)
+X = gsax.sampling.monte_carlo(PROBLEM, n=5000, seed=42)
 Y = evaluate(jnp.asarray(X))
 
 # Compute PAWN indices (median KS across 10 bins)
-result = gsax.analyze_pawn(PROBLEM, jnp.asarray(X), Y)
+result = gsax.pawn.analyze(PROBLEM, jnp.asarray(X), Y)
 
 print("PAWN:", result.pawn)  # (3,)
 ```
@@ -53,13 +53,13 @@ options are available:
 
 ```python
 # Median (default) — robust to outlier bins
-r_med = gsax.analyze_pawn(PROBLEM, X, Y, statistic="median")
+r_med = gsax.pawn.analyze(PROBLEM, X, Y, statistic="median")
 
 # Maximum — captures worst-case shift
-r_max = gsax.analyze_pawn(PROBLEM, X, Y, statistic="max")
+r_max = gsax.pawn.analyze(PROBLEM, X, Y, statistic="max")
 
 # Mean — simple average
-r_mean = gsax.analyze_pawn(PROBLEM, X, Y, statistic="mean")
+r_mean = gsax.pawn.analyze(PROBLEM, X, Y, statistic="mean")
 
 print("median:", r_med.pawn)
 print("max:   ", r_max.pawn)
@@ -69,7 +69,7 @@ print("mean:  ", r_mean.pawn)
 ## Bootstrap confidence intervals
 
 ```python
-result = gsax.analyze_pawn(
+result = gsax.pawn.analyze(
     PROBLEM, X, Y,
     n_bootstrap=100,
     conf_level=0.95,
@@ -89,21 +89,21 @@ import gsax
 from gsax.benchmarks import ishigami, sobol_g, linear
 
 # --- Ishigami ---
-X_ish = jnp.asarray(gsax.sample_mc(ishigami.PROBLEM, N=5000, seed=42))
+X_ish = jnp.asarray(gsax.sampling.monte_carlo(ishigami.PROBLEM, n=5000, seed=42))
 Y_ish = ishigami.evaluate(X_ish)
-r_ish = gsax.analyze_pawn(ishigami.PROBLEM, X_ish, Y_ish)
+r_ish = gsax.pawn.analyze(ishigami.PROBLEM, X_ish, Y_ish)
 print("Ishigami PAWN:", r_ish.pawn)
 
 # --- Sobol-G ---
-X_sg = jnp.asarray(gsax.sample_mc(sobol_g.PROBLEM, N=5000, seed=42))
+X_sg = jnp.asarray(gsax.sampling.monte_carlo(sobol_g.PROBLEM, n=5000, seed=42))
 Y_sg = sobol_g.evaluate(X_sg)
-r_sg = gsax.analyze_pawn(sobol_g.PROBLEM, X_sg, Y_sg)
+r_sg = gsax.pawn.analyze(sobol_g.PROBLEM, X_sg, Y_sg)
 print("Sobol-G PAWN:", r_sg.pawn)
 
 # --- Linear ---
-X_lin = jnp.asarray(gsax.sample_mc(linear.PROBLEM, N=5000, seed=42))
+X_lin = jnp.asarray(gsax.sampling.monte_carlo(linear.PROBLEM, n=5000, seed=42))
 Y_lin = linear.evaluate(X_lin)
-r_lin = gsax.analyze_pawn(linear.PROBLEM, X_lin, Y_lin)
+r_lin = gsax.pawn.analyze(linear.PROBLEM, X_lin, Y_lin)
 print("Linear PAWN:", r_lin.pawn)
 ```
 
@@ -116,12 +116,12 @@ import jax.numpy as jnp
 import gsax
 from gsax.benchmarks.ishigami import PROBLEM, evaluate
 
-X = jnp.asarray(gsax.sample_mc(PROBLEM, N=3000, seed=42))
+X = jnp.asarray(gsax.sampling.monte_carlo(PROBLEM, n=3000, seed=42))
 Y1 = evaluate(X)
 Y2 = jnp.sum(X**2, axis=1)
 Y_multi = jnp.column_stack([Y1, Y2])
 
-result = gsax.analyze_pawn(PROBLEM, X, Y_multi)
+result = gsax.pawn.analyze(PROBLEM, X, Y_multi)
 print("PAWN shape:", result.pawn.shape)  # (2, 3)
 ```
 
@@ -132,7 +132,7 @@ ds = result.to_dataset()
 print(ds)
 
 # With bootstrap CIs
-result_ci = gsax.analyze_pawn(PROBLEM, X, Y1, n_bootstrap=50, seed=0)
+result_ci = gsax.pawn.analyze(PROBLEM, X, Y1, n_bootstrap=50, seed=0)
 ds_ci = result_ci.to_dataset()
 print(ds_ci)  # includes pawn_lower and pawn_upper
 ```

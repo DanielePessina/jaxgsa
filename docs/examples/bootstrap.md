@@ -10,10 +10,10 @@ import jax
 import gsax
 from gsax.benchmarks.ishigami import PROBLEM, evaluate
 
-sampling_result = gsax.sample(PROBLEM, n_samples=4096, seed=42)
+sampling_result = gsax.sobol.sample(PROBLEM, n_samples=4096, seed=42)
 Y = evaluate(sampling_result.samples)
 
-result = gsax.analyze(
+result = gsax.sobol.analyze(
     sampling_result,
     Y,
     prenormalize=True,

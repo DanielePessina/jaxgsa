@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import xarray as xr
@@ -11,6 +12,9 @@ from jax import Array
 from gsax._normalization import _dims_and_coords
 from gsax.problem import Problem
 
+if TYPE_CHECKING:
+    from gsax.shapley import ShapleyResult
+
 
 @dataclass
 class PCEResult:
@@ -18,9 +22,9 @@ class PCEResult:
 
     Stores Sobol indices computed analytically from the expansion
     coefficients, plus the fitted coefficients and multi-index so the
-    surrogate can be reused for prediction via ``pce.emulate``.
+    surrogate can be reused through :meth:`predict`.
 
-    Index arrays mirror the layout of the ``Y`` passed to ``analyze_pce``:
+    Index arrays mirror the layout of the ``Y`` passed to ``pce.analyze``:
     leading dims are ``()`` for scalar ``(N,)`` outputs, ``(K,)`` for
     multi-output ``(N, K)``, and ``(T, K)`` for time-series ``(N, T, K)``.
 
@@ -55,10 +59,19 @@ class PCEResult:
     multi_index: np.ndarray
     order: int
     loo_rmse: Array | None = None
-    # True when layout inference inserted the singleton output axis (a 2-D
-    # (N, T) Y under a single named output). emulate_pce squeezes it back so
-    # predictions mirror the training Y's rank.
-    _inserted_output_axis: bool = field(default=False, repr=False)
+    explained_variance: Array | None = None
+
+    def predict(self, X: Array, *, batch_size: int | None = None) -> Array:
+        """Predict outputs at new input rows using the fitted expansion."""
+        from gsax.pce._analyze import _predict_pce
+
+        return _predict_pce(self, X, batch_size=batch_size)
+
+    def shapley(self) -> "ShapleyResult":
+        """Compute Shapley effects from this fitted PCE decomposition."""
+        from gsax.shapley._analyze import _shapley_from_pce
+
+        return _shapley_from_pce(self)
 
     def __repr__(self) -> str:
         n_terms = self.coefficients.shape[-1]
@@ -93,5 +106,10 @@ class PCEResult:
         # (output,) / (time, output) otherwise.
         if self.loo_rmse is not None:
             data_vars["loo_rmse"] = (dims[:-1], np.asarray(self.loo_rmse))
+        if self.explained_variance is not None:
+            data_vars["explained_variance"] = (
+                dims[:-1],
+                np.asarray(self.explained_variance),
+            )
 
         return xr.Dataset(data_vars, coords=coords)

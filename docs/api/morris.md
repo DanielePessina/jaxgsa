@@ -9,8 +9,8 @@ Jump directly to:
 
 - [`sample_morris()`](/api/#sample-morris)
 - [`analyze_morris()`](/api/#analyze-morris)
-- [`MorrisSamplingResult`](/api/#morrissamplingresult)
-- [`MorrisSamplingResult.downsample()`](/api/#morrissamplingresult-downsample)
+- [`MorrisSamples`](/api/#morrissamplingresult)
+- [`MorrisSamples.downsample()`](/api/#morrissamplingresult-downsample)
 - [`MorrisResult`](/api/#morrisresult)
 - [`MorrisResult.to_physical_units()`](/api/#morrisresult-to_physical_units)
 - [`MorrisResult.to_dataset()`](/api/#morrisresult-to_dataset)

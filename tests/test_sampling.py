@@ -3,13 +3,8 @@ import pytest
 from scipy.stats import truncnorm
 
 from gsax.problem import GaussianInputSpec, Problem, UniformInputSpec
-from gsax.sampling import (
-    _next_power_of_2,
-    _saltelli_step,
-    downsample,
-    sample,
-    verify_prefix,
-)
+from gsax.sobol import sample
+from gsax.sobol._sampling import _next_power_of_2, _saltelli_step
 
 
 def test_next_power_of_2():
@@ -48,15 +43,6 @@ def test_power_of_2_enforcement():
     p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
     result = sample(p, n_samples=100, seed=42, verbose=False)
     assert result.base_n & (result.base_n - 1) == 0
-
-
-def test_samples_df_contains_sample_id_and_named_columns():
-    p = Problem.from_dict({"alpha": (0.0, 1.0), "beta": (2.0, 3.0)})
-    result = sample(p, n_samples=32, seed=42, verbose=False)
-    df = result.samples_df
-    assert list(df.columns) == ["SampleID", "alpha", "beta"]
-    assert df["SampleID"].tolist() == result.sample_ids.tolist()
-    assert np.allclose(df[["alpha", "beta"]].to_numpy(), result.samples)
 
 
 def test_no_second_order_expanded_count():
@@ -227,7 +213,7 @@ def test_two_sided_truncated_gaussian_matches_target_variance_formula():
 
 
 class TestSamplingResultDownsample:
-    """Tests for SamplingResult.downsample()."""
+    """Tests for SobolSamples.downsample()."""
 
     def _make_sr(self, D: int = 3, base_n: int = 32, second_order: bool = True, seed: int = 42):
         names = {f"x{i}": (0.0, 1.0) for i in range(D)}
@@ -330,76 +316,3 @@ class TestSamplingResultDownsample:
         Y = np.ones((sr_full.n_total, 3))
         _, Y_small = sr_full.downsample(8, Y)
         assert not np.shares_memory(Y, Y_small)
-
-
-class TestDownsampleFunction:
-    """Tests for the module-level downsample(sr, Y, base_n) function."""
-
-    def _make_sr_and_Y(self, D: int = 3, base_n: int = 32, T: int = 5, seed: int = 42):
-        names = {f"x{i}": (0.0, 1.0) for i in range(D)}
-        p = Problem.from_dict(names)
-        sr = sample(p, n_samples=1, base_n=base_n, seed=seed, verbose=False)
-        Y = np.arange(sr.n_total * T, dtype=np.float64).reshape(sr.n_total, T)
-        return sr, Y
-
-    def test_returns_prefix_slices(self):
-        sr_full, Y_full = self._make_sr_and_Y(base_n=32)
-        sr_small, Y_small = downsample(sr_full, Y_full, 8)
-        assert np.array_equal(Y_small, Y_full[: sr_small.n_total])
-        assert np.array_equal(sr_small.samples, sr_full.samples[: sr_small.n_total])
-
-    def test_Y_misaligned_raises(self):
-        sr_full, _ = self._make_sr_and_Y(base_n=32)
-        Y_wrong = np.zeros((sr_full.n_total + 3, 5))
-        with pytest.raises(ValueError, match="does not match n_total"):
-            downsample(sr_full, Y_wrong, 8)
-
-    def test_preserves_trailing_dims(self):
-        names = {f"x{i}": (0.0, 1.0) for i in range(3)}
-        p = Problem.from_dict(names)
-        sr = sample(p, n_samples=1, base_n=16, seed=0, verbose=False)
-        Y = np.random.default_rng(0).standard_normal((sr.n_total, 4, 2))
-        sr_small, Y_small = downsample(sr, Y, 4)
-        assert Y_small.shape == (sr_small.n_total, 4, 2)
-        assert np.array_equal(Y_small, Y[: sr_small.n_total])
-
-
-class TestVerifyPrefix:
-    """Tests for verify_prefix() validation."""
-
-    def test_sobol_prefix_passes(self):
-        p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0), "x3": (0.0, 1.0)})
-        verify_prefix(p, 8, 64, seed=42)
-
-    def test_sobol_prefix_first_order_only(self):
-        p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
-        verify_prefix(p, 4, 32, calc_second_order=False, seed=7)
-
-    def test_different_seeds_may_fail(self):
-        p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0), "x3": (0.0, 1.0)})
-        sr_a = sample(p, n_samples=1, base_n=8, seed=0, verbose=False)
-        sr_b = sample(p, n_samples=1, base_n=32, seed=99, verbose=False)
-        assert not np.array_equal(sr_a.samples, sr_b.samples[: sr_a.n_total])
-
-    def test_small_gt_large_raises(self):
-        p = Problem.from_dict({"x1": (0.0, 1.0)})
-        with pytest.raises(ValueError, match="base_n_small.*base_n_large"):
-            verify_prefix(p, 32, 8, seed=0)
-
-    def test_non_int_seed_raises(self):
-        p = Problem.from_dict({"x1": (0.0, 1.0)})
-        with pytest.raises(TypeError, match="must be an int"):
-            verify_prefix(p, 4, 16, seed=None)  # type: ignore[arg-type]
-
-    def test_default_seed_works(self):
-        p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
-        verify_prefix(p, 4, 32)
-
-    def test_mixed_distributions(self):
-        p = Problem.from_dict(
-            {
-                "u": (0.0, 1.0),
-                "g": GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0),
-            }
-        )
-        verify_prefix(p, 4, 32, seed=123)

@@ -1,4 +1,4 @@
-"""Defines the SAResult dataclass for storing sensitivity analysis results."""
+"""Defines the SobolResult dataclass for storing sensitivity analysis results."""
 
 from dataclasses import dataclass
 
@@ -11,7 +11,7 @@ from gsax.problem import Problem
 
 
 @dataclass
-class SAResult:
+class SobolResult:
     """Sobol sensitivity analysis results, returned by :func:`gsax.analyze`.
 
     Stores first-order (S1), total-order (ST), and optionally second-order (S2)
@@ -61,7 +61,7 @@ class SAResult:
             shapes["ST_conf"] = self.ST_conf.shape
         if self.S2_conf is not None:
             shapes["S2_conf"] = self.S2_conf.shape
-        return f"SAResult({shapes})"
+        return f"SobolResult({shapes})"
 
     def to_dataset(
         self,

@@ -10,9 +10,9 @@ HSIC additionally captures dependence carried through interactions.
 Example::
 
     from gsax import hsic
-    from gsax.sampling import sample_mc
+    from gsax.sampling import monte_carlo
 
-    X = sample_mc(problem, N=4096, seed=42)
+    X = monte_carlo(problem, n=4096, seed=42)
     Y = model(X)
     result = hsic.analyze(problem, jnp.asarray(X), Y)
 """

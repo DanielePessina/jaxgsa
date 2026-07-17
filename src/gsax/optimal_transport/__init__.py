@@ -17,9 +17,9 @@ mixed) and correlated inputs are supported.
 Example::
 
     from gsax import optimal_transport
-    from gsax.sampling import sample_mc
+    from gsax.sampling import monte_carlo
 
-    X = sample_mc(problem, N=5000, seed=42)
+    X = monte_carlo(problem, n=5000, seed=42)
     Y = model(X)
     result = optimal_transport.analyze(problem, X, Y)
 
