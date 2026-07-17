@@ -67,7 +67,7 @@ Eleven complementary methods are included: **Sobol indices** (the standard varia
   Sobol or HDMR analysis
 - Automatic data cleaning: non-finite values (NaN/Inf) are detected and dropped by group
 - **xarray integration** — `to_dataset()` on results for labeled, named dimensions (`param`, `output`, `time`)
-- Save and reload Sobol sample sets as one NPZ file via `SobolSamples.save()` and `SobolSamples.load()`
+- Save and reload sample designs as one NPZ file via `SobolSamples.save()` / `.load()` (and the same on `MorrisSamples`)
 - Built-in Ishigami benchmark function with known analytical solutions
 
 ## Installation
@@ -173,7 +173,7 @@ result = gsax.hdmr.analyze(
     PROBLEM, X, Y,
     maxorder=2,
     prenormalize=False,  # default; set True for SALib-style output standardization
-    chunk_size=64,  # optional: cap the vmap batch (timesteps x outputs) for memory control
+    slice_chunk_size=64,  # optional: cap the vmap batch (timesteps x outputs) for memory control
 )
 
 # Sobol-compatible first-order and total-order indices
@@ -425,7 +425,7 @@ result = gsax.sobol.analyze(
     Y,
     prenormalize=False,  # optional SALib-style output standardization
     # ci_method="quantile",  # optional bootstrap CI summary method
-    chunk_size=64,  # optional: limit vmap batch size for memory control
+    slice_chunk_size=64,  # optional: limit vmap batch size for memory control
 )
 
 # result.S1, result.ST — sensitivity indices
@@ -524,8 +524,8 @@ Quick map:
 - `gsax.sampling`: `monte_carlo`
 - `gsax.hdmr`: `analyze` / `HDMRResult`
 - `gsax.pce`: `analyze` / `PCEResult`
-- `gsax.shapley`: `ShapleyResult`
-- `gsax.efast`: `sample` / `analyze` / `EFASTResult`
+- `gsax.shapley`: `analyze` / `ShapleyResult`
+- `gsax.efast`: `sample` / `analyze` / `EFASTResult` / `EFASTSamples`
 - `gsax.dgsm`: `analyze` / `DGSMResult` / `poincare_constant` / `axis_constants`
 - `gsax.morris`: `sample` / `analyze` / `MorrisResult` / `MorrisSamples`
 - `gsax.hsic`: `analyze` / `HSICResult`

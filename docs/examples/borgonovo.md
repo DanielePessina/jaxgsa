@@ -154,8 +154,8 @@ print(ds_plain)
   and grid) but is deterministic given the data — SALib computes its
   central estimate on a random resample — and returns `delta = S1 = 0` for
   a constant output instead of raising.
-- Peak memory scales with `chunk_size * D * N * grid_size`; lower
-  `chunk_size` for large time-series outputs.
+- Peak memory scales with `slice_chunk_size * D * N * grid_size`; lower
+  `slice_chunk_size` for large time-series outputs.
 
 ## See also
 

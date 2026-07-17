@@ -87,7 +87,9 @@ correlative contributions.
 | `gsax.efast` | `sample` then `analyze` | `EFASTResult` |
 | `gsax.morris` | `sample` then `analyze` | `MorrisResult` |
 
-Morris sampling returns `gsax.morris.MorrisSamples`. eFAST sampling returns
+Morris sampling returns `gsax.morris.MorrisSamples`, which supports the same
+single-NPZ `save(path)` / `load(path)` persistence as `SobolSamples`. eFAST
+sampling returns
 `gsax.efast.EFASTSamples`, which carries the design metadata (`n_per_curve`,
 `M`, `problem`) into `gsax.efast.analyze(samples, Y)` so they can never be
 mismatched:
@@ -98,11 +100,13 @@ Y = model(samples.samples)
 result = gsax.efast.analyze(samples, Y)
 ```
 
-## Shapley Results
+## Shapley Effects
 
-The `gsax.shapley` namespace exposes `ShapleyResult`. Shapley effects are
-derived from an existing PCE or HDMR result rather than fitted through a
-standalone analysis function.
+The `gsax.shapley` namespace exposes `analyze` and `ShapleyResult`. The
+canonical form derives Shapley effects from an existing PCE or HDMR result
+(`result.shapley(...)`); `gsax.shapley.analyze(problem, X, Y, backend="pce")`
+is a thin convenience that fits the chosen surrogate and calls `.shapley()`
+in one step — there is no separate Shapley pipeline.
 
 All result objects support `to_dataset(...)` for labeled xarray export.
 
@@ -110,6 +114,12 @@ All result objects support `to_dataset(...)` for labeled xarray export.
 
 Use `gsax.config.enable_compilation_cache(path)` to configure JAX's persistent
 compilation cache.
+
+Use `gsax.config.set_memory_budget(bytes)` / `gsax.config.get_memory_budget()`
+to adjust the global transient-memory budget (default 512 MiB) that sizes
+automatic batching: surrogate `predict` batches, HDMR output-slice chunking,
+and the PCE streaming fit. Explicit per-call `batch_size` / `slice_chunk_size`
+parameters always take precedence.
 
 See the [0.3 to 0.4 migration guide](/guide/migration-0.4) for direct API
 replacements.

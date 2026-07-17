@@ -21,6 +21,37 @@ from jax import Array
 # per-batch dispatch overhead negligible next to the basis construction cost.
 DEFAULT_EMULATE_BUDGET_BYTES: int = 512 * 1024**2
 
+# Module-level override for the transient-memory budget, set through
+# ``gsax.config.set_memory_budget``. ``None`` means "use the default"; the
+# getter below is the single read path so every budget consumer (surrogate
+# predict batching, the HDMR slice-chunk derivation, PCE streaming) honours
+# the global override. Per-call parameters (``batch_size``/``slice_chunk_size``)
+# always take precedence over this budget.
+_memory_budget_bytes: int | None = None
+
+
+def get_memory_budget() -> int:
+    """Return the active transient-memory budget in bytes.
+
+    Returns:
+        The budget set via :func:`gsax.config.set_memory_budget`, or
+        ``DEFAULT_EMULATE_BUDGET_BYTES`` if none was set.
+    """
+    return DEFAULT_EMULATE_BUDGET_BYTES if _memory_budget_bytes is None else _memory_budget_bytes
+
+
+def _set_memory_budget(budget_bytes: int | None) -> None:
+    """Set (or with ``None`` reset) the global transient-memory budget.
+
+    Internal state mutator behind :func:`gsax.config.set_memory_budget`,
+    which performs the input validation.
+
+    Args:
+        budget_bytes: New budget in bytes, or ``None`` to restore the default.
+    """
+    global _memory_budget_bytes
+    _memory_budget_bytes = budget_bytes
+
 
 def resolve_batch_size(
     bytes_per_row: int,
@@ -34,7 +65,7 @@ def resolve_batch_size(
             row (basis tensors plus contraction intermediates).
         n_rows: Total number of prediction rows.
         batch_size: User-requested batch size, or ``None`` to derive one from
-            ``DEFAULT_EMULATE_BUDGET_BYTES``.
+            the active memory budget (:func:`get_memory_budget`).
 
     Returns:
         Batch size in ``[1, n_rows]`` (``n_rows`` means a single-shot call).
@@ -46,7 +77,7 @@ def resolve_batch_size(
         if batch_size < 1:
             raise ValueError(f"batch_size must be >= 1, got {batch_size}")
         return min(batch_size, n_rows)
-    auto = DEFAULT_EMULATE_BUDGET_BYTES // max(bytes_per_row, 1)
+    auto = get_memory_budget() // max(bytes_per_row, 1)
     return max(1, min(n_rows, auto))
 
 

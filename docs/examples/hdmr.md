@@ -30,7 +30,7 @@ result = hdmr.analyze(
     Y,
     prenormalize=True,
     maxorder=2,
-    chunk_size=256,
+    slice_chunk_size=256,
 )
 
 print("S1:", result.S1)

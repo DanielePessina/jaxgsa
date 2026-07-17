@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -192,7 +194,7 @@ class TestChunked:
         Xj = jnp.asarray(X)
         Y = linear.evaluate(Xj)
         r_full = analyze(problem, Xj, Y, n_perms=50, seed=13)
-        r_chunked = analyze(problem, Xj, Y, n_perms=50, seed=13, chunk_size=128)
+        r_chunked = analyze(problem, Xj, Y, n_perms=50, seed=13, batch_size=128)
         np.testing.assert_allclose(
             np.asarray(r_full.R2_HSIC),
             np.asarray(r_chunked.R2_HSIC),
@@ -203,6 +205,23 @@ class TestChunked:
             np.asarray(r_chunked.T_HSIC),
             atol=1e-4,
         )
+
+    def test_batch_size_kwarg_accepted(self):
+        """The 0.4 name `batch_size` is accepted explicitly."""
+        problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
+        Xj = jnp.asarray(monte_carlo(problem, n=64, seed=13))
+        Y = Xj[:, 0] + Xj[:, 1]
+        result = analyze(problem, Xj, Y, n_perms=5, seed=13, batch_size=16)
+        assert result.R2_HSIC.shape == (2,)
+
+    def test_old_chunk_size_kwarg_raises(self):
+        """The pre-0.4 `chunk_size` name is gone — no shim."""
+        problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
+        Xj = jnp.asarray(monte_carlo(problem, n=64, seed=13))
+        Y = Xj[:, 0] + Xj[:, 1]
+        old_kwargs: dict[str, Any] = {"chunk_size": 16}
+        with pytest.raises(TypeError):
+            analyze(problem, Xj, Y, n_perms=5, seed=13, **old_kwargs)
 
 
 class TestReproducibility:

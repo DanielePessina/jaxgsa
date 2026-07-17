@@ -1,5 +1,7 @@
 """Tests for RS-HDMR sensitivity analysis."""
 
+from typing import Any
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -174,7 +176,7 @@ def test_shapes_3d(ishigami_data):
     assert result._fit["f0"].shape == (T, K)
 
 
-def test_chunk_size_regression(ishigami_data):
+def test_slice_chunk_size_regression(ishigami_data):
     """Chunked and unchunked HDMR paths should agree for multi-output Y."""
     X, Y = ishigami_data
     Y_2d = jnp.stack([Y, Y * 0.5], axis=1)
@@ -186,7 +188,7 @@ def test_chunk_size_regression(ishigami_data):
         Y_2d,
         maxorder=2,
         m=2,
-        chunk_size=1,
+        slice_chunk_size=1,
     )
 
     # Chunked and unchunked paths differ only by floating-point reduction
@@ -236,7 +238,7 @@ def test_chunk_size_regression(ishigami_data):
     )
 
 
-def test_chunk_size_regression_3d(ishigami_data):
+def test_slice_chunk_size_regression_3d(ishigami_data):
     """Chunked and unchunked HDMR paths should agree for time-series multi-output Y."""
     X, Y = ishigami_data
     Y_alt = jnp.sin(X[:, 1]) + 0.1 * X[:, 0] * X[:, 2]
@@ -255,7 +257,7 @@ def test_chunk_size_regression_3d(ishigami_data):
         Y_tk,
         maxorder=2,
         m=2,
-        chunk_size=1,
+        slice_chunk_size=1,
     )
 
     # Chunked and unchunked paths differ only by floating-point reduction
@@ -658,8 +660,18 @@ def test_validation_errors():
     with pytest.raises(ValueError, match="maxorder"):
         analyze_hdmr(PROBLEM, X, Y, maxorder=4)
 
-    with pytest.raises(ValueError, match="chunk_size"):
-        analyze_hdmr(PROBLEM, X, Y, chunk_size=0)
+    with pytest.raises(ValueError, match="slice_chunk_size"):
+        analyze_hdmr(PROBLEM, X, Y, slice_chunk_size=0)
+
+    with pytest.raises(ValueError, match="batch_size"):
+        analyze_hdmr(PROBLEM, X, Y, batch_size=0)
+
+    # 0.4.0 rename: the old kwarg is gone, no shim. (Passed via an Any-typed
+    # dict so the static type-checker does not flag the intentionally-invalid
+    # name; the TypeError is the runtime contract under test.)
+    legacy_kwargs: dict[str, Any] = {"chunk_size": 1}
+    with pytest.raises(TypeError):
+        analyze_hdmr(PROBLEM, X, Y, **legacy_kwargs)
 
 
 # ---------------------------------------------------------------------------

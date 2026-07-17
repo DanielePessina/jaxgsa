@@ -10,6 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from gsax._core.batching import get_memory_budget, resolve_batch_size
 from gsax._core.surrogate import _PredictPlan
 from gsax._core.validation import (
     _prepare_Y,
@@ -90,18 +91,124 @@ class _PCEFit(NamedTuple):
     """The shared PCE fit: coefficients and everything needed to reuse them.
 
     PCE analysis derives Sobol indices and the LOO diagnostic from this state;
-    :meth:`PCEResult.shapley` reuses its coefficients and multi-index.
+    :meth:`PCEResult.shapley` reuses its coefficients and multi-index. The
+    design matrix and Gram factorization are deliberately NOT carried: the
+    streamed path never materializes them at full N, so both fit paths reduce
+    to the same coefficient + LOO summary.
     """
 
     coefficients: Array  # (T, K, n_terms), terms-last
-    coeffs_flat: Array  # (n_terms, T*K), for loo_error
+    coeffs_flat: Array  # (n_terms, T*K)
     multi_index: np.ndarray  # (n_terms, D)
     order: int  # effective order after _auto_order
-    Phi: Array  # (N, n_terms) design matrix
-    gram_inv_PhiT: Array  # (n_terms, N), shared by fit and LOO
-    Y_flat: Array  # (N, T*K)
+    loo_flat: Array  # (T*K,) per-slice LOO RMSE
     squeeze_time: bool
     squeeze_output: bool
+
+
+def _fit_pce_streamed(
+    X_ref: Array,
+    Y_flat: Array,
+    multi_index: np.ndarray,
+    input_types: tuple[str, ...],
+    order: int,
+    ridge: float,
+    batch_size: int | None,
+) -> tuple[Array, Array]:
+    """Fit the PCE by streaming row batches: exact normal equations + LOO.
+
+    Two passes over row batches of ``X_ref``/``Y_flat``, never holding more
+    than one ``(batch, n_terms)`` design block:
+
+    1. Accumulate ``G = Phi^T Phi`` (n_terms, n_terms) and ``B = Phi^T Y``
+       (n_terms, T*K), then solve ``(G + ridge*I) c = B`` once. This is
+       mathematically identical to the single-pass normal equations -- only
+       the float32 summation order differs.
+    2. With ``(G + ridge*I)^{-1}`` known, rebuild each design block to get
+       the hat-matrix diagonal ``h_i = phi_i G^{-1} phi_i^T`` and per-row
+       residuals, accumulating the exact LOO sum of squares as defined by
+       :func:`gsax.pce._engine.loo_error` (same leverage clip, same
+       ``mean`` over rows).
+
+    Args:
+        X_ref: (N, D) inputs already mapped to the reference domain.
+        Y_flat: (N, T*K) flattened output slices.
+        multi_index: (n_terms, D) multi-index array.
+        input_types: per-dimension ``"uniform"`` / ``"gaussian"`` tags.
+        order: effective (post-``_auto_order``) polynomial order.
+        ridge: Tikhonov parameter added to the Gram matrix.
+        batch_size: rows per batch, or ``None`` to derive one from the
+            active memory budget.
+
+    Returns:
+        Tuple of ``coeffs_flat`` (n_terms, T*K) and the (T*K,) per-slice
+        LOO RMSE.
+    """
+    N = X_ref.shape[0]
+    n_terms = multi_index.shape[0]
+    M = Y_flat.shape[1]
+    dtype = jnp.result_type(X_ref.dtype, Y_flat.dtype)
+
+    # Per-row transient cost mirrors _single_pass_fit_bytes: 3*n_terms floats
+    # for the design-block running product plus 2*M for the residual arrays.
+    bytes_per_row = jnp.dtype(dtype).itemsize * (3 * n_terms + 2 * M)
+    b = resolve_batch_size(bytes_per_row, N, batch_size)
+
+    # Pass 1: accumulate the Gram matrix and cross-moments batch by batch.
+    G = jnp.zeros((n_terms, n_terms), dtype=dtype)
+    B = jnp.zeros((n_terms, M), dtype=dtype)
+    for i in range(0, N, b):
+        Phi_b = build_design_matrix(X_ref[i : i + b], multi_index, input_types, order)
+        G = G + Phi_b.T @ Phi_b
+        B = B + Phi_b.T @ Y_flat[i : i + b]
+    gram = G + ridge * jnp.eye(n_terms, dtype=dtype)
+    coeffs_flat = jnp.linalg.solve(gram, B)  # (n_terms, M)
+
+    # Pass 2: exact LOO from the hat-matrix diagonal, streamed. gram is
+    # symmetric, so h_i = phi_i gram^{-1} phi_i^T = sum(Phi_b * (Phi_b @
+    # gram_inv), axis=1) reproduces loo_error's diag(Phi @ gram_inv_PhiT).
+    gram_inv = jnp.linalg.inv(gram)
+    sse = jnp.zeros((M,), dtype=dtype)
+    for i in range(0, N, b):
+        Phi_b = build_design_matrix(X_ref[i : i + b], multi_index, input_types, order)
+        residuals = Y_flat[i : i + b] - Phi_b @ coeffs_flat  # (b, M)
+        leverage = jnp.sum(Phi_b * (Phi_b @ gram_inv), axis=1)  # (b,)
+        # Same interpolation guard as loo_error: a leverage of exactly 1
+        # would divide by zero.
+        leverage = jnp.clip(leverage, 0.0, 1.0 - 1e-10)
+        loo_residuals = residuals / (1.0 - leverage)[:, None]
+        sse = sse + jnp.sum(loo_residuals**2, axis=0)
+    loo_flat = jnp.sqrt(sse / N)  # == sqrt(mean(loo_residuals^2, axis=0))
+
+    return coeffs_flat, loo_flat
+
+
+def _single_pass_fit_bytes(N: int, n_terms: int, M: int, itemsize: int) -> int:
+    """Estimate the resident bytes of the single-pass PCE fit path.
+
+    Derived from the arrays the single-pass code actually materializes:
+
+    - ``build_design_matrix`` keeps ~3 (N, n_terms) arrays live at its peak
+      (running-product accumulator, one gathered factor, multiply output);
+      the same count recurs at ``loo_error``'s leverage step, where ``Phi``,
+      ``gram_inv_PhiT``, and its transpose coexist -> ``3 * N * n_terms``.
+    - ``loo_error`` materializes the (N, M) prediction ``Phi @ coefficients``
+      / residuals and the (N, M) ``loo_residuals`` -> ``2 * N * M``.
+
+    ``Y`` itself and the (n_terms, n_terms) Gram matrix are excluded: the
+    caller holds Y either way, and the Gram factors are negligible next to
+    the N-sized arrays.
+
+    Args:
+        N: number of sample rows.
+        n_terms: number of expansion terms.
+        M: number of flattened output slices (T*K).
+        itemsize: bytes per element of the working dtype.
+
+    Returns:
+        Estimated peak resident bytes of the single-pass fit + LOO.
+    """
+    return itemsize * N * (3 * n_terms + 2 * M)
 
 
 def _fit_pce_core(
@@ -112,12 +219,20 @@ def _fit_pce_core(
     order: int,
     ridge: float,
     fit_ratio: float,
+    batch_size: int | None = None,
 ) -> _PCEFit:
     """Fit the shared PCE expansion for every output slice at once.
 
     Operates on an already-canonical Y (no validation, no zero-variance
     warning, no index extraction). The basis is identical across slices, so
     fitting all ``T*K`` right-hand sides is a single Gram solve.
+
+    When the single-pass residents (design matrix, Gram factorization, LOO
+    residual arrays) would exceed the active memory budget -- or when
+    ``batch_size`` is an explicit int -- the fit streams over row batches
+    instead (see :func:`_fit_pce_streamed`); the streamed fit solves the
+    same normal equations and computes the same exact LOO, differing only
+    in float32 summation order.
     """
     Y_3d, squeeze_time, squeeze_output = _prepare_Y(Y_canonical)
     N, D = X.shape
@@ -134,30 +249,40 @@ def _fit_pce_core(
             stacklevel=3,
         )
     mi = build_multi_index(D, effective_order)
+    n_terms = mi.shape[0]
 
-    # Map inputs to reference domain and build the orthonormal design matrix.
+    # Map inputs to reference domain; (N, D) is small next to (N, n_terms).
     X_ref, input_types = _map_to_reference(X, problem)
-    Phi = build_design_matrix(X_ref, mi, input_types, effective_order)
-
-    # Compute Gram factorization once, reused for both fitting and LOO.
-    gram = Phi.T @ Phi + ridge * jnp.eye(Phi.shape[1])
-    gram_inv_PhiT = jnp.linalg.solve(gram, Phi.T)
-    # The basis is identical for every output slice (the effective order
-    # depends only on N and D), so fitting all T*K slices is ONE shared solve
-    # with multiple right-hand sides -- a single vectorized matmul, no loops.
     Y_flat = Y_3d.reshape(N, T * K)  # column t*K + k is slice (t, k)
-    coeffs_flat = gram_inv_PhiT @ Y_flat  # (n_terms, T*K)
+
+    single_pass_bytes = _single_pass_fit_bytes(N, n_terms, T * K, X_ref.dtype.itemsize)
+    if batch_size is None and single_pass_bytes <= get_memory_budget():
+        # Single-pass path: build the full design matrix and compute the Gram
+        # factorization once, reused for both fitting and LOO.
+        Phi = build_design_matrix(X_ref, mi, input_types, effective_order)
+        gram = Phi.T @ Phi + ridge * jnp.eye(Phi.shape[1])
+        gram_inv_PhiT = jnp.linalg.solve(gram, Phi.T)
+        # The basis is identical for every output slice (the effective order
+        # depends only on N and D), so fitting all T*K slices is ONE shared
+        # solve with multiple right-hand sides -- a single vectorized matmul.
+        coeffs_flat = gram_inv_PhiT @ Y_flat  # (n_terms, T*K)
+        # Per-slice LOO RMSE from the shared hat-matrix leverage.
+        loo_flat = loo_error(Phi, Y_flat, coeffs_flat, gram_inv_PhiT=gram_inv_PhiT)
+    else:
+        # Streamed path: same normal equations and exact LOO, accumulated
+        # over row batches so peak memory stays within the budget.
+        coeffs_flat, loo_flat = _fit_pce_streamed(
+            X_ref, Y_flat, mi, input_types, effective_order, ridge, batch_size
+        )
     # Terms-last layout, matching HDMR's Sa convention (slices lead).
-    coeffs = coeffs_flat.T.reshape(T, K, coeffs_flat.shape[0])
+    coeffs = coeffs_flat.T.reshape(T, K, n_terms)
 
     return _PCEFit(
         coefficients=coeffs,
         coeffs_flat=coeffs_flat,
         multi_index=mi,
         order=effective_order,
-        Phi=Phi,
-        gram_inv_PhiT=gram_inv_PhiT,
-        Y_flat=Y_flat,
+        loo_flat=loo_flat,
         squeeze_time=squeeze_time,
         squeeze_output=squeeze_output,
     )
@@ -171,6 +296,7 @@ def analyze_pce(
     order: int = 3,
     ridge: float = 1e-8,
     fit_ratio: float = 0.5,
+    batch_size: int | None = None,
 ) -> PCEResult:
     """Compute Sobol indices via polynomial chaos expansion (PCE).
 
@@ -200,6 +326,17 @@ def analyze_pce(
         fit_ratio: Maximum ratio of terms to samples before ``order`` is
             reduced. Lower values demand more samples per term (a more
             conservative, less overfit-prone fit).
+        batch_size: Rows of ``X``/``Y`` processed per batch during the fit
+            (the package-wide ``batch_size`` convention). ``None`` (default)
+            keeps the single-shot fit unless its estimated resident memory
+            (design matrix, Gram factorization, LOO residuals) exceeds the
+            active memory budget (~512 MiB, see
+            ``gsax.config.set_memory_budget``), in which case the fit
+            streams over auto-sized row batches. An explicit int always
+            forces the streamed fit with that many rows per batch. Both fit
+            paths solve the same normal equations and compute the same
+            exact leave-one-out error; results differ only at the level of
+            float32 summation order.
 
     Returns:
         PCEResult with S1, ST, S2 (shaped ``(..., D)`` / ``(..., D, D)`` with
@@ -208,8 +345,9 @@ def analyze_pce(
         and the per-slice leave-one-out RMSE goodness-of-fit diagnostic.
 
     Raises:
-        ValueError: If ``X`` fails validation against ``problem`` or ``Y``'s
-            layout cannot be resolved against ``X``'s row count.
+        ValueError: If ``X`` fails validation against ``problem``, ``Y``'s
+            layout cannot be resolved against ``X``'s row count, or
+            ``batch_size`` is given and not a positive integer.
     """
     X = jnp.asarray(X)
     Y = _validate_xy_inputs(problem, X, jnp.asarray(Y))
@@ -222,7 +360,9 @@ def analyze_pce(
     # A constant output slice makes every index 0/0 = NaN; warn once up front.
     _warn_zero_variance_slices(Y_3d, output_names=problem.output_names, var_per_slice=total_var)
 
-    fit = _fit_pce_core(problem, X, Y, order=order, ridge=ridge, fit_ratio=fit_ratio)
+    fit = _fit_pce_core(
+        problem, X, Y, order=order, ridge=ridge, fit_ratio=fit_ratio, batch_size=batch_size
+    )
     squeeze_time, squeeze_output = fit.squeeze_time, fit.squeeze_output
     T, K = fit.coefficients.shape[:2]
 
@@ -230,10 +370,10 @@ def analyze_pce(
     # (Sudret 2008), batched over all slices -- no extra sampling, no loops.
     S1, ST, S2 = sobol_from_coefficients(fit.coefficients, fit.multi_index)  # (T,K,D), (T,K,D,D)
 
-    # Per-slice LOO RMSE as a cheap goodness-of-fit diagnostic; the
-    # hat-matrix leverage is shared by every slice.
-    loo = loo_error(fit.Phi, fit.Y_flat, fit.coeffs_flat, gram_inv_PhiT=fit.gram_inv_PhiT)
-    loo = loo.reshape(T, K)
+    # Per-slice LOO RMSE as a cheap goodness-of-fit diagnostic, computed by
+    # the fit path (single-pass hat-matrix diagonal, or the streamed
+    # equivalent); the leverage is shared by every slice.
+    loo = fit.loo_flat.reshape(T, K)
     partial_var = jnp.sum(fit.coefficients[..., 1:] ** 2, axis=-1)
     explained_variance = jnp.where(total_var == 0, jnp.nan, partial_var / total_var)
 

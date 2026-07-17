@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -47,6 +49,19 @@ class TestPAWNBasic:
         pawn = np.asarray(result.pawn)
         assert pawn[0] > pawn[2], "x1 should be more important than x3"
         assert pawn[1] > pawn[2], "x2 should be more important than x3"
+
+    def test_slice_chunk_size_kwarg_accepted(self, ishigami_data):
+        """The 0.4 name `slice_chunk_size` is accepted (documented no-op)."""
+        X, Y = ishigami_data
+        result = analyze(ishigami.PROBLEM, X[:200], Y[:200], seed=0, slice_chunk_size=8)
+        assert result.pawn.shape == (3,)
+
+    def test_old_chunk_size_kwarg_raises(self, ishigami_data):
+        """The pre-0.4 `chunk_size` name is gone — no shim."""
+        X, Y = ishigami_data
+        old_kwargs: dict[str, Any] = {"chunk_size": 8}
+        with pytest.raises(TypeError):
+            analyze(ishigami.PROBLEM, X[:200], Y[:200], seed=0, **old_kwargs)
 
 
 class TestPAWNSALibComparison:

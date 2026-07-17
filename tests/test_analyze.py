@@ -604,3 +604,21 @@ def test_gaussian_and_quantile_bootstrap_endpoints_differ():
     gaussian = gsax.sobol.analyze(sr, Y, num_resamples=50, ci_method="gaussian", key=key)
 
     assert not np.allclose(np.asarray(gaussian.S1_conf), np.asarray(quantile.S1_conf))
+
+
+def test_slice_chunk_size_kwarg_accepted():
+    """The 0.4 name `slice_chunk_size` is accepted explicitly."""
+    sr = gsax.sobol.sample(PROBLEM, n_samples=2**6, seed=7, verbose=False)
+    Y = evaluate(jnp.asarray(sr.samples))
+    Y_multi = jnp.stack([Y, 2 * Y], axis=-1)
+    result = gsax.sobol.analyze(sr, Y_multi, slice_chunk_size=1)
+    assert np.asarray(result.S1).shape == (2, 3)
+
+
+def test_old_chunk_size_kwarg_raises():
+    """The pre-0.4 `chunk_size` name is gone — no shim."""
+    sr = gsax.sobol.sample(PROBLEM, n_samples=2**6, seed=7, verbose=False)
+    Y = evaluate(jnp.asarray(sr.samples))
+    old_kwargs: dict[str, Any] = {"chunk_size": 1}
+    with pytest.raises(TypeError):
+        gsax.sobol.analyze(sr, Y, **old_kwargs)

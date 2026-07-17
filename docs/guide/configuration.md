@@ -4,9 +4,10 @@ gsax needs no configuration to get started — the defaults are fine for most
 workloads, and you can safely skip this page at first. It runs on JAX and
 inherits JAX's runtime defaults, two of which are worth revisiting for
 sensitivity-analysis workloads: **numerical precision** and **compilation
-caching**. Both are opt-in and off by default, because they mutate global,
+caching**. gsax adds one knob of its own, the **memory budget** that sizes
+automatic batching. All three are opt-in, because they mutate global,
 process-wide state that the host application may also depend on. This page
-documents when to enable each and how.
+documents when to change each and how.
 
 ## Precision (float32 vs float64)
 
@@ -91,3 +92,32 @@ It returns the expanded cache-directory path that was configured.
 > can make this process load and run arbitrary compiled code. Never point it at a
 > world-writable or shared, untrusted location — keep it under a directory only
 > you control, such as `~/.cache/gsax-jax`.
+
+## Memory budget
+
+gsax bounds peak transient memory in several places by processing data in
+batches sized against a bytes budget: surrogate `predict` for PCE and HDMR,
+HDMR output-slice chunking, and the streaming fits of `gsax.pce.analyze` and
+`gsax.hdmr.analyze` (which engage automatically when the single-pass fit would
+exceed the budget). The default budget is **512 MiB**.
+
+`gsax.config.set_memory_budget(...)` adjusts it globally:
+
+```python
+import gsax
+
+gsax.config.set_memory_budget(256 * 1024**2)  # 256 MiB
+gsax.config.get_memory_budget()               # -> 268435456
+```
+
+Lower it on memory-constrained devices (more, smaller batches); raise it when
+you have headroom and want fewer, larger batches.
+
+Consistent with this page's never-on-import philosophy, nothing changes until
+you call it, and it only affects *subsequent* gsax calls — analyses already
+running keep the budget they started with. Explicit per-call parameters
+(`batch_size`, `slice_chunk_size`) always take precedence over the budget.
+
+The API-level summary lives in the [API overview](/api/#configuration); the
+migration notes on the new streaming fits are in the
+[0.3 to 0.4 migration guide](/guide/migration-0.4).

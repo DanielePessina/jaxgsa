@@ -16,6 +16,23 @@
 - Simplified Sobol persistence to one NPZ file through
   `SobolSamples.save(...)` and `SobolSamples.load(...)`; removed pandas and
   format-specific persistence dependencies.
+- Renamed the design row-count fields on `SobolSamples` and `MorrisSamples`:
+  `n_total` is now `n_runs` (unique rows you evaluate, one model run per row)
+  and `expanded_n_total` is now `n_expanded` (pre-deduplication design size).
+- Retyped the eFAST workflow: `gsax.efast.sample(problem, n_per_curve, *, M=4,
+  ...)` (the second parameter was `N`) returns a typed `EFASTSamples` carrying
+  `samples`, `n_per_curve`, `M`, `problem`, and an `n_runs` property;
+  `gsax.efast.analyze(samples, Y, ...)` is samples-first and no longer takes
+  `M` or `problem` — both are threaded from the design object, so a mismatch
+  between sampling and analysis is now impossible.
+- Standardized the batching vocabulary package-wide: `batch_size` always means
+  rows of X/Y per batch (`pce.analyze`, `hdmr.analyze`, `dgsm.analyze`,
+  `hsic.analyze`, and `result.predict`); output-slice chunking parameters were
+  renamed from `chunk_size` to `slice_chunk_size` on `hdmr`, `efast`, `sobol`,
+  `borgonovo`, `optimal_transport`, and `pawn` `analyze`.
+- Moved shared internals into a private `gsax._core` package and introduced
+  private base classes for sample designs and surrogate results (internal
+  reorganization; no user-facing API change).
 
 ### Added
 
@@ -23,7 +40,29 @@
   `result.shapley(include_correlative=True)`.
 - Dense structural `HDMRResult.S2` and `HDMRResult.S3` interaction arrays.
 - Bounded-memory batched prediction for PCE and HDMR result objects.
+- Automatic streaming fits for `gsax.pce.analyze` and `gsax.hdmr.analyze`:
+  when the estimated single-pass fit memory exceeds the active budget, the
+  fit streams over row batches. The streamed path is mathematically exact —
+  it accumulates the same Gram matrices and moments as the in-memory path
+  (PCE leave-one-out diagnostics stay exact via a second streamed pass),
+  differing only in floating-point summation order. An explicit `batch_size=`
+  forces streaming.
+- `gsax.config.set_memory_budget(bytes)` / `gsax.config.get_memory_budget()`:
+  an opt-in, process-global transient-memory budget (default 512 MiB) that
+  sizes every automatic batching decision — surrogate `predict` batches, HDMR
+  output-slice chunking, and the streaming fits. Explicit per-call
+  `batch_size` / `slice_chunk_size` parameters always take precedence.
+- `MorrisSamples.save(path)` and `MorrisSamples.load(path)`, using the same
+  single-NPZ format and metadata schema as `SobolSamples`.
+- `gsax.shapley.analyze(problem, X, Y, backend="pce"|"hdmr", ...)`: a thin
+  convenience wrapper over the canonical result methods
+  (`pce.analyze(...).shapley()` / `hdmr.analyze(...).shapley(...)`).
 - A 0.3 to 0.4 API migration guide.
+
+### Improved
+
+- Power-of-2 validation errors now name the two nearest valid values, so the
+  message states exactly which sample counts would be accepted.
 
 ## 0.3.0b1
 

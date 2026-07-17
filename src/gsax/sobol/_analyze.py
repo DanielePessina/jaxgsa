@@ -182,7 +182,7 @@ def _normalize_s2_matrix(S2: Array) -> Array:
 
 
 def _analyze_no_bootstrap(
-    sampling_result: SobolSamples, Y: Array, *, chunk_size: int
+    sampling_result: SobolSamples, Y: Array, *, slice_chunk_size: int
 ) -> SobolResult:
     """Compute Sobol indices with optimized kernel selection.
 
@@ -241,10 +241,10 @@ def _analyze_no_bootstrap(
     B_flat = B.transpose(1, 2, 0).reshape(T * K, base_n)
     AB_flat = AB.transpose(2, 3, 0, 1).reshape(T * K, base_n, D)
 
-    if chunk_size < 1:
-        raise ValueError(f"chunk_size must be >= 1, got {chunk_size}")
+    if slice_chunk_size < 1:
+        raise ValueError(f"slice_chunk_size must be >= 1, got {slice_chunk_size}")
     # Chunk the T*K batches to cap peak memory when many outputs exist
-    cs = min(chunk_size, total)
+    cs = min(slice_chunk_size, total)
 
     if calc_second_order:
         assert BA is not None
@@ -306,7 +306,7 @@ def _analyze_bootstrap(
     conf_level: float,
     ci_method: Literal["quantile", "gaussian"],
     key: Array,
-    chunk_size: int,
+    slice_chunk_size: int,
 ) -> SobolResult:
     """Bootstrap path: loop over (T, K) combos, vmap over R resamples.
 
@@ -353,7 +353,7 @@ def _analyze_bootstrap(
                 S2_list.append(s2)
 
                 s1_boot, st_boot, s2_boot = _bootstrap_second_order(
-                    indices, a, ab, ba, b, chunk_size
+                    indices, a, ab, ba, b, slice_chunk_size
                 )
                 s2_lo, s2_hi = _bootstrap_ci_endpoints(
                     s2,
@@ -365,7 +365,7 @@ def _analyze_bootstrap(
                 S2_hi_list.append(s2_hi)
             else:
                 s1, st = jit_ft(a, ab, b)
-                s1_boot, st_boot = _bootstrap_first_total(indices, a, ab, b, chunk_size)
+                s1_boot, st_boot = _bootstrap_first_total(indices, a, ab, b, slice_chunk_size)
 
             S1_list.append(s1)
             ST_list.append(st)
@@ -449,7 +449,7 @@ def analyze(
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
     key: Array | None = None,
-    chunk_size: int = 2048,
+    slice_chunk_size: int = 2048,
 ) -> SobolResult:
     """Compute Sobol sensitivity indices from model outputs using JAX.
 
@@ -494,11 +494,11 @@ def analyze(
             Both methods still return lower/upper bounds, not half-widths.
         key: JAX PRNG key for bootstrap randomness. Required when
             ``num_resamples > 0``.
-        chunk_size: Memory/speed trade-off for batched computation. In the
-            no-bootstrap path this is the number of (T, K) output slices per
-            vmap batch; in the bootstrap path it is the number of resamples
-            per batch. Lower it if you hit device out-of-memory errors.
-            Defaults to 2048.
+        slice_chunk_size: Memory/speed trade-off for batched computation.
+            In the no-bootstrap path this is the number of (T, K) output
+            slices per vmap batch; in the bootstrap path it caps the
+            number of bootstrap resamples per batch. Lower it if you hit
+            device out-of-memory errors. Defaults to 2048.
 
     Returns:
         SobolResult containing:
@@ -568,7 +568,7 @@ def analyze(
             conf_level=conf_level,
             ci_method=ci_method,
             key=key,
-            chunk_size=chunk_size,
+            slice_chunk_size=slice_chunk_size,
         )
 
-    return _analyze_no_bootstrap(sampling_result, Y, chunk_size=chunk_size)
+    return _analyze_no_bootstrap(sampling_result, Y, slice_chunk_size=slice_chunk_size)

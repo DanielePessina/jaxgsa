@@ -23,6 +23,7 @@ method namespaces. Replace root-level shortcuts with namespace calls:
 | `gsax.analyze_pawn(...)` | `gsax.pawn.analyze(...)` |
 | `gsax.analyze_borgonovo(...)` | `gsax.borgonovo.analyze(...)` |
 | `gsax.analyze_optimal_transport(...)` | `gsax.optimal_transport.analyze(...)` |
+| `gsax.analyze_shapley(...)` | `gsax.shapley.analyze(...)` or `result.shapley()` |
 | `gsax.enable_compilation_cache(...)` | `gsax.config.enable_compilation_cache(...)` |
 
 `monte_carlo` uses `n=...`, not `N=...`.
@@ -47,6 +48,100 @@ result = gsax.sobol.analyze(samples, Y)
 
 The sampling result type is now `gsax.sobol.SobolSamples`; the analysis result
 is `gsax.sobol.SobolResult`.
+
+## Design Row Counts
+
+The two row-count fields on sampling results were renamed, on both
+`SobolSamples` and `MorrisSamples`:
+
+| 0.3 | 0.4 |
+| --- | --- |
+| `samples.n_total` | `samples.n_runs` |
+| `samples.expanded_n_total` | `samples.n_expanded` |
+
+`n_runs` is the number of unique rows you evaluate (one model run per row);
+`n_expanded` is the size of the full design layout before deduplication.
+
+## eFAST Workflow
+
+`efast.sample` renamed its second parameter from `N` to `n_per_curve` and now
+returns a typed `EFASTSamples` object instead of a bare array. `efast.analyze`
+takes that object first — the `M` and `problem` parameters are gone, because
+both travel inside the design object and can no longer be mismatched between
+sampling and analysis.
+
+Before:
+
+```python
+X = gsax.sample_efast(problem, 4096, M=4, seed=42)
+Y = model(X)
+result = gsax.analyze_efast(problem, Y, M=4)
+```
+
+After:
+
+```python
+samples = gsax.efast.sample(problem, n_per_curve=4096, M=4, seed=42)
+Y = model(samples.samples)
+result = gsax.efast.analyze(samples, Y)
+```
+
+`EFASTSamples` carries `samples`, `n_per_curve`, `M`, `problem`, and an
+`n_runs` property (`n_per_curve * D`, the package-wide meaning: unique rows
+you run the model on).
+
+## Batching Parameters
+
+0.4 uses one vocabulary for the two kinds of batching, package-wide:
+
+- `batch_size` always means **rows of X/Y** processed per batch
+  (`pce.analyze`, `hdmr.analyze`, `dgsm.analyze`, `hsic.analyze`, and
+  `result.predict`);
+- `slice_chunk_size` always means **output slices** (`T * K` columns)
+  processed per batch.
+
+The former `chunk_size` parameters were renamed accordingly:
+
+| 0.3 | 0.4 |
+| --- | --- |
+| `gsax.sobol.analyze(..., chunk_size=...)` | `gsax.sobol.analyze(..., slice_chunk_size=...)` |
+| `gsax.efast.analyze(..., chunk_size=...)` | `gsax.efast.analyze(..., slice_chunk_size=...)` |
+| `gsax.hdmr.analyze(..., chunk_size=...)` | `gsax.hdmr.analyze(..., slice_chunk_size=...)` |
+| `gsax.pawn.analyze(..., chunk_size=...)` | `gsax.pawn.analyze(..., slice_chunk_size=...)` |
+| `gsax.borgonovo.analyze(..., chunk_size=...)` | `gsax.borgonovo.analyze(..., slice_chunk_size=...)` |
+| `gsax.optimal_transport.analyze(..., chunk_size=...)` | `gsax.optimal_transport.analyze(..., slice_chunk_size=...)` |
+| `gsax.dgsm.analyze(..., chunk_size=...)` | `gsax.dgsm.analyze(..., batch_size=...)` |
+| `gsax.hsic.analyze(..., chunk_size=...)` | `gsax.hsic.analyze(..., batch_size=...)` |
+
+`gsax.morris.analyze` keeps its `chunk_size` parameter unchanged — there it
+bounds bootstrap resamples per batch, which is neither rows nor output slices.
+
+## Streaming Fits and the Memory Budget
+
+`gsax.pce.analyze` and `gsax.hdmr.analyze` gained a `batch_size` parameter and
+automatic streaming: when the estimated memory of the single-pass fit exceeds
+the active budget, the fit streams over row batches automatically. The
+streamed fit is mathematically exact — it accumulates the same Gram matrices
+and moments as the in-memory path (and PCE leave-one-out diagnostics stay
+exact via a second pass), differing only in floating-point summation order.
+Passing an explicit `batch_size=` forces the streamed path.
+
+The budget itself is a new process-global knob (default 512 MiB):
+
+```python
+import gsax
+
+gsax.config.set_memory_budget(256 * 1024**2)  # 256 MiB
+gsax.config.get_memory_budget()               # 268435456
+
+result = gsax.pce.analyze(problem, X, Y, order=4)           # streams if needed
+result = gsax.hdmr.analyze(problem, X, Y, batch_size=8192)  # streaming forced
+```
+
+It sizes every automatic batching decision (surrogate `predict`, HDMR
+output-slice chunking, and the streaming fits). Explicit per-call
+`batch_size` / `slice_chunk_size` parameters always take precedence. See the
+[configuration guide](/guide/configuration) for details.
 
 ## PCE and HDMR
 
@@ -74,8 +169,8 @@ hdmr_result.S3  # (..., D, D, D)
 
 ## Shapley Effects
 
-There is no standalone `analyze_shapley(...)` in 0.4. Fit the surrogate you
-want, then derive Shapley effects from that result:
+There is no standalone Shapley pipeline in 0.4. The canonical form is to fit
+the surrogate you want, then derive Shapley effects from that result:
 
 ```python
 pce_result = gsax.pce.analyze(problem, X, Y, order=4)
@@ -88,6 +183,18 @@ correlation_aware = hdmr_result.shapley(include_correlative=True)
 
 This makes the fit reusable for prediction, diagnostics, Sobol-style indices,
 and Shapley effects without fitting the same surrogate twice.
+
+When only the Shapley effects are needed, `gsax.shapley.analyze` wraps the
+two steps as a thin convenience — it is literally
+`gsax.pce.analyze(...).shapley()` (or the HDMR equivalent), with no separate
+pipeline behind it:
+
+```python
+effects = gsax.shapley.analyze(problem, X, Y, backend="pce", order=4)
+effects = gsax.shapley.analyze(
+    problem, X, Y, backend="hdmr", include_correlative=True
+)
+```
 
 ## Output Shapes
 
@@ -115,7 +222,7 @@ exactly and the trailing axis of length `D`:
 - `(N, K)` outputs require `(N, K, D)`;
 - `(N, T, K)` outputs require `(N, T, K, D)`.
 
-## Sobol Persistence
+## Design Persistence
 
 Sobol designs now use one NPZ file:
 
@@ -126,3 +233,12 @@ samples = gsax.sobol.SobolSamples.load("runs/design")
 
 The `.npz` suffix is optional. CSV, text, pickle, Excel, and Parquet
 persistence were removed, along with the pandas dependency.
+
+`MorrisSamples` gained the same `save(path)` / `load(path)` pair, using the
+identical single-NPZ format and metadata schema:
+
+```python
+samples = gsax.morris.sample(problem, n_trajectories=64, seed=42)
+samples.save("runs/morris_design")
+samples = gsax.morris.MorrisSamples.load("runs/morris_design")
+```

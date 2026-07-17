@@ -206,7 +206,7 @@ def analyze(
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
     seed: int = 0,
-    chunk_size: int = 2048,
+    slice_chunk_size: int = 2048,
 ) -> PAWNResult:
     """Compute PAWN sensitivity indices.
 
@@ -243,8 +243,8 @@ def analyze(
             intervals. Set to 0 to skip.
         conf_level: Confidence level for bootstrap intervals.
         seed: Random seed for bootstrap resampling.
-        chunk_size: Accepted for signature parity with the other
-            ``analyze`` functions; PAWN needs no kernel-matrix blocking,
+        slice_chunk_size: Accepted for signature parity with the other
+            ``analyze`` functions; PAWN needs no output-slice chunking,
             so it has no effect.
 
     Returns:

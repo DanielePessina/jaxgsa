@@ -90,21 +90,21 @@ def _build_kernel_fixed(x: Array, sigma: Array) -> Array:
     return jnp.exp(-dists_sq / (2.0 * sigma**2))
 
 
-def _build_kernel_chunked(x: Array, sigma: Array, chunk_size: int) -> Array:
+def _build_kernel_chunked(x: Array, sigma: Array, batch_size: int) -> Array:
     """Build Gaussian kernel matrix in row blocks to limit peak memory.
 
     Args:
         x: 1-D array of N values.
         sigma: Kernel bandwidth.
-        chunk_size: Number of rows per block.
+        batch_size: Number of rows per block.
 
     Returns:
         (N, N) kernel matrix.
     """
     N = x.shape[0]
     rows = []
-    for start in range(0, N, chunk_size):
-        end = min(start + chunk_size, N)
+    for start in range(0, N, batch_size):
+        end = min(start + batch_size, N)
         block = jnp.exp(-((x[start:end, None] - x[None, :]) ** 2) / (2.0 * sigma**2))
         rows.append(block)
     return jnp.concatenate(rows, axis=0)
@@ -165,7 +165,7 @@ def _hsic_v(K: Array, L: Array) -> Array:
 def _build_one_kernel(
     x: Array,
     bandwidth: float | None,
-    chunk_size: int | None,
+    batch_size: int | None,
     N: int,
 ) -> Array:
     """Build a single kernel matrix with the appropriate strategy.
@@ -173,13 +173,13 @@ def _build_one_kernel(
     Args:
         x: 1-D array of N values.
         bandwidth: Fixed bandwidth or None for median heuristic.
-        chunk_size: Block size for kernel matrix, or None.
+        batch_size: Block size for kernel matrix, or None.
         N: Sample count (used for chunking decision).
 
     Returns:
         (N, N) kernel matrix.
     """
-    use_chunked = chunk_size is not None and chunk_size > 0 and N > chunk_size
+    use_chunked = batch_size is not None and batch_size > 0 and N > batch_size
     if bandwidth is None and not use_chunked:
         return _build_kernel_median(x)
     if bandwidth is not None and not use_chunked:
@@ -188,28 +188,28 @@ def _build_one_kernel(
         sigma = _median_bandwidth(x)
     else:
         sigma = jnp.asarray(bandwidth, dtype=x.dtype)
-    if chunk_size is None:
-        raise ValueError("chunk_size must not be None in chunked path")
-    return _build_kernel_chunked(x, sigma, chunk_size)
+    if batch_size is None:
+        raise ValueError("batch_size must not be None in chunked path")
+    return _build_kernel_chunked(x, sigma, batch_size)
 
 
 def _build_input_kernels(
     X_unit: Array,
     bandwidth: float | None,
-    chunk_size: int | None,
+    batch_size: int | None,
 ) -> list[Array]:
     """Build kernel matrices for all D input dimensions.
 
     Args:
         X_unit: (N, D) inputs on [0, 1].
         bandwidth: Fixed bandwidth or None for median heuristic.
-        chunk_size: Block size for kernel matrix, or None.
+        batch_size: Block size for kernel matrix, or None.
 
     Returns:
         List of D kernel matrices, each (N, N).
     """
     N, D = X_unit.shape
-    return [_build_one_kernel(X_unit[:, d], bandwidth, chunk_size, N) for d in range(D)]
+    return [_build_one_kernel(X_unit[:, d], bandwidth, batch_size, N) for d in range(D)]
 
 
 def _augmented_kernels(Ks: list[Array]) -> list[Array]:
@@ -338,7 +338,7 @@ def _compute_slice(
     bandwidth: float | None,
     key: Array,
     n_perms: int,
-    chunk_size: int | None,
+    batch_size: int | None,
 ) -> tuple[Array, Array, Array, Array]:
     """Compute HSIC indices for a single (t, k) output slice.
 
@@ -352,13 +352,13 @@ def _compute_slice(
         bandwidth: Fixed bandwidth or None for median heuristic.
         key: PRNG key for permutation test.
         n_perms: Number of permutations.
-        chunk_size: Block size for kernel matrix, or None.
+        batch_size: Block size for kernel matrix, or None.
 
     Returns:
         (R2_HSIC, T_HSIC, p_values, hsic_raw) each of shape ``(D,)``.
     """
     N = y_col.shape[0]
-    L = _build_one_kernel(y_col, bandwidth, chunk_size, N)
+    L = _build_one_kernel(y_col, bandwidth, batch_size, N)
     return _get_hsic_kernel(n_perms)(Ks_stack, K_aug_compls_stack, K_aug_full, hsic_xxs, L, key)
 
 
@@ -370,7 +370,7 @@ def analyze(
     n_perms: int = 200,
     seed: int = 0,
     bandwidth: float | None = None,
-    chunk_size: int | None = None,
+    batch_size: int | None = None,
     prenormalize: bool = False,
 ) -> HSICResult:
     """Compute HSIC (Hilbert-Schmidt Independence Criterion) sensitivity indices.
@@ -406,7 +406,7 @@ def analyze(
         bandwidth: Fixed Gaussian-kernel bandwidth applied to all inputs
             and the output. None (default) selects it per variable via the
             median heuristic (median pairwise distance), a robust default.
-        chunk_size: Row-block size for building each ``(N, N)`` kernel
+        batch_size: Row-block size for building each ``(N, N)`` kernel
             matrix, bounding peak memory for large N. None computes each
             full matrix at once.
         prenormalize: If True, standardize each output slice to mean 0 and
@@ -444,7 +444,7 @@ def analyze(
     key = jax.random.key(seed)
 
     # Build input kernels and augmented products once (independent of Y).
-    Ks = _build_input_kernels(X_unit, bandwidth, chunk_size)
+    Ks = _build_input_kernels(X_unit, bandwidth, batch_size)
     Ks_stack = jnp.stack(Ks)
     Ks_aug = _augmented_kernels(Ks)
     K_aug_full, K_aug_compls = _complement_kernels(Ks_aug)
@@ -473,7 +473,7 @@ def analyze(
                 bandwidth,
                 subkey,
                 n_perms,
-                chunk_size,
+                batch_size,
             )
 
             r2_all = r2_all.at[t, k].set(r2)

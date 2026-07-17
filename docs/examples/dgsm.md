@@ -133,7 +133,7 @@ D is always the last axis of the index arrays.
   given input.
 - For purely additive linear models, the upper and lower bounds collapse to
   the exact total Sobol index.
-- The `chunk_size` parameter controls batching of the autodiff to limit peak
+- The `batch_size` parameter controls batching of the autodiff to limit peak
   memory usage on large sample sets.
 
 ## See also

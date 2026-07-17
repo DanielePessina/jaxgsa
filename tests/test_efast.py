@@ -1,5 +1,7 @@
 """Tests for eFAST (extended FAST) sensitivity analysis."""
 
+from typing import Any
+
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -300,15 +302,15 @@ class TestPrenormalize:
         np.testing.assert_allclose(np.asarray(result.ST), np.asarray(baseline.ST), atol=0.02)
 
 
-class TestChunkSize:
-    """Chunk size should not affect results."""
+class TestSliceChunkSize:
+    """Slice chunk size should not affect results."""
 
-    def test_chunk_size(self):
+    def test_slice_chunk_size(self):
         sr = sample(ishigami.PROBLEM, n_per_curve=4096, M=4, seed=42)
         Y = ishigami.evaluate(jnp.asarray(sr.samples))
         Y_multi = jnp.stack([Y, 2 * Y, 0.5 * Y], axis=-1)
         default_result = analyze(sr, Y_multi)
-        chunked_result = analyze(sr, Y_multi, chunk_size=1)
+        chunked_result = analyze(sr, Y_multi, slice_chunk_size=1)
         np.testing.assert_allclose(
             np.asarray(chunked_result.S1),
             np.asarray(default_result.S1),
@@ -319,6 +321,21 @@ class TestChunkSize:
             np.asarray(default_result.ST),
             atol=1e-6,
         )
+
+    def test_slice_chunk_size_kwarg_accepted(self):
+        """The 0.4 name `slice_chunk_size` is accepted explicitly."""
+        sr = sample(ishigami.PROBLEM, n_per_curve=128, M=4, seed=0)
+        Y = ishigami.evaluate(jnp.asarray(sr.samples))
+        result = analyze(sr, jnp.asarray(Y), slice_chunk_size=2)
+        assert np.asarray(result.S1).shape == (3,)
+
+    def test_old_chunk_size_kwarg_raises(self):
+        """The pre-0.4 `chunk_size` name is gone — no shim."""
+        sr = sample(ishigami.PROBLEM, n_per_curve=128, M=4, seed=0)
+        Y = ishigami.evaluate(jnp.asarray(sr.samples))
+        old_kwargs: dict[str, Any] = {"chunk_size": 2}
+        with pytest.raises(TypeError):
+            analyze(sr, jnp.asarray(Y), **old_kwargs)
 
 
 class TestToDatasetMultiOutput:

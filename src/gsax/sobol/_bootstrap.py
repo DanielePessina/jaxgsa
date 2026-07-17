@@ -19,6 +19,7 @@ Chunked vmap
 (N, D) array simultaneously, easily exhausting device memory when R is large.
 Instead we process resamples in chunks of ``chunk_size`` rows, vmap within each
 chunk (fully vectorised on-device), and concatenate the results on the host.
+(``analyze`` forwards its ``slice_chunk_size`` argument as this resample cap.)
 """
 
 import jax

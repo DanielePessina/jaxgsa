@@ -1,15 +1,19 @@
-"""Opt-in JAX runtime configuration helpers for gsax.
+"""Opt-in runtime configuration helpers for gsax.
 
-These helpers wrap ``jax.config`` settings worth tuning for sensitivity-analysis
-workloads. They are deliberately never applied on import, because they mutate
-global JAX state that the host application may also depend on.
+These helpers wrap process-global settings worth tuning for
+sensitivity-analysis workloads: JAX runtime flags and gsax's own
+transient-memory budget. They are deliberately never applied on import,
+because they mutate global state that the host application may also depend
+on -- every knob here only changes behavior when explicitly called.
 """
 
 from pathlib import Path
 
 import jax
 
-__all__ = ["enable_compilation_cache"]
+from gsax._core import batching as _batching
+
+__all__ = ["enable_compilation_cache", "get_memory_budget", "set_memory_budget"]
 
 
 def enable_compilation_cache(
@@ -54,3 +58,41 @@ def enable_compilation_cache(
     # partway through after the two updates above have already taken effect.
     jax.config.update("jax_persistent_cache_min_entry_size_bytes", int(min_entry_size_bytes))
     return cache_dir
+
+
+def set_memory_budget(budget_bytes: int) -> None:
+    """Set the global transient-memory budget used for automatic batching.
+
+    gsax bounds peak memory in several places by processing data in batches
+    sized against a bytes budget: surrogate ``predict`` (PCE, HDMR), the HDMR
+    output-slice chunking, and the PCE streaming fit that engages when the
+    single-pass design matrix would not fit. All of them derive their
+    automatic batch/chunk sizes from this budget (default: 512 MiB).
+
+    This is an opt-in process-global setting, consistent with this module's
+    never-on-import philosophy: nothing changes until you call it, and it
+    only takes effect for *subsequent* gsax calls -- analyses already running
+    keep the budget they started with. Explicit per-call parameters
+    (``batch_size``, ``slice_chunk_size``) always take precedence over this
+    budget.
+
+    Args:
+        budget_bytes: New budget in bytes; must be a positive integer
+            (e.g. ``256 * 1024**2`` for 256 MiB).
+
+    Raises:
+        ValueError: If ``budget_bytes`` is not a positive integer.
+    """
+    if not isinstance(budget_bytes, int) or isinstance(budget_bytes, bool) or budget_bytes <= 0:
+        raise ValueError(f"memory budget must be a positive int of bytes, got {budget_bytes!r}")
+    _batching._set_memory_budget(budget_bytes)
+
+
+def get_memory_budget() -> int:
+    """Return the active transient-memory budget in bytes.
+
+    Returns:
+        The budget set by the most recent :func:`set_memory_budget` call, or
+        the built-in default (512 MiB) if it was never called.
+    """
+    return _batching.get_memory_budget()

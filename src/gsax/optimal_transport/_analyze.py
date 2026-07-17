@@ -318,7 +318,7 @@ def analyze(
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
     seed: int = 0,
-    chunk_size: int | None = None,
+    slice_chunk_size: int | None = None,
 ) -> OTResult:
     """Compute optimal-transport sensitivity indices from given data.
 
@@ -388,10 +388,10 @@ def analyze(
             transport problems -- keep it modest there.
         conf_level: Confidence level for percentile bootstrap intervals.
         seed: Random seed for bootstrap resampling and the dummy input.
-        chunk_size: ``"univariate"`` mode: number of flattened ``T*K``
-            output columns processed per kernel call; ``None`` picks a
-            memory-aware default. Accepted but inert in the point-cloud
-            modes
+        slice_chunk_size: ``"univariate"`` mode: number of flattened
+            ``T*K`` output columns processed per kernel call; ``None``
+            picks a memory-aware default. Accepted but inert in the
+            point-cloud modes
             (their peak memory is bounded by one ``(N, N/M)`` cost block
             per solve).
 
@@ -411,7 +411,7 @@ def analyze(
             used with a non-3-D Y, ``n_partitions`` is not in
             ``[2, N // 2]``, ``epsilon <= 0``, ``max_iter < 1``,
             ``tol <= 0``, ``n_bootstrap < 0``, ``conf_level`` is not in
-            ``(0, 1)``, or ``chunk_size`` is not a positive integer.
+            ``(0, 1)``, or ``slice_chunk_size`` is not a positive integer.
     """
     X = jnp.asarray(X)
     Y = _validate_xy_inputs(problem, X, Y)
@@ -433,8 +433,8 @@ def analyze(
         raise ValueError(f"n_bootstrap must be >= 0, got {n_bootstrap}")
     if not 0 < conf_level < 1:
         raise ValueError(f"conf_level must be in (0, 1), got {conf_level}")
-    if chunk_size is not None and chunk_size < 1:
-        raise ValueError(f"chunk_size must be >= 1, got {chunk_size}")
+    if slice_chunk_size is not None and slice_chunk_size < 1:
+        raise ValueError(f"slice_chunk_size must be >= 1, got {slice_chunk_size}")
 
     Y_3d, squeeze_time, squeeze_output = _prepare_Y(Y)
     _, T, K = Y_3d.shape
@@ -478,7 +478,7 @@ def analyze(
 
         def _run(idx: Array, cls_idx: Array) -> tuple[Array, Array, Array, Array]:
             R_run, D_run = idx.shape[0], cls_idx.shape[1]
-            cs = chunk_size
+            cs = slice_chunk_size
             if cs is None:
                 cs = max(1, _CHUNK_ELEM_BUDGET // (D_run * M * N))
             cs = min(cs, total)

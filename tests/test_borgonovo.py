@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import Any, cast
 
 import jax.numpy as jnp
 import numpy as np
@@ -76,15 +76,28 @@ class TestDeltaBasic:
         r_coarse = analyze(ishigami.PROBLEM, X, Y, n_classes=4, n_bootstrap=0)
         assert not np.allclose(np.asarray(r_default.delta), np.asarray(r_coarse.delta))
 
-    def test_chunk_size_invariance(self, ishigami_data):
+    def test_slice_chunk_size_invariance(self, ishigami_data):
         """Chunked column processing must not change the result."""
         X, Y = ishigami_data
         Y2 = jnp.stack([Y, Y**2, jnp.sin(Y)], axis=1)
         r_full = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=10, seed=0)
-        r_chunked = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=10, seed=0, chunk_size=1)
+        r_chunked = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=10, seed=0, slice_chunk_size=1)
         np.testing.assert_allclose(
             np.asarray(r_full.delta), np.asarray(r_chunked.delta), rtol=1e-6
         )
+
+    def test_slice_chunk_size_kwarg_accepted(self, ishigami_data):
+        """The 0.4 name `slice_chunk_size` is accepted explicitly."""
+        X, Y = ishigami_data
+        result = analyze(ishigami.PROBLEM, X[:256], Y[:256], n_bootstrap=0, slice_chunk_size=4)
+        assert np.asarray(result.delta).shape == (3,)
+
+    def test_old_chunk_size_kwarg_raises(self, ishigami_data):
+        """The pre-0.4 `chunk_size` name is gone — no shim."""
+        X, Y = ishigami_data
+        old_kwargs: dict[str, Any] = {"chunk_size": 4}
+        with pytest.raises(TypeError):
+            analyze(ishigami.PROBLEM, X[:256], Y[:256], n_bootstrap=0, **old_kwargs)
 
 
 class TestDeltaSALibComparison:

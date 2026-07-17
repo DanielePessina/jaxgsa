@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import jax
 import jax.numpy as jnp
@@ -91,11 +91,24 @@ class TestOTBasic:
         assert r1.ot_conf is not None and r2.ot_conf is not None
         np.testing.assert_array_equal(np.asarray(r1.ot_conf), np.asarray(r2.ot_conf))
 
-    def test_chunk_size_invariance(self, multi_output_data):
+    def test_slice_chunk_size_invariance(self, multi_output_data):
         X, _, Y3 = multi_output_data
         r_default = analyze(ishigami.PROBLEM, X, Y3)
-        r_chunked = analyze(ishigami.PROBLEM, X, Y3, chunk_size=1)
+        r_chunked = analyze(ishigami.PROBLEM, X, Y3, slice_chunk_size=1)
         np.testing.assert_allclose(np.asarray(r_default.ot), np.asarray(r_chunked.ot), atol=1e-7)
+
+    def test_slice_chunk_size_kwarg_accepted(self, ishigami_data):
+        """The 0.4 name `slice_chunk_size` is accepted explicitly."""
+        X, Y = ishigami_data
+        result = analyze(ishigami.PROBLEM, X[:512], Y[:512], slice_chunk_size=2)
+        assert np.asarray(result.ot).shape == (3,)
+
+    def test_old_chunk_size_kwarg_raises(self, ishigami_data):
+        """The pre-0.4 `chunk_size` name is gone — no shim."""
+        X, Y = ishigami_data
+        old_kwargs: dict[str, Any] = {"chunk_size": 2}
+        with pytest.raises(TypeError):
+            analyze(ishigami.PROBLEM, X[:512], Y[:512], **old_kwargs)
 
     def test_n_partitions_changes_result(self, ishigami_data):
         X, Y = ishigami_data
@@ -555,10 +568,10 @@ class TestOTValidation:
         with pytest.raises(ValueError, match="conf_level"):
             analyze(ishigami.PROBLEM, X, Y, n_bootstrap=10, conf_level=1.5)
 
-    def test_bad_chunk_size(self, ishigami_data):
+    def test_bad_slice_chunk_size(self, ishigami_data):
         X, Y = ishigami_data
-        with pytest.raises(ValueError, match="chunk_size"):
-            analyze(ishigami.PROBLEM, X, Y, chunk_size=0)
+        with pytest.raises(ValueError, match="slice_chunk_size"):
+            analyze(ishigami.PROBLEM, X, Y, slice_chunk_size=0)
 
 
 class TestOTXarray:

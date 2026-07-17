@@ -194,7 +194,7 @@ def analyze(
     conf_level: float = 0.95,
     bias_correct: bool = True,
     seed: int = 0,
-    chunk_size: int | None = None,
+    slice_chunk_size: int | None = None,
 ) -> DeltaResult:
     """Compute Borgonovo delta and given-data first-order Sobol indices.
 
@@ -230,10 +230,11 @@ def analyze(
             ``n_bootstrap > 0``; S1 is never bias-corrected, matching
             SALib).
         seed: Random seed for bootstrap resampling.
-        chunk_size: Number of flattened ``T*K`` output columns processed
-            per kernel call. ``None`` picks a memory-aware default from the
-            sample size; pass an explicit positive integer to override.
-            Peak memory scales with ``chunk_size * D * N * grid_size``.
+        slice_chunk_size: Number of flattened ``T*K`` output columns
+            processed per kernel call. ``None`` picks a memory-aware
+            default from the sample size; pass an explicit positive
+            integer to override. Peak memory scales with
+            ``slice_chunk_size * D * N * grid_size``.
 
     Returns:
         DeltaResult with delta and S1 indices and optional confidence
@@ -250,7 +251,7 @@ def analyze(
             counts, ``n_classes`` is not in ``[2, N]``, ``grid_size < 2``,
             ``bandwidth`` is neither ``"silverman"`` nor a positive float,
             ``n_bootstrap < 0``, ``conf_level`` is not in ``(0, 1)``, or
-            ``chunk_size`` is not a positive integer.
+            ``slice_chunk_size`` is not a positive integer.
     """
     X = jnp.asarray(X)
     Y = _validate_xy_inputs(problem, X, Y)
@@ -275,10 +276,10 @@ def analyze(
     D = problem.num_vars
     Y_cols = Y_3d.reshape(N, T * K)
 
-    if chunk_size is None:
-        chunk_size = max(1, _CHUNK_ELEM_BUDGET // (D * N * grid_size))
-    elif chunk_size < 1:
-        raise ValueError(f"chunk_size must be >= 1, got {chunk_size}")
+    if slice_chunk_size is None:
+        slice_chunk_size = max(1, _CHUNK_ELEM_BUDGET // (D * N * grid_size))
+    elif slice_chunk_size < 1:
+        raise ValueError(f"slice_chunk_size must be >= 1, got {slice_chunk_size}")
 
     # Replicate 0 is the identity permutation (the original sample); the
     # remaining rows are the bootstrap resamples. Building them together
@@ -305,7 +306,7 @@ def analyze(
     kernel = _get_delta_kernel(grid_size, bw_factor)
 
     total = T * K
-    cs = min(chunk_size, total)
+    cs = min(slice_chunk_size, total)
     d_parts, s1_parts, degen_parts = [], [], []
     for start in range(0, total, cs):
         d, s1, degen = kernel(Y_cols[:, start : start + cs], all_idx, all_cls_idx, mask, counts)

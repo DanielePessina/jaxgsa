@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
@@ -321,7 +322,7 @@ class TestChunked:
         X = monte_carlo(problem, n=500, seed=11)
         Xj = jnp.asarray(X)
         result_full = analyze(problem, _linear_single, Xj)
-        result_chunked = analyze(problem, _linear_single, Xj, chunk_size=100)
+        result_chunked = analyze(problem, _linear_single, Xj, batch_size=100)
         np.testing.assert_allclose(
             np.asarray(result_full.nu),
             np.asarray(result_chunked.nu),
@@ -329,17 +330,32 @@ class TestChunked:
         )
 
     def test_ragged_chunk_matches(self):
-        """N not divisible by chunk_size should still produce correct results."""
+        """N not divisible by batch_size should still produce correct results."""
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
         X = monte_carlo(problem, n=503, seed=14)
         Xj = jnp.asarray(X)
         result_full = analyze(problem, _linear_single, Xj)
-        result_ragged = analyze(problem, _linear_single, Xj, chunk_size=100)
+        result_ragged = analyze(problem, _linear_single, Xj, batch_size=100)
         np.testing.assert_allclose(
             np.asarray(result_full.nu),
             np.asarray(result_ragged.nu),
             atol=1e-5,
         )
+
+    def test_batch_size_kwarg_accepted(self):
+        """The 0.4 name `batch_size` is accepted explicitly."""
+        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1),) * 3)
+        Xj = jnp.asarray(monte_carlo(problem, n=50, seed=3))
+        result = analyze(problem, _linear_single, Xj, batch_size=16)
+        assert result.nu.shape == (1, 3)
+
+    def test_old_chunk_size_kwarg_raises(self):
+        """The pre-0.4 `chunk_size` name is gone — no shim."""
+        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1),) * 3)
+        Xj = jnp.asarray(monte_carlo(problem, n=50, seed=3))
+        old_kwargs: dict[str, Any] = {"chunk_size": 16}
+        with pytest.raises(TypeError):
+            analyze(problem, _linear_single, Xj, **old_kwargs)
 
 
 class TestValidation:
@@ -571,7 +587,7 @@ class TestTimeSeries:
     def test_chunked_time_series_matches_unchunked(self):
         X = self._X(200)
         full = analyze(linear.PROBLEM, self._fn_ts, X)
-        chunked = analyze(linear.PROBLEM, self._fn_ts, X, chunk_size=64)
+        chunked = analyze(linear.PROBLEM, self._fn_ts, X, batch_size=64)
         np.testing.assert_allclose(np.asarray(chunked.nu), np.asarray(full.nu), rtol=1e-5)
         np.testing.assert_allclose(np.asarray(chunked.sigma), np.asarray(full.sigma), rtol=1e-4)
 

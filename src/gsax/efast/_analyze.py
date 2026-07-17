@@ -97,7 +97,7 @@ def analyze(
     Y: Array,
     *,
     prenormalize: bool = False,
-    chunk_size: int = 2048,
+    slice_chunk_size: int = 2048,
 ) -> EFASTResult:
     """Compute eFAST first- and total-order sensitivity indices.
 
@@ -123,9 +123,9 @@ def analyze(
             variance before computing indices. The indices are ratios, so
             this changes nothing mathematically; it only helps when raw
             output magnitudes risk float overflow/underflow.
-        chunk_size: Maximum number of output slices to process in one
-            vmapped batch. Caps peak device memory for large ``T * K``;
-            smaller values trade speed for memory.
+        slice_chunk_size: Maximum number of output slices to process in
+            one vmapped batch. Caps peak device memory for large
+            ``T * K``; smaller values trade speed for memory.
 
     Returns:
         EFASTResult with S1 and ST, shaped ``(D,)`` / ``(K, D)`` /
@@ -201,7 +201,7 @@ def analyze(
         Y_batched = Y_reshaped.transpose(0, 2, 3, 1).reshape(D * T * K, N)
 
         total = D * T * K
-        cs = min(chunk_size, total)
+        cs = min(slice_chunk_size, total)
         batched = _get_efast_kernel(N, M, omega_0, batched=True)
 
         s1_parts: list[Array] = []
