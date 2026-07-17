@@ -15,12 +15,13 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
-from gsax._batching import (
+from gsax._core.batching import (
     DEFAULT_EMULATE_BUDGET_BYTES,
     apply_batched,
     resolve_batch_size,
 )
-from gsax._normalization import (
+from gsax._core.transforms import cdf_to_unit_interval
+from gsax._core.validation import (
     _prenormalize_outputs,
     _prepare_Y,
     _squeeze_output_axes,
@@ -28,7 +29,6 @@ from gsax._normalization import (
     _validate_xy_inputs,
     _warn_zero_variance_slices,
 )
-from gsax._transforms import cdf_to_unit_interval
 from gsax.hdmr._engine import (
     _build_B1,
     _build_B2,

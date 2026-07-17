@@ -55,14 +55,14 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
-from gsax._bootstrap import _percentile_ci
-from gsax._normalization import (
+from gsax._core.bootstrap import _percentile_ci
+from gsax._core.partition import _build_class_indices, _class_layout
+from gsax._core.validation import (
     _prenormalize_outputs,
     _prepare_Y,
     _squeeze_output_axes,
     _validate_xy_inputs,
 )
-from gsax._partition import _build_class_indices, _class_layout
 from gsax.optimal_transport._result import OTResult
 from gsax.optimal_transport._solver import _sinkhorn_w2
 from gsax.problem import Problem
@@ -106,7 +106,7 @@ def _quantile_ranks(sizes: "np.ndarray", N: int) -> "np.ndarray":
 
     Args:
         sizes: True class sizes ``(M,)`` from
-            :func:`gsax._partition._class_layout`.
+            :func:`gsax._core.partition._class_layout`.
         N: Number of samples.
 
     Returns:
@@ -137,7 +137,7 @@ def _ot_1d_kernel(
         Y_cols: Output columns ``(N, C)``.
         all_idx: Replicate row indices ``(R, N)`` (row 0 is the identity).
         all_cls_idx: Class indices ``(R, D, M, P)`` into the original
-            sample, from :func:`gsax._partition._build_class_indices`.
+            sample, from :func:`gsax._core.partition._build_class_indices`.
         mask: Class validity mask ``(M, P)``.
         counts: True class sizes ``(M,)``.
         j: Quantile lookup table ``(M, N)`` from :func:`_quantile_ranks`.

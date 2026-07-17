@@ -24,7 +24,7 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from gsax._normalization import (
+from gsax._core.validation import (
     _prenormalize_outputs,
     _prepare_Y,
     _validate_output,

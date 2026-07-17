@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import pytest
 
 import gsax
-from gsax._normalization import _validate_output
+from gsax._core.validation import _validate_output
 from gsax.problem import Problem
 
 N = 40

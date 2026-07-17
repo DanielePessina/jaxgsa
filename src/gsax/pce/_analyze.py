@@ -10,8 +10,8 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
-from gsax._batching import apply_batched, resolve_batch_size
-from gsax._normalization import (
+from gsax._core.batching import apply_batched, resolve_batch_size
+from gsax._core.validation import (
     _prepare_Y,
     _squeeze_output_axes,
     _validate_x,

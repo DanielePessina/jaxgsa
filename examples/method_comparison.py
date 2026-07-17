@@ -85,7 +85,7 @@ def _run_all(gsax, ishigami, ishigami_fn, jax, jnp, problem, time):
     result_sobol = gsax.sobol.analyze(sr, _Y_sobol)
     jax.block_until_ready(result_sobol.S1)
     time_sobol = time.perf_counter() - _t0
-    n_evals_sobol = sr.n_total
+    n_evals_sobol = sr.n_runs
 
     # --- eFAST ---
     _t0 = time.perf_counter()
@@ -129,7 +129,7 @@ def _run_all(gsax, ishigami, ishigami_fn, jax, jnp, problem, time):
     result_morris = gsax.morris.analyze(sr_morris, _Y_morris)
     jax.block_until_ready(result_morris.mu_star)
     time_morris = time.perf_counter() - _t0
-    n_evals_morris = sr_morris.n_total
+    n_evals_morris = sr_morris.n_runs
 
     # --- Shapley (PCE backend, same data and order as the PCE run) ---
     _t0 = time.perf_counter()

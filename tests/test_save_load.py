@@ -13,7 +13,7 @@ def _assert_equal(left: SobolSamples, right: SobolSamples) -> None:
     np.testing.assert_array_equal(left.samples, right.samples)
     np.testing.assert_array_equal(left.sample_ids, right.sample_ids)
     np.testing.assert_array_equal(left.expanded_to_unique, right.expanded_to_unique)
-    assert left.expanded_n_total == right.expanded_n_total
+    assert left.n_expanded == right.n_expanded
     assert left.base_n == right.base_n
     assert left.n_params == right.n_params
     assert left.calc_second_order == right.calc_second_order
@@ -100,7 +100,7 @@ def test_identity_mapping_skips_index_array(tmp_path):
     """Designs without duplicate rows omit expanded_to_unique from the NPZ."""
     problem = Problem.from_dict({f"x{i}": (0.0, 1.0) for i in range(4)})
     samples = gsax.sobol.sample(problem, 64, seed=3, verbose=False)
-    assert np.array_equal(samples.expanded_to_unique, np.arange(samples.expanded_n_total)), (
+    assert np.array_equal(samples.expanded_to_unique, np.arange(samples.n_expanded)), (
         "test premise: this design should have no duplicate rows"
     )
 
@@ -122,7 +122,7 @@ def test_duplicate_rows_store_index_array(tmp_path):
         seed=5,
         verbose=False,
     )
-    assert samples.expanded_n_total > samples.n_total, (
+    assert samples.n_expanded > samples.n_runs, (
         "test premise: 1-D Saltelli designs should contain duplicate rows"
     )
 

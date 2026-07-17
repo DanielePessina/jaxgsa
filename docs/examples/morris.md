@@ -40,8 +40,8 @@ from gsax.benchmarks.ishigami import PROBLEM, evaluate
 # Only the unique rows are returned — exact duplicates across trajectories
 # are removed, so you evaluate fewer points than r * (D + 1).
 sr = gsax.morris.sample(PROBLEM, n_trajectories=50, num_levels=4, seed=42)
-print("unique rows:", sr.n_total)          # <= 50 * (3 + 1) = 200
-print("expanded rows:", sr.expanded_n_total)  # 200
+print("unique rows:", sr.n_runs)          # <= 50 * (3 + 1) = 200
+print("expanded rows:", sr.n_expanded)  # 200
 
 # Evaluate the model on the unique rows
 Y = evaluate(jnp.asarray(sr.samples))
@@ -103,8 +103,8 @@ design.
 ## Multi-output example
 
 When your model returns K outputs per sample, pass Y with shape
-`(n_total, K)`. The resulting measures have shape `(K, D)`. Time-series
-outputs `(n_total, T, K)` produce `(T, K, D)`.
+`(n_runs, K)`. The resulting measures have shape `(K, D)`. Time-series
+outputs `(n_runs, T, K)` produce `(T, K, D)`.
 
 ```python
 import jax.numpy as jnp
@@ -126,7 +126,7 @@ def multi_output_model(X):
     damping = X[:, 2]
     displacement = amp * jnp.sin(freq) * jnp.exp(-damping)
     velocity = amp * jnp.cos(freq) * jnp.exp(-damping)
-    return jnp.stack([displacement, velocity], axis=-1)  # (n_total, K=2)
+    return jnp.stack([displacement, velocity], axis=-1)  # (n_runs, K=2)
 
 
 sr = gsax.morris.sample(problem, n_trajectories=50, seed=42)
@@ -243,20 +243,20 @@ When bootstrap CIs are present, the dataset also contains `mu_lower`,
 
 ## Shape rules
 
-- `(n_total,)` means scalar output.
-- `(n_total, K)` means K output variables with no time dimension.
-- `(n_total, T, K)` means T time steps and K outputs.
+- `(n_runs,)` means scalar output.
+- `(n_runs, K)` means K output variables with no time dimension.
+- `(n_runs, T, K)` means T time steps and K outputs.
 - Without `problem.output_names`, a 2D array is always treated as
-  `(n_total, K)`.
+  `(n_runs, K)`.
 - With exactly one entry in `problem.output_names`, a 2D array is treated as
-  `(n_total, T)` — timepoints of that single output — and flows through as
-  `(n_total, T, 1)`. Passing a pre-reshaped `(n_total, T, 1)` array also works.
+  `(n_runs, T)` — timepoints of that single output — and flows through as
+  `(n_runs, T, 1)`. Passing a pre-reshaped `(n_runs, T, 1)` array also works.
 
 | Y shape | mu / mu_star / sigma shape |
 |---------|----------------------------|
-| `(n_total,)` | `(D,)` |
-| `(n_total, K)` | `(K, D)` |
-| `(n_total, T, K)` | `(T, K, D)` |
+| `(n_runs,)` | `(D,)` |
+| `(n_runs, K)` | `(K, D)` |
+| `(n_runs, T, K)` | `(T, K, D)` |
 
 D is always the last axis.
 

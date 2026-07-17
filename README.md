@@ -112,12 +112,12 @@ from gsax.benchmarks.ishigami import PROBLEM, evaluate
 
 # 1. Generate unique Sobol/Saltelli samples
 sampling_result = gsax.sobol.sample(PROBLEM, n_samples=4096, seed=42)
-# sampling_result.samples.shape == (n_total, D)  — D parameters, n_total unique rows
-# sampling_result.expanded_n_total is the internal Saltelli row count used by analyze()
+# sampling_result.samples.shape == (n_runs, D)  — D parameters, n_runs unique rows
+# sampling_result.n_expanded is the internal Saltelli row count used by analyze()
 # by default, sample() also prints a short summary of unique vs expanded rows
 
 # 2. Evaluate your model on the samples
-Y = evaluate(sampling_result.samples)  # Y.shape == (n_total,)
+Y = evaluate(sampling_result.samples)  # Y.shape == (n_runs,)
 
 # 3. Compute Sobol indices
 result = gsax.sobol.analyze(
@@ -389,7 +389,7 @@ sampling_result = gsax.sobol.sample(
 )
 
 # sampling_result.samples is the unique NumPy array you pass to your model
-# sampling_result.expanded_n_total is the internal Saltelli row count
+# sampling_result.n_expanded is the internal Saltelli row count
 ```
 
 ### Save and reload samples
@@ -412,9 +412,9 @@ matrix, problem definition, and Saltelli reconstruction metadata.
 
 ```python
 # Y can be:
-#   - (n_total,)       scalar output (single output, no time dimension)
-#   - (n_total, K)     multi-output (K outputs, no time dimension)
-#   - (n_total, T, K)  time-series multi-output (T timesteps, K outputs)
+#   - (n_runs,)       scalar output (single output, no time dimension)
+#   - (n_runs, K)     multi-output (K outputs, no time dimension)
+#   - (n_runs, T, K)  time-series multi-output (T timesteps, K outputs)
 #
 # Axes are never inferred or transposed. Use (N, T, 1) for one
 # time-varying output and make len(problem.output_names) match K.
@@ -442,7 +442,7 @@ not SALib-style confidence half-widths — even when `prenormalize=True`.
 
 ### Multi-output models
 
-For models with multiple outputs, pass a 2D array `(n_total, K)` evaluated on the unique rows. The returned indices will have shape `(K, D)`:
+For models with multiple outputs, pass a 2D array `(n_runs, K)` evaluated on the unique rows. The returned indices will have shape `(K, D)`:
 
 ```python
 import jax.numpy as jnp
@@ -452,21 +452,21 @@ def multi_output_model(X):
     y2 = X[:, 0] * X[:, 2]
     return jnp.column_stack([y1, y2])
 
-Y = multi_output_model(sampling_result.samples)  # (n_total, 2)
+Y = multi_output_model(sampling_result.samples)  # (n_runs, 2)
 result = gsax.sobol.analyze(sampling_result, Y)
 # result.S1.shape == (2, 3)  — 2 outputs, 3 parameters (K, D)
 # result.ST.shape == (2, 3)  — (K, D)
 # result.S2.shape == (2, 3, 3)  — (K, D, D)
 ```
 
-For time-series multi-output models, pass a 3D array `(n_total, T, K)` evaluated on the unique rows:
+For time-series multi-output models, pass a 3D array `(n_runs, T, K)` evaluated on the unique rows:
 
 ```python
 def time_series_model(X):
-    # Returns shape (n_total, T, K) — e.g. 50 timesteps, 4 outputs
+    # Returns shape (n_runs, T, K) — e.g. 50 timesteps, 4 outputs
     ...
 
-Y = time_series_model(sampling_result.samples)  # (n_total, 50, 4)
+Y = time_series_model(sampling_result.samples)  # (n_runs, 50, 4)
 result = gsax.sobol.analyze(sampling_result, Y)
 # result.S1.shape == (50, 4, D)  — (T, K, D)
 # result.ST.shape == (50, 4, D)  — (T, K, D)
@@ -479,13 +479,13 @@ How a 2D array is interpreted depends on `problem.output_names`. Without it, a 2
 
 ```python
 # Single output, no time dimension — pass a 1D array
-Y = my_model(X)          # shape (n_total,)
+Y = my_model(X)          # shape (n_runs,)
 result = gsax.sobol.analyze(sampling_result, Y)
 # result.S1.shape == (D,)
 
 # Single output WITH time dimension — reshape to (N, T, 1) ...
-Y = my_model(X)          # shape (n_total, T) — e.g. 50 timesteps
-Y = Y[:, :, None]        # reshape to (n_total, 50, 1)
+Y = my_model(X)          # shape (n_runs, T) — e.g. 50 timesteps
+Y = Y[:, :, None]        # reshape to (n_runs, 50, 1)
 result = gsax.sobol.analyze(sampling_result, Y)
 # result.S1.shape == (50, 1, D)  — (T, K=1, D)
 
@@ -494,7 +494,7 @@ result = gsax.sobol.analyze(sampling_result, Y)
 # output and produces the same (50, 1, D) result.
 
 # Multiple outputs, single timestep — just pass (N, K)
-Y = my_model(X)          # shape (n_total, 4) — 4 outputs
+Y = my_model(X)          # shape (n_runs, 4) — 4 outputs
 result = gsax.sobol.analyze(sampling_result, Y)
 # result.S1.shape == (4, D)  — (K, D)
 # No need for a time dimension; (N, 1, 4) also works but is unnecessary.

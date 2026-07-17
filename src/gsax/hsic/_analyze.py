@@ -30,14 +30,14 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from gsax._normalization import (
+from gsax._core.transforms import cdf_to_unit_interval
+from gsax._core.validation import (
     _prenormalize_outputs,
     _prepare_Y,
     _squeeze_output_axes,
     _validate_xy_inputs,
     _warn_zero_variance_slices,
 )
-from gsax._transforms import cdf_to_unit_interval
 from gsax.hsic._result import HSICResult
 from gsax.problem import Problem
 

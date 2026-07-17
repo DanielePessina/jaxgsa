@@ -52,7 +52,7 @@ def test_constant_y_produces_nan_counts(simple_problem):
     sr = gsax.sobol.sample(
         simple_problem, n_samples=64, seed=0, calc_second_order=False, verbose=False
     )
-    Y = jnp.ones(sr.n_total)
+    Y = jnp.ones(sr.n_runs)
     with pytest.warns(UserWarning, match="zero variance"):
         result = gsax.sobol.analyze(sr, Y)
     assert result.nan_counts is not None
@@ -66,7 +66,7 @@ def test_constant_y_second_order_nan(simple_problem):
     sr = gsax.sobol.sample(
         simple_problem, n_samples=64, seed=0, calc_second_order=True, verbose=False
     )
-    Y = jnp.ones(sr.n_total)
+    Y = jnp.ones(sr.n_runs)
     with pytest.warns(UserWarning, match="zero variance"):
         result = gsax.sobol.analyze(sr, Y)
     assert result.nan_counts is not None
@@ -94,7 +94,7 @@ def test_all_nonfinite_raises(simple_problem):
     sr = gsax.sobol.sample(
         simple_problem, n_samples=64, seed=0, calc_second_order=False, verbose=False
     )
-    Y = jnp.full(sr.n_total, jnp.nan)
+    Y = jnp.full(sr.n_runs, jnp.nan)
     with pytest.warns(UserWarning, match="dropped"):
         with pytest.raises(ValueError, match="All samples contain non-finite values"):
             gsax.sobol.analyze(sr, Y)

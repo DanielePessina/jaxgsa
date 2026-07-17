@@ -129,7 +129,7 @@ class TestOTPOTComparison:
     def test_per_bin_w2_matches_pot(self):
         """Per-bin 1-D W2^2 vs POT in the exact regime (n_m divides N)."""
         ot = pytest.importorskip("ot")
-        from gsax._partition import _build_class_indices, _class_layout
+        from gsax._core.partition import _build_class_indices, _class_layout
         from gsax.optimal_transport._analyze import _ot_1d_kernel, _quantile_ranks
 
         N, M = 1000, 25  # n_m = 40 divides N -> exact quantile coupling

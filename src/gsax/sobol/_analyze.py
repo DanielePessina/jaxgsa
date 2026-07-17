@@ -21,8 +21,8 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from gsax._bootstrap import _bootstrap_ci_endpoints
-from gsax._normalization import (
+from gsax._core.bootstrap import _bootstrap_ci_endpoints
+from gsax._core.validation import (
     _prenormalize_outputs,
     _prepare_Y,
     _squeeze_output_axes,
@@ -71,7 +71,7 @@ def _drop_nonfinite(Y: Array, step: int) -> tuple[Array, int]:
     because a partial group would corrupt the A/B/AB/BA split.
 
     Args:
-        Y: Model output array, shape (n_total, ...) where n_total = N * step.
+        Y: Model output array, shape (n_rows, ...) where n_rows = N * step.
             Trailing dimensions are typically (T, K) or absent.
         step: Number of rows per Saltelli group (D+2 or 2D+2).
 
@@ -79,8 +79,8 @@ def _drop_nonfinite(Y: Array, step: int) -> tuple[Array, int]:
         (Y_clean, n_dropped) — cleaned output array with shape
         (N_good * step, ...) and the number of groups that were removed.
     """
-    n_total = Y.shape[0]
-    base_n = n_total // step
+    n_rows = Y.shape[0]
+    base_n = n_rows // step
     trailing = Y.shape[1:]
 
     # Each Saltelli group [A_i, AB_{i,0}, …, AB_{i,D-1}, B_i] is an
@@ -142,8 +142,8 @@ def _separate_output_values(
         (N, D, ...) respectively; BA is None when second order is off.
     """
     step = 2 * D + 2 if calc_second_order else D + 2
-    n_total = Y.shape[0]
-    base_n = n_total // step
+    n_rows = Y.shape[0]
+    base_n = n_rows // step
     trailing = Y.shape[1:]
 
     # Reshape-based extraction: one reshape converts the flat output vector
@@ -185,13 +185,13 @@ def _expand_unique_outputs(sampling_result: SobolSamples, Y: Array) -> Array:
     """Rebuild expanded Saltelli outputs from unique user-evaluated outputs.
 
     The sampler deduplicates the Saltelli design before returning samples to
-    the user, so Y has only unique rows (shape ``(n_total, ...)``). This
+    the user, so Y has only unique rows (shape ``(n_runs, ...)``). This
     function gathers them back into the full interleaved layout the
-    estimators expect, shape ``(expanded_n_total, ...)``.
+    estimators expect, shape ``(n_expanded, ...)``.
     """
-    if Y.shape[0] != sampling_result.n_total:
+    if Y.shape[0] != sampling_result.n_runs:
         raise ValueError(
-            f"Y.shape[0] must match sampling_result.n_total ({sampling_result.n_total}), "
+            f"Y.shape[0] must match sampling_result.n_runs ({sampling_result.n_runs}), "
             f"got {Y.shape[0]}"
         )
     # expanded_to_unique[i] gives the unique-row index for expanded position i
@@ -489,10 +489,10 @@ def analyze(
         Y: Model outputs evaluated at each unique row of
             ``sampling_result.samples``, in the same row order. Accepted
             shapes:
-                (n_total,)       — scalar output, single time step
-                (n_total, K)     — K outputs, single time step
-                (n_total, T, K)  — K outputs over T time steps
-            where ``n_total`` is the unique row count. Indices are computed
+                (n_runs,)       — scalar output, single time step
+                (n_runs, K)     — K outputs, single time step
+                (n_runs, T, K)  — K outputs over T time steps
+            where ``n_runs`` is the unique row count. Indices are computed
             independently for every (t, k) output slice.
         prenormalize: When ``True``, apply SALib-style global output
             standardization over the cleaned expanded sample axis before

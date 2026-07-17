@@ -313,8 +313,8 @@ def _downsample(Y_traj, gsax, jnp, morris_problem, np, plt, result_traj, sr_traj
 
     _rank_100 = " > ".join(_names[_i] for _i in np.argsort(-_mu_star_100))
     _rank_25 = " > ".join(_names[_i] for _i in np.argsort(-_mu_star_25))
-    print(f"r=100 ranking: {_rank_100}   ({sr_traj.n_total} unique evals)")
-    print(f"r=25  ranking: {_rank_25}   ({sr_25.n_total} unique evals)")
+    print(f"r=100 ranking: {_rank_100}   ({sr_traj.n_runs} unique evals)")
+    print(f"r=25  ranking: {_rank_25}   ({sr_25.n_runs} unique evals)")
     print(f"rankings stable: {_rank_100 == _rank_25}")
 
     _x = np.arange(len(_names))

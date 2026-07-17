@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from gsax._core.sampling import _transform_samples
 from gsax.problem import Problem
-from gsax.sobol._sampling import _transform_samples
 
 
 def monte_carlo(

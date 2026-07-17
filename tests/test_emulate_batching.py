@@ -15,7 +15,7 @@ import pytest
 from jax import Array
 
 from gsax import hdmr, pce
-from gsax._batching import apply_batched, resolve_batch_size
+from gsax._core.batching import apply_batched, resolve_batch_size
 from gsax.problem import Problem
 
 D = 4

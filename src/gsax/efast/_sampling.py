@@ -16,8 +16,8 @@ import math
 
 import numpy as np
 
+from gsax._core.sampling import _transform_samples
 from gsax.problem import Problem
-from gsax.sobol._sampling import _transform_samples
 
 
 def _assign_frequencies(D: int, omega_0: int, M: int) -> np.ndarray:

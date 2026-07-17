@@ -22,8 +22,8 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
-from gsax._bootstrap import _bootstrap_ci_endpoints
-from gsax._normalization import (
+from gsax._core.bootstrap import _bootstrap_ci_endpoints
+from gsax._core.validation import (
     _prenormalize_outputs,
     _prepare_Y,
     _squeeze_output_axes,
@@ -163,9 +163,9 @@ def _drop_nonfinite_trajectories(
 
 def _expand_unique_outputs(sampling_result: MorrisSamples, Y: Array) -> Array:
     """Rebuild expanded Morris outputs from unique user-evaluated outputs."""
-    if Y.shape[0] != sampling_result.n_total:
+    if Y.shape[0] != sampling_result.n_runs:
         raise ValueError(
-            f"Y.shape[0] must match sampling_result.n_total ({sampling_result.n_total}), "
+            f"Y.shape[0] must match sampling_result.n_runs ({sampling_result.n_runs}), "
             f"got {Y.shape[0]}"
         )
     expanded_to_unique = jnp.asarray(sampling_result.expanded_to_unique)
@@ -205,10 +205,10 @@ def analyze(
             unique sample matrix plus elementary-effect bookkeeping.
         Y: Model outputs evaluated at each unique row of
             ``sampling_result.samples``. Accepted shapes:
-                (n_total,)       — scalar output, single time step
-                (n_total, K)     — K outputs, single time step
-                (n_total, T, K)  — K outputs over T time steps
-            where ``n_total`` is the unique row count. Any other number of
+                (n_runs,)       — scalar output, single time step
+                (n_runs, K)     — K outputs, single time step
+                (n_runs, T, K)  — K outputs over T time steps
+            where ``n_runs`` is the unique row count. Any other number of
             dimensions raises ``ValueError``.
         prenormalize: When ``True``, standardize each output slice to mean 0
             and unit standard deviation over the expanded sample axis before
@@ -236,7 +236,7 @@ def analyze(
 
     Raises:
         ValueError: If ``Y`` does not have 1, 2, or 3 dimensions; if ``Y``'s
-            first axis does not match ``sampling_result.n_total``; if fewer
+            first axis does not match ``sampling_result.n_runs``; if fewer
             than 2 trajectories survive non-finite cleaning; if ``ci_method``
             is invalid; if ``num_resamples > 0`` but ``key`` is ``None``; or
             if ``chunk_size < 1``.

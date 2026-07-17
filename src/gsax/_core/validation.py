@@ -1,4 +1,10 @@
-"""Shared output helpers for analysis entrypoints."""
+"""Shared input/output validation and labeling for analysis entrypoints.
+
+Validates the canonical ``(N, D)`` input and ``(N,)``/``(N, K)``/``(N, T, K)``
+output contracts, promotes outputs to the canonical 3-D layout, squeezes
+singleton axes back out of results, and resolves output/time coordinate
+labels for result containers.
+"""
 
 from __future__ import annotations
 
@@ -192,7 +198,7 @@ def _dims_and_coords(
 def _prepare_Y(
     Y: Array,
 ) -> tuple[Array, bool, bool]:
-    """Promote Y to a canonical 3-D shape (n_total, T, K).
+    """Promote Y to a canonical 3-D shape (N, T, K).
 
     Args:
         Y: Model output array with 1, 2, or 3 dimensions.

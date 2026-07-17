@@ -444,13 +444,13 @@ def test_prenormalize_gaussian_bootstrap_is_offset_invariant():
 
 
 def _legacy_sampling_result(sr: SobolSamples) -> SobolSamples:
-    expanded_n_total = sr.expanded_n_total
+    n_expanded = sr.n_expanded
     expanded_samples = sr.samples[sr.expanded_to_unique]
     return SobolSamples(
         samples=expanded_samples,
-        sample_ids=np.arange(expanded_n_total, dtype=np.int64),
-        expanded_n_total=expanded_n_total,
-        expanded_to_unique=np.arange(expanded_n_total, dtype=np.int64),
+        sample_ids=np.arange(n_expanded, dtype=np.int64),
+        n_expanded=n_expanded,
+        expanded_to_unique=np.arange(n_expanded, dtype=np.int64),
         base_n=sr.base_n,
         n_params=sr.n_params,
         calc_second_order=sr.calc_second_order,

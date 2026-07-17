@@ -38,9 +38,9 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from gsax._bootstrap import _percentile_ci
-from gsax._normalization import _prepare_Y, _squeeze_output_axes, _validate_xy_inputs
-from gsax._transforms import cdf_to_unit_interval
+from gsax._core.bootstrap import _percentile_ci
+from gsax._core.transforms import cdf_to_unit_interval
+from gsax._core.validation import _prepare_Y, _squeeze_output_axes, _validate_xy_inputs
 from gsax.pawn._result import PAWNResult
 from gsax.problem import Problem
 

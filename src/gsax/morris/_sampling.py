@@ -29,8 +29,8 @@ import jax.numpy as jnp
 import numpy as np
 from scipy.stats.qmc import Sobol
 
+from gsax._core.sampling import _next_power_of_2, _stable_unique_rows, _transform_samples
 from gsax.problem import Problem
-from gsax.sobol._sampling import _next_power_of_2, _stable_unique_rows, _transform_samples
 
 # Offset between the Sobol' draws used for radial base points (a) and
 # auxiliary points (b). Reusing draw i for both would give delta = 0;
@@ -58,12 +58,17 @@ def _min_radial_delta() -> float:
 class MorrisSamples:
     """Unique Morris samples plus metadata to locate elementary effects.
 
+    Note the two row counts: ``n_runs`` is the number of *unique* rows you
+    must evaluate (one model run per row), while ``n_expanded`` is the
+    (larger or equal) pre-deduplication size of the full Morris design that
+    the analysis reconstructs internally.
+
     Attributes:
         samples: Unique rows to evaluate with the user's model, shape
-            ``(n_unique, D)`` in the problem's physical units.
-        expanded_n_total: Row count of the full expanded design before
+            ``(n_runs, D)`` in the problem's physical units.
+        n_expanded: Row count of the full expanded design before
             deduplication, always ``n_trajectories * (D + 1)``.
-        expanded_to_unique: Integer index map of shape ``(expanded_n_total,)``
+        expanded_to_unique: Integer index map of shape ``(n_expanded,)``
             from each expanded row to its row index in ``samples``.
         n_trajectories: Number of trajectories (r), the Morris repetition unit.
         num_levels: Grid levels ``p`` used by the trajectory design
@@ -80,7 +85,7 @@ class MorrisSamples:
     """
 
     samples: np.ndarray  # shape (n_unique, D), scaled to bounds
-    expanded_n_total: int
+    n_expanded: int
     expanded_to_unique: np.ndarray
     n_trajectories: int
     num_levels: int
@@ -92,8 +97,8 @@ class MorrisSamples:
     problem: Problem
 
     @property
-    def n_total(self) -> int:
-        """Number of unique rows in ``samples``."""
+    def n_runs(self) -> int:
+        """Number of unique rows in ``samples`` (model runs to evaluate)."""
         return self.samples.shape[0]
 
     @overload
@@ -123,7 +128,7 @@ class MorrisSamples:
 
         Args:
             n_trajectories: Target trajectory count (``2 <= m <= r``).
-            Y: Model outputs with shape ``(n_total, ...)``. When provided,
+            Y: Model outputs with shape ``(n_runs, ...)``. When provided,
                 the matching prefix is returned alongside the new result.
 
         Returns:
@@ -141,8 +146,8 @@ class MorrisSamples:
                 f"Cannot upsample: requested n_trajectories={n_trajectories} > "
                 f"current n_trajectories={self.n_trajectories}"
             )
-        if Y is not None and Y.shape[0] != self.n_total:
-            raise ValueError(f"Y.shape[0]={Y.shape[0]} does not match n_total={self.n_total}")
+        if Y is not None and Y.shape[0] != self.n_runs:
+            raise ValueError(f"Y.shape[0]={Y.shape[0]} does not match n_runs={self.n_runs}")
         if n_trajectories == self.n_trajectories:
             return (self, Y) if Y is not None else self
 
@@ -154,7 +159,7 @@ class MorrisSamples:
 
         sr_small = MorrisSamples(
             samples=self.samples[:n_unique_new].copy(),
-            expanded_n_total=new_expanded_n,
+            n_expanded=new_expanded_n,
             expanded_to_unique=new_exp2uniq.copy(),
             n_trajectories=n_trajectories,
             num_levels=self.num_levels,
@@ -292,17 +297,17 @@ def _print_morris_summary(
     method: str,
     n_trajectories: int,
     num_levels: int,
-    unique_n: int,
-    expanded_n_total: int,
+    n_runs: int,
+    n_expanded: int,
 ) -> None:
     """Print a compact summary of the generated unique Morris design."""
-    duplicates_removed = expanded_n_total - unique_n
-    duplicate_fraction = duplicates_removed / expanded_n_total if expanded_n_total else 0.0
+    duplicates_removed = n_expanded - n_runs
+    duplicate_fraction = duplicates_removed / n_expanded if n_expanded else 0.0
     levels_label = f", num_levels={num_levels}" if method == "trajectory" else ""
     print(
         "gsax.morris.sample: "
         f"D={n_params}, method={method}, n_trajectories={n_trajectories}{levels_label}, "
-        f"expanded_rows={expanded_n_total}, returned_unique={unique_n}, "
+        f"n_expanded={n_expanded}, n_runs={n_runs}, "
         f"duplicates_removed={duplicates_removed} ({duplicate_fraction:.1%})"
     )
 
@@ -423,13 +428,13 @@ def sample(
             method=method,
             n_trajectories=n_trajectories,
             num_levels=num_levels,
-            unique_n=unique_samples.shape[0],
-            expanded_n_total=expanded_samples.shape[0],
+            n_runs=unique_samples.shape[0],
+            n_expanded=expanded_samples.shape[0],
         )
 
     return MorrisSamples(
         samples=unique_samples,
-        expanded_n_total=expanded_samples.shape[0],
+        n_expanded=expanded_samples.shape[0],
         expanded_to_unique=expanded_to_unique,
         n_trajectories=n_trajectories,
         num_levels=num_levels,

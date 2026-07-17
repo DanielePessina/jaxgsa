@@ -50,9 +50,9 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
-from gsax._bootstrap import _percentile_ci
-from gsax._normalization import _prepare_Y, _squeeze_output_axes, _validate_xy_inputs
-from gsax._partition import _build_class_indices, _class_layout
+from gsax._core.bootstrap import _percentile_ci
+from gsax._core.partition import _build_class_indices, _class_layout
+from gsax._core.validation import _prepare_Y, _squeeze_output_axes, _validate_xy_inputs
 from gsax.borgonovo._result import DeltaResult
 from gsax.problem import Problem
 

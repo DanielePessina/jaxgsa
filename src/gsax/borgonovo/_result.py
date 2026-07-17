@@ -6,7 +6,7 @@ import numpy as np
 import xarray as xr
 from jax import Array
 
-from gsax._normalization import _dims_and_coords
+from gsax._core.validation import _dims_and_coords
 from gsax.problem import Problem
 
 
