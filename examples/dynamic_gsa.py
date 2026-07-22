@@ -1,4 +1,4 @@
-"""Dynamic (time-varying) sensitivity analysis with gsax.
+"""Dynamic (time-varying) sensitivity analysis with jaxgsa.
 
 Demonstrates how sensitivity indices evolve over time using a coupled damped
 oscillator model. Compares Sobol (with bootstrap CIs), eFAST, and DGSM bounds
@@ -19,7 +19,7 @@ app = marimo.App(width="medium")
 @app.cell(hide_code=True)
 def _intro(mo):
     mo.md(r"""
-    # Dynamic sensitivity analysis with **gsax**
+    # Dynamic sensitivity analysis with **jaxgsa**
 
     Dynamic sensitivity analysis reveals **how parameter importance evolves
     over time**. Early transient behaviour may be dominated by different
@@ -52,12 +52,12 @@ def _imports():
     import matplotlib.pyplot as plt
     import numpy as np
 
-    import gsax
-    from gsax import efast
-    from gsax.sampling import sample_mc
+    import jaxgsa
+    from jaxgsa import efast
+    from jaxgsa.sampling import monte_carlo
 
     plt.rcParams["figure.dpi"] = 150
-    return efast, gsax, jax, jnp, mo, np, plt, sample_mc
+    return efast, jaxgsa, jax, jnp, mo, np, plt, monte_carlo
 
 
 @app.cell(hide_code=True)
@@ -89,8 +89,8 @@ def _model_md(mo):
 
 
 @app.cell
-def _model(gsax, jnp):
-    problem = gsax.Problem.from_dict(
+def _model(jaxgsa, jnp):
+    problem = jaxgsa.Problem.from_dict(
         {
             "amplitude": (0.5, 2.0),
             "frequency": (1.0, 5.0),
@@ -141,8 +141,8 @@ def _sobol_md(mo):
 
 
 @app.cell
-def _sobol_analysis(gsax, jax, jnp, oscillator, problem):
-    sampling_result = gsax.sample(
+def _sobol_analysis(jaxgsa, jax, jnp, oscillator, problem):
+    sampling_result = jaxgsa.sobol.sample(
         problem,
         n_samples=4096,
         seed=0,
@@ -151,10 +151,10 @@ def _sobol_analysis(gsax, jax, jnp, oscillator, problem):
 
     X_sobol = jnp.asarray(sampling_result.samples)
     Y_sobol = oscillator(X_sobol)
-    # Reshape (N, T) -> (N, T, 1) so gsax treats columns as time steps, not outputs
+    # Reshape (N, T) -> (N, T, 1) so jaxgsa treats columns as time steps, not outputs
     Y_sobol = Y_sobol[..., None]
 
-    sobol_result = gsax.analyze(
+    sobol_result = jaxgsa.sobol.analyze(
         sampling_result,
         Y_sobol,
         num_resamples=200,
@@ -232,12 +232,12 @@ def _efast_md(mo):
 
 @app.cell
 def _efast_analysis(efast, jnp, oscillator, problem):
-    X_ef = efast.sample(problem, N=4096, M=4, seed=42)
-    Y_ef = oscillator(jnp.asarray(X_ef))
-    # Reshape (N*D, T) -> (N*D, T, 1) so gsax treats columns as time steps, not outputs
+    efast_samples = efast.sample(problem, n_per_curve=4096, M=4, seed=42)
+    Y_ef = oscillator(jnp.asarray(efast_samples.samples))
+    # Reshape (n_runs, T) -> (n_runs, T, 1) so jaxgsa treats columns as time steps, not outputs
     Y_ef = Y_ef[..., None]
 
-    efast_result = efast.analyze(problem, Y_ef, M=4)
+    efast_result = efast.analyze(efast_samples, Y_ef)
     print(efast_result)
     return (efast_result,)
 
@@ -324,9 +324,9 @@ def _dgsm_fn(jnp, times):
 
 
 @app.cell
-def _dgsm_analysis(gsax, jnp, oscillator_unbatched, problem, sample_mc):
-    X_dgsm = sample_mc(problem, N=50_000, seed=7)
-    dgsm_result = gsax.analyze_dgsm(problem, oscillator_unbatched, jnp.asarray(X_dgsm))
+def _dgsm_analysis(jaxgsa, jnp, oscillator_unbatched, problem, monte_carlo):
+    X_dgsm = monte_carlo(problem, n=50_000, seed=7)
+    dgsm_result = jaxgsa.dgsm.analyze(problem, oscillator_unbatched, jnp.asarray(X_dgsm))
     print(dgsm_result)
     return (dgsm_result,)
 

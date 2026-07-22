@@ -1,4 +1,4 @@
-"""Shapley-effect sensitivity analysis — gsax tutorial.
+"""Shapley-effect sensitivity analysis — jaxgsa tutorial.
 
 Demonstrates the Shapley-effects workflow on the Ishigami benchmark:
 Monte Carlo sampling, the default PCE backend, the S1 <= Sh <= ST
@@ -21,7 +21,7 @@ app = marimo.App(width="medium")
 @app.cell(hide_code=True)
 def _intro(mo):
     mo.md(r"""
-    # Shapley effects with **gsax**
+    # Shapley effects with **jaxgsa**
 
     **Shapley effects** (Owen 2014; Song, Nelson & Staum 2016) allocate
     the output variance *fairly*: each interaction's variance is split
@@ -32,7 +32,7 @@ def _intro(mo):
     $$
 
     where the $V_u$ are the partial variances of the Hoeffding–Sobol'
-    decomposition.  gsax computes them **analytically** from a fitted
+    decomposition.  jaxgsa computes them **analytically** from a fitted
     surrogate — PCE (default) or RS-HDMR — with no permutation Monte
     Carlo and no extra model runs.  The result carries four quantities:
 
@@ -62,11 +62,11 @@ def _imports():
     import matplotlib.pyplot as plt
     import numpy as np
 
-    import gsax
-    from gsax.benchmarks import ishigami
+    import jaxgsa
+    from jaxgsa.benchmarks import ishigami
 
     plt.rcParams["figure.dpi"] = 150
-    return gsax, ishigami, jnp, mo, np, plt
+    return jaxgsa, ishigami, jnp, mo, np, plt
 
 
 @app.cell(hide_code=True)
@@ -81,10 +81,10 @@ def _ishigami_md(mo):
     — it consumes whatever $(X, Y)$ data you already have, with no
     method-specific sampling design:
 
-    1. **Sample** — here `gsax.sample_mc` draws plain Monte Carlo
+    1. **Sample** — here `jaxgsa.sampling.monte_carlo` draws plain Monte Carlo
        points, but any sampling scheme would do.
     2. **Evaluate** — run the model on the samples.
-    3. **Analyse** — `gsax.analyze_shapley` fits the surrogate backend
+    3. **Analyse** — fit PCE, then call `result.shapley()`
        and reads the Shapley allocation off its variance decomposition.
 
     The default `backend="pce"` is exact *within the fitted
@@ -96,13 +96,13 @@ def _ishigami_md(mo):
 
 
 @app.cell
-def _ishigami_analysis(gsax, ishigami, jnp):
+def _ishigami_analysis(jaxgsa, ishigami, jnp):
     shapley_problem = ishigami.PROBLEM
 
-    X = jnp.asarray(gsax.sample_mc(shapley_problem, N=2000, seed=42))
+    X = jnp.asarray(jaxgsa.sampling.monte_carlo(shapley_problem, n=2000, seed=42))
     Y = ishigami.evaluate(X)
 
-    result = gsax.analyze_shapley(shapley_problem, X, Y, order=8)
+    result = jaxgsa.pce.analyze(shapley_problem, X, Y, order=8).shapley()
 
     print("Sh:", result.Sh)
     print("S1:", result.S1)
@@ -187,7 +187,7 @@ def _order_md(mo):
     the allocation, and $\mathrm{Sh}$ *always* sums to 1 — so the
     fit-quality signal lives in `explained_variance`
     ($\sum_u V_u / \mathrm{Var}(Y)$), reported separately rather than
-    silently renormalized away.  gsax emits a `UserWarning` when it
+    silently renormalized away.  jaxgsa emits a `UserWarning` when it
     drops below 0.5 (much of $\mathrm{Var}(Y)$ unexplained — watch the
     low-order runs below) or exceeds 1.3 (an overfit surrogate
     over-counting variance).  Sweeping the polynomial order shows the
@@ -197,11 +197,11 @@ def _order_md(mo):
 
 
 @app.cell
-def _order_sweep(X, Y, gsax, ishigami, np, shapley_problem):
+def _order_sweep(X, Y, jaxgsa, ishigami, np, shapley_problem):
     orders = (2, 3, 4, 6, 8)
     sweep = {}
     for _order in orders:
-        _r = gsax.analyze_shapley(shapley_problem, X, Y, order=_order)
+        _r = jaxgsa.pce.analyze(shapley_problem, X, Y, order=_order).shapley()
         sweep[_order] = _r
         _err = float(np.max(np.abs(np.asarray(_r.Sh) - ishigami.ANALYTICAL_SHAPLEY)))
         print(
@@ -263,10 +263,10 @@ def _hdmr_md(mo):
 
 
 @app.cell
-def _hdmr_multi(X, Y, gsax, jnp, shapley_problem):
+def _hdmr_multi(X, Y, jaxgsa, jnp, shapley_problem):
     Y_multi = jnp.column_stack([Y, jnp.sum(X**2, axis=1)])  # (N, K=2)
 
-    result_hdmr = gsax.analyze_shapley(shapley_problem, X, Y_multi, backend="hdmr")
+    result_hdmr = jaxgsa.hdmr.analyze(shapley_problem, X, Y_multi).shapley()
 
     print("Sh shape:", result_hdmr.Sh.shape)  # (K, D) = (2, 3)
     print("row sums:", result_hdmr.Sh.sum(axis=-1))  # each exactly 1

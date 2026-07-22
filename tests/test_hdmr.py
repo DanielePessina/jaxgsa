@@ -1,19 +1,20 @@
 """Tests for RS-HDMR sensitivity analysis."""
 
+from typing import Any
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from gsax.benchmarks.ishigami import (
+from jaxgsa.benchmarks.ishigami import (
     ANALYTICAL_S1,
     ANALYTICAL_ST,
     PROBLEM,
     evaluate,
 )
-from gsax.hdmr import analyze as analyze_hdmr
-from gsax.hdmr import emulate as emulate_hdmr
-from gsax.problem import GaussianInputSpec
+from jaxgsa.hdmr import analyze as analyze_hdmr
+from jaxgsa.problem import GaussianInputSpec
 
 
 # HDMR builds polynomial surrogates that approximate the true function, so
@@ -101,8 +102,8 @@ def test_shapes_1d(ishigami_data):
     assert result.ST.shape == (D,)
     assert result.rmse is not None
     assert result.rmse.shape == ()
-    assert result.emulator is not None
-    assert set(result.emulator) == {
+    assert result._fit is not None
+    assert set(result._fit) == {
         "C1",
         "C2",
         "C3",
@@ -112,17 +113,15 @@ def test_shapes_1d(ishigami_data):
         "y_std",
         "m",
         "maxorder",
-        "c2",
-        "c3",
     }
-    assert result.emulator["C1"].shape == (5, 3)
-    assert result.emulator["C2"] is not None
-    assert result.emulator["C2"].shape == (25, 3)
-    assert result.emulator["C3"] is None
-    assert result.emulator["f0"].shape == ()
-    assert result.emulator["y_mean"].shape == ()
-    assert result.emulator["y_std"].shape == ()
-    assert result.emulator["prenormalize"] is False
+    assert result._fit["C1"].shape == (5, 3)
+    assert result._fit["C2"] is not None
+    assert result._fit["C2"].shape == (25, 3)
+    assert result._fit["C3"] is None
+    assert result._fit["f0"].shape == ()
+    assert result._fit["y_mean"].shape == ()
+    assert result._fit["y_std"].shape == ()
+    assert result._fit["prenormalize"] is False
 
 
 def test_shapes_2d(ishigami_data):
@@ -143,12 +142,12 @@ def test_shapes_2d(ishigami_data):
     assert result.ST.shape == (K, D)
     assert result.rmse is not None
     assert result.rmse.shape == (K,)
-    assert result.emulator is not None
-    assert result.emulator["C1"].shape == (K, 5, 3)
-    assert result.emulator["C2"] is not None
-    assert result.emulator["C2"].shape == (K, 25, 3)
-    assert result.emulator["C3"] is None
-    assert result.emulator["f0"].shape == (K,)
+    assert result._fit is not None
+    assert result._fit["C1"].shape == (K, 5, 3)
+    assert result._fit["C2"] is not None
+    assert result._fit["C2"].shape == (K, 25, 3)
+    assert result._fit["C3"] is None
+    assert result._fit["f0"].shape == (K,)
 
 
 def test_shapes_3d(ishigami_data):
@@ -169,15 +168,15 @@ def test_shapes_3d(ishigami_data):
     assert result.ST.shape == (T, K, D)
     assert result.rmse is not None
     assert result.rmse.shape == (T, K)
-    assert result.emulator is not None
-    assert result.emulator["C1"].shape == (T, K, 5, 3)
-    assert result.emulator["C2"] is not None
-    assert result.emulator["C2"].shape == (T, K, 25, 3)
-    assert result.emulator["C3"] is None
-    assert result.emulator["f0"].shape == (T, K)
+    assert result._fit is not None
+    assert result._fit["C1"].shape == (T, K, 5, 3)
+    assert result._fit["C2"] is not None
+    assert result._fit["C2"].shape == (T, K, 25, 3)
+    assert result._fit["C3"] is None
+    assert result._fit["f0"].shape == (T, K)
 
 
-def test_chunk_size_regression(ishigami_data):
+def test_slice_chunk_size_regression(ishigami_data):
     """Chunked and unchunked HDMR paths should agree for multi-output Y."""
     X, Y = ishigami_data
     Y_2d = jnp.stack([Y, Y * 0.5], axis=1)
@@ -189,7 +188,7 @@ def test_chunk_size_regression(ishigami_data):
         Y_2d,
         maxorder=2,
         m=2,
-        chunk_size=1,
+        slice_chunk_size=1,
     )
 
     # Chunked and unchunked paths differ only by floating-point reduction
@@ -215,31 +214,31 @@ def test_chunk_size_regression(ishigami_data):
         rtol=1e-6,
         atol=1e-6,
     )
-    assert result_default.emulator is not None
-    assert result_chunked.emulator is not None
+    assert result_default._fit is not None
+    assert result_chunked._fit is not None
     np.testing.assert_allclose(
-        result_default.emulator["C1"], result_chunked.emulator["C1"], rtol=1e-4, atol=5e-3
+        result_default._fit["C1"], result_chunked._fit["C1"], rtol=1e-4, atol=5e-3
     )
-    assert result_default.emulator["C2"] is not None
-    assert result_chunked.emulator["C2"] is not None
+    assert result_default._fit["C2"] is not None
+    assert result_chunked._fit["C2"] is not None
     np.testing.assert_allclose(
-        np.asarray(result_default.emulator["C2"]),
-        np.asarray(result_chunked.emulator["C2"]),
+        np.asarray(result_default._fit["C2"]),
+        np.asarray(result_chunked._fit["C2"]),
         rtol=1e-4,
         atol=2e-3,
     )
     np.testing.assert_allclose(
-        result_default.emulator["f0"], result_chunked.emulator["f0"], rtol=1e-4, atol=5e-3
+        result_default._fit["f0"], result_chunked._fit["f0"], rtol=1e-4, atol=5e-3
     )
     np.testing.assert_allclose(
-        emulate_hdmr(result_default, X),
-        emulate_hdmr(result_chunked, X),
+        result_default.predict(X),
+        result_chunked.predict(X),
         rtol=1e-4,
         atol=3e-3,
     )
 
 
-def test_chunk_size_regression_3d(ishigami_data):
+def test_slice_chunk_size_regression_3d(ishigami_data):
     """Chunked and unchunked HDMR paths should agree for time-series multi-output Y."""
     X, Y = ishigami_data
     Y_alt = jnp.sin(X[:, 1]) + 0.1 * X[:, 0] * X[:, 2]
@@ -258,7 +257,7 @@ def test_chunk_size_regression_3d(ishigami_data):
         Y_tk,
         maxorder=2,
         m=2,
-        chunk_size=1,
+        slice_chunk_size=1,
     )
 
     # Chunked and unchunked paths differ only by floating-point reduction
@@ -333,17 +332,17 @@ def test_repeated_calls_identical(ishigami_data):
         rtol=1e-6,
         atol=1e-6,
     )
-    assert result_first.emulator is not None
-    assert result_second.emulator is not None
+    assert result_first._fit is not None
+    assert result_second._fit is not None
     np.testing.assert_allclose(
-        np.asarray(result_first.emulator["C1"]),
-        np.asarray(result_second.emulator["C1"]),
+        np.asarray(result_first._fit["C1"]),
+        np.asarray(result_second._fit["C1"]),
         rtol=1e-6,
         atol=1e-6,
     )
     np.testing.assert_allclose(
-        np.asarray(result_first.emulator["C2"]),
-        np.asarray(result_second.emulator["C2"]),
+        np.asarray(result_first._fit["C2"]),
+        np.asarray(result_second._fit["C2"]),
         rtol=1e-6,
         atol=1e-6,
     )
@@ -447,7 +446,7 @@ def test_maxorder_3(ishigami_data):
 def test_emulator_prediction(hdmr_result, ishigami_data):
     """Emulator predictions on training data should have low RMSE."""
     X, Y = ishigami_data
-    Y_pred = emulate_hdmr(hdmr_result, X)
+    Y_pred = hdmr_result.predict(X)
     assert Y_pred.shape == Y.shape
     rmse = float(jnp.sqrt(jnp.mean(jnp.square(Y - Y_pred))))
     # HDMR surrogate should capture most of the variance
@@ -457,8 +456,20 @@ def test_emulator_prediction(hdmr_result, ishigami_data):
 def test_emulator_reasonable(hdmr_result, ishigami_data):
     """Emulator output mean should be close to data mean."""
     X, Y = ishigami_data
-    Y_pred = emulate_hdmr(hdmr_result, X)
+    Y_pred = hdmr_result.predict(X)
     assert abs(float(jnp.mean(Y_pred)) - float(jnp.mean(Y))) < 1.0
+
+
+def test_predict_rejects_wrong_shaped_x(hdmr_result, ishigami_data):
+    """predict must validate X shape instead of silently clamping/truncating."""
+    X, _ = ishigami_data
+    with pytest.raises(ValueError, match="2-D"):
+        hdmr_result.predict(X[:, 0])  # 1-D input
+    D = PROBLEM.num_vars
+    X_wide = jnp.concatenate([X, X[:, :2]], axis=1)  # (N, D + 2)
+    assert X_wide.shape[1] == D + 2
+    with pytest.raises(ValueError, match="columns"):
+        hdmr_result.predict(X_wide)
 
 
 def test_prenormalize_emulator_predictions_and_rmse_stay_on_original_scale(ishigami_data):
@@ -467,11 +478,11 @@ def test_prenormalize_emulator_predictions_and_rmse_stay_on_original_scale(ishig
     Y_affine = 3.0 * Y + 17.0
 
     result = analyze_hdmr(PROBLEM, X, Y_affine, maxorder=2, m=2, prenormalize=True)
-    Y_pred = emulate_hdmr(result, X)
+    Y_pred = result.predict(X)
     rmse = float(jnp.sqrt(jnp.mean(jnp.square(Y_affine - Y_pred))))
 
-    assert result.emulator is not None
-    assert result.emulator["prenormalize"] is True
+    assert result._fit is not None
+    assert result._fit["prenormalize"] is True
     assert Y_pred.shape == Y_affine.shape
     assert result.rmse is not None
     np.testing.assert_allclose(np.asarray(result.rmse), rmse, rtol=1e-6, atol=1e-6)
@@ -484,13 +495,13 @@ def test_multi_output_analytical_ishigami_emulator(ishigami_data):
     Y_multi = jnp.stack([Y, 2.0 * Y], axis=1)
 
     result = analyze_hdmr(PROBLEM, X, Y_multi, maxorder=2, m=2)
-    Y_pred = emulate_hdmr(result, X)
+    Y_pred = result.predict(X)
 
-    assert result.emulator is not None
-    assert result.emulator["C1"].shape == (2, 5, 3)
-    assert result.emulator["C2"] is not None
-    assert result.emulator["C2"].shape == (2, 25, 3)
-    assert result.emulator["f0"].shape == (2,)
+    assert result._fit is not None
+    assert result._fit["C1"].shape == (2, 5, 3)
+    assert result._fit["C2"] is not None
+    assert result._fit["C2"].shape == (2, 25, 3)
+    assert result._fit["f0"].shape == (2,)
     assert Y_pred.shape == Y_multi.shape
 
     np.testing.assert_allclose(result.S1[0], result.S1[1], rtol=1e-6, atol=1e-6)
@@ -517,13 +528,13 @@ def test_time_series_multi_output_emulator_preserves_axes(ishigami_data):
     )
 
     result = analyze_hdmr(PROBLEM, X, Y_tk, maxorder=2, m=2)
-    Y_pred = emulate_hdmr(result, X)
+    Y_pred = result.predict(X)
 
-    assert result.emulator is not None
-    assert result.emulator["C1"].shape == (2, 2, 5, 3)
-    assert result.emulator["C2"] is not None
-    assert result.emulator["C2"].shape == (2, 2, 25, 3)
-    assert result.emulator["f0"].shape == (2, 2)
+    assert result._fit is not None
+    assert result._fit["C1"].shape == (2, 2, 5, 3)
+    assert result._fit["C2"] is not None
+    assert result._fit["C2"].shape == (2, 2, 25, 3)
+    assert result._fit["f0"].shape == (2, 2)
     assert Y_pred.shape == Y_tk.shape
 
     rmse = np.sqrt(np.mean(np.square(np.array(Y_pred) - np.array(Y_tk)), axis=0))
@@ -532,21 +543,21 @@ def test_time_series_multi_output_emulator_preserves_axes(ishigami_data):
     assert not np.allclose(np.array(Y_pred[:, 0, 0]), np.array(Y_pred[:, 1, 0]))
 
 
-def test_emulate_mirrors_single_label_2d_training(ishigami_data):
-    """Training on (N, T) single-label Y yields (N_new, T) predictions."""
-    from gsax.problem import Problem
+def test_predict_preserves_explicit_time_series_layout(ishigami_data):
+    """Training on (N, T, K) yields (N_new, T, K) predictions."""
+    from jaxgsa.problem import Problem
 
     X, Y = ishigami_data
-    problem = Problem(names=PROBLEM.names, bounds=PROBLEM.bounds, output_names=("pressure",))
-    Y_2d = jnp.stack([Y, 2.0 * Y], axis=-1)  # (N, T=2) single label
-    result = analyze_hdmr(problem, X, Y_2d, maxorder=2, m=2)
-    pred = emulate_hdmr(result, X[:30])
-    assert pred.shape == (30, 2)
-    # Equivalent to explicit (N, T, 1) training, squeezing the K axis.
-    explicit = analyze_hdmr(problem, X, Y_2d[:, :, None], maxorder=2, m=2)
-    np.testing.assert_allclose(
-        np.asarray(pred), np.asarray(emulate_hdmr(explicit, X[:30])[..., 0]), rtol=1e-5
+    assert PROBLEM.bounds is not None
+    problem = Problem(
+        names=PROBLEM.names,
+        bounds=PROBLEM.bounds,
+        output_names=("pressure",),
     )
+    Y_3d = jnp.stack([Y, 2.0 * Y], axis=-1)[..., None]
+    result = analyze_hdmr(problem, X, Y_3d, maxorder=2, m=2)
+    pred = result.predict(X[:30])
+    assert pred.shape == (30, 2, 1)
 
 
 def test_multi_output_emulator_preserves_non_proportional_outputs(ishigami_data):
@@ -556,13 +567,13 @@ def test_multi_output_emulator_preserves_non_proportional_outputs(ishigami_data)
     Y_multi = jnp.stack([Y, Y_alt], axis=1)
 
     result = analyze_hdmr(PROBLEM, X, Y_multi, maxorder=2, m=2)
-    Y_pred = emulate_hdmr(result, X)
+    Y_pred = result.predict(X)
 
-    assert result.emulator is not None
-    assert result.emulator["C1"].shape == (2, 5, 3)
-    assert result.emulator["C2"] is not None
-    assert result.emulator["C2"].shape == (2, 25, 3)
-    assert result.emulator["f0"].shape == (2,)
+    assert result._fit is not None
+    assert result._fit["C1"].shape == (2, 5, 3)
+    assert result._fit["C2"] is not None
+    assert result._fit["C2"].shape == (2, 25, 3)
+    assert result._fit["f0"].shape == (2,)
     assert result.rmse is not None
     assert result.rmse.shape == (2,)
     assert Y_pred.shape == Y_multi.shape
@@ -596,8 +607,8 @@ def test_select_and_rmse(hdmr_result):
     assert hdmr_result.select is not None
     assert hdmr_result.rmse is not None
     assert hdmr_result.select.shape[0] > 0
-    assert isinstance(hdmr_result.emulator["c2"], list)
-    assert isinstance(hdmr_result.emulator["c3"], list)
+    assert isinstance(hdmr_result._c2, tuple)
+    assert isinstance(hdmr_result._c3, tuple)
 
 
 def test_s1_property(hdmr_result):
@@ -649,5 +660,150 @@ def test_validation_errors():
     with pytest.raises(ValueError, match="maxorder"):
         analyze_hdmr(PROBLEM, X, Y, maxorder=4)
 
-    with pytest.raises(ValueError, match="chunk_size"):
-        analyze_hdmr(PROBLEM, X, Y, chunk_size=0)
+    with pytest.raises(ValueError, match="slice_chunk_size"):
+        analyze_hdmr(PROBLEM, X, Y, slice_chunk_size=0)
+
+    with pytest.raises(ValueError, match="batch_size"):
+        analyze_hdmr(PROBLEM, X, Y, batch_size=0)
+
+    # 0.4.0 rename: the old kwarg is gone, no shim. (Passed via an Any-typed
+    # dict so the static type-checker does not flag the intentionally-invalid
+    # name; the TypeError is the runtime contract under test.)
+    legacy_kwargs: dict[str, Any] = {"chunk_size": 1}
+    with pytest.raises(TypeError):
+        analyze_hdmr(PROBLEM, X, Y, **legacy_kwargs)
+
+
+# ---------------------------------------------------------------------------
+# S2 / S3 interaction-index properties
+# ---------------------------------------------------------------------------
+
+
+def _term_index(result, label: str) -> int:
+    """Return the position of a term label along the term axis."""
+    return result.terms.index(label)
+
+
+def test_s2_property_shape_and_symmetry(hdmr_result):
+    """S2 is a symmetric (D, D) matrix with a NaN diagonal."""
+    D = PROBLEM.num_vars
+    S2 = np.array(hdmr_result.S2)
+    assert S2.shape == (D, D)
+    # Diagonal has no pairwise term, so it stays NaN.
+    assert np.all(np.isnan(np.diag(S2)))
+    # Off-diagonal pairs are populated (Ishigami, maxorder=2) and symmetric.
+    offdiag = S2[~np.eye(D, dtype=bool)]
+    assert np.all(np.isfinite(offdiag))
+    np.testing.assert_array_equal(S2, S2.T)
+
+
+def test_s2_matches_term_slice(hdmr_result):
+    """Each S2[i, j] equals the Sa entry of the matching interaction term."""
+    names = PROBLEM.names
+    Sa = np.array(hdmr_result.Sa)
+    S2 = np.array(hdmr_result.S2)
+    D = PROBLEM.num_vars
+    for i in range(D):
+        for j in range(i + 1, D):
+            k = _term_index(hdmr_result, f"{names[i]}/{names[j]}")
+            assert S2[i, j] == Sa[k]
+            assert S2[j, i] == Sa[k]
+
+
+def test_s2_ishigami_dominant_pair(hdmr_result):
+    """Ishigami's x1-x3 interaction should dominate the S2 matrix."""
+    S2 = np.array(hdmr_result.S2)
+    # x1 (index 0) and x3 (index 2) carry Ishigami's only real interaction.
+    assert S2[0, 2] > S2[0, 1]
+    assert S2[0, 2] > S2[1, 2]
+
+
+def test_s2_s3_all_nan_when_maxorder_1(ishigami_data):
+    """With no interaction terms, S2 and S3 are entirely NaN."""
+    X, Y = ishigami_data
+    D = PROBLEM.num_vars
+    result = analyze_hdmr(PROBLEM, X, Y, maxorder=1, m=2)
+    assert result.S2.shape == (D, D)
+    assert bool(jnp.all(jnp.isnan(result.S2)))
+    assert result.S3.shape == (D, D, D)
+    assert bool(jnp.all(jnp.isnan(result.S3)))
+
+
+def test_s3_property_maxorder_3(ishigami_data):
+    """S3 is a symmetric (D, D, D) tensor matching the triple's Sa entry."""
+    X, Y = ishigami_data
+    names = PROBLEM.names
+    D = PROBLEM.num_vars
+    result = analyze_hdmr(PROBLEM, X, Y, maxorder=3, m=2)
+    S3 = np.array(result.S3)
+    Sa = np.array(result.Sa)
+    assert S3.shape == (D, D, D)
+
+    # Cells with any repeated axis have no term and stay NaN.
+    for i in range(D):
+        for j in range(D):
+            assert np.isnan(S3[i, i, j])
+            assert np.isnan(S3[i, j, i])
+            assert np.isnan(S3[j, i, i])
+
+    # The single D=3 triple (x1/x2/x3) is populated symmetrically.
+    k = _term_index(result, "/".join(names))
+    for perm in ((0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)):
+        assert S3[perm] == Sa[k]
+
+
+def test_s2_layout_uses_numeric_interaction_indices():
+    """S2 uses stored numeric indices instead of parsing display labels."""
+    from jaxgsa.hdmr._result import HDMRResult
+    from jaxgsa.problem import Problem
+
+    problem = Problem(names=("x1", "x2", "x3"), bounds=((0.0, 1.0),) * 3)
+    result = HDMRResult(
+        Sa=jnp.array([1.0, 2.0, 3.0, 9.0]),
+        Sb=jnp.zeros(4),
+        S=jnp.ones(4),
+        ST=jnp.ones(3),
+        problem=problem,
+        terms=("x1", "x2", "x3", "x1/x2"),
+        _c2=((0, 1),),
+    )
+    S2 = np.array(result.S2)
+    # The (x1, x2) cell is populated from Sa[3], not silently left NaN.
+    assert S2[0, 1] == 9.0
+    assert S2[1, 0] == 9.0
+    assert np.all(np.isnan(np.diag(S2)))
+    assert np.isnan(S2[0, 2])  # (x1, x3) has no term -> NaN
+
+
+def test_s2_multi_output_shape(ishigami_data):
+    """Multi-output S2 carries a leading output axis: (K, D, D)."""
+    X, Y = ishigami_data
+    D = PROBLEM.num_vars
+    Y_multi = jnp.stack([Y, 2.0 * Y], axis=1)
+    result = analyze_hdmr(PROBLEM, X, Y_multi, maxorder=2, m=2)
+    assert result.S2.shape == (2, D, D)
+    # Both proportional outputs share the same interaction structure. Each slice
+    # is fit by an independent least-squares solve, so near-zero interaction
+    # cells differ in the last digits -- compare with an absolute floor.
+    np.testing.assert_allclose(
+        np.array(result.S2[0]), np.array(result.S2[1]), rtol=1e-4, atol=1e-5
+    )
+
+
+def test_to_dataset_includes_s2_s3(ishigami_data):
+    """to_dataset exposes S2 always and S3 when third-order terms exist."""
+    X, Y = ishigami_data
+    D = PROBLEM.num_vars
+    names = list(PROBLEM.names)
+
+    ds2 = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2).to_dataset()
+    assert "S2" in ds2
+    assert ds2["S2"].dims == ("param_i", "param_j")
+    assert ds2["S2"].shape == (D, D)
+    assert list(ds2.coords["param_i"].values) == names
+    assert "S3" not in ds2
+
+    ds3 = analyze_hdmr(PROBLEM, X, Y, maxorder=3, m=2).to_dataset()
+    assert "S3" in ds3
+    assert ds3["S3"].dims == ("param_i", "param_j", "param_k")
+    assert ds3["S3"].shape == (D, D, D)

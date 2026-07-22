@@ -1,21 +1,16 @@
 # HDMR
 
-RS-HDMR fits a B-spline surrogate to arbitrary `(X, Y)` data, yielding ANCOVA
-sensitivity indices and a reusable emulator. The module lives at `gsax.hdmr`.
+`jaxgsa.hdmr.analyze(problem, X, Y, ...)` fits an RS-HDMR surrogate and returns
+`HDMRResult`.
 
-The canonical API reference now lives at [API Reference](/api/).
+Important result operations:
 
-Jump directly to:
+- `result.predict(X_new, batch_size=None)`
+- `result.shapley(include_correlative=False)`
+- `result.to_dataset(time_coords=None)`
 
-- [`analyze_hdmr()`](/api/#analyze_hdmr)
-- [`emulate_hdmr()`](/api/#emulate_hdmr)
-- [`HDMRResult`](/api/#hdmrresult)
-- [`HDMRResult.S1`](/api/#hdmrresult-s1)
-- [`HDMRResult.to_dataset()`](/api/#hdmrresult-to_dataset)
-- [`HDMREmulator`](/api/#hdmremulator)
+The result exposes ANCOVA term arrays `Sa`, `Sb`, and `S`, parameter totals
+`ST`, structural interaction properties `S1`, `S2`, and `S3`, fit selection
+counts, and RMSE.
 
-Related docs:
-
-- [RS-HDMR Example](/examples/hdmr)
-- [Advanced Workflow](/examples/advanced-workflow)
-- [Methods](/guide/methods)
+See the [HDMR example](/examples/hdmr) and [API overview](/api/).

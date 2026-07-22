@@ -59,7 +59,7 @@
         {
           "type": "stream",
           "name": "stdout",
-          "text": "gsax.sample: D=3, mode=second-order, base_n=512, requested_unique>=4096, returned_unique=4096, expanded_rows=4096, duplicates_removed=0 (0.0%), scramble=True\n",
+          "text": "jaxgsa.sample: D=3, mode=second-order, base_n=512, requested_unique>=4096, returned_unique=4096, expanded_rows=4096, duplicates_removed=0 (0.0%), scramble=True\n",
           "mimetype": "text/plain"
         },
         {

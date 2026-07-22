@@ -21,27 +21,27 @@ When to use Borgonovo delta:
 
 ```python
 # Subpackage import
-from gsax import borgonovo
+from jaxgsa import borgonovo
 # borgonovo.analyze(...)
 
 # Or top-level
-import gsax
-# gsax.analyze_borgonovo(...)
+import jaxgsa
+# jaxgsa.borgonovo.analyze(...)
 ```
 
 ## Scalar example (Ishigami)
 
 ```python
 import jax.numpy as jnp
-import gsax
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
 # Generate Monte Carlo samples
-X = gsax.sample_mc(PROBLEM, N=5000, seed=42)
+X = jaxgsa.sampling.monte_carlo(PROBLEM, n=5000, seed=42)
 Y = evaluate(jnp.asarray(X))
 
 # Compute delta and given-data S1 indices
-result = gsax.analyze_borgonovo(PROBLEM, jnp.asarray(X), Y)
+result = jaxgsa.borgonovo.analyze(PROBLEM, jnp.asarray(X), Y)
 
 print("delta:", result.delta)  # (3,)
 print("S1:   ", result.S1)     # (3,)
@@ -67,7 +67,7 @@ bias-corrected with bootstrap resamples (Plischke et al., 2013) and
 percentile confidence intervals come from the same replicates.
 
 ```python
-result = gsax.analyze_borgonovo(
+result = jaxgsa.borgonovo.analyze(
     PROBLEM, X, Y,
     n_bootstrap=100,
     conf_level=0.95,
@@ -93,12 +93,12 @@ truth rather than another implementation:
 
 ```python
 import jax.numpy as jnp
-import gsax
-from gsax.benchmarks import gaussian_linear
+import jaxgsa
+from jaxgsa.benchmarks import gaussian_linear
 
-X = jnp.asarray(gsax.sample_mc(gaussian_linear.PROBLEM, N=8000, seed=42))
+X = jnp.asarray(jaxgsa.sampling.monte_carlo(gaussian_linear.PROBLEM, n=8000, seed=42))
 Y = gaussian_linear.evaluate(X)
-result = gsax.analyze_borgonovo(gaussian_linear.PROBLEM, X, Y)
+result = jaxgsa.borgonovo.analyze(gaussian_linear.PROBLEM, X, Y)
 
 print("estimated: ", result.delta)
 print("analytical:", gaussian_linear.ANALYTICAL_DELTA)
@@ -110,15 +110,15 @@ When Y has shape `(N, K)`, delta and S1 indices have shape `(K, D)`.
 
 ```python
 import jax.numpy as jnp
-import gsax
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
-X = jnp.asarray(gsax.sample_mc(PROBLEM, N=3000, seed=42))
+X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n=3000, seed=42))
 Y1 = evaluate(X)
 Y2 = jnp.sum(X**2, axis=1)
 Y_multi = jnp.column_stack([Y1, Y2])
 
-result = gsax.analyze_borgonovo(PROBLEM, X, Y_multi)
+result = jaxgsa.borgonovo.analyze(PROBLEM, X, Y_multi)
 print("delta shape:", result.delta.shape)  # (2, 3)
 ```
 
@@ -129,7 +129,7 @@ ds = result.to_dataset()
 print(ds)  # variables: delta, S1 (+ delta_lower/upper, S1_lower/upper with CIs)
 
 # Without bootstrap: only delta and S1
-result_plain = gsax.analyze_borgonovo(PROBLEM, X, Y1, n_bootstrap=0)
+result_plain = jaxgsa.borgonovo.analyze(PROBLEM, X, Y1, n_bootstrap=0)
 ds_plain = result_plain.to_dataset()
 print(ds_plain)
 ```
@@ -154,8 +154,8 @@ print(ds_plain)
   and grid) but is deterministic given the data — SALib computes its
   central estimate on a random resample — and returns `delta = S1 = 0` for
   a constant output instead of raising.
-- Peak memory scales with `chunk_size * D * N * grid_size`; lower
-  `chunk_size` for large time-series outputs.
+- Peak memory scales with `slice_chunk_size * D * N * grid_size`; lower
+  `slice_chunk_size` for large time-series outputs.
 
 ## See also
 
@@ -164,5 +164,5 @@ print(ds_plain)
 - [PAWN Example](/examples/pawn) for the CDF-based moment-independent
   method.
 - [Methods](/guide/methods) for a comparison of all methods.
-- [API Reference](/api/#borgonovo-delta-workflow) for full parameter
+- [API Reference](/api/#given-data-methods) for full parameter
   documentation.

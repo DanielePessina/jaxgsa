@@ -1,23 +1,19 @@
 # Sampling
 
-Sobol/Saltelli sample generation for the Sobol workflow, plus prefix-nested
-downsampling and save/load round-trips.
+Use `jaxgsa.sobol.sample(...)` for Saltelli designs and
+`jaxgsa.sampling.monte_carlo(...)` for ordinary independent draws.
 
-The canonical API reference now lives at [API Reference](/api/).
+`jaxgsa.sobol.SobolSamples` provides:
 
-Jump directly to:
+- `samples` and `sample_ids`;
+- `n_runs` (unique rows to evaluate, one model run per row) and `n_expanded`
+  (pre-deduplication design size);
+- Saltelli reconstruction metadata;
+- `downsample(base_n, Y=None)`;
+- `save(path)` and `load(path)` using one NPZ file.
 
-- [`sample()`](/api/#sample)
-- [`SamplingResult`](/api/#samplingresult)
-- [`SamplingResult.n_total`](/api/#samplingresult-n_total)
-- [`SamplingResult.samples_df`](/api/#samplingresult-samples_df)
-- [`SamplingResult.save()`](/api/#samplingresult-save)
-- [`SamplingResult.downsample()`](/api/#samplingresult-downsample)
-- [`downsample()`](/api/#downsample)
-- [`verify_prefix()`](/api/#verify_prefix)
-- [`load()`](/api/#load)
+`jaxgsa.morris.MorrisSamples` shares the same vocabulary (`n_runs`,
+`n_expanded`) and the same single-NPZ `save(path)` / `load(path)` format.
 
-Related docs:
-
-- [Save and Reload Samples](/examples/save-load)
-- [Methods](/guide/methods)
+See [Save and Reload Samples](/examples/save-load) and the
+[API overview](/api/).

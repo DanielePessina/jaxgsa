@@ -2,23 +2,23 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import Any, cast
 
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from gsax.benchmarks import gaussian_linear, ishigami
-from gsax.borgonovo import DeltaResult, analyze
-from gsax.borgonovo._analyze import _plischke_n_classes
-from gsax.sampling import sample_mc
+from jaxgsa.benchmarks import gaussian_linear, ishigami
+from jaxgsa.borgonovo import DeltaResult, analyze
+from jaxgsa.borgonovo._analyze import _plischke_n_classes
+from jaxgsa.sampling import monte_carlo
 
 
 @pytest.fixture(scope="module")
 def ishigami_data():
     """Generate Ishigami test data."""
     N = 5000
-    X = jnp.asarray(sample_mc(ishigami.PROBLEM, N=N, seed=42))
+    X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=N, seed=42))
     Y = ishigami.evaluate(X)
     return X, Y
 
@@ -27,7 +27,7 @@ def ishigami_data():
 def gaussian_linear_data():
     """Generate Gaussian linear test data (large N for ground-truth checks)."""
     N = 32000
-    X = jnp.asarray(sample_mc(gaussian_linear.PROBLEM, N=N, seed=1))
+    X = jnp.asarray(monte_carlo(gaussian_linear.PROBLEM, n=N, seed=1))
     Y = gaussian_linear.evaluate(X)
     return X, Y
 
@@ -76,15 +76,28 @@ class TestDeltaBasic:
         r_coarse = analyze(ishigami.PROBLEM, X, Y, n_classes=4, n_bootstrap=0)
         assert not np.allclose(np.asarray(r_default.delta), np.asarray(r_coarse.delta))
 
-    def test_chunk_size_invariance(self, ishigami_data):
+    def test_slice_chunk_size_invariance(self, ishigami_data):
         """Chunked column processing must not change the result."""
         X, Y = ishigami_data
         Y2 = jnp.stack([Y, Y**2, jnp.sin(Y)], axis=1)
         r_full = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=10, seed=0)
-        r_chunked = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=10, seed=0, chunk_size=1)
+        r_chunked = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=10, seed=0, slice_chunk_size=1)
         np.testing.assert_allclose(
             np.asarray(r_full.delta), np.asarray(r_chunked.delta), rtol=1e-6
         )
+
+    def test_slice_chunk_size_kwarg_accepted(self, ishigami_data):
+        """The 0.4 name `slice_chunk_size` is accepted explicitly."""
+        X, Y = ishigami_data
+        result = analyze(ishigami.PROBLEM, X[:256], Y[:256], n_bootstrap=0, slice_chunk_size=4)
+        assert np.asarray(result.delta).shape == (3,)
+
+    def test_old_chunk_size_kwarg_raises(self, ishigami_data):
+        """The pre-0.4 `chunk_size` name is gone — no shim."""
+        X, Y = ishigami_data
+        old_kwargs: dict[str, Any] = {"chunk_size": 4}
+        with pytest.raises(TypeError):
+            analyze(ishigami.PROBLEM, X[:256], Y[:256], n_bootstrap=0, **old_kwargs)
 
 
 class TestDeltaSALibComparison:
@@ -110,7 +123,7 @@ class TestDeltaSALibComparison:
         """Bias-corrected delta and S1 vs SALib.analyze.delta.
 
         SALib's central estimates are computed on a random resample of the
-        data (gsax deliberately uses the original sample), so the tolerance
+        data (jaxgsa deliberately uses the original sample), so the tolerance
         covers that resampling noise on top of bootstrap RNG differences.
         """
         from SALib.analyze import delta as salib_delta
@@ -385,7 +398,7 @@ class TestDeltaRegression:
         ``mean(d_boot)`` below ``d_hat`` and pushing the corrected estimate
         *above* the plug-in value for an input whose true delta is ~0.
         """
-        X = jnp.asarray(sample_mc(ishigami.PROBLEM, N=1000, seed=1))
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=1000, seed=1))
         Y_np = np.zeros(1000)
         Y_np[np.random.default_rng(0).integers(1000)] = 1.0
         Y = jnp.asarray(Y_np)
@@ -412,8 +425,8 @@ class TestDeltaRegression:
             jax.config.update("jax_enable_x64", True)
             import numpy as np
             import jax.numpy as jnp
-            from gsax.benchmarks import ishigami
-            from gsax.borgonovo import analyze
+            from jaxgsa.benchmarks import ishigami
+            from jaxgsa.borgonovo import analyze
 
             rng = np.random.default_rng(0)
             N = 1500

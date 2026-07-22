@@ -1,224 +1,295 @@
-"""Tests for SamplingResult.save() and gsax.load() round-trip."""
+"""Tests for the NPZ-only sampling persistence API (Sobol and Morris)."""
 
-from __future__ import annotations
+import json
 
-from unittest.mock import patch
-
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
-import gsax
-from gsax.problem import GaussianInputSpec, Problem
-from gsax.sampling import SamplingResult, load
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
+import jaxgsa
+from jaxgsa.morris import MorrisSamples
+from jaxgsa.problem import GaussianInputSpec, Problem
+from jaxgsa.sobol import SobolSamples
 
 
-@pytest.fixture
-def low_d_problem():
-    """1-D problem — Saltelli design will have many duplicate rows."""
-    return Problem.from_dict({"x1": (0.0, 1.0)})
+def _assert_equal(left: SobolSamples, right: SobolSamples) -> None:
+    _assert_array_identical(left.samples, right.samples)
+    _assert_array_identical(left.sample_ids, right.sample_ids)
+    _assert_array_identical(left.expanded_to_unique, right.expanded_to_unique)
+    assert left.n_expanded == right.n_expanded
+    assert left.base_n == right.base_n
+    assert left.n_params == right.n_params
+    assert left.calc_second_order == right.calc_second_order
+    assert left.problem == right.problem
 
 
-@pytest.fixture
-def high_d_problem():
-    """6-D problem — unlikely to produce duplicate rows."""
-    return Problem.from_dict({f"x{i}": (0.0, 1.0) for i in range(1, 7)})
+def _assert_array_identical(left: np.ndarray, right: np.ndarray) -> None:
+    np.testing.assert_array_equal(left, right)
+    assert left.dtype == right.dtype
 
 
-@pytest.fixture
-def sr_with_duplicates(low_d_problem):
-    """SamplingResult where expanded_to_unique != identity."""
-    return gsax.sample(low_d_problem, 16, seed=42, verbose=False)
+def _assert_morris_equal(left: MorrisSamples, right: MorrisSamples) -> None:
+    _assert_array_identical(left.samples, right.samples)
+    _assert_array_identical(left.expanded_to_unique, right.expanded_to_unique)
+    _assert_array_identical(left.ee_idx_after, right.ee_idx_after)
+    _assert_array_identical(left.ee_idx_before, right.ee_idx_before)
+    _assert_array_identical(left.ee_delta, right.ee_delta)
+    assert left.n_expanded == right.n_expanded
+    assert left.n_trajectories == right.n_trajectories
+    assert left.num_levels == right.num_levels
+    assert left.method == right.method
+    assert left.n_params == right.n_params
+    assert left.problem == right.problem
 
 
-@pytest.fixture
-def sr_identity(high_d_problem):
-    """SamplingResult where expanded_to_unique IS an identity mapping."""
-    sr = gsax.sample(high_d_problem, 16, calc_second_order=False, seed=42, verbose=False)
-    # Verify this fixture actually has an identity mapping
-    assert np.array_equal(
-        sr.expanded_to_unique,
-        np.arange(sr.expanded_n_total, dtype=sr.expanded_to_unique.dtype),
-    )
-    return sr
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _assert_sr_equal(a: SamplingResult, b: SamplingResult) -> None:
-    """Assert two SamplingResults are semantically equal."""
-    np.testing.assert_array_almost_equal(a.samples, b.samples)
-    np.testing.assert_array_equal(a.sample_ids, b.sample_ids)
-    assert a.expanded_n_total == b.expanded_n_total
-    np.testing.assert_array_equal(a.expanded_to_unique, b.expanded_to_unique)
-    assert a.base_n == b.base_n
-    assert a.n_params == b.n_params
-    assert a.calc_second_order == b.calc_second_order
-    assert a.problem.names == b.problem.names
-    assert a.problem.bounds == b.problem.bounds
-    assert a.problem.output_names == b.problem.output_names
-
-
-# ---------------------------------------------------------------------------
-# Round-trip tests
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("fmt", ["csv", "txt", "pkl"])
-def test_round_trip(sr_with_duplicates, tmp_path, fmt):
-    stem = tmp_path / "experiment"
-    sr_with_duplicates.save(stem, format=fmt)
-    loaded = load(stem, format=fmt)
-    _assert_sr_equal(sr_with_duplicates, loaded)
-
-
-def test_round_trip_identity(sr_identity, tmp_path):
-    stem = tmp_path / "experiment"
-    sr_identity.save(stem, format="csv")
-    loaded = load(stem, format="csv")
-    _assert_sr_equal(sr_identity, loaded)
-
-
-# ---------------------------------------------------------------------------
-# Identity mapping optimization
-# ---------------------------------------------------------------------------
-
-
-def test_identity_skips_npz(sr_identity, tmp_path):
-    stem = tmp_path / "experiment"
-    sr_identity.save(stem, format="csv")
-    assert (stem.with_suffix(".csv")).exists()
-    assert (stem.with_suffix(".json")).exists()
-    assert not (stem.with_suffix(".npz")).exists()
-
-
-def test_non_identity_writes_npz(sr_with_duplicates, tmp_path):
-    stem = tmp_path / "experiment"
-    sr_with_duplicates.save(stem, format="csv")
-    assert (stem.with_suffix(".npz")).exists()
-
-
-# ---------------------------------------------------------------------------
-# output_names round-trip
-# ---------------------------------------------------------------------------
-
-
-def test_output_names_preserved(tmp_path):
-    prob = Problem(
-        names=("a", "b"),
-        bounds=((0.0, 1.0), (0.0, 1.0)),
-        output_names=("y1", "y2"),
-    )
-    sr = gsax.sample(prob, 16, seed=0, verbose=False)
-    stem = tmp_path / "with_outputs"
-    sr.save(stem, format="csv")
-    loaded = load(stem, format="csv")
-    assert loaded.problem.output_names == ("y1", "y2")
-
-
-def test_mixed_input_specs_round_trip(tmp_path):
-    prob = Problem.from_dict(
+def test_npz_round_trip(tmp_path):
+    problem = Problem.from_dict(
         {
             "uniform": (0.0, 1.0),
-            "gaussian": GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0),
-            "truncated": GaussianInputSpec(
+            "gaussian": GaussianInputSpec(
                 dist="gaussian",
                 mean=1.0,
                 variance=4.0,
                 low=0.0,
                 high=3.0,
             ),
-        }
+        },
+        output_names=("response",),
     )
-    sr = gsax.sample(prob, 32, calc_second_order=False, seed=0, verbose=False)
-    stem = tmp_path / "mixed"
-    sr.save(stem, format="csv")
-    loaded = load(stem, format="csv")
-    _assert_sr_equal(sr, loaded)
-    assert loaded.problem.bounds is None
-    assert loaded.problem.has_non_uniform_inputs is True
+    samples = jaxgsa.sobol.sample(
+        problem,
+        64,
+        calc_second_order=False,
+        seed=4,
+        verbose=False,
+    )
+
+    path = tmp_path / "design"
+    samples.save(path)
+    loaded = SobolSamples.load(path)
+
+    assert path.with_suffix(".npz").exists()
+    _assert_equal(samples, loaded)
 
 
-def test_load_remains_backward_compatible_with_legacy_bounds_metadata(tmp_path):
-    prob = Problem.from_dict({"x1": (0.0, 1.0), "x2": (1.0, 2.0)})
-    sr = gsax.sample(prob, 16, calc_second_order=False, seed=0, verbose=False)
-    stem = tmp_path / "legacy"
-    sr.save(stem, format="csv")
+def test_explicit_npz_suffix_round_trip(tmp_path):
+    samples = jaxgsa.sobol.sample(
+        Problem.from_dict({"x": (0.0, 1.0)}),
+        16,
+        seed=2,
+        verbose=False,
+    )
+    path = tmp_path / "design.npz"
 
-    import json
+    samples.save(path)
 
-    json_path = stem.with_suffix(".json")
-    meta = json.loads(json_path.read_text())
-    del meta["problem"]["input_specs"]
-    json_path.write_text(json.dumps(meta))
+    _assert_equal(samples, SobolSamples.load(path))
 
-    loaded = load(stem, format="csv")
-    _assert_sr_equal(sr, loaded)
+
+def test_dotted_stem_appends_npz_suffix(tmp_path):
+    """A dotted stem must gain '.npz' by appending, not by suffix replacement."""
+    samples = jaxgsa.sobol.sample(
+        Problem.from_dict({"x": (0.0, 1.0)}),
+        16,
+        seed=2,
+        verbose=False,
+    )
+    path = tmp_path / "design.2026-07"
+
+    samples.save(path)
+
+    assert (tmp_path / "design.2026-07.npz").exists()
+    assert not (tmp_path / "design.npz").exists()
+    _assert_equal(samples, SobolSamples.load(path))
+
+
+def test_dotted_stems_do_not_collide(tmp_path):
+    """Saving 'run.A' and 'run.B' must produce two distinct files."""
+    problem = Problem.from_dict({"x": (0.0, 1.0), "y": (0.0, 1.0)})
+    samples_a = jaxgsa.sobol.sample(problem, 32, seed=1, verbose=False)
+    samples_b = jaxgsa.sobol.sample(problem, 64, seed=2, verbose=False)
+
+    samples_a.save(tmp_path / "run.A")
+    samples_b.save(tmp_path / "run.B")
+
+    assert (tmp_path / "run.A.npz").exists()
+    assert (tmp_path / "run.B.npz").exists()
+    _assert_equal(samples_a, SobolSamples.load(tmp_path / "run.A"))
+    _assert_equal(samples_b, SobolSamples.load(tmp_path / "run.B"))
+
+
+def test_identity_mapping_skips_index_array(tmp_path):
+    """Designs without duplicate rows omit expanded_to_unique from the NPZ."""
+    problem = Problem.from_dict({f"x{i}": (0.0, 1.0) for i in range(4)})
+    samples = jaxgsa.sobol.sample(problem, 64, seed=3, verbose=False)
+    assert np.array_equal(samples.expanded_to_unique, np.arange(samples.n_expanded)), (
+        "test premise: this design should have no duplicate rows"
+    )
+
+    path = tmp_path / "identity"
+    samples.save(path)
+
+    with np.load(tmp_path / "identity.npz", allow_pickle=False) as data:
+        assert "expanded_to_unique" not in data.files
+        meta = json.loads(data["metadata"].item())
+    assert meta["identity_mapping"] is True
+    _assert_equal(samples, SobolSamples.load(path))
+
+
+def test_duplicate_rows_store_index_array(tmp_path):
+    """Designs with duplicate rows still persist the full expansion map."""
+    samples = jaxgsa.sobol.sample(
+        Problem.from_dict({"x": (0.0, 1.0)}),
+        16,
+        seed=5,
+        verbose=False,
+    )
+    assert samples.n_expanded > samples.n_runs, (
+        "test premise: 1-D Saltelli designs should contain duplicate rows"
+    )
+
+    path = tmp_path / "dupes"
+    samples.save(path)
+
+    with np.load(tmp_path / "dupes.npz", allow_pickle=False) as data:
+        assert "expanded_to_unique" in data.files
+        meta = json.loads(data["metadata"].item())
+    assert meta["identity_mapping"] is False
+    _assert_equal(samples, SobolSamples.load(path))
+
+
+def test_metadata_records_jaxgsa_version(tmp_path):
+    samples = jaxgsa.sobol.sample(
+        Problem.from_dict({"x": (0.0, 1.0)}),
+        16,
+        seed=2,
+        verbose=False,
+    )
+    samples.save(tmp_path / "versioned")
+
+    with np.load(tmp_path / "versioned.npz", allow_pickle=False) as data:
+        meta = json.loads(data["metadata"].item())
+    assert isinstance(meta["jaxgsa_version"], str)
+    assert meta["jaxgsa_version"] != ""
 
 
 # ---------------------------------------------------------------------------
-# Error handling
+# Morris persistence (via the shared UniqueDesignSamples base)
 # ---------------------------------------------------------------------------
 
 
-def test_missing_metadata(tmp_path):
-    with pytest.raises(FileNotFoundError, match="Metadata file not found"):
-        load(tmp_path / "nonexistent", format="csv")
+def _morris_problem() -> Problem:
+    return Problem.from_dict(
+        {
+            "uniform": (0.0, 1.0),
+            "gaussian": GaussianInputSpec(
+                dist="gaussian",
+                mean=1.0,
+                variance=4.0,
+                low=0.0,
+                high=3.0,
+            ),
+        },
+        output_names=("response",),
+    )
 
 
-def test_unsupported_format(sr_with_duplicates, tmp_path):
-    with pytest.raises(ValueError, match="Unsupported format"):
-        sr_with_duplicates.save(tmp_path / "bad", format="hdf5")
+@pytest.mark.parametrize("method", ["trajectory", "radial"])
+def test_morris_npz_round_trip(tmp_path, method):
+    samples = jaxgsa.morris.sample(
+        _morris_problem(),
+        n_trajectories=8,
+        method=method,
+        seed=4,
+        verbose=False,
+    )
+
+    path = tmp_path / "morris_design"
+    samples.save(path)
+    loaded = MorrisSamples.load(path)
+
+    assert path.with_suffix(".npz").exists()
+    _assert_morris_equal(samples, loaded)
 
 
-def test_xlsx_import_error(sr_with_duplicates, tmp_path):
-    stem = tmp_path / "experiment"
-    with patch("pandas.DataFrame.to_excel", side_effect=ImportError):
-        with pytest.raises(ImportError, match="openpyxl"):
-            sr_with_duplicates.save(stem, format="xlsx")
+def test_morris_downsampled_round_trip(tmp_path):
+    samples = jaxgsa.morris.sample(
+        _morris_problem(),
+        n_trajectories=10,
+        seed=7,
+        verbose=False,
+    ).downsample(4)
+
+    path = tmp_path / "morris_small"
+    samples.save(path)
+    loaded = MorrisSamples.load(path)
+
+    _assert_morris_equal(samples, loaded)
+    assert loaded.n_trajectories == 4
 
 
-def test_parquet_import_error(sr_with_duplicates, tmp_path):
-    stem = tmp_path / "experiment"
-    with patch("pandas.DataFrame.to_parquet", side_effect=ImportError):
-        with pytest.raises(ImportError, match="pyarrow"):
-            sr_with_duplicates.save(stem, format="parquet")
+def test_morris_expand_outputs_after_load(tmp_path):
+    samples = jaxgsa.morris.sample(
+        _morris_problem(),
+        n_trajectories=6,
+        seed=11,
+        verbose=False,
+    )
+    Y = jnp.arange(samples.n_runs, dtype=jnp.float32)
+
+    path = tmp_path / "morris_expand"
+    samples.save(path)
+    loaded = MorrisSamples.load(path)
+
+    expanded = loaded.expand_outputs(Y)
+    assert expanded.shape == (loaded.n_expanded,)
+    np.testing.assert_array_equal(np.asarray(expanded), np.asarray(samples.expand_outputs(Y)))
 
 
-def test_xlsx_read_import_error(sr_with_duplicates, tmp_path):
-    stem = tmp_path / "experiment"
-    # Save as csv first, then try to load as xlsx with mocked import error
-    sr_with_duplicates.save(stem, format="csv")
-    # Create a fake json that says xlsx format
-    import json
+def test_morris_identity_mapping_skips_index_array(tmp_path):
+    """Radial designs have no duplicate rows, so the index map is omitted."""
+    samples = jaxgsa.morris.sample(
+        _morris_problem(),
+        n_trajectories=8,
+        method="radial",
+        seed=3,
+        verbose=False,
+    )
+    assert np.array_equal(samples.expanded_to_unique, np.arange(samples.n_expanded)), (
+        "test premise: radial designs should have no duplicate rows"
+    )
 
-    json_path = stem.with_suffix(".json")
-    meta = json.loads(json_path.read_text())
-    meta["sample_format"] = "xlsx"
-    json_path.write_text(json.dumps(meta))
-    # Create a dummy xlsx file
-    stem.with_suffix(".xlsx").write_bytes(b"fake")
-    with patch("pandas.read_excel", side_effect=ImportError):
-        with pytest.raises(ImportError, match="openpyxl"):
-            load(stem, format="xlsx")
+    path = tmp_path / "morris_identity"
+    samples.save(path)
+
+    with np.load(tmp_path / "morris_identity.npz", allow_pickle=False) as data:
+        assert "expanded_to_unique" not in data.files
+        meta = json.loads(data["metadata"].item())
+    assert meta["identity_mapping"] is True
+    _assert_morris_equal(samples, MorrisSamples.load(path))
 
 
-def test_parquet_read_import_error(sr_with_duplicates, tmp_path):
-    stem = tmp_path / "experiment"
-    sr_with_duplicates.save(stem, format="csv")
-    import json
+def test_sobol_and_morris_share_metadata_schema(tmp_path):
+    """Both NPZ formats carry the same base-owned metadata keys."""
+    problem = _morris_problem()
+    sobol_samples = jaxgsa.sobol.sample(problem, 32, seed=1, verbose=False)
+    morris_samples = jaxgsa.morris.sample(problem, n_trajectories=6, seed=1, verbose=False)
 
-    json_path = stem.with_suffix(".json")
-    meta = json.loads(json_path.read_text())
-    meta["sample_format"] = "parquet"
-    json_path.write_text(json.dumps(meta))
-    stem.with_suffix(".parquet").write_bytes(b"fake")
-    with patch("pandas.read_parquet", side_effect=ImportError):
-        with pytest.raises(ImportError, match="pyarrow"):
-            load(stem, format="parquet")
+    sobol_samples.save(tmp_path / "schema_sobol")
+    morris_samples.save(tmp_path / "schema_morris")
+
+    metas = {}
+    for name in ("schema_sobol", "schema_morris"):
+        with np.load(tmp_path / f"{name}.npz", allow_pickle=False) as data:
+            assert "samples" in data.files
+            assert "metadata" in data.files
+            metas[name] = json.loads(data["metadata"].item())
+
+    common_keys = {"jaxgsa_version", "problem", "n_expanded", "identity_mapping"}
+    for meta in metas.values():
+        assert common_keys <= set(meta)
+        assert set(meta["problem"]) == {"names", "input_specs", "output_names"}
+
+    # The shared (base-owned) part of the schema is identical across designs.
+    assert metas["schema_sobol"]["problem"] == metas["schema_morris"]["problem"]
+    assert metas["schema_sobol"]["jaxgsa_version"] == metas["schema_morris"]["jaxgsa_version"]

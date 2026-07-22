@@ -8,10 +8,10 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from gsax import pce
-from gsax.benchmarks import ishigami, linear
-from gsax.pce._analyze import _auto_order
-from gsax.pce._engine import (
+from jaxgsa import pce
+from jaxgsa.benchmarks import ishigami, linear
+from jaxgsa.pce._analyze import _auto_order
+from jaxgsa.pce._engine import (
     _hermite_1d,
     _legendre_1d,
     build_design_matrix,
@@ -19,7 +19,7 @@ from gsax.pce._engine import (
     loo_error,
     sobol_from_coefficients,
 )
-from gsax.problem import GaussianInputSpec, Problem
+from jaxgsa.problem import GaussianInputSpec, Problem
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -178,7 +178,7 @@ class TestEmulatorRoundTrip:
     def test_linear_emulator_reproduces_training_data(self, linear_pce_result, linear_pce_data):
         """Emulator predictions on training data should be close to actual outputs."""
         X, Y = linear_pce_data
-        Y_pred = pce.emulate(linear_pce_result, X)
+        Y_pred = linear_pce_result.predict(X)
         np.testing.assert_allclose(
             np.asarray(Y_pred),
             np.asarray(Y),
@@ -189,7 +189,7 @@ class TestEmulatorRoundTrip:
     def test_ishigami_emulator_reasonable(self, ishigami_pce_result, ishigami_pce_data):
         """Emulator R-squared on Ishigami training data should be high."""
         X, Y = ishigami_pce_data
-        Y_pred = pce.emulate(ishigami_pce_result, X)
+        Y_pred = ishigami_pce_result.predict(X)
         ss_res = float(jnp.sum((Y - Y_pred) ** 2))
         ss_tot = float(jnp.sum((Y - jnp.mean(Y)) ** 2))
         r_squared = 1.0 - ss_res / ss_tot
@@ -245,6 +245,17 @@ class TestInputValidation:
         Y = jnp.ones(10)
         with pytest.raises(ValueError, match="columns"):
             pce.analyze(problem, X, Y)
+
+    def test_predict_1d_x_raises(self, linear_pce_result):
+        """predict with a 1-D X must raise instead of silently truncating."""
+        with pytest.raises(ValueError, match="2-D"):
+            linear_pce_result.predict(jnp.ones(10))
+
+    def test_predict_x_column_mismatch_raises(self, linear_pce_result):
+        """predict with a wrong-width X must raise with a clear message."""
+        D = linear_pce_result.problem.num_vars
+        with pytest.raises(ValueError, match="columns"):
+            linear_pce_result.predict(jnp.ones((10, D + 2)))
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +315,7 @@ class TestLooRmse:
         result = pce.analyze(linear.PROBLEM, X, Y, order=2)
 
         # Reconstruct Phi manually
-        from gsax.pce._analyze import _map_to_reference
+        from jaxgsa.pce._analyze import _map_to_reference
 
         X_ref, input_types = _map_to_reference(X, linear.PROBLEM)
         Phi = build_design_matrix(X_ref, result.multi_index, input_types, result.order)
@@ -340,7 +351,7 @@ class TestGaussianInputs:
     def test_gaussian_emulator(self, gaussian_pce_result, gaussian_pce_data):
         """Emulator should predict well on Gaussian training data."""
         problem, X, Y = gaussian_pce_data
-        Y_pred = pce.emulate(gaussian_pce_result, X)
+        Y_pred = gaussian_pce_result.predict(X)
         np.testing.assert_allclose(np.asarray(Y_pred), np.asarray(Y), atol=0.5, rtol=0.1)
 
     def test_hermite_1d_orthonormality(self):
@@ -504,14 +515,14 @@ class TestMultiOutput:
             )
 
     def test_emulate_multi_output_round_trip(self, linear_pce_data):
-        """emulate_pce mirrors the training layout and reproduces linear Y."""
+        """predict mirrors the training layout and reproduces linear Y."""
         X, Y = linear_pce_data
         Y2 = jnp.stack([Y, 2.0 * Y + 1.0], axis=-1)
         Y3 = jnp.stack([Y2, 0.5 * Y2], axis=1)
         res2 = pce.analyze(linear.PROBLEM, X, Y2, order=2)
         res3 = pce.analyze(linear.PROBLEM, X, Y3, order=2)
-        pred2 = pce.emulate(res2, X[:50])
-        pred3 = pce.emulate(res3, X[:50])
+        pred2 = res2.predict(X[:50])
+        pred3 = res3.predict(X[:50])
         assert pred2.shape == (50, 2)
         assert pred3.shape == (50, 2, 2)
         # The linear benchmark is exactly representable at order 2.
@@ -553,22 +564,17 @@ class TestMultiOutput:
                 np.testing.assert_allclose(np.asarray(STb[t, k]), np.asarray(STs), rtol=1e-6)
                 np.testing.assert_allclose(np.asarray(S2b[t, k]), np.asarray(S2s), rtol=1e-6)
 
-    def test_emulate_mirrors_single_label_2d_training(self):
-        """Training on (N, T) single-label Y yields (N_new, T) predictions."""
+    def test_predict_preserves_explicit_time_series_layout(self):
+        """Training on (N, T, K) yields (N_new, T, K) predictions."""
         problem = Problem(names=("x0", "x1", "x2"), bounds=((0.0, 1.0),) * 3, output_names=("p",))
         key = jax.random.PRNGKey(4)
         X = jax.random.uniform(key, shape=(500, 3))
         base = jnp.sin(X[:, 0]) + 2.0 * X[:, 1]
-        Y = jnp.stack([base, 2.0 * base], axis=-1)  # (N, T=2) single label
+        Y = jnp.stack([base, 2.0 * base], axis=-1)[..., None]
         result = pce.analyze(problem, X, Y)
         X_new = jax.random.uniform(jax.random.PRNGKey(5), shape=(30, 3))
-        pred = pce.emulate(result, X_new)
-        assert pred.shape == (30, 2)
-        # Equivalent to explicit (N, T, 1) training, then squeezing the K axis.
-        explicit = pce.analyze(problem, X, Y[:, :, None])
-        np.testing.assert_allclose(
-            np.asarray(pred), np.asarray(pce.emulate(explicit, X_new)[..., 0]), rtol=1e-5
-        )
+        pred = result.predict(X_new)
+        assert pred.shape == (30, 2, 1)
 
     def test_s2_pair_mask_matches_dense(self):
         """The upper-triangle pair mask reproduces the dense symmetric einsum."""

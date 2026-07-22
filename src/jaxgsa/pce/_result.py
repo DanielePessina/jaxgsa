@@ -1,0 +1,163 @@
+"""PCE result dataclass."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+import numpy as np
+import xarray as xr
+from jax import Array
+
+from jaxgsa._core.surrogate import SurrogateResult, _PredictPlan
+from jaxgsa._core.validation import _dims_and_coords
+from jaxgsa.problem import Problem
+
+if TYPE_CHECKING:
+    from jaxgsa.shapley import ShapleyResult
+
+
+@dataclass
+class PCEResult(SurrogateResult):
+    """Polynomial chaos expansion sensitivity analysis results.
+
+    Stores Sobol indices computed analytically from the expansion
+    coefficients, plus the fitted coefficients and multi-index so the
+    surrogate can be reused through :meth:`predict`.
+
+    Index arrays mirror the layout of the ``Y`` passed to ``pce.analyze``:
+    leading dims are ``()`` for scalar ``(N,)`` outputs, ``(K,)`` for
+    multi-output ``(N, K)``, and ``(T, K)`` for time-series ``(N, T, K)``.
+
+    Attributes:
+        S1: First-order Sobol indices, shape ``(..., D)``. Fraction of output
+            variance explained by each parameter acting alone.
+        ST: Total-order Sobol indices, shape ``(..., D)``. Fraction of output
+            variance involving each parameter, interactions included;
+            ``ST - S1`` measures how strongly a parameter interacts.
+        S2: Second-order interaction indices, shape ``(..., D, D)`` with NaN
+            on the diagonal. Upper and lower triangles are symmetric.
+        problem: Problem definition.
+        coefficients: Fitted PCE coefficients, shape ``(..., n_terms)`` with
+            the term axis last. ``coefficients[..., 0]`` is the constant
+            (mean) term of each output slice; all slices share one basis.
+        multi_index: Per-term polynomial degrees, shape ``(n_terms, D)``;
+            row ``t`` gives the degree of each input in term ``t``.
+        order: Effective total polynomial degree used (may be lower than
+            requested if the sample budget forced a reduction). A single
+            int — the shared basis serves every output slice.
+        loo_rmse: Leave-one-out cross-validation RMSE per output slice
+            (shape ``(...)``: scalar / ``(K,)`` / ``(T, K)``), or None. In
+            the units of ``Y``; compare against ``Y.std()`` -- a ratio near
+            or above 1 means the surrogate (and its indices) is unreliable.
+        explained_variance: Fraction of each output slice's sample variance
+            captured by the expansion (shape ``(...)``: scalar / ``(K,)`` /
+            ``(T, K)``, matching ``loo_rmse``), or None. Computed as the sum
+            of squared non-constant coefficients divided by ``Var(Y)`` for
+            that slice; NaN for constant (zero-variance) slices. Values well
+            below 1 mean the surrogate misses variance; values above 1 mean
+            it attributes more variance than the data holds (overfit).
+    """
+
+    S1: Array
+    ST: Array
+    S2: Array
+    problem: Problem
+    coefficients: Array
+    multi_index: np.ndarray
+    order: int
+    loo_rmse: Array | None = None
+    explained_variance: Array | None = None
+
+    def _predict_plan(self, X: Array) -> _PredictPlan:
+        """Plan a batched evaluation of the fitted expansion at ``X``.
+
+        Rebuilds the polynomial basis at ``X`` and contracts it with the
+        coefficients fitted by ``pce.analyze`` -- no model evaluations are
+        needed. The basis tensors carry ``~3 * n_terms`` transient floats
+        per prediction row, which prices the automatic batch size.
+        See :meth:`predict` for the full contract.
+        """
+        from jaxgsa.pce._analyze import _pce_predict_plan
+
+        return _pce_predict_plan(self, X)
+
+    def shapley(self) -> "ShapleyResult":
+        """Compute Shapley effects from this fitted PCE decomposition.
+
+        Distributes each expansion term's variance contribution equally among
+        the parameters active in it -- no extra model evaluations or refit.
+
+        Returns:
+            ShapleyResult with per-parameter Shapley effects ``Sh`` (summing
+            to 1 per output slice), the matching ``S1``/``ST`` bounds, and
+            this result's ``explained_variance`` diagnostic.
+
+        Raises:
+            ValueError: If this result carries no ``explained_variance``
+                diagnostic (e.g. constructed by hand without one).
+
+        Warns:
+            UserWarning: If ``explained_variance`` indicates a pathological
+                fit (well below 1, or above 1 -- overfit), making the Shapley
+                effects unreliable.
+        """
+        from jaxgsa.shapley._analyze import _shapley_result_from_variances
+
+        explained = self.explained_variance
+        if explained is None:
+            raise ValueError("PCEResult does not contain explained-variance diagnostics")
+        # Orthonormality makes each squared non-constant coefficient a
+        # partial variance; multi_index[1:] > 0 IS the membership matrix.
+        partial = self.coefficients[..., 1:] ** 2
+        membership = np.asarray(self.multi_index[1:] > 0)
+        return _shapley_result_from_variances(
+            partial,
+            membership,
+            explained,
+            total=partial.sum(axis=-1),
+            problem=self.problem,
+            backend="pce",
+            order=self.order,
+        )
+
+    def __repr__(self) -> str:
+        n_terms = self.coefficients.shape[-1]
+        return f"PCEResult(D={len(self.problem.names)}, order={self.order}, n_terms={n_terms})"
+
+    def to_dataset(self, time_coords: np.ndarray | list | None = None) -> xr.Dataset:
+        """Convert results to a labeled xarray Dataset.
+
+        Args:
+            time_coords: Optional coordinate values for the ``time``
+                dimension of time-series results; defaults to ``0..T-1``.
+        """
+        s1 = np.asarray(self.S1)
+        dims, coords = _dims_and_coords(s1.ndim, s1.shape, self.problem, time_coords)
+        data_vars: dict = {
+            "S1": (dims, s1),
+            "ST": (dims, np.asarray(self.ST)),
+        }
+
+        # S2 is a symmetric (..., D, D) matrix; separate coord names
+        # (param_i, param_j) avoid xarray dimension-name conflicts with the
+        # 1-D "param" coord used by S1/ST.
+        param_names = list(self.problem.names)
+        data_vars["S2"] = (
+            (*dims[:-1], "param_i", "param_j"),
+            np.asarray(self.S2),
+        )
+        coords["param_i"] = param_names
+        coords["param_j"] = param_names
+
+        # LOO RMSE is a per-slice diagnostic: no dims for scalar output,
+        # (output,) / (time, output) otherwise.
+        if self.loo_rmse is not None:
+            data_vars["loo_rmse"] = (dims[:-1], np.asarray(self.loo_rmse))
+        if self.explained_variance is not None:
+            data_vars["explained_variance"] = (
+                dims[:-1],
+                np.asarray(self.explained_variance),
+            )
+
+        return xr.Dataset(data_vars, coords=coords)

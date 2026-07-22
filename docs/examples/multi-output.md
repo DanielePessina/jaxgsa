@@ -1,6 +1,6 @@
 # Multi-Output & Time-Series
 
-`gsax` accepts scalar, multi-output, and time-series multi-output arrays from
+`jaxgsa` accepts scalar, multi-output, and time-series multi-output arrays from
 the same API. This page uses one concrete model to show both `(N, K)` and
 `(N, T, K)` layouts.
 
@@ -9,9 +9,9 @@ the same API. This page uses one concrete model to show both `(N, K)` and
 ```python
 import jax.numpy as jnp
 import numpy as np
-import gsax
+import jaxgsa
 
-problem = gsax.Problem.from_dict(
+problem = jaxgsa.Problem.from_dict(
     {
         "amplitude": (0.5, 2.0),
         "frequency": (1.0, 5.0),
@@ -39,14 +39,14 @@ def oscillator_model(X):
     return jnp.stack([displacement, velocity], axis=-1)  # (N, T, K=2)
 
 
-sampling_result = gsax.sample(problem, n_samples=2048, seed=42)
+sampling_result = jaxgsa.sobol.sample(problem, n_samples=2048, seed=42)
 X = jnp.asarray(sampling_result.samples)
 
 Y_time = oscillator_model(X)      # (N, T, K)
 Y_snapshot = Y_time[:, -1, :]     # (N, K)
 
-time_result = gsax.analyze(sampling_result, Y_time)
-snapshot_result = gsax.analyze(sampling_result, Y_snapshot)
+time_result = jaxgsa.sobol.analyze(sampling_result, Y_time)
+snapshot_result = jaxgsa.sobol.analyze(sampling_result, Y_snapshot)
 
 print("Time-series S1 shape:", time_result.S1.shape)      # (T, K, D)
 print("Time-series ST shape:", time_result.ST.shape)      # (T, K, D)
@@ -77,12 +77,12 @@ print(snapshot_result.S1[1, :])
 ```python
 # Scalar output
 Y_scalar = Y_snapshot[:, 0]      # (N,)
-scalar_result = gsax.analyze(sampling_result, Y_scalar)
+scalar_result = jaxgsa.sobol.analyze(sampling_result, Y_scalar)
 print(scalar_result.S1.shape)    # (D,)
 
 # Time-series with one output
 Y_one_output = Y_time[:, :, :1]  # (N, T, 1)
-one_output_result = gsax.analyze(sampling_result, Y_one_output)
+one_output_result = jaxgsa.sobol.analyze(sampling_result, Y_one_output)
 print(one_output_result.S1.shape)  # (T, 1, D)
 ```
 
@@ -92,7 +92,7 @@ print(one_output_result.S1.shape)  # (T, 1, D)
   plan to export with `to_dataset()`.
 - `calc_second_order=False` removes `S2`, which can be a useful tradeoff for
   large `(T, K)` outputs when you only need `S1` and `ST`.
-- The same shape rules apply to `gsax.analyze_hdmr()`.
+- The same shape rules apply to `jaxgsa.hdmr.analyze()`.
 
 ## See also
 

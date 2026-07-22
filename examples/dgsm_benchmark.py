@@ -1,4 +1,4 @@
-"""DGSM sensitivity analysis on Ishigami and linear benchmarks with gsax.
+"""DGSM sensitivity analysis on Ishigami and linear benchmarks with jaxgsa.
 
 Demonstrates derivative-based global sensitivity measures (DGSM) using
 JAX autodiff. Computes Poincare upper bounds and Kucherenko-Song lower
@@ -60,11 +60,11 @@ def _imports():
     import matplotlib.pyplot as plt
     import numpy as np
 
-    import gsax
-    from gsax.benchmarks import ishigami, linear
-    from gsax.sampling import sample_mc
+    import jaxgsa
+    from jaxgsa.benchmarks import ishigami, linear
+    from jaxgsa.sampling import monte_carlo
 
-    return gsax, ishigami, jnp, linear, mo, np, plt, sample_mc
+    return jaxgsa, ishigami, jnp, linear, mo, np, plt, monte_carlo
 
 
 @app.cell(hide_code=True)
@@ -94,9 +94,9 @@ def _ishigami_fn(jnp):
 
 
 @app.cell
-def _ishigami_dgsm(gsax, ishigami, ishigami_fn, jnp, sample_mc):
-    X_ish = sample_mc(ishigami.PROBLEM, N=50_000, seed=42)
-    result_ish = gsax.analyze_dgsm(ishigami.PROBLEM, ishigami_fn, jnp.asarray(X_ish))
+def _ishigami_dgsm(jaxgsa, ishigami, ishigami_fn, jnp, monte_carlo):
+    X_ish = monte_carlo(ishigami.PROBLEM, n=50_000, seed=42)
+    result_ish = jaxgsa.dgsm.analyze(ishigami.PROBLEM, ishigami_fn, jnp.asarray(X_ish))
     return (result_ish,)
 
 
@@ -181,9 +181,9 @@ def _linear_fn(jnp):
 
 
 @app.cell
-def _linear_dgsm(gsax, jnp, linear, linear_fn, sample_mc):
-    X_lin = sample_mc(linear.PROBLEM, N=10_000, seed=123)
-    result_lin = gsax.analyze_dgsm(linear.PROBLEM, linear_fn, jnp.asarray(X_lin))
+def _linear_dgsm(jaxgsa, jnp, linear, linear_fn, monte_carlo):
+    X_lin = monte_carlo(linear.PROBLEM, n=10_000, seed=123)
+    result_lin = jaxgsa.dgsm.analyze(linear.PROBLEM, linear_fn, jnp.asarray(X_lin))
     return (result_lin,)
 
 
@@ -252,8 +252,8 @@ def _outro(mo):
     3. **Multi-output**: All measures have shape $(K, D)$, handling
        scalar and multi-output models uniformly.
 
-    For exact Sobol indices, use `gsax.analyze()` (Saltelli sampling)
-    or `gsax.analyze_pce()` (polynomial chaos expansion).
+    For exact Sobol indices, use `jaxgsa.sobol.analyze()` (Saltelli sampling)
+    or `jaxgsa.pce.analyze()` (polynomial chaos expansion).
     """)
     return
 

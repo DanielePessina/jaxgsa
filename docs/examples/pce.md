@@ -16,19 +16,11 @@ When to use PCE:
 
 ## Import style
 
-The PCE module lives at `gsax.pce`. You can import it directly or use the
-top-level convenience aliases:
+The PCE module lives at `jaxgsa.pce`:
 
 ```python
-# Subpackage import (preferred for PCE-focused scripts)
-from gsax import pce
+from jaxgsa import pce
 # pce.analyze(...)
-# pce.emulate(...)
-
-# Or use the top-level re-exports
-import gsax
-# gsax.analyze_pce(...)
-# gsax.emulate_pce(...)
 ```
 
 ## Basic example (Ishigami)
@@ -36,8 +28,8 @@ import gsax
 ```python
 import jax
 import jax.numpy as jnp
-import gsax
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
 # Generate samples (any design works -- PCE does not need Saltelli structure)
 key = jax.random.PRNGKey(42)
@@ -49,7 +41,7 @@ X = jax.random.uniform(
 Y = evaluate(X)
 
 # Fit PCE and extract Sobol indices
-result = gsax.analyze_pce(PROBLEM, X, Y, order=4)
+result = jaxgsa.pce.analyze(PROBLEM, X, Y, order=4)
 
 print("S1:", result.S1)          # (D,) = (3,)
 print("ST:", result.ST)          # (D,) = (3,)
@@ -78,14 +70,14 @@ print("loo_rmse:", result.loo_rmse)                 # leave-one-out RMSE
 
 ## Emulation
 
-`emulate_pce()` predicts at new input points using the fitted polynomial:
+`PCEResult.predict()` predicts at new input points using the fitted polynomial:
 
 ```python
 X_new = jax.random.uniform(
     jax.random.PRNGKey(99), (100, PROBLEM.num_vars),
     minval=bounds[:, 0], maxval=bounds[:, 1],
 )
-Y_pred = gsax.emulate_pce(result, X_new)
+Y_pred = result.predict(X_new)
 print("Y_pred shape:", Y_pred.shape)  # (100,)
 
 # Compare against true model
@@ -128,4 +120,4 @@ print(ds.loo_rmse)  # included when available
 - [DGSM](/examples/dgsm) for derivative-based sensitivity bounds.
 - [Methods](/guide/methods) for the theory behind PCE and when to choose it
   over other methods.
-- [API Reference](/api/#pce-workflow) for full parameter documentation.
+- [API Reference](/api/#given-data-methods) for full parameter documentation.

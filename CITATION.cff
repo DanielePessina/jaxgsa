@@ -1,8 +1,8 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it using these metadata."
-title: "gsax: Global Sensitivity Analysis in JAX"
+title: "jaxgsa: Global Sensitivity Analysis in JAX"
 abstract: >-
-  gsax computes global sensitivity indices entirely in JAX, providing Sobol,
+  jaxgsa computes global sensitivity indices entirely in JAX, providing Sobol,
   RS-HDMR, PCE, eFAST, DGSM, HSIC, and PAWN methods with GPU/TPU acceleration.
 type: software
 authors:
@@ -12,8 +12,8 @@ authors:
 version: 0.1.0
 date-released: "2026-07-09"
 license: MIT
-repository-code: "https://github.com/DanielePessina/gsax"
-url: "https://danielepessina.github.io/gsax/"
+repository-code: "https://github.com/DanielePessina/jaxgsa"
+url: "https://danielepessina.github.io/jaxgsa/"
 keywords:
   - sensitivity-analysis
   - global-sensitivity-analysis

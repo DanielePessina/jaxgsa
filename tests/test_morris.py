@@ -9,9 +9,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from gsax.benchmarks import ishigami, linear, sobol_g
-from gsax.morris import analyze, sample
-from gsax.problem import GaussianInputSpec, Problem
+from jaxgsa.benchmarks import ishigami, linear, sobol_g
+from jaxgsa.morris import analyze, sample
+from jaxgsa.problem import GaussianInputSpec, Problem
 
 UNIT_PROBLEM = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
 
@@ -50,10 +50,10 @@ class TestSampling:
     def test_shapes_and_bookkeeping(self):
         sr = sample(UNIT_PROBLEM, n_trajectories=10, seed=1, verbose=False)
         D = 3
-        assert sr.expanded_n_total == 10 * (D + 1)
+        assert sr.n_expanded == 10 * (D + 1)
         assert sr.samples.shape[1] == D
-        assert sr.samples.shape[0] == sr.n_total <= sr.expanded_n_total
-        assert sr.expanded_to_unique.shape == (sr.expanded_n_total,)
+        assert sr.samples.shape[0] == sr.n_runs <= sr.n_expanded
+        assert sr.expanded_to_unique.shape == (sr.n_expanded,)
         for arr in (sr.ee_idx_after, sr.ee_idx_before, sr.ee_delta):
             assert arr.shape == (10, D)
 
@@ -98,7 +98,7 @@ class TestSampling:
     def test_prefix_property_trajectory(self):
         sr_large = sample(UNIT_PROBLEM, n_trajectories=30, seed=42, verbose=False)
         sr_small = sample(UNIT_PROBLEM, n_trajectories=10, seed=42, verbose=False)
-        n_rows = sr_small.expanded_n_total
+        n_rows = sr_small.n_expanded
         np.testing.assert_array_equal(
             sr_large.samples[sr_large.expanded_to_unique][:n_rows],
             sr_small.samples[sr_small.expanded_to_unique],
@@ -107,7 +107,7 @@ class TestSampling:
     def test_prefix_property_radial(self):
         sr_large = sample(UNIT_PROBLEM, n_trajectories=30, method="radial", seed=42, verbose=False)
         sr_small = sample(UNIT_PROBLEM, n_trajectories=10, method="radial", seed=42, verbose=False)
-        n_rows = sr_small.expanded_n_total
+        n_rows = sr_small.n_expanded
         np.testing.assert_array_equal(
             sr_large.samples[sr_large.expanded_to_unique][:n_rows],
             sr_small.samples[sr_small.expanded_to_unique],
@@ -146,7 +146,7 @@ class TestSampling:
             sample(UNIT_PROBLEM, n_trajectories=5, method=cast(Any, "star"), verbose=False)
 
     def test_radial_tiny_delta_raises(self, monkeypatch):
-        import gsax.morris._sampling as morris_sampling
+        import jaxgsa.morris._sampling as morris_sampling
 
         class DegenerateSobol:
             def __init__(self, d, scramble, seed):
@@ -237,7 +237,7 @@ class TestDownsample:
         sr = sample(linear.PROBLEM, n_trajectories=20, seed=1, verbose=False)
         Y = np.asarray(linear.evaluate(jnp.asarray(sr.samples)))
         sr_small, Y_small = sr.downsample(8, Y)
-        assert Y_small.shape[0] == sr_small.n_total
+        assert Y_small.shape[0] == sr_small.n_runs
         res_small = analyze(sr_small, jnp.asarray(Y_small))
         sr_direct = sample(linear.PROBLEM, n_trajectories=8, seed=1, verbose=False)
         res_direct = analyze(sr_direct, linear.evaluate(jnp.asarray(sr_direct.samples)))
@@ -255,8 +255,8 @@ class TestDownsample:
             sr.downsample(6)
         with pytest.raises(ValueError, match=">= 2"):
             sr.downsample(1)
-        with pytest.raises(ValueError, match="n_total"):
-            sr.downsample(3, np.ones(sr.n_total + 1))
+        with pytest.raises(ValueError, match="n_runs"):
+            sr.downsample(3, np.ones(sr.n_runs + 1))
 
 
 class TestLinearAccuracy:
@@ -343,7 +343,7 @@ class TestSALibParity:
         Y_unique = sobol_g.evaluate(jnp.asarray(sr.samples))
         res = analyze(sr, Y_unique)
 
-        # Re-expand to the full design; unit-cube bounds make gsax's samples
+        # Re-expand to the full design; unit-cube bounds make jaxgsa's samples
         # identical to unit-cube coordinates, sidestepping SALib's rescaling.
         X_expanded = sr.samples[sr.expanded_to_unique]
         Y_expanded = np.asarray(Y_unique)[sr.expanded_to_unique]
@@ -519,7 +519,7 @@ class TestValidation:
     def test_y_length_mismatch_raises(self):
         sr = sample(UNIT_PROBLEM, n_trajectories=5, seed=1, verbose=False)
         with pytest.raises(ValueError, match="sample rows"):
-            analyze(sr, jnp.ones(sr.n_total + 3))
+            analyze(sr, jnp.ones(sr.n_runs + 3))
 
     def test_y_wrong_ndim_raises(self):
         """4-D Y is outside the (n,), (n,K), (n,T,K) contract and must error."""
@@ -527,13 +527,13 @@ class TestValidation:
             problem = Problem(names=tuple(f"x{i}" for i in range(D)), bounds=((0.0, 1.0),) * D)
             sr = sample(problem, n_trajectories=5, seed=1, verbose=False)
             with pytest.raises(ValueError, match="must be 1-D"):
-                analyze(sr, jnp.ones((sr.n_total, 2, 3, 5)))
+                analyze(sr, jnp.ones((sr.n_runs, 2, 3, 5)))
 
     def test_zero_variance_warns_measures_are_zero(self):
         """Constant output warns about 0 measures (not NaN) and returns zeros."""
         sr = sample(UNIT_PROBLEM, n_trajectories=10, seed=1, verbose=False)
         with pytest.warns(UserWarning, match="zero variance.*will be 0"):
-            res = analyze(sr, jnp.full(sr.n_total, 7.0))
+            res = analyze(sr, jnp.full(sr.n_runs, 7.0))
         np.testing.assert_array_equal(np.asarray(res.mu_star), np.zeros(3))
         assert not np.any(np.isnan(np.asarray(res.mu_star)))
 
@@ -561,7 +561,7 @@ class TestValidation:
 
     def test_all_nonfinite_raises(self):
         sr = sample(UNIT_PROBLEM, n_trajectories=5, seed=1, verbose=False)
-        Y = jnp.full(sr.n_total, jnp.nan)
+        Y = jnp.full(sr.n_runs, jnp.nan)
         with pytest.warns(UserWarning, match="dropped"):
             with pytest.raises(ValueError, match="Fewer than 2 trajectories"):
                 analyze(sr, Y)

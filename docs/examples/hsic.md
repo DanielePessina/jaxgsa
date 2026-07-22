@@ -25,22 +25,15 @@ When to use HSIC:
 
 ## Import style
 
-The HSIC module lives at `gsax.hsic`. You can import it directly or use the
-top-level convenience aliases:
+The HSIC module lives at `jaxgsa.hsic`:
 
 ```python
-# Subpackage import (preferred for HSIC-focused scripts)
-from gsax import hsic
+from jaxgsa import hsic
 # hsic.analyze(...)
-
-# Or use the top-level re-exports
-import gsax
-# gsax.analyze_hsic(...)
-# gsax.sample_mc(...)  # Monte Carlo sampling lives in gsax.sampling
 ```
 
-Note that `sample_mc` is in `gsax.sampling`, not in `gsax.hsic`. It is
-re-exported at the top level as `gsax.sample_mc()`.
+Note that `monte_carlo` is in `jaxgsa.sampling`, not in `jaxgsa.hsic`. It is
+called as `jaxgsa.sampling.monte_carlo()`.
 
 ## Key difference from other methods
 
@@ -60,19 +53,19 @@ Hilbert space. This means:
 
 ```python
 import jax.numpy as jnp
-import gsax
-from gsax.benchmarks.ishigami import PROBLEM
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM
 
 # Generate Monte Carlo samples (any sampling works — no special design needed)
-X = gsax.sample_mc(PROBLEM, N=2048, seed=42)
+X = jaxgsa.sampling.monte_carlo(PROBLEM, n=2048, seed=42)
 print("X shape:", X.shape)  # (2048, 3)
 
 # Evaluate the model
-Y = gsax.benchmarks.ishigami.evaluate(jnp.asarray(X))
+Y = jaxgsa.benchmarks.ishigami.evaluate(jnp.asarray(X))
 print("Y shape:", Y.shape)  # (2048,)
 
 # Compute HSIC indices
-result = gsax.analyze_hsic(PROBLEM, jnp.asarray(X), Y)
+result = jaxgsa.hsic.analyze(PROBLEM, jnp.asarray(X), Y)
 
 print("R2_HSIC:", result.R2_HSIC)   # (D,) = (3,) — normalized first-order
 print("T_HSIC:", result.T_HSIC)     # (D,) = (3,) — total-order
@@ -87,9 +80,9 @@ When your model returns K outputs, the resulting index arrays have shape
 
 ```python
 import jax.numpy as jnp
-import gsax
+import jaxgsa
 
-problem = gsax.Problem.from_dict(
+problem = jaxgsa.Problem.from_dict(
     {
         "x1": (0.0, 1.0),
         "x2": (0.0, 1.0),
@@ -98,7 +91,7 @@ problem = gsax.Problem.from_dict(
     output_names=("linear", "quadratic"),
 )
 
-X = gsax.sample_mc(problem, N=2048, seed=42)
+X = jaxgsa.sampling.monte_carlo(problem, n=2048, seed=42)
 Xj = jnp.asarray(X)
 
 # Two outputs: linear combination and sum of squares
@@ -107,7 +100,7 @@ Y = jnp.column_stack([
     jnp.sum(Xj**2, axis=1),
 ])
 
-result = gsax.analyze_hsic(problem, Xj, Y)
+result = jaxgsa.hsic.analyze(problem, Xj, Y)
 
 print("R2_HSIC shape:", result.R2_HSIC.shape)  # (K, D) = (2, 3)
 print("T_HSIC shape:", result.T_HSIC.shape)    # (K, D) = (2, 3)
@@ -137,10 +130,10 @@ convergence studies:
 
 ```python
 # Default: median heuristic (recommended)
-result = gsax.analyze_hsic(problem, X, Y)
+result = jaxgsa.hsic.analyze(problem, X, Y)
 
 # Fixed bandwidth for sweep studies
-result = gsax.analyze_hsic(problem, X, Y, bandwidth=0.3)
+result = jaxgsa.hsic.analyze(problem, X, Y, bandwidth=0.3)
 ```
 
 ## Permutation p-values
@@ -150,10 +143,10 @@ Phipson-Smyth correction. The number of permutations controls precision:
 
 ```python
 # Default: 200 permutations (p-value resolution ≈ 0.005)
-result = gsax.analyze_hsic(problem, X, Y, n_perms=200, seed=42)
+result = jaxgsa.hsic.analyze(problem, X, Y, n_perms=200, seed=42)
 
 # Faster with fewer permutations
-result = gsax.analyze_hsic(problem, X, Y, n_perms=50, seed=42)
+result = jaxgsa.hsic.analyze(problem, X, Y, n_perms=50, seed=42)
 ```
 
 A small p-value (< 0.05) indicates that the input has a statistically
@@ -173,7 +166,7 @@ D is always the last axis of the index arrays.
 ## Practical caveats
 
 - HSIC is **O(N²)** in computation and memory (kernel matrices). For N > 8000,
-  use `chunk_size` to limit peak memory.
+  use `batch_size` to limit peak memory.
 - R2-HSIC indices do **not** sum to 1. They are individual dependence measures,
   not variance fractions.
 - The total HSIC index uses product kernels across all D inputs. For very
@@ -193,5 +186,5 @@ D is always the last axis of the index arrays.
   coefficients.
 - [Methods](/guide/methods) for the theory behind HSIC and when to choose it
   over other methods.
-- [API Reference](/api/#hsic-kernel-based-sensitivity-analysis) for full
+- [API Reference](/api/#given-data-methods) for full
   parameter documentation.

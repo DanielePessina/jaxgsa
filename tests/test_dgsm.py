@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from gsax.benchmarks import ishigami, linear, sobol_g
-from gsax.dgsm import analyze
-from gsax.dgsm._poincare import axis_constants, marginal_variance, poincare_constant
-from gsax.problem import GaussianInputSpec, Problem
-from gsax.sampling import sample_mc
+from jaxgsa.benchmarks import ishigami, linear, sobol_g
+from jaxgsa.dgsm import analyze
+from jaxgsa.dgsm._poincare import axis_constants, marginal_variance, poincare_constant
+from jaxgsa.problem import GaussianInputSpec, Problem
+from jaxgsa.sampling import monte_carlo
 
 A, B = 7.0, 0.1
 
@@ -44,14 +45,14 @@ def _sobol_g_single(x):
 @pytest.fixture(scope="module")
 def ishigami_dgsm_result():
     """DGSM result for Ishigami benchmark."""
-    X = sample_mc(ishigami.PROBLEM, N=50_000, seed=42)
+    X = monte_carlo(ishigami.PROBLEM, n=50_000, seed=42)
     return analyze(ishigami.PROBLEM, _ishigami_single, jnp.asarray(X))
 
 
 @pytest.fixture(scope="module")
 def linear_dgsm_result():
     """DGSM result for linear benchmark."""
-    X = sample_mc(linear.PROBLEM, N=10_000, seed=123)
+    X = monte_carlo(linear.PROBLEM, n=10_000, seed=123)
     return analyze(linear.PROBLEM, _linear_single, jnp.asarray(X))
 
 
@@ -73,13 +74,13 @@ class TestPoincare:
         assert C > 0.0
 
     def test_spectral_recovers_uniform(self):
-        from gsax.dgsm._poincare import _truncnorm_poincare
+        from jaxgsa.dgsm._poincare import _truncnorm_poincare
 
         got = _truncnorm_poincare(0.0, 1e6, -math.pi, math.pi, 512)
         assert got == pytest.approx(4.0, rel=2e-3)
 
     def test_spectral_wide_gaussian_collapses_to_sigma2(self):
-        from gsax.dgsm._poincare import _truncnorm_poincare
+        from jaxgsa.dgsm._poincare import _truncnorm_poincare
 
         sigma = 1.3
         got = _truncnorm_poincare(0.0, sigma, -6 * sigma, 6 * sigma, 700)
@@ -122,12 +123,12 @@ class TestAxisConstants:
 class TestSampleMC:
     def test_shape(self):
         problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        X = sample_mc(problem, N=100, seed=1)
+        X = monte_carlo(problem, n=100, seed=1)
         assert X.shape == (100, 2)
 
     def test_within_bounds(self):
         problem = Problem(names=("a", "b"), bounds=((2.0, 5.0), (-1.0, 3.0)))
-        X = sample_mc(problem, N=1000, seed=2)
+        X = monte_carlo(problem, n=1000, seed=2)
         assert np.all(X[:, 0] >= 2.0 - 1e-10)
         assert np.all(X[:, 0] <= 5.0 + 1e-10)
         assert np.all(X[:, 1] >= -1.0 - 1e-10)
@@ -135,8 +136,8 @@ class TestSampleMC:
 
     def test_reproducible(self):
         problem = Problem(names=("x1",), bounds=((0, 1),))
-        X1 = sample_mc(problem, N=50, seed=99)
-        X2 = sample_mc(problem, N=50, seed=99)
+        X1 = monte_carlo(problem, n=50, seed=99)
+        X2 = monte_carlo(problem, n=50, seed=99)
         np.testing.assert_array_equal(X1, X2)
 
     def test_gaussian_inputs(self):
@@ -146,7 +147,7 @@ class TestSampleMC:
                 "x2": GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0),
             }
         )
-        X = sample_mc(problem, N=500, seed=3)
+        X = monte_carlo(problem, n=500, seed=3)
         assert X.shape == (500, 2)
         assert np.all(X[:, 0] >= 0.0 - 1e-10)
         assert np.all(X[:, 0] <= 1.0 + 1e-10)
@@ -217,7 +218,7 @@ class TestIshigamiDGSM:
 class TestMultiOutput:
     def test_shapes(self):
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
-        X = sample_mc(problem, N=500, seed=7)
+        X = monte_carlo(problem, n=500, seed=7)
         result = analyze(problem, _multi_output, jnp.asarray(X))
         assert result.nu.shape == (2, 3)
         assert result.sigma.shape == (2, 3)
@@ -227,7 +228,7 @@ class TestMultiOutput:
 
     def test_linear_output_matches_scalar(self):
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
-        X = sample_mc(problem, N=2000, seed=8)
+        X = monte_carlo(problem, n=2000, seed=8)
         Xj = jnp.asarray(X)
         result_multi = analyze(problem, _multi_output, Xj)
         result_linear = analyze(problem, _linear_single, Xj)
@@ -246,7 +247,7 @@ class TestScalarOutput:
             return jnp.dot(jnp.array([1.0, 2.0, 3.0]), x)
 
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
-        X = sample_mc(problem, N=500, seed=9)
+        X = monte_carlo(problem, n=500, seed=9)
         result = analyze(problem, f_scalar, jnp.asarray(X))
         assert result.nu.shape == (3,)
         assert result.sigma.shape == (3,)
@@ -260,7 +261,7 @@ class TestScalarOutput:
 class TestPrecomputed:
     def test_precomputed_matches_autodiff(self):
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
-        X = sample_mc(problem, N=1000, seed=10)
+        X = monte_carlo(problem, n=1000, seed=10)
         Xj = jnp.asarray(X)
         result_auto = analyze(problem, _linear_single, Xj)
 
@@ -284,34 +285,33 @@ class TestPrecomputed:
             analyze(problem)
 
     def test_singleton_pair_scalar(self):
-        """Y=(N,) pairs with both (N, D) and (N, 1, D) dfdx (singleton tolerance)."""
+        """Y=(N,) requires an exact (N, D) Jacobian."""
         import jax
 
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1),) * 3)
-        X = jnp.asarray(sample_mc(problem, N=400, seed=7))
+        X = jnp.asarray(monte_carlo(problem, n=400, seed=7))
 
         def fn(x):  # (3,) -> ()
             return jnp.dot(jnp.array([1.0, 2.0, 3.0]), x)
 
         Y = jax.vmap(fn)(X)  # (N,)
         dfdx = jax.vmap(jax.jacrev(fn))(X)  # (N, D)
-        base = analyze(problem, Y=Y, dfdx=dfdx)
-        singleton = analyze(problem, Y=Y, dfdx=dfdx[:, None, :])  # (N, 1, D)
-        assert base.nu.shape == (3,)
-        np.testing.assert_allclose(np.asarray(singleton.nu), np.asarray(base.nu), rtol=1e-6)
+        assert analyze(problem, Y=Y, dfdx=dfdx).nu.shape == (3,)
+        with pytest.raises(ValueError, match="ndim"):
+            analyze(problem, Y=Y, dfdx=dfdx[:, None, :])
 
     def test_singleton_pair_2d(self):
-        """Y=(N, 1) pairs with (N, D) dfdx."""
+        """Y=(N, 1) requires an exact (N, 1, D) Jacobian."""
         import jax
 
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1),) * 3)
-        X = jnp.asarray(sample_mc(problem, N=400, seed=8))
+        X = jnp.asarray(monte_carlo(problem, n=400, seed=8))
 
         def fn(x):
             return jnp.dot(jnp.array([1.0, 2.0, 3.0]), x)
 
         Y = jax.vmap(fn)(X)[:, None]  # (N, 1)
-        dfdx = jax.vmap(jax.jacrev(fn))(X)  # (N, D)
+        dfdx = jax.vmap(jax.jacrev(fn))(X)[:, None, :]
         result = analyze(problem, Y=Y, dfdx=dfdx)
         assert result.nu.shape == (1, 3)
 
@@ -319,10 +319,10 @@ class TestPrecomputed:
 class TestChunked:
     def test_chunked_matches_unchunked(self):
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
-        X = sample_mc(problem, N=500, seed=11)
+        X = monte_carlo(problem, n=500, seed=11)
         Xj = jnp.asarray(X)
         result_full = analyze(problem, _linear_single, Xj)
-        result_chunked = analyze(problem, _linear_single, Xj, chunk_size=100)
+        result_chunked = analyze(problem, _linear_single, Xj, batch_size=100)
         np.testing.assert_allclose(
             np.asarray(result_full.nu),
             np.asarray(result_chunked.nu),
@@ -330,17 +330,32 @@ class TestChunked:
         )
 
     def test_ragged_chunk_matches(self):
-        """N not divisible by chunk_size should still produce correct results."""
+        """N not divisible by batch_size should still produce correct results."""
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
-        X = sample_mc(problem, N=503, seed=14)
+        X = monte_carlo(problem, n=503, seed=14)
         Xj = jnp.asarray(X)
         result_full = analyze(problem, _linear_single, Xj)
-        result_ragged = analyze(problem, _linear_single, Xj, chunk_size=100)
+        result_ragged = analyze(problem, _linear_single, Xj, batch_size=100)
         np.testing.assert_allclose(
             np.asarray(result_full.nu),
             np.asarray(result_ragged.nu),
             atol=1e-5,
         )
+
+    def test_batch_size_kwarg_accepted(self):
+        """The 0.4 name `batch_size` is accepted explicitly."""
+        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1),) * 3)
+        Xj = jnp.asarray(monte_carlo(problem, n=50, seed=3))
+        result = analyze(problem, _linear_single, Xj, batch_size=16)
+        assert result.nu.shape == (1, 3)
+
+    def test_old_chunk_size_kwarg_raises(self):
+        """The pre-0.4 `chunk_size` name is gone — no shim."""
+        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1),) * 3)
+        Xj = jnp.asarray(monte_carlo(problem, n=50, seed=3))
+        old_kwargs: dict[str, Any] = {"chunk_size": 16}
+        with pytest.raises(TypeError):
+            analyze(problem, _linear_single, Xj, **old_kwargs)
 
 
 class TestValidation:
@@ -371,8 +386,8 @@ class TestValidation:
 
     def test_sample_mc_n_zero_raises(self):
         problem = Problem(names=("x",), bounds=((0, 1),))
-        with pytest.raises(ValueError, match="N must be >= 1"):
-            sample_mc(problem, N=0)
+        with pytest.raises(ValueError, match="n must be >= 1"):
+            monte_carlo(problem, n=0)
 
 
 class TestToDataset:
@@ -383,7 +398,7 @@ class TestToDataset:
             return jnp.dot(jnp.array([1.0, 2.0, 3.0]), x)
 
         problem = linear.PROBLEM
-        X = sample_mc(problem, N=500, seed=42)
+        X = monte_carlo(problem, n=500, seed=42)
         result = analyze(problem, f_scalar, jnp.asarray(X))
         ds = result.to_dataset()
         assert "nu" in ds.data_vars
@@ -395,7 +410,7 @@ class TestToDataset:
 
     def test_multi_output(self):
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
-        X = sample_mc(problem, N=200, seed=12)
+        X = monte_carlo(problem, n=200, seed=12)
         result = analyze(problem, _multi_output, jnp.asarray(X))
         ds = result.to_dataset()
         assert "output" in ds.dims
@@ -407,7 +422,7 @@ class TestToDataset:
             bounds=((0, 1), (0, 1), (0, 1)),
             output_names=("temp", "pressure"),
         )
-        X = sample_mc(problem, N=200, seed=13)
+        X = monte_carlo(problem, n=200, seed=13)
         result = analyze(problem, _multi_output, jnp.asarray(X))
         ds = result.to_dataset()
         assert list(ds.coords["output"].values) == ["temp", "pressure"]
@@ -417,7 +432,7 @@ class TestSobolGDGSM:
     @pytest.fixture(scope="module")
     def sobol_g_dgsm_result(self):
         """DGSM result for Sobol G-function benchmark."""
-        X = sample_mc(sobol_g.PROBLEM, N=50_000, seed=42)
+        X = monte_carlo(sobol_g.PROBLEM, n=50_000, seed=42)
         return analyze(sobol_g.PROBLEM, _sobol_g_single, jnp.asarray(X))
 
     def test_upper_bound_holds(self, sobol_g_dgsm_result):
@@ -439,7 +454,7 @@ class TestSobolGDGSM:
 
 def test_single_param():
     problem = Problem(names=("x",), bounds=((0.0, 1.0),))
-    X = sample_mc(problem, N=5000, seed=1)
+    X = monte_carlo(problem, n=5000, seed=1)
 
     def fn(x):
         return jnp.sin(x[0])
@@ -475,7 +490,7 @@ class TestTimeSeries:
         return scale * base
 
     def _X(self, n=512):
-        return jnp.asarray(sample_mc(linear.PROBLEM, N=n, seed=3))
+        return jnp.asarray(monte_carlo(linear.PROBLEM, n=n, seed=3))
 
     def test_time_series_fn_shapes(self):
         X = self._X()
@@ -526,45 +541,41 @@ class TestTimeSeries:
         with pytest.raises(ValueError, match="ndim"):
             analyze(linear.PROBLEM, Y=Y, dfdx=dfdx_3d)
 
-    def test_precomputed_swapped_layout_lockstep(self):
-        """Transposed Y+dfdx (labels force a T/K swap, T != K) match canonical."""
+    def test_precomputed_swapped_layout_is_rejected(self):
+        """The output axis must remain last for both Y and dfdx."""
         import jax
 
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1),) * 3, output_names=("a", "b"))
-        X = jnp.asarray(sample_mc(problem, N=400, seed=9))
+        X = jnp.asarray(monte_carlo(problem, n=400, seed=9))
         Y = jax.vmap(self._fn_ts)(X)  # (N, T=3, K=2)
         dfdx = jax.vmap(jax.jacrev(self._fn_ts))(X)  # (N, T, K, D)
-        canonical = analyze(problem, Y=Y, dfdx=dfdx)
-        with pytest.warns(UserWarning, match="swapping"):
-            swapped = analyze(
+        analyze(problem, Y=Y, dfdx=dfdx)
+        with pytest.raises(ValueError, match="output_names"):
+            analyze(
                 problem,
                 Y=jnp.swapaxes(Y, 1, 2),  # (N, K, T)
                 dfdx=jnp.swapaxes(dfdx, 1, 2),  # (N, K, T, D)
             )
-        np.testing.assert_allclose(np.asarray(swapped.nu), np.asarray(canonical.nu), rtol=1e-5)
-        np.testing.assert_allclose(
-            np.asarray(swapped.upper_bound), np.asarray(canonical.upper_bound), rtol=1e-5
-        )
 
     def test_precomputed_inconsistent_dfdx_raises(self):
         """Canonical Y with a transposed dfdx (T != K) is rejected, not swapped."""
         import jax
 
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1),) * 3, output_names=("a", "b"))
-        X = jnp.asarray(sample_mc(problem, N=64, seed=1))
+        X = jnp.asarray(monte_carlo(problem, n=64, seed=1))
         Y = jax.vmap(self._fn_ts)(X)  # (N, 3, 2) canonical
         dfdx = jax.vmap(jax.jacrev(self._fn_ts))(X)  # (N, 3, 2, D)
-        with pytest.raises(ValueError, match="incompatible"):
+        with pytest.raises(ValueError, match="does not match"):
             analyze(problem, Y=Y, dfdx=jnp.swapaxes(dfdx, 1, 2))  # (N, 2, 3, D)
 
-    def test_autodiff_single_label_1d_output_aligned(self):
-        """fn returning (T,) under a single-label problem yields (T, 1, D) moments."""
+    def test_autodiff_explicit_single_output_timeseries(self):
+        """A time-varying single output is returned explicitly as (T, 1)."""
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1),) * 3, output_names=("p",))
-        X = jnp.asarray(sample_mc(problem, N=400, seed=2))
+        X = jnp.asarray(monte_carlo(problem, n=400, seed=2))
 
-        def fn(x):  # (3,) -> (T=4,)
+        def fn(x):  # (3,) -> (T=4, K=1)
             base = jnp.dot(jnp.array([1.0, 2.0, 3.0]), x)
-            return jnp.array([1.0, 2.0, 0.5, 3.0]) * base
+            return (jnp.array([1.0, 2.0, 0.5, 3.0]) * base)[:, None]
 
         result = analyze(problem, fn, X)
         assert result.nu.shape == (4, 1, 3)
@@ -576,7 +587,7 @@ class TestTimeSeries:
     def test_chunked_time_series_matches_unchunked(self):
         X = self._X(200)
         full = analyze(linear.PROBLEM, self._fn_ts, X)
-        chunked = analyze(linear.PROBLEM, self._fn_ts, X, chunk_size=64)
+        chunked = analyze(linear.PROBLEM, self._fn_ts, X, batch_size=64)
         np.testing.assert_allclose(np.asarray(chunked.nu), np.asarray(full.nu), rtol=1e-5)
         np.testing.assert_allclose(np.asarray(chunked.sigma), np.asarray(full.sigma), rtol=1e-4)
 

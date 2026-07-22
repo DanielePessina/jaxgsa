@@ -1,6 +1,6 @@
 # xarray Labeled Output
 
-`to_dataset()` turns `gsax` results into labeled `xarray.Dataset` objects so
+`to_dataset()` turns `jaxgsa` results into labeled `xarray.Dataset` objects so
 you can select by parameter name, output name, time coordinate, and term label
 instead of raw integer axes.
 
@@ -10,9 +10,9 @@ instead of raw integer axes.
 import jax
 import jax.numpy as jnp
 import numpy as np
-import gsax
+import jaxgsa
 
-problem = gsax.Problem.from_dict(
+problem = jaxgsa.Problem.from_dict(
     {
         "amplitude": (0.5, 2.0),
         "frequency": (1.0, 5.0),
@@ -35,11 +35,11 @@ def model(X):
     return jnp.stack([displacement, velocity], axis=-1)  # (N, T, K)
 
 
-sampling_result = gsax.sample(problem, n_samples=2048, seed=42)
+sampling_result = jaxgsa.sobol.sample(problem, n_samples=2048, seed=42)
 X_sobol = jnp.asarray(sampling_result.samples)
 Y_sobol = model(X_sobol)
 
-sobol = gsax.analyze(
+sobol = jaxgsa.sobol.analyze(
     sampling_result,
     Y_sobol,
     num_resamples=100,
@@ -54,7 +54,7 @@ X_hdmr = jax.random.uniform(
     maxval=bounds[:, 1],
 )
 Y_hdmr = model(X_hdmr)
-hdmr = gsax.analyze_hdmr(problem, X_hdmr, Y_hdmr, maxorder=2)
+hdmr = jaxgsa.hdmr.analyze(problem, X_hdmr, Y_hdmr, maxorder=2)
 
 ds_sobol = sobol.to_dataset(time_coords=time_values)
 ds_hdmr = hdmr.to_dataset(time_coords=time_values)

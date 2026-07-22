@@ -9,7 +9,7 @@ on:
       - "docs/**"
       - "scripts/check_api_docs_coverage.py"
       - "scripts/check_vitepress_pager.py"
-      - "src/gsax/**"
+      - "src/jaxgsa/**"
   push:
     branches:
       - master
@@ -20,7 +20,7 @@ on:
       - "docs/**"
       - "scripts/check_api_docs_coverage.py"
       - "scripts/check_vitepress_pager.py"
-      - "src/gsax/**"
+      - "src/jaxgsa/**"
 
 jobs:
   docs-check:

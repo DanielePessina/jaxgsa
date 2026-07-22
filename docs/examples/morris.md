@@ -16,45 +16,38 @@ When to use Morris:
   variance fractions.
 
 A companion marimo notebook lives at
-[`examples/morris_gsa.py`](https://github.com/danielepessina/gsax/blob/master/examples/morris_gsa.py).
+[`examples/morris_gsa.py`](https://github.com/danielepessina/jaxgsa/blob/master/examples/morris_gsa.py).
 Run it interactively with `uv run marimo edit examples/morris_gsa.py`.
 
 ## Import style
 
-The Morris module lives at `gsax.morris`. You can import it directly or use
-the top-level convenience aliases:
+The Morris module lives at `jaxgsa.morris`:
 
 ```python
-# Subpackage import (preferred for Morris-focused scripts)
-from gsax import morris
+from jaxgsa import morris
 # morris.sample(...)
 # morris.analyze(...)
-
-# Or use the top-level re-exports
-import gsax
-# gsax.sample_morris(...)
-# gsax.analyze_morris(...)
 ```
 
 ## Scalar example (Ishigami)
 
 ```python
 import jax.numpy as jnp
-import gsax
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
 # Generate Morris trajectories: r trajectories of D+1 points each.
 # Only the unique rows are returned — exact duplicates across trajectories
 # are removed, so you evaluate fewer points than r * (D + 1).
-sr = gsax.sample_morris(PROBLEM, n_trajectories=50, num_levels=4, seed=42)
-print("unique rows:", sr.n_total)          # <= 50 * (3 + 1) = 200
-print("expanded rows:", sr.expanded_n_total)  # 200
+sr = jaxgsa.morris.sample(PROBLEM, n_trajectories=50, num_levels=4, seed=42)
+print("unique rows:", sr.n_runs)          # <= 50 * (3 + 1) = 200
+print("expanded rows:", sr.n_expanded)  # 200
 
 # Evaluate the model on the unique rows
 Y = evaluate(jnp.asarray(sr.samples))
 
 # Compute the screening measures
-result = gsax.analyze_morris(sr, Y)
+result = jaxgsa.morris.analyze(sr, Y)
 
 print("mu:", result.mu)            # (D,) mean elementary effect (signed)
 print("mu_star:", result.mu_star)  # (D,) mean |elementary effect| — importance
@@ -85,7 +78,7 @@ Bootstrap confidence intervals over trajectories are available via
 ```python
 import jax
 
-result = gsax.analyze_morris(sr, Y, num_resamples=500, key=jax.random.key(0))
+result = jaxgsa.morris.analyze(sr, Y, num_resamples=500, key=jax.random.key(0))
 print(result.mu_star_conf)  # (2, D) — [lower, upper] bounds
 ```
 
@@ -97,9 +90,9 @@ designs around scrambled-Sobol' base points, so the steps vary in size and
 no grid is involved:
 
 ```python
-sr_radial = gsax.sample_morris(PROBLEM, n_trajectories=50, method="radial", seed=42)
+sr_radial = jaxgsa.morris.sample(PROBLEM, n_trajectories=50, method="radial", seed=42)
 Y_radial = evaluate(jnp.asarray(sr_radial.samples))
-result_radial = gsax.analyze_morris(sr_radial, Y_radial)
+result_radial = jaxgsa.morris.analyze(sr_radial, Y_radial)
 print("mu_star (radial):", result_radial.mu_star)
 ```
 
@@ -110,14 +103,14 @@ design.
 ## Multi-output example
 
 When your model returns K outputs per sample, pass Y with shape
-`(n_total, K)`. The resulting measures have shape `(K, D)`. Time-series
-outputs `(n_total, T, K)` produce `(T, K, D)`.
+`(n_runs, K)`. The resulting measures have shape `(K, D)`. Time-series
+outputs `(n_runs, T, K)` produce `(T, K, D)`.
 
 ```python
 import jax.numpy as jnp
-import gsax
+import jaxgsa
 
-problem = gsax.Problem.from_dict(
+problem = jaxgsa.Problem.from_dict(
     {
         "amplitude": (0.5, 2.0),
         "frequency": (1.0, 5.0),
@@ -133,13 +126,13 @@ def multi_output_model(X):
     damping = X[:, 2]
     displacement = amp * jnp.sin(freq) * jnp.exp(-damping)
     velocity = amp * jnp.cos(freq) * jnp.exp(-damping)
-    return jnp.stack([displacement, velocity], axis=-1)  # (n_total, K=2)
+    return jnp.stack([displacement, velocity], axis=-1)  # (n_runs, K=2)
 
 
-sr = gsax.sample_morris(problem, n_trajectories=50, seed=42)
+sr = jaxgsa.morris.sample(problem, n_trajectories=50, seed=42)
 Y = multi_output_model(jnp.asarray(sr.samples))
 
-result = gsax.analyze_morris(sr, Y)
+result = jaxgsa.morris.analyze(sr, Y)
 print("mu_star shape:", result.mu_star.shape)  # (K, D) = (2, 3)
 print("sigma shape:", result.sigma.shape)      # (K, D) = (2, 3)
 ```
@@ -155,20 +148,20 @@ deduplication and prefix-nested downsampling work as usual.
 
 ```python
 import jax.numpy as jnp
-import gsax
+import jaxgsa
 
-problem = gsax.Problem.from_dict(
+problem = jaxgsa.Problem.from_dict(
     {
         "x1": (-1.0, 1.0),
         "x2": {"dist": "gaussian", "mean": 0.0, "variance": 1.0},
     }
 )
 
-sr = gsax.sample_morris(problem, n_trajectories=50, seed=42)
+sr = jaxgsa.morris.sample(problem, n_trajectories=50, seed=42)
 X = jnp.asarray(sr.samples)
 Y = X[:, 0] + X[:, 1] ** 2
 
-result = gsax.analyze_morris(sr, Y)
+result = jaxgsa.morris.analyze(sr, Y)
 print("mu_star:", result.mu_star)  # (2,)
 ```
 
@@ -186,11 +179,11 @@ a uniform-marginal problem (unlike the Gaussian example above):
 
 ```python
 import jax.numpy as jnp
-import gsax
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
-sr = gsax.sample_morris(PROBLEM, n_trajectories=50, seed=42)
-result = gsax.analyze_morris(sr, evaluate(jnp.asarray(sr.samples)))
+sr = jaxgsa.morris.sample(PROBLEM, n_trajectories=50, seed=42)
+result = jaxgsa.morris.analyze(sr, evaluate(jnp.asarray(sr.samples)))
 
 physical = result.to_physical_units()
 print(physical.space)    # "physical" (the original result stays "unit")
@@ -211,19 +204,19 @@ no re-simulation needed:
 
 ```python
 import jax.numpy as jnp
-import gsax
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
-sr_full = gsax.sample_morris(PROBLEM, n_trajectories=100, seed=42)
+sr_full = jaxgsa.morris.sample(PROBLEM, n_trajectories=100, seed=42)
 Y_full = evaluate(jnp.asarray(sr_full.samples))
 
 for r in [50, 25, 10]:
     sr_r, Y_r = sr_full.downsample(r, Y_full)
-    result = gsax.analyze_morris(sr_r, Y_r)
+    result = jaxgsa.morris.analyze(sr_r, Y_r)
     print(f"r={r:3d}  mu_star={result.mu_star}")
 ```
 
-This mirrors `SamplingResult.downsample()` for Sobol designs and is useful
+This mirrors `SobolSamples.downsample()` for Sobol designs and is useful
 for convergence checks: if the ranking is stable from 25 to 100 trajectories,
 25 would have sufficed.
 
@@ -250,20 +243,20 @@ When bootstrap CIs are present, the dataset also contains `mu_lower`,
 
 ## Shape rules
 
-- `(n_total,)` means scalar output.
-- `(n_total, K)` means K output variables with no time dimension.
-- `(n_total, T, K)` means T time steps and K outputs.
+- `(n_runs,)` means scalar output.
+- `(n_runs, K)` means K output variables with no time dimension.
+- `(n_runs, T, K)` means T time steps and K outputs.
 - Without `problem.output_names`, a 2D array is always treated as
-  `(n_total, K)`.
+  `(n_runs, K)`.
 - With exactly one entry in `problem.output_names`, a 2D array is treated as
-  `(n_total, T)` — timepoints of that single output — and flows through as
-  `(n_total, T, 1)`. Passing a pre-reshaped `(n_total, T, 1)` array also works.
+  `(n_runs, T)` — timepoints of that single output — and flows through as
+  `(n_runs, T, 1)`. Passing a pre-reshaped `(n_runs, T, 1)` array also works.
 
 | Y shape | mu / mu_star / sigma shape |
 |---------|----------------------------|
-| `(n_total,)` | `(D,)` |
-| `(n_total, K)` | `(K, D)` |
-| `(n_total, T, K)` | `(T, K, D)` |
+| `(n_runs,)` | `(D,)` |
+| `(n_runs, K)` | `(K, D)` |
+| `(n_runs, T, K)` | `(T, K, D)` |
 
 D is always the last axis.
 
@@ -272,7 +265,7 @@ D is always the last axis.
 - Gaussian marginals are sampled on a truncated-quantile grid
   (`truncation_quantile`, default 0.005): the design would otherwise hit the
   unit-cube boundaries, which an unbounded inverse CDF maps to infinity.
-  `truncation_quantile` must be in `(0, 0.5)` or `sample_morris()` raises
+  `truncation_quantile` must be in `(0, 0.5)` or `jaxgsa.morris.sample()` raises
   `ValueError`.
 - `to_physical_units()` raises `ValueError` for problems with Gaussian
   marginals — the inverse-CDF transform is nonlinear, so the measures stay
@@ -282,7 +275,7 @@ D is always the last axis.
   but cannot attribute them to specific pairs.
 - Even `num_levels` values (the default is 4) make all grid levels equally
   probable; odd values trigger a warning.
-- `Y` must be evaluated on `sr.samples` (the unique rows); `analyze_morris()`
+- `Y` must be evaluated on `sr.samples` (the unique rows); `jaxgsa.morris.analyze()`
   reconstructs the expanded trajectory layout internally.
 - Trajectories containing any non-finite output (NaN/Inf) are dropped as
   whole blocks with a warning. Fewer than 2 remaining trajectories raise an
@@ -299,4 +292,4 @@ D is always the last axis.
   output, and time coordinate.
 - [Methods](/guide/methods) for the theory behind Morris and when to choose
   it over other methods.
-- [API Reference](/api/#morris-workflow) for full parameter documentation.
+- [API Reference](/api/#structured-methods) for full parameter documentation.

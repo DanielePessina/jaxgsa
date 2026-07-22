@@ -1,108 +1,67 @@
-"""Tests that verify subpackage import paths and top-level re-exports."""
+"""Tests for the namespace-only public API."""
+
+import jaxgsa
 
 
-def test_sobol_subpackage():
-    from gsax.sobol import SAResult, analyze
+def test_root_exports_foundational_types_and_namespaces():
+    assert isinstance(jaxgsa.Problem, type)
+    assert isinstance(jaxgsa.GaussianInputSpec, type)
+    assert isinstance(jaxgsa.UniformInputSpec, type)
 
-    assert callable(analyze)
-    assert isinstance(SAResult, type)
-
-
-def test_hdmr_subpackage():
-    from gsax import hdmr
-
-    assert callable(hdmr.analyze)
-    assert callable(hdmr.emulate)
-
-
-def test_pce_subpackage():
-    from gsax import pce
-
-    assert callable(pce.analyze)
-    assert callable(pce.emulate)
-
-
-def test_shapley_subpackage():
-    from gsax import shapley
-
-    assert callable(shapley.analyze)
-    assert isinstance(shapley.ShapleyResult, type)
+    for namespace in (
+        jaxgsa.borgonovo,
+        jaxgsa.config,
+        jaxgsa.dgsm,
+        jaxgsa.efast,
+        jaxgsa.hdmr,
+        jaxgsa.hsic,
+        jaxgsa.morris,
+        jaxgsa.optimal_transport,
+        jaxgsa.pawn,
+        jaxgsa.pce,
+        jaxgsa.sampling,
+        jaxgsa.shapley,
+        jaxgsa.sobol,
+    ):
+        assert namespace is not None
 
 
-def test_top_level_re_exports():
-    import gsax
+def test_method_namespaces_expose_commands_and_results():
+    assert callable(jaxgsa.sobol.sample)
+    assert callable(jaxgsa.sobol.analyze)
+    assert isinstance(jaxgsa.sobol.SobolSamples, type)
+    assert isinstance(jaxgsa.sobol.SobolResult, type)
 
-    assert callable(gsax.analyze)
-    assert callable(gsax.analyze_hdmr)
-    assert callable(gsax.analyze_pce)
-    assert callable(gsax.analyze_shapley)
-    assert callable(gsax.emulate_hdmr)
-    assert callable(gsax.emulate_pce)
-    assert callable(gsax.sample)
-    assert callable(gsax.load)
+    assert callable(jaxgsa.morris.sample)
+    assert callable(jaxgsa.morris.analyze)
+    assert isinstance(jaxgsa.morris.MorrisSamples, type)
 
+    assert callable(jaxgsa.pce.analyze)
+    assert isinstance(jaxgsa.pce.PCEResult, type)
+    assert callable(jaxgsa.hdmr.analyze)
+    assert isinstance(jaxgsa.hdmr.HDMRResult, type)
 
-def test_re_exports_are_same_objects():
-    import gsax
-    from gsax.hdmr import analyze as hdmr_analyze
-    from gsax.pce import analyze as pce_analyze
-    from gsax.shapley import analyze as shapley_analyze
-    from gsax.sobol import analyze as sobol_analyze
-
-    assert gsax.analyze is sobol_analyze
-    assert gsax.analyze_hdmr is hdmr_analyze
-    assert gsax.analyze_pce is pce_analyze
-    assert gsax.analyze_shapley is shapley_analyze
+    assert callable(jaxgsa.sampling.monte_carlo)
+    assert isinstance(jaxgsa.shapley.ShapleyResult, type)
 
 
-def test_dgsm_re_exports():
-    import gsax
-
-    assert callable(gsax.analyze_dgsm)
-    assert isinstance(gsax.DGSMResult, type)
-
-
-def test_efast_re_exports():
-    import gsax
-
-    assert callable(gsax.analyze_efast)
-    assert callable(gsax.sample_efast)
-    assert isinstance(gsax.EFASTResult, type)
-
-
-def test_morris_re_exports():
-    import gsax
-
-    assert callable(gsax.analyze_morris)
-    assert callable(gsax.sample_morris)
-    assert isinstance(gsax.MorrisResult, type)
-    assert isinstance(gsax.MorrisSamplingResult, type)
+def test_removed_root_shortcuts_are_absent():
+    for name in (
+        "sample",
+        "analyze",
+        "load",
+        "monte_carlo",
+        "analyze_pce",
+        "emulate_pce",
+        "analyze_hdmr",
+        "emulate_hdmr",
+        "analyze_shapley",
+    ):
+        assert not hasattr(jaxgsa, name)
 
 
-def test_optimal_transport_subpackage():
-    from gsax import optimal_transport
-
-    assert callable(optimal_transport.analyze)
-    assert isinstance(optimal_transport.OTResult, type)
-
-
-def test_optimal_transport_re_exports():
-    import gsax
-    from gsax.optimal_transport import analyze as ot_analyze
-
-    assert callable(gsax.analyze_optimal_transport)
-    assert gsax.analyze_optimal_transport is ot_analyze
-    assert isinstance(gsax.OTResult, type)
-
-
-def test_sampling_re_exports():
-    import gsax
-
-    assert callable(gsax.sample_mc)
-
-
-def test_problem_re_exports():
-    import gsax
-
-    assert isinstance(gsax.GaussianInputSpec, type)
-    assert isinstance(gsax.UniformInputSpec, type)
+def test_prediction_and_shapley_are_result_methods():
+    assert callable(jaxgsa.pce.PCEResult.predict)
+    assert callable(jaxgsa.pce.PCEResult.shapley)
+    assert callable(jaxgsa.hdmr.HDMRResult.predict)
+    assert callable(jaxgsa.hdmr.HDMRResult.shapley)

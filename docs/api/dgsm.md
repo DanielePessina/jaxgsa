@@ -7,12 +7,11 @@ The canonical API reference now lives at [API Reference](/api/).
 
 Jump directly to:
 
-- [`sample_mc()`](/api/#sample-mc)
-- [`analyze_dgsm()`](/api/#analyze-dgsm)
-- [`DGSMResult`](/api/#dgsmresult)
-- [`DGSMResult.to_dataset()`](/api/#dgsmresult-to_dataset)
-- [`poincare_constant()`](/api/#poincare_constant)
-- [`axis_constants()`](/api/#axis_constants)
+- [`jaxgsa.sampling.monte_carlo()`](/api/#given-data-methods)
+- [`jaxgsa.dgsm.analyze()`](/api/#given-data-methods)
+- [`jaxgsa.dgsm.DGSMResult`](/api/#given-data-methods)
+- [`jaxgsa.dgsm.poincare_constant()`](/api/#given-data-methods)
+- [`jaxgsa.dgsm.axis_constants()`](/api/#given-data-methods)
 
 Related docs:
 

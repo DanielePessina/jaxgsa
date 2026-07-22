@@ -10,10 +10,9 @@ The canonical API reference now lives at [API Reference](/api/).
 
 Jump directly to:
 
-- [`sample_mc()`](/api/#sample-mc)
-- [`analyze_optimal_transport()`](/api/#analyze-optimal-transport)
-- [`OTResult`](/api/#otresult)
-- [`OTResult.to_dataset()`](/api/#otresult-to_dataset)
+- [`jaxgsa.sampling.monte_carlo()`](/api/#given-data-methods)
+- [`jaxgsa.optimal_transport.analyze()`](/api/#given-data-methods)
+- [`jaxgsa.optimal_transport.OTResult`](/api/#given-data-methods)
 
 Related docs:
 

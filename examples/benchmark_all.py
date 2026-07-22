@@ -1,4 +1,4 @@
-"""Benchmark: gsax vs SALib on Ishigami (D=3) and Oakley-O'Hagan (D=15).
+"""Benchmark: jaxgsa vs SALib on Ishigami (D=3) and Oakley-O'Hagan (D=15).
 
 Compares analysis-phase performance across four SA methods: Sobol, eFAST,
 DGSM, and HDMR on two canonical test functions with known analytical
@@ -19,7 +19,7 @@ app = marimo.App(width="medium")
 @app.cell(hide_code=True)
 def _intro(mo):
     mo.md(r"""
-    # gsax vs SALib — Benchmark
+    # jaxgsa vs SALib — Benchmark
 
     Performance comparison on two canonical SA test functions:
 
@@ -60,14 +60,14 @@ def _imports():
     from SALib.sample import fast_sampler as salib_fast_sampler
     from SALib.sample import finite_diff as salib_finite_diff
 
-    import gsax
-    from gsax.benchmarks import ishigami, oakley_ohagan
-    from gsax.sampling import sample_mc
+    import jaxgsa
+    from jaxgsa.benchmarks import ishigami, oakley_ohagan
+    from jaxgsa.sampling import monte_carlo
 
     warnings.filterwarnings("ignore", category=DeprecationWarning)
     plt.rcParams["figure.dpi"] = 150
     return (
-        gsax,
+        jaxgsa,
         ishigami,
         jax,
         jnp,
@@ -86,7 +86,7 @@ def _imports():
         salib_sep,
         salib_sobol_mod,
         salib_st,
-        sample_mc,
+        monte_carlo,
         time,
         warnings,
     )
@@ -331,7 +331,7 @@ def _benchmark(
     SALIB_OAKH,
     best_of,
     expand_sobol,
-    gsax,
+    jaxgsa,
     ishi_batch,
     jax,
     jnp,
@@ -352,7 +352,7 @@ def _benchmark(
     salib_slices,
     salib_sobol_mod,
     salib_st,
-    sample_mc,
+    monte_carlo,
     time,
     warnings,
 ):
@@ -404,7 +404,7 @@ def _benchmark(
 
             # ======== SOBOL ========
             for _label, _T, _K in _scens:
-                _sr = gsax.sample(
+                _sr = jaxgsa.sobol.sample(
                     _prob,
                     _bn * _step,
                     seed=1,
@@ -415,10 +415,10 @@ def _benchmark(
                 jax.block_until_ready(_Yj)
                 _Ys = expand_sobol(_sr, _Yj)
 
-                gsax.analyze(_sr, _Yj).S1.block_until_ready()
+                jaxgsa.sobol.analyze(_sr, _Yj).S1.block_until_ready()
                 _g = (
                     best_of(
-                        lambda sr=_sr, Y=_Yj: gsax.analyze(sr, Y),
+                        lambda sr=_sr, Y=_Yj: jaxgsa.sobol.analyze(sr, Y),
                     )
                     * 1e3
                 )
@@ -455,33 +455,31 @@ def _benchmark(
                         "problem": _pname,
                         "method": "Sobol",
                         "scenario": _label,
-                        "gsax_ms": _g,
+                        "jaxgsa_ms": _g,
                         "salib_ms": _sb * 1e3,
                     }
                 )
 
             # ======== eFAST ========
             for _label, _T, _K in _scens:
-                _Xe = gsax.sample_efast(
+                _Xe = jaxgsa.efast.sample(
                     _prob,
-                    N=2049,
+                    n_per_curve=2049,
                     M=4,
                     seed=42,
                 )
-                _Ye = _bfn(jnp.asarray(_Xe), _T, _K)
+                _Ye = _bfn(jnp.asarray(_Xe.samples), _T, _K)
                 jax.block_until_ready(_Ye)
 
-                gsax.analyze_efast(
-                    _prob,
+                jaxgsa.efast.analyze(
+                    _Xe,
                     _Ye,
-                    M=4,
                 ).S1.block_until_ready()
                 _g = (
                     best_of(
-                        lambda Y=_Ye, p=_prob: gsax.analyze_efast(
-                            p,
+                        lambda Y=_Ye, sr=_Xe: jaxgsa.efast.analyze(
+                            sr,
                             Y,
-                            M=4,
                         ),
                     )
                     * 1e3
@@ -524,7 +522,7 @@ def _benchmark(
                         "problem": _pname,
                         "method": "eFAST",
                         "scenario": _label,
-                        "gsax_ms": _g,
+                        "jaxgsa_ms": _g,
                         "salib_ms": _sb * 1e3,
                     }
                 )
@@ -532,12 +530,12 @@ def _benchmark(
             # ======== DGSM (pre-computed path) ========
             for _label, _T, _K in _scens:
                 _Xmc = jnp.asarray(
-                    sample_mc(_prob, 2048, seed=42),
+                    monte_carlo(_prob, 2048, seed=42),
                 )
                 _fn = _ubfn(_T, _K)
 
                 # Warmup autodiff path
-                gsax.analyze_dgsm(
+                jaxgsa.dgsm.analyze(
                     _prob,
                     _fn,
                     _Xmc,
@@ -551,8 +549,8 @@ def _benchmark(
                 _dfdx = _jac_fn(_Xmc)
                 jax.block_until_ready(_dfdx)
 
-                # gsax: pre-computed analysis only
-                gsax.analyze_dgsm(
+                # jaxgsa: pre-computed analysis only
+                jaxgsa.dgsm.analyze(
                     _prob,
                     Y=_Yd,
                     dfdx=_dfdx,
@@ -560,7 +558,7 @@ def _benchmark(
                 _gb = float("inf")
                 for _ in range(N_REPEATS):
                     _t0 = time.perf_counter()
-                    _r = gsax.analyze_dgsm(
+                    _r = jaxgsa.dgsm.analyze(
                         _prob,
                         Y=_Yd,
                         dfdx=_dfdx,
@@ -607,13 +605,13 @@ def _benchmark(
                         "problem": _pname,
                         "method": "DGSM",
                         "scenario": _label,
-                        "gsax_ms": _g,
+                        "jaxgsa_ms": _g,
                         "salib_ms": _sb * 1e3,
                     }
                 )
 
             # ======== HDMR ========
-            _Xmc_h = np.asarray(sample_mc(_prob, _bn, seed=42))
+            _Xmc_h = np.asarray(monte_carlo(_prob, _bn, seed=42))
             _Xjax_h = jnp.asarray(_Xmc_h)
 
             for _label, _T, _K in _scens:
@@ -621,7 +619,7 @@ def _benchmark(
                 jax.block_until_ready(_Yj)
                 _Ynp = np.asarray(_Yj)
 
-                gsax.analyze_hdmr(
+                jaxgsa.hdmr.analyze(
                     _prob,
                     _Xjax_h,
                     _Yj,
@@ -630,7 +628,7 @@ def _benchmark(
                 ).Sa.block_until_ready()
                 _g = (
                     best_of(
-                        lambda X=_Xjax_h, Y=_Yj, p=_prob: gsax.analyze_hdmr(
+                        lambda X=_Xjax_h, Y=_Yj, p=_prob: jaxgsa.hdmr.analyze(
                             p,
                             X,
                             Y,
@@ -676,7 +674,7 @@ def _benchmark(
                         "problem": _pname,
                         "method": "HDMR",
                         "scenario": _label,
-                        "gsax_ms": _g,
+                        "jaxgsa_ms": _g,
                         "salib_ms": _s,
                     }
                 )
@@ -684,7 +682,7 @@ def _benchmark(
         # ======== BOOTSTRAP COMPARISON (Ishigami 1x1 Sobol) ========
         _boot = {}
         _ishi_step = 2 * 3 + 2
-        _sr_b = gsax.sample(
+        _sr_b = jaxgsa.sobol.sample(
             ISHI_PROB,
             ISHI_BASE_N * _ishi_step,
             seed=1,
@@ -695,10 +693,10 @@ def _benchmark(
         jax.block_until_ready(_Yb)
         _Yb_exp = expand_sobol(_sr_b, _Yb)
 
-        # gsax: 0, 100, 1000 resamples
+        # jaxgsa: 0, 100, 1000 resamples
         # Use prenormalize=True + ci_method="gaussian" to match SALib
         for _nr in [0, 100, 1000]:
-            gsax.analyze(
+            jaxgsa.sobol.analyze(
                 _sr_b,
                 _Yb,
                 num_resamples=_nr,
@@ -708,7 +706,7 @@ def _benchmark(
             ).S1.block_until_ready()
             _g = (
                 best_of(
-                    lambda nr=_nr: gsax.analyze(
+                    lambda nr=_nr: jaxgsa.sobol.analyze(
                         _sr_b,
                         _Yb,
                         num_resamples=nr,
@@ -719,9 +717,9 @@ def _benchmark(
                 )
                 * 1e3
             )
-            _boot[f"gsax_{_nr}"] = _g
+            _boot[f"jaxgsa_{_nr}"] = _g
             if _nr > 0:
-                _r = gsax.analyze(
+                _r = jaxgsa.sobol.analyze(
                     _sr_b,
                     _Yb,
                     num_resamples=_nr,
@@ -729,7 +727,7 @@ def _benchmark(
                     ci_method="gaussian",
                     key=jax.random.key(0),
                 )
-                _boot[f"gsax_ci_{_nr}"] = float(
+                _boot[f"jaxgsa_ci_{_nr}"] = float(
                     jnp.mean(_r.S1_conf[1] - _r.S1_conf[0]),
                 )
 
@@ -781,14 +779,14 @@ def _tables(all_results, mo):
         _d = 3 if _pname == "Ishigami" else 15
         _lines.append(f"\n### {_pname} (D={_d})\n")
         _lines.append(
-            "| Method | Scenario | gsax (ms) | SALib (ms)"
+            "| Method | Scenario | jaxgsa (ms) | SALib (ms)"
             " | Speedup |\n"
             "| --- | --- | ---: | ---: | ---: |"
         )
         for _r in _speed:
             if _r["problem"] != _pname:
                 continue
-            _g, _s = _r["gsax_ms"], _r["salib_ms"]
+            _g, _s = _r["jaxgsa_ms"], _r["salib_ms"]
             _sp = f"**{_s / _g:.1f}x**" if _g > 0 else "---"
             _lines.append(f"| {_r['method']} | {_r['scenario']} | {_g:.1f} | {_s:.1f} | {_sp} |")
 
@@ -808,7 +806,7 @@ def _bar_charts(all_results, mo, np, plt):
         for _r in _speed:
             if _r["problem"] != prob_name:
                 continue
-            _g, _s = _r["gsax_ms"], _r["salib_ms"]
+            _g, _s = _r["jaxgsa_ms"], _r["salib_ms"]
             _speedups[(_r["method"], _r["scenario"])] = _s / _g if _g > 0 else 0
         _x = np.arange(len(_methods))
         _w = 0.8 / max(len(scenarios), 1)
@@ -832,7 +830,7 @@ def _bar_charts(all_results, mo, np, plt):
         )
         ax.set_xticks(_x)
         ax.set_xticklabels(_methods)
-        ax.set_ylabel("Speedup (SALib / gsax)")
+        ax.set_ylabel("Speedup (SALib / jaxgsa)")
         _d = 3 if prob_name == "Ishigami" else 15
         ax.set_title(f"{prob_name} (D={_d})")
         ax.legend(title="T x K", frameon=False, fontsize=7)
@@ -851,7 +849,7 @@ def _bar_charts(all_results, mo, np, plt):
     )
     _make_chart(_ax2, "O'Hagan", ["1x1", "50x1"])
     _fig.suptitle(
-        "gsax speedup over SALib",
+        "jaxgsa speedup over SALib",
         fontsize=14,
         y=1.02,
     )
@@ -893,10 +891,10 @@ def _scaling_chart(all_results, mo, plt):
                     _by_m[_m],
                     key=lambda r: _tk_map[r["scenario"]],
                 )
-                if r["gsax_ms"] > 0
+                if r["jaxgsa_ms"] > 0
             ]
             _xs = [_tk_map[r["scenario"]] for r in _rows]
-            _ys = [r["salib_ms"] / r["gsax_ms"] for r in _rows]
+            _ys = [r["salib_ms"] / r["jaxgsa_ms"] for r in _rows]
             _mk, _co = _styles[_m]
             _ax.plot(
                 _xs,
@@ -921,7 +919,7 @@ def _scaling_chart(all_results, mo, plt):
         _ax.legend(frameon=False, fontsize=8)
         _ax.grid(alpha=0.3)
 
-    _ax1.set_ylabel("Speedup (SALib / gsax)")
+    _ax1.set_ylabel("Speedup (SALib / jaxgsa)")
     _fig.suptitle(
         "Speedup vs output dimensionality",
         fontsize=14,
@@ -942,15 +940,15 @@ def _bootstrap_section(all_results, mo, np, plt):
 
     # ---- Timing comparison ----
     _labels = ["100", "1000"]
-    _gsax_t = [_boot["gsax_100"], _boot["gsax_1000"]]
+    _jaxgsa_t = [_boot["jaxgsa_100"], _boot["jaxgsa_1000"]]
     _salib_t = [_boot["salib_100"], _boot["salib_1000"]]
     _x = np.arange(len(_labels))
     _w = 0.35
     _ax1.bar(
         _x - _w / 2,
-        _gsax_t,
+        _jaxgsa_t,
         _w,
-        label="gsax",
+        label="jaxgsa",
         color="#2196F3",
     )
     _ax1.bar(
@@ -960,7 +958,7 @@ def _bootstrap_section(all_results, mo, np, plt):
         label="SALib",
         color="#FF9800",
     )
-    _pt = _boot["gsax_0"]
+    _pt = _boot["jaxgsa_0"]
     _ax1.axhline(
         _pt,
         color="#2196F3",
@@ -969,7 +967,7 @@ def _bootstrap_section(all_results, mo, np, plt):
         alpha=0.7,
     )
     _ax1.annotate(
-        f"gsax point est. {_pt:.1f} ms",
+        f"jaxgsa point est. {_pt:.1f} ms",
         xy=(0, _pt),
         xytext=(0.3, _pt * 1.3),
         fontsize=7,
@@ -984,9 +982,9 @@ def _bootstrap_section(all_results, mo, np, plt):
     _ax1.grid(axis="y", alpha=0.3)
 
     # ---- CI width comparison ----
-    _ci_gsax = [
-        _boot.get("gsax_ci_100", 0),
-        _boot.get("gsax_ci_1000", 0),
+    _ci_jaxgsa = [
+        _boot.get("jaxgsa_ci_100", 0),
+        _boot.get("jaxgsa_ci_1000", 0),
     ]
     _ci_salib = [
         _boot.get("salib_ci_100", 0),
@@ -995,9 +993,9 @@ def _bootstrap_section(all_results, mo, np, plt):
     _x2 = np.arange(2)
     _ax2.bar(
         _x2 - _w / 2,
-        _ci_gsax,
+        _ci_jaxgsa,
         _w,
-        label="gsax",
+        label="jaxgsa",
         color="#2196F3",
     )
     _ax2.bar(
@@ -1025,25 +1023,25 @@ def _findings(mo):
     ## Key findings
 
     - **Speedup grows with output dimensionality** — SALib loops over
-      (T, K) slices in Python; gsax vectorizes with `jax.vmap`
+      (T, K) slices in Python; jaxgsa vectorizes with `jax.vmap`
     - **Higher D amplifies the gap** — O'Hagan (D=15) shows larger
       speedups than Ishigami (D=3) because SALib's per-parameter
       loops are longer
     - **HDMR has the largest speedups** — SALib runs backfitting per
-      slice; gsax vmaps the entire B-spline fit
-    - **DGSM note** — gsax uses pre-computed Jacobians (autodiff
+      slice; jaxgsa vmaps the entire B-spline fit
+    - **DGSM note** — jaxgsa uses pre-computed Jacobians (autodiff
       excluded); SALib's `analyze()` includes finite-difference
       computation since it has no pre-computed path
-    - **Scalar outputs (1x1)** — SALib can match or beat gsax: the
+    - **Scalar outputs (1x1)** — SALib can match or beat jaxgsa: the
       analysis itself is tiny, so JAX's fixed per-call overhead
       dominates the timing
-    - **Bootstrap scales efficiently in gsax** — JIT reuse across
+    - **Bootstrap scales efficiently in jaxgsa** — JIT reuse across
       resamples means 10x more resamples costs far less than 10x
       more time; CI width narrows as $\sim 1/\sqrt{B}$
 
-    **Bottom line:** gsax's advantage is vectorized multi-output
+    **Bottom line:** jaxgsa's advantage is vectorized multi-output
     analysis. For scalar problems, SALib is competitive. For
-    time-series or multi-output workloads, gsax is 5--700x faster.
+    time-series or multi-output workloads, jaxgsa is 5--700x faster.
     """)
     return
 

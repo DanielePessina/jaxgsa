@@ -1,17 +1,37 @@
 # Shapley Effects
 
-A fair, game-theoretic split of output variance across parameters that always
-sums to 1, computed analytically from a fitted surrogate (PCE by default).
+`jaxgsa.shapley` exposes `analyze` and the `ShapleyResult` type.
 
-The canonical API reference now lives at [API Reference](/api/).
+The canonical form is a result method: fit a PCE or HDMR surrogate, then
+derive Shapley effects from the fitted result:
 
-Jump directly to:
+```python
+effects = jaxgsa.pce.analyze(problem, X, Y).shapley()
+effects = jaxgsa.hdmr.analyze(problem, X, Y).shapley()
+effects = jaxgsa.hdmr.analyze(problem, X, Y).shapley(
+    include_correlative=True,
+)
+```
 
-- [`analyze_shapley()`](/api/#analyze_shapley)
-- [`ShapleyResult`](/api/#shapleyresult)
-- [`ShapleyResult.to_dataset()`](/api/#shapleyresult-to_dataset)
+`jaxgsa.shapley.analyze(problem, X, Y, backend="pce" | "hdmr", ...)` is a thin
+convenience over the same two steps — it is literally
+`jaxgsa.pce.analyze(problem, X, Y, **kw).shapley()` (or the HDMR equivalent
+with `include_correlative=...`); there is no separate Shapley pipeline.
+Extra keyword arguments pass through to the selected backend's `analyze`
+(e.g. `order` for PCE, `maxorder` for HDMR):
 
-Related docs:
+```python
+effects = jaxgsa.shapley.analyze(problem, X, Y, backend="pce", order=4)
+effects = jaxgsa.shapley.analyze(
+    problem, X, Y, backend="hdmr", include_correlative=True
+)
+```
 
-- [Shapley Example](/examples/shapley)
-- [Methods](/guide/methods)
+Prefer the result-method form when you also want the fitted surrogate
+(prediction, Sobol-style indices, fit diagnostics); use the wrapper when only
+the Shapley effects are needed.
+
+The result exposes `Sh`, `S1`, `ST`, `explained_variance`, fit provenance, and
+`to_dataset(...)`.
+
+See the [Shapley example](/examples/shapley) and [API overview](/api/).

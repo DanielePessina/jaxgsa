@@ -1,4 +1,4 @@
-"""Batch reactor mechanistic model — Sobol global sensitivity analysis with gsax.
+"""Batch reactor mechanistic model — Sobol global sensitivity analysis with jaxgsa.
 
 Walks through Sobol global sensitivity analysis on a batch reactor running a
 first-order liquid-phase reaction A -> B. The rate constant k(T, pH) combines
@@ -23,7 +23,7 @@ app = marimo.App(width="medium")
 @app.cell(hide_code=True)
 def _intro(mo):
     mo.md(r"""
-    # Batch reactor sensitivity analysis with **gsax**
+    # Batch reactor sensitivity analysis with **jaxgsa**
 
     A batch reactor running a first-order liquid-phase reaction
     $A \to B$. The rate constant $k(T, \mathrm{pH})$ combines a centred
@@ -72,9 +72,9 @@ def _imports():
     import matplotlib.pyplot as plt
     import numpy as np
 
-    import gsax
+    import jaxgsa
 
-    return gsax, jax, jnp, mo, np, plt
+    return jaxgsa, jax, jnp, mo, np, plt
 
 
 @app.cell(hide_code=True)
@@ -146,8 +146,8 @@ def _doe_md(mo):
     | $T$ | $[15,\, 35]$ | °C |
     | $\mathrm{pH}$ | $[4.5,\, 7.5]$ | — |
 
-    `gsax.sample(...)` returns a `SamplingResult` whose `.samples`
-    attribute is the deduplicated unique-row sample matrix; gsax
+    `jaxgsa.sobol.sample(...)` returns a `SobolSamples` whose `.samples`
+    attribute is the deduplicated unique-row sample matrix; jaxgsa
     reconstructs the expanded Saltelli ordering internally inside
     `analyze`. Setting `calc_second_order=True` activates the extra
     cross-matrix needed for $S_{ij}$.
@@ -156,8 +156,8 @@ def _doe_md(mo):
 
 
 @app.cell
-def _problem(gsax):
-    problem = gsax.Problem.from_dict(
+def _problem(jaxgsa):
+    problem = jaxgsa.Problem.from_dict(
         {
             "Ca0": (0.75, 1.5),
             "temperature_C": (15.0, 35.0),
@@ -166,7 +166,7 @@ def _problem(gsax):
         output_names=("Ca",),
     )
 
-    sampling_result = gsax.sample(
+    sampling_result = jaxgsa.sobol.sample(
         problem,
         n_samples=4096,
         seed=0,
@@ -232,7 +232,7 @@ def _analyze_md(mo):
     mo.md(r"""
     ## Sobol analysis with bootstrap
 
-    `gsax.analyze(...)` accepts the `(N, T, K)` output array and
+    `jaxgsa.sobol.analyze(...)` accepts the `(N, T, K)` output array and
     returns indices with shape `(T, K, D)` for first-order, total-order
     and `(T, K, D, D)` for second-order. Passing `num_resamples > 0`
     together with a PRNG `key` switches on a vectorised non-parametric
@@ -247,8 +247,8 @@ def _analyze_md(mo):
 
 
 @app.cell
-def _analyze(Y, gsax, jax, sampling_result):
-    result = gsax.analyze(
+def _analyze(Y, jaxgsa, jax, sampling_result):
+    result = jaxgsa.sobol.analyze(
         sampling_result,
         Y,
         num_resamples=200,

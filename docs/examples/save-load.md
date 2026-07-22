@@ -1,67 +1,37 @@
-# Save and Reload Samples
+# Save and Reload Sobol Samples
 
-Use `SamplingResult.save()` when you want to generate Sobol/Saltelli samples
-once, store them on disk, and reuse them later without re-running the sampling
-step.
-
-## Save, reload, and analyze
+`SobolSamples` stores both the unique model-evaluation rows and the metadata
+needed to reconstruct the internal Saltelli design.
 
 ```python
-import gsax
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM
 
-sampling_result = gsax.sample(PROBLEM, n_samples=4096, seed=42)
+samples = jaxgsa.sobol.sample(PROBLEM, n_samples=4096, seed=42)
+samples.save("runs/ishigami")
 
-# Save a file stem, not a full filename with extension.
-sampling_result.save("runs/ishigami", format="csv")
-
-restored = gsax.load("runs/ishigami", format="csv")
-Y = evaluate(restored.samples)
-result = gsax.analyze(restored, Y)
-
-print("Loaded rows:", restored.n_total)
-print("First SampleID values:")
-print(restored.samples_df.head())
-print(result.S1)
-print(result.ST)
+restored = jaxgsa.sobol.SobolSamples.load("runs/ishigami")
+Y = my_model(restored.samples)
+result = jaxgsa.sobol.analyze(restored, Y)
 ```
 
-## Files written to disk
+The `.npz` suffix is optional. Both calls above address
+`runs/ishigami.npz`.
 
-For `path="runs/ishigami"` and `format="csv"`, `save()` writes:
+One compressed file contains:
 
-- `runs/ishigami.csv` with the unique sample matrix.
-- `runs/ishigami.json` with the `Problem` definition, `base_n`,
-  `expanded_n_total`, and related metadata.
-- `runs/ishigami.npz` only when `expanded_to_unique` is not the identity map.
+- the unique sample matrix;
+- stable sample identifiers;
+- the expanded-to-unique Saltelli mapping;
+- the input problem and output names;
+- sampling settings such as `base_n` and second-order mode.
 
-The `.npz` file is skipped for storage efficiency when the expanded Saltelli
-rows already map one-to-one to the unique rows.
+Use NumPy directly when a separate CSV or table is needed:
 
-## Choosing a format
+```python
+import numpy as np
 
-- `csv` is the safest default for interop and version control.
-- `txt` is useful for plain numeric pipelines.
-- `pkl` is compact inside Python-only workflows.
-- `xlsx` requires `openpyxl`.
-- `parquet` requires `pyarrow`.
+np.savetxt("runs/ishigami.csv", samples.samples, delimiter=",")
+```
 
-Use the same `format` when calling `gsax.load()`. Format is not inferred from
-the metadata file.
-
-## Practical caveats
-
-- Saving persists the metadata that `gsax.analyze()` needs; do not drop the
-  `.json` file.
-- Reloaded samples are still the unique rows, so your model evaluation step
-  remains `Y = model(restored.samples)`.
-- If you need a human-readable audit trail, `samples_df` is easier to inspect
-  than the raw NumPy array.
-
-## See also
-
-- [Basic Example](/examples/basic) for the minimal Sobol workflow.
-- [Bootstrap Confidence Intervals](/examples/bootstrap) if you want uncertainty
-  bounds on a reloaded design.
-- [Advanced Workflow](/examples/advanced-workflow) for a larger custom model
-  that keeps Sobol and HDMR runs side by side.
+The CSV is only a model-input table; keep the NPZ file for later jaxgsa analysis.

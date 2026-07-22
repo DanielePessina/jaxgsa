@@ -1,8 +1,8 @@
-# Publishes gsax to PyPI when a GitHub Release is published.
+# Publishes jaxgsa to PyPI when a GitHub Release is published.
 #
 # Setup required once on PyPI (no API tokens needed):
 #   PyPI project -> Settings -> Publishing -> add a "trusted publisher" for
-#   owner=DanielePessina, repo=gsax, workflow=publish.yml, environment=pypi.
+#   owner=DanielePessina, repo=jaxgsa, workflow=publish.yml, environment=pypi.
 # See https://docs.pypi.org/trusted-publishers/
 name: Publish to PyPI
 
@@ -35,7 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/gsax
+      url: https://pypi.org/p/jaxgsa
     permissions:
       id-token: write # OIDC token for PyPI trusted publishing
     steps:

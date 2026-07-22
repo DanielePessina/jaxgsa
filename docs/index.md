@@ -2,7 +2,7 @@
 layout: home
 
 hero:
-  name: gsax
+  name: jaxgsa
   text: Global Sensitivity Analysis in JAX
   tagline: GPU-accelerated Sobol indices, RS-HDMR, PCE, Shapley effects, eFAST, DGSM, Morris screening, HSIC, PAWN, and Borgonovo delta with JIT compilation, vectorized bootstrap, and multi-output support.
   actions:
@@ -34,11 +34,11 @@ features:
   - title: Borgonovo Delta
     details: Measures the shift of the entire output density when an input is fixed — moment-independent like PAWN, but density-based. The given-data estimator works on any (X, Y) pairs and includes bootstrap confidence intervals.
   - title: Save & Reload Samples
-    details: Persist a sample set with SamplingResult.save(), evaluate your model elsewhere, and reload with gsax.load() — the analysis metadata travels with the samples.
+    details: Persist a sample set with SobolSamples.save(), evaluate your model elsewhere, and reload with SobolSamples.load() — the analysis metadata travels with the samples.
   - title: Multi-Output & Time-Series
-    details: Pass scalar, (N, K), or (N, T, K) outputs to any of the eleven methods and get indices for every output and timestep in a single vectorized pass. Set output_names and gsax disambiguates 2-D layouts, fixing obvious transposes with a warning.
+    details: Pass scalar, (N, K), or (N, T, K) outputs to any of the eleven methods and get indices for every output and timestep in a single vectorized pass. Set output_names and jaxgsa disambiguates 2-D layouts, fixing obvious transposes with a warning.
   - title: Up to 668× Faster than SALib
     details: Fused JIT kernels and vectorized execution replace Python loops. Sobol up to 15.8× faster, HDMR up to 668× on multi-output workloads.
 ---
 
-`gsax`'s Sobol sampling and analysis workflow is heavily drawn from [SALib](https://salib.readthedocs.io/), adapted here into a JAX-first implementation focused on JIT compilation, accelerator execution, and multi-output workloads.
+`jaxgsa`'s Sobol sampling and analysis workflow is heavily drawn from [SALib](https://salib.readthedocs.io/), adapted here into a JAX-first implementation focused on JIT compilation, accelerator execution, and multi-output workloads.

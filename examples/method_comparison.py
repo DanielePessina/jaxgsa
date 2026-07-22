@@ -56,11 +56,11 @@ def _imports():
     import matplotlib.pyplot as plt
     import numpy as np
 
-    import gsax
-    from gsax.benchmarks import ishigami
+    import jaxgsa
+    from jaxgsa.benchmarks import ishigami
 
     plt.rcParams["figure.dpi"] = 150
-    return gsax, ishigami, jax, jnp, mo, np, plt, time
+    return jaxgsa, ishigami, jax, jnp, mo, np, plt, time
 
 
 @app.cell
@@ -77,24 +77,24 @@ def _setup(ishigami, jnp):
 
 
 @app.cell
-def _run_all(gsax, ishigami, ishigami_fn, jax, jnp, problem, time):
+def _run_all(jaxgsa, ishigami, ishigami_fn, jax, jnp, problem, time):
     # --- Sobol (Saltelli) ---
     _t0 = time.perf_counter()
-    sr = gsax.sample(problem, 4096, seed=42, calc_second_order=True)
+    sr = jaxgsa.sobol.sample(problem, 4096, seed=42, calc_second_order=True)
     _Y_sobol = ishigami.evaluate(jnp.asarray(sr.samples))
-    result_sobol = gsax.analyze(sr, _Y_sobol)
+    result_sobol = jaxgsa.sobol.analyze(sr, _Y_sobol)
     jax.block_until_ready(result_sobol.S1)
     time_sobol = time.perf_counter() - _t0
-    n_evals_sobol = sr.n_total
+    n_evals_sobol = sr.n_runs
 
     # --- eFAST ---
     _t0 = time.perf_counter()
-    _X_efast = gsax.sample_efast(problem, N=4096, M=4, seed=42)
-    _Y_efast = ishigami.evaluate(jnp.asarray(_X_efast))
-    result_efast = gsax.analyze_efast(problem, _Y_efast, M=4)
+    _efast_samples = jaxgsa.efast.sample(problem, n_per_curve=4096, M=4, seed=42)
+    _Y_efast = ishigami.evaluate(jnp.asarray(_efast_samples.samples))
+    result_efast = jaxgsa.efast.analyze(_efast_samples, _Y_efast)
     jax.block_until_ready(result_efast.S1)
     time_efast = time.perf_counter() - _t0
-    n_evals_efast = len(_X_efast)
+    n_evals_efast = _efast_samples.n_runs
 
     # --- HDMR ---
     _key = jax.random.PRNGKey(42)
@@ -102,45 +102,45 @@ def _run_all(gsax, ishigami, ishigami_fn, jax, jnp, problem, time):
     _X_hdmr = jax.random.uniform(_key, (2000, 3), minval=_bounds[:, 0], maxval=_bounds[:, 1])
     _Y_hdmr = ishigami.evaluate(_X_hdmr)
     _t0 = time.perf_counter()
-    result_hdmr = gsax.analyze_hdmr(problem, _X_hdmr, _Y_hdmr, maxorder=2, m=2)
+    result_hdmr = jaxgsa.hdmr.analyze(problem, _X_hdmr, _Y_hdmr, maxorder=2, m=2)
     jax.block_until_ready(result_hdmr.S1)
     time_hdmr = time.perf_counter() - _t0
     n_evals_hdmr = len(_X_hdmr)
 
     # --- PCE ---
     _t0 = time.perf_counter()
-    result_pce = gsax.analyze_pce(problem, _X_hdmr, _Y_hdmr, order=4)
+    result_pce = jaxgsa.pce.analyze(problem, _X_hdmr, _Y_hdmr, order=4)
     jax.block_until_ready(result_pce.S1)
     time_pce = time.perf_counter() - _t0
     n_evals_pce = len(_X_hdmr)
 
     # --- DGSM ---
-    _X_dgsm = gsax.sample_mc(problem, N=10_000, seed=42)
+    _X_dgsm = jaxgsa.sampling.monte_carlo(problem, n=10_000, seed=42)
     _t0 = time.perf_counter()
-    result_dgsm = gsax.analyze_dgsm(problem, ishigami_fn, jnp.asarray(_X_dgsm))
+    result_dgsm = jaxgsa.dgsm.analyze(problem, ishigami_fn, jnp.asarray(_X_dgsm))
     jax.block_until_ready(result_dgsm.upper_bound)
     time_dgsm = time.perf_counter() - _t0
     n_evals_dgsm = len(_X_dgsm)
 
     # --- Morris ---
     _t0 = time.perf_counter()
-    sr_morris = gsax.sample_morris(problem, 100, seed=42)
+    sr_morris = jaxgsa.morris.sample(problem, 100, seed=42)
     _Y_morris = ishigami.evaluate(jnp.asarray(sr_morris.samples))
-    result_morris = gsax.analyze_morris(sr_morris, _Y_morris)
+    result_morris = jaxgsa.morris.analyze(sr_morris, _Y_morris)
     jax.block_until_ready(result_morris.mu_star)
     time_morris = time.perf_counter() - _t0
-    n_evals_morris = sr_morris.n_total
+    n_evals_morris = sr_morris.n_runs
 
     # --- Shapley (PCE backend, same data and order as the PCE run) ---
     _t0 = time.perf_counter()
-    result_shapley = gsax.analyze_shapley(problem, _X_hdmr, _Y_hdmr, order=4)
+    result_shapley = jaxgsa.pce.analyze(problem, _X_hdmr, _Y_hdmr, order=4).shapley()
     jax.block_until_ready(result_shapley.Sh)
     time_shapley = time.perf_counter() - _t0
     n_evals_shapley = len(_X_hdmr)
 
     # --- Borgonovo delta ---
     _t0 = time.perf_counter()
-    result_borgonovo = gsax.analyze_borgonovo(problem, _X_hdmr, _Y_hdmr, seed=42)
+    result_borgonovo = jaxgsa.borgonovo.analyze(problem, _X_hdmr, _Y_hdmr, seed=42)
     jax.block_until_ready(result_borgonovo.delta)
     time_borgonovo = time.perf_counter() - _t0
     n_evals_borgonovo = len(_X_hdmr)
@@ -680,7 +680,7 @@ def _summary(mo):
       how the full output density shifts when an input is fixed, and
       returns a given-data $S_1$ from the same conditioning for free.
 
-    Two gsax methods sit outside this comparison because they don't
+    Two jaxgsa methods sit outside this comparison because they don't
     estimate variance shares at all: **HSIC** (kernel-based dependence
     indices) and **PAWN** (Kolmogorov–Smirnov distances between
     conditional and unconditional output CDFs). Both are given-data

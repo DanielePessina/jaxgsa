@@ -9,12 +9,12 @@ model is treated as already fitted — the example focuses on variance
 attribution, not estimation.
 
 The notebook source lives at
-[`examples/batch_reactor_gsa.py`](https://github.com/danielepessina/gsax/blob/master/examples/batch_reactor_gsa.py).
+[`examples/batch_reactor_gsa.py`](https://github.com/danielepessina/jaxgsa/blob/master/examples/batch_reactor_gsa.py).
 Run it interactively with `uv run marimo edit examples/batch_reactor_gsa.py`, or read
 the rendered output below.
 
 <iframe
-  src="/gsax/notebooks/batch_reactor_gsa.html"
+  src="/jaxgsa/notebooks/batch_reactor_gsa.html"
   style="width: 100%; height: 90vh; border: 1px solid var(--vp-c-divider); border-radius: 6px;"
   loading="lazy"
 ></iframe>
@@ -22,10 +22,10 @@ the rendered output below.
 ## What this example covers
 
 - A three-input Sobol problem ($C_{A,0}$, $T$, $\mathrm{pH}$) defined with
-  `gsax.Problem.from_dict(...)` and uniform marginals.
+  `jaxgsa.Problem.from_dict(...)` and uniform marginals.
 - A closed-form batch reactor start-up trajectory used as the model — the kind of cheap
   surrogate you would plug a fitted mechanistic predictor into.
-- A single `gsax.analyze(..., num_resamples=200, key=...)` call to obtain
+- A single `jaxgsa.sobol.analyze(..., num_resamples=200, key=...)` call to obtain
   $S_1$, $S_T$, $S_{ij}$ along with bootstrap 95 % confidence intervals.
 - Three plots that read the indices off:
   steady-state bar chart with CI error bars, time-resolved $S_1(t)$ and

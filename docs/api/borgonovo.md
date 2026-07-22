@@ -7,10 +7,9 @@ The canonical API reference now lives at [API Reference](/api/).
 
 Jump directly to:
 
-- [`sample_mc()`](/api/#sample-mc)
-- [`analyze_borgonovo()`](/api/#analyze-borgonovo)
-- [`DeltaResult`](/api/#deltaresult)
-- [`DeltaResult.to_dataset()`](/api/#deltaresult-to_dataset)
+- [`jaxgsa.sampling.monte_carlo()`](/api/#given-data-methods)
+- [`jaxgsa.borgonovo.analyze()`](/api/#given-data-methods)
+- [`jaxgsa.borgonovo.DeltaResult`](/api/#given-data-methods)
 
 Related docs:
 

@@ -5,17 +5,10 @@ surrogate that can predict at new inputs.
 
 ## Import style
 
-The HDMR module lives at `gsax.hdmr`. You can import it directly or use the
-top-level convenience aliases:
+The HDMR module lives at `jaxgsa.hdmr`:
 
 ```python
-# Subpackage import (preferred for HDMR-focused scripts)
-from gsax.hdmr import analyze, emulate
-
-# Or use the top-level re-exports
-import gsax
-# gsax.analyze_hdmr(...)
-# gsax.emulate_hdmr(...)
+from jaxgsa import hdmr
 ```
 
 ## Sensitivity analysis from random samples
@@ -23,21 +16,21 @@ import gsax
 ```python
 import jax
 import jax.numpy as jnp
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
-from gsax.hdmr import analyze, emulate
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
+from jaxgsa import hdmr
 
 key = jax.random.PRNGKey(42)
 bounds = jnp.array(PROBLEM.bounds)
 X = jax.random.uniform(key, (2000, 3), minval=bounds[:, 0], maxval=bounds[:, 1])
 Y = evaluate(X)
 
-result = analyze(
+result = hdmr.analyze(
     PROBLEM,
     X,
     Y,
     prenormalize=True,
     maxorder=2,
-    chunk_size=256,
+    slice_chunk_size=256,
 )
 
 print("S1:", result.S1)
@@ -51,7 +44,7 @@ print("RMSE:", result.rmse)
 ## Use the emulator
 
 ```python
-Y_pred = emulate(result, X[:5])
+Y_pred = result.predict(X[:5])
 print("Prediction shape:", Y_pred.shape)
 print("Absolute residuals:", jnp.abs(Y[:5] - Y_pred))
 ```
@@ -73,10 +66,10 @@ predictions on the original output scale.
 
 ## Practical caveats
 
-- `analyze_hdmr()` accepts `(N,)`, `(N, K)`, and `(N, T, K)` outputs, so the
+- `hdmr.analyze()` accepts `(N,)`, `(N, K)`, and `(N, T, K)` outputs, so the
   same shape rules from [Multi-Output & Time-Series](/examples/multi-output)
   still apply.
-- Leave `prenormalize=False` to preserve the current gsax behavior. Enable it
+- Leave `prenormalize=False` to preserve the current jaxgsa behavior. Enable it
   when you want SALib-style output standardization before fitting.
 - HDMR does not use a structured Saltelli design; if you want exact Sobol
   estimators on independent inputs, start from [Basic Example](/examples/basic)

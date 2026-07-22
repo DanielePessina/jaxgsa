@@ -1,4 +1,4 @@
-"""Benchmark: gsax vs SALib — correctness + timing across output shapes.
+"""Benchmark: jaxgsa vs SALib — correctness + timing across output shapes.
 
 Correctness: Ishigami function (D=3) with known analytical solutions.
 Timing: coupled oscillators model with varying T (timepoints) and K (outputs).
@@ -20,11 +20,11 @@ from SALib.analyze.sobol import second_order as salib_second_order
 from SALib.analyze.sobol import separate_output_values as salib_separate_output_values
 from SALib.analyze.sobol import total_order as salib_total_order
 
-import gsax
-from gsax.benchmarks.ishigami import ANALYTICAL_S1 as ISHIGAMI_ANALYTICAL_S1
-from gsax.benchmarks.ishigami import ANALYTICAL_ST as ISHIGAMI_ANALYTICAL_ST
-from gsax.benchmarks.ishigami import PROBLEM as ISHIGAMI_PROBLEM
-from gsax.benchmarks.ishigami import evaluate as ishigami_evaluate
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import ANALYTICAL_S1 as ISHIGAMI_ANALYTICAL_S1
+from jaxgsa.benchmarks.ishigami import ANALYTICAL_ST as ISHIGAMI_ANALYTICAL_ST
+from jaxgsa.benchmarks.ishigami import PROBLEM as ISHIGAMI_PROBLEM
+from jaxgsa.benchmarks.ishigami import evaluate as ishigami_evaluate
 
 # ---------------------------------------------------------------------------
 # Benchmark model: coupled damped oscillators (D=5)
@@ -32,7 +32,7 @@ from gsax.benchmarks.ishigami import evaluate as ishigami_evaluate
 
 D_PARAMS = 5
 
-BENCH_PROBLEM = gsax.Problem.from_dict(
+BENCH_PROBLEM = jaxgsa.Problem.from_dict(
     {
         "amplitude": (0.1, 2.0),
         "frequency": (0.5, 5.0),
@@ -81,16 +81,19 @@ def coupled_oscillators(X: jax.Array, T: int, K: int) -> jax.Array:
 # ---------------------------------------------------------------------------
 
 
-def gsax_problem_to_salib(problem: gsax.Problem) -> dict:
+def jaxgsa_problem_to_salib(problem: jaxgsa.Problem) -> dict:
+    bounds = problem.bounds
+    if bounds is None:
+        raise ValueError("SALib conversion requires a uniform-only problem with finite bounds")
     return {
         "num_vars": problem.num_vars,
         "names": list(problem.names),
-        "bounds": [list(b) for b in problem.bounds],
+        "bounds": [list(b) for b in bounds],
     }
 
 
 def expand_sobol_outputs(sr, Y) -> np.ndarray:
-    """Expand unique gsax outputs back into Saltelli row order for SALib."""
+    """Expand unique jaxgsa outputs back into Saltelli row order for SALib."""
     Y_np = np.asarray(Y)
     return Y_np[sr.expanded_to_unique]
 
@@ -136,30 +139,30 @@ def salib_sobol_point_estimates(
 
 
 def benchmark_correctness() -> bool:
-    """Validate gsax analyze and analyze_hdmr against SALib and analytical values."""
+    """Validate jaxgsa analyze and analyze_hdmr against SALib and analytical values."""
     base_n = 1024
     D = ISHIGAMI_PROBLEM.num_vars
-    salib_problem = gsax_problem_to_salib(ISHIGAMI_PROBLEM)
+    salib_problem = jaxgsa_problem_to_salib(ISHIGAMI_PROBLEM)
     analytical_S1 = np.array(ISHIGAMI_ANALYTICAL_S1)
     analytical_ST = np.array(ISHIGAMI_ANALYTICAL_ST)
 
     rows: list[tuple[str, str, float, float, float, bool, bool]] = []
 
-    # --- Sobol: gsax vs SALib (shared Saltelli samples) ---
+    # --- Sobol: jaxgsa vs SALib (shared Saltelli samples) ---
     n_samples = 2**14 * 8
-    sr = gsax.sample(ISHIGAMI_PROBLEM, n_samples, seed=42, calc_second_order=True)
+    sr = jaxgsa.sobol.sample(ISHIGAMI_PROBLEM, n_samples, seed=42, calc_second_order=True)
     Y_jax = ishigami_evaluate(jnp.asarray(sr.samples))
     Y_np = expand_sobol_outputs(sr, Y_jax)
 
-    gsax_sobol = gsax.analyze(sr, Y_jax)
+    jaxgsa_sobol = jaxgsa.sobol.analyze(sr, Y_jax)
     salib_sobol_result = salib_sobol_point_estimates(
         salib_problem,
         Y_np,
         calc_second_order=True,
     )
 
-    g_S1 = np.asarray(gsax_sobol.S1)
-    g_ST = np.asarray(gsax_sobol.ST)
+    g_S1 = np.asarray(jaxgsa_sobol.S1)
+    g_ST = np.asarray(jaxgsa_sobol.ST)
     s_S1 = salib_sobol_result["S1"]
     s_ST = salib_sobol_result["ST"]
 
@@ -172,13 +175,13 @@ def benchmark_correctness() -> bool:
 
     # S2 check (upper triangle)
     mask = np.triu(np.ones((D, D), dtype=bool), k=1)
-    g_S2 = np.asarray(gsax_sobol.S2)[mask]
+    g_S2 = np.asarray(jaxgsa_sobol.S2)[mask]
     s_S2 = salib_sobol_result["S2"][mask]
     for idx, (g, s) in enumerate(zip(g_S2, s_S2)):
         match = bool(np.abs(g - s) < 1e-5)
         rows.append(("analyze (S2)", f"S2[{idx}]", float(g), float(s), float("nan"), match, True))
 
-    # --- Sobol gsax vs analytical ---
+    # --- Sobol jaxgsa vs analytical ---
     for i in range(D):
         if analytical_S1[i] == 0.0:
             ok = abs(g_S1[i]) < 0.05
@@ -209,7 +212,7 @@ def benchmark_correctness() -> bool:
             )
         )
 
-    # --- HDMR: gsax vs SALib ---
+    # --- HDMR: jaxgsa vs SALib ---
     rng = np.random.default_rng(42)
     bounds = np.array(ISHIGAMI_PROBLEM.bounds)
     X_np = rng.uniform(bounds[:, 0], bounds[:, 1], size=(base_n, D))
@@ -217,7 +220,7 @@ def benchmark_correctness() -> bool:
     X_jax_hdmr = jnp.asarray(X_np)
     Y_hdmr_jax = jnp.asarray(Y_hdmr_np)
 
-    gsax_hdmr = gsax.analyze_hdmr(ISHIGAMI_PROBLEM, X_jax_hdmr, Y_hdmr_jax, maxorder=2, m=2)
+    jaxgsa_hdmr = jaxgsa.hdmr.analyze(ISHIGAMI_PROBLEM, X_jax_hdmr, Y_hdmr_jax, maxorder=2, m=2)
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
@@ -230,8 +233,8 @@ def benchmark_correctness() -> bool:
             print_to_console=False,
         )
 
-    g_hdmr_S1 = np.asarray(gsax_hdmr.S1)
-    g_hdmr_ST = np.asarray(gsax_hdmr.ST)
+    g_hdmr_S1 = np.asarray(jaxgsa_hdmr.S1)
+    g_hdmr_ST = np.asarray(jaxgsa_hdmr.ST)
     s_hdmr_S1 = np.array(salib_hdmr_result["Sa"][:D])
     s_hdmr_ST = np.array(salib_hdmr_result["ST"][:D])
 
@@ -246,7 +249,7 @@ def benchmark_correctness() -> bool:
             ("analyze_hdmr", f"ST[{i}]", g_hdmr_ST[i], s_hdmr_ST[i], analytical_ST[i], match, True)
         )
 
-    # --- HDMR gsax vs analytical (informational only; RS-HDMR is approximate) ---
+    # --- HDMR jaxgsa vs analytical (informational only; RS-HDMR is approximate) ---
     for i in range(D):
         if analytical_S1[i] == 0.0:
             ok = abs(g_hdmr_S1[i]) < 0.1
@@ -283,11 +286,11 @@ def benchmark_correctness() -> bool:
     print("CORRECTNESS CHECK  (Ishigami)")
     print("=" * 78)
     print(
-        f"{'Method':<22} {'Index':<8} {'gsax':>10} {'SALib':>10} {'analytical':>10} {'match':>6}"
+        f"{'Method':<22} {'Index':<8} {'jaxgsa':>10} {'SALib':>10} {'analytical':>10} {'match':>6}"
     )
     print("-" * 78)
     print(
-        "NOTE: overall PASS/FAIL is driven by gsax-vs-SALib agreement "
+        "NOTE: overall PASS/FAIL is driven by jaxgsa-vs-SALib agreement "
         "plus Sobol-vs-analytical rows."
     )
     print("      HDMR-vs-analytical rows are reported for context only.")
@@ -322,7 +325,7 @@ SCENARIOS = [
 N_TIMING_ITERS = 5
 # SALib's HDMR path costs ~1 s per output slice, so a smaller best-of-N keeps
 # the total run bounded; its run-to-run variance is negligible next to the
-# multi-second mean, unlike the ms-scale gsax runs that N_TIMING_ITERS de-noises.
+# multi-second mean, unlike the ms-scale jaxgsa runs that N_TIMING_ITERS de-noises.
 N_SALIB_HDMR_ITERS = 2
 SOBOL_RESAMPLE_COUNTS = (0, 300)
 SOBOL_BOOTSTRAP_SEED = 123
@@ -355,7 +358,7 @@ def _best_of_n(fn, block_result, iters: int = N_TIMING_ITERS) -> float:
     """Return the best wall time across ``iters`` identical runs.
 
     Best-of-N reporting de-noises OS-scheduler jitter, which dominates the
-    ms-scale gsax runs. Slow (multi-second) paths may pass a smaller ``iters``
+    ms-scale jaxgsa runs. Slow (multi-second) paths may pass a smaller ``iters``
     to keep the total benchmark runtime bounded.
     """
     best = float("inf")
@@ -367,13 +370,13 @@ def _best_of_n(fn, block_result, iters: int = N_TIMING_ITERS) -> float:
     return best
 
 
-def _time_gsax_sobol(sr, Y_jax, *, num_resamples: int) -> float:
-    """Time gsax.analyze for either point estimates or bootstrap CIs."""
-    kwargs = {}
-    if num_resamples > 0:
-        kwargs["num_resamples"] = num_resamples
-        kwargs["key"] = jax.random.key(SOBOL_BOOTSTRAP_SEED)
-    return _best_of_n(lambda: gsax.analyze(sr, Y_jax, **kwargs), _block_sobol_result)
+def _time_jaxgsa_sobol(sr, Y_jax, *, num_resamples: int) -> float:
+    """Time jaxgsa.sobol.analyze for either point estimates or bootstrap CIs."""
+    key = jax.random.key(SOBOL_BOOTSTRAP_SEED) if num_resamples > 0 else None
+    return _best_of_n(
+        lambda: jaxgsa.sobol.analyze(sr, Y_jax, num_resamples=num_resamples, key=key),
+        _block_sobol_result,
+    )
 
 
 def _salib_sobol_point_estimate_slices(
@@ -464,10 +467,10 @@ def _time_salib_sobol(
     )
 
 
-def _time_gsax_hdmr(problem, X_jax, Y_jax) -> float:
-    """Time gsax.analyze_hdmr, best of N_TIMING_ITERS."""
+def _time_jaxgsa_hdmr(problem, X_jax, Y_jax) -> float:
+    """Time jaxgsa.analyze_hdmr, best of N_TIMING_ITERS."""
     return _best_of_n(
-        lambda: gsax.analyze_hdmr(problem, X_jax, Y_jax, maxorder=2, m=2),
+        lambda: jaxgsa.hdmr.analyze(problem, X_jax, Y_jax, maxorder=2, m=2),
         _block_hdmr_result,
     )
 
@@ -504,7 +507,7 @@ def _salib_hdmr_slices(salib_problem, X_np, Y_np, T: int, K: int) -> None:
 
 
 def _time_salib_hdmr(salib_problem, X_np, Y_np, T: int, K: int) -> float:
-    """Time SALib hdmr.analyze with best-of-N timing symmetric to the gsax path.
+    """Time SALib hdmr.analyze with best-of-N timing symmetric to the jaxgsa path.
 
     SALib is pure NumPy/SciPy (no JIT, so no warmup is needed). Uses the smaller
     ``N_SALIB_HDMR_ITERS`` because each HDMR slice costs ~1 s and its run-to-run
@@ -518,18 +521,18 @@ def _time_salib_hdmr(salib_problem, X_np, Y_np, T: int, K: int) -> float:
 
 
 def _print_timing_table(title: str, rows, *, method_width: int) -> None:
-    """Print one gsax-vs-SALib timing table.
+    """Print one jaxgsa-vs-SALib timing table.
 
     Args:
         title: Header line printed above the table.
-        rows: Iterable of ``(scenario, method, gsax_ms, salib_ms, speedup)``.
+        rows: Iterable of ``(scenario, method, jaxgsa_ms, salib_ms, speedup)``.
         method_width: Column width for the method label (Sobol labels are wider
             than HDMR's). The separator length is derived from the header so the
             two never drift out of sync.
     """
     header = (
         f"{'Scenario (TxK)':<16} {'Method':<{method_width}} "
-        f"{'gsax (ms)':>12} {'SALib (ms)':>12} {'speedup':>10}"
+        f"{'jaxgsa (ms)':>12} {'SALib (ms)':>12} {'speedup':>10}"
     )
     print(f"\n{title}")
     print(header)
@@ -547,7 +550,7 @@ def benchmark_timing(base_n: int = 1024) -> None:
         raise ValueError(
             "base_n must be >= 300 because analyze_hdmr requires at least 300 samples"
         )
-    salib_problem = gsax_problem_to_salib(BENCH_PROBLEM)
+    salib_problem = jaxgsa_problem_to_salib(BENCH_PROBLEM)
     bounds = np.array(BENCH_PROBLEM.bounds)
 
     print(f"\n{'=' * 78}")
@@ -557,7 +560,7 @@ def benchmark_timing(base_n: int = 1024) -> None:
 
     scenario_sobol_data: dict[
         tuple[str, int, int, bool],
-        tuple[object, jax.Array, np.ndarray],
+        tuple[jaxgsa.sobol.SobolSamples, jax.Array, np.ndarray],
     ] = {}
     scenario_hdmr_data: dict[
         tuple[str, int, int],
@@ -567,7 +570,7 @@ def benchmark_timing(base_n: int = 1024) -> None:
     for scenario_label, T, K in SCENARIOS:
         for calc_s2 in (False, True):
             step = (2 * D + 2) if calc_s2 else (D + 2)
-            sr = gsax.sample(
+            sr = jaxgsa.sobol.sample(
                 BENCH_PROBLEM,
                 base_n * step,
                 seed=1,
@@ -587,23 +590,22 @@ def benchmark_timing(base_n: int = 1024) -> None:
         Y_hdmr_np = np.asarray(Y_hdmr_jax)
         scenario_hdmr_data[(scenario_label, T, K)] = (X_hdmr_np, X_hdmr_jax, Y_hdmr_jax, Y_hdmr_np)
 
-    # --- JIT warmup for gsax (exact timing shapes) ---
+    # --- JIT warmup for jaxgsa (exact timing shapes) ---
     # Pre-compile every kernel the timing loop reuses, so the reported numbers are
     # post-JIT steady-state and the one-off XLA compile is excluded.
-    print("\nWarming up gsax JIT ...", end=" ", flush=True)
+    print("\nWarming up jaxgsa JIT ...", end=" ", flush=True)
     for scenario_label, T, K in SCENARIOS:
         for calc_s2 in (False, True):
             sr, Y_jax, _ = scenario_sobol_data[(scenario_label, T, K, calc_s2)]
             for num_resamples in SOBOL_RESAMPLE_COUNTS:
-                kwargs = {}
-                if num_resamples > 0:
-                    kwargs["num_resamples"] = num_resamples
-                    kwargs["key"] = jax.random.key(SOBOL_BOOTSTRAP_SEED)
-                _block_sobol_result(gsax.analyze(sr, Y_jax, **kwargs))
+                key = jax.random.key(SOBOL_BOOTSTRAP_SEED) if num_resamples > 0 else None
+                _block_sobol_result(
+                    jaxgsa.sobol.analyze(sr, Y_jax, num_resamples=num_resamples, key=key)
+                )
 
         _, X_hdmr_jax, Y_hdmr_jax, _ = scenario_hdmr_data[(scenario_label, T, K)]
         _block_hdmr_result(
-            gsax.analyze_hdmr(BENCH_PROBLEM, X_hdmr_jax, Y_hdmr_jax, maxorder=2, m=2)
+            jaxgsa.hdmr.analyze(BENCH_PROBLEM, X_hdmr_jax, Y_hdmr_jax, maxorder=2, m=2)
         )
     print("done.")
 
@@ -623,7 +625,7 @@ def benchmark_timing(base_n: int = 1024) -> None:
                     bootstrap_label = "no bootstrap"
                 else:
                     bootstrap_label = f"{num_resamples} bootstrap"
-                g_time = _time_gsax_sobol(sr, Y_jax, num_resamples=num_resamples)
+                g_time = _time_jaxgsa_sobol(sr, Y_jax, num_resamples=num_resamples)
                 s_time = _time_salib_sobol(
                     salib_problem,
                     Y_salib,
@@ -646,7 +648,7 @@ def benchmark_timing(base_n: int = 1024) -> None:
         # -- HDMR: shared (X, Y) --
         X_hdmr_np, X_hdmr_jax, Y_hdmr_jax, Y_hdmr_np = scenario_hdmr_data[(scenario_label, T, K)]
 
-        g_time = _time_gsax_hdmr(BENCH_PROBLEM, X_hdmr_jax, Y_hdmr_jax)
+        g_time = _time_jaxgsa_hdmr(BENCH_PROBLEM, X_hdmr_jax, Y_hdmr_jax)
         s_time = _time_salib_hdmr(salib_problem, X_hdmr_np, Y_hdmr_np, T, K)
         speedup = s_time / g_time if g_time > 0 else float("inf")
         hdmr_rows.append((scenario_label, "analyze_hdmr", g_time * 1e3, s_time * 1e3, speedup))

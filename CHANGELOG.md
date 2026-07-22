@@ -1,11 +1,86 @@
 # Changelog
 
+## 0.4.0
+
+### Changed
+
+- **BREAKING: renamed the package from `gsax` to `jaxgsa`.** The distribution
+  and import name are now `jaxgsa` (`pip install jaxgsa`, `import jaxgsa`). The
+  old `gsax` project on PyPI is frozen at `0.3.0b1` with no compatibility shim;
+  see the [0.3 → 0.4 migration guide](docs/guide/migration-0.4.md).
+- Replaced root-level command aliases with method namespaces such as
+  `jaxgsa.sobol.sample`, `jaxgsa.sobol.analyze`, `jaxgsa.pce.analyze`, and
+  `jaxgsa.hdmr.analyze`.
+- Moved surrogate prediction and Shapley derivation onto `PCEResult` and
+  `HDMRResult` through `predict(...)` and `shapley(...)`.
+- Enforced one output contract across methods: `(N,)`, `(N, K)`, or
+  `(N, T, K)`. Axis inference and automatic transposition were removed.
+- Renamed the main sampling/result types to `SobolSamples`, `SobolResult`, and
+  `MorrisSamples`.
+- Simplified Sobol persistence to one NPZ file through
+  `SobolSamples.save(...)` and `SobolSamples.load(...)`; removed pandas and
+  format-specific persistence dependencies.
+- Renamed the design row-count fields on `SobolSamples` and `MorrisSamples`:
+  `n_total` is now `n_runs` (unique rows you evaluate, one model run per row)
+  and `expanded_n_total` is now `n_expanded` (pre-deduplication design size).
+- Retyped the eFAST workflow: `jaxgsa.efast.sample(problem, n_per_curve, *, M=4,
+  ...)` (the second parameter was `N`) returns a typed `EFASTSamples` carrying
+  `samples`, `n_per_curve`, `M`, `problem`, and an `n_runs` property;
+  `jaxgsa.efast.analyze(samples, Y, ...)` is samples-first and no longer takes
+  `M` or `problem` — both are threaded from the design object, so a mismatch
+  between sampling and analysis is now impossible.
+- Tightened the eFAST design bound to `n_per_curve >= 4*M^2*(D-1) + 1` (was
+  `n_per_curve > 4*M^2`, independent of `D`). Below the new bound there are
+  not enough integer frequencies below `omega_0/(2M)` to give each non-focal
+  parameter a distinct one; the old code wrapped them cyclically, so two
+  parameters got the same frequency and the same phase and were therefore
+  identical along that search curve — a silent bias. Such designs now raise
+  `ValueError` from both `efast.sample` and `EFASTSamples`.
+- Standardized the batching vocabulary package-wide: `batch_size` always means
+  rows of X/Y per batch (`pce.analyze`, `hdmr.analyze`, `dgsm.analyze`,
+  `hsic.analyze`, and `result.predict`); output-slice chunking parameters were
+  renamed from `chunk_size` to `slice_chunk_size` on `hdmr`, `efast`, `sobol`,
+  `borgonovo`, `optimal_transport`, and `pawn` `analyze`.
+- Moved shared internals into a private `jaxgsa._core` package and introduced
+  private base classes for sample designs and surrogate results (internal
+  reorganization; no user-facing API change).
+
+### Added
+
+- Correlation-aware HDMR Shapley effects with
+  `result.shapley(include_correlative=True)`.
+- Dense structural `HDMRResult.S2` and `HDMRResult.S3` interaction arrays.
+- Bounded-memory batched prediction for PCE and HDMR result objects.
+- Automatic streaming fits for `jaxgsa.pce.analyze` and `jaxgsa.hdmr.analyze`:
+  when the estimated single-pass fit memory exceeds the active budget, the
+  fit streams over row batches. The streamed path is mathematically exact —
+  it accumulates the same Gram matrices and moments as the in-memory path
+  (PCE leave-one-out diagnostics stay exact via a second streamed pass),
+  differing only in floating-point summation order. An explicit `batch_size=`
+  forces streaming.
+- `jaxgsa.config.set_memory_budget(bytes)` / `jaxgsa.config.get_memory_budget()`:
+  an opt-in, process-global transient-memory budget (default 512 MiB) that
+  sizes every automatic batching decision — surrogate `predict` batches, HDMR
+  output-slice chunking, and the streaming fits. Explicit per-call
+  `batch_size` / `slice_chunk_size` parameters always take precedence.
+- `MorrisSamples.save(path)` and `MorrisSamples.load(path)`, using the same
+  single-NPZ format and metadata schema as `SobolSamples`.
+- `jaxgsa.shapley.analyze(problem, X, Y, backend="pce"|"hdmr", ...)`: a thin
+  convenience wrapper over the canonical result methods
+  (`pce.analyze(...).shapley()` / `hdmr.analyze(...).shapley(...)`).
+- A 0.3 to 0.4 API migration guide.
+
+### Improved
+
+- Power-of-2 validation errors now name the two nearest valid values, so the
+  message states exactly which sample counts would be accepted.
+
 ## 0.3.0b1
 
 ### Added
 
 - **Optimal-transport sensitivity indices**
-  (`gsax.optimal_transport`, re-exported as `gsax.analyze_optimal_transport()`):
+  (`jaxgsa.optimal_transport`, re-exported as `jaxgsa.analyze_optimal_transport()`):
   the Wasserstein-based distributional indices of Borgonovo, Figalli,
   Plischke & Savaré (2024, Management Science, doi:10.1287/mnsc.2023.01796) —
   the class-averaged squared 2-Wasserstein distance between conditional and
@@ -36,11 +111,11 @@
   Implemented from the published equations; numerics are validated in
   the test suite against POT (`ot.wasserstein_1d`,
   `ot.sinkhorn2`, `ot.emd2`; new `pot` dev extra), analytic Gaussian closed
-  forms (new `gsax.benchmarks.gaussian_linear.ANALYTICAL_OT` constant), the
+  forms (new `jaxgsa.benchmarks.gaussian_linear.ANALYTICAL_OT` constant), the
   published Ishigami anchor, and the `2 * advective == S1` identity.
-- Shared `gsax._partition` module: the equal-frequency rank-partition
+- Shared `jaxgsa._partition` module: the equal-frequency rank-partition
   helpers (`_class_layout`, `_build_class_indices`) moved out of
-  `gsax.borgonovo` so the Borgonovo delta and optimal-transport estimators
+  `jaxgsa.borgonovo` so the Borgonovo delta and optimal-transport estimators
   use one implementation (no behavior change).
 
 ## 0.2.0
@@ -48,8 +123,8 @@
 ### Added
 
 - **Morris** elementary-effects screening
-  (`gsax.morris`, re-exported as `gsax.sample_morris()` /
-  `gsax.analyze_morris()`): globalized one-at-a-time screening that reduces
+  (`jaxgsa.morris`, re-exported as `jaxgsa.morris.sample()` /
+  `jaxgsa.morris.analyze()`): globalized one-at-a-time screening that reduces
   `r * (D + 1)` model evaluations to mu, mu_star (importance ranking), and
   sigma (nonlinearity/interaction flag), with
   - trajectory (Morris, 1991) and radial (Campolongo et al., 2011,
@@ -61,10 +136,10 @@
     cost real model evaluations (same contract as Saltelli `sample()`);
   - scalar, multi-output, and time-series outputs, non-finite trajectory
     cleaning, and bootstrap confidence intervals over trajectories;
-  - `MorrisSamplingResult.downsample()` prefix-slicing to fewer trajectories
+  - `MorrisSamples.downsample()` prefix-slicing to fewer trajectories
     without re-simulation, and `MorrisResult.to_physical_units()` /
     `to_dataset()` for derivative-scale measures and labeled xarray export.
-- **Shapley effects** (`gsax.analyze_shapley`, `ShapleyResult`) — global
+- **Shapley effects** (`jaxgsa.analyze_shapley`, `ShapleyResult`) — global
   Shapley-value allocation of output variance across inputs (Owen 2014;
   Song, Nelson & Staum 2016), computed analytically from a fitted surrogate's
   variance decomposition instead of permutation Monte Carlo. Two backends:
@@ -80,7 +155,7 @@
 - Closed-form analytical Shapley values (`ANALYTICAL_SHAPLEY`,
   `analytical_shapley(...)`) for the Ishigami, linear, and Sobol-G
   benchmarks, used to validate the new method.
-- `gsax.borgonovo` subpackage — moment-independent, density-based sensitivity via
+- `jaxgsa.borgonovo` subpackage — moment-independent, density-based sensitivity via
   the Plischke, Borgonovo & Smith (2013) given-data estimator of Borgonovo's
   (2007) delta index. `analyze` (top-level alias `analyze_borgonovo`) returns both
   the delta index and the given-data first-order Sobol `S1` from the same
@@ -89,7 +164,7 @@
   scalar, multi-output, and time-series outputs.
 - `DeltaResult` dataclass holding the delta and `S1` indices with optional
   bootstrap intervals and a `to_dataset()` xarray export.
-- `gsax.benchmarks.gaussian_linear` — a Gaussian linear additive benchmark whose
+- `jaxgsa.benchmarks.gaussian_linear` — a Gaussian linear additive benchmark whose
   Gaussian marginals give the Borgonovo delta index a semi-analytic solution
   (`ANALYTICAL_DELTA`), for ground-truth validation of the delta estimator.
 - **Uniform output support across all ten methods** — every analyze entry point
@@ -148,8 +223,8 @@
 
 ### Internal
 
-- Bootstrap confidence-interval helpers moved to a shared `gsax._bootstrap`
-  module (previously private to `gsax.sobol` and cross-imported by Morris);
+- Bootstrap confidence-interval helpers moved to a shared `jaxgsa._bootstrap`
+  module (previously private to `jaxgsa.sobol` and cross-imported by Morris);
   PAWN and Borgonovo now reuse the same percentile-CI implementation.
 - All ten result classes now build their `to_dataset()` dims/coords through the
   shared `_dims_and_coords` helper (including `HDMRResult`, whose per-term
@@ -165,7 +240,7 @@
 
 ### Added
 
-- `gsax.enable_compilation_cache(path, ...)` — opt-in helper that enables JAX's
+- `jaxgsa.config.enable_compilation_cache(path, ...)` — opt-in helper that enables JAX's
   persistent, on-disk compilation cache so compiled kernels are reused across
   process restarts (parameter sweeps, CI, HPC batches).
 - Configuration guide covering double precision (`jax_enable_x64`) for
@@ -200,7 +275,7 @@
 
 ### Changed
 
-- Documentation installs gsax from PyPI (`pip install gsax` / `uv add gsax`).
+- Documentation installs jaxgsa from PyPI (`pip install jaxgsa` / `uv add jaxgsa`).
 - Update pinned development/CI dependencies and GitHub Actions; add weekly
   Dependabot updates for Python dependencies.
 
@@ -208,7 +283,7 @@
 
 Initial public release.
 
-`gsax` provides global sensitivity analysis in JAX with seven complementary
+`jaxgsa` provides global sensitivity analysis in JAX with seven complementary
 methods:
 
 - **Sobol** indices via Saltelli sampling — first-, total-, and second-order,

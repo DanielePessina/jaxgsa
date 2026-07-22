@@ -2,21 +2,23 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from gsax.benchmarks import ishigami
-from gsax.pawn import PAWNResult, analyze
-from gsax.problem import Problem
-from gsax.sampling import sample_mc
+from jaxgsa.benchmarks import ishigami
+from jaxgsa.pawn import PAWNResult, analyze
+from jaxgsa.problem import Problem
+from jaxgsa.sampling import monte_carlo
 
 
 @pytest.fixture(scope="module")
 def ishigami_data():
     """Generate Ishigami test data."""
     N = 5000
-    X = jnp.asarray(sample_mc(ishigami.PROBLEM, N=N, seed=42))
+    X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=N, seed=42))
     Y = ishigami.evaluate(X)
     return X, Y
 
@@ -48,6 +50,19 @@ class TestPAWNBasic:
         assert pawn[0] > pawn[2], "x1 should be more important than x3"
         assert pawn[1] > pawn[2], "x2 should be more important than x3"
 
+    def test_slice_chunk_size_kwarg_accepted(self, ishigami_data):
+        """The 0.4 name `slice_chunk_size` is accepted (documented no-op)."""
+        X, Y = ishigami_data
+        result = analyze(ishigami.PROBLEM, X[:200], Y[:200], seed=0, slice_chunk_size=8)
+        assert result.pawn.shape == (3,)
+
+    def test_old_chunk_size_kwarg_raises(self, ishigami_data):
+        """The pre-0.4 `chunk_size` name is gone — no shim."""
+        X, Y = ishigami_data
+        old_kwargs: dict[str, Any] = {"chunk_size": 8}
+        with pytest.raises(TypeError):
+            analyze(ishigami.PROBLEM, X[:200], Y[:200], seed=0, **old_kwargs)
+
 
 class TestPAWNSALibComparison:
     def test_matches_salib_median(self, ishigami_data):
@@ -65,7 +80,7 @@ class TestPAWNSALibComparison:
         salib_result = salib_pawn.analyze(salib_problem, X_np, Y_np, S=10, seed=0)
         salib_median = salib_result["median"]
 
-        gsax_result = analyze(
+        jaxgsa_result = analyze(
             ishigami.PROBLEM,
             ishigami_data[0],
             ishigami_data[1],
@@ -73,9 +88,9 @@ class TestPAWNSALibComparison:
             statistic="median",
             seed=0,
         )
-        gsax_pawn = np.asarray(gsax_result.pawn)
+        jaxgsa_pawn = np.asarray(jaxgsa_result.pawn)
 
-        np.testing.assert_allclose(gsax_pawn, salib_median, atol=0.01)
+        np.testing.assert_allclose(jaxgsa_pawn, salib_median, atol=0.01)
 
 
 class TestPAWNStatistics:
@@ -123,7 +138,7 @@ class TestPAWNMultiOutput:
             bounds=((-np.pi, np.pi), (-np.pi, np.pi), (-np.pi, np.pi)),
         )
         N = 2000
-        X = jnp.asarray(sample_mc(problem, N=N, seed=42))
+        X = jnp.asarray(monte_carlo(problem, n=N, seed=42))
         Y1 = ishigami.evaluate(X)
         Y2 = jnp.sum(X**2, axis=1)
         Y_multi = jnp.column_stack([Y1, Y2])
@@ -137,7 +152,7 @@ class TestPAWNMultiOutput:
             bounds=((-np.pi, np.pi), (-np.pi, np.pi), (-np.pi, np.pi)),
         )
         N = 2000
-        X = jnp.asarray(sample_mc(problem, N=N, seed=42))
+        X = jnp.asarray(monte_carlo(problem, n=N, seed=42))
         Y1 = ishigami.evaluate(X)
         Y2 = jnp.sum(X**2, axis=1)
         Y_3d = jnp.stack([jnp.column_stack([Y1, Y2]), jnp.column_stack([Y2, Y1])], axis=1)
@@ -162,7 +177,7 @@ class TestPAWNToDataset:
             bounds=((-np.pi, np.pi), (-np.pi, np.pi), (-np.pi, np.pi)),
         )
         N = 1000
-        X = jnp.asarray(sample_mc(problem, N=N, seed=42))
+        X = jnp.asarray(monte_carlo(problem, n=N, seed=42))
         Y1 = ishigami.evaluate(X)
         Y2 = jnp.sum(X**2, axis=1)
         Y_multi = jnp.column_stack([Y1, Y2])
@@ -232,7 +247,7 @@ class TestPAWNTiedOutputs:
 class TestPAWNOutOfBounds:
     def test_out_of_range_gets_sentinel(self):
         """Samples outside [0, 1] are excluded (sentinel -1), not clamped."""
-        from gsax.pawn._analyze import _bin_indices
+        from jaxgsa.pawn._analyze import _bin_indices
 
         X = jnp.asarray([[-0.5], [0.0], [0.4], [1.0], [1.5], [jnp.nan]])
         idx = np.asarray(_bin_indices(X, 4)).ravel()

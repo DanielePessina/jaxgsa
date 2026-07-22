@@ -2,24 +2,24 @@
 
 from __future__ import annotations
 
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
-import gsax
-from gsax.benchmarks import gaussian_linear, ishigami
-from gsax.optimal_transport import OTResult, analyze
-from gsax.sampling import sample_mc
+import jaxgsa
+from jaxgsa.benchmarks import gaussian_linear, ishigami
+from jaxgsa.optimal_transport import OTResult, analyze
+from jaxgsa.sampling import monte_carlo
 
 
 @pytest.fixture(scope="module")
 def ishigami_data():
     """Generate Ishigami test data (N large enough for the published anchor)."""
     N = 8192
-    X = jnp.asarray(sample_mc(ishigami.PROBLEM, N=N, seed=42))
+    X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=N, seed=42))
     Y = ishigami.evaluate(X)
     return X, Y
 
@@ -28,7 +28,7 @@ def ishigami_data():
 def gaussian_linear_data():
     """Generate Gaussian linear test data (large N for ground-truth checks)."""
     N = 32000
-    X = jnp.asarray(sample_mc(gaussian_linear.PROBLEM, N=N, seed=1))
+    X = jnp.asarray(monte_carlo(gaussian_linear.PROBLEM, n=N, seed=1))
     Y = gaussian_linear.evaluate(X)
     return X, Y
 
@@ -91,11 +91,24 @@ class TestOTBasic:
         assert r1.ot_conf is not None and r2.ot_conf is not None
         np.testing.assert_array_equal(np.asarray(r1.ot_conf), np.asarray(r2.ot_conf))
 
-    def test_chunk_size_invariance(self, multi_output_data):
+    def test_slice_chunk_size_invariance(self, multi_output_data):
         X, _, Y3 = multi_output_data
         r_default = analyze(ishigami.PROBLEM, X, Y3)
-        r_chunked = analyze(ishigami.PROBLEM, X, Y3, chunk_size=1)
+        r_chunked = analyze(ishigami.PROBLEM, X, Y3, slice_chunk_size=1)
         np.testing.assert_allclose(np.asarray(r_default.ot), np.asarray(r_chunked.ot), atol=1e-7)
+
+    def test_slice_chunk_size_kwarg_accepted(self, ishigami_data):
+        """The 0.4 name `slice_chunk_size` is accepted explicitly."""
+        X, Y = ishigami_data
+        result = analyze(ishigami.PROBLEM, X[:512], Y[:512], slice_chunk_size=2)
+        assert np.asarray(result.ot).shape == (3,)
+
+    def test_old_chunk_size_kwarg_raises(self, ishigami_data):
+        """The pre-0.4 `chunk_size` name is gone — no shim."""
+        X, Y = ishigami_data
+        old_kwargs: dict[str, Any] = {"chunk_size": 2}
+        with pytest.raises(TypeError):
+            analyze(ishigami.PROBLEM, X[:512], Y[:512], **old_kwargs)
 
     def test_n_partitions_changes_result(self, ishigami_data):
         X, Y = ishigami_data
@@ -129,8 +142,8 @@ class TestOTPOTComparison:
     def test_per_bin_w2_matches_pot(self):
         """Per-bin 1-D W2^2 vs POT in the exact regime (n_m divides N)."""
         ot = pytest.importorskip("ot")
-        from gsax._partition import _build_class_indices, _class_layout
-        from gsax.optimal_transport._analyze import _ot_1d_kernel, _quantile_ranks
+        from jaxgsa._core.partition import _build_class_indices, _class_layout
+        from jaxgsa.optimal_transport._analyze import _ot_1d_kernel, _quantile_ranks
 
         N, M = 1000, 25  # n_m = 40 divides N -> exact quantile coupling
         key = jax.random.PRNGKey(1)
@@ -164,7 +177,7 @@ class TestOTPOTComparison:
     def test_sinkhorn_matches_pot_and_approaches_emd(self):
         """Solver-level parity vs ot.sinkhorn2 and monotone approach to ot.emd2."""
         ot = pytest.importorskip("ot")
-        from gsax.optimal_transport._solver import _sinkhorn_w2
+        from jaxgsa.optimal_transport._solver import _sinkhorn_w2
 
         rng = np.random.default_rng(0)
         N, P, E = 200, 40, 2
@@ -200,7 +213,7 @@ class TestOTPOTComparison:
         would set the max-cost scale and change the effective epsilon.
         This mimics that contract with deliberately extreme pad points.
         """
-        from gsax.optimal_transport._solver import _sinkhorn_w2
+        from jaxgsa.optimal_transport._solver import _sinkhorn_w2
 
         rng = np.random.default_rng(3)
         N, P, P_pad, E = 100, 20, 27, 3
@@ -234,7 +247,7 @@ class TestOTAnalytic:
             axis=1,
         )
         Y = X[:, 0] + X[:, 1]
-        problem = gsax.Problem(("x1", "x2"), ((-6.0, 6.0), (-12.0, 12.0)))
+        problem = jaxgsa.Problem(("x1", "x2"), ((-6.0, 6.0), (-12.0, 12.0)))
         result = analyze(problem, X, Y, n_partitions=50)
 
         expected = np.array(
@@ -274,7 +287,7 @@ class TestOTAnalytic:
     def test_ishigami_published_anchor(self, ishigami_data):
         """Published Var(Y)-normalized W2^2 for Ishigami X1 is ~0.423.
 
-        gsax normalizes by 2*Var(Y), so the anchor is compared at 2*ot.
+        jaxgsa normalizes by 2*Var(Y), so the anchor is compared at 2*ot.
         """
         X, Y = ishigami_data
         result = analyze(ishigami.PROBLEM, X, Y)
@@ -282,13 +295,13 @@ class TestOTAnalytic:
 
     def test_mixed_uniform_gaussian_marginals(self):
         """Rank-based conditioning handles mixed input marginals unchanged."""
-        problem = gsax.Problem.from_dict(
+        problem = jaxgsa.Problem.from_dict(
             {
                 "xu": (-1.0, 1.0),
-                "xg": gsax.GaussianInputSpec(dist="gaussian", mean=0.0, variance=4.0),
+                "xg": jaxgsa.GaussianInputSpec(dist="gaussian", mean=0.0, variance=4.0),
             }
         )
-        X = jnp.asarray(sample_mc(problem, N=16000, seed=5))
+        X = jnp.asarray(monte_carlo(problem, n=16000, seed=5))
         Y = X[:, 0] + X[:, 1]
         result = analyze(problem, X, Y, n_partitions=40)
         ot = np.asarray(result.ot)
@@ -323,7 +336,7 @@ class TestOTAnalytic:
         v_cond = v_y - adv
         expected = (adv + (np.sqrt(v_y) - np.sqrt(v_cond)) ** 2) / (2 * v_y)
 
-        problem = gsax.Problem(("x1", "x2", "x3"), ((-6.0, 6.0),) * 3)
+        problem = jaxgsa.Problem(("x1", "x2", "x3"), ((-6.0, 6.0),) * 3)
         result = analyze(problem, jnp.asarray(X), jnp.asarray(Y), n_partitions=50)
         np.testing.assert_allclose(np.asarray(result.ot), expected, atol=0.02)
 
@@ -555,10 +568,10 @@ class TestOTValidation:
         with pytest.raises(ValueError, match="conf_level"):
             analyze(ishigami.PROBLEM, X, Y, n_bootstrap=10, conf_level=1.5)
 
-    def test_bad_chunk_size(self, ishigami_data):
+    def test_bad_slice_chunk_size(self, ishigami_data):
         X, Y = ishigami_data
-        with pytest.raises(ValueError, match="chunk_size"):
-            analyze(ishigami.PROBLEM, X, Y, chunk_size=0)
+        with pytest.raises(ValueError, match="slice_chunk_size"):
+            analyze(ishigami.PROBLEM, X, Y, slice_chunk_size=0)
 
 
 class TestOTXarray:

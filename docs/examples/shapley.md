@@ -3,7 +3,7 @@
 Shapley effects allocate the output variance **fairly** across inputs: each
 interaction's variance is split equally among its participants (Owen, 2014;
 Song, Nelson & Staum, 2016), so the shares sum to exactly 1 with no gaps and
-no double counting. gsax computes them **analytically** from a fitted
+no double counting. jaxgsa computes them **analytically** from a fitted
 surrogate's variance decomposition — PCE (default) or RS-HDMR — with no
 permutation Monte Carlo and no extra model runs. The result carries Sh
 alongside the first-order (S1) and total-order (ST) indices from the same
@@ -20,39 +20,34 @@ When to use Shapley effects:
   version).
 
 A companion marimo notebook lives at
-[`examples/shapley_gsa.py`](https://github.com/danielepessina/gsax/blob/master/examples/shapley_gsa.py).
+[`examples/shapley_gsa.py`](https://github.com/danielepessina/jaxgsa/blob/master/examples/shapley_gsa.py).
 Run it interactively with `uv run marimo edit examples/shapley_gsa.py`.
 
 ## Import style
 
-The Shapley module lives at `gsax.shapley`. You can import it directly or
-use the top-level convenience alias:
+Shapley effects are methods on fitted PCE and HDMR results:
 
 ```python
-# Subpackage import (preferred for Shapley-focused scripts)
-from gsax import shapley
-# shapley.analyze(...)
-
-# Or use the top-level re-export
-import gsax
-# gsax.analyze_shapley(...)
+import jaxgsa
+# jaxgsa.pce.analyze(...).shapley()
+# jaxgsa.hdmr.analyze(...).shapley()
 ```
 
 ## Scalar example (Ishigami)
 
 ```python
 import jax.numpy as jnp
-import gsax
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
 # Any (X, Y) pairs work — no structured design required
-X = jnp.asarray(gsax.sample_mc(PROBLEM, N=2000, seed=42))
+X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n=2000, seed=42))
 Y = evaluate(X)
 
-# Default backend="pce": exact within the fitted polynomial, scalar Y only.
+# PCE effects are exact within the fitted polynomial.
 # Ishigami's sines need a degree-8 polynomial; the default order=3
 # under-fits here and would trigger the explained_variance warning.
-result = gsax.analyze_shapley(PROBLEM, X, Y, order=8)
+result = jaxgsa.pce.analyze(PROBLEM, X, Y, order=8).shapley()
 
 print("Sh:", result.Sh)        # (D,) fair variance shares
 print("sum:", result.Sh.sum()) # exactly 1 (Shapley efficiency)
@@ -86,7 +81,7 @@ rather than another implementation:
 
 ```python
 import numpy as np
-from gsax.benchmarks import ishigami
+from jaxgsa.benchmarks import ishigami
 
 print("estimated: ", np.round(result.Sh, 4))            # [0.4362 0.4418 0.122]
 print("analytical:", np.round(ishigami.ANALYTICAL_SHAPLEY, 4))  # [0.4357 0.4424 0.1218]
@@ -104,7 +99,7 @@ variances:
 - **`backend="hdmr"`** fits the RS-HDMR B-spline surrogate and uses its
   structural (ANCOVA) component variances, truncated at `maxorder`.
   Supports `(N,)`, `(N, K)`, and `(N, T, K)` outputs. Knobs: `maxorder`
-  (default 2), `m`, `maxiter`, `lambdax`, `prenormalize`, `chunk_size`.
+  (default 2), `m`, `maxiter`, `lambdax`, `prenormalize`, `slice_chunk_size`.
 
 Backend-specific keywords are validated: explicitly setting a knob that
 belongs to the non-selected backend (e.g. `backend="pce"` with
@@ -117,15 +112,15 @@ row of Sh sums to 1. Time-series outputs `(N, T, K)` produce `(T, K, D)`.
 
 ```python
 import jax.numpy as jnp
-import gsax
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
-X = jnp.asarray(gsax.sample_mc(PROBLEM, N=2000, seed=42))
+X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n=2000, seed=42))
 Y1 = evaluate(X)
 Y2 = jnp.sum(X**2, axis=1)  # purely additive: S1 = Sh = ST = 1/3 each
 Y_multi = jnp.column_stack([Y1, Y2])
 
-result = gsax.analyze_shapley(PROBLEM, X, Y_multi, backend="hdmr")
+result = jaxgsa.hdmr.analyze(PROBLEM, X, Y_multi).shapley()
 
 print("Sh shape:", result.Sh.shape)          # (K, D) = (2, 3)
 print("row sums:", result.Sh.sum(axis=-1))   # [1. 1.]
@@ -144,21 +139,21 @@ emitted when it drops below 0.5 or exceeds 1.3 — check it before trusting
 the allocation.
 
 ```python
-result_low = gsax.analyze_shapley(PROBLEM, X, Y1, order=2)
-# UserWarning: gsax: surrogate explained_variance is below 0.5 ...
+result_low = jaxgsa.pce.analyze(PROBLEM, X, Y1, order=2).shapley()
+# UserWarning: jaxgsa: surrogate explained_variance is below 0.5 ...
 print(result_low.Sh.sum())              # still exactly 1
 print(result_low.explained_variance)    # ~0.4 — do not trust these shares
 ```
 
 Because of this normalization, `backend="pce"` returns S1/ST that match
-`analyze_pce` exactly, while `backend="hdmr"` indices relate to
-`analyze_hdmr`'s (which normalize by `Var(Y)`) by a factor of
+`jaxgsa.pce.analyze` exactly, while `backend="hdmr"` indices relate to
+`jaxgsa.hdmr.analyze`'s (which normalize by `Var(Y)`) by a factor of
 `explained_variance`.
 
 ## xarray export
 
 `ShapleyResult.to_dataset()` converts results to a labeled
-`xarray.Dataset`, just like the other gsax result types.
+`xarray.Dataset`, just like the other jaxgsa result types.
 
 ```python
 ds = result.to_dataset()
@@ -199,7 +194,7 @@ as `(N, T)` — timepoints of that single output — and flows through as
 - Interactions beyond the surrogate's truncation (`order` for PCE,
   `maxorder` for HDMR) are absent from the allocation — raise the order
   until `explained_variance` stabilizes near 1.
-- The HDMR backend inherits `analyze_hdmr`'s input contract: at least 300
+- The HDMR backend inherits `jaxgsa.hdmr.analyze`'s input contract: at least 300
   samples and `maxorder` in `{1, 2, 3}` (clamped with a warning when
   `D < maxorder`).
 - Setting a keyword that belongs to the non-selected backend raises
@@ -216,5 +211,5 @@ as `(N, T)` — timepoints of that single output — and flows through as
   importance measure from the same given-data setting.
 - [Methods](/guide/methods) for the theory behind Shapley effects and when
   to choose them over S1/ST.
-- [API Reference](/api/#shapley-effects-workflow) for full parameter
+- [API Reference](/api/#shapley-results) for full parameter
   documentation.
