@@ -32,7 +32,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "jax>=0.6",
+    "jax>=0.11.0",
     "jaxlib>=0.6",
     "scipy>=1.10",
     "xarray>=2026.2.0",
@@ -48,14 +48,14 @@ Changelog = "https://github.com/DanielePessina/jaxgsa/blob/master/CHANGELOG.md"
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
-    "ruff>=0.4",
-    "ty>=0.0.21",
+    "ruff>=0.15.22",
+    "ty>=0.0.62",
     "SALib>=1.4",
     "pot>=0.9",
 ]
 notebook = [
-    "marimo>=0.23.4",
-    "matplotlib>=3.10.8",
+    "marimo>=0.23.14",
+    "matplotlib>=3.11.1",
 ]
 
 [build-system]
@@ -64,7 +64,7 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
-    "marimo>=0.23.4",
+    "marimo>=0.23.14",
 ]
 
 [tool.pytest.ini_options]
