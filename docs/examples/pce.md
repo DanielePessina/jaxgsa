@@ -16,10 +16,10 @@ When to use PCE:
 
 ## Import style
 
-The PCE module lives at `gsax.pce`:
+The PCE module lives at `jaxgsa.pce`:
 
 ```python
-from gsax import pce
+from jaxgsa import pce
 # pce.analyze(...)
 ```
 
@@ -28,8 +28,8 @@ from gsax import pce
 ```python
 import jax
 import jax.numpy as jnp
-import gsax
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
 # Generate samples (any design works -- PCE does not need Saltelli structure)
 key = jax.random.PRNGKey(42)
@@ -41,7 +41,7 @@ X = jax.random.uniform(
 Y = evaluate(X)
 
 # Fit PCE and extract Sobol indices
-result = gsax.pce.analyze(PROBLEM, X, Y, order=4)
+result = jaxgsa.pce.analyze(PROBLEM, X, Y, order=4)
 
 print("S1:", result.S1)          # (D,) = (3,)
 print("ST:", result.ST)          # (D,) = (3,)

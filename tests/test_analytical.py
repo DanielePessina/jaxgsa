@@ -1,13 +1,13 @@
 """Verify Sobol indices against analytical benchmark values.
 
-Each test compares gsax-computed indices to the closed-form analytical
+Each test compares jaxgsa-computed indices to the closed-form analytical
 solutions for the Ishigami, linear additive, and Sobol G-function
 benchmarks.
 """
 
 import numpy as np
 
-from gsax.benchmarks import ishigami, linear, oakley_ohagan, sobol_g
+from jaxgsa.benchmarks import ishigami, linear, oakley_ohagan, sobol_g
 
 # ---------------------------------------------------------------------------
 # Ishigami

@@ -2,10 +2,10 @@ import numpy as np
 import pytest
 from scipy.stats import truncnorm
 
-from gsax._core.sampling import _next_power_of_2
-from gsax.problem import GaussianInputSpec, InputSpecValue, Problem, UniformInputSpec
-from gsax.sobol import sample
-from gsax.sobol._sampling import _saltelli_step
+from jaxgsa._core.sampling import _next_power_of_2
+from jaxgsa.problem import GaussianInputSpec, InputSpecValue, Problem, UniformInputSpec
+from jaxgsa.sobol import sample
+from jaxgsa.sobol._sampling import _saltelli_step
 
 
 def test_next_power_of_2():
@@ -98,7 +98,7 @@ def test_sample_verbose_prints_summary(capsys):
     p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
     sample(p, n_samples=32, seed=42, verbose=True)
     out = capsys.readouterr().out
-    assert "gsax.sobol.sample:" in out
+    assert "jaxgsa.sobol.sample:" in out
     assert "requested_runs>=" in out
     assert "n_runs=" in out
     assert "n_expanded=" in out

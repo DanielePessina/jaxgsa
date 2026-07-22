@@ -1,7 +1,7 @@
 # Non-Uniform Inputs
 
 Use this page when your Sobol analysis needs independent inputs with different
-marginals. `gsax.Problem.from_dict(...)` accepts the legacy `(low, high)`
+marginals. `jaxgsa.Problem.from_dict(...)` accepts the legacy `(low, high)`
 uniform shorthand plus tagged `TypedDict` specs for Gaussian and truncated
 Gaussian inputs.
 
@@ -12,9 +12,9 @@ import jax.numpy as jnp
 import numpy as np
 from scipy.stats import truncnorm
 
-import gsax
+import jaxgsa
 
-problem = gsax.Problem.from_dict(
+problem = jaxgsa.Problem.from_dict(
     {
         "uniform": (0.0, 2.0),
         "gaussian": {
@@ -38,7 +38,7 @@ Rules for Gaussian specs:
 
 - `mean` and `variance` describe the parent Gaussian before truncation.
 - `low` and `high` are optional and may be used independently.
-- When either truncation bound is present, `gsax.sobol.sample()` uses a true
+- When either truncation bound is present, `jaxgsa.sobol.sample()` uses a true
   truncated normal transform, not hard clipping.
 
 ## Run Sobol on a single-timepoint linear model
@@ -61,7 +61,7 @@ timepoint/output slice directly.
 ```python
 coeffs = jnp.array([1.5, -0.75, 2.0])
 
-sampling_result = gsax.sobol.sample(
+sampling_result = jaxgsa.sobol.sample(
     problem,
     n_samples=8192,
     calc_second_order=False,
@@ -71,7 +71,7 @@ sampling_result = gsax.sobol.sample(
 X = jnp.asarray(sampling_result.samples)
 Y = (X @ coeffs)[:, None, None]  # (N, 1, 1)
 
-result = gsax.sobol.analyze(sampling_result, Y)
+result = jaxgsa.sobol.analyze(sampling_result, Y)
 
 std = np.sqrt(1.44)
 a = (-0.5 - 0.5) / std
@@ -104,7 +104,7 @@ Expected behavior:
   expected and signals that the problem is not finite-bounds-only anymore.
 - Save/load still works for mixed problems. The JSON metadata records the
   declared input specs so `SobolSamples.load()` reconstructs the same marginals.
-- `gsax.hdmr.analyze()` supports non-uniform inputs (Gaussian, truncated Gaussian)
+- `jaxgsa.hdmr.analyze()` supports non-uniform inputs (Gaussian, truncated Gaussian)
   via CDF mapping to `[0, 1]` before surrogate fitting.
 
 ## See also

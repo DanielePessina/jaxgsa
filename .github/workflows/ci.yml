@@ -36,7 +36,7 @@ jobs:
         run: uv run ruff check .
 
       - name: Type check
-        run: uv run ty check src/gsax
+        run: uv run ty check src/jaxgsa
 
       - name: Run tests
         run: uv run pytest -q

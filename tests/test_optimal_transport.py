@@ -9,10 +9,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-import gsax
-from gsax.benchmarks import gaussian_linear, ishigami
-from gsax.optimal_transport import OTResult, analyze
-from gsax.sampling import monte_carlo
+import jaxgsa
+from jaxgsa.benchmarks import gaussian_linear, ishigami
+from jaxgsa.optimal_transport import OTResult, analyze
+from jaxgsa.sampling import monte_carlo
 
 
 @pytest.fixture(scope="module")
@@ -142,8 +142,8 @@ class TestOTPOTComparison:
     def test_per_bin_w2_matches_pot(self):
         """Per-bin 1-D W2^2 vs POT in the exact regime (n_m divides N)."""
         ot = pytest.importorskip("ot")
-        from gsax._core.partition import _build_class_indices, _class_layout
-        from gsax.optimal_transport._analyze import _ot_1d_kernel, _quantile_ranks
+        from jaxgsa._core.partition import _build_class_indices, _class_layout
+        from jaxgsa.optimal_transport._analyze import _ot_1d_kernel, _quantile_ranks
 
         N, M = 1000, 25  # n_m = 40 divides N -> exact quantile coupling
         key = jax.random.PRNGKey(1)
@@ -177,7 +177,7 @@ class TestOTPOTComparison:
     def test_sinkhorn_matches_pot_and_approaches_emd(self):
         """Solver-level parity vs ot.sinkhorn2 and monotone approach to ot.emd2."""
         ot = pytest.importorskip("ot")
-        from gsax.optimal_transport._solver import _sinkhorn_w2
+        from jaxgsa.optimal_transport._solver import _sinkhorn_w2
 
         rng = np.random.default_rng(0)
         N, P, E = 200, 40, 2
@@ -213,7 +213,7 @@ class TestOTPOTComparison:
         would set the max-cost scale and change the effective epsilon.
         This mimics that contract with deliberately extreme pad points.
         """
-        from gsax.optimal_transport._solver import _sinkhorn_w2
+        from jaxgsa.optimal_transport._solver import _sinkhorn_w2
 
         rng = np.random.default_rng(3)
         N, P, P_pad, E = 100, 20, 27, 3
@@ -247,7 +247,7 @@ class TestOTAnalytic:
             axis=1,
         )
         Y = X[:, 0] + X[:, 1]
-        problem = gsax.Problem(("x1", "x2"), ((-6.0, 6.0), (-12.0, 12.0)))
+        problem = jaxgsa.Problem(("x1", "x2"), ((-6.0, 6.0), (-12.0, 12.0)))
         result = analyze(problem, X, Y, n_partitions=50)
 
         expected = np.array(
@@ -287,7 +287,7 @@ class TestOTAnalytic:
     def test_ishigami_published_anchor(self, ishigami_data):
         """Published Var(Y)-normalized W2^2 for Ishigami X1 is ~0.423.
 
-        gsax normalizes by 2*Var(Y), so the anchor is compared at 2*ot.
+        jaxgsa normalizes by 2*Var(Y), so the anchor is compared at 2*ot.
         """
         X, Y = ishigami_data
         result = analyze(ishigami.PROBLEM, X, Y)
@@ -295,10 +295,10 @@ class TestOTAnalytic:
 
     def test_mixed_uniform_gaussian_marginals(self):
         """Rank-based conditioning handles mixed input marginals unchanged."""
-        problem = gsax.Problem.from_dict(
+        problem = jaxgsa.Problem.from_dict(
             {
                 "xu": (-1.0, 1.0),
-                "xg": gsax.GaussianInputSpec(dist="gaussian", mean=0.0, variance=4.0),
+                "xg": jaxgsa.GaussianInputSpec(dist="gaussian", mean=0.0, variance=4.0),
             }
         )
         X = jnp.asarray(monte_carlo(problem, n=16000, seed=5))
@@ -336,7 +336,7 @@ class TestOTAnalytic:
         v_cond = v_y - adv
         expected = (adv + (np.sqrt(v_y) - np.sqrt(v_cond)) ** 2) / (2 * v_y)
 
-        problem = gsax.Problem(("x1", "x2", "x3"), ((-6.0, 6.0),) * 3)
+        problem = jaxgsa.Problem(("x1", "x2", "x3"), ((-6.0, 6.0),) * 3)
         result = analyze(problem, jnp.asarray(X), jnp.asarray(Y), n_partitions=50)
         np.testing.assert_allclose(np.asarray(result.ot), expected, atol=0.02)
 

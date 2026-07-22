@@ -1,6 +1,6 @@
 # PCE
 
-`gsax.pce.analyze(problem, X, Y, ...)` fits a polynomial chaos expansion and
+`jaxgsa.pce.analyze(problem, X, Y, ...)` fits a polynomial chaos expansion and
 returns `PCEResult`.
 
 Important result operations:

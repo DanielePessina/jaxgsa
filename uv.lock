@@ -239,54 +239,6 @@ wheels = [
 ]
 
 [[package]]
-name = "gsax"
-version = "0.4.0"
-source = { editable = "." }
-dependencies = [
-    { name = "jax" },
-    { name = "jaxlib" },
-    { name = "scipy" },
-    { name = "xarray" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "pot" },
-    { name = "pytest" },
-    { name = "ruff" },
-    { name = "salib" },
-    { name = "ty" },
-]
-notebook = [
-    { name = "marimo" },
-    { name = "matplotlib" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "marimo" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "jax", specifier = ">=0.6" },
-    { name = "jaxlib", specifier = ">=0.6" },
-    { name = "marimo", marker = "extra == 'notebook'", specifier = ">=0.23.4" },
-    { name = "matplotlib", marker = "extra == 'notebook'", specifier = ">=3.10.8" },
-    { name = "pot", marker = "extra == 'dev'", specifier = ">=0.9" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
-    { name = "salib", marker = "extra == 'dev'", specifier = ">=1.4" },
-    { name = "scipy", specifier = ">=1.10" },
-    { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.21" },
-    { name = "xarray", specifier = ">=2026.2.0" },
-]
-provides-extras = ["dev", "notebook"]
-
-[package.metadata.requires-dev]
-dev = [{ name = "marimo", specifier = ">=0.23.4" }]
-
-[[package]]
 name = "h11"
 version = "0.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -337,6 +289,54 @@ sdist = { url = "https://files.pythonhosted.org/packages/d2/73/eb91d98fcadfa2cbc
 wheels = [
     { url = "https://files.pythonhosted.org/packages/89/82/5ab5211079a151b6f661529369c0c8e98ec64cabf5c0cf22a0a05af124d8/jax-0.10.2-py3-none-any.whl", hash = "sha256:724d73c4678d8b06f6a6ab4db1b8a2fea8cd4f1e2c2564f99601634ec7b8d1c6", size = 3219515, upload-time = "2026-06-17T23:42:41.259Z" },
 ]
+
+[[package]]
+name = "jaxgsa"
+version = "0.4.0"
+source = { editable = "." }
+dependencies = [
+    { name = "jax" },
+    { name = "jaxlib" },
+    { name = "scipy" },
+    { name = "xarray" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pot" },
+    { name = "pytest" },
+    { name = "ruff" },
+    { name = "salib" },
+    { name = "ty" },
+]
+notebook = [
+    { name = "marimo" },
+    { name = "matplotlib" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "marimo" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "jax", specifier = ">=0.6" },
+    { name = "jaxlib", specifier = ">=0.6" },
+    { name = "marimo", marker = "extra == 'notebook'", specifier = ">=0.23.4" },
+    { name = "matplotlib", marker = "extra == 'notebook'", specifier = ">=3.10.8" },
+    { name = "pot", marker = "extra == 'dev'", specifier = ">=0.9" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
+    { name = "salib", marker = "extra == 'dev'", specifier = ">=1.4" },
+    { name = "scipy", specifier = ">=1.10" },
+    { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.21" },
+    { name = "xarray", specifier = ">=2026.2.0" },
+]
+provides-extras = ["dev", "notebook"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "marimo", specifier = ">=0.23.4" }]
 
 [[package]]
 name = "jaxlib"

@@ -1,6 +1,6 @@
 # HDMR
 
-`gsax.hdmr.analyze(problem, X, Y, ...)` fits an RS-HDMR surrogate and returns
+`jaxgsa.hdmr.analyze(problem, X, Y, ...)` fits an RS-HDMR surrogate and returns
 `HDMRResult`.
 
 Important result operations:

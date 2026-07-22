@@ -8,10 +8,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from gsax.benchmarks import ishigami, linear, sobol_g
-from gsax.hsic import HSICResult, analyze
-from gsax.problem import GaussianInputSpec, Problem
-from gsax.sampling import monte_carlo
+from jaxgsa.benchmarks import ishigami, linear, sobol_g
+from jaxgsa.hsic import HSICResult, analyze
+from jaxgsa.problem import GaussianInputSpec, Problem
+from jaxgsa.sampling import monte_carlo
 
 
 @pytest.fixture(scope="module")

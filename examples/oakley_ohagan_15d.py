@@ -54,11 +54,11 @@ def _imports():
     import matplotlib.pyplot as plt
     import numpy as np
 
-    import gsax
-    from gsax.benchmarks import oakley_ohagan
+    import jaxgsa
+    from jaxgsa.benchmarks import oakley_ohagan
 
     plt.rcParams["figure.dpi"] = 150
-    return gsax, jax, jnp, mo, np, oakley_ohagan, plt
+    return jaxgsa, jax, jnp, mo, np, oakley_ohagan, plt
 
 
 @app.cell(hide_code=True)
@@ -166,11 +166,11 @@ def _efast_md(mo):
 
 
 @app.cell
-def _efast_analysis(gsax, jnp, oakley_ohagan, problem):
-    efast_samples = gsax.efast.sample(problem, n_per_curve=4096, M=4, seed=42)
+def _efast_analysis(jaxgsa, jnp, oakley_ohagan, problem):
+    efast_samples = jaxgsa.efast.sample(problem, n_per_curve=4096, M=4, seed=42)
     Y_ef = oakley_ohagan.evaluate(jnp.asarray(efast_samples.samples))
 
-    efast_result = gsax.efast.analyze(efast_samples, Y_ef)
+    efast_result = jaxgsa.efast.analyze(efast_samples, Y_ef)
     print(efast_result)
     return (efast_result,)
 
@@ -252,12 +252,12 @@ def _hdmr_md(mo):
 
 
 @app.cell
-def _hdmr_analysis(gsax, jax, jnp, oakley_ohagan, problem):
+def _hdmr_analysis(jaxgsa, jax, jnp, oakley_ohagan, problem):
     _key = jax.random.key(0)
     X_hd = jax.random.normal(_key, (3000, problem.num_vars))
     Y_hd = oakley_ohagan.evaluate(jnp.asarray(X_hd))
 
-    hdmr_result = gsax.hdmr.analyze(problem, X_hd, Y_hd, maxorder=2, m=2)
+    hdmr_result = jaxgsa.hdmr.analyze(problem, X_hd, Y_hd, maxorder=2, m=2)
     print(hdmr_result)
     return (hdmr_result,)
 
@@ -291,9 +291,9 @@ def _dgsm_fn(jnp, oakley_ohagan):
 
 
 @app.cell
-def _dgsm_analysis(gsax, jnp, oakley_fn, problem):
-    X_dg = gsax.sampling.monte_carlo(problem, n=10000, seed=42)
-    dgsm_result = gsax.dgsm.analyze(problem, oakley_fn, jnp.asarray(X_dg))
+def _dgsm_analysis(jaxgsa, jnp, oakley_fn, problem):
+    X_dg = jaxgsa.sampling.monte_carlo(problem, n=10000, seed=42)
+    dgsm_result = jaxgsa.dgsm.analyze(problem, oakley_fn, jnp.asarray(X_dg))
     print(dgsm_result)
     return (dgsm_result,)
 
@@ -483,7 +483,7 @@ def _summary(mo):
       tighter upper bounds than uniform distributions.
 
     In short: fifteen dimensions and Gaussian marginals need no special
-    configuration in gsax.  Pick the method by what you have — a
+    configuration in jaxgsa.  Pick the method by what you have — a
     structured sampling budget (eFAST), an existing dataset (RS-HDMR),
     or a differentiable model (DGSM).
     """)

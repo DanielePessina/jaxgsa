@@ -4,15 +4,15 @@
 needed to reconstruct the internal Saltelli design.
 
 ```python
-import gsax
-from gsax.benchmarks.ishigami import PROBLEM
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM
 
-samples = gsax.sobol.sample(PROBLEM, n_samples=4096, seed=42)
+samples = jaxgsa.sobol.sample(PROBLEM, n_samples=4096, seed=42)
 samples.save("runs/ishigami")
 
-restored = gsax.sobol.SobolSamples.load("runs/ishigami")
+restored = jaxgsa.sobol.SobolSamples.load("runs/ishigami")
 Y = my_model(restored.samples)
-result = gsax.sobol.analyze(restored, Y)
+result = jaxgsa.sobol.analyze(restored, Y)
 ```
 
 The `.npz` suffix is optional. Both calls above address
@@ -34,4 +34,4 @@ import numpy as np
 np.savetxt("runs/ishigami.csv", samples.samples, delimiter=",")
 ```
 
-The CSV is only a model-input table; keep the NPZ file for later gsax analysis.
+The CSV is only a model-input table; keep the NPZ file for later jaxgsa analysis.

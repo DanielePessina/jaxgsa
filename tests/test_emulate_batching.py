@@ -14,10 +14,10 @@ import numpy as np
 import pytest
 from jax import Array
 
-from gsax import hdmr, pce
-from gsax._core.batching import apply_batched, resolve_batch_size
-from gsax._core.surrogate import SurrogateResult, _PredictPlan
-from gsax.problem import Problem
+from jaxgsa import hdmr, pce
+from jaxgsa._core.batching import apply_batched, resolve_batch_size
+from jaxgsa._core.surrogate import SurrogateResult, _PredictPlan
+from jaxgsa.problem import Problem
 
 D = 4
 N_FIT = 800

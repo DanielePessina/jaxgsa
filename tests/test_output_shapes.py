@@ -3,9 +3,9 @@
 import jax.numpy as jnp
 import pytest
 
-import gsax
-from gsax._core.validation import _validate_output
-from gsax.problem import Problem
+import jaxgsa
+from jaxgsa._core.validation import _validate_output
+from jaxgsa.problem import Problem
 
 N = 40
 UNLABELED = Problem.from_dict({"x0": (0.0, 1.0), "x1": (0.0, 1.0)})
@@ -38,17 +38,17 @@ def test_output_name_count_must_match_k(shape):
 
 
 def test_given_data_methods_do_not_transpose_outputs():
-    X = jnp.asarray(gsax.sampling.monte_carlo(UNLABELED, 400, seed=2))
+    X = jnp.asarray(jaxgsa.sampling.monte_carlo(UNLABELED, 400, seed=2))
     Y = jnp.stack((X[:, 0], X[:, 1]), axis=1)
 
     with pytest.raises(ValueError, match="sample rows"):
-        gsax.pce.analyze(UNLABELED, X, Y.T)
+        jaxgsa.pce.analyze(UNLABELED, X, Y.T)
 
 
 def test_two_dimensional_output_is_always_n_k():
-    X = jnp.asarray(gsax.sampling.monte_carlo(TWO_OUTPUTS, 400, seed=3))
+    X = jnp.asarray(jaxgsa.sampling.monte_carlo(TWO_OUTPUTS, 400, seed=3))
     Y = jnp.stack((X[:, 0], X[:, 1]), axis=1)
-    result = gsax.pce.analyze(TWO_OUTPUTS, X, Y, order=1)
+    result = jaxgsa.pce.analyze(TWO_OUTPUTS, X, Y, order=1)
 
     assert result.S1.shape == (2, 2)
     assert result.predict(X[:5]).shape == (5, 2)

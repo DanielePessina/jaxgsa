@@ -6,11 +6,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from gsax.benchmarks import ishigami, linear, sobol_g
-from gsax.efast import EFASTResult, EFASTSamples, analyze, sample
-from gsax.efast._analyze import _compute_indices
-from gsax.efast._sampling import _assign_frequencies
-from gsax.problem import GaussianInputSpec, Problem
+from jaxgsa.benchmarks import ishigami, linear, sobol_g
+from jaxgsa.efast import EFASTResult, EFASTSamples, analyze, sample
+from jaxgsa.efast._analyze import _compute_indices
+from jaxgsa.efast._sampling import _assign_frequencies
+from jaxgsa.problem import GaussianInputSpec, Problem
 
 
 @pytest.fixture(scope="module")
@@ -101,6 +101,25 @@ class TestSampling:
         with pytest.raises(ValueError, match="M must be >= 1"):
             sample(problem, n_per_curve=257, M=0)
 
+    def test_n_below_dimension_bound_raises(self):
+        """n_per_curve above 4*M^2 is still too small once D grows."""
+        problem = Problem(names=tuple(f"x{i}" for i in range(6)), bounds=((0, 1),) * 6)
+        # 4*M^2 = 64 passes the old bound; the D-aware bound is 4*M^2*5 + 1 = 321.
+        with pytest.raises(ValueError, match=r"4\*M\^2\*\(D-1\) \+ 1 = 321"):
+            sample(problem, n_per_curve=257, M=4)
+        sample(problem, n_per_curve=321, M=4, seed=0)
+
+    def test_complementary_frequencies_are_distinct(self):
+        """Every parameter on a curve oscillates at its own frequency."""
+        for D in (2, 5, 9):
+            for M in (2, 4, 6):
+                n = 4 * M**2 * (D - 1) + 1
+                omega_0 = (n - 1) // (2 * M)
+                omega_compl = _assign_frequencies(D, omega_0, M)
+                assert len(set(omega_compl.tolist())) == D - 1, (D, M)
+                assert omega_compl.min() >= 1
+                assert omega_compl.max() <= omega_0 // (2 * M)
+
     def test_gaussian_inputs(self):
         problem = Problem.from_dict(
             {
@@ -130,6 +149,12 @@ class TestEFASTSamplesValidation:
         problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
         with pytest.raises(ValueError, match="M must be >= 1"):
             EFASTSamples(samples=np.zeros((514, 2)), n_per_curve=257, M=0, problem=problem)
+
+    def test_n_below_dimension_bound_raises(self):
+        """A hand-built design too short for its dimension is rejected."""
+        problem = Problem(names=tuple(f"x{i}" for i in range(6)), bounds=((0, 1),) * 6)
+        with pytest.raises(ValueError, match=r"4\*M\^2\*\(D-1\) \+ 1 = 321"):
+            EFASTSamples(samples=np.zeros((257 * 6, 6)), n_per_curve=257, M=4, problem=problem)
 
 
 class TestAnalysis:
@@ -213,6 +238,11 @@ class TestFrequencyAssignment:
         assert len(freqs) == 3
         assert np.all(freqs >= 1)
         assert len(np.unique(freqs)) == 3
+
+    def test_low_omega_raises_instead_of_wrapping(self):
+        """omega_0 = 15, M = 4 leaves one slot — three parameters cannot share it."""
+        with pytest.raises(ValueError, match="distinct complementary frequencies"):
+            _assign_frequencies(4, 15, 4)
 
 
 class TestComputeIndices:
@@ -324,14 +354,14 @@ class TestSliceChunkSize:
 
     def test_slice_chunk_size_kwarg_accepted(self):
         """The 0.4 name `slice_chunk_size` is accepted explicitly."""
-        sr = sample(ishigami.PROBLEM, n_per_curve=128, M=4, seed=0)
+        sr = sample(ishigami.PROBLEM, n_per_curve=129, M=4, seed=0)
         Y = ishigami.evaluate(jnp.asarray(sr.samples))
         result = analyze(sr, jnp.asarray(Y), slice_chunk_size=2)
         assert np.asarray(result.S1).shape == (3,)
 
     def test_old_chunk_size_kwarg_raises(self):
         """The pre-0.4 `chunk_size` name is gone — no shim."""
-        sr = sample(ishigami.PROBLEM, n_per_curve=128, M=4, seed=0)
+        sr = sample(ishigami.PROBLEM, n_per_curve=129, M=4, seed=0)
         Y = ishigami.evaluate(jnp.asarray(sr.samples))
         old_kwargs: dict[str, Any] = {"chunk_size": 2}
         with pytest.raises(TypeError):

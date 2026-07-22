@@ -8,10 +8,10 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from gsax import pce
-from gsax.benchmarks import ishigami, linear
-from gsax.pce._analyze import _auto_order
-from gsax.pce._engine import (
+from jaxgsa import pce
+from jaxgsa.benchmarks import ishigami, linear
+from jaxgsa.pce._analyze import _auto_order
+from jaxgsa.pce._engine import (
     _hermite_1d,
     _legendre_1d,
     build_design_matrix,
@@ -19,7 +19,7 @@ from gsax.pce._engine import (
     loo_error,
     sobol_from_coefficients,
 )
-from gsax.problem import GaussianInputSpec, Problem
+from jaxgsa.problem import GaussianInputSpec, Problem
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -315,7 +315,7 @@ class TestLooRmse:
         result = pce.analyze(linear.PROBLEM, X, Y, order=2)
 
         # Reconstruct Phi manually
-        from gsax.pce._analyze import _map_to_reference
+        from jaxgsa.pce._analyze import _map_to_reference
 
         X_ref, input_types = _map_to_reference(X, linear.PROBLEM)
         Phi = build_design_matrix(X_ref, result.multi_index, input_types, result.order)

@@ -13,10 +13,10 @@ When to use eFAST instead of Sobol:
 
 ## Import style
 
-The eFAST module lives at `gsax.efast`:
+The eFAST module lives at `jaxgsa.efast`:
 
 ```python
-from gsax import efast
+from jaxgsa import efast
 # efast.sample(...)
 # efast.analyze(...)
 ```
@@ -25,8 +25,8 @@ from gsax import efast
 
 ```python
 import jax.numpy as jnp
-from gsax import efast
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
+from jaxgsa import efast
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
 # Generate eFAST samples: n_per_curve points per search curve, D curves total
 samples = efast.sample(PROBLEM, n_per_curve=4096, M=4, seed=42)
@@ -53,10 +53,10 @@ The resulting indices have shape `(K, D)`.
 
 ```python
 import jax.numpy as jnp
-import gsax
-from gsax import efast
+import jaxgsa
+from jaxgsa import efast
 
-problem = gsax.Problem.from_dict(
+problem = jaxgsa.Problem.from_dict(
     {
         "amplitude": (0.5, 2.0),
         "frequency": (1.0, 5.0),
@@ -92,10 +92,10 @@ When your model returns T time steps and K outputs, pass Y with shape
 ```python
 import jax.numpy as jnp
 import numpy as np
-import gsax
-from gsax import efast
+import jaxgsa
+from jaxgsa import efast
 
-problem = gsax.Problem.from_dict(
+problem = jaxgsa.Problem.from_dict(
     {
         "amplitude": (0.5, 2.0),
         "frequency": (1.0, 5.0),
@@ -170,8 +170,12 @@ D is always the last axis.
 - The `M` parameter (interference factor) is set once in `sample()` and travels
   inside the returned `EFASTSamples`, so it can never be mismatched at
   `analyze()` time. The default is 4.
-- `n_per_curve` must satisfy `n_per_curve > 4*M^2` (i.e. `n_per_curve > 64`
-  with the default `M=4`).
+- `n_per_curve` must satisfy `n_per_curve >= 4*M^2*(D-1) + 1`, where `D` is the
+  number of parameters — the cost of eFAST grows with dimension because every
+  parameter needs its own frequency. With the default `M=4` and `D=3` that is
+  `n_per_curve >= 129`; at `D=10` it is `n_per_curve >= 577`. Shorter designs
+  raise `ValueError` rather than silently reusing a frequency for two
+  parameters, which would leave them indistinguishable along the curve.
 - Indices outside `[0, 1]` indicate insufficient samples or near-zero output
   variance.
 

@@ -13,10 +13,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-import gsax
-from gsax import pce
-from gsax.pce import _analyze as pce_analyze_mod
-from gsax.problem import Problem
+import jaxgsa
+from jaxgsa import pce
+from jaxgsa.pce import _analyze as pce_analyze_mod
+from jaxgsa.problem import Problem
 
 # Streamed vs single-pass runs do the same float32 reductions in a different
 # order (batched accumulation vs one big matmul, inv vs solve for the hat
@@ -32,7 +32,7 @@ def _restore_memory_budget():
     ``set_memory_budget`` mutates process-global state; leaking a tiny test
     budget would silently switch other tests onto batched/streamed paths.
     """
-    from gsax._core import batching
+    from jaxgsa._core import batching
 
     saved = batching._memory_budget_bytes
     yield
@@ -153,13 +153,13 @@ class TestAutoEngage:
 
         counter = _DesignBuildCounter()
         monkeypatch.setattr(pce_analyze_mod, "build_design_matrix", counter)
-        saved = gsax.config.get_memory_budget()
+        saved = jaxgsa.config.get_memory_budget()
         try:
-            gsax.config.set_memory_budget(64 * 1024)  # 64 KiB: forces streaming
+            jaxgsa.config.set_memory_budget(64 * 1024)  # 64 KiB: forces streaming
             streamed = pce.analyze(problem_4d, X, Y, order=3)
         finally:
-            gsax.config.set_memory_budget(saved)
-        assert gsax.config.get_memory_budget() == saved
+            jaxgsa.config.set_memory_budget(saved)
+        assert jaxgsa.config.get_memory_budget() == saved
         # More than one design-block build per pass proves streaming engaged.
         assert counter.calls > 2
         _assert_results_match(streamed, single)
@@ -177,42 +177,42 @@ class TestMemoryBudgetConfig:
     """set_memory_budget / get_memory_budget contract."""
 
     def test_get_returns_default(self):
-        from gsax._core.batching import DEFAULT_EMULATE_BUDGET_BYTES
+        from jaxgsa._core.batching import DEFAULT_EMULATE_BUDGET_BYTES
 
-        assert gsax.config.get_memory_budget() == DEFAULT_EMULATE_BUDGET_BYTES
+        assert jaxgsa.config.get_memory_budget() == DEFAULT_EMULATE_BUDGET_BYTES
 
     def test_get_returns_what_was_set(self):
-        gsax.config.set_memory_budget(123 * 1024**2)
-        assert gsax.config.get_memory_budget() == 123 * 1024**2
+        jaxgsa.config.set_memory_budget(123 * 1024**2)
+        assert jaxgsa.config.get_memory_budget() == 123 * 1024**2
 
     @pytest.mark.parametrize("bad", [0, -1, -(512 * 1024**2)])
     def test_rejects_non_positive(self, bad):
         with pytest.raises(ValueError, match="positive"):
-            gsax.config.set_memory_budget(bad)
+            jaxgsa.config.set_memory_budget(bad)
 
     @pytest.mark.parametrize("bad", [1.5, "512MiB", None, True])
     def test_rejects_non_int(self, bad):
         with pytest.raises(ValueError, match="positive"):
-            gsax.config.set_memory_budget(bad)
+            jaxgsa.config.set_memory_budget(bad)
 
     def test_budget_applies_to_predict_batching(self):
         """resolve_batch_size reads the global budget for predict batches too."""
-        from gsax._core.batching import resolve_batch_size
+        from jaxgsa._core.batching import resolve_batch_size
 
-        gsax.config.set_memory_budget(1000)
+        jaxgsa.config.set_memory_budget(1000)
         assert resolve_batch_size(100, 50, None) == 10
 
     def test_per_call_batch_size_overrides_global(self, problem_4d, data_4d):
         """An explicit batch_size wins over the global budget in both directions."""
-        from gsax._core.batching import resolve_batch_size
+        from jaxgsa._core.batching import resolve_batch_size
 
-        gsax.config.set_memory_budget(1000)
+        jaxgsa.config.set_memory_budget(1000)
         # Explicit batch of 40 rows beats the budget-derived 10.
         assert resolve_batch_size(100, 50, 40) == 40
         # And through the public API: a huge budget plus an explicit
         # batch_size still yields correct (streamed) results.
         X, Y = data_4d
-        gsax.config.set_memory_budget(2**62)
+        jaxgsa.config.set_memory_budget(2**62)
         single = pce.analyze(problem_4d, X, Y, order=3)
         streamed = pce.analyze(problem_4d, X, Y, order=3, batch_size=333)
         _assert_results_match(streamed, single)

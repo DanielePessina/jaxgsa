@@ -1,16 +1,16 @@
-# Contributing to gsax
+# Contributing to jaxgsa
 
-Thanks for your interest in improving gsax! This guide covers the local setup
+Thanks for your interest in improving jaxgsa! This guide covers the local setup
 and the checks a pull request is expected to pass.
 
 ## Development setup
 
-gsax uses [uv](https://docs.astral.sh/uv/) for environment and dependency
+jaxgsa uses [uv](https://docs.astral.sh/uv/) for environment and dependency
 management.
 
 ```bash
-git clone https://github.com/DanielePessina/gsax.git
-cd gsax
+git clone https://github.com/DanielePessina/jaxgsa.git
+cd jaxgsa
 uv sync --extra dev
 ```
 
@@ -21,7 +21,7 @@ Run the same checks CI runs, and make sure they all pass:
 ```bash
 uv run ruff format .          # format
 uv run ruff check .           # lint
-uv run ty check src/gsax      # type-check
+uv run ty check src/jaxgsa      # type-check
 uv run pytest                 # tests
 ```
 
@@ -36,5 +36,5 @@ Please also:
 
 ## Reporting issues
 
-Please open an issue with a minimal reproducible example, the gsax version, and
+Please open an issue with a minimal reproducible example, the jaxgsa version, and
 your Python/JAX versions.

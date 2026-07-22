@@ -7,13 +7,13 @@ not just point estimates.
 
 ```python
 import jax
-import gsax
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
-sampling_result = gsax.sobol.sample(PROBLEM, n_samples=4096, seed=42)
+sampling_result = jaxgsa.sobol.sample(PROBLEM, n_samples=4096, seed=42)
 Y = evaluate(sampling_result.samples)
 
-result = gsax.sobol.analyze(
+result = jaxgsa.sobol.analyze(
     sampling_result,
     Y,
     prenormalize=True,
@@ -65,7 +65,7 @@ bootstrap draws:
   right companion when your model is not scalar.
 - Confidence intervals always remain lower/upper endpoint arrays even when
   `prenormalize=True`. `ci_method="gaussian"` is closer to SALib's CI
-  construction, but `gsax` still returns endpoints rather than SALib-style
+  construction, but `jaxgsa` still returns endpoints rather than SALib-style
   confidence half-widths.
 
 ## See also

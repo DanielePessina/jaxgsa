@@ -1,4 +1,4 @@
-"""eFAST (extended FAST) sensitivity analysis — gsax tutorial.
+"""eFAST (extended FAST) sensitivity analysis — jaxgsa tutorial.
 
 Demonstrates the eFAST workflow on standard benchmarks: scalar outputs,
 multi-output models, and time-series sensitivity evolution.
@@ -18,7 +18,7 @@ app = marimo.App(width="medium")
 @app.cell(hide_code=True)
 def _intro(mo):
     mo.md(r"""
-    # eFAST sensitivity analysis with **gsax**
+    # eFAST sensitivity analysis with **jaxgsa**
 
     The **extended Fourier Amplitude Sensitivity Test** (eFAST) decomposes
     the variance of a model output into contributions from each input
@@ -50,8 +50,8 @@ def _imports():
     import matplotlib.pyplot as plt
     import numpy as np
 
-    from gsax import Problem, efast
-    from gsax.benchmarks import ishigami, sobol_g
+    from jaxgsa import Problem, efast
+    from jaxgsa.benchmarks import ishigami, sobol_g
 
     plt.rcParams["figure.dpi"] = 150
     return Problem, efast, ishigami, jnp, mo, np, plt, sobol_g

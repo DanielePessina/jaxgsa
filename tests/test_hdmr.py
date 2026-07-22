@@ -7,14 +7,14 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from gsax.benchmarks.ishigami import (
+from jaxgsa.benchmarks.ishigami import (
     ANALYTICAL_S1,
     ANALYTICAL_ST,
     PROBLEM,
     evaluate,
 )
-from gsax.hdmr import analyze as analyze_hdmr
-from gsax.problem import GaussianInputSpec
+from jaxgsa.hdmr import analyze as analyze_hdmr
+from jaxgsa.problem import GaussianInputSpec
 
 
 # HDMR builds polynomial surrogates that approximate the true function, so
@@ -545,7 +545,7 @@ def test_time_series_multi_output_emulator_preserves_axes(ishigami_data):
 
 def test_predict_preserves_explicit_time_series_layout(ishigami_data):
     """Training on (N, T, K) yields (N_new, T, K) predictions."""
-    from gsax.problem import Problem
+    from jaxgsa.problem import Problem
 
     X, Y = ishigami_data
     assert PROBLEM.bounds is not None
@@ -754,8 +754,8 @@ def test_s3_property_maxorder_3(ishigami_data):
 
 def test_s2_layout_uses_numeric_interaction_indices():
     """S2 uses stored numeric indices instead of parsing display labels."""
-    from gsax.hdmr._result import HDMRResult
-    from gsax.problem import Problem
+    from jaxgsa.hdmr._result import HDMRResult
+    from jaxgsa.problem import Problem
 
     problem = Problem(names=("x1", "x2", "x3"), bounds=((0.0, 1.0),) * 3)
     result = HDMRResult(

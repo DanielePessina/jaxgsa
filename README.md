@@ -1,14 +1,14 @@
-# gsax
+# jaxgsa
 
 **Global Sensitivity Analysis in JAX**
 
-[![PyPI](https://img.shields.io/pypi/v/gsax)](https://pypi.org/project/gsax/)
-[![CI](https://github.com/DanielePessina/gsax/actions/workflows/ci.yml/badge.svg)](https://github.com/DanielePessina/gsax/actions/workflows/ci.yml)
-[![Documentation](https://img.shields.io/badge/docs-online-blue)](https://danielepessina.github.io/gsax/)
+[![PyPI](https://img.shields.io/pypi/v/jaxgsa)](https://pypi.org/project/jaxgsa/)
+[![CI](https://github.com/DanielePessina/jaxgsa/actions/workflows/ci.yml/badge.svg)](https://github.com/DanielePessina/jaxgsa/actions/workflows/ci.yml)
+[![Documentation](https://img.shields.io/badge/docs-online-blue)](https://danielepessina.github.io/jaxgsa/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org)
 
-`gsax` tells you which of your model's inputs actually drive its output. You give it input samples and the outputs your model produced for them; it returns sensitivity indices that rank the inputs and expose interactions. Everything is computed in JAX, so analyses are JIT-compiled and run on CPU, GPU, or TPU without code changes.
+`jaxgsa` tells you which of your model's inputs actually drive its output. You give it input samples and the outputs your model produced for them; it returns sensitivity indices that rank the inputs and expose interactions. Everything is computed in JAX, so analyses are JIT-compiled and run on CPU, GPU, or TPU without code changes.
 
 Eleven complementary methods are included: **Sobol indices** (the standard variance decomposition, via Saltelli sampling), **RS-HDMR** and **PCE** (surrogate-based — they fit a cheap approximation of your model to any existing input–output pairs and read the indices off the fit), **Shapley effects** (a fair, game-theoretic split of the output variance, computed analytically from a PCE or HDMR surrogate), **eFAST** (Fourier-based S1 and ST), **DGSM** (derivative-based bounds via JAX autodiff), **Morris** (cheap elementary-effects screening to discard unimportant inputs early), **HSIC** (kernel-based dependence detection), and three moment-independent measures that look at the whole output distribution rather than just its variance: **PAWN** (CDF-based, Pianosi & Wagener, 2015), the **Borgonovo delta** (density-based, Borgonovo, 2007), and **optimal-transport indices** (Wasserstein-based with an advective/diffusive decomposition, Borgonovo et al., 2024).
 
@@ -73,45 +73,45 @@ Eleven complementary methods are included: **Sobol indices** (the standard varia
 ## Installation
 
 ```bash
-pip install gsax
+pip install jaxgsa
 # or, with uv:
-uv add gsax
+uv add jaxgsa
 ```
 
 To install the latest development version from GitHub:
 
 ```bash
-pip install git+https://github.com/DanielePessina/gsax.git
+pip install git+https://github.com/DanielePessina/jaxgsa.git
 ```
 
 For local development:
 
 ```bash
-git clone https://github.com/DanielePessina/gsax.git
-cd gsax
+git clone https://github.com/DanielePessina/jaxgsa.git
+cd jaxgsa
 uv sync --extra dev   # or: pip install -e ".[dev]"
 ```
 
 ## Configuration
 
-gsax inherits JAX's runtime defaults. Two optional knobs, documented in full in
-the [Configuration guide](https://danielepessina.github.io/gsax/guide/configuration):
+jaxgsa inherits JAX's runtime defaults. Two optional knobs, documented in full in
+the [Configuration guide](https://danielepessina.github.io/jaxgsa/guide/configuration):
 
 - **Double precision** — JAX defaults to float32 and silently downcasts `float64`.
   For precision-sensitive Sobol/HSIC work, enable 64-bit floats *before the first
   array is created*: `jax.config.update("jax_enable_x64", True)`.
 - **Persistent compilation cache** — reuse compiled kernels across process
   restarts (sweeps, CI, HPC) by calling
-  `gsax.config.enable_compilation_cache("~/.cache/gsax-jax")` once, before your first analysis.
+  `jaxgsa.config.enable_compilation_cache("~/.cache/jaxgsa-jax")` once, before your first analysis.
 
 ## Quick Start
 
 ```python
-import gsax
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
 # 1. Generate unique Sobol/Saltelli samples
-sampling_result = gsax.sobol.sample(PROBLEM, n_samples=4096, seed=42)
+sampling_result = jaxgsa.sobol.sample(PROBLEM, n_samples=4096, seed=42)
 # sampling_result.samples.shape == (n_runs, D)  — D parameters, n_runs unique rows
 # sampling_result.n_expanded is the internal Saltelli row count used by analyze()
 # by default, sample() also prints a short summary of unique vs expanded rows
@@ -120,7 +120,7 @@ sampling_result = gsax.sobol.sample(PROBLEM, n_samples=4096, seed=42)
 Y = evaluate(sampling_result.samples)  # Y.shape == (n_runs,)
 
 # 3. Compute Sobol indices
-result = gsax.sobol.analyze(
+result = jaxgsa.sobol.analyze(
     sampling_result,
     Y,
     prenormalize=False,  # default; set True for SALib-style output standardization
@@ -157,8 +157,8 @@ model runs already exist and rerunning on a Saltelli design isn't an option.
 ```python
 import jax
 import jax.numpy as jnp
-import gsax
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
 # 1. Generate any set of input samples (no structured sampling needed)
 key = jax.random.PRNGKey(42)
@@ -169,7 +169,7 @@ X = jax.random.uniform(key, (2000, 3), minval=bounds[:, 0], maxval=bounds[:, 1])
 Y = evaluate(X)  # Y.shape == (2000,)
 
 # 3. Compute HDMR sensitivity indices
-result = gsax.hdmr.analyze(
+result = jaxgsa.hdmr.analyze(
     PROBLEM, X, Y,
     maxorder=2,
     prenormalize=False,  # default; set True for SALib-style output standardization
@@ -198,15 +198,15 @@ the Sobol indices straight off the coefficients — no Saltelli design needed.
 ```python
 import jax
 import jax.numpy as jnp
-import gsax
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
 key = jax.random.PRNGKey(42)
 bounds = jnp.array(PROBLEM.bounds)
 X = jax.random.uniform(key, (2000, 3), minval=bounds[:, 0], maxval=bounds[:, 1])
 Y = evaluate(X)
 
-result = gsax.pce.analyze(PROBLEM, X, Y, order=4)
+result = jaxgsa.pce.analyze(PROBLEM, X, Y, order=4)
 print("S1:", result.S1)              # (D,) first-order
 print("ST:", result.ST)              # (D,) total-order
 print("LOO RMSE:", result.loo_rmse)  # leave-one-out cross-validation error
@@ -223,13 +223,13 @@ permutation Monte Carlo. Inputs are assumed independent in this version.
 
 ```python
 import jax.numpy as jnp
-import gsax
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
-X = gsax.sampling.monte_carlo(PROBLEM, n=2000, seed=42)
+X = jaxgsa.sampling.monte_carlo(PROBLEM, n=2000, seed=42)
 Y = evaluate(jnp.asarray(X))
 
-result = gsax.pce.analyze(PROBLEM, jnp.asarray(X), Y).shapley()
+result = jaxgsa.pce.analyze(PROBLEM, jnp.asarray(X), Y).shapley()
 print("Sh:", result.Sh)              # (D,) Shapley effects
 print("sum:", result.Sh.sum())       # == 1 (Shapley efficiency property)
 print("explained:", result.explained_variance)  # fraction of Var(Y) captured
@@ -238,7 +238,7 @@ print("ST:", result.ST)              # (D,) total-order — S1 <= Sh <= ST per p
 
 # Both backends accept scalar (N,), multi-output (N, K), and
 # time-series (N, T, K) Y; backend="hdmr" swaps in the B-spline surrogate
-result_hdmr = gsax.hdmr.analyze(PROBLEM, jnp.asarray(X), Y).shapley()
+result_hdmr = jaxgsa.hdmr.analyze(PROBLEM, jnp.asarray(X), Y).shapley()
 ```
 
 ### HSIC (kernel-based dependence)
@@ -249,13 +249,13 @@ pairs, including correlated inputs.
 
 ```python
 import jax.numpy as jnp
-import gsax
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
-X = gsax.sampling.monte_carlo(PROBLEM, n=2000, seed=42)
+X = jaxgsa.sampling.monte_carlo(PROBLEM, n=2000, seed=42)
 Y = evaluate(jnp.asarray(X))
 
-result = gsax.hsic.analyze(PROBLEM, jnp.asarray(X), Y)
+result = jaxgsa.hsic.analyze(PROBLEM, jnp.asarray(X), Y)
 print("R2-HSIC:", result.R2_HSIC)    # (D,) normalized first-order dependence
 print("Total HSIC:", result.T_HSIC)  # (D,) dependence through interactions
 print("p-values:", result.p_values)  # permutation-test significance
@@ -272,13 +272,13 @@ sampling is needed.
 
 ```python
 import jax.numpy as jnp
-import gsax
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
-X = gsax.sampling.monte_carlo(PROBLEM, n=5000, seed=42)
+X = jaxgsa.sampling.monte_carlo(PROBLEM, n=5000, seed=42)
 Y = evaluate(jnp.asarray(X))
 
-result = gsax.pawn.analyze(PROBLEM, jnp.asarray(X), Y, statistic="median")
+result = jaxgsa.pawn.analyze(PROBLEM, jnp.asarray(X), Y, statistic="median")
 print("PAWN:", result.pawn)  # (D,) median KS distance across conditioning bins
 ```
 
@@ -291,13 +291,13 @@ points.
 
 ```python
 import jax.numpy as jnp
-import gsax
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
-sr = gsax.morris.sample(PROBLEM, n_trajectories=50, seed=42)
+sr = jaxgsa.morris.sample(PROBLEM, n_trajectories=50, seed=42)
 Y = evaluate(jnp.asarray(sr.samples))
 
-result = gsax.morris.analyze(sr, Y)
+result = jaxgsa.morris.analyze(sr, Y)
 print("mu_star:", result.mu_star)  # (D,) mean |elementary effect| — importance
 print("sigma:", result.sigma)      # (D,) spread — nonlinearity/interactions
 ```
@@ -312,13 +312,13 @@ the first-order Sobol index estimated from the same data partition.
 
 ```python
 import jax.numpy as jnp
-import gsax
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
-X = gsax.sampling.monte_carlo(PROBLEM, n=5000, seed=42)
+X = jaxgsa.sampling.monte_carlo(PROBLEM, n=5000, seed=42)
 Y = evaluate(jnp.asarray(X))
 
-result = gsax.borgonovo.analyze(PROBLEM, jnp.asarray(X), Y)
+result = jaxgsa.borgonovo.analyze(PROBLEM, jnp.asarray(X), Y)
 print("delta:", result.delta)  # (D,) bias-corrected delta indices
 print("S1:", result.S1)        # (D,) given-data first-order Sobol
 ```
@@ -337,20 +337,20 @@ unchanged.
 
 ```python
 import jax.numpy as jnp
-import gsax
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
-X = gsax.sampling.monte_carlo(PROBLEM, n=5000, seed=42)
+X = jaxgsa.sampling.monte_carlo(PROBLEM, n=5000, seed=42)
 Y = evaluate(jnp.asarray(X))
 
-result = gsax.optimal_transport.analyze(PROBLEM, jnp.asarray(X), Y)
+result = jaxgsa.optimal_transport.analyze(PROBLEM, jnp.asarray(X), Y)
 print("ot:", result.ot)                # (D,) total index
 print("advective:", result.advective)  # mean-shift part (= S1 / 2)
 print("diffusive:", result.diffusive)  # spread/shape part
 
 # Time-series outputs: one index per input over each output's whole
 # trajectory (point-cloud transport via pure-JAX Sinkhorn)
-# result = gsax.optimal_transport.analyze(PROBLEM, X, Y_tk, mode="trajectory")
+# result = jaxgsa.optimal_transport.analyze(PROBLEM, X, Y_tk, mode="trajectory")
 ```
 
 ## Usage
@@ -360,7 +360,7 @@ print("diffusive:", result.diffusive)  # spread/shape part
 A `Problem` specifies the parameter names and their bounds:
 
 ```python
-from gsax import Problem
+from jaxgsa import Problem
 
 # From a dictionary
 problem = Problem.from_dict({
@@ -379,7 +379,7 @@ problem = Problem(
 ### Generate samples
 
 ```python
-sampling_result = gsax.sobol.sample(
+sampling_result = jaxgsa.sobol.sample(
     problem,
     n_samples=4096,          # minimum desired unique model evaluations
     calc_second_order=True,  # include second-order indices (default)
@@ -400,9 +400,9 @@ If you want to generate samples once and reuse them later, persist the
 ```python
 sampling_result.save("runs/ishigami_samples")
 
-restored = gsax.sobol.SobolSamples.load("runs/ishigami_samples")
+restored = jaxgsa.sobol.SobolSamples.load("runs/ishigami_samples")
 Y = my_model(restored.samples)
-result = gsax.sobol.analyze(restored, Y)
+result = jaxgsa.sobol.analyze(restored, Y)
 ```
 
 The call writes `runs/ishigami_samples.npz`, containing the unique sample
@@ -420,7 +420,7 @@ matrix, problem definition, and Saltelli reconstruction metadata.
 # time-varying output and make len(problem.output_names) match K.
 Y = my_model(sampling_result.samples)
 
-result = gsax.sobol.analyze(
+result = jaxgsa.sobol.analyze(
     sampling_result,
     Y,
     prenormalize=False,  # optional SALib-style output standardization
@@ -437,7 +437,7 @@ analysis, SALib-style; the default `False` analyzes the raw outputs. For
 confidence intervals, set `num_resamples > 0` and choose how the bootstrap
 distribution is summarized: `ci_method="quantile"` gives percentile
 lower/upper endpoints, `ci_method="gaussian"` gives symmetric endpoints from
-the bootstrap standard deviation. Either way gsax returns endpoint arrays,
+the bootstrap standard deviation. Either way jaxgsa returns endpoint arrays,
 not SALib-style confidence half-widths — even when `prenormalize=True`.
 
 ### Multi-output models
@@ -453,7 +453,7 @@ def multi_output_model(X):
     return jnp.column_stack([y1, y2])
 
 Y = multi_output_model(sampling_result.samples)  # (n_runs, 2)
-result = gsax.sobol.analyze(sampling_result, Y)
+result = jaxgsa.sobol.analyze(sampling_result, Y)
 # result.S1.shape == (2, 3)  — 2 outputs, 3 parameters (K, D)
 # result.ST.shape == (2, 3)  — (K, D)
 # result.S2.shape == (2, 3, 3)  — (K, D, D)
@@ -467,7 +467,7 @@ def time_series_model(X):
     ...
 
 Y = time_series_model(sampling_result.samples)  # (n_runs, 50, 4)
-result = gsax.sobol.analyze(sampling_result, Y)
+result = jaxgsa.sobol.analyze(sampling_result, Y)
 # result.S1.shape == (50, 4, D)  — (T, K, D)
 # result.ST.shape == (50, 4, D)  — (T, K, D)
 # result.S2.shape == (50, 4, D, D)  — (T, K, D, D)
@@ -480,13 +480,13 @@ How a 2D array is interpreted depends on `problem.output_names`. Without it, a 2
 ```python
 # Single output, no time dimension — pass a 1D array
 Y = my_model(X)          # shape (n_runs,)
-result = gsax.sobol.analyze(sampling_result, Y)
+result = jaxgsa.sobol.analyze(sampling_result, Y)
 # result.S1.shape == (D,)
 
 # Single output WITH time dimension — reshape to (N, T, 1) ...
 Y = my_model(X)          # shape (n_runs, T) — e.g. 50 timesteps
 Y = Y[:, :, None]        # reshape to (n_runs, 50, 1)
-result = gsax.sobol.analyze(sampling_result, Y)
+result = jaxgsa.sobol.analyze(sampling_result, Y)
 # result.S1.shape == (50, 1, D)  — (T, K=1, D)
 
 # ... or set output_names=["y"] on the problem and pass (N, T) directly:
@@ -495,23 +495,23 @@ result = gsax.sobol.analyze(sampling_result, Y)
 
 # Multiple outputs, single timestep — just pass (N, K)
 Y = my_model(X)          # shape (n_runs, 4) — 4 outputs
-result = gsax.sobol.analyze(sampling_result, Y)
+result = jaxgsa.sobol.analyze(sampling_result, Y)
 # result.S1.shape == (4, D)  — (K, D)
 # No need for a time dimension; (N, 1, 4) also works but is unnecessary.
 ```
 
-gsax also resolves layouts that are off but unambiguously recoverable — a transposed `(K, N)` array, or a 3D `(N, K, T)` array whose middle axis matches `len(output_names)` — fixing them with a `UserWarning` that names the transformation. Ambiguous layouts raise; gsax never guesses.
+jaxgsa also resolves layouts that are off but unambiguously recoverable — a transposed `(K, N)` array, or a 3D `(N, K, T)` array whose middle axis matches `len(output_names)` — fixing them with a `UserWarning` that names the transformation. Ambiguous layouts raise; jaxgsa never guesses.
 
 ---
 
 ## API Reference
 
 The full site reference now lives at
-[danielepessina.github.io/gsax/api/](https://danielepessina.github.io/gsax/api/).
+[danielepessina.github.io/jaxgsa/api/](https://danielepessina.github.io/jaxgsa/api/).
 
 Use it for:
 
-- the complete exported surface from `gsax`
+- the complete exported surface from `jaxgsa`
 - parameter, field, and shape contracts
 - validation and error behavior
 - `to_dataset()` labeling rules
@@ -520,27 +520,27 @@ Use it for:
 Quick map:
 
 - `Problem`, `UniformInputSpec`, and `GaussianInputSpec`
-- `gsax.sobol`: `sample` / `analyze` / `SobolSamples` / `SobolResult`
-- `gsax.sampling`: `monte_carlo`
-- `gsax.hdmr`: `analyze` / `HDMRResult`
-- `gsax.pce`: `analyze` / `PCEResult`
-- `gsax.shapley`: `analyze` / `ShapleyResult`
-- `gsax.efast`: `sample` / `analyze` / `EFASTResult` / `EFASTSamples`
-- `gsax.dgsm`: `analyze` / `DGSMResult` / `poincare_constant` / `axis_constants`
-- `gsax.morris`: `sample` / `analyze` / `MorrisResult` / `MorrisSamples`
-- `gsax.hsic`: `analyze` / `HSICResult`
-- `gsax.pawn`: `analyze` / `PAWNResult`
-- `gsax.borgonovo`: `analyze` / `DeltaResult`
-- `gsax.optimal_transport`: `analyze` / `OTResult`
+- `jaxgsa.sobol`: `sample` / `analyze` / `SobolSamples` / `SobolResult`
+- `jaxgsa.sampling`: `monte_carlo`
+- `jaxgsa.hdmr`: `analyze` / `HDMRResult`
+- `jaxgsa.pce`: `analyze` / `PCEResult`
+- `jaxgsa.shapley`: `analyze` / `ShapleyResult`
+- `jaxgsa.efast`: `sample` / `analyze` / `EFASTResult` / `EFASTSamples`
+- `jaxgsa.dgsm`: `analyze` / `DGSMResult` / `poincare_constant` / `axis_constants`
+- `jaxgsa.morris`: `sample` / `analyze` / `MorrisResult` / `MorrisSamples`
+- `jaxgsa.hsic`: `analyze` / `HSICResult`
+- `jaxgsa.pawn`: `analyze` / `PAWNResult`
+- `jaxgsa.borgonovo`: `analyze` / `DeltaResult`
+- `jaxgsa.optimal_transport`: `analyze` / `OTResult`
 
 Commands are intentionally not duplicated at the package root. Use the method
 namespaces shown above. PCE and HDMR predictions and Shapley effects are result
 methods: `result.predict(...)` and `result.shapley(...)`.
 
 For runnable walkthroughs, start with the
-[Getting Started guide](https://danielepessina.github.io/gsax/guide/getting-started)
+[Getting Started guide](https://danielepessina.github.io/jaxgsa/guide/getting-started)
 and the
-[examples section](https://danielepessina.github.io/gsax/examples/basic).
+[examples section](https://danielepessina.github.io/jaxgsa/examples/basic).
 
 ---
 
@@ -561,11 +561,11 @@ See [LICENSE](LICENSE) for details.
 
 ## Benchmark Results
 
-gsax vs SALib on a coupled-oscillator model (D=5 parameters, N=1024 base samples), Apple M1 Pro CPU, JAX 0.10.2. Every timing is the best of 5 runs, except the slow SALib HDMR path (best of 2). gsax figures are post-JIT steady-state: the one-off XLA compile — roughly 0.3–1.1 s depending on scenario — is paid once per process and excluded here, whereas SALib (pure NumPy/SciPy) requires no compilation. The timing tables below cover the two methods timed against SALib here (Sobol and RS-HDMR); the other methods (PCE, Shapley, eFAST, DGSM, Morris, HSIC, PAWN, Borgonovo delta, and optimal transport) are validated for correctness but not timed here. Borgonovo delta also has a direct SALib counterpart, `SALib.analyze.delta`, and is validated against it in the test suite.
+jaxgsa vs SALib on a coupled-oscillator model (D=5 parameters, N=1024 base samples), Apple M1 Pro CPU, JAX 0.10.2. Every timing is the best of 5 runs, except the slow SALib HDMR path (best of 2). jaxgsa figures are post-JIT steady-state: the one-off XLA compile — roughly 0.3–1.1 s depending on scenario — is paid once per process and excluded here, whereas SALib (pure NumPy/SciPy) requires no compilation. The timing tables below cover the two methods timed against SALib here (Sobol and RS-HDMR); the other methods (PCE, Shapley, eFAST, DGSM, Morris, HSIC, PAWN, Borgonovo delta, and optimal transport) are validated for correctness but not timed here. Borgonovo delta also has a direct SALib counterpart, `SALib.analyze.delta`, and is validated against it in the test suite.
 
 ### Sobol — point estimates (no bootstrap)
 
-| Scenario (T×K) | Method | gsax (ms) | SALib (ms) | Speedup |
+| Scenario (T×K) | Method | jaxgsa (ms) | SALib (ms) | Speedup |
 |---|---|---:|---:|---:|
 | 1×1 | analyze (no S2) | 0.7 | 0.2 | 0.3× |
 | 1×1 | analyze (S2) | 0.9 | 0.9 | **0.9×** |
@@ -578,7 +578,7 @@ gsax vs SALib on a coupled-oscillator model (D=5 parameters, N=1024 base samples
 
 ### Sobol — 300 bootstrap resamples
 
-| Scenario (T×K) | Method | gsax (ms) | SALib (ms) | Speedup |
+| Scenario (T×K) | Method | jaxgsa (ms) | SALib (ms) | Speedup |
 |---|---|---:|---:|---:|
 | 1×1 | analyze (no S2) | 8.2 | 22.2 | **2.7×** |
 | 1×1 | analyze (S2) | 11.1 | 88.4 | **8.0×** |
@@ -591,16 +591,16 @@ gsax vs SALib on a coupled-oscillator model (D=5 parameters, N=1024 base samples
 
 ### HDMR
 
-| Scenario (T×K) | gsax (ms) | SALib (ms) | Speedup |
+| Scenario (T×K) | jaxgsa (ms) | SALib (ms) | Speedup |
 |---|---:|---:|---:|
 | 1×1 | 18.3 | 89.3 | **4.9×** |
 | 1×6 | 18.8 | 506.1 | **26.9×** |
 | 50×1 | 20.9 | 4000.7 | **191.6×** |
 | 50×6 | 39.0 | 26063.1 | **667.7×** |
 
-The speedup grows with output dimensionality because SALib loops over each (T, K) slice in Python while gsax vectorizes with `jax.vmap`. With bootstrap, JIT reuse across resamples adds further gains.
+The speedup grows with output dimensionality because SALib loops over each (T, K) slice in Python while jaxgsa vectorizes with `jax.vmap`. With bootstrap, JIT reuse across resamples adds further gains.
 
-Correctness is validated against analytical Ishigami solutions and SALib on every run. Full benchmark script: [`benchmark_salib.py`](https://github.com/DanielePessina/gsax/blob/master/benchmark_salib.py). See the [docs](https://danielepessina.github.io/gsax/guide/benchmarks) for methodology details.
+Correctness is validated against analytical Ishigami solutions and SALib on every run. Full benchmark script: [`benchmark_salib.py`](https://github.com/DanielePessina/jaxgsa/blob/master/benchmark_salib.py). See the [docs](https://danielepessina.github.io/jaxgsa/guide/benchmarks) for methodology details.
 
 ```bash
 uv run --extra dev benchmark_salib.py

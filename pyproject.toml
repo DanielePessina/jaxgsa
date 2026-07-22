@@ -1,5 +1,5 @@
 [project]
-name = "gsax"
+name = "jaxgsa"
 version = "0.4.0"
 description = "Global Sensitivity Analysis in JAX"
 readme = "README.md"
@@ -39,11 +39,11 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/DanielePessina/gsax"
-Repository = "https://github.com/DanielePessina/gsax"
-Documentation = "https://danielepessina.github.io/gsax/"
-Issues = "https://github.com/DanielePessina/gsax/issues"
-Changelog = "https://github.com/DanielePessina/gsax/blob/master/CHANGELOG.md"
+Homepage = "https://github.com/DanielePessina/jaxgsa"
+Repository = "https://github.com/DanielePessina/jaxgsa"
+Documentation = "https://danielepessina.github.io/jaxgsa/"
+Issues = "https://github.com/DanielePessina/jaxgsa/issues"
+Changelog = "https://github.com/DanielePessina/jaxgsa/blob/master/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [
@@ -71,7 +71,7 @@ dev = [
 # Surface deprecations early: promote every DeprecationWarning/FutureWarning to
 # a test failure so upcoming API removals (JAX especially) are caught in CI
 # instead of passing silently. Module-scoping does NOT work for this — JAX emits
-# its deprecations with a stacklevel pointing at the *caller* (gsax/tests), not
+# its deprecations with a stacklevel pointing at the *caller* (jaxgsa/tests), not
 # at a `jax.*` module — so we go global and ignore-list the known, non-actionable
 # third-party deprecations we don't control. Ignore entries come last so they
 # take precedence over the blanket `error` rules above.

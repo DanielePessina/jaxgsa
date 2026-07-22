@@ -7,9 +7,9 @@ The canonical API reference now lives at [API Reference](/api/).
 
 Jump directly to:
 
-- [`gsax.sampling.monte_carlo()`](/api/#given-data-methods)
-- [`gsax.pawn.analyze()`](/api/#given-data-methods)
-- [`gsax.pawn.PAWNResult`](/api/#given-data-methods)
+- [`jaxgsa.sampling.monte_carlo()`](/api/#given-data-methods)
+- [`jaxgsa.pawn.analyze()`](/api/#given-data-methods)
+- [`jaxgsa.pawn.PAWNResult`](/api/#given-data-methods)
 
 Related docs:
 

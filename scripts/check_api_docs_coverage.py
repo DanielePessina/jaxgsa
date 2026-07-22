@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate namespace coverage for the public gsax surface."""
+"""Validate namespace coverage for the public jaxgsa surface."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 API_DOC = ROOT / "docs" / "api" / "index.md"
-INIT_FILE = ROOT / "src" / "gsax" / "__init__.py"
+INIT_FILE = ROOT / "src" / "jaxgsa" / "__init__.py"
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 HTML_ID_RE = re.compile(r'<a\s+id="([^"]+)"', re.IGNORECASE)
 
@@ -42,7 +42,7 @@ def _load_exports() -> list[str]:
                             raise ValueError("__all__ entries must be literal strings")
                         exports.append(elt.value)
                     return exports
-    raise ValueError("Could not find __all__ in src/gsax/__init__.py")
+    raise ValueError("Could not find __all__ in src/jaxgsa/__init__.py")
 
 
 def _build_required_entries() -> list[str]:

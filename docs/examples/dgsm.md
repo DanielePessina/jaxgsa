@@ -20,15 +20,15 @@ When to use DGSM:
 
 ## Import style
 
-The DGSM module lives at `gsax.dgsm`:
+The DGSM module lives at `jaxgsa.dgsm`:
 
 ```python
-from gsax import dgsm
+from jaxgsa import dgsm
 # dgsm.analyze(...)
 ```
 
-Note that `monte_carlo` is in `gsax.sampling`, not in `gsax.dgsm`. It is
-called as `gsax.sampling.monte_carlo()`.
+Note that `monte_carlo` is in `jaxgsa.sampling`, not in `jaxgsa.dgsm`. It is
+called as `jaxgsa.sampling.monte_carlo()`.
 
 ## Key difference from other methods
 
@@ -37,26 +37,26 @@ DGSM requires an **unbatched** function with signature `(D,) -> ()` or
 used by Sobol, HDMR, and eFAST which accept `(N, D)` input arrays.
 
 The unbatched signature is needed because `jax.jacrev` differentiates a
-single-input function. Internally, `gsax.dgsm.analyze` vectorizes the autodiff
+single-input function. Internally, `jaxgsa.dgsm.analyze` vectorizes the autodiff
 over all N samples.
 
 ## Scalar example (Ishigami)
 
 ```python
 import jax.numpy as jnp
-import gsax
-from gsax.benchmarks.ishigami import PROBLEM
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM
 
 # Define an UNBATCHED function: (D,) -> ()
 def ishigami(x):
     return jnp.sin(x[0]) + 7.0 * jnp.sin(x[1])**2 + 0.1 * x[2]**4 * jnp.sin(x[0])
 
 # Generate Monte Carlo samples
-X = gsax.sampling.monte_carlo(PROBLEM, n=10000, seed=42)
+X = jaxgsa.sampling.monte_carlo(PROBLEM, n=10000, seed=42)
 print("X shape:", X.shape)  # (10000, 3)
 
 # Compute DGSM indices
-result = gsax.dgsm.analyze(PROBLEM, ishigami, jnp.asarray(X))
+result = jaxgsa.dgsm.analyze(PROBLEM, ishigami, jnp.asarray(X))
 
 print("nu:", result.nu)                # (D,) = (3,)
 print("sigma:", result.sigma)          # (D,) = (3,)
@@ -72,9 +72,9 @@ index arrays have shape `(K, D)`.
 
 ```python
 import jax.numpy as jnp
-import gsax
+import jaxgsa
 
-problem = gsax.Problem.from_dict(
+problem = jaxgsa.Problem.from_dict(
     {
         "x1": (-3.14159, 3.14159),
         "x2": (-3.14159, 3.14159),
@@ -91,8 +91,8 @@ def multi_output_fn(x):
     return jnp.array([a, b])
 
 
-X = gsax.sampling.monte_carlo(problem, n=10000, seed=42)
-result = gsax.dgsm.analyze(problem, multi_output_fn, jnp.asarray(X))
+X = jaxgsa.sampling.monte_carlo(problem, n=10000, seed=42)
+result = jaxgsa.dgsm.analyze(problem, multi_output_fn, jnp.asarray(X))
 
 print("nu shape:", result.nu.shape)            # (K, D) = (2, 3)
 print("upper_bound shape:", result.upper_bound.shape)  # (K, D) = (2, 3)
@@ -127,7 +127,7 @@ D is always the last axis of the index arrays.
 
 - DGSM requires a **JAX-differentiable** function. If your model is not
   differentiable in JAX, you can pre-compute the Jacobian externally and pass
-  `Y` and `dfdx` arrays directly to `gsax.dgsm.analyze()`.
+  `Y` and `dfdx` arrays directly to `jaxgsa.dgsm.analyze()`.
 - The Poincare upper bound can be loose for strongly nonlinear or non-monotone
   responses. The bound becomes tight when the model is nearly monotone in a
   given input.

@@ -9,11 +9,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from gsax.benchmarks import ishigami, linear, sobol_g
-from gsax.dgsm import analyze
-from gsax.dgsm._poincare import axis_constants, marginal_variance, poincare_constant
-from gsax.problem import GaussianInputSpec, Problem
-from gsax.sampling import monte_carlo
+from jaxgsa.benchmarks import ishigami, linear, sobol_g
+from jaxgsa.dgsm import analyze
+from jaxgsa.dgsm._poincare import axis_constants, marginal_variance, poincare_constant
+from jaxgsa.problem import GaussianInputSpec, Problem
+from jaxgsa.sampling import monte_carlo
 
 A, B = 7.0, 0.1
 
@@ -74,13 +74,13 @@ class TestPoincare:
         assert C > 0.0
 
     def test_spectral_recovers_uniform(self):
-        from gsax.dgsm._poincare import _truncnorm_poincare
+        from jaxgsa.dgsm._poincare import _truncnorm_poincare
 
         got = _truncnorm_poincare(0.0, 1e6, -math.pi, math.pi, 512)
         assert got == pytest.approx(4.0, rel=2e-3)
 
     def test_spectral_wide_gaussian_collapses_to_sigma2(self):
-        from gsax.dgsm._poincare import _truncnorm_poincare
+        from jaxgsa.dgsm._poincare import _truncnorm_poincare
 
         sigma = 1.3
         got = _truncnorm_poincare(0.0, sigma, -6 * sigma, 6 * sigma, 700)

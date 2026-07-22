@@ -1,6 +1,6 @@
 # Methods
 
-gsax implements eleven methods for global sensitivity analysis (GSA). All of them answer the same broad question — which input parameters actually drive my model's output? — but they differ in what exactly they measure, how many model evaluations they cost, and whether they need a dedicated sampling design or can work with data you already have.
+jaxgsa implements eleven methods for global sensitivity analysis (GSA). All of them answer the same broad question — which input parameters actually drive my model's output? — but they differ in what exactly they measure, how many model evaluations they cost, and whether they need a dedicated sampling design or can work with data you already have.
 
 If you're new to the package, start with [Choosing a Method](#choosing-a-method), then jump to the section for the method you picked. Each method section opens with what it measures and when you'd choose it, followed by the estimator details.
 
@@ -10,7 +10,7 @@ Throughout this page, $D$ is the number of input parameters and $N$ is a sample 
 
 Three questions narrow the field quickly.
 
-**1. Can you still choose where to run the model?** Four methods need their own sampling design, which gsax generates for you: Sobol' (Saltelli matrices), eFAST (search curves), Morris (trajectories), and DGSM (plain Monte Carlo plus autodiff). The other seven — HDMR, PCE, Shapley effects, HSIC, PAWN, Borgonovo delta, and optimal transport — are **given-data** methods: they accept any set of $(X, Y)$ pairs, including simulation runs you already have.
+**1. Can you still choose where to run the model?** Four methods need their own sampling design, which jaxgsa generates for you: Sobol' (Saltelli matrices), eFAST (search curves), Morris (trajectories), and DGSM (plain Monte Carlo plus autodiff). The other seven — HDMR, PCE, Shapley effects, HSIC, PAWN, Borgonovo delta, and optimal transport — are **given-data** methods: they accept any set of $(X, Y)$ pairs, including simulation runs you already have.
 
 **2. What should the number mean?** Variance-based methods (Sobol', HDMR, PCE, eFAST, Shapley) report *fractions of output variance* — "parameter 3 explains 40% of the output's spread". Screening methods (Morris, DGSM) trade that precision for cheap, reliable *rankings*. Moment-independent methods (HSIC, PAWN, Borgonovo delta, optimal transport) measure how strongly an input affects the *whole output distribution* — the right lens when your output is skewed or heavy-tailed and variance feels like the wrong summary; optimal transport additionally splits its index into a mean-shift and a shape-change part.
 
@@ -95,7 +95,7 @@ where $\mathbf{X}_{\sim i}$ denotes all inputs except $X_i$. By construction, $S
 
 ## Sobol' Indices via Saltelli Sampling
 
-This is the reference method and gsax's default workflow: exact, model-free variance decomposition with well-understood convergence. Pick it when you can afford a dedicated sampling design and your inputs are independent. gsax uses the **Saltelli sampling scheme** (Saltelli 2002, 2010), which arranges quasi-random sample matrices so that first-order ($S_1$), total-order ($S_T$), and second-order ($S_2$) indices can all be estimated from a single batch of model evaluations.
+This is the reference method and jaxgsa's default workflow: exact, model-free variance decomposition with well-understood convergence. Pick it when you can afford a dedicated sampling design and your inputs are independent. jaxgsa uses the **Saltelli sampling scheme** (Saltelli 2002, 2010), which arranges quasi-random sample matrices so that first-order ($S_1$), total-order ($S_T$), and second-order ($S_2$) indices can all be estimated from a single batch of model evaluations.
 
 ### The Pick-Freeze Sampling Scheme
 
@@ -105,7 +105,7 @@ The cost is $N(D + 2)$ model evaluations for all first-order and total-order ind
 
 ### Estimators
 
-gsax implements the following estimators:
+jaxgsa implements the following estimators:
 
 **First-order** — Saltelli (2010):
 
@@ -123,11 +123,11 @@ $$
 
 ### How to use it
 
-1. `gsax.sobol.sample()` generates the Sobol' quasi-random sequence and builds the Saltelli cross-matrices. Duplicate rows are removed so your model only evaluates unique input points.
+1. `jaxgsa.sobol.sample()` generates the Sobol' quasi-random sequence and builds the Saltelli cross-matrices. Duplicate rows are removed so your model only evaluates unique input points.
 2. You evaluate your model on `sampling_result.samples`.
-3. `gsax.sobol.analyze()` reconstructs the Saltelli layout internally and computes all indices in a single `jit(vmap(...))` pass.
+3. `jaxgsa.sobol.analyze()` reconstructs the Saltelli layout internally and computes all indices in a single `jit(vmap(...))` pass.
 
-Two optional knobs align results with SALib. `gsax.sobol.analyze(..., prenormalize=True)` applies SALib-style output standardization once per output slice before computing the estimators, which changes the point-estimate path to match SALib more closely. When bootstrapping (`num_resamples > 0`), `ci_method="quantile"` reports percentile bootstrap bounds and `ci_method="gaussian"` reports symmetric bounds from the bootstrap standard deviation; either way, gsax returns explicit lower/upper endpoint arrays rather than SALib's symmetric confidence widths.
+Two optional knobs align results with SALib. `jaxgsa.sobol.analyze(..., prenormalize=True)` applies SALib-style output standardization once per output slice before computing the estimators, which changes the point-estimate path to match SALib more closely. When bootstrapping (`num_resamples > 0`), `ci_method="quantile"` reports percentile bootstrap bounds and `ci_method="gaussian"` reports symmetric bounds from the bootstrap standard deviation; either way, jaxgsa returns explicit lower/upper endpoint arrays rather than SALib's symmetric confidence widths.
 
 ### Index summary
 
@@ -165,7 +165,7 @@ This distinction matters because many real-world models have correlated inputs (
 ### How to use it
 
 1. You provide any set of $(X, Y)$ pairs — no sampling design required.
-2. `gsax.hdmr.analyze()` maps inputs to $[0, 1]$ via their marginal CDFs, optionally standardises outputs once over the sample axis (`prenormalize=True`), builds B-spline basis matrices, and fits component functions via backfitting with Tikhonov regularisation.
+2. `jaxgsa.hdmr.analyze()` maps inputs to $[0, 1]$ via their marginal CDFs, optionally standardises outputs once over the sample axis (`prenormalize=True`), builds B-spline basis matrices, and fits component functions via backfitting with Tikhonov regularisation.
 3. The ANCOVA decomposition splits each component's variance into structural ($S_a$) and correlative ($S_b$) parts. Total-order indices ($S_T$) sum contributions from all terms involving a given parameter.
 
 When prenormalization is enabled, the surrogate is trained on standardized
@@ -193,7 +193,7 @@ PCE is the second given-data, surrogate-based route to Sobol indices: it fits an
 ### How to use it
 
 1. You provide any set of $(X, Y)$ pairs; `Y` may be scalar `(N,)`, multi-output `(N, K)`, or time-series `(N, T, K)` — all output slices share one polynomial basis and are fitted in a single solve.
-2. `gsax.pce.analyze()` maps inputs to the appropriate reference domain, builds the design matrix from a total-degree multi-index, and fits coefficients via regularized least squares.
+2. `jaxgsa.pce.analyze()` maps inputs to the appropriate reference domain, builds the design matrix from a total-degree multi-index, and fits coefficients via regularized least squares.
 3. Sobol indices ($S_1$, $S_T$, $S_2$) are computed analytically from the squared coefficients.
 4. Leave-one-out cross-validation RMSE quantifies surrogate accuracy.
 
@@ -220,18 +220,18 @@ so a main-effect variance $V_i$ is attributed entirely to parameter $i$, a pairw
 - **Bracketing**: $S_{1,i} \leq \mathrm{Sh}_i \leq S_{T,i}$ — the Shapley effect always lies between the first-order and total-order Sobol indices.
 - **Exact partition**: unlike $S_1$ (which omits interactions, so $\sum_i S_{1,i} \leq 1$) and $S_T$ (which counts each interaction once per participant, so $\sum_i S_{T,i} \geq 1$), Shapley effects split every interaction fairly and sum to exactly 1 with no gaps or double counting.
 
-**Independence assumption (v1 limitation)**: gsax currently assumes **independent inputs**. The Shapley value is particularly attractive for dependent inputs — where Sobol indices lose their clean interpretation — but the dependent-input formulation requires conditional-variance estimation and is future work. Do not rely on the indices when inputs are strongly correlated.
+**Independence assumption (v1 limitation)**: jaxgsa currently assumes **independent inputs**. The Shapley value is particularly attractive for dependent inputs — where Sobol indices lose their clean interpretation — but the dependent-input formulation requires conditional-variance estimation and is future work. Do not rely on the indices when inputs are strongly correlated.
 
-### How gsax computes them
+### How jaxgsa computes them
 
-gsax computes Shapley effects **analytically** from a fitted surrogate's variance decomposition — no permutation Monte Carlo, no conditional-variance sampling, and no external `shap` dependency:
+jaxgsa computes Shapley effects **analytically** from a fitted surrogate's variance decomposition — no permutation Monte Carlo, no conditional-variance sampling, and no external `shap` dependency:
 
 - **`backend="pce"`** (default) fits a polynomial chaos expansion and groups the squared orthonormal coefficients by the support of their multi-index (Sudret, 2008) — exact within the fitted polynomial.
 - **`backend="hdmr"`** fits the RS-HDMR B-spline surrogate and uses the structural ($S_a$) variances of its component functions as the partial variances $V_u$, truncated at `maxorder`.
 
 Both backends accept scalar `(N,)`, multi-output `(N, K)`, and time-series `(N, T, K)` `Y`.
 
-Normalization is by the surrogate's **total decomposed variance** $\sum_u V_u$, so $\sum_i \mathrm{Sh}_i = 1$ exactly — the Shapley efficiency property (Owen, 2014). $S_1$ and $S_T$ from the same surrogate use the same denominator, so for `backend="pce"` they match `gsax.pce.analyze` exactly, while for `backend="hdmr"` they differ from `gsax.hdmr.analyze` (which normalizes by $\mathrm{Var}(Y)$) by a factor of `explained_variance`.
+Normalization is by the surrogate's **total decomposed variance** $\sum_u V_u$, so $\sum_i \mathrm{Sh}_i = 1$ exactly — the Shapley efficiency property (Owen, 2014). $S_1$ and $S_T$ from the same surrogate use the same denominator, so for `backend="pce"` they match `jaxgsa.pce.analyze` exactly, while for `backend="hdmr"` they differ from `jaxgsa.hdmr.analyze` (which normalizes by $\mathrm{Var}(Y)$) by a factor of `explained_variance`.
 
 How much of the *output* variance the surrogate actually captured is reported separately in the `explained_variance` field, $\sum_u V_u / \mathrm{Var}(Y)$: close to 1 for a good fit, below 1 when truncation or fit error leaves variance unexplained, and above 1 when an overfit surrogate over-counts shared variance — an honest diagnostic rather than a silently renormalized result. A `UserWarning` is emitted when it strays far from 1. Interactions above `maxorder` (HDMR) or the polynomial order (PCE) are absent from the allocation.
 
@@ -244,14 +244,14 @@ How much of the *output* variance the surrogate actually captured is reported se
 
 ```python
 import jax.numpy as jnp
-import gsax
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
-X = gsax.sampling.monte_carlo(PROBLEM, n=2000, seed=42)
+X = jaxgsa.sampling.monte_carlo(PROBLEM, n=2000, seed=42)
 Y = evaluate(jnp.asarray(X))
 
 # PCE backend (default) — exact within the fitted polynomial
-result = gsax.pce.analyze(PROBLEM, jnp.asarray(X), Y).shapley()
+result = jaxgsa.pce.analyze(PROBLEM, jnp.asarray(X), Y).shapley()
 print("Sh:", result.Sh)              # (D,) Shapley effects
 print("sum:", result.Sh.sum())       # == 1 (Shapley efficiency property)
 print("explained:", result.explained_variance)  # sum_u V_u / Var(Y) — fit quality
@@ -260,7 +260,7 @@ print("S1:", result.S1)              # first-order, same surrogate
 print("ST:", result.ST)              # total-order, same surrogate
 
 # HDMR backend — B-spline surrogate; HDMR-only knobs
-result_hdmr = gsax.hdmr.analyze(
+result_hdmr = jaxgsa.hdmr.analyze(
     PROBLEM,
     jnp.asarray(X),
     Y,
@@ -319,9 +319,9 @@ The low-frequency content at or below $\lfloor\omega_0/2\rfloor$ is driven entir
 
 ### How to use it
 
-1. `gsax.efast.sample(problem, n_per_curve, ...)` returns an `EFASTSamples` design whose `samples` array has shape `(n_per_curve * D, D)`, where each contiguous block of `n_per_curve` rows corresponds to one parameter's search curve.
+1. `jaxgsa.efast.sample(problem, n_per_curve, ...)` returns an `EFASTSamples` design whose `samples` array has shape `(n_per_curve * D, D)`, where each contiguous block of `n_per_curve` rows corresponds to one parameter's search curve.
 2. You evaluate your model on all `n_per_curve * D` rows of `samples.samples`, in order.
-3. `gsax.efast.analyze(samples, Y)` splits the output by curve, computes the Fourier spectrum for each, and extracts $S_1$ and $S_T$ indices. The interference factor `M` and the problem travel inside the `EFASTSamples` object, so they can never be mismatched between sampling and analysis.
+3. `jaxgsa.efast.analyze(samples, Y)` splits the output by curve, computes the Fourier spectrum for each, and extracts $S_1$ and $S_T$ indices. The interference factor `M` and the problem travel inside the `EFASTSamples` object, so they can never be mismatched between sampling and analysis.
 
 ### Index summary
 
@@ -394,12 +394,12 @@ The Poincaré constant depends on the marginal distribution of each input:
 | Gaussian $\mathcal{N}(\mu, \sigma^2)$ | $\sigma^2$ |
 | Truncated Normal | Spectral solve (P1 finite-element Neumann eigenproblem) |
 
-For truncated normal inputs, the constant is computed numerically by solving a weighted eigenproblem on a finite-element grid. gsax handles this automatically when the input spec declares truncation bounds.
+For truncated normal inputs, the constant is computed numerically by solving a weighted eigenproblem on a finite-element grid. jaxgsa handles this automatically when the input spec declares truncation bounds.
 
 ### How to use it
 
-1. `gsax.sampling.monte_carlo()` generates plain Monte Carlo samples from the declared input distributions.
-2. You pass your JAX-differentiable function and the samples to `gsax.dgsm.analyze()`.
+1. `jaxgsa.sampling.monte_carlo()` generates plain Monte Carlo samples from the declared input distributions.
+2. You pass your JAX-differentiable function and the samples to `jaxgsa.dgsm.analyze()`.
 3. Internally, `jax.jacrev` computes the Jacobian via reverse-mode autodiff, and the DGSM moments and bounds are derived.
 4. The returned `DGSMResult` contains `nu`, `sigma`, `upper_bound`, `lower_bound`, and `var_y`.
 
@@ -438,7 +438,7 @@ $$
 EE_i = \frac{f(\mathbf{x} + \Delta \mathbf{e}_i) - f(\mathbf{x})}{\Delta}
 $$
 
-where $\mathbf{e}_i$ is the unit vector along input $i$ and $\Delta$ is the step in unit-cube coordinates. gsax implements two designs:
+where $\mathbf{e}_i$ is the unit vector along input $i$ and $\Delta$ is the step in unit-cube coordinates. jaxgsa implements two designs:
 
 - **Trajectory design** (Morris 1991, default): each trajectory is a random walk on a $p$-level grid (`num_levels`, default 4) with the canonical step $\Delta = p / (2(p-1))$, visiting inputs in a random order.
 - **Radial design** (Campolongo et al. 2011, `method="radial"`): star designs around scrambled-Sobol' base points, where each elementary effect compares a one-coordinate swap against the shared base point with a per-step $\Delta_i = b_i - a_i$.
@@ -453,17 +453,17 @@ The $r$ elementary effects per input are reduced to three screening measures:
 
 The canonical output is the **$\mu^*$–$\sigma$ scatter plot**: parameters near the origin are negligible, parameters far along the $\mu^*$ axis are influential, and parameters high above the diagonal act mainly through nonlinearity or interactions.
 
-Morris is closely related to DGSM: as $\Delta \to 0$, $\mu^*_i \to \mathbb{E}|\partial f / \partial x_i|$, so Morris is the black-box, macro-step analog of gsax's DGSM — use DGSM when the model is JAX-differentiable, Morris when it is not.
+Morris is closely related to DGSM: as $\Delta \to 0$, $\mu^*_i \to \mathbb{E}|\partial f / \partial x_i|$, so Morris is the black-box, macro-step analog of jaxgsa's DGSM — use DGSM when the model is JAX-differentiable, Morris when it is not.
 
 ### How to use it
 
-1. `gsax.morris.sample()` builds the trajectories, removes exact duplicate rows (grid designs collide often in low dimensions, so this saves real model evaluations, just like Saltelli sampling), and returns only the unique rows.
+1. `jaxgsa.morris.sample()` builds the trajectories, removes exact duplicate rows (grid designs collide often in low dimensions, so this saves real model evaluations, just like Saltelli sampling), and returns only the unique rows.
 2. You evaluate your model on `sampling_result.samples`.
-3. `gsax.morris.analyze()` reconstructs the expanded design internally, drops trajectories containing non-finite values with a warning, and reduces one elementary effect per trajectory and parameter to $\mu$, $\mu^*$, and $\sigma$. Pass `num_resamples > 0` (with a JAX PRNG `key`) for bootstrap confidence intervals over trajectories.
+3. `jaxgsa.morris.analyze()` reconstructs the expanded design internally, drops trajectories containing non-finite values with a warning, and reduces one elementary effect per trajectory and parameter to $\mu$, $\mu^*$, and $\sigma$. Pass `num_resamples > 0` (with a JAX PRNG `key`) for bootstrap confidence intervals over trajectories.
 
 Elementary effects are computed in unit-cube coordinates, so $\mu^*$ is directly comparable across parameters regardless of their physical ranges; `MorrisResult.to_physical_units()` rescales to derivative-scale values in the problem's native units (uniform-marginal problems only — for Gaussian marginals the inverse-CDF transform is nonlinear, so the measures stay in grid coordinates). `MorrisSamples.downsample()` prefix-slices to fewer trajectories without re-simulation, mirroring `SobolSamples.downsample()`.
 
-Compared to SALib's Morris implementation, gsax adds unique-row deduplication, vectorized multi-output and time-series analysis (SALib's Morris is scalar-only), bootstrap confidence intervals, the radial design, and prefix-nested downsampling.
+Compared to SALib's Morris implementation, jaxgsa adds unique-row deduplication, vectorized multi-output and time-series analysis (SALib's Morris is scalar-only), bootstrap confidence intervals, the radial design, and prefix-nested downsampling.
 
 ### Index summary
 
@@ -492,7 +492,7 @@ HSIC measures the statistical **dependence** between each input and the output �
 
 ### The HSIC Dependence Measure
 
-Each input $X_i$ and the output $Y$ are passed through a characteristic kernel — a Gaussian RBF whose bandwidth is set automatically by the **median heuristic** (the median pairwise distance between sample points). Writing $\mathbf{K}$ and $\mathbf{L}$ for the two $N \times N$ kernel matrices, gsax uses the biased V-statistic estimator
+Each input $X_i$ and the output $Y$ are passed through a characteristic kernel — a Gaussian RBF whose bandwidth is set automatically by the **median heuristic** (the median pairwise distance between sample points). Writing $\mathbf{K}$ and $\mathbf{L}$ for the two $N \times N$ kernel matrices, jaxgsa uses the biased V-statistic estimator
 
 $$
 \widehat{\mathrm{HSIC}}(X_i, Y) = \frac{1}{N^2}\,\mathrm{tr}(\mathbf{K}\mathbf{H}\mathbf{L}\mathbf{H}), \qquad \mathbf{H} = \mathbf{I} - \tfrac{1}{N}\mathbf{1}\mathbf{1}^\top
@@ -502,7 +502,7 @@ where $\mathbf{H}$ is the centering matrix. For characteristic kernels, $\mathrm
 
 ### First-Order and Total Indices
 
-gsax reports two normalised indices per parameter.
+jaxgsa reports two normalised indices per parameter.
 
 **R2-HSIC** (first-order) — the normalised dependence between input $i$ and the output, in $[0, 1]$; read it as a kernel analogue of a squared correlation coefficient (centred kernel alignment):
 
@@ -516,13 +516,13 @@ Unlike Sobol indices, R2-HSIC values are individual dependence measures and do *
 
 ### Permutation p-values
 
-Because HSIC is a dependence measure rather than a variance fraction, gsax attaches a **permutation test** to each first-order index: the output labels are randomly shuffled `n_perms` times to build a null distribution of HSIC values, and the p-value uses the Phipson–Smyth correction $(c + 1)/(M + 1)$, where $M$ is the number of permutations (`n_perms`) and $c$ counts permuted HSIC values at least as large as the observed one. A small p-value (< 0.05) indicates a statistically significant dependence between the input and the output.
+Because HSIC is a dependence measure rather than a variance fraction, jaxgsa attaches a **permutation test** to each first-order index: the output labels are randomly shuffled `n_perms` times to build a null distribution of HSIC values, and the p-value uses the Phipson–Smyth correction $(c + 1)/(M + 1)$, where $M$ is the number of permutations (`n_perms`) and $c$ counts permuted HSIC values at least as large as the observed one. A small p-value (< 0.05) indicates a statistically significant dependence between the input and the output.
 
 ### How to use it
 
-1. `gsax.sampling.monte_carlo()` generates plain Monte Carlo samples — any sampling strategy works, since no structured design is required.
+1. `jaxgsa.sampling.monte_carlo()` generates plain Monte Carlo samples — any sampling strategy works, since no structured design is required.
 2. You evaluate your model on the samples.
-3. `gsax.hsic.analyze()` transforms each input to $[0, 1]$ via its marginal CDF, builds the kernel matrices with the median heuristic, and computes all indices and p-values in a single JIT-compiled pass.
+3. `jaxgsa.hsic.analyze()` transforms each input to $[0, 1]$ via its marginal CDF, builds the kernel matrices with the median heuristic, and computes all indices and p-values in a single JIT-compiled pass.
 
 HSIC is $O(N^2)$ in time and memory because it forms $N \times N$ kernel matrices; for large $N$, pass `batch_size` to build them in row blocks and limit peak memory. For outputs of large magnitude, set `prenormalize=True` to standardise $Y$ before kernel construction.
 
@@ -572,9 +572,9 @@ Because it is built on CDFs rather than moments, the PAWN index is **moment-inde
 
 ### How to use it
 
-1. `gsax.sampling.monte_carlo()` generates plain Monte Carlo samples (Monte Carlo, Latin Hypercube, or Sobol sequences all work — no structured design required).
+1. `jaxgsa.sampling.monte_carlo()` generates plain Monte Carlo samples (Monte Carlo, Latin Hypercube, or Sobol sequences all work — no structured design required).
 2. You evaluate your model on the samples.
-3. `gsax.pawn.analyze()` maps each input to $[0, 1]$, assigns samples to bins, and computes the per-bin KS distances and their aggregate in a single JIT-compiled pass. Pass `n_bootstrap > 0` for bootstrap confidence intervals.
+3. `jaxgsa.pawn.analyze()` maps each input to $[0, 1]$, assigns samples to bins, and computes the per-bin KS distances and their aggregate in a single JIT-compiled pass. Pass `n_bootstrap > 0` for bootstrap confidence intervals.
 
 The number of bins (`n_bins`, default 10) trades conditioning resolution against sample density per bin; with very few samples per bin the KS statistic becomes noisy, so increase $N$ or decrease `n_bins`.
 
@@ -596,7 +596,7 @@ Pianosi, F. & Wagener, T. (2015). A simple and efficient method for global sensi
 
 ## Borgonovo Delta (Density-Based Sensitivity)
 
-Borgonovo's $\delta$ index is the second **moment-independent** method in gsax, and the natural companion to PAWN: where PAWN summarises a distributional shift by the largest gap between CDFs, $\delta$ measures the expected **L1 distance between the entire output density** and the output density conditional on an input (Borgonovo, 2007). Pick it when you want a distribution-based index on a fixed $[0, 1]$ scale, or as a drop-in, faster replacement for `SALib.analyze.delta`:
+Borgonovo's $\delta$ index is the second **moment-independent** method in jaxgsa, and the natural companion to PAWN: where PAWN summarises a distributional shift by the largest gap between CDFs, $\delta$ measures the expected **L1 distance between the entire output density** and the output density conditional on an input (Borgonovo, 2007). Pick it when you want a distribution-based index on a fixed $[0, 1]$ scale, or as a drop-in, faster replacement for `SALib.analyze.delta`:
 
 $$
 \delta_i = \frac{1}{2}\,\mathbb{E}_{X_i}\!\left[\int \left| f_Y(y) - f_{Y \mid X_i}(y) \right| \mathrm{d}y \right]
@@ -606,7 +606,7 @@ The index is $0$ when fixing $X_i$ never changes the output distribution, and $1
 
 ### How it works
 
-gsax implements the given-data estimator of Plischke, Borgonovo & Smith (2013):
+jaxgsa implements the given-data estimator of Plischke, Borgonovo & Smith (2013):
 
 1. For each input, the samples are ordered by that input's rank and split into $M$ **equal-frequency classes**. By default $M$ follows the Plischke sample-size heuristic (roughly $N^{2/7}$, at most 48 classes); override it with `n_classes`.
 2. The unconditional density $f_Y$ and each class-conditional density $f_{Y \mid X_i \in \mathcal{C}_m}$ are estimated by **Gaussian KDE** with Silverman bandwidths on a fixed grid of `grid_size` points spanning $[\min Y, \max Y]$.
@@ -616,7 +616,7 @@ $$
 \hat{\delta}_i = \sum_{m=1}^{M} \frac{n_m}{2N} \int \left| \hat{f}_Y(y) - \hat{f}_{Y \mid X_i \in \mathcal{C}_m}(y) \right| \mathrm{d}y
 $$
 
-The plug-in estimate is **biased upward** at finite $N$, so by default gsax applies Plischke's bootstrap bias reduction $2\hat{\delta}_i - \overline{\hat{\delta}_i^{(b)}}$ over `n_bootstrap` resamples, with percentile confidence intervals from the same replicates. Because this correction subtracts a bootstrap mean from twice the plug-in estimate, the reported $\delta$ (and its percentile-interval bounds) can fall marginally below $0$ for weak or near-noninfluential inputs at small $N$, even though the true index and the plug-in estimate both lie in $[0, 1]$.
+The plug-in estimate is **biased upward** at finite $N$, so by default jaxgsa applies Plischke's bootstrap bias reduction $2\hat{\delta}_i - \overline{\hat{\delta}_i^{(b)}}$ over `n_bootstrap` resamples, with percentile confidence intervals from the same replicates. Because this correction subtracts a bootstrap mean from twice the plug-in estimate, the reported $\delta$ (and its percentile-interval bounds) can fall marginally below $0$ for weak or near-noninfluential inputs at small $N$, even though the true index and the plug-in estimate both lie in $[0, 1]$.
 
 The same class partition also yields the **given-data first-order Sobol index** (variance of the class means over the total variance) at negligible extra cost, so every analysis returns both $\delta$ and $S_1$.
 
@@ -624,9 +624,9 @@ The estimator matches `SALib.analyze.delta` (same equal-frequency rank partition
 
 ### How to use it
 
-1. `gsax.sampling.monte_carlo()` generates plain Monte Carlo samples (any sampling strategy works — no structured design is required).
+1. `jaxgsa.sampling.monte_carlo()` generates plain Monte Carlo samples (any sampling strategy works — no structured design is required).
 2. You evaluate your model on the samples.
-3. `gsax.borgonovo.analyze()` partitions each input into rank classes and computes $\delta$, $S_1$, and their bootstrap intervals in a single JIT-compiled kernel, vmapped over output columns and scanned over bootstrap replicates.
+3. `jaxgsa.borgonovo.analyze()` partitions each input into rank classes and computes $\delta$, $S_1$, and their bootstrap intervals in a single JIT-compiled kernel, vmapped over output columns and scanned over bootstrap replicates.
 
 Set `n_bootstrap=0` to skip bias correction and confidence intervals (raw plug-in estimate), or `bias_correct=False` to keep the intervals but report the uncorrected estimate. For large time-series outputs, lower `slice_chunk_size` to bound peak memory, which scales with `slice_chunk_size * D * N * grid_size`.
 
@@ -673,8 +673,8 @@ Entropic and finite-sample bias keep point-cloud-mode indices of irrelevant inpu
 
 ### How to use it
 
-1. `gsax.sampling.monte_carlo()` or any existing $(X, Y)$ data — no structured design required.
-2. `gsax.optimal_transport.analyze()` computes `ot`, `advective`, and `diffusive` per input (and per output column in `"univariate"` mode), with optional stratified bootstrap confidence intervals.
+1. `jaxgsa.sampling.monte_carlo()` or any existing $(X, Y)$ data — no structured design required.
+2. `jaxgsa.optimal_transport.analyze()` computes `ot`, `advective`, and `diffusive` per input (and per output column in `"univariate"` mode), with optional stratified bootstrap confidence intervals.
 
 Pick the mode by the question: `"univariate"` for per-column indices across `(N,)`/`(N, K)`/`(N, T, K)` outputs, `"multivariate"` for one index per input over the flattened joint output, `"trajectory"` for one index per input per output over the whole time course. Bootstrap in the point-cloud modes costs `n_bootstrap * D * n_partitions` Sinkhorn solves, so keep it modest.
 
@@ -711,13 +711,13 @@ D is always the last axis. Confidence interval arrays (when using bootstrap) pre
 
 How a 2-D `Y` is read depends on `problem.output_names`. Without it, a 2-D `Y` is always `(N, K)` — multiple outputs, no time dimension. With exactly **one** entry in `output_names` and more than one column, a 2-D `(N, M)` `Y` is read as `M` timepoints of that single labeled output and flows through as `(N, M, 1)`, keeping the labeled output axis in results; a lone column `(N, 1)` stays a scalar output `(N, K=1)` (pass `(N, 1, 1)` explicitly for a genuine 1-timepoint series). With several entries, the column count must equal `len(output_names)`. A 1-D `(N,)` `Y` is one output regardless of how many names are declared.
 
-You need not pass exactly the canonical layout: every public entry point resolves `Y` through the same inference ladder. Exact canonical shapes pass silently; unambiguously recoverable layouts — a transposed `(K, N)` array, or a 3-D `(N, K, T)` array whose middle axis matches `len(output_names)` — are fixed with a `UserWarning` naming the transformation; ambiguous layouts raise. gsax never guesses.
+You need not pass exactly the canonical layout: every public entry point resolves `Y` through the same inference ladder. Exact canonical shapes pass silently; unambiguously recoverable layouts — a transposed `(K, N)` array, or a 3-D `(N, K, T)` array whose middle axis matches `len(output_names)` — are fixed with a `UserWarning` naming the transformation; ambiguous layouts raise. jaxgsa never guesses.
 
 Time-series outputs are particularly useful for dynamic models, where the evolution of sensitivity indices over time can reveal which parameters dominate at different stages of a process — for example, a parameter that is highly influential early in a batch but negligible later.
 
 ## Data Cleaning
 
-`gsax.sobol.analyze()` automatically drops sample groups that contain non-finite values (NaN, Inf). The Saltelli layout requires groups of rows to stay together, so if any row in a group is non-finite, the entire group is removed. A message is printed when this happens. The `nan_counts` field on the result reports how many NaN values remain in the computed indices.
+`jaxgsa.sobol.analyze()` automatically drops sample groups that contain non-finite values (NaN, Inf). The Saltelli layout requires groups of rows to stay together, so if any row in a group is non-finite, the entire group is removed. A message is printed when this happens. The `nan_counts` field on the result reports how many NaN values remain in the computed indices.
 
 ## References
 

@@ -7,11 +7,11 @@ order.
 ## Minimal Sobol run
 
 ```python
-import gsax
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
 # Generate Saltelli samples (unique rows only)
-sampling_result = gsax.sobol.sample(
+sampling_result = jaxgsa.sobol.sample(
     PROBLEM,
     n_samples=4096,
     seed=42,
@@ -22,7 +22,7 @@ sampling_result = gsax.sobol.sample(
 Y = evaluate(sampling_result.samples)
 
 # Compute Sobol indices
-result = gsax.sobol.analyze(sampling_result, Y)
+result = jaxgsa.sobol.analyze(sampling_result, Y)
 
 print("S1:", result.S1)
 print("ST:", result.ST)
@@ -58,7 +58,7 @@ np.savetxt("samples.csv", sampling_result.samples, delimiter=",")
 
 ## Practical caveats
 
-- Evaluate `sampling_result.samples`, not an expanded Saltelli matrix. `gsax`
+- Evaluate `sampling_result.samples`, not an expanded Saltelli matrix. `jaxgsa`
   reconstructs the expanded layout internally.
 - `calc_second_order=False` is a good speed and memory tradeoff when you only
   need `S1` and `ST`. In that case `result.S2` is `None`.

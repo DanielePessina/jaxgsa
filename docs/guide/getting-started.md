@@ -1,6 +1,6 @@
 # Getting Started
 
-gsax answers a practical question: **which of your model's inputs actually
+jaxgsa answers a practical question: **which of your model's inputs actually
 drive its output?** You give it a set of input samples and the outputs your
 model produced for them; it returns sensitivity indices that rank the inputs
 and expose interactions between them. Everything is computed in JAX, so the
@@ -8,27 +8,27 @@ analysis is JIT-compiled and runs on CPU, GPU, or TPU without code changes.
 
 This page walks through one complete analysis with Sobol indices, the most
 widely used method. Once it runs, the [Methods guide](/guide/methods) explains
-how to choose among the eleven methods gsax provides.
+how to choose among the eleven methods jaxgsa provides.
 
 ## Installation
 
 ```bash
-pip install gsax
+pip install jaxgsa
 # or, with uv:
-uv add gsax
+uv add jaxgsa
 ```
 
 To install the latest development version from GitHub:
 
 ```bash
-pip install git+https://github.com/DanielePessina/gsax.git
+pip install git+https://github.com/DanielePessina/jaxgsa.git
 ```
 
 For local development:
 
 ```bash
-git clone https://github.com/DanielePessina/gsax.git
-cd gsax
+git clone https://github.com/DanielePessina/jaxgsa.git
+cd jaxgsa
 uv sync --extra dev   # or: pip install -e ".[dev]"
 ```
 
@@ -41,18 +41,18 @@ own.
 
 ```python
 import jax.numpy as jnp
-import gsax
+import jaxgsa
 
 # 1. Define the problem: parameter names and their ranges
-problem = gsax.Problem.from_dict({
+problem = jaxgsa.Problem.from_dict({
     "x1": (-jnp.pi, jnp.pi),
     "x2": (-jnp.pi, jnp.pi),
     "x3": (-jnp.pi, jnp.pi),
 })
 
 # 2. Generate input samples. Sobol analysis needs a specific sample layout
-#    (a Saltelli design), so use gsax.sobol.sample() rather than random points.
-sampling_result = gsax.sobol.sample(problem, n_samples=4096, seed=42)
+#    (a Saltelli design), so use jaxgsa.sobol.sample() rather than random points.
+sampling_result = jaxgsa.sobol.sample(problem, n_samples=4096, seed=42)
 
 # 3. Evaluate your model at each sampled input
 def model(X):  # Ishigami test function — swap in your own model here
@@ -65,7 +65,7 @@ def model(X):  # Ishigami test function — swap in your own model here
 Y = model(sampling_result.samples)  # one output value per sample row
 
 # 4. Compute Sobol indices
-result = gsax.sobol.analyze(sampling_result, Y)
+result = jaxgsa.sobol.analyze(sampling_result, Y)
 
 print("S1:", result.S1)   # first-order indices
 print("ST:", result.ST)   # total-order indices
@@ -97,7 +97,7 @@ Each index is a fraction of the output variance, one value per parameter:
 A `Problem` specifies parameter names and bounds:
 
 ```python
-from gsax import Problem
+from jaxgsa import Problem
 
 problem = Problem.from_dict({
     "x1": (-3.14, 3.14),
@@ -114,17 +114,17 @@ the full `TypedDict` form and the Gaussian truncation rules.
 ## Save and Reuse Samples
 
 Generating samples and evaluating the model are often separate steps — the
-model may run on a cluster, or take hours. `gsax.sobol.sample()` returns a
+model may run on a cluster, or take hours. `jaxgsa.sobol.sample()` returns a
 `SobolSamples` that you can persist and reload later without losing the
-metadata `gsax.sobol.analyze()` needs:
+metadata `jaxgsa.sobol.analyze()` needs:
 
 ```python
-sampling_result = gsax.sobol.sample(problem, n_samples=4096, seed=42)
+sampling_result = jaxgsa.sobol.sample(problem, n_samples=4096, seed=42)
 sampling_result.save("runs/experiment")
 
-restored = gsax.sobol.SobolSamples.load("runs/experiment")
+restored = jaxgsa.sobol.SobolSamples.load("runs/experiment")
 Y = my_model(restored.samples)
-result = gsax.sobol.analyze(restored, Y)
+result = jaxgsa.sobol.analyze(restored, Y)
 ```
 
 This writes `runs/experiment.npz`, containing the sample matrix, problem

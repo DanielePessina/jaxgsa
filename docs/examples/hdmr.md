@@ -5,10 +5,10 @@ surrogate that can predict at new inputs.
 
 ## Import style
 
-The HDMR module lives at `gsax.hdmr`:
+The HDMR module lives at `jaxgsa.hdmr`:
 
 ```python
-from gsax import hdmr
+from jaxgsa import hdmr
 ```
 
 ## Sensitivity analysis from random samples
@@ -16,8 +16,8 @@ from gsax import hdmr
 ```python
 import jax
 import jax.numpy as jnp
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
-from gsax import hdmr
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
+from jaxgsa import hdmr
 
 key = jax.random.PRNGKey(42)
 bounds = jnp.array(PROBLEM.bounds)
@@ -69,7 +69,7 @@ predictions on the original output scale.
 - `hdmr.analyze()` accepts `(N,)`, `(N, K)`, and `(N, T, K)` outputs, so the
   same shape rules from [Multi-Output & Time-Series](/examples/multi-output)
   still apply.
-- Leave `prenormalize=False` to preserve the current gsax behavior. Enable it
+- Leave `prenormalize=False` to preserve the current jaxgsa behavior. Enable it
   when you want SALib-style output standardization before fitting.
 - HDMR does not use a structured Saltelli design; if you want exact Sobol
   estimators on independent inputs, start from [Basic Example](/examples/basic)

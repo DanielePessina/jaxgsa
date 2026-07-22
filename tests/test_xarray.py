@@ -5,10 +5,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-import gsax
-from gsax.hdmr import HDMRResult
-from gsax.problem import Problem
-from gsax.sobol._result import SobolResult
+import jaxgsa
+from jaxgsa.hdmr import HDMRResult
+from jaxgsa.problem import Problem
+from jaxgsa.sobol._result import SobolResult
 
 
 @pytest.fixture
@@ -155,7 +155,7 @@ class TestSAResultToDataset:
             {"x1": (0.0, 1.0), "x2": (0.0, 1.0), "x3": (0.0, 1.0)},
             output_names=("response",),
         )
-        sampling_result = gsax.sobol.sample(
+        sampling_result = jaxgsa.sobol.sample(
             problem,
             n_samples=256,
             calc_second_order=True,
@@ -165,7 +165,7 @@ class TestSAResultToDataset:
         X = jnp.asarray(sampling_result.samples)
         Y = 2.0 * X[:, 0] + 0.5 * X[:, 1] ** 2 + X[:, 0] * X[:, 2]
 
-        result = gsax.sobol.analyze(
+        result = jaxgsa.sobol.analyze(
             sampling_result,
             Y,
             num_resamples=20,

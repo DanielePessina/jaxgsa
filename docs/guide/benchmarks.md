@@ -1,15 +1,15 @@
 # Benchmarks
 
-This page covers two things: the **analytical test functions** shipped with gsax (useful for validating any sensitivity method against known ground truth) and **timing comparisons** against [SALib](https://salib.readthedocs.io/).
+This page covers two things: the **analytical test functions** shipped with jaxgsa (useful for validating any sensitivity method against known ground truth) and **timing comparisons** against [SALib](https://salib.readthedocs.io/).
 
 ## Test Functions
 
-gsax ships with analytical benchmark functions in `gsax.benchmarks`. Each
+jaxgsa ships with analytical benchmark functions in `jaxgsa.benchmarks`. Each
 submodule provides a `PROBLEM` definition, a batched `evaluate(X)` function,
 precomputed `ANALYTICAL_S1` / `ANALYTICAL_ST` / `ANALYTICAL_S2` arrays, and
 an `analytical_indices(...)` function for custom parameters.
 
-### `gsax.benchmarks.ishigami`
+### `jaxgsa.benchmarks.ishigami`
 
 The Ishigami function: $f(x) = \sin(x_1) + A \sin^2(x_2) + B x_3^4 \sin(x_1)$
 with $x_i \sim U[-\pi, \pi]$.
@@ -25,7 +25,7 @@ good test for methods that must distinguish $S_1 = 0$ from $S_T > 0$.
 | `analytical_indices(A=7.0, B=0.1)` | Returns `(S1, ST, S2)` arrays |
 | `ANALYTICAL_S1`, `ANALYTICAL_ST`, `ANALYTICAL_S2` | Precomputed for default A=7, B=0.1 |
 
-### `gsax.benchmarks.sobol_g`
+### `jaxgsa.benchmarks.sobol_g`
 
 The Sobol G-function: $g(\mathbf{x}) = \prod_{j=1}^{D} \frac{|4x_j - 2| + a_j}{1 + a_j}$
 with $x_j \sim U[0, 1]$.
@@ -41,7 +41,7 @@ $a_j$ makes it nearly inert. The default creates four importance tiers.
 | `analytical_indices(a=DEFAULT_A)` | Returns `(S1, ST, S2)` arrays |
 | `ANALYTICAL_S1`, `ANALYTICAL_ST`, `ANALYTICAL_S2` | Precomputed for default `a` |
 
-### `gsax.benchmarks.linear`
+### `jaxgsa.benchmarks.linear`
 
 Linear additive model: $f(\mathbf{x}) = \sum_{j} c_j x_j$ with $x_j \sim U[0, 1]$.
 
@@ -56,7 +56,7 @@ method correctly identifies zero interactions.
 | `analytical_indices(coeffs, bounds)` | Returns `(S1, ST, S2)` arrays |
 | `ANALYTICAL_S1`, `ANALYTICAL_ST`, `ANALYTICAL_S2` | Precomputed for default coefficients |
 
-### `gsax.benchmarks.gaussian_linear`
+### `jaxgsa.benchmarks.gaussian_linear`
 
 Gaussian linear additive model: $f(\mathbf{x}) = \sum_{j} c_j x_j$ with
 $x_j \sim \mathcal{N}(0, \sigma_j^2)$.
@@ -75,7 +75,7 @@ ground-truth benchmark for moment-independent (delta) estimators.
 | `analytical_delta(coeffs, variances, quad_order=61)` | Returns Borgonovo delta indices `(D,)` |
 | `ANALYTICAL_S1`, `ANALYTICAL_ST`, `ANALYTICAL_S2`, `ANALYTICAL_DELTA` | Precomputed for default coefficients |
 
-### `gsax.benchmarks.oakley_ohagan`
+### `jaxgsa.benchmarks.oakley_ohagan`
 
 Oakley and O'Hagan (2004) 15-dimensional Gaussian-input benchmark:
 $f(\mathbf{x}) = \mathbf{a}_1^\top \mathbf{x} + \mathbf{a}_2^\top \sin(\mathbf{x}) + \mathbf{a}_3^\top \cos(\mathbf{x}) + \mathbf{x}^\top M \mathbf{x}$
@@ -95,12 +95,12 @@ create a natural importance gradient across the 15 dimensions.
 ### Usage
 
 ```python
-import gsax
-from gsax.benchmarks import ishigami
+import jaxgsa
+from jaxgsa.benchmarks import ishigami
 
-sr = gsax.sobol.sample(ishigami.PROBLEM, n_samples=4096)
+sr = jaxgsa.sobol.sample(ishigami.PROBLEM, n_samples=4096)
 Y = ishigami.evaluate(sr.samples)
-result = gsax.sobol.analyze(sr, Y)
+result = jaxgsa.sobol.analyze(sr, Y)
 
 # Compare against analytical values
 print("S1 error:", abs(result.S1 - ishigami.ANALYTICAL_S1).max())
@@ -108,17 +108,17 @@ print("S1 error:", abs(result.S1 - ishigami.ANALYTICAL_S1).max())
 
 ## Timing Results
 
-gsax is benchmarked against [SALib](https://salib.readthedocs.io/) on a coupled-oscillator model with varying output shapes. What's timed is the **analysis step only** — computing indices from precomputed model outputs — not the model evaluations themselves. Three methods are compared: `gsax.sobol.analyze` (first/total order only), `gsax.sobol.analyze` (with second-order), and `gsax.hdmr.analyze`, each across four output-shape scenarios (T timepoints × K outputs), with and without bootstrap confidence intervals.
+jaxgsa is benchmarked against [SALib](https://salib.readthedocs.io/) on a coupled-oscillator model with varying output shapes. What's timed is the **analysis step only** — computing indices from precomputed model outputs — not the model evaluations themselves. Three methods are compared: `jaxgsa.sobol.analyze` (first/total order only), `jaxgsa.sobol.analyze` (with second-order), and `jaxgsa.hdmr.analyze`, each across four output-shape scenarios (T timepoints × K outputs), with and without bootstrap confidence intervals.
 
 **Machine:** Apple M1 Pro, CPU only (no GPU), JAX 0.10.2, Python 3.12.
 
-Every timing is the best of 5 runs on the same hardware and data, except the slow SALib HDMR path (best of 2). gsax figures are **post-JIT** (steady-state): the one-off XLA compile (~0.3–1.1 s depending on scenario) is paid once per process and excluded, while SALib (pure NumPy/SciPy) requires no compilation.
+Every timing is the best of 5 runs on the same hardware and data, except the slow SALib HDMR path (best of 2). jaxgsa figures are **post-JIT** (steady-state): the one-off XLA compile (~0.3–1.1 s depending on scenario) is paid once per process and excluded, while SALib (pure NumPy/SciPy) requires no compilation.
 
-The short version: for a single scalar output without bootstrap, gsax and SALib are comparable (SALib can even be faster, since gsax pays some JAX dispatch overhead). The gap opens as the output grows — multi-output, time-series, or bootstrap workloads run several times to several hundred times faster in gsax.
+The short version: for a single scalar output without bootstrap, jaxgsa and SALib are comparable (SALib can even be faster, since jaxgsa pays some JAX dispatch overhead). The gap opens as the output grows — multi-output, time-series, or bootstrap workloads run several times to several hundred times faster in jaxgsa.
 
 ### Sobol — no bootstrap
 
-| Scenario (T×K) | Method | gsax (ms) | SALib (ms) | Speedup |
+| Scenario (T×K) | Method | jaxgsa (ms) | SALib (ms) | Speedup |
 |---|---|---:|---:|---:|
 | 1×1 | analyze (no S2) | 0.7 | 0.2 | **0.3×** |
 | 1×1 | analyze (S2) | 0.9 | 0.9 | **0.9×** |
@@ -131,7 +131,7 @@ The short version: for a single scalar output without bootstrap, gsax and SALib 
 
 ### Sobol — 300 bootstrap resamples
 
-| Scenario (T×K) | Method | gsax (ms) | SALib (ms) | Speedup |
+| Scenario (T×K) | Method | jaxgsa (ms) | SALib (ms) | Speedup |
 |---|---|---:|---:|---:|
 | 1×1 | analyze (no S2) | 8.2 | 22.2 | **2.7×** |
 | 1×1 | analyze (S2) | 11.1 | 88.4 | **8.0×** |
@@ -144,25 +144,25 @@ The short version: for a single scalar output without bootstrap, gsax and SALib 
 
 ### HDMR
 
-| Scenario (T×K) | Method | gsax (ms) | SALib (ms) | Speedup |
+| Scenario (T×K) | Method | jaxgsa (ms) | SALib (ms) | Speedup |
 |---|---|---:|---:|---:|
 | 1×1 | hdmr.analyze | 18.3 | 89.3 | **4.9×** |
 | 1×6 | hdmr.analyze | 18.8 | 506.1 | **26.9×** |
 | 50×1 | hdmr.analyze | 20.9 | 4000.7 | **191.6×** |
 | 50×6 | hdmr.analyze | 39.0 | 26063.1 | **667.7×** |
 
-## Why gsax is faster
+## Why jaxgsa is faster
 
 **SALib** processes each `(t, k)` output slice in a Python loop. For a 50-timestep × 6-output model, that's 300 sequential calls to the Sobol analyzer.
 
-**gsax** uses:
+**jaxgsa** uses:
 
 - **Fused kernels** that compute the pooled variance once and derive all S1, ST, and S2 indices from it (instead of recomputing it D×2 times per output).
 - **Vectorized execution** via `jax.vmap` over all T×K output combinations in a single compiled pass.
 - **Scalar fast-path** for T×K=1 that bypasses vmap overhead entirely.
 - **JIT compilation** so repeated calls (e.g. bootstrap resamples or parameter sweeps) run at native speed.
 
-The speedup grows with T×K because SALib's per-slice overhead is linear while gsax's vectorized cost is nearly flat. With bootstrap enabled, JIT compilation pays off even more — resampled analyses reuse the same compiled kernel, while SALib re-runs pure Python each time.
+The speedup grows with T×K because SALib's per-slice overhead is linear while jaxgsa's vectorized cost is nearly flat. With bootstrap enabled, JIT compilation pays off even more — resampled analyses reuse the same compiled kernel, while SALib re-runs pure Python each time.
 
 ## Benchmark setup
 
@@ -174,7 +174,7 @@ The speedup grows with T×K because SALib's per-slice overhead is linear while g
 
 ## Reproducing
 
-The full benchmark script is at [`benchmark_salib.py`](https://github.com/DanielePessina/gsax/blob/master/benchmark_salib.py) in the repository root. It needs SALib, which ships in the `dev` extra. Run it locally:
+The full benchmark script is at [`benchmark_salib.py`](https://github.com/DanielePessina/jaxgsa/blob/master/benchmark_salib.py) in the repository root. It needs SALib, which ships in the `dev` extra. Run it locally:
 
 ```bash
 uv run --extra dev benchmark_salib.py

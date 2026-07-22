@@ -10,9 +10,9 @@ analysis, HDMR analysis, HDMR emulation, and labeled `xarray` export.
 import jax
 import jax.numpy as jnp
 import numpy as np
-import gsax
+import jaxgsa
 
-problem = gsax.Problem.from_dict(
+problem = jaxgsa.Problem.from_dict(
     {
         "amplitude": (0.5, 2.0),
         "frequency": (1.0, 5.0),
@@ -47,7 +47,7 @@ def model(X):
 ## Run Sobol analysis
 
 ```python
-sampling_result = gsax.sobol.sample(
+sampling_result = jaxgsa.sobol.sample(
     problem,
     n_samples=2048,
     seed=42,
@@ -57,7 +57,7 @@ sampling_result = gsax.sobol.sample(
 X_sobol = jnp.asarray(sampling_result.samples)
 Y_sobol = model(X_sobol)
 
-sobol = gsax.sobol.analyze(sampling_result, Y_sobol)
+sobol = jaxgsa.sobol.analyze(sampling_result, Y_sobol)
 
 print("Sobol S1 shape:", sobol.S1.shape)  # (T, K, D)
 print("Sobol ST shape:", sobol.ST.shape)  # (T, K, D)
@@ -77,7 +77,7 @@ X_hdmr = jax.random.uniform(
 )
 Y_hdmr = model(X_hdmr)
 
-hdmr = gsax.hdmr.analyze(problem, X_hdmr, Y_hdmr, maxorder=2)
+hdmr = jaxgsa.hdmr.analyze(problem, X_hdmr, Y_hdmr, maxorder=2)
 
 print("HDMR S1 shape:", hdmr.S1.shape)  # (T, K, D)
 print("HDMR ST shape:", hdmr.ST.shape)  # (T, K, D)

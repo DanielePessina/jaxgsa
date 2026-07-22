@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from gsax.sobol._indices import first_order, second_order, total_order
+from jaxgsa.sobol._indices import first_order, second_order, total_order
 
 
 def test_first_order_jit():

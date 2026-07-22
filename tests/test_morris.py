@@ -9,9 +9,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from gsax.benchmarks import ishigami, linear, sobol_g
-from gsax.morris import analyze, sample
-from gsax.problem import GaussianInputSpec, Problem
+from jaxgsa.benchmarks import ishigami, linear, sobol_g
+from jaxgsa.morris import analyze, sample
+from jaxgsa.problem import GaussianInputSpec, Problem
 
 UNIT_PROBLEM = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
 
@@ -146,7 +146,7 @@ class TestSampling:
             sample(UNIT_PROBLEM, n_trajectories=5, method=cast(Any, "star"), verbose=False)
 
     def test_radial_tiny_delta_raises(self, monkeypatch):
-        import gsax.morris._sampling as morris_sampling
+        import jaxgsa.morris._sampling as morris_sampling
 
         class DegenerateSobol:
             def __init__(self, d, scramble, seed):
@@ -343,7 +343,7 @@ class TestSALibParity:
         Y_unique = sobol_g.evaluate(jnp.asarray(sr.samples))
         res = analyze(sr, Y_unique)
 
-        # Re-expand to the full design; unit-cube bounds make gsax's samples
+        # Re-expand to the full design; unit-cube bounds make jaxgsa's samples
         # identical to unit-cube coordinates, sidestepping SALib's rescaling.
         X_expanded = sr.samples[sr.expanded_to_unique]
         Y_expanded = np.asarray(Y_unique)[sr.expanded_to_unique]

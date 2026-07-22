@@ -6,10 +6,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-import gsax
-from gsax.morris import MorrisSamples
-from gsax.problem import GaussianInputSpec, Problem
-from gsax.sobol import SobolSamples
+import jaxgsa
+from jaxgsa.morris import MorrisSamples
+from jaxgsa.problem import GaussianInputSpec, Problem
+from jaxgsa.sobol import SobolSamples
 
 
 def _assert_equal(left: SobolSamples, right: SobolSamples) -> None:
@@ -56,7 +56,7 @@ def test_npz_round_trip(tmp_path):
         },
         output_names=("response",),
     )
-    samples = gsax.sobol.sample(
+    samples = jaxgsa.sobol.sample(
         problem,
         64,
         calc_second_order=False,
@@ -73,7 +73,7 @@ def test_npz_round_trip(tmp_path):
 
 
 def test_explicit_npz_suffix_round_trip(tmp_path):
-    samples = gsax.sobol.sample(
+    samples = jaxgsa.sobol.sample(
         Problem.from_dict({"x": (0.0, 1.0)}),
         16,
         seed=2,
@@ -88,7 +88,7 @@ def test_explicit_npz_suffix_round_trip(tmp_path):
 
 def test_dotted_stem_appends_npz_suffix(tmp_path):
     """A dotted stem must gain '.npz' by appending, not by suffix replacement."""
-    samples = gsax.sobol.sample(
+    samples = jaxgsa.sobol.sample(
         Problem.from_dict({"x": (0.0, 1.0)}),
         16,
         seed=2,
@@ -106,8 +106,8 @@ def test_dotted_stem_appends_npz_suffix(tmp_path):
 def test_dotted_stems_do_not_collide(tmp_path):
     """Saving 'run.A' and 'run.B' must produce two distinct files."""
     problem = Problem.from_dict({"x": (0.0, 1.0), "y": (0.0, 1.0)})
-    samples_a = gsax.sobol.sample(problem, 32, seed=1, verbose=False)
-    samples_b = gsax.sobol.sample(problem, 64, seed=2, verbose=False)
+    samples_a = jaxgsa.sobol.sample(problem, 32, seed=1, verbose=False)
+    samples_b = jaxgsa.sobol.sample(problem, 64, seed=2, verbose=False)
 
     samples_a.save(tmp_path / "run.A")
     samples_b.save(tmp_path / "run.B")
@@ -121,7 +121,7 @@ def test_dotted_stems_do_not_collide(tmp_path):
 def test_identity_mapping_skips_index_array(tmp_path):
     """Designs without duplicate rows omit expanded_to_unique from the NPZ."""
     problem = Problem.from_dict({f"x{i}": (0.0, 1.0) for i in range(4)})
-    samples = gsax.sobol.sample(problem, 64, seed=3, verbose=False)
+    samples = jaxgsa.sobol.sample(problem, 64, seed=3, verbose=False)
     assert np.array_equal(samples.expanded_to_unique, np.arange(samples.n_expanded)), (
         "test premise: this design should have no duplicate rows"
     )
@@ -138,7 +138,7 @@ def test_identity_mapping_skips_index_array(tmp_path):
 
 def test_duplicate_rows_store_index_array(tmp_path):
     """Designs with duplicate rows still persist the full expansion map."""
-    samples = gsax.sobol.sample(
+    samples = jaxgsa.sobol.sample(
         Problem.from_dict({"x": (0.0, 1.0)}),
         16,
         seed=5,
@@ -158,8 +158,8 @@ def test_duplicate_rows_store_index_array(tmp_path):
     _assert_equal(samples, SobolSamples.load(path))
 
 
-def test_metadata_records_gsax_version(tmp_path):
-    samples = gsax.sobol.sample(
+def test_metadata_records_jaxgsa_version(tmp_path):
+    samples = jaxgsa.sobol.sample(
         Problem.from_dict({"x": (0.0, 1.0)}),
         16,
         seed=2,
@@ -169,8 +169,8 @@ def test_metadata_records_gsax_version(tmp_path):
 
     with np.load(tmp_path / "versioned.npz", allow_pickle=False) as data:
         meta = json.loads(data["metadata"].item())
-    assert isinstance(meta["gsax_version"], str)
-    assert meta["gsax_version"] != ""
+    assert isinstance(meta["jaxgsa_version"], str)
+    assert meta["jaxgsa_version"] != ""
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +196,7 @@ def _morris_problem() -> Problem:
 
 @pytest.mark.parametrize("method", ["trajectory", "radial"])
 def test_morris_npz_round_trip(tmp_path, method):
-    samples = gsax.morris.sample(
+    samples = jaxgsa.morris.sample(
         _morris_problem(),
         n_trajectories=8,
         method=method,
@@ -213,7 +213,7 @@ def test_morris_npz_round_trip(tmp_path, method):
 
 
 def test_morris_downsampled_round_trip(tmp_path):
-    samples = gsax.morris.sample(
+    samples = jaxgsa.morris.sample(
         _morris_problem(),
         n_trajectories=10,
         seed=7,
@@ -229,7 +229,7 @@ def test_morris_downsampled_round_trip(tmp_path):
 
 
 def test_morris_expand_outputs_after_load(tmp_path):
-    samples = gsax.morris.sample(
+    samples = jaxgsa.morris.sample(
         _morris_problem(),
         n_trajectories=6,
         seed=11,
@@ -248,7 +248,7 @@ def test_morris_expand_outputs_after_load(tmp_path):
 
 def test_morris_identity_mapping_skips_index_array(tmp_path):
     """Radial designs have no duplicate rows, so the index map is omitted."""
-    samples = gsax.morris.sample(
+    samples = jaxgsa.morris.sample(
         _morris_problem(),
         n_trajectories=8,
         method="radial",
@@ -272,8 +272,8 @@ def test_morris_identity_mapping_skips_index_array(tmp_path):
 def test_sobol_and_morris_share_metadata_schema(tmp_path):
     """Both NPZ formats carry the same base-owned metadata keys."""
     problem = _morris_problem()
-    sobol_samples = gsax.sobol.sample(problem, 32, seed=1, verbose=False)
-    morris_samples = gsax.morris.sample(problem, n_trajectories=6, seed=1, verbose=False)
+    sobol_samples = jaxgsa.sobol.sample(problem, 32, seed=1, verbose=False)
+    morris_samples = jaxgsa.morris.sample(problem, n_trajectories=6, seed=1, verbose=False)
 
     sobol_samples.save(tmp_path / "schema_sobol")
     morris_samples.save(tmp_path / "schema_morris")
@@ -285,11 +285,11 @@ def test_sobol_and_morris_share_metadata_schema(tmp_path):
             assert "metadata" in data.files
             metas[name] = json.loads(data["metadata"].item())
 
-    common_keys = {"gsax_version", "problem", "n_expanded", "identity_mapping"}
+    common_keys = {"jaxgsa_version", "problem", "n_expanded", "identity_mapping"}
     for meta in metas.values():
         assert common_keys <= set(meta)
         assert set(meta["problem"]) == {"names", "input_specs", "output_names"}
 
     # The shared (base-owned) part of the schema is identical across designs.
     assert metas["schema_sobol"]["problem"] == metas["schema_morris"]["problem"]
-    assert metas["schema_sobol"]["gsax_version"] == metas["schema_morris"]["gsax_version"]
+    assert metas["schema_sobol"]["jaxgsa_version"] == metas["schema_morris"]["jaxgsa_version"]

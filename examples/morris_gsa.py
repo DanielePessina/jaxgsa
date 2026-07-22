@@ -1,4 +1,4 @@
-"""Morris elementary-effects screening — gsax tutorial.
+"""Morris elementary-effects screening — jaxgsa tutorial.
 
 Demonstrates the Morris screening workflow on the Ishigami benchmark:
 trajectory sampling, the canonical mu_star-sigma plane, bootstrap
@@ -20,7 +20,7 @@ app = marimo.App(width="medium")
 @app.cell(hide_code=True)
 def _intro(mo):
     mo.md(r"""
-    # Morris elementary-effects screening with **gsax**
+    # Morris elementary-effects screening with **jaxgsa**
 
     The **Morris method** is a globalized one-at-a-time screening design.
     It builds $r$ trajectories of $D + 1$ points each; every step along a
@@ -40,7 +40,7 @@ def _intro(mo):
     | $\mu$ | signed mean $EE$ — sign cancellation ($\mu \ll \mu^*$) flags non-monotone response |
 
     At $r \times (D + 1)$ model evaluations (before deduplication), Morris
-    is the cheapest method in gsax — ideal for *factor fixing* before a
+    is the cheapest method in jaxgsa — ideal for *factor fixing* before a
     full variance-based analysis.  This notebook walks through:
 
     1. **Trajectory sampling** on the Ishigami benchmark
@@ -60,11 +60,11 @@ def _imports():
     import matplotlib.pyplot as plt
     import numpy as np
 
-    import gsax
-    from gsax.benchmarks import ishigami
+    import jaxgsa
+    from jaxgsa.benchmarks import ishigami
 
     plt.rcParams["figure.dpi"] = 150
-    return gsax, ishigami, jax, jnp, mo, np, plt
+    return jaxgsa, ishigami, jax, jnp, mo, np, plt
 
 
 @app.cell(hide_code=True)
@@ -74,32 +74,32 @@ def _ishigami_md(mo):
 
     The Ishigami function $f(x_1, x_2, x_3) = \sin x_1 + 7\sin^2 x_2
     + 0.1\,x_3^4 \sin x_1$ has three inputs uniform on $[-\pi, \pi]$.
-    The workflow mirrors the other gsax methods:
+    The workflow mirrors the other jaxgsa methods:
 
-    1. **Sample** — `gsax.morris.sample` builds $r = 100$ trajectories on
+    1. **Sample** — `jaxgsa.morris.sample` builds $r = 100$ trajectories on
        the default `num_levels=4` grid and returns only the **unique** rows
        to evaluate.
     2. **Evaluate** — run the model on `sr.samples`.
-    3. **Analyse** — `gsax.morris.analyze` reconstructs the expanded design
+    3. **Analyse** — `jaxgsa.morris.analyze` reconstructs the expanded design
        internally and reduces the elementary effects.
 
     Watch the verbose summary line printed by the sampler: it reports the
     **duplicate-row savings** from deduplication.  Trajectory points live
     on a coarse 4-level grid, so in 3-D the 400 expanded rows collapse to
-    just 64 unique model evaluations — an 84% saving that gsax banks
+    just 64 unique model evaluations — an 84% saving that jaxgsa banks
     automatically.
     """)
     return
 
 
 @app.cell
-def _ishigami_analysis(gsax, ishigami, jnp):
+def _ishigami_analysis(jaxgsa, ishigami, jnp):
     morris_problem = ishigami.PROBLEM
 
-    sr_traj = gsax.morris.sample(morris_problem, 100, seed=42)
+    sr_traj = jaxgsa.morris.sample(morris_problem, 100, seed=42)
     Y_traj = ishigami.evaluate(jnp.asarray(sr_traj.samples))
 
-    result_traj = gsax.morris.analyze(sr_traj, Y_traj)
+    result_traj = jaxgsa.morris.analyze(sr_traj, Y_traj)
     print(result_traj.to_dataset())
     return Y_traj, morris_problem, result_traj, sr_traj
 
@@ -186,8 +186,8 @@ def _bootstrap_md(mo):
 
 
 @app.cell
-def _bootstrap(Y_traj, gsax, jax, morris_problem, np, plt, sr_traj):
-    result_ci = gsax.morris.analyze(
+def _bootstrap(Y_traj, jaxgsa, jax, morris_problem, np, plt, sr_traj):
+    result_ci = jaxgsa.morris.analyze(
         sr_traj,
         Y_traj,
         num_resamples=500,
@@ -252,10 +252,10 @@ def _radial_md(mo):
 
 
 @app.cell
-def _radial_comparison(gsax, ishigami, jnp, morris_problem, np, plt, result_traj):
-    sr_radial = gsax.morris.sample(morris_problem, 100, method="radial", seed=42)
+def _radial_comparison(jaxgsa, ishigami, jnp, morris_problem, np, plt, result_traj):
+    sr_radial = jaxgsa.morris.sample(morris_problem, 100, method="radial", seed=42)
     Y_radial = ishigami.evaluate(jnp.asarray(sr_radial.samples))
-    result_radial = gsax.morris.analyze(sr_radial, Y_radial)
+    result_radial = jaxgsa.morris.analyze(sr_radial, Y_radial)
 
     _names = list(morris_problem.names)
     _x = np.arange(len(_names))
@@ -303,9 +303,9 @@ def _downsample_md(mo):
 
 
 @app.cell
-def _downsample(Y_traj, gsax, jnp, morris_problem, np, plt, result_traj, sr_traj):
+def _downsample(Y_traj, jaxgsa, jnp, morris_problem, np, plt, result_traj, sr_traj):
     sr_25, Y_25 = sr_traj.downsample(25, np.asarray(Y_traj))
-    result_25 = gsax.morris.analyze(sr_25, jnp.asarray(Y_25))
+    result_25 = jaxgsa.morris.analyze(sr_25, jnp.asarray(Y_25))
 
     _names = list(morris_problem.names)
     _mu_star_100 = np.asarray(result_traj.mu_star)

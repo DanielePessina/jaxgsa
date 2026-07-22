@@ -1,6 +1,6 @@
 import pytest
 
-from gsax.problem import GaussianInputSpec, Problem, UniformInputSpec
+from jaxgsa.problem import GaussianInputSpec, Problem, UniformInputSpec
 
 
 def test_from_dict_tuple_shorthand_still_produces_uniform_bounds():

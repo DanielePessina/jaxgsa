@@ -1,9 +1,9 @@
 import { defineConfig } from 'vitepress'
 
 export default defineConfig({
-  title: 'gsax',
+  title: 'jaxgsa',
   description: 'Global Sensitivity Analysis in JAX',
-  base: '/gsax/',
+  base: '/jaxgsa/',
   markdown: {
     math: true,
   },
@@ -49,7 +49,7 @@ export default defineConfig({
     },
 
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/danielepessina/gsax' },
+      { icon: 'github', link: 'https://github.com/danielepessina/jaxgsa' },
     ],
 
     search: {

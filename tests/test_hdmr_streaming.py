@@ -1,6 +1,6 @@
 """Tests for the row-streamed HDMR fit and its auto-engage policy.
 
-The streamed fit (``gsax.hdmr._stream``) accumulates the component-regression
+The streamed fit (``jaxgsa.hdmr._stream``) accumulates the component-regression
 Gram blocks, the ANCOVA covariances, and the F-test sums of squares over row
 batches; it must match the in-memory kernel to float32 tolerances on every
 public result field, pick the SAME F-test term set (selection is discrete),
@@ -15,10 +15,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-import gsax
-from gsax.benchmarks.ishigami import PROBLEM, evaluate
-from gsax.hdmr import _analyze as hdmr_analyze_mod
-from gsax.hdmr import analyze as analyze_hdmr
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
+from jaxgsa.hdmr import _analyze as hdmr_analyze_mod
+from jaxgsa.hdmr import analyze as analyze_hdmr
 
 # Streamed vs in-memory runs do the same float32 reductions in a different
 # order (row-batched Gram accumulation vs one full-N kernel), so agreement is
@@ -38,7 +38,7 @@ def _restore_memory_budget():
     ``set_memory_budget`` mutates process-global state; leaking a tiny test
     budget would silently switch other tests onto streamed paths.
     """
-    from gsax._core import batching
+    from jaxgsa._core import batching
 
     saved = batching._memory_budget_bytes
     yield
@@ -204,13 +204,13 @@ class TestAutoEngage:
         X, Y = ishigami_data
         counter = _StreamedFitCounter()
         monkeypatch.setattr(hdmr_analyze_mod, "_fit_hdmr_streamed", counter)
-        saved = gsax.config.get_memory_budget()
+        saved = jaxgsa.config.get_memory_budget()
         try:
-            gsax.config.set_memory_budget(256 * 1024)  # 256 KiB: forces streaming
+            jaxgsa.config.set_memory_budget(256 * 1024)  # 256 KiB: forces streaming
             streamed = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2)
         finally:
-            gsax.config.set_memory_budget(saved)
-        assert gsax.config.get_memory_budget() == saved
+            jaxgsa.config.set_memory_budget(saved)
+        assert jaxgsa.config.get_memory_budget() == saved
         assert counter.calls == 1
         _assert_results_match(streamed, full_result)
 
@@ -224,7 +224,7 @@ class TestAutoEngage:
 
     def test_full_fit_bytes_formula(self):
         """The auto-engage estimate reflects the documented resident arrays."""
-        from gsax.hdmr._stream import _full_fit_bytes
+        from jaxgsa.hdmr._stream import _full_fit_bytes
 
         # maxorder=2, D=3, m=2: m1=5, m2=25, n1=3, n2=3, n=6.
         got = _full_fit_bytes(N=1000, D=3, m1=5, m2=25, m3=125, n1=3, n2=3, n3=0, n=6, itemsize=4)

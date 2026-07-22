@@ -8,10 +8,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from gsax.benchmarks import ishigami
-from gsax.pawn import PAWNResult, analyze
-from gsax.problem import Problem
-from gsax.sampling import monte_carlo
+from jaxgsa.benchmarks import ishigami
+from jaxgsa.pawn import PAWNResult, analyze
+from jaxgsa.problem import Problem
+from jaxgsa.sampling import monte_carlo
 
 
 @pytest.fixture(scope="module")
@@ -80,7 +80,7 @@ class TestPAWNSALibComparison:
         salib_result = salib_pawn.analyze(salib_problem, X_np, Y_np, S=10, seed=0)
         salib_median = salib_result["median"]
 
-        gsax_result = analyze(
+        jaxgsa_result = analyze(
             ishigami.PROBLEM,
             ishigami_data[0],
             ishigami_data[1],
@@ -88,9 +88,9 @@ class TestPAWNSALibComparison:
             statistic="median",
             seed=0,
         )
-        gsax_pawn = np.asarray(gsax_result.pawn)
+        jaxgsa_pawn = np.asarray(jaxgsa_result.pawn)
 
-        np.testing.assert_allclose(gsax_pawn, salib_median, atol=0.01)
+        np.testing.assert_allclose(jaxgsa_pawn, salib_median, atol=0.01)
 
 
 class TestPAWNStatistics:
@@ -247,7 +247,7 @@ class TestPAWNTiedOutputs:
 class TestPAWNOutOfBounds:
     def test_out_of_range_gets_sentinel(self):
         """Samples outside [0, 1] are excluded (sentinel -1), not clamped."""
-        from gsax.pawn._analyze import _bin_indices
+        from jaxgsa.pawn._analyze import _bin_indices
 
         X = jnp.asarray([[-0.5], [0.0], [0.4], [1.0], [1.5], [jnp.nan]])
         idx = np.asarray(_bin_indices(X, 4)).ravel()

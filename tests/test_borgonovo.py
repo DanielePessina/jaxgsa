@@ -8,10 +8,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from gsax.benchmarks import gaussian_linear, ishigami
-from gsax.borgonovo import DeltaResult, analyze
-from gsax.borgonovo._analyze import _plischke_n_classes
-from gsax.sampling import monte_carlo
+from jaxgsa.benchmarks import gaussian_linear, ishigami
+from jaxgsa.borgonovo import DeltaResult, analyze
+from jaxgsa.borgonovo._analyze import _plischke_n_classes
+from jaxgsa.sampling import monte_carlo
 
 
 @pytest.fixture(scope="module")
@@ -123,7 +123,7 @@ class TestDeltaSALibComparison:
         """Bias-corrected delta and S1 vs SALib.analyze.delta.
 
         SALib's central estimates are computed on a random resample of the
-        data (gsax deliberately uses the original sample), so the tolerance
+        data (jaxgsa deliberately uses the original sample), so the tolerance
         covers that resampling noise on top of bootstrap RNG differences.
         """
         from SALib.analyze import delta as salib_delta
@@ -425,8 +425,8 @@ class TestDeltaRegression:
             jax.config.update("jax_enable_x64", True)
             import numpy as np
             import jax.numpy as jnp
-            from gsax.benchmarks import ishigami
-            from gsax.borgonovo import analyze
+            from jaxgsa.benchmarks import ishigami
+            from jaxgsa.borgonovo import analyze
 
             rng = np.random.default_rng(0)
             N = 1500

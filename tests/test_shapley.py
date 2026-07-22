@@ -7,19 +7,19 @@ import numpy as np
 import pytest
 import xarray as xr
 
-import gsax
-from gsax.benchmarks import ishigami, linear, sobol_g
-from gsax.problem import GaussianInputSpec, Problem
-from gsax.shapley._engine import build_membership, shapley_from_variances
+import jaxgsa
+from jaxgsa.benchmarks import ishigami, linear, sobol_g
+from jaxgsa.problem import GaussianInputSpec, Problem
+from jaxgsa.shapley._engine import build_membership, shapley_from_variances
 
 
 def _analyze_shapley(problem, X, Y, **kwargs):
     """Fit the selected surrogate and derive Shapley effects from its result.
 
     Routes through the public convenience wrapper so every test in this file
-    also exercises ``gsax.shapley.analyze``.
+    also exercises ``jaxgsa.shapley.analyze``.
     """
-    return gsax.shapley.analyze(problem, X, Y, **kwargs)
+    return jaxgsa.shapley.analyze(problem, X, Y, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -30,7 +30,7 @@ def _analyze_shapley(problem, X, Y, **kwargs):
 @pytest.fixture(scope="module")
 def ishigami_data():
     """Monte Carlo training data for the Ishigami benchmark."""
-    X = jnp.asarray(gsax.sampling.monte_carlo(ishigami.PROBLEM, 8192, seed=42))
+    X = jnp.asarray(jaxgsa.sampling.monte_carlo(ishigami.PROBLEM, 8192, seed=42))
     Y = ishigami.evaluate(X)
     return X, Y
 
@@ -51,7 +51,7 @@ def ishigami_pce_shapley(ishigami_data):
 @pytest.fixture(scope="module")
 def linear_data():
     """Monte Carlo training data for the linear benchmark."""
-    X = jnp.asarray(gsax.sampling.monte_carlo(linear.PROBLEM, 2048, seed=7))
+    X = jnp.asarray(jaxgsa.sampling.monte_carlo(linear.PROBLEM, 2048, seed=7))
     Y = linear.evaluate(X)
     return X, Y
 
@@ -123,7 +123,7 @@ def test_linear_vs_analytical(linear_data, backend, kwargs):
 
 
 def test_hdmr_sobol_g_vs_analytical():
-    X = jnp.asarray(gsax.sampling.monte_carlo(sobol_g.PROBLEM, 8192, seed=456))
+    X = jnp.asarray(jaxgsa.sampling.monte_carlo(sobol_g.PROBLEM, 8192, seed=456))
     Y = sobol_g.evaluate(X)
     result = _analyze_shapley(sobol_g.PROBLEM, X, Y, backend="hdmr")
     np.testing.assert_allclose(np.asarray(result.Sh), sobol_g.ANALYTICAL_SHAPLEY, atol=0.1)
@@ -159,15 +159,15 @@ def test_default_backend_is_pce(linear_data):
 
 
 # ---------------------------------------------------------------------------
-# Convenience wrapper: gsax.shapley.analyze is literally analyze(...).shapley()
+# Convenience wrapper: jaxgsa.shapley.analyze is literally analyze(...).shapley()
 # ---------------------------------------------------------------------------
 
 
 def test_analyze_wrapper_matches_result_method(linear_data):
     """The wrapper is the same one-path pipeline as pce/hdmr.analyze().shapley()."""
     X, Y = linear_data
-    via_wrapper = gsax.shapley.analyze(linear.PROBLEM, X, Y, backend="pce", order=2)
-    via_method = gsax.pce.analyze(linear.PROBLEM, X, Y, order=2).shapley()
+    via_wrapper = jaxgsa.shapley.analyze(linear.PROBLEM, X, Y, backend="pce", order=2)
+    via_method = jaxgsa.pce.analyze(linear.PROBLEM, X, Y, order=2).shapley()
     np.testing.assert_array_equal(np.asarray(via_wrapper.Sh), np.asarray(via_method.Sh))
     np.testing.assert_array_equal(np.asarray(via_wrapper.S1), np.asarray(via_method.S1))
     np.testing.assert_array_equal(np.asarray(via_wrapper.ST), np.asarray(via_method.ST))
@@ -177,8 +177,8 @@ def test_analyze_wrapper_matches_result_method(linear_data):
 
 def test_analyze_wrapper_hdmr_matches_result_method(linear_data):
     X, Y = linear_data
-    via_wrapper = gsax.shapley.analyze(linear.PROBLEM, X, Y, backend="hdmr", m=3)
-    via_method = gsax.hdmr.analyze(linear.PROBLEM, X, Y, m=3).shapley()
+    via_wrapper = jaxgsa.shapley.analyze(linear.PROBLEM, X, Y, backend="hdmr", m=3)
+    via_method = jaxgsa.hdmr.analyze(linear.PROBLEM, X, Y, m=3).shapley()
     np.testing.assert_array_equal(np.asarray(via_wrapper.Sh), np.asarray(via_method.Sh))
     assert via_wrapper.backend == "hdmr"
 
@@ -189,7 +189,7 @@ def test_analyze_wrapper_unknown_backend_raises(linear_data):
     # without tripping the static Literal["pce", "hdmr"] annotation.
     bad_kwargs: dict = {"backend": "spline"}
     with pytest.raises(ValueError, match="backend"):
-        gsax.shapley.analyze(linear.PROBLEM, X, Y, **bad_kwargs)
+        jaxgsa.shapley.analyze(linear.PROBLEM, X, Y, **bad_kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -271,14 +271,14 @@ def test_pce_shapley_matches_analyze_pce(ishigami_data):
     """The PCE backend's S1/ST coincide with analyze_pce on the identical fit."""
     X, Y = ishigami_data
     sh = _analyze_shapley(ishigami.PROBLEM, X, Y, backend="pce", order=9)
-    pce = gsax.pce.analyze(ishigami.PROBLEM, X, Y, order=9)
+    pce = jaxgsa.pce.analyze(ishigami.PROBLEM, X, Y, order=9)
     np.testing.assert_allclose(np.asarray(sh.S1), np.asarray(pce.S1), atol=1e-5)
     np.testing.assert_allclose(np.asarray(sh.ST), np.asarray(pce.ST), atol=1e-5)
 
 
 def test_pce_order_reduction_surfaced():
     """A silently-reduced PCE order is both warned about and exposed on the result."""
-    X = jnp.asarray(gsax.sampling.monte_carlo(ishigami.PROBLEM, 200, seed=11))
+    X = jnp.asarray(jaxgsa.sampling.monte_carlo(ishigami.PROBLEM, 200, seed=11))
     Y = ishigami.evaluate(X)
     # For N=200 (fit_ratio=0.5) the order-7 term count exceeds the budget,
     # so the fit is silently coarsened -- which must now be visible.
@@ -345,7 +345,7 @@ def test_correlative_matches_hdmr_sa_plus_sb():
     """White-box: the fold-in reproduces the Shapley allocation of analyze_hdmr's
     Sa+Sb exactly, independent of what the component functions are."""
     problem, X, Y = _correlated_gaussian(0.5)
-    hd = gsax.hdmr.analyze(problem, X, Y, m=5)
+    hd = jaxgsa.hdmr.analyze(problem, X, Y, m=5)
     assert hd._fit is not None
     subsets: list[tuple[int, ...]] = [(i,) for i in range(problem.num_vars)]
     subsets.extend(hd._c2)
@@ -385,7 +385,7 @@ def test_correlative_explained_variance_is_r2():
     = sum_j S_j, not the structural sum sum_j Sa_j."""
     problem, X, Y = _correlated_gaussian(0.5)
     res = _analyze_shapley(problem, X, Y, backend="hdmr", include_correlative=True, m=5)
-    hd = gsax.hdmr.analyze(problem, X, Y, m=5)
+    hd = jaxgsa.hdmr.analyze(problem, X, Y, m=5)
     np.testing.assert_allclose(
         float(res.explained_variance), float(np.asarray(hd.S).sum()), atol=1e-5
     )
