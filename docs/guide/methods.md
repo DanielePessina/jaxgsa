@@ -487,7 +487,11 @@ sobol_result = jaxgsa.sobol.analyze(samples, Y)          # S1, ST, S2
 morris_result = jaxgsa.morris.analyze(samples.to_morris(), Y)  # mu*, sigma
 ```
 
-Second-order designs yield twice the blocks, since $B$ with its $B_A^{(j)}$ rows is another radial block based at $B$. Three caveats:
+You get one radial block per base point, so `n_trajectories == base_n` for both design variants. A second-order design *also* contains a block based at $B$ ($B$ with its $B_A^{(j)}$ rows), and it is tempting to harvest as a free doubling — but it is a near-duplicate, not a second sample. Whenever parameter $j$'s contribution is additive,
+
+$$\frac{f(B_A^{(j)}) - f(B)}{A_j - B_j} = \frac{g_j(A_j) - g_j(B_j)}{A_j - B_j} = \frac{f(A_B^{(j)}) - f(A)}{B_j - A_j}$$
+
+— algebraically the *same* effect. Measured on Ishigami the paired effects correlate 0.50 / 1.00 / −0.06 (the middle term, $a\sin^2(x_2)$, being purely additive), and including them leaves $\mu^*$ and $\sigma$ unchanged to four significant figures while making a block-resampled bootstrap 10–28% too narrow. So `to_morris()` deliberately uses only the $A$-based blocks. Three caveats:
 
 - The derived measures reuse the same model outputs as the Sobol' indices, so agreement between $\mu^*$ and $S_T$ is **not** an independent check of either. (They may also legitimately rank parameters differently — $\mu^*$ is a mean absolute derivative, not a variance share.)
 - Saltelli takes $A$ and $B$ from the *same* Sobol' row, whereas `jaxgsa.morris.sample`'s radial design offsets them by four draws precisely to keep $\Delta$ away from zero. Blocks whose step is unmeasurable are dropped with a warning; with `scramble=False` an unscrambled sequence repeats values across coordinate pairs and loses a substantial fraction of blocks, so keep the default `scramble=True`.

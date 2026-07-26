@@ -164,9 +164,13 @@ class SobolSamples(UniqueDesignSamples):
         same array you would pass to :func:`jaxgsa.sobol.analyze`) to
         :func:`jaxgsa.morris.analyze`.
 
-        Second-order designs yield twice the blocks: ``B`` with its ``BA_j``
-        rows forms another radial block based at ``B``, so ``n_trajectories`` is
-        ``2 * base_n`` rather than ``base_n``.
+        ``n_trajectories`` is ``base_n`` for both design variants: one radial
+        block per base point, based at ``A``. Second-order designs also contain
+        a block based at ``B`` (``B`` with its ``BA_j`` rows), but it is not a
+        second independent sample — for additive contributions it is
+        algebraically the *same* effect, so harvesting it leaves ``mu_star`` and
+        ``sigma`` unchanged while inflating the apparent sample size. It is
+        deliberately not used.
 
         Because the derived measures reuse the very same model outputs as the
         Sobol indices, agreement between ``mu_star`` and ``ST`` is not an
@@ -221,22 +225,20 @@ class SobolSamples(UniqueDesignSamples):
         params = np.arange(D)
 
         # Layout per base point: [A, AB_0..AB_{D-1}, (BA_0..BA_{D-1},) B].
-        a_block = np.empty((self.base_n, D + 1), dtype=np.int64)
-        a_block[:, 0] = self.expanded_to_unique[starts]
-        a_block[:, 1:] = self.expanded_to_unique[offsets + 1 + params]
-
-        if self.calc_second_order:
-            b_block = np.empty((self.base_n, D + 1), dtype=np.int64)
-            b_block[:, 0] = self.expanded_to_unique[starts + step - 1]
-            b_block[:, 1:] = self.expanded_to_unique[offsets + D + 1 + params]
-            # Interleave [A-block_i, B-block_i] rather than concatenating, so a
-            # prefix of blocks stays a prefix of base points and
-            # MorrisSamples.downsample keeps working.
-            block_rows = np.empty((2 * self.base_n, D + 1), dtype=np.int64)
-            block_rows[0::2] = a_block
-            block_rows[1::2] = b_block
-        else:
-            block_rows = a_block
+        # Only the A-based block is harvested. Second-order designs also hold a
+        # radial block based at B (B with its BA_j rows), but it is a
+        # near-duplicate rather than a second sample: for any additive
+        # contribution the two effects are algebraically identical, since
+        # (f(BA_j) - f(B)) / (A_j - B_j) reduces to the same difference quotient
+        # as (f(AB_j) - f(A)) / (B_j - A_j). Measured on Ishigami, the paired
+        # effects correlate 0.50 / 1.00 / -0.06, and including them leaves
+        # mu_star and sigma unchanged to four digits while making a
+        # block-resampled bootstrap 10-28% too narrow. Recovering the partial
+        # information in them honestly needs a cluster bootstrap over base
+        # points, which is not worth the machinery for no gain in the estimate.
+        block_rows = np.empty((self.base_n, D + 1), dtype=np.int64)
+        block_rows[:, 0] = self.expanded_to_unique[starts]
+        block_rows[:, 1:] = self.expanded_to_unique[offsets + 1 + params]
 
         _warn_unbounded_gaussian(self.problem)
         derived = _radial_samples_from_blocks(
@@ -337,15 +339,16 @@ def _build_expanded_samples(
 
 
 def _warn_unbounded_gaussian(problem: Problem) -> None:
-    """Warn that unbounded Gaussians make derived Morris measures tail-sensitive.
+    """Warn that unbounded Gaussian tails bias derived Morris measures upward.
 
-    Truncated Gaussians and uniforms are bounded, so their unit-space
-    elementary effects are bounded too and stay silent.
+    ``GaussianInputSpec`` accepts ``low`` and/or ``high``, so a one-sided
+    truncation still leaves the opposite tail unbounded and is reported. Only
+    uniforms and two-sided-truncated Gaussians stay silent.
     """
     unbounded = [
         name
         for name, spec in zip(problem.names, problem.input_specs)
-        if spec[0] != "uniform" and spec[3] is None and spec[4] is None
+        if spec[0] != "uniform" and (spec[3] is None or spec[4] is None)
     ]
     if not unbounded:
         return

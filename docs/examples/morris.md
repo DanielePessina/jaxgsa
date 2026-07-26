@@ -125,9 +125,12 @@ everything else works unchanged: bootstrap CIs, multi-output outputs,
 you already evaluated, so `n_runs` is unchanged and your existing `Y` stays
 valid.
 
-Second-order designs (the `calc_second_order=True` default) give twice the
-blocks, because `B` with its `BA_j` rows forms a second radial block based at
-`B` — `n_trajectories` is `2 * base_n` rather than `base_n`.
+`n_trajectories` is `base_n` for both design variants — one radial block per
+base point. A second-order design also holds a block based at `B` (`B` with its
+`BA_j` rows), but for additive contributions it is algebraically the *same*
+effect, so harvesting it would inflate the apparent sample size and narrow
+bootstrap CIs without improving `mu_star` or `sigma`. It is deliberately unused;
+see [Methods](/guide/methods) for the measurement.
 
 See [Methods](/guide/methods) for why this works: Jansen's total-order
 estimator and Morris's mu_star are different moments of the same increments

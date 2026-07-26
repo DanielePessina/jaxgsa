@@ -41,24 +41,47 @@ def _numpy_reference(sr, Y: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndar
 
 
 class TestDesignStructure:
-    def test_second_order_yields_2r_blocks(self, derived):
+    def test_one_block_per_base_point(self, derived):
         s, _, m = derived
-        # B with its BA_j rows is a second radial block based at B.
-        assert m.n_trajectories == 2 * BASE_N
+        assert m.n_trajectories == BASE_N
         assert m.method == "radial"
-        assert m.n_expanded == 2 * BASE_N * (D + 1)
-        assert m.ee_delta.shape == (2 * BASE_N, D)
+        assert m.n_expanded == BASE_N * (D + 1)
+        assert m.ee_delta.shape == (BASE_N, D)
         # The evaluated rows are reused as-is, so existing Y stays valid.
         assert m.samples is s.samples
         assert m.n_runs == s.n_runs
 
-    def test_first_order_only_yields_r_blocks(self):
+    def test_block_count_independent_of_second_order(self):
+        """The B-based block is a near-duplicate, so it is deliberately unused."""
         s = sobol.sample(
             ishigami.PROBLEM, 0, base_n=BASE_N, calc_second_order=False, seed=0, verbose=False
         )
         m = s.to_morris(verbose=False)
         assert m.n_trajectories == BASE_N
         assert m.n_expanded == BASE_N * (D + 1)
+
+    def test_ba_rows_would_duplicate_additive_effects(self):
+        """Pin the reason B-blocks are skipped: for additive terms they are identical.
+
+        ``(f(BA_j) - f(B)) / (A_j - B_j)`` reduces to the same difference
+        quotient as ``(f(AB_j) - f(A)) / (B_j - A_j)`` whenever parameter j's
+        contribution is additive, so harvesting them would inflate the apparent
+        sample size without adding information.
+        """
+        problem = Problem(names=("x1", "x2"), bounds=((0.0, 1.0),) * 2)
+        s = sobol.sample(problem, 0, base_n=128, seed=3, verbose=False)
+        Y = np.asarray(s.samples[:, 0] + s.samples[:, 1] ** 2, dtype=np.float64)
+
+        step = 2 * 2 + 2
+        starts = np.arange(128) * step
+        e2u = s.expanded_to_unique
+        unit = np.asarray(s.samples, dtype=np.float64)  # unit cube already
+        for j in range(2):
+            a_row, ab_row = e2u[starts], e2u[starts + 1 + j]
+            b_row, ba_row = e2u[starts + step - 1], e2u[starts + 2 + 1 + j]
+            ee_a = (Y[ab_row] - Y[a_row]) / (unit[ab_row, j] - unit[a_row, j])
+            ee_b = (Y[ba_row] - Y[b_row]) / (unit[ba_row, j] - unit[b_row, j])
+            np.testing.assert_allclose(ee_a, ee_b, atol=1e-9)
 
     def test_blocks_perturb_exactly_one_parameter(self, derived):
         _, _, m = derived
@@ -75,9 +98,7 @@ class TestDesignStructure:
         # Regenerate the underlying draw: A is the first D dims, B the last D.
         base = Sobol(d=2 * D, scramble=True, seed=0).random(BASE_N)
         delta_true = base[:, D:] - base[:, :D]
-        # Even blocks are based at A (step B-A), odd blocks at B (step A-B).
-        np.testing.assert_allclose(m.ee_delta[0::2], delta_true, atol=1e-12)
-        np.testing.assert_allclose(m.ee_delta[1::2], -delta_true, atol=1e-12)
+        np.testing.assert_allclose(m.ee_delta, delta_true, atol=1e-12)
 
 
 class TestJansenIdentity:
@@ -85,8 +106,8 @@ class TestJansenIdentity:
         s, Y, m = derived
         sr = sobol.analyze(s, Y)
 
-        # sobol.analyze estimates ST from the A-based increments only, which are
-        # the even-indexed derived blocks, and normalizes by the pooled
+        # sobol.analyze estimates ST from the A-based increments, which is
+        # exactly what the derived blocks hold, normalized by the pooled
         # Var(concat(A, B)) with ddof=0.
         Y_exp = np.asarray(s.expand_outputs(Y), dtype=np.float64)
         step = 2 * D + 2
@@ -95,7 +116,7 @@ class TestJansenIdentity:
 
         Y_m = np.asarray(m.expand_outputs(Y), dtype=np.float64)
         increments = Y_m[m.ee_idx_after] - Y_m[m.ee_idx_before]
-        ST_from_ee = 0.5 * (increments[0::2] ** 2).mean(axis=0) / pooled.var(ddof=0)
+        ST_from_ee = 0.5 * (increments**2).mean(axis=0) / pooled.var(ddof=0)
 
         np.testing.assert_allclose(ST_from_ee, np.asarray(sr.ST), rtol=1e-5, atol=1e-6)
 
@@ -173,12 +194,23 @@ class TestGaussianInputs:
         base = Sobol(d=6, scramble=True, seed=1).random(256)
         # Inverting the marginal transform in float64 must be exact enough to
         # divide by: uniform is affine, gaussian round-trips through the CDF.
-        np.testing.assert_allclose(m.ee_delta[0::2], base[:, 3:] - base[:, :3], atol=1e-12)
+        np.testing.assert_allclose(m.ee_delta, base[:, 3:] - base[:, :3], atol=1e-12)
 
     def test_warning_names_only_unbounded_params(self):
         s = sobol.sample(self.PROBLEM, 0, base_n=64, seed=1, verbose=False)
         with pytest.warns(UserWarning, match=r"\['unbounded'\]"):
             s.to_morris(verbose=False)
+
+    def test_one_sided_truncation_still_warns(self):
+        """GaussianInputSpec takes low and/or high; one bound leaves a tail open."""
+        for spec in (
+            GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0, low=-2.0),
+            GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0, high=2.0),
+        ):
+            problem = Problem.from_dict({"half": spec, "uni": (0.0, 1.0)})
+            s = sobol.sample(problem, 0, base_n=64, seed=1, verbose=False)
+            with pytest.warns(UserWarning, match=r"\['half'\]"):
+                s.to_morris(verbose=False)
 
     def test_bounded_problem_is_silent(self):
         s = sobol.sample(ishigami.PROBLEM, 0, base_n=64, seed=1, verbose=False)
@@ -197,7 +229,7 @@ class TestDegenerateBlocks:
         s = sobol.sample(ishigami.PROBLEM, 0, base_n=64, scramble=False, seed=0, verbose=False)
         with pytest.warns(UserWarning, match="radial blocks whose step is below"):
             m = s.to_morris(verbose=False)
-        assert m.n_trajectories < 2 * 64
+        assert m.n_trajectories < 64
         assert m.n_trajectories == m.ee_delta.shape[0]
         assert m.n_expanded == m.n_trajectories * (D + 1)
         assert np.all(np.abs(m.ee_delta) > 0)
@@ -219,5 +251,5 @@ def test_verbose_summary(capsys):
     s.to_morris()
     out = capsys.readouterr().out
     assert "to_morris" in out
-    assert "blocks=128" in out
+    assert "blocks=64" in out
     assert "0 new model runs" in out

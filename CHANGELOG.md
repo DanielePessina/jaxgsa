@@ -13,8 +13,12 @@
   so both methods are moments of the same increments. Pass the returned
   `MorrisSamples` and your existing `Y` to `jaxgsa.morris.analyze` to get
   `mu`/`mu_star`/`sigma`, bootstrap CIs, and multi-output support with no new
-  model runs. Second-order designs yield `2 * base_n` blocks, because `B` with
-  its `BA_j` rows forms another radial block based at `B`.
+  model runs. `n_trajectories` is `base_n` for both design variants: one radial
+  block per base point, based at `A`. Second-order designs also contain a block
+  based at `B`, but for additive contributions it is algebraically the same
+  effect, so using it would inflate the apparent sample size (narrowing
+  bootstrap CIs by 10-28%) without changing `mu_star` or `sigma`; it is
+  deliberately unused.
 
 ### Internal
 
