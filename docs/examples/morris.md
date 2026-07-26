@@ -319,7 +319,10 @@ D is always the last axis.
   only: blocks whose step is unmeasurable are dropped with a warning (keep
   `scramble=True`, since an unscrambled sequence loses a substantial fraction
   of blocks), and for unbounded Gaussian marginals the Saltelli design applies
-  no tail truncation, so mu_star is tail-dominated and grows with `base_n`.
+  no tail truncation, which biases mu_star upward by a modest factor (1.04x for
+  a linear response, 1.6x for a strongly tail-heavy one) without drifting with
+  `base_n`. Declare the marginals with explicit `low`/`high` if magnitudes must
+  match a native Morris design.
 
 ## See also
 

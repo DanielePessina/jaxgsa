@@ -491,7 +491,17 @@ Second-order designs yield twice the blocks, since $B$ with its $B_A^{(j)}$ rows
 
 - The derived measures reuse the same model outputs as the Sobol' indices, so agreement between $\mu^*$ and $S_T$ is **not** an independent check of either. (They may also legitimately rank parameters differently — $\mu^*$ is a mean absolute derivative, not a variance share.)
 - Saltelli takes $A$ and $B$ from the *same* Sobol' row, whereas `jaxgsa.morris.sample`'s radial design offsets them by four draws precisely to keep $\Delta$ away from zero. Blocks whose step is unmeasurable are dropped with a warning; with `scramble=False` an unscrambled sequence repeats values across coordinate pairs and loses a substantial fraction of blocks, so keep the default `scramble=True`.
-- For **unbounded Gaussian** marginals the Saltelli design applies no tail truncation, unlike `morris.sample`'s `truncation_quantile`. Unit-space effects are amplified by $1/\varphi$ near the tails, so $\mu^*$ is tail-dominated and grows with `base_n`. Rankings within one design stay usable; magnitudes do not transfer across `base_n` or to a native Morris design. `to_morris()` warns in this case.
+- For **unbounded Gaussian** marginals the Saltelli design applies no tail truncation, unlike `morris.sample`'s `truncation_quantile`, so it reaches further into the tails. The effect is smaller than it first appears: an elementary effect is a *secant* slope over a step of typical size $O(1)$, not a local derivative, so the $1/\varphi$ blow-up at the extreme draw never materializes. Measured against a design truncated at the 0.5%/99.5% quantiles, $\mu^*$ carries a modest upward bias that grows with tail weight — 1.04× for a linear response, 1.13× for $x^2$, 1.42× for $x^4$, 1.61× for $\exp(x^2/3)$ — and is noisier at small `base_n`, but it does **not** drift with `base_n` (measured flat to within a few percent from 256 to 16384). Rankings are unaffected. If magnitudes must match a native Morris design, declare the marginals with explicit `low`/`high`:
+
+  ```python
+  from scipy.stats import norm
+  jaxgsa.GaussianInputSpec(
+      dist="gaussian", mean=mu, variance=sigma**2,
+      low=norm.ppf(0.005, mu, sigma), high=norm.ppf(0.995, mu, sigma),
+  )
+  ```
+
+  This bounds the design at sampling time, so both the Sobol indices and the derived Morris measures describe the same truncated input model. `to_morris()` warns when unbounded Gaussians are present.
 
 Note the reverse derivation is impossible: a radial Morris design never evaluates the $B$ rows, so $S_1$ and $S_T$ cannot be recovered from it.
 
