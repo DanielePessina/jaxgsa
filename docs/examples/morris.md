@@ -100,6 +100,39 @@ print("mu_star (radial):", result_radial.mu_star)
 coarse grid, so fewer duplicate rows are removed than with the trajectory
 design.
 
+## From an existing Sobol design
+
+If you have already run a Sobol analysis, you can get Morris measures out of
+it for free. A Saltelli design already contains the radial structure Morris
+needs — within each base point, `A` and each `AB_j` differ in exactly one
+parameter — so `SobolSamples.to_morris()` reinterprets the design without any
+new model evaluations:
+
+```python
+samples = jaxgsa.sobol.sample(PROBLEM, 0, base_n=512, seed=0)
+Y = evaluate(jnp.asarray(samples.samples))
+
+sobol_result = jaxgsa.sobol.analyze(samples, Y)
+morris_result = jaxgsa.morris.analyze(samples.to_morris(), Y)
+
+print("ST:     ", sobol_result.ST)
+print("mu_star:", morris_result.mu_star)
+```
+
+`to_morris()` returns a normal `MorrisSamples` with `method="radial"`, so
+everything else works unchanged: bootstrap CIs, multi-output outputs,
+`to_dataset()`, `downsample()`, and `save()`. Its `samples` is the *same* array
+you already evaluated, so `n_runs` is unchanged and your existing `Y` stays
+valid.
+
+Second-order designs (the `calc_second_order=True` default) give twice the
+blocks, because `B` with its `BA_j` rows forms a second radial block based at
+`B` — `n_trajectories` is `2 * base_n` rather than `base_n`.
+
+See [Methods](/guide/methods) for why this works: Jansen's total-order
+estimator and Morris's mu_star are different moments of the same increments
+`f(AB_j) - f(A)`.
+
 ## Multi-output example
 
 When your model returns K outputs per sample, pass Y with shape
@@ -280,6 +313,13 @@ D is always the last axis.
 - Trajectories containing any non-finite output (NaN/Inf) are dropped as
   whole blocks with a warning. Fewer than 2 remaining trajectories raise an
   error; fewer than 10 trigger a reliability warning.
+- Measures derived through `SobolSamples.to_morris()` come from the same model
+  outputs as that design's Sobol indices, so mu_star and ST agreeing is not an
+  independent check of either. Two further limits apply to derived designs
+  only: blocks whose step is unmeasurable are dropped with a warning (keep
+  `scramble=True`, since an unscrambled sequence loses a substantial fraction
+  of blocks), and for unbounded Gaussian marginals the Saltelli design applies
+  no tail truncation, so mu_star is tail-dominated and grows with `base_n`.
 
 ## See also
 

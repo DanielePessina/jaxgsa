@@ -88,7 +88,19 @@ correlative contributions.
 | `jaxgsa.morris` | `sample` then `analyze` | `MorrisResult` |
 
 Morris sampling returns `jaxgsa.morris.MorrisSamples`, which supports the same
-single-NPZ `save(path)` / `load(path)` persistence as `SobolSamples`. eFAST
+single-NPZ `save(path)` / `load(path)` persistence as `SobolSamples`.
+`SobolSamples.to_morris()` also returns a `MorrisSamples`, reinterpreting an
+already-evaluated Saltelli design as a radial Morris design so screening
+measures cost no extra model runs:
+
+```python
+samples = jaxgsa.sobol.sample(problem, 1024)
+Y = model(samples.samples)
+sobol_result = jaxgsa.sobol.analyze(samples, Y)
+morris_result = jaxgsa.morris.analyze(samples.to_morris(), Y)
+```
+
+eFAST
 sampling returns
 `jaxgsa.efast.EFASTSamples`, which carries the design metadata (`n_per_curve`,
 `M`, `problem`) into `jaxgsa.efast.analyze(samples, Y)` so they can never be

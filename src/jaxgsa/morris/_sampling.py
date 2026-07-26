@@ -30,7 +30,12 @@ import numpy as np
 from scipy.stats.qmc import Sobol
 
 from jaxgsa._core.samples import UniqueDesignSamples
-from jaxgsa._core.sampling import _next_power_of_2, _stable_unique_rows, _transform_samples
+from jaxgsa._core.sampling import (
+    _inverse_transform_samples,
+    _next_power_of_2,
+    _stable_unique_rows,
+    _transform_samples,
+)
 from jaxgsa.problem import Problem
 
 # Offset between the Sobol' draws used for radial base points (a) and
@@ -211,6 +216,99 @@ class MorrisSamples(UniqueDesignSamples):
             n_params=problem.num_vars,
             problem=problem,
         )
+
+
+def _radial_samples_from_blocks(
+    *,
+    samples: np.ndarray,
+    block_rows: np.ndarray,
+    problem: Problem,
+) -> MorrisSamples:
+    """Assemble a radial ``MorrisSamples`` from an already-evaluated design.
+
+    Generic over where the points came from: the caller supplies the unique
+    sample matrix plus, for each radial block, the row index of the block's
+    base point followed by the ``D`` points perturbed in one parameter each.
+    This lets a design built for another method be reinterpreted as a Morris
+    design at zero extra model cost — see
+    :meth:`jaxgsa.sobol.SobolSamples.to_morris`.
+
+    ``samples`` is passed through unchanged, so outputs already computed for it
+    stay aligned and no re-evaluation is needed.
+
+    Args:
+        samples: Unique rows already evaluated, shape ``(n_runs, D)``, in the
+            problem's physical units.
+        block_rows: ``(n_blocks, D + 1)`` integer indices into ``samples``.
+            Column 0 is the block's base point; column ``1 + j`` is the point
+            differing from it only in parameter ``j``.
+        problem: Problem definition the samples were drawn for.
+
+    Returns:
+        A radial ``MorrisSamples`` ready for :func:`jaxgsa.morris.analyze`.
+
+    Raises:
+        ValueError: If fewer than two blocks are left with a measurable step.
+
+    Warns:
+        UserWarning: If any block is dropped because its base and perturbed
+            points coincide at the model's floating-point resolution.
+    """
+    D = problem.num_vars
+    # The elementary-effect denominator must be the unit-cube step, matching
+    # what ``sample()`` records, so recover unit coordinates in float64.
+    samples_unit = _inverse_transform_samples(problem, samples)
+
+    param_idx = np.arange(D)
+    # Read each step off the coordinate that actually differs between the base
+    # row and the row perturbed in that parameter. This needs no knowledge of
+    # the source layout, and it collapses to exactly 0 when deduplication has
+    # merged the two rows.
+    base_unit = samples_unit[block_rows[:, 0][:, None], param_idx]
+    after_unit = samples_unit[block_rows[:, 1:], param_idx]
+    ee_delta = after_unit - base_unit
+
+    tol = _min_radial_delta()
+    keep = ~(np.abs(ee_delta) < tol).any(axis=1)
+    n_total = int(block_rows.shape[0])
+    n_dropped = n_total - int(keep.sum())
+    if n_dropped:
+        block_rows = block_rows[keep]
+        ee_delta = ee_delta[keep]
+        warnings.warn(
+            f"jaxgsa: dropped {n_dropped} of {n_total} radial blocks whose step is below "
+            f"{tol:.1e} in at least one parameter (base and perturbed points coincide at "
+            f"the model's floating-point resolution); {block_rows.shape[0]} blocks remain",
+            # Reached through a caller's conversion method, so the user's frame
+            # is two levels up rather than one.
+            stacklevel=3,
+        )
+
+    n_blocks = int(block_rows.shape[0])
+    if n_blocks < 2:
+        raise ValueError(
+            f"Only {n_blocks} radial block(s) have a measurable step; "
+            "Morris measures need at least 2"
+        )
+
+    # Block b occupies expanded rows [b*(D+1), (b+1)*(D+1)): base point first,
+    # then the D perturbed points in parameter order. That is exactly the row
+    # order of block_rows, so flattening it gives the expansion map directly.
+    offsets = (np.arange(n_blocks) * (D + 1)).astype(np.int64)
+    return MorrisSamples(
+        samples=samples,
+        n_expanded=n_blocks * (D + 1),
+        expanded_to_unique=np.ascontiguousarray(block_rows, dtype=np.int64).reshape(-1),
+        n_trajectories=n_blocks,
+        # Unused by the radial design; held at the sample() default.
+        num_levels=4,
+        method="radial",
+        ee_idx_after=offsets[:, None] + 1 + param_idx.astype(np.int64),
+        ee_idx_before=np.broadcast_to(offsets[:, None], (n_blocks, D)).copy(),
+        ee_delta=ee_delta,
+        n_params=D,
+        problem=problem,
+    )
 
 
 def _build_trajectories(

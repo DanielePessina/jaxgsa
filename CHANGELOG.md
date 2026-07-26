@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.5.0
+
+### Added
+
+- `SobolSamples.to_morris()` — derive Morris elementary effects from a Sobol
+  design you have already evaluated, at **zero extra model cost**. A Saltelli
+  design already contains the radial (star) structure Morris needs: within each
+  base point, `A` and each `AB_j` differ in exactly one parameter. Writing
+  `EE_j = (f(AB_j) - f(A)) / (B_j - A_j)`, Jansen's total-order estimator is
+  `E[(delta_j * EE_j)^2] / (2 Var Y)` while Morris reports `mu_star = E|EE_j|`,
+  so both methods are moments of the same increments. Pass the returned
+  `MorrisSamples` and your existing `Y` to `jaxgsa.morris.analyze` to get
+  `mu`/`mu_star`/`sigma`, bootstrap CIs, and multi-output support with no new
+  model runs. Second-order designs yield `2 * base_n` blocks, because `B` with
+  its `BA_j` rows forms another radial block based at `B`.
+
+### Internal
+
+- Added `jaxgsa._core.sampling._inverse_transform_samples`, the float64 inverse
+  of `_transform_samples` (physical units back to the unit cube). Needed
+  because derived elementary-effect *denominators* are differences of unit
+  coordinates, and the existing float32 JAX helper
+  (`_core.transforms.cdf_to_unit_interval`) loses too many digits to divide by.
+  Unifying the two remains a follow-up.
+
 ## 0.4.0
 
 ### Changed

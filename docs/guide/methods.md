@@ -465,6 +465,36 @@ Elementary effects are computed in unit-cube coordinates, so $\mu^*$ is directly
 
 Compared to SALib's Morris implementation, jaxgsa adds unique-row deduplication, vectorized multi-output and time-series analysis (SALib's Morris is scalar-only), bootstrap confidence intervals, the radial design, and prefix-nested downsampling.
 
+### Free screening from a Sobol' design
+
+A Saltelli design **already is** a radial Morris design. Within each base point it holds a row $A$ and $D$ rows $A_B^{(j)}$ that differ from $A$ in exactly one parameter — precisely what an elementary effect needs. This is not a coincidence: Campolongo et al. (2011) build the radial design from a $2D$-dimensional Sobol' sequence split into halves $(a, b)$, and `jaxgsa.sobol.sample` draws the same sequence the same way.
+
+Write the step as $\Delta_j = B_j - A_j$, so that $EE_j = \left(f(A_B^{(j)}) - f(A)\right) / \Delta_j$. Substituting $f(A_B^{(j)}) - f(A) = \Delta_j \cdot EE_j$ into the estimators jaxgsa uses for Sobol' indices gives
+
+$$S_{T_j} = \frac{\mathbb{E}\left[(f(A) - f(A_B^{(j)}))^2\right]}{2\,\mathrm{Var}(Y)} = \frac{\mathbb{E}\left[\Delta_j^2\, EE_j^2\right]}{2\,\mathrm{Var}(Y)} \quad \text{(Jansen 1999)}$$
+
+$$S_{1_j} = \frac{\mathbb{E}\left[f(B)\left(f(A_B^{(j)}) - f(A)\right)\right]}{\mathrm{Var}(Y)} = \frac{\mathbb{E}\left[f(B)\, \Delta_j\, EE_j\right]}{\mathrm{Var}(Y)} \quad \text{(Saltelli 2010)}$$
+
+against Morris's $\mu^*_j = \mathbb{E}|EE_j|$. **Same increments, different weighting**: Morris divides by $\Delta$ and takes a first absolute moment, Jansen keeps $\Delta$ and takes a second moment. Campolongo et al. (2011) call this the unified approach — one design serving both screening and quantitative indices. The chain closes at DGSM: as $\Delta_j \to 0$ the effect tends to $\partial f / \partial x_j$, so $\mathbb{E}[EE_j^2] \to \nu_j$, the quantity that bounds $S_{T_j}$ through the Poincaré inequality.
+
+`SobolSamples.to_morris()` performs this reinterpretation, so screening measures cost **no extra model evaluations**:
+
+```python
+samples = jaxgsa.sobol.sample(problem, 1024)
+Y = model(samples.samples)
+
+sobol_result = jaxgsa.sobol.analyze(samples, Y)          # S1, ST, S2
+morris_result = jaxgsa.morris.analyze(samples.to_morris(), Y)  # mu*, sigma
+```
+
+Second-order designs yield twice the blocks, since $B$ with its $B_A^{(j)}$ rows is another radial block based at $B$. Three caveats:
+
+- The derived measures reuse the same model outputs as the Sobol' indices, so agreement between $\mu^*$ and $S_T$ is **not** an independent check of either. (They may also legitimately rank parameters differently — $\mu^*$ is a mean absolute derivative, not a variance share.)
+- Saltelli takes $A$ and $B$ from the *same* Sobol' row, whereas `jaxgsa.morris.sample`'s radial design offsets them by four draws precisely to keep $\Delta$ away from zero. Blocks whose step is unmeasurable are dropped with a warning; with `scramble=False` an unscrambled sequence repeats values across coordinate pairs and loses a substantial fraction of blocks, so keep the default `scramble=True`.
+- For **unbounded Gaussian** marginals the Saltelli design applies no tail truncation, unlike `morris.sample`'s `truncation_quantile`. Unit-space effects are amplified by $1/\varphi$ near the tails, so $\mu^*$ is tail-dominated and grows with `base_n`. Rankings within one design stay usable; magnitudes do not transfer across `base_n` or to a native Morris design. `to_morris()` warns in this case.
+
+Note the reverse derivation is impossible: a radial Morris design never evaluates the $B$ rows, so $S_1$ and $S_T$ cannot be recovered from it.
+
 ### Index summary
 
 | Measure | Meaning |
@@ -484,6 +514,7 @@ Compared to SALib's Morris implementation, jaxgsa adds unique-row deduplication,
 - Morris, M.D. (1991). Factorial sampling plans for preliminary computational experiments. *Technometrics*, 33(2), 161-174.
 - Campolongo, F., Cariboni, J. & Saltelli, A. (2007). An effective screening design for sensitivity analysis of large models. *Environmental Modelling & Software*, 22(10), 1509-1518.
 - Campolongo, F., Cariboni, J. & Saltelli, A. (2011). From screening to quantitative sensitivity analysis. A unified approach. *Computer Physics Communications*, 182(4), 978-988.
+- Jansen, M.J.W. (1999). Analysis of variance designs for model output. *Computer Physics Communications*, 117(1-2), 35-43.
 - Saltelli, A. et al. (2008). *Global Sensitivity Analysis: The Primer*, ch. 3. Wiley.
 
 ## HSIC (Hilbert–Schmidt Independence Criterion)

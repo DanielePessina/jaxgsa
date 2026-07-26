@@ -13,8 +13,9 @@ expanded Saltelli design contains exact duplicate rows.
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass
-from typing import Any, Mapping, overload
+from typing import TYPE_CHECKING, Any, Mapping, overload
 
 import numpy as np
 from scipy.stats.qmc import Sobol
@@ -28,6 +29,9 @@ from jaxgsa._core.sampling import (
     _transform_samples,
 )
 from jaxgsa.problem import Problem
+
+if TYPE_CHECKING:
+    from jaxgsa.morris import MorrisSamples
 
 
 @dataclass(frozen=True)
@@ -141,6 +145,111 @@ class SobolSamples(UniqueDesignSamples):
             return sr_small, Y_small
         return sr_small
 
+    def to_morris(self, *, verbose: bool = True) -> MorrisSamples:
+        """Reinterpret this Saltelli design as a radial Morris design.
+
+        A Saltelli design already *is* a Morris radial (star) design: within
+        each base point, the row ``A`` and the ``D`` rows ``AB_j`` differ in
+        exactly one parameter, which is what an elementary effect needs.
+        Campolongo et al. (2011) build the radial design from a ``2D``-dimensional
+        Sobol' sequence for precisely this reason, and
+        :func:`jaxgsa.sobol.sample` draws the same sequence the same way.
+
+        The two methods then weight the same increments differently. Writing
+        ``EE_j = (f(AB_j) - f(A)) / delta_j`` with ``delta_j = B_j - A_j``,
+        Jansen's total-order estimator is ``E[(delta_j * EE_j)^2] / (2 Var Y)``
+        while Morris reports ``mu_star = E|EE_j|``. So screening measures come
+        out of a design you have already paid for — **no extra model
+        evaluations**. Pass the returned object and your existing ``Y`` (the
+        same array you would pass to :func:`jaxgsa.sobol.analyze`) to
+        :func:`jaxgsa.morris.analyze`.
+
+        Second-order designs yield twice the blocks: ``B`` with its ``BA_j``
+        rows forms another radial block based at ``B``, so ``n_trajectories`` is
+        ``2 * base_n`` rather than ``base_n``.
+
+        Because the derived measures reuse the very same model outputs as the
+        Sobol indices, agreement between ``mu_star`` and ``ST`` is not an
+        independent check of either.
+
+        Args:
+            verbose: If ``True`` (default), print a short summary of the
+                derived design.
+
+        Returns:
+            A ``MorrisSamples`` whose ``samples`` is this object's ``samples``
+            unchanged, so ``n_runs`` and any outputs computed for it stay valid.
+
+        Raises:
+            ValueError: If fewer than two blocks are left with a measurable
+                step (see below).
+
+        Warns:
+            UserWarning: If any parameter has an *unbounded* Gaussian marginal.
+                The Saltelli design applies no tail truncation, unlike
+                :func:`jaxgsa.morris.sample`'s ``truncation_quantile``, so
+                unit-space effects are amplified by ``1 / pdf`` near the tails
+                and ``mu_star`` grows with ``base_n``. Rankings within one
+                design remain usable; absolute magnitudes are not comparable
+                across ``base_n`` or against a native Morris design.
+            UserWarning: If any block is dropped for having a near-zero step.
+                Unlike :func:`jaxgsa.morris.sample`'s radial design, which
+                offsets the auxiliary points by four draws, Saltelli takes
+                ``A`` and ``B`` from the *same* Sobol' row, so the two can
+                coincide. With ``scramble=False`` the sequence's first row is
+                all zeros and its blocks are always dropped.
+
+        References:
+            Campolongo, Cariboni & Saltelli (2011). Comput. Phys. Commun.
+                182:978-988.
+            Jansen (1999). Comput. Phys. Commun. 117:35-43.
+        """
+        # Imported lazily: morris knows nothing about sobol, and this keeps the
+        # dependency one-directional and free of an import cycle.
+        from jaxgsa.morris._sampling import _radial_samples_from_blocks
+
+        D = self.n_params
+        step = _saltelli_step(D, self.calc_second_order)
+        # First expanded row of each base point's group, and a column vector of
+        # the same for broadcasting one row per parameter.
+        starts = np.arange(self.base_n) * step
+        offsets = starts[:, None]
+        params = np.arange(D)
+
+        # Layout per base point: [A, AB_0..AB_{D-1}, (BA_0..BA_{D-1},) B].
+        a_block = np.empty((self.base_n, D + 1), dtype=np.int64)
+        a_block[:, 0] = self.expanded_to_unique[starts]
+        a_block[:, 1:] = self.expanded_to_unique[offsets + 1 + params]
+
+        if self.calc_second_order:
+            b_block = np.empty((self.base_n, D + 1), dtype=np.int64)
+            b_block[:, 0] = self.expanded_to_unique[starts + step - 1]
+            b_block[:, 1:] = self.expanded_to_unique[offsets + D + 1 + params]
+            # Interleave [A-block_i, B-block_i] rather than concatenating, so a
+            # prefix of blocks stays a prefix of base points and
+            # MorrisSamples.downsample keeps working.
+            block_rows = np.empty((2 * self.base_n, D + 1), dtype=np.int64)
+            block_rows[0::2] = a_block
+            block_rows[1::2] = b_block
+        else:
+            block_rows = a_block
+
+        _warn_unbounded_gaussian(self.problem)
+        derived = _radial_samples_from_blocks(
+            samples=self.samples,
+            block_rows=block_rows,
+            problem=self.problem,
+        )
+        if verbose:
+            _print_to_morris_summary(
+                n_params=D,
+                base_n=self.base_n,
+                n_blocks=derived.n_trajectories,
+                n_runs=derived.n_runs,
+                calc_second_order=self.calc_second_order,
+            )
+        return derived
+
     def _extra_arrays(self) -> dict[str, np.ndarray]:
         """Persist the sample identifiers alongside the base arrays."""
         return {"sample_ids": self.sample_ids}
@@ -221,6 +330,48 @@ def _build_expanded_samples(
         rows.append(B[i])
 
     return np.array(rows)
+
+
+def _warn_unbounded_gaussian(problem: Problem) -> None:
+    """Warn that unbounded Gaussians make derived Morris measures tail-sensitive.
+
+    Truncated Gaussians and uniforms are bounded, so their unit-space
+    elementary effects are bounded too and stay silent.
+    """
+    unbounded = [
+        name
+        for name, spec in zip(problem.names, problem.input_specs)
+        if spec[0] != "uniform" and spec[3] is None and spec[4] is None
+    ]
+    if not unbounded:
+        return
+    warnings.warn(
+        f"jaxgsa: parameters {unbounded} have unbounded gaussian marginals. The Saltelli "
+        "design applies no tail truncation, unlike morris.sample(truncation_quantile=...), "
+        "so unit-space elementary effects are amplified near the tails and mu_star grows "
+        "with base_n. Rankings within this design are usable; magnitudes are not comparable "
+        "across base_n or against a native Morris design",
+        # Reached from SobolSamples.to_morris, so the user's frame is two up.
+        stacklevel=3,
+    )
+
+
+def _print_to_morris_summary(
+    *,
+    n_params: int,
+    base_n: int,
+    n_blocks: int,
+    n_runs: int,
+    calc_second_order: bool,
+) -> None:
+    """Print a compact summary of the Morris design derived from a Saltelli design."""
+    order_label = "second-order" if calc_second_order else "first/total-order"
+    print(
+        "jaxgsa.sobol.SobolSamples.to_morris: "
+        f"D={n_params}, mode={order_label}, base_n={base_n}, "
+        f"blocks={n_blocks}, effects={n_blocks * n_params}, "
+        f"reusing n_runs={n_runs} existing evaluations (0 new model runs)"
+    )
 
 
 def _print_sampling_summary(

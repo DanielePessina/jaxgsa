@@ -1,8 +1,8 @@
 """Shared low-level sampling helpers.
 
-Marginal transforms (unit cube to the problem's declared distributions),
-power-of-2 utilities for Sobol'-sequence sizing, and stable row
-deduplication. Used by the Sobol', Morris, and eFAST samplers as well as
+Marginal transforms in both directions (unit cube to the problem's declared
+distributions and back), power-of-2 utilities for Sobol'-sequence sizing, and
+stable row deduplication. Used by the Sobol', Morris, and eFAST samplers as well as
 :func:`jaxgsa.sampling.monte_carlo`.
 """
 
@@ -105,6 +105,66 @@ def _transform_samples(problem: Problem, samples_unit: np.ndarray) -> np.ndarray
             )
 
     return transformed
+
+
+def _inverse_transform_uniform(values: np.ndarray, low: float, high: float) -> np.ndarray:
+    """Affine-map a finite uniform range back onto the unit interval."""
+    return (values - low) / (high - low)
+
+
+def _inverse_transform_gaussian(
+    values: np.ndarray,
+    mean: float,
+    variance: float,
+    *,
+    low: float | None,
+    high: float | None,
+) -> np.ndarray:
+    """Map Gaussian or truncated-Gaussian values back onto the unit interval."""
+    # Forward CDF, the inverse of the ppf used by _transform_gaussian. Values
+    # produced by that function were clipped to (1e-12, 1-1e-12) beforehand, so
+    # the round trip cannot land exactly on 0 or 1 here.
+    std = math.sqrt(variance)
+    if low is None and high is None:
+        return np.asarray(norm.cdf((values - mean) / std), dtype=np.float64)
+
+    a = -np.inf if low is None else (low - mean) / std
+    b = np.inf if high is None else (high - mean) / std
+    return np.asarray(truncnorm.cdf(values, a=a, b=b, loc=mean, scale=std), dtype=np.float64)
+
+
+def _inverse_transform_samples(problem: Problem, samples_physical: np.ndarray) -> np.ndarray:
+    """Recover unit-cube coordinates from samples in the problem's marginals.
+
+    Inverse of :func:`_transform_samples`, computed in float64 throughout.
+    Precision matters because the recovered coordinates are differenced to form
+    elementary-effect *denominators*: the float32 JAX equivalent
+    (:func:`jaxgsa._core.transforms.cdf_to_unit_interval`) loses too many digits
+    to divide by safely.
+
+    Args:
+        problem: Problem definition whose marginals produced the samples.
+        samples_physical: Samples in physical units, shape ``(N, D)``.
+
+    Returns:
+        Unit-cube coordinates of shape ``(N, D)``, dtype float64.
+    """
+    unit = np.empty_like(samples_physical, dtype=np.float64)
+
+    for idx, spec in enumerate(problem.input_specs):
+        dist, first, second, low, high = spec
+        if dist == "uniform":
+            unit[:, idx] = _inverse_transform_uniform(samples_physical[:, idx], first, second)
+        else:
+            unit[:, idx] = _inverse_transform_gaussian(
+                samples_physical[:, idx],
+                first,
+                second,
+                low=low,
+                high=high,
+            )
+
+    return unit
 
 
 def _stable_unique_rows(samples: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

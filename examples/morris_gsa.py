@@ -47,7 +47,8 @@ def _intro(mo):
     2. The canonical **$\mu^*$–$\sigma$ plane**
     3. **Bootstrap confidence intervals** on $\mu^*$
     4. **Trajectory vs radial** designs at the same budget
-    5. **Downsampling** as a convergence check
+    5. **Free screening** derived from a Sobol design, at no extra cost
+    6. **Downsampling** as a convergence check
     """)
     return
 
@@ -284,6 +285,70 @@ def _radial_comparison(jaxgsa, ishigami, jnp, morris_problem, np, plt, result_tr
     ax_designs.grid(axis="y", alpha=0.3)
     fig_designs.tight_layout()
     fig_designs
+    return
+
+
+@app.cell(hide_code=True)
+def _from_sobol_md(mo):
+    mo.md(r"""
+    ## Free screening from a Sobol design
+
+    A Saltelli design **already is** a radial design: within each base point,
+    the row $A$ and each row $A_B^{(j)}$ differ in exactly one parameter.
+    Writing $\Delta_j = B_j - A_j$ and
+    $EE_j = (f(A_B^{(j)}) - f(A)) / \Delta_j$, Jansen's total-order estimator
+    is $\mathbb{E}[\Delta_j^2 EE_j^2] / (2\,\mathrm{Var}\,Y)$ while Morris
+    reports $\mu^* = \mathbb{E}|EE_j|$ — **the same increments, weighted
+    differently**.
+
+    So `SobolSamples.to_morris()` hands you $\mu^*$ and $\sigma$ from a design
+    you have already paid for, at **zero extra model evaluations**. Note the
+    two measures answer different questions and may rank parameters
+    differently: $S_T$ is a variance share, $\mu^*$ a mean absolute
+    derivative.
+    """)
+    return
+
+
+@app.cell
+def _from_sobol(jaxgsa, ishigami, jnp, morris_problem, np, plt):
+    sobol_samples = jaxgsa.sobol.sample(morris_problem, 0, base_n=256, seed=42, verbose=False)
+    Y_sobol = ishigami.evaluate(jnp.asarray(sobol_samples.samples))
+
+    # Two analyses, one set of model runs.
+    derived_samples = sobol_samples.to_morris(verbose=False)
+    result_sobol = jaxgsa.sobol.analyze(sobol_samples, Y_sobol)
+    result_derived = jaxgsa.morris.analyze(derived_samples, Y_sobol)
+
+    _names = list(morris_problem.names)
+    _x = np.arange(len(_names))
+    _width = 0.38
+
+    # Normalize each measure by its own maximum: they are on different scales
+    # (variance share vs unit-space derivative), so only the profile compares.
+    _st = np.asarray(result_sobol.ST)
+    _mu = np.asarray(result_derived.mu_star)
+
+    fig_derived, ax_derived = plt.subplots(figsize=(7.5, 4.5))
+    ax_derived.bar(_x - _width / 2, _st / _st.max(), _width, color="C2", label=r"$S_T$ (Sobol)")
+    ax_derived.bar(
+        _x + _width / 2,
+        _mu / _mu.max(),
+        _width,
+        color="C3",
+        label=r"$\mu^*$ (Morris, derived)",
+    )
+    ax_derived.set_xticks(_x)
+    ax_derived.set_xticklabels(_names)
+    ax_derived.set_ylabel("normalized to own maximum")
+    ax_derived.set_title(
+        f"Both from one design: {sobol_samples.n_runs} model runs, 0 extra "
+        f"({derived_samples.n_trajectories} radial blocks)"
+    )
+    ax_derived.legend(frameon=False, fontsize=8)
+    ax_derived.grid(axis="y", alpha=0.3)
+    fig_derived.tight_layout()
+    fig_derived
     return
 
 
