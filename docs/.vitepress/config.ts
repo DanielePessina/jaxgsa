@@ -27,6 +27,7 @@ export default defineConfig({
         { text: 'Basic (Ishigami)', link: '/examples/basic' },
         { text: 'Non-Uniform Inputs', link: '/examples/non-uniform-inputs' },
         { text: 'Correlated Inputs', link: '/examples/correlated-inputs' },
+        { text: 'Categorical Inputs', link: '/examples/categorical-inputs' },
         { text: 'Save & Reload', link: '/examples/save-load' },
         { text: 'Bootstrap CIs', link: '/examples/bootstrap' },
         { text: 'Multi-Output & Time-Series', link: '/examples/multi-output' },

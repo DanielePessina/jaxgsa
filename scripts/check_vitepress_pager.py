@@ -26,6 +26,7 @@ SECTIONS = {
         "basic",
         "non-uniform-inputs",
         "correlated-inputs",
+        "categorical-inputs",
         "save-load",
         "bootstrap",
         "multi-output",

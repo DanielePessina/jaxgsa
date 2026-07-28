@@ -1,5 +1,57 @@
 # Changelog
 
+## Unreleased (0.7.0)
+
+### Added
+
+- **Categorical inputs — first-class unordered discrete marginals.**
+  `Problem.from_dict` accepts
+  `{"dist": "categorical", "probs": [p0, ..., pL-1], "labels": [...]}`
+  (new `CategoricalInputSpec`). A categorical parameter has `L >= 2`
+  levels. The probabilities must be positive and sum to 1. A small
+  rounding error is renormalized; a clearly wrong sum raises. Samples
+  carry the integer level codes `0 .. L-1` as floats — codes, never
+  physical values. The optional `labels` (strings or numbers) live on the
+  `Problem` for reporting only. `problem.categorical_labels` maps each
+  categorical parameter to its label tuple.
+  `problem.has_categorical_inputs` reports their presence. Problems with
+  categorical marginals round-trip through JSON metadata and NPZ design
+  files, labels included.
+- **Sampling.** `jaxgsa.sampling.monte_carlo` draws categorical columns
+  through a step-function inverse CDF on the unit interval
+  (`searchsorted` on the cumulative probabilities). Level frequencies
+  follow the declared `probs` exactly in distribution.
+- **Optimal transport and Borgonovo delta support categorical inputs.**
+  A categorical column conditions on **one class per level**. Class sizes
+  are the observed level counts. They vary per column and per bootstrap
+  resample; the shared partition layer builds a per-replicate padded
+  layout for them. Continuous columns keep their equal-frequency rank
+  classes; `n_partitions` / `n_classes` apply to continuous columns only.
+  The indices depend only on the level partition, so relabeling levels
+  does not change them (tested). Declared levels with no observed samples
+  are dropped from the class average with a `UserWarning`. All OT modes
+  (`univariate`, `multivariate`, `trajectory`) and the `dummy` baseline
+  work.
+- **Sobol' pick-freeze works with categorical columns.** The Saltelli
+  design only copies coordinate values between rows, so the estimators
+  are unaffected. A guard caps the unique-row inflation loop: a
+  low-cardinality categorical problem has finitely many distinct rows,
+  and the sampler now stops doubling `base_n` when the achievable count
+  is reached (or after a fixed number of doublings). It then keeps
+  duplicate rows and explains why in a `UserWarning`. Duplicates are
+  valid Saltelli samples; deduplication only saves model evaluations.
+- **Clear errors from code-order-sensitive methods.** `morris.sample`,
+  `efast.sample`, `SobolSamples.to_morris`, `dgsm.analyze`,
+  `pce.analyze`, `hdmr.analyze`, `hsic.analyze`, `pawn.analyze`, and
+  `shapley.analyze` refuse a categorical problem with a `ValueError`
+  that names the categorical parameters and the supported alternatives.
+  The guard is a `categorical_ok` capability flag in the shared
+  validation layer, parallel to the 0.6.0 `correlation_ok` flag.
+- **No correlation × categorical.** A `problem.correlation` entry that
+  touches a categorical parameter raises at construction (a Gaussian
+  copula does not define a coupling for an unordered marginal; polychoric
+  coupling is future work). Identity rows and columns are fine.
+
 ## Unreleased (0.6.0)
 
 ### Added

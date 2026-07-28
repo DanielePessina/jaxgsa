@@ -62,6 +62,7 @@ Eleven complementary methods are included: **Sobol indices** (the standard varia
   - Advective (mean-shift, = S1/2) vs diffusive (spread/shape) decomposition of every index
   - Per-column indices via exact 1-D transport (solver-free) plus joint point-cloud modes over multivariate/time-series outputs (pure-JAX log-domain Sinkhorn); dummy-input irrelevance baseline
 - **Correlated inputs** — declare a Gaussian-copula correlation matrix on `Problem` (`correlation=`, latent or Spearman scale, or `problem.with_correlation(R)`); `jaxgsa.sampling.monte_carlo` draws from it transparently, `correlate()` retrofits it onto existing samples, `fit_correlation()` estimates it from data, correlation-tolerant methods (OT, Borgonovo, HDMR, HSIC, PAWN) analyze it, and correlation-naive methods (Sobol, Morris, eFAST, PCE, DGSM, PCE-backed Shapley) refuse it with an actionable error
+- **Categorical inputs** — declare unordered discrete marginals with `{"dist": "categorical", "probs": [...], "labels": [...]}`; samples carry integer level codes, optimal transport and Borgonovo condition on one class per level, Sobol pick-freeze works unchanged, and every code-order-sensitive method (Morris, eFAST, DGSM, PCE, HDMR, HSIC, PAWN, Shapley) refuses with a clear error
 - All eleven methods use one strict output contract: scalar `(N,)`, multi-output `(N, K)`, or time-series `(N, T, K)`
 - Bootstrap confidence intervals with JAX-accelerated resampling
 - Optional `prenormalize=True` mode for SALib-style output standardization before
