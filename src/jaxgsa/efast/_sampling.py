@@ -18,6 +18,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from jaxgsa._core.sampling import _transform_samples
+from jaxgsa._core.validation import _raise_correlated_design
 from jaxgsa.problem import Problem
 
 
@@ -201,8 +202,11 @@ def sample(
         parameter ``i``.
 
     Raises:
-        ValueError: If ``M < 1`` or ``n_per_curve < 4*M^2*(D-1) + 1``.
+        ValueError: If ``M < 1``, ``n_per_curve < 4*M^2*(D-1) + 1``, or
+            ``problem.correlation`` declares a dependence structure (the
+            search-curve design assumes independent inputs).
     """
+    _raise_correlated_design(problem, "jaxgsa.efast.sample")
     if M < 1:
         raise ValueError(f"M must be >= 1, got {M}")
 

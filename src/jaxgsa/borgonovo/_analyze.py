@@ -254,7 +254,9 @@ def analyze(
             ``slice_chunk_size`` is not a positive integer.
     """
     X = jnp.asarray(X)
-    Y = _validate_xy_inputs(problem, X, Y)
+    # The delta estimator partitions on rank classes and compares output
+    # densities, so a declared input correlation does not invalidate it.
+    Y = _validate_xy_inputs(problem, X, Y, correlation_ok=True)
 
     N = X.shape[0]
     if n_classes is None:

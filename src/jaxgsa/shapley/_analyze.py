@@ -205,14 +205,30 @@ def analyze(
 
     Raises:
         ValueError: If ``backend`` is unknown, ``include_correlative`` is
-            requested with the PCE backend, or the underlying ``analyze``
-            rejects its inputs.
+            requested with the PCE backend, ``problem.correlation`` declares
+            a dependence structure with the PCE backend (use
+            ``backend="hdmr"`` with ``include_correlative=True``), or the
+            underlying ``analyze`` rejects its inputs.
         TypeError: If ``backend_kwargs`` contains a keyword the selected
             backend's ``analyze`` does not accept.
     """
     if backend == "pce":
         if include_correlative:
             raise ValueError("include_correlative requires backend='hdmr'")
+        if problem.has_correlated_inputs:
+            # The delegated pce.analyze would reject the problem anyway; this
+            # guard names the Shapley-specific alternative in the message.
+            raise ValueError(
+                "jaxgsa.shapley.analyze with backend='pce' computes a variance "
+                "allocation that assumes independent inputs, but "
+                "problem.correlation declares a dependence structure. Use "
+                "backend='hdmr' with include_correlative=True, which allocates "
+                "the ANCOVA (structural + correlative) decomposition instead — "
+                "an ANCOVA-based attribution, not conditional-variance Shapley "
+                "effects — or a correlation-tolerant given-data method "
+                "(jaxgsa.optimal_transport, jaxgsa.borgonovo, jaxgsa.hsic, "
+                "jaxgsa.pawn)."
+            )
         from jaxgsa.pce import analyze as analyze_pce
 
         return analyze_pce(problem, X, Y, **backend_kwargs).shapley()

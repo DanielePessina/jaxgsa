@@ -36,6 +36,7 @@ from jaxgsa._core.sampling import (
     _stable_unique_rows,
     _transform_samples,
 )
+from jaxgsa._core.validation import _raise_correlated_design
 from jaxgsa.problem import Problem
 
 # Offset between the Sobol' draws used for radial base points (a) and
@@ -592,8 +593,11 @@ def sample(
 
     Raises:
         ValueError: If ``n_trajectories``, ``num_levels``, ``method``, or
-            ``truncation_quantile`` are invalid.
+            ``truncation_quantile`` are invalid, or ``problem.correlation``
+            declares a dependence structure (the one-at-a-time design assumes
+            independent inputs).
     """
+    _raise_correlated_design(problem, "jaxgsa.morris.sample")
     if not 0.0 < truncation_quantile < 0.5:
         raise ValueError(f"truncation_quantile must be in (0, 0.5), got {truncation_quantile}")
     if n_trajectories < 2:

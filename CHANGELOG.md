@@ -1,5 +1,55 @@
 # Changelog
 
+## Unreleased (0.6.0)
+
+### Added
+
+- **`Problem.correlation` — declared input dependence via a Gaussian copula.**
+  A `Problem` can now carry an optional `(D, D)` correlation matrix
+  (`correlation=` on the constructor and `from_dict`, or the
+  `problem.with_correlation(R)` copy constructor, since problems are frozen).
+  The matrix lives on the latent standard-normal scale of a Gaussian copula:
+  each parameter keeps its declared marginal exactly, and only the coupling
+  between columns changes. Pass `correlation_kind="spearman"` to declare a
+  rank correlation instead — it is converted through the exact
+  `2 sin(pi rho_s / 6)` relation, the invertible route for non-Gaussian
+  marginals. Matrices are validated on entry (shape, symmetry, unit diagonal,
+  entry range); a non-positive-definite matrix — usually a sign of
+  inconsistent pairwise correlations — is repaired by eigenvalue clipping
+  with a `UserWarning` reporting the minimum eigenvalue and the largest
+  entrywise change, so a silently different dependence structure is never
+  sampled. The correlation round-trips through the JSON problem metadata and
+  the NPZ design files, so saved designs do not silently drop it.
+- **Correlated sampling in `jaxgsa.sampling`.** `monte_carlo` now honors
+  `problem.correlation` transparently: correlated standard normals are drawn
+  on the latent scale and pushed through each marginal's inverse CDF (the
+  NORTA construction). Independent problems keep the previous pseudo-random
+  path bit-for-bit, so existing seeds reproduce existing samples. Two new
+  companions cover the remaining workflows: `correlate(X, problem)` retrofits
+  the declared correlation onto an existing sample by Iman–Conover-style rank
+  re-pairing (each column of the result is an exact permutation of the input
+  column, so the marginal values are preserved), and
+  `fit_correlation(problem, X)` estimates the latent matrix from observed
+  data via Spearman ranks — attach it with
+  `problem.with_correlation(fit_correlation(problem, X))`. Note the rank
+  estimate degrades under heavy ties (discrete data); a polychoric estimator
+  is future work. `correlation_from_covariance(cov)` converts a published
+  covariance matrix to the correlation form the API accepts — the variances
+  on its diagonal are discarded in favor of the declared marginals.
+- **Hard errors from correlation-naive methods.** When `problem.correlation`
+  declares a (non-identity) dependence structure, the methods whose indices
+  assume independent inputs now refuse to run rather than return silently
+  wrong numbers: the structured design samplers (`sobol.sample`,
+  `morris.sample`, `efast.sample`) and the given-data analyzers whose theory
+  needs independence (`pce.analyze`, `dgsm.analyze`, and `shapley.analyze`
+  with the PCE backend). Each error names correlation-tolerant alternatives:
+  `optimal_transport`, `borgonovo`, `hdmr` (whose ANCOVA `Sb` term is
+  precisely the correlation-induced contribution), `hsic`, and `pawn` all
+  accept correlated problems, and `shapley.analyze(backend="hdmr",
+  include_correlative=True)` allocates the ANCOVA decomposition. Internally
+  this is a `correlation_ok` capability flag on the shared `(X, Y)`
+  validation, so future methods must make the decision explicitly.
+
 ## 0.5.0
 
 ### Added

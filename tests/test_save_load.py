@@ -288,8 +288,100 @@ def test_sobol_and_morris_share_metadata_schema(tmp_path):
     common_keys = {"jaxgsa_version", "problem", "n_expanded", "identity_mapping"}
     for meta in metas.values():
         assert common_keys <= set(meta)
-        assert set(meta["problem"]) == {"names", "input_specs", "output_names"}
+        assert set(meta["problem"]) == {"names", "input_specs", "output_names", "correlation"}
 
     # The shared (base-owned) part of the schema is identical across designs.
     assert metas["schema_sobol"]["problem"] == metas["schema_morris"]["problem"]
     assert metas["schema_sobol"]["jaxgsa_version"] == metas["schema_morris"]["jaxgsa_version"]
+
+
+# ---------------------------------------------------------------------------
+# Problem.correlation persistence (JSON metadata + NPZ design files)
+# ---------------------------------------------------------------------------
+
+
+def test_problem_meta_json_round_trip_carries_correlation():
+    from jaxgsa._core.samples import _problem_from_meta, _problem_to_meta
+
+    problem = Problem.from_dict(
+        {
+            "uniform": (0.0, 1.0),
+            "gaussian": GaussianInputSpec(dist="gaussian", mean=1.0, variance=4.0),
+        },
+        correlation=[[1.0, 0.6], [0.6, 1.0]],
+    )
+
+    meta = json.loads(json.dumps(_problem_to_meta(problem)))
+    restored = _problem_from_meta(meta)
+
+    assert restored == problem
+    assert hash(restored) == hash(problem)
+    stored = restored.correlation
+    assert stored is not None
+    np.testing.assert_array_equal(stored, problem.correlation)
+
+
+def test_problem_meta_round_trip_preserves_none_correlation():
+    from jaxgsa._core.samples import _problem_from_meta, _problem_to_meta
+
+    problem = Problem.from_dict({"x": (0.0, 1.0)})
+    meta = json.loads(json.dumps(_problem_to_meta(problem)))
+    restored = _problem_from_meta(meta)
+    assert restored == problem
+    assert restored.correlation is None
+
+
+def test_problem_meta_load_tolerates_pre_060_files_without_correlation_key():
+    from jaxgsa._core.samples import _problem_from_meta, _problem_to_meta
+
+    problem = Problem.from_dict({"x": (0.0, 1.0), "y": (0.0, 1.0)})
+    meta = _problem_to_meta(problem)
+    del meta["correlation"]  # simulate a design saved by jaxgsa < 0.6
+    restored = _problem_from_meta(meta)
+    assert restored == problem
+    assert restored.correlation is None
+
+
+def test_npz_round_trip_carries_identity_correlation(tmp_path):
+    """End-to-end NPZ persistence with a declared (identity) correlation.
+
+    An identity matrix is 'declared but independent', so the design samplers
+    still accept the problem; a non-identity correlation cannot reach a
+    Saltelli design at all (the sampler raises), which is why the non-trivial
+    matrix is covered through the metadata round-trip tests above.
+    """
+    problem = Problem.from_dict(
+        {"x": (0.0, 1.0), "y": (0.0, 1.0)},
+        correlation=np.eye(2),
+    )
+    samples = jaxgsa.sobol.sample(problem, 32, seed=6, verbose=False)
+
+    path = tmp_path / "correlated_design"
+    samples.save(path)
+    loaded = SobolSamples.load(path)
+
+    _assert_equal(samples, loaded)
+    stored = loaded.problem.correlation
+    assert stored is not None
+    np.testing.assert_array_equal(stored, np.eye(2))
+
+    with np.load(tmp_path / "correlated_design.npz", allow_pickle=False) as data:
+        meta = json.loads(data["metadata"].item())
+    assert meta["problem"]["correlation"] == [[1.0, 0.0], [0.0, 1.0]]
+
+
+def test_morris_npz_round_trip_carries_identity_correlation(tmp_path):
+    problem = Problem.from_dict(
+        {"x": (0.0, 1.0), "y": (0.0, 1.0)},
+        correlation=np.eye(2),
+    )
+    samples = jaxgsa.morris.sample(problem, n_trajectories=4, seed=6, verbose=False)
+
+    path = tmp_path / "correlated_morris"
+    samples.save(path)
+    loaded = MorrisSamples.load(path)
+
+    _assert_morris_equal(samples, loaded)
+    stored = loaded.problem.correlation
+    assert stored is not None
+    np.testing.assert_array_equal(stored, np.eye(2))

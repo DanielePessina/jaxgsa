@@ -1,9 +1,12 @@
+import jax.numpy as jnp
 import numpy as np
 import pytest
 from scipy.stats import truncnorm
 
+import jaxgsa
 from jaxgsa._core.sampling import _next_power_of_2
 from jaxgsa.problem import GaussianInputSpec, InputSpecValue, Problem, UniformInputSpec
+from jaxgsa.sampling import correlate, fit_correlation, monte_carlo
 from jaxgsa.sobol import sample
 from jaxgsa.sobol._sampling import _saltelli_step
 
@@ -346,3 +349,186 @@ class TestSamplingResultDownsample:
         np.testing.assert_array_equal(sr_small.sample_ids, sr_direct.sample_ids)
         assert sr_small.n_expanded == sr_direct.n_expanded
         assert sr_small.base_n == sr_direct.base_n == K
+
+
+# ---------------------------------------------------------------------------
+# Correlated sampling (Gaussian copula on Problem.correlation)
+# ---------------------------------------------------------------------------
+
+
+def _spearman_of(X: np.ndarray) -> np.ndarray:
+    """Sample Spearman rank-correlation matrix of the columns of X."""
+    ranks = np.argsort(np.argsort(X, axis=0), axis=0).astype(np.float64)
+    return np.corrcoef(ranks, rowvar=False)
+
+
+def test_monte_carlo_gaussian_marginals_reproduce_mvn_covariance():
+    """All-Gaussian marginals + latent R: the copula *is* the MVN N(mu, DRD)."""
+    rho = 0.6
+    sigma = np.array([1.5, 2.0])
+    problem = Problem.from_dict(
+        {
+            "a": GaussianInputSpec(dist="gaussian", mean=1.0, variance=float(sigma[0] ** 2)),
+            "b": GaussianInputSpec(dist="gaussian", mean=-2.0, variance=float(sigma[1] ** 2)),
+        },
+        correlation=[[1.0, rho], [rho, 1.0]],
+    )
+    X = monte_carlo(problem, 100_000, seed=42)
+    expected = sigma[:, None] * np.array([[1.0, rho], [rho, 1.0]]) * sigma[None, :]
+    np.testing.assert_allclose(np.cov(X, rowvar=False), expected, atol=0.08)
+    np.testing.assert_allclose(np.mean(X, axis=0), [1.0, -2.0], atol=0.03)
+
+
+def test_spearman_kind_recovers_rank_correlation_with_uniform_marginals():
+    rho_s = 0.7
+    R = [[1.0, rho_s], [rho_s, 1.0]]
+    spearman_problem = Problem.from_dict(
+        {"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=R, correlation_kind="spearman"
+    )
+    X = monte_carlo(spearman_problem, 100_000, seed=3)
+    assert abs(_spearman_of(X)[0, 1] - rho_s) < 0.01
+
+    # The latent kind would *not* hit the rank target: a latent 0.7 yields
+    # a Spearman correlation of (6/pi) asin(0.7/2) ~ 0.683, which is what
+    # justifies exposing the kind switch at all.
+    latent_problem = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=R)
+    X_latent = monte_carlo(latent_problem, 100_000, seed=3)
+    expected_spearman = (6.0 / np.pi) * np.arcsin(rho_s / 2.0)
+    assert abs(_spearman_of(X_latent)[0, 1] - expected_spearman) < 0.01
+    assert abs(_spearman_of(X_latent)[0, 1] - rho_s) > 0.01
+
+
+def test_correlated_sampling_preserves_marginals():
+    """Coupling must not disturb the declared marginals (moments + bounds)."""
+    R = np.array(
+        [
+            [1.0, 0.5, 0.5],
+            [0.5, 1.0, 0.5],
+            [0.5, 0.5, 1.0],
+        ]
+    )
+    problem = Problem.from_dict(
+        {
+            "uniform": UniformInputSpec(dist="uniform", low=-3.0, high=2.0),
+            "gaussian": GaussianInputSpec(dist="gaussian", mean=1.5, variance=2.25),
+            "two_sided": GaussianInputSpec(
+                dist="gaussian", mean=0.5, variance=1.44, low=-0.5, high=1.5
+            ),
+        },
+        correlation=R,
+    )
+    X = monte_carlo(problem, 16_384, seed=123)
+
+    assert np.all(X[:, 0] >= -3.0)
+    assert np.all(X[:, 0] <= 2.0)
+    assert abs(np.mean(X[:, 1]) - 1.5) < 0.05
+    assert abs(np.var(X[:, 1]) - 2.25) < 0.08
+    assert np.all(X[:, 2] >= -0.5)
+    assert np.all(X[:, 2] <= 1.5)
+    std = np.sqrt(1.44)
+    a = (-0.5 - 0.5) / std
+    b = (1.5 - 0.5) / std
+    assert abs(np.var(X[:, 2]) - truncnorm.var(a, b, loc=0.5, scale=std)) < 0.03
+
+
+def test_identity_correlation_is_bitwise_identical_to_independent_path():
+    """An identity R short-circuits to the plain pseudo-random path."""
+    independent = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
+    identity = independent.with_correlation(np.eye(2))
+    np.testing.assert_array_equal(
+        monte_carlo(independent, 512, seed=9), monte_carlo(identity, 512, seed=9)
+    )
+
+
+def test_correlated_monte_carlo_determinism_and_generator_seed():
+    problem = Problem.from_dict(
+        {"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=[[1.0, 0.8], [0.8, 1.0]]
+    )
+    np.testing.assert_array_equal(
+        monte_carlo(problem, 128, seed=5), monte_carlo(problem, 128, seed=5)
+    )
+    assert not np.array_equal(monte_carlo(problem, 128, seed=5), monte_carlo(problem, 128, seed=6))
+    from_generator = monte_carlo(problem, 128, seed=np.random.default_rng(5))
+    np.testing.assert_array_equal(from_generator, monte_carlo(problem, 128, seed=5))
+
+
+def test_correlated_monte_carlo_rejects_nonpositive_n():
+    problem = Problem.from_dict(
+        {"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=[[1.0, 0.8], [0.8, 1.0]]
+    )
+    with pytest.raises(ValueError, match="n must be >= 1"):
+        monte_carlo(problem, 0)
+
+
+def test_correlate_is_a_per_column_permutation_hitting_the_target():
+    rho = 0.8
+    problem = Problem.from_dict(
+        {"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=[[1.0, rho], [rho, 1.0]]
+    )
+    X = monte_carlo(problem.with_correlation(None), 8192, seed=21)
+    X_corr = correlate(X, problem, seed=22)
+
+    # Exact permutation of each column: sample values are fully preserved.
+    np.testing.assert_array_equal(np.sort(X_corr, axis=0), np.sort(X, axis=0))
+    # And the re-pairing achieves the declared latent correlation.
+    assert abs(fit_correlation(problem, X_corr)[0, 1] - rho) < 0.05
+
+
+def test_correlate_determinism_and_validation():
+    problem = Problem.from_dict(
+        {"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=[[1.0, 0.5], [0.5, 1.0]]
+    )
+    X = monte_carlo(problem.with_correlation(None), 256, seed=1)
+    np.testing.assert_array_equal(correlate(X, problem, seed=2), correlate(X, problem, seed=2))
+
+    with pytest.raises(ValueError, match="requires problem.correlation"):
+        correlate(X, problem.with_correlation(None))
+    with pytest.raises(ValueError, match=r"X must be \(N, 2\)"):
+        correlate(X[:, :1], problem)
+
+
+def test_fit_correlation_public_wrapper_recovers_declared_matrix():
+    rho = 0.7
+    problem = Problem.from_dict(
+        {"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=[[1.0, rho], [rho, 1.0]]
+    )
+    X = monte_carlo(problem, 20_000, seed=17)
+    fitted = fit_correlation(problem, X)
+    assert fitted.shape == (2, 2)
+    assert abs(fitted[0, 1] - rho) < 0.02
+
+
+def test_correlated_end_to_end_ot_borgonovo_hdmr():
+    """Y = X1 with corr(X1, X2) = 0.8: the unused X2 must earn a clearly
+    non-zero index under the correlation-inclusive given-data methods, and
+    HDMR's ANCOVA Sb term must flag the correlation-induced variance."""
+    rho = 0.8
+    problem = Problem.from_dict(
+        {"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=[[1.0, rho], [rho, 1.0]]
+    )
+    X = monte_carlo(problem, 2048, seed=99)
+    Y = jnp.asarray(X[:, 0])
+    Xj = jnp.asarray(X)
+
+    ot = jaxgsa.optimal_transport.analyze(problem, Xj, Y)
+    assert float(ot.ot[0]) > 0.5  # Y is fully determined by X1
+    assert float(ot.ot[1]) > 0.1  # X2 unused, but correlated with X1
+
+    delta = jaxgsa.borgonovo.analyze(problem, Xj, Y)
+    assert float(delta.delta[0]) > 0.5
+    assert float(delta.delta[1]) > 0.1
+
+    # For Y = X1 backfitting attributes everything to the x1 component, so
+    # the correlative share is clearest on an additive model of both inputs:
+    # each first-order term covaries with the other through corr(X1, X2).
+    Y_sum = jnp.asarray(X[:, 0] + X[:, 1])
+    hdmr = jaxgsa.hdmr.analyze(problem, Xj, Y_sum)
+    assert float(jnp.max(jnp.abs(hdmr.Sb))) > 0.1
+
+    # Same model on an independent draw: the correlative share collapses.
+    independent = problem.with_correlation(None)
+    X0 = monte_carlo(independent, 2048, seed=98)
+    hdmr_indep = jaxgsa.hdmr.analyze(
+        independent, jnp.asarray(X0), jnp.asarray(X0[:, 0] + X0[:, 1])
+    )
+    assert float(jnp.max(jnp.abs(hdmr_indep.Sb))) < 0.05

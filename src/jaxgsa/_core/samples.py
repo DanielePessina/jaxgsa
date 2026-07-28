@@ -22,7 +22,12 @@ from typing import TYPE_CHECKING, Any, Mapping, Self
 import jax.numpy as jnp
 import numpy as np
 
-from jaxgsa.problem import Problem, _normalize_input_spec, _normalized_input_to_dict
+from jaxgsa.problem import (
+    Problem,
+    _canonical_correlation,
+    _normalize_input_spec,
+    _normalized_input_to_dict,
+)
 
 if TYPE_CHECKING:
     from jax import Array
@@ -54,20 +59,29 @@ def _jaxgsa_version() -> str:
 
 def _problem_to_meta(problem: Problem) -> dict[str, Any]:
     """Serialize a :class:`Problem` to a JSON-compatible metadata dict."""
+    correlation = problem.correlation
     return {
         "names": list(problem.names),
         "input_specs": [_normalized_input_to_dict(spec) for spec in problem.input_specs],
         "output_names": list(problem.output_names) if problem.output_names is not None else None,
+        "correlation": correlation.tolist() if correlation is not None else None,
     }
 
 
 def _problem_from_meta(problem_meta: Mapping[str, Any]) -> Problem:
     """Reconstruct a :class:`Problem` from its metadata dict."""
     output_names = problem_meta["output_names"]
+    names = tuple(problem_meta["names"])
     return Problem._from_normalized_inputs(
-        names=tuple(problem_meta["names"]),
+        names=names,
         input_specs=tuple(_normalize_input_spec(spec) for spec in problem_meta["input_specs"]),
         output_names=tuple(output_names) if output_names is not None else None,
+        # `.get`: files written before jaxgsa 0.6 carry no correlation key.
+        # The matrix was validated (with the repair warning) at construction,
+        # so re-validation on load stays silent.
+        correlation=_canonical_correlation(
+            problem_meta.get("correlation"), len(names), warn_on_repair=False
+        ),
     )
 
 

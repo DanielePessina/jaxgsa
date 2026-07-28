@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Literal, NotRequired, TypeAlias, TypedDict
+from typing import TYPE_CHECKING, Literal, NotRequired, TypeAlias, TypedDict
+
+import numpy as np
+
+if TYPE_CHECKING:
+    import numpy.typing as npt
 
 
 class UniformInputSpec(TypedDict):
@@ -37,6 +42,8 @@ class GaussianInputSpec(TypedDict):
 
 # Public-facing union type -- users pass one of these per parameter.
 InputSpecValue: TypeAlias = tuple[float, float] | UniformInputSpec | GaussianInputSpec
+# Hashable canonical storage for a validated latent correlation matrix.
+_CorrelationTuple: TypeAlias = tuple[tuple[float, ...], ...]
 # Internal canonical form: (dist, param1, param2, lo_bound, hi_bound).
 # For uniform: param1=low, param2=high. For gaussian: param1=mean, param2=variance.
 _NormalizedInputSpec: TypeAlias = tuple[
@@ -142,6 +149,29 @@ def _derive_bounds(
     return tuple(bounds)
 
 
+def _canonical_correlation(
+    correlation: "npt.ArrayLike | None",
+    n_params: int,
+    kind: Literal["latent", "spearman"] = "latent",
+    *,
+    warn_on_repair: bool,
+) -> _CorrelationTuple | None:
+    """Validate a correlation matrix and freeze it into hashable form.
+
+    ``None`` passes through (independent inputs). Anything else is converted
+    from ``kind`` to the latent scale, validated (with positive-definiteness
+    repair), and stored as a nested tuple of floats so ``Problem`` stays
+    frozen and hashable.
+    """
+    if correlation is None:
+        return None
+    # Imported lazily: jaxgsa._core.copula imports this module at load time.
+    from jaxgsa._core.copula import canonicalize_correlation
+
+    R = canonicalize_correlation(correlation, n_params, kind=kind, warn_on_repair=warn_on_repair)
+    return tuple(tuple(float(value) for value in row) for row in R)
+
+
 def _normalized_input_to_dict(spec: _NormalizedInputSpec) -> UniformInputSpec | GaussianInputSpec:
     """Convert a normalized immutable input spec into a JSON-friendly mapping."""
     dist, first, second, low, high = spec
@@ -175,6 +205,13 @@ class Problem:
     ``(low, high)`` bounds. Use :meth:`from_dict` when you need mixed uniform
     and Gaussian marginals.
 
+    Optionally, a Gaussian-copula ``correlation`` matrix couples the
+    marginals: samples then follow the declared dependence structure while
+    each parameter keeps its marginal exactly as written.
+    ``jaxgsa.sampling.monte_carlo`` honors it transparently; methods whose
+    indices assume independent inputs refuse a correlated problem with a
+    ``ValueError``.
+
     Attributes:
         names: Parameter names in model-input order.
         bounds: Per-parameter ``(low, high)`` tuples when every marginal is
@@ -188,12 +225,15 @@ class Problem:
     bounds: tuple[tuple[float, float], ...] | None
     _input_specs: tuple[_NormalizedInputSpec, ...] = field(repr=False)
     output_names: tuple[str, ...] | None = None
+    _correlation: _CorrelationTuple | None = field(repr=False, default=None)
 
     def __init__(
         self,
         names: tuple[str, ...],
         bounds: tuple[tuple[float, float], ...],
         output_names: tuple[str, ...] | None = None,
+        correlation: "npt.ArrayLike | None" = None,
+        correlation_kind: Literal["latent", "spearman"] = "latent",
     ) -> None:
         """Create a uniform-only problem from finite bounds.
 
@@ -203,6 +243,15 @@ class Problem:
                 as ``names``. Each parameter is sampled uniformly between its
                 bounds.
             output_names: Optional output labels used by ``to_dataset()``.
+            correlation: Optional ``(D, D)`` Gaussian-copula correlation
+                matrix declaring the dependence between parameters. ``None``
+                (default) means independent inputs. Validated on entry; a
+                non-positive-definite matrix is repaired with a
+                ``UserWarning``.
+            correlation_kind: Scale ``correlation`` is expressed on:
+                ``"latent"`` (default) for the Pearson correlation of the
+                copula's latent normals, ``"spearman"`` for a rank
+                correlation (converted via ``2 sin(pi rho_s / 6)``).
         """
         normalized_names = tuple(names)
         normalized_bounds = tuple((float(low), float(high)) for low, high in bounds)
@@ -217,6 +266,10 @@ class Problem:
             names=normalized_names,
             input_specs=input_specs,
             output_names=output_names,
+            # User-declared matrices deserve the repair warning.
+            correlation=_canonical_correlation(
+                correlation, len(normalized_names), correlation_kind, warn_on_repair=True
+            ),
         )
 
     @classmethod
@@ -226,6 +279,8 @@ class Problem:
         output_names: tuple[str, ...] | None = None,
         *,
         truncate_gaussians: float | None = None,
+        correlation: "npt.ArrayLike | None" = None,
+        correlation_kind: Literal["latent", "spearman"] = "latent",
     ) -> "Problem":
         """Create a ``Problem`` from per-parameter distribution specs.
 
@@ -251,6 +306,12 @@ class Problem:
                 :func:`jaxgsa.morris.sample` does not squash it a second time
                 and :meth:`jaxgsa.sobol.SobolSamples.to_morris` stops warning
                 about unbounded tails.
+            correlation: Optional ``(D, D)`` Gaussian-copula correlation
+                matrix declaring the dependence between parameters; rows and
+                columns follow the dict's insertion order. ``None`` (default)
+                means independent inputs.
+            correlation_kind: Scale ``correlation`` is expressed on:
+                ``"latent"`` (default) or ``"spearman"``.
 
         Returns:
             A normalized ``Problem`` instance.
@@ -272,6 +333,46 @@ class Problem:
             names=names,
             input_specs=input_specs,
             output_names=output_names,
+            correlation=_canonical_correlation(
+                correlation, len(names), correlation_kind, warn_on_repair=True
+            ),
+        )
+
+    def with_correlation(
+        self,
+        correlation: "npt.ArrayLike | None",
+        *,
+        kind: Literal["latent", "spearman"] = "latent",
+    ) -> "Problem":
+        """Return a copy of this problem with the given correlation matrix.
+
+        ``Problem`` is frozen, so attaching a correlation after construction
+        — the fit-then-attach workflow with
+        ``jaxgsa.sampling.fit_correlation`` — goes through this copy
+        constructor:
+
+        .. code-block:: python
+
+            R = jaxgsa.sampling.fit_correlation(problem, X_observed)
+            problem = problem.with_correlation(R)
+
+        Args:
+            correlation: ``(D, D)`` Gaussian-copula correlation matrix, or
+                ``None`` to drop a previously declared correlation.
+            kind: Scale ``correlation`` is expressed on: ``"latent"``
+                (default) or ``"spearman"``.
+
+        Returns:
+            A new ``Problem`` with the same marginals, names, and output
+            names, and the validated correlation attached.
+        """
+        return Problem._from_normalized_inputs(
+            names=self.names,
+            input_specs=self._input_specs,
+            output_names=self.output_names,
+            correlation=_canonical_correlation(
+                correlation, self.num_vars, kind, warn_on_repair=True
+            ),
         )
 
     @classmethod
@@ -281,8 +382,14 @@ class Problem:
         names: tuple[str, ...],
         input_specs: tuple[_NormalizedInputSpec, ...],
         output_names: tuple[str, ...] | None = None,
+        correlation: _CorrelationTuple | None = None,
     ) -> "Problem":
-        """Create a problem from internal normalized input specs."""
+        """Create a problem from internal normalized input specs.
+
+        ``correlation`` must already be in canonical validated form (the
+        nested-tuple output of :func:`_canonical_correlation`); this internal
+        path performs no correlation validation of its own.
+        """
         if len(names) != len(input_specs):
             raise ValueError(
                 "names and input specs must have the same length, got "
@@ -294,6 +401,7 @@ class Problem:
             names=tuple(names),
             input_specs=tuple(input_specs),
             output_names=output_names,
+            correlation=correlation,
         )
         return obj
 
@@ -303,6 +411,7 @@ class Problem:
         names: tuple[str, ...],
         input_specs: tuple[_NormalizedInputSpec, ...],
         output_names: tuple[str, ...] | None,
+        correlation: _CorrelationTuple | None,
     ) -> None:
         """Assign validated frozen dataclass fields in one place."""
         # Bypass frozen dataclass protection -- only called during construction.
@@ -311,11 +420,33 @@ class Problem:
         normalized = tuple(output_names) if output_names is not None else None
         object.__setattr__(self, "output_names", normalized)
         object.__setattr__(self, "_input_specs", input_specs)
+        object.__setattr__(self, "_correlation", correlation)
 
     @property
     def input_specs(self) -> tuple[_NormalizedInputSpec, ...]:
         """Normalized input distribution specs for each parameter."""
         return self._input_specs
+
+    @property
+    def correlation(self) -> "np.ndarray | None":
+        """Latent Gaussian-copula correlation matrix, or ``None`` if independent.
+
+        Always expressed on the latent scale regardless of the
+        ``correlation_kind`` it was declared with. Returns a fresh
+        ``(D, D)`` float64 array; mutating it does not affect the problem.
+        """
+        if self._correlation is None:
+            return None
+        return np.asarray(self._correlation, dtype=np.float64)
+
+    @property
+    def has_correlated_inputs(self) -> bool:
+        """Return ``True`` when a non-identity correlation matrix is declared."""
+        if self._correlation is None:
+            return False
+        from jaxgsa._core.copula import is_independent
+
+        return not is_independent(np.asarray(self._correlation, dtype=np.float64))
 
     @property
     def has_non_uniform_inputs(self) -> bool:
