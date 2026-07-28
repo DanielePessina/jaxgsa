@@ -35,7 +35,9 @@ from typing import Callable, NamedTuple
 import numpy as np
 from scipy.stats import norm
 
+from jaxgsa._core.batching import get_memory_budget
 from jaxgsa._core.copula import _ConditionalPlan, latent_normal_sample
+from jaxgsa._core.legendre import legendre_orthonormal
 
 # Degree of the marginal Legendre basis used to recover the first-order
 # component functions f_i. Six terms capture the smooth univariate shapes a
@@ -129,6 +131,7 @@ def estimate_correlated_indices(
             predict=predict,
             n_outer=n_outer,
             n_inner=n_inner,
+            n_slices=n_slices,
             seed=seed + 1 + i,
         )
         total_uncorrelated, conditional_component_var = _total_uncorrelated_and_conditional(
@@ -138,6 +141,7 @@ def estimate_correlated_indices(
             component=coefficients[:, i, :],
             n_outer=n_outer,
             n_inner=n_inner,
+            n_slices=n_slices,
             seed=seed + 1 + D + i,
         )
         S_TU[:, i] = total_uncorrelated
@@ -172,6 +176,9 @@ def _legendre_basis(u: np.ndarray, degree: int) -> np.ndarray:
     are marginally orthonormal and mean-zero here. That makes the additive
     least squares below well posed without any extra centering.
 
+    Thin wrapper over the shared recurrence in :mod:`jaxgsa._core.legendre`:
+    shift ``(0, 1)`` onto ``(-1, 1)`` and drop the constant term.
+
     Args:
         u: ``(..., )`` values in (0, 1).
         degree: Highest polynomial degree; term 0 (the constant) is dropped.
@@ -179,17 +186,7 @@ def _legendre_basis(u: np.ndarray, degree: int) -> np.ndarray:
     Returns:
         ``(..., degree)`` array of basis values.
     """
-    x = 2.0 * u - 1.0  # map (0, 1) onto the Legendre domain (-1, 1)
-    columns = []
-    previous, current = np.ones_like(x), x
-    for k in range(1, degree + 1):
-        # Normalised so each column has unit variance under a uniform marginal.
-        columns.append(current * np.sqrt(2.0 * k + 1.0))
-        previous, current = (
-            current,
-            ((2 * k + 1) * x * current - k * previous) / (k + 1),
-        )
-    return np.stack(columns, axis=-1)
+    return legendre_orthonormal(2.0 * u - 1.0, degree)[..., 1:]
 
 
 def _fit_component_functions(U: np.ndarray, Y: np.ndarray) -> np.ndarray:
@@ -255,6 +252,24 @@ def _assemble_latent(
     return Z
 
 
+def _outer_chunk(n_outer: int, n_inner: int, n_columns: int) -> int:
+    """Return how many outer points fit in the transient-memory budget.
+
+    Each outer point expands into ``n_inner`` rows. Each row holds the
+    ``D``-column latent block plus the ``S``-column prediction, in float64.
+
+    Args:
+        n_outer: Total outer points.
+        n_inner: Inner draws per outer point.
+        n_columns: Columns held per expanded row (``D + S``).
+
+    Returns:
+        Chunk size in ``[1, n_outer]``.
+    """
+    bytes_per_outer = 8 * n_inner * n_columns
+    return max(1, min(n_outer, get_memory_budget() // max(bytes_per_outer, 1)))
+
+
 def _total_correlated(
     *,
     plan: _ConditionalPlan,
@@ -262,36 +277,47 @@ def _total_correlated(
     predict: Callable[[np.ndarray], np.ndarray],
     n_outer: int,
     n_inner: int,
+    n_slices: int,
     seed: int,
 ) -> np.ndarray:
     """Estimate ``V(E(Y|X_i))`` for one parameter.
+
+    Outer points are processed in memory-budgeted chunks. Only the
+    ``(n_outer, S)`` inner means stay resident; the full
+    ``(n_outer * n_inner, S)`` block is never materialised. All latent draws
+    are made up front, so chunking changes evaluation batching only, not the
+    sample.
 
     Returns:
         ``(S,)`` conditional-expectation variance, not yet normalised.
     """
     others = plan.others[index]
+    D_rest = others.shape[0]
     z_self = latent_normal_sample(n_outer, 1, seed=seed)[:, 0]
     # One inner block, reused across every outer point. Sharing it makes the
     # inner integration rule identical for all conditioning values, which
     # cancels much of its error out of the outer variance.
-    inner = latent_normal_sample(n_inner, others.shape[0], seed=seed + 7919)
+    inner = latent_normal_sample(n_inner, D_rest, seed=seed + 7919)
+    inner_rotated = inner @ plan.chol_rest[index].T
 
-    # Z_-i | Z_i = beta * z_i + L eps.
-    z_rest = (
-        plan.beta_rest[index][None, None, :] * z_self[:, None, None]
-        + inner @ plan.chol_rest[index].T
-    )
-    z_self_tiled = np.repeat(z_self, n_inner)
-    Z = _assemble_latent(index, others, z_self_tiled, z_rest.reshape(-1, others.shape[0]))
+    inner_mean = np.empty((n_outer, n_slices), dtype=np.float64)
+    chunk = _outer_chunk(n_outer, n_inner, D_rest + 1 + n_slices)
+    for start in range(0, n_outer, chunk):
+        z_chunk = z_self[start : start + chunk]
+        # Z_-i | Z_i = beta * z_i + L eps.
+        z_rest = plan.beta_rest[index][None, None, :] * z_chunk[:, None, None] + inner_rotated
+        z_self_tiled = np.repeat(z_chunk, n_inner)
+        Z = _assemble_latent(index, others, z_self_tiled, z_rest.reshape(-1, D_rest))
+        Y = np.asarray(predict(norm.cdf(Z)), dtype=np.float64)
+        inner_mean[start : start + chunk] = Y.reshape(-1, n_inner, n_slices).mean(axis=1)
 
-    Y = np.asarray(predict(norm.cdf(Z)), dtype=np.float64)
-    Y = Y.reshape(n_outer, n_inner, -1)
-
-    inner_mean = Y.mean(axis=1)
-    # The variance of a noisy mean overstates V(E(Y|X_i)) by the inner sampling
-    # variance; subtract it rather than leaning on a large n_inner.
-    inner_var = Y.var(axis=1, ddof=1)
-    return np.maximum(inner_mean.var(axis=0) - inner_var.mean(axis=0) / n_inner, 0.0)
+    # No inner-noise correction. The textbook term ``inner_var / n_inner``
+    # assumes iid inner draws. Here the inner block is QMC and shared across
+    # outer points, so the inner error is far smaller and mostly constant in
+    # the outer variance. Chosen empirically against the linear-Gaussian
+    # closed form: the correction clamps small true S_TC to near zero, while
+    # the uncorrected estimator is unbiased at equal spread.
+    return inner_mean.var(axis=0)
 
 
 def _total_uncorrelated_and_conditional(
@@ -302,6 +328,7 @@ def _total_uncorrelated_and_conditional(
     component: np.ndarray,
     n_outer: int,
     n_inner: int,
+    n_slices: int,
     seed: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Estimate ``E(V(Y|X_-i))`` and ``V(E(f_i|X_-i))`` for one parameter.
@@ -311,29 +338,40 @@ def _total_uncorrelated_and_conditional(
     the fitted component function evaluated on the same draws gives the
     conditional expectation Equation (25) subtracts.
 
+    Outer points are processed in memory-budgeted chunks, as in
+    :func:`_total_correlated`: only ``(n_outer, S)`` accumulators stay
+    resident, and chunking does not change the latent sample.
+
     Returns:
         ``(S,)`` conditional-variance mean and ``(S,)`` variance of
         ``E(f_i|X_-i)``, neither normalised by ``V(Y)``.
     """
     others = plan.others[index]
-    z_rest = (
-        latent_normal_sample(n_outer, others.shape[0], seed=seed) @ plan.chol_marginal[index].T
-    )
+    D_rest = others.shape[0]
+    z_rest = latent_normal_sample(n_outer, D_rest, seed=seed) @ plan.chol_marginal[index].T
     inner = latent_normal_sample(n_inner, 1, seed=seed + 7919)[:, 0]
 
     # Z_i | Z_-i = beta . z_-i + sigma eps.
     conditional_mean = z_rest @ plan.beta_self[index]
-    z_self = conditional_mean[:, None] + plan.std_self[index] * inner[None, :]
 
-    z_rest_tiled = np.repeat(z_rest, n_inner, axis=0)
-    Z = _assemble_latent(index, others, z_self.reshape(-1), z_rest_tiled)
+    inner_var = np.empty((n_outer, n_slices), dtype=np.float64)
+    f_hat = np.empty((n_outer, n_slices), dtype=np.float64)
+    chunk = _outer_chunk(n_outer, n_inner, D_rest + 1 + n_slices)
+    for start in range(0, n_outer, chunk):
+        stop = start + chunk
+        z_self = conditional_mean[start:stop, None] + plan.std_self[index] * inner[None, :]
+        z_rest_tiled = np.repeat(z_rest[start:stop], n_inner, axis=0)
+        Z = _assemble_latent(index, others, z_self.reshape(-1), z_rest_tiled)
 
-    Y = np.asarray(predict(norm.cdf(Z)), dtype=np.float64)
-    Y = Y.reshape(n_outer, n_inner, -1)
-    total_uncorrelated = Y.var(axis=1, ddof=1).mean(axis=0)
+        Y = np.asarray(predict(norm.cdf(Z)), dtype=np.float64)
+        inner_var[start:stop] = Y.reshape(-1, n_inner, n_slices).var(axis=1, ddof=1)
 
-    # E(f_i | X_-i), averaged over the same inner draws of X_i. Its variance
-    # over the outer sample is the correlation-explained part of f_i that
-    # Equation (25) removes.
-    f_hat = _evaluate_component(norm.cdf(z_self), component).mean(axis=1)
-    return total_uncorrelated, f_hat.var(axis=0)
+        # E(f_i | X_-i), averaged over the same inner draws of X_i. Its
+        # variance over the outer sample is the correlation-explained part of
+        # f_i that Equation (25) removes. No inner-noise correction here
+        # either: the same shared-QMC-block argument as in _total_correlated
+        # applies, so both estimators use the same (empirically validated)
+        # convention.
+        f_hat[start:stop] = _evaluate_component(norm.cdf(z_self), component).mean(axis=1)
+
+    return inner_var.mean(axis=0), f_hat.var(axis=0)

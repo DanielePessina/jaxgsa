@@ -30,6 +30,7 @@ from jaxgsa._core.copula import (
     independent_correlation,
     validate_correlation,
 )
+from jaxgsa._core.sampling import _next_power_of_2
 from jaxgsa._core.surrogate import _PredictPlan
 from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa._core.validation import (
@@ -91,16 +92,18 @@ def analyze_vkoga(
             ``"empirical"`` fits one from ``X`` by rank correlation.
         gamma: RBF shape parameter. ``None`` cross-validates over a grid.
         ridge: Kernel regularisation. ``None`` cross-validates over a grid.
-        max_centers: Maximum kernel centres the greedy may select. Defaults to
-            300, capped at ``N``.
-        n_folds: Folds for hyperparameter cross-validation.
-        n_outer: Outer (conditioning) sample size per parameter.
-        n_inner: Inner (conditional) sample size per outer point.
+        max_centers: Maximum kernel centres the greedy may select, at least 1.
+            Defaults to 300, capped at ``N``.
+        n_folds: Folds for hyperparameter cross-validation, at least 2.
+        n_outer: Outer (conditioning) sample size per parameter, at least 2.
+            Rounded up to the next power of two (Sobol' balance).
+        n_inner: Inner (conditional) sample size per outer point, at least 2.
+            Rounded up to the next power of two.
         n_variance: Sample size for the output variance and the component-
-            function fit.
+            function fit, at least 2. Rounded up to the next power of two.
         seed: Base seed for the quasi-random draws.
-        batch_size: Rows per batch when evaluating the surrogate. ``None``
-            derives one from the memory budget.
+        batch_size: Rows per batch when evaluating the surrogate, at least 1.
+            ``None`` derives one from the memory budget.
 
     Returns:
         A :class:`VKOGAResult` with ``S_TC``, ``S_TU``, ``S_U``, ``S_C`` and
@@ -108,14 +111,36 @@ def analyze_vkoga(
 
     Raises:
         ValueError: If ``X``/``Y`` violate the output contract, if the problem
-            has fewer than two parameters, or if ``correlation`` is neither a
-            valid matrix nor ``"empirical"``.
+            has fewer than two parameters, if ``correlation`` is neither a
+            valid matrix nor ``"empirical"``, or if a size argument is out of
+            range.
+        RuntimeError: If every cross-validation score is non-finite.
 
     Warns:
         UserWarning: If any output slice has zero variance, or if JAX is in
             single precision, where the kernel solve loses accuracy for small
             ``gamma`` (see :mod:`jaxgsa.vkoga`).
     """
+    # Raise-early validation: every scalar argument is checked before any
+    # expensive work (cross-validation, fitting, index estimation).
+    if max_centers is None:
+        max_centers = _DEFAULT_MAX_CENTERS
+    elif max_centers < 1:
+        raise ValueError(f"max_centers must be >= 1, got {max_centers}")
+    if n_folds < 2:
+        raise ValueError(f"n_folds must be >= 2 for cross-validation, got {n_folds}")
+    for name, value in (("n_outer", n_outer), ("n_inner", n_inner), ("n_variance", n_variance)):
+        if value < 2:
+            raise ValueError(f"{name} must be >= 2, got {value}")
+    if batch_size is not None and batch_size < 1:
+        raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+    # The latent draws come from Sobol' sequences, which need power-of-two
+    # sizes to keep their balance guarantees (scipy warns otherwise). The
+    # defaults are already powers of two, so they pass through unchanged.
+    n_outer = _next_power_of_2(n_outer)
+    n_inner = _next_power_of_2(n_inner)
+    n_variance = _next_power_of_2(n_variance)
+
     X = jnp.asarray(X)
     Y = _validate_xy_inputs(problem, X, jnp.asarray(Y))
     D = problem.num_vars
@@ -139,7 +164,7 @@ def analyze_vkoga(
     y_mean = Y_flat.mean(axis=0)
     Y_centered = Y_flat - y_mean
 
-    resolved_centers = min(int(max_centers or _DEFAULT_MAX_CENTERS), int(U.shape[0]))
+    resolved_centers = min(int(max_centers), int(U.shape[0]))
     gamma_value, ridge_value = _resolve_hyperparameters(
         U,
         Y_centered,
@@ -155,6 +180,14 @@ def analyze_vkoga(
         gamma=gamma_value,
         max_centers=resolved_centers,
         ridge=ridge_value,
+    )
+    # The fitted state is padded to the static max_centers size (rows past
+    # n_centers hold zero coefficients). Slice it down host-side so predict
+    # and the index estimators pay only for the centres the greedy selected.
+    n_selected = int(state.n_centers)
+    state = state._replace(
+        centers=state.centers[:n_selected],
+        coefficients=state.coefficients[:n_selected],
     )
 
     predict = _make_unit_predictor(state, y_mean, batch_size)
@@ -250,6 +283,11 @@ def _resolve_hyperparameters(
 
     Searching a one-element grid is how a partially specified pair is handled,
     so there is a single code path rather than four.
+
+    Raises:
+        RuntimeError: If every cross-validation score is non-finite. Argmin
+            over such a grid would silently pick flat index 0, the most
+            ill-conditioned corner.
     """
     if gamma is not None and ridge is not None:
         return float(gamma), float(ridge)
@@ -267,9 +305,16 @@ def _resolve_hyperparameters(
             seed=seed,
         )
     )
+    finite = np.isfinite(scores)
+    if not finite.any():
+        raise RuntimeError(
+            "Every cross-validation score is non-finite; the kernel solves failed on the whole "
+            "hyperparameter grid. Enable float64 with jax.config.update('jax_enable_x64', True), "
+            "increase ridge, or pass gamma and ridge explicitly."
+        )
     # A fold can return a non-finite score when the solve blows up; treat those
     # as the worst possible rather than letting argmin pick a NaN.
-    scores = np.where(np.isfinite(scores), scores, np.inf)
+    scores = np.where(finite, scores, np.inf)
     best = np.unravel_index(int(np.argmin(scores)), scores.shape)
     return float(gammas[best[0]]), float(ridges[best[1]])
 

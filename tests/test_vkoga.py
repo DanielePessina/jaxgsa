@@ -19,11 +19,15 @@ warns about single precision.
 
 from __future__ import annotations
 
+import warnings
+
 import jax
 import numpy as np
 import pytest
+from scipy.stats import spearmanr
 
 import jaxgsa
+from jaxgsa._core.copula import fit_gaussian_copula
 from jaxgsa.problem import Problem
 
 # --- closed-form linear-Gaussian reference ----------------------------------
@@ -124,7 +128,9 @@ def uniform_fits():
 
 def test_closed_form_total_indices(gauss_result):
     S_TC_true, S_TU_true, var_y = _analytic_indices(A_COEF, R_GAUSS)
-    np.testing.assert_allclose(np.asarray(gauss_result.S_TC), S_TC_true, atol=2e-2)
+    # atol tightened from 2e-2 after dropping the iid inner-noise correction
+    # (it biased small S_TC low; see _indices._total_correlated).
+    np.testing.assert_allclose(np.asarray(gauss_result.S_TC), S_TC_true, atol=1e-2)
     np.testing.assert_allclose(np.asarray(gauss_result.S_TU), S_TU_true, atol=2e-2)
     np.testing.assert_allclose(float(np.asarray(gauss_result.variance)), var_y, rtol=5e-2)
     assert gauss_result.is_correlated
@@ -219,6 +225,28 @@ def test_correlation_matrix_validation_errors():
             jaxgsa.vkoga.analyze(GAUSS_PROBLEM, X, Y, correlation=bad_matrix, **SMALL_KWARGS)
 
 
+def test_copula_fit_with_ties_matches_spearmanr():
+    """Tied values with a structured row order must not bias the rank fit.
+
+    A column with heavy ties, ordered so the other column descends within
+    each tie group, breaks positional tie-breaking (double argsort): the
+    row order leaks into the ranks. Average ranks match spearmanr.
+    """
+    rng = np.random.default_rng(0)
+    n = 512
+    x1 = np.repeat(np.arange(8.0), n // 8)  # heavy ties: 8 levels, 64 rows each
+    x2 = x1 + rng.normal(0.0, 1.0, n)
+    x3 = rng.normal(size=n)
+    # Structured row order: within each tie group of x1, sort x2 descending.
+    order = np.lexsort((-x2, x1))
+    X = np.column_stack([x1, x2, x3])[order]
+
+    rho_s = spearmanr(X[:, 0], X[:, 1]).statistic
+    expected = 2.0 * np.sin(np.pi * rho_s / 6.0)
+    R = fit_gaussian_copula(GAUSS_PROBLEM, X)
+    assert abs(R[0, 1] - expected) < 1e-8
+
+
 def test_indefinite_correlation_is_repaired():
     """A valid-looking but indefinite matrix is projected to PD, not rejected."""
     R = np.array([[1.0, 0.99, 0.99], [0.99, 1.0, -0.99], [0.99, -0.99, 1.0]])
@@ -303,6 +331,40 @@ def test_to_dataset_time_series_dims(uniform_fits):
     assert list(ds.coords["time"].values) == [0.5, 1.0]
     assert ds["variance"].dims == ("time", "output")
     assert ds.attrs["correlated"] == 0
+
+
+# --- argument validation ------------------------------------------------------
+
+
+def test_scalar_argument_validation_raises_early():
+    """Bad scalar arguments raise before any expensive work, without warnings."""
+    X = jaxgsa.sampling.monte_carlo(GAUSS_PROBLEM, 32, seed=0)
+    Y = X @ A_COEF
+    cases = [
+        ({"n_folds": 1}, "n_folds must be >= 2"),
+        ({"n_outer": 1}, "n_outer must be >= 2"),
+        ({"n_inner": 1}, "n_inner must be >= 2"),
+        ({"n_variance": 1}, "n_variance must be >= 2"),
+        ({"max_centers": 0}, "max_centers must be >= 1"),
+        ({"batch_size": 0}, "batch_size must be >= 1"),
+    ]
+    for overrides, message in cases:
+        kwargs = dict(SMALL_KWARGS, **overrides)
+        # Validation runs first: no fit, no CV, and no precision warning yet.
+        with pytest.raises(ValueError, match=message):
+            jaxgsa.vkoga.analyze(GAUSS_PROBLEM, X, Y, **kwargs)
+
+
+def test_odd_sample_sizes_round_up_to_powers_of_two():
+    """Non-power-of-two sizes are rounded up; scipy emits no balance warnings."""
+    X = jaxgsa.sampling.monte_carlo(UNIFORM_PROBLEM, 128, seed=0)
+    Y = _uniform_scalar(X)
+    kwargs = dict(SMALL_KWARGS, n_outer=100, n_inner=9, n_variance=1000)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, **kwargs)
+    assert not [w for w in caught if "balance" in str(w.message)]
+    assert np.all(np.isfinite(np.asarray(result.S_TC)))
 
 
 # --- precision, cross-validation, determinism ---------------------------------

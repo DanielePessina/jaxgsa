@@ -43,6 +43,9 @@ from numpy.typing import ArrayLike
 
 # Paper defaults (Hilhorst et al. 2024): tau_P = 5e-8 on the power function,
 # tau_R = 1e-4 on the interpolation residual, lambda = 1e-10 on the RKHS term.
+# tau_P is absolute: the Gaussian kernel has K(x, x) = 1, so the power
+# function is already scale-free. tau_R is applied *relative* to each output
+# slice's norm; an absolute residual rule would depend on the scale of Y.
 _DEFAULT_RIDGE = 1e-10
 _DEFAULT_TOL_POWER = 5e-8
 _DEFAULT_TOL_RESIDUAL = 1e-4
@@ -107,18 +110,17 @@ def _gaussian_kernel(X1: Array, X2: Array, gamma: Array | float) -> Array:
     return jnp.exp(-gamma * jnp.maximum(d2, 0.0))
 
 
-def _fit_vkoga(
+def _select_centers(
     X: Array,
     Y: Array,
     *,
     gamma: Array | float,
     max_centers: int,
-    ridge: Array | float = _DEFAULT_RIDGE,
     tol_power: Array | float = _DEFAULT_TOL_POWER,
     tol_residual: Array | float = _DEFAULT_TOL_RESIDUAL,
     train_mask: Array | None = None,
-) -> _VKOGAState:
-    """Fit a vectorial Gaussian-RBF surrogate by P-greedy centre selection.
+) -> tuple[Array, Array]:
+    """Select kernel centres by the P-greedy rule.
 
     Centres are picked one at a time at the current maximiser of the power
     function (Hilhorst et al. 2024, eq. 8), expressed in the Newton basis of
@@ -128,46 +130,39 @@ def _fit_vkoga(
     is simply ``p2 = 1 - rowsum(V**2)`` with ``V`` the Newton basis evaluated
     at those points.
 
-    Selection is driven only by ``X``; ``Y`` enters through the residual
-    stopping rule and the final coefficient solve. All output slices
-    therefore share one basis and one set of centres.
-
-    Coefficients solve the RKHS-regularised normal equations over the
-    selected centres::
-
-        (A_nm^T A_nm + ridge * A_mm) alpha = A_nm^T Y
-
-    where ``A_nm`` is the (n, m) cross-kernel between training points and
-    centres and ``A_mm`` the (m, m) centre Gram. When ``m = n`` this collapses
-    to the paper's eq. (6): ``A_nm = A_mm = A`` is symmetric, so the system is
-    ``A (A + ridge*I) alpha = A Y``, i.e. ``(A + ridge*I) alpha = Y``.
+    Selection depends on ``X``, ``gamma``, and the stopping rules. It does
+    not depend on ``ridge``. ``Y`` enters only through the residual stopping
+    rule, so all output slices share one set of centres.
+    :func:`_cross_validate` exploits the ridge independence: one sweep per
+    ``(fold, gamma)`` serves the whole ridge grid.
 
     Args:
         X: (n, D) training inputs.
         Y: (n, S) training outputs, output slices already flattened.
         gamma: positive Gaussian shape parameter.
-        max_centers: hard cap on the number of centres; also the static array
-            size of the returned state. Silently capped at the number of
-            usable training rows.
-        ridge: RKHS regularisation parameter (the paper's lambda).
-        tol_power: stop once ``sqrt(max(p2)) <= tol_power`` (tau_P).
-        tol_residual: stop once the largest per-slice residual norm falls to
-            ``tol_residual`` (tau_R).
+        max_centers: hard cap on the number of centres; also the static size
+            of the returned index buffer. Silently capped at ``n``.
+        tol_power: stop once ``sqrt(max(p2)) <= tol_power`` (tau_P). Absolute:
+            ``K(x, x) = 1`` makes the power function scale-free.
+        tol_residual: relative residual stopping rule (tau_R). Stop once every
+            slice's residual L2 norm falls to ``tol_residual`` times that
+            slice's ``||Y||`` over the training rows. A zero-norm slice counts
+            as converged from the start.
         train_mask: optional (n,) boolean mask; ``False`` rows are excluded
-            both as candidate centres and from the coefficient solve. Used by
+            as candidate centres and from the residual rule. Used by
             :func:`_cross_validate` to hold folds out without changing shapes.
 
     Returns:
-        The fitted :class:`_VKOGAState`.
+        ``(idx, m)``: the (max_centers,) int32 buffer of selected row indices
+        and the scalar count of centres actually selected. Slots ``>= m``
+        are unused.
     """
     n, _ = X.shape
-    n_slices = Y.shape[1]
     # Never ask for more centres than there are points to pick from: the
     # greedy loop would run out of candidates and stall on masked -inf.
     max_centers = min(max_centers, n)
 
     mask = jnp.ones((n,), dtype=bool) if train_mask is None else train_mask.astype(bool)
-    n_train = jnp.sum(mask)
 
     dtype = X.dtype
     # Rows that must never be chosen as centres: held-out rows start blocked,
@@ -175,6 +170,12 @@ def _fit_vkoga(
     blocked0 = ~mask
     # Held-out rows contribute nothing to the residual stopping rule either.
     residual0 = jnp.where(mask[:, None], Y, 0.0)
+
+    # Per-slice norms of the training outputs, for the *relative* residual
+    # rule. A zero-norm slice would divide 0/0; give it scale 1 so its ratio
+    # is 0 and it counts as converged.
+    y_norm = jnp.sqrt(jnp.sum(residual0**2, axis=0))
+    res_scale = jnp.where(y_norm > 0.0, y_norm, 1.0)
 
     eps = jnp.finfo(dtype).eps
     init = (
@@ -186,7 +187,7 @@ def _fit_vkoga(
         # K(x, x) = 1 for the Gaussian kernel, so the power function starts at
         # 1 everywhere; the empty basis subtracts nothing.
         jnp.ones((), dtype=dtype),
-        jnp.max(jnp.sqrt(jnp.sum(residual0**2, axis=0))),
+        jnp.max(y_norm / res_scale),
     )
 
     def _cond(state: tuple) -> Array:
@@ -230,12 +231,58 @@ def _fit_vkoga(
         power = jnp.sqrt(jnp.maximum(jnp.max(p2_next), 0.0))
         # Selected points are interpolated exactly, so their rows are already
         # ~0 and summing over all rows equals summing over the remaining ones.
-        res = jnp.max(jnp.sqrt(jnp.sum(residual**2, axis=0)))
+        # Relative to each slice's own norm, so the rule is scale-free.
+        res = jnp.max(jnp.sqrt(jnp.sum(residual**2, axis=0)) / res_scale)
         return (V, residual, blocked, idx, m, power, res)
 
     _, _, _, idx, m, _, _ = jax.lax.while_loop(_cond, _body, init)
+    return idx, m
 
-    # --- coefficients over the selected centres -----------------------------
+
+def _solve_coefficients(
+    X: Array,
+    Y: Array,
+    idx: Array,
+    m: Array,
+    *,
+    gamma: Array | float,
+    ridge: Array | float,
+    train_mask: Array | None = None,
+) -> _VKOGAState:
+    """Solve for the expansion coefficients over already-selected centres.
+
+    Coefficients solve the RKHS-regularised normal equations over the
+    selected centres::
+
+        (A_nm^T A_nm + ridge * A_mm) alpha = A_nm^T Y
+
+    where ``A_nm`` is the (n, m) cross-kernel between training points and
+    centres and ``A_mm`` the (m, m) centre Gram. When ``m = n`` this collapses
+    to the paper's eq. (6): ``A_nm = A_mm = A`` is symmetric, so the system is
+    ``A (A + ridge*I) alpha = A Y``, i.e. ``(A + ridge*I) alpha = Y``.
+
+    Args:
+        X: (n, D) training inputs.
+        Y: (n, S) training outputs, output slices already flattened.
+        idx: (max_centers,) selected row indices from :func:`_select_centers`.
+        m: scalar count of centres actually selected.
+        gamma: positive Gaussian shape parameter the centres were selected
+            with.
+        ridge: RKHS regularisation parameter (the paper's lambda).
+        train_mask: optional (n,) boolean mask; ``False`` rows are excluded
+            from the solve and the RMSE diagnostic.
+
+    Returns:
+        The fitted :class:`_VKOGAState`.
+    """
+    n, _ = X.shape
+    n_slices = Y.shape[1]
+    max_centers = idx.shape[0]
+    dtype = X.dtype
+
+    mask = jnp.ones((n,), dtype=bool) if train_mask is None else train_mask.astype(bool)
+    n_train = jnp.sum(mask)
+
     # Unused slots point at row 0; masking their kernel columns to zero (and
     # putting a 1 on their diagonal below) forces their coefficients to be
     # exactly zero, so the duplicate centre is inert.
@@ -266,6 +313,50 @@ def _fit_vkoga(
         n_centers=m,
         rmse=rmse,
     )
+
+
+def _fit_vkoga(
+    X: Array,
+    Y: Array,
+    *,
+    gamma: Array | float,
+    max_centers: int,
+    ridge: Array | float = _DEFAULT_RIDGE,
+    tol_power: Array | float = _DEFAULT_TOL_POWER,
+    tol_residual: Array | float = _DEFAULT_TOL_RESIDUAL,
+    train_mask: Array | None = None,
+) -> _VKOGAState:
+    """Fit a vectorial Gaussian-RBF surrogate by P-greedy centre selection.
+
+    Two stages: :func:`_select_centers` picks the centres, then
+    :func:`_solve_coefficients` solves the regularised system over them. See
+    those functions for the algorithmic details and the argument contracts.
+
+    Args:
+        X: (n, D) training inputs.
+        Y: (n, S) training outputs, output slices already flattened.
+        gamma: positive Gaussian shape parameter.
+        max_centers: hard cap on the number of centres; also the static array
+            size of the returned state. Silently capped at ``n``.
+        ridge: RKHS regularisation parameter (the paper's lambda).
+        tol_power: absolute power-function stopping tolerance (tau_P).
+        tol_residual: relative residual stopping tolerance (tau_R), taken
+            against each output slice's own norm.
+        train_mask: optional (n,) boolean mask; ``False`` rows are held out.
+
+    Returns:
+        The fitted :class:`_VKOGAState`.
+    """
+    idx, m = _select_centers(
+        X,
+        Y,
+        gamma=gamma,
+        max_centers=max_centers,
+        tol_power=tol_power,
+        tol_residual=tol_residual,
+        train_mask=train_mask,
+    )
+    return _solve_coefficients(X, Y, idx, m, gamma=gamma, ridge=ridge, train_mask=train_mask)
 
 
 def _predict_vkoga(state: _VKOGAState, X_new: Array) -> Array:
@@ -307,6 +398,10 @@ def _cross_validate(
     over that full set of out-of-sample predictions, pooled across output
     slices.
 
+    Centre selection does not depend on ``ridge``, so each ``(fold, gamma)``
+    pair runs one greedy sweep and reuses the selected centres for every
+    ridge in the grid. Only the cheap regularised solve repeats per ridge.
+
     The grids are caller-supplied: no range is baked in here.
 
     Args:
@@ -315,9 +410,9 @@ def _cross_validate(
         gammas: candidate Gaussian shape parameters, any 1-D array-like.
         ridges: candidate RKHS regularisation parameters, any 1-D array-like.
         max_centers: centre cap passed through to each fit.
-        n_folds: number of folds; capped at ``n``.
-        tol_power: power-function stopping tolerance (tau_P).
-        tol_residual: residual stopping tolerance (tau_R).
+        n_folds: number of folds, at least 2; capped at ``n``.
+        tol_power: absolute power-function stopping tolerance (tau_P).
+        tol_residual: relative residual stopping tolerance (tau_R).
         seed: seed for the row permutation used to build the folds. ``None``
             keeps the sample order, which is what you want for a
             low-discrepancy design; pass an int if the rows are ordered by
@@ -326,7 +421,13 @@ def _cross_validate(
     Returns:
         (len(gammas), len(ridges)) array of pooled out-of-sample RMSE. Take
         ``argmin`` over the flattened grid to pick the hyperparameters.
+
+    Raises:
+        ValueError: If ``n_folds < 2``. A single fold holds out every row, so
+            all grid scores tie and the argmin is meaningless.
     """
+    if n_folds < 2:
+        raise ValueError(f"n_folds must be >= 2 for cross-validation, got {n_folds}")
     gamma_grid = np.atleast_1d(np.asarray(gammas, dtype=np.float64)).ravel()
     ridge_grid = np.atleast_1d(np.asarray(ridges, dtype=np.float64)).ravel()
 
@@ -340,34 +441,39 @@ def _cross_validate(
     order = np.arange(n) if seed is None else np.random.default_rng(seed).permutation(n)
     fold_of = jnp.asarray(np.argsort(order) % n_folds)
     fold_ids = jnp.arange(n_folds)
+    ridge_vec = jnp.asarray(ridge_grid, dtype=X.dtype)
 
     @jax.jit
-    def _score(gamma: Array, ridge: Array) -> Array:
+    def _score_gamma(gamma: Array) -> Array:
         def _fold_sse(fold: Array) -> Array:
             train = fold_of != fold
-            state = _fit_vkoga(
+            # One greedy sweep per (fold, gamma): selection is ridge-free.
+            idx, m = _select_centers(
                 X,
                 Y,
                 gamma=gamma,
                 max_centers=max_centers,
-                ridge=ridge,
                 tol_power=tol_power,
                 tol_residual=tol_residual,
                 train_mask=train,
             )
-            err = Y - _predict_vkoga(state, X)
-            return jnp.sum(jnp.where(train[:, None], 0.0, err**2))
+
+            def _ridge_sse(ridge: Array) -> Array:
+                state = _solve_coefficients(
+                    X, Y, idx, m, gamma=gamma, ridge=ridge, train_mask=train
+                )
+                err = Y - _predict_vkoga(state, X)
+                return jnp.sum(jnp.where(train[:, None], 0.0, err**2))
+
+            return jax.lax.map(_ridge_sse, ridge_vec)  # (n_ridges,)
 
         # lax.map runs the folds sequentially: vmap would hold n_folds copies
         # of the (n, n) kernel work live at once, which is the memory wall
         # here long before it is a speed win.
-        sse = jnp.sum(jax.lax.map(_fold_sse, fold_ids))
+        sse = jnp.sum(jax.lax.map(_fold_sse, fold_ids), axis=0)
         return jnp.sqrt(sse / (n * n_slices))
 
-    # The grids are host-side and static, so loop over them in Python; the
-    # jitted body is traced once and reused for every pair.
-    scores = [
-        [_score(jnp.asarray(g, dtype=X.dtype), jnp.asarray(r, dtype=X.dtype)) for r in ridge_grid]
-        for g in gamma_grid
-    ]
+    # The gamma grid is host-side and static, so loop over it in Python; the
+    # jitted body is traced once and reused for every value.
+    scores = [_score_gamma(jnp.asarray(g, dtype=X.dtype)) for g in gamma_grid]
     return jnp.asarray(scores)

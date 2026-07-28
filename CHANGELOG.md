@@ -66,6 +66,11 @@
   is no membership matrix to allocate from. Use `jaxgsa.hdmr` (which also offers
   `shapley(include_correlative=True)`) or `jaxgsa.pce`.
 
+### Internal
+
+- Added `jaxgsa._core.legendre`: one orthonormal Legendre recurrence, shared by
+  the PCE basis and the VKOGA component-function fit.
+
 ## Unreleased (0.7.0)
 
 ### Added
