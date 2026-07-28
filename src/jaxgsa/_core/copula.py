@@ -25,7 +25,7 @@ from typing import Literal, NamedTuple
 import jax.numpy as jnp
 import numpy as np
 import numpy.typing as npt
-from scipy.stats import norm, qmc
+from scipy.stats import norm, qmc, rankdata
 
 from jaxgsa._core.sampling import _transform_samples
 from jaxgsa._core.transforms import cdf_to_unit_interval
@@ -194,7 +194,8 @@ def fit_gaussian_copula(problem: Problem, X: np.ndarray) -> np.ndarray:
     correlation of the latent normals, ``rho = 2 sin(pi rho_s / 6)``. Working
     from ranks rather than raw values keeps the estimate invariant to the
     declared marginals, so a heavily skewed parameter does not distort the
-    dependency structure.
+    dependency structure. Tied values get average ranks, which is the
+    Spearman convention (``scipy.stats.spearmanr``).
 
     Args:
         problem: Problem the samples were drawn for. Only its parameter count
@@ -217,10 +218,10 @@ def fit_gaussian_copula(problem: Problem, X: np.ndarray) -> np.ndarray:
     if X.shape[0] < 3:
         raise ValueError(f"Fitting a copula needs at least 3 samples, got {X.shape[0]}")
 
-    # Rank-transform each column independently, then correlate. np.argsort twice
-    # gives ranks; ties are broken arbitrarily, which is harmless for continuous
-    # marginals and is what a copula fit assumes anyway.
-    ranks = np.argsort(np.argsort(X, axis=0), axis=0).astype(np.float64)
+    # Rank-transform each column independently, then correlate. Average ranks
+    # follow the Spearman convention for tied values. Position-dependent tie
+    # breaking would bias the estimate on discrete or quantized columns.
+    ranks = rankdata(X, method="average", axis=0)
     spearman = np.corrcoef(ranks, rowvar=False)
     if D == 1:  # np.corrcoef collapses to a scalar for a single column
         spearman = np.atleast_2d(spearman)

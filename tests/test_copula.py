@@ -5,6 +5,7 @@ import warnings
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import scipy.stats
 
 import jaxgsa
 from jaxgsa._core.copula import (
@@ -186,6 +187,29 @@ def test_fit_gaussian_copula_recovers_latent_correlation():
     fitted = fit_gaussian_copula(problem, X)
     assert abs(fitted[0, 1] - rho) < 0.02
     np.testing.assert_allclose(np.diag(fitted), 1.0, atol=1e-12)
+
+
+def test_fit_gaussian_copula_averages_tied_ranks():
+    # Regression test for position-dependent tie ranks. Column 0 holds two
+    # tied levels in a structured block order. Column 1 increases with the
+    # row index. The true Spearman correlation is exactly zero. The old
+    # double-argsort fit ranked ties by row position. That gave a spurious
+    # rho_s of about -0.305 here (latent rho about -0.318). Average ranks
+    # must reproduce scipy.stats.spearmanr exactly.
+    problem = _uniform_problem(2)
+    x0 = np.repeat([0.0, 1.0, 1.0, 0.0], 50)
+    x1 = np.arange(200, dtype=np.float64)
+    X = np.column_stack([x0, x1])
+
+    rho_s = scipy.stats.spearmanr(x0, x1).statistic
+    expected = 2.0 * np.sin(np.pi * rho_s / 6.0)
+
+    fitted = fit_gaussian_copula(problem, X)
+    assert abs(fitted[0, 1] - expected) < 1e-12
+
+    # The public entry point must agree.
+    public = jaxgsa.sampling.fit_correlation(problem, X)
+    np.testing.assert_allclose(public, fitted, atol=1e-15)
 
 
 def test_fit_gaussian_copula_rejects_bad_shapes():

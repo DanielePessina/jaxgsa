@@ -140,10 +140,12 @@ def fit_correlation(problem: Problem, X: npt.ArrayLike) -> np.ndarray:
             jaxgsa.sampling.fit_correlation(problem, X_observed)
         )
 
-    Heavy ties break the rank estimate: for discrete or heavily rounded
-    columns the Spearman-based fit is biased toward zero, and a polychoric
-    correlation would be needed instead (future work, alongside categorical
-    marginals). The conversion is exact for continuous marginals only.
+    Tied values get average ranks, which is the Spearman convention
+    (``scipy.stats.spearmanr``). Average ranks reduce the tie problem but
+    do not remove it. For heavily discrete or rounded columns the fit is
+    still biased toward zero. Such data needs a polychoric correlation
+    instead (future work, alongside categorical marginals). The conversion
+    is exact for continuous marginals only.
 
     Args:
         problem: Problem the samples were drawn for. Only its parameter
