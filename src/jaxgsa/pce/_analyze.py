@@ -100,7 +100,13 @@ def _map_to_reference(X: Array, problem: Problem, order: int) -> tuple[Array, tu
     input_types: list[str] = []
     hermite_safe_order = order <= _MAX_HERMITE_ORDER_UNDER_TRUNCATION
     for d in range(D):
-        dist, first, second, lo, hi = problem.input_specs[d]
+        dist, first, second, lo, hi, _ = problem.input_specs[d]
+        if dist == "categorical":
+            # Layered guard: pce.analyze rejects categorical problems up front.
+            raise ValueError(
+                f"Parameter {problem.names[d]!r} is categorical; no orthogonal "
+                "polynomial family exists for an unordered marginal"
+            )
         if dist == "uniform":
             cols.append(2.0 * (X[:, d] - first) / (second - first) - 1.0)
             input_types.append("uniform")

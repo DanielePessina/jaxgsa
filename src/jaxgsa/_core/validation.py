@@ -152,12 +152,73 @@ def _raise_correlated_analysis(problem: Problem, method: str) -> None:
     )
 
 
+# Named in every categorical-problem rejection so the error is actionable.
+_CATEGORICAL_TOLERANT_METHODS = (
+    "jaxgsa.optimal_transport and jaxgsa.borgonovo (one conditioning class "
+    "per level), or the design-based jaxgsa.sobol pick-freeze pipeline"
+)
+
+
+def _categorical_param_names(problem: Problem) -> list[str]:
+    """Return the names of the problem's categorical parameters."""
+    return [
+        name for name, spec in zip(problem.names, problem.input_specs) if spec[0] == "categorical"
+    ]
+
+
+def _raise_categorical_design(problem: Problem, method: str) -> None:
+    """Reject a categorical problem in an incompatible design sampler.
+
+    The Morris and eFAST designs walk or sweep a continuous input space;
+    an unordered categorical axis has no meaningful step or frequency, so
+    sampling refuses up front.
+
+    Args:
+        problem: Problem the design was requested for.
+        method: Fully qualified sampler name for the error message.
+
+    Raises:
+        ValueError: If ``problem`` declares any categorical parameter.
+    """
+    names = _categorical_param_names(problem)
+    if not names:
+        return
+    raise ValueError(
+        f"{method} requires continuous (orderable) inputs, but parameters "
+        f"{names} are categorical. Use jaxgsa.sobol.sample (pick-freeze is "
+        "distribution-agnostic), or analyze given data with "
+        "jaxgsa.optimal_transport or jaxgsa.borgonovo."
+    )
+
+
+def _raise_categorical_analysis(problem: Problem, method: str) -> None:
+    """Reject a categorical problem in a categorical-naive analyzer.
+
+    Args:
+        problem: Problem the analysis was requested for.
+        method: Fully qualified analyzer name for the error message.
+
+    Raises:
+        ValueError: If ``problem`` declares any categorical parameter.
+    """
+    names = _categorical_param_names(problem)
+    if not names:
+        return
+    raise ValueError(
+        f"{method} treats every input as continuous, but parameters {names} "
+        "are categorical (unordered level codes); its indices would depend on "
+        "the arbitrary code order. Use a categorical-aware method instead: "
+        f"{_CATEGORICAL_TOLERANT_METHODS}."
+    )
+
+
 def _validate_xy_inputs(
     problem: Problem,
     X: Array,
     Y: Array,
     *,
     correlation_ok: bool = False,
+    categorical_ok: bool = False,
     method: str = "this method",
 ) -> Array:
     """Validate the shared ``(problem, X, Y)`` contract of given-data methods.
@@ -175,17 +236,26 @@ def _validate_xy_inputs(
             structure. Correlation-tolerant methods (rank/CDF-based, or
             ANCOVA-decomposing) pass ``True``; the default ``False`` rejects
             a correlated problem with an actionable ``ValueError``.
+        categorical_ok: Capability flag: whether the calling method handles
+            categorical (unordered) parameters correctly. Methods that
+            condition on one class per level pass ``True``; the default
+            ``False`` rejects a categorical problem with an actionable
+            ``ValueError``.
         method: Fully qualified caller name used in the rejection message.
 
     Returns:
         Y as a validated JAX array.
 
     Raises:
-        ValueError: If X or Y violates the shared shape contract, or the
-            problem is correlated and ``correlation_ok`` is ``False``.
+        ValueError: If X or Y violates the shared shape contract, the
+            problem is correlated and ``correlation_ok`` is ``False``, or
+            the problem has categorical parameters and ``categorical_ok``
+            is ``False``.
     """
     if not correlation_ok:
         _raise_correlated_analysis(problem, method)
+    if not categorical_ok:
+        _raise_categorical_analysis(problem, method)
     _validate_x(problem, X)
     return _validate_output(Y, int(X.shape[0]), problem)
 

@@ -18,7 +18,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from jaxgsa._core.sampling import _transform_samples
-from jaxgsa._core.validation import _raise_correlated_design
+from jaxgsa._core.validation import _raise_categorical_design, _raise_correlated_design
 from jaxgsa.problem import Problem
 
 
@@ -207,6 +207,7 @@ def sample(
             search-curve design assumes independent inputs).
     """
     _raise_correlated_design(problem, "jaxgsa.efast.sample")
+    _raise_categorical_design(problem, "jaxgsa.efast.sample")
     if M < 1:
         raise ValueError(f"M must be >= 1, got {M}")
 

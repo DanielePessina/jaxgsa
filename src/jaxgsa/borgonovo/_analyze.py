@@ -51,10 +51,16 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core.bootstrap import _percentile_ci
-from jaxgsa._core.partition import _build_class_indices, _class_layout
+from jaxgsa._core.partition import (
+    _build_class_indices,
+    _categorical_class_layout,
+    _class_layout,
+    _extract_categorical_codes,
+    _warn_empty_levels,
+)
 from jaxgsa._core.validation import _prepare_Y, _squeeze_output_axes, _validate_xy_inputs
 from jaxgsa.borgonovo._result import DeltaResult
-from jaxgsa.problem import Problem
+from jaxgsa.problem import Problem, _categorical_dims
 
 _SQRT_2PI = math.sqrt(2.0 * math.pi)
 _MAX_CLASSES = 48
@@ -98,10 +104,15 @@ def _get_delta_kernel(grid_size: int, bw_factor: float | None):
 
     Returns:
         A jitted callable ``(Y_cols (N, C), all_idx (R, N),
-        all_cls_idx (R, D, M, P), mask (M, P), counts (M,)) ->
+        all_cls_idx (R, D, M, P), mask, counts) ->
         (d (R, C, D), s1 (R, C, D), degenerate (R, C))`` giving plug-in
         estimates for every replicate and a per-replicate/per-column flag
-        marking constant resamples.
+        marking constant resamples. ``mask``/``counts`` accept the shared
+        layout ``(M, P)``/``(M,)`` (equal-frequency rank classes of
+        continuous inputs) or the per-replicate layout
+        ``(R, D, M, P)``/``(R, D, M)`` (one class per categorical level,
+        whose sizes vary across columns and bootstrap resamples);
+        zero-size classes carry zero weight.
     """
 
     def _bandwidths(counts: Array, std: Array) -> Array:
@@ -130,9 +141,8 @@ def _get_delta_kernel(grid_size: int, bw_factor: float | None):
     ):
         dtype = jnp.result_type(Y_cols.dtype, jnp.float32)
         Y_cols = Y_cols.astype(dtype)
-        mask = mask.astype(dtype)
-        counts = counts.astype(dtype)
-        n_total = counts.sum()  # == N
+        N = Y_cols.shape[0]  # == counts.sum(-1): every row belongs to one class
+        per_replicate = mask.ndim == 4
 
         # Output grids depend only on the original sample and are reused for
         # every replicate (SALib does the same).
@@ -141,42 +151,69 @@ def _get_delta_kernel(grid_size: int, bw_factor: float | None):
         steps = jnp.linspace(0.0, 1.0, grid_size, dtype=dtype)
         grids = y_min[:, None] + steps[None, :] * (y_max - y_min)[:, None]  # (C, G)
 
-        def _col_stats(y: Array, grid: Array, r: Array, cls_idx: Array):
-            """Delta, S1, and a degeneracy flag for one column/replicate."""
+        def _col_stats(y: Array, grid: Array, r: Array, cls_idx: Array, mask_b, counts_b):
+            """Delta, S1, and a degeneracy flag for one column/replicate.
+
+            ``mask_b (G, M, P)`` and ``counts_b (G, M)`` (both float)
+            broadcast against the input axis D (``G`` is 1 or D). A
+            zero-size class has zero std, hence zero bandwidth, so its
+            density is dropped; its zero count removes it from every
+            weighted sum.
+            """
+            safe_counts = jnp.maximum(counts_b, 1.0)
             y_r = y[r]  # resampled column
             fy = _kde_full(y_r, grid)
             degenerate = y_r.max() == y_r.min()
 
             y_cls = y[cls_idx]  # (D, M, P) resampled class members
-            mean = (y_cls * mask).sum(axis=-1) / counts  # (D, M)
-            dev = (y_cls - mean[..., None]) * mask
-            var = (dev**2).sum(axis=-1) / jnp.maximum(counts - 1.0, 1.0)
-            h = _bandwidths(counts, jnp.sqrt(var))  # (D, M)
+            mean = (y_cls * mask_b).sum(axis=-1) / safe_counts  # (D, M)
+            dev = (y_cls - mean[..., None]) * mask_b
+            var = (dev**2).sum(axis=-1) / jnp.maximum(counts_b - 1.0, 1.0)
+            h = _bandwidths(safe_counts, jnp.sqrt(var))  # (D, M)
             safe_h = jnp.where(h > 0, h, 1.0)
 
             u = (grid[None, None, :, None] - y_cls[:, :, None, :]) / safe_h[..., None, None]
-            k = jnp.exp(-0.5 * u * u) * mask[None, :, None, :]
-            fyc = k.sum(axis=-1) / (counts[:, None] * safe_h[..., None] * _SQRT_2PI)
+            k = jnp.exp(-0.5 * u * u) * mask_b[..., None, :]
+            fyc = k.sum(axis=-1) / (safe_counts[..., None] * safe_h[..., None] * _SQRT_2PI)
             fyc = jnp.where((h > 0)[..., None], fyc, 0.0)  # (D, M, G)
 
             l1 = jnp.trapezoid(jnp.abs(fy[None, None, :] - fyc), grid, axis=-1)
-            delta = (counts[None, :] / (2.0 * n_total) * l1).sum(axis=-1)  # (D,)
+            delta = (counts_b / (2.0 * N) * l1).sum(axis=-1)  # (D,)
 
             y_mean = y_r.mean()
             y_var = jnp.var(y_r)
             safe_var = jnp.where(y_var > 0, y_var, 1.0)
-            Vi = (counts[None, :] / n_total * (mean - y_mean) ** 2).sum(axis=-1)
+            Vi = (counts_b / N * (mean - y_mean) ** 2).sum(axis=-1)
             s1 = jnp.where(y_var > 0, Vi / safe_var, 0.0)
             return delta, s1, degenerate
 
-        def _one_replicate(carry, xs):
-            r, cls_idx = xs
-            d, s1, degen = jax.vmap(lambda y, grid: _col_stats(y, grid, r, cls_idx))(
-                Y_cols.T, grids
-            )
-            return carry, (d, s1, degen)
+        if per_replicate:
 
-        _, (d_all, s1_all, degen_all) = jax.lax.scan(_one_replicate, None, (all_idx, all_cls_idx))
+            def _one_replicate(carry, xs):
+                r, cls_idx, mask_r, counts_r = xs
+                mask_rf = mask_r.astype(dtype)
+                counts_rf = counts_r.astype(dtype)
+                d, s1, degen = jax.vmap(
+                    lambda y, grid: _col_stats(y, grid, r, cls_idx, mask_rf, counts_rf)
+                )(Y_cols.T, grids)
+                return carry, (d, s1, degen)
+
+            scan_xs: tuple[Array, ...] = (all_idx, all_cls_idx, mask, counts)
+        else:
+            # Insert the length-1 input axis once; broadcasting does the rest.
+            mask_s = mask.astype(dtype)[None]
+            counts_s = counts.astype(dtype)[None]
+
+            def _one_replicate(carry, xs):
+                r, cls_idx = xs
+                d, s1, degen = jax.vmap(
+                    lambda y, grid: _col_stats(y, grid, r, cls_idx, mask_s, counts_s)
+                )(Y_cols.T, grids)
+                return carry, (d, s1, degen)
+
+            scan_xs = (all_idx, all_cls_idx)
+
+        _, (d_all, s1_all, degen_all) = jax.lax.scan(_one_replicate, None, scan_xs)
         return d_all, s1_all, degen_all
 
     return jax.jit(_impl)
@@ -214,8 +251,12 @@ def analyze(
         X: Input sample matrix ``(N, D)``.
         Y: Model output ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
         n_classes: Number of equal-frequency conditioning classes per
-            input. ``None`` selects the Plischke sample-size heuristic
-            (SALib-identical, at most 48 classes).
+            *continuous* input. ``None`` selects the Plischke sample-size
+            heuristic (SALib-identical, at most 48 classes). Categorical
+            inputs ignore it and always use one class per level (class
+            sizes are the observed level counts); declared levels with no
+            observed samples are dropped with a warning. With only
+            categorical inputs the argument is inert and unvalidated.
         grid_size: Number of points of the output grid the densities are
             compared on (spanning ``[Y.min(), Y.max()]`` per column).
         bandwidth: KDE bandwidth rule: ``"silverman"`` for the per-class
@@ -248,7 +289,9 @@ def analyze(
     Raises:
         ValueError: If X is not 2-D, its column count does not match the
             problem, Y is not 1-D/2-D/3-D, X and Y have differing row
-            counts, ``n_classes`` is not in ``[2, N]``, ``grid_size < 2``,
+            counts, ``n_classes`` is not in ``[2, N]`` (checked only when
+            a continuous input uses it), a categorical column of X holds
+            values other than its integer level codes, ``grid_size < 2``,
             ``bandwidth`` is neither ``"silverman"`` nor a positive float,
             ``n_bootstrap < 0``, ``conf_level`` is not in ``(0, 1)``, or
             ``slice_chunk_size`` is not a positive integer.
@@ -256,13 +299,17 @@ def analyze(
     X = jnp.asarray(X)
     # The delta estimator partitions on rank classes and compares output
     # densities, so a declared input correlation does not invalidate it.
-    Y = _validate_xy_inputs(problem, X, Y, correlation_ok=True)
+    Y = _validate_xy_inputs(problem, X, Y, correlation_ok=True, categorical_ok=True)
 
     N = X.shape[0]
+    # n_classes applies to the continuous columns only; categorical columns
+    # always get one conditioning class per level.
+    cat_dims = [d for d, _ in _categorical_dims(problem)]
+    cont_dims = [d for d in range(problem.num_vars) if d not in set(cat_dims)]
     if n_classes is None:
         M = _plischke_n_classes(N)
     else:
-        if not 2 <= n_classes <= N:
+        if cont_dims and not 2 <= n_classes <= N:
             raise ValueError(f"n_classes must be in [2, N={N}], got {n_classes}")
         M = int(n_classes)
     if grid_size < 2:
@@ -296,14 +343,43 @@ def analyze(
         all_idx = identity
     R = all_idx.shape[0]
 
-    take_np, mask_np, sizes_np = _class_layout(N, M)
-    take = jnp.asarray(take_np)
-    mask = jnp.asarray(mask_np)
-    counts = jnp.asarray(sizes_np)
-
-    # Rank the inputs once for every replicate (never per output-column
-    # chunk), then reuse the class indices across chunks.
-    all_cls_idx = _build_class_indices(X, all_idx, take)
+    # Build one partition layout per column group. Continuous columns share
+    # one equal-frequency rank layout (identical for every replicate);
+    # categorical columns get one class per level, with sizes that vary per
+    # column and per bootstrap resample, so their layout carries leading
+    # (R, Dc) axes. Grouping keeps the padded class tensors rectangular
+    # without padding continuous classes up to a categorical level size (or
+    # vice versa). Each group: (class indices, mask, counts).
+    groups: list[tuple[Array, Array, Array]] = []
+    group_dims: list[int] = []
+    if cont_dims:
+        take_np, mask_np, sizes_np = _class_layout(N, M)
+        X_cont = X[:, jnp.asarray(cont_dims)] if cat_dims else X
+        # Rank the inputs once for every replicate (never per output-column
+        # chunk), then reuse the class indices across chunks.
+        groups.append(
+            (
+                _build_class_indices(X_cont, all_idx, jnp.asarray(take_np)),
+                jnp.asarray(mask_np),
+                jnp.asarray(sizes_np),
+            )
+        )
+        group_dims.extend(cont_dims)
+    if cat_dims:
+        _, codes = _extract_categorical_codes(problem, np.asarray(X))
+        levels = [n for _, n in _categorical_dims(problem)]
+        cat_cls_np, cat_mask_np, cat_counts_np = _categorical_class_layout(
+            codes, np.asarray(all_idx), levels
+        )
+        _warn_empty_levels(problem, cat_dims, cat_counts_np[0])
+        groups.append(
+            (jnp.asarray(cat_cls_np), jnp.asarray(cat_mask_np), jnp.asarray(cat_counts_np))
+        )
+        group_dims.extend(cat_dims)
+    # Kernel outputs concatenate the groups on the input axis; this gather
+    # restores the problem's column order (None when one group is already
+    # in order).
+    col_order = jnp.asarray(np.argsort(group_dims)) if len(groups) > 1 else None
 
     kernel = _get_delta_kernel(grid_size, bw_factor)
 
@@ -311,10 +387,16 @@ def analyze(
     cs = min(slice_chunk_size, total)
     d_parts, s1_parts, degen_parts = [], [], []
     for start in range(0, total, cs):
-        d, s1, degen = kernel(Y_cols[:, start : start + cs], all_idx, all_cls_idx, mask, counts)
+        chunk = Y_cols[:, start : start + cs]
+        outs = [kernel(chunk, all_idx, cls_idx, msk, cnt) for cls_idx, msk, cnt in groups]
+        d = jnp.concatenate([o[0] for o in outs], axis=-1)
+        s1 = jnp.concatenate([o[1] for o in outs], axis=-1)
+        if col_order is not None:
+            d = d[..., col_order]
+            s1 = s1[..., col_order]
         d_parts.append(d)
         s1_parts.append(s1)
-        degen_parts.append(degen)
+        degen_parts.append(outs[0][2])
 
     d_all = jnp.concatenate(d_parts, axis=1).reshape(R, T, K, D)
     s1_all = jnp.concatenate(s1_parts, axis=1).reshape(R, T, K, D)

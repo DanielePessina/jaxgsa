@@ -259,7 +259,7 @@ def analyze(
     X = jnp.asarray(X)
     # PAWN conditions on bins of each input and compares output CDFs, so a
     # declared input correlation does not invalidate the indices.
-    Y = _validate_xy_inputs(problem, X, Y, correlation_ok=True)
+    Y = _validate_xy_inputs(problem, X, Y, correlation_ok=True, method="jaxgsa.pawn.analyze")
     if statistic not in ("median", "max", "mean"):
         raise ValueError(f"statistic must be 'median', 'max', or 'mean', got {statistic!r}")
     if n_bins < 2:

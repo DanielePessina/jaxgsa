@@ -35,13 +35,14 @@ def poincare_constant(spec: _NormalizedInputSpec, *, grid: int = 512) -> float:
     """Poincare constant C(p) for a single marginal.
 
     Args:
-        spec: Normalized input spec tuple (dist, first, second, low, high).
+        spec: Normalized input spec tuple (dist, first, second, low, high,
+            categorical).
         grid: Number of P1 elements for truncated-Normal spectral solve.
 
     Returns:
         The (optimal) Poincare constant.
     """
-    dist, first, second, low, high = spec
+    dist, first, second, low, high, _ = spec
     if dist == "uniform":
         return (second - first) ** 2 / math.pi**2
     if dist == "gaussian":
@@ -52,6 +53,12 @@ def poincare_constant(spec: _NormalizedInputSpec, *, grid: int = 512) -> float:
         fallback_lo = first - 8 * std if low is None else low
         fallback_hi = first + 8 * std if high is None else high
         return _truncnorm_poincare(first, std, fallback_lo, fallback_hi, grid)
+    if dist == "categorical":
+        raise ValueError(
+            "A categorical marginal has no Poincare constant (the inequality "
+            "needs a continuous density); jaxgsa.dgsm does not support "
+            "categorical parameters"
+        )
     raise ValueError(f"Unknown distribution type {dist!r}")
 
 
@@ -101,7 +108,7 @@ def marginal_variance(spec: _NormalizedInputSpec) -> float:
     Returns:
         The variance of the marginal distribution.
     """
-    dist, first, second, low, high = spec
+    dist, first, second, low, high, _ = spec
     if dist == "uniform":
         return (second - first) ** 2 / 12.0
     if dist == "gaussian":
@@ -113,6 +120,12 @@ def marginal_variance(spec: _NormalizedInputSpec) -> float:
         a_std = -np.inf if low is None else (low - mu) / sd
         b_std = np.inf if high is None else (high - mu) / sd
         return float(truncnorm.var(a_std, b_std, loc=mu, scale=sd))
+    if dist == "categorical":
+        raise ValueError(
+            "A categorical marginal's level codes have no variance meaningful "
+            "to the DGSM bounds; jaxgsa.dgsm does not support categorical "
+            "parameters"
+        )
     raise ValueError(f"Unknown distribution type {dist!r}")
 
 

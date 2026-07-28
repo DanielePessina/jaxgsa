@@ -21,6 +21,7 @@ from jax import Array
 
 from jaxgsa._core.validation import (
     _prepare_Y,
+    _raise_categorical_analysis,
     _raise_correlated_analysis,
     _squeeze_output_axes,
     _validate_output,
@@ -199,6 +200,7 @@ def analyze(
     # The Poincare-inequality bound on ST assumes independent inputs; both
     # calling conventions are rejected for a correlated problem.
     _raise_correlated_analysis(problem, "jaxgsa.dgsm.analyze")
+    _raise_categorical_analysis(problem, "jaxgsa.dgsm.analyze")
     D = problem.num_vars
 
     if fn is not None and X is not None:

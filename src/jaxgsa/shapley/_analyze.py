@@ -18,6 +18,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from jaxgsa._core.validation import _raise_categorical_analysis
 from jaxgsa.shapley._engine import shapley_from_variances
 from jaxgsa.shapley._result import ShapleyResult
 
@@ -212,6 +213,9 @@ def analyze(
         TypeError: If ``backend_kwargs`` contains a keyword the selected
             backend's ``analyze`` does not accept.
     """
+    # Both backends fit smooth surrogates over the inputs, which is undefined
+    # for unordered level codes; reject with the Shapley-specific name.
+    _raise_categorical_analysis(problem, "jaxgsa.shapley.analyze")
     if backend == "pce":
         if include_correlative:
             raise ValueError("include_correlative requires backend='hdmr'")

@@ -15,9 +15,10 @@ from . import (
     shapley,
     sobol,
 )
-from .problem import GaussianInputSpec, Problem, UniformInputSpec
+from .problem import CategoricalInputSpec, GaussianInputSpec, Problem, UniformInputSpec
 
 __all__ = [
+    "CategoricalInputSpec",
     "GaussianInputSpec",
     "Problem",
     "UniformInputSpec",

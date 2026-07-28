@@ -24,6 +24,12 @@ def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
 
     Returns:
         (N, D) array with each column in [0, 1].
+
+    Raises:
+        ValueError: If any parameter is categorical — its step CDF collapses
+            each level onto one point, which would silently discard the
+            level structure. The expansion methods that call this transform
+            reject categorical problems up front; this is the layered guard.
     """
     from jax.scipy.stats import norm as jax_norm
     from scipy.stats import truncnorm
@@ -37,7 +43,14 @@ def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
     # Clipping output to (UNIT_CLIP, 1-UNIT_CLIP) keeps values in the open
     # interval so downstream inverse transforms (ppf) never receive 0 or 1.
     for d in range(D):
-        dist, first, second, lo, hi = problem.input_specs[d]
+        dist, first, second, lo, hi, _ = problem.input_specs[d]
+        if dist == "categorical":
+            raise ValueError(
+                f"Parameter {problem.names[d]!r} is categorical; its step CDF is "
+                "many-to-one and has no meaningful unit-interval image. Use "
+                "jaxgsa.optimal_transport, jaxgsa.borgonovo, or jaxgsa.sobol "
+                "for categorical inputs"
+            )
         if dist == "uniform":  # affine map (x - lo)/(hi - lo) is the CDF of U(lo, hi)
             cols.append((X[:, d] - first) / (second - first))
         # Truncated Gaussian -- need scipy because JAX lacks a truncnorm CDF.

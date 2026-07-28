@@ -42,19 +42,46 @@ class GaussianInputSpec(TypedDict):
     high: NotRequired[float]
 
 
+class CategoricalInputSpec(TypedDict):
+    """Categorical (unordered discrete) marginal distribution.
+
+    Pass to :meth:`Problem.from_dict` as
+    ``{"dist": "categorical", "probs": [0.5, 0.3, 0.2]}``. The parameter
+    takes one of ``L = len(probs)`` levels. Samples carry the integer level
+    codes ``0 .. L-1`` (as floats), never physical values. ``probs`` must be
+    positive and sum to 1 (small rounding error is renormalized). Optional
+    ``labels`` (strings or numbers, one per level) are stored on the
+    ``Problem`` for reporting only — see :attr:`Problem.categorical_labels`.
+    """
+
+    dist: Literal["categorical"]
+    probs: list[float]
+    labels: NotRequired[list[str | int | float]]
+
+
 # Public-facing union type -- users pass one of these per parameter.
-InputSpecValue: TypeAlias = tuple[float, float] | UniformInputSpec | GaussianInputSpec
+InputSpecValue: TypeAlias = (
+    tuple[float, float] | UniformInputSpec | GaussianInputSpec | CategoricalInputSpec
+)
 # Hashable canonical storage for a validated latent correlation matrix.
 _CorrelationTuple: TypeAlias = tuple[tuple[float, ...], ...]
-# Internal canonical form: (dist, param1, param2, lo_bound, hi_bound).
+# Hashable categorical payload: (level probabilities, level labels).
+_CategoricalData: TypeAlias = tuple[tuple[float, ...], tuple[str, ...]]
+# Internal canonical form: (dist, param1, param2, lo_bound, hi_bound, categorical).
 # For uniform: param1=low, param2=high. For gaussian: param1=mean, param2=variance.
+# For categorical: param1=param2=0.0, bounds None, and the last slot carries
+# the (probs, labels) payload; it is None for the other distributions.
 _NormalizedInputSpec: TypeAlias = tuple[
-    Literal["uniform", "gaussian"],
+    Literal["uniform", "gaussian", "categorical"],
     float,
     float,
     float | None,
     float | None,
+    _CategoricalData | None,
 ]
+
+# Renormalize probs whose sum is off by at most this much; raise beyond it.
+_PROB_SUM_TOL = 1e-3
 
 
 def _make_uniform_spec(low: float, high: float) -> _NormalizedInputSpec:
@@ -64,7 +91,7 @@ def _make_uniform_spec(low: float, high: float) -> _NormalizedInputSpec:
     # `not <` instead of `>=` to also catch NaN (NaN comparisons are always False).
     if not low < high:
         raise ValueError(f"Uniform input requires low < high, got {(low, high)!r}")
-    return ("uniform", low, high, None, None)
+    return ("uniform", low, high, None, None, None)
 
 
 def _make_gaussian_spec(
@@ -86,7 +113,60 @@ def _make_gaussian_spec(
     if low is not None and high is not None and not low < high:
         raise ValueError(f"Truncated Gaussian input requires low < high, got {(low, high)!r}")
 
-    return ("gaussian", mean, variance, low, high)
+    return ("gaussian", mean, variance, low, high, None)
+
+
+def _make_categorical_spec(
+    probs: "npt.ArrayLike",
+    *,
+    labels: "list[str | int | float] | None" = None,
+) -> _NormalizedInputSpec:
+    """Validate and normalize a categorical input specification.
+
+    Args:
+        probs: Level probabilities, one per level, at least two. Must be
+            positive and sum to 1; a sum within ``1e-3`` of 1 is
+            renormalized, anything further off raises.
+        labels: Optional level labels (strings or numbers), one per level.
+            Defaults to ``"0" .. "L-1"``. Stored for reporting only.
+
+    Returns:
+        The normalized immutable spec tuple.
+
+    Raises:
+        ValueError: If fewer than two levels are given, any probability is
+            not positive and finite, the probabilities do not sum to 1
+            within tolerance, or ``labels`` has the wrong length or
+            duplicate entries.
+    """
+    # Coerce to Python floats to prevent JAX tracers or numpy scalars from
+    # leaking into hashable metadata.
+    prob_values = tuple(float(p) for p in np.asarray(probs, dtype=np.float64).ravel())
+    n_levels = len(prob_values)
+    if n_levels < 2:
+        raise ValueError(f"Categorical input requires at least 2 levels, got {n_levels}")
+    if not all(math.isfinite(p) and p > 0 for p in prob_values):
+        raise ValueError(f"Categorical probs must be positive and finite, got {prob_values!r}")
+    total = sum(prob_values)
+    if abs(total - 1.0) > _PROB_SUM_TOL:
+        raise ValueError(
+            f"Categorical probs must sum to 1 (within {_PROB_SUM_TOL}), got sum={total!r}"
+        )
+    prob_values = tuple(p / total for p in prob_values)
+
+    if labels is None:
+        label_values = tuple(str(level) for level in range(n_levels))
+    else:
+        label_values = tuple(str(label) for label in labels)
+        if len(label_values) != n_levels:
+            raise ValueError(
+                f"Categorical labels length {len(label_values)} does not match "
+                f"the {n_levels} levels declared by probs"
+            )
+        if len(set(label_values)) != n_levels:
+            raise ValueError(f"Categorical labels must be unique, got {label_values!r}")
+
+    return ("categorical", 0.0, 0.0, None, None, (prob_values, label_values))
 
 
 def _normalize_input_spec(spec: InputSpecValue) -> _NormalizedInputSpec:
@@ -105,6 +185,8 @@ def _normalize_input_spec(spec: InputSpecValue) -> _NormalizedInputSpec:
             low=spec.get("low"),
             high=spec.get("high"),
         )
+    if spec["dist"] == "categorical":
+        return _make_categorical_spec(spec["probs"], labels=spec.get("labels"))
 
     raise ValueError(f"Unsupported input distribution {spec['dist']!r}")
 
@@ -142,9 +224,10 @@ def _derive_bounds(
 ) -> tuple[tuple[float, float], ...] | None:
     """Return finite bounds for uniform-only problems, otherwise ``None``."""
     # Bounds only meaningful for uniform-only problems; Gaussian inputs have
-    # infinite (or truncated) support that doesn't map to simple lo/hi bounds.
+    # infinite (or truncated) support and categorical inputs carry codes, so
+    # neither maps to simple lo/hi bounds.
     bounds: list[tuple[float, float]] = []
-    for dist, first, second, _, _ in input_specs:
+    for dist, first, second, _, _, _ in input_specs:
         if dist != "uniform":
             return None
         bounds.append((first, second))
@@ -175,11 +258,18 @@ def _canonical_correlation(
     return tuple(tuple(float(value) for value in row) for row in R)
 
 
-def _normalized_input_to_dict(spec: _NormalizedInputSpec) -> UniformInputSpec | GaussianInputSpec:
+def _normalized_input_to_dict(
+    spec: _NormalizedInputSpec,
+) -> UniformInputSpec | GaussianInputSpec | CategoricalInputSpec:
     """Convert a normalized immutable input spec into a JSON-friendly mapping."""
-    dist, first, second, low, high = spec
+    dist, first, second, low, high, categorical = spec
     if dist == "uniform":
         return UniformInputSpec(dist="uniform", low=first, high=second)
+    if dist == "categorical":
+        assert categorical is not None  # categorical specs always carry (probs, labels)
+        probs, labels = categorical
+        label_list: list[str | int | float] = list(labels)
+        return CategoricalInputSpec(dist="categorical", probs=list(probs), labels=label_list)
 
     # Reconstruct the TypedDict for JSON serialization (used by SobolSamples.save).
     payload: GaussianInputSpec = GaussianInputSpec(
@@ -194,6 +284,47 @@ def _normalized_input_to_dict(spec: _NormalizedInputSpec) -> UniformInputSpec | 
     return payload
 
 
+def _check_correlation_touches_categorical(
+    names: tuple[str, ...],
+    input_specs: tuple[_NormalizedInputSpec, ...],
+    correlation: _CorrelationTuple | None,
+) -> None:
+    """Reject a correlation matrix that couples a categorical parameter.
+
+    The Gaussian copula has no defined coupling for an unordered marginal
+    (that needs a polychoric model, which is future work). Identity rows and
+    columns are fine: they declare the categorical parameter independent.
+
+    Raises:
+        ValueError: If any non-zero off-diagonal entry of ``correlation``
+            touches a categorical parameter.
+    """
+    if correlation is None:
+        return
+    R = np.asarray(correlation, dtype=np.float64)
+    for d, spec in enumerate(input_specs):
+        if spec[0] != "categorical":
+            continue
+        off_diag = np.concatenate([np.delete(R[d], d), np.delete(R[:, d], d)])
+        if np.any(off_diag != 0.0):
+            raise ValueError(
+                f"problem.correlation couples categorical parameter {names[d]!r}, "
+                "but the Gaussian copula does not define a coupling for an "
+                "unordered marginal (polychoric coupling is future work). Keep "
+                "the categorical parameter's row and column at identity, or "
+                "drop the matrix with problem.with_correlation(None)."
+            )
+
+
+def _categorical_dims(problem: "Problem") -> tuple[tuple[int, int], ...]:
+    """Return ``(dimension index, level count)`` per categorical parameter."""
+    return tuple(
+        (d, len(spec[5][0]))
+        for d, spec in enumerate(problem.input_specs)
+        if spec[0] == "categorical" and spec[5] is not None
+    )
+
+
 # frozen for hashability and safety; init=False because we define a custom __init__ for validation.
 @dataclass(frozen=True, init=False)
 class Problem:
@@ -205,8 +336,8 @@ class Problem:
     safely be shared across analyses.
 
     The direct constructor accepts uniform marginals only, given as finite
-    ``(low, high)`` bounds. Use :meth:`from_dict` when you need mixed uniform
-    and Gaussian marginals.
+    ``(low, high)`` bounds. Use :meth:`from_dict` when you need mixed
+    uniform, Gaussian, and categorical marginals.
 
     Optionally, a Gaussian-copula ``correlation`` matrix couples the
     marginals: samples then follow the declared dependence structure while
@@ -288,14 +419,16 @@ class Problem:
     ) -> "Problem":
         """Create a ``Problem`` from per-parameter distribution specs.
 
-        This is the most general constructor: it accepts any mix of uniform
-        and Gaussian marginals. Parameter order follows the dict's insertion
-        order, which must match the column order of the model's input matrix.
+        This is the most general constructor: it accepts any mix of uniform,
+        Gaussian, and categorical marginals. Parameter order follows the
+        dict's insertion order, which must match the column order of the
+        model's input matrix.
 
         Args:
             params: Mapping from parameter name to one of:
                 a ``(low, high)`` tuple (shorthand for uniform),
-                a :class:`UniformInputSpec`, or a :class:`GaussianInputSpec`.
+                a :class:`UniformInputSpec`, a :class:`GaussianInputSpec`,
+                or a :class:`CategoricalInputSpec`.
             output_names: Optional output labels used by ``to_dataset()``.
             truncate_gaussians: Optional tail probability ``q`` in
                 ``(0, 0.5)``. ``None`` (the default) leaves every Gaussian
@@ -418,6 +551,7 @@ class Problem:
         correlation: _CorrelationTuple | None,
     ) -> None:
         """Assign validated frozen dataclass fields in one place."""
+        _check_correlation_touches_categorical(names, input_specs, correlation)
         # Bypass frozen dataclass protection -- only called during construction.
         object.__setattr__(self, "names", names)
         object.__setattr__(self, "bounds", _derive_bounds(input_specs))
@@ -456,6 +590,26 @@ class Problem:
     def has_non_uniform_inputs(self) -> bool:
         """Return ``True`` when any parameter uses a non-uniform marginal."""
         return any(spec[0] != "uniform" for spec in self._input_specs)
+
+    @property
+    def has_categorical_inputs(self) -> bool:
+        """Return ``True`` when any parameter uses a categorical marginal."""
+        return any(spec[0] == "categorical" for spec in self._input_specs)
+
+    @property
+    def categorical_labels(self) -> dict[str, tuple[str, ...]]:
+        """Level labels of every categorical parameter, keyed by name.
+
+        Samples always carry the integer level codes ``0 .. L-1`` (as
+        floats); code ``i`` of a parameter maps to ``labels[i]``. The labels
+        are reporting metadata only — jaxgsa never relabels arrays. The dict
+        is empty when the problem has no categorical parameters.
+        """
+        return {
+            self.names[d]: spec[5][1]
+            for d, spec in enumerate(self._input_specs)
+            if spec[0] == "categorical" and spec[5] is not None
+        }
 
     @property
     def num_vars(self) -> int:

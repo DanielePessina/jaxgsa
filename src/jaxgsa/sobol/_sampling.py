@@ -28,7 +28,7 @@ from jaxgsa._core.sampling import (
     _stable_unique_rows,
     _transform_samples,
 )
-from jaxgsa._core.validation import _raise_correlated_design
+from jaxgsa._core.validation import _raise_categorical_design, _raise_correlated_design
 from jaxgsa.problem import Problem
 
 if TYPE_CHECKING:
@@ -241,6 +241,9 @@ class SobolSamples(UniqueDesignSamples):
                 182:978-988.
             Jansen (1999). Comput. Phys. Commun. 117:35-43.
         """
+        # An elementary effect divides by a step along one input axis, which
+        # has no meaning for unordered level codes.
+        _raise_categorical_design(self.problem, "jaxgsa.sobol.SobolSamples.to_morris")
         # Imported lazily: morris knows nothing about sobol, and this keeps the
         # dependency one-directional and free of an import cycle.
         from jaxgsa.morris._sampling import _radial_samples_from_blocks
@@ -323,6 +326,27 @@ def _saltelli_step(n_params: int, calc_second_order: bool) -> int:
     return 2 * n_params + 2 if calc_second_order else n_params + 2
 
 
+# Inflation-loop safety valve for categorical problems: the loop stops after
+# this many doublings even when the unique-row target is not reached.
+_MAX_INFLATION_DOUBLINGS = 16
+
+
+def _max_distinct_rows(problem: Problem) -> int | None:
+    """Upper bound on the number of distinct sample rows, if one exists.
+
+    An all-categorical problem can only produce ``prod(L_d)`` distinct rows
+    (each column takes one of its ``L_d`` level codes), no matter how large
+    the design grows. Any continuous column makes the count unbounded, in
+    which case ``None`` is returned.
+    """
+    total = 1
+    for spec in problem.input_specs:
+        if spec[0] != "categorical" or spec[5] is None:
+            return None
+        total *= len(spec[5][0])
+    return total
+
+
 def _build_expanded_samples(
     n_params: int,
     base_n: int,
@@ -374,10 +398,11 @@ def _warn_unbounded_gaussian(problem: Problem) -> None:
     truncation still leaves the opposite tail unbounded and is reported. Only
     uniforms and two-sided-truncated Gaussians stay silent.
     """
+    # Only Gaussian marginals can be unbounded; categorical codes are bounded.
     unbounded = [
         name
         for name, spec in zip(problem.names, problem.input_specs)
-        if spec[0] != "uniform" and (spec[3] is None or spec[4] is None)
+        if spec[0] == "gaussian" and (spec[3] is None or spec[4] is None)
     ]
     if not unbounded:
         return
@@ -518,9 +543,38 @@ def sample(
 
     if target_n is not None:
         # Deduplication may reduce unique count below target;
-        # double base_n and rebuild until we have enough.
+        # double base_n and rebuild until we have enough. Categorical columns
+        # collapse whole probability bins onto one code, so the unique count
+        # can saturate: an all-categorical problem has at most
+        # _max_distinct_rows(problem) distinct rows, and the loop would
+        # otherwise inflate the design forever. The guard stops doubling once
+        # that bound is reached (or after a fixed number of doublings) and
+        # accepts duplicate rows — they are legitimate Saltelli samples, the
+        # dedup exists only to save model evaluations.
+        max_unique = _max_distinct_rows(problem)
+        n_doublings = 0
         while unique_samples.shape[0] < target_n:
+            if problem.has_categorical_inputs and (
+                (max_unique is not None and unique_samples.shape[0] >= max_unique)
+                or n_doublings >= _MAX_INFLATION_DOUBLINGS
+            ):
+                reason = (
+                    f"has only {max_unique} possible distinct rows"
+                    if max_unique is not None and unique_samples.shape[0] >= max_unique
+                    else f"still holds duplicates after {n_doublings} base_n doublings"
+                )
+                warnings.warn(
+                    f"jaxgsa.sobol.sample: the categorical problem {reason}, so "
+                    f"the requested n_samples={target_n} unique rows cannot be "
+                    f"reached (returning {unique_samples.shape[0]}). The design "
+                    "keeps its duplicate rows; they are valid Saltelli samples "
+                    "and the analysis is unaffected — deduplication only saves "
+                    "model evaluations",
+                    stacklevel=2,
+                )
+                break
             base_n *= 2
+            n_doublings += 1
             expanded_samples_unit = _build_expanded_samples(
                 D,
                 base_n,
