@@ -58,17 +58,17 @@ def linear_dgsm_result():
 
 class TestPoincare:
     def test_uniform_constant(self):
-        spec = ("uniform", -math.pi, math.pi, None, None)
+        spec = ("uniform", -math.pi, math.pi, None, None, None)
         C = poincare_constant(spec)
         assert C == pytest.approx((2 * math.pi) ** 2 / math.pi**2)
         assert C == pytest.approx(4.0)
 
     def test_gaussian_constant(self):
-        spec = ("gaussian", 0.0, 1.5, None, None)
+        spec = ("gaussian", 0.0, 1.5, None, None, None)
         assert poincare_constant(spec) == pytest.approx(1.5)
 
     def test_truncated_gaussian_spectral(self):
-        spec = ("gaussian", 0.0, 1.0, -3.0, 3.0)
+        spec = ("gaussian", 0.0, 1.0, -3.0, 3.0, None)
         C = poincare_constant(spec)
         assert C < 1.0
         assert C > 0.0
@@ -89,19 +89,19 @@ class TestPoincare:
 
 class TestMarginalVariance:
     def test_uniform(self):
-        spec = ("uniform", 0.0, 1.0, None, None)
+        spec = ("uniform", 0.0, 1.0, None, None, None)
         assert marginal_variance(spec) == pytest.approx(1.0 / 12.0)
 
     def test_uniform_wide(self):
-        spec = ("uniform", -math.pi, math.pi, None, None)
+        spec = ("uniform", -math.pi, math.pi, None, None, None)
         assert marginal_variance(spec) == pytest.approx((2 * math.pi) ** 2 / 12.0)
 
     def test_gaussian(self):
-        spec = ("gaussian", 0.0, 2.5, None, None)
+        spec = ("gaussian", 0.0, 2.5, None, None, None)
         assert marginal_variance(spec) == pytest.approx(2.5)
 
     def test_truncated_gaussian(self):
-        spec = ("gaussian", 0.0, 1.0, -1.0, 1.0)
+        spec = ("gaussian", 0.0, 1.0, -1.0, 1.0, None)
         v = marginal_variance(spec)
         assert 0 < v < 1.0
 
