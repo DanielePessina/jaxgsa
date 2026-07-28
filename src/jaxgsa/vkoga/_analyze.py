@@ -1,0 +1,328 @@
+"""Two-stage correlated sensitivity analysis: VKOGA surrogate, then indices.
+
+Implements the surrogate-based sensitivity analysis (SSA) of Hilhorst et al.
+(2024). Stage one fits a greedy kernel surrogate to the given ``(X, Y)`` data;
+stage two computes the correlated variance-based indices of Li et al. (2010)
+against that surrogate under a Gaussian copula. The split is what makes the
+method affordable: the indices need nested conditional sampling, which is
+hopeless against an expensive model but trivial against a kernel expansion.
+
+References:
+    Hilhorst, Quicken, van de Vosse & Huberts (2024). Int. J. Numer. Meth.
+        Biomed. Engng. 40(2):e3797.
+    Li, Rabitz, Yelvington et al. (2010). J. Phys. Chem. A 114:6022-6032.
+    Wirtz & Haasdonk (2013). Dolomites Res. Notes Approx. 6:83-100.
+"""
+
+from __future__ import annotations
+
+import warnings
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+from jax import Array
+
+from jaxgsa._core.batching import apply_batched, resolve_batch_size
+from jaxgsa._core.copula import (
+    build_conditional_plan,
+    fit_gaussian_copula,
+    independent_correlation,
+    validate_correlation,
+)
+from jaxgsa._core.surrogate import _PredictPlan
+from jaxgsa._core.transforms import cdf_to_unit_interval
+from jaxgsa._core.validation import (
+    _prepare_Y,
+    _squeeze_output_axes,
+    _validate_xy_inputs,
+    _warn_zero_variance_slices,
+)
+from jaxgsa.problem import Problem
+from jaxgsa.vkoga._engine import _cross_validate, _fit_vkoga, _predict_vkoga
+from jaxgsa.vkoga._indices import estimate_correlated_indices
+from jaxgsa.vkoga._result import VKOGAResult
+
+# Hyperparameter search grid, following Hilhorst et al. Section 2.4.1: ten
+# log-spaced values each, cross-validated as a 10x10 product.
+_GAMMA_GRID = np.logspace(-2, np.log10(50.0), 10)
+_RIDGE_GRID = np.logspace(-16, -2, 10)
+
+# Cap on kernel centres when the caller does not choose one. Greedy selection
+# cost is O(max_centers * n), and the marginal accuracy of further centres
+# falls off quickly once the power function has collapsed.
+_DEFAULT_MAX_CENTERS = 300
+
+
+def analyze_vkoga(
+    problem: Problem,
+    X: Array,
+    Y: Array,
+    *,
+    correlation: Array | np.ndarray | str | None = None,
+    gamma: float | None = None,
+    ridge: float | None = None,
+    max_centers: int | None = None,
+    n_folds: int = 10,
+    n_outer: int = 512,
+    n_inner: int = 128,
+    n_variance: int = 8192,
+    seed: int = 0,
+    batch_size: int | None = None,
+) -> VKOGAResult:
+    """Correlated variance-based sensitivity indices via a VKOGA surrogate.
+
+    Fits a Vectorial Kernel Orthogonal Greedy Algorithm surrogate to given
+    ``(X, Y)`` data, then estimates the five correlated indices of Li et al.
+    (2010) against it under a Gaussian copula.
+
+    The training design should be **independent and space-filling** even when
+    the analysis is correlated. The correlated measure concentrates on a ridge,
+    but ``S_TU`` conditions on the other parameters and then resamples ``X_i``
+    across its whole marginal; a surrogate trained only on correlated data
+    would be extrapolating for exactly those draws.
+
+    Args:
+        problem: Problem defining the parameters and their marginals.
+        X: ``(N, D)`` inputs in physical units.
+        Y: Outputs, ``(N,)``, ``(N, K)`` or ``(N, T, K)``.
+        correlation: Gaussian-copula dependency structure. ``None`` treats the
+            inputs as independent; a ``(D, D)`` matrix declares one directly;
+            ``"empirical"`` fits one from ``X`` by rank correlation.
+        gamma: RBF shape parameter. ``None`` cross-validates over a grid.
+        ridge: Kernel regularisation. ``None`` cross-validates over a grid.
+        max_centers: Maximum kernel centres the greedy may select. Defaults to
+            300, capped at ``N``.
+        n_folds: Folds for hyperparameter cross-validation.
+        n_outer: Outer (conditioning) sample size per parameter.
+        n_inner: Inner (conditional) sample size per outer point.
+        n_variance: Sample size for the output variance and the component-
+            function fit.
+        seed: Base seed for the quasi-random draws.
+        batch_size: Rows per batch when evaluating the surrogate. ``None``
+            derives one from the memory budget.
+
+    Returns:
+        A :class:`VKOGAResult` with ``S_TC``, ``S_TU``, ``S_U``, ``S_C`` and
+        ``S_IU``.
+
+    Raises:
+        ValueError: If ``X``/``Y`` violate the output contract, if the problem
+            has fewer than two parameters, or if ``correlation`` is neither a
+            valid matrix nor ``"empirical"``.
+
+    Warns:
+        UserWarning: If any output slice has zero variance, or if JAX is in
+            single precision, where the kernel solve loses accuracy for small
+            ``gamma`` (see :mod:`jaxgsa.vkoga`).
+    """
+    X = jnp.asarray(X)
+    Y = _validate_xy_inputs(problem, X, jnp.asarray(Y))
+    D = problem.num_vars
+    if D < 2:
+        raise ValueError(f"Correlated sensitivity indices need at least 2 parameters, got {D}")
+
+    Y_canonical, squeeze_time, squeeze_output = _prepare_Y(Y)
+    _warn_zero_variance_slices(Y_canonical, output_names=problem.output_names)
+    n_time, n_out = Y_canonical.shape[1], Y_canonical.shape[2]
+    Y_flat = Y_canonical.reshape(Y_canonical.shape[0], n_time * n_out)
+
+    _warn_single_precision()
+    R = _resolve_correlation(problem, np.asarray(X), correlation)
+
+    # The RBF kernel is isotropic, so every column must share a scale; the
+    # marginal CDF map is the same transform HDMR uses for its basis.
+    U = cdf_to_unit_interval(X, problem)
+    # VKOGA carries no constant term, so a non-zero output mean would have to
+    # be reconstructed by the kernel expansion itself. Centring removes that
+    # burden and measurably improves the fit.
+    y_mean = Y_flat.mean(axis=0)
+    Y_centered = Y_flat - y_mean
+
+    resolved_centers = min(int(max_centers or _DEFAULT_MAX_CENTERS), int(U.shape[0]))
+    gamma_value, ridge_value = _resolve_hyperparameters(
+        U,
+        Y_centered,
+        gamma=gamma,
+        ridge=ridge,
+        max_centers=resolved_centers,
+        n_folds=n_folds,
+        seed=seed,
+    )
+    state = _fit_vkoga(
+        U,
+        Y_centered,
+        gamma=gamma_value,
+        max_centers=resolved_centers,
+        ridge=ridge_value,
+    )
+
+    predict = _make_unit_predictor(state, y_mean, batch_size)
+    indices = estimate_correlated_indices(
+        plan=build_conditional_plan(R),
+        chol_full=np.linalg.cholesky(R),
+        predict=predict,
+        n_outer=n_outer,
+        n_inner=n_inner,
+        n_variance=n_variance,
+        seed=seed,
+    )
+
+    def _shape_index(flat: np.ndarray) -> Array:
+        """Reshape an ``(S, D)`` index block to the output contract."""
+        arr = jnp.asarray(flat.reshape(n_time, n_out, D))
+        return _squeeze_output_axes(arr, squeeze_time, squeeze_output, n_trailing=1)
+
+    def _shape_slice(flat: np.ndarray) -> Array:
+        """Reshape an ``(S,)`` per-slice diagnostic to the output contract."""
+        arr = jnp.asarray(flat.reshape(n_time, n_out))
+        return _squeeze_output_axes(arr, squeeze_time, squeeze_output, n_trailing=0)
+
+    output_shape = _squeeze_output_axes(
+        jnp.zeros((n_time, n_out)), squeeze_time, squeeze_output, n_trailing=0
+    ).shape
+    return VKOGAResult(
+        S_TC=_shape_index(indices.S_TC),
+        S_TU=_shape_index(indices.S_TU),
+        S_U=_shape_index(indices.S_U),
+        S_C=_shape_index(indices.S_C),
+        S_IU=_shape_index(indices.S_IU),
+        problem=problem,
+        correlation=R,
+        variance=_shape_slice(indices.variance),
+        n_centers=int(state.n_centers),
+        gamma=float(gamma_value),
+        ridge=float(ridge_value),
+        rmse=_shape_slice(np.asarray(state.rmse)),
+        _fit=state,
+        _y_mean=y_mean,
+        _output_shape=output_shape,
+    )
+
+
+def _warn_single_precision() -> None:
+    """Warn that float32 limits the kernel solve's accuracy.
+
+    The regularised normal equations square the condition number of the cross
+    kernel, which for small ``gamma`` exceeds what float32 can carry. Cross
+    validation partly self-corrects by scoring in the same arithmetic and so
+    avoiding the blown-up corner of the grid, but the ceiling is real.
+    """
+    # Read the flag off the config object directly; config.read() raises for
+    # flags that were never explicitly set.
+    if not getattr(jax.config, "jax_enable_x64", False):
+        warnings.warn(
+            "jaxgsa.vkoga: JAX is in single precision; the kernel solve is ill-conditioned for "
+            "small gamma and the surrogate may be inaccurate. Enable float64 with "
+            'jax.config.update("jax_enable_x64", True) before fitting.',
+            stacklevel=3,
+        )
+
+
+def _resolve_correlation(
+    problem: Problem,
+    X: np.ndarray,
+    correlation: Array | np.ndarray | str | None,
+) -> np.ndarray:
+    """Turn the ``correlation`` argument into a validated matrix."""
+    if correlation is None:
+        return independent_correlation(problem.num_vars)
+    if isinstance(correlation, str):
+        if correlation != "empirical":
+            raise ValueError(
+                f"correlation must be None, 'empirical', or a (D, D) matrix, got {correlation!r}"
+            )
+        return fit_gaussian_copula(problem, X)
+    return validate_correlation(np.asarray(correlation), problem.num_vars)
+
+
+def _resolve_hyperparameters(
+    U: Array,
+    Y: Array,
+    *,
+    gamma: float | None,
+    ridge: float | None,
+    max_centers: int,
+    n_folds: int,
+    seed: int,
+) -> tuple[float, float]:
+    """Return ``(gamma, ridge)``, cross-validating whichever was not given.
+
+    Searching a one-element grid is how a partially specified pair is handled,
+    so there is a single code path rather than four.
+    """
+    if gamma is not None and ridge is not None:
+        return float(gamma), float(ridge)
+
+    gammas = np.asarray([gamma]) if gamma is not None else _GAMMA_GRID
+    ridges = np.asarray([ridge]) if ridge is not None else _RIDGE_GRID
+    scores = np.asarray(
+        _cross_validate(
+            U,
+            Y,
+            gammas=gammas,
+            ridges=ridges,
+            max_centers=max_centers,
+            n_folds=n_folds,
+            seed=seed,
+        )
+    )
+    # A fold can return a non-finite score when the solve blows up; treat those
+    # as the worst possible rather than letting argmin pick a NaN.
+    scores = np.where(np.isfinite(scores), scores, np.inf)
+    best = np.unravel_index(int(np.argmin(scores)), scores.shape)
+    return float(gammas[best[0]]), float(ridges[best[1]])
+
+
+def _make_unit_predictor(state, y_mean: Array, batch_size: int | None):
+    """Build the ``(n, D) unit-cube -> (n, S)`` callable the estimators use.
+
+    Returns a plain NumPy-in/NumPy-out function because the index estimators
+    are host-side quasi-Monte-Carlo loops; batching keeps the kernel matrix
+    within the configured memory budget for the millions of conditional draws.
+    """
+    n_centers = int(state.centers.shape[0])
+    itemsize = int(jnp.zeros(()).itemsize)
+    bytes_per_row = itemsize * (n_centers + int(state.coefficients.shape[1]))
+    compiled = jax.jit(lambda U: _predict_vkoga(state, U) + y_mean)
+
+    def predict(U: np.ndarray) -> np.ndarray:
+        U_device = jnp.asarray(U)
+        batch = resolve_batch_size(bytes_per_row, U_device.shape[0], batch_size)
+        return np.asarray(apply_batched(compiled, U_device, batch))
+
+    return predict
+
+
+def _vkoga_predict_plan(result: VKOGAResult, X_new: Array) -> _PredictPlan:
+    """Plan a batched surrogate evaluation for :meth:`VKOGAResult.predict`.
+
+    Args:
+        result: Fitted result carrying the kernel state.
+        X_new: ``(N_new, D)`` inputs in physical units.
+
+    Returns:
+        A ``_PredictPlan`` whose kernel returns predictions shaped to the
+        result's output contract.
+
+    Raises:
+        ValueError: If ``result`` carries no fitted surrogate state.
+    """
+    state = result._fit
+    if state is None or result._y_mean is None:
+        raise ValueError("VKOGAResult does not contain a fitted surrogate")
+
+    U = cdf_to_unit_interval(X_new, result.problem)
+    n_centers = int(state.centers.shape[0])
+    n_slices = int(state.coefficients.shape[1])
+    itemsize = int(jnp.zeros(()).itemsize)
+    y_mean = result._y_mean
+    output_shape = result._output_shape
+
+    def kernel(U_batch: Array) -> Array:
+        predictions = _predict_vkoga(state, U_batch) + y_mean
+        return predictions.reshape(U_batch.shape[0], *output_shape)
+
+    # The (n, n_centers) kernel block dominates the transient cost, plus one
+    # output row per prediction.
+    return _PredictPlan(X=U, bytes_per_row=itemsize * (n_centers + n_slices), kernel=kernel)

@@ -605,8 +605,10 @@ def latent_normal_sample(n: int, dim: int, *, seed: int, scramble: bool = True) 
     rather than model cost and the better equidistribution is free.
 
     Args:
-        n: Number of points. Rounded up to the next power of two internally by
-            the Sobol' engine's balance properties; passed through as-is.
+        n: Number of points. Pass a power of two: the Sobol' engine loses its
+            balance guarantees (and scipy warns) otherwise. jaxgsa callers
+            round their sample sizes up before calling; the value is used
+            as-is here.
         dim: Dimension of each point.
         seed: Seed for the scrambling.
         scramble: Whether to scramble the sequence. Unscrambled Sobol' starts

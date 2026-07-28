@@ -78,6 +78,7 @@ These methods analyze arbitrary aligned `(X, Y)` pairs:
 | `jaxgsa.pawn` | `analyze` | `PAWNResult` |
 | `jaxgsa.borgonovo` | `analyze` | `DeltaResult` |
 | `jaxgsa.optimal_transport` | `analyze` | `OTResult` |
+| `jaxgsa.vkoga` | `analyze` | `VKOGAResult` |
 
 Draw plain Monte Carlo inputs with
 `jaxgsa.sampling.monte_carlo(problem, n, seed=...)`; it honors
@@ -104,6 +105,24 @@ effects = hdmr_result.shapley(include_correlative=True)
 matrix, and tensor layouts. Correlation-aware Shapley effects are available
 from HDMR because its ANCOVA decomposition separates structural and
 correlative contributions.
+
+`jaxgsa.vkoga` is the third surrogate-carrying namespace, and the one to reach
+for when the inputs are **dependent**. It fits a VKOGA kernel surrogate and then
+estimates the correlated variance-based indices of Li et al. (2010) against it
+under a Gaussian copula:
+
+```python
+vkoga_result = jaxgsa.vkoga.analyze(problem, X, Y, correlation="empirical")
+vkoga_result.S_TC          # total correlated — input prioritisation
+vkoga_result.S_TU          # total uncorrelated — input fixing
+Y_pred = vkoga_result.predict(X_new, batch_size=2048)
+```
+
+`VKOGAResult` carries `S_TC`, `S_TU`, `S_U`, `S_C`, and `S_IU`, plus the
+`correlation` matrix used and the `n_centers` / `gamma` / `ridge` / `rmse` fit
+diagnostics. `VKOGAResult.shapley()` raises `NotImplementedError` — a kernel
+expansion has no term-wise variance decomposition to allocate from. See the
+[VKOGA page](/api/vkoga) for the full index reference.
 
 ## Structured Methods
 

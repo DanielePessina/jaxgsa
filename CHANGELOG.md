@@ -1,5 +1,71 @@
 # Changelog
 
+## Unreleased (0.8.0)
+
+### Added
+
+- **`jaxgsa.vkoga` — variance-based sensitivity analysis for correlated
+  inputs.** The two-stage surrogate-based sensitivity analysis (SSA) of Hilhorst,
+  Quicken, van de Vosse & Huberts (2024, *Int. J. Numer. Meth. Biomed. Engng.*
+  40(2):e3797): fit a VKOGA kernel surrogate to given `(X, Y)` data, then compute
+  the correlated variance-based indices of Li et al. (2010, *J. Phys. Chem. A*
+  114:6022-6032) against it under a Gaussian copula. Splitting the work this way
+  is what makes the method affordable — the indices need nested conditional
+  sampling, hopeless against an expensive model but trivial against a kernel
+  expansion.
+
+  `jaxgsa.vkoga.analyze(problem, X, Y, correlation=...)` returns a
+  `VKOGAResult` with five indices per parameter, shaped by the usual output
+  contract (`(D,)`, `(K, D)`, `(T, K, D)`):
+  - `S_TC`, total **correlated**, `V(E(Y|X_i))/V(Y)` — what `X_i` explains
+    through itself *and* through its correlation with the others. The measure for
+    **input prioritisation**.
+  - `S_TU`, total **uncorrelated**, `E(V(Y|X_-i))/V(Y)` — what only `X_i` can
+    explain. The measure for **input fixing**.
+  - `S_U` (the independent contribution alone), `S_C = S_TC - S_U` (the
+    correlation-borne part, which **can be negative** when a correlation opposes
+    a direct effect), and `S_IU = S_TU - S_U` (independent interactions).
+
+  Under independent inputs the five collapse to the familiar picture: `S_TC` is
+  the first-order Sobol' index `S1`, `S_TU` is the total index `ST`, and `S_C` is
+  zero.
+
+  The dependency structure comes from `correlation=`: `None` for independent
+  inputs, a `(D, D)` matrix to declare one, or `"empirical"` to fit one from `X`
+  by Spearman rank correlation (`rho = 2 sin(pi rho_s / 6)`, projected to the
+  nearest positive-definite matrix). The matrix actually used is returned on
+  `result.correlation`. All conditioning happens in the latent standard-normal
+  space where the Gaussian conditionals are closed-form, and every expectation is
+  a scrambled-Sobol' quasi-Monte-Carlo average against the surrogate.
+
+  Stage one is a pure-JAX VKOGA (Wirtz & Haasdonk 2013): Gaussian RBF, centres
+  chosen by the P-greedy rule in a nested Newton basis, coefficients from
+  RKHS-regularised normal equations, with `gamma` and `ridge` selected by k-fold
+  cross validation over a 10x10 grid. Centre selection depends only on `X`, so
+  all output slices share one basis and one set of centres — the "vectorial" part
+  — and a multi-output fit costs barely more than a scalar one. The result keeps
+  the surrogate: `result.predict(X_new, batch_size=None)` evaluates it with the
+  usual bounded-memory batching, and `result.to_dataset()` exports the indices,
+  the fit diagnostics (`n_centers`, `gamma`, `ridge`, `rmse`), the copula matrix,
+  and the output `variance` under the correlated measure.
+
+  Two things to get right, both documented prominently:
+  - **Train on an independent, space-filling design even when the analysis is
+    correlated.** The correlated measure concentrates on a ridge, but `S_TU`
+    conditions on `X_-i` and then resamples `X_i` across its whole marginal — a
+    surrogate trained only on correlated data extrapolates for exactly those
+    draws.
+  - **Enable float64.** The coefficient step forms `A^T A`, squaring the
+    condition number of the cross kernel, which float32 cannot carry for small
+    `gamma`. Call `jax.config.update("jax_enable_x64", True)` before fitting;
+    `analyze` warns when x64 is off.
+
+  `VKOGAResult.shapley()` raises `NotImplementedError` by design. Shapley effects
+  need a variance decomposition indexed by parameter subsets; a kernel expansion
+  is a sum over *centres*, every one of which involves every parameter, so there
+  is no membership matrix to allocate from. Use `jaxgsa.hdmr` (which also offers
+  `shapley(include_correlative=True)`) or `jaxgsa.pce`.
+
 ## Unreleased (0.7.0)
 
 ### Added

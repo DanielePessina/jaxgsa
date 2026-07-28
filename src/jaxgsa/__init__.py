@@ -14,6 +14,7 @@ from . import (
     sampling,
     shapley,
     sobol,
+    vkoga,
 )
 from .problem import CategoricalInputSpec, GaussianInputSpec, Problem, UniformInputSpec
 
@@ -35,4 +36,5 @@ __all__ = [
     "sampling",
     "shapley",
     "sobol",
+    "vkoga",
 ]
