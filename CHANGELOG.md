@@ -71,6 +71,41 @@
   is no membership matrix to allocate from. Use `jaxgsa.hdmr` (which also offers
   `shapley(include_correlative=True)`) or `jaxgsa.pce`.
 
+- **`jaxgsa.kucherenko` — design-based Sobol' indices for dependent inputs.**
+  The single-loop estimators of Kucherenko, Tarantola & Annoni (2012, *Comput.
+  Phys. Commun.* 183:937-946). `kucherenko.sample(problem, n)` builds a
+  conditional-copula design of `n * (2D + 1)` rows: one joint block, one
+  conditional block per parameter for `S1`, one per parameter for `ST`. You
+  evaluate your **actual model** on the rows — no surrogate is fitted. This is
+  the design-based counterpart to `jaxgsa.vkoga`: the same two quantities,
+  `S1 = V(E(Y|X_i))/V(Y)` (correlation-inclusive, VKOGA's `S_TC`) and
+  `ST = E(V(Y|X_~i))/V(Y)` (correlation-exclusive, VKOGA's `S_TU`).
+
+  The sampler reads `problem.correlation`. Both conditionals are closed-form
+  Gaussians in the latent copula space. It is deliberately exempt from the
+  0.6.0 correlated-design error: conditioning on the declared copula is the
+  method's purpose. With no declared correlation the design reduces exactly to
+  the Saltelli column-swap scheme and the indices to the classic Sobol' `S1`
+  and `ST`. Categorical problems raise (the conditional copula needs
+  continuous marginals). `KucherenkoSamples` uses the standard one-file NPZ
+  `save`/`load`; `KucherenkoResult` has `to_dataset` and follows the usual
+  output contract.
+
+  Validation: the linear-Gaussian closed form (max error `7.5e-4` at
+  `base_n = 4096`), independent Ishigami against the analytic values and
+  `jaxgsa.sobol`, and a dedicated cross-route module
+  (`tests/test_correlated_agreement.py`) that pins analytic, `vkoga`, and
+  `kucherenko` to the same reference — and the two routes to each other.
+
+- **Optimal transport is certified valid under correlated inputs.** It was
+  already exempt from the correlated-input error; two dedicated tests now
+  certify the reading. With `corr(X1, X2) = 0.8` and `Y = X1` only, the unused
+  input `X2` gets a clearly non-zero index (0.40 vs 0.94) — the documented
+  correlation-inclusive interpretation. And the indices on a correlated
+  problem are **bit-equal** to the indices on the same `(X, Y)` with the
+  correlation stripped: the estimator never reads the matrix, which proves
+  distribution-freeness in `X`. `methods.md` states the guarantee explicitly.
+
 ### Internal
 
 - Added `jaxgsa._core.legendre`: one orthonormal Legendre recurrence, shared by

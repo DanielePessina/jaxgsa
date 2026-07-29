@@ -44,6 +44,7 @@ export default defineConfig({
         { text: 'Borgonovo Delta', link: '/examples/borgonovo' },
         { text: 'Optimal Transport', link: '/examples/optimal-transport' },
         { text: 'VKOGA (Correlated Inputs)', link: '/examples/vkoga' },
+        { text: 'Kucherenko (Dependent-Input Sobol)', link: '/examples/kucherenko' },
         { text: 'Batch Reactor (notebook)', link: '/examples/batch_reactor' },
       ],
       '/api/': [

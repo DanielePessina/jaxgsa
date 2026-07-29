@@ -170,6 +170,13 @@ print(hdmr.Sb)  # correlative variance fraction — the correlation diagnostic
 allocates the full ANCOVA decomposition (an ANCOVA-based attribution, not
 conditional-variance Shapley effects).
 
+For **variance fractions** under dependence, two dedicated methods read the
+declared correlation directly. [VKOGA](/examples/vkoga) fits a kernel
+surrogate to given `(X, Y)` data and splits each input's effect into
+correlated and uncorrelated parts. [Kucherenko](/examples/kucherenko)
+generates a conditional-copula design for your actual model and returns
+`S1`/`ST` with their exact conditional-variance meaning — no surrogate.
+
 ## Methods that refuse correlated problems
 
 Methods whose indices are only defined for independent inputs raise a
@@ -210,4 +217,6 @@ matrix explicitly with `problem.with_correlation(None)`.
 - [RS-HDMR](/examples/hdmr) for the ANCOVA decomposition in depth.
 - [Optimal Transport](/examples/optimal-transport) and
   [Borgonovo Delta](/examples/borgonovo) for the distribution-based indices.
+- [VKOGA](/examples/vkoga) and [Kucherenko](/examples/kucherenko) for
+  variance fractions under dependence.
 - [Methods guide](/guide/methods) for which method to pick under correlation.

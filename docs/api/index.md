@@ -86,8 +86,10 @@ Draw plain Monte Carlo inputs with
 provides `correlate(X, problem)` (impose the declared correlation on an
 existing sample by rank re-pairing), `fit_correlation(problem, X)` (estimate
 the latent matrix from data), and `correlation_from_covariance(cov)`. Under a
-declared correlation, `optimal_transport`, `borgonovo`, `hdmr`, `hsic`, and
-`pawn` accept the data; `pce`, `dgsm`, and `shapley` (PCE backend) raise.
+declared correlation, `optimal_transport`, `borgonovo`, `hdmr`, `hsic`,
+`pawn`, and `vkoga` accept the data; `pce`, `dgsm`, and `shapley`
+(PCE backend) raise. The design-based `kucherenko` conditions on the declared
+correlation by construction.
 
 PCE and HDMR results retain their fitted surrogate:
 
@@ -130,6 +132,7 @@ expansion has no term-wise variance decomposition to allocate from. See the
 | --- | --- | --- |
 | `jaxgsa.efast` | `sample` then `analyze` | `EFASTResult` |
 | `jaxgsa.morris` | `sample` then `analyze` | `MorrisResult` |
+| `jaxgsa.kucherenko` | `sample` then `analyze` | `KucherenkoResult` |
 
 Morris sampling returns `jaxgsa.morris.MorrisSamples`, which supports the same
 single-NPZ `save(path)` / `load(path)` persistence as `SobolSamples`.
@@ -155,6 +158,27 @@ samples = jaxgsa.efast.sample(problem, n_per_curve=4096, seed=42)
 Y = model(samples.samples)
 result = jaxgsa.efast.analyze(samples, Y)
 ```
+
+## Kucherenko
+
+`jaxgsa.kucherenko` estimates Sobol' indices for **dependent** inputs by
+evaluating the actual model on a conditional-copula design (no surrogate).
+It reads `problem.correlation` and is exempt from the correlated-design
+error; with no declared correlation it reduces to the classic Saltelli
+column-swap scheme and the classic `S1` / `ST`:
+
+```python
+ks = jaxgsa.kucherenko.sample(problem, 4096, seed=0)
+Y = model(ks.samples)
+result = jaxgsa.kucherenko.analyze(ks, Y)
+result.S1   # correlation-inclusive first-order (VKOGA's S_TC)
+result.ST   # correlation-exclusive total (VKOGA's S_TU)
+```
+
+Public objects: `jaxgsa.kucherenko.sample`, `jaxgsa.kucherenko.analyze`,
+`jaxgsa.kucherenko.KucherenkoSamples` (with the standard NPZ
+`save` / `load`), and `jaxgsa.kucherenko.KucherenkoResult`. Categorical
+problems raise. See the [Kucherenko page](/api/kucherenko) for details.
 
 ## Shapley Effects
 

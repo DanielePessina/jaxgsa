@@ -4,7 +4,7 @@ layout: home
 hero:
   name: jaxgsa
   text: Global Sensitivity Analysis in JAX
-  tagline: GPU-accelerated Sobol indices, RS-HDMR, PCE, Shapley effects, eFAST, DGSM, Morris screening, HSIC, PAWN, Borgonovo delta, optimal transport, and VKOGA with JIT compilation, vectorized bootstrap, and multi-output support.
+  tagline: GPU-accelerated Sobol indices, RS-HDMR, PCE, Shapley effects, eFAST, DGSM, Morris screening, HSIC, PAWN, Borgonovo delta, optimal transport, VKOGA, and Kucherenko indices with JIT compilation, vectorized bootstrap, and multi-output support.
   actions:
     - theme: brand
       text: Get Started
@@ -35,10 +35,12 @@ features:
     details: Measures the shift of the entire output density when an input is fixed — moment-independent like PAWN, but density-based. The given-data estimator works on any (X, Y) pairs and includes bootstrap confidence intervals.
   - title: VKOGA
     details: Variance-based indices that stay meaningful under correlated inputs. Fits a greedy kernel surrogate to any (X, Y) pairs and splits each input's effect into a correlated and an uncorrelated part under a Gaussian copula.
+  - title: Kucherenko Indices
+    details: Sobol indices for dependent inputs, estimated by evaluating your actual model on a conditional-copula design — no surrogate. Reads problem.correlation; with independent inputs it reduces to the classic Saltelli scheme.
   - title: Save & Reload Samples
     details: Persist a sample set with SobolSamples.save(), evaluate your model elsewhere, and reload with SobolSamples.load() — the analysis metadata travels with the samples.
   - title: Multi-Output & Time-Series
-    details: Pass scalar, (N, K), or (N, T, K) outputs to any of the twelve methods and get indices for every output and timestep in a single vectorized pass. Set output_names and jaxgsa disambiguates 2-D layouts, fixing obvious transposes with a warning.
+    details: Pass scalar, (N, K), or (N, T, K) outputs to any of the thirteen methods and get indices for every output and timestep in a single vectorized pass. Set output_names and jaxgsa disambiguates 2-D layouts, fixing obvious transposes with a warning.
   - title: Up to 668× Faster than SALib
     details: Fused JIT kernels and vectorized execution replace Python loops. Sobol up to 15.8× faster, HDMR up to 668× on multi-output workloads.
 ---
