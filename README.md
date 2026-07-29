@@ -547,8 +547,12 @@ Quick map:
 - `jaxgsa.kucherenko`: `sample` / `analyze` / `KucherenkoSamples` / `KucherenkoResult`
 
 Commands are intentionally not duplicated at the package root. Use the method
-namespaces shown above. PCE, HDMR, and VKOGA predictions and Shapley effects
-are result methods: `result.predict(...)` and `result.shapley(...)`.
+namespaces shown above. PCE, HDMR, and VKOGA predictions are result methods:
+`result.predict(...)`. Shapley effects are result methods on PCE and HDMR:
+`result.shapley(...)`. VKOGA offers `predict` but not `shapley` — a kernel
+expansion has no per-parameter-subset variance decomposition. For Shapley
+effects under dependent inputs, use `jaxgsa.hdmr` with
+`shapley(include_correlative=True)`.
 
 For runnable walkthroughs, start with the
 [Getting Started guide](https://danielepessina.github.io/jaxgsa/guide/getting-started)

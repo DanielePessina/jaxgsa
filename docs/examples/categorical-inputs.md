@@ -176,17 +176,23 @@ except ValueError as e:
     print(e)
 # jaxgsa.morris.sample requires continuous (orderable) inputs, but
 # parameters ['catalyst'] are categorical. Use jaxgsa.sobol.sample
-# (the Saltelli column-swap scheme is distribution-agnostic), or
-# analyze given data with jaxgsa.optimal_transport, jaxgsa.borgonovo, or
-# jaxgsa.pawn.
+# (the Saltelli column-swap scheme is distribution-agnostic; it requires
+# a problem with no declared correlation), or analyze given data with
+# jaxgsa.optimal_transport or jaxgsa.borgonovo.
 ```
 
 The same applies to `efast.sample`, `dgsm.analyze`, `pce.analyze`,
-`hdmr.analyze`, `hsic.analyze`, and `shapley.analyze`.
+`hdmr.analyze`, `hsic.analyze`, `pawn.analyze`, `shapley.analyze`,
+`vkoga.analyze`, and `kucherenko.sample`.
 
 Correlation is also rejected for categorical parameters: a
 `problem.correlation` entry touching one raises `ValueError` (polychoric
-coupling is future work). Identity rows and columns are fine.
+coupling is future work). Identity rows and columns are fine. Note the
+combined case: for a categorical problem whose continuous parameters are
+correlated, no variance-based route exists yet — `sobol.sample` refuses
+the correlation, and the design/analyzer errors say so instead of
+pointing you in a circle. Optimal transport and Borgonovo delta are the
+supported analyses there.
 
 ## Map codes back to labels
 

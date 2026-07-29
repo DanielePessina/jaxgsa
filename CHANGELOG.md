@@ -46,7 +46,11 @@
   Stage one is a pure-JAX VKOGA (Wirtz & Haasdonk 2013): Gaussian RBF, centres
   chosen by the P-greedy rule in a nested Newton basis, coefficients from
   RKHS-regularised normal equations, with `gamma` and `ridge` selected by k-fold
-  cross validation over a 10x10 grid. Centre selection depends only on `X`, so
+  cross validation over a 10x10 grid. Held-out rows are masked out of the greedy
+  stopping rule, so cross-validation fits stop exactly like the final fit and
+  score the hyperparameters under the same stopping behaviour. Explicit `gamma`
+  and `ridge` values must be finite and positive; anything else raises before
+  any fitting. Centre selection depends only on `X`, so
   all output slices share one basis and one set of centres — the "vectorial" part
   — and a multi-output fit costs barely more than a scalar one. The result keeps
   the surrogate: `result.predict(X_new, batch_size=None)` evaluates it with the
@@ -91,6 +95,14 @@
   `save`/`load`; `KucherenkoResult` has `to_dataset` and follows the usual
   output contract.
 
+  Two numerical safeguards are built in. The `S1` estimator subtracts one
+  shared shift (the joint-block mean) from both product factors — the
+  estimator is algebraically unchanged, but a large output mean no longer
+  destroys the covariance term in rounding (a `+1e8` offset moves `S1` by
+  less than `3e-11`; the uncentered form drifted by up to `0.11`). And with
+  `scramble=False` the Sobol' sequence skips its all-zeros origin point,
+  which the probit would map to a clipped extreme deviate.
+
   Validation: the linear-Gaussian closed form (max error `7.5e-4` at
   `base_n = 4096`), independent Ishigami against the analytic values and
   `jaxgsa.sobol`, and a dedicated cross-route module
@@ -109,7 +121,17 @@
 ### Internal
 
 - Added `jaxgsa._core.legendre`: one orthonormal Legendre recurrence, shared by
-  the PCE basis and the VKOGA component-function fit.
+  the PCE basis and the VKOGA component-function fit. The recurrence runs in
+  the backend default float dtype (float64 under x64), the same promotion the
+  Hermite basis applies, so a float32 `X` does not downgrade the PCE design
+  matrix and mixed uniform/Gaussian problems get one basis dtype.
+- The categorical-design error is situation-aware: when the categorical
+  problem also declares a correlation, it no longer recommends
+  `jaxgsa.sobol.sample` (which refuses correlated problems). It states that no
+  variance-based route exists and names the given-data methods.
+- The Gaussian conditional-draw algebra lives in `jaxgsa._core.copula`, next
+  to the conditional plan; the VKOGA estimators and the Kucherenko design
+  share it.
 
 ## Unreleased (0.7.0)
 
