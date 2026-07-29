@@ -62,6 +62,21 @@ in favor of the declared marginals:
 R = jaxgsa.sampling.correlation_from_covariance(cov)
 ```
 
+## Which matrix do I pass?
+
+Match your starting point to the right entry path:
+
+| You have | Do this |
+|---|---|
+| A rank (Spearman) correlation you want the samples to have | Pass that matrix with `correlation_kind="spearman"`. The conversion to the latent scale is exact. |
+| A published covariance for **Gaussian** variables | `correlation_from_covariance(cov)`, default kind. Latent equals Pearson here, so this is exact. |
+| Observed data | `fit_correlation(problem, X_observed)`, then `with_correlation`. The fit uses ranks and converts internally. |
+| A rough Pearson target with non-Gaussian marginals | Prefer `correlation_kind="spearman"` with the same number. Only the Spearman route carries an exact guarantee. The two scales differ little (Spearman 0.6 maps to latent 0.618). |
+
+The short version: the latent matrix is what the copula machinery uses; the
+Spearman matrix is what your samples measurably have. When in doubt, declare
+Spearman.
+
 ## Draw correlated samples
 
 `jaxgsa.sampling.monte_carlo` honors the declared correlation transparently
