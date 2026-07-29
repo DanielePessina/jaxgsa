@@ -42,6 +42,7 @@ References:
 from __future__ import annotations
 
 import math
+import warnings
 from functools import lru_cache
 from typing import Literal
 
@@ -64,6 +65,21 @@ from jaxgsa.problem import Problem, _categorical_dims
 
 _SQRT_2PI = math.sqrt(2.0 * math.pi)
 _MAX_CLASSES = 48
+# A class whose KDE bandwidth falls below this fraction of the full-sample
+# bandwidth is numerically degenerate: its variance is zero (a point mass,
+# e.g. one categorical level mapping to one output value) or pure float
+# noise. Genuine conditional spreads sit orders of magnitude above this.
+_DEGENERATE_BW_TOL = 1e-6
+# Bandwidth given to a degenerate class, as a fraction of the full-sample
+# Silverman bandwidth. The class must stay visibly narrower than the
+# unconditional smoothing (so it still reads as a concentrated class), but
+# wide enough for the shared output grid to integrate it: a Gaussian
+# sampled at a spacing of at most its own sigma has negligible trapezoid
+# error, hence the grid-step lower bound. Measured on a noise-free
+# three-atom repro (true delta 2/3), 0.1 recovers delta within ~0.07
+# across N in [1e3, 1e4]; fractions >= 0.2 over-smooth toward 0.56 and
+# fractions <= 0.02 alias on the grid (delta > 1).
+_DEGENERATE_BW_FRACTION = 0.1
 # Target element budget for the default per-chunk working set. The dominant
 # intermediate is the conditional-KDE tensor whose size scales as
 # ``chunk_columns * D * N * grid_size`` (class count M times padding P is ~N),
@@ -105,9 +121,11 @@ def _get_delta_kernel(grid_size: int, bw_factor: float | None):
     Returns:
         A jitted callable ``(Y_cols (N, C), all_idx (R, N),
         all_cls_idx (R, D, M, P), mask, counts) ->
-        (d (R, C, D), s1 (R, C, D), degenerate (R, C))`` giving plug-in
-        estimates for every replicate and a per-replicate/per-column flag
-        marking constant resamples. ``mask``/``counts`` accept the shared
+        (d (R, C, D), s1 (R, C, D), degenerate (R, C), floored (R, C))``
+        giving plug-in estimates for every replicate, a
+        per-replicate/per-column flag marking constant resamples, and a
+        flag marking columns where a degenerate class engaged the
+        bandwidth floor. ``mask``/``counts`` accept the shared
         layout ``(M, P)``/``(M,)`` (equal-frequency rank classes of
         continuous inputs) or the per-replicate layout
         ``(R, D, M, P)``/``(R, D, M)`` (one class per categorical level,
@@ -120,11 +138,9 @@ def _get_delta_kernel(grid_size: int, bw_factor: float | None):
         factor = (0.75 * counts) ** (-0.2) if bw_factor is None else bw_factor
         return factor * std
 
-    def _kde_full(y: Array, grid: Array) -> Array:
+    def _kde_full(y: Array, grid: Array, h: Array) -> Array:
         """Gaussian KDE of a full column ``y (N,)`` on ``grid (G,)``."""
         n = y.shape[0]
-        std = jnp.std(y, ddof=1)
-        h = _bandwidths(jnp.asarray(float(n), dtype=y.dtype), std)
         safe_h = jnp.where(h > 0, h, 1.0)
         u = (grid[:, None] - y[None, :]) / safe_h
         f = jnp.exp(-0.5 * u * u).sum(axis=1) / (n * safe_h * _SQRT_2PI)
@@ -152,7 +168,7 @@ def _get_delta_kernel(grid_size: int, bw_factor: float | None):
         grids = y_min[:, None] + steps[None, :] * (y_max - y_min)[:, None]  # (C, G)
 
         def _col_stats(y: Array, grid: Array, r: Array, cls_idx: Array, mask_b, counts_b):
-            """Delta, S1, and a degeneracy flag for one column/replicate.
+            """Delta, S1, degeneracy and bandwidth-floor flags for one column/replicate.
 
             ``mask_b (G, M, P)`` and ``counts_b (G, M)`` (both float)
             broadcast against the input axis D (``G`` is 1 or D). A
@@ -162,7 +178,8 @@ def _get_delta_kernel(grid_size: int, bw_factor: float | None):
             """
             safe_counts = jnp.maximum(counts_b, 1.0)
             y_r = y[r]  # resampled column
-            fy = _kde_full(y_r, grid)
+            h_full = _bandwidths(jnp.asarray(float(N), dtype=dtype), jnp.std(y_r, ddof=1))
+            fy = _kde_full(y_r, grid, h_full)
             degenerate = y_r.max() == y_r.min()
 
             y_cls = y[cls_idx]  # (D, M, P) resampled class members
@@ -170,6 +187,16 @@ def _get_delta_kernel(grid_size: int, bw_factor: float | None):
             dev = (y_cls - mean[..., None]) * mask_b
             var = (dev**2).sum(axis=-1) / jnp.maximum(counts_b - 1.0, 1.0)
             h = _bandwidths(safe_counts, jnp.sqrt(var))  # (D, M)
+            # A degenerate (zero-variance) class would get bandwidth 0 and a
+            # zeroed density, which biases delta far low. Floor it so it
+            # becomes a narrow kernel at its value instead; see the
+            # _DEGENERATE_BW_FRACTION comment for the width rationale. The
+            # predicate keeps non-degenerate classes bit-identical and stays
+            # False for a constant column (h_full == 0), which must keep its
+            # delta = 0 contract.
+            floor = jnp.maximum(_DEGENERATE_BW_FRACTION * h_full, grid[1] - grid[0])
+            floored_cls = (counts_b > 0) & (h < _DEGENERATE_BW_TOL * h_full)
+            h = jnp.where(floored_cls, floor, h)
             safe_h = jnp.where(h > 0, h, 1.0)
 
             u = (grid[None, None, :, None] - y_cls[:, :, None, :]) / safe_h[..., None, None]
@@ -185,7 +212,7 @@ def _get_delta_kernel(grid_size: int, bw_factor: float | None):
             safe_var = jnp.where(y_var > 0, y_var, 1.0)
             Vi = (counts_b / N * (mean - y_mean) ** 2).sum(axis=-1)
             s1 = jnp.where(y_var > 0, Vi / safe_var, 0.0)
-            return delta, s1, degenerate
+            return delta, s1, degenerate, floored_cls.any()
 
         if per_replicate:
 
@@ -193,10 +220,10 @@ def _get_delta_kernel(grid_size: int, bw_factor: float | None):
                 r, cls_idx, mask_r, counts_r = xs
                 mask_rf = mask_r.astype(dtype)
                 counts_rf = counts_r.astype(dtype)
-                d, s1, degen = jax.vmap(
+                d, s1, degen, floored = jax.vmap(
                     lambda y, grid: _col_stats(y, grid, r, cls_idx, mask_rf, counts_rf)
                 )(Y_cols.T, grids)
-                return carry, (d, s1, degen)
+                return carry, (d, s1, degen, floored)
 
             scan_xs: tuple[Array, ...] = (all_idx, all_cls_idx, mask, counts)
         else:
@@ -206,15 +233,15 @@ def _get_delta_kernel(grid_size: int, bw_factor: float | None):
 
             def _one_replicate(carry, xs):
                 r, cls_idx = xs
-                d, s1, degen = jax.vmap(
+                d, s1, degen, floored = jax.vmap(
                     lambda y, grid: _col_stats(y, grid, r, cls_idx, mask_s, counts_s)
                 )(Y_cols.T, grids)
-                return carry, (d, s1, degen)
+                return carry, (d, s1, degen, floored)
 
             scan_xs = (all_idx, all_cls_idx)
 
-        _, (d_all, s1_all, degen_all) = jax.lax.scan(_one_replicate, None, scan_xs)
-        return d_all, s1_all, degen_all
+        _, (d_all, s1_all, degen_all, floored_all) = jax.lax.scan(_one_replicate, None, scan_xs)
+        return d_all, s1_all, degen_all, floored_all
 
     return jax.jit(_impl)
 
@@ -255,8 +282,9 @@ def analyze(
             heuristic (SALib-identical, at most 48 classes). Categorical
             inputs ignore it and always use one class per level (class
             sizes are the observed level counts); declared levels with no
-            observed samples are dropped with a warning. With only
-            categorical inputs the argument is inert and unvalidated.
+            observed samples are dropped with a warning. A passed value
+            is always validated against ``[2, N]``; with only categorical
+            inputs a ``UserWarning`` says it is ignored.
         grid_size: Number of points of the output grid the densities are
             compared on (spanning ``[Y.min(), Y.max()]`` per column).
         bandwidth: KDE bandwidth rule: ``"silverman"`` for the per-class
@@ -284,13 +312,16 @@ def analyze(
         bias-corrected estimate (and its confidence bounds) can fall
         marginally below 0 for weak/near-noninfluential inputs at small
         sample sizes. A constant output column yields ``delta = S1 = 0``
-        (SALib raises an error in this case).
+        (SALib raises an error in this case). A conditioning class with
+        zero output variance (a point mass) gets a floored KDE bandwidth
+        instead of a zeroed density, with one ``UserWarning``; classes
+        with genuine spread are unaffected.
 
     Raises:
         ValueError: If X is not 2-D, its column count does not match the
             problem, Y is not 1-D/2-D/3-D, X and Y have differing row
-            counts, ``n_classes`` is not in ``[2, N]`` (checked only when
-            a continuous input uses it), a categorical column of X holds
+            counts, a passed ``n_classes`` is not in ``[2, N]``, a
+            categorical column of X holds
             values other than its integer level codes, ``grid_size < 2``,
             ``bandwidth`` is neither ``"silverman"`` nor a positive float,
             ``n_bootstrap < 0``, ``conf_level`` is not in ``(0, 1)``, or
@@ -309,9 +340,17 @@ def analyze(
     if n_classes is None:
         M = _plischke_n_classes(N)
     else:
-        if cont_dims and not 2 <= n_classes <= N:
-            raise ValueError(f"n_classes must be in [2, N={N}], got {n_classes}")
         M = int(n_classes)
+        # A passed value is always validated, even when nothing uses it;
+        # silently accepting nonsense hides bugs in the caller.
+        if not 2 <= M <= N:
+            raise ValueError(f"n_classes must be in [2, N={N}], got {n_classes}")
+        if not cont_dims:
+            warnings.warn(
+                "jaxgsa: n_classes is ignored because every parameter is "
+                "categorical (one conditioning class per level)",
+                stacklevel=2,
+            )
     if grid_size < 2:
         raise ValueError(f"grid_size must be >= 2, got {grid_size}")
     bw_factor = _resolve_bandwidth(bandwidth)
@@ -385,7 +424,7 @@ def analyze(
 
     total = T * K
     cs = min(slice_chunk_size, total)
-    d_parts, s1_parts, degen_parts = [], [], []
+    d_parts, s1_parts, degen_parts, floored_parts = [], [], [], []
     for start in range(0, total, cs):
         chunk = Y_cols[:, start : start + cs]
         outs = [kernel(chunk, all_idx, cls_idx, msk, cnt) for cls_idx, msk, cnt in groups]
@@ -397,6 +436,17 @@ def analyze(
         d_parts.append(d)
         s1_parts.append(s1)
         degen_parts.append(outs[0][2])
+        floored_parts.append(jnp.stack([o[3] for o in outs]).any())
+
+    if bool(jnp.stack(floored_parts).any()):
+        warnings.warn(
+            "jaxgsa: at least one conditioning class has zero sample "
+            "variance (a point mass, e.g. a categorical level that maps to "
+            "one output value). Its KDE bandwidth was floored to a narrow "
+            "kernel; without the floor its density would drop out and bias "
+            "delta low",
+            stacklevel=2,
+        )
 
     d_all = jnp.concatenate(d_parts, axis=1).reshape(R, T, K, D)
     s1_all = jnp.concatenate(s1_parts, axis=1).reshape(R, T, K, D)

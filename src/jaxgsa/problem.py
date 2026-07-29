@@ -83,6 +83,13 @@ _NormalizedInputSpec: TypeAlias = tuple[
 # Renormalize probs whose sum is off by at most this much; raise beyond it.
 _PROB_SUM_TOL = 1e-3
 
+# A correlation entry that touches a categorical parameter counts as a real
+# coupling only above this magnitude. The tolerance absorbs float noise (a
+# declared coupling below 1e-8 is physically meaningless), while the
+# positive-definiteness repair itself is checked pre-repair and its output
+# re-zeroed, so repair noise never reaches this comparison.
+_CATEGORICAL_COUPLING_TOL = 1e-8
+
 
 def _make_uniform_spec(low: float, high: float) -> _NormalizedInputSpec:
     """Validate and normalize a uniform input specification."""
@@ -236,7 +243,8 @@ def _derive_bounds(
 
 def _canonical_correlation(
     correlation: "npt.ArrayLike | None",
-    n_params: int,
+    names: tuple[str, ...],
+    input_specs: tuple[_NormalizedInputSpec, ...],
     kind: Literal["latent", "spearman"] = "latent",
     *,
     policy: "RepairPolicy",
@@ -248,13 +256,32 @@ def _canonical_correlation(
     repair), and stored as a nested tuple of floats so ``Problem`` stays
     frozen and hashable. ``policy`` grades how loudly the repair reports
     itself; every ``Problem`` surface declares ``"declared"``.
+
+    Categorical parameters get special handling around the repair. The
+    categorical-coupling check runs on the *declared* matrix, before the
+    repair: the repair's eigendecomposition fills decoupled categorical rows
+    with float-level noise, and the check must not mistake that noise for a
+    declared coupling. After the repair the categorical rows and columns are
+    reset to exact identity, so the stored matrix carries exact zeros. The
+    reset keeps the matrix positive definite: the result is block-diagonal,
+    with an identity block and a principal submatrix of the repaired matrix.
     """
     if correlation is None:
         return None
     # Imported lazily: jaxgsa._core.copula imports this module at load time.
-    from jaxgsa._core.copula import canonicalize_correlation
+    from jaxgsa._core.copula import _force_categorical_identity, canonicalize_correlation
 
-    R = canonicalize_correlation(correlation, n_params, kind=kind, policy=policy)
+    n_params = len(names)
+    R_declared = np.asarray(correlation, dtype=np.float64)
+    if R_declared.shape == (n_params, n_params):
+        # Check the declared matrix; a wrong shape falls through to the
+        # shape error inside canonicalize_correlation. The sign-preserving
+        # Spearman conversion cannot turn a zero coupling into a non-zero
+        # one, so checking before the conversion is equivalent.
+        _check_correlation_touches_categorical(names, input_specs, R_declared)
+    R = canonicalize_correlation(R_declared, n_params, kind=kind, policy=policy)
+    cat_dims = [d for d, _ in _categorical_dims_from_specs(input_specs)]
+    R = _force_categorical_identity(R, cat_dims)
     return tuple(tuple(float(value) for value in row) for row in R)
 
 
@@ -262,12 +289,12 @@ def _normalized_input_to_dict(
     spec: _NormalizedInputSpec,
 ) -> UniformInputSpec | GaussianInputSpec | CategoricalInputSpec:
     """Convert a normalized immutable input spec into a JSON-friendly mapping."""
-    dist, first, second, low, high, categorical = spec
+    dist, first, second, low, high, _ = spec
     if dist == "uniform":
         return UniformInputSpec(dist="uniform", low=first, high=second)
-    if dist == "categorical":
-        assert categorical is not None  # categorical specs always carry (probs, labels)
-        probs, labels = categorical
+    payload = _categorical_payload(spec)
+    if payload is not None:
+        probs, labels = payload
         label_list: list[str | int | float] = list(labels)
         return CategoricalInputSpec(dist="categorical", probs=list(probs), labels=label_list)
 
@@ -287,17 +314,22 @@ def _normalized_input_to_dict(
 def _check_correlation_touches_categorical(
     names: tuple[str, ...],
     input_specs: tuple[_NormalizedInputSpec, ...],
-    correlation: _CorrelationTuple | None,
+    correlation: "npt.ArrayLike | None",
 ) -> None:
     """Reject a correlation matrix that couples a categorical parameter.
 
     The Gaussian copula has no defined coupling for an unordered marginal
     (that needs a polychoric model, which is future work). Identity rows and
     columns are fine: they declare the categorical parameter independent.
+    Entries within ``_CATEGORICAL_COUPLING_TOL`` of zero count as zero.
+
+    Only the rows are checked. A stored matrix is symmetric, so its rows
+    cover the columns; a declared matrix whose coupling sits in the column
+    only is asymmetric and fails the symmetry validation instead.
 
     Raises:
-        ValueError: If any non-zero off-diagonal entry of ``correlation``
-            touches a categorical parameter.
+        ValueError: If any off-diagonal row entry of ``correlation`` above
+            the tolerance touches a categorical parameter.
     """
     if correlation is None:
         return
@@ -305,8 +337,8 @@ def _check_correlation_touches_categorical(
     for d, spec in enumerate(input_specs):
         if spec[0] != "categorical":
             continue
-        off_diag = np.concatenate([np.delete(R[d], d), np.delete(R[:, d], d)])
-        if np.any(off_diag != 0.0):
+        off_diag = np.delete(R[d], d)
+        if np.any(np.abs(off_diag) > _CATEGORICAL_COUPLING_TOL):
             raise ValueError(
                 f"problem.correlation couples categorical parameter {names[d]!r}, "
                 "but the Gaussian copula does not define a coupling for an "
@@ -316,13 +348,35 @@ def _check_correlation_touches_categorical(
             )
 
 
+def _categorical_payload(spec: _NormalizedInputSpec) -> _CategoricalData | None:
+    """Return the ``(probs, labels)`` payload of a categorical spec.
+
+    Single accessor for the spec's payload slot, so callers never index or
+    ``None``-guard ``spec[5]`` themselves. Returns ``None`` for the other
+    distributions.
+    """
+    if spec[0] != "categorical":
+        return None
+    payload = spec[5]
+    assert payload is not None  # _make_categorical_spec always stores the payload
+    return payload
+
+
+def _categorical_dims_from_specs(
+    input_specs: tuple[_NormalizedInputSpec, ...],
+) -> tuple[tuple[int, int], ...]:
+    """Return ``(dimension index, level count)`` per categorical spec."""
+    dims: list[tuple[int, int]] = []
+    for d, spec in enumerate(input_specs):
+        payload = _categorical_payload(spec)
+        if payload is not None:
+            dims.append((d, len(payload[0])))
+    return tuple(dims)
+
+
 def _categorical_dims(problem: "Problem") -> tuple[tuple[int, int], ...]:
     """Return ``(dimension index, level count)`` per categorical parameter."""
-    return tuple(
-        (d, len(spec[5][0]))
-        for d, spec in enumerate(problem.input_specs)
-        if spec[0] == "categorical" and spec[5] is not None
-    )
+    return _categorical_dims_from_specs(problem.input_specs)
 
 
 # frozen for hashability and safety; init=False because we define a custom __init__ for validation.
@@ -403,7 +457,7 @@ class Problem:
             output_names=output_names,
             # User-declared matrices deserve the repair warning.
             correlation=_canonical_correlation(
-                correlation, len(normalized_names), correlation_kind, policy="declared"
+                correlation, normalized_names, input_specs, correlation_kind, policy="declared"
             ),
         )
 
@@ -471,7 +525,7 @@ class Problem:
             input_specs=input_specs,
             output_names=output_names,
             correlation=_canonical_correlation(
-                correlation, len(names), correlation_kind, policy="declared"
+                correlation, names, input_specs, correlation_kind, policy="declared"
             ),
         )
 
@@ -508,7 +562,7 @@ class Problem:
             input_specs=self._input_specs,
             output_names=self.output_names,
             correlation=_canonical_correlation(
-                correlation, self.num_vars, kind, policy="declared"
+                correlation, self.names, self._input_specs, kind, policy="declared"
             ),
         )
 
@@ -606,9 +660,9 @@ class Problem:
         is empty when the problem has no categorical parameters.
         """
         return {
-            self.names[d]: spec[5][1]
+            self.names[d]: payload[1]
             for d, spec in enumerate(self._input_specs)
-            if spec[0] == "categorical" and spec[5] is not None
+            if (payload := _categorical_payload(spec)) is not None
         }
 
     @property

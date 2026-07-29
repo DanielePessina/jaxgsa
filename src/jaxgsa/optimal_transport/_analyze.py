@@ -394,7 +394,7 @@ def analyze(
     Y: Array,
     *,
     mode: Literal["univariate", "multivariate", "trajectory"] = "univariate",
-    n_partitions: int = 25,
+    n_partitions: int | None = None,
     standardize: bool = True,
     epsilon: float = 0.01,
     max_iter: int = 1000,
@@ -450,9 +450,11 @@ def analyze(
             *continuous* input. More classes localize the conditioning
             (less discretization bias) but leave fewer samples per class
             (more estimation noise); ~25 is customary for the OT index at
-            N >= 2500. Categorical inputs ignore it and always use one
-            class per level; with only categorical inputs (and no
-            ``dummy``) the argument is inert and unvalidated.
+            N >= 2500. ``None`` (default) selects ``min(25, N // 2)``.
+            Categorical inputs ignore it and always use one class per
+            level. A passed value is always validated against
+            ``[2, N // 2]``; if nothing uses it (only categorical inputs
+            and no ``dummy``), a ``UserWarning`` says it is ignored.
         standardize: Joint modes only: divide each output column by its
             standard deviation before building the transport cost, so no
             single output dominates the joint distance through its units.
@@ -499,9 +501,8 @@ def analyze(
         ValueError: If X is not 2-D, its column count does not match the
             problem, Y is not 1-D/2-D/3-D, X and Y have differing row
             counts, ``mode`` is unknown, ``mode="trajectory"`` is
-            used with a non-3-D Y, ``n_partitions`` is not in
-            ``[2, N // 2]`` (checked only when a continuous input or the
-            dummy baseline uses it), a categorical column of X holds
+            used with a non-3-D Y, a passed ``n_partitions`` is not in
+            ``[2, N // 2]``, a categorical column of X holds
             values other than its integer level codes, ``epsilon <= 0``,
             ``max_iter < 1``,
             ``tol <= 0``, ``n_bootstrap < 0``, ``conf_level`` is not in
@@ -521,8 +522,32 @@ def analyze(
     # categorical columns always get one conditioning class per level.
     cat_dims = [d for d, _ in _categorical_dims(problem)]
     cont_dims = [d for d in range(problem.num_vars) if d not in set(cat_dims)]
-    if (cont_dims or dummy) and not 2 <= n_partitions <= N // 2:
-        raise ValueError(f"n_partitions must be in [2, N//2={N // 2}], got {n_partitions}")
+    if n_partitions is None:
+        # The customary 25 classes, clamped so small samples do not raise
+        # over a default the user never passed.
+        M = min(25, N // 2)
+        if (cont_dims or dummy) and M < 2:
+            raise ValueError(f"building conditioning classes needs N >= 4 samples, got N={N}")
+    else:
+        M = int(n_partitions)
+        if not 2 <= M <= N // 2:
+            # Name the dummy baseline when it is the only consumer, so the
+            # error does not read as a complaint about categorical columns.
+            scope = (
+                " for the dummy baseline (categorical columns use one class per level)"
+                if dummy and not cont_dims
+                else ""
+            )
+            raise ValueError(
+                f"n_partitions must be in [2, N//2={N // 2}]{scope}, got {n_partitions}"
+            )
+        if not cont_dims and not dummy:
+            warnings.warn(
+                "jaxgsa: n_partitions is ignored because every parameter is "
+                "categorical (one conditioning class per level) and no dummy "
+                "baseline was requested",
+                stacklevel=2,
+            )
     if not epsilon > 0:
         raise ValueError(f"epsilon must be > 0, got {epsilon}")
     if max_iter < 1:
@@ -538,7 +563,6 @@ def analyze(
 
     Y_3d, squeeze_time, squeeze_output = _prepare_Y(Y)
     _, T, K = Y_3d.shape
-    M = int(n_partitions)
 
     dtype = jnp.result_type(Y_3d.dtype, jnp.float32)
     if tol is None:

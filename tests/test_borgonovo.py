@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, cast
 
 import jax.numpy as jnp
@@ -480,3 +481,18 @@ class TestDeltaYNdimValidation:
         X, _ = ishigami_data
         with pytest.raises(ValueError, match="Y must be 1-D"):
             analyze(ishigami.PROBLEM, X, jnp.asarray(3.0))
+
+
+class TestDegenerateClassBandwidthFloor:
+    def test_continuous_fixture_never_engages_floor(self, ishigami_data):
+        """Smooth continuous data must not trip the degenerate-class floor.
+
+        The floor predicate only fires for numerically zero class variance,
+        so continuous results stay bit-identical to the un-floored kernel
+        (verified against the 0.6.0 outputs during development).
+        """
+        X, Y = ishigami_data
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            analyze(ishigami.PROBLEM, X, Y, n_bootstrap=8, seed=0)
+        assert not any("bandwidth" in str(w.message) for w in caught)
