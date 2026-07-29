@@ -22,13 +22,11 @@ from __future__ import annotations
 import warnings
 from typing import Literal, NamedTuple
 
-import jax.numpy as jnp
 import numpy as np
 import numpy.typing as npt
 from scipy.stats import norm, qmc, rankdata
 
 from jaxgsa._core.sampling import _transform_samples
-from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa.problem import Problem
 
 # Eigenvalues below this are lifted when repairing a non-PD correlation matrix.
@@ -424,20 +422,3 @@ def latent_to_physical(problem: Problem, Z: np.ndarray) -> np.ndarray:
     # the forward path in _core.sampling.
     unit = np.clip(unit, 1e-12, 1.0 - 1e-12)
     return _transform_samples(problem, unit)
-
-
-def physical_to_latent(problem: Problem, X: np.ndarray) -> np.ndarray:
-    """Map physical samples back to the latent normal space.
-
-    Inverse of :func:`latent_to_physical`, used to place a user-supplied design
-    matrix in the space where the copula conditionals are defined.
-
-    Args:
-        problem: Problem supplying the marginal distributions.
-        X: ``(N, D)`` samples in physical units.
-
-    Returns:
-        ``(N, D)`` latent standard-normal variates.
-    """
-    unit = np.asarray(cdf_to_unit_interval(jnp.asarray(X), problem), dtype=np.float64)
-    return norm.ppf(np.clip(unit, 1e-12, 1.0 - 1e-12))

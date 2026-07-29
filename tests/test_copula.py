@@ -16,7 +16,6 @@ from jaxgsa._core.copula import (
     independent_correlation,
     is_independent,
     latent_to_physical,
-    physical_to_latent,
     validate_correlation,
 )
 from jaxgsa.problem import GaussianInputSpec, Problem
@@ -220,7 +219,7 @@ def test_fit_gaussian_copula_rejects_bad_shapes():
         fit_gaussian_copula(problem, np.zeros((2, 2)))
 
 
-def test_latent_physical_round_trip():
+def test_latent_to_physical_applies_the_marginal_inverse_cdfs():
     problem = Problem.from_dict(
         {
             "u": (-2.0, 3.0),
@@ -230,9 +229,11 @@ def test_latent_physical_round_trip():
     rng = np.random.default_rng(5)
     Z = rng.standard_normal((256, 2))
     X = latent_to_physical(problem, Z)
-    Z_back = physical_to_latent(problem, X)
-    # float32 JAX CDF on the inverse path limits the achievable precision.
-    np.testing.assert_allclose(Z_back, Z, atol=5e-3)
+    # Column-by-column against scipy: X_i = F_i^{-1}(Phi(Z_i)).
+    U = scipy.stats.norm.cdf(Z)
+    np.testing.assert_allclose(X[:, 0], -2.0 + 5.0 * U[:, 0], atol=1e-12)
+    expected_g = scipy.stats.norm.ppf(U[:, 1], loc=1.0, scale=2.0)
+    np.testing.assert_allclose(X[:, 1], expected_g, atol=1e-9)
 
 
 def test_is_independent_and_identity_helper():
