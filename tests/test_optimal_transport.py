@@ -620,3 +620,59 @@ class TestQuantileRankIndices:
             ref = np.minimum(ref, np.maximum(counts[:, None] - 1, 0))
             got = np.asarray(_quantile_rank_indices(jnp.asarray(counts), N))
             np.testing.assert_array_equal(got, ref)
+
+
+class TestOTCorrelatedInputs:
+    """Certify the documented correlation-inclusive reading of the OT index.
+
+    The estimator partitions on the rank classes of each column of X and
+    compares conditional output distributions. It never reads
+    ``problem.correlation``, so its value is a property of the (X, Y) sample
+    alone — which is exactly why it stays valid when the inputs are
+    dependent: the index then measures total (direct plus correlation-borne)
+    influence.
+    """
+
+    RHO = 0.8
+
+    @pytest.fixture(scope="class")
+    def correlated_data(self):
+        """Y = X1 only, with corr(X1, X2) = 0.8 declared and honored."""
+        R = np.array([[1.0, self.RHO], [self.RHO, 1.0]])
+        problem = jaxgsa.Problem.from_dict(
+            {
+                "x1": {"dist": "gaussian", "mean": 0.0, "variance": 1.0},
+                "x2": {"dist": "gaussian", "mean": 0.0, "variance": 1.0},
+            }
+        ).with_correlation(R)
+        X = monte_carlo(problem, 4096, seed=0)
+        Y = jnp.asarray(X)[:, 0]  # x2 never enters the model
+        return problem, X, Y
+
+    def test_unused_but_correlated_input_gets_nonzero_index(self, correlated_data):
+        """The correlation-inclusive reading: x2 matters through x1."""
+        problem, X, Y = correlated_data
+        result = analyze(problem, X, Y)
+        ot = np.asarray(result.ot)
+        # x1 determines Y outright; x2 sees it only through the coupling.
+        assert ot[0] > 0.8
+        assert ot[1] > 0.15  # clearly non-zero, far above estimator noise
+        assert ot[1] < ot[0]
+
+    def test_indices_ignore_the_declared_matrix_bitwise(self, correlated_data):
+        """Stripping the correlation changes nothing: distribution-freeness in X.
+
+        The estimator conditions on rank classes of the observed sample, so
+        the declared matrix must not enter the computation at all. Bit
+        equality proves it never does.
+        """
+        problem, X, Y = correlated_data
+        with_matrix = analyze(problem, X, Y)
+        without_matrix = analyze(problem.with_correlation(None), X, Y)
+        np.testing.assert_array_equal(np.asarray(with_matrix.ot), np.asarray(without_matrix.ot))
+        np.testing.assert_array_equal(
+            np.asarray(with_matrix.advective), np.asarray(without_matrix.advective)
+        )
+        np.testing.assert_array_equal(
+            np.asarray(with_matrix.diffusive), np.asarray(without_matrix.diffusive)
+        )
