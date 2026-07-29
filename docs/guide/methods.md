@@ -781,7 +781,7 @@ The OT index is **valid under correlated inputs**, and jaxgsa certifies it: `opt
 
 ## VKOGA (Correlated-Input Variance Indices)
 
-Every other variance-based method on this page assumes independent inputs, or sidesteps the question by measuring something other than variance. VKOGA does neither: it is the surrogate-based sensitivity analysis (SSA) of Hilhorst, Quicken, van de Vosse & Huberts (2024), which computes the correlated variance-based indices of Li et al. (2010) — five of them, separating what an input explains *by itself* from what it explains *through its correlations*. Pick it when your inputs are genuinely dependent and you still want variance fractions, not a distributional distance.
+Apart from VKOGA and [Kucherenko](#kucherenko-dependent-input-sobol-indices), every variance-based method on this page assumes independent inputs, or sidesteps the question by measuring something other than variance. VKOGA is the given-data route of the pair: it is the surrogate-based sensitivity analysis (SSA) of Hilhorst, Quicken, van de Vosse & Huberts (2024), which computes the correlated variance-based indices of Li et al. (2010) — five of them, separating what an input explains *by itself* from what it explains *through its correlations*. Pick it when your inputs are genuinely dependent and you still want variance fractions, not a distributional distance.
 
 The method is two-stage, and the split is the whole point. The indices need nested conditional sampling, which is hopeless against an expensive model but trivial against a cheap emulator:
 

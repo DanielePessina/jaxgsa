@@ -1,7 +1,9 @@
 # VKOGA (Correlated-Input Sensitivity)
 
-VKOGA is the one variance-based method in jaxgsa that does **not** assume
-independent inputs. It is the two-stage surrogate-based sensitivity analysis of
+VKOGA is the given-data variance-based method in jaxgsa that does **not** assume
+independent inputs (its design-based counterpart is
+[Kucherenko](/examples/kucherenko)). It is the two-stage surrogate-based
+sensitivity analysis of
 Hilhorst et al. (2024): fit a greedy kernel surrogate to whatever `(X, Y)` data
 you have, then estimate the correlated variance-based indices of Li et al. (2010)
 against it under a Gaussian copula. The nested conditional sampling those indices
