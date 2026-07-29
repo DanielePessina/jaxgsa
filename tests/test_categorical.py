@@ -528,7 +528,7 @@ def test_mixed_partition_bootstrap_cis_are_finite_and_ordered():
 # ---------------------------------------------------------------------------
 
 
-def test_sobol_pick_freeze_matches_analytic_reference():
+def test_sobol_saltelli_matches_analytic_reference():
     problem = _mixed_problem()
     sr = sobol.sample(problem, 2**13, seed=0, verbose=False)
     codes = sr.samples[:, 1].astype(int)

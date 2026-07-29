@@ -71,10 +71,10 @@ A declared level with no observed samples is dropped from the class
 average, with a `UserWarning`. `n_partitions` / `n_classes` apply to the
 continuous columns only.
 
-## Analyze with Sobol' (pick-freeze)
+## Analyze with Sobol' (the Saltelli scheme)
 
-The Saltelli design works because pick-freeze only ever copies coordinate
-values between sample rows — it never needs an ordering on them.
+The Saltelli design works because its estimators only ever copy coordinate
+values between sample rows — they never need an ordering on them.
 
 ```python
 sr = jaxgsa.sobol.sample(problem, 2**13, seed=0)
@@ -103,8 +103,8 @@ except ValueError as e:
     print(e)
 # jaxgsa.morris.sample requires continuous (orderable) inputs, but
 # parameters ['catalyst'] are categorical. Use jaxgsa.sobol.sample
-# (pick-freeze is distribution-agnostic), or analyze given data with
-# jaxgsa.optimal_transport or jaxgsa.borgonovo.
+# (the Saltelli column-swap scheme is distribution-agnostic), or
+# analyze given data with jaxgsa.optimal_transport or jaxgsa.borgonovo.
 ```
 
 The same applies to `efast.sample`, `dgsm.analyze`, `pce.analyze`,

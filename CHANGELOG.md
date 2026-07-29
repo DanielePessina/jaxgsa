@@ -32,14 +32,16 @@
   are dropped from the class average with a `UserWarning`. All OT modes
   (`univariate`, `multivariate`, `trajectory`) and the `dummy` baseline
   work.
-- **Sobol' pick-freeze works with categorical columns.** The Saltelli
-  design only copies coordinate values between rows, so the estimators
-  are unaffected. A guard caps the unique-row inflation loop: a
-  low-cardinality categorical problem has finitely many distinct rows,
-  and the sampler now stops doubling `base_n` when the achievable count
-  is reached (or after a fixed number of doublings). It then keeps
-  duplicate rows and explains why in a `UserWarning`. Duplicates are
-  valid Saltelli samples; deduplication only saves model evaluations.
+- **The Saltelli column-swap scheme works with categorical columns.**
+  The Saltelli design only copies coordinate values between rows, so the
+  estimators are unaffected. A guard caps the unique-row inflation loop:
+  a low-cardinality categorical problem has finitely many distinct rows.
+  The sampler stops doubling `base_n` when a doubling adds no new unique
+  rows or the known distinct-row bound is reached. A candidate-row cap
+  is checked before the next doubling is built, so the warning fires
+  before any huge allocation. The design then keeps duplicate rows and
+  explains why in a `UserWarning`. Duplicates are valid Saltelli
+  samples; deduplication only saves model evaluations.
 - **Clear errors from code-order-sensitive methods.** `morris.sample`,
   `efast.sample`, `SobolSamples.to_morris`, `dgsm.analyze`,
   `pce.analyze`, `hdmr.analyze`, `hsic.analyze`, `pawn.analyze`, and
@@ -50,7 +52,36 @@
 - **No correlation × categorical.** A `problem.correlation` entry that
   touches a categorical parameter raises at construction (a Gaussian
   copula does not define a coupling for an unordered marginal; polychoric
-  coupling is future work). Identity rows and columns are fine.
+  coupling is future work). Identity rows and columns are fine. The
+  check runs on the declared matrix, before the positive-definiteness
+  repair, so repair noise never reads as a coupling; the stored matrix
+  carries exact-identity categorical rows and columns.
+
+### Changed
+
+- **Borgonovo delta floors the bandwidth of degenerate classes.** A
+  conditioning class with zero output variance (a point mass, e.g. one
+  categorical level mapping to one output value) used to get bandwidth 0.
+  Its density dropped out of the L1 integrand and delta biased far low
+  (0.33 instead of 2/3 on a noise-free three-level repro). The class now
+  gets a narrow, grid-resolvable kernel at its value:
+  `max(0.1 * full-sample Silverman bandwidth, grid step)`. The repro
+  recovers delta 0.60–0.62. One `UserWarning` reports the floor. Classes
+  with genuine spread are untouched, so continuous results are
+  bit-identical.
+- **`fit_correlation` keeps categorical parameters at identity.** A
+  Spearman rank correlation over unordered level codes depends on the
+  arbitrary code order (relabeling flips its sign). The fit now excludes
+  categorical columns, returns exact-identity rows and columns for them,
+  and warns once naming them. The fit is invariant under level
+  relabeling. Polychoric estimation is future work.
+- **`n_partitions` / `n_classes` are always validated when passed.** An
+  all-categorical problem used to accept any value silently. A passed
+  value now validates against its range; a valid value that nothing uses
+  draws an "ignored" `UserWarning`. `optimal_transport.analyze` defaults
+  `n_partitions` to `min(25, N // 2)`, so small samples no longer raise
+  over a default the user never passed; an out-of-range value that only
+  the `dummy` baseline consumes names the dummy in the error.
 
 ## Unreleased (0.6.0)
 
