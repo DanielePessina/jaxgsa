@@ -161,9 +161,10 @@ _CATEGORICAL_TOLERANT_METHODS = (
 
 def _categorical_param_names(problem: Problem) -> list[str]:
     """Return the names of the problem's categorical parameters."""
-    return [
-        name for name, spec in zip(problem.names, problem.input_specs) if spec[0] == "categorical"
-    ]
+    # Imported lazily: this module is type-checking-only on Problem.
+    from jaxgsa.problem import _categorical_dims
+
+    return [problem.names[d] for d, _ in _categorical_dims(problem)]
 
 
 def _raise_categorical_design(problem: Problem, method: str) -> None:

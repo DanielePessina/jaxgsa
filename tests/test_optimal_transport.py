@@ -143,7 +143,7 @@ class TestOTPOTComparison:
         """Per-bin 1-D W2^2 vs POT in the exact regime (n_m divides N)."""
         ot = pytest.importorskip("ot")
         from jaxgsa._core.partition import _build_class_indices, _class_layout
-        from jaxgsa.optimal_transport._analyze import _ot_1d_kernel, _quantile_ranks
+        from jaxgsa.optimal_transport._analyze import _ot_1d_kernel
 
         N, M = 1000, 25  # n_m = 40 divides N -> exact quantile coupling
         key = jax.random.PRNGKey(1)
@@ -153,14 +153,10 @@ class TestOTPOTComparison:
         take, mask, sizes = _class_layout(N, M)
         all_idx = jnp.arange(N, dtype=jnp.int32)[None, :]
         cls_idx = _build_class_indices(X, all_idx, jnp.asarray(take))
-        ot_idx, _, _, _ = _ot_1d_kernel(
-            Y[:, None],
-            all_idx,
-            cls_idx,
-            jnp.asarray(mask),
-            jnp.asarray(sizes),
-            jnp.asarray(_quantile_ranks(sizes, N)),
-        )
+        # Canonical partition-group layout: (cls_idx, counts) with
+        # length-1 leading axes on the shared counts.
+        group = (cls_idx, jnp.asarray(sizes)[None, None, :])
+        ot_idx, _, _, _ = _ot_1d_kernel(Y[:, None], all_idx, (group,))
 
         y_np = np.asarray(Y, dtype=np.float64)
         V = 2 * np.var(y_np, ddof=1)
@@ -600,3 +596,27 @@ class TestOTXarray:
         assert {"ot_lower", "ot_upper", "advective_lower", "diffusive_upper"} <= set(ds.data_vars)
         assert "ot_dummy" in ds.data_vars
         assert ds["ot_dummy"].dims == ()
+
+
+class TestQuantileRankIndices:
+    def test_matches_float64_host_reference_exactly(self):
+        """The in-kernel int32 long division must match float64 exactly.
+
+        Includes boundary-heavy cases like (N=1000, c=800), where the true
+        value (i + 0.5) * c / N hits exact integers and a naive float32
+        product can floor to the wrong index.
+        """
+        from jaxgsa.optimal_transport._analyze import _quantile_rank_indices
+
+        rng = np.random.default_rng(0)
+        for N in (7, 100, 1000, 1024, 8000, 100_000):
+            sizes = sorted(
+                {0, 1, 2, 800, N // 3, N // 2, N - 1, N}
+                | {int(s) for s in rng.integers(0, N + 1, size=8)}
+            )
+            counts = np.array([s for s in sizes if s <= N], dtype=np.int64)
+            i_grid = np.arange(N, dtype=np.float64) + 0.5
+            ref = np.floor(i_grid * counts[:, None].astype(np.float64) / N).astype(np.int64)
+            ref = np.minimum(ref, np.maximum(counts[:, None] - 1, 0))
+            got = np.asarray(_quantile_rank_indices(jnp.asarray(counts), N))
+            np.testing.assert_array_equal(got, ref)

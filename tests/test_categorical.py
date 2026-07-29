@@ -317,15 +317,16 @@ def test_sobol_npz_round_trip_carries_categorical_problem(tmp_path):
 
 def test_extract_categorical_codes_rejects_non_code_values():
     p = _mixed_problem()
+    dims_levels = _categorical_dims(p)
     X = np.asarray(jaxgsa.sampling.monte_carlo(p, 32, seed=0))
     bad = X.copy()
     bad[0, 1] = 0.5
     with pytest.raises(ValueError, match="'c'"):
-        _extract_categorical_codes(p, bad)
+        _extract_categorical_codes(p, bad, dims_levels)
     bad = X.copy()
     bad[0, 1] = 3.0  # out of range for 3 levels
     with pytest.raises(ValueError, match="'c'"):
-        _extract_categorical_codes(p, bad)
+        _extract_categorical_codes(p, bad, dims_levels)
 
 
 def test_categorical_class_layout_partitions_by_level():
