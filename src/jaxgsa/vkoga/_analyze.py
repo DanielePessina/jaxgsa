@@ -26,9 +26,8 @@ from jax import Array
 from jaxgsa._core.batching import apply_batched, resolve_batch_size
 from jaxgsa._core.copula import (
     build_conditional_plan,
-    fit_gaussian_copula,
+    canonicalize_correlation,
     independent_correlation,
-    validate_correlation,
 )
 from jaxgsa._core.sampling import _next_power_of_2
 from jaxgsa._core.surrogate import _PredictPlan
@@ -60,7 +59,7 @@ def analyze_vkoga(
     X: Array,
     Y: Array,
     *,
-    correlation: Array | np.ndarray | str | None = None,
+    correlation: Array | np.ndarray | None = None,
     gamma: float | None = None,
     ridge: float | None = None,
     max_centers: int | None = None,
@@ -87,9 +86,12 @@ def analyze_vkoga(
         problem: Problem defining the parameters and their marginals.
         X: ``(N, D)`` inputs in physical units.
         Y: Outputs, ``(N,)``, ``(N, K)`` or ``(N, T, K)``.
-        correlation: Gaussian-copula dependency structure. ``None`` treats the
-            inputs as independent; a ``(D, D)`` matrix declares one directly;
-            ``"empirical"`` fits one from ``X`` by rank correlation.
+        correlation: Gaussian-copula dependency structure. ``None`` (default)
+            reads ``problem.correlation`` and falls back to independent inputs
+            when the problem declares none. A ``(D, D)`` matrix overrides the
+            problem's declaration for this call. To fit a matrix from data,
+            use :func:`jaxgsa.sampling.fit_correlation` and attach it with
+            ``problem.with_correlation(...)``.
         gamma: RBF shape parameter. ``None`` cross-validates over a grid.
         ridge: Kernel regularisation. ``None`` cross-validates over a grid.
         max_centers: Maximum kernel centres the greedy may select, at least 1.
@@ -111,9 +113,9 @@ def analyze_vkoga(
 
     Raises:
         ValueError: If ``X``/``Y`` violate the output contract, if the problem
-            has fewer than two parameters, if ``correlation`` is neither a
-            valid matrix nor ``"empirical"``, or if a size argument is out of
-            range.
+            has fewer than two parameters or any categorical parameter, if
+            ``correlation`` is not ``None`` or a valid matrix, or if a size
+            argument is out of range.
         RuntimeError: If every cross-validation score is non-finite.
 
     Warns:
@@ -142,7 +144,18 @@ def analyze_vkoga(
     n_variance = _next_power_of_2(n_variance)
 
     X = jnp.asarray(X)
-    Y = _validate_xy_inputs(problem, X, jnp.asarray(Y))
+    # The Gaussian copula is the method's dependence model, so a declared
+    # problem.correlation is welcome. Categorical parameters are not: the
+    # isotropic RBF needs a continuous CDF map per coordinate, and a step-CDF
+    # coordinate breaks both the kernel metric and the copula conditionals.
+    Y = _validate_xy_inputs(
+        problem,
+        X,
+        jnp.asarray(Y),
+        correlation_ok=True,
+        categorical_ok=False,
+        method="jaxgsa.vkoga.analyze",
+    )
     D = problem.num_vars
     if D < 2:
         raise ValueError(f"Correlated sensitivity indices need at least 2 parameters, got {D}")
@@ -153,7 +166,7 @@ def analyze_vkoga(
     Y_flat = Y_canonical.reshape(Y_canonical.shape[0], n_time * n_out)
 
     _warn_single_precision()
-    R = _resolve_correlation(problem, np.asarray(X), correlation)
+    R = _resolve_correlation(problem, correlation)
 
     # The RBF kernel is isotropic, so every column must share a scale; the
     # marginal CDF map is the same transform HDMR uses for its basis.
@@ -254,19 +267,30 @@ def _warn_single_precision() -> None:
 
 def _resolve_correlation(
     problem: Problem,
-    X: np.ndarray,
-    correlation: Array | np.ndarray | str | None,
+    correlation: Array | np.ndarray | None,
 ) -> np.ndarray:
-    """Turn the ``correlation`` argument into a validated matrix."""
+    """Turn the ``correlation`` argument into a validated latent matrix.
+
+    ``None`` reads ``problem.correlation``; independent when the problem
+    declares none. A matrix is an explicit per-call override and is
+    canonicalized like a constructor argument. Strings are rejected: the one
+    workflow for fitting a matrix from data is
+    ``problem.with_correlation(jaxgsa.sampling.fit_correlation(problem, X))``,
+    which makes explicit *which* sample the copula comes from.
+    """
     if correlation is None:
-        return independent_correlation(problem.num_vars)
+        declared = problem.correlation
+        if declared is None:
+            return independent_correlation(problem.num_vars)
+        # Problem construction already canonicalized the declared matrix.
+        return declared
     if isinstance(correlation, str):
-        if correlation != "empirical":
-            raise ValueError(
-                f"correlation must be None, 'empirical', or a (D, D) matrix, got {correlation!r}"
-            )
-        return fit_gaussian_copula(problem, X)
-    return validate_correlation(np.asarray(correlation), problem.num_vars)
+        raise ValueError(
+            f"correlation must be None or a (D, D) matrix, got {correlation!r}. To fit a "
+            "matrix from observed data, use jaxgsa.sampling.fit_correlation(problem, X_data) "
+            "and attach it with problem.with_correlation(...)."
+        )
+    return canonicalize_correlation(correlation, problem.num_vars, warn_on_repair=True)
 
 
 def _resolve_hyperparameters(

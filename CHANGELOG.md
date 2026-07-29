@@ -30,13 +30,18 @@
   the first-order Sobol' index `S1`, `S_TU` is the total index `ST`, and `S_C` is
   zero.
 
-  The dependency structure comes from `correlation=`: `None` for independent
-  inputs, a `(D, D)` matrix to declare one, or `"empirical"` to fit one from `X`
-  by Spearman rank correlation (`rho = 2 sin(pi rho_s / 6)`, projected to the
-  nearest positive-definite matrix). The matrix actually used is returned on
-  `result.correlation`. All conditioning happens in the latent standard-normal
-  space where the Gaussian conditionals are closed-form, and every expectation is
-  a scrambled-Sobol' quasi-Monte-Carlo average against the surrogate.
+  The dependency structure comes from the problem. `analyze` reads
+  `problem.correlation` by default. An uncorrelated problem gives independent
+  inputs. A `(D, D)` matrix passed as `correlation=` overrides the declaration
+  for one call. To fit a matrix from observed data, use
+  `jaxgsa.sampling.fit_correlation(problem, X_data)` and attach it with
+  `problem.with_correlation(...)` — one workflow, and it makes explicit which
+  sample the copula comes from. The matrix actually used is returned on
+  `result.correlation`. Categorical problems raise: the isotropic RBF needs a
+  continuous CDF map per coordinate. All conditioning happens in the latent
+  standard-normal space where the Gaussian conditionals are closed-form, and
+  every expectation is a scrambled-Sobol' quasi-Monte-Carlo average against the
+  surrogate.
 
   Stage one is a pure-JAX VKOGA (Wirtz & Haasdonk 2013): Gaussian RBF, centres
   chosen by the P-greedy rule in a nested Newton basis, coefficients from

@@ -182,27 +182,66 @@ def test_independent_inputs_recover_sobol_indices():
 # --- correlation handling -----------------------------------------------------
 
 
-def test_empirical_correlation_is_fitted_from_x():
-    L = np.linalg.cholesky(R_GAUSS)
-    rng = np.random.default_rng(3)
-    X = rng.standard_normal((1024, 3)) @ L.T  # standard-normal marginals, rho12 = 0.6
+def test_problem_correlation_is_read_by_default():
+    """analyze() with no correlation argument reads problem.correlation.
+
+    A problem that declares R and a plain problem with R passed per-call must
+    produce identical results on the same seed: same matrix, same draws.
+    """
+    X = jaxgsa.sampling.monte_carlo(GAUSS_PROBLEM, 256, seed=2)
     Y = X @ A_COEF
+    problem_corr = GAUSS_PROBLEM.with_correlation(R_GAUSS)
     with pytest.warns(UserWarning, match="single precision"):
-        result = jaxgsa.vkoga.analyze(GAUSS_PROBLEM, X, Y, correlation="empirical", **SMALL_KWARGS)
-    assert result.is_correlated
-    np.testing.assert_allclose(result.correlation, result.correlation.T, atol=1e-12)
-    np.testing.assert_allclose(np.diag(result.correlation), 1.0, atol=1e-12)
-    assert abs(result.correlation[0, 1] - RHO) < 0.1
-    # The uncorrelated pairs must not pick up spurious structure.
-    assert abs(result.correlation[0, 2]) < 0.1
-    assert abs(result.correlation[1, 2]) < 0.1
+        from_problem = jaxgsa.vkoga.analyze(problem_corr, X, Y, **SMALL_KWARGS)
+    with pytest.warns(UserWarning, match="single precision"):
+        from_override = jaxgsa.vkoga.analyze(
+            GAUSS_PROBLEM, X, Y, correlation=R_GAUSS, **SMALL_KWARGS
+        )
+    assert from_problem.is_correlated
+    np.testing.assert_array_equal(from_problem.correlation, from_override.correlation)
+    for field in ("S_TC", "S_TU", "S_U", "S_C", "S_IU"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(from_problem, field)),
+            np.asarray(getattr(from_override, field)),
+        )
 
 
-def test_invalid_correlation_string_raises():
+def test_explicit_matrix_overrides_problem_correlation():
+    """A per-call matrix wins over the problem's declaration."""
+    X = jaxgsa.sampling.monte_carlo(GAUSS_PROBLEM, 256, seed=2)
+    Y = X @ A_COEF
+    problem_corr = GAUSS_PROBLEM.with_correlation(R_GAUSS)
+    with pytest.warns(UserWarning, match="single precision"):
+        result = jaxgsa.vkoga.analyze(problem_corr, X, Y, correlation=np.eye(3), **SMALL_KWARGS)
+    assert not result.is_correlated
+    np.testing.assert_allclose(result.correlation, np.eye(3), atol=1e-12)
+
+
+def test_correlation_string_raises():
+    """Every string is rejected; the error names the one supported workflow."""
     X = jaxgsa.sampling.monte_carlo(GAUSS_PROBLEM, 32, seed=0)
     Y = X @ A_COEF
-    with pytest.raises(ValueError, match="empirical"), pytest.warns(UserWarning):
-        jaxgsa.vkoga.analyze(GAUSS_PROBLEM, X, Y, correlation="bogus", **SMALL_KWARGS)
+    for value in ("empirical", "bogus"):
+        with (
+            pytest.raises(ValueError, match="fit_correlation"),
+            pytest.warns(UserWarning),
+        ):
+            jaxgsa.vkoga.analyze(GAUSS_PROBLEM, X, Y, correlation=value, **SMALL_KWARGS)
+
+
+def test_categorical_problem_raises():
+    """The isotropic RBF has no valid metric over unordered level codes."""
+    problem = Problem.from_dict(
+        {
+            "u1": {"dist": "uniform", "low": 0.0, "high": 1.0},
+            "c1": {"dist": "categorical", "probs": [0.5, 0.5]},
+        }
+    )
+    rng = np.random.default_rng(0)
+    X = np.column_stack([rng.uniform(size=64), rng.integers(0, 2, 64).astype(float)])
+    Y = X[:, 0]
+    with pytest.raises(ValueError, match="categorical"):
+        jaxgsa.vkoga.analyze(problem, X, Y, **SMALL_KWARGS)
 
 
 def test_correlation_matrix_validation_errors():

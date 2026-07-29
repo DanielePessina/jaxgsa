@@ -65,7 +65,7 @@ Twelve complementary methods are included: **Sobol indices** (the standard varia
 - **Categorical inputs** — declare unordered discrete marginals with `{"dist": "categorical", "probs": [...], "labels": [...]}`; samples carry integer level codes, optimal transport, Borgonovo, and PAWN condition on one class per level, the Saltelli-based Sobol pipeline works unchanged, and every code-order-sensitive method (Morris, eFAST, DGSM, PCE, HDMR, HSIC, Shapley) refuses with a clear error
 - **VKOGA** — variance-based indices for correlated inputs (Hilhorst et al., 2024; Li et al., 2010)
   - Given-data method: fits a greedy Gaussian-RBF kernel surrogate to any (X, Y) pairs
-  - Gaussian copula for the dependency structure: declare a correlation matrix or fit one from X
+  - Gaussian copula for the dependency structure: reads `problem.correlation`, with a per-call matrix override
   - Splits each input's effect into correlated and uncorrelated parts (S_TC, S_TU, S_U, S_C, S_IU) — S_TC ranks inputs for measurement, S_TU for fixing
   - Built-in emulator for prediction at new inputs
 - All twelve methods use one strict output contract: scalar `(N,)`, multi-output `(N, K)`, or time-series `(N, T, K)`

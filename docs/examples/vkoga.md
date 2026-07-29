@@ -83,7 +83,9 @@ problem = jaxgsa.Problem.from_dict(
 X = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, 2048, seed=0))
 Y = X @ jnp.array([2.0, 1.0, 0.5])
 
-# The dependency structure the indices are computed under
+# The dependency structure the indices are computed under. Declare it on the
+# problem; analyze() reads problem.correlation by default. A (D, D) matrix
+# passed as correlation= overrides the declaration for one call.
 R = np.array(
     [
         [1.0, 0.6, 0.0],
@@ -91,8 +93,9 @@ R = np.array(
         [0.0, 0.0, 1.0],
     ]
 )
+problem_corr = problem.with_correlation(R)
 
-result = jaxgsa.vkoga.analyze(problem, X, Y, correlation=R)
+result = jaxgsa.vkoga.analyze(problem_corr, X, Y)
 
 print("S_TC:", np.round(result.S_TC, 3))  # [0.881 0.627 0.025]
 print("S_TU:", np.round(result.S_TU, 3))  # [0.34  0.085 0.034]
@@ -147,17 +150,19 @@ sample size to shrink it.
 
 ## Fitting the copula from the data
 
-If your data is observational and already correlated, `correlation="empirical"`
-fits the copula from `X` by Spearman rank correlation. Rank-based estimation
-makes it invariant to the declared marginals, so a skewed parameter cannot
-distort the dependency structure.
+If your data is observational and already correlated, fit the copula from the
+data with `jaxgsa.sampling.fit_correlation` and attach it to the problem. The
+fit uses Spearman rank correlation, so it is invariant to the declared
+marginals — a skewed parameter cannot distort the dependency structure. One
+workflow, one explicit choice of *which* sample the copula comes from.
 
 ```python
 rng = np.random.default_rng(0)
 X_corr = jnp.asarray(rng.standard_normal((2048, 3)) @ np.linalg.cholesky(R).T)
 Y_corr = X_corr @ jnp.array([2.0, 1.0, 0.5])
 
-emp = jaxgsa.vkoga.analyze(problem, X_corr, Y_corr, correlation="empirical")
+R_fit = jaxgsa.sampling.fit_correlation(problem, X_corr)
+emp = jaxgsa.vkoga.analyze(problem.with_correlation(R_fit), X_corr, Y_corr)
 
 print(np.round(emp.correlation, 3))
 # [[1.    0.609 0.041]
@@ -172,12 +177,12 @@ only on the correlated ridge, and `S_TU` queries it off that ridge.
 
 ## Independent inputs collapse to S1 / ST
 
-With `correlation=None` (the default) the five indices reduce to the familiar
-picture: `S_TC` is the first-order Sobol' index, `S_TU` is the total index, and
-`S_C` vanishes.
+When neither the problem nor the call declares a correlation, the five indices
+reduce to the familiar picture: `S_TC` is the first-order Sobol' index, `S_TU`
+is the total index, and `S_C` vanishes.
 
 ```python
-indep = jaxgsa.vkoga.analyze(problem, X, Y)  # no correlation argument
+indep = jaxgsa.vkoga.analyze(problem, X, Y)  # problem declares no correlation
 
 print("S_TC:", np.round(indep.S_TC, 3))  # [0.76  0.183 0.04 ]
 print("S_TU:", np.round(indep.S_TU, 3))  # [0.77  0.192 0.049]

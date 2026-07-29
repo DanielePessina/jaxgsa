@@ -112,7 +112,7 @@ estimates the correlated variance-based indices of Li et al. (2010) against it
 under a Gaussian copula:
 
 ```python
-vkoga_result = jaxgsa.vkoga.analyze(problem, X, Y, correlation="empirical")
+vkoga_result = jaxgsa.vkoga.analyze(problem, X, Y)  # reads problem.correlation
 vkoga_result.S_TC          # total correlated — input prioritisation
 vkoga_result.S_TU          # total uncorrelated — input fixing
 Y_pred = vkoga_result.predict(X_new, batch_size=2048)

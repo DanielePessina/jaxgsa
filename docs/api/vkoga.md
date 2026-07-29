@@ -41,13 +41,19 @@ under:
 
 | Value | Meaning |
 | --- | --- |
-| `None` (default) | Treat the inputs as independent (identity matrix). |
-| `(D, D)` array | Use this copula correlation matrix directly. Must be symmetric with a unit diagonal; it is projected to the nearest positive-definite matrix if needed. |
-| `"empirical"` | Fit one from `X` by Spearman rank correlation, converted to the latent Pearson correlation with $\rho = 2\sin(\pi\rho_s/6)$. |
+| `None` (default) | Read `problem.correlation`. Independent (identity matrix) when the problem declares none. |
+| `(D, D)` array | Override the problem's declaration for this call. Must be symmetric with a unit diagonal; it is projected to the nearest positive-definite matrix if needed (with a `UserWarning`). |
+
+To fit a matrix from observed data, use
+`jaxgsa.sampling.fit_correlation(problem, X_data)` and attach it with
+`problem.with_correlation(...)`. This one workflow makes explicit *which*
+sample the copula comes from; a string value raises `ValueError`.
 
 The matrix actually used is always returned on `result.correlation`. Fewer than
 two parameters raises `ValueError`: conditioning on "the other parameters" is
-meaningless for `D = 1`.
+meaningless for `D = 1`. Categorical parameters also raise: the isotropic RBF
+needs a continuous CDF map per coordinate, and a step-CDF coordinate breaks
+both the kernel metric and the copula conditionals.
 
 ## Fit and estimator controls
 

@@ -18,7 +18,12 @@ Example::
     X = jaxgsa.sampling.monte_carlo(problem, 2048)   # independent, space-filling
     Y = model(X)
 
-    result = jaxgsa.vkoga.analyze(problem, X, Y, correlation="empirical")
+    # Declare the dependence on the problem. Fit it from observed data with
+    # jaxgsa.sampling.fit_correlation(problem, X_data) when you have no
+    # published matrix.
+    problem = problem.with_correlation(R)
+
+    result = jaxgsa.vkoga.analyze(problem, X, Y)
     result.S_TC   # total correlated -- for input prioritisation
     result.S_TU   # total uncorrelated -- for input fixing
     Y_pred = result.predict(X_new)
