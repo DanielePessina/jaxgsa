@@ -35,8 +35,14 @@ from typing import Callable, NamedTuple
 import numpy as np
 from scipy.stats import norm
 
-from jaxgsa._core.batching import get_memory_budget
-from jaxgsa._core.copula import _ConditionalPlan, latent_normal_sample
+from jaxgsa._core.batching import resolve_batch_size
+from jaxgsa._core.copula import (
+    _ConditionalPlan,
+    assemble_latent,
+    draw_rest_given_self,
+    draw_self_given_rest,
+    latent_normal_sample,
+)
 from jaxgsa._core.legendre import legendre_orthonormal
 
 # Degree of the marginal Legendre basis used to recover the first-order
@@ -228,35 +234,13 @@ def _evaluate_component(u: np.ndarray, coefficients: np.ndarray) -> np.ndarray:
     return _legendre_basis(u, _COMPONENT_DEGREE) @ coefficients
 
 
-def _assemble_latent(
-    index: int,
-    others: np.ndarray,
-    z_self: np.ndarray,
-    z_rest: np.ndarray,
-) -> np.ndarray:
-    """Interleave a parameter's latent draw with the other parameters'.
-
-    Args:
-        index: Parameter being conditioned on or resampled.
-        others: ``(D - 1,)`` indices of the remaining parameters.
-        z_self: ``(n,)`` latent values for ``index``.
-        z_rest: ``(n, D - 1)`` latent values for the others.
-
-    Returns:
-        ``(n, D)`` latent sample in parameter order.
-    """
-    n = z_self.shape[0]
-    Z = np.empty((n, others.shape[0] + 1), dtype=np.float64)
-    Z[:, index] = z_self
-    Z[:, others] = z_rest
-    return Z
-
-
 def _outer_chunk(n_outer: int, n_inner: int, n_columns: int) -> int:
     """Return how many outer points fit in the transient-memory budget.
 
     Each outer point expands into ``n_inner`` rows. Each row holds the
     ``D``-column latent block plus the ``S``-column prediction, in float64.
+    Thin wrapper over the shared :func:`resolve_batch_size` with one outer
+    point as the "row".
 
     Args:
         n_outer: Total outer points.
@@ -266,8 +250,7 @@ def _outer_chunk(n_outer: int, n_inner: int, n_columns: int) -> int:
     Returns:
         Chunk size in ``[1, n_outer]``.
     """
-    bytes_per_outer = 8 * n_inner * n_columns
-    return max(1, min(n_outer, get_memory_budget() // max(bytes_per_outer, 1)))
+    return resolve_batch_size(8 * n_inner * n_columns, n_outer, None)
 
 
 def _total_correlated(
@@ -298,16 +281,15 @@ def _total_correlated(
     # inner integration rule identical for all conditioning values, which
     # cancels much of its error out of the outer variance.
     inner = latent_normal_sample(n_inner, D_rest, seed=seed + 7919)
-    inner_rotated = inner @ plan.chol_rest[index].T
 
     inner_mean = np.empty((n_outer, n_slices), dtype=np.float64)
     chunk = _outer_chunk(n_outer, n_inner, D_rest + 1 + n_slices)
     for start in range(0, n_outer, chunk):
         z_chunk = z_self[start : start + chunk]
-        # Z_-i | Z_i = beta * z_i + L eps.
-        z_rest = plan.beta_rest[index][None, None, :] * z_chunk[:, None, None] + inner_rotated
+        # Z_-i | Z_i, broadcast to (chunk, n_inner, D_rest).
+        z_rest = draw_rest_given_self(plan, index, z_chunk[:, None], inner)
         z_self_tiled = np.repeat(z_chunk, n_inner)
-        Z = _assemble_latent(index, others, z_self_tiled, z_rest.reshape(-1, D_rest))
+        Z = assemble_latent(index, others, z_self_tiled, z_rest.reshape(-1, D_rest))
         Y = np.asarray(predict(norm.cdf(Z)), dtype=np.float64)
         inner_mean[start : start + chunk] = Y.reshape(-1, n_inner, n_slices).mean(axis=1)
 
@@ -351,17 +333,15 @@ def _total_uncorrelated_and_conditional(
     z_rest = latent_normal_sample(n_outer, D_rest, seed=seed) @ plan.chol_marginal[index].T
     inner = latent_normal_sample(n_inner, 1, seed=seed + 7919)[:, 0]
 
-    # Z_i | Z_-i = beta . z_-i + sigma eps.
-    conditional_mean = z_rest @ plan.beta_self[index]
-
     inner_var = np.empty((n_outer, n_slices), dtype=np.float64)
     f_hat = np.empty((n_outer, n_slices), dtype=np.float64)
     chunk = _outer_chunk(n_outer, n_inner, D_rest + 1 + n_slices)
     for start in range(0, n_outer, chunk):
         stop = start + chunk
-        z_self = conditional_mean[start:stop, None] + plan.std_self[index] * inner[None, :]
+        # Z_i | Z_-i, broadcast to (chunk, n_inner) via the batched mean.
+        z_self = draw_self_given_rest(plan, index, z_rest[start:stop, None, :], inner[None, :])
         z_rest_tiled = np.repeat(z_rest[start:stop], n_inner, axis=0)
-        Z = _assemble_latent(index, others, z_self.reshape(-1), z_rest_tiled)
+        Z = assemble_latent(index, others, z_self.reshape(-1), z_rest_tiled)
 
         Y = np.asarray(predict(norm.cdf(Z)), dtype=np.float64)
         inner_var[start:stop] = Y.reshape(-1, n_inner, n_slices).var(axis=1, ddof=1)

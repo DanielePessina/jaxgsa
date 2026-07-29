@@ -243,6 +243,99 @@ def _select_centers(
     return idx, m
 
 
+class _NormalEquations(NamedTuple):
+    """Ridge-independent pieces of the regularised coefficient solve.
+
+    Everything here depends on ``X``, ``Y``, the selected centres, and
+    ``gamma`` — but not on ``ridge``. :func:`_cross_validate` builds one per
+    ``(fold, gamma)`` and reuses it for every ridge in the grid; only the
+    cheap assembly-and-solve in :func:`_solve_ridge` repeats.
+
+    Attributes:
+        active: (max_centers,) bool mask of the slots the greedy filled.
+        centers: (max_centers, D) selected centres (padded with duplicates).
+        A_nm: (n, max_centers) masked cross-kernel between training points
+            and centres.
+        A_mm: (max_centers, max_centers) masked centre Gram.
+        AtA: ``A_nm^T A_nm``.
+        AtY: ``A_nm^T Y`` over the training rows.
+        m: scalar count of centres actually selected.
+    """
+
+    active: Array
+    centers: Array
+    A_nm: Array
+    A_mm: Array
+    AtA: Array
+    AtY: Array
+    m: Array
+
+
+def _normal_equations(
+    X: Array,
+    Y: Array,
+    idx: Array,
+    m: Array,
+    *,
+    gamma: Array | float,
+    train_mask: Array | None = None,
+) -> _NormalEquations:
+    """Build the ridge-independent normal-equation matrices.
+
+    Args:
+        X: (n, D) training inputs.
+        Y: (n, S) training outputs, output slices already flattened.
+        idx: (max_centers,) selected row indices from :func:`_select_centers`.
+        m: scalar count of centres actually selected.
+        gamma: positive Gaussian shape parameter the centres were selected
+            with.
+        train_mask: optional (n,) boolean mask; ``False`` rows are excluded
+            from the solve.
+
+    Returns:
+        A :class:`_NormalEquations` bundle.
+    """
+    n, _ = X.shape
+    max_centers = idx.shape[0]
+    mask = jnp.ones((n,), dtype=bool) if train_mask is None else train_mask.astype(bool)
+
+    # Unused slots point at row 0; masking their kernel columns to zero (and
+    # putting a 1 on their diagonal in _solve_ridge) forces their coefficients
+    # to be exactly zero, so the duplicate centre is inert.
+    active = jnp.arange(max_centers) < m
+    centers = X[idx]
+    A_nm = _gaussian_kernel(X, centers, gamma) * active[None, :] * mask[:, None]
+    A_mm = _gaussian_kernel(centers, centers, gamma) * active[None, :] * active[:, None]
+    Y_train = jnp.where(mask[:, None], Y, 0.0)
+    return _NormalEquations(
+        active=active,
+        centers=centers,
+        A_nm=A_nm,
+        A_mm=A_mm,
+        AtA=A_nm.T @ A_nm,
+        AtY=A_nm.T @ Y_train,
+        m=m,
+    )
+
+
+def _solve_ridge(eq: _NormalEquations, ridge: Array | float) -> Array:
+    """Assemble the regularised system for one ridge value and solve it.
+
+    Args:
+        eq: Ridge-independent matrices from :func:`_normal_equations`.
+        ridge: RKHS regularisation parameter (the paper's lambda).
+
+    Returns:
+        (max_centers, S) expansion coefficients; inactive rows are zero.
+    """
+    G = eq.AtA + ridge * eq.A_mm
+    # Relative jitter: scale-free against gamma and the number of rows, which
+    # both move the magnitude of A_nm^T A_nm by orders of magnitude.
+    diag_mean = jnp.sum(jnp.where(eq.active, jnp.diagonal(G), 0.0)) / jnp.maximum(eq.m, 1)
+    G = G + jnp.diag(jnp.where(eq.active, _JITTER * diag_mean, 1.0))
+    return jnp.linalg.solve(G, eq.AtY)
+
+
 def _solve_coefficients(
     X: Array,
     Y: Array,
@@ -281,31 +374,17 @@ def _solve_coefficients(
     """
     n, _ = X.shape
     n_slices = Y.shape[1]
-    max_centers = idx.shape[0]
     dtype = X.dtype
 
     mask = jnp.ones((n,), dtype=bool) if train_mask is None else train_mask.astype(bool)
     n_train = jnp.sum(mask)
 
-    # Unused slots point at row 0; masking their kernel columns to zero (and
-    # putting a 1 on their diagonal below) forces their coefficients to be
-    # exactly zero, so the duplicate centre is inert.
-    active = jnp.arange(max_centers) < m
-    centers = X[idx]
-    A_nm = _gaussian_kernel(X, centers, gamma) * active[None, :] * mask[:, None]
-    A_mm = _gaussian_kernel(centers, centers, gamma) * active[None, :] * active[:, None]
-
-    G = A_nm.T @ A_nm + ridge * A_mm
-    # Relative jitter: scale-free against gamma and the number of rows, which
-    # both move the magnitude of A_nm^T A_nm by orders of magnitude.
-    diag_mean = jnp.sum(jnp.where(active, jnp.diagonal(G), 0.0)) / jnp.maximum(m, 1)
-    G = G + jnp.diag(jnp.where(active, _JITTER * diag_mean, 1.0))
-
-    Y_train = jnp.where(mask[:, None], Y, 0.0)
-    alpha = jnp.linalg.solve(G, A_nm.T @ Y_train)  # (max_centers, S)
+    eq = _normal_equations(X, Y, idx, m, gamma=gamma, train_mask=mask)
+    centers = eq.centers
+    alpha = _solve_ridge(eq, ridge)  # (max_centers, S)
 
     # Training-fit diagnostic, per slice, over the rows actually fitted.
-    sq_err = jnp.where(mask[:, None], (Y - A_nm @ alpha) ** 2, 0.0)
+    sq_err = jnp.where(mask[:, None], (Y - eq.A_nm @ alpha) ** 2, 0.0)
     rmse = jnp.sqrt(jnp.sum(sq_err, axis=0) / jnp.maximum(n_train, 1))
     rmse = jnp.where(n_train > 0, rmse, jnp.full((n_slices,), jnp.nan))
 
@@ -402,9 +481,10 @@ def _cross_validate(
     over that full set of out-of-sample predictions, pooled across output
     slices.
 
-    Centre selection does not depend on ``ridge``, so each ``(fold, gamma)``
-    pair runs one greedy sweep and reuses the selected centres for every
-    ridge in the grid. Only the cheap regularised solve repeats per ridge.
+    Centre selection, the normal-equation matrices, and the prediction
+    kernel do not depend on ``ridge``, so each ``(fold, gamma)`` pair builds
+    them once and reuses them for every ridge in the grid. Only the cheap
+    assembly-and-solve repeats per ridge.
 
     The grids are caller-supplied: no range is baked in here.
 
@@ -461,12 +541,14 @@ def _cross_validate(
                 tol_residual=tol_residual,
                 train_mask=train,
             )
+            # The normal-equation matrices and the prediction kernel are also
+            # ridge-free: build them once per (fold, gamma) and reuse them for
+            # the whole ridge grid. Only the assembly-and-solve repeats.
+            eq = _normal_equations(X, Y, idx, m, gamma=gamma, train_mask=train)
+            K_pred = _gaussian_kernel(X, eq.centers, gamma)
 
             def _ridge_sse(ridge: Array) -> Array:
-                state = _solve_coefficients(
-                    X, Y, idx, m, gamma=gamma, ridge=ridge, train_mask=train
-                )
-                err = Y - _predict_vkoga(state, X)
+                err = Y - K_pred @ _solve_ridge(eq, ridge)
                 return jnp.sum(jnp.where(train[:, None], 0.0, err**2))
 
             return jax.lax.map(_ridge_sse, ridge_vec)  # (n_ridges,)

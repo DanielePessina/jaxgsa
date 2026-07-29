@@ -349,6 +349,33 @@ def _resolve_hyperparameters(
     return float(gammas[best[0]]), float(ridges[best[1]])
 
 
+def _unit_evaluator(state, y_mean: Array):
+    """Build the shared unit-cube evaluation kernel and its memory cost.
+
+    One place defines how a fitted state is evaluated — kernel expansion plus
+    the training mean — and what a row of that evaluation costs: the
+    ``(n, n_centers)`` kernel block dominates the transient memory, plus one
+    output row per prediction. Both the estimator-facing predictor and the
+    public ``predict`` plan build on it.
+
+    Args:
+        state: Fitted (sliced) surrogate state.
+        y_mean: ``(S,)`` training output mean to restore.
+
+    Returns:
+        ``(kernel, bytes_per_row)``: a ``(n, D) unit-cube -> (n, S)``
+        callable and the per-row transient-memory estimate.
+    """
+    n_centers = int(state.centers.shape[0])
+    n_slices = int(state.coefficients.shape[1])
+    itemsize = int(jnp.zeros(()).itemsize)
+
+    def kernel(U: Array) -> Array:
+        return _predict_vkoga(state, U) + y_mean
+
+    return kernel, itemsize * (n_centers + n_slices)
+
+
 def _make_unit_predictor(state, y_mean: Array, batch_size: int | None):
     """Build the ``(n, D) unit-cube -> (n, S)`` callable the estimators use.
 
@@ -356,10 +383,8 @@ def _make_unit_predictor(state, y_mean: Array, batch_size: int | None):
     are host-side quasi-Monte-Carlo loops; batching keeps the kernel matrix
     within the configured memory budget for the millions of conditional draws.
     """
-    n_centers = int(state.centers.shape[0])
-    itemsize = int(jnp.zeros(()).itemsize)
-    bytes_per_row = itemsize * (n_centers + int(state.coefficients.shape[1]))
-    compiled = jax.jit(lambda U: _predict_vkoga(state, U) + y_mean)
+    kernel, bytes_per_row = _unit_evaluator(state, y_mean)
+    compiled = jax.jit(kernel)
 
     def predict(U: np.ndarray) -> np.ndarray:
         U_device = jnp.asarray(U)
@@ -388,16 +413,10 @@ def _vkoga_predict_plan(result: VKOGAResult, X_new: Array) -> _PredictPlan:
         raise ValueError("VKOGAResult does not contain a fitted surrogate")
 
     U = cdf_to_unit_interval(X_new, result.problem)
-    n_centers = int(state.centers.shape[0])
-    n_slices = int(state.coefficients.shape[1])
-    itemsize = int(jnp.zeros(()).itemsize)
-    y_mean = result._y_mean
+    unit_kernel, bytes_per_row = _unit_evaluator(state, result._y_mean)
     output_shape = result._output_shape
 
     def kernel(U_batch: Array) -> Array:
-        predictions = _predict_vkoga(state, U_batch) + y_mean
-        return predictions.reshape(U_batch.shape[0], *output_shape)
+        return unit_kernel(U_batch).reshape(U_batch.shape[0], *output_shape)
 
-    # The (n, n_centers) kernel block dominates the transient cost, plus one
-    # output row per prediction.
-    return _PredictPlan(X=U, bytes_per_row=itemsize * (n_centers + n_slices), kernel=kernel)
+    return _PredictPlan(X=U, bytes_per_row=bytes_per_row, kernel=kernel)

@@ -33,7 +33,10 @@ from typing import Any, Mapping
 import numpy as np
 
 from jaxgsa._core.copula import (
+    assemble_latent,
     build_conditional_plan,
+    draw_rest_given_self,
+    draw_self_given_rest,
     independent_correlation,
     latent_normal_sample,
     latent_to_physical,
@@ -172,20 +175,13 @@ def sample(
     # First-order blocks: keep Z_i, redraw the rest from p(z_rest | z_i).
     for i in range(D):
         others = plan.others[i]
-        Z = np.empty((n, D), dtype=np.float64)
-        Z[:, i] = Z_joint[:, i]
-        Z[:, others] = (
-            Z_joint[:, i : i + 1] * plan.beta_rest[i][None, :]
-            + redraw[:, others] @ plan.chol_rest[i].T
-        )
-        blocks.append(Z)
+        z_rest = draw_rest_given_self(plan, i, Z_joint[:, i], redraw[:, others])
+        blocks.append(assemble_latent(i, others, Z_joint[:, i], z_rest))
     # Total blocks: keep Z_rest, redraw Z_i from p(z_i | z_rest).
     for i in range(D):
         others = plan.others[i]
-        Z = np.empty((n, D), dtype=np.float64)
-        Z[:, others] = Z_joint[:, others]
-        Z[:, i] = Z_joint[:, others] @ plan.beta_self[i] + plan.std_self[i] * redraw[:, i]
-        blocks.append(Z)
+        z_self = draw_self_given_rest(plan, i, Z_joint[:, others], redraw[:, i])
+        blocks.append(assemble_latent(i, others, z_self, Z_joint[:, others]))
 
     X = latent_to_physical(problem, np.concatenate(blocks, axis=0))
     n_total = n * (2 * D + 1)
