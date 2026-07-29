@@ -30,35 +30,9 @@ import jaxgsa
 from jaxgsa._core.copula import fit_gaussian_copula
 from jaxgsa.problem import Problem
 
-# --- closed-form linear-Gaussian reference ----------------------------------
-
-A_COEF = np.array([2.0, 1.0, 0.5])
-RHO = 0.6
-
-GAUSS_PROBLEM = Problem.from_dict(
-    {
-        "x1": {"dist": "gaussian", "mean": 0.0, "variance": 1.0},
-        "x2": {"dist": "gaussian", "mean": 0.0, "variance": 1.0},
-        "x3": {"dist": "gaussian", "mean": 0.0, "variance": 1.0},
-    }
-)
-
-R_GAUSS = np.eye(3)
-R_GAUSS[0, 1] = R_GAUSS[1, 0] = RHO
-
-
-def _analytic_indices(a: np.ndarray, R: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
-    """Closed-form (S_TC, S_TU, V(Y)) for a linear model on N(0, R) inputs."""
-    var_y = float(a @ R @ a)
-    S_TC = (R @ a) ** 2 / var_y
-    D = a.shape[0]
-    S_TU = np.empty(D)
-    for i in range(D):
-        rest = [j for j in range(D) if j != i]
-        r = R[rest, i]
-        S_TU[i] = a[i] ** 2 * (1.0 - r @ np.linalg.solve(R[np.ix_(rest, rest)], r)) / var_y
-    return S_TC, S_TU, var_y
-
+# Closed-form linear-Gaussian reference, shared with test_kucherenko.py and
+# test_correlated_agreement.py.
+from _linear_gaussian import A_COEF, GAUSS_PROBLEM, R_GAUSS, analytic_indices  # isort: skip
 
 # --- cheap uniform model for shape/contract tests ---------------------------
 
@@ -127,7 +101,7 @@ def uniform_fits():
 
 
 def test_closed_form_total_indices(gauss_result):
-    S_TC_true, S_TU_true, var_y = _analytic_indices(A_COEF, R_GAUSS)
+    S_TC_true, S_TU_true, var_y = analytic_indices(A_COEF, R_GAUSS)
     # atol tightened from 2e-2 after dropping the iid inner-noise correction
     # (it biased small S_TC low; see _indices._total_correlated).
     np.testing.assert_allclose(np.asarray(gauss_result.S_TC), S_TC_true, atol=1e-2)

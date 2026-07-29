@@ -21,32 +21,9 @@ import jaxgsa
 from jaxgsa.benchmarks import ishigami
 from jaxgsa.problem import Problem
 
-A_COEF = np.array([2.0, 1.0, 0.5])
-RHO = 0.6
-
-GAUSS_PROBLEM = Problem.from_dict(
-    {
-        "x1": {"dist": "gaussian", "mean": 0.0, "variance": 1.0},
-        "x2": {"dist": "gaussian", "mean": 0.0, "variance": 1.0},
-        "x3": {"dist": "gaussian", "mean": 0.0, "variance": 1.0},
-    }
-)
-
-R_GAUSS = np.eye(3)
-R_GAUSS[0, 1] = R_GAUSS[1, 0] = RHO
-
-
-def _analytic_indices(a: np.ndarray, R: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
-    """Closed-form (S1, ST, V(Y)) for a linear model on N(0, R) inputs."""
-    var_y = float(a @ R @ a)
-    S1 = (R @ a) ** 2 / var_y
-    D = a.shape[0]
-    ST = np.empty(D)
-    for i in range(D):
-        rest = [j for j in range(D) if j != i]
-        r = R[rest, i]
-        ST[i] = a[i] ** 2 * (1.0 - r @ np.linalg.solve(R[np.ix_(rest, rest)], r)) / var_y
-    return S1, ST, var_y
+# Closed-form linear-Gaussian reference, shared with test_vkoga.py and
+# test_correlated_agreement.py.
+from _linear_gaussian import A_COEF, GAUSS_PROBLEM, R_GAUSS, RHO, analytic_indices  # isort: skip
 
 
 @pytest.fixture(scope="module")
@@ -62,7 +39,7 @@ def correlated_result():
 
 
 def test_closed_form_linear_gaussian(correlated_result):
-    S1_true, ST_true, var_y = _analytic_indices(A_COEF, R_GAUSS)
+    S1_true, ST_true, var_y = analytic_indices(A_COEF, R_GAUSS)
     np.testing.assert_allclose(np.asarray(correlated_result.S1), S1_true, atol=5e-3)
     np.testing.assert_allclose(np.asarray(correlated_result.ST), ST_true, atol=5e-3)
     np.testing.assert_allclose(float(np.asarray(correlated_result.variance)), var_y, rtol=2e-2)

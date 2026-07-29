@@ -26,41 +26,18 @@ import numpy as np
 import pytest
 
 import jaxgsa
-from jaxgsa.problem import Problem
 
-A_COEF = np.array([2.0, 1.0, 0.5])
-RHO = 0.6
-
-GAUSS_PROBLEM = Problem.from_dict(
-    {
-        "x1": {"dist": "gaussian", "mean": 0.0, "variance": 1.0},
-        "x2": {"dist": "gaussian", "mean": 0.0, "variance": 1.0},
-        "x3": {"dist": "gaussian", "mean": 0.0, "variance": 1.0},
-    }
-)
-
-R_GAUSS = np.eye(3)
-R_GAUSS[0, 1] = R_GAUSS[1, 0] = RHO
-
-
-def _analytic_indices(a: np.ndarray, R: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Closed-form (S_TC/S1, S_TU/ST) for a linear model on N(0, R) inputs."""
-    var_y = float(a @ R @ a)
-    S_TC = (R @ a) ** 2 / var_y
-    D = a.shape[0]
-    S_TU = np.empty(D)
-    for i in range(D):
-        rest = [j for j in range(D) if j != i]
-        r = R[rest, i]
-        S_TU[i] = a[i] ** 2 * (1.0 - r @ np.linalg.solve(R[np.ix_(rest, rest)], r)) / var_y
-    return S_TC, S_TU
+# Closed-form linear-Gaussian reference, shared with test_vkoga.py and
+# test_kucherenko.py.
+from _linear_gaussian import A_COEF, GAUSS_PROBLEM, R_GAUSS, analytic_indices  # isort: skip
 
 
 @pytest.fixture(scope="module")
 def three_routes():
     """Analytic, vkoga, and kucherenko indices for the same problem."""
     problem = GAUSS_PROBLEM.with_correlation(R_GAUSS)
-    analytic = _analytic_indices(A_COEF, R_GAUSS)
+    # Drop V(Y): only the two index arrays are compared across routes.
+    analytic = analytic_indices(A_COEF, R_GAUSS)[:2]
 
     # Surrogate route: independent training design, x64 (the kernel solve
     # squares the condition number; same configuration as test_vkoga.py).
