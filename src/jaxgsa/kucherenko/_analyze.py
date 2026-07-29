@@ -20,7 +20,10 @@ share ``y_k``, so its expectation is ``E[E(Y|y)^2]``, and subtracting the mean
 product leaves the variance of the conditional mean. The mean correction uses
 the product of the two block means (each block estimates ``f0``), which
 cancels the shared Monte-Carlo error of the two blocks; with ``f0_A^2`` the
-estimator carries a strictly larger O(1/N) bias. ``ST_i`` estimates
+estimator carries a strictly larger O(1/N) bias. The implementation subtracts
+one shared shift (the joint-block mean) from both factors before the product.
+The estimator is algebraically identical, but the arithmetic stays centered
+when ``Y`` carries a large mean. ``ST_i`` estimates
 ``E(V(Y|X_{~i})) / V(Y)``: the squared difference pairs two draws of ``y``
 under the same ``z_k``, the Jansen form of the conditional variance.
 
@@ -115,9 +118,20 @@ def analyze(sampling_result: KucherenkoSamples, Y: Array) -> KucherenkoResult:
     variance = f_joint.var(axis=0)  # (S,)
     safe_variance = np.where(variance > 0.0, variance, np.nan)
 
+    # Shift both S1 factors by one shared constant (the joint-block mean)
+    # before the product. The estimator is algebraically unchanged: for any
+    # shift c, mean((a-c)(b-c)) - mean(a-c) mean(b-c) == mean(ab) - mean(a)
+    # mean(b). Numerically it is decisive: the uncentered product form loses
+    # the O(1) covariance in rounding when Y carries a large mean, because
+    # mean(f_joint f_first) and f0_joint f0_first are both O(mean^2). The ST
+    # estimator is a squared difference and the variance is a central moment,
+    # so both are already shift-safe.
     f0_joint = f_joint.mean(axis=0)  # (S,)
-    f0_first = f_first.mean(axis=1)  # (D, S)
-    S1 = ((f_joint[None] * f_first).mean(axis=1) - f0_joint[None] * f0_first) / safe_variance
+    g_joint = f_joint - f0_joint  # (N, S), centered
+    g_first = f_first - f0_joint[None, None]  # (D, N, S), same shift
+    S1 = (
+        (g_joint[None] * g_first).mean(axis=1) - g_joint.mean(axis=0)[None] * g_first.mean(axis=1)
+    ) / safe_variance
     ST = 0.5 * ((f_joint[None] - f_total) ** 2).mean(axis=1) / safe_variance
 
     def _shape(index: np.ndarray) -> Array:

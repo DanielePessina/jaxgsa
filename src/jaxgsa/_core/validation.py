@@ -185,12 +185,22 @@ def _raise_categorical_design(problem: Problem, method: str) -> None:
     names = _categorical_param_names(problem)
     if not names:
         return
+    if problem.has_correlated_inputs:
+        # jaxgsa.sobol.sample refuses correlated problems, so recommending it
+        # here would send the user in a circle. Name the honest state instead.
+        raise ValueError(
+            f"{method} requires continuous (orderable) inputs, but parameters "
+            f"{names} are categorical. This problem also declares a "
+            "correlation, and no variance-based method supports categorical "
+            "plus correlated inputs yet. Analyze given data with "
+            "jaxgsa.optimal_transport or jaxgsa.borgonovo."
+        )
     raise ValueError(
         f"{method} requires continuous (orderable) inputs, but parameters "
         f"{names} are categorical. Use jaxgsa.sobol.sample (the Saltelli "
-        "column-swap scheme is distribution-agnostic), or analyze given "
-        "data with jaxgsa.optimal_transport, jaxgsa.borgonovo, or "
-        "jaxgsa.pawn."
+        "column-swap scheme is distribution-agnostic; it requires a problem "
+        "with no declared correlation), or analyze given data with "
+        "jaxgsa.optimal_transport or jaxgsa.borgonovo."
     )
 
 

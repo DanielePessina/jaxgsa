@@ -18,6 +18,7 @@ from jaxgsa._core.copula import (
     fit_gaussian_copula,
     independent_correlation,
     is_independent,
+    latent_normal_sample,
     latent_to_physical,
     validate_correlation,
 )
@@ -405,6 +406,29 @@ def test_latent_to_physical_applies_the_marginal_inverse_cdfs():
 def test_is_independent_and_identity_helper():
     assert is_independent(independent_correlation(4))
     assert not is_independent(np.array([[1.0, 0.2], [0.2, 1.0]]))
+
+
+def test_unscrambled_latent_sample_skips_the_origin():
+    """The unscrambled sequence starts past the origin, not at a clipped extreme.
+
+    The origin maps through the probit to the clipped ~-7-sigma corner in
+    every coordinate — a point no normal sample should contain. The sampler
+    fast-forwards past it, so the first returned point is the sequence's
+    second point (0.5, ..., 0.5), which maps to the origin of the latent
+    space.
+    """
+    Z = latent_normal_sample(8, 3, seed=0, scramble=False)
+    assert np.all(np.isfinite(Z))
+    assert np.abs(Z).max() < 6.0
+    np.testing.assert_allclose(Z[0], 0.0, atol=1e-12)
+
+
+def test_scrambled_latent_sample_unchanged_by_origin_skip():
+    """The scrambled path is a fixed-seed regression: no fast-forward there."""
+    Z = latent_normal_sample(16, 3, seed=42, scramble=True)
+    unit = scipy.stats.qmc.Sobol(d=3, scramble=True, seed=42).random(16)
+    expected = scipy.stats.norm.ppf(np.clip(unit, 1e-12, 1.0 - 1e-12))
+    np.testing.assert_array_equal(Z, expected)
 
 
 # ---------------------------------------------------------------------------

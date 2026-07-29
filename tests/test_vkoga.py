@@ -359,7 +359,7 @@ def test_to_dataset_schema(gauss_result):
     assert list(ds.coords["param_i"].values) == ["x1", "x2", "x3"]
     np.testing.assert_allclose(ds["correlation"].values, R_GAUSS, atol=1e-12)
     assert ds.attrs["method"] == "vkoga"
-    assert ds.attrs["correlated"] == 1
+    assert ds.attrs["correlated"] is True
     assert ds.attrs["n_centers"] == gauss_result.n_centers
 
 
@@ -369,7 +369,7 @@ def test_to_dataset_time_series_dims(uniform_fits):
     assert ds["S_TC"].dims == ("time", "output", "param")
     assert list(ds.coords["time"].values) == [0.5, 1.0]
     assert ds["variance"].dims == ("time", "output")
-    assert ds.attrs["correlated"] == 0
+    assert ds.attrs["correlated"] is False
 
 
 # --- argument validation ------------------------------------------------------
@@ -386,6 +386,12 @@ def test_scalar_argument_validation_raises_early():
         ({"n_variance": 1}, "n_variance must be >= 2"),
         ({"max_centers": 0}, "max_centers must be >= 1"),
         ({"batch_size": 0}, "batch_size must be >= 1"),
+        ({"gamma": -1.0}, "gamma must be a finite positive number"),
+        ({"gamma": 0.0}, "gamma must be a finite positive number"),
+        ({"gamma": float("nan")}, "gamma must be a finite positive number"),
+        ({"ridge": -1.0}, "ridge must be a finite positive number"),
+        ({"ridge": 0.0}, "ridge must be a finite positive number"),
+        ({"ridge": float("inf")}, "ridge must be a finite positive number"),
     ]
     for overrides, message in cases:
         kwargs = dict(SMALL_KWARGS, **overrides)
@@ -404,6 +410,37 @@ def test_odd_sample_sizes_round_up_to_powers_of_two():
         result = jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, **kwargs)
     assert not [w for w in caught if "balance" in str(w.message)]
     assert np.all(np.isfinite(np.asarray(result.S_TC)))
+
+
+def test_is_correlated_agrees_with_problem_classification():
+    """Result and Problem must classify the same matrix the same way.
+
+    A 1e-10 off-diagonal entry sits above the shared is_independent
+    tolerance (1e-12) but below np.allclose's default. Both surfaces must
+    call it correlated.
+    """
+    import jax.numpy as jnp
+
+    from jaxgsa.vkoga._result import VKOGAResult
+
+    R = np.eye(3)
+    R[0, 1] = R[1, 0] = 1e-10
+    problem = GAUSS_PROBLEM.with_correlation(R)
+    result = VKOGAResult(
+        S_TC=jnp.zeros(3),
+        S_TU=jnp.zeros(3),
+        S_U=jnp.zeros(3),
+        S_C=jnp.zeros(3),
+        S_IU=jnp.zeros(3),
+        problem=problem,
+        correlation=np.asarray(problem.correlation),
+        variance=jnp.ones(()),
+        n_centers=1,
+        gamma=1.0,
+        ridge=1e-6,
+    )
+    assert problem.has_correlated_inputs
+    assert result.is_correlated == problem.has_correlated_inputs
 
 
 # --- precision, cross-validation, determinism ---------------------------------
@@ -447,6 +484,51 @@ def test_cross_validation_path_resolves_gamma():
     assert np.isfinite(result.gamma) and result.gamma > 0
     assert result.ridge == 1e-6
     assert np.all(np.isfinite(np.asarray(result.S_TC)))
+
+
+def test_masked_selection_stops_like_a_training_rows_fit():
+    """Held-out rows must not leak into the residual stopping rule.
+
+    A greedy sweep with a train_mask must stop at the same centre count as
+    the same sweep run on the training rows alone. Before the residual
+    re-mask, the held-out rows accumulated minus-interpolant values, the
+    stopping norm plateaued, and every cross-validation fit ran to
+    max_centers while the final fit stopped early — so the two scored
+    hyperparameters under different stopping behaviour.
+    """
+    import jax.numpy as jnp
+
+    from jaxgsa._core.transforms import cdf_to_unit_interval
+    from jaxgsa.vkoga._engine import _select_centers
+
+    with jax.enable_x64():
+        X = jaxgsa.sampling.monte_carlo(UNIFORM_PROBLEM, 256, seed=11)
+        U = jnp.asarray(cdf_to_unit_interval(jnp.asarray(X), UNIFORM_PROBLEM))
+        y = _uniform_scalar(np.asarray(X))
+        Y = jnp.asarray((y - y.mean())[:, None])
+        mask = np.ones(256, dtype=bool)
+        mask[::10] = False  # hold out every tenth row, CV-style
+
+        _, m_masked = _select_centers(
+            U,
+            Y,
+            gamma=3.0,
+            max_centers=256,
+            tol_residual=0.05,
+            train_mask=jnp.asarray(mask),
+        )
+        _, m_train_only = _select_centers(
+            U[np.flatnonzero(mask)],
+            Y[np.flatnonzero(mask)],
+            gamma=3.0,
+            max_centers=256,
+            tol_residual=0.05,
+        )
+
+    assert int(m_masked) == int(m_train_only)
+    # The loose tolerance stops the sweep long before the candidate pool is
+    # exhausted; running to the cap is the regression signature.
+    assert int(m_masked) < int(mask.sum())
 
 
 def test_determinism_by_seed():

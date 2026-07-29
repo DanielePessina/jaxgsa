@@ -92,8 +92,10 @@ def analyze_vkoga(
             problem's declaration for this call. To fit a matrix from data,
             use :func:`jaxgsa.sampling.fit_correlation` and attach it with
             ``problem.with_correlation(...)``.
-        gamma: RBF shape parameter. ``None`` cross-validates over a grid.
-        ridge: Kernel regularisation. ``None`` cross-validates over a grid.
+        gamma: RBF shape parameter, finite and positive when given. ``None``
+            cross-validates over a grid.
+        ridge: Kernel regularisation, finite and positive when given. ``None``
+            cross-validates over a grid.
         max_centers: Maximum kernel centres the greedy may select, at least 1.
             Defaults to 300, capped at ``N``.
         n_folds: Folds for hyperparameter cross-validation, at least 2.
@@ -114,8 +116,9 @@ def analyze_vkoga(
     Raises:
         ValueError: If ``X``/``Y`` violate the output contract, if the problem
             has fewer than two parameters or any categorical parameter, if
-            ``correlation`` is not ``None`` or a valid matrix, or if a size
-            argument is out of range.
+            ``correlation`` is not ``None`` or a valid matrix, if ``gamma`` or
+            ``ridge`` is not finite and positive, or if a size argument is out
+            of range.
         RuntimeError: If every cross-validation score is non-finite.
 
     Warns:
@@ -131,6 +134,9 @@ def analyze_vkoga(
         raise ValueError(f"max_centers must be >= 1, got {max_centers}")
     if n_folds < 2:
         raise ValueError(f"n_folds must be >= 2 for cross-validation, got {n_folds}")
+    for name, value in (("gamma", gamma), ("ridge", ridge)):
+        if value is not None and not (np.isfinite(value) and value > 0):
+            raise ValueError(f"{name} must be a finite positive number, got {value}")
     for name, value in (("n_outer", n_outer), ("n_inner", n_inner), ("n_variance", n_variance)):
         if value < 2:
             raise ValueError(f"{name} must be >= 2, got {value}")

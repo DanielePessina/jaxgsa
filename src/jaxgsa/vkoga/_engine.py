@@ -213,9 +213,12 @@ def _select_centers(
         v = (k_col - V @ V[i]) / sqrt_p
 
         # Interpolation residual in the same basis: one coefficient row per
-        # output slice, since all slices share this basis.
+        # output slice, since all slices share this basis. Re-mask after the
+        # update: v is dense, so the outer product writes minus-interpolant
+        # values into held-out rows. Without the mask those rows accumulate
+        # and the stopping norm below never converges inside cross-validation.
         c = residual[i] / sqrt_p  # (S,)
-        residual = residual - jnp.outer(v, c)
+        residual = jnp.where(mask[:, None], residual - jnp.outer(v, c), 0.0)
 
         V = V.at[:, m].set(v)
         blocked = blocked.at[i].set(True)
@@ -229,9 +232,10 @@ def _select_centers(
         # NaN under the square root.
         p2_next = jnp.where(blocked, -jnp.inf, 1.0 - jnp.sum(V * V, axis=1))
         power = jnp.sqrt(jnp.maximum(jnp.max(p2_next), 0.0))
-        # Selected points are interpolated exactly, so their rows are already
-        # ~0 and summing over all rows equals summing over the remaining ones.
-        # Relative to each slice's own norm, so the rule is scale-free.
+        # Held-out rows are re-masked to exactly zero above, and selected
+        # points are interpolated exactly, so summing over all rows equals
+        # summing over the active training rows. Relative to each slice's own
+        # norm, so the rule is scale-free.
         res = jnp.max(jnp.sqrt(jnp.sum(residual**2, axis=0)) / res_scale)
         return (V, residual, blocked, idx, m, power, res)
 

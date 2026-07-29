@@ -986,3 +986,33 @@ def test_to_morris_raises_for_categorical_design():
     sr = sobol.sample(problem, 128, seed=0, verbose=False)
     with pytest.raises(ValueError, match="'c'"):
         sr.to_morris(verbose=False)
+
+
+def test_categorical_design_error_is_honest_about_correlation():
+    """The refusal must not point to a sampler that refuses the same problem.
+
+    For a plain categorical problem the message may recommend
+    jaxgsa.sobol.sample. For a categorical problem that also declares a
+    correlation, sobol.sample would refuse too — the message must instead
+    say that no variance-based route exists and name the given-data methods.
+    """
+    problem = Problem.from_dict(
+        {
+            "x1": (0.0, 1.0),
+            "x2": (0.0, 1.0),
+            "c": {"dist": "categorical", "probs": PROBS},
+        }
+    )
+    # kucherenko.sample is exempt from the correlated-design guard, so its
+    # categorical refusal is where the combined case actually surfaces.
+    with pytest.raises(ValueError, match=r"jaxgsa\.sobol\.sample"):
+        jaxgsa.kucherenko.sample(problem, 64)
+
+    R = np.eye(3)
+    R[0, 1] = R[1, 0] = 0.5  # couples the continuous pair; identity row for c
+    correlated = problem.with_correlation(R)
+    with pytest.raises(ValueError, match="no variance-based method") as excinfo:
+        jaxgsa.kucherenko.sample(correlated, 64)
+    message = str(excinfo.value)
+    assert "sobol.sample" not in message
+    assert "optimal_transport" in message and "borgonovo" in message

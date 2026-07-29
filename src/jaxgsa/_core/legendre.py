@@ -27,16 +27,20 @@ def legendre_orthonormal(x: Array | np.ndarray, max_degree: int) -> Array | np.n
     the uniform measure on ``[-1, 1]`` (weight 1/2).
 
     The implementation follows the input type. JAX arrays (including tracers)
-    stay JAX. NumPy arrays stay NumPy and keep their dtype.
+    stay JAX. NumPy arrays stay NumPy. The recurrence runs in the backend's
+    default float dtype (float64 under x64), the same promotion the Hermite
+    basis applies, so a float32 ``x`` does not silently downgrade a PCE
+    design matrix and mixed uniform/Gaussian problems get one basis dtype.
 
     Args:
         x: ``(...,)`` points in ``[-1, 1]``.
         max_degree: Highest polynomial degree.
 
     Returns:
-        ``(..., max_degree + 1)`` basis values.
+        ``(..., max_degree + 1)`` basis values, in the default float dtype.
     """
     xp = jnp if isinstance(x, jax.Array) else np
+    x = x.astype(xp.zeros(()).dtype)
     columns = [xp.ones_like(x)]
     if max_degree >= 1:
         columns.append(x)

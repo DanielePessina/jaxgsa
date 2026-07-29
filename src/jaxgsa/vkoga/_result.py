@@ -9,6 +9,7 @@ import numpy as np
 import xarray as xr
 from jax import Array
 
+from jaxgsa._core.copula import is_independent
 from jaxgsa._core.surrogate import SurrogateResult, _PredictPlan
 from jaxgsa._core.validation import _dims_and_coords
 from jaxgsa.problem import Problem
@@ -104,8 +105,13 @@ class VKOGAResult(SurrogateResult):
 
     @property
     def is_correlated(self) -> bool:
-        """Whether the indices were computed under a non-trivial dependency."""
-        return not bool(np.allclose(self.correlation, np.eye(self.correlation.shape[0])))
+        """Whether the indices were computed under a non-trivial dependency.
+
+        Delegates to the same identity test as
+        ``Problem.has_correlated_inputs``, so the two classifications always
+        agree.
+        """
+        return not is_independent(self.correlation)
 
     def __repr__(self) -> str:
         D = len(self.problem.names)
@@ -149,6 +155,6 @@ class VKOGAResult(SurrogateResult):
                 "n_centers": self.n_centers,
                 "gamma": self.gamma,
                 "ridge": self.ridge,
-                "correlated": int(self.is_correlated),
+                "correlated": bool(self.is_correlated),
             },
         )

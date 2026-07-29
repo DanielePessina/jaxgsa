@@ -13,6 +13,7 @@ Tolerances are set from the measured estimator error at the test sample sizes
 
 from __future__ import annotations
 
+import jax
 import numpy as np
 import pytest
 
@@ -86,6 +87,27 @@ def test_independent_ishigami_matches_sobol():
     np.testing.assert_allclose(np.asarray(result.ST), ishigami.ANALYTICAL_ST, atol=2e-2)
     np.testing.assert_allclose(np.asarray(result.S1), np.asarray(sob.S1), atol=2e-2)
     np.testing.assert_allclose(np.asarray(result.ST), np.asarray(sob.ST), atol=2e-2)
+
+
+def test_large_output_mean_does_not_corrupt_the_indices():
+    """A +1e8 output offset must leave every index unchanged.
+
+    The S1 estimator subtracts one shared shift from both product factors,
+    so the covariance never competes with O(mean^2) terms in rounding. The
+    uncentered product form lost it: at this configuration the offset moved
+    S1 by up to 0.11 (and zeroed small indices). Measured drift after the
+    fix is < 3e-11; 1e-8 leaves ~300x headroom. Runs under x64 so the f32
+    representation of Y + 1e8 does not mask the estimator behaviour.
+    """
+    problem = GAUSS_PROBLEM.with_correlation(R_GAUSS)
+    ks = jaxgsa.kucherenko.sample(problem, 2048, seed=1)
+    Y = np.asarray(ks.samples @ A_COEF, dtype=np.float64)
+    with jax.enable_x64():
+        base = jaxgsa.kucherenko.analyze(ks, Y)
+        shifted = jaxgsa.kucherenko.analyze(ks, Y + 1e8)
+    np.testing.assert_allclose(np.asarray(shifted.S1), np.asarray(base.S1), atol=1e-8)
+    np.testing.assert_allclose(np.asarray(shifted.ST), np.asarray(base.ST), atol=1e-8)
+    np.testing.assert_allclose(float(shifted.variance), float(base.variance), rtol=1e-9)
 
 
 # --- design contracts ---------------------------------------------------------

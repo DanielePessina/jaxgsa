@@ -611,13 +611,19 @@ def latent_normal_sample(n: int, dim: int, *, seed: int, scramble: bool = True) 
             as-is here.
         dim: Dimension of each point.
         seed: Seed for the scrambling.
-        scramble: Whether to scramble the sequence. Unscrambled Sobol' starts
-            at the origin, which maps to an infinite normal deviate.
+        scramble: Whether to scramble the sequence. With ``scramble=False``
+            the sequence's first point (the origin) is skipped: the probit
+            would map it to the clipped extreme deviate, a point no normal
+            sample should contain. The scrambled path is unaffected.
 
     Returns:
         ``(n, dim)`` array of standard normal variates.
     """
     engine = qmc.Sobol(d=dim, scramble=scramble, seed=seed)
+    if not scramble:
+        # Skip the all-zeros origin point instead of clipping it to -7 sigma
+        # in every coordinate.
+        engine.fast_forward(1)
     unit = engine.random(n)
     # Sobol' points can land on exactly 0 or 1 when unscrambled; clip before the
     # probit so the deviates stay finite.
