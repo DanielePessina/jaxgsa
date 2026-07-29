@@ -332,22 +332,23 @@ def test_extract_categorical_codes_rejects_non_code_values():
 def test_categorical_class_layout_partitions_by_level():
     codes = np.array([[0], [1], [0], [2], [1], [0]], dtype=np.int64)
     all_idx = np.arange(6, dtype=np.int64)[None, :]
-    cls_idx, mask, counts = _categorical_class_layout(codes, all_idx, [3])
+    cls_idx, counts = _categorical_class_layout(codes, all_idx, [3])
     np.testing.assert_array_equal(counts[0, 0], [3, 2, 1])
-    # Class members are the rows at each level, in original row order.
-    np.testing.assert_array_equal(cls_idx[0, 0, 0][mask[0, 0, 0]], [0, 2, 5])
-    np.testing.assert_array_equal(cls_idx[0, 0, 1][mask[0, 0, 1]], [1, 4])
-    np.testing.assert_array_equal(cls_idx[0, 0, 2][mask[0, 0, 2]], [3])
+    # Class members are the rows at each level, in original row order; the
+    # first count entries of each class are the valid ones.
+    np.testing.assert_array_equal(cls_idx[0, 0, 0][: counts[0, 0, 0]], [0, 2, 5])
+    np.testing.assert_array_equal(cls_idx[0, 0, 1][: counts[0, 0, 1]], [1, 4])
+    np.testing.assert_array_equal(cls_idx[0, 0, 2][: counts[0, 0, 2]], [3])
 
 
 def test_categorical_class_layout_recounts_bootstrap_resamples():
     codes = np.array([[0], [0], [1], [1]], dtype=np.int64)
     all_idx = np.array([[0, 1, 2, 3], [0, 0, 0, 2]], dtype=np.int64)
-    cls_idx, mask, counts = _categorical_class_layout(codes, all_idx, [2])
+    cls_idx, counts = _categorical_class_layout(codes, all_idx, [2])
     np.testing.assert_array_equal(counts[0, 0], [2, 2])
     np.testing.assert_array_equal(counts[1, 0], [3, 1])
-    np.testing.assert_array_equal(cls_idx[1, 0, 0][mask[1, 0, 0]], [0, 0, 0])
-    np.testing.assert_array_equal(cls_idx[1, 0, 1][mask[1, 0, 1]], [2])
+    np.testing.assert_array_equal(cls_idx[1, 0, 0][: counts[1, 0, 0]], [0, 0, 0])
+    np.testing.assert_array_equal(cls_idx[1, 0, 1][: counts[1, 0, 1]], [2])
 
 
 def test_empty_declared_level_warns_and_completes():

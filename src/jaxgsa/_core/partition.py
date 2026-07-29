@@ -42,33 +42,32 @@ if TYPE_CHECKING:
 PartitionGroup = tuple[Array, Array]
 
 
-def _class_layout(N: int, M: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _class_layout(N: int, M: int) -> tuple[np.ndarray, np.ndarray]:
     """Build static gather indices for equal-frequency rank classes.
 
     Class ``j`` holds the samples whose ordinal rank ``r`` (1-based)
     satisfies ``m[j] < r <= m[j+1]`` with ``m = linspace(0, N, M+1)`` --
     the same membership rule as SALib. Because floor of the shared float
     edges is used on both sides, class sizes (which differ by at most one)
-    match SALib exactly; classes are padded to the largest size with a
-    validity mask so downstream shapes stay static.
+    match SALib exactly; classes are padded to the largest size, and the
+    kernels derive the validity mask from the sizes
+    (:func:`_mask_from_counts`), so downstream shapes stay static.
 
     Args:
         N: Number of samples.
         M: Number of classes.
 
     Returns:
-        ``(take, mask, sizes)`` where ``take (M, P)`` indexes into a
-        rank-sorted array (entries beyond a class's size are clamped),
-        ``mask (M, P)`` flags valid entries, and ``sizes (M,)`` holds the
-        true class sizes.
+        ``(take, sizes)`` where ``take (M, P)`` indexes into a
+        rank-sorted array (entries beyond a class's size are clamped) and
+        ``sizes (M,)`` holds the true class sizes.
     """
     edges = np.floor(np.linspace(0.0, N, M + 1)).astype(np.int64)
     sizes = np.diff(edges)
     n_pad = int(sizes.max())
     take = edges[:-1, None] + np.arange(n_pad)[None, :]
-    mask = np.arange(n_pad)[None, :] < sizes[:, None]
     take = np.minimum(take, N - 1).astype(np.int32)
-    return take, mask, sizes
+    return take, sizes
 
 
 def _extract_categorical_codes(
@@ -145,7 +144,7 @@ def _categorical_class_layout(
     codes: np.ndarray,
     all_idx: np.ndarray,
     n_levels: list[int],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     """Per-replicate, per-column class layout for categorical columns.
 
     Each column gets one class per declared level; a class holds exactly
@@ -161,11 +160,12 @@ def _categorical_class_layout(
         n_levels: Declared level count per column.
 
     Returns:
-        ``(cls_idx, mask, counts)`` where ``cls_idx (R, Dc, M, P)`` holds
+        ``(cls_idx, counts)`` where ``cls_idx (R, Dc, M, P)`` holds
         global sample indices per class (``M = max(n_levels)``, entries
-        beyond a class's size are clamped), ``mask (R, Dc, M, P)`` flags
-        valid entries, and ``counts (R, Dc, M)`` holds the true class
-        sizes (0 for empty or padded level slots).
+        beyond a class's size are clamped) and ``counts (R, Dc, M)``
+        holds the true class sizes (0 for empty or padded level slots);
+        the kernels derive the validity mask from the counts
+        (:func:`_mask_from_counts`).
     """
     R, N = all_idx.shape
     Dc = codes.shape[1]
@@ -180,7 +180,6 @@ def _categorical_class_layout(
     P = int(counts.max())
     arange_p = np.arange(P, dtype=np.int64)
     cls_idx = np.empty((R, Dc, M, P), dtype=np.int32)
-    mask = arange_p[None, None, None, :] < counts[..., None]
     for j in range(Dc):
         v = codes[:, j][all_idx]
         # Stable sort groups each level into a contiguous slice whose edges
@@ -193,7 +192,7 @@ def _categorical_class_layout(
         take = np.minimum(edges[:, :-1, None] + arange_p[None, None, :], N - 1)  # (R, M, P)
         gathered = np.take_along_axis(sorted_global, take.reshape(R, M * P), axis=1)
         cls_idx[:, j] = gathered.reshape(R, M, P).astype(np.int32)
-    return cls_idx, mask, counts
+    return cls_idx, counts
 
 
 @jax.jit
@@ -292,7 +291,7 @@ def build_partition_groups(
     groups: list[PartitionGroup] = []
     group_dims: list[int] = []
     if cont_dims:
-        take_np, _, sizes_np = _class_layout(N, M)
+        take_np, sizes_np = _class_layout(N, M)
         X_cont = X[:, jnp.asarray(cont_dims)] if cat_dims else X
         # Rank the inputs once for every replicate (never per output-column
         # chunk); the kernels reuse the class indices across chunks.
@@ -302,9 +301,7 @@ def build_partition_groups(
     if cat_dims:
         codes = _extract_categorical_codes(problem, np.asarray(X), dims_levels)
         levels = [n_levels for _, n_levels in dims_levels]
-        cat_cls_np, _, cat_counts_np = _categorical_class_layout(
-            codes, np.asarray(all_idx), levels
-        )
+        cat_cls_np, cat_counts_np = _categorical_class_layout(codes, np.asarray(all_idx), levels)
         _warn_empty_levels(problem, dims_levels, cat_counts_np[0])
         groups.append((jnp.asarray(cat_cls_np), jnp.asarray(cat_counts_np)))
         group_dims.extend(cat_dims)

@@ -150,7 +150,7 @@ class TestOTPOTComparison:
         X = jax.random.uniform(key, (N, 2))
         Y = jnp.sin(3 * X[:, 0]) + 0.3 * jax.random.normal(jax.random.PRNGKey(2), (N,))
 
-        take, mask, sizes = _class_layout(N, M)
+        take, sizes = _class_layout(N, M)
         all_idx = jnp.arange(N, dtype=jnp.int32)[None, :]
         cls_idx = _build_class_indices(X, all_idx, jnp.asarray(take))
         # Canonical partition-group layout: (cls_idx, counts) with
@@ -165,7 +165,7 @@ class TestOTPOTComparison:
         for d in range(2):
             acc = 0.0
             for m in range(M):
-                cond = y_np[cls[d, m][mask[m]]]
+                cond = y_np[cls[d, m][: sizes[m]]]
                 acc += sizes[m] / N * ot.wasserstein_1d(y_np, cond, p=2)
             ref[d] = acc / V
         np.testing.assert_allclose(np.asarray(ot_idx[0, 0]), ref, atol=1e-4)

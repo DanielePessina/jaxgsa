@@ -755,7 +755,7 @@ def analyze(
         # through the identical estimator as a single-replicate pass (the
         # baseline needs no bootstrap interval). The dummy is continuous, so
         # it always uses the shared equal-frequency layout.
-        take_np, _, sizes_np = _class_layout(N, M)
+        take_np, sizes_np = _class_layout(N, M)
         dummy_col = jax.random.permutation(key_dummy, N)[:, None]
         dummy_cls_idx = _build_class_indices(dummy_col, identity, jnp.asarray(take_np))
         dummy_group = (dummy_cls_idx, jnp.asarray(sizes_np)[None, None, :])  # (1, 1, M, P)
