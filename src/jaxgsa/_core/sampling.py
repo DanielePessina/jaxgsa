@@ -18,6 +18,20 @@ if TYPE_CHECKING:
     from jaxgsa.problem import Problem
 
 
+# Absolute support bound the library puts on every unbounded marginal.
+#
+# Unit-cube coordinates are clipped into ``[UNIT_CLIP, 1 - UNIT_CLIP]`` before
+# an inverse CDF runs, because ``ppf(0)`` and ``ppf(1)`` return -inf and +inf.
+# The clip therefore *is* the library's support bound: no Gaussian draw can
+# ever leave the range +/-7.0345 standard deviations from its mean.
+#
+# The value stays at 1e-12 on purpose. It is Hermite-safe to about degree 8,
+# and the moment error it introduces is about 1e-10 — far below any sampling
+# error a user will see. A larger clip would visibly truncate the marginal; a
+# smaller one runs into the tail resolution of the scipy quantile functions.
+UNIT_CLIP = 1e-12
+
+
 def _is_power_of_2(n: int) -> bool:
     """Check whether *n* is a positive power of 2."""
     return n >= 1 and (n & (n - 1)) == 0
@@ -72,9 +86,10 @@ def _transform_gaussian(
 ) -> np.ndarray:
     """Transform unit-interval samples into Gaussian or truncated Gaussian values."""
     # Inverse-CDF sampling (probability integral transform): if U ~ Uniform(0,1)
-    # then F^{-1}(U) ~ F.  Clipping to (1e-12, 1-1e-12) prevents ppf (percent-
-    # point function = quantile = inverse CDF) from returning +/-inf at boundaries.
-    clipped = np.clip(unit_values, 1e-12, 1.0 - 1e-12)
+    # then F^{-1}(U) ~ F.  Clipping to (UNIT_CLIP, 1-UNIT_CLIP) prevents ppf
+    # (percent-point function = quantile = inverse CDF) from returning +/-inf
+    # at the boundaries.
+    clipped = np.clip(unit_values, UNIT_CLIP, 1.0 - UNIT_CLIP)
     std = math.sqrt(variance)
     if low is None and high is None:
         return mean + std * norm.ppf(clipped)
@@ -122,8 +137,8 @@ def _inverse_transform_gaussian(
 ) -> np.ndarray:
     """Map Gaussian or truncated-Gaussian values back onto the unit interval."""
     # Forward CDF, the inverse of the ppf used by _transform_gaussian. Values
-    # produced by that function were clipped to (1e-12, 1-1e-12) beforehand, so
-    # the round trip cannot land exactly on 0 or 1 here.
+    # produced by that function were clipped to (UNIT_CLIP, 1-UNIT_CLIP)
+    # beforehand, so the round trip cannot land exactly on 0 or 1 here.
     std = math.sqrt(variance)
     if low is None and high is None:
         return np.asarray(norm.cdf((values - mean) / std), dtype=np.float64)
