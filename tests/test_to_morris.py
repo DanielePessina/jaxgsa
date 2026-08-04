@@ -276,6 +276,9 @@ class TestDegenerateBlocks:
         with pytest.warns(UserWarning, match="radial blocks whose step is below"):
             m = s.to_morris(verbose=False)
         assert m.n_trajectories < 64
+        # The loss is recorded, so analyze() can report it as a loss and not
+        # as a design the user asked to be small.
+        assert m.n_blocks_dropped == 64 - m.n_trajectories
         assert m.n_trajectories == m.ee_delta.shape[0]
         assert m.n_expanded == m.n_trajectories * (D + 1)
         assert np.all(np.abs(m.ee_delta) > 0)

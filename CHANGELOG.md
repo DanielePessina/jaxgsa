@@ -60,10 +60,15 @@
   step actually taken — a systematic error of about 1% at the former default
   `q`. The divisor is now rescaled with the coordinate, per dimension. A model
   linear in the unit coordinate now recovers its coefficients exactly.
-- `morris.analyze`'s "statistically unreliable" warning now fires whenever
-  fewer than 10 blocks survive, whatever thinned the design. It previously
-  fired only inside the non-finite-cleaning branch, so `to_morris` could drop
-  to 4 surviving blocks in silence.
+- `morris.analyze` now reports a design that lost blocks. The warning follows
+  the cause, not the surviving count. A small design that you asked for stays
+  silent. A design that lost blocks gives a warning at any count, and the
+  message names each cause: blocks that `SobolSamples.to_morris` dropped for
+  having no measurable step, and blocks that non-finite cleaning removed. The
+  message adds the "statistically unreliable" note when fewer than 10
+  trajectories remain. Before, `to_morris` could drop to 4 surviving blocks in
+  silence, and a deliberate `r = 8` design gave a warning it did not deserve.
+  `MorrisSamples` records the loss in the new `n_blocks_dropped` field.
 
 ### Internal
 

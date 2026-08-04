@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+from dataclasses import replace
 from typing import Any, cast
 
 import jax
@@ -576,6 +578,64 @@ class TestToDataset:
         ds = analyze(sr, Y3).to_dataset(time_coords=[0.5, 1.0])
         assert list(ds.coords["time"].values) == [0.5, 1.0]
         assert ds["mu_star"].dims == ("time", "output", "param")
+
+
+class TestThinningWarning:
+    """The warning must follow the cause of thinning, not the surviving count."""
+
+    def _linear_Y(self, sr) -> jnp.ndarray:
+        return jnp.asarray(linear.evaluate(jnp.asarray(sr.samples)))
+
+    def test_small_deliberate_design_is_silent(self):
+        """r = 8 is below the floor, but the user asked for it. Say nothing."""
+        sr = sample(linear.PROBLEM, n_trajectories=8, seed=1, verbose=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            analyze(sr, self._linear_Y(sr))
+
+    def test_downsample_to_a_small_design_is_silent(self):
+        """Downsampling is deliberate too, so it must not trip the warning."""
+        sr = sample(linear.PROBLEM, n_trajectories=20, seed=1, verbose=False)
+        Y = np.asarray(linear.evaluate(jnp.asarray(sr.samples)))
+        sr_small, Y_small = sr.downsample(8, Y)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            analyze(sr_small, jnp.asarray(Y_small))
+
+    def test_lost_blocks_warn_above_the_floor(self):
+        """40 of 44 remain: well above the floor, but 4 blocks were lost."""
+        sr = sample(linear.PROBLEM, n_trajectories=40, seed=1, verbose=False)
+        sr = replace(sr, n_blocks_dropped=4)
+        with pytest.warns(UserWarning) as record:
+            analyze(sr, self._linear_Y(sr))
+        message = str(record[0].message)
+        assert "40 of the 44 requested trajectories remain" in message
+        assert "no measurable step" in message
+        assert "statistically unreliable" not in message
+
+    def test_lost_blocks_and_small_design_warn_with_the_floor(self):
+        """Asked for 8, got 4: name the loss and add the reliability note."""
+        sr = sample(linear.PROBLEM, n_trajectories=4, seed=1, verbose=False)
+        sr = replace(sr, n_blocks_dropped=4)
+        with pytest.warns(UserWarning) as record:
+            analyze(sr, self._linear_Y(sr))
+        message = str(record[0].message)
+        assert "4 of the 8 requested trajectories remain" in message
+        assert "no measurable step" in message
+        assert "statistically unreliable" in message
+
+    def test_nonfinite_loss_names_both_causes(self):
+        """Non-finite cleaning and an earlier block loss are reported together."""
+        sr = sample(ishigami.PROBLEM, n_trajectories=12, method="radial", seed=8, verbose=False)
+        sr = replace(sr, n_blocks_dropped=2)
+        Y = np.asarray(ishigami.evaluate(jnp.asarray(sr.samples)), dtype=np.float64)
+        Y[int(sr.expanded_to_unique[3 * (sr.n_params + 1)])] = np.nan
+        with pytest.warns(UserWarning) as record:
+            analyze(sr, jnp.asarray(Y))
+        message = str(record[0].message)
+        assert "11 of the 14 requested trajectories remain" in message
+        assert "no measurable step" in message
+        assert "non-finite values" in message
 
 
 class TestValidation:

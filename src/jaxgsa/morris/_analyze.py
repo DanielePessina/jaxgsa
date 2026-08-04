@@ -33,9 +33,9 @@ from jaxgsa.morris._result import MorrisResult
 from jaxgsa.morris._sampling import MorrisSamples
 
 # Minimum trajectories for statistically meaningful screening measures.
-# Enforced as a warning against the surviving block count, whatever the cause:
-# a small design, blocks dropped for an unmeasurable step, or non-finite
-# cleaning.
+# Reported only when the design lost blocks that the user did not give up:
+# blocks with an unmeasurable step, or blocks that non-finite cleaning removed.
+# A small design the user asked for is deliberate and stays silent.
 _MIN_TRAJECTORIES = 10
 
 # Peak-memory budget (in array elements) for one bootstrap chunk. Each resample
@@ -228,9 +228,18 @@ def analyze(
     Raises:
         ValueError: If ``Y`` does not have 1, 2, or 3 dimensions; if ``Y``'s
             first axis does not match ``sampling_result.n_runs``; if fewer
-            than 2 trajectories survive non-finite cleaning; if ``ci_method``
+            than 2 trajectories survive cleaning; if ``ci_method``
             is invalid; if ``num_resamples > 0`` but ``key`` is ``None``; or
             if ``chunk_size < 1``.
+
+    Warns:
+        UserWarning: If the design holds fewer trajectories than the user
+            asked for. Non-finite cleaning removes trajectories here, and a
+            derived design can already have lost blocks with no measurable
+            step. The message names the cause, and it adds a reliability note
+            when fewer than 10 trajectories remain. A small design that the
+            user asked for is deliberate, so it gives no warning.
+        UserWarning: If an output slice has zero variance.
     """
     if ci_method not in {"quantile", "gaussian"}:
         raise ValueError("ci_method must be one of {'quantile', 'gaussian'}")
@@ -247,25 +256,40 @@ def analyze(
 
     Y, idx_after, idx_before, delta, n_dropped = _drop_nonfinite_trajectories(Y, sampling_result)
     remaining = sampling_result.n_trajectories - n_dropped
-    if n_dropped > 0:
-        pct = 100.0 * n_dropped / sampling_result.n_trajectories
-        warnings.warn(
-            f"jaxgsa: dropped {n_dropped} of {sampling_result.n_trajectories} trajectories "
-            f"({pct:.1f}%) containing non-finite values; {remaining} trajectories remain",
-            stacklevel=2,
-        )
-        if remaining < 2:
-            raise ValueError("Fewer than 2 trajectories remain after dropping non-finite values")
 
-    # The reliability floor applies to whatever survives, whatever thinned the
-    # design: a small r the user asked for, blocks that SobolSamples.to_morris
-    # dropped for having no measurable step, or non-finite cleaning just above.
-    if remaining < _MIN_TRAJECTORIES:
-        warnings.warn(
-            f"jaxgsa: only {remaining} trajectories remain — results may be "
-            f"statistically unreliable (recommend >= {_MIN_TRAJECTORIES})",
-            stacklevel=2,
+    # Warn on the cause of thinning, not on the surviving count. A small r the
+    # user asked for is a deliberate choice, so it stays silent. Blocks the
+    # user never gave up are worth reporting at any count: blocks that
+    # SobolSamples.to_morris dropped for having no measurable step, or blocks
+    # that non-finite cleaning just removed. The reliability floor is added to
+    # that message when the survivors also fall below it.
+    n_lost_upstream = sampling_result.n_blocks_dropped
+    n_lost = n_lost_upstream + n_dropped
+    if n_lost > 0:
+        requested = remaining + n_lost
+        causes = []
+        if n_lost_upstream > 0:
+            causes.append(
+                f"the source design dropped {n_lost_upstream} for having no measurable step"
+            )
+        if n_dropped > 0:
+            pct = 100.0 * n_dropped / sampling_result.n_trajectories
+            causes.append(
+                f"dropped {n_dropped} of {sampling_result.n_trajectories} ({pct:.1f}%) "
+                "containing non-finite values"
+            )
+        message = (
+            f"jaxgsa: {remaining} of the {requested} requested trajectories remain: "
+            + "; ".join(causes)
         )
+        if remaining < _MIN_TRAJECTORIES:
+            message += (
+                f" — results may be statistically unreliable (recommend >= {_MIN_TRAJECTORIES})"
+            )
+        warnings.warn(message, stacklevel=2)
+
+    if remaining < 2:
+        raise ValueError("Fewer than 2 trajectories remain after cleaning")
 
     if prenormalize:
         Y, _, _, _ = _prenormalize_outputs(Y)

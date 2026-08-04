@@ -88,6 +88,12 @@ class MorrisSamples(UniqueDesignSamples):
             so that ``EE = (Y[after] - Y[before]) / delta``.
         n_params: Number of problem dimensions ``D``.
         problem: Problem definition used to transform the samples.
+        n_blocks_dropped: Number of blocks that the design lost at
+            construction, because their step was not measurable. This is 0
+            for a design that ``jaxgsa.morris.sample()`` built. It can be
+            positive only for a design derived from another method, such as
+            :meth:`jaxgsa.sobol.SobolSamples.to_morris`. The analysis reports
+            the loss, because the user did not ask for a smaller design.
     """
 
     samples: np.ndarray  # shape (n_unique, D), scaled to bounds
@@ -101,6 +107,7 @@ class MorrisSamples(UniqueDesignSamples):
     ee_delta: np.ndarray
     n_params: int
     problem: Problem
+    n_blocks_dropped: int = 0
 
     @overload
     def downsample(self, n_trajectories: int) -> MorrisSamples: ...
@@ -166,6 +173,9 @@ class MorrisSamples(UniqueDesignSamples):
             ee_delta=self.ee_delta[:n_trajectories].copy(),
             n_params=self.n_params,
             problem=self.problem,
+            # The earlier loss stays part of this design's history. The new,
+            # smaller size is deliberate, but the dropped blocks are not.
+            n_blocks_dropped=self.n_blocks_dropped,
         )
 
         if Y_small is not None:
@@ -186,6 +196,7 @@ class MorrisSamples(UniqueDesignSamples):
             "n_trajectories": self.n_trajectories,
             "num_levels": self.num_levels,
             "method": self.method,
+            "n_blocks_dropped": self.n_blocks_dropped,
         }
 
     @classmethod
@@ -215,6 +226,8 @@ class MorrisSamples(UniqueDesignSamples):
             ee_delta=arrays["ee_delta"],
             n_params=problem.num_vars,
             problem=problem,
+            # Files written before this field existed have no entry for it.
+            n_blocks_dropped=int(meta.get("n_blocks_dropped", 0)),
         )
 
 
@@ -308,6 +321,7 @@ def _radial_samples_from_blocks(
         ee_delta=ee_delta,
         n_params=D,
         problem=problem,
+        n_blocks_dropped=n_dropped,
     )
 
 
