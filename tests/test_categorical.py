@@ -179,12 +179,15 @@ def test_identity_categorical_rows_survive_psd_repair():
             "c": {"dist": "categorical", "probs": [0.5, 0.5]},
         }
     )
-    # Non-PSD continuous block; the categorical row is exact identity.
+    # Mildly non-PSD continuous block; the categorical row is exact identity.
+    # The repair has to engage, but must stay under the "declared" policy's
+    # material threshold so it warns rather than raising — a matrix that moved
+    # further would be rejected before the categorical reset ever ran.
     R = np.array(
         [
-            [1.0, 0.9, 0.9, 0.0],
-            [0.9, 1.0, -0.9, 0.0],
-            [0.9, -0.9, 1.0, 0.0],
+            [1.0, 0.52, 0.52, 0.0],
+            [0.52, 1.0, -0.52, 0.0],
+            [0.52, -0.52, 1.0, 0.0],
             [0.0, 0.0, 0.0, 1.0],
         ]
     )
