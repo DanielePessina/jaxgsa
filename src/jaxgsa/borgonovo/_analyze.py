@@ -412,6 +412,16 @@ def analyze(
     (X, Y) sample works. A given-data first-order Sobol index S1 is
     returned from the same partition at negligible extra cost.
 
+    Correlated inputs are supported: the estimator partitions on the inputs'
+    ordinal ranks and compares output densities, so a declared
+    ``problem.correlation`` does not invalidate it. Under dependence the index
+    then measures each input's total association with the output, including
+    effects carried by the inputs it correlates with. The companion ``S1`` is
+    the given-data first-order Sobol index and reads the same way. Neither
+    index separates the direct effect from the correlation-borne one; use
+    :mod:`jaxgsa.vkoga` or :mod:`jaxgsa.kucherenko` for that split, which need
+    continuous inputs.
+
     Args:
         problem: Problem definition with D parameters.
         X: Input sample matrix ``(N, D)``.
