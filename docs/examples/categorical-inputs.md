@@ -71,6 +71,30 @@ A declared level with no observed samples is dropped from the class
 average, with a `UserWarning`. `n_partitions` / `n_classes` apply to the
 continuous columns only.
 
+### Delta on a near-deterministic level
+
+A categorical level often maps to one output value, or to one value plus
+a small amount of noise. The conditional density is then a spike. The
+delta estimator compares densities on a shared output grid of `grid_size`
+points, and it cannot resolve a spike much narrower than one grid step.
+jaxgsa widens such a class to a bandwidth the grid can integrate and
+emits a `UserWarning`.
+
+Two things follow from this:
+
+- The delta of such an input depends on `grid_size` and is **biased low**.
+  On a noise-free three-level model with true delta `2/3`, the estimate is
+  0.56 at `grid_size=50` and about 0.61 at `grid_size=100` and above. The
+  bias does not go away as `N` grows. Read delta on a near-deterministic
+  level as a ranking signal, not a calibrated number. `grid_size` is the
+  knob that moves it.
+- If an estimate still leaves `[0, 1]`, the estimator has failed and
+  jaxgsa warns and names the parameter. The value comes back unclipped, so
+  the failure stays visible instead of looking like a valid `1.0`.
+
+`degenerate_tol` and `degenerate_bandwidth` let you override when a class
+counts as too narrow and how wide it is made. The defaults suit most work.
+
 ## Analyze with Sobol' (the Saltelli scheme)
 
 The Saltelli design works because its estimators only ever copy coordinate
@@ -90,6 +114,21 @@ normally inflates the design until it has `n_samples` unique rows; for
 categorical problems it stops when the achievable distinct-row count is
 reached and keeps duplicate rows, with a `UserWarning`. Duplicate rows
 are valid Saltelli samples — deduplication only saves model evaluations.
+
+::: warning `sr.samples` is an evaluation set, not a sample
+`sr.samples` holds the **unique** rows to evaluate. Deduplication removes
+repeated rows, so the empirical frequencies of a column in `sr.samples` do
+not match the declared marginal. With `probs = [0.9, 0.1]` the `sr.samples`
+column shows about `[0.84, 0.16]`, not `[0.9, 0.1]`. Categorical dedup
+rates are high, so the distortion is easy to see.
+
+The declared marginal is exact in the expanded design, which
+`jaxgsa.sobol.analyze` rebuilds through `sr.expanded_to_unique`. The
+indices are therefore correct. Evaluate `sr.samples` and pass the outputs
+to `analyze`; never reuse `sr.samples` on its own as a Monte Carlo design.
+For a plain sample of the declared distribution, use
+`jaxgsa.sampling.monte_carlo`.
+:::
 
 ## Methods that refuse categorical inputs
 

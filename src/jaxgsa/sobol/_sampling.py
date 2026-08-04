@@ -48,11 +48,23 @@ class SobolSamples(UniqueDesignSamples):
     (larger or equal) pre-deduplication size of the full Saltelli design that
     the analysis reconstructs internally.
 
+    ``samples`` is a deduplicated evaluation set, not a distributional
+    sample. Duplicate rows are collapsed, so the empirical marginal of a
+    column in ``samples`` does not match the declared input distribution.
+    The effect is strong for a categorical parameter, where whole rows
+    repeat often: with ``probs = [0.9, 0.1]`` the ``samples`` column shows
+    about ``[0.84, 0.16]``. The declared marginal is recovered only in the
+    expanded design, which ``analyze`` rebuilds through
+    ``expanded_to_unique``, so the indices are correct. Evaluate
+    ``samples`` and pass the outputs to ``analyze``; do not reuse
+    ``samples`` on its own as a Monte Carlo design.
+
     Attributes:
         samples: Unique rows to evaluate with the user's model. Shape
             ``(n_runs, D)`` where ``D`` is the number of parameters, in
             physical units (each Sobol marginal transformed into the
-            problem's declared input distribution).
+            problem's declared input distribution). Deduplicated, so its
+            empirical marginal is distorted -- see the note above.
         sample_ids: Stable integer identifiers aligned 1:1 with ``samples``.
             Useful for joining model outputs back onto the sampling table.
         n_expanded: Row count of the full expanded Saltelli layout before

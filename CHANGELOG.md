@@ -57,18 +57,78 @@
   repair, so repair noise never reads as a coupling; the stored matrix
   carries exact-identity categorical rows and columns.
 
+### Fixed
+
+- **`borgonovo.analyze` could return a delta far outside `[0, 1]` in
+  silence.** Delta is a half L1 distance between densities, so it lives in
+  `[0, 1]`. The degenerate-class detector only fired below `1e-6` of the
+  full-sample bandwidth. A class that was *almost* a point mass — one
+  output value plus a little jitter — passed that test but still sat
+  orders of magnitude below the output grid step. Its conditional density
+  aliased on the grid and the trapezoid integral exploded. On a
+  three-atom model with true delta `2/3` and jitter `1e-5`, `analyze`
+  returned **delta 121 with no warning**. Two changes close this:
+  - The degenerate tolerance is now `1e-2`, the scale at which the
+    default 100-point grid stops resolving a class. The same sweep now
+    returns 0.611 (jitter `1e-5`), 0.624 (`1e-3`) and 0.907 (`1e-2`), all
+    in range.
+  - A range guard checks every returned delta. An excursion beyond
+    `[-0.05, 1.05]` raises a `UserWarning` that names the parameter, gives
+    the observed range, and states the likely cause. The value is returned
+    **unclipped**: clipping 121 to 1.0 would turn an obvious failure into
+    a plausible wrong answer. The guard covers continuous and categorical
+    inputs alike.
+
+  The bug predated categorical support — a continuous step-function model
+  hit it too — but categorical inputs make "one level, one output value"
+  the normal case.
+- **`borgonovo.analyze` under-budgeted memory on imbalanced categorical
+  columns.** The default `slice_chunk_size` assumed the padded class
+  layout `M * P` was about `N`. That holds for equal-frequency continuous
+  classes. A categorical column pads every level up to the largest one, so
+  with `probs = [0.91] + [0.01] * 9` at `N = 20000` the layout is `9.1x N`
+  and the default chose a chunk whose KDE tensor was 2.29 GiB against a
+  256 MiB budget. The default now sizes from the real per-group layout
+  `sum_g(Dg * Mg * Pg)`, the same way `optimal_transport.analyze` already
+  did. On that case the chunk width goes 33 -> 3 and the peak lands at
+  54.6M elements, inside the budget. Continuous problems are unchanged.
+
 ### Changed
 
-- **Borgonovo delta floors the bandwidth of degenerate classes.** A
-  conditioning class with zero output variance (a point mass, e.g. one
-  categorical level mapping to one output value) used to get bandwidth 0.
-  Its density dropped out of the L1 integrand and delta biased far low
-  (0.33 instead of 2/3 on a noise-free three-level repro). The class now
-  gets a narrow, grid-resolvable kernel at its value:
+- **Borgonovo delta floors the bandwidth of classes the output grid cannot
+  resolve.** A conditioning class with zero output variance (a point mass,
+  e.g. one categorical level mapping to one output value) used to get
+  bandwidth 0. Its density dropped out of the L1 integrand and delta
+  biased far low (0.33 instead of 2/3 on a noise-free three-level repro).
+  The class now gets a grid-resolvable kernel at its value:
   `max(0.1 * full-sample Silverman bandwidth, grid step)`. The repro
   recovers delta 0.60–0.62. One `UserWarning` reports the floor. Classes
   with genuine spread are untouched, so continuous results are
   bit-identical.
+
+  The grid-step term is the one that binds in practice, so the delta of a
+  near-degenerate class is set by `grid_size`, not by the bandwidth
+  fraction. That estimate is **biased low** and the bias does not vanish as
+  `N` grows: on the three-atom repro (true `2/3`) it reads 0.56 at
+  `grid_size=50`, 0.61 at 100, and 0.61 at 200 and above. Read delta on an
+  atomic conditional as a ranking signal, not a calibrated number. The
+  `analyze` docstring and the categorical docs now say so. A consistent
+  estimator for atomic conditionals needs a different estimator and is
+  future work.
+- **`borgonovo.analyze` exposes the degenerate-class settings.** The two
+  module constants are now overridable: `degenerate_tol` (when a class
+  counts as unresolvable, a fraction of the full-sample bandwidth,
+  default `1e-2`) and `degenerate_bandwidth` (the floor, `"auto"` for
+  `max(0.1 * h_full, grid_step)` or a fraction of `h_full` applied
+  exactly).
+- **`SobolSamples.samples` is documented as an evaluation set, not a
+  sample.** Deduplication collapses repeated rows, so the empirical
+  marginal of a column in `samples` does not match the declared one. With
+  `probs = [0.9, 0.1]` the column reads about `[0.84, 0.16]`. Categorical
+  dedup rates are high, so the distortion shows. `analyze` is correct: it
+  reconstructs the expanded design through `expanded_to_unique`, and that
+  design carries `[0.900, 0.100]`. The docstring and the categorical docs
+  now warn against reusing `samples` as a standalone Monte Carlo design.
 - **`fit_correlation` keeps categorical parameters at identity.** A
   Spearman rank correlation over unordered level codes depends on the
   arbitrary code order (relabeling flips its sign). The fit now excludes
