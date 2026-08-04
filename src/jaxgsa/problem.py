@@ -11,6 +11,8 @@ import numpy as np
 if TYPE_CHECKING:
     import numpy.typing as npt
 
+    from jaxgsa._core.copula import RepairPolicy
+
 
 class UniformInputSpec(TypedDict):
     """Uniform marginal distribution between ``low`` and ``high``.
@@ -154,21 +156,22 @@ def _canonical_correlation(
     n_params: int,
     kind: Literal["latent", "spearman"] = "latent",
     *,
-    warn_on_repair: bool,
+    policy: "RepairPolicy",
 ) -> _CorrelationTuple | None:
     """Validate a correlation matrix and freeze it into hashable form.
 
     ``None`` passes through (independent inputs). Anything else is converted
     from ``kind`` to the latent scale, validated (with positive-definiteness
     repair), and stored as a nested tuple of floats so ``Problem`` stays
-    frozen and hashable.
+    frozen and hashable. ``policy`` grades how loudly the repair reports
+    itself; every ``Problem`` surface declares ``"declared"``.
     """
     if correlation is None:
         return None
     # Imported lazily: jaxgsa._core.copula imports this module at load time.
     from jaxgsa._core.copula import canonicalize_correlation
 
-    R = canonicalize_correlation(correlation, n_params, kind=kind, warn_on_repair=warn_on_repair)
+    R = canonicalize_correlation(correlation, n_params, kind=kind, policy=policy)
     return tuple(tuple(float(value) for value in row) for row in R)
 
 
@@ -245,9 +248,10 @@ class Problem:
             output_names: Optional output labels used by ``to_dataset()``.
             correlation: Optional ``(D, D)`` Gaussian-copula correlation
                 matrix declaring the dependence between parameters. ``None``
-                (default) means independent inputs. Validated on entry; a
-                non-positive-definite matrix is repaired with a
-                ``UserWarning``.
+                (default) means independent inputs. Validated on entry. A
+                slightly non-positive-definite matrix is repaired with a
+                ``UserWarning``; one that would have to move an entry by 0.05
+                or more is rejected with a ``ValueError``.
             correlation_kind: Scale ``correlation`` is expressed on:
                 ``"latent"`` (default) for the Pearson correlation of the
                 copula's latent normals, ``"spearman"`` for a rank
@@ -268,7 +272,7 @@ class Problem:
             output_names=output_names,
             # User-declared matrices deserve the repair warning.
             correlation=_canonical_correlation(
-                correlation, len(normalized_names), correlation_kind, warn_on_repair=True
+                correlation, len(normalized_names), correlation_kind, policy="declared"
             ),
         )
 
@@ -334,7 +338,7 @@ class Problem:
             input_specs=input_specs,
             output_names=output_names,
             correlation=_canonical_correlation(
-                correlation, len(names), correlation_kind, warn_on_repair=True
+                correlation, len(names), correlation_kind, policy="declared"
             ),
         )
 
@@ -371,7 +375,7 @@ class Problem:
             input_specs=self._input_specs,
             output_names=self.output_names,
             correlation=_canonical_correlation(
-                correlation, self.num_vars, kind, warn_on_repair=True
+                correlation, self.num_vars, kind, policy="declared"
             ),
         )
 

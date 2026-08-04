@@ -77,10 +77,11 @@ def _problem_from_meta(problem_meta: Mapping[str, Any]) -> Problem:
         input_specs=tuple(_normalize_input_spec(spec) for spec in problem_meta["input_specs"]),
         output_names=tuple(output_names) if output_names is not None else None,
         # `.get`: files written before jaxgsa 0.6 carry no correlation key.
-        # The matrix was validated (with the repair warning) at construction,
-        # so re-validation on load stays silent.
+        # The stored matrix was already validated and repaired at construction,
+        # so the repair is a no-op here. The lenient policy keeps a reload from
+        # reporting, or refusing, what the user was already told about once.
         correlation=_canonical_correlation(
-            problem_meta.get("correlation"), len(names), warn_on_repair=False
+            problem_meta.get("correlation"), len(names), policy="fitted"
         ),
     )
 

@@ -23,7 +23,8 @@ from jaxgsa._core.copula import (
 from jaxgsa.problem import GaussianInputSpec, Problem
 
 # An indefinite candidate: pairwise entries are individually valid but jointly
-# inconsistent (eigenvalues of this matrix include a negative one).
+# inconsistent (eigenvalues of this matrix include a negative one). The repair
+# moves an entry by 0.4, so a declared matrix like this is rejected outright.
 _INDEFINITE_R = np.array(
     [
         [1.0, 0.9, 0.9],
@@ -31,6 +32,26 @@ _INDEFINITE_R = np.array(
         [0.9, -0.9, 1.0],
     ]
 )
+
+
+def _equicorrelated(rho: float, D: int = 3) -> np.ndarray:
+    """Return the ``(D, D)`` matrix with ``rho`` off the diagonal.
+
+    Its smallest eigenvalue is ``1 + (D - 1) rho``, so ``rho`` places the
+    matrix in any severity band we want to test.
+    """
+    R = np.full((D, D), float(rho))
+    np.fill_diagonal(R, 1.0)
+    return R
+
+
+# Smallest eigenvalue -1e-9, so the repair only lifts it to the 1e-8 floor.
+# The largest entrywise change is 9e-9: numerical noise, reported to nobody.
+_NOISE_R = _equicorrelated(1.0 - 1e-9)
+
+# Smallest eigenvalue -0.01. The repair moves an entry by 5e-3, which is under
+# the 0.05 material threshold, so a declared matrix like this warns.
+_MILD_INDEFINITE_R = _equicorrelated(-0.505)
 
 
 def _uniform_problem(D: int = 2) -> Problem:
@@ -61,11 +82,11 @@ def test_validate_correlation_rejects_structurally_invalid(R, match):
         validate_correlation(R, 2)
 
 
-def test_repair_warning_fires_for_indefinite_matrix():
+def test_repair_warning_fires_for_mildly_indefinite_declared_matrix():
     # UserWarning is not promoted to an error by the pytest config, so the
     # firing case must be asserted explicitly with pytest.warns.
     with pytest.warns(UserWarning, match="not positive definite"):
-        repaired = validate_correlation(_INDEFINITE_R, 3, warn_on_repair=True)
+        repaired = validate_correlation(_MILD_INDEFINITE_R, 3, policy="declared")
     eigenvalues = np.linalg.eigvalsh(repaired)
     assert eigenvalues.min() > 0
     np.testing.assert_allclose(np.diag(repaired), 1.0, atol=1e-12)
@@ -73,24 +94,99 @@ def test_repair_warning_fires_for_indefinite_matrix():
 
 def test_repair_warning_reports_min_eigenvalue_and_max_change():
     with pytest.warns(UserWarning) as record:
-        validate_correlation(_INDEFINITE_R, 3, warn_on_repair=True)
+        repaired = validate_correlation(_MILD_INDEFINITE_R, 3, policy="declared")
     message = str(record[0].message)
+    min_eig = np.linalg.eigvalsh(_MILD_INDEFINITE_R).min()
+    change = np.abs(repaired - _MILD_INDEFINITE_R).max()
+    assert f"{min_eig:.3e}" in message
+    assert f"{change:.3e}" in message
+    assert "latent scale" in message
+
+
+def test_repair_of_declared_matrix_is_silent_at_noise_level():
+    """A repair that only lifts the eigenvalue floor says nothing."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        repaired = validate_correlation(_NOISE_R, 3, policy="declared")
+    assert 0.0 < np.abs(repaired - _NOISE_R).max() < 1e-8
+
+
+def test_repair_of_declared_matrix_raises_when_material():
+    with pytest.raises(ValueError, match="too far to accept"):
+        validate_correlation(_INDEFINITE_R, 3, policy="declared")
+
+
+def test_material_repair_error_names_the_way_out():
+    with pytest.raises(ValueError) as excinfo:
+        validate_correlation(_INDEFINITE_R, 3, policy="declared")
+    message = str(excinfo.value)
     min_eig = np.linalg.eigvalsh(_INDEFINITE_R).min()
     assert f"{min_eig:.3e}" in message
-    assert "largest entrywise change" in message
+    assert "4.000e-01" in message  # the max entrywise change
+    assert "jaxgsa.sampling.fit_correlation" in message
+    assert "correlation_kind" in message
 
 
 def test_repair_stays_silent_for_valid_matrix():
     R = np.array([[1.0, 0.3], [0.3, 1.0]])
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        validate_correlation(R, 2, warn_on_repair=True)
+        validate_correlation(R, 2, policy="declared")
 
 
-def test_repair_stays_silent_without_opt_in():
+def test_fitted_repair_stays_silent_below_the_material_threshold():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        validate_correlation(_INDEFINITE_R, 3)  # warn_on_repair defaults to False
+        validate_correlation(_MILD_INDEFINITE_R, 3)  # policy defaults to "fitted"
+
+
+def test_fitted_repair_warns_but_never_raises_when_material():
+    with pytest.warns(UserWarning, match="the fitted correlation matrix"):
+        repaired = validate_correlation(_INDEFINITE_R, 3)
+    assert np.linalg.eigvalsh(repaired).min() > 0
+
+
+def test_fit_gaussian_copula_never_raises_on_degenerate_data():
+    """A duplicated column makes the rank estimate singular; the fit survives."""
+    rng = np.random.default_rng(0)
+    column = rng.normal(size=64)
+    X = np.column_stack([column, column, rng.normal(size=64)])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        R = fit_gaussian_copula(_uniform_problem(3), X)
+    assert np.linalg.eigvalsh(R).min() > 0
+
+
+# ---------------------------------------------------------------------------
+# severity reported in the units the user declared
+# ---------------------------------------------------------------------------
+
+
+def test_spearman_repair_reports_the_change_on_the_spearman_scale():
+    """The user wrote Spearman numbers, so the message must use them.
+
+    This matrix straddles the material threshold: the change is 5.04e-2 on the
+    latent scale but 4.99e-2 on the Spearman scale. Reporting the declared
+    scale therefore also decides between a warning and an error.
+    """
+    from jaxgsa._core.copula import _latent_to_spearman, _spearman_to_latent
+
+    declared = _equicorrelated(-0.5325)
+    with pytest.warns(UserWarning, match="Spearman scale") as record:
+        repaired = canonicalize_correlation(declared, 3, kind="spearman", policy="declared")
+
+    latent_change = np.abs(repaired - _spearman_to_latent(declared)).max()
+    spearman_change = np.abs(_latent_to_spearman(repaired) - declared).max()
+    assert latent_change >= 0.05 > spearman_change
+    assert f"{spearman_change:.3e}" in str(record[0].message)
+
+
+def test_spearman_round_trip_is_exact():
+    """Reporting on the declared scale is only honest if the inverse is exact."""
+    from jaxgsa._core.copula import _latent_to_spearman, _spearman_to_latent
+
+    R = np.array([[1.0, 0.7, -0.3], [0.7, 1.0, 0.2], [-0.3, 0.2, 1.0]])
+    np.testing.assert_allclose(_latent_to_spearman(_spearman_to_latent(R)), R, atol=1e-15)
 
 
 # ---------------------------------------------------------------------------
@@ -174,8 +270,10 @@ def test_repair_is_idempotent(R):
     One clip-then-renormalise pass leaves the smallest eigenvalue under the
     floor, so a naive repair keeps nudging the matrix on every round trip.
     """
-    once = _project_to_correlation(R)
-    twice = _project_to_correlation(once)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # the fitted policy reports large repairs
+        once = _project_to_correlation(R)
+        twice = _project_to_correlation(once)
     np.testing.assert_array_equal(twice, once)
     assert np.linalg.eigvalsh(once).min() >= _MIN_EIGENVALUE
     np.testing.assert_array_equal(np.diag(once), np.ones(R.shape[0]))
@@ -188,7 +286,8 @@ def test_repair_survives_a_problem_metadata_round_trip():
     from jaxgsa._core.samples import _problem_from_meta, _problem_to_meta
 
     problem = Problem.from_dict({"x0": (0.0, 1.0), "x1": (0.0, 1.0), "x2": (0.0, 1.0)})
-    problem = problem.with_correlation(_INDEFINITE_R)
+    with pytest.warns(UserWarning, match="not positive definite"):
+        problem = problem.with_correlation(_MILD_INDEFINITE_R)
     stored = problem.correlation
     assert stored is not None
     for _ in range(3):

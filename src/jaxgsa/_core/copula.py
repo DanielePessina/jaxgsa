@@ -40,6 +40,29 @@ _MIN_EIGENVALUE = 1e-8
 # passes are enough in practice; the cap only bounds a pathological input.
 _MAX_REPAIR_PASSES = 16
 
+# The severity of a repair is the maximum entrywise change,
+# ``max|R_repaired - R_declared|``, measured on the scale the caller declared.
+# That number is scale-free and reads directly ("your 0.9 became 0.72"),
+# unlike a minimum eigenvalue, which means very different things at D = 3 and
+# at D = 50. The minimum eigenvalue stays as the numerical floor above and as
+# a diagnostic in the message.
+#
+# Below this the repair only removed floating-point noise, so nothing is said.
+_REPAIR_NOISE = 1e-8
+# At or above this the declared matrix is structurally inconsistent, not merely
+# rounded, and the two policies below diverge.
+_REPAIR_MATERIAL = 0.05
+
+# Policy applied when the repair actually engages.
+#
+# ``"declared"``  the matrix came from the user. A noise-level repair is
+#     silent, a small repair warns, and a material repair raises: the user can
+#     fix the matrix or fit one from data.
+# ``"fitted"``    the matrix came from our own estimator. A small repair is
+#     silent and a material repair warns. It never raises, because refusing to
+#     fit helps nobody when it is the data that is inconsistent.
+RepairPolicy = Literal["declared", "fitted"]
+
 
 class _ConditionalPlan(NamedTuple):
     """Closed-form Gaussian conditionals used by the correlated estimators.
@@ -98,12 +121,31 @@ def _spearman_to_latent(R: np.ndarray) -> np.ndarray:
     return latent
 
 
+def _latent_to_spearman(R: np.ndarray) -> np.ndarray:
+    """Convert a latent Pearson correlation matrix back to the Spearman scale.
+
+    Exact inverse of :func:`_spearman_to_latent`,
+    ``rho_s = (6 / pi) arcsin(rho / 2)`` (Kruskal 1958). It exists so a repair
+    of a Spearman-declared matrix can be reported in the units the user wrote.
+
+    Args:
+        R: ``(D, D)`` latent-normal Pearson correlation matrix.
+
+    Returns:
+        The equivalent Spearman rank-correlation matrix, with the diagonal
+        pinned to exactly 1.
+    """
+    spearman = (6.0 / np.pi) * np.arcsin(np.clip(np.asarray(R, dtype=np.float64), -2.0, 2.0) / 2.0)
+    np.fill_diagonal(spearman, 1.0)
+    return spearman
+
+
 def canonicalize_correlation(
     correlation: npt.ArrayLike,
     n_params: int,
     *,
     kind: Literal["latent", "spearman"] = "latent",
-    warn_on_repair: bool = False,
+    policy: RepairPolicy = "fitted",
 ) -> np.ndarray:
     """Normalize a user-supplied correlation matrix to the latent scale.
 
@@ -124,14 +166,16 @@ def canonicalize_correlation(
         n_params: Expected ``D``.
         kind: Scale the matrix is expressed on. ``"latent"`` (default) is the
             Pearson correlation of the latent normals; ``"spearman"`` is a
-            rank correlation, converted via ``2 sin(pi rho_s / 6)``.
-        warn_on_repair: Forwarded to :func:`validate_correlation`.
+            rank correlation, converted via ``2 sin(pi rho_s / 6)``. The
+            repair also reports its severity on this scale.
+        policy: Repair policy, see :data:`RepairPolicy`.
 
     Returns:
         ``(D, D)`` validated latent correlation matrix.
 
     Raises:
-        ValueError: If ``kind`` is unknown or the matrix fails validation.
+        ValueError: If ``kind`` is unknown, the matrix fails validation, or
+            the repair of a declared matrix is material.
     """
     if kind not in ("latent", "spearman"):
         raise ValueError(f"correlation_kind must be 'latent' or 'spearman', got {kind!r}")
@@ -141,7 +185,7 @@ def canonicalize_correlation(
         # The conversion is not guaranteed to preserve positive definiteness,
         # so the repair still runs on the result.
         R = _spearman_to_latent(R)
-    return _project_to_correlation(R, warn_on_repair=warn_on_repair)
+    return _project_to_correlation(R, policy=policy, report_kind=kind)
 
 
 def correlation_from_covariance(cov: npt.ArrayLike) -> np.ndarray:
@@ -243,30 +287,28 @@ def validate_correlation(
     R: np.ndarray,
     n_params: int,
     *,
-    warn_on_repair: bool = False,
+    policy: RepairPolicy = "fitted",
 ) -> np.ndarray:
     """Validate a user-supplied correlation matrix and make it usable.
 
     Args:
         R: ``(D, D)`` candidate correlation matrix.
         n_params: Expected ``D``.
-        warn_on_repair: Emit a ``UserWarning`` when the positive-definiteness
-            repair actually alters the matrix. A materially indefinite ``R``
-            usually signals a modelling error (inconsistent pairwise
-            correlations or a redundant column), so surfaces that accept
-            user-declared matrices should opt in; internal fitting paths stay
-            silent.
+        policy: Repair policy, see :data:`RepairPolicy`. Surfaces that accept
+            user-declared matrices pass ``"declared"``; internal fitting paths
+            keep the default.
 
     Returns:
         A symmetric, positive-definite copy with unit diagonal.
 
     Raises:
         ValueError: If the shape is wrong, the matrix is not symmetric, the
-            diagonal is not unit, or any entry lies outside ``[-1, 1]``.
+            diagonal is not unit, any entry lies outside ``[-1, 1]``, or the
+            repair of a declared matrix is material.
     """
     R = np.asarray(R, dtype=np.float64)
     _validate_structure(R, n_params)
-    return _project_to_correlation(R, warn_on_repair=warn_on_repair)
+    return _project_to_correlation(R, policy=policy)
 
 
 def _validate_structure(R: np.ndarray, n_params: int) -> None:
@@ -293,7 +335,12 @@ def _validate_structure(R: np.ndarray, n_params: int) -> None:
         raise ValueError("correlation entries must lie in [-1, 1]")
 
 
-def _project_to_correlation(R: np.ndarray, *, warn_on_repair: bool = False) -> np.ndarray:
+def _project_to_correlation(
+    R: np.ndarray,
+    *,
+    policy: RepairPolicy = "fitted",
+    report_kind: Literal["latent", "spearman"] = "latent",
+) -> np.ndarray:
     """Return the nearest positive-definite matrix with a unit diagonal.
 
     A rank-correlation estimate transformed entry-by-entry through
@@ -309,11 +356,27 @@ def _project_to_correlation(R: np.ndarray, *, warn_on_repair: bool = False) -> n
     holds. The result is symmetric by construction, so the leading
     symmetrisation is also a no-op on a second call.
 
+    How loudly the repair reports itself depends on how far it had to move the
+    matrix. The severity is the maximum entrywise change between the final
+    repaired matrix and the matrix as it arrived, not a per-pass change, and it
+    is measured on ``report_kind``. See :data:`RepairPolicy` for the bands.
+
     Args:
-        R: ``(D, D)`` candidate correlation matrix (structurally valid).
-        warn_on_repair: Emit a ``UserWarning`` reporting the minimum
-            eigenvalue and the maximum entrywise change when the repair
-            actually engages.
+        R: ``(D, D)`` candidate correlation matrix (structurally valid), on
+            the latent scale.
+        policy: Repair policy, see :data:`RepairPolicy`.
+        report_kind: Scale the caller declared the matrix on. With
+            ``"spearman"`` both matrices go back through
+            ``rho_s = (6 / pi) arcsin(rho / 2)`` before the change is measured,
+            so the number the user is asked to judge is in the units the user
+            wrote.
+
+    Returns:
+        A symmetric, positive-definite matrix with unit diagonal.
+
+    Raises:
+        ValueError: If ``policy`` is ``"declared"`` and the repair had to move
+            an entry by ``_REPAIR_MATERIAL`` or more.
     """
     original = 0.5 * (R + R.T)  # kill any asymmetry from floating-point accumulation
     current = original
@@ -344,14 +407,49 @@ def _project_to_correlation(R: np.ndarray, *, warn_on_repair: bool = False) -> n
 
     if current is original:
         return original
-    if warn_on_repair:
+
+    # Measure the whole repair, first pass to last, on the scale the caller
+    # declared. A Spearman user never wrote the latent numbers, so a latent
+    # change would ask them to judge a quantity they cannot recognise.
+    if report_kind == "spearman":
+        before, after = _latent_to_spearman(original), _latent_to_spearman(current)
+    else:
+        before, after = original, current
+    change = float(np.abs(after - before).max())
+    scale = "Spearman" if report_kind == "spearman" else "latent"
+    detail = (
+        f"is not positive definite (minimum eigenvalue {declared_minimum:.3e}); "
+        f"repairing it by eigenvalue clipping moves an entry by up to {change:.3e} "
+        f"on the {scale} scale"
+    )
+
+    if policy == "declared":
+        if change >= _REPAIR_MATERIAL:
+            raise ValueError(
+                f"jaxgsa: the declared correlation matrix {detail}, which is too far "
+                "to accept. A matrix that has "
+                "to move this much is structurally inconsistent — the pairwise "
+                "correlations cannot hold at the same time, or two parameters are "
+                "redundant. Correct the matrix, or obtain a valid one from data with "
+                "jaxgsa.sampling.fit_correlation. If you declared a rank correlation, "
+                "pass correlation_kind='spearman' so it is converted instead of read "
+                "as a latent matrix."
+            )
+        if change >= _REPAIR_NOISE:
+            warnings.warn(
+                f"jaxgsa: the declared correlation matrix {detail}. Samples will "
+                "follow the repaired dependence structure, not the declared one — "
+                "check the matrix for inconsistent pairwise correlations or redundant "
+                "parameters.",
+                stacklevel=2,
+            )
+    elif change >= _REPAIR_MATERIAL:
+        # A fit is never refused: it is the data that is inconsistent, not the
+        # user. A fit that moved this far is still worth reporting.
         warnings.warn(
-            "jaxgsa: the declared correlation matrix is not positive definite "
-            f"(minimum eigenvalue {declared_minimum:.3e}) and was repaired by "
-            "eigenvalue clipping; the largest entrywise change is "
-            f"{np.abs(current - original).max():.3e}. Samples will follow the repaired "
-            "dependence structure, not the declared one — check the matrix for "
-            "inconsistent pairwise correlations or redundant parameters.",
+            f"jaxgsa: the fitted correlation matrix {detail}. The fit is usable but "
+            "the data it came from is close to rank deficient — check for duplicated "
+            "or collinear columns.",
             stacklevel=2,
         )
     return current

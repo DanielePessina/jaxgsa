@@ -187,7 +187,21 @@ def test_correlation_shape_must_match_names():
         Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=np.eye(3))
 
 
-def test_indefinite_correlation_warns_at_construction():
+def test_mildly_indefinite_correlation_warns_at_construction():
+    # Smallest eigenvalue -0.01. The repair moves an entry by 5e-3, under the
+    # 0.05 threshold that makes a declared matrix an error.
+    mild = np.full((3, 3), -0.505)
+    np.fill_diagonal(mild, 1.0)
+    with pytest.warns(UserWarning, match="not positive definite"):
+        p = Problem.from_dict(
+            {"a": (0.0, 1.0), "b": (0.0, 1.0), "c": (0.0, 1.0)}, correlation=mild
+        )
+    stored = p.correlation
+    assert stored is not None
+    assert np.linalg.eigvalsh(stored).min() > 0
+
+
+def test_materially_indefinite_correlation_is_rejected_at_construction():
     indefinite = np.array(
         [
             [1.0, 0.9, 0.9],
@@ -195,13 +209,10 @@ def test_indefinite_correlation_warns_at_construction():
             [0.9, -0.9, 1.0],
         ]
     )
-    with pytest.warns(UserWarning, match="not positive definite"):
-        p = Problem.from_dict(
+    with pytest.raises(ValueError, match="too far to accept"):
+        Problem.from_dict(
             {"a": (0.0, 1.0), "b": (0.0, 1.0), "c": (0.0, 1.0)}, correlation=indefinite
         )
-    stored = p.correlation
-    assert stored is not None
-    assert np.linalg.eigvalsh(stored).min() > 0
 
 
 def test_identity_correlation_is_stored_but_not_correlated():

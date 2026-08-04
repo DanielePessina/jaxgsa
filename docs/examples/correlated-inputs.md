@@ -50,9 +50,24 @@ problem = jaxgsa.Problem.from_dict(
 The matrix is validated on entry: wrong shape, asymmetry, non-unit diagonal,
 or entries outside `[-1, 1]` raise `ValueError`. A matrix that is not
 positive definite — usually a sign of inconsistent pairwise correlations — is
-repaired by eigenvalue clipping with a `UserWarning` reporting how much it
-changed, so you never silently sample a different dependence structure than
-you declared.
+repaired by eigenvalue clipping. How loudly that repair reports itself depends
+on how far it has to move the matrix. The measure is the largest change to a
+single entry, on the scale you declared:
+
+| Largest entry change | What happens |
+|---|---|
+| below `1e-8` | nothing. This is floating-point noise. |
+| `1e-8` to `0.05` | a `UserWarning` reports the change and the minimum eigenvalue. |
+| `0.05` or more | a `ValueError`. The matrix is structurally inconsistent. |
+
+So you never silently sample a different dependence structure than you
+declared. If the third case applies, correct the matrix, or fit a valid one
+from data with `jaxgsa.sampling.fit_correlation`. Check also that you did not
+pass a rank correlation without `correlation_kind="spearman"`.
+
+`fit_correlation` itself never raises for this reason. When the *data* is
+inconsistent, refusing to fit helps nobody, so a fit that had to move an entry
+by `0.05` or more only warns.
 
 If you have a published **covariance** matrix rather than a correlation
 matrix, rescale it first — note the variances on its diagonal are discarded

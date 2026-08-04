@@ -15,9 +15,18 @@
   it. That route is invertible for non-Gaussian marginals. Validation on
   entry checks shape, symmetry, unit diagonal, and entry range. A
   non-positive-definite matrix usually signals inconsistent pairwise
-  correlations. Eigenvalue clipping repairs it. A `UserWarning` then reports
-  the minimum eigenvalue and the largest entrywise change. Sampling therefore
-  never follows a silently different dependence structure. The correlation
+  correlations. Eigenvalue clipping repairs it. The report is graded by the
+  largest change to a single entry, measured on the scale you declared. Below
+  `1e-8` the repair is floating-point noise and says nothing. Between `1e-8`
+  and `0.05` a `UserWarning` reports the change and the minimum eigenvalue.
+  At `0.05` or more a `ValueError` rejects the matrix. Such a matrix is
+  structurally inconsistent. Correct it, or fit a valid one from data with
+  `jaxgsa.sampling.fit_correlation`. Sampling therefore
+  never follows a silently different dependence structure. A matrix declared
+  with `correlation_kind="spearman"` is reported on the Spearman scale, in
+  the units you wrote, not on the converted latent scale. `fit_correlation`
+  never raises for this reason. Inconsistent data is not a user error. A fit
+  that had to move an entry by `0.05` or more only warns. The correlation
   round-trips through the JSON problem metadata and the NPZ design files.
   Saved designs do not silently drop it.
 - **Correlated sampling in `jaxgsa.sampling`.** `monte_carlo` now honors
