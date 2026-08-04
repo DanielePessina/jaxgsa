@@ -426,6 +426,53 @@ def _build_radial(
     return expanded_unit, ee_idx_after, ee_idx_before, ee_delta
 
 
+def _squash_open_sides(
+    expanded_unit: np.ndarray,
+    ee_delta: np.ndarray,
+    problem: Problem,
+    truncation_quantile: float,
+) -> None:
+    """Pull the design away from the unit-cube faces on open marginal sides.
+
+    A Morris design touches the unit-cube boundaries exactly, and an unbounded
+    inverse CDF maps 0 and 1 to -inf and +inf. Every side of a marginal whose
+    support is *open* is therefore pulled in by the tail probability ``q``, so
+    the transform stays finite.
+
+    Only genuinely open sides move. A uniform marginal is bounded on both
+    sides. A Gaussian marginal with an explicit ``low`` is bounded below, and
+    one with an explicit ``high`` is bounded above, so a two-sided truncated
+    Gaussian gets no squash at all — truncating it again would silently narrow
+    the input model the user declared.
+
+    The squash is an affine map on each dimension, so it also rescales the
+    step that each elementary effect actually takes. ``ee_delta`` is multiplied
+    by the same per-dimension factor, keeping the divisor equal to the
+    coordinate difference the design really uses.
+
+    Both arrays are modified in place. The map is deterministic, so exact
+    deduplication and prefix-nested downsampling are unaffected.
+
+    Args:
+        expanded_unit: ``(r * (D + 1), D)`` unit-cube design, modified in place.
+        ee_delta: ``(r, D)`` signed unit-cube steps, modified in place.
+        problem: Problem definition whose marginals decide which sides are open.
+        truncation_quantile: Tail probability ``q`` removed from each open side.
+    """
+    q = truncation_quantile
+    for idx, spec in enumerate(problem.input_specs):
+        dist, _, _, low, high = spec
+        if dist == "uniform":
+            continue
+        lo_target = 0.0 if low is not None else q
+        hi_target = 1.0 if high is not None else 1.0 - q
+        scale = hi_target - lo_target
+        if scale == 1.0:  # both sides already bounded — nothing to squash
+            continue
+        expanded_unit[:, idx] = lo_target + expanded_unit[:, idx] * scale
+        ee_delta[:, idx] *= scale
+
+
 def _print_morris_summary(
     *,
     n_params: int,
@@ -455,7 +502,7 @@ def sample(
     method: Literal["trajectory", "radial"] = "trajectory",
     scramble: bool = True,
     seed: int | np.random.Generator | None = None,
-    truncation_quantile: float = 0.005,
+    truncation_quantile: float = 1e-4,
     verbose: bool = True,
 ) -> MorrisSamples:
     """Generate unique Morris elementary-effects samples for model evaluation.
@@ -472,13 +519,25 @@ def sample(
     order, and returns only the unique rows for the user to evaluate.
     :func:`jaxgsa.morris.analyze` reconstructs the expanded layout internally.
 
-    Gaussian marginals are supported through a truncated-quantile grid: the
-    Morris design includes the unit-cube boundaries, which an unbounded
-    inverse CDF maps to infinity, so for each Gaussian parameter the unit-cube
-    coordinate is confined to ``[q, 1 - q]`` (``q = truncation_quantile``)
-    before the transform. Elementary effects remain per unit of the original
-    grid coordinate; :meth:`MorrisResult.to_physical_units` is unavailable for
-    such problems because the transform is nonlinear.
+    Gaussian marginals are supported through a truncated-quantile grid. The
+    Morris design touches the unit-cube boundaries, and an unbounded inverse
+    CDF maps 0 and 1 to infinity. Each *open* side of a Gaussian marginal is
+    therefore pulled in by ``q = truncation_quantile`` before the transform.
+    A side that the problem already bounds with an explicit ``low`` or
+    ``high`` is left alone, so a two-sided truncated Gaussian is sampled
+    exactly as declared. Elementary effects use the step the design really
+    takes, so the squash does not bias them.
+    :meth:`MorrisResult.to_physical_units` is unavailable for Gaussian
+    problems because the transform is nonlinear.
+
+    On an unbounded marginal ``mu_star`` has no ``q -> 0`` limit: the design
+    always includes unit levels 0 and 1 exactly, so a smaller ``q`` always
+    reaches further into the tail and the elementary effects grow with it.
+    ``mu_star`` magnitudes are therefore scale-dependent by construction on
+    an unbounded marginal, and only *rankings* are comparable across
+    truncation settings. Use :meth:`jaxgsa.Problem.from_dict` with
+    ``truncate_gaussians`` if you want one bounded input model that every
+    method shares.
 
     Args:
         problem: Problem definition with uniform and/or Gaussian marginals.
@@ -503,10 +562,13 @@ def sample(
             :meth:`MorrisSamples.downsample`; a reused
             ``np.random.Generator`` advances its state between calls and breaks
             that nesting.
-        truncation_quantile: Tail probability ``q`` excluded on each side of
-            every Gaussian marginal's grid (default 0.005, probing the
-            0.5%-99.5% quantile range). Applied to truncated Gaussians as
-            well for consistency; ignored for uniform marginals.
+        truncation_quantile: Tail probability ``q`` removed from each *open*
+            side of every Gaussian marginal's grid (default 1e-4, probing the
+            0.01%-99.99% quantile range). At this default the grid drops 0.29%
+            of the marginal variance and 5.0% of its fourth moment; the former
+            default of 5e-3 dropped 7.5% and 24% and visibly perturbed
+            rankings. Sides that the marginal already bounds with ``low`` or
+            ``high`` are not squashed. Ignored for uniform marginals.
         verbose: If ``True`` (default), print a short summary including how
             many duplicate rows were removed.
 
@@ -545,14 +607,7 @@ def sample(
         )
 
     if problem.has_non_uniform_inputs:
-        # Confine unbounded-support dimensions to [q, 1-q] so the inverse CDF
-        # stays finite at the grid boundaries. Uniform is the only bounded
-        # marginal today, so "not uniform" == "unbounded"; any future bounded
-        # distribution must be excluded from this mask. The squash is
-        # deterministic, so dedup and prefix-nesting are unaffected.
-        q = truncation_quantile
-        unbounded_dims = np.array([spec[0] != "uniform" for spec in problem.input_specs])
-        expanded_unit[:, unbounded_dims] = q + expanded_unit[:, unbounded_dims] * (1.0 - 2.0 * q)
+        _squash_open_sides(expanded_unit, ee_delta, problem, truncation_quantile)
 
     expanded_samples = _transform_samples(problem, expanded_unit)
     unique_samples, expanded_to_unique = _stable_unique_rows(expanded_samples)

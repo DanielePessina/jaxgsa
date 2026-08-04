@@ -173,7 +173,7 @@ class TestGaussianInputs:
 
         sr = sample(self.PROBLEM, n_trajectories=25, seed=1, verbose=False)
         assert np.all(np.isfinite(sr.samples))
-        lo, hi = norm.ppf([0.005, 0.995], loc=1.0, scale=2.0)
+        lo, hi = norm.ppf([1e-4, 1 - 1e-4], loc=1.0, scale=2.0)
         assert np.all(sr.samples[:, 1] >= lo - 1e-9)
         assert np.all(sr.samples[:, 1] <= hi + 1e-9)
         # The uniform dimension is untouched: still on the exact p=4 grid
@@ -189,6 +189,69 @@ class TestGaussianInputs:
         # Grid levels 0 and 1 map exactly onto the truncation quantiles
         assert sr.samples[:, 1].min() == pytest.approx(lo)
         assert sr.samples[:, 1].max() == pytest.approx(hi)
+
+    def test_two_sided_truncated_gaussian_is_not_squashed_again(self):
+        """A Gaussian with explicit low/high is already bounded — leave it alone."""
+        from scipy.stats import norm
+
+        lo, hi = norm.ppf([0.01, 0.99], loc=1.0, scale=2.0)
+        problem = Problem.from_dict(
+            {
+                "x1": (0.0, 1.0),
+                "x2": GaussianInputSpec(
+                    dist="gaussian", mean=1.0, variance=4.0, low=float(lo), high=float(hi)
+                ),
+            }
+        )
+        sr = sample(problem, n_trajectories=25, seed=1, verbose=False)
+        # Grid levels 0 and 1 must reach the declared bounds exactly, not a
+        # range narrowed by a second truncation.
+        assert sr.samples[:, 1].min() == pytest.approx(lo)
+        assert sr.samples[:, 1].max() == pytest.approx(hi)
+
+    def test_one_sided_truncation_squashes_only_the_open_side(self):
+        """A declared ``low`` is honoured exactly; the open high side is pulled in."""
+        from scipy.stats import norm
+
+        lo = float(norm.ppf(0.01, loc=1.0, scale=2.0))
+        q = 0.05
+        problem = Problem.from_dict(
+            {
+                "x1": (0.0, 1.0),
+                "x2": GaussianInputSpec(dist="gaussian", mean=1.0, variance=4.0, low=lo),
+            }
+        )
+        sr = sample(problem, n_trajectories=25, seed=1, truncation_quantile=q, verbose=False)
+        # scipy's truncnorm renormalises within [lo, inf), so the high grid
+        # level lands at the 1-q quantile of the *truncated* marginal.
+        from scipy.stats import truncnorm
+
+        a = (lo - 1.0) / 2.0
+        hi = float(truncnorm.ppf(1.0 - q, a=a, b=np.inf, loc=1.0, scale=2.0))
+        assert sr.samples[:, 1].min() == pytest.approx(lo)
+        assert sr.samples[:, 1].max() == pytest.approx(hi)
+
+    def test_trajectory_delta_matches_the_squashed_step(self):
+        """A model linear in the unit coordinate recovers its exact coefficients.
+
+        The squash rescales every step on an open side, so ``ee_delta`` must be
+        rescaled with it. If it is not, every Gaussian effect is off by the
+        squash factor.
+        """
+        from scipy.stats import norm
+
+        problem = Problem.from_dict(
+            {
+                "x1": (0.0, 1.0),
+                "x2": GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0),
+            }
+        )
+        # A large q makes the bug, if reintroduced, impossible to miss.
+        sr = sample(problem, n_trajectories=40, seed=1, truncation_quantile=0.1, verbose=False)
+        X = np.asarray(sr.samples)
+        Y = jnp.asarray(3.0 * X[:, 0] + 5.0 * norm.cdf(X[:, 1]))
+        res = analyze(sr, Y)
+        np.testing.assert_allclose(np.asarray(res.mu), [3.0, 5.0], rtol=1e-5)
 
     def test_analysis_detects_gaussian_input(self):
         sr = sample(self.PROBLEM, n_trajectories=30, seed=2, verbose=False)
