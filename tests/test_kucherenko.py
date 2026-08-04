@@ -23,7 +23,16 @@ from jaxgsa.problem import Problem
 
 # Closed-form linear-Gaussian reference, shared with test_vkoga.py and
 # test_correlated_agreement.py.
-from _linear_gaussian import A_COEF, GAUSS_PROBLEM, R_GAUSS, RHO, analytic_indices  # isort: skip
+from _linear_gaussian import (  # isort: skip
+    A_COEF,
+    A_COEF_ASYM,
+    ASYM_PROBLEM,
+    GAUSS_PROBLEM,
+    R_ASYM,
+    R_GAUSS,
+    RHO,
+    analytic_indices,
+)
 
 
 @pytest.fixture(scope="module")
@@ -46,6 +55,39 @@ def test_closed_form_linear_gaussian(correlated_result):
     assert correlated_result.is_correlated
     # Under correlation ST < S1 is the expected picture for coupled inputs.
     assert float(correlated_result.ST[0]) < float(correlated_result.S1[0])
+
+
+def test_asymmetric_correlation_structure():
+    """A D=4 case with six distinct off-diagonals of mixed sign.
+
+    R_GAUSS has one non-zero off-diagonal, so the parameter axis could be
+    transposed inside it without changing the result. This structure cannot be
+    permuted onto itself, so any index landing on the wrong parameter shows.
+    """
+    S1_true, ST_true, var_y = analytic_indices(A_COEF_ASYM, R_ASYM)
+    ks = jaxgsa.kucherenko.sample(ASYM_PROBLEM.with_correlation(R_ASYM), 4096, seed=1)
+    result = jaxgsa.kucherenko.analyze(ks, ks.samples @ A_COEF_ASYM)
+    # Measured errors are 7e-4 (S1) and 2e-5 (ST); the budgets keep headroom.
+    np.testing.assert_allclose(np.asarray(result.S1), S1_true, atol=5e-3)
+    np.testing.assert_allclose(np.asarray(result.ST), ST_true, atol=5e-3)
+    np.testing.assert_allclose(float(np.asarray(result.variance)), var_y, rtol=2e-2)
+
+
+def test_parameter_permutation_equivariance():
+    """Relabelling the parameters permutes the indices, and nothing else."""
+    perm = np.array([2, 0, 3, 1])
+    ks = jaxgsa.kucherenko.sample(ASYM_PROBLEM.with_correlation(R_ASYM), 4096, seed=1)
+    base = jaxgsa.kucherenko.analyze(ks, ks.samples @ A_COEF_ASYM)
+
+    # The same model with its parameters in a different order: permute the
+    # correlation matrix and the coefficients together.
+    ks_perm = jaxgsa.kucherenko.sample(
+        ASYM_PROBLEM.with_correlation(R_ASYM[np.ix_(perm, perm)]), 4096, seed=1
+    )
+    permuted = jaxgsa.kucherenko.analyze(ks_perm, ks_perm.samples @ A_COEF_ASYM[perm])
+
+    np.testing.assert_allclose(np.asarray(permuted.S1), np.asarray(base.S1)[perm], atol=5e-3)
+    np.testing.assert_allclose(np.asarray(permuted.ST), np.asarray(base.ST)[perm], atol=5e-3)
 
 
 def test_independent_ishigami_matches_sobol():

@@ -5,10 +5,11 @@ copula correlation, where every index of Li et al. (2010) is closed form:
 for ``Y = a . X`` with ``X ~ N(0, R)``,
 
     V(Y)     = a' R a
-    S_TC_i   = (a_i + sum_j a_j R_ji)^2 / V(Y)
+    S_TC_i   = (R a)_i^2 / V(Y)
     S_TU_i   = a_i^2 (1 - R_i,rest R_rest^-1 R_rest,i) / V(Y)
 
-and the model is additive, so ``S_U = S_TU`` and ``S_IU = 0``.
+and the model is additive, so ``S_U = S_TU`` and ``S_IU = 0``. Note that
+``(R a)_i = sum_j R_ij a_j`` already contains ``a_i``, because ``R_ii = 1``.
 
 The accuracy tests run under ``jax.enable_x64()``: the kernel solve squares
 the condition number of the cross kernel, which float32 cannot carry. The
@@ -32,7 +33,15 @@ from jaxgsa.problem import Problem
 
 # Closed-form linear-Gaussian reference, shared with test_kucherenko.py and
 # test_correlated_agreement.py.
-from _linear_gaussian import A_COEF, GAUSS_PROBLEM, R_GAUSS, analytic_indices  # isort: skip
+from _linear_gaussian import (  # isort: skip
+    A_COEF,
+    A_COEF_ASYM,
+    ASYM_PROBLEM,
+    GAUSS_PROBLEM,
+    R_ASYM,
+    R_GAUSS,
+    analytic_indices,
+)
 
 # --- cheap uniform model for shape/contract tests ---------------------------
 
@@ -78,6 +87,27 @@ def gauss_result():
             gamma=2.0,
             ridge=1e-10,
             max_centers=150,
+            n_outer=256,
+            n_inner=64,
+            n_variance=4096,
+            seed=0,
+        )
+
+
+@pytest.fixture(scope="module")
+def asym_result():
+    """x64 analysis of the D=4 asymmetric-structure case (computed once)."""
+    with jax.enable_x64():
+        X = jaxgsa.sampling.monte_carlo(ASYM_PROBLEM, 2048, seed=7)
+        Y = X @ A_COEF_ASYM
+        return jaxgsa.vkoga.analyze(
+            ASYM_PROBLEM,
+            X,
+            Y,
+            correlation=R_ASYM,
+            gamma=2.0,
+            ridge=1e-10,
+            max_centers=200,
             n_outer=256,
             n_inner=64,
             n_variance=4096,
@@ -151,6 +181,191 @@ def test_independent_inputs_recover_sobol_indices():
     # Additive model, no correlation: every index tells the same story.
     np.testing.assert_allclose(np.asarray(result.S_TU), S_TC, atol=3e-2)
     np.testing.assert_allclose(np.asarray(result.S_U), S_TC, atol=3e-2)
+
+
+def test_asymmetric_correlation_structure(asym_result):
+    """A D=4 case with six distinct off-diagonals of mixed sign.
+
+    R_GAUSS has one non-zero off-diagonal, so a transposition of the parameter
+    axis could hide inside it. This case cannot be permuted onto itself, so any
+    index that landed on the wrong parameter would show.
+    """
+    S_TC_true, S_TU_true, var_y = analytic_indices(A_COEF_ASYM, R_ASYM)
+    S_TC = np.asarray(asym_result.S_TC)
+    S_TU = np.asarray(asym_result.S_TU)
+    # Measured errors are 0.013 (S_TC) and 0.003 (S_TU); the budgets keep a
+    # small margin over that.
+    np.testing.assert_allclose(S_TC, S_TC_true, atol=2e-2)
+    np.testing.assert_allclose(S_TU, S_TU_true, atol=1e-2)
+    # The ordering carries the transposition signal: x4 dominates, x1 is nearly
+    # cancelled by its correlations, and no two entries are close enough to
+    # swap by chance.
+    assert list(np.argsort(S_TC)) == list(np.argsort(S_TC_true))
+    assert list(np.argsort(S_TU)) == list(np.argsort(S_TU_true))
+    # The surrogate under-resolves the Gaussian tails, so the variance comes
+    # out low. Documented in docs/examples/vkoga.md; do not loosen this.
+    np.testing.assert_allclose(float(np.asarray(asym_result.variance)), var_y, rtol=5e-2)
+
+
+def test_parameter_permutation_equivariance():
+    """Relabelling the parameters permutes the indices, and nothing else.
+
+    Re-running the same model with its parameters in a different order must
+    move every index to the new position of its parameter. An index computed
+    against the wrong column would not survive the relabelling.
+    """
+    perm = np.array([2, 0, 3, 1])
+    kwargs = dict(
+        gamma=2.0,
+        ridge=1e-10,
+        max_centers=200,
+        n_outer=256,
+        n_inner=64,
+        n_variance=4096,
+        seed=0,
+    )
+    with jax.enable_x64():
+        X = np.asarray(jaxgsa.sampling.monte_carlo(ASYM_PROBLEM, 2048, seed=7))
+        Y = X @ A_COEF_ASYM
+        base = jaxgsa.vkoga.analyze(ASYM_PROBLEM, X, Y, correlation=R_ASYM, **kwargs)
+        # Same model, parameters relabelled: permute the columns, the
+        # coefficients, and the correlation matrix together.
+        permuted = jaxgsa.vkoga.analyze(
+            ASYM_PROBLEM,
+            X[:, perm],
+            X[:, perm] @ A_COEF_ASYM[perm],
+            correlation=R_ASYM[np.ix_(perm, perm)],
+            **kwargs,
+        )
+    for name in ("S_TC", "S_TU", "S_U", "S_C", "S_IU"):
+        np.testing.assert_allclose(
+            np.asarray(getattr(permuted, name)),
+            np.asarray(getattr(base, name))[perm],
+            atol=2e-2,
+            err_msg=name,
+        )
+
+
+# --- the additive-projection limit --------------------------------------------
+
+# A correlated model with a genuine interaction, where the degree-6 additive
+# component functions cannot represent what X_i explains alone. The raw S_U
+# then exceeds S_TU and S_IU would go negative; the clip stops that.
+R_INTERACTION = np.array(
+    [
+        [1.0, -0.32, -0.12],
+        [-0.32, 1.0, -0.75],
+        [-0.12, -0.75, 1.0],
+    ]
+)
+
+
+def _interaction_model(X: np.ndarray) -> np.ndarray:
+    return X @ np.array([1.0, 0.7, 0.4]) + 0.5 * X[:, 0] * X[:, 1] + 0.3 * np.tanh(X[:, 2])
+
+
+def test_interaction_model_clips_s_u_and_warns():
+    """S_IU never goes negative, and a wide clip is reported.
+
+    On this model the additive projection absorbs interaction variance it
+    cannot represent as a function of X_i alone, so the raw S_U overshoots
+    S_TU. The estimator clips S_U to S_TU, which keeps S_IU >= 0, and warns
+    because the overshoot is far above the noise floor.
+    """
+    with jax.enable_x64():
+        X = np.asarray(jaxgsa.sampling.monte_carlo(GAUSS_PROBLEM, 1024, seed=5))
+        Y = _interaction_model(X)
+        with pytest.warns(UserWarning, match="S_U exceeded S_TU"):
+            result = jaxgsa.vkoga.analyze(
+                GAUSS_PROBLEM,
+                X,
+                Y,
+                correlation=R_INTERACTION,
+                gamma=2.0,
+                ridge=1e-10,
+                max_centers=150,
+                n_outer=256,
+                n_inner=64,
+                n_variance=4096,
+                seed=0,
+            )
+    S_TU = np.asarray(result.S_TU)
+    S_U = np.asarray(result.S_U)
+    S_IU = np.asarray(result.S_IU)
+    # The invariant the clip exists to hold.
+    assert np.all(S_U <= S_TU + 1e-12)
+    assert np.all(S_IU >= 0.0)
+    # x3 is the parameter that overshot; the clip binds there exactly.
+    assert S_IU[2] == pytest.approx(0.0, abs=1e-12)
+    # S_C is left free: these correlations oppose the direct effects, so a
+    # negative correlated part is the honest reading, not an artefact.
+    assert np.all(np.asarray(result.S_C) < 0.0)
+
+
+def test_additive_model_does_not_trigger_the_clip():
+    """The clip must stay out of the way on a model the projection can fit.
+
+    An additive model has no interaction variance for f_i to absorb, so S_U
+    tracks S_TU on its own and no warning fires.
+    """
+    with jax.enable_x64():
+        X = jaxgsa.sampling.monte_carlo(GAUSS_PROBLEM, 1024, seed=5)
+        Y = X @ A_COEF
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = jaxgsa.vkoga.analyze(
+                GAUSS_PROBLEM,
+                X,
+                Y,
+                correlation=R_INTERACTION,
+                gamma=2.0,
+                ridge=1e-10,
+                max_centers=150,
+                n_outer=256,
+                n_inner=64,
+                n_variance=4096,
+                seed=0,
+            )
+    assert not [w for w in caught if "S_U exceeded" in str(w.message)]
+    np.testing.assert_allclose(np.asarray(result.S_IU), 0.0, atol=3e-2)
+
+
+# --- surrogate-quality diagnostic ---------------------------------------------
+
+
+def test_oscillatory_model_warns_that_the_surrogate_failed():
+    """A 12-cycle sine defeats the kernel, and the user is told.
+
+    The greedy Gaussian kernel cannot resolve this frequency from 512 points.
+    Every index is measured against the surrogate, so the reported ranking is
+    meaningless — and without the warning it would look ordinary.
+    """
+    problem = Problem(names=("u1", "u2", "u3"), bounds=((0.0, 1.0),) * 3)
+    X = jaxgsa.sampling.monte_carlo(problem, 512, seed=1)
+    Y = np.sin(2.0 * np.pi * 12.0 * np.asarray(X)[:, 0]) + 0.5 * np.asarray(X)[:, 1]
+    with pytest.warns(UserWarning, match="cross-validated surrogate error"):
+        result = jaxgsa.vkoga.analyze(
+            problem,
+            X,
+            Y,
+            ridge=1e-6,  # gamma is cross-validated; ridge fixed keeps it to 10 fits
+            max_centers=100,
+            n_folds=4,
+            n_outer=64,
+            n_inner=16,
+            n_variance=512,
+            seed=0,
+        )
+    # The honest out-of-sample score reaches the result, and it is the thing
+    # the warning fired on: the surrogate explains nothing.
+    assert result.cv_rmse is not None
+    assert result.cv_rmse > 0.5 * float(Y.std())
+
+
+def test_cv_rmse_is_none_when_both_hyperparameters_are_fixed(uniform_fits):
+    """No cross-validation ran, so there is no out-of-sample score to report."""
+    _, _, fits = uniform_fits
+    assert fits["scalar"].cv_rmse is None
 
 
 # --- correlation handling -----------------------------------------------------
