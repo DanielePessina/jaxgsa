@@ -62,6 +62,28 @@
   a `correlation_ok` capability flag sits on the shared `(X, Y)` validation.
   Future methods must therefore make the decision explicitly.
 
+### Changed
+
+- **`hdmr` now says what `ST` means under correlated inputs.** No number
+  changed. `HDMRResult.ST` was labelled a total-order index with no caveat.
+  It is the SCSA total: the sum of `S = Sa + Sb` over every term that
+  contains the parameter. That is Eq. (8) of Sarazin, Viaud & Cournède
+  (2017), and it is the same convention as SALib's HDMR. With independent
+  inputs the correlative shares vanish and it reduces to the ordinary Sobol'
+  total-order index. With correlated inputs it does not. It can be negative,
+  it is not bounded in `[0, 1]`, and it does not measure the expected
+  variance reduction from fixing a parameter. So it must not be used as a
+  criterion for fixing one. The bias runs toward "cannot be fixed", and a
+  parameter the model ignores can outrank one with a negative value. It is
+  also not comparable with the `ST` of `jaxgsa.kucherenko` or the `S_TU` of
+  `jaxgsa.vkoga`. Use one of those for a conditional-variance total under
+  dependence. `HDMRResult.S1` carries the matching caveat: it is the
+  structural share `Sa` of the first-order term, not the Sobol' first-order
+  index. `hdmr.analyze` emits one `UserWarning` per call on a correlated
+  problem to say all of this. Independent problems stay silent. The
+  per-term `Sa`, `Sb` and `S` fields keep their ANCOVA meaning and are
+  unaffected.
+
 ### Fixed
 
 - **`correlation_kind="spearman"` now checks the matrix you declared.** The

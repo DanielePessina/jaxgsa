@@ -55,6 +55,14 @@ class HDMRResult(SurrogateResult):
     (``Sa``) blocks into the conventional Sobol-index layouts -- a ``(D,)``
     vector, a ``(D, D)`` matrix, and a ``(D, D, D)`` tensor respectively.
 
+    Warning:
+        Under correlated inputs, :attr:`ST` and :attr:`S1` do not carry their
+        usual Sobol meaning. :attr:`ST` is the SCSA total of Sarazin, Viaud &
+        Cournede (2017), Eq. (8), and :attr:`S1` is a structural share only.
+        Neither one measures expected conditional-variance reduction, and
+        neither one tells you that a parameter can be fixed. Read the notes on
+        each attribute before you rank parameters from a correlated fit.
+
     Attributes:
         Sa: Structural (uncorrelated) variance fraction per term, shape
             ``(n_terms,)`` / ``(K, n_terms)`` / ``(T, K, n_terms)``. The part
@@ -63,9 +71,25 @@ class HDMRResult(SurrogateResult):
             zero when inputs are independent; non-zero values flag variance
             shared through input correlation (and can be negative).
         S: Total contribution per term, ``S = Sa + Sb``, same shape.
-        ST: Total-order index per parameter -- its first-order term plus
-            every interaction term containing it -- shape ``(D,)`` /
-            ``(K, D)`` / ``(T, K, D)``.
+        ST: SCSA total per parameter, shape ``(D,)`` / ``(K, D)`` /
+            ``(T, K, D)``. It sums ``S = Sa + Sb`` over every term that
+            contains the parameter: ``ST_i = sum over u containing i of
+            (Sa_u + Sb_u)``. This is Eq. (8) of Sarazin, Viaud & Cournede
+            (2017), and it matches the HDMR convention of SALib and of
+            Vrugt's ``HDMR_end.m``.
+
+            With independent inputs the correlative shares ``Sb`` vanish and
+            ``ST`` reduces to the ordinary Sobol total-order index.
+
+            With correlated inputs it does **not**. It can be negative, it is
+            not bounded in ``[0, 1]``, and it does not measure the expected
+            reduction of output variance from fixing the parameter. Do not
+            use it to decide that a parameter can be fixed: the bias runs
+            toward "cannot be fixed", and a parameter the model ignores can
+            outrank one with a negative value. It is also not comparable with
+            the ``ST`` of ``jaxgsa.kucherenko`` or the ``S_TU`` of
+            ``jaxgsa.vkoga``. Use one of those for a genuine
+            conditional-variance total under dependence.
         problem: Problem definition used for the analysis.
         terms: Human-readable term labels, e.g. ``("x1", "x2", "x1/x2")``;
             interaction terms join parameter names with ``/``.
@@ -156,11 +180,18 @@ class HDMRResult(SurrogateResult):
 
     @property
     def S1(self) -> Array:
-        """First-order Sobol indices (structural contribution of first-order terms).
+        """Structural first-order share (Sobol' S1 only under independent inputs).
 
         Equivalent to ``Sa[:D]`` — the uncorrelated variance fraction of each
         single-parameter component function, which matches the definition of
         first-order Sobol indices.
+
+        Note:
+            This is the **structural** share only. With independent inputs it
+            equals the first-order Sobol index. With correlated inputs it does
+            not: the correlative share ``Sb`` is left out, so the value can sit
+            far below the Sobol ``S1`` of the same parameter. See :attr:`ST`
+            for the matching caveat on the total.
 
         Returns:
             Array of shape ``(D,)`` / ``(K, D)`` / ``(T, K, D)``.
