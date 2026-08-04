@@ -1,8 +1,8 @@
 # Correlated Inputs
 
 Use this page when your input parameters are not independent. jaxgsa models
-dependence with a **Gaussian copula**: every parameter keeps its declared
-marginal (uniform, Gaussian, or truncated Gaussian) exactly as written, and a
+dependence with a Gaussian copula. Every parameter keeps its declared
+marginal (uniform, Gaussian, or truncated Gaussian) exactly as written. A
 `(D, D)` correlation matrix on the copula's latent standard-normal scale
 couples the columns. The matrix lives on the `Problem`, so samplers and
 analyzers see one consistent declaration.
@@ -33,10 +33,10 @@ print(problem.has_correlated_inputs)  # True
 print(problem.correlation)            # the validated latent matrix
 ```
 
-By default the matrix is interpreted on the **latent** scale — the Pearson
-correlation of the copula's underlying normals. If you have a **rank**
-(Spearman) correlation instead — the natural target for non-Gaussian
-marginals, and exactly invertible under a Gaussian copula — declare it with
+By default the matrix is interpreted on the latent scale. That is the Pearson
+correlation of the copula's underlying normals. A rank (Spearman) correlation
+is the natural target for non-Gaussian marginals, and a Gaussian copula
+inverts it exactly. Declare a rank correlation with
 `correlation_kind="spearman"`:
 
 ```python
@@ -65,13 +65,12 @@ declared. If the third case applies, correct the matrix, or fit a valid one
 from data with `jaxgsa.sampling.fit_correlation`. Check also that you did not
 pass a rank correlation without `correlation_kind="spearman"`.
 
-`fit_correlation` itself never raises for this reason. When the *data* is
-inconsistent, refusing to fit helps nobody, so a fit that had to move an entry
-by `0.05` or more only warns.
+`fit_correlation` itself never raises for this reason. Inconsistent data is
+not a user error. A fit that had to move an entry by `0.05` or more only
+warns.
 
-If you have a published **covariance** matrix rather than a correlation
-matrix, rescale it first — note the variances on its diagonal are discarded
-in favor of the declared marginals:
+Rescale a published covariance matrix before you pass it. The variances on
+its diagonal are discarded in favor of the declared marginals:
 
 ```python
 R = jaxgsa.sampling.correlation_from_covariance(cov)
@@ -84,7 +83,7 @@ Match your starting point to the right entry path:
 | You have | Do this |
 |---|---|
 | A rank (Spearman) correlation you want the samples to have | Pass that matrix with `correlation_kind="spearman"`. The conversion to the latent scale is exact. |
-| A published covariance for **Gaussian** variables | `correlation_from_covariance(cov)`, default kind. Latent equals Pearson here, so this is exact. |
+| A published covariance for Gaussian variables | `correlation_from_covariance(cov)`, default kind. Latent equals Pearson here, so this is exact. |
 | Observed data | `fit_correlation(problem, X_observed)`, then `with_correlation`. The fit uses ranks and converts internally. |
 | A rough Pearson target with non-Gaussian marginals | Prefer `correlation_kind="spearman"` with the same number. Only the Spearman route carries an exact guarantee. The two scales differ little (Spearman 0.6 maps to latent 0.618). |
 
@@ -152,13 +151,13 @@ delta = jaxgsa.borgonovo.analyze(problem, X, Y)
 ```
 
 Under correlation these indices deliberately credit an input for influence
-it carries *through* its correlated partners: if `Y` depends only on `x1`
+it carries through its correlated partners: if `Y` depends only on `x1`
 but `corr(x1, x2) = 0.8`, then `x2` also gets a clearly non-zero index. That
 is the correct correlation-inclusive reading, not an estimation error.
 
-HDMR goes further and **separates** the two contributions via its ANCOVA
-decomposition — its `Sb` term is precisely the correlation-induced share, so
-it doubles as a diagnostic:
+HDMR goes further. Its ANCOVA decomposition separates the two contributions.
+The `Sb` term is the correlation-induced share, so it doubles as a
+diagnostic:
 
 ```python
 hdmr = jaxgsa.hdmr.analyze(problem, X, Y)
@@ -191,13 +190,13 @@ matrix explicitly with `problem.with_correlation(None)`.
 
 ## Practical notes
 
-- A Gaussian copula fixes the whole **dependence family**, not just the
-  correlation: it has no tail dependence, and variables are conditionally
-  independent given the rest on the latent scale. Real data may carry
-  asymmetric or tail dependence this smooths away.
-- The Pearson correlation of the physical samples will generally **not**
-  equal the latent matrix for non-Gaussian marginals (the NORTA
-  correlation-matching problem). The Spearman rank correlation is the
+- A Gaussian copula fixes the whole dependence family, not only the
+  correlation. It has no tail dependence. On the latent scale, the variables
+  are conditionally independent given the rest. Real data may carry
+  asymmetric or tail dependence that this smooths away.
+- For non-Gaussian marginals, the Pearson correlation of the physical samples
+  usually differs from the latent matrix. This is the NORTA
+  correlation-matching problem. The Spearman rank correlation is the
   exactly invertible route: declare it with `correlation_kind="spearman"`.
   When every marginal is Gaussian, latent and Pearson coincide and the
   sample covariance reproduces the declared one.
