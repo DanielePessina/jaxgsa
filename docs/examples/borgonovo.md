@@ -17,6 +17,19 @@ When to use Borgonovo delta:
 - You have a set of (X, Y) pairs from any sampling strategy — no
   structured design required.
 
+::: warning Continuous outputs only
+`borgonovo.analyze` supports a continuous output distribution only. The
+estimator compares kernel density estimates on a shared output grid, and a
+discrete output has atoms that no grid resolves. `analyze` checks the
+output first and raises `ValueError` when a column takes at most 20
+distinct values and those values are fewer than 1% of the samples. Use
+[`jaxgsa.optimal_transport.analyze`](/examples/optimal-transport) for a
+discrete output: it compares empirical distributions directly and needs no
+density. A continuous output rounded to a few decimals is not refused,
+and neither is a constant column, whose exact answer is `delta = S1 = 0`.
+Categorical inputs stay supported. The limit applies to the output only.
+:::
+
 ## Import style
 
 ```python
@@ -156,6 +169,13 @@ print(ds_plain)
   a constant output instead of raising.
 - Peak memory scales with `slice_chunk_size * D * N * grid_size`; lower
   `slice_chunk_size` for large time-series outputs.
+- Delta is a half L1 distance between densities, so it lies in [0, 1]. If
+  the returned estimate leaves that range by more than 0.05, the
+  computation failed and `analyze` raises `ValueError` naming the
+  parameter. Raise `grid_size`, or raise `degenerate_bandwidth`. The value
+  is never clipped, because a clipped value looks plausible and is still
+  wrong. A confidence bound outside the range only warns: the point
+  estimate is the contract and the interval is a diagnostic.
 
 ## See also
 

@@ -391,23 +391,52 @@ class TestPlischkeHeuristic:
 class TestDeltaRegression:
     """Regression coverage for confirmed code-review findings."""
 
-    def test_rare_event_bias_correction_not_inflated(self):
-        """A rare-event output must not make the bias correction inflate delta.
+    def test_rare_event_indicator_is_a_discrete_output(self):
+        """A 0/1 indicator is discrete, so the estimator refuses it.
 
-        Constant bootstrap resamples (frequent when Y is a rare-event
-        indicator) previously contributed spurious zero replicates, dragging
-        ``mean(d_boot)`` below ``d_hat`` and pushing the corrected estimate
-        *above* the plug-in value for an input whose true delta is ~0.
+        ``analyze`` supports a continuous output only. A rare-event
+        indicator has two atoms, which no output grid resolves.
         """
         X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=1000, seed=1))
         Y_np = np.zeros(1000)
         Y_np[np.random.default_rng(0).integers(1000)] = 1.0
+        with pytest.raises(ValueError, match="continuous output distribution only"):
+            analyze(ishigami.PROBLEM, X, jnp.asarray(Y_np), n_bootstrap=0)
+
+    def test_rare_event_bias_correction_not_inflated(self):
+        """A rare-event output must not make the bias correction inflate delta.
+
+        Near-constant bootstrap resamples (frequent when Y is a rare-event
+        magnitude) previously contributed spurious zero replicates, dragging
+        ``mean(d_boot)`` below ``d_hat`` and pushing the corrected estimate
+        *above* the plug-in value for an input whose true delta is ~0. The
+        output carries a small continuous background so it stays a
+        continuous distribution; the spike still dominates it by two orders
+        of magnitude.
+        """
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=1000, seed=1))
+        rng = np.random.default_rng(0)
+        Y_np = 0.01 * rng.standard_normal(1000)
+        Y_np[rng.integers(1000)] = 1.0
         Y = jnp.asarray(Y_np)
         plug = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0)
         corrected = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=200, seed=0)
         c = np.asarray(corrected.delta)
         assert np.all(np.isfinite(c))
         assert np.all(c <= np.asarray(plug.delta) + 0.02)
+
+    def test_constant_column_degenerate_replicates_stay_zero(self):
+        """A constant column keeps delta = 0 through every bootstrap replicate.
+
+        Every resample of a constant column is itself constant, so this
+        exercises the degenerate-replicate branch of the bias correction.
+        """
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=800, seed=2))
+        Y = jnp.stack([ishigami.evaluate(X), jnp.ones(800)], axis=1)
+        result = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=32, seed=0)
+        np.testing.assert_allclose(np.asarray(result.delta)[1], 0.0)
+        assert result.delta_conf is not None
+        np.testing.assert_allclose(np.asarray(result.delta_conf)[:, 1], 0.0)
 
     def test_ranking_uses_original_x_under_x64(self):
         """Ranks must be computed on the original X, not a Y-dtype downcast.

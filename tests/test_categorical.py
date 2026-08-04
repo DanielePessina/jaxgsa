@@ -16,7 +16,6 @@ from jaxgsa import (
     hsic,
     morris,
     optimal_transport,
-    pawn,
     shapley,
     sobol,
 )
@@ -28,6 +27,7 @@ from jaxgsa._core.partition import (
 )
 from jaxgsa._core.sampling import _inverse_transform_samples
 from jaxgsa._core.transforms import cdf_to_unit_interval
+from jaxgsa.borgonovo._analyze import _warn_conf_out_of_range
 from jaxgsa.problem import CategoricalInputSpec, Problem, _categorical_dims
 
 PROBS = [0.5, 0.3, 0.2]
@@ -378,19 +378,18 @@ def test_empty_declared_level_warns_and_completes():
 
 
 def test_borgonovo_degenerate_class_recovers_delta():
-    """A noise-free per-level output must not bias delta low.
+    """A near-atomic per-level output must not bias delta low.
 
     Y = offsets[code] with three balanced levels has true delta = 2/3.
-    Without the bandwidth floor the degenerate (zero-variance) classes drop
-    out of the integrand and delta collapses to ~0.33. With the floor the
-    estimate lands at 0.60-0.62 for N in [1e3, 1e4] (measured error <= 0.07;
-    asserted with headroom).
+    Without the bandwidth floor the degenerate (near-zero-variance) classes
+    drop out of the integrand and delta collapses to ~0.33. With the floor
+    the estimate lands at 0.60-0.62 for N in [1e3, 1e4] (measured error
+    <= 0.07; asserted with headroom). The jitter is 1e-9, far below the
+    atom spacing, so the classes stay degenerate; an exactly noise-free Y
+    is a discrete output and ``analyze`` refuses it (see
+    ``test_borgonovo_refuses_a_discrete_output``).
     """
-    p = Problem.from_dict({"c": {"dist": "categorical", "probs": [1 / 3, 1 / 3, 1 / 3]}})
-    rng = np.random.default_rng(0)
-    codes = rng.integers(0, 3, 3000)
-    X = codes[:, None].astype(np.float64)
-    Y = OFFSETS[codes]
+    p, X, Y = _atom_data(1e-9)
     with pytest.warns(UserWarning, match="bandwidth"):
         res = borgonovo.analyze(p, X, Y, seed=0)
     assert abs(float(res.delta[0]) - 2.0 / 3.0) < 0.11
@@ -406,14 +405,57 @@ def _atom_data(noise, n=3000, seed=0):
     return p, codes[:, None].astype(np.float64), Y
 
 
-@pytest.mark.parametrize("noise", [0.0, 1e-9, 1e-5, 1e-3, 3e-3, 1e-2, 0.1, 0.3])
+def test_borgonovo_refuses_a_discrete_output():
+    """Zero jitter makes Y discrete, which the estimator does not support.
+
+    The two guards are complementary. A discrete output is caught here, up
+    front, by the distinct-value check. An output with a tiny jitter has
+    about N distinct values, passes this check, and is caught later by the
+    delta range check if its conditional density aliases on the grid.
+    """
+    p, X, Y = _atom_data(0.0)
+    assert len(np.unique(Y)) == 3
+    with pytest.raises(ValueError, match="continuous output distribution only"):
+        jaxgsa.borgonovo.analyze(p, X, Y, seed=0, n_bootstrap=0)
+
+
+def test_borgonovo_discrete_output_error_points_at_optimal_transport():
+    p, X, Y = _atom_data(0.0)
+    with pytest.raises(ValueError, match="jaxgsa.optimal_transport.analyze"):
+        jaxgsa.borgonovo.analyze(p, X, Y, n_bootstrap=0)
+
+
+def test_borgonovo_accepts_a_rounded_continuous_output():
+    """Rounding to 2 decimals leaves many distinct values, so it is allowed."""
+    p = Problem(names=("a", "b"), bounds=((0.0, 1.0), (0.0, 1.0)))
+    rng = np.random.default_rng(1)
+    X = rng.random((3000, 2))
+    Y = np.round(X[:, 0] + 0.5 * X[:, 1], 2)
+    assert len(np.unique(Y)) > 20
+    res = jaxgsa.borgonovo.analyze(p, X, Y, n_bootstrap=0)
+    assert float(np.asarray(res.delta)[0]) > float(np.asarray(res.delta)[1])
+
+
+def test_borgonovo_discrete_output_names_the_offending_column():
+    """With several outputs the message says which column is discrete."""
+    p = Problem(names=("a",), bounds=((0.0, 1.0),), output_names=("smooth", "atoms"))
+    rng = np.random.default_rng(2)
+    X = rng.random((2000, 1))
+    Y = np.stack([X[:, 0], np.floor(3 * X[:, 0])], axis=1)
+    with pytest.raises(ValueError, match=r"k=1 \('atoms'\)"):
+        jaxgsa.borgonovo.analyze(p, X, Y, n_bootstrap=0)
+
+
+@pytest.mark.parametrize("noise", [1e-9, 1e-5, 1e-3, 3e-3, 1e-2, 0.1, 0.3])
 def test_borgonovo_atomic_class_delta_stays_in_range(noise):
     """The atoms are separated far beyond the jitter, so delta is 2/3.
 
     Before the degenerate-class tolerance was raised to 1e-2 the class
     bandwidth could sit orders of magnitude below the output grid step. The
     conditional density then aliased on the grid and the trapezoid integral
-    exploded: noise 1e-5 returned delta 121 with no warning at all.
+    exploded: noise 1e-5 returned delta 121 with no warning at all. Zero
+    noise is not swept here: it makes Y discrete, and the estimator refuses
+    a discrete output up front.
     """
     p, X, Y = _atom_data(noise)
     with warnings.catch_warnings():
@@ -424,17 +466,23 @@ def test_borgonovo_atomic_class_delta_stays_in_range(noise):
     assert abs(delta - 2.0 / 3.0) < 0.11
 
 
-def test_borgonovo_aliasing_delta_warns_out_of_range():
-    """An unresolvable class must never return a huge delta in silence."""
+def test_borgonovo_aliasing_delta_raises_out_of_range():
+    """An unresolvable class must never return a huge delta.
+
+    A delta outside [0, 1] is a failed computation, so it is an error, not
+    a number the caller can plot. The message names both knobs.
+    """
     p, X, Y = _atom_data(1e-5)
     # degenerate_tol=1e-6 restores the old, too-low detection threshold.
-    with pytest.warns(UserWarning, match=r"delta is defined on \[0, 1\]"):
-        res = jaxgsa.borgonovo.analyze(p, X, Y, seed=0, n_bootstrap=0, degenerate_tol=1e-6)
-    # The value is reported unclipped so the failure stays visible.
-    assert float(np.asarray(res.delta).ravel()[0]) > 1.0
+    with pytest.raises(ValueError, match=r"delta is a half L1 distance") as excinfo:
+        jaxgsa.borgonovo.analyze(p, X, Y, seed=0, n_bootstrap=0, degenerate_tol=1e-6)
+    message = str(excinfo.value)
+    assert "'c'" in message or "c:" in message
+    assert "grid_size (currently 100)" in message
+    assert "degenerate_bandwidth" in message
 
 
-def test_borgonovo_in_range_delta_does_not_warn_out_of_range():
+def test_borgonovo_in_range_delta_does_not_raise():
     p, X, Y = _atom_data(1e-5)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -442,9 +490,29 @@ def test_borgonovo_in_range_delta_does_not_warn_out_of_range():
     assert not [w for w in caught if "delta is defined on" in str(w.message)]
 
 
+def test_borgonovo_out_of_range_confidence_bound_only_warns():
+    """The interval is a diagnostic, so a bad bound warns instead of raising."""
+    p = Problem(names=("a", "b"), bounds=((0.0, 1.0), (0.0, 1.0)))
+    conf = np.array([[-0.4, 0.1], [0.6, 1.9]])  # lower bad in a, upper bad in b
+    with pytest.warns(UserWarning, match="bootstrap confidence") as record:
+        _warn_conf_out_of_range(p, jnp.asarray(conf))
+    message = str(record[0].message)
+    assert "lower bound for a" in message
+    assert "upper bound for b" in message
+
+
+def test_borgonovo_in_range_confidence_bound_is_silent():
+    p = Problem(names=("a", "b"), bounds=((0.0, 1.0), (0.0, 1.0)))
+    conf = np.array([[0.0, 0.1], [0.6, 0.9]])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _warn_conf_out_of_range(p, jnp.asarray(conf))
+    assert not caught
+
+
 def test_borgonovo_grid_size_moves_the_atomic_estimate():
     """Document the knob: grid_size, not the bandwidth fraction, governs it."""
-    p, X, Y = _atom_data(0.0)
+    p, X, Y = _atom_data(1e-9)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         coarse = jaxgsa.borgonovo.analyze(p, X, Y, seed=0, n_bootstrap=0, grid_size=50)
@@ -453,7 +521,7 @@ def test_borgonovo_grid_size_moves_the_atomic_estimate():
 
 
 def test_borgonovo_degenerate_bandwidth_override_changes_the_estimate():
-    p, X, Y = _atom_data(0.0)
+    p, X, Y = _atom_data(1e-9)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         default = jaxgsa.borgonovo.analyze(p, X, Y, seed=0, n_bootstrap=0)
@@ -762,12 +830,11 @@ def _gated_calls(problem, X, Y):
         (lambda: pce_mod.analyze(problem, X, Y)),
         (lambda: hdmr.analyze(problem, X, Y)),
         (lambda: hsic.analyze(problem, X, Y)),
-        (lambda: pawn.analyze(problem, X, Y)),
         (lambda: shapley.analyze(problem, X, Y)),
     ]
 
 
-@pytest.mark.parametrize("call_idx", range(8))
+@pytest.mark.parametrize("call_idx", range(7))
 def test_gated_methods_raise_naming_the_categorical_parameter(call_idx):
     problem, X, Y = _mixed_data(n=256)
     call = _gated_calls(problem, X, Y)[call_idx]

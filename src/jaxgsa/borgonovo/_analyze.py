@@ -8,6 +8,10 @@ each conditional density, both estimated by Gaussian KDE with Silverman
 bandwidths on a fixed output grid (trapezoidal integration). A given-data
 first-order Sobol index falls out of the same partition at negligible cost.
 
+The estimator supports a continuous output distribution only: a KDE on a
+fixed grid cannot represent an atom. ``analyze`` refuses a discrete output
+up front and points the caller at ``jaxgsa.optimal_transport``.
+
 The plug-in estimator is biased upward at finite N, so by default the
 central estimate is bias-corrected with bootstrap resamples
 (``2*d_hat - mean(d_boot)``, Plischke et al. eqn 30) where ``d_hat`` is
@@ -93,6 +97,18 @@ _DEGENERATE_BW_FRACTION = 0.1
 # bias-corrected estimate can leave that range by a little at small N, so
 # only an excursion wider than this counts as an estimator failure.
 _DELTA_RANGE_TOL = 0.05
+# A discrete output breaks the estimator: the KDE of an atomic density is a
+# spike the output grid cannot resolve, so delta is meaningless. An output
+# column is treated as discrete when it takes at most this many distinct
+# values *and* those values are a vanishing fraction of the sample. Both
+# conditions must hold, so a continuous output rounded to a few decimals
+# (many distinct values at any useful N) is not refused. A column with a
+# single distinct value is exempt: a constant output needs no density at
+# all, every conditional equals the unconditional, and delta = S1 = 0 is
+# the exact answer, not a failed computation. That contract predates this
+# guard and stays.
+_DISCRETE_MAX_DISTINCT = 20
+_DISCRETE_DISTINCT_FRACTION = 0.01
 # Target element budget for the default per-chunk working set. The dominant
 # intermediate is the conditional-KDE tensor whose size scales as
 # ``chunk_columns * sum_g(Dg * Mg * Pg) * grid_size``, so the default chunk
@@ -278,6 +294,95 @@ def _get_delta_kernel(
     return jax.jit(_impl)
 
 
+def _slice_label(flat_index: int, trailing: tuple[int, ...], problem: Problem) -> str:
+    """Name one flattened output column for an error message.
+
+    Args:
+        flat_index: Index of the column in the flattened ``T*K`` axis.
+        trailing: The shape of ``Y`` after the sample axis: ``()``,
+            ``(K,)``, or ``(T, K)``.
+        problem: Problem definition, which may carry ``output_names``.
+
+    Returns:
+        A short label such as ``"k=1 ('flux')"`` or ``"(t=3, k=0)"``. The
+        label is empty for a single scalar output, which needs no name.
+    """
+    if len(trailing) == 0:
+        return ""
+    K = trailing[-1]
+    names = problem.output_names
+    t, k = divmod(flat_index, K)
+
+    def _k_label(k_index: int) -> str:
+        if names is not None and len(names) == K:
+            return f"k={k_index} ('{names[k_index]}')"
+        return f"k={k_index}"
+
+    if len(trailing) == 1:
+        return _k_label(flat_index)
+    return f"(t={t}, {_k_label(k)})"
+
+
+def _raise_discrete_output(problem: Problem, Y: Array) -> None:
+    """Reject a discrete output up front.
+
+    The estimator compares Gaussian kernel density estimates on a shared
+    output grid. That construction needs a continuous output. A discrete
+    output has atoms, and the density of an atom is a spike no grid
+    resolves, so the returned delta is an artifact of ``grid_size`` rather
+    than a property of the model. The check runs before any expensive work.
+
+    An output column counts as discrete only when it takes at most
+    ``_DISCRETE_MAX_DISTINCT`` distinct values *and* those values are fewer
+    than ``_DISCRETE_DISTINCT_FRACTION`` of the sample. Both conditions
+    must hold, so a continuous output rounded to a few decimals keeps
+    working. A constant column (one distinct value) is exempt: it needs no
+    density, and ``delta = S1 = 0`` is its exact answer.
+
+    Args:
+        problem: Problem definition, used to name the offending column.
+        Y: Validated output array ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
+
+    Raises:
+        ValueError: If any output column is discrete.
+    """
+    N = Y.shape[0]
+    trailing = Y.shape[1:]
+    flat = Y.reshape(N, -1)
+    if N < 2:
+        return
+    ordered = jnp.sort(flat, axis=0)
+    n_distinct = np.asarray(1 + jnp.sum(ordered[1:] != ordered[:-1], axis=0))
+    discrete = (
+        (n_distinct > 1)
+        & (n_distinct <= _DISCRETE_MAX_DISTINCT)
+        & (n_distinct < _DISCRETE_DISTINCT_FRACTION * N)
+    )
+    bad = np.flatnonzero(discrete)
+    if bad.size == 0:
+        return
+
+    if flat.shape[1] == 1:
+        where = f"the output takes only {int(n_distinct[0])} distinct values"
+    else:
+        detail = ", ".join(
+            f"{_slice_label(int(i), trailing, problem)}: {int(n_distinct[i])} distinct values"
+            for i in bad[:5]
+        )
+        extra = f", and {bad.size - 5} more" if bad.size > 5 else ""
+        where = f"{bad.size} of {flat.shape[1]} output columns are discrete ({detail}{extra})"
+
+    raise ValueError(
+        "jaxgsa.borgonovo.analyze supports a continuous output distribution "
+        f"only, but {where} in {N} samples. The delta estimator compares "
+        "Gaussian kernel density estimates on a shared output grid; an "
+        "atomic density is a spike that no grid resolves, so the index "
+        "would report the grid resolution, not the model. Use "
+        "jaxgsa.optimal_transport.analyze for a discrete output: it "
+        "compares empirical distributions directly and needs no density."
+    )
+
+
 def analyze(
     problem: Problem,
     X: Array,
@@ -358,6 +463,19 @@ def analyze(
             far above 1.
 
     Note:
+        This estimator supports a continuous output distribution only. It
+        compares Gaussian kernel density estimates on a shared output grid,
+        and a discrete output has atoms that no grid resolves. ``analyze``
+        checks the output up front and raises ``ValueError`` when a column
+        takes at most 20 distinct values and those values are fewer than 1%
+        of the sample. Use :func:`jaxgsa.optimal_transport.analyze` for a
+        discrete output: it compares empirical distributions directly and
+        needs no density. A continuous output rounded to a few decimals is
+        not refused, and neither is a constant column, whose exact answer
+        is ``delta = S1 = 0``. A *categorical input* is still supported;
+        the restriction is on the output.
+
+    Note:
         For a conditioning class that is a point mass or nearly one -- the
         normal case for a categorical level that maps to one output value
         -- the delta estimate depends on the grid resolution and is biased
@@ -380,11 +498,9 @@ def analyze(
         (SALib raises an error in this case). A conditioning class the
         output grid cannot resolve gets a floored KDE bandwidth instead of
         its own, with one ``UserWarning``; classes with genuine spread are
-        unaffected. If a returned delta still leaves ``[0, 1]`` by more
-        than 0.05, the estimator has failed and a ``UserWarning`` names the
-        parameter. The value is returned unclipped, because clipping a
-        wild estimate to 1.0 would turn an obvious failure into a
-        plausible wrong answer.
+        unaffected. A confidence bound outside ``[0, 1]`` by more than 0.05
+        raises a ``UserWarning`` naming the parameter and the bound; the
+        point estimate still stands, so only the interval is suspect.
 
     Raises:
         ValueError: If X is not 2-D, its column count does not match the
@@ -397,12 +513,18 @@ def analyze(
             ``slice_chunk_size`` is not a positive integer,
             ``degenerate_tol`` is not in ``[0, 1)``, or
             ``degenerate_bandwidth`` is neither ``"auto"`` nor a positive
-            float.
+            float. Also raised when an output column is discrete (the
+            estimator supports a continuous output only; see the note
+            below), and when the returned delta leaves ``[0, 1]`` by more
+            than 0.05, which means the computation failed rather than
+            returned an estimate.
     """
     X = jnp.asarray(X)
     # The delta estimator partitions on rank classes and compares output
     # densities, so a declared input correlation does not invalidate it.
     Y = _validate_xy_inputs(problem, X, Y, correlation_ok=True, categorical_ok=True)
+    # The continuous-output contract is checked before any expensive work.
+    _raise_discrete_output(problem, Y)
 
     N = X.shape[0]
     # n_classes applies to the continuous columns only; categorical columns
@@ -530,7 +652,11 @@ def analyze(
     else:
         delta = d_hat
 
-    _warn_out_of_range(problem, delta)
+    # The point estimate is the contract, so an out-of-range value is an
+    # error. The interval is a diagnostic, so it only warns.
+    _raise_delta_out_of_range(problem, delta, grid_size)
+    if delta_conf is not None:
+        _warn_conf_out_of_range(problem, delta_conf)
 
     return DeltaResult(
         delta=_squeeze_output_axes(delta, squeeze_time, squeeze_output),
@@ -541,43 +667,99 @@ def analyze(
     )
 
 
-def _warn_out_of_range(problem: Problem, delta: Array) -> None:
-    """Warn when a delta estimate leaves ``[0, 1]`` by more than the tolerance.
-
-    Borgonovo's delta is a half L1 distance between probability densities,
-    so it lies in ``[0, 1]``. A value outside that range is an estimator
-    failure, not a valid answer, and the usual cause is a conditioning
-    class the output grid cannot resolve (a point mass or a class much
-    narrower than the grid step). The value is reported unclipped so the
-    failure stays visible; clipping would return a plausible-looking wrong
-    number instead.
+def _out_of_range_columns(values: Array, num_vars: int) -> tuple[np.ndarray, np.ndarray]:
+    """Find parameter columns whose estimates leave the delta range.
 
     Args:
-        problem: Problem definition (for parameter names in the warning).
-        delta: Delta estimates with the parameter axis last ``(..., D)``.
+        values: Estimates with the parameter axis last ``(..., D)``.
+        num_vars: Number of parameters D.
 
-    Warns:
-        UserWarning: If any estimate is below ``-_DELTA_RANGE_TOL`` or
-            above ``1 + _DELTA_RANGE_TOL``, naming the parameters.
+    Returns:
+        A tuple ``(flat, cols)`` where ``flat`` is the ``(-1, D)`` view of
+        ``values`` and ``cols`` holds the indices of the failing columns.
     """
-    flat = np.asarray(delta).reshape(-1, problem.num_vars)
+    flat = np.asarray(values).reshape(-1, num_vars)
     bad = ~np.isfinite(flat) | (flat < -_DELTA_RANGE_TOL) | (flat > 1.0 + _DELTA_RANGE_TOL)
-    cols = np.flatnonzero(bad.any(axis=0))
+    return flat, np.flatnonzero(bad.any(axis=0))
+
+
+def _raise_delta_out_of_range(problem: Problem, delta: Array, grid_size: int) -> None:
+    """Reject a delta point estimate that leaves ``[0, 1]``.
+
+    Borgonovo's delta is a half L1 distance between probability densities,
+    so it lies in ``[0, 1]`` by construction. A value outside that range is
+    a failed computation, not an estimate, so it is raised rather than
+    returned. The tolerance of 0.05 keeps the documented small negative
+    excursion of the bias-corrected form ``2*d_hat - d_boot`` legal. The
+    value is never clipped: a clipped value is a plausible-looking wrong
+    answer.
+
+    Args:
+        problem: Problem definition (for parameter names in the message).
+        delta: Delta point estimates with the parameter axis last
+            ``(..., D)``.
+        grid_size: The output-grid size that produced the estimate, named
+            in the message so the caller can act on it.
+
+    Raises:
+        ValueError: If any estimate is below ``-_DELTA_RANGE_TOL``, above
+            ``1 + _DELTA_RANGE_TOL``, or not finite.
+    """
+    flat, cols = _out_of_range_columns(delta, problem.num_vars)
     if cols.size == 0:
         return
     detail = ", ".join(
         f"{problem.names[d]}: [{np.nanmin(flat[:, d]):.3g}, {np.nanmax(flat[:, d]):.3g}]"
         for d in cols
     )
+    raise ValueError(
+        "jaxgsa: delta is a half L1 distance between densities, so it lies "
+        f"in [0, 1]. The estimate left that range for {detail}. This is a "
+        "failed computation, not a result. The cause is a conditioning "
+        "class the output grid cannot resolve: a class that is a point "
+        "mass, or one much narrower than the grid step. Two knobs fix it. "
+        f"Raise grid_size (currently {grid_size}) so the grid resolves the "
+        "narrow class. Or raise degenerate_bandwidth, which widens the "
+        "kernel given to such a class. The value is not clipped, because a "
+        "clipped value would look plausible and still be wrong."
+    )
+
+
+def _warn_conf_out_of_range(problem: Problem, delta_conf: Array) -> None:
+    """Warn when a delta confidence bound leaves ``[0, 1]``.
+
+    The point estimate is the contract and is checked by
+    :func:`_raise_delta_out_of_range`. The interval is a diagnostic, so an
+    out-of-range bound degrades the diagnostic without invalidating the
+    estimate, and it warns.
+
+    Args:
+        problem: Problem definition (for parameter names in the warning).
+        delta_conf: Bootstrap interval ``(2, ..., D)`` with the lower bound
+            first.
+
+    Warns:
+        UserWarning: If a bound leaves the range, naming the parameters and
+            which bound failed.
+    """
+    parts = []
+    for bound, arr in (("lower", delta_conf[0]), ("upper", delta_conf[1])):
+        flat, cols = _out_of_range_columns(arr, problem.num_vars)
+        if cols.size == 0:
+            continue
+        detail = ", ".join(
+            f"{problem.names[d]}: [{np.nanmin(flat[:, d]):.3g}, {np.nanmax(flat[:, d]):.3g}]"
+            for d in cols
+        )
+        parts.append(f"{bound} bound for {detail}")
+    if not parts:
+        return
     warnings.warn(
-        "jaxgsa: delta is defined on [0, 1] but the estimate left that "
-        f"range for {detail}. This is an estimator failure, not a result. "
-        "The usual cause is a conditioning class the output grid cannot "
-        "resolve: a degenerate class (one input value mapping to one "
-        "output value) or a grid too coarse for the conditional density. "
-        "Raise grid_size, or raise degenerate_tol so the narrow class gets "
-        "the bandwidth floor. The value is returned unclipped so the "
-        "failure stays visible",
+        "jaxgsa: delta is defined on [0, 1] but a bootstrap confidence "
+        f"bound left that range — {'; '.join(parts)}. The point estimate is "
+        "in range, so the index itself stands; the interval is the part to "
+        "distrust. Raise n_bootstrap, or raise grid_size if a conditioning "
+        "class is near degenerate.",
         stacklevel=3,
     )
 
