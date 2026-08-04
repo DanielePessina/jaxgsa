@@ -1,6 +1,6 @@
 # Morris (Elementary Effects Screening)
 
-Morris is a global **screening** method: a globalized one-at-a-time design
+Morris is a global screening method: a globalized one-at-a-time design
 that measures coarse finite-difference "elementary effects" of each input at
 many locations across the whole input domain. It reduces them to three cheap
 measures — mu (mean effect), mu_star (mean absolute effect, the headline
@@ -58,10 +58,10 @@ Interpreting the measures:
 
 - **mu_star** ranks the parameters. For Ishigami all three inputs come out
   comparable — note that x3 is kept even though its first-order Sobol index
-  is near zero, because mu_star is a proxy for the *total-order* index and
+  is near zero, because mu_star is a proxy for the total-order index and
   x3 acts through its interaction with x1. Parameters with small mu_star are
   negligible and can be fixed before a more expensive Sobol analysis.
-- **sigma** relative to **mu_star** flags *how* a parameter acts. A large
+- **sigma** relative to mu_star shows how a parameter acts. A large
   ratio means the elementary effects vary strongly across the domain — the
   parameter is involved in nonlinearities or interactions (here x3 has the
   largest sigma, consistent with its purely interactive role). The canonical
@@ -121,13 +121,13 @@ print("mu_star:", morris_result.mu_star)
 
 `to_morris()` returns a normal `MorrisSamples` with `method="radial"`, so
 everything else works unchanged: bootstrap CIs, multi-output outputs,
-`to_dataset()`, `downsample()`, and `save()`. Its `samples` is the *same* array
+`to_dataset()`, `downsample()`, and `save()`. Its `samples` is the same array
 you already evaluated, so `n_runs` is unchanged and your existing `Y` stays
 valid.
 
 `n_trajectories` is `base_n` for both design variants — one radial block per
 base point. A second-order design also holds a block based at `B` (`B` with its
-`BA_j` rows), but for additive contributions it is algebraically the *same*
+`BA_j` rows), but for additive contributions it is algebraically the same
 effect, so harvesting it would inflate the apparent sample size and narrow
 bootstrap CIs without improving `mu_star` or `sigma`. It is deliberately unused;
 see [Methods](/guide/methods) for the measurement.
@@ -175,19 +175,19 @@ print("sigma shape:", result.sigma.shape)      # (K, D) = (2, 3)
 
 ## Gaussian inputs
 
-Gaussian marginals are supported through a **truncated-quantile grid**. The
+Gaussian marginals are supported through a truncated-quantile grid. The
 Morris design touches the unit-cube boundaries, and an unbounded inverse CDF
-maps 0 and 1 to infinity. Each **open** side of a Gaussian marginal is
+maps 0 and 1 to infinity. Each open side of a Gaussian marginal is
 therefore pulled in by `q` (`truncation_quantile`, default 1e-4 — probing the
 0.01%–99.99% quantile range) before the transform. A side the problem already
 bounds with an explicit `low` or `high` stays exactly where you put it, so a
 two-sided truncated Gaussian is sampled as declared. Uniform marginals are
 untouched, and deduplication and prefix-nested downsampling work as usual.
 
-On an **unbounded** marginal `mu_star` has no `q -> 0` limit. The design always
+On an unbounded marginal `mu_star` has no `q -> 0` limit. The design always
 includes unit levels 0 and 1 exactly, so a smaller `q` always reaches further
 into the tail and the effects grow with it. Magnitudes are scale-dependent by
-construction there, and only *rankings* are comparable across truncation
+construction there, and only rankings are comparable across truncation
 settings. To fix one bounded input model that every method shares, pass
 `truncate_gaussians` once:
 
@@ -317,7 +317,7 @@ D is always the last axis.
 - Gaussian marginals are sampled on a truncated-quantile grid
   (`truncation_quantile`, default 1e-4): the design would otherwise hit the
   unit-cube boundaries, which an unbounded inverse CDF maps to infinity. Only
-  *open* sides are pulled in; an explicit `low` or `high` is kept as written.
+  open sides are pulled in; an explicit `low` or `high` is kept as written.
   `truncation_quantile` must be in `(0, 0.5)` or `jaxgsa.morris.sample()` raises
   `ValueError`.
 - `to_physical_units()` raises `ValueError` for problems with Gaussian
@@ -336,7 +336,7 @@ D is always the last axis.
 - Measures derived through `SobolSamples.to_morris()` come from the same model
   outputs as that design's Sobol indices, so mu_star and ST agreeing is not an
   independent check of either.
-- A derived design is a *radial* design. It estimates
+- A derived design is a radial design. It estimates
   `E|f(A with B_j) - f(A)| / |B_j - A_j|`, not the fixed-step-delta grid
   quantity. `jaxgsa.morris.sample()` defaults to `method="trajectory"`, so
   compare a derived result against `morris.sample(..., method="radial")`. On

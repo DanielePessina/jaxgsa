@@ -40,7 +40,7 @@ Rules for Gaussian specs:
 - `low` and `high` are optional and may be used independently.
 - When either truncation bound is present, `jaxgsa.sobol.sample()` uses a true
   truncated normal transform, not hard clipping.
-- An *unbounded* Gaussian is still bounded in practice, at the library's own
+- An unbounded Gaussian is still bounded in practice, at the library's own
   support clip of +/-7.0345 standard deviations. Inverse-CDF sampling has to
   keep the unit coordinate off 0 and 1, and that clip is the result.
 - `Problem.from_dict(params, truncate_gaussians=q)` fills `low` and `high` into

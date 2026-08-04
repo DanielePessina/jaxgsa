@@ -1,7 +1,7 @@
 # Borgonovo Delta (Moment-Independent Sensitivity)
 
 Borgonovo delta is a moment-independent sensitivity method that measures
-how much the **entire output density** shifts when an input is fixed. It
+how much the entire output density shifts when an input is fixed. It
 is the expected L1 distance between the unconditional output density and
 the density conditional on each input — no variance decomposition, no
 model assumptions. The same analysis also returns the given-data
@@ -144,7 +144,7 @@ print(ds_plain)
 
 ## Practical caveats
 
-- Delta uses **no structured sampling** — any (X, Y) pairs work, including
+- Delta needs no structured sampling. Any (X, Y) pairs work, including
   Monte Carlo, Latin Hypercube, or Sobol sequences.
 - The number of conditioning classes (`n_classes`) defaults to the
   Plischke sample-size heuristic (roughly `N**(2/7)`, at most 48). More

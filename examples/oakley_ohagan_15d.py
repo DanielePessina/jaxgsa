@@ -21,8 +21,8 @@ def _intro(mo):
     mo.md(r"""
     # High-dimensional SA with Gaussian inputs: Oakley & O'Hagan benchmark
 
-    The Oakley & O'Hagan (2004) function is a **15-dimensional** benchmark
-    with **Gaussian inputs** and a rich interaction structure.  It tests
+    The Oakley & O'Hagan (2004) function is a 15-dimensional benchmark
+    with Gaussian inputs and a rich interaction structure.  It tests
     whether SA methods can identify the few dominant parameters among many,
     and handle non-uniform input distributions.
 
@@ -242,7 +242,7 @@ def _hdmr_md(mo):
     mo.md(r"""
     ## RS-HDMR analysis
 
-    RS-HDMR works from **arbitrary samples** — no structured design needed.
+    RS-HDMR works from arbitrary samples — no structured design needed.
     We draw 3000 i.i.d. Gaussian samples and fit a B-spline surrogate with
     second-order interactions (`maxorder=2`).  There is no dedicated plot
     for this run; its indices join the method-comparison chart further
@@ -268,7 +268,7 @@ def _dgsm_md(mo):
     ## DGSM analysis
 
     DGSM uses JAX autodiff to compute partial derivatives and derives
-    **upper and lower bounds** on the total Sobol index $S_T$.  For
+    upper and lower bounds on the total Sobol index $S_T$.  For
     Gaussian inputs the Poincare constant is $C_i = \sigma^2 = 1$,
     which gives tighter bounds than uniform distributions.
 
@@ -414,7 +414,7 @@ def _ranking_md(mo):
     mo.md(r"""
     ## Ranking accuracy
 
-    Do the methods correctly identify the **top 5** most important
+    Do the methods correctly identify the top 5 most important
     parameters by total-order index?  The analytical ranking places
     x11--x15 at the top.
     """)
@@ -477,7 +477,7 @@ def _summary(mo):
 
     - **DGSM** is the cheapest computationally: one reverse-mode autodiff
       pass gives all 15 partial derivatives per sample.  It produces
-      **bounds** on $S_T$ rather than exact indices, but for screening
+      bounds on $S_T$ rather than exact indices, but for screening
       (identifying which parameters matter) this is often sufficient.
       For Gaussian inputs the Poincare constant $C_i = \sigma^2$ yields
       tighter upper bounds than uniform distributions.

@@ -50,7 +50,7 @@ ST: [~0.56, ~0.44, ~0.24]
 A Saltelli design already contains a Morris radial (star) design: within each
 base point, `A` and each `AB_j` differ in exactly one parameter. So you can read
 elementary-effect screening measures straight off a design you have already
-evaluated — **no extra model runs**:
+evaluated. This needs no extra model runs:
 
 ```python
 morris_result = jaxgsa.morris.analyze(sampling_result.to_morris(), Y)

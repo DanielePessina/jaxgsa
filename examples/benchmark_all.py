@@ -305,7 +305,7 @@ def _samples_md(ISHI_BASE_N, OAKH_BASE_N, mo):
     | **HDMR** | N={ISHI_BASE_N:,} random | N={OAKH_BASE_N:,} random |
 
     All timings are analysis-only, best-of-3, post-JIT warmup.
-    Scenarios: **T x K** where T = timesteps, K = output channels.
+    Scenarios: T x K where T = timesteps, K = output channels.
     """)
     return
 

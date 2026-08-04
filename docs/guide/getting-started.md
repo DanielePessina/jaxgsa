@@ -1,7 +1,7 @@
 # Getting Started
 
-jaxgsa answers a practical question: **which of your model's inputs actually
-drive its output?** You give it a set of input samples and the outputs your
+jaxgsa answers a practical question: which of your model's inputs actually
+drive its output? You give it a set of input samples and the outputs your
 model produced for them; it returns sensitivity indices that rank the inputs
 and expose interactions between them. Everything is computed in JAX, so the
 analysis is JIT-compiled and runs on CPU, GPU, or TPU without code changes.
@@ -83,11 +83,11 @@ ST: [~0.56, ~0.44, ~0.24]
 Each index is a fraction of the output variance, one value per parameter:
 
 - **S1 (first-order)** is the share of output variance each input explains
-  *on its own*. Here `x2` has the largest direct effect (~0.44).
+  on its own. Here `x2` has the largest direct effect (~0.44).
 - **ST (total-order)** adds every interaction the input takes part in. It's
   the right number for asking "can I fix this input to a constant?" — an
   input with ST near zero doesn't matter at all.
-- The **gap between ST and S1** is that input's interaction share. `x3` is
+- The gap between ST and S1 is that input's interaction share. `x3` is
   the interesting case: S1 ≈ 0 (no effect alone) but ST ≈ 0.24, so it matters
   only through its interaction with `x1`. `result.S2` holds the pairwise
   interaction matrix if you want to see which pairs are responsible.

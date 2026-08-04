@@ -1,7 +1,7 @@
 # PAWN (CDF-based Sensitivity)
 
 PAWN is a distribution-based sensitivity method that measures how much
-the **entire output CDF** shifts when an input is fixed. It uses the
+the entire output CDF shifts when an input is fixed. It uses the
 Kolmogorov-Smirnov distance between unconditional and conditional output
 distributions — no variance decomposition, no model assumptions.
 
@@ -147,7 +147,7 @@ print(ds_ci)  # includes pawn_lower and pawn_upper
 
 ## Practical caveats
 
-- PAWN uses **no structured sampling** — any (X, Y) pairs work, including
+- PAWN needs no structured sampling. Any (X, Y) pairs work, including
   Monte Carlo, Latin Hypercube, or Sobol sequences.
 - The number of bins (`n_bins`) trades off conditioning resolution against
   sample density per bin. The default of 10 works well for N >= 1000.

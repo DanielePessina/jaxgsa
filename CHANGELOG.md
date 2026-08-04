@@ -5,7 +5,7 @@
 ### Added
 
 - `SobolSamples.to_morris()` — derive Morris elementary effects from a Sobol
-  design you have already evaluated, at **zero extra model cost**. A Saltelli
+  design you have already evaluated, at no extra model cost. A Saltelli
   design already contains the radial (star) structure Morris needs: within each
   base point, `A` and each `AB_j` differ in exactly one parameter. Writing
   `EE_j = (f(AB_j) - f(A)) / (B_j - A_j)`, Jansen's total-order estimator is
@@ -20,7 +20,7 @@
   seeds at `base_n=128`) and would need a cluster bootstrap over base points to
   keep confidence intervals honest.
 
-  A derived design is a *radial* design, so it estimates
+  A derived design is a radial design, so it estimates
   `E|f(A with B_j) - f(A)| / |B_j - A_j|`, not the classical fixed-step-delta
   grid quantity. `morris.sample` defaults to `method="trajectory"`, so compare
   a derived result against `morris.sample(..., method="radial")`.
@@ -32,7 +32,7 @@
 
 ### Changed
 
-- `morris.sample` now squashes only the **open** sides of a Gaussian marginal.
+- `morris.sample` now squashes only the open sides of a Gaussian marginal.
   A Gaussian with an explicit `low` and `high` is already bounded, and was
   being truncated a second time into a range `truncation_quantile` narrower on
   each side. A one-sided truncation now squashes only its open side.
@@ -40,11 +40,11 @@
   Measured, `q=5e-3` discarded 7.5% of the marginal variance and 24% of the
   fourth moment and perturbed rankings (Kendall tau 0.66 against a
   near-untruncated design on Oakley-O'Hagan); `q=1e-4` discards 0.29% and 5.0%.
-  Note that `mu_star` on an *unbounded* marginal has no `q -> 0` limit — the
+  Note that `mu_star` on an unbounded marginal has no `q -> 0` limit — the
   design always includes unit levels 0 and 1 exactly — so magnitudes there are
   scale-dependent by construction and only rankings are comparable across
   truncation settings.
-- `pce.analyze` no longer forces a **wide** truncated Gaussian onto Legendre.
+- `pce.analyze` no longer forces a wide truncated Gaussian onto Legendre.
   Any truncation used to route the input through its truncated CDF, which the
   low-order Legendre basis approximates badly. A truncation whose every
   declared bound is at least 5 standard deviations out now keeps Hermite. On
@@ -55,7 +55,7 @@
 
 ### Fixed
 
-- Morris trajectory designs recorded `ee_delta` *before* the open-side squash
+- Morris trajectory designs recorded `ee_delta` before the open-side squash
   rescaled the coordinate, so the elementary-effect divisor did not match the
   step actually taken — a systematic error of about 1% at the former default
   `q`. The divisor is now rescaled with the coordinate, per dimension. A model
@@ -74,7 +74,7 @@
 
 - Added `jaxgsa._core.sampling._inverse_transform_samples`, the float64 inverse
   of `_transform_samples` (physical units back to the unit cube). Needed
-  because derived elementary-effect *denominators* are differences of unit
+  because derived elementary-effect denominators are differences of unit
   coordinates, and the existing float32 JAX helper
   (`_core.transforms.cdf_to_unit_interval`) loses too many digits to divide by.
   Unifying the two remains a follow-up.

@@ -17,9 +17,9 @@ Eleven complementary methods are included: **Sobol indices** (the standard varia
 - **Sobol indices** via Saltelli sampling with Sobol quasi-random sequences (`scipy.stats.qmc`)
   - First-order (S1: an input's direct share of output variance), total-order (ST: including all its interactions), and second-order (S2: pairwise interactions)
   - Fused JIT kernels and chunked `jit(vmap(...))` execution for bounded memory on large output grids
-  - [**Up to 668× faster than SALib**](#benchmark-results) (HDMR on multi-output workloads)
+  - [Up to 668× faster than SALib](#benchmark-results) (HDMR on multi-output workloads)
 - **RS-HDMR** (Random Sampling High-Dimensional Model Representation)
-  - Works with **any** set of (X, Y) pairs — no structured sampling required
+  - Works with any set of (X, Y) pairs — no structured sampling required
   - B-spline surrogate with ANCOVA decomposition (Sa, Sb, S, ST)
   - Built-in emulator for prediction at new inputs
   - S1/ST properties for direct comparison with Sobol results
@@ -30,8 +30,8 @@ Eleven complementary methods are included: **Sobol indices** (the standard varia
   - Scalar, multi-output, and time-series outputs — all output slices share one basis, fitted in a single multi-right-hand-side solve
 - **Shapley effects** (Owen, 2014; Song, Nelson & Staum, 2016)
   - Fair, game-theoretic allocation of output variance — each interaction's variance split equally among its participants
-  - Computed **analytically** from a fitted PCE (default) or RS-HDMR surrogate: no permutation Monte Carlo, no extra model runs
-  - Works with **any** set of (X, Y) pairs; returns Sh alongside S1 and ST from the same surrogate (S1 <= Sh <= ST)
+  - Computed analytically from a fitted PCE (default) or RS-HDMR surrogate: no permutation Monte Carlo, no extra model runs
+  - Works with any set of (X, Y) pairs; returns Sh alongside S1 and ST from the same surrogate (S1 <= Sh <= ST)
   - Assumes independent inputs (v1); Sh sums to 1, and `explained_variance` reports the fraction of Var(Y) the surrogate captured
 - **eFAST** (Extended Fourier Amplitude Sensitivity Test)
   - Frequency-based S1 and ST via sinusoidal search curves and Fourier decomposition
@@ -47,18 +47,18 @@ Eleven complementary methods are included: **Sobol indices** (the standard varia
   - Bootstrap confidence intervals over trajectories and prefix-nested trajectory downsampling
 - **HSIC** (Hilbert–Schmidt Independence Criterion)
   - Kernel-based dependence: normalized first-order (R2-HSIC) and Total HSIC indices
-  - Works with **any** set of (X, Y) pairs — Gaussian RBF kernels with the median heuristic
+  - Works with any set of (X, Y) pairs — Gaussian RBF kernels with the median heuristic
   - Detects nonlinear, non-monotone, and heteroscedastic dependence; permutation-test p-values
 - **PAWN** — moment-independent, CDF-based sensitivity (Pianosi & Wagener, 2015)
   - Kolmogorov–Smirnov distance between unconditional and conditional output CDFs
   - Tie-aware KS matching `scipy.stats.ks_2samp` for discrete/continuous outputs
   - Median / max / mean aggregation with bootstrap confidence intervals
 - **Borgonovo delta** — moment-independent, density-based sensitivity (Borgonovo, 2007)
-  - Plischke et al. (2013) given-data estimator: works with **any** set of (X, Y) pairs
+  - Plischke et al. (2013) given-data estimator: works with any set of (X, Y) pairs
   - Bias-corrected delta plus the given-data first-order Sobol S1 (SALib-compatible)
   - Percentile bootstrap confidence intervals
 - **Optimal transport** — Wasserstein-based distributional sensitivity (Borgonovo et al., 2024)
-  - Given-data estimator on **any** (X, Y) pairs; rank-based conditioning handles mixed uniform/Gaussian marginals and correlated inputs
+  - Given-data estimator on any (X, Y) pairs; rank-based conditioning handles mixed uniform/Gaussian marginals and correlated inputs
   - Advective (mean-shift, = S1/2) vs diffusive (spread/shape) decomposition of every index
   - Per-column indices via exact 1-D transport (solver-free) plus joint point-cloud modes over multivariate/time-series outputs (pure-JAX log-domain Sinkhorn); dummy-input irrelevance baseline
 - All eleven methods use one strict output contract: scalar `(N,)`, multi-output `(N, K)`, or time-series `(N, T, K)`
@@ -98,8 +98,8 @@ jaxgsa inherits JAX's runtime defaults. Two optional knobs, documented in full i
 the [Configuration guide](https://danielepessina.github.io/jaxgsa/guide/configuration):
 
 - **Double precision** — JAX defaults to float32 and silently downcasts `float64`.
-  For precision-sensitive Sobol/HSIC work, enable 64-bit floats *before the first
-  array is created*: `jax.config.update("jax_enable_x64", True)`.
+  For precision-sensitive Sobol/HSIC work, enable 64-bit floats before the first
+  array is created: `jax.config.update("jax_enable_x64", True)`.
 - **Persistent compilation cache** — reuse compiled kernels across process
   restarts (sweeps, CI, HPC) by calling
   `jaxgsa.config.enable_compilation_cache("~/.cache/jaxgsa-jax")` once, before your first analysis.
@@ -243,7 +243,7 @@ result_hdmr = jaxgsa.hdmr.analyze(PROBLEM, jnp.asarray(X), Y).shapley()
 
 ### HSIC (kernel-based dependence)
 
-The Hilbert–Schmidt Independence Criterion detects **any** statistical
+The Hilbert–Schmidt Independence Criterion detects any statistical
 dependence — nonlinear, non-monotone, or heteroscedastic — from any (X, Y)
 pairs, including correlated inputs.
 
@@ -263,7 +263,7 @@ print("p-values:", result.p_values)  # permutation-test significance
 
 ### PAWN (distribution/CDF-based)
 
-PAWN measures how much the **entire output distribution** (its CDF) shifts when
+PAWN measures how much the entire output distribution (its CDF) shifts when
 an input is fixed, using the Kolmogorov–Smirnov distance between the
 unconditional and conditional distributions. Because it looks at the whole
 distribution rather than just the variance ("moment-independent"), it catches
@@ -304,8 +304,8 @@ print("sigma:", result.sigma)      # (D,) spread — nonlinearity/interactions
 
 ### Borgonovo delta (density-based, moment-independent)
 
-The Borgonovo delta measures the average shift of the **entire output
-density** when an input is fixed — moment-independent like PAWN, but
+The Borgonovo delta measures the average shift of the entire output
+density when an input is fixed — moment-independent like PAWN, but
 density-based. The Plischke et al. (2013) "given-data" estimator works on any
 existing (X, Y) pairs, no special sampling design required, and also returns
 the first-order Sobol index estimated from the same data partition.
@@ -328,8 +328,8 @@ print("S1:", result.S1)        # (D,) given-data first-order Sobol
 The OT index measures how far knowing an input moves the entire output
 distribution: the class-averaged squared 2-Wasserstein distance between
 conditional and unconditional outputs, on a [0, 1] scale (Borgonovo et al.,
-2024). Every index splits exactly into an **advective** part (mean shift,
-equal to half the first-order Sobol index) and a **diffusive** part (changes
+2024). Every index splits exactly into an advective part (mean shift,
+equal to half the first-order Sobol index) and a diffusive part (changes
 in spread and shape) — an input with a large advective part moves the
 output, one with a large diffusive part reshapes it. Conditioning is
 rank-based: mixed uniform/Gaussian marginals and correlated inputs work
@@ -475,7 +475,7 @@ result = jaxgsa.sobol.analyze(sampling_result, Y)
 
 ### Edge cases: single output or single timestep
 
-How a 2D array is interpreted depends on `problem.output_names`. Without it, a 2D array is `(N, K)` — multiple outputs, no time dimension. With exactly **one** entry in `output_names`, a 2D array is `(N, T)` — timepoints of that single output — and flows through as `(N, T, 1)`:
+How a 2D array is interpreted depends on `problem.output_names`. Without it, a 2D array is `(N, K)` — multiple outputs, no time dimension. With exactly one entry in `output_names`, a 2D array is `(N, T)` — timepoints of that single output — and flows through as `(N, T, 1)`:
 
 ```python
 # Single output, no time dimension — pass a 1D array

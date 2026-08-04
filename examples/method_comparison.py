@@ -21,7 +21,7 @@ def _intro(mo):
     mo.md(r"""
     # GSA Method Comparison
 
-    **Eight methods, one function — which to choose?**
+    Eight methods, one function — which to choose?
 
     This notebook runs eight global sensitivity analysis methods on the
     Ishigami function and compares their accuracy, cost, and speed:
@@ -33,13 +33,13 @@ def _intro(mo):
     | **HDMR** | S1, ST via B-spline surrogate (ANCOVA) |
     | **PCE** | S1, ST, S2 via polynomial chaos expansion |
     | **DGSM** | Bounds on ST via derivative-based measures |
-    | **Morris** | mu*, sigma screening measures (proxy for the ST *ranking*) |
+    | **Morris** | mu*, sigma screening measures (proxy for the ST ranking) |
     | **Shapley** | Sh fair variance shares (sum to 1) from a PCE surrogate, plus S1, ST |
     | **Borgonovo delta** | delta moment-independent density shift, plus given-data S1 |
 
-    Jargon key: **S1** (first-order Sobol index) is the share of output
-    variance an input explains on its own; **ST** (total-order) adds
-    every interaction the input takes part in; **S2** is the extra share
+    Jargon key: S1 (first-order Sobol index) is the share of output
+    variance an input explains on its own; ST (total-order) adds
+    every interaction the input takes part in; S2 is the extra share
     a pair explains jointly. The remaining measures (mu*, Sh, delta)
     live on their own scales and are defined in their sections below.
     """)
@@ -274,10 +274,10 @@ def _morris_md(mo):
     ### Morris screening (different scale)
 
     Morris $\mu^*$ is the mean absolute elementary effect — a
-    **screening** measure on a derivative-like scale, not a variance
+    screening measure on a derivative-like scale, not a variance
     share. It is not directly comparable to $S_1$/$S_T$, so it is left
     out of the index charts above. Normalizing $\mu^*$ to sum to one
-    supports a **ranking** check against the analytical $S_T$ shares —
+    supports a ranking check against the analytical $S_T$ shares —
     the ranking ($x_1 > x_2 > x_3$) matches — but the normalized values
     themselves carry no variance meaning.
     """)
@@ -328,7 +328,7 @@ def _shapley_md(mo):
     mo.md(r"""
     ### Shapley effects (fair shares)
 
-    Shapley effects allocate variance **fairly**: each interaction's
+    Shapley effects allocate variance fairly: each interaction's
     variance is split equally among its participants, so the shares sum
     to exactly 1. The run above reuses the PCE surrogate fit (same data,
     same order), so its $S_1$/$S_T$ match the PCE row exactly — the new
@@ -382,7 +382,7 @@ def _borgonovo_md(mo):
     mo.md(r"""
     ### Borgonovo delta (different scale)
 
-    Borgonovo delta is **moment-independent**: it measures the expected
+    Borgonovo delta is moment-independent: it measures the expected
     L1 shift of the entire output density when an input is fixed, on its
     own [0, 1] scale — not a variance share, so it is left out of the
     index charts above. The same conditioning also yields a given-data
@@ -547,13 +547,13 @@ def _accuracy_table(
     mo.md(
         "### Accuracy and cost comparison\n\n" + _header + _sep + _body + "\n"
         "S1 MAE and ST MAE are mean absolute errors versus the known analytical "
-        "Ishigami indices. DGSM provides **bounds** on $S_T$ rather than point "
+        "Ishigami indices. DGSM provides bounds on $S_T$ rather than point "
         "estimates, so the S1 column is not applicable and the ST column reports "
         "the bound gap (MAE of the Poincare upper bound vs analytical $S_T$). "
         "Morris $\\mu^*$ is a screening measure on a different scale entirely "
         "(mean absolute elementary effect, not a variance share), so neither MAE "
         "column applies; see the normalized ranking check above. Its N evals is "
-        "the **unique** row count after grid deduplication (100 trajectories = "
+        "the unique row count after grid deduplication (100 trajectories = "
         "400 expanded rows). Shapley's S1/ST come from the same PCE surrogate as "
         "the PCE row (same data and order), so those MAEs coincide — its headline "
         "index Sh is checked against the analytical Shapley effects in the "
@@ -670,7 +670,7 @@ def _summary(mo):
       as a fast emulator for downstream prediction tasks.
     - **Morris** ranks parameters for the lowest budget of all —
       64 unique evaluations here after grid deduplication. Its $\mu^*$
-      proxies the $S_T$ *ranking* (not the variance shares); use it to
+      proxies the $S_T$ ranking (not the variance shares); use it to
       fix unimportant factors before a variance-based follow-up.
     - **Shapley** splits every interaction's variance fairly among its
       participants, giving a single score per parameter that sums to
@@ -681,8 +681,8 @@ def _summary(mo):
       returns a given-data $S_1$ from the same conditioning for free.
 
     Two jaxgsa methods sit outside this comparison because they don't
-    estimate variance shares at all: **HSIC** (kernel-based dependence
-    indices) and **PAWN** (Kolmogorov–Smirnov distances between
+    estimate variance shares at all: HSIC (kernel-based dependence
+    indices) and PAWN (Kolmogorov–Smirnov distances between
     conditional and unconditional output CDFs). Both are given-data
     methods — see their docs pages for when to reach for them.
     """)
