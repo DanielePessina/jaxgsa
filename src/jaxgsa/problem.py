@@ -201,8 +201,9 @@ def _normalize_input_spec(spec: InputSpecValue) -> _NormalizedInputSpec:
 def _truncate_gaussian_spec(spec: _NormalizedInputSpec, q: float) -> _NormalizedInputSpec:
     """Fill the open sides of a Gaussian spec with its own ``q`` quantiles.
 
-    Uniform specs and sides the user already declared are returned unchanged,
-    so an explicit ``low`` or ``high`` always wins over the automatic bound.
+    Only Gaussian marginals are touched. Uniform and categorical marginals
+    are already bounded, and a side the user declared always wins over the
+    automatic bound.
 
     Args:
         spec: Normalized input spec.
@@ -214,7 +215,9 @@ def _truncate_gaussian_spec(spec: _NormalizedInputSpec, q: float) -> _Normalized
     """
     from scipy.stats import norm
 
-    dist, mean, variance, low, high = spec
+    # Index rather than unpack: the normalized spec carries a trailing
+    # categorical payload slot, so its width is not fixed.
+    dist, mean, variance, low, high = spec[0], spec[1], spec[2], spec[3], spec[4]
     if dist != "gaussian" or (low is not None and high is not None):
         return spec
 
@@ -223,7 +226,7 @@ def _truncate_gaussian_spec(spec: _NormalizedInputSpec, q: float) -> _Normalized
         low = float(norm.ppf(q, loc=mean, scale=std))
     if high is None:
         high = float(norm.ppf(1.0 - q, loc=mean, scale=std))
-    return ("gaussian", mean, variance, low, high)
+    return ("gaussian", mean, variance, low, high, None)
 
 
 def _derive_bounds(
