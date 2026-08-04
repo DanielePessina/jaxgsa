@@ -11,6 +11,7 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core.batching import get_memory_budget, resolve_batch_size
+from jaxgsa._core.sampling import UNIT_CLIP
 from jaxgsa._core.surrogate import _PredictPlan
 from jaxgsa._core.validation import (
     _prepare_Y,
@@ -27,17 +28,64 @@ from jaxgsa.pce._engine import (
 from jaxgsa.pce._result import PCEResult
 from jaxgsa.problem import Problem
 
+# A truncated Gaussian is treated as effectively unbounded, and so kept on the
+# Hermite basis, when both of its bounds sit at least this many standard
+# deviations from the mean. Below the threshold the truncated measure differs
+# enough from the standard normal that Hermite polynomials are no longer
+# orthogonal against it.
+_WIDE_TRUNCATION_Z = 5.0
 
-def _map_to_reference(X: Array, problem: Problem) -> tuple[Array, tuple[str, ...]]:
+# Above this polynomial degree the Hermite Gram defect against even a very wide
+# truncated normal stops being negligible, so Legendre is the safer basis.
+# Measured max |G - I| for orthonormalised He_0..He_P against the truncated
+# normal at |z| = 7.03: 4.0e-8 (P=3), 2.8e-5 (P=6), 9.5e-3 (P=10).
+_MAX_HERMITE_ORDER_UNDER_TRUNCATION = 7
+
+
+def _truncated_gaussian_is_wide(
+    lo: float | None, hi: float | None, mean: float, std: float
+) -> bool:
+    """Decide whether a truncated Gaussian is wide enough to stay on Hermite.
+
+    The test uses the standardized bound ``|z| = |bound - mean| / std``. Both
+    declared sides must sit at least ``_WIDE_TRUNCATION_Z`` standard deviations
+    out. A one-sided truncation is judged by its bounded side alone.
+
+    Args:
+        lo: Lower truncation bound, or ``None`` when the side is open.
+        hi: Upper truncation bound, or ``None`` when the side is open.
+        mean: Marginal mean.
+        std: Marginal standard deviation.
+
+    Returns:
+        ``True`` when every declared bound is at least ``_WIDE_TRUNCATION_Z``
+        standardized units from the mean.
+    """
+    z = [abs(bound - mean) / std for bound in (lo, hi) if bound is not None]
+    return bool(z) and min(z) >= _WIDE_TRUNCATION_Z
+
+
+def _map_to_reference(X: Array, problem: Problem, order: int) -> tuple[Array, tuple[str, ...]]:
     """Map physical inputs to the orthogonal polynomial reference domain.
 
-    Uniform and truncated-Gaussian inputs use Legendre (mapped to [-1, 1];
-    truncated Gaussians go through their CDF first, so the mapped values are
-    uniform). Untruncated Gaussian inputs use Hermite (standardized to N(0,1)).
+    Uniform inputs use Legendre, mapped to [-1, 1]. Untruncated Gaussian
+    inputs use Hermite, standardized to N(0, 1).
+
+    A *truncated* Gaussian picks its basis from how tight the truncation is.
+    A narrow truncation is a genuinely different measure, so the input goes
+    through its truncated CDF and onto Legendre. A wide truncation — every
+    declared bound at least ``_WIDE_TRUNCATION_Z`` standard deviations from
+    the mean — is almost the standard normal, and Hermite is both cheaper and
+    far more accurate there: the Legendre route has to approximate the steep
+    inverse normal CDF with low-order polynomials, which measurably degrades
+    the fit. Requesting an order above
+    ``_MAX_HERMITE_ORDER_UNDER_TRUNCATION`` forces Legendre again, because the
+    Hermite Gram defect against the truncated measure grows with degree.
 
     Args:
         X: (N, D) inputs in physical units.
         problem: Problem whose ``input_specs`` decide the per-dimension map.
+        order: Effective maximum polynomial degree of the expansion.
 
     Returns:
         Tuple of the (N, D) reference-domain inputs and a length-D tuple of
@@ -50,25 +98,30 @@ def _map_to_reference(X: Array, problem: Problem) -> tuple[Array, tuple[str, ...
     D = problem.num_vars
     cols = []
     input_types: list[str] = []
+    hermite_safe_order = order <= _MAX_HERMITE_ORDER_UNDER_TRUNCATION
     for d in range(D):
         dist, first, second, lo, hi = problem.input_specs[d]
         if dist == "uniform":
             cols.append(2.0 * (X[:, d] - first) / (second - first) - 1.0)
             input_types.append("uniform")
-        elif lo is not None or hi is not None:
-            mean, variance = first, second
-            std = float(jnp.sqrt(variance))
+            continue
+
+        mean, variance = first, second
+        std = float(jnp.sqrt(variance))
+        truncated = lo is not None or hi is not None
+        if truncated and not (
+            hermite_safe_order and _truncated_gaussian_is_wide(lo, hi, mean, std)
+        ):
             a_std = -np.inf if lo is None else (lo - mean) / std
             b_std = np.inf if hi is None else (hi - mean) / std
             u = jnp.asarray(
                 truncnorm.cdf(np.asarray(X[:, d]), a=a_std, b=b_std, loc=mean, scale=std)
             )
-            u = jnp.clip(u, 1e-12, 1.0 - 1e-12)
+            u = jnp.clip(u, UNIT_CLIP, 1.0 - UNIT_CLIP)
             cols.append(2.0 * u - 1.0)
             input_types.append("uniform")
         else:
-            mean, variance = first, second
-            cols.append((X[:, d] - mean) / jnp.sqrt(variance))
+            cols.append((X[:, d] - mean) / std)
             input_types.append("gaussian")
 
     return jnp.column_stack(cols), tuple(input_types)
@@ -252,7 +305,7 @@ def _fit_pce_core(
     n_terms = mi.shape[0]
 
     # Map inputs to reference domain; (N, D) is small next to (N, n_terms).
-    X_ref, input_types = _map_to_reference(X, problem)
+    X_ref, input_types = _map_to_reference(X, problem, effective_order)
     Y_flat = Y_3d.reshape(N, T * K)  # column t*K + k is slice (t, k)
 
     single_pass_bytes = _single_pass_fit_bytes(N, n_terms, T * K, X_ref.dtype.itemsize)
@@ -414,7 +467,7 @@ def _pce_predict_plan(result: PCEResult, X_new: Array) -> _PredictPlan:
     shared template in :class:`jaxgsa._core.surrogate.SurrogateResult` runs
     the kernel in row batches sized against a transient-memory budget.
     """
-    X_ref, input_types = _map_to_reference(X_new, result.problem)
+    X_ref, input_types = _map_to_reference(X_new, result.problem, result.order)
     n_terms = result.multi_index.shape[0]
     # Transient footprint per row: build_design_matrix accumulates a running
     # product, so at most the (batch, n_terms) accumulator, one gathered

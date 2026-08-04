@@ -317,7 +317,7 @@ class TestLooRmse:
         # Reconstruct Phi manually
         from jaxgsa.pce._analyze import _map_to_reference
 
-        X_ref, input_types = _map_to_reference(X, linear.PROBLEM)
+        X_ref, input_types = _map_to_reference(X, linear.PROBLEM, result.order)
         Phi = build_design_matrix(X_ref, result.multi_index, input_types, result.order)
         loo_direct = loo_error(Phi, Y, result.coefficients, ridge=1e-8)
 
@@ -373,6 +373,65 @@ class TestGaussianInputs:
         # Monte Carlo inner product with weight 1/2: (1/N) * P^T P ~ I
         gram = (P.T @ P) / N
         np.testing.assert_allclose(np.asarray(gram), np.eye(5), atol=0.05)
+
+
+class TestTruncatedGaussianBasis:
+    """A wide truncation must keep the Hermite basis; a narrow one must not."""
+
+    @staticmethod
+    def _problem(D, *, q=None):
+        from scipy.stats import norm
+
+        spec = {"dist": "gaussian", "mean": 0.0, "variance": 1.0}
+        if q is not None:
+            spec = {**spec, "low": float(norm.ppf(q)), "high": float(norm.ppf(1.0 - q))}
+        return Problem.from_dict({f"x{i + 1}": dict(spec) for i in range(D)})
+
+    def test_wide_truncation_uses_hermite(self):
+        from jaxgsa.pce._analyze import _map_to_reference
+
+        problem = self._problem(2, q=1e-12)  # |z| = 7.03
+        X = jax.random.normal(jax.random.PRNGKey(0), (32, 2))
+        _, input_types = _map_to_reference(X, problem, 3)
+        assert input_types == ("gaussian", "gaussian")
+
+    def test_narrow_truncation_uses_legendre(self):
+        from jaxgsa.pce._analyze import _map_to_reference
+
+        problem = self._problem(2, q=1e-3)  # |z| = 3.09
+        X = jax.random.normal(jax.random.PRNGKey(0), (32, 2)) * 0.5
+        _, input_types = _map_to_reference(X, problem, 3)
+        assert input_types == ("uniform", "uniform")
+
+    def test_high_order_falls_back_to_legendre(self):
+        """The Hermite Gram defect grows with degree, so a high order drops back."""
+        from jaxgsa.pce._analyze import _map_to_reference
+
+        problem = self._problem(2, q=1e-12)
+        X = jax.random.normal(jax.random.PRNGKey(0), (32, 2))
+        _, input_types = _map_to_reference(X, problem, 10)
+        assert input_types == ("uniform", "uniform")
+
+    def test_wide_truncation_matches_unbounded_accuracy(self):
+        """Oakley-O'Hagan: a wide truncation must not degrade the fit.
+
+        The old rule routed every truncated Gaussian to Legendre, which has to
+        approximate the steep inverse normal CDF and lost roughly a factor 2 in
+        LOO RMSE and 7x in S1 error.
+        """
+        from jaxgsa.benchmarks import oakley_ohagan
+
+        X = jax.random.normal(jax.random.PRNGKey(0), (4000, 15))
+        Y = oakley_ohagan.evaluate(X)
+        analytic = oakley_ohagan.analytical_indices()[0]
+
+        unbounded = pce.analyze(self._problem(15), X, Y, order=3)
+        wide = pce.analyze(self._problem(15, q=1e-12), X, Y, order=3)
+
+        # Same basis, so the two fits agree to numerical noise.
+        np.testing.assert_allclose(np.asarray(wide.S1), np.asarray(unbounded.S1), atol=1e-6)
+        assert float(wide.loo_rmse) == pytest.approx(float(unbounded.loo_rmse), rel=1e-4)
+        assert np.max(np.abs(np.asarray(wide.S1) - analytic)) < 0.003
 
 
 # ---------------------------------------------------------------------------
