@@ -17,6 +17,12 @@ Use `jaxgsa.sobol.sample(...)` for Saltelli designs and
 - `correlation_from_covariance(cov)` rescales a published covariance matrix
   to the correlation form the API accepts.
 
+One design builder reads `problem.correlation` rather than refusing it:
+`jaxgsa.kucherenko.sample(problem, n, seed=...)` places its blocks with the
+declared copula's conditionals, so the indices it feeds are valid under
+dependence. See the [Kucherenko page](/api/kucherenko). To analyze correlated
+data you already have, see [VKOGA](/api/vkoga).
+
 `jaxgsa.sobol.SobolSamples` provides:
 
 - `samples` and `sample_ids`;

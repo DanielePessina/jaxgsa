@@ -16,8 +16,8 @@ When to use Shapley effects:
 - Interactions matter and you want them attributed to their participants
   rather than omitted (S1) or counted once per participant (ST).
 - You have existing (X, Y) pairs from any sampling strategy — no structured
-  design required — and your inputs are independent (required in this
-  version).
+  design required — and your inputs are independent. For dependent inputs,
+  see the caveat below.
 
 A companion marimo notebook lives at
 [`examples/shapley_gsa.py`](https://github.com/danielepessina/jaxgsa/blob/master/examples/shapley_gsa.py).
@@ -185,10 +185,19 @@ as `(N, T)` — timepoints of that single output — and flows through as
 
 ## Practical caveats
 
-- **Independent inputs are assumed (v1).** The Shapley value is especially
-  attractive for dependent inputs, but the dependent-input formulation
-  needs conditional-variance estimation and is future work — do not rely
-  on the indices when inputs are strongly correlated.
+- **Independent inputs are assumed.** The Shapley value is especially
+  attractive for dependent inputs, but conditional-variance Shapley effects
+  need a conditional-variance estimator that jaxgsa does not have yet. Do not
+  read these indices as Shapley effects when the inputs are strongly
+  correlated. Two routes exist instead.
+  `shapley.analyze(backend="hdmr", include_correlative=True)` allocates HDMR's
+  ANCOVA decomposition across the parameters. It accepts a declared
+  correlation, but it is an ANCOVA-based attribution, not a
+  conditional-variance Shapley effect. For conditional-variance indices under
+  dependence, leave Shapley behind and use [VKOGA](/examples/vkoga) (given
+  data, kernel surrogate) or [Kucherenko](/examples/kucherenko) (its own
+  design, your actual model). Neither returns a per-parameter allocation
+  summing to 1.
 - Both backends accept scalar `(N,)`, multi-output `(N, K)`, and
   time-series `(N, T, K)` `Y`.
 - Interactions beyond the surrogate's truncation (`order` for PCE,

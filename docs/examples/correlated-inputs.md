@@ -139,9 +139,12 @@ normal draw.
 
 ## Analyze with a correlation-tolerant method
 
-Rank- and distribution-based given-data methods remain valid under
-correlated inputs. Optimal transport, Borgonovo delta, HSIC, and PAWN all
-measure the total, correlation-inclusive influence of each input:
+Several methods accept a declared correlation. They divide into two groups
+by what they report.
+
+The first group returns a total, correlation-inclusive score per input:
+optimal transport, Borgonovo delta, HSIC, and PAWN. These are rank- and
+distribution-based, so they need no independence assumption at all:
 
 ```python
 Y = model(X)
@@ -158,9 +161,26 @@ correlated partners: if `Y` depends only on `x1` but `corr(x1, x2) = 0.8`,
 then `x2` also gets a clearly non-zero index. That is the correct
 correlation-inclusive reading, not an estimation error.
 
-HDMR goes further. Its ANCOVA decomposition separates the two contributions.
-The `Sb` term is the correlation-induced share, so it doubles as a
-diagnostic:
+The second group separates the direct effect from the correlation-borne one,
+and reports variance fractions. Two of the three read the declared
+correlation matrix directly:
+
+```python
+vk = jaxgsa.vkoga.analyze(problem, X, Y)
+print(vk.S_TC)  # total correlated — what to measure more accurately
+print(vk.S_TU)  # total uncorrelated — what is safe to freeze
+```
+
+[VKOGA](/examples/vkoga) fits a kernel surrogate to the given `(X, Y)` data
+and splits each input's effect into correlated and uncorrelated parts.
+[Kucherenko](/examples/kucherenko) answers the same two questions without a
+surrogate: it generates a conditional-copula design and you evaluate your
+actual model on it. Both return conditional-variance quantities with their
+exact meaning under dependence.
+
+HDMR is the third. It separates the two contributions per term rather than
+per parameter, via its ANCOVA decomposition — its `Sb` term is precisely the
+correlation-induced share, so it doubles as a diagnostic:
 
 ```python
 hdmr = jaxgsa.hdmr.analyze(problem, X, Y)
@@ -168,17 +188,16 @@ print(hdmr.Sa)  # structural variance fraction per term
 print(hdmr.Sb)  # correlative variance fraction — the correlation diagnostic
 ```
 
-`hsic` and `pawn` also accept correlated problems, and
-`jaxgsa.shapley.analyze(..., backend="hdmr", include_correlative=True)`
-allocates the full ANCOVA decomposition (an ANCOVA-based attribution, not
-conditional-variance Shapley effects).
+Read HDMR's `ST` with care here. Under dependence it is a sum over the terms
+each parameter appears in, not a total-effect index: it has no
+variance-reduction reading, and it can be far from the true total effect. Use
+`vkoga.S_TU` or `kucherenko.ST` when you need a total index. HDMR's value
+under dependence is the per-term `Sa` / `Sb` split, which the other two do
+not provide.
 
-For variance fractions under dependence, two dedicated methods read the
-declared correlation directly. [VKOGA](/examples/vkoga) fits a kernel
-surrogate to given `(X, Y)` data and splits each input's effect into
-correlated and uncorrelated parts. [Kucherenko](/examples/kucherenko)
-generates a conditional-copula design for your actual model and returns
-`S1`/`ST` with their exact conditional-variance meaning — no surrogate.
+`jaxgsa.shapley.analyze(..., backend="hdmr", include_correlative=True)`
+allocates the full ANCOVA decomposition across the parameters (an
+ANCOVA-based attribution, not conditional-variance Shapley effects).
 
 ## Methods that refuse correlated problems
 

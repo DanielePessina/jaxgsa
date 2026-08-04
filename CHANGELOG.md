@@ -168,6 +168,26 @@
   behind `S_U` (read the clip warning), and the roughly -3.5% low bias in
   `result.variance` for Gaussian marginals, which the CDF-space kernel causes by
   under-resolving the tails.
+- Pre-existing passages that list the correlated-input options no longer omit
+  `jaxgsa.vkoga` and `jaxgsa.kucherenko`. The "I only have existing simulation
+  data" menu in `methods.md` now names VKOGA. The correlation caveat in
+  `docs/examples/shapley.md` said only that dependent-input Shapley effects are
+  future work; it now names the ANCOVA route and the two conditional-variance
+  methods. `docs/examples/correlated-inputs.md` splits the correlation-tolerant
+  methods into the total, correlation-inclusive group and the group that
+  separates the direct from the correlation-borne effect, with VKOGA and
+  Kucherenko in the second. `docs/api/sampling.md` records that
+  `kucherenko.sample` is a design builder that reads `problem.correlation`
+  instead of refusing it, and `README.md` distinguishes the Shapley-style
+  allocation from the conditional-variance route.
+- The documentation tempers HDMR's `ST` under dependence. It is the SCSA
+  convention of Sarazin et al. (2017, Eq. 8), a sum over the terms a parameter
+  appears in. It is not a total-effect index: it has no variance-reduction
+  reading, it does not answer the input-fixing question, and it can go negative
+  because `Sb` can. `methods.md` and `docs/examples/correlated-inputs.md` say
+  so and send readers wanting a total index to `kucherenko.ST` or
+  `vkoga.S_TU`. HDMR's per-term `Sa` / `Sb` split remains the thing it uniquely
+  provides. No code or field names change here.
 - The VKOGA and Kucherenko documentation drops rhetorical bold and italics.
   Structural emphasis stays: table headers, term labels that open a
   definition-style bullet, and admonition titles. The change covers
@@ -203,6 +223,17 @@
   `_raise_categorical_design` both detect the combination, so the order the two
   checks run in no longer matters. A test asserts the combined message for
   `morris`, `efast`, `sobol` and `kucherenko`.
+- The analysis-side gates got the same treatment. `_raise_correlated_analysis`
+  and `_raise_categorical_analysis` had no combined message at all, so a
+  problem that is both categorical and correlated got a single-fault message
+  from whichever check its caller ran first. Both now route the combination to
+  the shared text, with an analysis-side wording that does not tell a caller
+  who already holds `(X, Y)` to go and draw samples. This covers `dgsm`,
+  `pce`, `hdmr`, `hsic`, `pawn`, `shapley` and `vkoga`, whether they gate
+  through `_validate_xy_inputs` or call the raisers directly. A parametrised
+  test covers all seven, and a companion test asserts that
+  `jaxgsa.optimal_transport` and `jaxgsa.borgonovo` — the two methods the
+  message recommends — do accept the combined problem.
 - The Gaussian conditional-draw algebra lives in `jaxgsa._core.copula`, next
   to the conditional plan; the VKOGA estimators and the Kucherenko design
   share it.
