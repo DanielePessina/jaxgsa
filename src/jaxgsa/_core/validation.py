@@ -95,21 +95,28 @@ def _validate_output(
     return Y
 
 
-# Named in every correlated-problem rejection so the error is actionable.
+# Named in every correlated-problem rejection so the error is actionable. The
+# variance-based routes come first: they answer the same question the refused
+# method was asked, so they are what the user most likely wants.
 _CORRELATION_TOLERANT_METHODS = (
-    "jaxgsa.optimal_transport, jaxgsa.borgonovo, jaxgsa.hdmr (whose ANCOVA Sb "
-    "term quantifies the correlation-induced contribution), jaxgsa.hsic, or "
-    "jaxgsa.pawn"
+    "jaxgsa.vkoga (variance-based indices from given data, through a kernel "
+    "surrogate), jaxgsa.kucherenko (variance-based indices from its own "
+    "conditional-copula design), jaxgsa.optimal_transport, jaxgsa.borgonovo, "
+    "jaxgsa.hdmr (whose ANCOVA Sb term quantifies the correlation-induced "
+    "contribution, and whose result supports "
+    "shapley(include_correlative=True)), jaxgsa.shapley with "
+    'backend="hdmr", jaxgsa.hsic, or jaxgsa.pawn'
 )
 
 
 def _raise_correlated_design(problem: Problem, method: str) -> None:
     """Reject a correlated problem in a structured design sampler.
 
-    The Saltelli, Morris, and eFAST designs place points assuming independent
-    marginals; their downstream estimators are undefined — not merely
-    approximate — under a declared correlation, so sampling refuses up front
-    rather than producing a design whose analysis would be silently wrong.
+    A structured design places its points assuming independent marginals; the
+    downstream estimators are undefined — not merely approximate — under a
+    declared correlation, so sampling refuses up front rather than producing a
+    design whose analysis would be silently wrong. ``method`` names the
+    sampler, so this text does not have to list the callers.
 
     Args:
         problem: Problem the design was requested for.
