@@ -312,7 +312,9 @@ def _resolve_correlation(
             "matrix from observed data, use jaxgsa.sampling.fit_correlation(problem, X_data) "
             "and attach it with problem.with_correlation(...)."
         )
-    return canonicalize_correlation(correlation, problem.num_vars, warn_on_repair=True)
+    # A per-call override is user-declared, so it takes the strict repair
+    # policy: a matrix that has to move materially is rejected, not repaired.
+    return canonicalize_correlation(correlation, problem.num_vars, policy="declared")
 
 
 def _resolve_hyperparameters(
