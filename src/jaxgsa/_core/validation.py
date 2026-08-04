@@ -109,6 +109,47 @@ _CORRELATION_TOLERANT_METHODS = (
 )
 
 
+def _categorical_param_names(problem: Problem) -> list[str]:
+    """Return the names of the problem's categorical parameters."""
+    # Imported lazily: this module is type-checking-only on Problem.
+    from jaxgsa.problem import _categorical_dims
+
+    return [problem.names[d] for d, _ in _categorical_dims(problem)]
+
+
+def _raise_categorical_and_correlated(problem: Problem, method: str, names: list[str]) -> None:
+    """Reject a problem that is both categorical and correlated.
+
+    This combination has no route. Every categorical-tolerant variance-based
+    sampler (``jaxgsa.sobol``) refuses a declared correlation, and every
+    correlation-tolerant variance-based method (``jaxgsa.vkoga``,
+    ``jaxgsa.kucherenko``) refuses a categorical parameter. Naming only one of
+    the two faults would send the user to a method that then refuses the
+    other, so both design-side gates route the combined case here.
+
+    Args:
+        problem: Problem the design was requested for.
+        method: Fully qualified sampler name for the error message.
+        names: Names of the categorical parameters, for the message.
+
+    Raises:
+        ValueError: Always. Callers check the combined condition first.
+    """
+    del problem
+    raise ValueError(
+        f"{method} cannot build a design for this problem: parameters {names} "
+        "are categorical and problem.correlation declares a dependence "
+        "structure, and no variance-based method supports categorical plus "
+        "correlated inputs yet. The categorical-tolerant samplers refuse a "
+        "correlation, and the correlation-tolerant ones refuse a categorical "
+        "parameter, so naming either route alone would send you in a circle. "
+        "Draw correlated samples with jaxgsa.sampling.monte_carlo and analyze "
+        "them with jaxgsa.optimal_transport or jaxgsa.borgonovo, which handle "
+        "both. To drop one of the two constraints, use "
+        "problem.with_correlation(None) or declare the parameter continuous."
+    )
+
+
 def _raise_correlated_design(problem: Problem, method: str) -> None:
     """Reject a correlated problem in a structured design sampler.
 
@@ -118,15 +159,25 @@ def _raise_correlated_design(problem: Problem, method: str) -> None:
     design whose analysis would be silently wrong. ``method`` names the
     sampler, so this text does not have to list the callers.
 
+    A problem that is also categorical gets the combined message instead: the
+    correlated-only text would recommend methods that then refuse it for being
+    categorical. This check therefore does not depend on being ordered before
+    or after :func:`_raise_categorical_design`.
+
     Args:
         problem: Problem the design was requested for.
         method: Fully qualified sampler name for the error message.
 
     Raises:
-        ValueError: If ``problem`` declares a non-identity correlation.
+        ValueError: If ``problem`` declares a non-identity correlation. The
+            message names the combined dead end when ``problem`` also declares
+            a categorical parameter.
     """
     if not problem.has_correlated_inputs:
         return
+    names = _categorical_param_names(problem)
+    if names:
+        _raise_categorical_and_correlated(problem, method, names)
     raise ValueError(
         f"{method} builds a structured design whose sensitivity indices assume "
         "independent inputs, but problem.correlation declares a dependence "
@@ -167,41 +218,33 @@ _CATEGORICAL_TOLERANT_METHODS = (
 )
 
 
-def _categorical_param_names(problem: Problem) -> list[str]:
-    """Return the names of the problem's categorical parameters."""
-    # Imported lazily: this module is type-checking-only on Problem.
-    from jaxgsa.problem import _categorical_dims
-
-    return [problem.names[d] for d, _ in _categorical_dims(problem)]
-
-
 def _raise_categorical_design(problem: Problem, method: str) -> None:
     """Reject a categorical problem in an incompatible design sampler.
 
     The Morris and eFAST designs walk or sweep a continuous input space;
     an unordered categorical axis has no meaningful step or frequency, so
-    sampling refuses up front.
+    sampling refuses up front. The copula conditionals of
+    ``jaxgsa.kucherenko.sample`` refuse it for a different reason: they need a
+    continuous marginal CDF on every coordinate.
+
+    A problem that is also correlated gets the combined message instead, so
+    this check does not depend on being ordered before or after
+    :func:`_raise_correlated_design`.
 
     Args:
         problem: Problem the design was requested for.
         method: Fully qualified sampler name for the error message.
 
     Raises:
-        ValueError: If ``problem`` declares any categorical parameter.
+        ValueError: If ``problem`` declares any categorical parameter. The
+            message names the combined dead end when ``problem`` also declares
+            a non-identity correlation.
     """
     names = _categorical_param_names(problem)
     if not names:
         return
     if problem.has_correlated_inputs:
-        # jaxgsa.sobol.sample refuses correlated problems, so recommending it
-        # here would send the user in a circle. Name the honest state instead.
-        raise ValueError(
-            f"{method} requires continuous (orderable) inputs, but parameters "
-            f"{names} are categorical. This problem also declares a "
-            "correlation, and no variance-based method supports categorical "
-            "plus correlated inputs yet. Analyze given data with "
-            "jaxgsa.optimal_transport or jaxgsa.borgonovo."
-        )
+        _raise_categorical_and_correlated(problem, method, names)
     raise ValueError(
         f"{method} requires continuous (orderable) inputs, but parameters "
         f"{names} are categorical. Use jaxgsa.sobol.sample (the Saltelli "

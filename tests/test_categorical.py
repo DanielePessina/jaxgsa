@@ -1016,3 +1016,64 @@ def test_categorical_design_error_is_honest_about_correlation():
     message = str(excinfo.value)
     assert "sobol.sample" not in message
     assert "optimal_transport" in message and "borgonovo" in message
+
+
+def _categorical_and_correlated_problem():
+    """A problem that is categorical AND correlated -- the combined dead end."""
+    problem = Problem.from_dict(
+        {
+            "x1": (0.0, 1.0),
+            "x2": (0.0, 1.0),
+            "c": {"dist": "categorical", "probs": PROBS},
+        }
+    )
+    R = np.eye(3)
+    R[0, 1] = R[1, 0] = 0.5  # couples the continuous pair; identity row for c
+    return problem.with_correlation(R)
+
+
+@pytest.mark.parametrize(
+    "name,call",
+    [
+        ("morris", lambda p: morris.sample(p, 8)),
+        ("efast", lambda p: efast.sample(p, 65)),
+        ("sobol", lambda p: sobol.sample(p, 64, seed=0, verbose=False)),
+        ("kucherenko", lambda p: jaxgsa.kucherenko.sample(p, 64)),
+    ],
+)
+def test_combined_categorical_and_correlated_message(name, call):
+    """Every design sampler must name the combined dead end, not one half.
+
+    A correlated-only message would recommend jaxgsa.vkoga or
+    jaxgsa.kucherenko, which then refuse the problem for being categorical.
+    A categorical-only message would recommend jaxgsa.sobol.sample, which
+    then refuses it for being correlated. Both gates route this case to the
+    combined text, so the order the two checks run in does not matter.
+    """
+    problem = _categorical_and_correlated_problem()
+    with pytest.raises(ValueError, match="no variance-based method") as excinfo:
+        call(problem)
+    message = str(excinfo.value)
+    # The message opens by naming the refusing sampler.
+    assert message.startswith(f"jaxgsa.{name}.sample ")
+    # Names the categorical parameter and both faults.
+    assert "'c'" in message
+    assert "problem.correlation" in message
+    # Never recommends a route that would refuse the same problem. Read the
+    # advice only, so the sampler's own name in the opening does not count.
+    advice = message.split("this problem:", 1)[1]
+    assert "sobol.sample" not in advice
+    assert "jaxgsa.vkoga" not in advice
+    assert "jaxgsa.kucherenko" not in advice
+    # Names the two methods that do handle both.
+    assert "jaxgsa.optimal_transport" in advice
+    assert "jaxgsa.borgonovo" in advice
+
+
+def test_correlated_only_message_is_unchanged_without_categoricals():
+    """A purely correlated problem keeps the correlated-only recommendation."""
+    problem = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
+    R = np.array([[1.0, 0.5], [0.5, 1.0]])
+    with pytest.raises(ValueError, match="correlation-tolerant") as excinfo:
+        morris.sample(problem.with_correlation(R), 8)
+    assert "jaxgsa.vkoga" in str(excinfo.value)
