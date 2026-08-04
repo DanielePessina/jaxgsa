@@ -1,14 +1,20 @@
 """Tests for deriving Morris elementary effects from a Saltelli design.
 
 ``SobolSamples.to_morris()`` reinterprets an existing Sobol/Saltelli design as
-a radial Morris design. The decisive check is the Jansen identity: the
+a radial Morris design. The central check is the Jansen identity: the
 elementary-effect increments are literally the increments Jansen's total-order
 estimator squares, so recomputing ``ST`` from the derived effects must
 reproduce ``sobol.analyze``'s own ``ST``.
+
+That identity does *not* validate every bookkeeping decision. It squares the
+increments and never touches ``ee_delta``, so swapping ``ee_idx_before`` with
+``ee_idx_after`` leaves it bit-identical — as it does ``mu_star`` and
+``sigma``. ``TestOrientation`` covers that gap through the sign of ``mu``.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import warnings
 
 import jax
@@ -52,7 +58,7 @@ class TestDesignStructure:
         assert m.n_runs == s.n_runs
 
     def test_block_count_independent_of_second_order(self):
-        """The B-based block is a near-duplicate, so it is deliberately unused."""
+        """The B-based block is deliberately unused, whatever the design variant."""
         s = sobol.sample(
             ishigami.PROBLEM, 0, base_n=BASE_N, calc_second_order=False, seed=0, verbose=False
         )
@@ -60,13 +66,15 @@ class TestDesignStructure:
         assert m.n_trajectories == BASE_N
         assert m.n_expanded == BASE_N * (D + 1)
 
-    def test_ba_rows_would_duplicate_additive_effects(self):
-        """Pin the reason B-blocks are skipped: for additive terms they are identical.
+    def test_ba_rows_duplicate_additive_effects_only(self):
+        """The B-block equals the A-block for *additive* contributions only.
 
         ``(f(BA_j) - f(B)) / (A_j - B_j)`` reduces to the same difference
         quotient as ``(f(AB_j) - f(A)) / (B_j - A_j)`` whenever parameter j's
-        contribution is additive, so harvesting them would inflate the apparent
-        sample size without adding information.
+        contribution is additive. It does not in general — measured
+        paired-effect correlations on Ishigami are 0.50 / 1.00 / -0.06. The
+        B-block is skipped because pooling it reduces no variance, not because
+        it is always a duplicate.
         """
         problem = Problem(names=("x1", "x2"), bounds=((0.0, 1.0),) * 2)
         s = sobol.sample(problem, 0, base_n=128, seed=3, verbose=False)
@@ -99,6 +107,44 @@ class TestDesignStructure:
         base = Sobol(d=2 * D, scramble=True, seed=0).random(BASE_N)
         delta_true = base[:, D:] - base[:, :D]
         np.testing.assert_allclose(m.ee_delta, delta_true, atol=1e-12)
+
+
+class TestOrientation:
+    """Before/after bookkeeping, which the Jansen identity cannot see.
+
+    Every other check in this file squares the increment or takes its absolute
+    value, so swapping ``ee_idx_before`` with ``ee_idx_after`` leaves the
+    output bit-identical. Only the *sign* of the mean elementary effect
+    distinguishes the two, and only on a model whose response is monotone.
+    """
+
+    @staticmethod
+    def _signed_mu(problem, model, *, swap: bool) -> np.ndarray:
+        s = sobol.sample(problem, 0, base_n=BASE_N, seed=0, verbose=False)
+        Y = model(jnp.asarray(s.samples))
+        m = s.to_morris(verbose=False)
+        if swap:
+            m = dataclasses.replace(m, ee_idx_before=m.ee_idx_after, ee_idx_after=m.ee_idx_before)
+        return np.asarray(morris.analyze(m, Y).mu)
+
+    def test_monotone_model_gives_positive_mu(self):
+        problem = Problem(names=("x1", "x2"), bounds=((0.0, 1.0), (0.0, 1.0)))
+
+        def model(X):
+            return 4.0 * X[:, 0] + 2.0 * X[:, 1]
+
+        mu = self._signed_mu(problem, model, swap=False)
+        # The derived design must report the true slopes, sign included.
+        np.testing.assert_allclose(mu, [4.0, 2.0], rtol=1e-4)
+
+    def test_swapping_before_and_after_flips_the_sign(self):
+        problem = Problem(names=("x1", "x2"), bounds=((0.0, 1.0), (0.0, 1.0)))
+
+        def model(X):
+            return 4.0 * X[:, 0] + 2.0 * X[:, 1]
+
+        mu = self._signed_mu(problem, model, swap=True)
+        np.testing.assert_allclose(mu, [-4.0, -2.0], rtol=1e-4)
 
 
 class TestJansenIdentity:
@@ -238,6 +284,18 @@ class TestDegenerateBlocks:
         mu, mu_star, sigma = _numpy_reference(m, np.asarray(Y))
         result = morris.analyze(m, Y)
         np.testing.assert_allclose(result.mu_star, mu_star, rtol=1e-4, atol=1e-4)
+
+    def test_reliability_warning_fires_on_the_drop_path(self):
+        """Dropping blocks for a zero step must trip the same floor as NaN cleaning."""
+        problem = Problem(names=("x1", "x2"), bounds=((0.0, 1.0), (0.0, 1.0)))
+        s = sobol.sample(problem, 0, base_n=8, scramble=False, seed=0, verbose=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            m = s.to_morris(verbose=False)
+        assert 2 <= m.n_trajectories < 10
+        Y = jnp.asarray(np.sum(np.asarray(s.samples), axis=1))
+        with pytest.warns(UserWarning, match="statistically unreliable"):
+            morris.analyze(m, Y)
 
     def test_raises_when_too_few_blocks_survive(self):
         problem = Problem(names=("x",), bounds=((0.0, 1.0),))

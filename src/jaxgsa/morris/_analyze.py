@@ -32,8 +32,10 @@ from jaxgsa._core.validation import (
 from jaxgsa.morris._result import MorrisResult
 from jaxgsa.morris._sampling import MorrisSamples
 
-# Minimum trajectories for statistically meaningful screening measures;
-# only enforced as a warning when non-finite cleaning shrinks the design.
+# Minimum trajectories for statistically meaningful screening measures.
+# Enforced as a warning against the surviving block count, whatever the cause:
+# a small design, blocks dropped for an unmeasurable step, or non-finite
+# cleaning.
 _MIN_TRAJECTORIES = 10
 
 # Peak-memory budget (in array elements) for one bootstrap chunk. Each resample
@@ -244,8 +246,8 @@ def analyze(
     Y, squeeze_time, squeeze_output = _prepare_Y(Y)
 
     Y, idx_after, idx_before, delta, n_dropped = _drop_nonfinite_trajectories(Y, sampling_result)
+    remaining = sampling_result.n_trajectories - n_dropped
     if n_dropped > 0:
-        remaining = sampling_result.n_trajectories - n_dropped
         pct = 100.0 * n_dropped / sampling_result.n_trajectories
         warnings.warn(
             f"jaxgsa: dropped {n_dropped} of {sampling_result.n_trajectories} trajectories "
@@ -254,13 +256,16 @@ def analyze(
         )
         if remaining < 2:
             raise ValueError("Fewer than 2 trajectories remain after dropping non-finite values")
-        if remaining < _MIN_TRAJECTORIES:
-            warnings.warn(
-                f"jaxgsa: only {remaining} trajectories remain after dropping non-finite "
-                f"values — results may be statistically unreliable "
-                f"(recommend >= {_MIN_TRAJECTORIES})",
-                stacklevel=2,
-            )
+
+    # The reliability floor applies to whatever survives, whatever thinned the
+    # design: a small r the user asked for, blocks that SobolSamples.to_morris
+    # dropped for having no measurable step, or non-finite cleaning just above.
+    if remaining < _MIN_TRAJECTORIES:
+        warnings.warn(
+            f"jaxgsa: only {remaining} trajectories remain — results may be "
+            f"statistically unreliable (recommend >= {_MIN_TRAJECTORIES})",
+            stacklevel=2,
+        )
 
     if prenormalize:
         Y, _, _, _ = _prenormalize_outputs(Y)
