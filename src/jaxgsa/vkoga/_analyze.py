@@ -53,6 +53,12 @@ _RIDGE_GRID = np.logspace(-16, -2, 10)
 # falls off quickly once the power function has collapsed.
 _DEFAULT_MAX_CENTERS = 300
 
+# Largest cross-validated RMSE, as a fraction of the output standard deviation,
+# that still gives usable indices. At 0.5 the surrogate leaves a quarter of the
+# output variance unexplained; past that the measured indices stop tracking the
+# true ones, and on oscillatory models they can even invert the ranking.
+_CV_RMSE_WARN_FRACTION = 0.5
+
 
 def analyze_vkoga(
     problem: Problem,
@@ -102,7 +108,10 @@ def analyze_vkoga(
         n_outer: Outer (conditioning) sample size per parameter, at least 2.
             Rounded up to the next power of two (Sobol' balance).
         n_inner: Inner (conditional) sample size per outer point, at least 2.
-            Rounded up to the next power of two.
+            Rounded up to the next power of two. Do not lower it below the
+            default to buy speed: the estimators drop the iid inner-noise
+            correction and depend on a large shared inner block, so a small
+            ``n_inner`` inflates a small ``S_TC``. Raise ``n_outer`` instead.
         n_variance: Sample size for the output variance and the component-
             function fit, at least 2. Rounded up to the next power of two.
         seed: Base seed for the quasi-random draws.
@@ -122,9 +131,14 @@ def analyze_vkoga(
         RuntimeError: If every cross-validation score is non-finite.
 
     Warns:
-        UserWarning: If any output slice has zero variance, or if JAX is in
+        UserWarning: If any output slice has zero variance; if JAX is in
             single precision, where the kernel solve loses accuracy for small
-            ``gamma`` (see :mod:`jaxgsa.vkoga`).
+            ``gamma`` (see :mod:`jaxgsa.vkoga`); if the cross-validated
+            surrogate error is a large fraction of the output standard
+            deviation, which makes every index untrustworthy; or if ``S_U``
+            had to be clipped to ``S_TU`` by a wide margin, which says the
+            additive component functions cannot represent the model's
+            interactions.
     """
     # Raise-early validation: every scalar argument is checked before any
     # expensive work (cross-validation, fitting, index estimation).
@@ -184,7 +198,7 @@ def analyze_vkoga(
     Y_centered = Y_flat - y_mean
 
     resolved_centers = min(int(max_centers), int(U.shape[0]))
-    gamma_value, ridge_value = _resolve_hyperparameters(
+    gamma_value, ridge_value, cv_rmse = _resolve_hyperparameters(
         U,
         Y_centered,
         gamma=gamma,
@@ -193,6 +207,7 @@ def analyze_vkoga(
         n_folds=n_folds,
         seed=seed,
     )
+    _warn_poor_surrogate(cv_rmse, Y_centered)
     state = _fit_vkoga(
         U,
         Y_centered,
@@ -246,6 +261,7 @@ def analyze_vkoga(
         gamma=float(gamma_value),
         ridge=float(ridge_value),
         rmse=_shape_slice(np.asarray(state.rmse)),
+        cv_rmse=cv_rmse,
         _fit=state,
         _y_mean=y_mean,
         _output_shape=output_shape,
@@ -308,11 +324,16 @@ def _resolve_hyperparameters(
     max_centers: int,
     n_folds: int,
     seed: int,
-) -> tuple[float, float]:
-    """Return ``(gamma, ridge)``, cross-validating whichever was not given.
+) -> tuple[float, float, float | None]:
+    """Return ``(gamma, ridge, cv_rmse)``, cross-validating what was not given.
 
     Searching a one-element grid is how a partially specified pair is handled,
     so there is a single code path rather than four.
+
+    Returns:
+        The chosen ``gamma`` and ``ridge``, plus the pooled out-of-sample RMSE
+        of the winning grid point. The score is ``None`` when the caller fixed
+        both hyperparameters, because no cross-validation ran.
 
     Raises:
         RuntimeError: If every cross-validation score is non-finite. Argmin
@@ -320,7 +341,7 @@ def _resolve_hyperparameters(
             ill-conditioned corner.
     """
     if gamma is not None and ridge is not None:
-        return float(gamma), float(ridge)
+        return float(gamma), float(ridge), None
 
     gammas = np.asarray([gamma]) if gamma is not None else _GAMMA_GRID
     ridges = np.asarray([ridge]) if ridge is not None else _RIDGE_GRID
@@ -346,7 +367,45 @@ def _resolve_hyperparameters(
     # as the worst possible rather than letting argmin pick a NaN.
     scores = np.where(finite, scores, np.inf)
     best = np.unravel_index(int(np.argmin(scores)), scores.shape)
-    return float(gammas[best[0]]), float(ridges[best[1]])
+    return float(gammas[best[0]]), float(ridges[best[1]]), float(scores[best])
+
+
+def _warn_poor_surrogate(cv_rmse: float | None, Y_centered: Array) -> None:
+    """Warn when the cross-validated fit is too weak to carry the indices.
+
+    Every index is measured against the surrogate, not against the model, so a
+    surrogate that misses most of the output variance produces indices that
+    describe the surrogate alone. The failure is quiet and it can invert the
+    ranking, so the honest out-of-sample score is checked here rather than left
+    for the user to notice.
+
+    Args:
+        cv_rmse: Pooled out-of-sample RMSE of the chosen hyperparameters, or
+            ``None`` when the caller fixed both and no cross-validation ran.
+        Y_centered: ``(N, S)`` centred training outputs, the scale to compare
+            against.
+
+    Warns:
+        UserWarning: If ``cv_rmse`` is above ``_CV_RMSE_WARN_FRACTION`` of the
+            pooled output standard deviation.
+    """
+    if cv_rmse is None:
+        return
+    scale = float(jnp.sqrt(jnp.mean(Y_centered**2)))
+    if scale <= 0.0 or not np.isfinite(cv_rmse):
+        return
+    relative = cv_rmse / scale
+    if relative <= _CV_RMSE_WARN_FRACTION:
+        return
+    warnings.warn(
+        f"jaxgsa.vkoga: the cross-validated surrogate error is {relative:.2f} of the output "
+        "standard deviation, so the surrogate misses most of the output variation. Every index "
+        "is computed against the surrogate, so the reported values — including the ranking — "
+        "are not trustworthy. This happens on high-frequency or oscillatory responses, which a "
+        "greedy Gaussian kernel cannot resolve. Add training points, or use a method that does "
+        "not need a surrogate (jaxgsa.kucherenko on a conditional design).",
+        stacklevel=3,
+    )
 
 
 def _unit_evaluator(state, y_mean: Array):

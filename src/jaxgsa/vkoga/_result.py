@@ -34,18 +34,27 @@ class VKOGAResult(SurrogateResult):
     dependence they separate (Li et al. 2010):
 
     Attributes:
-        S_TC: Total *correlated* index, ``V(E(Y|X_i)) / V(Y)``. What ``X_i``
-            explains through itself **and** through its correlation with the
-            other parameters. The right measure for input prioritisation:
-            it answers "how much variance would I remove by learning ``X_i``".
+        S_TC: Total *correlated* index, exactly ``V(E(Y|X_i)) / V(Y)``. What
+            ``X_i`` explains through itself **and** through its correlation
+            with the other parameters. The word "total" names the pathways it
+            counts, not the interaction order: the formula is a first-order
+            conditional variance, so ``S_TC`` is not a total-order Sobol'
+            index. The right measure for input prioritisation: it answers
+            "how much variance would I remove by learning ``X_i``".
         S_TU: Total *uncorrelated* index, ``E(V(Y|X_-i)) / V(Y)``. What only
             ``X_i`` can explain, with every correlated pathway removed. The
             right measure for input fixing: a parameter with ``S_TU`` near
             zero can be frozen.
-        S_U: The independent contribution of ``X_i`` alone.
+        S_U: The independent contribution of ``X_i`` alone,
+            ``E(V(f_i|X_-i)) / V(Y)``, where ``f_i`` is the fitted additive
+            component of the output. This is the decorrelated first-order
+            index of Mara & Tarantola (2012). It is clipped to at most
+            ``S_TU``; a wide clip raises a ``UserWarning``.
         S_C: The correlation-borne contribution, ``S_TC - S_U``. Can be
             negative when a correlation opposes a direct effect.
-        S_IU: Independent interaction contribution, ``S_TU - S_U``.
+        S_IU: Independent interaction contribution, ``S_TU - S_U``. Zero for
+            an additive model, and non-negative by construction of the
+            ``S_U`` clip.
         problem: The problem analysed.
         correlation: ``(D, D)`` Gaussian-copula correlation matrix the indices
             were computed under. The identity when inputs were treated as
@@ -55,7 +64,16 @@ class VKOGAResult(SurrogateResult):
         n_centers: Number of kernel centres the greedy selected.
         gamma: Fitted RBF shape parameter.
         ridge: Fitted regularisation parameter.
-        rmse: Training-fit RMSE per output slice.
+        rmse: Training-fit RMSE per output slice. It measures how well the
+            surrogate reproduces the rows it was fitted on, so it is
+            optimistic; read ``cv_rmse`` to judge the fit.
+        cv_rmse: Pooled out-of-sample RMSE of the chosen hyperparameters, from
+            the k-fold cross-validation. One scalar for the whole fit. This is
+            the honest accuracy estimate: every index is measured against the
+            surrogate, so a large ``cv_rmse`` relative to ``std(Y)`` makes the
+            indices unreliable, and ``analyze`` warns in that case. It is
+            ``None`` when the caller fixed both ``gamma`` and ``ridge``,
+            because no cross-validation ran.
     """
 
     S_TC: Array
@@ -70,6 +88,7 @@ class VKOGAResult(SurrogateResult):
     gamma: float
     ridge: float
     rmse: Array | None = None
+    cv_rmse: float | None = None
     _fit: _VKOGAState | None = field(default=None, repr=False)
     _y_mean: Array | None = field(default=None, repr=False)
     _output_shape: tuple[int, ...] = field(default=(), repr=False)
@@ -147,14 +166,15 @@ class VKOGAResult(SurrogateResult):
         coords["param_i"] = param_names
         coords["param_j"] = param_names
 
-        return xr.Dataset(
-            data_vars,
-            coords=coords,
-            attrs={
-                "method": "vkoga",
-                "n_centers": self.n_centers,
-                "gamma": self.gamma,
-                "ridge": self.ridge,
-                "correlated": bool(self.is_correlated),
-            },
-        )
+        attrs: dict = {
+            "method": "vkoga",
+            "n_centers": self.n_centers,
+            "gamma": self.gamma,
+            "ridge": self.ridge,
+            "correlated": bool(self.is_correlated),
+        }
+        # Omitted rather than stored as None: netCDF has no null attribute.
+        if self.cv_rmse is not None:
+            attrs["cv_rmse"] = float(self.cv_rmse)
+
+        return xr.Dataset(data_vars, coords=coords, attrs=attrs)

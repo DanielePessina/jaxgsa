@@ -9,13 +9,26 @@ index            definition                           reading
 ===============  ===================================  ==========================
 ``S_TC``         ``V(E(Y|X_i)) / V(Y)``               total *correlated*: what
                                                       ``X_i`` explains through
-                                                      itself and its correlation
+                                                      itself and its correlation.
+                                                      A first-order quantity in
+                                                      form; "total" names the
+                                                      pathways it counts, not
+                                                      the interaction order
 ``S_TU``         ``E(V(Y|X_-i)) / V(Y)``              total *uncorrelated*: what
                                                       only ``X_i`` can explain
-``S_U``          ``[V(f_i) - V(E(f_i|X_-i))] / V(Y)`` the independent part
+``S_U``          ``E(V(f_i|X_-i)) / V(Y)``            the independent part
 ``S_C``          ``S_TC - S_U``                       the correlation-borne part
 ``S_IU``         ``S_TU - S_U``                       independent interactions
 ===============  ===================================  ==========================
+
+``f_i`` is the additive first-order component of ``Y``, fitted by least squares
+under the *correlated* input measure (see :func:`_fit_component_functions`).
+``S_U`` therefore measures the part of ``f_i`` that ``X_-i`` cannot predict.
+This is the decorrelated first-order index of Mara & Tarantola (2012), not the
+structural index ``Var(f_i) / V(Y)`` of Li et al. (2010, Equation 25); on a
+linear-Gaussian model the two differ, because Li's keeps the correlated share
+of ``Var(f_i)`` and this one removes it. The pair ``(S_U, S_C)`` splits ``S_TC``
+along exactly the boundary the decorrelated index draws.
 
 Every expectation is taken under a Gaussian copula, whose conditionals are
 closed-form in the latent normal space, and every model evaluation goes through
@@ -24,12 +37,14 @@ nested conditional sampling would be unaffordable against the original model.
 
 References:
     Li, Rabitz, Yelvington et al. (2010). J. Phys. Chem. A 114:6022-6032.
+    Mara & Tarantola (2012). Reliab. Eng. Syst. Saf. 107:115-121.
     Hilhorst, Quicken, van de Vosse & Huberts (2024). Int. J. Numer. Meth.
         Biomed. Engng. 40(2):e3797.
 """
 
 from __future__ import annotations
 
+import warnings
 from typing import Callable, NamedTuple
 
 import numpy as np
@@ -55,6 +70,11 @@ _COMPONENT_DEGREE = 6
 # parameters are near-perfectly correlated; this only covers that case.
 _COMPONENT_RIDGE = 1e-8
 
+# How far S_U may exceed S_TU before the clip is reported. Both are fractions
+# of V(Y), so this is one percent of the output variance: below it the excess
+# is estimator noise, above it the additive projection is genuinely inadequate.
+_S_U_CLIP_TOLERANCE = 0.01
+
 
 class CorrelatedIndices(NamedTuple):
     """Raw index arrays produced by :func:`estimate_correlated_indices`.
@@ -63,11 +83,13 @@ class CorrelatedIndices(NamedTuple):
     parameters, matching the surrogate's flattened output layout.
 
     Attributes:
-        S_TC: Total correlated indices.
-        S_TU: Total uncorrelated indices.
-        S_U: Uncorrelated (independent) contribution.
-        S_C: Correlated contribution, ``S_TC - S_U``.
+        S_TC: Total correlated indices, ``V(E(Y|X_i)) / V(Y)``.
+        S_TU: Total uncorrelated indices, ``E(V(Y|X_-i)) / V(Y)``.
+        S_U: Uncorrelated (independent) contribution, clipped to at most
+            ``S_TU``.
+        S_C: Correlated contribution, ``S_TC - S_U``. May be negative.
         S_IU: Independent interaction contribution, ``S_TU - S_U``.
+            Non-negative by construction of the clip.
         variance: ``(S,)`` output variance under the correlated input measure.
     """
 
@@ -151,16 +173,17 @@ def estimate_correlated_indices(
             seed=seed + 1 + D + i,
         )
         S_TU[:, i] = total_uncorrelated
-        # Equation (25): the independent contribution is what f_i explains
-        # beyond the part of itself that X_-i already determines through the
-        # correlation. V(f_i) is a marginal quantity, so it comes from the
-        # joint variance sample rather than from the nested conditional draws.
+        # The independent contribution is what f_i explains beyond the part of
+        # itself that X_-i already determines through the correlation. V(f_i)
+        # is a marginal quantity, so it comes from the joint variance sample
+        # rather than from the nested conditional draws.
         f_i = _evaluate_component(U_var[:, i], coefficients[:, i, :])
         S_U[:, i] = np.maximum(f_i.var(axis=0) - conditional_component_var, 0.0)
 
     S_TC /= safe_variance[:, None]
     S_TU /= safe_variance[:, None]
     S_U /= safe_variance[:, None]
+    S_U = _clip_independent_part(S_U, S_TU)
     return CorrelatedIndices(
         S_TC=S_TC,
         S_TU=S_TU,
@@ -172,6 +195,53 @@ def estimate_correlated_indices(
         S_IU=S_TU - S_U,
         variance=variance,
     )
+
+
+def _clip_independent_part(S_U: np.ndarray, S_TU: np.ndarray) -> np.ndarray:
+    """Hold ``S_U <= S_TU`` so ``S_IU`` cannot go negative, and report the clip.
+
+    ``S_TU`` is everything ``X_i`` alone explains, and ``S_U`` is the part of
+    that which the additive component ``f_i`` accounts for. The remainder,
+    ``S_IU``, is the independent interaction share, so ``S_U <= S_TU`` is a
+    definitional invariant of the split.
+
+    The two indices come from different estimators, and only ``S_TU`` sees the
+    surrogate directly. On a model with interactions the degree-6 additive
+    projection ``f_i`` absorbs interaction variance that it cannot represent as
+    a function of ``X_i`` alone, so under a correlated measure the raw ``S_U``
+    can exceed ``S_TU``. Clipping restores the invariant. A clip wider than
+    ``_S_U_CLIP_TOLERANCE`` is not noise: it says the additive projection is
+    inadequate for this model, and it warns.
+
+    ``S_C = S_TC - S_U`` stays free to go negative. That is a real reading — a
+    correlation that opposes the direct effect — and not an estimator artefact.
+
+    Args:
+        S_U: ``(S, D)`` independent contribution, normalised by ``V(Y)``.
+        S_TU: ``(S, D)`` total uncorrelated index, normalised by ``V(Y)``.
+
+    Returns:
+        ``S_U`` clipped elementwise to at most ``S_TU``.
+
+    Warns:
+        UserWarning: If any entry is clipped by more than
+            ``_S_U_CLIP_TOLERANCE`` of the output variance.
+    """
+    excess = S_U - S_TU
+    # NaN slices (zero output variance) compare False and stay out of the report.
+    flagged = excess > _S_U_CLIP_TOLERANCE
+    if flagged.any():
+        params = sorted({int(j) for j in np.argwhere(flagged)[:, 1]})
+        warnings.warn(
+            f"jaxgsa.vkoga: S_U exceeded S_TU by up to {float(excess[flagged].max()):.3g} "
+            f"of the output variance for parameter(s) {params}; S_U was clipped to S_TU so "
+            "that S_IU stays non-negative. The additive component functions cannot represent "
+            "this model's interactions under the correlated measure, so read S_U, S_C and "
+            "S_IU for those parameters as indicative only. S_TC and S_TU are unaffected.",
+            # 1 here, 2 estimate_correlated_indices, 3 analyze_vkoga, 4 the caller.
+            stacklevel=4,
+        )
+    return np.minimum(S_U, S_TU)
 
 
 def _legendre_basis(u: np.ndarray, degree: int) -> np.ndarray:
@@ -271,6 +341,15 @@ def _total_correlated(
     are made up front, so chunking changes evaluation batching only, not the
     sample.
 
+    Note:
+        The estimator drops the usual ``inner_var / n_inner`` correction and
+        relies on the shared QMC inner block to cancel most of the inner error.
+        That argument is empirical, and it holds only while ``n_inner`` is
+        large against the outer conditioning signal. Do not lower ``n_inner``
+        below the default to buy speed: the residual inner variance then leaks
+        into the outer variance and inflates a small ``S_TC``. Raise
+        ``n_outer`` instead.
+
     Returns:
         ``(S,)`` conditional-expectation variance, not yet normalised.
     """
@@ -318,7 +397,7 @@ def _total_uncorrelated_and_conditional(
     Both quantities condition on ``X_-i`` and resample ``X_i``, so they share
     one nested sample: the surrogate gives the total uncorrelated index, and
     the fitted component function evaluated on the same draws gives the
-    conditional expectation Equation (25) subtracts.
+    conditional expectation that ``S_U`` subtracts from ``V(f_i)``.
 
     Outer points are processed in memory-budgeted chunks, as in
     :func:`_total_correlated`: only ``(n_outer, S)`` accumulators stay
