@@ -87,9 +87,12 @@ provides `correlate(X, problem)` (impose the declared correlation on an
 existing sample by rank re-pairing), `fit_correlation(problem, X)` (estimate
 the latent matrix from data), and `correlation_from_covariance(cov)`. Under a
 declared correlation, `optimal_transport`, `borgonovo`, `hdmr`, `hsic`,
-`pawn`, and `vkoga` accept the data; `pce`, `dgsm`, and `shapley`
-(PCE backend) raise. The design-based `kucherenko` conditions on the declared
-correlation by construction.
+`pawn`, and `vkoga` accept the data. `shapley.analyze(backend="hdmr")` also
+accepts it, and `include_correlative=True` then folds the ANCOVA correlative
+share into the allocation. These routes raise instead: `pce.analyze`,
+`dgsm.analyze`, `shapley.analyze(backend="pce")`, and the design builders
+`sobol.sample`, `morris.sample`, and `efast.sample`. The design-based
+`kucherenko` conditions on the declared correlation by construction.
 
 PCE and HDMR results retain their fitted surrogate:
 

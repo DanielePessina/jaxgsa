@@ -222,10 +222,23 @@ def analyze_hdmr(
 ) -> HDMRResult:
     """Compute sensitivity indices via RS-HDMR (public entry point).
 
-    Validates ``(X, Y)``, warns once about any zero-variance output slice and
-    once about the index reading on a correlated problem, then delegates to
-    :func:`_analyze_hdmr_core`. See that function for the full parameter and
-    return documentation.
+    Validates ``(X, Y)``, warns once about any zero-variance output slice, then
+    delegates to :func:`_analyze_hdmr_core`. See that function for the full
+    parameter and return documentation.
+
+    Correlated inputs are supported: the ANCOVA decomposition splits each
+    term's variance share into a structural part (``Sa``) and a
+    correlation-induced part (``Sb``), so a declared ``problem.correlation``
+    is welcome. ``Sb`` doubles as a correlation diagnostic, and
+    ``result.shapley(include_correlative=True)`` folds it into the Shapley
+    allocation.
+
+    Raises:
+        ValueError: If ``X`` or ``Y`` violates the shared shape contract, or
+            ``problem`` has categorical parameters (the B-spline component
+            functions need an orderable axis, which an unordered level code
+            does not give). :func:`_analyze_hdmr_core` raises for the
+            remaining argument checks.
     """
     X = jnp.asarray(X)
     # HDMR's ANCOVA decomposition separates structural (Sa) from
@@ -351,8 +364,12 @@ def _analyze_hdmr_core(
         that says this.
 
     Raises:
-        ValueError: If ``N < 300``, ``maxorder`` is not 1/2/3, or an explicit
-            ``slice_chunk_size < 1`` or ``batch_size < 1`` is passed.
+        ValueError: If ``N < 300``, ``maxorder`` is not 1/2/3, an explicit
+            ``slice_chunk_size < 1`` or ``batch_size < 1`` is passed, or
+            ``problem`` has categorical parameters (the B-spline component
+            functions need an orderable axis, which an unordered level code
+            does not give). The gate on categorical parameters runs in the
+            public :func:`analyze_hdmr` wrapper.
 
     Note:
         On the in-memory path (and independently of ``slice_chunk_size``),

@@ -118,8 +118,66 @@
   correlation stripped: the estimator never reads the matrix, which proves
   distribution-freeness in `X`. `methods.md` states the guarantee explicitly.
 
+### Changed
+
+- **Every correlated-problem refusal now names `jaxgsa.vkoga` and
+  `jaxgsa.kucherenko` first.** `sobol.sample`, `morris.sample`, `efast.sample`,
+  `pce.analyze` and `dgsm.analyze` raise the shared message, and it listed only
+  the moment-independent and rank-based routes. It now leads with the two
+  variance-based routes this release adds, because they answer the question the
+  refused method was asked. The list also names `jaxgsa.shapley` with
+  `backend="hdmr"`, which accepts correlated problems. The `backend="pce"`
+  refusal in `shapley.analyze` gained the same two names.
+- **`S_U` is clipped to `S_TU`, so `S_IU` can no longer go negative.** `S_U`
+  measures the output against fitted *additive* component functions. No additive
+  function of `X_i` can represent an interaction, so on a model with
+  interactions under a correlated measure the raw `S_U` could exceed `S_TU` and
+  drive `S_IU` below zero — a silently negative "interaction" index. The clip
+  restores the invariant, and a clip wider than 1% of the output variance now
+  raises a `UserWarning`: it says the additive projection is inadequate for that
+  model, so `S_U`, `S_C` and `S_IU` are indicative while `S_TC` and `S_TU` stay
+  reliable. `S_C` is **not** clipped; a negative `S_C` is a real reading.
+  Additive models are unaffected.
+- **`jaxgsa.vkoga` reports its out-of-sample error and warns when the surrogate
+  fails.** The pooled cross-validated RMSE was computed and then discarded; only
+  the optimistic *training* RMSE reached the result. It is now on
+  `VKOGAResult.cv_rmse` (and in `to_dataset().attrs`), and `analyze` warns when
+  it passes half the output standard deviation. Every index is measured against
+  the surrogate, so a failed fit gives meaningless indices — on
+  `sin(2*pi*12*u1) + 0.5*u2` the reported ranking is inverted, and nothing said
+  so. `cv_rmse` is `None` when the caller fixes both `gamma` and `ridge`,
+  because no cross-validation runs.
+- **`S_U`'s attribution is corrected.** The code cited Li et al. (2010,
+  Equation 25), whose structural index is `Var(f_i)/V(Y)`. The implemented
+  quantity is `E[Var(f_i|X_-i)]/V(Y)`, the decorrelated first-order index of
+  Mara & Tarantola (2012). The docstrings now cite the right result. `S_TC`'s
+  docstring also states its formula, so the word "total" cannot be read as
+  total-order: `S_TC` is `V(E(Y|X_i))/V(Y)`, a first-order quantity, and
+  "total" names the pathways it counts.
+- Docstring `Raises:` sections across `pce`, `hsic`, `pawn`, `hdmr`, `dgsm`,
+  `shapley`, `sobol.to_morris` and `efast.sample` now state the categorical and
+  correlated gating the code performs. The correlation tolerance of `hsic`,
+  `pawn` and `hdmr` moved from code comments into docstring prose. The `sobol`,
+  `vkoga` and `kucherenko` namespace docstrings state their gating. `docs/api`
+  and `docs/examples/categorical-inputs.md` match the refusal lists the code
+  actually raises, and the correlation-inclusive caveat in `methods.md` now
+  covers HSIC and PAWN as well as optimal transport.
+- `docs/examples/vkoga.md` documents three limits with their signals: a failed
+  surrogate on oscillatory responses (read `cv_rmse`), the additive projection
+  behind `S_U` (read the clip warning), and the roughly -3.5% low bias in
+  `result.variance` for Gaussian marginals, which the CDF-space kernel causes by
+  under-resolving the tails.
+
 ### Internal
 
+- The `n_inner` coupling in `jaxgsa.vkoga` is documented. The estimators drop
+  the iid inner-noise correction and rely on a large shared QMC inner block, so
+  `n_inner` cannot be lowered freely to buy speed.
+- The correlated tests gained a D=4 case with six distinct off-diagonals of
+  mixed sign, plus a parameter-permutation equivariance probe. The previous
+  cases all used one non-zero off-diagonal, which cannot catch a transposed
+  parameter axis. Both routes pass: Kucherenko errors are at most 7e-4 (`S1`)
+  and 2e-5 (`ST`); VKOGA errors are at most 0.013 (`S_TC`) and 0.006 (`S_TU`).
 - Added `jaxgsa._core.legendre`: one orthonormal Legendre recurrence, shared by
   the PCE basis and the VKOGA component-function fit. The recurrence runs in
   the backend default float dtype (float64 under x64), the same promotion the

@@ -183,7 +183,11 @@ except ValueError as e:
 
 The same applies to `efast.sample`, `dgsm.analyze`, `pce.analyze`,
 `hdmr.analyze`, `hsic.analyze`, `pawn.analyze`, `shapley.analyze`,
-`vkoga.analyze`, and `kucherenko.sample`.
+`vkoga.analyze`, `kucherenko.sample`, and
+`sobol.SobolSamples.to_morris`. The last one refuses because an
+elementary effect divides by a step along one input axis, which has no
+meaning for unordered level codes. The Saltelli design itself stays
+valid, so `sobol.sample` and `sobol.analyze` still work.
 
 Correlation is also rejected for categorical parameters: a
 `problem.correlation` entry touching one raises `ValueError` (polychoric

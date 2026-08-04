@@ -8,6 +8,13 @@ this is the design-based counterpart to :mod:`jaxgsa.vkoga`, which estimates
 the same two quantities against a kernel surrogate. Under independent inputs
 both indices reduce to the classic Sobol' ``S1`` and ``ST``.
 
+Gating: ``sample`` conditions on a declared ``problem.correlation``, so it is
+exempt from the correlated-design refusal that ``sobol`` / ``morris`` /
+``efast`` apply. It refuses categorical parameters. The copula conditionals
+need a continuous marginal CDF on every coordinate. Use
+:mod:`jaxgsa.optimal_transport` or :mod:`jaxgsa.borgonovo` for categorical
+inputs.
+
 Example::
 
     import jaxgsa

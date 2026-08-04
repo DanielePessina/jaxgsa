@@ -302,10 +302,13 @@ def analyze(
     design — and a good pick when the output is skewed or multimodal, so
     that variance-based indices summarize its uncertainty poorly.
 
-    Categorical inputs are supported. A categorical parameter conditions on
-    one class per level rather than on a bin of its range, so its index
-    does not depend on the arbitrary order of the level codes: relabel the
-    levels and the index is unchanged.
+    Correlated inputs are supported: PAWN conditions on bins of one input
+    and compares output CDFs, so a declared ``problem.correlation`` does
+    not invalidate the indices. Each index then measures the input's
+    *total* influence, which includes influence carried through its
+    correlated partners. An input that the model ignores can therefore
+    score above 0 when it correlates with an influential input. That
+    reading is correct, not an estimation error.
 
     Args:
         problem: Problem definition with D parameters.
@@ -337,8 +340,9 @@ def analyze(
         ValueError: If X is not 2-D, its column count does not match the
             problem, X and Y have differing row counts, ``statistic`` is
             not one of ``"median"``/``"max"``/``"mean"``, ``n_bins < 2``,
-            ``conf_level`` is not in ``(0, 1)``, or a categorical column of
-            X holds values other than its integer level codes.
+            ``conf_level`` is not in ``(0, 1)``, or ``problem`` has
+            categorical parameters (the equal-probability bins follow the
+            code order, which is arbitrary for unordered levels).
     """
     X = jnp.asarray(X)
     # PAWN conditions on bins of each input and compares output CDFs, so a

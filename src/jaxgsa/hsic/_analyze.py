@@ -392,6 +392,14 @@ def analyze(
     x_i and Y are independent, making HSIC useful for screening out
     non-influential inputs with a significance level attached.
 
+    Correlated inputs are supported: HSIC is a dependence measure and
+    assumes no input independence, so a declared ``problem.correlation``
+    does not invalidate the indices. Each index then measures the input's
+    *total* association with the output, which includes influence carried
+    through its correlated partners. An input that the model ignores can
+    therefore score above 0 when it correlates with an influential input.
+    That reading is correct, not an estimation error.
+
     Args:
         problem: Problem definition with D parameters.
         X: Input sample matrix ``(N, D)`` in physical units.
@@ -417,8 +425,11 @@ def analyze(
 
     Raises:
         ValueError: If X is not 2-D, column count doesn't match problem,
-            row counts of X and Y differ, n_perms < 1, N < 4, or
-            bandwidth is non-positive / non-finite.
+            row counts of X and Y differ, n_perms < 1, N < 4,
+            bandwidth is non-positive / non-finite, or ``problem`` has
+            categorical parameters (the Gaussian input kernel reads a
+            level code as a distance, which the arbitrary code order makes
+            meaningless).
     """
     D = problem.num_vars
     X = jnp.asarray(X)

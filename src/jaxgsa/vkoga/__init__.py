@@ -10,6 +10,12 @@ assume independent inputs. They follow Li et al. (2010): the familiar main and
 total indices keep their formulas but change connotation, and split into
 correlated and uncorrelated parts.
 
+Gating: ``analyze`` accepts a declared ``problem.correlation``. It refuses
+categorical parameters. The isotropic kernel needs a continuous CDF map on
+every coordinate, and an unordered level code has none. Use
+:mod:`jaxgsa.optimal_transport` or :mod:`jaxgsa.borgonovo` for categorical
+inputs.
+
 Example::
 
     import jaxgsa

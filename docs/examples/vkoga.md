@@ -125,7 +125,57 @@ pin.
   it is a correlation working against a direct effect (here it is just estimator
   noise around zero).
 - **`S_IU` is ~0 for every parameter**, as it must be: the model is additive, so
-  there are no independent interactions to find.
+  there are no independent interactions to find. `S_IU` is never negative: it is
+  `S_TU - S_U`, and `S_U` is clipped to `S_TU` (see below).
+
+## Three things that can go wrong
+
+These are limits of the method, not bugs. Each one has a signal you can read.
+
+### The surrogate can fail, and the ranking can invert
+
+Every index is measured against the surrogate, never against your model. If the
+surrogate misses the response, the indices describe the surrogate alone.
+
+A greedy Gaussian kernel cannot resolve a high-frequency or oscillatory
+response. On `sin(2*pi*12*u1) + 0.5*u2` with 2048 training points the reported
+`S_TC` is `[0.18, 0.75, 0.00]` against a true `[0.96, 0.04, 0.00]` — **the
+ranking is inverted**. A step function at the same size is fine.
+
+`analyze` warns when the cross-validated error passes half the output standard
+deviation, and it reports the score as `result.cv_rmse`. Check it:
+
+```python
+print(result.cv_rmse, np.std(Y))   # honest out-of-sample error vs output scale
+```
+
+`result.rmse` is the *training* error, so it is optimistic. Use `cv_rmse` to
+judge the fit. `cv_rmse` is `None` when you pass both `gamma` and `ridge`,
+because no cross-validation ran — pass at least one as `None` if you want the
+diagnostic. When the surrogate cannot be improved by more training points, use
+`jaxgsa.kucherenko` instead: it evaluates your actual model on a conditional
+design and needs no surrogate.
+
+### `S_U` uses an additive projection
+
+`S_U` compares the output against fitted additive component functions `f_i`. No
+additive function of `X_i` can represent an interaction, so on a model with
+interactions under a correlated measure the raw `S_U` can exceed `S_TU`.
+
+jaxgsa clips `S_U` to `S_TU`, which keeps `S_IU` non-negative, and warns when
+the clip is wider than 1% of the output variance. Treat that warning as a
+statement about the model: `S_TC` and `S_TU` are unaffected and stay reliable,
+but read `S_U`, `S_C` and `S_IU` as indicative only. `S_C` is never clipped —
+a negative `S_C` is a real reading, not an artefact.
+
+### The reported variance runs slightly low
+
+The surrogate works in CDF space, where the tails of a Gaussian marginal are
+compressed into a small part of the unit cube. The kernel under-resolves them,
+so `result.variance` is biased **low**. On a four-parameter Gaussian case it
+reported 15.64 against a true 16.20, about -3.5%. The bias grows with heavier
+tails. It affects the variance figure, not the index ratios, because every
+index is divided by the same number.
 
 ## Ground-truth check
 

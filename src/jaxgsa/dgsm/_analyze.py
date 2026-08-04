@@ -193,9 +193,11 @@ def analyze(
     Raises:
         ValueError: If neither ``(fn, X)`` nor ``(Y, dfdx)`` is provided,
             if ``dfdx`` has an unexpected shape or does not match
-            ``Y`` / the problem dimension, or if ``problem.correlation``
+            ``Y`` / the problem dimension, if ``problem.correlation``
             declares a dependence structure (the Poincare-inequality bounds
-            assume independent inputs).
+            assume independent inputs), or if ``problem`` has categorical
+            parameters (a derivative along an unordered level code has no
+            meaning).
     """
     # The Poincare-inequality bound on ST assumes independent inputs; both
     # calling conventions are rejected for a correlated problem.

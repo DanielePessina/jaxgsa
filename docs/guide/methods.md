@@ -35,7 +35,7 @@ Common situations:
 | Consideration | Sobol' | HDMR | PCE | Shapley | eFAST | DGSM | Morris | HSIC | PAWN | Borgonovo delta | Optimal transport | VKOGA | Kucherenko |
 |---------------|--------|------|-----|---------|-------|------|--------|------|------|-----------------|------------------|-------|------------|
 | Sampling requirement | Structured Saltelli design, $N(2D+2)$ evaluations (default) | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Search curves, $N \times D$ evaluations | Plain MC, $N$ evaluations + autodiff | Trajectory or radial design, $r(D+1)$ evaluations (deduplicated) | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Conditional-copula blocks, $N(2D+1)$ evaluations |
-| Input independence | Assumed | Handled via ANCOVA decomposition | Assumed | Assumed for `backend="pce"`; `backend="hdmr"` + `include_correlative=True` allocates the ANCOVA decomposition (conditional-variance Shapley is future work) | Assumed | Assumed | Assumed | Not assumed | Not assumed | Not assumed | Not assumed — valid under correlated inputs (measures total, correlation-inclusive influence; tested) | Not assumed (Gaussian copula from `problem.correlation`) | Not assumed (conditional sampling from the declared `problem.correlation` copula) |
+| Input independence | Assumed | Handled via ANCOVA decomposition | Assumed | Assumed for `backend="pce"`; `backend="hdmr"` + `include_correlative=True` allocates the ANCOVA decomposition (conditional-variance Shapley is future work) | Assumed | Assumed | Assumed | Not assumed — valid under correlated inputs (measures total, correlation-inclusive influence) | Not assumed — valid under correlated inputs (measures total, correlation-inclusive influence) | Not assumed — valid under correlated inputs (measures total, correlation-inclusive influence) | Not assumed — valid under correlated inputs (measures total, correlation-inclusive influence; tested) | Not assumed (Gaussian copula from `problem.correlation`) | Not assumed (conditional sampling from the declared `problem.correlation` copula) |
 | Input distributions | Uniform + Gaussian | Uniform + Gaussian (via CDF mapping) | Uniform + Gaussian | Uniform + Gaussian (both backends) | Uniform + Gaussian | Uniform + Gaussian (+ truncated Normal) | Uniform + Gaussian (truncated-quantile grid) | Uniform + Gaussian (via CDF mapping) | Uniform + Gaussian (via CDF mapping) | Any (rank-based classes; marginals not used) | Any (rank-based classes; marginals not used) | Uniform + Gaussian (via CDF mapping) | Uniform + Gaussian (latent-copula inverse CDF) |
 | Categorical inputs | Supported (column swaps on level codes) | Rejected | Rejected | Rejected | Rejected | Rejected | Rejected | Rejected | Supported (one bin per level) | Supported (one class per level) | Supported (one class per level) | Rejected |
 | Output shapes | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series (both backends) | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series; joint point-cloud modes over outputs/time | Scalar, multi-output, time-series | Scalar, multi-output, time-series |
@@ -43,6 +43,13 @@ Common situations:
 | Second-order indices | Direct estimation from cross-matrices | From interaction component functions | Analytical from coefficients | Not available (interaction variance folded into $\mathrm{Sh}$) | Not available | Not available | Not available | Not available | Not available | Not available | Not available | Not available | Not available |
 | Interaction detection | Via $S_2$ and the gap $S_T - S_1$ | Via explicit interaction component functions | Via $S_2$ from coefficients | Via the gaps $\mathrm{Sh} - S_1$ and $S_T - \mathrm{Sh}$ | Via the gap $S_T - S_1$ only | Not available (bounds only) | Via large $\sigma$ relative to $\mu^*$ (not pair-attributable) | Via the Total HSIC − R2-HSIC gap | Not available (first-order only) | Not available (the $\delta - S_1$ gap flags influence beyond first-order variance) | Not available (the diffusive component flags influence beyond mean shift) | Via $S_{IU}$, the independent-interaction index | Via the gap $S_T - S_1$ under independence (under correlation the gap mixes interactions and coupling) |
 | Reusable surrogate | No | Yes (`result.predict`) | Yes (`result.predict`) | Derived from either fitted result | No | No | No | No | No | No | No | Yes (`result.predict`) | No |
+
+HSIC, PAWN, the Borgonovo delta, and optimal transport share one caveat.
+Each measures **total, correlation-inclusive** influence. An input that
+the model ignores still scores above zero when it correlates with an
+influential input. That reading is correct, not an estimation error. Use
+HDMR (`Sa` and `Sb`), VKOGA, or Kucherenko when you must separate the
+structural effect from the correlation-induced one.
 
 ## Background: Variance-Based Sensitivity Analysis
 
@@ -810,9 +817,13 @@ The remaining three split $S_{TC}$ and $S_{TU}$ into their independent and corre
 |-------|------------|---------|
 | $S_{TC}(i)$ | $\mathrm{Var}[\mathbb{E}(Y \mid X_i)] / \mathrm{Var}(Y)$ | Total correlated: what $X_i$ explains through itself **and** its correlation with the rest. Use for input prioritisation. |
 | $S_{TU}(i)$ | $\mathbb{E}[\mathrm{Var}(Y \mid \mathbf{X}_{\sim i})] / \mathrm{Var}(Y)$ | Total uncorrelated: what only $X_i$ can explain. Use for input fixing. |
-| $S_U(i)$ | independent part of $S_{TC}$ | The contribution of $X_i$ alone, with the part of it that $\mathbf{X}_{\sim i}$ already determines removed. |
+| $S_U(i)$ | $\mathbb{E}[\mathrm{Var}(f_i \mid \mathbf{X}_{\sim i})] / \mathrm{Var}(Y)$ | The contribution of $X_i$ alone, with the part of it that $\mathbf{X}_{\sim i}$ already determines removed. $f_i$ is the fitted additive component of the output. |
 | $S_C(i)$ | $S_{TC} - S_U$ | The correlation-borne contribution. **Can be negative**, when a correlation works against a direct effect. |
-| $S_{IU}(i)$ | $S_{TU} - S_U$ | Independent interactions — zero for an additive model. |
+| $S_{IU}(i)$ | $S_{TU} - S_U$ | Independent interactions — zero for an additive model, non-negative always. |
+
+The name $S_{TC}$ says "total", but the formula is a first-order conditional variance. "Total" names the pathways it counts — direct and correlated — not the interaction order. It is not a total-order Sobol' index.
+
+$S_U$ uses an additive projection $f_i$, and no additive function of $X_i$ can represent an interaction. On a model with interactions under a correlated measure, the raw $S_U$ can therefore come out above $S_{TU}$. jaxgsa clips $S_U$ to $S_{TU}$, which keeps $S_{IU}$ non-negative, and warns when the clip is wider than 1% of the output variance. Read that warning as a statement about the model: the additive component functions are not enough for it, so trust $S_{TC}$ and $S_{TU}$ and treat $S_U$, $S_C$ and $S_{IU}$ as indicative. $S_C$ is never clipped, because a negative $S_C$ is a real reading.
 
 Under **independent** inputs the whole structure collapses back to the familiar one: $S_{TC}$ becomes the first-order Sobol' index $S_1$, $S_{TU}$ becomes the total index $S_T$, $S_U$ equals $S_{TC}$, and $S_C$ goes to zero. Running it on an uncorrelated problem is therefore a legitimate, if roundabout, way to get $S_1$ and $S_T$ from a kernel surrogate.
 

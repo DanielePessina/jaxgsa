@@ -405,8 +405,12 @@ def analyze_pce(
 
     Raises:
         ValueError: If ``X`` fails validation against ``problem``, ``Y``'s
-            layout cannot be resolved against ``X``'s row count, or
-            ``batch_size`` is given and not a positive integer.
+            layout cannot be resolved against ``X``'s row count,
+            ``batch_size`` is given and not a positive integer,
+            ``problem.correlation`` declares a dependence structure (the
+            Wiener-Askey basis is orthogonal only under independent
+            inputs), or ``problem`` has categorical parameters (a
+            polynomial in an unordered level code has no meaning).
     """
     X = jnp.asarray(X)
     # Wiener-Askey basis orthogonality assumes independent inputs, so a

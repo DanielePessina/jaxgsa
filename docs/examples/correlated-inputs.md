@@ -140,20 +140,23 @@ normal draw.
 ## Analyze with a correlation-tolerant method
 
 Rank- and distribution-based given-data methods remain valid under
-correlated inputs. Optimal transport and Borgonovo delta measure the total,
-correlation-inclusive influence of each input:
+correlated inputs. Optimal transport, Borgonovo delta, HSIC, and PAWN all
+measure the total, correlation-inclusive influence of each input:
 
 ```python
 Y = model(X)
 
 ot = jaxgsa.optimal_transport.analyze(problem, X, Y)
 delta = jaxgsa.borgonovo.analyze(problem, X, Y)
+hsic = jaxgsa.hsic.analyze(problem, X, Y)
+pawn = jaxgsa.pawn.analyze(problem, X, Y)
 ```
 
-Under correlation these indices deliberately credit an input for influence
-it carries through its correlated partners: if `Y` depends only on `x1`
-but `corr(x1, x2) = 0.8`, then `x2` also gets a clearly non-zero index. That
-is the correct correlation-inclusive reading, not an estimation error.
+All four share the same caveat. Under correlation these indices
+deliberately credit an input for influence it carries *through* its
+correlated partners: if `Y` depends only on `x1` but `corr(x1, x2) = 0.8`,
+then `x2` also gets a clearly non-zero index. That is the correct
+correlation-inclusive reading, not an estimation error.
 
 HDMR goes further. Its ANCOVA decomposition separates the two contributions.
 The `Sb` term is the correlation-induced share, so it doubles as a
