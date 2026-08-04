@@ -2,7 +2,7 @@
 
 `jaxgsa.vkoga.analyze(problem, X, Y, ...)` fits a VKOGA kernel surrogate to given
 `(X, Y)` data and returns `VKOGAResult` with variance-based indices that stay
-meaningful when the inputs are **dependent** (Hilhorst et al., 2024; Li et al.,
+meaningful when the inputs are dependent (Hilhorst et al., 2024; Li et al.,
 2010). It is the only method in jaxgsa that estimates correlated and
 uncorrelated contributions separately from a common surrogate.
 
@@ -14,7 +14,7 @@ Important result operations:
 
 `result.shapley()` raises `NotImplementedError`. Shapley effects need a variance
 decomposition indexed by parameter subsets; a kernel expansion is a sum over
-*centres*, every one of which involves every parameter, so there is no membership
+centres, every one of which involves every parameter, so there is no membership
 matrix to allocate from. Use `jaxgsa.hdmr` or `jaxgsa.pce` for Shapley effects.
 
 ## Index reference
@@ -24,10 +24,10 @@ Every index has shape `(..., D)` under the usual output contract: `(D,)` for
 
 | Index | Definition | Reading |
 | --- | --- | --- |
-| `S_TC` | $V(E(Y \mid X_i)) / V(Y)$ | Total **correlated**: what $X_i$ explains through itself *and* through its correlation with the others. The measure for **input prioritisation**. |
-| `S_TU` | $E(V(Y \mid X_{\sim i})) / V(Y)$ | Total **uncorrelated**: what only $X_i$ can explain, correlated pathways removed. The measure for **input fixing**. |
+| `S_TC` | $V(E(Y \mid X_i)) / V(Y)$ | Total correlated: what $X_i$ explains through itself, plus what it explains through its correlation with the others. This is the measure for input prioritisation. |
+| `S_TU` | $E(V(Y \mid X_{\sim i})) / V(Y)$ | Total uncorrelated: what only $X_i$ can explain, correlated pathways removed. This is the measure for input fixing. |
 | `S_U` | independent part of $S_{TC}$ | The contribution of $X_i$ alone. |
-| `S_C` | `S_TC - S_U` | The correlation-borne part. **Can be negative** when a correlation opposes a direct effect. |
+| `S_C` | `S_TC - S_U` | The correlation-borne part. It can be negative when a correlation opposes a direct effect. |
 | `S_IU` | `S_TU - S_U` | Independent interactions. |
 
 Under independent inputs the five collapse to the familiar picture: `S_TC` is the
@@ -46,7 +46,7 @@ under:
 
 To fit a matrix from observed data, use
 `jaxgsa.sampling.fit_correlation(problem, X_data)` and attach it with
-`problem.with_correlation(...)`. This one workflow makes explicit *which*
+`problem.with_correlation(...)`. This one workflow makes it explicit which
 sample the copula comes from; a string value raises `ValueError`.
 
 The matrix actually used is always returned on `result.correlation`. Fewer than
@@ -76,18 +76,18 @@ know good values (they are reported on the result).
 ## Diagnostics
 
 - `correlation` — the `(D, D)` copula matrix the indices were computed under.
-- `variance` — output variance under the *correlated* input measure, per output slice.
+- `variance` — output variance under the correlated input measure, per output slice.
 - `n_centers`, `gamma`, `ridge` — the fitted surrogate's size and hyperparameters.
 - `rmse` — training-fit RMSE per output slice.
 
 ## Two things to get right
 
-1. **Train on an independent, space-filling design even when the analysis is
-   correlated.** The correlated measure concentrates on a ridge, but `S_TU`
+1. Train on an independent, space-filling design even when the analysis is
+   correlated. The correlated measure concentrates on a ridge, but `S_TU`
    conditions on $X_{\sim i}$ and then resamples $X_i$ across its whole marginal —
    a surrogate trained only on correlated data extrapolates for exactly those
    draws.
-2. **Enable float64.** The coefficient solve forms $A^\top A$, squaring the
+2. Enable float64. The coefficient solve forms $A^\top A$, squaring the
    condition number of the cross kernel, and float32 cannot carry it for small
    `gamma`. Call `jax.config.update("jax_enable_x64", True)` before fitting;
    `analyze` emits a `UserWarning` when x64 is off.

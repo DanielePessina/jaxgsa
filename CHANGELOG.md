@@ -155,9 +155,10 @@
   total-order: `S_TC` is `V(E(Y|X_i))/V(Y)`, a first-order quantity, and
   "total" names the pathways it counts.
 - Docstring `Raises:` sections across `pce`, `hsic`, `pawn`, `hdmr`, `dgsm`,
-  `shapley`, `sobol.to_morris` and `efast.sample` now state the categorical and
-  correlated gating the code performs. The correlation tolerance of `hsic`,
-  `pawn` and `hdmr` moved from code comments into docstring prose. The `sobol`,
+  `shapley`, `sobol.to_morris`, `efast.sample` and `morris.sample` now state
+  the categorical and correlated gating the code performs. The correlation tolerance of `hsic`,
+  `pawn`, `hdmr` and `borgonovo` moved from code comments into docstring
+  prose. The `sobol`,
   `vkoga` and `kucherenko` namespace docstrings state their gating. `docs/api`
   and `docs/examples/categorical-inputs.md` match the refusal lists the code
   actually raises, and the correlation-inclusive caveat in `methods.md` now
@@ -167,6 +168,13 @@
   behind `S_U` (read the clip warning), and the roughly -3.5% low bias in
   `result.variance` for Gaussian marginals, which the CDF-space kernel causes by
   under-resolving the tails.
+- The VKOGA and Kucherenko documentation drops rhetorical bold and italics.
+  Structural emphasis stays: table headers, term labels that open a
+  definition-style bullet, and admonition titles. The change covers
+  `docs/examples/vkoga.md`, `docs/examples/kucherenko.md`, `docs/api/vkoga.md`,
+  `docs/api/kucherenko.md`, and the lines this release adds to `README.md`,
+  `docs/guide/methods.md`, `docs/api/index.md` and
+  `docs/examples/correlated-inputs.md`. No index value changes.
 
 ### Internal
 
@@ -186,7 +194,15 @@
 - The categorical-design error is situation-aware: when the categorical
   problem also declares a correlation, it no longer recommends
   `jaxgsa.sobol.sample` (which refuses correlated problems). It states that no
-  variance-based route exists and names the given-data methods.
+  variance-based route exists and names the given-data methods. Both
+  design-side gates now route the combined case to that message. Previously
+  only `kucherenko.sample` could emit it, because `morris.sample`,
+  `efast.sample` and `sobol.sample` ran the correlated check first and raised
+  the correlated-only text, which recommends methods that then refuse the
+  problem for being categorical. `_raise_correlated_design` and
+  `_raise_categorical_design` both detect the combination, so the order the two
+  checks run in no longer matters. A test asserts the combined message for
+  `morris`, `efast`, `sobol` and `kucherenko`.
 - The Gaussian conditional-draw algebra lives in `jaxgsa._core.copula`, next
   to the conditional plan; the VKOGA estimators and the Kucherenko design
   share it.

@@ -1,7 +1,7 @@
 # VKOGA (Correlated-Input Sensitivity)
 
-VKOGA is the given-data variance-based method in jaxgsa that does **not** assume
-independent inputs (its design-based counterpart is
+VKOGA is the given-data variance-based method in jaxgsa whose indices are
+defined without an independence assumption (its design-based counterpart is
 [Kucherenko](/examples/kucherenko)). It is the two-stage surrogate-based
 sensitivity analysis of
 Hilhorst et al. (2024): fit a greedy kernel surrogate to whatever `(X, Y)` data
@@ -12,15 +12,16 @@ is cheap.
 
 It returns five indices per parameter, of which two do most of the work:
 
-- **`S_TC`** (total correlated) — what an input explains through itself *and*
-  through its correlation with the others. The **input prioritisation** measure:
-  "which parameter should I measure more accurately?"
+- **`S_TC`** (total correlated) — what an input explains through itself, plus
+  what it explains through its correlation with the others. This is the input
+  prioritisation measure: "which parameter should I measure more accurately?"
 - **`S_TU`** (total uncorrelated) — what only that input can explain, correlated
-  pathways removed. The **input fixing** measure: "which parameter can I freeze?"
+  pathways removed. This is the input fixing measure: "which parameter can I
+  freeze?"
 
 When to use VKOGA:
 
-- Your inputs are genuinely correlated and you still want **variance fractions**,
+- Your inputs are genuinely correlated and you still want variance fractions,
   not a distributional distance.
 - You need to tell "worth measuring" apart from "safe to fix" — under dependence
   these are different questions with different answers.
@@ -32,7 +33,7 @@ When to use VKOGA:
 
 The coefficient solve forms `A.T @ A`, squaring the condition number of the cross
 kernel; float32 cannot carry that for small `gamma`. Turn on double precision
-**before** creating any arrays:
+before you create any arrays:
 
 ```python
 import jax
@@ -60,8 +61,8 @@ A model with a known answer: `Y = 2 x1 + x2 + 0.5 x3` with standard-normal
 marginals, analysed under a copula that correlates `x1` and `x2` at `rho = 0.6`
 and leaves `x3` independent.
 
-Note that the **training design is independent** even though the analysis is
-correlated — see [Practical caveats](#practical-caveats) for why this matters.
+The training design is independent even though the analysis is correlated. See
+[Practical caveats](#practical-caveats) for why this matters.
 
 ```python
 import jax
@@ -113,18 +114,17 @@ pin.
 
 ## Reading the five indices
 
-- **`x1` and `x2` both look important (`S_TC` 0.88 and 0.63) but neither is
-  individually necessary (`S_TU` 0.34 and 0.09).** They share correlated
+- `x1` and `x2` both look important (`S_TC` 0.88 and 0.63), but neither is
+  individually necessary (`S_TU` 0.34 and 0.09). They share correlated
   variance: each explains a large slice of the output, but most of that slice is
   also reachable through the other. Measuring either one more accurately pays
   off; fixing either one while leaving the other free does not.
-- **`S_C` is 0.545 for `x1` and 0.544 for `x2`, and effectively zero
-  (-0.008) for `x3`.** That is the correlation-borne part, and it is symmetric
-  here precisely because the correlation is what carries it. `x3` is
-  uncorrelated, so it has none. `S_C` **can be negative** — that is not a bug,
-  it is a correlation working against a direct effect (here it is just estimator
-  noise around zero).
-- **`S_IU` is ~0 for every parameter**, as it must be: the model is additive, so
+- `S_C` is 0.545 for `x1` and 0.544 for `x2`, and effectively zero (-0.008) for
+  `x3`. That is the correlation-borne part. It is symmetric here because the
+  correlation is what carries it. `x3` is uncorrelated, so it has none. A
+  negative `S_C` is a valid reading, not a bug: it is a correlation working
+  against a direct effect (here it is only estimator noise around zero).
+- `S_IU` is ~0 for every parameter, as it must be: the model is additive, so
   there are no independent interactions to find. `S_IU` is never negative: it is
   `S_TU - S_U`, and `S_U` is clipped to `S_TU` (see below).
 
@@ -139,8 +139,8 @@ surrogate misses the response, the indices describe the surrogate alone.
 
 A greedy Gaussian kernel cannot resolve a high-frequency or oscillatory
 response. On `sin(2*pi*12*u1) + 0.5*u2` with 2048 training points the reported
-`S_TC` is `[0.18, 0.75, 0.00]` against a true `[0.96, 0.04, 0.00]` — **the
-ranking is inverted**. A step function at the same size is fine.
+`S_TC` is `[0.18, 0.75, 0.00]` against a true `[0.96, 0.04, 0.00]`. The ranking
+is inverted. A step function at the same size is fine.
 
 `analyze` warns when the cross-validated error passes half the output standard
 deviation, and it reports the score as `result.cv_rmse`. Check it:
@@ -149,7 +149,7 @@ deviation, and it reports the score as `result.cv_rmse`. Check it:
 print(result.cv_rmse, np.std(Y))   # honest out-of-sample error vs output scale
 ```
 
-`result.rmse` is the *training* error, so it is optimistic. Use `cv_rmse` to
+`result.rmse` is the training error, so it is optimistic. Use `cv_rmse` to
 judge the fit. `cv_rmse` is `None` when you pass both `gamma` and `ridge`,
 because no cross-validation ran — pass at least one as `None` if you want the
 diagnostic. When the surrogate cannot be improved by more training points, use
@@ -172,7 +172,7 @@ a negative `S_C` is a real reading, not an artefact.
 
 The surrogate works in CDF space, where the tails of a Gaussian marginal are
 compressed into a small part of the unit cube. The kernel under-resolves them,
-so `result.variance` is biased **low**. On a four-parameter Gaussian case it
+so `result.variance` is biased low. On a four-parameter Gaussian case it
 reported 15.64 against a true 16.20, about -3.5%. The bias grows with heavier
 tails. It affects the variance figure, not the index ratios, because every
 index is divided by the same number.
@@ -205,8 +205,8 @@ sample size to shrink it.
 If your data is observational and already correlated, fit the copula from the
 data with `jaxgsa.sampling.fit_correlation` and attach it to the problem. The
 fit uses Spearman rank correlation, so it is invariant to the declared
-marginals — a skewed parameter cannot distort the dependency structure. One
-workflow, one explicit choice of *which* sample the copula comes from.
+marginals — a skewed parameter cannot distort the dependency structure. The
+workflow keeps one explicit choice: which sample the copula comes from.
 
 ```python
 rng = np.random.default_rng(0)
@@ -264,7 +264,7 @@ print("Var(Y) under the copula:", float(result.variance))  # 7.4615
 `n_centers` is the greedy's stopping point, capped by `max_centers` (default
 300). `rmse` is the fit on its own training rows — a diagnostic, not a
 generalisation estimate; check held-out points yourself if it matters. `variance`
-is the output variance under the **correlated** input measure, which is the
+is the output variance under the correlated input measure, which is the
 denominator of every index, and differs from `Y.var()` on an independent training
 design.
 
@@ -323,9 +323,9 @@ except NotImplementedError as exc:
 # undefined for it; use jaxgsa.hdmr or jaxgsa.pce instead
 ```
 
-Shapley effects allocate variance across *parameter subsets*. A kernel expansion
-is a sum over **centres**, and every centre involves every parameter, so there is
-no membership matrix to allocate from. Use
+Shapley effects allocate variance across parameter subsets. A kernel expansion
+is a sum over centres instead, and every centre involves every parameter, so
+there is no membership matrix to allocate from. Use
 [`jaxgsa.hdmr`](/examples/hdmr) — whose ANCOVA terms are labelled, and which
 supports `shapley(include_correlative=True)` for dependent inputs — or
 [`jaxgsa.pce`](/examples/pce).
@@ -343,24 +343,24 @@ input model, not of any output slice, so it stays `(D, D)` throughout.
 
 ## Practical caveats
 
-- **Train on an independent, space-filling design, even when the analysis is
-  correlated.** This is the easiest way to get wrong answers. A correlated
+- Train on an independent, space-filling design, even when the analysis is
+  correlated. This is the easiest way to get wrong answers. A correlated
   sample concentrates on a ridge, but `S_TU` conditions on the other parameters
   and then resamples `X_i` across its whole marginal — exactly the off-ridge
   region a correlated training set never visited, so the surrogate extrapolates
   where the estimator queries it hardest.
-- **float64 is strongly recommended.** The normal equations square the condition
-  number of the cross kernel, which float32 cannot carry for small `gamma`.
-  Cross validation partly self-corrects, since the scores are computed in the
-  same arithmetic and penalise the blown-up corner of the grid, but the ceiling
-  is real.
-- **Cost is the hyperparameter search.** A 10x10 `gamma`/`ridge` grid, each point
-  refitted `n_folds` times, is the bulk of the runtime. Pass `gamma=` and
-  `ridge=` explicitly once you know good values; raising `n_outer`, `n_inner`, or
-  `n_variance` is comparatively cheap because those only touch the surrogate.
-- **At least two parameters.** `D = 1` raises `ValueError` — conditioning on
-  "the other parameters" has no meaning.
-- **`S_C` can be negative** when a correlation opposes a direct effect, and small
+- Use float64. The normal equations square the condition number of the cross
+  kernel, which float32 cannot carry for small `gamma`. Cross validation partly
+  self-corrects, since the scores are computed in the same arithmetic and
+  penalise the blown-up corner of the grid, but the ceiling is real.
+- The hyperparameter search dominates the cost. A 10x10 `gamma`/`ridge` grid,
+  each point refitted `n_folds` times, is the bulk of the runtime. Pass `gamma=`
+  and `ridge=` explicitly once you know good values; raising `n_outer`,
+  `n_inner`, or `n_variance` is comparatively cheap because those only touch the
+  surrogate.
+- The problem needs at least two parameters. `D = 1` raises `ValueError`, because
+  conditioning on "the other parameters" has no meaning.
+- `S_C` can be negative when a correlation opposes a direct effect. Small
   negative values around zero are ordinary estimator noise for an uncorrelated
   parameter.
 - The kernel is isotropic, so inputs are mapped to `[0, 1]` through their

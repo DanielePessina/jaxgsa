@@ -112,7 +112,7 @@ from HDMR because its ANCOVA decomposition separates structural and
 correlative contributions.
 
 `jaxgsa.vkoga` is the third surrogate-carrying namespace, and the one to reach
-for when the inputs are **dependent**. It fits a VKOGA kernel surrogate and then
+for when the inputs are dependent. It fits a VKOGA kernel surrogate and then
 estimates the correlated variance-based indices of Li et al. (2010) against it
 under a Gaussian copula:
 
@@ -164,7 +164,7 @@ result = jaxgsa.efast.analyze(samples, Y)
 
 ## Kucherenko
 
-`jaxgsa.kucherenko` estimates Sobol' indices for **dependent** inputs by
+`jaxgsa.kucherenko` estimates Sobol' indices for dependent inputs by
 evaluating the actual model on a conditional-copula design (no surrogate).
 It reads `problem.correlation` and is exempt from the correlated-design
 error; with no declared correlation it reduces to the classic Saltelli

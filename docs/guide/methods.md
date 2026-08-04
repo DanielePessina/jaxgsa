@@ -21,7 +21,7 @@ Common situations:
 - **"I can run the model freely and want the standard variance decomposition."** Use [Sobol' via Saltelli sampling](#sobol-indices-via-saltelli-sampling) — the reference method, with first-order, total-order, and second-order indices.
 - **"My model is expensive and has many parameters."** Screen first with [Morris](#morris-elementary-effects-screening) ($r(D+1)$ runs), or with [DGSM](#dgsm-derivative-based-global-sensitivity-measures) if the model is JAX-differentiable. Fix the negligible parameters, then spend the remaining budget on Sobol' for the survivors.
 - **"I only have existing simulation data."** Any given-data method works. [HDMR](#rs-hdmr-random-sampling-high-dimensional-model-representation) or [PCE](#pce-polynomial-chaos-expansion) for variance-based indices via a surrogate; [HSIC](#hsic-hilbert–schmidt-independence-criterion), [PAWN](#pawn-cdf-based-sensitivity), [Borgonovo delta](#borgonovo-delta-density-based-sensitivity), or [optimal transport](#optimal-transport-wasserstein-based-sensitivity) for distribution-based indices.
-- **"My inputs are correlated."** Sobol', PCE, eFAST, DGSM, Morris, and PCE-backed Shapley all assume independent inputs — and refuse to run when `problem.correlation` is declared. The full menu: to **generate** correlated samples, declare a Gaussian-copula matrix on the `Problem` (`correlation=`, or `problem.with_correlation(R)`) and draw with `jaxgsa.sampling.monte_carlo`. To **analyze data you already have**, use [VKOGA](#vkoga-correlated-input-variance-indices) (variance fractions split into correlated and uncorrelated parts, via a kernel surrogate), HDMR (ANCOVA separation of structural and correlative variance; `shapley.analyze(backend="hdmr", include_correlative=True)` allocates that decomposition), or [optimal transport](#optimal-transport-wasserstein-based-sensitivity) / [Borgonovo delta](#borgonovo-delta-density-based-sensitivity) / HSIC / PAWN (no independence assumption). To **run your model on a dedicated design**, use [Kucherenko](#kucherenko-dependent-input-sobol-indices) — conditional-copula sampling that evaluates the actual model and returns $S_1$/$S_T$ under the declared dependence. See [Correlated Inputs](/examples/correlated-inputs).
+- **"My inputs are correlated."** Sobol', PCE, eFAST, DGSM, Morris, and PCE-backed Shapley all assume independent inputs — and refuse to run when `problem.correlation` is declared. The full menu: to generate correlated samples, declare a Gaussian-copula matrix on the `Problem` (`correlation=`, or `problem.with_correlation(R)`) and draw with `jaxgsa.sampling.monte_carlo`. To analyze data you already have, use [VKOGA](#vkoga-correlated-input-variance-indices) (variance fractions split into correlated and uncorrelated parts, via a kernel surrogate), HDMR (ANCOVA separation of structural and correlative variance; `shapley.analyze(backend="hdmr", include_correlative=True)` allocates that decomposition), or [optimal transport](#optimal-transport-wasserstein-based-sensitivity) / [Borgonovo delta](#borgonovo-delta-density-based-sensitivity) / HSIC / PAWN (no independence assumption). To run your model on a dedicated design, use [Kucherenko](#kucherenko-dependent-input-sobol-indices) — conditional-copula sampling that evaluates the actual model and returns $S_1$/$S_T$ under the declared dependence. See [Correlated Inputs](/examples/correlated-inputs).
 - **"Some of my inputs are categorical."** Declare them with `{"dist": "categorical", "probs": [...]}` — samples then carry integer level codes. Four methods handle unordered levels correctly: [Sobol'](#sobol-indices-via-saltelli-sampling) (the Saltelli column-swap scheme is distribution-agnostic), plus [Borgonovo delta](#borgonovo-delta-density-based-sensitivity), [optimal transport](#optimal-transport-wasserstein-based-sensitivity), and [PAWN](#pawn-cdf-based-sensitivity), which all condition on one class per level. Every other method refuses with a `ValueError`, because its indices would depend on the arbitrary code order. See [Categorical Inputs](/examples/categorical-inputs).
 - **"I need to decide what to measure more accurately, or what to hold fixed."** Use [VKOGA](#vkoga-correlated-input-variance-indices): $S_{TC}$ is the prioritisation measure and $S_{TU}$ the fixing measure, and under dependence they can rank parameters very differently.
 - **"My output distribution is skewed or heavy-tailed."** Use [PAWN](#pawn-cdf-based-sensitivity), [Borgonovo delta](#borgonovo-delta-density-based-sensitivity), or [optimal transport](#optimal-transport-wasserstein-based-sensitivity) — all compare whole output distributions rather than variances.
@@ -45,7 +45,7 @@ Common situations:
 | Reusable surrogate | No | Yes (`result.predict`) | Yes (`result.predict`) | Derived from either fitted result | No | No | No | No | No | No | No | Yes (`result.predict`) | No |
 
 HSIC, PAWN, the Borgonovo delta, and optimal transport share one caveat.
-Each measures **total, correlation-inclusive** influence. An input that
+Each measures total, correlation-inclusive influence. An input that
 the model ignores still scores above zero when it correlates with an
 influential input. That reading is correct, not an estimation error. Use
 HDMR (`Sa` and `Sb`), VKOGA, or Kucherenko when you must separate the
@@ -780,7 +780,7 @@ Pick the mode by the question: `"univariate"` for per-column indices across `(N,
 
 ### Valid under correlated inputs
 
-The OT index is **valid under correlated inputs**, and jaxgsa certifies it: `optimal_transport.analyze` accepts a problem with a declared `problem.correlation` (it is exempt from the correlated-input error). The definition $\mathbb{E}_{X_i}[W_2^2(P_{Y|X_i}, P_Y)]$ conditions on one input at a time and never requires an independence decomposition. The estimator conditions on rank classes of the observed sample and **never reads the declared matrix** — the test suite asserts bit-equality between a correlated problem and the same $(X, Y)$ with the correlation stripped. Read the index as **total, correlation-inclusive influence**: an input the model never uses still gets a clearly non-zero index when it is correlated with one the model does use (tested at $\rho = 0.8$). To separate direct from correlation-borne influence, use [VKOGA](#vkoga-correlated-input-variance-indices) or [Kucherenko](#kucherenko-dependent-input-sobol-indices).
+The OT index is valid under correlated inputs, and jaxgsa certifies it: `optimal_transport.analyze` accepts a problem with a declared `problem.correlation` (it is exempt from the correlated-input error). The definition $\mathbb{E}_{X_i}[W_2^2(P_{Y|X_i}, P_Y)]$ conditions on one input at a time and never requires an independence decomposition. The estimator conditions on rank classes of the observed sample and never reads the declared matrix — the test suite asserts bit-equality between a correlated problem and the same $(X, Y)$ with the correlation stripped. Read the index as total, correlation-inclusive influence: an input the model never uses still gets a clearly non-zero index when it is correlated with one the model does use (tested at $\rho = 0.8$). To separate direct from correlation-borne influence, use [VKOGA](#vkoga-correlated-input-variance-indices) or [Kucherenko](#kucherenko-dependent-input-sobol-indices).
 
 ### Reference
 
@@ -788,12 +788,12 @@ The OT index is **valid under correlated inputs**, and jaxgsa certifies it: `opt
 
 ## VKOGA (Correlated-Input Variance Indices)
 
-Apart from VKOGA and [Kucherenko](#kucherenko-dependent-input-sobol-indices), every variance-based method on this page assumes independent inputs, or sidesteps the question by measuring something other than variance. VKOGA is the given-data route of the pair: it is the surrogate-based sensitivity analysis (SSA) of Hilhorst, Quicken, van de Vosse & Huberts (2024), which computes the correlated variance-based indices of Li et al. (2010) — five of them, separating what an input explains *by itself* from what it explains *through its correlations*. Pick it when your inputs are genuinely dependent and you still want variance fractions, not a distributional distance.
+Apart from VKOGA and [Kucherenko](#kucherenko-dependent-input-sobol-indices), every variance-based method on this page assumes independent inputs, or sidesteps the question by measuring something other than variance. VKOGA is the given-data route of the pair: it is the surrogate-based sensitivity analysis (SSA) of Hilhorst, Quicken, van de Vosse & Huberts (2024), which computes the correlated variance-based indices of Li et al. (2010) — five of them, separating what an input explains by itself from what it explains through its correlations. Pick it when your inputs are genuinely dependent and you still want variance fractions, not a distributional distance.
 
 The method is two-stage, and the split is the whole point. The indices need nested conditional sampling, which is hopeless against an expensive model but trivial against a cheap emulator:
 
-1. **Fit a VKOGA surrogate** (Vectorial Kernel Orthogonal Greedy Algorithm; Wirtz & Haasdonk, 2013) to the given $(X, Y)$ data. Gaussian RBF kernel, centres chosen one at a time at the maximiser of the power function (P-greedy) expressed in a nested Newton basis, coefficients from an RKHS-regularised least-squares solve. Centre selection depends only on $X$, so **all output slices share one basis and one set of centres** — that is the "vectorial" part — and `gamma`/`ridge` are chosen by k-fold cross validation.
-2. **Estimate the indices against that surrogate** by quasi-Monte-Carlo, with a **Gaussian copula** supplying the dependency structure. The copula keeps each parameter's declared marginal exactly as written and adds a rank-correlation structure on top; all conditioning happens in the latent standard-normal space, where the conditionals are closed-form, so no iterative sampler is involved.
+1. **Fit a VKOGA surrogate** (Vectorial Kernel Orthogonal Greedy Algorithm; Wirtz & Haasdonk, 2013) to the given $(X, Y)$ data. Gaussian RBF kernel, centres chosen one at a time at the maximiser of the power function (P-greedy) expressed in a nested Newton basis, coefficients from an RKHS-regularised least-squares solve. Centre selection depends only on $X$, so all output slices share one basis and one set of centres — that is the "vectorial" part — and `gamma`/`ridge` are chosen by k-fold cross validation.
+2. **Estimate the indices against that surrogate** by quasi-Monte-Carlo, with a Gaussian copula supplying the dependency structure. The copula keeps each parameter's declared marginal exactly as written and adds a rank-correlation structure on top; all conditioning happens in the latent standard-normal space, where the conditionals are closed-form, so no iterative sampler is involved.
 
 ### The five indices
 
@@ -806,8 +806,8 @@ $$
 
 These are the same two formulas as $S_1$ and $S_T$. What changes is what they now mean, and the distinction is the single most important thing to get right:
 
-- **$S_{TC}$ (total correlated) answers "what should I measure more accurately?"** — the **input prioritisation** setting. It counts everything $X_i$ explains, including variance it only explains because it moves together with something else. Learning $X_i$ exactly removes that variance regardless of *why* it was there.
-- **$S_{TU}$ (total uncorrelated) answers "what can I freeze?"** — the **input fixing** setting. It counts only what nothing else can account for. A parameter whose $S_{TU}$ is near zero can be fixed at a nominal value, even if its $S_{TC}$ is large, because its apparent influence is carried by its correlates.
+- **$S_{TC}$ (total correlated)** answers "what should I measure more accurately?" — the input prioritisation setting. It counts everything $X_i$ explains, including variance it only explains because it moves together with something else. Learning $X_i$ exactly removes that variance whatever put it there.
+- **$S_{TU}$ (total uncorrelated)** answers "what can I freeze?" — the input fixing setting. It counts only what nothing else can account for. A parameter whose $S_{TU}$ is near zero can be fixed at a nominal value, even if its $S_{TC}$ is large, because its apparent influence is carried by its correlates.
 
 Two strongly correlated parameters will both show a large $S_{TC}$ and a small $S_{TU}$: either one is worth measuring, but you cannot fix one and keep the other free without changing the answer.
 
@@ -815,31 +815,31 @@ The remaining three split $S_{TC}$ and $S_{TU}$ into their independent and corre
 
 | Index | Definition | Meaning |
 |-------|------------|---------|
-| $S_{TC}(i)$ | $\mathrm{Var}[\mathbb{E}(Y \mid X_i)] / \mathrm{Var}(Y)$ | Total correlated: what $X_i$ explains through itself **and** its correlation with the rest. Use for input prioritisation. |
+| $S_{TC}(i)$ | $\mathrm{Var}[\mathbb{E}(Y \mid X_i)] / \mathrm{Var}(Y)$ | Total correlated: what $X_i$ explains through itself, plus what it explains through its correlation with the rest. Use for input prioritisation. |
 | $S_{TU}(i)$ | $\mathbb{E}[\mathrm{Var}(Y \mid \mathbf{X}_{\sim i})] / \mathrm{Var}(Y)$ | Total uncorrelated: what only $X_i$ can explain. Use for input fixing. |
 | $S_U(i)$ | $\mathbb{E}[\mathrm{Var}(f_i \mid \mathbf{X}_{\sim i})] / \mathrm{Var}(Y)$ | The contribution of $X_i$ alone, with the part of it that $\mathbf{X}_{\sim i}$ already determines removed. $f_i$ is the fitted additive component of the output. |
-| $S_C(i)$ | $S_{TC} - S_U$ | The correlation-borne contribution. **Can be negative**, when a correlation works against a direct effect. |
+| $S_C(i)$ | $S_{TC} - S_U$ | The correlation-borne contribution. It can be negative, when a correlation works against a direct effect. |
 | $S_{IU}(i)$ | $S_{TU} - S_U$ | Independent interactions — zero for an additive model, non-negative always. |
 
 The name $S_{TC}$ says "total", but the formula is a first-order conditional variance. "Total" names the pathways it counts — direct and correlated — not the interaction order. It is not a total-order Sobol' index.
 
 $S_U$ uses an additive projection $f_i$, and no additive function of $X_i$ can represent an interaction. On a model with interactions under a correlated measure, the raw $S_U$ can therefore come out above $S_{TU}$. jaxgsa clips $S_U$ to $S_{TU}$, which keeps $S_{IU}$ non-negative, and warns when the clip is wider than 1% of the output variance. Read that warning as a statement about the model: the additive component functions are not enough for it, so trust $S_{TC}$ and $S_{TU}$ and treat $S_U$, $S_C$ and $S_{IU}$ as indicative. $S_C$ is never clipped, because a negative $S_C$ is a real reading.
 
-Under **independent** inputs the whole structure collapses back to the familiar one: $S_{TC}$ becomes the first-order Sobol' index $S_1$, $S_{TU}$ becomes the total index $S_T$, $S_U$ equals $S_{TC}$, and $S_C$ goes to zero. Running it on an uncorrelated problem is therefore a legitimate, if roundabout, way to get $S_1$ and $S_T$ from a kernel surrogate.
+Under independent inputs the whole structure collapses back to the familiar one: $S_{TC}$ becomes the first-order Sobol' index $S_1$, $S_{TU}$ becomes the total index $S_T$, $S_U$ equals $S_{TC}$, and $S_C$ goes to zero. Running it on an uncorrelated problem is therefore a legitimate, if roundabout, way to get $S_1$ and $S_T$ from a kernel surrogate.
 
 ### VKOGA or HDMR's ANCOVA split?
 
 Both handle correlated given data, and both report a decomposition — but they decompose different things, so they answer different questions.
 
-[HDMR](#rs-hdmr-random-sampling-high-dimensional-model-representation) fits an explicit additive expansion $f_0 + \sum_i f_i(X_i) + \sum_{i<j} f_{ij}(X_i, X_j) + \cdots$ and splits each **term's** variance into a structural part $S_a$ and a correlative part $S_b$, where $S_b$ collects the covariance that term shares with the others. The decomposition is *term-wise*: you get per-interaction attribution, dense $S_2$/$S_3$ arrays, and — because it knows which parameters each term involves — correlation-aware Shapley effects via `shapley(include_correlative=True)`.
+[HDMR](#rs-hdmr-random-sampling-high-dimensional-model-representation) fits an explicit additive expansion $f_0 + \sum_i f_i(X_i) + \sum_{i<j} f_{ij}(X_i, X_j) + \cdots$ and splits each term's variance into a structural part $S_a$ and a correlative part $S_b$, where $S_b$ collects the covariance that term shares with the others. The decomposition is term-wise: you get per-interaction attribution, dense $S_2$/$S_3$ arrays, and — because it knows which parameters each term involves — correlation-aware Shapley effects via `shapley(include_correlative=True)`.
 
-VKOGA fits a kernel expansion, which is a sum over centres rather than over parameter subsets, and so has no term-wise structure at all. What it has instead is direct access to the **conditional-variance definitions**: the surrogate is cheap enough to sample $\mathbb{E}(Y \mid X_i)$ and $\mathrm{Var}(Y \mid \mathbf{X}_{\sim i})$ by brute force under an explicit copula. The decomposition is *per parameter*, and it is the one that maps onto the prioritisation-versus-fixing decision.
+VKOGA fits a kernel expansion, which is a sum over centres rather than over parameter subsets, and so has no term-wise structure at all. What it has instead is direct access to the conditional-variance definitions: the surrogate is cheap enough to sample $\mathbb{E}(Y \mid X_i)$ and $\mathrm{Var}(Y \mid \mathbf{X}_{\sim i})$ by brute force under an explicit copula. The decomposition is per parameter, and it is the one that maps onto the prioritisation-versus-fixing decision.
 
 Practical guidance:
 
-- Want the **prioritise / fix** distinction under dependence, with an explicit and auditable dependency structure? Use VKOGA.
-- Want **which interaction** carries the variance, or a fair per-parameter allocation summing to 1? Use HDMR — its terms are labelled, and only it can produce Shapley effects. `VKOGAResult.shapley()` deliberately raises `NotImplementedError`.
-- Want to **declare** a dependency structure rather than infer one from the data (a copula from expert knowledge, a sensitivity sweep over $\rho$, or the same data analysed under several correlation assumptions)? Only VKOGA takes a correlation matrix as an argument; HDMR reads correlation implicitly out of whatever $X$ you hand it.
+- Want the prioritise / fix distinction under dependence, with an explicit and auditable dependency structure? Use VKOGA.
+- Want to know which interaction carries the variance, or a fair per-parameter allocation summing to 1? Use HDMR — its terms are labelled, and only it can produce Shapley effects. `VKOGAResult.shapley()` deliberately raises `NotImplementedError`.
+- Want to declare a dependency structure rather than infer one from the data (a copula from expert knowledge, a sensitivity sweep over $\rho$, or the same data analysed under several correlation assumptions)? Only VKOGA takes a correlation matrix as an argument; HDMR reads correlation implicitly out of whatever $X$ you hand it.
 - The two are complementary, not redundant: HDMR's $S_b$ tells you that correlation matters, VKOGA's $S_{TC} - S_{TU}$ gap tells you what to do about it.
 
 ### How to use it
@@ -855,7 +855,7 @@ Cost is dominated by the hyperparameter search — a 10×10 grid of k-fold refit
 
 ### Two caveats
 
-**1. Train on an independent, space-filling design, even when the analysis is correlated.** This is the easy way to get wrong answers. A correlated sample concentrates on a ridge through the input space, but $S_{TU}$ conditions on $\mathbf{X}_{\sim i}$ and then resamples $X_i$ across its *whole* marginal — precisely the off-ridge region a correlated training set never visited. A surrogate fitted there is extrapolating exactly where the estimator queries it hardest. If your data is observational and correlated, you can still fit the copula from it (`problem.with_correlation(jaxgsa.sampling.fit_correlation(problem, X))`), but read $S_{TU}$ (and hence $S_U$, $S_C$, $S_{IU}$) as carrying the surrogate's extrapolation error.
+**1. Train on an independent, space-filling design, even when the analysis is correlated.** This is the easy way to get wrong answers. A correlated sample concentrates on a ridge through the input space, but $S_{TU}$ conditions on $\mathbf{X}_{\sim i}$ and then resamples $X_i$ across its whole marginal — precisely the off-ridge region a correlated training set never visited. A surrogate fitted there is extrapolating exactly where the estimator queries it hardest. If your data is observational and correlated, you can still fit the copula from it (`problem.with_correlation(jaxgsa.sampling.fit_correlation(problem, X))`), but read $S_{TU}$ (and hence $S_U$, $S_C$, $S_{IU}$) as carrying the surrogate's extrapolation error.
 
 **2. Use float64.** The coefficient step forms the normal matrix $A^\top A$, which squares the condition number of the cross kernel — for small `gamma` that exceeds what single precision can carry, and the surrogate can come out an order of magnitude worse than the same equations solved in double.
 
@@ -867,7 +867,7 @@ jax.config.update("jax_enable_x64", True)  # before fitting
 `jaxgsa.vkoga.analyze()` emits a `UserWarning` when x64 is off. Cross validation partly self-corrects (the scores are computed in the same arithmetic, so they penalise the blown-up corner of the grid), but the ceiling is real.
 
 **When to use VKOGA:**
-- Your inputs are correlated and you want **variance fractions**, not a distributional distance
+- Your inputs are correlated and you want variance fractions, not a distributional distance
 - You need to separate "worth measuring" ($S_{TC}$) from "safe to fix" ($S_{TU}$)
 - You want to state the dependency structure explicitly, or sweep over several
 - You have existing $(X, Y)$ pairs and also want a fast surrogate (`result.predict`)
@@ -888,17 +888,17 @@ S_i = \frac{V\!\left(\mathbb{E}(Y \mid X_i)\right)}{V(Y)}, \qquad
 S_{T_i} = \frac{\mathbb{E}\!\left(V(Y \mid \mathbf{X}_{\sim i})\right)}{V(Y)}
 $$
 
-Under independent inputs these are the classic first-order and total-order Sobol' indices. Under a declared `problem.correlation` they keep their exact conditional-variance meaning: $S_i$ becomes **correlation-inclusive** (what $X_i$ explains through itself *and* through its coupling — VKOGA's $S_{TC}$) and $S_{T_i}$ becomes **correlation-exclusive** (what only $X_i$ can explain — VKOGA's $S_{TU}$). $S_{T_i} \ge S_i$ no longer holds in general; for strongly coupled inputs the total index drops *below* the first-order one, and the gap is the correlation-borne share.
+Under independent inputs these are the classic first-order and total-order Sobol' indices. Under a declared `problem.correlation` they keep their exact conditional-variance meaning: $S_i$ becomes correlation-inclusive (what $X_i$ explains through itself, plus what it explains through its coupling — VKOGA's $S_{TC}$) and $S_{T_i}$ becomes correlation-exclusive (what only $X_i$ can explain — VKOGA's $S_{TU}$). $S_{T_i} \ge S_i$ no longer holds in general; for strongly coupled inputs the total index drops below the first-order one, and the gap is the correlation-borne share.
 
-This is the **design-based counterpart to [VKOGA](#vkoga-correlated-input-variance-indices)**: the same two quantities, but estimated on your *actual model* instead of a fitted surrogate. Choose Kucherenko when you can still run the model and want estimates free of surrogate error; choose VKOGA when all you have is existing $(X, Y)$ data. The test suite pins both routes to the same closed-form linear-Gaussian reference — and to each other.
+This is the design-based counterpart to [VKOGA](#vkoga-correlated-input-variance-indices): the same two quantities, but estimated on your actual model instead of a fitted surrogate. Choose Kucherenko when you can still run the model and want estimates free of surrogate error; choose VKOGA when all you have is existing $(X, Y)$ data. The test suite pins both routes to the same closed-form linear-Gaussian reference — and to each other.
 
 ### How it works
 
-1. `jaxgsa.kucherenko.sample(problem, n)` builds a design of $N(2D+1)$ rows, where $N$ is `n` rounded up to a power of two: one **joint block** drawn from the full copula, then per parameter one block where $X_i$ is kept and the rest is redrawn from $p(\mathbf{X}_{\sim i} \mid X_i)$ (for $S_i$), and one block where the rest is kept and $X_i$ is redrawn from $p(X_i \mid \mathbf{X}_{\sim i})$ (for $S_{T_i}$). Both conditionals are closed-form Gaussians in the latent copula space; no iterative sampler is involved. Under an identity correlation the design reduces exactly to the Saltelli column-swap scheme.
+1. `jaxgsa.kucherenko.sample(problem, n)` builds a design of $N(2D+1)$ rows, where $N$ is `n` rounded up to a power of two: one joint block drawn from the full copula, then per parameter one block where $X_i$ is kept and the rest is redrawn from $p(\mathbf{X}_{\sim i} \mid X_i)$ (for $S_i$), and one block where the rest is kept and $X_i$ is redrawn from $p(X_i \mid \mathbf{X}_{\sim i})$ (for $S_{T_i}$). Both conditionals are closed-form Gaussians in the latent copula space; no iterative sampler is involved. Under an identity correlation the design reduces exactly to the Saltelli column-swap scheme.
 2. You evaluate your model on `samples.samples` — this is the whole model cost.
 3. `jaxgsa.kucherenko.analyze(samples, Y)` applies the single-loop estimators: the paired product over the shared-$X_i$ rows for $S_i$, and the Jansen squared difference over the shared-$\mathbf{X}_{\sim i}$ rows for $S_{T_i}$. The exact formulas are stated in the `jaxgsa.kucherenko._analyze` module docstring.
 
-`kucherenko.sample` reads `problem.correlation` and is deliberately **exempt** from the correlated-design error on `sobol` / `morris` / `efast` — conditioning on the declared copula is the method's purpose. Categorical problems raise (the conditional copula needs continuous marginals), as do problems with fewer than two parameters.
+`kucherenko.sample` reads `problem.correlation` and is deliberately exempt from the correlated-design error on `sobol` / `morris` / `efast` — conditioning on the declared copula is the method's purpose. Categorical problems raise (the conditional copula needs continuous marginals), as do problems with fewer than two parameters.
 
 **When to use Kucherenko:**
 - Your inputs are correlated, you want $S_1$/$S_T$ with their exact conditional-variance meaning, and you can still run the model

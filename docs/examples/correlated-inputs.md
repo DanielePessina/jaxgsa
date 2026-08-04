@@ -173,7 +173,7 @@ print(hdmr.Sb)  # correlative variance fraction — the correlation diagnostic
 allocates the full ANCOVA decomposition (an ANCOVA-based attribution, not
 conditional-variance Shapley effects).
 
-For **variance fractions** under dependence, two dedicated methods read the
+For variance fractions under dependence, two dedicated methods read the
 declared correlation directly. [VKOGA](/examples/vkoga) fits a kernel
 surrogate to given `(X, Y)` data and splits each input's effect into
 correlated and uncorrelated parts. [Kucherenko](/examples/kucherenko)

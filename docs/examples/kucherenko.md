@@ -1,6 +1,6 @@
 # Kucherenko (Dependent-Input Sobol' Indices)
 
-Kucherenko indices are Sobol' indices for **dependent inputs**, estimated by
+Kucherenko indices are Sobol' indices for dependent inputs, estimated by
 running your actual model on a conditional-copula design (Kucherenko,
 Tarantola & Annoni, 2012). No surrogate is fitted. This makes the method the
 design-based counterpart to [VKOGA](/examples/vkoga): the same two
@@ -9,10 +9,10 @@ of a dedicated sampling design.
 
 The two indices keep their defining formulas under dependence:
 
-- **`S1`** = $V(E(Y|X_i))/V(Y)$ — **correlation-inclusive**: what $X_i$
+- **`S1`** = $V(E(Y|X_i))/V(Y)$ — correlation-inclusive: what $X_i$
   explains through itself and through its coupling with the others. Equals
   VKOGA's `S_TC`.
-- **`ST`** = $E(V(Y|X_{\sim i}))/V(Y)$ — **correlation-exclusive**: what only
+- **`ST`** = $E(V(Y|X_{\sim i}))/V(Y)$ — correlation-exclusive: what only
   $X_i$ can explain. Equals VKOGA's `S_TU`.
 
 Under independent inputs both reduce exactly to the classic Sobol' `S1` and
@@ -64,11 +64,11 @@ This linear model has a closed form: `S1 = (R a)_i^2 / (a' R a)`, which gives
 
 ## Reading the numbers
 
-- **`x1` and `x2` have large `S1` (0.88, 0.63) but small `ST` (0.33, 0.08).**
+- `x1` and `x2` have large `S1` (0.88, 0.63) but small `ST` (0.33, 0.08).
   They share correlated variance: each explains a large slice of the output,
   but most of that slice is also reachable through the other. `S1` ranks them
-  for **measurement**, `ST` for **fixing**.
-- **`x3` has `S1 = ST`** — it is uncorrelated with the rest, so the two
+  for measurement, `ST` ranks them for fixing.
+- `x3` has `S1 = ST`. It is uncorrelated with the rest, so the two
   readings coincide, as they do for every input of an independent problem.
 
 ## Independent inputs collapse to classic Sobol'

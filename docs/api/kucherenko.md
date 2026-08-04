@@ -25,8 +25,8 @@ for `(N,)` outputs, `(K, D)` for `(N, K)`, `(T, K, D)` for `(N, T, K)`.
 
 | Index | Definition | Reading |
 | --- | --- | --- |
-| `S1` | $V(E(Y \mid X_i)) / V(Y)$ | **Correlation-inclusive** first-order index: what $X_i$ explains through itself *and* through its coupling. Equals VKOGA's `S_TC`. |
-| `ST` | $E(V(Y \mid X_{\sim i})) / V(Y)$ | **Correlation-exclusive** total index: what only $X_i$ can explain. Equals VKOGA's `S_TU`. |
+| `S1` | $V(E(Y \mid X_i)) / V(Y)$ | Correlation-inclusive first-order index: what $X_i$ explains through itself, plus what it explains through its coupling. Equals VKOGA's `S_TC`. |
+| `ST` | $E(V(Y \mid X_{\sim i})) / V(Y)$ | Correlation-exclusive total index: what only $X_i$ can explain. Equals VKOGA's `S_TU`. |
 
 Under independent inputs both reduce exactly to the classic Sobol' `S1` and
 `ST`. Under correlation `ST >= S1` no longer holds in general.
