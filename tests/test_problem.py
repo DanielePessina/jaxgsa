@@ -139,6 +139,8 @@ class TestTruncateGaussians:
         sr = morris.sample(p, n_trajectories=25, seed=1, verbose=False)
         assert float(np.min(sr.samples[:, 0])) == pytest.approx(p.input_specs[0][3])
         assert float(np.max(sr.samples[:, 0])) == pytest.approx(p.input_specs[0][4])
+
+
 # ---------------------------------------------------------------------------
 # Problem.correlation
 # ---------------------------------------------------------------------------
