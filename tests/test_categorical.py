@@ -1074,9 +1074,10 @@ def test_combined_categorical_and_correlated_message(name, call):
     assert "sobol.sample" not in advice
     assert "jaxgsa.vkoga" not in advice
     assert "jaxgsa.kucherenko" not in advice
-    # Names the two methods that do handle both.
+    # Names the three methods that do handle both.
     assert "jaxgsa.optimal_transport" in advice
     assert "jaxgsa.borgonovo" in advice
+    assert "jaxgsa.pawn" in advice
 
 
 @pytest.mark.parametrize(
@@ -1086,7 +1087,9 @@ def test_combined_categorical_and_correlated_message(name, call):
         ("pce", lambda p, X, Y: pce_mod.analyze(p, X, Y)),
         ("hdmr", lambda p, X, Y: hdmr.analyze(p, X, Y)),
         ("hsic", lambda p, X, Y: hsic.analyze(p, X, Y)),
-        ("pawn", lambda p, X, Y: pawn.analyze(p, X, Y)),
+        # pawn is absent on purpose: it takes categorical inputs (one bin per
+        # level) and is correlation-tolerant, so it accepts the combined
+        # problem instead of refusing it. See the companion accept test.
         ("shapley", lambda p, X, Y: shapley.analyze(p, X, Y)),
         ("vkoga", lambda p, X, Y: jaxgsa.vkoga.analyze(p, X, Y)),
     ],
@@ -1100,7 +1103,7 @@ def test_combined_message_on_the_analysis_side(name, call):
     recommends the design-based jaxgsa.sobol pipeline, which refuses a
     declared correlation. Both analysis gates route the combination to the
     shared message, so the order they run in does not matter. Note that the
-    correlation-tolerant analyzers (hdmr, hsic, pawn, vkoga) reach it through
+    correlation-tolerant analyzers (hdmr, hsic, vkoga) reach it through
     the categorical gate, and the correlation-naive ones (dgsm, pce, shapley)
     through whichever gate their caller runs first.
     """
@@ -1117,17 +1120,19 @@ def test_combined_message_on_the_analysis_side(name, call):
     assert "jaxgsa.kucherenko" not in advice
     assert "jaxgsa.optimal_transport" in advice
     assert "jaxgsa.borgonovo" in advice
+    assert "jaxgsa.pawn" in advice
     # The analysis wording must not tell a caller who already has data to go
     # and draw samples.
     assert "jaxgsa.sampling.monte_carlo" not in advice
 
 
-@pytest.mark.parametrize("name", ["optimal_transport", "borgonovo"])
-def test_combined_case_is_accepted_by_the_two_recommended_methods(name):
-    """The advice must be true: both named methods actually run."""
+@pytest.mark.parametrize("name", ["optimal_transport", "borgonovo", "pawn"])
+def test_combined_case_is_accepted_by_the_recommended_methods(name):
+    """The advice must be true: every named method actually runs."""
     problem, X, Y = _categorical_and_correlated_data()
     result = getattr(jaxgsa, name).analyze(problem, X, Y)
-    indices = result.delta if name == "borgonovo" else result.ot
+    field = {"borgonovo": "delta", "optimal_transport": "ot", "pawn": "pawn"}[name]
+    indices = getattr(result, field)
     assert np.asarray(indices).shape == (3,)
 
 

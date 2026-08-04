@@ -192,28 +192,18 @@ scale before returning them.
 | $S_T(i)$ | SCSA total per parameter: $S_T(i) = \sum_{u \ni i} (S_a(u) + S_b(u))$, the sum of $S$ over every term that contains parameter $i$ (Li et al., 2010, Section 2.2.3). Equal to the Sobol' total-order index when the inputs are independent. Read the warning below when they are not. |
 
 ::: warning HDMR's total under correlated inputs
-With correlated inputs, HDMR's $S_T$ is not a Sobol' total-order index. It is the SCSA total that Li et al. (2010) define in Section 2.2.3, the same convention SALib uses. It can be negative, it is not bounded in $[0, 1]$, and it does not measure the expected variance reduction $\mathrm{E}[\mathrm{Var}(Y \mid X_{\sim i})] / \mathrm{Var}(Y)$ that a total-order index normally reports. So it is not a criterion for deciding that a parameter can be fixed. The bias runs toward "cannot be fixed", and a parameter the model ignores can outrank one with a negative value.
+With correlated inputs, HDMR's $S_T$ is not a Sobol' total-order index. It is the SCSA total that Li et al. (2010) define in Section 2.2.3, from the per-term indices of their Eqs. (19)-(22): the sum of $S_a + S_b$ over every term that contains the parameter. It is the same convention SALib uses. Read it as a term-membership sum and nothing more.
 
-The paper itself invites the confusion: its Eq. (4) uses the symbol $S_{Ti}$ for the classical conditional-variance total, and Section 2.2.3 reuses the same symbol for the term-membership sum. Only the second is what HDMR reports.
+It can be negative, because $S_b$ can be. It is not bounded in $[0, 1]$ — Sarazin, Viaud & Cournède (2017), who restate the total as their Eq. (8), say so explicitly. It does not measure the expected variance reduction $\mathrm{E}[\mathrm{Var}(Y \mid X_{\sim i})] / \mathrm{Var}(Y)$ that a total-order index normally reports, so it does not answer the input-fixing question. The bias runs toward "cannot be fixed", and it can be large: on a linear model at $\rho = 0.95$, HDMR reports 0.502 for a parameter whose true total effect is 0.025. A parameter the model ignores can outrank one that scored negative.
 
-Li et al. attach a precondition to the totals. They are reliable only when the per-term $S$ values sum to about 1 (Eq. 24); the shortfall is the variance the surrogate leaves unexplained. Check `result.S.sum()` before you rank parameters from a correlated fit.
+The source paper invites the confusion: its Eq. (4) uses the symbol $S_{Ti}$ for the classical conditional-variance total, and Section 2.2.3 reuses the same symbol for the term-membership sum. Only the second is what HDMR reports.
+
+Li et al. also attach a precondition to the totals. They are reliable only when the per-term $S$ values sum to about 1 (Eq. 24); the shortfall is the variance the surrogate leaves unexplained. Check `result.S.sum()` before you rank parameters from a correlated fit.
 
 $S_1$ has the matching caveat: it is the structural share $S_a$ of the first-order term, not the Sobol' first-order index.
 
-Use `jaxgsa.kucherenko` ($S_T$) or `jaxgsa.vkoga` ($S_{TU}$) when you need a conditional-variance total under dependence. The per-term $S_a$, $S_b$ and $S$ values keep their ANCOVA meaning. `jaxgsa.hdmr.analyze()` emits one `UserWarning` on a correlated problem to say this.
+When you need a conditional-variance total under dependence, use [Kucherenko](#kucherenko-dependent-input-sobol-indices) ($S_T$) or [VKOGA](#vkoga-correlated-input-variance-indices) ($S_{TU}$, the input-fixing measure). HDMR's own contribution under dependence is the per-term $S_a$ versus $S_b$ split, which neither of those provides. `jaxgsa.hdmr.analyze()` emits one `UserWarning` on a correlated problem to say all of this.
 :::
-
-Under dependence, read $S_T$ as a term-membership sum and nothing more. It is
-the SCSA convention of Sarazin et al. (2017, Eq. 8), which sums $S_a + S_b$
-over the terms a parameter appears in. It is not a total-effect index. It has
-no variance-reduction reading, it does not answer the input-fixing question,
-and because $S_b$ can be negative it can itself go negative. The gap can be
-large: on a linear model at $\rho = 0.95$, HDMR reports 0.502 for a parameter
-whose true total effect is 0.025. When you need a total index under dependence,
-use [Kucherenko](#kucherenko-dependent-input-sobol-indices) or
-[VKOGA](#vkoga-correlated-input-variance-indices), whose $S_{TU}$ is the
-input-fixing measure. HDMR's real contribution under dependence is the
-per-term $S_a$ versus $S_b$ split, which neither of those two provides.
 
 **When to use HDMR:**
 - Model evaluations are expensive and you want to reuse existing runs

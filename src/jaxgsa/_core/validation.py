@@ -129,10 +129,11 @@ def _raise_categorical_and_correlated(method: str, names: list[str], *, design: 
     route the combined case here.
 
     The two ends of the library reach the same dead end and recommend the same
-    two methods, ``jaxgsa.optimal_transport`` and ``jaxgsa.borgonovo``, which
-    are the only ones that accept both faults. Only the opening clause and the
-    call to action differ: a design caller has no samples yet and is told how
-    to draw them, while an analysis caller already holds ``(X, Y)``.
+    three methods, ``jaxgsa.optimal_transport``, ``jaxgsa.borgonovo`` and
+    ``jaxgsa.pawn``, which are the only ones that accept both faults. Only
+    the opening clause and the call to action differ: a design caller has no
+    samples yet and is told how to draw them, while an analysis caller
+    already holds ``(X, Y)``.
 
     Args:
         method: Fully qualified sampler or analyzer name for the message.
@@ -147,13 +148,13 @@ def _raise_categorical_and_correlated(method: str, names: list[str], *, design: 
     if design:
         action = (
             "Draw correlated samples with jaxgsa.sampling.monte_carlo and "
-            "analyze them with jaxgsa.optimal_transport or jaxgsa.borgonovo, "
-            "which handle both."
+            "analyze them with jaxgsa.optimal_transport, jaxgsa.borgonovo or "
+            "jaxgsa.pawn, which handle both."
         )
     else:
         action = (
-            "Analyze the same (X, Y) data with jaxgsa.optimal_transport or "
-            "jaxgsa.borgonovo, which handle both."
+            "Analyze the same (X, Y) data with jaxgsa.optimal_transport, "
+            "jaxgsa.borgonovo or jaxgsa.pawn, which handle both."
         )
     raise ValueError(
         f"{method} {lead} this problem: parameters {names} "
@@ -277,7 +278,7 @@ def _raise_categorical_design(problem: Problem, method: str) -> None:
         f"{names} are categorical. Use jaxgsa.sobol.sample (the Saltelli "
         "column-swap scheme is distribution-agnostic; it requires a problem "
         "with no declared correlation), or analyze given data with "
-        "jaxgsa.optimal_transport or jaxgsa.borgonovo."
+        "jaxgsa.optimal_transport, jaxgsa.borgonovo or jaxgsa.pawn."
     )
 
 

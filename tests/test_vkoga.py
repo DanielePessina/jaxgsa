@@ -475,9 +475,24 @@ def test_copula_fit_with_ties_matches_spearmanr():
     assert abs(R[0, 1] - expected) < 1e-8
 
 
-def test_indefinite_correlation_is_repaired():
-    """A valid-looking but indefinite matrix is projected to PD, not rejected."""
+def test_materially_indefinite_correlation_is_rejected():
+    """A per-call override is user-declared, so a large repair refuses.
+
+    The graded repair policy treats a matrix that has to move 0.05 or more as
+    structurally inconsistent rather than as something to quietly fix. This
+    one moves 0.49.
+    """
     R = np.array([[1.0, 0.99, 0.99], [0.99, 1.0, -0.99], [0.99, -0.99, 1.0]])
+    assert np.linalg.eigvalsh(R).min() < 0
+    X = jaxgsa.sampling.monte_carlo(GAUSS_PROBLEM, 256, seed=2)
+    Y = X @ A_COEF
+    with pytest.raises(ValueError, match="not positive definite"):
+        jaxgsa.vkoga.analyze(GAUSS_PROBLEM, X, Y, correlation=R, **SMALL_KWARGS)
+
+
+def test_indefinite_correlation_is_repaired():
+    """A mildly indefinite matrix is projected to PD, not rejected."""
+    R = np.array([[1.0, 0.52, 0.52], [0.52, 1.0, -0.52], [0.52, -0.52, 1.0]])
     assert np.linalg.eigvalsh(R).min() < 0  # genuinely indefinite as declared
     X = jaxgsa.sampling.monte_carlo(GAUSS_PROBLEM, 256, seed=2)
     Y = X @ A_COEF

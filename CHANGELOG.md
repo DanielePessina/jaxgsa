@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (0.8.0)
+## 0.8.0
 
 ### Added
 
@@ -229,16 +229,21 @@
   from whichever check its caller ran first. Both now route the combination to
   the shared text, with an analysis-side wording that does not tell a caller
   who already holds `(X, Y)` to go and draw samples. This covers `dgsm`,
-  `pce`, `hdmr`, `hsic`, `pawn`, `shapley` and `vkoga`, whether they gate
-  through `_validate_xy_inputs` or call the raisers directly. A parametrised
-  test covers all seven, and a companion test asserts that
-  `jaxgsa.optimal_transport` and `jaxgsa.borgonovo` — the two methods the
-  message recommends — do accept the combined problem.
+  `pce`, `hdmr`, `hsic`, `shapley` and `vkoga`, whether they gate through
+  `_validate_xy_inputs` or call the raisers directly. A parametrised test
+  covers all six, and a companion test asserts that the three methods the
+  message recommends — `jaxgsa.optimal_transport`, `jaxgsa.borgonovo` and
+  `jaxgsa.pawn` — do accept the combined problem.
+- **`jaxgsa.pawn` accepts categorical and correlated inputs together.** It
+  gained categorical support in 0.7.0 and was already correlation-tolerant,
+  so it is the third method that handles the combination. Every categorical
+  refusal message now names it alongside optimal transport and Borgonovo
+  delta.
 - The Gaussian conditional-draw algebra lives in `jaxgsa._core.copula`, next
   to the conditional plan; the VKOGA estimators and the Kucherenko design
   share it.
 
-## Unreleased (0.7.0)
+## 0.7.0
 
 ### Added
 
@@ -408,7 +413,7 @@
   over a default the user never passed; an out-of-range value that only
   the `dummy` baseline consumes names the dummy in the error.
 
-## Unreleased (0.6.0)
+## 0.6.0
 
 ### Added
 

@@ -178,13 +178,12 @@ except ValueError as e:
 # parameters ['catalyst'] are categorical. Use jaxgsa.sobol.sample
 # (the Saltelli column-swap scheme is distribution-agnostic; it requires
 # a problem with no declared correlation), or analyze given data with
-# jaxgsa.optimal_transport or jaxgsa.borgonovo.
+# jaxgsa.optimal_transport, jaxgsa.borgonovo or jaxgsa.pawn.
 ```
 
 The same applies to `efast.sample`, `dgsm.analyze`, `pce.analyze`,
-`hdmr.analyze`, `hsic.analyze`, `pawn.analyze`, `shapley.analyze`,
-`vkoga.analyze`, `kucherenko.sample`, and
-`sobol.SobolSamples.to_morris`. The last one refuses because an
+`hdmr.analyze`, `hsic.analyze`, `shapley.analyze`, `vkoga.analyze`,
+`kucherenko.sample`, and `sobol.SobolSamples.to_morris`. The last one refuses because an
 elementary effect divides by a step along one input axis, which has no
 meaning for unordered level codes. The Saltelli design itself stays
 valid, so `sobol.sample` and `sobol.analyze` still work.
