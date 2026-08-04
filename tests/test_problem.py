@@ -90,3 +90,51 @@ def test_frozen():
     p = Problem(names=("a",), bounds=((0.0, 1.0),))
     with pytest.raises(AttributeError):
         setattr(p, "names", ("b",))
+
+
+class TestTruncateGaussians:
+    """``Problem.from_dict(..., truncate_gaussians=q)`` bounds every open side."""
+
+    SPECS = {
+        "u": (0.0, 1.0),
+        "g": {"dist": "gaussian", "mean": 2.0, "variance": 9.0},
+        "half": {"dist": "gaussian", "mean": 0.0, "variance": 1.0, "low": -1.0},
+        "both": {"dist": "gaussian", "mean": 0.0, "variance": 1.0, "low": -1.0, "high": 1.0},
+    }
+
+    def test_default_leaves_gaussians_unbounded(self):
+        p = Problem.from_dict(dict(self.SPECS))
+        assert p.input_specs[1][3] is None
+        assert p.input_specs[1][4] is None
+
+    def test_fills_only_open_sides(self):
+        from scipy.stats import norm
+
+        p = Problem.from_dict(dict(self.SPECS), truncate_gaussians=1e-3)
+        assert p.input_specs[0] == ("uniform", 0.0, 1.0, None, None)  # uniform untouched
+        _, _, _, lo, hi = p.input_specs[1]
+        assert lo == pytest.approx(float(norm.ppf(1e-3, loc=2.0, scale=3.0)))
+        assert hi == pytest.approx(float(norm.ppf(1.0 - 1e-3, loc=2.0, scale=3.0)))
+        # A declared side wins; only the open side is filled.
+        _, _, _, lo, hi = p.input_specs[2]
+        assert lo == -1.0
+        assert hi == pytest.approx(float(norm.ppf(1.0 - 1e-3)))
+        assert p.input_specs[3] == ("gaussian", 0.0, 1.0, -1.0, 1.0)
+
+    @pytest.mark.parametrize("bad_q", [0.0, 0.5, -0.1, 1.0])
+    def test_invalid_q_raises(self, bad_q):
+        with pytest.raises(ValueError, match="truncate_gaussians"):
+            Problem.from_dict(dict(self.SPECS), truncate_gaussians=bad_q)
+
+    def test_morris_does_not_squash_a_problem_bounded_this_way(self):
+        """A spec bounded by ``truncate_gaussians`` is genuinely bounded (A1)."""
+        import numpy as np
+
+        from jaxgsa import morris
+
+        p = Problem.from_dict(
+            {"g": {"dist": "gaussian", "mean": 0.0, "variance": 1.0}}, truncate_gaussians=1e-3
+        )
+        sr = morris.sample(p, n_trajectories=25, seed=1, verbose=False)
+        assert float(np.min(sr.samples[:, 0])) == pytest.approx(p.input_specs[0][3])
+        assert float(np.max(sr.samples[:, 0])) == pytest.approx(p.input_specs[0][4])

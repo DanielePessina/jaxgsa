@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Literal, NotRequired, TypeAlias, TypedDict
 
@@ -97,6 +98,34 @@ def _normalize_input_spec(spec: InputSpecValue) -> _NormalizedInputSpec:
         )
 
     raise ValueError(f"Unsupported input distribution {spec['dist']!r}")
+
+
+def _truncate_gaussian_spec(spec: _NormalizedInputSpec, q: float) -> _NormalizedInputSpec:
+    """Fill the open sides of a Gaussian spec with its own ``q`` quantiles.
+
+    Uniform specs and sides the user already declared are returned unchanged,
+    so an explicit ``low`` or ``high`` always wins over the automatic bound.
+
+    Args:
+        spec: Normalized input spec.
+        q: Tail probability to cut from each open side.
+
+    Returns:
+        The spec with every open Gaussian side bounded at that marginal's own
+        ``q`` (low) and ``1 - q`` (high) quantile.
+    """
+    from scipy.stats import norm
+
+    dist, mean, variance, low, high = spec
+    if dist != "gaussian" or (low is not None and high is not None):
+        return spec
+
+    std = math.sqrt(variance)
+    if low is None:
+        low = float(norm.ppf(q, loc=mean, scale=std))
+    if high is None:
+        high = float(norm.ppf(1.0 - q, loc=mean, scale=std))
+    return ("gaussian", mean, variance, low, high)
 
 
 def _derive_bounds(
@@ -195,6 +224,8 @@ class Problem:
         cls,
         params: dict[str, InputSpecValue],
         output_names: tuple[str, ...] | None = None,
+        *,
+        truncate_gaussians: float | None = None,
     ) -> "Problem":
         """Create a ``Problem`` from per-parameter distribution specs.
 
@@ -207,12 +238,36 @@ class Problem:
                 a ``(low, high)`` tuple (shorthand for uniform),
                 a :class:`UniformInputSpec`, or a :class:`GaussianInputSpec`.
             output_names: Optional output labels used by ``to_dataset()``.
+            truncate_gaussians: Optional tail probability ``q`` in
+                ``(0, 0.5)``. ``None`` (the default) leaves every Gaussian
+                unbounded, which is the historical behaviour. Give a float and
+                each Gaussian marginal gets an explicit ``low`` and ``high``
+                at its own ``q`` and ``1 - q`` quantiles. This is the single
+                place to opt into one bounded input model that every method
+                then shares. A side the spec already declares is kept as
+                written, so only open sides are filled.
+
+                A marginal bounded this way is *genuinely* bounded, so
+                :func:`jaxgsa.morris.sample` does not squash it a second time
+                and :meth:`jaxgsa.sobol.SobolSamples.to_morris` stops warning
+                about unbounded tails.
 
         Returns:
             A normalized ``Problem`` instance.
+
+        Raises:
+            ValueError: If ``truncate_gaussians`` is not in ``(0, 0.5)``.
         """
         names = tuple(params.keys())
         input_specs = tuple(_normalize_input_spec(spec) for spec in params.values())
+        if truncate_gaussians is not None:
+            q = float(truncate_gaussians)
+            # `not <` also rejects NaN, whose comparisons are always False.
+            if not 0.0 < q < 0.5:
+                raise ValueError(
+                    f"truncate_gaussians must be in (0, 0.5), got {truncate_gaussians!r}"
+                )
+            input_specs = tuple(_truncate_gaussian_spec(spec, q) for spec in input_specs)
         return cls._from_normalized_inputs(
             names=names,
             input_specs=input_specs,
