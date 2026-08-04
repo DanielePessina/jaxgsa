@@ -35,8 +35,17 @@ from jaxgsa.problem import Problem
 # distort a matrix that was only marginally indefinite.
 _MIN_EIGENVALUE = 1e-8
 
+# Eigenvalues are lifted to this, not to the acceptance floor itself.
+# Renormalising the diagonal afterwards perturbs the spectrum, and clipping to
+# exactly _MIN_EIGENVALUE leaves the result sitting on the comparison boundary:
+# whether it then reads as >= the floor comes down to one unit in the last
+# place, which differs between LAPACK builds. Lifting to a small multiple puts
+# the converged minimum at 1.6x-4x the floor on every platform, and cuts the
+# loop from three or four passes to two.
+_EIGENVALUE_CLIP_TARGET = 4.0 * _MIN_EIGENVALUE
+
 # Clipping the eigenvalues and then renormalising the diagonal can push the
-# smallest eigenvalue back under the floor, so the repair runs again. Three
+# smallest eigenvalue back under the floor, so the repair runs again. Two
 # passes are enough in practice; the cap only bounds a pathological input.
 _MAX_REPAIR_PASSES = 16
 
@@ -48,7 +57,11 @@ _MAX_REPAIR_PASSES = 16
 # a diagnostic in the message.
 #
 # Below this the repair only removed floating-point noise, so nothing is said.
-_REPAIR_NOISE = 1e-8
+# It has to clear the largest change a pure floor-lift can make, which is a
+# little under _EIGENVALUE_CLIP_TARGET (measured 3.9e-8 for a near-singular
+# 3x3), with room to spare. A correlation entry moving by 1e-6 is negligible
+# by any reading.
+_REPAIR_NOISE = 1e-6
 # At or above this the declared matrix is structurally inconsistent, not merely
 # rounded, and the two policies below diverge.
 _REPAIR_MATERIAL = 0.05
@@ -389,7 +402,8 @@ def _project_to_correlation(
             declared_minimum = smallest
         if smallest >= _MIN_EIGENVALUE:
             break
-        clipped = (eigenvectors * np.maximum(eigenvalues, _MIN_EIGENVALUE)) @ eigenvectors.T
+        lifted = np.maximum(eigenvalues, _EIGENVALUE_CLIP_TARGET)
+        clipped = (eigenvectors * lifted) @ eigenvectors.T
         # Renormalise so the diagonal is exactly 1 again -- eigenvalue clipping
         # perturbs it, and every conditional formula below assumes R[i, i] == 1.
         scale = np.sqrt(np.diag(clipped))
@@ -401,7 +415,7 @@ def _project_to_correlation(
         # identity raises every eigenvalue and leaves the diagonal at 1, so it
         # closes the loop for certain rather than returning an unusable matrix.
         smallest = float(np.linalg.eigvalsh(current).min())
-        weight = (2.0 * _MIN_EIGENVALUE - smallest) / (1.0 - smallest)
+        weight = (2.0 * _EIGENVALUE_CLIP_TARGET - smallest) / (1.0 - smallest)
         current = (1.0 - weight) * current + weight * np.eye(current.shape[0])
         np.fill_diagonal(current, 1.0)
 

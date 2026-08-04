@@ -17,7 +17,7 @@
   non-positive-definite matrix usually signals inconsistent pairwise
   correlations. Eigenvalue clipping repairs it. The report is graded by the
   largest change to a single entry, measured on the scale you declared. Below
-  `1e-8` the repair is floating-point noise and says nothing. Between `1e-8`
+  `1e-6` the repair is floating-point noise and says nothing. Between `1e-6`
   and `0.05` a `UserWarning` reports the change and the minimum eigenvalue.
   At `0.05` or more a `ValueError` rejects the matrix. Such a matrix is
   structurally inconsistent. Correct it, or fit a valid one from data with

@@ -10,6 +10,7 @@ import scipy.stats
 import jaxgsa
 from jaxgsa._core.copula import (
     _MIN_EIGENVALUE,
+    _REPAIR_NOISE,
     _project_to_correlation,
     _spearman_to_latent,
     canonicalize_correlation,
@@ -108,7 +109,7 @@ def test_repair_of_declared_matrix_is_silent_at_noise_level():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         repaired = validate_correlation(_NOISE_R, 3, policy="declared")
-    assert 0.0 < np.abs(repaired - _NOISE_R).max() < 1e-8
+    assert 0.0 < np.abs(repaired - _NOISE_R).max() < _REPAIR_NOISE
 
 
 def test_repair_of_declared_matrix_raises_when_material():
