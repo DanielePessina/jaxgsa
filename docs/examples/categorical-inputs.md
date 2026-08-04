@@ -2,9 +2,9 @@
 
 Use this page when an input parameter is a choice, not a number. Examples:
 a material grade, a solver variant, an on/off switch with more than two
-states. jaxgsa calls these **categorical** marginals. A categorical
+states. jaxgsa calls these categorical marginals. A categorical
 parameter has `L` unordered levels with declared probabilities. Samples
-carry the **integer level codes** `0 .. L-1` (as floats) — codes, never
+carry the integer level codes `0 .. L-1` (as floats) — codes, never
 physical values. Your model maps each code to whatever the level means.
 
 ## Declare a categorical parameter
@@ -50,12 +50,13 @@ rate_constant = np.array([1.0, 1.8, 0.6])  # one entry per level
 Y = np.exp(-rate_constant[codes] * (X[:, 0] - 300.0) / 100.0)
 ```
 
-## Analyze with optimal transport and Borgonovo delta
+## Analyze with optimal transport, Borgonovo delta, and PAWN
 
-Both given-data methods condition on **one class per level** for a
-categorical column. Continuous columns keep their usual equal-frequency
-rank classes. The indices depend only on the level partition. Relabeling
-the levels does not change them.
+All three given-data methods condition on one class per level for a
+categorical column. Continuous columns keep their usual conditioning:
+equal-frequency rank classes for optimal transport and Borgonovo delta,
+equal-probability bins for PAWN. The indices depend only on the level
+partition. Relabeling the levels does not change them.
 
 ```python
 ot_result = jaxgsa.optimal_transport.analyze(problem, X, Y)
@@ -65,32 +66,65 @@ print(ot_result.advective)  # mean-shift part (= S1 / 2)
 delta_result = jaxgsa.borgonovo.analyze(problem, X, Y)
 print(delta_result.delta)   # density-based index per parameter
 print(delta_result.S1)      # given-data first-order Sobol index
+
+pawn_result = jaxgsa.pawn.analyze(problem, X, Y)
+print(pawn_result.pawn)     # KS-based index per parameter, [0, 1]
 ```
 
 A declared level with no observed samples is dropped from the class
-average, with a `UserWarning`. `n_partitions` / `n_classes` apply to the
-continuous columns only.
+average, with a `UserWarning`. `n_partitions` / `n_classes` / `n_bins`
+apply to the continuous columns only. PAWN gives a level with too few
+samples a `NaN` KS value and drops it from the median, max, or mean over
+bins, so a rare level cannot distort the index.
+
+### Delta needs a continuous output
+
+`borgonovo.analyze` supports a continuous output distribution only. A
+categorical input is fine. A categorical or otherwise discrete output is
+not. The estimator compares densities on a shared grid, and an atom is a
+spike no grid resolves. `analyze` checks the output first and raises
+`ValueError` when a column takes at most 20 distinct values and those
+values are fewer than 1% of the samples:
+
+```python
+Y_discrete = rate_constant[codes]  # 3 distinct values, no noise
+try:
+    jaxgsa.borgonovo.analyze(problem, X, Y_discrete)
+except ValueError as e:
+    print(e)
+# jaxgsa.borgonovo.analyze supports a continuous output distribution only,
+# but the output takes only 3 distinct values in 8192 samples. ... Use
+# jaxgsa.optimal_transport.analyze for a discrete output: it compares
+# empirical distributions directly and needs no density.
+```
+
+Optimal transport and PAWN both accept a discrete output. Use one of them
+instead. A continuous output rounded to a few decimals is not refused, and
+neither is a constant column, whose exact answer is `delta = S1 = 0`.
 
 ### Delta on a near-deterministic level
 
-A categorical level often maps to one output value, or to one value plus
-a small amount of noise. The conditional density is then a spike. The
-delta estimator compares densities on a shared output grid of `grid_size`
-points, and it cannot resolve a spike much narrower than one grid step.
-jaxgsa widens such a class to a bandwidth the grid can integrate and
-emits a `UserWarning`.
+A categorical level often maps to one output value plus a small amount of
+noise. The conditional density is then a spike. The delta estimator
+compares densities on a shared output grid of `grid_size` points, and it
+cannot resolve a spike much narrower than one grid step. jaxgsa widens
+such a class to a bandwidth the grid can integrate and emits a
+`UserWarning`.
 
 Two things follow from this:
 
-- The delta of such an input depends on `grid_size` and is **biased low**.
-  On a noise-free three-level model with true delta `2/3`, the estimate is
-  0.56 at `grid_size=50` and about 0.61 at `grid_size=100` and above. The
-  bias does not go away as `N` grows. Read delta on a near-deterministic
-  level as a ranking signal, not a calibrated number. `grid_size` is the
-  knob that moves it.
-- If an estimate still leaves `[0, 1]`, the estimator has failed and
-  jaxgsa warns and names the parameter. The value comes back unclipped, so
-  the failure stays visible instead of looking like a valid `1.0`.
+- The delta of such an input depends on `grid_size` and is biased low.
+  On a three-level model with true delta `2/3` and negligible noise, the
+  estimate is 0.56 at `grid_size=50` and about 0.61 at `grid_size=100` and
+  above. The bias does not go away as `N` grows. Read delta on a
+  near-deterministic level as a ranking signal, not a calibrated number.
+  `grid_size` is the knob that moves it.
+- If an estimate still leaves `[0, 1]` by more than 0.05, the computation
+  failed. `analyze` raises `ValueError` naming the parameter, the observed
+  value, and both knobs. The value is never clipped: a clipped value looks
+  plausible and is still wrong. A confidence bound outside the range only
+  warns, because the point estimate is the contract and the interval is a
+  diagnostic.
 
 `degenerate_tol` and `degenerate_bandwidth` let you override when a class
 counts as too narrow and how wide it is made. The defaults suit most work.
@@ -116,7 +150,7 @@ reached and keeps duplicate rows, with a `UserWarning`. Duplicate rows
 are valid Saltelli samples — deduplication only saves model evaluations.
 
 ::: warning `sr.samples` is an evaluation set, not a sample
-`sr.samples` holds the **unique** rows to evaluate. Deduplication removes
+`sr.samples` holds only the unique rows to evaluate. Deduplication removes
 repeated rows, so the empirical frequencies of a column in `sr.samples` do
 not match the declared marginal. With `probs = [0.9, 0.1]` the `sr.samples`
 column shows about `[0.84, 0.16]`, not `[0.9, 0.1]`. Categorical dedup
@@ -143,11 +177,12 @@ except ValueError as e:
 # jaxgsa.morris.sample requires continuous (orderable) inputs, but
 # parameters ['catalyst'] are categorical. Use jaxgsa.sobol.sample
 # (the Saltelli column-swap scheme is distribution-agnostic), or
-# analyze given data with jaxgsa.optimal_transport or jaxgsa.borgonovo.
+# analyze given data with jaxgsa.optimal_transport, jaxgsa.borgonovo, or
+# jaxgsa.pawn.
 ```
 
 The same applies to `efast.sample`, `dgsm.analyze`, `pce.analyze`,
-`hdmr.analyze`, `hsic.analyze`, `pawn.analyze`, and `shapley.analyze`.
+`hdmr.analyze`, `hsic.analyze`, and `shapley.analyze`.
 
 Correlation is also rejected for categorical parameters: a
 `problem.correlation` entry touching one raises `ValueError` (polychoric

@@ -19,8 +19,8 @@ Categorical (unordered discrete) inputs use `CategoricalInputSpec`:
 carry the integer level codes `0 .. L-1` as floats. Optional `labels` map
 codes to names for reporting (`problem.categorical_labels`);
 `problem.has_categorical_inputs` reports their presence. Optimal transport,
-Borgonovo delta, and the Saltelli-based Sobol pipeline support categorical
-inputs; the other methods refuse them with a `ValueError`. See
+Borgonovo delta, PAWN, and the Saltelli-based Sobol pipeline support
+categorical inputs; the other methods refuse them with a `ValueError`. See
 [Categorical Inputs](/examples/categorical-inputs).
 
 Dependent inputs are declared with the optional Gaussian-copula

@@ -21,9 +21,15 @@
   through a step-function inverse CDF on the unit interval
   (`searchsorted` on the cumulative probabilities). Level frequencies
   follow the declared `probs` exactly in distribution.
-- **Optimal transport and Borgonovo delta support categorical inputs.**
-  A categorical column conditions on **one class per level**. Class sizes
-  are the observed level counts. They vary per column and per bootstrap
+- **Optimal transport, Borgonovo delta, and PAWN support categorical
+  inputs.** A categorical column conditions on one class per level. For
+  PAWN the level code is already a bin index, so the KS kernel is
+  unchanged; the kernel compiles at `n_eff = max(n_bins, max_levels)` and
+  the unused bins stay empty, return `NaN`, and are dropped by the
+  nan-aware median/max/mean over bins. `n_bins` applies to continuous
+  columns only. Continuous-only PAWN results are bit-for-bit unchanged.
+  For optimal transport and Borgonovo delta, class sizes are the observed
+  level counts. They vary per column and per bootstrap
   resample; the shared partition layer builds a per-replicate padded
   layout for them. Continuous columns keep their equal-frequency rank
   classes; `n_partitions` / `n_classes` apply to continuous columns only.
@@ -44,7 +50,7 @@
   samples; deduplication only saves model evaluations.
 - **Clear errors from code-order-sensitive methods.** `morris.sample`,
   `efast.sample`, `SobolSamples.to_morris`, `dgsm.analyze`,
-  `pce.analyze`, `hdmr.analyze`, `hsic.analyze`, `pawn.analyze`, and
+  `pce.analyze`, `hdmr.analyze`, `hsic.analyze`, and
   `shapley.analyze` refuse a categorical problem with a `ValueError`
   that names the categorical parameters and the supported alternatives.
   The guard is a `categorical_ok` capability flag in the shared
@@ -73,11 +79,16 @@
     returns 0.611 (jitter `1e-5`), 0.624 (`1e-3`) and 0.907 (`1e-2`), all
     in range.
   - A range guard checks every returned delta. An excursion beyond
-    `[-0.05, 1.05]` raises a `UserWarning` that names the parameter, gives
-    the observed range, and states the likely cause. The value is returned
-    **unclipped**: clipping 121 to 1.0 would turn an obvious failure into
-    a plausible wrong answer. The guard covers continuous and categorical
-    inputs alike.
+    `[-0.05, 1.05]` in the point estimate now raises `ValueError`. The
+    message names the parameter, gives the observed range, states the
+    cause, and names both knobs: `grid_size` (with its current value) and
+    `degenerate_bandwidth`. A value outside `[0, 1]` is a failed
+    computation, not an estimate, so it must not reach a plot. A
+    confidence bound outside the range still raises a `UserWarning` only:
+    the point estimate is the contract and the interval is a diagnostic.
+    Nothing is clipped, because clipping 121 to 1.0 would turn an obvious
+    failure into a plausible wrong answer. The guard covers continuous and
+    categorical inputs alike.
 
   The bug predated categorical support — a continuous step-function model
   hit it too — but categorical inputs make "one level, one output value"
@@ -95,6 +106,22 @@
 
 ### Changed
 
+- **`borgonovo.analyze` refuses a discrete output.** The delta estimator
+  compares Gaussian kernel density estimates on a shared output grid. An
+  atomic density is a spike no grid resolves, so on a discrete output the
+  index reports the grid resolution rather than the model. `analyze` now
+  checks the output before any expensive work and raises `ValueError` when
+  a column takes at most 20 distinct values *and* those values are fewer
+  than 1% of the samples. Both conditions must hold, so a continuous
+  output rounded to two decimals is not refused. The message names the
+  offending column and points at `jaxgsa.optimal_transport.analyze`, which
+  compares empirical distributions and needs no density. Continuous
+  outputs are the supported contract; no atomic estimator is planned.
+  A constant column is exempt: it needs no density and its exact answer is
+  `delta = S1 = 0`, which is the documented behaviour and stays. A
+  rare-event 0/1 indicator has two atoms and is now refused; use
+  `jaxgsa.optimal_transport.analyze` or `jaxgsa.pawn.analyze` for it.
+  Categorical inputs stay supported. The limit applies to the output only.
 - **Borgonovo delta floors the bandwidth of classes the output grid cannot
   resolve.** A conditioning class with zero output variance (a point mass,
   e.g. one categorical level mapping to one output value) used to get
