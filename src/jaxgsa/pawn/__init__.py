@@ -7,6 +7,10 @@ the input, aggregated over conditioning bins. It is a given-data method
 (any (X, Y) sample works) and is a good pick when the output is skewed
 or multimodal, where variance is a poor summary of uncertainty.
 
+Categorical inputs are supported. A categorical parameter gets one
+conditioning class per level instead of a bin of its range, so its index
+does not depend on the order of the level codes.
+
 Example::
 
     from jaxgsa import pawn

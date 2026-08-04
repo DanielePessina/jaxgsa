@@ -155,6 +155,11 @@ print(ds_ci)  # includes pawn_lower and pawn_upper
   Increase N or decrease `n_bins`.
 - The KS statistic is bounded in [0, 1] but sensitive to sample size —
   larger N gives sharper discrimination between inputs.
+- Categorical inputs work. A categorical parameter needs no binning: its
+  level code already names the conditioning class, so PAWN uses one bin
+  per level and `n_bins` does not apply to it. Relabeling the levels does
+  not change the index. See
+  [Categorical Inputs](/examples/categorical-inputs).
 
 ## See also
 

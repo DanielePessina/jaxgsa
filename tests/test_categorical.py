@@ -16,6 +16,7 @@ from jaxgsa import (
     hsic,
     morris,
     optimal_transport,
+    pawn,
     shapley,
     sobol,
 )
@@ -28,6 +29,7 @@ from jaxgsa._core.partition import (
 from jaxgsa._core.sampling import _inverse_transform_samples
 from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa.borgonovo._analyze import _warn_conf_out_of_range
+from jaxgsa.pawn._analyze import _bin_indices, _equal_width_bins
 from jaxgsa.problem import CategoricalInputSpec, Problem, _categorical_dims
 
 PROBS = [0.5, 0.3, 0.2]
@@ -644,6 +646,140 @@ def test_level_permutation_invariance(method):
         # Same seed, same rows per class (only the class order changes):
         # the estimates agree to float noise.
         np.testing.assert_allclose(np.asarray(a), np.asarray(b), atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# PAWN with categorical inputs
+# ---------------------------------------------------------------------------
+
+
+def test_pawn_continuous_only_binning_is_unchanged():
+    """A continuous-only problem must take exactly the pre-existing path.
+
+    The padded bin count collapses to ``n_bins`` and the indices equal the
+    old equal-width binning, so the kernel and the aggregation see the same
+    arrays as before and the results stay bit-for-bit identical.
+    """
+    p = Problem.from_dict(
+        {"a": (0.0, 1.0), "b": {"dist": "gaussian", "mean": 0.0, "variance": 4.0}}
+    )
+    X = jaxgsa.sampling.monte_carlo(p, 500, seed=0)
+    bin_idx, n_eff = _bin_indices(p, X, 10)
+    assert n_eff == 10
+    expected = _equal_width_bins(cdf_to_unit_interval(X, p), 10)
+    np.testing.assert_array_equal(np.asarray(bin_idx), np.asarray(expected))
+
+
+def test_pawn_categorical_column_uses_level_codes_as_bins():
+    problem, X, _ = _mixed_data(n=500)
+    bin_idx, n_eff = _bin_indices(problem, X, 10)
+    # 10 continuous bins already exceed the 3 levels, so no padding is needed.
+    assert n_eff == 10
+    np.testing.assert_array_equal(np.asarray(bin_idx)[:, 1], np.asarray(X)[:, 1].astype(int))
+
+
+def test_pawn_pads_the_kernel_when_levels_exceed_n_bins():
+    p = Problem.from_dict({"c": {"dist": "categorical", "probs": [1 / 6] * 6}})
+    X = jaxgsa.sampling.monte_carlo(p, 600, seed=0)
+    _, n_eff = _bin_indices(p, X, 4)
+    assert n_eff == 6
+    rng = np.random.default_rng(0)
+    Y = np.asarray(X)[:, 0] + 0.1 * rng.standard_normal(600)
+    res = pawn.analyze(p, X, Y, n_bins=4)
+    # The two unused bins are NaN and the nan-aware reduction drops them.
+    assert np.isfinite(np.asarray(res.pawn)).all()
+
+
+def test_pawn_accepts_a_mixed_problem():
+    problem, X, Y = _mixed_data(n=6000)
+    res = pawn.analyze(problem, X, Y, n_bootstrap=8, seed=0)
+    values = np.asarray(res.pawn)
+    assert values.shape == (2,)
+    assert np.isfinite(values).all()
+    # The level offsets dominate the unit-uniform x1 term.
+    assert values[1] > values[0]
+    lo, hi = np.asarray(res.pawn_conf)
+    assert np.all(lo <= hi)
+
+
+def test_pawn_accepts_an_all_categorical_problem():
+    p, X, Y = _all_categorical_data(n=4000)
+    res = pawn.analyze(p, X, Y)
+    values = np.asarray(res.pawn)
+    assert np.isfinite(values).all()
+    # Y depends on c1 only, so c2 is near zero.
+    assert values[0] > 0.45
+    assert values[1] < 0.15
+
+
+def test_pawn_rejects_non_code_values_in_a_categorical_column():
+    problem, X, Y = _mixed_data(n=200)
+    bad = np.asarray(X).copy()
+    bad[0, 1] = 0.5
+    with pytest.raises(ValueError, match="integer level codes"):
+        pawn.analyze(problem, bad, Y)
+
+
+@pytest.mark.parametrize("statistic", ["median", "max", "mean"])
+def test_pawn_level_relabeling_is_invariant(statistic):
+    """Relabeling levels only reorders the per-bin KS values.
+
+    Median, max and mean over bins are permutation-invariant, so median and
+    max are exactly equal. The mean sums the same three floats in a
+    different order, which costs at most one float32 ULP.
+    """
+    problem, X, Y = _mixed_data(n=4000)
+    codes = np.asarray(X)[:, 1].astype(int)
+    perm = np.array([2, 0, 1])
+    inv = np.argsort(perm)
+    X_perm = np.asarray(X).copy()
+    X_perm[:, 1] = perm[codes]
+    problem_perm = Problem.from_dict(
+        {
+            "x1": (0.0, 1.0),
+            "c": {"dist": "categorical", "probs": [PROBS[inv[i]] for i in range(3)]},
+        }
+    )
+
+    base = np.asarray(pawn.analyze(problem, X, Y, statistic=statistic).pawn)
+    other = np.asarray(pawn.analyze(problem_perm, X_perm, Y, statistic=statistic).pawn)
+    if statistic == "mean":
+        np.testing.assert_allclose(base, other, rtol=0, atol=np.finfo(np.float32).eps)
+    else:
+        np.testing.assert_array_equal(base, other)
+
+
+def test_pawn_categorical_index_matches_the_analytic_ks():
+    """PAWN on a categorical input converges to the true per-level KS.
+
+    Y | c = l is Normal(OFFSETS[l], 1) and the unconditional Y is the
+    PROBS-weighted mixture, so each level's KS distance is a one-dimensional
+    supremum computable on a fine grid. PAWN's median over levels must match
+    it.
+    """
+    from scipy.stats import norm
+
+    n = 40000
+    p = Problem.from_dict({"c": {"dist": "categorical", "probs": PROBS}})
+    X = np.asarray(jaxgsa.sampling.monte_carlo(p, n, seed=0))
+    codes = X[:, 0].astype(int)
+    Y = OFFSETS[codes] + np.random.default_rng(0).standard_normal(n)
+
+    grid = np.linspace(-8.0, 8.0, 40001)
+    cdfs = np.stack([norm.cdf(grid, loc=off) for off in OFFSETS])
+    mixture = np.array(PROBS) @ cdfs
+    expected = np.median(np.abs(cdfs - mixture).max(axis=1))
+
+    got = float(np.asarray(pawn.analyze(p, X, Y).pawn)[0])
+    assert abs(got - expected) < 0.02
+
+
+def test_pawn_pure_noise_categorical_index_is_small():
+    problem, X, _ = _mixed_data(n=8000)
+    rng = np.random.default_rng(7)
+    Y = np.asarray(X)[:, 0] + 0.1 * rng.standard_normal(X.shape[0])
+    res = pawn.analyze(problem, X, Y)
+    assert float(np.asarray(res.pawn)[1]) < 0.06
 
 
 def test_ot_multivariate_mode_supports_categorical():

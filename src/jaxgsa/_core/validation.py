@@ -154,8 +154,9 @@ def _raise_correlated_analysis(problem: Problem, method: str) -> None:
 
 # Named in every categorical-problem rejection so the error is actionable.
 _CATEGORICAL_TOLERANT_METHODS = (
-    "jaxgsa.optimal_transport and jaxgsa.borgonovo (one conditioning class "
-    "per level), or the design-based jaxgsa.sobol Saltelli pipeline"
+    "jaxgsa.optimal_transport, jaxgsa.borgonovo, and jaxgsa.pawn (one "
+    "conditioning class per level), or the design-based jaxgsa.sobol "
+    "Saltelli pipeline"
 )
 
 
@@ -188,7 +189,8 @@ def _raise_categorical_design(problem: Problem, method: str) -> None:
         f"{method} requires continuous (orderable) inputs, but parameters "
         f"{names} are categorical. Use jaxgsa.sobol.sample (the Saltelli "
         "column-swap scheme is distribution-agnostic), or analyze given "
-        "data with jaxgsa.optimal_transport or jaxgsa.borgonovo."
+        "data with jaxgsa.optimal_transport, jaxgsa.borgonovo, or "
+        "jaxgsa.pawn."
     )
 
 
