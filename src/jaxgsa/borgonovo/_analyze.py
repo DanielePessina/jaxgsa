@@ -64,25 +64,39 @@ from jaxgsa.problem import Problem, _categorical_dims
 _SQRT_2PI = math.sqrt(2.0 * math.pi)
 _MAX_CLASSES = 48
 # A class whose KDE bandwidth falls below this fraction of the full-sample
-# bandwidth is numerically degenerate: its variance is zero (a point mass,
-# e.g. one categorical level mapping to one output value) or pure float
-# noise. Genuine conditional spreads sit orders of magnitude above this.
-_DEGENERATE_BW_TOL = 1e-6
+# bandwidth is treated as degenerate. Two failures live below this line:
+# an exactly zero variance (a point mass, e.g. one categorical level that
+# maps to one output value), and a spread so small that the shared output
+# grid cannot resolve the conditional density. The second is the dangerous
+# one. The grid step is (y_max - y_min) / (grid_size - 1), so a class whose
+# bandwidth is far below the step is sampled at a spacing of many sigma;
+# the trapezoid rule then either misses the peak or lands on it and
+# integrates a spike of height ~1/(h*sqrt(2*pi)) over a step-wide interval,
+# which makes the L1 distance -- and delta -- explode far above 1. At the
+# default grid_size = 100 the step is about 1/99 of the output range and a
+# Silverman bandwidth of 1e-2 of the full-sample bandwidth is already at
+# that scale, so 1e-2 is the threshold below which the grid is untrustworthy.
+_DEGENERATE_BW_TOL = 1e-2
 # Bandwidth given to a degenerate class, as a fraction of the full-sample
-# Silverman bandwidth. The class must stay visibly narrower than the
-# unconditional smoothing (so it still reads as a concentrated class), but
-# wide enough for the shared output grid to integrate it: a Gaussian
-# sampled at a spacing of at most its own sigma has negligible trapezoid
-# error, hence the grid-step lower bound. Measured on a noise-free
-# three-atom repro (true delta 2/3), 0.1 recovers delta within ~0.07
-# across N in [1e3, 1e4]; fractions >= 0.2 over-smooth toward 0.56 and
-# fractions <= 0.02 alias on the grid (delta > 1).
+# Silverman bandwidth. The applied floor is
+# ``max(fraction * h_full, grid_step)``; in the degenerate regime the
+# grid-step term is almost always the larger of the two, so the *grid* sets
+# the width and this fraction only binds for wide output ranges with a fine
+# grid. The grid-step bound is the load-bearing part: a Gaussian sampled at
+# a spacing of at most its own sigma has small trapezoid error, while one
+# sampled far more coarsely aliases and drives delta above 1. A consequence
+# is that the delta of a near-degenerate class is grid-resolution
+# dependent and biased low, and ``grid_size`` -- not this fraction -- is
+# the knob that moves it. See the ``analyze`` docstring.
 _DEGENERATE_BW_FRACTION = 0.1
+# Borgonovo's delta lies in [0, 1] by construction. The default
+# bias-corrected estimate can leave that range by a little at small N, so
+# only an excursion wider than this counts as an estimator failure.
+_DELTA_RANGE_TOL = 0.05
 # Target element budget for the default per-chunk working set. The dominant
 # intermediate is the conditional-KDE tensor whose size scales as
-# ``chunk_columns * D * N * grid_size`` (class count M times padding P is ~N),
-# so the default chunk width is chosen to keep it near this many float32
-# elements (~256 MB).
+# ``chunk_columns * sum_g(Dg * Mg * Pg) * grid_size``, so the default chunk
+# width is chosen to keep it near this many float32 elements (~256 MB).
 _CHUNK_ELEM_BUDGET = 1 << 26
 
 
@@ -103,18 +117,30 @@ def _plischke_n_classes(n_samples: int) -> int:
 
 
 @lru_cache(maxsize=32)
-def _get_delta_kernel(grid_size: int, bw_factor: float | None):
+def _get_delta_kernel(
+    grid_size: int,
+    bw_factor: float | None,
+    degenerate_tol: float,
+    degenerate_bw: float | None,
+):
     """Return a JIT-compiled delta/S1 kernel for static estimator settings.
 
     The kernel is cached only on the scalar settings that change tracing
-    (grid size and the bandwidth branch); sample-sized data (inputs, class
-    indices, masks) are passed as runtime arguments, so nothing of size
-    ``O(N)`` is captured or baked into the compiled executable.
+    (grid size, the bandwidth branch and the degenerate-class floor);
+    sample-sized data (inputs, class indices, masks) are passed as runtime
+    arguments, so nothing of size ``O(N)`` is captured or baked into the
+    compiled executable.
 
     Args:
         grid_size: Number of output-grid points for the KDE (static).
         bw_factor: KDE bandwidth factor multiplying the sample standard
             deviation, or ``None`` for the per-class Silverman rule.
+        degenerate_tol: A class counts as degenerate when its bandwidth is
+            below this fraction of the full-sample bandwidth.
+        degenerate_bw: Bandwidth floor for a degenerate class, as a
+            fraction of the full-sample bandwidth, applied exactly; or
+            ``None`` for the default ``max(_DEGENERATE_BW_FRACTION *
+            h_full, grid_step)``.
 
     Returns:
         A jitted callable ``(Y_cols (N, C), all_idx (R, N), groups) ->
@@ -179,15 +205,20 @@ def _get_delta_kernel(grid_size: int, bw_factor: float | None):
             dev = (y_cls - mean[..., None]) * mask_b
             var = (dev**2).sum(axis=-1) / jnp.maximum(counts_b - 1.0, 1.0)
             h = _bandwidths(safe_counts, jnp.sqrt(var))  # (Dg, M)
-            # A degenerate (zero-variance) class would get bandwidth 0 and a
-            # zeroed density, which biases delta far low. Floor it so it
-            # becomes a narrow kernel at its value instead; see the
-            # _DEGENERATE_BW_FRACTION comment for the width rationale. The
-            # predicate keeps non-degenerate classes bit-identical and stays
-            # False for a constant column (h_full == 0), which must keep its
-            # delta = 0 contract.
-            floor = jnp.maximum(_DEGENERATE_BW_FRACTION * h_full, grid[1] - grid[0])
-            floored_cls = (counts_b > 0) & (h < _DEGENERATE_BW_TOL * h_full)
+            # A degenerate class is one the output grid cannot resolve: a
+            # zero-variance class gets bandwidth 0 and a zeroed density
+            # (delta biased far low), and a class narrower than the grid
+            # step aliases (delta far above 1). Floor both to a kernel the
+            # grid can integrate; see the _DEGENERATE_BW_TOL and
+            # _DEGENERATE_BW_FRACTION comments. The predicate keeps
+            # resolvable classes bit-identical and stays False for a
+            # constant column (h_full == 0), which must keep its delta = 0
+            # contract.
+            if degenerate_bw is None:
+                floor = jnp.maximum(_DEGENERATE_BW_FRACTION * h_full, grid[1] - grid[0])
+            else:
+                floor = degenerate_bw * h_full
+            floored_cls = (counts_b > 0) & (h < degenerate_tol * h_full)
             h = jnp.where(floored_cls, floor, h)
             safe_h = jnp.where(h > 0, h, 1.0)
 
@@ -260,6 +291,8 @@ def analyze(
     bias_correct: bool = True,
     seed: int = 0,
     slice_chunk_size: int | None = None,
+    degenerate_tol: float = _DEGENERATE_BW_TOL,
+    degenerate_bandwidth: float | Literal["auto"] = "auto",
 ) -> DeltaResult:
     """Compute Borgonovo delta and given-data first-order Sobol indices.
 
@@ -287,7 +320,9 @@ def analyze(
             is always validated against ``[2, N]``; with only categorical
             inputs a ``UserWarning`` says it is ignored.
         grid_size: Number of points of the output grid the densities are
-            compared on (spanning ``[Y.min(), Y.max()]`` per column).
+            compared on (spanning ``[Y.min(), Y.max()]`` per column). It is
+            also the resolution knob for near-degenerate conditioning
+            classes: see the note below.
         bandwidth: KDE bandwidth rule: ``"silverman"`` for the per-class
             Silverman factor, or a positive float used directly as the
             factor multiplying the sample standard deviation.
@@ -304,7 +339,36 @@ def analyze(
             processed per kernel call. ``None`` picks a memory-aware
             default from the sample size; pass an explicit positive
             integer to override. Peak memory scales with
-            ``slice_chunk_size * D * N * grid_size``.
+            ``slice_chunk_size * grid_size`` times the summed padded class
+            layout ``sum_g(Dg * Mg * Pg)``. That layout is about ``D * N``
+            for continuous inputs, but an imbalanced categorical input
+            pads every level up to the largest one, so it can be many
+            times ``D * N``; the default accounts for the real layout.
+        degenerate_tol: A conditioning class counts as degenerate when its
+            KDE bandwidth is below this fraction of the full-sample
+            bandwidth. Degenerate classes get the floored bandwidth below.
+            Lower it to let narrower classes keep their own bandwidth, but
+            read the note about grid resolution first.
+        degenerate_bandwidth: Bandwidth floor applied to a degenerate
+            class. ``"auto"`` uses ``max(0.1 * h_full, grid_step)``, which
+            never goes below what the output grid can integrate. A float
+            is a fraction of the full-sample bandwidth ``h_full`` and is
+            applied exactly, with no grid-step bound; a value far below
+            ``grid_step / h_full`` aliases on the grid and returns delta
+            far above 1.
+
+    Note:
+        For a conditioning class that is a point mass or nearly one -- the
+        normal case for a categorical level that maps to one output value
+        -- the delta estimate depends on the grid resolution and is biased
+        low. The floored bandwidth is set by ``grid_step``, so ``grid_size``
+        is the knob that moves the answer: on a noise-free three-atom model
+        with true delta ``2/3``, the estimate goes 0.56 at ``grid_size=50``,
+        0.61 at 100, and 0.61 at 200 and above. The bias also does not
+        vanish as N grows, so on atomic conditionals this estimator is not
+        consistent. Treat delta on such inputs as a ranking signal, not a
+        calibrated number. Inputs with genuine conditional spread are
+        unaffected.
 
     Returns:
         DeltaResult with delta and S1 indices and optional confidence
@@ -313,10 +377,14 @@ def analyze(
         bias-corrected estimate (and its confidence bounds) can fall
         marginally below 0 for weak/near-noninfluential inputs at small
         sample sizes. A constant output column yields ``delta = S1 = 0``
-        (SALib raises an error in this case). A conditioning class with
-        zero output variance (a point mass) gets a floored KDE bandwidth
-        instead of a zeroed density, with one ``UserWarning``; classes
-        with genuine spread are unaffected.
+        (SALib raises an error in this case). A conditioning class the
+        output grid cannot resolve gets a floored KDE bandwidth instead of
+        its own, with one ``UserWarning``; classes with genuine spread are
+        unaffected. If a returned delta still leaves ``[0, 1]`` by more
+        than 0.05, the estimator has failed and a ``UserWarning`` names the
+        parameter. The value is returned unclipped, because clipping a
+        wild estimate to 1.0 would turn an obvious failure into a
+        plausible wrong answer.
 
     Raises:
         ValueError: If X is not 2-D, its column count does not match the
@@ -325,8 +393,11 @@ def analyze(
             categorical column of X holds
             values other than its integer level codes, ``grid_size < 2``,
             ``bandwidth`` is neither ``"silverman"`` nor a positive float,
-            ``n_bootstrap < 0``, ``conf_level`` is not in ``(0, 1)``, or
-            ``slice_chunk_size`` is not a positive integer.
+            ``n_bootstrap < 0``, ``conf_level`` is not in ``(0, 1)``,
+            ``slice_chunk_size`` is not a positive integer,
+            ``degenerate_tol`` is not in ``[0, 1)``, or
+            ``degenerate_bandwidth`` is neither ``"auto"`` nor a positive
+            float.
     """
     X = jnp.asarray(X)
     # The delta estimator partitions on rank classes and compares output
@@ -360,15 +431,17 @@ def analyze(
         raise ValueError(f"n_bootstrap must be >= 0, got {n_bootstrap}")
     if not 0 < conf_level < 1:
         raise ValueError(f"conf_level must be in (0, 1), got {conf_level}")
+    degenerate_tol = float(degenerate_tol)
+    if not 0 <= degenerate_tol < 1:
+        raise ValueError(f"degenerate_tol must be in [0, 1), got {degenerate_tol}")
+    degenerate_bw = _resolve_degenerate_bandwidth(degenerate_bandwidth)
 
     Y_3d, squeeze_time, squeeze_output = _prepare_Y(Y)
     _, T, K = Y_3d.shape
     D = problem.num_vars
     Y_cols = Y_3d.reshape(N, T * K)
 
-    if slice_chunk_size is None:
-        slice_chunk_size = max(1, _CHUNK_ELEM_BUDGET // (D * N * grid_size))
-    elif slice_chunk_size < 1:
+    if slice_chunk_size is not None and slice_chunk_size < 1:
         raise ValueError(f"slice_chunk_size must be >= 1, got {slice_chunk_size}")
 
     # Replicate 0 is the identity permutation (the original sample); the
@@ -387,9 +460,18 @@ def analyze(
     # Canonical partition-group layout, shared with optimal_transport.
     groups, _, col_order = build_partition_groups(problem, X, all_idx, M, dims_levels)
 
-    kernel = _get_delta_kernel(grid_size, bw_factor)
+    kernel = _get_delta_kernel(grid_size, bw_factor, degenerate_tol, degenerate_bw)
 
     total = T * K
+    if slice_chunk_size is None:
+        # Peak memory is the conditional-KDE tensor, one grid of length
+        # grid_size per padded class slot. Size it from the real per-group
+        # layout Dg * Mg * Pg: assuming that product is ~ D * N holds for
+        # equal-frequency continuous classes but under-counts badly for an
+        # imbalanced categorical column, where every level is padded up to
+        # the largest one.
+        layout_elems = sum(g[0].shape[1] * g[0].shape[2] * g[0].shape[3] for g in groups)
+        slice_chunk_size = max(1, _CHUNK_ELEM_BUDGET // (layout_elems * grid_size))
     cs = min(slice_chunk_size, total)
     d_parts, s1_parts, degen_parts, floored_parts = [], [], [], []
     for start in range(0, total, cs):
@@ -405,11 +487,12 @@ def analyze(
 
     if bool(jnp.stack(floored_parts).any()):
         warnings.warn(
-            "jaxgsa: at least one conditioning class has zero sample "
-            "variance (a point mass, e.g. a categorical level that maps to "
-            "one output value). Its KDE bandwidth was floored to a narrow "
-            "kernel; without the floor its density would drop out and bias "
-            "delta low",
+            "jaxgsa: at least one conditioning class is too narrow for the "
+            "output grid to resolve (often a point mass, e.g. a categorical "
+            "level that maps to one output value). Its KDE bandwidth was "
+            "floored to a kernel the grid can integrate. Delta for such an "
+            "input depends on grid_size and is biased low; raise grid_size "
+            "if you need a calibrated value",
             stacklevel=2,
         )
 
@@ -447,6 +530,8 @@ def analyze(
     else:
         delta = d_hat
 
+    _warn_out_of_range(problem, delta)
+
     return DeltaResult(
         delta=_squeeze_output_axes(delta, squeeze_time, squeeze_output),
         delta_conf=delta_conf,
@@ -454,6 +539,88 @@ def analyze(
         S1_conf=S1_conf,
         problem=problem,
     )
+
+
+def _warn_out_of_range(problem: Problem, delta: Array) -> None:
+    """Warn when a delta estimate leaves ``[0, 1]`` by more than the tolerance.
+
+    Borgonovo's delta is a half L1 distance between probability densities,
+    so it lies in ``[0, 1]``. A value outside that range is an estimator
+    failure, not a valid answer, and the usual cause is a conditioning
+    class the output grid cannot resolve (a point mass or a class much
+    narrower than the grid step). The value is reported unclipped so the
+    failure stays visible; clipping would return a plausible-looking wrong
+    number instead.
+
+    Args:
+        problem: Problem definition (for parameter names in the warning).
+        delta: Delta estimates with the parameter axis last ``(..., D)``.
+
+    Warns:
+        UserWarning: If any estimate is below ``-_DELTA_RANGE_TOL`` or
+            above ``1 + _DELTA_RANGE_TOL``, naming the parameters.
+    """
+    flat = np.asarray(delta).reshape(-1, problem.num_vars)
+    bad = ~np.isfinite(flat) | (flat < -_DELTA_RANGE_TOL) | (flat > 1.0 + _DELTA_RANGE_TOL)
+    cols = np.flatnonzero(bad.any(axis=0))
+    if cols.size == 0:
+        return
+    detail = ", ".join(
+        f"{problem.names[d]}: [{np.nanmin(flat[:, d]):.3g}, {np.nanmax(flat[:, d]):.3g}]"
+        for d in cols
+    )
+    warnings.warn(
+        "jaxgsa: delta is defined on [0, 1] but the estimate left that "
+        f"range for {detail}. This is an estimator failure, not a result. "
+        "The usual cause is a conditioning class the output grid cannot "
+        "resolve: a degenerate class (one input value mapping to one "
+        "output value) or a grid too coarse for the conditional density. "
+        "Raise grid_size, or raise degenerate_tol so the narrow class gets "
+        "the bandwidth floor. The value is returned unclipped so the "
+        "failure stays visible",
+        stacklevel=3,
+    )
+
+
+def _resolve_degenerate_bandwidth(degenerate_bandwidth: float | Literal["auto"]) -> float | None:
+    """Validate ``degenerate_bandwidth`` and return the floor fraction.
+
+    Args:
+        degenerate_bandwidth: ``"auto"`` for the grid-aware default floor,
+            or a positive fraction of the full-sample bandwidth.
+
+    Returns:
+        ``None`` for the default floor, otherwise the float fraction.
+
+    Raises:
+        ValueError: If the value is not ``"auto"`` or a positive real
+            number (booleans are rejected).
+    """
+    if isinstance(degenerate_bandwidth, str):
+        if degenerate_bandwidth == "auto":
+            return None
+        raise ValueError(
+            "degenerate_bandwidth must be 'auto' or a positive float, "
+            f"got {degenerate_bandwidth!r}"
+        )
+    if isinstance(degenerate_bandwidth, bool):
+        raise ValueError(
+            "degenerate_bandwidth must be 'auto' or a positive float, "
+            f"got {degenerate_bandwidth!r}"
+        )
+    try:
+        fraction = float(degenerate_bandwidth)
+    except (TypeError, ValueError):
+        raise ValueError(
+            "degenerate_bandwidth must be 'auto' or a positive float, "
+            f"got {degenerate_bandwidth!r}"
+        ) from None
+    if not fraction > 0:
+        raise ValueError(
+            "degenerate_bandwidth must be 'auto' or a positive float, "
+            f"got {degenerate_bandwidth!r}"
+        )
+    return fraction
 
 
 def _resolve_bandwidth(bandwidth: float | Literal["silverman"]) -> float | None:

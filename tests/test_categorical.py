@@ -1,7 +1,9 @@
 """Tests for categorical (unordered discrete) input support."""
 
 import json
+import warnings
 
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -19,7 +21,11 @@ from jaxgsa import (
     sobol,
 )
 from jaxgsa import pce as pce_mod
-from jaxgsa._core.partition import _categorical_class_layout, _extract_categorical_codes
+from jaxgsa._core.partition import (
+    _categorical_class_layout,
+    _extract_categorical_codes,
+    build_partition_groups,
+)
 from jaxgsa._core.sampling import _inverse_transform_samples
 from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa.problem import CategoricalInputSpec, Problem, _categorical_dims
@@ -391,6 +397,130 @@ def test_borgonovo_degenerate_class_recovers_delta():
     assert float(res.S1[0]) == pytest.approx(1.0, abs=1e-6)
 
 
+def _atom_data(noise, n=3000, seed=0):
+    """Three balanced atoms plus jitter; true delta is 2/3 at every noise."""
+    p = Problem.from_dict({"c": {"dist": "categorical", "probs": [1 / 3, 1 / 3, 1 / 3]}})
+    rng = np.random.default_rng(seed)
+    codes = rng.integers(0, 3, n)
+    Y = OFFSETS[codes] + noise * np.random.default_rng(42).standard_normal(n)
+    return p, codes[:, None].astype(np.float64), Y
+
+
+@pytest.mark.parametrize("noise", [0.0, 1e-9, 1e-5, 1e-3, 3e-3, 1e-2, 0.1, 0.3])
+def test_borgonovo_atomic_class_delta_stays_in_range(noise):
+    """The atoms are separated far beyond the jitter, so delta is 2/3.
+
+    Before the degenerate-class tolerance was raised to 1e-2 the class
+    bandwidth could sit orders of magnitude below the output grid step. The
+    conditional density then aliased on the grid and the trapezoid integral
+    exploded: noise 1e-5 returned delta 121 with no warning at all.
+    """
+    p, X, Y = _atom_data(noise)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        res = jaxgsa.borgonovo.analyze(p, X, Y, seed=0, n_bootstrap=0)
+    delta = float(np.asarray(res.delta).ravel()[0])
+    assert 0.0 <= delta <= 1.0
+    assert abs(delta - 2.0 / 3.0) < 0.11
+
+
+def test_borgonovo_aliasing_delta_warns_out_of_range():
+    """An unresolvable class must never return a huge delta in silence."""
+    p, X, Y = _atom_data(1e-5)
+    # degenerate_tol=1e-6 restores the old, too-low detection threshold.
+    with pytest.warns(UserWarning, match=r"delta is defined on \[0, 1\]"):
+        res = jaxgsa.borgonovo.analyze(p, X, Y, seed=0, n_bootstrap=0, degenerate_tol=1e-6)
+    # The value is reported unclipped so the failure stays visible.
+    assert float(np.asarray(res.delta).ravel()[0]) > 1.0
+
+
+def test_borgonovo_in_range_delta_does_not_warn_out_of_range():
+    p, X, Y = _atom_data(1e-5)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        jaxgsa.borgonovo.analyze(p, X, Y, seed=0, n_bootstrap=0)
+    assert not [w for w in caught if "delta is defined on" in str(w.message)]
+
+
+def test_borgonovo_grid_size_moves_the_atomic_estimate():
+    """Document the knob: grid_size, not the bandwidth fraction, governs it."""
+    p, X, Y = _atom_data(0.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        coarse = jaxgsa.borgonovo.analyze(p, X, Y, seed=0, n_bootstrap=0, grid_size=50)
+        fine = jaxgsa.borgonovo.analyze(p, X, Y, seed=0, n_bootstrap=0, grid_size=200)
+    assert float(np.asarray(coarse.delta).ravel()[0]) < float(np.asarray(fine.delta).ravel()[0])
+
+
+def test_borgonovo_degenerate_bandwidth_override_changes_the_estimate():
+    p, X, Y = _atom_data(0.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        default = jaxgsa.borgonovo.analyze(p, X, Y, seed=0, n_bootstrap=0)
+        wide = jaxgsa.borgonovo.analyze(p, X, Y, seed=0, n_bootstrap=0, degenerate_bandwidth=0.5)
+    # A wider floor over-smooths the conditional, pulling delta down.
+    assert float(np.asarray(wide.delta).ravel()[0]) < float(np.asarray(default.delta).ravel()[0])
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"degenerate_tol": 1.0}, "degenerate_tol"),
+        ({"degenerate_tol": -0.1}, "degenerate_tol"),
+        ({"degenerate_bandwidth": 0.0}, "degenerate_bandwidth"),
+        ({"degenerate_bandwidth": "wide"}, "degenerate_bandwidth"),
+        ({"degenerate_bandwidth": True}, "degenerate_bandwidth"),
+    ],
+)
+def test_borgonovo_rejects_invalid_degenerate_settings(kwargs, match):
+    p, X, Y = _atom_data(0.1, n=200)
+    with pytest.raises(ValueError, match=match):
+        jaxgsa.borgonovo.analyze(p, X, Y, n_bootstrap=0, **kwargs)
+
+
+def test_borgonovo_default_chunk_size_respects_budget_on_imbalanced_categorical(monkeypatch):
+    """The default chunk width must budget from the real padded layout.
+
+    The old rule assumed the padded class layout ``M * P`` was about ``N``.
+    A heavily imbalanced categorical column pads every level up to the
+    largest one, so ``M * P`` is many times ``N`` and the old default
+    over-committed memory by about 9x.
+    """
+    from jaxgsa.borgonovo import _analyze as mod
+
+    probs = [0.91] + [0.01] * 9
+    p = Problem.from_dict({"c": {"dist": "categorical", "probs": probs}})
+    n, grid_size = 20000, 100
+    rng = np.random.default_rng(0)
+    X = rng.choice(10, size=n, p=probs).astype(np.float64)[:, None]
+    # More output columns than the chunk width, so chunking actually happens.
+    Y = np.tile((X[:, 0] * 0.5 + rng.standard_normal(n))[:, None], (1, 40))
+
+    widths = []
+    real_kernel = mod._get_delta_kernel
+
+    def _spy(*args):
+        inner = real_kernel(*args)
+
+        def _wrapped(chunk, *rest):
+            widths.append(chunk.shape[1])
+            return inner(chunk, *rest)
+
+        return _wrapped
+
+    monkeypatch.setattr(mod, "_get_delta_kernel", _spy)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        jaxgsa.borgonovo.analyze(p, X, Y, n_bootstrap=0, grid_size=grid_size)
+
+    groups, _, _ = build_partition_groups(
+        p, jnp.asarray(X), jnp.arange(n, dtype=jnp.int32)[None, :], 8, _categorical_dims(p)
+    )
+    layout_elems = sum(g[0].shape[1] * g[0].shape[2] * g[0].shape[3] for g in groups)
+    assert layout_elems > 5 * n  # the layout really is far larger than D * N
+    assert max(widths) * layout_elems * grid_size <= mod._CHUNK_ELEM_BUDGET
+
+
 def test_borgonovo_s1_matches_analytic_reference():
     problem, X, Y = _mixed_data(n=8000)
     res = borgonovo.analyze(problem, X, Y, seed=0)
@@ -598,6 +728,25 @@ def test_sobol_expand_outputs_round_trips_duplicate_rows():
     assert expanded.shape[0] == sr.n_expanded
     # Every expanded row's output matches its unique row's output.
     np.testing.assert_array_equal(expanded, Y[sr.expanded_to_unique])
+
+
+def test_sobol_unique_rows_distort_the_marginal_but_expanded_does_not():
+    """Pin the documented ``sr.samples`` caveat.
+
+    ``sr.samples`` is a deduplicated evaluation set. Its empirical
+    frequencies do not match the declared marginal; only the expanded
+    design, which ``analyze`` reconstructs, carries the declared one.
+    """
+    p = Problem.from_dict({"c": {"dist": "categorical", "probs": [0.9, 0.1]}})
+    with pytest.warns(UserWarning, match="possible distinct rows"):
+        sr = sobol.sample(p, 2048, seed=0, verbose=False)
+
+    unique_freq = np.bincount(sr.samples[:, 0].astype(int), minlength=2) / sr.n_runs
+    expanded_codes = sr.samples[sr.expanded_to_unique, 0].astype(int)
+    expanded_freq = np.bincount(expanded_codes, minlength=2) / sr.n_expanded
+
+    np.testing.assert_allclose(expanded_freq, [0.9, 0.1], atol=0.01)
+    assert abs(unique_freq[0] - 0.9) > 0.02
 
 
 # ---------------------------------------------------------------------------
