@@ -1032,6 +1032,15 @@ def _categorical_and_correlated_problem():
     return problem.with_correlation(R)
 
 
+def _categorical_and_correlated_data(n=128):
+    """The combined-dead-end problem plus an aligned (X, Y) sample."""
+    problem = _categorical_and_correlated_problem()
+    X = jaxgsa.sampling.monte_carlo(problem, n, seed=0)
+    codes = np.asarray(X)[:, 2].astype(int)
+    Y = np.asarray(X)[:, 0] + OFFSETS[codes]
+    return problem, X, Y
+
+
 @pytest.mark.parametrize(
     "name,call",
     [
@@ -1070,6 +1079,58 @@ def test_combined_categorical_and_correlated_message(name, call):
     assert "jaxgsa.borgonovo" in advice
 
 
+@pytest.mark.parametrize(
+    "name,call",
+    [
+        ("dgsm", lambda p, X, Y: dgsm.analyze(p, fn=lambda x: x[:, 0], X=X)),
+        ("pce", lambda p, X, Y: pce_mod.analyze(p, X, Y)),
+        ("hdmr", lambda p, X, Y: hdmr.analyze(p, X, Y)),
+        ("hsic", lambda p, X, Y: hsic.analyze(p, X, Y)),
+        ("pawn", lambda p, X, Y: pawn.analyze(p, X, Y)),
+        ("shapley", lambda p, X, Y: shapley.analyze(p, X, Y)),
+        ("vkoga", lambda p, X, Y: jaxgsa.vkoga.analyze(p, X, Y)),
+    ],
+)
+def test_combined_message_on_the_analysis_side(name, call):
+    """Every gated analyzer must name the combined dead end too.
+
+    The analysis-side gates have the same fault the design-side ones had. A
+    correlated-only message recommends jaxgsa.vkoga and jaxgsa.kucherenko,
+    which refuse a categorical parameter. A categorical-only message
+    recommends the design-based jaxgsa.sobol pipeline, which refuses a
+    declared correlation. Both analysis gates route the combination to the
+    shared message, so the order they run in does not matter. Note that the
+    correlation-tolerant analyzers (hdmr, hsic, pawn, vkoga) reach it through
+    the categorical gate, and the correlation-naive ones (dgsm, pce, shapley)
+    through whichever gate their caller runs first.
+    """
+    problem, X, Y = _categorical_and_correlated_data()
+    with pytest.raises(ValueError, match="no variance-based method") as excinfo:
+        call(problem, X, Y)
+    message = str(excinfo.value)
+    assert message.startswith(f"jaxgsa.{name}.analyze ")
+    assert "'c'" in message
+    assert "problem.correlation" in message
+    advice = message.split("this problem:", 1)[1]
+    assert "sobol" not in advice
+    assert "jaxgsa.vkoga" not in advice
+    assert "jaxgsa.kucherenko" not in advice
+    assert "jaxgsa.optimal_transport" in advice
+    assert "jaxgsa.borgonovo" in advice
+    # The analysis wording must not tell a caller who already has data to go
+    # and draw samples.
+    assert "jaxgsa.sampling.monte_carlo" not in advice
+
+
+@pytest.mark.parametrize("name", ["optimal_transport", "borgonovo"])
+def test_combined_case_is_accepted_by_the_two_recommended_methods(name):
+    """The advice must be true: both named methods actually run."""
+    problem, X, Y = _categorical_and_correlated_data()
+    result = getattr(jaxgsa, name).analyze(problem, X, Y)
+    indices = result.delta if name == "borgonovo" else result.ot
+    assert np.asarray(indices).shape == (3,)
+
+
 def test_correlated_only_message_is_unchanged_without_categoricals():
     """A purely correlated problem keeps the correlated-only recommendation."""
     problem = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
@@ -1077,3 +1138,17 @@ def test_correlated_only_message_is_unchanged_without_categoricals():
     with pytest.raises(ValueError, match="correlation-tolerant") as excinfo:
         morris.sample(problem.with_correlation(R), 8)
     assert "jaxgsa.vkoga" in str(excinfo.value)
+
+    X = jaxgsa.sampling.monte_carlo(problem.with_correlation(R), 128, seed=0)
+    Y = np.asarray(X)[:, 0]
+    with pytest.raises(ValueError, match="correlation-tolerant") as excinfo:
+        pce_mod.analyze(problem.with_correlation(R), X, Y)
+    assert "jaxgsa.vkoga" in str(excinfo.value)
+
+
+def test_categorical_only_analysis_message_is_unchanged():
+    """A purely categorical problem keeps the categorical-only recommendation."""
+    problem, X, Y = _mixed_data(n=256)
+    with pytest.raises(ValueError, match="categorical-aware method") as excinfo:
+        hsic.analyze(problem, X, Y)
+    assert "jaxgsa.sobol" in str(excinfo.value)
