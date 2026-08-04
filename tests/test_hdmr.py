@@ -843,7 +843,7 @@ def correlated_hdmr_result():
 def test_st_is_scsa_total_under_correlation(correlated_hdmr_result):
     """ST is sum over terms u containing i of (Sa_u + Sb_u), not a Sobol total.
 
-    Pins the SCSA convention of Sarazin, Viaud & Cournede (2017) Eq. (8),
+    Pins the SCSA convention that Li et al. (2010) define in Section 2.2.3,
     which is also SALib's HDMR convention. Recomputed here from the per-term
     fields so a change of convention cannot pass silently.
     """
