@@ -45,4 +45,35 @@ features:
     details: Fused JIT kernels and vectorized execution replace Python loops. Sobol up to 15.8× faster, HDMR up to 668× on multi-output workloads.
 ---
 
+## Method capabilities
+
+| Method | Reports | Own design | Categorical | Correlated |
+|---|---|:--:|:--:|:--:|
+| **Variance-based** | | | | |
+| [`sobol`](/guide/methods#sobol-indices-via-saltelli-sampling) | $S_1$, $S_2$, $S_T$ | ✓ | ✓ | ✗ |
+| [`efast`](/guide/methods#efast-extended-fourier-amplitude-sensitivity-test) | $S_1$, $S_T$ | ✓ | ✗ | ✗ |
+| [`kucherenko`](/guide/methods#kucherenko-dependent-input-sobol-indices) | $S_1$, $S_T$ under dependence | ✓ | ✗ | ✓ |
+| [`pce`](/guide/methods#pce-polynomial-chaos-expansion) | $S_1$, $S_2$, $S_T$, surrogate | — | ✗ | ✗ |
+| [`hdmr`](/guide/methods#rs-hdmr-random-sampling-high-dimensional-model-representation) | $S_a$ / $S_b$ / $S$ per term, surrogate | — | ✗ | ✓ † |
+| [`shapley`](/guide/methods#shapley-effects) | allocation summing to 1 | — | ✗ | ✓ ‡ |
+| [`vkoga`](/guide/methods#vkoga-correlated-input-variance-indices) | $S_{TC}$, $S_{TU}$, $S_U$, $S_C$, $S_{IU}$, surrogate | — | ✗ | ✓ |
+| **Screening** | | | | |
+| [`morris`](/guide/methods#morris-elementary-effects-screening) | $\mu^*$, $\sigma$ | ✓ | ✗ | ✗ |
+| [`dgsm`](/guide/methods#dgsm-derivative-based-global-sensitivity-measures) | bounds on $S_T$ | ✓ | ✗ | ✗ |
+| **Moment-independent** | | | | |
+| [`borgonovo`](/guide/methods#borgonovo-delta-density-based-sensitivity) | $\delta$, $S_1$ | — | ✓ | ✓ § |
+| [`optimal_transport`](/guide/methods#optimal-transport-wasserstein-based-sensitivity) | $W_2^2$ index, advective + diffusive | — | ✓ | ✓ § |
+| [`pawn`](/guide/methods#pawn-cdf-based-sensitivity) | KS distance | — | ✓ | ✓ § |
+| [`hsic`](/guide/methods#hsic-hilbert–schmidt-independence-criterion) | dependence measure | — | ✗ | ✓ § |
+
+**Own design** means the method builds its own sample matrix, so you must be able to run the model at points it chooses. The rest are given-data methods: they accept any $(X, Y)$ pairs you already have.
+
+A ✗ is a refusal, not a silent approximation. The method raises a `ValueError` that names the parameters and the alternatives.
+
+† HDMR's per-term structural ($S_a$) and correlative ($S_b$) split is valid under dependence, but its $S_T$ is the SCSA convention and not a total-effect index. See the [HDMR section](/guide/methods#rs-hdmr-random-sampling-high-dimensional-model-representation).
+
+‡ Requires `backend="hdmr"`. The PCE backend assumes independent inputs and refuses.
+
+§ Correlation-inclusive: an input that does not enter the model but correlates with one that does scores non-zero. That is the correct reading of these indices, not an error.
+
 `jaxgsa`'s Sobol sampling and analysis workflow is heavily drawn from [SALib](https://salib.readthedocs.io/), adapted here into a JAX-first implementation focused on JIT compilation, accelerator execution, and multi-output workloads.
