@@ -164,13 +164,33 @@ class SobolSamples(UniqueDesignSamples):
         same array you would pass to :func:`jaxgsa.sobol.analyze`) to
         :func:`jaxgsa.morris.analyze`.
 
+        **Which estimand this is.** The derived design is a *radial* design,
+        so it estimates the radial quantity
+        ``E|f(A with B_j) - f(A)| / |B_j - A_j|``, in which the step varies
+        from block to block. That is not the classical Morris quantity, which
+        uses one fixed grid step ``Delta``. The two differ by much more than
+        sampling noise: on Ishigami at ``r = 8192`` the derived ``mu_star`` is
+        ``[8.68, 15.01, 6.62]`` against ``[8.69, 15.02, 6.64]`` from
+        ``morris.sample(..., method="radial")``, but ``[7.59, 7.88, 6.39]``
+        from the default ``method="trajectory"`` — a factor 1.9 on ``x2``, and
+        2.5 on its ``sigma``. ``morris.sample`` defaults to
+        ``method="trajectory"``, so compare these measures against
+        ``morris.sample(..., method="radial")``, never against the default.
+
         ``n_trajectories`` is ``base_n`` for both design variants: one radial
-        block per base point, based at ``A``. Second-order designs also contain
-        a block based at ``B`` (``B`` with its ``BA_j`` rows), but it is not a
-        second independent sample — for additive contributions it is
-        algebraically the *same* effect, so harvesting it leaves ``mu_star`` and
-        ``sigma`` unchanged while inflating the apparent sample size. It is
-        deliberately not used.
+        block per base point, based at ``A``. Second-order designs also hold a
+        block based at ``B`` (``B`` with its ``BA_j`` rows), which this method
+        deliberately does not harvest. The reason is that pooling it buys
+        nothing measurable. The two blocks are *not* algebraically the same
+        effect in general — that equality holds only for additive
+        contributions, and the measured paired-effect correlations on Ishigami
+        are 0.50 / 1.00 / -0.06, so only ``x2`` (from the purely additive
+        ``7 sin^2(x2)`` term) is a genuine duplicate. But over 150 seeds at
+        ``base_n = 128`` the pooled estimator's variance ratio against the
+        A-only estimator is ``[1.07, 1.00, 1.59]``: no reduction, and worse on
+        ``x3``. Pooling would also need a cluster bootstrap over base points to
+        keep the confidence intervals honest, because the two blocks in a base
+        point are dependent. That is real machinery for no gain.
 
         Because the derived measures reuse the very same model outputs as the
         Sobol indices, agreement between ``mu_star`` and ``ST`` is not an
@@ -189,23 +209,31 @@ class SobolSamples(UniqueDesignSamples):
                 step (see below).
 
         Warns:
-            UserWarning: If any parameter has an *unbounded* Gaussian marginal.
-                The Saltelli design applies no tail truncation, unlike
-                :func:`jaxgsa.morris.sample`'s ``truncation_quantile``, so the
-                design reaches further into the tails. An elementary effect is a
-                secant slope over a step of typical size ``O(1)``, not a local
-                derivative, so this is a modest upward bias in ``mu_star``
-                (measured 4% for a linear response up to ~60% for
-                ``exp(x^2/3)``) plus extra variance at small ``base_n`` — not a
-                divergence. Rankings are unaffected. Declare the marginals with
-                ``low``/``high`` at the quantiles you want if magnitudes must
-                match a native Morris design.
+            UserWarning: If any parameter has an *unbounded* Gaussian
+                marginal. ``mu_star`` then has no fixed scale, because how far
+                the design reaches into the tail sets its magnitude, and the
+                Saltelli design and :func:`jaxgsa.morris.sample` reach
+                different distances (the Saltelli design bounds support only at
+                the library's own clip, +/-7.03 sigma). Only *rankings* are
+                comparable across designs. Bound the marginals with
+                ``Problem.from_dict(..., truncate_gaussians=q)`` if magnitudes
+                must match. Once both sides are bounded the derived and native
+                radial measures agree: measured ratios 0.999 (linear), 0.997
+                (``x^2``), 0.988 (``x^4``), 0.987 (``exp(x^2/3)``), each within
+                its own seed-to-seed spread.
             UserWarning: If any block is dropped for having a near-zero step.
                 Unlike :func:`jaxgsa.morris.sample`'s radial design, which
                 offsets the auxiliary points by four draws, Saltelli takes
                 ``A`` and ``B`` from the *same* Sobol' row, so the two can
-                coincide. With ``scramble=False`` the sequence's first row is
-                all zeros and its blocks are always dropped.
+                coincide. This is a non-issue at the default
+                ``scramble=True``: 0 of 65536 blocks were dropped across 8
+                seeds at ``D = 3``. With ``scramble=False`` the drop rate is
+                real but falls off with ``base_n`` — measured 21.9% at
+                ``base_n=64``, 9.4% at 256, 2.3% at 1024 and 1.2% at 4096 — and
+                the survivors are a *biased* subsequence: ``mu_star`` comes out
+                ``[8.34, 14.88, 5.55]`` at ``base_n=64`` against
+                ``[8.68, 15.01, 6.62]`` scrambled, so ``x3`` reads 16% low.
+                Keep ``scramble=True``.
 
         References:
             Campolongo, Cariboni & Saltelli (2011). Comput. Phys. Commun.
@@ -226,16 +254,16 @@ class SobolSamples(UniqueDesignSamples):
 
         # Layout per base point: [A, AB_0..AB_{D-1}, (BA_0..BA_{D-1},) B].
         # Only the A-based block is harvested. Second-order designs also hold a
-        # radial block based at B (B with its BA_j rows), but it is a
-        # near-duplicate rather than a second sample: for any additive
-        # contribution the two effects are algebraically identical, since
-        # (f(BA_j) - f(B)) / (A_j - B_j) reduces to the same difference quotient
-        # as (f(AB_j) - f(A)) / (B_j - A_j). Measured on Ishigami, the paired
-        # effects correlate 0.50 / 1.00 / -0.06, and including them leaves
-        # mu_star and sigma unchanged to four digits while making a
-        # block-resampled bootstrap 10-28% too narrow. Recovering the partial
-        # information in them honestly needs a cluster bootstrap over base
-        # points, which is not worth the machinery for no gain in the estimate.
+        # radial block based at B (B with its BA_j rows). The two blocks are
+        # algebraically the same effect only for additive contributions:
+        # measured paired-effect correlations on Ishigami are 0.50 / 1.00 /
+        # -0.06, so only x2 (the additive 7 sin^2(x2) term) is a true
+        # duplicate. The reason to skip the B block is not duplication, it is
+        # that pooling gives no measured variance reduction — the pooled /
+        # A-only variance ratio over 150 seeds at base_n=128 is
+        # [1.07, 1.00, 1.59] — while requiring a cluster bootstrap over base
+        # points to keep the CIs honest, since the two blocks share a base
+        # point. Real machinery, no gain.
         block_rows = np.empty((self.base_n, D + 1), dtype=np.int64)
         block_rows[:, 0] = self.expanded_to_unique[starts]
         block_rows[:, 1:] = self.expanded_to_unique[offsets + 1 + params]
@@ -339,7 +367,7 @@ def _build_expanded_samples(
 
 
 def _warn_unbounded_gaussian(problem: Problem) -> None:
-    """Warn that unbounded Gaussian tails bias derived Morris measures upward.
+    """Warn that an unbounded Gaussian gives ``mu_star`` no fixed scale.
 
     ``GaussianInputSpec`` accepts ``low`` and/or ``high``, so a one-sided
     truncation still leaves the opposite tail unbounded and is reported. Only
@@ -353,11 +381,12 @@ def _warn_unbounded_gaussian(problem: Problem) -> None:
     if not unbounded:
         return
     warnings.warn(
-        f"jaxgsa: parameters {unbounded} have unbounded gaussian marginals. The Saltelli "
-        "design applies no tail truncation, unlike morris.sample(truncation_quantile=...), "
-        "so mu_star carries a modest upward bias (larger for tail-heavy models) and is "
-        "noisier at small base_n. Rankings are unaffected; declare the marginals with "
-        "low/high if magnitudes must match a native Morris design",
+        f"jaxgsa: parameters {unbounded} have unbounded gaussian marginals. An elementary "
+        "effect on an unbounded marginal has no fixed scale: how far the design reaches "
+        "into the tail sets the magnitude of mu_star, and the Saltelli design and "
+        "morris.sample reach different distances. Rankings are unaffected. Use "
+        "Problem.from_dict(..., truncate_gaussians=q) if magnitudes must be comparable "
+        "across designs",
         # Reached from SobolSamples.to_morris, so the user's frame is two up.
         stacklevel=3,
     )

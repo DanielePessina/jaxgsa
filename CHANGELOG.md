@@ -15,10 +15,55 @@
   `mu`/`mu_star`/`sigma`, bootstrap CIs, and multi-output support with no new
   model runs. `n_trajectories` is `base_n` for both design variants: one radial
   block per base point, based at `A`. Second-order designs also contain a block
-  based at `B`, but for additive contributions it is algebraically the same
-  effect, so using it would inflate the apparent sample size (narrowing
-  bootstrap CIs by 10-28%) without changing `mu_star` or `sigma`; it is
-  deliberately unused.
+  based at `B`. It is deliberately unused, because pooling it reduces no
+  measured variance (pooled / A-only variance ratio [1.07, 1.00, 1.59] over 150
+  seeds at `base_n=128`) and would need a cluster bootstrap over base points to
+  keep confidence intervals honest.
+
+  A derived design is a *radial* design, so it estimates
+  `E|f(A with B_j) - f(A)| / |B_j - A_j|`, not the classical fixed-step-delta
+  grid quantity. `morris.sample` defaults to `method="trajectory"`, so compare
+  a derived result against `morris.sample(..., method="radial")`.
+- `Problem.from_dict(..., truncate_gaussians=q)` — opt in to one bounded input
+  model. It writes explicit `low` and `high` into every Gaussian spec that does
+  not already declare them, at that marginal's own `q` and `1 - q` quantiles.
+  Default `None` keeps the previous unbounded behaviour. Sides the spec already
+  declares are kept as written.
+
+### Changed
+
+- `morris.sample` now squashes only the **open** sides of a Gaussian marginal.
+  A Gaussian with an explicit `low` and `high` is already bounded, and was
+  being truncated a second time into a range `truncation_quantile` narrower on
+  each side. A one-sided truncation now squashes only its open side.
+- `morris.sample`'s `truncation_quantile` default drops from `5e-3` to `1e-4`.
+  Measured, `q=5e-3` discarded 7.5% of the marginal variance and 24% of the
+  fourth moment and perturbed rankings (Kendall tau 0.66 against a
+  near-untruncated design on Oakley-O'Hagan); `q=1e-4` discards 0.29% and 5.0%.
+  Note that `mu_star` on an *unbounded* marginal has no `q -> 0` limit — the
+  design always includes unit levels 0 and 1 exactly — so magnitudes there are
+  scale-dependent by construction and only rankings are comparable across
+  truncation settings.
+- `pce.analyze` no longer forces a **wide** truncated Gaussian onto Legendre.
+  Any truncation used to route the input through its truncated CDF, which the
+  low-order Legendre basis approximates badly. A truncation whose every
+  declared bound is at least 5 standard deviations out now keeps Hermite. On
+  Oakley-O'Hagan at order 3 this restores the unbounded fit exactly, where the
+  Legendre route cost about a factor 2 in LOO RMSE. Above order 7 Legendre is
+  used even for a wide truncation, because the Hermite Gram defect against the
+  truncated measure grows with degree.
+
+### Fixed
+
+- Morris trajectory designs recorded `ee_delta` *before* the open-side squash
+  rescaled the coordinate, so the elementary-effect divisor did not match the
+  step actually taken — a systematic error of about 1% at the former default
+  `q`. The divisor is now rescaled with the coordinate, per dimension. A model
+  linear in the unit coordinate now recovers its coefficients exactly.
+- `morris.analyze`'s "statistically unreliable" warning now fires whenever
+  fewer than 10 blocks survive, whatever thinned the design. It previously
+  fired only inside the non-finite-cleaning branch, so `to_morris` could drop
+  to 4 surviving blocks in silence.
 
 ### Internal
 
@@ -28,6 +73,9 @@
   coordinates, and the existing float32 JAX helper
   (`_core.transforms.cdf_to_unit_interval`) loses too many digits to divide by.
   Unifying the two remains a follow-up.
+- Named the unit-cube clip that bounds every unbounded marginal:
+  `jaxgsa._core.sampling.UNIT_CLIP`, still `1e-12`, equal to +/-7.0345 sigma for
+  a Gaussian. It replaces four hard-coded literals. No behaviour change.
 
 ## 0.4.0
 

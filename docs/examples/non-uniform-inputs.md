@@ -40,6 +40,13 @@ Rules for Gaussian specs:
 - `low` and `high` are optional and may be used independently.
 - When either truncation bound is present, `jaxgsa.sobol.sample()` uses a true
   truncated normal transform, not hard clipping.
+- An *unbounded* Gaussian is still bounded in practice, at the library's own
+  support clip of +/-7.0345 standard deviations. Inverse-CDF sampling has to
+  keep the unit coordinate off 0 and 1, and that clip is the result.
+- `Problem.from_dict(params, truncate_gaussians=q)` fills `low` and `high` into
+  every Gaussian that does not already declare them, at that marginal's own `q`
+  and `1 - q` quantiles. Use it to fix one bounded input model that every
+  method shares. Sides you declared yourself are kept as written.
 
 ## Run Sobol on a single-timepoint linear model
 
@@ -106,6 +113,14 @@ Expected behavior:
   declared input specs so `SobolSamples.load()` reconstructs the same marginals.
 - `jaxgsa.hdmr.analyze()` supports non-uniform inputs (Gaussian, truncated Gaussian)
   via CDF mapping to `[0, 1]` before surrogate fitting.
+- `jaxgsa.pce.analyze()` picks the polynomial basis from how tight a truncation
+  is. A narrow truncation is a different measure, so it goes through the
+  truncated CDF and onto Legendre. A wide one — every declared bound at least 5
+  standard deviations out — keeps the Hermite basis, because forcing Legendre
+  there makes the fit visibly worse (on Oakley-O'Hagan at order 3, the LOO RMSE
+  went from 0.93 to 1.70 and the largest S1 error from 0.0023 to 0.0054). Above
+  order 7 Legendre is used even for a wide truncation, because the Hermite Gram
+  defect against the truncated measure grows with degree.
 
 ## See also
 

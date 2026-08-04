@@ -443,7 +443,16 @@ where $\mathbf{e}_i$ is the unit vector along input $i$ and $\Delta$ is the step
 - **Trajectory design** (Morris 1991, default): each trajectory is a random walk on a $p$-level grid (`num_levels`, default 4) with the canonical step $\Delta = p / (2(p-1))$, visiting inputs in a random order.
 - **Radial design** (Campolongo et al. 2011, `method="radial"`): star designs around scrambled-Sobol' base points, where each elementary effect compares a one-coordinate swap against the shared base point with a per-step $\Delta_i = b_i - a_i$.
 
-Both uniform and Gaussian marginals are supported. The design includes the unit-cube boundaries, which an unbounded inverse CDF would map to infinity, so each Gaussian coordinate is confined to $[q, 1-q]$ (`truncation_quantile`, default $q = 0.005$ — the 0.5%–99.5% quantile range) before the inverse-CDF transform; uniform marginals are untouched, and deduplication and prefix-nesting are unaffected.
+Both uniform and Gaussian marginals are supported. The design touches the unit-cube boundaries, and an unbounded inverse CDF maps 0 and 1 to infinity. Each **open** side of a Gaussian marginal is therefore pulled in by $q$ (`truncation_quantile`, default $q = 10^{-4}$ — the 0.01%–99.99% quantile range) before the inverse-CDF transform. A side the problem already bounds with an explicit `low` or `high` is left exactly where the user put it, so a two-sided truncated Gaussian is sampled as declared. Uniform marginals are untouched, and deduplication and prefix-nesting are unaffected. The elementary-effect divisor is the step the design really takes, so this rescaling does not bias $\mu^*$.
+
+On an **unbounded** marginal there is no $q \to 0$ limit for $\mu^*$. The design always includes unit levels 0 and 1 exactly, so a smaller $q$ always reaches further into the tail and the effects grow with it. $\mu^*$ magnitudes on an unbounded marginal are therefore scale-dependent by construction, and only *rankings* are comparable across truncation settings. If you want one bounded input model that every method shares, declare it once:
+
+```python
+problem = jaxgsa.Problem.from_dict(
+    {"x1": {"dist": "gaussian", "mean": 0.0, "variance": 1.0}},
+    truncate_gaussians=1e-4,   # fills low/high at this marginal's own quantiles
+)
+```
 
 The $r$ elementary effects per input are reduced to three screening measures:
 
@@ -487,25 +496,25 @@ sobol_result = jaxgsa.sobol.analyze(samples, Y)          # S1, ST, S2
 morris_result = jaxgsa.morris.analyze(samples.to_morris(), Y)  # mu*, sigma
 ```
 
-You get one radial block per base point, so `n_trajectories == base_n` for both design variants. A second-order design *also* contains a block based at $B$ ($B$ with its $B_A^{(j)}$ rows), and it is tempting to harvest as a free doubling — but it is a near-duplicate, not a second sample. Whenever parameter $j$'s contribution is additive,
+You get one radial block per base point, so `n_trajectories == base_n` for both design variants. A second-order design *also* contains a block based at $B$ ($B$ with its $B_A^{(j)}$ rows), and it is tempting to harvest as a free doubling. `to_morris()` does not use it. The reason is **not** that it is a duplicate. That equality holds only for additive contributions: whenever parameter $j$'s contribution is additive,
 
 $$\frac{f(B_A^{(j)}) - f(B)}{A_j - B_j} = \frac{g_j(A_j) - g_j(B_j)}{A_j - B_j} = \frac{f(A_B^{(j)}) - f(A)}{B_j - A_j}$$
 
-— algebraically the *same* effect. Measured on Ishigami the paired effects correlate 0.50 / 1.00 / −0.06 (the middle term, $a\sin^2(x_2)$, being purely additive), and including them leaves $\mu^*$ and $\sigma$ unchanged to four significant figures while making a block-resampled bootstrap 10–28% too narrow. So `to_morris()` deliberately uses only the $A$-based blocks. Three caveats:
+but in general it does not. Measured on Ishigami the paired effects correlate 0.50 / 1.00 / −0.06, so only $x_2$ — from the purely additive $7\sin^2(x_2)$ term — is a genuine duplicate. The real reason is that pooling buys nothing: over 150 seeds at `base_n=128` the pooled estimator's variance ratio against the $A$-only estimator is $[1.07, 1.00, 1.59]$, so it reduces no variance and is worse on $x_3$. Pooling would also need a cluster bootstrap over base points to keep confidence intervals honest, because the two blocks in a base point share their sampling unit. That is real machinery for no gain.
+
+**Which estimand you get.** The derived design is a *radial* design, so it estimates $\mathbb{E}\left|f(A \text{ with } B_j) - f(A)\right| / |B_j - A_j|$, in which the step varies from block to block. That is **not** the classical Morris quantity with one fixed grid step $\Delta$. `jaxgsa.morris.sample` defaults to `method="trajectory"`, so compare against `morris.sample(..., method="radial")`, never against the default. On Ishigami at $r = 8192$ the derived $\mu^*$ is $[8.68, 15.01, 6.62]$ against $[8.69, 15.02, 6.64]$ for the native radial design, but $[7.59, 7.88, 6.39]$ for the native trajectory design — a factor 1.9 on $x_2$, and 2.5 on its $\sigma$.
+
+Three further caveats:
 
 - The derived measures reuse the same model outputs as the Sobol' indices, so agreement between $\mu^*$ and $S_T$ is **not** an independent check of either. (They may also legitimately rank parameters differently — $\mu^*$ is a mean absolute derivative, not a variance share.)
-- Saltelli takes $A$ and $B$ from the *same* Sobol' row, whereas `jaxgsa.morris.sample`'s radial design offsets them by four draws precisely to keep $\Delta$ away from zero. Blocks whose step is unmeasurable are dropped with a warning; with `scramble=False` an unscrambled sequence repeats values across coordinate pairs and loses a substantial fraction of blocks, so keep the default `scramble=True`.
-- For **unbounded Gaussian** marginals the Saltelli design applies no tail truncation, unlike `morris.sample`'s `truncation_quantile`, so it reaches further into the tails. The effect is smaller than it first appears: an elementary effect is a *secant* slope over a step of typical size $O(1)$, not a local derivative, so the $1/\varphi$ blow-up at the extreme draw never materializes. Measured against a design truncated at the 0.5%/99.5% quantiles, $\mu^*$ carries a modest upward bias that grows with tail weight — 1.04× for a linear response, 1.13× for $x^2$, 1.42× for $x^4$, 1.61× for $\exp(x^2/3)$ — and is noisier at small `base_n`, but it does **not** drift with `base_n` (measured flat to within a few percent from 256 to 16384). Rankings are unaffected. If magnitudes must match a native Morris design, declare the marginals with explicit `low`/`high`:
+- Saltelli takes $A$ and $B$ from the *same* Sobol' row, whereas `jaxgsa.morris.sample`'s radial design offsets them by four draws precisely to keep $\Delta$ away from zero. Blocks whose step is unmeasurable are dropped with a warning. At the default `scramble=True` this is a non-issue: 0 of 65536 blocks were dropped across 8 seeds at $D = 3$. With `scramble=False` the drop rate is real but falls off with `base_n` — 21.9% at `base_n=64`, 9.4% at 256, 2.3% at 1024, 1.2% at 4096 — and the survivors are a *biased* subsequence, giving $\mu^* = [8.34, 14.88, 5.55]$ at `base_n=64` against $[8.68, 15.01, 6.62]$ scrambled, so $x_3$ reads 16% low. Keep `scramble=True`.
+- For **unbounded Gaussian** marginals, $\mu^*$ has no fixed scale. How far a design reaches into the tail sets the magnitude, and the Saltelli design (bounded only by the library's own $\pm 7.03\sigma$ support clip) and `morris.sample` reach different distances. Only rankings are comparable. Bound the marginals once if magnitudes must match:
 
   ```python
-  from scipy.stats import norm
-  jaxgsa.GaussianInputSpec(
-      dist="gaussian", mean=mu, variance=sigma**2,
-      low=norm.ppf(0.005, mu, sigma), high=norm.ppf(0.995, mu, sigma),
-  )
+  problem = jaxgsa.Problem.from_dict(params, truncate_gaussians=1e-4)
   ```
 
-  This bounds the design at sampling time, so both the Sobol indices and the derived Morris measures describe the same truncated input model. `to_morris()` warns when unbounded Gaussians are present.
+  Both sides are then genuinely bounded, `morris.sample` does not squash them again, and the derived and native radial measures agree — measured ratios 0.999 (linear), 0.997 ($x^2$), 0.988 ($x^4$), 0.987 ($\exp(x^2/3)$), each within its own seed-to-seed spread. `to_morris()` warns when unbounded Gaussians are present.
 
 Note the reverse derivation is impossible: a radial Morris design never evaluates the $B$ rows, so $S_1$ and $S_T$ cannot be recovered from it.
 

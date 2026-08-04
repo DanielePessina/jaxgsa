@@ -175,12 +175,28 @@ print("sigma shape:", result.sigma.shape)      # (K, D) = (2, 3)
 
 ## Gaussian inputs
 
-Gaussian marginals are supported through a **truncated-quantile grid**: the
-Morris design includes the unit-cube boundaries, which an unbounded inverse
-CDF would map to infinity, so each Gaussian coordinate is confined to
-`[q, 1 - q]` (`truncation_quantile`, default 0.005 — probing the 0.5%–99.5%
-quantile range) before the transform. Uniform marginals are untouched, and
-deduplication and prefix-nested downsampling work as usual.
+Gaussian marginals are supported through a **truncated-quantile grid**. The
+Morris design touches the unit-cube boundaries, and an unbounded inverse CDF
+maps 0 and 1 to infinity. Each **open** side of a Gaussian marginal is
+therefore pulled in by `q` (`truncation_quantile`, default 1e-4 — probing the
+0.01%–99.99% quantile range) before the transform. A side the problem already
+bounds with an explicit `low` or `high` stays exactly where you put it, so a
+two-sided truncated Gaussian is sampled as declared. Uniform marginals are
+untouched, and deduplication and prefix-nested downsampling work as usual.
+
+On an **unbounded** marginal `mu_star` has no `q -> 0` limit. The design always
+includes unit levels 0 and 1 exactly, so a smaller `q` always reaches further
+into the tail and the effects grow with it. Magnitudes are scale-dependent by
+construction there, and only *rankings* are comparable across truncation
+settings. To fix one bounded input model that every method shares, pass
+`truncate_gaussians` once:
+
+```python
+problem = jaxgsa.Problem.from_dict(params, truncate_gaussians=1e-4)
+```
+
+It writes explicit `low`/`high` into every Gaussian that does not already
+declare them, at that marginal's own `q` and `1 - q` quantiles.
 
 ```python
 import jax.numpy as jnp
@@ -299,8 +315,9 @@ D is always the last axis.
 ## Practical caveats
 
 - Gaussian marginals are sampled on a truncated-quantile grid
-  (`truncation_quantile`, default 0.005): the design would otherwise hit the
-  unit-cube boundaries, which an unbounded inverse CDF maps to infinity.
+  (`truncation_quantile`, default 1e-4): the design would otherwise hit the
+  unit-cube boundaries, which an unbounded inverse CDF maps to infinity. Only
+  *open* sides are pulled in; an explicit `low` or `high` is kept as written.
   `truncation_quantile` must be in `(0, 0.5)` or `jaxgsa.morris.sample()` raises
   `ValueError`.
 - `to_physical_units()` raises `ValueError` for problems with Gaussian
@@ -318,14 +335,24 @@ D is always the last axis.
   error; fewer than 10 trigger a reliability warning.
 - Measures derived through `SobolSamples.to_morris()` come from the same model
   outputs as that design's Sobol indices, so mu_star and ST agreeing is not an
-  independent check of either. Two further limits apply to derived designs
-  only: blocks whose step is unmeasurable are dropped with a warning (keep
-  `scramble=True`, since an unscrambled sequence loses a substantial fraction
-  of blocks), and for unbounded Gaussian marginals the Saltelli design applies
-  no tail truncation, which biases mu_star upward by a modest factor (1.04x for
-  a linear response, 1.6x for a strongly tail-heavy one) without drifting with
-  `base_n`. Declare the marginals with explicit `low`/`high` if magnitudes must
-  match a native Morris design.
+  independent check of either.
+- A derived design is a *radial* design. It estimates
+  `E|f(A with B_j) - f(A)| / |B_j - A_j|`, not the fixed-step-delta grid
+  quantity. `jaxgsa.morris.sample()` defaults to `method="trajectory"`, so
+  compare a derived result against `morris.sample(..., method="radial")`. On
+  Ishigami at r=8192 the derived mu_star is [8.68, 15.01, 6.62] against
+  [8.69, 15.02, 6.64] native radial, but [7.59, 7.88, 6.39] native trajectory.
+- Derived blocks whose step is unmeasurable are dropped with a warning. At the
+  default `scramble=True` this is a non-issue: 0 of 65536 blocks were dropped
+  across 8 seeds at D=3. With `scramble=False` the rate falls with `base_n`
+  (21.9% at 64, 9.4% at 256, 2.3% at 1024, 1.2% at 4096) and the survivors are
+  a biased subsequence — mu_star [8.34, 14.88, 5.55] at base_n=64 against
+  [8.68, 15.01, 6.62] scrambled, so x3 reads 16% low. Keep `scramble=True`.
+- For unbounded Gaussian marginals a derived mu_star has no fixed scale,
+  because how far the design reaches into the tail sets the magnitude and the
+  Saltelli design and `morris.sample` reach different distances. Rankings are
+  unaffected. Use `Problem.from_dict(..., truncate_gaussians=q)` if magnitudes
+  must be comparable across designs.
 
 ## See also
 
