@@ -57,8 +57,8 @@ class HDMRResult(SurrogateResult):
 
     Warning:
         Under correlated inputs, :attr:`ST` and :attr:`S1` do not carry their
-        usual Sobol meaning. :attr:`ST` is the SCSA total of Sarazin, Viaud &
-        Cournede (2017), Eq. (8), and :attr:`S1` is a structural share only.
+        usual Sobol meaning. :attr:`ST` is the SCSA total of Li et al.
+        (2010), Section 2.2.3, and :attr:`S1` is a structural share only.
         Neither one measures expected conditional-variance reduction, and
         neither one tells you that a parameter can be fixed. Read the notes on
         each attribute before you rank parameters from a correlated fit.
@@ -74,9 +74,17 @@ class HDMRResult(SurrogateResult):
         ST: SCSA total per parameter, shape ``(D,)`` / ``(K, D)`` /
             ``(T, K, D)``. It sums ``S = Sa + Sb`` over every term that
             contains the parameter: ``ST_i = sum over u containing i of
-            (Sa_u + Sb_u)``. This is Eq. (8) of Sarazin, Viaud & Cournede
-            (2017), and it matches the HDMR convention of SALib and of
-            Vrugt's ``HDMR_end.m``.
+            (Sa_u + Sb_u)``. Li, Rabitz et al. (2010) define it in Section
+            2.2.3 -- "the total sensitivity indices ... can be calculated by
+            adding together all the sensitivity indices containing X_i" --
+            from the per-term indices of their Eqs. (19)-(22). Sarazin,
+            Viaud & Cournede (2017) restate it as their Eq. (8). SALib and
+            Vrugt's ``HDMR_end.m`` use the same convention.
+
+            Li et al. attach a precondition to it: the totals are reliable
+            only when the per-term ``S`` values sum to about 1 (their
+            Eq. (24)). The shortfall is the surrogate's unexplained
+            variance, so check ``S.sum()`` before ranking parameters.
 
             With independent inputs the correlative shares ``Sb`` vanish and
             ``ST`` reduces to the ordinary Sobol total-order index.
@@ -86,7 +94,12 @@ class HDMRResult(SurrogateResult):
             reduction of output variance from fixing the parameter. Do not
             use it to decide that a parameter can be fixed: the bias runs
             toward "cannot be fixed", and a parameter the model ignores can
-            outrank one with a negative value. It is also not comparable with
+            outrank one with a negative value. Note that Li et al. reuse the
+            symbol ``S_Ti`` for both this term-membership sum and, in their
+            Eq. (4), the classical conditional-variance total; the two are
+            different quantities and only the first is computed here.
+            Sarazin et al. state explicitly that the ``[0, 1]`` bound no
+            longer holds. It is also not comparable with
             the ``ST`` of ``jaxgsa.kucherenko`` or the ``S_TU`` of
             ``jaxgsa.vkoga``. Use one of those for a genuine
             conditional-variance total under dependence.

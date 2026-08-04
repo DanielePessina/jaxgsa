@@ -179,10 +179,14 @@ scale before returning them.
 | $S_a(t)$ | Structural (uncorrelated) variance contribution of term $t$. For first-order terms with independent inputs, equivalent to Sobol' $S_1$. |
 | $S_b(t)$ | Correlative variance contribution of term $t$ (due to input correlations). |
 | $S(t)$ | Total contribution per term: $S_a + S_b$. |
-| $S_T(i)$ | SCSA total per parameter: $S_T(i) = \sum_{u \ni i} (S_a(u) + S_b(u))$, the sum of $S$ over every term that contains parameter $i$ (Sarazin, Viaud & Cournède, 2017, Eq. 8). Equal to the Sobol' total-order index when the inputs are independent. Read the warning below when they are not. |
+| $S_T(i)$ | SCSA total per parameter: $S_T(i) = \sum_{u \ni i} (S_a(u) + S_b(u))$, the sum of $S$ over every term that contains parameter $i$ (Li et al., 2010, Section 2.2.3). Equal to the Sobol' total-order index when the inputs are independent. Read the warning below when they are not. |
 
 ::: warning HDMR's total under correlated inputs
-With correlated inputs, HDMR's $S_T$ is not a Sobol' total-order index. It is the SCSA convention, the same one SALib uses. It can be negative, it is not bounded in $[0, 1]$, and it does not measure the expected variance reduction $\mathrm{E}[\mathrm{Var}(Y \mid X_{\sim i})] / \mathrm{Var}(Y)$ that a total-order index normally reports. So it is not a criterion for deciding that a parameter can be fixed. The bias runs toward "cannot be fixed", and a parameter the model ignores can outrank one with a negative value.
+With correlated inputs, HDMR's $S_T$ is not a Sobol' total-order index. It is the SCSA total that Li et al. (2010) define in Section 2.2.3, the same convention SALib uses. It can be negative, it is not bounded in $[0, 1]$, and it does not measure the expected variance reduction $\mathrm{E}[\mathrm{Var}(Y \mid X_{\sim i})] / \mathrm{Var}(Y)$ that a total-order index normally reports. So it is not a criterion for deciding that a parameter can be fixed. The bias runs toward "cannot be fixed", and a parameter the model ignores can outrank one with a negative value.
+
+The paper itself invites the confusion: its Eq. (4) uses the symbol $S_{Ti}$ for the classical conditional-variance total, and Section 2.2.3 reuses the same symbol for the term-membership sum. Only the second is what HDMR reports.
+
+Li et al. attach a precondition to the totals. They are reliable only when the per-term $S$ values sum to about 1 (Eq. 24); the shortfall is the variance the surrogate leaves unexplained. Check `result.S.sum()` before you rank parameters from a correlated fit.
 
 $S_1$ has the matching caveat: it is the structural share $S_a$ of the first-order term, not the Sobol' first-order index.
 
@@ -788,7 +792,8 @@ Time-series outputs are particularly useful for dynamic models, where the evolut
 - Saltelli, A., Annoni, P., Azzini, I., Campolongo, F., Ratto, M., & Tarantola, S. (2010). Variance based sensitivity analysis of model output. *Computer Physics Communications*, 181(2), 259-270.
 - Jansen, M.J.W. (1999). Analysis of variance designs for model output. *Computer Physics Communications*, 117(1-2), 35-43.
 - Li, G., Rabitz, H., Yelvington, P.E., Oluwole, O.O., Bacon, F., Kolb, C.E., & Schoendorf, J. (2010). Global sensitivity analysis for systems with independent and/or correlated inputs. *Journal of Physical Chemistry A*, 114(19), 6022-6032.
-- Sarazin, G., Viaud, C. & Cournède, P.-H. (2017). Analyse de sensibilité globale pour les modèles à entrées corrélées. *Journal de la Société Française de Statistique*, 158(1), 68-89. (Defines the SCSA total $S_T(u) = \sum_{v \supseteq u} S(v)$ in Eq. 8, and states that it is no longer confined to $[0, 1]$ in the correlated case.)
+- Li, G., Rabitz, H., Yelvington, P. E., Oluwole, O. O., Bacon, F., Kolb, C. E. & Schoendorf, J. (2010). Global sensitivity analysis for systems with independent and/or correlated inputs. *The Journal of Physical Chemistry A*, 114(19), 6022-6032. (Defines the SCSA method and its per-term indices $S$, $S^a$, $S^b$ in Eqs. 19-22, the per-input totals in Section 2.2.3, and the $\sum_j S_{p_j} \approx 1$ reliability criterion in Eq. 24.)
+- Sarazin, G., Viaud, C. & Cournède, P.-H. (2017). Analyse de sensibilité globale pour les modèles à entrées corrélées. *Journal de la Société Française de Statistique*, 158(1), 68-89. (Restates the SCSA total as $S_T(u) = \sum_{v \supseteq u} S(v)$ in Eq. 8, and states explicitly that it is no longer confined to $[0, 1]$ in the correlated case.)
 - Rabitz, H. & Alis, O. (1999). General foundations of high-dimensional model representations. *Journal of Mathematical Chemistry*, 25(2-3), 197-233.
 - Sudret, B. (2008). Global sensitivity analysis using polynomial chaos expansions. *Reliability Engineering & System Safety*, 93(7), 964-979.
 - Owen, A.B. (2014). Sobol' indices and Shapley value. *SIAM/ASA Journal on Uncertainty Quantification*, 2(1), 245-251.

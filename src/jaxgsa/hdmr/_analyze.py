@@ -173,10 +173,13 @@ def _warn_correlated_index_reading(problem: Problem) -> None:
     """Warn once that ST and S1 carry the SCSA reading on a correlated problem.
 
     HDMR accepts correlated inputs, and the ANCOVA split stays valid. The two
-    aggregate fields are the trap: ``ST`` is the SCSA total of Sarazin, Viaud
-    & Cournede (2017) Eq. (8), not a Sobol total, and ``S1`` is a structural
-    share only. Both are valid published quantities that are easy to misread,
-    so this warns rather than raises. Independent problems stay silent.
+    aggregate fields are the trap: ``ST`` is the SCSA total of Li et al.
+    (2010) Section 2.2.3, not a Sobol total, and ``S1`` is a structural
+    share only. The paper itself invites the confusion, reusing the symbol
+    ``S_Ti`` for both this term-membership sum and the classical
+    conditional-variance total of its Eq. (4). Both are valid published
+    quantities that are easy to misread, so this warns rather than raises.
+    Independent problems stay silent.
 
     Args:
         problem: Problem definition for the analysis; nothing is emitted
@@ -189,12 +192,14 @@ def _warn_correlated_index_reading(problem: Problem) -> None:
     warnings.warn(
         "jaxgsa: problem.correlation declares dependent inputs. HDMRResult.ST "
         "is then the SCSA total, sum over every term u containing i of "
-        "(Sa_u + Sb_u) (Sarazin, Viaud & Cournede 2017, Eq. 8; the SALib HDMR "
+        "(Sa_u + Sb_u) (Li et al. 2010, Section 2.2.3; the SALib HDMR "
         "convention). It is not a Sobol total-order index: it can be "
         "negative, it is not bounded in [0, 1], and it does not measure the "
         "expected variance reduction from fixing a parameter, so do not use "
-        "it to decide a parameter can be fixed. HDMRResult.S1 is likewise the "
-        "structural share only, not the Sobol first-order index. For a "
+        "it to decide a parameter can be fixed. Li et al. also require the "
+        "per-term S values to sum to about 1 for the totals to be reliable "
+        "(their Eq. 24) -- check result.S.sum(). HDMRResult.S1 is likewise "
+        "the structural share only, not the Sobol first-order index. For a "
         "conditional-variance total under dependence use jaxgsa.kucherenko "
         "(ST) or jaxgsa.vkoga (S_TU). The per-term Sa/Sb/S fields are "
         "unaffected.",
@@ -325,8 +330,9 @@ def _analyze_hdmr_core(
         surrogate state and its RMSE.
 
         ``ST`` is the SCSA total: ``ST_i = sum over u containing i of
-        (Sa_u + Sb_u)``, Eq. (8) of Sarazin, Viaud & Cournede (2017). It is
-        the same convention as SALib's HDMR. With independent inputs the
+        (Sa_u + Sb_u)``, defined in Section 2.2.3 of Li et al. (2010) from
+        the per-term indices of their Eqs. (19)-(22). It is the same
+        convention as SALib's HDMR. With independent inputs the
         correlative shares vanish and it reduces to the ordinary Sobol
         total-order index.
 

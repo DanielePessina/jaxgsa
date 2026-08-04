@@ -67,8 +67,12 @@
 - **`hdmr` now says what `ST` means under correlated inputs.** No number
   changed. `HDMRResult.ST` was labelled a total-order index with no caveat.
   It is the SCSA total: the sum of `S = Sa + Sb` over every term that
-  contains the parameter. That is Eq. (8) of Sarazin, Viaud & Cournède
-  (2017), and it is the same convention as SALib's HDMR. With independent
+  contains the parameter. Li et al. (2010) define it in Section 2.2.3, from
+  the per-term indices of their Eqs. (19)-(22); Sarazin, Viaud & Cournède
+  (2017) restate it as their Eq. (8). It is the same convention as SALib's
+  HDMR. The source paper invites the misreading, reusing the symbol `S_Ti`
+  for both this term-membership sum and the classical conditional-variance
+  total of its own Eq. (4). With independent
   inputs the correlative shares vanish and it reduces to the ordinary Sobol'
   total-order index. With correlated inputs it does not. It can be negative,
   it is not bounded in `[0, 1]`, and it does not measure the expected
@@ -77,7 +81,10 @@
   parameter the model ignores can outrank one with a negative value. It is
   also not comparable with the `ST` of `jaxgsa.kucherenko` or the `S_TU` of
   `jaxgsa.vkoga`. Use one of those for a conditional-variance total under
-  dependence. `HDMRResult.S1` carries the matching caveat: it is the
+  dependence. Li et al. also attach a precondition: the totals are reliable
+  only when the per-term `S` values sum to about 1 (their Eq. 24), the
+  shortfall being the variance the surrogate leaves unexplained, so check
+  `result.S.sum()`. `HDMRResult.S1` carries the matching caveat: it is the
   structural share `Sa` of the first-order term, not the Sobol' first-order
   index. `hdmr.analyze` emits one `UserWarning` per call on a correlated
   problem to say all of this. Independent problems stay silent. The
