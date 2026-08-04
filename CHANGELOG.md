@@ -27,9 +27,10 @@
   pseudo-random path bit-for-bit. Existing seeds reproduce existing samples.
   Two new companions cover the remaining workflows. `correlate(X, problem)`
   retrofits the declared correlation onto an existing sample. It uses
-  Iman–Conover-style rank re-pairing. Each output column is an exact
-  permutation of the input column. The marginal values therefore stay
-  intact. `fit_correlation(problem, X)` estimates the latent matrix from
+  Iman–Conover rank re-pairing: van der Waerden scores, de-correlated by
+  `chol(R) chol(corr(M))^-1`, then matched rank for rank. Each output column
+  is an exact permutation of the input column. The marginal values therefore
+  stay intact. `fit_correlation(problem, X)` estimates the latent matrix from
   observed data via Spearman ranks. Attach it with
   `problem.with_correlation(fit_correlation(problem, X))`. Tied values get
   average ranks, per the Spearman convention. Heavily discrete data still
@@ -51,6 +52,31 @@
   include_correlative=True)` allocates the ANCOVA decomposition. Internally,
   a `correlation_ok` capability flag sits on the shared `(X, Y)` validation.
   Future methods must therefore make the decision explicitly.
+
+### Fixed
+
+- **`correlation_kind="spearman"` now checks the matrix you declared.** The
+  structural checks (shape, symmetry, unit diagonal, entry range) ran after
+  the `2 sin(pi rho_s / 6)` conversion. That conversion pins the diagonal to
+  1, so a Spearman matrix with a nonsense diagonal was accepted and silently
+  rewritten. The checks now run on the declared matrix, before any
+  conversion. Both kinds reject the same structural errors.
+- **`correlate()` is now the real Iman–Conover method.** It drew a plain
+  correlated normal score matrix, which carries its own sampling noise into
+  the re-pairing. It now uses van der Waerden scores and the
+  `chol(corr(M))^-1` de-correlation step, which is what removes that noise.
+  At N = 50 and a target latent correlation of 0.8, the standard deviation of
+  the achieved rank correlation falls from 0.065 to 0.024, and a bias of
+  -0.006 disappears. The same ratio holds at every sample size. Output for a
+  correlated problem therefore changes for a given seed. Each output column
+  is still an exact permutation of the input column, and the function is
+  still deterministic for a given seed.
+- **The positive-definiteness repair is now idempotent.** Clipping the
+  eigenvalues and then renormalising the diagonal could push the smallest
+  eigenvalue back under the floor. A repaired matrix was therefore repaired
+  again on the next call, so a `Problem` moved by about 1e-9 on every
+  save-and-load round trip. The repair now repeats until the floor holds, so
+  it reaches a fixed point and round trips are stable.
 
 ## 0.5.0
 

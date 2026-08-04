@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import numpy.typing as npt
+from scipy.stats import norm
 
 from jaxgsa._core.copula import (
     _safe_cholesky,
@@ -75,17 +76,33 @@ def correlate(
 ) -> np.ndarray:
     """Impose ``problem.correlation`` on an existing sample by rank re-pairing.
 
-    Iman-Conover-style retrofit: draws a correlated latent score matrix from
-    the problem's Gaussian-copula correlation, then reorders each column of
-    ``X`` so its ranks match the score column's ranks. Each output column is
-    an exact permutation of the corresponding input column, so the marginal
-    sample values — including any structure a low-discrepancy design put into
-    them — are preserved; only the pairing across columns changes.
+    The Iman-Conover method (Iman & Conover 1982). It builds a score matrix
+    ``M`` from van der Waerden scores, ``Phi^{-1}(i / (N + 1))``, independently
+    permuted per column. It then maps ``M`` through
+    ``chol(R) chol(corr(M))^{-1}`` so the score matrix carries the target
+    correlation ``R`` exactly, not just in expectation. Finally it reorders
+    each column of ``X`` so its ranks match the score column's ranks.
+
+    The ``corr(M)^{-1/2}`` step is what separates the method from a plain
+    correlated normal draw. It removes the sampling noise of the finite score
+    matrix. Without it the achieved rank correlation of the output scatters
+    around the target about 2.5 times as widely, and it carries a small
+    negative bias. This matters because ``correlate`` exists to retrofit a
+    target onto a finite design, which is exactly where that variance
+    reduction pays.
+
+    Each output column is an exact permutation of the corresponding input
+    column, so the marginal sample values — including any structure a
+    low-discrepancy design put into them — are preserved; only the pairing
+    across columns changes.
 
     Use it when the per-column samples already exist (an evaluated design, an
     observational data set) and only the dependence structure is missing.
     For fresh samples prefer :func:`monte_carlo`, which draws the coupling
     directly.
+
+    References:
+        Iman & Conover (1982). Commun. Stat. Simul. Comput. 11(3):311-334.
 
     Args:
         X: ``(N, D)`` sample matrix in physical units, one column per
@@ -116,11 +133,45 @@ def correlate(
         raise ValueError(f"X must be (N, {D}) to match the problem, got {X.shape}")
 
     rng = np.random.default_rng(seed)
-    scores = rng.standard_normal((X.shape[0], D)) @ _safe_cholesky(R).T
+    scores = _iman_conover_scores(X.shape[0], R, rng)
     # Rank of each score within its column (argsort twice); row i of the
     # output takes the X value holding the same within-column rank.
     ranks = np.argsort(np.argsort(scores, axis=0), axis=0)
     return np.take_along_axis(np.sort(X, axis=0), ranks, axis=0)
+
+
+def _iman_conover_scores(n: int, R: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """Build the Iman-Conover score matrix whose sample correlation is ``R``.
+
+    Args:
+        n: Number of rows.
+        R: ``(D, D)`` target latent correlation matrix, positive definite.
+        rng: Generator supplying the column permutations.
+
+    Returns:
+        ``(n, D)`` score matrix. Every column is a permutation of the same van
+        der Waerden scores, so every column has the identical marginal; the
+        Pearson correlation of the columns equals ``R`` up to the rounding of
+        the linear map.
+    """
+    D = R.shape[0]
+    # Van der Waerden scores: the expected order statistics of a standard
+    # normal, up to the usual i / (n + 1) plotting position. Using a fixed
+    # score set rather than a fresh normal draw removes one source of noise.
+    scores = norm.ppf(np.arange(1, n + 1) / (n + 1))
+    M = np.empty((n, D), dtype=np.float64)
+    for j in range(D):
+        M[:, j] = rng.permutation(scores)
+
+    # corr(M) is singular when there are fewer rows than columns, and undefined
+    # for a single row. Those designs carry no usable rank structure anyway, so
+    # skip the de-correlation and fall back to the raw score matrix.
+    if n <= D or n < 3:
+        return M
+
+    T = np.atleast_2d(np.corrcoef(M, rowvar=False))
+    # M @ (chol(R) chol(T)^{-1}).T == M @ chol(T)^{-T} chol(R).T.
+    return M @ np.linalg.solve(_safe_cholesky(T).T, _safe_cholesky(R).T)
 
 
 def fit_correlation(problem: Problem, X: npt.ArrayLike) -> np.ndarray:

@@ -30,9 +30,15 @@ from jaxgsa._core.sampling import _transform_samples
 from jaxgsa.problem import Problem
 
 # Eigenvalues below this are lifted when repairing a non-PD correlation matrix.
-# Large enough to survive a float32 Cholesky downstream, small enough not to
+# Everything on this path is float64. The floor only has to keep the downstream
+# float64 Cholesky away from a zero pivot, so it stays small enough not to
 # distort a matrix that was only marginally indefinite.
 _MIN_EIGENVALUE = 1e-8
+
+# Clipping the eigenvalues and then renormalising the diagonal can push the
+# smallest eigenvalue back under the floor, so the repair runs again. Three
+# passes are enough in practice; the cap only bounds a pathological input.
+_MAX_REPAIR_PASSES = 16
 
 
 class _ConditionalPlan(NamedTuple):
@@ -75,9 +81,10 @@ def _spearman_to_latent(R: np.ndarray) -> np.ndarray:
     Under a Gaussian copula the Pearson correlation of the latent normals that
     reproduces a Spearman rank correlation ``rho_s`` is ``2 sin(pi rho_s / 6)``
     (Kruskal 1958). The conversion is exact for continuous marginals and maps
-    ``[-1, 1]`` onto itself, so validity checks may run on either scale; it is
-    not guaranteed to preserve positive definiteness, so callers must
-    re-validate the result.
+    ``[-1, 1]`` onto itself. It is not guaranteed to preserve positive
+    definiteness, so callers must run the positive-definiteness check on the
+    result. Structural checks must run on the input instead: the conversion
+    rewrites every entry, so it would mask a bad declared matrix.
 
     Args:
         R: ``(D, D)`` Spearman rank-correlation matrix.
@@ -101,12 +108,16 @@ def canonicalize_correlation(
     """Normalize a user-supplied correlation matrix to the latent scale.
 
     Single entry point behind every surface that accepts a correlation
-    matrix: checks the shape against the problem dimension, converts a
-    Spearman matrix to the latent scale, and runs the full structural and
-    positive-definiteness validation. The Spearman conversion maps
-    ``[-1, 1]`` onto itself monotonically and preserves symmetry and the
-    unit diagonal, so validating after conversion catches exactly the same
-    structural errors as validating before it.
+    matrix. The structural checks (shape, symmetry, unit diagonal, entry
+    range) run on the matrix as the user declared it, before any conversion.
+    A Spearman matrix is only then converted to the latent scale. The
+    positive-definiteness check and repair run last, on the latent matrix,
+    because the conversion can destroy positive definiteness.
+
+    The order matters. The conversion rewrites every entry and pins the
+    diagonal to exactly 1, so a check made after it cannot see a wrong
+    declared diagonal, and it would report any other error against numbers
+    the user never wrote.
 
     Args:
         correlation: ``(D, D)`` candidate correlation matrix.
@@ -125,13 +136,12 @@ def canonicalize_correlation(
     if kind not in ("latent", "spearman"):
         raise ValueError(f"correlation_kind must be 'latent' or 'spearman', got {kind!r}")
     R = np.asarray(correlation, dtype=np.float64)
-    if R.shape != (n_params, n_params):
-        raise ValueError(f"correlation must be ({n_params}, {n_params}), got {R.shape}")
+    _validate_structure(R, n_params)
     if kind == "spearman":
         # The conversion is not guaranteed to preserve positive definiteness,
-        # so the full validation (including PD repair) runs on the result.
+        # so the repair still runs on the result.
         R = _spearman_to_latent(R)
-    return validate_correlation(R, n_params, warn_on_repair=warn_on_repair)
+    return _project_to_correlation(R, warn_on_repair=warn_on_repair)
 
 
 def correlation_from_covariance(cov: npt.ArrayLike) -> np.ndarray:
@@ -255,6 +265,24 @@ def validate_correlation(
             diagonal is not unit, or any entry lies outside ``[-1, 1]``.
     """
     R = np.asarray(R, dtype=np.float64)
+    _validate_structure(R, n_params)
+    return _project_to_correlation(R, warn_on_repair=warn_on_repair)
+
+
+def _validate_structure(R: np.ndarray, n_params: int) -> None:
+    """Check the shape, symmetry, unit diagonal, and entry range of ``R``.
+
+    Runs on the matrix exactly as the caller supplied it, on whichever scale
+    that is, and before any conversion rewrites the entries.
+
+    Args:
+        R: Candidate correlation matrix.
+        n_params: Expected ``D``.
+
+    Raises:
+        ValueError: If the shape is wrong, the matrix is not symmetric, the
+            diagonal is not unit, or any entry lies outside ``[-1, 1]``.
+    """
     if R.shape != (n_params, n_params):
         raise ValueError(f"correlation must be ({n_params}, {n_params}), got {R.shape}")
     if not np.allclose(R, R.T, atol=1e-10):
@@ -263,7 +291,6 @@ def validate_correlation(
         raise ValueError("correlation must have a unit diagonal")
     if np.abs(R).max() > 1.0 + 1e-10:
         raise ValueError("correlation entries must lie in [-1, 1]")
-    return _project_to_correlation(R, warn_on_repair=warn_on_repair)
 
 
 def _project_to_correlation(R: np.ndarray, *, warn_on_repair: bool = False) -> np.ndarray:
@@ -275,34 +302,59 @@ def _project_to_correlation(R: np.ndarray, *, warn_on_repair: bool = False) -> n
     renormalising the diagonal is the standard repair; it is a no-op when the
     input is already valid, so the common case pays only one eigendecomposition.
 
+    The repair is idempotent: ``_project_to_correlation`` of its own output
+    returns that output bit for bit. One clip-then-renormalise pass does not
+    guarantee this, because the renormalisation can push the smallest
+    eigenvalue back under the floor, so the pass repeats until the floor
+    holds. The result is symmetric by construction, so the leading
+    symmetrisation is also a no-op on a second call.
+
     Args:
         R: ``(D, D)`` candidate correlation matrix (structurally valid).
         warn_on_repair: Emit a ``UserWarning`` reporting the minimum
             eigenvalue and the maximum entrywise change when the repair
             actually engages.
     """
-    R = 0.5 * (R + R.T)  # kill any asymmetry from floating-point accumulation
-    eigenvalues, eigenvectors = np.linalg.eigh(R)
-    if eigenvalues.min() >= _MIN_EIGENVALUE:
-        return R
+    original = 0.5 * (R + R.T)  # kill any asymmetry from floating-point accumulation
+    current = original
+    declared_minimum = None
 
-    clipped = eigenvectors @ np.diag(np.maximum(eigenvalues, _MIN_EIGENVALUE)) @ eigenvectors.T
-    # Renormalise so the diagonal is exactly 1 again -- eigenvalue clipping
-    # perturbs it, and every conditional formula below assumes R[i, i] == 1.
-    scale = np.sqrt(np.diag(clipped))
-    repaired = clipped / np.outer(scale, scale)
-    np.fill_diagonal(repaired, 1.0)
+    for _ in range(_MAX_REPAIR_PASSES):
+        eigenvalues, eigenvectors = np.linalg.eigh(current)
+        smallest = float(eigenvalues.min())
+        if declared_minimum is None:
+            declared_minimum = smallest
+        if smallest >= _MIN_EIGENVALUE:
+            break
+        clipped = (eigenvectors * np.maximum(eigenvalues, _MIN_EIGENVALUE)) @ eigenvectors.T
+        # Renormalise so the diagonal is exactly 1 again -- eigenvalue clipping
+        # perturbs it, and every conditional formula below assumes R[i, i] == 1.
+        scale = np.sqrt(np.diag(clipped))
+        current = clipped / np.outer(scale, scale)
+        current = 0.5 * (current + current.T)
+        np.fill_diagonal(current, 1.0)
+    else:
+        # Never reached for any matrix we have seen; blending toward the
+        # identity raises every eigenvalue and leaves the diagonal at 1, so it
+        # closes the loop for certain rather than returning an unusable matrix.
+        smallest = float(np.linalg.eigvalsh(current).min())
+        weight = (2.0 * _MIN_EIGENVALUE - smallest) / (1.0 - smallest)
+        current = (1.0 - weight) * current + weight * np.eye(current.shape[0])
+        np.fill_diagonal(current, 1.0)
+
+    if current is original:
+        return original
     if warn_on_repair:
         warnings.warn(
             "jaxgsa: the declared correlation matrix is not positive definite "
-            f"(minimum eigenvalue {eigenvalues.min():.3e}) and was repaired by "
+            f"(minimum eigenvalue {declared_minimum:.3e}) and was repaired by "
             "eigenvalue clipping; the largest entrywise change is "
-            f"{np.abs(repaired - R).max():.3e}. Samples will follow the repaired "
+            f"{np.abs(current - original).max():.3e}. Samples will follow the repaired "
             "dependence structure, not the declared one — check the matrix for "
             "inconsistent pairwise correlations or redundant parameters.",
             stacklevel=2,
         )
-    return repaired
+    return current
 
 
 def is_independent(R: np.ndarray) -> bool:

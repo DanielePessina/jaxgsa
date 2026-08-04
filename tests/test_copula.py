@@ -9,6 +9,8 @@ import scipy.stats
 
 import jaxgsa
 from jaxgsa._core.copula import (
+    _MIN_EIGENVALUE,
+    _project_to_correlation,
     _spearman_to_latent,
     canonicalize_correlation,
     correlation_from_covariance,
@@ -130,6 +132,70 @@ def test_canonicalize_spearman_applies_conversion():
     rho_s = 0.5
     R = canonicalize_correlation(np.array([[1.0, rho_s], [rho_s, 1.0]]), 2, kind="spearman")
     np.testing.assert_allclose(R[0, 1], 2.0 * np.sin(np.pi * rho_s / 6.0), atol=1e-15)
+
+
+@pytest.mark.parametrize("bad_diagonal", [0.0, 0.5, 2.0, -1.0])
+@pytest.mark.parametrize("kind", ["latent", "spearman"])
+def test_canonicalize_rejects_bad_diagonal_on_every_kind(bad_diagonal, kind):
+    """Structural checks must run on the declared matrix, before conversion.
+
+    The Spearman conversion pins the diagonal to exactly 1, so a check made
+    after it accepted any diagonal at all.
+    """
+    R = [[bad_diagonal, 0.3], [0.3, bad_diagonal]]
+    with pytest.raises(ValueError, match="unit diagonal"):
+        canonicalize_correlation(R, 2, kind=kind)
+
+
+@pytest.mark.parametrize("kind", ["latent", "spearman"])
+def test_canonicalize_rejects_asymmetry_and_out_of_range_on_every_kind(kind):
+    with pytest.raises(ValueError, match="symmetric"):
+        canonicalize_correlation([[1.0, 0.5], [0.2, 1.0]], 2, kind=kind)
+    with pytest.raises(ValueError, match=r"lie in \[-1, 1\]"):
+        canonicalize_correlation([[1.0, 1.5], [1.5, 1.0]], 2, kind=kind)
+
+
+# ---------------------------------------------------------------------------
+# positive-definiteness repair
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "R",
+    [
+        _INDEFINITE_R,
+        np.array([[1.0, 0.9, -0.9], [0.9, 1.0, 0.9], [-0.9, 0.9, 1.0]]),
+        np.array([[1.0, 1.0, 0.4], [1.0, 1.0, 0.4], [0.4, 0.4, 1.0]]),  # exactly singular
+    ],
+)
+def test_repair_is_idempotent(R):
+    """A repaired matrix must survive a second repair bit for bit.
+
+    One clip-then-renormalise pass leaves the smallest eigenvalue under the
+    floor, so a naive repair keeps nudging the matrix on every round trip.
+    """
+    once = _project_to_correlation(R)
+    twice = _project_to_correlation(once)
+    np.testing.assert_array_equal(twice, once)
+    assert np.linalg.eigvalsh(once).min() >= _MIN_EIGENVALUE
+    np.testing.assert_array_equal(np.diag(once), np.ones(R.shape[0]))
+
+
+def test_repair_survives_a_problem_metadata_round_trip():
+    """Serializing and reloading a repaired correlation must not move it."""
+    import json
+
+    from jaxgsa._core.samples import _problem_from_meta, _problem_to_meta
+
+    problem = Problem.from_dict({"x0": (0.0, 1.0), "x1": (0.0, 1.0), "x2": (0.0, 1.0)})
+    problem = problem.with_correlation(_INDEFINITE_R)
+    stored = problem.correlation
+    assert stored is not None
+    for _ in range(3):
+        reloaded = _problem_from_meta(json.loads(json.dumps(_problem_to_meta(problem))))
+        assert reloaded.correlation is not None
+        np.testing.assert_array_equal(reloaded.correlation, stored)
+        problem = reloaded
 
 
 # ---------------------------------------------------------------------------

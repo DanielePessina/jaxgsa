@@ -107,7 +107,7 @@ estimate toward zero — a polychoric estimator is future work.
 ## Retrofit correlation onto an existing sample
 
 `correlate` imposes the declared correlation on a sample you already have by
-Iman–Conover-style rank re-pairing. Each column of the result is an exact
+Iman–Conover rank re-pairing. Each column of the result is an exact
 permutation of the input column, so the marginal values — including any
 structure a low-discrepancy design put into them — are preserved:
 
@@ -115,6 +115,13 @@ structure a low-discrepancy design put into them — are preserved:
 X_independent = jaxgsa.sampling.monte_carlo(problem.with_correlation(None), n=4096, seed=1)
 X_correlated = jaxgsa.sampling.correlate(X_independent, problem, seed=2)
 ```
+
+The method builds a score matrix from van der Waerden scores. It then removes
+the score matrix's own sampling noise before it reads off the ranks. Your
+finite design therefore lands much closer to the declared correlation. At
+N = 50 and a target of 0.8, the achieved rank correlation scatters with a
+standard deviation of about 0.024, against about 0.065 for a plain correlated
+normal draw.
 
 ## Analyze with a correlation-tolerant method
 

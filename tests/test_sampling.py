@@ -487,6 +487,49 @@ def test_correlate_determinism_and_validation():
         correlate(X[:, :1], problem)
 
 
+def test_correlate_sampling_error_matches_iman_conover():
+    """Pin the variance reduction the de-correlation step buys.
+
+    A plain correlated normal score matrix carries its own sampling noise into
+    the re-pairing. At N = 50 that gave a standard deviation of about 0.065 in
+    the achieved rank correlation, plus a bias of about -0.006. Iman-Conover
+    removes both: about 0.024 and no bias. The thresholds below sit between
+    the two, so the old implementation fails this test.
+    """
+    from scipy.stats import spearmanr
+
+    rho = 0.8
+    n, replicates = 50, 150
+    problem = Problem.from_dict(
+        {"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=[[1.0, rho], [rho, 1.0]]
+    )
+    # Spearman rank correlation implied by a latent Pearson rho under the copula.
+    target = 6.0 / np.pi * np.arcsin(rho / 2.0)
+
+    achieved = np.array(
+        [
+            spearmanr(
+                correlate(monte_carlo(problem.with_correlation(None), n, seed=r), problem, seed=r)
+            ).statistic
+            for r in range(replicates)
+        ]
+    )
+    assert achieved.std() < 0.040  # old implementation: ~0.065
+    assert abs(achieved.mean() - target) < 0.004  # old implementation: ~-0.006
+
+
+def test_correlate_handles_degenerate_row_counts():
+    """Too few rows to estimate corr(M): fall back, do not divide by zero."""
+    problem = Problem.from_dict(
+        {"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=[[1.0, 0.5], [0.5, 1.0]]
+    )
+    for n in (1, 2, 3):
+        X = monte_carlo(problem.with_correlation(None), n, seed=n)
+        out = correlate(X, problem, seed=n)
+        assert np.isfinite(out).all()
+        np.testing.assert_array_equal(np.sort(out, axis=0), np.sort(X, axis=0))
+
+
 def test_fit_correlation_public_wrapper_recovers_declared_matrix():
     rho = 0.7
     problem = Problem.from_dict(
