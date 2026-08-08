@@ -78,6 +78,7 @@ These methods analyze arbitrary aligned `(X, Y)` pairs:
 | `jaxgsa.pawn` | `analyze` | `PAWNResult` |
 | `jaxgsa.borgonovo` | `analyze` | `DeltaResult` |
 | `jaxgsa.optimal_transport` | `analyze` | `OTResult` |
+| `jaxgsa.vkoga` | `analyze` | `VKOGAResult` |
 
 Draw plain Monte Carlo inputs with
 `jaxgsa.sampling.monte_carlo(problem, n, seed=...)`; it honors
@@ -85,8 +86,13 @@ Draw plain Monte Carlo inputs with
 provides `correlate(X, problem)` (impose the declared correlation on an
 existing sample by rank re-pairing), `fit_correlation(problem, X)` (estimate
 the latent matrix from data), and `correlation_from_covariance(cov)`. Under a
-declared correlation, `optimal_transport`, `borgonovo`, `hdmr`, `hsic`, and
-`pawn` accept the data; `pce`, `dgsm`, and `shapley` (PCE backend) raise.
+declared correlation, `optimal_transport`, `borgonovo`, `hdmr`, `hsic`,
+`pawn`, and `vkoga` accept the data. `shapley.analyze(backend="hdmr")` also
+accepts it, and `include_correlative=True` then folds the ANCOVA correlative
+share into the allocation. These routes raise instead: `pce.analyze`,
+`dgsm.analyze`, `shapley.analyze(backend="pce")`, and the design builders
+`sobol.sample`, `morris.sample`, and `efast.sample`. The design-based
+`kucherenko` conditions on the declared correlation by construction.
 
 PCE and HDMR results retain their fitted surrogate:
 
@@ -105,12 +111,31 @@ matrix, and tensor layouts. Correlation-aware Shapley effects are available
 from HDMR because its ANCOVA decomposition separates structural and
 correlative contributions.
 
+`jaxgsa.vkoga` is the third surrogate-carrying namespace, and the one to reach
+for when the inputs are dependent. It fits a VKOGA kernel surrogate and then
+estimates the correlated variance-based indices of Li et al. (2010) against it
+under a Gaussian copula:
+
+```python
+vkoga_result = jaxgsa.vkoga.analyze(problem, X, Y)  # reads problem.correlation
+vkoga_result.S_TC          # total correlated — input prioritisation
+vkoga_result.S_TU          # total uncorrelated — input fixing
+Y_pred = vkoga_result.predict(X_new, batch_size=2048)
+```
+
+`VKOGAResult` carries `S_TC`, `S_TU`, `S_U`, `S_C`, and `S_IU`, plus the
+`correlation` matrix used and the `n_centers` / `gamma` / `ridge` / `rmse` fit
+diagnostics. `VKOGAResult.shapley()` raises `NotImplementedError` — a kernel
+expansion has no term-wise variance decomposition to allocate from. See the
+[VKOGA page](/api/vkoga) for the full index reference.
+
 ## Structured Methods
 
 | Namespace | Workflow | Result |
 | --- | --- | --- |
 | `jaxgsa.efast` | `sample` then `analyze` | `EFASTResult` |
 | `jaxgsa.morris` | `sample` then `analyze` | `MorrisResult` |
+| `jaxgsa.kucherenko` | `sample` then `analyze` | `KucherenkoResult` |
 
 Morris sampling returns `jaxgsa.morris.MorrisSamples`, which supports the same
 single-NPZ `save(path)` / `load(path)` persistence as `SobolSamples`.
@@ -136,6 +161,27 @@ samples = jaxgsa.efast.sample(problem, n_per_curve=4096, seed=42)
 Y = model(samples.samples)
 result = jaxgsa.efast.analyze(samples, Y)
 ```
+
+## Kucherenko
+
+`jaxgsa.kucherenko` estimates Sobol' indices for dependent inputs by
+evaluating the actual model on a conditional-copula design (no surrogate).
+It reads `problem.correlation` and is exempt from the correlated-design
+error; with no declared correlation it reduces to the classic Saltelli
+column-swap scheme and the classic `S1` / `ST`:
+
+```python
+ks = jaxgsa.kucherenko.sample(problem, 4096, seed=0)
+Y = model(ks.samples)
+result = jaxgsa.kucherenko.analyze(ks, Y)
+result.S1   # correlation-inclusive first-order (VKOGA's S_TC)
+result.ST   # correlation-exclusive total (VKOGA's S_TU)
+```
+
+Public objects: `jaxgsa.kucherenko.sample`, `jaxgsa.kucherenko.analyze`,
+`jaxgsa.kucherenko.KucherenkoSamples` (with the standard NPZ
+`save` / `load`), and `jaxgsa.kucherenko.KucherenkoResult`. Categorical
+problems raise. See the [Kucherenko page](/api/kucherenko) for details.
 
 ## Shapley Effects
 

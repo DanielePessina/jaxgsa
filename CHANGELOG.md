@@ -1,6 +1,249 @@
 # Changelog
 
-## Unreleased (0.7.0)
+## 0.8.0
+
+### Added
+
+- **`jaxgsa.vkoga` — variance-based sensitivity analysis for correlated
+  inputs.** The two-stage surrogate-based sensitivity analysis (SSA) of Hilhorst,
+  Quicken, van de Vosse & Huberts (2024, *Int. J. Numer. Meth. Biomed. Engng.*
+  40(2):e3797): fit a VKOGA kernel surrogate to given `(X, Y)` data, then compute
+  the correlated variance-based indices of Li et al. (2010, *J. Phys. Chem. A*
+  114:6022-6032) against it under a Gaussian copula. Splitting the work this way
+  is what makes the method affordable — the indices need nested conditional
+  sampling, hopeless against an expensive model but trivial against a kernel
+  expansion.
+
+  `jaxgsa.vkoga.analyze(problem, X, Y, correlation=...)` returns a
+  `VKOGAResult` with five indices per parameter, shaped by the usual output
+  contract (`(D,)`, `(K, D)`, `(T, K, D)`):
+  - `S_TC`, total **correlated**, `V(E(Y|X_i))/V(Y)` — what `X_i` explains
+    through itself *and* through its correlation with the others. The measure for
+    **input prioritisation**.
+  - `S_TU`, total **uncorrelated**, `E(V(Y|X_-i))/V(Y)` — what only `X_i` can
+    explain. The measure for **input fixing**.
+  - `S_U` (the independent contribution alone), `S_C = S_TC - S_U` (the
+    correlation-borne part, which **can be negative** when a correlation opposes
+    a direct effect), and `S_IU = S_TU - S_U` (independent interactions).
+
+  Under independent inputs the five collapse to the familiar picture: `S_TC` is
+  the first-order Sobol' index `S1`, `S_TU` is the total index `ST`, and `S_C` is
+  zero.
+
+  The dependency structure comes from the problem. `analyze` reads
+  `problem.correlation` by default. An uncorrelated problem gives independent
+  inputs. A `(D, D)` matrix passed as `correlation=` overrides the declaration
+  for one call. To fit a matrix from observed data, use
+  `jaxgsa.sampling.fit_correlation(problem, X_data)` and attach it with
+  `problem.with_correlation(...)` — one workflow, and it makes explicit which
+  sample the copula comes from. The matrix actually used is returned on
+  `result.correlation`. Categorical problems raise: the isotropic RBF needs a
+  continuous CDF map per coordinate. All conditioning happens in the latent
+  standard-normal space where the Gaussian conditionals are closed-form, and
+  every expectation is a scrambled-Sobol' quasi-Monte-Carlo average against the
+  surrogate.
+
+  Stage one is a pure-JAX VKOGA (Wirtz & Haasdonk 2013): Gaussian RBF, centres
+  chosen by the P-greedy rule in a nested Newton basis, coefficients from
+  RKHS-regularised normal equations, with `gamma` and `ridge` selected by k-fold
+  cross validation over a 10x10 grid. Held-out rows are masked out of the greedy
+  stopping rule, so cross-validation fits stop exactly like the final fit and
+  score the hyperparameters under the same stopping behaviour. Explicit `gamma`
+  and `ridge` values must be finite and positive; anything else raises before
+  any fitting. Centre selection depends only on `X`, so
+  all output slices share one basis and one set of centres — the "vectorial" part
+  — and a multi-output fit costs barely more than a scalar one. The result keeps
+  the surrogate: `result.predict(X_new, batch_size=None)` evaluates it with the
+  usual bounded-memory batching, and `result.to_dataset()` exports the indices,
+  the fit diagnostics (`n_centers`, `gamma`, `ridge`, `rmse`), the copula matrix,
+  and the output `variance` under the correlated measure.
+
+  Two things to get right, both documented prominently:
+  - **Train on an independent, space-filling design even when the analysis is
+    correlated.** The correlated measure concentrates on a ridge, but `S_TU`
+    conditions on `X_-i` and then resamples `X_i` across its whole marginal — a
+    surrogate trained only on correlated data extrapolates for exactly those
+    draws.
+  - **Enable float64.** The coefficient step forms `A^T A`, squaring the
+    condition number of the cross kernel, which float32 cannot carry for small
+    `gamma`. Call `jax.config.update("jax_enable_x64", True)` before fitting;
+    `analyze` warns when x64 is off.
+
+  `VKOGAResult.shapley()` raises `NotImplementedError` by design. Shapley effects
+  need a variance decomposition indexed by parameter subsets; a kernel expansion
+  is a sum over *centres*, every one of which involves every parameter, so there
+  is no membership matrix to allocate from. Use `jaxgsa.hdmr` (which also offers
+  `shapley(include_correlative=True)`) or `jaxgsa.pce`.
+
+- **`jaxgsa.kucherenko` — design-based Sobol' indices for dependent inputs.**
+  The single-loop estimators of Kucherenko, Tarantola & Annoni (2012, *Comput.
+  Phys. Commun.* 183:937-946). `kucherenko.sample(problem, n)` builds a
+  conditional-copula design of `n * (2D + 1)` rows: one joint block, one
+  conditional block per parameter for `S1`, one per parameter for `ST`. You
+  evaluate your **actual model** on the rows — no surrogate is fitted. This is
+  the design-based counterpart to `jaxgsa.vkoga`: the same two quantities,
+  `S1 = V(E(Y|X_i))/V(Y)` (correlation-inclusive, VKOGA's `S_TC`) and
+  `ST = E(V(Y|X_~i))/V(Y)` (correlation-exclusive, VKOGA's `S_TU`).
+
+  The sampler reads `problem.correlation`. Both conditionals are closed-form
+  Gaussians in the latent copula space. It is deliberately exempt from the
+  0.6.0 correlated-design error: conditioning on the declared copula is the
+  method's purpose. With no declared correlation the design reduces exactly to
+  the Saltelli column-swap scheme and the indices to the classic Sobol' `S1`
+  and `ST`. Categorical problems raise (the conditional copula needs
+  continuous marginals). `KucherenkoSamples` uses the standard one-file NPZ
+  `save`/`load`; `KucherenkoResult` has `to_dataset` and follows the usual
+  output contract.
+
+  Two numerical safeguards are built in. The `S1` estimator subtracts one
+  shared shift (the joint-block mean) from both product factors — the
+  estimator is algebraically unchanged, but a large output mean no longer
+  destroys the covariance term in rounding (a `+1e8` offset moves `S1` by
+  less than `3e-11`; the uncentered form drifted by up to `0.11`). And with
+  `scramble=False` the Sobol' sequence skips its all-zeros origin point,
+  which the probit would map to a clipped extreme deviate.
+
+  Validation: the linear-Gaussian closed form (max error `7.5e-4` at
+  `base_n = 4096`), independent Ishigami against the analytic values and
+  `jaxgsa.sobol`, and a dedicated cross-route module
+  (`tests/test_correlated_agreement.py`) that pins analytic, `vkoga`, and
+  `kucherenko` to the same reference — and the two routes to each other.
+
+- **Optimal transport is certified valid under correlated inputs.** It was
+  already exempt from the correlated-input error; two dedicated tests now
+  certify the reading. With `corr(X1, X2) = 0.8` and `Y = X1` only, the unused
+  input `X2` gets a clearly non-zero index (0.40 vs 0.94) — the documented
+  correlation-inclusive interpretation. And the indices on a correlated
+  problem are **bit-equal** to the indices on the same `(X, Y)` with the
+  correlation stripped: the estimator never reads the matrix, which proves
+  distribution-freeness in `X`. `methods.md` states the guarantee explicitly.
+
+### Changed
+
+- **Every correlated-problem refusal now names `jaxgsa.vkoga` and
+  `jaxgsa.kucherenko` first.** `sobol.sample`, `morris.sample`, `efast.sample`,
+  `pce.analyze` and `dgsm.analyze` raise the shared message, and it listed only
+  the moment-independent and rank-based routes. It now leads with the two
+  variance-based routes this release adds, because they answer the question the
+  refused method was asked. The list also names `jaxgsa.shapley` with
+  `backend="hdmr"`, which accepts correlated problems. The `backend="pce"`
+  refusal in `shapley.analyze` gained the same two names.
+- **`S_U` is clipped to `S_TU`, so `S_IU` can no longer go negative.** `S_U`
+  measures the output against fitted *additive* component functions. No additive
+  function of `X_i` can represent an interaction, so on a model with
+  interactions under a correlated measure the raw `S_U` could exceed `S_TU` and
+  drive `S_IU` below zero — a silently negative "interaction" index. The clip
+  restores the invariant, and a clip wider than 1% of the output variance now
+  raises a `UserWarning`: it says the additive projection is inadequate for that
+  model, so `S_U`, `S_C` and `S_IU` are indicative while `S_TC` and `S_TU` stay
+  reliable. `S_C` is **not** clipped; a negative `S_C` is a real reading.
+  Additive models are unaffected.
+- **`jaxgsa.vkoga` reports its out-of-sample error and warns when the surrogate
+  fails.** The pooled cross-validated RMSE was computed and then discarded; only
+  the optimistic *training* RMSE reached the result. It is now on
+  `VKOGAResult.cv_rmse` (and in `to_dataset().attrs`), and `analyze` warns when
+  it passes half the output standard deviation. Every index is measured against
+  the surrogate, so a failed fit gives meaningless indices — on
+  `sin(2*pi*12*u1) + 0.5*u2` the reported ranking is inverted, and nothing said
+  so. `cv_rmse` is `None` when the caller fixes both `gamma` and `ridge`,
+  because no cross-validation runs.
+- **`S_U`'s attribution is corrected.** The code cited Li et al. (2010,
+  Equation 25), whose structural index is `Var(f_i)/V(Y)`. The implemented
+  quantity is `E[Var(f_i|X_-i)]/V(Y)`, the decorrelated first-order index of
+  Mara & Tarantola (2012). The docstrings now cite the right result. `S_TC`'s
+  docstring also states its formula, so the word "total" cannot be read as
+  total-order: `S_TC` is `V(E(Y|X_i))/V(Y)`, a first-order quantity, and
+  "total" names the pathways it counts.
+- Docstring `Raises:` sections across `pce`, `hsic`, `pawn`, `hdmr`, `dgsm`,
+  `shapley`, `sobol.to_morris`, `efast.sample` and `morris.sample` now state
+  the categorical and correlated gating the code performs. The correlation tolerance of `hsic`,
+  `pawn`, `hdmr` and `borgonovo` moved from code comments into docstring
+  prose. The `sobol`,
+  `vkoga` and `kucherenko` namespace docstrings state their gating. `docs/api`
+  and `docs/examples/categorical-inputs.md` match the refusal lists the code
+  actually raises, and the correlation-inclusive caveat in `methods.md` now
+  covers HSIC and PAWN as well as optimal transport.
+- `docs/examples/vkoga.md` documents three limits with their signals: a failed
+  surrogate on oscillatory responses (read `cv_rmse`), the additive projection
+  behind `S_U` (read the clip warning), and the roughly -3.5% low bias in
+  `result.variance` for Gaussian marginals, which the CDF-space kernel causes by
+  under-resolving the tails.
+- Pre-existing passages that list the correlated-input options no longer omit
+  `jaxgsa.vkoga` and `jaxgsa.kucherenko`. The "I only have existing simulation
+  data" menu in `methods.md` now names VKOGA. The correlation caveat in
+  `docs/examples/shapley.md` said only that dependent-input Shapley effects are
+  future work; it now names the ANCOVA route and the two conditional-variance
+  methods. `docs/examples/correlated-inputs.md` splits the correlation-tolerant
+  methods into the total, correlation-inclusive group and the group that
+  separates the direct from the correlation-borne effect, with VKOGA and
+  Kucherenko in the second. `docs/api/sampling.md` records that
+  `kucherenko.sample` is a design builder that reads `problem.correlation`
+  instead of refusing it, and `README.md` distinguishes the Shapley-style
+  allocation from the conditional-variance route.
+- The documentation tempers HDMR's `ST` under dependence. It is the SCSA
+  convention of Sarazin et al. (2017, Eq. 8), a sum over the terms a parameter
+  appears in. It is not a total-effect index: it has no variance-reduction
+  reading, it does not answer the input-fixing question, and it can go negative
+  because `Sb` can. `methods.md` and `docs/examples/correlated-inputs.md` say
+  so and send readers wanting a total index to `kucherenko.ST` or
+  `vkoga.S_TU`. HDMR's per-term `Sa` / `Sb` split remains the thing it uniquely
+  provides. No code or field names change here.
+- The VKOGA and Kucherenko documentation drops rhetorical bold and italics.
+  Structural emphasis stays: table headers, term labels that open a
+  definition-style bullet, and admonition titles. The change covers
+  `docs/examples/vkoga.md`, `docs/examples/kucherenko.md`, `docs/api/vkoga.md`,
+  `docs/api/kucherenko.md`, and the lines this release adds to `README.md`,
+  `docs/guide/methods.md`, `docs/api/index.md` and
+  `docs/examples/correlated-inputs.md`. No index value changes.
+
+### Internal
+
+- The `n_inner` coupling in `jaxgsa.vkoga` is documented. The estimators drop
+  the iid inner-noise correction and rely on a large shared QMC inner block, so
+  `n_inner` cannot be lowered freely to buy speed.
+- The correlated tests gained a D=4 case with six distinct off-diagonals of
+  mixed sign, plus a parameter-permutation equivariance probe. The previous
+  cases all used one non-zero off-diagonal, which cannot catch a transposed
+  parameter axis. Both routes pass: Kucherenko errors are at most 7e-4 (`S1`)
+  and 2e-5 (`ST`); VKOGA errors are at most 0.013 (`S_TC`) and 0.006 (`S_TU`).
+- Added `jaxgsa._core.legendre`: one orthonormal Legendre recurrence, shared by
+  the PCE basis and the VKOGA component-function fit. The recurrence runs in
+  the backend default float dtype (float64 under x64), the same promotion the
+  Hermite basis applies, so a float32 `X` does not downgrade the PCE design
+  matrix and mixed uniform/Gaussian problems get one basis dtype.
+- The categorical-design error is situation-aware: when the categorical
+  problem also declares a correlation, it no longer recommends
+  `jaxgsa.sobol.sample` (which refuses correlated problems). It states that no
+  variance-based route exists and names the given-data methods. Both
+  design-side gates now route the combined case to that message. Previously
+  only `kucherenko.sample` could emit it, because `morris.sample`,
+  `efast.sample` and `sobol.sample` ran the correlated check first and raised
+  the correlated-only text, which recommends methods that then refuse the
+  problem for being categorical. `_raise_correlated_design` and
+  `_raise_categorical_design` both detect the combination, so the order the two
+  checks run in no longer matters. A test asserts the combined message for
+  `morris`, `efast`, `sobol` and `kucherenko`.
+- The analysis-side gates got the same treatment. `_raise_correlated_analysis`
+  and `_raise_categorical_analysis` had no combined message at all, so a
+  problem that is both categorical and correlated got a single-fault message
+  from whichever check its caller ran first. Both now route the combination to
+  the shared text, with an analysis-side wording that does not tell a caller
+  who already holds `(X, Y)` to go and draw samples. This covers `dgsm`,
+  `pce`, `hdmr`, `hsic`, `shapley` and `vkoga`, whether they gate through
+  `_validate_xy_inputs` or call the raisers directly. A parametrised test
+  covers all six, and a companion test asserts that the three methods the
+  message recommends — `jaxgsa.optimal_transport`, `jaxgsa.borgonovo` and
+  `jaxgsa.pawn` — do accept the combined problem.
+- **`jaxgsa.pawn` accepts categorical and correlated inputs together.** It
+  gained categorical support in 0.7.0 and was already correlation-tolerant,
+  so it is the third method that handles the combination. Every categorical
+  refusal message now names it alongside optimal transport and Borgonovo
+  delta.
+- The Gaussian conditional-draw algebra lives in `jaxgsa._core.copula`, next
+  to the conditional plan; the VKOGA estimators and the Kucherenko design
+  share it.
+
+## 0.7.0
 
 ### Added
 
@@ -170,7 +413,7 @@
   over a default the user never passed; an out-of-range value that only
   the `dummy` baseline consumes names the dummy in the error.
 
-## Unreleased (0.6.0)
+## 0.6.0
 
 ### Added
 

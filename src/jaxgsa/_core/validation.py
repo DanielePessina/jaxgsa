@@ -95,31 +95,107 @@ def _validate_output(
     return Y
 
 
-# Named in every correlated-problem rejection so the error is actionable.
+# Named in every correlated-problem rejection so the error is actionable. The
+# variance-based routes come first: they answer the same question the refused
+# method was asked, so they are what the user most likely wants.
 _CORRELATION_TOLERANT_METHODS = (
-    "jaxgsa.optimal_transport, jaxgsa.borgonovo, jaxgsa.hdmr (whose ANCOVA Sb "
-    "term quantifies the correlation-induced contribution), jaxgsa.hsic, or "
-    "jaxgsa.pawn"
+    "jaxgsa.vkoga (variance-based indices from given data, through a kernel "
+    "surrogate), jaxgsa.kucherenko (variance-based indices from its own "
+    "conditional-copula design), jaxgsa.optimal_transport, jaxgsa.borgonovo, "
+    "jaxgsa.hdmr (whose ANCOVA Sb term quantifies the correlation-induced "
+    "contribution, and whose result supports "
+    "shapley(include_correlative=True)), jaxgsa.shapley with "
+    'backend="hdmr", jaxgsa.hsic, or jaxgsa.pawn'
 )
+
+
+def _categorical_param_names(problem: Problem) -> list[str]:
+    """Return the names of the problem's categorical parameters."""
+    # Imported lazily: this module is type-checking-only on Problem.
+    from jaxgsa.problem import _categorical_dims
+
+    return [problem.names[d] for d, _ in _categorical_dims(problem)]
+
+
+def _raise_categorical_and_correlated(method: str, names: list[str], *, design: bool) -> None:
+    """Reject a problem that is both categorical and correlated.
+
+    This combination has no variance-based route. Every categorical-tolerant
+    variance-based method (``jaxgsa.sobol``) refuses a declared correlation,
+    and every correlation-tolerant variance-based method (``jaxgsa.vkoga``,
+    ``jaxgsa.kucherenko``) refuses a categorical parameter. Naming only one of
+    the two faults would send the user to a method that then refuses the other,
+    so all four gates — design and analysis, categorical and correlated —
+    route the combined case here.
+
+    The two ends of the library reach the same dead end and recommend the same
+    three methods, ``jaxgsa.optimal_transport``, ``jaxgsa.borgonovo`` and
+    ``jaxgsa.pawn``, which are the only ones that accept both faults. Only
+    the opening clause and the call to action differ: a design caller has no
+    samples yet and is told how to draw them, while an analysis caller
+    already holds ``(X, Y)``.
+
+    Args:
+        method: Fully qualified sampler or analyzer name for the message.
+        names: Names of the categorical parameters, for the message.
+        design: Whether the refusing gate builds a design (``True``) or
+            analyzes given data (``False``). Selects the wording only.
+
+    Raises:
+        ValueError: Always. Callers check the combined condition first.
+    """
+    lead = "cannot build a design for" if design else "cannot analyze"
+    if design:
+        action = (
+            "Draw correlated samples with jaxgsa.sampling.monte_carlo and "
+            "analyze them with jaxgsa.optimal_transport, jaxgsa.borgonovo or "
+            "jaxgsa.pawn, which handle both."
+        )
+    else:
+        action = (
+            "Analyze the same (X, Y) data with jaxgsa.optimal_transport, "
+            "jaxgsa.borgonovo or jaxgsa.pawn, which handle both."
+        )
+    raise ValueError(
+        f"{method} {lead} this problem: parameters {names} "
+        "are categorical and problem.correlation declares a dependence "
+        "structure, and no variance-based method supports categorical plus "
+        "correlated inputs yet. The categorical-tolerant methods refuse a "
+        "correlation, and the correlation-tolerant ones refuse a categorical "
+        "parameter, so naming either route alone would send you in a circle. "
+        f"{action} To drop one of the two constraints, use "
+        "problem.with_correlation(None) or declare the parameter continuous."
+    )
 
 
 def _raise_correlated_design(problem: Problem, method: str) -> None:
     """Reject a correlated problem in a structured design sampler.
 
-    The Saltelli, Morris, and eFAST designs place points assuming independent
-    marginals; their downstream estimators are undefined — not merely
-    approximate — under a declared correlation, so sampling refuses up front
-    rather than producing a design whose analysis would be silently wrong.
+    A structured design places its points assuming independent marginals; the
+    downstream estimators are undefined — not merely approximate — under a
+    declared correlation, so sampling refuses up front rather than producing a
+    design whose analysis would be silently wrong. ``method`` names the
+    sampler, so this text does not have to list the callers.
+
+    A problem that is also categorical gets the combined message instead: the
+    correlated-only text would recommend methods that then refuse it for being
+    categorical. This check therefore does not depend on being ordered before
+    or after :func:`_raise_categorical_design`.
 
     Args:
         problem: Problem the design was requested for.
         method: Fully qualified sampler name for the error message.
 
     Raises:
-        ValueError: If ``problem`` declares a non-identity correlation.
+        ValueError: If ``problem`` declares a non-identity correlation. The
+            message names the combined dead end when ``problem`` also declares
+            a categorical parameter.
     """
     if not problem.has_correlated_inputs:
         return
+    names = _categorical_param_names(problem)
+    if names:
+        _raise_categorical_and_correlated(method, names, design=True)
     raise ValueError(
         f"{method} builds a structured design whose sensitivity indices assume "
         "independent inputs, but problem.correlation declares a dependence "
@@ -134,15 +210,25 @@ def _raise_correlated_design(problem: Problem, method: str) -> None:
 def _raise_correlated_analysis(problem: Problem, method: str) -> None:
     """Reject a correlated problem in a correlation-naive analyzer.
 
+    A problem that is also categorical gets the combined message instead: the
+    correlated-only text would recommend methods that then refuse it for being
+    categorical. This check therefore does not depend on being ordered before
+    or after :func:`_raise_categorical_analysis`.
+
     Args:
         problem: Problem the analysis was requested for.
         method: Fully qualified analyzer name for the error message.
 
     Raises:
-        ValueError: If ``problem`` declares a non-identity correlation.
+        ValueError: If ``problem`` declares a non-identity correlation. The
+            message names the combined dead end when ``problem`` also declares
+            a categorical parameter.
     """
     if not problem.has_correlated_inputs:
         return
+    names = _categorical_param_names(problem)
+    if names:
+        _raise_categorical_and_correlated(method, names, design=False)
     raise ValueError(
         f"{method} computes indices that assume independent inputs, and they are "
         "invalid — not merely approximate — when problem.correlation declares a "
@@ -160,53 +246,65 @@ _CATEGORICAL_TOLERANT_METHODS = (
 )
 
 
-def _categorical_param_names(problem: Problem) -> list[str]:
-    """Return the names of the problem's categorical parameters."""
-    # Imported lazily: this module is type-checking-only on Problem.
-    from jaxgsa.problem import _categorical_dims
-
-    return [problem.names[d] for d, _ in _categorical_dims(problem)]
-
-
 def _raise_categorical_design(problem: Problem, method: str) -> None:
     """Reject a categorical problem in an incompatible design sampler.
 
     The Morris and eFAST designs walk or sweep a continuous input space;
     an unordered categorical axis has no meaningful step or frequency, so
-    sampling refuses up front.
+    sampling refuses up front. The copula conditionals of
+    ``jaxgsa.kucherenko.sample`` refuse it for a different reason: they need a
+    continuous marginal CDF on every coordinate.
+
+    A problem that is also correlated gets the combined message instead, so
+    this check does not depend on being ordered before or after
+    :func:`_raise_correlated_design`.
 
     Args:
         problem: Problem the design was requested for.
         method: Fully qualified sampler name for the error message.
 
     Raises:
-        ValueError: If ``problem`` declares any categorical parameter.
+        ValueError: If ``problem`` declares any categorical parameter. The
+            message names the combined dead end when ``problem`` also declares
+            a non-identity correlation.
     """
     names = _categorical_param_names(problem)
     if not names:
         return
+    if problem.has_correlated_inputs:
+        _raise_categorical_and_correlated(method, names, design=True)
     raise ValueError(
         f"{method} requires continuous (orderable) inputs, but parameters "
         f"{names} are categorical. Use jaxgsa.sobol.sample (the Saltelli "
-        "column-swap scheme is distribution-agnostic), or analyze given "
-        "data with jaxgsa.optimal_transport, jaxgsa.borgonovo, or "
-        "jaxgsa.pawn."
+        "column-swap scheme is distribution-agnostic; it requires a problem "
+        "with no declared correlation), or analyze given data with "
+        "jaxgsa.optimal_transport, jaxgsa.borgonovo or jaxgsa.pawn."
     )
 
 
 def _raise_categorical_analysis(problem: Problem, method: str) -> None:
     """Reject a categorical problem in a categorical-naive analyzer.
 
+    A problem that is also correlated gets the combined message instead. The
+    categorical-only text recommends the design-based ``jaxgsa.sobol``
+    pipeline, which refuses a declared correlation, so it would send the user
+    in a circle. This check therefore does not depend on being ordered before
+    or after :func:`_raise_correlated_analysis`.
+
     Args:
         problem: Problem the analysis was requested for.
         method: Fully qualified analyzer name for the error message.
 
     Raises:
-        ValueError: If ``problem`` declares any categorical parameter.
+        ValueError: If ``problem`` declares any categorical parameter. The
+            message names the combined dead end when ``problem`` also declares
+            a non-identity correlation.
     """
     names = _categorical_param_names(problem)
     if not names:
         return
+    if problem.has_correlated_inputs:
+        _raise_categorical_and_correlated(method, names, design=False)
     raise ValueError(
         f"{method} treats every input as continuous, but parameters {names} "
         "are categorical (unordered level codes); its indices would depend on "
@@ -253,7 +351,8 @@ def _validate_xy_inputs(
         ValueError: If X or Y violates the shared shape contract, the
             problem is correlated and ``correlation_ok`` is ``False``, or
             the problem has categorical parameters and ``categorical_ok``
-            is ``False``.
+            is ``False``. A problem that trips both faults gets the combined
+            message, whichever of the two checks fires first.
     """
     if not correlation_ok:
         _raise_correlated_analysis(problem, method)

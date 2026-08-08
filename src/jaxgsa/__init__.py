@@ -7,6 +7,7 @@ from . import (
     efast,
     hdmr,
     hsic,
+    kucherenko,
     morris,
     optimal_transport,
     pawn,
@@ -14,6 +15,7 @@ from . import (
     sampling,
     shapley,
     sobol,
+    vkoga,
 )
 from .problem import CategoricalInputSpec, GaussianInputSpec, Problem, UniformInputSpec
 
@@ -28,6 +30,7 @@ __all__ = [
     "efast",
     "hdmr",
     "hsic",
+    "kucherenko",
     "morris",
     "optimal_transport",
     "pawn",
@@ -35,4 +38,5 @@ __all__ = [
     "sampling",
     "shapley",
     "sobol",
+    "vkoga",
 ]

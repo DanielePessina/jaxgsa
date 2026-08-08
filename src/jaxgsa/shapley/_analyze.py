@@ -208,8 +208,11 @@ def analyze(
         ValueError: If ``backend`` is unknown, ``include_correlative`` is
             requested with the PCE backend, ``problem.correlation`` declares
             a dependence structure with the PCE backend (use
-            ``backend="hdmr"`` with ``include_correlative=True``), or the
-            underlying ``analyze`` rejects its inputs.
+            ``backend="hdmr"`` with ``include_correlative=True``),
+            ``problem`` has categorical parameters (both backends fit a
+            smooth surrogate over the inputs, which is undefined for
+            unordered level codes), or the underlying ``analyze`` rejects
+            its inputs.
         TypeError: If ``backend_kwargs`` contains a keyword the selected
             backend's ``analyze`` does not accept.
     """
@@ -229,9 +232,10 @@ def analyze(
                 "backend='hdmr' with include_correlative=True, which allocates "
                 "the ANCOVA (structural + correlative) decomposition instead — "
                 "an ANCOVA-based attribution, not conditional-variance Shapley "
-                "effects — or a correlation-tolerant given-data method "
-                "(jaxgsa.optimal_transport, jaxgsa.borgonovo, jaxgsa.hsic, "
-                "jaxgsa.pawn)."
+                "effects — or a correlation-tolerant method (jaxgsa.vkoga and "
+                "jaxgsa.kucherenko for variance-based indices, "
+                "jaxgsa.optimal_transport, jaxgsa.borgonovo, jaxgsa.hsic, "
+                "jaxgsa.pawn). Those methods do not return Shapley effects."
             )
         from jaxgsa.pce import analyze as analyze_pce
 

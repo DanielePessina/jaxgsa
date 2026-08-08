@@ -12,36 +12,8 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
-
-def _legendre_1d(x: Array, max_degree: int) -> Array:
-    """Evaluate orthonormal Legendre polynomials up to degree max_degree.
-
-    Orthonormal w.r.t. the uniform measure on [-1, 1] (weight = 1/2):
-        (1/2) * integral_{-1}^{1} tilde_P_m(x) tilde_P_n(x) dx = delta_{mn}
-
-    Args:
-        x: (N,) points in [-1, 1].
-        max_degree: maximum polynomial degree.
-
-    Returns:
-        (N, max_degree + 1) matrix of basis values.
-    """
-    N = x.shape[0]
-    P = jnp.zeros((N, max_degree + 1))
-    # Seed the recurrence: P_0(x) = 1, P_1(x) = x.
-    P = P.at[:, 0].set(1.0)
-    if max_degree >= 1:
-        P = P.at[:, 1].set(x)
-
-    # Three-term recurrence: P_{n+1}(x) = ((2n+1)·x·P_n − n·P_{n-1}) / (n+1).
-    # Numerically stable vs. direct polynomial evaluation (Bonnet's recursion).
-    for n in range(1, max_degree):
-        P = P.at[:, n + 1].set(((2 * n + 1) * x * P[:, n] - n * P[:, n - 1]) / (n + 1))
-
-    # Orthonormalize: ||P_k||^2 = 2/(2k+1) under the uniform measure on [-1,1],
-    # so multiplying by sqrt(2k+1) gives unit-norm basis functions.
-    norms = jnp.sqrt(jnp.array([2.0 * k + 1.0 for k in range(max_degree + 1)]))
-    return P * norms[None, :]
+# Shared recurrence in _core.legendre; the VKOGA component fit uses it too.
+from jaxgsa._core.legendre import legendre_orthonormal as _legendre_1d
 
 
 def _hermite_1d(x: Array, max_degree: int) -> Array:

@@ -10,7 +10,7 @@
 
 `jaxgsa` tells you which of your model's inputs actually drive its output. You give it input samples and the outputs your model produced for them; it returns sensitivity indices that rank the inputs and expose interactions. Everything is computed in JAX, so analyses are JIT-compiled and run on CPU, GPU, or TPU without code changes.
 
-Eleven complementary methods are included: **Sobol indices** (the standard variance decomposition, via Saltelli sampling), **RS-HDMR** and **PCE** (surrogate-based — they fit a cheap approximation of your model to any existing input–output pairs and read the indices off the fit), **Shapley effects** (a fair, game-theoretic split of the output variance, computed analytically from a PCE or HDMR surrogate), **eFAST** (Fourier-based S1 and ST), **DGSM** (derivative-based bounds via JAX autodiff), **Morris** (cheap elementary-effects screening to discard unimportant inputs early), **HSIC** (kernel-based dependence detection), and three moment-independent measures that look at the whole output distribution rather than just its variance: **PAWN** (CDF-based, Pianosi & Wagener, 2015), the **Borgonovo delta** (density-based, Borgonovo, 2007), and **optimal-transport indices** (Wasserstein-based with an advective/diffusive decomposition, Borgonovo et al., 2024).
+Thirteen complementary methods are included: **Sobol indices** (the standard variance decomposition, via Saltelli sampling), **RS-HDMR** and **PCE** (surrogate-based — they fit a cheap approximation of your model to any existing input–output pairs and read the indices off the fit), **Shapley effects** (a fair, game-theoretic split of the output variance, computed analytically from a PCE or HDMR surrogate), **eFAST** (Fourier-based S1 and ST), **DGSM** (derivative-based bounds via JAX autodiff), **Morris** (cheap elementary-effects screening to discard unimportant inputs early), **HSIC** (kernel-based dependence detection), **VKOGA** (variance-based indices for correlated inputs, from a greedy kernel surrogate under a Gaussian copula; Hilhorst et al., 2024), **Kucherenko indices** (Sobol' indices for dependent inputs, estimated by evaluating the model on a conditional-copula design; Kucherenko et al., 2012), and three moment-independent measures that look at the whole output distribution rather than just its variance: **PAWN** (CDF-based, Pianosi & Wagener, 2015), the **Borgonovo delta** (density-based, Borgonovo, 2007), and **optimal-transport indices** (Wasserstein-based with an advective/diffusive decomposition, Borgonovo et al., 2024).
 
 ## Features
 
@@ -61,9 +61,18 @@ Eleven complementary methods are included: **Sobol indices** (the standard varia
   - Given-data estimator on any (X, Y) pairs; rank-based conditioning handles mixed uniform/Gaussian marginals and correlated inputs
   - Advective (mean-shift, = S1/2) vs diffusive (spread/shape) decomposition of every index
   - Per-column indices via exact 1-D transport (solver-free) plus joint point-cloud modes over multivariate/time-series outputs (pure-JAX log-domain Sinkhorn); dummy-input irrelevance baseline
-- **Correlated inputs** — declare a Gaussian-copula correlation matrix on `Problem` (`correlation=`, latent or Spearman scale, or `problem.with_correlation(R)`); `jaxgsa.sampling.monte_carlo` draws from it transparently, `correlate()` retrofits it onto existing samples, `fit_correlation()` estimates it from data, correlation-tolerant methods (OT, Borgonovo, HDMR, HSIC, PAWN) analyze it, and correlation-naive methods (Sobol, Morris, eFAST, PCE, DGSM, PCE-backed Shapley) refuse it with an actionable error
+- **Correlated inputs** — declare a Gaussian-copula correlation matrix on `Problem` (`correlation=`, latent or Spearman scale, or `problem.with_correlation(R)`); `jaxgsa.sampling.monte_carlo` draws from it transparently, `correlate()` retrofits it onto existing samples, `fit_correlation()` estimates it from data, correlation-tolerant methods (OT, Borgonovo, HDMR, HSIC, PAWN, VKOGA) analyze it, the Kucherenko design conditions on it, and correlation-naive methods (Sobol, Morris, eFAST, PCE, DGSM, PCE-backed Shapley) refuse it with an actionable error
 - **Categorical inputs** — declare unordered discrete marginals with `{"dist": "categorical", "probs": [...], "labels": [...]}`; samples carry integer level codes, optimal transport, Borgonovo, and PAWN condition on one class per level, the Saltelli-based Sobol pipeline works unchanged, and every code-order-sensitive method (Morris, eFAST, DGSM, PCE, HDMR, HSIC, Shapley) refuses with a clear error
-- All eleven methods use one strict output contract: scalar `(N,)`, multi-output `(N, K)`, or time-series `(N, T, K)`
+- **VKOGA** — variance-based indices for correlated inputs (Hilhorst et al., 2024; Li et al., 2010)
+  - Given-data method: fits a greedy Gaussian-RBF kernel surrogate to whatever (X, Y) pairs you have
+  - Gaussian copula for the dependency structure: reads `problem.correlation`, with a per-call matrix override
+  - Splits each input's effect into correlated and uncorrelated parts (S_TC, S_TU, S_U, S_C, S_IU) — S_TC ranks inputs for measurement, S_TU for fixing
+  - Built-in emulator for prediction at new inputs
+- **Kucherenko indices** — design-based Sobol' indices for dependent inputs (Kucherenko et al., 2012)
+  - `kucherenko.sample` builds a conditional-copula design from `problem.correlation` (exempt from the correlated-design error); you evaluate your actual model on it — no surrogate
+  - S1 is correlation-inclusive (VKOGA's S_TC), ST is correlation-exclusive (VKOGA's S_TU); with independent inputs both reduce to the classic Sobol' indices
+  - Cross-validated against VKOGA and the analytic linear-Gaussian closed form in the test suite
+- All thirteen methods use one strict output contract: scalar `(N,)`, multi-output `(N, K)`, or time-series `(N, T, K)`
 - Bootstrap confidence intervals with JAX-accelerated resampling
 - Optional `prenormalize=True` mode for SALib-style output standardization before
   Sobol or HDMR analysis
@@ -517,7 +526,7 @@ Use it for:
 - parameter, field, and shape contracts
 - validation and error behavior
 - `to_dataset()` labeling rules
-- Sobol, RS-HDMR, PCE, Shapley, eFAST, DGSM, Morris, HSIC, PAWN, Borgonovo delta, and optimal-transport workflow examples
+- Sobol, RS-HDMR, PCE, Shapley, eFAST, DGSM, Morris, HSIC, PAWN, Borgonovo delta, optimal-transport, VKOGA, and Kucherenko workflow examples
 
 Quick map:
 
@@ -534,10 +543,17 @@ Quick map:
 - `jaxgsa.pawn`: `analyze` / `PAWNResult`
 - `jaxgsa.borgonovo`: `analyze` / `DeltaResult`
 - `jaxgsa.optimal_transport`: `analyze` / `OTResult`
+- `jaxgsa.vkoga`: `analyze` / `VKOGAResult`
+- `jaxgsa.kucherenko`: `sample` / `analyze` / `KucherenkoSamples` / `KucherenkoResult`
 
 Commands are intentionally not duplicated at the package root. Use the method
-namespaces shown above. PCE and HDMR predictions and Shapley effects are result
-methods: `result.predict(...)` and `result.shapley(...)`.
+namespaces shown above. PCE, HDMR, and VKOGA predictions are result methods:
+`result.predict(...)`. Shapley effects are result methods on PCE and HDMR:
+`result.shapley(...)`. VKOGA offers `predict` but not `shapley` — a kernel
+expansion has no per-parameter-subset variance decomposition. For a
+Shapley-style allocation under dependent inputs, use `jaxgsa.hdmr` with
+`shapley(include_correlative=True)`; for conditional-variance indices under
+dependence, use `jaxgsa.vkoga` or `jaxgsa.kucherenko`.
 
 For runnable walkthroughs, start with the
 [Getting Started guide](https://danielepessina.github.io/jaxgsa/guide/getting-started)

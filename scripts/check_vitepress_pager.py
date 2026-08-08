@@ -42,6 +42,8 @@ SECTIONS = {
         "pawn",
         "borgonovo",
         "optimal-transport",
+        "vkoga",
+        "kucherenko",
         "batch_reactor",
     ],
 }

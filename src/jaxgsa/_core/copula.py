@@ -585,6 +585,81 @@ def build_conditional_plan(R: np.ndarray) -> _ConditionalPlan:
     )
 
 
+def draw_rest_given_self(
+    plan: _ConditionalPlan,
+    index: int,
+    z_self: np.ndarray,
+    eps_rest: np.ndarray,
+) -> np.ndarray:
+    """Draw ``Z_-i | Z_i = z_self`` from pre-drawn standard-normal noise.
+
+    The conditional is ``Z_-i = beta * z_i + L eps`` with ``beta = R[-i, i]``
+    (``R[i, i] == 1``) and ``L`` the Cholesky factor of the Schur complement.
+    Shared by the VKOGA index estimators and the Kucherenko design so the
+    conditional algebra lives in one place.
+
+    Args:
+        plan: Conditionals from :func:`build_conditional_plan`.
+        index: The conditioning parameter ``i``.
+        z_self: ``(...,)`` latent values of ``Z_i``.
+        eps_rest: ``(..., D - 1)`` standard-normal noise, broadcastable
+            against ``z_self[..., None]``.
+
+    Returns:
+        Latent ``Z_-i`` values, shaped by the broadcast of the two inputs.
+    """
+    return z_self[..., None] * plan.beta_rest[index] + eps_rest @ plan.chol_rest[index].T
+
+
+def draw_self_given_rest(
+    plan: _ConditionalPlan,
+    index: int,
+    z_rest: np.ndarray,
+    eps_self: np.ndarray,
+) -> np.ndarray:
+    """Draw ``Z_i | Z_-i = z_rest`` from pre-drawn standard-normal noise.
+
+    The conditional is ``Z_i = beta . z_-i + sigma eps`` with
+    ``beta = R[i, -i] R[-i, -i]^{-1}`` and ``sigma`` the conditional standard
+    deviation. Shared by the VKOGA index estimators and the Kucherenko design.
+
+    Args:
+        plan: Conditionals from :func:`build_conditional_plan`.
+        index: The redrawn parameter ``i``.
+        z_rest: ``(..., D - 1)`` latent values of ``Z_-i``.
+        eps_self: standard-normal noise, broadcastable against the
+            conditional mean ``z_rest @ beta``.
+
+    Returns:
+        Latent ``Z_i`` values, shaped by the broadcast of mean and noise.
+    """
+    return z_rest @ plan.beta_self[index] + plan.std_self[index] * eps_self
+
+
+def assemble_latent(
+    index: int,
+    others: np.ndarray,
+    z_self: np.ndarray,
+    z_rest: np.ndarray,
+) -> np.ndarray:
+    """Interleave a parameter's latent draw with the other parameters'.
+
+    Args:
+        index: Parameter being conditioned on or resampled.
+        others: ``(D - 1,)`` indices of the remaining parameters.
+        z_self: ``(n,)`` latent values for ``index``.
+        z_rest: ``(n, D - 1)`` latent values for the others.
+
+    Returns:
+        ``(n, D)`` latent sample in parameter order.
+    """
+    n = z_self.shape[0]
+    Z = np.empty((n, others.shape[0] + 1), dtype=np.float64)
+    Z[:, index] = z_self
+    Z[:, others] = z_rest
+    return Z
+
+
 def _safe_cholesky(cov: np.ndarray) -> np.ndarray:
     """Cholesky factor of a covariance, repaired if it is not quite PD."""
     try:
@@ -605,17 +680,25 @@ def latent_normal_sample(n: int, dim: int, *, seed: int, scramble: bool = True) 
     rather than model cost and the better equidistribution is free.
 
     Args:
-        n: Number of points. Rounded up to the next power of two internally by
-            the Sobol' engine's balance properties; passed through as-is.
+        n: Number of points. Pass a power of two: the Sobol' engine loses its
+            balance guarantees (and scipy warns) otherwise. jaxgsa callers
+            round their sample sizes up before calling; the value is used
+            as-is here.
         dim: Dimension of each point.
         seed: Seed for the scrambling.
-        scramble: Whether to scramble the sequence. Unscrambled Sobol' starts
-            at the origin, which maps to an infinite normal deviate.
+        scramble: Whether to scramble the sequence. With ``scramble=False``
+            the sequence's first point (the origin) is skipped: the probit
+            would map it to the clipped extreme deviate, a point no normal
+            sample should contain. The scrambled path is unaffected.
 
     Returns:
         ``(n, dim)`` array of standard normal variates.
     """
     engine = qmc.Sobol(d=dim, scramble=scramble, seed=seed)
+    if not scramble:
+        # Skip the all-zeros origin point instead of clipping it to -7 sigma
+        # in every coordinate.
+        engine.fast_forward(1)
     unit = engine.random(n)
     # Sobol' points can land on exactly 0 or 1 when unscrambled; clip before the
     # probit so the deviates stay finite.

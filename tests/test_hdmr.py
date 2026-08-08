@@ -8,6 +8,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from jaxgsa import kucherenko
 from jaxgsa.benchmarks.ishigami import (
     ANALYTICAL_S1,
     ANALYTICAL_ST,
@@ -874,9 +875,9 @@ def test_st_is_not_a_conditional_variance_total(correlated_hdmr_result):
     """ST and S1 leave their Sobol readings behind under correlation.
 
     The correlative shares are folded into ST but left out of S1, so neither
-    one tracks the conditional-variance quantity a Sobol index reports. A
-    direct comparison against jaxgsa.kucherenko's ST or jaxgsa.vkoga's S_TU
-    is not possible yet: neither module exists on this branch.
+    one tracks the conditional-variance quantity a Sobol index reports.
+    ``test_st_diverges_from_the_conditional_variance_total`` makes the same
+    point against a real conditional-variance estimator.
     """
     result = correlated_hdmr_result
     ST = np.array(result.ST)
@@ -887,6 +888,38 @@ def test_st_is_not_a_conditional_variance_total(correlated_hdmr_result):
     assert S1[1] < 0.9
     # The correlative fold-in moves ST away from the structural sum.
     assert not np.allclose(ST[:2], S1[:2], atol=1e-3)
+
+
+def test_st_diverges_from_the_conditional_variance_total():
+    """HDMR's SCSA total must not be "fixed" to agree with a real total index.
+
+    ``jaxgsa.kucherenko`` estimates the conditional-variance total
+    ``E[Var(Y | X_~i)] / Var(Y)`` from its own design, and that is the
+    quantity HDMR's ``ST`` is often mistaken for. The two answer different
+    questions under dependence, so they must disagree. This test exists to
+    fail loudly if someone later "corrects" either one to match the other.
+    """
+    problem = _correlated_problem(rho=0.9)
+
+    # HDMR, given data.
+    X = jnp.asarray(monte_carlo(problem, 4000, seed=5))
+    Y = _linear_interaction(X)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        hdmr_ST = np.asarray(analyze_hdmr(problem, X, Y, maxorder=2, m=2).ST)
+
+    # Kucherenko, from its own conditional-copula design.
+    samples = kucherenko.sample(problem, 4000, seed=5)
+    k_result = kucherenko.analyze(samples, _linear_interaction(jnp.asarray(samples.samples)))
+    kucherenko_ST = np.asarray(k_result.ST)
+
+    # Kucherenko's total is a variance fraction: non-negative and bounded.
+    assert np.all(kucherenko_ST >= -1e-6)
+    assert np.all(kucherenko_ST <= 1.0 + 1e-6)
+
+    # HDMR's SCSA total is neither of those things here, and the correlated
+    # pair is where the two readings come apart.
+    assert not np.allclose(hdmr_ST[:2], kucherenko_ST[:2], atol=0.05)
 
 
 def test_correlated_problem_warns_once():

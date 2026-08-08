@@ -598,9 +598,11 @@ def sample(
 
     Raises:
         ValueError: If ``n_trajectories``, ``num_levels``, ``method``, or
-            ``truncation_quantile`` are invalid, or ``problem.correlation``
+            ``truncation_quantile`` are invalid, ``problem.correlation``
             declares a dependence structure (the one-at-a-time design assumes
-            independent inputs).
+            independent inputs), or ``problem`` has categorical parameters
+            (the design steps each input along a grid, which has no meaning
+            for unordered level codes).
     """
     _raise_correlated_design(problem, "jaxgsa.morris.sample")
     _raise_categorical_design(problem, "jaxgsa.morris.sample")

@@ -202,9 +202,11 @@ def sample(
         parameter ``i``.
 
     Raises:
-        ValueError: If ``M < 1``, ``n_per_curve < 4*M^2*(D-1) + 1``, or
+        ValueError: If ``M < 1``, ``n_per_curve < 4*M^2*(D-1) + 1``,
             ``problem.correlation`` declares a dependence structure (the
-            search-curve design assumes independent inputs).
+            search-curve design assumes independent inputs), or ``problem``
+            has categorical parameters (the search curve sweeps each input
+            continuously, which has no meaning for unordered level codes).
     """
     _raise_correlated_design(problem, "jaxgsa.efast.sample")
     _raise_categorical_design(problem, "jaxgsa.efast.sample")

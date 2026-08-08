@@ -219,7 +219,12 @@ class SobolSamples(UniqueDesignSamples):
 
         Raises:
             ValueError: If fewer than two blocks are left with a measurable
-                step (see below).
+                step (see below), or if ``problem`` has categorical
+                parameters. An elementary effect divides by a step along one
+                input axis, which has no meaning for unordered level codes.
+                The Saltelli design itself stays valid, so
+                :func:`jaxgsa.sobol.sample` and :func:`jaxgsa.sobol.analyze`
+                still accept a categorical problem.
 
         Warns:
             UserWarning: If any parameter has an *unbounded* Gaussian

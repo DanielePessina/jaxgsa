@@ -374,6 +374,25 @@ class TestGaussianInputs:
         gram = (P.T @ P) / N
         np.testing.assert_allclose(np.asarray(gram), np.eye(5), atol=0.05)
 
+    def test_basis_dtype_promotes_float32_inputs_under_x64(self):
+        """A float32 x must not downgrade the PCE basis to float32 under x64.
+
+        Both recurrences run in the default float dtype, exactly like the
+        Hermite seed matrix. A float32 sample matrix then still yields a
+        float64 design matrix, and mixed uniform/Gaussian problems get one
+        consistent basis dtype.
+        """
+        with jax.enable_x64():
+            x = jnp.linspace(-0.9, 0.9, 8, dtype=jnp.float32)
+            assert _hermite_1d(x, 3).dtype == jnp.float64
+            assert _legendre_1d(x, 3).dtype == jnp.float64
+            X = jnp.stack([x, x], axis=1)
+            Phi = build_design_matrix(X, build_multi_index(2, 2), ("uniform", "gaussian"), 2)
+            assert Phi.dtype == jnp.float64
+        # The NumPy path promotes the same way (float64 is NumPy's default).
+        P = _legendre_1d(np.linspace(-0.9, 0.9, 8, dtype=np.float32), 3)
+        assert P.dtype == np.float64
+
 
 class TestTruncatedGaussianBasis:
     """A wide truncation must keep the Hermite basis; a narrow one must not."""

@@ -8,7 +8,7 @@ analysis is JIT-compiled and runs on CPU, GPU, or TPU without code changes.
 
 This page walks through one complete analysis with Sobol indices, the most
 widely used method. Once it runs, the [Methods guide](/guide/methods) explains
-how to choose among the eleven methods jaxgsa provides.
+how to choose among the thirteen methods jaxgsa provides.
 
 ## Installation
 
@@ -135,7 +135,7 @@ definition, and Saltelli reconstruction metadata.
 Start with the core workflow, then branch into the example that matches your
 next problem:
 
-- [Methods](/guide/methods) -- compare all eleven methods before choosing a workflow
+- [Methods](/guide/methods) -- compare all thirteen methods before choosing a workflow
 - [Migrating to 0.4](/guide/migration-0.4) -- update sampling, analysis, prediction, and Shapley calls from 0.3
 - [Basic Example (Ishigami)](/examples/basic) -- run the canonical scalar-output Sobol analysis end to end
 - [Non-Uniform Inputs](/examples/non-uniform-inputs) -- mix uniform, Gaussian, and truncated Gaussian Sobol marginals in one `Problem`
