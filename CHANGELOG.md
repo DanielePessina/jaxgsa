@@ -1,5 +1,121 @@
 # Changelog
 
+## Unreleased (0.6.0)
+
+### Added
+
+- **`Problem.correlation` — declared input dependence via a Gaussian copula.**
+  A `Problem` can now carry an optional `(D, D)` correlation matrix. Pass it
+  as `correlation=` on the constructor or on `from_dict`. Or use the
+  `problem.with_correlation(R)` copy constructor, since problems are frozen.
+  The matrix lives on the latent standard-normal scale of a Gaussian copula.
+  Each parameter keeps its declared marginal exactly. Only the coupling
+  between columns changes. Pass `correlation_kind="spearman"` to declare a
+  rank correlation instead. The exact relation `2 sin(pi rho_s / 6)` converts
+  it. That route is invertible for non-Gaussian marginals. Validation on
+  entry checks shape, symmetry, unit diagonal, and entry range. A
+  non-positive-definite matrix usually signals inconsistent pairwise
+  correlations. Eigenvalue clipping repairs it. The report is graded by the
+  largest change to a single entry, measured on the scale you declared. Below
+  `1e-6` the repair is floating-point noise and says nothing. Between `1e-6`
+  and `0.05` a `UserWarning` reports the change and the minimum eigenvalue.
+  At `0.05` or more a `ValueError` rejects the matrix. Such a matrix is
+  structurally inconsistent. Correct it, or fit a valid one from data with
+  `jaxgsa.sampling.fit_correlation`. Sampling therefore
+  never follows a silently different dependence structure. A matrix declared
+  with `correlation_kind="spearman"` is reported on the Spearman scale, in
+  the units you wrote, not on the converted latent scale. `fit_correlation`
+  never raises for this reason. Inconsistent data is not a user error. A fit
+  that had to move an entry by `0.05` or more only warns. The correlation
+  round-trips through the JSON problem metadata and the NPZ design files.
+  Saved designs do not silently drop it.
+- **Correlated sampling in `jaxgsa.sampling`.** `monte_carlo` now honors
+  `problem.correlation` transparently. It draws correlated standard normals
+  on the latent scale. It pushes them through each marginal's inverse CDF
+  (the NORTA construction). Independent problems keep the previous
+  pseudo-random path bit-for-bit. Existing seeds reproduce existing samples.
+  Two new companions cover the remaining workflows. `correlate(X, problem)`
+  retrofits the declared correlation onto an existing sample. It uses
+  Iman–Conover rank re-pairing: van der Waerden scores, de-correlated by
+  `chol(R) chol(corr(M))^-1`, then matched rank for rank. Each output column
+  is an exact permutation of the input column. The marginal values therefore
+  stay intact. `fit_correlation(problem, X)` estimates the latent matrix from
+  observed data via Spearman ranks. Attach it with
+  `problem.with_correlation(fit_correlation(problem, X))`. Tied values get
+  average ranks, per the Spearman convention. Heavily discrete data still
+  biases the fit toward zero. A polychoric estimator is future work.
+  `correlation_from_covariance(cov)` converts a published covariance matrix
+  to the correlation form the API accepts. It discards the variances on the
+  diagonal in favor of the declared marginals.
+- **Hard errors from correlation-naive methods.** Some methods compute
+  indices that assume independent inputs. When `problem.correlation`
+  declares a non-identity dependence structure, these methods now refuse to
+  run. They no longer return silently wrong numbers. This covers the
+  structured design samplers: `sobol.sample`, `morris.sample`,
+  `efast.sample`. It also covers the given-data analyzers whose theory needs
+  independence: `pce.analyze`, `dgsm.analyze`, and `shapley.analyze` with
+  the PCE backend. Each error names correlation-tolerant alternatives.
+  `optimal_transport`, `borgonovo`, `hdmr`, `hsic`, and `pawn` all accept
+  correlated problems. The ANCOVA `Sb` term of `hdmr` is precisely the
+  correlation-induced contribution. `shapley.analyze(backend="hdmr",
+  include_correlative=True)` allocates the ANCOVA decomposition. Internally,
+  a `correlation_ok` capability flag sits on the shared `(X, Y)` validation.
+  Future methods must therefore make the decision explicitly.
+
+### Changed
+
+- **`hdmr` now says what `ST` means under correlated inputs.** No number
+  changed. `HDMRResult.ST` was labelled a total-order index with no caveat.
+  It is the SCSA total: the sum of `S = Sa + Sb` over every term that
+  contains the parameter. Li et al. (2010) define it in Section 2.2.3, from
+  the per-term indices of their Eqs. (19)-(22); Sarazin, Viaud & Cournède
+  (2017) restate it as their Eq. (8). It is the same convention as SALib's
+  HDMR. The source paper invites the misreading, reusing the symbol `S_Ti`
+  for both this term-membership sum and the classical conditional-variance
+  total of its own Eq. (4). With independent
+  inputs the correlative shares vanish and it reduces to the ordinary Sobol'
+  total-order index. With correlated inputs it does not. It can be negative,
+  it is not bounded in `[0, 1]`, and it does not measure the expected
+  variance reduction from fixing a parameter. So it must not be used as a
+  criterion for fixing one. The bias runs toward "cannot be fixed", and a
+  parameter the model ignores can outrank one with a negative value. It is
+  also not comparable with the `ST` of `jaxgsa.kucherenko` or the `S_TU` of
+  `jaxgsa.vkoga`. Use one of those for a conditional-variance total under
+  dependence. Li et al. also attach a precondition: the totals are reliable
+  only when the per-term `S` values sum to about 1 (their Eq. 24), the
+  shortfall being the variance the surrogate leaves unexplained, so check
+  `result.S.sum()`. `HDMRResult.S1` carries the matching caveat: it is the
+  structural share `Sa` of the first-order term, not the Sobol' first-order
+  index. `hdmr.analyze` emits one `UserWarning` per call on a correlated
+  problem to say all of this. Independent problems stay silent. The
+  per-term `Sa`, `Sb` and `S` fields keep their ANCOVA meaning and are
+  unaffected.
+
+### Fixed
+
+- **`correlation_kind="spearman"` now checks the matrix you declared.** The
+  structural checks (shape, symmetry, unit diagonal, entry range) ran after
+  the `2 sin(pi rho_s / 6)` conversion. That conversion pins the diagonal to
+  1, so a Spearman matrix with a nonsense diagonal was accepted and silently
+  rewritten. The checks now run on the declared matrix, before any
+  conversion. Both kinds reject the same structural errors.
+- **`correlate()` is now the real Iman–Conover method.** It drew a plain
+  correlated normal score matrix, which carries its own sampling noise into
+  the re-pairing. It now uses van der Waerden scores and the
+  `chol(corr(M))^-1` de-correlation step, which is what removes that noise.
+  At N = 50 and a target latent correlation of 0.8, the standard deviation of
+  the achieved rank correlation falls from 0.065 to 0.024, and a bias of
+  -0.006 disappears. The same ratio holds at every sample size. Output for a
+  correlated problem therefore changes for a given seed. Each output column
+  is still an exact permutation of the input column, and the function is
+  still deterministic for a given seed.
+- **The positive-definiteness repair is now idempotent.** Clipping the
+  eigenvalues and then renormalising the diagonal could push the smallest
+  eigenvalue back under the floor. A repaired matrix was therefore repaired
+  again on the next call, so a `Problem` moved by about 1e-9 on every
+  save-and-load round trip. The repair now repeats until the floor holds, so
+  it reaches a fixed point and round trips are stable.
+
 ## 0.5.0
 
 ### Added

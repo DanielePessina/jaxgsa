@@ -25,6 +25,7 @@ SECTIONS = {
     "examples": [
         "basic",
         "non-uniform-inputs",
+        "correlated-inputs",
         "save-load",
         "bootstrap",
         "multi-output",

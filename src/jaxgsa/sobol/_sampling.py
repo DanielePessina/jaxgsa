@@ -28,6 +28,7 @@ from jaxgsa._core.sampling import (
     _stable_unique_rows,
     _transform_samples,
 )
+from jaxgsa._core.validation import _raise_correlated_design
 from jaxgsa.problem import Problem
 
 if TYPE_CHECKING:
@@ -484,7 +485,13 @@ def sample(
     Returns:
         SobolSamples with a unique sample matrix plus expansion metadata for
         later Sobol analysis.
+
+    Raises:
+        ValueError: If ``base_n`` is not a power of 2, or
+            ``problem.correlation`` declares a dependence structure (the
+            Saltelli design and its estimators assume independent inputs).
     """
+    _raise_correlated_design(problem, "jaxgsa.sobol.sample")
     D = problem.num_vars
     # Rows per base point -- determines the ratio between base_n and total expanded rows
     step = _saltelli_step(D, calc_second_order)

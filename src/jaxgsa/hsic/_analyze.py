@@ -427,7 +427,9 @@ def analyze(
         raise ValueError(f"n_perms must be >= 1, got {n_perms}")
     if bandwidth is not None and (bandwidth <= 0 or not math.isfinite(bandwidth)):
         raise ValueError(f"bandwidth must be positive and finite, got {bandwidth}")
-    Y = _validate_xy_inputs(problem, X, Y)
+    # HSIC is a dependence measure with no input-independence assumption, so
+    # a declared input correlation does not invalidate the indices.
+    Y = _validate_xy_inputs(problem, X, Y, correlation_ok=True)
     if X.shape[0] < _MIN_SAMPLES:
         raise ValueError(f"N must be >= {_MIN_SAMPLES} for HSIC, got {X.shape[0]}")
 

@@ -13,6 +13,13 @@ commands live under the namespace for their method.
 Construct problems with `Problem.from_dict(...)`. Uniform inputs may use the
 short `(low, high)` form; Gaussian inputs use `GaussianInputSpec`.
 
+Dependent inputs are declared with the optional Gaussian-copula
+`correlation=` argument (`correlation_kind="latent"` or `"spearman"`), or
+attached to an existing problem with `problem.with_correlation(R)`; the
+validated latent matrix is available as `problem.correlation`. Methods whose
+indices assume independent inputs refuse a correlated problem with a
+`ValueError`. See [Correlated Inputs](/examples/correlated-inputs).
+
 ## Shape Contract
 
 Every analysis accepts one of three output layouts:
@@ -60,8 +67,14 @@ These methods analyze arbitrary aligned `(X, Y)` pairs:
 | `jaxgsa.borgonovo` | `analyze` | `DeltaResult` |
 | `jaxgsa.optimal_transport` | `analyze` | `OTResult` |
 
-Draw ordinary independent inputs with
-`jaxgsa.sampling.monte_carlo(problem, n, seed=...)`.
+Draw plain Monte Carlo inputs with
+`jaxgsa.sampling.monte_carlo(problem, n, seed=...)`; it honors
+`problem.correlation` transparently when one is declared. The same namespace
+provides `correlate(X, problem)` (impose the declared correlation on an
+existing sample by rank re-pairing), `fit_correlation(problem, X)` (estimate
+the latent matrix from data), and `correlation_from_covariance(cov)`. Under a
+declared correlation, `optimal_transport`, `borgonovo`, `hdmr`, `hsic`, and
+`pawn` accept the data; `pce`, `dgsm`, and `shapley` (PCE backend) raise.
 
 PCE and HDMR results retain their fitted surrogate:
 

@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 
 from jaxgsa.problem import GaussianInputSpec, Problem, UniformInputSpec
@@ -138,3 +139,151 @@ class TestTruncateGaussians:
         sr = morris.sample(p, n_trajectories=25, seed=1, verbose=False)
         assert float(np.min(sr.samples[:, 0])) == pytest.approx(p.input_specs[0][3])
         assert float(np.max(sr.samples[:, 0])) == pytest.approx(p.input_specs[0][4])
+
+
+# ---------------------------------------------------------------------------
+# Problem.correlation
+# ---------------------------------------------------------------------------
+
+
+def test_correlation_defaults_to_none_and_independent():
+    p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
+    assert p.correlation is None
+    assert p.has_correlated_inputs is False
+
+
+def test_from_dict_accepts_latent_correlation():
+    R = [[1.0, 0.5], [0.5, 1.0]]
+    p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=R)
+    assert p.has_correlated_inputs is True
+    stored = p.correlation
+    assert stored is not None
+    np.testing.assert_allclose(stored, R, atol=1e-15)
+
+
+def test_direct_constructor_accepts_correlation():
+    p = Problem(
+        names=("a", "b"),
+        bounds=((0.0, 1.0), (0.0, 1.0)),
+        correlation=[[1.0, -0.3], [-0.3, 1.0]],
+    )
+    stored = p.correlation
+    assert stored is not None
+    np.testing.assert_allclose(stored[0, 1], -0.3, atol=1e-15)
+
+
+def test_spearman_kind_is_converted_to_latent_on_entry():
+    rho_s = 0.7
+    p = Problem.from_dict(
+        {"x1": (0.0, 1.0), "x2": (0.0, 1.0)},
+        correlation=[[1.0, rho_s], [rho_s, 1.0]],
+        correlation_kind="spearman",
+    )
+    stored = p.correlation
+    assert stored is not None
+    np.testing.assert_allclose(stored[0, 1], 2.0 * np.sin(np.pi * rho_s / 6.0), atol=1e-15)
+
+
+def test_correlation_shape_must_match_names():
+    with pytest.raises(ValueError, match=r"must be \(2, 2\)"):
+        Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=np.eye(3))
+
+
+def test_mildly_indefinite_correlation_warns_at_construction():
+    # Smallest eigenvalue -0.01. The repair moves an entry by 5e-3, under the
+    # 0.05 threshold that makes a declared matrix an error.
+    mild = np.full((3, 3), -0.505)
+    np.fill_diagonal(mild, 1.0)
+    with pytest.warns(UserWarning, match="not positive definite"):
+        p = Problem.from_dict(
+            {"a": (0.0, 1.0), "b": (0.0, 1.0), "c": (0.0, 1.0)}, correlation=mild
+        )
+    stored = p.correlation
+    assert stored is not None
+    assert np.linalg.eigvalsh(stored).min() > 0
+
+
+def test_materially_indefinite_correlation_is_rejected_at_construction():
+    indefinite = np.array(
+        [
+            [1.0, 0.9, 0.9],
+            [0.9, 1.0, -0.9],
+            [0.9, -0.9, 1.0],
+        ]
+    )
+    with pytest.raises(ValueError, match="too far to accept"):
+        Problem.from_dict(
+            {"a": (0.0, 1.0), "b": (0.0, 1.0), "c": (0.0, 1.0)}, correlation=indefinite
+        )
+
+
+def test_identity_correlation_is_stored_but_not_correlated():
+    p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=np.eye(2))
+    assert p.correlation is not None
+    assert p.has_correlated_inputs is False
+
+
+def test_with_correlation_returns_new_problem_and_preserves_marginals():
+    base = Problem.from_dict(
+        {
+            "u": (0.0, 2.0),
+            "g": GaussianInputSpec(dist="gaussian", mean=1.0, variance=4.0),
+        },
+        output_names=("response",),
+    )
+    R = np.array([[1.0, 0.6], [0.6, 1.0]])
+    correlated = base.with_correlation(R)
+
+    assert correlated is not base
+    assert base.correlation is None  # the original is untouched
+    assert correlated.names == base.names
+    assert correlated.input_specs == base.input_specs
+    assert correlated.output_names == base.output_names
+    stored = correlated.correlation
+    assert stored is not None
+    np.testing.assert_allclose(stored, R, atol=1e-15)
+
+
+def test_with_correlation_accepts_spearman_kind():
+    base = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
+    rho_s = 0.5
+    p = base.with_correlation([[1.0, rho_s], [rho_s, 1.0]], kind="spearman")
+    stored = p.correlation
+    assert stored is not None
+    np.testing.assert_allclose(stored[0, 1], 2.0 * np.sin(np.pi * rho_s / 6.0), atol=1e-15)
+
+
+def test_with_correlation_none_drops_the_matrix():
+    R = [[1.0, 0.5], [0.5, 1.0]]
+    p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=R)
+    dropped = p.with_correlation(None)
+    assert dropped.correlation is None
+    assert dropped.has_correlated_inputs is False
+
+
+def test_correlation_property_returns_defensive_copy():
+    R = [[1.0, 0.5], [0.5, 1.0]]
+    p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=R)
+    first = p.correlation
+    assert first is not None
+    first[0, 1] = 0.0
+    second = p.correlation
+    assert second is not None
+    assert second[0, 1] == 0.5
+
+
+def test_correlation_participates_in_equality_and_hash():
+    params = {"x1": (0.0, 1.0), "x2": (0.0, 1.0)}
+    plain = Problem.from_dict(dict(params))
+    correlated = Problem.from_dict(dict(params), correlation=[[1.0, 0.5], [0.5, 1.0]])
+    correlated_again = Problem.from_dict(dict(params), correlation=[[1.0, 0.5], [0.5, 1.0]])
+
+    assert plain != correlated
+    assert correlated == correlated_again
+    assert hash(correlated) == hash(correlated_again)
+
+
+def test_correlated_problem_is_still_frozen():
+    p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=np.eye(2))
+    with pytest.raises(AttributeError):
+        setattr(p, "_correlation", None)

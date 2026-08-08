@@ -403,7 +403,9 @@ def analyze_pce(
             ``batch_size`` is given and not a positive integer.
     """
     X = jnp.asarray(X)
-    Y = _validate_xy_inputs(problem, X, jnp.asarray(Y))
+    # Wiener-Askey basis orthogonality assumes independent inputs, so a
+    # correlated problem is rejected (correlation_ok stays False).
+    Y = _validate_xy_inputs(problem, X, jnp.asarray(Y), method="jaxgsa.pce.analyze")
 
     # Per-slice output variance, computed once and shared by the zero-variance
     # warning and the explained-variance diagnostic below.

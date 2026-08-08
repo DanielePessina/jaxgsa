@@ -169,6 +169,44 @@ def _reshape_emulator_value(
     return _squeeze_output_axes(value, squeeze_time, squeeze_output, n_trailing=value.ndim - 2)
 
 
+def _warn_correlated_index_reading(problem: Problem) -> None:
+    """Warn once that ST and S1 carry the SCSA reading on a correlated problem.
+
+    HDMR accepts correlated inputs, and the ANCOVA split stays valid. The two
+    aggregate fields are the trap: ``ST`` is the SCSA total of Li et al.
+    (2010) Section 2.2.3, not a Sobol total, and ``S1`` is a structural
+    share only. The paper itself invites the confusion, reusing the symbol
+    ``S_Ti`` for both this term-membership sum and the classical
+    conditional-variance total of its Eq. (4). Both are valid published
+    quantities that are easy to misread, so this warns rather than raises.
+    Independent problems stay silent.
+
+    Args:
+        problem: Problem definition for the analysis; nothing is emitted
+            unless it declares a dependence structure.
+    """
+    if not problem.has_correlated_inputs:
+        return
+    import warnings
+
+    warnings.warn(
+        "jaxgsa: problem.correlation declares dependent inputs. HDMRResult.ST "
+        "is then the SCSA total, sum over every term u containing i of "
+        "(Sa_u + Sb_u) (Li et al. 2010, Section 2.2.3; the SALib HDMR "
+        "convention). It is not a Sobol total-order index: it can be "
+        "negative, it is not bounded in [0, 1], and it does not measure the "
+        "expected variance reduction from fixing a parameter, so do not use "
+        "it to decide a parameter can be fixed. Li et al. also require the "
+        "per-term S values to sum to about 1 for the totals to be reliable "
+        "(their Eq. 24) -- check result.S.sum(). HDMRResult.S1 is likewise "
+        "the structural share only, not the Sobol first-order index. For a "
+        "conditional-variance total under dependence use jaxgsa.kucherenko "
+        "(ST) or jaxgsa.vkoga (S_TU). The per-term Sa/Sb/S fields are "
+        "unaffected.",
+        stacklevel=3,
+    )
+
+
 def analyze_hdmr(
     problem: Problem,
     X: Array,
@@ -184,16 +222,23 @@ def analyze_hdmr(
 ) -> HDMRResult:
     """Compute sensitivity indices via RS-HDMR (public entry point).
 
-    Validates ``(X, Y)``, warns once about any zero-variance output slice, then
-    delegates to :func:`_analyze_hdmr_core`. See that function for the full
-    parameter and return documentation.
+    Validates ``(X, Y)``, warns once about any zero-variance output slice and
+    once about the index reading on a correlated problem, then delegates to
+    :func:`_analyze_hdmr_core`. See that function for the full parameter and
+    return documentation.
     """
     X = jnp.asarray(X)
-    Y = _validate_xy_inputs(problem, X, jnp.asarray(Y))
+    # HDMR's ANCOVA decomposition separates structural (Sa) from
+    # correlation-induced (Sb) variance, so correlated problems are welcome.
+    Y = _validate_xy_inputs(problem, X, jnp.asarray(Y), correlation_ok=True)
     # A constant output slice makes every index 0/0 = NaN; warn once up front,
     # in the public wrapper only, so callers routing through the core (Shapley)
     # do not double-warn.
     _warn_zero_variance_slices(_prepare_Y(Y)[0], output_names=problem.output_names)
+    # ST and S1 change meaning under dependence; say so once per analyze call,
+    # in the public wrapper only, so Shapley routing through the core stays
+    # quiet.
+    _warn_correlated_index_reading(problem)
     return _analyze_hdmr_core(
         problem,
         X,
@@ -283,6 +328,25 @@ def _analyze_hdmr_core(
         HDMRResult with per-term indices Sa, Sb, S, per-parameter ST,
         human-readable term labels, F-test selection counts, the fitted
         surrogate state and its RMSE.
+
+        ``ST`` is the SCSA total: ``ST_i = sum over u containing i of
+        (Sa_u + Sb_u)``, defined in Section 2.2.3 of Li et al. (2010) from
+        the per-term indices of their Eqs. (19)-(22). It is the same
+        convention as SALib's HDMR. With independent inputs the
+        correlative shares vanish and it reduces to the ordinary Sobol
+        total-order index.
+
+    Warning:
+        With correlated inputs, ``ST`` is **not** a Sobol total-order index.
+        It can be negative, it is not bounded in ``[0, 1]``, and it does not
+        measure the expected reduction of output variance from fixing a
+        parameter. Do not use it as a fixing criterion. It is also not
+        comparable with the ``ST`` of ``jaxgsa.kucherenko`` or the ``S_TU``
+        of ``jaxgsa.vkoga``; use one of those when you need a genuine total
+        under dependence. ``S1`` is the structural share only, not the Sobol
+        first-order index. The per-term ``Sa``, ``Sb`` and ``S`` fields keep
+        their ANCOVA meaning. A correlated problem emits one ``UserWarning``
+        that says this.
 
     Raises:
         ValueError: If ``N < 300``, ``maxorder`` is not 1/2/3, or an explicit

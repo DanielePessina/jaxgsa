@@ -1,0 +1,500 @@
+"""Tests for the Gaussian-copula backend and the correlated-problem guards."""
+
+import warnings
+
+import jax.numpy as jnp
+import numpy as np
+import pytest
+import scipy.stats
+
+import jaxgsa
+from jaxgsa._core.copula import (
+    _MIN_EIGENVALUE,
+    _REPAIR_NOISE,
+    _project_to_correlation,
+    _spearman_to_latent,
+    canonicalize_correlation,
+    correlation_from_covariance,
+    fit_gaussian_copula,
+    independent_correlation,
+    is_independent,
+    latent_to_physical,
+    validate_correlation,
+)
+from jaxgsa.problem import GaussianInputSpec, Problem
+
+# An indefinite candidate: pairwise entries are individually valid but jointly
+# inconsistent (eigenvalues of this matrix include a negative one). The repair
+# moves an entry by 0.4, so a declared matrix like this is rejected outright.
+_INDEFINITE_R = np.array(
+    [
+        [1.0, 0.9, 0.9],
+        [0.9, 1.0, -0.9],
+        [0.9, -0.9, 1.0],
+    ]
+)
+
+
+def _equicorrelated(rho: float, D: int = 3) -> np.ndarray:
+    """Return the ``(D, D)`` matrix with ``rho`` off the diagonal.
+
+    Its smallest eigenvalue is ``1 + (D - 1) rho``, so ``rho`` places the
+    matrix in any severity band we want to test.
+    """
+    R = np.full((D, D), float(rho))
+    np.fill_diagonal(R, 1.0)
+    return R
+
+
+# Smallest eigenvalue -1e-9, so the repair only lifts it to the 1e-8 floor.
+# The largest entrywise change is 9e-9: numerical noise, reported to nobody.
+_NOISE_R = _equicorrelated(1.0 - 1e-9)
+
+# Smallest eigenvalue -0.01. The repair moves an entry by 5e-3, which is under
+# the 0.05 material threshold, so a declared matrix like this warns.
+_MILD_INDEFINITE_R = _equicorrelated(-0.505)
+
+
+def _uniform_problem(D: int = 2) -> Problem:
+    return Problem.from_dict({f"x{i}": (0.0, 1.0) for i in range(D)})
+
+
+# ---------------------------------------------------------------------------
+# validate_correlation / repair warning
+# ---------------------------------------------------------------------------
+
+
+def test_validate_correlation_accepts_valid_matrix_unchanged():
+    R = np.array([[1.0, 0.5], [0.5, 1.0]])
+    np.testing.assert_allclose(validate_correlation(R, 2), R, atol=1e-15)
+
+
+@pytest.mark.parametrize(
+    ("R", "match"),
+    [
+        (np.eye(3), r"must be \(2, 2\)"),
+        (np.array([[1.0, 0.5], [0.2, 1.0]]), "symmetric"),
+        (np.array([[2.0, 0.5], [0.5, 1.0]]), "unit diagonal"),
+        (np.array([[1.0, 1.5], [1.5, 1.0]]), r"lie in \[-1, 1\]"),
+    ],
+)
+def test_validate_correlation_rejects_structurally_invalid(R, match):
+    with pytest.raises(ValueError, match=match):
+        validate_correlation(R, 2)
+
+
+def test_repair_warning_fires_for_mildly_indefinite_declared_matrix():
+    # UserWarning is not promoted to an error by the pytest config, so the
+    # firing case must be asserted explicitly with pytest.warns.
+    with pytest.warns(UserWarning, match="not positive definite"):
+        repaired = validate_correlation(_MILD_INDEFINITE_R, 3, policy="declared")
+    eigenvalues = np.linalg.eigvalsh(repaired)
+    assert eigenvalues.min() > 0
+    np.testing.assert_allclose(np.diag(repaired), 1.0, atol=1e-12)
+
+
+def test_repair_warning_reports_min_eigenvalue_and_max_change():
+    with pytest.warns(UserWarning) as record:
+        repaired = validate_correlation(_MILD_INDEFINITE_R, 3, policy="declared")
+    message = str(record[0].message)
+    min_eig = np.linalg.eigvalsh(_MILD_INDEFINITE_R).min()
+    change = np.abs(repaired - _MILD_INDEFINITE_R).max()
+    assert f"{min_eig:.3e}" in message
+    assert f"{change:.3e}" in message
+    assert "latent scale" in message
+
+
+def test_repair_of_declared_matrix_is_silent_at_noise_level():
+    """A repair that only lifts the eigenvalue floor says nothing."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        repaired = validate_correlation(_NOISE_R, 3, policy="declared")
+    assert 0.0 < np.abs(repaired - _NOISE_R).max() < _REPAIR_NOISE
+
+
+def test_repair_of_declared_matrix_raises_when_material():
+    with pytest.raises(ValueError, match="too far to accept"):
+        validate_correlation(_INDEFINITE_R, 3, policy="declared")
+
+
+def test_material_repair_error_names_the_way_out():
+    with pytest.raises(ValueError) as excinfo:
+        validate_correlation(_INDEFINITE_R, 3, policy="declared")
+    message = str(excinfo.value)
+    min_eig = np.linalg.eigvalsh(_INDEFINITE_R).min()
+    assert f"{min_eig:.3e}" in message
+    assert "4.000e-01" in message  # the max entrywise change
+    assert "jaxgsa.sampling.fit_correlation" in message
+    assert "correlation_kind" in message
+
+
+def test_repair_stays_silent_for_valid_matrix():
+    R = np.array([[1.0, 0.3], [0.3, 1.0]])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        validate_correlation(R, 2, policy="declared")
+
+
+def test_fitted_repair_stays_silent_below_the_material_threshold():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        validate_correlation(_MILD_INDEFINITE_R, 3)  # policy defaults to "fitted"
+
+
+def test_fitted_repair_warns_but_never_raises_when_material():
+    with pytest.warns(UserWarning, match="the fitted correlation matrix"):
+        repaired = validate_correlation(_INDEFINITE_R, 3)
+    assert np.linalg.eigvalsh(repaired).min() > 0
+
+
+def test_fit_gaussian_copula_never_raises_on_degenerate_data():
+    """A duplicated column makes the rank estimate singular; the fit survives."""
+    rng = np.random.default_rng(0)
+    column = rng.normal(size=64)
+    X = np.column_stack([column, column, rng.normal(size=64)])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        R = fit_gaussian_copula(_uniform_problem(3), X)
+    assert np.linalg.eigvalsh(R).min() > 0
+
+
+# ---------------------------------------------------------------------------
+# severity reported in the units the user declared
+# ---------------------------------------------------------------------------
+
+
+def test_spearman_repair_reports_the_change_on_the_spearman_scale():
+    """The user wrote Spearman numbers, so the message must use them.
+
+    This matrix straddles the material threshold: the change is 5.04e-2 on the
+    latent scale but 4.99e-2 on the Spearman scale. Reporting the declared
+    scale therefore also decides between a warning and an error.
+    """
+    from jaxgsa._core.copula import _latent_to_spearman, _spearman_to_latent
+
+    declared = _equicorrelated(-0.5325)
+    with pytest.warns(UserWarning, match="Spearman scale") as record:
+        repaired = canonicalize_correlation(declared, 3, kind="spearman", policy="declared")
+
+    latent_change = np.abs(repaired - _spearman_to_latent(declared)).max()
+    spearman_change = np.abs(_latent_to_spearman(repaired) - declared).max()
+    assert latent_change >= 0.05 > spearman_change
+    assert f"{spearman_change:.3e}" in str(record[0].message)
+
+
+def test_spearman_round_trip_is_exact():
+    """Reporting on the declared scale is only honest if the inverse is exact."""
+    from jaxgsa._core.copula import _latent_to_spearman, _spearman_to_latent
+
+    R = np.array([[1.0, 0.7, -0.3], [0.7, 1.0, 0.2], [-0.3, 0.2, 1.0]])
+    np.testing.assert_allclose(_latent_to_spearman(_spearman_to_latent(R)), R, atol=1e-15)
+
+
+# ---------------------------------------------------------------------------
+# _spearman_to_latent
+# ---------------------------------------------------------------------------
+
+
+def test_spearman_to_latent_matches_kruskal_formula():
+    rho_s = 0.7
+    latent = _spearman_to_latent(np.array([[1.0, rho_s], [rho_s, 1.0]]))
+    expected = 2.0 * np.sin(np.pi * rho_s / 6.0)
+    np.testing.assert_allclose(latent[0, 1], expected, atol=1e-15)
+    np.testing.assert_allclose(np.diag(latent), 1.0, atol=0)  # pinned exactly
+
+
+def test_spearman_to_latent_maps_extremes_to_extremes():
+    R = np.array([[1.0, 1.0], [1.0, 1.0]])
+    np.testing.assert_allclose(_spearman_to_latent(R), R, atol=1e-15)
+    R = np.array([[1.0, -1.0], [-1.0, 1.0]])
+    np.testing.assert_allclose(_spearman_to_latent(R), R, atol=1e-15)
+
+
+# ---------------------------------------------------------------------------
+# canonicalize_correlation
+# ---------------------------------------------------------------------------
+
+
+def test_canonicalize_rejects_unknown_kind():
+    with pytest.raises(ValueError, match="correlation_kind"):
+        canonicalize_correlation(np.eye(2), 2, kind="pearson")
+
+
+def test_canonicalize_latent_is_identity_on_valid_input():
+    R = np.array([[1.0, 0.4], [0.4, 1.0]])
+    np.testing.assert_allclose(canonicalize_correlation(R, 2), R, atol=1e-15)
+
+
+def test_canonicalize_spearman_applies_conversion():
+    rho_s = 0.5
+    R = canonicalize_correlation(np.array([[1.0, rho_s], [rho_s, 1.0]]), 2, kind="spearman")
+    np.testing.assert_allclose(R[0, 1], 2.0 * np.sin(np.pi * rho_s / 6.0), atol=1e-15)
+
+
+@pytest.mark.parametrize("bad_diagonal", [0.0, 0.5, 2.0, -1.0])
+@pytest.mark.parametrize("kind", ["latent", "spearman"])
+def test_canonicalize_rejects_bad_diagonal_on_every_kind(bad_diagonal, kind):
+    """Structural checks must run on the declared matrix, before conversion.
+
+    The Spearman conversion pins the diagonal to exactly 1, so a check made
+    after it accepted any diagonal at all.
+    """
+    R = [[bad_diagonal, 0.3], [0.3, bad_diagonal]]
+    with pytest.raises(ValueError, match="unit diagonal"):
+        canonicalize_correlation(R, 2, kind=kind)
+
+
+@pytest.mark.parametrize("kind", ["latent", "spearman"])
+def test_canonicalize_rejects_asymmetry_and_out_of_range_on_every_kind(kind):
+    with pytest.raises(ValueError, match="symmetric"):
+        canonicalize_correlation([[1.0, 0.5], [0.2, 1.0]], 2, kind=kind)
+    with pytest.raises(ValueError, match=r"lie in \[-1, 1\]"):
+        canonicalize_correlation([[1.0, 1.5], [1.5, 1.0]], 2, kind=kind)
+
+
+# ---------------------------------------------------------------------------
+# positive-definiteness repair
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "R",
+    [
+        _INDEFINITE_R,
+        np.array([[1.0, 0.9, -0.9], [0.9, 1.0, 0.9], [-0.9, 0.9, 1.0]]),
+        np.array([[1.0, 1.0, 0.4], [1.0, 1.0, 0.4], [0.4, 0.4, 1.0]]),  # exactly singular
+    ],
+)
+def test_repair_is_idempotent(R):
+    """A repaired matrix must survive a second repair bit for bit.
+
+    One clip-then-renormalise pass leaves the smallest eigenvalue under the
+    floor, so a naive repair keeps nudging the matrix on every round trip.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # the fitted policy reports large repairs
+        once = _project_to_correlation(R)
+        twice = _project_to_correlation(once)
+    np.testing.assert_array_equal(twice, once)
+    assert np.linalg.eigvalsh(once).min() >= _MIN_EIGENVALUE
+    np.testing.assert_array_equal(np.diag(once), np.ones(R.shape[0]))
+
+
+def test_repair_survives_a_problem_metadata_round_trip():
+    """Serializing and reloading a repaired correlation must not move it."""
+    import json
+
+    from jaxgsa._core.samples import _problem_from_meta, _problem_to_meta
+
+    problem = Problem.from_dict({"x0": (0.0, 1.0), "x1": (0.0, 1.0), "x2": (0.0, 1.0)})
+    with pytest.warns(UserWarning, match="not positive definite"):
+        problem = problem.with_correlation(_MILD_INDEFINITE_R)
+    stored = problem.correlation
+    assert stored is not None
+    for _ in range(3):
+        reloaded = _problem_from_meta(json.loads(json.dumps(_problem_to_meta(problem))))
+        assert reloaded.correlation is not None
+        np.testing.assert_array_equal(reloaded.correlation, stored)
+        problem = reloaded
+
+
+# ---------------------------------------------------------------------------
+# correlation_from_covariance
+# ---------------------------------------------------------------------------
+
+
+def test_correlation_from_covariance_round_trips_drd():
+    R = np.array(
+        [
+            [1.0, 0.6, -0.2],
+            [0.6, 1.0, 0.1],
+            [-0.2, 0.1, 1.0],
+        ]
+    )
+    sigma = np.array([0.5, 2.0, 3.0])
+    cov = sigma[:, None] * R * sigma[None, :]
+    np.testing.assert_allclose(correlation_from_covariance(cov), R, atol=1e-14)
+
+
+def test_correlation_from_covariance_pins_unit_diagonal_exactly():
+    cov = np.array([[4.0, 1.0], [1.0, 9.0]])
+    R = correlation_from_covariance(cov)
+    assert (np.diag(R) == 1.0).all()
+    # Exact diagonal means the result survives validate_correlation unchanged.
+    np.testing.assert_allclose(validate_correlation(R, 2), R, atol=1e-15)
+
+
+@pytest.mark.parametrize(
+    ("cov", "match"),
+    [
+        (np.ones((2, 3)), "square"),
+        (np.array([[1.0, 0.5], [0.2, 1.0]]), "symmetric"),
+        (np.array([[1.0, 0.0], [0.0, -1.0]]), "strictly positive"),
+        (np.array([[1.0, 0.0], [0.0, 0.0]]), "strictly positive"),
+    ],
+)
+def test_correlation_from_covariance_rejects_invalid(cov, match):
+    with pytest.raises(ValueError, match=match):
+        correlation_from_covariance(cov)
+
+
+# ---------------------------------------------------------------------------
+# fit_gaussian_copula / latent transforms
+# ---------------------------------------------------------------------------
+
+
+def test_fit_gaussian_copula_recovers_latent_correlation():
+    problem = _uniform_problem(2)
+    rho = 0.8
+    R = np.array([[1.0, rho], [rho, 1.0]])
+    correlated = problem.with_correlation(R)
+    X = jaxgsa.sampling.monte_carlo(correlated, 20_000, seed=11)
+    fitted = fit_gaussian_copula(problem, X)
+    assert abs(fitted[0, 1] - rho) < 0.02
+    np.testing.assert_allclose(np.diag(fitted), 1.0, atol=1e-12)
+
+
+def test_fit_gaussian_copula_averages_tied_ranks():
+    # Regression test for position-dependent tie ranks. Column 0 holds two
+    # tied levels in a structured block order. Column 1 increases with the
+    # row index. The true Spearman correlation is exactly zero. The old
+    # double-argsort fit ranked ties by row position. That gave a spurious
+    # rho_s of about -0.305 here (latent rho about -0.318). Average ranks
+    # must reproduce scipy.stats.spearmanr exactly.
+    problem = _uniform_problem(2)
+    x0 = np.repeat([0.0, 1.0, 1.0, 0.0], 50)
+    x1 = np.arange(200, dtype=np.float64)
+    X = np.column_stack([x0, x1])
+
+    rho_s = scipy.stats.spearmanr(x0, x1).statistic
+    expected = 2.0 * np.sin(np.pi * rho_s / 6.0)
+
+    fitted = fit_gaussian_copula(problem, X)
+    assert abs(fitted[0, 1] - expected) < 1e-12
+
+    # The public entry point must agree.
+    public = jaxgsa.sampling.fit_correlation(problem, X)
+    np.testing.assert_allclose(public, fitted, atol=1e-15)
+
+
+def test_fit_gaussian_copula_rejects_bad_shapes():
+    problem = _uniform_problem(2)
+    with pytest.raises(ValueError, match=r"must be \(N, 2\)"):
+        fit_gaussian_copula(problem, np.zeros((10, 3)))
+    with pytest.raises(ValueError, match="at least 3 samples"):
+        fit_gaussian_copula(problem, np.zeros((2, 2)))
+
+
+def test_latent_to_physical_applies_the_marginal_inverse_cdfs():
+    problem = Problem.from_dict(
+        {
+            "u": (-2.0, 3.0),
+            "g": GaussianInputSpec(dist="gaussian", mean=1.0, variance=4.0),
+        }
+    )
+    rng = np.random.default_rng(5)
+    Z = rng.standard_normal((256, 2))
+    X = latent_to_physical(problem, Z)
+    # Column-by-column against scipy: X_i = F_i^{-1}(Phi(Z_i)).
+    U = scipy.stats.norm.cdf(Z)
+    np.testing.assert_allclose(X[:, 0], -2.0 + 5.0 * U[:, 0], atol=1e-12)
+    expected_g = scipy.stats.norm.ppf(U[:, 1], loc=1.0, scale=2.0)
+    np.testing.assert_allclose(X[:, 1], expected_g, atol=1e-9)
+
+
+def test_is_independent_and_identity_helper():
+    assert is_independent(independent_correlation(4))
+    assert not is_independent(np.array([[1.0, 0.2], [0.2, 1.0]]))
+
+
+# ---------------------------------------------------------------------------
+# Hard-error guards: design samplers
+# ---------------------------------------------------------------------------
+
+
+def _correlated_problem(D: int = 2, rho: float = 0.8) -> Problem:
+    R = np.full((D, D), rho)
+    np.fill_diagonal(R, 1.0)
+    return _uniform_problem(D).with_correlation(R)
+
+
+def test_sobol_sample_rejects_correlated_problem():
+    with pytest.raises(ValueError, match=r"jaxgsa\.sobol\.sample.*independent inputs"):
+        jaxgsa.sobol.sample(_correlated_problem(), 64, seed=1, verbose=False)
+
+
+def test_morris_sample_rejects_correlated_problem():
+    with pytest.raises(ValueError, match=r"jaxgsa\.morris\.sample.*independent inputs"):
+        jaxgsa.morris.sample(_correlated_problem(), n_trajectories=4, seed=1, verbose=False)
+
+
+def test_efast_sample_rejects_correlated_problem():
+    with pytest.raises(ValueError, match=r"jaxgsa\.efast\.sample.*independent inputs"):
+        jaxgsa.efast.sample(_correlated_problem(), n_per_curve=128, seed=1)
+
+
+def test_sampler_guard_message_names_alternatives():
+    with pytest.raises(
+        ValueError,
+        match=r"monte_carlo.*optimal_transport.*borgonovo.*hdmr.*hsic.*pawn",
+    ):
+        jaxgsa.sobol.sample(_correlated_problem(), 64, seed=1, verbose=False)
+
+
+def test_identity_correlation_does_not_trip_the_guards():
+    problem = _uniform_problem(2).with_correlation(np.eye(2))
+    samples = jaxgsa.sobol.sample(problem, 16, seed=1, verbose=False)
+    assert samples.n_runs >= 16
+
+
+# ---------------------------------------------------------------------------
+# Hard-error guards: correlation-naive analyzers
+# ---------------------------------------------------------------------------
+
+
+def _correlated_xy(D: int = 2, N: int = 64):
+    problem = _correlated_problem(D)
+    X = jaxgsa.sampling.monte_carlo(problem, N, seed=7)
+    Y = np.asarray(X[:, 0])
+    return problem, jnp.asarray(X), jnp.asarray(Y)
+
+
+def test_pce_analyze_rejects_correlated_problem():
+    problem, X, Y = _correlated_xy()
+    with pytest.raises(ValueError, match=r"jaxgsa\.pce\.analyze.*independent inputs"):
+        jaxgsa.pce.analyze(problem, X, Y)
+
+
+def test_dgsm_analyze_rejects_correlated_problem_on_both_paths():
+    problem, X, Y = _correlated_xy()
+    with pytest.raises(ValueError, match=r"jaxgsa\.dgsm\.analyze.*independent inputs"):
+        jaxgsa.dgsm.analyze(problem, fn=lambda x: x[0], X=X)
+    dfdx = jnp.zeros((X.shape[0], 2))
+    with pytest.raises(ValueError, match=r"jaxgsa\.dgsm\.analyze.*independent inputs"):
+        jaxgsa.dgsm.analyze(problem, Y=Y, dfdx=dfdx)
+
+
+def test_shapley_pce_backend_rejects_correlated_problem():
+    problem, X, Y = _correlated_xy()
+    with pytest.raises(ValueError, match=r"shapley.*backend='pce'.*include_correlative=True"):
+        jaxgsa.shapley.analyze(problem, X, Y, backend="pce")
+
+
+def test_analyzer_guard_message_names_alternatives():
+    problem, X, Y = _correlated_xy()
+    with pytest.raises(
+        ValueError,
+        match=r"optimal_transport.*borgonovo.*hdmr.*hsic.*pawn",
+    ):
+        jaxgsa.pce.analyze(problem, X, Y)
+
+
+def test_correlation_tolerant_analyzers_accept_correlated_problem():
+    problem, X, Y = _correlated_xy(N=512)  # HDMR needs at least 300 samples
+    # Each tolerant method must run to completion without the guard tripping.
+    jaxgsa.pawn.analyze(problem, X, Y)
+    jaxgsa.hsic.analyze(problem, X, Y)
+    jaxgsa.borgonovo.analyze(problem, X, Y)
+    jaxgsa.optimal_transport.analyze(problem, X, Y)
+    jaxgsa.hdmr.analyze(problem, X, Y)
+    jaxgsa.shapley.analyze(problem, X, Y, backend="hdmr", include_correlative=True)

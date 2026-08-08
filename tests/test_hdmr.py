@@ -1,5 +1,6 @@
 """Tests for RS-HDMR sensitivity analysis."""
 
+import warnings
 from typing import Any
 
 import jax
@@ -14,7 +15,8 @@ from jaxgsa.benchmarks.ishigami import (
     evaluate,
 )
 from jaxgsa.hdmr import analyze as analyze_hdmr
-from jaxgsa.problem import GaussianInputSpec
+from jaxgsa.problem import GaussianInputSpec, Problem
+from jaxgsa.sampling import monte_carlo
 
 
 # HDMR builds polynomial surrogates that approximate the true function, so
@@ -807,3 +809,108 @@ def test_to_dataset_includes_s2_s3(ishigami_data):
     assert "S3" in ds3
     assert ds3["S3"].dims == ("param_i", "param_j", "param_k")
     assert ds3["S3"].shape == (D, D, D)
+
+
+# ---------------------------------------------------------------------------
+# Correlated inputs: the SCSA reading of ST
+# ---------------------------------------------------------------------------
+
+
+def _correlated_problem(rho: float = 0.7):
+    """Build a 3-parameter uniform problem with x1 and x2 correlated."""
+    R = np.eye(3)
+    R[0, 1] = R[1, 0] = rho
+    return Problem(("x1", "x2", "x3"), ((-np.pi, np.pi),) * 3, correlation=R)
+
+
+def _linear_interaction(X):
+    """Model that uses x1 and x2 (with an interaction) and ignores x3."""
+    return X[:, 0] + 2.0 * X[:, 1] + 0.5 * X[:, 0] * X[:, 1]
+
+
+@pytest.fixture(scope="module")
+def correlated_hdmr_result():
+    """Fit HDMR once on a correlated problem, warnings suppressed."""
+    problem = _correlated_problem()
+    X = jnp.asarray(monte_carlo(problem, 1000, seed=7))
+    Y = _linear_interaction(X)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = analyze_hdmr(problem, X, Y, maxorder=2, m=2)
+    return result
+
+
+def test_st_is_scsa_total_under_correlation(correlated_hdmr_result):
+    """ST is sum over terms u containing i of (Sa_u + Sb_u), not a Sobol total.
+
+    Pins the SCSA convention of Sarazin, Viaud & Cournede (2017) Eq. (8),
+    which is also SALib's HDMR convention. Recomputed here from the per-term
+    fields so a change of convention cannot pass silently.
+    """
+    result = correlated_hdmr_result
+    D = result.problem.num_vars
+
+    def _scatter(per_term):
+        out = np.zeros(D)
+        for term_index, label in enumerate(result.terms):
+            for name in label.split("/"):
+                out[result.problem.names.index(name)] += per_term[term_index]
+        return out
+
+    ST = np.array(result.ST)
+    # Exact: ST scatters the per-term total S onto its participating params.
+    np.testing.assert_allclose(ST, _scatter(np.array(result.S)), rtol=1e-5, atol=1e-7)
+    # And S is the structural plus correlative share, so the SCSA identity
+    # ST_i = sum over u containing i of (Sa_u + Sb_u) holds to float32 noise
+    # (S is accumulated separately in the kernel, not as Sa + Sb).
+    np.testing.assert_allclose(ST, _scatter(np.array(result.Sa) + np.array(result.Sb)), atol=2e-3)
+    # The correlative shares are what make this differ from the structural
+    # sum; if they were negligible the test would not be pinning anything.
+    assert np.abs(np.array(result.Sb)).max() > 1e-3
+    assert not np.allclose(ST, _scatter(np.array(result.Sa)), atol=1e-2)
+
+
+def test_st_is_not_a_conditional_variance_total(correlated_hdmr_result):
+    """ST and S1 leave their Sobol readings behind under correlation.
+
+    The correlative shares are folded into ST but left out of S1, so neither
+    one tracks the conditional-variance quantity a Sobol index reports. A
+    direct comparison against jaxgsa.kucherenko's ST or jaxgsa.vkoga's S_TU
+    is not possible yet: neither module exists on this branch.
+    """
+    result = correlated_hdmr_result
+    ST = np.array(result.ST)
+    S1 = np.array(result.S1)
+    # S1 is the structural share only, so it sits well below the Sobol S1 of
+    # a strongly correlated pair.
+    assert S1[0] < 0.5
+    assert S1[1] < 0.9
+    # The correlative fold-in moves ST away from the structural sum.
+    assert not np.allclose(ST[:2], S1[:2], atol=1e-3)
+
+
+def test_correlated_problem_warns_once():
+    """analyze emits exactly one SCSA warning per call on a correlated problem."""
+    problem = _correlated_problem()
+    X = jnp.asarray(monte_carlo(problem, 400, seed=11))
+    Y = _linear_interaction(X)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        analyze_hdmr(problem, X, Y, maxorder=2, m=2)
+
+    scsa = [w for w in caught if "SCSA" in str(w.message)]
+    assert len(scsa) == 1
+    assert issubclass(scsa[0].category, UserWarning)
+    message = str(scsa[0].message)
+    assert "kucherenko" in message
+    assert "vkoga" in message
+
+
+def test_independent_problem_does_not_warn(ishigami_data):
+    """An independent problem stays silent about the SCSA reading."""
+    X, Y = ishigami_data
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2)
+    assert [w for w in caught if "SCSA" in str(w.message)] == []

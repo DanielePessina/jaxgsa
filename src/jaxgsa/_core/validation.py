@@ -95,7 +95,71 @@ def _validate_output(
     return Y
 
 
-def _validate_xy_inputs(problem: Problem, X: Array, Y: Array) -> Array:
+# Named in every correlated-problem rejection so the error is actionable.
+_CORRELATION_TOLERANT_METHODS = (
+    "jaxgsa.optimal_transport, jaxgsa.borgonovo, jaxgsa.hdmr (whose ANCOVA Sb "
+    "term quantifies the correlation-induced contribution), jaxgsa.hsic, or "
+    "jaxgsa.pawn"
+)
+
+
+def _raise_correlated_design(problem: Problem, method: str) -> None:
+    """Reject a correlated problem in a structured design sampler.
+
+    The Saltelli, Morris, and eFAST designs place points assuming independent
+    marginals; their downstream estimators are undefined — not merely
+    approximate — under a declared correlation, so sampling refuses up front
+    rather than producing a design whose analysis would be silently wrong.
+
+    Args:
+        problem: Problem the design was requested for.
+        method: Fully qualified sampler name for the error message.
+
+    Raises:
+        ValueError: If ``problem`` declares a non-identity correlation.
+    """
+    if not problem.has_correlated_inputs:
+        return
+    raise ValueError(
+        f"{method} builds a structured design whose sensitivity indices assume "
+        "independent inputs, but problem.correlation declares a dependence "
+        "structure. Draw correlated samples with jaxgsa.sampling.monte_carlo "
+        "(which honors problem.correlation) and analyze them with a "
+        f"correlation-tolerant given-data method: {_CORRELATION_TOLERANT_METHODS}. "
+        "To analyze the independent problem instead, drop the matrix with "
+        "problem.with_correlation(None)."
+    )
+
+
+def _raise_correlated_analysis(problem: Problem, method: str) -> None:
+    """Reject a correlated problem in a correlation-naive analyzer.
+
+    Args:
+        problem: Problem the analysis was requested for.
+        method: Fully qualified analyzer name for the error message.
+
+    Raises:
+        ValueError: If ``problem`` declares a non-identity correlation.
+    """
+    if not problem.has_correlated_inputs:
+        return
+    raise ValueError(
+        f"{method} computes indices that assume independent inputs, and they are "
+        "invalid — not merely approximate — when problem.correlation declares a "
+        "dependence structure. Use a correlation-tolerant given-data method "
+        f"instead: {_CORRELATION_TOLERANT_METHODS}. To analyze the independent "
+        "problem instead, drop the matrix with problem.with_correlation(None)."
+    )
+
+
+def _validate_xy_inputs(
+    problem: Problem,
+    X: Array,
+    Y: Array,
+    *,
+    correlation_ok: bool = False,
+    method: str = "this method",
+) -> Array:
     """Validate the shared ``(problem, X, Y)`` contract of given-data methods.
 
     Validates X and Y against the canonical jaxgsa layouts, using X's row count
@@ -106,13 +170,22 @@ def _validate_xy_inputs(problem: Problem, X: Array, Y: Array) -> Array:
         problem: Problem definition with ``num_vars`` parameters.
         X: Input sample matrix, expected shape ``(N, D)``.
         Y: Model output with shape ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
+        correlation_ok: Capability flag: whether the calling method's indices
+            remain valid when ``problem.correlation`` declares a dependence
+            structure. Correlation-tolerant methods (rank/CDF-based, or
+            ANCOVA-decomposing) pass ``True``; the default ``False`` rejects
+            a correlated problem with an actionable ``ValueError``.
+        method: Fully qualified caller name used in the rejection message.
 
     Returns:
         Y as a validated JAX array.
 
     Raises:
-        ValueError: If X or Y violates the shared shape contract.
+        ValueError: If X or Y violates the shared shape contract, or the
+            problem is correlated and ``correlation_ok`` is ``False``.
     """
+    if not correlation_ok:
+        _raise_correlated_analysis(problem, method)
     _validate_x(problem, X)
     return _validate_output(Y, int(X.shape[0]), problem)
 

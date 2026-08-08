@@ -414,7 +414,9 @@ def analyze(
             ``(0, 1)``, or ``slice_chunk_size`` is not a positive integer.
     """
     X = jnp.asarray(X)
-    Y = _validate_xy_inputs(problem, X, Y)
+    # The OT index measures total, correlation-inclusive influence via
+    # rank-based conditioning, so correlated problems are welcome.
+    Y = _validate_xy_inputs(problem, X, Y, correlation_ok=True)
 
     if mode not in _MODES:
         raise ValueError(f"mode must be one of {_MODES}, got {mode!r}")
