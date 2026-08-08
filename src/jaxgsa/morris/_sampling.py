@@ -36,7 +36,7 @@ from jaxgsa._core.sampling import (
     _stable_unique_rows,
     _transform_samples,
 )
-from jaxgsa._core.validation import _raise_correlated_design
+from jaxgsa._core.validation import _raise_categorical_design, _raise_correlated_design
 from jaxgsa.problem import Problem
 
 # Offset between the Sobol' draws used for radial base points (a) and
@@ -454,8 +454,9 @@ def _squash_open_sides(
     support is *open* is therefore pulled in by the tail probability ``q``, so
     the transform stays finite.
 
-    Only genuinely open sides move. A uniform marginal is bounded on both
-    sides. A Gaussian marginal with an explicit ``low`` is bounded below, and
+    Only genuinely open sides move. Uniform and categorical marginals are
+    bounded, so they never move. A Gaussian marginal with an explicit
+    ``low`` is bounded below, and
     one with an explicit ``high`` is bounded above, so a two-sided truncated
     Gaussian gets no squash at all — truncating it again would silently narrow
     the input model the user declared.
@@ -476,8 +477,12 @@ def _squash_open_sides(
     """
     q = truncation_quantile
     for idx, spec in enumerate(problem.input_specs):
-        dist, _, _, low, high = spec
-        if dist == "uniform":
+        # Index rather than unpack: the normalized spec carries a trailing
+        # categorical payload slot, so its width is not fixed.
+        dist, low, high = spec[0], spec[3], spec[4]
+        # Only a Gaussian marginal can be unbounded. Uniform and categorical
+        # marginals are bounded, so they never move.
+        if dist != "gaussian":
             continue
         lo_target = 0.0 if low is not None else q
         hi_target = 1.0 if high is not None else 1.0 - q
@@ -598,6 +603,7 @@ def sample(
             independent inputs).
     """
     _raise_correlated_design(problem, "jaxgsa.morris.sample")
+    _raise_categorical_design(problem, "jaxgsa.morris.sample")
     if not 0.0 < truncation_quantile < 0.5:
         raise ValueError(f"truncation_quantile must be in (0, 0.5), got {truncation_quantile}")
     if n_trajectories < 2:

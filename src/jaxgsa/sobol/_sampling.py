@@ -28,8 +28,8 @@ from jaxgsa._core.sampling import (
     _stable_unique_rows,
     _transform_samples,
 )
-from jaxgsa._core.validation import _raise_correlated_design
-from jaxgsa.problem import Problem
+from jaxgsa._core.validation import _raise_categorical_design, _raise_correlated_design
+from jaxgsa.problem import Problem, _categorical_dims
 
 if TYPE_CHECKING:
     from jaxgsa.morris import MorrisSamples
@@ -48,11 +48,23 @@ class SobolSamples(UniqueDesignSamples):
     (larger or equal) pre-deduplication size of the full Saltelli design that
     the analysis reconstructs internally.
 
+    ``samples`` is a deduplicated evaluation set, not a distributional
+    sample. Duplicate rows are collapsed, so the empirical marginal of a
+    column in ``samples`` does not match the declared input distribution.
+    The effect is strong for a categorical parameter, where whole rows
+    repeat often: with ``probs = [0.9, 0.1]`` the ``samples`` column shows
+    about ``[0.84, 0.16]``. The declared marginal is recovered only in the
+    expanded design, which ``analyze`` rebuilds through
+    ``expanded_to_unique``, so the indices are correct. Evaluate
+    ``samples`` and pass the outputs to ``analyze``; do not reuse
+    ``samples`` on its own as a Monte Carlo design.
+
     Attributes:
         samples: Unique rows to evaluate with the user's model. Shape
             ``(n_runs, D)`` where ``D`` is the number of parameters, in
             physical units (each Sobol marginal transformed into the
-            problem's declared input distribution).
+            problem's declared input distribution). Deduplicated, so its
+            empirical marginal is distorted -- see the note above.
         sample_ids: Stable integer identifiers aligned 1:1 with ``samples``.
             Useful for joining model outputs back onto the sampling table.
         n_expanded: Row count of the full expanded Saltelli layout before
@@ -241,6 +253,9 @@ class SobolSamples(UniqueDesignSamples):
                 182:978-988.
             Jansen (1999). Comput. Phys. Commun. 117:35-43.
         """
+        # An elementary effect divides by a step along one input axis, which
+        # has no meaning for unordered level codes.
+        _raise_categorical_design(self.problem, "jaxgsa.sobol.SobolSamples.to_morris")
         # Imported lazily: morris knows nothing about sobol, and this keeps the
         # dependency one-directional and free of an import cycle.
         from jaxgsa.morris._sampling import _radial_samples_from_blocks
@@ -323,6 +338,27 @@ def _saltelli_step(n_params: int, calc_second_order: bool) -> int:
     return 2 * n_params + 2 if calc_second_order else n_params + 2
 
 
+# Inflation-loop safety valve: never let a doubling materialize more candidate
+# rows than this floor (or 8x the requested unique count, whichever is
+# larger). The cap is checked BEFORE the doubling is built, so the warning
+# fires before any huge allocation.
+_CANDIDATE_ROW_CAP = 1 << 22
+
+
+def _max_distinct_rows(problem: Problem) -> int | None:
+    """Upper bound on the number of distinct sample rows, if one exists.
+
+    An all-categorical problem can only produce ``prod(L_d)`` distinct rows
+    (each column takes one of its ``L_d`` level codes), no matter how large
+    the design grows. Any continuous column makes the count unbounded, in
+    which case ``None`` is returned.
+    """
+    dims_levels = _categorical_dims(problem)
+    if len(dims_levels) != problem.num_vars:
+        return None
+    return math.prod(n_levels for _, n_levels in dims_levels)
+
+
 def _build_expanded_samples(
     n_params: int,
     base_n: int,
@@ -337,6 +373,7 @@ def _build_expanded_samples(
     construction collapses in low dimensions. Deduplication happens later.
     """
     D = n_params
+    step = _saltelli_step(D, calc_second_order)
     # Draw from a 2D-dimensional Sobol sequence; first D dims become matrix A, last D become B
     sampler = Sobol(d=2 * D, scramble=scramble, seed=seed)
     base = sampler.random(base_n)
@@ -348,23 +385,21 @@ def _build_expanded_samples(
     # Saltelli interleaved layout per base point i:
     #   [A_i, AB_0, ..., AB_{D-1}, BA_0, ..., BA_{D-1}, B_i]
     # AB_j = A with column j replaced by B's column j (and vice-versa for BA_j).
-    # .copy() prevents aliasing: without it, overwriting element j would mutate
-    # the original A[i] or B[i] row shared across iterations.
-    rows = []
-    for i in range(base_n):
-        rows.append(A[i])
-        for j in range(D):
-            AB_j = A[i].copy()
-            AB_j[j] = B[i, j]
-            rows.append(AB_j)
-        if calc_second_order:
-            for j in range(D):
-                BA_j = B[i].copy()
-                BA_j[j] = A[i, j]
-                rows.append(BA_j)
-        rows.append(B[i])
-
-    return np.array(rows)
+    # Built fully vectorized into one preallocated array: a per-row Python
+    # list would transiently hold base_n * step small arrays plus object
+    # overhead, which dwarfs the design itself at large sizes.
+    diag = np.arange(D)
+    out = np.empty((base_n, step, D), dtype=base.dtype)
+    out[:, 0, :] = A
+    AB = np.repeat(A[:, None, :], D, axis=1)  # (base_n, D, D)
+    AB[:, diag, diag] = B
+    out[:, 1 : D + 1, :] = AB
+    if calc_second_order:
+        BA = np.repeat(B[:, None, :], D, axis=1)
+        BA[:, diag, diag] = A
+        out[:, D + 1 : 2 * D + 1, :] = BA
+    out[:, -1, :] = B
+    return out.reshape(base_n * step, D)
 
 
 def _warn_unbounded_gaussian(problem: Problem) -> None:
@@ -374,10 +409,11 @@ def _warn_unbounded_gaussian(problem: Problem) -> None:
     truncation still leaves the opposite tail unbounded and is reported. Only
     uniforms and two-sided-truncated Gaussians stay silent.
     """
+    # Only Gaussian marginals can be unbounded; categorical codes are bounded.
     unbounded = [
         name
         for name, spec in zip(problem.names, problem.input_specs)
-        if spec[0] != "uniform" and (spec[3] is None or spec[4] is None)
+        if spec[0] == "gaussian" and (spec[3] is None or spec[4] is None)
     ]
     if not unbounded:
         return
@@ -517,9 +553,48 @@ def sample(
     unique_samples, expanded_to_unique = _stable_unique_rows(expanded_samples)
 
     if target_n is not None:
-        # Deduplication may reduce unique count below target;
-        # double base_n and rebuild until we have enough.
+        # Deduplication may reduce the unique count below the target; double
+        # base_n and rebuild until enough unique rows exist. Finite-support
+        # marginals (today: categorical level codes) collapse whole
+        # probability bins onto one value, so the unique count can saturate
+        # and the loop would otherwise inflate the design forever. Two
+        # guards stop it: a saturation predicate (the known distinct-row
+        # bound is reached, or a doubling added no new unique rows) and a
+        # candidate-row cap checked BEFORE the next doubling is
+        # materialized, so the warning fires before any huge allocation.
+        # The returned design then keeps duplicate rows — they are
+        # legitimate Saltelli samples; the dedup exists only to save model
+        # evaluations.
+        max_unique = _max_distinct_rows(problem)
+        max_candidate_rows = max(_CANDIDATE_ROW_CAP, 8 * target_n)
+        prev_unique = -1
         while unique_samples.shape[0] < target_n:
+            n_unique = unique_samples.shape[0]
+            # One saturation predicate feeds both the break and the warning
+            # reason, so the two can never drift apart.
+            bound_reached = max_unique is not None and n_unique >= max_unique
+            saturated = bound_reached or n_unique == prev_unique
+            next_rows = 2 * base_n * step
+            if saturated or next_rows > max_candidate_rows:
+                if bound_reached:
+                    reason = f"the problem has only {max_unique} possible distinct rows"
+                elif saturated:
+                    reason = "the last base_n doubling added no new unique rows"
+                else:
+                    reason = (
+                        f"the next doubling would materialize {next_rows} candidate "
+                        f"rows, above the cap of {max_candidate_rows}"
+                    )
+                warnings.warn(
+                    f"jaxgsa.sobol.sample: the requested n_samples={target_n} "
+                    f"unique rows cannot be reached because {reason}. The "
+                    f"design is returned with {n_unique} unique rows and "
+                    "keeps its duplicate rows. Duplicates are valid Saltelli "
+                    "samples; deduplication only saves model evaluations",
+                    stacklevel=2,
+                )
+                break
+            prev_unique = n_unique
             base_n *= 2
             expanded_samples_unit = _build_expanded_samples(
                 D,

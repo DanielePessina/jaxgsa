@@ -101,15 +101,33 @@ def _transform_gaussian(
     return truncnorm.ppf(clipped, a=a, b=b, loc=mean, scale=std)
 
 
+def _transform_categorical(unit_values: np.ndarray, probs: tuple[float, ...]) -> np.ndarray:
+    """Transform unit-interval samples into integer level codes (as floats).
+
+    Step-function inverse CDF: level ``l`` is selected when the unit value
+    falls into the ``l``-th cumulative-probability bin, so level frequencies
+    follow ``probs`` exactly in distribution. Codes ``0 .. L-1`` are the
+    sample values; labels never enter the sample matrix.
+    """
+    cum = np.cumsum(np.asarray(probs, dtype=np.float64))
+    codes = np.searchsorted(cum, unit_values, side="right")
+    # Float cumsum can end slightly below 1.0; clamp the (measure-zero)
+    # overflow onto the last level.
+    return np.minimum(codes, len(cum) - 1).astype(np.float64)
+
+
 def _transform_samples(problem: Problem, samples_unit: np.ndarray) -> np.ndarray:
     """Transform unit-cube samples into the problem's declared marginals."""
     # Pre-allocate output; each column is filled independently by its marginal's inverse CDF
     transformed = np.empty_like(samples_unit, dtype=np.float64)
 
     for idx, spec in enumerate(problem.input_specs):
-        dist, first, second, low, high = spec
+        dist, first, second, low, high, categorical = spec
         if dist == "uniform":
             transformed[:, idx] = _transform_uniform(samples_unit[:, idx], first, second)
+        elif dist == "categorical":
+            assert categorical is not None  # categorical specs always carry (probs, labels)
+            transformed[:, idx] = _transform_categorical(samples_unit[:, idx], categorical[0])
         else:
             transformed[:, idx] = _transform_gaussian(
                 samples_unit[:, idx],
@@ -163,11 +181,22 @@ def _inverse_transform_samples(problem: Problem, samples_physical: np.ndarray) -
 
     Returns:
         Unit-cube coordinates of shape ``(N, D)``, dtype float64.
+
+    Raises:
+        ValueError: If any parameter is categorical — the step CDF maps a
+            whole probability bin onto one code, so no unit-cube coordinate
+            can be recovered.
     """
     unit = np.empty_like(samples_physical, dtype=np.float64)
 
     for idx, spec in enumerate(problem.input_specs):
-        dist, first, second, low, high = spec
+        dist, first, second, low, high, _ = spec
+        if dist == "categorical":
+            raise ValueError(
+                f"Parameter {problem.names[idx]!r} is categorical; its step CDF is "
+                "many-to-one, so physical samples cannot be mapped back onto the "
+                "unit cube"
+            )
         if dist == "uniform":
             unit[:, idx] = _inverse_transform_uniform(samples_physical[:, idx], first, second)
         else:

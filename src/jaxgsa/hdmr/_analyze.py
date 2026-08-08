@@ -230,7 +230,9 @@ def analyze_hdmr(
     X = jnp.asarray(X)
     # HDMR's ANCOVA decomposition separates structural (Sa) from
     # correlation-induced (Sb) variance, so correlated problems are welcome.
-    Y = _validate_xy_inputs(problem, X, jnp.asarray(Y), correlation_ok=True)
+    Y = _validate_xy_inputs(
+        problem, X, jnp.asarray(Y), correlation_ok=True, method="jaxgsa.hdmr.analyze"
+    )
     # A constant output slice makes every index 0/0 = NaN; warn once up front,
     # in the public wrapper only, so callers routing through the core (Shapley)
     # do not double-warn.

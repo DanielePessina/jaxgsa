@@ -195,13 +195,19 @@ def fit_correlation(problem: Problem, X: npt.ArrayLike) -> np.ndarray:
     (``scipy.stats.spearmanr``). Average ranks reduce the tie problem but
     do not remove it. For heavily discrete or rounded columns the fit is
     still biased toward zero. Such data needs a polychoric correlation
-    instead (future work, alongside categorical marginals). The conversion
-    is exact for continuous marginals only.
+    instead (future work). The conversion is exact for continuous
+    marginals only.
+
+    Categorical parameters are excluded from the fit: their level codes
+    carry no order, so a rank correlation over them would depend on the
+    arbitrary code assignment. Their rows and columns come back as exact
+    identity (independent), with one ``UserWarning`` naming them.
+    Polychoric estimation is future work.
 
     Args:
-        problem: Problem the samples were drawn for. Only its parameter
-            count is used, but it is required so callers cannot silently
-            pass a transposed matrix.
+        problem: Problem the samples were drawn for. Its parameter count
+            shapes the fit, and its categorical parameters are excluded
+            from it.
         X: ``(N, D)`` samples in physical units, at least 3 rows.
 
     Returns:

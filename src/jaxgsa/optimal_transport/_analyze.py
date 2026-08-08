@@ -52,11 +52,16 @@ from typing import Literal
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from jax import Array
 
 from jaxgsa._core.bootstrap import _percentile_ci
-from jaxgsa._core.partition import _build_class_indices, _class_layout
+from jaxgsa._core.partition import (
+    _build_class_indices,
+    _class_layout,
+    _mask_from_counts,
+    _replicate_slice,
+    build_partition_groups,
+)
 from jaxgsa._core.validation import (
     _prenormalize_outputs,
     _prepare_Y,
@@ -65,7 +70,7 @@ from jaxgsa._core.validation import (
 )
 from jaxgsa.optimal_transport._result import OTResult
 from jaxgsa.optimal_transport._solver import _sinkhorn_w2
-from jaxgsa.problem import Problem
+from jaxgsa.problem import Problem, _categorical_dims
 
 # Target element budget for the default per-chunk working set of the
 # "univariate" mode. The dominant intermediate is the per-column conditional
@@ -76,55 +81,86 @@ _CHUNK_ELEM_BUDGET = 1 << 26
 _MODES = ("univariate", "multivariate", "trajectory")
 
 
+def _normalize_by_2var(weighted_sum: Array, V: Array) -> Array:
+    """Normalize class-weighted cost sums by ``V = 2 * Var``.
+
+    This is the defining [0, 1] normalization of the OT index, shared by
+    the 1-D and joint kernels so the two modes can never drift apart. A
+    non-positive ``V`` marks a constant output and yields exactly 0
+    instead of NaN.
+    """
+    V_safe = jnp.where(V > 0, V, 1.0)
+    return jnp.where(V > 0, weighted_sum / V_safe, 0.0)
+
+
 def _aggregate_normalized(per_class: Array, weights: Array, V: Array) -> Array:
     """Class-weighted average of per-class costs, normalized by ``V``.
 
-    This is the defining [0, 1] normalization of the OT index, shared by
-    the 1-D and joint kernels so the two modes can never drift apart.
-
     Args:
         per_class: Per-class costs ``(D, M)``.
-        weights: Class weights ``n_m / N`` summing to 1, shape ``(M,)``.
+        weights: Class weights ``n_m / N`` summing to 1 per column, shape
+            ``(M,)`` (shared across columns) or ``(D, M)`` (per column).
         V: Normalizer ``2 * Var`` (scalar); a non-positive value marks a
             constant output and yields exactly 0 instead of NaN.
 
     Returns:
         Normalized indices ``(D,)``.
     """
-    V_safe = jnp.where(V > 0, V, 1.0)
-    val = (weights[None, :] * per_class).sum(axis=-1) / V_safe
-    return jnp.where(V > 0, val, 0.0)
+    return _normalize_by_2var((weights * per_class).sum(axis=-1), V)
 
 
-def _quantile_ranks(sizes: "np.ndarray", N: int) -> "np.ndarray":
+def _quantile_rank_indices(counts: Array, N: int) -> Array:
     """Nearest-rank conditional quantile index for every full-sample mass point.
 
-    Midpoint rule ``j = floor((i + 0.5) * n_m / N)``; ``j < n_m`` always,
-    so class padding is never touched. Computed host-side in float64
-    because the products exceed float32's exact-integer range for large N
-    (and the table depends only on the static partition layout anyway).
+    Midpoint rule ``j = min(floor((i + 0.5) * c / N), c - 1)`` for every
+    mass point ``i`` and class size ``c``; ``j < c`` always, so class
+    padding is never touched. Zero-size classes (empty categorical levels)
+    get index 0; the kernels discard their lookups through the zero class
+    weight.
+
+    Computed on device, per replicate, from the class counts — a
+    precomputed ``(R, Dc, M, N)`` lookup table would be gigabytes for one
+    high-cardinality column at large N, while this transient is
+    ``(G, M, N)`` per replicate.
+
+    The products ``(2i + 1) * c`` overflow int32 and exceed float32's
+    exact-integer range (and float64 is unavailable without the x64
+    flag), so the quotient is formed exactly by schoolbook long division
+    over the base-``S`` digits of ``c``. ``S`` is a static power of two
+    chosen so every intermediate stays below ``2**31``; the digit count
+    is static, so the Python loop unrolls at trace time. Exact for any
+    ``N < 2**29``; bit-identical to a float64 host evaluation (tested).
 
     Args:
-        sizes: True class sizes ``(M,)`` from
-            :func:`jaxgsa._core.partition._class_layout`.
+        counts: Integer class sizes ``(..., M)``.
         N: Number of samples.
 
     Returns:
-        int32 lookup table ``(M, N)`` into each class's sorted members.
+        int32 lookup index ``(..., M, N)`` into each class's sorted
+        members.
     """
-    i_grid = np.arange(N, dtype=np.float64) + 0.5
-    j = np.floor(i_grid[None, :] * sizes[:, None].astype(np.float64) / N).astype(np.int32)
-    return np.minimum(j, (sizes - 1)[:, None].astype(np.int32))
+    # q = floor(a * c / m) with a = 2i + 1 (odd, < 2N) and m = 2N.
+    a = 2 * jnp.arange(N, dtype=jnp.int32) + 1  # (N,)
+    m = 2 * N
+    c = counts.astype(jnp.int32)[..., None]  # (..., M, 1)
+    shift = max(1, 29 - N.bit_length())  # S = 2**shift keeps 4*N*S <= 2**31
+    S = 1 << shift
+    n_digits = -(-max(1, N.bit_length()) // shift)  # ceil; c <= N
+    q = jnp.zeros_like(c * a)  # broadcast to (..., M, N)
+    r = jnp.zeros_like(q)
+    for k in reversed(range(n_digits)):
+        digit = (c >> (k * shift)) & (S - 1)
+        t = r * S + a * digit  # < 4*N*S <= 2**31
+        q = q * S + t // m
+        r = t % m
+    return jnp.minimum(q, jnp.maximum(c - 1, 0)).astype(jnp.int32)
 
 
 @jax.jit
 def _ot_1d_kernel(
     Y_cols: Array,
     all_idx: Array,
-    all_cls_idx: Array,
-    mask: Array,
-    counts: Array,
-    j: Array,
+    groups: tuple[tuple[Array, Array], ...],
 ) -> tuple[Array, Array, Array, Array]:
     """Per-column 1-D optimal-transport indices for every replicate.
 
@@ -133,14 +169,23 @@ def _ot_1d_kernel(
     conditional one through the nearest-rank (midpoint rule) lookup into
     the class's sorted members. No transport solver is involved.
 
+    ``groups`` is a tuple of canonical ``(cls_idx, counts)``
+    partition-group layouts from
+    :func:`jaxgsa._core.partition.build_partition_groups`. The kernel
+    processes every group in one call — the per-replicate column
+    statistics (resample gather, sort, mean, variance) are computed once
+    and shared — and concatenates the results on the input axis in group
+    order. Validity masks and quantile lookup indices are derived
+    in-kernel from the (small) counts, so nothing of size
+    ``O(R * D * M * N)`` is ever materialized. Zero-size classes (empty
+    levels, padded level slots) carry zero weight and contribute zero
+    cost.
+
     Args:
         Y_cols: Output columns ``(N, C)``.
         all_idx: Replicate row indices ``(R, N)`` (row 0 is the identity).
-        all_cls_idx: Class indices ``(R, D, M, P)`` into the original
-            sample, from :func:`jaxgsa._core.partition._build_class_indices`.
-        mask: Class validity mask ``(M, P)``.
-        counts: True class sizes ``(M,)``.
-        j: Quantile lookup table ``(M, N)`` from :func:`_quantile_ranks`.
+        groups: Canonical partition groups; see
+            :mod:`jaxgsa._core.partition`.
 
     Returns:
         ``(ot, advective, diffusive, degenerate)`` with index arrays of
@@ -149,12 +194,44 @@ def _ot_1d_kernel(
     """
     dtype = jnp.result_type(Y_cols.dtype, jnp.float32)
     Y_cols = Y_cols.astype(dtype)
-    maskf = mask.astype(dtype)
-    countsf = counts.astype(dtype)
     N = Y_cols.shape[0]
-    weights = countsf / N  # (M,)
+    counts_list = tuple(counts for _, counts in groups)
+    cls_list = tuple(cls_idx for cls_idx, _ in groups)
 
-    def _col_stats(y: Array, r: Array, cls_idx: Array):
+    def _group_stats(y, y_sorted, mean_r, V, cls_idx, mask_b, counts_b, j_b):
+        """Weighted, normalized cost sums for one group's inputs.
+
+        ``mask_b (G, M, P)``, ``counts_b (G, M)``, and ``j_b (G, M, N)``
+        broadcast against the group's input axis Dg (``G`` is 1 or Dg).
+        """
+        weights = counts_b / N  # (G, M)
+        safe_counts = jnp.maximum(counts_b, 1.0)
+        valid = counts_b > 0
+
+        y_cls = y[cls_idx]  # (Dg, M, P) resampled class members
+        # Pads sort to the tail as +inf and are unreachable through j.
+        y_cls_sorted = jnp.sort(jnp.where(mask_b, y_cls, jnp.inf), axis=-1)
+        j_full = jnp.broadcast_to(j_b, (y_cls.shape[0],) + j_b.shape[-2:])
+        q = jnp.take_along_axis(y_cls_sorted, j_full, axis=-1)  # (Dg, M, N)
+        w2 = ((y_sorted[None, None, :] - q) ** 2).mean(axis=-1)  # (Dg, M)
+
+        cls_mean = (y_cls * mask_b.astype(dtype)).sum(axis=-1) / safe_counts  # (Dg, M)
+        adv = (cls_mean - mean_r) ** 2
+        # A zero-size class carries zero weight; zero its (infinite) cost
+        # so 0 * inf never poisons the weighted sum.
+        w2 = jnp.where(valid, w2, 0.0)
+        adv = jnp.where(valid, adv, 0.0)
+        # W2^2 >= (mean shift)^2 mathematically; the clamp only absorbs
+        # float cancellation noise near zero.
+        diff = jnp.maximum(w2 - adv, 0.0)
+
+        return (
+            _aggregate_normalized(w2, weights, V),
+            _aggregate_normalized(adv, weights, V),
+            _aggregate_normalized(diff, weights, V),
+        )
+
+    def _col_stats(y: Array, r: Array, layouts):
         """OT/advective/diffusive indices for one column and replicate."""
         y_r = y[r]  # resampled column
         y_sorted = jnp.sort(y_r)
@@ -164,32 +241,27 @@ def _ot_1d_kernel(
         # neutralization can never disagree with the reported zeros.
         degenerate = ~(V > 0)
 
-        y_cls = y[cls_idx]  # (D, M, P) resampled class members
-        # Pads sort to the tail as +inf and are unreachable through j.
-        y_cls_sorted = jnp.sort(jnp.where(mask, y_cls, jnp.inf), axis=-1)
-        j_full = jnp.broadcast_to(j[None], (y_cls.shape[0],) + j.shape)
-        q = jnp.take_along_axis(y_cls_sorted, j_full, axis=-1)  # (D, M, N)
-        w2 = ((y_sorted[None, None, :] - q) ** 2).mean(axis=-1)  # (D, M)
-
-        cls_mean = (y_cls * maskf).sum(axis=-1) / countsf  # (D, M)
-        adv = (cls_mean - mean_r) ** 2
-        # W2^2 >= (mean shift)^2 mathematically; the clamp only absorbs
-        # float cancellation noise near zero.
-        diff = jnp.maximum(w2 - adv, 0.0)
-
-        return (
-            _aggregate_normalized(w2, weights, V),
-            _aggregate_normalized(adv, weights, V),
-            _aggregate_normalized(diff, weights, V),
-            degenerate,
-        )
+        outs = [
+            _group_stats(y, y_sorted, mean_r, V, cls_idx, mask_b, counts_b, j_b)
+            for cls_idx, mask_b, counts_b, j_b in layouts
+        ]
+        merged = [jnp.concatenate([o[i] for o in outs]) for i in range(3)]
+        return merged[0], merged[1], merged[2], degenerate
 
     def _one_replicate(carry, xs):
-        r, cls_idx = xs
-        out = jax.vmap(lambda y: _col_stats(y, r, cls_idx))(Y_cols.T)
+        i, r, cls_parts = xs
+        layouts = []
+        for cls_r, counts_g in zip(cls_parts, counts_list):
+            counts_r = _replicate_slice(counts_g, i)  # (G, M) int
+            mask_r = _mask_from_counts(counts_r, cls_r.shape[-1])
+            j_r = _quantile_rank_indices(counts_r, N)  # (G, M, N)
+            layouts.append((cls_r, mask_r, counts_r.astype(dtype), j_r))
+        out = jax.vmap(lambda y: _col_stats(y, r, layouts))(Y_cols.T)
         return carry, out
 
-    _, (ot, adv, diff, degen) = jax.lax.scan(_one_replicate, None, (all_idx, all_cls_idx))
+    R = all_idx.shape[0]
+    scan_xs = (jnp.arange(R), all_idx, cls_list)
+    _, (ot, adv, diff, degen) = jax.lax.scan(_one_replicate, None, scan_xs)
     return ot, adv, diff, degen
 
 
@@ -197,9 +269,8 @@ def _ot_1d_kernel(
 def _joint_kernel(
     Z: Array,
     all_idx: Array,
-    all_cls_idx: Array,
-    mask: Array,
-    counts: Array,
+    groups: tuple[tuple[Array, Array], ...],
+    dm_grids: tuple[Array, ...],
     epsilon: Array,
     max_iter: Array,
     tol: Array,
@@ -210,13 +281,25 @@ def _joint_kernel(
     onto the class's conditional cloud with entropic regularization and
     aggregates the per-class costs into one index per input.
 
+    ``groups`` is a tuple of canonical ``(cls_idx, counts)``
+    partition-group layouts from
+    :func:`jaxgsa._core.partition.build_partition_groups`; results
+    concatenate on the input axis in group order, with the shared
+    per-replicate cloud statistics computed once. ``dm_grids`` gives, per
+    group, the flat ``d * Mg + m`` class slots to actually solve: a
+    categorical group's class axis is padded to the largest level count,
+    and the statically-empty pad slots are excluded from the grid instead
+    of running dead Sinkhorn solves. Dynamically empty classes (declared
+    levels with no observed samples) still carry zero weight and are not
+    counted as convergence failures.
+
     Args:
         Z: Output point cloud ``(N, E)`` (already standardized when
             requested by the caller).
         all_idx: Replicate row indices ``(R, N)`` (row 0 is the identity).
-        all_cls_idx: Class indices ``(R, D, M, P)``.
-        mask: Class validity mask ``(M, P)``.
-        counts: True class sizes ``(M,)``.
+        groups: Canonical partition groups; see
+            :mod:`jaxgsa._core.partition`.
+        dm_grids: Per-group int32 arrays of flat class slots to solve.
         epsilon: Entropic regularization strength (scalar).
         max_iter: Sinkhorn iteration cap (scalar).
         tol: Sinkhorn marginal stopping tolerance (scalar).
@@ -230,25 +313,29 @@ def _joint_kernel(
     """
     dtype = jnp.result_type(Z.dtype, jnp.float32)
     Z = Z.astype(dtype)
-    maskf = mask.astype(dtype)
-    countsf = counts.astype(dtype)
     N = Z.shape[0]
-    weights = countsf / N
-    M = mask.shape[0]
-    log_b_all = jnp.where(mask, -jnp.log(countsf)[:, None], -jnp.inf)  # (M, P)
+    counts_list = tuple(counts for _, counts in groups)
+    cls_list = tuple(cls_idx for cls_idx, _ in groups)
 
-    def _one_replicate(carry, xs):
-        r, cls_idx = xs  # (N,), (D, M, P)
-        Z_r = Z[r]  # resampled cloud
-        mean_all = Z_r.mean(axis=0)
-        V = 2.0 * jnp.var(Z_r, axis=0, ddof=1).sum()  # == 2 * Tr(Cov)
-        sq_full = (Z_r**2).sum(axis=-1)  # (N,)
-        D = cls_idx.shape[0]
+    def _group_stats(Z_r, mean_all, sq_full, V, cls_idx, counts_r, dm_grid):
+        """Normalized cost sums and failure count for one group's inputs.
+
+        ``counts_r (G, M)`` broadcasts against the group's input axis Dg
+        (``G`` is 1 or Dg).
+        """
+        Dg, M, P = cls_idx.shape[0], cls_idx.shape[1], cls_idx.shape[2]
+        G = counts_r.shape[0]
+        mask_r = _mask_from_counts(counts_r, P)  # (G, M, P)
+        safe_counts = jnp.maximum(counts_r, 1.0)
+        log_b_all = jnp.where(mask_r, -jnp.log(safe_counts)[..., None], -jnp.inf)  # (G, M, P)
 
         def _one_class(dm: Array):
             """Transport cost of the full cloud onto class dm % M of input dm // M."""
-            idx = cls_idx[dm // M, dm % M]  # (P,)
             m = dm % M
+            g = jnp.minimum(dm // M, G - 1)  # broadcastable layout axis
+            idx = cls_idx[dm // M, m]  # (P,)
+            mask_dm = mask_r[g, m].astype(dtype)  # (P,)
+            count_dm = counts_r[g, m]
             Z_c = Z[idx]  # (P, E)
             # Squared Euclidean cost block (N, P). Padded columns carry
             # zero target mass, so zeroing their costs is exact -- and
@@ -256,28 +343,65 @@ def _joint_kernel(
             # an outlier there would otherwise set the solver's max-cost
             # scale and change the effective regularization per class.
             C = sq_full[:, None] + (Z_c**2).sum(axis=-1)[None, :] - 2.0 * (Z_r @ Z_c.T)
-            C = jnp.maximum(C, 0.0) * maskf[m][None, :]
-            cost, err = _sinkhorn_w2(C, log_b_all[m], epsilon, max_iter, tol)
-            cls_mean = (Z_c * maskf[m][:, None]).sum(axis=0) / countsf[m]
+            C = jnp.maximum(C, 0.0) * mask_dm[None, :]
+            cost, err = _sinkhorn_w2(C, log_b_all[g, m], epsilon, max_iter, tol)
+            cls_mean = (Z_c * mask_dm[:, None]).sum(axis=0) / jnp.maximum(count_dm, 1.0)
             adv = ((cls_mean - mean_all) ** 2).sum()
-            return cost, adv, err
+            # An empty class carries zero weight; discard its (junk) solve
+            # so it neither poisons the sum nor counts as a failure.
+            empty = ~(count_dm > 0)
+            zero = jnp.zeros((), dtype)
+            return (
+                jnp.where(empty, zero, cost),
+                jnp.where(empty, zero, adv),
+                jnp.where(empty, zero, err),
+            )
 
         # Sequential map keeps peak memory at one (N, P) cost block.
-        costs, advs, errs = jax.lax.map(_one_class, jnp.arange(D * M))
-        w2 = costs.reshape(D, M)
-        adv = advs.reshape(D, M)
+        costs, advs, errs = jax.lax.map(_one_class, dm_grid)
+        # Scatter the solved slots back onto the dense (Dg, M) class grid
+        # (each slot is unique, so this is a set, not an add). Excluded
+        # pad slots stay 0 and carry zero weight, so the weighted
+        # aggregation below is unchanged from a full-grid solve.
+        d_idx = dm_grid // M
+        m_idx = dm_grid % M
+        w2 = jnp.zeros((Dg, M), dtype).at[d_idx, m_idx].set(costs)
+        adv = jnp.zeros((Dg, M), dtype).at[d_idx, m_idx].set(advs)
         diff = jnp.maximum(w2 - adv, 0.0)
-
-        out = (
+        weights = counts_r / N  # (G, M)
+        return (
             _aggregate_normalized(w2, weights, V),
             _aggregate_normalized(adv, weights, V),
             _aggregate_normalized(diff, weights, V),
             (errs > tol).sum(),
-            ~(V > 0),
         )
-        return carry, out
 
-    _, (ot, adv, diff, n_bad, degen) = jax.lax.scan(_one_replicate, None, (all_idx, all_cls_idx))
+    def _one_replicate(carry, xs):
+        i, r, cls_parts = xs
+        Z_r = Z[r]  # resampled cloud
+        mean_all = Z_r.mean(axis=0)
+        V = 2.0 * jnp.var(Z_r, axis=0, ddof=1).sum()  # == 2 * Tr(Cov)
+        sq_full = (Z_r**2).sum(axis=-1)  # (N,)
+
+        outs = [
+            _group_stats(
+                Z_r,
+                mean_all,
+                sq_full,
+                V,
+                cls_r,
+                _replicate_slice(counts_g, i).astype(dtype),
+                dm_grid,
+            )
+            for cls_r, counts_g, dm_grid in zip(cls_parts, counts_list, dm_grids)
+        ]
+        merged = [jnp.concatenate([o[i_out] for o in outs]) for i_out in range(3)]
+        n_bad = jnp.stack([o[3] for o in outs]).sum()
+        return carry, (merged[0], merged[1], merged[2], n_bad, ~(V > 0))
+
+    R = all_idx.shape[0]
+    scan_xs = (jnp.arange(R), all_idx, cls_list)
+    _, (ot, adv, diff, n_bad, degen) = jax.lax.scan(_one_replicate, None, scan_xs)
     return ot, adv, diff, n_bad, degen
 
 
@@ -309,7 +433,7 @@ def analyze(
     Y: Array,
     *,
     mode: Literal["univariate", "multivariate", "trajectory"] = "univariate",
-    n_partitions: int = 25,
+    n_partitions: int | None = None,
     standardize: bool = True,
     epsilon: float = 0.01,
     max_iter: int = 1000,
@@ -338,7 +462,11 @@ def analyze(
     are invariant under monotone transforms -- the estimator is therefore
     distribution-free in X and works unchanged for uniform, Gaussian,
     truncated-Gaussian, or mixed marginals (no CDF transform involved).
-    Correlated inputs are supported: the index is well-defined under
+    Categorical parameters are supported natively: each one conditions on
+    one class per level (class sizes are the observed level counts), so
+    the index depends only on the level partition, never on the arbitrary
+    code order. Declared levels with no observed samples are dropped with
+    a warning. Correlated inputs are supported: the index is well-defined under
     dependence and then measures each input's *total* association with
     the output, including effects mediated by correlated inputs (the
     same reading as the given-data S1, whose half remains the advective
@@ -358,10 +486,14 @@ def analyze(
             output's time course as the cloud (``(K, D)``); requires a
             3-D ``Y``.
         n_partitions: Number of equal-frequency conditioning classes per
-            input. More classes localize the conditioning (less
-            discretization bias) but leave fewer samples per class (more
-            estimation noise); ~25 is customary for the OT index at
-            N >= 2500.
+            *continuous* input. More classes localize the conditioning
+            (less discretization bias) but leave fewer samples per class
+            (more estimation noise); ~25 is customary for the OT index at
+            N >= 2500. ``None`` (default) selects ``min(25, N // 2)``.
+            Categorical inputs ignore it and always use one class per
+            level. A passed value is always validated against
+            ``[2, N // 2]``; if nothing uses it (only categorical inputs
+            and no ``dummy``), a ``UserWarning`` says it is ignored.
         standardize: Joint modes only: divide each output column by its
             standard deviation before building the transport cost, so no
             single output dominates the joint distance through its units.
@@ -408,23 +540,54 @@ def analyze(
         ValueError: If X is not 2-D, its column count does not match the
             problem, Y is not 1-D/2-D/3-D, X and Y have differing row
             counts, ``mode`` is unknown, ``mode="trajectory"`` is
-            used with a non-3-D Y, ``n_partitions`` is not in
-            ``[2, N // 2]``, ``epsilon <= 0``, ``max_iter < 1``,
+            used with a non-3-D Y, a passed ``n_partitions`` is not in
+            ``[2, N // 2]``, a categorical column of X holds
+            values other than its integer level codes, ``epsilon <= 0``,
+            ``max_iter < 1``,
             ``tol <= 0``, ``n_bootstrap < 0``, ``conf_level`` is not in
             ``(0, 1)``, or ``slice_chunk_size`` is not a positive integer.
     """
     X = jnp.asarray(X)
     # The OT index measures total, correlation-inclusive influence via
     # rank-based conditioning, so correlated problems are welcome.
-    Y = _validate_xy_inputs(problem, X, Y, correlation_ok=True)
+    Y = _validate_xy_inputs(problem, X, Y, correlation_ok=True, categorical_ok=True)
 
     if mode not in _MODES:
         raise ValueError(f"mode must be one of {_MODES}, got {mode!r}")
     if mode == "trajectory" and Y.ndim != 3:
         raise ValueError(f"mode='trajectory' requires a 3-D (N, T, K) Y, got ndim={Y.ndim}")
     N = X.shape[0]
-    if not 2 <= n_partitions <= N // 2:
-        raise ValueError(f"n_partitions must be in [2, N//2={N // 2}], got {n_partitions}")
+    # n_partitions applies to the continuous columns (and the dummy input);
+    # categorical columns always get one conditioning class per level.
+    dims_levels = _categorical_dims(problem)
+    cat_dims = [d for d, _ in dims_levels]
+    cont_dims = [d for d in range(problem.num_vars) if d not in set(cat_dims)]
+    if n_partitions is None:
+        # The customary 25 classes, clamped so small samples do not raise
+        # over a default the user never passed.
+        M = min(25, N // 2)
+        if (cont_dims or dummy) and M < 2:
+            raise ValueError(f"building conditioning classes needs N >= 4 samples, got N={N}")
+    else:
+        M = int(n_partitions)
+        if not 2 <= M <= N // 2:
+            # Name the dummy baseline when it is the only consumer, so the
+            # error does not read as a complaint about categorical columns.
+            scope = (
+                " for the dummy baseline (categorical columns use one class per level)"
+                if dummy and not cont_dims
+                else ""
+            )
+            raise ValueError(
+                f"n_partitions must be in [2, N//2={N // 2}]{scope}, got {n_partitions}"
+            )
+        if not cont_dims and not dummy:
+            warnings.warn(
+                "jaxgsa: n_partitions is ignored because every parameter is "
+                "categorical (one conditioning class per level) and no dummy "
+                "baseline was requested",
+                stacklevel=2,
+            )
     if not epsilon > 0:
         raise ValueError(f"epsilon must be > 0, got {epsilon}")
     if max_iter < 1:
@@ -440,7 +603,6 @@ def analyze(
 
     Y_3d, squeeze_time, squeeze_output = _prepare_Y(Y)
     _, T, K = Y_3d.shape
-    M = int(n_partitions)
 
     dtype = jnp.result_type(Y_3d.dtype, jnp.float32)
     if tol is None:
@@ -458,38 +620,77 @@ def analyze(
     else:
         all_idx = identity
 
-    take_np, mask_np, sizes_np = _class_layout(N, M)
-    take = jnp.asarray(take_np)
-    mask = jnp.asarray(mask_np)
-    counts = jnp.asarray(sizes_np)
-    quantile_j = jnp.asarray(_quantile_ranks(sizes_np, N))
-    # Rank the inputs once for every replicate, reused by every kernel call.
-    all_cls_idx = _build_class_indices(X, all_idx, take)  # (R, D, M, P)
+    # Build one partition layout per column group. Continuous columns share
+    # one equal-frequency rank layout (identical for every replicate);
+    # categorical columns get one class per level, with sizes that vary per
+    # column and per bootstrap resample, so their layout carries leading
+    # (R, Dc) axes. Grouping keeps the padded class tensors rectangular
+    # without padding continuous classes up to a categorical level size (or
+    # vice versa).
+    # Canonical partition-group layout, shared with borgonovo. Each group
+    # is (cls_idx, counts); masks and quantile lookups are derived
+    # in-kernel from the counts.
+    groups, _, col_order = build_partition_groups(problem, X, all_idx, M, dims_levels)
 
-    # `_run` maps replicate indices + class indices to
+    def _static_dm_grid(group: tuple[Array, Array], levels: list[int] | None) -> Array:
+        """Flat ``d * Mg + m`` class slots the joint kernel must solve.
+
+        A categorical group's class axis is padded to the largest level
+        count; the pad slots are statically empty (their counts are zero
+        for every replicate), so they are excluded here instead of
+        running dead Sinkhorn solves.
+        """
+        D_g, M_g = group[0].shape[1], group[0].shape[2]
+        if levels is None:
+            return jnp.arange(D_g * M_g, dtype=jnp.int32)
+        return jnp.asarray(
+            [d * M_g + m for d, n_levels in enumerate(levels) for m in range(n_levels)],
+            dtype=jnp.int32,
+        )
+
+    # Group order mirrors build_partition_groups: continuous (no level
+    # list) first when present, then categorical.
+    group_levels: list[list[int] | None] = []
+    if cont_dims:
+        group_levels.append(None)
+    if cat_dims:
+        group_levels.append([n_levels for _, n_levels in dims_levels])
+
+    # `_run` maps replicate indices + partition-layout groups to
     # (ot, advective, diffusive, degenerate) arrays with the input axis
-    # last, and accumulates Sinkhorn convergence stats for the one
-    # end-of-analysis warning. Defining it per mode lets the dummy
-    # baseline below reuse the identical estimator.
+    # last (in problem column order), and accumulates Sinkhorn convergence
+    # stats for the one end-of-analysis warning. Defining it per mode lets
+    # the dummy baseline below reuse the identical estimator.
     n_bad_parts: list[Array] = []
     n_solves = 0
+    _Groups = list[tuple[Array, Array]]
 
     if mode == "univariate":
         Y_cols = Y_3d.reshape(N, T * K)
         total = T * K
 
-        def _run(idx: Array, cls_idx: Array) -> tuple[Array, Array, Array, Array]:
-            R_run, D_run = idx.shape[0], cls_idx.shape[1]
+        def _run(
+            idx: Array,
+            run_groups: _Groups,
+            run_levels: list[list[int] | None],
+            order: Array | None,
+        ) -> tuple[Array, Array, Array, Array]:
+            R_run = idx.shape[0]
+            D_run = sum(g[0].shape[1] for g in run_groups)
+            # Peak memory scales with the summed per-group D_g * M_g
+            # conditional-quantile tensors.
+            layout_elems = sum(g[0].shape[1] * g[0].shape[2] for g in run_groups)
             cs = slice_chunk_size
             if cs is None:
-                cs = max(1, _CHUNK_ELEM_BUDGET // (D_run * M * N))
+                cs = max(1, _CHUNK_ELEM_BUDGET // (layout_elems * N))
             cs = min(cs, total)
             parts: tuple[list, list, list, list] = ([], [], [], [])
             for start in range(0, total, cs):
-                out = _ot_1d_kernel(
-                    Y_cols[:, start : start + cs], idx, cls_idx, mask, counts, quantile_j
-                )
-                for part, arr in zip(parts, out):
+                chunk = Y_cols[:, start : start + cs]
+                merged = list(_ot_1d_kernel(chunk, idx, tuple(run_groups)))
+                if order is not None:
+                    merged[:3] = [arr[..., order] for arr in merged[:3]]
+                for part, arr in zip(parts, merged):
                     part.append(arr)
             ot, adv, diff, degen = (jnp.concatenate(p, axis=1) for p in parts)
             return (
@@ -512,35 +713,53 @@ def analyze(
         if standardize:
             clouds = [_prenormalize_outputs(Z)[0] for Z in clouds]
 
-        def _run(idx: Array, cls_idx: Array) -> tuple[Array, Array, Array, Array]:
+        def _run(
+            idx: Array,
+            run_groups: _Groups,
+            run_levels: list[list[int] | None],
+            order: Array | None,
+        ) -> tuple[Array, Array, Array, Array]:
             nonlocal n_solves
-            n_solves += len(clouds) * idx.shape[0] * cls_idx.shape[1] * M
-            outs = [
-                _joint_kernel(Z, idx, cls_idx, mask, counts, eps_s, max_iter_s, tol_s)
-                for Z in clouds
-            ]
-            n_bad_parts.append(sum(o[3].sum() for o in outs))
+            dm_grids = tuple(
+                _static_dm_grid(group, levels) for group, levels in zip(run_groups, run_levels)
+            )
+            n_solves += len(clouds) * idx.shape[0] * sum(grid.shape[0] for grid in dm_grids)
+
+            def _one_cloud(Z: Array) -> tuple[Array, Array, Array, Array, Array]:
+                ot, adv, diff, n_bad, degen = _joint_kernel(
+                    Z, idx, tuple(run_groups), dm_grids, eps_s, max_iter_s, tol_s
+                )
+                merged = [ot, adv, diff]
+                if order is not None:
+                    merged = [arr[..., order] for arr in merged]
+                return merged[0], merged[1], merged[2], n_bad.sum(), degen
+
+            cloud_outs = [_one_cloud(Z) for Z in clouds]
+            n_bad_parts.append(jnp.stack([o[3] for o in cloud_outs]).sum())
             if mode == "multivariate":
-                ot, adv, diff, _, degen = outs[0]  # (R, D) / (R,)
+                ot, adv, diff, _, degen = cloud_outs[0]  # (R, D) / (R,)
                 return ot, adv, diff, degen
             return (
-                jnp.stack([o[0] for o in outs], axis=1),  # (R, K, D)
-                jnp.stack([o[1] for o in outs], axis=1),
-                jnp.stack([o[2] for o in outs], axis=1),
-                jnp.stack([o[4] for o in outs], axis=1),  # (R, K)
+                jnp.stack([o[0] for o in cloud_outs], axis=1),  # (R, K, D)
+                jnp.stack([o[1] for o in cloud_outs], axis=1),
+                jnp.stack([o[2] for o in cloud_outs], axis=1),
+                jnp.stack([o[4] for o in cloud_outs], axis=1),  # (R, K)
             )
 
-    ot_all, adv_all, diff_all, degen_all = _run(all_idx, all_cls_idx)
+    ot_all, adv_all, diff_all, degen_all = _run(all_idx, groups, group_levels, col_order)
 
     ot_dummy: Array | None = None
     if dummy:
         # A synthetic input that is independent of Y by construction; only
         # its ranks matter, so a permutation of 0..N-1 suffices. It runs
         # through the identical estimator as a single-replicate pass (the
-        # baseline needs no bootstrap interval).
+        # baseline needs no bootstrap interval). The dummy is continuous, so
+        # it always uses the shared equal-frequency layout.
+        take_np, sizes_np = _class_layout(N, M)
         dummy_col = jax.random.permutation(key_dummy, N)[:, None]
-        dummy_cls_idx = _build_class_indices(dummy_col, identity, take)  # (1, 1, M, P)
-        ot_dummy = _run(identity, dummy_cls_idx)[0][0][..., 0]
+        dummy_cls_idx = _build_class_indices(dummy_col, identity, jnp.asarray(take_np))
+        dummy_group = (dummy_cls_idx, jnp.asarray(sizes_np)[None, None, :])  # (1, 1, M, P)
+        ot_dummy = _run(identity, [dummy_group], [None], None)[0][0][..., 0]
 
     if n_bad_parts:
         # One host sync for the whole analysis; the solver itself never

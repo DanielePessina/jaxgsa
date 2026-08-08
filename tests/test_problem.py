@@ -112,15 +112,15 @@ class TestTruncateGaussians:
         from scipy.stats import norm
 
         p = Problem.from_dict(dict(self.SPECS), truncate_gaussians=1e-3)
-        assert p.input_specs[0] == ("uniform", 0.0, 1.0, None, None)  # uniform untouched
-        _, _, _, lo, hi = p.input_specs[1]
+        assert p.input_specs[0] == ("uniform", 0.0, 1.0, None, None, None)  # uniform untouched
+        lo, hi = p.input_specs[1][3], p.input_specs[1][4]
         assert lo == pytest.approx(float(norm.ppf(1e-3, loc=2.0, scale=3.0)))
         assert hi == pytest.approx(float(norm.ppf(1.0 - 1e-3, loc=2.0, scale=3.0)))
         # A declared side wins; only the open side is filled.
-        _, _, _, lo, hi = p.input_specs[2]
+        lo, hi = p.input_specs[2][3], p.input_specs[2][4]
         assert lo == -1.0
         assert hi == pytest.approx(float(norm.ppf(1.0 - 1e-3)))
-        assert p.input_specs[3] == ("gaussian", 0.0, 1.0, -1.0, 1.0)
+        assert p.input_specs[3] == ("gaussian", 0.0, 1.0, -1.0, 1.0, None)
 
     @pytest.mark.parametrize("bad_q", [0.0, 0.5, -0.1, 1.0])
     def test_invalid_q_raises(self, bad_q):

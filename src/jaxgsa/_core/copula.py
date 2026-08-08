@@ -252,6 +252,32 @@ def correlation_from_covariance(cov: npt.ArrayLike) -> np.ndarray:
     return R
 
 
+def _force_categorical_identity(R: np.ndarray, cat_dims: "list[int]") -> np.ndarray:
+    """Reset the categorical rows and columns of ``R`` to exact identity.
+
+    Used after a fit or a positive-definiteness repair, both of which leave
+    float-level noise in rows that must be exactly decoupled. The reset
+    preserves positive definiteness: the result is block-diagonal, made of
+    an identity block and a principal submatrix of the (positive-definite)
+    input.
+
+    Args:
+        R: ``(D, D)`` correlation matrix.
+        cat_dims: Indices of the categorical parameters.
+
+    Returns:
+        A copy of ``R`` with identity rows and columns at ``cat_dims``
+        (``R`` itself when ``cat_dims`` is empty).
+    """
+    if not cat_dims:
+        return R
+    R = R.copy()
+    R[cat_dims, :] = 0.0
+    R[:, cat_dims] = 0.0
+    R[cat_dims, cat_dims] = 1.0
+    return R
+
+
 def fit_gaussian_copula(problem: Problem, X: np.ndarray) -> np.ndarray:
     """Estimate a Gaussian-copula correlation matrix from a design matrix.
 
@@ -262,10 +288,16 @@ def fit_gaussian_copula(problem: Problem, X: np.ndarray) -> np.ndarray:
     dependency structure. Tied values get average ranks, which is the
     Spearman convention (``scipy.stats.spearmanr``).
 
+    Categorical parameters have unordered level codes, so a rank correlation
+    over them would depend on the arbitrary code order. Their rows and
+    columns are forced to exact identity (independent) and one
+    ``UserWarning`` names them; polychoric estimation is future work. The
+    continuous pairs are fitted normally.
+
     Args:
-        problem: Problem the samples were drawn for. Only its parameter count
-            is used, but it is required so callers cannot silently pass a
-            transposed matrix.
+        problem: Problem the samples were drawn for. Its parameter count
+            shapes the fit, and its categorical parameters are excluded
+            from it.
         X: ``(N, D)`` samples in physical units.
 
     Returns:
@@ -276,6 +308,8 @@ def fit_gaussian_copula(problem: Problem, X: np.ndarray) -> np.ndarray:
         ValueError: If ``X`` is not ``(N, D)`` with ``D == problem.num_vars``,
             or holds fewer than three rows.
     """
+    from jaxgsa.problem import _categorical_dims
+
     X = np.asarray(X, dtype=np.float64)
     D = problem.num_vars
     if X.ndim != 2 or X.shape[1] != D:
@@ -291,9 +325,27 @@ def fit_gaussian_copula(problem: Problem, X: np.ndarray) -> np.ndarray:
     if D == 1:  # np.corrcoef collapses to a scalar for a single column
         spearman = np.atleast_2d(spearman)
 
+    cat_dims = [d for d, _ in _categorical_dims(problem)]
+    latent = _spearman_to_latent(spearman)
+    if cat_dims:
+        # Level codes carry no order, so their Spearman numbers are
+        # artifacts of the code assignment (relabeling flips them).
+        warnings.warn(
+            f"jaxgsa: parameters {[problem.names[d] for d in cat_dims]} are "
+            "categorical; a rank correlation over unordered level codes "
+            "depends on the arbitrary code order, so their rows and columns "
+            "are kept at identity (independent). Polychoric estimation is "
+            "future work.",
+            # The public entry point is jaxgsa.sampling.fit_correlation.
+            stacklevel=3,
+        )
+        latent = _force_categorical_identity(latent, cat_dims)
+
     # Pearson correlation of the latent normals that reproduces this Spearman
-    # rank correlation under a Gaussian copula.
-    return _project_to_correlation(_spearman_to_latent(spearman))
+    # rank correlation under a Gaussian copula. Zeroing before the repair
+    # keeps the matrix block-diagonal (the repair preserves the blocks up to
+    # float noise); zeroing again after it makes the zeros exact.
+    return _force_categorical_identity(_project_to_correlation(latent), cat_dims)
 
 
 def validate_correlation(

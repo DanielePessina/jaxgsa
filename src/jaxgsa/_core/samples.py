@@ -72,16 +72,17 @@ def _problem_from_meta(problem_meta: Mapping[str, Any]) -> Problem:
     """Reconstruct a :class:`Problem` from its metadata dict."""
     output_names = problem_meta["output_names"]
     names = tuple(problem_meta["names"])
+    input_specs = tuple(_normalize_input_spec(spec) for spec in problem_meta["input_specs"])
     return Problem._from_normalized_inputs(
         names=names,
-        input_specs=tuple(_normalize_input_spec(spec) for spec in problem_meta["input_specs"]),
+        input_specs=input_specs,
         output_names=tuple(output_names) if output_names is not None else None,
         # `.get`: files written before jaxgsa 0.6 carry no correlation key.
         # The stored matrix was already validated and repaired at construction,
         # so the repair is a no-op here. The lenient policy keeps a reload from
         # reporting, or refusing, what the user was already told about once.
         correlation=_canonical_correlation(
-            problem_meta.get("correlation"), len(names), policy="fitted"
+            problem_meta.get("correlation"), names, input_specs, policy="fitted"
         ),
     )
 

@@ -9,16 +9,28 @@ commands live under the namespace for their method.
 - `jaxgsa.Problem`
 - `jaxgsa.UniformInputSpec`
 - `jaxgsa.GaussianInputSpec`
+- `jaxgsa.CategoricalInputSpec`
 
 Construct problems with `Problem.from_dict(...)`. Uniform inputs may use the
 short `(low, high)` form; Gaussian inputs use `GaussianInputSpec`.
+
+Categorical (unordered discrete) inputs use `CategoricalInputSpec`:
+`{"dist": "categorical", "probs": [p0, ..., pL-1], "labels": [...]}`. Samples
+carry the integer level codes `0 .. L-1` as floats. Optional `labels` map
+codes to names for reporting (`problem.categorical_labels`);
+`problem.has_categorical_inputs` reports their presence. Optimal transport,
+Borgonovo delta, PAWN, and the Saltelli-based Sobol pipeline support
+categorical inputs; the other methods refuse them with a `ValueError`. See
+[Categorical Inputs](/examples/categorical-inputs).
 
 Dependent inputs are declared with the optional Gaussian-copula
 `correlation=` argument (`correlation_kind="latent"` or `"spearman"`), or
 attached to an existing problem with `problem.with_correlation(R)`; the
 validated latent matrix is available as `problem.correlation`. Methods whose
 indices assume independent inputs refuse a correlated problem with a
-`ValueError`. See [Correlated Inputs](/examples/correlated-inputs).
+`ValueError`. A correlation entry touching a categorical parameter is
+rejected (polychoric coupling is future work). See
+[Correlated Inputs](/examples/correlated-inputs).
 
 ## Shape Contract
 

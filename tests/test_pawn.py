@@ -247,10 +247,10 @@ class TestPAWNTiedOutputs:
 class TestPAWNOutOfBounds:
     def test_out_of_range_gets_sentinel(self):
         """Samples outside [0, 1] are excluded (sentinel -1), not clamped."""
-        from jaxgsa.pawn._analyze import _bin_indices
+        from jaxgsa.pawn._analyze import _equal_width_bins
 
         X = jnp.asarray([[-0.5], [0.0], [0.4], [1.0], [1.5], [jnp.nan]])
-        idx = np.asarray(_bin_indices(X, 4)).ravel()
+        idx = np.asarray(_equal_width_bins(X, 4)).ravel()
         assert idx[0] == -1  # below 0 -> excluded
         assert idx[4] == -1  # above 1 -> excluded
         assert idx[1] == 0  # exactly 0.0 -> first bin

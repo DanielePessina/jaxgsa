@@ -9,6 +9,14 @@ distance between the unconditional output density and the output density
 conditional on each input, plus the given-data first-order Sobol index
 from the same partition.
 
+The estimator supports a continuous output distribution only. It compares
+kernel density estimates on a shared output grid, and a discrete output has
+atoms that no grid resolves. ``analyze`` checks the output up front and
+raises ``ValueError`` for a discrete one. Use
+:func:`jaxgsa.optimal_transport.analyze` in that case: it compares empirical
+distributions directly. Categorical *inputs* stay supported — the
+restriction applies to the output.
+
 Example::
 
     from jaxgsa import borgonovo

@@ -1,5 +1,175 @@
 # Changelog
 
+## Unreleased (0.7.0)
+
+### Added
+
+- **Categorical inputs — first-class unordered discrete marginals.**
+  `Problem.from_dict` accepts
+  `{"dist": "categorical", "probs": [p0, ..., pL-1], "labels": [...]}`
+  (new `CategoricalInputSpec`). A categorical parameter has `L >= 2`
+  levels. The probabilities must be positive and sum to 1. A small
+  rounding error is renormalized; a clearly wrong sum raises. Samples
+  carry the integer level codes `0 .. L-1` as floats — codes, never
+  physical values. The optional `labels` (strings or numbers) live on the
+  `Problem` for reporting only. `problem.categorical_labels` maps each
+  categorical parameter to its label tuple.
+  `problem.has_categorical_inputs` reports their presence. Problems with
+  categorical marginals round-trip through JSON metadata and NPZ design
+  files, labels included.
+- **Sampling.** `jaxgsa.sampling.monte_carlo` draws categorical columns
+  through a step-function inverse CDF on the unit interval
+  (`searchsorted` on the cumulative probabilities). Level frequencies
+  follow the declared `probs` exactly in distribution.
+- **Optimal transport, Borgonovo delta, and PAWN support categorical
+  inputs.** A categorical column conditions on one class per level. For
+  PAWN the level code is already a bin index, so the KS kernel is
+  unchanged; the kernel compiles at `n_eff = max(n_bins, max_levels)` and
+  the unused bins stay empty, return `NaN`, and are dropped by the
+  nan-aware median/max/mean over bins. `n_bins` applies to continuous
+  columns only. Continuous-only PAWN results are bit-for-bit unchanged.
+  For optimal transport and Borgonovo delta, class sizes are the observed
+  level counts. They vary per column and per bootstrap
+  resample; the shared partition layer builds a per-replicate padded
+  layout for them. Continuous columns keep their equal-frequency rank
+  classes; `n_partitions` / `n_classes` apply to continuous columns only.
+  The indices depend only on the level partition, so relabeling levels
+  does not change them (tested). Declared levels with no observed samples
+  are dropped from the class average with a `UserWarning`. All OT modes
+  (`univariate`, `multivariate`, `trajectory`) and the `dummy` baseline
+  work.
+- **The Saltelli column-swap scheme works with categorical columns.**
+  The Saltelli design only copies coordinate values between rows, so the
+  estimators are unaffected. A guard caps the unique-row inflation loop:
+  a low-cardinality categorical problem has finitely many distinct rows.
+  The sampler stops doubling `base_n` when a doubling adds no new unique
+  rows or the known distinct-row bound is reached. A candidate-row cap
+  is checked before the next doubling is built, so the warning fires
+  before any huge allocation. The design then keeps duplicate rows and
+  explains why in a `UserWarning`. Duplicates are valid Saltelli
+  samples; deduplication only saves model evaluations.
+- **Clear errors from code-order-sensitive methods.** `morris.sample`,
+  `efast.sample`, `SobolSamples.to_morris`, `dgsm.analyze`,
+  `pce.analyze`, `hdmr.analyze`, `hsic.analyze`, and
+  `shapley.analyze` refuse a categorical problem with a `ValueError`
+  that names the categorical parameters and the supported alternatives.
+  The guard is a `categorical_ok` capability flag in the shared
+  validation layer, parallel to the 0.6.0 `correlation_ok` flag.
+- **No correlation × categorical.** A `problem.correlation` entry that
+  touches a categorical parameter raises at construction (a Gaussian
+  copula does not define a coupling for an unordered marginal; polychoric
+  coupling is future work). Identity rows and columns are fine. The
+  check runs on the declared matrix, before the positive-definiteness
+  repair, so repair noise never reads as a coupling; the stored matrix
+  carries exact-identity categorical rows and columns.
+
+### Fixed
+
+- **`borgonovo.analyze` could return a delta far outside `[0, 1]` in
+  silence.** Delta is a half L1 distance between densities, so it lives in
+  `[0, 1]`. The degenerate-class detector only fired below `1e-6` of the
+  full-sample bandwidth. A class that was *almost* a point mass — one
+  output value plus a little jitter — passed that test but still sat
+  orders of magnitude below the output grid step. Its conditional density
+  aliased on the grid and the trapezoid integral exploded. On a
+  three-atom model with true delta `2/3` and jitter `1e-5`, `analyze`
+  returned **delta 121 with no warning**. Two changes close this:
+  - The degenerate tolerance is now `1e-2`, the scale at which the
+    default 100-point grid stops resolving a class. The same sweep now
+    returns 0.611 (jitter `1e-5`), 0.624 (`1e-3`) and 0.907 (`1e-2`), all
+    in range.
+  - A range guard checks every returned delta. An excursion beyond
+    `[-0.05, 1.05]` in the point estimate now raises `ValueError`. The
+    message names the parameter, gives the observed range, states the
+    cause, and names both knobs: `grid_size` (with its current value) and
+    `degenerate_bandwidth`. A value outside `[0, 1]` is a failed
+    computation, not an estimate, so it must not reach a plot. A
+    confidence bound outside the range still raises a `UserWarning` only:
+    the point estimate is the contract and the interval is a diagnostic.
+    Nothing is clipped, because clipping 121 to 1.0 would turn an obvious
+    failure into a plausible wrong answer. The guard covers continuous and
+    categorical inputs alike.
+
+  The bug predated categorical support — a continuous step-function model
+  hit it too — but categorical inputs make "one level, one output value"
+  the normal case.
+- **`borgonovo.analyze` under-budgeted memory on imbalanced categorical
+  columns.** The default `slice_chunk_size` assumed the padded class
+  layout `M * P` was about `N`. That holds for equal-frequency continuous
+  classes. A categorical column pads every level up to the largest one, so
+  with `probs = [0.91] + [0.01] * 9` at `N = 20000` the layout is `9.1x N`
+  and the default chose a chunk whose KDE tensor was 2.29 GiB against a
+  256 MiB budget. The default now sizes from the real per-group layout
+  `sum_g(Dg * Mg * Pg)`, the same way `optimal_transport.analyze` already
+  did. On that case the chunk width goes 33 -> 3 and the peak lands at
+  54.6M elements, inside the budget. Continuous problems are unchanged.
+
+### Changed
+
+- **`borgonovo.analyze` refuses a discrete output.** The delta estimator
+  compares Gaussian kernel density estimates on a shared output grid. An
+  atomic density is a spike no grid resolves, so on a discrete output the
+  index reports the grid resolution rather than the model. `analyze` now
+  checks the output before any expensive work and raises `ValueError` when
+  a column takes at most 20 distinct values *and* those values are fewer
+  than 1% of the samples. Both conditions must hold, so a continuous
+  output rounded to two decimals is not refused. The message names the
+  offending column and points at `jaxgsa.optimal_transport.analyze`, which
+  compares empirical distributions and needs no density. Continuous
+  outputs are the supported contract; no atomic estimator is planned.
+  A constant column is exempt: it needs no density and its exact answer is
+  `delta = S1 = 0`, which is the documented behaviour and stays. A
+  rare-event 0/1 indicator has two atoms and is now refused; use
+  `jaxgsa.optimal_transport.analyze` or `jaxgsa.pawn.analyze` for it.
+  Categorical inputs stay supported. The limit applies to the output only.
+- **Borgonovo delta floors the bandwidth of classes the output grid cannot
+  resolve.** A conditioning class with zero output variance (a point mass,
+  e.g. one categorical level mapping to one output value) used to get
+  bandwidth 0. Its density dropped out of the L1 integrand and delta
+  biased far low (0.33 instead of 2/3 on a noise-free three-level repro).
+  The class now gets a grid-resolvable kernel at its value:
+  `max(0.1 * full-sample Silverman bandwidth, grid step)`. The repro
+  recovers delta 0.60–0.62. One `UserWarning` reports the floor. Classes
+  with genuine spread are untouched, so continuous results are
+  bit-identical.
+
+  The grid-step term is the one that binds in practice, so the delta of a
+  near-degenerate class is set by `grid_size`, not by the bandwidth
+  fraction. That estimate is **biased low** and the bias does not vanish as
+  `N` grows: on the three-atom repro (true `2/3`) it reads 0.56 at
+  `grid_size=50`, 0.61 at 100, and 0.61 at 200 and above. Read delta on an
+  atomic conditional as a ranking signal, not a calibrated number. The
+  `analyze` docstring and the categorical docs now say so. A consistent
+  estimator for atomic conditionals needs a different estimator and is
+  future work.
+- **`borgonovo.analyze` exposes the degenerate-class settings.** The two
+  module constants are now overridable: `degenerate_tol` (when a class
+  counts as unresolvable, a fraction of the full-sample bandwidth,
+  default `1e-2`) and `degenerate_bandwidth` (the floor, `"auto"` for
+  `max(0.1 * h_full, grid_step)` or a fraction of `h_full` applied
+  exactly).
+- **`SobolSamples.samples` is documented as an evaluation set, not a
+  sample.** Deduplication collapses repeated rows, so the empirical
+  marginal of a column in `samples` does not match the declared one. With
+  `probs = [0.9, 0.1]` the column reads about `[0.84, 0.16]`. Categorical
+  dedup rates are high, so the distortion shows. `analyze` is correct: it
+  reconstructs the expanded design through `expanded_to_unique`, and that
+  design carries `[0.900, 0.100]`. The docstring and the categorical docs
+  now warn against reusing `samples` as a standalone Monte Carlo design.
+- **`fit_correlation` keeps categorical parameters at identity.** A
+  Spearman rank correlation over unordered level codes depends on the
+  arbitrary code order (relabeling flips its sign). The fit now excludes
+  categorical columns, returns exact-identity rows and columns for them,
+  and warns once naming them. The fit is invariant under level
+  relabeling. Polychoric estimation is future work.
+- **`n_partitions` / `n_classes` are always validated when passed.** An
+  all-categorical problem used to accept any value silently. A passed
+  value now validates against its range; a valid value that nothing uses
+  draws an "ignored" `UserWarning`. `optimal_transport.analyze` defaults
+  `n_partitions` to `min(25, N // 2)`, so small samples no longer raise
+  over a default the user never passed; an out-of-range value that only
+  the `dummy` baseline consumes names the dummy in the error.
+
 ## Unreleased (0.6.0)
 
 ### Added

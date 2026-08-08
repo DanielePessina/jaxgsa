@@ -22,6 +22,7 @@ Common situations:
 - **"My model is expensive and has many parameters."** Screen first with [Morris](#morris-elementary-effects-screening) ($r(D+1)$ runs), or with [DGSM](#dgsm-derivative-based-global-sensitivity-measures) if the model is JAX-differentiable. Fix the negligible parameters, then spend the remaining budget on Sobol' for the survivors.
 - **"I only have existing simulation data."** Any given-data method works. [HDMR](#rs-hdmr-random-sampling-high-dimensional-model-representation) or [PCE](#pce-polynomial-chaos-expansion) for variance-based indices via a surrogate; [HSIC](#hsic-hilbert–schmidt-independence-criterion), [PAWN](#pawn-cdf-based-sensitivity), [Borgonovo delta](#borgonovo-delta-density-based-sensitivity), or [optimal transport](#optimal-transport-wasserstein-based-sensitivity) for distribution-based indices.
 - **"My inputs are correlated."** Sobol', PCE, eFAST, DGSM, Morris, and PCE-backed Shapley all assume independent inputs — and refuse to run when `problem.correlation` is declared. Use HDMR (which separates structural from correlation-induced variance; `shapley.analyze(backend="hdmr", include_correlative=True)` allocates that decomposition), or HSIC / PAWN / Borgonovo delta / optimal transport (which make no independence assumption). To draw correlated samples, declare a Gaussian-copula matrix on the `Problem` (`correlation=`, or `problem.with_correlation(R)`) and draw with `jaxgsa.sampling.monte_carlo` — see [Correlated Inputs](/examples/correlated-inputs).
+- **"Some of my inputs are categorical."** Declare them with `{"dist": "categorical", "probs": [...]}` — samples then carry integer level codes. Four methods handle unordered levels correctly: [Sobol'](#sobol-indices-via-saltelli-sampling) (the Saltelli column-swap scheme is distribution-agnostic), plus [Borgonovo delta](#borgonovo-delta-density-based-sensitivity), [optimal transport](#optimal-transport-wasserstein-based-sensitivity), and [PAWN](#pawn-cdf-based-sensitivity), which all condition on one class per level. Every other method refuses with a `ValueError`, because its indices would depend on the arbitrary code order. See [Categorical Inputs](/examples/categorical-inputs).
 - **"My output distribution is skewed or heavy-tailed."** Use [PAWN](#pawn-cdf-based-sensitivity), [Borgonovo delta](#borgonovo-delta-density-based-sensitivity), or [optimal transport](#optimal-transport-wasserstein-based-sensitivity) — all compare whole output distributions rather than variances.
 - **"I want to know how an input matters — shift vs shape."** Use [optimal transport](#optimal-transport-wasserstein-based-sensitivity): its index decomposes exactly into an advective (mean-shift, $= S_1/2$) and a diffusive (spread/shape) component.
 - **"I want one number per input for a whole trajectory."** Use [optimal transport](#optimal-transport-wasserstein-based-sensitivity) with `mode="trajectory"` — point-cloud transport scores each input against the entire time course jointly.
@@ -35,6 +36,7 @@ Common situations:
 | Sampling requirement | Structured Saltelli design, $N(2D+2)$ evaluations (default) | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Search curves, $N \times D$ evaluations | Plain MC, $N$ evaluations + autodiff | Trajectory or radial design, $r(D+1)$ evaluations (deduplicated) | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs |
 | Input independence | Assumed | Handled via ANCOVA decomposition | Assumed | Assumed for `backend="pce"`; `backend="hdmr"` + `include_correlative=True` allocates the ANCOVA decomposition (conditional-variance Shapley is future work) | Assumed | Assumed | Assumed | Not assumed | Not assumed | Not assumed | Not assumed (measures total, correlation-inclusive influence) |
 | Input distributions | Uniform + Gaussian | Uniform + Gaussian (via CDF mapping) | Uniform + Gaussian | Uniform + Gaussian (both backends) | Uniform + Gaussian | Uniform + Gaussian (+ truncated Normal) | Uniform + Gaussian (truncated-quantile grid) | Uniform + Gaussian (via CDF mapping) | Uniform + Gaussian (via CDF mapping) | Any (rank-based classes; marginals not used) | Any (rank-based classes; marginals not used) |
+| Categorical inputs | Supported (column swaps on level codes) | Rejected | Rejected | Rejected | Rejected | Rejected | Rejected | Rejected | Supported (one bin per level) | Supported (one class per level) | Supported (one class per level) |
 | Output shapes | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series (both backends) | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series; joint point-cloud modes over outputs/time |
 | What the numbers mean | Exact variance fractions (given enough samples) | Variance fractions from a B-spline surrogate (fit-dependent) | Variance fractions from a polynomial surrogate (fit-dependent) | Exact allocation within the fitted surrogate; depends on fit quality | Exact variance fractions (given enough samples) | Bounds on $S_T$, not exact indices | Screening ranks ($\mu^*$ as $S_T$ proxy), not variance fractions | Dependence measure, not variance fractions | Distributional (KS) distance, not variance fractions | Distributional (L1) distance, not variance fractions | Distributional ($W_2^2$) distance in $[0,1]$, split into mean-shift + shape parts |
 | Second-order indices | Direct estimation from cross-matrices | From interaction component functions | Analytical from coefficients | Not available (interaction variance folded into $\mathrm{Sh}$) | Not available | Not available | Not available | Not available | Not available | Not available | Not available |
@@ -97,9 +99,9 @@ where $\mathbf{X}_{\sim i}$ denotes all inputs except $X_i$. By construction, $S
 
 This is the reference method and jaxgsa's default workflow: exact, model-free variance decomposition with well-understood convergence. Pick it when you can afford a dedicated sampling design and your inputs are independent. jaxgsa uses the Saltelli sampling scheme (Saltelli 2002, 2010), which arranges quasi-random sample matrices so that first-order ($S_1$), total-order ($S_T$), and second-order ($S_2$) indices can all be estimated from a single batch of model evaluations.
 
-### The Pick-Freeze Sampling Scheme
+### The Saltelli Column-Swap Scheme
 
-The method generates two independent $N \times D$ quasi-random sample matrices $\mathbf{A}$ and $\mathbf{B}$ using a Sobol' low-discrepancy sequence (via `scipy.stats.qmc.Sobol`). For each parameter $j$, a cross-matrix $\mathbf{AB}^{(j)}$ is constructed by taking all columns from $\mathbf{A}$ except column $j$, which is replaced by column $j$ from $\mathbf{B}$. This "pick-and-freeze" construction allows conditional expectations to be estimated via sample averages.
+The method generates two independent $N \times D$ quasi-random sample matrices $\mathbf{A}$ and $\mathbf{B}$ using a Sobol' low-discrepancy sequence (via `scipy.stats.qmc.Sobol`). For each parameter $j$, a cross-matrix $\mathbf{AB}^{(j)}$ is constructed by taking all columns from $\mathbf{A}$ except column $j$, which is replaced by column $j$ from $\mathbf{B}$. This column-swap construction allows conditional expectations to be estimated via sample averages.
 
 The cost is $N(D + 2)$ model evaluations for all first-order and total-order indices, or $N(2D + 2)$ when second-order indices are included (`calc_second_order=True`, the default).
 
@@ -305,7 +307,7 @@ Backend-specific keyword arguments are validated: explicitly setting a knob that
 
 ## eFAST (Extended Fourier Amplitude Sensitivity Test)
 
-eFAST computes the same first-order and total-order Sobol indices as the Saltelli workflow, but through a frequency-based decomposition with a simpler sampling design of $N \times D$ evaluations. Pick it when you need $S_1$ and $S_T$ but not second-order indices. Instead of pick-and-freeze matrices, eFAST evaluates the model along sinusoidal search curves in the input space, then applies the discrete Fourier transform to extract variance contributions from the spectral content of the output.
+eFAST computes the same first-order and total-order Sobol indices as the Saltelli workflow, but through a frequency-based decomposition with a simpler sampling design of $N \times D$ evaluations. Pick it when you need $S_1$ and $S_T$ but not second-order indices. Instead of column-swapped sample matrices, eFAST evaluates the model along sinusoidal search curves in the input space, then applies the discrete Fourier transform to extract variance contributions from the spectral content of the output.
 
 ### How it works
 
@@ -644,6 +646,8 @@ Because it is built on CDFs rather than moments, the PAWN index is moment-indepe
 
 The number of bins (`n_bins`, default 10) trades conditioning resolution against sample density per bin; with very few samples per bin the KS statistic becomes noisy, so increase $N$ or decrease `n_bins`.
 
+Categorical inputs are supported. A categorical parameter needs no binning: its level code already names the conditioning class, so PAWN uses one bin per level and `n_bins` does not apply to it. Bins with too few samples yield `NaN` and the median, max, and mean over bins all drop them, so the index is unchanged by the order of the level codes — relabel the levels and you get the same number.
+
 ### Index summary
 
 | Index | Meaning |
@@ -655,6 +659,7 @@ The number of bins (`n_bins`, default 10) trades conditioning resolution against
 - You want a moment-independent index, invariant under monotone output transforms
 - You have existing $(X, Y)$ pairs from any sampling strategy
 - Your inputs may be correlated (no independence assumption or structured design)
+- Some of your inputs are categorical, or your output is discrete — PAWN needs neither an ordering on the inputs nor a density on the output
 
 ### Reference
 
@@ -674,7 +679,7 @@ The index is $0$ when fixing $X_i$ never changes the output distribution, and $1
 
 jaxgsa implements the given-data estimator of Plischke, Borgonovo & Smith (2013):
 
-1. For each input, the samples are ordered by that input's rank and split into $M$ equal-frequency classes. By default $M$ follows the Plischke sample-size heuristic (roughly $N^{2/7}$, at most 48 classes); override it with `n_classes`.
+1. For each input, the samples are ordered by that input's rank and split into $M$ equal-frequency classes. By default $M$ follows the Plischke sample-size heuristic (roughly $N^{2/7}$, at most 48 classes); override it with `n_classes`. Categorical inputs instead get one class per level (`n_classes` does not apply to them), so the index never depends on the arbitrary code order.
 2. The unconditional density $f_Y$ and each class-conditional density $f_{Y \mid X_i \in \mathcal{C}_m}$ are estimated by Gaussian KDE with Silverman bandwidths on a fixed grid of `grid_size` points spanning $[\min Y, \max Y]$.
 3. The L1 distances are integrated with the trapezoid rule and averaged with class weights, giving the plug-in estimate
 
@@ -695,6 +700,12 @@ The estimator matches `SALib.analyze.delta` (same equal-frequency rank partition
 3. `jaxgsa.borgonovo.analyze()` partitions each input into rank classes and computes $\delta$, $S_1$, and their bootstrap intervals in a single JIT-compiled kernel, vmapped over output columns and scanned over bootstrap replicates.
 
 Set `n_bootstrap=0` to skip bias correction and confidence intervals (raw plug-in estimate), or `bias_correct=False` to keep the intervals but report the uncorrected estimate. For large time-series outputs, lower `slice_chunk_size` to bound peak memory, which scales with `slice_chunk_size * D * N * grid_size`.
+
+::: warning Continuous outputs only
+The $\delta$ estimator supports a continuous output distribution only. It compares kernel density estimates on a shared output grid, and a discrete output has atoms that no grid resolves. `borgonovo.analyze` checks the output first and raises `ValueError` when a column takes at most 20 distinct values and those values are fewer than 1% of the samples. Use [optimal transport](#optimal-transport-wasserstein-based-sensitivity) or [PAWN](#pawn-cdf-based-sensitivity) for a discrete output: both compare empirical distributions and need no density. A constant column is exempt, because its exact answer is $\delta = S_1 = 0$. Categorical inputs stay supported. The limit applies to the output only.
+:::
+
+$\delta$ is a half L1 distance between densities, so it lies in $[0, 1]$. If the returned estimate leaves that range by more than 0.05, the computation failed and `analyze` raises `ValueError` naming the parameter and both knobs (`grid_size` and `degenerate_bandwidth`). The value is never clipped, because a clipped value looks plausible and is still wrong. A confidence bound outside the range only warns: the point estimate is the contract, the interval is a diagnostic.
 
 ### Index summary
 
@@ -731,7 +742,7 @@ So the OT index subsumes the variance-based first-order view and quantifies what
 
 ### How it works
 
-1. For each input, samples are split into `n_partitions` equal-frequency classes by the input's rank (default 25). Rank-based conditioning is distribution-free: uniform, Gaussian, or mixed marginals work unchanged, and monotone input transforms change nothing. Correlated inputs are supported — the index then measures total, correlation-inclusive influence.
+1. For each input, samples are split into `n_partitions` equal-frequency classes by the input's rank (default `min(25, N // 2)`). Rank-based conditioning is distribution-free: uniform, Gaussian, or mixed marginals work unchanged, and monotone input transforms change nothing. Correlated inputs are supported — the index then measures total, correlation-inclusive influence. Categorical inputs instead get one class per level (`n_partitions` does not apply to them), so the index never depends on the arbitrary code order.
 2. Per class, $W_2^2$ between the conditional and unconditional output samples is computed. In the default `mode="univariate"` (per output column) this uses the closed form of 1-D optimal transport — both empirical quantile functions evaluated at the $N$ uniform mass points via sorting, no iterative solver. The `"multivariate"` and `"trajectory"` modes treat the output vector as a point cloud and solve entropic transport with a pure-JAX log-domain Sinkhorn solver (regularization `epsilon`, reported cost is the unregularized $\langle P, C\rangle$).
 3. Class results are averaged with class-size weights and divided by $2\,\mathrm{Var}(Y)$ (point-cloud modes: $2\,\mathrm{Tr}\,\mathrm{Cov}(Y)$, with per-column standardization on by default so no output dominates through its units).
 
