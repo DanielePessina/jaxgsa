@@ -1,9 +1,16 @@
 # DGSM (Derivative-based Global Sensitivity Measures)
 
-DGSM computes sensitivity information from the partial derivatives of a
-model, rather than from variance decomposition. For JAX-differentiable models
-the derivatives come cheaply: one reverse-mode autodiff pass (`jax.jacrev`)
-yields all of them per sample.
+By the end of this page you will have, for each input, a range that contains
+its total Sobol index, at the cost of one differentiation pass per sample. The
+total Sobol index `ST` is the share of output variance an input drives on its
+own plus through every interaction it takes part in. Derivative-based global
+sensitivity measures (DGSM) do not compute it. They bracket it from above and
+below, which is often enough to decide which inputs to drop.
+
+DGSM works from the partial derivatives of the model instead of from a variance
+decomposition. For a JAX-differentiable model the derivatives are cheap. One
+reverse-mode automatic differentiation pass (`jax.jacrev`) yields all of them
+per sample.
 
 The key quantities are the second moment of the partial derivative (importance
 measure, nu) and the mean partial derivative (sigma). These yield two-sided
@@ -27,8 +34,8 @@ from jaxgsa import dgsm
 # dgsm.analyze(...)
 ```
 
-Note that `monte_carlo` is in `jaxgsa.sampling`, not in `jaxgsa.dgsm`. It is
-called as `jaxgsa.sampling.monte_carlo()`.
+`monte_carlo` is in `jaxgsa.sampling`, not in `jaxgsa.dgsm`. Call it as
+`jaxgsa.sampling.monte_carlo()`.
 
 ## Key difference from other methods
 
@@ -41,6 +48,12 @@ single-input function. Internally, `jaxgsa.dgsm.analyze` vectorizes the autodiff
 over all N samples.
 
 ## Scalar example (Ishigami)
+
+There are three steps. First write the model as an unbatched function, because
+that is the signature `jax.jacrev` differentiates. Then draw plain Monte Carlo
+samples: DGSM averages over the input distribution and needs no structured
+design. Then call `analyze`, which differentiates the function at every sample
+and reduces the derivatives to the indices.
 
 ```python
 import jax.numpy as jnp
@@ -64,6 +77,18 @@ print("upper_bound:", result.upper_bound)  # (D,) = (3,)
 print("lower_bound:", result.lower_bound)  # (D,) = (3,)
 print("var_y:", result.var_y)          # scalar
 ```
+
+Read the two bounds as a bracket on `ST`, one entry per input. Where
+`upper_bound` for an input is small, that input cannot have a large total
+effect, and you may fix it at a nominal value. Where `lower_bound` is well
+above zero, the input matters and no further argument is needed. An input whose
+bracket is wide is undecided, and Sobol or eFAST will settle it.
+
+`nu` and `sigma` are the raw derivative statistics the bounds are built from,
+and `nu` also serves as an importance ranking on its own. `var_y` is the output
+variance the bounds are expressed as a fraction of. A `var_y` near zero means
+the model barely responds to any input, and the bounds are then ratios of two
+small numbers and are not worth reading.
 
 ## Multi-output example
 
@@ -97,6 +122,12 @@ result = jaxgsa.dgsm.analyze(problem, multi_output_fn, jnp.asarray(X))
 print("nu shape:", result.nu.shape)            # (K, D) = (2, 3)
 print("upper_bound shape:", result.upper_bound.shape)  # (K, D) = (2, 3)
 ```
+
+Row 0 of each array belongs to `output_a` and row 1 to `output_b`, in the order
+`output_names` declares. Here `x3` enters only `b`, so its bounds for
+`output_a` are zero while its bounds for `output_b` are not. Every output gets
+an independent bracket, and an input you may fix for one output may still
+matter for another.
 
 ## xarray export
 

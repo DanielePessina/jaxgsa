@@ -1,17 +1,17 @@
-"""Morris elementary-effects sampling (trajectory and radial designs).
+"""Morris design generation for the trajectory and radial schemes.
 
-Follows the same two-layer contract as :mod:`jaxgsa.sampling`:
+This module follows the same two-layer contract as :mod:`jaxgsa.sampling`:
 
-1. ``sample()`` returns only the unique rows that a user should evaluate.
-2. ``MorrisSamples`` carries enough metadata to reconstruct the full
-   expanded design and to locate each elementary effect inside it.
+1. :func:`sample` returns only the unique rows that a user should evaluate.
+2. :class:`MorrisSamples` carries enough metadata to rebuild the full expanded
+   design and to locate each elementary effect inside it.
 
-Both designs cost ``n_trajectories * (D + 1)`` expanded rows. Trajectory
-points live on a coarse ``num_levels`` grid, so exact duplicate rows across
-trajectories are common in low dimensions and deduplication saves real model
-evaluations. Every elementary effect is described by a pair of expanded-row
-indices plus a signed unit-cube step, so the analysis reduces to one
-gather-subtract-divide regardless of the design.
+Both designs cost ``n_trajectories * (D + 1)`` expanded rows. Trajectory points
+live on a coarse ``num_levels`` grid. Exact duplicate rows across trajectories
+are therefore common in low dimensions, and deduplication saves real model
+evaluations. A pair of expanded-row indices plus a signed unit-cube step
+describes every elementary effect, so the analysis reduces to one
+gather-subtract-divide whichever design produced the points.
 
 References:
     Morris (1991). Technometrics 33(2):161-174.
@@ -39,21 +39,21 @@ from jaxgsa._core.sampling import (
 from jaxgsa._core.validation import _raise_categorical_design, _raise_correlated_design
 from jaxgsa.problem import Problem
 
-# Offset between the Sobol' draws used for radial base points (a) and
-# auxiliary points (b). Reusing draw i for both would give delta = 0;
+# Offset between the Sobol' draws used for the radial base points (a) and the
+# auxiliary points (b). Reusing draw i for both would give delta = 0.
 # Campolongo et al. (2011) recommend a shift of 4 positions.
 _RADIAL_SHIFT = 4
 
 
 def _min_radial_delta() -> float:
-    """Smallest |delta| a radial step may have before it is unmeasurable.
+    """Return the smallest |delta| a radial step may have to stay measurable.
 
-    A radial elementary effect is ``(f(a with b_i) - f(a)) / (b_i - a_i)``. If
-    ``|b_i - a_i|`` is near the floating-point resolution the model actually
-    runs at, the two evaluation rows round to the same value and the effect
-    degenerates to ``0`` or amplified rounding noise. JAX defaults to float32
-    (float64 only when x64 is enabled), so the guard tracks the JAX default
-    dtype rather than the float64 design array.
+    A radial elementary effect is ``(f(a with b_i) - f(a)) / (b_i - a_i)``.
+    Suppose ``|b_i - a_i|`` sits near the floating-point resolution the model
+    actually runs at. The two evaluation rows then round to the same value, and
+    the effect degenerates to ``0`` or to amplified rounding noise. JAX
+    defaults to float32, and uses float64 only when x64 is enabled, so the
+    guard tracks the JAX default dtype rather than the float64 design array.
 
     Returns:
         ``10 * eps`` of the JAX default floating dtype.
@@ -65,10 +65,10 @@ def _min_radial_delta() -> float:
 class MorrisSamples(UniqueDesignSamples):
     """Unique Morris samples plus metadata to locate elementary effects.
 
-    Note the two row counts: ``n_runs`` is the number of *unique* rows you
-    must evaluate (one model run per row), while ``n_expanded`` is the
-    (larger or equal) pre-deduplication size of the full Morris design that
-    the analysis reconstructs internally.
+    The class carries two row counts. ``n_runs`` is the number of unique rows
+    you must evaluate, one model run per row. ``n_expanded`` is the size of the
+    full Morris design before deduplication, which the analysis rebuilds
+    internally. ``n_expanded`` is greater than or equal to ``n_runs``.
 
     Attributes:
         samples: Unique rows to evaluate with the user's model, shape
@@ -81,17 +81,18 @@ class MorrisSamples(UniqueDesignSamples):
         num_levels: Grid levels ``p`` used by the trajectory design
             (unused by the radial design).
         method: Design generator, ``"trajectory"`` or ``"radial"``.
-        ee_idx_after: ``(r, D)`` expanded-row index of the perturbed point of
-            the elementary effect for each trajectory and parameter.
-        ee_idx_before: ``(r, D)`` expanded-row index of the reference point of
-            each elementary effect.
-        ee_delta: ``(r, D)`` signed unit-cube step of each elementary effect,
-            so that ``EE = (Y[after] - Y[before]) / delta``.
+        ee_idx_after: Expanded-row index of the perturbed point of each
+            elementary effect, shape ``(r, D)``, one entry per trajectory and
+            parameter.
+        ee_idx_before: Expanded-row index of the reference point of each
+            elementary effect, shape ``(r, D)``.
+        ee_delta: Signed unit-cube step of each elementary effect, shape
+            ``(r, D)``, so that ``EE = (Y[after] - Y[before]) / delta``.
         n_params: Number of problem dimensions ``D``.
         problem: Problem definition used to transform the samples.
         n_blocks_dropped: Number of blocks that the design lost at
-            construction, because their step was not measurable. This is 0
-            for a design that ``jaxgsa.morris.sample()`` built. It can be
+            construction because their step was not measurable. This is 0 for
+            a design that :func:`jaxgsa.morris.sample` built. It can be
             positive only for a design derived from another method, such as
             :meth:`jaxgsa.sobol.SobolSamples.to_morris`. The analysis reports
             the loss, because the user did not ask for a smaller design.
@@ -123,26 +124,26 @@ class MorrisSamples(UniqueDesignSamples):
     ) -> MorrisSamples | tuple[MorrisSamples, np.ndarray]:
         """Return a smaller result by prefix-slicing to fewer trajectories.
 
-        Trajectories are generated sequentially from independent draws
-        (trajectory design) or from prefix-nested Sobol' points (radial
-        design), so the first *m* trajectories of an *r*-trajectory run are
-        identical to drawing *m* trajectories directly with the same integer
-        seed. Simulate once at the largest ``n_trajectories`` and slice down —
-        no re-simulation needed. (This holds for an ``int`` or ``None`` seed; a
-        reused ``np.random.Generator`` advances its state between calls and so
-        is not prefix-nested.)
+        The generators build trajectories in sequence, from independent draws
+        in the trajectory design and from prefix-nested Sobol' points in the
+        radial design. The first m trajectories of an r-trajectory run are
+        therefore identical to drawing m trajectories directly with the same
+        integer seed. Simulate once at the largest ``n_trajectories`` and slice
+        down, with no re-simulation. This holds for an ``int`` or ``None``
+        seed. A reused ``np.random.Generator`` advances its state between
+        calls, so it is not prefix-nested.
 
-        Optionally pass ``Y`` (model outputs aligned with ``samples``) to get
-        the corresponding output slice back.
+        Pass ``Y``, the model outputs aligned with ``samples``, to get the
+        matching output slice back as well.
 
         Args:
-            n_trajectories: Target trajectory count (``2 <= m <= r``).
-            Y: Model outputs with shape ``(n_runs, ...)``. When provided,
-                the matching prefix is returned alongside the new result.
+            n_trajectories: Target trajectory count, ``2 <= m <= r``.
+            Y: Model outputs, shape ``(n_runs, ...)``. When given, the method
+                returns the matching prefix alongside the new result.
 
         Returns:
-            ``MorrisSamples`` when called without ``Y``, or
-            ``(MorrisSamples, Y_small)`` when ``Y`` is provided.
+            A :class:`MorrisSamples` when called without ``Y``, or
+            ``(MorrisSamples, Y_small)`` when ``Y`` is given.
 
         Raises:
             ValueError: If ``n_trajectories`` is out of range or ``Y`` has
@@ -174,7 +175,7 @@ class MorrisSamples(UniqueDesignSamples):
             ee_delta=self.ee_delta[:n_trajectories].copy(),
             n_params=self.n_params,
             problem=self.problem,
-            # The earlier loss stays part of this design's history. The new,
+            # The earlier loss stays part of this design's history. The new
             # smaller size is deliberate, but the dropped blocks are not.
             n_blocks_dropped=self.n_blocks_dropped,
         )
@@ -211,7 +212,7 @@ class MorrisSamples(UniqueDesignSamples):
         arrays: Mapping[str, np.ndarray],
         meta: Mapping[str, Any],
     ) -> MorrisSamples:
-        """Rebuild a ``MorrisSamples`` from a loaded NPZ payload."""
+        """Rebuild a :class:`MorrisSamples` from a loaded NPZ payload."""
         method = meta["method"]
         if method not in ("trajectory", "radial"):
             raise ValueError(f"method must be 'trajectory' or 'radial', got {method!r}")
@@ -238,28 +239,30 @@ def _radial_samples_from_blocks(
     block_rows: np.ndarray,
     problem: Problem,
 ) -> MorrisSamples:
-    """Assemble a radial ``MorrisSamples`` from an already-evaluated design.
+    """Assemble a radial :class:`MorrisSamples` from an evaluated design.
 
-    Generic over where the points came from: the caller supplies the unique
-    sample matrix plus, for each radial block, the row index of the block's
-    base point followed by the ``D`` points perturbed in one parameter each.
-    This lets a design built for another method be reinterpreted as a Morris
-    design at zero extra model cost — see
+    The function does not care where the points came from. The caller supplies
+    the unique sample matrix, plus, for each radial block, the row index of the
+    block's base point followed by the ``D`` points that each perturb one
+    parameter. A design built for another method can therefore be reread as a
+    Morris design at zero extra model cost. See
     :meth:`jaxgsa.sobol.SobolSamples.to_morris`.
 
-    ``samples`` is passed through unchanged, so outputs already computed for it
-    stay aligned and no re-evaluation is needed.
+    ``samples`` passes through unchanged, so outputs already computed for it
+    stay aligned and need no re-evaluation.
 
     Args:
         samples: Unique rows already evaluated, shape ``(n_runs, D)``, in the
             problem's physical units.
-        block_rows: ``(n_blocks, D + 1)`` integer indices into ``samples``.
-            Column 0 is the block's base point; column ``1 + j`` is the point
-            differing from it only in parameter ``j``.
+        block_rows: Integer indices into ``samples``, shape
+            ``(n_blocks, D + 1)``. Column 0 is the block's base point. Column
+            ``1 + j`` is the point that differs from it in parameter ``j``
+            only.
         problem: Problem definition the samples were drawn for.
 
     Returns:
-        A radial ``MorrisSamples`` ready for :func:`jaxgsa.morris.analyze`.
+        A radial :class:`MorrisSamples` ready for
+        :func:`jaxgsa.morris.analyze`.
 
     Raises:
         ValueError: If fewer than two blocks are left with a measurable step.
@@ -276,7 +279,7 @@ def _radial_samples_from_blocks(
     param_idx = np.arange(D)
     # Read each step off the coordinate that actually differs between the base
     # row and the row perturbed in that parameter. This needs no knowledge of
-    # the source layout, and it collapses to exactly 0 when deduplication has
+    # the source layout. It collapses to exactly 0 when deduplication has
     # merged the two rows.
     base_unit = samples_unit[block_rows[:, 0][:, None], param_idx]
     after_unit = samples_unit[block_rows[:, 1:], param_idx]
@@ -305,16 +308,16 @@ def _radial_samples_from_blocks(
             "Morris measures need at least 2"
         )
 
-    # Block b occupies expanded rows [b*(D+1), (b+1)*(D+1)): base point first,
-    # then the D perturbed points in parameter order. That is exactly the row
-    # order of block_rows, so flattening it gives the expansion map directly.
+    # Block b occupies expanded rows [b*(D+1), (b+1)*(D+1)): the base point
+    # first, then the D perturbed points in parameter order. That is exactly
+    # the row order of block_rows, so flattening it gives the expansion map.
     offsets = (np.arange(n_blocks) * (D + 1)).astype(np.int64)
     return MorrisSamples(
         samples=samples,
         n_expanded=n_blocks * (D + 1),
         expanded_to_unique=np.ascontiguousarray(block_rows, dtype=np.int64).reshape(-1),
         n_trajectories=n_blocks,
-        # Unused by the radial design; held at the sample() default.
+        # Unused by the radial design, so hold it at the sample() default.
         num_levels=4,
         method="radial",
         ee_idx_after=offsets[:, None] + 1 + param_idx.astype(np.int64),
@@ -334,26 +337,27 @@ def _build_trajectories(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Generate Morris trajectories on the ``num_levels`` grid.
 
-    Points are constructed on an integer half-level grid (units of
-    ``1 / (2 * (p - 1))``, where the Morris step ``delta = p / (2 * (p - 1))``
-    is exactly ``p`` half-levels). Converting to float once at the end makes
-    equal grid points bitwise identical across trajectories, which is what
-    lets exact deduplication collapse them.
+    The function builds the points on an integer half-level grid, in units of
+    ``1 / (2 * (p - 1))``. The Morris step ``delta = p / (2 * (p - 1))`` is
+    exactly ``p`` half-levels there. Converting to float once at the end makes
+    equal grid points bitwise identical across trajectories, which is what lets
+    exact deduplication collapse them.
 
-    Randomness is consumed strictly per trajectory so that the first *m*
-    trajectories of an *r*-trajectory draw match a direct *m*-trajectory draw.
+    The function consumes randomness strictly per trajectory. The first m
+    trajectories of an r-trajectory draw therefore match a direct m-trajectory
+    draw.
 
     Returns:
-        ``(expanded_unit, ee_idx_after, ee_idx_before, ee_delta)`` where
-        ``expanded_unit`` has shape ``(r * (D + 1), D)`` in the unit cube and
-        the bookkeeping arrays have shape ``(r, D)``.
+        ``(expanded_unit, ee_idx_after, ee_idx_before, ee_delta)``.
+        ``expanded_unit`` holds unit-cube points of shape ``(r * (D + 1), D)``,
+        and the three bookkeeping arrays have shape ``(r, D)``.
     """
     D = n_params
     p = num_levels
     # delta = p / (2(p-1)) expressed in half-level units of 1/(2(p-1)).
     delta_int = p
     delta = p / (2.0 * (p - 1))
-    # Base levels l/(p-1) must leave room for a +delta step: l <= p/2 - 1.
+    # A base level l/(p-1) must leave room for a +delta step: l <= p/2 - 1.
     n_start_levels = p // 2
 
     levels_int = np.empty((n_trajectories * (D + 1), D), dtype=np.int64)
@@ -392,14 +396,14 @@ def _build_radial(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Generate radial star designs from scrambled-Sobol' point pairs.
 
-    Each trajectory uses a base point ``a`` and an auxiliary point ``b`` drawn
-    from a ``2D``-dimensional Sobol' sequence (``b`` shifted ``_RADIAL_SHIFT``
-    draws ahead). Star row *i* swaps coordinate *i* of ``a`` with ``b_i``, so
-    every elementary effect compares a star row against the shared base row
-    with per-step delta ``b_i - a_i``.
+    Each trajectory uses a base point ``a`` and an auxiliary point ``b``, both
+    drawn from a ``2D``-dimensional Sobol' sequence. ``b`` is shifted
+    ``_RADIAL_SHIFT`` draws ahead of ``a``. Star row i swaps coordinate i of
+    ``a`` with ``b_i``. Every elementary effect therefore compares one star row
+    against the shared base row, with the per-step delta ``b_i - a_i``.
 
     Returns:
-        Same tuple layout as :func:`_build_trajectories`.
+        The same tuple layout as :func:`_build_trajectories`.
 
     Raises:
         ValueError: If any ``|delta|`` falls below the working float-precision
@@ -408,8 +412,8 @@ def _build_radial(
     D = n_params
     r = n_trajectories
     sampler = Sobol(d=2 * D, scramble=scramble, seed=seed)
-    # Draw a power-of-2 count (scipy warns otherwise) and slice; Sobol'
-    # prefixes are bit-identical, so the extra rows change nothing.
+    # Draw a power-of-2 count, which scipy warns about otherwise, and slice.
+    # Sobol' prefixes are bit-identical, so the extra rows change nothing.
     draws = sampler.random(_next_power_of_2(r + _RADIAL_SHIFT))
     a = draws[:r, :D]
     b = draws[_RADIAL_SHIFT : r + _RADIAL_SHIFT, D:]
@@ -426,9 +430,9 @@ def _build_radial(
             "Use scramble=True or a different seed."
         )
 
-    # Star block j: row 0 is the base point a[j]; row 1+i is a[j] with only
-    # coordinate i swapped to b[j, i]. No randomness is consumed here, so the
-    # whole design is three vectorized assignments.
+    # Star block j: row 0 is the base point a[j], and row 1+i is a[j] with
+    # coordinate i alone swapped to b[j, i]. This consumes no randomness, so
+    # the whole design is three vectorized assignments.
     block = np.repeat(a[:, None, :], D + 1, axis=1)  # (r, D+1, D)
     diag = np.arange(D)
     block[:, 1 + diag, diag] = b  # swap coordinate i of star row 1+i
@@ -450,28 +454,28 @@ def _squash_open_sides(
     """Pull the design away from the unit-cube faces on open marginal sides.
 
     A Morris design touches the unit-cube boundaries exactly, and an unbounded
-    inverse CDF maps 0 and 1 to -inf and +inf. Every side of a marginal whose
-    support is *open* is therefore pulled in by the tail probability ``q``, so
-    the transform stays finite.
+    inverse CDF maps 0 and 1 to -inf and +inf. The function therefore pulls in
+    every side of a marginal whose support is open by the tail probability
+    ``q``, which keeps the transform finite.
 
     Only genuinely open sides move. Uniform and categorical marginals are
-    bounded, so they never move. A Gaussian marginal with an explicit
-    ``low`` is bounded below, and
-    one with an explicit ``high`` is bounded above, so a two-sided truncated
-    Gaussian gets no squash at all — truncating it again would silently narrow
-    the input model the user declared.
+    bounded, so they never move. A Gaussian marginal with an explicit ``low``
+    is bounded below, and one with an explicit ``high`` is bounded above. A
+    two-sided truncated Gaussian therefore gets no squash at all. Truncating it
+    again would silently narrow the input model the user declared.
 
-    The squash is an affine map on each dimension, so it also rescales the
-    step that each elementary effect actually takes. ``ee_delta`` is multiplied
-    by the same per-dimension factor, keeping the divisor equal to the
-    coordinate difference the design really uses.
+    The squash is an affine map on each dimension, so it also rescales the step
+    that each elementary effect actually takes. The function multiplies
+    ``ee_delta`` by the same per-dimension factor. That keeps the divisor equal
+    to the coordinate difference the design really uses.
 
-    Both arrays are modified in place. The map is deterministic, so exact
-    deduplication and prefix-nested downsampling are unaffected.
+    The function modifies both arrays in place. The map is deterministic, so it
+    leaves exact deduplication and prefix-nested downsampling unaffected.
 
     Args:
-        expanded_unit: ``(r * (D + 1), D)`` unit-cube design, modified in place.
-        ee_delta: ``(r, D)`` signed unit-cube steps, modified in place.
+        expanded_unit: Unit-cube design, shape ``(r * (D + 1), D)``, modified
+            in place.
+        ee_delta: Signed unit-cube steps, shape ``(r, D)``, modified in place.
         problem: Problem definition whose marginals decide which sides are open.
         truncation_quantile: Tail probability ``q`` removed from each open side.
     """
@@ -487,7 +491,7 @@ def _squash_open_sides(
         lo_target = 0.0 if low is not None else q
         hi_target = 1.0 if high is not None else 1.0 - q
         scale = hi_target - lo_target
-        if scale == 1.0:  # both sides already bounded — nothing to squash
+        if scale == 1.0:  # both sides already bounded, so nothing to squash
             continue
         expanded_unit[:, idx] = lo_target + expanded_unit[:, idx] * scale
         ee_delta[:, idx] *= scale
@@ -527,82 +531,81 @@ def sample(
 ) -> MorrisSamples:
     """Generate unique Morris elementary-effects samples for model evaluation.
 
-    Morris screening ranks inputs by one-at-a-time finite differences
-    (elementary effects) spread across the whole input domain — the usual
-    first step for weeding out unimportant parameters before a more
-    expensive variance-based analysis. Each trajectory perturbs every
-    parameter exactly once, so the full design costs
-    ``n_trajectories * (D + 1)`` model evaluations at most.
+    Morris screening ranks parameters by one-at-a-time finite differences,
+    called elementary effects, spread across the whole input domain. It is the
+    usual first step for weeding out unimportant parameters before a more
+    expensive variance-based analysis. Each trajectory perturbs every parameter
+    exactly once, so the full design costs at most
+    ``n_trajectories * (D + 1)`` model evaluations.
 
     This function builds those ``n_trajectories`` paths of ``D + 1`` points
-    each, removes exact duplicate rows while preserving first-occurrence
+    each. It removes exact duplicate rows while it keeps first-occurrence
     order, and returns only the unique rows for the user to evaluate.
-    :func:`jaxgsa.morris.analyze` reconstructs the expanded layout internally.
+    :func:`jaxgsa.morris.analyze` rebuilds the expanded layout internally.
 
     Gaussian marginals are supported through a truncated-quantile grid. The
     Morris design touches the unit-cube boundaries, and an unbounded inverse
-    CDF maps 0 and 1 to infinity. Each *open* side of a Gaussian marginal is
-    therefore pulled in by ``q = truncation_quantile`` before the transform.
-    A side that the problem already bounds with an explicit ``low`` or
-    ``high`` is left alone, so a two-sided truncated Gaussian is sampled
-    exactly as declared. Elementary effects use the step the design really
-    takes, so the squash does not bias them.
-    :meth:`MorrisResult.to_physical_units` is unavailable for Gaussian
-    problems because the transform is nonlinear.
+    CDF maps 0 and 1 to infinity. Each open side of a Gaussian marginal is
+    therefore pulled in by ``q = truncation_quantile`` before the transform. A
+    side that the problem already bounds with an explicit ``low`` or ``high``
+    is left alone, so a two-sided truncated Gaussian is sampled exactly as
+    declared. Elementary effects use the step the design really takes, so the
+    squash does not bias them. :meth:`MorrisResult.to_physical_units` is
+    unavailable for Gaussian problems because the transform is nonlinear.
 
-    On an unbounded marginal ``mu_star`` has no ``q -> 0`` limit: the design
-    always includes unit levels 0 and 1 exactly, so a smaller ``q`` always
-    reaches further into the tail and the elementary effects grow with it.
-    ``mu_star`` magnitudes are therefore scale-dependent by construction on
-    an unbounded marginal, and only *rankings* are comparable across
-    truncation settings. Use :meth:`jaxgsa.Problem.from_dict` with
-    ``truncate_gaussians`` if you want one bounded input model that every
-    method shares.
+    On an unbounded marginal ``mu_star`` has no ``q -> 0`` limit. The design
+    always includes unit levels 0 and 1 exactly. A smaller ``q`` therefore
+    always reaches further into the tail, and the elementary effects grow with
+    it. ``mu_star`` magnitudes are scale-dependent by construction on an
+    unbounded marginal, so only rankings are comparable across truncation
+    settings. Use :meth:`jaxgsa.Problem.from_dict` with ``truncate_gaussians``
+    if you want one bounded input model that every method shares.
 
     Args:
         problem: Problem definition with uniform and/or Gaussian marginals.
-        n_trajectories: Number of trajectories r (>= 2). Each contributes one
-            elementary effect per parameter, so r is the sample size behind
-            every screening measure: more trajectories tighten the mu_star
-            ranking (and any bootstrap CIs) at proportionally more model
+        n_trajectories: Number of trajectories r (>= 2). Each one contributes
+            one elementary effect per parameter, so r is the sample size behind
+            every screening measure. More trajectories tighten the mu_star
+            ranking and any bootstrap intervals, at proportionally more model
             evaluations. Typical screening uses 10-50.
         num_levels: Grid levels ``p`` for the trajectory design (default 4,
-            step ``delta = p / (2 * (p - 1))``). Even values make all levels
-            equally probable; odd values trigger a warning. Ignored by the
-            radial design.
-        method: ``"trajectory"`` (Morris 1991 grid walks, default) or
-            ``"radial"`` (Campolongo 2011 star designs around scrambled-Sobol'
-            base points). The radial design spreads points quasi-randomly
-            instead of on a coarse grid and has no ``num_levels`` to choose,
-            at the cost of fewer duplicate rows to deduplicate.
-        scramble: Whether to Owen-scramble the Sobol' sequence (radial design
-            only).
-        seed: Random seed or generator for reproducibility. Pass an ``int``
-            (or ``None``) to keep the prefix-nesting guarantee of
-            :meth:`MorrisSamples.downsample`; a reused
-            ``np.random.Generator`` advances its state between calls and breaks
-            that nesting.
-        truncation_quantile: Tail probability ``q`` removed from each *open*
-            side of every Gaussian marginal's grid (default 1e-4, probing the
+            step ``delta = p / (2 * (p - 1))``). An even value makes all levels
+            equally probable. An odd value triggers a warning. The radial
+            design ignores this argument.
+        method: ``"trajectory"`` for Morris 1991 grid walks (default), or
+            ``"radial"`` for Campolongo 2011 star designs around
+            scrambled-Sobol' base points. The radial design spreads points
+            quasi-randomly instead of on a coarse grid, and it has no
+            ``num_levels`` to choose. In exchange it leaves fewer duplicate
+            rows to deduplicate.
+        scramble: Whether to Owen-scramble the Sobol' sequence. Radial design
+            only.
+        seed: Random seed or generator for reproducibility. Pass an ``int`` or
+            ``None`` to keep the prefix-nesting guarantee of
+            :meth:`MorrisSamples.downsample`. A reused ``np.random.Generator``
+            advances its state between calls, which breaks that nesting.
+        truncation_quantile: Tail probability ``q`` removed from each open side
+            of every Gaussian marginal's grid (default 1e-4, probing the
             0.01%-99.99% quantile range). At this default the grid drops 0.29%
-            of the marginal variance and 5.0% of its fourth moment; the former
-            default of 5e-3 dropped 7.5% and 24% and visibly perturbed
+            of the marginal variance and 5.0% of its fourth moment. The former
+            default of 5e-3 dropped 7.5% and 24%, and it visibly perturbed
             rankings. Sides that the marginal already bounds with ``low`` or
             ``high`` are not squashed. Ignored for uniform marginals.
-        verbose: If ``True`` (default), print a short summary including how
+        verbose: If ``True`` (default), print a short summary that includes how
             many duplicate rows were removed.
 
     Returns:
-        MorrisSamples with a unique sample matrix plus elementary-effect
-        bookkeeping for later analysis.
+        A :class:`MorrisSamples` with a unique sample matrix plus
+        elementary-effect bookkeeping for the later analysis.
 
     Raises:
         ValueError: If ``n_trajectories``, ``num_levels``, ``method``, or
-            ``truncation_quantile`` are invalid, ``problem.correlation``
-            declares a dependence structure (the one-at-a-time design assumes
-            independent inputs), or ``problem`` has categorical parameters
-            (the design steps each input along a grid, which has no meaning
-            for unordered level codes).
+            ``truncation_quantile`` is invalid. It also raises when
+            ``problem.correlation`` declares a dependence structure, because
+            the one-at-a-time design assumes independent inputs. It raises
+            again when ``problem`` has categorical parameters, because the
+            design steps each parameter along a grid and a grid has no meaning
+            for unordered level codes.
     """
     _raise_correlated_design(problem, "jaxgsa.morris.sample")
     _raise_categorical_design(problem, "jaxgsa.morris.sample")

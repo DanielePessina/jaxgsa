@@ -1,15 +1,15 @@
 """Shared template for surrogate-backed results (PCE, HDMR).
 
-Both surrogate results expose the same two capabilities: batched forward
-prediction at new inputs and analytical Shapley effects read off the fitted
+Both surrogate results expose the same two capabilities. They predict at new
+inputs in batches, and they read analytical Shapley effects off the fitted
 variance decomposition. :class:`SurrogateResult` implements the prediction
-plumbing once as a template method -- validate ``X``, size the row batches
-against a transient-memory budget, run a subclass-supplied kernel -- and
-declares the ``shapley`` contract that each subclass fulfils with its own
+plumbing once, as a template method: validate ``X``, size the row batches
+against a transient-memory budget, then run a subclass-supplied kernel. It
+also declares the ``shapley`` contract that each subclass fulfils with its own
 decomposition.
 
-Nothing here is public API (promote-later policy): ``SurrogateResult`` is not
-exported from ``jaxgsa`` and user code should type against ``PCEResult`` /
+Nothing here is public API (promote-later policy). ``SurrogateResult`` is not
+exported from ``jaxgsa``, and user code must type against ``PCEResult`` or
 ``HDMRResult`` directly.
 """
 
@@ -45,9 +45,9 @@ class _PredictPlan(NamedTuple):
             row (basis tensors plus contraction intermediates), used to
             derive the automatic batch size.
         kernel: Row-independent function mapping an ``(n, D)`` batch of the
-            prepared inputs to its ``(n, ...)`` predictions **on the original
-            output scale** -- any output standardization applied during
-            fitting must be inverted inside the kernel.
+            prepared inputs to its ``(n, ...)`` predictions on the original
+            output scale. Any output standardization applied during fitting
+            must be inverted inside the kernel.
     """
 
     X: Array
@@ -58,10 +58,11 @@ class _PredictPlan(NamedTuple):
 class SurrogateResult(ABC):
     """Base class for results that carry a reusable fitted surrogate.
 
-    Subclasses provide :meth:`_predict_plan` (input transform, per-row memory
-    estimate, and prediction kernel) and :meth:`shapley` (their variance
-    decomposition, finished by the shared Shapley pipeline in
-    ``jaxgsa.shapley._analyze``); :meth:`predict` is implemented once here.
+    Subclasses provide two methods. :meth:`_predict_plan` supplies the input
+    transform, the per-row memory estimate, and the prediction kernel.
+    :meth:`shapley` supplies the variance decomposition, which the shared
+    Shapley pipeline in ``jaxgsa.shapley._analyze`` then finishes.
+    :meth:`predict` is implemented once here.
     """
 
     problem: Problem
@@ -70,7 +71,7 @@ class SurrogateResult(ABC):
         """Predict outputs at new input rows using the fitted surrogate.
 
         Rebuilds the surrogate's basis at ``X`` and applies the fitted
-        coefficients -- no model evaluations are needed. Accuracy degrades
+        coefficients, so no model evaluations are needed. Accuracy degrades
         outside the input region the surrogate was fitted on.
 
         Args:

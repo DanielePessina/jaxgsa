@@ -1,15 +1,29 @@
 # Morris (Elementary Effects Screening)
 
-Morris is a global screening method: a globalized one-at-a-time design
-that measures coarse finite-difference "elementary effects" of each input at
-many locations across the whole input domain. It reduces them to three cheap
-measures — mu (mean effect), mu_star (mean absolute effect, the headline
-importance measure), and sigma (spread, flagging nonlinearity or
-interactions) — at a cost of only `r * (D + 1)` model evaluations.
+This page screens a model's inputs with the Morris method. You end with three
+arrays, one entry per input, that rank the inputs by importance and flag which
+of them behave nonlinearly or interact with each other.
+
+Morris is a global screening method. Screening means it sorts the inputs into
+"worth studying" and "safe to fix" instead of quantifying each one exactly. The
+design is a globalized one-at-a-time scheme: it changes one input at a time,
+but it repeats that from many starting locations across the whole input domain.
+Each single change gives an elementary effect, a coarse finite difference of the
+output with respect to that input. Morris reduces the collected elementary
+effects to three cheap measures:
+
+- mu — the mean effect.
+- mu_star — the mean absolute effect, the headline importance measure.
+- sigma — the spread, which flags nonlinearity or interactions.
+
+The cost is only `r * (D + 1)` model evaluations, where r is the number of
+trajectories and D the number of inputs.
 
 When to use Morris:
 
-- You want a cheap screening pass before committing to a full Sobol run.
+- You want a cheap screening pass before committing to a full Sobol run. A
+  Sobol run splits the output variance among the inputs and costs far more
+  model evaluations.
 - Your model is a black box (if it is JAX-differentiable, consider DGSM,
   which computes the infinitesimal-step analog of mu_star via autodiff).
 - You only need a parameter ranking and an interaction flag, not exact
@@ -30,6 +44,20 @@ from jaxgsa import morris
 ```
 
 ## Scalar example (Ishigami)
+
+Ishigami is a standard three-input test function whose behaviour is known in
+advance, so you can check the measures against the right answer. Morris is a
+structured method: it builds its own design, so the sampling step and the
+analysis step must use the same `MorrisSamples` object.
+
+1. Build the design with `morris.sample`. It lays out r trajectories of D+1
+   points, where consecutive points differ in exactly one input.
+2. Read `n_runs` and `n_expanded`. `sample` returns only the unique rows, so
+   you pay for fewer evaluations than the full layout implies.
+3. Run the model on the unique rows. Evaluating the duplicates again would
+   cost more and change nothing.
+4. Call `morris.analyze` with the design and the outputs. It rebuilds the
+   trajectory layout internally and forms the three measures.
 
 ```python
 import jax.numpy as jnp
@@ -54,6 +82,12 @@ print("mu_star:", result.mu_star)  # (D,) mean |elementary effect| — importanc
 print("sigma:", result.sigma)      # (D,) spread — nonlinearity/interactions
 ```
 
+`n_expanded` prints 200, which is the full 50 x (3 + 1) layout. `n_runs` is the
+number of rows you actually evaluate, and it is at most 200; the gap is the
+duplicate points that the grid design produced more than once. The three
+measures each have length 3, one entry per input, in the order the parameters
+appear in `PROBLEM`.
+
 Interpreting the measures:
 
 - **mu_star** ranks the parameters. For Ishigami all three inputs come out
@@ -72,8 +106,10 @@ Interpreting the measures:
   effects — compare mu with mu_star for x2 and x3 in this example. Rank with
   mu_star, not mu.
 
-Bootstrap confidence intervals over trajectories are available via
-`num_resamples` (a JAX PRNG key is required):
+A bootstrap resamples the trajectories many times and recomputes the measures
+on each resample. The spread of those values becomes a confidence interval,
+which tells you whether two inputs are really ranked apart or only separated by
+sampling noise. Ask for it with `num_resamples` (a JAX PRNG key is required):
 
 ```python
 import jax
@@ -82,12 +118,18 @@ result = jaxgsa.morris.analyze(sr, Y, num_resamples=500, key=jax.random.key(0))
 print(result.mu_star_conf)  # (2, D) — [lower, upper] bounds
 ```
 
+`mu_star_conf` has shape `(2, 3)`: row 0 holds the lower bound of each input's
+mu_star and row 1 the upper bound. Two inputs whose intervals overlap are not
+separated by this run.
+
 ## Radial variant
 
-The default `method="trajectory"` walks a `num_levels` grid (Morris 1991).
-The alternative `method="radial"` (Campolongo et al. 2011) builds star
-designs around scrambled-Sobol' base points, so the steps vary in size and
-no grid is involved:
+The default `method="trajectory"` walks a `num_levels` grid (Morris 1991). The
+alternative `method="radial"` (Campolongo et al. 2011) builds star designs
+around scrambled-Sobol' base points. A star design moves out from one base
+point along each input in turn, and the base points come from a
+low-discrepancy Sobol' sequence with a random scramble applied. The steps
+therefore vary in size and no grid is involved:
 
 ```python
 sr_radial = jaxgsa.morris.sample(PROBLEM, n_trajectories=50, method="radial", seed=42)
@@ -96,17 +138,21 @@ result_radial = jaxgsa.morris.analyze(sr_radial, Y_radial)
 print("mu_star (radial):", result_radial.mu_star)
 ```
 
-`num_levels` is ignored by the radial design. Radial points do not lie on a
-coarse grid, so fewer duplicate rows are removed than with the trajectory
-design.
+The printed array has the same length and meaning as the trajectory mu_star
+above, and you read the ranking the same way. The numbers themselves differ,
+because the two designs take different step sizes. `num_levels` is ignored by
+the radial design. Radial points do not lie on a coarse grid, so fewer
+duplicate rows are removed than with the trajectory design.
 
 ## From an existing Sobol design
 
-If you have already run a Sobol analysis, you can get Morris measures out of
-it for free. A Saltelli design already contains the radial structure Morris
-needs — within each base point, `A` and each `AB_j` differ in exactly one
-parameter — so `SobolSamples.to_morris()` reinterprets the design without any
-new model evaluations:
+If you have already run a Sobol analysis, you can get Morris measures out of it
+for free. A Saltelli design is the point layout a Sobol analysis uses: two
+independent sample matrices `A` and `B`, plus one matrix `AB_j` per input, in
+which column j of `A` is replaced by column j of `B`. That layout already
+contains the radial structure Morris needs. Within each base point, `A` and
+each `AB_j` differ in exactly one parameter. So `SobolSamples.to_morris()`
+reinterprets the design without any new model evaluations:
 
 ```python
 samples = jaxgsa.sobol.sample(PROBLEM, 0, base_n=512, seed=0)
@@ -118,6 +164,11 @@ morris_result = jaxgsa.morris.analyze(samples.to_morris(), Y)
 print("ST:     ", sobol_result.ST)
 print("mu_star:", morris_result.mu_star)
 ```
+
+The same `Y` feeds both calls. `ST` is the Sobol total-order index, a variance
+fraction; `mu_star` is a mean absolute effect on the model's own scale. The two
+printed lines are therefore on different scales and should be compared as
+rankings, not value by value.
 
 `to_morris()` returns a normal `MorrisSamples` with `method="radial"`, so
 everything else works unchanged: bootstrap CIs, multi-output outputs,
@@ -140,7 +191,14 @@ estimator and Morris's mu_star are different moments of the same increments
 
 When your model returns K outputs per sample, pass Y with shape
 `(n_runs, K)`. The resulting measures have shape `(K, D)`. Time-series
-outputs `(n_runs, T, K)` produce `(T, K, D)`.
+outputs `(n_runs, T, K)` produce `(T, K, D)`, where T is the number of time
+steps. The steps match the scalar case, with one addition: the problem carries
+`output_names`, which fixes the row order of the measure arrays.
+
+1. Build a `Problem` with three named inputs and two named outputs.
+2. Write a model that returns both outputs stacked on the last axis.
+3. Sample, evaluate, and analyze exactly as before. One call covers both
+   outputs.
 
 ```python
 import jax.numpy as jnp
@@ -173,16 +231,22 @@ print("mu_star shape:", result.mu_star.shape)  # (K, D) = (2, 3)
 print("sigma shape:", result.sigma.shape)      # (K, D) = (2, 3)
 ```
 
+Both printed shapes are `(2, 3)`: two rows for the two outputs, three columns
+for the three inputs. Row 0 belongs to `"displacement"` and row 1 to
+`"velocity"`, following `output_names`. So `result.mu_star[1, 0]` is the
+importance of `amplitude` for the `"velocity"` output.
+
 ## Gaussian inputs
 
-Gaussian marginals are supported through a truncated-quantile grid. The
-Morris design touches the unit-cube boundaries, and an unbounded inverse CDF
-maps 0 and 1 to infinity. Each open side of a Gaussian marginal is
-therefore pulled in by `q` (`truncation_quantile`, default 1e-4 — probing the
-0.01%–99.99% quantile range) before the transform. A side the problem already
-bounds with an explicit `low` or `high` stays exactly where you put it, so a
-two-sided truncated Gaussian is sampled as declared. Uniform marginals are
-untouched, and deduplication and prefix-nested downsampling work as usual.
+Gaussian marginals are supported through a truncated-quantile grid. A marginal
+is the distribution of one input on its own. The Morris design touches the
+unit-cube boundaries, and an unbounded inverse CDF maps 0 and 1 to infinity. Each
+open side of a Gaussian marginal is therefore pulled in by `q`
+(`truncation_quantile`, default 1e-4 — probing the 0.01%–99.99% quantile range)
+before the transform. A side the problem already bounds with an explicit `low`
+or `high` stays exactly where you put it, so a two-sided truncated Gaussian is
+sampled as declared. Uniform marginals are untouched, and deduplication and
+prefix-nested downsampling work as usual.
 
 On an unbounded marginal `mu_star` has no `q -> 0` limit. The design always
 includes unit levels 0 and 1 exactly, so a smaller `q` always reaches further
@@ -197,6 +261,9 @@ problem = jaxgsa.Problem.from_dict(params, truncate_gaussians=1e-4)
 
 It writes explicit `low`/`high` into every Gaussian that does not already
 declare them, at that marginal's own `q` and `1 - q` quantiles.
+
+The next example mixes one uniform input with one Gaussian input and runs the
+standard three steps on it.
 
 ```python
 import jax.numpy as jnp
@@ -217,8 +284,10 @@ result = jaxgsa.morris.analyze(sr, Y)
 print("mu_star:", result.mu_star)  # (2,)
 ```
 
-Elementary effects remain per unit of the original grid coordinate, and
-`to_physical_units()` is unavailable for such problems (see below).
+`mu_star` has length 2 here, because the problem has two inputs: the uniform
+`x1` and the Gaussian `x2`. Elementary effects remain per unit of the original
+grid coordinate, and `to_physical_units()` is unavailable for such problems
+(see below).
 
 ## Physical units
 
@@ -241,6 +310,12 @@ physical = result.to_physical_units()
 print(physical.space)    # "physical" (the original result stays "unit")
 print(physical.mu_star)  # per-physical-unit effects
 ```
+
+`physical.space` prints `"physical"`, which is how you tell the two coordinate
+systems apart later. The call returns a copy, so `result` still reports
+`"unit"` and still holds the unit-cube measures. `physical.mu_star` holds the
+same three inputs, each divided by its own `high - low`, so the ranking can
+change when the parameters have very different physical ranges.
 
 Calling `to_physical_units()` on a result that is already in physical units
 raises `ValueError`. It also raises for problems with non-uniform (Gaussian)
@@ -268,14 +343,18 @@ for r in [50, 25, 10]:
     print(f"r={r:3d}  mu_star={result.mu_star}")
 ```
 
-This mirrors `SobolSamples.downsample()` for Sobol designs and is useful
+The loop prints three mu_star rows from one set of model evaluations, at 50,
+25, and 10 trajectories. Compare the rows down the column: the values move as r
+falls, and what matters is whether the order of the three inputs stays the
+same. This mirrors `SobolSamples.downsample()` for Sobol designs and is useful
 for convergence checks: if the ranking is stable from 25 to 100 trajectories,
 25 would have sufficed.
 
 ## xarray export
 
 `MorrisResult.to_dataset()` converts results to a labeled `xarray.Dataset`,
-just like the Sobol and eFAST result types. The coordinate space is recorded
+just like the Sobol and eFAST result types. You can then select by parameter
+and output name instead of by integer index. The coordinate space is recorded
 in the `space` attribute.
 
 ```python
@@ -288,6 +367,12 @@ print(ds.mu_star.sel(param="amplitude"))
 print(ds.sigma.sel(output="velocity"))
 print(ds.attrs["space"])  # "unit"
 ```
+
+The printed dataset reports `(output: 2, param: 3)`, the same two axes as the
+raw `(K, D)` arrays but now named. The first `sel` call returns the mu_star of
+`amplitude` for both outputs. The second returns the sigma of all three inputs
+for the `"velocity"` output. The `space` attribute prints `"unit"`, so these
+measures are in unit-cube coordinates and not per physical unit.
 
 For time-series results, pass `time_coords` to label the time dimension.
 When bootstrap CIs are present, the dataset also contains `mu_lower`,

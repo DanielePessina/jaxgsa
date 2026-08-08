@@ -1,18 +1,22 @@
 """Optimal-transport sensitivity analysis (Borgonovo et al., 2024).
 
-The OT index measures how much knowing an input's value displaces the
-*entire* output distribution: it is the class-averaged squared
-2-Wasserstein distance between the conditional and unconditional output
-distributions, normalized to [0, 1] by twice the output variance. It
-reacts to changes in spread, tails and shape that variance-based indices
-miss, and decomposes into an *advective* (location-shift) component --
-exactly half the given-data first-order Sobol index -- plus a
-*diffusive* (spread/shape) remainder. Scalar and per-column analyses use
-exact 1-D optimal transport (no solver); the multivariate and
-trajectory modes transport output point clouds with entropic
-(Sinkhorn) regularization.
-Conditioning is rank-based, so any input marginals (uniform, Gaussian,
-mixed) and correlated inputs are supported.
+The optimal-transport (OT) index measures how much knowing a parameter's
+value displaces the whole output distribution. It is the class-averaged
+squared 2-Wasserstein distance between the conditional and unconditional
+output distributions, normalized to [0, 1] by twice the output variance.
+Variance-based indices miss changes in spread, tails and shape. The OT
+index reacts to them.
+
+The index splits into two parts. The advective component is the
+location shift, and it equals exactly half the given-data first-order
+Sobol index. The diffusive component is the remainder, and it covers
+spread and shape.
+
+Scalar and per-column analyses use exact 1-D optimal transport and need
+no solver. The multivariate and trajectory modes transport output point
+clouds with entropic (Sinkhorn) regularization. Conditioning is
+rank-based, so any parameter marginals (uniform, Gaussian, mixed) and
+correlated parameters are supported.
 
 Example::
 

@@ -1,9 +1,10 @@
 # HSIC
 
-Kernel-based dependence indices with permutation p-values. Detects input
-influence beyond variance; works on arbitrary `(X, Y)` pairs.
+`jaxgsa.hsic.analyze()` computes kernel-based dependence indices with
+permutation p-values. These indices detect input influence beyond variance. It
+works on arbitrary `(X, Y)` pairs.
 
-The canonical API reference now lives at [API Reference](/api/).
+The canonical API reference lives at [API Reference](/api/).
 
 Jump directly to:
 

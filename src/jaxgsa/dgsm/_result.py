@@ -14,25 +14,28 @@ from jaxgsa.problem import Problem
 class DGSMResult:
     """Derivative-based global sensitivity measures and Sobol index bounds.
 
-    ``upper_bound`` and ``lower_bound`` bracket the total Sobol index
-    ``ST_i`` of each input: an input whose upper bound is near zero is
-    provably negligible, while a large lower bound certifies importance.
+    ``upper_bound`` and ``lower_bound`` bracket the total Sobol index ``ST_i``
+    of each input. An input whose upper bound is near zero is provably
+    negligible. A large lower bound certifies that the input matters.
 
-    Index arrays mirror the output layout: shape ``(D,)`` with scalar
-    ``var_y`` for scalar-output models, ``(K, D)`` with ``(K,)`` ``var_y``
-    for multi-output, and ``(T, K, D)`` with ``(T, K)`` ``var_y`` for
-    time-series outputs.
+    The index arrays mirror the output layout. A scalar-output model gives
+    ``(D,)`` indices and a scalar ``var_y``. Multi-output gives ``(K, D)``
+    indices and ``(K,)`` ``var_y``. A time series gives ``(T, K, D)`` indices
+    and ``(T, K)`` ``var_y``. *D* is the number of parameters, *K* the number
+    of outputs, and *T* the number of time steps.
 
     Attributes:
-        nu: ``E[(df/dx_i)^2]``, the mean squared partial derivative over
-            the input distribution — the DGSM importance measure.
-        sigma: ``E[df/dx_i]``, the mean (signed) partial derivative; its
-            sign indicates the average direction of the effect.
-        upper_bound: ``C_i * nu_i / Var(Y)``, the Poincare upper bound on
-            ST (``C_i`` is the Poincare constant of input i's marginal).
-        lower_bound: ``Var(x_i) * sigma_i^2 / Var(Y)``, the
-            Kucherenko-Song lower bound on ST.
-        var_y: Output variance.
+        nu: Mean squared partial derivative ``E[(df/dx_i)^2]`` over the input
+            distribution, shape ``(D,)`` / ``(K, D)`` / ``(T, K, D)``. This is
+            the DGSM importance measure.
+        sigma: Mean signed partial derivative ``E[df/dx_i]``, same shape as
+            ``nu``. Its sign gives the average direction of the effect.
+        upper_bound: Poincare upper bound on ST, ``C_i * nu_i / Var(Y)``, same
+            shape as ``nu``. ``C_i`` is the Poincare constant of input i's
+            marginal.
+        lower_bound: Kucherenko-Song lower bound on ST,
+            ``Var(x_i) * sigma_i^2 / Var(Y)``, same shape as ``nu``.
+        var_y: Output variance per slice, shape ``()`` / ``(K,)`` / ``(T, K)``.
         problem: Problem definition used for the analysis.
     """
 
@@ -51,9 +54,10 @@ class DGSMResult:
                 dimension of time-series results; defaults to ``0..T-1``.
 
         Returns:
-            Dataset with variables nu, sigma, upper_bound, lower_bound on
-            dims ``(param,)`` / ``(output, param)`` / ``(time, output,
-            param)`` matching the result shapes.
+            An ``xr.Dataset`` with variables ``nu``, ``sigma``,
+            ``upper_bound``, and ``lower_bound`` on dims ``(param,)`` /
+            ``(output, param)`` / ``(time, output, param)``, matching the
+            result shapes.
         """
         nu_arr = np.asarray(self.nu)
         dims, coords = _dims_and_coords(nu_arr.ndim, nu_arr.shape, self.problem, time_coords)

@@ -1,39 +1,41 @@
 """Variance-based sensitivity indices for correlated inputs (Li et al. 2010).
 
-When inputs are dependent the Sobol' variance decomposition no longer holds,
-but the same conditional-variance quantities remain well defined and simply
-change connotation (Hilhorst et al. 2024, Figure 1):
+When inputs are dependent the Sobol' variance decomposition no longer holds.
+The same conditional-variance quantities stay well defined, but they change
+connotation (Hilhorst et al. 2024, Figure 1):
 
 ===============  ===================================  ==========================
 index            definition                           reading
 ===============  ===================================  ==========================
-``S_TC``         ``V(E(Y|X_i)) / V(Y)``               total *correlated*: what
+``S_TC``         ``V(E(Y|X_i)) / V(Y)``               total correlated: what
                                                       ``X_i`` explains through
-                                                      itself and its correlation.
-                                                      A first-order quantity in
-                                                      form; "total" names the
+                                                      itself and through its
+                                                      correlation. It is a
+                                                      first-order quantity in
+                                                      form. "Total" names the
                                                       pathways it counts, not
                                                       the interaction order
-``S_TU``         ``E(V(Y|X_-i)) / V(Y)``              total *uncorrelated*: what
+``S_TU``         ``E(V(Y|X_-i)) / V(Y)``              total uncorrelated: what
                                                       only ``X_i`` can explain
 ``S_U``          ``E(V(f_i|X_-i)) / V(Y)``            the independent part
 ``S_C``          ``S_TC - S_U``                       the correlation-borne part
 ``S_IU``         ``S_TU - S_U``                       independent interactions
 ===============  ===================================  ==========================
 
-``f_i`` is the additive first-order component of ``Y``, fitted by least squares
-under the *correlated* input measure (see :func:`_fit_component_functions`).
-``S_U`` therefore measures the part of ``f_i`` that ``X_-i`` cannot predict.
-This is the decorrelated first-order index of Mara & Tarantola (2012), not the
-structural index ``Var(f_i) / V(Y)`` of Li et al. (2010, Equation 25); on a
-linear-Gaussian model the two differ, because Li's keeps the correlated share
-of ``Var(f_i)`` and this one removes it. The pair ``(S_U, S_C)`` splits ``S_TC``
-along exactly the boundary the decorrelated index draws.
+``f_i`` is the additive first-order component of ``Y``. It is fitted by least
+squares under the correlated input measure (see
+:func:`_fit_component_functions`). ``S_U`` therefore measures the part of
+``f_i`` that ``X_-i`` cannot predict. This is the decorrelated first-order
+index of Mara & Tarantola (2012), not the structural index
+``Var(f_i) / V(Y)`` of Li et al. (2010, Equation 25). The two differ on a
+linear-Gaussian model: Li's keeps the correlated share of ``Var(f_i)`` and this
+one removes it. The pair ``(S_U, S_C)`` splits ``S_TC`` along exactly the
+boundary the decorrelated index draws.
 
 Every expectation is taken under a Gaussian copula, whose conditionals are
-closed-form in the latent normal space, and every model evaluation goes through
-a fitted surrogate — which is the whole point of the two-stage approach: the
-nested conditional sampling would be unaffordable against the original model.
+closed-form in the latent normal space. Every model evaluation goes through a
+fitted surrogate. That is the point of the two-stage approach: the nested
+conditional sampling would be unaffordable against the original model.
 
 References:
     Li, Rabitz, Yelvington et al. (2010). J. Phys. Chem. A 114:6022-6032.
@@ -79,18 +81,21 @@ _S_U_CLIP_TOLERANCE = 0.01
 class CorrelatedIndices(NamedTuple):
     """Raw index arrays produced by :func:`estimate_correlated_indices`.
 
-    Every array has shape ``(S, D)`` for ``S`` output slices and ``D``
+    Index arrays have shape ``(S, D)`` for ``S`` output slices and ``D``
     parameters, matching the surrogate's flattened output layout.
 
     Attributes:
-        S_TC: Total correlated indices, ``V(E(Y|X_i)) / V(Y)``.
-        S_TU: Total uncorrelated indices, ``E(V(Y|X_-i)) / V(Y)``.
-        S_U: Uncorrelated (independent) contribution, clipped to at most
-            ``S_TU``.
-        S_C: Correlated contribution, ``S_TC - S_U``. May be negative.
-        S_IU: Independent interaction contribution, ``S_TU - S_U``.
-            Non-negative by construction of the clip.
-        variance: ``(S,)`` output variance under the correlated input measure.
+        S_TC: Total correlated indices ``V(E(Y|X_i)) / V(Y)``, shape ``(S, D)``.
+        S_TU: Total uncorrelated indices ``E(V(Y|X_-i)) / V(Y)``, shape
+            ``(S, D)``.
+        S_U: Uncorrelated (independent) contribution, shape ``(S, D)``. Clipped
+            to at most ``S_TU``.
+        S_C: Correlated contribution ``S_TC - S_U``, shape ``(S, D)``. It may be
+            negative.
+        S_IU: Independent interaction contribution ``S_TU - S_U``, shape
+            ``(S, D)``. Non-negative by construction of the clip.
+        variance: Output variance under the correlated input measure, shape
+            ``(S,)``.
     """
 
     S_TC: np.ndarray
@@ -113,26 +118,26 @@ def estimate_correlated_indices(
 ) -> CorrelatedIndices:
     """Estimate the five correlated variance-based indices by quasi-Monte-Carlo.
 
-    Everything stays in copula (unit-cube) coordinates: ``u_i = Phi(z_i)`` is
-    exactly the marginal CDF value ``F_i(x_i)``, which is the space the
-    surrogate is fitted in, so no round-trip through physical units is needed
-    for the millions of conditional draws below.
+    Everything stays in copula (unit-cube) coordinates. ``u_i = Phi(z_i)`` is
+    exactly the marginal CDF value ``F_i(x_i)``, and that is the space the
+    surrogate is fitted in. The millions of conditional draws below therefore
+    need no round-trip through physical units.
 
     Args:
         plan: Precomputed Gaussian conditionals from
             :func:`jaxgsa._core.copula.build_conditional_plan`.
-        chol_full: ``(D, D)`` Cholesky factor of the copula correlation matrix,
-            used for the unconditional variance sample.
-        predict: Maps ``(n, D)`` unit-cube samples to ``(n, S)`` outputs. This
-            is the fitted surrogate.
+        chol_full: Cholesky factor of the copula correlation matrix, shape
+            ``(D, D)``. Used for the unconditional variance sample.
+        predict: Fitted surrogate. It maps ``(n, D)`` unit-cube samples to
+            ``(n, S)`` outputs.
         n_outer: Outer (conditioning) sample size per parameter.
         n_inner: Inner (conditional) sample size per outer point.
         n_variance: Sample size for the unconditional output variance and for
             the component-function fit.
-        seed: Base seed; each parameter and stage derives a distinct stream.
+        seed: Base seed. Each parameter and stage derives a distinct stream.
 
     Returns:
-        A :class:`CorrelatedIndices` with ``(S, D)`` arrays.
+        A :class:`CorrelatedIndices` whose index arrays have shape ``(S, D)``.
     """
     D = chol_full.shape[0]
 
@@ -213,12 +218,12 @@ def _clip_independent_part(S_U: np.ndarray, S_TU: np.ndarray) -> np.ndarray:
     ``_S_U_CLIP_TOLERANCE`` is not noise: it says the additive projection is
     inadequate for this model, and it warns.
 
-    ``S_C = S_TC - S_U`` stays free to go negative. That is a real reading — a
-    correlation that opposes the direct effect — and not an estimator artefact.
+    ``S_C = S_TC - S_U`` stays free to go negative. That is a real reading, a
+    correlation that opposes the direct effect. It is not an estimator artefact.
 
     Args:
-        S_U: ``(S, D)`` independent contribution, normalised by ``V(Y)``.
-        S_TU: ``(S, D)`` total uncorrelated index, normalised by ``V(Y)``.
+        S_U: Independent contribution normalised by ``V(Y)``, shape ``(S, D)``.
+        S_TU: Total uncorrelated index normalised by ``V(Y)``, shape ``(S, D)``.
 
     Returns:
         ``S_U`` clipped elementwise to at most ``S_TU``.
@@ -256,11 +261,11 @@ def _legendre_basis(u: np.ndarray, degree: int) -> np.ndarray:
     shift ``(0, 1)`` onto ``(-1, 1)`` and drop the constant term.
 
     Args:
-        u: ``(..., )`` values in (0, 1).
-        degree: Highest polynomial degree; term 0 (the constant) is dropped.
+        u: Values in (0, 1), shape ``(...,)``.
+        degree: Highest polynomial degree. Term 0 (the constant) is dropped.
 
     Returns:
-        ``(..., degree)`` array of basis values.
+        Basis values, shape ``(..., degree)``.
     """
     return legendre_orthonormal(2.0 * u - 1.0, degree)[..., 1:]
 
@@ -268,18 +273,18 @@ def _legendre_basis(u: np.ndarray, degree: int) -> np.ndarray:
 def _fit_component_functions(U: np.ndarray, Y: np.ndarray) -> np.ndarray:
     """Fit the additive first-order component functions ``f_i``.
 
-    Least squares of the output onto ``sum_i f_i(X_i)`` under the *correlated*
-    input measure is exactly the decomposition Li et al. use: the fitted
+    Least squares of the output onto ``sum_i f_i(X_i)`` under the correlated
+    input measure is exactly the decomposition Li et al. use. The fitted
     ``f_i`` absorbs both what ``X_i`` explains alone and what it explains
-    through its correlation with the rest, which is why the independent part
-    has to be extracted afterwards by conditioning.
+    through its correlation with the rest. The independent part therefore has
+    to be extracted afterwards by conditioning.
 
     Args:
-        U: ``(N, D)`` marginal CDF values of the sample.
-        Y: ``(N, S)`` surrogate outputs.
+        U: Marginal CDF values of the sample, shape ``(N, D)``.
+        Y: Surrogate outputs, shape ``(N, S)``.
 
     Returns:
-        ``(degree, D, S)`` basis coefficients.
+        Basis coefficients, shape ``(degree, D, S)``.
     """
     N, D = U.shape
     basis = _legendre_basis(U, _COMPONENT_DEGREE)  # (N, D, degree)
@@ -295,11 +300,11 @@ def _evaluate_component(u: np.ndarray, coefficients: np.ndarray) -> np.ndarray:
     """Evaluate one component function ``f_i`` at ``u``.
 
     Args:
-        u: ``(...,)`` marginal CDF values for parameter ``i``.
-        coefficients: ``(degree, S)`` coefficients for that parameter.
+        u: Marginal CDF values for parameter ``i``, shape ``(...,)``.
+        coefficients: Coefficients for that parameter, shape ``(degree, S)``.
 
     Returns:
-        ``(..., S)`` component values.
+        Component values, shape ``(..., S)``.
     """
     return _legendre_basis(u, _COMPONENT_DEGREE) @ coefficients
 
@@ -350,8 +355,18 @@ def _total_correlated(
         into the outer variance and inflates a small ``S_TC``. Raise
         ``n_outer`` instead.
 
+    Args:
+        plan: Precomputed Gaussian conditionals for the copula.
+        index: Position of the parameter ``X_i`` being conditioned on.
+        predict: Fitted surrogate. It maps ``(n, D)`` unit-cube samples to
+            ``(n, S)`` outputs.
+        n_outer: Outer (conditioning) sample size.
+        n_inner: Inner (conditional) sample size per outer point.
+        n_slices: Number of output slices ``S``.
+        seed: Seed for this parameter's latent draws.
+
     Returns:
-        ``(S,)`` conditional-expectation variance, not yet normalised.
+        Conditional-expectation variance, shape ``(S,)``. Not yet normalised.
     """
     others = plan.others[index]
     D_rest = others.shape[0]
@@ -400,12 +415,23 @@ def _total_uncorrelated_and_conditional(
     conditional expectation that ``S_U`` subtracts from ``V(f_i)``.
 
     Outer points are processed in memory-budgeted chunks, as in
-    :func:`_total_correlated`: only ``(n_outer, S)`` accumulators stay
+    :func:`_total_correlated`. Only ``(n_outer, S)`` accumulators stay
     resident, and chunking does not change the latent sample.
 
+    Args:
+        plan: Precomputed Gaussian conditionals for the copula.
+        index: Position of the parameter ``X_i`` being resampled.
+        predict: Fitted surrogate. It maps ``(n, D)`` unit-cube samples to
+            ``(n, S)`` outputs.
+        component: Basis coefficients of ``f_i``, shape ``(degree, S)``.
+        n_outer: Outer (conditioning) sample size.
+        n_inner: Inner (conditional) sample size per outer point.
+        n_slices: Number of output slices ``S``.
+        seed: Seed for this parameter's latent draws.
+
     Returns:
-        ``(S,)`` conditional-variance mean and ``(S,)`` variance of
-        ``E(f_i|X_-i)``, neither normalised by ``V(Y)``.
+        ``(conditional_variance_mean, component_conditional_variance)``, each
+        shape ``(S,)``. Neither is normalised by ``V(Y)``.
     """
     others = plan.others[index]
     D_rest = others.shape[0]

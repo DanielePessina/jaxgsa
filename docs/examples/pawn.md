@@ -1,16 +1,26 @@
 # PAWN (CDF-based Sensitivity)
 
-PAWN is a distribution-based sensitivity method that measures how much
-the entire output CDF shifts when an input is fixed. It uses the
-Kolmogorov-Smirnov distance between unconditional and conditional output
-distributions — no variance decomposition, no model assumptions.
+This page computes PAWN sensitivity indices from a set of input-output samples.
+You end with one number per input that says how much the shape of the whole
+output distribution changes when that input is held fixed.
+
+PAWN is a distribution-based sensitivity method. It compares two cumulative
+distribution functions (CDFs) of the output. A CDF gives, for each value, the
+probability that the output falls below it. The unconditional CDF uses all the
+samples. A conditional CDF uses only the samples in which one input sits inside
+a narrow range. The gap between the two is measured with the
+Kolmogorov-Smirnov (KS) distance, the largest vertical gap between two CDF
+curves. There is no variance decomposition and there are no model assumptions.
 
 When to use PAWN:
 
 - You care about distributional changes beyond just variance (tail
   behavior, skewness shifts).
 - You want a moment-independent index that is invariant under monotone
-  output transformations.
+  output transformations. Moment-independent means the index does not read the
+  output through its mean or variance. Invariant under monotone
+  transformations means that rescaling the output by any order-preserving
+  function, such as a log, leaves the index unchanged.
 - You have a set of (X, Y) pairs from any sampling strategy — no
   structured design required.
 
@@ -26,7 +36,18 @@ import jaxgsa
 # jaxgsa.pawn.analyze(...)
 ```
 
+Both forms reach the same function. Pick one and keep it.
+
 ## Scalar example (Ishigami)
+
+Ishigami is a standard three-input test function with a known answer, which
+makes it a good place to read the output of a new method. The steps are:
+
+1. Draw samples. PAWN accepts any sampling scheme, so a plain Monte Carlo draw
+   is enough.
+2. Run the model on those samples. PAWN needs only the paired (X, Y) values.
+3. Call `analyze`. It splits each input into bins, measures the KS distance in
+   each bin, and reduces the bin distances to one number per input.
 
 ```python
 import jax.numpy as jnp
@@ -43,13 +64,17 @@ result = jaxgsa.pawn.analyze(PROBLEM, jnp.asarray(X), Y)
 print("PAWN:", result.pawn)  # (3,)
 ```
 
-The PAWN index is the median (by default) KS distance across conditioning
-bins. Higher values indicate stronger influence on the output distribution.
+`result.pawn` has length 3, one entry per input, in the order the parameters
+appear in `PROBLEM`. The PAWN index is the median (by default) KS distance
+across conditioning bins. A conditioning bin is a slice of one input's range;
+inside it, that input is close to fixed while the others still vary. Higher
+values indicate stronger influence on the output distribution.
 
 ## Choosing the aggregation statistic
 
-PAWN computes one KS distance per bin, then aggregates across bins. Three
-options are available:
+PAWN computes one KS distance per bin, then aggregates across bins. The choice
+of aggregation decides which bin drives the index, so it changes the ranking
+you read. Three options are available:
 
 ```python
 # Median (default) — robust to outlier bins
@@ -66,7 +91,17 @@ print("max:   ", r_max.pawn)
 print("mean:  ", r_mean.pawn)
 ```
 
+The three printed arrays all have length 3 and come from the same KS distances.
+Only the reduction differs. The `max` row is at least as large as the other two
+for every input, because it takes the single largest bin distance. An input
+whose `max` sits far above its `median` acts strongly in one part of its range
+and weakly elsewhere.
+
 ## Bootstrap confidence intervals
+
+A bootstrap resamples the data many times and recomputes the index on each
+resample. The spread of those values gives an interval, which tells you whether
+two inputs are really ranked apart or just separated by sampling noise.
 
 ```python
 result = jaxgsa.pawn.analyze(
@@ -81,7 +116,20 @@ print("95% CI lower:", result.pawn_conf[0])
 print("95% CI upper:", result.pawn_conf[1])
 ```
 
+`pawn_conf` has shape `(2, D)`: row 0 holds the lower bounds and row 1 the
+upper bounds, one per input. If the interval of one input overlaps the interval
+of another, the data do not separate those two inputs at the 95% level.
+
 ## Running on all three benchmark functions
+
+Running the same call on three benchmark functions shows how the index reads
+models of different shape. Each benchmark ships its own `PROBLEM`, so nothing
+is shared between the three runs except the method.
+
+1. For each benchmark, draw Monte Carlo samples from that benchmark's own
+   `PROBLEM`, which carries its own number of inputs and ranges.
+2. Evaluate that benchmark's model on its own samples.
+3. Call `analyze` with the matching problem, X, and Y.
 
 ```python
 import jax.numpy as jnp
@@ -107,9 +155,16 @@ r_lin = jaxgsa.pawn.analyze(linear.PROBLEM, X_lin, Y_lin)
 print("Linear PAWN:", r_lin.pawn)
 ```
 
+Each printed array has one entry per input of that benchmark, so the three
+arrays need not have the same length. The indices are not comparable across
+benchmarks, only within one. Read each line as a ranking of that model's own
+inputs.
+
 ## Multi-output example
 
-When Y has shape `(N, K)`, PAWN indices have shape `(K, D)`.
+When Y has shape `(N, K)`, PAWN indices have shape `(K, D)`. N is the number of
+samples, K the number of outputs, and D the number of inputs. Here the two
+outputs share one X, so a single `analyze` call covers both.
 
 ```python
 import jax.numpy as jnp
@@ -125,7 +180,14 @@ result = jaxgsa.pawn.analyze(PROBLEM, X, Y_multi)
 print("PAWN shape:", result.pawn.shape)  # (2, 3)
 ```
 
+The printed shape is `(2, 3)`: two rows for the two stacked outputs, three
+columns for the three inputs. Row 0 is the Ishigami output `Y1` and row 1 is
+the sum of squares `Y2`, in the column order used by `jnp.column_stack`.
+
 ## xarray export
+
+`to_dataset()` converts a result to a labeled `xarray.Dataset`, so you can
+select by parameter and output name instead of by integer index.
 
 ```python
 ds = result.to_dataset()
@@ -137,6 +199,10 @@ ds_ci = result_ci.to_dataset()
 print(ds_ci)  # includes pawn_lower and pawn_upper
 ```
 
+The first dataset carries the `pawn` variable alone. The second run asks for
+bootstrap intervals, so its dataset carries `pawn_lower` and `pawn_upper` as
+well. Confidence bounds reach the dataset only when `n_bootstrap` is set.
+
 ## Shape rules
 
 | Y shape | pawn | pawn_conf |
@@ -144,6 +210,9 @@ print(ds_ci)  # includes pawn_lower and pawn_upper
 | `(N,)` | `(D,)` | `(2, D)` or None |
 | `(N, K)` | `(K, D)` | `(2, K, D)` or None |
 | `(N, T, K)` | `(T, K, D)` | `(2, T, K, D)` or None |
+
+T is the number of time steps. `pawn_conf` is None when you do not ask for a
+bootstrap.
 
 ## Practical caveats
 

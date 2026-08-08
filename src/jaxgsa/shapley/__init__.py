@@ -1,6 +1,6 @@
 """Shapley-effect sensitivity analysis.
 
-Shapley effects are computed from fitted PCE or HDMR results:
+A fitted PCE or HDMR result computes its own Shapley effects:
 
 Example::
 

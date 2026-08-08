@@ -6,10 +6,10 @@ at harmonics of the focal frequency omega_0, and total-order indices
 from the complementary low-frequency content.
 
 Array shape conventions used throughout:
-    N  — number of samples per search curve (``n_per_curve``)
-    D  — number of input parameters
-    T  — number of time steps (singleton-squeezed when absent)
-    K  — number of output variables (singleton-squeezed when absent)
+    N: number of samples per search curve (``n_per_curve``)
+    D: number of input parameters
+    T: number of time steps (singleton-squeezed when absent)
+    K: number of output variables (singleton-squeezed when absent)
 
 References:
     Saltelli, Tarantola & Chan (1999). Technometrics 41(1):39-56.
@@ -38,36 +38,39 @@ def _compute_indices(Y_curve: Array, N: int, M: int, omega_0: int) -> tuple[Arra
     """Compute S1 and ST for a single search curve.
 
     Args:
-        Y_curve: (N,) model outputs along one search curve.
+        Y_curve: Model outputs along one search curve, shape ``(N,)``.
         N: Number of samples in the curve.
         M: Interference factor.
         omega_0: Primary frequency.
 
     Returns:
-        (S1, ST) scalar arrays.
+        A tuple ``(S1, ST)`` of scalar arrays.
     """
-    # Discrete Fourier spectrum of the model output along one search curve
+    # Discrete Fourier spectrum of the model output along one search curve.
     f = jnp.fft.fft(Y_curve)
-    # One-sided power spectrum: |F_k|^2/N^2, positive freqs only (skip DC at k=0)
+    # One-sided power spectrum |F_k|^2/N^2, positive frequencies only. The DC
+    # term at k=0 is skipped.
     Sp = jnp.abs(f[1 : (N + 1) // 2]) ** 2 / N**2
     V = 2.0 * jnp.sum(Sp)
     if N % 2 == 0:
         V = V + jnp.abs(f[N // 2]) ** 2 / N**2
 
-    # First-order partial variance: sum power at harmonics p*omega_0, p=1..M.
-    # These frequencies carry variance attributable solely to the focal parameter.
+    # First-order partial variance: sum the power at the harmonics p*omega_0
+    # for p = 1..M. Those frequencies carry variance attributable to the focal
+    # parameter alone.
     harmonics = jnp.arange(1, M + 1) * omega_0
     D1 = 2.0 * jnp.sum(Sp[harmonics - 1])
 
-    # Complementary variance: power at frequencies 1..omega_0//2 (DC excluded;
-    # Sp[k] holds frequency k+1). Everything below omega_0/2 is driven by the
-    # complementary (non-focal) parameters' lower frequencies.
+    # Complementary variance: power at frequencies 1..omega_0//2, DC excluded,
+    # where Sp[k] holds frequency k+1. Everything below omega_0/2 comes from
+    # the lower frequencies of the non-focal parameters.
     compl_range = jnp.arange(omega_0 // 2)
     Dt = 2.0 * jnp.sum(Sp[compl_range])
 
-    # S1: fraction of total variance from the focal parameter alone
+    # S1 is the fraction of total variance from the focal parameter alone.
     S1 = jnp.where(V == 0, jnp.nan, D1 / V)
-    # ST: 1 - (complementary share) = total effect including all interactions
+    # ST is 1 minus the complementary share: the total effect, interactions
+    # included.
     ST = jnp.where(V == 0, jnp.nan, 1.0 - Dt / V)
     return S1, ST
 
@@ -76,13 +79,23 @@ def _compute_indices(Y_curve: Array, N: int, M: int, omega_0: int) -> tuple[Arra
 # Cached JIT kernels
 # ---------------------------------------------------------------------------
 
-# Closure captures concrete (N, M, omega_0) so jnp.arange() sees Python ints,
-# not JAX tracers. vmap only traces the Y_curve argument.
+# The closure captures concrete (N, M, omega_0), so jnp.arange() sees Python
+# ints rather than JAX tracers. vmap traces the Y_curve argument only.
 
 
 @lru_cache(maxsize=4)
 def _get_efast_kernel(N: int, M: int, omega_0: int, batched: bool):
-    """Cache JIT-compiled eFAST kernels, optionally vmapped for batched path."""
+    """Build and cache a JIT-compiled eFAST kernel for one design.
+
+    Args:
+        N: Number of samples per search curve.
+        M: Interference factor.
+        omega_0: Primary frequency.
+        batched: If True, vmap the kernel over a leading curve axis.
+
+    Returns:
+        A compiled callable mapping curve outputs to ``(S1, ST)``.
+    """
 
     def kernel(Y_curve: Array) -> tuple[Array, Array]:
         return _compute_indices(Y_curve, N, M, omega_0)
@@ -102,34 +115,36 @@ def analyze(
     """Compute eFAST first- and total-order sensitivity indices.
 
     eFAST attributes output variance to each parameter from the Fourier
-    spectrum of the model output along that parameter's search curve --
-    a structured, deterministic alternative to Monte Carlo Sobol estimation
-    that yields S1 and ST (but no second-order indices) from
-    ``n_per_curve * D`` model runs. ``Y`` must be the model evaluated
-    row-by-row on ``samples.samples`` (rows in the same order); the design
-    metadata (``n_per_curve``, ``M``, ``problem``) is read from ``samples``
-    so it can never be mismatched with the sampling step.
+    spectrum of the model output along that parameter's search curve. It is a
+    structured, deterministic alternative to Monte Carlo Sobol estimation. It
+    yields S1 and ST, but no second-order indices, from ``n_per_curve * D``
+    model runs.
+
+    ``Y`` must be the model evaluated row by row on ``samples.samples``, with
+    the rows in the same order. The design metadata ``n_per_curve``, ``M``,
+    and ``problem`` is read from ``samples``, so it can never be mismatched
+    with the sampling step.
 
     Args:
         samples: Design returned by ``jaxgsa.efast.sample()``, carrying the
             sample matrix plus ``n_per_curve``, ``M``, and the problem.
-        Y: Model outputs evaluated at each row of ``samples.samples``, in
-            the same row order. Accepted shapes (``n_runs`` is
-            ``samples.n_runs = n_per_curve * D``):
+        Y: Model outputs evaluated at each row of ``samples.samples``, in the
+            same row order. Accepted shapes, where ``n_runs`` is
+            ``samples.n_runs = n_per_curve * D``:
             - ``(n_runs,)`` for scalar output
             - ``(n_runs, K)`` for K output variables
             - ``(n_runs, T, K)`` for K outputs over T time steps
         prenormalize: If True, center and scale each output slice to unit
-            variance before computing indices. The indices are ratios, so
-            this changes nothing mathematically; it only helps when raw
-            output magnitudes risk float overflow/underflow.
-        slice_chunk_size: Maximum number of output slices to process in
-            one vmapped batch. Caps peak device memory for large
-            ``T * K``; smaller values trade speed for memory.
+            variance before computing indices. The indices are ratios, so this
+            changes nothing mathematically. It helps only when raw output
+            magnitudes risk float overflow or underflow.
+        slice_chunk_size: Maximum number of output slices to process in one
+            vmapped batch. It caps peak device memory for a large ``T * K``. A
+            smaller value trades speed for memory.
 
     Returns:
-        EFASTResult with S1 and ST, shaped ``(D,)`` / ``(K, D)`` /
-        ``(T, K, D)`` to mirror the layout of ``Y``.
+        An ``EFASTResult`` with ``S1`` and ``ST``, shape ``(D,)`` /
+        ``(K, D)`` / ``(T, K, D)``, mirroring the layout of ``Y``.
 
     Raises:
         ValueError: If ``Y``'s leading dimension does not equal
@@ -159,10 +174,10 @@ def analyze(
 
     Y = _validate_output(Y, samples.n_runs, problem)
 
-    # Detect scalar output before _prepare_Y adds singleton dims
+    # Record scalar output now: _prepare_Y adds singleton dims below.
     is_scalar = Y.ndim == 1
 
-    # Promote to canonical (N*D, T, K) shape
+    # Promote to the canonical (N*D, T, K) shape.
     Y, squeeze_time, squeeze_output = _prepare_Y(Y)
 
     if prenormalize:
@@ -170,18 +185,18 @@ def analyze(
 
     _warn_zero_variance_slices(Y, output_names=problem.output_names)
 
-    # Recompute omega_0 from the design's n_per_curve and M — the same
-    # formula sample() used, so the harmonics line up exactly.
+    # Recompute omega_0 from the design's n_per_curve and M, using the same
+    # formula sample() used. The harmonics then line up exactly.
     omega_0 = (N - 1) // (2 * M)
 
     _, T, K = Y.shape
 
-    # Split contiguous search curves into (D, N, T, K)
+    # Split the contiguous search curves into (D, N, T, K).
     Y_reshaped = Y.reshape(D, N, T, K)
 
-    # Per-curve zero-variance check: the global _warn_zero_variance_slices above
-    # can miss curves where a single parameter has no effect (V=0 on that curve
-    # alone), producing silent NaN indices.
+    # Per-curve zero-variance check. The global _warn_zero_variance_slices
+    # above can miss a curve where a single parameter has no effect, giving
+    # V=0 on that curve alone and a silent NaN index.
     per_curve_var = jnp.var(Y_reshaped, axis=1)  # (D, T, K)
     n_zero_curves = int(jnp.sum(per_curve_var == 0))
     if n_zero_curves > 0:
@@ -192,12 +207,13 @@ def analyze(
         )
 
     if is_scalar:
-        # Scalar path: squeeze trailing singletons, vmap over D curves only
+        # Scalar path: squeeze the trailing singletons and vmap over the D
+        # curves only.
         Y_curves = Y_reshaped[:, :, 0, 0]  # (D, N)
         kernel = _get_efast_kernel(N, M, omega_0, batched=True)
         S1, ST = kernel(Y_curves)  # each (D,)
     else:
-        # Batched path: flatten (D, T, K) into a single vmap axis
+        # Batched path: flatten (D, T, K) into a single vmap axis.
         Y_batched = Y_reshaped.transpose(0, 2, 3, 1).reshape(D * T * K, N)
 
         total = D * T * K
@@ -219,16 +235,17 @@ def analyze(
         S1_flat = jnp.concatenate(s1_parts)  # (D*T*K,)
         ST_flat = jnp.concatenate(st_parts)
 
-        # Reshape to (D, T, K) then transpose to (T, K, D) convention
+        # Reshape to (D, T, K), then transpose to the (T, K, D) convention.
         S1 = S1_flat.reshape(D, T, K).transpose(1, 2, 0)
         ST = ST_flat.reshape(D, T, K).transpose(1, 2, 0)
 
-        # Squeeze singleton dims that _prepare_Y inserted
+        # Drop the singleton dims that _prepare_Y inserted.
         if squeeze_time:
             S1 = S1[0]
             ST = ST[0]
 
-    # Indices outside [0,1] indicate the frequency decomposition didn't converge
+    # An index outside [0, 1] means the frequency decomposition did not
+    # converge.
     if jnp.any((S1 > 1.0) | (S1 < 0.0)) or jnp.any((ST > 1.0) | (ST < 0.0)):
         warnings.warn(
             "eFAST: some indices are outside [0, 1], suggesting "

@@ -1,7 +1,9 @@
 """Polynomial basis construction and evaluation for PCE.
 
-Implements orthonormal 1-D polynomial bases via three-term recurrence
-and multi-dimensional tensor-product basis via multi-index sets.
+Each 1-D orthonormal basis is built from its three-term recurrence: Hermite
+for a Gaussian marginal, Legendre for a uniform marginal. The
+multi-dimensional basis is the tensor product of those 1-D families, selected
+by a multi-index set.
 """
 
 from __future__ import annotations
@@ -23,11 +25,11 @@ def _hermite_1d(x: Array, max_degree: int) -> Array:
         E[tilde_He_m(X) tilde_He_n(X)] = delta_{mn}
 
     Args:
-        x: (N,) standardized points (zero mean, unit variance).
-        max_degree: maximum polynomial degree.
+        x: Standardized points (zero mean, unit variance), shape ``(N,)``.
+        max_degree: Maximum polynomial degree.
 
     Returns:
-        (N, max_degree + 1) matrix of basis values.
+        Matrix of basis values, shape ``(N, max_degree + 1)``.
     """
     N = x.shape[0]
     H = jnp.zeros((N, max_degree + 1))
@@ -55,11 +57,11 @@ def build_multi_index(D: int, p: int) -> np.ndarray:
     (constant term).
 
     Args:
-        D: number of dimensions.
-        p: maximum total polynomial degree.
+        D: Number of dimensions.
+        p: Maximum total polynomial degree.
 
     Returns:
-        (n_terms, D) integer array where n_terms = C(D+p, p).
+        Integer array of shape ``(n_terms, D)`` where n_terms = C(D+p, p).
     """
     indices: list[tuple[int, ...]] = []
 
@@ -91,14 +93,15 @@ def build_design_matrix(
     """Build the PCE design matrix Phi.
 
     Args:
-        X: (N, D) input samples, already mapped to the reference domain
-            ([-1,1] for uniform, standardized for Gaussian).
-        multi_index: (n_terms, D) multi-index array.
-        input_types: tuple of "uniform" or "gaussian" per dimension.
-        max_degree: maximum 1-D polynomial degree.
+        X: Input samples already mapped to the reference domain, shape
+            ``(N, D)``: [-1,1] for uniform, standardized for Gaussian.
+        multi_index: Multi-index array, shape ``(n_terms, D)``.
+        input_types: Tuple of "uniform" or "gaussian" per dimension.
+        max_degree: Maximum 1-D polynomial degree.
 
     Returns:
-        (N, n_terms) design matrix where Phi[n, alpha] = Psi_alpha(X_n).
+        Design matrix of shape ``(N, n_terms)`` where
+        Phi[n, alpha] = Psi_alpha(X_n).
     """
     N, D = X.shape
     # Pre-compute all 1-D basis values per dimension (N x max_degree+1 each).
@@ -129,20 +132,24 @@ def sobol_from_coefficients(
 ) -> tuple[Array, Array, Array]:
     """Compute Sobol indices from PCE coefficients (Sudret 2008).
 
-    Batched over any leading output-slice dims: the term axis is always last,
+    Batched over any leading output-slice dims. The term axis is always last,
     and every reduction contracts it in a single vectorized operation (masked
-    matmuls and one einsum) — no Python loop over slices or parameter pairs.
+    matmuls and one einsum). No Python loop runs over slices or parameter
+    pairs.
 
     Args:
-        coefficients: (..., n_terms) expansion coefficients; leading dims are
-            output slices (e.g. (T, K) for time-series outputs).
-        multi_index: (n_terms, D) multi-index array, shared by all slices.
+        coefficients: Expansion coefficients, shape ``(..., n_terms)``.
+            Leading dims are output slices, e.g. ``(T, K)`` for time-series
+            outputs.
+        multi_index: Multi-index array, shape ``(n_terms, D)``, shared by all
+            slices.
 
     Returns:
-        (S1, ST, S2) where:
-            S1: (..., D) first-order indices.
-            ST: (..., D) total-order indices.
-            S2: (..., D, D) second-order interaction indices (NaN diagonal).
+        Tuple ``(S1, ST, S2)`` where:
+            S1: First-order indices, shape ``(..., D)``.
+            ST: Total-order indices, shape ``(..., D)``.
+            S2: Second-order interaction indices with a NaN diagonal, shape
+                ``(..., D, D)``.
     """
     mi = np.asarray(multi_index)
     D = mi.shape[1]
@@ -175,7 +182,7 @@ def sobol_from_coefficients(
     # Second-order: for each unordered pair (i < j), sum the c_alpha^2 of terms
     # that activate exactly x_i and x_j. Enumerate the D*(D-1)/2 upper-triangle
     # pairs once (numpy, at trace time), so extraction is a single masked matmul
-    # over the term axis — the same shape as S1/ST, and half the work of
+    # over the term axis: the same shape as S1/ST, and half the work of
     # contracting the full symmetric (D, D) tensor.
     iu, ju = np.triu_indices(D, k=1)  # (n_pairs,) each
     pair_mask = active[:, iu] & active[:, ju] & (active_count == 2)[:, None]  # (n_terms, n_pairs)
@@ -205,15 +212,18 @@ def loo_error(
     slice columns.
 
     Args:
-        Phi: (N, n_terms) design matrix.
-        Y: (N,) outputs, or (N, M) with one column per output slice.
-        coefficients: (n_terms,) fitted coefficients, or (n_terms, M).
+        Phi: Design matrix, shape ``(N, n_terms)``.
+        Y: Outputs, shape ``(N,)``, or ``(N, M)`` with one column per output
+            slice.
+        coefficients: Fitted coefficients, shape ``(n_terms,)`` or
+            ``(n_terms, M)``.
         ridge: Tikhonov parameter used during fitting.
         gram_inv_PhiT: Pre-computed ``(Phi^T Phi + ridge*I)^{-1} Phi^T``.
             If provided, avoids recomputing the Gram factorization.
 
     Returns:
-        Scalar LOO RMSE for 1-D ``Y``, or (M,) per-slice LOO RMSE for 2-D.
+        Scalar LOO RMSE for 1-D ``Y``, or per-slice LOO RMSE of shape
+        ``(M,)`` for 2-D ``Y``.
     """
     residuals = Y - Phi @ coefficients  # (N,) or (N, M)
     if gram_inv_PhiT is None:

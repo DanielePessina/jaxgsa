@@ -1,11 +1,11 @@
 """Two-stage correlated sensitivity analysis: VKOGA surrogate, then indices.
 
 Implements the surrogate-based sensitivity analysis (SSA) of Hilhorst et al.
-(2024). Stage one fits a greedy kernel surrogate to the given ``(X, Y)`` data;
-stage two computes the correlated variance-based indices of Li et al. (2010)
+(2024). Stage one fits a greedy kernel surrogate to the given ``(X, Y)`` data.
+Stage two computes the correlated variance-based indices of Li et al. (2010)
 against that surrogate under a Gaussian copula. The split is what makes the
-method affordable: the indices need nested conditional sampling, which is
-hopeless against an expensive model but trivial against a kernel expansion.
+method affordable. The indices need nested conditional sampling, which is
+unaffordable against an expensive model but cheap against a kernel expansion.
 
 References:
     Hilhorst, Quicken, van de Vosse & Huberts (2024). Int. J. Numer. Meth.
@@ -82,16 +82,16 @@ def analyze_vkoga(
     ``(X, Y)`` data, then estimates the five correlated indices of Li et al.
     (2010) against it under a Gaussian copula.
 
-    The training design should be **independent and space-filling** even when
-    the analysis is correlated. The correlated measure concentrates on a ridge,
-    but ``S_TU`` conditions on the other parameters and then resamples ``X_i``
-    across its whole marginal; a surrogate trained only on correlated data
+    The training design must be independent and space-filling even when the
+    analysis is correlated. The correlated measure concentrates on a ridge, but
+    ``S_TU`` conditions on the other parameters and then resamples ``X_i``
+    across its whole marginal. A surrogate trained only on correlated data
     would be extrapolating for exactly those draws.
 
     Args:
         problem: Problem defining the parameters and their marginals.
-        X: ``(N, D)`` inputs in physical units.
-        Y: Outputs, ``(N,)``, ``(N, K)`` or ``(N, T, K)``.
+        X: Inputs in physical units, shape ``(N, D)``.
+        Y: Model outputs, shape ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
         correlation: Gaussian-copula dependency structure. ``None`` (default)
             reads ``problem.correlation`` and falls back to independent inputs
             when the problem declares none. A ``(D, D)`` matrix overrides the
@@ -119,8 +119,8 @@ def analyze_vkoga(
             ``None`` derives one from the memory budget.
 
     Returns:
-        A :class:`VKOGAResult` with ``S_TC``, ``S_TU``, ``S_U``, ``S_C`` and
-        ``S_IU``.
+        A :class:`VKOGAResult` with ``S_TC``, ``S_TU``, ``S_U``, ``S_C``, and
+        ``S_IU`` shaped ``(D,)``, ``(K, D)``, or ``(T, K, D)`` to mirror ``Y``.
 
     Raises:
         ValueError: If ``X``/``Y`` violate the output contract, if the problem
@@ -131,14 +131,13 @@ def analyze_vkoga(
         RuntimeError: If every cross-validation score is non-finite.
 
     Warns:
-        UserWarning: If any output slice has zero variance; if JAX is in
-            single precision, where the kernel solve loses accuracy for small
-            ``gamma`` (see :mod:`jaxgsa.vkoga`); if the cross-validated
+        UserWarning: In any of four cases. An output slice has zero variance.
+            JAX is in single precision, where the kernel solve loses accuracy
+            for small ``gamma`` (see :mod:`jaxgsa.vkoga`). The cross-validated
             surrogate error is a large fraction of the output standard
-            deviation, which makes every index untrustworthy; or if ``S_U``
-            had to be clipped to ``S_TU`` by a wide margin, which says the
-            additive component functions cannot represent the model's
-            interactions.
+            deviation, which makes every index untrustworthy. ``S_U`` had to be
+            clipped to ``S_TU`` by a wide margin, which says the additive
+            component functions cannot represent the model's interactions.
     """
     # Raise-early validation: every scalar argument is checked before any
     # expensive work (cross-validation, fitting, index estimation).
@@ -293,12 +292,22 @@ def _resolve_correlation(
 ) -> np.ndarray:
     """Turn the ``correlation`` argument into a validated latent matrix.
 
-    ``None`` reads ``problem.correlation``; independent when the problem
-    declares none. A matrix is an explicit per-call override and is
-    canonicalized like a constructor argument. Strings are rejected: the one
-    workflow for fitting a matrix from data is
+    ``None`` reads ``problem.correlation``, and falls back to independent
+    inputs when the problem declares none. A matrix is an explicit per-call
+    override and is canonicalized like a constructor argument. Strings are
+    rejected. The one workflow for fitting a matrix from data is
     ``problem.with_correlation(jaxgsa.sampling.fit_correlation(problem, X))``,
-    which makes explicit *which* sample the copula comes from.
+    which states in the call which sample the copula comes from.
+
+    Args:
+        problem: Problem whose declared correlation is the fallback.
+        correlation: Per-call override, shape ``(D, D)``, or ``None``.
+
+    Returns:
+        A canonicalized latent correlation matrix, shape ``(D, D)``.
+
+    Raises:
+        ValueError: If ``correlation`` is a string, or not a valid matrix.
     """
     if correlation is None:
         declared = problem.correlation
@@ -329,8 +338,17 @@ def _resolve_hyperparameters(
 ) -> tuple[float, float, float | None]:
     """Return ``(gamma, ridge, cv_rmse)``, cross-validating what was not given.
 
-    Searching a one-element grid is how a partially specified pair is handled,
-    so there is a single code path rather than four.
+    A partially specified pair is handled by searching a one-element grid for
+    the fixed member. That keeps one code path instead of four.
+
+    Args:
+        U: Training inputs in unit-cube coordinates, shape ``(N, D)``.
+        Y: Centred training outputs, shape ``(N, S)``.
+        gamma: Fixed RBF shape parameter, or ``None`` to cross-validate.
+        ridge: Fixed kernel regularisation, or ``None`` to cross-validate.
+        max_centers: Maximum kernel centres the greedy may select.
+        n_folds: Folds for the cross-validation.
+        seed: Seed for the fold assignment.
 
     Returns:
         The chosen ``gamma`` and ``ridge``, plus the pooled out-of-sample RMSE
@@ -384,8 +402,8 @@ def _warn_poor_surrogate(cv_rmse: float | None, Y_centered: Array) -> None:
     Args:
         cv_rmse: Pooled out-of-sample RMSE of the chosen hyperparameters, or
             ``None`` when the caller fixed both and no cross-validation ran.
-        Y_centered: ``(N, S)`` centred training outputs, the scale to compare
-            against.
+        Y_centered: Centred training outputs, shape ``(N, S)``. They set the
+            scale to compare against.
 
     Warns:
         UserWarning: If ``cv_rmse`` is above ``_CV_RMSE_WARN_FRACTION`` of the
@@ -413,19 +431,20 @@ def _warn_poor_surrogate(cv_rmse: float | None, Y_centered: Array) -> None:
 def _unit_evaluator(state, y_mean: Array):
     """Build the shared unit-cube evaluation kernel and its memory cost.
 
-    One place defines how a fitted state is evaluated — kernel expansion plus
-    the training mean — and what a row of that evaluation costs: the
-    ``(n, n_centers)`` kernel block dominates the transient memory, plus one
-    output row per prediction. Both the estimator-facing predictor and the
-    public ``predict`` plan build on it.
+    One place defines how a fitted state is evaluated: the kernel expansion
+    plus the training mean. It also defines what one row of that evaluation
+    costs. The ``(n, n_centers)`` kernel block dominates the transient memory,
+    and each prediction adds one output row. Both the estimator-facing
+    predictor and the public ``predict`` plan build on it.
 
     Args:
         state: Fitted (sliced) surrogate state.
-        y_mean: ``(S,)`` training output mean to restore.
+        y_mean: Training output mean to restore, shape ``(S,)``.
 
     Returns:
-        ``(kernel, bytes_per_row)``: a ``(n, D) unit-cube -> (n, S)``
-        callable and the per-row transient-memory estimate.
+        ``(kernel, bytes_per_row)``. The kernel maps ``(n, D)`` unit-cube rows
+        to ``(n, S)`` outputs. The second item is the per-row transient-memory
+        estimate.
     """
     n_centers = int(state.centers.shape[0])
     n_slices = int(state.coefficients.shape[1])
@@ -440,9 +459,18 @@ def _unit_evaluator(state, y_mean: Array):
 def _make_unit_predictor(state, y_mean: Array, batch_size: int | None):
     """Build the ``(n, D) unit-cube -> (n, S)`` callable the estimators use.
 
-    Returns a plain NumPy-in/NumPy-out function because the index estimators
-    are host-side quasi-Monte-Carlo loops; batching keeps the kernel matrix
+    The index estimators are host-side quasi-Monte-Carlo loops, so the returned
+    function is plain NumPy-in and NumPy-out. Batching keeps the kernel matrix
     within the configured memory budget for the millions of conditional draws.
+
+    Args:
+        state: Fitted (sliced) surrogate state.
+        y_mean: Training output mean to restore, shape ``(S,)``.
+        batch_size: Rows per batch, or ``None`` to derive one from the memory
+            budget.
+
+    Returns:
+        A callable mapping ``(n, D)`` unit-cube rows to ``(n, S)`` outputs.
     """
     kernel, bytes_per_row = _unit_evaluator(state, y_mean)
     compiled = jax.jit(kernel)
@@ -460,7 +488,7 @@ def _vkoga_predict_plan(result: VKOGAResult, X_new: Array) -> _PredictPlan:
 
     Args:
         result: Fitted result carrying the kernel state.
-        X_new: ``(N_new, D)`` inputs in physical units.
+        X_new: Inputs in physical units, shape ``(N_new, D)``.
 
     Returns:
         A ``_PredictPlan`` whose kernel returns predictions shaped to the

@@ -1,7 +1,15 @@
 # RS-HDMR Example
 
-Use HDMR when you already have arbitrary `(X, Y)` pairs or when you want a
-surrogate that can predict at new inputs.
+By the end of this page you will have sensitivity indices computed from
+`(X, Y)` pairs you already had, with no special sampling design, plus a fitted
+surrogate that predicts the model output at new inputs for almost no cost.
+
+Random sampling high-dimensional model representation (RS-HDMR) writes the
+model as a sum of terms. There is one term per input on its own, and with
+`maxorder=2` one more term per input pair. Fitting those terms by regression
+gives both the surrogate and the indices: the share of output variance a term
+accounts for is that term's sensitivity index. Because it is a regression, it
+accepts whatever samples you have.
 
 ## Import style
 
@@ -12,6 +20,11 @@ from jaxgsa import hdmr
 ```
 
 ## Sensitivity analysis from random samples
+
+This example draws uniform random inputs to stand in for data you already have.
+`maxorder=2` asks for pair terms as well as single-input terms.
+`slice_chunk_size` caps how many output slices are fitted at once, which bounds
+peak memory on large outputs.
 
 ```python
 import jax
@@ -41,13 +54,29 @@ print("Sb:", result.Sb)
 print("RMSE:", result.rmse)
 ```
 
+Start with `result.rmse`, which is the fit error of the surrogate against the
+training outputs. The indices describe the surrogate, not the model, so a poor
+fit means every other number on the result describes the wrong function. Once
+the fit holds up, compare `S1` and `ST` per input. Where `ST` is much larger
+than `S1`, the input works through interactions, and `result.Sa` says with
+which partner: it carries one entry per term, and `result.terms` names those
+terms.
+
 ## Use the emulator
+
+The fit leaves behind a surrogate you can call directly. Predicting at inputs
+the fit already saw is the cheapest sanity check on it.
 
 ```python
 Y_pred = result.predict(X[:5])
 print("Prediction shape:", Y_pred.shape)
 print("Absolute residuals:", jnp.abs(Y[:5] - Y_pred))
 ```
+
+Compare the printed residuals against the spread of `Y` itself. Residuals that
+are a small part of the output range mean the expansion captured the response.
+A leftover gap points at effects the chosen `maxorder` and basis cannot
+represent, and raising `maxorder` is the way to test that.
 
 `prenormalize=True` applies SALib-style output standardization once over the
 sample axis before fitting the surrogate. The stored emulator still returns
@@ -59,6 +88,10 @@ predictions on the original output scale.
   `result.Sa`.
 - `result.ST` is the total contribution per parameter after summing all terms
   that involve that parameter.
+- `result.Sa` is the structural variance fraction per term, and `result.Sb` is
+  the correlative one. `Sb` is near zero for independent inputs, as in this
+  example, and becomes the correlation diagnostic when the inputs are
+  dependent. See [Correlated Inputs](/examples/correlated-inputs).
 - `result.terms` tells you which columns in `Sa`, `Sb`, and `S` correspond to
   first-order and interaction terms.
 - `result.rmse` helps you decide whether the fitted surrogate is accurate enough

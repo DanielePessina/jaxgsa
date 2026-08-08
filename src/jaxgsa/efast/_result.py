@@ -14,21 +14,21 @@ from jaxgsa.problem import Problem
 class EFASTResult:
     """Extended FAST sensitivity analysis results.
 
-    Stores first-order (S1) and total-order (ST) Sobol indices computed
-    via Fourier amplitude decomposition. eFAST does not produce
-    second-order interaction indices.
+    Stores first-order (S1) and total-order (ST) Sobol indices computed from a
+    Fourier amplitude decomposition. eFAST produces no second-order
+    interaction indices.
 
-    Shapes follow the convention ``(T, K, D)`` for time-resolved analyses,
-    ``(K, D)`` when the time dimension is squeezed, or ``(D,)`` for scalar
-    output, where *K* is the number of outputs and *D* the number of
-    parameters.
+    Index shapes mirror the shape of the analyzed output Y: ``(D,)`` for a
+    scalar output, ``(K, D)`` when the time dimension is squeezed, or
+    ``(T, K, D)`` for time-resolved analyses. *D* is the number of parameters,
+    *K* the number of outputs, and *T* the number of time steps.
 
     Attributes:
-        S1: First-order indices — ``(D,)``, ``(K, D)``, or ``(T, K, D)``.
-        ST: Total-order indices — same shape as S1.
+        S1: First-order indices, shape ``(D,)`` / ``(K, D)`` / ``(T, K, D)``.
+        ST: Total-order indices, same shape as ``S1``.
         problem: Problem definition used for the analysis.
-        omega_0: The primary frequency used in the analysis.
-        M: The interference factor (number of harmonics summed).
+        omega_0: Primary frequency used in the analysis.
+        M: Interference factor, the number of harmonics summed.
     """
 
     S1: Array

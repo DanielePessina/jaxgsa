@@ -23,53 +23,56 @@ if TYPE_CHECKING:
 class VKOGAResult(SurrogateResult):
     """Correlated variance-based sensitivity indices from a VKOGA surrogate.
 
-    Produced by :func:`jaxgsa.vkoga.analyze`. Every index has shape
-    ``(..., D)``, where the leading axes follow the output contract: no leading
-    axis for ``(N,)`` outputs, ``(K, D)`` for ``(N, K)``, and ``(T, K, D)`` for
-    ``(N, T, K)``.
+    Produced by :func:`jaxgsa.vkoga.analyze`. Index arrays have shape ``(D,)``
+    for a scalar output, ``(K, D)`` for a multi-output model, and ``(T, K, D)``
+    for a time-resolved analysis.
 
-    Under *independent* inputs the indices collapse to the familiar ones:
+    Under independent inputs the indices collapse to the familiar ones.
     ``S_TC`` is the first-order Sobol' index ``S1``, ``S_TU`` is the total
     index ``S_T``, ``S_U`` equals ``S_TC``, and ``S_C`` is zero. Under
-    dependence they separate (Li et al. 2010):
+    dependence they separate (Li et al. 2010).
 
     Attributes:
-        S_TC: Total *correlated* index, exactly ``V(E(Y|X_i)) / V(Y)``. What
-            ``X_i`` explains through itself **and** through its correlation
-            with the other parameters. The word "total" names the pathways it
-            counts, not the interaction order: the formula is a first-order
-            conditional variance, so ``S_TC`` is not a total-order Sobol'
-            index. The right measure for input prioritisation: it answers
-            "how much variance would I remove by learning ``X_i``".
-        S_TU: Total *uncorrelated* index, ``E(V(Y|X_-i)) / V(Y)``. What only
-            ``X_i`` can explain, with every correlated pathway removed. The
-            right measure for input fixing: a parameter with ``S_TU`` near
-            zero can be frozen.
-        S_U: The independent contribution of ``X_i`` alone,
-            ``E(V(f_i|X_-i)) / V(Y)``, where ``f_i`` is the fitted additive
-            component of the output. This is the decorrelated first-order
-            index of Mara & Tarantola (2012). It is clipped to at most
-            ``S_TU``; a wide clip raises a ``UserWarning``.
-        S_C: The correlation-borne contribution, ``S_TC - S_U``. Can be
-            negative when a correlation opposes a direct effect.
-        S_IU: Independent interaction contribution, ``S_TU - S_U``. Zero for
-            an additive model, and non-negative by construction of the
-            ``S_U`` clip.
-        problem: The problem analysed.
-        correlation: ``(D, D)`` Gaussian-copula correlation matrix the indices
-            were computed under. The identity when inputs were treated as
-            independent.
-        variance: Output variance under the correlated input measure, one
-            value per output slice.
+        S_TC: Total correlated index ``V(E(Y|X_i)) / V(Y)``, shape
+            ``(..., D)``. It counts what ``X_i`` explains through itself and
+            through its correlation with the other parameters. The word
+            "total" names the pathways it counts, not the interaction order:
+            the formula is a first-order conditional variance, so ``S_TC`` is
+            not a total-order Sobol' index. Rank parameters by ``S_TC`` to
+            decide which ones to measure, because it answers how much variance
+            learning ``X_i`` would remove.
+        S_TU: Total uncorrelated index ``E(V(Y|X_-i)) / V(Y)``, shape
+            ``(..., D)``. It counts what only ``X_i`` can explain, with every
+            correlated pathway removed. Rank parameters by ``S_TU`` to decide
+            which ones to fix: a parameter with ``S_TU`` near zero can be
+            frozen.
+        S_U: Independent contribution of ``X_i`` alone,
+            ``E(V(f_i|X_-i)) / V(Y)``, shape ``(..., D)``. Here ``f_i`` is the
+            fitted additive component of the output, so this is the
+            decorrelated first-order index of Mara & Tarantola (2012). It is
+            clipped to at most ``S_TU``, and a wide clip raises a
+            ``UserWarning``.
+        S_C: Correlation-borne contribution ``S_TC - S_U``, shape ``(..., D)``.
+            It can be negative when a correlation opposes a direct effect.
+        S_IU: Independent interaction contribution ``S_TU - S_U``, shape
+            ``(..., D)``. Zero for an additive model, and non-negative by
+            construction of the ``S_U`` clip.
+        problem: Problem definition used for the analysis.
+        correlation: Gaussian-copula correlation matrix the indices were
+            computed under, shape ``(D, D)``. The identity when inputs were
+            treated as independent.
+        variance: Output variance under the correlated input measure, one value
+            per output slice (shape ``()``, ``(K,)``, or ``(T, K)``).
         n_centers: Number of kernel centres the greedy selected.
         gamma: Fitted RBF shape parameter.
         ridge: Fitted regularisation parameter.
-        rmse: Training-fit RMSE per output slice. It measures how well the
-            surrogate reproduces the rows it was fitted on, so it is
-            optimistic; read ``cv_rmse`` to judge the fit.
-        cv_rmse: Pooled out-of-sample RMSE of the chosen hyperparameters, from
-            the k-fold cross-validation. One scalar for the whole fit. This is
-            the honest accuracy estimate: every index is measured against the
+        rmse: Training-fit RMSE, one value per output slice (shape ``()``,
+            ``(K,)``, or ``(T, K)``). It measures how well the surrogate
+            reproduces the rows it was fitted on, so it is optimistic. Read
+            ``cv_rmse`` to judge the fit.
+        cv_rmse: Pooled out-of-sample RMSE of the chosen hyperparameters from
+            the k-fold cross-validation, one scalar for the whole fit. This is
+            the honest accuracy estimate. Every index is measured against the
             surrogate, so a large ``cv_rmse`` relative to ``std(Y)`` makes the
             indices unreliable, and ``analyze`` warns in that case. It is
             ``None`` when the caller fixed both ``gamma`` and ``ridge``,
@@ -96,9 +99,15 @@ class VKOGAResult(SurrogateResult):
     def _predict_plan(self, X: Array) -> _PredictPlan:
         """Plan a batched evaluation of the fitted surrogate at ``X``.
 
-        Maps ``X`` through the same marginal-CDF transform used at fit time --
-        the kernel is isotropic, so it only behaves if every column is on a
+        Maps ``X`` through the same marginal-CDF transform used at fit time.
+        The kernel is isotropic, so it only behaves if every column is on a
         common scale. See :meth:`predict` for the full contract.
+
+        Args:
+            X: Points to predict at, shape ``(N, D)``.
+
+        Returns:
+            A batched evaluation plan for the fitted surrogate.
         """
         from jaxgsa.vkoga._analyze import _vkoga_predict_plan
 
@@ -108,9 +117,9 @@ class VKOGAResult(SurrogateResult):
         """Not available for a kernel surrogate.
 
         Shapley effects need a decomposition of the output variance into terms
-        with known parameter membership. A VKOGA expansion is a sum over
-        *kernel centres*, not over parameter subsets: every centre involves
-        every parameter, so there is no membership matrix to allocate from.
+        with known parameter membership. A VKOGA expansion is a sum over kernel
+        centres, not over parameter subsets. Every centre involves every
+        parameter, so there is no membership matrix to allocate from.
 
         Raises:
             NotImplementedError: Always. Use ``jaxgsa.hdmr`` or ``jaxgsa.pce``
@@ -133,6 +142,7 @@ class VKOGAResult(SurrogateResult):
         return not is_independent(self.correlation)
 
     def __repr__(self) -> str:
+        """Return a concise summary showing the parameter and centre counts."""
         D = len(self.problem.names)
         kind = "correlated" if self.is_correlated else "independent"
         return f"VKOGAResult(D={D}, n_centers={self.n_centers}, {kind})"
@@ -141,8 +151,13 @@ class VKOGAResult(SurrogateResult):
         """Convert results to a labeled xarray Dataset.
 
         Args:
-            time_coords: Optional coordinate values for the ``time``
-                dimension of time-series results; defaults to ``0..T-1``.
+            time_coords: Coordinate values for the time dimension when
+                ``S_TC.ndim == 3``. Defaults to integer indices.
+
+        Returns:
+            An ``xr.Dataset`` with variables ``S_TC``, ``S_TU``, ``S_U``,
+            ``S_C``, ``S_IU``, ``variance``, ``correlation``, and optionally
+            ``rmse``.
         """
         s_tc = np.asarray(self.S_TC)
         dims, coords = _dims_and_coords(s_tc.ndim, s_tc.shape, self.problem, time_coords)

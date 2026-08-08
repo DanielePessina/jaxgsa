@@ -1,8 +1,8 @@
 """RS-HDMR (Random Sampling High-Dimensional Model Representation) analysis.
 
 Computes ANCOVA-based sensitivity indices from arbitrary ``(X, Y)`` pairs
-using B-spline surrogate modelling. The result retains the fitted surrogate
-for prediction and Shapley effects.
+using B-spline surrogate modelling. The result keeps the fitted surrogate, so
+it can also predict at new points and give Shapley effects.
 """
 
 import itertools
@@ -39,7 +39,7 @@ from jaxgsa.problem import Problem
 
 @lru_cache(maxsize=None)
 def _get_hdmr_static_data(D: int, maxorder: int, m: int) -> tuple:
-    """Cache host-side HDMR term metadata and basis index tables."""
+    """Build and cache the HDMR term metadata and basis index tables (host side)."""
     # Enumerate all parameter index combinations up to maxorder.
     # c1: single dimensions, c2: pairs, c3: triples.
     c1 = tuple(range(D))
@@ -80,7 +80,7 @@ def _get_batched_hdmr_kernel(
     lambdax: float,
     N: int,
 ):
-    """Cache the final batched HDMR wrapper by semantic signature."""
+    """Build and cache the jitted, vmapped HDMR fitting kernel."""
     # Caching by (D, maxorder, m, maxiter, lambdax, N) avoids re-tracing the
     # JIT+vmap wrapper when analyze_hdmr is called repeatedly with the same
     # structural parameters but different data.
@@ -110,7 +110,7 @@ def _build_term_labels(
     c2: tuple[tuple[int, int], ...],
     c3: tuple[tuple[int, int, int], ...],
 ) -> tuple[str, ...]:
-    """Build human-readable term labels."""
+    """Build one human-readable label per HDMR term, in term order."""
     names = problem.names
     labels = [names[i] for i in c1]
     labels += ["/".join(names[i] for i in combo) for combo in c2]
@@ -124,9 +124,9 @@ def _compute_ST(
     c3: Array,
     n1: int,
 ) -> Array:
-    """Compute total-order indices by summing S over terms involving each param."""
+    """Sum S over every term that contains a parameter, giving its total index."""
     # ST_j = S_j + sum_{i<j or j<i} S_{ij} + sum_{i<j<k, j in {i,j,k}} S_{ijk}
-    # i.e. total-order for param j includes its first-order term plus every
+    # i.e. the total for parameter j is its first-order term plus every
     # interaction term (2nd and 3rd order) that contains j.
     ST = S[..., :n1]  # First-order terms map 1:1 to parameters.
 
@@ -173,9 +173,9 @@ def _warn_correlated_index_reading(problem: Problem) -> None:
     """Warn once that ST and S1 carry the SCSA reading on a correlated problem.
 
     HDMR accepts correlated inputs, and the ANCOVA split stays valid. The two
-    aggregate fields are the trap: ``ST`` is the SCSA total of Li et al.
-    (2010) Section 2.2.3, not a Sobol total, and ``S1`` is a structural
-    share only. The paper itself invites the confusion, reusing the symbol
+    aggregate fields are the risk. ``ST`` is the SCSA total of Li et al.
+    (2010) Section 2.2.3, not a Sobol total. ``S1`` is a structural share
+    only. The paper itself invites the confusion: it reuses the symbol
     ``S_Ti`` for both this term-membership sum and the classical
     conditional-variance total of its Eq. (4). Both are valid published
     quantities that are easy to misread, so this warns rather than raises.
@@ -226,18 +226,18 @@ def analyze_hdmr(
     delegates to :func:`_analyze_hdmr_core`. See that function for the full
     parameter and return documentation.
 
-    Correlated inputs are supported: the ANCOVA decomposition splits each
-    term's variance share into a structural part (``Sa``) and a
-    correlation-induced part (``Sb``), so a declared ``problem.correlation``
-    is welcome. ``Sb`` doubles as a correlation diagnostic, and
+    Correlated inputs are supported, so a declared ``problem.correlation`` is
+    welcome. The ANCOVA decomposition splits each term's variance share into a
+    structural part (``Sa``) and a correlation-induced part (``Sb``). ``Sb``
+    doubles as a correlation diagnostic, and
     ``result.shapley(include_correlative=True)`` folds it into the Shapley
     allocation.
 
     Raises:
         ValueError: If ``X`` or ``Y`` violates the shared shape contract, or
-            ``problem`` has categorical parameters (the B-spline component
+            ``problem`` has categorical parameters. The B-spline component
             functions need an orderable axis, which an unordered level code
-            does not give). :func:`_analyze_hdmr_core` raises for the
+            does not give. :func:`_analyze_hdmr_core` raises for the
             remaining argument checks.
     """
     X = jnp.asarray(X)
@@ -285,59 +285,61 @@ def _analyze_hdmr_core(
 
     Compute sensitivity indices via RS-HDMR with B-spline surrogate modelling.
 
-    Works with **any** set of (X, Y) pairs -- no structured sampling required,
-    so it suits existing datasets and expensive models where Sobol/eFAST
-    sampling schemes are unaffordable. Decomposes the input-output
-    relationship into hierarchical component functions (one per parameter,
-    parameter pair, ...) via B-spline regression, then derives ANCOVA-based
-    sensitivity indices from the fitted components. Unlike pure Sobol
+    Works with any set of (X, Y) pairs. No structured sampling is required, so
+    it suits existing datasets and expensive models where Sobol/eFAST sampling
+    schemes are unaffordable. B-spline regression decomposes the input-output
+    relationship into hierarchical component functions: one per parameter, one
+    per parameter pair, and so on. The ANCOVA-based sensitivity indices then
+    come from the fitted components. Unlike pure Sobol
     estimators, the ANCOVA split into structural (Sa) and correlative (Sb)
     parts remains meaningful when inputs are correlated.
 
     Args:
         problem: Parameter names and distributions.
-        X: (N, D) input samples.
-        Y: (N,), (N, K), or (N, T, K) model outputs. A 2D array is read as
-            (N, K) unless ``problem.output_names`` has exactly one entry, in
-            which case the columns are T timepoints of that single output.
+        X: Input samples, shape ``(N, D)``.
+        Y: Model outputs, shape ``(N,)`` / ``(N, K)`` / ``(N, T, K)``. A 2-D
+            array is read as ``(N, K)`` unless ``problem.output_names`` has
+            exactly one entry. In that case the columns are T timepoints of
+            that single output.
         prenormalize: When ``True``, standardize each output slice over the
             sample axis (subtract mean, divide by standard deviation) before
-            fitting, which puts disparate output magnitudes on an equal
-            numerical footing. The indices are ratios and unaffected;
-            predictions from the returned emulator are still on the original
-            output scale. Defaults to ``False``.
-        maxorder: Maximum HDMR expansion order (1, 2, or 3): the largest
-            interaction size modelled. Order 2 (default) captures pairwise
-            interactions; 3 adds triples but the term count and fit cost grow
-            combinatorially. Clamped to D (with a warning) when D < maxorder.
+            fitting. That puts disparate output magnitudes on an equal
+            numerical footing. The indices are ratios, so they are
+            unaffected. Predictions from the returned emulator are still on
+            the original output scale. Defaults to ``False``.
+        maxorder: Maximum HDMR expansion order (1, 2, or 3), which is the
+            largest interaction size modelled. Order 2 (default) captures
+            pairwise interactions. Order 3 adds triples, but the term count
+            and the fit cost grow combinatorially. Clamped to D (with a
+            warning) when D < maxorder.
         maxiter: Maximum backfitting iterations for the first-order terms.
-            The default rarely needs raising; iteration stops early once the
-            coefficients stop changing.
+            The default rarely needs raising, because iteration stops early
+            once the coefficients stop changing.
         m: Number of B-spline intervals per dimension (basis size m + 3).
-            Larger m resolves sharper features of the component functions but
-            multiplies the coefficient count (per-term basis grows as
-            (m+3)^order) and needs more samples to avoid overfitting.
-        lambdax: Tikhonov regularization strength. Increase for noisy Y or
-            small N (smoother, more stable components); decrease if genuine
-            sharp features are being oversmoothed.
+            Larger m resolves sharper features of the component functions.
+            It also multiplies the coefficient count (the per-term basis grows
+            as (m+3)^order) and needs more samples to avoid overfitting.
+        lambdax: Tikhonov regularization strength. Increase it for noisy Y or
+            small N, which gives smoother and more stable components.
+            Decrease it if genuine sharp features are being oversmoothed.
         slice_chunk_size: Maximum number of (T, K) output slices fitted per
-            vmap batch on the in-memory (non-streamed) path. Caps peak device
-            memory for large T*K; smaller values trade speed for memory.
-            ``None`` (default) derives the chunk size from the active
-            memory budget (``jaxgsa.config.set_memory_budget``), since the
+            vmap batch on the in-memory (non-streamed) path. It caps peak
+            device memory for large T*K, and a smaller value trades speed for
+            memory. ``None`` (default) derives the chunk size from the active
+            memory budget (``jaxgsa.config.set_memory_budget``), because the
             per-slice cost inside the fitting kernel scales with
             ``N * n_terms``. Ignored when the fit streams over rows (see
             ``batch_size``).
         batch_size: Rows of ``X``/``Y`` processed per batch during the fit
             (the package-wide ``batch_size`` convention). ``None`` (default)
             keeps the in-memory fit unless its estimated resident memory
-            (the full-N B-spline bases plus the per-slice kernel transients,
-            see :func:`jaxgsa.hdmr._stream._full_fit_bytes`) exceeds the
-            active memory budget, in which case the fit streams over
-            auto-sized row batches. An explicit int always forces the
-            streamed fit with that many rows per batch. Both fit paths
-            solve the same regressions and the same F-test; results differ
-            only at the level of float32 summation order.
+            exceeds the active memory budget, in which case the fit streams
+            over auto-sized row batches. That estimate covers the full-N
+            B-spline bases plus the per-slice kernel transients: see
+            :func:`jaxgsa.hdmr._stream._full_fit_bytes`. An explicit int
+            always forces the streamed fit with that many rows per batch.
+            Both fit paths solve the same regressions and the same F-test.
+            Results differ only at the level of float32 summation order.
 
     Returns:
         HDMRResult with per-term indices Sa, Sb, S, per-parameter ST,
@@ -345,39 +347,39 @@ def _analyze_hdmr_core(
         surrogate state and its RMSE.
 
         ``ST`` is the SCSA total: ``ST_i = sum over u containing i of
-        (Sa_u + Sb_u)``, defined in Section 2.2.3 of Li et al. (2010) from
+        (Sa_u + Sb_u)``. Section 2.2.3 of Li et al. (2010) defines it from
         the per-term indices of their Eqs. (19)-(22). It is the same
         convention as SALib's HDMR. With independent inputs the
         correlative shares vanish and it reduces to the ordinary Sobol
         total-order index.
 
     Warning:
-        With correlated inputs, ``ST`` is **not** a Sobol total-order index.
-        It can be negative, it is not bounded in ``[0, 1]``, and it does not
-        measure the expected reduction of output variance from fixing a
-        parameter. Do not use it as a fixing criterion. It is also not
-        comparable with the ``ST`` of ``jaxgsa.kucherenko`` or the ``S_TU``
-        of ``jaxgsa.vkoga``; use one of those when you need a genuine total
-        under dependence. ``S1`` is the structural share only, not the Sobol
-        first-order index. The per-term ``Sa``, ``Sb`` and ``S`` fields keep
-        their ANCOVA meaning. A correlated problem emits one ``UserWarning``
-        that says this.
+        With correlated inputs, ``ST`` is not a Sobol total-order index. It
+        can be negative. It is not bounded in ``[0, 1]``. It does not measure
+        the expected reduction of output variance from fixing a parameter. Do
+        not use it as a fixing criterion. It is also not comparable with the
+        ``ST`` of ``jaxgsa.kucherenko`` or the ``S_TU`` of ``jaxgsa.vkoga``.
+        Use one of those when you need a genuine total under dependence.
+        ``S1`` is the structural share only, not the Sobol first-order index.
+        The per-term ``Sa``, ``Sb`` and ``S`` fields keep their ANCOVA
+        meaning. A correlated problem emits one ``UserWarning`` that says
+        this.
 
     Raises:
         ValueError: If ``N < 300``, ``maxorder`` is not 1/2/3, an explicit
             ``slice_chunk_size < 1`` or ``batch_size < 1`` is passed, or
-            ``problem`` has categorical parameters (the B-spline component
+            ``problem`` has categorical parameters. The B-spline component
             functions need an orderable axis, which an unordered level code
-            does not give). The gate on categorical parameters runs in the
+            does not give. The gate on categorical parameters runs in the
             public :func:`analyze_hdmr` wrapper.
 
     Note:
-        On the in-memory path (and independently of ``slice_chunk_size``),
-        the fit materializes full-N B-spline basis tensors of roughly
-        ``N * (m+3)^2 * n2`` floats at order 2 and ``N * (m+3)^3 * n3``
-        floats at order 3 (``n2``/``n3`` = number of parameter
-        pairs/triples). When that footprint exceeds the memory budget the
-        fit switches to the row-streamed path automatically.
+        On the in-memory path, the fit materializes full-N B-spline basis
+        tensors of roughly ``N * (m+3)^2 * n2`` floats at order 2 and
+        ``N * (m+3)^3 * n3`` floats at order 3 (``n2``/``n3`` = number of
+        parameter pairs/triples). ``slice_chunk_size`` does not change that
+        footprint. When it exceeds the memory budget, the fit switches to the
+        row-streamed path automatically.
     """
     N, D = X.shape
     # B-spline regression with backfitting needs a reasonable sample size
@@ -638,10 +640,10 @@ def _hdmr_predict_plan(result: HDMRResult, X_new: Array) -> _PredictPlan:
     """Build the prediction plan behind :meth:`HDMRResult.predict`.
 
     Applies the same CDF -> [0,1] transform used during fitting to the
-    (already validated) inputs and packages the per-row transient cost
+    (already validated) inputs. It then packages the per-row transient cost
     together with a kernel that reconstructs ``f0 + sum of component
-    functions``; the shared template in
-    :class:`jaxgsa._core.surrogate.SurrogateResult` runs the kernel in row
+    functions``. The shared template in
+    :class:`jaxgsa._core.surrogate.SurrogateResult` runs that kernel in row
     batches sized against a transient-memory budget. The kernel also inverts
     the output standardization when the fit used ``prenormalize=True``, so
     batched predictions land on the original output scale.
@@ -671,9 +673,9 @@ def _hdmr_predict_plan(result: HDMRResult, X_new: Array) -> _PredictPlan:
 
     # Hoist the static basis index tables out of the per-batch path. Each
     # higher_orders entry is (basis builder, term index table, tensor-product
-    # index table, coefficients) for one interaction order. Alongside, track
-    # the transient footprint per prediction row -- each basis tensor, its
-    # build temporaries (2 gathered factors for B2, 3 for B3), and the
+    # index table, coefficients) for one interaction order. The loop also
+    # tracks the transient footprint per prediction row: each basis tensor,
+    # its build temporaries (2 gathered factors for B2, 3 for B3), and the
     # pre-sum einsum intermediate of _emulator_contract, (slices, n_terms).
     m1 = C1.shape[-2]
     D = C1.shape[-1]

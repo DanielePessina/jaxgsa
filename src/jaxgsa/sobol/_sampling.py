@@ -1,13 +1,14 @@
 """Sobol/Saltelli sampling with unique user-facing rows.
 
-The public contract of this module is intentionally split in two layers:
+The public contract of this module has two layers:
 
 1. ``sample()`` returns only the unique rows that a user should evaluate.
 2. ``SobolSamples`` also carries enough metadata to reconstruct the full
    expanded Saltelli layout later inside :func:`jaxgsa.sobol.analyze`.
 
-This avoids wasted model evaluations in low-dimensional cases where the
-expanded Saltelli design contains exact duplicate rows.
+This split avoids wasted model evaluations. In low dimensions the expanded
+Saltelli design contains exact duplicate rows, and evaluating a model twice
+on the same input buys nothing.
 """
 
 from __future__ import annotations
@@ -43,10 +44,10 @@ class SobolSamples(UniqueDesignSamples):
     ``samples`` (in order) and pass this object together with the outputs to
     :func:`jaxgsa.sobol.analyze`.
 
-    Note the two row counts: ``n_runs`` is the number of *unique* rows you
-    must evaluate (one model run per row), while ``n_expanded`` is the
-    (larger or equal) pre-deduplication size of the full Saltelli design that
-    the analysis reconstructs internally.
+    The object carries two row counts. ``n_runs`` is the number of unique rows
+    you must evaluate, one model run per row. ``n_expanded`` is the size of the
+    full Saltelli design before deduplication, which the analysis reconstructs
+    internally. ``n_expanded`` is always greater than or equal to ``n_runs``.
 
     ``samples`` is a deduplicated evaluation set, not a distributional
     sample. Duplicate rows are collapsed, so the empirical marginal of a
@@ -56,24 +57,24 @@ class SobolSamples(UniqueDesignSamples):
     about ``[0.84, 0.16]``. The declared marginal is recovered only in the
     expanded design, which ``analyze`` rebuilds through
     ``expanded_to_unique``, so the indices are correct. Evaluate
-    ``samples`` and pass the outputs to ``analyze``; do not reuse
+    ``samples`` and pass the outputs to ``analyze``. Do not reuse
     ``samples`` on its own as a Monte Carlo design.
 
     Attributes:
-        samples: Unique rows to evaluate with the user's model. Shape
-            ``(n_runs, D)`` where ``D`` is the number of parameters, in
-            physical units (each Sobol marginal transformed into the
-            problem's declared input distribution). Deduplicated, so its
-            empirical marginal is distorted -- see the note above.
+        samples: Unique rows to evaluate with the user's model, shape
+            ``(n_runs, D)``. The values are in physical units: each Sobol
+            marginal is transformed into the problem's declared input
+            distribution. The rows are deduplicated, so the empirical marginal
+            is distorted (see the paragraph above).
         sample_ids: Stable integer identifiers aligned 1:1 with ``samples``.
-            Useful for joining model outputs back onto the sampling table.
+            Use them to join model outputs back onto the sampling table.
         n_expanded: Row count of the full expanded Saltelli layout before
             deduplication. This is the number of rows analyzed internally.
-        expanded_to_unique: Integer index map of shape ``(n_expanded,)``.
-            For each expanded Saltelli row, gives the corresponding row index in
+        expanded_to_unique: Integer index map, shape ``(n_expanded,)``. For
+            each expanded Saltelli row, it gives the matching row index in
             ``samples``.
-        base_n: Number of base Sobol points used to construct the Saltelli
-            design. Always a power of 2.
+        base_n: Number of base Sobol points used to build the Saltelli design.
+            Always a power of 2.
         n_params: Number of problem dimensions ``D``.
         calc_second_order: Whether the expanded design includes the extra
             cross-matrices needed for second-order Sobol indices.
@@ -100,26 +101,26 @@ class SobolSamples(UniqueDesignSamples):
     ) -> SobolSamples | tuple[SobolSamples, np.ndarray]:
         """Return a smaller ``SobolSamples`` by prefix-slicing to a lower ``base_n``.
 
-        Sobol sequences are prefix-nested: the first *K* base points of a
-        draw with *N > K* base points are bit-identical to drawing *K*
-        base points directly (same seed and scramble).  This means you can
-        simulate the model once at the largest ``base_n`` and recover exact
-        results for any smaller power-of-2 ``base_n`` by slicing — no
-        re-simulation needed.
+        Sobol sequences are prefix-nested. The first ``K`` base points of a
+        draw with ``N > K`` base points are bit-identical to drawing ``K`` base
+        points directly, given the same seed and scramble. So you can simulate
+        the model once at the largest ``base_n``, then slice to recover exact
+        results for any smaller power-of-2 ``base_n``. No re-simulation is
+        needed.
 
-        Optionally pass ``Y`` (model outputs aligned with ``samples``) to
-        get the corresponding output slice back — similar to how
-        ``sklearn.model_selection.train_test_split`` accepts both *X* and
-        *y*.
+        Pass ``Y`` (model outputs aligned with ``samples``) to get the matching
+        output slice back. This mirrors how
+        ``sklearn.model_selection.train_test_split`` accepts both ``X`` and
+        ``y``.
 
-        This property does **not** hold for Latin Hypercube Sampling (LHS),
-        whose stratification depends on *N*.
+        Latin Hypercube Sampling (LHS) lacks this property, because its
+        stratification depends on ``N``.
 
         Args:
-            base_n: Target base size (must be a power of 2 and
-                ``<= self.base_n``).
-            Y: Model outputs with shape ``(n_runs, ...)``.  When provided,
-                the matching prefix is returned alongside the new result.
+            base_n: Target base size. Must be a power of 2 and
+                ``<= self.base_n``.
+            Y: Model outputs, shape ``(n_runs, ...)``. When given, the matching
+                prefix is returned alongside the new result.
 
         Returns:
             ``SobolSamples`` when called without ``Y``, or
@@ -161,49 +162,50 @@ class SobolSamples(UniqueDesignSamples):
     def to_morris(self, *, verbose: bool = True) -> MorrisSamples:
         """Reinterpret this Saltelli design as a radial Morris design.
 
-        A Saltelli design already *is* a Morris radial (star) design: within
-        each base point, the row ``A`` and the ``D`` rows ``AB_j`` differ in
-        exactly one parameter, which is what an elementary effect needs.
-        Campolongo et al. (2011) build the radial design from a ``2D``-dimensional
-        Sobol' sequence for precisely this reason, and
-        :func:`jaxgsa.sobol.sample` draws the same sequence the same way.
+        A Saltelli design is already a Morris radial (star) design. Within one
+        base point, the row ``A`` and the ``D`` rows ``AB_j`` differ in exactly
+        one parameter, which is what an elementary effect needs. Campolongo
+        et al. (2011) build the radial design from a ``2D``-dimensional Sobol'
+        sequence for this reason, and :func:`jaxgsa.sobol.sample` draws the
+        same sequence the same way.
 
-        The two methods then weight the same increments differently. Writing
-        ``EE_j = (f(AB_j) - f(A)) / delta_j`` with ``delta_j = B_j - A_j``,
-        Jansen's total-order estimator is ``E[(delta_j * EE_j)^2] / (2 Var Y)``
-        while Morris reports ``mu_star = E|EE_j|``. So screening measures come
-        out of a design you have already paid for — **no extra model
-        evaluations**. Pass the returned object and your existing ``Y`` (the
-        same array you would pass to :func:`jaxgsa.sobol.analyze`) to
+        The two methods then weight the same increments differently. Write
+        ``EE_j = (f(AB_j) - f(A)) / delta_j`` with ``delta_j = B_j - A_j``.
+        Jansen's total-order estimator is ``E[(delta_j * EE_j)^2] / (2 Var Y)``,
+        while Morris reports ``mu_star = E|EE_j|``. So the screening measures
+        come out of a design you have already paid for, and they cost no extra
+        model evaluations. Pass the returned object and your existing ``Y``
+        (the same array you would pass to :func:`jaxgsa.sobol.analyze`) to
         :func:`jaxgsa.morris.analyze`.
 
-        **Which estimand this is.** The derived design is a *radial* design,
-        so it estimates the radial quantity
-        ``E|f(A with B_j) - f(A)| / |B_j - A_j|``, in which the step varies
-        from block to block. That is not the classical Morris quantity, which
-        uses one fixed grid step ``Delta``. The two differ by much more than
-        sampling noise: on Ishigami at ``r = 8192`` the derived ``mu_star`` is
+        The derived measures are the radial estimand, not the classical Morris
+        one. The derived design is a radial design, so it estimates the radial
+        quantity ``E|f(A with B_j) - f(A)| / |B_j - A_j|``, in which the step
+        varies from block to block. The classical Morris quantity instead uses
+        one fixed grid step ``Delta``. The two differ by much more than
+        sampling noise. On Ishigami at ``r = 8192`` the derived ``mu_star`` is
         ``[8.68, 15.01, 6.62]`` against ``[8.69, 15.02, 6.64]`` from
-        ``morris.sample(..., method="radial")``, but ``[7.59, 7.88, 6.39]``
-        from the default ``method="trajectory"`` — a factor 1.9 on ``x2``, and
-        2.5 on its ``sigma``. ``morris.sample`` defaults to
+        ``morris.sample(..., method="radial")``. The default
+        ``method="trajectory"`` gives ``[7.59, 7.88, 6.39]`` instead: a factor
+        1.9 on ``x2``, and 2.5 on its ``sigma``. ``morris.sample`` defaults to
         ``method="trajectory"``, so compare these measures against
         ``morris.sample(..., method="radial")``, never against the default.
 
         ``n_trajectories`` is ``base_n`` for both design variants: one radial
         block per base point, based at ``A``. Second-order designs also hold a
-        block based at ``B`` (``B`` with its ``BA_j`` rows), which this method
-        deliberately does not harvest. The reason is that pooling it buys
-        nothing measurable. The two blocks are *not* algebraically the same
-        effect in general — that equality holds only for additive
-        contributions, and the measured paired-effect correlations on Ishigami
-        are 0.50 / 1.00 / -0.06, so only ``x2`` (from the purely additive
-        ``7 sin^2(x2)`` term) is a genuine duplicate. But over 150 seeds at
-        ``base_n = 128`` the pooled estimator's variance ratio against the
-        A-only estimator is ``[1.07, 1.00, 1.59]``: no reduction, and worse on
-        ``x3``. Pooling would also need a cluster bootstrap over base points to
-        keep the confidence intervals honest, because the two blocks in a base
-        point are dependent. That is real machinery for no gain.
+        block based at ``B``, that is ``B`` with its ``BA_j`` rows. This method
+        deliberately does not harvest that block, because pooling it buys
+        nothing measurable. In general the two blocks are not algebraically the
+        same effect. That equality holds only for additive contributions, and
+        the measured paired-effect correlations on Ishigami are
+        0.50 / 1.00 / -0.06. So only ``x2`` is a genuine duplicate, and it
+        comes from the purely additive ``7 sin^2(x2)`` term. Even for the rest,
+        over 150 seeds at ``base_n = 128`` the pooled estimator's variance
+        ratio against the A-only estimator is ``[1.07, 1.00, 1.59]``: no
+        reduction, and worse on ``x3``. Pooling would also need a cluster
+        bootstrap over base points to keep the confidence intervals honest,
+        because the two blocks in a base point are dependent. That is real
+        machinery for no gain.
 
         Because the derived measures reuse the very same model outputs as the
         Sobol indices, agreement between ``mu_star`` and ``ST`` is not an
@@ -227,31 +229,30 @@ class SobolSamples(UniqueDesignSamples):
                 still accept a categorical problem.
 
         Warns:
-            UserWarning: If any parameter has an *unbounded* Gaussian
-                marginal. ``mu_star`` then has no fixed scale, because how far
-                the design reaches into the tail sets its magnitude, and the
-                Saltelli design and :func:`jaxgsa.morris.sample` reach
-                different distances (the Saltelli design bounds support only at
-                the library's own clip, +/-7.03 sigma). Only *rankings* are
-                comparable across designs. Bound the marginals with
+            UserWarning: If any parameter has an unbounded Gaussian marginal.
+                ``mu_star`` then has no fixed scale, because how far the design
+                reaches into the tail sets its magnitude. The Saltelli design
+                and :func:`jaxgsa.morris.sample` reach different distances (the
+                Saltelli design bounds support only at the library's own clip,
+                +/-7.03 sigma). Only rankings are comparable across designs.
+                Bound the marginals with
                 ``Problem.from_dict(..., truncate_gaussians=q)`` if magnitudes
                 must match. Once both sides are bounded the derived and native
                 radial measures agree: measured ratios 0.999 (linear), 0.997
                 (``x^2``), 0.988 (``x^4``), 0.987 (``exp(x^2/3)``), each within
                 its own seed-to-seed spread.
             UserWarning: If any block is dropped for having a near-zero step.
-                Unlike :func:`jaxgsa.morris.sample`'s radial design, which
-                offsets the auxiliary points by four draws, Saltelli takes
-                ``A`` and ``B`` from the *same* Sobol' row, so the two can
-                coincide. This is a non-issue at the default
-                ``scramble=True``: 0 of 65536 blocks were dropped across 8
-                seeds at ``D = 3``. With ``scramble=False`` the drop rate is
-                real but falls off with ``base_n`` — measured 21.9% at
-                ``base_n=64``, 9.4% at 256, 2.3% at 1024 and 1.2% at 4096 — and
-                the survivors are a *biased* subsequence: ``mu_star`` comes out
-                ``[8.34, 14.88, 5.55]`` at ``base_n=64`` against
-                ``[8.68, 15.01, 6.62]`` scrambled, so ``x3`` reads 16% low.
-                Keep ``scramble=True``.
+                The radial design of :func:`jaxgsa.morris.sample` offsets the
+                auxiliary points by four draws. Saltelli instead takes ``A``
+                and ``B`` from one Sobol' row, so the two can coincide. This is
+                a non-issue at the default ``scramble=True``: 0 of 65536 blocks
+                were dropped across 8 seeds at ``D = 3``. With
+                ``scramble=False`` the drop rate is real, but it falls off with
+                ``base_n``: measured 21.9% at ``base_n=64``, 9.4% at 256, 2.3%
+                at 1024 and 1.2% at 4096. The survivors are also a biased
+                subsequence. ``mu_star`` comes out ``[8.34, 14.88, 5.55]`` at
+                ``base_n=64`` against ``[8.68, 15.01, 6.62]`` scrambled, so
+                ``x3`` reads 16% low. Keep ``scramble=True``.
 
         References:
             Campolongo, Cariboni & Saltelli (2011). Comput. Phys. Commun.
@@ -279,12 +280,12 @@ class SobolSamples(UniqueDesignSamples):
         # algebraically the same effect only for additive contributions:
         # measured paired-effect correlations on Ishigami are 0.50 / 1.00 /
         # -0.06, so only x2 (the additive 7 sin^2(x2) term) is a true
-        # duplicate. The reason to skip the B block is not duplication, it is
-        # that pooling gives no measured variance reduction — the pooled /
+        # duplicate. The reason to skip the B block is not duplication. It is
+        # that pooling gives no measured variance reduction: the pooled /
         # A-only variance ratio over 150 seeds at base_n=128 is
-        # [1.07, 1.00, 1.59] — while requiring a cluster bootstrap over base
-        # points to keep the CIs honest, since the two blocks share a base
-        # point. Real machinery, no gain.
+        # [1.07, 1.00, 1.59]. Pooling would also require a cluster bootstrap
+        # over base points to keep the CIs honest, since the two blocks share a
+        # base point. Real machinery, no gain.
         block_rows = np.empty((self.base_n, D + 1), dtype=np.int64)
         block_rows[:, 0] = self.expanded_to_unique[starts]
         block_rows[:, 1:] = self.expanded_to_unique[offsets + 1 + params]
@@ -351,12 +352,12 @@ _CANDIDATE_ROW_CAP = 1 << 22
 
 
 def _max_distinct_rows(problem: Problem) -> int | None:
-    """Upper bound on the number of distinct sample rows, if one exists.
+    """Return an upper bound on the number of distinct sample rows, if one exists.
 
     An all-categorical problem can only produce ``prod(L_d)`` distinct rows
     (each column takes one of its ``L_d`` level codes), no matter how large
-    the design grows. Any continuous column makes the count unbounded, in
-    which case ``None`` is returned.
+    the design grows. Any continuous column makes the count unbounded, and
+    then ``None`` is returned.
     """
     dims_levels = _categorical_dims(problem)
     if len(dims_levels) != problem.num_vars:
@@ -491,14 +492,14 @@ def sample(
     returned ``result.samples`` (shape ``(n_runs, D)``), then pass the result
     object and your outputs to :func:`jaxgsa.sobol.analyze`.
 
-    Internally this builds a Saltelli design — the structured layout of base
-    and column-swapped sample matrices that Sobol index estimators require —
-    for a candidate ``base_n``, then removes exact duplicate rows while
-    preserving first-occurrence order (in low dimensions the Saltelli
-    construction repeats rows, and evaluating a model twice on the same input
-    is wasted work). If the unique matrix is still smaller than the requested
-    evaluation budget, ``base_n`` is doubled and the process repeats until
-    enough unique rows are available.
+    Internally the function builds a Saltelli design for a candidate
+    ``base_n``. A Saltelli design is the structured layout of base and
+    column-swapped sample matrices that Sobol index estimators require. The
+    function then removes exact duplicate rows and keeps first-occurrence
+    order. In low dimensions the Saltelli construction repeats rows, and
+    evaluating a model twice on the same input is wasted work. If the unique
+    matrix is still smaller than the requested evaluation budget, ``base_n``
+    doubles and the process repeats until enough unique rows are available.
 
     Args:
         problem: Problem definition with parameter names and distributions.
@@ -512,9 +513,10 @@ def sample(
             direct control over the sampling budget.
         calc_second_order: If ``True`` (default), include the extra
             cross-matrices needed to estimate second-order (pairwise
-            interaction) Sobol indices.  Set to ``False`` if you only need
-            first/total-order indices — it nearly halves the evaluation
-            budget (Saltelli step ``D + 2`` instead of ``2*D + 2``).
+            interaction) Sobol indices. Set it to ``False`` if you only need
+            first/total-order indices. That nearly halves the evaluation
+            budget: the Saltelli step becomes ``D + 2`` instead of
+            ``2*D + 2``.
         scramble: Whether to apply Owen scrambling to the Sobol sequence
             (recommended; randomizes the sequence so different seeds give
             statistically independent designs).
@@ -534,7 +536,7 @@ def sample(
     """
     _raise_correlated_design(problem, "jaxgsa.sobol.sample")
     D = problem.num_vars
-    # Rows per base point -- determines the ratio between base_n and total expanded rows
+    # Rows per base point: sets the ratio between base_n and total expanded rows.
     step = _saltelli_step(D, calc_second_order)
 
     if base_n is not None:
@@ -567,9 +569,8 @@ def sample(
         # bound is reached, or a doubling added no new unique rows) and a
         # candidate-row cap checked BEFORE the next doubling is
         # materialized, so the warning fires before any huge allocation.
-        # The returned design then keeps duplicate rows — they are
-        # legitimate Saltelli samples; the dedup exists only to save model
-        # evaluations.
+        # The returned design then keeps duplicate rows. They are legitimate
+        # Saltelli samples: the dedup exists only to save model evaluations.
         max_unique = _max_distinct_rows(problem)
         max_candidate_rows = max(_CANDIDATE_ROW_CAP, 8 * target_n)
         prev_unique = -1

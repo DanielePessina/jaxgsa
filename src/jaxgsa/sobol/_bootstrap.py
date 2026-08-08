@@ -2,11 +2,11 @@
 
 Bootstrap strategy
 ------------------
-Given N base model evaluations, we generate R sets of N random indices into
-[0, N) — i.e. sampling *with replacement*.  For each of the R resamples we
-gather the corresponding rows from the model-output arrays (A, B, AB, and
-optionally BA) and recompute Sobol indices, yielding an empirical distribution
-over each index from which confidence intervals can be derived.
+Given N base model evaluations, the code generates R sets of N random indices
+into [0, N), which is sampling with replacement. For each of the R resamples it
+gathers the matching rows from the model-output arrays (A, B, AB, and
+optionally BA) and recomputes the Sobol indices. That gives an empirical
+distribution over each index, from which confidence intervals follow.
 
 Dimensions used throughout:
     R = number of bootstrap resamples
@@ -16,10 +16,11 @@ Dimensions used throughout:
 Chunked vmap
 ~~~~~~~~~~~~
 ``jax.vmap`` over all R resamples at once would materialise R copies of every
-(N, D) array simultaneously, easily exhausting device memory when R is large.
-Instead we process resamples in chunks of ``chunk_size`` rows, vmap within each
-chunk (fully vectorised on-device), and concatenate the results on the host.
-(``analyze`` forwards its ``slice_chunk_size`` argument as this resample cap.)
+(N, D) array at the same time. That exhausts device memory when R is large.
+The code instead processes resamples in chunks of ``chunk_size`` rows, vmaps
+within each chunk (fully vectorised on-device), and concatenates the results on
+the host. ``analyze`` forwards its ``slice_chunk_size`` argument as this
+resample cap.
 """
 
 import jax
@@ -29,7 +30,7 @@ from jax import Array
 from jaxgsa.sobol._indices import _fused_first_total, _fused_second_order
 
 # @jax.jit is applied directly (not via lru_cache) because these functions
-# have a fixed signature — no configuration parameter to dispatch on.
+# have a fixed signature: there is no configuration parameter to dispatch on.
 
 
 @jax.jit
@@ -37,19 +38,19 @@ def _resample_ft(idx_chunk: Array, A: Array, AB: Array, B: Array):
     """Vectorised first/total-order Sobol computation for one chunk of resamples.
 
     Args:
-        idx_chunk: (C, N) bootstrap index sets for this chunk, where
-            C <= chunk_size and each row contains N indices in [0, N).
-        A:  (N,)    base model outputs from sample matrix A.
-        AB: (N, D)  model outputs from the AB cross-matrices.
-        B:  (N,)    base model outputs from sample matrix B.
+        idx_chunk: Bootstrap index sets for this chunk, shape ``(C, N)``,
+            where C <= chunk_size and each row holds N indices in [0, N).
+        A: Base model outputs from sample matrix A, shape ``(N,)``.
+        AB: Model outputs from the AB cross-matrices, shape ``(N, D)``.
+        B: Base model outputs from sample matrix B, shape ``(N,)``.
 
     Returns:
-        S1: (C, D) first-order indices per resample.
-        ST: (C, D) total-order indices per resample.
+        S1: first-order indices per resample, shape ``(C, D)``.
+        ST: total-order indices per resample, shape ``(C, D)``.
     """
 
     # Closure over A, AB, B lets vmap vary only the index vector per resample.
-    # A[idx] gathers N rows with replacement — the core of bootstrap resampling.
+    # A[idx] gathers N rows with replacement, the core of bootstrap resampling.
     def single(idx):
         return _fused_first_total(A[idx], AB[idx], B[idx])
 
@@ -62,16 +63,16 @@ def _resample_so(idx_chunk: Array, A: Array, AB: Array, BA: Array, B: Array):
     """Vectorised second-order Sobol computation for one chunk of resamples.
 
     Args:
-        idx_chunk: (C, N) bootstrap index sets for this chunk.
-        A:  (N,)    base model outputs from sample matrix A.
-        AB: (N, D)  model outputs from the AB cross-matrices.
-        BA: (N, D)  model outputs from the BA cross-matrices.
-        B:  (N,)    base model outputs from sample matrix B.
+        idx_chunk: Bootstrap index sets for this chunk, shape ``(C, N)``.
+        A: Base model outputs from sample matrix A, shape ``(N,)``.
+        AB: Model outputs from the AB cross-matrices, shape ``(N, D)``.
+        BA: Model outputs from the BA cross-matrices, shape ``(N, D)``.
+        B: Base model outputs from sample matrix B, shape ``(N,)``.
 
     Returns:
-        S1: (C, D)    first-order indices per resample.
-        ST: (C, D)    total-order indices per resample.
-        S2: (C, D, D) second-order indices per resample.
+        S1: first-order indices per resample, shape ``(C, D)``.
+        ST: total-order indices per resample, shape ``(C, D)``.
+        S2: second-order indices per resample, shape ``(C, D, D)``.
     """
 
     # Same closure+vmap pattern as _resample_ft, extended to include BA
@@ -86,20 +87,21 @@ def _bootstrap_first_total(
 ) -> tuple[Array, Array]:
     """Bootstrap first-order and total-order Sobol indices over R resamples.
 
-    Iterates over ``indices`` in chunks of ``chunk_size`` rows, calling
-    ``_resample_ft`` (vectorised via vmap) on each chunk to avoid
+    Iterate over ``indices`` in chunks of ``chunk_size`` rows and call
+    ``_resample_ft`` (vectorised via vmap) on each chunk. Chunking avoids
     materialising all R resamples in device memory at once.
 
     Args:
-        indices:    (R, N) int array of resampling indices in [0, N).
-        A:          (N,)   model outputs from sample matrix A.
-        AB:         (N, D) model outputs from the AB cross-matrices.
-        B:          (N,)   model outputs from sample matrix B.
-        chunk_size: max resamples to vmap in a single device call.
+        indices: Integer array of resampling indices in [0, N), shape
+            ``(R, N)``.
+        A: Model outputs from sample matrix A, shape ``(N,)``.
+        AB: Model outputs from the AB cross-matrices, shape ``(N, D)``.
+        B: Model outputs from sample matrix B, shape ``(N,)``.
+        chunk_size: Maximum resamples to vmap in a single device call.
 
     Returns:
-        S1_boot: (R, D) first-order indices for every resample.
-        ST_boot: (R, D) total-order indices for every resample.
+        S1_boot: first-order indices for every resample, shape ``(R, D)``.
+        ST_boot: total-order indices for every resample, shape ``(R, D)``.
     """
     R = indices.shape[0]
     s1_parts, st_parts = [], []
@@ -121,21 +123,23 @@ def _bootstrap_second_order(
 ) -> tuple[Array, Array, Array]:
     """Bootstrap first-, total-, and second-order Sobol indices over R resamples.
 
-    Same chunked strategy as ``_bootstrap_first_total``, extended to include
-    the BA matrices required for second-order index estimation.
+    Same chunked strategy as ``_bootstrap_first_total``, extended with the BA
+    matrices that second-order index estimation requires.
 
     Args:
-        indices:    (R, N) int array of resampling indices in [0, N).
-        A:          (N,)   model outputs from sample matrix A.
-        AB:         (N, D) model outputs from the AB cross-matrices.
-        BA:         (N, D) model outputs from the BA cross-matrices.
-        B:          (N,)   model outputs from sample matrix B.
-        chunk_size: max resamples to vmap in a single device call.
+        indices: Integer array of resampling indices in [0, N), shape
+            ``(R, N)``.
+        A: Model outputs from sample matrix A, shape ``(N,)``.
+        AB: Model outputs from the AB cross-matrices, shape ``(N, D)``.
+        BA: Model outputs from the BA cross-matrices, shape ``(N, D)``.
+        B: Model outputs from sample matrix B, shape ``(N,)``.
+        chunk_size: Maximum resamples to vmap in a single device call.
 
     Returns:
-        S1_boot: (R, D)    first-order indices for every resample.
-        ST_boot: (R, D)    total-order indices for every resample.
-        S2_boot: (R, D, D) second-order indices for every resample.
+        S1_boot: first-order indices for every resample, shape ``(R, D)``.
+        ST_boot: total-order indices for every resample, shape ``(R, D)``.
+        S2_boot: second-order indices for every resample, shape
+            ``(R, D, D)``.
     """
     R = indices.shape[0]
     s1_parts, st_parts, s2_parts = [], [], []

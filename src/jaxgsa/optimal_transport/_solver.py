@@ -1,18 +1,20 @@
 """Log-domain Sinkhorn solver for entropic optimal transport.
 
-Implements the standard entropic-regularization scheme for discrete
-optimal transport (Cuturi 2013; Peyre & Cuturi 2019, "Computational
-Optimal Transport") with log-domain scaling updates for numerical
-stability. Used by the multivariate and trajectory modes of
-:func:`jaxgsa.optimal_transport.analyze`
-to transport the unconditional output point cloud onto each conditional
-class; the ``"univariate"`` mode never needs a solver (1-D optimal transport
-has a closed form via sorted quantiles).
+This module implements the standard entropic-regularization scheme for
+discrete optimal transport (Cuturi 2013; Peyre & Cuturi 2019,
+"Computational Optimal Transport"). The scaling updates run in the log
+domain for numerical stability.
 
-The solver is a pure jit/vmap-compatible function: it never raises on
-non-convergence (exceptions cannot cross a ``lax.while_loop``); instead it
-returns the final marginal residual so the caller can warn once per
-analysis after a single host sync.
+The ``"multivariate"`` and ``"trajectory"`` modes of
+:func:`jaxgsa.optimal_transport.analyze` use this solver to transport the
+unconditional output point cloud onto each conditional class. The
+``"univariate"`` mode never needs a solver, because 1-D optimal transport
+has a closed form through sorted quantiles.
+
+The solver is a pure jit/vmap-compatible function. It never raises on
+non-convergence, because exceptions cannot cross a ``lax.while_loop``.
+Instead it returns the final marginal residual. The caller can then warn
+once per analysis after a single host sync.
 
 References:
     Cuturi (2013). Sinkhorn distances: lightspeed computation of optimal
@@ -46,21 +48,22 @@ def _sinkhorn_w2(
 
     Solves the entropic optimal-transport problem between the uniform
     distribution on the ``N`` source points and the target histogram
-    ``exp(log_b)`` over ``P`` (padded) target points, then reports the
-    *unregularized* transport cost ``<P, C>`` of the entropic plan --
-    not the epsilon-regularized objective -- so the value approaches the
+    ``exp(log_b)`` over ``P`` (padded) target points. It then reports the
+    unregularized transport cost ``<P, C>`` of the entropic plan, not the
+    epsilon-regularized objective. The value therefore approaches the
     exact squared Wasserstein distance as ``epsilon -> 0``.
 
-    The cost matrix is scaled by its maximum before solving (so
-    ``epsilon`` is a scale-free regularization strength) and the returned
-    cost is rescaled back. Updates run in the log domain; padded target
-    columns are handled exactly by ``log_b = -inf`` (zero mass, inert in
-    every ``logsumexp``).
+    The function scales the cost matrix by its maximum before solving, so
+    ``epsilon`` is a scale-free regularization strength, and it rescales
+    the returned cost back. Updates run in the log domain. ``log_b =
+    -inf`` handles padded target columns exactly: they carry zero mass and
+    stay inert in every ``logsumexp``.
 
     Args:
-        C: Cost matrix ``(N, P)`` (squared Euclidean distances).
-        log_b: Log target weights ``(P,)``: ``-log(n_m)`` for the class's
-            ``n_m`` valid entries and ``-inf`` at padded entries.
+        C: Cost matrix of squared Euclidean distances, shape ``(N, P)``.
+        log_b: Log target weights, shape ``(P,)``. The value is
+            ``-log(n_m)`` for the class's ``n_m`` valid entries and
+            ``-inf`` at padded entries.
         epsilon: Entropic regularization strength relative to the
             max-scaled cost (scalar).
         max_iter: Iteration cap (scalar).
@@ -68,10 +71,10 @@ def _sinkhorn_w2(
             marginal (scalar).
 
     Returns:
-        A tuple ``(cost, err)`` where ``cost`` is the transport cost
-        ``<P, C>`` on the original cost scale and ``err`` is the L1
-        target-marginal violation at exit (``err <= tol`` means
-        converged; it is refreshed on the final iteration).
+        A tuple ``(cost, err)``. ``cost`` is the transport cost ``<P, C>``
+        on the original cost scale. ``err`` is the L1 target-marginal
+        violation at exit, refreshed on the final iteration, and
+        ``err <= tol`` means the solve converged.
     """
     dtype = C.dtype
     N = C.shape[0]

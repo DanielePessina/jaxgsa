@@ -1,11 +1,15 @@
 # Categorical Inputs
 
-Use this page when an input parameter is a choice, not a number. Examples:
-a material grade, a solver variant, an on/off switch with more than two
-states. jaxgsa calls these categorical marginals. A categorical
-parameter has `L` unordered levels with declared probabilities. Samples
-carry the integer level codes `0 .. L-1` (as floats) — codes, never
-physical values. Your model maps each code to whatever the level means.
+Use this page when an input parameter is a choice, not a number. Examples: a
+material grade, a solver variant, an on/off switch with more than two states.
+By the end of it you will have sensitivity indices that rank such a choice
+against your numeric inputs, and you will know which methods accept it and
+which refuse it.
+
+jaxgsa calls these categorical marginals. A categorical parameter has `L`
+unordered levels with declared probabilities. Samples carry the integer level
+codes `0 .. L-1`, stored as floats. They are codes, never physical values. Your
+model maps each code to whatever the level means.
 
 ## Declare a categorical parameter
 
@@ -52,11 +56,15 @@ Y = np.exp(-rate_constant[codes] * (X[:, 0] - 300.0) / 100.0)
 
 ## Analyze with optimal transport, Borgonovo delta, and PAWN
 
-All three given-data methods condition on one class per level for a
-categorical column. Continuous columns keep their usual conditioning:
-equal-frequency rank classes for optimal transport and Borgonovo delta,
-equal-probability bins for PAWN. The indices depend only on the level
-partition. Relabeling the levels does not change them.
+These three methods are given-data methods: they take any `(X, Y)` pairs and
+need no structured design. They all work by conditioning, which means splitting
+the samples into classes by the value of one input and comparing the output
+distribution within each class against the overall one. For a categorical
+column each level is its own class, which is exactly the right split.
+Continuous columns keep their usual conditioning: equal-frequency rank classes
+for optimal transport and Borgonovo delta, equal-probability bins for PAWN. The
+indices depend only on the level partition. Relabeling the levels does not
+change them.
 
 ```python
 ot_result = jaxgsa.optimal_transport.analyze(problem, X, Y)
@@ -70,6 +78,12 @@ print(delta_result.S1)      # given-data first-order Sobol index
 pawn_result = jaxgsa.pawn.analyze(problem, X, Y)
 print(pawn_result.pawn)     # KS-based index per parameter, [0, 1]
 ```
+
+All three indices lie in [0, 1] and rank `catalyst` on the same scale as
+`temperature`, so you can read one ranking over both kinds of input. The
+`advective` part of the optimal-transport result is the share of the index that
+comes from a shift in the output mean, as opposed to a change in the shape of
+the distribution.
 
 A declared level with no observed samples is dropped from the class
 average, with a `UserWarning`. `n_partitions` / `n_classes` / `n_bins`
@@ -131,8 +145,10 @@ counts as too narrow and how wide it is made. The defaults suit most work.
 
 ## Analyze with Sobol' (the Saltelli scheme)
 
-The Saltelli design works because its estimators only ever copy coordinate
-values between sample rows — they never need an ordering on them.
+Sobol' indices need the Saltelli design, a structured set of sample rows built
+by swapping columns between two base matrices. That design works with a
+categorical input because its estimators only ever copy coordinate values
+between sample rows. They never need an ordering on those values.
 
 ```python
 sr = jaxgsa.sobol.sample(problem, 2**13, seed=0)
@@ -141,6 +157,10 @@ Y = np.exp(-rate_constant[codes] * (sr.samples[:, 0] - 300.0) / 100.0)
 result = jaxgsa.sobol.analyze(sr, Y)
 print(result.S1, result.ST)
 ```
+
+`result.S1` and `result.ST` carry one entry per parameter, `catalyst`
+included, so the choice of catalyst is ranked against the temperature on the
+same variance scale.
 
 One caveat: a categorical column collapses whole probability bins onto
 one code, so low-cardinality problems have few distinct rows. The sampler

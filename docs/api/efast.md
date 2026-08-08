@@ -1,9 +1,10 @@
 # eFAST
 
-Fourier-based first- and total-order sensitivity indices from model outputs on
-sinusoidal search curves, at low sample cost.
+`jaxgsa.efast.analyze()` computes Fourier-based first- and total-order
+sensitivity indices from model outputs on sinusoidal search curves. The sample
+cost is low.
 
-The canonical API reference now lives at [API Reference](/api/).
+The canonical API reference lives at [API Reference](/api/).
 
 Jump directly to:
 

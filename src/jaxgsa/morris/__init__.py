@@ -1,9 +1,11 @@
 """Morris elementary-effects screening method.
 
-Globalized one-at-a-time screening: finite-difference effects sampled across
-the whole input domain are reduced to mu_star (importance), mu (signed mean),
-and sigma (nonlinearity/interactions) at a cost of ``n_trajectories * (D + 1)``
-model evaluations.
+Morris screening changes one parameter at a time and measures the finite
+difference in the output. It calls this difference an elementary effect, and it
+samples effects across the whole input domain rather than around one point. The
+method reduces the effects to three measures: ``mu_star`` (importance), ``mu``
+(signed mean), and ``sigma`` (nonlinearity or interactions). The design costs
+``n_trajectories * (D + 1)`` model evaluations.
 
 Example::
 

@@ -1,12 +1,11 @@
 """Sobol G-function for sensitivity analysis benchmarking.
 
-A standard D-dimensional multiplicative benchmark with known analytical
-Sobol indices for any choice of the importance parameters ``a``.
+A standard D-dimensional multiplicative benchmark. Its analytical Sobol
+indices are known for any choice of the importance parameters ``a``.
 
-The G-function is widely used because its analytical variance decomposition
-is available in closed form, and the ``a`` vector provides direct control
-over each parameter's importance: ``a_j = 0`` makes ``x_j`` highly
-influential; large ``a_j`` makes it nearly irrelevant.
+The variance decomposition of the G-function has a closed form. The ``a``
+vector also sets each input's importance directly. ``a_j = 0`` makes ``x_j``
+highly influential, and a large ``a_j`` makes it nearly irrelevant.
 
 References:
     Saltelli, A. and Sobol, I. M. (1995). About the use of rank
@@ -37,15 +36,15 @@ def evaluate(X: Array, a: tuple[float, ...] = DEFAULT_A) -> Array:
         \\frac{|4 x_j - 2| + a_j}{1 + a_j}
 
     Args:
-        X: Input array of shape ``(N, D)`` with ``x_j \\in [0, 1]``.
+        X: Input array, shape ``(N, D)``, with ``x_j \\in [0, 1]``.
         a: Importance parameters, one per dimension.
 
     Returns:
-        Array of shape ``(N,)`` with function values.
+        Function values, shape ``(N,)``.
     """
     a_arr = jnp.asarray(a)
-    # Each factor (|4x_j-2|+a_j)/(1+a_j) is mean-1 and variance 1/(3(1+a_j)^2).
-    # The product form means ALL subsets of inputs interact (no purely additive structure).
+    # Each factor (|4x_j-2|+a_j)/(1+a_j) has mean 1 and variance 1/(3(1+a_j)^2).
+    # The product form makes every subset of inputs interact: no additive structure.
     return jnp.prod((jnp.abs(4.0 * X - 2.0) + a_arr) / (1.0 + a_arr), axis=1)
 
 
@@ -54,21 +53,22 @@ def analytical_indices(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Compute analytical first-order, total-order, and second-order Sobol indices.
 
-    For the G-function with independent uniform inputs:
+    For the G-function with independent uniform inputs, the indices have a
+    closed form:
 
     .. math::
         V_j = \\frac{1}{3(1 + a_j)^2}, \\quad
         V(Y) = \\prod_j (1 + V_j) - 1
 
-    Since the G-function is multiplicatively separable, the ANOVA
-    decomposition gives closed-form indices at all orders.
+    The G-function is multiplicatively separable, so the ANOVA decomposition
+    gives closed-form indices at all orders.
 
     Args:
         a: Importance parameters.
 
     Returns:
-        ``(S1, ST, S2)`` where S1 and ST are ``(D,)`` arrays and S2 is
-        a ``(D, D)`` symmetric matrix with NaN on the diagonal.
+        ``(S1, ST, S2)``. ``S1`` and ``ST`` have shape ``(D,)``. ``S2`` is a
+        symmetric ``(D, D)`` matrix with NaN on the diagonal.
     """
     a_arr = np.asarray(a, dtype=float)
     D = len(a_arr)
@@ -104,21 +104,21 @@ def analytical_indices(
 def analytical_shapley(a: tuple[float, ...] = DEFAULT_A) -> np.ndarray:
     """Compute analytical Shapley effects for the Sobol G-function.
 
-    For independent inputs (Owen, 2014) the Shapley effect of input j is
+    For independent inputs the Shapley effect of input j is (Owen, 2014)
 
     .. math::
         \\mathrm{Sh}_j = \\frac{1}{V(Y)} \\sum_{u \\ni j} \\frac{V_u}{|u|}
 
-    summing over all non-empty subsets ``u`` containing j. The G-function's
-    multiplicative structure gives every partial variance in product form,
-    ``V_u = \\prod_{k \\in u} V_k``, so the sum is evaluated by exact
-    enumeration over all ``2^D - 1`` non-empty subsets.
+    where the sum runs over all non-empty subsets ``u`` that contain j. The
+    multiplicative structure of the G-function puts every partial variance in
+    product form, ``V_u = \\prod_{k \\in u} V_k``. The sum is therefore
+    evaluated by exact enumeration over all ``2^D - 1`` non-empty subsets.
 
     Args:
         a: Importance parameters.
 
     Returns:
-        ``(D,)`` array of Shapley effects, summing to 1 exactly.
+        Shapley effects, shape ``(D,)``. They sum to 1 exactly.
     """
     a_arr = np.asarray(a, dtype=float)
     D = len(a_arr)

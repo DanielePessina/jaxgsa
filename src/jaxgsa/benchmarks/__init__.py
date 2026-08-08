@@ -1,8 +1,8 @@
 """Analytical benchmark functions with known Sobol indices.
 
-Use these to validate a sensitivity method or gauge its convergence:
-each function's exact indices are available in closed form, so estimates
-can be compared against ground truth at any sample size.
+Every function here has exact indices in closed form. Use them to check that
+a sensitivity method is correct, and to measure how fast its estimates reach
+the ground truth as the sample size grows.
 
 Each submodule provides:
     - ``PROBLEM``: a :class:`~jaxgsa.Problem` definition.
@@ -11,8 +11,8 @@ Each submodule provides:
       indices for the default parameters.
     - ``analytical_indices(...)``: compute indices for custom parameters.
 
-Some submodules add further ground truths: ``ishigami``, ``linear``, and
-``sobol_g`` expose ``ANALYTICAL_SHAPLEY``; ``gaussian_linear`` exposes
+Some submodules add further ground truths. ``ishigami``, ``linear``, and
+``sobol_g`` expose ``ANALYTICAL_SHAPLEY``. ``gaussian_linear`` exposes
 ``ANALYTICAL_DELTA`` for the Borgonovo delta index.
 
 Example::

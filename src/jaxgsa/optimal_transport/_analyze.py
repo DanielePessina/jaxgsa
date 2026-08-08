@@ -1,43 +1,44 @@
-"""Optimal-transport sensitivity analysis from given data.
+"""Optimal-transport index estimators for given data.
 
-Implements the optimal-transport sensitivity indices of Borgonovo,
-Figalli, Plischke & Savare (2024). For each input the sample is split
-into equal-frequency classes by the input's rank; the index is the
-class-weighted squared 2-Wasserstein distance between the conditional
-output distribution of each class and the unconditional one, normalized
-by twice the output variance (the theoretical maximum of the averaged
-distance) so it lies in [0, 1].
+This module implements the optimal-transport (OT) sensitivity indices of
+Borgonovo, Figalli, Plischke & Savare (2024). For each parameter the
+estimator splits the sample into equal-frequency classes by the
+parameter's rank. The index is the class-weighted squared 2-Wasserstein
+distance between the conditional output distribution of each class and
+the unconditional one. Dividing by twice the output variance, the
+theoretical maximum of the averaged distance, puts the index in [0, 1].
 
-Every index is decomposed into an *advective* component -- the
-class-averaged squared distance between conditional and unconditional
-means, i.e. how much the input relocates the output distribution -- and
-a *diffusive* remainder capturing changes in spread and shape. Because
-the advective numerator is exactly ``Var(E[Y|X_i])``, the advective
-component equals half the given-data first-order Sobol index, which
-anchors the decomposition to the variance-based world.
+Every index splits into two parts. The advective component is the
+class-averaged squared distance between the conditional and the
+unconditional means, so it says how far the parameter relocates the
+output distribution. The diffusive remainder covers changes in spread
+and shape. The advective numerator is exactly ``Var(E[Y|X_i])``, so the
+advective component equals half the given-data first-order Sobol index.
+That identity anchors the split to the variance-based indices.
 
-Three modes cover jaxgsa's output shapes. ``"univariate"`` treats every
-output column independently with the closed-form 1-D optimal transport
-(sorted-quantile coupling; no solver): the unconditional sample supplies
-quantiles at the N uniform mass points and each conditional class is
-evaluated at the same points through its nearest-rank empirical quantile
-function (midpoint rule ``j = floor((i + 0.5) * n_m / N)``, exact
-whenever the class size divides N). ``"multivariate"`` and ``"trajectory"``
-treat the (flattened or per-output) output vector as a point cloud and
-transport the unconditional cloud onto each class with entropic
-regularization (log-domain Sinkhorn, see
-:mod:`jaxgsa.optimal_transport._solver`), reporting the unregularized cost
-of the entropic plan.
+Three modes cover jaxgsa's output shapes:
+
+- ``"univariate"`` scores every output column independently with the
+  closed-form 1-D optimal transport (sorted-quantile coupling, no
+  solver). The unconditional sample supplies quantiles at the N uniform
+  mass points. Each conditional class is evaluated at the same points
+  through its nearest-rank empirical quantile function (midpoint rule
+  ``j = floor((i + 0.5) * n_m / N)``, exact whenever the class size
+  divides N).
+- ``"multivariate"`` and ``"trajectory"`` treat the flattened or
+  per-output vector as a point cloud. They transport the unconditional
+  cloud onto each class with entropic regularization (log-domain
+  Sinkhorn, see :mod:`jaxgsa.optimal_transport._solver`) and report the
+  unregularized cost of the entropic plan.
 
 The original sample and any bootstrap resamples run through a single
-scanned path (the original sample is replicate 0, gathered via the
-identity permutation), so point estimates and confidence intervals share
-one code path. Class partitions are rebuilt per replicate from the
-resampled inputs, exactly as in :mod:`jaxgsa.borgonovo`.
+scanned path. The original sample is replicate 0, gathered through the
+identity permutation, so point estimates and confidence intervals share
+one code path. The estimator rebuilds the class partitions per replicate
+from the resampled parameters, exactly as in :mod:`jaxgsa.borgonovo`.
 
-The estimator is implemented from the paper's published equations and
-numerically validated against POT and analytic closed forms in the
-test suite.
+The estimator follows the paper's published equations. The test suite
+validates it numerically against POT and against analytic closed forms.
 
 References:
     Borgonovo, Figalli, Plischke & Savare (2024). Global sensitivity
@@ -84,8 +85,8 @@ _MODES = ("univariate", "multivariate", "trajectory")
 def _normalize_by_2var(weighted_sum: Array, V: Array) -> Array:
     """Normalize class-weighted cost sums by ``V = 2 * Var``.
 
-    This is the defining [0, 1] normalization of the OT index, shared by
-    the 1-D and joint kernels so the two modes can never drift apart. A
+    This is the defining [0, 1] normalization of the OT index. The 1-D
+    and joint kernels share it, so the two modes can never drift apart. A
     non-positive ``V`` marks a constant output and yields exactly 0
     instead of NaN.
     """
@@ -97,14 +98,15 @@ def _aggregate_normalized(per_class: Array, weights: Array, V: Array) -> Array:
     """Class-weighted average of per-class costs, normalized by ``V``.
 
     Args:
-        per_class: Per-class costs ``(D, M)``.
-        weights: Class weights ``n_m / N`` summing to 1 per column, shape
-            ``(M,)`` (shared across columns) or ``(D, M)`` (per column).
-        V: Normalizer ``2 * Var`` (scalar); a non-positive value marks a
+        per_class: Per-class costs, shape ``(D, M)``.
+        weights: Class weights ``n_m / N`` that sum to 1 per column, shape
+            ``(M,)`` when shared across columns or ``(D, M)`` when per
+            column.
+        V: Normalizer ``2 * Var`` (scalar). A non-positive value marks a
             constant output and yields exactly 0 instead of NaN.
 
     Returns:
-        Normalized indices ``(D,)``.
+        Normalized indices, shape ``(D,)``.
     """
     return _normalize_by_2var((weights * per_class).sum(axis=-1), V)
 
@@ -112,32 +114,33 @@ def _aggregate_normalized(per_class: Array, weights: Array, V: Array) -> Array:
 def _quantile_rank_indices(counts: Array, N: int) -> Array:
     """Nearest-rank conditional quantile index for every full-sample mass point.
 
-    Midpoint rule ``j = min(floor((i + 0.5) * c / N), c - 1)`` for every
-    mass point ``i`` and class size ``c``; ``j < c`` always, so class
-    padding is never touched. Zero-size classes (empty categorical levels)
-    get index 0; the kernels discard their lookups through the zero class
-    weight.
+    Applies the midpoint rule ``j = min(floor((i + 0.5) * c / N), c - 1)``
+    for every mass point ``i`` and class size ``c``. ``j < c`` always, so
+    the lookup never touches class padding. Zero-size classes (empty
+    categorical levels) get index 0, and the kernels discard those lookups
+    through the zero class weight.
 
-    Computed on device, per replicate, from the class counts — a
+    The function runs on device, per replicate, from the class counts. A
     precomputed ``(R, Dc, M, N)`` lookup table would be gigabytes for one
     high-cardinality column at large N, while this transient is
     ``(G, M, N)`` per replicate.
 
     The products ``(2i + 1) * c`` overflow int32 and exceed float32's
-    exact-integer range (and float64 is unavailable without the x64
-    flag), so the quotient is formed exactly by schoolbook long division
+    exact-integer range, and float64 is unavailable without the x64 flag.
+    The quotient is therefore formed exactly by schoolbook long division
     over the base-``S`` digits of ``c``. ``S`` is a static power of two
-    chosen so every intermediate stays below ``2**31``; the digit count
-    is static, so the Python loop unrolls at trace time. Exact for any
-    ``N < 2**29``; bit-identical to a float64 host evaluation (tested).
+    chosen so every intermediate stays below ``2**31``. The digit count is
+    static, so the Python loop unrolls at trace time. The result is exact
+    for any ``N < 2**29`` and bit-identical to a float64 host evaluation
+    (tested).
 
     Args:
-        counts: Integer class sizes ``(..., M)``.
+        counts: Integer class sizes, shape ``(..., M)``.
         N: Number of samples.
 
     Returns:
-        int32 lookup index ``(..., M, N)`` into each class's sorted
-        members.
+        An int32 lookup index into each class's sorted members, shape
+        ``(..., M, N)``.
     """
     # q = floor(a * c / m) with a = 2i + 1 (odd, < 2N) and m = 2N.
     a = 2 * jnp.arange(N, dtype=jnp.int32) + 1  # (N,)
@@ -164,33 +167,34 @@ def _ot_1d_kernel(
 ) -> tuple[Array, Array, Array, Array]:
     """Per-column 1-D optimal-transport indices for every replicate.
 
-    Uses the closed-form 1-D coupling: both empirical quantile functions
-    are evaluated on the N uniform mass points of the full sample, the
-    conditional one through the nearest-rank (midpoint rule) lookup into
-    the class's sorted members. No transport solver is involved.
+    Uses the closed-form 1-D coupling. Both empirical quantile functions
+    are evaluated on the N uniform mass points of the full sample. The
+    conditional one uses the nearest-rank (midpoint rule) lookup into the
+    class's sorted members. No transport solver is involved.
 
     ``groups`` is a tuple of canonical ``(cls_idx, counts)``
     partition-group layouts from
     :func:`jaxgsa._core.partition.build_partition_groups`. The kernel
-    processes every group in one call — the per-replicate column
-    statistics (resample gather, sort, mean, variance) are computed once
-    and shared — and concatenates the results on the input axis in group
-    order. Validity masks and quantile lookup indices are derived
-    in-kernel from the (small) counts, so nothing of size
-    ``O(R * D * M * N)`` is ever materialized. Zero-size classes (empty
-    levels, padded level slots) carry zero weight and contribute zero
-    cost.
+    processes every group in one call and concatenates the results on the
+    parameter axis in group order. It computes the per-replicate column
+    statistics (resample gather, sort, mean, variance) once and shares
+    them. It derives the validity masks and quantile lookup indices
+    in-kernel from the small counts, so it never materializes anything of
+    size ``O(R * D * M * N)``. Zero-size classes (empty levels, padded
+    level slots) carry zero weight and contribute zero cost.
 
     Args:
-        Y_cols: Output columns ``(N, C)``.
-        all_idx: Replicate row indices ``(R, N)`` (row 0 is the identity).
+        Y_cols: Output columns, shape ``(N, C)``.
+        all_idx: Replicate row indices, shape ``(R, N)``. Row 0 is the
+            identity.
         groups: Canonical partition groups; see
             :mod:`jaxgsa._core.partition`.
 
     Returns:
-        ``(ot, advective, diffusive, degenerate)`` with index arrays of
-        shape ``(R, C, D)`` and a ``(R, C)`` flag marking constant
-        (zero-variance) replicate columns, which yield zero indices.
+        ``(ot, advective, diffusive, degenerate)``. The three index arrays
+        have shape ``(R, C, D)``. ``degenerate`` has shape ``(R, C)`` and
+        flags constant (zero-variance) replicate columns, which yield zero
+        indices.
     """
     dtype = jnp.result_type(Y_cols.dtype, jnp.float32)
     Y_cols = Y_cols.astype(dtype)
@@ -199,10 +203,10 @@ def _ot_1d_kernel(
     cls_list = tuple(cls_idx for cls_idx, _ in groups)
 
     def _group_stats(y, y_sorted, mean_r, V, cls_idx, mask_b, counts_b, j_b):
-        """Weighted, normalized cost sums for one group's inputs.
+        """Weighted, normalized cost sums for one group's parameters.
 
         ``mask_b (G, M, P)``, ``counts_b (G, M)``, and ``j_b (G, M, N)``
-        broadcast against the group's input axis Dg (``G`` is 1 or Dg).
+        broadcast against the group's parameter axis Dg. ``G`` is 1 or Dg.
         """
         weights = counts_b / N  # (G, M)
         safe_counts = jnp.maximum(counts_b, 1.0)
@@ -277,26 +281,28 @@ def _joint_kernel(
 ) -> tuple[Array, Array, Array, Array, Array]:
     """Joint (point-cloud) optimal-transport indices for every replicate.
 
-    For every input and class, transports the unconditional output cloud
-    onto the class's conditional cloud with entropic regularization and
-    aggregates the per-class costs into one index per input.
+    For every parameter and class, transports the unconditional output
+    cloud onto the class's conditional cloud with entropic
+    regularization. It then aggregates the per-class costs into one index
+    per parameter.
 
     ``groups`` is a tuple of canonical ``(cls_idx, counts)``
     partition-group layouts from
-    :func:`jaxgsa._core.partition.build_partition_groups`; results
-    concatenate on the input axis in group order, with the shared
-    per-replicate cloud statistics computed once. ``dm_grids`` gives, per
-    group, the flat ``d * Mg + m`` class slots to actually solve: a
-    categorical group's class axis is padded to the largest level count,
-    and the statically-empty pad slots are excluded from the grid instead
-    of running dead Sinkhorn solves. Dynamically empty classes (declared
-    levels with no observed samples) still carry zero weight and are not
-    counted as convergence failures.
+    :func:`jaxgsa._core.partition.build_partition_groups`. Results
+    concatenate on the parameter axis in group order, and the shared
+    per-replicate cloud statistics are computed once. ``dm_grids`` gives,
+    per group, the flat ``d * Mg + m`` class slots to solve. A categorical
+    group's class axis is padded to the largest level count, so the
+    statically empty pad slots are excluded from the grid instead of
+    running dead Sinkhorn solves. Dynamically empty classes (declared
+    levels with no observed samples) still carry zero weight and do not
+    count as convergence failures.
 
     Args:
-        Z: Output point cloud ``(N, E)`` (already standardized when
-            requested by the caller).
-        all_idx: Replicate row indices ``(R, N)`` (row 0 is the identity).
+        Z: Output point cloud, shape ``(N, E)``, already standardized when
+            the caller requested it.
+        all_idx: Replicate row indices, shape ``(R, N)``. Row 0 is the
+            identity.
         groups: Canonical partition groups; see
             :mod:`jaxgsa._core.partition`.
         dm_grids: Per-group int32 arrays of flat class slots to solve.
@@ -305,11 +311,12 @@ def _joint_kernel(
         tol: Sinkhorn marginal stopping tolerance (scalar).
 
     Returns:
-        ``(ot, advective, diffusive, n_bad, degenerate)`` with index
-        arrays of shape ``(R, D)``, a per-replicate count ``(R,)`` of
-        Sinkhorn solves whose marginal residual stayed above ``tol``, and
-        a ``(R,)`` flag marking constant (zero-variance) replicate
-        clouds, which yield zero indices.
+        ``(ot, advective, diffusive, n_bad, degenerate)``. The three index
+        arrays have shape ``(R, D)``. ``n_bad`` has shape ``(R,)`` and
+        counts, per replicate, the Sinkhorn solves whose marginal residual
+        stayed above ``tol``. ``degenerate`` has shape ``(R,)`` and flags
+        constant (zero-variance) replicate clouds, which yield zero
+        indices.
     """
     dtype = jnp.result_type(Z.dtype, jnp.float32)
     Z = Z.astype(dtype)
@@ -318,10 +325,10 @@ def _joint_kernel(
     cls_list = tuple(cls_idx for cls_idx, _ in groups)
 
     def _group_stats(Z_r, mean_all, sq_full, V, cls_idx, counts_r, dm_grid):
-        """Normalized cost sums and failure count for one group's inputs.
+        """Normalized cost sums and failure count for one group's parameters.
 
-        ``counts_r (G, M)`` broadcasts against the group's input axis Dg
-        (``G`` is 1 or Dg).
+        ``counts_r (G, M)`` broadcasts against the group's parameter axis
+        Dg. ``G`` is 1 or Dg.
         """
         Dg, M, P = cls_idx.shape[0], cls_idx.shape[1], cls_idx.shape[2]
         G = counts_r.shape[0]
@@ -330,7 +337,7 @@ def _joint_kernel(
         log_b_all = jnp.where(mask_r, -jnp.log(safe_counts)[..., None], -jnp.inf)  # (G, M, P)
 
         def _one_class(dm: Array):
-            """Transport cost of the full cloud onto class dm % M of input dm // M."""
+            """Transport cost of the full cloud onto class dm % M of parameter dm // M."""
             m = dm % M
             g = jnp.minimum(dm // M, G - 1)  # broadcastable layout axis
             idx = cls_idx[dm // M, m]  # (P,)
@@ -338,7 +345,7 @@ def _joint_kernel(
             count_dm = counts_r[g, m]
             Z_c = Z[idx]  # (P, E)
             # Squared Euclidean cost block (N, P). Padded columns carry
-            # zero target mass, so zeroing their costs is exact -- and
+            # zero target mass, so zeroing their costs is exact. It is also
             # necessary: pads are clamped duplicates of a real sample, and
             # an outlier there would otherwise set the solver's max-cost
             # scale and change the effective regularization per class.
@@ -408,19 +415,19 @@ def _joint_kernel(
 def _boot_conf(vals_all: Array, hat: Array, degen_all: Array, conf_level: float) -> Array:
     """Percentile CI endpoints with degenerate replicates neutralized.
 
-    A constant bootstrap resample carries no information; it contributes
-    the point estimate instead of a spurious zero so it neither widens
+    A constant bootstrap resample carries no information. It contributes
+    the point estimate instead of a spurious zero, so it neither widens
     nor shifts the interval (borgonovo convention).
 
     Args:
-        vals_all: Replicate values ``(R, ..., D)`` (row 0 is the point
-            estimate).
-        hat: Point estimate ``(..., D)``.
-        degen_all: Degeneracy flags ``(R, ...)``.
+        vals_all: Replicate values, shape ``(R, ..., D)``. Row 0 is the
+            point estimate.
+        hat: Point estimate, shape ``(..., D)``.
+        degen_all: Degeneracy flags, shape ``(R, ...)``.
         conf_level: Two-sided confidence level.
 
     Returns:
-        ``(2, ..., D)`` array of ``[lower, upper]`` endpoints.
+        An array of ``[lower, upper]`` endpoints, shape ``(2, ..., D)``.
     """
     degen_boot = degen_all[1:][..., None]
     boot_vals = jnp.where(degen_boot, hat[None], vals_all[1:])
@@ -446,95 +453,104 @@ def analyze(
 ) -> OTResult:
     """Compute optimal-transport sensitivity indices from given data.
 
-    The OT index measures how much knowing an input's value displaces the
-    *entire* output distribution: it is the class-averaged squared
-    2-Wasserstein distance between the output distribution conditional on
-    the input and the unconditional one, normalized to [0, 1] by twice
-    the output variance. 0 means the output distribution is unaffected by
-    the input, 1 means it is fully determined by it. Unlike variance-based
-    indices it reacts to changes in spread, tails and shape; the returned
-    decomposition separates the location-shift (``advective``) part --
-    exactly half the given-data first-order Sobol index -- from the
-    spread/shape (``diffusive``) remainder. Any ``(X, Y)`` sample works;
-    no special design is needed.
+    The optimal-transport (OT) index measures how much knowing a
+    parameter's value displaces the whole output distribution. It is the
+    class-averaged squared 2-Wasserstein distance between the output
+    distribution conditional on the parameter and the unconditional one,
+    normalized to [0, 1] by twice the output variance. 0 means the
+    parameter leaves the output distribution unchanged. 1 means the
+    parameter determines the output distribution fully. Variance-based
+    indices do not react to changes in spread, tails and shape, and this
+    index does.
 
-    Conditioning classes are built from the inputs' ordinal *ranks*, which
-    are invariant under monotone transforms -- the estimator is therefore
-    distribution-free in X and works unchanged for uniform, Gaussian,
-    truncated-Gaussian, or mixed marginals (no CDF transform involved).
-    Categorical parameters are supported natively: each one conditions on
-    one class per level (class sizes are the observed level counts), so
-    the index depends only on the level partition, never on the arbitrary
-    code order. Declared levels with no observed samples are dropped with
-    a warning. Correlated inputs are supported: the index is well-defined under
-    dependence and then measures each input's *total* association with
-    the output, including effects mediated by correlated inputs (the
-    same reading as the given-data S1, whose half remains the advective
-    component).
+    The returned split separates the location-shift part (``advective``)
+    from the spread/shape remainder (``diffusive``). The advective part is
+    exactly half the given-data first-order Sobol index. Any ``(X, Y)``
+    sample works, and no special design is needed.
+
+    Conditioning classes come from the ordinal ranks of the parameters.
+    Ranks are invariant under monotone transforms, so the estimator is
+    distribution-free in X. It works unchanged for uniform, Gaussian,
+    truncated-Gaussian, or mixed marginals, and it applies no CDF
+    transform. Categorical parameters work natively. Each one conditions
+    on one class per level, and the class sizes are the observed level
+    counts, so the index depends only on the level partition and never on
+    the arbitrary code order. The estimator drops declared levels with no
+    observed samples and warns.
+
+    Correlated parameters are supported. The index stays well-defined
+    under dependence, and it then measures each parameter's total
+    association with the output, including effects mediated by correlated
+    parameters. This is the same reading as the given-data S1, whose half
+    remains the advective component. A parameter that does not enter the
+    model but correlates with one that does therefore scores non-zero.
+    That is the correct reading, not an error.
 
     Args:
         problem: Problem definition with D parameters.
-        X: Input sample matrix ``(N, D)``.
-        Y: Model output ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
+        X: Parameter sample matrix, shape ``(N, D)``.
+        Y: Model output, shape ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
         mode: Output treatment. ``"univariate"`` (default) scores every
-            output column independently with exact 1-D optimal transport
-            (indices ``(T, K, D)``, squeezed). ``"multivariate"`` treats the
-            whole (flattened) output vector as one point cloud and yields
-            a single index per input over the joint output distribution
-            (``(D,)``), using entropic Sinkhorn transport.
-            ``"trajectory"`` does the same per output, treating each
-            output's time course as the cloud (``(K, D)``); requires a
-            3-D ``Y``.
+            output column independently with exact 1-D optimal transport,
+            giving indices of shape ``(T, K, D)``, squeezed.
+            ``"multivariate"`` treats the whole flattened output vector as
+            one point cloud and gives a single index per parameter over
+            the joint output distribution, shape ``(D,)``. It uses
+            entropic Sinkhorn transport. ``"trajectory"`` does the same
+            per output, with each output's time course as the cloud, shape
+            ``(K, D)``. It requires a 3-D ``Y``.
         n_partitions: Number of equal-frequency conditioning classes per
-            *continuous* input. More classes localize the conditioning
-            (less discretization bias) but leave fewer samples per class
-            (more estimation noise); ~25 is customary for the OT index at
-            N >= 2500. ``None`` (default) selects ``min(25, N // 2)``.
-            Categorical inputs ignore it and always use one class per
-            level. A passed value is always validated against
-            ``[2, N // 2]``; if nothing uses it (only categorical inputs
-            and no ``dummy``), a ``UserWarning`` says it is ignored.
-        standardize: Joint modes only: divide each output column by its
+            continuous parameter. More classes localize the conditioning
+            and lower the discretization bias, but they leave fewer
+            samples per class and raise the estimation noise. About 25 is
+            customary for the OT index at N >= 2500. ``None`` (default)
+            selects ``min(25, N // 2)``. Categorical parameters ignore it
+            and always use one class per level. A passed value is always
+            validated against ``[2, N // 2]``. If every parameter is
+            categorical and ``dummy`` is false, nothing uses the value and
+            a ``UserWarning`` says it is ignored.
+        standardize: Joint modes only. Divide each output column by its
             standard deviation before building the transport cost, so no
             single output dominates the joint distance through its units.
-            Ignored in ``"univariate"`` mode (each column is normalized by
-            its own variance regardless).
-        epsilon: Joint modes only: entropic regularization strength,
+            Ignored in ``"univariate"`` mode, where each column is
+            normalized by its own variance regardless.
+        epsilon: Joint modes only. Entropic regularization strength,
             relative to the cost matrix scaled to [0, 1]. Smaller values
             approach exact transport at the price of more iterations.
-        max_iter: Joint modes only: Sinkhorn iteration cap per solve.
-        tol: Joint modes only: stopping tolerance on the L1 target-
+        max_iter: Joint modes only. Sinkhorn iteration cap per solve.
+        tol: Joint modes only. Stopping tolerance on the L1 target-
             marginal violation. ``None`` selects ``1e-9`` in float64 and
-            ``1e-6`` in float32 (tighter is unresolvable there). A single
-            warning is emitted if any solve fails to converge.
-        dummy: Also push one synthetic input -- independent of the output
-            by construction -- through the identical pipeline and report
-            its index as ``ot_dummy``. This estimates the index floor a
-            fully irrelevant input receives from finite-sample and
-            (in the point-cloud modes) entropic bias; inputs not
-            clearly above it
-            are indistinguishable from noise.
+            ``1e-6`` in float32, where a tighter value is unresolvable.
+            One warning is emitted if any solve fails to converge.
+        dummy: Also push one synthetic parameter through the identical
+            pipeline and report its index as ``ot_dummy``. The synthetic
+            parameter is independent of the output by construction. Its
+            index estimates the floor a fully irrelevant parameter
+            receives from finite-sample bias and, in the point-cloud
+            modes, from entropic bias. Parameters not clearly above that
+            floor are indistinguishable from noise.
         n_bootstrap: Number of bootstrap resamples for confidence
-            intervals. 0 (default) skips them (``*_conf`` are ``None``).
-            Joint modes solve ``n_bootstrap * D * n_partitions``
-            transport problems -- keep it modest there.
+            intervals. ``0`` (default) skips them, and the ``*_conf``
+            fields are ``None``. Joint modes solve
+            ``n_bootstrap * D * n_partitions`` transport problems, so keep
+            the value modest there.
         conf_level: Confidence level for percentile bootstrap intervals.
-        seed: Random seed for bootstrap resampling and the dummy input.
-        slice_chunk_size: ``"univariate"`` mode: number of flattened
-            ``T*K`` output columns processed per kernel call; ``None``
-            picks a memory-aware default. Accepted but inert in the
-            point-cloud modes
-            (their peak memory is bounded by one ``(N, N/M)`` cost block
-            per solve).
+        seed: Random seed for bootstrap resampling and the dummy
+            parameter.
+        slice_chunk_size: ``"univariate"`` mode only. Number of flattened
+            ``T*K`` output columns processed per kernel call. ``None``
+            picks a memory-aware default. The point-cloud modes accept it
+            but ignore it, because one ``(N, N/M)`` cost block per solve
+            bounds their peak memory.
 
     Returns:
-        OTResult with total, advective and diffusive indices, optional
-        confidence intervals, and the optional dummy baseline. All
-        indices are 0 for a constant (zero-variance) output slice rather
-        than NaN. In the point-cloud modes the entropic and
-        finite-sample bias
-        keeps indices of irrelevant inputs strictly positive -- compare
-        against ``ot_dummy`` rather than against 0.
+        An :class:`OTResult` with the total, advective and diffusive
+        indices, optional confidence intervals, and the optional dummy
+        baseline. Every index is 0 for a constant (zero-variance) output
+        slice rather than NaN. In the point-cloud modes the entropic and
+        finite-sample bias keeps the indices of irrelevant parameters
+        strictly positive. Compare those against ``ot_dummy`` rather than
+        against 0.
 
     Raises:
         ValueError: If X is not 2-D, its column count does not match the
@@ -548,8 +564,8 @@ def analyze(
             ``(0, 1)``, or ``slice_chunk_size`` is not a positive integer.
     """
     X = jnp.asarray(X)
-    # The OT index measures total, correlation-inclusive influence via
-    # rank-based conditioning, so correlated problems are welcome.
+    # The OT index measures total, correlation-inclusive influence through
+    # rank-based conditioning, so correlated problems are accepted.
     Y = _validate_xy_inputs(problem, X, Y, correlation_ok=True, categorical_ok=True)
 
     if mode not in _MODES:
@@ -557,8 +573,8 @@ def analyze(
     if mode == "trajectory" and Y.ndim != 3:
         raise ValueError(f"mode='trajectory' requires a 3-D (N, T, K) Y, got ndim={Y.ndim}")
     N = X.shape[0]
-    # n_partitions applies to the continuous columns (and the dummy input);
-    # categorical columns always get one conditioning class per level.
+    # n_partitions applies to the continuous columns and the dummy
+    # parameter. Categorical columns always get one class per level.
     dims_levels = _categorical_dims(problem)
     cat_dims = [d for d, _ in dims_levels]
     cont_dims = [d for d in range(problem.num_vars) if d not in set(cat_dims)]
@@ -621,12 +637,12 @@ def analyze(
         all_idx = identity
 
     # Build one partition layout per column group. Continuous columns share
-    # one equal-frequency rank layout (identical for every replicate);
-    # categorical columns get one class per level, with sizes that vary per
+    # one equal-frequency rank layout, identical for every replicate.
+    # Categorical columns get one class per level, with sizes that vary per
     # column and per bootstrap resample, so their layout carries leading
     # (R, Dc) axes. Grouping keeps the padded class tensors rectangular
-    # without padding continuous classes up to a categorical level size (or
-    # vice versa).
+    # without padding continuous classes up to a categorical level size, or
+    # the other way round.
     # Canonical partition-group layout, shared with borgonovo. Each group
     # is (cls_idx, counts); masks and quantile lookups are derived
     # in-kernel from the counts.
@@ -636,8 +652,8 @@ def analyze(
         """Flat ``d * Mg + m`` class slots the joint kernel must solve.
 
         A categorical group's class axis is padded to the largest level
-        count; the pad slots are statically empty (their counts are zero
-        for every replicate), so they are excluded here instead of
+        count. The pad slots are statically empty, because their counts
+        are zero for every replicate. They are excluded here instead of
         running dead Sinkhorn solves.
         """
         D_g, M_g = group[0].shape[1], group[0].shape[2]
@@ -656,11 +672,11 @@ def analyze(
     if cat_dims:
         group_levels.append([n_levels for _, n_levels in dims_levels])
 
-    # `_run` maps replicate indices + partition-layout groups to
-    # (ot, advective, diffusive, degenerate) arrays with the input axis
-    # last (in problem column order), and accumulates Sinkhorn convergence
-    # stats for the one end-of-analysis warning. Defining it per mode lets
-    # the dummy baseline below reuse the identical estimator.
+    # `_run` maps replicate indices and partition-layout groups to
+    # (ot, advective, diffusive, degenerate) arrays with the parameter axis
+    # last, in problem column order. It also accumulates the Sinkhorn
+    # convergence stats for the one end-of-analysis warning. Defining it
+    # per mode lets the dummy baseline below reuse the identical estimator.
     n_bad_parts: list[Array] = []
     n_solves = 0
     _Groups = list[tuple[Array, Array]]
@@ -703,9 +719,9 @@ def analyze(
         eps_s = jnp.asarray(epsilon, dtype)
         max_iter_s = jnp.asarray(max_iter, jnp.int32)
         tol_s = jnp.asarray(tol, dtype)
-        # One point cloud for "multivariate" (flattened output), one per output
-        # for "trajectory"; the runner stacks per-cloud results on a
-        # new output axis only in the latter case.
+        # One point cloud for "multivariate" (flattened output), one per
+        # output for "trajectory". The runner stacks the per-cloud results
+        # on a new output axis only in the "trajectory" case.
         if mode == "multivariate":
             clouds = [Y_3d.reshape(N, T * K)]
         else:
@@ -750,11 +766,11 @@ def analyze(
 
     ot_dummy: Array | None = None
     if dummy:
-        # A synthetic input that is independent of Y by construction; only
-        # its ranks matter, so a permutation of 0..N-1 suffices. It runs
-        # through the identical estimator as a single-replicate pass (the
-        # baseline needs no bootstrap interval). The dummy is continuous, so
-        # it always uses the shared equal-frequency layout.
+        # A synthetic parameter that is independent of Y by construction.
+        # Only its ranks matter, so a permutation of 0..N-1 is enough. It
+        # runs through the identical estimator as a single-replicate pass,
+        # because the baseline needs no bootstrap interval. The dummy is
+        # continuous, so it always uses the shared equal-frequency layout.
         take_np, sizes_np = _class_layout(N, M)
         dummy_col = jax.random.permutation(key_dummy, N)[:, None]
         dummy_cls_idx = _build_class_indices(dummy_col, identity, jnp.asarray(take_np))
@@ -762,8 +778,8 @@ def analyze(
         ot_dummy = _run(identity, [dummy_group], [None], None)[0][0][..., 0]
 
     if n_bad_parts:
-        # One host sync for the whole analysis; the solver itself never
-        # raises (exceptions cannot cross a traced while_loop).
+        # One host sync for the whole analysis. The solver itself never
+        # raises, because exceptions cannot cross a traced while_loop.
         n_bad = int(sum(n_bad_parts))
         if n_bad:
             warnings.warn(

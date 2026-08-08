@@ -1,9 +1,9 @@
 """Poincare constants and marginal variances for DGSM bounds.
 
-The Poincare constant C(p) of a distribution p is the sharpest factor
-for which the Poincare inequality ``Var(g(X)) <= C(p) * E[g'(X)^2]``
-holds for every smooth function g. The Sobol-Kucherenko inequality
-applies it per input to bound the total Sobol index as
+The Poincare constant C(p) of a distribution p is the sharpest factor for
+which the Poincare inequality ``Var(g(X)) <= C(p) * E[g'(X)^2]`` holds for
+every smooth function g. The Sobol-Kucherenko inequality applies it per input
+to bound the total Sobol index as
 
     ST_i <= C(p_i) * nu_i / Var(Y)
 
@@ -32,15 +32,19 @@ from jaxgsa.problem import Problem, _NormalizedInputSpec
 
 
 def poincare_constant(spec: _NormalizedInputSpec, *, grid: int = 512) -> float:
-    """Poincare constant C(p) for a single marginal.
+    """Return the Poincare constant C(p) of a single marginal.
 
     Args:
-        spec: Normalized input spec tuple (dist, first, second, low, high,
-            categorical).
-        grid: Number of P1 elements for truncated-Normal spectral solve.
+        spec: Normalized input spec tuple ``(dist, first, second, low, high,
+            categorical)``.
+        grid: Number of P1 elements for the truncated-Normal spectral solve.
 
     Returns:
-        The (optimal) Poincare constant.
+        The optimal Poincare constant.
+
+    Raises:
+        ValueError: If the marginal is categorical, which has no Poincare
+            constant, or if the distribution type is unknown.
     """
     dist, first, second, low, high, _ = spec
     if dist == "uniform":
@@ -63,11 +67,11 @@ def poincare_constant(spec: _NormalizedInputSpec, *, grid: int = 512) -> float:
 
 
 def _truncnorm_poincare(mu: float, sigma: float, a: float, b: float, grid: int) -> float:
-    """Optimal Poincare constant of N(mu, sigma^2) truncated to [a, b].
+    """Return the optimal Poincare constant of N(mu, sigma^2) on [a, b].
 
     Solves the weighted Neumann eigenproblem ``int rho g' h' = lam int rho g h``
-    on [a, b] with a P1 finite-element basis. The constant is 1/lambda_1
-    where lambda_1 is the spectral gap (smallest positive eigenvalue).
+    on [a, b] with a P1 finite-element basis. The constant is 1/lambda_1, where
+    lambda_1 is the spectral gap: the smallest positive eigenvalue.
 
     Args:
         mu: Mean of the underlying Gaussian.
@@ -97,9 +101,9 @@ def _truncnorm_poincare(mu: float, sigma: float, a: float, b: float, grid: int) 
 
 
 def marginal_variance(spec: _NormalizedInputSpec) -> float:
-    """Marginal variance of a single input distribution.
+    """Return the marginal variance of a single input distribution.
 
-    Used for the Kucherenko-Song lower bound on ST:
+    The Kucherenko-Song lower bound on ST uses it:
         ST_i >= Var_i * w_i^2 / Var(Y)
 
     Args:
@@ -107,6 +111,11 @@ def marginal_variance(spec: _NormalizedInputSpec) -> float:
 
     Returns:
         The variance of the marginal distribution.
+
+    Raises:
+        ValueError: If the marginal is categorical, whose level codes have no
+            variance meaningful to the bounds, or if the distribution type is
+            unknown.
     """
     dist, first, second, low, high, _ = spec
     if dist == "uniform":
@@ -130,13 +139,14 @@ def marginal_variance(spec: _NormalizedInputSpec) -> float:
 
 
 def axis_constants(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
-    """Per-axis (Poincare constant, marginal variance) from a Problem.
+    """Return the per-axis Poincare constant and marginal variance.
 
     Args:
         problem: Problem definition with D parameters.
 
     Returns:
-        (C, Var) each of shape (D,).
+        A tuple ``(C, Var)``. ``C`` holds the Poincare constants and ``Var`` the
+        marginal variances, each of shape ``(D,)``.
     """
     C = np.array(
         [poincare_constant(spec) for spec in problem.input_specs],

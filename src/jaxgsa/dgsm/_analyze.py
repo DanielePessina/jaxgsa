@@ -33,11 +33,21 @@ from jaxgsa.problem import Problem
 
 
 def _promote_jac(jac: Array) -> Array:
-    """Promote a Jacobian to canonical 4-D (N, T, K, D) by axis position.
+    """Promote a Jacobian to canonical 4-D ``(N, T, K, D)`` by axis position.
 
-    Positional only — the label-aware reinterpretation of the slice axes
-    (single-output time series, swapped trailing axes) is applied afterwards
-    in ``analyze`` by aligning against the canonicalized ``Y``.
+    This step is positional only. ``analyze`` applies the label-aware
+    reinterpretation of the slice axes afterwards, by aligning against the
+    canonicalized ``Y``. That pass handles a single-output time series and
+    swapped trailing axes.
+
+    Args:
+        jac: Jacobian, shape ``(N, D)`` / ``(N, K, D)`` / ``(N, T, K, D)``.
+
+    Returns:
+        The Jacobian as a 4-D array of shape ``(N, T, K, D)``.
+
+    Raises:
+        ValueError: If ``jac`` is not 2-D, 3-D, or 4-D.
     """
     if jac.ndim == 2:  # (N, D) scalar output
         return jac[:, None, None, :]
@@ -53,9 +63,15 @@ def _promote_jac(jac: Array) -> Array:
 def _promote_moments(m: Array) -> Array:
     """Promote a reduced moment ``(*slice, D)`` to canonical ``(T, K, D)``.
 
-    The reduced-space analog of :func:`_promote_jac` (which acts on the sample
-    axis too); used on the autodiff path where the moments are already averaged
-    over N before layout is known.
+    This is the reduced-space analog of :func:`_promote_jac`, which acts on the
+    sample axis as well. The autodiff path needs it because it averages the
+    moments over N before the output layout is known.
+
+    Args:
+        m: Reduced moment, shape ``(D,)`` / ``(K, D)`` / ``(T, K, D)``.
+
+    Returns:
+        The moment as a 3-D array of shape ``(T, K, D)``.
     """
     if m.ndim == 1:  # (D,) scalar output
         return m[None, None, :]
@@ -71,27 +87,28 @@ def _compute_moments(
 ) -> tuple[Array, Array, Array]:
     """Compute DGSM moments and forward outputs via reverse-mode autodiff.
 
-    The mean over the sample axis is one vectorized reduction covering every
-    (t, k) output slice at once — the per-slice kernel needs no explicit vmap
+    The mean over the sample axis is one vectorized reduction that covers every
+    (t, k) output slice at once. The per-slice kernel needs no explicit vmap,
     because the closed form already batches it.
 
     Args:
-        fn: JAX-differentiable function (D,) -> (), (D,) -> (K,), or
-            (D,) -> (T, K).
-        X: Sample matrix (N, D).
-        batch_size: If given, process the N sample rows in batches of
-            this size to limit memory.
+        fn: JAX-differentiable function ``(D,) -> ()``, ``(D,) -> (K,)``, or
+            ``(D,) -> (T, K)``.
+        X: Sample matrix, shape ``(N, D)``.
+        batch_size: Number of N sample rows per batch, to limit memory. None
+            processes all N rows at once.
 
     Returns:
-        (Y, sigma, nu) where Y is the stacked raw fn output ((N,), (N, K),
-        or (N, T, K)) and sigma / nu are the reduced raw moments carrying the
-        fn output's own slice axes: (D,), (K, D), or (T, K, D). Layout
-        canonicalization (promotion, label-driven axis moves) is applied in
-        ``analyze`` once the semantic axes are known.
+        A tuple ``(Y, sigma, nu)``. ``Y`` is the stacked raw ``fn`` output,
+        shape ``(N,)`` / ``(N, K)`` / ``(N, T, K)``. ``sigma`` and ``nu`` are
+        the reduced raw moments and carry the ``fn`` output's own slice axes,
+        shape ``(D,)`` / ``(K, D)`` / ``(T, K, D)``. ``analyze`` applies the
+        layout canonicalization (promotion and label-driven axis moves) once
+        the semantic axes are known.
     """
 
     # Reverse-mode Jacobian is efficient when K (outputs) < D (inputs).
-    # has_aux=True returns both Jacobian and forward output from a single
+    # has_aux=True returns both the Jacobian and the forward output from one
     # forward+backward pass, avoiding a redundant model evaluation.
     def _fn_aux(x: Array) -> tuple[Array, Array]:
         y = fn(x)
@@ -114,7 +131,8 @@ def _compute_moments(
         end = min(start + batch_size, N)
         actual_len = end - start
 
-        # Pad ragged last batch to avoid JIT recompilation for a new shape
+        # Pad the ragged last batch, so a new shape does not force a JIT
+        # recompilation.
         X_chunk = X[start:end]
         if actual_len < batch_size:
             pad_size = batch_size - actual_len
@@ -145,59 +163,58 @@ def analyze(
 ) -> DGSMResult:
     """Compute DGSM sensitivity indices and Sobol index bounds.
 
-    DGSM ranks inputs by how strongly the output reacts to them on
-    average: ``nu_i = E[(df/dx_i)^2]``, the mean squared partial
-    derivative over the input distribution. It is the natural pick when
-    the model is JAX-differentiable, because one autodiff sweep over an
-    ordinary Monte Carlo sample replaces a dedicated Sobol design. The
-    moments are converted into a bracket on the total Sobol index:
+    DGSM ranks inputs by how strongly the output reacts to them on average.
+    The measure is ``nu_i = E[(df/dx_i)^2]``, the mean squared partial
+    derivative over the input distribution. It is the natural pick when the
+    model is JAX-differentiable: one autodiff sweep over an ordinary Monte
+    Carlo sample replaces a dedicated Sobol design.
+
+    Two inequalities convert the moments into a bracket on the total Sobol
+    index:
 
     - **Upper bound** (Poincare / Sobol-Kucherenko inequality):
-      ``ST_i <= C_i * nu_i / Var(Y)``, where ``C_i`` is the Poincare
-      constant of input i's marginal distribution — the sharpest factor
-      for which the inequality holds (see :mod:`jaxgsa.dgsm._poincare`).
+      ``ST_i <= C_i * nu_i / Var(Y)``. ``C_i`` is the Poincare constant of
+      input i's marginal distribution, the sharpest factor for which the
+      inequality holds (see :mod:`jaxgsa.dgsm._poincare`).
     - **Lower bound** (Kucherenko-Song):
-      ``ST_i >= Var(x_i) * sigma_i^2 / Var(Y)`` with
+      ``ST_i >= Var(x_i) * sigma_i^2 / Var(Y)``, with
       ``sigma_i = E[df/dx_i]``, the mean (signed) derivative.
 
     An input whose upper bound is near zero is provably negligible.
 
-    Two calling conventions are supported:
+    There are two calling conventions:
 
-    **Autodiff path** (primary): pass ``fn`` and ``X``. The function is
-    differentiated via ``jax.jacrev`` and evaluated to obtain both
-    the Jacobian and forward outputs.
-
-    **Pre-computed path**: pass ``Y`` and ``dfdx``. Useful when the model
-    is not JAX-differentiable or when the Jacobian has been computed
-    externally.
+    - **Autodiff path** (primary): pass ``fn`` and ``X``. ``jax.jacrev``
+      differentiates the function, and one pass returns both the Jacobian and
+      the forward outputs.
+    - **Pre-computed path**: pass ``Y`` and ``dfdx``. Use it when the model is
+      not JAX-differentiable, or when the Jacobian comes from elsewhere.
 
     Args:
         problem: Problem definition with D parameters.
         fn: JAX-differentiable function ``(D,) -> ()``, ``(D,) -> (K,)``, or
             ``(D,) -> (T, K)`` for time-series outputs.
-        X: Sample matrix ``(N, D)`` in the problem's physical units.
-        Y: Forward model outputs ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
-        dfdx: Pre-computed Jacobian mirroring ``Y``'s layout with one extra
-            trailing ``(D,)`` axis: ``(N, D)`` for ``(N,)`` Y, ``(N, K, D)`` for
-            ``(N, K)``, and ``(N, T, K, D)`` for ``(N, T, K)``.
-        batch_size: Number of N sample rows per batch on the autodiff
-            path; the Jacobian is accumulated in batches of this many
-            samples to bound peak memory. None (default) processes all
-            N samples at once.
+        X: Sample matrix in the problem's physical units, shape ``(N, D)``.
+        Y: Forward model outputs, shape ``(N,)`` / ``(N, K)`` / ``(N, T, K)``.
+        dfdx: Pre-computed Jacobian, mirroring ``Y``'s layout with one extra
+            trailing ``(D,)`` axis: ``(N, D)`` for ``(N,)`` Y, ``(N, K, D)``
+            for ``(N, K)``, and ``(N, T, K, D)`` for ``(N, T, K)``.
+        batch_size: Number of N sample rows per batch on the autodiff path.
+            The Jacobian accumulates in batches of this many samples, which
+            bounds peak memory. None (default) processes all N samples at once.
 
     Returns:
-        DGSMResult with nu, sigma, upper_bound, lower_bound (each ``(D,)`` /
-        ``(K, D)`` / ``(T, K, D)`` mirroring the output layout) and var_y.
+        A ``DGSMResult`` with ``nu``, ``sigma``, ``upper_bound``, and
+        ``lower_bound``, each of shape ``(D,)`` / ``(K, D)`` / ``(T, K, D)``
+        mirroring the output layout, plus ``var_y``.
 
     Raises:
-        ValueError: If neither ``(fn, X)`` nor ``(Y, dfdx)`` is provided,
-            if ``dfdx`` has an unexpected shape or does not match
-            ``Y`` / the problem dimension, if ``problem.correlation``
-            declares a dependence structure (the Poincare-inequality bounds
-            assume independent inputs), or if ``problem`` has categorical
-            parameters (a derivative along an unordered level code has no
-            meaning).
+        ValueError: In any of these cases. Neither ``(fn, X)`` nor
+            ``(Y, dfdx)`` was given. ``dfdx`` has an unexpected shape, or does
+            not match ``Y`` or the problem dimension. ``problem.correlation``
+            declares a dependence structure, and the Poincare-inequality bounds
+            assume independent inputs. ``problem`` has categorical parameters,
+            and a derivative along an unordered level code has no meaning.
     """
     # The Poincare-inequality bound on ST assumes independent inputs; both
     # calling conventions are rejected for a correlated problem.
@@ -213,7 +230,8 @@ def analyze(
         sigma = _promote_moments(sigma)
         nu = _promote_moments(nu)
     elif Y is not None and dfdx is not None:
-        # Pre-computed path: user supplies Jacobian and forward outputs directly
+        # Pre-computed path: the caller supplies the Jacobian and the forward
+        # outputs directly.
         Y_out = jnp.asarray(Y)
         dfdx_arr = jnp.asarray(dfdx)
         Y_valid = _validate_output(Y_out, int(dfdx_arr.shape[0]), problem)
@@ -236,9 +254,9 @@ def analyze(
         raise ValueError("Provide either (fn, X) or (Y, dfdx)")
 
     # Canonicalize Y to (N, T, K). The moments were realigned in lockstep with
-    # Y's canonicalization above, so their slice axes must already match; a
-    # mismatch means dfdx did not mirror Y's layout (e.g. wrong ndim or a
-    # transposed Jacobian that inference could not recover), which we reject.
+    # Y's canonicalization above, so their slice axes must already match. A
+    # mismatch means dfdx did not mirror Y's layout: wrong ndim, or a
+    # transposed Jacobian that inference could not recover. Reject it.
     Y_3d, squeeze_time, squeeze_output = _prepare_Y(Y_valid)
     if sigma.shape[:2] != Y_3d.shape[1:3]:
         raise ValueError(
@@ -250,12 +268,13 @@ def analyze(
     # Var(Y) per (t, k) output slice, denominator of both bounds.
     var_y = jnp.var(Y_3d, axis=0)  # (T, K)
 
-    # Per-axis constants: C for Poincare upper bound, Var for lower bound
+    # Per-axis constants: C for the Poincare upper bound, Var for the lower.
     C, Var = axis_constants(problem)
     C_jnp = jnp.asarray(C)
     Var_jnp = jnp.asarray(Var)
 
-    # Guard against zero variance (constant output) -> NaN bounds
+    # A constant output slice has zero variance; map it to NaN bounds rather
+    # than dividing by zero.
     denom = jnp.where(var_y == 0, jnp.nan, var_y)[..., None]  # (T, K, 1)
 
     # Upper: ST_i <= C_i * nu_i / Var(Y)  (Sobol-Kucherenko inequality).
@@ -264,7 +283,8 @@ def analyze(
     # Lower: ST_i >= Var_i * sigma_i^2 / Var(Y)  (Kucherenko-Song)
     lower = Var_jnp * sigma**2 / denom
 
-    # Sanity check: upper should be >= lower within numerical tolerance
+    # The upper bound must sit at or above the lower bound. Check it within a
+    # numerical tolerance and warn if it does not hold.
     if jnp.any(jnp.isfinite(upper) & jnp.isfinite(lower) & (upper < lower * 0.9)):
         warnings.warn(
             "DGSM: some upper bounds are below lower bounds, suggesting "

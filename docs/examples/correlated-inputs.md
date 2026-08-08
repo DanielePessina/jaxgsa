@@ -1,10 +1,17 @@
 # Correlated Inputs
 
-Use this page when your input parameters are not independent. jaxgsa models
-dependence with a Gaussian copula. Every parameter keeps its declared
-marginal (uniform, Gaussian, or truncated Gaussian) exactly as written. A
-`(D, D)` correlation matrix on the copula's latent standard-normal scale
-couples the columns. The matrix lives on the `Problem`, so samplers and
+Use this page when your input parameters are not independent. By the end of it
+you will be able to declare the dependence once on the `Problem`, draw samples
+that respect it, and pick a method whose indices still mean something when
+inputs move together.
+
+jaxgsa models dependence with a Gaussian copula. A copula separates two
+questions: what each parameter's own distribution looks like, and how the
+parameters move together. Every parameter keeps its declared marginal (uniform,
+Gaussian, or truncated Gaussian) exactly as written. A `(D, D)` correlation
+matrix couples the columns. That matrix lives on the copula's latent
+standard-normal scale, which is the hidden set of normal variables the copula
+builds the samples from. The matrix lives on the `Problem`, so samplers and
 analyzers see one consistent declaration.
 
 ## Declare correlation on a Problem
@@ -47,12 +54,12 @@ problem = jaxgsa.Problem.from_dict(
 )
 ```
 
-The matrix is validated on entry: wrong shape, asymmetry, non-unit diagonal,
-or entries outside `[-1, 1]` raise `ValueError`. A matrix that is not
-positive definite — usually a sign of inconsistent pairwise correlations — is
-repaired by eigenvalue clipping. How loudly that repair reports itself depends
-on how far it has to move the matrix. The measure is the largest change to a
-single entry, on the scale you declared:
+The matrix is validated on entry. A wrong shape, an asymmetry, a non-unit
+diagonal, or entries outside `[-1, 1]` raise `ValueError`. A matrix that is not
+positive definite is repaired by eigenvalue clipping. Such a matrix usually
+means the pairwise correlations you declared cannot all hold at once. How
+loudly the repair reports itself depends on how far it has to move the matrix.
+The measure is the largest change to a single entry, on the scale you declared:
 
 | Largest entry change | What happens |
 |---|---|
@@ -131,8 +138,8 @@ X_correlated = jaxgsa.sampling.correlate(X_independent, problem, seed=2)
 ```
 
 The method builds a score matrix from van der Waerden scores. It then removes
-the score matrix's own sampling noise before it reads off the ranks. Your
-finite design therefore lands much closer to the declared correlation. At
+the score matrix's own sampling noise before it reads off the ranks. A finite
+design therefore lands much closer to the declared correlation. At
 N = 50 and a target of 0.8, the achieved rank correlation scatters with a
 standard deviation of about 0.024, against about 0.065 for a plain correlated
 normal draw.
@@ -155,15 +162,17 @@ hsic = jaxgsa.hsic.analyze(problem, X, Y)
 pawn = jaxgsa.pawn.analyze(problem, X, Y)
 ```
 
-All four share the same caveat. Under correlation these indices
-deliberately credit an input for influence it carries *through* its
-correlated partners: if `Y` depends only on `x1` but `corr(x1, x2) = 0.8`,
-then `x2` also gets a clearly non-zero index. That is the correct
-correlation-inclusive reading, not an estimation error.
+All four share the same caveat. Under correlation these indices deliberately
+credit an input for influence it carries through its correlated partners.
+Suppose `Y` depends only on `x1` and `corr(x1, x2) = 0.8`. Then `x2` also gets
+a clearly non-zero index. That is the correct correlation-inclusive reading,
+not an estimation error. It answers "what does watching `x2` tell me about
+`Y`", not "what happens if I change `x2` on its own".
 
-The second group separates the direct effect from the correlation-borne one,
-and reports variance fractions. Two of the three read the declared
-correlation matrix directly:
+The second group answers the other question. It separates an input's direct
+effect from the part it borrows through its correlated partners, and reports
+both as variance fractions. Two of the three read the declared correlation
+matrix directly:
 
 ```python
 vk = jaxgsa.vkoga.analyze(problem, X, Y)
@@ -201,11 +210,11 @@ ANCOVA-based attribution, not conditional-variance Shapley effects).
 
 ## Methods that refuse correlated problems
 
-Methods whose indices are only defined for independent inputs raise a
-`ValueError` instead of returning silently wrong numbers — the structured
-design samplers (`sobol.sample`, `morris.sample`, `efast.sample`) and the
-analyzers whose theory needs independence (`pce.analyze`, `dgsm.analyze`,
-`shapley.analyze` with the PCE backend):
+Some methods have indices that are only defined for independent inputs. They
+raise a `ValueError` rather than return silently wrong numbers. Two groups do
+this: the structured design samplers (`sobol.sample`, `morris.sample`,
+`efast.sample`) and the analyzers whose theory needs independence
+(`pce.analyze`, `dgsm.analyze`, `shapley.analyze` with the PCE backend).
 
 ```python
 jaxgsa.pce.analyze(problem, X, Y)

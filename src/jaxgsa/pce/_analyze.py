@@ -68,29 +68,32 @@ def _truncated_gaussian_is_wide(
 def _map_to_reference(X: Array, problem: Problem, order: int) -> tuple[Array, tuple[str, ...]]:
     """Map physical inputs to the orthogonal polynomial reference domain.
 
-    Uniform inputs use Legendre, mapped to [-1, 1]. Untruncated Gaussian
-    inputs use Hermite, standardized to N(0, 1).
+    This is the Wiener-Askey rule. Uniform inputs use Legendre, mapped to
+    [-1, 1]. Untruncated Gaussian inputs use Hermite, standardized to
+    N(0, 1).
 
-    A *truncated* Gaussian picks its basis from how tight the truncation is.
+    A truncated Gaussian picks its basis from how tight the truncation is.
     A narrow truncation is a genuinely different measure, so the input goes
-    through its truncated CDF and onto Legendre. A wide truncation — every
-    declared bound at least ``_WIDE_TRUNCATION_Z`` standard deviations from
-    the mean — is almost the standard normal, and Hermite is both cheaper and
-    far more accurate there: the Legendre route has to approximate the steep
-    inverse normal CDF with low-order polynomials, which measurably degrades
-    the fit. Requesting an order above
-    ``_MAX_HERMITE_ORDER_UNDER_TRUNCATION`` forces Legendre again, because the
-    Hermite Gram defect against the truncated measure grows with degree.
+    through its truncated CDF and onto Legendre. A wide truncation keeps
+    Hermite. Wide means every declared bound sits at least
+    ``_WIDE_TRUNCATION_Z`` standard deviations from the mean, which is almost
+    the standard normal. Hermite is both cheaper and far more accurate there,
+    because the Legendre route has to approximate the steep inverse normal
+    CDF with low-order polynomials, and that measurably degrades the fit.
+    Requesting an order above ``_MAX_HERMITE_ORDER_UNDER_TRUNCATION`` forces
+    Legendre again, because the Hermite Gram defect against the truncated
+    measure grows with degree.
 
     Args:
-        X: (N, D) inputs in physical units.
+        X: Inputs in physical units, shape ``(N, D)``.
         problem: Problem whose ``input_specs`` decide the per-dimension map.
         order: Effective maximum polynomial degree of the expansion.
 
     Returns:
-        Tuple of the (N, D) reference-domain inputs and a length-D tuple of
-        ``"uniform"`` / ``"gaussian"`` tags telling ``build_design_matrix``
-        which 1-D polynomial family each dimension needs.
+        Tuple of the reference-domain inputs, shape ``(N, D)``, and a
+        length-``D`` tuple of ``"uniform"`` / ``"gaussian"`` tags telling
+        ``build_design_matrix`` which 1-D polynomial family each dimension
+        needs.
     """
     import numpy as np
     from scipy.stats import truncnorm
@@ -149,11 +152,11 @@ def _auto_order(D: int, N: int, max_order: int, fit_ratio: float) -> int:
 class _PCEFit(NamedTuple):
     """The shared PCE fit: coefficients and everything needed to reuse them.
 
-    PCE analysis derives Sobol indices and the LOO diagnostic from this state;
-    :meth:`PCEResult.shapley` reuses its coefficients and multi-index. The
-    design matrix and Gram factorization are deliberately NOT carried: the
-    streamed path never materializes them at full N, so both fit paths reduce
-    to the same coefficient + LOO summary.
+    PCE analysis derives Sobol indices and the leave-one-out (LOO) diagnostic
+    from this state. :meth:`PCEResult.shapley` reuses its coefficients and
+    multi-index. The design matrix and Gram factorization are deliberately
+    NOT carried: the streamed path never materializes them at full ``N``, so
+    both fit paths reduce to the same coefficient and LOO summary.
     """
 
     coefficients: Array  # (T, K, n_terms), terms-last
@@ -181,7 +184,7 @@ def _fit_pce_streamed(
 
     1. Accumulate ``G = Phi^T Phi`` (n_terms, n_terms) and ``B = Phi^T Y``
        (n_terms, T*K), then solve ``(G + ridge*I) c = B`` once. This is
-       mathematically identical to the single-pass normal equations -- only
+       mathematically identical to the single-pass normal equations. Only
        the float32 summation order differs.
     2. With ``(G + ridge*I)^{-1}`` known, rebuild each design block to get
        the hat-matrix diagonal ``h_i = phi_i G^{-1} phi_i^T`` and per-row
@@ -190,18 +193,19 @@ def _fit_pce_streamed(
        ``mean`` over rows).
 
     Args:
-        X_ref: (N, D) inputs already mapped to the reference domain.
-        Y_flat: (N, T*K) flattened output slices.
-        multi_index: (n_terms, D) multi-index array.
-        input_types: per-dimension ``"uniform"`` / ``"gaussian"`` tags.
-        order: effective (post-``_auto_order``) polynomial order.
+        X_ref: Inputs already mapped to the reference domain, shape
+            ``(N, D)``.
+        Y_flat: Flattened output slices, shape ``(N, T*K)``.
+        multi_index: Multi-index array, shape ``(n_terms, D)``.
+        input_types: Per-dimension ``"uniform"`` / ``"gaussian"`` tags.
+        order: Effective (post-``_auto_order``) polynomial order.
         ridge: Tikhonov parameter added to the Gram matrix.
-        batch_size: rows per batch, or ``None`` to derive one from the
+        batch_size: Rows per batch, or ``None`` to derive one from the
             active memory budget.
 
     Returns:
-        Tuple of ``coeffs_flat`` (n_terms, T*K) and the (T*K,) per-slice
-        LOO RMSE.
+        Tuple of ``coeffs_flat``, shape ``(n_terms, T*K)``, and the per-slice
+        LOO RMSE, shape ``(T*K,)``.
     """
     N = X_ref.shape[0]
     n_terms = multi_index.shape[0]
@@ -259,10 +263,10 @@ def _single_pass_fit_bytes(N: int, n_terms: int, M: int, itemsize: int) -> int:
     the N-sized arrays.
 
     Args:
-        N: number of sample rows.
-        n_terms: number of expansion terms.
-        M: number of flattened output slices (T*K).
-        itemsize: bytes per element of the working dtype.
+        N: Number of sample rows.
+        n_terms: Number of expansion terms.
+        M: Number of flattened output slices (T*K).
+        itemsize: Bytes per element of the working dtype.
 
     Returns:
         Estimated peak resident bytes of the single-pass fit + LOO.
@@ -286,12 +290,12 @@ def _fit_pce_core(
     warning, no index extraction). The basis is identical across slices, so
     fitting all ``T*K`` right-hand sides is a single Gram solve.
 
-    When the single-pass residents (design matrix, Gram factorization, LOO
-    residual arrays) would exceed the active memory budget -- or when
-    ``batch_size`` is an explicit int -- the fit streams over row batches
-    instead (see :func:`_fit_pce_streamed`); the streamed fit solves the
-    same normal equations and computes the same exact LOO, differing only
-    in float32 summation order.
+    The fit streams over row batches instead (see :func:`_fit_pce_streamed`)
+    in two cases: when the single-pass residents (design matrix, Gram
+    factorization, LOO residual arrays) would exceed the active memory
+    budget, or when ``batch_size`` is an explicit int. The streamed fit
+    solves the same normal equations and computes the same exact LOO. It
+    differs only in float32 summation order.
     """
     Y_3d, squeeze_time, squeeze_output = _prepare_Y(Y_canonical)
     N, D = X.shape
@@ -323,7 +327,7 @@ def _fit_pce_core(
         gram_inv_PhiT = jnp.linalg.solve(gram, Phi.T)
         # The basis is identical for every output slice (the effective order
         # depends only on N and D), so fitting all T*K slices is ONE shared
-        # solve with multiple right-hand sides -- a single vectorized matmul.
+        # solve with multiple right-hand sides: a single vectorized matmul.
         coeffs_flat = gram_inv_PhiT @ Y_flat  # (n_terms, T*K)
         # Per-slice LOO RMSE from the shared hat-matrix leverage.
         loo_flat = loo_error(Phi, Y_flat, coeffs_flat, gram_inv_PhiT=gram_inv_PhiT)
@@ -359,28 +363,28 @@ def analyze_pce(
 ) -> PCEResult:
     """Compute Sobol indices via polynomial chaos expansion (PCE).
 
-    Fits an orthogonal polynomial surrogate to arbitrary (X, Y) pairs -- no
-    structured sampling required -- and reads first-, total-, and second-order
-    Sobol indices directly off the expansion coefficients (Sudret, 2008), with
-    no extra model evaluations. Compared with Monte Carlo Sobol estimators,
-    PCE needs far fewer samples when the model response is smooth, but it only
-    captures effects the polynomial can represent: check
-    ``PCEResult.loo_rmse`` before trusting the indices.
+    Fits an orthogonal polynomial surrogate to arbitrary (X, Y) pairs, so no
+    structured sampling is required. First-, total-, and second-order Sobol
+    indices are then read directly off the expansion coefficients
+    (Sudret, 2008), with no extra model evaluations. Compared with Monte
+    Carlo Sobol estimators, PCE needs far fewer samples when the model
+    response is smooth. It only captures effects the polynomial can
+    represent, so check ``PCEResult.loo_rmse`` before trusting the indices.
 
     Args:
         problem: Parameter names and distributions.
-        X: (N, D) input samples.
-        Y: Model outputs — (N,) scalar, (N, K) multi-output, or (N, T, K)
-            time-series. All slices share one basis and are fitted in a
-            single multi-right-hand-side solve; indices are computed
-            independently per (t, k) slice.
+        X: Input samples, shape ``(N, D)``.
+        Y: Model outputs, shape ``(N,)`` scalar, ``(N, K)`` multi-output, or
+            ``(N, T, K)`` time-series. All slices share one basis and are
+            fitted in a single multi-right-hand-side solve. Indices are
+            computed independently per (t, k) slice.
         order: Maximum total polynomial degree. Higher orders capture
             sharper nonlinearity and higher-order interactions, but the
             term count C(D+order, order) grows fast and needs more samples
             to fit. Automatically reduced (with a warning) if the term
             count would exceed ``fit_ratio * N``.
         ridge: Tikhonov regularization for the least-squares fit. The tiny
-            default only guards against a singular normal matrix; increase
+            default only guards against a singular normal matrix. Increase
             it if coefficients look unstable (noisy Y, near-duplicate rows).
         fit_ratio: Maximum ratio of terms to samples before ``order`` is
             reduced. Lower values demand more samples per term (a more
@@ -398,10 +402,12 @@ def analyze_pce(
             float32 summation order.
 
     Returns:
-        PCEResult with S1, ST, S2 (shaped ``(..., D)`` / ``(..., D, D)`` with
-        leading output/time dims mirroring ``Y``), the fitted coefficients and
-        multi-index (reused by ``result.predict``), the effective ``order``,
-        and the per-slice leave-one-out RMSE goodness-of-fit diagnostic.
+        PCEResult holding S1 and ST, shape ``(D,)`` / ``(K, D)`` /
+        ``(T, K, D)``, and S2, shape ``(D, D)`` / ``(K, D, D)`` /
+        ``(T, K, D, D)``, with leading output and time dims mirroring ``Y``.
+        It also carries the fitted coefficients and multi-index (reused by
+        ``result.predict``), the effective ``order``, and the per-slice
+        leave-one-out RMSE goodness-of-fit diagnostic.
 
     Raises:
         ValueError: If ``X`` fails validation against ``problem``, ``Y``'s
@@ -432,7 +438,7 @@ def analyze_pce(
     T, K = fit.coefficients.shape[:2]
 
     # Sobol indices are extracted analytically from the coefficients
-    # (Sudret 2008), batched over all slices -- no extra sampling, no loops.
+    # (Sudret 2008), batched over all slices: no extra sampling, no loops.
     S1, ST, S2 = sobol_from_coefficients(fit.coefficients, fit.multi_index)  # (T,K,D), (T,K,D,D)
 
     # Per-slice LOO RMSE as a cheap goodness-of-fit diagnostic, computed by
@@ -473,9 +479,9 @@ def analyze_pce(
 def _pce_predict_plan(result: PCEResult, X_new: Array) -> _PredictPlan:
     """Build the prediction plan behind :meth:`PCEResult.predict`.
 
-    Maps the (already validated) inputs to the polynomial reference domain
-    and packages the per-row transient cost together with a kernel that
-    rebuilds the basis and contracts it with the fitted coefficients; the
+    Maps the (already validated) inputs to the polynomial reference domain.
+    It then packages the per-row transient cost together with a kernel that
+    rebuilds the basis and contracts it with the fitted coefficients. The
     shared template in :class:`jaxgsa._core.surrogate.SurrogateResult` runs
     the kernel in row batches sized against a transient-memory budget.
     """

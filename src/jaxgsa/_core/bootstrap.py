@@ -1,8 +1,9 @@
 """Shared bootstrap confidence-interval helpers.
 
-Every method that reports bootstrap CIs (Sobol, Morris, PAWN, Borgonovo)
-funnels through these so the percentile convention — two-tailed,
-``alpha/2`` per tail, NaN-tolerant — stays identical across the package.
+Every method that reports bootstrap confidence intervals (Sobol, Morris, PAWN,
+Borgonovo) goes through these helpers. One percentile convention therefore
+holds across the package: two-tailed, ``alpha/2`` per tail, and tolerant of
+NaN draws.
 """
 
 from __future__ import annotations
@@ -37,7 +38,19 @@ def _bootstrap_ci_endpoints(
     conf_level: float,
     ci_method: Literal["quantile", "gaussian"],
 ) -> tuple[Array, Array]:
-    """Convert bootstrap draws into lower and upper endpoint arrays."""
+    """Convert bootstrap draws into lower and upper endpoint arrays.
+
+    Args:
+        estimate: Point estimate the interval is centered on. Used by the
+            ``"gaussian"`` method only.
+        bootstrap_draws: ``(n_resamples, ...)`` bootstrap replicates.
+        conf_level: Two-sided confidence level, e.g. ``0.95``.
+        ci_method: ``"quantile"`` for the empirical percentile interval, or
+            ``"gaussian"`` for the normal-approximation interval.
+
+    Returns:
+        A tuple ``(lower, upper)``, each shaped like ``estimate``.
+    """
     if ci_method == "quantile":
         # Non-parametric: read endpoints directly from the empirical bootstrap
         # distribution.  No normality assumption, but needs enough resamples.

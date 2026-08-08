@@ -15,17 +15,19 @@ The implemented estimators are the single-loop forms of Kucherenko, Tarantola
     S1_i = [ (1/N) sum_k f(y_k, z_k) f(y_k, z'_k)  -  f0_A f0_B,i ] / V
     ST_i = [ (1/(2N)) sum_k ( f(y_k, z_k) - f(y'_k, z_k) )^2 ] / V
 
-``S1_i`` estimates ``V(E(Y|X_i)) / V(Y)``: the product pairs two draws that
-share ``y_k``, so its expectation is ``E[E(Y|y)^2]``, and subtracting the mean
-product leaves the variance of the conditional mean. The mean correction uses
-the product of the two block means (each block estimates ``f0``), which
-cancels the shared Monte-Carlo error of the two blocks; with ``f0_A^2`` the
-estimator carries a strictly larger O(1/N) bias. The implementation subtracts
-one shared shift (the joint-block mean) from both factors before the product.
-The estimator is algebraically identical, but the arithmetic stays centered
-when ``Y`` carries a large mean. ``ST_i`` estimates
-``E(V(Y|X_{~i})) / V(Y)``: the squared difference pairs two draws of ``y``
-under the same ``z_k``, the Jansen form of the conditional variance.
+``S1_i`` estimates ``V(E(Y|X_i)) / V(Y)``. The product pairs two draws that
+share ``y_k``, so its expectation is ``E[E(Y|y)^2]``. Subtracting the mean
+product then leaves the variance of the conditional mean. The mean correction
+uses the product of the two block means, since each block estimates ``f0``.
+That cancels the shared Monte-Carlo error of the two blocks. With ``f0_A^2``
+the estimator carries a strictly larger O(1/N) bias. The implementation
+subtracts one shared shift (the joint-block mean) from both factors before the
+product. The estimator is algebraically identical, but the arithmetic stays
+centered when ``Y`` carries a large mean.
+
+``ST_i`` estimates ``E(V(Y|X_{~i})) / V(Y)``. The squared difference pairs two
+draws of ``y`` under the same ``z_k``, which is the Jansen form of the
+conditional variance.
 
 Under an identity correlation the conditional draws are plain independent
 draws and both formulas reduce exactly to the classic Saltelli column-swap
@@ -58,12 +60,12 @@ from jaxgsa.kucherenko._sampling import KucherenkoSamples
 def analyze(sampling_result: KucherenkoSamples, Y: Array) -> KucherenkoResult:
     """Compute Kucherenko first-order and total indices from model outputs.
 
-    The estimators run on the actual model outputs — no surrogate is fitted.
-    This is the design-based counterpart to :func:`jaxgsa.vkoga.analyze`: the
-    same two conditional-variance quantities, estimated by evaluating the
-    model on a conditional-copula design instead of querying a fitted kernel
-    surrogate. Under independent inputs the indices are the classic Sobol'
-    ``S1`` and ``ST``.
+    The estimators run on the actual model outputs. No surrogate is fitted.
+    This is the design-based counterpart to :func:`jaxgsa.vkoga.analyze`. It
+    estimates the same two conditional-variance quantities, but it evaluates
+    the model on a conditional-copula design instead of querying a fitted
+    kernel surrogate. Under independent inputs the indices are the classic
+    Sobol' ``S1`` and ``ST``.
 
     Args:
         sampling_result: Design from :func:`jaxgsa.kucherenko.sample`.

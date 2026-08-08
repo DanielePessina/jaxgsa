@@ -10,20 +10,20 @@
   40(2):e3797): fit a VKOGA kernel surrogate to given `(X, Y)` data, then compute
   the correlated variance-based indices of Li et al. (2010, *J. Phys. Chem. A*
   114:6022-6032) against it under a Gaussian copula. Splitting the work this way
-  is what makes the method affordable — the indices need nested conditional
-  sampling, hopeless against an expensive model but trivial against a kernel
-  expansion.
+  is what makes the method affordable. The indices need nested conditional
+  sampling. That is hopeless against an expensive model, but trivial against a
+  kernel expansion.
 
   `jaxgsa.vkoga.analyze(problem, X, Y, correlation=...)` returns a
   `VKOGAResult` with five indices per parameter, shaped by the usual output
   contract (`(D,)`, `(K, D)`, `(T, K, D)`):
-  - `S_TC`, total **correlated**, `V(E(Y|X_i))/V(Y)` — what `X_i` explains
-    through itself *and* through its correlation with the others. The measure for
-    **input prioritisation**.
-  - `S_TU`, total **uncorrelated**, `E(V(Y|X_-i))/V(Y)` — what only `X_i` can
-    explain. The measure for **input fixing**.
+  - `S_TC`, total correlated, `V(E(Y|X_i))/V(Y)` — what `X_i` explains
+    through itself and through its correlation with the others. The measure for
+    input prioritisation.
+  - `S_TU`, total uncorrelated, `E(V(Y|X_-i))/V(Y)` — what only `X_i` can
+    explain. The measure for input fixing.
   - `S_U` (the independent contribution alone), `S_C = S_TC - S_U` (the
-    correlation-borne part, which **can be negative** when a correlation opposes
+    correlation-borne part, which can be negative when a correlation opposes
     a direct effect), and `S_IU = S_TU - S_U` (independent interactions).
 
   Under independent inputs the five collapse to the familiar picture: `S_TC` is
@@ -35,12 +35,12 @@
   inputs. A `(D, D)` matrix passed as `correlation=` overrides the declaration
   for one call. To fit a matrix from observed data, use
   `jaxgsa.sampling.fit_correlation(problem, X_data)` and attach it with
-  `problem.with_correlation(...)` — one workflow, and it makes explicit which
-  sample the copula comes from. The matrix actually used is returned on
+  `problem.with_correlation(...)`. That is one workflow, and it makes explicit
+  which sample the copula comes from. The matrix actually used is returned on
   `result.correlation`. Categorical problems raise: the isotropic RBF needs a
   continuous CDF map per coordinate. All conditioning happens in the latent
-  standard-normal space where the Gaussian conditionals are closed-form, and
-  every expectation is a scrambled-Sobol' quasi-Monte-Carlo average against the
+  standard-normal space, where the Gaussian conditionals are closed-form. Every
+  expectation is a scrambled-Sobol' quasi-Monte-Carlo average against the
   surrogate.
 
   Stage one is a pure-JAX VKOGA (Wirtz & Haasdonk 2013): Gaussian RBF, centres
@@ -50,28 +50,28 @@
   stopping rule, so cross-validation fits stop exactly like the final fit and
   score the hyperparameters under the same stopping behaviour. Explicit `gamma`
   and `ridge` values must be finite and positive; anything else raises before
-  any fitting. Centre selection depends only on `X`, so
-  all output slices share one basis and one set of centres — the "vectorial" part
-  — and a multi-output fit costs barely more than a scalar one. The result keeps
-  the surrogate: `result.predict(X_new, batch_size=None)` evaluates it with the
-  usual bounded-memory batching, and `result.to_dataset()` exports the indices,
-  the fit diagnostics (`n_centers`, `gamma`, `ridge`, `rmse`), the copula matrix,
+  any fitting. Centre selection depends only on `X`, so all output slices share
+  one basis and one set of centres. That is the "vectorial" part, and it makes a
+  multi-output fit cost barely more than a scalar one. The result keeps the
+  surrogate. `result.predict(X_new, batch_size=None)` evaluates it with the
+  usual bounded-memory batching. `result.to_dataset()` exports the indices, the
+  fit diagnostics (`n_centers`, `gamma`, `ridge`, `rmse`), the copula matrix,
   and the output `variance` under the correlated measure.
 
   Two things to get right, both documented prominently:
   - **Train on an independent, space-filling design even when the analysis is
-    correlated.** The correlated measure concentrates on a ridge, but `S_TU`
-    conditions on `X_-i` and then resamples `X_i` across its whole marginal — a
+    correlated.** The correlated measure concentrates on a ridge. But `S_TU`
+    conditions on `X_-i` and then resamples `X_i` across its whole marginal. A
     surrogate trained only on correlated data extrapolates for exactly those
     draws.
-  - **Enable float64.** The coefficient step forms `A^T A`, squaring the
-    condition number of the cross kernel, which float32 cannot carry for small
+  - **Enable float64.** The coefficient step forms `A^T A`, which squares the
+    condition number of the cross kernel. float32 cannot carry that for small
     `gamma`. Call `jax.config.update("jax_enable_x64", True)` before fitting;
     `analyze` warns when x64 is off.
 
   `VKOGAResult.shapley()` raises `NotImplementedError` by design. Shapley effects
-  need a variance decomposition indexed by parameter subsets; a kernel expansion
-  is a sum over *centres*, every one of which involves every parameter, so there
+  need a variance decomposition indexed by parameter subsets. A kernel expansion
+  is a sum over centres, and every centre involves every parameter, so there
   is no membership matrix to allocate from. Use `jaxgsa.hdmr` (which also offers
   `shapley(include_correlative=True)`) or `jaxgsa.pce`.
 
@@ -80,7 +80,7 @@
   Phys. Commun.* 183:937-946). `kucherenko.sample(problem, n)` builds a
   conditional-copula design of `n * (2D + 1)` rows: one joint block, one
   conditional block per parameter for `S1`, one per parameter for `ST`. You
-  evaluate your **actual model** on the rows — no surrogate is fitted. This is
+  evaluate your actual model on the rows — no surrogate is fitted. This is
   the design-based counterpart to `jaxgsa.vkoga`: the same two quantities,
   `S1 = V(E(Y|X_i))/V(Y)` (correlation-inclusive, VKOGA's `S_TC`) and
   `ST = E(V(Y|X_~i))/V(Y)` (correlation-exclusive, VKOGA's `S_TU`).
@@ -96,7 +96,7 @@
   output contract.
 
   Two numerical safeguards are built in. The `S1` estimator subtracts one
-  shared shift (the joint-block mean) from both product factors — the
+  shared shift (the joint-block mean) from both product factors. The
   estimator is algebraically unchanged, but a large output mean no longer
   destroys the covariance term in rounding (a `+1e8` offset moves `S1` by
   less than `3e-11`; the uncentered form drifted by up to `0.11`). And with
@@ -106,16 +106,16 @@
   Validation: the linear-Gaussian closed form (max error `7.5e-4` at
   `base_n = 4096`), independent Ishigami against the analytic values and
   `jaxgsa.sobol`, and a dedicated cross-route module
-  (`tests/test_correlated_agreement.py`) that pins analytic, `vkoga`, and
-  `kucherenko` to the same reference — and the two routes to each other.
+  (`tests/test_correlated_agreement.py`). That module pins analytic, `vkoga`,
+  and `kucherenko` to the same reference, and the two routes to each other.
 
 - **Optimal transport is certified valid under correlated inputs.** It was
   already exempt from the correlated-input error; two dedicated tests now
   certify the reading. With `corr(X1, X2) = 0.8` and `Y = X1` only, the unused
   input `X2` gets a clearly non-zero index (0.40 vs 0.94) — the documented
   correlation-inclusive interpretation. And the indices on a correlated
-  problem are **bit-equal** to the indices on the same `(X, Y)` with the
-  correlation stripped: the estimator never reads the matrix, which proves
+  problem are bit-equal to the indices on the same `(X, Y)` with the
+  correlation stripped. The estimator never reads the matrix, which proves
   distribution-freeness in `X`. `methods.md` states the guarantee explicitly.
 
 ### Changed
@@ -129,21 +129,22 @@
   `backend="hdmr"`, which accepts correlated problems. The `backend="pce"`
   refusal in `shapley.analyze` gained the same two names.
 - **`S_U` is clipped to `S_TU`, so `S_IU` can no longer go negative.** `S_U`
-  measures the output against fitted *additive* component functions. No additive
-  function of `X_i` can represent an interaction, so on a model with
+  measures the output against fitted additive component functions. No additive
+  function of `X_i` can represent an interaction. So on a model with
   interactions under a correlated measure the raw `S_U` could exceed `S_TU` and
-  drive `S_IU` below zero — a silently negative "interaction" index. The clip
-  restores the invariant, and a clip wider than 1% of the output variance now
-  raises a `UserWarning`: it says the additive projection is inadequate for that
-  model, so `S_U`, `S_C` and `S_IU` are indicative while `S_TC` and `S_TU` stay
-  reliable. `S_C` is **not** clipped; a negative `S_C` is a real reading.
+  drive `S_IU` below zero, a silently negative "interaction" index. The clip
+  restores the invariant. A clip wider than 1% of the output variance now
+  raises a `UserWarning`. That warning says the additive projection is
+  inadequate for that model, so `S_U`, `S_C` and `S_IU` are indicative while
+  `S_TC` and `S_TU` stay reliable. `S_C` is not clipped; a negative `S_C` is a
+  real reading.
   Additive models are unaffected.
 - **`jaxgsa.vkoga` reports its out-of-sample error and warns when the surrogate
   fails.** The pooled cross-validated RMSE was computed and then discarded; only
-  the optimistic *training* RMSE reached the result. It is now on
+  the optimistic training RMSE reached the result. It is now on
   `VKOGAResult.cv_rmse` (and in `to_dataset().attrs`), and `analyze` warns when
   it passes half the output standard deviation. Every index is measured against
-  the surrogate, so a failed fit gives meaningless indices — on
+  the surrogate, so a failed fit gives meaningless indices. On
   `sin(2*pi*12*u1) + 0.5*u2` the reported ranking is inverted, and nothing said
   so. `cv_rmse` is `None` when the caller fixes both `gamma` and `ridge`,
   because no cross-validation runs.
@@ -216,10 +217,10 @@
   `jaxgsa.sobol.sample` (which refuses correlated problems). It states that no
   variance-based route exists and names the given-data methods. Both
   design-side gates now route the combined case to that message. Previously
-  only `kucherenko.sample` could emit it, because `morris.sample`,
-  `efast.sample` and `sobol.sample` ran the correlated check first and raised
-  the correlated-only text, which recommends methods that then refuse the
-  problem for being categorical. `_raise_correlated_design` and
+  only `kucherenko.sample` could emit it. `morris.sample`, `efast.sample` and
+  `sobol.sample` ran the correlated check first and raised the correlated-only
+  text, which recommends methods that then refuse the problem for being
+  categorical. `_raise_correlated_design` and
   `_raise_categorical_design` both detect the combination, so the order the two
   checks run in no longer matters. A test asserts the combined message for
   `morris`, `efast`, `sobol` and `kucherenko`.
@@ -267,8 +268,8 @@
 - **Optimal transport, Borgonovo delta, and PAWN support categorical
   inputs.** A categorical column conditions on one class per level. For
   PAWN the level code is already a bin index, so the KS kernel is
-  unchanged; the kernel compiles at `n_eff = max(n_bins, max_levels)` and
-  the unused bins stay empty, return `NaN`, and are dropped by the
+  unchanged. The kernel compiles at `n_eff = max(n_bins, max_levels)`. The
+  unused bins stay empty, return `NaN`, and are dropped by the
   nan-aware median/max/mean over bins. `n_bins` applies to continuous
   columns only. Continuous-only PAWN results are bit-for-bit unchanged.
   For optimal transport and Borgonovo delta, class sizes are the observed
@@ -311,12 +312,12 @@
 - **`borgonovo.analyze` could return a delta far outside `[0, 1]` in
   silence.** Delta is a half L1 distance between densities, so it lives in
   `[0, 1]`. The degenerate-class detector only fired below `1e-6` of the
-  full-sample bandwidth. A class that was *almost* a point mass — one
+  full-sample bandwidth. A class that was almost a point mass — one
   output value plus a little jitter — passed that test but still sat
   orders of magnitude below the output grid step. Its conditional density
   aliased on the grid and the trapezoid integral exploded. On a
   three-atom model with true delta `2/3` and jitter `1e-5`, `analyze`
-  returned **delta 121 with no warning**. Two changes close this:
+  returned delta 121 with no warning. Two changes close this:
   - The degenerate tolerance is now `1e-2`, the scale at which the
     default 100-point grid stops resolving a class. The same sweep now
     returns 0.611 (jitter `1e-5`), 0.624 (`1e-3`) and 0.907 (`1e-2`), all
@@ -354,7 +355,7 @@
   atomic density is a spike no grid resolves, so on a discrete output the
   index reports the grid resolution rather than the model. `analyze` now
   checks the output before any expensive work and raises `ValueError` when
-  a column takes at most 20 distinct values *and* those values are fewer
+  a column takes at most 20 distinct values and those values are fewer
   than 1% of the samples. Both conditions must hold, so a continuous
   output rounded to two decimals is not refused. The message names the
   offending column and points at `jaxgsa.optimal_transport.analyze`, which
@@ -378,7 +379,7 @@
 
   The grid-step term is the one that binds in practice, so the delta of a
   near-degenerate class is set by `grid_size`, not by the bandwidth
-  fraction. That estimate is **biased low** and the bias does not vanish as
+  fraction. That estimate is biased low, and the bias does not vanish as
   `N` grows: on the three-atom repro (true `2/3`) it reads 0.56 at
   `grid_size=50`, 0.61 at 100, and 0.61 at 200 and above. Read delta on an
   atomic conditional as a ranking signal, not a calibrated number. The
@@ -569,9 +570,9 @@
   Measured, `q=5e-3` discarded 7.5% of the marginal variance and 24% of the
   fourth moment and perturbed rankings (Kendall tau 0.66 against a
   near-untruncated design on Oakley-O'Hagan); `q=1e-4` discards 0.29% and 5.0%.
-  Note that `mu_star` on an unbounded marginal has no `q -> 0` limit — the
-  design always includes unit levels 0 and 1 exactly — so magnitudes there are
-  scale-dependent by construction and only rankings are comparable across
+  `mu_star` on an unbounded marginal has no `q -> 0` limit, because the
+  design always includes unit levels 0 and 1 exactly. Magnitudes there are
+  scale-dependent by construction, so only rankings are comparable across
   truncation settings.
 - `pce.analyze` no longer forces a wide truncated Gaussian onto Legendre.
   Any truncation used to route the input through its truncated CDF, which the

@@ -1,6 +1,6 @@
 # Benchmarks
 
-This page covers two things: the analytical test functions shipped with jaxgsa (useful for validating any sensitivity method against known ground truth) and timing comparisons against [SALib](https://salib.readthedocs.io/).
+This page covers two things. First, the analytical test functions that ship with jaxgsa. Their indices are known exactly, so you can use them to validate any sensitivity method against ground truth. Second, timing comparisons against [SALib](https://salib.readthedocs.io/).
 
 ## Test Functions
 
@@ -14,9 +14,9 @@ an `analytical_indices(...)` function for custom parameters.
 The Ishigami function: $f(x) = \sin(x_1) + A \sin^2(x_2) + B x_3^4 \sin(x_1)$
 with $x_i \sim U[-\pi, \pi]$.
 
-A standard 3-parameter benchmark. Parameter $x_3$ has zero first-order effect
-but contributes through a higher-order interaction with $x_1$, making it a
-good test for methods that must distinguish $S_1 = 0$ from $S_T > 0$.
+A standard 3-parameter benchmark. Parameter $x_3$ has zero first-order effect,
+but it contributes through a higher-order interaction with $x_1$. This makes it
+a good test for methods that must tell $S_1 = 0$ apart from $S_T > 0$.
 
 | Export | Description |
 | --- | --- |
@@ -30,9 +30,9 @@ good test for methods that must distinguish $S_1 = 0$ from $S_T > 0$.
 The Sobol G-function: $g(\mathbf{x}) = \prod_{j=1}^{D} \frac{|4x_j - 2| + a_j}{1 + a_j}$
 with $x_j \sim U[0, 1]$.
 
-An 8-dimensional multiplicative benchmark. The `a` vector controls each
-parameter's importance: $a_j = 0$ makes $x_j$ maximally influential, large
-$a_j$ makes it nearly inert. The default creates four importance tiers.
+An 8-dimensional multiplicative benchmark. The `a` vector sets each parameter's
+importance. $a_j = 0$ makes $x_j$ maximally influential, and a large $a_j$
+makes it nearly inert. The default `a` creates four importance tiers.
 
 | Export | Description |
 | --- | --- |
@@ -61,11 +61,11 @@ method correctly identifies zero interactions.
 Gaussian linear additive model: $f(\mathbf{x}) = \sum_{j} c_j x_j$ with
 $x_j \sim \mathcal{N}(0, \sigma_j^2)$.
 
-Like `linear` it is purely additive ($S_1 = S_T$, zero interactions), but the
-Gaussian marginals make the output and every conditional output Gaussian too,
-so the Borgonovo delta index has a semi-analytic solution (closed-form L1
-distance between Gaussians plus 1-D Gauss-Hermite quadrature). This is the
-ground-truth benchmark for moment-independent (delta) estimators.
+Like `linear`, this model is purely additive ($S_1 = S_T$, zero interactions).
+The Gaussian marginals also make the output and every conditional output
+Gaussian. The Borgonovo delta index therefore has a semi-analytic solution: a
+closed-form L1 distance between Gaussians plus 1-D Gauss-Hermite quadrature.
+This is the ground-truth benchmark for moment-independent (delta) estimators.
 
 | Export | Description |
 | --- | --- |
@@ -81,9 +81,10 @@ Oakley and O'Hagan (2004) 15-dimensional Gaussian-input benchmark:
 $f(\mathbf{x}) = \mathbf{a}_1^\top \mathbf{x} + \mathbf{a}_2^\top \sin(\mathbf{x}) + \mathbf{a}_3^\top \cos(\mathbf{x}) + \mathbf{x}^\top M \mathbf{x}$
 with $x_i \sim \mathcal{N}(0, \sigma^2)$.
 
-One of the few standard SA benchmarks with Gaussian (non-uniform) inputs. The
-quadratic form introduces all pairwise interactions. Coefficient magnitudes
-create a natural importance gradient across the 15 dimensions.
+One of the few standard sensitivity analysis benchmarks with Gaussian
+(non-uniform) inputs. The quadratic form introduces all pairwise interactions.
+The coefficient magnitudes create an importance gradient across the 15
+dimensions.
 
 | Export | Description |
 | --- | --- |
@@ -108,13 +109,15 @@ print("S1 error:", abs(result.S1 - ishigami.ANALYTICAL_S1).max())
 
 ## Timing Results
 
-jaxgsa is benchmarked against [SALib](https://salib.readthedocs.io/) on a coupled-oscillator model with varying output shapes. Only the analysis step is timed. It computes the indices from precomputed model outputs. The model evaluations themselves are not included. Three methods are compared: `jaxgsa.sobol.analyze` (first/total order only), `jaxgsa.sobol.analyze` (with second-order), and `jaxgsa.hdmr.analyze`, each across four output-shape scenarios (T timepoints × K outputs), with and without bootstrap confidence intervals.
+The benchmark compares jaxgsa against [SALib](https://salib.readthedocs.io/) on a coupled-oscillator model with varying output shapes. It times only the analysis step, which computes the indices from precomputed model outputs. The model evaluations themselves are not included.
+
+Three methods are compared: `jaxgsa.sobol.analyze` (first/total order only), `jaxgsa.sobol.analyze` (with second-order), and `jaxgsa.hdmr.analyze`. Each one runs across four output-shape scenarios (T timepoints × K outputs), with and without bootstrap confidence intervals.
 
 **Machine:** Apple M1 Pro, CPU only (no GPU), JAX 0.10.2, Python 3.12.
 
-Every timing is the best of 5 runs on the same hardware and data, except the slow SALib HDMR path (best of 2). jaxgsa figures are post-JIT (steady-state): the one-off XLA compile (~0.3–1.1 s depending on scenario) is paid once per process and excluded, while SALib (pure NumPy/SciPy) requires no compilation.
+Every timing is the best of 5 runs on the same hardware and data, except the slow SALib HDMR path (best of 2). The jaxgsa figures are post-JIT (steady-state). The one-off XLA compile (~0.3–1.1 s depending on scenario) is paid once per process and excluded. SALib is pure NumPy/SciPy and requires no compilation.
 
-The short version: for a single scalar output without bootstrap, jaxgsa and SALib are comparable (SALib can even be faster, since jaxgsa pays some JAX dispatch overhead). The gap opens as the output grows — multi-output, time-series, or bootstrap workloads run several times to several hundred times faster in jaxgsa.
+The short version: for a single scalar output without bootstrap, jaxgsa and SALib are comparable. SALib can even be faster there, because jaxgsa pays some JAX dispatch overhead. The gap opens as the output grows. Multi-output, time-series, and bootstrap workloads run several times to several hundred times faster in jaxgsa.
 
 ### Sobol — no bootstrap
 
@@ -153,7 +156,7 @@ The short version: for a single scalar output without bootstrap, jaxgsa and SALi
 
 ## Why jaxgsa is faster
 
-SALib processes each `(t, k)` output slice in a Python loop. For a 50-timestep × 6-output model, that's 300 sequential calls to the Sobol analyzer.
+SALib processes each `(t, k)` output slice in a Python loop. For a 50-timestep × 6-output model, that is 300 sequential calls to the Sobol analyzer.
 
 jaxgsa uses:
 
@@ -162,7 +165,7 @@ jaxgsa uses:
 - **Scalar fast-path** for T×K=1 that bypasses vmap overhead entirely.
 - **JIT compilation** so repeated calls (e.g. bootstrap resamples or parameter sweeps) run at native speed.
 
-The speedup grows with T×K because SALib's per-slice overhead is linear while jaxgsa's vectorized cost is nearly flat. With bootstrap enabled, JIT compilation pays off even more — resampled analyses reuse the same compiled kernel, while SALib re-runs pure Python each time.
+The speedup grows with T×K because SALib's per-slice overhead is linear while jaxgsa's vectorized cost is nearly flat. Bootstrap makes JIT compilation pay off even more. The resampled analyses reuse the same compiled kernel, while SALib re-runs pure Python each time.
 
 ## Benchmark setup
 
@@ -174,7 +177,7 @@ The speedup grows with T×K because SALib's per-slice overhead is linear while j
 
 ## Reproducing
 
-The full benchmark script is at [`benchmark_salib.py`](https://github.com/DanielePessina/jaxgsa/blob/master/benchmark_salib.py) in the repository root. It needs SALib, which ships in the `dev` extra. Run it locally:
+The full benchmark script is [`benchmark_salib.py`](https://github.com/DanielePessina/jaxgsa/blob/master/benchmark_salib.py) in the repository root. It needs SALib, which ships in the `dev` extra. To run it locally:
 
 ```bash
 uv run --extra dev benchmark_salib.py

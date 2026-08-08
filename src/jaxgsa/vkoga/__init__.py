@@ -1,13 +1,13 @@
 """Correlated variance-based sensitivity analysis via a VKOGA surrogate.
 
-Given-data method: fits a Vectorial Kernel Orthogonal Greedy Algorithm
-surrogate to ``(X, Y)`` you already have, then computes variance-based
-sensitivity indices that remain meaningful when the inputs are *dependent*,
-using a Gaussian copula for the dependency structure.
+This is a given-data method. It fits a Vectorial Kernel Orthogonal Greedy
+Algorithm (VKOGA) surrogate to the ``(X, Y)`` you already have. It then
+computes variance-based sensitivity indices that stay meaningful when the
+inputs are dependent, using a Gaussian copula for the dependency structure.
 
 Unlike every sampling-based method in this package, the indices here do not
-assume independent inputs. They follow Li et al. (2010): the familiar main and
-total indices keep their formulas but change connotation, and split into
+assume independent inputs. They follow Li et al. (2010). The familiar main and
+total indices keep their formulas but change connotation, and they split into
 correlated and uncorrelated parts.
 
 Gating: ``analyze`` accepts a declared ``problem.correlation``. It refuses
@@ -30,13 +30,13 @@ Example::
     problem = problem.with_correlation(R)
 
     result = jaxgsa.vkoga.analyze(problem, X, Y)
-    result.S_TC   # total correlated -- for input prioritisation
-    result.S_TU   # total uncorrelated -- for input fixing
+    result.S_TC   # total correlated: rank parameters to measure
+    result.S_TU   # total uncorrelated: rank parameters to fix
     Y_pred = result.predict(X_new)
 
-Float64 is strongly recommended. The kernel solve squares the condition number
-of the cross kernel, which single precision cannot carry for small shape
-parameters; ``jax.config.update("jax_enable_x64", True)`` before fitting.
+Use float64. The kernel solve squares the condition number of the cross kernel,
+and single precision cannot carry that for small shape parameters. Call
+``jax.config.update("jax_enable_x64", True)`` before fitting.
 
 References:
     Hilhorst, Quicken, van de Vosse & Huberts (2024). Int. J. Numer. Meth.

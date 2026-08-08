@@ -1,39 +1,43 @@
 """Borgonovo delta analysis: moment-independent sensitivity from given data.
 
-Implements the Plischke, Borgonovo & Smith (2013) given-data estimator of
-Borgonovo's (2007) delta index. For each input the sample is split into
-equal-frequency classes by the input's rank; the delta index is the
-class-weighted L1 distance between the unconditional output density and
-each conditional density, both estimated by Gaussian KDE with Silverman
-bandwidths on a fixed output grid (trapezoidal integration). A given-data
-first-order Sobol index falls out of the same partition at negligible cost.
+This module implements the Plischke, Borgonovo & Smith (2013) given-data
+estimator of Borgonovo's (2007) delta index. For each parameter the estimator
+splits the sample into equal-frequency classes by the parameter's rank. The
+delta index is then the class-weighted L1 distance between the unconditional
+output density and each conditional density. Both densities come from a
+Gaussian kernel density estimate (KDE) with Silverman bandwidths, evaluated on
+a fixed output grid and integrated by the trapezoid rule. The same partition
+also yields a given-data first-order Sobol index at negligible cost.
 
-The estimator supports a continuous output distribution only: a KDE on a
-fixed grid cannot represent an atom. ``analyze`` refuses a discrete output
-up front and points the caller at ``jaxgsa.optimal_transport``.
+The estimator supports a continuous output distribution only, because a KDE
+on a fixed grid cannot represent an atom. ``analyze`` refuses a discrete
+output up front and points the caller at ``jaxgsa.optimal_transport``.
 
-The plug-in estimator is biased upward at finite N, so by default the
-central estimate is bias-corrected with bootstrap resamples
-(``2*d_hat - mean(d_boot)``, Plischke et al. eqn 30) where ``d_hat`` is
-computed on the original sample; percentile confidence intervals come from
-the same replicates. The original sample and the bootstrap replicates run
-through a single scanned path (the original sample is replicate 0, gathered
-via the identity permutation), so the point estimate and its interval are
-always computed under identical conventions. Class-partition indices are
-built once (per input, for every replicate) and reused across output-column
-chunks; the JIT-compiled per-column kernel is cached only on the scalar
-estimator settings ``(grid_size, bandwidth)`` so it captures no
-sample-sized constants.
+The plug-in estimator is biased upward at finite N. By default the central
+estimate is therefore bias-corrected with bootstrap resamples, as
+``2*d_hat - mean(d_boot)`` (Plischke et al. eqn 30), where ``d_hat`` comes
+from the original sample. The same replicates give the percentile confidence
+intervals. The original sample and the bootstrap replicates run through one
+scanned path, with the original sample as replicate 0 gathered by the identity
+permutation. The point estimate and its interval are therefore always computed
+under identical conventions.
 
-Estimator details mirror ``SALib.analyze.delta`` (equal-frequency ordinal
-rank partition, Plischke class-count heuristic, Silverman KDE factors,
-100-point output grid) with three deliberate differences: the central
-estimate uses the original sample rather than a bootstrap resample
-(deterministic given the data); a constant output column yields
-``delta = S1 = 0`` instead of an error; and a bootstrap replicate that
-happens to be constant (reachable for rare-event outputs) contributes the
-point estimate rather than a spurious zero, so it neither adds nor removes
-bias (SALib raises ``LinAlgError`` on such data).
+Two things are computed once and reused. The class-partition indices are built
+per parameter for every replicate, then reused across output-column chunks.
+The JIT-compiled per-column kernel is cached only on the scalar estimator
+settings ``(grid_size, bandwidth)``, so it captures no sample-sized constants.
+
+The estimator details mirror ``SALib.analyze.delta``: an equal-frequency
+ordinal rank partition, the Plischke class-count heuristic, Silverman KDE
+factors, and a 100-point output grid. Three differences are deliberate.
+
+1. The central estimate uses the original sample rather than a bootstrap
+   resample, so it is deterministic given the data.
+2. A constant output column yields ``delta = S1 = 0`` instead of an error.
+3. A bootstrap replicate that happens to be constant contributes the point
+   estimate rather than a spurious zero, so it neither adds nor removes bias.
+   Such a replicate is reachable for rare-event outputs, and SALib raises
+   ``LinAlgError`` on such data.
 
 References:
     Borgonovo (2007). A new uncertainty importance measure.
@@ -68,51 +72,52 @@ from jaxgsa.problem import Problem, _categorical_dims
 _SQRT_2PI = math.sqrt(2.0 * math.pi)
 _MAX_CLASSES = 48
 # A class whose KDE bandwidth falls below this fraction of the full-sample
-# bandwidth is treated as degenerate. Two failures live below this line:
-# an exactly zero variance (a point mass, e.g. one categorical level that
-# maps to one output value), and a spread so small that the shared output
-# grid cannot resolve the conditional density. The second is the dangerous
-# one. The grid step is (y_max - y_min) / (grid_size - 1), so a class whose
-# bandwidth is far below the step is sampled at a spacing of many sigma;
-# the trapezoid rule then either misses the peak or lands on it and
-# integrates a spike of height ~1/(h*sqrt(2*pi)) over a step-wide interval,
-# which makes the L1 distance -- and delta -- explode far above 1. At the
-# default grid_size = 100 the step is about 1/99 of the output range and a
-# Silverman bandwidth of 1e-2 of the full-sample bandwidth is already at
-# that scale, so 1e-2 is the threshold below which the grid is untrustworthy.
+# bandwidth counts as degenerate. Two failures live below this line. The
+# first is an exactly zero variance, that is a point mass, such as one
+# categorical level that maps to one output value. The second is a spread so
+# small that the shared output grid cannot resolve the conditional density.
+# The second failure is the dangerous one. The grid step is
+# (y_max - y_min) / (grid_size - 1). A class whose bandwidth is far below
+# that step is sampled at a spacing of many sigma. The trapezoid rule then
+# either misses the peak, or lands on it and integrates a spike of height
+# ~1/(h*sqrt(2*pi)) over a step-wide interval. Either way the L1 distance,
+# and with it delta, explodes far above 1. At the default grid_size = 100 the
+# step is about 1/99 of the output range. A Silverman bandwidth of 1e-2 of
+# the full-sample bandwidth is already at that scale, so 1e-2 is the
+# threshold below which the grid is untrustworthy.
 _DEGENERATE_BW_TOL = 1e-2
 # Bandwidth given to a degenerate class, as a fraction of the full-sample
-# Silverman bandwidth. The applied floor is
-# ``max(fraction * h_full, grid_step)``; in the degenerate regime the
-# grid-step term is almost always the larger of the two, so the *grid* sets
-# the width and this fraction only binds for wide output ranges with a fine
-# grid. The grid-step bound is the load-bearing part: a Gaussian sampled at
-# a spacing of at most its own sigma has small trapezoid error, while one
-# sampled far more coarsely aliases and drives delta above 1. A consequence
-# is that the delta of a near-degenerate class is grid-resolution
-# dependent and biased low, and ``grid_size`` -- not this fraction -- is
-# the knob that moves it. See the ``analyze`` docstring.
+# Silverman bandwidth. The applied floor is ``max(fraction * h_full,
+# grid_step)``. In the degenerate regime the grid-step term is almost always
+# the larger of the two, so the grid sets the width. This fraction only
+# binds for a wide output range with a fine grid. The grid-step bound is the
+# load-bearing part. A Gaussian sampled at a spacing of at most its own
+# sigma has small trapezoid error, while one sampled far more coarsely
+# aliases and drives delta above 1. One consequence is that the delta of a
+# near-degenerate class depends on the grid resolution and is biased low.
+# The knob that moves it is ``grid_size``, not this fraction. See the
+# ``analyze`` docstring.
 _DEGENERATE_BW_FRACTION = 0.1
 # Borgonovo's delta lies in [0, 1] by construction. The default
 # bias-corrected estimate can leave that range by a little at small N, so
 # only an excursion wider than this counts as an estimator failure.
 _DELTA_RANGE_TOL = 0.05
-# A discrete output breaks the estimator: the KDE of an atomic density is a
+# A discrete output breaks the estimator. The KDE of an atomic density is a
 # spike the output grid cannot resolve, so delta is meaningless. An output
-# column is treated as discrete when it takes at most this many distinct
-# values *and* those values are a vanishing fraction of the sample. Both
-# conditions must hold, so a continuous output rounded to a few decimals
-# (many distinct values at any useful N) is not refused. A column with a
-# single distinct value is exempt: a constant output needs no density at
-# all, every conditional equals the unconditional, and delta = S1 = 0 is
-# the exact answer, not a failed computation. That contract predates this
-# guard and stays.
+# column counts as discrete when it takes at most this many distinct values
+# and those values are a vanishing fraction of the sample. Both conditions
+# must hold, so the guard does not refuse a continuous output rounded to a
+# few decimals, which has many distinct values at any useful N. A column
+# with a single distinct value is exempt. A constant output needs no
+# density, every conditional equals the unconditional, and delta = S1 = 0 is
+# the exact answer rather than a failed computation. That contract predates
+# this guard and stays.
 _DISCRETE_MAX_DISTINCT = 20
 _DISCRETE_DISTINCT_FRACTION = 0.01
 # Target element budget for the default per-chunk working set. The dominant
-# intermediate is the conditional-KDE tensor whose size scales as
-# ``chunk_columns * sum_g(Dg * Mg * Pg) * grid_size``, so the default chunk
-# width is chosen to keep it near this many float32 elements (~256 MB).
+# intermediate is the conditional-KDE tensor. Its size scales as
+# ``chunk_columns * sum_g(Dg * Mg * Pg) * grid_size``. The default chunk
+# width keeps that tensor near this many float32 elements (~256 MB).
 _CHUNK_ELEM_BUDGET = 1 << 26
 
 
@@ -141,11 +146,11 @@ def _get_delta_kernel(
 ):
     """Return a JIT-compiled delta/S1 kernel for static estimator settings.
 
-    The kernel is cached only on the scalar settings that change tracing
-    (grid size, the bandwidth branch and the degenerate-class floor);
-    sample-sized data (inputs, class indices, masks) are passed as runtime
-    arguments, so nothing of size ``O(N)`` is captured or baked into the
-    compiled executable.
+    The cache key holds only the scalar settings that change tracing: the grid
+    size, the bandwidth branch, and the degenerate-class floor. The kernel
+    takes all sample-sized data as runtime arguments, namely the outputs, the
+    class indices and the masks. Nothing of size ``O(N)`` is therefore
+    captured or baked into the compiled executable.
 
     Args:
         grid_size: Number of output-grid points for the KDE (static).
@@ -160,16 +165,16 @@ def _get_delta_kernel(
 
     Returns:
         A jitted callable ``(Y_cols (N, C), all_idx (R, N), groups) ->
-        (d (R, C, D), s1 (R, C, D), degenerate (R, C), floored (R, C))``
-        giving plug-in estimates for every replicate, a
-        per-replicate/per-column flag marking constant resamples, and a
-        flag marking columns where a degenerate class engaged the
-        bandwidth floor. ``groups`` is a tuple of canonical
+        (d (R, C, D), s1 (R, C, D), degenerate (R, C), floored (R, C))``.
+        ``d`` and ``s1`` are the plug-in estimates for every replicate.
+        ``degenerate`` flags each replicate and column whose resample is
+        constant. ``floored`` flags each column where a degenerate class
+        engaged the bandwidth floor. ``groups`` is a tuple of canonical
         ``(cls_idx, counts)`` partition-group layouts from
-        :func:`jaxgsa._core.partition.build_partition_groups`; the kernel
-        processes every group in one call (shared per-replicate statistics
-        are computed once) and concatenates the results on the input axis
-        in group order. Zero-size classes carry zero weight.
+        :func:`jaxgsa._core.partition.build_partition_groups`. The kernel
+        processes every group in one call, computing the shared
+        per-replicate statistics once, and concatenates the results on the
+        parameter axis in group order. Zero-size classes carry zero weight.
     """
 
     def _bandwidths(counts: Array, std: Array) -> Array:
@@ -183,8 +188,8 @@ def _get_delta_kernel(
         safe_h = jnp.where(h > 0, h, 1.0)
         u = (grid[:, None] - y[None, :]) / safe_h
         f = jnp.exp(-0.5 * u * u).sum(axis=1) / (n * safe_h * _SQRT_2PI)
-        # Zero bandwidth (constant data) drops the density from the
-        # integrand, mirroring SALib's degenerate-class treatment.
+        # A zero bandwidth means constant data. It drops the density from
+        # the integrand, mirroring SALib's degenerate-class treatment.
         return jnp.where(h > 0, f, 0.0)
 
     def _impl(
@@ -194,10 +199,10 @@ def _get_delta_kernel(
     ):
         dtype = jnp.result_type(Y_cols.dtype, jnp.float32)
         Y_cols = Y_cols.astype(dtype)
-        N = Y_cols.shape[0]  # every row belongs to exactly one class per input
+        N = Y_cols.shape[0]  # every row belongs to exactly one class per parameter
 
-        # Output grids depend only on the original sample and are reused for
-        # every replicate (SALib does the same).
+        # The output grids depend only on the original sample, so every
+        # replicate reuses them. SALib does the same.
         y_min = Y_cols.min(axis=0)
         y_max = Y_cols.max(axis=0)
         steps = jnp.linspace(0.0, 1.0, grid_size, dtype=dtype)
@@ -207,13 +212,14 @@ def _get_delta_kernel(
         cls_list = tuple(cls_idx for cls_idx, _ in groups)
 
         def _group_stats(y, grid, h_full, fy, y_mean, cls_idx, mask_b, counts_b):
-            """Per-input delta/S1 numerators and floor flag for one group.
+            """Per-parameter delta/S1 numerators and floor flag for one group.
 
-            ``mask_b (G, M, P)`` and ``counts_b (G, M)`` (both float)
-            broadcast against the group's input axis Dg (``G`` is 1 or
-            Dg). A zero-size class has zero std, hence zero bandwidth, so
-            its density is dropped; its zero count removes it from every
-            weighted sum.
+            ``mask_b``, shape ``(G, M, P)``, and ``counts_b``, shape
+            ``(G, M)``, are both float and broadcast against the group's
+            parameter axis Dg. ``G`` is either 1 or Dg. A zero-size class
+            has zero standard deviation and therefore zero bandwidth, so
+            its density is dropped. Its zero count also removes it from
+            every weighted sum.
             """
             safe_counts = jnp.maximum(counts_b, 1.0)
             y_cls = y[cls_idx]  # (Dg, M, P) resampled class members
@@ -221,15 +227,15 @@ def _get_delta_kernel(
             dev = (y_cls - mean[..., None]) * mask_b
             var = (dev**2).sum(axis=-1) / jnp.maximum(counts_b - 1.0, 1.0)
             h = _bandwidths(safe_counts, jnp.sqrt(var))  # (Dg, M)
-            # A degenerate class is one the output grid cannot resolve: a
-            # zero-variance class gets bandwidth 0 and a zeroed density
-            # (delta biased far low), and a class narrower than the grid
-            # step aliases (delta far above 1). Floor both to a kernel the
-            # grid can integrate; see the _DEGENERATE_BW_TOL and
+            # A degenerate class is one the output grid cannot resolve. A
+            # zero-variance class gets bandwidth 0 and a zeroed density,
+            # which biases delta far low. A class narrower than the grid
+            # step aliases, which pushes delta far above 1. Floor both to a
+            # kernel the grid can integrate. See the _DEGENERATE_BW_TOL and
             # _DEGENERATE_BW_FRACTION comments. The predicate keeps
-            # resolvable classes bit-identical and stays False for a
-            # constant column (h_full == 0), which must keep its delta = 0
-            # contract.
+            # resolvable classes bit-identical. It also stays False for a
+            # constant column, where h_full == 0, which must keep its
+            # delta = 0 contract.
             if degenerate_bw is None:
                 floor = jnp.maximum(_DEGENERATE_BW_FRACTION * h_full, grid[1] - grid[0])
             else:
@@ -251,10 +257,11 @@ def _get_delta_kernel(
         def _col_stats(y: Array, grid: Array, r: Array, layouts):
             """Delta, S1, degeneracy and floor flags for one column/replicate.
 
-            The per-replicate column statistics (resampled column, full
-            KDE, mean, variance) are computed once and shared by every
-            partition group; group results are concatenated on the input
-            axis in group order.
+            The per-replicate column statistics are the resampled column,
+            the full KDE, the mean and the variance. This function computes
+            them once and shares them with every partition group. It then
+            concatenates the group results on the parameter axis in group
+            order.
             """
             y_r = y[r]  # resampled column
             h_full = _bandwidths(jnp.asarray(float(N), dtype=dtype), jnp.std(y_r, ddof=1))
@@ -329,15 +336,16 @@ def _raise_discrete_output(problem: Problem, Y: Array) -> None:
     The estimator compares Gaussian kernel density estimates on a shared
     output grid. That construction needs a continuous output. A discrete
     output has atoms, and the density of an atom is a spike no grid
-    resolves, so the returned delta is an artifact of ``grid_size`` rather
-    than a property of the model. The check runs before any expensive work.
+    resolves. The returned delta would then be an artifact of ``grid_size``
+    rather than a property of the model. This check runs before any
+    expensive work.
 
     An output column counts as discrete only when it takes at most
-    ``_DISCRETE_MAX_DISTINCT`` distinct values *and* those values are fewer
+    ``_DISCRETE_MAX_DISTINCT`` distinct values and those values are fewer
     than ``_DISCRETE_DISTINCT_FRACTION`` of the sample. Both conditions
     must hold, so a continuous output rounded to a few decimals keeps
-    working. A constant column (one distinct value) is exempt: it needs no
-    density, and ``delta = S1 = 0`` is its exact answer.
+    working. A constant column, with one distinct value, is exempt. It
+    needs no density, and ``delta = S1 = 0`` is its exact answer.
 
     Args:
         problem: Problem definition, used to name the offending column.
@@ -401,64 +409,67 @@ def analyze(
 ) -> DeltaResult:
     """Compute Borgonovo delta and given-data first-order Sobol indices.
 
-    The delta index measures how much knowing an input's value shifts the
-    *entire* output density: ``delta_i`` is (half) the expected L1
-    distance between the unconditional output density and the density
-    conditional on x_i. It lies in [0, 1] — 0 means the output
-    distribution is unaffected by x_i, 1 means it is fully determined by
-    it. Because delta compares whole densities rather than variances
-    ("moment-independent"), it captures influence on tails and shape that
-    Sobol indices miss, and it needs no special sampling design: any
-    (X, Y) sample works. A given-data first-order Sobol index S1 is
-    returned from the same partition at negligible extra cost.
+    The delta index measures how much knowing a parameter's value shifts the
+    whole output density. ``delta_i`` is (half) the expected L1 distance
+    between the unconditional output density and the density conditional on
+    x_i. It lies in [0, 1]. A value of 0 means the output distribution does
+    not change with x_i, and 1 means x_i fully determines it. Delta compares
+    whole densities rather than variances, which makes it
+    moment-independent. It therefore captures influence on tails and on
+    shape that Sobol indices miss. It also needs no special sampling design,
+    so any (X, Y) sample works. The same partition returns a given-data
+    first-order Sobol index ``S1`` at negligible extra cost.
 
-    Correlated inputs are supported: the estimator partitions on the inputs'
-    ordinal ranks and compares output densities, so a declared
-    ``problem.correlation`` does not invalidate it. Under dependence the index
-    then measures each input's total association with the output, including
-    effects carried by the inputs it correlates with. The companion ``S1`` is
-    the given-data first-order Sobol index and reads the same way. Neither
-    index separates the direct effect from the correlation-borne one; use
-    :mod:`jaxgsa.vkoga` or :mod:`jaxgsa.kucherenko` for that split, which need
-    continuous inputs.
+    The estimator supports correlated inputs. It partitions on the
+    parameters' ordinal ranks and compares output densities, so a declared
+    ``problem.correlation`` does not invalidate it. Under dependence the
+    index measures each parameter's total association with the output. That
+    total includes the effects carried by the parameters it correlates with.
+    The companion ``S1`` is the given-data first-order Sobol index and reads
+    the same way. Neither index separates the direct effect from the
+    correlation-borne one. Use :mod:`jaxgsa.vkoga` or
+    :mod:`jaxgsa.kucherenko` for that split; both need continuous inputs.
 
     Args:
         problem: Problem definition with D parameters.
-        X: Input sample matrix ``(N, D)``.
-        Y: Model output ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
+        X: Input samples, shape ``(N, D)``.
+        Y: Model outputs, shape ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
         n_classes: Number of equal-frequency conditioning classes per
-            *continuous* input. ``None`` selects the Plischke sample-size
-            heuristic (SALib-identical, at most 48 classes). Categorical
-            inputs ignore it and always use one class per level (class
-            sizes are the observed level counts); declared levels with no
-            observed samples are dropped with a warning. A passed value
-            is always validated against ``[2, N]``; with only categorical
-            inputs a ``UserWarning`` says it is ignored.
+            continuous parameter. ``None`` selects the Plischke
+            sample-size heuristic, which is identical to SALib's and uses
+            at most 48 classes. A categorical parameter ignores this
+            argument and always uses one class per level, with class sizes
+            equal to the observed level counts. Declared levels with no
+            observed samples are dropped with a warning. A passed value is
+            always validated against ``[2, N]``. When every parameter is
+            categorical, a ``UserWarning`` says the value is ignored.
         grid_size: Number of points of the output grid the densities are
-            compared on (spanning ``[Y.min(), Y.max()]`` per column). It is
-            also the resolution knob for near-degenerate conditioning
-            classes: see the note below.
-        bandwidth: KDE bandwidth rule: ``"silverman"`` for the per-class
-            Silverman factor, or a positive float used directly as the
-            factor multiplying the sample standard deviation.
+            compared on. The grid spans ``[Y.min(), Y.max()]`` per column.
+            It is also the resolution knob for near-degenerate
+            conditioning classes; see the note below.
+        bandwidth: KDE bandwidth rule. Use ``"silverman"`` for the
+            per-class Silverman factor, or a positive float used directly
+            as the factor multiplying the sample standard deviation.
         n_bootstrap: Number of bootstrap resamples for bias correction and
-            confidence intervals. Set to 0 to skip both (plug-in estimate,
-            ``delta_conf``/``S1_conf`` are ``None``).
+            confidence intervals. ``0`` skips both: the result is the
+            plug-in estimate and ``delta_conf`` and ``S1_conf`` are
+            ``None``.
         conf_level: Confidence level for percentile bootstrap intervals.
         bias_correct: Apply the Plischke bias reduction
-            ``2*d_hat - mean(d_boot)`` to the delta estimate (requires
-            ``n_bootstrap > 0``; S1 is never bias-corrected, matching
-            SALib).
+            ``2*d_hat - mean(d_boot)`` to the delta estimate. It requires
+            ``n_bootstrap > 0``. S1 is never bias-corrected, matching
+            SALib.
         seed: Random seed for bootstrap resampling.
         slice_chunk_size: Number of flattened ``T*K`` output columns
             processed per kernel call. ``None`` picks a memory-aware
-            default from the sample size; pass an explicit positive
-            integer to override. Peak memory scales with
+            default from the sample size. Pass a positive integer to
+            override it. Peak memory scales with
             ``slice_chunk_size * grid_size`` times the summed padded class
             layout ``sum_g(Dg * Mg * Pg)``. That layout is about ``D * N``
-            for continuous inputs, but an imbalanced categorical input
-            pads every level up to the largest one, so it can be many
-            times ``D * N``; the default accounts for the real layout.
+            for continuous parameters. An imbalanced categorical parameter
+            pads every level up to the largest one, so the layout can be
+            many times ``D * N``. The default accounts for the real
+            layout.
         degenerate_tol: A conditioning class counts as degenerate when its
             KDE bandwidth is below this fraction of the full-sample
             bandwidth. Degenerate classes get the floored bandwidth below.
@@ -468,7 +479,7 @@ def analyze(
             class. ``"auto"`` uses ``max(0.1 * h_full, grid_step)``, which
             never goes below what the output grid can integrate. A float
             is a fraction of the full-sample bandwidth ``h_full`` and is
-            applied exactly, with no grid-step bound; a value far below
+            applied exactly, with no grid-step bound. A value far below
             ``grid_step / h_full`` aliases on the grid and returns delta
             far above 1.
 
@@ -480,65 +491,66 @@ def analyze(
         takes at most 20 distinct values and those values are fewer than 1%
         of the sample. Use :func:`jaxgsa.optimal_transport.analyze` for a
         discrete output: it compares empirical distributions directly and
-        needs no density. A continuous output rounded to a few decimals is
-        not refused, and neither is a constant column, whose exact answer
-        is ``delta = S1 = 0``. A *categorical input* is still supported;
-        the restriction is on the output.
+        needs no density. The check does not refuse a continuous output
+        rounded to a few decimals, and it does not refuse a constant
+        column, whose exact answer is ``delta = S1 = 0``. A categorical
+        parameter is still supported. The restriction is on the output.
 
     Note:
-        For a conditioning class that is a point mass or nearly one -- the
-        normal case for a categorical level that maps to one output value
-        -- the delta estimate depends on the grid resolution and is biased
-        low. The floored bandwidth is set by ``grid_step``, so ``grid_size``
-        is the knob that moves the answer: on a noise-free three-atom model
-        with true delta ``2/3``, the estimate goes 0.56 at ``grid_size=50``,
-        0.61 at 100, and 0.61 at 200 and above. The bias also does not
-        vanish as N grows, so on atomic conditionals this estimator is not
-        consistent. Treat delta on such inputs as a ranking signal, not a
-        calibrated number. Inputs with genuine conditional spread are
-        unaffected.
+        A conditioning class can be a point mass or nearly one. That is the
+        normal case for a categorical level that maps to one output value.
+        For such a class the delta estimate depends on the grid resolution
+        and is biased low. ``grid_step`` sets the floored bandwidth, so
+        ``grid_size`` is the knob that moves the answer. On a noise-free
+        three-atom model with true delta ``2/3``, the estimate goes 0.56 at
+        ``grid_size=50``, 0.61 at 100, and 0.61 at 200 and above. The bias
+        also does not vanish as N grows, so on atomic conditionals this
+        estimator is not consistent. Treat delta on such parameters as a
+        ranking signal, not a calibrated number. Parameters with genuine
+        conditional spread are unaffected.
 
     Returns:
-        DeltaResult with delta and S1 indices and optional confidence
-        intervals. The underlying delta index is defined on ``[0, 1]`` and
-        the plug-in estimate stays in that range, but the default
-        bias-corrected estimate (and its confidence bounds) can fall
-        marginally below 0 for weak/near-noninfluential inputs at small
-        sample sizes. A constant output column yields ``delta = S1 = 0``
-        (SALib raises an error in this case). A conditioning class the
-        output grid cannot resolve gets a floored KDE bandwidth instead of
-        its own, with one ``UserWarning``; classes with genuine spread are
-        unaffected. A confidence bound outside ``[0, 1]`` by more than 0.05
-        raises a ``UserWarning`` naming the parameter and the bound; the
-        point estimate still stands, so only the interval is suspect.
+        A :class:`DeltaResult` with the delta and ``S1`` indices and the
+        optional confidence intervals. The underlying delta index is
+        defined on ``[0, 1]`` and the plug-in estimate stays in that range.
+        The default bias-corrected estimate and its confidence bounds can
+        fall marginally below 0 for weak or near-noninfluential parameters
+        at small sample sizes. A constant output column yields
+        ``delta = S1 = 0``, where SALib raises an error. A conditioning
+        class the output grid cannot resolve gets a floored KDE bandwidth
+        instead of its own, together with one ``UserWarning``; classes with
+        genuine spread are unaffected. A confidence bound outside
+        ``[0, 1]`` by more than 0.05 raises a ``UserWarning`` naming the
+        parameter and the bound. The point estimate still stands in that
+        case, so only the interval is suspect.
 
     Raises:
-        ValueError: If X is not 2-D, its column count does not match the
-            problem, Y is not 1-D/2-D/3-D, X and Y have differing row
-            counts, a passed ``n_classes`` is not in ``[2, N]``, a
-            categorical column of X holds
-            values other than its integer level codes, ``grid_size < 2``,
-            ``bandwidth`` is neither ``"silverman"`` nor a positive float,
-            ``n_bootstrap < 0``, ``conf_level`` is not in ``(0, 1)``,
-            ``slice_chunk_size`` is not a positive integer,
-            ``degenerate_tol`` is not in ``[0, 1)``, or
+        ValueError: If any argument fails validation. The invalid cases are:
+            X is not 2-D; the column count of X does not match the problem;
+            Y is not 1-D, 2-D or 3-D; X and Y have differing row counts; a
+            passed ``n_classes`` is not in ``[2, N]``; a categorical column
+            of X holds values other than its integer level codes;
+            ``grid_size < 2``; ``bandwidth`` is neither ``"silverman"`` nor
+            a positive float; ``n_bootstrap < 0``; ``conf_level`` is not in
+            ``(0, 1)``; ``slice_chunk_size`` is not a positive integer;
+            ``degenerate_tol`` is not in ``[0, 1)``; or
             ``degenerate_bandwidth`` is neither ``"auto"`` nor a positive
-            float. Also raised when an output column is discrete (the
-            estimator supports a continuous output only; see the note
-            below), and when the returned delta leaves ``[0, 1]`` by more
-            than 0.05, which means the computation failed rather than
-            returned an estimate.
+            float. It is also raised when an output column is discrete,
+            because the estimator supports a continuous output only; see
+            the note above. It is raised again when the returned delta
+            leaves ``[0, 1]`` by more than 0.05, which means the
+            computation failed rather than returned an estimate.
     """
     X = jnp.asarray(X)
     # The delta estimator partitions on rank classes and compares output
     # densities, so a declared input correlation does not invalidate it.
     Y = _validate_xy_inputs(problem, X, Y, correlation_ok=True, categorical_ok=True)
-    # The continuous-output contract is checked before any expensive work.
+    # Check the continuous-output contract before any expensive work.
     _raise_discrete_output(problem, Y)
 
     N = X.shape[0]
-    # n_classes applies to the continuous columns only; categorical columns
-    # always get one conditioning class per level.
+    # n_classes applies to the continuous columns only. A categorical column
+    # always gets one conditioning class per level.
     dims_levels = _categorical_dims(problem)
     cat_dims = [d for d, _ in dims_levels]
     cont_dims = [d for d in range(problem.num_vars) if d not in set(cat_dims)]
@@ -546,8 +558,8 @@ def analyze(
         M = _plischke_n_classes(N)
     else:
         M = int(n_classes)
-        # A passed value is always validated, even when nothing uses it;
-        # silently accepting nonsense hides bugs in the caller.
+        # A passed value is always validated, even when nothing uses it.
+        # Silently accepting nonsense hides bugs in the caller.
         if not 2 <= M <= N:
             raise ValueError(f"n_classes must be in [2, N={N}], got {n_classes}")
         if not cont_dims:
@@ -576,8 +588,8 @@ def analyze(
     if slice_chunk_size is not None and slice_chunk_size < 1:
         raise ValueError(f"slice_chunk_size must be >= 1, got {slice_chunk_size}")
 
-    # Replicate 0 is the identity permutation (the original sample); the
-    # remaining rows are the bootstrap resamples. Building them together
+    # Replicate 0 is the identity permutation, that is the original sample.
+    # The remaining rows are the bootstrap resamples. Building them together
     # means the point estimate and its interval share one code path.
     identity = jnp.arange(N, dtype=jnp.int32)[None, :]
     if n_bootstrap > 0:
@@ -596,12 +608,12 @@ def analyze(
 
     total = T * K
     if slice_chunk_size is None:
-        # Peak memory is the conditional-KDE tensor, one grid of length
-        # grid_size per padded class slot. Size it from the real per-group
-        # layout Dg * Mg * Pg: assuming that product is ~ D * N holds for
-        # equal-frequency continuous classes but under-counts badly for an
-        # imbalanced categorical column, where every level is padded up to
-        # the largest one.
+        # Peak memory is the conditional-KDE tensor, which holds one grid of
+        # length grid_size per padded class slot. Size it from the real
+        # per-group layout Dg * Mg * Pg. Assuming that product is ~ D * N
+        # holds for equal-frequency continuous classes, but it under-counts
+        # badly for an imbalanced categorical column, where every level is
+        # padded up to the largest one.
         layout_elems = sum(g[0].shape[1] * g[0].shape[2] * g[0].shape[3] for g in groups)
         slice_chunk_size = max(1, _CHUNK_ELEM_BUDGET // (layout_elems * grid_size))
     cs = min(slice_chunk_size, total)
@@ -638,9 +650,10 @@ def analyze(
     delta_conf: Array | None = None
     S1_conf: Array | None = None
     if n_bootstrap > 0:
-        # A constant bootstrap resample carries no information; replace its
+        # A constant bootstrap resample carries no information. Replace its
         # degenerate zero with the point estimate so it neither inflates nor
-        # deflates the bias correction (constant whole columns still give 0).
+        # deflates the bias correction. A whole column that is constant
+        # still gives 0.
         degen_boot = degen_all[1:, ..., None]
         d_boot = jnp.where(degen_boot, d_hat[None], d_all[1:])
         s1_boot = jnp.where(degen_boot, S1[None], s1_all[1:])
@@ -698,11 +711,11 @@ def _raise_delta_out_of_range(problem: Problem, delta: Array, grid_size: int) ->
 
     Borgonovo's delta is a half L1 distance between probability densities,
     so it lies in ``[0, 1]`` by construction. A value outside that range is
-    a failed computation, not an estimate, so it is raised rather than
-    returned. The tolerance of 0.05 keeps the documented small negative
-    excursion of the bias-corrected form ``2*d_hat - d_boot`` legal. The
-    value is never clipped: a clipped value is a plausible-looking wrong
-    answer.
+    a failed computation rather than an estimate, so this function raises
+    instead of returning it. The tolerance of 0.05 keeps the documented
+    small negative excursion of the bias-corrected form
+    ``2*d_hat - d_boot`` legal. The function never clips the value, because
+    a clipped value is a plausible-looking wrong answer.
 
     Args:
         problem: Problem definition (for parameter names in the message).
@@ -738,10 +751,10 @@ def _raise_delta_out_of_range(problem: Problem, delta: Array, grid_size: int) ->
 def _warn_conf_out_of_range(problem: Problem, delta_conf: Array) -> None:
     """Warn when a delta confidence bound leaves ``[0, 1]``.
 
-    The point estimate is the contract and is checked by
-    :func:`_raise_delta_out_of_range`. The interval is a diagnostic, so an
-    out-of-range bound degrades the diagnostic without invalidating the
-    estimate, and it warns.
+    The point estimate is the contract, and :func:`_raise_delta_out_of_range`
+    checks it. The interval is only a diagnostic. An out-of-range bound
+    degrades that diagnostic without invalidating the estimate, so this
+    function warns instead of raising.
 
     Args:
         problem: Problem definition (for parameter names in the warning).

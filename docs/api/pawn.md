@@ -1,9 +1,10 @@
 # PAWN
 
-Distribution-based sensitivity indices from Kolmogorov-Smirnov distances
-between conditional and unconditional output CDFs.
+`jaxgsa.pawn.analyze()` computes distribution-based sensitivity indices from
+the Kolmogorov-Smirnov distances between the conditional and unconditional
+output CDFs.
 
-The canonical API reference now lives at [API Reference](/api/).
+The canonical API reference lives at [API Reference](/api/).
 
 Jump directly to:
 

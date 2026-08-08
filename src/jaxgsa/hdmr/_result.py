@@ -19,11 +19,11 @@ if TYPE_CHECKING:
 
 
 class _HDMRFit(TypedDict):
-    """Typed emulator payload returned inside ``HDMRResult``.
+    """Fitted HDMR surrogate state carried inside ``HDMRResult``.
 
     The coefficient arrays are stored on the fitted analysis scale. When
-    ``prenormalize`` is ``True``, ``y_mean`` and ``y_std`` are used by
-    :meth:`HDMRResult.predict` to map predictions back to the original scale.
+    ``prenormalize`` is ``True``, :meth:`HDMRResult.predict` uses ``y_mean``
+    and ``y_std`` to map predictions back to the original scale.
     """
 
     C1: Array
@@ -41,18 +41,18 @@ class _HDMRFit(TypedDict):
 class HDMRResult(SurrogateResult):
     """RS-HDMR (Random Sampling High-Dimensional Model Representation) results.
 
-    Stores ANCOVA-decomposed sensitivity indices. Each *term* is one component
-    function of the HDMR expansion -- a single parameter, a pair, or a triple
-    (up to the ``maxorder`` used) -- named in ``terms``. Per-term indices
-    (Sa, Sb, S) have a trailing ``n_terms`` axis; the per-parameter ST has a
-    trailing ``D`` axis.
+    Stores ANCOVA-decomposed sensitivity indices. A term is one component
+    function of the HDMR expansion: a single parameter, a pair, or a triple,
+    up to the ``maxorder`` used. ``terms`` holds their names. The per-term
+    indices (Sa, Sb, S) have a trailing ``n_terms`` axis. The per-parameter
+    ST has a trailing ``D`` axis.
 
     Shapes follow ``(T, K, n_terms)`` for time-resolved multi-output analyses.
     Singleton T and/or K dimensions are squeezed when the original Y had fewer
     than 3 dimensions.
 
     The :attr:`S1`, :attr:`S2`, and :attr:`S3` properties reshape the structural
-    (``Sa``) blocks into the conventional Sobol-index layouts -- a ``(D,)``
+    (``Sa``) blocks into the conventional Sobol-index layouts: a ``(D,)``
     vector, a ``(D, D)`` matrix, and a ``(D, D, D)`` tensor respectively.
 
     Warning:
@@ -65,21 +65,22 @@ class HDMRResult(SurrogateResult):
 
     Attributes:
         Sa: Structural (uncorrelated) variance fraction per term, shape
-            ``(n_terms,)`` / ``(K, n_terms)`` / ``(T, K, n_terms)``. The part
-            of a term's contribution independent of other inputs.
-        Sb: Correlative contribution per term, same shape as ``Sa``. Near
-            zero when inputs are independent; non-zero values flag variance
-            shared through input correlation (and can be negative).
-        S: Total contribution per term, ``S = Sa + Sb``, same shape.
+            ``(n_terms,)`` / ``(K, n_terms)`` / ``(T, K, n_terms)``. This is
+            the part of a term's contribution independent of other inputs.
+        Sb: Correlative contribution per term, same shape as ``Sa``. It is
+            near zero when inputs are independent. A non-zero value flags
+            variance shared through input correlation, and it can be
+            negative.
+        S: Total contribution per term, ``S = Sa + Sb``, same shape as ``Sa``.
         ST: SCSA total per parameter, shape ``(D,)`` / ``(K, D)`` /
             ``(T, K, D)``. It sums ``S = Sa + Sb`` over every term that
             contains the parameter: ``ST_i = sum over u containing i of
             (Sa_u + Sb_u)``. Li, Rabitz et al. (2010) define it in Section
-            2.2.3 -- "the total sensitivity indices ... can be calculated by
-            adding together all the sensitivity indices containing X_i" --
-            from the per-term indices of their Eqs. (19)-(22). Sarazin,
-            Viaud & Cournede (2017) restate it as their Eq. (8). SALib and
-            Vrugt's ``HDMR_end.m`` use the same convention.
+            2.2.3: "the total sensitivity indices ... can be calculated by
+            adding together all the sensitivity indices containing X_i".
+            They build it from the per-term indices of their Eqs. (19)-(22).
+            Sarazin, Viaud & Cournede (2017) restate it as their Eq. (8).
+            SALib and Vrugt's ``HDMR_end.m`` use the same convention.
 
             Li et al. attach a precondition to it: the totals are reliable
             only when the per-term ``S`` values sum to about 1 (their
@@ -89,29 +90,35 @@ class HDMRResult(SurrogateResult):
             With independent inputs the correlative shares ``Sb`` vanish and
             ``ST`` reduces to the ordinary Sobol total-order index.
 
-            With correlated inputs it does **not**. It can be negative, it is
-            not bounded in ``[0, 1]``, and it does not measure the expected
-            reduction of output variance from fixing the parameter. Do not
-            use it to decide that a parameter can be fixed: the bias runs
-            toward "cannot be fixed", and a parameter the model ignores can
-            outrank one with a negative value. Note that Li et al. reuse the
-            symbol ``S_Ti`` for both this term-membership sum and, in their
-            Eq. (4), the classical conditional-variance total; the two are
-            different quantities and only the first is computed here.
-            Sarazin et al. state explicitly that the ``[0, 1]`` bound no
-            longer holds. It is also not comparable with
-            the ``ST`` of ``jaxgsa.kucherenko`` or the ``S_TU`` of
-            ``jaxgsa.vkoga``. Use one of those for a genuine
-            conditional-variance total under dependence.
+            With correlated inputs it does not reduce to that index. It can
+            be negative. It is not bounded in ``[0, 1]``. It does not measure
+            the expected reduction of output variance from fixing the
+            parameter. Do not use it to decide that a parameter can be fixed:
+            the bias runs toward "cannot be fixed", and a parameter the model
+            ignores can outrank one with a negative value. Li et al. reuse
+            the symbol ``S_Ti`` for two different quantities: this
+            term-membership sum, and the classical conditional-variance total
+            of their Eq. (4). Only the first one is computed here. Sarazin et
+            al. state explicitly that the ``[0, 1]`` bound no longer holds.
+            ``ST`` is also not comparable with the ``ST`` of
+            ``jaxgsa.kucherenko`` or the ``S_TU`` of ``jaxgsa.vkoga``. Use one
+            of those for a genuine conditional-variance total under
+            dependence.
         problem: Problem definition used for the analysis.
-        terms: Human-readable term labels, e.g. ``("x1", "x2", "x1/x2")``;
-            interaction terms join parameter names with ``/``.
+        terms: Human-readable term labels, e.g. ``("x1", "x2", "x1/x2")``.
+            Interaction terms join parameter names with ``/``.
         _fit: Private fitted surrogate state used by :meth:`predict`.
         select: F-test significance count per term, summed over the T*K
-            output slices (max value T*K), or None. Low counts mark terms
-            the F-test deems insignificant.
+            output slices (maximum value T*K), or None. A low count marks a
+            term the F-test deems insignificant.
         rmse: Emulator fit RMSE per output slice in the units of ``Y``,
             shape ``()`` / ``(K,)`` / ``(T, K)``, or None.
+        _c2: Private parameter index pairs of the second-order terms, in the
+            order they occupy in the ``n_terms`` axis. Empty at
+            ``maxorder=1``.
+        _c3: Private parameter index triples of the third-order terms, in the
+            order they occupy in the ``n_terms`` axis. Empty below
+            ``maxorder=3``.
     """
 
     Sa: Array
@@ -129,13 +136,13 @@ class HDMRResult(SurrogateResult):
     def _predict_plan(self, X: Array) -> _PredictPlan:
         """Plan a batched evaluation of the fitted HDMR surrogate at ``X``.
 
-        Re-applies the CDF transform used during fitting and packages a
-        kernel that rebuilds the B-spline tensor-product bases (a large
-        per-row constant, up to ``m1^3`` floats per interaction term at
-        ``maxorder=3``) and contracts them with the fitted component
-        coefficients; when the fit used ``prenormalize=True``, the kernel
-        inverse-transforms predictions back to the original output scale.
-        See :meth:`predict` for the full contract.
+        Re-applies the CDF transform used during fitting. It then packages a
+        kernel that rebuilds the B-spline tensor-product bases and contracts
+        them with the fitted component coefficients. Those bases are a large
+        per-row constant: up to ``m1^3`` floats per interaction term at
+        ``maxorder=3``. When the fit used ``prenormalize=True``, the kernel
+        also inverse-transforms predictions back to the original output
+        scale. See :meth:`predict` for the full contract.
 
         Raises:
             ValueError: If this result carries no fitted surrogate state.
@@ -148,14 +155,14 @@ class HDMRResult(SurrogateResult):
         """Compute Shapley effects from this fitted HDMR decomposition.
 
         Allocates each fitted ANCOVA term's variance share equally among the
-        parameters participating in that term, yielding per-parameter Shapley
-        effects that sum to one.
+        parameters that take part in that term. The per-parameter Shapley
+        effects sum to one.
 
         Args:
             include_correlative: When ``True``, allocate the total ANCOVA
                 contribution ``Sa + Sb`` (structural plus correlative
-                fold-in), which keeps the allocation meaningful under
-                correlated inputs. Defaults to ``False``, allocating the
+                fold-in). That keeps the allocation meaningful under
+                correlated inputs. Defaults to ``False``, which allocates the
                 structural part ``Sa`` only.
 
         Returns:
@@ -195,12 +202,12 @@ class HDMRResult(SurrogateResult):
     def S1(self) -> Array:
         """Structural first-order share (Sobol' S1 only under independent inputs).
 
-        Equivalent to ``Sa[:D]`` — the uncorrelated variance fraction of each
-        single-parameter component function, which matches the definition of
+        Equivalent to ``Sa[:D]``: the uncorrelated variance fraction of each
+        single-parameter component function. That matches the definition of
         first-order Sobol indices.
 
         Note:
-            This is the **structural** share only. With independent inputs it
+            This is the structural share only. With independent inputs it
             equals the first-order Sobol index. With correlated inputs it does
             not: the correlative share ``Sb`` is left out, so the value can sit
             far below the Sobol ``S1`` of the same parameter. See :attr:`ST`
@@ -218,8 +225,8 @@ class HDMRResult(SurrogateResult):
 
         Mirrors :attr:`S1`, scattering the second-order block of ``Sa`` into a
         dense ``(D, D)`` matrix. Entry ``[i, j]`` is the structural variance
-        fraction of the ``(x_i, x_j)`` interaction component; the matrix is
-        symmetric. Cells for the diagonal and for any parameter pair absent
+        fraction of the ``(x_i, x_j)`` interaction component, and the matrix
+        is symmetric. Cells for the diagonal and for any parameter pair absent
         from the expansion (e.g. ``maxorder < 2``) are ``NaN``.
 
         Returns:
@@ -248,7 +255,7 @@ class HDMRResult(SurrogateResult):
         Mirrors :attr:`S1`/:attr:`S2`, scattering the third-order block of
         ``Sa`` into a dense ``(D, D, D)`` tensor. Entry ``[i, j, k]`` is the
         structural variance fraction of the ``(x_i, x_j, x_k)`` interaction
-        component; the tensor is symmetric under permutation of its axes.
+        component, and the tensor is symmetric under permutation of its axes.
         Cells where any two axes share an index, and any triple absent from
         the expansion (e.g. ``maxorder < 3``), are ``NaN``.
 
@@ -301,8 +308,8 @@ class HDMRResult(SurrogateResult):
             terms exist), and optionally ``select`` and ``rmse``.
         """
         # ST is indexed by parameter, exactly the shared param/output/time
-        # schema; Sa/Sb/S replace the trailing "param" with "term" (interaction
-        # components), and select/rmse drop it entirely.
+        # schema. Sa/Sb/S replace the trailing "param" with "term" (the
+        # interaction components). select/rmse drop that axis entirely.
         dims_param, coords = _dims_and_coords(
             self.Sa.ndim, self.Sa.shape, self.problem, time_coords
         )

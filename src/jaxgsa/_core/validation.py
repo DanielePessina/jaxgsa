@@ -1,9 +1,11 @@
 """Shared input/output validation and labeling for analysis entrypoints.
 
-Validates the canonical ``(N, D)`` input and ``(N,)``/``(N, K)``/``(N, T, K)``
-output contracts, promotes outputs to the canonical 3-D layout, squeezes
-singleton axes back out of results, and resolves output/time coordinate
-labels for result containers.
+The helpers here do four jobs. They check the canonical ``(N, D)`` input and
+``(N,)`` / ``(N, K)`` / ``(N, T, K)`` output contracts. They promote outputs to
+the canonical 3-D layout, and squeeze the inserted singleton axes back out of
+the results. They resolve output and time coordinate labels for the result
+containers. Finally, they gate the methods that cannot handle a correlated or
+categorical problem.
 """
 
 from __future__ import annotations
@@ -20,14 +22,14 @@ if TYPE_CHECKING:
 
 
 def _default_output_names(K: int, problem: Problem) -> list[str]:
-    """Resolve output coordinate labels, defaulting to y0, y1, ...
+    """Resolve the output coordinate labels, defaulting to ``y0``, ``y1``, ....
 
     Args:
         K: Number of output variables.
-        problem: Problem definition (may carry output_names).
+        problem: Problem definition, which may carry ``output_names``.
 
     Returns:
-        List of K string labels.
+        A list of ``K`` string labels.
     """
     if problem.output_names is not None:
         if len(problem.output_names) != K:
@@ -44,8 +46,8 @@ def _validate_x(problem: Problem, X: Array) -> None:
         X: Input sample matrix, expected shape ``(N, D)``.
 
     Raises:
-        ValueError: If X is not 2-D or its column count does not match the
-            problem.
+        ValueError: If ``X`` is not 2-D, or its column count does not match
+            the problem.
     """
     if X.ndim != 2:
         raise ValueError(f"X must be 2-D (N, D), got ndim={X.ndim}")
@@ -120,20 +122,20 @@ def _categorical_param_names(problem: Problem) -> list[str]:
 def _raise_categorical_and_correlated(method: str, names: list[str], *, design: bool) -> None:
     """Reject a problem that is both categorical and correlated.
 
-    This combination has no variance-based route. Every categorical-tolerant
-    variance-based method (``jaxgsa.sobol``) refuses a declared correlation,
-    and every correlation-tolerant variance-based method (``jaxgsa.vkoga``,
-    ``jaxgsa.kucherenko``) refuses a categorical parameter. Naming only one of
-    the two faults would send the user to a method that then refuses the other,
-    so all four gates — design and analysis, categorical and correlated —
-    route the combined case here.
+    This combination has no variance-based route. The categorical-tolerant
+    variance-based method (``jaxgsa.sobol``) refuses a declared correlation.
+    The correlation-tolerant variance-based methods (``jaxgsa.vkoga``,
+    ``jaxgsa.kucherenko``) refuse a categorical parameter. Naming only one of
+    the two faults would send the user to a method that then refuses the
+    other. All four gates therefore route the combined case here: design and
+    analysis, categorical and correlated.
 
-    The two ends of the library reach the same dead end and recommend the same
-    three methods, ``jaxgsa.optimal_transport``, ``jaxgsa.borgonovo`` and
-    ``jaxgsa.pawn``, which are the only ones that accept both faults. Only
-    the opening clause and the call to action differ: a design caller has no
-    samples yet and is told how to draw them, while an analysis caller
-    already holds ``(X, Y)``.
+    Both ends of the library reach the same dead end, so both recommend the
+    same three methods: ``jaxgsa.optimal_transport``, ``jaxgsa.borgonovo`` and
+    ``jaxgsa.pawn``. Those are the only ones that accept both faults. Only the
+    opening clause and the call to action differ. A design caller has no
+    samples yet and is told how to draw them, while an analysis caller already
+    holds ``(X, Y)``.
 
     Args:
         method: Fully qualified sampler or analyzer name for the message.
@@ -171,13 +173,13 @@ def _raise_categorical_and_correlated(method: str, names: list[str], *, design: 
 def _raise_correlated_design(problem: Problem, method: str) -> None:
     """Reject a correlated problem in a structured design sampler.
 
-    A structured design places its points assuming independent marginals; the
-    downstream estimators are undefined — not merely approximate — under a
-    declared correlation, so sampling refuses up front rather than producing a
-    design whose analysis would be silently wrong. ``method`` names the
-    sampler, so this text does not have to list the callers.
+    A structured design places its points assuming independent marginals.
+    Under a declared correlation the downstream estimators are undefined, not
+    merely approximate. Sampling therefore refuses up front, rather than
+    handing back a design whose analysis would be silently wrong. ``method``
+    names the sampler, so this text does not have to list the callers.
 
-    A problem that is also categorical gets the combined message instead: the
+    A problem that is also categorical gets the combined message instead. The
     correlated-only text would recommend methods that then refuse it for being
     categorical. This check therefore does not depend on being ordered before
     or after :func:`_raise_categorical_design`.
@@ -210,7 +212,11 @@ def _raise_correlated_design(problem: Problem, method: str) -> None:
 def _raise_correlated_analysis(problem: Problem, method: str) -> None:
     """Reject a correlated problem in a correlation-naive analyzer.
 
-    A problem that is also categorical gets the combined message instead: the
+    The indices such a method computes are invalid, not merely approximate,
+    once ``problem.correlation`` declares a dependence structure, so the gate
+    raises instead of warning.
+
+    A problem that is also categorical gets the combined message instead. The
     correlated-only text would recommend methods that then refuse it for being
     categorical. This check therefore does not depend on being ordered before
     or after :func:`_raise_categorical_analysis`.
@@ -249,8 +255,8 @@ _CATEGORICAL_TOLERANT_METHODS = (
 def _raise_categorical_design(problem: Problem, method: str) -> None:
     """Reject a categorical problem in an incompatible design sampler.
 
-    The Morris and eFAST designs walk or sweep a continuous input space;
-    an unordered categorical axis has no meaningful step or frequency, so
+    The Morris and eFAST designs walk or sweep a continuous input space. An
+    unordered categorical axis has no meaningful step or frequency, so
     sampling refuses up front. The copula conditionals of
     ``jaxgsa.kucherenko.sample`` refuse it for a different reason: they need a
     continuous marginal CDF on every coordinate.
@@ -324,9 +330,9 @@ def _validate_xy_inputs(
 ) -> Array:
     """Validate the shared ``(problem, X, Y)`` contract of given-data methods.
 
-    Validates X and Y against the canonical jaxgsa layouts, using X's row count
-    as the expected sample count. No axis inference or transposition is
-    performed.
+    Checks ``X`` and ``Y`` against the canonical jaxgsa layouts, taking ``X``'s
+    row count as the expected sample count. jaxgsa never infers or transposes
+    an axis.
 
     Args:
         problem: Problem definition with ``num_vars`` parameters.
@@ -371,13 +377,13 @@ def _squeeze_output_axes(
 ) -> Array:
     """Remove the singleton T/K axes that ``_prepare_Y`` inserted.
 
-    The ``(T, K)`` slice axes are located immediately before ``n_trailing``
-    trailing axes and addressed relative to the end, so any leading axes (a
-    confidence array's ``[lower, upper]`` axis, for example) ride through the
-    ``Ellipsis`` untouched. ``n_trailing`` says how many axes follow ``K``:
-    ``1`` for the usual ``(..., T, K, D)`` point/confidence arrays, ``2`` for
-    ``(..., T, K, D, D)`` pair matrices, and ``0`` for per-slice ``(..., T, K)``
-    scalars.
+    The ``(T, K)`` slice axes sit immediately before ``n_trailing`` trailing
+    axes, and are addressed relative to the end. The ``Ellipsis`` therefore
+    leaves any leading axes alone, such as a confidence array's
+    ``[lower, upper]`` axis. ``n_trailing`` says how many axes follow ``K``:
+    ``1`` for the usual ``(..., T, K, D)`` point and confidence arrays, ``2``
+    for ``(..., T, K, D, D)`` pair matrices, and ``0`` for per-slice
+    ``(..., T, K)`` scalars.
 
     Args:
         arr: Array whose axes are ``(..., T, K) + n_trailing`` trailing axes.
@@ -473,6 +479,10 @@ def _warn_zero_variance_slices(
 ) -> None:
     """Check for zero-variance output slices before analysis and warn.
 
+    A constant slice turns every index into ``0 / 0``, so the analysis still
+    runs and reports NaN for that slice. The other slices are unaffected, so
+    this warns rather than raising.
+
     Args:
         Y: Model output array with shape ``(n_expanded, ...)`` where
             trailing dims are ``()``, ``(K,)``, or ``(T, K)``.
@@ -541,7 +551,6 @@ def _warn_zero_variance_slices(
     elif len(trailing) == 2:  # multi-timestep: flat index encodes (t, k) in row-major order
         affected = []
         for idx in zero_indices:
-            # divmod decomposes flat index into (time_step, output_column)
             t, k = divmod(idx, K)
             affected.append(f"(t={t}, {_fmt_k(k)})")
         if len(affected) > 5:  # cap displayed labels to keep warnings readable

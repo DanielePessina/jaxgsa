@@ -1,10 +1,10 @@
 """Gaussian-copula dependency structure for correlated-input analyses.
 
 Every sampling design in jaxgsa draws independent marginals, so dependence has
-to be introduced explicitly. A Gaussian copula does that with the least
-commitment: it keeps each parameter's declared marginal exactly as the user
-wrote it and adds a rank-correlation structure on top, which is what Hilhorst
-et al. (2024) use to map independent nodes into the correlated input space.
+to be added explicitly. A Gaussian copula does that with the least commitment.
+It keeps each parameter's declared marginal exactly as the user wrote it, and
+adds a rank-correlation structure on top. Hilhorst et al. (2024) use the same
+construction to map independent nodes into the correlated input space.
 
 The latent space is standard normal. Writing ``R`` for the copula correlation
 matrix, ``Z ~ N(0, R)``, ``U = Phi(Z)`` and ``X_i = F_i^{-1}(U_i)``. All
@@ -212,22 +212,22 @@ def correlation_from_covariance(cov: npt.ArrayLike) -> np.ndarray:
 
     Two caveats the caller must own:
 
-    - The result is the **Pearson** correlation of the physical variables.
-      Under a Gaussian copula that equals the latent correlation only when
-      every marginal is Gaussian; for non-Gaussian marginals prefer a rank
+    - The result is the Pearson correlation of the physical variables. Under
+      a Gaussian copula that equals the latent correlation only when every
+      marginal is Gaussian. For non-Gaussian marginals prefer a rank
       correlation with ``correlation_kind="spearman"``, which is exactly
       invertible. Pearson matching for arbitrary marginals is the NORTA
-      correlation-matching problem and is not attempted here.
-    - Variances always come from the **declared marginals** on the
-      ``Problem``, never from the covariance diagonal, so nothing is
-      specified twice. If the supplied diagonal disagrees with a declared
-      ``GaussianInputSpec.variance``, the diagonal is silently discarded —
-      this function cannot see the ``Problem``, so reconciling the two is
-      the caller's responsibility.
+      correlation-matching problem, and this function does not attempt it.
+    - Variances always come from the marginals declared on the ``Problem``,
+      never from the covariance diagonal, so nothing is specified twice. A
+      supplied diagonal that disagrees with a declared
+      ``GaussianInputSpec.variance`` is silently discarded. This function
+      cannot see the ``Problem``, so reconciling the two is the caller's
+      responsibility.
 
     Args:
-        cov: ``(D, D)`` covariance matrix — square, symmetric, with a
-            strictly positive diagonal.
+        cov: ``(D, D)`` covariance matrix. Must be square, symmetric, and
+            have a strictly positive diagonal.
 
     Returns:
         ``(D, D)`` correlation matrix with the diagonal pinned to exactly 1
@@ -411,8 +411,9 @@ def _project_to_correlation(
     A rank-correlation estimate transformed entry-by-entry through
     ``2 sin(pi rho_s / 6)`` is not guaranteed to stay positive definite, and a
     user-declared matrix need not be either. Clipping the eigenvalues and
-    renormalising the diagonal is the standard repair; it is a no-op when the
-    input is already valid, so the common case pays only one eigendecomposition.
+    renormalising the diagonal is the standard repair. It is a no-op when the
+    input is already valid, so the common case pays for one eigendecomposition
+    and nothing more.
 
     The repair is idempotent: ``_project_to_correlation`` of its own output
     returns that output bit for bit. One clip-then-renormalise pass does not
@@ -423,8 +424,8 @@ def _project_to_correlation(
 
     How loudly the repair reports itself depends on how far it had to move the
     matrix. The severity is the maximum entrywise change between the final
-    repaired matrix and the matrix as it arrived, not a per-pass change, and it
-    is measured on ``report_kind``. See :data:`RepairPolicy` for the bands.
+    repaired matrix and the matrix as it arrived, measured on ``report_kind``.
+    It is not a per-pass change. See :data:`RepairPolicy` for the bands.
 
     Args:
         R: ``(D, D)`` candidate correlation matrix (structurally valid), on
@@ -661,7 +662,16 @@ def assemble_latent(
 
 
 def _safe_cholesky(cov: np.ndarray) -> np.ndarray:
-    """Cholesky factor of a covariance, repaired if it is not quite PD."""
+    """Return the Cholesky factor of a covariance, lifting it if it is not PD.
+
+    Args:
+        cov: ``(D, D)`` symmetric covariance matrix.
+
+    Returns:
+        ``(D, D)`` lower-triangular Cholesky factor. When ``cov`` is not
+        positive definite, the factor is of the matrix with its eigenvalues
+        lifted to ``_MIN_EIGENVALUE``, not of ``cov`` itself.
+    """
     try:
         return np.linalg.cholesky(cov)
     except np.linalg.LinAlgError:
@@ -675,9 +685,9 @@ def _safe_cholesky(cov: np.ndarray) -> np.ndarray:
 def latent_normal_sample(n: int, dim: int, *, seed: int, scramble: bool = True) -> np.ndarray:
     """Draw ``(n, dim)`` standard normal variates from a scrambled Sobol' set.
 
-    Quasi-random draws are used throughout because every integrand here is
-    evaluated on a cheap surrogate, so the sample size is limited by memory
-    rather than model cost and the better equidistribution is free.
+    Every integrand here runs on a cheap surrogate, so memory rather than
+    model cost limits the sample size. The better equidistribution of a
+    quasi-random set is therefore free, and this module uses one throughout.
 
     Args:
         n: Number of points. Pass a power of two: the Sobol' engine loses its

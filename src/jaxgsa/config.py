@@ -1,10 +1,10 @@
 """Opt-in runtime configuration helpers for jaxgsa.
 
-These helpers wrap process-global settings worth tuning for
-sensitivity-analysis workloads: JAX runtime flags and jaxgsa's own
-transient-memory budget. They are deliberately never applied on import,
-because they mutate global state that the host application may also depend
-on -- every knob here only changes behavior when explicitly called.
+These helpers wrap two kinds of process-global setting worth tuning for
+sensitivity-analysis workloads: JAX runtime flags, and jaxgsa's own
+transient-memory budget. Nothing here is applied on import. Each setting
+mutates global state the host application may also depend on, so it changes
+behavior only when you call the helper yourself.
 """
 
 from pathlib import Path
@@ -25,11 +25,11 @@ def enable_compilation_cache(
     """Enable JAX's persistent, on-disk compilation cache.
 
     JAX caches compiled XLA executables in memory for the lifetime of a process.
-    Enabling the *persistent* cache additionally stores them on disk, so repeated
-    runs of the same analysis across process restarts (parameter sweeps, CI jobs,
-    HPC batches) skip the cold XLA compile. This is an opt-in convenience: call it
-    once, before the first ``analyze`` call (e.g. ``jaxgsa.sobol.analyze``), so the
-    cache is active when the first compilation happens.
+    The persistent cache stores them on disk as well. Repeated runs of the same
+    analysis across process restarts (parameter sweeps, CI jobs, HPC batches)
+    then skip the cold XLA compile. Call this once, before the first ``analyze``
+    call (``jaxgsa.sobol.analyze``, for example), so the cache is active when the
+    first compilation happens.
 
     Args:
         path: Directory used to store compiled executables. A leading ``~`` is
@@ -69,12 +69,11 @@ def set_memory_budget(budget_bytes: int) -> None:
     single-pass design matrix would not fit. All of them derive their
     automatic batch/chunk sizes from this budget (default: 512 MiB).
 
-    This is an opt-in process-global setting, consistent with this module's
-    never-on-import philosophy: nothing changes until you call it, and it
-    only takes effect for *subsequent* jaxgsa calls -- analyses already running
-    keep the budget they started with. Explicit per-call parameters
-    (``batch_size``, ``slice_chunk_size``) always take precedence over this
-    budget.
+    This is an opt-in process-global setting. Nothing changes until you call
+    it, and the new budget applies only to jaxgsa calls made after it.
+    Analyses already running keep the budget they started with. Explicit
+    per-call parameters (``batch_size``, ``slice_chunk_size``) always take
+    precedence over this budget.
 
     Args:
         budget_bytes: New budget in bytes; must be a positive integer

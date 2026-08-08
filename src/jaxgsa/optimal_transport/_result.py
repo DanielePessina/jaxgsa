@@ -1,4 +1,4 @@
-"""Defines the OTResult dataclass for optimal-transport sensitivity analysis."""
+"""Result container for optimal-transport sensitivity indices."""
 
 from dataclasses import dataclass
 
@@ -14,48 +14,54 @@ from jaxgsa.problem import Problem
 class OTResult:
     """Optimal-transport sensitivity analysis results.
 
-    Stores the normalized optimal-transport index -- the class-averaged
-    squared 2-Wasserstein distance between the conditional and
-    unconditional output distributions, on a [0, 1] scale -- together
-    with its decomposition into an advective (location-shift) and a
-    diffusive (spread/shape) component, and optional bootstrap
-    confidence intervals.
+    Holds the normalized optimal-transport index. The index is the
+    class-averaged squared 2-Wasserstein distance between the conditional
+    and unconditional output distributions, on a [0, 1] scale. The
+    container also holds the split of that index into an advective
+    (location-shift) and a diffusive (spread/shape) component, plus
+    optional bootstrap confidence intervals.
 
     Index shapes depend on the analysis mode:
 
-    - ``"univariate"``: one index per output column -- ``(D,)`` for scalar
-      outputs, ``(K, D)`` for multi-output, ``(T, K, D)`` for time
-      series.
-    - ``"multivariate"``: one index per input over the joint output
-      distribution -- ``(D,)``.
-    - ``"trajectory"``: one index per input per output, treating
-      each output's time course as a point cloud -- ``(K, D)``.
+    - ``"univariate"``: one index per output column. Index arrays have
+      shape ``(D,)`` for a scalar output, ``(K, D)`` for a multi-output
+      model, and ``(T, K, D)`` for a time-resolved analysis.
+    - ``"multivariate"``: one index per parameter over the joint output
+      distribution, shape ``(D,)``.
+    - ``"trajectory"``: one index per parameter per output, shape
+      ``(K, D)``. Each output's time course is one point cloud.
 
-    Confidence arrays add a leading axis of size 2 (``[lower, upper]``).
+    Confidence-interval fields add a leading axis: shape ``(2, ...)`` for
+    ``[lower, upper]``.
 
     Attributes:
-        ot: Total optimal-transport index per parameter: 0 means the
-            output distribution is unaffected by the input, 1 means
-            fully determined by it.
-        ot_conf: Percentile bootstrap confidence interval
-            ``[lower, upper]``, or ``None`` when ``n_bootstrap=0``.
-        advective: Location-shift component -- the class-averaged squared
-            distance between conditional and unconditional output means,
-            on the same normalized scale. Equals half the given-data
-            first-order Sobol index.
-        advective_conf: Percentile bootstrap confidence interval, or
+        ot: Total optimal-transport index per parameter, shape
+            ``(..., D)``. 0 means the parameter leaves the output
+            distribution unchanged. 1 means the parameter determines the
+            output distribution fully.
+        ot_conf: Percentile bootstrap confidence interval for ``ot``,
+            shape ``(2, ..., D)`` for ``[lower, upper]``. ``None`` when
+            ``n_bootstrap=0``.
+        advective: Location-shift component, shape ``(..., D)``. It is the
+            class-averaged squared distance between the conditional and
+            unconditional output means, on the same normalized scale. It
+            equals half the given-data first-order Sobol index.
+        advective_conf: Percentile bootstrap confidence interval for
+            ``advective``, shape ``(2, ..., D)`` for ``[lower, upper]``.
             ``None`` when ``n_bootstrap=0``.
-        diffusive: Spread/shape component ``ot - advective``, capturing
-            changes in dispersion and higher moments of the output
-            distribution.
-        diffusive_conf: Percentile bootstrap confidence interval, or
+        diffusive: Spread/shape component ``ot - advective``, shape
+            ``(..., D)``. It captures changes in the dispersion and in the
+            higher moments of the output distribution.
+        diffusive_conf: Percentile bootstrap confidence interval for
+            ``diffusive``, shape ``(2, ..., D)`` for ``[lower, upper]``.
             ``None`` when ``n_bootstrap=0``.
-        ot_dummy: Irrelevance baseline -- the index of a synthetic input
-            that is independent of the output by construction, computed
-            through the identical pipeline. Inputs whose ``ot`` is not
-            clearly above this floor are indistinguishable from noise.
-            Same shape as ``ot`` without the trailing parameter axis;
-            ``None`` unless the analysis ran with ``dummy=True``.
+        ot_dummy: Irrelevance baseline, the same shape as ``ot`` without
+            the trailing parameter axis. It is the index of a synthetic
+            parameter that is independent of the output by construction,
+            computed through the identical pipeline. Parameters whose
+            ``ot`` is not clearly above this floor are indistinguishable
+            from noise. ``None`` unless the analysis ran with
+            ``dummy=True``.
         mode: Analysis mode that produced these shapes (``"univariate"``,
             ``"multivariate"``, or ``"trajectory"``).
         problem: Problem definition used for the analysis.
@@ -82,10 +88,10 @@ class OTResult:
                 arrays are 3-D. Defaults to integer indices.
 
         Returns:
-            An ``xr.Dataset`` with variables ``ot``, ``advective`` and
-            ``diffusive`` (plus ``*_lower`` / ``*_upper`` when bootstrap
-            intervals are present, and ``ot_dummy`` when the dummy
-            baseline was computed) and a ``mode`` attribute.
+            An ``xr.Dataset`` with the variables ``ot``, ``advective`` and
+            ``diffusive``, and with a ``mode`` attribute. Bootstrap
+            intervals add ``*_lower`` and ``*_upper`` variables. A
+            computed dummy baseline adds ``ot_dummy``.
         """
         dims, coords = _dims_and_coords(self.ot.ndim, self.ot.shape, self.problem, time_coords)
 
@@ -106,7 +112,7 @@ class OTResult:
 
         if self.ot_dummy is not None:
             # The dummy baseline has no parameter axis: it is the index of
-            # one synthetic input, per output slice.
+            # one synthetic parameter, per output slice.
             data_vars["ot_dummy"] = (dims[:-1], np.asarray(self.ot_dummy))
 
         return xr.Dataset(data_vars, coords=coords, attrs={"mode": self.mode})

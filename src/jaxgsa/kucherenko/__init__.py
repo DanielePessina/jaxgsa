@@ -3,13 +3,14 @@
 Design-based method: generate a conditional-copula design, evaluate your
 actual model on it, and estimate ``S1 = V(E(Y|X_i))/V(Y)`` and
 ``ST = E(V(Y|X_{~i}))/V(Y)`` under the problem's declared dependence
-structure (Kucherenko, Tarantola & Annoni 2012). No surrogate is fitted —
-this is the design-based counterpart to :mod:`jaxgsa.vkoga`, which estimates
-the same two quantities against a kernel surrogate. Under independent inputs
-both indices reduce to the classic Sobol' ``S1`` and ``ST``.
+structure (Kucherenko, Tarantola & Annoni 2012). No surrogate is fitted. This
+is the design-based counterpart to :mod:`jaxgsa.vkoga`, which estimates the
+same two quantities against a kernel surrogate. Under independent inputs both
+indices reduce exactly to the Saltelli column-swap estimators of the classic
+Sobol' ``S1`` and ``ST``.
 
 Gating: ``sample`` conditions on a declared ``problem.correlation``, so it is
-exempt from the correlated-design refusal that ``sobol`` / ``morris`` /
+exempt from the correlated-design refusal that ``sobol``, ``morris``, and
 ``efast`` apply. It refuses categorical parameters. The copula conditionals
 need a continuous marginal CDF on every coordinate. Use
 :mod:`jaxgsa.optimal_transport` or :mod:`jaxgsa.borgonovo` for categorical

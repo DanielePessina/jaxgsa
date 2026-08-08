@@ -1,19 +1,19 @@
-"""HSIC analysis: kernel-based sensitivity indices.
+"""HSIC index estimators for kernel-based sensitivity analysis.
 
-Computes R2-HSIC (normalized first-order) and Total HSIC indices from
-arbitrary (X, Y) sample pairs using Gaussian RBF kernels with the
-median heuristic for bandwidth selection.
+The estimators compute R2-HSIC (normalized first-order) and Total HSIC
+indices from arbitrary (X, Y) sample pairs. They use Gaussian RBF kernels
+and pick the bandwidth with the median heuristic.
 
 Array shape conventions used throughout:
     N  — number of samples
-    D  — number of input parameters
+    D  — number of parameters
     T  — number of time steps (singleton-squeezed when absent)
     K  — number of output variables (singleton-squeezed when absent)
 
-For total HSIC, augmented kernels k*(x,x') = 1 + k_c(x,x') are used
-per Larsen & Alexanderian (2026), where k_c is the centered kernel.
-The product of augmented kernels captures all interaction orders,
-not just the highest, giving correct total indices for additive models.
+Total HSIC uses augmented kernels k*(x,x') = 1 + k_c(x,x') per Larsen &
+Alexanderian (2026), where k_c is the centered kernel. The product of
+augmented kernels captures all interaction orders, not just the highest.
+This gives correct total indices for additive models.
 
 References:
     Gretton et al. (2005). JMLR 6:2075-2129.
@@ -47,14 +47,15 @@ _MIN_SAMPLES = 4
 def _median_bandwidth_sq(dists_sq: Array) -> Array:
     """Compute squared bandwidth from a pairwise squared-distance matrix.
 
-    Uses the upper triangle (excluding diagonal) to avoid bias from
-    the N diagonal zeros per the standard median heuristic definition.
+    The median runs over the upper triangle and excludes the diagonal. This
+    avoids the bias from the N diagonal zeros, per the standard definition of
+    the median heuristic.
 
     Args:
-        dists_sq: (N, N) pairwise squared distances.
+        dists_sq: Pairwise squared distances, shape ``(N, N)``.
 
     Returns:
-        Scalar median of off-diagonal squared distances, floored at 1e-20.
+        Scalar median of the off-diagonal squared distances, floored at 1e-20.
     """
     n = dists_sq.shape[0]
     idx = jnp.triu_indices(n, k=1)
@@ -63,13 +64,13 @@ def _median_bandwidth_sq(dists_sq: Array) -> Array:
 
 
 def _build_kernel_median(x: Array) -> Array:
-    """Build Gaussian RBF kernel matrix with median heuristic bandwidth.
+    """Build a Gaussian RBF kernel matrix with a median-heuristic bandwidth.
 
     Args:
-        x: 1-D array of N values.
+        x: Values for one variable, shape ``(N,)``.
 
     Returns:
-        (N, N) kernel matrix.
+        Kernel matrix, shape ``(N, N)``.
     """
     dists_sq = (x[:, None] - x[None, :]) ** 2
     median_sq = _median_bandwidth_sq(dists_sq)
@@ -77,29 +78,29 @@ def _build_kernel_median(x: Array) -> Array:
 
 
 def _build_kernel_fixed(x: Array, sigma: Array) -> Array:
-    """Build Gaussian RBF kernel matrix with a fixed bandwidth.
+    """Build a Gaussian RBF kernel matrix with a fixed bandwidth.
 
     Args:
-        x: 1-D array of N values.
+        x: Values for one variable, shape ``(N,)``.
         sigma: Kernel bandwidth.
 
     Returns:
-        (N, N) kernel matrix.
+        Kernel matrix, shape ``(N, N)``.
     """
     dists_sq = (x[:, None] - x[None, :]) ** 2
     return jnp.exp(-dists_sq / (2.0 * sigma**2))
 
 
 def _build_kernel_chunked(x: Array, sigma: Array, batch_size: int) -> Array:
-    """Build Gaussian kernel matrix in row blocks to limit peak memory.
+    """Build a Gaussian kernel matrix in row blocks to limit peak memory.
 
     Args:
-        x: 1-D array of N values.
+        x: Values for one variable, shape ``(N,)``.
         sigma: Kernel bandwidth.
         batch_size: Number of rows per block.
 
     Returns:
-        (N, N) kernel matrix.
+        Kernel matrix, shape ``(N, N)``.
     """
     N = x.shape[0]
     rows = []
@@ -111,10 +112,10 @@ def _build_kernel_chunked(x: Array, sigma: Array, batch_size: int) -> Array:
 
 
 def _median_bandwidth(x: Array) -> Array:
-    """Compute bandwidth via the median heuristic (upper triangle only).
+    """Compute the bandwidth with the median heuristic (upper triangle only).
 
     Args:
-        x: 1-D array of N values.
+        x: Values for one variable, shape ``(N,)``.
 
     Returns:
         Scalar bandwidth sigma.
@@ -127,10 +128,10 @@ def _center_kernel(K: Array) -> Array:
     """Center a kernel matrix: K_c = HKH where H = I - (1/n)11^T.
 
     Args:
-        K: (N, N) kernel matrix.
+        K: Kernel matrix, shape ``(N, N)``.
 
     Returns:
-        (N, N) centered kernel matrix.
+        Centered kernel matrix, shape ``(N, N)``.
     """
     row_mean = jnp.mean(K, axis=1, keepdims=True)
     col_mean = jnp.mean(K, axis=0, keepdims=True)
@@ -139,15 +140,15 @@ def _center_kernel(K: Array) -> Array:
 
 
 def _hsic_v(K: Array, L: Array) -> Array:
-    """Biased V-statistic HSIC estimator.
+    """Compute the biased V-statistic HSIC estimate for two kernels.
 
-    Uses the efficient trace formula avoiding explicit centering matrices:
+    The trace formula below avoids forming explicit centering matrices:
         HSIC = U/n^2 - 2V/n^3 + W/n^4
     where U = sum(K*L), V = sum(colsums(K)*colsums(L)), W = sum(K)*sum(L).
 
     Args:
-        K: (N, N) kernel matrix.
-        L: (N, N) kernel matrix.
+        K: Kernel matrix, shape ``(N, N)``.
+        L: Kernel matrix, shape ``(N, N)``.
 
     Returns:
         Scalar HSIC value.
@@ -168,16 +169,16 @@ def _build_one_kernel(
     batch_size: int | None,
     N: int,
 ) -> Array:
-    """Build a single kernel matrix with the appropriate strategy.
+    """Build one kernel matrix, chunked or not, as the arguments require.
 
     Args:
-        x: 1-D array of N values.
-        bandwidth: Fixed bandwidth or None for median heuristic.
-        batch_size: Block size for kernel matrix, or None.
-        N: Sample count (used for chunking decision).
+        x: Values for one variable, shape ``(N,)``.
+        bandwidth: Fixed bandwidth, or None for the median heuristic.
+        batch_size: Row-block size for the kernel matrix, or None.
+        N: Sample count, used to decide whether to chunk.
 
     Returns:
-        (N, N) kernel matrix.
+        Kernel matrix, shape ``(N, N)``.
     """
     use_chunked = batch_size is not None and batch_size > 0 and N > batch_size
     if bandwidth is None and not use_chunked:
@@ -198,15 +199,15 @@ def _build_input_kernels(
     bandwidth: float | None,
     batch_size: int | None,
 ) -> list[Array]:
-    """Build kernel matrices for all D input dimensions.
+    """Build one kernel matrix per parameter.
 
     Args:
-        X_unit: (N, D) inputs on [0, 1].
-        bandwidth: Fixed bandwidth or None for median heuristic.
-        batch_size: Block size for kernel matrix, or None.
+        X_unit: Inputs mapped to [0, 1], shape ``(N, D)``.
+        bandwidth: Fixed bandwidth, or None for the median heuristic.
+        batch_size: Row-block size for the kernel matrix, or None.
 
     Returns:
-        List of D kernel matrices, each (N, N).
+        List of D kernel matrices, each of shape ``(N, N)``.
     """
     N, D = X_unit.shape
     return [_build_one_kernel(X_unit[:, d], bandwidth, batch_size, N) for d in range(D)]
@@ -215,29 +216,31 @@ def _build_input_kernels(
 def _augmented_kernels(Ks: list[Array]) -> list[Array]:
     """Build augmented kernels: K*_d = 1 + center(K_d).
 
-    The augmented kernel includes a constant term so that the product
-    of augmented kernels captures all interaction orders, not just the
-    highest. This is required for correct total HSIC indices.
+    The augmented kernel carries a constant term. The product of augmented
+    kernels therefore captures all interaction orders, not just the highest.
+    Correct total HSIC indices need this.
 
     Args:
-        Ks: List of D raw kernel matrices.
+        Ks: List of D raw kernel matrices, each of shape ``(N, N)``.
 
     Returns:
-        List of D augmented kernel matrices.
+        List of D augmented kernel matrices, each of shape ``(N, N)``.
     """
     return [jnp.ones_like(K) + _center_kernel(K) for K in Ks]
 
 
 def _complement_kernels(Ks: list[Array]) -> tuple[Array, list[Array]]:
-    """Build full product and complement product kernels via prefix-suffix.
+    """Build the full product kernel and every complement product kernel.
+
+    A prefix-suffix pass gives all D complements in linear time.
 
     Args:
-        Ks: List of D kernel matrices, each (N, N).
+        Ks: List of D kernel matrices, each of shape ``(N, N)``.
 
     Returns:
-        Tuple of (K_full, complements) where K_full is the Hadamard
-        product of all Ks, and complements[d] is the product of all
-        Ks except d.
+        ``(K_full, complements)``. ``K_full`` is the Hadamard product of all
+        Ks, shape ``(N, N)``. ``complements[d]`` is the product of all Ks
+        except d, each of shape ``(N, N)``.
     """
     D = len(Ks)
     if D == 1:
@@ -265,9 +268,10 @@ def _get_hsic_kernel(n_perms: int):
             it sets the scan length and the number of split keys).
 
     Returns:
-        A jitted callable that computes ``(R2_HSIC, T_HSIC, p_values,
-        hsic_raw)`` for one output slice from the stacked input kernels,
-        the precomputed self-HSIC values, the output kernel, and a key.
+        A jitted callable that returns ``(R2_HSIC, T_HSIC, p_values,
+        hsic_raw)``, each of shape ``(D,)``, for one output slice. It takes
+        the stacked input kernels, the precomputed self-HSIC values, the
+        output kernel, and a PRNG key.
     """
 
     def _impl(
@@ -348,14 +352,14 @@ def _compute_slice(
         K_aug_full: Product of all augmented input kernels ``(N, N)``.
         hsic_xxs: Precomputed self-HSIC ``HSIC(K_d, K_d)`` ``(D,)``
             (output-independent, so built once by the caller).
-        y_col: ``(N,)`` single output column.
-        bandwidth: Fixed bandwidth or None for median heuristic.
-        key: PRNG key for permutation test.
+        y_col: Single output column, shape ``(N,)``.
+        bandwidth: Fixed bandwidth, or None for the median heuristic.
+        key: PRNG key for the permutation test.
         n_perms: Number of permutations.
-        batch_size: Block size for kernel matrix, or None.
+        batch_size: Row-block size for the kernel matrix, or None.
 
     Returns:
-        (R2_HSIC, T_HSIC, p_values, hsic_raw) each of shape ``(D,)``.
+        ``(R2_HSIC, T_HSIC, p_values, hsic_raw)``, each of shape ``(D,)``.
     """
     N = y_col.shape[0]
     L = _build_one_kernel(y_col, bandwidth, batch_size, N)
@@ -375,61 +379,64 @@ def analyze(
 ) -> HSICResult:
     """Compute HSIC (Hilbert-Schmidt Independence Criterion) sensitivity indices.
 
-    HSIC quantifies the statistical dependence between each input and the
-    output using kernel embeddings, so it picks up nonlinear and
-    non-monotonic relationships that correlation-based screening misses.
-    It is a given-data method: any (X, Y) sample pair works — no special
-    sampling design is required. Two indices are reported:
+    HSIC uses kernel embeddings to measure the statistical dependence between
+    each parameter and the output. It therefore finds nonlinear and
+    non-monotonic relationships that correlation-based screening misses. HSIC
+    is a given-data method: any (X, Y) sample pair works, and no special
+    sampling design is required. The function reports two indices:
 
-    - **R2-HSIC**: HSIC(x_i, Y) normalized by the geometric mean of the
+    - **R2-HSIC**: ``HSIC(x_i, Y)`` normalized by the geometric mean of the
       self-similarities, ``HSIC(x_i, Y) / sqrt(HSIC(x_i, x_i) * HSIC(Y, Y))``.
-      Lies in [0, 1]; 0 means x_i and Y are independent (first-order view).
-    - **Total HSIC (T_HSIC)**: fraction of the joint dependence lost when
-      x_i is removed, analogous to a total-order Sobol index — it also
-      counts influence carried through interactions with other inputs.
+      It lies in [0, 1]. A value of 0 means x_i and Y are independent. This is
+      the first-order view.
+    - **Total HSIC (T_HSIC)**: the fraction of the joint dependence lost when
+      x_i is removed. It is analogous to a total-order Sobol index, so it also
+      counts influence carried through interactions with other parameters.
 
-    A permutation test supplies p-values for the null hypothesis that
-    x_i and Y are independent, making HSIC useful for screening out
-    non-influential inputs with a significance level attached.
+    A permutation test supplies p-values for the null hypothesis that x_i and
+    Y are independent. HSIC can therefore screen out non-influential
+    parameters with a significance level attached.
 
-    Correlated inputs are supported: HSIC is a dependence measure and
-    assumes no input independence, so a declared ``problem.correlation``
-    does not invalidate the indices. Each index then measures the input's
-    *total* association with the output, which includes influence carried
-    through its correlated partners. An input that the model ignores can
-    therefore score above 0 when it correlates with an influential input.
-    That reading is correct, not an estimation error.
+    Correlated parameters are supported. HSIC is a dependence measure and
+    assumes no input independence, so a declared ``problem.correlation`` does
+    not invalidate the indices. Each index then measures the parameter's total
+    association with the output, which includes influence carried through its
+    correlated partners. A parameter that the model ignores can therefore
+    score above 0 when it correlates with an influential parameter. That
+    reading is correct, not an estimation error.
 
     Args:
         problem: Problem definition with D parameters.
-        X: Input sample matrix ``(N, D)`` in physical units.
-        Y: Model output ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
-            For outputs with large magnitude, set ``prenormalize=True``
-            to avoid float overflow in distance computation.
-        n_perms: Number of random permutations for the p-value test.
-            More permutations give finer p-value resolution (the smallest
-            attainable p-value is ``1 / (n_perms + 1)``) at linearly
-            higher cost; 200 (default) resolves down to p ~ 0.005.
-        seed: Random seed for permutation test reproducibility.
-        bandwidth: Fixed Gaussian-kernel bandwidth applied to all inputs
-            and the output. None (default) selects it per variable via the
-            median heuristic (median pairwise distance), a robust default.
-        batch_size: Row-block size for building each ``(N, N)`` kernel
-            matrix, bounding peak memory for large N. None computes each
-            full matrix at once.
+        X: Input samples in physical units, shape ``(N, D)``.
+        Y: Model outputs, shape ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
+            For outputs of large magnitude, set ``prenormalize=True`` to
+            avoid float overflow in the distance computation.
+        n_perms: Number of random permutations for the p-value test. More
+            permutations give finer p-value resolution at linearly higher
+            cost. The smallest attainable p-value is ``1 / (n_perms + 1)``,
+            so the default of 200 resolves down to p ~ 0.005.
+        seed: Random seed that makes the permutation test reproducible.
+        bandwidth: Fixed Gaussian-kernel bandwidth applied to all parameters
+            and to the output. None (default) selects it per variable with
+            the median heuristic (median pairwise distance), a robust default.
+        batch_size: Row-block size for building each ``(N, N)`` kernel matrix,
+            which bounds peak memory for large N. None builds each full
+            matrix at once.
         prenormalize: If True, standardize each output slice to mean 0 and
-            unit standard deviation before analysis.
+            unit standard deviation before the analysis.
 
     Returns:
-        HSICResult with R2_HSIC, T_HSIC, p_values, and hsic_raw.
+        An :class:`HSICResult` with ``R2_HSIC``, ``T_HSIC``, ``p_values``, and
+        ``hsic_raw``, each shaped ``(D,)``, ``(K, D)``, or ``(T, K, D)``.
 
     Raises:
-        ValueError: If X is not 2-D, column count doesn't match problem,
-            row counts of X and Y differ, n_perms < 1, N < 4,
-            bandwidth is non-positive / non-finite, or ``problem`` has
-            categorical parameters (the Gaussian input kernel reads a
-            level code as a distance, which the arbitrary code order makes
-            meaningless).
+        ValueError: If X is not 2-D, its column count does not match the
+            problem, X and Y have differing row counts, ``n_perms < 1``,
+            ``N < 4``, ``bandwidth`` is non-positive or non-finite, or
+            ``problem`` has categorical parameters. Categorical parameters
+            are rejected because the Gaussian input kernel reads a level code
+            as a distance, and the arbitrary code order makes that
+            meaningless.
     """
     D = problem.num_vars
     X = jnp.asarray(X)

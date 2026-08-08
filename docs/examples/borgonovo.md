@@ -1,12 +1,20 @@
 # Borgonovo Delta (Moment-Independent Sensitivity)
 
-Borgonovo delta is a moment-independent sensitivity method that measures
-how much the entire output density shifts when an input is fixed. It
-is the expected L1 distance between the unconditional output density and
-the density conditional on each input — no variance decomposition, no
-model assumptions. The same analysis also returns the given-data
-first-order Sobol index from the same conditioning, for comparison at no
-extra cost.
+By the end of this page you will have one index per input, on a [0, 1] scale,
+that says how much fixing that input reshapes the whole distribution of the
+output. Variance-based methods only ask how much the output spread shrinks.
+This one also catches an input that shifts the tails or splits the output into
+two modes without changing the variance much.
+
+Borgonovo delta is called a moment-independent method because it uses no
+summary statistic such as mean or variance. It compares densities directly. The
+output density with nothing fixed is the unconditional density. The density you
+get after fixing one input is the conditional density. Delta is the expected L1
+distance between the two, which is the average area between the curves. It
+needs no variance decomposition and makes no model assumptions. The same
+analysis also returns the given-data first-order Sobol index from the same
+conditioning, for comparison at no extra cost. That Sobol index is the share of
+output variance the input explains on its own.
 
 When to use Borgonovo delta:
 
@@ -60,24 +68,29 @@ print("delta:", result.delta)  # (3,)
 print("S1:   ", result.S1)     # (3,)
 ```
 
-The delta index lies in [0, 1] (as do the true index and the raw plug-in
-estimate): 0 means fixing the input never changes the output distribution,
-higher values mean stronger influence. The default bias-corrected estimate
-returned in `result.delta` — and the bounds of `result.delta_conf` — can dip
-marginally below 0 for weak or near-noninfluential inputs at small N; that is
-expected from the bias correction, not an error. On Ishigami,
-`x3` has a first-order Sobol index near zero (it acts only through an
-interaction with `x1`), yet its delta index is clearly positive — fixing
-`x3` reshapes the output density even though it does not shift the
-conditional mean. That gap between `delta` and `S1` is exactly what a
-moment-independent index adds.
+The delta index lies in [0, 1], and so do the true index and the raw plug-in
+estimate. A value of 0 means fixing the input never changes the output
+distribution. Higher values mean stronger influence. The default
+bias-corrected estimate in `result.delta` can dip marginally below 0 for weak
+or near-noninfluential inputs at small N, and so can the bounds of
+`result.delta_conf`. That is expected from the bias correction, not an error.
+
+Compare the two printed arrays entry by entry. On Ishigami, `x3` has a
+first-order Sobol index near zero, because it acts only through an interaction
+with `x1`. Its delta index is clearly positive. Fixing `x3` reshapes the output
+density even though it does not shift the conditional mean. That gap between
+`delta` and `S1` is exactly what a moment-independent index adds. Where the two
+agree, the input acts on the output mean and variance in the ordinary way, and
+delta tells you nothing the Sobol index did not.
 
 ## Bias correction and bootstrap confidence intervals
 
-The plug-in delta estimator is biased upward at finite N, so by default
-(`n_bootstrap=100`, `bias_correct=True`) the central estimate is
-bias-corrected with bootstrap resamples (Plischke et al., 2013) and
-percentile confidence intervals come from the same replicates.
+The plug-in delta estimator is biased upward at finite N. A bootstrap fixes
+this. It recomputes delta on many resamples of the data, measures how far the
+estimate drifts, and subtracts that drift. The defaults are `n_bootstrap=100`
+and `bias_correct=True`, so the central estimate is already bias-corrected
+(Plischke et al., 2013). Percentile confidence intervals come from the same
+replicates.
 
 ```python
 result = jaxgsa.borgonovo.analyze(
@@ -102,7 +115,10 @@ estimate.
 
 The `gaussian_linear` benchmark has a semi-analytic delta solution
 (`ANALYTICAL_DELTA`), so you can validate the estimator against ground
-truth rather than another implementation:
+truth rather than another implementation. Run this when you want to know how
+much N your own problem needs: shrink `n` until the estimate drifts away from
+the analytical values, and you have located the sample size at which the
+estimator stops being reliable.
 
 ```python
 import jax.numpy as jnp
@@ -134,6 +150,11 @@ Y_multi = jnp.column_stack([Y1, Y2])
 result = jaxgsa.borgonovo.analyze(PROBLEM, X, Y_multi)
 print("delta shape:", result.delta.shape)  # (2, 3)
 ```
+
+The shape `(2, 3)` reads as two outputs by three inputs. Row 0 holds the delta
+indices for `Y1` and row 1 those for `Y2`. Each output gets its own ranking, and
+an input can be the most influential one for `Y1` and the least influential for
+`Y2`.
 
 ## xarray export
 

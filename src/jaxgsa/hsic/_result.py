@@ -1,4 +1,4 @@
-"""Defines the HSICResult dataclass for kernel-based sensitivity analysis."""
+"""Result container for HSIC kernel-based sensitivity indices."""
 
 from __future__ import annotations
 
@@ -16,23 +16,25 @@ from jaxgsa.problem import Problem
 class HSICResult:
     """HSIC (Hilbert-Schmidt Independence Criterion) sensitivity analysis results.
 
-    For scalar-output models, index arrays have shape ``(D,)``.
-    For multi-output models, index arrays have shape ``(K, D)``.
-    For time-series multi-output, index arrays have shape ``(T, K, D)``.
+    Index arrays have shape ``(D,)`` for a scalar output, ``(K, D)`` for a
+    multi-output model, and ``(T, K, D)`` for a time-resolved analysis.
 
     Attributes:
-        R2_HSIC: Normalized first-order HSIC index in [0, 1]:
-            ``HSIC(x_i, Y)`` divided by
-            ``sqrt(HSIC(x_i, x_i) * HSIC(Y, Y))``. 0 means the input and
-            output are independent; larger means stronger dependence.
-        T_HSIC: Total-order HSIC index: the fraction of the joint
-            dependence lost when input i is removed, so it also counts
-            influence carried through interactions (analogous to ST).
-        p_values: Permutation-test p-values for the null hypothesis that
-            ``x_i`` and ``Y`` are independent; small values mean the
-            detected dependence is unlikely to be sampling noise.
-        hsic_raw: Unnormalized HSIC(x_i, Y) values (kernel- and
-            scale-dependent; compare only within one analysis).
+        R2_HSIC: Normalized first-order HSIC indices, shape ``(..., D)``.
+            Each entry is ``HSIC(x_i, Y)`` divided by
+            ``sqrt(HSIC(x_i, x_i) * HSIC(Y, Y))`` and lies in [0, 1]. A value
+            of 0 means the parameter and the output are independent, and
+            larger values mean stronger dependence.
+        T_HSIC: Total-order HSIC indices, shape ``(..., D)``. Each entry is
+            the fraction of the joint dependence lost when parameter i is
+            removed, so it also counts influence carried through interactions
+            (analogous to ST).
+        p_values: Permutation-test p-values, shape ``(..., D)``, for the null
+            hypothesis that ``x_i`` and ``Y`` are independent. Small values
+            mean the detected dependence is unlikely to be sampling noise.
+        hsic_raw: Unnormalized ``HSIC(x_i, Y)`` values, shape ``(..., D)``.
+            They depend on the kernel and on the scale of the data, so
+            compare them only within one analysis.
         problem: Problem definition used for the analysis.
     """
 
@@ -63,7 +65,8 @@ class HSICResult:
                 arrays are 3-D. Defaults to integer indices.
 
         Returns:
-            Dataset with variables R2_HSIC, T_HSIC, p_values, hsic_raw.
+            An ``xr.Dataset`` with the variables ``R2_HSIC``, ``T_HSIC``,
+            ``p_values``, and ``hsic_raw``.
         """
         r2_arr = np.asarray(self.R2_HSIC)
         dims, coords = _dims_and_coords(r2_arr.ndim, r2_arr.shape, self.problem, time_coords)

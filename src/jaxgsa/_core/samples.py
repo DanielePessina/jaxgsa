@@ -1,9 +1,9 @@
 """Private shared base for deduplicated sample designs.
 
-Samplers that follow the two-layer contract (return only the *unique* rows a
-user must evaluate, plus an index map back to the full expanded design) share
-their dedup bookkeeping, output re-expansion, NPZ persistence skeleton, and
-prefix-slicing mechanics through :class:`UniqueDesignSamples`.
+Some samplers follow a two-layer contract. They return only the unique rows a
+user must evaluate, plus an index map back to the full expanded design. Those
+samplers share their dedup bookkeeping, output re-expansion, NPZ persistence
+skeleton, and prefix-slicing mechanics through :class:`UniqueDesignSamples`.
 
 Nothing in this module is public API. Concrete sample classes
 (``jaxgsa.sobol.SobolSamples``, ``jaxgsa.morris.MorrisSamples``) remain the
@@ -40,10 +40,16 @@ _RESERVED_ARRAY_NAMES = frozenset({"samples", "expanded_to_unique", "metadata"})
 def _npz_path(path: str | Path) -> Path:
     """Return a path with the canonical ``.npz`` suffix.
 
-    A missing suffix is *appended* (never substituted), matching NumPy's own
+    A missing suffix is appended, never substituted, which matches NumPy's own
     ``savez`` convention: ``"run.A"`` becomes ``"run.A.npz"``, not
     ``"run.npz"``. Substituting via ``Path.with_suffix`` would make dotted
     stems like ``"run.A"`` and ``"run.B"`` silently collide on disk.
+
+    Args:
+        path: Destination or source path, with or without the suffix.
+
+    Returns:
+        The path ending in ``.npz``.
     """
     path = Path(path)
     return path if path.suffix == ".npz" else Path(str(path) + ".npz")
@@ -166,13 +172,14 @@ class UniqueDesignSamples:
         expanded prefix itself a prefix, so ``max() + 1`` on the sliced index
         map recovers the new unique count.
 
-        One exception: a design *derived* from another method's design (see
-        :meth:`jaxgsa.sobol.SobolSamples.to_morris`) references only a subset of
-        the source's rows, so its index set is not a prefix and ``max() + 1`` is
-        a conservative upper bound rather than the exact count — a few rows the
-        smaller design never gathers are carried along. Slicing stays correct
-        because every retained index is still below the bound; do not tighten
-        this to an exact count without special-casing derived designs.
+        There is one exception. A design built from another method's design
+        (see :meth:`jaxgsa.sobol.SobolSamples.to_morris`) references only a
+        subset of the source's rows. Its index set is then not a prefix, and
+        ``max() + 1`` is a conservative upper bound rather than the exact
+        count, so a few rows the smaller design never gathers are carried
+        along. Slicing stays correct because every retained index is still
+        below the bound. Do not tighten this to an exact count without
+        special-casing such derived designs.
 
         Args:
             new_expanded_n: Expanded row count of the smaller design.
@@ -194,19 +201,26 @@ class UniqueDesignSamples:
     # ------------------------------------------------------------------
 
     def _extra_arrays(self) -> dict[str, np.ndarray]:
-        """Subclass hook: design-specific arrays persisted in the NPZ file.
+        """Return the design-specific arrays to persist in the NPZ file.
 
-        Keys must not collide with the base-owned array names ``samples``,
-        ``expanded_to_unique``, or ``metadata``.
+        Subclass hook. Keys must not collide with the base-owned array names
+        ``samples``, ``expanded_to_unique``, or ``metadata``.
+
+        Returns:
+            Array name to array. Empty for a design with no extra payload.
         """
         return {}
 
     def _extra_metadata(self) -> dict[str, Any]:
-        """Subclass hook: design-specific JSON-serializable metadata entries.
+        """Return the design-specific metadata entries to persist.
 
-        Merged into the top level of the metadata blob next to the common
-        keys (``jaxgsa_version``, ``problem``, ``n_expanded``,
-        ``identity_mapping``).
+        Subclass hook. The entries must be JSON-serializable. They are merged
+        into the top level of the metadata blob, next to the common keys
+        ``jaxgsa_version``, ``problem``, ``n_expanded``, and
+        ``identity_mapping``.
+
+        Returns:
+            Metadata key to value. Empty for a design with no extra payload.
         """
         return {}
 
@@ -221,7 +235,10 @@ class UniqueDesignSamples:
         arrays: Mapping[str, np.ndarray],
         meta: Mapping[str, Any],
     ) -> Self:
-        """Subclass hook: rebuild an instance from a loaded NPZ payload.
+        """Rebuild an instance from a loaded NPZ payload.
+
+        Subclass hook, called by :meth:`load` once the common fields are read
+        back.
 
         Args:
             samples: Unique sample matrix, shape ``(n_runs, D)``.
@@ -254,9 +271,9 @@ class UniqueDesignSamples:
 
         Args:
             path: Destination file path. If it does not already end in
-                ``.npz``, the suffix is appended (matching NumPy's ``savez``
-                convention), so the file written to disk may differ from the
-                exact string passed — e.g. ``"run.A"`` is saved as
+                ``.npz``, the suffix is appended, matching NumPy's ``savez``
+                convention. The file written to disk may therefore differ
+                from the exact string passed: ``"run.A"`` is saved as
                 ``"run.A.npz"``.
         """
         # Identity-mapping optimization: when no duplicate rows were removed,
@@ -291,9 +308,9 @@ class UniqueDesignSamples:
 
         Args:
             path: Path to the saved design. If it does not already end in
-                ``.npz``, the suffix is appended before opening (mirroring
-                the convention used by :meth:`save`), so the file read may
-                differ from the exact string passed.
+                ``.npz``, the suffix is appended before opening, mirroring
+                the convention used by :meth:`save`. The file actually read
+                may therefore differ from the exact string passed.
 
         Returns:
             The reconstructed design, equal to the instance that was saved.

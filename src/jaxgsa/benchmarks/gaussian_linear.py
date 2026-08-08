@@ -1,16 +1,18 @@
 """Gaussian linear additive model for sensitivity analysis benchmarking.
 
-A weighted sum of independent Gaussian inputs. Like :mod:`jaxgsa.benchmarks.linear`
-it is purely additive (S1 == ST, zero interactions), but the Gaussian marginals
-make the output and every conditional output Gaussian too, so the Borgonovo
-delta index has a semi-analytic solution: the L1 distance between two Gaussian
-densities is closed-form, and the outer expectation over each input reduces to
-a 1-D Gauss-Hermite quadrature.
+The model is a weighted sum of independent Gaussian inputs. Like
+:mod:`jaxgsa.benchmarks.linear` it is purely additive, so S1 == ST and there
+are no interactions. The Gaussian marginals also make the output and every
+conditional output Gaussian. The Borgonovo delta index therefore has a
+semi-analytic solution. The L1 distance between two Gaussian densities is
+closed-form, and the outer expectation over each input reduces to a 1-D
+Gauss-Hermite quadrature.
 
 Useful for:
     - Ground-truth validation of moment-independent (delta) estimators,
       independent of any reference implementation.
-    - The same S1 == ST / zero-interaction checks as the uniform linear model.
+    - The same S1 == ST and zero-interaction checks as the uniform linear
+      model.
 """
 
 import math
@@ -42,19 +44,19 @@ def evaluate(
 ) -> Array:
     """Evaluate the Gaussian linear additive model.
 
-    A weighted sum of the inputs, identical to
-    :func:`jaxgsa.benchmarks.linear.evaluate`; kept here as a thin wrapper so the
+    The model is a weighted sum of the inputs, identical to
+    :func:`jaxgsa.benchmarks.linear.evaluate`. This thin wrapper exists so the
     Gaussian benchmark exposes ``evaluate`` under its own module namespace.
 
     .. math::
         f(\\mathbf{x}) = \\sum_{j=1}^{D} c_j \\, x_j
 
     Args:
-        X: Input array of shape ``(N, D)``.
+        X: Input array, shape ``(N, D)``.
         coeffs: Coefficient per dimension.
 
     Returns:
-        Array of shape ``(N,)`` with function values.
+        Function values, shape ``(N,)``.
     """
     return _linear_evaluate(X, coeffs)
 
@@ -65,22 +67,25 @@ def analytical_indices(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Compute analytical Sobol indices for the Gaussian linear model.
 
-    For ``Y = sum c_j x_j`` with independent ``x_j ~ N(mu_j, sigma_j^2)``:
+    For ``Y = sum c_j x_j`` with independent ``x_j ~ N(mu_j, sigma_j^2)``, the
+    indices have a closed form:
 
     .. math::
         V_j = c_j^2 \\sigma_j^2, \\quad
         S_{1,j} = S_{T,j} = V_j / V(Y), \\quad
         S_{2,jk} = 0
 
-    The means do not enter any index (all indices are translation invariant).
+    The means do not enter any index, because all indices are translation
+    invariant.
 
     Args:
         coeffs: Coefficient per dimension.
         variances: Variance of each Gaussian input.
 
     Returns:
-        ``(S1, ST, S2)`` where S1 == ST (no interactions) and S2 is
-        all-zero off-diagonal with NaN on the diagonal.
+        ``(S1, ST, S2)``. ``S1`` and ``ST`` have shape ``(D,)`` and are equal
+        because the model has no interactions. ``S2`` is a ``(D, D)`` matrix
+        that is zero off the diagonal and NaN on the diagonal.
     """
     # The Gaussian marginals feed their variances straight into the shared
     # additive-model formula (the uniform benchmark derives var_x from bounds).
@@ -99,30 +104,31 @@ def _gaussian_l1(
     """L1 distance between ``N(mu1, v1)`` and each ``N(mu2[k], v2)``.
 
     Two Gaussian densities with distinct variances cross at exactly two
-    points (the roots of the quadratic obtained from equating log-densities);
-    between them one density dominates, outside the other does. Because both
-    densities integrate to one, the L1 distance is twice the absolute
-    difference of the CDF increments over the crossing interval.
+    points. Those points are the roots of the quadratic that comes from
+    equating the log-densities. One density dominates between the roots, and
+    the other dominates outside them. Both densities integrate to one, so the
+    L1 distance is twice the absolute difference of the CDF increments over
+    the crossing interval.
 
-    When the variances coincide (within a small relative tolerance) that
-    quadratic degenerates because ``a = 1/v1 - 1/v2 -> 0`` (its roots become
-    ``0/0 -> NaN``). Equal-variance Gaussians differ only in mean and cross
-    once, at the midpoint, so the L1 distance has the closed form
-    ``2 * (2 * Phi(|mu2 - mu1| / (2 * sqrt(v))) - 1)`` -- exactly 0 when the
-    means also coincide.
+    When the variances coincide, within a small relative tolerance, that
+    quadratic degenerates. Its leading coefficient ``a = 1/v1 - 1/v2`` goes to
+    0, and its roots become ``0/0 -> NaN``. Equal-variance Gaussians differ
+    only in mean and cross once, at the midpoint. The L1 distance then has the
+    closed form ``2 * (2 * Phi(|mu2 - mu1| / (2 * sqrt(v))) - 1)``, which is
+    exactly 0 when the means also coincide.
 
     Args:
         mu1: Mean of the first Gaussian.
         v1: Variance of the first Gaussian.
-        mu2: Means of the second Gaussian (vectorized).
+        mu2: Means of the second Gaussian, one per evaluation point.
         v2: Variance of the second Gaussian.
 
     Returns:
-        Array of L1 distances, same shape as ``mu2``, each in ``[0, 2]``.
+        L1 distances, same shape as ``mu2``, each in ``[0, 2]``.
     """
     mu2 = np.asarray(mu2, dtype=float)
 
-    # Equal (or numerically indistinguishable) variances: the two-root formula
+    # Equal, or numerically indistinguishable, variances: the two-root formula
     # below divides by a -> 0, so use the single-crossing closed form instead.
     if abs(v1 - v2) <= 1e-9 * max(v1, v2):
         s = math.sqrt(0.5 * (v1 + v2))
@@ -154,17 +160,18 @@ def analytical_delta(
 ) -> np.ndarray:
     """Compute Borgonovo delta indices for the Gaussian linear model.
 
-    With ``Y ~ N(mu_Y, v_Y)`` and ``Y | X_i = x ~ N(mu + c_i x, v_Y - c_i^2 s_i^2)``,
-    the inner L1 distance between the unconditional and conditional densities
-    is closed-form (:func:`_gaussian_l1`); the outer expectation
+    Here ``Y ~ N(mu_Y, v_Y)``, and ``Y | X_i = x`` is
+    ``N(mu + c_i x, v_Y - c_i^2 s_i^2)``. The inner L1 distance between the
+    unconditional and the conditional density is closed-form, see
+    :func:`_gaussian_l1`. The outer expectation
 
     .. math::
         \\delta_i = \\tfrac{1}{2}\\, \\mathbb{E}_{X_i}\\!\\left[
             \\lVert f_Y - f_{Y|X_i} \\rVert_1 \\right]
 
-    is evaluated with Gauss-Hermite quadrature over ``X_i``. Means do not
-    affect the result (translation invariance), so only coefficients and
-    variances are parameters.
+    is evaluated with Gauss-Hermite quadrature over ``X_i``. The means do not
+    affect the result, because the index is translation invariant. Only the
+    coefficients and the variances are parameters.
 
     Args:
         coeffs: Coefficient per dimension.
@@ -172,7 +179,7 @@ def analytical_delta(
         quad_order: Number of Gauss-Hermite nodes for the outer expectation.
 
     Returns:
-        Array of shape ``(D,)`` with delta indices in ``[0, 1]``.
+        Delta indices, shape ``(D,)``, each in ``[0, 1]``.
     """
     c = np.asarray(coeffs, dtype=float)
     var_x = np.asarray(variances, dtype=float)
@@ -206,27 +213,27 @@ def analytical_ot(
 ) -> np.ndarray:
     """Compute optimal-transport sensitivity indices for the Gaussian linear model.
 
-    With ``Y ~ N(0, v)`` and ``Y | X_i = x ~ N(c_i x, v - c_i^2 s_i^2)``
-    (all Gaussian), the squared 2-Wasserstein distance between two
-    Gaussians is closed-form, ``(mu1 - mu2)^2 + (sqrt(v1) - sqrt(v2))^2``,
-    and the outer expectation over ``X_i`` is elementary
-    (``E[c_i^2 X_i^2] = c_i^2 s_i^2``):
+    Here ``Y ~ N(0, v)``, and ``Y | X_i = x`` is
+    ``N(c_i x, v - c_i^2 s_i^2)``. Both are Gaussian, so the squared
+    2-Wasserstein distance between them is closed-form,
+    ``(mu1 - mu2)^2 + (sqrt(v1) - sqrt(v2))^2``. The outer expectation over
+    ``X_i`` is elementary, because ``E[c_i^2 X_i^2] = c_i^2 s_i^2``:
 
     .. math::
         \\iota_i = \\frac{c_i^2 \\sigma_i^2
             + (\\sqrt{v} - \\sqrt{v - c_i^2 \\sigma_i^2})^2}{2 v}
 
-    The first numerator term is the advective (mean-shift) part -- exactly
-    ``S1_i / 2`` after normalization -- and the second is the diffusive
-    (spread) part. This is the point-conditioning (``M -> infinity``)
-    limit of the partition estimator.
+    The first term in the numerator is the advective (mean-shift) part. After
+    normalization it is exactly ``S1_i / 2``. The second term is the diffusive
+    (spread) part. The whole expression is the point-conditioning
+    (``M -> infinity``) limit of the partition estimator.
 
     Args:
         coeffs: Coefficient per dimension.
         variances: Variance of each Gaussian input.
 
     Returns:
-        Array of shape ``(D,)`` with OT indices in ``[0, 1]``.
+        OT indices, shape ``(D,)``, each in ``[0, 1]``.
     """
     c = np.asarray(coeffs, dtype=float)
     var_x = np.asarray(variances, dtype=float)

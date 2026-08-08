@@ -1,10 +1,11 @@
 """Shared Shapley pipeline tail and the convenience ``analyze`` wrapper.
 
 ``PCEResult.shapley`` and ``HDMRResult.shapley`` each supply their own
-variance decomposition (per-term partial variances plus term membership) and
-delegate the common tail -- normalization, Shapley allocation, fit-quality
-warning, result construction -- to :func:`_shapley_result_from_variances`.
-:func:`analyze` is a thin convenience over those result methods.
+variance decomposition: per-term partial variances plus term membership. Both
+then delegate the common tail to :func:`_shapley_result_from_variances`. That
+tail does normalization, Shapley allocation, the fit-quality warning, and
+result construction. :func:`analyze` is a thin convenience over those result
+methods.
 """
 
 from __future__ import annotations
@@ -32,11 +33,11 @@ _OVERFIT_THRESHOLD = 1.3
 def _external_stacklevel(default: int = 2) -> int:
     """``warnings`` stacklevel of the first caller frame outside jaxgsa.
 
-    The Shapley fit-quality warning is emitted from a shared tail reached by
-    two call chains of different depth (``result.shapley()`` directly vs. via
-    the ``jaxgsa.shapley.analyze`` wrapper, which adds a frame), so no fixed
-    ``stacklevel`` points at the user's frame in both. Walking out of the
-    package locates it regardless of chain length.
+    A shared tail emits the Shapley fit-quality warning, and two call chains
+    of different depth reach that tail: ``result.shapley()`` directly, or the
+    ``jaxgsa.shapley.analyze`` wrapper, which adds a frame. No fixed
+    ``stacklevel`` points at the user's frame in both cases. Walking out of
+    the package locates it regardless of chain length.
 
     Args:
         default: Fallback level for interpreters without frame introspection.
@@ -92,10 +93,11 @@ def _normalize_partial_variances(
 def _warn_pathological_fit(explained_variance: Array) -> None:
     """Warn when a surrogate captured implausibly little or too much variance.
 
-    Reached from two call chains of different depth (``result.shapley()`` and
-    the ``jaxgsa.shapley.analyze`` wrapper), so the warning's ``stacklevel`` is
-    resolved dynamically by :func:`_external_stacklevel` to attribute it to the
-    user's frame in either case.
+    Two call chains of different depth reach this function:
+    ``result.shapley()`` and the ``jaxgsa.shapley.analyze`` wrapper.
+    :func:`_external_stacklevel` therefore resolves the warning's
+    ``stacklevel`` dynamically, so the warning points at the user's frame in
+    either case.
     """
     ev = jnp.asarray(explained_variance)
     if bool(jnp.any(ev > _OVERFIT_THRESHOLD)):
@@ -125,16 +127,16 @@ def _shapley_result_from_variances(
 ) -> ShapleyResult:
     """Finish a Shapley analysis from a surrogate's variance decomposition.
 
-    The single shared tail of both ``shapley()`` result methods: normalize
-    the partial variances so the modelled terms sum to 1, allocate each
-    term's share equally among its participants, warn on a pathological fit,
-    and assemble the result. Callers perform their fitted-state precheck and
-    decomposition before delegating here.
+    This is the single shared tail of both ``shapley()`` result methods. It
+    normalizes the partial variances so the modelled terms sum to 1,
+    allocates each term's share equally among its participants, warns on a
+    pathological fit, and assembles the result. Callers perform their
+    fitted-state precheck and decomposition before delegating here.
 
     Args:
         partial: Per-term variance contributions, shape ``(..., n_terms)``.
-        membership: ``(n_terms, D)`` boolean matrix marking which parameters
-            participate in each term.
+        membership: Boolean matrix marking which parameters participate in
+            each term, shape ``(n_terms, D)``.
         explained: Per-slice explained-variance diagnostic, shape ``(...,)``.
         total: Pre-computed ``partial.sum(axis=-1)`` (for HDMR this is the
             same array as ``explained``, so passing it avoids a recompute).
@@ -150,7 +152,7 @@ def _shapley_result_from_variances(
 
     Warns:
         UserWarning: If ``explained`` flags a pathological fit (well below
-            1, or above 1 -- overfit).
+            1, or above 1, which is an overfit).
     """
     normalized = _normalize_partial_variances(partial, explained, total)
     Sh, S1, ST = shapley_from_variances(normalized, membership)
@@ -180,22 +182,23 @@ def analyze(
 
     This is literally ``jaxgsa.pce.analyze(problem, X, Y, **kw).shapley()`` /
     ``jaxgsa.hdmr.analyze(problem, X, Y, **kw).shapley(include_correlative=...)``
-    depending on ``backend`` -- there is no separate Shapley pipeline. Prefer
+    depending on ``backend``. There is no separate Shapley pipeline. Prefer
     the two-step form when you also want the fitted result (Sobol indices,
-    ``predict``, fit diagnostics); use this wrapper when only the Shapley
+    ``predict``, fit diagnostics). Use this wrapper when only the Shapley
     effects are needed.
 
     Args:
         problem: Parameter names and distributions.
-        X: (N, D) input samples.
-        Y: Model outputs -- (N,) scalar, (N, K) multi-output, or (N, T, K)
-            time-series.
+        X: Input samples, shape ``(N, D)``.
+        Y: Model outputs, shape ``(N,)`` scalar, ``(N, K)`` multi-output, or
+            ``(N, T, K)`` time-series.
         backend: Surrogate providing the variance decomposition. ``"pce"``
             (default) reads subset variances off orthonormal polynomial
-            coefficients; ``"hdmr"`` fits B-spline component functions and
+            coefficients. ``"hdmr"`` fits B-spline component functions and
             additionally separates correlation-induced variance.
-        include_correlative: HDMR-only; fold the correlative ANCOVA part
-            (``Sb``) into the allocation. See ``HDMRResult.shapley``.
+        include_correlative: HDMR-only flag. Set it to fold the correlative
+            ANCOVA part (``Sb``) into the allocation. See
+            ``HDMRResult.shapley``.
         **backend_kwargs: Passed through unchanged to the selected backend's
             ``analyze`` (e.g. ``order``/``ridge``/``fit_ratio`` for PCE,
             ``maxorder``/``m``/``lambdax`` for HDMR).

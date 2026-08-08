@@ -16,22 +16,23 @@ from jaxgsa.problem import Problem
 class KucherenkoResult:
     """Kucherenko sensitivity indices, returned by :func:`jaxgsa.kucherenko.analyze`.
 
-    Index shapes mirror the shape of the analyzed output ``Y``: ``(D,)`` for a
-    scalar output, ``(K, D)`` for multi-output, or ``(T, K, D)`` for
-    time-resolved analyses.
+    Index arrays have shape ``(D,)`` for a scalar output, ``(K, D)`` for a
+    multi-output model, and ``(T, K, D)`` for a time-resolved analysis.
 
     ``S1`` estimates ``V(E(Y|X_i)) / V(Y)`` and ``ST`` estimates
     ``E(V(Y|X_{~i})) / V(Y)`` under the problem's declared dependence
     structure. Under independent inputs they are the classic Sobol' first-order
     and total-order indices. Under a declared correlation ``S1`` is
-    correlation-inclusive (it matches ``jaxgsa.vkoga``'s ``S_TC``) and ``ST``
-    is correlation-exclusive (it matches ``S_TU``), so ``ST >= S1`` no longer
-    holds in general.
+    correlation-inclusive and matches ``jaxgsa.vkoga``'s ``S_TC``, and ``ST``
+    is correlation-exclusive and matches ``S_TU``. In that case ``ST >= S1`` no
+    longer holds in general.
 
     Attributes:
-        S1: First-order (correlation-inclusive) indices.
-        ST: Total-order (correlation-exclusive) indices.
-        problem: Problem the design was generated for.
+        S1: First-order (correlation-inclusive) indices, shape ``(..., D)``.
+            Rank parameters by ``S1`` to decide which ones to measure.
+        ST: Total-order (correlation-exclusive) indices, shape ``(..., D)``.
+            Rank parameters by ``ST`` to decide which ones to fix.
+        problem: Problem definition used for the analysis.
         variance: Output variance under the joint input measure, one value per
             output slice (shape ``()``, ``(K,)``, or ``(T, K)``).
     """

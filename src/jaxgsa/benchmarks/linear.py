@@ -1,13 +1,14 @@
 """Linear additive model for sensitivity analysis benchmarking.
 
-The simplest possible benchmark: a weighted sum of independent uniform
-inputs. Because the model is purely additive, first-order indices equal
-total-order indices and all second-order interactions are exactly zero.
+The model is a weighted sum of independent uniform inputs. It is the
+simplest benchmark in this package. The model is purely additive, so the
+first-order indices equal the total-order indices and every second-order
+interaction is exactly zero.
 
 Useful for:
-    - Verifying that a SA method correctly identifies zero interactions.
-    - Sanity-checking that S1 == ST when there are no interactions.
-    - Testing convergence rates (exact analytical solution is trivial).
+    - Checking that a sensitivity method reports zero interactions.
+    - Checking that S1 == ST when there are no interactions.
+    - Measuring convergence rates against a trivial exact solution.
 """
 
 import jax.numpy as jnp
@@ -37,13 +38,13 @@ def evaluate(
         f(\\mathbf{x}) = \\sum_{j=1}^{D} c_j \\, x_j
 
     Args:
-        X: Input array of shape ``(N, D)``.
+        X: Input array, shape ``(N, D)``.
         coeffs: Coefficient per dimension.
 
     Returns:
-        Array of shape ``(N,)`` with function values.
+        Function values, shape ``(N,)``.
     """
-    # Matrix-vector multiply: vectorized weighted sum across all N samples at once.
+    # One matrix-vector product gives the weighted sum for all N samples at once.
     return X @ jnp.asarray(coeffs)
 
 
@@ -53,9 +54,10 @@ def _additive_sobol_indices(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Sobol indices for a purely additive linear model ``Y = sum c_j x_j``.
 
-    Shared by the uniform (:mod:`~jaxgsa.benchmarks.linear`) and Gaussian
-    (:mod:`~jaxgsa.benchmarks.gaussian_linear`) benchmarks, which differ only in
-    how ``var_x`` is derived from the input distributions:
+    The uniform (:mod:`~jaxgsa.benchmarks.linear`) and Gaussian
+    (:mod:`~jaxgsa.benchmarks.gaussian_linear`) benchmarks share this helper.
+    They differ only in how ``var_x`` comes from the input distributions.
+    The indices have a closed form:
 
     .. math::
         V_j = c_j^2 \\operatorname{Var}(x_j), \\quad
@@ -67,8 +69,9 @@ def _additive_sobol_indices(
         var_x: Variance of each independent input.
 
     Returns:
-        ``(S1, ST, S2)`` where S1 == ST (no interactions) and S2 is
-        all-zero off-diagonal with NaN on the diagonal.
+        ``(S1, ST, S2)``. ``S1`` and ``ST`` have shape ``(D,)`` and are equal
+        because the model has no interactions. ``S2`` is a ``(D, D)`` matrix
+        that is zero off the diagonal and NaN on the diagonal.
     """
     c = np.asarray(coeffs, dtype=float)
     var_x = np.asarray(var_x, dtype=float)
@@ -95,7 +98,8 @@ def analytical_indices(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Compute analytical Sobol indices for the linear additive model.
 
-    For ``Y = sum c_j x_j`` with independent inputs:
+    For ``Y = sum c_j x_j`` with independent inputs, the indices have a
+    closed form:
 
     .. math::
         V_j = c_j^2 \\operatorname{Var}(x_j), \\quad
@@ -107,8 +111,9 @@ def analytical_indices(
         bounds: ``(low, high)`` bounds for each uniform input.
 
     Returns:
-        ``(S1, ST, S2)`` where S1 == ST (no interactions) and S2 is
-        all-zero off-diagonal with NaN on the diagonal.
+        ``(S1, ST, S2)``. ``S1`` and ``ST`` have shape ``(D,)`` and are equal
+        because the model has no interactions. ``S2`` is a ``(D, D)`` matrix
+        that is zero off the diagonal and NaN on the diagonal.
     """
     c = np.asarray(coeffs, dtype=float)
     # Var(Uniform[lo, hi]) = (hi - lo)^2 / 12
@@ -122,11 +127,11 @@ def analytical_shapley(
 ) -> np.ndarray:
     """Compute analytical Shapley effects for the linear additive model.
 
-    For independent inputs (Owen, 2014) the Shapley effect of input j is
-    the average of its partial-variance shares over all subsets containing
-    it. A purely additive model has no interaction terms, so every share
-    beyond the main effect vanishes and the Shapley effects coincide
-    exactly with the first-order indices:
+    For independent inputs the Shapley effect of input j is the average of
+    its partial-variance shares over all subsets that contain j (Owen, 2014).
+    A purely additive model has no interaction terms. Every share beyond the
+    main effect is therefore zero, and the Shapley effects equal the
+    first-order indices exactly:
 
     .. math::
         \\mathrm{Sh}_j = S_{1,j} = c_j^2 \\operatorname{Var}(x_j) / V(Y)
@@ -136,7 +141,7 @@ def analytical_shapley(
         bounds: ``(low, high)`` bounds for each uniform input.
 
     Returns:
-        ``(D,)`` array of Shapley effects (identical to S1), summing to 1.
+        Shapley effects, shape ``(D,)``. They equal ``S1`` and sum to 1.
     """
     # No interactions => Shapley == first-order; reuse the S1 derivation.
     S1, _, _ = analytical_indices(coeffs, bounds)

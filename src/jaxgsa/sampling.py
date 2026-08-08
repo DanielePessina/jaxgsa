@@ -30,13 +30,13 @@ def monte_carlo(
     this uses plain pseudo-random draws with no low-discrepancy structure and
     no Saltelli layout.
 
-    When ``problem.correlation`` declares a (non-identity) Gaussian-copula
-    correlation matrix, it is honored transparently: correlated standard
-    normals are drawn on the latent scale and pushed through each marginal's
-    inverse CDF (the NORTA construction), so every column keeps its declared
-    marginal exactly while the joint sample carries the declared dependence
-    structure. Independent problems keep the plain uniform-draw path
-    bit-for-bit, so existing seeds reproduce existing samples.
+    A ``problem.correlation`` that declares a non-identity Gaussian-copula
+    correlation matrix is honored transparently. Correlated standard normals
+    are drawn on the latent scale, then pushed through each marginal's
+    inverse CDF. This is the NORTA construction: every column keeps its
+    declared marginal exactly, and the joint sample carries the declared
+    dependence structure. Independent problems keep the plain uniform-draw
+    path bit-for-bit, so existing seeds reproduce existing samples.
 
     Args:
         problem: Problem definition with parameter names and distributions;
@@ -92,9 +92,9 @@ def correlate(
     reduction pays.
 
     Each output column is an exact permutation of the corresponding input
-    column, so the marginal sample values — including any structure a
-    low-discrepancy design put into them — are preserved; only the pairing
-    across columns changes.
+    column. The marginal sample values are therefore preserved, including any
+    structure a low-discrepancy design put into them. Only the pairing across
+    columns changes.
 
     Use it when the per-column samples already exist (an evaluated design, an
     observational data set) and only the dependence structure is missing.

@@ -1,9 +1,10 @@
 # DGSM
 
-Derivative-based global sensitivity measures with Poincaré bounds on total
-Sobol indices. Requires a JAX-differentiable model or precomputed Jacobians.
+`jaxgsa.dgsm.analyze()` computes derivative-based global sensitivity measures
+with Poincaré bounds on the total Sobol indices. It needs a
+JAX-differentiable model or precomputed Jacobians.
 
-The canonical API reference now lives at [API Reference](/api/).
+The canonical API reference lives at [API Reference](/api/).
 
 Jump directly to:
 

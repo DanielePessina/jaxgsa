@@ -1,4 +1,4 @@
-"""Defines the SobolResult dataclass for storing sensitivity analysis results."""
+"""Result container for Sobol sensitivity analysis."""
 
 from dataclasses import dataclass
 
@@ -15,35 +15,45 @@ class SobolResult:
     """Sobol sensitivity analysis results, returned by :func:`jaxgsa.sobol.analyze`.
 
     Stores first-order (S1), total-order (ST), and optionally second-order (S2)
-    Sobol indices, with optional bootstrap confidence intervals. Use
-    :meth:`to_dataset` to get a labeled xarray view keyed by parameter (and
-    output/time) names.
+    Sobol indices, with optional bootstrap confidence intervals. Call
+    :meth:`to_dataset` for a labeled xarray view keyed by parameter, output and
+    time names.
 
-    Index shapes mirror the shape of the analyzed output Y: ``(D,)`` for a
-    scalar output, ``(K, D)`` for multi-output, or ``(T, K, D)`` for
-    time-resolved analyses, where *D* is the number of parameters, *K* the
-    number of outputs, and *T* the number of time steps.
+    Index shapes track the shape of the analyzed output ``Y``. ``D`` is the
+    number of parameters, ``K`` the number of outputs, and ``T`` the number of
+    time steps. A scalar output gives ``(D,)``, a multi-output analysis gives
+    ``(K, D)``, and a time-resolved analysis gives ``(T, K, D)``.
 
-    ``S2`` is stored as a symmetric ``(..., D, D)`` matrix. Only the upper
-    triangle is estimated directly; the lower triangle mirrors it for
-    convenience, and the diagonal (a parameter's interaction with itself) is
-    undefined and therefore set to ``NaN``.
-
-    Confidence interval arrays (``*_conf``) have an extra leading dimension of
-    size 2 representing ``[lower, upper]`` bounds. ``S2_conf`` follows the same
-    symmetric-with-``NaN``-diagonal contract as ``S2``.
-
-    ``nan_counts`` reports how many entries of each index array are NaN
-    (typically caused by zero-variance output slices), keyed by index name.
-    For ``S2`` only the directly estimated upper triangle is counted, so the
-    always-NaN diagonal does not inflate the count.
+    Attributes:
+        S1: First-order Sobol indices, shape ``(D,)`` / ``(K, D)`` /
+            ``(T, K, D)``.
+        ST: Total-order Sobol indices, same shape as ``S1``.
+        S2: Second-order Sobol indices, shape ``(D, D)`` / ``(K, D, D)`` /
+            ``(T, K, D, D)``, or ``None`` when they were not computed. Only the
+            upper triangle is estimated directly. The lower triangle mirrors it
+            for convenience. The diagonal holds a parameter's interaction with
+            itself, which is undefined, so it is set to ``NaN``.
+        problem: Problem definition used for the analysis.
+        S1_conf: Bootstrap confidence bounds on ``S1``, shape ``(2, D)`` /
+            ``(2, K, D)`` / ``(2, T, K, D)``, or ``None`` without a bootstrap.
+            The leading axis holds ``[lower, upper]``.
+        ST_conf: Bootstrap confidence bounds on ``ST``, same shape and layout
+            as ``S1_conf``.
+        S2_conf: Bootstrap confidence bounds on ``S2``, shape ``(2, D, D)`` /
+            ``(2, K, D, D)`` / ``(2, T, K, D, D)``, or ``None`` without a
+            bootstrap. Symmetric with a ``NaN`` diagonal, like ``S2``.
+        nan_counts: Number of ``NaN`` entries per index array, keyed by index
+            name, or ``None`` when not recorded. Zero-variance output slices
+            are the usual cause. For ``S2`` only the directly estimated upper
+            triangle is counted, so the always-``NaN`` diagonal does not
+            inflate the count.
     """
 
-    S1: Array  # (D,), (K, D), or (T, K, D) — matches the analyzed Y shape
+    S1: Array  # (D,), (K, D), or (T, K, D)
     ST: Array  # same shape as S1
-    S2: Array | None  # (..., D, D), symmetric, diagonal NaN, None if not computed
+    S2: Array | None  # (..., D, D), symmetric, diagonal NaN
     problem: Problem
-    S1_conf: Array | None = None  # (2, *S1.shape); [lower, upper]
+    S1_conf: Array | None = None  # (2, *S1.shape)
     ST_conf: Array | None = None
     S2_conf: Array | None = None
     nan_counts: dict[str, int] | None = None

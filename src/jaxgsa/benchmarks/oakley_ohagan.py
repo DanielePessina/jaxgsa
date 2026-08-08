@@ -1,10 +1,10 @@
 # ruff: noqa: E501
-"""Oakley & O'Hagan (2004) 15-dimensional Gaussian-input benchmark.
+"""Oakley & O'Hagan test function for sensitivity analysis benchmarking.
 
-A canonical benchmark for variance-based sensitivity analysis with
-Gaussian inputs. The function combines linear, trigonometric, and
-quadratic terms so that first-order, total-order, and pairwise
-interaction Sobol indices are all available in closed form.
+A 15-dimensional benchmark for variance-based sensitivity analysis with
+Gaussian inputs. The function adds linear, trigonometric, and quadratic
+terms. First-order, total-order, and pairwise interaction Sobol indices
+all have a closed form.
 
 .. math::
     f(\\mathbf{x}) = \\mathbf{a}_1^\\top \\mathbf{x}
@@ -15,8 +15,8 @@ interaction Sobol indices are all available in closed form.
 with :math:`x_i \\sim \\mathcal{N}(0, \\sigma^2)` i.i.d.
 
 The coefficients are the published values from Oakley & O'Hagan (2004,
-JRSS-B 66:751-769), embedded as literals so no external data file is
-needed.
+JRSS-B 66:751-769). They are embedded as literals, so no external data
+file is needed.
 
 References:
     Oakley, J. E. and O'Hagan, A. (2004). Probabilistic sensitivity
@@ -32,8 +32,8 @@ from jax import Array
 
 from jaxgsa.problem import Problem
 
-# 15 dimensions — high enough to stress-test scalability and to span
-# a wide range of importance levels (some inputs are nearly inert).
+# 15 dimensions. That is high enough to test scalability and to span a wide
+# range of importance levels; some inputs are nearly inert.
 D = 15
 DEFAULT_SIGMA = 1.0
 
@@ -57,16 +57,16 @@ _M = np.array([
     [0.0415, -0.26, 0.464, -0.361, -0.95, -0.165, 0.00309, 0.0528, 0.225, 0.384, 0.456, -0.186, 0.00823, 0.167, 0.16],
 ], dtype=float)
 
-# Coefficients for linear, sin, and cos terms respectively.
-# Magnitudes increase toward higher indices, creating a natural importance
-# gradient: x11-x15 dominate, x1-x5 are nearly inert, x6-x10 intermediate.
+# Coefficients for the linear, sin, and cos terms respectively.
+# The magnitudes grow toward the higher indices. This creates an importance
+# gradient: x11-x15 dominate, x6-x10 are intermediate, x1-x5 are nearly inert.
 _A1 = np.array([0.0118, 0.0456, 0.2297, 0.0393, 0.1177, 0.3865, 0.3897, 0.6061, 0.6159, 0.4005, 1.0741, 1.1474, 0.788, 1.1242, 1.1982], dtype=float)
 _A2 = np.array([0.4341, 0.0887, 0.0512, 0.3233, 0.1489, 1.036, 0.9892, 0.9672, 0.8977, 0.8083, 1.8426, 2.4712, 2.3946, 2.0045, 2.2621], dtype=float)
 _A3 = np.array([0.1044, 0.2057, 0.0774, 0.273, 0.1253, 0.7526, 0.857, 1.0331, 0.8388, 0.797, 2.2145, 2.0382, 2.4004, 2.0541, 1.9845], dtype=float)
 # fmt: on
 
-# Reference S1 values from the original paper; useful for cross-checking
-# our analytical derivation against the published table.
+# Reference S1 values from the original paper. Use them to cross-check the
+# analytical derivation below against the published table.
 PUBLISHED_S1 = np.array(
     [
         0.00156,
@@ -87,7 +87,8 @@ PUBLISHED_S1 = np.array(
     ]
 )
 
-# Gaussian inputs (not uniform) -- one of few SA benchmarks with non-uniform distributions.
+# The inputs are Gaussian, not uniform. This is one of the few sensitivity
+# analysis benchmarks with non-uniform input distributions.
 PROBLEM = Problem.from_dict(
     {
         f"x{i + 1}": {"dist": "gaussian", "mean": 0.0, "variance": DEFAULT_SIGMA**2}
@@ -100,14 +101,15 @@ def evaluate(X: Array) -> Array:
     """Evaluate the Oakley & O'Hagan function.
 
     Args:
-        X: Input array of shape ``(N, 15)`` with ``x_i ~ N(0, sigma^2)``.
+        X: Input array, shape ``(N, 15)``, with ``x_i ~ N(0, sigma^2)``.
 
     Returns:
-        Array of shape ``(N,)`` with function values.
+        Function values, shape ``(N,)``.
     """
     Xj = jnp.asarray(X)
-    # Four additive components: linear a1^T x, trigonometric a2^T sin(x) + a3^T cos(x),
-    # and the quadratic form x^T M x which introduces all pairwise interactions.
+    # Four additive terms: the linear term a1^T x, the trigonometric terms
+    # a2^T sin(x) + a3^T cos(x), and the quadratic form x^T M x. The quadratic
+    # form is what introduces all the pairwise interactions.
     return (
         Xj @ jnp.asarray(_A1)
         + jnp.sin(Xj) @ jnp.asarray(_A2)
@@ -122,18 +124,20 @@ def analytical_indices(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Compute analytical first-order, total-order, and second-order Sobol indices.
 
-    Each input enters through the block ``(x, sin x, cos x, x^2)``
-    (main effect) plus off-diagonal quadratic cross-terms (pairwise
-    interactions). The main-effect variance is ``c_i' Sigma c_i`` where
-    ``Sigma`` is the covariance of that block under ``N(0, sigma^2)``,
-    and pairwise interaction variance is ``(M_ij + M_ji)^2 * sigma^4``.
+    Each input enters twice. It enters through the block
+    ``(x, sin x, cos x, x^2)``, which gives its main effect. It also enters
+    through the off-diagonal quadratic cross-terms, which give the pairwise
+    interactions. The indices therefore have a closed form. The main-effect
+    variance is ``c_i' Sigma c_i``, where ``Sigma`` is the covariance of that
+    block under ``N(0, sigma^2)``. The pairwise interaction variance is
+    ``(M_ij + M_ji)^2 * sigma^4``.
 
     Args:
         sigma: Standard deviation of each input.
 
     Returns:
-        ``(S1, ST, S2)`` where S1 and ST are ``(15,)`` arrays and S2 is
-        a ``(15, 15)`` symmetric matrix with NaN on the diagonal.
+        ``(S1, ST, S2)``. ``S1`` and ``ST`` have shape ``(15,)``. ``S2`` is a
+        symmetric ``(15, 15)`` matrix with NaN on the diagonal.
     """
     s2 = sigma**2
     # Gaussian moment-generating-function identities for X ~ N(0, s2):
@@ -142,9 +146,9 @@ def analytical_indices(
     es2 = np.exp(-2.0 * s2)  # appears in Var[sin X] and Var[cos X]
 
     # Covariance matrix of the feature vector (x, sin x, cos x, x^2) for X~N(0,s2).
-    # Block-diagonal: (x, sin x) decouple from (cos x, x^2) because odd/even symmetry.
-    # Each input's main-effect variance is Vi = c_i^T * cov_block * c_i
-    # where c_i = [a1_i, a2_i, a3_i, M_ii].
+    # It is block-diagonal: (x, sin x) decouple from (cos x, x^2) because of the
+    # odd/even symmetry. Each input's main-effect variance is
+    # Vi = c_i^T * cov_block * c_i, where c_i = [a1_i, a2_i, a3_i, M_ii].
     cov_block = np.array(
         [
             [s2, s2 * es, 0.0, 0.0],

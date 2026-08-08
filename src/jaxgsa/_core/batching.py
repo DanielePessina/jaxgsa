@@ -1,10 +1,10 @@
 """Row-batching helpers for surrogate forward prediction.
 
-Surrogate prediction materializes basis
-tensors whose size is linear in the number of prediction rows but carries a
-large per-row constant (polynomial terms, B-spline tensor products). At large
-``N_new`` a single-shot evaluation can exceed available memory, so predictions
-are computed in row batches sized against a transient-memory budget.
+Surrogate prediction materializes basis tensors. Their size grows linearly
+with the number of prediction rows, but the per-row constant is large
+(polynomial terms, B-spline tensor products). At large ``N_new`` a single-shot
+evaluation can exceed available memory. The helpers here therefore predict in
+row batches, sized against a transient-memory budget.
 """
 
 from __future__ import annotations
@@ -88,17 +88,17 @@ def apply_batched(fn: Callable[[Array], Array], X: Array, batch_size: int) -> Ar
     which other rows share the batch. ``batch_size >= X.shape[0]`` degrades
     to a plain single-shot call.
 
-    Each finished batch is staged into a host (NumPy) output buffer, so
-    device residency stays at one batch plus the final output — a device-side
-    chunk list followed by ``jnp.concatenate`` would instead hold the full
-    output twice. Under ``jax.jit`` tracing, host staging is impossible, so
-    the traced path falls back to a device concatenate (XLA owns buffer
-    lifetimes there anyway).
+    Each finished batch is staged into a host (NumPy) output buffer, so device
+    residency stays at one batch plus the final output. A device-side chunk
+    list followed by ``jnp.concatenate`` would instead hold the full output
+    twice. Host staging is impossible under ``jax.jit`` tracing, so the traced
+    path falls back to a device concatenate. XLA owns the buffer lifetimes
+    there anyway.
 
     Args:
         fn: Function mapping an ``(n, ...)`` input batch to an ``(n, ...)``
             output batch.
-        X: (N, ...) input rows.
+        X: ``(N, ...)`` input rows.
         batch_size: Rows per batch, as returned by ``resolve_batch_size``.
 
     Returns:

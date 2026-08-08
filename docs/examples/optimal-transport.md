@@ -1,16 +1,27 @@
 # Optimal Transport (Wasserstein-Based Sensitivity)
 
+This page runs an optimal-transport sensitivity analysis on the Ishigami test
+function, a standard three-input benchmark. You finish with one index per
+input, split into the part that comes from shifting the output distribution
+and the part that comes from reshaping it.
+
 The optimal-transport index measures how far knowing an input moves the
 entire output distribution. It is the class-averaged squared
 2-Wasserstein distance between the output distribution conditional on the
 input and the unconditional one, normalized by twice the output variance
-so it lies in [0, 1] (Borgonovo, Figalli, Plischke & Savaré, 2024).
+so it lies in [0, 1] (Borgonovo, Figalli, Plischke & Savaré, 2024). The
+2-Wasserstein distance is the smallest mean squared distance needed to move
+one distribution onto another. This page calls the whole quantity the OT
+index.
 
-Unlike the other moment-independent indices (PAWN, Borgonovo delta),
-every OT index splits exactly into two parts:
+A moment-independent index reads the whole output distribution rather than
+its variance alone. PAWN and the Borgonovo delta are the other two
+moment-independent indices in jaxgsa. Unlike those two, every OT index
+splits exactly into two parts:
 
 - **advective** — the location shift of the conditional distribution.
-  This equals half the first-order Sobol index.
+  This equals half the first-order Sobol index. The first-order Sobol index
+  (S1) is the share of output variance removed by fixing that one input.
 - **diffusive** — everything else: changes in spread, tails, and shape.
 
 An input with a large advective part moves the output; one with a large
@@ -43,6 +54,20 @@ import jaxgsa
 ```
 
 ## Scalar example (Ishigami)
+
+The code below does four things.
+
+1. Import the Ishigami benchmark. It ships both the input definition
+   (`PROBLEM`) and the model itself (`evaluate`), so no external model is
+   needed to follow along.
+2. Draw 8192 Monte Carlo samples of the inputs. Optimal transport compares
+   sample distributions, so it needs enough points per input class to make
+   those distributions meaningful.
+3. Run the model on those samples to get the output array `Y`. The estimator
+   works from plain (X, Y) pairs, which is why any sampler is allowed here.
+4. Call `analyze` and print the total index next to its two parts. Printing
+   the parts, not only the total, is what lets you tell a shift apart from a
+   reshape.
 
 ```python
 import jax.numpy as jnp
@@ -77,11 +102,14 @@ the theoretical maximum of that average, which pins the scale to [0, 1].
 In the default `mode="univariate"`, each output column uses the exact
 closed form of 1-D optimal transport (sorted-quantile coupling), with no
 iterative solver at all. The `multivariate` and `trajectory` modes
-transport point clouds with a pure-JAX log-domain Sinkhorn solver.
+transport point clouds. They use a pure-JAX log-domain Sinkhorn solver,
+an iterative method for transport problems with no closed form.
 
 ## Multi-output and time series
 
-All jaxgsa output shapes work, and `mode` chooses the granularity:
+All jaxgsa output shapes work, and `mode` chooses the granularity. Here N is
+the number of samples, T the number of timepoints, K the number of outputs,
+and D the number of inputs.
 
 ```python
 Y2 = jnp.stack([Y, Y**2], axis=1)        # (N, K=2)
@@ -99,6 +127,12 @@ print(r_mv.ot.shape)  # (3,)
 r_traj = jaxgsa.optimal_transport.analyze(PROBLEM, X, Y3, mode="trajectory")
 print(r_traj.ot.shape)  # (2, 3)
 ```
+
+Read the three printed shapes against the mode that produced them. The
+default mode returns `(2, 2, 3)`: one index per timepoint, per output, per
+input. `multivariate` collapses the two output columns into a single joint
+distribution and returns `(3,)`, one index per input. `trajectory` keeps the
+two outputs apart but collapses time, so it returns `(2, 3)`.
 
 `trajectory` fits time-course models (a concentration curve per output,
 say): each input gets one index per output summarizing its influence on
@@ -132,6 +166,9 @@ less bias but more iterations.
 
 ## Bootstrap confidence intervals
 
+Bootstrapping resamples the (X, Y) pairs with replacement and re-estimates
+the index on each resample. The spread of those estimates gives the interval.
+
 ```python
 result = jaxgsa.optimal_transport.analyze(
     PROBLEM, X, Y, n_bootstrap=200, conf_level=0.95, seed=0
@@ -140,10 +177,14 @@ print(result.ot_conf)         # (2, 3): [lower, upper]
 print(result.advective_conf)  # same for each component
 ```
 
-Keep `n_bootstrap` modest in the point-cloud modes: each replicate
-re-solves `D * n_partitions` transport problems.
+The `(2, 3)` shape is a lower and an upper bound for each of the three
+inputs, not two outputs. Keep `n_bootstrap` modest in the point-cloud modes:
+each replicate re-solves `D * n_partitions` transport problems.
 
 ## xarray export
+
+`to_dataset()` returns the indices as a labeled `xarray.Dataset`, with the
+input names and output names attached as coordinates.
 
 ```python
 ds = result.to_dataset()

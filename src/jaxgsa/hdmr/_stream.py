@@ -5,9 +5,9 @@ the full-N B-spline bases ``B1``/``B2``/``B3`` resident. Every quantity the
 per-slice kernel computes is a per-row reduction over the N samples:
 
 - The first-order backfit only touches the data through the cross-Gram
-  ``G1[j, k] = B1_j^T B1_k`` and the moment vector ``b1_j = B1_j^T Y``; both
-  are accumulated over row batches, after which the backfit iteration runs
-  in coefficient space (see :func:`_get_gram_backfit`).
+  ``G1[j, k] = B1_j^T B1_k`` and the moment vector ``b1_j = B1_j^T Y``. Row
+  batches accumulate both, and the backfit iteration then runs in coefficient
+  space (see :func:`_get_gram_backfit`).
 - The higher-order single-shot solves need only the per-term Gram blocks
   ``B_j^T B_j`` and moments ``B_j^T Y_res``, where the sequential residual
   ``Y_res`` is recomputed exactly per batch from the already-solved
@@ -57,8 +57,8 @@ def _full_fit_bytes(
     - per vmap lane, the ANCOVA/F-test stage keeps ~5 arrays of shape (N, n)
       live at its peak (``Y_em``, its centered copy, the leave-one-out sums
       ``Y0_minus``, their centered copy, and the F-test per-term residuals)
-      -> ``5 * N * n`` — the same constant the automatic ``slice_chunk_size``
-      derivation uses.
+      -> ``5 * N * n``. That is the same constant the automatic
+      ``slice_chunk_size`` derivation uses.
 
     The per-lane terms are counted once: slice chunking can shrink the lane
     count to 1 but can never shrink the shared full-N bases, so this is the
@@ -100,10 +100,10 @@ def _streamed_bytes_per_row(
     """Per-row transient bytes of one streamed batch.
 
     Each batch materializes ``B1`` (m1 * D per row), ``B2`` with its two
-    gather temporaries (3 * m2 * n2), ``B3`` with its three gather
-    temporaries (4 * m3 * n3), and — in the final statistics pass — the
-    per-term contributions ``F`` plus ~2 elementwise temporaries of the same
-    shape (3 * n * L per row).
+    gather temporaries (3 * m2 * n2), and ``B3`` with its three gather
+    temporaries (4 * m3 * n3). The final statistics pass adds the per-term
+    contributions ``F`` plus ~2 elementwise temporaries of the same shape
+    (3 * n * L per row).
 
     Args:
         D: Number of input parameters.
@@ -130,7 +130,7 @@ def _streamed_bytes_per_row(
 
 @lru_cache(maxsize=32)
 def _get_gram_backfit(m1: int, n1: int, maxiter: int, lambdax: float):
-    """Cache the vmapped Gram-space first-order backfit.
+    """Build and cache the vmapped Gram-space first-order backfit.
 
     Rewrites :func:`jaxgsa.hdmr._engine._fit_first_order` in coefficient space.
     With ``M_j = G1[j, j] + lambdax * I``, the kernel's solver matrices give
@@ -144,9 +144,9 @@ def _get_gram_backfit(m1: int, n1: int, maxiter: int, lambdax: float):
     ``maxiter``) are identical to the in-memory kernel.
 
     Returns:
-        A jitted function ``(G1, G1_diag, b1res) -> C1`` with ``G1``
-        (n1, m1, n1, m1) and ``G1_diag`` (n1, m1, m1) shared across lanes
-        and ``b1res`` batched as (L, n1, m1); the result is (L, m1, n1).
+        A jitted function ``(G1, G1_diag, b1res) -> C1``. ``G1``
+        (n1, m1, n1, m1) and ``G1_diag`` (n1, m1, m1) are shared across lanes,
+        and ``b1res`` is batched as (L, n1, m1). The result is (L, m1, n1).
     """
 
     def backfit(G1: Array, G1_diag: Array, b1res: Array) -> Array:
@@ -185,16 +185,17 @@ def _get_gram_backfit(m1: int, n1: int, maxiter: int, lambdax: float):
 
 @lru_cache(maxsize=32)
 def _get_gram_higher_solver(m_basis: int, lambdax: float):
-    """Cache the vmapped Gram-space higher-order solver.
+    """Build and cache the vmapped Gram-space higher-order solver.
 
     Mirrors :func:`jaxgsa.hdmr._engine._fit_higher_order`: each term is solved
     independently, ``C_j = (B_j^T B_j + lambdax * I)^{-1} B_j^T Y_res``, from
     the accumulated per-term Gram blocks and moments.
 
     Returns:
-        A jitted function ``(BtB, BtY) -> C`` with ``BtB``
-        (n_terms, m_basis, m_basis) shared across lanes and ``BtY`` batched
-        as (L, n_terms, m_basis); the result is (L, m_basis, n_terms).
+        A jitted function ``(BtB, BtY) -> C``. ``BtB``
+        (n_terms, m_basis, m_basis) is shared across lanes, and ``BtY`` is
+        batched as (L, n_terms, m_basis). The result is
+        (L, m_basis, n_terms).
     """
 
     def solve_lane(BtB: Array, BtY: Array) -> Array:
@@ -235,8 +236,8 @@ def _fit_hdmr_streamed(
     """Fit RS-HDMR by streaming row batches; exact up to f32 summation order.
 
     Runs ``1 + (maxorder - 1) + 1`` passes over row batches of
-    ``X_n``/``Y_nl``, rebuilding the per-batch B-spline bases each pass and
-    never holding a full-N basis:
+    ``X_n``/``Y_nl``. Each pass rebuilds the per-batch B-spline bases, so a
+    full-N basis is never resident:
 
     1. Accumulate the first-order cross-Gram ``G1``, basis column sums, the
        per-lane moments ``B1^T Y`` and the Y statistics (mean, shifted
@@ -249,18 +250,18 @@ def _fit_hdmr_streamed(
        cross-products, and the RMSE residual sum.
 
     Args:
-        X_n: (N, D) CDF-normalized inputs in [0, 1].
-        Y_nl: (N, L) response with output slices flattened to the last axis
-            (column ``t*K + k`` is slice ``(t, k)``).
+        X_n: CDF-normalized inputs in [0, 1], shape ``(N, D)``.
+        Y_nl: Response with the output slices flattened to the last axis,
+            shape ``(N, L)``. Column ``t*K + k`` is slice ``(t, k)``.
         m: Number of B-spline intervals.
         maxorder: HDMR expansion order (1, 2, or 3), post-clamping.
         maxiter: Maximum backfitting iterations.
         lambdax: Tikhonov regularization strength.
-        f_crits: (3,) precomputed critical F values per order.
-        c2_idx: (n2, 2) parameter index pairs.
-        c3_idx: (n3, 3) parameter index triples.
-        beta2: (m2, 2) tensor-product basis index table.
-        beta3: (m3, 3) tensor-product basis index table.
+        f_crits: Precomputed critical F values per order, shape ``(3,)``.
+        c2_idx: Parameter index pairs, shape ``(n2, 2)``.
+        c3_idx: Parameter index triples, shape ``(n3, 3)``.
+        beta2: Tensor-product basis index table, shape ``(m2, 2)``.
+        beta3: Tensor-product basis index table, shape ``(m3, 3)``.
         n1: Number of first-order terms (= D).
         n2: Number of second-order terms.
         n3: Number of third-order terms.
@@ -274,7 +275,7 @@ def _fit_hdmr_streamed(
     Returns:
         Tuple ``(Sa, Sb, S, select, rmse, C1, C2, C3, f0)`` with lane-leading
         shapes: (L, n) indices and selection, (L,) rmse and f0, (L, m1, n1)
-        C1, (L, m2, n2) C2 or None, (L, m3, n3) C3 or None — matching the
+        C1, (L, m2, n2) C2 or None, (L, m3, n3) C3 or None. These match the
         vmapped in-memory kernel's concatenated outputs.
     """
     N, D = X_n.shape

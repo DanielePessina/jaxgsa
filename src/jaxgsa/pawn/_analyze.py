@@ -1,32 +1,35 @@
-"""PAWN analysis: distribution-based sensitivity via KS distances.
+"""PAWN index estimators for distribution-based sensitivity analysis.
 
-Computes the Kolmogorov-Smirnov (KS) distance — the largest vertical gap
-between two empirical CDFs — between the unconditional output CDF and
-the conditional CDF when each input is confined to a bin of its range.
-The PAWN index aggregates KS values across bins via median, max, or mean.
+The Kolmogorov-Smirnov (KS) distance is the largest vertical gap between two
+empirical CDFs. These estimators take that distance between the
+unconditional output CDF and the conditional CDF that holds one parameter
+inside a bin of its range. The PAWN index aggregates the KS values across
+bins by median, max, or mean.
 
 Array shape conventions used throughout:
     N  — number of samples
-    D  — number of input parameters
+    D  — number of parameters
     T  — number of time steps (singleton-squeezed when absent)
     K  — number of output variables (singleton-squeezed when absent)
 
-The KS computation is vectorized: each output column is sorted once, and
-the unconditional and per-bin conditional ECDFs are compared only at
-distinct output values (tie-group ends).  This makes the statistic equal
-to the two-sample KS of ``scipy.stats.ks_2samp`` even for tied/discrete
-outputs, not just continuous ones.  Bin assignment (via ``searchsorted``)
-depends only on the inputs, so it is computed once and shared across all
-output columns; a single JIT-compiled kernel (one compilation per unique
-``(N, D, n_bins)`` and output-column count ``T*K``) is vmapped over the
-flattened ``T*K`` output columns.  The ``statistic`` aggregation runs
-outside JIT so all three statistics share one compilation.
+The KS computation is vectorized. Each output column is sorted once, and the
+unconditional and per-bin conditional ECDFs are compared only at distinct
+output values, that is at tie-group ends. This makes the statistic equal to
+the two-sample KS of ``scipy.stats.ks_2samp`` for tied and discrete outputs,
+not only for continuous ones.
 
-A categorical input needs no binning: its level code is already a bin
-index.  Continuous and categorical columns share one kernel, compiled at
-``n_eff = max(n_bins, max_levels)``; the shorter columns leave their
+Bin assignment (via ``searchsorted``) depends only on the inputs, so it is
+computed once and shared across all output columns. One JIT-compiled kernel
+is vmapped over the flattened ``T*K`` output columns, with one compilation
+per unique ``(N, D, n_bins)`` and output-column count ``T*K``. The
+``statistic`` aggregation runs outside JIT so all three statistics share one
+compilation.
+
+A categorical parameter needs no binning: its level code is already a bin
+index. Continuous and categorical columns share one kernel, compiled at
+``n_eff = max(n_bins, max_levels)``. The shorter columns leave their
 trailing bins empty, the kernel returns ``NaN`` for an empty bin, and the
-nan-aware aggregation drops it.  A continuous-only problem has
+nan-aware aggregation drops it. A continuous-only problem has
 ``n_eff == n_bins`` and is bit-for-bit unaffected.
 
 References:
@@ -57,20 +60,19 @@ from jaxgsa.problem import Problem, _categorical_dims
 def _equal_width_bins(X_u01: Array, n_bins: int) -> Array:
     """Assign each sample to an equal-width bin in ``[0, 1]``.
 
-    Samples falling outside ``[0, 1]`` (possible when the caller passes
-    inputs beyond the declared bounds of a ``uniform`` parameter) are
-    given the sentinel ``-1`` so they match no bin and are excluded from
-    every conditional set.  ``NaN`` inputs are treated the same way.
-    Values exactly ``0.0`` map to the first bin and ``1.0`` to the last
-    bin.
+    A sample outside ``[0, 1]`` gets the sentinel ``-1``, so it matches no bin
+    and drops out of every conditional set. This happens when the caller
+    passes inputs beyond the declared bounds of a ``uniform`` parameter. A
+    ``NaN`` input gets the same sentinel. A value of exactly ``0.0`` maps to
+    the first bin and ``1.0`` maps to the last bin.
 
     Args:
-        X_u01: Unit-interval inputs ``(N, D)``.
+        X_u01: Unit-interval inputs, shape ``(N, D)``.
         n_bins: Number of equal-width bins.
 
     Returns:
-        Integer bin indices ``(N, D)`` in ``[0, n_bins)``, or ``-1`` for
-        out-of-range or ``NaN`` samples.
+        Integer bin indices, shape ``(N, D)``, in ``[0, n_bins)``, or ``-1``
+        for out-of-range or ``NaN`` samples.
     """
     bin_edges = jnp.linspace(0.0, 1.0, n_bins + 1)
     idx = jnp.clip(jnp.searchsorted(bin_edges, X_u01, side="right") - 1, 0, n_bins - 1)
@@ -79,31 +81,29 @@ def _equal_width_bins(X_u01: Array, n_bins: int) -> Array:
 
 
 def _bin_indices(problem: Problem, X: Array, n_bins: int) -> tuple[Array, int]:
-    """Assign every input column to conditioning bins, categorical or not.
+    """Assign every parameter column to conditioning bins, categorical or not.
 
-    A continuous column keeps equal-width binning on the CDF-transformed
-    unit interval, which is equal-probability under the column's marginal.
-    A categorical column needs no binning at all: its level code ``0..L-1``
-    already names the conditioning class, so the code is used as the bin
-    index directly.
+    A continuous column keeps equal-width binning on the CDF-transformed unit
+    interval, which is equal-probability under the column's marginal. A
+    categorical column needs no binning at all. Its level code ``0..L-1``
+    already names the conditioning class, so the code serves as the bin index.
 
     The two kinds share one kernel, so the kernel is compiled at
-    ``n_eff = max(n_bins, max_levels)`` and the shorter columns simply
-    leave their trailing bins empty. An empty bin yields ``NaN`` from the
-    KS kernel and the nan-aware aggregation drops it, so padding does not
-    change any index. A continuous-only problem has ``n_eff == n_bins`` and
-    is therefore unaffected.
+    ``n_eff = max(n_bins, max_levels)`` and the shorter columns leave their
+    trailing bins empty. An empty bin yields ``NaN`` from the KS kernel and
+    the nan-aware aggregation drops it, so the padding changes no index. A
+    continuous-only problem has ``n_eff == n_bins`` and is unaffected.
 
     Args:
         problem: Problem definition with D parameters.
-        X: Input sample matrix ``(N, D)`` in physical units; a categorical
+        X: Input samples in physical units, shape ``(N, D)``. A categorical
             column holds its integer level codes as floats.
         n_bins: Number of conditioning bins for the continuous columns.
 
     Returns:
-        A tuple ``(bin_idx, n_eff)`` with integer bin indices ``(N, D)``
-        (``-1`` marks an excluded sample) and the padded bin count the
-        kernel must be compiled at.
+        ``(bin_idx, n_eff)``. ``bin_idx`` holds integer bin indices of shape
+        ``(N, D)``, where ``-1`` marks an excluded sample. ``n_eff`` is the
+        padded bin count the kernel must be compiled at.
 
     Raises:
         ValueError: If a categorical column holds values other than its
@@ -152,38 +152,40 @@ def _get_pawn_ks(n_bins: int):
         n_bins: Number of equal-width conditioning bins (static).
 
     Returns:
-        A jitted callable ``(bin_idx (N, D), Y_cols (N, M)) -> ks
-        (M, D, n_bins)`` where ``M`` is the number of output columns.
+        A jitted callable that maps ``bin_idx`` of shape ``(N, D)`` and
+        ``Y_cols`` of shape ``(N, M)`` to KS statistics of shape
+        ``(M, D, n_bins)``, where ``M`` is the number of output columns.
     """
 
     def _impl(bin_idx: Array, Y_cols: Array) -> Array:
         """Compute per-bin KS statistics for every output column.
 
         Args:
-            bin_idx: Integer bin indices ``(N, D)`` (``-1`` = excluded).
-            Y_cols: Output columns ``(N, M)``.
+            bin_idx: Integer bin indices, shape ``(N, D)``, where ``-1``
+                marks an excluded sample.
+            Y_cols: Output columns, shape ``(N, M)``.
 
         Returns:
-            KS statistics ``(M, D, n_bins)`` with ``NaN`` where a bin has
-            fewer than two samples.
+            KS statistics, shape ``(M, D, n_bins)``, with ``NaN`` where a bin
+            has fewer than two samples.
         """
         N = bin_idx.shape[0]
         param_bins = jnp.arange(n_bins)
 
         def _ks_one_col(y: Array) -> Array:
-            """KS statistics ``(D, n_bins)`` for a single output column."""
+            """Compute KS statistics of shape ``(D, n_bins)`` for one output column."""
             dtype = jnp.result_type(y.dtype, jnp.float32)
             order = jnp.argsort(y)
             y_sorted = y[order]
-            # A sorted position is a "group end" if it is the last member
-            # of its tie group; evaluating ECDFs only there yields the
+            # A sorted position is a "group end" if it is the last member of
+            # its tie group. Evaluating the ECDFs only there yields the
             # value-based (tie-aware) two-sample KS statistic.
             is_group_end = jnp.concatenate([y_sorted[:-1] != y_sorted[1:], jnp.array([True])])
             bin_idx_sorted = bin_idx[order]
             uncond_cdf = jnp.arange(1, N + 1, dtype=dtype) / N
 
             def _ks_one_param(bid: Array) -> Array:
-                """KS statistics ``(n_bins,)`` for one input dimension."""
+                """Compute KS statistics of shape ``(n_bins,)`` for one parameter."""
                 oh = (bid[:, None] == param_bins[None, :]).astype(dtype)
                 cnt = oh.sum(axis=0)
                 cum = jnp.cumsum(oh, axis=0)
@@ -206,14 +208,15 @@ def _aggregate_ks(
 ) -> Array:
     """Reduce KS values over the trailing ``n_bins`` axis to PAWN indices.
 
-    All three statistics are nan-aware, so a bin with fewer than two
-    samples — an empty padding bin, or a genuinely under-filled one — is
-    dropped rather than propagated. An input whose bins are all empty
+    All three statistics are nan-aware. A bin with fewer than two samples is
+    dropped rather than propagated, whether it is an empty padding bin or a
+    genuinely under-filled one. A parameter whose bins are all empty
     therefore yields ``NaN``, which is the honest answer.
 
     Args:
-        ks: KS statistics with bins on the last axis, e.g. ``(..., n_bins)``.
-            ``NaN`` entries (bins with fewer than two samples) are ignored.
+        ks: KS statistics with bins on the last axis, shape ``(..., n_bins)``.
+            The function ignores ``NaN`` entries, which mark bins with fewer
+            than two samples.
         statistic: Aggregation across bins.
 
     Returns:
@@ -234,20 +237,20 @@ def _pawn_core(
     *,
     warn: bool = True,
 ) -> Array:
-    """Core PAWN computation over all (T, K) output slices.
+    """Compute PAWN indices over all (T, K) output slices.
 
     Args:
-        bin_idx: Conditioning-bin indices ``(N, D)`` from
-            :func:`_bin_indices` (``-1`` marks an excluded sample).
-        Y_3d: Output array promoted to ``(N, T, K)``.
+        bin_idx: Conditioning-bin indices from :func:`_bin_indices`, shape
+            ``(N, D)``, where ``-1`` marks an excluded sample.
+        Y_3d: Output array promoted to shape ``(N, T, K)``.
         n_eff: Number of bins the kernel is compiled at.
         statistic: Aggregation method across bins.
-        warn: If True, emit one warning per input whose bins are all empty
-            (all fewer than two samples).  Set False for bootstrap resamples
-            to avoid duplicate warnings.
+        warn: If True, emit one warning per parameter whose bins all hold
+            fewer than two samples. Pass False for bootstrap resamples to
+            avoid duplicate warnings.
 
     Returns:
-        PAWN indices ``(T, K, D)``.
+        PAWN indices, shape ``(T, K, D)``.
     """
     N, T, K = Y_3d.shape
     D = bin_idx.shape[1]
@@ -258,9 +261,9 @@ def _pawn_core(
     ks = _get_pawn_ks(n_eff)(bin_idx, Y_cols)  # (T*K, D, n_eff)
 
     if warn:
-        # Whether every bin of an input is empty depends only on the input
-        # binning (not on Y), so it is identical across output columns:
-        # one host sync, one warning per affected input.
+        # Whether every bin of a parameter is empty depends only on the
+        # binning and not on Y, so the answer is identical across output
+        # columns. One host sync, one warning per affected parameter.
         all_empty = jnp.all(jnp.isnan(ks), axis=(0, 2)).tolist()
         for d, empty in enumerate(all_empty):
             if empty:
@@ -287,62 +290,62 @@ def analyze(
 ) -> PAWNResult:
     """Compute PAWN sensitivity indices.
 
-    PAWN measures how much fixing an input changes the whole output
-    *distribution*, not just its variance. For each input, the samples
-    are split into ``n_bins`` conditioning bins (equal-width on the
-    CDF-transformed unit interval, i.e. equal-probability under the
-    input's marginal), and each bin's conditional output CDF is compared
-    with the unconditional CDF via the Kolmogorov-Smirnov (KS) statistic
-    — the largest vertical gap between the two CDFs, a number in [0, 1].
-    The per-bin KS values are then aggregated (median by default) into
-    one index per input: 0 means the input has no effect on the output
-    distribution; larger values mean stronger influence.
+    PAWN measures how much fixing a parameter changes the whole output
+    distribution, not just its variance. For each parameter, the samples are
+    split into ``n_bins`` conditioning bins. The bins are equal-width on the
+    CDF-transformed unit interval, so they are equal-probability under the
+    parameter's marginal. Each bin's conditional output CDF is then compared
+    with the unconditional CDF by the Kolmogorov-Smirnov (KS) statistic, the
+    largest vertical gap between the two CDFs and a number in [0, 1].
 
-    It is a given-data method — any (X, Y) sample works, with no special
-    design — and a good pick when the output is skewed or multimodal, so
+    The per-bin KS values are aggregated (median by default) into one index
+    per parameter. A value of 0 means the parameter has no effect on the
+    output distribution, and larger values mean stronger influence.
+
+    PAWN is a given-data method, so any (X, Y) sample works with no special
+    design. It is a good choice when the output is skewed or multimodal, so
     that variance-based indices summarize its uncertainty poorly.
 
-    Correlated inputs are supported: PAWN conditions on bins of one input
-    and compares output CDFs, so a declared ``problem.correlation`` does
-    not invalidate the indices. Each index then measures the input's
-    *total* influence, which includes influence carried through its
-    correlated partners. An input that the model ignores can therefore
-    score above 0 when it correlates with an influential input. That
-    reading is correct, not an estimation error.
+    Correlated parameters are supported. PAWN conditions on bins of one
+    parameter and compares output CDFs, so a declared ``problem.correlation``
+    does not invalidate the indices. Each index then measures the parameter's
+    total influence, which includes influence carried through its correlated
+    partners. A parameter that the model ignores can therefore score above 0
+    when it correlates with an influential parameter. That reading is
+    correct, not an estimation error.
 
     Args:
         problem: Problem definition with D parameters.
-        X: Input sample matrix ``(N, D)``.
-        Y: Model output ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
-        n_bins: Number of conditioning bins per *continuous* input
-            (equal-probability under the input's marginal). More bins
-            condition each input more tightly but leave fewer samples per
-            bin (roughly ``N / n_bins``), making each KS value noisier; the
-            default of 10 suits N in the thousands. A categorical input
-            ignores it and uses one bin per level.
+        X: Input samples, shape ``(N, D)``.
+        Y: Model outputs, shape ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
+        n_bins: Number of conditioning bins per continuous parameter, which
+            are equal-probability under that parameter's marginal. More bins
+            condition each parameter more tightly but leave fewer samples per
+            bin, roughly ``N / n_bins``, which makes each KS value noisier.
+            The default of 10 suits N in the thousands. A categorical
+            parameter ignores this and uses one bin per level.
         statistic: Aggregation of KS values across bins. ``"median"``
-            (default) is robust to a few noisy bins; ``"max"`` is the
-            conservative choice for screening out non-influential inputs
-            (an input is negligible only if *no* bin shifts the output);
-            ``"mean"`` weights all bins equally.
-        n_bootstrap: Number of bootstrap resamples for confidence
-            intervals. Set to 0 to skip.
-        conf_level: Confidence level for bootstrap intervals.
-        seed: Random seed for bootstrap resampling.
+            (default) is robust to a few noisy bins. ``"max"`` is the
+            conservative choice for screening out non-influential
+            parameters, because a parameter is negligible only if no bin
+            shifts the output. ``"mean"`` weights all bins equally.
+        n_bootstrap: Number of bootstrap resamples for confidence intervals.
+            ``0`` disables the confidence intervals.
+        conf_level: Confidence level for the bootstrap intervals.
+        seed: Random seed for the bootstrap resampling.
         slice_chunk_size: Accepted for signature parity with the other
-            ``analyze`` functions; PAWN needs no output-slice chunking,
-            so it has no effect.
+            ``analyze`` functions. PAWN needs no output-slice chunking, so
+            this has no effect.
 
     Returns:
-        PAWNResult with PAWN indices and optional confidence intervals.
+        A :class:`PAWNResult` with ``pawn`` shaped ``(D,)``, ``(K, D)``, or
+        ``(T, K, D)``, and optional confidence intervals in ``pawn_conf``.
 
     Raises:
         ValueError: If X is not 2-D, its column count does not match the
             problem, X and Y have differing row counts, ``statistic`` is
-            not one of ``"median"``/``"max"``/``"mean"``, ``n_bins < 2``,
-            ``conf_level`` is not in ``(0, 1)``, or ``problem`` has
-            categorical parameters (the equal-probability bins follow the
-            code order, which is arbitrary for unordered levels).
+            not one of ``"median"``/``"max"``/``"mean"``, ``n_bins < 2``, or
+            ``conf_level`` is not in ``(0, 1)``.
     """
     X = jnp.asarray(X)
     # PAWN conditions on bins of each input and compares output CDFs, so a

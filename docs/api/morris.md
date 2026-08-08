@@ -1,9 +1,10 @@
 # Morris
 
-Elementary-effects screening (`mu_star`, `sigma`) that ranks many parameters
-cheaply before a more expensive variance-based analysis.
+`jaxgsa.morris.analyze()` computes elementary-effects screening measures
+(`mu_star` and `sigma`). They rank many parameters cheaply, before a more
+expensive variance-based analysis.
 
-The canonical API reference now lives at [API Reference](/api/).
+The canonical API reference lives at [API Reference](/api/).
 
 Jump directly to:
 

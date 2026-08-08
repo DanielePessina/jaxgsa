@@ -11,25 +11,26 @@ from jaxgsa.problem import Problem
 
 
 def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
-    """Map each column of X to [0, 1] via its marginal CDF.
+    """Map each column of ``X`` to ``[0, 1]`` through its marginal CDF.
 
-    Uniform inputs use an affine map. Gaussian inputs (truncated or
-    not) are mapped through their normal CDF. The result is always in
-    [0, 1], suitable for B-spline bases or further affine mapping to
-    [-1, 1] for Legendre polynomials.
+    Uniform inputs use an affine map. Gaussian inputs, truncated or not, go
+    through their normal CDF. The result always lies in ``[0, 1]``. That
+    suits a B-spline basis directly, or a further affine map to ``[-1, 1]``
+    for Legendre polynomials.
 
     Args:
-        X: (N, D) input samples in physical units.
+        X: ``(N, D)`` input samples in physical units.
         problem: Problem with per-dimension distribution specs.
 
     Returns:
-        (N, D) array with each column in [0, 1].
+        ``(N, D)`` array with each column in ``[0, 1]``.
 
     Raises:
-        ValueError: If any parameter is categorical — its step CDF collapses
-            each level onto one point, which would silently discard the
-            level structure. The expansion methods that call this transform
-            reject categorical problems up front; this is the layered guard.
+        ValueError: If any parameter is categorical. Its step CDF collapses
+            each level onto one point, which would silently discard the level
+            structure. The expansion methods that call this transform already
+            reject categorical problems up front, so this is a second,
+            layered guard.
     """
     from jax.scipy.stats import norm as jax_norm
     from scipy.stats import truncnorm
@@ -67,4 +68,4 @@ def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
             u = jax_norm.cdf(X[:, d], loc=mean, scale=std)
             cols.append(jnp.clip(u, UNIT_CLIP, 1.0 - UNIT_CLIP))
 
-    return jnp.column_stack(cols)  # reassemble per-dimension columns into (N, D)
+    return jnp.column_stack(cols)

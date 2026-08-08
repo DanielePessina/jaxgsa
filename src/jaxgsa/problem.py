@@ -30,9 +30,9 @@ class UniformInputSpec(TypedDict):
 class GaussianInputSpec(TypedDict):
     """Gaussian (normal) marginal distribution, optionally truncated.
 
-    Note that ``variance`` is the variance, not the standard deviation.
-    Provide ``low`` and/or ``high`` to truncate the support; omit both for an
-    unbounded Gaussian.
+    ``variance`` is the variance, not the standard deviation. Provide ``low``
+    and/or ``high`` to truncate the support. Omit both for an unbounded
+    Gaussian.
     """
 
     dist: Literal["gaussian"]
@@ -51,7 +51,8 @@ class CategoricalInputSpec(TypedDict):
     codes ``0 .. L-1`` (as floats), never physical values. ``probs`` must be
     positive and sum to 1 (small rounding error is renormalized). Optional
     ``labels`` (strings or numbers, one per level) are stored on the
-    ``Problem`` for reporting only — see :attr:`Problem.categorical_labels`.
+    ``Problem`` for reporting only; read them back from
+    :attr:`Problem.categorical_labels`.
     """
 
     dist: Literal["categorical"]
@@ -254,20 +255,40 @@ def _canonical_correlation(
 ) -> _CorrelationTuple | None:
     """Validate a correlation matrix and freeze it into hashable form.
 
-    ``None`` passes through (independent inputs). Anything else is converted
-    from ``kind`` to the latent scale, validated (with positive-definiteness
-    repair), and stored as a nested tuple of floats so ``Problem`` stays
-    frozen and hashable. ``policy`` grades how loudly the repair reports
-    itself; every ``Problem`` surface declares ``"declared"``.
+    ``None`` passes through and means independent inputs. Any other matrix is
+    converted from ``kind`` to the latent scale and validated, which includes
+    the positive-definiteness repair. The result is stored as a nested tuple
+    of floats, so ``Problem`` stays frozen and hashable. ``policy`` grades how
+    loudly the repair reports itself. Every ``Problem`` surface passes
+    ``"declared"``.
 
-    Categorical parameters get special handling around the repair. The
-    categorical-coupling check runs on the *declared* matrix, before the
-    repair: the repair's eigendecomposition fills decoupled categorical rows
-    with float-level noise, and the check must not mistake that noise for a
-    declared coupling. After the repair the categorical rows and columns are
-    reset to exact identity, so the stored matrix carries exact zeros. The
-    reset keeps the matrix positive definite: the result is block-diagonal,
-    with an identity block and a principal submatrix of the repaired matrix.
+    Categorical parameters need care around the repair. The
+    categorical-coupling check runs on the matrix as the caller declared it,
+    before the repair. The repair's eigendecomposition fills decoupled
+    categorical rows with float-level noise, and the check must not read that
+    noise as a declared coupling. After the repair, the categorical rows and
+    columns are reset to exact identity, so the stored matrix carries exact
+    zeros. The reset keeps the matrix positive definite: the result is
+    block-diagonal, built from an identity block and a principal submatrix of
+    the repaired matrix.
+
+    Args:
+        correlation: ``(D, D)`` candidate correlation matrix, or ``None`` for
+            independent inputs.
+        names: Parameter names in model-input order.
+        input_specs: Normalized input spec per parameter, in the same order
+            as ``names``.
+        kind: Scale ``correlation`` is expressed on, ``"latent"`` or
+            ``"spearman"``.
+        policy: Repair policy passed through to the copula validator.
+
+    Returns:
+        The validated latent matrix as a nested tuple of floats, or ``None``
+        when ``correlation`` is ``None``.
+
+    Raises:
+        ValueError: If ``correlation`` couples a categorical parameter, or if
+            it fails the copula validation.
     """
     if correlation is None:
         return None
@@ -327,8 +348,15 @@ def _check_correlation_touches_categorical(
     Entries within ``_CATEGORICAL_COUPLING_TOL`` of zero count as zero.
 
     Only the rows are checked. A stored matrix is symmetric, so its rows
-    cover the columns; a declared matrix whose coupling sits in the column
-    only is asymmetric and fails the symmetry validation instead.
+    already cover the columns. A declared matrix whose coupling sits in the
+    column only is asymmetric, and it fails the symmetry validation instead.
+
+    Args:
+        names: Parameter names in model-input order.
+        input_specs: Normalized input spec per parameter, in the same order
+            as ``names``.
+        correlation: ``(D, D)`` correlation matrix, or ``None`` to skip the
+            check.
 
     Raises:
         ValueError: If any off-diagonal row entry of ``correlation`` above
@@ -396,18 +424,19 @@ class Problem:
     ``(low, high)`` bounds. Use :meth:`from_dict` when you need mixed
     uniform, Gaussian, and categorical marginals.
 
-    Optionally, a Gaussian-copula ``correlation`` matrix couples the
-    marginals: samples then follow the declared dependence structure while
-    each parameter keeps its marginal exactly as written.
-    ``jaxgsa.sampling.monte_carlo`` honors it transparently; methods whose
-    indices assume independent inputs refuse a correlated problem with a
-    ``ValueError``.
+    A Gaussian-copula ``correlation`` matrix optionally couples the
+    marginals. Samples then follow the declared dependence structure, and
+    each parameter still keeps its marginal exactly as written.
+    ``jaxgsa.sampling.monte_carlo`` honors the matrix transparently. Methods
+    whose indices assume independent inputs refuse a correlated problem with
+    a ``ValueError``.
 
     Attributes:
         names: Parameter names in model-input order.
         bounds: Per-parameter ``(low, high)`` tuples when every marginal is
-            uniform, or ``None`` as soon as any marginal is Gaussian (whose
-            support has no meaningful finite bounds).
+            uniform, or ``None`` as soon as one is not. A Gaussian support has
+            no meaningful finite bounds, and a categorical marginal carries
+            level codes rather than a range.
         output_names: Optional labels for the model's outputs, used to name
             the ``output`` coordinate in ``to_dataset()`` exports.
     """
@@ -437,9 +466,10 @@ class Problem:
             correlation: Optional ``(D, D)`` Gaussian-copula correlation
                 matrix declaring the dependence between parameters. ``None``
                 (default) means independent inputs. Validated on entry. A
-                slightly non-positive-definite matrix is repaired with a
-                ``UserWarning``; one that would have to move an entry by 0.05
-                or more is rejected with a ``ValueError``.
+                slightly non-positive-definite matrix is repaired and reported
+                with a ``UserWarning``. A matrix whose repair would have to
+                move an entry by 0.05 or more is rejected with a
+                ``ValueError``.
             correlation_kind: Scale ``correlation`` is expressed on:
                 ``"latent"`` (default) for the Pearson correlation of the
                 copula's latent normals, ``"spearman"`` for a rank
@@ -496,9 +526,10 @@ class Problem:
                 then shares. A side the spec already declares is kept as
                 written, so only open sides are filled.
 
-                A marginal bounded this way is *genuinely* bounded, so
-                :func:`jaxgsa.morris.sample` does not squash it a second time
-                and :meth:`jaxgsa.sobol.SobolSamples.to_morris` stops warning
+                A marginal bounded this way carries real bounds, not a
+                display convention. :func:`jaxgsa.morris.sample` therefore
+                does not squash it a second time, and
+                :meth:`jaxgsa.sobol.SobolSamples.to_morris` stops warning
                 about unbounded tails.
             correlation: Optional ``(D, D)`` Gaussian-copula correlation
                 matrix declaring the dependence between parameters; rows and
@@ -540,10 +571,9 @@ class Problem:
     ) -> "Problem":
         """Return a copy of this problem with the given correlation matrix.
 
-        ``Problem`` is frozen, so attaching a correlation after construction
-        — the fit-then-attach workflow with
-        ``jaxgsa.sampling.fit_correlation`` — goes through this copy
-        constructor:
+        ``Problem`` is frozen, so a correlation attached after construction
+        goes through this copy constructor. That is the fit-then-attach
+        workflow with ``jaxgsa.sampling.fit_correlation``:
 
         .. code-block:: python
 
@@ -658,9 +688,9 @@ class Problem:
         """Level labels of every categorical parameter, keyed by name.
 
         Samples always carry the integer level codes ``0 .. L-1`` (as
-        floats); code ``i`` of a parameter maps to ``labels[i]``. The labels
-        are reporting metadata only — jaxgsa never relabels arrays. The dict
-        is empty when the problem has no categorical parameters.
+        floats). Code ``i`` of a parameter maps to ``labels[i]``. The labels
+        are reporting metadata only, and jaxgsa never relabels arrays. The
+        dict is empty when the problem has no categorical parameters.
         """
         return {
             self.names[d]: payload[1]

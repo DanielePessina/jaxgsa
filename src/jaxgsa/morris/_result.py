@@ -1,4 +1,4 @@
-"""Defines the MorrisResult dataclass for elementary-effects screening."""
+"""Result container for Morris elementary-effects screening measures."""
 
 from __future__ import annotations
 
@@ -17,28 +17,34 @@ from jaxgsa.problem import Problem
 class MorrisResult:
     """Morris elementary-effects screening measures.
 
-    For scalar-output models, measure arrays have shape ``(D,)``; for
-    multi-output models ``(K, D)``; for time-resolved analyses ``(T, K, D)``.
-    Confidence interval arrays (``*_conf``) have an extra leading dimension of
-    size 2 representing ``[lower, upper]`` bounds.
+    Measure arrays have shape ``(D,)`` for a scalar output, ``(K, D)`` for a
+    multi-output model, and ``(T, K, D)`` for a time-resolved analysis.
 
-    Elementary effects are computed in unit-cube coordinates by default
-    (``space == "unit"``), making ``mu_star`` directly comparable across
-    parameters with different ranges. Use :meth:`to_physical_units` for
-    derivative-scale values in the problem's native units.
+    The analysis computes elementary effects in unit-cube coordinates by
+    default, which the ``space == "unit"`` field records. In that space
+    ``mu_star`` compares directly across parameters with different ranges. Use
+    :meth:`to_physical_units` for derivative-scale values in the problem's
+    native units.
 
     Attributes:
-        mu: Mean elementary effect; sign cancellation can mask non-monotonic
-            influence.
-        mu_star: Mean absolute elementary effect (Campolongo et al. 2007), the
-            headline importance measure and a proxy for total-order ranking.
-        sigma: Standard deviation of the elementary effects (ddof=1); large
-            values relative to ``mu_star`` indicate nonlinearity or
-            interactions.
+        mu: Mean elementary effect, shape ``(..., D)``. The sign is kept, so
+            effects of opposite sign can cancel and hide a non-monotonic
+            parameter.
+        mu_star: Mean absolute elementary effect, shape ``(..., D)``
+            (Campolongo et al. 2007). This is the headline importance measure
+            and a proxy for total-order ranking.
+        sigma: Standard deviation of the elementary effects (ddof=1), shape
+            ``(..., D)``. A value that is large next to ``mu_star`` shows
+            nonlinearity or interactions.
         problem: Problem definition used for the analysis.
-        mu_conf: Optional bootstrap CI bounds on ``mu``, shape ``(2, ...)``.
-        mu_star_conf: Optional bootstrap CI bounds on ``mu_star``.
-        sigma_conf: Optional bootstrap CI bounds on ``sigma``.
+        mu_conf: Bootstrap confidence bounds on ``mu``, shape ``(2, ...)`` for
+            ``[lower, upper]``. ``None`` when the analysis ran no bootstrap.
+        mu_star_conf: Bootstrap confidence bounds on ``mu_star``, shape
+            ``(2, ...)`` for ``[lower, upper]``. ``None`` when the analysis ran
+            no bootstrap.
+        sigma_conf: Bootstrap confidence bounds on ``sigma``, shape
+            ``(2, ...)`` for ``[lower, upper]``. ``None`` when the analysis ran
+            no bootstrap.
         space: Coordinate space of the measures, ``"unit"`` or ``"physical"``.
     """
 
@@ -54,13 +60,13 @@ class MorrisResult:
     def to_physical_units(self) -> MorrisResult:
         """Return a copy with measures rescaled to physical input units.
 
-        Unit-cube elementary effects divide the output change by a step in
-        ``[0, 1]`` coordinates; dividing each measure by the parameter range
-        ``high - low`` converts it to a per-physical-unit (derivative-scale)
-        effect, comparable to DGSM's mean derivative.
+        A unit-cube elementary effect divides the output change by a step in
+        ``[0, 1]`` coordinates. Dividing each measure by the parameter range
+        ``high - low`` turns it into a per-physical-unit effect. That is a
+        derivative scale, comparable to DGSM's mean derivative.
 
         Returns:
-            A new ``MorrisResult`` with ``space == "physical"``.
+            A new :class:`MorrisResult` with ``space == "physical"``.
 
         Raises:
             ValueError: If the result is already in physical units or the
@@ -92,16 +98,18 @@ class MorrisResult:
         self,
         time_coords: np.ndarray | list | None = None,
     ) -> xr.Dataset:
-        """Convert results to a labeled xarray Dataset.
+        """Convert the measures to a labeled xarray Dataset.
 
         Args:
-            time_coords: Coordinate values for the time dimension when
+            time_coords: Coordinate values for the time dimension, used when
                 ``mu.ndim == 3``. Defaults to integer indices.
 
         Returns:
-            An ``xr.Dataset`` with variables ``mu``, ``mu_star``, ``sigma``,
-            optionally ``*_lower``/``*_upper`` CI bounds, and a ``space``
-            attribute recording the coordinate space.
+            An :class:`xarray.Dataset` with the variables ``mu``, ``mu_star``,
+            and ``sigma``, each shaped ``(D,)``, ``(K, D)``, or ``(T, K, D)``.
+            It also holds ``*_lower`` and ``*_upper`` confidence bounds when
+            the analysis ran a bootstrap, and a ``space`` attribute that
+            records the coordinate space.
         """
         dims, coords = _dims_and_coords(self.mu.ndim, self.mu.shape, self.problem, time_coords)
 
@@ -111,8 +119,8 @@ class MorrisResult:
             "sigma": (dims, np.asarray(self.sigma)),
         }
 
-        # Split the (2, ...) confidence arrays into *_lower and *_upper
-        # variables so users can select bounds without integer indexing.
+        # Split each (2, ...) confidence array into *_lower and *_upper
+        # variables so users can select a bound without integer indexing.
         for name, arr in [
             ("mu", self.mu_conf),
             ("mu_star", self.mu_star_conf),

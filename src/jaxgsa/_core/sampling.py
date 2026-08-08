@@ -1,9 +1,10 @@
 """Shared low-level sampling helpers.
 
-Marginal transforms in both directions (unit cube to the problem's declared
-distributions and back), power-of-2 utilities for Sobol'-sequence sizing, and
-stable row deduplication. Used by the Sobol', Morris, and eFAST samplers as well as
-:func:`jaxgsa.sampling.monte_carlo`.
+This module holds three groups of helper. Marginal transforms map the unit
+cube to the problem's declared distributions and back. Power-of-2 utilities
+size a Sobol' sequence. One deduplication routine drops repeated design rows
+while keeping their first-occurrence order. The Sobol', Morris, and eFAST
+samplers use them, as does :func:`jaxgsa.sampling.monte_carlo`.
 """
 
 from __future__ import annotations
@@ -22,23 +23,23 @@ if TYPE_CHECKING:
 #
 # Unit-cube coordinates are clipped into ``[UNIT_CLIP, 1 - UNIT_CLIP]`` before
 # an inverse CDF runs, because ``ppf(0)`` and ``ppf(1)`` return -inf and +inf.
-# The clip therefore *is* the library's support bound: no Gaussian draw can
-# ever leave the range +/-7.0345 standard deviations from its mean.
+# That clip is what bounds the support: no Gaussian draw can ever leave the
+# range +/-7.0345 standard deviations from its mean.
 #
 # The value stays at 1e-12 on purpose. It is Hermite-safe to about degree 8,
-# and the moment error it introduces is about 1e-10 — far below any sampling
-# error a user will see. A larger clip would visibly truncate the marginal; a
+# and the moment error it introduces is about 1e-10, far below any sampling
+# error a user will see. A larger clip would visibly truncate the marginal. A
 # smaller one runs into the tail resolution of the scipy quantile functions.
 UNIT_CLIP = 1e-12
 
 
 def _is_power_of_2(n: int) -> bool:
-    """Check whether *n* is a positive power of 2."""
+    """Check whether ``n`` is a positive power of 2."""
     return n >= 1 and (n & (n - 1)) == 0
 
 
 def _next_power_of_2(n: int) -> int:
-    """Return the smallest power of 2 that is >= *n*."""
+    """Return the smallest power of 2 that is >= ``n``."""
     if n <= 0:
         return 1
     # Bit-length trick: (n-1).bit_length() gives the position of the highest
@@ -170,10 +171,10 @@ def _inverse_transform_samples(problem: Problem, samples_physical: np.ndarray) -
     """Recover unit-cube coordinates from samples in the problem's marginals.
 
     Inverse of :func:`_transform_samples`, computed in float64 throughout.
-    Precision matters because the recovered coordinates are differenced to form
-    elementary-effect *denominators*: the float32 JAX equivalent
-    (:func:`jaxgsa._core.transforms.cdf_to_unit_interval`) loses too many digits
-    to divide by safely.
+    Precision matters because the recovered coordinates are differenced to
+    form the denominator of an elementary effect. The float32 JAX equivalent
+    (:func:`jaxgsa._core.transforms.cdf_to_unit_interval`) loses too many
+    digits to divide by safely.
 
     Args:
         problem: Problem definition whose marginals produced the samples.
@@ -183,9 +184,9 @@ def _inverse_transform_samples(problem: Problem, samples_physical: np.ndarray) -
         Unit-cube coordinates of shape ``(N, D)``, dtype float64.
 
     Raises:
-        ValueError: If any parameter is categorical — the step CDF maps a
-            whole probability bin onto one code, so no unit-cube coordinate
-            can be recovered.
+        ValueError: If any parameter is categorical. Its step CDF maps a whole
+            probability bin onto one code, so no unit-cube coordinate can be
+            recovered.
     """
     unit = np.empty_like(samples_physical, dtype=np.float64)
 
@@ -213,6 +214,9 @@ def _inverse_transform_samples(problem: Problem, samples_physical: np.ndarray) -
 
 def _stable_unique_rows(samples: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Deduplicate rows while preserving first-occurrence order.
+
+    Args:
+        samples: ``(N, D)`` design matrix in physical units.
 
     Returns:
         ``(unique_samples, expanded_to_unique)`` where ``expanded_to_unique``

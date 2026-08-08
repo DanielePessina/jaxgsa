@@ -1,7 +1,7 @@
 # Contributing to jaxgsa
 
-Thanks for your interest in improving jaxgsa! This guide covers the local setup
-and the checks a pull request is expected to pass.
+Thanks for your interest in improving jaxgsa. This guide covers the local setup
+and the checks your pull request must pass.
 
 ## Development setup
 
@@ -31,8 +31,9 @@ Please also:
 - Keep public APIs documented with Google-style docstrings.
 - Update `CHANGELOG.md` under the unreleased section when user-facing behaviour
   changes.
-- If you touch the public API, run `uv run python scripts/check_api_docs_coverage.py`
-  so the reference docs stay complete.
+- If you touch the public API, run
+  `uv run python scripts/check_api_docs_coverage.py`. This keeps the reference
+  docs complete.
 
 ## Reporting issues
 

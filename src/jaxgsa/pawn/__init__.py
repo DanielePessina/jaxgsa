@@ -1,13 +1,13 @@
 """PAWN sensitivity analysis (Pianosi & Wagener, 2015).
 
-PAWN measures how much fixing an input changes the *entire* output
-distribution, not just its variance: the index is the Kolmogorov-Smirnov
+PAWN measures how much fixing a parameter changes the whole output
+distribution, not just its variance. The index is the Kolmogorov-Smirnov
 distance between the unconditional output CDF and the CDF conditional on
-the input, aggregated over conditioning bins. It is a given-data method
-(any (X, Y) sample works) and is a good pick when the output is skewed
-or multimodal, where variance is a poor summary of uncertainty.
+the parameter, aggregated over conditioning bins. PAWN is a given-data
+method, so any (X, Y) sample works. It is a good choice when the output is
+skewed or multimodal, where variance is a poor summary of uncertainty.
 
-Categorical inputs are supported. A categorical parameter gets one
+Categorical parameters are supported. A categorical parameter gets one
 conditioning class per level instead of a bin of its range, so its index
 does not depend on the order of the level codes.
 

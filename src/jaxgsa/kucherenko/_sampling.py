@@ -9,17 +9,18 @@ base point ``k`` contributes three input rows:
 3. ``(y'_k, z_k)`` with ``y'_k`` drawn from the conditional ``p(y | z = z_k)``.
 
 Row 1 is shared by every parameter, so the full design has ``n * (2D + 1)``
-rows. The dependence structure is the problem's Gaussian copula: both
+rows. The dependence structure is the problem's Gaussian copula. Both
 conditionals are closed-form Gaussians in the latent standard-normal space
-(:func:`jaxgsa._core.copula.build_conditional_plan`), and the marginal inverse
-CDFs map the latent draws to physical units at the very end. Under an identity
-correlation the conditionals collapse to fresh independent draws and the design
-is exactly the Saltelli column-swap scheme with ``A``, ``AB_i``-complement, and
-``AB_i`` blocks.
+(:func:`jaxgsa._core.copula.build_conditional_plan`). The marginal inverse CDFs
+map the latent draws to physical units at the very end. Under an identity
+correlation the conditionals collapse to fresh independent draws, and the
+design is exactly the Saltelli column-swap scheme with ``A``,
+``AB_i``-complement, and ``AB_i`` blocks.
 
-The base draws come from one scrambled Sobol' sequence of dimension ``2D``:
-the first ``D`` columns drive the joint block, the last ``D`` the conditional
-redraws — the same pairing the Saltelli ``(A, B)`` construction uses.
+The base draws come from one scrambled Sobol' sequence of dimension ``2D``. The
+first ``D`` columns drive the joint block and the last ``D`` drive the
+conditional redraws. That is the same pairing the Saltelli ``(A, B)``
+construction uses.
 
 References:
     Kucherenko, Tarantola & Annoni (2012). Comput. Phys. Commun. 183:937-946.
@@ -55,22 +56,24 @@ class KucherenkoSamples(UniqueDesignSamples):
     ``(n_runs, D)``), then pass this object and the outputs to
     :func:`jaxgsa.kucherenko.analyze`.
 
-    The design is stored as ``2D + 1`` stacked blocks of ``base_n`` rows each:
-    the joint block first, then one conditional block per parameter for the
-    first-order index, then one per parameter for the total index. Every
+    The design is stored as ``2D + 1`` stacked blocks of ``base_n`` rows each.
+    The joint block comes first. Then comes one conditional block per parameter
+    for the first-order index, and one per parameter for the total index. Every
     conditional draw is a distinct continuous point, so the design has no
-    duplicate rows and the expansion map is the identity — the
-    :class:`~jaxgsa._core.samples.UniqueDesignSamples` base is used for its
-    NPZ persistence and metadata schema, not for deduplication.
+    duplicate rows and the expansion map is the identity. The
+    :class:`~jaxgsa._core.samples.UniqueDesignSamples` base is used for its NPZ
+    persistence and metadata schema, not for deduplication.
 
     Attributes:
-        samples: Rows to evaluate, shape ``(base_n * (2D + 1), D)`` in the
-            problem's physical units.
-        n_expanded: Equal to ``n_runs``; the design has no duplicate rows.
-        expanded_to_unique: Identity index map.
+        samples: Rows to evaluate in the problem's physical units, shape
+            ``(base_n * (2D + 1), D)``.
+        n_expanded: Equal to ``n_runs``, because the design has no duplicate
+            rows.
+        expanded_to_unique: Identity index map, shape ``(n_runs,)``.
         base_n: Base points ``n`` per block, a power of two.
         n_params: Number of parameters ``D``.
-        problem: Problem definition, including its ``correlation``.
+        problem: Problem definition used for the analysis, including its
+            ``correlation``.
     """
 
     samples: np.ndarray
@@ -129,8 +132,8 @@ def sample(
     The dependence structure comes from ``problem.correlation``. An
     uncorrelated problem gives the classic Saltelli column-swap design, and
     the analysis then reproduces the classic Sobol' indices. This sampler is
-    deliberately exempt from the correlated-design guard on ``sobol`` /
-    ``morris`` / ``efast``: conditioning on the declared copula is exactly
+    deliberately exempt from the correlated-design guard on ``sobol``,
+    ``morris``, and ``efast``. Conditioning on the declared copula is exactly
     what the Kucherenko estimators are for.
 
     Args:
@@ -138,8 +141,8 @@ def sample(
             optional ``correlation``.
         n_samples: Requested base points per block, at least 2. Rounded up to
             the next power of two.
-        scramble: Whether to Owen-scramble the Sobol' sequence (recommended;
-            different seeds then give statistically independent designs).
+        scramble: Whether to Owen-scramble the Sobol' sequence. Keep it on:
+            different seeds then give statistically independent designs.
         seed: Seed for the scrambling.
 
     Returns:

@@ -1,10 +1,32 @@
 # xarray Labeled Output
 
-`to_dataset()` turns `jaxgsa` results into labeled `xarray.Dataset` objects so
-you can select by parameter name, output name, time coordinate, and term label
-instead of raw integer axes.
+By the end of this page you will have two `xarray.Dataset` objects, one from a
+Sobol analysis and one from an RS-HDMR analysis of the same model. In both you
+can select a number by parameter name, output name, time coordinate, or term
+label, instead of counting integer axes.
+
+`to_dataset()` does the conversion. An `xarray.Dataset` is a container of named
+arrays that share named axes (dimensions) and axis labels (coordinates), so
+`sel(param="amplitude")` replaces an index like `[..., 0]`.
 
 ## Self-contained setup
+
+The setup below runs in five steps.
+
+1. Declare the problem, with three named input parameters and two named
+   outputs. The names given here become the `param` and `output` coordinate
+   labels in every dataset built later.
+2. Write the model. It returns displacement and velocity at 30 timepoints,
+   stacked last, which is the `(N, T, K)` layout: `N` model runs, `T`
+   timepoints, `K` outputs.
+3. Run Sobol. `num_resamples=100` and a random `key` turn on bootstrap
+   resampling, which is what produces the confidence intervals used further
+   down. Without them there would be no `S1_lower` or `S1_upper` to export.
+4. Run RS-HDMR on a separate set of 1500 uniform random points. HDMR fits a
+   surrogate to arbitrary `(X, Y)` pairs, so it does not need the structured
+   Saltelli design that Sobol uses, and it gets its own sample.
+5. Export both results. Passing `time_coords=time_values` labels the time axis
+   with the real time values rather than the integers 0 to 29.
 
 ```python
 import jax
@@ -80,9 +102,29 @@ print(
 )
 ```
 
+The printed dimensions line accounts for every axis in the result. `time: 30`
+is the 30 timepoints, `output: 2` the two named outputs, and `param: 3` the
+three input parameters. `param_i` and `param_j` are both 3 as well, because the
+second-order indices `S2` cover pairs of parameters and so need a parameter
+axis twice.
+
+The three selections then return progressively smaller arrays.
+
+- `ds_sobol.S1.sel(param="amplitude")` fixes one of the three parameters and
+  leaves `(time, output)`, so 60 first-order values: amplitude's own share of
+  the variance at each timepoint, for each output.
+- `ds_sobol.ST.sel(output="velocity")` fixes the output and leaves
+  `(time, param)`, so 90 total-order values for velocity alone.
+- The `S2` selection fixes all four axes and returns a single number: the
+  amplitude-frequency interaction in displacement, at the eleventh timepoint.
+  `method="nearest"` is there because `time` holds floating-point values, and
+  asking for an exact float match is fragile.
+
 ## Confidence intervals
 
-Bootstrap intervals are split into separate dataset variables:
+The bootstrap resampling requested with `num_resamples=100` gives each index a
+lower and an upper bound. `to_dataset()` stores those bounds as their own
+dataset variables, named after the index they belong to:
 
 ```python
 print(ds_sobol.S1_lower.sel(param="amplitude"))
@@ -90,16 +132,38 @@ print(ds_sobol.S1_upper.sel(param="amplitude"))
 print(ds_sobol.ST_lower.sel(output="velocity"))
 ```
 
+Each of these has the same dimensions as the index it bounds, so
+`S1_lower.sel(param="amplitude")` lines up element by element with
+`S1.sel(param="amplitude")` from the previous section. Comparing the two tells
+you how much of an index you can trust: an interval that spans zero means the
+sample size does not yet separate that parameter from noise.
+
 ## HDMR dataset
 
-`HDMRResult.to_dataset()` uses `term` for `Sa`, `Sb`, `S`, and `select`, while
-`ST` stays indexed by `param`.
+RS-HDMR fits the output as a sum of terms, one per parameter and one per
+interacting group of parameters. That is why its dataset is indexed
+differently from the Sobol one. `HDMRResult.to_dataset()` uses a `term`
+dimension for `Sa`, `Sb`, `S`, and `select`, whose labels join parameter names
+with a slash. `ST` stays
+indexed by `param`, because a total-order index belongs to a single parameter.
 
 ```python
 print(ds_hdmr.ST.sel(param="amplitude"))
 print(ds_hdmr.Sa.sel(term="amplitude/frequency"))
 print(ds_hdmr.rmse.sel(output="displacement"))
 ```
+
+Read these as follows.
+
+- `ST.sel(param="amplitude")` is amplitude's total contribution, summed over
+  every term it appears in.
+- `Sa.sel(term="amplitude/frequency")` is the structural contribution of the
+  joint amplitude-frequency term: the share of output variance carried by that
+  one term of the fitted surrogate. The matching `Sb` variable holds the
+  correlative part, which goes to zero when the inputs are independent.
+- `rmse.sel(output="displacement")` is the surrogate fit error for
+  displacement. Check it first. If the surrogate does not reproduce the output,
+  the indices derived from it describe the surrogate and not your model.
 
 ## Practical caveats
 

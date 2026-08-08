@@ -1,12 +1,13 @@
 # Optimal Transport
 
-Wasserstein-based sensitivity indices measuring how far fixing an input
-moves the full output distribution, decomposed into advective
-(mean-shift) and diffusive (spread/shape) components. Works on arbitrary
-`(X, Y)` pairs; no structured design, mixed marginals and correlated
-inputs supported.
+`jaxgsa.optimal_transport.analyze()` computes Wasserstein-based sensitivity
+indices. Each index measures how far fixing an input moves the full output
+distribution. Each index splits into an advective (mean-shift) component and a
+diffusive (spread and shape) component. The method works on arbitrary
+`(X, Y)` pairs and needs no structured design. It supports mixed marginals and
+correlated inputs.
 
-The canonical API reference now lives at [API Reference](/api/).
+The canonical API reference lives at [API Reference](/api/).
 
 Jump directly to:
 

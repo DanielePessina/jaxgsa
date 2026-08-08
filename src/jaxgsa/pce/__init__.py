@@ -1,7 +1,8 @@
 """Polynomial Chaos Expansion (PCE) sensitivity analysis.
 
-Orthogonal polynomial surrogate with analytical Sobol indices from
-the expansion coefficients (Sudret, 2008).
+The surrogate is an expansion in orthogonal polynomials. Sobol indices come
+analytically from the expansion coefficients (Sudret, 2008), so no extra
+model evaluations are needed.
 
 Example::
 

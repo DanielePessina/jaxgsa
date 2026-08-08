@@ -1,9 +1,20 @@
 # Bootstrap Confidence Intervals
 
-Use bootstrap resampling when you need uncertainty bounds for Sobol indices,
-not just point estimates.
+A Sobol index computed from a finite sample is an estimate, and a second run
+with a different seed gives a slightly different number. By the end of this
+page you will have a lower and an upper bound around each index, so you can
+tell a real ranking apart from sampling noise.
+
+The bounds come from a bootstrap. The bootstrap draws many resamples of the
+same output array with replacement, recomputes the indices on each resample,
+and reports the spread of those repeated values as a confidence interval.
 
 ## Scalar-output bootstrap
+
+Turn the bootstrap on with two arguments to `analyze`. `num_resamples` sets how
+many resamples to draw, and `key` seeds them, because JAX asks for the random
+state to be explicit. Every `*_conf` array on the result then holds the bounds
+for the matching index array.
 
 ```python
 import jax
@@ -32,6 +43,14 @@ print("ST upper:", result.ST_conf[1])
 print("S2 lower:", result.S2_conf[0])
 print("S2 upper:", result.S2_conf[1])
 ```
+
+Read each index against its own interval, not against the other indices. If the
+interval around `x1`'s `S1` overlaps the interval around `x3`'s `S1`, the run
+does not support ranking those two inputs, however far apart the point
+estimates sit. An interval whose lower bound is above zero is the evidence that
+an input matters at all. To narrow an interval, raise `n_samples` in
+`sobol.sample` and evaluate the model again. Raising `num_resamples` measures
+the same uncertainty more precisely; it does not reduce it.
 
 ## Confidence-interval shapes
 

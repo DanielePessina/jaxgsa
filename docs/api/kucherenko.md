@@ -20,8 +20,9 @@ Public objects:
 
 ## Index reference
 
-Both indices have shape `(..., D)` under the usual output contract: `(D,)`
-for `(N,)` outputs, `(K, D)` for `(N, K)`, `(T, K, D)` for `(N, T, K)`.
+Every index has shape `(..., D)`, where `D` is the number of parameters. The
+leading axes follow the output contract: `(D,)` for a scalar output `(N,)`,
+`(K, D)` for `(N, K)`, and `(T, K, D)` for `(N, T, K)`.
 
 | Index | Definition | Reading |
 | --- | --- | --- |
@@ -35,20 +36,26 @@ Under independent inputs both reduce exactly to the classic Sobol' `S1` and
 
 `sample(problem, n_samples, *, scramble=True, seed=0)` builds
 `base_n * (2D + 1)` rows, where `base_n` is `n_samples` rounded up to the
-next power of two: one joint block, then per parameter one block with
-$X_i$ kept and the rest redrawn from $p(\mathbf{X}_{\sim i} \mid X_i)$, and
-one block with the rest kept and $X_i$ redrawn from
-$p(X_i \mid \mathbf{X}_{\sim i})$. Both conditionals are closed-form
-Gaussians in the latent copula space.
+next power of two. The design holds one joint block, then two blocks per
+parameter. The first keeps $X_i$ and redraws the rest from
+$p(\mathbf{X}_{\sim i} \mid X_i)$. The second keeps the rest and redraws
+$X_i$ from $p(X_i \mid \mathbf{X}_{\sim i})$. Both conditionals are
+closed-form Gaussians in the latent copula space.
 
 The dependence structure comes from `problem.correlation`. The sampler is
-exempt from the correlated-design error on `sobol` / `morris` / `efast`:
-conditioning on the declared copula is the method's purpose. With no declared
-correlation the design is exactly the Saltelli column-swap scheme.
+exempt from the correlated-design error raised by `sobol`, `morris`, and
+`efast`, because conditioning on the declared copula is the method's purpose.
+With no declared correlation the design is exactly the Saltelli column-swap
+scheme.
 
-Raises `ValueError` for categorical problems (the conditional copula needs
-continuous marginals), for fewer than two parameters, and for
-`n_samples < 2`.
+`sample` raises `ValueError` in three cases:
+
+- The problem declares a categorical parameter. The conditional copula needs
+  continuous marginals. Use `jaxgsa.optimal_transport`, `jaxgsa.borgonovo`,
+  `jaxgsa.pawn`, or the Saltelli-based Sobol pipeline instead.
+- The problem has fewer than two parameters. Conditioning on the other
+  parameters is meaningless for `D = 1`.
+- `n_samples < 2`. Raise `n_samples`.
 
 ## Analysis
 
@@ -57,17 +64,23 @@ the paired product over the shared-$X_i$ rows for `S1` and the Jansen squared
 difference over the shared-$\mathbf{X}_{\sim i}$ rows for `ST`. The exact
 formulas are stated in the `jaxgsa.kucherenko._analyze` module docstring.
 
-Base points with any non-finite output are dropped as a group, with a
-`UserWarning`. Zero-variance output slices warn and produce NaN indices.
+Two conditions raise a `UserWarning` instead of an error:
+
+- A base point whose output is non-finite anywhere. `analyze` drops the whole
+  group of rows for that base point. Check the model for failed runs, because
+  the effective sample size falls with every dropped group.
+- An output slice with zero variance. Its indices come back as NaN. Drop that
+  slice, or widen the input ranges so the output varies.
 
 ## Result
 
-- `result.S1`, `result.ST` — the two index arrays.
-- `result.variance` — output variance under the joint input measure, per
+- `result.S1` — the correlation-inclusive first-order index array.
+- `result.ST` — the correlation-exclusive total index array.
+- `result.variance` — the output variance under the joint input measure, per
   output slice.
 - `result.is_correlated` — whether the problem declared a dependence.
-- `result.to_dataset(time_coords=None)` — labeled xarray view (`S1`, `ST`,
-  `variance`).
+- `result.to_dataset(time_coords=None)` — labeled xarray view of `S1`, `ST`,
+  and `variance`.
 
 ## Persistence
 

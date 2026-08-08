@@ -1,15 +1,15 @@
 """Shared rank-partition helpers for given-data methods.
 
-Both the Borgonovo delta and optimal-transport estimators condition on
-classes of each input's value. Continuous inputs use equal-frequency
-classes of the ordinal rank; categorical inputs use one class per level
-(class sizes are the observed level counts). The helpers here build
-static, padded gather indices once (per input, for every bootstrap
-replicate) so the per-column analysis kernels never re-rank the inputs
-and all downstream shapes stay static under JIT.
+Both the Borgonovo delta and optimal-transport estimators condition on classes
+of each input's value. Continuous inputs use equal-frequency classes of the
+ordinal rank. Categorical inputs use one class per level, and the class sizes
+are the observed level counts. The helpers here build static, padded gather
+indices once, per input and for every bootstrap replicate. The per-column
+analysis kernels therefore never re-rank the inputs, and all downstream shapes
+stay static under JIT.
 
 :func:`build_partition_groups` is the one entry point the analyzers use.
-It returns partition *groups* in a canonical layout: every group is a
+It returns partition groups in a canonical layout: every group is a
 ``(cls_idx, counts)`` pair with
 
 - ``cls_idx (R, Dg, Mg, Pg)``: per-replicate global sample indices of
@@ -46,10 +46,10 @@ def _class_layout(N: int, M: int) -> tuple[np.ndarray, np.ndarray]:
     """Build static gather indices for equal-frequency rank classes.
 
     Class ``j`` holds the samples whose ordinal rank ``r`` (1-based)
-    satisfies ``m[j] < r <= m[j+1]`` with ``m = linspace(0, N, M+1)`` --
-    the same membership rule as SALib. Because floor of the shared float
-    edges is used on both sides, class sizes (which differ by at most one)
-    match SALib exactly; classes are padded to the largest size, and the
+    satisfies ``m[j] < r <= m[j+1]`` with ``m = linspace(0, N, M+1)``. That is
+    the same membership rule as SALib. Both sides take the floor of the same
+    float edges, so the class sizes match SALib exactly; they differ from each
+    other by at most one. Classes are padded to the largest size, and the
     kernels derive the validity mask from the sizes
     (:func:`_mask_from_counts`), so downstream shapes stay static.
 
@@ -145,14 +145,14 @@ def _categorical_class_layout(
     all_idx: np.ndarray,
     n_levels: list[int],
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Per-replicate, per-column class layout for categorical columns.
+    """Build the per-replicate, per-column class layout of categorical columns.
 
-    Each column gets one class per declared level; a class holds exactly
-    the rows observed at that level, so class sizes vary across levels,
-    columns, and bootstrap replicates. Members keep their original row
-    order within a class (stable sort — the ``ties.method="first"`` rank
-    convention). Everything is padded to the largest observed class so the
-    downstream kernel shapes stay static.
+    Each column gets one class per declared level. A class holds exactly the
+    rows observed at that level, so class sizes vary across levels, columns,
+    and bootstrap replicates. Members keep their original row order within a
+    class, because the sort is stable; that is the ``ties.method="first"``
+    rank convention. Everything is padded to the largest observed class, so
+    the downstream kernel shapes stay static.
 
     Args:
         codes: Integer level codes ``(N, Dc)`` of the original sample.
@@ -197,10 +197,10 @@ def _categorical_class_layout(
 
 @jax.jit
 def _build_class_indices(X: Array, all_idx: Array, take: Array) -> Array:
-    """Global sample indices of every class, for every replicate.
+    """Return the global sample indices of every class, for every replicate.
 
-    Computed once (never per output-column chunk) so the per-column kernel
-    never re-ranks the inputs.
+    Computed once per analysis, never per output-column chunk, so the
+    per-column kernel never re-ranks the inputs.
 
     Args:
         X: Input sample matrix ``(N, D)``.
@@ -226,18 +226,32 @@ def _build_class_indices(X: Array, all_idx: Array, take: Array) -> Array:
 def _replicate_slice(arr: Array, i: Array) -> Array:
     """Select replicate ``i`` from a canonical ``(R-or-1, ...)`` array.
 
-    A length-1 leading axis marks a layout shared by every replicate; the
-    static Python branch keeps the shared case free of dynamic gathers.
+    A length-1 leading axis marks a layout shared by every replicate. The
+    static Python branch keeps that shared case free of dynamic gathers.
+
+    Args:
+        arr: Array whose leading axis is ``R`` or 1.
+        i: Replicate index, used only when the leading axis is ``R``.
+
+    Returns:
+        The array with its leading replicate axis removed.
     """
     return arr[i] if arr.shape[0] > 1 else arr[0]
 
 
 def _mask_from_counts(counts: Array, n_pad: int) -> Array:
-    """Class-validity mask ``(..., M, P)`` derived from true class sizes.
+    """Derive the class-validity mask ``(..., M, P)`` from true class sizes.
 
-    Entry ``p`` of a class is valid iff ``p < count``. Deriving the mask
-    in-kernel from the (small) counts avoids materializing a boolean
-    ``(R, D, M, P)`` tensor over all replicates.
+    Entry ``p`` of a class is valid when ``p < count``. Deriving the mask
+    inside the kernel from the small counts array avoids materializing a
+    boolean ``(R, D, M, P)`` tensor over all replicates.
+
+    Args:
+        counts: ``(..., M)`` true class sizes.
+        n_pad: Padded class width ``P``.
+
+    Returns:
+        ``(..., M, P)`` boolean mask, ``True`` for a real class member.
     """
     return jnp.arange(n_pad)[(None,) * counts.ndim] < counts[..., None]
 

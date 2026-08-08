@@ -1,4 +1,4 @@
-"""Defines the PAWNResult dataclass for PAWN sensitivity analysis."""
+"""Result container for PAWN distribution-based sensitivity indices."""
 
 from dataclasses import dataclass
 
@@ -14,21 +14,21 @@ from jaxgsa.problem import Problem
 class PAWNResult:
     """PAWN sensitivity analysis results.
 
-    Stores the PAWN index — the Kolmogorov-Smirnov distance between the
-    unconditional output CDF and the CDF conditional on each input,
-    aggregated (median/max/mean) across conditioning bins — plus optional
-    bootstrap confidence intervals.
+    The PAWN index is the Kolmogorov-Smirnov distance between the
+    unconditional output CDF and the CDF conditional on one parameter. The
+    per-bin distances are aggregated across the conditioning bins by median,
+    max, or mean.
 
-    For scalar-output models, ``pawn`` has shape ``(D,)``; for
-    multi-output models ``(K, D)``; for time-series analyses
-    ``(T, K, D)``. ``pawn_conf`` adds a leading axis of size 2.
+    Index arrays have shape ``(D,)`` for a scalar output, ``(K, D)`` for a
+    multi-output model, and ``(T, K, D)`` for a time-resolved analysis.
 
     Attributes:
-        pawn: PAWN sensitivity index per parameter, in [0, 1]. 0 means
-            fixing the input leaves the output distribution unchanged
-            (non-influential); larger values mean stronger influence.
-        pawn_conf: Bootstrap confidence interval ``[lower, upper]``,
-            or ``None`` when ``n_bootstrap=0``.
+        pawn: PAWN sensitivity indices per parameter, shape ``(..., D)``, in
+            [0, 1]. A value of 0 means fixing the parameter leaves the output
+            distribution unchanged, and larger values mean stronger influence.
+        pawn_conf: Bootstrap confidence interval for ``pawn``, shape
+            ``(2, ...)`` for ``[lower, upper]``. ``None`` when
+            ``n_bootstrap=0``.
         problem: Problem definition used for the analysis.
     """
 

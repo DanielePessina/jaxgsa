@@ -3,14 +3,19 @@
 `jaxgsa.hdmr.analyze(problem, X, Y, ...)` fits an RS-HDMR surrogate and returns
 `HDMRResult`.
 
-Important result operations:
+Result operations:
 
-- `result.predict(X_new, batch_size=None)`
-- `result.shapley(include_correlative=False)`
-- `result.to_dataset(time_coords=None)`
+- `result.predict(X_new, batch_size=None)` — evaluate the fitted surrogate on
+  new inputs.
+- `result.shapley(include_correlative=False)` — derive Shapley effects from
+  the fit.
+- `result.to_dataset(time_coords=None)` — labeled xarray view of the indices.
 
-The result exposes ANCOVA term arrays `Sa`, `Sb`, and `S`, parameter totals
-`ST`, structural interaction properties `S1`, `S2`, and `S3`, fit selection
-counts, and RMSE.
+Result fields:
+
+- `Sa`, `Sb`, `S` — the ANCOVA term arrays.
+- `ST` — the total index per parameter.
+- `S1`, `S2`, `S3` — the structural first-, second-, and third-order indices.
+- Fit selection counts and RMSE.
 
 See the [HDMR example](/examples/hdmr) and [API overview](/api/).

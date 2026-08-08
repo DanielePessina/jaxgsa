@@ -1,17 +1,18 @@
 """Main Sobol sensitivity analysis computation using JAX.
 
-This module implements the Saltelli sampling-based Sobol variance decomposition.
-Model outputs Y are split into base matrices A and B and their cross-matrices
-AB (and BA for second-order), then first-order (S1), total-order (ST), and
-optionally second-order (S2) Sobol indices are computed.
+This module implements the Saltelli sampling-based Sobol variance
+decomposition. It splits the model outputs Y into the base matrices A and B
+and their cross-matrices AB (plus BA for second order). It then computes
+first-order (S1), total-order (ST), and optionally second-order (S2) Sobol
+indices.
 
 Array shape conventions used throughout:
-    N  — number of base Sobol samples (base_n after cleaning)
-    D  — number of input parameters
-    T  — number of time steps (singleton-squeezed when absent)
-    K  — number of output variables (singleton-squeezed when absent)
-    R  — number of bootstrap resamples
-    step — rows per Saltelli group: 2D+2 (second order) or D+2 (first only)
+    N: number of base Sobol samples (base_n after cleaning)
+    D: number of input parameters
+    T: number of time steps (singleton-squeezed when absent)
+    K: number of output variables (singleton-squeezed when absent)
+    R: number of bootstrap resamples
+    step: rows per Saltelli group, 2D+2 (second order) or D+2 (first only)
 """
 
 from functools import lru_cache
@@ -65,19 +66,20 @@ def _get_batched_kernel(calc_second_order: bool):
 def _drop_nonfinite(Y: Array, step: int) -> tuple[Array, int]:
     """Drop entire Saltelli groups that contain any non-finite (NaN/Inf) value.
 
-    Each Saltelli group is a contiguous block of ``step`` rows in Y that
-    corresponds to one base sample and its D (or 2D) cross-matrix evaluations.
-    If any single element in the group is non-finite the whole group is removed,
-    because a partial group would corrupt the A/B/AB/BA split.
+    Each Saltelli group is a contiguous block of ``step`` rows in Y. It holds
+    one base sample and its D (or 2D) cross-matrix evaluations. If any single
+    element in the group is non-finite, the whole group is removed. A partial
+    group would corrupt the A/B/AB/BA split.
 
     Args:
-        Y: Model output array, shape (n_rows, ...) where n_rows = N * step.
-            Trailing dimensions are typically (T, K) or absent.
+        Y: Model output array, shape ``(n_rows, ...)`` with
+            ``n_rows = N * step``. Trailing dimensions are typically
+            ``(T, K)`` or absent.
         step: Number of rows per Saltelli group (D+2 or 2D+2).
 
     Returns:
-        (Y_clean, n_dropped) — cleaned output array with shape
-        (N_good * step, ...) and the number of groups that were removed.
+        Tuple ``(Y_clean, n_dropped)``: the cleaned output array with shape
+        ``(N_good * step, ...)``, and the number of groups that were removed.
     """
     n_rows = Y.shape[0]
     base_n = n_rows // step
@@ -109,11 +111,11 @@ def _count_nans(
     ST: Array,
     S2: Array | None,
 ) -> dict[str, int]:
-    """Count NaN values per index array; callers decide whether to report.
+    """Count NaN values per index array, keyed by index name.
 
-    For S2, only the strict upper triangle is counted — the diagonal is NaN
-    by construction (see ``_normalize_s2_matrix``) and would inflate the
-    count.
+    Callers decide whether to report the counts. For S2, only the strict upper
+    triangle is counted. The diagonal is NaN by construction (see
+    ``_normalize_s2_matrix``) and would inflate the count.
     """
     counts: dict[str, int] = {
         "S1": int(jnp.sum(jnp.isnan(S1))),
@@ -132,14 +134,15 @@ def _separate_output_values(
     """De-interleave flat Saltelli output rows into A, B, AB, BA matrices.
 
     Args:
-        Y: Expanded outputs, shape (N * step, ...) with rows in Saltelli
+        Y: Expanded outputs, shape ``(N * step, ...)``, with rows in Saltelli
             group order.
         D: Number of input parameters.
         calc_second_order: Whether the layout includes BA blocks.
 
     Returns:
-        (A, B, AB, BA) with shapes (N, ...), (N, ...), (N, D, ...), and
-        (N, D, ...) respectively; BA is None when second order is off.
+        Tuple ``(A, B, AB, BA)`` with shapes ``(N, ...)``, ``(N, ...)``,
+        ``(N, D, ...)`` and ``(N, D, ...)``. BA is None when second order is
+        off.
     """
     step = 2 * D + 2 if calc_second_order else D + 2
     n_rows = Y.shape[0]
@@ -184,10 +187,11 @@ def _normalize_s2_matrix(S2: Array) -> Array:
 def _analyze_no_bootstrap(
     sampling_result: SobolSamples, Y: Array, *, slice_chunk_size: int
 ) -> SobolResult:
-    """Compute Sobol indices with optimized kernel selection.
+    """Compute Sobol indices without a bootstrap, picking the faster kernel.
 
-    For scalar output (T*K=1), uses a direct fused kernel that computes
-    variance once. For multi-output, vmaps the fused kernel over T*K batches.
+    For a scalar output (T*K=1), call a direct fused kernel that computes the
+    variance once. For a multi-output analysis, vmap the fused kernel over the
+    T*K batches.
     """
     D = sampling_result.n_params
     calc_second_order = sampling_result.calc_second_order
@@ -308,12 +312,13 @@ def _analyze_bootstrap(
     key: Array,
     slice_chunk_size: int,
 ) -> SobolResult:
-    """Bootstrap path: loop over (T, K) combos, vmap over R resamples.
+    """Compute Sobol indices with bootstrap confidence intervals.
 
-    Unlike the no-bootstrap path which vmaps over output slices, here we loop
-    over (T, K) in Python and vmap over R resamples within each slice.  This
-    trades some Python-loop overhead for bounded memory: each vmap call
-    materialises R copies of a single (N,) or (N,D) slice, not R * T * K.
+    The no-bootstrap path vmaps over output slices. This path instead loops
+    over the (T, K) combinations in Python and vmaps over the R resamples
+    inside each slice. That trades some Python-loop overhead for bounded
+    memory: each vmap call materialises R copies of a single (N,) or (N, D)
+    slice, not R * T * K.
     """
     from jaxgsa.sobol._bootstrap import _bootstrap_first_total, _bootstrap_second_order
 
@@ -454,28 +459,27 @@ def analyze(
     """Compute Sobol sensitivity indices from model outputs using JAX.
 
     This is the main entry point of the package. Sobol indices apportion the
-    variance of a model output among its input parameters: S1 (first-order)
-    is the fraction of output variance explained by each parameter alone, ST
-    (total-order) additionally includes all of its interactions with other
-    parameters, and S2 (second-order) isolates pairwise interactions.
+    variance of a model output among its input parameters. S1 (first-order) is
+    the fraction of output variance explained by each parameter alone. ST
+    (total-order) also includes all of that parameter's interactions with the
+    other parameters. S2 (second-order) isolates pairwise interactions.
 
-    The function accepts model outputs Y evaluated at the unique rows
-    returned by ``jaxgsa.sobol.sample()``, reconstructs the expanded Saltelli
-    ordering internally, drops sample groups containing non-finite values
-    (with a warning), and dispatches to either the fast no-bootstrap path or
-    the bootstrap confidence-interval path depending on ``num_resamples``.
+    The function takes the model outputs Y evaluated at the unique rows that
+    ``jaxgsa.sobol.sample()`` returned. It rebuilds the expanded Saltelli
+    ordering internally and drops sample groups that contain non-finite
+    values, with a warning. It then dispatches on ``num_resamples``: to the
+    fast no-bootstrap path, or to the bootstrap confidence-interval path.
 
     Args:
-        sampling_result: Result from ``jaxgsa.sobol.sample()`` containing the unique
+        sampling_result: Result from ``jaxgsa.sobol.sample()`` with the unique
             sample matrix plus expansion metadata.
         Y: Model outputs evaluated at each unique row of
-            ``sampling_result.samples``, in the same row order. Accepted
-            shapes:
-                (n_runs,)       — scalar output, single time step
-                (n_runs, K)     — K outputs, single time step
-                (n_runs, T, K)  — K outputs over T time steps
-            where ``n_runs`` is the unique row count. Indices are computed
-            independently for every (t, k) output slice.
+            ``sampling_result.samples``, in the same row order, where
+            ``n_runs`` is the unique row count. Accepted shapes:
+                ``(n_runs,)``: scalar output, single time step
+                ``(n_runs, K)``: K outputs, single time step
+                ``(n_runs, T, K)``: K outputs over T time steps
+            Indices are computed independently for every (t, k) output slice.
         prenormalize: When ``True``, apply SALib-style global output
             standardization over the cleaned expanded sample axis before
             computing Sobol indices. Each output slice is centered to mean 0
@@ -501,14 +505,15 @@ def analyze(
             device out-of-memory errors. Defaults to 2048.
 
     Returns:
-        SobolResult containing:
-            S1 — first-order indices, shape (D,) / (K, D) / (T, K, D)
-                 for Y of shape (n,) / (n, K) / (n, T, K) respectively
-            ST — total-order indices, same shape as S1
-            S2 — second-order indices with shape (..., D, D), or None when
-                 the design was drawn with ``calc_second_order=False``
-            S1_conf, ST_conf, S2_conf — (2, ...) [lower, upper] CI bounds,
-                 or None when ``num_resamples == 0``
+        SobolResult holding:
+            S1: first-order indices, shape ``(D,)`` / ``(K, D)`` /
+                ``(T, K, D)`` for Y of shape (n,) / (n, K) / (n, T, K)
+                respectively
+            ST: total-order indices, same shape as S1
+            S2: second-order indices with shape ``(..., D, D)``, or None when
+                the design was drawn with ``calc_second_order=False``
+            S1_conf, ST_conf, S2_conf: ``(2, ...)`` [lower, upper] CI bounds,
+                or None when ``num_resamples == 0``
     """
     # Resolve the user-supplied layout (sample axis first, labeled output axis
     # last) against the unique design rows, BEFORE any expansion or resampling

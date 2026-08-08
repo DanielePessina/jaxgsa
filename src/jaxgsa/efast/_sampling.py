@@ -34,35 +34,35 @@ class EFASTSamples:
 
     Terms:
 
-    - ``n_per_curve`` — number of points along each sinusoidal search curve.
+    - ``n_per_curve``: number of points along each sinusoidal search curve.
       There is one curve per parameter, so the design has ``D`` curves.
-    - ``n_runs`` — total number of rows to evaluate, ``n_per_curve * D``
-      (the package-wide meaning: unique rows you run the model on).
+    - ``n_runs``: total number of rows to evaluate, ``n_per_curve * D``. This
+      is the package-wide meaning of unique rows you run the model on.
 
-    Row layout: rows ``i*n_per_curve:(i+1)*n_per_curve`` of ``samples`` form
-    the search curve for parameter ``i`` — the block along which parameter
-    ``i`` oscillates at the primary frequency ``omega_0`` while all other
-    parameters oscillate at lower complementary frequencies.
+    Rows ``i*n_per_curve:(i+1)*n_per_curve`` of ``samples`` form the search
+    curve for parameter ``i``. Along that block, parameter ``i`` oscillates at
+    the primary frequency ``omega_0`` while every other parameter oscillates
+    at a lower complementary frequency.
 
     Attributes:
-        samples: Rows to evaluate with the user's model. Shape
-            ``(n_per_curve * D, D)`` in the problem's physical units (each
-            uniform search-curve marginal transformed into the problem's
-            declared input distribution).
+        samples: Rows to evaluate with the user's model, shape
+            ``(n_per_curve * D, D)``, in the problem's physical units. Each
+            uniform search-curve marginal is transformed into the problem's
+            declared input distribution.
         n_per_curve: Number of samples along each search curve.
-        M: Interference factor used to build the design — how many harmonics
-            of ``omega_0`` are credited to the focal parameter during
-            analysis.
+        M: Interference factor used to build the design. It sets how many
+            harmonics of ``omega_0`` are credited to the focal parameter
+            during analysis.
         problem: Problem definition used to transform the samples.
     """
 
-    samples: np.ndarray  # shape (n_per_curve * D, D), physical units
+    samples: np.ndarray  # (n_per_curve * D, D), physical units
     n_per_curve: int
     M: int
     problem: Problem
 
     def __post_init__(self) -> None:
-        """Validate design consistency.
+        """Check that the design metadata and the sample array agree.
 
         Raises:
             ValueError: If ``M < 1``, ``n_per_curve < 4*M^2*(D-1) + 1``, or
@@ -81,17 +81,17 @@ class EFASTSamples:
 
     @property
     def n_runs(self) -> int:
-        """Number of rows in ``samples`` (model runs to evaluate)."""
+        """Number of rows in ``samples``, which is the number of model runs."""
         return self.n_per_curve * self.problem.num_vars
 
 
 def _min_n_per_curve(D: int, M: int) -> int:
     """Smallest ``n_per_curve`` admitting D distinct search-curve frequencies.
 
-    The focal parameter runs at ``omega_0 = (n_per_curve - 1) // (2*M)`` and
-    the ``D-1`` others must fit as *distinct* integers in
-    ``[1, omega_0 // (2*M)]`` — that upper limit keeps their harmonics clear
-    of the focal parameter's ``M`` harmonics. Requiring
+    The focal parameter runs at ``omega_0 = (n_per_curve - 1) // (2*M)``. The
+    ``D-1`` other parameters must fit as distinct integers in
+    ``[1, omega_0 // (2*M)]``. That upper limit keeps their harmonics clear of
+    the focal parameter's ``M`` harmonics. Requiring
     ``omega_0 // (2*M) >= D-1`` gives ``n_per_curve >= 4*M^2*(D-1) + 1``.
 
     Args:
@@ -140,7 +140,7 @@ def _assign_frequencies(D: int, omega_0: int, M: int) -> np.ndarray:
         M: Interference factor.
 
     Returns:
-        (D-1,) array of distinct complementary frequencies.
+        Distinct complementary frequencies, shape ``(D-1,)``.
 
     Raises:
         ValueError: If ``omega_0`` is too low to give the ``D-1`` non-focal
@@ -150,8 +150,8 @@ def _assign_frequencies(D: int, omega_0: int, M: int) -> np.ndarray:
     if D == 1:
         return np.array([], dtype=np.int64)
     # Spread D-1 complementary frequencies evenly over the integers in
-    # [1, omega_0/(2M)]. Fewer slots than parameters would force duplicates,
-    # which is a silent-bias failure, not a degradation: two non-focal
+    # [1, omega_0/(2M)]. Fewer slots than parameters would force duplicates.
+    # That is a silent-bias failure, not a degradation: two non-focal
     # parameters sharing a frequency also share the curve's phase, so their
     # columns are identical and the model cannot separate them.
     m = omega_0 // (2 * M)
@@ -172,41 +172,42 @@ def sample(
 ) -> EFASTSamples:
     """Generate eFAST samples along sinusoidal search curves.
 
-    For each of the D parameters, generates ``n_per_curve`` samples along a
-    search curve where the focal parameter oscillates at the highest
-    frequency omega_0 and the others at lower complementary frequencies.
-    Evaluate the model on every row of the returned object's ``samples``
-    (``n_per_curve * D`` runs total, keeping the rows in order) and pass
-    the returned object together with the outputs to ``efast.analyze``.
+    For each of the D parameters, this builds ``n_per_curve`` samples along one
+    search curve. On that curve the focal parameter oscillates at the highest
+    frequency omega_0, and the others oscillate at lower complementary
+    frequencies. Evaluate the model on every row of the returned object's
+    ``samples``, keeping the rows in order, for ``n_per_curve * D`` runs in
+    total. Then pass the returned object and the outputs to ``efast.analyze``.
 
     Args:
         problem: Problem definition with parameter distributions.
-        n_per_curve: Number of samples per search curve. Must satisfy
-            ``n_per_curve >= 4*M^2*(D-1) + 1`` so that all ``D`` parameters
-            get distinct frequencies (for ``D == 1`` this is the usual
-            ``n_per_curve > 4*M^2``). Larger values raise
-            omega_0 = (n_per_curve-1)//(2M), separating the focal
-            parameter's harmonics further from the complementary
-            frequencies and improving index accuracy, at the cost of
-            proportionally more model runs.
-        M: Interference factor -- how many harmonics of omega_0 are
-            credited to the focal parameter during analysis. Default 4
-            (the standard choice; rarely needs changing).
-        seed: Random seed for phase-shift reproducibility.
+        n_per_curve: Number of samples per search curve. It must satisfy
+            ``n_per_curve >= 4*M^2*(D-1) + 1``, so that all ``D`` parameters
+            get distinct frequencies. For ``D == 1`` this is the usual
+            ``n_per_curve > 4*M^2``. A larger value raises
+            omega_0 = (n_per_curve-1)//(2M). That separates the focal
+            parameter's harmonics further from the complementary frequencies
+            and improves index accuracy, at the cost of proportionally more
+            model runs.
+        M: Interference factor, the number of harmonics of omega_0 credited to
+            the focal parameter during analysis. Default 4, the standard
+            choice, which rarely needs changing.
+        seed: Random seed, for reproducible phase shifts.
 
     Returns:
-        EFASTSamples carrying the ``(n_per_curve * D, D)`` sample array in
-        the problem's physical units plus the design metadata
-        (``n_per_curve``, ``M``, ``problem``). Rows
+        An ``EFASTSamples`` carrying the ``(n_per_curve * D, D)`` sample array
+        in the problem's physical units, plus the design metadata
+        ``n_per_curve``, ``M``, and ``problem``. Rows
         ``i*n_per_curve:(i+1)*n_per_curve`` form the search curve for
         parameter ``i``.
 
     Raises:
-        ValueError: If ``M < 1``, ``n_per_curve < 4*M^2*(D-1) + 1``,
-            ``problem.correlation`` declares a dependence structure (the
-            search-curve design assumes independent inputs), or ``problem``
-            has categorical parameters (the search curve sweeps each input
-            continuously, which has no meaning for unordered level codes).
+        ValueError: In any of these cases. ``M < 1``.
+            ``n_per_curve < 4*M^2*(D-1) + 1``. ``problem.correlation`` declares
+            a dependence structure, and the search-curve design assumes
+            independent inputs. ``problem`` has categorical parameters, and the
+            search curve sweeps each input continuously, which has no meaning
+            for unordered level codes.
     """
     _raise_correlated_design(problem, "jaxgsa.efast.sample")
     _raise_categorical_design(problem, "jaxgsa.efast.sample")
@@ -218,33 +219,37 @@ def sample(
 
     rng = np.random.default_rng(seed)
 
-    # Max integer frequency fitting n_per_curve samples while keeping M
-    # harmonics below Nyquist.
+    # Largest integer frequency that fits n_per_curve samples while keeping all
+    # M harmonics below Nyquist.
     omega_0 = (n_per_curve - 1) // (2 * M)
     omega_compl = _assign_frequencies(D, omega_0, M)
 
-    # Parametric variable s in [0, 2pi) — uniform grid along the search curve.
+    # Parametric variable s in [0, 2pi): a uniform grid along the search curve.
     s = (2 * math.pi / n_per_curve) * np.arange(n_per_curve)
     X = np.zeros((n_per_curve * D, D))
 
     for i in range(D):
-        # Focal param i gets omega_0 (highest freq = most variation = identifiable);
-        # remaining params get lower complementary frequencies.
+        # Focal parameter i gets omega_0. The highest frequency carries the
+        # most variation, which makes that parameter identifiable. The
+        # remaining parameters get lower complementary frequencies.
         omega = np.zeros(D, dtype=np.int64)
         omega[i] = omega_0
         idx = [j for j in range(D) if j != i]
         omega[idx] = omega_compl
 
-        # Random phase breaks symmetry so each curve samples a different cross-section.
+        # A random phase breaks the symmetry, so each curve samples a
+        # different cross-section.
         phi = 2 * math.pi * rng.random()
 
         row_slice = slice(i * n_per_curve, (i + 1) * n_per_curve)
         for j in range(D):
-            # Cukier's transform: arcsin(sin(w*s+phi))/pi + 0.5 maps sinusoidal
-            # oscillation to uniform [0,1] marginals (otherwise arcsine-shaped).
+            # Cukier's transform: arcsin(sin(w*s+phi))/pi + 0.5 maps the
+            # sinusoidal oscillation to uniform [0, 1] marginals. Without it
+            # the marginals are arcsine-shaped.
             X[row_slice, j] = 0.5 + (1.0 / math.pi) * np.arcsin(np.sin(omega[j] * s + phi))
 
-    # CDF-based transform: map [0,1] samples to the problem's physical parameter space.
+    # CDF-based transform: map the [0, 1] samples into the problem's physical
+    # parameter space.
     X = _transform_samples(problem, X)
 
     return EFASTSamples(samples=X, n_per_curve=n_per_curve, M=M, problem=problem)

@@ -1,8 +1,9 @@
 """Internal helpers for RS-HDMR sensitivity analysis.
 
-Implements pure-JAX cubic B-spline basis evaluation, tensor product construction,
-regularized least squares, backfitting for first-order terms, ANCOVA decomposition,
-and F-test model selection.
+Everything here is pure JAX. The module evaluates the cubic B-spline basis and
+builds its tensor products. It solves the regularized least squares, with
+backfitting for the first-order terms. It then runs the ANCOVA decomposition
+and the F-test model selection.
 """
 
 from functools import partial
@@ -23,11 +24,11 @@ def _bspline_basis(x: Array, m: int) -> Array:
     knot spacing 1/m, scaled by m^3 to match SALib convention.
 
     Args:
-        x: (N,) points in [0, 1].
-        m: number of B-spline intervals.
+        x: Evaluation points in [0, 1], shape ``(N,)``.
+        m: Number of B-spline intervals.
 
     Returns:
-        B: (N, m+3) basis matrix.
+        B: Basis matrix, shape ``(N, m+3)``.
     """
     n_basis = m + 3
     i = jnp.arange(n_basis, dtype=x.dtype)
@@ -71,11 +72,11 @@ def _build_B1(X_n: Array, m: int) -> Array:
     """Build first-order B-spline basis for all dimensions.
 
     Args:
-        X_n: (N, D) normalized inputs in [0, 1].
-        m: number of B-spline intervals.
+        X_n: Normalized inputs in [0, 1], shape ``(N, D)``.
+        m: Number of B-spline intervals.
 
     Returns:
-        B1: (N, m1, D) where m1 = m + 3.
+        B1: First-order basis, shape ``(N, m1, D)`` with m1 = m + 3.
     """
     # vmap over columns of X_n: each dimension gets its own 1-D basis evaluated
     # independently, then axes are permuted to (sample, basis, dimension).
@@ -91,12 +92,12 @@ def _build_B2(B1: Array, c2: Array, beta: Array) -> Array:
     of materializing both (N, m2, n2) gather products as eager transients.
 
     Args:
-        B1: (N, m1, D) first-order basis.
-        c2: (n2, 2) int array of parameter index combinations.
-        beta: (m1^2, 2) tensor-product basis index table.
+        B1: First-order basis, shape ``(N, m1, D)``.
+        c2: Integer parameter index pairs, shape ``(n2, 2)``.
+        beta: Tensor-product basis index table, shape ``(m1^2, 2)``.
 
     Returns:
-        B2: (N, m1^2, n2) second-order basis.
+        B2: Second-order basis, shape ``(N, m1^2, n2)``.
     """
     # beta maps each flat index in [0, m1^2) to a pair of 1D basis indices,
     # replacing the explicit outer product B_i(x_a) otimes B_j(x_b) with
@@ -115,12 +116,12 @@ def _build_B3(B1: Array, c3: Array, beta: Array) -> Array:
     transients.
 
     Args:
-        B1: (N, m1, D) first-order basis.
-        c3: (n3, 3) int array of parameter index combinations.
-        beta: (m1^3, 3) tensor-product basis index table.
+        B1: First-order basis, shape ``(N, m1, D)``.
+        c3: Integer parameter index triples, shape ``(n3, 3)``.
+        beta: Tensor-product basis index table, shape ``(m1^3, 3)``.
 
     Returns:
-        B3: (N, m1^3, n3) third-order basis.
+        B3: Third-order basis, shape ``(N, m1^3, n3)``.
     """
     # Three-way tensor product: phi_{ijk}(x) = B_i(x_a) * B_j(x_b) * B_k(x_c),
     # constructed via the same index-gather strategy as _build_B2.
@@ -146,20 +147,23 @@ def _fit_first_order(
     """Fit first-order component functions via regularized least squares + backfitting.
 
     Args:
-        B1: (R, m1, n1) first-order basis, R = number of samples.
-        Y_res: (R,) residuals (Y - f0).
-        m1: number of basis functions per dimension.
-        n1: number of first-order terms (= D).
-        maxiter: max backfitting iterations.
+        B1: First-order basis, shape ``(R, m1, n1)``, with R the number of
+            samples.
+        Y_res: Residuals ``Y - f0``, shape ``(R,)``.
+        m1: Number of basis functions per dimension.
+        n1: Number of first-order terms (= D).
+        maxiter: Maximum backfitting iterations.
         lambdax: Tikhonov regularization parameter.
 
     Returns:
-        Y_em1: (R, n1) first-order emulated contributions.
-        Y_res_out: (R,) updated residuals after subtracting first-order terms.
-        C1: (m1, n1) fitted coefficients.
+        Y_em1: First-order emulated contributions, shape ``(R, n1)``.
+        Y_res_out: Residuals after subtracting the first-order terms, shape
+            ``(R,)``.
+        C1: Fitted coefficients, shape ``(m1, n1)``.
     """
-    # Tikhonov regularization: prevents ill-conditioned B^T B from blowing up
-    # coefficients when basis functions are nearly collinear or sample count is low.
+    # Tikhonov regularization keeps an ill-conditioned B^T B from blowing up
+    # the coefficients when the basis functions are nearly collinear or the
+    # sample count is low.
     lam_eye = lambdax * jnp.eye(m1)
 
     # Precompute solver matrices: T1[j] = (B1_j^T B1_j + lam*I)^{-1} B1_j^T.
@@ -230,21 +234,21 @@ def _fit_higher_order(
     """Fit second- or third-order terms via regularized least squares.
 
     Args:
-        B: (R, m_basis, n_terms) basis matrix.
-        Y_res: (R,) residuals.
-        n_terms: number of terms at this order.
-        m_basis: number of basis functions per term.
-        lambdax: regularization parameter.
+        B: Basis matrix, shape ``(R, m_basis, n_terms)``.
+        Y_res: Residuals, shape ``(R,)``.
+        n_terms: Number of terms at this order.
+        m_basis: Number of basis functions per term.
+        lambdax: Tikhonov regularization parameter.
 
     Returns:
-        Y_em: (R, n_terms) contributions.
-        Y_res_out: (R,) updated residuals.
-        C: (m_basis, n_terms) coefficients.
+        Y_em: Term contributions, shape ``(R, n_terms)``.
+        Y_res_out: Updated residuals, shape ``(R,)``.
+        C: Fitted coefficients, shape ``(m_basis, n_terms)``.
     """
-    # Higher-order terms are fit in a single shot (no backfitting): each term
-    # is solved independently against the same lower-order residual. With
-    # lower-order structure already removed, same-order tensor-product terms
-    # overlap little, so one joint-free pass is accurate in practice.
+    # Higher-order terms are fit in a single shot, with no backfitting: each
+    # term is solved independently against the same lower-order residual. The
+    # lower-order structure is already removed, so same-order tensor-product
+    # terms overlap little and one joint-free pass is accurate in practice.
     lam_eye = lambdax * jnp.eye(m_basis)
     # Normal equations per term: (B_j^T B_j + lambda*I) C_j = B_j^T Y_res
     BtB = jnp.einsum("rmj,rnj->jmn", B, B)  # (n_terms, m_basis, m_basis)
@@ -269,22 +273,22 @@ def _fit_higher_order(
 
 
 def _ancova(Y: Array, Y_em: Array, V_Y: Array) -> tuple[Array, Array, Array]:
-    """ANCOVA decomposition of sensitivity indices.
+    """Split the fitted term contributions into ANCOVA sensitivity indices.
 
     Args:
-        Y: (R,) model output.
-        Y_em: (R, n) emulated term contributions.
-        V_Y: scalar variance of Y.
+        Y: Model output, shape ``(R,)``.
+        Y_em: Emulated term contributions, shape ``(R, n)``.
+        V_Y: Scalar variance of Y.
 
     Returns:
-        S:  (n,) total sensitivity per term.
-        Sa: (n,) structural (uncorrelated) contribution.
-        Sb: (n,) correlative contribution.
+        S:  Total sensitivity per term, shape ``(n,)``.
+        Sa: Structural (uncorrelated) contribution, shape ``(n,)``.
+        Sb: Correlative contribution, shape ``(n,)``.
     """
     # ANCOVA decomposition (Li et al., 2010). Three sensitivity measures:
-    #   Sa = Var(f_j) / Var(Y)         -- structural (uncorrelated) contribution
-    #   S  = Cov(f_j, Y) / Var(Y)      -- total (correlated) contribution
-    #   Sb = S - Sa = Cov(f_j, sum_{k!=j} f_k) / Var(Y) -- correlative part
+    #   Sa = Var(f_j) / Var(Y):         structural (uncorrelated) contribution
+    #   S  = Cov(f_j, Y) / Var(Y):      total (correlated) contribution
+    #   Sb = S - Sa = Cov(f_j, sum_{k!=j} f_k) / Var(Y): correlative part
     # When inputs are independent, Sb -> 0 and S -> Sa.
     # A constant-output slice has V_Y == 0, so every index is 0/0. Emit NaN
     # (matching Sobol and the "all indices will be NaN" zero-variance warning)
@@ -320,7 +324,7 @@ def _f_ppf(q: float, d1: float, d2: float) -> float:
     """
     # The F-distribution CDF can be written as I_x(d1/2, d2/2) where
     # x = d1*F / (d1*F + d2) and I_x is the regularized incomplete beta.
-    # We invert this relationship via bisection on x in [0, 1].
+    # Bisection on x in [0, 1] inverts that relationship.
     a, b = d1 / 2.0, d2 / 2.0
     lo, hi = 0.0, 1.0
     for _ in range(100):
@@ -340,15 +344,16 @@ def _compute_f_crits(alpha: float, m1: int, m2: int, m3: int, R: int) -> Array:
     """Precompute F critical values for each order (outside JIT).
 
     Returns:
-        f_crits: (3,) array [f_crit_order1, f_crit_order2, f_crit_order3].
+        f_crits: Critical F values ``[order1, order2, order3]``, shape
+            ``(3,)``.
     """
     crits = []
     for p in (m1, m2, m3):
         if R > p:
             crits.append(_f_ppf(alpha, float(p), float(R - p)))
         else:
-            # Fewer samples than basis functions -> F-test is undefined;
-            # set inf so no term at this order can pass the significance test.
+            # Fewer samples than basis functions makes the F-test undefined.
+            # Set inf so no term at this order can pass the significance test.
             crits.append(float("inf"))
     return jnp.array(crits)
 
@@ -370,16 +375,17 @@ def _f_test(
     """F-test for model selection (JIT-compatible).
 
     Args:
-        Y: (R,) model output.
-        f0: scalar mean.
-        Y_em: (R, n) emulated contributions per term.
-        R: number of samples.
-        m1, m2, m3: basis sizes for orders 1, 2, 3.
-        n1, n2, n3, n: term counts.
-        f_crits: (3,) precomputed critical F values per order.
+        Y: Model output, shape ``(R,)``.
+        f0: Scalar mean of Y.
+        Y_em: Emulated contributions per term, shape ``(R, n)``.
+        R: Number of samples.
+        m1, m2, m3: Basis sizes for orders 1, 2, 3.
+        n1, n2, n3, n: Term counts.
+        f_crits: Precomputed critical F values per order, shape ``(3,)``.
 
     Returns:
-        select: (n,) binary array, 1.0 if term is significant.
+        select: Binary array, shape ``(n,)``, holding 1.0 where the term is
+            significant.
     """
     # F-test for incremental model selection (Li et al., 2002).
     # Null model SSR0 includes all lower-order terms but excludes term i.
@@ -459,11 +465,12 @@ def _make_hdmr_kernel(
     All integer/float parameters are captured in the closure so they are
     concrete when this kernel is wrapped by a cached outer ``jit(vmap(...))``.
 
-    Returns a function ``kernel(B1, B2, B3, Y, f_crits)`` that fits one
-    output slice and returns the 9-tuple
-    ``(Sa, Sb, S, select, rmse, C1, C2, C3, f0)``. Every maxorder variant
-    returns the same 9-tuple shape (dummy C2/C3 for inactive orders) so
-    the caller's vmap/concatenation logic stays uniform.
+    Returns:
+        A function ``kernel(B1, B2, B3, Y, f_crits)`` that fits one output
+        slice and returns the 9-tuple
+        ``(Sa, Sb, S, select, rmse, C1, C2, C3, f0)``. Every maxorder variant
+        returns the same 9-tuple shape, with dummy C2/C3 for inactive orders,
+        so the caller's vmap/concatenation logic stays uniform.
     """
 
     # Each branch builds a kernel with the same 9-element return signature so
@@ -564,9 +571,10 @@ def _make_hdmr_kernel(
             V_Y = jnp.var(Y_sub)
             Y_res = Y_sub - f0
 
-            # Hierarchical fitting: first-order terms are fit with backfitting,
-            # then residuals cascade to 2nd then 3rd order -- each order
-            # explains variance that lower orders could not capture.
+            # Hierarchical fitting: first-order terms are fit with
+            # backfitting, then the residuals cascade to 2nd then 3rd order.
+            # Each order explains variance that lower orders could not
+            # capture.
             Y_em1, Y_res, C1 = _fit_first_order(
                 B1_sub,
                 Y_res,

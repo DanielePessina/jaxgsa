@@ -2,33 +2,33 @@
 
 Implements the Vectorial Kernel Orthogonal Greedy Algorithm (Wirtz &
 Haasdonk, 2013; Santin & Haasdonk) as used for surrogate-based sensitivity
-analysis by Hilhorst et al. (2024): a Gaussian RBF surrogate whose centres
-are chosen by the P-greedy rule (maximise the power function) and whose
-coefficients come from an RKHS-regularised least-squares solve over the
-selected centres.
+analysis by Hilhorst et al. (2024). The surrogate is a Gaussian RBF expansion.
+Its centres are chosen by the P-greedy rule, which maximises the power
+function. Its coefficients come from an RKHS-regularised least-squares solve
+over the selected centres.
 
-Two properties make this cheap enough to drive a Monte-Carlo sensitivity
-loop. First, the P-greedy selection is *y-independent*, so a single greedy
-sweep serves every output slice -- that is the "vectorial" part: one set of
-centres, one Newton basis, one coefficient matrix with a column per slice
-(separable matrix-valued kernel). Second, prediction is a single kernel
-GEMM against a handful of centres.
+Two properties make this cheap enough to drive a Monte-Carlo sensitivity loop.
+First, the P-greedy selection does not depend on ``Y``, so one greedy sweep
+serves every output slice. That is the "vectorial" part: one set of centres,
+one Newton basis, and one coefficient matrix with a column per slice
+(a separable matrix-valued kernel). Second, prediction is a single kernel GEMM
+against a handful of centres.
 
-Everything here is a pure function on arrays: no result classes, no
-``Problem``. Outputs arrive as ``(n, S)`` with ``S = T*K`` output slices
+Everything here is a pure function on arrays. There are no result classes and
+no ``Problem``. Outputs arrive as ``(n, S)`` with ``S = T*K`` output slices
 already flattened by the caller.
 
-Precision: the coefficient step forms the normal matrix ``A_nm^T A_nm``,
-which squares the condition number of the cross-kernel. Under JAX's default
-float32 that is the accuracy ceiling of this module -- it bites whenever the
-kernel Gram is ill-conditioned, i.e. small ``gamma`` or a centre count close
-to ``n``, where the fitted surrogate can be an order of magnitude worse than
-the same equations solved in double. Enabling
-``jax.config.update("jax_enable_x64", True)`` removes the ceiling; the code
-carries ``X.dtype`` throughout and needs no other change. Grid-searching the
-hyperparameters with :func:`_cross_validate` also mitigates it, since the
-scores are computed with the same arithmetic and so penalise the
-ill-conditioned corner of the grid.
+The coefficient step forms the normal matrix ``A_nm^T A_nm``, which squares the
+condition number of the cross-kernel. Under JAX's default float32 that is the
+accuracy ceiling of this module. It bites whenever the kernel Gram is
+ill-conditioned, which means a small ``gamma`` or a centre count close to
+``n``. There the fitted surrogate can be an order of magnitude worse than the
+same equations solved in double precision. Enabling
+``jax.config.update("jax_enable_x64", True)`` removes the ceiling, and the code
+carries ``X.dtype`` throughout so it needs no other change. Grid-searching the
+hyperparameters with :func:`_cross_validate` also helps, because the scores are
+computed in the same arithmetic and so penalise the ill-conditioned corner of
+the grid.
 """
 
 from __future__ import annotations
@@ -44,8 +44,9 @@ from numpy.typing import ArrayLike
 # Paper defaults (Hilhorst et al. 2024): tau_P = 5e-8 on the power function,
 # tau_R = 1e-4 on the interpolation residual, lambda = 1e-10 on the RKHS term.
 # tau_P is absolute: the Gaussian kernel has K(x, x) = 1, so the power
-# function is already scale-free. tau_R is applied *relative* to each output
-# slice's norm; an absolute residual rule would depend on the scale of Y.
+# function is already scale-free. tau_R is applied relative to each output
+# slice's norm, because an absolute residual rule would depend on the scale
+# of Y.
 _DEFAULT_RIDGE = 1e-10
 _DEFAULT_TOL_POWER = 5e-8
 _DEFAULT_TOL_RESIDUAL = 1e-4
@@ -60,21 +61,22 @@ _JITTER = 1e-8
 class _VKOGAState(NamedTuple):
     """A fitted VKOGA surrogate.
 
-    The arrays are allocated at the *static* ``max_centers`` size because the
+    The arrays are allocated at the static ``max_centers`` size, because the
     greedy loop runs under ``lax.while_loop`` and JAX needs static shapes.
     Slots beyond ``n_centers`` carry a duplicated centre with an exactly zero
-    coefficient row, so :func:`_predict_vkoga` is correct whether or not the
-    caller first slices the state down to ``n_centers`` rows.
+    coefficient row. :func:`_predict_vkoga` is therefore correct whether or not
+    the caller first slices the state down to ``n_centers`` rows.
 
     Attributes:
-        centers: (m, D) selected centres, ``m = max_centers`` as returned.
-        coefficients: (m, S) expansion coefficients, one column per output
-            slice; rows ``>= n_centers`` are zero.
-        gamma: scalar Gaussian shape parameter the surrogate was fitted with.
-        ridge: scalar RKHS regularisation parameter (the paper's lambda).
-        n_centers: number of centres the greedy loop actually selected.
-        rmse: (S,) per-slice root-mean-square error of the fit on its own
-            training rows -- a diagnostic, not a generalisation estimate.
+        centers: Selected centres, shape ``(m, D)`` with ``m = max_centers``
+            as returned.
+        coefficients: Expansion coefficients, shape ``(m, S)``, one column per
+            output slice. Rows ``>= n_centers`` are zero.
+        gamma: Scalar Gaussian shape parameter the surrogate was fitted with.
+        ridge: Scalar RKHS regularisation parameter (the paper's lambda).
+        n_centers: Number of centres the greedy loop actually selected.
+        rmse: Root-mean-square error of the fit on its own training rows, shape
+            ``(S,)``. It is a diagnostic, not a generalisation estimate.
     """
 
     centers: Array
@@ -91,19 +93,19 @@ def _gaussian_kernel(X1: Array, X2: Array, gamma: Array | float) -> Array:
     ``K(x1, x2) = exp(-gamma * ||x1 - x2||^2)``.
 
     Args:
-        X1: (n1, D) first point set.
-        X2: (n2, D) second point set.
-        gamma: positive shape parameter; larger means narrower kernels.
+        X1: First point set, shape ``(n1, D)``.
+        X2: Second point set, shape ``(n2, D)``.
+        gamma: Positive shape parameter. Larger means narrower kernels.
 
     Returns:
-        (n1, n2) kernel matrix.
+        Kernel matrix, shape ``(n1, n2)``.
     """
     # Squared distances via the ||a||^2 + ||b||^2 - 2a.b expansion: one GEMM
     # instead of an (n1, n2, D) difference tensor, which is what keeps
     # prediction affordable when n1 runs into the millions. The price is
-    # cancellation for near-coincident points -- in float32 the expansion can
-    # go slightly negative, which would make the kernel exceed 1 and corrupt
-    # the power function p2 = 1 - ... below, so clamp at zero.
+    # cancellation for near-coincident points. In float32 the expansion can go
+    # slightly negative, which would make the kernel exceed 1 and corrupt the
+    # power function p2 = 1 - ... below, so clamp at zero.
     sq1 = jnp.sum(X1 * X1, axis=1)
     sq2 = jnp.sum(X2 * X2, axis=1)
     d2 = sq1[:, None] + sq2[None, :] - 2.0 * (X1 @ X2.T)
@@ -123,39 +125,41 @@ def _select_centers(
     """Select kernel centres by the P-greedy rule.
 
     Centres are picked one at a time at the current maximiser of the power
-    function (Hilhorst et al. 2024, eq. 8), expressed in the Newton basis of
-    Pazouki & Schaback so that the basis is *nested*: adding a centre appends
-    one column and never touches the earlier ones. For the Gaussian kernel
-    the diagonal is 1, so the squared power function at every training point
-    is simply ``p2 = 1 - rowsum(V**2)`` with ``V`` the Newton basis evaluated
-    at those points.
+    function (Hilhorst et al. 2024, eq. 8). The rule is expressed in the Newton
+    basis of Pazouki & Schaback, which keeps the basis nested: adding a centre
+    appends one column and never touches the earlier ones. For the Gaussian
+    kernel the diagonal is 1, so the squared power function at every training
+    point is ``p2 = 1 - rowsum(V**2)`` with ``V`` the Newton basis evaluated at
+    those points.
 
-    Selection depends on ``X``, ``gamma``, and the stopping rules. It does
-    not depend on ``ridge``. ``Y`` enters only through the residual stopping
-    rule, so all output slices share one set of centres.
-    :func:`_cross_validate` exploits the ridge independence: one sweep per
-    ``(fold, gamma)`` serves the whole ridge grid.
+    Selection depends on ``X``, ``gamma``, and the stopping rules. It does not
+    depend on ``ridge``. ``Y`` enters only through the residual stopping rule,
+    so all output slices share one set of centres. :func:`_cross_validate` uses
+    that ridge independence: one sweep per ``(fold, gamma)`` serves the whole
+    ridge grid.
 
     Args:
-        X: (n, D) training inputs.
-        Y: (n, S) training outputs, output slices already flattened.
-        gamma: positive Gaussian shape parameter.
-        max_centers: hard cap on the number of centres; also the static size
-            of the returned index buffer. Silently capped at ``n``.
-        tol_power: stop once ``sqrt(max(p2)) <= tol_power`` (tau_P). Absolute:
+        X: Training inputs, shape ``(n, D)``.
+        Y: Training outputs, shape ``(n, S)``, output slices already flattened.
+        gamma: Positive Gaussian shape parameter.
+        max_centers: Hard cap on the number of centres, and the static size of
+            the returned index buffer. Silently capped at ``n``.
+        tol_power: Power-function stopping rule (tau_P). Stop once
+            ``sqrt(max(p2)) <= tol_power``. It is absolute, because
             ``K(x, x) = 1`` makes the power function scale-free.
-        tol_residual: relative residual stopping rule (tau_R). Stop once every
+        tol_residual: Relative residual stopping rule (tau_R). Stop once every
             slice's residual L2 norm falls to ``tol_residual`` times that
             slice's ``||Y||`` over the training rows. A zero-norm slice counts
             as converged from the start.
-        train_mask: optional (n,) boolean mask; ``False`` rows are excluded
-            as candidate centres and from the residual rule. Used by
-            :func:`_cross_validate` to hold folds out without changing shapes.
+        train_mask: Boolean mask, shape ``(n,)``, or ``None``. ``False`` rows
+            are excluded as candidate centres and from the residual rule.
+            :func:`_cross_validate` uses it to hold folds out without changing
+            shapes.
 
     Returns:
-        ``(idx, m)``: the (max_centers,) int32 buffer of selected row indices
-        and the scalar count of centres actually selected. Slots ``>= m``
-        are unused.
+        ``(idx, m)``. ``idx`` is the int32 buffer of selected row indices,
+        shape ``(max_centers,)``. ``m`` is the scalar count of centres actually
+        selected. Slots ``>= m`` are unused.
     """
     n, _ = X.shape
     # Never ask for more centres than there are points to pick from: the
@@ -171,9 +175,9 @@ def _select_centers(
     # Held-out rows contribute nothing to the residual stopping rule either.
     residual0 = jnp.where(mask[:, None], Y, 0.0)
 
-    # Per-slice norms of the training outputs, for the *relative* residual
-    # rule. A zero-norm slice would divide 0/0; give it scale 1 so its ratio
-    # is 0 and it counts as converged.
+    # Per-slice norms of the training outputs, for the relative residual rule.
+    # A zero-norm slice would divide 0/0, so give it scale 1: its ratio is then
+    # 0 and it counts as converged.
     y_norm = jnp.sqrt(jnp.sum(residual0**2, axis=0))
     res_scale = jnp.where(y_norm > 0.0, y_norm, 1.0)
 
@@ -247,19 +251,21 @@ class _NormalEquations(NamedTuple):
     """Ridge-independent pieces of the regularised coefficient solve.
 
     Everything here depends on ``X``, ``Y``, the selected centres, and
-    ``gamma`` — but not on ``ridge``. :func:`_cross_validate` builds one per
-    ``(fold, gamma)`` and reuses it for every ridge in the grid; only the
-    cheap assembly-and-solve in :func:`_solve_ridge` repeats.
+    ``gamma``, but not on ``ridge``. :func:`_cross_validate` builds one per
+    ``(fold, gamma)`` and reuses it for every ridge in the grid. Only the cheap
+    assembly-and-solve in :func:`_solve_ridge` repeats.
 
     Attributes:
-        active: (max_centers,) bool mask of the slots the greedy filled.
-        centers: (max_centers, D) selected centres (padded with duplicates).
-        A_nm: (n, max_centers) masked cross-kernel between training points
-            and centres.
-        A_mm: (max_centers, max_centers) masked centre Gram.
-        AtA: ``A_nm^T A_nm``.
-        AtY: ``A_nm^T Y`` over the training rows.
-        m: scalar count of centres actually selected.
+        active: Boolean mask of the slots the greedy filled, shape
+            ``(max_centers,)``.
+        centers: Selected centres, shape ``(max_centers, D)``, padded with
+            duplicates.
+        A_nm: Masked cross-kernel between training points and centres, shape
+            ``(n, max_centers)``.
+        A_mm: Masked centre Gram, shape ``(max_centers, max_centers)``.
+        AtA: ``A_nm^T A_nm``, shape ``(max_centers, max_centers)``.
+        AtY: ``A_nm^T Y`` over the training rows, shape ``(max_centers, S)``.
+        m: Scalar count of centres actually selected.
     """
 
     active: Array
@@ -283,14 +289,15 @@ def _normal_equations(
     """Build the ridge-independent normal-equation matrices.
 
     Args:
-        X: (n, D) training inputs.
-        Y: (n, S) training outputs, output slices already flattened.
-        idx: (max_centers,) selected row indices from :func:`_select_centers`.
-        m: scalar count of centres actually selected.
-        gamma: positive Gaussian shape parameter the centres were selected
+        X: Training inputs, shape ``(n, D)``.
+        Y: Training outputs, shape ``(n, S)``, output slices already flattened.
+        idx: Selected row indices from :func:`_select_centers`, shape
+            ``(max_centers,)``.
+        m: Scalar count of centres actually selected.
+        gamma: Positive Gaussian shape parameter the centres were selected
             with.
-        train_mask: optional (n,) boolean mask; ``False`` rows are excluded
-            from the solve.
+        train_mask: Boolean mask, shape ``(n,)``, or ``None``. ``False`` rows
+            are excluded from the solve.
 
     Returns:
         A :class:`_NormalEquations` bundle.
@@ -326,7 +333,8 @@ def _solve_ridge(eq: _NormalEquations, ridge: Array | float) -> Array:
         ridge: RKHS regularisation parameter (the paper's lambda).
 
     Returns:
-        (max_centers, S) expansion coefficients; inactive rows are zero.
+        Expansion coefficients, shape ``(max_centers, S)``. Inactive rows are
+        zero.
     """
     G = eq.AtA + ridge * eq.A_mm
     # Relative jitter: scale-free against gamma and the number of rows, which
@@ -353,21 +361,23 @@ def _solve_coefficients(
 
         (A_nm^T A_nm + ridge * A_mm) alpha = A_nm^T Y
 
-    where ``A_nm`` is the (n, m) cross-kernel between training points and
-    centres and ``A_mm`` the (m, m) centre Gram. When ``m = n`` this collapses
-    to the paper's eq. (6): ``A_nm = A_mm = A`` is symmetric, so the system is
-    ``A (A + ridge*I) alpha = A Y``, i.e. ``(A + ridge*I) alpha = Y``.
+    ``A_nm`` is the ``(n, m)`` cross-kernel between training points and
+    centres, and ``A_mm`` is the ``(m, m)`` centre Gram. When ``m = n`` this
+    collapses to the paper's eq. (6). ``A_nm = A_mm = A`` is then symmetric, so
+    the system is ``A (A + ridge*I) alpha = A Y``, that is
+    ``(A + ridge*I) alpha = Y``.
 
     Args:
-        X: (n, D) training inputs.
-        Y: (n, S) training outputs, output slices already flattened.
-        idx: (max_centers,) selected row indices from :func:`_select_centers`.
-        m: scalar count of centres actually selected.
-        gamma: positive Gaussian shape parameter the centres were selected
+        X: Training inputs, shape ``(n, D)``.
+        Y: Training outputs, shape ``(n, S)``, output slices already flattened.
+        idx: Selected row indices from :func:`_select_centers`, shape
+            ``(max_centers,)``.
+        m: Scalar count of centres actually selected.
+        gamma: Positive Gaussian shape parameter the centres were selected
             with.
         ridge: RKHS regularisation parameter (the paper's lambda).
-        train_mask: optional (n,) boolean mask; ``False`` rows are excluded
-            from the solve and the RMSE diagnostic.
+        train_mask: Boolean mask, shape ``(n,)``, or ``None``. ``False`` rows
+            are excluded from the solve and the RMSE diagnostic.
 
     Returns:
         The fitted :class:`_VKOGAState`.
@@ -411,21 +421,22 @@ def _fit_vkoga(
 ) -> _VKOGAState:
     """Fit a vectorial Gaussian-RBF surrogate by P-greedy centre selection.
 
-    Two stages: :func:`_select_centers` picks the centres, then
+    The fit runs in two stages. :func:`_select_centers` picks the centres, then
     :func:`_solve_coefficients` solves the regularised system over them. See
     those functions for the algorithmic details and the argument contracts.
 
     Args:
-        X: (n, D) training inputs.
-        Y: (n, S) training outputs, output slices already flattened.
-        gamma: positive Gaussian shape parameter.
-        max_centers: hard cap on the number of centres; also the static array
+        X: Training inputs, shape ``(n, D)``.
+        Y: Training outputs, shape ``(n, S)``, output slices already flattened.
+        gamma: Positive Gaussian shape parameter.
+        max_centers: Hard cap on the number of centres, and the static array
             size of the returned state. Silently capped at ``n``.
         ridge: RKHS regularisation parameter (the paper's lambda).
-        tol_power: absolute power-function stopping tolerance (tau_P).
-        tol_residual: relative residual stopping tolerance (tau_R), taken
+        tol_power: Absolute power-function stopping tolerance (tau_P).
+        tol_residual: Relative residual stopping tolerance (tau_R), taken
             against each output slice's own norm.
-        train_mask: optional (n,) boolean mask; ``False`` rows are held out.
+        train_mask: Boolean mask, shape ``(n,)``, or ``None``. ``False`` rows
+            are held out.
 
     Returns:
         The fitted :class:`_VKOGAState`.
@@ -445,17 +456,17 @@ def _fit_vkoga(
 def _predict_vkoga(state: _VKOGAState, X_new: Array) -> Array:
     """Evaluate a fitted VKOGA surrogate at new points.
 
-    Free of host-side control flow and of any dependence on ``n_centers``, so
-    it is safe to ``jit``/``vmap`` and to call inside a Monte-Carlo loop over
-    millions of rows. Unused centre slots carry zero coefficients, so they
-    drop out of the matrix product.
+    The function has no host-side control flow and no dependence on
+    ``n_centers``, so it is safe to ``jit`` and ``vmap`` and to call inside a
+    Monte-Carlo loop over millions of rows. Unused centre slots carry zero
+    coefficients, so they drop out of the matrix product.
 
     Args:
-        state: fitted surrogate.
-        X_new: (n_new, D) evaluation points.
+        state: Fitted surrogate.
+        X_new: Evaluation points, shape ``(n_new, D)``.
 
     Returns:
-        (n_new, S) predictions, one column per output slice.
+        Predictions, shape ``(n_new, S)``, one column per output slice.
     """
     return _gaussian_kernel(X_new, state.centers, state.gamma) @ state.coefficients
 
@@ -474,36 +485,35 @@ def _cross_validate(
 ) -> Array:
     """Score a ``(gamma, ridge)`` grid by k-fold held-out RMSE.
 
-    Each fold refits from scratch on the other ``k-1`` folds -- the greedy
-    centre selection is part of what is being validated, so it must not see
-    the held-out rows. Because the folds partition the rows, every row is
-    predicted exactly once out-of-sample and the returned score is the RMSE
-    over that full set of out-of-sample predictions, pooled across output
-    slices.
+    Each fold refits from scratch on the other ``k-1`` folds. The greedy centre
+    selection is part of what is being validated, so it must not see the
+    held-out rows. The folds partition the rows, so every row is predicted
+    exactly once out-of-sample. The returned score is the RMSE over that full
+    set of out-of-sample predictions, pooled across output slices.
 
     Centre selection, the normal-equation matrices, and the prediction
     kernel do not depend on ``ridge``, so each ``(fold, gamma)`` pair builds
     them once and reuses them for every ridge in the grid. Only the cheap
     assembly-and-solve repeats per ridge.
 
-    The grids are caller-supplied: no range is baked in here.
+    The caller supplies the grids. No range is baked in here.
 
     Args:
-        X: (n, D) inputs.
-        Y: (n, S) outputs, output slices already flattened.
-        gammas: candidate Gaussian shape parameters, any 1-D array-like.
-        ridges: candidate RKHS regularisation parameters, any 1-D array-like.
-        max_centers: centre cap passed through to each fit.
-        n_folds: number of folds, at least 2; capped at ``n``.
-        tol_power: absolute power-function stopping tolerance (tau_P).
-        tol_residual: relative residual stopping tolerance (tau_R).
-        seed: seed for the row permutation used to build the folds. ``None``
-            keeps the sample order, which is what you want for a
-            low-discrepancy design; pass an int if the rows are ordered by
+        X: Training inputs, shape ``(n, D)``.
+        Y: Training outputs, shape ``(n, S)``, output slices already flattened.
+        gammas: Candidate Gaussian shape parameters, any 1-D array-like.
+        ridges: Candidate RKHS regularisation parameters, any 1-D array-like.
+        max_centers: Centre cap passed through to each fit.
+        n_folds: Number of folds, at least 2. Capped at ``n``.
+        tol_power: Absolute power-function stopping tolerance (tau_P).
+        tol_residual: Relative residual stopping tolerance (tau_R).
+        seed: Seed for the row permutation used to build the folds. ``None``
+            keeps the sample order, which is the right choice for a
+            low-discrepancy design. Pass an int if the rows are ordered by
             anything that correlates with the output.
 
     Returns:
-        (len(gammas), len(ridges)) array of pooled out-of-sample RMSE. Take
+        Pooled out-of-sample RMSE, shape ``(len(gammas), len(ridges))``. Take
         ``argmin`` over the flattened grid to pick the hyperparameters.
 
     Raises:

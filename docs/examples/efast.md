@@ -1,9 +1,18 @@
 # eFAST (Extended FAST)
 
-eFAST is a frequency-based variance decomposition that computes first-order
-(S1) and total-order (ST) Sobol indices from Fourier amplitudes along
-sinusoidal search curves. It does not produce second-order (S2) interaction
-indices.
+By the end of this page you will have a first-order and a total-order Sobol
+index for every input, from a design that costs one sweep per input. A Sobol
+index is a share of output variance attributed to an input. The first-order
+index `S1` covers the input acting alone. The total index `ST` covers the input
+acting alone plus every interaction it takes part in.
+
+The extended Fourier amplitude sensitivity test (eFAST) gets there by a
+different route from the Sobol estimators. It walks the input space along a
+sinusoidal search curve, giving each input its own frequency. An input that
+drives the output leaves its frequency in the output signal, and the strength
+of that frequency in the output's Fourier spectrum is its index. eFAST does not
+produce second-order (S2) interaction indices, which report the effect of one
+pair of inputs acting together.
 
 When to use eFAST instead of Sobol:
 
@@ -22,6 +31,12 @@ from jaxgsa import efast
 ```
 
 ## Scalar example (Ishigami)
+
+The run has three steps. Build the design with `efast.sample`, which lays out
+one search curve per input. Evaluate your model on every row of it. Then call
+`efast.analyze` with the design object rather than the raw array, so the
+analyzer knows which rows belong to which curve and which frequency to look
+for.
 
 ```python
 import jax.numpy as jnp
@@ -45,6 +60,14 @@ print("ST:", result.ST)  # (D,) = (3,)
 print("omega_0:", result.omega_0)
 print("M:", result.M)
 ```
+
+The design cost is visible in the shapes: 4096 points per curve times 3 inputs
+is 12288 model runs, and that number grows linearly with the number of inputs.
+Compare `S1` and `ST` entry by entry. Where they agree, the input acts alone.
+Where `ST` is much larger, the input matters through interactions, though eFAST
+will not tell you with which partner. `omega_0` and `M` are the frequency
+settings the analysis used, and they are echoed back so a stored result records
+how it was produced.
 
 ## Multi-output example
 
@@ -83,6 +106,11 @@ result = efast.analyze(samples, Y)
 print("S1 shape:", result.S1.shape)  # (K, D) = (2, 3)
 print("ST shape:", result.ST.shape)  # (K, D) = (2, 3)
 ```
+
+The same design serves both outputs. `result.S1[0]` ranks the three inputs for
+`displacement` and `result.S1[1]` ranks them for `velocity`, in the order
+`output_names` declares. Extra outputs cost no extra model runs, so return
+every quantity you might want to analyze in one pass.
 
 ## Time-series example
 
@@ -126,6 +154,12 @@ result = efast.analyze(samples, Y)
 print("S1 shape:", result.S1.shape)  # (T, K, D) = (20, 2, 3)
 print("ST shape:", result.ST.shape)  # (T, K, D) = (20, 2, 3)
 ```
+
+Each index is now a curve rather than a number: `result.S1[:, 0, 1]` is the
+first-order index of `frequency` for `displacement` across all 20 time steps.
+Plot these curves before you rank anything. Damping matters more late in the
+trajectory than early, so a single ranking taken at one time step can be
+misleading.
 
 ## xarray export
 

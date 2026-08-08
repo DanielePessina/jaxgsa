@@ -1,9 +1,10 @@
 # Analyze (Sobol)
 
-Variance-based Sobol indices (`S1`, `ST`, optional `S2`) computed from model
-outputs evaluated on a Saltelli design from `jaxgsa.sobol.sample()`.
+`jaxgsa.sobol.analyze()` computes variance-based Sobol indices (`S1`, `ST`,
+and the optional `S2`) from model outputs evaluated on a Saltelli design built
+by `jaxgsa.sobol.sample()`.
 
-The canonical API reference now lives at [API Reference](/api/).
+The canonical API reference lives at [API Reference](/api/).
 
 Jump directly to:
 
