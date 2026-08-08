@@ -21,10 +21,10 @@ app = marimo.App(width="medium")
 @app.cell(hide_code=True)
 def _intro(mo):
     mo.md(r"""
-    # Shapley effects with **jaxgsa**
+    # Shapley effects with jaxgsa
 
-    **Shapley effects** (Owen 2014; Song, Nelson & Staum 2016) allocate
-    the output variance *fairly*: each interaction's variance is split
+    Shapley effects (Owen 2014; Song, Nelson & Staum 2016) allocate
+    the output variance fairly: each interaction's variance is split
     equally among its participants,
 
     $$
@@ -32,7 +32,7 @@ def _intro(mo):
     $$
 
     where the $V_u$ are the partial variances of the Hoeffding–Sobol'
-    decomposition.  jaxgsa computes them **analytically** from a fitted
+    decomposition.  jaxgsa computes them analytically from a fitted
     surrogate — PCE (default) or RS-HDMR — with no permutation Monte
     Carlo and no extra model runs.  The result carries four quantities:
 
@@ -87,8 +87,8 @@ def _ishigami_md(mo):
     3. **Analyse** — fit PCE, then call `result.shapley()`
        and reads the Shapley allocation off its variance decomposition.
 
-    The default `backend="pce"` is exact *within the fitted
-    polynomial*.  Ishigami's sines need a degree-8 polynomial — the
+    The default `backend="pce"` is exact within the fitted
+    polynomial.  Ishigami's sines need a degree-8 polynomial — the
     default `order=3` under-fits here (explained variance
     $\approx 0.47$) and would trip the fit warning shown later.
     """)
@@ -184,7 +184,7 @@ def _order_md(mo):
     ## Surrogate order and the `explained_variance` guardrail
 
     Interactions the surrogate cannot represent are simply absent from
-    the allocation, and $\mathrm{Sh}$ *always* sums to 1 — so the
+    the allocation, and $\mathrm{Sh}$ always sums to 1 — so the
     fit-quality signal lives in `explained_variance`
     ($\sum_u V_u / \mathrm{Var}(Y)$), reported separately rather than
     silently renormalized away.  jaxgsa emits a `UserWarning` when it
@@ -291,7 +291,7 @@ def _interpretation(mo):
       double-counts the interaction across $x_1$ and $x_3$; Shapley
       attributes it once, split between the participants.
     - **`explained_variance` is the honest fit signal.**  The shares sum
-      to 1 at *every* order, even when a degree-2 polynomial captures a
+      to 1 at every order, even when a degree-2 polynomial captures a
       fraction of $\mathrm{Var}(Y)$ — the sweep shows the warning firing
       below 0.5 and the shares converging as the fit improves.  Always
       check it before trusting the allocation.

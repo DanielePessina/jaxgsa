@@ -19,18 +19,18 @@ app = marimo.App(width="medium")
 @app.cell(hide_code=True)
 def _intro(mo):
     mo.md(r"""
-    # Dynamic sensitivity analysis with **jaxgsa**
+    # Dynamic sensitivity analysis with jaxgsa
 
-    Dynamic sensitivity analysis reveals **how parameter importance evolves
-    over time**. Early transient behaviour may be dominated by different
+    Dynamic sensitivity analysis reveals how parameter importance evolves
+    over time. Early transient behaviour may be dominated by different
     parameters than steady-state behaviour. By computing sensitivity indices
     at every time step we obtain a film rather than a snapshot of the
     variance decomposition. Two Sobol indices carry the story: the
-    **first-order index** $S_1$ is the fraction of output variance a
-    parameter explains on its own, and the **total-order index** $S_T$
+    first-order index $S_1$ is the fraction of output variance a
+    parameter explains on its own, and the total-order index $S_T$
     adds every interaction it takes part in.
 
-    This notebook uses a **coupled damped oscillator** model whose output
+    This notebook uses a coupled damped oscillator model whose output
     $y(t)$ depends on four physical parameters — amplitude, frequency,
     damping, and coupling strength — and shows:
 
@@ -300,7 +300,7 @@ def _dgsm_md(mo):
 
     The result has `upper_bound` and `lower_bound` with shape $(T, D)$.
     Plotting these as shaded regions shows that the DGSM bracket
-    **contains** the Sobol $S_T$ at every time step — a useful sanity
+    contains the Sobol $S_T$ at every time step — a useful sanity
     check and a way to screen parameters cheaply.
     """)
     return
@@ -394,24 +394,24 @@ def _insight(mo):
     mo.md(r"""
     ## Key insight: parameter importance is not static
 
-    The time-resolved analysis reveals a clear **shift in dominance**
+    The time-resolved analysis reveals a clear shift in dominance
     across the trajectory:
 
-    - **Early times** ($t < 2$): the **amplitude** $A$ and **coupling**
+    - **Early times** ($t < 2$): the amplitude $A$ and coupling
       $\kappa$ dominate because the exponential envelope has not yet
       decayed significantly. The output is approximately $A\sin(\cdot) +
       \kappa\,t$, both linear in their respective parameters.
-    - **Mid-range** ($2 < t < 5$): the **frequency** $\omega$ contributes
+    - **Mid-range** ($2 < t < 5$): the frequency $\omega$ contributes
       most strongly during the oscillatory transient, where the sine
       argument $2\pi\omega t$ sweeps rapidly.
-    - **Late times** ($t > 5$): the **damping** $\gamma$ takes over as
+    - **Late times** ($t > 5$): the damping $\gamma$ takes over as
       the dominant parameter. The decay $e^{-\gamma t}$ suppresses
       everything exponentially, so small changes in $\gamma$ produce
       large relative changes in $y$.
 
     A single steady-state analysis would capture only the late-time
     picture and miss the early dominance of amplitude and coupling
-    entirely. Time-resolved indices show **when** each parameter
+    entirely. Time-resolved indices show when each parameter
     matters — useful when deciding which parameters deserve tighter
     measurement or calibration at each stage of an experiment.
     """)

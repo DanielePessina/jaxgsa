@@ -22,7 +22,7 @@ def _intro(mo):
     mo.md(r"""
     # Derivative-based Global Sensitivity Measures (DGSM)
 
-    DGSM computes sensitivity information from the **partial derivatives**
+    DGSM computes sensitivity information from the partial derivatives
     of a model, rather than from variance decomposition. For
     JAX-differentiable models the derivatives come cheaply: one
     reverse-mode autodiff pass (`jax.jacrev`) yields all of them per
@@ -35,7 +35,7 @@ def _intro(mo):
     - $\sigma_i = \mathbb{E}\!\left[\frac{\partial f}{\partial x_i}\right]$
       — the mean partial derivative
 
-    These yield **two-sided bounds** on the total Sobol index $S_{T_i}$
+    These yield two-sided bounds on the total Sobol index $S_{T_i}$
     — the share of output variance attributable to $x_i$ including all
     of its interactions:
 
@@ -45,7 +45,7 @@ def _intro(mo):
     \frac{C_i \cdot \nu_i}{\mathrm{Var}(Y)}
     $$
 
-    where $C_i$ is the **Poincare constant** of the $i$-th input's
+    where $C_i$ is the Poincare constant of the $i$-th input's
     marginal distribution.
 
     This notebook demonstrates DGSM on two standard benchmark functions.
@@ -74,10 +74,10 @@ def _ishigami_md(mo):
 
     The Ishigami function $f(x_1, x_2, x_3) = \sin(x_1) + 7\sin^2(x_2) + 0.1\,x_3^4\sin(x_1)$
     is a standard sensitivity analysis benchmark with known analytical
-    Sobol indices. Parameter $x_3$ has **zero first-order effect** but
+    Sobol indices. Parameter $x_3$ has zero first-order effect but
     contributes through a higher-order interaction with $x_1$.
 
-    We define an **unbatched** version for autodiff — DGSM needs
+    We define an unbatched version for autodiff — DGSM needs
     `fn(x) -> (T,)` rather than the batched `evaluate(X) -> (N,)`.
     """)
     return
@@ -162,7 +162,7 @@ def _linear_md(mo):
     ## Linear model
 
     For a purely additive linear model $f(\mathbf{x}) = \sum_j c_j x_j$,
-    the DGSM bracket **collapses to the exact value**: the partial
+    the DGSM bracket collapses to the exact value: the partial
     derivatives are constant ($\partial f / \partial x_i = c_i$), so
     $\nu_i = c_i^2$ and $\sigma_i = c_i$ exactly. The lower and upper
     bounds coincide with $S_T$.
@@ -219,7 +219,7 @@ def _poincare_md(mo):
     mo.md(r"""
     ## Poincare constants
 
-    The tightness of the DGSM upper bound depends on the **Poincare constant**
+    The tightness of the DGSM upper bound depends on the Poincare constant
     $C_i$ of each input's marginal distribution:
 
     | Distribution | $C_i$ |
@@ -242,7 +242,7 @@ def _outro(mo):
     mo.md(r"""
     ## Summary
 
-    DGSM provides **fast sensitivity screening** for JAX-differentiable
+    DGSM provides fast sensitivity screening for JAX-differentiable
     models. The key advantages:
 
     1. **Speed**: One reverse-mode autodiff pass gives all $D$ partial

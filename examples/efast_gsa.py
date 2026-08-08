@@ -18,9 +18,9 @@ app = marimo.App(width="medium")
 @app.cell(hide_code=True)
 def _intro(mo):
     mo.md(r"""
-    # eFAST sensitivity analysis with **jaxgsa**
+    # eFAST sensitivity analysis with jaxgsa
 
-    The **extended Fourier Amplitude Sensitivity Test** (eFAST) decomposes
+    The extended Fourier Amplitude Sensitivity Test (eFAST) decomposes
     the variance of a model output into contributions from each input
     factor using spectral analysis.  Each input is assigned a characteristic
     frequency along a search curve in the input space; the Fourier power

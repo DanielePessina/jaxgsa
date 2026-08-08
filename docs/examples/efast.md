@@ -2,7 +2,7 @@
 
 eFAST is a frequency-based variance decomposition that computes first-order
 (S1) and total-order (ST) Sobol indices from Fourier amplitudes along
-sinusoidal search curves. It does **not** produce second-order (S2) interaction
+sinusoidal search curves. It does not produce second-order (S2) interaction
 indices.
 
 When to use eFAST instead of Sobol:
@@ -165,7 +165,7 @@ D is always the last axis.
 
 ## Practical caveats
 
-- eFAST does **not** produce S2 (second-order) indices. Use the Sobol workflow
+- eFAST does not produce S2 (second-order) indices. Use the Sobol workflow
   if you need pairwise interaction estimates.
 - The `M` parameter (interference factor) is set once in `sample()` and travels
   inside the returned `EFASTSamples`, so it can never be mismatched at

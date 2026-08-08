@@ -30,7 +30,12 @@ import numpy as np
 from scipy.stats.qmc import Sobol
 
 from jaxgsa._core.samples import UniqueDesignSamples
-from jaxgsa._core.sampling import _next_power_of_2, _stable_unique_rows, _transform_samples
+from jaxgsa._core.sampling import (
+    _inverse_transform_samples,
+    _next_power_of_2,
+    _stable_unique_rows,
+    _transform_samples,
+)
 from jaxgsa.problem import Problem
 
 # Offset between the Sobol' draws used for radial base points (a) and
@@ -83,6 +88,12 @@ class MorrisSamples(UniqueDesignSamples):
             so that ``EE = (Y[after] - Y[before]) / delta``.
         n_params: Number of problem dimensions ``D``.
         problem: Problem definition used to transform the samples.
+        n_blocks_dropped: Number of blocks that the design lost at
+            construction, because their step was not measurable. This is 0
+            for a design that ``jaxgsa.morris.sample()`` built. It can be
+            positive only for a design derived from another method, such as
+            :meth:`jaxgsa.sobol.SobolSamples.to_morris`. The analysis reports
+            the loss, because the user did not ask for a smaller design.
     """
 
     samples: np.ndarray  # shape (n_unique, D), scaled to bounds
@@ -96,6 +107,7 @@ class MorrisSamples(UniqueDesignSamples):
     ee_delta: np.ndarray
     n_params: int
     problem: Problem
+    n_blocks_dropped: int = 0
 
     @overload
     def downsample(self, n_trajectories: int) -> MorrisSamples: ...
@@ -161,6 +173,9 @@ class MorrisSamples(UniqueDesignSamples):
             ee_delta=self.ee_delta[:n_trajectories].copy(),
             n_params=self.n_params,
             problem=self.problem,
+            # The earlier loss stays part of this design's history. The new,
+            # smaller size is deliberate, but the dropped blocks are not.
+            n_blocks_dropped=self.n_blocks_dropped,
         )
 
         if Y_small is not None:
@@ -181,6 +196,7 @@ class MorrisSamples(UniqueDesignSamples):
             "n_trajectories": self.n_trajectories,
             "num_levels": self.num_levels,
             "method": self.method,
+            "n_blocks_dropped": self.n_blocks_dropped,
         }
 
     @classmethod
@@ -210,7 +226,103 @@ class MorrisSamples(UniqueDesignSamples):
             ee_delta=arrays["ee_delta"],
             n_params=problem.num_vars,
             problem=problem,
+            # Files written before this field existed have no entry for it.
+            n_blocks_dropped=int(meta.get("n_blocks_dropped", 0)),
         )
+
+
+def _radial_samples_from_blocks(
+    *,
+    samples: np.ndarray,
+    block_rows: np.ndarray,
+    problem: Problem,
+) -> MorrisSamples:
+    """Assemble a radial ``MorrisSamples`` from an already-evaluated design.
+
+    Generic over where the points came from: the caller supplies the unique
+    sample matrix plus, for each radial block, the row index of the block's
+    base point followed by the ``D`` points perturbed in one parameter each.
+    This lets a design built for another method be reinterpreted as a Morris
+    design at zero extra model cost — see
+    :meth:`jaxgsa.sobol.SobolSamples.to_morris`.
+
+    ``samples`` is passed through unchanged, so outputs already computed for it
+    stay aligned and no re-evaluation is needed.
+
+    Args:
+        samples: Unique rows already evaluated, shape ``(n_runs, D)``, in the
+            problem's physical units.
+        block_rows: ``(n_blocks, D + 1)`` integer indices into ``samples``.
+            Column 0 is the block's base point; column ``1 + j`` is the point
+            differing from it only in parameter ``j``.
+        problem: Problem definition the samples were drawn for.
+
+    Returns:
+        A radial ``MorrisSamples`` ready for :func:`jaxgsa.morris.analyze`.
+
+    Raises:
+        ValueError: If fewer than two blocks are left with a measurable step.
+
+    Warns:
+        UserWarning: If any block is dropped because its base and perturbed
+            points coincide at the model's floating-point resolution.
+    """
+    D = problem.num_vars
+    # The elementary-effect denominator must be the unit-cube step, matching
+    # what ``sample()`` records, so recover unit coordinates in float64.
+    samples_unit = _inverse_transform_samples(problem, samples)
+
+    param_idx = np.arange(D)
+    # Read each step off the coordinate that actually differs between the base
+    # row and the row perturbed in that parameter. This needs no knowledge of
+    # the source layout, and it collapses to exactly 0 when deduplication has
+    # merged the two rows.
+    base_unit = samples_unit[block_rows[:, 0][:, None], param_idx]
+    after_unit = samples_unit[block_rows[:, 1:], param_idx]
+    ee_delta = after_unit - base_unit
+
+    tol = _min_radial_delta()
+    keep = ~(np.abs(ee_delta) < tol).any(axis=1)
+    n_total = int(block_rows.shape[0])
+    n_dropped = n_total - int(keep.sum())
+    if n_dropped:
+        block_rows = block_rows[keep]
+        ee_delta = ee_delta[keep]
+        warnings.warn(
+            f"jaxgsa: dropped {n_dropped} of {n_total} radial blocks whose step is below "
+            f"{tol:.1e} in at least one parameter (base and perturbed points coincide at "
+            f"the model's floating-point resolution); {block_rows.shape[0]} blocks remain",
+            # Reached through a caller's conversion method, so the user's frame
+            # is two levels up rather than one.
+            stacklevel=3,
+        )
+
+    n_blocks = int(block_rows.shape[0])
+    if n_blocks < 2:
+        raise ValueError(
+            f"Only {n_blocks} radial block(s) have a measurable step; "
+            "Morris measures need at least 2"
+        )
+
+    # Block b occupies expanded rows [b*(D+1), (b+1)*(D+1)): base point first,
+    # then the D perturbed points in parameter order. That is exactly the row
+    # order of block_rows, so flattening it gives the expansion map directly.
+    offsets = (np.arange(n_blocks) * (D + 1)).astype(np.int64)
+    return MorrisSamples(
+        samples=samples,
+        n_expanded=n_blocks * (D + 1),
+        expanded_to_unique=np.ascontiguousarray(block_rows, dtype=np.int64).reshape(-1),
+        n_trajectories=n_blocks,
+        # Unused by the radial design; held at the sample() default.
+        num_levels=4,
+        method="radial",
+        ee_idx_after=offsets[:, None] + 1 + param_idx.astype(np.int64),
+        ee_idx_before=np.broadcast_to(offsets[:, None], (n_blocks, D)).copy(),
+        ee_delta=ee_delta,
+        n_params=D,
+        problem=problem,
+        n_blocks_dropped=n_dropped,
+    )
 
 
 def _build_trajectories(
@@ -328,6 +440,53 @@ def _build_radial(
     return expanded_unit, ee_idx_after, ee_idx_before, ee_delta
 
 
+def _squash_open_sides(
+    expanded_unit: np.ndarray,
+    ee_delta: np.ndarray,
+    problem: Problem,
+    truncation_quantile: float,
+) -> None:
+    """Pull the design away from the unit-cube faces on open marginal sides.
+
+    A Morris design touches the unit-cube boundaries exactly, and an unbounded
+    inverse CDF maps 0 and 1 to -inf and +inf. Every side of a marginal whose
+    support is *open* is therefore pulled in by the tail probability ``q``, so
+    the transform stays finite.
+
+    Only genuinely open sides move. A uniform marginal is bounded on both
+    sides. A Gaussian marginal with an explicit ``low`` is bounded below, and
+    one with an explicit ``high`` is bounded above, so a two-sided truncated
+    Gaussian gets no squash at all — truncating it again would silently narrow
+    the input model the user declared.
+
+    The squash is an affine map on each dimension, so it also rescales the
+    step that each elementary effect actually takes. ``ee_delta`` is multiplied
+    by the same per-dimension factor, keeping the divisor equal to the
+    coordinate difference the design really uses.
+
+    Both arrays are modified in place. The map is deterministic, so exact
+    deduplication and prefix-nested downsampling are unaffected.
+
+    Args:
+        expanded_unit: ``(r * (D + 1), D)`` unit-cube design, modified in place.
+        ee_delta: ``(r, D)`` signed unit-cube steps, modified in place.
+        problem: Problem definition whose marginals decide which sides are open.
+        truncation_quantile: Tail probability ``q`` removed from each open side.
+    """
+    q = truncation_quantile
+    for idx, spec in enumerate(problem.input_specs):
+        dist, _, _, low, high = spec
+        if dist == "uniform":
+            continue
+        lo_target = 0.0 if low is not None else q
+        hi_target = 1.0 if high is not None else 1.0 - q
+        scale = hi_target - lo_target
+        if scale == 1.0:  # both sides already bounded — nothing to squash
+            continue
+        expanded_unit[:, idx] = lo_target + expanded_unit[:, idx] * scale
+        ee_delta[:, idx] *= scale
+
+
 def _print_morris_summary(
     *,
     n_params: int,
@@ -357,7 +516,7 @@ def sample(
     method: Literal["trajectory", "radial"] = "trajectory",
     scramble: bool = True,
     seed: int | np.random.Generator | None = None,
-    truncation_quantile: float = 0.005,
+    truncation_quantile: float = 1e-4,
     verbose: bool = True,
 ) -> MorrisSamples:
     """Generate unique Morris elementary-effects samples for model evaluation.
@@ -374,13 +533,25 @@ def sample(
     order, and returns only the unique rows for the user to evaluate.
     :func:`jaxgsa.morris.analyze` reconstructs the expanded layout internally.
 
-    Gaussian marginals are supported through a truncated-quantile grid: the
-    Morris design includes the unit-cube boundaries, which an unbounded
-    inverse CDF maps to infinity, so for each Gaussian parameter the unit-cube
-    coordinate is confined to ``[q, 1 - q]`` (``q = truncation_quantile``)
-    before the transform. Elementary effects remain per unit of the original
-    grid coordinate; :meth:`MorrisResult.to_physical_units` is unavailable for
-    such problems because the transform is nonlinear.
+    Gaussian marginals are supported through a truncated-quantile grid. The
+    Morris design touches the unit-cube boundaries, and an unbounded inverse
+    CDF maps 0 and 1 to infinity. Each *open* side of a Gaussian marginal is
+    therefore pulled in by ``q = truncation_quantile`` before the transform.
+    A side that the problem already bounds with an explicit ``low`` or
+    ``high`` is left alone, so a two-sided truncated Gaussian is sampled
+    exactly as declared. Elementary effects use the step the design really
+    takes, so the squash does not bias them.
+    :meth:`MorrisResult.to_physical_units` is unavailable for Gaussian
+    problems because the transform is nonlinear.
+
+    On an unbounded marginal ``mu_star`` has no ``q -> 0`` limit: the design
+    always includes unit levels 0 and 1 exactly, so a smaller ``q`` always
+    reaches further into the tail and the elementary effects grow with it.
+    ``mu_star`` magnitudes are therefore scale-dependent by construction on
+    an unbounded marginal, and only *rankings* are comparable across
+    truncation settings. Use :meth:`jaxgsa.Problem.from_dict` with
+    ``truncate_gaussians`` if you want one bounded input model that every
+    method shares.
 
     Args:
         problem: Problem definition with uniform and/or Gaussian marginals.
@@ -405,10 +576,13 @@ def sample(
             :meth:`MorrisSamples.downsample`; a reused
             ``np.random.Generator`` advances its state between calls and breaks
             that nesting.
-        truncation_quantile: Tail probability ``q`` excluded on each side of
-            every Gaussian marginal's grid (default 0.005, probing the
-            0.5%-99.5% quantile range). Applied to truncated Gaussians as
-            well for consistency; ignored for uniform marginals.
+        truncation_quantile: Tail probability ``q`` removed from each *open*
+            side of every Gaussian marginal's grid (default 1e-4, probing the
+            0.01%-99.99% quantile range). At this default the grid drops 0.29%
+            of the marginal variance and 5.0% of its fourth moment; the former
+            default of 5e-3 dropped 7.5% and 24% and visibly perturbed
+            rankings. Sides that the marginal already bounds with ``low`` or
+            ``high`` are not squashed. Ignored for uniform marginals.
         verbose: If ``True`` (default), print a short summary including how
             many duplicate rows were removed.
 
@@ -447,14 +621,7 @@ def sample(
         )
 
     if problem.has_non_uniform_inputs:
-        # Confine unbounded-support dimensions to [q, 1-q] so the inverse CDF
-        # stays finite at the grid boundaries. Uniform is the only bounded
-        # marginal today, so "not uniform" == "unbounded"; any future bounded
-        # distribution must be excluded from this mask. The squash is
-        # deterministic, so dedup and prefix-nesting are unaffected.
-        q = truncation_quantile
-        unbounded_dims = np.array([spec[0] != "uniform" for spec in problem.input_specs])
-        expanded_unit[:, unbounded_dims] = q + expanded_unit[:, unbounded_dims] * (1.0 - 2.0 * q)
+        _squash_open_sides(expanded_unit, ee_delta, problem, truncation_quantile)
 
     expanded_samples = _transform_samples(problem, expanded_unit)
     unique_samples, expanded_to_unique = _stable_unique_rows(expanded_samples)

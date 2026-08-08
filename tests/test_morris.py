@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+from dataclasses import replace
 from typing import Any, cast
 
 import jax
@@ -173,7 +175,7 @@ class TestGaussianInputs:
 
         sr = sample(self.PROBLEM, n_trajectories=25, seed=1, verbose=False)
         assert np.all(np.isfinite(sr.samples))
-        lo, hi = norm.ppf([0.005, 0.995], loc=1.0, scale=2.0)
+        lo, hi = norm.ppf([1e-4, 1 - 1e-4], loc=1.0, scale=2.0)
         assert np.all(sr.samples[:, 1] >= lo - 1e-9)
         assert np.all(sr.samples[:, 1] <= hi + 1e-9)
         # The uniform dimension is untouched: still on the exact p=4 grid
@@ -189,6 +191,69 @@ class TestGaussianInputs:
         # Grid levels 0 and 1 map exactly onto the truncation quantiles
         assert sr.samples[:, 1].min() == pytest.approx(lo)
         assert sr.samples[:, 1].max() == pytest.approx(hi)
+
+    def test_two_sided_truncated_gaussian_is_not_squashed_again(self):
+        """A Gaussian with explicit low/high is already bounded — leave it alone."""
+        from scipy.stats import norm
+
+        lo, hi = norm.ppf([0.01, 0.99], loc=1.0, scale=2.0)
+        problem = Problem.from_dict(
+            {
+                "x1": (0.0, 1.0),
+                "x2": GaussianInputSpec(
+                    dist="gaussian", mean=1.0, variance=4.0, low=float(lo), high=float(hi)
+                ),
+            }
+        )
+        sr = sample(problem, n_trajectories=25, seed=1, verbose=False)
+        # Grid levels 0 and 1 must reach the declared bounds exactly, not a
+        # range narrowed by a second truncation.
+        assert sr.samples[:, 1].min() == pytest.approx(lo)
+        assert sr.samples[:, 1].max() == pytest.approx(hi)
+
+    def test_one_sided_truncation_squashes_only_the_open_side(self):
+        """A declared ``low`` is honoured exactly; the open high side is pulled in."""
+        from scipy.stats import norm
+
+        lo = float(norm.ppf(0.01, loc=1.0, scale=2.0))
+        q = 0.05
+        problem = Problem.from_dict(
+            {
+                "x1": (0.0, 1.0),
+                "x2": GaussianInputSpec(dist="gaussian", mean=1.0, variance=4.0, low=lo),
+            }
+        )
+        sr = sample(problem, n_trajectories=25, seed=1, truncation_quantile=q, verbose=False)
+        # scipy's truncnorm renormalises within [lo, inf), so the high grid
+        # level lands at the 1-q quantile of the *truncated* marginal.
+        from scipy.stats import truncnorm
+
+        a = (lo - 1.0) / 2.0
+        hi = float(truncnorm.ppf(1.0 - q, a=a, b=np.inf, loc=1.0, scale=2.0))
+        assert sr.samples[:, 1].min() == pytest.approx(lo)
+        assert sr.samples[:, 1].max() == pytest.approx(hi)
+
+    def test_trajectory_delta_matches_the_squashed_step(self):
+        """A model linear in the unit coordinate recovers its exact coefficients.
+
+        The squash rescales every step on an open side, so ``ee_delta`` must be
+        rescaled with it. If it is not, every Gaussian effect is off by the
+        squash factor.
+        """
+        from scipy.stats import norm
+
+        problem = Problem.from_dict(
+            {
+                "x1": (0.0, 1.0),
+                "x2": GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0),
+            }
+        )
+        # A large q makes the bug, if reintroduced, impossible to miss.
+        sr = sample(problem, n_trajectories=40, seed=1, truncation_quantile=0.1, verbose=False)
+        X = np.asarray(sr.samples)
+        Y = jnp.asarray(3.0 * X[:, 0] + 5.0 * norm.cdf(X[:, 1]))
+        res = analyze(sr, Y)
+        np.testing.assert_allclose(np.asarray(res.mu), [3.0, 5.0], rtol=1e-5)
 
     def test_analysis_detects_gaussian_input(self):
         sr = sample(self.PROBLEM, n_trajectories=30, seed=2, verbose=False)
@@ -513,6 +578,64 @@ class TestToDataset:
         ds = analyze(sr, Y3).to_dataset(time_coords=[0.5, 1.0])
         assert list(ds.coords["time"].values) == [0.5, 1.0]
         assert ds["mu_star"].dims == ("time", "output", "param")
+
+
+class TestThinningWarning:
+    """The warning must follow the cause of thinning, not the surviving count."""
+
+    def _linear_Y(self, sr) -> jnp.ndarray:
+        return jnp.asarray(linear.evaluate(jnp.asarray(sr.samples)))
+
+    def test_small_deliberate_design_is_silent(self):
+        """r = 8 is below the floor, but the user asked for it. Say nothing."""
+        sr = sample(linear.PROBLEM, n_trajectories=8, seed=1, verbose=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            analyze(sr, self._linear_Y(sr))
+
+    def test_downsample_to_a_small_design_is_silent(self):
+        """Downsampling is deliberate too, so it must not trip the warning."""
+        sr = sample(linear.PROBLEM, n_trajectories=20, seed=1, verbose=False)
+        Y = np.asarray(linear.evaluate(jnp.asarray(sr.samples)))
+        sr_small, Y_small = sr.downsample(8, Y)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            analyze(sr_small, jnp.asarray(Y_small))
+
+    def test_lost_blocks_warn_above_the_floor(self):
+        """40 of 44 remain: well above the floor, but 4 blocks were lost."""
+        sr = sample(linear.PROBLEM, n_trajectories=40, seed=1, verbose=False)
+        sr = replace(sr, n_blocks_dropped=4)
+        with pytest.warns(UserWarning) as record:
+            analyze(sr, self._linear_Y(sr))
+        message = str(record[0].message)
+        assert "40 of the 44 requested trajectories remain" in message
+        assert "no measurable step" in message
+        assert "statistically unreliable" not in message
+
+    def test_lost_blocks_and_small_design_warn_with_the_floor(self):
+        """Asked for 8, got 4: name the loss and add the reliability note."""
+        sr = sample(linear.PROBLEM, n_trajectories=4, seed=1, verbose=False)
+        sr = replace(sr, n_blocks_dropped=4)
+        with pytest.warns(UserWarning) as record:
+            analyze(sr, self._linear_Y(sr))
+        message = str(record[0].message)
+        assert "4 of the 8 requested trajectories remain" in message
+        assert "no measurable step" in message
+        assert "statistically unreliable" in message
+
+    def test_nonfinite_loss_names_both_causes(self):
+        """Non-finite cleaning and an earlier block loss are reported together."""
+        sr = sample(ishigami.PROBLEM, n_trajectories=12, method="radial", seed=8, verbose=False)
+        sr = replace(sr, n_blocks_dropped=2)
+        Y = np.asarray(ishigami.evaluate(jnp.asarray(sr.samples)), dtype=np.float64)
+        Y[int(sr.expanded_to_unique[3 * (sr.n_params + 1)])] = np.nan
+        with pytest.warns(UserWarning) as record:
+            analyze(sr, jnp.asarray(Y))
+        message = str(record[0].message)
+        assert "11 of the 14 requested trajectories remain" in message
+        assert "no measurable step" in message
+        assert "non-finite values" in message
 
 
 class TestValidation:

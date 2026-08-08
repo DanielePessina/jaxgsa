@@ -45,6 +45,27 @@ ST: [~0.56, ~0.44, ~0.24]
 - `x3` has almost no main effect but still matters through interactions with
   `x1`.
 
+## Free Morris screening from the same run
+
+A Saltelli design already contains a Morris radial (star) design: within each
+base point, `A` and each `AB_j` differ in exactly one parameter. So you can read
+elementary-effect screening measures straight off a design you have already
+evaluated. This needs no extra model runs:
+
+```python
+morris_result = jaxgsa.morris.analyze(sampling_result.to_morris(), Y)
+
+print("mu_star:", morris_result.mu_star)  # importance ranking
+print("sigma:  ", morris_result.sigma)    # nonlinearity / interaction flag
+```
+
+`sigma` is worth having even when you already have `S2`: a large
+`sigma / mu_star` says an input's effect changes across the domain. The two
+analyses share the same model outputs, so this is not an independent
+confirmation of the Sobol indices — see
+[Morris](/examples/morris#from-an-existing-sobol-design) for the derivation and
+its caveats.
+
 ## Export the unique sample matrix
 
 The core result stays a NumPy array. Export it with NumPy when another process

@@ -1,6 +1,6 @@
 # Benchmarks
 
-This page covers two things: the **analytical test functions** shipped with jaxgsa (useful for validating any sensitivity method against known ground truth) and **timing comparisons** against [SALib](https://salib.readthedocs.io/).
+This page covers two things: the analytical test functions shipped with jaxgsa (useful for validating any sensitivity method against known ground truth) and timing comparisons against [SALib](https://salib.readthedocs.io/).
 
 ## Test Functions
 
@@ -108,11 +108,11 @@ print("S1 error:", abs(result.S1 - ishigami.ANALYTICAL_S1).max())
 
 ## Timing Results
 
-jaxgsa is benchmarked against [SALib](https://salib.readthedocs.io/) on a coupled-oscillator model with varying output shapes. What's timed is the **analysis step only** — computing indices from precomputed model outputs — not the model evaluations themselves. Three methods are compared: `jaxgsa.sobol.analyze` (first/total order only), `jaxgsa.sobol.analyze` (with second-order), and `jaxgsa.hdmr.analyze`, each across four output-shape scenarios (T timepoints × K outputs), with and without bootstrap confidence intervals.
+jaxgsa is benchmarked against [SALib](https://salib.readthedocs.io/) on a coupled-oscillator model with varying output shapes. Only the analysis step is timed. It computes the indices from precomputed model outputs. The model evaluations themselves are not included. Three methods are compared: `jaxgsa.sobol.analyze` (first/total order only), `jaxgsa.sobol.analyze` (with second-order), and `jaxgsa.hdmr.analyze`, each across four output-shape scenarios (T timepoints × K outputs), with and without bootstrap confidence intervals.
 
 **Machine:** Apple M1 Pro, CPU only (no GPU), JAX 0.10.2, Python 3.12.
 
-Every timing is the best of 5 runs on the same hardware and data, except the slow SALib HDMR path (best of 2). jaxgsa figures are **post-JIT** (steady-state): the one-off XLA compile (~0.3–1.1 s depending on scenario) is paid once per process and excluded, while SALib (pure NumPy/SciPy) requires no compilation.
+Every timing is the best of 5 runs on the same hardware and data, except the slow SALib HDMR path (best of 2). jaxgsa figures are post-JIT (steady-state): the one-off XLA compile (~0.3–1.1 s depending on scenario) is paid once per process and excluded, while SALib (pure NumPy/SciPy) requires no compilation.
 
 The short version: for a single scalar output without bootstrap, jaxgsa and SALib are comparable (SALib can even be faster, since jaxgsa pays some JAX dispatch overhead). The gap opens as the output grows — multi-output, time-series, or bootstrap workloads run several times to several hundred times faster in jaxgsa.
 
@@ -153,9 +153,9 @@ The short version: for a single scalar output without bootstrap, jaxgsa and SALi
 
 ## Why jaxgsa is faster
 
-**SALib** processes each `(t, k)` output slice in a Python loop. For a 50-timestep × 6-output model, that's 300 sequential calls to the Sobol analyzer.
+SALib processes each `(t, k)` output slice in a Python loop. For a 50-timestep × 6-output model, that's 300 sequential calls to the Sobol analyzer.
 
-**jaxgsa** uses:
+jaxgsa uses:
 
 - **Fused kernels** that compute the pooled variance once and derive all S1, ST, and S2 indices from it (instead of recomputing it D×2 times per output).
 - **Vectorized execution** via `jax.vmap` over all T×K output combinations in a single compiled pass.

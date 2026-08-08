@@ -1,6 +1,6 @@
 # Morris (Elementary Effects Screening)
 
-Morris is a global **screening** method: a globalized one-at-a-time design
+Morris is a global screening method: a globalized one-at-a-time design
 that measures coarse finite-difference "elementary effects" of each input at
 many locations across the whole input domain. It reduces them to three cheap
 measures — mu (mean effect), mu_star (mean absolute effect, the headline
@@ -58,10 +58,10 @@ Interpreting the measures:
 
 - **mu_star** ranks the parameters. For Ishigami all three inputs come out
   comparable — note that x3 is kept even though its first-order Sobol index
-  is near zero, because mu_star is a proxy for the *total-order* index and
+  is near zero, because mu_star is a proxy for the total-order index and
   x3 acts through its interaction with x1. Parameters with small mu_star are
   negligible and can be fixed before a more expensive Sobol analysis.
-- **sigma** relative to **mu_star** flags *how* a parameter acts. A large
+- **sigma** relative to mu_star shows how a parameter acts. A large
   ratio means the elementary effects vary strongly across the domain — the
   parameter is involved in nonlinearities or interactions (here x3 has the
   largest sigma, consistent with its purely interactive role). The canonical
@@ -99,6 +99,42 @@ print("mu_star (radial):", result_radial.mu_star)
 `num_levels` is ignored by the radial design. Radial points do not lie on a
 coarse grid, so fewer duplicate rows are removed than with the trajectory
 design.
+
+## From an existing Sobol design
+
+If you have already run a Sobol analysis, you can get Morris measures out of
+it for free. A Saltelli design already contains the radial structure Morris
+needs — within each base point, `A` and each `AB_j` differ in exactly one
+parameter — so `SobolSamples.to_morris()` reinterprets the design without any
+new model evaluations:
+
+```python
+samples = jaxgsa.sobol.sample(PROBLEM, 0, base_n=512, seed=0)
+Y = evaluate(jnp.asarray(samples.samples))
+
+sobol_result = jaxgsa.sobol.analyze(samples, Y)
+morris_result = jaxgsa.morris.analyze(samples.to_morris(), Y)
+
+print("ST:     ", sobol_result.ST)
+print("mu_star:", morris_result.mu_star)
+```
+
+`to_morris()` returns a normal `MorrisSamples` with `method="radial"`, so
+everything else works unchanged: bootstrap CIs, multi-output outputs,
+`to_dataset()`, `downsample()`, and `save()`. Its `samples` is the same array
+you already evaluated, so `n_runs` is unchanged and your existing `Y` stays
+valid.
+
+`n_trajectories` is `base_n` for both design variants — one radial block per
+base point. A second-order design also holds a block based at `B` (`B` with its
+`BA_j` rows), but for additive contributions it is algebraically the same
+effect, so harvesting it would inflate the apparent sample size and narrow
+bootstrap CIs without improving `mu_star` or `sigma`. It is deliberately unused;
+see [Methods](/guide/methods) for the measurement.
+
+See [Methods](/guide/methods) for why this works: Jansen's total-order
+estimator and Morris's mu_star are different moments of the same increments
+`f(AB_j) - f(A)`.
 
 ## Multi-output example
 
@@ -139,12 +175,28 @@ print("sigma shape:", result.sigma.shape)      # (K, D) = (2, 3)
 
 ## Gaussian inputs
 
-Gaussian marginals are supported through a **truncated-quantile grid**: the
-Morris design includes the unit-cube boundaries, which an unbounded inverse
-CDF would map to infinity, so each Gaussian coordinate is confined to
-`[q, 1 - q]` (`truncation_quantile`, default 0.005 — probing the 0.5%–99.5%
-quantile range) before the transform. Uniform marginals are untouched, and
-deduplication and prefix-nested downsampling work as usual.
+Gaussian marginals are supported through a truncated-quantile grid. The
+Morris design touches the unit-cube boundaries, and an unbounded inverse CDF
+maps 0 and 1 to infinity. Each open side of a Gaussian marginal is
+therefore pulled in by `q` (`truncation_quantile`, default 1e-4 — probing the
+0.01%–99.99% quantile range) before the transform. A side the problem already
+bounds with an explicit `low` or `high` stays exactly where you put it, so a
+two-sided truncated Gaussian is sampled as declared. Uniform marginals are
+untouched, and deduplication and prefix-nested downsampling work as usual.
+
+On an unbounded marginal `mu_star` has no `q -> 0` limit. The design always
+includes unit levels 0 and 1 exactly, so a smaller `q` always reaches further
+into the tail and the effects grow with it. Magnitudes are scale-dependent by
+construction there, and only rankings are comparable across truncation
+settings. To fix one bounded input model that every method shares, pass
+`truncate_gaussians` once:
+
+```python
+problem = jaxgsa.Problem.from_dict(params, truncate_gaussians=1e-4)
+```
+
+It writes explicit `low`/`high` into every Gaussian that does not already
+declare them, at that marginal's own `q` and `1 - q` quantiles.
 
 ```python
 import jax.numpy as jnp
@@ -263,8 +315,9 @@ D is always the last axis.
 ## Practical caveats
 
 - Gaussian marginals are sampled on a truncated-quantile grid
-  (`truncation_quantile`, default 0.005): the design would otherwise hit the
-  unit-cube boundaries, which an unbounded inverse CDF maps to infinity.
+  (`truncation_quantile`, default 1e-4): the design would otherwise hit the
+  unit-cube boundaries, which an unbounded inverse CDF maps to infinity. Only
+  open sides are pulled in; an explicit `low` or `high` is kept as written.
   `truncation_quantile` must be in `(0, 0.5)` or `jaxgsa.morris.sample()` raises
   `ValueError`.
 - `to_physical_units()` raises `ValueError` for problems with Gaussian
@@ -280,6 +333,26 @@ D is always the last axis.
 - Trajectories containing any non-finite output (NaN/Inf) are dropped as
   whole blocks with a warning. Fewer than 2 remaining trajectories raise an
   error; fewer than 10 trigger a reliability warning.
+- Measures derived through `SobolSamples.to_morris()` come from the same model
+  outputs as that design's Sobol indices, so mu_star and ST agreeing is not an
+  independent check of either.
+- A derived design is a radial design. It estimates
+  `E|f(A with B_j) - f(A)| / |B_j - A_j|`, not the fixed-step-delta grid
+  quantity. `jaxgsa.morris.sample()` defaults to `method="trajectory"`, so
+  compare a derived result against `morris.sample(..., method="radial")`. On
+  Ishigami at r=8192 the derived mu_star is [8.68, 15.01, 6.62] against
+  [8.69, 15.02, 6.64] native radial, but [7.59, 7.88, 6.39] native trajectory.
+- Derived blocks whose step is unmeasurable are dropped with a warning. At the
+  default `scramble=True` this is a non-issue: 0 of 65536 blocks were dropped
+  across 8 seeds at D=3. With `scramble=False` the rate falls with `base_n`
+  (21.9% at 64, 9.4% at 256, 2.3% at 1024, 1.2% at 4096) and the survivors are
+  a biased subsequence — mu_star [8.34, 14.88, 5.55] at base_n=64 against
+  [8.68, 15.01, 6.62] scrambled, so x3 reads 16% low. Keep `scramble=True`.
+- For unbounded Gaussian marginals a derived mu_star has no fixed scale,
+  because how far the design reaches into the tail sets the magnitude and the
+  Saltelli design and `morris.sample` reach different distances. Rankings are
+  unaffected. Use `Problem.from_dict(..., truncate_gaussians=q)` if magnitudes
+  must be comparable across designs.
 
 ## See also
 

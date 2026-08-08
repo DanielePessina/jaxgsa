@@ -113,7 +113,7 @@ The minimum design size is also stricter. 0.3 required only
 `n_per_curve > 4*M^2`; 0.4 requires `n_per_curve >= 4*M^2*(D-1) + 1`, which
 grows with the number of parameters. Below that bound there are not enough
 frequencies to give every non-focal parameter a distinct one, and 0.3 wrapped
-them cyclically — two parameters then shared a frequency *and* a phase, making
+them cyclically — two parameters then shared a frequency and a phase, making
 them identical along the search curve and silently biasing the indices. Such
 designs now raise `ValueError`; raise `n_per_curve` or lower `M`.
 
@@ -121,10 +121,10 @@ designs now raise `ValueError`; raise `n_per_curve` or lower `M`.
 
 0.4 uses one vocabulary for the two kinds of batching, package-wide:
 
-- `batch_size` always means **rows of X/Y** processed per batch
+- `batch_size` always means rows of X/Y processed per batch
   (`pce.analyze`, `hdmr.analyze`, `dgsm.analyze`, `hsic.analyze`, and
   `result.predict`);
-- `slice_chunk_size` always means **output slices** (`T * K` columns)
+- `slice_chunk_size` always means output slices (`T * K` columns)
   processed per batch.
 
 The former `chunk_size` parameters were renamed accordingly:

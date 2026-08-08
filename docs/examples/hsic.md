@@ -1,7 +1,7 @@
 # HSIC (Kernel-Based Sensitivity Analysis)
 
 HSIC (Hilbert-Schmidt Independence Criterion) computes sensitivity indices
-using **kernel-based dependence measures** rather than variance decomposition.
+using kernel-based dependence measures rather than variance decomposition.
 It detects any form of statistical dependence — nonlinear, non-monotone,
 heteroscedastic — by mapping inputs and outputs into reproducing kernel
 Hilbert spaces.
@@ -15,11 +15,11 @@ The method produces two index types:
 
 When to use HSIC:
 
-- You want a sensitivity measure that captures **any dependence**, not just
-  variance-based effects.
-- Your inputs may be **correlated** (HSIC works without independence assumptions).
+- You want a sensitivity measure that captures all forms of dependence, not
+  just variance-based effects.
+- Your inputs may be correlated. HSIC works without independence assumptions.
 - You have existing (X, Y) sample pairs and want sensitivity indices without
-  additional model evaluations — HSIC is a **given-data** method.
+  additional model evaluations. HSIC is a given-data method.
 - You want a third lens alongside Sobol (variance) and distribution-based
   methods (OT, PAWN).
 
@@ -37,14 +37,14 @@ called as `jaxgsa.sampling.monte_carlo()`.
 
 ## Key difference from other methods
 
-HSIC is a **given-data** method like RS-HDMR. It takes any (X, Y) sample pairs
+HSIC is a given-data method like RS-HDMR. It takes any (X, Y) sample pairs
 — no special sampling design is required. Unlike Sobol indices which decompose
 output variance, HSIC measures statistical dependence in a reproducing kernel
 Hilbert space. This means:
 
 - HSIC detects nonlinear, non-monotone, and heteroscedastic effects that
   Sobol indices may underweight.
-- R2-HSIC indices do **not** sum to 1 (they are individual dependence
+- R2-HSIC indices do not sum to 1 (they are individual dependence
   measures, not variance fractions).
 - The indices depend on the kernel bandwidth, which is set automatically
   via the median heuristic.
@@ -124,8 +124,8 @@ For scalar output, the dataset has dimension `(param,)` only.
 
 ## Bandwidth control
 
-By default, HSIC uses the **median heuristic** to set the Gaussian kernel
-bandwidth — no tuning required. You can override with a fixed bandwidth for
+By default, HSIC uses the median heuristic to set the Gaussian kernel
+bandwidth. No tuning is required. You can override with a fixed bandwidth for
 convergence studies:
 
 ```python
@@ -165,9 +165,9 @@ D is always the last axis of the index arrays.
 
 ## Practical caveats
 
-- HSIC is **O(N²)** in computation and memory (kernel matrices). For N > 8000,
+- HSIC is O(N²) in computation and memory (kernel matrices). For N > 8000,
   use `batch_size` to limit peak memory.
-- R2-HSIC indices do **not** sum to 1. They are individual dependence measures,
+- R2-HSIC indices do not sum to 1. They are individual dependence measures,
   not variance fractions.
 - The total HSIC index uses product kernels across all D inputs. For very
   high D (> 15), the product kernel can underflow in float32.

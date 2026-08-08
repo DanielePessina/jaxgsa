@@ -20,9 +20,9 @@ app = marimo.App(width="medium")
 @app.cell(hide_code=True)
 def _intro(mo):
     mo.md(r"""
-    # Morris elementary-effects screening with **jaxgsa**
+    # Morris elementary-effects screening with jaxgsa
 
-    The **Morris method** is a globalized one-at-a-time screening design.
+    The Morris method is a globalized one-at-a-time screening design.
     It builds $r$ trajectories of $D + 1$ points each; every step along a
     trajectory perturbs a single input, yielding one *elementary effect*
 
@@ -35,7 +35,7 @@ def _intro(mo):
 
     | Measure | Meaning |
     | --- | --- |
-    | $\mu^*$ | mean $\lvert EE \rvert$ — importance; proxy for the total-order ($S_T$) *ranking* |
+    | $\mu^*$ | mean $\lvert EE \rvert$ — importance; proxy for the total-order ($S_T$) ranking |
     | $\sigma$ | std of $EE$ — large values relative to $\mu^*$ flag nonlinearity or interactions |
     | $\mu$ | signed mean $EE$ — sign cancellation ($\mu \ll \mu^*$) flags non-monotone response |
 
@@ -47,7 +47,8 @@ def _intro(mo):
     2. The canonical **$\mu^*$–$\sigma$ plane**
     3. **Bootstrap confidence intervals** on $\mu^*$
     4. **Trajectory vs radial** designs at the same budget
-    5. **Downsampling** as a convergence check
+    5. **Free screening** derived from a Sobol design, at no extra cost
+    6. **Downsampling** as a convergence check
     """)
     return
 
@@ -77,14 +78,14 @@ def _ishigami_md(mo):
     The workflow mirrors the other jaxgsa methods:
 
     1. **Sample** — `jaxgsa.morris.sample` builds $r = 100$ trajectories on
-       the default `num_levels=4` grid and returns only the **unique** rows
+       the default `num_levels=4` grid and returns only the unique rows
        to evaluate.
     2. **Evaluate** — run the model on `sr.samples`.
     3. **Analyse** — `jaxgsa.morris.analyze` reconstructs the expanded design
        internally and reduces the elementary effects.
 
     Watch the verbose summary line printed by the sampler: it reports the
-    **duplicate-row savings** from deduplication.  Trajectory points live
+    duplicate-row savings from deduplication.  Trajectory points live
     on a coarse 4-level grid, so in 3-D the 400 expanded rows collapse to
     just 64 unique model evaluations — an 84% saving that jaxgsa banks
     automatically.
@@ -113,7 +114,7 @@ def _plane_md(mo):
     $(\mu^*, \sigma)$.  Points near the horizontal axis behave almost
     linearly and additively; points above the dashed $\sigma = \mu^*$
     line have effects whose spread exceeds their mean magnitude — the
-    classic signature of **nonlinearity or interactions**.
+    classic signature of nonlinearity or interactions.
     """)
     return
 
@@ -246,7 +247,7 @@ def _radial_md(mo):
     $7\sin^2 x_2$ (derivative up to $7\lvert\sin 2x_2\rvert$ per physical
     unit), which the fixed $\Delta = 2/3$ grid step averages away.
     Screening verdicts are design-dependent — when in doubt, keep every
-    parameter that *either* design flags as important.
+    parameter that either design flags as important.
     """)
     return
 
@@ -288,6 +289,70 @@ def _radial_comparison(jaxgsa, ishigami, jnp, morris_problem, np, plt, result_tr
 
 
 @app.cell(hide_code=True)
+def _from_sobol_md(mo):
+    mo.md(r"""
+    ## Free screening from a Sobol design
+
+    A Saltelli design is already a radial design: within each base point,
+    the row $A$ and each row $A_B^{(j)}$ differ in exactly one parameter.
+    Writing $\Delta_j = B_j - A_j$ and
+    $EE_j = (f(A_B^{(j)}) - f(A)) / \Delta_j$, Jansen's total-order estimator
+    is $\mathbb{E}[\Delta_j^2 EE_j^2] / (2\,\mathrm{Var}\,Y)$ while Morris
+    reports $\mu^* = \mathbb{E}|EE_j|$ — the same increments, weighted
+    differently.
+
+    So `SobolSamples.to_morris()` hands you $\mu^*$ and $\sigma$ from a design
+    you have already paid for, at zero extra model evaluations. Note the
+    two measures answer different questions and may rank parameters
+    differently: $S_T$ is a variance share, $\mu^*$ a mean absolute
+    derivative.
+    """)
+    return
+
+
+@app.cell
+def _from_sobol(jaxgsa, ishigami, jnp, morris_problem, np, plt):
+    sobol_samples = jaxgsa.sobol.sample(morris_problem, 0, base_n=256, seed=42, verbose=False)
+    Y_sobol = ishigami.evaluate(jnp.asarray(sobol_samples.samples))
+
+    # Two analyses, one set of model runs.
+    derived_samples = sobol_samples.to_morris(verbose=False)
+    result_sobol = jaxgsa.sobol.analyze(sobol_samples, Y_sobol)
+    result_derived = jaxgsa.morris.analyze(derived_samples, Y_sobol)
+
+    _names = list(morris_problem.names)
+    _x = np.arange(len(_names))
+    _width = 0.38
+
+    # Normalize each measure by its own maximum: they are on different scales
+    # (variance share vs unit-space derivative), so only the profile compares.
+    _st = np.asarray(result_sobol.ST)
+    _mu = np.asarray(result_derived.mu_star)
+
+    fig_derived, ax_derived = plt.subplots(figsize=(7.5, 4.5))
+    ax_derived.bar(_x - _width / 2, _st / _st.max(), _width, color="C2", label=r"$S_T$ (Sobol)")
+    ax_derived.bar(
+        _x + _width / 2,
+        _mu / _mu.max(),
+        _width,
+        color="C3",
+        label=r"$\mu^*$ (Morris, derived)",
+    )
+    ax_derived.set_xticks(_x)
+    ax_derived.set_xticklabels(_names)
+    ax_derived.set_ylabel("normalized to own maximum")
+    ax_derived.set_title(
+        f"Both from one design: {sobol_samples.n_runs} model runs, 0 extra "
+        f"({derived_samples.n_trajectories} radial blocks)"
+    )
+    ax_derived.legend(frameon=False, fontsize=8)
+    ax_derived.grid(axis="y", alpha=0.3)
+    fig_derived.tight_layout()
+    fig_derived
+    return
+
+
+@app.cell(hide_code=True)
 def _downsample_md(mo):
     mo.md(r"""
     ## Convergence check via downsampling
@@ -295,7 +360,7 @@ def _downsample_md(mo):
     Trajectories are generated sequentially, so the first $m$ trajectories
     of an $r$-trajectory run are identical to drawing $m$ directly with
     the same seed.  `sr.downsample(m, Y)` slices both the design and the
-    already-computed outputs — **no re-simulation needed**.  If the
+    already-computed outputs — no re-simulation needed.  If the
     $\mu^*$ ranking is stable between $r = 25$ and $r = 100$, the
     screening verdict has converged.
     """)
@@ -355,7 +420,7 @@ def _interpretation(mo):
       $x_1 > x_2 > x_3$ matches the analytical total-order ordering
       ($S_T = 0.56, 0.44, 0.24$), but $\mu^*$ is a mean absolute
       derivative-like quantity, not a variance share — treat it as a
-      proxy for the $S_T$ *ranking* and follow up with a variance-based
+      proxy for the $S_T$ ranking and follow up with a variance-based
       method (Sobol, eFAST) on the surviving parameters.
     - **Deduplication costs nothing.**  The verbose sampler line showed
       400 expanded rows collapsing to 64 unique evaluations (84% saved)

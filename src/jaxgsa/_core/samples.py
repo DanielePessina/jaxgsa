@@ -150,6 +150,14 @@ class UniqueDesignSamples:
         expanded prefix itself a prefix, so ``max() + 1`` on the sliced index
         map recovers the new unique count.
 
+        One exception: a design *derived* from another method's design (see
+        :meth:`jaxgsa.sobol.SobolSamples.to_morris`) references only a subset of
+        the source's rows, so its index set is not a prefix and ``max() + 1`` is
+        a conservative upper bound rather than the exact count — a few rows the
+        smaller design never gathers are carried along. Slicing stays correct
+        because every retained index is still below the bound; do not tighten
+        this to an exact count without special-casing derived designs.
+
         Args:
             new_expanded_n: Expanded row count of the smaller design.
             Y: Optional model outputs aligned with ``samples`` to co-slice.

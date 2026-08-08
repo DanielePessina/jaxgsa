@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from jaxgsa._core.sampling import UNIT_CLIP
 from jaxgsa.problem import Problem
 
 
@@ -33,8 +34,8 @@ def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
     # CDF-to-unit-interval mapping: apply F(x) per dimension so each column
     # lands in (0, 1).  For Gaussian inputs, standardised truncation bounds
     # a=(lo-mu)/sigma, b=(hi-mu)/sigma follow scipy's truncnorm convention.
-    # Clipping output to (1e-12, 1-1e-12) keeps values in the open interval
-    # so downstream inverse transforms (ppf) never receive exactly 0 or 1.
+    # Clipping output to (UNIT_CLIP, 1-UNIT_CLIP) keeps values in the open
+    # interval so downstream inverse transforms (ppf) never receive 0 or 1.
     for d in range(D):
         dist, first, second, lo, hi = problem.input_specs[d]
         if dist == "uniform":  # affine map (x - lo)/(hi - lo) is the CDF of U(lo, hi)
@@ -46,11 +47,11 @@ def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
             a = -np.inf if lo is None else (lo - mean) / std
             b = np.inf if hi is None else (hi - mean) / std
             u = jnp.asarray(truncnorm.cdf(np.asarray(X[:, d]), a=a, b=b, loc=mean, scale=std))
-            cols.append(jnp.clip(u, 1e-12, 1.0 - 1e-12))
+            cols.append(jnp.clip(u, UNIT_CLIP, 1.0 - UNIT_CLIP))
         else:  # unbounded Gaussian -- stays on device via jax.scipy
             mean, variance = first, second
             std = float(jnp.sqrt(variance))
             u = jax_norm.cdf(X[:, d], loc=mean, scale=std)
-            cols.append(jnp.clip(u, 1e-12, 1.0 - 1e-12))
+            cols.append(jnp.clip(u, UNIT_CLIP, 1.0 - UNIT_CLIP))
 
     return jnp.column_stack(cols)  # reassemble per-dimension columns into (N, D)

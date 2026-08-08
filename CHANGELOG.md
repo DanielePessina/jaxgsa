@@ -1,5 +1,87 @@
 # Changelog
 
+## 0.5.0
+
+### Added
+
+- `SobolSamples.to_morris()` — derive Morris elementary effects from a Sobol
+  design you have already evaluated, at no extra model cost. A Saltelli
+  design already contains the radial (star) structure Morris needs: within each
+  base point, `A` and each `AB_j` differ in exactly one parameter. Writing
+  `EE_j = (f(AB_j) - f(A)) / (B_j - A_j)`, Jansen's total-order estimator is
+  `E[(delta_j * EE_j)^2] / (2 Var Y)` while Morris reports `mu_star = E|EE_j|`,
+  so both methods are moments of the same increments. Pass the returned
+  `MorrisSamples` and your existing `Y` to `jaxgsa.morris.analyze` to get
+  `mu`/`mu_star`/`sigma`, bootstrap CIs, and multi-output support with no new
+  model runs. `n_trajectories` is `base_n` for both design variants: one radial
+  block per base point, based at `A`. Second-order designs also contain a block
+  based at `B`. It is deliberately unused, because pooling it reduces no
+  measured variance (pooled / A-only variance ratio [1.07, 1.00, 1.59] over 150
+  seeds at `base_n=128`) and would need a cluster bootstrap over base points to
+  keep confidence intervals honest.
+
+  A derived design is a radial design, so it estimates
+  `E|f(A with B_j) - f(A)| / |B_j - A_j|`, not the classical fixed-step-delta
+  grid quantity. `morris.sample` defaults to `method="trajectory"`, so compare
+  a derived result against `morris.sample(..., method="radial")`.
+- `Problem.from_dict(..., truncate_gaussians=q)` — opt in to one bounded input
+  model. It writes explicit `low` and `high` into every Gaussian spec that does
+  not already declare them, at that marginal's own `q` and `1 - q` quantiles.
+  Default `None` keeps the previous unbounded behaviour. Sides the spec already
+  declares are kept as written.
+
+### Changed
+
+- `morris.sample` now squashes only the open sides of a Gaussian marginal.
+  A Gaussian with an explicit `low` and `high` is already bounded, and was
+  being truncated a second time into a range `truncation_quantile` narrower on
+  each side. A one-sided truncation now squashes only its open side.
+- `morris.sample`'s `truncation_quantile` default drops from `5e-3` to `1e-4`.
+  Measured, `q=5e-3` discarded 7.5% of the marginal variance and 24% of the
+  fourth moment and perturbed rankings (Kendall tau 0.66 against a
+  near-untruncated design on Oakley-O'Hagan); `q=1e-4` discards 0.29% and 5.0%.
+  Note that `mu_star` on an unbounded marginal has no `q -> 0` limit — the
+  design always includes unit levels 0 and 1 exactly — so magnitudes there are
+  scale-dependent by construction and only rankings are comparable across
+  truncation settings.
+- `pce.analyze` no longer forces a wide truncated Gaussian onto Legendre.
+  Any truncation used to route the input through its truncated CDF, which the
+  low-order Legendre basis approximates badly. A truncation whose every
+  declared bound is at least 5 standard deviations out now keeps Hermite. On
+  Oakley-O'Hagan at order 3 this restores the unbounded fit exactly, where the
+  Legendre route cost about a factor 2 in LOO RMSE. Above order 7 Legendre is
+  used even for a wide truncation, because the Hermite Gram defect against the
+  truncated measure grows with degree.
+
+### Fixed
+
+- Morris trajectory designs recorded `ee_delta` before the open-side squash
+  rescaled the coordinate, so the elementary-effect divisor did not match the
+  step actually taken — a systematic error of about 1% at the former default
+  `q`. The divisor is now rescaled with the coordinate, per dimension. A model
+  linear in the unit coordinate now recovers its coefficients exactly.
+- `morris.analyze` now reports a design that lost blocks. The warning follows
+  the cause, not the surviving count. A small design that you asked for stays
+  silent. A design that lost blocks gives a warning at any count, and the
+  message names each cause: blocks that `SobolSamples.to_morris` dropped for
+  having no measurable step, and blocks that non-finite cleaning removed. The
+  message adds the "statistically unreliable" note when fewer than 10
+  trajectories remain. Before, `to_morris` could drop to 4 surviving blocks in
+  silence, and a deliberate `r = 8` design gave a warning it did not deserve.
+  `MorrisSamples` records the loss in the new `n_blocks_dropped` field.
+
+### Internal
+
+- Added `jaxgsa._core.sampling._inverse_transform_samples`, the float64 inverse
+  of `_transform_samples` (physical units back to the unit cube). Needed
+  because derived elementary-effect denominators are differences of unit
+  coordinates, and the existing float32 JAX helper
+  (`_core.transforms.cdf_to_unit_interval`) loses too many digits to divide by.
+  Unifying the two remains a follow-up.
+- Named the unit-cube clip that bounds every unbounded marginal:
+  `jaxgsa._core.sampling.UNIT_CLIP`, still `1e-12`, equal to +/-7.0345 sigma for
+  a Gaussian. It replaces four hard-coded literals. No behaviour change.
+
 ## 0.4.0
 
 ### Changed

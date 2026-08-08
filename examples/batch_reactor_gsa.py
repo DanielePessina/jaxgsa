@@ -23,7 +23,7 @@ app = marimo.App(width="medium")
 @app.cell(hide_code=True)
 def _intro(mo):
     mo.md(r"""
-    # Batch reactor sensitivity analysis with **jaxgsa**
+    # Batch reactor sensitivity analysis with jaxgsa
 
     A batch reactor running a first-order liquid-phase reaction
     $A \to B$. The rate constant $k(T, \mathrm{pH})$ combines a centred
@@ -51,13 +51,13 @@ def _intro(mo):
     $$
 
     Sobol analysis answers that question with three kinds of variance
-    share: the **first-order index** $S_1$ is the fraction of output
-    variance an input explains on its own, the **total-order index**
+    share: the first-order index $S_1$ is the fraction of output
+    variance an input explains on its own, the total-order index
     $S_T$ adds every interaction the input takes part in, and the
-    **second-order index** $S_{ij}$ isolates what a pair explains
+    second-order index $S_{ij}$ isolates what a pair explains
     jointly beyond their individual effects. The notebook treats
     $C_A(t)$ as a time-series output, runs Sobol with bootstrap
-    resampling **once**, and reads the three off as bar plots, a
+    resampling once, and reads the three off as bar plots, a
     time-resolved sensitivity profile, and a pairwise interaction
     heatmap.
     """)

@@ -1,9 +1,9 @@
 # Shapley Effects (Fair Variance Allocation)
 
-Shapley effects allocate the output variance **fairly** across inputs: each
+Shapley effects allocate the output variance fairly across inputs: each
 interaction's variance is split equally among its participants (Owen, 2014;
 Song, Nelson & Staum, 2016), so the shares sum to exactly 1 with no gaps and
-no double counting. jaxgsa computes them **analytically** from a fitted
+no double counting. jaxgsa computes them analytically from a fitted
 surrogate's variance decomposition — PCE (default) or RS-HDMR — with no
 permutation Monte Carlo and no extra model runs. The result carries Sh
 alongside the first-order (S1) and total-order (ST) indices from the same
@@ -67,7 +67,7 @@ Interpreting the indices:
   it acts only through the `x1`–`x3` interaction — yet its Shapley effect
   is clearly positive (about 0.12) because it owns half of that
   interaction's variance. S1 would dismiss x3 entirely; ST counts the
-  interaction once for x1 *and* once for x3.
+  interaction once for x1 and once for x3.
 - **Bracketing.** Under independent inputs `S1 <= Sh <= ST` holds
   elementwise, and all three come from the same surrogate fit, so they are
   directly comparable. Ishigami has a single two-way interaction, so
@@ -130,7 +130,7 @@ print("explained_variance:", result.explained_variance)  # (K,)
 ## The explained_variance diagnostic
 
 Indices are normalized by the surrogate's total decomposed variance
-`sum_u V_u`, so **Sh always sums to exactly 1** — even when the surrogate
+`sum_u V_u`. Thus Sh always sums to exactly 1, even when the surrogate
 fits poorly. The fit-quality signal is reported separately in
 `explained_variance = sum_u V_u / Var(Y)`: close to 1 for a good fit,
 below 1 when truncation or fit error leaves variance unexplained, above 1

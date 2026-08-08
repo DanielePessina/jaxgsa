@@ -1,6 +1,6 @@
 # DGSM (Derivative-based Global Sensitivity Measures)
 
-DGSM computes sensitivity information from the **partial derivatives** of a
+DGSM computes sensitivity information from the partial derivatives of a
 model, rather than from variance decomposition. For JAX-differentiable models
 the derivatives come cheaply: one reverse-mode autodiff pass (`jax.jacrev`)
 yields all of them per sample.
@@ -32,7 +32,7 @@ called as `jaxgsa.sampling.monte_carlo()`.
 
 ## Key difference from other methods
 
-DGSM requires an **unbatched** function with signature `(D,) -> ()` or
+DGSM requires an unbatched function with signature `(D,) -> ()` or
 `(D,) -> (K,)`. This is different from the batched `evaluate(X)` functions
 used by Sobol, HDMR, and eFAST which accept `(N, D)` input arrays.
 
@@ -125,7 +125,7 @@ D is always the last axis of the index arrays.
 
 ## Practical caveats
 
-- DGSM requires a **JAX-differentiable** function. If your model is not
+- DGSM requires a JAX-differentiable function. If your model is not
   differentiable in JAX, you can pre-compute the Jacobian externally and pass
   `Y` and `dfdx` arrays directly to `jaxgsa.dgsm.analyze()`.
 - The Poincare upper bound can be loose for strongly nonlinear or non-monotone
