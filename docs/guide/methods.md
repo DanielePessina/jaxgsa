@@ -10,7 +10,7 @@ Throughout this page, $D$ is the number of parameters and $N$ is a sample count.
 
 Three questions narrow the field quickly.
 
-1. Can you still choose where to run the model? Five methods need their own sampling design, which jaxgsa generates for you: Sobol' (Saltelli matrices), eFAST (search curves), Morris (trajectories), DGSM (plain Monte Carlo plus autodiff), and Kucherenko (conditional-copula blocks for dependent parameters). The other eight are given-data methods: HDMR, PCE, Shapley effects, HSIC, PAWN, Borgonovo delta, optimal transport, and VKOGA. They accept any set of $(X, Y)$ pairs, including simulation runs you already have.
+1. Can you still choose where to run the model? Four methods need their own sampling design, which jaxgsa generates for you: Sobol' (Saltelli matrices), eFAST (search curves), Morris (trajectories), and Kucherenko (conditional-copula blocks for dependent parameters). The other nine are given-data methods: HDMR, PCE, Shapley effects, DGSM, HSIC, PAWN, Borgonovo delta, optimal transport, and VKOGA. They accept any set of $(X, Y)$ pairs, including simulation runs you already have. DGSM has no sampler of its own: draw plain Monte Carlo points with `jaxgsa.sampling.monte_carlo` and let autodiff do the rest.
 
 2. What should the number mean? Variance-based methods (Sobol', HDMR, PCE, eFAST, Shapley) report fractions of output variance, as in "parameter 3 explains 40% of the output's spread". Screening methods (Morris, DGSM) trade that precision for cheap, reliable rankings. Moment-independent methods (HSIC, PAWN, Borgonovo delta, optimal transport) measure how strongly a parameter affects the whole output distribution. Use them when your output is skewed or heavy-tailed and variance is the wrong summary. Optimal transport also splits its index into a mean-shift part and a shape-change part.
 
@@ -30,26 +30,72 @@ Common situations:
 - "I want one fair importance number per parameter that sums to 1." Use [Shapley effects](#shapley-effects).
 - "I also want a fast surrogate of my model." Use HDMR or PCE and call `result.predict(...)`.
 
+### Method capabilities
+
+This table is the one place that records what each method accepts. The other
+pages link here instead of repeating it. `tests/test_docs_matrix.py` checks
+every cell against the method registry, so the table cannot fall behind the
+code.
+
+| Method | Reports | Own design | Correlated | Categorical | Bootstrap CI |
+|---|---|:--:|:--:|:--:|---|
+| [`borgonovo`](#borgonovo-delta-density-based-sensitivity) | $\delta$, $S_1$ | ✗ | ✓ § | ✓ | `n_bootstrap` |
+| [`dgsm`](#dgsm-derivative-based-global-sensitivity-measures) | bounds on $S_T$ | ✗ | ✗ | ✗ | — |
+| [`efast`](#efast-extended-fourier-amplitude-sensitivity-test) | $S_1$, $S_T$ | ✓ | ✗ | ✗ | — |
+| [`hdmr`](#rs-hdmr-random-sampling-high-dimensional-model-representation) | $S_a$ / $S_b$ / $S$ per term, surrogate | ✗ | ✓ † | ✗ | — |
+| [`hsic`](#hsic-hilbert–schmidt-independence-criterion) | dependence measure | ✗ | ✓ § | ✗ | — |
+| [`kucherenko`](#kucherenko-dependent-input-sobol-indices) | $S_1$, $S_T$ under dependence | ✓ | ✓ | ✗ | — |
+| [`morris`](#morris-elementary-effects-screening) | $\mu^*$, $\sigma$ | ✓ | ✗ | ✗ | `num_resamples` |
+| [`optimal_transport`](#optimal-transport-wasserstein-based-sensitivity) | $W_2^2$ index, advective + diffusive | ✗ | ✓ § | ✓ | `n_bootstrap` |
+| [`pawn`](#pawn-cdf-based-sensitivity) | KS distance | ✗ | ✓ § | ✓ | `n_bootstrap` |
+| [`pce`](#pce-polynomial-chaos-expansion) | $S_1$, $S_2$, $S_T$, surrogate | ✗ | ✗ | ✗ | — |
+| [`shapley`](#shapley-effects) | allocation summing to 1 | ✗ | ✗ ‡ | ✗ | — |
+| [`sobol`](#sobol-indices-via-saltelli-sampling) | $S_1$, $S_2$, $S_T$ | ✓ | ✗ | ✓ | `num_resamples` |
+| [`vkoga`](#vkoga-correlated-input-variance-indices) | $S_{TC}$, $S_{TU}$, $S_U$, $S_C$, $S_{IU}$, surrogate | ✗ | ✓ | ✗ | — |
+
+**Own design** means the method builds its own sample matrix, so you must be
+able to run the model at the points it chooses. The other nine are given-data
+methods. They accept any $(X, Y)$ pairs you already have.
+
+**Correlated** and **Categorical** say what the method does with a problem
+that declares a Gaussian-copula correlation, or that declares a categorical
+parameter. A ✗ is a refusal, not a silent approximation. The method raises a
+`ValueError` that names the parameters and the alternatives.
+
+**Bootstrap CI** gives the keyword that asks for bootstrap confidence
+intervals. Two spellings are in use. Eight methods report no intervals at all
+and show a —. See [Confidence intervals](/api/#confidence-intervals) for the
+`result.ci` record that comes back with them.
+
+† HDMR handles dependence through its ANCOVA decomposition: $S_a$ is the
+structural share and $S_b$ the correlative share. Its $S_T$ is the SCSA
+convention and is not a total-effect index under dependence. See the
+[HDMR section](#rs-hdmr-random-sampling-high-dimensional-model-representation).
+
+‡ The default `backend="pce"` assumes independent parameters and refuses. The
+table records that default. `shapley.analyze(backend="hdmr")` does accept a
+correlated problem, and with `include_correlative=True` it allocates the
+ANCOVA decomposition.
+
+§ Correlation-inclusive: a parameter that does not enter the model, but that
+correlates with one that does, scores above zero. That is the correct reading
+of these indices, not an estimation error. Use HDMR ($S_a$ and $S_b$), VKOGA,
+or Kucherenko when you must separate the structural effect from the
+correlation-induced one.
+
 ### Comparison table
+
+The rest of the differences, method by method. The capability columns above are not repeated here.
 
 | Consideration | Sobol' | HDMR | PCE | Shapley | eFAST | DGSM | Morris | HSIC | PAWN | Borgonovo delta | Optimal transport | VKOGA | Kucherenko |
 |---------------|--------|------|-----|---------|-------|------|--------|------|------|-----------------|------------------|-------|------------|
 | Sampling requirement | Structured Saltelli design, $N(2D+2)$ evaluations (default) | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Search curves, $N \times D$ evaluations | Plain MC, $N$ evaluations + autodiff | Trajectory or radial design, $r(D+1)$ evaluations (deduplicated) | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Any $(X, Y)$ pairs | Conditional-copula blocks, $N(2D+1)$ evaluations |
-| Parameter independence | Assumed | Handled via ANCOVA decomposition | Assumed | Assumed for `backend="pce"`; `backend="hdmr"` + `include_correlative=True` allocates the ANCOVA decomposition (conditional-variance Shapley is future work) | Assumed | Assumed | Assumed | Not assumed — valid under correlated parameters (measures total, correlation-inclusive influence) | Not assumed — valid under correlated parameters (measures total, correlation-inclusive influence) | Not assumed — valid under correlated parameters (measures total, correlation-inclusive influence) | Not assumed — valid under correlated parameters (measures total, correlation-inclusive influence; tested) | Not assumed (Gaussian copula from `problem.correlation`) | Not assumed (conditional sampling from the declared `problem.correlation` copula) |
 | Parameter distributions | Uniform + Gaussian | Uniform + Gaussian (via CDF mapping) | Uniform + Gaussian | Uniform + Gaussian (both backends) | Uniform + Gaussian | Uniform + Gaussian (+ truncated Normal) | Uniform + Gaussian (truncated-quantile grid) | Uniform + Gaussian (via CDF mapping) | Uniform + Gaussian (via CDF mapping) | Any (rank-based classes; marginals not used) | Any (rank-based classes; marginals not used) | Uniform + Gaussian (via CDF mapping) | Uniform + Gaussian (latent-copula inverse CDF) |
-| Categorical parameters | Supported (column swaps on level codes) | Rejected | Rejected | Rejected | Rejected | Rejected | Rejected | Rejected | Supported (one bin per level) | Supported (one class per level) | Supported (one class per level) | Rejected |
 | Output shapes | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series (both backends) | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series | Scalar, multi-output, time-series; joint point-cloud modes over outputs/time | Scalar, multi-output, time-series | Scalar, multi-output, time-series |
 | What the numbers mean | Exact variance fractions (given enough samples) | Variance fractions from a B-spline surrogate (fit-dependent) | Variance fractions from a polynomial surrogate (fit-dependent) | Exact allocation within the fitted surrogate; depends on fit quality | Exact variance fractions (given enough samples) | Bounds on $S_T$, not exact indices | Screening ranks ($\mu^*$ as $S_T$ proxy), not variance fractions | Dependence measure, not variance fractions | Distributional (KS) distance, not variance fractions | Distributional (L1) distance, not variance fractions | Distributional ($W_2^2$) distance in $[0,1]$, split into mean-shift + shape parts | Correlated and uncorrelated variance fractions from a kernel surrogate (fit-dependent) | Exact conditional-variance fractions under the declared dependence (given enough samples) |
 | Second-order indices | Direct estimation from cross-matrices | From interaction component functions | Analytical from coefficients | Not available (interaction variance folded into $\mathrm{Sh}$) | Not available | Not available | Not available | Not available | Not available | Not available | Not available | Not available | Not available |
 | Interaction detection | Via $S_2$ and the gap $S_T - S_1$ | Via explicit interaction component functions | Via $S_2$ from coefficients | Via the gaps $\mathrm{Sh} - S_1$ and $S_T - \mathrm{Sh}$ | Via the gap $S_T - S_1$ only | Not available (bounds only) | Via large $\sigma$ relative to $\mu^*$ (not pair-attributable) | Via the Total HSIC − R2-HSIC gap | Not available (first-order only) | Not available (the $\delta - S_1$ gap flags influence beyond first-order variance) | Not available (the diffusive component flags influence beyond mean shift) | Via $S_{IU}$, the independent-interaction index | Via the gap $S_T - S_1$ under independence (under correlation the gap mixes interactions and coupling) |
 | Reusable surrogate | No | Yes (`result.predict`) | Yes (`result.predict`) | Derived from either fitted result | No | No | No | No | No | No | No | Yes (`result.predict`) | No |
-
-HSIC, PAWN, the Borgonovo delta, and optimal transport share one caveat.
-Each measures total, correlation-inclusive influence. A parameter that
-the model ignores still scores above zero when it correlates with an
-influential parameter. That reading is correct, not an estimation error. Use
-HDMR (`Sa` and `Sb`), VKOGA, or Kucherenko when you must separate the
-structural effect from the correlation-induced one.
 
 ## Background: Variance-Based Sensitivity Analysis
 

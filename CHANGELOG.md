@@ -140,6 +140,17 @@ not a side effect. They are marked **now raises** below.
   `jaxgsa.config.set_memory_budget`. Only peak memory changes; every index is
   identical.
 
+- **One compatibility matrix, and a test that keeps it true.** The
+  documentation stated it three times and the three disagreed: one table had a
+  short row that rendered a column blank, one credited DGSM with a sampler it
+  does not have, and one listed eight of the nine given-data methods. There is
+  now one table, "Method capabilities" in `docs/guide/methods.md`. It gains a
+  Bootstrap CI column that names the keyword each method uses.
+  `docs/index.md` and `docs/api/index.md` link to it instead of restating it.
+  `tests/test_docs_matrix.py` checks every cell against the method
+  registry, so a fourteenth method, or a changed capability, fails the
+  suite rather than leaving the documentation stale.
+
 ### Performance
 
 - **HSIC allocates about a third of what it did** when it picks its own kernel

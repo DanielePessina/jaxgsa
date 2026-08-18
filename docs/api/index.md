@@ -63,7 +63,9 @@ codes to names for reporting.
 Optimal transport, Borgonovo delta, PAWN, and the Saltelli-based Sobol
 pipeline accept categorical inputs. The other methods raise a `ValueError`
 when a problem declares one. To analyze such a problem, use one of the four
-supported methods. See [Categorical Inputs](/examples/categorical-inputs).
+supported methods. The
+[method capability table](/guide/methods#method-capabilities) lists every
+method's answer. See [Categorical Inputs](/examples/categorical-inputs).
 
 ### Dependent inputs
 
@@ -74,9 +76,9 @@ To attach a matrix to an existing problem, call
 as `problem.correlation`.
 
 Methods whose indices assume independent inputs raise a `ValueError` on a
-correlated problem. Use `jaxgsa.kucherenko` or `jaxgsa.vkoga` instead; the
-table under [Given-Data Methods](#given-data-methods) lists which routes
-accept a correlated problem.
+correlated problem. Use `jaxgsa.kucherenko` or `jaxgsa.vkoga` instead. The
+[method capability table](/guide/methods#method-capabilities) lists which
+routes accept a correlated problem.
 
 A correlation entry that touches a categorical parameter is also rejected.
 Polychoric coupling is future work. See
@@ -109,35 +111,97 @@ Public objects:
 
 - `jaxgsa.sobol.sample`
 - `jaxgsa.sobol.analyze`
+- `jaxgsa.sobol.indices`
 - `jaxgsa.sobol.SobolSamples`
 - `jaxgsa.sobol.SobolResult`
 
 `SobolSamples.save(path)` and `SobolSamples.load(path)` use one compressed NPZ
 file. `SobolSamples.downsample(...)` returns a prefix-nested smaller design.
+`SobolSamples.unit` holds the same design in the unit cube, before the input
+distributions are applied, and `SobolSamples.transform(theta)` applies a set
+of distribution parameters to it. See
+[Sampling](/api/sampling#sobolsamples).
+
+`jaxgsa.sobol.indices(samples, Y)` returns `S1` and `ST` as plain arrays. It
+runs the same estimator as `analyze`, but it checks nothing and builds no
+result, so it works inside `jax.jit`, `jax.vmap` and `jax.grad`. Pair it with
+`transform` to differentiate an index with respect to the input distribution
+parameters. See [Analyze (Sobol)](/api/analyze).
+
+## Confidence Intervals
+
+Five methods report bootstrap confidence intervals: `sobol`, `morris`,
+`pawn`, `borgonovo` and `optimal_transport`. Two keyword spellings are in
+use. `sobol.analyze` and `morris.analyze` take `num_resamples`, and
+`pawn.analyze`, `borgonovo.analyze` and `optimal_transport.analyze` take
+`n_bootstrap`. The
+[method capability table](/guide/methods#method-capabilities) records the
+spelling for each method. The other eight methods report no intervals.
+
+Every interval comes with `result.ci`, a `CIInfo` record that says how it was
+made. A bare `*_conf` array does not say whether it is a 95% or a 68%
+interval, or how many resamples it rests on. `CIInfo` does:
+
+- `level` — the two-sided confidence level, the `conf_level` the analysis ran
+  with.
+- `method` — the endpoint rule used. `"quantile"` takes empirical bootstrap
+  quantiles and `"gaussian"` takes a normal approximation. `sobol` and
+  `morris` choose between them with `ci_method`. The other three always use
+  the percentile interval and record `"quantile"`.
+- `n_resamples` — the number of bootstrap resamples drawn.
+- `replicates` — the per-resample values, or `None`.
+
+`result.ci` is `None` when the analysis ran no bootstrap.
+
+### Keeping the bootstrap draws
+
+All five `analyze()` functions take `keep_replicates`. It defaults to `False`,
+which throws the draws away once the interval is computed. Pass
+`keep_replicates=True` to keep them in `result.ci.replicates`, a mapping from
+the name of an estimate (`"S1"`, `"mu_star"`, and so on) to an array whose
+leading axis has length `n_resamples`.
+
+Keep them to recompute an interval at another level, or to compute a
+bias-corrected one, without running the analysis again:
+
+```python
+result = jaxgsa.sobol.analyze(samples, Y, num_resamples=1000, keep_replicates=True)
+result.ci.level                      # 0.95
+result.ci.n_resamples                # 1000
+lo, hi = jnp.quantile(result.ci.replicates["S1"], jnp.array([0.05, 0.95]), axis=0)
+```
+
+The draws are large. 1000 resamples of a `(T=100, K=5, D=20)` index array is
+80 MB, which is more than the rest of the result put together. That is why
+they are dropped by default.
 
 ## Given-Data Methods
 
-These methods analyze arbitrary aligned `(X, Y)` pairs. The last column says
-whether the route accepts a problem that declares a correlation.
+These nine methods analyze arbitrary aligned `(X, Y)` pairs. They need no
+design of their own.
 
-| Namespace | Command | Result | Correlated problem |
-| --- | --- | --- | --- |
-| `jaxgsa.hdmr` | `analyze` | `HDMRResult` | accepted |
-| `jaxgsa.pce` | `analyze` | `PCEResult` | raises `ValueError` |
-| `jaxgsa.dgsm` | `analyze` | `DGSMResult` | raises `ValueError` |
-| `jaxgsa.hsic` | `analyze` | `HSICResult` | accepted |
-| `jaxgsa.pawn` | `analyze` | `PAWNResult` | accepted |
-| `jaxgsa.borgonovo` | `analyze` | `DeltaResult` | accepted |
-| `jaxgsa.optimal_transport` | `analyze` | `OTResult` | accepted |
-| `jaxgsa.vkoga` | `analyze` | `VKOGAResult` | accepted |
+| Namespace | Command | Result |
+| --- | --- | --- |
+| `jaxgsa.borgonovo` | `analyze` | `DeltaResult` |
+| `jaxgsa.dgsm` | `analyze` | `DGSMResult` |
+| `jaxgsa.hdmr` | `analyze` | `HDMRResult` |
+| `jaxgsa.hsic` | `analyze` | `HSICResult` |
+| `jaxgsa.optimal_transport` | `analyze` | `OTResult` |
+| `jaxgsa.pawn` | `analyze` | `PAWNResult` |
+| `jaxgsa.pce` | `analyze` | `PCEResult` |
+| `jaxgsa.shapley` | `analyze` | `ShapleyResult` |
+| `jaxgsa.vkoga` | `analyze` | `VKOGAResult` |
 
-`jaxgsa.shapley.analyze(backend="hdmr")` also accepts a correlated problem.
-With `include_correlative=True` it folds the ANCOVA correlative share into the
-allocation. `jaxgsa.shapley.analyze(backend="pce")` raises, as do the design
-builders `sobol.sample`, `morris.sample`, and `efast.sample`. When you hit one
-of those errors, switch to a route marked accepted above, or to
-`jaxgsa.kucherenko`, which conditions on the declared correlation by
-construction.
+Which of them accept a correlated or a categorical problem is in the
+[method capability table](/guide/methods#method-capabilities). Shapley is the
+one route whose answer depends on an argument:
+`jaxgsa.shapley.analyze(backend="pce")`, the default, raises on a correlated
+problem, and `backend="hdmr"` accepts one. With `include_correlative=True` the
+HDMR backend folds the ANCOVA correlative share into the allocation. The
+design builders `sobol.sample`, `morris.sample`, and `efast.sample` raise as
+well. When you hit one of those errors, switch to a route the table marks with
+a ✓, or to `jaxgsa.kucherenko`, which conditions on the declared correlation
+by construction.
 
 ### Drawing inputs
 
