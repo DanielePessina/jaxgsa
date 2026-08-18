@@ -305,6 +305,7 @@ class TestPrecomputed:
         )
 
     def test_missing_args_raises(self):
+        """Tier T4 (behavioural contract): no argument group at all is rejected."""
         problem = Problem(names=("x",), bounds=((0, 1),))
         with pytest.raises(ValueError, match="Provide either"):
             analyze(problem)
@@ -398,6 +399,178 @@ class TestValidation:
         problem = Problem(names=("x",), bounds=((0, 1),))
         with pytest.raises(ValueError, match="n must be >= 1"):
             monte_carlo(problem, n=0)
+
+
+def _three_uniform_problem():
+    """Return a three-parameter unit-cube problem, built the public way."""
+    return Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0), "x3": (0.0, 1.0)})
+
+
+class TestCallStyleResolution:
+    """The two argument groups are exclusive, and each must be complete."""
+
+    def test_over_specified_call_raises_and_names_arguments(self):
+        """Tier T4 (behavioural contract): X plus (Y, dfdx) is rejected.
+
+        This used to take the pre-computed branch and drop ``X`` in silence,
+        which also dropped the bounds check that runs only on ``X``.
+        """
+        import jax
+
+        problem = _three_uniform_problem()
+        X = jnp.asarray(monte_carlo(problem, n=64, seed=3))
+        Y = jax.vmap(_linear_single)(X)
+        dfdx = jax.vmap(jax.jacrev(_linear_single))(X)
+
+        with pytest.raises(ValueError, match="not both") as excinfo:
+            analyze(problem, X=X, Y=Y, dfdx=dfdx)
+        message = str(excinfo.value)
+        assert "X" in message
+        assert "Y" in message and "dfdx" in message
+
+    def test_fn_plus_precomputed_raises(self):
+        """Tier T4 (behavioural contract): fn alongside (Y, dfdx) is rejected."""
+        problem = _three_uniform_problem()
+        with pytest.raises(ValueError, match="not both") as excinfo:
+            analyze(problem, _linear_single, Y=jnp.ones((5, 1)), dfdx=jnp.ones((5, 1, 3)))
+        assert "fn" in str(excinfo.value)
+
+    def test_fn_without_x_raises(self):
+        """Tier T4 (behavioural contract): a half-filled autodiff group is rejected."""
+        problem = _three_uniform_problem()
+        with pytest.raises(ValueError, match="autodiff path needs both") as excinfo:
+            analyze(problem, _linear_single)
+        assert "X was not" in str(excinfo.value)
+
+    def test_x_without_fn_raises(self):
+        """Tier T4 (behavioural contract): X on its own is rejected."""
+        problem = _three_uniform_problem()
+        X = jnp.asarray(monte_carlo(problem, n=16, seed=4))
+        with pytest.raises(ValueError, match="autodiff path needs both") as excinfo:
+            analyze(problem, X=X)
+        assert "fn was not" in str(excinfo.value)
+
+    def test_y_without_dfdx_raises(self):
+        """Tier T4 (behavioural contract): a half-filled pre-computed group is rejected."""
+        problem = _three_uniform_problem()
+        with pytest.raises(ValueError, match="pre-computed path needs both") as excinfo:
+            analyze(problem, Y=jnp.ones((5, 1)))
+        assert "dfdx was not" in str(excinfo.value)
+
+    def test_dfdx_without_y_raises(self):
+        """Tier T4 (behavioural contract): dfdx on its own is rejected."""
+        problem = _three_uniform_problem()
+        with pytest.raises(ValueError, match="pre-computed path needs both") as excinfo:
+            analyze(problem, dfdx=jnp.ones((5, 1, 3)))
+        assert "Y was not" in str(excinfo.value)
+
+    def test_both_valid_styles_still_run(self):
+        """Tier T4 (behavioural contract): the guard changes no valid call.
+
+        Both complete groups must still be accepted, and must still agree on
+        the moments. This is the regression guard for the resolution step: a
+        guard that rejected a legal call would fail here.
+        """
+        import jax
+
+        problem = _three_uniform_problem()
+        X = jnp.asarray(monte_carlo(problem, n=256, seed=5))
+        Y = jax.vmap(_linear_single)(X)
+        dfdx = jax.vmap(jax.jacrev(_linear_single))(X)
+
+        result_auto = analyze(problem, _linear_single, X)
+        result_pre = analyze(problem, Y=Y, dfdx=dfdx)
+        np.testing.assert_allclose(
+            np.asarray(result_auto.nu), np.asarray(result_pre.nu), atol=1e-5
+        )
+        np.testing.assert_allclose(
+            np.asarray(result_auto.upper_bound), np.asarray(result_pre.upper_bound), atol=1e-5
+        )
+
+
+class TestBatchCallableRejected:
+    """``fn`` takes one row, not the whole sample matrix."""
+
+    def test_batch_callable_raises_clear_error(self):
+        """Tier T4 (behavioural contract): a batch model gives a named error.
+
+        A callable that indexes a sample axis used to die with an
+        ``IndexError`` raised inside ``jax.jacrev``, which named nothing the
+        caller could act on.
+        """
+        problem = _three_uniform_problem()
+        X = jnp.asarray(monte_carlo(problem, n=32, seed=6))
+
+        def batch_model(x):
+            """Batch convention: (N, D) -> (N,)."""
+            return x[:, 0] + 2.0 * x[:, 1] + 3.0 * x[:, 2]
+
+        with pytest.raises(ValueError, match="one-sample function") as excinfo:
+            analyze(problem, batch_model, X)
+        message = str(excinfo.value)
+        assert "(3,)" in message
+        assert "model(x[None, :])[0]" in message
+
+    def test_batch_callable_with_extra_axis_raises(self):
+        """Tier T4 (behavioural contract): a traceable batch model is caught too.
+
+        A batch callable that broadcasts instead of indexing traces cleanly on
+        one row, but returns one axis too many. The output-rank check catches
+        that case, which the trace alone cannot.
+        """
+        problem = _three_uniform_problem()
+        X = jnp.asarray(monte_carlo(problem, n=32, seed=7))
+
+        def batch_model(x):
+            """Batch convention: (N, D) -> (N, T, K)."""
+            return x[..., None, None] * jnp.ones((2, 2))
+
+        with pytest.raises(ValueError, match="more than two axes"):
+            analyze(problem, batch_model, X)
+
+    def test_generic_trace_failure_omits_wrapper_advice(self):
+        """Tier T4 (behavioural contract): an unrelated bug is not blamed on batching.
+
+        This model already follows the one-sample convention. It fails to
+        trace for its own reason: it multiplies a ``(3,)`` row by a ``(4,)``
+        array. The guard must report that error and the expected signature,
+        and must not tell the caller to wrap a batch model. That advice would
+        send a caller with an ordinary model bug the wrong way.
+        """
+        problem = _three_uniform_problem()
+        X = jnp.asarray(monte_carlo(problem, n=16, seed=9))
+
+        def buggy_point_model(x):
+            """One-sample convention, with an unrelated internal shape bug."""
+            return jnp.sum(x * jnp.ones(4))
+
+        with pytest.raises(ValueError) as excinfo:
+            analyze(problem, buggy_point_model, X)
+        message = str(excinfo.value)
+        # The real cause is reported, by type and by text.
+        assert "TypeError" in message
+        assert "broadcasting" in message
+        # The expected signature is still stated.
+        assert "one-sample function" in message
+        # The batch-wrapper advice is not, because nothing points to batching.
+        assert "model(x[None, :])[0]" not in message
+        assert "Wrap a batch model" not in message
+
+    def test_valid_time_series_callable_accepted(self):
+        """Tier T4 (behavioural contract): the guard passes a legal (T, K) model.
+
+        Two output axes are the largest a one-sample function may return, so
+        this is the boundary the rank check must not reject.
+        """
+        problem = _three_uniform_problem()
+        X = jnp.asarray(monte_carlo(problem, n=64, seed=8))
+
+        def point_model(x):
+            """One-sample convention: (D,) -> (T, K)."""
+            return jnp.outer(jnp.array([1.0, 2.0]), x[:2])
+
+        result = analyze(problem, point_model, X)
+        assert result.nu.shape == (2, 2, 3)
 
 
 class TestToDataset:

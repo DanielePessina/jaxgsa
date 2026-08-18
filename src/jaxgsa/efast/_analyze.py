@@ -32,17 +32,22 @@ from jaxgsa._core.validation import (
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.efast._result import EFASTResult
-from jaxgsa.efast._sampling import EFASTSamples
+from jaxgsa.efast._sampling import EFASTSamples, _frequency_plan
 
 
-def _compute_indices(Y_curve: Array, N: int, M: int, omega_0: int) -> tuple[Array, Array]:
+def _compute_indices(
+    Y_curve: Array, N: int, M: int, omega_0: int, analysis_max: int
+) -> tuple[Array, Array]:
     """Compute S1 and ST for a single search curve.
 
     Args:
         Y_curve: Model outputs along one search curve, shape ``(N,)``.
         N: Number of samples in the curve.
         M: Interference factor.
-        omega_0: Primary frequency.
+        omega_0: Primary frequency, from the design's frequency plan.
+        analysis_max: Top of the analysis band, from the same plan. It is
+            wider than the band the sampler assigned carriers in; see
+            :class:`jaxgsa.efast._sampling._FrequencyPlan`.
 
     Returns:
         A tuple ``(S1, ST)`` of scalar arrays.
@@ -62,10 +67,12 @@ def _compute_indices(Y_curve: Array, N: int, M: int, omega_0: int) -> tuple[Arra
     harmonics = jnp.arange(1, M + 1) * omega_0
     D1 = 2.0 * jnp.sum(Sp[harmonics - 1])
 
-    # Complementary variance: power at frequencies 1..omega_0//2, DC excluded,
-    # where Sp[k] holds frequency k+1. Everything below omega_0/2 comes from
-    # the lower frequencies of the non-focal parameters.
-    compl_range = jnp.arange(omega_0 // 2)
+    # Complementary variance: power at frequencies 1..analysis_max, DC
+    # excluded, where Sp[k] holds frequency k+1. Everything in that band comes
+    # from the non-focal parameters — the carriers the sampler assigned, and
+    # the interference between them, which lands on frequencies nobody was
+    # assigned. The band is therefore wider than the assigned band on purpose.
+    compl_range = jnp.arange(analysis_max)
     Dt = 2.0 * jnp.sum(Sp[compl_range])
 
     # S1 is the fraction of total variance from the focal parameter alone.
@@ -85,13 +92,18 @@ def _compute_indices(Y_curve: Array, N: int, M: int, omega_0: int) -> tuple[Arra
 
 
 @lru_cache(maxsize=4)
-def _get_efast_kernel(N: int, M: int, omega_0: int, batched: bool):
+def _get_efast_kernel(N: int, M: int, omega_0: int, analysis_max: int, batched: bool):
     """Build and cache a JIT-compiled eFAST kernel for one design.
+
+    Every argument is a plain Python int or bool, so it can serve as a cache
+    key. The frequency plan itself holds a NumPy array and must not be passed
+    here; read its fields instead.
 
     Args:
         N: Number of samples per search curve.
         M: Interference factor.
-        omega_0: Primary frequency.
+        omega_0: Primary frequency, from the design's frequency plan.
+        analysis_max: Top of the analysis band, from the same plan.
         batched: If True, vmap the kernel over a leading curve axis.
 
     Returns:
@@ -99,7 +111,7 @@ def _get_efast_kernel(N: int, M: int, omega_0: int, batched: bool):
     """
 
     def kernel(Y_curve: Array) -> tuple[Array, Array]:
-        return _compute_indices(Y_curve, N, M, omega_0)
+        return _compute_indices(Y_curve, N, M, omega_0, analysis_max)
 
     if batched:
         return jax.jit(jax.vmap(kernel))
@@ -187,9 +199,11 @@ def analyze(
 
     _warn_zero_variance_slices(Y, output_names=problem.output_names)
 
-    # Recompute omega_0 from the design's n_per_curve and M, using the same
-    # formula sample() used. The harmonics then line up exactly.
-    omega_0 = (N - 1) // (2 * M)
+    # Rebuild the frequency plan sample() used, from the design metadata that
+    # travels inside EFASTSamples. Both sides read the same numbers, so the
+    # harmonics line up by construction rather than by agreement.
+    plan = _frequency_plan(D, N, M)
+    omega_0 = plan.omega_0
 
     _, T, K = Y.shape
 
@@ -213,7 +227,7 @@ def analyze(
         # Scalar path: squeeze the trailing singletons and vmap over the D
         # curves only.
         Y_curves = Y_reshaped[:, :, 0, 0]  # (D, N)
-        kernel = _get_efast_kernel(N, M, omega_0, batched=True)
+        kernel = _get_efast_kernel(N, M, omega_0, plan.analysis_max, batched=True)
         S1, ST = kernel(Y_curves)  # each (D,)
     else:
         # Batched path: flatten (D, T, K) into a single vmap axis.
@@ -221,7 +235,7 @@ def analyze(
 
         total = D * T * K
         cs = min(slice_chunk_size, total)
-        batched = _get_efast_kernel(N, M, omega_0, batched=True)
+        batched = _get_efast_kernel(N, M, omega_0, plan.analysis_max, batched=True)
 
         s1_parts: list[Array] = []
         st_parts: list[Array] = []

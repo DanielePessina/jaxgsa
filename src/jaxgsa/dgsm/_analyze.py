@@ -81,6 +81,155 @@ def _promote_moments(m: Array) -> Array:
     return m  # (T, K, D) time series
 
 
+def _resolve_call_style(
+    fn: Callable | None,
+    X: Array | None,
+    Y: Array | None,
+    dfdx: Array | None,
+) -> bool:
+    """Pick one calling convention, and reject an ambiguous or incomplete call.
+
+    ``analyze`` accepts two argument groups: ``(fn, X)`` for the autodiff path
+    and ``(Y, dfdx)`` for the pre-computed path. Exactly one group must be
+    complete. Resolving this once, before any computation, stops an
+    over-specified call such as ``analyze(problem, X=X, Y=Y, dfdx=J)`` from
+    silently dropping ``X`` and the bounds check that goes with it.
+
+    Args:
+        fn: The model function, or None.
+        X: The sample matrix, or None.
+        Y: Pre-computed outputs, or None.
+        dfdx: Pre-computed Jacobian, or None.
+
+    Returns:
+        True for the autodiff path ``(fn, X)``, False for the pre-computed
+        path ``(Y, dfdx)``.
+
+    Raises:
+        ValueError: If arguments from both groups are given, if neither group
+            is given, or if one group is only partly filled.
+    """
+    autodiff_given = [name for name, v in (("fn", fn), ("X", X)) if v is not None]
+    precomputed_given = [name for name, v in (("Y", Y), ("dfdx", dfdx)) if v is not None]
+
+    if autodiff_given and precomputed_given:
+        raise ValueError(
+            f"Provide either (fn, X) or (Y, dfdx), not both: got "
+            f"{', '.join(autodiff_given)} from the autodiff path and "
+            f"{', '.join(precomputed_given)} from the pre-computed path. "
+            f"Drop {', '.join(precomputed_given)} to differentiate the model, or drop "
+            f"{', '.join(autodiff_given)} to use the values you already have."
+        )
+
+    if autodiff_given:
+        if len(autodiff_given) == 2:
+            return True
+        missing = "X" if fn is not None else "fn"
+        raise ValueError(
+            f"The autodiff path needs both fn and X: {autodiff_given[0]} was given, "
+            f"{missing} was not."
+        )
+
+    if precomputed_given:
+        if len(precomputed_given) == 2:
+            return False
+        missing = "dfdx" if Y is not None else "Y"
+        raise ValueError(
+            f"The pre-computed path needs both Y and dfdx: {precomputed_given[0]} was "
+            f"given, {missing} was not."
+        )
+
+    raise ValueError("Provide either (fn, X) or (Y, dfdx)")
+
+
+def _looks_like_missing_axis(exc: BaseException) -> bool:
+    """Report whether a trace failure says ``fn`` wanted an axis the row lacks.
+
+    A batch callable fails on a one-row trace in one of two recognisable
+    ways: it indexes a sample axis (``x[:, 0]``), which raises an
+    ``IndexError`` about too many indices, or it reduces over one
+    (``sum(x, axis=1)``), which raises an out-of-bounds-axis error. Both say
+    the function wanted a second axis that a ``(D,)`` row does not have, so
+    the "wrap the batch model" advice is right for them.
+
+    Everything else stays out. A broadcasting mismatch, for one, is far more
+    often an ordinary bug inside the model than a batch-convention error, and
+    pointing that caller at a wrapper sends them the wrong way.
+
+    Args:
+        exc: The exception raised while tracing ``fn`` on one row.
+
+    Returns:
+        True if the failure matches a missing-axis signature.
+    """
+    message = str(exc).lower()
+    if isinstance(exc, IndexError) and "too many indices" in message:
+        return True
+    return "out of bounds for array of dimension 1" in message
+
+
+def _check_point_callable(fn: Callable, X: Array) -> None:
+    """Reject a batch callable before it reaches the autodiff machinery.
+
+    ``analyze`` differentiates a **one-sample** function: it maps one row of
+    shape ``(D,)`` to ``()``, ``(K,)``, or ``(T, K)``. Every other module in
+    this package takes the whole ``(N, D)`` matrix, so a batch callable is the
+    natural thing to try, and it used to fail with an ``IndexError`` raised
+    deep inside ``jax.jacrev``.
+
+    The check uses :func:`jax.eval_shape`, which traces ``fn`` on an abstract
+    row and never runs it. An expensive model therefore pays nothing: no
+    forward evaluation, and no compilation. ``analyze`` already requires a
+    traceable function, because ``jax.jacrev`` has to differentiate it, so the
+    check demands nothing the method did not already demand.
+
+    A trace failure is reported with its original error and the expected
+    signature. The "wrap the batch model" advice is added only where it is
+    indicated: an output with more than two axes, or a trace failure that
+    :func:`_looks_like_missing_axis` recognises. A generic failure gets no
+    guess at its cause.
+
+    Args:
+        fn: The candidate one-sample function.
+        X: The validated sample matrix, shape ``(N, D)``. Only its column
+            count and dtype are used.
+
+    Raises:
+        ValueError: If ``fn`` cannot be traced on a single row, or if it
+            returns an array with more than two axes.
+    """
+    D = int(X.shape[1])
+    row = jax.ShapeDtypeStruct((D,), X.dtype)
+    expected = (
+        "jaxgsa.dgsm.analyze differentiates a one-sample function: it maps one "
+        f"row of shape ({D},) to a scalar (), a (K,) vector, or a (T, K) array."
+    )
+    wrap_hint = "Wrap a batch model that takes (N, D) as `lambda x: model(x[None, :])[0]`."
+    try:
+        out = jax.eval_shape(fn, row)
+    except Exception as exc:  # noqa: BLE001 - re-raised with the real cause named
+        # A trace failure has many causes, and a batch callable is only one of
+        # them. Report the real error and state the expected signature, but
+        # add the wrapper advice only when the failure actually looks like a
+        # missing sample axis. Telling a user whose model has an unrelated
+        # internal shape bug to wrap an already-correct function sends them
+        # the wrong way.
+        advice = f" {wrap_hint}" if _looks_like_missing_axis(exc) else ""
+        raise ValueError(
+            f"fn could not be evaluated on a single sample row: "
+            f"{type(exc).__name__}: {exc}\n{expected}{advice}"
+        ) from exc
+
+    for leaf in jax.tree.leaves(out):
+        if getattr(leaf, "ndim", 0) > 2:
+            # An extra leading axis is what a batch callable returns, so here
+            # the wrap hint is indicated.
+            raise ValueError(
+                f"fn returned an output of shape {tuple(leaf.shape)} for one sample "
+                f"row, which has more than two axes. {expected} {wrap_hint}"
+            )
+
+
 def _compute_moments(
     fn: Callable,
     X: Array,
@@ -183,7 +332,7 @@ def analyze(
 
     An input whose upper bound is near zero is provably negligible.
 
-    There are two calling conventions:
+    There are two calling conventions, and you must use exactly one of them:
 
     - **Autodiff path** (primary): pass ``fn`` and ``X``. ``jax.jacrev``
       differentiates the function, and one pass returns both the Jacobian and
@@ -191,10 +340,19 @@ def analyze(
     - **Pre-computed path**: pass ``Y`` and ``dfdx``. Use it when the model is
       not JAX-differentiable, or when the Jacobian comes from elsewhere.
 
+    Arguments from both groups, or one group only partly filled, raise a
+    ``ValueError``. Nothing is dropped silently.
+
+    ``fn`` takes **one sample**, not a batch. Unlike the other methods in this
+    package, which call the model on the whole ``(N, D)`` matrix, ``fn`` maps a
+    single row of shape ``(D,)`` to ``()``, ``(K,)``, or ``(T, K)``. Wrap a
+    batch model as ``lambda x: model(x[None, :])[0]``.
+
     Args:
         problem: Problem definition with D parameters.
-        fn: JAX-differentiable function ``(D,) -> ()``, ``(D,) -> (K,)``, or
-            ``(D,) -> (T, K)`` for time-series outputs.
+        fn: JAX-differentiable **one-sample** function: ``(D,) -> ()``,
+            ``(D,) -> (K,)``, or ``(D,) -> (T, K)`` for time-series outputs.
+            It is called on one row at a time; ``analyze`` does the batching.
         X: Sample matrix in the problem's physical units, shape ``(N, D)``.
         Y: Forward model outputs, shape ``(N,)`` / ``(N, K)`` / ``(N, T, K)``.
         dfdx: Pre-computed Jacobian, mirroring ``Y``'s layout with one extra
@@ -210,8 +368,11 @@ def analyze(
         mirroring the output layout, plus ``var_y``.
 
     Raises:
-        ValueError: In any of these cases. Neither ``(fn, X)`` nor
-            ``(Y, dfdx)`` was given. ``dfdx`` has an unexpected shape, or does
+        ValueError: In any of these cases. Arguments from both ``(fn, X)`` and
+            ``(Y, dfdx)`` were given. Neither pair was given. One pair was only
+            partly filled, such as ``fn`` without ``X``. ``fn`` takes a batch
+            ``(N, D)`` instead of one ``(D,)`` row, or cannot be traced on one
+            row. ``dfdx`` has an unexpected shape, or does
             not match ``Y`` or the problem dimension. ``problem.correlation``
             declares a dependence structure, and the Poincare-inequality bounds
             assume independent inputs. ``problem`` has categorical parameters,
@@ -223,14 +384,24 @@ def analyze(
     _raise_categorical_analysis(problem, "jaxgsa.dgsm.analyze")
     D = problem.num_vars
 
-    if fn is not None and X is not None:
+    # Resolve the calling convention once, before any computation, so that an
+    # over-specified call cannot pick one branch and drop the other group's
+    # arguments unchecked.
+    use_autodiff = _resolve_call_style(fn, X, Y, dfdx)
+
+    if use_autodiff:
+        assert fn is not None and X is not None  # guaranteed by _resolve_call_style
         X = jnp.asarray(X)
         _validate_x(problem, X)
+        # Free shape-only trace: catches a batch (N, D) callable here, instead
+        # of as an IndexError from inside jax.jacrev.
+        _check_point_callable(fn, X)
         Y_out, sigma, nu = _compute_moments(fn, X, batch_size=batch_size)
         Y_valid = _validate_output(Y_out, int(X.shape[0]), problem)
         sigma = _promote_moments(sigma)
         nu = _promote_moments(nu)
-    elif Y is not None and dfdx is not None:
+    else:
+        assert Y is not None and dfdx is not None  # guaranteed by _resolve_call_style
         # Pre-computed path: the caller supplies the Jacobian and the forward
         # outputs directly.
         Y_out = jnp.asarray(Y)
@@ -251,8 +422,6 @@ def analyze(
         # One vectorized reduction over N covers every (t, k) slice at once.
         sigma = jnp.mean(dfdx_arr, axis=0)  # E[df/dx_i], (T, K, D)
         nu = jnp.mean(dfdx_arr**2, axis=0)  # E[(df/dx_i)^2]
-    else:
-        raise ValueError("Provide either (fn, X) or (Y, dfdx)")
 
     # Canonicalize Y to (N, T, K). The moments were realigned in lockstep with
     # Y's canonicalization above, so their slice axes must already match. A

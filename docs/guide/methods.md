@@ -754,6 +754,16 @@ The $\delta$ estimator supports a continuous output distribution only. It compar
 
 $\delta$ is a half L1 distance between densities, so it lies in $[0, 1]$. If the returned estimate leaves that range by more than 0.05, the computation failed and `analyze` raises `ValueError` naming the parameter and both knobs (`grid_size` and `degenerate_bandwidth`). The value is never clipped, because a clipped value looks plausible and is still wrong. A confidence bound outside the range only warns: the point estimate is the contract, and the interval is a diagnostic.
 
+Two settings control how a near-degenerate conditioning class is treated. `degenerate_tol` says when a class counts as degenerate. `degenerate_bandwidth` says how wide a kernel such a class is given.
+
+`degenerate_bandwidth="auto"`, the default, floors the kernel at `max(0.1 * h_full, grid_step)`, so it never goes below what the output grid can integrate. A float is a fraction of the full-sample bandwidth and is applied exactly.
+
+`analyze` does not refuse a `degenerate_bandwidth` on the setting alone, because the setting alone does not say whether the run works. Two conditions have to hold first. The floor only ever reaches a class the estimator already called degenerate, so on data with no such class the setting changes nothing at any value. And even on a degenerate class, a kernel narrower than one grid step only aliases if a grid point lands on the narrow peak. On one test problem with a genuine point mass, a floor of 0.01 of the full-sample bandwidth — a tenth of one grid step — still returns a $\delta$ inside $[0, 1]$, and moving the same point mass off the grid boundary keeps the answer stable down to $10^{-5}$.
+
+`analyze` therefore checks the returned $\delta$, not the setting. When the estimate does leave $[0, 1]$, the error message reads what the run actually did. If a class was floored, it gives the floor width, one grid step, and the fraction of the full-sample bandwidth that equals one grid step. If no class was floored, it says so and names `degenerate_tol` and `grid_size` instead. The value is not clipped, for the same reason as above.
+
+Raising `degenerate_tol` also does not raise. A higher tolerance calls more classes degenerate, and each of those is then given the floor. When the floor is narrower than a class's own bandwidth, that class gets a *narrower* kernel than it had, which inflates $\delta$ for the classes the higher tolerance said to distrust. The answer is still a valid computation, only biased, so `analyze` neither raises nor warns: whether the bias is real depends on the data inside the kernel, and a warning based on the settings alone would be a false alarm in most runs.
+
 ### Index summary
 
 | Index | Meaning |

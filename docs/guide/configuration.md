@@ -102,6 +102,8 @@ is 512 MiB. The batched places are:
 
 - surrogate `predict` for PCE and HDMR,
 - HDMR output-slice chunking,
+- PAWN output-slice chunking, which sizes `slice_chunk_size` against the
+  budget when you leave it at `None`,
 - the streaming fits of `jaxgsa.pce.analyze` and `jaxgsa.hdmr.analyze`, which
   engage automatically when the single-pass fit would exceed the budget.
 

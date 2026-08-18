@@ -97,15 +97,53 @@ following are not.
 
 ### 2.1 Two corrections that change the work
 
-**C1. D9 cannot be implemented as written.** The audit says to raise at the top
+**C1. D9 cannot be implemented at all, and the decision behind it is wrong.**
+
+*Superseded on 2026-08-18 by measurement. The paragraphs below record why the
+audit's fix was unbuildable; the deeper finding is that it should not be built.*
+
+D9 rests on the claim that a kernel narrower than one grid step "guarantees"
+a failed computation. It does not. Two conditions must both hold before the
+integral breaks: a conditioning class must actually be **degenerate**, so the
+floor is applied at all, and the resulting spike must land **on a grid point**,
+so the trapezoid rule sees it.
+
+Measured on a fixture built to have a genuinely degenerate class, where one
+grid step is `0.108 * h_full`:
+
+| `degenerate_bandwidth` | spike on a grid point | spike off the boundary |
+| --- | --- | --- |
+| 0.100 | delta 0.6721 | 0.7336 |
+| 0.010 | delta 0.9433 | 0.5982 |
+| 0.001 | **fails**, delta 4.01 | 0.5982 |
+| 1e-05 | — | 0.5982 |
+
+So a kernel one tenth of a grid step returns a valid answer, and off the
+boundary the estimate is stable five orders of magnitude below the step.
+Whether it breaks is a property of where the class sits relative to the grid,
+which is **data, not configuration**. No configuration-only check can be a
+true precondition.
+
+A first attempt shipped the audit's rule and refused four configurations that
+return bit-identical, correct results — including `degenerate_bandwidth=0.1`,
+the very fraction `"auto"` uses internally. That was caught in review before
+it left the branch.
+
+**What ships instead.** No up-front raise. The existing out-of-range error now
+builds its advice from what the kernel actually did: whether a class was
+floored, which column, the floor it used against the real grid step, and the
+fraction that would fix it. Cost was never the obstacle — a host-side
+degeneracy scan measured 282 ms against `analyze`'s 5037 ms — it simply would
+not have been correct.
+
+The original objection, still true: The audit says to raise at the top
 of `borgonovo.analyze` when `degenerate_bandwidth * h_full < grid_step`. That
 test cannot run there. `h_full` is computed per output column *inside the jitted
 kernel* at `borgonovo/_analyze.py:267`, from `jnp.std(y_r)`. `grid_step` is also
 data-dependent, at `:240`. Neither value exists at the top of `analyze`.
 
 This is the same objection D9 itself raises when it refuses to warn about
-`degenerate_tol`. Three routes are open. Section 5, batch 4 states which one to
-take and why.
+`degenerate_tol`.
 
 **C2. `on_invalid="raise"` is a behaviour change, not a new argument.** The
 roadmap says only `sobol` and `morris` handle non-finite output. Four modules
@@ -303,7 +341,7 @@ The core of the release. These are independent and may run in parallel.
 | **D11** DGSM argument groups | `analyze(problem, X=X, Y=Y, dfdx=J)` takes the precomputed branch and silently ignores `X`. The check that validates `X` against the problem's bounds runs only in the other branch, so a user who passed inputs and believed they were checked had them discarded unchecked. Resolve both groups once at the top, raise on both-given, neither-given, or partly-filled. Fix the `Raises:` list at `:212-218`. |
 | **DGSM batch callables** | Found while building the baseline: `dgsm.analyze` takes a one-sample `(D,) -> ...` function. A batch callable dies with `IndexError` from deep inside. Add the check next to D11's resolution. |
 | **D12** PAWN `slice_chunk_size` | Declared, documented as "accepted for signature parity", and not even validated. PAWN nests two `vmap` calls, so the whole `(T*K, D, n_bins)` computation materialises at once — on the time-series case the project advertises with a dedicated example. Copy the Sobol or Borgonovo pattern. Replace the placeholder test at `tests/test_pawn.py:46` with a real chunk-invariance test. Remove the "signature parity" wording. |
-| **D9** Borgonovo bandwidth | A user-supplied `degenerate_bandwidth` below one grid step configures a computation certain to fail, and it fails three steps later. Route (a), settled: compute the full-sample bandwidth and grid step on the host, before the jitted kernel, and raise there. Collapse the two resolvers at `:790-861`. Add the `degenerate_tol` bias sentence. |
+| **D9** Borgonovo bandwidth | **Done, but not as the audit specified — see correction C1.** The premise is false: a bandwidth below one grid step fails only when a class is degenerate *and* its spike lands on a grid point, which is data, not configuration. No up-front raise ships. The out-of-range error instead builds its advice from what the kernel did. The two resolvers are collapsed and the `degenerate_tol` bias is documented, as planned. |
 | **D10** eFAST frequency plan | The sampler assigns complementary frequencies in `[1, omega_0 // (2*M)]`; the analyzer reads `arange(omega_0 // 2)`. Two separately written bounds that agree today only because one range contains the other. One `_frequency_plan(D, n_per_curve, M)` called from both sides. Keep `omega_0` a concrete int in the kernel cache key. Absorb `_min_n_per_curve`; delete the unreachable branch at `_sampling.py:158-162`. Add a test that the two sides read the same band — the current tests recompute the formula and structurally cannot catch this. |
 | **D7** redundant guards | Two lines. The Sobol one silently exports nothing when `S2_conf` is present without `S2`, while `__repr__` still advertises the field. |
 

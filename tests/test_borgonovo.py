@@ -11,8 +11,37 @@ import pytest
 
 from jaxgsa.benchmarks import gaussian_linear, ishigami
 from jaxgsa.borgonovo import analyze
-from jaxgsa.borgonovo._analyze import _plischke_n_classes
+from jaxgsa.borgonovo._analyze import _DEGENERATE_BW_FRACTION, _plischke_n_classes
+from jaxgsa.problem import Problem
 from jaxgsa.sampling import monte_carlo
+
+
+@pytest.fixture(scope="module")
+def degenerate_class_data():
+    """A problem with one genuinely degenerate conditioning class.
+
+    The categorical parameter ``c`` has three levels. Level 0 maps every
+    sample to the single output value 5.0, so that conditioning class has
+    exactly zero variance and zero bandwidth. It is the only kind of class
+    the floor predicate fires on at the default ``degenerate_tol``. The
+    other two levels keep a genuine spread from the continuous parameter,
+    so the column has 1369 distinct values and is not refused as a discrete
+    output.
+
+    Level 0's output value is also the column maximum, so it sits exactly on
+    the last grid point. That is the worst case for a floored kernel: the
+    trapezoid rule lands on the spike rather than missing it.
+    """
+    problem = Problem.from_dict(
+        {"x": (0.0, 1.0), "c": {"dist": "categorical", "probs": [1 / 3, 1 / 3, 1 / 3]}}
+    )
+    rng = np.random.default_rng(0)
+    n = 2000
+    codes = rng.integers(0, 3, size=n).astype(np.float64)
+    x = rng.uniform(0.0, 1.0, size=n)
+    X = jnp.asarray(np.stack([x, codes], axis=1))
+    Y = jnp.asarray(np.where(codes == 0, 5.0, codes + 0.3 * x))
+    return problem, X, Y
 
 
 @pytest.fixture(scope="module")
@@ -529,3 +558,181 @@ class TestDegenerateClassBandwidthFloor:
             warnings.simplefilter("always")
             analyze(ishigami.PROBLEM, X, Y, n_bootstrap=8, seed=0)
         assert not any("bandwidth" in str(w.message) for w in caught)
+
+
+class TestDegenerateBandwidthIsNotAPrecondition:
+    """``degenerate_bandwidth`` is checked on the result, not on the setting.
+
+    Tier T4 (internal consistency) for every test here, and that is the
+    right tier: these are behavioural contracts about which configurations
+    the estimator accepts, not numbers an external oracle could confirm.
+    The delta values these tests compare are checked against SALib
+    elsewhere in this file.
+
+    A kernel narrower than one output-grid step does not by itself break
+    the run. Two independent conditions have to hold first. The floor only
+    reaches a class the estimator already found degenerate, and on smooth
+    data no class is. Even on a degenerate class, aliasing needs a grid
+    point to land on the spike. ``analyze`` therefore refuses the returned
+    delta, never the setting.
+    """
+
+    @pytest.mark.parametrize(
+        ("grid_size", "bandwidth"),
+        [(100, 0.01), (100, 1e-8), (100, 0.1), (50, 0.3)],
+    )
+    def test_explicit_bandwidth_that_cannot_apply_is_accepted(
+        self, ishigami_data, grid_size, bandwidth
+    ):
+        """Tier T4. A setting that cannot change the result must not raise.
+
+        On smooth continuous data no conditioning class is degenerate, so
+        the floor is never applied and ``degenerate_bandwidth`` is dead
+        code for this run. Every value must therefore be accepted, and
+        every result must be bit-identical to ``"auto"``. All four cases
+        here were refused by the 0.8.0 up-front guard, including 0.1,
+        which is the fraction ``"auto"`` itself uses.
+        """
+        X, Y = ishigami_data
+        explicit = analyze(
+            ishigami.PROBLEM,
+            X,
+            Y,
+            n_bootstrap=0,
+            grid_size=grid_size,
+            degenerate_bandwidth=bandwidth,
+        )
+        auto = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0, grid_size=grid_size)
+        np.testing.assert_array_equal(np.asarray(explicit.delta), np.asarray(auto.delta))
+        np.testing.assert_array_equal(np.asarray(explicit.S1), np.asarray(auto.S1))
+
+    def test_sub_grid_step_bandwidth_on_a_degenerate_class_can_still_work(
+        self, degenerate_class_data
+    ):
+        """Tier T4. Even an applied floor below one grid step can be fine.
+
+        This fixture does have a degenerate class, so the floor really is
+        applied. One grid step is about 0.108 of the full-sample
+        bandwidth. A floor of 0.05, less than half of that, still returns
+        a delta within 0.01 of the ``"auto"`` answer. The width alone
+        therefore does not decide whether the run fails, which is why
+        ``analyze`` cannot refuse it up front.
+        """
+        problem, X, Y = degenerate_class_data
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            auto = analyze(problem, X, Y, n_bootstrap=0)
+            narrow = analyze(problem, X, Y, n_bootstrap=0, degenerate_bandwidth=0.05)
+        assert np.all(np.asarray(narrow.delta) >= 0.0)
+        assert np.all(np.asarray(narrow.delta) <= 1.0)
+        np.testing.assert_allclose(np.asarray(narrow.delta), np.asarray(auto.delta), atol=0.01)
+
+    def test_aliased_floor_raises_and_names_the_knobs(self, degenerate_class_data):
+        """Tier T4. A floor that does alias is caught on the returned delta.
+
+        A floor of 1e-3 of the full-sample bandwidth is two orders of
+        magnitude below one grid step, and this fixture's point mass sits
+        exactly on a grid point, so the trapezoid rule integrates the
+        spike and delta leaves [0, 1]. The message must name the setting
+        that caused it, the grid step it is measured against, and the
+        fraction that would fix it.
+        """
+        problem, X, Y = degenerate_class_data
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(ValueError, match=r"delta is a half L1 distance") as excinfo:
+                analyze(problem, X, Y, n_bootstrap=0, degenerate_bandwidth=1e-3)
+        message = str(excinfo.value)
+        assert "degenerate_bandwidth=0.001" in message
+        assert "output-grid step" in message
+        # The fix is the fraction of h_full that equals one grid step.
+        assert "at least 0.108" in message
+        assert "grid_size (currently 100)" in message
+        assert "not clipped" in message
+
+    def test_message_names_the_floored_column(self, degenerate_class_data):
+        """Tier T4. With many output columns, the message says which one.
+
+        Column 0 carries the point mass; column 1 is a smooth transform of
+        the continuous parameter and has no degenerate class. Only column
+        0 can be the one reported.
+        """
+        problem, X, Y = degenerate_class_data
+        smooth = jnp.asarray(np.asarray(X)[:, 0] * 2.0 + 1.0)
+        Y2 = jnp.stack([Y, smooth], axis=1)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(ValueError, match=r"delta is a half L1 distance") as excinfo:
+                analyze(problem, X, Y2, n_bootstrap=0, degenerate_bandwidth=1e-3)
+        assert "k=0" in str(excinfo.value)
+
+    def test_advice_switches_when_no_class_was_floored(self, degenerate_class_data):
+        """Tier T4. Without a floored class the floor is the wrong advice.
+
+        ``degenerate_tol=1e-12`` stops the predicate firing, so the narrow
+        class keeps its own bandwidth and the floor is never applied.
+        Pointing the caller at ``degenerate_bandwidth`` would then be
+        wrong, because that setting had no effect on this run. The message
+        must name ``degenerate_tol`` instead.
+
+        An exact point mass gets bandwidth 0, whose density is dropped;
+        that under-counts delta rather than inflating it. Drive the
+        failure from the other side instead, with a class narrow enough to
+        alias but not exactly zero.
+        """
+        problem, X, Y = degenerate_class_data
+        rng = np.random.default_rng(1)
+        jitter = np.where(np.asarray(X)[:, 1] == 0, rng.normal(0.0, 1e-7, Y.shape[0]), 0.0)
+        Y_jitter = jnp.asarray(np.asarray(Y) + jitter)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(ValueError, match=r"delta is a half L1 distance") as excinfo:
+                analyze(problem, X, Y_jitter, n_bootstrap=0, degenerate_tol=1e-12)
+        message = str(excinfo.value)
+        assert "degenerate_tol=1e-12" in message
+        assert "never applied" in message
+        assert "grid_size (currently 100)" in message
+
+    def test_auto_resolves_to_one_grid_step_when_the_grid_binds(self, degenerate_class_data):
+        """Tier T4. The real property behind the old vacuous ``"auto"`` test.
+
+        The old test called ``analyze`` with ``"auto"`` and asserted the
+        result was finite. That could never fail: the guard returned early
+        for ``"auto"`` before it compared anything.
+
+        The property that matters is that ``"auto"`` resolves to
+        ``max(0.1 * h_full, grid_step)``, so it is never below one grid
+        step. Test it through the answer, not by restating the formula.
+        On this fixture one grid step is about 0.108 of the full-sample
+        bandwidth, so the grid-step term is the larger one and it is the
+        term ``"auto"`` must pick. Passing that exact fraction explicitly
+        must therefore reproduce the ``"auto"`` delta, while passing half
+        of it must not: a floor that ignored the grid step would make the
+        two agree.
+        """
+        problem, X, Y = degenerate_class_data
+        y = np.asarray(Y, dtype=np.float32)
+        n = y.shape[0]
+        h_full = (0.75 * n) ** -0.2 * y.std(ddof=1)
+        one_step = float((y.max() - y.min()) / 99 / h_full)
+        assert one_step > _DEGENERATE_BW_FRACTION, "fixture must let the grid step bind"
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            auto = analyze(problem, X, Y, n_bootstrap=0)
+            at_step = analyze(problem, X, Y, n_bootstrap=0, degenerate_bandwidth=one_step)
+            half_step = analyze(problem, X, Y, n_bootstrap=0, degenerate_bandwidth=one_step / 2)
+        np.testing.assert_allclose(np.asarray(at_step.delta), np.asarray(auto.delta), rtol=1e-4)
+        assert not np.allclose(np.asarray(half_step.delta), np.asarray(auto.delta), rtol=1e-4)
+
+    def test_constant_column_is_exempt(self, ishigami_data):
+        """Tier T4. A constant column has no density to integrate.
+
+        Its grid step and its bandwidth are both zero, so no class can
+        fall below the tolerance and no floor is ever applied. Its exact
+        answer is delta = S1 = 0, and that contract must survive any
+        explicit bandwidth.
+        """
+        X, Y = ishigami_data
+        Y2 = jnp.stack([jnp.ones(Y.shape[0]), jnp.ones(Y.shape[0])], axis=1)
+        result = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=0, degenerate_bandwidth=1e-8)
+        np.testing.assert_allclose(np.asarray(result.delta), 0.0)

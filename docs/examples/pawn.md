@@ -214,6 +214,29 @@ well. Confidence bounds reach the dataset only when `n_bootstrap` is set.
 T is the number of time steps. `pawn_conf` is None when you do not ask for a
 bootstrap.
 
+## Memory and output-slice chunking
+
+PAWN runs the flattened `T*K` output columns through one vmapped kernel, in
+chunks of at most `slice_chunk_size` columns.
+
+Peak working memory is not the `slice_chunk_size * D * n_bins` result. The
+inner `vmap` builds a full `(N, n_bins)` ECDF table for every (column,
+parameter) pair, and two such arrays are live at once. Peak memory is therefore
+about `2 * slice_chunk_size * D * N * n_bins` elements. That is `N` times the
+size of the result, which is why the default is derived rather than fixed.
+
+`slice_chunk_size` defaults to `None`. PAWN then sizes the chunk against the
+active memory budget, which `jaxgsa.config.set_memory_budget` sets. Pass a
+positive integer to override it:
+
+```python
+result = jaxgsa.pawn.analyze(PROBLEM, X, Y_ts, slice_chunk_size=64)
+```
+
+Lower it if a time-series output runs the device out of memory. It changes no
+index. Every output column is independent of every other, so the chunked result
+is the unchunked one.
+
 ## Practical caveats
 
 - PAWN needs no structured sampling. Any (X, Y) pairs work, including

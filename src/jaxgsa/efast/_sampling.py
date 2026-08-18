@@ -85,14 +85,79 @@ class EFASTSamples:
         return self.n_per_curve * self.problem.num_vars
 
 
+@dataclass(frozen=True)
+class _FrequencyPlan:
+    """The frequency layout of one eFAST design, computed once.
+
+    ``sample()`` and ``analyze()`` both need to know how the search curve
+    spends the frequency axis. This object is the single place that decides
+    it, so the two sides cannot drift apart.
+
+    It holds **two different bands**, and they are not two versions of one
+    quantity:
+
+    - The *assigned* band ``[1, assigned_max]`` with
+      ``assigned_max = omega_0 // (2*M)``. ``sample()`` draws the ``D-1``
+      complementary carrier frequencies from it. The upper limit keeps those
+      carriers clear of the focal parameter's ``M`` harmonics.
+    - The *analysis* band ``[1, analysis_max]`` with
+      ``analysis_max = omega_0 // 2``. ``analyze()`` sums the power over all
+      of it to get the complementary variance, following Saltelli, Tarantola
+      & Chan (1999). Everything below ``omega_0 / 2`` comes from the non-focal
+      parameters: the assigned carriers, and also the interference between
+      them, which lands on frequencies nobody was assigned.
+
+    The analysis band is therefore deliberately wider than the assigned band.
+    The relation ``1 <= assigned_max <= analysis_max`` is the invariant the
+    two sides rely on, and ``__post_init__`` checks it.
+
+    Attributes:
+        omega_0: Primary frequency given to the focal parameter.
+        omega_compl: Complementary frequencies for the ``D-1`` non-focal
+            parameters, shape ``(D-1,)``, distinct, all inside the assigned
+            band.
+        assigned_max: Highest frequency ``sample()`` may assign.
+        analysis_max: Highest frequency ``analyze()`` counts as complementary.
+    """
+
+    omega_0: int
+    omega_compl: np.ndarray
+    assigned_max: int
+    analysis_max: int
+
+    def __post_init__(self) -> None:
+        """Check that the assigned band lies inside the analysis band.
+
+        Raises:
+            ValueError: If the invariant
+                ``1 <= assigned_max <= analysis_max`` fails, or if an assigned
+                frequency falls outside the assigned band. Either would mean
+                the sampler put carrier power where the analyzer does not look
+                for it, or below a floor it treats as noise.
+        """
+        if not 1 <= self.assigned_max <= self.analysis_max:
+            raise ValueError(
+                f"eFAST frequency plan is inconsistent: assigned band "
+                f"[1, {self.assigned_max}] does not lie inside the analysis "
+                f"band [1, {self.analysis_max}] for omega_0 = {self.omega_0}"
+            )
+        if self.omega_compl.size and (
+            int(self.omega_compl.min()) < 1 or int(self.omega_compl.max()) > self.assigned_max
+        ):
+            raise ValueError(
+                f"eFAST complementary frequencies {self.omega_compl.tolist()} fall "
+                f"outside the assigned band [1, {self.assigned_max}]"
+            )
+
+
 def _min_n_per_curve(D: int, M: int) -> int:
     """Smallest ``n_per_curve`` admitting D distinct search-curve frequencies.
 
-    The focal parameter runs at ``omega_0 = (n_per_curve - 1) // (2*M)``. The
-    ``D-1`` other parameters must fit as distinct integers in
-    ``[1, omega_0 // (2*M)]``. That upper limit keeps their harmonics clear of
-    the focal parameter's ``M`` harmonics. Requiring
-    ``omega_0 // (2*M) >= D-1`` gives ``n_per_curve >= 4*M^2*(D-1) + 1``.
+    This is the frequency plan read backwards. The focal parameter runs at
+    ``omega_0 = (n_per_curve - 1) // (2*M)``, and the ``D-1`` other parameters
+    must fit as distinct integers in the assigned band
+    ``[1, omega_0 // (2*M)]``. Requiring ``omega_0 // (2*M) >= D-1`` gives
+    ``n_per_curve >= 4*M^2*(D-1) + 1``.
 
     Args:
         D: Number of parameters.
@@ -100,9 +165,43 @@ def _min_n_per_curve(D: int, M: int) -> int:
 
     Returns:
         Minimum admissible ``n_per_curve``. For ``D == 1`` there are no
-        complementary frequencies, so the bound is the plain ``4*M^2 + 1``.
+        complementary frequencies, so the bound is the plain ``4*M^2 + 1``,
+        which is also what the assigned band needs to hold one slot.
     """
     return 4 * M**2 * max(D - 1, 1) + 1
+
+
+def _frequency_plan(D: int, n_per_curve: int, M: int) -> _FrequencyPlan:
+    """Compute the frequency layout of an eFAST design, once, for both sides.
+
+    ``sample()`` calls this to build the design and ``analyze()`` calls it to
+    read the design back. Every frequency-axis number either module needs comes
+    from here.
+
+    Args:
+        D: Number of parameters.
+        n_per_curve: Number of samples along each search curve.
+        M: Interference factor.
+
+    Returns:
+        The :class:`_FrequencyPlan` for this design.
+
+    Raises:
+        ValueError: If ``n_per_curve`` is below :func:`_min_n_per_curve`, or if
+            the resulting bands violate the plan's invariant.
+    """
+    _check_n_per_curve(D, M, n_per_curve)
+    # Largest integer frequency that fits n_per_curve samples while keeping all
+    # M harmonics of omega_0 below Nyquist.
+    omega_0 = (n_per_curve - 1) // (2 * M)
+    assigned_max = omega_0 // (2 * M)
+    analysis_max = omega_0 // 2
+    return _FrequencyPlan(
+        omega_0=omega_0,
+        omega_compl=_assign_frequencies(D, assigned_max),
+        assigned_max=assigned_max,
+        analysis_max=analysis_max,
+    )
 
 
 def _check_n_per_curve(D: int, M: int, n_per_curve: int) -> None:
@@ -131,36 +230,26 @@ def _check_n_per_curve(D: int, M: int, n_per_curve: int) -> None:
     )
 
 
-def _assign_frequencies(D: int, omega_0: int, M: int) -> np.ndarray:
+def _assign_frequencies(D: int, assigned_max: int) -> np.ndarray:
     """Assign complementary frequencies for D-1 non-focal parameters.
 
     Args:
         D: Number of parameters.
-        omega_0: Primary frequency for the focal parameter.
-        M: Interference factor.
+        assigned_max: Top of the assigned band, from the frequency plan.
 
     Returns:
-        Distinct complementary frequencies, shape ``(D-1,)``.
-
-    Raises:
-        ValueError: If ``omega_0`` is too low to give the ``D-1`` non-focal
-            parameters distinct frequencies. Callers must enforce
-            :func:`_min_n_per_curve` before reaching this point.
+        Distinct complementary frequencies, shape ``(D-1,)``, spread evenly
+        over ``[1, assigned_max]``. Empty for ``D == 1``.
     """
     if D == 1:
         return np.array([], dtype=np.int64)
     # Spread D-1 complementary frequencies evenly over the integers in
-    # [1, omega_0/(2M)]. Fewer slots than parameters would force duplicates.
-    # That is a silent-bias failure, not a degradation: two non-focal
-    # parameters sharing a frequency also share the curve's phase, so their
-    # columns are identical and the model cannot separate them.
-    m = omega_0 // (2 * M)
-    if m < D - 1:
-        raise ValueError(
-            f"omega_0 = {omega_0} leaves only {m} distinct complementary "
-            f"frequencies for {D - 1} non-focal parameters"
-        )
-    return np.floor(np.linspace(1, m, D - 1)).astype(np.int64)
+    # [1, assigned_max]. _check_n_per_curve guarantees at least D-1 slots.
+    # Fewer slots than parameters would force duplicates, which is a
+    # silent-bias failure rather than a degradation: two non-focal parameters
+    # sharing a frequency also share the curve's phase, so their columns are
+    # identical and the model cannot separate them.
+    return np.floor(np.linspace(1, assigned_max, D - 1)).astype(np.int64)
 
 
 def sample(
@@ -215,14 +304,13 @@ def sample(
         raise ValueError(f"M must be >= 1, got {M}")
 
     D = problem.num_vars
-    _check_n_per_curve(D, M, n_per_curve)
+
+    # One plan, shared with analyze(). It validates n_per_curve on the way.
+    plan = _frequency_plan(D, n_per_curve, M)
+    omega_0 = plan.omega_0
+    omega_compl = plan.omega_compl
 
     rng = np.random.default_rng(seed)
-
-    # Largest integer frequency that fits n_per_curve samples while keeping all
-    # M harmonics below Nyquist.
-    omega_0 = (n_per_curve - 1) // (2 * M)
-    omega_compl = _assign_frequencies(D, omega_0, M)
 
     # Parametric variable s in [0, 2pi): a uniform grid along the search curve.
     s = (2 * math.pi / n_per_curve) * np.arange(n_per_curve)

@@ -21,9 +21,17 @@ not only for continuous ones.
 Bin assignment (via ``searchsorted``) depends only on the inputs, so it is
 computed once and shared across all output columns. One JIT-compiled kernel
 is vmapped over the flattened ``T*K`` output columns, with one compilation
-per unique ``(N, D, n_bins)`` and output-column count ``T*K``. The
-``statistic`` aggregation runs outside JIT so all three statistics share one
-compilation.
+per unique ``(N, D, n_bins)`` and output-column count. The columns run in
+chunks of at most ``slice_chunk_size``, which bounds the working arrays, so
+the column count is the chunk width and a trailing part-chunk adds at most
+one more compilation. The ``statistic`` aggregation runs outside JIT so all
+three statistics share one compilation.
+
+The kernel's working set is not the ``(chunk, D, n_bins)`` result. The
+nested ``vmap`` builds a full ``(N, n_bins)`` ECDF table per (column,
+parameter) pair, so the live arrays are ``(chunk, D, N, n_bins)``. That is
+``N`` times larger than the result, which is why the default chunk width is
+derived from ``N``, ``D`` and ``n_bins`` rather than fixed.
 
 A categorical parameter needs no binning: its level code is already a bin
 index. Continuous and categorical columns share one kernel, compiled at
@@ -49,6 +57,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from jaxgsa._core.batching import get_memory_budget
 from jaxgsa._core.bootstrap import _percentile_ci
 from jaxgsa._core.partition import _extract_categorical_codes
 from jaxgsa._core.transforms import cdf_to_unit_interval
@@ -203,6 +212,37 @@ def _get_pawn_ks(n_bins: int):
     return jax.jit(_impl)
 
 
+def _resolve_slice_chunk_size(
+    slice_chunk_size: int | None,
+    N: int,
+    D: int,
+    n_eff: int,
+    itemsize: int,
+) -> int:
+    """Resolve the number of output columns per kernel call.
+
+    An explicit value is honoured as given. ``None`` derives one from the
+    active memory budget (:func:`jaxgsa._core.batching.get_memory_budget`)
+    and the kernel's real working set, which is ``chunk * D * N * n_eff``
+    elements, not the ``chunk * D * n_eff`` result. Two such arrays are live
+    at once inside the kernel, so the estimate carries a factor of two.
+
+    Args:
+        slice_chunk_size: Caller's value, or ``None`` to derive one.
+        N: Number of samples.
+        D: Number of parameters.
+        n_eff: Number of bins the kernel is compiled at.
+        itemsize: Bytes per element of the kernel's working dtype.
+
+    Returns:
+        A chunk width of at least 1.
+    """
+    if slice_chunk_size is not None:
+        return slice_chunk_size
+    bytes_per_column = 2 * D * N * n_eff * itemsize
+    return max(1, get_memory_budget() // max(bytes_per_column, 1))
+
+
 def _aggregate_ks(
     ks: Array,
     statistic: Literal["median", "max", "mean"],
@@ -235,10 +275,19 @@ def _pawn_core(
     Y_3d: Array,
     n_eff: int,
     statistic: Literal["median", "max", "mean"],
+    slice_chunk_size: int | None,
     *,
     warn: bool = True,
 ) -> Array:
     """Compute PAWN indices over all (T, K) output slices.
+
+    The KS kernel is vmapped over the flattened ``T*K`` output columns. Its
+    working set is ``(chunk, D, N, n_eff)``, not the ``(chunk, D, n_eff)``
+    result: the inner ``vmap`` builds a full ``(N, n_eff)`` ECDF table per
+    (column, parameter) pair. The columns are processed in chunks of at most
+    ``slice_chunk_size`` so those arrays stay bounded when ``T*K`` is large.
+    Each column is independent of every other, so the chunked result is
+    bit-for-bit the unchunked one.
 
     Args:
         bin_idx: Conditioning-bin indices from :func:`_bin_indices`, shape
@@ -246,6 +295,9 @@ def _pawn_core(
         Y_3d: Output array promoted to shape ``(N, T, K)``.
         n_eff: Number of bins the kernel is compiled at.
         statistic: Aggregation method across bins.
+        slice_chunk_size: Maximum number of flattened ``T*K`` output columns
+            per kernel call, or ``None`` to derive one from the memory
+            budget. An explicit value must be at least 1.
         warn: If True, emit one warning per parameter whose bins all hold
             fewer than two samples. Pass False for bootstrap resamples to
             avoid duplicate warnings.
@@ -257,15 +309,30 @@ def _pawn_core(
     D = bin_idx.shape[1]
 
     # Bin assignment depends only on the inputs, so it is built once by the
-    # caller and every output column runs through a single vmapped kernel.
+    # caller and every output column runs through the same vmapped kernel.
     Y_cols = Y_3d.reshape(N, T * K)
-    ks = _get_pawn_ks(n_eff)(bin_idx, Y_cols)  # (T*K, D, n_eff)
+    total = T * K
+    # The kernel promotes its working dtype to at least float32.
+    itemsize = jnp.result_type(Y_3d.dtype, jnp.float32).itemsize
+    cs = min(_resolve_slice_chunk_size(slice_chunk_size, N, D, n_eff, itemsize), total)
+    kernel = _get_pawn_ks(n_eff)
+
+    # The KS values of one output column depend on no other column, so the
+    # aggregation runs inside the loop and only the (chunk, D) result is kept.
+    pawn_parts: list[Array] = []
+    empty_parts: list[Array] = []
+    for start in range(0, total, cs):
+        ks = kernel(bin_idx, Y_cols[:, start : start + cs])  # (chunk, D, n_eff)
+        pawn_parts.append(_aggregate_ks(ks, statistic))  # (chunk, D)
+        if warn:
+            empty_parts.append(jnp.all(jnp.isnan(ks), axis=(0, 2)))
 
     if warn:
         # Whether every bin of a parameter is empty depends only on the
         # binning and not on Y, so the answer is identical across output
-        # columns. One host sync, one warning per affected parameter.
-        all_empty = jnp.all(jnp.isnan(ks), axis=(0, 2)).tolist()
+        # columns and across chunks. One host sync, one warning per affected
+        # parameter.
+        all_empty = jnp.all(jnp.stack(empty_parts), axis=0).tolist()
         for d, empty in enumerate(all_empty):
             if empty:
                 warnings.warn(
@@ -274,7 +341,7 @@ def _pawn_core(
                     category=JaxgsaWarning,
                 )
 
-    pawn = _aggregate_ks(ks, statistic)  # (T*K, D)
+    pawn = jnp.concatenate(pawn_parts, axis=0)  # (T*K, D)
     return pawn.reshape(T, K, D)
 
 
@@ -288,7 +355,7 @@ def analyze(
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
     seed: int = 0,
-    slice_chunk_size: int = 2048,
+    slice_chunk_size: int | None = None,
 ) -> PAWNResult:
     """Compute PAWN sensitivity indices.
 
@@ -335,9 +402,18 @@ def analyze(
             ``0`` disables the confidence intervals.
         conf_level: Confidence level for the bootstrap intervals.
         seed: Random seed for the bootstrap resampling.
-        slice_chunk_size: Accepted for signature parity with the other
-            ``analyze`` functions. PAWN needs no output-slice chunking, so
-            this has no effect.
+        slice_chunk_size: Number of flattened ``T*K`` output columns
+            processed per kernel call. ``None`` (default) derives one from
+            the active memory budget, which
+            :func:`jaxgsa.config.set_memory_budget` sets. Pass a positive
+            integer to override it. Peak memory is dominated by the kernel's
+            ECDF tables, about ``2 * slice_chunk_size * D * N * n_bins``
+            elements: the inner ``vmap`` holds a full ``(N, n_bins)`` table
+            per (column, parameter) pair. The ``slice_chunk_size * D *
+            n_bins`` KS result is smaller by a factor of ``N`` and does not
+            drive the peak. Lower it if a time-series output runs the device
+            out of memory. It changes no index: every output column is
+            independent of every other.
 
     Returns:
         A :class:`PAWNResult` with ``pawn`` shaped ``(D,)``, ``(K, D)``, or
@@ -346,8 +422,9 @@ def analyze(
     Raises:
         ValueError: If X is not 2-D, its column count does not match the
             problem, X and Y have differing row counts, ``statistic`` is
-            not one of ``"median"``/``"max"``/``"mean"``, ``n_bins < 2``, or
-            ``conf_level`` is not in ``(0, 1)``.
+            not one of ``"median"``/``"max"``/``"mean"``, ``n_bins < 2``,
+            ``conf_level`` is not in ``(0, 1)``, or ``slice_chunk_size`` is
+            given and is not a positive integer.
     """
     X = jnp.asarray(X)
     # PAWN conditions on bins of each input and compares output CDFs, so a
@@ -368,11 +445,13 @@ def analyze(
         raise ValueError(f"n_bins must be >= 2, got {n_bins}")
     if not 0 < conf_level < 1:
         raise ValueError(f"conf_level must be in (0, 1), got {conf_level}")
+    if slice_chunk_size is not None and slice_chunk_size < 1:
+        raise ValueError(f"slice_chunk_size must be >= 1, got {slice_chunk_size}")
 
     Y_3d, squeeze_time, squeeze_output = _prepare_Y(Y)
     bin_idx, n_eff = _bin_indices(problem, X, n_bins)
 
-    pawn_3d = _pawn_core(bin_idx, Y_3d, n_eff, statistic)
+    pawn_3d = _pawn_core(bin_idx, Y_3d, n_eff, statistic, slice_chunk_size)
 
     pawn_conf: Array | None = None
     if n_bootstrap > 0:
@@ -382,7 +461,9 @@ def analyze(
         for _ in range(n_bootstrap):
             key, subkey = jax.random.split(key)
             idx = jax.random.choice(subkey, N, shape=(N,), replace=True)
-            boot_pawn = _pawn_core(bin_idx[idx], Y_3d[idx], n_eff, statistic, warn=False)
+            boot_pawn = _pawn_core(
+                bin_idx[idx], Y_3d[idx], n_eff, statistic, slice_chunk_size, warn=False
+            )
             boot_draws.append(boot_pawn)
 
         boot_stack = jnp.stack(boot_draws, axis=0)

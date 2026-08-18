@@ -97,11 +97,17 @@ class SobolResult:
 
         # S2 has two parameter axes (interaction between param_i and param_j),
         # so it uses separate coordinate names to avoid an xarray dimension clash.
-        if self.S2 is not None:
-            dims_s2 = (*dims_s1[:-1], "param_i", "param_j")
-            data_vars["S2"] = (dims_s2, np.asarray(self.S2))
+        # The coordinates belong to the axes, not to any one variable, so they
+        # are named whenever either the estimate or its interval is exported.
+        # Naming them only alongside S2 would leave S2_lower and S2_upper
+        # unlabelled, and `.sel(param_i=...)` would raise.
+        dims_s2 = (*dims_s1[:-1], "param_i", "param_j")
+        if self.S2 is not None or self.S2_conf is not None:
             coords["param_i"] = param_names
             coords["param_j"] = param_names
+
+        if self.S2 is not None:
+            data_vars["S2"] = (dims_s2, np.asarray(self.S2))
 
         # Split the (2, ...) confidence arrays into *_lower and *_upper
         # variables so users can select bounds without integer indexing.
@@ -113,8 +119,7 @@ class SobolResult:
                 data_vars[f"{name}_lower"] = (dims_s1, np.asarray(arr[0]))
                 data_vars[f"{name}_upper"] = (dims_s1, np.asarray(arr[1]))
 
-        if self.S2_conf is not None and self.S2 is not None:
-            dims_s2 = (*dims_s1[:-1], "param_i", "param_j")
+        if self.S2_conf is not None:
             data_vars["S2_lower"] = (dims_s2, np.asarray(self.S2_conf[0]))
             data_vars["S2_upper"] = (dims_s2, np.asarray(self.S2_conf[1]))
 

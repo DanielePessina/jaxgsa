@@ -7,7 +7,8 @@ import pytest
 from jaxgsa.benchmarks import ishigami, linear, sobol_g
 from jaxgsa.efast import EFASTSamples, analyze, sample
 from jaxgsa.efast._analyze import _compute_indices
-from jaxgsa.efast._sampling import _assign_frequencies
+from jaxgsa.efast._analyze import _frequency_plan as _analyze_frequency_plan
+from jaxgsa.efast._sampling import _frequency_plan
 from jaxgsa.problem import GaussianInputSpec, Problem
 
 
@@ -108,15 +109,22 @@ class TestSampling:
         sample(problem, n_per_curve=321, M=4, seed=0)
 
     def test_complementary_frequencies_are_distinct(self):
-        """Every parameter on a curve oscillates at its own frequency."""
+        """Every parameter on a curve oscillates at its own frequency.
+
+        The upper bound is written out here rather than read from
+        ``plan.assigned_max``. Carriers must stay clear of the focal
+        parameter's ``M`` harmonics, which puts the highest usable carrier at
+        ``omega_0 / (2*M)``. Comparing the plan against its own field would
+        pass for any band the plan happened to choose.
+        """
         for D in (2, 5, 9):
             for M in (2, 4, 6):
                 n = 4 * M**2 * (D - 1) + 1
-                omega_0 = (n - 1) // (2 * M)
-                omega_compl = _assign_frequencies(D, omega_0, M)
+                plan = _frequency_plan(D, n, M)
+                omega_compl = plan.omega_compl
                 assert len(set(omega_compl.tolist())) == D - 1, (D, M)
                 assert omega_compl.min() >= 1
-                assert omega_compl.max() <= omega_0 // (2 * M)
+                assert omega_compl.max() <= plan.omega_0 // (2 * M), (D, M)
 
     def test_gaussian_inputs(self):
         problem = Problem.from_dict(
@@ -199,8 +207,10 @@ class TestMConsistency:
         # The indices must equal a manual M=6 computation on curve 0 —
         # proof analyze summed 6 harmonics of the M=6 omega_0.
         n = sr.n_per_curve
-        omega_0 = (n - 1) // (2 * 6)
-        s1_manual, st_manual = _compute_indices(jnp.asarray(Y[:n]), n, 6, omega_0)
+        plan = _frequency_plan(ishigami.PROBLEM.num_vars, n, 6)
+        s1_manual, st_manual = _compute_indices(
+            jnp.asarray(Y[:n]), n, 6, plan.omega_0, plan.analysis_max
+        )
         np.testing.assert_allclose(float(result.S1[0]), float(s1_manual), rtol=1e-6)
         np.testing.assert_allclose(float(result.ST[0]), float(st_manual), rtol=1e-6)
 
@@ -220,31 +230,206 @@ class TestMConsistency:
 
 class TestFrequencyAssignment:
     def test_d1(self):
-        freqs = _assign_frequencies(1, 100, 4)
-        assert len(freqs) == 0
+        plan = _frequency_plan(1, 4 * 4**2 + 1, 4)
+        assert len(plan.omega_compl) == 0
 
     def test_d2(self):
-        freqs = _assign_frequencies(2, 100, 4)
-        assert len(freqs) == 1
-        assert freqs[0] >= 1
+        plan = _frequency_plan(2, 801, 4)
+        assert len(plan.omega_compl) == 1
+        assert plan.omega_compl[0] >= 1
 
     def test_high_omega(self):
-        freqs = _assign_frequencies(4, 200, 4)
-        assert len(freqs) == 3
-        assert np.all(freqs >= 1)
-        assert len(np.unique(freqs)) == 3
+        plan = _frequency_plan(4, 6401, 4)
+        assert len(plan.omega_compl) == 3
+        assert np.all(plan.omega_compl >= 1)
+        assert len(np.unique(plan.omega_compl)) == 3
 
-    def test_low_omega_raises_instead_of_wrapping(self):
-        """omega_0 = 15, M = 4 leaves one slot — three parameters cannot share it."""
-        with pytest.raises(ValueError, match="distinct complementary frequencies"):
-            _assign_frequencies(4, 15, 4)
+    def test_too_few_slots_raises_instead_of_wrapping(self):
+        """A curve too short to hold D-1 distinct carriers is rejected up front.
+
+        Tier T4 (internal consistency): three parameters cannot share one
+        assigned slot, so the plan refuses to build rather than emitting
+        duplicate frequencies.
+        """
+        with pytest.raises(ValueError, match=r"4\*M\^2\*\(D-1\) \+ 1"):
+            _frequency_plan(4, 129, 4)
+
+
+def _column(sr: EFASTSamples, curve: int, param: int) -> np.ndarray:
+    """One parameter column of one search curve, mean removed.
+
+    Args:
+        sr: An evaluated eFAST design.
+        curve: Index of the search curve (the focal parameter of the block).
+        param: Index of the parameter column to pull out.
+
+    Returns:
+        The column, shape ``(n_per_curve,)``, centred so that the DFT's DC bin
+        is empty and ``argmax`` finds the carrier.
+    """
+    n = sr.n_per_curve
+    col = np.asarray(sr.samples)[curve * n : (curve + 1) * n, param]
+    return col - col.mean()
+
+
+def _tone(f: int, n: int) -> np.ndarray:
+    """A unit cosine at integer frequency ``f`` over ``n`` curve points.
+
+    The search-curve parameter ``s`` runs over ``2*pi*k/n`` for
+    ``k = 0..n-1``, so ``cos(f*s)`` completes exactly ``f`` cycles across the
+    curve. Its DFT therefore puts all of its power in bin ``f`` and nowhere
+    else. This is the definition of the discrete Fourier transform, not a
+    restatement of anything in ``jaxgsa.efast``.
+
+    Args:
+        f: Frequency in cycles per curve.
+        n: Number of samples along the curve.
+
+    Returns:
+        The sampled cosine, shape ``(n,)``.
+    """
+    return np.cos(2.0 * np.pi * f * np.arange(n) / n)
+
+
+def _st_for_tone(sr: EFASTSamples, f: int) -> float:
+    """Run ``analyze`` on a design whose every curve carries one pure tone.
+
+    Every search curve gets the same cosine at frequency ``f``. All of the
+    output variance sits in bin ``f``, so ``ST = 1 - Dt/V`` is 0 when the
+    analyzer's complementary band contains ``f`` and 1 when it does not. The
+    value is therefore a direct read-out of the band the analyzer integrates
+    over.
+
+    Args:
+        sr: An eFAST design; only its shape metadata is used.
+        f: Frequency of the injected tone, in cycles per curve.
+
+    Returns:
+        The ST of the first parameter, which is the same for all of them.
+    """
+    n = sr.n_per_curve
+    Y = jnp.asarray(np.tile(_tone(f, n), sr.problem.num_vars))
+    return float(np.asarray(analyze(sr, Y).ST).reshape(-1)[0])
+
+
+class TestAnalysisBandEdge:
+    """Where the analyzer's complementary band actually stops.
+
+    Every assertion here is driven by a signal built from the DFT definition,
+    so none of it can agree with a wrong band by reading that band's own value.
+    """
+
+    @pytest.fixture(scope="class")
+    def design(self):
+        """A four-parameter design with omega_0 = 128, analysis band [1, 64]."""
+        problem = Problem(names=tuple(f"x{i}" for i in range(4)), bounds=((0, 1),) * 4)
+        return sample(problem, n_per_curve=1025, M=4, seed=7)
+
+    def test_kernel_counts_the_top_of_the_band_and_nothing_above(self):
+        """Tier T0 (analytic): ``analysis_max`` means what its name says.
+
+        Feed ``_compute_indices`` a cosine at a chosen frequency and read ST
+        back. A tone inside the complementary band gives ``Dt = V`` and so
+        ``ST = 0``; a tone above the band gives ``Dt = 0`` and so ``ST = 1``.
+        The expectation comes from Parseval and the DFT of a cosine, so this
+        pins the exact meaning of the ``analysis_max`` argument: the top
+        frequency counted, inclusive.
+        """
+        n, m, omega_0 = 1025, 4, 128
+        for analysis_max in (17, 40, 64):
+            inside = _compute_indices(
+                jnp.asarray(_tone(analysis_max, n)), n, m, omega_0, analysis_max
+            )[1]
+            above = _compute_indices(
+                jnp.asarray(_tone(analysis_max + 1, n)), n, m, omega_0, analysis_max
+            )[1]
+            assert float(inside) == pytest.approx(0.0, abs=1e-6), analysis_max
+            assert float(above) == pytest.approx(1.0, abs=1e-6), analysis_max
+
+    def test_analyzer_band_is_the_plan_band(self, design):
+        """Tier T0/T4: the band ``analyze`` integrates over, measured.
+
+        Sweep a pure tone across the frequency axis and record which
+        frequencies ``analyze`` charges to the complementary variance. The
+        counted set must be exactly ``[1, analysis_max]`` — contiguous, and
+        stopping at the plan's edge. A band that is one bin short, or eight
+        bins too wide, moves the measured edge and fails here, even though
+        neither changes any value the plan itself reports.
+        """
+        plan = _frequency_plan(design.problem.num_vars, design.n_per_curve, design.M)
+        counted = [f for f in range(1, plan.omega_0) if _st_for_tone(design, f) < 0.5]
+        assert counted == list(range(1, plan.analysis_max + 1))
+
+    def test_assigned_carriers_lie_in_the_measured_band(self, design):
+        """Tier T4 (behavioural): the sampler puts power where analyze looks.
+
+        Recover the complementary carriers from the sampled design by FFT,
+        not from the plan, and recover the analyzer's band edge by the tone
+        sweep, not from the plan. Every carrier must sit at or below that
+        edge. If the sampler and the analyzer ever drift apart in either
+        direction, carrier power lands outside the band that is summed and
+        this fails.
+        """
+        n = design.n_per_curve
+        omega_0 = int(np.argmax(np.abs(np.fft.rfft(_column(design, 0, 0)))))
+        edge = max(f for f in range(1, omega_0) if _st_for_tone(design, f) < 0.5)
+
+        carriers = set()
+        for i in range(design.problem.num_vars):
+            for j in range(design.problem.num_vars):
+                if j == i:
+                    continue
+                col = _column(design, i, j)
+                carriers.add(int(np.argmax(np.abs(np.fft.rfft(col)))))
+        assert carriers, "design has no non-focal columns to recover"
+        assert min(carriers) >= 1
+        assert max(carriers) <= edge, (sorted(carriers), edge, n)
+
+    def test_focal_frequency_is_recoverable_from_the_design(self, design):
+        """Tier T4 (behavioural): column i of curve i really runs at omega_0.
+
+        The sampler laid the design out on the plan's frequencies. Recover the
+        focal frequency from the sample matrix itself: on curve ``i``, column
+        ``i`` oscillates at ``omega_0``, so its spectrum peaks at that bin.
+        """
+        plan = _frequency_plan(design.problem.num_vars, design.n_per_curve, design.M)
+        for i in range(design.problem.num_vars):
+            spectrum = np.abs(np.fft.rfft(_column(design, i, i)))
+            assert int(np.argmax(spectrum)) == plan.omega_0, i
+
+
+class TestFrequencyPlanSharing:
+    """The sampler and the analyzer must read one plan, not two formulas."""
+
+    def test_both_modules_bind_one_plan_function(self):
+        """Tier T4 (internal consistency): the analyzer imports, not redefines.
+
+        ``jaxgsa.efast._analyze`` imports ``_frequency_plan`` from
+        ``_sampling``, which binds a *separate name* in the analyzer's module.
+        This asserts the two names are the same object. That is all it proves:
+        it rules out a second copy of the formula living in ``_analyze``, and
+        it does not check any frequency value. The band itself is measured in
+        :class:`TestAnalysisBandEdge`.
+        """
+        assert _analyze_frequency_plan is _frequency_plan
+
+    def test_bands_are_not_the_same_number(self):
+        """Tier T4 (internal consistency): the two bands stay distinct.
+
+        Classic eFAST counts every frequency below ``omega_0 / 2`` as
+        complementary, not only the assigned ones. Collapsing the two bands
+        into one would change every ST value, so guard that they really differ
+        for the standard M.
+        """
+        plan = _frequency_plan(5, 4097, 4)
+        assert plan.assigned_max < plan.analysis_max
 
 
 class TestComputeIndices:
     def test_constant_output(self):
         """Constant Y has no meaningful variance; indices should be near zero or NaN."""
         Y = jnp.ones(257)
-        s1, st = _compute_indices(Y, 257, 4, 32)
+        s1, st = _compute_indices(Y, 257, 4, 32, 32 // 2)
         assert jnp.isnan(s1) or abs(float(s1)) < 0.1
         assert jnp.isnan(st) or float(st) < 1.0
 
@@ -253,7 +438,7 @@ class TestComputeIndices:
         omega = 32
         s = (2 * np.pi / N) * np.arange(N)
         Y = jnp.asarray(np.sin(omega * s))
-        s1, st = _compute_indices(Y, N, 4, omega)
+        s1, st = _compute_indices(Y, N, 4, omega, omega // 2)
         assert float(s1) > 0.9
 
 

@@ -2,12 +2,11 @@
 
 ## Unreleased (0.9.0)
 
-Version 0.9.0 fixes defects. It adds no method and breaks no API.
+Version 0.9.0 fixes defects. It adds no method and removes no API.
 
-There is one deliberate change of behaviour, and it is a correctness fix: an
-analysis that meets a non-finite model output now raises by default instead of
-dropping rows or continuing. `on_invalid=` selects the old behaviour. See the
-entry below.
+Three calls that were accepted before now raise. Each one was accepted while
+doing something the caller did not ask for, so refusing it is the fix, not a
+side effect. They are marked **now raises** below.
 
 `PLAN-V1.0.md` records the whole plan and the order of the work.
 
@@ -34,6 +33,13 @@ entry below.
   get a NumPy the package does not support.
 - **The SciPy floor rises to `scipy>=1.15`**, from `>=1.10`. This makes
   `scipy.stats.chatterjeexi` always available as a verification oracle.
+- **PAWN's `slice_chunk_size` default is now derived from the memory budget**,
+  as `None`, rather than a fixed 2048. The fixed value never engaged: it is
+  compared against `T*K`, which is smaller than 2048 in every realistic case,
+  so the knob did nothing unless you found and lowered it yourself. The default
+  now adapts to `N`, `D` and `n_bins` through
+  `jaxgsa.config.set_memory_budget`. Only peak memory changes; every index is
+  identical.
 
 ### Performance
 
@@ -47,6 +53,38 @@ entry below.
 
 ### Fixed
 
+- **DGSM: passing arguments from both call styles now raises.** `dgsm.analyze`
+  accepts either a model and inputs, or precomputed outputs and derivatives.
+  The dispatch was first-match, not exclusive, so
+  `analyze(problem, X=X, Y=Y, dfdx=J)` took the precomputed branch and
+  discarded `X`. The check that validates `X` against the problem's bounds and
+  shape runs only in the other branch, so a user who passed inputs and believed
+  they were checked had them thrown away unchecked. **Now raises**, naming the
+  conflicting arguments.
+- **DGSM: a batch model now raises up front.** `dgsm.analyze` differentiates a
+  one-sample function, `(D,) -> ...`. Every other method in the package takes
+  `(N, D)`, so passing a batch model is an easy mistake, and it used to fail
+  with an `IndexError` from deep inside the autodiff machinery. **Now raises**
+  with the expected signature and a wrapper snippet. The check costs no model
+  evaluations: it traces shapes only. An unrelated failure inside your model is
+  reported plainly, without the wrapper advice.
+- **PAWN: `slice_chunk_size` now does something.** It was declared, documented
+  as "accepted for signature parity", never validated, and never used, so the
+  whole `(T*K, D, N, n_bins)` working set was built in one call — on the
+  time-series case this project recommends. It now chunks the output columns,
+  and `slice_chunk_size=0` **now raises** like it does elsewhere. Results are
+  unchanged.
+- **eFAST computed its frequency plan twice.** The sampler built the design
+  from one copy of the formula and the analyzer recomputed it from another. The
+  two agreed only because one frequency band happened to contain the other, and
+  no test could catch a divergence, because the tests recomputed the formula
+  too. Both sides now read one plan, which checks its own invariant, and a new
+  test recovers the bands from a synthetic signal instead of from the formula.
+- **Borgonovo: a failed delta estimate now says how to fix it.** The estimate
+  is a half L1 distance, so a value outside `[0, 1]` is a failed computation.
+  The error now reports whether a conditioning class was floored, which output
+  column failed, the bandwidth actually used against the real grid step, and
+  the value that would resolve it.
 - `MorrisSamples.downsample` no longer carries a previous design's dropped-block
   count into the smaller design. A `downsample` caller names the trajectory
   count and receives exactly it, so nothing is missing. Carrying the count

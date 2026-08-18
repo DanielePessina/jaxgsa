@@ -43,11 +43,113 @@ class TestPAWNBasic:
         assert pawn[0] > pawn[2], "x1 should be more important than x3"
         assert pawn[1] > pawn[2], "x2 should be more important than x3"
 
-    def test_slice_chunk_size_kwarg_accepted(self, ishigami_data):
-        """The 0.4 name `slice_chunk_size` is accepted (documented no-op)."""
+    def test_slice_chunk_size_invariance(self, ishigami_data):
+        """Tier T4 (internal consistency): chunking changes no index.
+
+        ``slice_chunk_size`` splits the flattened ``T*K`` output columns into
+        separate kernel calls. Every column is independent of every other, so
+        the chunked result must equal the unchunked one exactly, not merely
+        to a tolerance. The bootstrap intervals are compared too: they run
+        through the same loop, once per resample.
+
+        The test is not vacuous. The output has ``T*K == 6`` columns and the
+        chunk size is 4, so the loop runs twice and the second chunk is a
+        short one. Both asserts below state that, and they fail if a future
+        edit shrinks the output or raises the chunk size past it.
+        """
         X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X[:200], Y[:200], seed=0, slice_chunk_size=8)
-        assert result.pawn.shape == (3,)
+        X = X[:500]
+        Y = Y[:500]
+        # (N, T, K) with T = 3, K = 2, so six flattened output columns.
+        Y_3d = jnp.stack(
+            [
+                jnp.stack([Y, 2.0 * Y], axis=-1),
+                jnp.stack([jnp.sin(Y), Y**2], axis=-1),
+                jnp.stack([-Y, jnp.cos(Y)], axis=-1),
+            ],
+            axis=1,
+        )
+        total = Y_3d.shape[1] * Y_3d.shape[2]
+        chunk = 4
+        assert total > chunk, "chunk must be smaller than T*K or nothing is split"
+        assert total % chunk != 0, "an uneven split exercises the short trailing chunk"
+
+        full = analyze(ishigami.PROBLEM, X, Y_3d, n_bootstrap=8, conf_level=0.9, seed=3)
+        chunked = analyze(
+            ishigami.PROBLEM,
+            X,
+            Y_3d,
+            n_bootstrap=8,
+            conf_level=0.9,
+            seed=3,
+            slice_chunk_size=chunk,
+        )
+
+        assert full.pawn.shape == (3, 2, 3)
+        assert full.pawn_conf is not None
+        assert chunked.pawn_conf is not None
+        np.testing.assert_array_equal(np.asarray(chunked.pawn), np.asarray(full.pawn))
+        np.testing.assert_array_equal(np.asarray(chunked.pawn_conf), np.asarray(full.pawn_conf))
+        assert chunked.problem is full.problem
+
+    def test_slice_chunk_size_splits_the_columns(self, ishigami_data, monkeypatch):
+        """Tier T4 (internal consistency): the chunk loop really splits.
+
+        This test patches an internal and counts calls, which this suite
+        avoids elsewhere. Keep it anyway. Chunking is *defined* to return
+        the identical numbers, so the loop has no other observable effect:
+        :meth:`test_slice_chunk_size_invariance` above passes unchanged if
+        ``slice_chunk_size`` is dropped on the floor, because an ignored
+        keyword trivially gives an identical result. Without the check
+        below, the fix that chunks the outer vmap over output columns is
+        indistinguishable from a no-op. This is not a mirror of the
+        implementation; it is the only place the memory bound is asserted.
+
+        The recorded per-call column widths are the contract, not merely
+        the number of calls: ``T*K == 6`` columns at a chunk size of 4 must
+        arrive as one full chunk of 4 and one short trailing chunk of 2. A
+        loop that rounded the trailing chunk up, or that passed all six
+        columns once and sliced afterwards, would give the same indices and
+        fail here.
+        """
+        from jaxgsa.pawn import _analyze as pawn_analyze
+
+        X, Y = ishigami_data
+        X = X[:500]
+        Y = Y[:500]
+        # (N, T, K) with T = 3, K = 2, so six flattened output columns.
+        Y_3d = jnp.stack(
+            [
+                jnp.stack([Y, 2.0 * Y], axis=-1),
+                jnp.stack([jnp.sin(Y), Y**2], axis=-1),
+                jnp.stack([-Y, jnp.cos(Y)], axis=-1),
+            ],
+            axis=1,
+        )
+        assert Y_3d.shape[1] * Y_3d.shape[2] == 6
+
+        widths: list[int] = []
+        real_get = pawn_analyze._get_pawn_ks
+
+        def recording_get(n_bins: int):
+            kernel = real_get(n_bins)
+
+            def recorder(bin_idx, Y_cols):
+                widths.append(int(Y_cols.shape[1]))
+                return kernel(bin_idx, Y_cols)
+
+            return recorder
+
+        monkeypatch.setattr(pawn_analyze, "_get_pawn_ks", recording_get)
+        analyze(ishigami.PROBLEM, X, Y_3d, slice_chunk_size=4, n_bootstrap=0)
+
+        assert widths == [4, 2], f"expected one full and one short chunk, got {widths}"
+
+    def test_slice_chunk_size_must_be_positive(self, ishigami_data):
+        """Tier T4 (internal consistency): an unusable chunk size is refused."""
+        X, Y = ishigami_data
+        with pytest.raises(ValueError, match="slice_chunk_size must be >= 1"):
+            analyze(ishigami.PROBLEM, X[:200], Y[:200], slice_chunk_size=0)
 
 
 class TestPAWNSALibComparison:
@@ -258,6 +360,46 @@ class TestPAWNEmptyBinWarning:
             analyze(problem, jnp.asarray(X), jnp.asarray(y), n_bins=20, n_bootstrap=5)
         msgs = [r for r in rec if "all bins empty" in str(r.message)]
         assert len(msgs) == 1
+
+    def test_warns_once_across_a_chunk_boundary(self):
+        """Tier T4 (internal consistency): the empty-bin flag reduces over chunks.
+
+        Whether every bin of a parameter is empty depends on the binning
+        only, so the per-chunk flags must be combined with an AND across
+        chunks and reported once per parameter. The other empty-bin test
+        uses a scalar output, where ``T*K == 1`` gives a single chunk and
+        the cross-chunk reduce never runs. Here the output has six
+        flattened columns at a chunk size of 4, so the flags come from two
+        chunks of different widths.
+
+        Parameter ``a`` spreads over 20 bins with one sample each, so all
+        of its bins are empty. Parameter ``b`` is constant, so all eight
+        samples land in one bin and it is never empty. Exactly one warning
+        must name parameter 0, which fails both if the reduce drops the
+        per-parameter granularity and if it warns once per chunk.
+        """
+        import warnings as _warnings
+
+        problem = Problem(names=("a", "b"), bounds=((0.0, 1.0), (0.0, 1.0)))
+        X = np.column_stack([np.linspace(0.02, 0.98, 8), np.full(8, 0.5)])
+        y = np.arange(8, dtype=float)
+        # (N, T, K) = (8, 3, 2), so six flattened columns and chunks of 4 + 2.
+        Y_3d = jnp.stack(
+            [
+                jnp.stack([y, 2.0 * y], axis=-1),
+                jnp.stack([np.sin(y), y**2], axis=-1),
+                jnp.stack([-y, np.cos(y)], axis=-1),
+            ],
+            axis=1,
+        )
+        assert Y_3d.shape == (8, 3, 2)
+
+        with _warnings.catch_warnings(record=True) as rec:
+            _warnings.simplefilter("always")
+            analyze(problem, jnp.asarray(X), Y_3d, n_bins=20, slice_chunk_size=4)
+        msgs = [str(r.message) for r in rec if "all bins empty" in str(r.message)]
+        assert len(msgs) == 1
+        assert "parameter 0" in msgs[0]
 
 
 class TestPAWNValidation:

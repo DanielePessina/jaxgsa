@@ -193,10 +193,23 @@ print(ds_plain)
 - Delta is a half L1 distance between densities, so it lies in [0, 1]. If
   the returned estimate leaves that range by more than 0.05, the
   computation failed and `analyze` raises `ValueError` naming the
-  parameter. Raise `grid_size`, or raise `degenerate_bandwidth`. The value
-  is never clipped, because a clipped value looks plausible and is still
-  wrong. A confidence bound outside the range only warns: the point
-  estimate is the contract and the interval is a diagnostic.
+  parameter. The cause is a conditioning class the output grid cannot
+  resolve. The message reads what the run actually did and names the knob
+  that governs it: `grid_size` and `degenerate_bandwidth` when the class
+  was found degenerate and its kernel was floored, or `grid_size` and
+  `degenerate_tol` when no class was floored and the floor played no part.
+  The value is never clipped, because a clipped value looks plausible and
+  is still wrong. A confidence bound outside the range only warns: the
+  point estimate is the contract and the interval is a diagnostic.
+- `analyze` never refuses `degenerate_tol` or `degenerate_bandwidth` on
+  the setting alone. `degenerate_bandwidth` only reaches a class the
+  estimator already called degenerate, so on smooth data it cannot change
+  the result at any value. Raising `degenerate_tol` above the floor
+  fraction does bias the result: a class whose own bandwidth sits between
+  the floor and the tolerance is then *narrowed* to the floor, which
+  inflates delta for the very classes the higher tolerance said to
+  distrust. That is still a valid computation, so it is a bias to know
+  about, not an error.
 
 ## See also
 

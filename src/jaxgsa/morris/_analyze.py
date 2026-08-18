@@ -328,7 +328,9 @@ def analyze(
     ee = _elementary_effects(Y, idx_after, idx_before, delta)  # (r, D, T, K)
     mu, mu_star, sigma = _stats_from_ee(ee)  # each (T, K, D)
 
-    mu_conf = mu_star_conf = sigma_conf = None
+    # One value for all three intervals: they are produced together or not at
+    # all, so a single name keeps that fact checkable instead of implied.
+    conf_triple: tuple[Array, Array, Array] | None = None
     if num_resamples > 0:
         if key is None:
             raise ValueError("key is required when num_resamples > 0")
@@ -368,15 +370,17 @@ def analyze(
                 estimate, draws, conf_level=conf_level, ci_method=ci_method
             )
             conf_pairs.append(jnp.stack([lower, upper]))
-        mu_conf, mu_star_conf, sigma_conf = conf_pairs
+        conf_triple = (conf_pairs[0], conf_pairs[1], conf_pairs[2])
 
     mu = _squeeze_output_axes(mu, squeeze_time, squeeze_output)
     mu_star = _squeeze_output_axes(mu_star, squeeze_time, squeeze_output)
     sigma = _squeeze_output_axes(sigma, squeeze_time, squeeze_output)
-    if mu_conf is not None and mu_star_conf is not None and sigma_conf is not None:
-        mu_conf = _squeeze_output_axes(mu_conf, squeeze_time, squeeze_output)
-        mu_star_conf = _squeeze_output_axes(mu_star_conf, squeeze_time, squeeze_output)
-        sigma_conf = _squeeze_output_axes(sigma_conf, squeeze_time, squeeze_output)
+    if conf_triple is None:
+        mu_conf = mu_star_conf = sigma_conf = None
+    else:
+        mu_conf, mu_star_conf, sigma_conf = (
+            _squeeze_output_axes(arr, squeeze_time, squeeze_output) for arr in conf_triple
+        )
 
     return MorrisResult(
         mu=mu,

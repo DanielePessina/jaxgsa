@@ -135,13 +135,24 @@ Two things follow from this:
   `grid_size` is the knob that moves it.
 - If an estimate still leaves `[0, 1]` by more than 0.05, the computation
   failed. `analyze` raises `ValueError` naming the parameter, the observed
-  value, and both knobs. The value is never clipped: a clipped value looks
-  plausible and is still wrong. A confidence bound outside the range only
-  warns, because the point estimate is the contract and the interval is a
-  diagnostic.
+  value, and the knob to turn. The message reads what the run actually
+  did: it names `degenerate_bandwidth` and the fraction that would fix it
+  when a class was floored, and `degenerate_tol` when no class was. The
+  value is never clipped: a clipped value looks plausible and is still
+  wrong. A confidence bound outside the range only warns, because the
+  point estimate is the contract and the interval is a diagnostic.
 
 `degenerate_tol` and `degenerate_bandwidth` let you override when a class
 counts as too narrow and how wide it is made. The defaults suit most work.
+Neither is refused on the setting alone. `degenerate_bandwidth` only ever
+reaches a class already called degenerate, so on data with no such class
+it changes nothing at any value, and even on a degenerate class a narrow
+kernel only breaks the run if a grid point lands on the peak. Raising
+`degenerate_tol` biases the answer instead: a class whose own bandwidth
+sits between the floor and the tolerance is *narrowed* to the floor, which
+inflates delta for the very classes the higher tolerance said to distrust.
+That stays a valid computation, so it is a bias to know about, not an
+error.
 
 ## Analyze with Sobol' (the Saltelli scheme)
 

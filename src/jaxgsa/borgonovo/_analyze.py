@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import math
 import warnings
+from collections.abc import Callable
 from functools import lru_cache
 from typing import Literal
 
@@ -138,6 +139,27 @@ def _plischke_n_classes(n_samples: int) -> int:
     return min(int(np.ceil(n_samples**exponent)), _MAX_CLASSES)
 
 
+def _kde_bandwidths(counts: Array, std: Array, bw_factor: float | None) -> Array:
+    """Per-class (or full-sample) KDE bandwidths.
+
+    This is the single definition of the bandwidth rule. The jitted kernel
+    and the host-side failure diagnostic both call it, so the two cannot
+    drift apart.
+
+    Args:
+        counts: Number of samples the bandwidth is computed from. It is the
+            per-class count, or ``N`` for the full-sample bandwidth.
+        std: Sample standard deviation of the same samples.
+        bw_factor: Fixed factor multiplying ``std``, or ``None`` for the
+            Silverman rule ``(0.75 * counts) ** (-0.2)``.
+
+    Returns:
+        The bandwidth, in the dtype of the inputs.
+    """
+    factor = (0.75 * counts) ** (-0.2) if bw_factor is None else bw_factor
+    return factor * std
+
+
 @lru_cache(maxsize=32)
 def _get_delta_kernel(
     grid_size: int,
@@ -179,9 +201,8 @@ def _get_delta_kernel(
     """
 
     def _bandwidths(counts: Array, std: Array) -> Array:
-        """Per-class (or full-sample) KDE bandwidths."""
-        factor = (0.75 * counts) ** (-0.2) if bw_factor is None else bw_factor
-        return factor * std
+        """Per-class (or full-sample) KDE bandwidths for this kernel's factor."""
+        return _kde_bandwidths(counts, std, bw_factor)
 
     def _kde_full(y: Array, grid: Array, h: Array) -> Array:
         """Gaussian KDE of a full column ``y (N,)`` on ``grid (G,)``."""
@@ -392,6 +413,117 @@ def _raise_discrete_output(problem: Problem, Y: Array) -> None:
     )
 
 
+def _bandwidth_advice(
+    problem: Problem,
+    Y_cols: Array,
+    trailing: tuple[int, ...],
+    grid_size: int,
+    bw_factor: float | None,
+    degenerate_tol: float,
+    degenerate_bandwidth: float | Literal["auto"],
+    degenerate_bw: float | None,
+    floored: Array,
+) -> str:
+    """Explain which knob to turn after a delta estimate leaves ``[0, 1]``.
+
+    An out-of-range delta comes from a conditioning class the output grid
+    cannot resolve. Two different situations produce it, and they need
+    opposite advice, so this function reads what the kernel actually did
+    rather than what the settings asked for.
+
+    In the first situation the class was found degenerate and its kernel
+    was floored. The floor is then the width to change, and the message
+    compares it with one grid step. In the second situation no class was
+    floored, because none fell below ``degenerate_tol``. The floor is then
+    irrelevant and the message says so.
+
+    The numbers come from the original sample on the host: the same grid
+    construction as the kernel, and the shared :func:`_kde_bandwidths`.
+    They are advisory only, so a difference of a few units in the last
+    place against the kernel's own values does not matter. Nothing here
+    decides whether to raise; :func:`_raise_delta_out_of_range` has already
+    decided that from the returned estimate.
+
+    Args:
+        problem: Problem definition, used to name the offending column.
+        Y_cols: Output columns, shape ``(N, T*K)``, as passed to the kernel.
+        trailing: The shape of ``Y`` after the sample axis: ``()``,
+            ``(K,)``, or ``(T, K)``.
+        grid_size: Number of output-grid points.
+        bw_factor: Resolved ``bandwidth`` factor, or ``None`` for Silverman.
+        degenerate_tol: The tolerance that decides degeneracy.
+        degenerate_bandwidth: The argument as the caller passed it, quoted
+            back in the message.
+        degenerate_bw: Resolved floor fraction, or ``None`` for ``"auto"``.
+        floored: Boolean flags ``(T*K,)`` from the kernel, ``True`` where a
+            degenerate class engaged the bandwidth floor in any replicate.
+
+    Returns:
+        One or more sentences naming the knob to turn and the value to
+        turn it to.
+    """
+    engaged = np.flatnonzero(np.asarray(floored))
+    if engaged.size == 0:
+        return (
+            "No conditioning class was narrow enough to count as degenerate "
+            f"at degenerate_tol={degenerate_tol:.3g}, so the bandwidth floor "
+            f"was never applied. Raise grid_size (currently {grid_size}) so "
+            "the grid resolves the narrow class. Or raise degenerate_tol so "
+            "the class is treated as degenerate and given the wider kernel "
+            "that degenerate_bandwidth sets."
+        )
+
+    dtype = jnp.result_type(Y_cols.dtype, jnp.float32)
+    cols = Y_cols.astype(dtype)
+    N = cols.shape[0]
+    # Mirror the kernel's grid construction, including the final subtraction.
+    y_min = cols.min(axis=0)
+    y_max = cols.max(axis=0)
+    steps = jnp.linspace(0.0, 1.0, grid_size, dtype=dtype)
+    grids = y_min[:, None] + steps[None, :] * (y_max - y_min)[:, None]
+    step = np.asarray(grids[:, 1] - grids[:, 0])
+    full = np.asarray(
+        _kde_bandwidths(
+            jnp.asarray(float(N), dtype=dtype), jnp.std(cols, axis=0, ddof=1), bw_factor
+        )
+    )
+    if degenerate_bw is None:
+        applied = np.maximum(_DEGENERATE_BW_FRACTION * full, step)
+    else:
+        applied = degenerate_bw * full
+    # Report the floored column whose kernel is narrowest against its own
+    # grid. A floored column always has a positive grid step: a constant
+    # column has h_full == 0, which no bandwidth falls below.
+    ratio = np.where(
+        step[engaged] > 0,
+        applied[engaged] / np.where(step[engaged] > 0, step[engaged], 1.0),
+        np.inf,
+    )
+    worst = int(engaged[int(np.argmin(ratio))])
+    where = "" if cols.shape[1] == 1 else f" in {_slice_label(worst, trailing, problem)}"
+
+    if degenerate_bw is None:
+        return (
+            f"A conditioning class{where} was too narrow to resolve, so its "
+            "kernel was floored at max(0.1 * h_full, grid_step) = "
+            f"{float(applied[worst]):.3g}. That floor is already one grid "
+            f"step wide, so raise grid_size (currently {grid_size}): a "
+            "shorter step lets the grid follow the narrow class."
+        )
+    needed = float(step[worst]) / float(full[worst])
+    return (
+        f"A conditioning class{where} was too narrow to resolve, so its "
+        f"kernel was floored. degenerate_bandwidth={degenerate_bandwidth!r} "
+        f"set that floor to {float(applied[worst]):.3g}, against an "
+        f"output-grid step of {float(step[worst]):.3g}. Raise "
+        f"degenerate_bandwidth to at least {needed:.3g}, which is the "
+        "fraction of the full-sample bandwidth that equals one grid step. "
+        "Or pass degenerate_bandwidth='auto', the default, which takes "
+        "max(0.1 * h_full, grid_step) for you. Raising grid_size (currently "
+        f"{grid_size}) shrinks the grid step instead."
+    )
+
+
 def analyze(
     problem: Problem,
     X: Array,
@@ -475,14 +607,27 @@ def analyze(
             KDE bandwidth is below this fraction of the full-sample
             bandwidth. Degenerate classes get the floored bandwidth below.
             Lower it to let narrower classes keep their own bandwidth, but
-            read the note about grid resolution first.
+            read the note about grid resolution first. Raising it above the
+            floor fraction goes the other way and biases the result: a
+            class whose own bandwidth is between the floor and this
+            tolerance is then *narrowed* to the floor, which inflates delta
+            for the very classes the higher tolerance said to distrust. The
+            answer stays a valid computation, so this is a bias to know
+            about, not an error.
         degenerate_bandwidth: Bandwidth floor applied to a degenerate
             class. ``"auto"`` uses ``max(0.1 * h_full, grid_step)``, which
             never goes below what the output grid can integrate. A float
             is a fraction of the full-sample bandwidth ``h_full`` and is
-            applied exactly, with no grid-step bound. A value far below
-            ``grid_step / h_full`` aliases on the grid and returns delta
-            far above 1.
+            applied exactly, with no grid-step bound. This setting only
+            ever reaches a class the estimator already found degenerate,
+            so on data with no such class it cannot change the result at
+            any value. Where it does apply, a float far below
+            ``grid_step / h_full`` risks aliasing on the grid. Whether it
+            aliases depends on where the narrow class sits relative to the
+            grid points, so ``analyze`` does not refuse the setting up
+            front. It checks the returned delta instead, and the error
+            message then names this argument and the value that would fix
+            it.
 
     Note:
         This estimator supports a continuous output distribution only. It
@@ -572,7 +717,7 @@ def analyze(
             )
     if grid_size < 2:
         raise ValueError(f"grid_size must be >= 2, got {grid_size}")
-    bw_factor = _resolve_bandwidth(bandwidth)
+    bw_factor = _resolve_sentinel_float(bandwidth, "bandwidth", "silverman")
     if n_bootstrap < 0:
         raise ValueError(f"n_bootstrap must be >= 0, got {n_bootstrap}")
     if not 0 < conf_level < 1:
@@ -580,7 +725,7 @@ def analyze(
     degenerate_tol = float(degenerate_tol)
     if not 0 <= degenerate_tol < 1:
         raise ValueError(f"degenerate_tol must be in [0, 1), got {degenerate_tol}")
-    degenerate_bw = _resolve_degenerate_bandwidth(degenerate_bandwidth)
+    degenerate_bw = _resolve_sentinel_float(degenerate_bandwidth, "degenerate_bandwidth", "auto")
 
     Y_3d, squeeze_time, squeeze_output = _prepare_Y(Y)
     _, T, K = Y_3d.shape
@@ -629,9 +774,12 @@ def analyze(
         d_parts.append(d)
         s1_parts.append(s1)
         degen_parts.append(degen)
-        floored_parts.append(floored.any())
+        # Keep the flag per output column, not per chunk: a failure message
+        # has to name the column whose class was floored.
+        floored_parts.append(floored.any(axis=0))
 
-    if bool(jnp.stack(floored_parts).any()):
+    floored_cols = jnp.concatenate(floored_parts)
+    if bool(floored_cols.any()):
         warnings.warn(
             "jaxgsa: at least one conditioning class is too narrow for the "
             "output grid to resolve (often a point mass, e.g. a categorical "
@@ -679,8 +827,24 @@ def analyze(
         delta = d_hat
 
     # The point estimate is the contract, so an out-of-range value is an
-    # error. The interval is a diagnostic, so it only warns.
-    _raise_delta_out_of_range(problem, delta, grid_size)
+    # error. The interval is a diagnostic, so it only warns. The advice is
+    # built from what the kernel did, so it names the knob that actually
+    # governs this run.
+    _raise_delta_out_of_range(
+        problem,
+        delta,
+        lambda: _bandwidth_advice(
+            problem,
+            Y_cols,
+            Y.shape[1:],
+            grid_size,
+            bw_factor,
+            degenerate_tol,
+            degenerate_bandwidth,
+            degenerate_bw,
+            floored_cols,
+        ),
+    )
     if delta_conf is not None:
         _warn_conf_out_of_range(problem, delta_conf)
 
@@ -709,7 +873,7 @@ def _out_of_range_columns(values: Array, num_vars: int) -> tuple[np.ndarray, np.
     return flat, np.flatnonzero(bad.any(axis=0))
 
 
-def _raise_delta_out_of_range(problem: Problem, delta: Array, grid_size: int) -> None:
+def _raise_delta_out_of_range(problem: Problem, delta: Array, advice: Callable[[], str]) -> None:
     """Reject a delta point estimate that leaves ``[0, 1]``.
 
     Borgonovo's delta is a half L1 distance between probability densities,
@@ -720,12 +884,20 @@ def _raise_delta_out_of_range(problem: Problem, delta: Array, grid_size: int) ->
     ``2*d_hat - d_boot`` legal. The function never clips the value, because
     a clipped value is a plausible-looking wrong answer.
 
+    This is the only place the estimator refuses a bandwidth setting, and
+    it refuses on the returned number rather than on the configuration. A
+    kernel narrower than one grid step does not by itself break the run:
+    whether it does depends on where the narrow class sits relative to the
+    grid points, which is a property of the data. See
+    :func:`_bandwidth_advice`.
+
     Args:
         problem: Problem definition (for parameter names in the message).
         delta: Delta point estimates with the parameter axis last
             ``(..., D)``.
-        grid_size: The output-grid size that produced the estimate, named
-            in the message so the caller can act on it.
+        advice: Callable returning the sentences that name the knob to
+            turn. It is called only when this function raises, so the
+            caller pays for the diagnostic only on a failed run.
 
     Raises:
         ValueError: If any estimate is below ``-_DELTA_RANGE_TOL``, above
@@ -743,11 +915,9 @@ def _raise_delta_out_of_range(problem: Problem, delta: Array, grid_size: int) ->
         f"in [0, 1]. The estimate left that range for {detail}. This is a "
         "failed computation, not a result. The cause is a conditioning "
         "class the output grid cannot resolve: a class that is a point "
-        "mass, or one much narrower than the grid step. Two knobs fix it. "
-        f"Raise grid_size (currently {grid_size}) so the grid resolves the "
-        "narrow class. Or raise degenerate_bandwidth, which widens the "
-        "kernel given to such a class. The value is not clipped, because a "
-        "clipped value would look plausible and still be wrong."
+        f"mass, or one much narrower than the grid step. {advice()} The "
+        "value is not clipped, because a clipped value would look plausible "
+        "and still be wrong."
     )
 
 
@@ -791,74 +961,39 @@ def _warn_conf_out_of_range(problem: Problem, delta_conf: Array) -> None:
     )
 
 
-def _resolve_degenerate_bandwidth(degenerate_bandwidth: float | Literal["auto"]) -> float | None:
-    """Validate ``degenerate_bandwidth`` and return the floor fraction.
+def _resolve_sentinel_float(value: float | str, name: str, sentinel: str) -> float | None:
+    """Validate a "sentinel string, or positive float" argument.
+
+    Both bandwidth arguments follow the same ladder: one named string
+    selects a rule, and any other value must be a positive real number that
+    is used directly. This is that ladder, written once.
 
     Args:
-        degenerate_bandwidth: ``"auto"`` for the grid-aware default floor,
-            or a positive fraction of the full-sample bandwidth.
+        value: The value the caller passed.
+        name: Argument name, used in the error message.
+        sentinel: The one string the argument accepts, such as
+            ``"silverman"`` or ``"auto"``.
 
     Returns:
-        ``None`` for the default floor, otherwise the float fraction.
+        ``None`` when ``value`` is the sentinel string, otherwise
+        ``float(value)``.
 
     Raises:
-        ValueError: If the value is not ``"auto"`` or a positive real
-            number (booleans are rejected).
+        ValueError: If ``value`` is neither the sentinel nor a positive
+            real number. Booleans are rejected: ``bool`` is an ``int``
+            subclass but is never a meaningful factor.
     """
-    if isinstance(degenerate_bandwidth, str):
-        if degenerate_bandwidth == "auto":
+    message = f"{name} must be {sentinel!r} or a positive float, got {value!r}"
+    if isinstance(value, str):
+        if value == sentinel:
             return None
-        raise ValueError(
-            "degenerate_bandwidth must be 'auto' or a positive float, "
-            f"got {degenerate_bandwidth!r}"
-        )
-    if isinstance(degenerate_bandwidth, bool):
-        raise ValueError(
-            "degenerate_bandwidth must be 'auto' or a positive float, "
-            f"got {degenerate_bandwidth!r}"
-        )
+        raise ValueError(message)
+    if isinstance(value, bool):
+        raise ValueError(message)
     try:
-        fraction = float(degenerate_bandwidth)
+        factor = float(value)
     except (TypeError, ValueError):
-        raise ValueError(
-            "degenerate_bandwidth must be 'auto' or a positive float, "
-            f"got {degenerate_bandwidth!r}"
-        ) from None
-    if not fraction > 0:
-        raise ValueError(
-            "degenerate_bandwidth must be 'auto' or a positive float, "
-            f"got {degenerate_bandwidth!r}"
-        )
-    return fraction
-
-
-def _resolve_bandwidth(bandwidth: float | Literal["silverman"]) -> float | None:
-    """Validate the ``bandwidth`` argument and return the KDE factor.
-
-    Args:
-        bandwidth: ``"silverman"`` for the per-class Silverman rule, or a
-            positive real factor.
-
-    Returns:
-        ``None`` for the Silverman rule, otherwise the float factor.
-
-    Raises:
-        ValueError: If ``bandwidth`` is not ``"silverman"`` or a positive
-            real number (booleans are rejected).
-    """
-    if isinstance(bandwidth, str):
-        if bandwidth == "silverman":
-            return None
-        raise ValueError(f"bandwidth must be 'silverman' or a positive float, got {bandwidth!r}")
-    # bool is an int subclass but is never a meaningful bandwidth factor.
-    if isinstance(bandwidth, bool):
-        raise ValueError(f"bandwidth must be 'silverman' or a positive float, got {bandwidth!r}")
-    try:
-        factor = float(bandwidth)
-    except (TypeError, ValueError):
-        raise ValueError(
-            f"bandwidth must be 'silverman' or a positive float, got {bandwidth!r}"
-        ) from None
+        raise ValueError(message) from None
     if not factor > 0:
-        raise ValueError(f"bandwidth must be 'silverman' or a positive float, got {bandwidth!r}")
+        raise ValueError(message)
     return factor

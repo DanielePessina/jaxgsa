@@ -39,13 +39,28 @@ from jaxgsa import dgsm
 
 ## Key difference from other methods
 
-DGSM requires an unbatched function with signature `(D,) -> ()` or
-`(D,) -> (K,)`. This is different from the batched `evaluate(X)` functions
-used by Sobol, HDMR, and eFAST which accept `(N, D)` input arrays.
+DGSM requires an unbatched function with signature `(D,) -> ()`,
+`(D,) -> (K,)`, or `(D,) -> (T, K)`. This is different from the batched
+`evaluate(X)` functions used by Sobol, HDMR, and eFAST which accept `(N, D)`
+input arrays.
 
 The unbatched signature is needed because `jax.jacrev` differentiates a
 single-input function. Internally, `jaxgsa.dgsm.analyze` vectorizes the autodiff
 over all N samples.
+
+If you pass a batch callable, `analyze` rejects it up front. It traces `fn` on
+one row with `jax.eval_shape`, so the check never runs the model and costs an
+expensive model nothing. The error names the expected signature and shows the
+wrapper:
+
+```python
+result = jaxgsa.dgsm.analyze(problem, lambda x: model(x[None, :])[0], X)
+```
+
+This used to fail deep inside `jacrev`, with an `IndexError` that named
+nothing you could act on. The wrapper advice appears only when the failure
+looks like a batch callable. Any other trace failure reports its own error and
+the expected signature, with no guess at the cause.
 
 ## Scalar example (Ishigami)
 
@@ -151,14 +166,20 @@ For scalar output, the dataset has dimension `(param,)` only.
 |---|---|---|
 | `(D,) -> ()` | `(D,)` | `()` |
 | `(D,) -> (K,)` | `(K, D)` | `(K,)` |
+| `(D,) -> (T, K)` | `(T, K, D)` | `(T, K)` |
 
-D is always the last axis of the index arrays.
+D is always the last axis of the index arrays. T is the number of time steps.
+Two output axes are the most `fn` may return. An output with more axes is
+what a batch callable produces, so `analyze` rejects it.
 
 ## Practical caveats
 
 - DGSM requires a JAX-differentiable function. If your model is not
-  differentiable in JAX, you can pre-compute the Jacobian externally and pass
-  `Y` and `dfdx` arrays directly to `jaxgsa.dgsm.analyze()`.
+  differentiable in JAX, compute the Jacobian externally and pass `Y` and
+  `dfdx` to `jaxgsa.dgsm.analyze()` instead. This is an alternative to
+  `(fn, X)`, not an addition to it. Use exactly one group. Passing arguments
+  from both, or filling only half of one, raises a `ValueError` that names
+  the argument. Nothing is dropped in silence.
 - The Poincare upper bound can be loose for strongly nonlinear or non-monotone
   responses. The bound becomes tight when the model is nearly monotone in a
   given input.
