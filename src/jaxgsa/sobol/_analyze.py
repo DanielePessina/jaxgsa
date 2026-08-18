@@ -6,6 +6,11 @@ and their cross-matrices AB (plus BA for second order). It then computes
 first-order (S1), total-order (ST), and optionally second-order (S2) Sobol
 indices.
 
+The estimator maths lives in exactly one place, ``_indices_from_expanded``.
+``analyze`` runs the host-side diagnostics and wraps that core in a result
+object; ``indices`` calls the same core with nothing around it, so it stays
+traceable by ``jit``, ``vmap`` and ``jacrev``.
+
 Array shape conventions used throughout:
     N: number of base Sobol samples (base_n after cleaning)
     D: number of input parameters
@@ -127,18 +132,38 @@ def _normalize_s2_matrix(S2: Array) -> Array:
     return jnp.where(diag_mask, jnp.nan, mirrored)
 
 
-def _analyze_no_bootstrap(
-    sampling_result: SobolSamples, Y: Array, *, slice_chunk_size: int, invalid: InvalidReport
-) -> SobolResult:
-    """Compute Sobol indices without a bootstrap, picking the faster kernel.
+def _indices_from_expanded(
+    Y: Array, D: int, calc_second_order: bool, slice_chunk_size: int
+) -> tuple[Array, Array, Array | None]:
+    """Compute Sobol indices from expanded-layout outputs, picking the faster kernel.
 
-    For a scalar output (T*K=1), call a direct fused kernel that computes the
-    variance once. For a multi-output analysis, vmap the fused kernel over the
-    T*K batches.
+    This is the single implementation of the estimator maths. Both the public
+    :func:`indices` and the ``analyze`` no-bootstrap path go through it, so
+    the two can never drift apart.
+
+    It is deliberately free of policy: no diagnostics, no host-side reads of
+    array values, no result object. Every branch here is on a shape or a
+    Python flag, all of which stay concrete under tracing, so the function is
+    ``jit``-, ``vmap``- and ``jacrev``-able.
+
+    For a scalar output (T*K=1) it calls a direct fused kernel that computes
+    the variance once. For a multi-output analysis it vmaps the fused kernel
+    over the T*K batches.
+
+    Args:
+        Y: Model outputs in the expanded Saltelli layout, shape
+            ``(base_n * step, ...)``.
+        D: Number of input parameters.
+        calc_second_order: Whether the layout includes the BA blocks.
+        slice_chunk_size: Number of (T, K) output slices per vmap batch.
+
+    Returns:
+        ``(S1, ST, S2)``, with ``S2`` ``None`` when second order is off. The
+        output axes match ``Y``'s trailing axes, as ``analyze`` documents.
+
+    Raises:
+        ValueError: If ``slice_chunk_size`` is below 1.
     """
-    D = sampling_result.n_params
-    calc_second_order = sampling_result.calc_second_order
-
     # Detect scalar output before _prepare_Y adds singleton T and K dims.
     # The scalar path skips vmap entirely, saving tracing and dispatch cost.
     is_scalar = Y.ndim == 1
@@ -171,13 +196,7 @@ def _analyze_no_bootstrap(
             S1_out, ST_out = kernel(a, ab, b)
             S2_out = None
 
-        return SobolResult(
-            S1=S1_out,
-            ST=ST_out,
-            S2=S2_out,
-            problem=sampling_result.problem,
-            invalid=invalid,
-        )
+        return S1_out, ST_out, S2_out
 
     # Batched path (T*K > 1): flatten (T, K) into a single batch dimension
     # so vmap processes all output slices in one vectorised call.
@@ -234,6 +253,19 @@ def _analyze_no_bootstrap(
     ST_out = _squeeze_output_axes(ST_out, squeeze_time, squeeze_output)
     if S2_out is not None:
         S2_out = _squeeze_output_axes(S2_out, squeeze_time, squeeze_output, n_trailing=2)
+    return S1_out, ST_out, S2_out
+
+
+def _analyze_no_bootstrap(
+    sampling_result: SobolSamples, Y: Array, *, slice_chunk_size: int, invalid: InvalidReport
+) -> SobolResult:
+    """Wrap the estimator core in a ``SobolResult``, without a bootstrap."""
+    S1_out, ST_out, S2_out = _indices_from_expanded(
+        Y,
+        sampling_result.n_params,
+        sampling_result.calc_second_order,
+        slice_chunk_size,
+    )
     return SobolResult(
         S1=S1_out,
         ST=ST_out,
@@ -241,6 +273,65 @@ def _analyze_no_bootstrap(
         problem=sampling_result.problem,
         invalid=invalid,
     )
+
+
+def indices(
+    sampling_result: SobolSamples, Y: Array, *, slice_chunk_size: int = 2048
+) -> tuple[Array, ...]:
+    """Compute Sobol indices as plain arrays, with no diagnostics.
+
+    This is the transformable core of :func:`analyze`. It runs the same
+    estimators on the same data and returns the same numbers, but it does
+    nothing else: no non-finite check, no zero-variance warning, no
+    :class:`jaxgsa.sobol.SobolResult`, and no read of any array value on the
+    host. So it composes with ``jax.jit``, ``jax.vmap``, ``jax.grad`` and
+    ``jax.jacrev``, which :func:`analyze` cannot, because a policy decision
+    needs a concrete value and a tracer has none.
+
+    Pair it with :meth:`jaxgsa.sobol.SobolSamples.transform` to differentiate
+    an index with respect to the input distribution parameters::
+
+        def s1(theta):
+            Y = model(sampling_result.transform(theta))
+            return jaxgsa.sobol.indices(sampling_result, Y)[0]
+
+        dS1_dtheta = jax.jacrev(s1)(theta)
+
+    Use :func:`analyze` for ordinary analysis. Nothing here checks the outputs,
+    so a single NaN silently turns every index into NaN.
+
+    Tier T4 (behavioural contract): the returned arrays must equal the
+    corresponding fields of ``analyze``'s result on clean outputs, and the
+    function must survive ``jit``, ``vmap`` and ``jit(jacrev(...))``. Checked
+    in ``tests/test_sobol_gradients.py``.
+
+    Args:
+        sampling_result: The design from :func:`jaxgsa.sobol.sample`, used
+            only for its expansion map and its Saltelli layout flags.
+        Y: Model outputs evaluated at each unique row of
+            ``sampling_result.samples``, in the same row order. Shapes are
+            those :func:`analyze` accepts: ``(n_runs,)``, ``(n_runs, K)`` or
+            ``(n_runs, T, K)``.
+        slice_chunk_size: Number of (T, K) output slices per vmap batch. Lower
+            it if you hit device out-of-memory errors.
+
+    Returns:
+        ``(S1, ST)``, or ``(S1, ST, S2)`` when the design was drawn with
+        ``calc_second_order=True``. The shapes are those ``analyze`` reports.
+
+    Raises:
+        ValueError: If ``Y``'s first axis does not match
+            ``sampling_result.n_runs``, or ``slice_chunk_size`` is below 1.
+    """
+    S1, ST, S2 = _indices_from_expanded(
+        sampling_result.expand_outputs(Y),
+        sampling_result.n_params,
+        sampling_result.calc_second_order,
+        slice_chunk_size,
+    )
+    if S2 is None:
+        return S1, ST
+    return S1, ST, S2
 
 
 def _analyze_bootstrap(
@@ -411,6 +502,11 @@ def analyze(
     ordering internally and checks it for non-finite values under the
     ``on_invalid`` policy. It then dispatches on ``num_resamples``: to the
     fast no-bootstrap path, or to the bootstrap confidence-interval path.
+
+    Those checks read array values on the host, so ``analyze`` cannot be
+    traced by ``jax.jit`` or differentiated by ``jax.grad``. Use
+    :func:`jaxgsa.sobol.indices` when you need that; it runs the same
+    estimators and skips every check.
 
     Args:
         sampling_result: Result from ``jaxgsa.sobol.sample()`` with the unique

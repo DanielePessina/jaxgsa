@@ -16,15 +16,25 @@ Example::
     sr = sobol.sample(problem, n_samples=4096, seed=42)
     Y = model(sr.samples)
     result = sobol.analyze(sr, Y)
+
+There is a second, transformable route through the same estimators.
+``SobolSamples.transform(theta)`` rebuilds the design from its unit-cube
+points for any input distribution parameters, and ``sobol.indices`` returns
+the indices as plain arrays with no diagnostics attached. Both are pure JAX,
+so composing them with a JAX model gives a chain that ``jax.grad`` can
+differentiate: how an index moves when an input's range or variance moves.
+``analyze`` cannot do that, because deciding what to do about a non-finite
+output needs a concrete value and a tracer has none. Neither route accepts a
+categorical problem for differentiation: a step CDF has no useful derivative.
 """
 
 from jaxgsa._core.invalid import InvalidUnit
 from jaxgsa._core.registry import MethodSpec, register
-from jaxgsa.sobol._analyze import analyze
+from jaxgsa.sobol._analyze import analyze, indices
 from jaxgsa.sobol._result import SobolResult
 from jaxgsa.sobol._sampling import SobolSamples, sample
 
-__all__ = ["SobolResult", "SobolSamples", "analyze", "sample"]
+__all__ = ["SobolResult", "SobolSamples", "analyze", "indices", "sample"]
 
 SPEC = register(
     MethodSpec(

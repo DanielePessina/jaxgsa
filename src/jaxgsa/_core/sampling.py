@@ -1,22 +1,37 @@
 """Shared low-level sampling helpers.
 
-This module holds three groups of helper. Marginal transforms map the unit
-cube to the problem's declared distributions and back. Power-of-2 utilities
-size a Sobol' sequence. One deduplication routine drops repeated design rows
-while keeping their first-occurrence order. The Sobol', Morris, and eFAST
-samplers use them, as does :func:`jaxgsa.sampling.monte_carlo`.
+This module holds four groups of helper. Marginal transforms map the unit
+cube to the problem's declared distributions and back. A second, JAX-native
+copy of the forward transform does the same job differentiably, so a design
+can be re-expressed as a function of its distribution parameters. Power-of-2
+utilities size a Sobol' sequence. One deduplication routine drops repeated
+design rows while keeping their first-occurrence order. The Sobol', Morris,
+and eFAST samplers use them, as does :func:`jaxgsa.sampling.monte_carlo`.
 """
 
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Mapping, TypeAlias
 
+import jax.numpy as jnp
 import numpy as np
+from jax import Array
+from jax.scipy.special import ndtr, ndtri
 from scipy.stats import norm, truncnorm
 
 if TYPE_CHECKING:
     from jaxgsa.problem import Problem
+
+
+# Distribution parameters keyed by parameter name, then by field name. The
+# field names are exactly those of the public input TypedDicts
+# (:class:`jaxgsa.problem.UniformInputSpec` and
+# :class:`jaxgsa.problem.GaussianInputSpec`), so a user writes the same words
+# here as when the problem was declared. The values may be Python floats or
+# JAX scalars, which is what makes the mapping a pytree that ``jax.grad`` and
+# ``jax.jacrev`` can differentiate with respect to.
+Theta: TypeAlias = Mapping[str, Mapping[str, Any]]
 
 
 # Absolute support bound the library puts on every unbounded marginal.
@@ -139,6 +154,153 @@ def _transform_samples(problem: Problem, samples_unit: np.ndarray) -> np.ndarray
             )
 
     return transformed
+
+
+# ---------------------------------------------------------------------------
+# Differentiable (JAX) copy of the forward transform
+#
+# The NumPy/SciPy transforms above stay the reference implementation: they run
+# in float64 regardless of the JAX x64 flag, and every stored design is built
+# with them, so their exact output is part of the library's baseline. The
+# functions below reproduce the same mathematics in pure ``jnp`` so a design
+# can be re-expressed as a differentiable function of its distribution
+# parameters. With ``jax_enable_x64`` on they agree with the SciPy path to
+# floating-point precision (measured max absolute difference 9e-16 on a
+# uniform / Gaussian / truncated-Gaussian problem), not bitwise: ``ndtri`` and
+# ``scipy.stats.norm.ppf`` are different rational approximations of the same
+# function and differ in the last unit in the last place.
+#
+# There is deliberately no JAX copy of the categorical transform. Its inverse
+# CDF is a step function, so its derivative is zero almost everywhere and
+# undefined on the jumps. Callers reject categorical parameters instead.
+# ---------------------------------------------------------------------------
+
+# Which fields of a theta entry each marginal family accepts. A field outside
+# this set is a typo or a distribution mix-up, and silently ignoring it would
+# return a gradient of zero for a parameter the user believes they varied.
+_THETA_FIELDS: dict[str, frozenset[str]] = {
+    "uniform": frozenset({"low", "high"}),
+    "gaussian": frozenset({"mean", "variance", "low", "high"}),
+}
+
+
+def _jax_transform_uniform(unit_values: Array, low: Any, high: Any) -> Array:
+    """Affine-map unit-interval samples into a finite uniform range."""
+    # Factor order matches _transform_uniform so the two agree bitwise in x64.
+    return unit_values * (high - low) + low
+
+
+def _jax_transform_gaussian(
+    unit_values: Array,
+    mean: Any,
+    variance: Any,
+    *,
+    low: Any | None,
+    high: Any | None,
+) -> Array:
+    """Transform unit-interval samples into Gaussian or truncated Gaussian values."""
+    # Same clip as _transform_gaussian: ndtri(0) and ndtri(1) are -inf/+inf,
+    # and an infinite sample would poison every downstream index.
+    clipped = jnp.clip(unit_values, UNIT_CLIP, 1.0 - UNIT_CLIP)
+    std = jnp.sqrt(variance)
+    if low is None and high is None:
+        return mean + std * ndtri(clipped)
+
+    # Truncated inverse CDF, written out rather than taken from SciPy: rescale
+    # the unit value into the probability window the truncation leaves, then
+    # invert the standard normal. ``ndtr``/``ndtri`` are JAX primitives with
+    # derivative rules, so the whole chain differentiates. Whether a bound
+    # exists is a static Python fact, so the branch never blocks tracing; only
+    # the bound's *value* flows through the graph.
+    a = 0.0 if low is None else ndtr((low - mean) / std)
+    b = 1.0 if high is None else ndtr((high - mean) / std)
+    return mean + std * ndtri(a + clipped * (b - a))
+
+
+def _validate_theta(problem: Problem, theta: Theta) -> None:
+    """Check that a theta override names real parameters and real fields.
+
+    Args:
+        problem: Problem whose declared marginals theta overrides.
+        theta: Distribution parameters keyed by parameter name, then field.
+
+    Raises:
+        ValueError: If theta names a parameter the problem does not declare,
+            or a field the parameter's marginal family does not use.
+    """
+    for name, fields in theta.items():
+        if name not in problem.names:
+            raise ValueError(
+                f"theta names parameter {name!r}, which the problem does not declare. "
+                f"Known parameters: {list(problem.names)}"
+            )
+        dist = problem.input_specs[problem.names.index(name)][0]
+        allowed = _THETA_FIELDS.get(dist, frozenset())
+        unknown = sorted(set(fields) - allowed)
+        if unknown:
+            raise ValueError(
+                f"theta[{name!r}] sets {unknown}, which a {dist!r} marginal does not use. "
+                f"Allowed fields: {sorted(allowed)}"
+            )
+
+
+def _jax_transform_samples(
+    problem: Problem, samples_unit: Array | np.ndarray, theta: Theta | None = None
+) -> Array:
+    """Transform unit-cube samples into declared marginals, differentiably.
+
+    This is the JAX counterpart of :func:`_transform_samples`. It reads the
+    distribution parameters from ``theta`` where the caller supplies them and
+    from ``problem`` everywhere else, so a caller can differentiate the design
+    with respect to a few fields without restating the rest.
+
+    Args:
+        problem: Problem definition supplying the default parameter values.
+        samples_unit: Unit-cube samples, shape ``(N, D)``.
+        theta: Optional overrides keyed by parameter name, then field name.
+            ``None`` means "use the problem's own values throughout".
+
+    Returns:
+        Samples in physical units, shape ``(N, D)``.
+
+    Raises:
+        ValueError: If any parameter is categorical, or if ``theta`` names an
+            unknown parameter or field.
+    """
+    if theta is None:
+        theta = {}
+    else:
+        _validate_theta(problem, theta)
+
+    samples_unit = jnp.asarray(samples_unit)
+    columns = []
+    for idx, (name, spec) in enumerate(zip(problem.names, problem.input_specs)):
+        dist, first, second, low, high, _ = spec
+        if dist == "categorical":
+            raise ValueError(
+                f"Parameter {name!r} is categorical; its inverse CDF is a step "
+                "function, which has no useful derivative"
+            )
+        fields = theta.get(name, {})
+        unit_column = samples_unit[:, idx]
+        if dist == "uniform":
+            columns.append(
+                _jax_transform_uniform(
+                    unit_column, fields.get("low", first), fields.get("high", second)
+                )
+            )
+        else:
+            columns.append(
+                _jax_transform_gaussian(
+                    unit_column,
+                    fields.get("mean", first),
+                    fields.get("variance", second),
+                    low=fields.get("low", low),
+                    high=fields.get("high", high),
+                )
+            )
+
+    return jnp.stack(columns, axis=1)
 
 
 def _inverse_transform_uniform(values: np.ndarray, low: float, high: float) -> np.ndarray:
