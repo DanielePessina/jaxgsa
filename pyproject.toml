@@ -68,6 +68,14 @@ dev = [
     "marimo>=0.23.4",
 ]
 
+[tool.ty.environment]
+# `scripts/` is not a package and is not installed. The scripts import each
+# other by plain module name, the way they do when run directly, and the
+# baseline tests reach them the same way after a sys.path insert. Naming the
+# directory here lets ty resolve those imports statically instead of needing a
+# suppression at each import site.
+extra-paths = ["scripts"]
+
 [tool.pytest.ini_options]
 # Surface deprecations early: promote every DeprecationWarning/FutureWarning to
 # a test failure so upcoming API removals (JAX especially) are caught in CI

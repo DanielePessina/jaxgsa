@@ -40,3 +40,32 @@ jobs:
 
       - name: Run tests
         run: uv run pytest -q
+
+  # The fixed-seed numerical baseline. Separate from `test` so a ~3 minute
+  # numerical dump stays out of local `pytest -q`, and so a moved number
+  # reports as its own failure rather than one more red test.
+  #
+  # PLAN-0.10.md: "Every pre-existing entry must stay bit-identical. Any
+  # movement is a defect until it is proved otherwise." Until this job
+  # existed that rule was enforced by whoever remembered to run the script,
+  # which is how the stored file stayed pinned at 0.8.0.
+  #
+  # One Python version is enough: the check is about this code changing, not
+  # about interpreter differences, and the dump is not bit-identical across
+  # interpreter versions in any case.
+  baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install project and dev dependencies
+        run: uv sync --extra dev
+
+      - name: Numerical baseline
+        run: uv run python scripts/baseline_check.py --quiet
