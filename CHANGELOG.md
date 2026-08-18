@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased (0.9.0)
+
+Version 0.9.0 is a breaking release. It carries fixes only, with no new method.
+`PLAN-V1.0.md` records the whole plan and the order of the work.
+
+### Changed
+
+- **NumPy is now a declared dependency**, at `numpy>=2`. NumPy is imported
+  directly by about twenty modules but reached users only through JAX and
+  SciPy, both of which allow NumPy 1.x. An install from PyPI could therefore
+  get a NumPy the package does not support.
+- **The SciPy floor rises to `scipy>=1.15`**, from `>=1.10`. This makes
+  `scipy.stats.chatterjeexi` always available as a verification oracle.
+
+### Removed
+
+- `_PCEFit.coeffs_flat`, a private field that was written and never read. It
+  kept a large array alive inside the module whose purpose is bounding memory.
+- The private `validate_correlation` helper. It had no production caller and
+  stayed alive only because tests used it. `canonicalize_correlation` runs the
+  same code, and its tests now call that instead.
+- The `version` and `date-released` fields in `CITATION.cff`. Nothing updated
+  them and nothing checked them, so they had drifted three releases behind.
+  Both are optional, and GitHub and Zenodo take the version from the release
+  tag when they are absent.
+
 ## 0.8.0
 
 ### Added

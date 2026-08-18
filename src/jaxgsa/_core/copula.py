@@ -231,7 +231,7 @@ def correlation_from_covariance(cov: npt.ArrayLike) -> np.ndarray:
 
     Returns:
         ``(D, D)`` correlation matrix with the diagonal pinned to exactly 1
-        (so it survives ``validate_correlation``'s unit-diagonal check).
+        (so it survives ``canonicalize_correlation``'s unit-diagonal check).
 
     Raises:
         ValueError: If ``cov`` is not square, not symmetric, or its diagonal
@@ -346,34 +346,6 @@ def fit_gaussian_copula(problem: Problem, X: np.ndarray) -> np.ndarray:
     # keeps the matrix block-diagonal (the repair preserves the blocks up to
     # float noise); zeroing again after it makes the zeros exact.
     return _force_categorical_identity(_project_to_correlation(latent), cat_dims)
-
-
-def validate_correlation(
-    R: np.ndarray,
-    n_params: int,
-    *,
-    policy: RepairPolicy = "fitted",
-) -> np.ndarray:
-    """Validate a user-supplied correlation matrix and make it usable.
-
-    Args:
-        R: ``(D, D)`` candidate correlation matrix.
-        n_params: Expected ``D``.
-        policy: Repair policy, see :data:`RepairPolicy`. Surfaces that accept
-            user-declared matrices pass ``"declared"``; internal fitting paths
-            keep the default.
-
-    Returns:
-        A symmetric, positive-definite copy with unit diagonal.
-
-    Raises:
-        ValueError: If the shape is wrong, the matrix is not symmetric, the
-            diagonal is not unit, any entry lies outside ``[-1, 1]``, or the
-            repair of a declared matrix is material.
-    """
-    R = np.asarray(R, dtype=np.float64)
-    _validate_structure(R, n_params)
-    return _project_to_correlation(R, policy=policy)
 
 
 def _validate_structure(R: np.ndarray, n_params: int) -> None:

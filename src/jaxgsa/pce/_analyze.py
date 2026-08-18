@@ -160,7 +160,6 @@ class _PCEFit(NamedTuple):
     """
 
     coefficients: Array  # (T, K, n_terms), terms-last
-    coeffs_flat: Array  # (n_terms, T*K)
     multi_index: np.ndarray  # (n_terms, D)
     order: int  # effective order after _auto_order
     loo_flat: Array  # (T*K,) per-slice LOO RMSE
@@ -342,7 +341,6 @@ def _fit_pce_core(
 
     return _PCEFit(
         coefficients=coeffs,
-        coeffs_flat=coeffs_flat,
         multi_index=mi,
         order=effective_order,
         loo_flat=loo_flat,

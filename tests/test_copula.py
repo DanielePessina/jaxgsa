@@ -20,7 +20,6 @@ from jaxgsa._core.copula import (
     is_independent,
     latent_normal_sample,
     latent_to_physical,
-    validate_correlation,
 )
 from jaxgsa.problem import GaussianInputSpec, Problem
 
@@ -61,13 +60,13 @@ def _uniform_problem(D: int = 2) -> Problem:
 
 
 # ---------------------------------------------------------------------------
-# validate_correlation / repair warning
+# canonicalize_correlation / repair warning
 # ---------------------------------------------------------------------------
 
 
-def test_validate_correlation_accepts_valid_matrix_unchanged():
+def test_canonicalize_correlation_accepts_valid_matrix_unchanged():
     R = np.array([[1.0, 0.5], [0.5, 1.0]])
-    np.testing.assert_allclose(validate_correlation(R, 2), R, atol=1e-15)
+    np.testing.assert_allclose(canonicalize_correlation(R, 2), R, atol=1e-15)
 
 
 @pytest.mark.parametrize(
@@ -79,16 +78,16 @@ def test_validate_correlation_accepts_valid_matrix_unchanged():
         (np.array([[1.0, 1.5], [1.5, 1.0]]), r"lie in \[-1, 1\]"),
     ],
 )
-def test_validate_correlation_rejects_structurally_invalid(R, match):
+def test_canonicalize_correlation_rejects_structurally_invalid(R, match):
     with pytest.raises(ValueError, match=match):
-        validate_correlation(R, 2)
+        canonicalize_correlation(R, 2)
 
 
 def test_repair_warning_fires_for_mildly_indefinite_declared_matrix():
     # UserWarning is not promoted to an error by the pytest config, so the
     # firing case must be asserted explicitly with pytest.warns.
     with pytest.warns(UserWarning, match="not positive definite"):
-        repaired = validate_correlation(_MILD_INDEFINITE_R, 3, policy="declared")
+        repaired = canonicalize_correlation(_MILD_INDEFINITE_R, 3, policy="declared")
     eigenvalues = np.linalg.eigvalsh(repaired)
     assert eigenvalues.min() > 0
     np.testing.assert_allclose(np.diag(repaired), 1.0, atol=1e-12)
@@ -96,7 +95,7 @@ def test_repair_warning_fires_for_mildly_indefinite_declared_matrix():
 
 def test_repair_warning_reports_min_eigenvalue_and_max_change():
     with pytest.warns(UserWarning) as record:
-        repaired = validate_correlation(_MILD_INDEFINITE_R, 3, policy="declared")
+        repaired = canonicalize_correlation(_MILD_INDEFINITE_R, 3, policy="declared")
     message = str(record[0].message)
     min_eig = np.linalg.eigvalsh(_MILD_INDEFINITE_R).min()
     change = np.abs(repaired - _MILD_INDEFINITE_R).max()
@@ -109,18 +108,18 @@ def test_repair_of_declared_matrix_is_silent_at_noise_level():
     """A repair that only lifts the eigenvalue floor says nothing."""
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        repaired = validate_correlation(_NOISE_R, 3, policy="declared")
+        repaired = canonicalize_correlation(_NOISE_R, 3, policy="declared")
     assert 0.0 < np.abs(repaired - _NOISE_R).max() < _REPAIR_NOISE
 
 
 def test_repair_of_declared_matrix_raises_when_material():
     with pytest.raises(ValueError, match="too far to accept"):
-        validate_correlation(_INDEFINITE_R, 3, policy="declared")
+        canonicalize_correlation(_INDEFINITE_R, 3, policy="declared")
 
 
 def test_material_repair_error_names_the_way_out():
     with pytest.raises(ValueError) as excinfo:
-        validate_correlation(_INDEFINITE_R, 3, policy="declared")
+        canonicalize_correlation(_INDEFINITE_R, 3, policy="declared")
     message = str(excinfo.value)
     min_eig = np.linalg.eigvalsh(_INDEFINITE_R).min()
     assert f"{min_eig:.3e}" in message
@@ -133,18 +132,18 @@ def test_repair_stays_silent_for_valid_matrix():
     R = np.array([[1.0, 0.3], [0.3, 1.0]])
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        validate_correlation(R, 2, policy="declared")
+        canonicalize_correlation(R, 2, policy="declared")
 
 
 def test_fitted_repair_stays_silent_below_the_material_threshold():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        validate_correlation(_MILD_INDEFINITE_R, 3)  # policy defaults to "fitted"
+        canonicalize_correlation(_MILD_INDEFINITE_R, 3)  # policy defaults to "fitted"
 
 
 def test_fitted_repair_warns_but_never_raises_when_material():
     with pytest.warns(UserWarning, match="the fitted correlation matrix"):
-        repaired = validate_correlation(_INDEFINITE_R, 3)
+        repaired = canonicalize_correlation(_INDEFINITE_R, 3)
     assert np.linalg.eigvalsh(repaired).min() > 0
 
 
@@ -321,8 +320,8 @@ def test_correlation_from_covariance_pins_unit_diagonal_exactly():
     cov = np.array([[4.0, 1.0], [1.0, 9.0]])
     R = correlation_from_covariance(cov)
     assert (np.diag(R) == 1.0).all()
-    # Exact diagonal means the result survives validate_correlation unchanged.
-    np.testing.assert_allclose(validate_correlation(R, 2), R, atol=1e-15)
+    # Exact diagonal means the result survives canonicalize_correlation unchanged.
+    np.testing.assert_allclose(canonicalize_correlation(R, 2), R, atol=1e-15)
 
 
 @pytest.mark.parametrize(

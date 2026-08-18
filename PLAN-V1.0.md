@@ -168,7 +168,7 @@ Verified available on this machine, 2026-08-18:
 
 | Oracle | Tier | Status |
 | --- | --- | --- |
-| `scipy.stats.chatterjeexi` | T2 | scipy 1.18.0 present. Note the project pins `scipy>=1.10`; the function needs 1.15. |
+| `scipy.stats.chatterjeexi` | T2 | scipy 1.18.0 present. The project pin was raised to `scipy>=1.15` in tranche 0, so the function is always available. |
 | SALib `analyze.rsa` | T2 | 1.5.2, already a dev extra. |
 | OpenTURNS | T2 | 1.27, wheel installs clean. All four Sobol estimators, `RankSobolSensitivityAlgorithm` and `HSICEstimatorGlobalSensitivity` are in the main namespace. |
 | POT `ot.emd` | T2 | 0.9.7, already a dev extra. |
@@ -177,7 +177,7 @@ Verified available on this machine, 2026-08-18:
 | R `sensitivity` | T3 | 1.31.0 installed. `sobolrank`, `sobolshap_knn`, `shapleyPermEx`, `PoincareOptimal` available. |
 | R `gsaot` | T3 | 1.1.1 installed. |
 | SAFEpython | T3 | 0.2.0rc1 resolves. GPL-3, so subprocess only, and do not read its source while implementing. |
-| R `sensobol` | T3 | **Not installed.** One `install.packages` away; needed for BCa intervals and the dummy-parameter floor. |
+| R `sensobol` | T3 | 1.2.0, installed 2026-08-18. Needed for BCa intervals and the dummy-parameter floor. |
 | ATHENA | T2 | **Dead end.** Its dependency chain cannot be resolved on any supported Python. Active subspaces must use its T0 oracles instead, which are strong. |
 
 Because oracles stay out of the package, `pyproject.toml` gains no `oracles`
@@ -365,14 +365,22 @@ story with one benchmark.
 
 ## 9. Open questions
 
-These need an answer before the tranche that depends on them. None blocks 0.9.
+Three were answered on 2026-08-18 and are recorded here as settled. The rest
+need an answer before the tranche that depends on them. None blocks 0.9.
+
+### Settled
+
+| # | Question | Answer |
+| --- | --- | --- |
+| Q1 | D9: which of the three routes? | **Route (a)**: compute the full-sample bandwidth and grid step on the host, before the jitted kernel, and raise there. It costs one `std` and one `linspace` and keeps the "fail up front" principle. |
+| Q2 | Does `scipy>=1.10` rise, or does the Chatterjee oracle test skip? | **Raise the pin.** `scipy>=1.15` is declared as of tranche 0, so `scipy.stats.chatterjeexi` is always available and needs no skip. |
+| Q4 | Install R `sensobol` locally? | **Yes.** `sensobol` 1.2.0 installed 2026-08-18 alongside `sensitivity` 1.31.0 and `gsaot` 1.1.1. All three T3 oracles are now available on the development machine. |
+
+### Open
 
 | # | Question | Needed by |
 | --- | --- | --- |
-| Q1 | D9: confirm route (a) — a host-side pre-check — against routes (b) and (c). | 0.9 batch 4 |
-| Q2 | Does `scipy>=1.10` rise to `>=1.15`, or does the Chatterjee oracle test skip on older scipy? | 0.10 item 1 |
 | Q3 | Regional sensitivity analysis: SAFEpython threshold form, or SALib binned form? They are not interchangeable and the choice fixes the oracle. | 0.10 item 6 |
-| Q4 | Install R `sensobol` locally? It is the oracle for BCa intervals and the dummy floor. | 0.10 item 3 |
 | Q5 | Non-Gaussian copulas: Clayton, Frank, Gumbel, t. GlobalSensitivity.jl has them and it is the gap a reviewer notices first. In or out of 1.0? | 1.0 |
 | Q6 | "Pick-freeze": keep the blanket substitution, or allow the term where it is technically correct? A sweep of 13 occurrences is still pending. | 1.0 docs |
 

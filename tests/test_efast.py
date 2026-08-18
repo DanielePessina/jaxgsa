@@ -421,14 +421,18 @@ class TestSobolGAccuracy:
     """Validate eFAST against the Sobol G-function benchmark (8-D)."""
 
     @pytest.fixture(scope="module")
-    def sobol_g_result(self):
-        """eFAST result for Sobol G-function benchmark."""
+    def efast_sobol_g_result(self):
+        """eFAST result for the Sobol G-function benchmark.
+
+        Named to distinguish it from the session fixture `sobol_g_result` in
+        conftest, which holds a Sobol result for the same model.
+        """
         sr = sample(sobol_g.PROBLEM, n_per_curve=4096, M=4, seed=42)
         Y = sobol_g.evaluate(jnp.asarray(sr.samples))
         return analyze(sr, jnp.asarray(Y))
 
-    def test_s1(self, sobol_g_result):
-        S1 = np.asarray(sobol_g_result.S1)
+    def test_s1(self, efast_sobol_g_result):
+        S1 = np.asarray(efast_sobol_g_result.S1)
         analytical = np.asarray(sobol_g.ANALYTICAL_S1)
         for i in range(len(analytical)):
             if analytical[i] > 0.01:
@@ -439,8 +443,8 @@ class TestSobolGAccuracy:
             else:
                 assert abs(S1[i]) < 0.02, f"S1[{i}]={S1[i]:.4f}, expected ~0"
 
-    def test_st(self, sobol_g_result):
-        ST = np.asarray(sobol_g_result.ST)
+    def test_st(self, efast_sobol_g_result):
+        ST = np.asarray(efast_sobol_g_result.ST)
         analytical = np.asarray(sobol_g.ANALYTICAL_ST)
         for i in range(len(analytical)):
             if analytical[i] > 0.01:
@@ -449,9 +453,9 @@ class TestSobolGAccuracy:
                     f"ST[{i}]={ST[i]:.4f}, expected {analytical[i]:.4f}, rel error {rel:.2%}"
                 )
 
-    def test_ranking(self, sobol_g_result):
+    def test_ranking(self, efast_sobol_g_result):
         """First three params should be ordered by importance (a_j = 0, 1, 4.5)."""
-        S1 = np.asarray(sobol_g_result.S1)
+        S1 = np.asarray(efast_sobol_g_result.S1)
         assert S1[0] > S1[1], f"S1[0]={S1[0]:.4f} should be > S1[1]={S1[1]:.4f}"
         assert S1[1] > S1[2], f"S1[1]={S1[1]:.4f} should be > S1[2]={S1[2]:.4f}"
 

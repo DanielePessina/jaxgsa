@@ -297,6 +297,7 @@ source = { editable = "." }
 dependencies = [
     { name = "jax" },
     { name = "jaxlib" },
+    { name = "numpy" },
     { name = "scipy" },
     { name = "xarray" },
 ]
@@ -325,11 +326,12 @@ requires-dist = [
     { name = "jaxlib", specifier = ">=0.6" },
     { name = "marimo", marker = "extra == 'notebook'", specifier = ">=0.23.4" },
     { name = "matplotlib", marker = "extra == 'notebook'", specifier = ">=3.10.8" },
+    { name = "numpy", specifier = ">=2" },
     { name = "pot", marker = "extra == 'dev'", specifier = ">=0.9" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
     { name = "salib", marker = "extra == 'dev'", specifier = ">=1.4" },
-    { name = "scipy", specifier = ">=1.10" },
+    { name = "scipy", specifier = ">=1.15" },
     { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.21" },
     { name = "xarray", specifier = ">=2026.2.0" },
 ]

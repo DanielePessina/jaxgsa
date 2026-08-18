@@ -9,8 +9,6 @@ authors:
   - family-names: Pessina
     given-names: Daniele
     email: danielepessina99@gmail.com
-version: 0.5.0
-date-released: "2026-07-26"
 license: MIT
 repository-code: "https://github.com/DanielePessina/jaxgsa"
 url: "https://danielepessina.github.io/jaxgsa/"
