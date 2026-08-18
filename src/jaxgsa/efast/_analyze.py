@@ -25,18 +25,9 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
-from jaxgsa._core.invalid import (
-    InvalidUnit,
-    OnInvalid,
-    check_invalid,
-    resolve_policy,
-)
-from jaxgsa._core.validation import (
-    _prenormalize_outputs,
-    _prepare_Y,
-    _validate_output,
-    _warn_zero_variance_slices,
-)
+from jaxgsa._core.entry import at_least, prepare, require
+from jaxgsa._core.invalid import OnInvalid
+from jaxgsa._core.validation import _prenormalize_outputs
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.efast._result import EFASTResult
 from jaxgsa.efast._sampling import EFASTSamples, _frequency_plan
@@ -180,47 +171,46 @@ def analyze(
             is not one of the three policies or is ``"drop"``; or if the sample
             holds a non-finite value under ``on_invalid="raise"``.
     """
-    method = "jaxgsa.efast.analyze"
-    policy = resolve_policy(on_invalid, method=method, unit=InvalidUnit.CURVE, allow_drop=False)
+    from jaxgsa.efast import SPEC
+
     problem = samples.problem
     M = samples.M
     D = problem.num_vars
     N = samples.n_per_curve
 
-    Y = jnp.asarray(Y)
+    Y_arr = jnp.asarray(Y)
+    # A row-count complaint reads better in the design's own terms than in the
+    # generic one, so it is phrased here and handed to prepare as a check.
+    rows_match = Y_arr.ndim not in (1, 2, 3) or Y_arr.shape[0] == samples.n_runs
 
-    if Y.ndim in (1, 2, 3) and Y.shape[0] != samples.n_runs:
-        raise ValueError(
-            f"Y has {Y.shape[0]} rows but this eFAST design requires "
-            f"n_runs = n_per_curve * D = {N} * {D} = {samples.n_runs}; "
-            "evaluate the model on every row of samples.samples, in order"
-        )
-
-    Y = _validate_output(Y, samples.n_runs, problem)
-
-    # The design lays the D search curves out contiguously, N rows each. The
-    # check runs after the shape contract, so the row map is known to match.
-    # A curve cannot be dropped, so `keep` is always all-True here and is
-    # never applied; the report still names the curve to investigate.
-    _, invalid = check_invalid(
-        policy=policy,
-        method=method,
-        unit=InvalidUnit.CURVE,
+    ctx = prepare(
+        SPEC,
+        problem,
+        Y_arr,
+        on_invalid=on_invalid,
+        checks=(
+            at_least("slice_chunk_size", slice_chunk_size, 1),
+            require(
+                rows_match,
+                f"Y has {Y_arr.shape[0] if Y_arr.ndim else 0} rows but this eFAST design "
+                f"requires n_runs = n_per_curve * D = {N} * {D} = {samples.n_runs}; "
+                "evaluate the model on every row of samples.samples, in order",
+            ),
+        ),
+        n_expected=samples.n_runs,
+        # The design lays the D search curves out contiguously, N rows each.
+        # A curve cannot be dropped, so `keep` is always all-True; the report
+        # still names the curve to investigate.
         n_units=D,
-        Y=Y,
         unit_of_row=np.repeat(np.arange(D), N),
     )
-
-    # Record scalar output now: _prepare_Y adds singleton dims below.
-    is_scalar = Y.ndim == 1
-
-    # Promote to the canonical (N*D, T, K) shape.
-    Y, squeeze_time, squeeze_output = _prepare_Y(Y)
+    invalid = ctx.invalid
+    # Record scalar output now: the promotion below added singleton dims.
+    is_scalar = ctx.Y.ndim == 1
+    Y, squeeze_time = ctx.Y3, ctx.squeeze_time
 
     if prenormalize:
         Y, _, _, _ = _prenormalize_outputs(Y)
-
-    _warn_zero_variance_slices(Y, output_names=problem.output_names)
 
     # Rebuild the frequency plan sample() used, from the design metadata that
     # travels inside EFASTSamples. Both sides read the same numbers, so the

@@ -45,16 +45,10 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
-from jaxgsa._core.invalid import (
-    InvalidUnit,
-    OnInvalid,
-    check_invalid,
-    resolve_policy,
-)
+from jaxgsa._core.entry import prepare
+from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.validation import (
-    _prepare_Y,
     _squeeze_output_axes,
-    _validate_output,
     _warn_zero_variance_slices,
 )
 from jaxgsa.kucherenko._result import KucherenkoResult
@@ -106,32 +100,37 @@ def analyze(
             NaN), or if non-finite outputs are found under a policy that does
             not raise.
     """
-    method = "jaxgsa.kucherenko.analyze"
-    policy = resolve_policy(on_invalid, method=method, unit=InvalidUnit.BASE_POINT)
+    from jaxgsa.kucherenko import SPEC
+
     problem = sampling_result.problem
     N = sampling_result.base_n
     D = sampling_result.n_params
-    Y = _validate_output(jnp.asarray(Y), sampling_result.n_runs, problem)
 
-    Y_canonical, squeeze_time, squeeze_output = _prepare_Y(Y)
+    ctx = prepare(
+        SPEC,
+        problem,
+        Y,
+        on_invalid=on_invalid,
+        n_expected=sampling_result.n_runs,
+        # A base point k feeds the joint row and every conditional row with
+        # the same k, so one non-finite output anywhere invalidates all of
+        # them. The design is block-major, so base point k sits at rows
+        # k, N + k, 2N + k, … rather than in a contiguous run.
+        n_units=N,
+        unit_of_row=np.tile(np.arange(N), 2 * D + 1),
+        min_kept=2,
+        # The denominator of both indices is the variance of the joint block
+        # alone, not of the whole design, so the zero-variance check has to
+        # wait until that block has been separated out below.
+        warn_zero_variance=False,
+    )
+    keep, invalid = ctx.keep, ctx.invalid
+    squeeze_time, squeeze_output = ctx.squeeze_time, ctx.squeeze_output
+    Y_canonical = ctx.Y3
     n_time, n_out = Y_canonical.shape[1], Y_canonical.shape[2]
     n_slices = n_time * n_out
     # (2D+1, N, S) — block-major, matching the design's stacking order.
     F = np.asarray(Y_canonical, dtype=np.float64).reshape(2 * D + 1, N, n_slices)
-
-    # A base point k feeds the joint row and every conditional row with the
-    # same k, so one non-finite output anywhere invalidates all of them. The
-    # design is block-major, so base point k sits at rows k, N + k, 2N + k, …
-    # rather than in a contiguous run.
-    keep, invalid = check_invalid(
-        policy=policy,
-        method=method,
-        unit=InvalidUnit.BASE_POINT,
-        n_units=N,
-        Y=Y_canonical,
-        unit_of_row=np.tile(np.arange(N), 2 * D + 1),
-        min_kept=2,
-    )
     if not keep.all():
         F = F[:, keep, :]
 

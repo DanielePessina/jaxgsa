@@ -23,18 +23,12 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
-from jaxgsa._core.invalid import (
-    InvalidUnit,
-    OnInvalid,
-    check_invalid,
-    resolve_policy,
-)
+from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare
+from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
     _prenormalize_outputs,
-    _prepare_Y,
     _squeeze_output_axes,
-    _validate_output,
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.morris._result import MorrisResult
@@ -251,8 +245,9 @@ def analyze(
             ``on_invalid`` is not one of the three policies; if the sample
             holds a non-finite value under ``on_invalid="raise"``; if fewer
             than 2 trajectories survive; if ``ci_method`` is invalid; if
-            ``num_resamples > 0`` but ``key`` is ``None``; or if
-            ``chunk_size < 1``.
+            ``num_resamples`` is negative; if ``conf_level`` is not in
+            ``(0, 1)``; if ``num_resamples > 0`` but ``key`` is ``None``; or
+            if ``chunk_size < 1``.
 
     Warns:
         JaxgsaWarning: If a derived design already lost blocks with no
@@ -261,35 +256,38 @@ def analyze(
             for is deliberate, so it gives no warning.
         JaxgsaWarning: If an output slice has zero variance.
     """
-    method = "jaxgsa.morris.analyze"
-    policy = resolve_policy(on_invalid, method=method, unit=InvalidUnit.TRAJECTORY)
-    if ci_method not in {"quantile", "gaussian"}:
-        raise ValueError("ci_method must be one of {'quantile', 'gaussian'}")
-    if chunk_size < 1:
-        raise ValueError(f"chunk_size must be >= 1, got {chunk_size}")
-    Y = _validate_output(
-        Y,
-        int(sampling_result.samples.shape[0]),
-        sampling_result.problem,
-    )
-    # Map the user-evaluated unique outputs back to the full expanded layout.
-    Y = sampling_result.expand_outputs(Y)
-    Y, squeeze_time, squeeze_output = _prepare_Y(Y)
+    from jaxgsa.morris import SPEC
 
     # A trajectory is an indivisible sampling unit: it occupies a contiguous
     # block of D+1 expanded rows, and one bad row corrupts every elementary
     # effect that references it.
     r = sampling_result.n_trajectories
     rows_per_traj = sampling_result.n_params + 1
-    keep, invalid = check_invalid(
-        policy=policy,
-        method=method,
-        unit=InvalidUnit.TRAJECTORY,
+
+    ctx = prepare(
+        SPEC,
+        sampling_result.problem,
+        Y,
+        on_invalid=on_invalid,
+        checks=(
+            one_of("ci_method", ci_method, ("quantile", "gaussian")),
+            at_least("chunk_size", chunk_size, 1),
+            at_least("num_resamples", num_resamples, 0),
+            in_open_interval("conf_level", conf_level, 0.0, 1.0),
+        ),
+        n_expected=int(sampling_result.samples.shape[0]),
+        expand=sampling_result.expand_outputs,
         n_units=r,
-        Y=Y,
         unit_of_row=np.repeat(np.arange(r), rows_per_traj),
         min_kept=2,
+        # A constant slice gives elementary effects of exactly 0 (0/delta), so
+        # the measures come out 0, not NaN as in the variance-based methods.
+        zero_variance_outcome="morris",
     )
+    Y = ctx.Y3
+    keep, invalid = ctx.keep, ctx.invalid
+    squeeze_time, squeeze_output = ctx.squeeze_time, ctx.squeeze_output
+
     idx_after, idx_before, delta = _reindex_after_drop(sampling_result, keep)
     if not keep.all():
         trailing = Y.shape[1:]
@@ -322,26 +320,6 @@ def analyze(
 
     if prenormalize:
         Y, _, _, _ = _prenormalize_outputs(Y)
-
-    # A constant output slice gives elementary effects of exactly 0 (0/delta),
-    # so its screening measures come out 0, not NaN as in the variance-based
-    # methods. Warn with that Morris-correct consequence. Report a plain slice
-    # count instead of fabricating (t, k) labels for the singleton time axis
-    # that _prepare_Y inserts.
-    slice_var = jnp.var(Y.reshape(Y.shape[0], -1), axis=0)
-    n_zero = int(jnp.sum(slice_var == 0))
-    if n_zero > 0:
-        which = (
-            "output has"
-            if slice_var.shape[0] == 1
-            else f"{n_zero}/{slice_var.shape[0]} output slice(s) have"
-        )
-        warnings.warn(
-            f"jaxgsa: {which} zero variance — the corresponding screening "
-            "measures (mu, mu_star, sigma) will be 0",
-            stacklevel=2,
-            category=JaxgsaWarning,
-        )
 
     ee = _elementary_effects(Y, idx_after, idx_before, delta)  # (r, D, T, K)
     mu, mu_star, sigma = _stats_from_ee(ee)  # each (T, K, D)

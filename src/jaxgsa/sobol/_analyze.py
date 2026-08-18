@@ -29,20 +29,13 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
-from jaxgsa._core.invalid import (
-    InvalidReport,
-    InvalidUnit,
-    OnInvalid,
-    check_invalid,
-    resolve_policy,
-)
+from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare
+from jaxgsa._core.invalid import InvalidReport, OnInvalid
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
     _prenormalize_outputs,
     _prepare_Y,
     _squeeze_output_axes,
-    _validate_output,
-    _warn_zero_variance_slices,
 )
 from jaxgsa.sobol._indices import (
     _fused_first_total,
@@ -603,56 +596,59 @@ def analyze(
             invalid: What the non-finite check found, and what it did
 
     Raises:
-        ValueError: If ``on_invalid`` is not one of the three policies, or if
-            the sample holds a non-finite value under ``on_invalid="raise"``,
-            or if fewer than 2 Saltelli groups survive a drop.
-    """
-    method = "jaxgsa.sobol.analyze"
-    policy = resolve_policy(on_invalid, method=method, unit=InvalidUnit.SALTELLI_GROUP)
+        ValueError: If ``on_invalid`` is not one of the three policies; if
+            ``ci_method`` is not ``"quantile"`` or ``"gaussian"``; if
+            ``num_resamples`` is negative; if ``slice_chunk_size`` is below 1;
+            if ``conf_level`` is not in ``(0, 1)``; if the sample holds a
+            non-finite value under ``on_invalid="raise"``; or if fewer than 2
+            Saltelli groups survive a drop.
 
-    # Resolve the user-supplied layout (sample axis first, labeled output axis
-    # last) against the unique design rows, BEFORE any expansion or resampling
-    # so every downstream stage sees canonical axes.
-    Y = _validate_output(
-        Y,
-        int(sampling_result.samples.shape[0]),
-        sampling_result.problem,
-    )
-    # Map user-evaluated unique outputs back to the full Saltelli interleaving
-    Y = sampling_result.expand_outputs(Y)
+    Warns:
+        JaxgsaWarning: If an output slice has zero variance, which makes its
+            indices NaN.
+    """
+    from jaxgsa.sobol import SPEC
 
     D = sampling_result.n_params
     # step = rows per Saltelli group: D+2 (first-order only) or 2D+2 (with S2)
     step = _saltelli_step(D, sampling_result.calc_second_order)
-
     # A Saltelli group [A_i, AB_{i,0}, …, B_i] is one indivisible sampling
     # unit, so the check runs at group granularity: a single bad row condemns
     # the whole block of `step` rows, and a partial group would corrupt the
-    # A/B/AB/BA split.
-    base_n = Y.shape[0] // step
-    keep, invalid = check_invalid(
-        policy=policy,
-        method=method,
-        unit=InvalidUnit.SALTELLI_GROUP,
+    # A/B/AB/BA split. The group count comes from the design, not from Y, so
+    # it is known before Y is looked at.
+    base_n = sampling_result.n_expanded // step
+
+    ctx = prepare(
+        SPEC,
+        sampling_result.problem,
+        Y,
+        on_invalid=on_invalid,
+        checks=(
+            one_of("ci_method", ci_method, ("quantile", "gaussian")),
+            at_least("num_resamples", num_resamples, 0),
+            at_least("slice_chunk_size", slice_chunk_size, 1),
+            in_open_interval("conf_level", conf_level, 0.0, 1.0),
+        ),
+        n_expected=int(sampling_result.samples.shape[0]),
+        expand=sampling_result.expand_outputs,
         n_units=base_n,
-        Y=Y,
         unit_of_row=np.repeat(np.arange(base_n), step),
         min_kept=2,
     )
-    if not keep.all():
+    # The estimator reads the expanded layout, and its scalar fast path
+    # branches on Y's own rank, so this is ctx.Y and not ctx.Y3.
+    Y = ctx.Y
+    invalid = ctx.invalid
+    if not ctx.keep.all():
         trailing = Y.shape[1:]
         # Boolean indexing gives a variable-length result, which JAX cannot
         # trace, so the compaction round-trips through NumPy.
-        grouped = np.asarray(Y).reshape(base_n, step, *trailing)[keep]
+        grouped = np.asarray(Y).reshape(base_n, step, *trailing)[ctx.keep]
         Y = jnp.asarray(grouped.reshape(-1, *trailing))
 
     if prenormalize:
         Y, _, _, _ = _prenormalize_outputs(Y)
-
-    _warn_zero_variance_slices(Y, output_names=sampling_result.problem.output_names)
-
-    if ci_method not in {"quantile", "gaussian"}:
-        raise ValueError("ci_method must be one of {'quantile', 'gaussian'}")
 
     if num_resamples > 0:
         if key is None:

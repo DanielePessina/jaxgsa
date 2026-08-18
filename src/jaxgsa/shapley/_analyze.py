@@ -14,8 +14,9 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from jax import Array
 
+from jaxgsa._core.entry import gates
 from jaxgsa._core.invalid import OnInvalid
-from jaxgsa._core.validation import _raise_categorical_analysis
+from jaxgsa._core.validation import _correlation_tolerant_methods
 from jaxgsa.shapley._result import ShapleyResult
 
 if TYPE_CHECKING:
@@ -81,9 +82,13 @@ def analyze(
         TypeError: If ``backend_kwargs`` contains a keyword the selected
             backend's ``analyze`` does not accept.
     """
+    from jaxgsa.shapley import SPEC
+
     # Both backends fit smooth surrogates over the inputs, which is undefined
-    # for unordered level codes; reject with the Shapley-specific name.
-    _raise_categorical_analysis(problem, "jaxgsa.shapley.analyze")
+    # for unordered level codes; reject with the Shapley-specific name. Only
+    # the categorical half is gated from the record: whether a correlation is
+    # tolerated depends on the backend, so it is settled below instead.
+    gates(SPEC, problem, method="jaxgsa.shapley.analyze", check=("categorical",))
     if backend == "pce":
         if include_correlative:
             raise ValueError("include_correlative requires backend='hdmr'")
@@ -97,10 +102,9 @@ def analyze(
                 "backend='hdmr' with include_correlative=True, which allocates "
                 "the ANCOVA (structural + correlative) decomposition instead — "
                 "an ANCOVA-based attribution, not conditional-variance Shapley "
-                "effects — or a correlation-tolerant method (jaxgsa.vkoga and "
-                "jaxgsa.kucherenko for variance-based indices, "
-                "jaxgsa.optimal_transport, jaxgsa.borgonovo, jaxgsa.hsic, "
-                "jaxgsa.pawn). Those methods do not return Shapley effects."
+                "effects — or one of the correlation-tolerant methods: "
+                f"{_correlation_tolerant_methods()}. Those methods do not "
+                "return Shapley effects."
             )
         from jaxgsa.pce import analyze as analyze_pce
 

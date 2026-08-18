@@ -99,18 +99,82 @@ def _validate_output(
     return Y
 
 
-# Named in every correlated-problem rejection so the error is actionable. The
-# variance-based routes come first: they answer the same question the refused
-# method was asked, so they are what the user most likely wants.
-_CORRELATION_TOLERANT_METHODS = (
-    "jaxgsa.vkoga (variance-based indices from given data, through a kernel "
-    "surrogate), jaxgsa.kucherenko (variance-based indices from its own "
-    "conditional-copula design), jaxgsa.optimal_transport, jaxgsa.borgonovo, "
-    "jaxgsa.hdmr (whose ANCOVA Sb term quantifies the correlation-induced "
-    "contribution, and whose result supports "
-    "shapley(include_correlative=True)), jaxgsa.shapley with "
-    'backend="hdmr", jaxgsa.hsic, or jaxgsa.pawn'
-)
+# The parenthetical each recommended method carries. The *set* of methods is
+# read from the registry; only this extra prose is written by hand, and a
+# method with no entry here is simply named without one. Keying the prose
+# separately is what stops the list drifting: a new correlation-tolerant
+# method appears in the message the moment it registers, note or no note.
+_CORRELATION_NOTES: dict[str, str] = {
+    "vkoga": " (variance-based indices from given data, through a kernel surrogate)",
+    "kucherenko": " (variance-based indices from its own conditional-copula design)",
+    "hdmr": (
+        " (whose ANCOVA Sb term quantifies the correlation-induced contribution, "
+        "and whose result supports shapley(include_correlative=True))"
+    ),
+}
+
+# The variance-based routes come first: they answer the same question the
+# refused method was asked, so they are what the user most likely wants. Any
+# method not named here sorts after these, alphabetically.
+_CORRELATION_ORDER = ("vkoga", "kucherenko", "optimal_transport", "borgonovo", "hdmr")
+
+# The one route the registry cannot express. ``jaxgsa.shapley`` declares
+# correlation="refuses" because its default backend does refuse; the hdmr
+# backend does not. A capability that depends on an argument has no place in a
+# per-method record, so it is named here instead.
+_EXTRA_CORRELATION_ROUTES = ('jaxgsa.shapley with backend="hdmr"',)
+
+_CATEGORICAL_NOTES: dict[str, str] = {
+    "pawn": " (one conditioning class per level)",
+    "sobol": " Saltelli pipeline",
+}
+
+_CATEGORICAL_ORDER = ("optimal_transport", "borgonovo", "pawn")
+
+
+def _tolerant_names(kind: str, order: tuple[str, ...]) -> list[tuple[str, bool]]:
+    """Return the registered methods that tolerate ``kind``, in message order.
+
+    Args:
+        kind: ``"correlation"`` or ``"categorical"``.
+        order: Namespace names to list first, in that order. Anything the
+            registry holds beyond this list follows, alphabetically, so a new
+            method still reaches the message without an edit here.
+
+    Returns:
+        A list of ``(name, is_design_based)`` pairs.
+    """
+    # Imported here, not at module level: the registry fills up as the method
+    # packages import, and this module is imported before they do.
+    from jaxgsa._core.registry import methods
+
+    def rank(name: str) -> tuple[int, str]:
+        return (order.index(name), "") if name in order else (len(order), name)
+
+    accepting = sorted(
+        (spec for spec in methods().values() if getattr(spec, kind) == "accepts"),
+        key=lambda spec: rank(spec.name),
+    )
+    return [(spec.name, spec.is_design_based) for spec in accepting]
+
+
+def _correlation_tolerant_methods() -> str:
+    """Name every correlation-tolerant route, for a rejection message."""
+    named = _tolerant_names("correlation", _CORRELATION_ORDER)
+    items = [f"jaxgsa.{n}{_CORRELATION_NOTES.get(n, '')}" for n, _ in named]
+    items.extend(_EXTRA_CORRELATION_ROUTES)
+    return f"{', '.join(items[:-1])}, or {items[-1]}"
+
+
+def _categorical_tolerant_methods() -> str:
+    """Name every categorical-tolerant route, for a rejection message."""
+    named = _tolerant_names("categorical", _CATEGORICAL_ORDER)
+    given = [f"jaxgsa.{n}{_CATEGORICAL_NOTES.get(n, '')}" for n, design in named if not design]
+    design = [f"jaxgsa.{n}{_CATEGORICAL_NOTES.get(n, '')}" for n, is_d in named if is_d]
+    listed = f"{', '.join(given[:-1])}, and {given[-1]}" if len(given) > 1 else given[0]
+    if not design:
+        return listed
+    return f"{listed}, or the design-based {', '.join(design)}"
 
 
 def _categorical_param_names(problem: Problem) -> list[str]:
@@ -205,7 +269,7 @@ def _raise_correlated_design(problem: Problem, method: str) -> None:
         "independent inputs, but problem.correlation declares a dependence "
         "structure. Draw correlated samples with jaxgsa.sampling.monte_carlo "
         "(which honors problem.correlation) and analyze them with a "
-        f"correlation-tolerant given-data method: {_CORRELATION_TOLERANT_METHODS}. "
+        f"correlation-tolerant given-data method: {_correlation_tolerant_methods()}. "
         "To analyze the independent problem instead, drop the matrix with "
         "problem.with_correlation(None)."
     )
@@ -241,17 +305,9 @@ def _raise_correlated_analysis(problem: Problem, method: str) -> None:
         f"{method} computes indices that assume independent inputs, and they are "
         "invalid — not merely approximate — when problem.correlation declares a "
         "dependence structure. Use a correlation-tolerant given-data method "
-        f"instead: {_CORRELATION_TOLERANT_METHODS}. To analyze the independent "
+        f"instead: {_correlation_tolerant_methods()}. To analyze the independent "
         "problem instead, drop the matrix with problem.with_correlation(None)."
     )
-
-
-# Named in every categorical-problem rejection so the error is actionable.
-_CATEGORICAL_TOLERANT_METHODS = (
-    "jaxgsa.optimal_transport, jaxgsa.borgonovo, and jaxgsa.pawn (one "
-    "conditioning class per level), or the design-based jaxgsa.sobol "
-    "Saltelli pipeline"
-)
 
 
 def _raise_categorical_design(problem: Problem, method: str) -> None:
@@ -317,7 +373,7 @@ def _raise_categorical_analysis(problem: Problem, method: str) -> None:
         f"{method} treats every input as continuous, but parameters {names} "
         "are categorical (unordered level codes); its indices would depend on "
         "the arbitrary code order. Use a categorical-aware method instead: "
-        f"{_CATEGORICAL_TOLERANT_METHODS}."
+        f"{_categorical_tolerant_methods()}."
     )
 
 
@@ -474,10 +530,31 @@ def _prepare_Y(
     return Y, squeeze_time, squeeze_output
 
 
+# What a constant output slice does to the numbers, per method family. A
+# variance-based method divides by that variance and reports NaN. A
+# distribution-comparison method (Borgonovo, PAWN, optimal transport) finds
+# every conditional distribution identical to the unconditional one and
+# reports an exact 0, and Morris divides by the step size and reports 0 for
+# all three of its measures. Those are three different things to tell a user,
+# and the wording is the only part that differs, so it lives here rather than
+# in three copies of the whole check.
+_ZERO_VARIANCE_OUTCOMES: dict[str, tuple[str, str]] = {
+    "nan": ("all indices will be NaN", "corresponding indices will be NaN"),
+    "zero": ("all indices will be 0", "corresponding indices will be 0"),
+    "morris": (
+        "the screening measures (mu, mu_star, sigma) will be 0",
+        "the corresponding screening measures (mu, mu_star, sigma) will be 0",
+    ),
+}
+
+
 def _warn_zero_variance_slices(
     Y: Array,
     output_names: tuple[str, ...] | None = None,
     var_per_slice: Array | None = None,
+    *,
+    outcome: str = "nan",
+    stacklevel: int = 2,
 ) -> None:
     """Check for zero-variance output slices before analysis and warn.
 
@@ -493,7 +570,12 @@ def _warn_zero_variance_slices(
             ``Y`` over its first axis (any shape reshapeable to the flat
             slice axis). Pass it when the caller already computed the same
             variance, so it is not recomputed here.
+        outcome: Which consequence to report, ``"nan"`` or ``"zero"``. See
+            :data:`_ZERO_VARIANCE_OUTCOMES`.
+        stacklevel: Frames to skip so the warning points at the user's
+            ``analyze()`` call rather than at this helper.
     """
+    single_tail, plural_tail = _ZERO_VARIANCE_OUTCOMES[outcome]
     # Collapse trailing dims so variance is computed per (t, k) slice.
     flat = Y.reshape(Y.shape[0], -1)
     n_outputs = flat.shape[1]
@@ -528,10 +610,10 @@ def _warn_zero_variance_slices(
 
     if n_outputs == 1:
         if output_names is not None and len(output_names) == 1:
-            msg = f"jaxgsa: output '{output_names[0]}' has zero variance — all indices will be NaN"
+            msg = f"jaxgsa: output '{output_names[0]}' has zero variance — {single_tail}"
         else:
-            msg = "jaxgsa: output has zero variance — all indices will be NaN"
-        warnings.warn(msg, stacklevel=2, category=JaxgsaWarning)
+            msg = f"jaxgsa: output has zero variance — {single_tail}"
+        warnings.warn(msg, stacklevel=stacklevel, category=JaxgsaWarning)
         return
 
     # Materialize indices eagerly -- this is a rare warning path, not a hot loop.
@@ -547,8 +629,8 @@ def _warn_zero_variance_slices(
             label_str = ", ".join(labels)
         warnings.warn(
             f"jaxgsa: {n_zero}/{n_outputs} output(s) have zero variance "
-            f"({label_str}) — corresponding indices will be NaN",
-            stacklevel=2,
+            f"({label_str}) — {plural_tail}",
+            stacklevel=stacklevel,
             category=JaxgsaWarning,
         )
     elif len(trailing) == 2:  # multi-timestep: flat index encodes (t, k) in row-major order
@@ -564,8 +646,8 @@ def _warn_zero_variance_slices(
             label_str = ", ".join(affected)
         warnings.warn(
             f"jaxgsa: {n_zero}/{n_outputs} output slice(s) have zero variance "
-            f"[{label_str}] — corresponding indices will be NaN",
-            stacklevel=2,
+            f"[{label_str}] — {plural_tail}",
+            stacklevel=stacklevel,
             category=JaxgsaWarning,
         )
 

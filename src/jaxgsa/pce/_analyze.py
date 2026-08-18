@@ -11,14 +11,13 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core.batching import get_memory_budget, resolve_batch_size
-from jaxgsa._core.invalid import InvalidUnit, OnInvalid, check_invalid, resolve_policy
+from jaxgsa._core.entry import prepare
+from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.sampling import UNIT_CLIP
 from jaxgsa._core.surrogate import _PredictPlan
 from jaxgsa._core.validation import (
     _prepare_Y,
     _squeeze_output_axes,
-    _validate_xy_inputs,
-    _warn_zero_variance_slices,
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.pce._engine import (
@@ -463,40 +462,18 @@ def analyze_pce(
             ``on_invalid="raise"`` (the default) and ``X`` or ``Y`` holds a
             non-finite value.
     """
-    method = "jaxgsa.pce.analyze"
-    policy = resolve_policy(on_invalid, method=method, unit=InvalidUnit.ROW)
-    X = jnp.asarray(X)
-    # Wiener-Askey basis orthogonality assumes independent inputs, so a
-    # correlated problem is rejected (correlation_ok stays False).
-    Y = _validate_xy_inputs(problem, X, jnp.asarray(Y), method=method)
+    from jaxgsa.pce import SPEC
 
-    # The non-finite check runs here, in the public entry point only, and on
-    # the canonical Y. Everything downstream (`_fit_pce_core`, and Shapley
-    # routing through `PCEResult.shapley`) then works on data the policy has
-    # already passed, so the policy is applied exactly once per user call.
-    # X and Y are checked jointly: dropping a bad X row without its matching
-    # Y row would misalign every later row, undetectably.
-    keep, invalid = check_invalid(
-        policy=policy,
-        method=method,
-        unit=InvalidUnit.ROW,
-        n_units=int(X.shape[0]),
-        X=X,
-        Y=Y,
-        min_kept=_MIN_ROWS,
-    )
-    if not keep.all():
-        mask = jnp.asarray(keep)
-        X = X[mask]
-        Y = Y[mask]
+    # The non-finite check runs here, in the public entry point only.
+    # Everything downstream (`_fit_pce_core`, and Shapley routing through
+    # `PCEResult.shapley`) then works on data the policy has already passed,
+    # so the policy is applied exactly once per user call.
+    ctx = prepare(SPEC, problem, Y, X=X, on_invalid=on_invalid, min_kept=_MIN_ROWS)
+    assert ctx.X is not None  # X was passed, so prepare validated and returned it
+    X, Y, invalid = ctx.X, ctx.Y, ctx.invalid
 
-    # Per-slice output variance, computed once and shared by the zero-variance
-    # warning and the explained-variance diagnostic below.
-    Y_3d = _prepare_Y(Y)[0]
-    total_var = jnp.var(Y_3d, axis=0)  # (T, K)
-
-    # A constant output slice makes every index 0/0 = NaN; warn once up front.
-    _warn_zero_variance_slices(Y_3d, output_names=problem.output_names, var_per_slice=total_var)
+    # Per-slice output variance for the explained-variance diagnostic below.
+    total_var = jnp.var(ctx.Y3, axis=0)  # (T, K)
 
     fit = _fit_pce_core(
         problem, X, Y, order=order, ridge=ridge, fit_ratio=fit_ratio, batch_size=batch_size

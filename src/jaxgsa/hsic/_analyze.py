@@ -30,19 +30,12 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from jaxgsa._core.invalid import (
-    InvalidUnit,
-    OnInvalid,
-    check_invalid,
-    resolve_policy,
-)
+from jaxgsa._core.entry import at_least, prepare, require
+from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa._core.validation import (
     _prenormalize_outputs,
-    _prepare_Y,
     _squeeze_output_axes,
-    _validate_xy_inputs,
-    _warn_zero_variance_slices,
 )
 from jaxgsa.hsic._result import HSICResult
 from jaxgsa.problem import Problem
@@ -449,41 +442,36 @@ def analyze(
             as a distance, and the arbitrary code order makes that
             meaningless.
     """
-    D = problem.num_vars
-    X = jnp.asarray(X)
+    from jaxgsa.hsic import SPEC
 
-    if n_perms < 1:
-        raise ValueError(f"n_perms must be >= 1, got {n_perms}")
-    if bandwidth is not None and (bandwidth <= 0 or not math.isfinite(bandwidth)):
-        raise ValueError(f"bandwidth must be positive and finite, got {bandwidth}")
-    # HSIC is a dependence measure with no input-independence assumption, so
-    # a declared input correlation does not invalidate the indices.
-    Y = _validate_xy_inputs(problem, X, Y, correlation_ok=True, method="jaxgsa.hsic.analyze")
+    D = problem.num_vars
+
+    ctx = prepare(
+        SPEC,
+        problem,
+        Y,
+        X=X,
+        on_invalid=on_invalid,
+        checks=(
+            at_least("n_perms", n_perms, 1),
+            require(
+                bandwidth is None or (bandwidth > 0 and math.isfinite(bandwidth)),
+                f"bandwidth must be positive and finite, got {bandwidth}",
+            ),
+        ),
+        min_kept=_MIN_SAMPLES,
+    )
+    assert ctx.X is not None  # X was passed, so prepare validated and returned it
+    X, invalid = ctx.X, ctx.invalid
+    # A sample count, not a scalar argument: it is checked once the shape
+    # contract has held, and a sample this small costs nothing to have read.
     if X.shape[0] < _MIN_SAMPLES:
         raise ValueError(f"N must be >= {_MIN_SAMPLES} for HSIC, got {X.shape[0]}")
 
-    # The shape contract holds by now, and nothing has been transformed yet,
-    # so this is the last point at which a row still means one model run.
-    method = "jaxgsa.hsic.analyze"
-    policy = resolve_policy(on_invalid, method=method, unit=InvalidUnit.ROW)
-    keep, invalid = check_invalid(
-        policy=policy,
-        method=method,
-        unit=InvalidUnit.ROW,
-        n_units=int(X.shape[0]),
-        X=X,
-        Y=Y,
-        min_kept=_MIN_SAMPLES,
-    )
-    if not keep.all():
-        X = X[keep]
-        Y = Y[keep]
-
-    _warn_zero_variance_slices(Y, problem.output_names)
-
     X_unit = cdf_to_unit_interval(X, problem)
 
-    Y_3d, squeeze_time, squeeze_output = _prepare_Y(Y)
+    Y_3d = ctx.Y3
+    squeeze_time, squeeze_output = ctx.squeeze_time, ctx.squeeze_output
     _N, T, K = Y_3d.shape
 
     if prenormalize:

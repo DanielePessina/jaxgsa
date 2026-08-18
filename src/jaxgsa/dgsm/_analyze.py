@@ -22,6 +22,7 @@ import numpy as np
 import numpy.typing as npt
 from jax import Array
 
+from jaxgsa._core.entry import at_least, check_scalars, gates
 from jaxgsa._core.invalid import (
     InvalidUnit,
     OnInvalid,
@@ -30,11 +31,10 @@ from jaxgsa._core.invalid import (
 )
 from jaxgsa._core.validation import (
     _prepare_Y,
-    _raise_categorical_analysis,
-    _raise_correlated_analysis,
     _squeeze_output_axes,
     _validate_output,
     _validate_x,
+    _warn_zero_variance_slices,
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.dgsm._poincare import axis_constants
@@ -561,15 +561,23 @@ def analyze(
             declares a dependence structure, and the Poincare-inequality bounds
             assume independent inputs. ``problem`` has categorical parameters,
             and a derivative along an unordered level code has no meaning.
+    Warns:
+        JaxgsaWarning: If an output slice has zero variance, which makes both
+            bounds for that slice NaN.
     """
-    # Validate the policy before anything expensive runs. The autodiff path
-    # evaluates the model, and a misspelled on_invalid should not cost that.
-    policy = resolve_policy(on_invalid, method=_METHOD, unit=InvalidUnit.ROW)
+    from jaxgsa.dgsm import SPEC
 
-    # The Poincare-inequality bound on ST assumes independent inputs; both
-    # calling conventions are rejected for a correlated problem.
-    _raise_correlated_analysis(problem, "jaxgsa.dgsm.analyze")
-    _raise_categorical_analysis(problem, "jaxgsa.dgsm.analyze")
+    # DGSM resolves two argument groups before it knows which array is even
+    # the model output, so it cannot hand its data to the shared prepare().
+    # It uses the two halves that do not need the data: the policy is settled
+    # before anything expensive runs, because the autodiff path evaluates the
+    # model and a misspelled on_invalid should not cost that; and the
+    # capability gates come from the registry record, as everywhere else. The
+    # Poincare-inequality bound on ST assumes independent inputs, so both
+    # calling conventions are refused for a correlated problem.
+    policy = resolve_policy(on_invalid, method=_METHOD, unit=InvalidUnit.ROW)
+    check_scalars((at_least("batch_size", batch_size, 1),))
+    gates(SPEC, problem, method=_METHOD)
     D = problem.num_vars
 
     # Resolve the calling convention once, before any computation, so that an
@@ -667,8 +675,10 @@ def analyze(
             "dfdx must mirror Y's layout with one extra trailing (D,) axis"
         )
 
-    # Var(Y) per (t, k) output slice, denominator of both bounds.
+    # Var(Y) per (t, k) output slice, denominator of both bounds. A constant
+    # slice makes both bounds NaN, so say so rather than returning it silently.
     var_y = jnp.var(Y_3d, axis=0)  # (T, K)
+    _warn_zero_variance_slices(Y_valid, output_names=problem.output_names, var_per_slice=var_y)
 
     # Per-axis constants: C for the Poincare upper bound, Var for the lower.
     C, Var = axis_constants(problem)

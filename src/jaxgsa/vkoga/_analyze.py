@@ -29,16 +29,12 @@ from jaxgsa._core.copula import (
     canonicalize_correlation,
     independent_correlation,
 )
-from jaxgsa._core.invalid import InvalidUnit, OnInvalid, check_invalid, resolve_policy
+from jaxgsa._core.entry import at_least, prepare, require
+from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.sampling import _next_power_of_2
 from jaxgsa._core.surrogate import _PredictPlan
 from jaxgsa._core.transforms import cdf_to_unit_interval
-from jaxgsa._core.validation import (
-    _prepare_Y,
-    _squeeze_output_axes,
-    _validate_xy_inputs,
-    _warn_zero_variance_slices,
-)
+from jaxgsa._core.validation import _squeeze_output_axes
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.problem import Problem
 from jaxgsa.vkoga._engine import _cross_validate, _fit_vkoga, _predict_vkoga
@@ -155,24 +151,52 @@ def analyze_vkoga(
             clipped to ``S_TU`` by a wide margin, which says the additive
             component functions cannot represent the model's interactions.
     """
-    # Raise-early validation: every scalar argument is checked before any
-    # expensive work (cross-validation, fitting, index estimation).
-    method = "jaxgsa.vkoga.analyze"
-    policy = resolve_policy(on_invalid, method=method, unit=InvalidUnit.ROW)
+    from jaxgsa.vkoga import SPEC
+
+    D = problem.num_vars
+    # Every scalar argument is checked before any expensive work
+    # (cross-validation, fitting, index estimation). The preamble runs them
+    # first, so that ordering is structural rather than a convention.
+    ctx = prepare(
+        SPEC,
+        problem,
+        Y,
+        X=X,
+        on_invalid=on_invalid,
+        checks=(
+            at_least("max_centers", max_centers, 1),
+            require(
+                n_folds >= 2,
+                f"n_folds must be >= 2 for cross-validation, got {n_folds}",
+            ),
+            *(
+                require(
+                    value is None or bool(np.isfinite(value) and value > 0),
+                    f"{name} must be a finite positive number, got {value}",
+                )
+                for name, value in (("gamma", gamma), ("ridge", ridge))
+            ),
+            *(
+                at_least(name, value, 2)
+                for name, value in (
+                    ("n_outer", n_outer),
+                    ("n_inner", n_inner),
+                    ("n_variance", n_variance),
+                )
+            ),
+            at_least("batch_size", batch_size, 1),
+            require(
+                D >= 2,
+                f"Correlated sensitivity indices need at least 2 parameters, got {D}",
+            ),
+        ),
+        min_kept=n_folds,
+    )
+    assert ctx.X is not None  # X was passed, so prepare validated and returned it
+    X, Y, invalid = ctx.X, ctx.Y, ctx.invalid
+
     if max_centers is None:
         max_centers = _DEFAULT_MAX_CENTERS
-    elif max_centers < 1:
-        raise ValueError(f"max_centers must be >= 1, got {max_centers}")
-    if n_folds < 2:
-        raise ValueError(f"n_folds must be >= 2 for cross-validation, got {n_folds}")
-    for name, value in (("gamma", gamma), ("ridge", ridge)):
-        if value is not None and not (np.isfinite(value) and value > 0):
-            raise ValueError(f"{name} must be a finite positive number, got {value}")
-    for name, value in (("n_outer", n_outer), ("n_inner", n_inner), ("n_variance", n_variance)):
-        if value < 2:
-            raise ValueError(f"{name} must be >= 2, got {value}")
-    if batch_size is not None and batch_size < 1:
-        raise ValueError(f"batch_size must be >= 1, got {batch_size}")
     # The latent draws come from Sobol' sequences, which need power-of-two
     # sizes to keep their balance guarantees (scipy warns otherwise). The
     # defaults are already powers of two, so they pass through unchanged.
@@ -180,40 +204,8 @@ def analyze_vkoga(
     n_inner = _next_power_of_2(n_inner)
     n_variance = _next_power_of_2(n_variance)
 
-    X = jnp.asarray(X)
-    # The Gaussian copula is the method's dependence model, so a declared
-    # problem.correlation is welcome. Categorical parameters are not: the
-    # isotropic RBF needs a continuous CDF map per coordinate, and a step-CDF
-    # coordinate breaks both the kernel metric and the copula conditionals.
-    Y = _validate_xy_inputs(
-        problem,
-        X,
-        jnp.asarray(Y),
-        correlation_ok=True,
-        categorical_ok=False,
-        method=method,
-    )
-    # Applied here, in the only public entry point, before any fitting. The
-    # joint X/Y check keeps the pairs aligned when rows are dropped.
-    keep, invalid = check_invalid(
-        policy=policy,
-        method=method,
-        unit=InvalidUnit.ROW,
-        n_units=int(X.shape[0]),
-        X=X,
-        Y=Y,
-        min_kept=n_folds,
-    )
-    if not keep.all():
-        mask = jnp.asarray(keep)
-        X = X[mask]
-        Y = Y[mask]
-    D = problem.num_vars
-    if D < 2:
-        raise ValueError(f"Correlated sensitivity indices need at least 2 parameters, got {D}")
-
-    Y_canonical, squeeze_time, squeeze_output = _prepare_Y(Y)
-    _warn_zero_variance_slices(Y_canonical, output_names=problem.output_names)
+    Y_canonical = ctx.Y3
+    squeeze_time, squeeze_output = ctx.squeeze_time, ctx.squeeze_output
     n_time, n_out = Y_canonical.shape[1], Y_canonical.shape[2]
     Y_flat = Y_canonical.reshape(Y_canonical.shape[0], n_time * n_out)
 

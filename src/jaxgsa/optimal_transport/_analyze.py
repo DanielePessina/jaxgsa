@@ -56,12 +56,8 @@ import jax.numpy as jnp
 from jax import Array
 
 from jaxgsa._core.bootstrap import _percentile_ci
-from jaxgsa._core.invalid import (
-    InvalidUnit,
-    OnInvalid,
-    check_invalid,
-    resolve_policy,
-)
+from jaxgsa._core.entry import at_least, in_open_interval, prepare, require
+from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.partition import (
     _build_class_indices,
     _class_layout,
@@ -72,9 +68,7 @@ from jaxgsa._core.partition import (
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
     _prenormalize_outputs,
-    _prepare_Y,
     _squeeze_output_axes,
-    _validate_xy_inputs,
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.optimal_transport._result import OTResult
@@ -599,38 +593,40 @@ def analyze(
             ``(0, 1)``, ``slice_chunk_size`` is not a positive integer,
             ``on_invalid`` is not one of the three policies, or the
             non-finite policy refuses the sample.
+    Warns:
+        JaxgsaWarning: If an output slice has zero variance. Every
+            conditional distribution then equals the unconditional one, so
+            the corresponding indices are an exact 0 rather than an answer.
     """
-    X = jnp.asarray(X)
-    # The OT index measures total, correlation-inclusive influence through
-    # rank-based conditioning, so correlated problems are accepted.
-    Y = _validate_xy_inputs(
-        problem,
-        X,
-        Y,
-        correlation_ok=True,
-        categorical_ok=True,
-        method="jaxgsa.optimal_transport.analyze",
-    )
-    # The user's own sample, before any partition layout is built and before
-    # the dummy column exists. The dummy is synthetic and finite by
-    # construction, so it is not part of what is checked here.
-    method = "jaxgsa.optimal_transport.analyze"
-    policy = resolve_policy(on_invalid, method=method, unit=InvalidUnit.ROW)
-    keep, invalid = check_invalid(
-        policy=policy,
-        method=method,
-        unit=InvalidUnit.ROW,
-        n_units=int(X.shape[0]),
-        X=X,
-        Y=Y,
-        min_kept=_MIN_KEPT,
-    )
-    if not keep.all():
-        X = X[keep]
-        Y = Y[keep]
+    from jaxgsa.optimal_transport import SPEC
 
-    if mode not in _MODES:
-        raise ValueError(f"mode must be one of {_MODES}, got {mode!r}")
+    # The check runs on the user's own sample, before any partition layout is
+    # built and before the dummy column exists. The dummy is synthetic and
+    # finite by construction, so it is not part of what is checked here.
+    ctx = prepare(
+        SPEC,
+        problem,
+        Y,
+        X=X,
+        on_invalid=on_invalid,
+        checks=(
+            require(mode in _MODES, f"mode must be one of {_MODES}, got {mode!r}"),
+            require(not epsilon <= 0, f"epsilon must be > 0, got {epsilon}"),
+            at_least("max_iter", max_iter, 1),
+            require(tol is None or tol > 0, f"tol must be > 0, got {tol}"),
+            at_least("n_bootstrap", n_bootstrap, 0),
+            in_open_interval("conf_level", conf_level, 0.0, 1.0),
+            at_least("slice_chunk_size", slice_chunk_size, 1),
+        ),
+        min_kept=_MIN_KEPT,
+        # A constant slice leaves every conditional distribution equal to
+        # the unconditional one, so the indices come out an exact 0, not
+        # the NaN a variance ratio would give.
+        zero_variance_outcome="zero",
+    )
+    assert ctx.X is not None  # X was passed, so prepare validated and returned it
+    X, Y, invalid = ctx.X, ctx.Y, ctx.invalid
+
     if mode == "trajectory" and Y.ndim != 3:
         raise ValueError(f"mode='trajectory' requires a 3-D (N, T, K) Y, got ndim={Y.ndim}")
     N = X.shape[0]
@@ -666,20 +662,8 @@ def analyze(
                 stacklevel=2,
                 category=JaxgsaWarning,
             )
-    if not epsilon > 0:
-        raise ValueError(f"epsilon must be > 0, got {epsilon}")
-    if max_iter < 1:
-        raise ValueError(f"max_iter must be >= 1, got {max_iter}")
-    if tol is not None and not tol > 0:
-        raise ValueError(f"tol must be > 0, got {tol}")
-    if n_bootstrap < 0:
-        raise ValueError(f"n_bootstrap must be >= 0, got {n_bootstrap}")
-    if not 0 < conf_level < 1:
-        raise ValueError(f"conf_level must be in (0, 1), got {conf_level}")
-    if slice_chunk_size is not None and slice_chunk_size < 1:
-        raise ValueError(f"slice_chunk_size must be >= 1, got {slice_chunk_size}")
-
-    Y_3d, squeeze_time, squeeze_output = _prepare_Y(Y)
+    Y_3d = ctx.Y3
+    squeeze_time, squeeze_output = ctx.squeeze_time, ctx.squeeze_output
     _, T, K = Y_3d.shape
 
     dtype = jnp.result_type(Y_3d.dtype, jnp.float32)

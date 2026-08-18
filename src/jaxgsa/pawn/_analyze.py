@@ -59,16 +59,12 @@ from jax import Array
 
 from jaxgsa._core.batching import get_memory_budget
 from jaxgsa._core.bootstrap import _percentile_ci
-from jaxgsa._core.invalid import (
-    InvalidUnit,
-    OnInvalid,
-    check_invalid,
-    resolve_policy,
-)
+from jaxgsa._core.entry import at_least, in_open_interval, prepare, require
+from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.partition import _extract_categorical_codes
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.transforms import cdf_to_unit_interval
-from jaxgsa._core.validation import _prepare_Y, _squeeze_output_axes, _validate_xy_inputs
+from jaxgsa._core.validation import _squeeze_output_axes
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.pawn._result import PAWNResult
 from jaxgsa.problem import Problem, _categorical_dims
@@ -456,49 +452,44 @@ def analyze(
             not one of ``"median"``/``"max"``/``"mean"``, ``n_bins < 2``,
             ``conf_level`` is not in ``(0, 1)``, ``slice_chunk_size`` is
             given and is not a positive integer, ``on_invalid`` is not one
-            of the three policies, or the non-finite policy refuses the
-            sample.
+            of the three policies, ``n_bootstrap < 0``, or the non-finite
+            policy refuses the sample.
+    Warns:
+        JaxgsaWarning: If an output slice has zero variance. Every
+            conditional distribution then equals the unconditional one, so
+            the corresponding indices are an exact 0 rather than an answer.
     """
-    X = jnp.asarray(X)
-    # PAWN conditions on bins of each input and compares output CDFs, so a
-    # declared input correlation does not invalidate the indices. A
-    # categorical input gets one class per level, so an unordered input is
-    # fine too: the level code is already a bin index.
-    Y = _validate_xy_inputs(
-        problem,
-        X,
-        Y,
-        correlation_ok=True,
-        categorical_ok=True,
-        method="jaxgsa.pawn.analyze",
-    )
-    # Before any transform, and before binning above all: a non-finite input
-    # would otherwise take the out-of-range sentinel and leave every
-    # conditional set without a word.
-    method = "jaxgsa.pawn.analyze"
-    policy = resolve_policy(on_invalid, method=method, unit=InvalidUnit.ROW)
-    keep, invalid = check_invalid(
-        policy=policy,
-        method=method,
-        unit=InvalidUnit.ROW,
-        n_units=int(X.shape[0]),
-        X=X,
-        Y=Y,
-        min_kept=_MIN_KEPT,
-    )
-    if not keep.all():
-        X = X[keep]
-        Y = Y[keep]
-    if statistic not in ("median", "max", "mean"):
-        raise ValueError(f"statistic must be 'median', 'max', or 'mean', got {statistic!r}")
-    if n_bins < 2:
-        raise ValueError(f"n_bins must be >= 2, got {n_bins}")
-    if not 0 < conf_level < 1:
-        raise ValueError(f"conf_level must be in (0, 1), got {conf_level}")
-    if slice_chunk_size is not None and slice_chunk_size < 1:
-        raise ValueError(f"slice_chunk_size must be >= 1, got {slice_chunk_size}")
+    from jaxgsa.pawn import SPEC
 
-    Y_3d, squeeze_time, squeeze_output = _prepare_Y(Y)
+    # The non-finite check runs before any transform, and before binning above
+    # all: a non-finite input would otherwise take the out-of-range sentinel
+    # and leave every conditional set without a word.
+    ctx = prepare(
+        SPEC,
+        problem,
+        Y,
+        X=X,
+        on_invalid=on_invalid,
+        checks=(
+            require(
+                statistic in ("median", "max", "mean"),
+                f"statistic must be 'median', 'max', or 'mean', got {statistic!r}",
+            ),
+            at_least("n_bins", n_bins, 2),
+            at_least("n_bootstrap", n_bootstrap, 0),
+            in_open_interval("conf_level", conf_level, 0.0, 1.0),
+            at_least("slice_chunk_size", slice_chunk_size, 1),
+        ),
+        min_kept=_MIN_KEPT,
+        # A constant slice leaves every conditional distribution equal to
+        # the unconditional one, so the indices come out an exact 0, not
+        # the NaN a variance ratio would give.
+        zero_variance_outcome="zero",
+    )
+    assert ctx.X is not None  # X was passed, so prepare validated and returned it
+    X, invalid = ctx.X, ctx.invalid
+    Y_3d = ctx.Y3
+    squeeze_time, squeeze_output = ctx.squeeze_time, ctx.squeeze_output
     bin_idx, n_eff = _bin_indices(problem, X, n_bins)
 
     pawn_3d = _pawn_core(bin_idx, Y_3d, n_eff, statistic, slice_chunk_size)

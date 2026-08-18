@@ -17,21 +17,14 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core.batching import get_memory_budget
-from jaxgsa._core.invalid import (
-    InvalidReport,
-    InvalidUnit,
-    OnInvalid,
-    check_invalid,
-    resolve_policy,
-)
+from jaxgsa._core.entry import prepare
+from jaxgsa._core.invalid import InvalidReport, OnInvalid
 from jaxgsa._core.surrogate import _PredictPlan
 from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa._core.validation import (
     _prenormalize_outputs,
     _prepare_Y,
     _squeeze_output_axes,
-    _validate_xy_inputs,
-    _warn_zero_variance_slices,
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.hdmr._engine import (
@@ -306,34 +299,14 @@ def analyze_hdmr(
             :func:`_analyze_hdmr_core` raises for the remaining argument
             checks.
     """
-    method = "jaxgsa.hdmr.analyze"
-    policy = resolve_policy(on_invalid, method=method, unit=InvalidUnit.ROW)
-    X = jnp.asarray(X)
-    # HDMR's ANCOVA decomposition separates structural (Sa) from
-    # correlation-induced (Sb) variance, so correlated problems are welcome.
-    Y = _validate_xy_inputs(problem, X, jnp.asarray(Y), correlation_ok=True, method=method)
-    # The non-finite check lives in this public wrapper only, next to the two
-    # warnings below and for the same reason: callers routing through
-    # `_analyze_hdmr_core` must not have the policy applied a second time.
-    # X and Y are checked jointly, so a bad input takes its own output with it
-    # and the rows stay aligned.
-    keep, invalid = check_invalid(
-        policy=policy,
-        method=method,
-        unit=InvalidUnit.ROW,
-        n_units=int(X.shape[0]),
-        X=X,
-        Y=Y,
-        min_kept=_MIN_ROWS,
-    )
-    if not keep.all():
-        mask = jnp.asarray(keep)
-        X = X[mask]
-        Y = Y[mask]
-    # A constant output slice makes every index 0/0 = NaN; warn once up front,
-    # in the public wrapper only, so callers routing through the core (Shapley)
-    # do not double-warn.
-    _warn_zero_variance_slices(_prepare_Y(Y)[0], output_names=problem.output_names)
+    from jaxgsa.hdmr import SPEC
+
+    # The preamble runs in this public wrapper only. Callers routing through
+    # `_analyze_hdmr_core` (Shapley) must not have the policy applied, or the
+    # zero-variance warning issued, a second time.
+    ctx = prepare(SPEC, problem, Y, X=X, on_invalid=on_invalid, min_kept=_MIN_ROWS)
+    assert ctx.X is not None  # X was passed, so prepare validated and returned it
+    X, Y, invalid = ctx.X, ctx.Y, ctx.invalid
     # ST and S1 change meaning under dependence; say so once per analyze call,
     # in the public wrapper only, so Shapley routing through the core stays
     # quiet.

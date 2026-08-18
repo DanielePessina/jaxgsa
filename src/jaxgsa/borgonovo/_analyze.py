@@ -61,19 +61,15 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core.bootstrap import _percentile_ci
-from jaxgsa._core.invalid import (
-    InvalidUnit,
-    OnInvalid,
-    check_invalid,
-    resolve_policy,
-)
+from jaxgsa._core.entry import at_least, in_open_interval, prepare, require
+from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.partition import (
     _mask_from_counts,
     _replicate_slice,
     build_partition_groups,
 )
 from jaxgsa._core.result import CIInfo
-from jaxgsa._core.validation import _prepare_Y, _squeeze_output_axes, _validate_xy_inputs
+from jaxgsa._core.validation import _squeeze_output_axes
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.borgonovo._result import DeltaResult
 from jaxgsa.problem import Problem, _categorical_dims
@@ -729,36 +725,41 @@ def analyze(
             the note above. It is raised again when the returned delta
             leaves ``[0, 1]`` by more than 0.05, which means the
             computation failed rather than returned an estimate.
+
+    Warns:
+        JaxgsaWarning: If an output slice has zero variance. Every
+            conditional density then equals the unconditional one, so delta
+            is an exact 0 rather than an answer.
     """
-    X = jnp.asarray(X)
-    # The delta estimator partitions on rank classes and compares output
-    # densities, so a declared input correlation does not invalidate it.
-    Y = _validate_xy_inputs(
+    from jaxgsa.borgonovo import SPEC
+
+    # A non-finite value has to be settled before the KDE runs. Left alone it
+    # would survive the whole estimate and the bootstrap, and then surface as
+    # an out-of-range delta, which reads as a bandwidth problem and is not one.
+    ctx = prepare(
+        SPEC,
         problem,
-        X,
         Y,
-        correlation_ok=True,
-        categorical_ok=True,
-        method="jaxgsa.borgonovo.analyze",
-    )
-    # A non-finite value has to be settled here, before the KDE runs. Left
-    # alone it would survive the whole estimate and the bootstrap, and then
-    # surface as an out-of-range delta, which reads as a bandwidth problem
-    # and is not one.
-    method = "jaxgsa.borgonovo.analyze"
-    policy = resolve_policy(on_invalid, method=method, unit=InvalidUnit.ROW)
-    keep, invalid = check_invalid(
-        policy=policy,
-        method=method,
-        unit=InvalidUnit.ROW,
-        n_units=int(X.shape[0]),
         X=X,
-        Y=Y,
+        on_invalid=on_invalid,
+        checks=(
+            at_least("grid_size", grid_size, 2),
+            at_least("n_bootstrap", n_bootstrap, 0),
+            in_open_interval("conf_level", conf_level, 0.0, 1.0),
+            require(
+                0 <= float(degenerate_tol) < 1,
+                f"degenerate_tol must be in [0, 1), got {degenerate_tol}",
+            ),
+            at_least("slice_chunk_size", slice_chunk_size, 1),
+        ),
         min_kept=_MIN_KEPT,
+        # A constant slice leaves every conditional distribution equal to
+        # the unconditional one, so the indices come out an exact 0, not
+        # the NaN a variance ratio would give.
+        zero_variance_outcome="zero",
     )
-    if not keep.all():
-        X = X[keep]
-        Y = Y[keep]
+    assert ctx.X is not None  # X was passed, so prepare validated and returned it
+    X, Y, invalid = ctx.X, ctx.Y, ctx.invalid
     # Check the continuous-output contract before any expensive work.
     _raise_discrete_output(problem, Y)
 
@@ -783,19 +784,12 @@ def analyze(
                 stacklevel=2,
                 category=JaxgsaWarning,
             )
-    if grid_size < 2:
-        raise ValueError(f"grid_size must be >= 2, got {grid_size}")
     bw_factor = _resolve_sentinel_float(bandwidth, "bandwidth", "silverman")
-    if n_bootstrap < 0:
-        raise ValueError(f"n_bootstrap must be >= 0, got {n_bootstrap}")
-    if not 0 < conf_level < 1:
-        raise ValueError(f"conf_level must be in (0, 1), got {conf_level}")
     degenerate_tol = float(degenerate_tol)
-    if not 0 <= degenerate_tol < 1:
-        raise ValueError(f"degenerate_tol must be in [0, 1), got {degenerate_tol}")
     degenerate_bw = _resolve_sentinel_float(degenerate_bandwidth, "degenerate_bandwidth", "auto")
 
-    Y_3d, squeeze_time, squeeze_output = _prepare_Y(Y)
+    Y_3d = ctx.Y3
+    squeeze_time, squeeze_output = ctx.squeeze_time, ctx.squeeze_output
     _, T, K = Y_3d.shape
     D = problem.num_vars
     Y_cols = Y_3d.reshape(N, T * K)
