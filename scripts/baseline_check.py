@@ -211,6 +211,16 @@ def main(argv: list[str] | None = None) -> int:
             "Used by CI to diff two commits dumped on the same runner."
         ),
     )
+    parser.add_argument(
+        "--allow-schema-change",
+        action="store_true",
+        help=(
+            "Exit 0 when the only differences are gained or lost fields. Used "
+            "by CI, which asks whether a change moved a number; a new field is "
+            "a deliberate edit to the result surface and is reviewed in the "
+            "diff. The local check against the stored file leaves this off."
+        ),
+    )
     parser.add_argument("--quiet", action="store_true", help="no progress output")
     args = parser.parse_args(argv)
 
@@ -253,7 +263,12 @@ def main(argv: list[str] | None = None) -> int:
             "  uv run scripts/baseline_dump.py --out scripts/baseline/baseline-<version>.json"
         )
 
-    return 1 if diffs.values else 2
+    if diffs.values:
+        return 1
+    if args.allow_schema_change:
+        print("\nSchema changes only, and --allow-schema-change was passed. No number moved.")
+        return 0
+    return 2
 
 
 if __name__ == "__main__":

@@ -94,8 +94,13 @@ jobs:
           uv sync --extra dev
           uv run python scripts/baseline_dump.py --out /tmp/head.json --quiet
 
+      # --allow-schema-change: this job asks whether the change moved a
+      # number. A result that gains or loses a field is a deliberate edit to
+      # the public surface, reviewed in the diff like any other, and it must
+      # not read as a numerical regression. Moved values still fail.
       - name: Compare the two dumps
         if: steps.base.outputs.skip != 'true'
         run: |
           uv run python scripts/baseline_check.py \
-            --baseline /tmp/base.json --current /tmp/head.json
+            --baseline /tmp/base.json --current /tmp/head.json \
+            --allow-schema-change

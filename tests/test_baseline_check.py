@@ -161,6 +161,53 @@ class TestComparingTwoStoredDumps:
         )
 
 
+class TestAllowSchemaChange:
+    """CI asks one question: did this change move a number?
+
+    A result that gains a field is a deliberate edit to the public surface,
+    reviewed in the diff like any other. Blocking it on the numerical guard
+    would mean every PR that touches a result class goes red for the wrong
+    reason. Moved values must still fail.
+    """
+
+    def _write(self, path, results):
+        path.write_text(json.dumps({"header": {"git_commit": "test"}, "results": results}))
+
+    def test_a_schema_change_passes_when_allowed(self, tmp_path, baseline, capsys):
+        base, head = tmp_path / "base.json", tmp_path / "head.json"
+        self._write(base, baseline)
+        self._write(head, {"method": {**baseline["method"], "ci": {"level": 0.95}}})
+        code = baseline_check.main(
+            ["--baseline", str(base), "--current", str(head), "--allow-schema-change"]
+        )
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "schema change(s)" in out, "the change must still be reported, just not fatal"
+
+    def test_a_moved_value_still_fails_when_schema_changes_are_allowed(
+        self, tmp_path, baseline, capsys
+    ):
+        """The flag must not become a way to wave a wiring error through."""
+        base, head = tmp_path / "base.json", tmp_path / "head.json"
+        self._write(base, baseline)
+        self._write(
+            head,
+            {"method": {"S1": _array([1.0, 999.0]), "streamed": False, "ci": {"level": 0.95}}},
+        )
+        code = baseline_check.main(
+            ["--baseline", str(base), "--current", str(head), "--allow-schema-change"]
+        )
+        assert code == 1
+        assert "999.0" in capsys.readouterr().out
+
+    def test_the_default_still_treats_a_schema_change_as_a_failure(self, tmp_path, baseline):
+        """The local check against the stored file keeps the strict behaviour."""
+        base, head = tmp_path / "base.json", tmp_path / "head.json"
+        self._write(base, baseline)
+        self._write(head, {"method": {**baseline["method"], "ci": {"level": 0.95}}})
+        assert baseline_check.main(["--baseline", str(base), "--current", str(head)]) == 2
+
+
 class TestTheTwoKindsStaySeparate:
     def test_a_gained_field_does_not_hide_a_moved_number(self, baseline):
         """The regression this split exists to prevent.
