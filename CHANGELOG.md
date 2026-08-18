@@ -2,7 +2,13 @@
 
 ## Unreleased (0.9.0)
 
-Version 0.9.0 is a breaking release. It carries fixes only, with no new method.
+Version 0.9.0 fixes defects. It adds no method and breaks no API.
+
+There is one deliberate change of behaviour, and it is a correctness fix: an
+analysis that meets a non-finite model output now raises by default instead of
+dropping rows or continuing. `on_invalid=` selects the old behaviour. See the
+entry below.
+
 `PLAN-V1.0.md` records the whole plan and the order of the work.
 
 ### Added
