@@ -69,6 +69,7 @@ from jaxgsa._core.validation import (
     _squeeze_output_axes,
     _validate_xy_inputs,
 )
+from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.optimal_transport._result import OTResult
 from jaxgsa.optimal_transport._solver import _sinkhorn_w2
 from jaxgsa.problem import Problem, _categorical_dims
@@ -508,7 +509,7 @@ def analyze(
             and always use one class per level. A passed value is always
             validated against ``[2, N // 2]``. If every parameter is
             categorical and ``dummy`` is false, nothing uses the value and
-            a ``UserWarning`` says it is ignored.
+            a ``JaxgsaWarning`` says it is ignored.
         standardize: Joint modes only. Divide each output column by its
             standard deviation before building the transport cost, so no
             single output dominates the joint distance through its units.
@@ -603,6 +604,7 @@ def analyze(
                 "categorical (one conditioning class per level) and no dummy "
                 "baseline was requested",
                 stacklevel=2,
+                category=JaxgsaWarning,
             )
     if not epsilon > 0:
         raise ValueError(f"epsilon must be > 0, got {epsilon}")
@@ -787,6 +789,7 @@ def analyze(
                 f"tol={tol:g} within max_iter={max_iter}; results use the last "
                 "iterate (consider raising max_iter or epsilon)",
                 stacklevel=2,
+                category=JaxgsaWarning,
             )
 
     hats = {"ot": ot_all[0], "advective": adv_all[0], "diffusive": diff_all[0]}

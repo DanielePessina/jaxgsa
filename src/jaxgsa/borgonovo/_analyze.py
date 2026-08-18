@@ -66,6 +66,7 @@ from jaxgsa._core.partition import (
     build_partition_groups,
 )
 from jaxgsa._core.validation import _prepare_Y, _squeeze_output_axes, _validate_xy_inputs
+from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.borgonovo._result import DeltaResult
 from jaxgsa.problem import Problem, _categorical_dims
 
@@ -442,7 +443,7 @@ def analyze(
             equal to the observed level counts. Declared levels with no
             observed samples are dropped with a warning. A passed value is
             always validated against ``[2, N]``. When every parameter is
-            categorical, a ``UserWarning`` says the value is ignored.
+            categorical, a ``JaxgsaWarning`` says the value is ignored.
         grid_size: Number of points of the output grid the densities are
             compared on. The grid spans ``[Y.min(), Y.max()]`` per column.
             It is also the resolution knob for near-degenerate
@@ -518,9 +519,9 @@ def analyze(
         at small sample sizes. A constant output column yields
         ``delta = S1 = 0``, where SALib raises an error. A conditioning
         class the output grid cannot resolve gets a floored KDE bandwidth
-        instead of its own, together with one ``UserWarning``; classes with
+        instead of its own, together with one ``JaxgsaWarning``; classes with
         genuine spread are unaffected. A confidence bound outside
-        ``[0, 1]`` by more than 0.05 raises a ``UserWarning`` naming the
+        ``[0, 1]`` by more than 0.05 raises a ``JaxgsaWarning`` naming the
         parameter and the bound. The point estimate still stands in that
         case, so only the interval is suspect.
 
@@ -567,6 +568,7 @@ def analyze(
                 "jaxgsa: n_classes is ignored because every parameter is "
                 "categorical (one conditioning class per level)",
                 stacklevel=2,
+                category=JaxgsaWarning,
             )
     if grid_size < 2:
         raise ValueError(f"grid_size must be >= 2, got {grid_size}")
@@ -638,6 +640,7 @@ def analyze(
             "input depends on grid_size and is biased low; raise grid_size "
             "if you need a calibrated value",
             stacklevel=2,
+            category=JaxgsaWarning,
         )
 
     d_all = jnp.concatenate(d_parts, axis=1).reshape(R, T, K, D)
@@ -762,7 +765,7 @@ def _warn_conf_out_of_range(problem: Problem, delta_conf: Array) -> None:
             first.
 
     Warns:
-        UserWarning: If a bound leaves the range, naming the parameters and
+        JaxgsaWarning: If a bound leaves the range, naming the parameters and
             which bound failed.
     """
     parts = []
@@ -784,6 +787,7 @@ def _warn_conf_out_of_range(problem: Problem, delta_conf: Array) -> None:
         "distrust. Raise n_bootstrap, or raise grid_size if a conditioning "
         "class is near degenerate.",
         stacklevel=3,
+        category=JaxgsaWarning,
     )
 
 

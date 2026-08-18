@@ -559,7 +559,20 @@ result = jaxgsa.sobol.analyze(sampling_result, Y)
 # No need for a time dimension; (N, 1, 4) also works but is unnecessary.
 ```
 
-jaxgsa also resolves layouts that are off but unambiguously recoverable. Two cases qualify: a transposed `(K, N)` array, and a 3D `(N, K, T)` array whose middle axis matches `len(output_names)`. jaxgsa fixes them and emits a `UserWarning` that names the transformation. Ambiguous layouts raise. jaxgsa never guesses.
+jaxgsa also resolves layouts that are off but unambiguously recoverable. Two cases qualify: a transposed `(K, N)` array, and a 3D `(N, K, T)` array whose middle axis matches `len(output_names)`. jaxgsa fixes them and emits a `JaxgsaWarning` that names the transformation. Ambiguous layouts raise. jaxgsa never guesses.
+
+`JaxgsaWarning` is the category of every warning that jaxgsa raises. It is a subclass of `UserWarning`, so code that already filters on `UserWarning` keeps working. Use the jaxgsa class when you want to select jaxgsa warnings alone:
+
+```python
+import warnings
+from jaxgsa import JaxgsaWarning
+
+# Silence them.
+warnings.filterwarnings("ignore", category=JaxgsaWarning)
+
+# Or turn them into errors. Pick one of the two lines, not both.
+warnings.simplefilter("error", JaxgsaWarning)
+```
 
 ---
 

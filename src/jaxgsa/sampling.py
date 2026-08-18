@@ -201,7 +201,7 @@ def fit_correlation(problem: Problem, X: npt.ArrayLike) -> np.ndarray:
     Categorical parameters are excluded from the fit: their level codes
     carry no order, so a rank correlation over them would depend on the
     arbitrary code assignment. Their rows and columns come back as exact
-    identity (independent), with one ``UserWarning`` naming them.
+    identity (independent), with one ``JaxgsaWarning`` naming them.
     Polychoric estimation is future work.
 
     Args:

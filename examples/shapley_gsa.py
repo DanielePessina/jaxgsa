@@ -187,7 +187,7 @@ def _order_md(mo):
     the allocation, and $\mathrm{Sh}$ always sums to 1 — so the
     fit-quality signal lives in `explained_variance`
     ($\sum_u V_u / \mathrm{Var}(Y)$), reported separately rather than
-    silently renormalized away.  jaxgsa emits a `UserWarning` when it
+    silently renormalized away.  jaxgsa emits a `JaxgsaWarning` when it
     drops below 0.5 (much of $\mathrm{Var}(Y)$ unexplained — watch the
     low-order runs below) or exceeds 1.3 (an overfit surrogate
     over-counting variance).  Sweeping the polynomial order shows the

@@ -223,26 +223,57 @@ def _stable_unique_rows(samples: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         maps each original row position in ``samples`` back to the retained
         unique row index.
     """
-    # Ensure C-contiguous layout so tobytes() gives a consistent byte representation
+    # Ensure C-contiguous layout so the byte view below is well defined.
     samples = np.ascontiguousarray(samples)
-    unique_rows: list[np.ndarray] = []
-    expanded_to_unique = np.empty(samples.shape[0], dtype=np.int64)
+    n_rows, n_cols = samples.shape
+
+    if n_rows == 0:
+        return (
+            np.empty((0, n_cols), dtype=samples.dtype),
+            np.empty(0, dtype=np.int64),
+        )
+    if n_cols == 0:
+        # Every row holds the same (empty) value, so one row survives.
+        return samples[:1].copy(), np.zeros(n_rows, dtype=np.int64)
+
+    # Compare whole rows as raw bytes. This keeps the exact-match semantics of
+    # the old ``row.tobytes()`` key: two rows merge only when they are bitwise
+    # equal, so 0.0 and -0.0 stay distinct and equal NaN patterns still merge.
+    # Exact deduplication is what we want here: if two rows are bitwise equal,
+    # evaluating the model twice is wasteful.
+    #
+    # The void view turns each row into one Python ``bytes`` object, and
+    # ``tolist()`` builds all N of them in one C loop. That is the expensive
+    # part of the old per-row Python loop, which paid for a fresh array view
+    # plus a ``tobytes()`` call on every row. Hashing the keys in a dict then
+    # costs far less than sorting them.
+    #
+    # Measured on an M1 Pro at the hot case (N=2**20, D=20, float64): the old
+    # per-row loop took 1099 ms, ``np.unique`` over the same void view took
+    # 1128 ms (it falls back to a generic comparison sort with memcmp
+    # callbacks, so it loses to hashing once rows are wide), ``np.lexsort``
+    # over the columns took 5431 ms, and this form took 325 ms. Do not replace
+    # this with a sort-based form without re-measuring.
+    keys = samples.view(np.dtype((np.void, samples.dtype.itemsize * n_cols))).ravel().tolist()
+
+    # ``setdefault`` numbers the rows in first-appearance order: the label of a
+    # new row is the number of distinct rows seen before it.
     seen: dict[bytes, int] = {}
+    setdefault = seen.setdefault
+    expanded_to_unique = np.fromiter(
+        (setdefault(key, len(seen)) for key in keys),
+        dtype=np.int64,
+        count=n_rows,
+    )
 
-    for idx, row in enumerate(samples):
-        # ``row.tobytes()`` gives a stable exact-match key for the already
-        # scaled floating-point row. Exact deduplication is what we want here:
-        # if two rows are bitwise equal, evaluating the model twice is wasteful.
-        key = row.tobytes()
-        unique_idx = seen.get(key)
-        if unique_idx is None:
-            unique_idx = len(unique_rows)
-            seen[key] = unique_idx
-            unique_rows.append(row.copy())
-        expanded_to_unique[idx] = unique_idx
-
-    if unique_rows:
-        unique_samples = np.vstack(unique_rows)
-    else:
-        unique_samples = np.empty((0, samples.shape[1]), dtype=samples.dtype)
+    # A row is a first occurrence exactly when its label is higher than every
+    # label before it, because the labels rise by one on each new row.
+    is_first = np.empty(n_rows, dtype=bool)
+    is_first[0] = True
+    np.greater(
+        expanded_to_unique[1:],
+        np.maximum.accumulate(expanded_to_unique)[:-1],
+        out=is_first[1:],
+    )
+    unique_samples = samples[np.flatnonzero(is_first)]
     return unique_samples, expanded_to_unique

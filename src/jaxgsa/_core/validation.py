@@ -17,6 +17,8 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from jaxgsa._core.warning_types import JaxgsaWarning
+
 if TYPE_CHECKING:
     from jaxgsa.problem import Problem
 
@@ -529,7 +531,7 @@ def _warn_zero_variance_slices(
             msg = f"jaxgsa: output '{output_names[0]}' has zero variance — all indices will be NaN"
         else:
             msg = "jaxgsa: output has zero variance — all indices will be NaN"
-        warnings.warn(msg, stacklevel=2)
+        warnings.warn(msg, stacklevel=2, category=JaxgsaWarning)
         return
 
     # Materialize indices eagerly -- this is a rare warning path, not a hot loop.
@@ -547,6 +549,7 @@ def _warn_zero_variance_slices(
             f"jaxgsa: {n_zero}/{n_outputs} output(s) have zero variance "
             f"({label_str}) — corresponding indices will be NaN",
             stacklevel=2,
+            category=JaxgsaWarning,
         )
     elif len(trailing) == 2:  # multi-timestep: flat index encodes (t, k) in row-major order
         affected = []
@@ -563,6 +566,7 @@ def _warn_zero_variance_slices(
             f"jaxgsa: {n_zero}/{n_outputs} output slice(s) have zero variance "
             f"[{label_str}] — corresponding indices will be NaN",
             stacklevel=2,
+            category=JaxgsaWarning,
         )
 
 

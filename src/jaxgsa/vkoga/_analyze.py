@@ -38,6 +38,7 @@ from jaxgsa._core.validation import (
     _validate_xy_inputs,
     _warn_zero_variance_slices,
 )
+from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.problem import Problem
 from jaxgsa.vkoga._engine import _cross_validate, _fit_vkoga, _predict_vkoga
 from jaxgsa.vkoga._indices import estimate_correlated_indices
@@ -131,7 +132,7 @@ def analyze_vkoga(
         RuntimeError: If every cross-validation score is non-finite.
 
     Warns:
-        UserWarning: In any of four cases. An output slice has zero variance.
+        JaxgsaWarning: In any of four cases. An output slice has zero variance.
             JAX is in single precision, where the kernel solve loses accuracy
             for small ``gamma`` (see :mod:`jaxgsa.vkoga`). The cross-validated
             surrogate error is a large fraction of the output standard
@@ -283,6 +284,7 @@ def _warn_single_precision() -> None:
             "small gamma and the surrogate may be inaccurate. Enable float64 with "
             'jax.config.update("jax_enable_x64", True) before fitting.',
             stacklevel=3,
+            category=JaxgsaWarning,
         )
 
 
@@ -406,7 +408,7 @@ def _warn_poor_surrogate(cv_rmse: float | None, Y_centered: Array) -> None:
             scale to compare against.
 
     Warns:
-        UserWarning: If ``cv_rmse`` is above ``_CV_RMSE_WARN_FRACTION`` of the
+        JaxgsaWarning: If ``cv_rmse`` is above ``_CV_RMSE_WARN_FRACTION`` of the
             pooled output standard deviation.
     """
     if cv_rmse is None:
@@ -425,6 +427,7 @@ def _warn_poor_surrogate(cv_rmse: float | None, Y_centered: Array) -> None:
         "greedy Gaussian kernel cannot resolve. Add training points, or use a method that does "
         "not need a surrogate (jaxgsa.kucherenko on a conditional design).",
         stacklevel=3,
+        category=JaxgsaWarning,
     )
 
 

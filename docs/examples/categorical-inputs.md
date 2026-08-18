@@ -86,7 +86,7 @@ comes from a shift in the output mean, as opposed to a change in the shape of
 the distribution.
 
 A declared level with no observed samples is dropped from the class
-average, with a `UserWarning`. `n_partitions` / `n_classes` / `n_bins`
+average, with a `JaxgsaWarning`. `n_partitions` / `n_classes` / `n_bins`
 apply to the continuous columns only. PAWN gives a level with too few
 samples a `NaN` KS value and drops it from the median, max, or mean over
 bins, so a rare level cannot distort the index.
@@ -123,7 +123,7 @@ noise. The conditional density is then a spike. The delta estimator
 compares densities on a shared output grid of `grid_size` points, and it
 cannot resolve a spike much narrower than one grid step. jaxgsa widens
 such a class to a bandwidth the grid can integrate and emits a
-`UserWarning`.
+`JaxgsaWarning`.
 
 Two things follow from this:
 
@@ -166,7 +166,7 @@ One caveat: a categorical column collapses whole probability bins onto
 one code, so low-cardinality problems have few distinct rows. The sampler
 normally inflates the design until it has `n_samples` unique rows; for
 categorical problems it stops when the achievable distinct-row count is
-reached and keeps duplicate rows, with a `UserWarning`. Duplicate rows
+reached and keeps duplicate rows, with a `JaxgsaWarning`. Duplicate rows
 are valid Saltelli samples — deduplication only saves model evaluations.
 
 ::: warning `sr.samples` is an evaluation set, not a sample

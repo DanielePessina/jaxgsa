@@ -314,6 +314,48 @@ class TestDownsample:
         sr = sample(UNIT_PROBLEM, n_trajectories=5, seed=1, verbose=False)
         assert sr.downsample(5) is sr
 
+    def test_downsample_clears_the_earlier_block_loss(self):
+        """Tier T4 (internal consistency): the caller asked for this size.
+
+        ``n_blocks_dropped`` counts trajectories the user asked for and did
+        not get. ``downsample`` gives the caller exactly the count they name,
+        so an earlier loss no longer applies and must not reach ``analyze``.
+        """
+        sr = sample(UNIT_PROBLEM, n_trajectories=20, seed=1, verbose=False)
+        sr = replace(sr, n_blocks_dropped=6)
+        sr_small = sr.downsample(8)
+        assert sr_small.n_trajectories == 8
+        assert sr_small.n_blocks_dropped == 0
+
+    def test_same_size_downsample_also_clears_the_block_loss(self):
+        """Tier T4 (internal consistency): the answer cannot hinge on the size.
+
+        Asking for the size you already have is still asking for a size and
+        receiving it, so it clears the count for the same reason a smaller
+        request does. Were it otherwise, ``downsample(r)`` and
+        ``downsample(r - 1)`` would give different answers about the same
+        design, and one trajectory in the argument would decide whether
+        ``analyze`` warns.
+        """
+        sr = sample(UNIT_PROBLEM, n_trajectories=5, seed=1, verbose=False)
+        sr = replace(sr, n_blocks_dropped=3)
+        assert sr.downsample(5).n_blocks_dropped == 0
+        assert sr.downsample(4).n_blocks_dropped == 0
+
+    def test_downsampled_design_is_silent_in_analyze(self):
+        """Tier T4 (internal consistency): no "requested" count is invented.
+
+        With the loss carried forward, ``analyze`` reported more requested
+        trajectories than the caller ever asked for.
+        """
+        sr = sample(linear.PROBLEM, n_trajectories=20, seed=1, verbose=False)
+        sr = replace(sr, n_blocks_dropped=6)
+        Y = np.asarray(linear.evaluate(jnp.asarray(sr.samples)))
+        sr_small, Y_small = sr.downsample(8, Y)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            analyze(sr_small, jnp.asarray(Y_small))
+
     def test_invalid_raises(self):
         sr = sample(UNIT_PROBLEM, n_trajectories=5, seed=1, verbose=False)
         with pytest.raises(ValueError, match="upsample"):

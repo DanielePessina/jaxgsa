@@ -182,13 +182,13 @@ Indices are normalized by the surrogate's total decomposed variance
 fits poorly. The fit-quality signal is reported separately in
 `explained_variance = sum_u V_u / Var(Y)`: close to 1 for a good fit,
 below 1 when truncation or fit error leaves variance unexplained, above 1
-when an overfit surrogate over-counts shared variance. A `UserWarning` is
+when an overfit surrogate over-counts shared variance. A `JaxgsaWarning` is
 emitted when it drops below 0.5 or exceeds 1.3 — check it before trusting
 the allocation.
 
 ```python
 result_low = jaxgsa.pce.analyze(PROBLEM, X, Y1, order=2).shapley()
-# UserWarning: jaxgsa: surrogate explained_variance is below 0.5 ...
+# JaxgsaWarning: jaxgsa: surrogate explained_variance is below 0.5 ...
 print(result_low.Sh.sum())              # still exactly 1
 print(result_low.explained_variance)    # ~0.4 — do not trust these shares
 ```

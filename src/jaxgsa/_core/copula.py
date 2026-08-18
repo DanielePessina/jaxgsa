@@ -27,6 +27,7 @@ import numpy.typing as npt
 from scipy.stats import norm, qmc, rankdata
 
 from jaxgsa._core.sampling import _transform_samples
+from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.problem import Problem
 
 # Eigenvalues below this are lifted when repairing a non-PD correlation matrix.
@@ -291,7 +292,7 @@ def fit_gaussian_copula(problem: Problem, X: np.ndarray) -> np.ndarray:
     Categorical parameters have unordered level codes, so a rank correlation
     over them would depend on the arbitrary code order. Their rows and
     columns are forced to exact identity (independent) and one
-    ``UserWarning`` names them; polychoric estimation is future work. The
+    ``JaxgsaWarning`` names them; polychoric estimation is future work. The
     continuous pairs are fitted normally.
 
     Args:
@@ -338,6 +339,7 @@ def fit_gaussian_copula(problem: Problem, X: np.ndarray) -> np.ndarray:
             "future work.",
             # The public entry point is jaxgsa.sampling.fit_correlation.
             stacklevel=3,
+            category=JaxgsaWarning,
         )
         latent = _force_categorical_identity(latent, cat_dims)
 
@@ -481,6 +483,7 @@ def _project_to_correlation(
                 "check the matrix for inconsistent pairwise correlations or redundant "
                 "parameters.",
                 stacklevel=2,
+                category=JaxgsaWarning,
             )
     elif change >= _REPAIR_MATERIAL:
         # A fit is never refused: it is the data that is inconsistent, not the
@@ -490,6 +493,7 @@ def _project_to_correlation(
             "the data it came from is close to rank deficient — check for duplicated "
             "or collinear columns.",
             stacklevel=2,
+            category=JaxgsaWarning,
         )
     return current
 

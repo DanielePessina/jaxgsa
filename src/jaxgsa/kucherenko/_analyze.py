@@ -53,6 +53,7 @@ from jaxgsa._core.validation import (
     _validate_output,
     _warn_zero_variance_slices,
 )
+from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.kucherenko._result import KucherenkoResult
 from jaxgsa.kucherenko._sampling import KucherenkoSamples
 
@@ -82,7 +83,7 @@ def analyze(sampling_result: KucherenkoSamples, Y: Array) -> KucherenkoResult:
         ValueError: If ``Y``'s shape violates the output contract.
 
     Warns:
-        UserWarning: If any output slice has zero variance (its indices are
+        JaxgsaWarning: If any output slice has zero variance (its indices are
             NaN), or if non-finite outputs force base points to be dropped.
     """
     problem = sampling_result.problem
@@ -105,6 +106,7 @@ def analyze(sampling_result: KucherenkoSamples, Y: Array) -> KucherenkoResult:
             f"jaxgsa: dropped {n_dropped} of {N} base points because a model output "
             "in their group is non-finite",
             stacklevel=2,
+            category=JaxgsaWarning,
         )
         F = F[:, finite, :]
         if F.shape[1] < 2:

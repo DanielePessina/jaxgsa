@@ -5,6 +5,21 @@
 Version 0.9.0 is a breaking release. It carries fixes only, with no new method.
 `PLAN-V1.0.md` records the whole plan and the order of the work.
 
+### Added
+
+- **`jaxgsa.JaxgsaWarning`**, exported from the package root. Every warning the
+  package raises now passes this category. Before, all of them defaulted to
+  `UserWarning`, so the only way to tell a jaxgsa warning from a NumPy or JAX
+  one was the message text, and no filter selected exactly this package's
+  warnings. To silence them:
+
+  ```python
+  warnings.filterwarnings("ignore", category=jaxgsa.JaxgsaWarning)
+  ```
+
+  `JaxgsaWarning` subclasses `UserWarning`, so filters and
+  `pytest.warns(UserWarning, ...)` assertions that worked before still work.
+
 ### Changed
 
 - **NumPy is now a declared dependency**, at `numpy>=2`. NumPy is imported
@@ -13,6 +28,24 @@ Version 0.9.0 is a breaking release. It carries fixes only, with no new method.
   get a NumPy the package does not support.
 - **The SciPy floor rises to `scipy>=1.15`**, from `>=1.10`. This makes
   `scipy.stats.chatterjeexi` always available as a verification oracle.
+
+### Performance
+
+- **Row deduplication is about 3.4 times faster.** `_stable_unique_rows` runs
+  twice on the Sobol sampling path and once on the Morris path. It built one
+  array view and one `bytes` key per row in Python. It now builds every key in
+  one C-level call and keeps the dictionary that was already doing the work.
+  Measured on an Apple M1 Pro at `N = 2**20`, `D = 20`, float64: 1099 ms
+  before, 325 ms after. Output is bit-identical, including row order, which
+  matters because the design prefix logic depends on it.
+
+### Fixed
+
+- `MorrisSamples.downsample` no longer carries a previous design's dropped-block
+  count into the smaller design. A `downsample` caller names the trajectory
+  count and receives exactly it, so nothing is missing. Carrying the count
+  forward made `morris.analyze` warn about a "requested" total the user had
+  never asked for.
 
 ### Removed
 

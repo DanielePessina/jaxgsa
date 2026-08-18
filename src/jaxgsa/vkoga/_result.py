@@ -51,7 +51,7 @@ class VKOGAResult(SurrogateResult):
             fitted additive component of the output, so this is the
             decorrelated first-order index of Mara & Tarantola (2012). It is
             clipped to at most ``S_TU``, and a wide clip raises a
-            ``UserWarning``.
+            ``JaxgsaWarning``.
         S_C: Correlation-borne contribution ``S_TC - S_U``, shape ``(..., D)``.
             It can be negative when a correlation opposes a direct effect.
         S_IU: Independent interaction contribution ``S_TU - S_U``, shape

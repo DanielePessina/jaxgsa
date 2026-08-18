@@ -29,6 +29,7 @@ from jaxgsa._core.validation import (
     _squeeze_output_axes,
     _validate_output,
 )
+from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.morris._result import MorrisResult
 from jaxgsa.morris._sampling import MorrisSamples
 
@@ -243,13 +244,13 @@ def analyze(
             if ``chunk_size < 1``.
 
     Warns:
-        UserWarning: If the design holds fewer trajectories than the user
+        JaxgsaWarning: If the design holds fewer trajectories than the user
             asked for. Non-finite cleaning removes trajectories here, and a
             derived design can already have lost blocks with no measurable
             step. The message names the cause, and it adds a reliability note
             when fewer than 10 trajectories remain. A small design that the
             user asked for is deliberate, so it gives no warning.
-        UserWarning: If an output slice has zero variance.
+        JaxgsaWarning: If an output slice has zero variance.
     """
     if ci_method not in {"quantile", "gaussian"}:
         raise ValueError("ci_method must be one of {'quantile', 'gaussian'}")
@@ -296,7 +297,7 @@ def analyze(
             message += (
                 f" — results may be statistically unreliable (recommend >= {_MIN_TRAJECTORIES})"
             )
-        warnings.warn(message, stacklevel=2)
+        warnings.warn(message, stacklevel=2, category=JaxgsaWarning)
 
     if remaining < 2:
         raise ValueError("Fewer than 2 trajectories remain after cleaning")
@@ -321,6 +322,7 @@ def analyze(
             f"jaxgsa: {which} zero variance — the corresponding screening "
             "measures (mu, mu_star, sigma) will be 0",
             stacklevel=2,
+            category=JaxgsaWarning,
         )
 
     ee = _elementary_effects(Y, idx_after, idx_before, delta)  # (r, D, T, K)

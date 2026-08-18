@@ -30,6 +30,7 @@ from jaxgsa._core.validation import (
     _validate_output,
     _warn_zero_variance_slices,
 )
+from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.sobol._indices import (
     _fused_first_total,
     _fused_second_order,
@@ -543,6 +544,7 @@ def analyze(
             f"({pct:.1f}%) containing non-finite values; "
             f"{remaining} groups remain",
             stacklevel=2,
+            category=JaxgsaWarning,
         )
         if Y.shape[0] == 0:
             raise ValueError("All samples contain non-finite values")
@@ -553,6 +555,7 @@ def analyze(
                 f"non-finite values — results may be statistically unreliable "
                 f"(recommend >= {_MIN_GROUPS})",
                 stacklevel=2,
+                category=JaxgsaWarning,
             )
 
     if prenormalize:

@@ -61,6 +61,7 @@ from jaxgsa._core.copula import (
     latent_normal_sample,
 )
 from jaxgsa._core.legendre import legendre_orthonormal
+from jaxgsa._core.warning_types import JaxgsaWarning
 
 # Degree of the marginal Legendre basis used to recover the first-order
 # component functions f_i. Six terms capture the smooth univariate shapes a
@@ -229,7 +230,7 @@ def _clip_independent_part(S_U: np.ndarray, S_TU: np.ndarray) -> np.ndarray:
         ``S_U`` clipped elementwise to at most ``S_TU``.
 
     Warns:
-        UserWarning: If any entry is clipped by more than
+        JaxgsaWarning: If any entry is clipped by more than
             ``_S_U_CLIP_TOLERANCE`` of the output variance.
     """
     excess = S_U - S_TU
@@ -245,6 +246,7 @@ def _clip_independent_part(S_U: np.ndarray, S_TU: np.ndarray) -> np.ndarray:
             "S_IU for those parameters as indicative only. S_TC and S_TU are unaffected.",
             # 1 here, 2 estimate_correlated_indices, 3 analyze_vkoga, 4 the caller.
             stacklevel=4,
+            category=JaxgsaWarning,
         )
     return np.minimum(S_U, S_TU)
 

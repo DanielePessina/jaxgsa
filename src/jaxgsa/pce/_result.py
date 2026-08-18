@@ -103,7 +103,7 @@ class PCEResult(SurrogateResult):
                 diagnostic (e.g. constructed by hand without one).
 
         Warns:
-            UserWarning: If ``explained_variance`` indicates a pathological
+            JaxgsaWarning: If ``explained_variance`` indicates a pathological
                 fit (well below 1, or above 1, which is an overfit), making
                 the Shapley effects unreliable.
         """

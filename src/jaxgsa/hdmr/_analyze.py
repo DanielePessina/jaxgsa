@@ -25,6 +25,7 @@ from jaxgsa._core.validation import (
     _validate_xy_inputs,
     _warn_zero_variance_slices,
 )
+from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.hdmr._engine import (
     _build_B1,
     _build_B2,
@@ -204,6 +205,7 @@ def _warn_correlated_index_reading(problem: Problem) -> None:
         "(ST) or jaxgsa.vkoga (S_TU). The per-term Sa/Sb/S fields are "
         "unaffected.",
         stacklevel=3,
+        category=JaxgsaWarning,
     )
 
 
@@ -362,7 +364,7 @@ def _analyze_hdmr_core(
         Use one of those when you need a genuine total under dependence.
         ``S1`` is the structural share only, not the Sobol first-order index.
         The per-term ``Sa``, ``Sb`` and ``S`` fields keep their ANCOVA
-        meaning. A correlated problem emits one ``UserWarning`` that says
+        meaning. A correlated problem emits one ``JaxgsaWarning`` that says
         this.
 
     Raises:
@@ -395,6 +397,7 @@ def _analyze_hdmr_core(
         warnings.warn(
             f"jaxgsa: maxorder clamped to {maxorder} (need D >= maxorder, got D={D})",
             stacklevel=2,
+            category=JaxgsaWarning,
         )
     if slice_chunk_size is not None and slice_chunk_size < 1:
         raise ValueError(f"slice_chunk_size must be >= 1, got {slice_chunk_size}")

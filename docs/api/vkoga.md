@@ -46,7 +46,7 @@ under:
 | Value | Meaning |
 | --- | --- |
 | `None` (default) | Read `problem.correlation`. Independent (identity matrix) when the problem declares none. |
-| `(D, D)` array | Override the problem's declaration for this call. The matrix must be symmetric with a unit diagonal. If it is not positive definite, `analyze` projects it to the nearest positive-definite matrix and emits a `UserWarning`. |
+| `(D, D)` array | Override the problem's declaration for this call. The matrix must be symmetric with a unit diagonal. If it is not positive definite, `analyze` projects it to the nearest positive-definite matrix and emits a `JaxgsaWarning`. |
 
 To fit a matrix from observed data, use
 `jaxgsa.sampling.fit_correlation(problem, X_data)` and attach it with
@@ -104,7 +104,7 @@ result.
 2. Enable float64. The coefficient solve forms $A^\top A$, which squares the
    condition number of the cross kernel, and float32 cannot carry it for small
    `gamma`. Call `jax.config.update("jax_enable_x64", True)` before fitting.
-   `analyze` emits a `UserWarning` when x64 is off.
+   `analyze` emits a `JaxgsaWarning` when x64 is off.
 
 ## References
 

@@ -64,7 +64,7 @@ The measure is the largest change to a single entry, on the scale you declared:
 | Largest entry change | What happens |
 |---|---|
 | below `1e-6` | nothing. This is floating-point noise. |
-| `1e-6` to `0.05` | a `UserWarning` reports the change and the minimum eigenvalue. |
+| `1e-6` to `0.05` | a `JaxgsaWarning` reports the change and the minimum eigenvalue. |
 | `0.05` or more | a `ValueError`. The matrix is structurally inconsistent. |
 
 So you never silently sample a different dependence structure than you

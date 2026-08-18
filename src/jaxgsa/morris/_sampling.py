@@ -22,7 +22,7 @@ References:
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, Mapping, overload
 
 import jax.numpy as jnp
@@ -37,6 +37,7 @@ from jaxgsa._core.sampling import (
     _transform_samples,
 )
 from jaxgsa._core.validation import _raise_categorical_design, _raise_correlated_design
+from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.problem import Problem
 
 # Offset between the Sobol' draws used for the radial base points (a) and the
@@ -96,6 +97,10 @@ class MorrisSamples(UniqueDesignSamples):
             positive only for a design derived from another method, such as
             :meth:`jaxgsa.sobol.SobolSamples.to_morris`. The analysis reports
             the loss, because the user did not ask for a smaller design.
+            :meth:`downsample` resets it to 0, whatever size is asked for:
+            the caller names the size and gets it, so no trajectory is
+            missing. A design that came through a lossy conversion is still
+            warned about at the conversion itself.
     """
 
     samples: np.ndarray  # shape (n_unique, D), scaled to bounds
@@ -158,7 +163,13 @@ class MorrisSamples(UniqueDesignSamples):
             )
         self._validate_downsample_Y(Y)
         if n_trajectories == self.n_trajectories:
-            return (self, Y) if Y is not None else self
+            # Same size, so every array is already right. Only the dropped-block
+            # count can differ, and it is reset here for the same reason it is
+            # reset below: the caller named this size and received it. Returning
+            # ``self`` unchanged would make the count depend on whether the
+            # requested size happened to equal the current one.
+            same = self if self.n_blocks_dropped == 0 else replace(self, n_blocks_dropped=0)
+            return (same, Y) if Y is not None else same
 
         new_expanded_n = n_trajectories * (self.n_params + 1)
         samples_small, new_exp2uniq, _, Y_small = self._prefix_slice(new_expanded_n, Y)
@@ -175,9 +186,13 @@ class MorrisSamples(UniqueDesignSamples):
             ee_delta=self.ee_delta[:n_trajectories].copy(),
             n_params=self.n_params,
             problem=self.problem,
-            # The earlier loss stays part of this design's history. The new
-            # smaller size is deliberate, but the dropped blocks are not.
-            n_blocks_dropped=self.n_blocks_dropped,
+            # The count answers one question: how many trajectories did the
+            # user ask for but not get? A downsample answers it afresh. The
+            # caller named ``n_trajectories`` here and receives exactly that,
+            # so nothing is missing from this design and the earlier loss no
+            # longer applies. Carrying the old count forward would make
+            # analyze() report a "requested" total the user never asked for.
+            n_blocks_dropped=0,
         )
 
         if Y_small is not None:
@@ -268,7 +283,7 @@ def _radial_samples_from_blocks(
         ValueError: If fewer than two blocks are left with a measurable step.
 
     Warns:
-        UserWarning: If any block is dropped because its base and perturbed
+        JaxgsaWarning: If any block is dropped because its base and perturbed
             points coincide at the model's floating-point resolution.
     """
     D = problem.num_vars
@@ -299,6 +314,7 @@ def _radial_samples_from_blocks(
             # Reached through a caller's conversion method, so the user's frame
             # is two levels up rather than one.
             stacklevel=3,
+            category=JaxgsaWarning,
         )
 
     n_blocks = int(block_rows.shape[0])
@@ -622,6 +638,7 @@ def sample(
             f"jaxgsa: num_levels={num_levels} is odd — grid levels are not equally "
             "probable and steps land off-grid; an even value is recommended",
             stacklevel=2,
+            category=JaxgsaWarning,
         )
 
     D = problem.num_vars

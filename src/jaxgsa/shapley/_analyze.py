@@ -20,6 +20,7 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core.validation import _raise_categorical_analysis
+from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.shapley._engine import shapley_from_variances
 from jaxgsa.shapley._result import ShapleyResult
 
@@ -105,12 +106,14 @@ def _warn_pathological_fit(explained_variance: Array) -> None:
             f"jaxgsa: surrogate explained_variance exceeds {_OVERFIT_THRESHOLD}; "
             "Shapley effects may be unreliable",
             stacklevel=_external_stacklevel(),
+            category=JaxgsaWarning,
         )
     elif bool(jnp.any(ev < _POORFIT_THRESHOLD)):
         warnings.warn(
             f"jaxgsa: surrogate explained_variance is below {_POORFIT_THRESHOLD}; "
             "Shapley effects may be unreliable",
             stacklevel=_external_stacklevel(),
+            category=JaxgsaWarning,
         )
 
 
@@ -151,7 +154,7 @@ def _shapley_result_from_variances(
         provenance fields.
 
     Warns:
-        UserWarning: If ``explained`` flags a pathological fit (well below
+        JaxgsaWarning: If ``explained`` flags a pathological fit (well below
             1, or above 1, which is an overfit).
     """
     normalized = _normalize_partial_variances(partial, explained, total)

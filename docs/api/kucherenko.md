@@ -64,7 +64,7 @@ the paired product over the shared-$X_i$ rows for `S1` and the Jansen squared
 difference over the shared-$\mathbf{X}_{\sim i}$ rows for `ST`. The exact
 formulas are stated in the `jaxgsa.kucherenko._analyze` module docstring.
 
-Two conditions raise a `UserWarning` instead of an error:
+Two conditions raise a `JaxgsaWarning` instead of an error:
 
 - A base point whose output is non-finite anywhere. `analyze` drops the whole
   group of rows for that base point. Check the model for failed runs, because

@@ -53,6 +53,7 @@ from jaxgsa._core.bootstrap import _percentile_ci
 from jaxgsa._core.partition import _extract_categorical_codes
 from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa._core.validation import _prepare_Y, _squeeze_output_axes, _validate_xy_inputs
+from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.pawn._result import PAWNResult
 from jaxgsa.problem import Problem, _categorical_dims
 
@@ -270,6 +271,7 @@ def _pawn_core(
                 warnings.warn(
                     f"PAWN: all bins empty for parameter {d}, returning NaN",
                     stacklevel=3,
+                    category=JaxgsaWarning,
                 )
 
     pawn = _aggregate_ks(ks, statistic)  # (T*K, D)

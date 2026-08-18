@@ -210,7 +210,7 @@ Li et al. also attach a precondition to the totals. They are reliable only when 
 
 $S_1$ has the matching caveat: it is the structural share $S_a$ of the first-order term, not the Sobol' first-order index.
 
-When you need a conditional-variance total under dependence, use [Kucherenko](#kucherenko-dependent-input-sobol-indices) ($S_T$) or [VKOGA](#vkoga-correlated-input-variance-indices) ($S_{TU}$, the parameter-fixing measure). HDMR's own contribution under dependence is the per-term $S_a$ versus $S_b$ split, which neither of those provides. `jaxgsa.hdmr.analyze()` emits one `UserWarning` on a correlated problem to say all of this.
+When you need a conditional-variance total under dependence, use [Kucherenko](#kucherenko-dependent-input-sobol-indices) ($S_T$) or [VKOGA](#vkoga-correlated-input-variance-indices) ($S_{TU}$, the parameter-fixing measure). HDMR's own contribution under dependence is the per-term $S_a$ versus $S_b$ split, which neither of those provides. `jaxgsa.hdmr.analyze()` emits one `JaxgsaWarning` on a correlated problem to say all of this.
 :::
 
 ### When to use it
@@ -280,7 +280,7 @@ Both backends accept scalar `(N,)`, multi-output `(N, K)`, and time-series `(N, 
 
 Normalization is by the surrogate's total decomposed variance $\sum_u V_u$, so $\sum_i \mathrm{Sh}_i = 1$ exactly — the Shapley efficiency property (Owen, 2014). $S_1$ and $S_T$ from the same surrogate use the same denominator. For `backend="pce"` they therefore match `jaxgsa.pce.analyze` exactly. For `backend="hdmr"` they differ from `jaxgsa.hdmr.analyze`, which normalizes by $\mathrm{Var}(Y)$, by a factor of `explained_variance`.
 
-How much of the output variance the surrogate actually captured is reported separately in the `explained_variance` field, $\sum_u V_u / \mathrm{Var}(Y)$. It is close to 1 for a good fit, below 1 when truncation or fit error leaves variance unexplained, and above 1 when an overfit surrogate over-counts shared variance. It is an honest diagnostic rather than a silently renormalized result. A `UserWarning` is emitted when it strays far from 1. Interactions above `maxorder` (HDMR) or the polynomial order (PCE) are absent from the allocation.
+How much of the output variance the surrogate actually captured is reported separately in the `explained_variance` field, $\sum_u V_u / \mathrm{Var}(Y)$. It is close to 1 for a good fit, below 1 when truncation or fit error leaves variance unexplained, and above 1 when an overfit surrogate over-counts shared variance. It is an honest diagnostic rather than a silently renormalized result. A `JaxgsaWarning` is emitted when it strays far from 1. Interactions above `maxorder` (HDMR) or the polynomial order (PCE) are absent from the allocation.
 
 ### How to use it
 
@@ -909,7 +909,7 @@ import jax
 jax.config.update("jax_enable_x64", True)  # before fitting
 ```
 
-`jaxgsa.vkoga.analyze()` emits a `UserWarning` when x64 is off. Cross validation partly self-corrects, because the scores are computed in the same arithmetic and so penalise the blown-up corner of the grid, but the ceiling is real.
+`jaxgsa.vkoga.analyze()` emits a `JaxgsaWarning` when x64 is off. Cross validation partly self-corrects, because the scores are computed in the same arithmetic and so penalise the blown-up corner of the grid, but the ceiling is real.
 
 ### When to use it
 
@@ -977,7 +977,16 @@ D is always the last axis. Confidence interval arrays (when using bootstrap) pre
 
 How a 2-D `Y` is read depends on `problem.output_names`. Without it, a 2-D `Y` is always `(N, K)`: multiple outputs, no time dimension. With exactly one entry in `output_names` and more than one column, a 2-D `(N, M)` `Y` is read as `M` timepoints of that single labeled output and flows through as `(N, M, 1)`, keeping the labeled output axis in results. A lone column `(N, 1)` stays a scalar output `(N, K=1)`; pass `(N, 1, 1)` explicitly for a genuine 1-timepoint series. With several entries, the column count must equal `len(output_names)`. A 1-D `(N,)` `Y` is one output regardless of how many names are declared.
 
-You need not pass exactly the canonical layout, because every public entry point resolves `Y` through the same inference ladder. Exact canonical shapes pass silently. Unambiguously recoverable layouts — a transposed `(K, N)` array, or a 3-D `(N, K, T)` array whose middle axis matches `len(output_names)` — are fixed with a `UserWarning` naming the transformation. Ambiguous layouts raise. jaxgsa never guesses.
+You need not pass exactly the canonical layout, because every public entry point resolves `Y` through the same inference ladder. Exact canonical shapes pass silently. Unambiguously recoverable layouts — a transposed `(K, N)` array, or a 3-D `(N, K, T)` array whose middle axis matches `len(output_names)` — are fixed with a `JaxgsaWarning` naming the transformation. Ambiguous layouts raise. jaxgsa never guesses.
+
+Every warning that jaxgsa raises uses the `JaxgsaWarning` category. The class is a subclass of `UserWarning`, so a filter on `UserWarning` still catches it. Filter on `JaxgsaWarning` to select the jaxgsa warnings alone:
+
+```python
+import warnings
+from jaxgsa import JaxgsaWarning
+
+warnings.filterwarnings("ignore", category=JaxgsaWarning)
+```
 
 Time-series outputs are particularly useful for dynamic models. Watching the sensitivity indices evolve over time reveals which parameters dominate at different stages of a process — for example, a parameter that is highly influential early in a batch but negligible later.
 

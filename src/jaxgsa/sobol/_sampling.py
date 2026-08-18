@@ -30,6 +30,7 @@ from jaxgsa._core.sampling import (
     _transform_samples,
 )
 from jaxgsa._core.validation import _raise_categorical_design, _raise_correlated_design
+from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.problem import Problem, _categorical_dims
 
 if TYPE_CHECKING:
@@ -229,7 +230,7 @@ class SobolSamples(UniqueDesignSamples):
                 still accept a categorical problem.
 
         Warns:
-            UserWarning: If any parameter has an unbounded Gaussian marginal.
+            JaxgsaWarning: If any parameter has an unbounded Gaussian marginal.
                 ``mu_star`` then has no fixed scale, because how far the design
                 reaches into the tail sets its magnitude. The Saltelli design
                 and :func:`jaxgsa.morris.sample` reach different distances (the
@@ -241,7 +242,7 @@ class SobolSamples(UniqueDesignSamples):
                 radial measures agree: measured ratios 0.999 (linear), 0.997
                 (``x^2``), 0.988 (``x^4``), 0.987 (``exp(x^2/3)``), each within
                 its own seed-to-seed spread.
-            UserWarning: If any block is dropped for having a near-zero step.
+            JaxgsaWarning: If any block is dropped for having a near-zero step.
                 The radial design of :func:`jaxgsa.morris.sample` offsets the
                 auxiliary points by four draws. Saltelli instead takes ``A``
                 and ``B`` from one Sobol' row, so the two can coincide. This is
@@ -432,6 +433,7 @@ def _warn_unbounded_gaussian(problem: Problem) -> None:
         "across designs",
         # Reached from SobolSamples.to_morris, so the user's frame is two up.
         stacklevel=3,
+        category=JaxgsaWarning,
     )
 
 
@@ -598,6 +600,7 @@ def sample(
                     "keeps its duplicate rows. Duplicates are valid Saltelli "
                     "samples; deduplication only saves model evaluations",
                     stacklevel=2,
+                    category=JaxgsaWarning,
                 )
                 break
             prev_unique = n_unique

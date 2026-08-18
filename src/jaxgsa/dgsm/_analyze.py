@@ -27,6 +27,7 @@ from jaxgsa._core.validation import (
     _validate_output,
     _validate_x,
 )
+from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.dgsm._poincare import axis_constants
 from jaxgsa.dgsm._result import DGSMResult
 from jaxgsa.problem import Problem
@@ -290,6 +291,7 @@ def analyze(
             "DGSM: some upper bounds are below lower bounds, suggesting "
             "insufficient samples or numerical issues",
             stacklevel=2,
+            category=JaxgsaWarning,
         )
 
     # Drop the singleton axes _prepare_Y inserted; var_y has no trailing param

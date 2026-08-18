@@ -34,6 +34,8 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from jaxgsa._core.warning_types import JaxgsaWarning
+
 if TYPE_CHECKING:
     from jaxgsa.problem import Problem
 
@@ -137,6 +139,7 @@ def _warn_empty_levels(
                 # analyze() -> build_partition_groups() -> here; point at
                 # the caller of analyze().
                 stacklevel=4,
+                category=JaxgsaWarning,
             )
 
 
@@ -295,7 +298,7 @@ def build_partition_groups(
             than its integer level codes.
 
     Warns:
-        UserWarning: If a declared categorical level has no observed
+        JaxgsaWarning: If a declared categorical level has no observed
             samples (its class is dropped with zero weight).
     """
     N = X.shape[0]

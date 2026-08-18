@@ -63,7 +63,7 @@ import jax
 jax.config.update("jax_enable_x64", True)
 ```
 
-`jaxgsa.vkoga.analyze()` emits a `UserWarning` if you forget.
+`jaxgsa.vkoga.analyze()` emits a `JaxgsaWarning` if you forget.
 
 ## Import style
 

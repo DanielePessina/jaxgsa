@@ -467,7 +467,7 @@ class Problem:
                 matrix declaring the dependence between parameters. ``None``
                 (default) means independent inputs. Validated on entry. A
                 slightly non-positive-definite matrix is repaired and reported
-                with a ``UserWarning``. A matrix whose repair would have to
+                with a ``JaxgsaWarning``. A matrix whose repair would have to
                 move an entry by 0.05 or more is rejected with a
                 ``ValueError``.
             correlation_kind: Scale ``correlation`` is expressed on:

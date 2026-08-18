@@ -192,17 +192,20 @@ def _select_centers(
         # 1 everywhere; the empty basis subtracts nothing.
         jnp.ones((), dtype=dtype),
         jnp.max(y_norm / res_scale),
+        # Squared power function at every point, carried so the loop body reads
+        # it instead of rebuilding it. The empty basis subtracts nothing, so an
+        # open point starts at 1 and a blocked point is never a candidate.
+        jnp.where(blocked0, -jnp.inf, jnp.ones((n,), dtype=dtype)),
     )
 
     def _cond(state: tuple) -> Array:
-        _, _, _, _, m, power, res = state
+        _, _, _, _, m, power, res, _ = state
         # All three stopping rules, first to trigger wins.
         return (m < max_centers) & (power > tol_power) & (res > tol_residual)
 
     def _body(state: tuple) -> tuple:
-        V, residual, blocked, idx, m, _, _ = state
+        V, residual, blocked, idx, m, _, _, p2 = state
 
-        p2 = jnp.where(blocked, -jnp.inf, 1.0 - jnp.sum(V * V, axis=1))
         i = jnp.argmax(p2)
         # p2 = 1 - sum(V^2) is a cancellation: once the basis nearly spans the
         # space the true value is ~0 and float32 rounding pushes it negative.
@@ -241,9 +244,9 @@ def _select_centers(
         # summing over the active training rows. Relative to each slice's own
         # norm, so the rule is scale-free.
         res = jnp.max(jnp.sqrt(jnp.sum(residual**2, axis=0)) / res_scale)
-        return (V, residual, blocked, idx, m, power, res)
+        return (V, residual, blocked, idx, m, power, res, p2_next)
 
-    _, _, _, idx, m, _, _ = jax.lax.while_loop(_cond, _body, init)
+    _, _, _, idx, m, _, _, _ = jax.lax.while_loop(_cond, _body, init)
     return idx, m
 
 

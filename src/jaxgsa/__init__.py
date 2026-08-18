@@ -17,11 +17,13 @@ from . import (
     sobol,
     vkoga,
 )
+from ._core.warning_types import JaxgsaWarning
 from .problem import CategoricalInputSpec, GaussianInputSpec, Problem, UniformInputSpec
 
 __all__ = [
     "CategoricalInputSpec",
     "GaussianInputSpec",
+    "JaxgsaWarning",
     "Problem",
     "UniformInputSpec",
     "borgonovo",

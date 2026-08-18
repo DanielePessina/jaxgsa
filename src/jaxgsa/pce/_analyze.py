@@ -19,6 +19,7 @@ from jaxgsa._core.validation import (
     _validate_xy_inputs,
     _warn_zero_variance_slices,
 )
+from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.pce._engine import (
     build_design_matrix,
     build_multi_index,
@@ -309,6 +310,7 @@ def _fit_pce_core(
             f"jaxgsa: PCE order reduced from {order} to {effective_order} to keep the "
             f"term count within the sample budget (fit_ratio={fit_ratio}, N={N})",
             stacklevel=3,
+            category=JaxgsaWarning,
         )
     mi = build_multi_index(D, effective_order)
     n_terms = mi.shape[0]

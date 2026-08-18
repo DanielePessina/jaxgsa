@@ -15,6 +15,12 @@ sampling and analysis commands for the method.
 Construct problems with `Problem.from_dict(...)`. Uniform inputs may use the
 short `(low, high)` form. Gaussian inputs use `GaussianInputSpec`.
 
+The package root also holds `jaxgsa.JaxgsaWarning`, the category of every
+warning that jaxgsa raises. It is a subclass of `UserWarning`, so existing
+`UserWarning` filters keep working. Filter on `JaxgsaWarning` to select the
+jaxgsa warnings alone, for example
+`warnings.filterwarnings("ignore", category=JaxgsaWarning)`.
+
 ### Categorical inputs
 
 Declare a categorical parameter as

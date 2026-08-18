@@ -124,7 +124,7 @@ way.
   `(N, T)` — timepoints of that single output — and flows through as
   `(N, T, 1)`. Passing a pre-reshaped `(N, T, 1)` array also works.
 - Obvious layout mistakes (e.g. a transposed array) are fixed with a
-  `UserWarning`; ambiguous layouts raise.
+  `JaxgsaWarning`; ambiguous layouts raise.
 
 ## Single-output edge case
 

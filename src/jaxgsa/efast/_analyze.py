@@ -30,6 +30,7 @@ from jaxgsa._core.validation import (
     _validate_output,
     _warn_zero_variance_slices,
 )
+from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.efast._result import EFASTResult
 from jaxgsa.efast._sampling import EFASTSamples
 
@@ -170,6 +171,7 @@ def analyze(
             f"eFAST: Y contains {n_bad} non-finite values (NaN/Inf) "
             "which will propagate into indices",
             stacklevel=2,
+            category=JaxgsaWarning,
         )
 
     Y = _validate_output(Y, samples.n_runs, problem)
@@ -204,6 +206,7 @@ def analyze(
             f"eFAST: {n_zero_curves} search-curve/output slice(s) have zero "
             "variance — corresponding indices will be NaN",
             stacklevel=2,
+            category=JaxgsaWarning,
         )
 
     if is_scalar:
@@ -251,6 +254,7 @@ def analyze(
             "eFAST: some indices are outside [0, 1], suggesting "
             "insufficient samples or near-zero output variance",
             stacklevel=2,
+            category=JaxgsaWarning,
         )
 
     return EFASTResult(
