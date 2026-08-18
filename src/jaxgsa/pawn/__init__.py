@@ -21,7 +21,22 @@ Example::
     result = pawn.analyze(problem, X, Y)
 """
 
+from jaxgsa._core.invalid import InvalidUnit
+from jaxgsa._core.registry import MethodSpec, register
 from jaxgsa.pawn._analyze import analyze
 from jaxgsa.pawn._result import PAWNResult
 
 __all__ = ["PAWNResult", "analyze"]
+
+SPEC = register(
+    MethodSpec(
+        name="pawn",
+        analyze=analyze,
+        sample=None,
+        result=PAWNResult,
+        correlation="accepts",
+        categorical="accepts",
+        bootstrap="n_bootstrap",
+        invalid_unit=InvalidUnit.ROW,
+    )
+)

@@ -27,7 +27,24 @@ Example::
     result = borgonovo.analyze(problem, X, Y)
 """
 
+from jaxgsa._core.invalid import InvalidUnit
+from jaxgsa._core.registry import MethodSpec, register
 from jaxgsa.borgonovo._analyze import analyze
 from jaxgsa.borgonovo._result import DeltaResult
 
 __all__ = ["DeltaResult", "analyze"]
+
+SPEC = register(
+    MethodSpec(
+        name="borgonovo",
+        analyze=analyze,
+        sample=None,
+        result=DeltaResult,
+        correlation="accepts",
+        categorical="accepts",
+        # The only method whose bootstrap is on by default (n_bootstrap=100),
+        # because the bias correction needs it.
+        bootstrap="n_bootstrap",
+        invalid_unit=InvalidUnit.ROW,
+    )
+)

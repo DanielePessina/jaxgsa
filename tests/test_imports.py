@@ -1,48 +1,57 @@
-"""Tests for the namespace-only public API."""
+"""Tests for the namespace-only public API.
+
+The method namespaces are enumerated from the registry, never listed here. An
+earlier hand-written list in this file covered eleven of the thirteen methods:
+``kucherenko`` and ``vkoga`` were exported in ``jaxgsa.__all__`` and were not
+checked, because adding a method meant remembering to edit this list and
+nothing said so. ``tests/test_registry.py`` proves the registry is complete
+against the source tree, so deriving from it here is safe.
+"""
+
+import pytest
 
 import jaxgsa
+from jaxgsa._core.registry import methods
+
+ALL_SPECS = sorted(methods().values(), key=lambda s: s.name)
+SPEC_IDS = [s.name for s in ALL_SPECS]
 
 
-def test_root_exports_foundational_types_and_namespaces():
+def test_root_exports_foundational_types():
     assert isinstance(jaxgsa.Problem, type)
     assert isinstance(jaxgsa.GaussianInputSpec, type)
     assert isinstance(jaxgsa.UniformInputSpec, type)
 
-    for namespace in (
-        jaxgsa.borgonovo,
-        jaxgsa.config,
-        jaxgsa.dgsm,
-        jaxgsa.efast,
-        jaxgsa.hdmr,
-        jaxgsa.hsic,
-        jaxgsa.morris,
-        jaxgsa.optimal_transport,
-        jaxgsa.pawn,
-        jaxgsa.pce,
-        jaxgsa.sampling,
-        jaxgsa.shapley,
-        jaxgsa.sobol,
-    ):
-        assert namespace is not None
 
-
-def test_method_namespaces_expose_commands_and_results():
-    assert callable(jaxgsa.sobol.sample)
-    assert callable(jaxgsa.sobol.analyze)
-    assert isinstance(jaxgsa.sobol.SobolSamples, type)
-    assert isinstance(jaxgsa.sobol.SobolResult, type)
-
-    assert callable(jaxgsa.morris.sample)
-    assert callable(jaxgsa.morris.analyze)
-    assert isinstance(jaxgsa.morris.MorrisSamples, type)
-
-    assert callable(jaxgsa.pce.analyze)
-    assert isinstance(jaxgsa.pce.PCEResult, type)
-    assert callable(jaxgsa.hdmr.analyze)
-    assert isinstance(jaxgsa.hdmr.HDMRResult, type)
-
+def test_root_exports_the_support_namespaces():
+    assert jaxgsa.config is not None
+    assert jaxgsa.sampling is not None
     assert callable(jaxgsa.sampling.monte_carlo)
-    assert isinstance(jaxgsa.shapley.ShapleyResult, type)
+
+
+@pytest.mark.parametrize("spec", ALL_SPECS, ids=SPEC_IDS)
+def test_every_method_namespace_is_reachable_from_the_root(spec):
+    assert getattr(jaxgsa, spec.name) is not None
+
+
+@pytest.mark.parametrize("spec", ALL_SPECS, ids=SPEC_IDS)
+def test_every_method_exposes_analyze_and_a_result_type(spec):
+    namespace = getattr(jaxgsa, spec.name)
+    assert callable(namespace.analyze)
+    assert isinstance(spec.result, type)
+    assert getattr(namespace, spec.result.__name__) is spec.result
+
+
+@pytest.mark.parametrize("spec", ALL_SPECS, ids=SPEC_IDS)
+def test_a_design_based_method_exposes_sample_and_a_samples_type(spec):
+    namespace = getattr(jaxgsa, spec.name)
+    if not spec.is_design_based:
+        assert not hasattr(namespace, "sample")
+        return
+    assert callable(namespace.sample)
+    samples_types = [n for n in namespace.__all__ if n.endswith("Samples")]
+    assert len(samples_types) == 1, f"{spec.name} should export exactly one *Samples type"
+    assert isinstance(getattr(namespace, samples_types[0]), type)
 
 
 def test_removed_root_shortcuts_are_absent():

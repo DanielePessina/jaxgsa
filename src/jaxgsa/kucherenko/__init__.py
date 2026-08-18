@@ -33,8 +33,27 @@ References:
     Kucherenko, Tarantola & Annoni (2012). Comput. Phys. Commun. 183:937-946.
 """
 
+from jaxgsa._core.invalid import InvalidUnit
+from jaxgsa._core.registry import MethodSpec, register
 from jaxgsa.kucherenko._analyze import analyze
 from jaxgsa.kucherenko._result import KucherenkoResult
 from jaxgsa.kucherenko._sampling import KucherenkoSamples, sample
 
 __all__ = ["KucherenkoResult", "KucherenkoSamples", "analyze", "sample"]
+
+SPEC = register(
+    MethodSpec(
+        name="kucherenko",
+        analyze=analyze,
+        sample=sample,
+        result=KucherenkoResult,
+        # Deliberately exempt from the correlated-design guard on sobol,
+        # morris and efast: this sampler conditions on the dependence
+        # structure rather than assuming it away.
+        correlation="accepts",
+        categorical="refuses",
+        bootstrap=None,
+        # One base point carries the 2D+1 conditional rows drawn around it.
+        invalid_unit=InvalidUnit.BASE_POINT,
+    )
+)

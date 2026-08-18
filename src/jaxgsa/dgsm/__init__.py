@@ -19,8 +19,26 @@ Example::
     result = dgsm.analyze(problem, fn, jnp.asarray(X))
 """
 
+from jaxgsa._core.invalid import InvalidUnit
+from jaxgsa._core.registry import MethodSpec, register
 from jaxgsa.dgsm._analyze import analyze
 from jaxgsa.dgsm._poincare import axis_constants, poincare_constant
 from jaxgsa.dgsm._result import DGSMResult
 
 __all__ = ["DGSMResult", "analyze", "axis_constants", "poincare_constant"]
+
+SPEC = register(
+    MethodSpec(
+        name="dgsm",
+        analyze=analyze,
+        # Not design-based: it takes any X, or a precomputed Jacobian.
+        sample=None,
+        result=DGSMResult,
+        # A derivative with respect to a level code has no meaning, and the
+        # Poincare bound assumes a product measure.
+        correlation="refuses",
+        categorical="refuses",
+        bootstrap=None,
+        invalid_unit=InvalidUnit.ROW,
+    )
+)

@@ -45,7 +45,22 @@ References:
     Wirtz & Haasdonk (2013). Dolomites Res. Notes Approx. 6:83-100.
 """
 
+from jaxgsa._core.invalid import InvalidUnit
+from jaxgsa._core.registry import MethodSpec, register
 from jaxgsa.vkoga._analyze import analyze_vkoga as analyze
 from jaxgsa.vkoga._result import VKOGAResult
 
 __all__ = ["VKOGAResult", "analyze"]
+
+SPEC = register(
+    MethodSpec(
+        name="vkoga",
+        analyze=analyze,
+        sample=None,
+        result=VKOGAResult,
+        correlation="accepts",
+        categorical="refuses",
+        bootstrap=None,
+        invalid_unit=InvalidUnit.ROW,
+    )
+)

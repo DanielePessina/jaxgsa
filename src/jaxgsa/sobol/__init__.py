@@ -18,8 +18,26 @@ Example::
     result = sobol.analyze(sr, Y)
 """
 
+from jaxgsa._core.invalid import InvalidUnit
+from jaxgsa._core.registry import MethodSpec, register
 from jaxgsa.sobol._analyze import analyze
 from jaxgsa.sobol._result import SobolResult
 from jaxgsa.sobol._sampling import SobolSamples, sample
 
 __all__ = ["SobolResult", "SobolSamples", "analyze", "sample"]
+
+SPEC = register(
+    MethodSpec(
+        name="sobol",
+        analyze=analyze,
+        sample=sample,
+        result=SobolResult,
+        # The Saltelli design and its estimators assume independent inputs.
+        correlation="refuses",
+        categorical="accepts",
+        bootstrap="num_resamples",
+        # A Saltelli group is D+2 or 2D+2 rows for one base point. Dropping
+        # part of one leaves the estimator reading misaligned rows.
+        invalid_unit=InvalidUnit.SALTELLI_GROUP,
+    )
+)

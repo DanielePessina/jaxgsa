@@ -33,7 +33,22 @@ References:
     doi:10.1287/mnsc.2023.01796.
 """
 
+from jaxgsa._core.invalid import InvalidUnit
+from jaxgsa._core.registry import MethodSpec, register
 from jaxgsa.optimal_transport._analyze import analyze
 from jaxgsa.optimal_transport._result import OTResult
 
 __all__ = ["OTResult", "analyze"]
+
+SPEC = register(
+    MethodSpec(
+        name="optimal_transport",
+        analyze=analyze,
+        sample=None,
+        result=OTResult,
+        correlation="accepts",
+        categorical="accepts",
+        bootstrap="n_bootstrap",
+        invalid_unit=InvalidUnit.ROW,
+    )
+)

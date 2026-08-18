@@ -16,8 +16,25 @@ Example::
     result = morris.analyze(sr, Y)
 """
 
+from jaxgsa._core.invalid import InvalidUnit
+from jaxgsa._core.registry import MethodSpec, register
 from jaxgsa.morris._analyze import analyze
 from jaxgsa.morris._result import MorrisResult
 from jaxgsa.morris._sampling import MorrisSamples, sample
 
 __all__ = ["MorrisResult", "MorrisSamples", "analyze", "sample"]
+
+SPEC = register(
+    MethodSpec(
+        name="morris",
+        analyze=analyze,
+        sample=sample,
+        result=MorrisResult,
+        correlation="refuses",
+        categorical="refuses",
+        bootstrap="num_resamples",
+        # A trajectory is D+1 rows walked one parameter at a time. An
+        # elementary effect is a difference between two of its rows.
+        invalid_unit=InvalidUnit.TRAJECTORY,
+    )
+)
