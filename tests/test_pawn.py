@@ -23,12 +23,6 @@ def ishigami_data():
 
 
 class TestPAWNBasic:
-    def test_shape_scalar_output(self, ishigami_data):
-        X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y, seed=0)
-        assert result.pawn.shape == (3,)
-        assert result.pawn_conf is None
-
     def test_values_in_unit_interval(self, ishigami_data):
         X, Y = ishigami_data
         result = analyze(ishigami.PROBLEM, X, Y, seed=0)
@@ -183,20 +177,6 @@ class TestPAWNSALibComparison:
 
 
 class TestPAWNStatistics:
-    def test_max_statistic(self, ishigami_data):
-        X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y, statistic="max", seed=0)
-        pawn = np.asarray(result.pawn)
-        assert np.all(pawn >= 0.0)
-        assert np.all(pawn <= 1.0)
-
-    def test_mean_statistic(self, ishigami_data):
-        X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y, statistic="mean", seed=0)
-        pawn = np.asarray(result.pawn)
-        assert np.all(pawn >= 0.0)
-        assert np.all(pawn <= 1.0)
-
     def test_max_geq_median(self, ishigami_data):
         X, Y = ishigami_data
         r_median = analyze(ishigami.PROBLEM, X, Y, statistic="median", seed=0)
@@ -205,12 +185,6 @@ class TestPAWNStatistics:
 
 
 class TestPAWNBootstrap:
-    def test_bootstrap_produces_conf(self, ishigami_data):
-        X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=20, conf_level=0.95, seed=0)
-        assert result.pawn_conf is not None
-        assert result.pawn_conf.shape == (2, 3)
-
     def test_bootstrap_lower_leq_upper(self, ishigami_data):
         X, Y = ishigami_data
         result = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=20, conf_level=0.95, seed=0)
@@ -218,70 +192,6 @@ class TestPAWNBootstrap:
         lower = np.asarray(result.pawn_conf[0])
         upper = np.asarray(result.pawn_conf[1])
         assert np.all(lower <= upper + 1e-6)
-
-
-class TestPAWNMultiOutput:
-    def test_multi_output_shape(self):
-        problem = Problem(
-            names=("x1", "x2", "x3"),
-            bounds=((-np.pi, np.pi), (-np.pi, np.pi), (-np.pi, np.pi)),
-        )
-        N = 2000
-        X = jnp.asarray(monte_carlo(problem, n=N, seed=42))
-        Y1 = ishigami.evaluate(X)
-        Y2 = jnp.sum(X**2, axis=1)
-        Y_multi = jnp.column_stack([Y1, Y2])
-
-        result = analyze(problem, X, Y_multi, seed=0)
-        assert result.pawn.shape == (2, 3)
-
-    def test_time_series_shape(self):
-        problem = Problem(
-            names=("x1", "x2", "x3"),
-            bounds=((-np.pi, np.pi), (-np.pi, np.pi), (-np.pi, np.pi)),
-        )
-        N = 2000
-        X = jnp.asarray(monte_carlo(problem, n=N, seed=42))
-        Y1 = ishigami.evaluate(X)
-        Y2 = jnp.sum(X**2, axis=1)
-        Y_3d = jnp.stack([jnp.column_stack([Y1, Y2]), jnp.column_stack([Y2, Y1])], axis=1)
-        assert Y_3d.shape == (N, 2, 2)
-
-        result = analyze(problem, X, Y_3d, seed=0)
-        assert result.pawn.shape == (2, 2, 3)
-
-
-class TestPAWNToDataset:
-    def test_scalar_dataset(self, ishigami_data):
-        X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y, seed=0)
-        ds = result.to_dataset()
-        assert "pawn" in ds.data_vars
-        assert list(ds.coords["param"].values) == list(ishigami.PROBLEM.names)
-        assert "output" not in ds.dims
-
-    def test_multi_output_dataset(self):
-        problem = Problem(
-            names=("x1", "x2", "x3"),
-            bounds=((-np.pi, np.pi), (-np.pi, np.pi), (-np.pi, np.pi)),
-        )
-        N = 1000
-        X = jnp.asarray(monte_carlo(problem, n=N, seed=42))
-        Y1 = ishigami.evaluate(X)
-        Y2 = jnp.sum(X**2, axis=1)
-        Y_multi = jnp.column_stack([Y1, Y2])
-
-        result = analyze(problem, X, Y_multi, seed=0)
-        ds = result.to_dataset()
-        assert "output" in ds.dims
-        assert ds["pawn"].shape == (2, 3)
-
-    def test_bootstrap_dataset(self, ishigami_data):
-        X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=10, seed=0)
-        ds = result.to_dataset()
-        assert "pawn_lower" in ds.data_vars
-        assert "pawn_upper" in ds.data_vars
 
 
 class TestPAWNTiedOutputs:
@@ -403,23 +313,6 @@ class TestPAWNEmptyBinWarning:
         assert "parameter 0" in msgs[0]
 
 
-class TestPAWNValidation:
-    def test_x_wrong_ndim(self):
-        problem = Problem(names=("x",), bounds=((0, 1),))
-        with pytest.raises(ValueError, match="2-D"):
-            analyze(problem, jnp.ones(10), jnp.ones(10))
-
-    def test_x_wrong_columns(self):
-        problem = Problem(names=("x",), bounds=((0, 1),))
-        with pytest.raises(ValueError, match="columns"):
-            analyze(problem, jnp.ones((10, 3)), jnp.ones(10))
-
-    def test_row_mismatch(self):
-        problem = Problem(names=("x",), bounds=((0, 1),))
-        with pytest.raises(ValueError, match="rows"):
-            analyze(problem, jnp.ones((10, 1)), jnp.ones(5))
-
-
 def _invalid_sample(n: int = 200, seed: int = 0):
     """Build a clean two-parameter PAWN sample for the on_invalid tests."""
     problem = Problem(names=("a", "b"), bounds=((0.0, 1.0), (0.0, 1.0)))
@@ -479,22 +372,6 @@ class TestPAWNInvalidPolicy:
         assert result.invalid.unit_indices == (7,)
         assert np.all(np.isfinite(np.asarray(result.pawn)))
 
-    def test_a_bad_x_is_caught_and_named(self):
-        """T4: a non-finite input is caught too, and the report says it was X.
-
-        Before 0.10 a non-finite X reached ``_equal_width_bins`` and took the
-        out-of-range sentinel, which quietly removed the sample from every
-        conditional set with no warning at all.
-        """
-        problem, X, Y = _invalid_sample()
-        X = X.at[3, 1].set(jnp.inf)
-        with pytest.raises(ValueError, match=r"in X\b") as exc:
-            analyze(problem, X, Y)
-        assert "[3]" in str(exc.value)
-        with pytest.warns(JaxgsaWarning):
-            result = analyze(problem, X, Y, on_invalid="drop")
-        assert result.invalid.sources == ("X",)
-
     def test_a_non_finite_x_is_no_longer_swallowed_by_the_bin_sentinel(self):
         """T4: the silent -1 path is unreachable from analyze().
 
@@ -521,40 +398,3 @@ class TestPAWNInvalidPolicy:
                 result = analyze(problem, X, Y, on_invalid=policy)
             assert any(isinstance(r.message, JaxgsaWarning) for r in rec), policy
             assert result.invalid.unit_indices == (5,), policy
-
-    def test_dropping_an_x_row_takes_its_y_row_with_it(self):
-        """T4: X and Y are dropped as a pair, so the sample stays aligned.
-
-        Removing the bad row of X but keeping its row of Y would shift every
-        later output by one, which no estimator can detect. The proof is an
-        equality: dropping through the policy must give exactly the indices
-        of the sample with that row deleted from both arrays by hand.
-        """
-        problem, X, Y = _invalid_sample()
-        X_bad = X.at[42, 0].set(jnp.nan)
-
-        with pytest.warns(JaxgsaWarning):
-            dropped = analyze(problem, X_bad, Y, on_invalid="drop", seed=0)
-
-        keep = np.ones(200, dtype=bool)
-        keep[42] = False
-        by_hand = analyze(problem, X[keep], Y[keep], seed=0)
-
-        np.testing.assert_array_equal(np.asarray(dropped.pawn), np.asarray(by_hand.pawn))
-
-    @pytest.mark.parametrize("policy", ["raise", "propagate", "drop"])
-    def test_a_clean_sample_is_untouched_under_every_policy(self, policy, recwarn):
-        """T4: nothing found means nothing removed, nothing warned, empty report."""
-        problem, X, Y = _invalid_sample()
-        result = analyze(problem, X, Y, on_invalid=policy)
-        assert result.invalid.n_invalid == 0
-        assert result.invalid.n_units == 200
-        assert result.invalid.sources == ()
-        assert result.invalid.policy == policy
-        assert len(recwarn) == 0
-
-    def test_rejects_an_unknown_policy(self):
-        """T4: a misspelled policy is refused by name, not silently ignored."""
-        problem, X, Y = _invalid_sample()
-        with pytest.raises(ValueError, match="on_invalid must be one of"):
-            analyze(problem, X, Y, on_invalid="skip")

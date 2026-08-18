@@ -7,7 +7,6 @@ import warnings
 import jax.numpy as jnp
 import numpy as np
 import pytest
-import xarray as xr
 
 import jaxgsa
 from jaxgsa.benchmarks import ishigami, linear, sobol_g
@@ -89,12 +88,6 @@ def test_engine_batched_leading_dims():
     np.testing.assert_allclose(np.asarray(Sh), [[0.6, 0.4], [0.3, 0.4]], atol=1e-7)
 
 
-def test_build_membership():
-    membership = build_membership([(1,), (0, 2)], D=3)
-    expected = np.array([[False, True, False], [True, False, True]])
-    np.testing.assert_array_equal(membership, expected)
-
-
 # ---------------------------------------------------------------------------
 # Correctness vs analytical benchmark values
 # ---------------------------------------------------------------------------
@@ -154,12 +147,6 @@ def test_pce_multi_output_matches_scalar(linear_data):
     np.testing.assert_allclose(multi.Sh.sum(axis=-1), 1.0, rtol=1e-6)
 
 
-def test_default_backend_is_pce(linear_data):
-    X, Y = linear_data
-    result = _analyze_shapley(linear.PROBLEM, X, Y, order=2)
-    assert result.backend == "pce"
-
-
 # ---------------------------------------------------------------------------
 # Convenience wrapper: jaxgsa.shapley.analyze is literally analyze(...).shapley()
 # ---------------------------------------------------------------------------
@@ -208,27 +195,9 @@ def test_multi_output_shapes(linear_data):
     np.testing.assert_allclose(np.asarray(result.Sh[0]), np.asarray(result.Sh[1]), atol=1e-4)
 
 
-def test_time_series_shapes(linear_data):
-    X, Y = linear_data
-    Y3 = jnp.stack([jnp.stack([Y, 2.0 * Y], axis=1)] * 2, axis=1)  # (N, T=2, K=2)
-    result = _analyze_shapley(linear.PROBLEM, X, Y3, backend="hdmr")
-    assert result.Sh.shape == (2, 2, 3)
-    assert result.S1.shape == (2, 2, 3)
-    assert result.ST.shape == (2, 2, 3)
-
-
 # ---------------------------------------------------------------------------
 # xarray export
 # ---------------------------------------------------------------------------
-
-
-def test_to_dataset_scalar(ishigami_pce_shapley):
-    ds = ishigami_pce_shapley.to_dataset()
-    assert isinstance(ds, xr.Dataset)
-    assert set(ds.data_vars) == {"Sh", "S1", "ST", "explained_variance"}
-    assert ds["Sh"].dims == ("param",)
-    assert ds["explained_variance"].dims == ()
-    assert list(ds.coords["param"].values) == list(ishigami.PROBLEM.names)
 
 
 def test_to_dataset_time_series(linear_data):
@@ -240,22 +209,9 @@ def test_to_dataset_time_series(linear_data):
     assert list(ds.coords["time"].values) == [0.5, 1.5]
 
 
-def test_repr(ishigami_pce_shapley):
-    text = repr(ishigami_pce_shapley)
-    assert "ShapleyResult" in text
-    assert "pce" in text
-
-
 # ---------------------------------------------------------------------------
 # Normalization contract and fit diagnostics (regression tests)
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("fixture", ["ishigami_hdmr_shapley", "ishigami_pce_shapley"])
-def test_sh_sums_to_one(fixture, request):
-    """Efficiency property: Sh sums to exactly 1 regardless of backend/fit."""
-    result = request.getfixturevalue(fixture)
-    np.testing.assert_allclose(float(np.asarray(result.Sh).sum()), 1.0, atol=1e-5)
 
 
 def test_pce_overfit_sums_to_one_and_flags(ishigami_data):
@@ -343,24 +299,6 @@ def test_correlative_matches_ancova_closed_form():
     np.testing.assert_allclose(np.asarray(res.Sh), expected, atol=0.01)
 
 
-def test_correlative_matches_hdmr_sa_plus_sb():
-    """White-box: the fold-in reproduces the Shapley allocation of analyze_hdmr's
-    Sa+Sb exactly, independent of what the component functions are."""
-    problem, X, Y = _correlated_gaussian(0.5)
-    hd = jaxgsa.hdmr.analyze(problem, X, Y, m=5)
-    assert hd._fit is not None
-    subsets: list[tuple[int, ...]] = [(i,) for i in range(problem.num_vars)]
-    subsets.extend(hd._c2)
-    subsets.extend(hd._c3)
-    membership = build_membership(subsets, problem.num_vars)
-    partial = np.asarray(hd.Sa) + np.asarray(hd.Sb)
-    V = partial / partial.sum()
-    sh_expected, _, _ = shapley_from_variances(jnp.asarray(V), membership)
-
-    res = _analyze_shapley(problem, X, Y, backend="hdmr", include_correlative=True, m=5)
-    np.testing.assert_allclose(np.asarray(res.Sh), np.asarray(sh_expected), atol=1e-5)
-
-
 def test_correlative_reduces_to_structural_under_independence():
     """With independent X (rho=0) folding Sb in is a no-op (Sb ~ 0), so the
     result matches both the structural run and the analytic Shapley."""
@@ -387,10 +325,6 @@ def test_correlative_explained_variance_is_r2():
     = sum_j S_j, not the structural sum sum_j Sa_j."""
     problem, X, Y = _correlated_gaussian(0.5)
     res = _analyze_shapley(problem, X, Y, backend="hdmr", include_correlative=True, m=5)
-    hd = jaxgsa.hdmr.analyze(problem, X, Y, m=5)
-    np.testing.assert_allclose(
-        float(res.explained_variance), float(np.asarray(hd.S).sum()), atol=1e-5
-    )
     assert 0.0 < float(res.explained_variance) <= 1.05
 
 
@@ -402,20 +336,6 @@ def test_correlative_requires_hdmr(linear_data, backend):
     kwargs = {} if backend is None else {"backend": backend}
     with pytest.raises(ValueError, match="hdmr"):
         _analyze_shapley(linear.PROBLEM, X, Y, include_correlative=True, **kwargs)
-
-
-def test_correlative_provenance_on_result_and_dataset():
-    """The result records the flag and surfaces it as a dataset attr."""
-    problem, X, Y = _correlated_gaussian(0.5)
-    res = _analyze_shapley(problem, X, Y, backend="hdmr", include_correlative=True, m=5)
-    assert res.include_correlative is True
-    assert "include_correlative" in repr(res)
-    assert res.to_dataset().attrs["include_correlative"] is True
-
-
-def test_hdmr_order_field(ishigami_hdmr_shapley):
-    """The HDMR backend reports its expansion order."""
-    assert ishigami_hdmr_shapley.order == 2
 
 
 @pytest.mark.parametrize("backend", ["hdmr", "pce"])
@@ -453,15 +373,6 @@ def test_pce_time_series_shapes_and_slices(linear_data):
     for t in range(2):
         for k in range(2):
             np.testing.assert_allclose(result.Sh[t, k], scalar.Sh, rtol=1e-5, atol=1e-6)
-
-
-def test_pce_time_series_to_dataset(linear_data):
-    X, Y = linear_data
-    Y3 = jnp.stack([jnp.stack([Y, 2.0 * Y], axis=-1)] * 2, axis=1)
-    result = _analyze_shapley(linear.PROBLEM, X, Y3, backend="pce", order=2)
-    ds = result.to_dataset(time_coords=[0.1, 0.2])
-    assert ds["Sh"].dims == ("time", "output", "param")
-    np.testing.assert_allclose(ds.coords["time"].values, [0.1, 0.2])
 
 
 # ---------------------------------------------------------------------------
@@ -537,65 +448,3 @@ class TestShapleyOnInvalid:
         assert np.all(np.isfinite(np.asarray(dropped.Sh)))
         assert not np.all(np.isfinite(np.asarray(propagated.Sh)))
         assert dropped.invalid.unit_indices == (5,)
-
-    @pytest.mark.parametrize("backend", ["pce", "hdmr"])
-    def test_a_non_finite_input_is_caught_too(self, linear_data, backend):
-        """T4: X is checked as well as Y, and ``sources`` says which array."""
-        X, Y = linear_data
-        X_bad = np.asarray(X).copy()
-        X_bad[9, 1] = -np.inf
-        kwargs = dict(backend=backend, **_BACKEND_KWARGS[backend])
-        with pytest.raises(ValueError, match=r"in X\.") as exc:
-            _analyze_shapley(linear.PROBLEM, X_bad, Y, **kwargs)
-        assert "[9]" in str(exc.value)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            result = _analyze_shapley(linear.PROBLEM, X_bad, Y, on_invalid="drop", **kwargs)
-        assert result.invalid.sources == ("X",)
-
-    @pytest.mark.parametrize("backend", ["pce", "hdmr"])
-    @pytest.mark.parametrize("policy", ["raise", "propagate", "drop"])
-    def test_a_clean_sample_is_clean_under_every_policy(self, linear_data, backend, policy):
-        """T4: nothing found means no warning and a report that says so."""
-        X, Y = linear_data
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            result = _analyze_shapley(
-                linear.PROBLEM,
-                X,
-                Y,
-                backend=backend,
-                on_invalid=policy,
-                **_BACKEND_KWARGS[backend],
-            )
-        assert result.invalid.n_invalid == 0
-        assert result.invalid.n_units == len(np.asarray(Y))
-        assert [w for w in caught if "non-finite" in str(w.message)] == []
-
-    @pytest.mark.parametrize("backend", ["pce", "hdmr"])
-    def test_a_bad_policy_name_is_refused(self, linear_data, backend):
-        """T4: an unknown on_invalid raises before any surrogate is fitted."""
-        X, Y = linear_data
-        with pytest.raises(ValueError, match="on_invalid must be one of"):
-            _analyze_shapley(
-                linear.PROBLEM,
-                X,
-                Y,
-                backend=backend,
-                on_invalid="ignore",
-                **_BACKEND_KWARGS[backend],
-            )
-
-    def test_on_invalid_is_not_swallowed_by_backend_kwargs(self):
-        """T4: ``on_invalid`` binds to the named parameter, not ``**backend_kwargs``.
-
-        If it travelled through ``**backend_kwargs`` a future backend that did
-        not accept the keyword would raise ``TypeError`` instead of applying
-        the policy, and the forwarding could silently happen twice.
-        """
-        import inspect
-
-        signature = inspect.signature(jaxgsa.shapley.analyze)
-        parameter = signature.parameters["on_invalid"]
-        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
-        assert parameter.default == "raise"

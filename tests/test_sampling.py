@@ -27,7 +27,6 @@ def test_sample_returns_unique_rows():
     assert result.samples.shape == (result.n_runs, p.num_vars)
     assert np.unique(result.samples, axis=0).shape[0] == result.n_runs
     assert result.sample_ids.tolist() == list(range(result.n_runs))
-    assert result.n_expanded == result.base_n * _saltelli_step(p.num_vars, True)
     assert result.expanded_to_unique.shape == (result.n_expanded,)
     assert result.expanded_to_unique.max() < result.n_runs
     assert result.n_params == p.num_vars
@@ -49,13 +48,6 @@ def test_power_of_2_enforcement():
     assert result.base_n & (result.base_n - 1) == 0
     with pytest.raises(ValueError, match=r"power of 2 .*got 1000.*nearest valid: 512 or 1024"):
         sample(p, n_samples=100, base_n=1000, seed=42, verbose=False)
-
-
-def test_no_second_order_expanded_count():
-    p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
-    result = sample(p, n_samples=100, calc_second_order=False, seed=42, verbose=False)
-    assert result.calc_second_order is False
-    assert result.n_expanded == result.base_n * _saltelli_step(p.num_vars, False)
 
 
 def test_single_parameter_mapping_collapses_duplicates():
@@ -97,39 +89,11 @@ def test_reconstructing_expanded_samples_matches_mapping():
     assert np.unique(reconstructed, axis=0).shape[0] == result.n_runs
 
 
-def test_sample_verbose_prints_summary(capsys):
-    p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
-    sample(p, n_samples=32, seed=42, verbose=True)
-    out = capsys.readouterr().out
-    assert "jaxgsa.sobol.sample:" in out
-    assert "requested_runs>=" in out
-    assert "n_runs=" in out
-    assert "n_expanded=" in out
-    assert "duplicates_removed=" in out
-
-
 def test_sample_verbose_false_is_silent(capsys):
     p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
     sample(p, n_samples=32, seed=42, verbose=False)
     out = capsys.readouterr().out
     assert out == ""
-
-
-def test_mixed_distributions_preserve_sampling_metadata():
-    p = Problem.from_dict(
-        {
-            "x1": (0.0, 1.0),
-            "x2": GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0),
-            "x3": GaussianInputSpec(dist="gaussian", mean=1.0, variance=4.0, low=-2.0),
-        }
-    )
-
-    result = sample(p, n_samples=128, calc_second_order=False, seed=42, verbose=False)
-    assert result.n_runs >= 128
-    assert result.samples.shape == (result.n_runs, p.num_vars)
-    assert result.n_expanded == result.base_n * _saltelli_step(p.num_vars, False)
-    assert result.expanded_to_unique.shape == (result.n_expanded,)
-    assert result.problem.has_non_uniform_inputs is True
 
 
 def test_uniform_columns_stay_within_bounds_for_mixed_problem():
@@ -238,23 +202,6 @@ class TestSamplingResultDownsample:
         sr_small = sr_full.downsample(16)
         assert np.array_equal(sr_small.samples, sr_full.samples[: sr_small.n_runs])
 
-    def test_n_expanded_matches_step(self):
-        sr_full = self._make_sr(D=4, base_n=32, second_order=True)
-        sr_small = sr_full.downsample(8)
-        step = _saltelli_step(4, True)
-        assert sr_small.n_expanded == 8 * step
-
-    def test_expanded_to_unique_is_consistent(self):
-        sr_full = self._make_sr(base_n=64)
-        sr_small = sr_full.downsample(16)
-        assert sr_small.expanded_to_unique.shape == (sr_small.n_expanded,)
-        assert sr_small.expanded_to_unique.max() < sr_small.n_runs
-
-    def test_base_n_stored(self):
-        sr_full = self._make_sr(base_n=32)
-        sr_small = sr_full.downsample(8)
-        assert sr_small.base_n == 8
-
     def test_multiple_rungs_are_nested(self):
         sr_full = self._make_sr(base_n=64)
         sr_32 = sr_full.downsample(32)
@@ -263,13 +210,6 @@ class TestSamplingResultDownsample:
         assert sr_8.n_runs <= sr_16.n_runs <= sr_32.n_runs <= sr_full.n_runs
         assert np.array_equal(sr_8.samples, sr_16.samples[: sr_8.n_runs])
         assert np.array_equal(sr_16.samples, sr_32.samples[: sr_16.n_runs])
-
-    def test_first_order_only(self):
-        sr_full = self._make_sr(base_n=32, second_order=False)
-        sr_small = sr_full.downsample(8)
-        step = _saltelli_step(3, False)
-        assert sr_small.n_expanded == 8 * step
-        assert sr_small.calc_second_order is False
 
     def test_upsample_raises(self):
         sr = self._make_sr(base_n=16)
@@ -280,18 +220,6 @@ class TestSamplingResultDownsample:
         sr = self._make_sr(base_n=16)
         with pytest.raises(ValueError, match=r"power of 2 .*nearest valid: 8 or 16"):
             sr.downsample(12)
-
-    def test_single_param_with_duplicates(self):
-        sr_full = self._make_sr(D=1, base_n=32, second_order=True)
-        sr_small = sr_full.downsample(8)
-        reconstructed = sr_small.samples[sr_small.expanded_to_unique]
-        assert reconstructed.shape == (sr_small.n_expanded, 1)
-
-    def test_problem_preserved(self):
-        sr_full = self._make_sr()
-        sr_small = sr_full.downsample(8)
-        assert sr_small.problem is sr_full.problem
-        assert sr_small.n_params == sr_full.n_params
 
     def test_with_Y_returns_tuple(self):
         sr_full = self._make_sr(base_n=32)

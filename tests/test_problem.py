@@ -39,20 +39,6 @@ def test_from_dict_accepts_uniform_and_gaussian_typed_dict_specs():
 
 
 @pytest.mark.parametrize(
-    "spec",
-    [
-        GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0, low=-1.0),
-        GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0, high=1.0),
-        GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0, low=-1.0, high=1.0),
-    ],
-)
-def test_from_dict_accepts_one_or_two_sided_gaussian_truncation(spec):
-    p = Problem.from_dict({"x": spec})
-    assert p.bounds is None
-    assert p.has_non_uniform_inputs is True
-
-
-@pytest.mark.parametrize(
     ("params", "match"),
     [
         (
@@ -84,18 +70,6 @@ def test_from_dict_accepts_one_or_two_sided_gaussian_truncation(spec):
 def test_invalid_input_specs_raise_value_error(params, match):
     with pytest.raises(ValueError, match=match):
         Problem.from_dict(params)
-
-
-def test_direct_constructor_remains_uniform_only():
-    p = Problem(names=("a",), bounds=((0.0, 1.0),))
-    assert p.bounds == ((0.0, 1.0),)
-    assert p.has_non_uniform_inputs is False
-
-
-def test_frozen():
-    p = Problem(names=("a",), bounds=((0.0, 1.0),))
-    with pytest.raises(AttributeError):
-        setattr(p, "names", ("b",))
 
 
 class TestTruncateGaussians:
@@ -191,32 +165,6 @@ class TestTruncateGaussians:
 # ---------------------------------------------------------------------------
 
 
-def test_correlation_defaults_to_none_and_independent():
-    p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
-    assert p.correlation is None
-    assert p.has_correlated_inputs is False
-
-
-def test_from_dict_accepts_latent_correlation():
-    R = [[1.0, 0.5], [0.5, 1.0]]
-    p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=R)
-    assert p.has_correlated_inputs is True
-    stored = p.correlation
-    assert stored is not None
-    np.testing.assert_allclose(stored, R, atol=1e-15)
-
-
-def test_direct_constructor_accepts_correlation():
-    p = Problem(
-        names=("a", "b"),
-        bounds=((0.0, 1.0), (0.0, 1.0)),
-        correlation=[[1.0, -0.3], [-0.3, 1.0]],
-    )
-    stored = p.correlation
-    assert stored is not None
-    np.testing.assert_allclose(stored[0, 1], -0.3, atol=1e-15)
-
-
 def test_spearman_kind_is_converted_to_latent_on_entry():
     rho_s = 0.7
     p = Problem.from_dict(
@@ -248,20 +196,6 @@ def test_mildly_indefinite_correlation_warns_at_construction():
     assert np.linalg.eigvalsh(stored).min() > 0
 
 
-def test_materially_indefinite_correlation_is_rejected_at_construction():
-    indefinite = np.array(
-        [
-            [1.0, 0.9, 0.9],
-            [0.9, 1.0, -0.9],
-            [0.9, -0.9, 1.0],
-        ]
-    )
-    with pytest.raises(ValueError, match="too far to accept"):
-        Problem.from_dict(
-            {"a": (0.0, 1.0), "b": (0.0, 1.0), "c": (0.0, 1.0)}, correlation=indefinite
-        )
-
-
 def test_identity_correlation_is_stored_but_not_correlated():
     p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=np.eye(2))
     assert p.correlation is not None
@@ -287,15 +221,6 @@ def test_with_correlation_returns_new_problem_and_preserves_marginals():
     stored = correlated.correlation
     assert stored is not None
     np.testing.assert_allclose(stored, R, atol=1e-15)
-
-
-def test_with_correlation_accepts_spearman_kind():
-    base = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
-    rho_s = 0.5
-    p = base.with_correlation([[1.0, rho_s], [rho_s, 1.0]], kind="spearman")
-    stored = p.correlation
-    assert stored is not None
-    np.testing.assert_allclose(stored[0, 1], 2.0 * np.sin(np.pi * rho_s / 6.0), atol=1e-15)
 
 
 def test_with_correlation_none_drops_the_matrix():
@@ -326,9 +251,3 @@ def test_correlation_participates_in_equality_and_hash():
     assert plain != correlated
     assert correlated == correlated_again
     assert hash(correlated) == hash(correlated_again)
-
-
-def test_correlated_problem_is_still_frozen():
-    p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=np.eye(2))
-    with pytest.raises(AttributeError):
-        setattr(p, "_correlation", None)

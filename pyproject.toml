@@ -73,8 +73,10 @@ dev = [
 # other by plain module name, the way they do when run directly, and the
 # baseline tests reach them the same way after a sys.path insert. Naming the
 # directory here lets ty resolve those imports statically instead of needing a
-# suppression at each import site.
-extra-paths = ["scripts"]
+# suppression at each import site. `tests/` is listed for the same reason in
+# the other direction: `scripts/dump_result_schema.py` builds the schema
+# snapshot from `tests/_result_fixtures.py`, the module the test reads it with.
+extra-paths = ["scripts", "tests"]
 
 [tool.pytest.ini_options]
 # Surface deprecations early: promote every DeprecationWarning/FutureWarning to

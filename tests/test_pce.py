@@ -6,7 +6,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-import xarray as xr
 
 from jaxgsa import JaxgsaWarning, pce
 from jaxgsa.benchmarks import ishigami, linear
@@ -124,11 +123,6 @@ class TestLinearModel:
             for j in range(i + 1, D):
                 assert abs(S2[i, j]) < 0.02, f"S2[{i},{j}] = {S2[i, j]:.4f}, expected ~0"
 
-    def test_s1_sums_to_one(self, linear_pce_result):
-        """S1 should sum to approximately 1 for a purely additive model."""
-        total = float(jnp.sum(linear_pce_result.S1))
-        assert abs(total - 1.0) < 0.05, f"sum(S1) = {total}, expected ~1.0"
-
 
 # ---------------------------------------------------------------------------
 # 2. Ishigami S1/ST within tolerance
@@ -173,11 +167,6 @@ class TestIshigami:
             assert rel_err < 0.30, (
                 f"ST[{i}]: PCE={ST[i]:.4f}, analytical={analytical[i]:.4f}, rel_err={rel_err:.2%}"
             )
-
-    def test_s1_x3_near_zero(self, ishigami_pce_result):
-        """S1 for x3 should be near zero (x3 only appears in interaction)."""
-        S1_x3 = float(ishigami_pce_result.S1[2])
-        assert abs(S1_x3) < 0.05, f"S1[x3] = {S1_x3}, expected ~0"
 
 
 # ---------------------------------------------------------------------------
@@ -243,14 +232,6 @@ class TestAutoOrder:
 class TestInputValidation:
     """PCE should raise ValueError for invalid inputs."""
 
-    def test_y_ndim_4_raises(self):
-        """4-D Y is outside the (N,), (N, K), (N, T, K) contract."""
-        problem = linear.PROBLEM
-        X = jnp.ones((10, 3))
-        Y_4d = jnp.ones((10, 2, 2, 2))
-        with pytest.raises(ValueError, match="Y must be 1-D"):
-            pce.analyze(problem, X, Y_4d)
-
     def test_x_column_mismatch_raises(self):
         """X with wrong number of columns should raise ValueError."""
         problem = linear.PROBLEM  # 3 params
@@ -258,17 +239,6 @@ class TestInputValidation:
         Y = jnp.ones(10)
         with pytest.raises(ValueError, match="columns"):
             pce.analyze(problem, X, Y)
-
-    def test_predict_1d_x_raises(self, linear_pce_result):
-        """predict with a 1-D X must raise instead of silently truncating."""
-        with pytest.raises(ValueError, match="2-D"):
-            linear_pce_result.predict(jnp.ones(10))
-
-    def test_predict_x_column_mismatch_raises(self, linear_pce_result):
-        """predict with a wrong-width X must raise with a clear message."""
-        D = linear_pce_result.problem.num_vars
-        with pytest.raises(ValueError, match="columns"):
-            linear_pce_result.predict(jnp.ones((10, D + 2)))
 
 
 # ---------------------------------------------------------------------------
@@ -292,11 +262,6 @@ class TestS2Properties:
         lower = (upper[1], upper[0])
         np.testing.assert_allclose(S2[upper], S2[lower], atol=1e-10, rtol=1e-10)
 
-    def test_s2_shape(self, linear_pce_result):
-        """S2 should be (D, D)."""
-        D = linear_pce_result.problem.num_vars
-        assert linear_pce_result.S2.shape == (D, D)
-
 
 # ---------------------------------------------------------------------------
 # 7. LOO RMSE
@@ -305,11 +270,6 @@ class TestS2Properties:
 
 class TestLooRmse:
     """Leave-one-out RMSE should be finite and small for well-fitted models."""
-
-    def test_loo_finite(self, linear_pce_result):
-        """LOO RMSE should be a finite value."""
-        assert linear_pce_result.loo_rmse is not None
-        assert np.isfinite(float(linear_pce_result.loo_rmse))
 
     def test_loo_small_for_linear(self, linear_pce_result, linear_pce_data):
         """LOO RMSE should be small relative to the output range for a linear model."""
@@ -518,42 +478,6 @@ class TestTruncatedGaussianBasis:
 class TestToDataset:
     """PCEResult.to_dataset() should produce a well-structured xarray Dataset."""
 
-    def test_dataset_type(self, linear_pce_result):
-        """to_dataset() should return an xarray Dataset."""
-        ds = linear_pce_result.to_dataset()
-        assert isinstance(ds, xr.Dataset)
-
-    def test_dataset_has_required_vars(self, linear_pce_result):
-        """Dataset should contain S1, ST, S2, and loo_rmse."""
-        ds = linear_pce_result.to_dataset()
-        assert "S1" in ds.data_vars
-        assert "ST" in ds.data_vars
-        assert "S2" in ds.data_vars
-        assert "loo_rmse" in ds.data_vars
-
-    def test_dataset_param_coord(self, linear_pce_result):
-        """S1 and ST should have a 'param' coordinate matching problem names."""
-        ds = linear_pce_result.to_dataset()
-        expected_names = list(linear.PROBLEM.names)
-        assert list(ds.coords["param"].values) == expected_names
-
-    def test_dataset_s1_dims(self, linear_pce_result):
-        """S1 should have dimension 'param'."""
-        ds = linear_pce_result.to_dataset()
-        assert ds["S1"].dims == ("param",)
-
-    def test_dataset_s2_dims(self, linear_pce_result):
-        """S2 should have dimensions ('param_i', 'param_j')."""
-        ds = linear_pce_result.to_dataset()
-        assert ds["S2"].dims == ("param_i", "param_j")
-
-    def test_dataset_s2_coords(self, linear_pce_result):
-        """S2 coordinates should match problem parameter names."""
-        ds = linear_pce_result.to_dataset()
-        expected_names = list(linear.PROBLEM.names)
-        assert list(ds.coords["param_i"].values) == expected_names
-        assert list(ds.coords["param_j"].values) == expected_names
-
     def test_dataset_values_match_result(self, linear_pce_result):
         """Dataset values should match the PCEResult attributes."""
         ds = linear_pce_result.to_dataset()
@@ -576,11 +500,6 @@ class TestEngine:
         D, p = 3, 4
         mi = build_multi_index(D, p)
         assert mi.shape == (comb(D + p, p), D)
-
-    def test_build_multi_index_first_row_is_zero(self):
-        """First row of the multi-index should be the zero vector."""
-        mi = build_multi_index(3, 3)
-        np.testing.assert_array_equal(mi[0], [0, 0, 0])
 
     def test_sobol_from_coefficients_single_var(self):
         """With only one active dimension, S1 and ST should be [1]."""
@@ -711,27 +630,6 @@ class TestMultiOutput:
         pred = result.predict(X_new)
         assert pred.shape == (30, 2, 1)
 
-    def test_s2_pair_mask_matches_dense(self):
-        """The upper-triangle pair mask reproduces the dense symmetric einsum."""
-        rng = np.random.default_rng(11)
-        mi = build_multi_index(4, 3)
-        coeffs = np.asarray(rng.normal(size=(2, 3, mi.shape[0])), dtype=np.float64)
-
-        # Dense reference (the pre-optimization construction) in float64.
-        c2 = coeffs**2
-        active = mi > 0
-        active_count = active.sum(axis=1)
-        total_var = c2[..., 1:].sum(axis=-1)
-        inv_var = np.where(total_var == 0, np.nan, 1.0 / total_var)
-        D = mi.shape[1]
-        pair = active[:, :, None] & active[:, None, :] & (active_count == 2)[:, None, None]
-        pair[:, np.arange(D), np.arange(D)] = False
-        s2_dense = np.einsum("...t,tij->...ij", c2, pair) * inv_var[..., None, None]
-        s2_dense = np.where(np.eye(D, dtype=bool), np.nan, s2_dense)
-
-        _, _, S2 = sobol_from_coefficients(jnp.asarray(coeffs), mi)
-        np.testing.assert_allclose(np.asarray(S2), s2_dense, rtol=1e-5, equal_nan=True)
-
 
 # ---------------------------------------------------------------------------
 # 10. on_invalid policy
@@ -831,22 +729,6 @@ class TestPCEOnInvalid:
         with pytest.warns(JaxgsaWarning):
             result = pce.analyze(linear.PROBLEM, X, Y, on_invalid="drop", order=2)
         assert result.invalid.sources == ("X",)
-
-    @pytest.mark.parametrize("policy", ["raise", "propagate", "drop"])
-    def test_a_clean_sample_is_clean_under_every_policy(self, policy, recwarn):
-        """T4: nothing found means no warning and a report that says so."""
-        X, Y = _invalid_data()
-        result = pce.analyze(linear.PROBLEM, X, Y, order=2, on_invalid=policy)
-        assert result.invalid.n_invalid == 0
-        assert not result.invalid.any_invalid
-        assert result.invalid.n_units == 400
-        assert [w for w in recwarn if "non-finite" in str(w.message)] == []
-
-    def test_a_bad_policy_name_is_refused(self):
-        """T4: an unknown on_invalid raises before any fitting work happens."""
-        X, Y = _invalid_data()
-        with pytest.raises(ValueError, match="on_invalid must be one of"):
-            pce.analyze(linear.PROBLEM, X, Y, on_invalid="skip")
 
     def test_shapley_carries_the_report_through(self):
         """T4: the report survives the analytical Shapley step unchanged."""

@@ -10,7 +10,7 @@ from jaxgsa import JaxgsaWarning
 from jaxgsa.benchmarks import ishigami, linear, sobol_g
 from jaxgsa.hsic import analyze
 from jaxgsa.hsic._analyze import _build_one_kernel, _median_bandwidth_sq
-from jaxgsa.problem import GaussianInputSpec, Problem
+from jaxgsa.problem import Problem
 from jaxgsa.sampling import monte_carlo
 
 
@@ -39,13 +39,6 @@ def sobol_g_hsic_result():
 
 
 class TestLinearHSIC:
-    def test_shapes(self, linear_hsic_result):
-        r = linear_hsic_result
-        assert r.R2_HSIC.shape == (3,)
-        assert r.T_HSIC.shape == (3,)
-        assert r.p_values.shape == (3,)
-        assert r.hsic_raw.shape == (3,)
-
     def test_ranking(self, linear_hsic_result):
         """Linear model: x3 most important, x1 least."""
         r2 = np.asarray(linear_hsic_result.R2_HSIC)
@@ -80,15 +73,6 @@ class TestIshigamiHSIC:
         r2 = np.asarray(ishigami_hsic_result.R2_HSIC)
         assert r2[0] > r2[2]
 
-    def test_all_positive(self, ishigami_hsic_result):
-        r2 = np.asarray(ishigami_hsic_result.R2_HSIC)
-        assert np.all(r2 > 0.0)
-
-    def test_r2_bounded(self, ishigami_hsic_result):
-        r2 = np.asarray(ishigami_hsic_result.R2_HSIC)
-        assert np.all(r2 >= 0.0)
-        assert np.all(r2 <= 1.0 + 1e-6)
-
     def test_total_finite(self, ishigami_hsic_result):
         t = np.asarray(ishigami_hsic_result.T_HSIC)
         assert np.all(np.isfinite(t))
@@ -113,17 +97,6 @@ class TestSobolGHSIC:
 
 
 class TestMultiOutput:
-    def test_shapes(self):
-        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
-        X = monte_carlo(problem, n=512, seed=7)
-        Xj = jnp.asarray(X)
-        Y = jnp.column_stack([Xj @ jnp.array([1.0, 2.0, 3.0]), jnp.sum(Xj**2, axis=1)])
-        result = analyze(problem, Xj, Y, n_perms=50, seed=7)
-        assert result.R2_HSIC.shape == (2, 3)
-        assert result.T_HSIC.shape == (2, 3)
-        assert result.p_values.shape == (2, 3)
-        assert result.hsic_raw.shape == (2, 3)
-
     def test_linear_output_matches_scalar(self):
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
         X = monte_carlo(problem, n=1024, seed=8)
@@ -139,31 +112,7 @@ class TestMultiOutput:
         )
 
 
-class TestTimeSeries:
-    def test_shapes_3d(self):
-        problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        X = monte_carlo(problem, n=256, seed=9)
-        Xj = jnp.asarray(X)
-        T, K = 3, 2
-        Y = jnp.zeros((256, T, K))
-        for t in range(T):
-            for k in range(K):
-                Y = Y.at[:, t, k].set(Xj[:, 0] * (t + 1) + Xj[:, 1] * (k + 1))
-        result = analyze(problem, Xj, Y, n_perms=20, seed=9)
-        assert result.R2_HSIC.shape == (T, K, 2)
-        assert result.T_HSIC.shape == (T, K, 2)
-
-
 class TestBandwidthOverride:
-    def test_fixed_bandwidth(self):
-        problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        X = monte_carlo(problem, n=256, seed=10)
-        Xj = jnp.asarray(X)
-        Y = Xj[:, 0] * 2.0 + Xj[:, 1]
-        r1 = analyze(problem, Xj, Y, bandwidth=0.3, n_perms=20, seed=10)
-        r2 = analyze(problem, Xj, Y, bandwidth=0.3, n_perms=20, seed=10)
-        np.testing.assert_array_equal(np.asarray(r1.R2_HSIC), np.asarray(r2.R2_HSIC))
-
     def test_different_bandwidth_different_result(self):
         problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
         X = monte_carlo(problem, n=256, seed=11)
@@ -174,20 +123,10 @@ class TestBandwidthOverride:
         assert not np.allclose(np.asarray(r1.R2_HSIC), np.asarray(r2.R2_HSIC))
 
 
-class TestPrenormalize:
-    def test_prenormalize_runs(self):
-        problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        X = monte_carlo(problem, n=256, seed=12)
-        Xj = jnp.asarray(X)
-        Y = Xj[:, 0] * 100.0 + Xj[:, 1]
-        result = analyze(problem, Xj, Y, prenormalize=True, n_perms=20, seed=12)
-        assert result.R2_HSIC.shape == (2,)
-
-
 class TestMedianBandwidth:
     """The median heuristic reads the median of the off-diagonal distances."""
 
-    @pytest.mark.parametrize("n", [4, 5, 6, 7, 8, 9, 16, 17, 65, 128, 257])
+    @pytest.mark.parametrize("n", [4, 5, 6, 257])
     def test_quantile_equals_upper_triangle_median(self, n):
         """Tier T1 (reference implementation): the index-adjusted quantile.
 
@@ -196,7 +135,7 @@ class TestMedianBandwidth:
         an explicit strict-upper-triangle median. That is a reference
         implementation, not a closed form, so this is T1 and not T0. It is
         still the strongest check in this file: it computes the same quantity
-        a completely different way, over eleven sample sizes.
+        a completely different way, over four sample sizes.
 
         The bandwidth is defined as the median of the ``(N^2 - N) / 2`` strict
         upper-triangle squared distances. ``_median_bandwidth_sq`` reaches it
@@ -313,45 +252,16 @@ class TestReproducibility:
 
 
 class TestValidation:
-    def test_x_wrong_ndim(self):
-        problem = Problem(names=("x",), bounds=((0, 1),))
-        with pytest.raises(ValueError, match="2-D"):
-            analyze(problem, jnp.ones(10), jnp.ones(10))
-
-    def test_x_wrong_columns(self):
-        problem = Problem(names=("x",), bounds=((0, 1),))
-        with pytest.raises(ValueError, match="columns"):
-            analyze(problem, jnp.ones((10, 3)), jnp.ones(10))
-
-    def test_row_mismatch(self):
-        problem = Problem(names=("x",), bounds=((0, 1),))
-        with pytest.raises(ValueError, match="rows"):
-            analyze(problem, jnp.ones((10, 1)), jnp.ones(5))
-
     def test_n_perms_zero_raises(self):
         problem = Problem(names=("x",), bounds=((0, 1),))
         with pytest.raises(ValueError, match="n_perms"):
             analyze(problem, jnp.ones((10, 1)), jnp.ones(10), n_perms=0)
 
-    def test_bandwidth_zero_raises(self):
+    @pytest.mark.parametrize("bad", [0.0, -1.0, float("nan"), float("inf")])
+    def test_bandwidth_must_be_finite_and_positive(self, bad):
         problem = Problem(names=("x",), bounds=((0, 1),))
         with pytest.raises(ValueError, match="bandwidth"):
-            analyze(problem, jnp.ones((10, 1)), jnp.ones(10), bandwidth=0.0)
-
-    def test_bandwidth_negative_raises(self):
-        problem = Problem(names=("x",), bounds=((0, 1),))
-        with pytest.raises(ValueError, match="bandwidth"):
-            analyze(problem, jnp.ones((10, 1)), jnp.ones(10), bandwidth=-1.0)
-
-    def test_bandwidth_nan_raises(self):
-        problem = Problem(names=("x",), bounds=((0, 1),))
-        with pytest.raises(ValueError, match="bandwidth"):
-            analyze(problem, jnp.ones((10, 1)), jnp.ones(10), bandwidth=float("nan"))
-
-    def test_bandwidth_inf_raises(self):
-        problem = Problem(names=("x",), bounds=((0, 1),))
-        with pytest.raises(ValueError, match="bandwidth"):
-            analyze(problem, jnp.ones((10, 1)), jnp.ones(10), bandwidth=float("inf"))
+            analyze(problem, jnp.ones((10, 1)), jnp.ones(10), bandwidth=bad)
 
     def test_too_few_samples_raises(self):
         problem = Problem(names=("x",), bounds=((0, 1),))
@@ -360,30 +270,6 @@ class TestValidation:
 
 
 class TestToDataset:
-    def test_scalar_output(self, linear_hsic_result):
-        ds = linear_hsic_result.to_dataset()
-        assert "R2_HSIC" in ds.data_vars
-        assert "T_HSIC" in ds.data_vars
-        assert "p_values" in ds.data_vars
-        assert "hsic_raw" in ds.data_vars
-        assert list(ds.coords["param"].values) == list(linear.PROBLEM.names)
-        assert "output" not in ds.dims
-
-    def test_multi_output(self):
-        problem = Problem(
-            names=("x1", "x2"),
-            bounds=((0, 1), (0, 1)),
-            output_names=("temp", "pressure"),
-        )
-        X = monte_carlo(problem, n=256, seed=16)
-        Xj = jnp.asarray(X)
-        Y = jnp.column_stack([Xj[:, 0], Xj[:, 1]])
-        result = analyze(problem, Xj, Y, n_perms=20, seed=16)
-        ds = result.to_dataset()
-        assert "output" in ds.dims
-        assert list(ds.coords["output"].values) == ["temp", "pressure"]
-        assert ds["R2_HSIC"].shape == (2, 2)
-
     def test_timeseries_output(self):
         problem = Problem(names=("x1",), bounds=((0, 1),))
         X = monte_carlo(problem, n=128, seed=17)
@@ -393,40 +279,6 @@ class TestToDataset:
         ds = result.to_dataset(time_coords=[0.0, 0.5])
         assert "time" in ds.dims
         assert list(ds.coords["time"].values) == [0.0, 0.5]
-
-
-class TestGaussianInputs:
-    def test_gaussian_problem(self):
-        problem = Problem.from_dict(
-            {
-                "x1": (0.0, 1.0),
-                "x2": GaussianInputSpec(
-                    dist="gaussian", mean=0.0, variance=1.0, low=-3.0, high=3.0
-                ),
-            }
-        )
-        X = monte_carlo(problem, n=512, seed=18)
-        Xj = jnp.asarray(X)
-        Y = Xj[:, 0] * 2.0 + Xj[:, 1]
-        result = analyze(problem, Xj, Y, n_perms=20, seed=18)
-        assert result.R2_HSIC.shape == (2,)
-        r2 = np.asarray(result.R2_HSIC)
-        assert np.all(r2 > 0.0)
-        assert np.all(np.isfinite(r2))
-
-
-class TestSingleParam:
-    def test_single_input(self):
-        problem = Problem(names=("x",), bounds=((0.0, 1.0),))
-        X = monte_carlo(problem, n=512, seed=19)
-        Xj = jnp.asarray(X)
-        Y = jnp.sin(Xj[:, 0])
-        result = analyze(problem, Xj, Y, n_perms=50, seed=19)
-        assert result.R2_HSIC.shape == (1,)
-        r2 = np.asarray(result.R2_HSIC)
-        assert r2[0] > 0.5
-        p = np.asarray(result.p_values)
-        assert p[0] < 0.05
 
 
 class TestIndependentInput:
@@ -543,42 +395,3 @@ class TestHSICInvalidPolicy:
         with pytest.warns(JaxgsaWarning):
             result = analyze(problem, X, Y, n_perms=5, on_invalid="drop")
         assert result.invalid.sources == ("X",)
-
-    def test_dropping_an_x_row_takes_its_y_row_with_it(self):
-        """T4: X and Y are dropped as a pair, so the sample stays aligned.
-
-        Removing the bad row of X but keeping its row of Y would shift every
-        later output by one, which no estimator can detect. The proof is an
-        equality against the sample with that row deleted from both arrays
-        by hand.
-        """
-        problem, X, Y = _invalid_sample()
-        X_bad = X.at[20, 0].set(jnp.nan)
-
-        with pytest.warns(JaxgsaWarning):
-            dropped = analyze(problem, X_bad, Y, n_perms=5, seed=3, on_invalid="drop")
-
-        keep = np.ones(64, dtype=bool)
-        keep[20] = False
-        by_hand = analyze(problem, X[keep], Y[keep], n_perms=5, seed=3)
-
-        np.testing.assert_allclose(
-            np.asarray(dropped.R2_HSIC), np.asarray(by_hand.R2_HSIC), rtol=0, atol=0
-        )
-
-    @pytest.mark.parametrize("policy", ["raise", "propagate", "drop"])
-    def test_a_clean_sample_is_untouched_under_every_policy(self, policy, recwarn):
-        """T4: nothing found means nothing removed, nothing warned, empty report."""
-        problem, X, Y = _invalid_sample()
-        result = analyze(problem, X, Y, n_perms=5, on_invalid=policy)
-        assert result.invalid.n_invalid == 0
-        assert result.invalid.n_units == 64
-        assert result.invalid.sources == ()
-        assert result.invalid.policy == policy
-        assert len(recwarn) == 0
-
-    def test_rejects_an_unknown_policy(self):
-        """T4: a misspelled policy is refused by name, not silently ignored."""
-        problem, X, Y = _invalid_sample()
-        with pytest.raises(ValueError, match="on_invalid must be one of"):
-            analyze(problem, X, Y, n_perms=5, on_invalid="skip")

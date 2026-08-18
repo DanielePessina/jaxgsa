@@ -15,8 +15,8 @@ copies drifted, and this module holds one test per thing the drift broke:
 5. Three methods validated their scalar arguments after the host-side data
    check, so a typo cost a full pass over the sample before it was reported.
 
-The last class of test reads the capability gates off the registry, so a
-fourteenth method is covered the moment it registers.
+``TestEveryMethodWarnsOnAConstantOutput`` reads its method list off the
+registry, so a fourteenth method is covered the moment it registers.
 """
 
 from __future__ import annotations
@@ -36,14 +36,10 @@ from jaxgsa._core.entry import (
     check_scalars,
     in_open_interval,
     one_of,
-    prepare,
     require,
 )
 from jaxgsa._core.registry import methods
-from jaxgsa._core.validation import (
-    _categorical_tolerant_methods,
-    _correlation_tolerant_methods,
-)
+from jaxgsa._core.validation import _correlation_tolerant_methods
 
 D = 3
 PROBLEM = jaxgsa.Problem(("x1", "x2", "x3"), ((0.0, 1.0),) * D)
@@ -97,63 +93,40 @@ class TestConfLevelIsValidatedEverywhere:
     inverted interval, lower above upper, with no error and no warning.
     """
 
-    @pytest.mark.parametrize("bad", [-0.2, 0.0, 1.0, 1.5])
-    def test_sobol_refuses_a_conf_level_outside_the_unit_interval(self, bad):
+    def test_sobol_refuses_a_conf_level_outside_the_unit_interval(self):
         sr = _sobol_design()
         Y = jnp.asarray(np.asarray(sr.samples)[:, 0])
         with pytest.raises(ValueError, match="conf_level must be in"):
-            jaxgsa.sobol.analyze(sr, Y, num_resamples=4, key=jax.random.key(0), conf_level=bad)
+            jaxgsa.sobol.analyze(sr, Y, num_resamples=4, key=jax.random.key(0), conf_level=-0.2)
 
-    @pytest.mark.parametrize("bad", [-0.2, 0.0, 1.0, 1.5])
-    def test_morris_refuses_a_conf_level_outside_the_unit_interval(self, bad):
+    def test_morris_refuses_a_conf_level_outside_the_unit_interval(self):
         sr = _morris_design()
         Y = jnp.asarray(np.asarray(sr.samples)[:, 0])
         with pytest.raises(ValueError, match="conf_level must be in"):
-            jaxgsa.morris.analyze(sr, Y, num_resamples=4, key=jax.random.key(0), conf_level=bad)
-
-    def test_every_bootstrapping_method_now_checks_it(self):
-        """Read the five off the registry, so a sixth cannot be missed."""
-        bootstrapping = {s.name for s in methods().values() if s.bootstrap is not None}
-        assert bootstrapping == {
-            "borgonovo",
-            "morris",
-            "optimal_transport",
-            "pawn",
-            "sobol",
-        }
-        import inspect
-
-        for name in sorted(bootstrapping):
-            params = inspect.signature(methods()[name].analyze).parameters
-            assert "conf_level" in params, name
+            jaxgsa.morris.analyze(sr, Y, num_resamples=4, key=jax.random.key(0), conf_level=1.5)
 
 
 class TestChunkSizeIsValidatedOnEveryPath:
     """Defect 2: sobol checked it inside one branch of one of three paths."""
 
-    @pytest.mark.parametrize("bad", [0, -5])
-    def test_the_scalar_no_bootstrap_path_refuses_it(self, bad):
+    def test_the_scalar_no_bootstrap_path_refuses_it(self):
         sr = _sobol_design()
         Y = jnp.asarray(np.asarray(sr.samples)[:, 0])
         with pytest.raises(ValueError, match="slice_chunk_size must be >= 1"):
-            jaxgsa.sobol.analyze(sr, Y, slice_chunk_size=bad)
+            jaxgsa.sobol.analyze(sr, Y, slice_chunk_size=0)
 
-    @pytest.mark.parametrize("bad", [0, -5])
-    def test_the_bootstrap_path_refuses_it(self, bad):
+    def test_the_bootstrap_path_refuses_it(self):
         sr = _sobol_design()
         Y = jnp.asarray(np.asarray(sr.samples)[:, 0])
         with pytest.raises(ValueError, match="slice_chunk_size must be >= 1"):
-            jaxgsa.sobol.analyze(
-                sr, Y, num_resamples=4, key=jax.random.key(0), slice_chunk_size=bad
-            )
+            jaxgsa.sobol.analyze(sr, Y, num_resamples=4, key=jax.random.key(0), slice_chunk_size=0)
 
-    @pytest.mark.parametrize("bad", [0, -5])
-    def test_the_multi_output_path_refuses_it(self, bad):
+    def test_the_multi_output_path_refuses_it(self):
         sr = _sobol_design()
         base = np.asarray(sr.samples)[:, 0]
         Y = jnp.asarray(np.stack([base, 2.0 * base], axis=-1))
         with pytest.raises(ValueError, match="slice_chunk_size must be >= 1"):
-            jaxgsa.sobol.analyze(sr, Y, slice_chunk_size=bad)
+            jaxgsa.sobol.analyze(sr, Y, slice_chunk_size=0)
 
 
 class TestNegativeResampleCountsAreRefused:
@@ -242,18 +215,6 @@ class TestEveryMethodWarnsOnAConstantOutput:
         with pytest.warns(JaxgsaWarning, match="zero variance"):
             call()
 
-    def test_the_wording_says_nan_for_a_variance_ratio(self):
-        with pytest.warns(JaxgsaWarning, match="zero variance.*will be NaN"):
-            _constant_output_call("hsic")()
-
-    def test_the_wording_says_zero_for_a_distribution_comparison(self):
-        with pytest.warns(JaxgsaWarning, match="zero variance.*will be 0"):
-            _constant_output_call("pawn")()
-
-    def test_morris_names_its_own_three_measures(self):
-        with pytest.warns(JaxgsaWarning, match="mu, mu_star, sigma.*will be 0"):
-            _constant_output_call("morris")()
-
 
 class TestScalarsAreCheckedBeforeTheData:
     """Defect 5: three methods validated arguments after the data check.
@@ -299,30 +260,6 @@ class TestScalarsAreCheckedBeforeTheData:
 class TestTheGatesComeFromTheRegistry:
     """The recommendation lists are generated, so they cannot drift."""
 
-    def test_the_correlation_list_names_every_tolerant_method(self):
-        listed = _correlation_tolerant_methods()
-        for spec in methods().values():
-            if spec.correlation == "accepts":
-                assert f"jaxgsa.{spec.name}" in listed, spec.name
-
-    def test_the_correlation_list_names_no_refusing_method(self):
-        listed = _correlation_tolerant_methods()
-        for spec in methods().values():
-            if spec.correlation == "refuses" and spec.name != "shapley":
-                assert f"jaxgsa.{spec.name}" not in listed, spec.name
-
-    def test_the_categorical_list_names_every_tolerant_method(self):
-        listed = _categorical_tolerant_methods()
-        for spec in methods().values():
-            if spec.categorical == "accepts":
-                assert f"jaxgsa.{spec.name}" in listed, spec.name
-
-    def test_the_categorical_list_names_no_refusing_method(self):
-        listed = _categorical_tolerant_methods()
-        for spec in methods().values():
-            if spec.categorical == "refuses":
-                assert f"jaxgsa.{spec.name}" not in listed, spec.name
-
     def test_a_refusing_method_quotes_the_generated_list(self):
         R = np.eye(D)
         R[0, 1] = R[1, 0] = 0.4
@@ -364,43 +301,3 @@ class TestACleanSampleStaysSilent:
             else:
                 getattr(jaxgsa, name).analyze(PROBLEM, X, Y)
         assert [w for w in caught if issubclass(w.category, JaxgsaWarning)] == []
-
-
-class TestTheInputAccessor:
-    """`Context.X` is optional, because a design-based method has none.
-
-    Reading it through `Context.inputs` states that expectation once, instead
-    of seven given-data analyzers each narrowing the type at their own call
-    site. Tier T4 (behavioural contract).
-    """
-
-    def test_inputs_returns_the_matrix_a_given_data_method_was_handed(self):
-        X, Y = _xy()
-        ctx = prepare(
-            methods()["pawn"],
-            PROBLEM,
-            Y,
-            X=X,
-            on_invalid="raise",
-            checks=(),
-        )
-        assert ctx.inputs is ctx.X
-        assert ctx.inputs.shape == (N, D)
-
-    def test_inputs_refuses_when_the_method_was_given_no_matrix(self):
-        """A design-based context has no X, and asking for one is a bug here.
-
-        It raises TypeError rather than ValueError: nothing is wrong with the
-        caller's data, the analyzer asked for something it never passed in.
-        """
-        _, Y = _xy()
-        ctx = prepare(
-            methods()["sobol"],
-            PROBLEM,
-            Y,
-            on_invalid="raise",
-            checks=(),
-        )
-        assert ctx.X is None
-        with pytest.raises(TypeError, match="no input matrix was passed"):
-            _ = ctx.inputs

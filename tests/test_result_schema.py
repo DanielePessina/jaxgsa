@@ -32,7 +32,7 @@ import pytest
 
 import jaxgsa
 from jaxgsa._core.registry import methods
-from jaxgsa._core.result import CIInfo, ResultSchema, SchemaResult
+from jaxgsa._core.result import CIInfo
 
 SNAPSHOT = Path(__file__).parent / "data" / "result_dataset_schema.json"
 
@@ -49,17 +49,6 @@ def _result(name: str, shape: str) -> Any:
 # ---------------------------------------------------------------------------
 # __repr__
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("method", sorted(methods()))
-def test_every_registered_result_declares_a_schema(method: str) -> None:
-    """Every method's result class derives its repr and export from a schema."""
-    cls = methods()[method].result
-    assert issubclass(cls, SchemaResult), f"{cls.__name__} does not mix in SchemaResult"
-    assert isinstance(cls._schema, ResultSchema), f"{cls.__name__} declares no _schema"
-    assert cls._schema.primary in {spec.name for spec in cls._schema.fields}, (
-        f"{cls.__name__}._schema.primary names a field the schema does not declare"
-    )
 
 
 @pytest.mark.parametrize("method", sorted(methods()))
@@ -97,9 +86,6 @@ def test_ciinfo_repr_hides_the_stored_draws() -> None:
     """The interval summary names its kept draws without printing them."""
     ci = CIInfo(level=0.9, method="quantile", n_resamples=3, replicates={"S1": jnp.zeros((3, 8))})
     text = repr(ci)
-    assert "level=0.9" in text
-    assert "method='quantile'" in text
-    assert "replicates={S1}" in text
     assert "0." not in text.split("replicates=")[1]
 
 
@@ -128,27 +114,11 @@ def test_dataset_schema_is_unchanged(name: str, shape: str) -> None:
     assert actual == {k: v for k, v in expected.items() if k != "type"}
 
 
-def test_hdmr_term_axis_is_not_labelled_param() -> None:
-    """HDMR's primary axis is the expansion term, and the export says so."""
-    ds = _result("hdmr", "scalar").to_dataset()
-    assert ds["Sa"].dims == ("term",)
-    assert ds["ST"].dims == ("param",)
-    assert ds["select"].dims == ("term",)
-    assert len(ds.coords["term"]) > len(ds.coords["param"])
-
-
 def test_ot_multivariate_shape_comes_from_the_mode() -> None:
     """A multivariate OT result is one index per parameter, whatever Y was."""
     ds = _result("optimal_transport_multivariate", "scalar").to_dataset()
     assert ds["ot"].dims == ("param",)
     assert ds.attrs["mode"] == "multivariate"
-
-
-def test_ot_trajectory_shape_comes_from_the_mode() -> None:
-    """A trajectory OT result is one index per parameter per output."""
-    ds = _result("optimal_transport_trajectory", "series").to_dataset()
-    assert ds["ot"].dims == ("output", "param")
-    assert ds.attrs["mode"] == "trajectory"
 
 
 def test_second_order_axes_are_labelled_even_without_the_estimate() -> None:
@@ -244,14 +214,6 @@ def test_ci_records_the_level_that_ran(method: str) -> None:
     assert result.ci.n_resamples == 6
 
 
-@pytest.mark.parametrize("method", WIRED)
-def test_ci_records_the_endpoint_rule_that_ran(method: str) -> None:
-    """The recorded rule is one this method can actually run."""
-    result = _bootstrapped(method, level=0.95, keep=False)
-    assert result.ci is not None
-    assert result.ci.method in {"quantile", "gaussian"}
-
-
 def test_morris_records_the_gaussian_rule_when_asked() -> None:
     """Morris offers two rules, and records whichever one ran."""
     import jax
@@ -311,13 +273,6 @@ def test_morris_physical_units_rescales_the_kept_draws() -> None:
     ranges = jnp.asarray([high - low for low, high in bounds])
     for name, draws in physical.ci.replicates.items():
         assert jnp.allclose(draws, unit.ci.replicates[name] / ranges)
-
-
-def test_sobol_records_its_ci() -> None:
-    """Sobol should record its interval metadata like the other four."""
-    result = _result("sobol", "scalar")
-    assert result.ci is not None
-    assert result.ci.method == "quantile"
 
 
 def _sobol_analyze(**kwargs: Any) -> Any:

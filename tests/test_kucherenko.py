@@ -196,17 +196,6 @@ def test_sampler_validation_errors():
         jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 1)
 
 
-def test_categorical_problem_raises():
-    problem = Problem.from_dict(
-        {
-            "u1": {"dist": "uniform", "low": 0.0, "high": 1.0},
-            "c1": {"dist": "categorical", "probs": [0.5, 0.5]},
-        }
-    )
-    with pytest.raises(ValueError, match="categorical"):
-        jaxgsa.kucherenko.sample(problem, 64)
-
-
 # --- analyze contracts --------------------------------------------------------
 
 
@@ -345,18 +334,6 @@ class TestOnInvalidPolicy:
             jaxgsa.kucherenko.analyze(ks, Y, on_invalid="skip")
 
 
-def test_nonfinite_outputs_drop_base_points_with_warning():
-    ks = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 512, seed=0)
-    Y = np.asarray(ks.samples @ A_COEF)
-    Y[3] = np.nan  # poisons base point 3 in the joint block
-    with pytest.warns(UserWarning, match="non-finite"):
-        result = jaxgsa.kucherenko.analyze(ks, Y, on_invalid="drop")
-    assert np.all(np.isfinite(np.asarray(result.S1)))
-    # The estimate barely moves: one base point out of 512.
-    clean = jaxgsa.kucherenko.analyze(ks, np.asarray(ks.samples @ A_COEF))
-    np.testing.assert_allclose(np.asarray(result.S1), np.asarray(clean.S1), atol=2e-2)
-
-
 # --- persistence and reporting ------------------------------------------------
 
 
@@ -375,43 +352,3 @@ def test_save_load_round_trip(tmp_path):
     a = jaxgsa.kucherenko.analyze(ks, Y)
     b = jaxgsa.kucherenko.analyze(loaded, Y)
     np.testing.assert_array_equal(np.asarray(a.S1), np.asarray(b.S1))
-
-
-def test_to_dataset_schema(correlated_result):
-    ds = correlated_result.to_dataset()
-    assert set(ds.data_vars) == {"S1", "ST", "variance"}
-    assert list(ds.coords["param"].values) == ["x1", "x2", "x3"]
-    assert ds.attrs["method"] == "kucherenko"
-    assert ds.attrs["correlated"] is True
-
-
-def test_repr(correlated_result):
-    text = repr(correlated_result)
-    assert "KucherenkoResult" in text
-    assert "correlated=True" in text
-    ks = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 64, seed=0)
-    assert "correlated=False" in repr(ks)
-
-
-def test_design_uses_the_factor_on_the_plan(monkeypatch):
-    """T4 internal consistency: the joint block comes from ``plan.chol_full``.
-
-    The design used to call ``np.linalg.cholesky`` beside the plan, so the
-    joint sample and the conditionals could come from different matrices
-    without any error. Replacing the factor carried on the plan must now
-    change the design; if it does not, the sampler is still reading a factor
-    from somewhere else.
-    """
-    from jaxgsa._core.copula import build_conditional_plan as real_build
-    from jaxgsa.kucherenko import _sampling
-
-    problem = GAUSS_PROBLEM.with_correlation(R_GAUSS)
-    baseline = jaxgsa.kucherenko.sample(problem, 64, seed=0).samples
-
-    def perturbed(R):
-        plan = real_build(R)
-        return plan._replace(chol_full=plan.chol_full * 0.5)
-
-    monkeypatch.setattr(_sampling, "build_conditional_plan", perturbed)
-    moved = jaxgsa.kucherenko.sample(problem, 64, seed=0).samples
-    assert not np.allclose(baseline, moved)

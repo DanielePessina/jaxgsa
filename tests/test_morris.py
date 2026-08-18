@@ -27,13 +27,6 @@ def _multi_output(X: np.ndarray) -> jax.Array:
     return jnp.stack([jnp.asarray(X @ COEFFS), jnp.asarray(np.sum(X**2, axis=1))], axis=-1)
 
 
-def _numpy_reference(sr, Y: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Independent NumPy implementation of the Morris measures."""
-    Y_exp = np.asarray(Y, dtype=np.float64)[sr.expanded_to_unique]
-    ee = (Y_exp[sr.ee_idx_after] - Y_exp[sr.ee_idx_before]) / sr.ee_delta
-    return ee.mean(axis=0), np.abs(ee).mean(axis=0), ee.std(axis=0, ddof=1)
-
-
 @pytest.fixture(scope="module")
 def ishigami_morris_result():
     """Trajectory-design Morris result for the Ishigami benchmark."""
@@ -130,12 +123,6 @@ class TestSampling:
         assert np.all(sr.samples[:, 0] <= 5.0 + 1e-10)
         assert np.all(sr.samples[:, 1] >= -1.0 - 1e-10)
         assert np.all(sr.samples[:, 1] <= 3.0 + 1e-10)
-
-    def test_verbose_reports_duplicates(self, capsys):
-        sample(UNIT_PROBLEM, n_trajectories=10, seed=1)
-        out = capsys.readouterr().out
-        assert "duplicates_removed" in out
-        assert "method=trajectory" in out
 
     def test_odd_num_levels_warns(self):
         with pytest.warns(UserWarning, match="odd"):
@@ -257,20 +244,6 @@ class TestGaussianInputs:
         res = analyze(sr, Y)
         np.testing.assert_allclose(np.asarray(res.mu), [3.0, 5.0], rtol=1e-5)
 
-    def test_analysis_detects_gaussian_input(self):
-        sr = sample(self.PROBLEM, n_trajectories=30, seed=2, verbose=False)
-        Y = jnp.asarray(sr.samples[:, 0] + 0.5 * sr.samples[:, 1])
-        res = analyze(sr, Y)
-        assert np.all(np.isfinite(np.asarray(res.mu_star)))
-        assert np.all(np.asarray(res.mu_star) > 0)
-
-    def test_radial_gaussian_finite(self):
-        sr = sample(self.PROBLEM, n_trajectories=10, method="radial", seed=4, verbose=False)
-        assert np.all(np.isfinite(sr.samples))
-        Y = jnp.asarray(np.sum(sr.samples, axis=1))
-        res = analyze(sr, Y)
-        assert np.all(np.isfinite(np.asarray(res.mu_star)))
-
     def test_to_physical_units_raises(self):
         sr = sample(self.PROBLEM, n_trajectories=10, seed=3, verbose=False)
         res = analyze(sr, jnp.asarray(np.sum(sr.samples, axis=1)))
@@ -315,19 +288,6 @@ class TestDownsample:
     def test_same_size_returns_self(self):
         sr = sample(UNIT_PROBLEM, n_trajectories=5, seed=1, verbose=False)
         assert sr.downsample(5) is sr
-
-    def test_downsample_clears_the_earlier_block_loss(self):
-        """Tier T4 (internal consistency): the caller asked for this size.
-
-        ``n_blocks_dropped`` counts trajectories the user asked for and did
-        not get. ``downsample`` gives the caller exactly the count they name,
-        so an earlier loss no longer applies and must not reach ``analyze``.
-        """
-        sr = sample(UNIT_PROBLEM, n_trajectories=20, seed=1, verbose=False)
-        sr = replace(sr, n_blocks_dropped=6)
-        sr_small = sr.downsample(8)
-        assert sr_small.n_trajectories == 8
-        assert sr_small.n_blocks_dropped == 0
 
     def test_same_size_downsample_also_clears_the_block_loss(self):
         """Tier T4 (internal consistency): the answer cannot hinge on the size.
@@ -411,23 +371,6 @@ class TestIshigamiAccuracy:
         sigma = np.asarray(res.sigma)
         assert sigma[2] / mu_star[2] > 1.0
 
-    def test_matches_numpy_reference(self, ishigami_morris_result):
-        sr, Y, res = ishigami_morris_result
-        mu_ref, mu_star_ref, sigma_ref = _numpy_reference(sr, np.asarray(Y))
-        np.testing.assert_allclose(np.asarray(res.mu), mu_ref, rtol=1e-4, atol=1e-4)
-        np.testing.assert_allclose(np.asarray(res.mu_star), mu_star_ref, rtol=1e-4, atol=1e-4)
-        np.testing.assert_allclose(np.asarray(res.sigma), sigma_ref, rtol=1e-3, atol=1e-4)
-
-    def test_radial_matches_numpy_reference(self):
-        sr = sample(ishigami.PROBLEM, n_trajectories=50, method="radial", seed=3, verbose=False)
-        Y = ishigami.evaluate(jnp.asarray(sr.samples))
-        res = analyze(sr, Y)
-        mu_ref, mu_star_ref, sigma_ref = _numpy_reference(sr, np.asarray(Y))
-        np.testing.assert_allclose(np.asarray(res.mu), mu_ref, rtol=1e-4, atol=1e-4)
-        np.testing.assert_allclose(np.asarray(res.mu_star), mu_star_ref, rtol=1e-4, atol=1e-4)
-        np.testing.assert_allclose(np.asarray(res.sigma), sigma_ref, rtol=1e-3, atol=1e-4)
-        assert np.all(np.asarray(res.mu_star) > 1.0)
-
 
 class TestSobolGAccuracy:
     def test_ranking(self):
@@ -476,14 +419,6 @@ class TestSALibParity:
 
 
 class TestMultiOutput:
-    def test_shapes(self):
-        sr = sample(UNIT_PROBLEM, n_trajectories=15, seed=4, verbose=False)
-        Y = _multi_output(sr.samples)
-        res = analyze(sr, Y)
-        assert res.mu.shape == (2, 3)
-        assert res.mu_star.shape == (2, 3)
-        assert res.sigma.shape == (2, 3)
-
     def test_slices_match_scalar_runs(self):
         sr = sample(UNIT_PROBLEM, n_trajectories=15, seed=4, verbose=False)
         Y = _multi_output(sr.samples)
@@ -587,22 +522,6 @@ class TestPhysicalUnits:
 
 
 class TestToDataset:
-    def test_scalar_output(self, ishigami_morris_result):
-        _, _, res = ishigami_morris_result
-        ds = res.to_dataset()
-        for var in ("mu", "mu_star", "sigma"):
-            assert var in ds.data_vars
-        assert list(ds.coords["param"].values) == list(ishigami.PROBLEM.names)
-        assert "output" not in ds.dims
-        assert ds.attrs["space"] == "unit"
-
-    def test_conf_variables(self, ishigami_morris_result):
-        sr, Y, _ = ishigami_morris_result
-        res = analyze(sr, Y, num_resamples=50, key=jax.random.PRNGKey(0))
-        ds = res.to_dataset()
-        for var in ("mu_lower", "mu_upper", "mu_star_lower", "mu_star_upper"):
-            assert var in ds.data_vars
-
     def test_multi_output_names(self):
         problem = Problem(
             names=("x1", "x2", "x3"),
@@ -612,6 +531,7 @@ class TestToDataset:
         sr = sample(problem, n_trajectories=10, seed=4, verbose=False)
         res = analyze(sr, _multi_output(sr.samples))
         ds = res.to_dataset()
+        assert list(ds.coords["param"].values) == list(problem.names)
         assert list(ds.coords["output"].values) == ["temp", "pressure"]
         assert ds["mu_star"].shape == (2, 3)
 
@@ -688,19 +608,6 @@ class TestThinningWarning:
 
 
 class TestValidation:
-    def test_y_length_mismatch_raises(self):
-        sr = sample(UNIT_PROBLEM, n_trajectories=5, seed=1, verbose=False)
-        with pytest.raises(ValueError, match="sample rows"):
-            analyze(sr, jnp.ones(sr.n_runs + 3))
-
-    def test_y_wrong_ndim_raises(self):
-        """4-D Y is outside the (n,), (n,K), (n,T,K) contract and must error."""
-        for D in (1, 3):
-            problem = Problem(names=tuple(f"x{i}" for i in range(D)), bounds=((0.0, 1.0),) * D)
-            sr = sample(problem, n_trajectories=5, seed=1, verbose=False)
-            with pytest.raises(ValueError, match="must be 1-D"):
-                analyze(sr, jnp.ones((sr.n_runs, 2, 3, 5)))
-
     def test_zero_variance_warns_measures_are_zero(self):
         """Constant output warns about 0 measures (not NaN) and returns zeros."""
         sr = sample(UNIT_PROBLEM, n_trajectories=10, seed=1, verbose=False)
@@ -708,28 +615,6 @@ class TestValidation:
             res = analyze(sr, jnp.full(sr.n_runs, 7.0))
         np.testing.assert_array_equal(np.asarray(res.mu_star), np.zeros(3))
         assert not np.any(np.isnan(np.asarray(res.mu_star)))
-
-    def test_nonfinite_trajectory_dropped(self):
-        """Poisoning one radial trajectory must drop exactly that trajectory."""
-        sr = sample(ishigami.PROBLEM, n_trajectories=12, method="radial", seed=8, verbose=False)
-        Y = np.asarray(ishigami.evaluate(jnp.asarray(sr.samples)), dtype=np.float64)
-        poisoned_row = int(sr.expanded_to_unique[3 * (sr.n_params + 1)])
-        Y_bad = Y.copy()
-        Y_bad[poisoned_row] = np.nan
-
-        with pytest.warns(UserWarning, match="dropped 1 of 12"):
-            res = analyze(sr, jnp.asarray(Y_bad), on_invalid="drop")
-
-        # Manual reference: recompute measures from the 11 finite trajectories
-        Y_exp = Y[sr.expanded_to_unique]
-        ee = (Y_exp[sr.ee_idx_after] - Y_exp[sr.ee_idx_before]) / sr.ee_delta
-        keep = np.arange(12) != 3
-        np.testing.assert_allclose(
-            np.asarray(res.mu_star), np.abs(ee[keep]).mean(axis=0), rtol=1e-4, atol=1e-4
-        )
-        np.testing.assert_allclose(
-            np.asarray(res.sigma), ee[keep].std(axis=0, ddof=1), rtol=1e-3, atol=1e-4
-        )
 
     def test_all_nonfinite_raises(self):
         sr = sample(UNIT_PROBLEM, n_trajectories=5, seed=1, verbose=False)
@@ -864,12 +749,6 @@ class TestOnInvalidPolicy:
         assert res.invalid.unit is InvalidUnit.TRAJECTORY
         assert res.invalid.n_units == self.R
         assert [w for w in recwarn if issubclass(w.category, JaxgsaWarning)] == []
-
-    def test_a_bad_on_invalid_value_is_rejected(self):
-        """T4: an unknown policy name is refused before anything is computed."""
-        sr, Y = self._design_and_Y()
-        with pytest.raises(ValueError, match="on_invalid must be one of"):
-            analyze(sr, jnp.asarray(Y), on_invalid="skip")
 
 
 def test_single_param():

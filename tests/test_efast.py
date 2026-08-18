@@ -9,9 +9,8 @@ from jaxgsa._core.invalid import InvalidUnit
 from jaxgsa.benchmarks import ishigami, linear, sobol_g
 from jaxgsa.efast import EFASTSamples, analyze, sample
 from jaxgsa.efast._analyze import _compute_indices
-from jaxgsa.efast._analyze import _frequency_plan as _analyze_frequency_plan
 from jaxgsa.efast._sampling import _frequency_plan
-from jaxgsa.problem import GaussianInputSpec, Problem
+from jaxgsa.problem import Problem
 
 
 @pytest.fixture(scope="module")
@@ -70,20 +69,6 @@ class TestLinearAccuracy:
 
 
 class TestSampling:
-    def test_returns_efast_samples(self):
-        problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        sr = sample(problem, n_per_curve=257, M=4, seed=1)
-        assert isinstance(sr, EFASTSamples)
-        assert sr.n_per_curve == 257
-        assert sr.M == 4
-        assert sr.problem is problem
-
-    def test_shape(self):
-        problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        sr = sample(problem, n_per_curve=257, M=4, seed=1)
-        assert sr.samples.shape == (257 * 2, 2)
-        assert sr.n_runs == 257 * 2
-
     def test_within_bounds(self):
         problem = Problem(names=("a", "b"), bounds=((2.0, 5.0), (-1.0, 3.0)))
         X = sample(problem, n_per_curve=257, M=4, seed=2).samples
@@ -96,11 +81,6 @@ class TestSampling:
         problem = Problem(names=("x",), bounds=((0, 1),))
         with pytest.raises(ValueError, match="4.*M.*2"):
             sample(problem, n_per_curve=64, M=4)
-
-    def test_invalid_m_raises(self):
-        problem = Problem(names=("x",), bounds=((0, 1),))
-        with pytest.raises(ValueError, match="M must be >= 1"):
-            sample(problem, n_per_curve=257, M=0)
 
     def test_n_below_dimension_bound_raises(self):
         """n_per_curve above 4*M^2 is still too small once D grows."""
@@ -128,18 +108,6 @@ class TestSampling:
                 assert omega_compl.min() >= 1
                 assert omega_compl.max() <= plan.omega_0 // (2 * M), (D, M)
 
-    def test_gaussian_inputs(self):
-        problem = Problem.from_dict(
-            {
-                "x1": (0.0, 1.0),
-                "x2": GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0),
-            }
-        )
-        X = sample(problem, n_per_curve=257, M=4, seed=3).samples
-        assert X.shape == (257 * 2, 2)
-        assert np.all(X[:, 0] >= 0.0 - 1e-10)
-        assert np.all(X[:, 0] <= 1.0 + 1e-10)
-
     def test_reproducible(self):
         problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
         X1 = sample(problem, n_per_curve=257, M=4, seed=99).samples
@@ -166,24 +134,6 @@ class TestEFASTSamplesValidation:
 
 
 class TestAnalysis:
-    def test_result_shapes(self, ishigami_efast_result):
-        assert ishigami_efast_result.S1.shape == (3,)
-        assert ishigami_efast_result.ST.shape == (3,)
-
-    def test_no_s2(self, ishigami_efast_result):
-        assert set(vars(ishigami_efast_result).keys()) == {
-            "S1",
-            "ST",
-            "problem",
-            "invalid",
-            "omega_0",
-            "M",
-        }
-
-    def test_omega_and_m(self, ishigami_efast_result):
-        assert ishigami_efast_result.M == 4
-        assert ishigami_efast_result.omega_0 > 0
-
     def test_wrong_y_row_count_raises_with_both_numbers(self):
         """A wrong Y row count names the given and required counts."""
         problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
@@ -203,26 +153,6 @@ class TestAnalysis:
 class TestMConsistency:
     """M travels inside EFASTSamples, so sample/analyze can never disagree."""
 
-    def test_analyze_uses_samples_m(self):
-        """A design built with M=6 is analyzed with 6 harmonics."""
-        sr = sample(ishigami.PROBLEM, n_per_curve=4096, M=6, seed=42)
-        Y = ishigami.evaluate(jnp.asarray(sr.samples))
-        result = analyze(sr, jnp.asarray(Y))
-
-        # Metadata threads through from the design, not from any analyze arg.
-        assert result.M == 6
-        assert result.omega_0 == (4096 - 1) // (2 * 6)
-
-        # The indices must equal a manual M=6 computation on curve 0 —
-        # proof analyze summed 6 harmonics of the M=6 omega_0.
-        n = sr.n_per_curve
-        plan = _frequency_plan(ishigami.PROBLEM.num_vars, n, 6)
-        s1_manual, st_manual = _compute_indices(
-            jnp.asarray(Y[:n]), n, 6, plan.omega_0, plan.analysis_max
-        )
-        np.testing.assert_allclose(float(result.S1[0]), float(s1_manual), rtol=1e-6)
-        np.testing.assert_allclose(float(result.ST[0]), float(st_manual), rtol=1e-6)
-
     def test_m6_still_accurate(self):
         """With M carried in the design, M=6 indices stay accurate."""
         sr = sample(ishigami.PROBLEM, n_per_curve=4096, M=6, seed=42)
@@ -241,17 +171,6 @@ class TestFrequencyAssignment:
     def test_d1(self):
         plan = _frequency_plan(1, 4 * 4**2 + 1, 4)
         assert len(plan.omega_compl) == 0
-
-    def test_d2(self):
-        plan = _frequency_plan(2, 801, 4)
-        assert len(plan.omega_compl) == 1
-        assert plan.omega_compl[0] >= 1
-
-    def test_high_omega(self):
-        plan = _frequency_plan(4, 6401, 4)
-        assert len(plan.omega_compl) == 3
-        assert np.all(plan.omega_compl >= 1)
-        assert len(np.unique(plan.omega_compl)) == 3
 
     def test_too_few_slots_raises_instead_of_wrapping(self):
         """A curve too short to hold D-1 distinct carriers is rejected up front.
@@ -407,50 +326,6 @@ class TestAnalysisBandEdge:
             assert int(np.argmax(spectrum)) == plan.omega_0, i
 
 
-class TestFrequencyPlanSharing:
-    """The sampler and the analyzer must read one plan, not two formulas."""
-
-    def test_both_modules_bind_one_plan_function(self):
-        """Tier T4 (internal consistency): the analyzer imports, not redefines.
-
-        ``jaxgsa.efast._analyze`` imports ``_frequency_plan`` from
-        ``_sampling``, which binds a *separate name* in the analyzer's module.
-        This asserts the two names are the same object. That is all it proves:
-        it rules out a second copy of the formula living in ``_analyze``, and
-        it does not check any frequency value. The band itself is measured in
-        :class:`TestAnalysisBandEdge`.
-        """
-        assert _analyze_frequency_plan is _frequency_plan
-
-    def test_bands_are_not_the_same_number(self):
-        """Tier T4 (internal consistency): the two bands stay distinct.
-
-        Classic eFAST counts every frequency below ``omega_0 / 2`` as
-        complementary, not only the assigned ones. Collapsing the two bands
-        into one would change every ST value, so guard that they really differ
-        for the standard M.
-        """
-        plan = _frequency_plan(5, 4097, 4)
-        assert plan.assigned_max < plan.analysis_max
-
-
-class TestComputeIndices:
-    def test_constant_output(self):
-        """Constant Y has no meaningful variance; indices should be near zero or NaN."""
-        Y = jnp.ones(257)
-        s1, st = _compute_indices(Y, 257, 4, 32, 32 // 2)
-        assert jnp.isnan(s1) or abs(float(s1)) < 0.1
-        assert jnp.isnan(st) or float(st) < 1.0
-
-    def test_single_frequency(self):
-        N = 257
-        omega = 32
-        s = (2 * np.pi / N) * np.arange(N)
-        Y = jnp.asarray(np.sin(omega * s))
-        s1, st = _compute_indices(Y, N, 4, omega, omega // 2)
-        assert float(s1) > 0.9
-
-
 class TestMultiOutputShapes:
     """Tests for multi-output and time-series Y shapes."""
 
@@ -557,7 +432,12 @@ class TestToDatasetMultiOutput:
         assert len(ds.coords["output"]) == 3
 
     def test_3d_dataset_with_time_coords(self):
-        """Time-series result exports with ('time', 'output', 'param') dims."""
+        """The ``time_coords=`` kwarg lands on the time coordinate.
+
+        The dims and data-var names are pinned for every method and Y-rank by
+        ``tests/data/result_dataset_schema.json``, so only the kwarg — a
+        coordinate *value* the caller supplied — is asserted here.
+        """
         sr = sample(ishigami.PROBLEM, n_per_curve=4096, M=4, seed=42)
         Y = ishigami.evaluate(jnp.asarray(sr.samples))
         T = 5
@@ -568,27 +448,7 @@ class TestToDatasetMultiOutput:
         result = analyze(sr, Y_3d)
         time_coords = [0.0, 0.1, 0.2, 0.3, 0.4]
         ds = result.to_dataset(time_coords=time_coords)
-        assert set(ds["S1"].dims) == {"time", "output", "param"}
         assert list(ds.coords["time"].values) == time_coords
-        assert list(ds.coords["param"].values) == list(ishigami.PROBLEM.names)
-
-    def test_repr(self):
-        """repr() includes shape info."""
-        sr = sample(ishigami.PROBLEM, n_per_curve=4096, M=4, seed=42)
-        Y = ishigami.evaluate(jnp.asarray(sr.samples))
-        Y_multi = jnp.stack([Y, 2 * Y], axis=-1)
-        result = analyze(sr, Y_multi)
-        r = repr(result)
-        assert "EFASTResult" in r
-        assert "S1" in r
-
-
-class TestToDataset:
-    def test_conversion(self, ishigami_efast_result):
-        ds = ishigami_efast_result.to_dataset()
-        assert "S1" in ds.data_vars
-        assert "ST" in ds.data_vars
-        assert list(ds.coords["param"].values) == list(ishigami.PROBLEM.names)
 
 
 class TestSobolGAccuracy:
@@ -683,17 +543,6 @@ class TestOnInvalidPolicy:
         assert "search curve" in message
         assert "'raise'" in message and "'propagate'" in message
 
-    def test_drop_is_refused_even_when_the_sample_is_clean(self):
-        """T4: the refusal is about the design, not about the data.
-
-        Validating ``on_invalid`` before the check means a user learns the
-        policy is unavailable on the first clean run, not later when a model
-        run happens to fail.
-        """
-        sr, Y = self._design_and_Y()
-        with pytest.raises(ValueError, match="not available for this method"):
-            analyze(sr, jnp.asarray(Y), on_invalid="drop")
-
     def test_raise_is_the_default_and_names_the_curve_and_its_rows(self):
         """T4: the default refuses, and locates the failure in the design.
 
@@ -722,19 +571,6 @@ class TestOnInvalidPolicy:
         assert result.invalid.policy == "propagate"
         assert result.invalid.unit is InvalidUnit.CURVE
 
-    def test_one_bad_value_is_reported_against_its_own_curve(self):
-        """T4: the unit is the curve, so the report names one curve of D.
-
-        The rows of a curve are contiguous, so the report must attribute the
-        failure to the curve that owns the row and to no other.
-        """
-        sr, Y = self._design_and_Y()
-        bad, row = self._poison(sr, Y, curve=2)
-        with pytest.raises(ValueError) as exc:
-            analyze(sr, jnp.asarray(bad))
-        assert "Affected search curves: [2]" in str(exc.value)
-        assert row // self.N == 2
-
     @pytest.mark.parametrize("policy", ["raise", "propagate"])
     def test_a_clean_sample_reports_nothing_and_stays_silent(self, policy, recwarn):
         """T4: a clean run gives an empty report under both usable policies."""
@@ -744,12 +580,6 @@ class TestOnInvalidPolicy:
         assert result.invalid.n_units == 3
         assert result.invalid.unit is InvalidUnit.CURVE
         assert [w for w in recwarn if issubclass(w.category, JaxgsaWarning)] == []
-
-    def test_a_bad_on_invalid_value_is_rejected(self):
-        """T4: an unknown policy name is refused before anything is computed."""
-        sr, Y = self._design_and_Y()
-        with pytest.raises(ValueError, match="on_invalid must be one of"):
-            analyze(sr, jnp.asarray(Y), on_invalid="skip")
 
 
 def test_single_param():

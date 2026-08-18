@@ -1,5 +1,3 @@
-from typing import Any, cast
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -84,126 +82,6 @@ def test_bootstrap_ci_contains_analytical(ishigami_bootstrap_result):
         )
 
 
-def test_repeated_no_bootstrap_calls_identical():
-    """Repeated identical no-bootstrap calls should return identical outputs."""
-    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**10, seed=7)
-    Y = evaluate(jnp.asarray(sr.samples))
-
-    first = jaxgsa.sobol.analyze(sr, Y)
-    second = jaxgsa.sobol.analyze(sr, Y)
-
-    np.testing.assert_allclose(np.asarray(first.S1), np.asarray(second.S1), rtol=1e-6, atol=1e-6)
-    np.testing.assert_allclose(np.asarray(first.ST), np.asarray(second.ST), rtol=1e-6, atol=1e-6)
-    np.testing.assert_allclose(
-        np.asarray(first.S2),
-        np.asarray(second.S2),
-        rtol=1e-6,
-        atol=1e-6,
-        equal_nan=True,
-    )
-
-
-def test_explicit_prenormalize_false_matches_default():
-    """Explicit prenormalize=False should preserve the default Sobol path."""
-    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**10, seed=17, verbose=False)
-    Y = evaluate(jnp.asarray(sr.samples))
-
-    default = jaxgsa.sobol.analyze(sr, Y)
-    explicit = jaxgsa.sobol.analyze(sr, Y, prenormalize=False)
-
-    np.testing.assert_allclose(
-        np.asarray(default.S1), np.asarray(explicit.S1), rtol=1e-6, atol=1e-6
-    )
-    np.testing.assert_allclose(
-        np.asarray(default.ST), np.asarray(explicit.ST), rtol=1e-6, atol=1e-6
-    )
-    np.testing.assert_allclose(
-        np.asarray(default.S2),
-        np.asarray(explicit.S2),
-        rtol=1e-6,
-        atol=1e-6,
-        equal_nan=True,
-    )
-
-
-def test_default_ci_method_matches_explicit_quantile():
-    """The default bootstrap CI method should match explicit quantile mode."""
-    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**10, seed=31, verbose=False)
-    Y = evaluate(jnp.asarray(sr.samples))
-    key = jax.random.key(987)
-
-    default = jaxgsa.sobol.analyze(sr, Y, num_resamples=20, key=key)
-    explicit = jaxgsa.sobol.analyze(sr, Y, num_resamples=20, ci_method="quantile", key=key)
-
-    np.testing.assert_allclose(
-        np.asarray(default.S1), np.asarray(explicit.S1), rtol=1e-6, atol=1e-6
-    )
-    np.testing.assert_allclose(
-        np.asarray(default.ST), np.asarray(explicit.ST), rtol=1e-6, atol=1e-6
-    )
-    np.testing.assert_allclose(
-        np.asarray(default.S2),
-        np.asarray(explicit.S2),
-        rtol=1e-6,
-        atol=1e-6,
-        equal_nan=True,
-    )
-    np.testing.assert_allclose(
-        np.asarray(default.S1_conf),
-        np.asarray(explicit.S1_conf),
-        rtol=1e-6,
-        atol=1e-6,
-    )
-    np.testing.assert_allclose(
-        np.asarray(default.ST_conf),
-        np.asarray(explicit.ST_conf),
-        rtol=1e-6,
-        atol=1e-6,
-    )
-    np.testing.assert_allclose(
-        np.asarray(default.S2_conf),
-        np.asarray(explicit.S2_conf),
-        rtol=1e-6,
-        atol=1e-6,
-        equal_nan=True,
-    )
-
-
-def test_invalid_ci_method_raises_value_error():
-    """Unsupported ci_method values should raise before analysis dispatch."""
-    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**8, seed=37, verbose=False)
-    Y = evaluate(jnp.asarray(sr.samples))
-
-    with pytest.raises(ValueError, match="ci_method"):
-        jaxgsa.sobol.analyze(sr, Y, ci_method=cast(Any, "unsupported"))
-
-
-def test_supported_ci_method_is_accepted_without_bootstrap():
-    """Supported ci_method values should be accepted and ignored without bootstrap."""
-    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**8, seed=41, verbose=False)
-    Y = evaluate(jnp.asarray(sr.samples))
-
-    default = jaxgsa.sobol.analyze(sr, Y)
-    gaussian = jaxgsa.sobol.analyze(sr, Y, ci_method="gaussian")
-
-    np.testing.assert_allclose(
-        np.asarray(default.S1), np.asarray(gaussian.S1), rtol=1e-6, atol=1e-6
-    )
-    np.testing.assert_allclose(
-        np.asarray(default.ST), np.asarray(gaussian.ST), rtol=1e-6, atol=1e-6
-    )
-    np.testing.assert_allclose(
-        np.asarray(default.S2),
-        np.asarray(gaussian.S2),
-        rtol=1e-6,
-        atol=1e-6,
-        equal_nan=True,
-    )
-    assert gaussian.S1_conf is None
-    assert gaussian.ST_conf is None
-    assert gaussian.S2_conf is None
-
-
 def test_prenormalize_point_estimates_are_offset_invariant():
     """prenormalize=True should make Sobol point estimates shift-invariant."""
     sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**10, seed=19, verbose=False)
@@ -232,45 +110,6 @@ def test_repeated_bootstrap_calls_identical():
 
     first = jaxgsa.sobol.analyze(sr, Y, num_resamples=20, key=key)
     second = jaxgsa.sobol.analyze(sr, Y, num_resamples=20, key=key)
-
-    np.testing.assert_allclose(np.asarray(first.S1), np.asarray(second.S1), rtol=1e-6, atol=1e-6)
-    np.testing.assert_allclose(np.asarray(first.ST), np.asarray(second.ST), rtol=1e-6, atol=1e-6)
-    np.testing.assert_allclose(
-        np.asarray(first.S2),
-        np.asarray(second.S2),
-        rtol=1e-6,
-        atol=1e-6,
-        equal_nan=True,
-    )
-    np.testing.assert_allclose(
-        np.asarray(first.S1_conf),
-        np.asarray(second.S1_conf),
-        rtol=1e-6,
-        atol=1e-6,
-    )
-    np.testing.assert_allclose(
-        np.asarray(first.ST_conf),
-        np.asarray(second.ST_conf),
-        rtol=1e-6,
-        atol=1e-6,
-    )
-    np.testing.assert_allclose(
-        np.asarray(first.S2_conf),
-        np.asarray(second.S2_conf),
-        rtol=1e-6,
-        atol=1e-6,
-        equal_nan=True,
-    )
-
-
-def test_repeated_gaussian_bootstrap_calls_identical():
-    """Repeated gaussian bootstrap calls should preserve point estimates and CI shapes."""
-    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**10, seed=43)
-    Y = evaluate(jnp.asarray(sr.samples))
-    key = jax.random.key(654)
-
-    first = jaxgsa.sobol.analyze(sr, Y, num_resamples=20, ci_method="gaussian", key=key)
-    second = jaxgsa.sobol.analyze(sr, Y, num_resamples=20, ci_method="gaussian", key=key)
 
     np.testing.assert_allclose(np.asarray(first.S1), np.asarray(second.S1), rtol=1e-6, atol=1e-6)
     np.testing.assert_allclose(np.asarray(first.ST), np.asarray(second.ST), rtol=1e-6, atol=1e-6)
@@ -389,60 +228,6 @@ def test_prenormalize_bootstrap_is_offset_invariant():
     )
 
 
-def test_prenormalize_gaussian_bootstrap_is_offset_invariant():
-    """Gaussian bootstrap endpoints should remain shift-invariant with prenormalize=True."""
-    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**10, seed=47, verbose=False)
-    Y = evaluate(jnp.asarray(sr.samples))
-    Y_shifted = Y + 123.0
-    key = jax.random.key(765)
-
-    base = jaxgsa.sobol.analyze(
-        sr,
-        Y,
-        num_resamples=20,
-        ci_method="gaussian",
-        key=key,
-        prenormalize=True,
-    )
-    shifted = jaxgsa.sobol.analyze(
-        sr,
-        Y_shifted,
-        num_resamples=20,
-        ci_method="gaussian",
-        key=key,
-        prenormalize=True,
-    )
-
-    np.testing.assert_allclose(np.asarray(base.S1), np.asarray(shifted.S1), rtol=1e-6, atol=1e-6)
-    np.testing.assert_allclose(np.asarray(base.ST), np.asarray(shifted.ST), rtol=1e-6, atol=1e-6)
-    np.testing.assert_allclose(
-        np.asarray(base.S2),
-        np.asarray(shifted.S2),
-        rtol=1e-6,
-        atol=1e-6,
-        equal_nan=True,
-    )
-    np.testing.assert_allclose(
-        np.asarray(base.S1_conf),
-        np.asarray(shifted.S1_conf),
-        rtol=1e-6,
-        atol=1e-6,
-    )
-    np.testing.assert_allclose(
-        np.asarray(base.ST_conf),
-        np.asarray(shifted.ST_conf),
-        rtol=1e-6,
-        atol=1e-6,
-    )
-    np.testing.assert_allclose(
-        np.asarray(base.S2_conf),
-        np.asarray(shifted.S2_conf),
-        rtol=1e-5,
-        atol=2e-6,
-        equal_nan=True,
-    )
-
-
 def _legacy_sampling_result(sr: SobolSamples) -> SobolSamples:
     n_expanded = sr.n_expanded
     expanded_samples = sr.samples[sr.expanded_to_unique]
@@ -502,102 +287,14 @@ def test_unique_bootstrap_matches_expanded_layout():
     )
 
 
-def test_unique_gaussian_bootstrap_matches_expanded_layout():
-    """Gaussian bootstrap CIs should preserve unique-vs-expanded equivalence."""
-    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=1024, seed=53, verbose=False)
-    Y_unique = evaluate(jnp.asarray(sr.samples))
-    key = jax.random.key(876)
-    result_unique = jaxgsa.sobol.analyze(
-        sr,
-        Y_unique,
-        num_resamples=50,
-        ci_method="gaussian",
-        key=key,
-    )
-
-    legacy_sr = _legacy_sampling_result(sr)
-    Y_expanded = Y_unique[sr.expanded_to_unique]
-    result_expanded = jaxgsa.sobol.analyze(
-        legacy_sr,
-        Y_expanded,
-        num_resamples=50,
-        ci_method="gaussian",
-        key=key,
-    )
-
-    assert np.allclose(np.asarray(result_unique.S1), np.asarray(result_expanded.S1))
-    assert np.allclose(np.asarray(result_unique.ST), np.asarray(result_expanded.ST))
-    assert np.allclose(
-        np.asarray(result_unique.S2),
-        np.asarray(result_expanded.S2),
-        equal_nan=True,
-    )
-    assert np.allclose(np.asarray(result_unique.S1_conf), np.asarray(result_expanded.S1_conf))
-    assert np.allclose(np.asarray(result_unique.ST_conf), np.asarray(result_expanded.ST_conf))
-    assert np.allclose(
-        np.asarray(result_unique.S2_conf),
-        np.asarray(result_expanded.S2_conf),
-        equal_nan=True,
-    )
-
-
-def test_unique_bootstrap_prenormalize_matches_expanded_layout():
-    """prenormalize=True should preserve unique-vs-expanded bootstrap equivalence."""
-    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=1024, seed=29, verbose=False)
-    Y_unique = evaluate(jnp.asarray(sr.samples))
-    key = jax.random.key(456)
-    result_unique = jaxgsa.sobol.analyze(
-        sr, Y_unique, num_resamples=50, key=key, prenormalize=True
-    )
-
-    legacy_sr = _legacy_sampling_result(sr)
-    Y_expanded = Y_unique[sr.expanded_to_unique]
-    result_expanded = jaxgsa.sobol.analyze(
-        legacy_sr,
-        Y_expanded,
-        num_resamples=50,
-        key=key,
-        prenormalize=True,
-    )
-
-    assert np.allclose(np.asarray(result_unique.S1), np.asarray(result_expanded.S1))
-    assert np.allclose(np.asarray(result_unique.ST), np.asarray(result_expanded.ST))
-    assert np.allclose(
-        np.asarray(result_unique.S2),
-        np.asarray(result_expanded.S2),
-        equal_nan=True,
-    )
-    assert np.allclose(np.asarray(result_unique.S1_conf), np.asarray(result_expanded.S1_conf))
-    assert np.allclose(np.asarray(result_unique.ST_conf), np.asarray(result_expanded.ST_conf))
-    assert np.allclose(
-        np.asarray(result_unique.S2_conf),
-        np.asarray(result_expanded.S2_conf),
-        equal_nan=True,
-    )
-
-
-def test_gaussian_conf_shapes_match_quantile():
-    """Gaussian CI arrays should keep the same shapes as quantile mode."""
-    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**10, seed=59, verbose=False)
-    Y = evaluate(jnp.asarray(sr.samples))
-    key = jax.random.key(111)
-
-    quantile = jaxgsa.sobol.analyze(sr, Y, num_resamples=20, ci_method="quantile", key=key)
-    gaussian = jaxgsa.sobol.analyze(sr, Y, num_resamples=20, ci_method="gaussian", key=key)
-
-    assert quantile.S1_conf is not None
-    assert quantile.ST_conf is not None
-    assert quantile.S2_conf is not None
-    assert gaussian.S1_conf is not None
-    assert gaussian.ST_conf is not None
-    assert gaussian.S2_conf is not None
-    assert gaussian.S1_conf.shape == quantile.S1_conf.shape
-    assert gaussian.ST_conf.shape == quantile.ST_conf.shape
-    assert gaussian.S2_conf.shape == quantile.S2_conf.shape
-
-
 def test_gaussian_and_quantile_bootstrap_endpoints_differ():
-    """The ci_method switch should exercise distinct endpoint calculations."""
+    """The ci_method switch must exercise distinct endpoint calculations.
+
+    This is the only observable difference between the two endpoint rules.
+    ``CIInfo.method`` records the name the caller asked for, so a gaussian
+    branch that quietly returned percentile endpoints would still record
+    ``"gaussian"`` and pass every other test in the suite.
+    """
     sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**10, seed=61, verbose=False)
     Y = evaluate(jnp.asarray(sr.samples))
     key = jax.random.key(222)

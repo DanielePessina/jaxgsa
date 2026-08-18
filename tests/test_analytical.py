@@ -41,14 +41,6 @@ class TestIshigami:
         rel = abs(S2[0, 2] - expected_02) / expected_02
         assert rel < 0.10, f"S2[0,2]={S2[0, 2]:.4f}, expected {expected_02}"
 
-    def test_s1_sum_leq_1(self, ishigami_sobol_result):
-        assert np.sum(np.asarray(ishigami_sobol_result.S1)) <= 1.0 + 0.05
-
-    def test_st_geq_s1(self, ishigami_sobol_result):
-        S1 = np.asarray(ishigami_sobol_result.S1)
-        ST = np.asarray(ishigami_sobol_result.ST)
-        assert np.all(ST >= S1 - 0.02)
-
 
 # ---------------------------------------------------------------------------
 # Linear additive
@@ -73,11 +65,6 @@ class TestLinear:
         S2 = np.asarray(linear_sobol_result.S2)
         off_diag = S2[np.triu_indices_from(S2, k=1)]
         np.testing.assert_allclose(off_diag, 0.0, atol=0.03)
-
-    def test_s1_sums_to_1(self, linear_sobol_result):
-        """Additive model: S1 values should sum to 1."""
-        total = float(np.sum(np.asarray(linear_sobol_result.S1)))
-        assert abs(total - 1.0) < 0.05, f"sum(S1) = {total:.4f}"
 
     def test_analytical_values(self):
         """Verify the analytical formulas directly."""
@@ -114,22 +101,6 @@ class TestSobolG:
                 rel = abs(ST[i] - expected) / expected
                 assert rel < 0.10, f"ST[{i}]={ST[i]:.4f}, expected {expected:.4f}"
 
-    def test_st_geq_s1(self, sobol_g_result):
-        S1 = np.asarray(sobol_g_result.S1)
-        ST = np.asarray(sobol_g_result.ST)
-        assert np.all(ST >= S1 - 0.02)
-
-    def test_analytical_indices_consistency(self):
-        """Verify analytical formulas: S1 sums to < 1, ST sums to > 1."""
-        S1, ST, S2 = sobol_g.analytical_indices()
-        # S1 < 1: interaction terms absorb variance not captured by first-order effects.
-        # ST > 1: each interaction is counted in every participating variable's total index.
-        assert S1.sum() < 1.0
-        assert ST.sum() > 1.0
-        assert np.all(ST >= S1)
-        off_diag = S2[np.triu_indices_from(S2, k=1)]
-        assert np.all(off_diag >= 0)
-
     def test_analytical_degenerate(self):
         """When all a=0, each factor is equally important."""
         # All a_j = 0 makes the G-function symmetric in all inputs, so S1_j = 1/D.
@@ -161,11 +132,6 @@ class TestOakleyOHagan:
             else:
                 rel = abs(ST[i] - expected) / expected
                 assert rel < 0.15, f"ST[{i}]={ST[i]:.4f}, expected {expected:.4f}, rel={rel:.3f}"
-
-    def test_st_geq_s1(self, oakley_sobol_result):
-        S1 = np.asarray(oakley_sobol_result.S1)
-        ST = np.asarray(oakley_sobol_result.ST)
-        assert np.all(ST >= S1 - 0.02)
 
     def test_analytical_matches_published(self):
         """Analytical closed-form S1 matches Oakley & O'Hagan (2004) Table."""

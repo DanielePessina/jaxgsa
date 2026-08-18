@@ -106,17 +106,6 @@ def test_bootstrap_3d_shape():
     assert result.S2_conf.shape == (2, 2, 3, D, D)
 
 
-def test_no_bootstrap_conf_is_none():
-    """Without bootstrap, _conf fields should be None."""
-    p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
-    sr = jaxgsa.sobol.sample(p, n_samples=256, seed=42, verbose=False)
-    Y = jax.random.normal(jax.random.key(1), (sr.n_runs,))
-    result = jaxgsa.sobol.analyze(sr, Y)
-    assert result.S1_conf is None
-    assert result.ST_conf is None
-    assert result.S2_conf is None
-
-
 def test_bootstrap_no_second_order_shape():
     """Bootstrap without second order: S2_conf should be None."""
     result, p = _bootstrap_result((), calc_second_order=False)

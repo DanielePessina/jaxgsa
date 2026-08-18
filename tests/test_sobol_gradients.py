@@ -394,31 +394,10 @@ def _legacy_design(problem, base_n, *, calc_second_order, scramble, seed):
 @pytest.mark.parametrize(
     "problem",
     [
+        # One continuous marginal stands for all three: uniform, gaussian and
+        # truncated gaussian are strictly monotone, so they exercise the same
+        # injectivity path. The categorical case is the other path.
         pytest.param(Problem.from_dict({"a": (0.0, 1.0), "b": (-2.0, 3.0)}), id="uniform"),
-        pytest.param(
-            Problem.from_dict(
-                {
-                    "a": {"dist": "gaussian", "mean": 1.0, "variance": 4.0},
-                    "b": {"dist": "gaussian", "mean": 0.0, "variance": 1.0},
-                }
-            ),
-            id="gaussian",
-        ),
-        pytest.param(
-            Problem.from_dict(
-                {
-                    "a": {
-                        "dist": "gaussian",
-                        "mean": 0.0,
-                        "variance": 1.0,
-                        "low": -1.0,
-                        "high": 2.0,
-                    },
-                    "b": (0.0, 1.0),
-                }
-            ),
-            id="truncated",
-        ),
         pytest.param(
             Problem.from_dict(
                 {

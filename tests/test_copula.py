@@ -11,7 +11,6 @@ import jaxgsa
 from jaxgsa._core.copula import (
     _MIN_EIGENVALUE,
     _REPAIR_NOISE,
-    _ConditionalPlan,
     _project_to_correlation,
     _safe_cholesky,
     _spearman_to_latent,
@@ -19,11 +18,10 @@ from jaxgsa._core.copula import (
     canonicalize_correlation,
     correlation_from_covariance,
     fit_gaussian_copula,
-    independent_correlation,
-    is_independent,
     latent_normal_sample,
     latent_to_physical,
 )
+from jaxgsa._core.validation import _correlation_tolerant_methods
 from jaxgsa.problem import GaussianInputSpec, Problem
 
 # An indefinite candidate: pairwise entries are individually valid but jointly
@@ -67,23 +65,16 @@ def _uniform_problem(D: int = 2) -> Problem:
 # ---------------------------------------------------------------------------
 
 
-def test_canonicalize_correlation_accepts_valid_matrix_unchanged():
-    R = np.array([[1.0, 0.5], [0.5, 1.0]])
-    np.testing.assert_allclose(canonicalize_correlation(R, 2), R, atol=1e-15)
+def test_canonicalize_correlation_rejects_a_matrix_of_the_wrong_size():
+    """The shape check is the one this file owns.
 
-
-@pytest.mark.parametrize(
-    ("R", "match"),
-    [
-        (np.eye(3), r"must be \(2, 2\)"),
-        (np.array([[1.0, 0.5], [0.2, 1.0]]), "symmetric"),
-        (np.array([[2.0, 0.5], [0.5, 1.0]]), "unit diagonal"),
-        (np.array([[1.0, 1.5], [1.5, 1.0]]), r"lie in \[-1, 1\]"),
-    ],
-)
-def test_canonicalize_correlation_rejects_structurally_invalid(R, match):
-    with pytest.raises(ValueError, match=match):
-        canonicalize_correlation(R, 2)
+    Asymmetry, a non-unit diagonal and an out-of-range entry are covered on
+    both correlation kinds by ``test_canonicalize_rejects_bad_diagonal_on_
+    every_kind`` and ``test_canonicalize_rejects_asymmetry_and_out_of_range_
+    on_every_kind`` below.
+    """
+    with pytest.raises(ValueError, match=r"must be \(2, 2\)"):
+        canonicalize_correlation(np.eye(3), 2)
 
 
 def test_repair_warning_fires_for_mildly_indefinite_declared_matrix():
@@ -94,17 +85,6 @@ def test_repair_warning_fires_for_mildly_indefinite_declared_matrix():
     eigenvalues = np.linalg.eigvalsh(repaired)
     assert eigenvalues.min() > 0
     np.testing.assert_allclose(np.diag(repaired), 1.0, atol=1e-12)
-
-
-def test_repair_warning_reports_min_eigenvalue_and_max_change():
-    with pytest.warns(UserWarning) as record:
-        repaired = canonicalize_correlation(_MILD_INDEFINITE_R, 3, policy="declared")
-    message = str(record[0].message)
-    min_eig = np.linalg.eigvalsh(_MILD_INDEFINITE_R).min()
-    change = np.abs(repaired - _MILD_INDEFINITE_R).max()
-    assert f"{min_eig:.3e}" in message
-    assert f"{change:.3e}" in message
-    assert "latent scale" in message
 
 
 def test_repair_of_declared_matrix_is_silent_at_noise_level():
@@ -118,17 +98,6 @@ def test_repair_of_declared_matrix_is_silent_at_noise_level():
 def test_repair_of_declared_matrix_raises_when_material():
     with pytest.raises(ValueError, match="too far to accept"):
         canonicalize_correlation(_INDEFINITE_R, 3, policy="declared")
-
-
-def test_material_repair_error_names_the_way_out():
-    with pytest.raises(ValueError) as excinfo:
-        canonicalize_correlation(_INDEFINITE_R, 3, policy="declared")
-    message = str(excinfo.value)
-    min_eig = np.linalg.eigvalsh(_INDEFINITE_R).min()
-    assert f"{min_eig:.3e}" in message
-    assert "4.000e-01" in message  # the max entrywise change
-    assert "jaxgsa.sampling.fit_correlation" in message
-    assert "correlation_kind" in message
 
 
 def test_repair_stays_silent_for_valid_matrix():
@@ -226,12 +195,6 @@ def test_canonicalize_rejects_unknown_kind():
 def test_canonicalize_latent_is_identity_on_valid_input():
     R = np.array([[1.0, 0.4], [0.4, 1.0]])
     np.testing.assert_allclose(canonicalize_correlation(R, 2), R, atol=1e-15)
-
-
-def test_canonicalize_spearman_applies_conversion():
-    rho_s = 0.5
-    R = canonicalize_correlation(np.array([[1.0, rho_s], [rho_s, 1.0]]), 2, kind="spearman")
-    np.testing.assert_allclose(R[0, 1], 2.0 * np.sin(np.pi * rho_s / 6.0), atol=1e-15)
 
 
 @pytest.mark.parametrize("bad_diagonal", [0.0, 0.5, 2.0, -1.0])
@@ -405,11 +368,6 @@ def test_latent_to_physical_applies_the_marginal_inverse_cdfs():
     np.testing.assert_allclose(X[:, 1], expected_g, atol=1e-9)
 
 
-def test_is_independent_and_identity_helper():
-    assert is_independent(independent_correlation(4))
-    assert not is_independent(np.array([[1.0, 0.2], [0.2, 1.0]]))
-
-
 def test_unscrambled_latent_sample_skips_the_origin():
     """The unscrambled sequence starts past the origin, not at a clipped extreme.
 
@@ -444,27 +402,21 @@ def _correlated_problem(D: int = 2, rho: float = 0.8) -> Problem:
     return _uniform_problem(D).with_correlation(R)
 
 
-def test_sobol_sample_rejects_correlated_problem():
-    with pytest.raises(ValueError, match=r"jaxgsa\.sobol\.sample.*independent inputs"):
-        jaxgsa.sobol.sample(_correlated_problem(), 64, seed=1, verbose=False)
-
-
-def test_morris_sample_rejects_correlated_problem():
-    with pytest.raises(ValueError, match=r"jaxgsa\.morris\.sample.*independent inputs"):
-        jaxgsa.morris.sample(_correlated_problem(), n_trajectories=4, seed=1, verbose=False)
-
-
-def test_efast_sample_rejects_correlated_problem():
-    with pytest.raises(ValueError, match=r"jaxgsa\.efast\.sample.*independent inputs"):
-        jaxgsa.efast.sample(_correlated_problem(), n_per_curve=128, seed=1)
-
-
 def test_sampler_guard_message_names_alternatives():
-    with pytest.raises(
-        ValueError,
-        match=r"monte_carlo.*optimal_transport.*borgonovo.*hdmr.*hsic.*pawn",
-    ):
+    """The sampler refusal quotes the generated list, not a copy of it.
+
+    ``tests/test_entry_preamble.py`` makes this claim for the *analysis*
+    gate. This is the design gate, whose message is built at a different call
+    site. Asserting against ``_correlation_tolerant_methods()`` rather than a
+    transcribed ordering means adding a tolerant method cannot make the test
+    stale without also making the message wrong.
+    """
+    with pytest.raises(ValueError) as excinfo:
         jaxgsa.sobol.sample(_correlated_problem(), 64, seed=1, verbose=False)
+    message = str(excinfo.value)
+    assert _correlation_tolerant_methods() in message
+    # The design gate additionally has to say how to draw the samples.
+    assert "jaxgsa.sampling.monte_carlo" in message
 
 
 def test_identity_correlation_does_not_trip_the_guards():
@@ -485,12 +437,6 @@ def _correlated_xy(D: int = 2, N: int = 64):
     return problem, jnp.asarray(X), jnp.asarray(Y)
 
 
-def test_pce_analyze_rejects_correlated_problem():
-    problem, X, Y = _correlated_xy()
-    with pytest.raises(ValueError, match=r"jaxgsa\.pce\.analyze.*independent inputs"):
-        jaxgsa.pce.analyze(problem, X, Y)
-
-
 def test_dgsm_analyze_rejects_correlated_problem_on_both_paths():
     problem, X, Y = _correlated_xy()
     with pytest.raises(ValueError, match=r"jaxgsa\.dgsm\.analyze.*independent inputs"):
@@ -498,32 +444,6 @@ def test_dgsm_analyze_rejects_correlated_problem_on_both_paths():
     dfdx = jnp.zeros((X.shape[0], 2))
     with pytest.raises(ValueError, match=r"jaxgsa\.dgsm\.analyze.*independent inputs"):
         jaxgsa.dgsm.analyze(problem, Y=Y, dfdx=dfdx)
-
-
-def test_shapley_pce_backend_rejects_correlated_problem():
-    problem, X, Y = _correlated_xy()
-    with pytest.raises(ValueError, match=r"shapley.*backend='pce'.*include_correlative=True"):
-        jaxgsa.shapley.analyze(problem, X, Y, backend="pce")
-
-
-def test_analyzer_guard_message_names_alternatives():
-    problem, X, Y = _correlated_xy()
-    with pytest.raises(
-        ValueError,
-        match=r"optimal_transport.*borgonovo.*hdmr.*hsic.*pawn",
-    ):
-        jaxgsa.pce.analyze(problem, X, Y)
-
-
-def test_correlation_tolerant_analyzers_accept_correlated_problem():
-    problem, X, Y = _correlated_xy(N=512)  # HDMR needs at least 300 samples
-    # Each tolerant method must run to completion without the guard tripping.
-    jaxgsa.pawn.analyze(problem, X, Y)
-    jaxgsa.hsic.analyze(problem, X, Y)
-    jaxgsa.borgonovo.analyze(problem, X, Y)
-    jaxgsa.optimal_transport.analyze(problem, X, Y)
-    jaxgsa.hdmr.analyze(problem, X, Y)
-    jaxgsa.shapley.analyze(problem, X, Y, backend="hdmr", include_correlative=True)
 
 
 def test_conditional_plan_carries_the_factor_of_its_own_matrix():
@@ -547,23 +467,6 @@ def test_conditional_plan_carries_the_factor_of_its_own_matrix():
     # silently interchanged.
     other = build_conditional_plan(_equicorrelated(0.2, D=4))
     assert not np.allclose(plan.chol_full, other.chol_full)
-
-
-def test_conditional_plan_chol_full_is_appended_last():
-    """T4 internal consistency: the positional field order is unchanged.
-
-    ``_ConditionalPlan`` is a NamedTuple, so inserting a field rather than
-    appending it would silently re-map every positional read.
-    """
-    assert _ConditionalPlan._fields == (
-        "others",
-        "beta_rest",
-        "chol_rest",
-        "beta_self",
-        "std_self",
-        "chol_marginal",
-        "chol_full",
-    )
 
 
 def test_safe_cholesky_matches_numpy_when_comfortably_pd():

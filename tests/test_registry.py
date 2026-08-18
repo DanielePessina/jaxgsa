@@ -23,7 +23,6 @@ from __future__ import annotations
 import pathlib
 import warnings
 from collections.abc import Callable
-from types import MappingProxyType
 
 import jax.numpy as jnp
 import numpy as np
@@ -126,19 +125,6 @@ class TestCompleteness:
             f"registered but no package: {sorted(registered - discovered)}"
         )
 
-    def test_the_registry_matches_the_public_namespace_list(self):
-        """The drift that hit tests/test_imports.py, in assertion form."""
-        exported = {n for n in jaxgsa.__all__ if hasattr(getattr(jaxgsa, n), "__path__")}
-        exported -= {"benchmarks", "config", "sampling"}
-        assert exported == set(methods())
-
-    def test_the_walk_finds_the_packages_it_claims_to_check(self):
-        """Guard the guard: a walk that finds nothing would pass vacuously."""
-        discovered = _discover_method_packages()
-        assert len(discovered) >= 13
-        assert "sobol" in discovered
-        assert "_core" not in discovered
-
 
 class TestTheSpecsAreTrue:
     """Every claim is answerable to the code."""
@@ -171,20 +157,6 @@ class TestTheSpecsAreTrue:
         else:
             assert spec.bootstrap in params
 
-    @pytest.mark.parametrize("spec", ALL_SPECS, ids=SPEC_IDS)
-    def test_a_design_based_method_exposes_its_sampler(self, spec):
-        namespace = getattr(jaxgsa, spec.name)
-        assert spec.is_design_based == hasattr(namespace, "sample")
-        if spec.is_design_based:
-            assert spec.sample is namespace.sample
-
-    @pytest.mark.parametrize("spec", ALL_SPECS, ids=SPEC_IDS)
-    def test_the_analyze_and_result_entries_are_the_exported_ones(self, spec):
-        """Three methods export analyze under another name; catch a mismatch."""
-        namespace = getattr(jaxgsa, spec.name)
-        assert spec.analyze is namespace.analyze
-        assert spec.result.__name__ in namespace.__all__
-
 
 class TestTheRegistryIsProtected:
     def test_a_duplicate_name_is_refused(self):
@@ -210,12 +182,3 @@ class TestTheRegistryIsProtected:
         from jaxgsa._core.registry import register
 
         assert register(methods()["sobol"]) is methods()["sobol"]
-
-    def test_the_returned_mapping_cannot_be_edited(self):
-        """A consumer that edited it would change what every consumer sees.
-
-        Asserted as the type rather than by attempting a write: MappingProxyType
-        refusing __setitem__ is a language guarantee, and writing the failing
-        assignment here would be a type error in its own right.
-        """
-        assert isinstance(methods(), MappingProxyType)

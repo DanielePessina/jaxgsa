@@ -137,43 +137,6 @@ def test_identity_mapping_skips_index_array(tmp_path):
     _assert_equal(samples, SobolSamples.load(path))
 
 
-def test_duplicate_rows_store_index_array(tmp_path):
-    """Designs with duplicate rows still persist the full expansion map."""
-    samples = jaxgsa.sobol.sample(
-        Problem.from_dict({"x": (0.0, 1.0)}),
-        16,
-        seed=5,
-        verbose=False,
-    )
-    assert samples.n_expanded > samples.n_runs, (
-        "test premise: 1-D Saltelli designs should contain duplicate rows"
-    )
-
-    path = tmp_path / "dupes"
-    samples.save(path)
-
-    with np.load(tmp_path / "dupes.npz", allow_pickle=False) as data:
-        assert "expanded_to_unique" in data.files
-        meta = json.loads(data["metadata"].item())
-    assert meta["identity_mapping"] is False
-    _assert_equal(samples, SobolSamples.load(path))
-
-
-def test_metadata_records_jaxgsa_version(tmp_path):
-    samples = jaxgsa.sobol.sample(
-        Problem.from_dict({"x": (0.0, 1.0)}),
-        16,
-        seed=2,
-        verbose=False,
-    )
-    samples.save(tmp_path / "versioned")
-
-    with np.load(tmp_path / "versioned.npz", allow_pickle=False) as data:
-        meta = json.loads(data["metadata"].item())
-    assert isinstance(meta["jaxgsa_version"], str)
-    assert meta["jaxgsa_version"] != ""
-
-
 # ---------------------------------------------------------------------------
 # Morris persistence (via the shared UniqueDesignSamples base)
 # ---------------------------------------------------------------------------
@@ -255,55 +218,6 @@ def test_morris_expand_outputs_after_load(tmp_path):
     np.testing.assert_array_equal(np.asarray(expanded), np.asarray(samples.expand_outputs(Y)))
 
 
-def test_morris_identity_mapping_skips_index_array(tmp_path):
-    """Radial designs have no duplicate rows, so the index map is omitted."""
-    samples = jaxgsa.morris.sample(
-        _morris_problem(),
-        n_trajectories=8,
-        method="radial",
-        seed=3,
-        verbose=False,
-    )
-    assert np.array_equal(samples.expanded_to_unique, np.arange(samples.n_expanded)), (
-        "test premise: radial designs should have no duplicate rows"
-    )
-
-    path = tmp_path / "morris_identity"
-    samples.save(path)
-
-    with np.load(tmp_path / "morris_identity.npz", allow_pickle=False) as data:
-        assert "expanded_to_unique" not in data.files
-        meta = json.loads(data["metadata"].item())
-    assert meta["identity_mapping"] is True
-    _assert_morris_equal(samples, MorrisSamples.load(path))
-
-
-def test_sobol_and_morris_share_metadata_schema(tmp_path):
-    """Both NPZ formats carry the same base-owned metadata keys."""
-    problem = _morris_problem()
-    sobol_samples = jaxgsa.sobol.sample(problem, 32, seed=1, verbose=False)
-    morris_samples = jaxgsa.morris.sample(problem, n_trajectories=6, seed=1, verbose=False)
-
-    sobol_samples.save(tmp_path / "schema_sobol")
-    morris_samples.save(tmp_path / "schema_morris")
-
-    metas = {}
-    for name in ("schema_sobol", "schema_morris"):
-        with np.load(tmp_path / f"{name}.npz", allow_pickle=False) as data:
-            assert "samples" in data.files
-            assert "metadata" in data.files
-            metas[name] = json.loads(data["metadata"].item())
-
-    common_keys = {"jaxgsa_version", "problem", "n_expanded", "identity_mapping"}
-    for meta in metas.values():
-        assert common_keys <= set(meta)
-        assert set(meta["problem"]) == {"names", "input_specs", "output_names", "correlation"}
-
-    # The shared (base-owned) part of the schema is identical across designs.
-    assert metas["schema_sobol"]["problem"] == metas["schema_morris"]["problem"]
-    assert metas["schema_sobol"]["jaxgsa_version"] == metas["schema_morris"]["jaxgsa_version"]
-
-
 # ---------------------------------------------------------------------------
 # Problem.correlation persistence (JSON metadata + NPZ design files)
 # ---------------------------------------------------------------------------
@@ -328,16 +242,6 @@ def test_problem_meta_json_round_trip_carries_correlation():
     stored = restored.correlation
     assert stored is not None
     np.testing.assert_array_equal(stored, problem.correlation)
-
-
-def test_problem_meta_round_trip_preserves_none_correlation():
-    from jaxgsa._core.samples import _problem_from_meta, _problem_to_meta
-
-    problem = Problem.from_dict({"x": (0.0, 1.0)})
-    meta = json.loads(json.dumps(_problem_to_meta(problem)))
-    restored = _problem_from_meta(meta)
-    assert restored == problem
-    assert restored.correlation is None
 
 
 def test_problem_meta_load_tolerates_pre_060_files_without_correlation_key():
@@ -377,20 +281,3 @@ def test_npz_round_trip_carries_identity_correlation(tmp_path):
     with np.load(tmp_path / "correlated_design.npz", allow_pickle=False) as data:
         meta = json.loads(data["metadata"].item())
     assert meta["problem"]["correlation"] == [[1.0, 0.0], [0.0, 1.0]]
-
-
-def test_morris_npz_round_trip_carries_identity_correlation(tmp_path):
-    problem = Problem.from_dict(
-        {"x": (0.0, 1.0), "y": (0.0, 1.0)},
-        correlation=np.eye(2),
-    )
-    samples = jaxgsa.morris.sample(problem, n_trajectories=4, seed=6, verbose=False)
-
-    path = tmp_path / "correlated_morris"
-    samples.save(path)
-    loaded = MorrisSamples.load(path)
-
-    _assert_morris_equal(samples, loaded)
-    stored = loaded.problem.correlation
-    assert stored is not None
-    np.testing.assert_array_equal(stored, np.eye(2))

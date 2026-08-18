@@ -317,7 +317,12 @@ def prepare(
     """
     method = method or f"jaxgsa.{spec.name}.analyze"
     unit = spec.invalid_unit
-    if unit is None:  # pragma: no cover - guarded by tests/test_registry.py
+    # Defensive: no registered method reaches this. Every spec that calls
+    # prepare declares an invalid_unit, and shapley, the one spec that does
+    # not, uses gates() instead. Nothing tests this branch; it is here so a
+    # new method that forgets the field fails with a sentence rather than an
+    # AttributeError deeper in the check.
+    if unit is None:  # pragma: no cover - defensive
         raise TypeError(
             f"{method}: {spec.name} declares no invalid_unit, so it cannot use prepare"
         )

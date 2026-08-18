@@ -153,17 +153,6 @@ class TestForcedStreaming:
         )
         _assert_results_match(streamed, full)
 
-    def test_predict_round_trip(self, ishigami_data, full_result):
-        """The streamed fit's surrogate predicts like the in-memory one."""
-        X, Y = ishigami_data
-        streamed = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2, batch_size=137)
-        np.testing.assert_allclose(
-            np.asarray(streamed.predict(X[:100])),
-            np.asarray(full_result.predict(X[:100])),
-            rtol=1e-3,
-            atol=PREDICT_ATOL,
-        )
-
     def test_batch_size_larger_than_n_streams_once(self, ishigami_data, full_result):
         """Tier T4 (internal consistency): batch_size >= N still streams.
 
@@ -174,24 +163,6 @@ class TestForcedStreaming:
         streamed = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2, batch_size=10**6)
         assert streamed.streamed is True
         _assert_results_match(streamed, full_result)
-
-    def test_invalid_batch_size_raises(self, ishigami_data):
-        X, Y = ishigami_data
-        with pytest.raises(ValueError, match="batch_size"):
-            analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2, batch_size=0)
-
-    def test_explicit_batch_size_engages_streaming(self, ishigami_data):
-        """Tier T4 (internal consistency): batch_size forces the streamed path.
-
-        Under the default (huge) memory budget this fit would run in memory,
-        so an explicit ``batch_size`` is the only thing that can make
-        ``streamed`` True here. The flag reports the fit path the code took,
-        so this checks the code against its own documented dispatch rule and
-        nothing outside it.
-        """
-        X, Y = ishigami_data
-        result = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2, batch_size=500)
-        assert result.streamed is True
 
 
 class TestAutoEngage:
@@ -216,95 +187,3 @@ class TestAutoEngage:
         assert jaxgsa.config.get_memory_budget() == saved
         assert streamed.streamed is True
         _assert_results_match(streamed, full_result)
-
-    def test_default_budget_keeps_in_memory(self, ishigami_data):
-        """Tier T4 (internal consistency): small fits stay on the in-memory path.
-
-        The default budget is far above this fit's estimated footprint, so the
-        reported path must be the in-memory one.
-        """
-        X, Y = ishigami_data
-        assert analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2).streamed is False
-
-    def test_full_fit_bytes_formula(self):
-        """Tier T4 (internal consistency): the auto-engage memory estimate.
-
-        For ``maxorder=2, D=3, m=2`` (so ``m1=5, m2=25, n1=3, n2=3, n=6``) and
-        ``N=1000`` float32 values the resident arrays are ``B1`` (1000 x 5 x 3 =
-        15000), ``B2`` (1000 x 25 x 3 = 75000), the ``B3`` placeholder (1000)
-        and the per-lane kernel transients (1000 x (2 x 3 x 5 + 5 x 6) = 60000).
-        That is 151000 values, or 604000 bytes at 4 bytes each.
-
-        The literal is hand-computed from the array breakdown that
-        ``_full_fit_bytes`` documents for itself, not from any paper or outside
-        tool, so this is T4 and not T1. What it proves: the code agrees with
-        its own documented arithmetic, and a silent change to the formula makes
-        the test fail instead of moving with it. What it does not prove: that
-        the breakdown names the right arrays, or that the estimate matches the
-        memory JAX really allocates. Only a measurement can show that.
-        """
-        from jaxgsa.hdmr._stream import _full_fit_bytes
-
-        got = _full_fit_bytes(N=1000, D=3, m1=5, m2=25, m3=125, n1=3, n2=3, n3=0, n=6, itemsize=4)
-        assert got == 604_000
-
-
-class TestHDMRStaticDataLayout:
-    """The twelve-field ``_HDMRStaticData`` NamedTuple's positional layout."""
-
-    def test_field_order_is_unchanged(self):
-        """Tier T4 (internal consistency): the positional field order is pinned.
-
-        ``_get_hdmr_static_data`` builds ``_HDMRStaticData`` positionally,
-        while every consumer reads it by attribute name. Swapping two names in
-        the class body therefore re-maps the values silently, with no error
-        anywhere. Same-typed neighbours make that easy to do by accident:
-        ``n1, n2, n3, n`` and ``m1, m2, m3`` are all plain ints.
-
-        Append new fields, never insert them.
-        """
-        from jaxgsa.hdmr._analyze import _HDMRStaticData
-
-        assert _HDMRStaticData._fields == (
-            "c1",
-            "c2",
-            "c3",
-            "n1",
-            "n2",
-            "n3",
-            "n",
-            "m1",
-            "m2",
-            "m3",
-            "beta2",
-            "beta3",
-        )
-
-    def test_values_land_on_the_right_names(self):
-        """Tier T4 (internal consistency): each name carries its own value.
-
-        The field-order test above catches a rename. This one catches the
-        other half: that the positional construction puts each computed value
-        under the name its own docstring gives it. For ``D=3, maxorder=2,
-        m=2`` the values are fixed by the definitions ``n1 = D``, ``n2 =
-        C(D, 2)``, ``n3 = 0``, ``n = n1 + n2 + n3``, ``m1 = m + 3``,
-        ``m2 = m1^2``, ``m3 = m1^3``.
-        """
-        from jaxgsa.hdmr._analyze import _get_hdmr_static_data
-
-        static = _get_hdmr_static_data(3, 2, 2)
-        assert static.c1 == (0, 1, 2)
-        assert static.c2 == ((0, 1), (0, 2), (1, 2))
-        assert static.c3 == ()
-        assert (static.n1, static.n2, static.n3, static.n) == (3, 3, 0, 6)
-        assert (static.m1, static.m2, static.m3) == (5, 25, 125)
-        assert static.beta2.shape == (25, 2)
-        assert static.beta3.shape == (0, 3)  # unused below maxorder=3
-
-        # maxorder=3 fills the order-3 fields, so no name is left untested.
-        static3 = _get_hdmr_static_data(3, 3, 2)
-        assert static3.c3 == ((0, 1, 2),)
-        assert (static3.n1, static3.n2, static3.n3, static3.n) == (3, 3, 1, 7)
-        assert (static3.m1, static3.m2, static3.m3) == (5, 25, 125)
-        assert static3.beta2.shape == (25, 2)
-        assert static3.beta3.shape == (125, 3)

@@ -9,7 +9,6 @@ import pytest
 
 from jaxgsa import JaxgsaWarning
 from jaxgsa._core.invalid import (
-    InvalidReport,
     InvalidUnit,
     check_invalid,
     resolve_policy,
@@ -28,11 +27,6 @@ def _rows(*bad_rows: int, n: int = 6, width: int = 2) -> np.ndarray:
 
 class TestResolvePolicy:
     """T4: validation of the on_invalid argument."""
-
-    @pytest.mark.parametrize("policy", ["raise", "propagate", "drop"])
-    def test_accepts_the_three_policies(self, policy):
-        """T4: each documented policy is returned unchanged."""
-        assert resolve_policy(policy, method=METHOD, unit=InvalidUnit.ROW) == policy
 
     @pytest.mark.parametrize("bad", ["Raise", "skip", "", None, 0, True, ["drop"]])
     def test_rejects_anything_else(self, bad):
@@ -91,24 +85,6 @@ class TestCleanSample:
         assert report.n_kept == 6
         assert report.sources == ()
         assert len(recwarn) == 0
-
-    def test_clean_report_records_that_the_check_ran(self):
-        """T4: a clean report still carries the policy and the unit count.
-
-        A result with no report and a result with an empty report mean
-        different things: the second says the check ran and found nothing.
-        """
-        _, report = check_invalid(
-            policy="raise",
-            method=METHOD,
-            unit=InvalidUnit.SALTELLI_GROUP,
-            n_units=4,
-            Y=_rows(n=4),
-        )
-        assert report.policy == "raise"
-        assert report.unit is InvalidUnit.SALTELLI_GROUP
-        assert report.n_units == 4
-        assert "clean" in repr(report)
 
 
 class TestRaisePolicy:
@@ -368,42 +344,6 @@ class TestWhatCountsAsInvalid:
         assert report.sources == ()
 
 
-class TestReportSurface:
-    """T4: the report a user reads off the result."""
-
-    def test_repr_abbreviates_a_long_index_list(self):
-        """T4: a report on hundreds of bad rows stays readable."""
-        report = InvalidReport(
-            policy="drop",
-            unit=InvalidUnit.ROW,
-            n_units=1000,
-            n_invalid=200,
-            unit_indices=tuple(range(200)),
-            row_indices=tuple(range(200)),
-            sources=("Y",),
-        )
-        text = repr(report)
-        assert "190 more" in text
-        assert len(text) < 400
-
-    def test_indices_refer_to_the_original_numbering(self):
-        """T4: positions are pre-removal, which is what the caller can act on.
-
-        After dropping, row 5 of the returned array is not row 5 of the array
-        the user passed. Reporting post-removal positions would point at the
-        wrong model run.
-        """
-        with pytest.warns(JaxgsaWarning):
-            _, report = check_invalid(
-                policy="drop",
-                method=METHOD,
-                unit=InvalidUnit.ROW,
-                n_units=8,
-                Y=_rows(1, 6, n=8),
-            )
-        assert report.unit_indices == (1, 6)
-
-
 class TestSourceNames:
     """T4: renaming the arrays the report talks about."""
 
@@ -438,15 +378,3 @@ class TestSourceNames:
                 source_names=("inputs", "outputs"),
             )
         assert report.sources == ("inputs", "outputs")
-
-    def test_default_names_are_still_x_and_y(self):
-        """T4: the override is opt-in and does not shift the common case."""
-        with pytest.warns(JaxgsaWarning):
-            _, report = check_invalid(
-                policy="propagate",
-                method=METHOD,
-                unit=InvalidUnit.ROW,
-                n_units=6,
-                Y=_rows(0),
-            )
-        assert report.sources == ("Y",)

@@ -31,13 +31,12 @@ from scipy.stats import truncnorm
 from jaxgsa.problem import Problem, _NormalizedInputSpec
 
 
-def poincare_constant(spec: _NormalizedInputSpec, *, grid: int = 512) -> float:
+def poincare_constant(spec: _NormalizedInputSpec) -> float:
     """Return the Poincare constant C(p) of a single marginal.
 
     Args:
         spec: Normalized input spec tuple ``(dist, first, second, low, high,
             categorical)``.
-        grid: Number of P1 elements for the truncated-Normal spectral solve.
 
     Returns:
         The optimal Poincare constant.
@@ -56,7 +55,7 @@ def poincare_constant(spec: _NormalizedInputSpec, *, grid: int = 512) -> float:
         std = math.sqrt(sigma2)
         fallback_lo = first - 8 * std if low is None else low
         fallback_hi = first + 8 * std if high is None else high
-        return _truncnorm_poincare(first, std, fallback_lo, fallback_hi, grid)
+        return _truncnorm_poincare(first, std, fallback_lo, fallback_hi, 512)
     if dist == "categorical":
         raise ValueError(
             "A categorical marginal has no Poincare constant (the inequality "

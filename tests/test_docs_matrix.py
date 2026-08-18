@@ -155,18 +155,27 @@ class TestTheTableCoversEveryMethod:
             f"documented but not registered: {sorted(documented - registered)}"
         )
 
-    def test_the_rows_are_in_alphabetical_order(self):
-        """A stable order keeps a diff of the table readable."""
-        assert list(ROWS) == sorted(ROWS)
-
-    def test_the_parser_finds_the_table_it_claims_to_check(self):
-        """Guard the guard: an empty parse would pass the tests above."""
-        assert len(ROWS) >= 13
-        assert "sobol" in ROWS
-
 
 class TestEveryCellIsTrue:
     """Each documented cell is answerable to the registry."""
+
+    @pytest.mark.parametrize("spec", SPECS, ids=IDS)
+    def test_the_reports_cell_says_something(self, spec):
+        """The registry declares no list of what a method reports.
+
+        The cell is prose — "bounds on $S_T$", "dependence measure",
+        "$W_2^2$ index" — and none of those is answerable to a field on the
+        result class, so the wording cannot be checked. What can be checked is
+        that the cell holds prose at all: a blank cell, or a capability mark
+        that slipped one column to the left, is the defect that put this test
+        module here in the first place.
+        """
+        cell = ROWS[spec.name][EXPECTED_COLUMNS.index("Reports")]
+        assert cell, f"the Reports cell for {spec.name} is empty"
+        assert cell.strip(FOOTNOTE_MARKERS + " ") not in (YES, NO, DASH), (
+            f"the Reports cell for {spec.name} is {cell!r}; a tick, a cross or "
+            f"a dash there means a capability mark landed in the wrong column"
+        )
 
     @pytest.mark.parametrize("spec", SPECS, ids=IDS)
     def test_the_own_design_cell(self, spec):
@@ -231,35 +240,3 @@ class TestTheProseAgreesWithTheTable:
             if spec.is_design_based:
                 continue
             assert documented[spec.name] == spec.result.__name__
-
-    def test_the_footnote_on_the_bootstrap_column_counts_correctly(self):
-        """The table says how many methods report no intervals. Check it."""
-        silent = sum(1 for s in SPECS if s.bootstrap is None)
-        page = METHODS_PAGE.read_text().lower()
-        assert f"{_spelled(silent)} methods report no intervals" in page, (
-            f"{silent} methods declare no bootstrap keyword, but the "
-            f"Bootstrap CI note in {METHODS_PAGE.name} says otherwise"
-        )
-
-    def test_the_prose_counts_the_design_based_methods_correctly(self):
-        """``docs/guide/methods.md`` once credited DGSM with a sampler."""
-        design = sum(1 for s in SPECS if s.is_design_based)
-        page = METHODS_PAGE.read_text().lower()
-        assert f"{_spelled(design)} methods need their own sampling design" in page
-        assert f"the other {_spelled(len(SPECS) - design)} are given-data" in page
-
-
-def _spelled(n: int) -> str:
-    """Spell a small count as the documentation spells it.
-
-    Args:
-        n: The count, at most twenty.
-
-    Returns:
-        The English word for it.
-    """
-    words = (
-        "zero one two three four five six seven eight nine ten eleven twelve "
-        "thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty"
-    ).split()
-    return words[n]

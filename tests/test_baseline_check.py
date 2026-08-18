@@ -28,7 +28,7 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 import baseline_check  # noqa: E402  # isort: skip
-from baseline_check import Diffs, compare  # noqa: E402  # isort: skip
+from baseline_check import compare  # noqa: E402  # isort: skip
 
 
 def _array(values: list[float], shape: list[int] | None = None) -> dict[str, Any]:
@@ -109,13 +109,6 @@ class TestSchemaChanges:
         assert diffs.values == []
         assert len(diffs.schema) == 1
         assert "REMOVED" in diffs.schema[0]
-
-    def test_a_gained_method_is_a_schema_change(self, baseline):
-        """Adding a fourteenth method must not read as a wiring error."""
-        current = {**baseline, "new_method": {"S1": _array([0.5])}}
-        diffs = compare(baseline, current)
-        assert diffs.values == []
-        assert len(diffs.schema) == 1
 
 
 class TestComparingTwoStoredDumps:
@@ -200,13 +193,6 @@ class TestAllowSchemaChange:
         assert code == 1
         assert "999.0" in capsys.readouterr().out
 
-    def test_the_default_still_treats_a_schema_change_as_a_failure(self, tmp_path, baseline):
-        """The local check against the stored file keeps the strict behaviour."""
-        base, head = tmp_path / "base.json", tmp_path / "head.json"
-        self._write(base, baseline)
-        self._write(head, {"method": {**baseline["method"], "ci": {"level": 0.95}}})
-        assert baseline_check.main(["--baseline", str(base), "--current", str(head)]) == 2
-
 
 class TestTheTwoKindsStaySeparate:
     def test_a_gained_field_does_not_hide_a_moved_number(self, baseline):
@@ -221,8 +207,3 @@ class TestTheTwoKindsStaySeparate:
         assert len(diffs.values) == 1, "the moved number must be reported on its own"
         assert len(diffs.schema) == 1
         assert "999.0" in diffs.values[0]
-
-    def test_diffs_is_falsy_only_when_both_are_empty(self):
-        assert not Diffs()
-        assert Diffs(values=["x"])
-        assert Diffs(schema=["x"])

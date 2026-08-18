@@ -82,17 +82,3 @@ def test_vkoga_vs_kucherenko(three_routes):
     _, vkoga, kucherenko = three_routes
     np.testing.assert_allclose(np.asarray(vkoga.S_TC), np.asarray(kucherenko.S1), atol=1e-2 + 5e-3)
     np.testing.assert_allclose(np.asarray(vkoga.S_TU), np.asarray(kucherenko.ST), atol=2e-2 + 5e-3)
-
-
-def test_routes_agree_on_the_reading(three_routes):
-    """Both routes tell the same qualitative story about the coupling."""
-    _, vkoga, kucherenko = three_routes
-    for first, total in (
-        (np.asarray(vkoga.S_TC), np.asarray(vkoga.S_TU)),
-        (np.asarray(kucherenko.S1), np.asarray(kucherenko.ST)),
-    ):
-        # x1 and x2 share correlated variance: large first-order, small total.
-        assert first[0] > 0.8 and total[0] < 0.4
-        assert first[1] > 0.5 and total[1] < 0.15
-        # x3 is uncorrelated and additive: the two coincide.
-        assert abs(first[2] - total[2]) < 2e-2

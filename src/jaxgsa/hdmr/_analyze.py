@@ -52,6 +52,8 @@ class _HDMRStaticData(NamedTuple):
     matter: the values used to travel as a bare twelve-tuple unpacked
     positionally at three call sites, two of them with blind placeholders, so
     reordering the fields produced silently wrong indices instead of an error.
+    Every consumer now reads by attribute name, and the one construction site
+    passes keywords, so the field order carries no meaning of its own.
 
     Attributes:
         c1: First-order parameter indices, one per dimension.
@@ -115,7 +117,20 @@ def _get_hdmr_static_data(D: int, maxorder: int, m: int) -> _HDMRStaticData:
         if n3 > 0
         else np.zeros((0, 3), dtype=np.int32)
     )
-    return _HDMRStaticData(c1, c2, c3, n1, n2, n3, n, m1, m2, m3, beta2, beta3)
+    return _HDMRStaticData(
+        c1=c1,
+        c2=c2,
+        c3=c3,
+        n1=n1,
+        n2=n2,
+        n3=n3,
+        n=n,
+        m1=m1,
+        m2=m2,
+        m3=m3,
+        beta2=beta2,
+        beta3=beta3,
+    )
 
 
 @lru_cache(maxsize=None)

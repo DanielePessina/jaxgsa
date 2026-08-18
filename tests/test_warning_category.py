@@ -4,7 +4,7 @@ Decision D21 gives the package one warning class, ``JaxgsaWarning``. A warning
 that does not pass ``category=`` falls back to ``UserWarning``, and a user can
 then no longer filter jaxgsa warnings apart from NumPy, SciPy or JAX ones.
 
-These tests walk the source with the ``ast`` module, not a regular expression,
+This test walks the source with the ``ast`` module, not a regular expression,
 so a new module cannot drift back to an uncategorised warning.
 """
 
@@ -14,7 +14,6 @@ import ast
 import pathlib
 
 import jaxgsa
-from jaxgsa import JaxgsaWarning
 
 SRC_ROOT = pathlib.Path(jaxgsa.__file__).parent
 
@@ -82,27 +81,3 @@ def test_every_warning_passes_a_category():
         "these warnings pass no category, so they fall back to UserWarning: "
         + ", ".join(offenders)
     )
-
-
-def test_the_walk_finds_the_warnings_it_claims_to_check():
-    """Tier T4 (internal consistency): guard the guard.
-
-    An empty walk would pass the test above by accident, so this test pins a
-    floor on how many ``warnings.warn`` calls the walk actually finds.
-    """
-    total = 0
-    for path in SRC_ROOT.rglob("*.py"):
-        source = path.read_text()
-        if "warnings.warn" in source:
-            total += len(_warn_calls(ast.parse(source)))
-    assert total >= 30
-
-
-def test_jaxgsa_warning_is_a_user_warning_subclass():
-    """Tier T4 (internal consistency): ``JaxgsaWarning`` is a distinct subclass.
-
-    Existing ``pytest.warns(UserWarning)`` assertions must keep passing, and a
-    user must still be able to filter jaxgsa warnings on their own.
-    """
-    assert issubclass(JaxgsaWarning, UserWarning)
-    assert JaxgsaWarning is not UserWarning

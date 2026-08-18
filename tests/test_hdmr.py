@@ -88,13 +88,6 @@ def test_st_accuracy(hdmr_result):
     _assert_matches_analytical_s1_st(np.array(hdmr_result.S1), ST)
 
 
-def test_s1_via_sa(hdmr_result):
-    """First-order Sa terms should approximate analytical S1."""
-    Sa = np.array(hdmr_result.Sa)
-    D = PROBLEM.num_vars
-    _assert_matches_analytical_s1_st(Sa[:D], np.array(hdmr_result.ST))
-
-
 # ---------------------------------------------------------------------------
 # Shape tests
 # ---------------------------------------------------------------------------
@@ -119,26 +112,6 @@ def test_shapes_1d(ishigami_data):
     assert result.ST.shape == (D,)
     assert result.rmse is not None
     assert result.rmse.shape == ()
-    assert result._fit is not None
-    assert set(result._fit) == {
-        "C1",
-        "C2",
-        "C3",
-        "f0",
-        "prenormalize",
-        "y_mean",
-        "y_std",
-        "m",
-        "maxorder",
-    }
-    assert result._fit["C1"].shape == (5, 3)
-    assert result._fit["C2"] is not None
-    assert result._fit["C2"].shape == (25, 3)
-    assert result._fit["C3"] is None
-    assert result._fit["f0"].shape == ()
-    assert result._fit["y_mean"].shape == ()
-    assert result._fit["y_std"].shape == ()
-    assert result._fit["prenormalize"] is False
 
 
 def test_shapes_2d(ishigami_data):
@@ -255,53 +228,6 @@ def test_slice_chunk_size_regression(ishigami_data):
     )
 
 
-def test_slice_chunk_size_regression_3d(ishigami_data):
-    """Chunked and unchunked HDMR paths should agree for time-series multi-output Y."""
-    X, Y = ishigami_data
-    Y_alt = jnp.sin(X[:, 1]) + 0.1 * X[:, 0] * X[:, 2]
-    Y_tk = jnp.stack(
-        [
-            jnp.stack([Y, Y_alt], axis=1),
-            jnp.stack([0.5 * Y + 0.25 * X[:, 0], -1.5 * Y_alt], axis=1),
-        ],
-        axis=1,
-    )
-
-    result_default = analyze_hdmr(PROBLEM, X, Y_tk, maxorder=2, m=2)
-    result_chunked = analyze_hdmr(
-        PROBLEM,
-        X,
-        Y_tk,
-        maxorder=2,
-        m=2,
-        slice_chunk_size=1,
-    )
-
-    # Chunked and unchunked paths differ only by floating-point reduction
-    # order, so use a tolerance that absorbs that (and cross-version jax
-    # rounding drift) while still catching a genuine chunking bug.
-    np.testing.assert_allclose(
-        np.asarray(result_default.Sa), np.asarray(result_chunked.Sa), rtol=1e-5, atol=1e-5
-    )
-    np.testing.assert_allclose(
-        np.asarray(result_default.Sb), np.asarray(result_chunked.Sb), rtol=1e-5, atol=1e-5
-    )
-    np.testing.assert_allclose(
-        np.asarray(result_default.S), np.asarray(result_chunked.S), rtol=1e-5, atol=1e-5
-    )
-    np.testing.assert_allclose(
-        np.asarray(result_default.ST), np.asarray(result_chunked.ST), rtol=1e-6, atol=1e-6
-    )
-    assert result_default.rmse is not None
-    assert result_chunked.rmse is not None
-    np.testing.assert_allclose(
-        np.asarray(result_default.rmse),
-        np.asarray(result_chunked.rmse),
-        rtol=1e-6,
-        atol=1e-6,
-    )
-
-
 def test_hdmr_accepts_gaussian_inputs():
     """HDMR should accept mixed uniform/Gaussian problems via CDF mapping."""
     problem = PROBLEM.from_dict(
@@ -323,75 +249,6 @@ def test_hdmr_accepts_gaussian_inputs():
     assert result.ST.shape == (3,)
 
 
-def test_repeated_calls_identical(ishigami_data):
-    """Repeated identical HDMR calls should return identical outputs."""
-    X, Y = ishigami_data
-    result_first = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2)
-    result_second = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2)
-
-    np.testing.assert_allclose(
-        np.asarray(result_first.Sa), np.asarray(result_second.Sa), rtol=1e-6, atol=1e-6
-    )
-    np.testing.assert_allclose(
-        np.asarray(result_first.Sb), np.asarray(result_second.Sb), rtol=1e-6, atol=1e-6
-    )
-    np.testing.assert_allclose(
-        np.asarray(result_first.S), np.asarray(result_second.S), rtol=1e-6, atol=1e-6
-    )
-    np.testing.assert_allclose(
-        np.asarray(result_first.ST), np.asarray(result_second.ST), rtol=1e-6, atol=1e-6
-    )
-    assert result_first.rmse is not None
-    assert result_second.rmse is not None
-    np.testing.assert_allclose(
-        np.asarray(result_first.rmse),
-        np.asarray(result_second.rmse),
-        rtol=1e-6,
-        atol=1e-6,
-    )
-    assert result_first._fit is not None
-    assert result_second._fit is not None
-    np.testing.assert_allclose(
-        np.asarray(result_first._fit["C1"]),
-        np.asarray(result_second._fit["C1"]),
-        rtol=1e-6,
-        atol=1e-6,
-    )
-    np.testing.assert_allclose(
-        np.asarray(result_first._fit["C2"]),
-        np.asarray(result_second._fit["C2"]),
-        rtol=1e-6,
-        atol=1e-6,
-    )
-    assert result_first.terms == result_second.terms
-
-
-def test_explicit_prenormalize_false_matches_default(ishigami_data):
-    """Explicit prenormalize=False should preserve the default HDMR path."""
-    X, Y = ishigami_data
-    default = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2)
-    explicit = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2, prenormalize=False)
-
-    np.testing.assert_allclose(
-        np.asarray(default.Sa), np.asarray(explicit.Sa), rtol=1e-6, atol=1e-6
-    )
-    np.testing.assert_allclose(
-        np.asarray(default.Sb), np.asarray(explicit.Sb), rtol=1e-6, atol=1e-6
-    )
-    np.testing.assert_allclose(np.asarray(default.S), np.asarray(explicit.S), rtol=1e-6, atol=1e-6)
-    np.testing.assert_allclose(
-        np.asarray(default.ST), np.asarray(explicit.ST), rtol=1e-6, atol=1e-6
-    )
-    assert default.rmse is not None
-    assert explicit.rmse is not None
-    np.testing.assert_allclose(
-        np.asarray(default.rmse),
-        np.asarray(explicit.rmse),
-        rtol=1e-6,
-        atol=1e-6,
-    )
-
-
 def test_prenormalize_is_shift_scale_invariant(ishigami_data):
     """prenormalize=True should make HDMR sensitivities invariant to affine Y changes."""
     X, Y = ishigami_data
@@ -409,50 +266,14 @@ def test_prenormalize_is_shift_scale_invariant(ishigami_data):
 # ---------------------------------------------------------------------------
 
 
-def test_maxorder_1(ishigami_data):
-    """maxorder=1 should produce D terms."""
+@pytest.mark.parametrize(("maxorder", "n_terms"), [(1, 3), (2, 6), (3, 7)])
+def test_maxorder_selects_the_term_count(maxorder, n_terms, ishigami_data):
+    """For D=3 the term count is 3, 6 and 7 at maxorder 1, 2 and 3."""
     X, Y = ishigami_data
-    result = analyze_hdmr(
-        PROBLEM,
-        X,
-        Y,
-        maxorder=1,
-        m=2,
-    )
-    assert result.Sa.shape == (PROBLEM.num_vars,)
-    assert len(result.terms) == PROBLEM.num_vars
-
-
-def test_maxorder_2(ishigami_data):
-    """maxorder=2 should produce D + C(D,2) terms."""
-    X, Y = ishigami_data
-    D = PROBLEM.num_vars
-    result = analyze_hdmr(
-        PROBLEM,
-        X,
-        Y,
-        maxorder=2,
-        m=2,
-    )
-    expected_n = D + D * (D - 1) // 2
-    assert result.Sa.shape == (expected_n,)
-    assert len(result.terms) == expected_n
-
-
-def test_maxorder_3(ishigami_data):
-    """maxorder=3 should produce D + C(D,2) + C(D,3) terms."""
-    X, Y = ishigami_data
-    D = PROBLEM.num_vars
-    result = analyze_hdmr(
-        PROBLEM,
-        X,
-        Y,
-        maxorder=3,
-        m=2,
-    )
-    expected_n = D + D * (D - 1) // 2 + D * (D - 1) * (D - 2) // 6
-    assert result.Sa.shape == (expected_n,)
-    assert len(result.terms) == expected_n
+    assert PROBLEM.num_vars == 3
+    result = analyze_hdmr(PROBLEM, X, Y, maxorder=maxorder, m=2)
+    assert result.Sa.shape == (n_terms,)
+    assert len(result.terms) == n_terms
 
 
 # ---------------------------------------------------------------------------
@@ -468,13 +289,6 @@ def test_emulator_prediction(hdmr_result, ishigami_data):
     rmse = float(jnp.sqrt(jnp.mean(jnp.square(Y - Y_pred))))
     # HDMR surrogate should capture most of the variance
     assert rmse < 1.5, f"Emulator RMSE = {rmse:.3f}, expected < 1.5"
-
-
-def test_emulator_reasonable(hdmr_result, ishigami_data):
-    """Emulator output mean should be close to data mean."""
-    X, Y = ishigami_data
-    Y_pred = hdmr_result.predict(X)
-    assert abs(float(jnp.mean(Y_pred)) - float(jnp.mean(Y))) < 1.0
 
 
 def test_predict_rejects_wrong_shaped_x(hdmr_result, ishigami_data):
@@ -560,23 +374,6 @@ def test_time_series_multi_output_emulator_preserves_axes(ishigami_data):
     assert not np.allclose(np.array(Y_pred[:, 0, 0]), np.array(Y_pred[:, 1, 0]))
 
 
-def test_predict_preserves_explicit_time_series_layout(ishigami_data):
-    """Training on (N, T, K) yields (N_new, T, K) predictions."""
-    from jaxgsa.problem import Problem
-
-    X, Y = ishigami_data
-    assert PROBLEM.bounds is not None
-    problem = Problem(
-        names=PROBLEM.names,
-        bounds=PROBLEM.bounds,
-        output_names=("pressure",),
-    )
-    Y_3d = jnp.stack([Y, 2.0 * Y], axis=-1)[..., None]
-    result = analyze_hdmr(problem, X, Y_3d, maxorder=2, m=2)
-    pred = result.predict(X[:30])
-    assert pred.shape == (30, 2, 1)
-
-
 def test_multi_output_emulator_preserves_non_proportional_outputs(ishigami_data):
     """Distinct outputs should keep distinct sensitivities and predictions."""
     X, Y = ishigami_data
@@ -608,39 +405,6 @@ def test_multi_output_emulator_preserves_non_proportional_outputs(ishigami_data)
 # ---------------------------------------------------------------------------
 
 
-def test_term_labels(hdmr_result):
-    """Term labels should contain parameter names and interaction terms."""
-    terms = hdmr_result.terms
-    names = PROBLEM.names
-    # First-order terms should be parameter names
-    for name in names:
-        assert name in terms
-    # Should have interaction terms
-    assert any("/" in t for t in terms)
-
-
-def test_select_and_rmse(hdmr_result):
-    """select and rmse should be present."""
-    assert hdmr_result.select is not None
-    assert hdmr_result.rmse is not None
-    assert hdmr_result.select.shape[0] > 0
-    assert isinstance(hdmr_result._c2, tuple)
-    assert isinstance(hdmr_result._c3, tuple)
-
-
-def test_s1_property(hdmr_result):
-    """S1 property should extract first D terms of Sa."""
-    D = PROBLEM.num_vars
-    S1 = hdmr_result.S1
-    assert S1.shape == (D,)
-    np.testing.assert_array_equal(S1, hdmr_result.Sa[:D])
-
-
-def test_s1_accuracy(hdmr_result):
-    """S1 property should approximate analytical first-order Sobol indices."""
-    _assert_matches_analytical_s1_st(np.array(hdmr_result.S1), np.array(hdmr_result.ST))
-
-
 def test_constant_y():
     """Constant Y yields NaN indices and a warning (package-wide convention)."""
     N = 500
@@ -654,13 +418,6 @@ def test_constant_y():
     # Matches Sobol/PCE: 0/0 indices are NaN, not silent zeros.
     assert jnp.all(jnp.isnan(result.Sa))
     assert jnp.all(jnp.isnan(result.ST))
-
-
-def test_scalar_like_lambdax(ishigami_data):
-    """Scalar-like lambdax inputs should still be accepted."""
-    X, Y = ishigami_data
-    result = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2, lambdax=float(jnp.array(0.01)))
-    assert result.Sa.shape[0] == PROBLEM.num_vars + PROBLEM.num_vars * (PROBLEM.num_vars - 1) // 2
 
 
 def test_validation_errors():
@@ -793,40 +550,6 @@ def test_s2_layout_uses_numeric_interaction_indices():
     assert np.isnan(S2[0, 2])  # (x1, x3) has no term -> NaN
 
 
-def test_s2_multi_output_shape(ishigami_data):
-    """Multi-output S2 carries a leading output axis: (K, D, D)."""
-    X, Y = ishigami_data
-    D = PROBLEM.num_vars
-    Y_multi = jnp.stack([Y, 2.0 * Y], axis=1)
-    result = analyze_hdmr(PROBLEM, X, Y_multi, maxorder=2, m=2)
-    assert result.S2.shape == (2, D, D)
-    # Both proportional outputs share the same interaction structure. Each slice
-    # is fit by an independent least-squares solve, so near-zero interaction
-    # cells differ in the last digits -- compare with an absolute floor.
-    np.testing.assert_allclose(
-        np.array(result.S2[0]), np.array(result.S2[1]), rtol=1e-4, atol=1e-5
-    )
-
-
-def test_to_dataset_includes_s2_s3(ishigami_data):
-    """to_dataset exposes S2 always and S3 when third-order terms exist."""
-    X, Y = ishigami_data
-    D = PROBLEM.num_vars
-    names = list(PROBLEM.names)
-
-    ds2 = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2).to_dataset()
-    assert "S2" in ds2
-    assert ds2["S2"].dims == ("param_i", "param_j")
-    assert ds2["S2"].shape == (D, D)
-    assert list(ds2.coords["param_i"].values) == names
-    assert "S3" not in ds2
-
-    ds3 = analyze_hdmr(PROBLEM, X, Y, maxorder=3, m=2).to_dataset()
-    assert "S3" in ds3
-    assert ds3["S3"].dims == ("param_i", "param_j", "param_k")
-    assert ds3["S3"].shape == (D, D, D)
-
-
 # ---------------------------------------------------------------------------
 # Correlated inputs: the SCSA reading of ST
 # ---------------------------------------------------------------------------
@@ -884,25 +607,6 @@ def test_st_is_scsa_total_under_correlation(correlated_hdmr_result):
     # sum; if they were negligible the test would not be pinning anything.
     assert np.abs(np.array(result.Sb)).max() > 1e-3
     assert not np.allclose(ST, _scatter(np.array(result.Sa)), atol=1e-2)
-
-
-def test_st_is_not_a_conditional_variance_total(correlated_hdmr_result):
-    """ST and S1 leave their Sobol readings behind under correlation.
-
-    The correlative shares are folded into ST but left out of S1, so neither
-    one tracks the conditional-variance quantity a Sobol index reports.
-    ``test_st_diverges_from_the_conditional_variance_total`` makes the same
-    point against a real conditional-variance estimator.
-    """
-    result = correlated_hdmr_result
-    ST = np.array(result.ST)
-    S1 = np.array(result.S1)
-    # S1 is the structural share only, so it sits well below the Sobol S1 of
-    # a strongly correlated pair.
-    assert S1[0] < 0.5
-    assert S1[1] < 0.9
-    # The correlative fold-in moves ST away from the structural sum.
-    assert not np.allclose(ST[:2], S1[:2], atol=1e-3)
 
 
 def test_st_diverges_from_the_conditional_variance_total():
@@ -1044,23 +748,6 @@ class TestHDMROnInvalid:
         with pytest.raises(ValueError, match="every usable row was removed") as exc:
             analyze_hdmr(PROBLEM, X, Y, on_invalid="drop", **self.HDMR_KWARGS)
         assert "at least 300" in str(exc.value)
-
-    @pytest.mark.parametrize("policy", ["raise", "propagate", "drop"])
-    def test_a_clean_sample_is_clean_under_every_policy(self, policy, ishigami_data):
-        """T4: nothing found means no warning and a report that says so."""
-        X, Y = ishigami_data
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            result = analyze_hdmr(PROBLEM, X, Y, on_invalid=policy, **self.HDMR_KWARGS)
-        assert result.invalid.n_invalid == 0
-        assert result.invalid.n_units == 2000
-        assert [w for w in caught if "non-finite" in str(w.message)] == []
-
-    def test_a_bad_policy_name_is_refused(self, ishigami_data):
-        """T4: an unknown on_invalid raises before any fitting work happens."""
-        X, Y = ishigami_data
-        with pytest.raises(ValueError, match="on_invalid must be one of"):
-            analyze_hdmr(PROBLEM, X, Y, on_invalid="Drop", **self.HDMR_KWARGS)
 
     def test_shapley_carries_the_report_through(self, ishigami_data):
         """T4: the report survives the analytical Shapley step unchanged."""

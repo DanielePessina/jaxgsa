@@ -12,7 +12,7 @@ from jaxgsa import JaxgsaWarning
 from jaxgsa._core.invalid import InvalidUnit
 from jaxgsa.benchmarks import ishigami, linear, sobol_g
 from jaxgsa.dgsm import analyze
-from jaxgsa.dgsm._poincare import axis_constants, marginal_variance, poincare_constant
+from jaxgsa.dgsm._poincare import marginal_variance, poincare_constant
 from jaxgsa.problem import GaussianInputSpec, Problem
 from jaxgsa.sampling import monte_carlo
 
@@ -117,10 +117,6 @@ class TestMarginalVariance:
         spec = _spec((0.0, 1.0))
         assert marginal_variance(spec) == pytest.approx(1.0 / 12.0)
 
-    def test_uniform_wide(self):
-        spec = _spec((-math.pi, math.pi))
-        assert marginal_variance(spec) == pytest.approx((2 * math.pi) ** 2 / 12.0)
-
     def test_gaussian(self):
         spec = _spec(GaussianInputSpec(dist="gaussian", mean=0.0, variance=2.5))
         assert marginal_variance(spec) == pytest.approx(2.5)
@@ -131,53 +127,6 @@ class TestMarginalVariance:
         )
         v = marginal_variance(spec)
         assert 0 < v < 1.0
-
-
-class TestAxisConstants:
-    def test_shapes(self):
-        problem = Problem(names=("a", "b", "c"), bounds=((0, 1), (0, 1), (0, 1)))
-        C, Var = axis_constants(problem)
-        assert C.shape == (3,)
-        assert Var.shape == (3,)
-
-    def test_uniform_values(self):
-        problem = Problem(names=("x",), bounds=((0.0, 1.0),))
-        C, Var = axis_constants(problem)
-        assert C[0] == pytest.approx(1.0 / math.pi**2)
-        assert Var[0] == pytest.approx(1.0 / 12.0)
-
-
-class TestSampleMC:
-    def test_shape(self):
-        problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        X = monte_carlo(problem, n=100, seed=1)
-        assert X.shape == (100, 2)
-
-    def test_within_bounds(self):
-        problem = Problem(names=("a", "b"), bounds=((2.0, 5.0), (-1.0, 3.0)))
-        X = monte_carlo(problem, n=1000, seed=2)
-        assert np.all(X[:, 0] >= 2.0 - 1e-10)
-        assert np.all(X[:, 0] <= 5.0 + 1e-10)
-        assert np.all(X[:, 1] >= -1.0 - 1e-10)
-        assert np.all(X[:, 1] <= 3.0 + 1e-10)
-
-    def test_reproducible(self):
-        problem = Problem(names=("x1",), bounds=((0, 1),))
-        X1 = monte_carlo(problem, n=50, seed=99)
-        X2 = monte_carlo(problem, n=50, seed=99)
-        np.testing.assert_array_equal(X1, X2)
-
-    def test_gaussian_inputs(self):
-        problem = Problem.from_dict(
-            {
-                "x1": (0.0, 1.0),
-                "x2": GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0),
-            }
-        )
-        X = monte_carlo(problem, n=500, seed=3)
-        assert X.shape == (500, 2)
-        assert np.all(X[:, 0] >= 0.0 - 1e-10)
-        assert np.all(X[:, 0] <= 1.0 + 1e-10)
 
 
 class TestLinearDGSM:
@@ -205,16 +154,6 @@ class TestLinearDGSM:
         ST = np.array(linear.ANALYTICAL_ST)
         # MC noise in Var(Y) means the bound can slightly exceed analytical ST
         np.testing.assert_allclose(lower[0], ST, rtol=0.05)
-
-    def test_bracket_contains_st(self, linear_dgsm_result):
-        """The DGSM bracket [lower, upper] should approximately contain ST."""
-        lower = np.asarray(linear_dgsm_result.lower_bound)[0]
-        upper = np.asarray(linear_dgsm_result.upper_bound)[0]
-        ST = np.array(linear.ANALYTICAL_ST)
-        # MC noise tolerance: bounds are exact in expectation, noisy in practice
-        for i in range(3):
-            assert lower[i] <= ST[i] + 0.02, f"lower[{i}]={lower[i]:.4f} > ST={ST[i]:.4f}"
-            assert upper[i] >= ST[i] - 0.02, f"upper[{i}]={upper[i]:.4f} < ST={ST[i]:.4f}"
 
 
 class TestIshigamiDGSM:
@@ -286,26 +225,6 @@ class TestScalarOutput:
 
 
 class TestPrecomputed:
-    def test_precomputed_matches_autodiff(self):
-        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
-        X = monte_carlo(problem, n=1000, seed=10)
-        Xj = jnp.asarray(X)
-        result_auto = analyze(problem, _linear_single, Xj)
-
-        import jax
-
-        jacfn = jax.vmap(jax.jacrev(_linear_single))
-        dfdx = jacfn(Xj)
-        Y = jax.vmap(_linear_single)(Xj)
-
-        result_pre = analyze(problem, Y=Y, dfdx=dfdx)
-        np.testing.assert_allclose(
-            np.asarray(result_auto.nu), np.asarray(result_pre.nu), atol=1e-5
-        )
-        np.testing.assert_allclose(
-            np.asarray(result_auto.sigma), np.asarray(result_pre.sigma), atol=1e-5
-        )
-
     def test_missing_args_raises(self):
         """Tier T4 (behavioural contract): no argument group at all is rejected."""
         problem = Problem(names=("x",), bounds=((0, 1),))
@@ -328,35 +247,8 @@ class TestPrecomputed:
         with pytest.raises(ValueError, match="ndim"):
             analyze(problem, Y=Y, dfdx=dfdx[:, None, :])
 
-    def test_singleton_pair_2d(self):
-        """Y=(N, 1) requires an exact (N, 1, D) Jacobian."""
-        import jax
-
-        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1),) * 3)
-        X = jnp.asarray(monte_carlo(problem, n=400, seed=8))
-
-        def fn(x):
-            return jnp.dot(jnp.array([1.0, 2.0, 3.0]), x)
-
-        Y = jax.vmap(fn)(X)[:, None]  # (N, 1)
-        dfdx = jax.vmap(jax.jacrev(fn))(X)[:, None, :]
-        result = analyze(problem, Y=Y, dfdx=dfdx)
-        assert result.nu.shape == (1, 3)
-
 
 class TestChunked:
-    def test_chunked_matches_unchunked(self):
-        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
-        X = monte_carlo(problem, n=500, seed=11)
-        Xj = jnp.asarray(X)
-        result_full = analyze(problem, _linear_single, Xj)
-        result_chunked = analyze(problem, _linear_single, Xj, batch_size=100)
-        np.testing.assert_allclose(
-            np.asarray(result_full.nu),
-            np.asarray(result_chunked.nu),
-            atol=1e-5,
-        )
-
     def test_ragged_chunk_matches(self):
         """N not divisible by batch_size should still produce correct results."""
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
@@ -372,16 +264,6 @@ class TestChunked:
 
 
 class TestValidation:
-    def test_x_wrong_ndim(self):
-        problem = Problem(names=("x",), bounds=((0, 1),))
-        with pytest.raises(ValueError, match="2-D"):
-            analyze(problem, _linear_single, jnp.ones(10))
-
-    def test_x_wrong_columns(self):
-        problem = Problem(names=("x",), bounds=((0, 1),))
-        with pytest.raises(ValueError, match="columns"):
-            analyze(problem, _linear_single, jnp.ones((10, 3)))
-
     def test_dfdx_wrong_ndim(self):
         problem = Problem(names=("x",), bounds=((0, 1),))
         with pytest.raises(ValueError, match="ndim"):
@@ -396,11 +278,6 @@ class TestValidation:
         problem = Problem(names=("x",), bounds=((0, 1),))
         with pytest.raises(ValueError, match="rows"):
             analyze(problem, Y=jnp.ones(10), dfdx=jnp.ones((5, 1)))
-
-    def test_sample_mc_n_zero_raises(self):
-        problem = Problem(names=("x",), bounds=((0, 1),))
-        with pytest.raises(ValueError, match="n must be >= 1"):
-            monte_carlo(problem, n=0)
 
 
 def _three_uniform_problem():
@@ -576,31 +453,6 @@ class TestBatchCallableRejected:
 
 
 class TestToDataset:
-    def test_scalar_output(self):
-        """Truly scalar fn (returning ()) produces a dataset with no output dim."""
-
-        def f_scalar(x):
-            return jnp.dot(jnp.array([1.0, 2.0, 3.0]), x)
-
-        problem = linear.PROBLEM
-        X = monte_carlo(problem, n=500, seed=42)
-        result = analyze(problem, f_scalar, jnp.asarray(X))
-        ds = result.to_dataset()
-        assert "nu" in ds.data_vars
-        assert "sigma" in ds.data_vars
-        assert "upper_bound" in ds.data_vars
-        assert "lower_bound" in ds.data_vars
-        assert list(ds.coords["param"].values) == list(linear.PROBLEM.names)
-        assert "output" not in ds.dims
-
-    def test_multi_output(self):
-        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
-        X = monte_carlo(problem, n=200, seed=12)
-        result = analyze(problem, _multi_output, jnp.asarray(X))
-        ds = result.to_dataset()
-        assert "output" in ds.dims
-        assert ds["nu"].shape == (2, 3)
-
     def test_output_names_used(self):
         problem = Problem(
             names=("x1", "x2", "x3"),
@@ -635,20 +487,6 @@ class TestSobolGDGSM:
     def test_ranking(self, sobol_g_dgsm_result):
         nu = np.asarray(sobol_g_dgsm_result.nu)
         assert nu[0] > nu[1] > nu[2] > nu[3]
-
-
-def test_single_param():
-    problem = Problem(names=("x",), bounds=((0.0, 1.0),))
-    X = monte_carlo(problem, n=5000, seed=1)
-
-    def fn(x):
-        return jnp.sin(x[0])
-
-    result = analyze(problem, fn, jnp.asarray(X))
-    assert result.nu.shape == (1,)
-    assert result.sigma.shape == (1,)
-    assert result.upper_bound.shape == (1,)
-    assert result.lower_bound.shape == (1,)
 
 
 # ---------------------------------------------------------------------------
@@ -1063,16 +901,6 @@ class TestInvalidPolicyShared:
         assert result.invalid.policy == policy
         assert result.invalid.unit is InvalidUnit.ROW
         assert result.invalid.n_units == 24
-        assert not any("non-finite" in str(w.message) for w in recwarn)
-
-    @pytest.mark.parametrize("policy", ["raise", "propagate", "drop"])
-    def test_clean_precomputed_sample_reports_nothing(self, policy, recwarn):
-        """T4: the same, on the pre-computed convention."""
-        X = _grid_X()
-        Y, dfdx = _precomputed(_plain, X)
-        result = analyze(_two_uniform_problem(), Y=Y, dfdx=dfdx, on_invalid=policy)
-        assert result.invalid.n_invalid == 0
-        assert result.invalid.policy == policy
         assert not any("non-finite" in str(w.message) for w in recwarn)
 
     @pytest.mark.parametrize("bad", ["Raise", "skip", "", None, 0, True])

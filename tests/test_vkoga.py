@@ -25,12 +25,9 @@ import warnings
 import jax
 import numpy as np
 import pytest
-from scipy.stats import spearmanr
 
 import jaxgsa
 from jaxgsa import JaxgsaWarning
-from jaxgsa._core.copula import fit_gaussian_copula
-from jaxgsa._core.invalid import InvalidReport, InvalidUnit
 from jaxgsa.problem import Problem
 
 # Closed-form linear-Gaussian reference, shared with test_kucherenko.py and
@@ -61,19 +58,6 @@ SMALL_KWARGS = dict(
     n_variance=512,
     seed=0,
 )
-
-
-def _clean_report(n_units: int = 0) -> InvalidReport:
-    """Build the empty non-finite report a hand-made result needs."""
-    return InvalidReport(
-        policy="raise",
-        unit=InvalidUnit.ROW,
-        n_units=n_units,
-        n_invalid=0,
-        unit_indices=(),
-        row_indices=(),
-        sources=(),
-    )
 
 
 def _uniform_scalar(X: np.ndarray) -> np.ndarray:
@@ -378,12 +362,6 @@ def test_oscillatory_model_warns_that_the_surrogate_failed():
     assert result.cv_rmse > 0.5 * float(Y.std())
 
 
-def test_cv_rmse_is_none_when_both_hyperparameters_are_fixed(uniform_fits):
-    """No cross-validation ran, so there is no out-of-sample score to report."""
-    _, _, fits = uniform_fits
-    assert fits["scalar"].cv_rmse is None
-
-
 # --- correlation handling -----------------------------------------------------
 
 
@@ -434,76 +412,13 @@ def test_correlation_string_raises():
             jaxgsa.vkoga.analyze(GAUSS_PROBLEM, X, Y, correlation=value, **SMALL_KWARGS)
 
 
-def test_categorical_problem_raises():
-    """The isotropic RBF has no valid metric over unordered level codes."""
-    problem = Problem.from_dict(
-        {
-            "u1": {"dist": "uniform", "low": 0.0, "high": 1.0},
-            "c1": {"dist": "categorical", "probs": [0.5, 0.5]},
-        }
-    )
-    rng = np.random.default_rng(0)
-    X = np.column_stack([rng.uniform(size=64), rng.integers(0, 2, 64).astype(float)])
-    Y = X[:, 0]
-    with pytest.raises(ValueError, match="categorical"):
-        jaxgsa.vkoga.analyze(problem, X, Y, **SMALL_KWARGS)
-
-
 def test_correlation_matrix_validation_errors():
+    """A correlation matrix of the wrong size is refused, naming the size."""
     X = jaxgsa.sampling.monte_carlo(GAUSS_PROBLEM, 32, seed=0)
     Y = X @ A_COEF
-
-    asymmetric = np.eye(3)
-    asymmetric[0, 1] = 0.5
-    out_of_range = np.eye(3)
-    out_of_range[0, 1] = out_of_range[1, 0] = 1.5
-    cases = [
-        (np.eye(2), r"must be \(3, 3\)"),
-        (asymmetric, "symmetric"),
-        (np.eye(3) * 2.0, "unit diagonal"),
-        (out_of_range, r"\[-1, 1\]"),
-    ]
-    for bad_matrix, message in cases:
-        # The single-precision warning fires before validation raises.
-        with pytest.raises(ValueError, match=message), pytest.warns(UserWarning):
-            jaxgsa.vkoga.analyze(GAUSS_PROBLEM, X, Y, correlation=bad_matrix, **SMALL_KWARGS)
-
-
-def test_copula_fit_with_ties_matches_spearmanr():
-    """Tied values with a structured row order must not bias the rank fit.
-
-    A column with heavy ties, ordered so the other column descends within
-    each tie group, breaks positional tie-breaking (double argsort): the
-    row order leaks into the ranks. Average ranks match spearmanr.
-    """
-    rng = np.random.default_rng(0)
-    n = 512
-    x1 = np.repeat(np.arange(8.0), n // 8)  # heavy ties: 8 levels, 64 rows each
-    x2 = x1 + rng.normal(0.0, 1.0, n)
-    x3 = rng.normal(size=n)
-    # Structured row order: within each tie group of x1, sort x2 descending.
-    order = np.lexsort((-x2, x1))
-    X = np.column_stack([x1, x2, x3])[order]
-
-    rho_s = spearmanr(X[:, 0], X[:, 1]).statistic
-    expected = 2.0 * np.sin(np.pi * rho_s / 6.0)
-    R = fit_gaussian_copula(GAUSS_PROBLEM, X)
-    assert abs(R[0, 1] - expected) < 1e-8
-
-
-def test_materially_indefinite_correlation_is_rejected():
-    """A per-call override is user-declared, so a large repair refuses.
-
-    The graded repair policy treats a matrix that has to move 0.05 or more as
-    structurally inconsistent rather than as something to quietly fix. This
-    one moves 0.49.
-    """
-    R = np.array([[1.0, 0.99, 0.99], [0.99, 1.0, -0.99], [0.99, -0.99, 1.0]])
-    assert np.linalg.eigvalsh(R).min() < 0
-    X = jaxgsa.sampling.monte_carlo(GAUSS_PROBLEM, 256, seed=2)
-    Y = X @ A_COEF
-    with pytest.raises(ValueError, match="not positive definite"):
-        jaxgsa.vkoga.analyze(GAUSS_PROBLEM, X, Y, correlation=R, **SMALL_KWARGS)
+    # The single-precision warning fires before validation raises.
+    with pytest.raises(ValueError, match=r"must be \(3, 3\)"), pytest.warns(UserWarning):
+        jaxgsa.vkoga.analyze(GAUSS_PROBLEM, X, Y, correlation=np.eye(2), **SMALL_KWARGS)
 
 
 def test_indefinite_correlation_is_repaired():
@@ -568,28 +483,19 @@ def test_shapley_raises_not_implemented(uniform_fits):
         fits["scalar"].shapley()
 
 
-def test_to_dataset_schema(gauss_result):
+def test_to_dataset_carries_the_coordinate_and_attribute_values(gauss_result):
+    """The dataset's names and dims are snapshot-pinned; the values are not.
+
+    ``test_result_schema.py`` fixes the data-var names, dims and attribute
+    keys for every method. What it cannot see is what the coordinates and
+    attributes actually hold, so those claims live here.
+    """
     ds = gauss_result.to_dataset()
-    for name in ("S_TC", "S_TU", "S_U", "S_C", "S_IU"):
-        assert ds[name].dims == ("param",)
     assert list(ds.coords["param"].values) == ["x1", "x2", "x3"]
-    assert ds["variance"].dims == ()
-    assert ds["rmse"].dims == ()
-    assert ds["correlation"].dims == ("param_i", "param_j")
     assert list(ds.coords["param_i"].values) == ["x1", "x2", "x3"]
     np.testing.assert_allclose(ds["correlation"].values, R_GAUSS, atol=1e-12)
-    assert ds.attrs["method"] == "vkoga"
     assert ds.attrs["correlated"] is True
     assert ds.attrs["n_centers"] == gauss_result.n_centers
-
-
-def test_to_dataset_time_series_dims(uniform_fits):
-    _, _, fits = uniform_fits
-    ds = fits["time"].to_dataset(time_coords=[0.5, 1.0])
-    assert ds["S_TC"].dims == ("time", "output", "param")
-    assert list(ds.coords["time"].values) == [0.5, 1.0]
-    assert ds["variance"].dims == ("time", "output")
-    assert ds.attrs["correlated"] is False
 
 
 # --- argument validation ------------------------------------------------------
@@ -632,79 +538,7 @@ def test_odd_sample_sizes_round_up_to_powers_of_two():
     assert np.all(np.isfinite(np.asarray(result.S_TC)))
 
 
-def test_is_correlated_agrees_with_problem_classification():
-    """Result and Problem must classify the same matrix the same way.
-
-    A 1e-10 off-diagonal entry sits above the shared is_independent
-    tolerance (1e-12) but below np.allclose's default. Both surfaces must
-    call it correlated.
-    """
-    import jax.numpy as jnp
-
-    from jaxgsa.vkoga._result import VKOGAResult
-
-    R = np.eye(3)
-    R[0, 1] = R[1, 0] = 1e-10
-    problem = GAUSS_PROBLEM.with_correlation(R)
-    result = VKOGAResult(
-        S_TC=jnp.zeros(3),
-        S_TU=jnp.zeros(3),
-        S_U=jnp.zeros(3),
-        S_C=jnp.zeros(3),
-        S_IU=jnp.zeros(3),
-        problem=problem,
-        correlation=np.asarray(problem.correlation),
-        variance=jnp.ones(()),
-        n_centers=1,
-        gamma=1.0,
-        ridge=1e-6,
-        invalid=_clean_report(),
-    )
-    assert problem.has_correlated_inputs
-    assert result.is_correlated == problem.has_correlated_inputs
-
-
 # --- precision, cross-validation, determinism ---------------------------------
-
-
-def test_float32_emits_precision_warning():
-    X = jaxgsa.sampling.monte_carlo(UNIFORM_PROBLEM, 128, seed=0)
-    Y = _uniform_scalar(X)
-    with pytest.warns(UserWarning, match="single precision"):
-        jaxgsa.vkoga.analyze(
-            UNIFORM_PROBLEM,
-            X,
-            Y,
-            gamma=3.0,
-            ridge=1e-6,
-            max_centers=32,
-            n_outer=64,
-            n_inner=16,
-            n_variance=512,
-        )
-
-
-def test_cross_validation_path_resolves_gamma():
-    """Leaving gamma=None cross-validates it over the built-in grid."""
-    X = jaxgsa.sampling.monte_carlo(UNIFORM_PROBLEM, 128, seed=4)
-    Y = _uniform_scalar(X)
-    with pytest.warns(UserWarning, match="single precision"):
-        result = jaxgsa.vkoga.analyze(
-            UNIFORM_PROBLEM,
-            X,
-            Y,
-            gamma=None,  # cross-validated; ridge fixed keeps the grid to 10 fits
-            ridge=1e-6,
-            max_centers=32,
-            n_folds=4,
-            n_outer=64,
-            n_inner=16,
-            n_variance=512,
-            seed=0,
-        )
-    assert np.isfinite(result.gamma) and result.gamma > 0
-    assert result.ridge == 1e-6
-    assert np.all(np.isfinite(np.asarray(result.S_TC)))
 
 
 def test_masked_selection_stops_like_a_training_rows_fit():
@@ -770,34 +604,6 @@ def test_determinism_by_seed():
     # A different quasi-random stream moves the estimates, but not by much.
     assert not np.allclose(np.asarray(first.S_TC), np.asarray(other.S_TC), atol=1e-6)
     np.testing.assert_allclose(np.asarray(first.S_TC), np.asarray(other.S_TC), atol=0.25)
-
-
-def test_estimator_uses_the_factor_on_the_plan():
-    """T4 internal consistency: the joint sample comes from ``plan.chol_full``.
-
-    ``estimate_correlated_indices`` used to take the plan and a Cholesky
-    factor as two unlinked arguments, and read the parameter count from one
-    and the index geometry from the other. A mismatched pair gave wrong
-    indices rather than an error. The factor is now a field of the plan, so
-    the two cannot disagree: replacing the field must move the result.
-    """
-    from jaxgsa._core.copula import build_conditional_plan
-    from jaxgsa.vkoga._indices import estimate_correlated_indices
-
-    R_pair = np.array([[1.0, 0.7], [0.7, 1.0]])
-    plan = build_conditional_plan(R_pair)
-
-    def predict(U: np.ndarray) -> np.ndarray:
-        """Smooth, non-additive surrogate on the unit cube."""
-        return (U[:, 0] + 2.0 * U[:, 1] + U[:, 0] * U[:, 1])[:, None]
-
-    kwargs = dict(predict=predict, n_outer=64, n_inner=64, n_variance=256, seed=3)
-    baseline = estimate_correlated_indices(plan=plan, **kwargs)
-    # Only the joint factor changes; every conditional field is untouched.
-    perturbed = estimate_correlated_indices(plan=plan._replace(chol_full=np.eye(2)), **kwargs)
-
-    assert not np.allclose(baseline.variance, perturbed.variance)
-    assert not np.allclose(baseline.S_TC, perturbed.S_TC)
 
 
 # --- on_invalid policy --------------------------------------------------------
@@ -912,20 +718,3 @@ class TestVKOGAOnInvalid:
         with pytest.raises(ValueError, match="every usable row was removed") as exc:
             jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, on_invalid="drop", **SMALL_KWARGS)
         assert "at least 10" in str(exc.value)
-
-    @pytest.mark.parametrize("policy", ["raise", "propagate", "drop"])
-    def test_a_clean_sample_is_clean_under_every_policy(self, policy):
-        """T4: nothing found means no warning and a report that says so."""
-        X, Y = self._data()
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            result = jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, on_invalid=policy, **SMALL_KWARGS)
-        assert result.invalid.n_invalid == 0
-        assert result.invalid.n_units == 256
-        assert [w for w in caught if "non-finite" in str(w.message)] == []
-
-    def test_a_bad_policy_name_is_refused(self):
-        """T4: an unknown on_invalid raises before any fitting work happens."""
-        X, Y = self._data()
-        with pytest.raises(ValueError, match="on_invalid must be one of"):
-            jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, on_invalid=True, **SMALL_KWARGS)

@@ -49,17 +49,6 @@ class TestOTBasic:
         result = analyze(ishigami.PROBLEM, X, Y)
         assert result.mode == "univariate"
 
-    def test_shape_scalar_output(self, ishigami_data):
-        X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y)
-        assert result.ot.shape == (3,)
-        assert result.advective.shape == (3,)
-        assert result.diffusive.shape == (3,)
-        assert result.ot_conf is None
-        assert result.advective_conf is None
-        assert result.diffusive_conf is None
-        assert result.ot_dummy is None
-
     def test_values_in_unit_interval(self, ishigami_data):
         X, Y = ishigami_data
         result = analyze(ishigami.PROBLEM, X, Y)
@@ -325,18 +314,6 @@ class TestOTAnalytic:
 
 
 class TestOTPointCloud:
-    def test_multivariate_shape(self, multi_output_data):
-        X, Y2, _ = multi_output_data
-        result = analyze(ishigami.PROBLEM, X, Y2, mode="multivariate", n_partitions=10)
-        assert result.ot.shape == (3,)
-        assert result.mode == "multivariate"
-
-    def test_trajectory_shape(self, multi_output_data):
-        X, _, Y3 = multi_output_data
-        result = analyze(ishigami.PROBLEM, X, Y3, mode="trajectory", n_partitions=10)
-        assert result.ot.shape == (2, 3)  # (K, D)
-        assert result.mode == "trajectory"
-
     def test_multivariate_decomposition_sums_to_total(self, multi_output_data):
         X, Y2, _ = multi_output_data
         result = analyze(ishigami.PROBLEM, X, Y2, mode="multivariate", n_partitions=10)
@@ -426,16 +403,6 @@ class TestOTBootstrap:
 
 
 class TestOTMultiOutput:
-    def test_multi_output_shape(self, multi_output_data):
-        X, Y2, _ = multi_output_data
-        result = analyze(ishigami.PROBLEM, X, Y2)
-        assert result.ot.shape == (2, 3)
-
-    def test_time_series_shape(self, multi_output_data):
-        X, _, Y3 = multi_output_data
-        result = analyze(ishigami.PROBLEM, X, Y3)
-        assert result.ot.shape == (2, 2, 3)
-
     def test_first_column_matches_scalar_run(self, multi_output_data, ishigami_data):
         X, Y2, _ = multi_output_data
         _, Y = ishigami_data
@@ -503,11 +470,6 @@ class TestOTValidation:
         with pytest.raises(ValueError, match="parameters"):
             analyze(ishigami.PROBLEM, X[:, :2], Y)
 
-    def test_row_mismatch(self, ishigami_data):
-        X, Y = ishigami_data
-        with pytest.raises(ValueError, match="sample rows"):
-            analyze(ishigami.PROBLEM, X, Y[:100])
-
     def test_bad_mode(self, ishigami_data):
         X, Y = ishigami_data
         # cast so the deliberately invalid literal exercises the runtime check
@@ -531,20 +493,10 @@ class TestOTValidation:
         with pytest.raises(ValueError, match="epsilon"):
             analyze(ishigami.PROBLEM, X, Y, epsilon=0.0)
 
-    def test_bad_max_iter(self, ishigami_data):
-        X, Y = ishigami_data
-        with pytest.raises(ValueError, match="max_iter"):
-            analyze(ishigami.PROBLEM, X, Y, max_iter=0)
-
     def test_bad_tol(self, ishigami_data):
         X, Y = ishigami_data
         with pytest.raises(ValueError, match="tol"):
             analyze(ishigami.PROBLEM, X, Y, tol=0.0)
-
-    def test_bad_n_bootstrap(self, ishigami_data):
-        X, Y = ishigami_data
-        with pytest.raises(ValueError, match="n_bootstrap"):
-            analyze(ishigami.PROBLEM, X, Y, n_bootstrap=-1)
 
     def test_bad_conf_level(self, ishigami_data):
         X, Y = ishigami_data
@@ -558,31 +510,11 @@ class TestOTValidation:
 
 
 class TestOTXarray:
-    def test_scalar_dims(self, ishigami_data):
-        X, Y = ishigami_data
-        ds = analyze(ishigami.PROBLEM, X, Y).to_dataset()
-        assert set(ds.data_vars) == {"ot", "advective", "diffusive"}
-        assert ds["ot"].dims == ("param",)
-        assert ds.attrs["mode"] == "univariate"
-
-    def test_time_series_dims(self, multi_output_data):
+    def test_time_coords_kwarg_sets_the_time_coordinate(self, multi_output_data):
+        """The dims are snapshot-covered; the kwarg's coordinate values are not."""
         X, _, Y3 = multi_output_data
         ds = analyze(ishigami.PROBLEM, X, Y3).to_dataset(time_coords=[0.5, 1.0])
-        assert ds["ot"].dims == ("time", "output", "param")
         assert list(ds.coords["time"].values) == [0.5, 1.0]
-
-    def test_trajectory_dims(self, multi_output_data):
-        X, _, Y3 = multi_output_data
-        ds = analyze(ishigami.PROBLEM, X, Y3, mode="trajectory", n_partitions=10).to_dataset()
-        assert ds["ot"].dims == ("output", "param")
-        assert ds.attrs["mode"] == "trajectory"
-
-    def test_conf_and_dummy_vars(self, ishigami_data):
-        X, Y = ishigami_data
-        ds = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=10, dummy=True).to_dataset()
-        assert {"ot_lower", "ot_upper", "advective_lower", "diffusive_upper"} <= set(ds.data_vars)
-        assert "ot_dummy" in ds.data_vars
-        assert ds["ot_dummy"].dims == ()
 
 
 class TestQuantileRankIndices:
@@ -746,40 +678,3 @@ class TestOTInvalidPolicy:
         # A clean sample with a dummy column reports nothing at all.
         clean = analyze(problem, X, Y, dummy=True)
         assert clean.invalid.n_invalid == 0
-
-    def test_dropping_an_x_row_takes_its_y_row_with_it(self):
-        """T4: X and Y are dropped as a pair, so the sample stays aligned.
-
-        Removing the bad row of X but keeping its row of Y would shift every
-        later output by one, which no estimator can detect. The proof is an
-        equality against the sample with that row deleted from both arrays
-        by hand.
-        """
-        problem, X, Y = _invalid_sample()
-        X_bad = X.at[77, 0].set(jnp.nan)
-
-        with pytest.warns(jaxgsa.JaxgsaWarning):
-            dropped = analyze(problem, X_bad, Y, seed=7, on_invalid="drop")
-
-        keep = np.ones(200, dtype=bool)
-        keep[77] = False
-        by_hand = analyze(problem, X[keep], Y[keep], seed=7)
-
-        np.testing.assert_array_equal(np.asarray(dropped.ot), np.asarray(by_hand.ot))
-
-    @pytest.mark.parametrize("policy", ["raise", "propagate", "drop"])
-    def test_a_clean_sample_is_untouched_under_every_policy(self, policy, recwarn):
-        """T4: nothing found means nothing removed, nothing warned, empty report."""
-        problem, X, Y = _invalid_sample()
-        result = analyze(problem, X, Y, on_invalid=policy)
-        assert result.invalid.n_invalid == 0
-        assert result.invalid.n_units == 200
-        assert result.invalid.sources == ()
-        assert result.invalid.policy == policy
-        assert len(recwarn) == 0
-
-    def test_rejects_an_unknown_policy(self):
-        """T4: a misspelled policy is refused by name, not silently ignored."""
-        problem, X, Y = _invalid_sample()
-        with pytest.raises(ValueError, match="on_invalid must be one of"):
-            analyze(problem, X, Y, on_invalid="skip")

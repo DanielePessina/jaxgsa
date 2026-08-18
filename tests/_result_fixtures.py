@@ -1,10 +1,11 @@
 """One small result object per result class, for schema regression tests.
 
 ``tests/test_result_schema.py`` compares the ``to_dataset()`` schema of every
-result against a stored snapshot. The snapshot is only meaningful if the
-results that produce it are fixed, so they are built here rather than inside
-the test, and the generator that writes the snapshot imports the same
-builders.
+result against the stored snapshot ``tests/data/result_dataset_schema.json``.
+The snapshot is only meaningful if the results that produce it are fixed, so
+they are built here rather than inside the test. ``scripts/dump_result_schema.py``
+writes the snapshot from these same builders, so a deliberate schema change is
+regenerated rather than hand-edited.
 
 The problems are deliberately tiny. Nothing here checks a number; it checks
 which dimensions, coordinates and variables a result exports.

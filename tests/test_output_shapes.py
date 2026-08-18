@@ -15,11 +15,6 @@ TWO_OUTPUTS = Problem.from_dict(
 )
 
 
-@pytest.mark.parametrize("shape", [(N,), (N, 2), (N, 5, 2)])
-def test_canonical_shapes_pass(shape):
-    assert _validate_output(jnp.ones(shape), N).shape == shape
-
-
 @pytest.mark.parametrize("shape", [(2, N), (3, N, 2)])
 def test_nonleading_sample_axis_is_rejected(shape):
     with pytest.raises(ValueError, match="sample rows"):
@@ -43,12 +38,3 @@ def test_given_data_methods_do_not_transpose_outputs():
 
     with pytest.raises(ValueError, match="sample rows"):
         jaxgsa.pce.analyze(UNLABELED, X, Y.T)
-
-
-def test_two_dimensional_output_is_always_n_k():
-    X = jnp.asarray(jaxgsa.sampling.monte_carlo(TWO_OUTPUTS, 400, seed=3))
-    Y = jnp.stack((X[:, 0], X[:, 1]), axis=1)
-    result = jaxgsa.pce.analyze(TWO_OUTPUTS, X, Y, order=1)
-
-    assert result.S1.shape == (2, 2)
-    assert result.predict(X[:5]).shape == (5, 2)

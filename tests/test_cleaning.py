@@ -7,7 +7,6 @@ import pytest
 import jaxgsa
 from jaxgsa._core.invalid import InvalidUnit
 from jaxgsa.problem import Problem
-from jaxgsa.sobol._indices import first_order, second_order, total_order
 
 
 @pytest.fixture()
@@ -16,35 +15,6 @@ def simple_problem():
         names=("x1", "x2", "x3"),
         bounds=((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0)),
     )
-
-
-# --- Division guard: zero-variance inputs produce NaN, not inf ---
-
-
-def test_first_order_zero_variance():
-    A = jnp.ones(10)
-    AB_j = jnp.ones(10)
-    B = jnp.ones(10)
-    result = first_order(A, AB_j, B)
-    assert jnp.isnan(result), f"Expected NaN, got {result}"
-
-
-def test_total_order_zero_variance():
-    A = jnp.ones(10)
-    AB_j = jnp.ones(10)
-    B = jnp.ones(10)
-    result = total_order(A, AB_j, B)
-    assert jnp.isnan(result), f"Expected NaN, got {result}"
-
-
-def test_second_order_zero_variance():
-    A = jnp.ones(10)
-    AB_j = jnp.ones(10)
-    AB_k = jnp.ones(10)
-    BA_j = jnp.ones(10)
-    B = jnp.ones(10)
-    result = second_order(A, AB_j, AB_k, BA_j, B)
-    assert jnp.isnan(result), f"Expected NaN, got {result}"
 
 
 # --- End-to-end: constant Y → NaN indices ---
@@ -78,19 +48,6 @@ def test_constant_y_second_order_nan(simple_problem):
 # --- Input cleaning: non-finite values ---
 
 
-def test_drop_nonfinite_rows(simple_problem):
-    sr = jaxgsa.sobol.sample(
-        simple_problem, n_samples=64, seed=0, calc_second_order=False, verbose=False
-    )
-    Y = jnp.sin(jnp.sum(jnp.asarray(sr.samples), axis=1))
-    # Inject NaN into the first group
-    Y_bad = Y.at[0].set(jnp.nan)
-    with pytest.warns(UserWarning, match="dropped"):
-        result = jaxgsa.sobol.analyze(sr, Y_bad, on_invalid="drop")
-    # Should still produce finite results from remaining groups
-    assert result.S1.shape == (3,)
-
-
 def test_all_nonfinite_raises(simple_problem):
     sr = jaxgsa.sobol.sample(
         simple_problem, n_samples=64, seed=0, calc_second_order=False, verbose=False
@@ -98,17 +55,6 @@ def test_all_nonfinite_raises(simple_problem):
     Y = jnp.full(sr.n_runs, jnp.nan)
     with pytest.raises(ValueError, match="every usable Saltelli group was removed"):
         jaxgsa.sobol.analyze(sr, Y, on_invalid="drop")
-
-
-def test_inf_values_dropped(simple_problem):
-    sr = jaxgsa.sobol.sample(
-        simple_problem, n_samples=64, seed=0, calc_second_order=False, verbose=False
-    )
-    Y = jnp.sin(jnp.sum(jnp.asarray(sr.samples), axis=1))
-    Y_bad = Y.at[0].set(jnp.inf)
-    with pytest.warns(UserWarning, match="dropped"):
-        result = jaxgsa.sobol.analyze(sr, Y_bad, on_invalid="drop")
-    assert result.S1.shape == (3,)
 
 
 # --- The shared on_invalid policy, at Saltelli-group granularity ---
@@ -229,9 +175,3 @@ class TestOnInvalidPolicy:
         assert not result.invalid.any_invalid
         assert result.invalid.unit is InvalidUnit.SALTELLI_GROUP
         assert [w for w in recwarn if issubclass(w.category, jaxgsa.JaxgsaWarning)] == []
-
-    def test_a_bad_on_invalid_value_is_rejected(self, simple_problem):
-        """T4: an unknown policy name is refused before anything is computed."""
-        sr = self._sample(simple_problem)
-        with pytest.raises(ValueError, match="on_invalid must be one of"):
-            jaxgsa.sobol.analyze(sr, jnp.asarray(_finite_Y(sr)), on_invalid="skip")

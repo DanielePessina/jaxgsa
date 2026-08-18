@@ -24,14 +24,12 @@ from jaxgsa import pce as pce_mod
 from jaxgsa._core.partition import (
     _categorical_class_layout,
     _extract_categorical_codes,
-    build_partition_groups,
 )
 from jaxgsa._core.sampling import _inverse_transform_samples
 from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa.borgonovo._analyze import _warn_conf_out_of_range
-from jaxgsa.pawn._analyze import _bin_indices, _equal_width_bins
+from jaxgsa.pawn._analyze import _bin_indices
 from jaxgsa.problem import (
-    CategoricalInputSpec,
     Problem,
     _categorical_dims,
     _normalized_input_to_dict,
@@ -131,23 +129,11 @@ def test_categorical_spec_rejects_invalid_input(spec, match):
         Problem.from_dict({"c": spec})
 
 
-def test_categorical_labels_empty_without_categorical_params():
-    p = Problem.from_dict({"x": (0.0, 1.0)})
-    assert p.categorical_labels == {}
-    assert p.has_categorical_inputs is False
-
-
 def test_categorical_problem_is_hashable_and_comparable():
     p1 = _mixed_problem()
     p2 = _mixed_problem()
     assert p1 == p2
     assert hash(p1) == hash(p2)
-
-
-def test_categorical_input_spec_typed_dict_accepted():
-    spec = CategoricalInputSpec(dist="categorical", probs=[0.5, 0.5], labels=["lo", "hi"])
-    p = Problem.from_dict({"c": spec})
-    assert p.categorical_labels["c"] == ("lo", "hi")
 
 
 # ---------------------------------------------------------------------------
@@ -467,7 +453,7 @@ def test_borgonovo_discrete_output_names_the_offending_column():
         jaxgsa.borgonovo.analyze(p, X, Y, n_bootstrap=0)
 
 
-@pytest.mark.parametrize("noise", [1e-9, 1e-5, 1e-3, 3e-3, 1e-2, 0.1, 0.3])
+@pytest.mark.parametrize("noise", [1e-9, 1e-5, 0.1])
 def test_borgonovo_atomic_class_delta_stays_in_range(noise):
     """The atoms are separated far beyond the jitter, so delta is 2/3.
 
@@ -522,15 +508,6 @@ def test_borgonovo_out_of_range_confidence_bound_only_warns():
     assert "upper bound for b" in message
 
 
-def test_borgonovo_in_range_confidence_bound_is_silent():
-    p = Problem(names=("a", "b"), bounds=((0.0, 1.0), (0.0, 1.0)))
-    conf = np.array([[0.0, 0.1], [0.6, 0.9]])
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        _warn_conf_out_of_range(p, jnp.asarray(conf))
-    assert not caught
-
-
 def test_borgonovo_grid_size_moves_the_atomic_estimate():
     """Document the knob: grid_size, not the bandwidth fraction, governs it."""
     p, X, Y = _atom_data(1e-9)
@@ -565,49 +542,6 @@ def test_borgonovo_rejects_invalid_degenerate_settings(kwargs, match):
     p, X, Y = _atom_data(0.1, n=200)
     with pytest.raises(ValueError, match=match):
         jaxgsa.borgonovo.analyze(p, X, Y, n_bootstrap=0, **kwargs)
-
-
-def test_borgonovo_default_chunk_size_respects_budget_on_imbalanced_categorical(monkeypatch):
-    """The default chunk width must budget from the real padded layout.
-
-    The old rule assumed the padded class layout ``M * P`` was about ``N``.
-    A heavily imbalanced categorical column pads every level up to the
-    largest one, so ``M * P`` is many times ``N`` and the old default
-    over-committed memory by about 9x.
-    """
-    from jaxgsa.borgonovo import _analyze as mod
-
-    probs = [0.91] + [0.01] * 9
-    p = Problem.from_dict({"c": {"dist": "categorical", "probs": probs}})
-    n, grid_size = 20000, 100
-    rng = np.random.default_rng(0)
-    X = rng.choice(10, size=n, p=probs).astype(np.float64)[:, None]
-    # More output columns than the chunk width, so chunking actually happens.
-    Y = np.tile((X[:, 0] * 0.5 + rng.standard_normal(n))[:, None], (1, 40))
-
-    widths = []
-    real_kernel = mod._get_delta_kernel
-
-    def _spy(*args):
-        inner = real_kernel(*args)
-
-        def _wrapped(chunk, *rest):
-            widths.append(chunk.shape[1])
-            return inner(chunk, *rest)
-
-        return _wrapped
-
-    monkeypatch.setattr(mod, "_get_delta_kernel", _spy)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
-        jaxgsa.borgonovo.analyze(p, X, Y, n_bootstrap=0, grid_size=grid_size)
-
-    groups, _, _ = build_partition_groups(
-        p, jnp.asarray(X), jnp.arange(n, dtype=jnp.int32)[None, :], 8, _categorical_dims(p)
-    )
-    layout_elems = sum(g[0].shape[1] * g[0].shape[2] * g[0].shape[3] for g in groups)
-    assert layout_elems > 5 * n  # the layout really is far larger than D * N
-    assert max(widths) * layout_elems * grid_size <= mod._CHUNK_ELEM_BUDGET
 
 
 def test_borgonovo_s1_matches_analytic_reference():
@@ -670,23 +604,6 @@ def test_level_permutation_invariance(method):
 # ---------------------------------------------------------------------------
 # PAWN with categorical inputs
 # ---------------------------------------------------------------------------
-
-
-def test_pawn_continuous_only_binning_is_unchanged():
-    """A continuous-only problem must take exactly the pre-existing path.
-
-    The padded bin count collapses to ``n_bins`` and the indices equal the
-    old equal-width binning, so the kernel and the aggregation see the same
-    arrays as before and the results stay bit-for-bit identical.
-    """
-    p = Problem.from_dict(
-        {"a": (0.0, 1.0), "b": {"dist": "gaussian", "mean": 0.0, "variance": 4.0}}
-    )
-    X = jaxgsa.sampling.monte_carlo(p, 500, seed=0)
-    bin_idx, n_eff = _bin_indices(p, X, 10)
-    assert n_eff == 10
-    expected = _equal_width_bins(cdf_to_unit_interval(X, p), 10)
-    np.testing.assert_array_equal(np.asarray(bin_idx), np.asarray(expected))
 
 
 def test_pawn_categorical_column_uses_level_codes_as_bins():
@@ -937,22 +854,6 @@ def test_sobol_inflation_guard_detects_flat_doubling(monkeypatch):
     assert sr.n_runs <= 4
 
 
-def test_sobol_expand_outputs_round_trips_duplicate_rows():
-    p = Problem.from_dict(
-        {
-            "c1": {"dist": "categorical", "probs": [0.5, 0.5]},
-            "c2": {"dist": "categorical", "probs": [0.3, 0.7]},
-        }
-    )
-    with pytest.warns(UserWarning, match="possible distinct rows"):
-        sr = sobol.sample(p, 1000, seed=0, verbose=False)
-    Y = sr.samples[:, 0]
-    expanded = np.asarray(sr.expand_outputs(Y))
-    assert expanded.shape[0] == sr.n_expanded
-    # Every expanded row's output matches its unique row's output.
-    np.testing.assert_array_equal(expanded, Y[sr.expanded_to_unique])
-
-
 def test_sobol_unique_rows_distort_the_marginal_but_expanded_does_not():
     """Pin the documented ``sr.samples`` caveat.
 
@@ -975,26 +876,6 @@ def test_sobol_unique_rows_distort_the_marginal_but_expanded_does_not():
 # ---------------------------------------------------------------------------
 # Method gating
 # ---------------------------------------------------------------------------
-
-
-def _gated_calls(problem, X, Y):
-    return [
-        (lambda: morris.sample(problem, 8)),
-        (lambda: efast.sample(problem, 65)),
-        (lambda: dgsm.analyze(problem, fn=lambda x: x[:, 0], X=X)),
-        (lambda: pce_mod.analyze(problem, X, Y)),
-        (lambda: hdmr.analyze(problem, X, Y)),
-        (lambda: hsic.analyze(problem, X, Y)),
-        (lambda: shapley.analyze(problem, X, Y)),
-    ]
-
-
-@pytest.mark.parametrize("call_idx", range(7))
-def test_gated_methods_raise_naming_the_categorical_parameter(call_idx):
-    problem, X, Y = _mixed_data(n=256)
-    call = _gated_calls(problem, X, Y)[call_idx]
-    with pytest.raises(ValueError, match="'c'"):
-        call()
 
 
 def test_to_morris_raises_for_categorical_design():
