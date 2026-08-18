@@ -1,7 +1,12 @@
 import numpy as np
 import pytest
 
-from jaxgsa.problem import GaussianInputSpec, Problem, UniformInputSpec
+from jaxgsa.problem import (
+    GaussianInputSpec,
+    Problem,
+    UniformInputSpec,
+    _normalized_input_to_dict,
+)
 
 
 def test_from_dict_tuple_shorthand_still_produces_uniform_bounds():
@@ -104,23 +109,57 @@ class TestTruncateGaussians:
     }
 
     def test_default_leaves_gaussians_unbounded(self):
+        """Tier T4 (internal consistency): no default truncation is applied.
+
+        An unbounded Gaussian carries neither a ``low`` nor a ``high`` key.
+        """
         p = Problem.from_dict(dict(self.SPECS))
-        assert p.input_specs[1][3] is None
-        assert p.input_specs[1][4] is None
+        spec = _normalized_input_to_dict(p.input_specs[1])
+        assert "low" not in spec
+        assert "high" not in spec
 
     def test_fills_only_open_sides(self):
-        from scipy.stats import norm
+        """Tier T2 (external library): truncation points match the frozen Gaussian quantiles.
 
+        Provenance:
+
+        * Tier: T2.
+        * Oracle: ``scipy.stats.norm.ppf``.
+        * Version: scipy 1.18.0.
+        * Run on: 2026-08-18.
+        * Script: none needed. The three values are
+          ``float(norm.ppf(1e-3, loc=2.0, scale=3.0))``,
+          ``float(norm.ppf(1 - 1e-3, loc=2.0, scale=3.0))`` and
+          ``float(norm.ppf(1 - 1e-3))``, in that order.
+
+        The values are literals and not a live call on purpose.
+        ``problem._fill_gaussian_bounds`` calls ``norm.ppf`` itself, so a test
+        that called ``norm.ppf`` too would compare scipy against scipy and pass
+        for any ``q``, any ``loc`` and any ``scale`` the code chose to pass.
+        Frozen numbers make the test fail if the fill ever uses the wrong tail,
+        the wrong side, or the wrong location and scale.
+        """
         p = Problem.from_dict(dict(self.SPECS), truncate_gaussians=1e-3)
-        assert p.input_specs[0] == ("uniform", 0.0, 1.0, None, None, None)  # uniform untouched
-        lo, hi = p.input_specs[1][3], p.input_specs[1][4]
-        assert lo == pytest.approx(float(norm.ppf(1e-3, loc=2.0, scale=3.0)))
-        assert hi == pytest.approx(float(norm.ppf(1.0 - 1e-3, loc=2.0, scale=3.0)))
+        # uniform untouched
+        assert _normalized_input_to_dict(p.input_specs[0]) == {
+            "dist": "uniform",
+            "low": 0.0,
+            "high": 1.0,
+        }
+        spec = _normalized_input_to_dict(p.input_specs[1])
+        assert spec["low"] == pytest.approx(-7.27069691850344)
+        assert spec["high"] == pytest.approx(11.27069691850344)
         # A declared side wins; only the open side is filled.
-        lo, hi = p.input_specs[2][3], p.input_specs[2][4]
-        assert lo == -1.0
-        assert hi == pytest.approx(float(norm.ppf(1.0 - 1e-3)))
-        assert p.input_specs[3] == ("gaussian", 0.0, 1.0, -1.0, 1.0, None)
+        spec = _normalized_input_to_dict(p.input_specs[2])
+        assert spec["low"] == -1.0
+        assert spec["high"] == pytest.approx(3.090232306167813)
+        assert _normalized_input_to_dict(p.input_specs[3]) == {
+            "dist": "gaussian",
+            "mean": 0.0,
+            "variance": 1.0,
+            "low": -1.0,
+            "high": 1.0,
+        }
 
     @pytest.mark.parametrize("bad_q", [0.0, 0.5, -0.1, 1.0])
     def test_invalid_q_raises(self, bad_q):
@@ -128,7 +167,12 @@ class TestTruncateGaussians:
             Problem.from_dict(dict(self.SPECS), truncate_gaussians=bad_q)
 
     def test_morris_does_not_squash_a_problem_bounded_this_way(self):
-        """A spec bounded by ``truncate_gaussians`` is genuinely bounded (A1)."""
+        """Tier T4 (internal consistency): a spec bounded by ``truncate_gaussians`` is
+        genuinely bounded (A1).
+
+        The Morris design spans the full truncation interval, so the sampler reads
+        the same bounds the problem declares.
+        """
         import numpy as np
 
         from jaxgsa import morris
@@ -136,9 +180,10 @@ class TestTruncateGaussians:
         p = Problem.from_dict(
             {"g": {"dist": "gaussian", "mean": 0.0, "variance": 1.0}}, truncate_gaussians=1e-3
         )
+        spec = _normalized_input_to_dict(p.input_specs[0])
         sr = morris.sample(p, n_trajectories=25, seed=1, verbose=False)
-        assert float(np.min(sr.samples[:, 0])) == pytest.approx(p.input_specs[0][3])
-        assert float(np.max(sr.samples[:, 0])) == pytest.approx(p.input_specs[0][4])
+        assert float(np.min(sr.samples[:, 0])) == pytest.approx(spec["low"])
+        assert float(np.max(sr.samples[:, 0])) == pytest.approx(spec["high"])
 
 
 # ---------------------------------------------------------------------------

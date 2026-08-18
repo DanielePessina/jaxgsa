@@ -39,6 +39,7 @@ def _assert_morris_equal(left: MorrisSamples, right: MorrisSamples) -> None:
     assert left.num_levels == right.num_levels
     assert left.method == right.method
     assert left.n_params == right.n_params
+    assert left.n_blocks_dropped == right.n_blocks_dropped
     assert left.problem == right.problem
 
 
@@ -213,6 +214,12 @@ def test_morris_npz_round_trip(tmp_path, method):
 
 
 def test_morris_downsampled_round_trip(tmp_path):
+    """Tier T4 (round trip): a downsampled Morris design survives save/load.
+
+    ``downsample`` rebuilds the design from kept trajectories only, so it
+    resets ``n_blocks_dropped`` to 0. The npz round trip must carry that
+    value through unchanged.
+    """
     samples = jaxgsa.morris.sample(
         _morris_problem(),
         n_trajectories=10,
@@ -226,6 +233,8 @@ def test_morris_downsampled_round_trip(tmp_path):
 
     _assert_morris_equal(samples, loaded)
     assert loaded.n_trajectories == 4
+    assert samples.n_blocks_dropped == 0
+    assert loaded.n_blocks_dropped == 0
 
 
 def test_morris_expand_outputs_after_load(tmp_path):

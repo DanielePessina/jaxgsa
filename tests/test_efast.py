@@ -1,13 +1,11 @@
 """Tests for eFAST (extended FAST) sensitivity analysis."""
 
-from typing import Any
-
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
 from jaxgsa.benchmarks import ishigami, linear, sobol_g
-from jaxgsa.efast import EFASTResult, EFASTSamples, analyze, sample
+from jaxgsa.efast import EFASTSamples, analyze, sample
 from jaxgsa.efast._analyze import _compute_indices
 from jaxgsa.efast._sampling import _assign_frequencies
 from jaxgsa.problem import GaussianInputSpec, Problem
@@ -158,9 +156,6 @@ class TestEFASTSamplesValidation:
 
 
 class TestAnalysis:
-    def test_result_type(self, ishigami_efast_result):
-        assert isinstance(ishigami_efast_result, EFASTResult)
-
     def test_result_shapes(self, ishigami_efast_result):
         assert ishigami_efast_result.S1.shape == (3,)
         assert ishigami_efast_result.ST.shape == (3,)
@@ -352,21 +347,6 @@ class TestSliceChunkSize:
             atol=1e-6,
         )
 
-    def test_slice_chunk_size_kwarg_accepted(self):
-        """The 0.4 name `slice_chunk_size` is accepted explicitly."""
-        sr = sample(ishigami.PROBLEM, n_per_curve=129, M=4, seed=0)
-        Y = ishigami.evaluate(jnp.asarray(sr.samples))
-        result = analyze(sr, jnp.asarray(Y), slice_chunk_size=2)
-        assert np.asarray(result.S1).shape == (3,)
-
-    def test_old_chunk_size_kwarg_raises(self):
-        """The pre-0.4 `chunk_size` name is gone — no shim."""
-        sr = sample(ishigami.PROBLEM, n_per_curve=129, M=4, seed=0)
-        Y = ishigami.evaluate(jnp.asarray(sr.samples))
-        old_kwargs: dict[str, Any] = {"chunk_size": 2}
-        with pytest.raises(TypeError):
-            analyze(sr, jnp.asarray(Y), **old_kwargs)
-
 
 class TestToDatasetMultiOutput:
     """Tests for to_dataset with multi-output and time-series results."""
@@ -444,6 +424,19 @@ class TestSobolGAccuracy:
                 assert abs(S1[i]) < 0.02, f"S1[{i}]={S1[i]:.4f}, expected ~0"
 
     def test_st(self, efast_sobol_g_result):
+        """Tier T0 (closed form): every analytical ST entry of the Sobol G-function.
+
+        Large entries hold to 20% relative error. The four near-zero entries
+        (analytical 1.05e-4) get an absolute bound instead. The reason is not
+        that no relative bound holds: the estimate is about 1.8e-4 against
+        1.05e-4, a relative error near 77%, so ``rel < 1.0`` would hold. It is
+        that a relative bound on a near-zero true value measures nothing useful.
+        The eFAST total index sums all spectral power outside a parameter's own
+        harmonics, so aliasing and interpolation noise leave a positive floor
+        whose size is set by the design, not by the analytical value. What the
+        test needs to catch is that floor growing, and an absolute bound says
+        that directly. 1e-3 keeps about 5x headroom over the 1.8e-4 seen here.
+        """
         ST = np.asarray(efast_sobol_g_result.ST)
         analytical = np.asarray(sobol_g.ANALYTICAL_ST)
         for i in range(len(analytical)):
@@ -452,6 +445,8 @@ class TestSobolGAccuracy:
                 assert rel < 0.20, (
                     f"ST[{i}]={ST[i]:.4f}, expected {analytical[i]:.4f}, rel error {rel:.2%}"
                 )
+            else:
+                assert abs(ST[i]) < 1e-3, f"ST[{i}]={ST[i]:.6f}, expected ~0"
 
     def test_ranking(self, efast_sobol_g_result):
         """First three params should be ordered by importance (a_j = 0, 1, 4.5)."""

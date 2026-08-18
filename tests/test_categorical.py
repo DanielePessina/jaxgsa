@@ -30,7 +30,12 @@ from jaxgsa._core.sampling import _inverse_transform_samples
 from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa.borgonovo._analyze import _warn_conf_out_of_range
 from jaxgsa.pawn._analyze import _bin_indices, _equal_width_bins
-from jaxgsa.problem import CategoricalInputSpec, Problem, _categorical_dims
+from jaxgsa.problem import (
+    CategoricalInputSpec,
+    Problem,
+    _categorical_dims,
+    _normalized_input_to_dict,
+)
 
 PROBS = [0.5, 0.3, 0.2]
 OFFSETS = np.array([0.0, 2.0, -1.0])
@@ -72,13 +77,23 @@ def _analytic_s1():
 
 
 def test_categorical_spec_normalizes_and_stores_probs_and_labels():
+    """Tier T4 (internal consistency): the normalized spec keeps the declared
+    probabilities and supplies default string labels.
+
+    The stored payload is also checked directly, not through
+    ``_normalized_input_to_dict``. That helper rebuilds ``probs`` and
+    ``labels`` as lists for the public view, so it cannot see whether the
+    stored spec is still hashable. ``Problem`` is frozen and its specs go into
+    cache keys, so both must stay tuples.
+    """
     p = Problem.from_dict({"c": {"dist": "categorical", "probs": [0.25, 0.25, 0.5]}})
-    spec = p.input_specs[0]
-    assert spec[0] == "categorical"
-    assert spec[5] is not None
-    probs, labels = spec[5]
-    assert probs == (0.25, 0.25, 0.5)
-    assert labels == ("0", "1", "2")
+    stored_probs, stored_labels = p.input_specs[0][5]
+    assert isinstance(stored_probs, tuple)
+    assert isinstance(stored_labels, tuple)
+    spec = _normalized_input_to_dict(p.input_specs[0])
+    assert spec["dist"] == "categorical"
+    assert list(spec["probs"]) == [0.25, 0.25, 0.5]
+    assert list(spec["labels"]) == ["0", "1", "2"]
     assert p.has_categorical_inputs is True
     assert p.has_non_uniform_inputs is True
     assert p.bounds is None
@@ -86,8 +101,9 @@ def test_categorical_spec_normalizes_and_stores_probs_and_labels():
 
 
 def test_categorical_spec_renormalizes_small_prob_error():
+    """Tier T0 (closed form): stored probabilities sum to exactly one."""
     p = Problem.from_dict({"c": {"dist": "categorical", "probs": [1 / 3, 1 / 3, 1 / 3]}})
-    probs = p.input_specs[0][5][0]
+    probs = _normalized_input_to_dict(p.input_specs[0])["probs"]
     assert sum(probs) == pytest.approx(1.0, abs=1e-15)
 
 

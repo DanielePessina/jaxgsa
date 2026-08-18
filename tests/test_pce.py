@@ -16,7 +16,6 @@ from jaxgsa.pce._engine import (
     _legendre_1d,
     build_design_matrix,
     build_multi_index,
-    loo_error,
     sobol_from_coefficients,
 )
 from jaxgsa.problem import GaussianInputSpec, Problem
@@ -138,7 +137,12 @@ class TestIshigami:
     """PCE on the Ishigami function should approximate known indices."""
 
     def test_s1_within_tolerance(self, ishigami_pce_result):
-        """Non-zero S1 values should be within 30% relative error."""
+        """Tier T0 (closed form): every analytical S1 entry of the Ishigami function.
+
+        Non-zero entries hold to 30% relative error. The analytical ``S1[x3]``
+        is exactly zero, so it takes an absolute bound; the estimate is about
+        3e-5, well inside it.
+        """
         S1 = np.asarray(ishigami_pce_result.S1)
         analytical = np.array(ishigami.ANALYTICAL_S1)
         for i in range(len(analytical)):
@@ -148,18 +152,25 @@ class TestIshigami:
                     f"S1[{i}]: PCE={S1[i]:.4f}, analytical={analytical[i]:.4f}, "
                     f"rel_err={rel_err:.2%}"
                 )
+            else:
+                assert abs(S1[i]) < 0.05, f"S1[{i}]={S1[i]:.6f}, expected ~0"
 
     def test_st_within_tolerance(self, ishigami_pce_result):
-        """Non-zero ST values should be within 30% relative error."""
+        """Tier T0 (closed form): every analytical ST entry of the Ishigami function.
+
+        No analytical ST entry of the Ishigami function is near zero: the
+        smallest is ``ST[x3] = 0.2437``, which comes entirely from the x1-x3
+        interaction. Every entry therefore takes the same relative bound and
+        none is skipped.
+        """
         ST = np.asarray(ishigami_pce_result.ST)
         analytical = np.array(ishigami.ANALYTICAL_ST)
+        assert np.all(analytical > 0.01)
         for i in range(len(analytical)):
-            if analytical[i] > 0.01:
-                rel_err = abs(ST[i] - analytical[i]) / analytical[i]
-                assert rel_err < 0.30, (
-                    f"ST[{i}]: PCE={ST[i]:.4f}, analytical={analytical[i]:.4f}, "
-                    f"rel_err={rel_err:.2%}"
-                )
+            rel_err = abs(ST[i] - analytical[i]) / analytical[i]
+            assert rel_err < 0.30, (
+                f"ST[{i}]: PCE={ST[i]:.4f}, analytical={analytical[i]:.4f}, rel_err={rel_err:.2%}"
+            )
 
     def test_s1_x3_near_zero(self, ishigami_pce_result):
         """S1 for x3 should be near zero (x3 only appears in interaction)."""
@@ -305,24 +316,45 @@ class TestLooRmse:
         loo = float(linear_pce_result.loo_rmse)
         assert loo / y_range < 0.05, f"LOO RMSE / range = {loo / y_range:.4f}, expected < 0.05"
 
-    def test_loo_engine_function_matches(self):
-        """loo_error called directly should match the result stored in PCEResult."""
-        key = jax.random.PRNGKey(7)
-        N = 200
-        bounds = jnp.array(linear.PROBLEM.bounds)
-        X = jax.random.uniform(key, shape=(N, 3), minval=bounds[:, 0], maxval=bounds[:, 1])
-        Y = linear.evaluate(X)
-        result = pce.analyze(linear.PROBLEM, X, Y, order=2)
+    def test_loo_matches_brute_force_refit(self):
+        """Tier T0 (closed form): the reported LOO RMSE equals a refit-per-point one.
 
-        # Reconstruct Phi manually
+        ``loo_error`` uses the hat-matrix shortcut
+        ``e_i = (Y_i - Phi_i c) / (1 - H_ii)``. This test never writes that
+        expression down. It refits the ridge least-squares problem N times, each
+        time leaving one row out, and takes the root mean square of the N held-out
+        residuals. That is the definition of leave-one-out error, so the two
+        numbers must agree.
+        """
+        key = jax.random.PRNGKey(7)
+        N = 120
+        bounds = jnp.array(ishigami.PROBLEM.bounds)
+        X = jax.random.uniform(key, shape=(N, 3), minval=bounds[:, 0], maxval=bounds[:, 1])
+        Y = ishigami.evaluate(X)
+        result = pce.analyze(ishigami.PROBLEM, X, Y, order=3)
+
         from jaxgsa.pce._analyze import _map_to_reference
 
-        X_ref, input_types = _map_to_reference(X, linear.PROBLEM, result.order)
-        Phi = build_design_matrix(X_ref, result.multi_index, input_types, result.order)
-        loo_direct = loo_error(Phi, Y, result.coefficients, ridge=1e-8)
+        X_ref, input_types = _map_to_reference(X, ishigami.PROBLEM, result.order)
+        Phi = np.asarray(
+            build_design_matrix(X_ref, result.multi_index, input_types, result.order),
+            dtype=np.float64,
+        )
+        Y_np = np.asarray(Y, dtype=np.float64)
+        ridge = 1e-8
+        n_terms = Phi.shape[1]
+
+        held_out = np.empty(N, dtype=np.float64)
+        for i in range(N):
+            rows = np.delete(np.arange(N), i)
+            Phi_i, Y_i = Phi[rows], Y_np[rows]
+            gram = Phi_i.T @ Phi_i + ridge * np.eye(n_terms)
+            coef = np.linalg.solve(gram, Phi_i.T @ Y_i)
+            held_out[i] = Y_np[i] - Phi[i] @ coef
+        brute_force = float(np.sqrt(np.mean(held_out**2)))
 
         assert result.loo_rmse is not None
-        np.testing.assert_allclose(float(result.loo_rmse), float(loo_direct), rtol=1e-5)
+        np.testing.assert_allclose(float(result.loo_rmse), brute_force, rtol=2e-3)
 
 
 # ---------------------------------------------------------------------------
@@ -332,10 +364,6 @@ class TestLooRmse:
 
 class TestGaussianInputs:
     """PCE with Gaussian inputs should use the Hermite basis correctly."""
-
-    def test_gaussian_result_exists(self, gaussian_pce_result):
-        """Gaussian-input PCE should produce a valid PCEResult."""
-        assert isinstance(gaussian_pce_result, pce.PCEResult)
 
     def test_gaussian_s1_reasonable(self, gaussian_pce_result):
         """S1 for the Gaussian linear model should match analytical values.

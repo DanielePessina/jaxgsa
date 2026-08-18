@@ -608,19 +608,64 @@ def test_gaussian_and_quantile_bootstrap_endpoints_differ():
     assert not np.allclose(np.asarray(gaussian.S1_conf), np.asarray(quantile.S1_conf))
 
 
-def test_slice_chunk_size_kwarg_accepted():
-    """The 0.4 name `slice_chunk_size` is accepted explicitly."""
-    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**6, seed=7, verbose=False)
-    Y = evaluate(jnp.asarray(sr.samples))
-    Y_multi = jnp.stack([Y, 2 * Y], axis=-1)
-    result = jaxgsa.sobol.analyze(sr, Y_multi, slice_chunk_size=1)
-    assert np.asarray(result.S1).shape == (2, 3)
+def _assert_sobol_fields_match(chunked, full, fields):
+    """Compare the named fields of two Sobol results element by element.
+
+    Args:
+        chunked: The result computed with a small ``slice_chunk_size``.
+        full: The result computed with the default ``slice_chunk_size``.
+        fields: Names of the ``SobolResult`` fields to compare.
+    """
+    for field in fields:
+        expected = getattr(full, field)
+        actual = getattr(chunked, field)
+        assert (expected is None) == (actual is None), field
+        if expected is None:
+            continue
+        np.testing.assert_allclose(
+            np.asarray(actual),
+            np.asarray(expected),
+            rtol=1e-5,
+            atol=1e-7,
+            err_msg=field,
+        )
+    assert chunked.nan_counts == full.nan_counts
 
 
-def test_old_chunk_size_kwarg_raises():
-    """The pre-0.4 `chunk_size` name is gone — no shim."""
-    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**6, seed=7, verbose=False)
+def test_slice_chunk_size_invariance():
+    """Tier T4 (internal consistency): chunking changes no index, on both paths.
+
+    ``sobol.analyze`` dispatches on ``num_resamples``, and ``slice_chunk_size``
+    means a different thing on each side, so the test runs both halves.
+
+    * ``num_resamples=32`` takes ``_analyze_bootstrap``. There
+      ``slice_chunk_size`` is forwarded only to the resample loops, so it
+      chunks *resamples*. The point estimates ``S1``, ``ST`` and ``S2`` come
+      from the per-slice kernels and do not depend on it at all: only the
+      three ``*_conf`` fields are sensitive to this half. The point estimates
+      are still compared, but as a cheap guard, not as the thing under test.
+    * ``num_resamples=0`` takes ``_analyze_no_bootstrap``. That is the path
+      whose loop chunks the ``T*K`` output columns and reassembles them with
+      ``jnp.concatenate`` plus ``_normalize_s2_matrix``. This half is the only
+      coverage of that loop in the suite, so it uses three outputs and
+      compares ``S1``, ``ST`` and ``S2``.
+
+    Both halves share one design, one key and one seed, so every compared
+    field must match to floating-point noise.
+    """
+    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**10, seed=7, verbose=False)
     Y = evaluate(jnp.asarray(sr.samples))
-    old_kwargs: dict[str, Any] = {"chunk_size": 1}
-    with pytest.raises(TypeError):
-        jaxgsa.sobol.analyze(sr, Y, **old_kwargs)
+    Y_multi = jnp.stack([Y, 2.0 * Y, jnp.sin(Y)], axis=-1)
+
+    # Bootstrap path: the *_conf fields are what slice_chunk_size touches.
+    full = jaxgsa.sobol.analyze(sr, Y_multi, num_resamples=32, key=jax.random.key(3))
+    chunked = jaxgsa.sobol.analyze(
+        sr, Y_multi, num_resamples=32, key=jax.random.key(3), slice_chunk_size=1
+    )
+    _assert_sobol_fields_match(chunked, full, ("S1", "ST", "S2", "S1_conf", "ST_conf", "S2_conf"))
+
+    # Plain path: this is the half that exercises the output-column loop.
+    plain_full = jaxgsa.sobol.analyze(sr, Y_multi, num_resamples=0)
+    plain_chunked = jaxgsa.sobol.analyze(sr, Y_multi, num_resamples=0, slice_chunk_size=1)
+    assert plain_full.S1_conf is None
+    _assert_sobol_fields_match(plain_chunked, plain_full, ("S1", "ST", "S2"))

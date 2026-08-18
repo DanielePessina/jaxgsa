@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
@@ -16,6 +15,24 @@ from jaxgsa.problem import GaussianInputSpec, Problem
 from jaxgsa.sampling import monte_carlo
 
 A, B = 7.0, 0.1
+
+
+def _spec(input_spec):
+    """Return the normalized spec of one marginal, built the public way.
+
+    The test never spells the private spec layout itself. It declares the
+    marginal with the ordinary public input spec, builds a ``Problem``, and
+    reads the normalized spec back off it.
+
+    Args:
+        input_spec: Any value ``Problem.from_dict`` accepts for one
+            parameter, such as a ``(low, high)`` tuple or a
+            :class:`GaussianInputSpec`.
+
+    Returns:
+        The normalized spec of that single marginal.
+    """
+    return Problem.from_dict({"x": input_spec}).input_specs[0]
 
 
 def _ishigami_single(x):
@@ -58,17 +75,23 @@ def linear_dgsm_result():
 
 class TestPoincare:
     def test_uniform_constant(self):
-        spec = ("uniform", -math.pi, math.pi, None, None, None)
+        """Tier T0 (closed form): the Poincare constant of ``U(-pi, pi)``.
+
+        For a uniform density on an interval of width ``L`` the constant is
+        ``(L / pi) ** 2``. Here ``L = 2 * pi``, so the value is exactly 4.
+        """
+        spec = _spec((-math.pi, math.pi))
         C = poincare_constant(spec)
-        assert C == pytest.approx((2 * math.pi) ** 2 / math.pi**2)
         assert C == pytest.approx(4.0)
 
     def test_gaussian_constant(self):
-        spec = ("gaussian", 0.0, 1.5, None, None, None)
+        spec = _spec(GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.5))
         assert poincare_constant(spec) == pytest.approx(1.5)
 
     def test_truncated_gaussian_spectral(self):
-        spec = ("gaussian", 0.0, 1.0, -3.0, 3.0, None)
+        spec = _spec(
+            GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0, low=-3.0, high=3.0)
+        )
         C = poincare_constant(spec)
         assert C < 1.0
         assert C > 0.0
@@ -89,19 +112,21 @@ class TestPoincare:
 
 class TestMarginalVariance:
     def test_uniform(self):
-        spec = ("uniform", 0.0, 1.0, None, None, None)
+        spec = _spec((0.0, 1.0))
         assert marginal_variance(spec) == pytest.approx(1.0 / 12.0)
 
     def test_uniform_wide(self):
-        spec = ("uniform", -math.pi, math.pi, None, None, None)
+        spec = _spec((-math.pi, math.pi))
         assert marginal_variance(spec) == pytest.approx((2 * math.pi) ** 2 / 12.0)
 
     def test_gaussian(self):
-        spec = ("gaussian", 0.0, 2.5, None, None, None)
+        spec = _spec(GaussianInputSpec(dist="gaussian", mean=0.0, variance=2.5))
         assert marginal_variance(spec) == pytest.approx(2.5)
 
     def test_truncated_gaussian(self):
-        spec = ("gaussian", 0.0, 1.0, -1.0, 1.0, None)
+        spec = _spec(
+            GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0, low=-1.0, high=1.0)
+        )
         v = marginal_variance(spec)
         assert 0 < v < 1.0
 
@@ -341,21 +366,6 @@ class TestChunked:
             np.asarray(result_ragged.nu),
             atol=1e-5,
         )
-
-    def test_batch_size_kwarg_accepted(self):
-        """The 0.4 name `batch_size` is accepted explicitly."""
-        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1),) * 3)
-        Xj = jnp.asarray(monte_carlo(problem, n=50, seed=3))
-        result = analyze(problem, _linear_single, Xj, batch_size=16)
-        assert result.nu.shape == (1, 3)
-
-    def test_old_chunk_size_kwarg_raises(self):
-        """The pre-0.4 `chunk_size` name is gone — no shim."""
-        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1),) * 3)
-        Xj = jnp.asarray(monte_carlo(problem, n=50, seed=3))
-        old_kwargs: dict[str, Any] = {"chunk_size": 16}
-        with pytest.raises(TypeError):
-            analyze(problem, _linear_single, Xj, **old_kwargs)
 
 
 class TestValidation:

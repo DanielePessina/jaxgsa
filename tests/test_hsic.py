@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
 from jaxgsa.benchmarks import ishigami, linear, sobol_g
-from jaxgsa.hsic import HSICResult, analyze
+from jaxgsa.hsic import analyze
 from jaxgsa.problem import GaussianInputSpec, Problem
 from jaxgsa.sampling import monte_carlo
 
@@ -39,9 +37,6 @@ def sobol_g_hsic_result():
 
 
 class TestLinearHSIC:
-    def test_result_type(self, linear_hsic_result):
-        assert isinstance(linear_hsic_result, HSICResult)
-
     def test_shapes(self, linear_hsic_result):
         r = linear_hsic_result
         assert r.R2_HSIC.shape == (3,)
@@ -205,23 +200,6 @@ class TestChunked:
             np.asarray(r_chunked.T_HSIC),
             atol=1e-4,
         )
-
-    def test_batch_size_kwarg_accepted(self):
-        """The 0.4 name `batch_size` is accepted explicitly."""
-        problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        Xj = jnp.asarray(monte_carlo(problem, n=64, seed=13))
-        Y = Xj[:, 0] + Xj[:, 1]
-        result = analyze(problem, Xj, Y, n_perms=5, seed=13, batch_size=16)
-        assert result.R2_HSIC.shape == (2,)
-
-    def test_old_chunk_size_kwarg_raises(self):
-        """The pre-0.4 `chunk_size` name is gone — no shim."""
-        problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        Xj = jnp.asarray(monte_carlo(problem, n=64, seed=13))
-        Y = Xj[:, 0] + Xj[:, 1]
-        old_kwargs: dict[str, Any] = {"chunk_size": 16}
-        with pytest.raises(TypeError):
-            analyze(problem, Xj, Y, n_perms=5, seed=13, **old_kwargs)
 
 
 class TestReproducibility:

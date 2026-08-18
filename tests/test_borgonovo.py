@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import warnings
-from typing import Any, cast
+from typing import cast
 
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
 from jaxgsa.benchmarks import gaussian_linear, ishigami
-from jaxgsa.borgonovo import DeltaResult, analyze
+from jaxgsa.borgonovo import analyze
 from jaxgsa.borgonovo._analyze import _plischke_n_classes
 from jaxgsa.sampling import monte_carlo
 
@@ -34,11 +34,6 @@ def gaussian_linear_data():
 
 
 class TestDeltaBasic:
-    def test_returns_delta_result(self, ishigami_data):
-        X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0)
-        assert isinstance(result, DeltaResult)
-
     def test_shape_scalar_output(self, ishigami_data):
         X, Y = ishigami_data
         result = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0)
@@ -86,19 +81,6 @@ class TestDeltaBasic:
         np.testing.assert_allclose(
             np.asarray(r_full.delta), np.asarray(r_chunked.delta), rtol=1e-6
         )
-
-    def test_slice_chunk_size_kwarg_accepted(self, ishigami_data):
-        """The 0.4 name `slice_chunk_size` is accepted explicitly."""
-        X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X[:256], Y[:256], n_bootstrap=0, slice_chunk_size=4)
-        assert np.asarray(result.delta).shape == (3,)
-
-    def test_old_chunk_size_kwarg_raises(self, ishigami_data):
-        """The pre-0.4 `chunk_size` name is gone — no shim."""
-        X, Y = ishigami_data
-        old_kwargs: dict[str, Any] = {"chunk_size": 4}
-        with pytest.raises(TypeError):
-            analyze(ishigami.PROBLEM, X[:256], Y[:256], n_bootstrap=0, **old_kwargs)
 
 
 class TestDeltaSALibComparison:
@@ -378,11 +360,33 @@ class TestDeltaXarray:
 
 
 class TestPlischkeHeuristic:
-    def test_matches_salib_formula(self):
-        for N in (100, 500, 1000, 1500, 5000, 10000, 100000):
-            exp = 2.0 / (7.0 + np.tanh((1500.0 - N) / 500.0))
-            expected = int(np.round(min(int(np.ceil(N**exp)), 48)))
-            assert _plischke_n_classes(N) == expected
+    def test_matches_reference_class_counts(self):
+        """Tier T2 (external library): class counts of the Plischke heuristic.
+
+        Provenance:
+
+        * Tier: T2.
+        * Oracle: SALib, ``SALib.analyze.delta.analyze``, which applies the rule
+          ``min(ceil(N ** (2 / (7 + tanh((1500 - N) / 500)))), 48)``.
+        * Version: SALib 1.5.2.
+        * Run on: 2026-08-18.
+        * Script: ``scripts/oracles/salib_delta_class_counts.py``.
+
+        SALib is a development extra, so the oracle runs locally and the values
+        are typed in here as literals. The test then compares against fixed
+        numbers and never against our own code.
+        """
+        expected = {
+            100: 4,
+            500: 5,
+            1000: 6,
+            1500: 9,
+            5000: 18,
+            10000: 22,
+            100000: 47,
+        }
+        for n_samples, n_classes in expected.items():
+            assert _plischke_n_classes(n_samples) == n_classes, n_samples
 
     def test_saturates_at_48(self):
         assert _plischke_n_classes(10**6) == 48

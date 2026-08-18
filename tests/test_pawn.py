@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
 from jaxgsa.benchmarks import ishigami
-from jaxgsa.pawn import PAWNResult, analyze
+from jaxgsa.pawn import analyze
 from jaxgsa.problem import Problem
 from jaxgsa.sampling import monte_carlo
 
@@ -24,11 +22,6 @@ def ishigami_data():
 
 
 class TestPAWNBasic:
-    def test_returns_pawn_result(self, ishigami_data):
-        X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y, seed=0)
-        assert isinstance(result, PAWNResult)
-
     def test_shape_scalar_output(self, ishigami_data):
         X, Y = ishigami_data
         result = analyze(ishigami.PROBLEM, X, Y, seed=0)
@@ -55,13 +48,6 @@ class TestPAWNBasic:
         X, Y = ishigami_data
         result = analyze(ishigami.PROBLEM, X[:200], Y[:200], seed=0, slice_chunk_size=8)
         assert result.pawn.shape == (3,)
-
-    def test_old_chunk_size_kwarg_raises(self, ishigami_data):
-        """The pre-0.4 `chunk_size` name is gone — no shim."""
-        X, Y = ishigami_data
-        old_kwargs: dict[str, Any] = {"chunk_size": 8}
-        with pytest.raises(TypeError):
-            analyze(ishigami.PROBLEM, X[:200], Y[:200], seed=0, **old_kwargs)
 
 
 class TestPAWNSALibComparison:

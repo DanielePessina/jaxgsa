@@ -34,7 +34,7 @@ def _restore_memory_budget():
     """
     from jaxgsa._core import batching
 
-    saved = batching._memory_budget_bytes
+    saved = batching.get_memory_budget()
     yield
     batching._set_memory_budget(saved)
 

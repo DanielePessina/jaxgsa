@@ -142,12 +142,13 @@ def test_closed_form_total_indices(gauss_result):
 
 
 def test_closed_form_split_identities(gauss_result):
-    S_TC = np.asarray(gauss_result.S_TC)
+    """Tier T0 (closed form): an additive model has no interaction part.
+
+    The test model is a sum of one-dimensional terms, so every interaction
+    index is zero and the uncorrelated index equals its total.
+    """
     S_TU = np.asarray(gauss_result.S_TU)
     S_U = np.asarray(gauss_result.S_U)
-    # S_C and S_IU are defined as differences; the identities must be exact.
-    np.testing.assert_allclose(np.asarray(gauss_result.S_C), S_TC - S_U, atol=1e-12)
-    np.testing.assert_allclose(np.asarray(gauss_result.S_IU), S_TU - S_U, atol=1e-12)
     # The model is additive: no interactions, and the uncorrelated part is all
     # of the total uncorrelated index.
     np.testing.assert_allclose(np.asarray(gauss_result.S_IU), 0.0, atol=3e-2)

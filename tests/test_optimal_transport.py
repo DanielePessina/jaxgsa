@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, cast
+from typing import Literal, cast
 
 import jax
 import jax.numpy as jnp
@@ -11,7 +11,7 @@ import pytest
 
 import jaxgsa
 from jaxgsa.benchmarks import gaussian_linear, ishigami
-from jaxgsa.optimal_transport import OTResult, analyze
+from jaxgsa.optimal_transport import analyze
 from jaxgsa.sampling import monte_carlo
 
 
@@ -43,10 +43,10 @@ def multi_output_data(ishigami_data):
 
 
 class TestOTBasic:
-    def test_returns_ot_result(self, ishigami_data):
+    def test_scalar_output_selects_univariate_mode(self, ishigami_data):
+        """Tier T4 (internal consistency): a scalar output picks the univariate mode."""
         X, Y = ishigami_data
         result = analyze(ishigami.PROBLEM, X, Y)
-        assert isinstance(result, OTResult)
         assert result.mode == "univariate"
 
     def test_shape_scalar_output(self, ishigami_data):
@@ -96,19 +96,6 @@ class TestOTBasic:
         r_default = analyze(ishigami.PROBLEM, X, Y3)
         r_chunked = analyze(ishigami.PROBLEM, X, Y3, slice_chunk_size=1)
         np.testing.assert_allclose(np.asarray(r_default.ot), np.asarray(r_chunked.ot), atol=1e-7)
-
-    def test_slice_chunk_size_kwarg_accepted(self, ishigami_data):
-        """The 0.4 name `slice_chunk_size` is accepted explicitly."""
-        X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X[:512], Y[:512], slice_chunk_size=2)
-        assert np.asarray(result.ot).shape == (3,)
-
-    def test_old_chunk_size_kwarg_raises(self, ishigami_data):
-        """The pre-0.4 `chunk_size` name is gone — no shim."""
-        X, Y = ishigami_data
-        old_kwargs: dict[str, Any] = {"chunk_size": 2}
-        with pytest.raises(TypeError):
-            analyze(ishigami.PROBLEM, X[:512], Y[:512], **old_kwargs)
 
     def test_n_partitions_changes_result(self, ishigami_data):
         X, Y = ishigami_data

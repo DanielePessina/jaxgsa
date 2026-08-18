@@ -40,7 +40,7 @@ def _restore_memory_budget():
     """
     from jaxgsa._core import batching
 
-    saved = batching._memory_budget_bytes
+    saved = batching.get_memory_budget()
     yield
     batching._set_memory_budget(saved)
 
@@ -223,15 +223,23 @@ class TestAutoEngage:
         assert counter.calls == 0
 
     def test_full_fit_bytes_formula(self):
-        """The auto-engage estimate reflects the documented resident arrays."""
+        """Tier T4 (internal consistency): the auto-engage memory estimate.
+
+        For ``maxorder=2, D=3, m=2`` (so ``m1=5, m2=25, n1=3, n2=3, n=6``) and
+        ``N=1000`` float32 values the resident arrays are ``B1`` (1000 x 5 x 3 =
+        15000), ``B2`` (1000 x 25 x 3 = 75000), the ``B3`` placeholder (1000)
+        and the per-lane kernel transients (1000 x (2 x 3 x 5 + 5 x 6) = 60000).
+        That is 151000 values, or 604000 bytes at 4 bytes each.
+
+        The literal is hand-computed from the array breakdown that
+        ``_full_fit_bytes`` documents for itself, not from any paper or outside
+        tool, so this is T4 and not T1. What it proves: the code agrees with
+        its own documented arithmetic, and a silent change to the formula makes
+        the test fail instead of moving with it. What it does not prove: that
+        the breakdown names the right arrays, or that the estimate matches the
+        memory JAX really allocates. Only a measurement can show that.
+        """
         from jaxgsa.hdmr._stream import _full_fit_bytes
 
-        # maxorder=2, D=3, m=2: m1=5, m2=25, n1=3, n2=3, n=6.
         got = _full_fit_bytes(N=1000, D=3, m1=5, m2=25, m3=125, n1=3, n2=3, n3=0, n=6, itemsize=4)
-        expected = 4 * (
-            1000 * 5 * 3  # B1
-            + 1000 * 25 * 3  # B2
-            + 1000  # B3 placeholder
-            + 1000 * (2 * 3 * 5 + 5 * 6)  # per-lane kernel transients
-        )
-        assert got == expected
+        assert got == 604_000

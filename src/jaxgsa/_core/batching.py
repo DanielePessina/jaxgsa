@@ -40,14 +40,16 @@ def get_memory_budget() -> int:
     return DEFAULT_EMULATE_BUDGET_BYTES if _memory_budget_bytes is None else _memory_budget_bytes
 
 
-def _set_memory_budget(budget_bytes: int | None) -> None:
-    """Set (or with ``None`` reset) the global transient-memory budget.
+def _set_memory_budget(budget_bytes: int) -> None:
+    """Set the global transient-memory budget.
 
     Internal state mutator behind :func:`jaxgsa.config.set_memory_budget`,
-    which performs the input validation.
+    which performs the input validation. To go back to the default, read
+    :func:`get_memory_budget` first and set that value again: it resolves
+    the unset state to ``DEFAULT_EMULATE_BUDGET_BYTES``.
 
     Args:
-        budget_bytes: New budget in bytes, or ``None`` to restore the default.
+        budget_bytes: New budget in bytes.
     """
     global _memory_budget_bytes
     _memory_budget_bytes = budget_bytes
