@@ -758,8 +758,7 @@ def analyze(
         # the NaN a variance ratio would give.
         zero_variance_outcome="zero",
     )
-    assert ctx.X is not None  # X was passed, so prepare validated and returned it
-    X, Y, invalid = ctx.X, ctx.Y, ctx.invalid
+    X, Y, invalid = ctx.inputs, ctx.Y, ctx.invalid
     # Check the continuous-output contract before any expensive work.
     _raise_discrete_output(problem, Y)
 

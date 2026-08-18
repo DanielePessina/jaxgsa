@@ -469,8 +469,7 @@ def analyze_pce(
     # `PCEResult.shapley`) then works on data the policy has already passed,
     # so the policy is applied exactly once per user call.
     ctx = prepare(SPEC, problem, Y, X=X, on_invalid=on_invalid, min_kept=_MIN_ROWS)
-    assert ctx.X is not None  # X was passed, so prepare validated and returned it
-    X, Y, invalid = ctx.X, ctx.Y, ctx.invalid
+    X, Y, invalid = ctx.inputs, ctx.Y, ctx.invalid
 
     # Per-slice output variance for the explained-variance diagnostic below.
     total_var = jnp.var(ctx.Y3, axis=0)  # (T, K)

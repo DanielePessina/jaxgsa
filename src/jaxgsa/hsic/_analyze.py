@@ -461,8 +461,7 @@ def analyze(
         ),
         min_kept=_MIN_SAMPLES,
     )
-    assert ctx.X is not None  # X was passed, so prepare validated and returned it
-    X, invalid = ctx.X, ctx.invalid
+    X, invalid = ctx.inputs, ctx.invalid
     # A sample count, not a scalar argument: it is checked once the shape
     # contract has held, and a sample this small costs nothing to have read.
     if X.shape[0] < _MIN_SAMPLES:

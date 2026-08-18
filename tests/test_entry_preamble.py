@@ -31,7 +31,14 @@ import pytest
 
 import jaxgsa
 from jaxgsa import JaxgsaWarning
-from jaxgsa._core.entry import at_least, check_scalars, in_open_interval, one_of, require
+from jaxgsa._core.entry import (
+    at_least,
+    check_scalars,
+    in_open_interval,
+    one_of,
+    prepare,
+    require,
+)
 from jaxgsa._core.registry import methods
 from jaxgsa._core.validation import (
     _categorical_tolerant_methods,
@@ -357,3 +364,43 @@ class TestACleanSampleStaysSilent:
             else:
                 getattr(jaxgsa, name).analyze(PROBLEM, X, Y)
         assert [w for w in caught if issubclass(w.category, JaxgsaWarning)] == []
+
+
+class TestTheInputAccessor:
+    """`Context.X` is optional, because a design-based method has none.
+
+    Reading it through `Context.inputs` states that expectation once, instead
+    of seven given-data analyzers each narrowing the type at their own call
+    site. Tier T4 (behavioural contract).
+    """
+
+    def test_inputs_returns_the_matrix_a_given_data_method_was_handed(self):
+        X, Y = _xy()
+        ctx = prepare(
+            methods()["pawn"],
+            PROBLEM,
+            Y,
+            X=X,
+            on_invalid="raise",
+            checks=(),
+        )
+        assert ctx.inputs is ctx.X
+        assert ctx.inputs.shape == (N, D)
+
+    def test_inputs_refuses_when_the_method_was_given_no_matrix(self):
+        """A design-based context has no X, and asking for one is a bug here.
+
+        It raises TypeError rather than ValueError: nothing is wrong with the
+        caller's data, the analyzer asked for something it never passed in.
+        """
+        _, Y = _xy()
+        ctx = prepare(
+            methods()["sobol"],
+            PROBLEM,
+            Y,
+            on_invalid="raise",
+            checks=(),
+        )
+        assert ctx.X is None
+        with pytest.raises(TypeError, match="no input matrix was passed"):
+            _ = ctx.inputs

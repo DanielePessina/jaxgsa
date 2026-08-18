@@ -624,8 +624,7 @@ def analyze(
         # the NaN a variance ratio would give.
         zero_variance_outcome="zero",
     )
-    assert ctx.X is not None  # X was passed, so prepare validated and returned it
-    X, Y, invalid = ctx.X, ctx.Y, ctx.invalid
+    X, Y, invalid = ctx.inputs, ctx.Y, ctx.invalid
 
     if mode == "trajectory" and Y.ndim != 3:
         raise ValueError(f"mode='trajectory' requires a 3-D (N, T, K) Y, got ndim={Y.ndim}")

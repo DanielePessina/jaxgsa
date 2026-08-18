@@ -486,8 +486,7 @@ def analyze(
         # the NaN a variance ratio would give.
         zero_variance_outcome="zero",
     )
-    assert ctx.X is not None  # X was passed, so prepare validated and returned it
-    X, invalid = ctx.X, ctx.invalid
+    X, invalid = ctx.inputs, ctx.invalid
     Y_3d = ctx.Y3
     squeeze_time, squeeze_output = ctx.squeeze_time, ctx.squeeze_output
     bin_idx, n_eff = _bin_indices(problem, X, n_bins)

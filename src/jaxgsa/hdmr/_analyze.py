@@ -305,8 +305,7 @@ def analyze_hdmr(
     # `_analyze_hdmr_core` (Shapley) must not have the policy applied, or the
     # zero-variance warning issued, a second time.
     ctx = prepare(SPEC, problem, Y, X=X, on_invalid=on_invalid, min_kept=_MIN_ROWS)
-    assert ctx.X is not None  # X was passed, so prepare validated and returned it
-    X, Y, invalid = ctx.X, ctx.Y, ctx.invalid
+    X, Y, invalid = ctx.inputs, ctx.Y, ctx.invalid
     # ST and S1 change meaning under dependence; say so once per analyze call,
     # in the public wrapper only, so Shapley routing through the core stays
     # quiet.

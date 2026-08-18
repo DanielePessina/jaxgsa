@@ -219,6 +219,31 @@ class Context:
     invalid: InvalidReport
     policy: OnInvalid
 
+    @property
+    def inputs(self) -> Array:
+        """The input matrix, for a method that was given one.
+
+        ``X`` is optional because a design-based method has none, so every
+        given-data caller would otherwise narrow the type itself. Reading it
+        through here states the expectation once instead of at each call
+        site.
+
+        Returns:
+            The input matrix with the dropped rows already removed.
+
+        Raises:
+            TypeError: If this context came from a method with no ``X``. That
+                is a mistake in the analyzer, not in the caller's data, so it
+                is not a ``ValueError``.
+        """
+        if self.X is None:
+            raise TypeError(
+                f"{self.method}: no input matrix was passed to prepare(), so "
+                "Context.inputs is unavailable. A design-based method should "
+                "read its design instead."
+            )
+        return self.X
+
 
 def prepare(
     spec: MethodSpec,

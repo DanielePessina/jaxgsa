@@ -192,8 +192,7 @@ def analyze_vkoga(
         ),
         min_kept=n_folds,
     )
-    assert ctx.X is not None  # X was passed, so prepare validated and returned it
-    X, Y, invalid = ctx.X, ctx.Y, ctx.invalid
+    X, Y, invalid = ctx.inputs, ctx.Y, ctx.invalid
 
     if max_centers is None:
         max_centers = _DEFAULT_MAX_CENTERS
