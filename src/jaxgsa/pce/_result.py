@@ -6,20 +6,19 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
-import xarray as xr
 from jax import Array
 
 from jaxgsa._core.invalid import InvalidReport
+from jaxgsa._core.result import FieldSpec, ResultSchema, SchemaResult
 from jaxgsa._core.surrogate import SurrogateResult, _PredictPlan
-from jaxgsa._core.validation import _dims_and_coords
 from jaxgsa.problem import Problem
 
 if TYPE_CHECKING:
     from jaxgsa.shapley import ShapleyResult
 
 
-@dataclass
-class PCEResult(SurrogateResult):
+@dataclass(repr=False)
+class PCEResult(SchemaResult, SurrogateResult):
     """Polynomial chaos expansion sensitivity analysis results.
 
     Stores Sobol indices computed analytically from the expansion
@@ -88,6 +87,18 @@ class PCEResult(SurrogateResult):
     explained_variance: Array | None = None
     streamed: bool = False
 
+    _schema = ResultSchema(
+        primary="S1",
+        fields=(
+            FieldSpec("S1"),
+            FieldSpec("ST"),
+            FieldSpec("S2", "pair"),
+            FieldSpec("loo_rmse", "slice"),
+            FieldSpec("explained_variance", "slice"),
+        ),
+        meta=("order", "streamed"),
+    )
+
     def _predict_plan(self, X: Array) -> _PredictPlan:
         """Plan a batched evaluation of the fitted expansion at ``X``.
 
@@ -122,7 +133,7 @@ class PCEResult(SurrogateResult):
                 fit (well below 1, or above 1, which is an overfit), making
                 the Shapley effects unreliable.
         """
-        from jaxgsa.shapley._analyze import _shapley_result_from_variances
+        from jaxgsa.shapley._engine import _shapley_result_from_variances
 
         explained = self.explained_variance
         if explained is None:
@@ -141,49 +152,3 @@ class PCEResult(SurrogateResult):
             order=self.order,
             invalid=self.invalid,
         )
-
-    def __repr__(self) -> str:
-        """Return a concise summary showing the size of the fitted basis."""
-        n_terms = self.coefficients.shape[-1]
-        return f"PCEResult(D={len(self.problem.names)}, order={self.order}, n_terms={n_terms})"
-
-    def to_dataset(self, time_coords: np.ndarray | list | None = None) -> xr.Dataset:
-        """Convert results to a labeled xarray Dataset.
-
-        Args:
-            time_coords: Coordinate values for the ``time`` dimension of
-                time-series results. Defaults to ``0..T-1``.
-
-        Returns:
-            An ``xr.Dataset`` with variables ``S1``, ``ST``, ``S2`` and, when
-            present, ``loo_rmse`` and ``explained_variance``.
-        """
-        s1 = np.asarray(self.S1)
-        dims, coords = _dims_and_coords(s1.ndim, s1.shape, self.problem, time_coords)
-        data_vars: dict = {
-            "S1": (dims, s1),
-            "ST": (dims, np.asarray(self.ST)),
-        }
-
-        # S2 is a symmetric (..., D, D) matrix; separate coord names
-        # (param_i, param_j) avoid xarray dimension-name conflicts with the
-        # 1-D "param" coord used by S1/ST.
-        param_names = list(self.problem.names)
-        data_vars["S2"] = (
-            (*dims[:-1], "param_i", "param_j"),
-            np.asarray(self.S2),
-        )
-        coords["param_i"] = param_names
-        coords["param_j"] = param_names
-
-        # LOO RMSE is a per-slice diagnostic: no dims for scalar output,
-        # (output,) / (time, output) otherwise.
-        if self.loo_rmse is not None:
-            data_vars["loo_rmse"] = (dims[:-1], np.asarray(self.loo_rmse))
-        if self.explained_variance is not None:
-            data_vars["explained_variance"] = (
-                dims[:-1],
-                np.asarray(self.explained_variance),
-            )
-
-        return xr.Dataset(data_vars, coords=coords)

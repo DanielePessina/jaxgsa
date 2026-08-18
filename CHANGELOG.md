@@ -48,6 +48,29 @@ not a side effect. They are marked **now raises** below.
 
 ### Added
 
+- **`result.ci` records how a confidence interval was made.** Until now a
+  `*_conf` array was an interval of unknown level: nothing on the result said
+  whether it was a 95% or a 68% interval, which endpoint rule drew it, or how
+  many resamples it rested on. The five results that carry intervals
+  (`SobolResult`, `MorrisResult`, `DeltaResult`, `PAWNResult`, `OTResult`) now
+  carry a `ci` field holding `level`, `method`, `n_resamples` and, on request,
+  `replicates`. `S1` and `S1_conf` are unchanged plain arrays.
+- **`keep_replicates=True` keeps the bootstrap draws.** `analyze` discarded
+  them, so recomputing an interval at another level meant re-running the whole
+  analysis. Pass `keep_replicates=True` and the draws arrive on
+  `result.ci.replicates`, keyed by the estimate they belong to. It is off by
+  default because the draws are large: 1000 resamples of a
+  `(T=100, K=5, D=20)` index array is 80 MB.
+
+  `jaxgsa.morris`, `jaxgsa.pawn`, `jaxgsa.borgonovo` and
+  `jaxgsa.optimal_transport` accept the keyword. `jaxgsa.sobol` does not yet:
+  `SobolResult` carries the `ci` field and reads it, but `sobol.analyze` still
+  has to be taught to fill it in.
+- **Every result class now prints a one-line summary.** `MorrisResult`,
+  `DGSMResult`, `DeltaResult`, `PAWNResult` and `OTResult` had no `__repr__`,
+  so echoing one in a notebook printed every index array and the whole
+  `Problem`. All thirteen now print their field shapes and their provenance,
+  in one style.
 - **`PCEResult.streamed` and `HDMRResult.streamed`.** They record which fit path
   ran. A fit that took much longer than expected is a real reason to ask whether
   the memory budget engaged, and until now nothing answered that.
@@ -66,6 +89,20 @@ not a side effect. They are marked **now raises** below.
 
 ### Changed
 
+- **A result declares its fields, and `to_dataset` is derived from that.**
+  There were thirteen hand-written `to_dataset` methods and four copies of the
+  `param_i`/`param_j` splice. Each result now declares a field schema, and the
+  export, the summary and the `*_lower`/`*_upper` split all read it. The
+  exported dims, coordinates and variable names are unchanged for all thirteen
+  results, which `tests/test_result_schema.py` pins against a snapshot taken
+  from the old methods.
+- **`SurrogateResult` no longer declares `shapley`.** The abstract method fixed
+  no contract: `VKOGAResult` could only satisfy it by raising, and
+  `HDMRResult` widened the signature. `PCEResult.shapley` and
+  `HDMRResult.shapley` are plain methods now, and `VKOGAResult.shapley` still
+  raises `NotImplementedError` with the same message. `predict` stays on the
+  base class. This also removes an inverted dependency: `jaxgsa._core` no
+  longer imports a method package's private module.
 - **NumPy is now a declared dependency**, at `numpy>=2`. NumPy is imported
   directly by about twenty modules but reached users only through JAX and
   SciPy, both of which allow NumPy 1.x. An install from PyPI could therefore

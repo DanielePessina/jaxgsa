@@ -29,6 +29,7 @@ from jaxgsa._core.invalid import (
     check_invalid,
     resolve_policy,
 )
+from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
     _prenormalize_outputs,
     _prepare_Y,
@@ -168,6 +169,7 @@ def analyze(
     num_resamples: int = 0,
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
+    keep_replicates: bool = False,
     key: Array | None = None,
     chunk_size: int = 2048,
     on_invalid: OnInvalid = "raise",
@@ -213,6 +215,11 @@ def analyze(
             0.95).
         ci_method: Bootstrap endpoint method, ``"quantile"`` (empirical
             percentiles) or ``"gaussian"`` (symmetric around the estimate).
+        keep_replicates: Keep the per-resample measures on
+            ``MorrisResult.ci.replicates``. Off by default because they are
+            large: ``num_resamples`` copies of all three measure arrays. Turn
+            it on to recompute an interval at another level without
+            re-running the analysis.
         key: JAX PRNG key for the bootstrap randomness. Required when
             ``num_resamples > 0``.
         chunk_size: Upper bound on the bootstrap resamples processed per vmap
@@ -234,6 +241,8 @@ def analyze(
             mu_star  — mean absolute elementary effect, same shape
             sigma    — standard deviation of elementary effects, same shape
             mu_conf, mu_star_conf, sigma_conf — (2, ...) CI bounds or None
+            ci       — how the intervals were made, or None without a
+                       bootstrap
             invalid  — what the non-finite check found, and what it did
 
     Raises:
@@ -340,6 +349,7 @@ def analyze(
     # One value for all three intervals: they are produced together or not at
     # all, so a single name keeps that fact checkable instead of implied.
     conf_triple: tuple[Array, Array, Array] | None = None
+    replicates: dict[str, Array] | None = {} if keep_replicates else None
     if num_resamples > 0:
         if key is None:
             raise ValueError("key is required when num_resamples > 0")
@@ -369,16 +379,20 @@ def analyze(
             sigma_parts.append(sd[:n_real])
 
         conf_pairs = []
-        for estimate, parts in [
-            (mu, mu_parts),
-            (mu_star, mu_star_parts),
-            (sigma, sigma_parts),
+        for name, estimate, parts in [
+            ("mu", mu, mu_parts),
+            ("mu_star", mu_star, mu_star_parts),
+            ("sigma", sigma, sigma_parts),
         ]:
             draws = jnp.concatenate(parts)  # (R, T, K, D)
             lower, upper = _bootstrap_ci_endpoints(
                 estimate, draws, conf_level=conf_level, ci_method=ci_method
             )
             conf_pairs.append(jnp.stack([lower, upper]))
+            if replicates is not None:
+                # The leading resample axis survives the squeeze, which
+                # addresses the inserted T/K axes from the end.
+                replicates[name] = _squeeze_output_axes(draws, squeeze_time, squeeze_output)
         conf_triple = (conf_pairs[0], conf_pairs[1], conf_pairs[2])
 
     mu = _squeeze_output_axes(mu, squeeze_time, squeeze_output)
@@ -391,6 +405,17 @@ def analyze(
             _squeeze_output_axes(arr, squeeze_time, squeeze_output) for arr in conf_triple
         )
 
+    ci = (
+        CIInfo(
+            level=conf_level,
+            method=ci_method,
+            n_resamples=num_resamples,
+            replicates=replicates,
+        )
+        if num_resamples > 0
+        else None
+    )
+
     return MorrisResult(
         mu=mu,
         mu_star=mu_star,
@@ -401,4 +426,5 @@ def analyze(
         mu_star_conf=mu_star_conf,
         sigma_conf=sigma_conf,
         space="unit",
+        ci=ci,
     )

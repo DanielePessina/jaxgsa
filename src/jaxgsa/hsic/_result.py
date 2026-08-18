@@ -4,17 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import numpy as np
-import xarray as xr
 from jax import Array
 
 from jaxgsa._core.invalid import InvalidReport
-from jaxgsa._core.validation import _dims_and_coords
+from jaxgsa._core.result import FieldSpec, ResultSchema, SchemaResult
 from jaxgsa.problem import Problem
 
 
-@dataclass
-class HSICResult:
+@dataclass(repr=False)
+class HSICResult(SchemaResult):
     """HSIC (Hilbert-Schmidt Independence Criterion) sensitivity analysis results.
 
     Index arrays have shape ``(D,)`` for a scalar output, ``(K, D)`` for a
@@ -49,37 +47,12 @@ class HSICResult:
     problem: Problem
     invalid: InvalidReport
 
-    def __repr__(self) -> str:
-        """Return a concise summary showing index shapes."""
-        shapes = {
-            "R2_HSIC": self.R2_HSIC.shape,
-            "T_HSIC": self.T_HSIC.shape,
-            "p_values": self.p_values.shape,
-            "hsic_raw": self.hsic_raw.shape,
-        }
-        return f"HSICResult({shapes})"
-
-    def to_dataset(
-        self,
-        time_coords: np.ndarray | list | None = None,
-    ) -> xr.Dataset:
-        """Convert results to a labeled xarray Dataset.
-
-        Args:
-            time_coords: Coordinate values for the time dimension when
-                arrays are 3-D. Defaults to integer indices.
-
-        Returns:
-            An ``xr.Dataset`` with the variables ``R2_HSIC``, ``T_HSIC``,
-            ``p_values``, and ``hsic_raw``.
-        """
-        r2_arr = np.asarray(self.R2_HSIC)
-        dims, coords = _dims_and_coords(r2_arr.ndim, r2_arr.shape, self.problem, time_coords)
-
-        data_vars: dict = {
-            "R2_HSIC": (dims, r2_arr),
-            "T_HSIC": (dims, np.asarray(self.T_HSIC)),
-            "p_values": (dims, np.asarray(self.p_values)),
-            "hsic_raw": (dims, np.asarray(self.hsic_raw)),
-        }
-        return xr.Dataset(data_vars, coords=coords)
+    _schema = ResultSchema(
+        primary="R2_HSIC",
+        fields=(
+            FieldSpec("R2_HSIC"),
+            FieldSpec("T_HSIC"),
+            FieldSpec("p_values"),
+            FieldSpec("hsic_raw"),
+        ),
+    )

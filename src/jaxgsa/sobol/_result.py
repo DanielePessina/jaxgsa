@@ -2,17 +2,15 @@
 
 from dataclasses import dataclass
 
-import numpy as np
-import xarray as xr
 from jax import Array
 
 from jaxgsa._core.invalid import InvalidReport
-from jaxgsa._core.validation import _dims_and_coords
+from jaxgsa._core.result import CIInfo, FieldSpec, ResultSchema, SchemaResult
 from jaxgsa.problem import Problem
 
 
-@dataclass
-class SobolResult:
+@dataclass(repr=False)
+class SobolResult(SchemaResult):
     """Sobol sensitivity analysis results, returned by :func:`jaxgsa.sobol.analyze`.
 
     Stores first-order (S1), total-order (ST), and optionally second-order (S2)
@@ -46,6 +44,10 @@ class SobolResult:
         S2_conf: Bootstrap confidence bounds on ``S2``, shape ``(2, D, D)`` /
             ``(2, K, D, D)`` / ``(2, T, K, D, D)``, or ``None`` without a
             bootstrap. Symmetric with a ``NaN`` diagonal, like ``S2``.
+        ci: How the intervals were produced: the confidence level, the
+            endpoint rule, the resample count, and the bootstrap draws when
+            the analysis ran with ``keep_replicates=True``. ``None`` without
+            a bootstrap. See :class:`jaxgsa._core.result.CIInfo`.
     """
 
     S1: Array  # (D,), (K, D), or (T, K, D)
@@ -56,70 +58,13 @@ class SobolResult:
     S1_conf: Array | None = None  # (2, *S1.shape)
     ST_conf: Array | None = None
     S2_conf: Array | None = None
+    ci: CIInfo | None = None
 
-    def __repr__(self) -> str:
-        """Return a concise summary showing index shapes."""
-        shapes = {
-            "S1": self.S1.shape,
-            "ST": self.ST.shape,
-            "S2": self.S2.shape if self.S2 is not None else None,
-        }
-        if self.S1_conf is not None:
-            shapes["S1_conf"] = self.S1_conf.shape
-        if self.ST_conf is not None:
-            shapes["ST_conf"] = self.ST_conf.shape
-        if self.S2_conf is not None:
-            shapes["S2_conf"] = self.S2_conf.shape
-        return f"SobolResult({shapes})"
-
-    def to_dataset(
-        self,
-        time_coords: np.ndarray | list | None = None,
-    ) -> xr.Dataset:
-        """Convert results to a labeled xarray Dataset.
-
-        Args:
-            time_coords: Coordinate values for the time dimension when
-                ``S1.ndim == 3``. Defaults to integer indices.
-
-        Returns:
-            An ``xr.Dataset`` with variables ``S1``, ``ST``, and optionally
-            ``S2``, ``S1_lower/upper``, ``ST_lower/upper``, ``S2_lower/upper``.
-        """
-        dims_s1, coords = _dims_and_coords(self.S1.ndim, self.S1.shape, self.problem, time_coords)
-        param_names = list(self.problem.names)
-
-        data_vars: dict = {
-            "S1": (dims_s1, np.asarray(self.S1)),
-            "ST": (dims_s1, np.asarray(self.ST)),
-        }
-
-        # S2 has two parameter axes (interaction between param_i and param_j),
-        # so it uses separate coordinate names to avoid an xarray dimension clash.
-        # The coordinates belong to the axes, not to any one variable, so they
-        # are named whenever either the estimate or its interval is exported.
-        # Naming them only alongside S2 would leave S2_lower and S2_upper
-        # unlabelled, and `.sel(param_i=...)` would raise.
-        dims_s2 = (*dims_s1[:-1], "param_i", "param_j")
-        if self.S2 is not None or self.S2_conf is not None:
-            coords["param_i"] = param_names
-            coords["param_j"] = param_names
-
-        if self.S2 is not None:
-            data_vars["S2"] = (dims_s2, np.asarray(self.S2))
-
-        # Split the (2, ...) confidence arrays into *_lower and *_upper
-        # variables so users can select bounds without integer indexing.
-        for name, arr in [
-            ("S1", self.S1_conf),
-            ("ST", self.ST_conf),
-        ]:
-            if arr is not None:
-                data_vars[f"{name}_lower"] = (dims_s1, np.asarray(arr[0]))
-                data_vars[f"{name}_upper"] = (dims_s1, np.asarray(arr[1]))
-
-        if self.S2_conf is not None:
-            data_vars["S2_lower"] = (dims_s2, np.asarray(self.S2_conf[0]))
-            data_vars["S2_upper"] = (dims_s2, np.asarray(self.S2_conf[1]))
-
-        return xr.Dataset(data_vars, coords=coords)
+    _schema = ResultSchema(
+        primary="S1",
+        fields=(
+            FieldSpec("S1", "param", interval=True),
+            FieldSpec("ST", "param", interval=True),
+            FieldSpec("S2", "pair", interval=True),
+        ),
+    )

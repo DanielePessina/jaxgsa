@@ -69,6 +69,7 @@ from jaxgsa._core.partition import (
     _replicate_slice,
     build_partition_groups,
 )
+from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
     _prenormalize_outputs,
     _prepare_Y,
@@ -431,8 +432,8 @@ def _joint_kernel(
     return ot, adv, diff, n_bad, degen
 
 
-def _boot_conf(vals_all: Array, hat: Array, degen_all: Array, conf_level: float) -> Array:
-    """Percentile CI endpoints with degenerate replicates neutralized.
+def _boot_replicates(vals_all: Array, hat: Array, degen_all: Array) -> Array:
+    """The bootstrap draws the interval is taken from.
 
     A constant bootstrap resample carries no information. It contributes
     the point estimate instead of a spurious zero, so it neither widens
@@ -443,14 +444,13 @@ def _boot_conf(vals_all: Array, hat: Array, degen_all: Array, conf_level: float)
             point estimate.
         hat: Point estimate, shape ``(..., D)``.
         degen_all: Degeneracy flags, shape ``(R, ...)``.
-        conf_level: Two-sided confidence level.
 
     Returns:
-        An array of ``[lower, upper]`` endpoints, shape ``(2, ..., D)``.
+        The ``(R - 1, ..., D)`` bootstrap draws with degenerate rows
+        neutralized.
     """
     degen_boot = degen_all[1:][..., None]
-    boot_vals = jnp.where(degen_boot, hat[None], vals_all[1:])
-    return _percentile_ci(boot_vals, conf_level)
+    return jnp.where(degen_boot, hat[None], vals_all[1:])
 
 
 def analyze(
@@ -467,6 +467,7 @@ def analyze(
     dummy: bool = False,
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
+    keep_replicates: bool = False,
     seed: int = 0,
     slice_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
@@ -555,6 +556,12 @@ def analyze(
             ``n_bootstrap * D * n_partitions`` transport problems, so keep
             the value modest there.
         conf_level: Confidence level for percentile bootstrap intervals.
+        keep_replicates: Keep the per-resample indices on
+            ``OTResult.ci.replicates``. Off by default because they are
+            large: ``n_bootstrap`` copies of all three index arrays. Turn it
+            on to recompute an interval at another level without re-running
+            the analysis, which for this method means without re-solving
+            every transport problem.
         seed: Random seed for bootstrap resampling and the dummy
             parameter.
         slice_chunk_size: ``"univariate"`` mode only. Number of flattened
@@ -847,12 +854,29 @@ def analyze(
 
     hats = {"ot": ot_all[0], "advective": adv_all[0], "diffusive": diff_all[0]}
     confs: dict[str, Array | None] = dict.fromkeys(hats, None)
+    ci_info: CIInfo | None = None
     if n_bootstrap > 0:
+        replicates: dict[str, Array] | None = {} if keep_replicates else None
         for name, vals in (("ot", ot_all), ("advective", adv_all), ("diffusive", diff_all)):
-            ci = _boot_conf(vals, hats[name], degen_all, conf_level)
+            draws = _boot_replicates(vals, hats[name], degen_all)
+            endpoints = _percentile_ci(draws, conf_level)
             if mode == "univariate":
-                ci = _squeeze_output_axes(ci, squeeze_time, squeeze_output)
-            confs[name] = ci
+                endpoints = _squeeze_output_axes(endpoints, squeeze_time, squeeze_output)
+            confs[name] = endpoints
+            if replicates is not None:
+                # The leading resample axis survives the squeeze, which
+                # addresses the inserted T/K axes from the end.
+                if mode == "univariate":
+                    draws = _squeeze_output_axes(draws, squeeze_time, squeeze_output)
+                replicates[name] = draws
+        # This method has one hard-wired endpoint rule, the percentile
+        # interval, so "quantile" is what ran and not a guess.
+        ci_info = CIInfo(
+            level=conf_level,
+            method="quantile",
+            n_resamples=n_bootstrap,
+            replicates=replicates,
+        )
 
     if mode == "univariate":
         hats = {
@@ -873,4 +897,5 @@ def analyze(
         mode=mode,
         problem=problem,
         invalid=invalid,
+        ci=ci_info,
     )

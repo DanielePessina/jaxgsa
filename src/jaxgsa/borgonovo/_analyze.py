@@ -72,6 +72,7 @@ from jaxgsa._core.partition import (
     _replicate_slice,
     build_partition_groups,
 )
+from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import _prepare_Y, _squeeze_output_axes, _validate_xy_inputs
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.borgonovo._result import DeltaResult
@@ -557,6 +558,7 @@ def analyze(
     bandwidth: float | Literal["silverman"] = "silverman",
     n_bootstrap: int = 100,
     conf_level: float = 0.95,
+    keep_replicates: bool = False,
     bias_correct: bool = True,
     seed: int = 0,
     slice_chunk_size: int | None = None,
@@ -612,6 +614,13 @@ def analyze(
             plug-in estimate and ``delta_conf`` and ``S1_conf`` are
             ``None``.
         conf_level: Confidence level for percentile bootstrap intervals.
+        keep_replicates: Keep the per-resample indices on
+            ``DeltaResult.ci.replicates``. Off by default because they are
+            large: ``n_bootstrap`` copies of both index arrays. Turn it on to
+            recompute an interval at another level without re-running the
+            analysis. The ``delta`` draws are the ones the interval was taken
+            from, so they carry the bias correction when
+            ``bias_correct=True``.
         bias_correct: Apply the Plischke bias reduction
             ``2*d_hat - mean(d_boot)`` to the delta estimate. It requires
             ``n_bootstrap > 0``. S1 is never bias-corrected, matching
@@ -859,6 +868,7 @@ def analyze(
 
     delta_conf: Array | None = None
     S1_conf: Array | None = None
+    ci: CIInfo | None = None
     if n_bootstrap > 0:
         # A constant bootstrap resample carries no information. Replace its
         # degenerate zero with the point estimate so it neither inflates nor
@@ -881,6 +891,23 @@ def analyze(
         )
         S1_conf = _squeeze_output_axes(
             _percentile_ci(s1_boot, conf_level), squeeze_time, squeeze_output
+        )
+        # Borgonovo has one hard-wired endpoint rule, the percentile
+        # interval, so "quantile" is what ran and not a guess. The leading
+        # resample axis survives the squeeze, which addresses the T/K axes
+        # from the end.
+        ci = CIInfo(
+            level=conf_level,
+            method="quantile",
+            n_resamples=n_bootstrap,
+            replicates=(
+                {
+                    "delta": _squeeze_output_axes(d_reps, squeeze_time, squeeze_output),
+                    "S1": _squeeze_output_axes(s1_boot, squeeze_time, squeeze_output),
+                }
+                if keep_replicates
+                else None
+            ),
         )
     else:
         delta = d_hat
@@ -923,6 +950,7 @@ def analyze(
         S1_conf=S1_conf,
         problem=problem,
         invalid=invalid,
+        ci=ci,
     )
 
 

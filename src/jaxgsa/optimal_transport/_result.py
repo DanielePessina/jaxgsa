@@ -1,18 +1,19 @@
 """Result container for optimal-transport sensitivity indices."""
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
-import xarray as xr
 from jax import Array
 
 from jaxgsa._core.invalid import InvalidReport
+from jaxgsa._core.result import CIInfo, FieldSpec, ResultSchema, SchemaResult
 from jaxgsa._core.validation import _dims_and_coords
 from jaxgsa.problem import Problem
 
 
-@dataclass
-class OTResult:
+@dataclass(repr=False)
+class OTResult(SchemaResult):
     """Optimal-transport sensitivity analysis results.
 
     Holds the normalized optimal-transport index. The index is the
@@ -69,6 +70,10 @@ class OTResult:
         invalid: What the non-finite check found in the sample, and which
             ``on_invalid`` policy ran. ``invalid.n_invalid == 0`` means the
             check ran and found nothing.
+        ci: How the intervals were produced: the confidence level, the
+            endpoint rule, the resample count, and the bootstrap draws when
+            the analysis ran with ``keep_replicates=True``. ``None`` without
+            a bootstrap. See :class:`jaxgsa._core.result.CIInfo`.
     """
 
     ot: Array
@@ -81,43 +86,43 @@ class OTResult:
     mode: str
     problem: Problem
     invalid: InvalidReport
+    ci: CIInfo | None = None
 
-    def to_dataset(
-        self,
-        time_coords: np.ndarray | list | None = None,
-    ) -> xr.Dataset:
-        """Convert results to a labeled xarray Dataset.
+    _schema = ResultSchema(
+        primary="ot",
+        fields=(
+            FieldSpec("ot", "param", interval=True),
+            FieldSpec("advective", "param", interval=True),
+            FieldSpec("diffusive", "param", interval=True),
+            FieldSpec("ot_dummy", "slice"),
+        ),
+        meta=("mode",),
+    )
+
+    def _base_dims(
+        self, time_coords: np.ndarray | list | None
+    ) -> tuple[tuple[str, ...], dict[str, Any]]:
+        """Resolve dimensions from ``mode``, not from the array rank.
+
+        Two of the three modes fix their own layout. "multivariate" reduces
+        the whole output to one index per parameter, so it is always
+        ``(param,)``. "trajectory" treats each output's time course as one
+        point cloud, so it is always ``(output, param)``. Reading the rank
+        instead would label a trajectory result's leading axis "param" for a
+        one-output model, because the array happens to be 1-D.
 
         Args:
-            time_coords: Coordinate values for the time dimension when
-                arrays are 3-D. Defaults to integer indices.
+            time_coords: Coordinate values for the time dimension, unused
+                outside "univariate" because neither other mode has one.
 
         Returns:
-            An ``xr.Dataset`` with the variables ``ot``, ``advective`` and
-            ``diffusive``, and with a ``mode`` attribute. Bootstrap
-            intervals add ``*_lower`` and ``*_upper`` variables. A
-            computed dummy baseline adds ``ot_dummy``.
+            The base dims and coordinates for this result's mode.
         """
-        dims, coords = _dims_and_coords(self.ot.ndim, self.ot.shape, self.problem, time_coords)
+        if self.mode == "multivariate":
+            return ("param",), {"param": list(self.problem.names)}
+        ndim = 2 if self.mode == "trajectory" else np.asarray(self.ot).ndim
+        return _dims_and_coords(ndim, np.asarray(self.ot).shape, self.problem, time_coords)
 
-        data_vars: dict = {
-            "ot": (dims, np.asarray(self.ot)),
-            "advective": (dims, np.asarray(self.advective)),
-            "diffusive": (dims, np.asarray(self.diffusive)),
-        }
-
-        for name, conf in (
-            ("ot", self.ot_conf),
-            ("advective", self.advective_conf),
-            ("diffusive", self.diffusive_conf),
-        ):
-            if conf is not None:
-                data_vars[f"{name}_lower"] = (dims, np.asarray(conf[0]))
-                data_vars[f"{name}_upper"] = (dims, np.asarray(conf[1]))
-
-        if self.ot_dummy is not None:
-            # The dummy baseline has no parameter axis: it is the index of
-            # one synthetic parameter, per output slice.
-            data_vars["ot_dummy"] = (dims[:-1], np.asarray(self.ot_dummy))
-
-        return xr.Dataset(data_vars, coords=coords, attrs={"mode": self.mode})
+    def _dataset_attrs(self) -> dict[str, Any]:
+        """Record the analysis mode, which fixes how the shapes read."""
+        return {"mode": self.mode}

@@ -3,19 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
-import numpy as np
-import xarray as xr
 from jax import Array
 
 from jaxgsa._core.invalid import InvalidReport
-from jaxgsa._core.validation import _dims_and_coords
+from jaxgsa._core.result import FieldSpec, ResultSchema, SchemaResult
 from jaxgsa.problem import Problem
 
 
-@dataclass
-class ShapleyResult:
+@dataclass(repr=False)
+class ShapleyResult(SchemaResult):
     """Shapley-effect sensitivity analysis results.
 
     Stores Shapley effects computed analytically from a fitted surrogate's
@@ -76,53 +74,17 @@ class ShapleyResult:
     invalid: InvalidReport
     include_correlative: bool = False
 
-    def __repr__(self) -> str:
-        """Return a concise summary showing index shapes."""
-        shapes = {
-            "Sh": self.Sh.shape,
-            "S1": self.S1.shape,
-            "ST": self.ST.shape,
-        }
-        return (
-            f"ShapleyResult({shapes}, backend={self.backend!r}, order={self.order}, "
-            f"include_correlative={self.include_correlative})"
-        )
+    _schema = ResultSchema(
+        primary="Sh",
+        fields=(
+            FieldSpec("Sh"),
+            FieldSpec("S1"),
+            FieldSpec("ST"),
+            FieldSpec("explained_variance", "slice"),
+        ),
+        meta=("backend", "order", "include_correlative"),
+    )
 
-    def to_dataset(
-        self,
-        time_coords: np.ndarray | list | None = None,
-    ) -> xr.Dataset:
-        """Convert results to a labeled xarray Dataset.
-
-        Args:
-            time_coords: Coordinate values for the time dimension when
-                ``Sh.ndim == 3``. Defaults to integer indices.
-
-        Returns:
-            An ``xr.Dataset`` with variables ``Sh``, ``S1``, ``ST``, and the
-            scalar/per-output ``explained_variance`` on ``param`` (plus
-            ``output``/``time``) dimensions.
-        """
-        dims, coords = _dims_and_coords(self.Sh.ndim, self.Sh.shape, self.problem, time_coords)
-
-        data_vars: dict = {
-            "Sh": (dims, np.asarray(self.Sh)),
-            "S1": (dims, np.asarray(self.S1)),
-            "ST": (dims, np.asarray(self.ST)),
-        }
-
-        # explained_variance mirrors the squeezed output layout (no param axis):
-        # scalar -> (), vector -> (output,), matrix -> (time, output).
-        ev = np.asarray(self.explained_variance)
-        if ev.ndim == 0:
-            data_vars["explained_variance"] = ((), ev)
-        elif ev.ndim == 1:
-            data_vars["explained_variance"] = (("output",), ev)
-        else:
-            data_vars["explained_variance"] = (("time", "output"), ev)
-
-        return xr.Dataset(
-            data_vars,
-            coords=coords,
-            attrs={"backend": self.backend, "include_correlative": self.include_correlative},
-        )
+    def _dataset_attrs(self) -> dict[str, Any]:
+        """Record which surrogate produced the effects, and on what basis."""
+        return {"backend": self.backend, "include_correlative": self.include_correlative}

@@ -2,17 +2,15 @@
 
 from dataclasses import dataclass
 
-import numpy as np
-import xarray as xr
 from jax import Array
 
 from jaxgsa._core.invalid import InvalidReport
-from jaxgsa._core.validation import _dims_and_coords
+from jaxgsa._core.result import CIInfo, FieldSpec, ResultSchema, SchemaResult
 from jaxgsa.problem import Problem
 
 
-@dataclass
-class PAWNResult:
+@dataclass(repr=False)
+class PAWNResult(SchemaResult):
     """PAWN sensitivity analysis results.
 
     The PAWN index is the Kolmogorov-Smirnov distance between the
@@ -34,35 +32,19 @@ class PAWNResult:
         invalid: What the non-finite check found in the sample, and which
             ``on_invalid`` policy ran. ``invalid.n_invalid == 0`` means the
             check ran and found nothing.
+        ci: How the intervals were produced: the confidence level, the
+            endpoint rule, the resample count, and the bootstrap draws when
+            the analysis ran with ``keep_replicates=True``. ``None`` without
+            a bootstrap. See :class:`jaxgsa._core.result.CIInfo`.
     """
 
     pawn: Array
     pawn_conf: Array | None
     problem: Problem
     invalid: InvalidReport
+    ci: CIInfo | None = None
 
-    def to_dataset(
-        self,
-        time_coords: np.ndarray | list | None = None,
-    ) -> xr.Dataset:
-        """Convert results to a labeled xarray Dataset.
-
-        Args:
-            time_coords: Coordinate values for the time dimension when
-                arrays are 3-D. Defaults to integer indices.
-
-        Returns:
-            An ``xr.Dataset`` with variable ``pawn`` and optionally
-            ``pawn_lower`` / ``pawn_upper``.
-        """
-        dims, coords = _dims_and_coords(self.pawn.ndim, self.pawn.shape, self.problem, time_coords)
-
-        data_vars: dict = {
-            "pawn": (dims, np.asarray(self.pawn)),
-        }
-
-        if self.pawn_conf is not None:
-            data_vars["pawn_lower"] = (dims, np.asarray(self.pawn_conf[0]))
-            data_vars["pawn_upper"] = (dims, np.asarray(self.pawn_conf[1]))
-
-        return xr.Dataset(data_vars, coords=coords)
+    _schema = ResultSchema(
+        primary="pawn",
+        fields=(FieldSpec("pawn", "param", interval=True),),
+    )

@@ -1,12 +1,20 @@
 """Shared template for surrogate-backed results (PCE, HDMR).
 
-Both surrogate results expose the same two capabilities. They predict at new
-inputs in batches, and they read analytical Shapley effects off the fitted
-variance decomposition. :class:`SurrogateResult` implements the prediction
-plumbing once, as a template method: validate ``X``, size the row batches
-against a transient-memory budget, then run a subclass-supplied kernel. It
-also declares the ``shapley`` contract that each subclass fulfils with its own
-decomposition.
+Every surrogate result predicts at new inputs in batches.
+:class:`SurrogateResult` implements that plumbing once, as a template method:
+validate ``X``, size the row batches against a transient-memory budget, then
+run a subclass-supplied kernel. The body is short, but the contract it
+documents is long, and writing it here states it once instead of three times.
+
+Shapley effects are deliberately *not* declared here. Two of the three
+subclasses read them off a term-wise variance decomposition, and the third,
+``VKOGAResult``, has no such decomposition and could only satisfy an abstract
+``shapley`` by raising. ``HDMRResult`` widens the signature with
+``include_correlative`` besides, so the declaration fixed no signature either.
+Typing its return also forced this module to import ``jaxgsa.shapley._result``
+under ``TYPE_CHECKING``, which inverted the dependency: ``_core`` named a
+method package's private module. ``PCEResult.shapley`` and
+``HDMRResult.shapley`` are now plain methods on their own classes.
 
 Nothing here is public API (promote-later policy). ``SurrogateResult`` is not
 exported from ``jaxgsa``, and user code must type against ``PCEResult`` or
@@ -17,7 +25,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import TYPE_CHECKING, NamedTuple
+from typing import NamedTuple
 
 import jax.numpy as jnp
 from jax import Array
@@ -25,9 +33,6 @@ from jax import Array
 from jaxgsa._core.batching import apply_batched, resolve_batch_size
 from jaxgsa._core.validation import _validate_x
 from jaxgsa.problem import Problem
-
-if TYPE_CHECKING:
-    from jaxgsa.shapley._result import ShapleyResult
 
 
 class _PredictPlan(NamedTuple):
@@ -58,10 +63,8 @@ class _PredictPlan(NamedTuple):
 class SurrogateResult(ABC):
     """Base class for results that carry a reusable fitted surrogate.
 
-    Subclasses provide two methods. :meth:`_predict_plan` supplies the input
+    A subclass provides one method. :meth:`_predict_plan` supplies the input
     transform, the per-row memory estimate, and the prediction kernel.
-    :meth:`shapley` supplies the variance decomposition, which the shared
-    Shapley pipeline in ``jaxgsa.shapley._analyze`` then finishes.
     :meth:`predict` is implemented once here.
     """
 
@@ -117,25 +120,4 @@ class SurrogateResult(ABC):
 
         Raises:
             ValueError: If this result carries no fitted surrogate state.
-        """
-
-    @abstractmethod
-    def shapley(self) -> "ShapleyResult":
-        """Compute Shapley effects from this fitted surrogate's decomposition.
-
-        Each subclass supplies its per-term partial variances and term
-        membership; the shared pipeline normalizes them, allocates each
-        term's variance equally among its participants (Owen, 2014), and
-        warns when the fit diagnostic flags an unreliable surrogate.
-        Overrides may widen the signature with backend-specific keyword-only
-        options (e.g. ``HDMRResult.shapley(include_correlative=...)``).
-
-        Returns:
-            ShapleyResult with per-parameter effects ``Sh`` (summing to 1
-            per output slice), the matching ``S1``/``ST`` bounds, and an
-            explained-variance diagnostic.
-
-        Raises:
-            ValueError: If this result carries no fitted surrogate state or
-                fit diagnostics.
         """

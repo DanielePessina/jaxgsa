@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import xarray as xr
 from jax import Array
 
 from jaxgsa._core.copula import is_independent
 from jaxgsa._core.invalid import InvalidReport
+from jaxgsa._core.result import FieldSpec, ResultSchema, SchemaResult
 from jaxgsa._core.surrogate import SurrogateResult, _PredictPlan
-from jaxgsa._core.validation import _dims_and_coords
 from jaxgsa.problem import Problem
 from jaxgsa.vkoga._engine import _VKOGAState
 
@@ -20,8 +19,8 @@ if TYPE_CHECKING:
     from jaxgsa.shapley._result import ShapleyResult
 
 
-@dataclass
-class VKOGAResult(SurrogateResult):
+@dataclass(repr=False)
+class VKOGAResult(SchemaResult, SurrogateResult):
     """Correlated variance-based sensitivity indices from a VKOGA surrogate.
 
     Produced by :func:`jaxgsa.vkoga.analyze`. Index arrays have shape ``(D,)``
@@ -102,6 +101,37 @@ class VKOGAResult(SurrogateResult):
     _y_mean: Array | None = field(default=None, repr=False)
     _output_shape: tuple[int, ...] = field(default=(), repr=False)
 
+    _schema = ResultSchema(
+        primary="S_TC",
+        fields=(
+            FieldSpec("S_TC"),
+            FieldSpec("S_TU"),
+            FieldSpec("S_U"),
+            FieldSpec("S_C"),
+            FieldSpec("S_IU"),
+            FieldSpec("variance", "slice"),
+            FieldSpec("rmse", "slice"),
+            # The copula matrix describes the input model, not any output
+            # slice, so it carries no output or time axis.
+            FieldSpec("correlation", "pair_only"),
+        ),
+        meta=("n_centers", "gamma", "ridge", "is_correlated"),
+    )
+
+    def _dataset_attrs(self) -> dict[str, Any]:
+        """Record the fit's hyperparameters and its dependence assumption."""
+        attrs: dict[str, Any] = {
+            "method": "vkoga",
+            "n_centers": self.n_centers,
+            "gamma": self.gamma,
+            "ridge": self.ridge,
+            "correlated": bool(self.is_correlated),
+        }
+        # Omitted rather than stored as None: netCDF has no null attribute.
+        if self.cv_rmse is not None:
+            attrs["cv_rmse"] = float(self.cv_rmse)
+        return attrs
+
     def _predict_plan(self, X: Array) -> _PredictPlan:
         """Plan a batched evaluation of the fitted surrogate at ``X``.
 
@@ -127,6 +157,11 @@ class VKOGAResult(SurrogateResult):
         centres, not over parameter subsets. Every centre involves every
         parameter, so there is no membership matrix to allocate from.
 
+        This method no longer overrides an abstract one: ``SurrogateResult``
+        stopped declaring ``shapley``, because a contract that one of its three
+        subclasses can only meet by refusing is not a contract. It stays as a
+        signpost, so the call names the two backends that do support it.
+
         Raises:
             NotImplementedError: Always. Use ``jaxgsa.hdmr`` or ``jaxgsa.pce``
                 for Shapley effects; ``hdmr`` additionally supports
@@ -146,56 +181,3 @@ class VKOGAResult(SurrogateResult):
         agree.
         """
         return not is_independent(self.correlation)
-
-    def __repr__(self) -> str:
-        """Return a concise summary showing the parameter and centre counts."""
-        D = len(self.problem.names)
-        kind = "correlated" if self.is_correlated else "independent"
-        return f"VKOGAResult(D={D}, n_centers={self.n_centers}, {kind})"
-
-    def to_dataset(self, time_coords: np.ndarray | list | None = None) -> xr.Dataset:
-        """Convert results to a labeled xarray Dataset.
-
-        Args:
-            time_coords: Coordinate values for the time dimension when
-                ``S_TC.ndim == 3``. Defaults to integer indices.
-
-        Returns:
-            An ``xr.Dataset`` with variables ``S_TC``, ``S_TU``, ``S_U``,
-            ``S_C``, ``S_IU``, ``variance``, ``correlation``, and optionally
-            ``rmse``.
-        """
-        s_tc = np.asarray(self.S_TC)
-        dims, coords = _dims_and_coords(s_tc.ndim, s_tc.shape, self.problem, time_coords)
-        data_vars: dict = {
-            "S_TC": (dims, s_tc),
-            "S_TU": (dims, np.asarray(self.S_TU)),
-            "S_U": (dims, np.asarray(self.S_U)),
-            "S_C": (dims, np.asarray(self.S_C)),
-            "S_IU": (dims, np.asarray(self.S_IU)),
-        }
-
-        # Per-slice diagnostics carry the index dims minus the parameter axis.
-        data_vars["variance"] = (dims[:-1], np.asarray(self.variance))
-        if self.rmse is not None:
-            data_vars["rmse"] = (dims[:-1], np.asarray(self.rmse))
-
-        # The copula matrix is a property of the input model, not of any
-        # output slice, so it gets its own pair of parameter dimensions.
-        param_names = list(self.problem.names)
-        data_vars["correlation"] = (("param_i", "param_j"), np.asarray(self.correlation))
-        coords["param_i"] = param_names
-        coords["param_j"] = param_names
-
-        attrs: dict = {
-            "method": "vkoga",
-            "n_centers": self.n_centers,
-            "gamma": self.gamma,
-            "ridge": self.ridge,
-            "correlated": bool(self.is_correlated),
-        }
-        # Omitted rather than stored as None: netCDF has no null attribute.
-        if self.cv_rmse is not None:
-            attrs["cv_rmse"] = float(self.cv_rmse)
-
-        return xr.Dataset(data_vars, coords=coords, attrs=attrs)

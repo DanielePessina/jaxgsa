@@ -3,16 +3,14 @@
 import itertools
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 import jax.numpy as jnp
-import numpy as np
-import xarray as xr
 from jax import Array
 
 from jaxgsa._core.invalid import InvalidReport
+from jaxgsa._core.result import FieldSpec, ResultSchema, SchemaResult
 from jaxgsa._core.surrogate import SurrogateResult, _PredictPlan
-from jaxgsa._core.validation import _dims_and_coords
 from jaxgsa.problem import Problem
 
 if TYPE_CHECKING:
@@ -38,8 +36,8 @@ class _HDMRFit(TypedDict):
     maxorder: int
 
 
-@dataclass
-class HDMRResult(SurrogateResult):
+@dataclass(repr=False)
+class HDMRResult(SchemaResult, SurrogateResult):
     """RS-HDMR (Random Sampling High-Dimensional Model Representation) results.
 
     Stores ANCOVA-decomposed sensitivity indices. A term is one component
@@ -148,6 +146,42 @@ class HDMRResult(SurrogateResult):
     _c2: tuple[tuple[int, int], ...] = field(default=(), repr=False)
     _c3: tuple[tuple[int, int, int], ...] = field(default=(), repr=False)
 
+    # Sa/Sb/S are indexed by expansion term, not by parameter, so they cannot
+    # share the "param" axis that ST uses. "select" carries the term axis
+    # alone: it is one flag per term, with no output or time axis at all.
+    _schema = ResultSchema(
+        primary="Sa",
+        fields=(
+            FieldSpec("Sa", "term"),
+            FieldSpec("Sb", "term"),
+            FieldSpec("S", "term"),
+            FieldSpec("ST", "param"),
+            FieldSpec("S2", "pair"),
+            FieldSpec("S3", "triple"),
+            FieldSpec("select", "term_only"),
+            FieldSpec("rmse", "slice"),
+        ),
+        meta=("streamed",),
+    )
+
+    def _extra_coords(self) -> dict[str, Any]:
+        """Name the expansion-term axis, which the parameter names cannot."""
+        return {"term": list(self.terms)}
+
+    def _omit_fields(self) -> frozenset[str]:
+        """Skip the interaction tensors when the fit has no terms of that order.
+
+        ``S2`` and ``S3`` always materialize, filled with NaN where a term is
+        absent. Exporting an all-NaN tensor from a ``maxorder=1`` fit would
+        claim an interaction structure the fit never modelled.
+        """
+        omit = set()
+        if not self._c2:
+            omit.add("S2")
+        if not self._c3:
+            omit.add("S3")
+        return frozenset(omit)
+
     def _predict_plan(self, X: Array) -> _PredictPlan:
         """Plan a batched evaluation of the fitted HDMR surrogate at ``X``.
 
@@ -187,8 +221,7 @@ class HDMRResult(SurrogateResult):
         Raises:
             ValueError: If this result carries no fitted surrogate state.
         """
-        from jaxgsa.shapley._analyze import _shapley_result_from_variances
-        from jaxgsa.shapley._engine import build_membership
+        from jaxgsa.shapley._engine import _shapley_result_from_variances, build_membership
 
         fit = self._fit
         if fit is None:
@@ -297,71 +330,3 @@ class HDMRResult(SurrogateResult):
         vals6 = jnp.concatenate([vals] * len(perms), axis=-1)  # (..., 6*n3)
         out = out.at[..., ia, ib, ic].set(vals6)
         return out
-
-    def __repr__(self) -> str:
-        """Return a concise summary showing index shapes."""
-        shapes = {
-            "Sa": self.Sa.shape,
-            "Sb": self.Sb.shape,
-            "S": self.S.shape,
-            "ST": self.ST.shape,
-        }
-        return f"HDMRResult({shapes})"
-
-    def to_dataset(
-        self,
-        time_coords: np.ndarray | list | None = None,
-    ) -> xr.Dataset:
-        """Convert results to a labeled xarray Dataset.
-
-        Args:
-            time_coords: Coordinate values for the time dimension when
-                arrays are 3-D. Defaults to integer indices.
-
-        Returns:
-            An ``xr.Dataset`` with variables ``Sa``, ``Sb``, ``S``, ``ST``,
-            ``S2`` when second-order terms exist (and ``S3`` when third-order
-            terms exist), and optionally ``select`` and ``rmse``.
-        """
-        # ST is indexed by parameter, exactly the shared param/output/time
-        # schema. Sa/Sb/S replace the trailing "param" with "term" (the
-        # interaction components). select/rmse drop that axis entirely.
-        dims_param, coords = _dims_and_coords(
-            self.Sa.ndim, self.Sa.shape, self.problem, time_coords
-        )
-        coords = {**coords, "term": list(self.terms)}
-        dims_term = (*dims_param[:-1], "term")
-
-        data_vars: dict = {
-            "Sa": (dims_term, np.asarray(self.Sa)),
-            "Sb": (dims_term, np.asarray(self.Sb)),
-            "S": (dims_term, np.asarray(self.S)),
-            "ST": (dims_param, np.asarray(self.ST)),
-        }
-
-        # S2/S3 are symmetric interaction tensors; their trailing axes each span
-        # the parameters, so they get their own dim names (param_i/j/k) to avoid
-        # clashing with the 1-D "param" coord, mirroring PCEResult.to_dataset.
-        # Each is emitted only when its expansion order has terms.
-        param_names = list(self.problem.names)
-        lead = dims_param[:-1]
-        if len(self._c2) > 0:
-            data_vars["S2"] = ((*lead, "param_i", "param_j"), np.asarray(self.S2))
-            coords["param_i"] = param_names
-            coords["param_j"] = param_names
-        if len(self._c3) > 0:
-            data_vars["S3"] = (
-                (*lead, "param_i", "param_j", "param_k"),
-                np.asarray(self.S3),
-            )
-            coords["param_k"] = param_names
-
-        if self.select is not None:
-            data_vars["select"] = (("term",), np.asarray(self.select))
-
-        if self.rmse is not None:
-            # RMSE has no param/term axis, so it uses the leading dims only:
-            # () / (output,) / (time, output).
-            data_vars["rmse"] = (dims_param[:-1], np.asarray(self.rmse))
-
-        return xr.Dataset(data_vars, coords=coords)

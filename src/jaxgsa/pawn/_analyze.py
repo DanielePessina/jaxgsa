@@ -66,6 +66,7 @@ from jaxgsa._core.invalid import (
     resolve_policy,
 )
 from jaxgsa._core.partition import _extract_categorical_codes
+from jaxgsa._core.result import CIInfo
 from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa._core.validation import _prepare_Y, _squeeze_output_axes, _validate_xy_inputs
 from jaxgsa._core.warning_types import JaxgsaWarning
@@ -369,6 +370,7 @@ def analyze(
     statistic: Literal["median", "max", "mean"] = "median",
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
+    keep_replicates: bool = False,
     seed: int = 0,
     slice_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
@@ -417,6 +419,11 @@ def analyze(
         n_bootstrap: Number of bootstrap resamples for confidence intervals.
             ``0`` disables the confidence intervals.
         conf_level: Confidence level for the bootstrap intervals.
+        keep_replicates: Keep the per-resample indices on
+            ``PAWNResult.ci.replicates``. Off by default because they are
+            large: ``n_bootstrap`` copies of the index array. Turn it on to
+            recompute an interval at another level without re-running the
+            analysis.
         seed: Random seed for the bootstrap resampling.
         slice_chunk_size: Number of flattened ``T*K`` output columns
             processed per kernel call. ``None`` (default) derives one from
@@ -439,8 +446,9 @@ def analyze(
 
     Returns:
         A :class:`PAWNResult` with ``pawn`` shaped ``(D,)``, ``(K, D)``, or
-        ``(T, K, D)``, optional confidence intervals in ``pawn_conf``, and
-        the non-finite report in ``invalid``.
+        ``(T, K, D)``, optional confidence intervals in ``pawn_conf``, how
+        those intervals were made in ``ci``, and the non-finite report in
+        ``invalid``.
 
     Raises:
         ValueError: If X is not 2-D, its column count does not match the
@@ -496,6 +504,7 @@ def analyze(
     pawn_3d = _pawn_core(bin_idx, Y_3d, n_eff, statistic, slice_chunk_size)
 
     pawn_conf: Array | None = None
+    ci: CIInfo | None = None
     if n_bootstrap > 0:
         key = jax.random.PRNGKey(seed + 1)
         N = X.shape[0]
@@ -513,6 +522,20 @@ def analyze(
 
         pawn_conf = _squeeze_output_axes(pawn_conf_3d, squeeze_time, squeeze_output)
 
+        # PAWN has one hard-wired endpoint rule, the percentile interval, so
+        # "quantile" is what ran and not a guess. The leading resample axis
+        # survives the squeeze, which addresses the T/K axes from the end.
+        ci = CIInfo(
+            level=conf_level,
+            method="quantile",
+            n_resamples=n_bootstrap,
+            replicates=(
+                {"pawn": _squeeze_output_axes(boot_stack, squeeze_time, squeeze_output)}
+                if keep_replicates
+                else None
+            ),
+        )
+
     pawn_out = _squeeze_output_axes(pawn_3d, squeeze_time, squeeze_output)
 
     return PAWNResult(
@@ -520,4 +543,5 @@ def analyze(
         pawn_conf=pawn_conf,
         problem=problem,
         invalid=invalid,
+        ci=ci,
     )

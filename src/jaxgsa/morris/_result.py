@@ -3,19 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
-import xarray as xr
 from jax import Array
 
 from jaxgsa._core.invalid import InvalidReport
-from jaxgsa._core.validation import _dims_and_coords
+from jaxgsa._core.result import CIInfo, FieldSpec, ResultSchema, SchemaResult
 from jaxgsa.problem import Problem
 
 
-@dataclass
-class MorrisResult:
+@dataclass(repr=False)
+class MorrisResult(SchemaResult):
     """Morris elementary-effects screening measures.
 
     Measure arrays have shape ``(D,)`` for a scalar output, ``(K, D)`` for a
@@ -50,6 +49,12 @@ class MorrisResult:
             ``(2, ...)`` for ``[lower, upper]``. ``None`` when the analysis ran
             no bootstrap.
         space: Coordinate space of the measures, ``"unit"`` or ``"physical"``.
+        ci: How the intervals were produced: the confidence level, the
+            endpoint rule, the resample count, and the bootstrap draws when
+            the analysis ran with ``keep_replicates=True``. ``None`` without
+            a bootstrap. :meth:`to_physical_units` rescales any kept draws
+            along with the measures. See
+            :class:`jaxgsa._core.result.CIInfo`.
     """
 
     mu: Array
@@ -61,6 +66,21 @@ class MorrisResult:
     mu_star_conf: Array | None = None
     sigma_conf: Array | None = None
     space: Literal["unit", "physical"] = "unit"
+    ci: CIInfo | None = None
+
+    _schema = ResultSchema(
+        primary="mu",
+        fields=(
+            FieldSpec("mu", "param", interval=True),
+            FieldSpec("mu_star", "param", interval=True),
+            FieldSpec("sigma", "param", interval=True),
+        ),
+        meta=("space",),
+    )
+
+    def _dataset_attrs(self) -> dict[str, Any]:
+        """Record the coordinate space the measures are in."""
+        return {"space": self.space}
 
     def to_physical_units(self) -> MorrisResult:
         """Return a copy with measures rescaled to physical input units.
@@ -88,8 +108,15 @@ class MorrisResult:
         def _scale(arr: Array | None) -> Array | None:
             return None if arr is None else arr / ranges
 
+        # Kept bootstrap draws are measures too. Leaving them in unit-cube
+        # coordinates would make them disagree with the intervals beside them.
+        ci = self.ci
+        if ci is not None and ci.replicates is not None:
+            ci = replace(ci, replicates={k: v / ranges for k, v in ci.replicates.items()})
+
         return replace(
             self,
+            ci=ci,
             mu=self.mu / ranges,
             mu_star=self.mu_star / ranges,
             sigma=self.sigma / ranges,
@@ -98,41 +125,3 @@ class MorrisResult:
             sigma_conf=_scale(self.sigma_conf),
             space="physical",
         )
-
-    def to_dataset(
-        self,
-        time_coords: np.ndarray | list | None = None,
-    ) -> xr.Dataset:
-        """Convert the measures to a labeled xarray Dataset.
-
-        Args:
-            time_coords: Coordinate values for the time dimension, used when
-                ``mu.ndim == 3``. Defaults to integer indices.
-
-        Returns:
-            An :class:`xarray.Dataset` with the variables ``mu``, ``mu_star``,
-            and ``sigma``, each shaped ``(D,)``, ``(K, D)``, or ``(T, K, D)``.
-            It also holds ``*_lower`` and ``*_upper`` confidence bounds when
-            the analysis ran a bootstrap, and a ``space`` attribute that
-            records the coordinate space.
-        """
-        dims, coords = _dims_and_coords(self.mu.ndim, self.mu.shape, self.problem, time_coords)
-
-        data_vars: dict = {
-            "mu": (dims, np.asarray(self.mu)),
-            "mu_star": (dims, np.asarray(self.mu_star)),
-            "sigma": (dims, np.asarray(self.sigma)),
-        }
-
-        # Split each (2, ...) confidence array into *_lower and *_upper
-        # variables so users can select a bound without integer indexing.
-        for name, arr in [
-            ("mu", self.mu_conf),
-            ("mu_star", self.mu_star_conf),
-            ("sigma", self.sigma_conf),
-        ]:
-            if arr is not None:
-                data_vars[f"{name}_lower"] = (dims, np.asarray(arr[0]))
-                data_vars[f"{name}_upper"] = (dims, np.asarray(arr[1]))
-
-        return xr.Dataset(data_vars, coords=coords, attrs={"space": self.space})

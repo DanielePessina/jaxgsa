@@ -2,17 +2,15 @@
 
 from dataclasses import dataclass
 
-import numpy as np
-import xarray as xr
 from jax import Array
 
 from jaxgsa._core.invalid import InvalidReport
-from jaxgsa._core.validation import _dims_and_coords
+from jaxgsa._core.result import FieldSpec, ResultSchema, SchemaResult
 from jaxgsa.problem import Problem
 
 
-@dataclass
-class DGSMResult:
+@dataclass(repr=False)
+class DGSMResult(SchemaResult):
     """Derivative-based global sensitivity measures and Sobol index bounds.
 
     ``upper_bound`` and ``lower_bound`` bracket the total Sobol index ``ST_i``
@@ -53,25 +51,15 @@ class DGSMResult:
     problem: Problem
     invalid: InvalidReport
 
-    def to_dataset(self, time_coords: np.ndarray | list | None = None) -> xr.Dataset:
-        """Convert results to a labeled xarray Dataset.
-
-        Args:
-            time_coords: Optional coordinate values for the ``time``
-                dimension of time-series results; defaults to ``0..T-1``.
-
-        Returns:
-            An ``xr.Dataset`` with variables ``nu``, ``sigma``,
-            ``upper_bound``, and ``lower_bound`` on dims ``(param,)`` /
-            ``(output, param)`` / ``(time, output, param)``, matching the
-            result shapes.
-        """
-        nu_arr = np.asarray(self.nu)
-        dims, coords = _dims_and_coords(nu_arr.ndim, nu_arr.shape, self.problem, time_coords)
-        data_vars: dict = {
-            "nu": (dims, nu_arr),
-            "sigma": (dims, np.asarray(self.sigma)),
-            "upper_bound": (dims, np.asarray(self.upper_bound)),
-            "lower_bound": (dims, np.asarray(self.lower_bound)),
-        }
-        return xr.Dataset(data_vars, coords=coords)
+    # var_y is declared but not exported: the dataset has never carried it,
+    # and adding it here would change what an existing netCDF file holds.
+    _schema = ResultSchema(
+        primary="nu",
+        fields=(
+            FieldSpec("nu"),
+            FieldSpec("sigma"),
+            FieldSpec("upper_bound"),
+            FieldSpec("lower_bound"),
+            FieldSpec("var_y", "slice", dataset=False),
+        ),
+    )

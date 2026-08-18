@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
-import numpy as np
-import xarray as xr
 from jax import Array
 
 from jaxgsa._core.invalid import InvalidReport
-from jaxgsa._core.validation import _dims_and_coords
+from jaxgsa._core.result import FieldSpec, ResultSchema, SchemaResult
 from jaxgsa.problem import Problem
 
 
-@dataclass(frozen=True)
-class KucherenkoResult:
+@dataclass(frozen=True, repr=False)
+class KucherenkoResult(SchemaResult):
     """Kucherenko sensitivity indices, returned by :func:`jaxgsa.kucherenko.analyze`.
 
     Index arrays have shape ``(D,)`` for a scalar output, ``(K, D)`` for a
@@ -47,37 +46,17 @@ class KucherenkoResult:
     variance: Array
     invalid: InvalidReport
 
-    def __repr__(self) -> str:
-        """Return a concise summary showing index shapes."""
-        return (
-            f"KucherenkoResult(S1={tuple(self.S1.shape)}, ST={tuple(self.ST.shape)}, "
-            f"correlated={self.problem.has_correlated_inputs})"
-        )
+    _schema = ResultSchema(
+        primary="S1",
+        fields=(FieldSpec("S1"), FieldSpec("ST"), FieldSpec("variance", "slice")),
+        meta=("is_correlated",),
+    )
 
     @property
     def is_correlated(self) -> bool:
         """Return ``True`` when the problem declares a non-identity correlation."""
         return self.problem.has_correlated_inputs
 
-    def to_dataset(self, time_coords: np.ndarray | list | None = None) -> xr.Dataset:
-        """Convert results to a labeled xarray Dataset.
-
-        Args:
-            time_coords: Coordinate values for the time dimension when
-                ``S1.ndim == 3``. Defaults to integer indices.
-
-        Returns:
-            An ``xr.Dataset`` with variables ``S1``, ``ST``, and ``variance``,
-            keyed by ``param`` (and ``output`` / ``time``) coordinates.
-        """
-        dims, coords = _dims_and_coords(self.S1.ndim, self.S1.shape, self.problem, time_coords)
-        data_vars: dict = {
-            "S1": (dims, np.asarray(self.S1)),
-            "ST": (dims, np.asarray(self.ST)),
-            "variance": (dims[:-1], np.asarray(self.variance)),
-        }
-        return xr.Dataset(
-            data_vars,
-            coords=coords,
-            attrs={"method": "kucherenko", "correlated": bool(self.is_correlated)},
-        )
+    def _dataset_attrs(self) -> dict[str, Any]:
+        """Record the method and whether the inputs were treated as dependent."""
+        return {"method": "kucherenko", "correlated": bool(self.is_correlated)}
