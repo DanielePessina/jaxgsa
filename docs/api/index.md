@@ -232,7 +232,7 @@ All result objects support `to_dataset(...)` for labeled xarray export.
 Use `jaxgsa.config.enable_compilation_cache(path)` to configure JAX's persistent
 compilation cache.
 
-Use `jaxgsa.config.set_memory_budget(bytes)` and
+Use `jaxgsa.config.set_memory_budget(megabytes)` and
 `jaxgsa.config.get_memory_budget()` to adjust the global transient-memory
 budget. The default is 512 MiB. This budget sizes automatic batching: the
 surrogate `predict` batches, the HDMR output-slice chunking, and the PCE

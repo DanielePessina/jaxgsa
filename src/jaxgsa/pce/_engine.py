@@ -13,6 +13,7 @@ from math import comb, factorial
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
+from jax.scipy.linalg import solve_triangular
 
 # Shared recurrence in _core.legendre; the VKOGA component fit uses it too.
 from jaxgsa._core.legendre import legendre_orthonormal as _legendre_1d
@@ -195,12 +196,64 @@ def sobol_from_coefficients(
     return S1, ST, S2
 
 
+def gram_cholesky(Phi: Array, ridge: float = 0.0) -> Array:
+    """Factor the (regularized) Gram matrix of a design block.
+
+    Args:
+        Phi: Design matrix, shape ``(N, n_terms)``.
+        ridge: Tikhonov parameter added to the diagonal.
+
+    Returns:
+        Lower-triangular Cholesky factor ``L`` of ``Phi^T Phi + ridge*I``,
+        shape ``(n_terms, n_terms)``.
+    """
+    gram = Phi.T @ Phi
+    if ridge > 0:
+        gram = gram + ridge * jnp.eye(gram.shape[0], dtype=gram.dtype)
+    return jnp.linalg.cholesky(gram)
+
+
+def hat_diagonal(Phi: Array, gram_chol: Array) -> Array:
+    """Hat-matrix diagonal (leverage) of a design block, from a Cholesky factor.
+
+    This is the single definition of PCE leverage. Both the single-pass fit
+    and the row-streamed fit call it, so the two paths cannot drift apart.
+
+    With ``Phi^T Phi + ridge*I = L L^T``, the leverage of row ``i`` is
+
+        ``h_i = phi_i (L L^T)^{-1} phi_i^T = || L^{-1} phi_i ||^2``
+
+    so one triangular solve gives every ``h_i``. The Gram matrix is never
+    inverted. That matters here: the default ridge is ``1e-8`` and PCE Gram
+    matrices lose conditioning quickly as the polynomial order rises, so an
+    explicit inverse would square an already large condition number, and a
+    degraded leverage feeds straight back into automatic order selection.
+    The triangular solve keeps the error at the level of the factorization
+    itself, and ``h_i`` comes out as a sum of squares, hence non-negative by
+    construction.
+
+    Args:
+        Phi: Design matrix or row block, shape ``(b, n_terms)``.
+        gram_chol: Lower-triangular Cholesky factor of the regularized Gram
+            matrix, shape ``(n_terms, n_terms)``.
+
+    Returns:
+        Leverage per row, shape ``(b,)``, clipped to ``[0, 1 - 1e-10]``. The
+        upper clip keeps ``1 - h_i`` away from zero: a row the fit
+        interpolates exactly has ``h_i = 1``, which would divide by zero.
+    """
+    # (n_terms, b): solve L Z = Phi^T, then h_i = sum_j Z[j, i]^2.
+    Z = solve_triangular(gram_chol, Phi.T, lower=True)
+    leverage = jnp.sum(Z * Z, axis=0)
+    return jnp.clip(leverage, 0.0, 1.0 - 1e-10)
+
+
 def loo_error(
     Phi: Array,
     Y: Array,
     coefficients: Array,
     ridge: float = 0.0,
-    gram_inv_PhiT: Array | None = None,
+    gram_chol: Array | None = None,
 ) -> Array:
     """Efficient leave-one-out cross-validation error from the hat matrix.
 
@@ -209,7 +262,7 @@ def loo_error(
 
     The leverage ``H_ii`` depends only on ``Phi``, so a single hat-matrix
     diagonal serves every output slice; residuals broadcast over trailing
-    slice columns.
+    slice columns. :func:`hat_diagonal` computes it.
 
     Args:
         Phi: Design matrix, shape ``(N, n_terms)``.
@@ -218,24 +271,20 @@ def loo_error(
         coefficients: Fitted coefficients, shape ``(n_terms,)`` or
             ``(n_terms, M)``.
         ridge: Tikhonov parameter used during fitting.
-        gram_inv_PhiT: Pre-computed ``(Phi^T Phi + ridge*I)^{-1} Phi^T``.
-            If provided, avoids recomputing the Gram factorization.
+        gram_chol: Pre-computed lower-triangular Cholesky factor of
+            ``Phi^T Phi + ridge*I``, shape ``(n_terms, n_terms)``. Pass it to
+            reuse a factorization the caller already holds. It is the small
+            factor, not an ``(n_terms, N)`` product, so reuse costs no memory
+            that scales with ``N``.
 
     Returns:
         Scalar LOO RMSE for 1-D ``Y``, or per-slice LOO RMSE of shape
         ``(M,)`` for 2-D ``Y``.
     """
     residuals = Y - Phi @ coefficients  # (N,) or (N, M)
-    if gram_inv_PhiT is None:
-        gram = Phi.T @ Phi
-        if ridge > 0:
-            gram = gram + ridge * jnp.eye(gram.shape[0])
-        gram_inv_PhiT = jnp.linalg.solve(gram, Phi.T)
-    # H_ii without forming the full N x N hat matrix: diag(Phi @ gram_inv_PhiT).
-    leverage = jnp.sum(Phi * gram_inv_PhiT.T, axis=1)
-    # A leverage of exactly 1 (interpolated point) would divide by zero below.
-    leverage = jnp.clip(leverage, 0.0, 1.0 - 1e-10)
-    denom = 1.0 - leverage
+    if gram_chol is None:
+        gram_chol = gram_cholesky(Phi, ridge)
+    denom = 1.0 - hat_diagonal(Phi, gram_chol)
     if residuals.ndim == 2:
         denom = denom[:, None]  # broadcast the shared leverage over slices
     loo_residuals = residuals / denom

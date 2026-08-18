@@ -8,6 +8,7 @@ import pytest
 
 from jaxgsa.benchmarks import ishigami, linear, sobol_g
 from jaxgsa.hsic import analyze
+from jaxgsa.hsic._analyze import _build_one_kernel, _median_bandwidth_sq
 from jaxgsa.problem import GaussianInputSpec, Problem
 from jaxgsa.sampling import monte_carlo
 
@@ -182,8 +183,60 @@ class TestPrenormalize:
         assert result.R2_HSIC.shape == (2,)
 
 
+class TestMedianBandwidth:
+    """The median heuristic reads the median of the off-diagonal distances."""
+
+    @pytest.mark.parametrize("n", [4, 5, 6, 7, 8, 9, 16, 17, 65, 128, 257])
+    def test_quantile_equals_upper_triangle_median(self, n):
+        """Tier T1 (reference implementation): the index-adjusted quantile.
+
+        The oracle is ``jnp.median(dists_sq[jnp.triu_indices(n, k=1)])``: the
+        previous implementation of the median heuristic, re-expressed here as
+        an explicit strict-upper-triangle median. That is a reference
+        implementation, not a closed form, so this is T1 and not T0. It is
+        still the strongest check in this file: it computes the same quantity
+        a completely different way, over eleven sample sizes.
+
+        The bandwidth is defined as the median of the ``(N^2 - N) / 2`` strict
+        upper-triangle squared distances. ``_median_bandwidth_sq`` reaches it
+        with a quantile of the full matrix instead, so the two must agree.
+        ``jnp.quantile`` and ``jnp.median`` can round differently at an even
+        element count, hence a relative tolerance and not exact equality. The
+        parametrisation covers both parities of ``(N^2 - N) / 2`` and the
+        smallest N the analyzer accepts.
+        """
+        x = jnp.asarray(np.random.default_rng(n).normal(size=n))
+        dists_sq = (x[:, None] - x[None, :]) ** 2
+        reference = jnp.median(dists_sq[jnp.triu_indices(n, k=1)])
+        np.testing.assert_allclose(float(_median_bandwidth_sq(x)), float(reference), rtol=1e-6)
+
+    def test_diagonal_zeros_would_bias_a_plain_median(self):
+        """Tier T4 (internal consistency): the index adjustment does work.
+
+        This test bites: a plain median of the full matrix includes the N
+        diagonal zeros and returns a smaller bandwidth. If the quantile
+        position were dropped to 0.5, the test above would fail.
+        """
+        x = jnp.asarray(np.random.default_rng(0).normal(size=65))
+        dists_sq = (x[:, None] - x[None, :]) ** 2
+        assert float(jnp.median(dists_sq)) < 0.99 * float(_median_bandwidth_sq(x))
+
+    def test_fixed_bandwidth_is_squared_once(self):
+        """Tier T0 (closed form): a fixed sigma yields exp(-d^2 / 2 sigma^2)."""
+        x = jnp.asarray([0.0, 1.0, 2.0])
+        K = _build_one_kernel(x, 0.5, None)
+        expected = np.exp(-np.array([0.0, 1.0, 4.0]) / (2.0 * 0.25))
+        np.testing.assert_allclose(np.asarray(K[0]), expected, rtol=1e-6)
+
+
 class TestChunked:
     def test_chunked_matches_unchunked(self):
+        """Tier T4 (internal consistency): row blocking changes no index.
+
+        Both paths now resolve one squared bandwidth and then evaluate the same
+        elementwise expression, so the kernels agree to floating-point noise
+        rather than to the loose tolerance the two old median forms needed.
+        """
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
         X = monte_carlo(problem, n=512, seed=13)
         Xj = jnp.asarray(X)
@@ -193,13 +246,46 @@ class TestChunked:
         np.testing.assert_allclose(
             np.asarray(r_full.R2_HSIC),
             np.asarray(r_chunked.R2_HSIC),
-            atol=1e-4,
+            rtol=1e-6,
         )
         np.testing.assert_allclose(
             np.asarray(r_full.T_HSIC),
             np.asarray(r_chunked.T_HSIC),
-            atol=1e-4,
+            rtol=1e-6,
         )
+
+    def test_chunked_matches_unchunked_with_explicit_bandwidth(self):
+        """Tier T4 (internal consistency): chunking is bandwidth-independent.
+
+        The kernel build used to be a two-by-two dispatch: {median, fixed}
+        bandwidth x {whole, chunked} matrix. The other three combinations are
+        covered elsewhere in this file; this pins the fourth. Bandwidth
+        resolution now happens once, before either kernel path runs, so the
+        two questions are independent — and this test is what says so. An
+        explicit ``bandwidth`` skips the median heuristic entirely, so any
+        difference here would come from the row blocking alone.
+        """
+        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
+        X = monte_carlo(problem, n=512, seed=13)
+        Xj = jnp.asarray(X)
+        Y = linear.evaluate(Xj)
+        r_full = analyze(problem, Xj, Y, n_perms=50, seed=13, bandwidth=0.3)
+        r_chunked = analyze(problem, Xj, Y, n_perms=50, seed=13, bandwidth=0.3, batch_size=128)
+        np.testing.assert_allclose(
+            np.asarray(r_full.R2_HSIC),
+            np.asarray(r_chunked.R2_HSIC),
+            rtol=1e-6,
+        )
+        np.testing.assert_allclose(
+            np.asarray(r_full.T_HSIC),
+            np.asarray(r_chunked.T_HSIC),
+            rtol=1e-6,
+        )
+        # The explicit bandwidth must actually be in force: the median
+        # heuristic on this data gives different indices, so a chunked path
+        # that ignored `bandwidth` would still pass the equality above.
+        r_median = analyze(problem, Xj, Y, n_perms=50, seed=13, batch_size=128)
+        assert not np.allclose(np.asarray(r_chunked.R2_HSIC), np.asarray(r_median.R2_HSIC))
 
 
 class TestReproducibility:

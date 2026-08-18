@@ -97,6 +97,14 @@ class _ConditionalPlan(NamedTuple):
         chol_marginal: ``(D, D - 1, D - 1)`` Cholesky factor of ``R[-i, -i]``,
             for drawing the ``Z_-i`` outer sample of the total-uncorrelated
             index.
+        chol_full: ``(D, D)`` Cholesky factor of the full correlation matrix
+            ``R`` the plan was built from, for drawing the joint latent
+            sample. It travels with the plan so a caller cannot pair the
+            conditionals of one matrix with the joint factor of another.
+
+    Note:
+        Append new fields, never insert them. This is a NamedTuple, so a new
+        field in the middle silently re-maps every positional read of it.
     """
 
     others: np.ndarray
@@ -105,6 +113,7 @@ class _ConditionalPlan(NamedTuple):
     beta_self: np.ndarray
     std_self: np.ndarray
     chol_marginal: np.ndarray
+    chol_full: np.ndarray
 
 
 def independent_correlation(n_params: int) -> np.ndarray:
@@ -559,6 +568,7 @@ def build_conditional_plan(R: np.ndarray) -> _ConditionalPlan:
         beta_self=beta_self,
         std_self=std_self,
         chol_marginal=chol_marginal,
+        chol_full=_safe_cholesky(R),
     )
 
 

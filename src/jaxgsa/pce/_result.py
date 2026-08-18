@@ -61,6 +61,14 @@ class PCEResult(SurrogateResult):
             and NaN for constant (zero-variance) slices. Values well below 1
             mean the surrogate misses variance. Values above 1 mean it
             attributes more variance than the data holds (overfit).
+        streamed: True when the fit ran the row-streamed path, False when it
+            ran in one pass. Both paths solve the same normal equations and
+            report the same leave-one-out error; they differ only in float32
+            summation order and in peak memory. The streamed path engages
+            when ``batch_size`` is an explicit int, or when the one-pass fit
+            would exceed the memory budget (see
+            :func:`jaxgsa.config.set_memory_budget`). Read it when a fit takes
+            much longer than expected: True means the budget engaged.
     """
 
     S1: Array
@@ -72,6 +80,7 @@ class PCEResult(SurrogateResult):
     order: int
     loo_rmse: Array | None = None
     explained_variance: Array | None = None
+    streamed: bool = False
 
     def _predict_plan(self, X: Array) -> _PredictPlan:
         """Plan a batched evaluation of the fitted expansion at ``X``.

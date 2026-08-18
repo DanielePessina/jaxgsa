@@ -724,6 +724,41 @@ class TestDegenerateBandwidthIsNotAPrecondition:
         np.testing.assert_allclose(np.asarray(at_step.delta), np.asarray(auto.delta), rtol=1e-4)
         assert not np.allclose(np.asarray(half_step.delta), np.asarray(auto.delta), rtol=1e-4)
 
+    def test_auto_floor_still_aliases_under_a_tiny_bandwidth_factor(self, degenerate_class_data):
+        """Tier T4. The ``"auto"`` floor can alias when something else does.
+
+        The ``"auto"`` floor is ``max(0.1 * h_full, grid_step)``, so it is
+        never narrower than one grid step and cannot alias on its own.
+        A second cause can still push delta out of ``[0, 1]``. A tiny
+        ``bandwidth`` factor shrinks the full-sample bandwidth far below
+        the grid step, so the *unconditional* density is a spike the grid
+        cannot integrate, while the point-mass class is floored as usual.
+
+        The message must then quote the floor it really applied, which is
+        one grid step here, and name ``grid_size`` alone. It must not
+        point at ``degenerate_bandwidth``, which is not the knob in this
+        branch. Raising ``grid_size`` must also actually fix the run,
+        which the last block checks.
+        """
+        problem, X, Y = degenerate_class_data
+        y = np.asarray(Y, dtype=np.float32)
+        one_step = float((y.max() - y.min()) / 99)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(ValueError, match=r"delta is a half L1 distance") as excinfo:
+                analyze(problem, X, Y, n_bootstrap=0, bandwidth=1e-3)
+        message = str(excinfo.value)
+        assert "max(0.1 * h_full, grid_step)" in message
+        assert f"grid_step) = {one_step:.3g}" in message
+        assert "at least one grid step wide" in message
+        assert "grid_size (currently 100)" in message
+        assert "Raise degenerate_bandwidth" not in message
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            fixed = analyze(problem, X, Y, n_bootstrap=0, bandwidth=1e-3, grid_size=400)
+        assert np.all(np.asarray(fixed.delta) >= 0.0)
+        assert np.all(np.asarray(fixed.delta) <= 1.0)
+
     def test_constant_column_is_exempt(self, ishigami_data):
         """Tier T4. A constant column has no density to integrate.
 

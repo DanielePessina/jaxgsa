@@ -227,7 +227,6 @@ def analyze_vkoga(
     predict = _make_unit_predictor(state, y_mean, batch_size)
     indices = estimate_correlated_indices(
         plan=build_conditional_plan(R),
-        chol_full=np.linalg.cholesky(R),
         predict=predict,
         n_outer=n_outer,
         n_inner=n_inner,

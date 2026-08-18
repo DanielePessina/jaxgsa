@@ -23,6 +23,7 @@ from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.pce._engine import (
     build_design_matrix,
     build_multi_index,
+    hat_diagonal,
     loo_error,
     sobol_from_coefficients,
 )
@@ -166,6 +167,7 @@ class _PCEFit(NamedTuple):
     loo_flat: Array  # (T*K,) per-slice LOO RMSE
     squeeze_time: bool
     squeeze_output: bool
+    streamed: bool  # True when the row-streamed fit path ran
 
 
 def _fit_pce_streamed(
@@ -186,11 +188,13 @@ def _fit_pce_streamed(
        (n_terms, T*K), then solve ``(G + ridge*I) c = B`` once. This is
        mathematically identical to the single-pass normal equations. Only
        the float32 summation order differs.
-    2. With ``(G + ridge*I)^{-1}`` known, rebuild each design block to get
-       the hat-matrix diagonal ``h_i = phi_i G^{-1} phi_i^T`` and per-row
-       residuals, accumulating the exact LOO sum of squares as defined by
-       :func:`jaxgsa.pce._engine.loo_error` (same leverage clip, same
-       ``mean`` over rows).
+    2. With the Cholesky factor of ``G + ridge*I`` known, rebuild each design
+       block, get its hat-matrix diagonal from
+       :func:`jaxgsa.pce._engine.hat_diagonal` and its per-row residuals, and
+       accumulate the exact LOO sum of squares as defined by
+       :func:`jaxgsa.pce._engine.loo_error`. Both paths call the same leverage
+       function, so they cannot disagree about the clip or the formula; only
+       the ``mean`` over rows is re-derived here, from the accumulated sum.
 
     Args:
         X_ref: Inputs already mapped to the reference domain, shape
@@ -212,8 +216,8 @@ def _fit_pce_streamed(
     M = Y_flat.shape[1]
     dtype = jnp.result_type(X_ref.dtype, Y_flat.dtype)
 
-    # Per-row transient cost mirrors _single_pass_fit_bytes: 3*n_terms floats
-    # for the design-block running product plus 2*M for the residual arrays.
+    # Per-row transient cost of one batch: 3*n_terms floats for the
+    # design-block running product plus 2*M for the residual arrays.
     bytes_per_row = jnp.dtype(dtype).itemsize * (3 * n_terms + 2 * M)
     b = resolve_batch_size(bytes_per_row, N, batch_size)
 
@@ -227,19 +231,16 @@ def _fit_pce_streamed(
     gram = G + ridge * jnp.eye(n_terms, dtype=dtype)
     coeffs_flat = jnp.linalg.solve(gram, B)  # (n_terms, M)
 
-    # Pass 2: exact LOO from the hat-matrix diagonal, streamed. gram is
-    # symmetric, so h_i = phi_i gram^{-1} phi_i^T = sum(Phi_b * (Phi_b @
-    # gram_inv), axis=1) reproduces loo_error's diag(Phi @ gram_inv_PhiT).
-    gram_inv = jnp.linalg.inv(gram)
+    # Pass 2: exact LOO from the hat-matrix diagonal, streamed. The leverage
+    # comes from the shared hat_diagonal helper, which only needs the small
+    # (n_terms, n_terms) Cholesky factor, so this path holds nothing that
+    # scales with N and applies the same clip as the single-pass path.
+    gram_chol = jnp.linalg.cholesky(gram)
     sse = jnp.zeros((M,), dtype=dtype)
     for i in range(0, N, b):
         Phi_b = build_design_matrix(X_ref[i : i + b], multi_index, input_types, order)
         residuals = Y_flat[i : i + b] - Phi_b @ coeffs_flat  # (b, M)
-        leverage = jnp.sum(Phi_b * (Phi_b @ gram_inv), axis=1)  # (b,)
-        # Same interpolation guard as loo_error: a leverage of exactly 1
-        # would divide by zero.
-        leverage = jnp.clip(leverage, 0.0, 1.0 - 1e-10)
-        loo_residuals = residuals / (1.0 - leverage)[:, None]
+        loo_residuals = residuals / (1.0 - hat_diagonal(Phi_b, gram_chol))[:, None]
         sse = sse + jnp.sum(loo_residuals**2, axis=0)
     loo_flat = jnp.sqrt(sse / N)  # == sqrt(mean(loo_residuals^2, axis=0))
 
@@ -249,18 +250,39 @@ def _fit_pce_streamed(
 def _single_pass_fit_bytes(N: int, n_terms: int, M: int, itemsize: int) -> int:
     """Estimate the resident bytes of the single-pass PCE fit path.
 
-    Derived from the arrays the single-pass code actually materializes:
+    Derived from the arrays the single-pass code actually materializes. At the
+    peak, which is inside the leave-one-out step, three (N, n_terms) arrays are
+    resident at once:
 
-    - ``build_design_matrix`` keeps ~3 (N, n_terms) arrays live at its peak
-      (running-product accumulator, one gathered factor, multiply output);
-      the same count recurs at ``loo_error``'s leverage step, where ``Phi``,
-      ``gram_inv_PhiT``, and its transpose coexist -> ``3 * N * n_terms``.
-    - ``loo_error`` materializes the (N, M) prediction ``Phi @ coefficients``
-      / residuals and the (N, M) ``loo_residuals`` -> ``2 * N * M``.
+    - ``Phi``, the design matrix.
+    - ``gram_inv_PhiT``, the ``(n_terms, N)`` product the coefficient solve
+      builds. It is still a live local while ``loo_error`` runs, because the
+      caller holds it for the coefficient step that precedes it.
+    - the triangular-solve result inside
+      :func:`jaxgsa.pce._engine.hat_diagonal`.
+
+    Plus the (N, M) prediction and residual arrays ``loo_error`` materializes,
+    for ``2 * N * M``.
+
+    ``build_design_matrix`` also peaks at ~3 (N, n_terms) transients in an
+    earlier phase, but that phase ends before ``Y`` is touched, so it does not
+    add to this one.
 
     ``Y`` itself and the (n_terms, n_terms) Gram matrix are excluded: the
     caller holds Y either way, and the Gram factors are negligible next to
     the N-sized arrays.
+
+    Note:
+        An audit read the three ``n_terms`` terms as charging for an array the
+        Cholesky rewrite had removed, and asked for two. That was wrong, and
+        measurement settled it: the rewrite removed a *transpose* inside the
+        leave-one-out step, not ``gram_inv_PhiT``, which the coefficient solve
+        still needs and still holds. Counting live arrays during a real fit
+        (N=4000, n_terms=35) gives 3.16 times ``N * n_terms``, not 2. Charging
+        two would under-estimate the peak by up to a quarter and let a fit run
+        in one pass that does not fit — on the multi-output case, where
+        ``M`` is near ``n_terms / 2``, the under-count is worst. The term count
+        stays at three.
 
     Args:
         N: Number of sample rows.
@@ -320,7 +342,8 @@ def _fit_pce_core(
     Y_flat = Y_3d.reshape(N, T * K)  # column t*K + k is slice (t, k)
 
     single_pass_bytes = _single_pass_fit_bytes(N, n_terms, T * K, X_ref.dtype.itemsize)
-    if batch_size is None and single_pass_bytes <= get_memory_budget():
+    streamed = not (batch_size is None and single_pass_bytes <= get_memory_budget())
+    if not streamed:
         # Single-pass path: build the full design matrix and compute the Gram
         # factorization once, reused for both fitting and LOO.
         Phi = build_design_matrix(X_ref, mi, input_types, effective_order)
@@ -330,8 +353,11 @@ def _fit_pce_core(
         # depends only on N and D), so fitting all T*K slices is ONE shared
         # solve with multiple right-hand sides: a single vectorized matmul.
         coeffs_flat = gram_inv_PhiT @ Y_flat  # (n_terms, T*K)
-        # Per-slice LOO RMSE from the shared hat-matrix leverage.
-        loo_flat = loo_error(Phi, Y_flat, coeffs_flat, gram_inv_PhiT=gram_inv_PhiT)
+        # Per-slice LOO RMSE from the shared hat-matrix leverage. Pass the
+        # small Cholesky factor of the Gram matrix already built above, so
+        # loo_error reuses the factorization without carrying anything that
+        # scales with N.
+        loo_flat = loo_error(Phi, Y_flat, coeffs_flat, gram_chol=jnp.linalg.cholesky(gram))
     else:
         # Streamed path: same normal equations and exact LOO, accumulated
         # over row batches so peak memory stays within the budget.
@@ -348,6 +374,7 @@ def _fit_pce_core(
         loo_flat=loo_flat,
         squeeze_time=squeeze_time,
         squeeze_output=squeeze_output,
+        streamed=streamed,
     )
 
 
@@ -473,6 +500,7 @@ def analyze_pce(
         order=fit.order,
         loo_rmse=loo,
         explained_variance=explained_variance,
+        streamed=fit.streamed,
     )
 
 

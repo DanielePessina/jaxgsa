@@ -164,7 +164,6 @@ def sample(
     if R is None:
         R = independent_correlation(D)
     plan = build_conditional_plan(R)
-    chol_full = np.linalg.cholesky(R)
 
     # One scrambled Sobol' block of dimension 2D: the first D columns drive
     # the joint sample, the last D the conditional redraws. Pairing them
@@ -172,7 +171,7 @@ def sample(
     draws = latent_normal_sample(n, 2 * D, seed=seed, scramble=scramble)
     base = draws[:, :D]
     redraw = draws[:, D:]
-    Z_joint = base @ chol_full.T
+    Z_joint = base @ plan.chol_full.T
 
     blocks = [Z_joint]
     # First-order blocks: keep Z_i, redraw the rest from p(z_rest | z_i).

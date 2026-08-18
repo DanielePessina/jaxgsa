@@ -107,17 +107,60 @@ is 512 MiB. The batched places are:
 - the streaming fits of `jaxgsa.pce.analyze` and `jaxgsa.hdmr.analyze`, which
   engage automatically when the single-pass fit would exceed the budget.
 
-`jaxgsa.config.set_memory_budget(...)` adjusts it globally:
+`jaxgsa.config.set_memory_budget(...)` adjusts it globally. The value is read
+in megabytes unless you say otherwise:
 
 ```python
 import jaxgsa
 
-jaxgsa.config.set_memory_budget(256 * 1024**2)  # 256 MiB
-jaxgsa.config.get_memory_budget()               # -> 268435456
+jaxgsa.config.set_memory_budget(256)             # 256 MiB
+jaxgsa.config.get_memory_budget()                # -> 268435456 (bytes)
+jaxgsa.config.get_memory_budget(unit="mb")       # -> 256.0
 ```
 
 Lower the budget on memory-constrained devices, which gives more and smaller
 batches. Raise it when you have headroom and want fewer, larger batches.
+
+### Units
+
+Pass `unit=` to use another unit:
+
+```python
+jaxgsa.config.set_memory_budget(1.5, unit="gb")  # 1.5 GiB
+jaxgsa.config.set_memory_budget(65536, unit="b") # 64 KiB, counted in bytes
+```
+
+| `unit` | Bytes in one |
+| --- | --- |
+| `b`, `bytes` | 1 |
+| `kb`, `kib` | 1024 |
+| `mb`, `mib` | 1 048 576 (1024²) |
+| `gb`, `gib` | 1 073 741 824 (1024³) |
+| `tb`, `tib` | 1 099 511 627 776 (1024⁴) |
+
+All units are binary. `mb` means 1024², not 1000², because memory is
+conventionally counted in binary units. `mib` is an exact synonym of `mb`, and
+the same holds for the other pairs. Unit names ignore case and surrounding
+whitespace, so `"MB"`, `" mb "` and `"Mb"` are one unit. An unknown name raises
+a `ValueError` that lists the accepted names.
+
+The value may be an `int` or a `float`. It must be positive and finite. The
+resolved byte count is rounded to the nearest whole byte and must be at least
+one byte.
+
+`get_memory_budget()` still returns **bytes** by default. That asymmetry is
+deliberate. Silently changing what it returns would break arithmetic in
+existing code without any error. Pass `unit=` when you want another unit; you
+then get a `float`, because the budget need not be a whole number of them.
+
+> [!WARNING]
+> **Before jaxgsa 0.9 this function took bytes.** An old call such as
+> `set_memory_budget(536870912)` would now mean 512 TB, not 512 MiB. To stop
+> that going unnoticed, a call that leaves out `unit` and passes 1 048 576 or
+> more raises a `ValueError` and shows both ways to say what you probably
+> meant. That threshold is 1 TiB when read as MB, which no real batching budget
+> reaches, so it never blocks a genuine large figure such as
+> `set_memory_budget(64000)` (62.5 GiB). An explicit `unit=` skips the check.
 
 Like the other settings on this page, the budget is opt-in. Nothing changes
 until you call `set_memory_budget`, and the new value affects

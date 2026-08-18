@@ -9,6 +9,7 @@ import itertools
 import math
 from collections.abc import Callable
 from functools import lru_cache
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -38,8 +39,47 @@ from jaxgsa.hdmr._stream import _fit_hdmr_streamed, _full_fit_bytes
 from jaxgsa.problem import Problem
 
 
+class _HDMRStaticData(NamedTuple):
+    """Term metadata and basis index tables for one ``(D, maxorder, m)``.
+
+    Every field is host-side and shared by all output slices. The names
+    matter: the values used to travel as a bare twelve-tuple unpacked
+    positionally at three call sites, two of them with blind placeholders, so
+    reordering the fields produced silently wrong indices instead of an error.
+
+    Attributes:
+        c1: First-order parameter indices, one per dimension.
+        c2: Second-order parameter index pairs, empty below ``maxorder=2``.
+        c3: Third-order parameter index triples, empty below ``maxorder=3``.
+        n1: Number of first-order terms (``= D``).
+        n2: Number of second-order terms.
+        n3: Number of third-order terms.
+        n: Total number of terms, ``n1 + n2 + n3``.
+        m1: Number of B-spline basis functions per dimension, ``m + 3``.
+        m2: Tensor-product basis size of a second-order term, ``m1 ** 2``.
+        m3: Tensor-product basis size of a third-order term, ``m1 ** 3``.
+        beta2: Flat index -> ``(i, j)`` lookup for the order-2 tensor
+            product, shape ``(m2, 2)``.
+        beta3: Flat index -> ``(i, j, k)`` lookup for the order-3 tensor
+            product, shape ``(m3, 3)``.
+    """
+
+    c1: tuple[int, ...]
+    c2: tuple[tuple[int, int], ...]
+    c3: tuple[tuple[int, int, int], ...]
+    n1: int
+    n2: int
+    n3: int
+    n: int
+    m1: int
+    m2: int
+    m3: int
+    beta2: np.ndarray
+    beta3: np.ndarray
+
+
 @lru_cache(maxsize=None)
-def _get_hdmr_static_data(D: int, maxorder: int, m: int) -> tuple:
+def _get_hdmr_static_data(D: int, maxorder: int, m: int) -> _HDMRStaticData:
     """Build and cache the HDMR term metadata and basis index tables (host side)."""
     # Enumerate all parameter index combinations up to maxorder.
     # c1: single dimensions, c2: pairs, c3: triples.
@@ -69,7 +109,7 @@ def _get_hdmr_static_data(D: int, maxorder: int, m: int) -> tuple:
         if n3 > 0
         else np.zeros((0, 3), dtype=np.int32)
     )
-    return c1, c2, c3, n1, n2, n3, n, m1, m2, m3, beta2, beta3
+    return _HDMRStaticData(c1, c2, c3, n1, n2, n3, n, m1, m2, m3, beta2, beta3)
 
 
 @lru_cache(maxsize=None)
@@ -85,17 +125,17 @@ def _get_batched_hdmr_kernel(
     # Caching by (D, maxorder, m, maxiter, lambdax, N) avoids re-tracing the
     # JIT+vmap wrapper when analyze_hdmr is called repeatedly with the same
     # structural parameters but different data.
-    _, _, _, n1, n2, n3, n, m1, m2, m3, _, _ = _get_hdmr_static_data(D, maxorder, m)
+    sd = _get_hdmr_static_data(D, maxorder, m)
     kernel = _make_hdmr_kernel(
         maxorder,
-        m1,
-        n1,
+        sd.m1,
+        sd.n1,
         maxiter,
-        m2,
-        m3,
-        n2,
-        n3,
-        n,
+        sd.m2,
+        sd.m3,
+        sd.n2,
+        sd.n3,
+        sd.n,
         lambdax,
         N,
     )
@@ -406,11 +446,11 @@ def _analyze_hdmr_core(
     lambdax = float(lambdax)
 
     # Build term metadata (cached on host; only computed once per D/maxorder/m).
-    c1, c2, c3, n1, n2, n3, n, m1, m2, m3, beta2_host, beta3_host = _get_hdmr_static_data(
-        D,
-        maxorder,
-        m,
-    )
+    static = _get_hdmr_static_data(D, maxorder, m)
+    c1, c2, c3 = static.c1, static.c2, static.c3
+    n1, n2, n3, n = static.n1, static.n2, static.n3, static.n
+    m1, m2, m3 = static.m1, static.m2, static.m3
+    beta2_host, beta3_host = static.beta2, static.beta3
     term_labels = _build_term_labels(problem, c1, c2, c3)
     # Transfer index tables to device; empty arrays for inactive orders.
     c2_idx = jnp.asarray(c2, dtype=int) if n2 > 0 else jnp.zeros((0, 2), dtype=int)
@@ -444,7 +484,8 @@ def _analyze_hdmr_core(
     # batch_size, or when the in-memory fit's resident footprint (full-N
     # bases + one lane's kernel transients) would exceed the memory budget.
     full_bytes = _full_fit_bytes(N, D, m1, m2, m3, n1, n2, n3, n, Y_3d.dtype.itemsize)
-    if batch_size is not None or full_bytes > get_memory_budget():
+    streamed = batch_size is not None or full_bytes > get_memory_budget()
+    if streamed:
         # (N, T, K) -> (N, T*K): keep the sample axis leading so row batches
         # are contiguous slices; column t*K + k is output slice (t, k).
         Y_nl = Y_3d.reshape(N, total)
@@ -617,6 +658,7 @@ def _analyze_hdmr_core(
         # RMSE is computed on the standardized scale inside the kernel;
         # multiply by y_std to report it on the original output scale.
         rmse=_reshape_emulator_value(rmse_cat, T, K_out, squeeze_time, squeeze_output) * y_std_out,
+        streamed=streamed,
         _c2=tuple(c2),
         _c3=tuple(c3),
     )
@@ -686,9 +728,8 @@ def _hdmr_predict_plan(result: HDMRResult, X_new: Array) -> _PredictPlan:
     higher_orders: list[tuple[Callable[[Array, Array, Array], Array], Array, Array, Array]] = []
     elems_per_row = m1 * D + slices * D
     if maxorder >= 2:
-        *_, beta2_host, beta3_host = _get_hdmr_static_data(
-            result.problem.num_vars, maxorder, em["m"]
-        )
+        static = _get_hdmr_static_data(result.problem.num_vars, maxorder, em["m"])
+        beta2_host, beta3_host = static.beta2, static.beta3
         C2 = em["C2"]
         if C2 is not None:
             c2 = jnp.asarray(result._c2, dtype=int)

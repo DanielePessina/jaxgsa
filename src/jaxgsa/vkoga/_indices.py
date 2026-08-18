@@ -110,7 +110,6 @@ class CorrelatedIndices(NamedTuple):
 def estimate_correlated_indices(
     *,
     plan: _ConditionalPlan,
-    chol_full: np.ndarray,
     predict: Callable[[np.ndarray], np.ndarray],
     n_outer: int,
     n_inner: int,
@@ -126,9 +125,10 @@ def estimate_correlated_indices(
 
     Args:
         plan: Precomputed Gaussian conditionals from
-            :func:`jaxgsa._core.copula.build_conditional_plan`.
-        chol_full: Cholesky factor of the copula correlation matrix, shape
-            ``(D, D)``. Used for the unconditional variance sample.
+            :func:`jaxgsa._core.copula.build_conditional_plan`. Its
+            ``chol_full`` field supplies the joint factor for the
+            unconditional variance sample, so the conditionals and the joint
+            draw always come from the same correlation matrix.
         predict: Fitted surrogate. It maps ``(n, D)`` unit-cube samples to
             ``(n, S)`` outputs.
         n_outer: Outer (conditioning) sample size per parameter.
@@ -140,10 +140,10 @@ def estimate_correlated_indices(
     Returns:
         A :class:`CorrelatedIndices` whose index arrays have shape ``(S, D)``.
     """
-    D = chol_full.shape[0]
+    D = plan.chol_full.shape[0]
 
     # --- Unconditional variance, and the additive component functions --------
-    Z_var = latent_normal_sample(n_variance, D, seed=seed) @ chol_full.T
+    Z_var = latent_normal_sample(n_variance, D, seed=seed) @ plan.chol_full.T
     U_var = norm.cdf(Z_var)
     Y_var = np.asarray(predict(U_var), dtype=np.float64)
     variance = Y_var.var(axis=0)

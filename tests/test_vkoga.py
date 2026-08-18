@@ -754,3 +754,31 @@ def test_determinism_by_seed():
     # A different quasi-random stream moves the estimates, but not by much.
     assert not np.allclose(np.asarray(first.S_TC), np.asarray(other.S_TC), atol=1e-6)
     np.testing.assert_allclose(np.asarray(first.S_TC), np.asarray(other.S_TC), atol=0.25)
+
+
+def test_estimator_uses_the_factor_on_the_plan():
+    """T4 internal consistency: the joint sample comes from ``plan.chol_full``.
+
+    ``estimate_correlated_indices`` used to take the plan and a Cholesky
+    factor as two unlinked arguments, and read the parameter count from one
+    and the index geometry from the other. A mismatched pair gave wrong
+    indices rather than an error. The factor is now a field of the plan, so
+    the two cannot disagree: replacing the field must move the result.
+    """
+    from jaxgsa._core.copula import build_conditional_plan
+    from jaxgsa.vkoga._indices import estimate_correlated_indices
+
+    R_pair = np.array([[1.0, 0.7], [0.7, 1.0]])
+    plan = build_conditional_plan(R_pair)
+
+    def predict(U: np.ndarray) -> np.ndarray:
+        """Smooth, non-additive surrogate on the unit cube."""
+        return (U[:, 0] + 2.0 * U[:, 1] + U[:, 0] * U[:, 1])[:, None]
+
+    kwargs = dict(predict=predict, n_outer=64, n_inner=64, n_variance=256, seed=3)
+    baseline = estimate_correlated_indices(plan=plan, **kwargs)
+    # Only the joint factor changes; every conditional field is untouched.
+    perturbed = estimate_correlated_indices(plan=plan._replace(chol_full=np.eye(2)), **kwargs)
+
+    assert not np.allclose(baseline.variance, perturbed.variance)
+    assert not np.allclose(baseline.S_TC, perturbed.S_TC)

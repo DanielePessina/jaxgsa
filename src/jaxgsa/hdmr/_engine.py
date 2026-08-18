@@ -358,6 +358,56 @@ def _compute_f_crits(alpha: float, m1: int, m2: int, m3: int, R: int) -> Array:
     return jnp.array(crits)
 
 
+def term_order_map(
+    n: int,
+    n1: int,
+    n2: int,
+    m1: int,
+    m2: int,
+    m3: int,
+    f_crits: Array,
+) -> tuple[Array, Array, Array]:
+    """Map every HDMR term to the interaction order it belongs to.
+
+    Terms are laid out in one flat axis: the ``n1`` single-parameter terms
+    first, then the ``n2`` pairs, then the triples. The F-test needs three
+    per-term lookups derived from that layout, and both the in-memory kernel
+    (:func:`_f_test`) and the row-streamed fit
+    (:func:`jaxgsa.hdmr._stream._fit_hdmr_streamed`) need exactly the same
+    three. This is their single definition: the streamed fit is compared
+    against the in-memory one by exact equality on the selected term set, so
+    the two must agree bit for bit, which a second copy of the expressions
+    cannot guarantee.
+
+    Args:
+        n: Total number of terms.
+        n1: Number of first-order terms.
+        n2: Number of second-order terms.
+        m1: Basis count of a first-order term.
+        m2: Basis count of a second-order term.
+        m3: Basis count of a third-order term.
+        f_crits: Critical F values per order, shape ``(3,)``.
+
+    Returns:
+        Tuple ``(p, f_crit_per_term, order_idx)``, each of shape ``(n,)``:
+        the basis count of each term as float32, its critical F value, and
+        its interaction order as a 0/1/2 index into the null-model tables.
+    """
+    term_idx = jnp.arange(n)
+    p = jnp.where(
+        term_idx < n1,
+        m1,
+        jnp.where(term_idx < n1 + n2, m2, m3),
+    ).astype(jnp.float32)
+    f_crit_per_term = jnp.where(
+        term_idx < n1,
+        f_crits[0],
+        jnp.where(term_idx < n1 + n2, f_crits[1], f_crits[2]),
+    )
+    order_idx = jnp.where(term_idx < n1, 0, jnp.where(term_idx < n1 + n2, 1, 2))
+    return p, f_crit_per_term, order_idx
+
+
 def _f_test(
     Y: Array,
     f0: Array,
@@ -408,18 +458,7 @@ def _f_test(
 
     # Map each term to its order's basis count (p), critical F value, and
     # null-model index so the per-term test below is fully vectorized.
-    term_idx = jnp.arange(n)
-    p1 = jnp.where(
-        term_idx < n1,
-        m1,
-        jnp.where(term_idx < n1 + n2, m2, m3),
-    ).astype(jnp.float32)
-    f_crit_per_term = jnp.where(
-        term_idx < n1,
-        f_crits[0],
-        jnp.where(term_idx < n1 + n2, f_crits[1], f_crits[2]),
-    )
-    order_idx = jnp.where(term_idx < n1, 0, jnp.where(term_idx < n1 + n2, 1, 2))
+    p1, f_crit_per_term, order_idx = term_order_map(n, n1, n2, m1, m2, m3, f_crits)
 
     def _test_term(i: int | Array) -> Array:
         # Compare SSR with vs without term i: large reduction -> significant.

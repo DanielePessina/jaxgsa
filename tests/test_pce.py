@@ -16,6 +16,8 @@ from jaxgsa.pce._engine import (
     _legendre_1d,
     build_design_matrix,
     build_multi_index,
+    gram_cholesky,
+    hat_diagonal,
     sobol_from_coefficients,
 )
 from jaxgsa.problem import GaussianInputSpec, Problem
@@ -355,6 +357,33 @@ class TestLooRmse:
 
         assert result.loo_rmse is not None
         np.testing.assert_allclose(float(result.loo_rmse), brute_force, rtol=2e-3)
+
+    def test_hat_diagonal_matches_explicit_hat_matrix(self):
+        """Tier T0 (closed form): leverage equals the hat matrix's own diagonal.
+
+        ``hat_diagonal`` never forms ``H``. It takes the Cholesky factor ``L``
+        of ``Phi^T Phi + ridge*I`` and returns ``|| L^{-1} phi_i ||^2``. This
+        test builds the full ``N x N`` hat matrix
+        ``H = Phi (Phi^T Phi + ridge*I)^{-1} Phi^T`` in float64 from its
+        definition and reads its diagonal. The two must agree, because they
+        are the same quantity written two ways.
+        """
+        key = jax.random.PRNGKey(11)
+        N, ridge = 90, 1e-8
+        bounds = jnp.array(ishigami.PROBLEM.bounds)
+        X = jax.random.uniform(key, shape=(N, 3), minval=bounds[:, 0], maxval=bounds[:, 1])
+
+        from jaxgsa.pce._analyze import _map_to_reference
+
+        X_ref, input_types = _map_to_reference(X, ishigami.PROBLEM, 3)
+        Phi = build_design_matrix(X_ref, build_multi_index(3, 3), input_types, 3)
+
+        got = np.asarray(hat_diagonal(Phi, gram_cholesky(Phi, ridge)))
+
+        Phi_np = np.asarray(Phi, dtype=np.float64)
+        gram = Phi_np.T @ Phi_np + ridge * np.eye(Phi_np.shape[1])
+        H = Phi_np @ np.linalg.solve(gram, Phi_np.T)
+        np.testing.assert_allclose(got, np.diag(H), rtol=1e-4, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------

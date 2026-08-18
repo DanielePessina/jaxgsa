@@ -113,6 +113,14 @@ class HDMRResult(SurrogateResult):
             term the F-test deems insignificant.
         rmse: Emulator fit RMSE per output slice in the units of ``Y``,
             shape ``()`` / ``(K,)`` / ``(T, K)``, or None.
+        streamed: True when the fit ran the row-streamed path, False when it
+            ran the in-memory path. Both paths fit the same components, pick
+            the same F-test term set, and report the same indices; they differ
+            only in float32 summation order and in peak memory. The streamed
+            path engages when ``batch_size`` is an explicit int, or when the
+            in-memory fit would exceed the memory budget (see
+            :func:`jaxgsa.config.set_memory_budget`). Read it when a fit takes
+            much longer than expected: True means the budget engaged.
         _c2: Private parameter index pairs of the second-order terms, in the
             order they occupy in the ``n_terms`` axis. Empty at
             ``maxorder=1``.
@@ -130,6 +138,7 @@ class HDMRResult(SurrogateResult):
     _fit: _HDMRFit | None = field(default=None, repr=False)
     select: Array | None = None
     rmse: Array | None = None
+    streamed: bool = False
     _c2: tuple[tuple[int, int], ...] = field(default=(), repr=False)
     _c3: tuple[tuple[int, int, int], ...] = field(default=(), repr=False)
 

@@ -158,12 +158,14 @@ through a second pass. Only the floating-point summation order differs. To
 force the streamed path, pass an explicit `batch_size=`.
 
 The budget itself is a new process-global knob. The default is 512 MiB.
+Since 0.9 the value is read in megabytes, and `unit=` takes `"b"`, `"kb"`,
+`"mb"`, `"gb"` or `"tb"`.
 
 ```python
 import jaxgsa
 
-jaxgsa.config.set_memory_budget(256 * 1024**2)  # 256 MiB
-jaxgsa.config.get_memory_budget()               # 268435456
+jaxgsa.config.set_memory_budget(256)  # 256 MiB
+jaxgsa.config.get_memory_budget()     # 268435456, always in bytes
 
 result = jaxgsa.pce.analyze(problem, X, Y, order=4)           # streams if needed
 result = jaxgsa.hdmr.analyze(problem, X, Y, batch_size=8192)  # streaming forced

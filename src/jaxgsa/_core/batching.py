@@ -24,9 +24,13 @@ DEFAULT_EMULATE_BUDGET_BYTES: int = 512 * 1024**2
 # Module-level override for the transient-memory budget, set through
 # ``jaxgsa.config.set_memory_budget``. ``None`` means "use the default"; the
 # getter below is the single read path so every budget consumer (surrogate
-# predict batching, the HDMR slice-chunk derivation, PCE streaming) honours
-# the global override. Per-call parameters (``batch_size``/``slice_chunk_size``)
-# always take precedence over this budget.
+# predict batching, the HDMR and PAWN slice-chunk derivations, PCE and HDMR
+# streaming) honours the global override. Per-call parameters
+# (``batch_size``/``slice_chunk_size``) always take precedence over this budget.
+#
+# The budget is always bytes in here. ``jaxgsa.config.set_memory_budget``
+# accepts a ``unit`` and converts to bytes before it reaches this module, so
+# unit handling lives at the public boundary only.
 _memory_budget_bytes: int | None = None
 
 

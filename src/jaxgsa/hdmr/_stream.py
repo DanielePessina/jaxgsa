@@ -27,7 +27,7 @@ import jax.numpy as jnp
 from jax import Array
 
 from jaxgsa._core.batching import resolve_batch_size
-from jaxgsa.hdmr._engine import _build_B1, _build_B2, _build_B3
+from jaxgsa.hdmr._engine import _build_B1, _build_B2, _build_B3, term_order_map
 
 # ---------------------------------------------------------------------------
 # Memory model
@@ -436,14 +436,10 @@ def _fit_hdmr_streamed(
     Sb = jnp.where(zero_var, jnp.nan, (acc_cov_fy0m / N) / V_Y_safe)
 
     # ---- F-test (mirrors _engine._f_test) ----------------------------------
-    term_idx = jnp.arange(n)
-    p1 = jnp.where(term_idx < n1, m1, jnp.where(term_idx < n1 + n2, m2, m3)).astype(jnp.float32)
-    f_crit_per_term = jnp.where(
-        term_idx < n1,
-        f_crits[0],
-        jnp.where(term_idx < n1 + n2, f_crits[1], f_crits[2]),
-    )
-    order_idx = jnp.where(term_idx < n1, 0, jnp.where(term_idx < n1 + n2, 1, 2))
+    # The per-term order map comes from _engine.term_order_map, the same
+    # function _f_test calls, so the two paths cannot select different terms
+    # because one copy of the expressions drifted.
+    p1, f_crit_per_term, order_idx = term_order_map(n, n1, n2, m1, m2, m3, f_crits)
     SSR0 = acc_ssr[:, order_idx]  # (L, n) null SSR per term
     # SSR1 = sum (r_null - f_i)^2 = SSR0 - 2 sum r_null f_i + sum f_i^2.
     SSR1 = SSR0 - 2.0 * acc_cross + acc_fsq

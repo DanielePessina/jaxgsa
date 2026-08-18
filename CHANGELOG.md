@@ -4,14 +4,53 @@
 
 Version 0.9.0 fixes defects. It adds no method and removes no API.
 
-Three calls that were accepted before now raise. Each one was accepted while
-doing something the caller did not ask for, so refusing it is the fix, not a
-side effect. They are marked **now raises** below.
+**One breaking change:** `jaxgsa.config.set_memory_budget` now reads its value
+in megabytes, not bytes. See "Breaking" below before you upgrade.
+
+Three further calls that were accepted before now raise. Each one was accepted
+while doing something the caller did not ask for, so refusing it is the fix,
+not a side effect. They are marked **now raises** below.
 
 `PLAN-V1.0.md` records the whole plan and the order of the work.
 
+### Breaking
+
+- **`jaxgsa.config.set_memory_budget` now reads megabytes.** It took bytes
+  before, so the same call means a million times more than it used to.
+
+  ```python
+  jaxgsa.config.set_memory_budget(512)              # 512 MiB, the default
+  jaxgsa.config.set_memory_budget(2, unit="gb")     # 2 GiB
+  jaxgsa.config.set_memory_budget(536870912, unit="b")   # the old spelling
+  ```
+
+  `unit` accepts `b`, `bytes`, `kb`, `mb`, `gb`, `tb` and the explicit binary
+  spellings `kib`, `mib`, `gib`, `tib`. Case and surrounding spaces do not
+  matter. The multiples are binary, so `mb` is 1024 squared and
+  `set_memory_budget(512)` is exactly the previous default. Values may be
+  floats.
+
+  A call that gives no unit and a value of 1048576 or more now raises, because
+  such a value is almost certainly bytes and reading it as megabytes would ask
+  for more memory than any machine has. The message shows both ways to say what
+  you meant. A unit-less value below that is read as megabytes without
+  complaint, so a caller who deliberately set a budget under 1 MiB should add
+  `unit="b"`.
+
+  Two smaller consequences: the first parameter is now called `budget`, not
+  `budget_bytes`, so a keyword call must be renamed; and `unit` is
+  keyword-only.
+
+  `get_memory_budget()` is **unchanged**. It still returns an `int` of bytes,
+  because a silently changed return value cannot be guarded the way an argument
+  can. It gained an optional `unit=`, which returns a float for any unit other
+  than bytes.
+
 ### Added
 
+- **`PCEResult.streamed` and `HDMRResult.streamed`.** They record which fit path
+  ran. A fit that took much longer than expected is a real reason to ask whether
+  the memory budget engaged, and until now nothing answered that.
 - **`jaxgsa.JaxgsaWarning`**, exported from the package root. Every warning the
   package raises now passes this category. Before, all of them defaulted to
   `UserWarning`, so the only way to tell a jaxgsa warning from a NumPy or JAX
@@ -43,6 +82,13 @@ side effect. They are marked **now raises** below.
 
 ### Performance
 
+- **HSIC allocates about a third of what it did** when it picks its own kernel
+  bandwidth. The median heuristic built a distance matrix, two index arrays and
+  a copy of the upper triangle, only to skip the diagonal zeros. Those zeros are
+  the smallest entries, so their effect folds into the quantile position
+  instead. Measured on an Apple M1 Pro in float32: peak transient memory falls
+  from `3.57 * N^2` to `1.00 * N^2`, which is 228 MiB down to 64 MiB at
+  `N = 4096`. Every index is unchanged.
 - **Row deduplication is about 3.4 times faster.** `_stable_unique_rows` runs
   twice on the Sobol sampling path and once on the Morris path. It built one
   array view and one `bytes` key per row in Python. It now builds every key in
@@ -85,6 +131,25 @@ side effect. They are marked **now raises** below.
   The error now reports whether a conditioning class was floored, which output
   column failed, the bandwidth actually used against the real grid step, and
   the value that would resolve it.
+- **PCE computed its leave-one-out error twice, two different ways**, with a
+  comment asserting the two agreed. One copy built an array of `(n_terms, N)`
+  and then transposed it, so a third array scaling with the sample count was
+  alive at once. Both paths now take the leverage from a Cholesky factor of the
+  Gram matrix, which is `(n_terms, n_terms)`. The Gram matrix is never
+  inverted: the default ridge is deliberately small and PCE conditioning
+  degrades as the polynomial order rises, so an explicit inverse would make a
+  bad condition number worse, and the leave-one-out value feeds back into
+  automatic order selection.
+
+  The memory estimate that decides when the streaming fit engages was wrong in
+  the same place. It charged three sample-sized arrays for a phase that holds
+  two. It now charges the larger of the fit's two phases, which leaves a
+  scalar-output fit exactly where it was and only moves the threshold for
+  multi-slice fits.
+- **HDMR unpacked twelve values positionally** at three call sites, two of them
+  with blind placeholders. Reordering them produced silently wrong indices
+  rather than an error. They are now named fields. The per-term order map, which
+  was written out identically in two files, is now written once.
 - `MorrisSamples.downsample` no longer carries a previous design's dropped-block
   count into the smaller design. A `downsample` caller names the trajectory
   count and receives exactly it, so nothing is missing. Carrying the count

@@ -11,8 +11,11 @@ import jaxgsa
 from jaxgsa._core.copula import (
     _MIN_EIGENVALUE,
     _REPAIR_NOISE,
+    _ConditionalPlan,
     _project_to_correlation,
+    _safe_cholesky,
     _spearman_to_latent,
+    build_conditional_plan,
     canonicalize_correlation,
     correlation_from_covariance,
     fit_gaussian_copula,
@@ -521,3 +524,128 @@ def test_correlation_tolerant_analyzers_accept_correlated_problem():
     jaxgsa.optimal_transport.analyze(problem, X, Y)
     jaxgsa.hdmr.analyze(problem, X, Y)
     jaxgsa.shapley.analyze(problem, X, Y, backend="hdmr", include_correlative=True)
+
+
+def test_conditional_plan_carries_the_factor_of_its_own_matrix():
+    """T4 internal consistency: ``chol_full`` belongs to the plan's matrix.
+
+    The plan used to be paired with a Cholesky factor computed separately at
+    each call site, so a caller could hand one function the conditionals of
+    one matrix and the joint factor of another. The factor now travels on the
+    plan, and it must reconstruct exactly the matrix the plan was built from.
+    """
+    R = _equicorrelated(0.6, D=4)
+    plan = build_conditional_plan(R)
+
+    assert plan.chol_full.shape == (4, 4)
+    # Exact reconstruction: the field is the factor of R, not of anything else.
+    np.testing.assert_allclose(plan.chol_full @ plan.chol_full.T, R, atol=1e-12)
+    # And it agrees bit-for-bit with the module's own convention.
+    np.testing.assert_array_equal(plan.chol_full, _safe_cholesky(R))
+
+    # A different matrix must give a different factor, so the two cannot be
+    # silently interchanged.
+    other = build_conditional_plan(_equicorrelated(0.2, D=4))
+    assert not np.allclose(plan.chol_full, other.chol_full)
+
+
+def test_conditional_plan_chol_full_is_appended_last():
+    """T4 internal consistency: the positional field order is unchanged.
+
+    ``_ConditionalPlan`` is a NamedTuple, so inserting a field rather than
+    appending it would silently re-map every positional read.
+    """
+    assert _ConditionalPlan._fields == (
+        "others",
+        "beta_rest",
+        "chol_rest",
+        "beta_self",
+        "std_self",
+        "chol_marginal",
+        "chol_full",
+    )
+
+
+def test_safe_cholesky_matches_numpy_when_comfortably_pd():
+    """T4 internal consistency: ``_safe_cholesky`` is a no-op on a healthy matrix.
+
+    ``_safe_cholesky`` repairs a matrix that is only just positive definite.
+    On a comfortably positive-definite one it must return exactly what
+    ``np.linalg.cholesky`` returns, so moving the plan's call sites onto it
+    cannot move a number.
+    """
+    R = _equicorrelated(0.5, D=3)
+    np.testing.assert_array_equal(_safe_cholesky(R), np.linalg.cholesky(R))
+
+
+def test_safe_cholesky_repairs_a_rank_deficient_matrix_silently():
+    """T4 internal consistency: the repair branch, and how loud it is.
+
+    This is the direction the no-op test above cannot see. On an exactly
+    singular matrix ``np.linalg.cholesky`` raises ``LinAlgError`` while
+    ``_safe_cholesky`` lifts the spectrum to ``_MIN_EIGENVALUE`` and returns a
+    factor. Moving the plan's call sites onto ``_safe_cholesky`` therefore
+    changed the behaviour for a non-positive-definite matrix from "fail" to
+    "repair".
+
+    Pinned here: the repair happens, it reconstructs the input to the lift
+    tolerance, and it says nothing. Silence is deliberate, not an oversight:
+    every matrix that reaches this function through the public API has already
+    been through ``canonicalize_correlation``, which reports the repair it
+    made on the scale the user declared. A second warning from here would
+    report the same defect twice, in units nobody wrote.
+    """
+    R = np.ones((3, 3))  # rank 1: the extreme non-PD case
+    with pytest.raises(np.linalg.LinAlgError):
+        np.linalg.cholesky(R)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any warning fails the test
+        L = _safe_cholesky(R)
+
+    assert L.shape == (3, 3)
+    assert np.isfinite(L).all()
+    np.testing.assert_array_equal(L, np.tril(L))
+    # The factor is of the lifted matrix, so it reproduces R only to the size
+    # of the lift, and its smallest eigenvalue sits at the floor, not at zero.
+    np.testing.assert_allclose(L @ L.T, R, atol=10 * _MIN_EIGENVALUE)
+    assert np.linalg.eigvalsh(L @ L.T).min() >= _MIN_EIGENVALUE / 2
+
+
+def test_safe_cholesky_repair_is_unreachable_through_the_public_api():
+    """T4 internal consistency: canonicalization gets there first.
+
+    The behaviour change of the previous test is not reachable from
+    ``kucherenko.sample`` or ``vkoga.analyze``. Both take their matrix from
+    ``canonicalize_correlation``, directly or through ``problem.correlation``,
+    and that already lifts the spectrum off zero. So the matrix handed to
+    ``build_conditional_plan`` is positive definite, plain
+    ``np.linalg.cholesky`` succeeds on it, and ``_safe_cholesky`` returns the
+    same factor: the repair branch never runs.
+
+    The declared matrix here is exactly singular, the worst case a user can
+    write. Its repair moves an entry by about 4e-8, far under the noise
+    threshold, so ``policy="declared"`` neither raises nor warns and the
+    sampler runs on the lifted matrix. That silence is the point of the test:
+    the guard against a truly inconsistent matrix is the material-repair band,
+    not the Cholesky.
+    """
+    R_declared = np.ones((2, 2))  # rank 1
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        problem = _uniform_problem(D=2).with_correlation(R_declared)
+
+    R = np.asarray(problem.correlation)
+    assert np.linalg.eigvalsh(R).min() >= _MIN_EIGENVALUE
+    # Plain cholesky already works here, so the two functions agree.
+    np.testing.assert_array_equal(_safe_cholesky(R), np.linalg.cholesky(R))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        samples = jaxgsa.kucherenko.sample(problem, 64, seed=0).samples
+    assert np.isfinite(np.asarray(samples, dtype=float)).all()
+
+    # A genuinely inconsistent declared matrix is rejected before any factor
+    # is taken, so no non-PD matrix reaches the sampler at all.
+    with pytest.raises(ValueError, match="not positive definite"):
+        _uniform_problem(D=3).with_correlation(_INDEFINITE_R)

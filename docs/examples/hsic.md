@@ -230,9 +230,11 @@ D is always the last axis of the index arrays.
 
 ## Practical caveats
 
-- HSIC is O(N²) in computation and memory (kernel matrices). For N > 8000,
-  use `batch_size` to limit peak memory. `batch_size` splits the kernel
-  computation into chunks so the whole matrix never sits in memory at once.
+- HSIC is O(N²) in computation and memory (kernel matrices). `batch_size`
+  builds a kernel matrix in row blocks, then joins the blocks. It bounds the
+  working memory of the build. It does **not** bound the kernel matrix: the
+  result is one full `N x N` array in every case, so peak memory stays of
+  order N². Reduce N if memory is the limit.
 - R2-HSIC indices do not sum to 1. They are individual dependence measures,
   not variance fractions.
 - The total HSIC index uses product kernels across all D inputs. For very

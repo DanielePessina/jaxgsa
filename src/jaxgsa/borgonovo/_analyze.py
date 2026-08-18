@@ -427,15 +427,21 @@ def _bandwidth_advice(
     """Explain which knob to turn after a delta estimate leaves ``[0, 1]``.
 
     An out-of-range delta comes from a conditioning class the output grid
-    cannot resolve. Two different situations produce it, and they need
-    opposite advice, so this function reads what the kernel actually did
+    cannot resolve. Different situations produce it, and they need
+    different advice, so this function reads what the kernel actually did
     rather than what the settings asked for.
 
-    In the first situation the class was found degenerate and its kernel
-    was floored. The floor is then the width to change, and the message
-    compares it with one grid step. In the second situation no class was
-    floored, because none fell below ``degenerate_tol``. The floor is then
-    irrelevant and the message says so.
+    If no class was floored, because none fell below ``degenerate_tol``,
+    the floor had no effect on the run. The message says so and names
+    ``degenerate_tol`` and ``grid_size``.
+
+    If a class was floored under an explicit ``degenerate_bandwidth``, that
+    float is the width to change. The message compares it with one grid
+    step and gives the fraction that would match one step.
+
+    If a class was floored under ``degenerate_bandwidth="auto"``, the floor
+    is already at least one grid step wide, so widening it is not the fix.
+    The message names ``grid_size`` only.
 
     The numbers come from the original sample on the host: the same grid
     construction as the kernel, and the shared :func:`_kde_bandwidths`.
@@ -503,12 +509,18 @@ def _bandwidth_advice(
     where = "" if cols.shape[1] == 1 else f" in {_slice_label(worst, trailing, problem)}"
 
     if degenerate_bw is None:
+        # Reachable, but only off the usual route. The "auto" floor is
+        # never below one grid step, so it cannot alias on its own. It
+        # takes a second cause, such as a tiny explicit ``bandwidth``
+        # factor that leaves the unconditional density unresolved too.
+        # See test_auto_floor_still_aliases_under_a_tiny_bandwidth_factor.
         return (
             f"A conditioning class{where} was too narrow to resolve, so its "
             "kernel was floored at max(0.1 * h_full, grid_step) = "
-            f"{float(applied[worst]):.3g}. That floor is already one grid "
-            f"step wide, so raise grid_size (currently {grid_size}): a "
-            "shorter step lets the grid follow the narrow class."
+            f"{float(applied[worst]):.3g}. That floor is already at least "
+            "one grid step wide, so widening it further is not the fix. "
+            f"Raise grid_size (currently {grid_size}): a shorter step lets "
+            "the grid follow the narrow class."
         )
     needed = float(step[worst]) / float(full[worst])
     return (

@@ -283,3 +283,27 @@ def test_repr(correlated_result):
     assert "correlated=True" in text
     ks = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 64, seed=0)
     assert "correlated=False" in repr(ks)
+
+
+def test_design_uses_the_factor_on_the_plan(monkeypatch):
+    """T4 internal consistency: the joint block comes from ``plan.chol_full``.
+
+    The design used to call ``np.linalg.cholesky`` beside the plan, so the
+    joint sample and the conditionals could come from different matrices
+    without any error. Replacing the factor carried on the plan must now
+    change the design; if it does not, the sampler is still reading a factor
+    from somewhere else.
+    """
+    from jaxgsa._core.copula import build_conditional_plan as real_build
+    from jaxgsa.kucherenko import _sampling
+
+    problem = GAUSS_PROBLEM.with_correlation(R_GAUSS)
+    baseline = jaxgsa.kucherenko.sample(problem, 64, seed=0).samples
+
+    def perturbed(R):
+        plan = real_build(R)
+        return plan._replace(chol_full=plan.chol_full * 0.5)
+
+    monkeypatch.setattr(_sampling, "build_conditional_plan", perturbed)
+    moved = jaxgsa.kucherenko.sample(problem, 64, seed=0).samples
+    assert not np.allclose(baseline, moved)

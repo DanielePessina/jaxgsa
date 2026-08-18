@@ -44,84 +44,88 @@ from jaxgsa.problem import Problem
 _MIN_SAMPLES = 4
 
 
-def _median_bandwidth_sq(dists_sq: Array) -> Array:
-    """Compute squared bandwidth from a pairwise squared-distance matrix.
+def _median_bandwidth_sq(x: Array) -> Array:
+    """Compute the median-heuristic squared bandwidth for one variable.
 
-    The median runs over the upper triangle and excludes the diagonal. This
-    avoids the bias from the N diagonal zeros, per the standard definition of
-    the median heuristic.
+    The median heuristic takes the median of the ``M = (N^2 - N) / 2``
+    off-diagonal pairwise squared distances. The N diagonal zeros are excluded
+    because they carry no information about the spread of the sample.
+
+    Building the strict upper triangle to do that costs two index arrays and a
+    gathered copy. It is not needed: the diagonal zeros are the *smallest*
+    entries of the full ``(N, N)`` matrix, so they only shift the target
+    position in the sorted array, and a quantile of the full matrix reaches the
+    same value.
+
+    Derivation. Sort all ``N^2`` entries. The N zeros occupy positions
+    ``0 .. N-1``. Each off-diagonal value appears twice, so the j-th smallest
+    upper-triangle value (0-based) occupies positions ``N + 2j`` and
+    ``N + 2j + 1``. Write ``S = N + M = (N^2 + N) / 2``.
+
+    - M odd: the upper-triangle median is element ``j = (M - 1) / 2``, which
+      occupies positions ``S - 1`` and ``S``. Any position in ``[S-1, S]``
+      selects it.
+    - M even: the median averages elements ``j = M/2 - 1`` and ``j = M/2``,
+      which end at position ``S - 1`` and start at position ``S``. Linear
+      interpolation at position ``S - 0.5`` returns exactly that average.
+
+    Position ``S - 0.5`` therefore serves both parities, and ``jnp.quantile``
+    with the default linear interpolation puts the target at
+    ``q * (N^2 - 1)``. Solving for q and substituting S gives the expression
+    below. It reproduces ``jnp.median`` of the strict upper triangle exactly at
+    every N tested from 4 to 1024.
 
     Args:
-        dists_sq: Pairwise squared distances, shape ``(N, N)``.
+        x: Values for one variable, shape ``(N,)``.
 
     Returns:
         Scalar median of the off-diagonal squared distances, floored at 1e-20.
     """
-    n = dists_sq.shape[0]
-    idx = jnp.triu_indices(n, k=1)
-    upper = dists_sq[idx]
-    return jnp.maximum(jnp.median(upper), 1e-20)
+    N = x.shape[0]
+    dists_sq = (x[:, None] - x[None, :]) ** 2
+    q = (N**2 + N - 1) / (2 * (N**2 - 1))
+    return jnp.maximum(jnp.quantile(dists_sq, q), 1e-20)
 
 
-def _build_kernel_median(x: Array) -> Array:
-    """Build a Gaussian RBF kernel matrix with a median-heuristic bandwidth.
+def _resolve_bandwidth_sq(x: Array, bandwidth: float | None) -> Array:
+    """Resolve the squared Gaussian bandwidth for one variable.
 
     Args:
         x: Values for one variable, shape ``(N,)``.
+        bandwidth: Fixed bandwidth, or None for the median heuristic.
 
     Returns:
-        Kernel matrix, shape ``(N, N)``.
+        Scalar squared bandwidth.
     """
-    dists_sq = (x[:, None] - x[None, :]) ** 2
-    median_sq = _median_bandwidth_sq(dists_sq)
-    return jnp.exp(-dists_sq / (2.0 * median_sq))
+    if bandwidth is None:
+        return _median_bandwidth_sq(x)
+    return jnp.asarray(bandwidth, dtype=x.dtype) ** 2
 
 
-def _build_kernel_fixed(x: Array, sigma: Array) -> Array:
-    """Build a Gaussian RBF kernel matrix with a fixed bandwidth.
+def _build_kernel(x: Array, sigma_sq: Array, batch_size: int | None) -> Array:
+    """Build a Gaussian RBF kernel matrix from a resolved squared bandwidth.
+
+    The matrix is built in row blocks when ``batch_size`` asks for it. Blocking
+    bounds the working memory of the build, not the size of the result: the
+    blocks are concatenated back into one ``(N, N)`` matrix either way.
 
     Args:
         x: Values for one variable, shape ``(N,)``.
-        sigma: Kernel bandwidth.
-
-    Returns:
-        Kernel matrix, shape ``(N, N)``.
-    """
-    dists_sq = (x[:, None] - x[None, :]) ** 2
-    return jnp.exp(-dists_sq / (2.0 * sigma**2))
-
-
-def _build_kernel_chunked(x: Array, sigma: Array, batch_size: int) -> Array:
-    """Build a Gaussian kernel matrix in row blocks to limit peak memory.
-
-    Args:
-        x: Values for one variable, shape ``(N,)``.
-        sigma: Kernel bandwidth.
-        batch_size: Number of rows per block.
+        sigma_sq: Scalar squared bandwidth.
+        batch_size: Number of rows per block, or None to build in one step.
 
     Returns:
         Kernel matrix, shape ``(N, N)``.
     """
     N = x.shape[0]
+    if batch_size is None or batch_size <= 0 or N <= batch_size:
+        return jnp.exp(-((x[:, None] - x[None, :]) ** 2) / (2.0 * sigma_sq))
+
     rows = []
     for start in range(0, N, batch_size):
         end = min(start + batch_size, N)
-        block = jnp.exp(-((x[start:end, None] - x[None, :]) ** 2) / (2.0 * sigma**2))
-        rows.append(block)
+        rows.append(jnp.exp(-((x[start:end, None] - x[None, :]) ** 2) / (2.0 * sigma_sq)))
     return jnp.concatenate(rows, axis=0)
-
-
-def _median_bandwidth(x: Array) -> Array:
-    """Compute the bandwidth with the median heuristic (upper triangle only).
-
-    Args:
-        x: Values for one variable, shape ``(N,)``.
-
-    Returns:
-        Scalar bandwidth sigma.
-    """
-    dists_sq = (x[:, None] - x[None, :]) ** 2
-    return jnp.sqrt(_median_bandwidth_sq(dists_sq))
 
 
 def _center_kernel(K: Array) -> Array:
@@ -167,31 +171,21 @@ def _build_one_kernel(
     x: Array,
     bandwidth: float | None,
     batch_size: int | None,
-    N: int,
 ) -> Array:
-    """Build one kernel matrix, chunked or not, as the arguments require.
+    """Build one kernel matrix for one variable.
+
+    How the bandwidth is chosen and how the matrix is built are independent
+    questions, so the bandwidth is resolved first and the build follows.
 
     Args:
         x: Values for one variable, shape ``(N,)``.
         bandwidth: Fixed bandwidth, or None for the median heuristic.
         batch_size: Row-block size for the kernel matrix, or None.
-        N: Sample count, used to decide whether to chunk.
 
     Returns:
         Kernel matrix, shape ``(N, N)``.
     """
-    use_chunked = batch_size is not None and batch_size > 0 and N > batch_size
-    if bandwidth is None and not use_chunked:
-        return _build_kernel_median(x)
-    if bandwidth is not None and not use_chunked:
-        return _build_kernel_fixed(x, jnp.asarray(bandwidth, dtype=x.dtype))
-    if bandwidth is None:
-        sigma = _median_bandwidth(x)
-    else:
-        sigma = jnp.asarray(bandwidth, dtype=x.dtype)
-    if batch_size is None:
-        raise ValueError("batch_size must not be None in chunked path")
-    return _build_kernel_chunked(x, sigma, batch_size)
+    return _build_kernel(x, _resolve_bandwidth_sq(x, bandwidth), batch_size)
 
 
 def _build_input_kernels(
@@ -209,8 +203,8 @@ def _build_input_kernels(
     Returns:
         List of D kernel matrices, each of shape ``(N, N)``.
     """
-    N, D = X_unit.shape
-    return [_build_one_kernel(X_unit[:, d], bandwidth, batch_size, N) for d in range(D)]
+    D = X_unit.shape[1]
+    return [_build_one_kernel(X_unit[:, d], bandwidth, batch_size) for d in range(D)]
 
 
 def _augmented_kernels(Ks: list[Array]) -> list[Array]:
@@ -361,8 +355,7 @@ def _compute_slice(
     Returns:
         ``(R2_HSIC, T_HSIC, p_values, hsic_raw)``, each of shape ``(D,)``.
     """
-    N = y_col.shape[0]
-    L = _build_one_kernel(y_col, bandwidth, batch_size, N)
+    L = _build_one_kernel(y_col, bandwidth, batch_size)
     return _get_hsic_kernel(n_perms)(Ks_stack, K_aug_compls_stack, K_aug_full, hsic_xxs, L, key)
 
 
@@ -419,9 +412,11 @@ def analyze(
         bandwidth: Fixed Gaussian-kernel bandwidth applied to all parameters
             and to the output. None (default) selects it per variable with
             the median heuristic (median pairwise distance), a robust default.
-        batch_size: Row-block size for building each ``(N, N)`` kernel matrix,
-            which bounds peak memory for large N. None builds each full
-            matrix at once.
+        batch_size: Row-block size for building each ``(N, N)`` kernel matrix.
+            It bounds the working memory of the build, **not** the kernel
+            matrix: the blocks are concatenated back into one ``(N, N)``
+            array, so peak memory stays of order ``N^2`` in every case. None
+            (default) builds each matrix in one step.
         prenormalize: If True, standardize each output slice to mean 0 and
             unit standard deviation before the analysis.
 

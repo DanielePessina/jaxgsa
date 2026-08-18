@@ -23,12 +23,18 @@ two of them change the work.
 Five decisions shape this plan. The first was revised on 2026-08-18, after
 batches 1 and 2 had shipped; section 1.2 records why.
 
-1. **Version 0.9 fixes what is broken, and breaks nothing.** It carries the
-   defects a user can hit today, the latent ones that would produce a silently
-   wrong number after any nearby edit, and two resource wins. It does **not**
-   carry the structural work: no new spec dataclasses, no layout enum, no
-   frozen results, no `.npz` break, no migration guide. Section 5.1 lists what
-   was cut and why.
+1. **Version 0.9 fixes what is broken, and breaks one thing on purpose.** It
+   carries the defects a user can hit today, the latent ones that would produce
+   a silently wrong number after any nearby edit, and two resource wins. It
+   does **not** carry the structural work: no new spec dataclasses, no layout
+   enum, no frozen results, no `.npz` break. Section 5.1 lists what was cut and
+   why.
+
+   The one deliberate break is `config.set_memory_budget`, which now reads its
+   value in megabytes instead of bytes, on the user's instruction. That is a
+   silent reinterpretation by a factor of a million, so a guard refuses
+   bytes-shaped values passed without a unit and names both fixes. Everything
+   else in the release is additive or invisible.
 2. **The release ladder shifts by one.** The roadmap put given-data methods in
    0.9. They move to 0.10, gradients move to 0.11, and 1.0 keeps coverage and
    stability.
@@ -49,7 +55,7 @@ batches 1 and 2 had shipped; section 1.2 records why.
 
 | Release | Content | Breaking |
 | --- | --- | --- |
-| **0.9** | Correctness, latent silent-wrongness, two resource wins | No, with one deliberate exception |
+| **0.9** | Correctness, latent silent-wrongness, two resource wins | One function: `config.set_memory_budget` |
 | **0.10** | Methods that work on data you already have | No |
 | **0.11** | Methods that use gradients | No |
 | **1.0** | Coverage, stability, release engineering | No |
@@ -356,7 +362,7 @@ nearby code. All are cheap.
 | **D17** `chol_full` on the plan | Two call sites build a `_ConditionalPlan` and then call `np.linalg.cholesky` on the same matrix, carrying the two as unlinked values. One function takes the parameter count from one and the index geometry from the other; a mismatched pair gives wrong indices, not an error. The raw call also bypasses `_safe_cholesky`, which exists because the module accepts matrices that are only just positive definite. |
 | **D14** PCE leave-one-out | Computed twice, two different ways, with a comment asserting they agree. Compute leverage once from a Cholesky factor of the Gram matrix. The memory estimate charges three `N x n_terms` arrays where two are needed, so streaming engages at the wrong point. This is the one item in the release that deliberately moves a number. |
 | **D15** `streamed` flag | Honest observability, and it replaces tests that monkeypatch a module function and count calls — which freeze the import style and the loop structure. Needed alongside D14, or a fit that silently stops streaming passes every test. |
-| **D18** HSIC dispatch and bandwidth | Collapses a two-by-two dispatch across five helpers, one branch of which holds an unreachable `raise`, and removes roughly `3 * N^2` of allocation by replacing the upper-triangle index machinery with an index-adjusted quantile. State in the docstring that `batch_size` bounds working memory, not the kernel matrix. |
+| **D18** HSIC dispatch and bandwidth | **Done.** Collapsed the two-by-two dispatch across five helpers, deleted the unreachable `raise`, and replaced the upper-triangle index machinery with an index-adjusted quantile. Measured: `3.57 * N^2` down to `1.00 * N^2`, saving 164 MiB at `N = 4096`. `batch_size` bounds working memory, not the kernel matrix, and now says so. **Correction:** the quantile position this document originally gave, `q = (N + (N^2 - N)/2) / N^2`, is wrong — it lands half a slot short and biases toward the lower order statistic at even counts, a 15% relative error at `N = 4`. The exact position is `q = (N^2 + N - 1) / (2 * (N^2 - 1))`, which reproduces the strict-upper-triangle median to zero error for every `N` from 4 to 1024. |
 
 ### 5.6 Optional
 
