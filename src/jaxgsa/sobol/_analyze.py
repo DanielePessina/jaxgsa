@@ -36,6 +36,7 @@ from jaxgsa._core.invalid import (
     check_invalid,
     resolve_policy,
 )
+from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
     _prenormalize_outputs,
     _prepare_Y,
@@ -344,6 +345,7 @@ def _analyze_bootstrap(
     key: Array,
     slice_chunk_size: int,
     invalid: InvalidReport,
+    keep_replicates: bool,
 ) -> SobolResult:
     """Compute Sobol indices with bootstrap confidence intervals.
 
@@ -375,6 +377,11 @@ def _analyze_bootstrap(
     S1_lo_list, S1_hi_list = [], []
     ST_lo_list, ST_hi_list = [], []
     S2_list, S2_lo_list, S2_hi_list = [], [], []
+    # Only filled when the caller asked for the draws. R copies of every index
+    # array is the largest thing this function can hold, so it is opt-in.
+    S1_draw_list: list[Array] = []
+    ST_draw_list: list[Array] = []
+    S2_draw_list: list[Array] = []
 
     for t in range(T):
         for k in range(K):
@@ -401,12 +408,17 @@ def _analyze_bootstrap(
                 )
                 S2_lo_list.append(s2_lo)
                 S2_hi_list.append(s2_hi)
+                if keep_replicates:
+                    S2_draw_list.append(s2_boot)
             else:
                 s1, st = jit_ft(a, ab, b)
                 s1_boot, st_boot = _bootstrap_first_total(indices, a, ab, b, slice_chunk_size)
 
             S1_list.append(s1)
             ST_list.append(st)
+            if keep_replicates:
+                S1_draw_list.append(s1_boot)
+                ST_draw_list.append(st_boot)
 
             s1_lo, s1_hi = _bootstrap_ci_endpoints(
                 s1,
@@ -465,6 +477,29 @@ def _analyze_bootstrap(
         S2_out = _squeeze_output_axes(S2_out, squeeze_time, squeeze_output, n_trailing=2)
     if S2_conf is not None:
         S2_conf = _squeeze_output_axes(S2_conf, squeeze_time, squeeze_output, n_trailing=2)
+
+    replicates: dict[str, Array] | None = None
+    if keep_replicates:
+
+        def _stack_draws(per_slice: list[Array], n_trailing: int) -> Array:
+            """Reorder per-slice draws into one array led by the resample axis.
+
+            Each entry is ``(R, ...)`` for one ``(t, k)``. Stacking gives
+            ``(T*K, R, ...)``; the resample axis has to move to the front so
+            the layout matches the other four methods, and so the squeeze can
+            address the inserted T and K axes from the end.
+            """
+            stacked = jnp.stack(per_slice).reshape(T, K, *per_slice[0].shape)
+            moved = jnp.moveaxis(stacked, 2, 0)
+            return _squeeze_output_axes(moved, squeeze_time, squeeze_output, n_trailing=n_trailing)
+
+        replicates = {
+            "S1": _stack_draws(S1_draw_list, 1),
+            "ST": _stack_draws(ST_draw_list, 1),
+        }
+        if calc_second_order:
+            replicates["S2"] = _stack_draws(S2_draw_list, 2)
+
     return SobolResult(
         S1=S1_out,
         ST=ST_out,
@@ -474,6 +509,12 @@ def _analyze_bootstrap(
         S1_conf=S1_conf,
         ST_conf=ST_conf,
         S2_conf=S2_conf,
+        ci=CIInfo(
+            level=conf_level,
+            method=ci_method,
+            n_resamples=num_resamples,
+            replicates=replicates,
+        ),
     )
 
 
@@ -488,6 +529,7 @@ def analyze(
     key: Array | None = None,
     slice_chunk_size: int = 2048,
     on_invalid: OnInvalid = "raise",
+    keep_replicates: bool = False,
 ) -> SobolResult:
     """Compute Sobol sensitivity indices from model outputs using JAX.
 
@@ -624,6 +666,7 @@ def analyze(
             key=key,
             slice_chunk_size=slice_chunk_size,
             invalid=invalid,
+            keep_replicates=keep_replicates,
         )
 
     return _analyze_no_bootstrap(

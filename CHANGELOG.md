@@ -62,10 +62,33 @@ not a side effect. They are marked **now raises** below.
   default because the draws are large: 1000 resamples of a
   `(T=100, K=5, D=20)` index array is 80 MB.
 
+  All five methods that report intervals accept the keyword: `jaxgsa.sobol`,
   `jaxgsa.morris`, `jaxgsa.pawn`, `jaxgsa.borgonovo` and
-  `jaxgsa.optimal_transport` accept the keyword. `jaxgsa.sobol` does not yet:
-  `SobolResult` carries the `ci` field and reads it, but `sobol.analyze` still
-  has to be taught to fill it in.
+  `jaxgsa.optimal_transport`.
+- **`jaxgsa.sobol.indices()` computes the indices with nothing around them.**
+  `analyze` reads output values on the host to apply its `on_invalid` policy,
+  and a policy decision needs a concrete number, so it cannot run inside
+  `jax.jit` or `jax.vmap`. `indices` reads nothing, so it can. Both call one
+  estimator, so the numbers are the same.
+- **`SobolSamples.unit` and `SobolSamples.transform(theta)`.** `unit` holds the
+  design in the unit cube, before any input distribution is applied, so it does
+  not depend on the distributions at all. `transform` applies a set of
+  distribution parameters to it. That allows one design to be reused across
+  different assumed input ranges, and, because `transform` is written in JAX,
+  it allows a Sobol index to be differentiated with respect to those
+  parameters:
+
+  ```python
+  def s1(theta):
+      return jaxgsa.sobol.indices(samples, model(samples.transform(theta)))[0]
+
+  dS1_dtheta = jax.jacrev(s1)(theta)
+  ```
+
+  The chain runs through the model, so the model must be differentiable in
+  JAX, and float64 should be enabled. `transform` raises for a categorical
+  problem: a categorical inverse CDF is a step function, so it has no useful
+  derivative and `unit` and `samples` do not have the same number of rows.
 - **Every result class now prints a one-line summary.** `MorrisResult`,
   `DGSMResult`, `DeltaResult`, `PAWNResult` and `OTResult` had no `__repr__`,
   so echoing one in a notebook printed every index array and the whole

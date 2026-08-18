@@ -313,16 +313,48 @@ def test_morris_physical_units_rescales_the_kept_draws() -> None:
         assert jnp.allclose(draws, unit.ci.replicates[name] / ranges)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "sobol.analyze is held by a concurrent branch, so its CIInfo is not "
-        "wired yet. SobolResult carries the field; only the constructor call "
-        "in sobol/_analyze.py is missing."
-    ),
-)
 def test_sobol_records_its_ci() -> None:
     """Sobol should record its interval metadata like the other four."""
     result = _result("sobol", "scalar")
     assert result.ci is not None
     assert result.ci.method == "quantile"
+
+
+def _sobol_analyze(**kwargs: Any) -> Any:
+    """Run sobol on the shared fixture design, with analyze options."""
+    import jax
+
+    from jaxgsa import sobol
+
+    sr = sobol.sample(fixtures.PROBLEM, n_samples=128, seed=fixtures.SEED, verbose=False)
+    Y = fixtures.MODELS["scalar"](jnp.asarray(sr.samples))
+    return sobol.analyze(sr, Y, num_resamples=8, key=jax.random.key(fixtures.SEED), **kwargs)
+
+
+def test_sobol_records_the_ci_method_it_actually_ran() -> None:
+    """Sobol offers two endpoint rules, so the record must not be a constant.
+
+    Morris is the only other method with that choice. The three that hard-wire
+    the percentile interval report ``"quantile"`` because that is what runs.
+    """
+    quantile = _sobol_analyze(ci_method="quantile")
+    gaussian = _sobol_analyze(ci_method="gaussian")
+    assert quantile.ci is not None and gaussian.ci is not None
+    assert quantile.ci.method == "quantile"
+    assert gaussian.ci.method == "gaussian"
+
+
+def test_sobol_keeps_its_draws_only_when_asked() -> None:
+    """R copies of every index array is the largest thing analyze can hold."""
+    default = _sobol_analyze()
+    kept = _sobol_analyze(keep_replicates=True)
+    assert default.ci is not None and kept.ci is not None
+    assert default.ci.replicates is None
+    assert kept.ci.replicates is not None
+    # Keys are the point estimates the draws belong to, and each array leads
+    # with the resample axis, matching the other four methods. The fixture
+    # design carries second order, so S2 has draws as well.
+    assert set(kept.ci.replicates) == {"S1", "ST", "S2"}
+    for name, draws in kept.ci.replicates.items():
+        assert draws.shape[0] == kept.ci.n_resamples
+        assert draws.shape[1:] == getattr(kept, name).shape
