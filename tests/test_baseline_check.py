@@ -14,6 +14,7 @@ pin the reporting split and the exit codes, not any numerical result.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ _SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
+import baseline_check  # noqa: E402  # isort: skip
 from baseline_check import Diffs, compare  # noqa: E402  # isort: skip
 
 
@@ -114,6 +116,49 @@ class TestSchemaChanges:
         diffs = compare(baseline, current)
         assert diffs.values == []
         assert len(diffs.schema) == 1
+
+
+class TestComparingTwoStoredDumps:
+    """`--current` is how CI diffs two commits dumped on one runner.
+
+    The stored baseline cannot be used in CI: it records float32 bits, and
+    those depend on the CPU, so an Apple-silicon file compared against an
+    x86-64 run reports about a thousand moved values with no code change.
+    """
+
+    def _write(self, path, results):
+        path.write_text(json.dumps({"header": {"git_commit": "test"}, "results": results}))
+
+    def test_two_identical_dumps_pass(self, tmp_path, baseline, capsys):
+        base, head = tmp_path / "base.json", tmp_path / "head.json"
+        self._write(base, baseline)
+        self._write(head, baseline)
+        code = baseline_check.main(["--baseline", str(base), "--current", str(head)])
+        assert code == 0
+        assert "PASSED" in capsys.readouterr().out
+
+    def test_a_moved_value_exits_one(self, tmp_path, baseline, capsys):
+        base, head = tmp_path / "base.json", tmp_path / "head.json"
+        self._write(base, baseline)
+        self._write(head, {"method": {"S1": _array([1.0, 2.5]), "streamed": False}})
+        assert baseline_check.main(["--baseline", str(base), "--current", str(head)]) == 1
+        assert "value(s) moved" in capsys.readouterr().out
+
+    def test_a_schema_change_alone_exits_two(self, tmp_path, baseline, capsys):
+        base, head = tmp_path / "base.json", tmp_path / "head.json"
+        self._write(base, baseline)
+        self._write(head, {"method": {**baseline["method"], "invalid": {"n": 0}}})
+        assert baseline_check.main(["--baseline", str(base), "--current", str(head)]) == 2
+        out = capsys.readouterr().out
+        assert "schema change(s)" in out
+        assert "regenerate" in out
+
+    def test_a_missing_current_file_is_refused(self, tmp_path, baseline):
+        base = tmp_path / "base.json"
+        self._write(base, baseline)
+        assert (
+            baseline_check.main(["--baseline", str(base), "--current", str(tmp_path / "no")]) == 1
+        )
 
 
 class TestTheTwoKindsStaySeparate:

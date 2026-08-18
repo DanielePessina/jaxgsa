@@ -19,6 +19,20 @@ in the same list as a moved number buries the one that matters.
 Run it with::
 
     uv run scripts/baseline_check.py
+
+**The comparison is only valid within one machine.** The stored file records
+float32 results to the last bit, and those bits depend on the CPU. Comparing a
+dump made on Apple silicon against one made on x86-64 reports about a thousand
+moved values with deltas around 1e-5 to 1e-7, none of which is a code change:
+different XLA kernels reassociate the same arithmetic differently. So the
+stored baseline is a *local* instrument, checked by the developer who owns the
+machine that produced it, in the same spirit as the project's rule that
+oracles run locally and never in CI.
+
+CI therefore does not use the stored file. It dumps the base commit and the
+head commit on one runner and diffs those two, with ``--current``. Same
+machine on both sides, no tolerance, and it answers the question that matters
+on a pull request: did *this change* move a number.
 """
 
 from __future__ import annotations
@@ -188,6 +202,15 @@ def main(argv: list[str] | None = None) -> int:
     """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", type=Path, default=DEFAULT_OUT, help="baseline JSON path")
+    parser.add_argument(
+        "--current",
+        type=Path,
+        default=None,
+        help=(
+            "Compare a dump file that already exists instead of building one. "
+            "Used by CI to diff two commits dumped on the same runner."
+        ),
+    )
     parser.add_argument("--quiet", action="store_true", help="no progress output")
     args = parser.parse_args(argv)
 
@@ -198,7 +221,13 @@ def main(argv: list[str] | None = None) -> int:
 
     stored = json.loads(args.baseline.read_text())
     header = stored.get("header", {})
-    current = build_dump(verbose=not args.quiet)
+    if args.current is not None:
+        if not args.current.exists():
+            print(f"current dump not found: {args.current}", file=sys.stderr)
+            return 1
+        current = json.loads(args.current.read_text())["results"]
+    else:
+        current = build_dump(verbose=not args.quiet)
 
     diffs = compare(stored["results"], current)
     recorded_at = header.get("git_commit", "?")

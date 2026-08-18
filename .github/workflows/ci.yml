@@ -41,22 +41,33 @@ jobs:
       - name: Run tests
         run: uv run pytest -q
 
-  # The fixed-seed numerical baseline. Separate from `test` so a ~3 minute
+  # The fixed-seed numerical baseline. Separate from `test` so a multi-minute
   # numerical dump stays out of local `pytest -q`, and so a moved number
   # reports as its own failure rather than one more red test.
   #
   # PLAN-0.10.md: "Every pre-existing entry must stay bit-identical. Any
-  # movement is a defect until it is proved otherwise." Until this job
-  # existed that rule was enforced by whoever remembered to run the script,
-  # which is how the stored file stayed pinned at 0.8.0.
+  # movement is a defect until it is proved otherwise." Until this job existed
+  # that rule was enforced by whoever remembered to run the script, which is
+  # how the stored file stayed pinned at 0.8.0.
   #
-  # One Python version is enough: the check is about this code changing, not
-  # about interpreter differences, and the dump is not bit-identical across
-  # interpreter versions in any case.
+  # This job does NOT compare against the stored file. That file records
+  # float32 results to the last bit and those bits depend on the CPU: a dump
+  # made on Apple silicon differs from one made on x86-64 in about a thousand
+  # values, by 1e-5 to 1e-7, with no code change involved. Instead it dumps
+  # the base commit and the head commit on this one runner and diffs those.
+  # Same machine on both sides, so no tolerance is needed, and it answers the
+  # question a pull request actually raises: did this change move a number.
+  #
+  # Each commit is dumped with its own copy of the dump script, which is what
+  # we want: a deliberate change to the recorded schema shows up as a schema
+  # difference rather than a crash.
   baseline:
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -64,8 +75,27 @@ jobs:
           python-version: "3.13"
           enable-cache: true
 
-      - name: Install project and dev dependencies
-        run: uv sync --extra dev
+      - name: Dump the base commit
+        id: base
+        run: |
+          git checkout --detach ${{ github.event.pull_request.base.sha }}
+          if [ ! -f scripts/baseline_dump.py ]; then
+            echo "The base commit has no baseline harness; nothing to compare."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          uv sync --extra dev
+          uv run python scripts/baseline_dump.py --out /tmp/base.json --quiet
 
-      - name: Numerical baseline
-        run: uv run python scripts/baseline_check.py --quiet
+      - name: Dump this commit
+        if: steps.base.outputs.skip != 'true'
+        run: |
+          git checkout --detach ${{ github.event.pull_request.head.sha }}
+          uv sync --extra dev
+          uv run python scripts/baseline_dump.py --out /tmp/head.json --quiet
+
+      - name: Compare the two dumps
+        if: steps.base.outputs.skip != 'true'
+        run: |
+          uv run python scripts/baseline_check.py \
+            --baseline /tmp/base.json --current /tmp/head.json
