@@ -267,6 +267,7 @@ D3 must land first: it collides with D9, D11 and D12.
 | **D12**: implement PAWN `slice_chunk_size` | `pawn/_analyze.py:198-200`, copy the Sobol or Borgonovo pattern. Add a chunk-invariance test. Remove the "signature parity" wording at `:336`. |
 | **D9**: Borgonovo bandwidth | **See C1.** The check as written is not reachable. Take route (a): compute the host-side full-sample bandwidth and grid step once, before the jitted kernel, and raise there — it costs one `std` and one `linspace` on the host. Routes (b) return a NaN from inside the kernel and let the existing range check fail, or (c) document the failure mode and raise nothing. Route (a) keeps the "fail up front" principle the decision is built on. Also collapse the two resolvers at `:790-861`, and add the `degenerate_tol` bias sentence. |
 | **D7**: drop the redundant guards | `sobol/_result.py:115`, `morris/_analyze.py:374` |
+| **New, found while building the baseline**: `dgsm.analyze` takes a one-sample `(D,) -> ...` function, not a batch one. A batch callable fails with `IndexError` from deep inside, not with a clear message. Add the check next to D11's argument resolution, which is already rewriting that block. | `dgsm/_analyze.py:225-254` |
 | **D17**: `chol_full` on `_ConditionalPlan` | `_core/copula.py:80-106`, append the field; two call sites at `kucherenko/_sampling.py:166` and `vkoga/_analyze.py:228` |
 
 ### Batch 5 — the fit paths
