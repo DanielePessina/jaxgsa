@@ -8,7 +8,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaxgsa import kucherenko
+from jaxgsa import JaxgsaWarning, kucherenko
+from jaxgsa._core.invalid import InvalidReport, InvalidUnit
 from jaxgsa.benchmarks.ishigami import (
     ANALYTICAL_S1,
     ANALYTICAL_ST,
@@ -18,6 +19,19 @@ from jaxgsa.benchmarks.ishigami import (
 from jaxgsa.hdmr import analyze as analyze_hdmr
 from jaxgsa.problem import GaussianInputSpec, Problem
 from jaxgsa.sampling import monte_carlo
+
+
+def _clean_report(n_units: int = 0) -> InvalidReport:
+    """Build the empty non-finite report a hand-made result needs."""
+    return InvalidReport(
+        policy="raise",
+        unit=InvalidUnit.ROW,
+        n_units=n_units,
+        n_invalid=0,
+        unit_indices=(),
+        row_indices=(),
+        sources=(),
+    )
 
 
 # HDMR builds polynomial surrogates that approximate the true function, so
@@ -768,6 +782,7 @@ def test_s2_layout_uses_numeric_interaction_indices():
         ST=jnp.ones(3),
         problem=problem,
         terms=("x1", "x2", "x3", "x1/x2"),
+        invalid=_clean_report(),
         _c2=((0, 1),),
     )
     S2 = np.array(result.S2)
@@ -947,3 +962,111 @@ def test_independent_problem_does_not_warn(ishigami_data):
         warnings.simplefilter("always")
         analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2)
     assert [w for w in caught if "SCSA" in str(w.message)] == []
+
+
+# ---------------------------------------------------------------------------
+# on_invalid policy
+# ---------------------------------------------------------------------------
+
+
+class TestHDMROnInvalid:
+    """T4: ``hdmr.analyze`` applies the shared non-finite policy.
+
+    The check lives in the public wrapper only, next to the zero-variance and
+    SCSA warnings and for the same reason: ``_analyze_hdmr_core`` must stay
+    free of it so no caller can trigger the policy twice.
+    """
+
+    HDMR_KWARGS: dict[str, Any] = dict(maxorder=2, m=2)
+
+    def test_raise_is_the_default_and_names_the_rows(self, ishigami_data):
+        """T4: a non-finite Y refuses the analysis and says which rows carry it."""
+        X, Y = ishigami_data
+        Y = np.asarray(Y).copy()
+        Y[3] = np.nan
+        Y[500] = -np.inf
+        with pytest.raises(ValueError, match="non-finite") as exc:
+            analyze_hdmr(PROBLEM, X, Y, **self.HDMR_KWARGS)
+        message = str(exc.value)
+        assert "jaxgsa.hdmr.analyze" in message
+        assert "2 of 2000 rows" in message
+        assert "[3, 500]" in message
+
+    def test_propagate_warns_and_lets_the_nan_reach_the_indices(self, ishigami_data):
+        """T4: 'propagate' keeps every row, so the fitted indices go non-finite."""
+        X, Y = ishigami_data
+        Y = np.asarray(Y).copy()
+        Y[3] = np.nan
+        with pytest.warns(JaxgsaWarning, match="reaches the indices"):
+            result = analyze_hdmr(PROBLEM, X, Y, on_invalid="propagate", **self.HDMR_KWARGS)
+        assert not np.all(np.isfinite(np.array(result.ST)))
+        assert result.invalid.policy == "propagate"
+        assert result.invalid.n_invalid == 1
+
+    def test_drop_removes_the_rows_and_the_fit_is_finite_again(self, ishigami_data):
+        """T4: 'drop' fits on the survivors, so every index is finite."""
+        X, Y = ishigami_data
+        Y = np.asarray(Y).copy()
+        Y[3] = np.nan
+        with pytest.warns(JaxgsaWarning, match="dropped 1 of 2000 rows"):
+            result = analyze_hdmr(PROBLEM, X, Y, on_invalid="drop", **self.HDMR_KWARGS)
+        assert np.all(np.isfinite(np.array(result.ST)))
+        assert result.invalid.unit_indices == (3,)
+        assert result.invalid.sources == ("Y",)
+        _assert_matches_analytical_s1_st(np.array(result.S1), np.array(result.ST))
+
+    def test_a_non_finite_input_is_caught_too(self, ishigami_data):
+        """T4: X is checked as well as Y, and ``sources`` says which array.
+
+        A NaN input reaches the CDF transform and then the B-spline basis, so
+        it is no less fatal than a NaN output.
+        """
+        X, Y = ishigami_data
+        X = np.asarray(X).copy()
+        X[17, 1] = np.inf
+        with pytest.raises(ValueError, match=r"in X\.") as exc:
+            analyze_hdmr(PROBLEM, X, Y, **self.HDMR_KWARGS)
+        assert "[17]" in str(exc.value)
+        with pytest.warns(JaxgsaWarning):
+            result = analyze_hdmr(PROBLEM, X, Y, on_invalid="drop", **self.HDMR_KWARGS)
+        assert result.invalid.sources == ("X",)
+
+    def test_dropping_below_the_sample_floor_refuses(self, ishigami_data):
+        """T4: 'drop' will not fit on fewer rows than HDMR's own 300 minimum.
+
+        Without the floor the surviving sample would fall through to the
+        generic "Need at least 300 samples" check, which names neither the
+        dropped rows nor the policy that removed them.
+        """
+        X, Y = ishigami_data
+        X, Y = np.asarray(X)[:400], np.asarray(Y)[:400].copy()
+        Y[:150] = np.nan
+        with pytest.raises(ValueError, match="every usable row was removed") as exc:
+            analyze_hdmr(PROBLEM, X, Y, on_invalid="drop", **self.HDMR_KWARGS)
+        assert "at least 300" in str(exc.value)
+
+    @pytest.mark.parametrize("policy", ["raise", "propagate", "drop"])
+    def test_a_clean_sample_is_clean_under_every_policy(self, policy, ishigami_data):
+        """T4: nothing found means no warning and a report that says so."""
+        X, Y = ishigami_data
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = analyze_hdmr(PROBLEM, X, Y, on_invalid=policy, **self.HDMR_KWARGS)
+        assert result.invalid.n_invalid == 0
+        assert result.invalid.n_units == 2000
+        assert [w for w in caught if "non-finite" in str(w.message)] == []
+
+    def test_a_bad_policy_name_is_refused(self, ishigami_data):
+        """T4: an unknown on_invalid raises before any fitting work happens."""
+        X, Y = ishigami_data
+        with pytest.raises(ValueError, match="on_invalid must be one of"):
+            analyze_hdmr(PROBLEM, X, Y, on_invalid="Drop", **self.HDMR_KWARGS)
+
+    def test_shapley_carries_the_report_through(self, ishigami_data):
+        """T4: the report survives the analytical Shapley step unchanged."""
+        X, Y = ishigami_data
+        Y = np.asarray(Y).copy()
+        Y[3] = np.nan
+        with pytest.warns(JaxgsaWarning):
+            result = analyze_hdmr(PROBLEM, X, Y, on_invalid="drop", **self.HDMR_KWARGS)
+        assert result.shapley().invalid == result.invalid

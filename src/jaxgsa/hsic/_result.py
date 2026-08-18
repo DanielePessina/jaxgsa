@@ -8,6 +8,7 @@ import numpy as np
 import xarray as xr
 from jax import Array
 
+from jaxgsa._core.invalid import InvalidReport
 from jaxgsa._core.validation import _dims_and_coords
 from jaxgsa.problem import Problem
 
@@ -36,6 +37,9 @@ class HSICResult:
             They depend on the kernel and on the scale of the data, so
             compare them only within one analysis.
         problem: Problem definition used for the analysis.
+        invalid: What the non-finite check found in the sample, and which
+            ``on_invalid`` policy ran. ``invalid.n_invalid == 0`` means the
+            check ran and found nothing.
     """
 
     R2_HSIC: Array
@@ -43,6 +47,7 @@ class HSICResult:
     p_values: Array
     hsic_raw: Array
     problem: Problem
+    invalid: InvalidReport
 
     def __repr__(self) -> str:
         """Return a concise summary showing index shapes."""

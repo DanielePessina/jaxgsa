@@ -14,11 +14,20 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+import numpy.typing as npt
 from jax import Array
 
+from jaxgsa._core.invalid import (
+    InvalidUnit,
+    OnInvalid,
+    check_invalid,
+    resolve_policy,
+)
 from jaxgsa._core.validation import (
     _prepare_Y,
     _raise_categorical_analysis,
@@ -31,6 +40,18 @@ from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.dgsm._poincare import axis_constants
 from jaxgsa.dgsm._result import DGSMResult
 from jaxgsa.problem import Problem
+
+# Both bounds divide by Var(Y), so a single surviving row leaves nothing to
+# divide by. Two is the fewest rows that still define a variance.
+_MIN_KEPT = 2
+
+# What the report calls the two arrays it checked. DGSM puts the model
+# output and its derivative into one slot, because on the autodiff path the
+# derivative is model output too. Saying "Y" alone would send a reader to an
+# output array that is finite everywhere.
+_SOURCE_NAMES = ("X", "Y or its derivative")
+
+_METHOD = "jaxgsa.dgsm.analyze"
 
 
 def _promote_jac(jac: Array) -> Array:
@@ -230,16 +251,129 @@ def _check_point_callable(fn: Callable, X: Array) -> None:
             )
 
 
+@dataclass(frozen=True)
+class _Moments:
+    """Unreduced derivative sums from the autodiff path, in two versions.
+
+    The autodiff path makes ``Y`` itself, inside a jitted ``vmap`` of
+    ``jax.jacrev``, and reduces each batch of Jacobian rows to a running total
+    as soon as it has it. A row that is already inside that total cannot be
+    taken out again: ``NaN`` plus anything is ``NaN``. So the batch loop keeps
+    two totals side by side, one over every row and one over the clean rows
+    only, and ``analyze`` picks the one its policy calls for. The masking
+    happens where the row still exists, which is inside the loop.
+
+    Keeping both costs one extra pair of sums per batch. The Jacobian itself
+    is what the batch loop exists to bound, and neither total holds a sample
+    axis, so peak memory is unchanged.
+
+    Attributes:
+        Y: Stacked raw ``fn`` output, shape ``(N,)`` / ``(N, K)`` /
+            ``(N, T, K)``.
+        jac_finite: For each row, whether every entry of its Jacobian block is
+            finite, shape ``(N,)``. Reported separately from ``Y`` because a
+            derivative can blow up where the output does not, and ``nu`` is
+            built from the derivative.
+        row_ok: For each row, whether ``X``, ``Y`` and the Jacobian are all
+            finite, shape ``(N,)``. This is the mask the ``*_kept`` totals
+            used.
+        sum_jac: Sum of the Jacobian over every row, shape ``(D,)`` /
+            ``(K, D)`` / ``(T, K, D)``.
+        sum_jac2: Sum of the squared Jacobian over every row, same shape.
+        sum_jac_kept: Sum of the Jacobian over the rows in ``row_ok``.
+        sum_jac2_kept: Sum of the squared Jacobian over those same rows.
+    """
+
+    Y: Array
+    jac_finite: npt.NDArray[np.bool_]
+    row_ok: npt.NDArray[np.bool_]
+    sum_jac: Array
+    sum_jac2: Array
+    sum_jac_kept: Array
+    sum_jac2_kept: Array
+
+
+def _rows_finite(array: Array) -> Array:
+    """Return a ``(N,)`` mask that is True where a whole row is finite.
+
+    Args:
+        array: Any array whose leading axis is the sample axis.
+
+    Returns:
+        A boolean array of shape ``(N,)``.
+    """
+    return jnp.all(jnp.isfinite(array.reshape(array.shape[0], -1)), axis=1)
+
+
+def _mask_rows(array: Array, row_ok: Array) -> Array:
+    """Zero out the rows a mask rejects, without arithmetic on their values.
+
+    ``jnp.where`` is required here rather than a multiply by ``0.0``: a
+    multiply leaves ``NaN * 0 == NaN``, which is exactly the value the mask
+    exists to remove.
+
+    Args:
+        array: Array whose leading axis is the sample axis.
+        row_ok: Boolean mask of shape ``(N,)``.
+
+    Returns:
+        ``array`` with the rejected rows replaced by zeros.
+    """
+    return jnp.where(row_ok.reshape((-1,) + (1,) * (array.ndim - 1)), array, 0.0)
+
+
+def _model_side(Y: Array, jac_flag: npt.ArrayLike) -> npt.NDArray[np.floating]:
+    """Stack the output and its derivative into one block for the check.
+
+    :func:`jaxgsa._core.invalid.check_invalid` takes two arrays and labels
+    them ``"X"`` and ``"Y"``. DGSM has three things to check: the input
+    sample, the output, and the derivative. The output and the derivative are
+    both what the model produced, so they go into the ``"Y"`` slot together
+    and a non-finite derivative is reported as a non-finite ``"Y"``.
+
+    Args:
+        Y: Model output, leading axis the sample axis.
+        jac_flag: Derivative evidence, leading axis the sample axis. Either
+            the Jacobian itself, or a one-column stand-in that is ``NaN`` on
+            the rows whose Jacobian is not finite.
+
+    Returns:
+        A 2-D array of shape ``(N, ·)`` holding both.
+    """
+    blocks = [
+        np.asarray(a, dtype=float).reshape(np.asarray(a).shape[0], -1) for a in (Y, jac_flag)
+    ]
+    return np.concatenate(blocks, axis=1)
+
+
+def _finite_flag(row_finite: npt.NDArray[np.bool_]) -> npt.NDArray[np.floating]:
+    """Turn a per-row verdict back into a one-column array the check reads.
+
+    Args:
+        row_finite: True where the row is clean, shape ``(N,)``.
+
+    Returns:
+        A ``(N, 1)`` array holding ``0.0`` on the clean rows and ``NaN`` on
+        the rest.
+    """
+    return np.where(row_finite, 0.0, np.nan)[:, None]
+
+
 def _compute_moments(
     fn: Callable,
     X: Array,
     batch_size: int | None = None,
-) -> tuple[Array, Array, Array]:
-    """Compute DGSM moments and forward outputs via reverse-mode autodiff.
+) -> _Moments:
+    """Compute DGSM derivative sums and forward outputs via reverse-mode autodiff.
 
-    The mean over the sample axis is one vectorized reduction that covers every
-    (t, k) output slice at once. The per-slice kernel needs no explicit vmap,
-    because the closed form already batches it.
+    The reduction over the sample axis is one vectorized operation that covers
+    every (t, k) output slice at once. The per-slice kernel needs no explicit
+    vmap, because the closed form already batches it.
+
+    Every batch is reduced twice: once over all of its rows, and once over the
+    rows in which ``X``, the output and the Jacobian are all finite. See
+    :class:`_Moments` for why both are needed. ``analyze`` divides by the
+    matching row count.
 
     Args:
         fn: JAX-differentiable function ``(D,) -> ()``, ``(D,) -> (K,)``, or
@@ -249,12 +383,10 @@ def _compute_moments(
             processes all N rows at once.
 
     Returns:
-        A tuple ``(Y, sigma, nu)``. ``Y`` is the stacked raw ``fn`` output,
-        shape ``(N,)`` / ``(N, K)`` / ``(N, T, K)``. ``sigma`` and ``nu`` are
-        the reduced raw moments and carry the ``fn`` output's own slice axes,
-        shape ``(D,)`` / ``(K, D)`` / ``(T, K, D)``. ``analyze`` applies the
-        layout canonicalization (promotion and label-driven axis moves) once
-        the semantic axes are known.
+        A :class:`_Moments`. Its sums carry the ``fn`` output's own slice
+        axes, shape ``(D,)`` / ``(K, D)`` / ``(T, K, D)``. ``analyze`` applies
+        the layout canonicalization (promotion and label-driven axis moves)
+        once the semantic axes are known.
     """
 
     # Reverse-mode Jacobian is efficient when K (outputs) < D (inputs).
@@ -267,16 +399,32 @@ def _compute_moments(
     combined = jax.jit(jax.vmap(jax.jacrev(_fn_aux, has_aux=True)))
 
     N = X.shape[0]
+    unbatched = not batch_size or batch_size <= 0 or N <= batch_size
 
-    if not batch_size or batch_size <= 0 or N <= batch_size:
+    if unbatched:
         jac, Y = combined(X)
-        return Y, jnp.mean(jac, axis=0), jnp.mean(jac**2, axis=0)
+        jac_finite = _rows_finite(jac)
+        row_ok = jac_finite & _rows_finite(Y) & _rows_finite(X)
+        jac_kept = _mask_rows(jac, row_ok)
+        return _Moments(
+            Y=Y,
+            jac_finite=np.asarray(jac_finite),
+            row_ok=np.asarray(row_ok),
+            sum_jac=jnp.sum(jac, axis=0),
+            sum_jac2=jnp.sum(jac**2, axis=0),
+            sum_jac_kept=jnp.sum(jac_kept, axis=0),
+            sum_jac2_kept=jnp.sum(jac_kept**2, axis=0),
+        )
 
     # Batched path: accumulate running sums to bound peak memory.
     # The first full batch triggers XLA compilation; subsequent batches reuse it.
     sum_jac: Array | None = None
     sum_jac2: Array | None = None
+    sum_jac_kept: Array | None = None
+    sum_jac2_kept: Array | None = None
     Y_parts: list[Array] = []
+    jac_finite_parts: list[Array] = []
+    row_ok_parts: list[Array] = []
     for start in range(0, N, batch_size):
         end = min(start + batch_size, N)
         actual_len = end - start
@@ -289,17 +437,38 @@ def _compute_moments(
             X_chunk = jnp.concatenate([X_chunk, jnp.zeros((pad_size, X.shape[1]))], axis=0)
 
         jac, Y_chunk_full = combined(X_chunk)
-        Y_parts.append(Y_chunk_full[:actual_len])
+        Y_chunk = Y_chunk_full[:actual_len]
+        Y_parts.append(Y_chunk)
 
         jac = jac[:actual_len]
+        # The mask is built and applied here, before the sums below fold this
+        # batch into the running totals. After that point the batch is gone.
+        chunk_jac_finite = _rows_finite(jac)
+        chunk_row_ok = chunk_jac_finite & _rows_finite(Y_chunk) & _rows_finite(X[start:end])
+        jac_finite_parts.append(chunk_jac_finite)
+        row_ok_parts.append(chunk_row_ok)
+        jac_kept = _mask_rows(jac, chunk_row_ok)
+
         sj = jnp.sum(jac, axis=0)
         sj2 = jnp.sum(jac**2, axis=0)
+        sjk = jnp.sum(jac_kept, axis=0)
+        sjk2 = jnp.sum(jac_kept**2, axis=0)
         sum_jac = sj if sum_jac is None else sum_jac + sj
         sum_jac2 = sj2 if sum_jac2 is None else sum_jac2 + sj2
+        sum_jac_kept = sjk if sum_jac_kept is None else sum_jac_kept + sjk
+        sum_jac2_kept = sjk2 if sum_jac2_kept is None else sum_jac2_kept + sjk2
 
-    Y = jnp.concatenate(Y_parts, axis=0)
     assert sum_jac is not None and sum_jac2 is not None
-    return Y, sum_jac / N, sum_jac2 / N
+    assert sum_jac_kept is not None and sum_jac2_kept is not None
+    return _Moments(
+        Y=jnp.concatenate(Y_parts, axis=0),
+        jac_finite=np.asarray(jnp.concatenate(jac_finite_parts, axis=0)),
+        row_ok=np.asarray(jnp.concatenate(row_ok_parts, axis=0)),
+        sum_jac=sum_jac,
+        sum_jac2=sum_jac2,
+        sum_jac_kept=sum_jac_kept,
+        sum_jac2_kept=sum_jac2_kept,
+    )
 
 
 def analyze(
@@ -310,6 +479,7 @@ def analyze(
     Y: Array | None = None,
     dfdx: Array | None = None,
     batch_size: int | None = None,
+    on_invalid: OnInvalid = "raise",
 ) -> DGSMResult:
     """Compute DGSM sensitivity indices and Sobol index bounds.
 
@@ -361,14 +531,28 @@ def analyze(
         batch_size: Number of N sample rows per batch on the autodiff path.
             The Jacobian accumulates in batches of this many samples, which
             bounds peak memory. None (default) processes all N samples at once.
+        on_invalid: What to do about a sample row that holds a non-finite
+            value. ``"raise"`` (default) refuses the sample, ``"drop"``
+            removes those rows and analyzes the rest, and ``"propagate"``
+            warns and computes anyway. The check covers the **derivative** as
+            well as the output, on both calling conventions: a derivative that
+            blows up poisons ``nu`` even where the output itself is finite.
+            The derivative is checked in the ``"Y"`` slot, so the report names
+            ``"Y"`` for a bad derivative. On the autodiff path ``X`` is
+            checked too, and the rows are masked before the batch reduction,
+            so ``"drop"`` gives the same moments as re-running on the smaller
+            sample. See :mod:`jaxgsa._core.invalid`.
 
     Returns:
         A ``DGSMResult`` with ``nu``, ``sigma``, ``upper_bound``, and
         ``lower_bound``, each of shape ``(D,)`` / ``(K, D)`` / ``(T, K, D)``
-        mirroring the output layout, plus ``var_y``.
+        mirroring the output layout, plus ``var_y`` and the non-finite report
+        in ``invalid``.
 
     Raises:
-        ValueError: In any of these cases. Arguments from both ``(fn, X)`` and
+        ValueError: In any of these cases. ``on_invalid`` is not one of the
+            three policies, or the non-finite policy refuses the sample.
+            Arguments from both ``(fn, X)`` and
             ``(Y, dfdx)`` were given. Neither pair was given. One pair was only
             partly filled, such as ``fn`` without ``X``. ``fn`` takes a batch
             ``(N, D)`` instead of one ``(D,)`` row, or cannot be traced on one
@@ -378,6 +562,10 @@ def analyze(
             assume independent inputs. ``problem`` has categorical parameters,
             and a derivative along an unordered level code has no meaning.
     """
+    # Validate the policy before anything expensive runs. The autodiff path
+    # evaluates the model, and a misspelled on_invalid should not cost that.
+    policy = resolve_policy(on_invalid, method=_METHOD, unit=InvalidUnit.ROW)
+
     # The Poincare-inequality bound on ST assumes independent inputs; both
     # calling conventions are rejected for a correlated problem.
     _raise_correlated_analysis(problem, "jaxgsa.dgsm.analyze")
@@ -396,8 +584,38 @@ def analyze(
         # Free shape-only trace: catches a batch (N, D) callable here, instead
         # of as an IndexError from inside jax.jacrev.
         _check_point_callable(fn, X)
-        Y_out, sigma, nu = _compute_moments(fn, X, batch_size=batch_size)
-        Y_valid = _validate_output(Y_out, int(X.shape[0]), problem)
+        moments = _compute_moments(fn, X, batch_size=batch_size)
+        N = int(X.shape[0])
+        Y_valid = _validate_output(moments.Y, N, problem)
+        # The Jacobian never leaves the device whole, so it reaches the check
+        # as a per-row verdict rather than as its own array. The verdict is
+        # the same one the batch loop masked with.
+        keep, invalid = check_invalid(
+            policy=policy,
+            method=_METHOD,
+            unit=InvalidUnit.ROW,
+            n_units=N,
+            X=X,
+            Y=_model_side(Y_valid, _finite_flag(moments.jac_finite)),
+            min_kept=_MIN_KEPT,
+            source_names=_SOURCE_NAMES,
+        )
+        if keep.all():
+            # No row was removed, so the totals over every row are the ones
+            # to divide. Under "propagate" this is the branch that lets the
+            # non-finite value through, which is what it is for.
+            sigma = moments.sum_jac / N
+            nu = moments.sum_jac2 / N
+        else:
+            # The batch loop masked with its own copy of this verdict, built
+            # from the same three arrays. If the two ever disagreed, the
+            # moments below would come from a different set of rows than the
+            # ones the report names.
+            assert np.array_equal(keep, moments.row_ok)
+            n_kept = int(keep.sum())
+            sigma = moments.sum_jac_kept / n_kept
+            nu = moments.sum_jac2_kept / n_kept
+            Y_valid = Y_valid[keep]
         sigma = _promote_moments(sigma)
         nu = _promote_moments(nu)
     else:
@@ -418,6 +636,20 @@ def analyze(
                 f"dfdx shape {dfdx_arr.shape} does not match Y shape {Y_valid.shape} "
                 f"with trailing D={D}"
             )
+        # Both arrays are in hand here, so the check needs no stand-in for
+        # the derivative: it goes into the "Y" slot whole, alongside Y.
+        keep, invalid = check_invalid(
+            policy=policy,
+            method=_METHOD,
+            unit=InvalidUnit.ROW,
+            n_units=int(dfdx_arr.shape[0]),
+            Y=_model_side(Y_valid, dfdx_arr),
+            min_kept=_MIN_KEPT,
+            source_names=_SOURCE_NAMES,
+        )
+        if not keep.all():
+            Y_valid = Y_valid[keep]
+            dfdx_arr = dfdx_arr[keep]
         dfdx_arr = _promote_jac(dfdx_arr)
         # One vectorized reduction over N covers every (t, k) slice at once.
         sigma = jnp.mean(dfdx_arr, axis=0)  # E[df/dx_i], (T, K, D)
@@ -478,4 +710,5 @@ def analyze(
         lower_bound=lower,
         var_y=var_y,
         problem=problem,
+        invalid=invalid,
     )

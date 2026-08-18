@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from jaxgsa import JaxgsaWarning
 from jaxgsa.benchmarks import ishigami
 from jaxgsa.pawn import analyze
 from jaxgsa.problem import Problem
@@ -417,3 +418,143 @@ class TestPAWNValidation:
         problem = Problem(names=("x",), bounds=((0, 1),))
         with pytest.raises(ValueError, match="rows"):
             analyze(problem, jnp.ones((10, 1)), jnp.ones(5))
+
+
+def _invalid_sample(n: int = 200, seed: int = 0):
+    """Build a clean two-parameter PAWN sample for the on_invalid tests."""
+    problem = Problem(names=("a", "b"), bounds=((0.0, 1.0), (0.0, 1.0)))
+    rng = np.random.default_rng(seed)
+    X = rng.uniform(size=(n, 2))
+    Y = X[:, 0] ** 2 + 0.5 * X[:, 1]
+    return problem, jnp.asarray(X), jnp.asarray(Y)
+
+
+class TestPAWNInvalidPolicy:
+    """T4 (behaviour): jaxgsa.pawn.analyze honours the shared on_invalid policy."""
+
+    def test_raise_is_the_default_and_names_the_rows(self):
+        """T4: a non-finite Y row refuses the analysis and says which row it is.
+
+        The row index is the whole point of the message: it names the model
+        evaluation the user has to investigate.
+        """
+        problem, X, Y = _invalid_sample()
+        Y = Y.at[7].set(jnp.nan)
+        with pytest.raises(ValueError) as exc:
+            analyze(problem, X, Y)
+        message = str(exc.value)
+        assert "jaxgsa.pawn.analyze" in message
+        assert "1 of 200 rows" in message
+        assert "[7]" in message
+
+    def test_propagate_warns_and_keeps_every_row(self):
+        """T4: 'propagate' computes anyway, loudly, and drops nothing.
+
+        The point of the policy is that the user is told and that the bad row
+        still reaches the estimator. PAWN reads the output through an ECDF,
+        so a NaN there shifts the index rather than turning it into a NaN;
+        the test therefore proves the row was kept by comparing against the
+        result of removing it, which must differ.
+        """
+        problem, X, Y = _invalid_sample()
+        Y = Y.at[7].set(jnp.nan)
+        with pytest.warns(JaxgsaWarning, match="reaches the indices"):
+            result = analyze(problem, X, Y, on_invalid="propagate")
+        assert result.invalid.policy == "propagate"
+        assert result.invalid.n_invalid == 1
+        assert result.invalid.unit_indices == (7,)
+
+        keep = np.ones(200, dtype=bool)
+        keep[7] = False
+        without = analyze(problem, X[keep], Y[keep])
+        assert not np.array_equal(np.asarray(result.pawn), np.asarray(without.pawn))
+
+    def test_drop_removes_the_row_and_returns_finite_indices(self):
+        """T4: 'drop' analyzes the remainder and the indices come back usable."""
+        problem, X, Y = _invalid_sample()
+        Y = Y.at[7].set(jnp.nan)
+        with pytest.warns(JaxgsaWarning, match="dropped 1 of 200 rows"):
+            result = analyze(problem, X, Y, on_invalid="drop")
+        assert result.invalid.n_kept == 199
+        assert result.invalid.unit_indices == (7,)
+        assert np.all(np.isfinite(np.asarray(result.pawn)))
+
+    def test_a_bad_x_is_caught_and_named(self):
+        """T4: a non-finite input is caught too, and the report says it was X.
+
+        Before 0.10 a non-finite X reached ``_equal_width_bins`` and took the
+        out-of-range sentinel, which quietly removed the sample from every
+        conditional set with no warning at all.
+        """
+        problem, X, Y = _invalid_sample()
+        X = X.at[3, 1].set(jnp.inf)
+        with pytest.raises(ValueError, match=r"in X\b") as exc:
+            analyze(problem, X, Y)
+        assert "[3]" in str(exc.value)
+        with pytest.warns(JaxgsaWarning):
+            result = analyze(problem, X, Y, on_invalid="drop")
+        assert result.invalid.sources == ("X",)
+
+    def test_a_non_finite_x_is_no_longer_swallowed_by_the_bin_sentinel(self):
+        """T4: the silent -1 path is unreachable from analyze().
+
+        ``_equal_width_bins`` still maps a non-finite value to the
+        out-of-range sentinel, and out-of-range inputs are a separate,
+        legitimate concern. What changed is that ``analyze`` never lets a
+        non-finite value get that far: every policy reports it first, so no
+        sample leaves the conditional sets in silence. The old behaviour was
+        to return an index with no warning and a smaller effective sample.
+        """
+        import warnings as _warnings
+
+        problem, X, Y = _invalid_sample()
+        X = X.at[5, 0].set(jnp.nan)
+
+        # The default refuses outright.
+        with pytest.raises(ValueError, match="non-finite"):
+            analyze(problem, X, Y)
+
+        # Every other policy at least says something.
+        for policy in ("propagate", "drop"):
+            with _warnings.catch_warnings(record=True) as rec:
+                _warnings.simplefilter("always")
+                result = analyze(problem, X, Y, on_invalid=policy)
+            assert any(isinstance(r.message, JaxgsaWarning) for r in rec), policy
+            assert result.invalid.unit_indices == (5,), policy
+
+    def test_dropping_an_x_row_takes_its_y_row_with_it(self):
+        """T4: X and Y are dropped as a pair, so the sample stays aligned.
+
+        Removing the bad row of X but keeping its row of Y would shift every
+        later output by one, which no estimator can detect. The proof is an
+        equality: dropping through the policy must give exactly the indices
+        of the sample with that row deleted from both arrays by hand.
+        """
+        problem, X, Y = _invalid_sample()
+        X_bad = X.at[42, 0].set(jnp.nan)
+
+        with pytest.warns(JaxgsaWarning):
+            dropped = analyze(problem, X_bad, Y, on_invalid="drop", seed=0)
+
+        keep = np.ones(200, dtype=bool)
+        keep[42] = False
+        by_hand = analyze(problem, X[keep], Y[keep], seed=0)
+
+        np.testing.assert_array_equal(np.asarray(dropped.pawn), np.asarray(by_hand.pawn))
+
+    @pytest.mark.parametrize("policy", ["raise", "propagate", "drop"])
+    def test_a_clean_sample_is_untouched_under_every_policy(self, policy, recwarn):
+        """T4: nothing found means nothing removed, nothing warned, empty report."""
+        problem, X, Y = _invalid_sample()
+        result = analyze(problem, X, Y, on_invalid=policy)
+        assert result.invalid.n_invalid == 0
+        assert result.invalid.n_units == 200
+        assert result.invalid.sources == ()
+        assert result.invalid.policy == policy
+        assert len(recwarn) == 0
+
+    def test_rejects_an_unknown_policy(self):
+        """T4: a misspelled policy is refused by name, not silently ignored."""
+        problem, X, Y = _invalid_sample()
+        with pytest.raises(ValueError, match="on_invalid must be one of"):
+            analyze(problem, X, Y, on_invalid="skip")

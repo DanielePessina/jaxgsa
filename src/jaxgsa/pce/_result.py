@@ -9,6 +9,7 @@ import numpy as np
 import xarray as xr
 from jax import Array
 
+from jaxgsa._core.invalid import InvalidReport
 from jaxgsa._core.surrogate import SurrogateResult, _PredictPlan
 from jaxgsa._core.validation import _dims_and_coords
 from jaxgsa.problem import Problem
@@ -50,6 +51,10 @@ class PCEResult(SurrogateResult):
         order: Effective total polynomial degree used. It may be lower than
             requested if the sample budget forced a reduction. It is a single
             int, because the shared basis serves every output slice.
+        invalid: What the non-finite check found in ``(X, Y)`` and what the
+            ``on_invalid`` policy did about it. See
+            :class:`jaxgsa._core.invalid.InvalidReport`. ``n_invalid == 0``
+            means the check ran and found nothing.
         loo_rmse: Leave-one-out cross-validation RMSE per output slice, shape
             ``()`` / ``(K,)`` / ``(T, K)``, or None. It is in the units of
             ``Y``. Compare it against ``Y.std()``: a ratio near or above 1
@@ -78,6 +83,7 @@ class PCEResult(SurrogateResult):
     coefficients: Array
     multi_index: np.ndarray
     order: int
+    invalid: InvalidReport
     loo_rmse: Array | None = None
     explained_variance: Array | None = None
     streamed: bool = False
@@ -133,6 +139,7 @@ class PCEResult(SurrogateResult):
             problem=self.problem,
             backend="pce",
             order=self.order,
+            invalid=self.invalid,
         )
 
     def __repr__(self) -> str:

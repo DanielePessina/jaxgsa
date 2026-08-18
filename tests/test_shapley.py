@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -460,3 +462,140 @@ def test_pce_time_series_to_dataset(linear_data):
     ds = result.to_dataset(time_coords=[0.1, 0.2])
     assert ds["Sh"].dims == ("time", "output", "param")
     np.testing.assert_allclose(ds.coords["time"].values, [0.1, 0.2])
+
+
+# ---------------------------------------------------------------------------
+# on_invalid policy
+# ---------------------------------------------------------------------------
+
+# HDMR needs at least 300 rows, so the shared sample is sized for it. Both
+# backends stay cheap at this size.
+_BACKEND_KWARGS = {"pce": {"order": 2}, "hdmr": {"maxorder": 2, "m": 2}}
+
+
+def _dirty(linear_data, row: int = 5):
+    """Return the linear sample with one output row made non-finite."""
+    X, Y = linear_data
+    Y_bad = np.asarray(Y).copy()
+    Y_bad[row] = np.nan
+    return np.asarray(X), Y_bad
+
+
+class TestShapleyOnInvalid:
+    """T4: ``shapley.analyze`` forwards the policy and applies it exactly once.
+
+    ``shapley.analyze`` is pure delegation: it fits one backend and calls that
+    result's ``shapley()``. It therefore must not run the non-finite check of
+    its own, or a single user call would warn twice and the two reports could
+    disagree. ``on_invalid`` is a named parameter rather than one of
+    ``**backend_kwargs`` so exactly one backend receives it.
+    """
+
+    @pytest.mark.parametrize("backend", ["pce", "hdmr"])
+    @pytest.mark.parametrize("policy", ["propagate", "drop"])
+    def test_the_policy_is_applied_exactly_once(self, linear_data, backend, policy):
+        """T4: one user call produces one non-finite warning, never two.
+
+        A policy applied in both the backend wrapper and the Shapley wrapper
+        would be invisible in the indices: the second pass finds nothing left
+        to drop. Counting the warnings is what makes the duplication visible.
+        """
+        X, Y = _dirty(linear_data)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = _analyze_shapley(
+                linear.PROBLEM,
+                X,
+                Y,
+                backend=backend,
+                on_invalid=policy,
+                **_BACKEND_KWARGS[backend],
+            )
+        policy_warnings = [w for w in caught if "non-finite" in str(w.message)]
+        assert len(policy_warnings) == 1, [str(w.message) for w in policy_warnings]
+        assert result.invalid.n_invalid == 1
+        assert result.invalid.policy == policy
+
+    @pytest.mark.parametrize("backend", ["pce", "hdmr"])
+    def test_raise_is_the_default_through_the_wrapper(self, linear_data, backend):
+        """T4: the wrapper inherits the raising default from its backend."""
+        X, Y = _dirty(linear_data)
+        with pytest.raises(ValueError, match="non-finite") as exc:
+            _analyze_shapley(linear.PROBLEM, X, Y, backend=backend, **_BACKEND_KWARGS[backend])
+        assert f"jaxgsa.{backend}.analyze" in str(exc.value)
+        assert "[5]" in str(exc.value)
+
+    @pytest.mark.parametrize("backend", ["pce", "hdmr"])
+    def test_drop_yields_finite_effects_and_propagate_does_not(self, linear_data, backend):
+        """T4: the two non-raising policies differ in the effects they return."""
+        X, Y = _dirty(linear_data)
+        kwargs = dict(backend=backend, **_BACKEND_KWARGS[backend])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            dropped = _analyze_shapley(linear.PROBLEM, X, Y, on_invalid="drop", **kwargs)
+            propagated = _analyze_shapley(linear.PROBLEM, X, Y, on_invalid="propagate", **kwargs)
+        assert np.all(np.isfinite(np.asarray(dropped.Sh)))
+        assert not np.all(np.isfinite(np.asarray(propagated.Sh)))
+        assert dropped.invalid.unit_indices == (5,)
+
+    @pytest.mark.parametrize("backend", ["pce", "hdmr"])
+    def test_a_non_finite_input_is_caught_too(self, linear_data, backend):
+        """T4: X is checked as well as Y, and ``sources`` says which array."""
+        X, Y = linear_data
+        X_bad = np.asarray(X).copy()
+        X_bad[9, 1] = -np.inf
+        kwargs = dict(backend=backend, **_BACKEND_KWARGS[backend])
+        with pytest.raises(ValueError, match=r"in X\.") as exc:
+            _analyze_shapley(linear.PROBLEM, X_bad, Y, **kwargs)
+        assert "[9]" in str(exc.value)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = _analyze_shapley(linear.PROBLEM, X_bad, Y, on_invalid="drop", **kwargs)
+        assert result.invalid.sources == ("X",)
+
+    @pytest.mark.parametrize("backend", ["pce", "hdmr"])
+    @pytest.mark.parametrize("policy", ["raise", "propagate", "drop"])
+    def test_a_clean_sample_is_clean_under_every_policy(self, linear_data, backend, policy):
+        """T4: nothing found means no warning and a report that says so."""
+        X, Y = linear_data
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = _analyze_shapley(
+                linear.PROBLEM,
+                X,
+                Y,
+                backend=backend,
+                on_invalid=policy,
+                **_BACKEND_KWARGS[backend],
+            )
+        assert result.invalid.n_invalid == 0
+        assert result.invalid.n_units == len(np.asarray(Y))
+        assert [w for w in caught if "non-finite" in str(w.message)] == []
+
+    @pytest.mark.parametrize("backend", ["pce", "hdmr"])
+    def test_a_bad_policy_name_is_refused(self, linear_data, backend):
+        """T4: an unknown on_invalid raises before any surrogate is fitted."""
+        X, Y = linear_data
+        with pytest.raises(ValueError, match="on_invalid must be one of"):
+            _analyze_shapley(
+                linear.PROBLEM,
+                X,
+                Y,
+                backend=backend,
+                on_invalid="ignore",
+                **_BACKEND_KWARGS[backend],
+            )
+
+    def test_on_invalid_is_not_swallowed_by_backend_kwargs(self):
+        """T4: ``on_invalid`` binds to the named parameter, not ``**backend_kwargs``.
+
+        If it travelled through ``**backend_kwargs`` a future backend that did
+        not accept the keyword would raise ``TypeError`` instead of applying
+        the policy, and the forwarding could silently happen twice.
+        """
+        import inspect
+
+        signature = inspect.signature(jaxgsa.shapley.analyze)
+        parameter = signature.parameters["on_invalid"]
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameter.default == "raise"

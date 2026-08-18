@@ -6,6 +6,7 @@ import numpy as np
 import xarray as xr
 from jax import Array
 
+from jaxgsa._core.invalid import InvalidReport
 from jaxgsa._core.validation import _dims_and_coords
 from jaxgsa.problem import Problem
 
@@ -34,6 +35,9 @@ class SobolResult:
             for convenience. The diagonal holds a parameter's interaction with
             itself, which is undefined, so it is set to ``NaN``.
         problem: Problem definition used for the analysis.
+        invalid: What the non-finite check found and what it did about it. A
+            report with ``n_invalid == 0`` means the check ran and found
+            nothing. See :class:`jaxgsa._core.invalid.InvalidReport`.
         S1_conf: Bootstrap confidence bounds on ``S1``, shape ``(2, D)`` /
             ``(2, K, D)`` / ``(2, T, K, D)``, or ``None`` without a bootstrap.
             The leading axis holds ``[lower, upper]``.
@@ -42,21 +46,16 @@ class SobolResult:
         S2_conf: Bootstrap confidence bounds on ``S2``, shape ``(2, D, D)`` /
             ``(2, K, D, D)`` / ``(2, T, K, D, D)``, or ``None`` without a
             bootstrap. Symmetric with a ``NaN`` diagonal, like ``S2``.
-        nan_counts: Number of ``NaN`` entries per index array, keyed by index
-            name, or ``None`` when not recorded. Zero-variance output slices
-            are the usual cause. For ``S2`` only the directly estimated upper
-            triangle is counted, so the always-``NaN`` diagonal does not
-            inflate the count.
     """
 
     S1: Array  # (D,), (K, D), or (T, K, D)
     ST: Array  # same shape as S1
     S2: Array | None  # (..., D, D), symmetric, diagonal NaN
     problem: Problem
+    invalid: InvalidReport
     S1_conf: Array | None = None  # (2, *S1.shape)
     ST_conf: Array | None = None
     S2_conf: Array | None = None
-    nan_counts: dict[str, int] | None = None
 
     def __repr__(self) -> str:
         """Return a concise summary showing index shapes."""

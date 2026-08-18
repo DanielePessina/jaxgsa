@@ -21,6 +21,33 @@ warning that jaxgsa raises. It is a subclass of `UserWarning`, so existing
 jaxgsa warnings alone, for example
 `warnings.filterwarnings("ignore", category=JaxgsaWarning)`.
 
+### Failed model runs
+
+Every `analyze()` function takes `on_invalid`, which says what to do when the
+model output holds `NaN` or `Inf`. It accepts `"raise"` (the default),
+`"propagate"` and `"drop"`. See
+[Failed model runs](/guide/methods#failed-model-runs) for what each one does
+and which unit of data `"drop"` removes.
+
+Two supporting types live at the package root.
+
+#### InvalidReport
+
+`jaxgsa.InvalidReport` — what the non-finite check found, carried by every
+result as `result.invalid`. It records `n_invalid`, `n_units`, `n_kept`,
+`unit_indices`, `row_indices`, `sources` and the `policy` that ran. The
+positions refer to the array as it was passed in, before anything was
+removed, so they name the model runs to investigate. A report with
+`n_invalid == 0` means the check ran and found nothing.
+
+#### InvalidUnit
+
+`jaxgsa.InvalidUnit` — the block of data that one bad value invalidates,
+reported as `result.invalid.unit`. It is one of `ROW`, `SALTELLI_GROUP`,
+`TRAJECTORY`, `BASE_POINT` or `CURVE`. A design that is read in blocks cannot
+lose part of one and stay valid, which is why the unit, and not the row, is
+what `"drop"` removes.
+
 ### Categorical inputs
 
 Declare a categorical parameter as

@@ -6,6 +6,7 @@ import numpy as np
 import xarray as xr
 from jax import Array
 
+from jaxgsa._core.invalid import InvalidReport
 from jaxgsa._core.validation import _dims_and_coords
 from jaxgsa.problem import Problem
 
@@ -27,6 +28,11 @@ class EFASTResult:
         S1: First-order indices, shape ``(D,)`` / ``(K, D)`` / ``(T, K, D)``.
         ST: Total-order indices, same shape as ``S1``.
         problem: Problem definition used for the analysis.
+        invalid: What the non-finite check found and what it did about it. A
+            report with ``n_invalid == 0`` means the check ran and found
+            nothing. A search curve can never be dropped, so the report is
+            only ever informational here. See
+            :class:`jaxgsa._core.invalid.InvalidReport`.
         omega_0: Primary frequency used in the analysis.
         M: Interference factor, the number of harmonics summed.
     """
@@ -34,6 +40,7 @@ class EFASTResult:
     S1: Array
     ST: Array
     problem: Problem
+    invalid: InvalidReport
     omega_0: int = 0
     M: int = 4
 

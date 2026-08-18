@@ -6,9 +6,36 @@ import numpy as np
 import pytest
 
 import jaxgsa
+from jaxgsa._core.invalid import InvalidReport, InvalidUnit
 from jaxgsa.hdmr import HDMRResult
 from jaxgsa.problem import Problem
 from jaxgsa.sobol._result import SobolResult
+
+
+# Every result class carries an invalid report. These tests build results by
+# hand rather than by running an analysis, so they need a stand-in that says
+# the check ran and found nothing.
+def _clean_invalid(unit: InvalidUnit) -> InvalidReport:
+    """Build an empty report, for results assembled by hand in these tests.
+
+    These tests build result objects directly to exercise ``to_dataset()``,
+    so no analysis ran and no check ran either. The unit is passed in rather
+    than fixed, because it is a property of the method the result came from:
+    a Saltelli-based result counts groups, a given-data one counts rows.
+    """
+    return InvalidReport(
+        policy="raise",
+        unit=unit,
+        n_units=0,
+        n_invalid=0,
+        unit_indices=(),
+        row_indices=(),
+        sources=(),
+    )
+
+
+_CLEAN_INVALID = _clean_invalid(InvalidUnit.SALTELLI_GROUP)
+_CLEAN_INVALID_ROW = _clean_invalid(InvalidUnit.ROW)
 
 
 @pytest.fixture
@@ -27,6 +54,7 @@ class TestSAResultToDataset:
             ST=jnp.array([0.4, 0.5, 0.6]),
             S2=None,
             problem=problem,
+            invalid=_CLEAN_INVALID,
         )
         ds = r.to_dataset()
         assert list(ds.S1.dims) == ["param"]
@@ -40,6 +68,7 @@ class TestSAResultToDataset:
             ST=jnp.ones((2, 3)),
             S2=None,
             problem=problem,
+            invalid=_CLEAN_INVALID,
         )
         ds = r.to_dataset()
         assert list(ds.S1.dims) == ["output", "param"]
@@ -52,6 +81,7 @@ class TestSAResultToDataset:
             ST=jnp.ones((4, 2, 3)),
             S2=None,
             problem=problem,
+            invalid=_CLEAN_INVALID,
         )
         ds = r.to_dataset()
         assert list(ds.S1.dims) == ["time", "output", "param"]
@@ -69,6 +99,7 @@ class TestSAResultToDataset:
             ST=jnp.ones((2, 2)),
             S2=None,
             problem=p,
+            invalid=_CLEAN_INVALID,
         )
         ds = r.to_dataset()
         assert list(ds.coords["output"].values) == ["temp", "pressure"]
@@ -80,6 +111,7 @@ class TestSAResultToDataset:
             ST=jnp.ones((3, 2, 3)),
             S2=None,
             problem=problem,
+            invalid=_CLEAN_INVALID,
         )
         ds = r.to_dataset(time_coords=[0.0, 0.5, 1.0])
         np.testing.assert_allclose(ds.coords["time"].values, [0.0, 0.5, 1.0])
@@ -92,6 +124,7 @@ class TestSAResultToDataset:
             ST=jnp.ones(D),
             S2=jnp.ones((D, D)),
             problem=problem,
+            invalid=_CLEAN_INVALID,
         )
         ds = r.to_dataset()
         assert list(ds.S2.dims) == ["param_i", "param_j"]
@@ -105,6 +138,7 @@ class TestSAResultToDataset:
             ST=jnp.ones(D),
             S2=None,
             problem=problem,
+            invalid=_CLEAN_INVALID,
             S1_conf=jnp.stack([jnp.zeros(D), jnp.ones(D)]),
             ST_conf=jnp.stack([jnp.zeros(D), 2 * jnp.ones(D)]),
         )
@@ -123,6 +157,7 @@ class TestSAResultToDataset:
             ST=jnp.ones(D),
             S2=jnp.ones((D, D)),
             problem=problem,
+            invalid=_CLEAN_INVALID,
             S1_conf=jnp.stack([jnp.zeros(D), jnp.ones(D)]),
             ST_conf=jnp.stack([jnp.zeros(D), jnp.ones(D)]),
             S2_conf=jnp.stack([jnp.zeros((D, D)), jnp.ones((D, D))]),
@@ -144,6 +179,7 @@ class TestSAResultToDataset:
             ST=jnp.ones((2, 2)),
             S2=None,
             problem=p,
+            invalid=_CLEAN_INVALID,
         )
         with pytest.raises(ValueError, match="output_names length"):
             r.to_dataset()
@@ -225,6 +261,7 @@ class TestHDMRResultToDataset:
             ST=jnp.ones(D),
             problem=problem,
             terms=terms,
+            invalid=_CLEAN_INVALID_ROW,
         )
         ds = r.to_dataset()
         assert list(ds.Sa.dims) == ["term"]
@@ -242,6 +279,7 @@ class TestHDMRResultToDataset:
             ST=jnp.ones(3),
             problem=problem,
             terms=terms,
+            invalid=_CLEAN_INVALID_ROW,
             select=jnp.array([1, 0, 1]),
             rmse=jnp.array(0.05),
         )
@@ -261,6 +299,7 @@ class TestHDMRResultToDataset:
             ST=jnp.ones((2, 3)),
             problem=problem,
             terms=terms,
+            invalid=_CLEAN_INVALID_ROW,
         )
         ds = r.to_dataset()
         assert list(ds.Sa.dims) == ["output", "term"]

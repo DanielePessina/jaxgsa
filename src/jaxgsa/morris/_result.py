@@ -9,6 +9,7 @@ import numpy as np
 import xarray as xr
 from jax import Array
 
+from jaxgsa._core.invalid import InvalidReport
 from jaxgsa._core.validation import _dims_and_coords
 from jaxgsa.problem import Problem
 
@@ -37,6 +38,9 @@ class MorrisResult:
             ``(..., D)``. A value that is large next to ``mu_star`` shows
             nonlinearity or interactions.
         problem: Problem definition used for the analysis.
+        invalid: What the non-finite check found and what it did about it. A
+            report with ``n_invalid == 0`` means the check ran and found
+            nothing. See :class:`jaxgsa._core.invalid.InvalidReport`.
         mu_conf: Bootstrap confidence bounds on ``mu``, shape ``(2, ...)`` for
             ``[lower, upper]``. ``None`` when the analysis ran no bootstrap.
         mu_star_conf: Bootstrap confidence bounds on ``mu_star``, shape
@@ -52,6 +56,7 @@ class MorrisResult:
     mu_star: Array
     sigma: Array
     problem: Problem
+    invalid: InvalidReport
     mu_conf: Array | None = None
     mu_star_conf: Array | None = None
     sigma_conf: Array | None = None

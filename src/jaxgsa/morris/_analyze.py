@@ -23,6 +23,12 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
+from jaxgsa._core.invalid import (
+    InvalidUnit,
+    OnInvalid,
+    check_invalid,
+    resolve_policy,
+)
 from jaxgsa._core.validation import (
     _prenormalize_outputs,
     _prepare_Y,
@@ -35,9 +41,9 @@ from jaxgsa.morris._sampling import MorrisSamples
 
 # Fewest trajectories that still give statistically meaningful screening
 # measures. The analysis reports this floor only when the design lost blocks
-# that the user did not give up: blocks with an unmeasurable step, or blocks
-# that non-finite cleaning removed. A small design the user asked for is
-# deliberate, so it stays silent.
+# that the user did not give up, meaning blocks with an unmeasurable step. The
+# shared non-finite policy carries its own copy of the floor for the blocks it
+# drops. A small design the user asked for is deliberate, so it stays silent.
 _MIN_TRAJECTORIES = 10
 
 # Peak-memory budget, in array elements, for one bootstrap chunk. Each resample
@@ -116,58 +122,42 @@ def _resample_stats(idx_chunk: Array, ee: Array) -> tuple[Array, Array, Array]:
     return jax.vmap(single)(idx_chunk)
 
 
-def _drop_nonfinite_trajectories(
-    Y: Array, sampling_result: MorrisSamples
-) -> tuple[Array, Array, Array, Array, int]:
-    """Drop whole trajectories that hold any non-finite (NaN or Inf) value.
+def _reindex_after_drop(
+    sampling_result: MorrisSamples, keep: np.ndarray
+) -> tuple[Array, Array, Array]:
+    """Rebuild the elementary-effect bookkeeping against the compacted layout.
 
-    A trajectory is an indivisible sampling unit. One bad row corrupts every
-    elementary effect that references it, so the function removes the whole
-    block of D+1 rows. It then rebuilds the bookkeeping indices against the
-    compacted layout.
+    Removing whole trajectories shifts every later block down, so the global
+    row indices stored on the design no longer point at the rows they named.
+    The offset of a row *inside* its block does not change, so the fix is to
+    strip the old block offset and add the new one.
 
     Args:
-        Y: Expanded model outputs, shape ``(r * (D + 1), T, K)``.
-        sampling_result: Sampling metadata with elementary-effect bookkeeping.
+        sampling_result: Sampling metadata with the original bookkeeping.
+        keep: Boolean mask of shape ``(r,)``, True for surviving trajectories.
 
     Returns:
-        ``(Y_clean, idx_after, idx_before, delta, n_dropped)``. The bookkeeping
-        arrays are re-indexed into the cleaned layout.
+        ``(idx_after, idx_before, delta)``, re-indexed and restricted to the
+        surviving trajectories. All three are unchanged when nothing is
+        dropped.
     """
-    r = sampling_result.n_trajectories
+    idx_after = np.asarray(sampling_result.ee_idx_after)
+    idx_before = np.asarray(sampling_result.ee_idx_before)
+    delta = np.asarray(sampling_result.ee_delta)
+    if keep.all():
+        return jnp.asarray(idx_after), jnp.asarray(idx_before), jnp.asarray(delta)
+
     rows_per_traj = sampling_result.n_params + 1
-    trailing = Y.shape[1:]
-
-    grouped = Y.reshape(r, rows_per_traj, *trailing)
-    finite_mask = jnp.all(jnp.isfinite(grouped.reshape(r, -1)), axis=1)
-    n_good = int(jnp.sum(finite_mask))
-    n_dropped = r - n_good
-
-    idx_after = jnp.asarray(sampling_result.ee_idx_after)
-    idx_before = jnp.asarray(sampling_result.ee_idx_before)
-    delta = jnp.asarray(sampling_result.ee_delta)
-
-    if n_dropped == 0:
-        return Y, idx_after, idx_before, delta, 0
-
-    # finite_mask is a small (r,) host array. Gather the surviving trajectory
-    # blocks with jnp.take to keep the large output tensor on device.
-    keep = np.flatnonzero(np.asarray(finite_mask))
-    Y_clean = jnp.take(grouped, jnp.asarray(keep), axis=0).reshape(
-        n_good * rows_per_traj, *trailing
+    kept = np.flatnonzero(keep)
+    old_offsets = (idx_after // rows_per_traj) * rows_per_traj
+    local_after = idx_after - old_offsets
+    local_before = idx_before - old_offsets
+    new_offsets = np.arange(len(kept))[:, None] * rows_per_traj
+    return (
+        jnp.asarray(local_after[kept] + new_offsets),
+        jnp.asarray(local_before[kept] + new_offsets),
+        jnp.asarray(delta[kept]),
     )
-
-    # Global indices encode trajectory-block offsets, so recompute them for the
-    # compacted layout. The local offset inside a block does not change.
-    old_offsets = (np.asarray(sampling_result.ee_idx_after) // rows_per_traj) * rows_per_traj
-    local_after = np.asarray(sampling_result.ee_idx_after) - old_offsets
-    local_before = np.asarray(sampling_result.ee_idx_before) - old_offsets
-    new_offsets = np.arange(n_good)[:, None] * rows_per_traj
-    idx_after = jnp.asarray(local_after[keep] + new_offsets)
-    idx_before = jnp.asarray(local_before[keep] + new_offsets)
-    delta = jnp.asarray(np.asarray(sampling_result.ee_delta)[keep])
-
-    return Y_clean, idx_after, idx_before, delta, n_dropped
 
 
 def analyze(
@@ -180,14 +170,15 @@ def analyze(
     ci_method: Literal["quantile", "gaussian"] = "quantile",
     key: Array | None = None,
     chunk_size: int = 2048,
+    on_invalid: OnInvalid = "raise",
 ) -> MorrisResult:
     """Compute Morris elementary-effects screening measures using JAX.
 
     Pass the model outputs ``Y`` evaluated at the unique rows that
     :func:`jaxgsa.morris.sample` returned. The function rebuilds the expanded
-    design internally and drops every trajectory that holds a non-finite
-    value. It then reduces one elementary effect per trajectory and parameter
-    to three measures. Rank parameters by ``mu_star``, the mean absolute
+    design internally and checks it for non-finite values under the
+    ``on_invalid`` policy. It then reduces one elementary effect per trajectory
+    and parameter to three measures. Rank parameters by ``mu_star``, the mean absolute
     effect and the headline importance measure. A ``sigma`` (the spread of the
     effects) that is large next to ``mu_star`` shows nonlinearity or
     interactions. ``mu`` keeps the effect sign, so it can cancel for a
@@ -228,6 +219,14 @@ def analyze(
             batch. Large multi-output or time-series outputs reduce the
             effective batch further, which keeps peak memory bounded. Defaults
             to 2048.
+        on_invalid: What to do about non-finite model outputs. The unit here
+            is one trajectory, so a single bad value removes the whole block
+            of ``D + 1`` rows: the elementary effects are differences between
+            neighbours inside the trajectory, and a gap invents an effect that
+            was never measured. ``"raise"`` (the default) refuses the sample,
+            ``"propagate"`` lets the value reach the measures, and ``"drop"``
+            analyzes the surviving trajectories. See
+            :mod:`jaxgsa._core.invalid`.
 
     Returns:
         A :class:`MorrisResult` holding:
@@ -235,23 +234,26 @@ def analyze(
             mu_star  — mean absolute elementary effect, same shape
             sigma    — standard deviation of elementary effects, same shape
             mu_conf, mu_star_conf, sigma_conf — (2, ...) CI bounds or None
+            invalid  — what the non-finite check found, and what it did
 
     Raises:
         ValueError: If ``Y`` does not have 1, 2, or 3 dimensions; if ``Y``'s
-            first axis does not match ``sampling_result.n_runs``; if fewer
-            than 2 trajectories survive cleaning; if ``ci_method``
-            is invalid; if ``num_resamples > 0`` but ``key`` is ``None``; or
-            if ``chunk_size < 1``.
+            first axis does not match ``sampling_result.n_runs``; if
+            ``on_invalid`` is not one of the three policies; if the sample
+            holds a non-finite value under ``on_invalid="raise"``; if fewer
+            than 2 trajectories survive; if ``ci_method`` is invalid; if
+            ``num_resamples > 0`` but ``key`` is ``None``; or if
+            ``chunk_size < 1``.
 
     Warns:
-        JaxgsaWarning: If the design holds fewer trajectories than the user
-            asked for. Non-finite cleaning removes trajectories here, and a
-            derived design can already have lost blocks with no measurable
-            step. The message names the cause, and it adds a reliability note
-            when fewer than 10 trajectories remain. A small design that the
-            user asked for is deliberate, so it gives no warning.
+        JaxgsaWarning: If a derived design already lost blocks with no
+            measurable step. The message adds a reliability note when fewer
+            than 10 trajectories remain. A small design that the user asked
+            for is deliberate, so it gives no warning.
         JaxgsaWarning: If an output slice has zero variance.
     """
+    method = "jaxgsa.morris.analyze"
+    policy = resolve_policy(on_invalid, method=method, unit=InvalidUnit.TRAJECTORY)
     if ci_method not in {"quantile", "gaussian"}:
         raise ValueError("ci_method must be one of {'quantile', 'gaussian'}")
     if chunk_size < 1:
@@ -265,33 +267,40 @@ def analyze(
     Y = sampling_result.expand_outputs(Y)
     Y, squeeze_time, squeeze_output = _prepare_Y(Y)
 
-    Y, idx_after, idx_before, delta, n_dropped = _drop_nonfinite_trajectories(Y, sampling_result)
-    remaining = sampling_result.n_trajectories - n_dropped
+    # A trajectory is an indivisible sampling unit: it occupies a contiguous
+    # block of D+1 expanded rows, and one bad row corrupts every elementary
+    # effect that references it.
+    r = sampling_result.n_trajectories
+    rows_per_traj = sampling_result.n_params + 1
+    keep, invalid = check_invalid(
+        policy=policy,
+        method=method,
+        unit=InvalidUnit.TRAJECTORY,
+        n_units=r,
+        Y=Y,
+        unit_of_row=np.repeat(np.arange(r), rows_per_traj),
+        min_kept=2,
+    )
+    idx_after, idx_before, delta = _reindex_after_drop(sampling_result, keep)
+    if not keep.all():
+        trailing = Y.shape[1:]
+        kept_rows = np.flatnonzero(np.asarray(keep))
+        Y = jnp.take(Y.reshape(r, rows_per_traj, *trailing), jnp.asarray(kept_rows), axis=0)
+        Y = Y.reshape(len(kept_rows) * rows_per_traj, *trailing)
+    remaining = int(keep.sum())
 
     # Warn on the cause of the thinning, not on the surviving count. A small r
     # that the user asked for is a deliberate choice, so it stays silent.
-    # Blocks the user never gave up are worth reporting at any count: blocks
-    # that SobolSamples.to_morris dropped for having no measurable step, and
-    # blocks that non-finite cleaning just removed. The message also carries
-    # the reliability floor when the survivors fall below it.
+    # Blocks the user never gave up are worth reporting: blocks that
+    # SobolSamples.to_morris dropped for having no measurable step. The
+    # non-finite loss reports itself, through check_invalid. The message also
+    # carries the reliability floor when the survivors fall below it.
     n_lost_upstream = sampling_result.n_blocks_dropped
-    n_lost = n_lost_upstream + n_dropped
-    if n_lost > 0:
-        requested = remaining + n_lost
-        causes = []
-        if n_lost_upstream > 0:
-            causes.append(
-                f"the source design dropped {n_lost_upstream} for having no measurable step"
-            )
-        if n_dropped > 0:
-            pct = 100.0 * n_dropped / sampling_result.n_trajectories
-            causes.append(
-                f"dropped {n_dropped} of {sampling_result.n_trajectories} ({pct:.1f}%) "
-                "containing non-finite values"
-            )
+    if n_lost_upstream > 0:
+        requested = r + n_lost_upstream
         message = (
-            f"jaxgsa: {remaining} of the {requested} requested trajectories remain: "
-            + "; ".join(causes)
+            f"jaxgsa: {r} of the {requested} requested trajectories remain: "
+            f"the source design dropped {n_lost_upstream} for having no measurable step"
         )
         if remaining < _MIN_TRAJECTORIES:
             message += (
@@ -387,6 +396,7 @@ def analyze(
         mu_star=mu_star,
         sigma=sigma,
         problem=sampling_result.problem,
+        invalid=invalid,
         mu_conf=mu_conf,
         mu_star_conf=mu_star_conf,
         sigma_conf=sigma_conf,

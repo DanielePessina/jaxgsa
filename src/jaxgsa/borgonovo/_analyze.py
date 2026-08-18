@@ -61,6 +61,12 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core.bootstrap import _percentile_ci
+from jaxgsa._core.invalid import (
+    InvalidUnit,
+    OnInvalid,
+    check_invalid,
+    resolve_policy,
+)
 from jaxgsa._core.partition import (
     _mask_from_counts,
     _replicate_slice,
@@ -121,6 +127,11 @@ _DISCRETE_DISTINCT_FRACTION = 0.01
 # ``chunk_columns * sum_g(Dg * Mg * Pg) * grid_size``. The default chunk
 # width keeps that tensor near this many float32 elements (~256 MB).
 _CHUNK_ELEM_BUDGET = 1 << 26
+
+
+# Fewest samples that still build two conditioning classes with a density
+# each. Below this there is nothing to compare.
+_MIN_KEPT = 4
 
 
 def _plischke_n_classes(n_samples: int) -> int:
@@ -551,6 +562,7 @@ def analyze(
     slice_chunk_size: int | None = None,
     degenerate_tol: float = _DEGENERATE_BW_TOL,
     degenerate_bandwidth: float | Literal["auto"] = "auto",
+    on_invalid: OnInvalid = "raise",
 ) -> DeltaResult:
     """Compute Borgonovo delta and given-data first-order Sobol indices.
 
@@ -640,6 +652,14 @@ def analyze(
             front. It checks the returned delta instead, and the error
             message then names this argument and the value that would fix
             it.
+        on_invalid: What to do about a row of ``X`` or ``Y`` that holds a
+            non-finite value. ``"raise"`` (default) refuses the sample,
+            ``"drop"`` removes those rows and analyzes the rest, and
+            ``"propagate"`` warns and computes anyway. ``X`` and ``Y`` are
+            checked together, so a bad input takes its own output with it.
+            The check runs before the KDE, so a failed model run is named
+            for what it is instead of surfacing later as a bandwidth
+            complaint. See :mod:`jaxgsa._core.invalid`.
 
     Note:
         This estimator supports a continuous output distribution only. It
@@ -693,7 +713,9 @@ def analyze(
             ``(0, 1)``; ``slice_chunk_size`` is not a positive integer;
             ``degenerate_tol`` is not in ``[0, 1)``; or
             ``degenerate_bandwidth`` is neither ``"auto"`` nor a positive
-            float. It is also raised when an output column is discrete,
+            float; or ``on_invalid`` is not one of the three policies. It
+            is also raised when the non-finite policy refuses the sample,
+            and when an output column is discrete,
             because the estimator supports a continuous output only; see
             the note above. It is raised again when the returned delta
             leaves ``[0, 1]`` by more than 0.05, which means the
@@ -702,7 +724,32 @@ def analyze(
     X = jnp.asarray(X)
     # The delta estimator partitions on rank classes and compares output
     # densities, so a declared input correlation does not invalidate it.
-    Y = _validate_xy_inputs(problem, X, Y, correlation_ok=True, categorical_ok=True)
+    Y = _validate_xy_inputs(
+        problem,
+        X,
+        Y,
+        correlation_ok=True,
+        categorical_ok=True,
+        method="jaxgsa.borgonovo.analyze",
+    )
+    # A non-finite value has to be settled here, before the KDE runs. Left
+    # alone it would survive the whole estimate and the bootstrap, and then
+    # surface as an out-of-range delta, which reads as a bandwidth problem
+    # and is not one.
+    method = "jaxgsa.borgonovo.analyze"
+    policy = resolve_policy(on_invalid, method=method, unit=InvalidUnit.ROW)
+    keep, invalid = check_invalid(
+        policy=policy,
+        method=method,
+        unit=InvalidUnit.ROW,
+        n_units=int(X.shape[0]),
+        X=X,
+        Y=Y,
+        min_kept=_MIN_KEPT,
+    )
+    if not keep.all():
+        X = X[keep]
+        Y = Y[keep]
     # Check the continuous-output contract before any expensive work.
     _raise_discrete_output(problem, Y)
 
@@ -842,6 +889,14 @@ def analyze(
     # error. The interval is a diagnostic, so it only warns. The advice is
     # built from what the kernel did, so it names the knob that actually
     # governs this run.
+    #
+    # A report that still holds findings here means the policy was
+    # "propagate": "raise" would have raised and "drop" would have removed
+    # them. The user asked for the non-finite value to reach the indices and
+    # was warned that it would, so this check must not answer that with a
+    # bandwidth complaint. It still enforces the [0, 1] range on the finite
+    # entries.
+    propagated = invalid.any_invalid
     _raise_delta_out_of_range(
         problem,
         delta,
@@ -856,9 +911,10 @@ def analyze(
             degenerate_bw,
             floored_cols,
         ),
+        allow_non_finite=propagated,
     )
     if delta_conf is not None:
-        _warn_conf_out_of_range(problem, delta_conf)
+        _warn_conf_out_of_range(problem, delta_conf, allow_non_finite=propagated)
 
     return DeltaResult(
         delta=_squeeze_output_axes(delta, squeeze_time, squeeze_output),
@@ -866,26 +922,43 @@ def analyze(
         S1=_squeeze_output_axes(S1, squeeze_time, squeeze_output),
         S1_conf=S1_conf,
         problem=problem,
+        invalid=invalid,
     )
 
 
-def _out_of_range_columns(values: Array, num_vars: int) -> tuple[np.ndarray, np.ndarray]:
+def _out_of_range_columns(
+    values: Array, num_vars: int, allow_non_finite: bool = False
+) -> tuple[np.ndarray, np.ndarray]:
     """Find parameter columns whose estimates leave the delta range.
 
     Args:
         values: Estimates with the parameter axis last ``(..., D)``.
         num_vars: Number of parameters D.
+        allow_non_finite: Treat a non-finite estimate as acceptable. Set
+            only under ``on_invalid="propagate"``, where the caller asked
+            for the bad value to reach the indices and already has a
+            warning that says so. Refusing it here would answer a
+            deliberate request with an unrelated bandwidth complaint.
 
     Returns:
         A tuple ``(flat, cols)`` where ``flat`` is the ``(-1, D)`` view of
         ``values`` and ``cols`` holds the indices of the failing columns.
     """
     flat = np.asarray(values).reshape(-1, num_vars)
-    bad = ~np.isfinite(flat) | (flat < -_DELTA_RANGE_TOL) | (flat > 1.0 + _DELTA_RANGE_TOL)
+    # A NaN compares False both ways, so the range tests alone never flag
+    # one; an infinity does trip them. Both kinds are handled together.
+    finite = np.isfinite(flat)
+    bad = (flat < -_DELTA_RANGE_TOL) | (flat > 1.0 + _DELTA_RANGE_TOL)
+    bad = (bad & finite) if allow_non_finite else (bad | ~finite)
     return flat, np.flatnonzero(bad.any(axis=0))
 
 
-def _raise_delta_out_of_range(problem: Problem, delta: Array, advice: Callable[[], str]) -> None:
+def _raise_delta_out_of_range(
+    problem: Problem,
+    delta: Array,
+    advice: Callable[[], str],
+    allow_non_finite: bool = False,
+) -> None:
     """Reject a delta point estimate that leaves ``[0, 1]``.
 
     Borgonovo's delta is a half L1 distance between probability densities,
@@ -910,12 +983,15 @@ def _raise_delta_out_of_range(problem: Problem, delta: Array, advice: Callable[[
         advice: Callable returning the sentences that name the knob to
             turn. It is called only when this function raises, so the
             caller pays for the diagnostic only on a failed run.
+        allow_non_finite: Accept a non-finite estimate. Set only under
+            ``on_invalid="propagate"``; see :func:`_out_of_range_columns`.
 
     Raises:
         ValueError: If any estimate is below ``-_DELTA_RANGE_TOL``, above
-            ``1 + _DELTA_RANGE_TOL``, or not finite.
+            ``1 + _DELTA_RANGE_TOL``, or, unless ``allow_non_finite``, not
+            finite.
     """
-    flat, cols = _out_of_range_columns(delta, problem.num_vars)
+    flat, cols = _out_of_range_columns(delta, problem.num_vars, allow_non_finite)
     if cols.size == 0:
         return
     detail = ", ".join(
@@ -933,7 +1009,9 @@ def _raise_delta_out_of_range(problem: Problem, delta: Array, advice: Callable[[
     )
 
 
-def _warn_conf_out_of_range(problem: Problem, delta_conf: Array) -> None:
+def _warn_conf_out_of_range(
+    problem: Problem, delta_conf: Array, allow_non_finite: bool = False
+) -> None:
     """Warn when a delta confidence bound leaves ``[0, 1]``.
 
     The point estimate is the contract, and :func:`_raise_delta_out_of_range`
@@ -945,6 +1023,8 @@ def _warn_conf_out_of_range(problem: Problem, delta_conf: Array) -> None:
         problem: Problem definition (for parameter names in the warning).
         delta_conf: Bootstrap interval ``(2, ..., D)`` with the lower bound
             first.
+        allow_non_finite: Accept a non-finite bound. Set only under
+            ``on_invalid="propagate"``; see :func:`_out_of_range_columns`.
 
     Warns:
         JaxgsaWarning: If a bound leaves the range, naming the parameters and
@@ -952,7 +1032,7 @@ def _warn_conf_out_of_range(problem: Problem, delta_conf: Array) -> None:
     """
     parts = []
     for bound, arr in (("lower", delta_conf[0]), ("upper", delta_conf[1])):
-        flat, cols = _out_of_range_columns(arr, problem.num_vars)
+        flat, cols = _out_of_range_columns(arr, problem.num_vars, allow_non_finite)
         if cols.size == 0:
             continue
         detail = ", ".join(

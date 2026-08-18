@@ -1000,9 +1000,34 @@ warnings.filterwarnings("ignore", category=JaxgsaWarning)
 
 Time-series outputs are particularly useful for dynamic models. Watching the sensitivity indices evolve over time reveals which parameters dominate at different stages of a process — for example, a parameter that is highly influential early in a batch but negligible later.
 
-## Data Cleaning
+## Failed model runs
 
-`jaxgsa.sobol.analyze()` automatically drops sample groups that contain non-finite values (NaN, Inf). The Saltelli layout requires groups of rows to stay together, so if any row in a group is non-finite, the entire group is removed. A message is printed when this happens. The `nan_counts` field on the result reports how many NaN values remain in the computed indices.
+A model that fails on some of its runs returns `NaN` or `Inf`. Every `analyze()` function takes the same `on_invalid` keyword to say what should happen then.
+
+| Value | What it does |
+| --- | --- |
+| `"raise"` | Refuse the analysis. This is the default. |
+| `"propagate"` | Compute anyway, and let the non-finite value reach the indices. |
+| `"drop"` | Remove the affected data, and use what is left. |
+
+The default refuses, because an index computed from part of a sample is a different quantity from the one you asked for, and `analyze()` is cheap to run again once you know which runs failed.
+
+What `"drop"` removes depends on the design. A Saltelli group, a Morris trajectory and a Kucherenko base point are each read as one block, so a single bad value removes the whole block. Keeping part of a block would leave the estimator reading rows that no longer line up, and nothing would report an error. For the methods that take any `(X, Y)` sample, one bad value removes one row. A bad input row always takes its matching output row with it.
+
+`jaxgsa.efast.analyze()` accepts only `"raise"` and `"propagate"`. Its design is an ordered sweep read by a Fourier transform, so removing a point does not shrink the sample; it changes what the estimator computes. Asking for `"drop"` there raises and says so.
+
+Whatever you choose, the result carries an `invalid` report:
+
+```python
+result = jaxgsa.sobol.analyze(samples, Y, on_invalid="drop")
+
+result.invalid.n_invalid     # how many blocks held a bad value
+result.invalid.unit_indices  # which blocks
+result.invalid.row_indices   # which rows of the array you passed in
+result.invalid.sources       # whether the bad values were in X, in Y, or both
+```
+
+The positions are the useful part: they name the model runs to investigate. They always refer to the array as you passed it, before anything was removed.
 
 ## References
 

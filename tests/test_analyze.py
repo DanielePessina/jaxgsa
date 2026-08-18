@@ -629,7 +629,6 @@ def _assert_sobol_fields_match(chunked, full, fields):
             atol=1e-7,
             err_msg=field,
         )
-    assert chunked.nan_counts == full.nan_counts
 
 
 def test_slice_chunk_size_invariance():

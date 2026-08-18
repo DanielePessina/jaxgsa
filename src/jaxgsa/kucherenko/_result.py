@@ -8,6 +8,7 @@ import numpy as np
 import xarray as xr
 from jax import Array
 
+from jaxgsa._core.invalid import InvalidReport
 from jaxgsa._core.validation import _dims_and_coords
 from jaxgsa.problem import Problem
 
@@ -35,12 +36,16 @@ class KucherenkoResult:
         problem: Problem definition used for the analysis.
         variance: Output variance under the joint input measure, one value per
             output slice (shape ``()``, ``(K,)``, or ``(T, K)``).
+        invalid: What the non-finite check found and what it did about it. A
+            report with ``n_invalid == 0`` means the check ran and found
+            nothing. See :class:`jaxgsa._core.invalid.InvalidReport`.
     """
 
     S1: Array
     ST: Array
     problem: Problem
     variance: Array
+    invalid: InvalidReport
 
     def __repr__(self) -> str:
         """Return a concise summary showing index shapes."""

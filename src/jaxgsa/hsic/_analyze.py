@@ -30,6 +30,12 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
+from jaxgsa._core.invalid import (
+    InvalidUnit,
+    OnInvalid,
+    check_invalid,
+    resolve_policy,
+)
 from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa._core.validation import (
     _prenormalize_outputs,
@@ -369,6 +375,7 @@ def analyze(
     bandwidth: float | None = None,
     batch_size: int | None = None,
     prenormalize: bool = False,
+    on_invalid: OnInvalid = "raise",
 ) -> HSICResult:
     """Compute HSIC (Hilbert-Schmidt Independence Criterion) sensitivity indices.
 
@@ -419,15 +426,24 @@ def analyze(
             (default) builds each matrix in one step.
         prenormalize: If True, standardize each output slice to mean 0 and
             unit standard deviation before the analysis.
+        on_invalid: What to do about a row of ``X`` or ``Y`` that holds a
+            non-finite value. ``"raise"`` (default) refuses the sample,
+            ``"drop"`` removes those rows and analyzes the rest, and
+            ``"propagate"`` warns and computes anyway. ``X`` and ``Y`` are
+            checked together, so a bad input takes its own output with it.
+            See :mod:`jaxgsa._core.invalid`.
 
     Returns:
         An :class:`HSICResult` with ``R2_HSIC``, ``T_HSIC``, ``p_values``, and
-        ``hsic_raw``, each shaped ``(D,)``, ``(K, D)``, or ``(T, K, D)``.
+        ``hsic_raw``, each shaped ``(D,)``, ``(K, D)``, or ``(T, K, D)``, and
+        the non-finite report in ``invalid``.
 
     Raises:
         ValueError: If X is not 2-D, its column count does not match the
             problem, X and Y have differing row counts, ``n_perms < 1``,
-            ``N < 4``, ``bandwidth`` is non-positive or non-finite, or
+            ``N < 4``, ``bandwidth`` is non-positive or non-finite,
+            ``on_invalid`` is not one of the three policies, the non-finite
+            policy refuses the sample, or
             ``problem`` has categorical parameters. Categorical parameters
             are rejected because the Gaussian input kernel reads a level code
             as a distance, and the arbitrary code order makes that
@@ -445,6 +461,23 @@ def analyze(
     Y = _validate_xy_inputs(problem, X, Y, correlation_ok=True, method="jaxgsa.hsic.analyze")
     if X.shape[0] < _MIN_SAMPLES:
         raise ValueError(f"N must be >= {_MIN_SAMPLES} for HSIC, got {X.shape[0]}")
+
+    # The shape contract holds by now, and nothing has been transformed yet,
+    # so this is the last point at which a row still means one model run.
+    method = "jaxgsa.hsic.analyze"
+    policy = resolve_policy(on_invalid, method=method, unit=InvalidUnit.ROW)
+    keep, invalid = check_invalid(
+        policy=policy,
+        method=method,
+        unit=InvalidUnit.ROW,
+        n_units=int(X.shape[0]),
+        X=X,
+        Y=Y,
+        min_kept=_MIN_SAMPLES,
+    )
+    if not keep.all():
+        X = X[keep]
+        Y = Y[keep]
 
     _warn_zero_variance_slices(Y, problem.output_names)
 
@@ -507,4 +540,5 @@ def analyze(
         p_values=p_all,
         hsic_raw=raw_all,
         problem=problem,
+        invalid=invalid,
     )

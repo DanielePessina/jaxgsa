@@ -29,6 +29,7 @@ from jaxgsa._core.copula import (
     canonicalize_correlation,
     independent_correlation,
 )
+from jaxgsa._core.invalid import InvalidUnit, OnInvalid, check_invalid, resolve_policy
 from jaxgsa._core.sampling import _next_power_of_2
 from jaxgsa._core.surrogate import _PredictPlan
 from jaxgsa._core.transforms import cdf_to_unit_interval
@@ -76,6 +77,7 @@ def analyze_vkoga(
     n_variance: int = 8192,
     seed: int = 0,
     batch_size: int | None = None,
+    on_invalid: OnInvalid = "raise",
 ) -> VKOGAResult:
     """Correlated variance-based sensitivity indices via a VKOGA surrogate.
 
@@ -118,6 +120,15 @@ def analyze_vkoga(
         seed: Base seed for the quasi-random draws.
         batch_size: Rows per batch when evaluating the surrogate, at least 1.
             ``None`` derives one from the memory budget.
+        on_invalid: What to do about non-finite values in ``X`` or ``Y``. One
+            training row is one unit here, so ``"drop"`` removes the affected
+            ``(X, Y)`` pairs and fits the surrogate on the rest. See
+            :mod:`jaxgsa._core.invalid`. The check runs before the
+            hyperparameter search on purpose: a single non-finite ``Y`` makes
+            every cross-validation score non-finite, and the caller would
+            otherwise meet a ``RuntimeError`` about failed kernel solves that
+            names the wrong cause. ``"drop"`` needs at least ``n_folds`` rows
+            to survive, because a fold with no rows in it scores nothing.
 
     Returns:
         A :class:`VKOGAResult` with ``S_TC``, ``S_TU``, ``S_U``, ``S_C``, and
@@ -128,8 +139,12 @@ def analyze_vkoga(
             has fewer than two parameters or any categorical parameter, if
             ``correlation`` is not ``None`` or a valid matrix, if ``gamma`` or
             ``ridge`` is not finite and positive, or if a size argument is out
-            of range.
-        RuntimeError: If every cross-validation score is non-finite.
+            of range, if ``on_invalid`` is not one of the three policies, or
+            if ``on_invalid="raise"`` (the default) and ``X`` or ``Y`` holds a
+            non-finite value.
+        RuntimeError: If every cross-validation score is non-finite. Non-finite
+            training data no longer reaches this check; it is now a genuine
+            solver failure.
 
     Warns:
         JaxgsaWarning: In any of four cases. An output slice has zero variance.
@@ -142,6 +157,8 @@ def analyze_vkoga(
     """
     # Raise-early validation: every scalar argument is checked before any
     # expensive work (cross-validation, fitting, index estimation).
+    method = "jaxgsa.vkoga.analyze"
+    policy = resolve_policy(on_invalid, method=method, unit=InvalidUnit.ROW)
     if max_centers is None:
         max_centers = _DEFAULT_MAX_CENTERS
     elif max_centers < 1:
@@ -174,8 +191,23 @@ def analyze_vkoga(
         jnp.asarray(Y),
         correlation_ok=True,
         categorical_ok=False,
-        method="jaxgsa.vkoga.analyze",
+        method=method,
     )
+    # Applied here, in the only public entry point, before any fitting. The
+    # joint X/Y check keeps the pairs aligned when rows are dropped.
+    keep, invalid = check_invalid(
+        policy=policy,
+        method=method,
+        unit=InvalidUnit.ROW,
+        n_units=int(X.shape[0]),
+        X=X,
+        Y=Y,
+        min_kept=n_folds,
+    )
+    if not keep.all():
+        mask = jnp.asarray(keep)
+        X = X[mask]
+        Y = Y[mask]
     D = problem.num_vars
     if D < 2:
         raise ValueError(f"Correlated sensitivity indices need at least 2 parameters, got {D}")
@@ -259,6 +291,7 @@ def analyze_vkoga(
         n_centers=int(state.n_centers),
         gamma=float(gamma_value),
         ridge=float(ridge_value),
+        invalid=invalid,
         rmse=_shape_slice(np.asarray(state.rmse)),
         cv_rmse=cv_rmse,
         _fit=state,

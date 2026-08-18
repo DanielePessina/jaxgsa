@@ -17,6 +17,13 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core.batching import get_memory_budget
+from jaxgsa._core.invalid import (
+    InvalidReport,
+    InvalidUnit,
+    OnInvalid,
+    check_invalid,
+    resolve_policy,
+)
 from jaxgsa._core.surrogate import _PredictPlan
 from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa._core.validation import (
@@ -37,6 +44,12 @@ from jaxgsa.hdmr._engine import (
 from jaxgsa.hdmr._result import HDMRResult, _HDMRFit
 from jaxgsa.hdmr._stream import _fit_hdmr_streamed, _full_fit_bytes
 from jaxgsa.problem import Problem
+
+# Fewest rows the B-spline backfitting fit can run on. It is the module's own
+# documented minimum, re-used as the floor for ``on_invalid="drop"`` so that
+# dropping past it refuses in the policy's words rather than in the generic
+# "Need at least 300 samples" check further down.
+_MIN_ROWS = 300
 
 
 class _HDMRStaticData(NamedTuple):
@@ -261,6 +274,7 @@ def analyze_hdmr(
     lambdax: float = 0.01,
     slice_chunk_size: int | None = None,
     batch_size: int | None = None,
+    on_invalid: OnInvalid = "raise",
 ) -> HDMRResult:
     """Compute sensitivity indices via RS-HDMR (public entry point).
 
@@ -275,19 +289,47 @@ def analyze_hdmr(
     ``result.shapley(include_correlative=True)`` folds it into the Shapley
     allocation.
 
+    Args:
+        on_invalid: What to do about non-finite values in ``X`` or ``Y``. One
+            row is one unit here, so ``"drop"`` removes the affected
+            ``(X, Y)`` pairs and fits on the rest. See
+            :mod:`jaxgsa._core.invalid`. Every other argument is documented on
+            :func:`_analyze_hdmr_core`.
+
     Raises:
         ValueError: If ``X`` or ``Y`` violates the shared shape contract, or
             ``problem`` has categorical parameters. The B-spline component
             functions need an orderable axis, which an unordered level code
-            does not give. :func:`_analyze_hdmr_core` raises for the
-            remaining argument checks.
+            does not give. Also if ``on_invalid`` is not one of the three
+            policies, or ``on_invalid="raise"`` (the default) and ``X`` or
+            ``Y`` holds a non-finite value.
+            :func:`_analyze_hdmr_core` raises for the remaining argument
+            checks.
     """
+    method = "jaxgsa.hdmr.analyze"
+    policy = resolve_policy(on_invalid, method=method, unit=InvalidUnit.ROW)
     X = jnp.asarray(X)
     # HDMR's ANCOVA decomposition separates structural (Sa) from
     # correlation-induced (Sb) variance, so correlated problems are welcome.
-    Y = _validate_xy_inputs(
-        problem, X, jnp.asarray(Y), correlation_ok=True, method="jaxgsa.hdmr.analyze"
+    Y = _validate_xy_inputs(problem, X, jnp.asarray(Y), correlation_ok=True, method=method)
+    # The non-finite check lives in this public wrapper only, next to the two
+    # warnings below and for the same reason: callers routing through
+    # `_analyze_hdmr_core` must not have the policy applied a second time.
+    # X and Y are checked jointly, so a bad input takes its own output with it
+    # and the rows stay aligned.
+    keep, invalid = check_invalid(
+        policy=policy,
+        method=method,
+        unit=InvalidUnit.ROW,
+        n_units=int(X.shape[0]),
+        X=X,
+        Y=Y,
+        min_kept=_MIN_ROWS,
     )
+    if not keep.all():
+        mask = jnp.asarray(keep)
+        X = X[mask]
+        Y = Y[mask]
     # A constant output slice makes every index 0/0 = NaN; warn once up front,
     # in the public wrapper only, so callers routing through the core (Shapley)
     # do not double-warn.
@@ -307,6 +349,7 @@ def analyze_hdmr(
         lambdax=lambdax,
         slice_chunk_size=slice_chunk_size,
         batch_size=batch_size,
+        invalid=invalid,
     )
 
 
@@ -322,6 +365,7 @@ def _analyze_hdmr_core(
     lambdax: float = 0.01,
     slice_chunk_size: int | None = None,
     batch_size: int | None = None,
+    invalid: InvalidReport,
 ) -> HDMRResult:
     """Fit RS-HDMR on an already-canonical Y (no re-validation, no warn).
 
@@ -382,6 +426,12 @@ def _analyze_hdmr_core(
             always forces the streamed fit with that many rows per batch.
             Both fit paths solve the same regressions and the same F-test.
             Results differ only at the level of float32 summation order.
+        invalid: The non-finite report the public :func:`analyze_hdmr` wrapper
+            produced, carried onto the result. It is a required argument
+            rather than a default so that no caller can construct an
+            ``HDMRResult`` that silently claims the check ran. The check
+            itself is deliberately not repeated here: applying it twice would
+            warn twice for one user call.
 
     Returns:
         HDMRResult with per-term indices Sa, Sb, S, per-parameter ST,
@@ -653,6 +703,7 @@ def _analyze_hdmr_core(
         ST=ST_out,
         problem=problem,
         terms=term_labels,
+        invalid=invalid,
         _fit=fit_state,
         select=select_sum,
         # RMSE is computed on the standardized scale inside the kernel;

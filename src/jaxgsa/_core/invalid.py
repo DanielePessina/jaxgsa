@@ -143,8 +143,10 @@ class InvalidReport:
             original numbering. For ``InvalidUnit.ROW`` this equals
             ``unit_indices``. For a grouped design it is larger, because one
             bad value removes its whole group.
-        sources: Which arrays held non-finite values, as a sorted tuple drawn
-            from ``"X"`` and ``"Y"``. Empty when nothing was found.
+        sources: Which arrays held non-finite values. Empty when nothing was
+            found. The names are usually ``"X"`` and ``"Y"``, but a caller
+            that checks something else can rename them; see the
+            ``source_names`` argument of :func:`check_invalid`.
     """
 
     policy: OnInvalid
@@ -295,6 +297,7 @@ def check_invalid(
     X: npt.ArrayLike | None = None,
     unit_of_row: npt.NDArray[np.intp] | None = None,
     min_kept: int = 1,
+    source_names: tuple[str, str] = ("X", "Y"),
 ) -> tuple[npt.NDArray[np.bool_], InvalidReport]:
     """Apply the non-finite policy and describe what was found.
 
@@ -317,6 +320,13 @@ def check_invalid(
         min_kept: Fewest surviving units the caller can still work with. Below
             this the call raises even under ``"drop"``, because an estimate
             from too little data is not an estimate.
+        source_names: What to call the two arrays in messages and in
+            :attr:`InvalidReport.sources`, as ``(name_of_X, name_of_Y)``.
+            Override it where the defaults would mislead. DGSM is the case
+            that needed it: on its autodiff path the array in the ``Y`` slot
+            carries the model output **and** its derivative, so a report
+            saying ``"Y"`` would send a user to look at an output array that
+            is entirely finite.
 
     Returns:
         A tuple ``(keep, report)``. ``keep`` is a boolean array of shape
@@ -335,7 +345,8 @@ def check_invalid(
     if n_invalid == 0:
         return np.ones(n_units, dtype=bool), _clean_report(unit, n_units, policy)
 
-    sources = tuple(name for name, ok in (("X", x_ok), ("Y", y_ok)) if bool((~ok).any()))
+    x_name, y_name = source_names
+    sources = tuple(name for name, ok in ((x_name, x_ok), (y_name, y_ok)) if bool((~ok).any()))
     unit_indices = tuple(int(i) for i in np.flatnonzero(~clean))
     report = InvalidReport(
         policy=policy,

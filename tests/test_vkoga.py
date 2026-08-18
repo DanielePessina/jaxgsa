@@ -28,7 +28,9 @@ import pytest
 from scipy.stats import spearmanr
 
 import jaxgsa
+from jaxgsa import JaxgsaWarning
 from jaxgsa._core.copula import fit_gaussian_copula
+from jaxgsa._core.invalid import InvalidReport, InvalidUnit
 from jaxgsa.problem import Problem
 
 # Closed-form linear-Gaussian reference, shared with test_kucherenko.py and
@@ -59,6 +61,19 @@ SMALL_KWARGS = dict(
     n_variance=512,
     seed=0,
 )
+
+
+def _clean_report(n_units: int = 0) -> InvalidReport:
+    """Build the empty non-finite report a hand-made result needs."""
+    return InvalidReport(
+        policy="raise",
+        unit=InvalidUnit.ROW,
+        n_units=n_units,
+        n_invalid=0,
+        unit_indices=(),
+        row_indices=(),
+        sources=(),
+    )
 
 
 def _uniform_scalar(X: np.ndarray) -> np.ndarray:
@@ -643,6 +658,7 @@ def test_is_correlated_agrees_with_problem_classification():
         n_centers=1,
         gamma=1.0,
         ridge=1e-6,
+        invalid=_clean_report(),
     )
     assert problem.has_correlated_inputs
     assert result.is_correlated == problem.has_correlated_inputs
@@ -782,3 +798,134 @@ def test_estimator_uses_the_factor_on_the_plan():
 
     assert not np.allclose(baseline.variance, perturbed.variance)
     assert not np.allclose(baseline.S_TC, perturbed.S_TC)
+
+
+# --- on_invalid policy --------------------------------------------------------
+
+
+class TestVKOGAOnInvalid:
+    """T4: ``vkoga.analyze`` applies the shared non-finite policy.
+
+    Before the policy, a single non-finite ``Y`` made every cross-validation
+    score non-finite and the caller met a ``RuntimeError`` about failed kernel
+    solves. The cause it named was wrong, and no message pointed at the bad
+    row. The check now runs before any fitting.
+    """
+
+    @staticmethod
+    def _data(n: int = 256, seed: int = 5):
+        """A small smooth sample on the cheap two-parameter uniform problem."""
+        rng = np.random.default_rng(seed)
+        X = rng.uniform(0.0, 1.0, size=(n, 2))
+        return X, _uniform_scalar(X)
+
+    def test_raise_is_the_default_and_names_the_rows(self):
+        """T4: a non-finite Y refuses the analysis and says which rows carry it."""
+        X, Y = self._data()
+        Y = Y.copy()
+        Y[4] = np.nan
+        Y[9] = np.inf
+        with pytest.raises(ValueError, match="non-finite") as exc:
+            jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, **SMALL_KWARGS)
+        message = str(exc.value)
+        assert "jaxgsa.vkoga.analyze" in message
+        assert "2 of 256 rows" in message
+        assert "[4, 9]" in message
+
+    def test_a_non_finite_y_no_longer_reaches_the_cross_validation(self):
+        """T4: the misleading 'kernel solves failed' RuntimeError is unreachable.
+
+        This is the exact regression the policy was added for. With ``gamma``
+        and ``ridge`` unset the hyperparameter search runs, and one NaN row
+        used to make every score on the grid non-finite. The user then got a
+        ``RuntimeError`` blaming conditioning and suggesting float64, with no
+        mention of the bad row. It must now be a ``ValueError`` that names the
+        row instead.
+        """
+        X, Y = self._data(n=64)
+        Y = Y.copy()
+        Y[11] = np.nan
+        cv_kwargs = dict(SMALL_KWARGS)
+        cv_kwargs.pop("gamma")
+        cv_kwargs.pop("ridge")
+        cv_kwargs["n_folds"] = 2
+        cv_kwargs["max_centers"] = 16
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(ValueError, match="non-finite") as exc:
+                jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, **cv_kwargs)
+        message = str(exc.value)
+        assert "cross-validation" not in message
+        assert "[11]" in message
+
+    def test_propagate_warns_and_lets_the_nan_reach_the_indices(self):
+        """T4: 'propagate' keeps every row, so the indices come out non-finite."""
+        X, Y = self._data()
+        Y = Y.copy()
+        Y[4] = np.nan
+        with pytest.warns(JaxgsaWarning, match="reaches the indices"):
+            result = jaxgsa.vkoga.analyze(
+                UNIFORM_PROBLEM, X, Y, on_invalid="propagate", **SMALL_KWARGS
+            )
+        assert not np.all(np.isfinite(np.asarray(result.S_TC)))
+        assert result.invalid.policy == "propagate"
+        assert result.invalid.n_invalid == 1
+
+    def test_drop_removes_the_rows_and_the_fit_is_finite_again(self):
+        """T4: 'drop' fits the surrogate on the survivors, so indices are finite."""
+        X, Y = self._data()
+        Y = Y.copy()
+        Y[4] = np.nan
+        with pytest.warns(JaxgsaWarning, match="dropped 1 of 256 rows"):
+            result = jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, on_invalid="drop", **SMALL_KWARGS)
+        assert np.all(np.isfinite(np.asarray(result.S_TC)))
+        assert np.all(np.isfinite(np.asarray(result.S_TU)))
+        assert result.invalid.unit_indices == (4,)
+        assert result.invalid.sources == ("Y",)
+
+    def test_a_non_finite_input_is_caught_too(self):
+        """T4: X is checked as well as Y, and ``sources`` says which array.
+
+        A NaN input reaches the marginal CDF map and then the kernel metric,
+        so it poisons the surrogate just as thoroughly as a NaN output.
+        """
+        X, Y = self._data()
+        X = X.copy()
+        X[6, 0] = np.nan
+        with pytest.raises(ValueError, match=r"in X\.") as exc:
+            jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, **SMALL_KWARGS)
+        assert "[6]" in str(exc.value)
+        with pytest.warns(JaxgsaWarning):
+            result = jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, on_invalid="drop", **SMALL_KWARGS)
+        assert result.invalid.sources == ("X",)
+
+    def test_dropping_below_the_fold_count_refuses(self):
+        """T4: 'drop' will not leave fewer rows than there are folds.
+
+        A fold with no rows in it scores nothing, so the floor is ``n_folds``
+        and the refusal names the policy rather than failing later inside the
+        cross-validation.
+        """
+        X, Y = self._data(n=16)
+        Y = Y.copy()
+        Y[8:] = np.nan
+        with pytest.raises(ValueError, match="every usable row was removed") as exc:
+            jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, on_invalid="drop", **SMALL_KWARGS)
+        assert "at least 10" in str(exc.value)
+
+    @pytest.mark.parametrize("policy", ["raise", "propagate", "drop"])
+    def test_a_clean_sample_is_clean_under_every_policy(self, policy):
+        """T4: nothing found means no warning and a report that says so."""
+        X, Y = self._data()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, on_invalid=policy, **SMALL_KWARGS)
+        assert result.invalid.n_invalid == 0
+        assert result.invalid.n_units == 256
+        assert [w for w in caught if "non-finite" in str(w.message)] == []
+
+    def test_a_bad_policy_name_is_refused(self):
+        """T4: an unknown on_invalid raises before any fitting work happens."""
+        X, Y = self._data()
+        with pytest.raises(ValueError, match="on_invalid must be one of"):
+            jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, on_invalid=True, **SMALL_KWARGS)

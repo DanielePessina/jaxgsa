@@ -663,3 +663,123 @@ class TestOTCorrelatedInputs:
         np.testing.assert_array_equal(
             np.asarray(with_matrix.diffusive), np.asarray(without_matrix.diffusive)
         )
+
+
+def _invalid_sample(n: int = 200, seed: int = 0):
+    """Build a clean two-parameter OT sample for the on_invalid tests."""
+    problem = jaxgsa.Problem(("a", "b"), ((0.0, 1.0), (0.0, 1.0)))
+    rng = np.random.default_rng(seed)
+    X = rng.uniform(size=(n, 2))
+    Y = np.sin(3.0 * X[:, 0]) + 0.3 * X[:, 1]
+    return problem, jnp.asarray(X), jnp.asarray(Y)
+
+
+class TestOTInvalidPolicy:
+    """T4 (behaviour): jaxgsa.optimal_transport.analyze honours on_invalid."""
+
+    def test_raise_is_the_default_and_names_the_rows(self):
+        """T4: a non-finite Y row refuses the analysis and says which row it is."""
+        problem, X, Y = _invalid_sample()
+        Y = Y.at[9].set(jnp.nan)
+        with pytest.raises(ValueError) as exc:
+            analyze(problem, X, Y)
+        message = str(exc.value)
+        assert "jaxgsa.optimal_transport.analyze" in message
+        assert "1 of 200 rows" in message
+        assert "[9]" in message
+
+    def test_propagate_warns_and_the_indices_go_non_finite(self):
+        """T4: 'propagate' keeps the row and the NaN reaches the indices.
+
+        The index is a class-averaged squared Wasserstein distance normalized
+        by the output variance, and both halves average over the whole
+        sample, so one NaN output carries through. It must arrive as NaN and
+        not as 0: the normalizer's ``V > 0`` guard turns a non-positive
+        variance into an exact 0 for a constant output, and a NaN variance
+        fails that same test. Reporting 0 there would read as "no influence"
+        instead of "this did not compute".
+        """
+        problem, X, Y = _invalid_sample()
+        Y = Y.at[9].set(jnp.nan)
+        with pytest.warns(jaxgsa.JaxgsaWarning, match="reaches the indices"):
+            result = analyze(problem, X, Y, on_invalid="propagate")
+        assert result.invalid.policy == "propagate"
+        assert result.invalid.unit_indices == (9,)
+        assert not np.all(np.isfinite(np.asarray(result.ot)))
+
+    def test_drop_removes_the_row_and_returns_finite_indices(self):
+        """T4: 'drop' analyzes the remainder and the indices come back usable."""
+        problem, X, Y = _invalid_sample()
+        Y = Y.at[9].set(jnp.nan)
+        with pytest.warns(jaxgsa.JaxgsaWarning, match="dropped 1 of 200 rows"):
+            result = analyze(problem, X, Y, on_invalid="drop")
+        assert result.invalid.n_kept == 199
+        assert np.all(np.isfinite(np.asarray(result.ot)))
+
+    def test_a_bad_x_is_caught_and_named(self):
+        """T4: a non-finite input is caught too, and the report says it was X."""
+        problem, X, Y = _invalid_sample()
+        X = X.at[2, 1].set(jnp.inf)
+        with pytest.raises(ValueError, match=r"in X\b") as exc:
+            analyze(problem, X, Y)
+        assert "[2]" in str(exc.value)
+        with pytest.warns(jaxgsa.JaxgsaWarning):
+            result = analyze(problem, X, Y, on_invalid="drop")
+        assert result.invalid.sources == ("X",)
+
+    def test_the_check_reads_the_real_sample_not_the_dummy_column(self):
+        """T4: ``dummy=True`` adds a synthetic column, and it is not what is checked.
+
+        The dummy is drawn inside ``analyze`` and is finite by construction.
+        The report must still count only the user's own parameters, so its
+        row positions stay the positions of the model runs.
+        """
+        problem, X, Y = _invalid_sample()
+        X_bad = X.at[2, 1].set(jnp.nan)
+        with pytest.warns(jaxgsa.JaxgsaWarning):
+            result = analyze(problem, X_bad, Y, dummy=True, on_invalid="drop")
+        assert result.invalid.sources == ("X",)
+        assert result.invalid.unit_indices == (2,)
+        assert result.ot_dummy is not None
+        assert np.all(np.isfinite(np.asarray(result.ot_dummy)))
+
+        # A clean sample with a dummy column reports nothing at all.
+        clean = analyze(problem, X, Y, dummy=True)
+        assert clean.invalid.n_invalid == 0
+
+    def test_dropping_an_x_row_takes_its_y_row_with_it(self):
+        """T4: X and Y are dropped as a pair, so the sample stays aligned.
+
+        Removing the bad row of X but keeping its row of Y would shift every
+        later output by one, which no estimator can detect. The proof is an
+        equality against the sample with that row deleted from both arrays
+        by hand.
+        """
+        problem, X, Y = _invalid_sample()
+        X_bad = X.at[77, 0].set(jnp.nan)
+
+        with pytest.warns(jaxgsa.JaxgsaWarning):
+            dropped = analyze(problem, X_bad, Y, seed=7, on_invalid="drop")
+
+        keep = np.ones(200, dtype=bool)
+        keep[77] = False
+        by_hand = analyze(problem, X[keep], Y[keep], seed=7)
+
+        np.testing.assert_array_equal(np.asarray(dropped.ot), np.asarray(by_hand.ot))
+
+    @pytest.mark.parametrize("policy", ["raise", "propagate", "drop"])
+    def test_a_clean_sample_is_untouched_under_every_policy(self, policy, recwarn):
+        """T4: nothing found means nothing removed, nothing warned, empty report."""
+        problem, X, Y = _invalid_sample()
+        result = analyze(problem, X, Y, on_invalid=policy)
+        assert result.invalid.n_invalid == 0
+        assert result.invalid.n_units == 200
+        assert result.invalid.sources == ()
+        assert result.invalid.policy == policy
+        assert len(recwarn) == 0
+
+    def test_rejects_an_unknown_policy(self):
+        """T4: a misspelled policy is refused by name, not silently ignored."""
+        problem, X, Y = _invalid_sample()
+        with pytest.raises(ValueError, match="on_invalid must be one of"):
+            analyze(problem, X, Y, on_invalid="skip")

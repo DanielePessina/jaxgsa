@@ -8,6 +8,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from jaxgsa import JaxgsaWarning
+from jaxgsa._core.invalid import InvalidUnit
 from jaxgsa.benchmarks import ishigami, linear, sobol_g
 from jaxgsa.dgsm import analyze
 from jaxgsa.dgsm._poincare import axis_constants, marginal_variance, poincare_constant
@@ -779,3 +781,371 @@ class TestTimeSeries:
         ds = analyze(linear.PROBLEM, self._fn_ts, X).to_dataset(time_coords=[0.0, 0.5, 1.0])
         assert ds["nu"].dims == ("time", "output", "param")
         np.testing.assert_allclose(ds.coords["time"].values, [0.0, 0.5, 1.0])
+
+
+# --- The shared on_invalid policy -------------------------------------------
+
+
+def _two_uniform_problem():
+    """Return a two-parameter unit-cube problem, built the public way."""
+    return Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
+
+
+def _grid_X(n=24):
+    """Return a deterministic (n, 2) sample whose first column spans (0, 1).
+
+    A fixed grid, not a random draw, so a test can name the rows it makes bad
+    and read the same rows back out of the report.
+    """
+    first = np.linspace(0.02, 0.98, n)
+    second = np.linspace(1.0, 2.0, n)
+    return jnp.asarray(np.stack([first, second], axis=1))
+
+
+def _plain(x):
+    """Well-behaved model: (2,) -> (), finite output and finite derivative."""
+    return 3.0 * x[0] + 0.5 * x[1]
+
+
+def _nan_output_at(bad_rows, X):
+    """Return a model that gives a NaN **output** on the named rows of X.
+
+    The derivative stays finite on those rows, so this isolates the output
+    half of the check. The model recognises its row by the first column of
+    ``X``, which ``_grid_X`` makes unique.
+    """
+    keys = jnp.asarray(np.asarray(X)[list(bad_rows), 0])
+
+    def fn(x):
+        is_bad = jnp.any(keys == x[0])
+        return jnp.where(is_bad, jnp.nan, 3.0 * x[0] + 0.5 * x[1])
+
+    return fn
+
+
+def _nan_jacobian(x):
+    """Finite output, NaN derivative where ``x[0] < 0.5``: (2,) -> ().
+
+    This is the textbook ``jnp.where`` gradient trap. The forward pass selects
+    the safe branch, so the output is finite everywhere. The backward pass
+    still evaluates ``d/dx sqrt(negative)``, which is NaN, and ``0 * NaN`` is
+    NaN. A check that only looked at Y would let it through and return a
+    ``nu`` that is silently NaN.
+    """
+    safe = x[0] >= 0.5
+    return jnp.where(safe, jnp.sqrt(x[0] - 0.5), 0.0) + 0.5 * x[1]
+
+
+def _nan_jacobian_at(bad_rows, X):
+    """Return a model with a NaN **derivative** on the named rows of X.
+
+    Same gradient trap as :func:`_nan_jacobian`, but aimed at chosen rows
+    rather than at a half of the input range. The output stays finite
+    everywhere, so only the derivative check can see these rows.
+    """
+    keys = jnp.asarray(np.asarray(X)[list(bad_rows), 0])
+
+    def fn(x):
+        is_bad = jnp.any(keys == x[0])
+        branch = jnp.sqrt(x[0] - jnp.where(is_bad, 10.0, 0.0))
+        return jnp.where(is_bad, 0.5 * x[1], branch + 0.5 * x[1])
+
+    return fn
+
+
+def _precomputed(fn, X):
+    """Return ``(Y, dfdx)`` for the pre-computed calling convention."""
+    import jax
+
+    return jax.vmap(fn)(X), jax.vmap(jax.jacrev(fn))(X)
+
+
+class TestInvalidPolicyPrecomputed:
+    """T4: the on_invalid policy on the (Y, dfdx) calling convention."""
+
+    def test_raise_is_the_default(self):
+        """T4: a non-finite output refuses the analysis without being asked."""
+        X = _grid_X()
+        Y, dfdx = _precomputed(_nan_output_at([3], X), X)
+        with pytest.raises(ValueError, match="non-finite"):
+            analyze(_two_uniform_problem(), Y=Y, dfdx=dfdx)
+
+    def test_raise_names_the_rows(self):
+        """T4: the refusal lists the positions the caller has to investigate."""
+        X = _grid_X()
+        Y, dfdx = _precomputed(_nan_output_at([3, 11], X), X)
+        with pytest.raises(ValueError) as exc:
+            analyze(_two_uniform_problem(), Y=Y, dfdx=dfdx, on_invalid="raise")
+        assert "[3, 11]" in str(exc.value)
+        assert "jaxgsa.dgsm.analyze" in str(exc.value)
+
+    def test_propagate_lets_the_value_reach_the_indices(self):
+        """T4: 'propagate' warns, keeps every row, and returns NaN indices."""
+        X = _grid_X()
+        Y, dfdx = _precomputed(_nan_output_at([3], X), X)
+        with pytest.warns(JaxgsaWarning, match="propagate"):
+            result = analyze(_two_uniform_problem(), Y=Y, dfdx=dfdx, on_invalid="propagate")
+        assert result.invalid.n_invalid == 1
+        assert result.invalid.n_kept == X.shape[0] - 1
+        assert not np.isfinite(np.asarray(result.var_y))
+
+    def test_drop_matches_the_sample_with_those_rows_removed(self):
+        """T4: 'drop' gives what analyzing the surviving rows alone gives."""
+        X = _grid_X()
+        bad = [3, 11]
+        Y, dfdx = _precomputed(_nan_output_at(bad, X), X)
+        keep = np.setdiff1d(np.arange(X.shape[0]), bad)
+
+        with pytest.warns(JaxgsaWarning, match="dropped"):
+            dropped = analyze(_two_uniform_problem(), Y=Y, dfdx=dfdx, on_invalid="drop")
+        reference = analyze(_two_uniform_problem(), Y=Y[keep], dfdx=dfdx[keep])
+
+        np.testing.assert_allclose(np.asarray(dropped.nu), np.asarray(reference.nu), rtol=1e-6)
+        np.testing.assert_allclose(
+            np.asarray(dropped.sigma), np.asarray(reference.sigma), rtol=1e-6
+        )
+        np.testing.assert_allclose(
+            np.asarray(dropped.var_y), np.asarray(reference.var_y), rtol=1e-6
+        )
+        assert dropped.invalid.unit_indices == tuple(bad)
+
+    def test_a_non_finite_jacobian_is_caught_with_a_finite_output(self):
+        """T4: dfdx is checked too, not only Y.
+
+        ``nu`` is built from the derivative, so a NaN there poisons the index
+        whatever the output does.
+        """
+        X = _grid_X()
+        Y, dfdx = _precomputed(_plain, X)
+        dfdx = dfdx.at[5, 0].set(jnp.nan)
+        assert bool(jnp.all(jnp.isfinite(Y)))
+
+        with pytest.raises(ValueError, match="non-finite") as exc:
+            analyze(_two_uniform_problem(), Y=Y, dfdx=dfdx)
+        assert "[5]" in str(exc.value)
+
+        with pytest.warns(JaxgsaWarning, match="dropped"):
+            result = analyze(_two_uniform_problem(), Y=Y, dfdx=dfdx, on_invalid="drop")
+        assert result.invalid.unit_indices == (5,)
+        # Not plain "Y": the output array is finite everywhere here, and only
+        # the derivative is not. A report saying "Y" would send a reader to
+        # look at the wrong array.
+        assert result.invalid.sources == ("Y or its derivative",)
+        assert bool(np.all(np.isfinite(np.asarray(result.nu))))
+
+    def test_drop_refuses_when_nothing_usable_is_left(self):
+        """T4: a variance needs two rows, so dropping down to one still raises."""
+        X = _grid_X(n=4)
+        Y, dfdx = _precomputed(_nan_output_at([0, 1, 2], X), X)
+        with pytest.raises(ValueError, match="every usable row was removed"):
+            analyze(_two_uniform_problem(), Y=Y, dfdx=dfdx, on_invalid="drop")
+
+
+class TestInvalidPolicyAutodiff:
+    """T4: the on_invalid policy on the (fn, X) calling convention.
+
+    This path builds Y itself, inside a jitted vmap, and reduces the Jacobian
+    to running totals as it goes. The policy therefore has to act inside that
+    loop, not after it.
+    """
+
+    def test_raise_is_the_default(self):
+        """T4: a NaN the model itself produced refuses the analysis."""
+        X = _grid_X()
+        with pytest.raises(ValueError, match="non-finite"):
+            analyze(_two_uniform_problem(), _nan_output_at([7], X), X)
+
+    def test_propagate_lets_the_value_reach_the_indices(self):
+        """T4: 'propagate' warns and returns the non-finite index."""
+        X = _grid_X()
+        with pytest.warns(JaxgsaWarning, match="propagate"):
+            result = analyze(
+                _two_uniform_problem(), _nan_output_at([7], X), X, on_invalid="propagate"
+            )
+        assert result.invalid.n_invalid == 1
+        assert not np.isfinite(np.asarray(result.var_y))
+
+    def test_drop_matches_the_sample_with_those_rows_removed(self):
+        """T4: the drop happens before the moments accumulate.
+
+        This is the load-bearing claim of the autodiff path. ``sum_jac`` and
+        ``sum_jac2`` are running totals over batches, so a bad row folded into
+        them cannot be taken out again: masking after the reduction would
+        divide the wrong total by the wrong count. The assertion is equality
+        with the same model run on the clean rows only.
+        """
+        X = _grid_X()
+        bad = [2, 9]
+        fn = _nan_output_at(bad, X)
+        keep = np.setdiff1d(np.arange(X.shape[0]), bad)
+
+        with pytest.warns(JaxgsaWarning, match="dropped"):
+            dropped = analyze(_two_uniform_problem(), fn, X, on_invalid="drop")
+        reference = analyze(_two_uniform_problem(), fn, X[keep])
+
+        np.testing.assert_allclose(np.asarray(dropped.nu), np.asarray(reference.nu), rtol=1e-5)
+        np.testing.assert_allclose(
+            np.asarray(dropped.sigma), np.asarray(reference.sigma), rtol=1e-5
+        )
+        np.testing.assert_allclose(
+            np.asarray(dropped.var_y), np.asarray(reference.var_y), rtol=1e-5
+        )
+        assert dropped.invalid.unit_indices == tuple(bad)
+
+    def test_a_non_finite_jacobian_is_caught_with_a_finite_output(self):
+        """T4: the Jacobian the model produced is checked, not only its output.
+
+        ``_nan_jacobian`` is finite everywhere in the forward pass, so nothing
+        in Y says anything is wrong. Only the derivative is NaN.
+        """
+        import jax
+
+        X = _grid_X()
+        bad = np.flatnonzero(np.asarray(X)[:, 0] < 0.5)
+        assert bad.size > 2
+        assert bool(jnp.all(jnp.isfinite(jax.vmap(_nan_jacobian)(X))))
+
+        with pytest.raises(ValueError, match="non-finite") as exc:
+            analyze(_two_uniform_problem(), _nan_jacobian, X)
+        assert "jaxgsa.dgsm.analyze" in str(exc.value)
+
+        with pytest.warns(JaxgsaWarning, match="dropped"):
+            result = analyze(_two_uniform_problem(), _nan_jacobian, X, on_invalid="drop")
+        assert result.invalid.unit_indices == tuple(int(i) for i in bad)
+        # Not plain "Y": the output array is finite everywhere here, and only
+        # the derivative is not. A report saying "Y" would send a reader to
+        # look at the wrong array.
+        assert result.invalid.sources == ("Y or its derivative",)
+        assert bool(np.all(np.isfinite(np.asarray(result.nu))))
+
+    def test_a_dropped_nan_jacobian_matches_the_clean_subsample(self):
+        """T4: dropping a NaN **derivative** also happens before the totals.
+
+        A NaN Jacobian is the strict case. Its row contributes NaN to
+        ``sum_jac`` the instant it is summed, so if the mask were applied
+        after the reduction ``nu`` would be NaN and this equality could not
+        hold at all.
+        """
+        X = _grid_X()
+        keep = np.flatnonzero(np.asarray(X)[:, 0] >= 0.5)
+
+        with pytest.warns(JaxgsaWarning, match="dropped"):
+            dropped = analyze(_two_uniform_problem(), _nan_jacobian, X, on_invalid="drop")
+        reference = analyze(_two_uniform_problem(), _nan_jacobian, X[keep])
+
+        np.testing.assert_allclose(np.asarray(dropped.nu), np.asarray(reference.nu), rtol=1e-5)
+        np.testing.assert_allclose(
+            np.asarray(dropped.sigma), np.asarray(reference.sigma), rtol=1e-5
+        )
+
+    def test_a_non_finite_input_is_reported_as_an_input(self):
+        """T4: X is checked as well, and the report separates it from Y."""
+        X = np.asarray(_grid_X()).copy()
+        X[4, 1] = np.nan
+        with pytest.raises(ValueError, match="non-finite") as exc:
+            analyze(_two_uniform_problem(), _plain, jnp.asarray(X))
+        assert "X" in str(exc.value)
+
+        with pytest.warns(JaxgsaWarning, match="dropped"):
+            result = analyze(_two_uniform_problem(), _plain, jnp.asarray(X), on_invalid="drop")
+        assert result.invalid.unit_indices == (4,)
+        assert "X" in result.invalid.sources
+
+
+class TestInvalidPolicyShared:
+    """T4: behaviour that must agree across both calling conventions."""
+
+    @pytest.mark.parametrize("policy", ["raise", "propagate", "drop"])
+    def test_clean_autodiff_sample_reports_nothing(self, policy, recwarn):
+        """T4: a clean sample gives an empty report and no warning."""
+        result = analyze(_two_uniform_problem(), _plain, _grid_X(), on_invalid=policy)
+        assert result.invalid.n_invalid == 0
+        assert result.invalid.policy == policy
+        assert result.invalid.unit is InvalidUnit.ROW
+        assert result.invalid.n_units == 24
+        assert not any("non-finite" in str(w.message) for w in recwarn)
+
+    @pytest.mark.parametrize("policy", ["raise", "propagate", "drop"])
+    def test_clean_precomputed_sample_reports_nothing(self, policy, recwarn):
+        """T4: the same, on the pre-computed convention."""
+        X = _grid_X()
+        Y, dfdx = _precomputed(_plain, X)
+        result = analyze(_two_uniform_problem(), Y=Y, dfdx=dfdx, on_invalid=policy)
+        assert result.invalid.n_invalid == 0
+        assert result.invalid.policy == policy
+        assert not any("non-finite" in str(w.message) for w in recwarn)
+
+    @pytest.mark.parametrize("bad", ["Raise", "skip", "", None, 0, True])
+    def test_a_bad_policy_value_is_rejected(self, bad):
+        """T4: an unknown on_invalid is refused, on either convention."""
+        X = _grid_X()
+        with pytest.raises(ValueError, match="on_invalid must be one of"):
+            analyze(_two_uniform_problem(), _plain, X, on_invalid=bad)
+        Y, dfdx = _precomputed(_plain, X)
+        with pytest.raises(ValueError, match="on_invalid must be one of"):
+            analyze(_two_uniform_problem(), Y=Y, dfdx=dfdx, on_invalid=bad)
+
+    def test_the_policy_is_checked_before_the_model_runs(self):
+        """T4: a misspelled policy costs no model evaluation.
+
+        The autodiff path is the expensive one. Validating on_invalid first
+        means a typo is caught without differentiating anything.
+        """
+        calls = []
+
+        def counted(x):
+            calls.append(1)
+            return _plain(x)
+
+        with pytest.raises(ValueError, match="on_invalid must be one of"):
+            analyze(_two_uniform_problem(), counted, _grid_X(), on_invalid="nope")
+        assert calls == []
+
+
+class TestInvalidPolicyBatched:
+    """T4: batching does not change what the policy does."""
+
+    @pytest.mark.parametrize("bad_row", [1, 15, 29])
+    def test_a_bad_row_is_dropped_wherever_its_batch_falls(self, bad_row):
+        """T4: batch 1, batch 2 and the ragged last batch behave alike.
+
+        The running totals are per batch, so a row in the middle batch is the
+        case that a naive "mask at the end" implementation gets wrong. The
+        model poisons the derivative rather than the output, which is the case
+        that cannot survive being summed.
+        """
+        X = _grid_X(n=30)
+        fn = _nan_jacobian_at([bad_row], X)
+        keep = np.setdiff1d(np.arange(30), [bad_row])
+
+        with pytest.warns(JaxgsaWarning, match="dropped"):
+            dropped = analyze(_two_uniform_problem(), fn, X, batch_size=10, on_invalid="drop")
+        reference = analyze(_two_uniform_problem(), fn, X[keep])
+
+        assert dropped.invalid.unit_indices == (bad_row,)
+        np.testing.assert_allclose(np.asarray(dropped.nu), np.asarray(reference.nu), rtol=1e-5)
+        np.testing.assert_allclose(
+            np.asarray(dropped.sigma), np.asarray(reference.sigma), rtol=1e-5
+        )
+
+    def test_batched_and_unbatched_drops_agree(self):
+        """T4: the same sample gives the same indices with and without batching."""
+        X = _grid_X(n=30)
+        fn = _nan_jacobian_at([4, 17], X)
+        with pytest.warns(JaxgsaWarning, match="dropped"):
+            batched = analyze(_two_uniform_problem(), fn, X, batch_size=7, on_invalid="drop")
+        with pytest.warns(JaxgsaWarning, match="dropped"):
+            whole = analyze(_two_uniform_problem(), fn, X, on_invalid="drop")
+        assert batched.invalid.unit_indices == whole.invalid.unit_indices == (4, 17)
+        np.testing.assert_allclose(np.asarray(batched.nu), np.asarray(whole.nu), rtol=1e-5)
+
+    def test_a_ragged_last_batch_does_not_invent_a_bad_row(self):
+        """T4: the zero padding of the last batch is never checked.
+
+        The pad rows would look non-finite to a model like ``_nan_jacobian``,
+        which fails at ``x[0] < 0.5``. They are cut off before the mask is
+        built, so a clean sample stays clean.
+        """
+        X = jnp.asarray(np.stack([np.linspace(0.6, 0.99, 17), np.linspace(1.0, 2.0, 17)], axis=1))
+        result = analyze(_two_uniform_problem(), _nan_jacobian, X, batch_size=5)
+        assert result.invalid.n_invalid == 0

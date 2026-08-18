@@ -402,3 +402,51 @@ class TestReportSurface:
                 Y=_rows(1, 6, n=8),
             )
         assert report.unit_indices == (1, 6)
+
+
+class TestSourceNames:
+    """T4: renaming the arrays the report talks about."""
+
+    def test_source_names_replace_the_default_labels(self):
+        """T4: a caller checking something other than X and Y can say so.
+
+        DGSM is the real case. On its autodiff path it puts the model output
+        and its derivative into one slot, so a report saying "Y" would send a
+        reader to an output array that is finite everywhere.
+        """
+        with pytest.raises(ValueError, match="Y or its derivative") as exc:
+            check_invalid(
+                policy="raise",
+                method=METHOD,
+                unit=InvalidUnit.ROW,
+                n_units=6,
+                Y=_rows(2),
+                source_names=("X", "Y or its derivative"),
+            )
+        assert "in Y or its derivative" in str(exc.value)
+
+    def test_renamed_sources_reach_the_report(self):
+        """T4: the report carries the caller's names, not the defaults."""
+        with pytest.warns(JaxgsaWarning):
+            _, report = check_invalid(
+                policy="propagate",
+                method=METHOD,
+                unit=InvalidUnit.ROW,
+                n_units=6,
+                X=_rows(1),
+                Y=_rows(3),
+                source_names=("inputs", "outputs"),
+            )
+        assert report.sources == ("inputs", "outputs")
+
+    def test_default_names_are_still_x_and_y(self):
+        """T4: the override is opt-in and does not shift the common case."""
+        with pytest.warns(JaxgsaWarning):
+            _, report = check_invalid(
+                policy="propagate",
+                method=METHOD,
+                unit=InvalidUnit.ROW,
+                n_units=6,
+                Y=_rows(0),
+            )
+        assert report.sources == ("Y",)

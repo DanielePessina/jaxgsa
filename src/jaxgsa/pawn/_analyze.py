@@ -59,12 +59,22 @@ from jax import Array
 
 from jaxgsa._core.batching import get_memory_budget
 from jaxgsa._core.bootstrap import _percentile_ci
+from jaxgsa._core.invalid import (
+    InvalidUnit,
+    OnInvalid,
+    check_invalid,
+    resolve_policy,
+)
 from jaxgsa._core.partition import _extract_categorical_codes
 from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa._core.validation import _prepare_Y, _squeeze_output_axes, _validate_xy_inputs
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.pawn._result import PAWNResult
 from jaxgsa.problem import Problem, _categorical_dims
+
+# Fewest samples that still define both an unconditional and a conditional
+# ECDF, so that a KS distance is a distance and not an artefact.
+_MIN_KEPT = 4
 
 
 def _equal_width_bins(X_u01: Array, n_bins: int) -> Array:
@@ -73,8 +83,13 @@ def _equal_width_bins(X_u01: Array, n_bins: int) -> Array:
     A sample outside ``[0, 1]`` gets the sentinel ``-1``, so it matches no bin
     and drops out of every conditional set. This happens when the caller
     passes inputs beyond the declared bounds of a ``uniform`` parameter. A
-    ``NaN`` input gets the same sentinel. A value of exactly ``0.0`` maps to
-    the first bin and ``1.0`` maps to the last bin.
+    value of exactly ``0.0`` maps to the first bin and ``1.0`` maps to the
+    last bin.
+
+    A non-finite input would take the same sentinel, but :func:`analyze`
+    never lets one reach here: the ``on_invalid`` policy handles it first, so
+    a failed model run is reported instead of quietly leaving every
+    conditional set.
 
     Args:
         X_u01: Unit-interval inputs, shape ``(N, D)``.
@@ -356,6 +371,7 @@ def analyze(
     conf_level: float = 0.95,
     seed: int = 0,
     slice_chunk_size: int | None = None,
+    on_invalid: OnInvalid = "raise",
 ) -> PAWNResult:
     """Compute PAWN sensitivity indices.
 
@@ -414,17 +430,26 @@ def analyze(
             drive the peak. Lower it if a time-series output runs the device
             out of memory. It changes no index: every output column is
             independent of every other.
+        on_invalid: What to do about a row of ``X`` or ``Y`` that holds a
+            non-finite value. ``"raise"`` (default) refuses the sample,
+            ``"drop"`` removes those rows and analyzes the rest, and
+            ``"propagate"`` warns and computes anyway. ``X`` and ``Y`` are
+            checked together, so a bad input takes its own output with it.
+            See :mod:`jaxgsa._core.invalid`.
 
     Returns:
         A :class:`PAWNResult` with ``pawn`` shaped ``(D,)``, ``(K, D)``, or
-        ``(T, K, D)``, and optional confidence intervals in ``pawn_conf``.
+        ``(T, K, D)``, optional confidence intervals in ``pawn_conf``, and
+        the non-finite report in ``invalid``.
 
     Raises:
         ValueError: If X is not 2-D, its column count does not match the
             problem, X and Y have differing row counts, ``statistic`` is
             not one of ``"median"``/``"max"``/``"mean"``, ``n_bins < 2``,
-            ``conf_level`` is not in ``(0, 1)``, or ``slice_chunk_size`` is
-            given and is not a positive integer.
+            ``conf_level`` is not in ``(0, 1)``, ``slice_chunk_size`` is
+            given and is not a positive integer, ``on_invalid`` is not one
+            of the three policies, or the non-finite policy refuses the
+            sample.
     """
     X = jnp.asarray(X)
     # PAWN conditions on bins of each input and compares output CDFs, so a
@@ -439,6 +464,23 @@ def analyze(
         categorical_ok=True,
         method="jaxgsa.pawn.analyze",
     )
+    # Before any transform, and before binning above all: a non-finite input
+    # would otherwise take the out-of-range sentinel and leave every
+    # conditional set without a word.
+    method = "jaxgsa.pawn.analyze"
+    policy = resolve_policy(on_invalid, method=method, unit=InvalidUnit.ROW)
+    keep, invalid = check_invalid(
+        policy=policy,
+        method=method,
+        unit=InvalidUnit.ROW,
+        n_units=int(X.shape[0]),
+        X=X,
+        Y=Y,
+        min_kept=_MIN_KEPT,
+    )
+    if not keep.all():
+        X = X[keep]
+        Y = Y[keep]
     if statistic not in ("median", "max", "mean"):
         raise ValueError(f"statistic must be 'median', 'max', or 'mean', got {statistic!r}")
     if n_bins < 2:
@@ -477,4 +519,5 @@ def analyze(
         pawn=pawn_out,
         pawn_conf=pawn_conf,
         problem=problem,
+        invalid=invalid,
     )

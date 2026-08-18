@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from jaxgsa import pce
+from jaxgsa import JaxgsaWarning, pce
 from jaxgsa.benchmarks import ishigami, linear
 from jaxgsa.pce._analyze import _auto_order
 from jaxgsa.pce._engine import (
@@ -731,3 +731,128 @@ class TestMultiOutput:
 
         _, _, S2 = sobol_from_coefficients(jnp.asarray(coeffs), mi)
         np.testing.assert_allclose(np.asarray(S2), s2_dense, rtol=1e-5, equal_nan=True)
+
+
+# ---------------------------------------------------------------------------
+# 10. on_invalid policy
+# ---------------------------------------------------------------------------
+
+
+def _invalid_data(n: int = 400, seed: int = 3):
+    """Build a smooth 3-parameter sample the default PCE order fits well."""
+    rng = np.random.default_rng(seed)
+    bounds = np.asarray(linear.PROBLEM.bounds)
+    X = rng.uniform(bounds[:, 0], bounds[:, 1], size=(n, 3))
+    Y = np.asarray(linear.evaluate(jnp.asarray(X)))
+    return X, Y
+
+
+class TestPCEOnInvalid:
+    """T4: ``pce.analyze`` applies the shared non-finite policy.
+
+    A PCE fit has no defence of its own against a NaN. It reaches the normal
+    equations, and one bad row is enough to make every coefficient, every
+    leave-one-out RMSE and every index non-finite.
+    """
+
+    def test_raise_is_the_default_and_names_the_rows(self):
+        """T4: a non-finite Y refuses the analysis and says which rows carry it."""
+        X, Y = _invalid_data()
+        Y = Y.copy()
+        Y[7] = np.nan
+        Y[19] = np.inf
+        with pytest.raises(ValueError, match="non-finite") as exc:
+            pce.analyze(linear.PROBLEM, X, Y)
+        message = str(exc.value)
+        assert "jaxgsa.pce.analyze" in message
+        assert "2 of 400 rows" in message
+        assert "[7, 19]" in message
+
+    def test_propagate_warns_and_lets_the_nan_reach_the_indices(self):
+        """T4: 'propagate' keeps every row, so the indices come out non-finite.
+
+        This is the debugging policy: the answer must be loudly wrong rather
+        than quietly wrong, so both the warning and the NaN indices matter.
+        """
+        X, Y = _invalid_data()
+        Y = Y.copy()
+        Y[7] = np.nan
+        with pytest.warns(JaxgsaWarning, match="reaches the indices"):
+            result = pce.analyze(linear.PROBLEM, X, Y, on_invalid="propagate")
+        assert not np.all(np.isfinite(np.asarray(result.S1)))
+        assert result.invalid.policy == "propagate"
+        assert result.invalid.n_invalid == 1
+        assert result.invalid.n_kept == 399
+
+    def test_drop_removes_the_rows_and_the_fit_is_finite_again(self):
+        """T4: 'drop' fits on the survivors, so every index is finite."""
+        X, Y = _invalid_data()
+        Y = Y.copy()
+        Y[7] = np.nan
+        with pytest.warns(JaxgsaWarning, match="dropped 1 of 400 rows"):
+            result = pce.analyze(linear.PROBLEM, X, Y, on_invalid="drop", order=2)
+        assert np.all(np.isfinite(np.asarray(result.S1)))
+        assert result.loo_rmse is not None
+        assert np.all(np.isfinite(np.asarray(result.loo_rmse)))
+        assert result.invalid.unit_indices == (7,)
+        assert result.invalid.sources == ("Y",)
+
+    def test_drop_matches_a_hand_filtered_fit(self):
+        """T4: dropping row i equals never passing row i.
+
+        The point is alignment. If the mask reached Y but not X, every later
+        pair would be mismatched and no index could detect it.
+        """
+        X, Y = _invalid_data()
+        Y_bad = Y.copy()
+        Y_bad[7] = np.nan
+        with pytest.warns(JaxgsaWarning):
+            dropped = pce.analyze(linear.PROBLEM, X, Y_bad, on_invalid="drop", order=2)
+        keep = np.ones(len(Y), dtype=bool)
+        keep[7] = False
+        manual = pce.analyze(linear.PROBLEM, X[keep], Y[keep], order=2)
+        np.testing.assert_allclose(
+            np.asarray(dropped.S1), np.asarray(manual.S1), rtol=1e-5, atol=1e-6
+        )
+
+    def test_a_non_finite_input_is_caught_too(self):
+        """T4: X is checked as well as Y, and ``sources`` says which array.
+
+        A NaN input is just as fatal as a NaN output, because it enters the
+        design matrix. A user who only sanitized Y needs to be told where to
+        look.
+        """
+        X, Y = _invalid_data()
+        X = X.copy()
+        X[11, 2] = np.nan
+        with pytest.raises(ValueError, match=r"in X\.") as exc:
+            pce.analyze(linear.PROBLEM, X, Y)
+        assert "[11]" in str(exc.value)
+        with pytest.warns(JaxgsaWarning):
+            result = pce.analyze(linear.PROBLEM, X, Y, on_invalid="drop", order=2)
+        assert result.invalid.sources == ("X",)
+
+    @pytest.mark.parametrize("policy", ["raise", "propagate", "drop"])
+    def test_a_clean_sample_is_clean_under_every_policy(self, policy, recwarn):
+        """T4: nothing found means no warning and a report that says so."""
+        X, Y = _invalid_data()
+        result = pce.analyze(linear.PROBLEM, X, Y, order=2, on_invalid=policy)
+        assert result.invalid.n_invalid == 0
+        assert not result.invalid.any_invalid
+        assert result.invalid.n_units == 400
+        assert [w for w in recwarn if "non-finite" in str(w.message)] == []
+
+    def test_a_bad_policy_name_is_refused(self):
+        """T4: an unknown on_invalid raises before any fitting work happens."""
+        X, Y = _invalid_data()
+        with pytest.raises(ValueError, match="on_invalid must be one of"):
+            pce.analyze(linear.PROBLEM, X, Y, on_invalid="skip")
+
+    def test_shapley_carries_the_report_through(self):
+        """T4: the report survives the analytical Shapley step unchanged."""
+        X, Y = _invalid_data()
+        Y = Y.copy()
+        Y[7] = np.nan
+        with pytest.warns(JaxgsaWarning):
+            result = pce.analyze(linear.PROBLEM, X, Y, on_invalid="drop", order=2)
+        assert result.shapley().invalid == result.invalid

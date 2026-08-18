@@ -56,6 +56,12 @@ import jax.numpy as jnp
 from jax import Array
 
 from jaxgsa._core.bootstrap import _percentile_ci
+from jaxgsa._core.invalid import (
+    InvalidUnit,
+    OnInvalid,
+    check_invalid,
+    resolve_policy,
+)
 from jaxgsa._core.partition import (
     _build_class_indices,
     _class_layout,
@@ -82,6 +88,10 @@ _CHUNK_ELEM_BUDGET = 1 << 26
 
 _MODES = ("univariate", "multivariate", "trajectory")
 
+# Fewest samples that still build two conditioning classes of two points
+# each, which is what the default ``M = min(25, N // 2)`` already assumes.
+_MIN_KEPT = 4
+
 
 def _normalize_by_2var(weighted_sum: Array, V: Array) -> Array:
     """Normalize class-weighted cost sums by ``V = 2 * Var``.
@@ -90,9 +100,17 @@ def _normalize_by_2var(weighted_sum: Array, V: Array) -> Array:
     and joint kernels share it, so the two modes can never drift apart. A
     non-positive ``V`` marks a constant output and yields exactly 0
     instead of NaN.
+
+    A ``NaN`` ``V`` is not a constant output, it is a broken one. ``V > 0``
+    is False for it, so without the second branch below it would take the
+    constant-output path and report 0, which reads as "no influence" rather
+    than "this did not compute". Only ``on_invalid="propagate"`` can reach
+    that case: the other two policies remove the non-finite rows or refuse
+    the sample.
     """
     V_safe = jnp.where(V > 0, V, 1.0)
-    return jnp.where(V > 0, weighted_sum / V_safe, 0.0)
+    normalized = jnp.where(V > 0, weighted_sum / V_safe, 0.0)
+    return jnp.where(jnp.isnan(V), jnp.nan, normalized)
 
 
 def _aggregate_normalized(per_class: Array, weights: Array, V: Array) -> Array:
@@ -451,6 +469,7 @@ def analyze(
     conf_level: float = 0.95,
     seed: int = 0,
     slice_chunk_size: int | None = None,
+    on_invalid: OnInvalid = "raise",
 ) -> OTResult:
     """Compute optimal-transport sensitivity indices from given data.
 
@@ -543,11 +562,19 @@ def analyze(
             picks a memory-aware default. The point-cloud modes accept it
             but ignore it, because one ``(N, N/M)`` cost block per solve
             bounds their peak memory.
+        on_invalid: What to do about a row of ``X`` or ``Y`` that holds a
+            non-finite value. ``"raise"`` (default) refuses the sample,
+            ``"drop"`` removes those rows and analyzes the rest, and
+            ``"propagate"`` warns and computes anyway. The check reads the
+            real ``X`` and ``Y`` the caller passed, not the synthetic
+            ``dummy`` column, and it reads them together, so a bad input
+            takes its own output with it. See :mod:`jaxgsa._core.invalid`.
 
     Returns:
         An :class:`OTResult` with the total, advective and diffusive
-        indices, optional confidence intervals, and the optional dummy
-        baseline. Every index is 0 for a constant (zero-variance) output
+        indices, optional confidence intervals, the optional dummy
+        baseline, and the non-finite report in ``invalid``. Every index is
+        0 for a constant (zero-variance) output
         slice rather than NaN. In the point-cloud modes the entropic and
         finite-sample bias keeps the indices of irrelevant parameters
         strictly positive. Compare those against ``ot_dummy`` rather than
@@ -562,12 +589,38 @@ def analyze(
             values other than its integer level codes, ``epsilon <= 0``,
             ``max_iter < 1``,
             ``tol <= 0``, ``n_bootstrap < 0``, ``conf_level`` is not in
-            ``(0, 1)``, or ``slice_chunk_size`` is not a positive integer.
+            ``(0, 1)``, ``slice_chunk_size`` is not a positive integer,
+            ``on_invalid`` is not one of the three policies, or the
+            non-finite policy refuses the sample.
     """
     X = jnp.asarray(X)
     # The OT index measures total, correlation-inclusive influence through
     # rank-based conditioning, so correlated problems are accepted.
-    Y = _validate_xy_inputs(problem, X, Y, correlation_ok=True, categorical_ok=True)
+    Y = _validate_xy_inputs(
+        problem,
+        X,
+        Y,
+        correlation_ok=True,
+        categorical_ok=True,
+        method="jaxgsa.optimal_transport.analyze",
+    )
+    # The user's own sample, before any partition layout is built and before
+    # the dummy column exists. The dummy is synthetic and finite by
+    # construction, so it is not part of what is checked here.
+    method = "jaxgsa.optimal_transport.analyze"
+    policy = resolve_policy(on_invalid, method=method, unit=InvalidUnit.ROW)
+    keep, invalid = check_invalid(
+        policy=policy,
+        method=method,
+        unit=InvalidUnit.ROW,
+        n_units=int(X.shape[0]),
+        X=X,
+        Y=Y,
+        min_kept=_MIN_KEPT,
+    )
+    if not keep.all():
+        X = X[keep]
+        Y = Y[keep]
 
     if mode not in _MODES:
         raise ValueError(f"mode must be one of {_MODES}, got {mode!r}")
@@ -819,4 +872,5 @@ def analyze(
         ot_dummy=ot_dummy,
         mode=mode,
         problem=problem,
+        invalid=invalid,
     )

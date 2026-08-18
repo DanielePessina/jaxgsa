@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from jaxgsa import JaxgsaWarning
 from jaxgsa.benchmarks import ishigami, linear, sobol_g
 from jaxgsa.hsic import analyze
 from jaxgsa.hsic._analyze import _build_one_kernel, _median_bandwidth_sq
@@ -478,3 +479,106 @@ class TestZeroVarianceOutput:
         t = np.asarray(result.T_HSIC)
         assert np.all(np.isnan(r2))
         assert np.all(np.isnan(t))
+
+
+def _invalid_sample(n: int = 64, seed: int = 0):
+    """Build a clean two-parameter HSIC sample for the on_invalid tests."""
+    problem = Problem(names=("a", "b"), bounds=((0.0, 1.0), (0.0, 1.0)))
+    rng = np.random.default_rng(seed)
+    X = rng.uniform(size=(n, 2))
+    Y = np.sin(3.0 * X[:, 0]) + 0.5 * X[:, 1]
+    return problem, jnp.asarray(X), jnp.asarray(Y)
+
+
+class TestHSICInvalidPolicy:
+    """T4 (behaviour): jaxgsa.hsic.analyze honours the shared on_invalid policy."""
+
+    def test_raise_is_the_default_and_names_the_rows(self):
+        """T4: a non-finite Y row refuses the analysis and says which row it is.
+
+        Before 0.10 HSIC checked neither X nor Y for finiteness, so a failed
+        model run reached the kernel matrices and came back as a NaN index
+        with nothing said about where it came from.
+        """
+        problem, X, Y = _invalid_sample()
+        Y = Y.at[11].set(jnp.nan)
+        with pytest.raises(ValueError) as exc:
+            analyze(problem, X, Y, n_perms=5)
+        message = str(exc.value)
+        assert "jaxgsa.hsic.analyze" in message
+        assert "1 of 64 rows" in message
+        assert "[11]" in message
+
+    def test_propagate_warns_and_the_indices_go_non_finite(self):
+        """T4: 'propagate' keeps the row, and the NaN reaches the indices.
+
+        The Gaussian kernel and the centering both average over the sample,
+        so one NaN output contaminates every entry. That is the intended
+        outcome of the policy: loudly wrong beats quietly wrong.
+        """
+        problem, X, Y = _invalid_sample()
+        Y = Y.at[11].set(jnp.nan)
+        with pytest.warns(JaxgsaWarning, match="reaches the indices"):
+            result = analyze(problem, X, Y, n_perms=5, on_invalid="propagate")
+        assert result.invalid.policy == "propagate"
+        assert result.invalid.unit_indices == (11,)
+        assert not np.all(np.isfinite(np.asarray(result.R2_HSIC)))
+
+    def test_drop_removes_the_row_and_returns_finite_indices(self):
+        """T4: 'drop' analyzes the remainder and the indices come back usable."""
+        problem, X, Y = _invalid_sample()
+        Y = Y.at[11].set(jnp.nan)
+        with pytest.warns(JaxgsaWarning, match="dropped 1 of 64 rows"):
+            result = analyze(problem, X, Y, n_perms=5, on_invalid="drop")
+        assert result.invalid.n_kept == 63
+        assert np.all(np.isfinite(np.asarray(result.R2_HSIC)))
+
+    def test_a_bad_x_is_caught_and_named(self):
+        """T4: a non-finite input is caught too, and the report says it was X."""
+        problem, X, Y = _invalid_sample()
+        X = X.at[4, 1].set(-jnp.inf)
+        with pytest.raises(ValueError, match=r"in X\b") as exc:
+            analyze(problem, X, Y, n_perms=5)
+        assert "[4]" in str(exc.value)
+        with pytest.warns(JaxgsaWarning):
+            result = analyze(problem, X, Y, n_perms=5, on_invalid="drop")
+        assert result.invalid.sources == ("X",)
+
+    def test_dropping_an_x_row_takes_its_y_row_with_it(self):
+        """T4: X and Y are dropped as a pair, so the sample stays aligned.
+
+        Removing the bad row of X but keeping its row of Y would shift every
+        later output by one, which no estimator can detect. The proof is an
+        equality against the sample with that row deleted from both arrays
+        by hand.
+        """
+        problem, X, Y = _invalid_sample()
+        X_bad = X.at[20, 0].set(jnp.nan)
+
+        with pytest.warns(JaxgsaWarning):
+            dropped = analyze(problem, X_bad, Y, n_perms=5, seed=3, on_invalid="drop")
+
+        keep = np.ones(64, dtype=bool)
+        keep[20] = False
+        by_hand = analyze(problem, X[keep], Y[keep], n_perms=5, seed=3)
+
+        np.testing.assert_allclose(
+            np.asarray(dropped.R2_HSIC), np.asarray(by_hand.R2_HSIC), rtol=0, atol=0
+        )
+
+    @pytest.mark.parametrize("policy", ["raise", "propagate", "drop"])
+    def test_a_clean_sample_is_untouched_under_every_policy(self, policy, recwarn):
+        """T4: nothing found means nothing removed, nothing warned, empty report."""
+        problem, X, Y = _invalid_sample()
+        result = analyze(problem, X, Y, n_perms=5, on_invalid=policy)
+        assert result.invalid.n_invalid == 0
+        assert result.invalid.n_units == 64
+        assert result.invalid.sources == ()
+        assert result.invalid.policy == policy
+        assert len(recwarn) == 0
+
+    def test_rejects_an_unknown_policy(self):
+        """T4: a misspelled policy is refused by name, not silently ignored."""
+        problem, X, Y = _invalid_sample()
+        with pytest.raises(ValueError, match="on_invalid must be one of"):
+            analyze(problem, X, Y, n_perms=5, on_invalid="skip")

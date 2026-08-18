@@ -41,24 +41,32 @@ References:
 
 from __future__ import annotations
 
-import warnings
-
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from jaxgsa._core.invalid import (
+    InvalidUnit,
+    OnInvalid,
+    check_invalid,
+    resolve_policy,
+)
 from jaxgsa._core.validation import (
     _prepare_Y,
     _squeeze_output_axes,
     _validate_output,
     _warn_zero_variance_slices,
 )
-from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.kucherenko._result import KucherenkoResult
 from jaxgsa.kucherenko._sampling import KucherenkoSamples
 
 
-def analyze(sampling_result: KucherenkoSamples, Y: Array) -> KucherenkoResult:
+def analyze(
+    sampling_result: KucherenkoSamples,
+    Y: Array,
+    *,
+    on_invalid: OnInvalid = "raise",
+) -> KucherenkoResult:
     """Compute Kucherenko first-order and total indices from model outputs.
 
     The estimators run on the actual model outputs. No surrogate is fitted.
@@ -74,18 +82,32 @@ def analyze(sampling_result: KucherenkoSamples, Y: Array) -> KucherenkoResult:
             ``sampling_result.samples``, in the same row order. Accepted
             shapes: ``(n_runs,)``, ``(n_runs, K)``, or ``(n_runs, T, K)``.
             Indices are computed independently for every output slice.
+        on_invalid: What to do about non-finite model outputs. The unit here
+            is one base point, which appears once in the joint block and once
+            in each of the ``2D`` conditional blocks, so a single bad value
+            removes all ``2D + 1`` of its rows. ``"raise"`` (the default)
+            refuses the sample, ``"propagate"`` lets the value reach the
+            indices, and ``"drop"`` analyzes the surviving base points. See
+            :mod:`jaxgsa._core.invalid`.
 
     Returns:
         A :class:`KucherenkoResult` with ``S1`` and ``ST`` shaped ``(D,)``,
-        ``(K, D)``, or ``(T, K, D)`` to mirror ``Y``.
+        ``(K, D)``, or ``(T, K, D)`` to mirror ``Y``, plus the ``invalid``
+        report.
 
     Raises:
-        ValueError: If ``Y``'s shape violates the output contract.
+        ValueError: If ``Y``'s shape violates the output contract; if
+            ``on_invalid`` is not one of the three policies; if the sample
+            holds a non-finite value under ``on_invalid="raise"``; or if
+            fewer than 2 base points survive a drop.
 
     Warns:
         JaxgsaWarning: If any output slice has zero variance (its indices are
-            NaN), or if non-finite outputs force base points to be dropped.
+            NaN), or if non-finite outputs are found under a policy that does
+            not raise.
     """
+    method = "jaxgsa.kucherenko.analyze"
+    policy = resolve_policy(on_invalid, method=method, unit=InvalidUnit.BASE_POINT)
     problem = sampling_result.problem
     N = sampling_result.base_n
     D = sampling_result.n_params
@@ -98,19 +120,20 @@ def analyze(sampling_result: KucherenkoSamples, Y: Array) -> KucherenkoResult:
     F = np.asarray(Y_canonical, dtype=np.float64).reshape(2 * D + 1, N, n_slices)
 
     # A base point k feeds the joint row and every conditional row with the
-    # same k, so one non-finite output anywhere invalidates all of them.
-    finite = np.isfinite(F).all(axis=(0, 2))
-    n_dropped = N - int(finite.sum())
-    if n_dropped:
-        warnings.warn(
-            f"jaxgsa: dropped {n_dropped} of {N} base points because a model output "
-            "in their group is non-finite",
-            stacklevel=2,
-            category=JaxgsaWarning,
-        )
-        F = F[:, finite, :]
-        if F.shape[1] < 2:
-            raise ValueError("Fewer than 2 base points remain after dropping non-finite outputs")
+    # same k, so one non-finite output anywhere invalidates all of them. The
+    # design is block-major, so base point k sits at rows k, N + k, 2N + k, …
+    # rather than in a contiguous run.
+    keep, invalid = check_invalid(
+        policy=policy,
+        method=method,
+        unit=InvalidUnit.BASE_POINT,
+        n_units=N,
+        Y=Y_canonical,
+        unit_of_row=np.tile(np.arange(N), 2 * D + 1),
+        min_kept=2,
+    )
+    if not keep.all():
+        F = F[:, keep, :]
 
     f_joint = F[0]  # (N, S)
     f_first = F[1 : D + 1]  # (D, N, S) — z redrawn given x_i
@@ -151,4 +174,5 @@ def analyze(sampling_result: KucherenkoSamples, Y: Array) -> KucherenkoResult:
         ST=_shape(ST),
         problem=problem,
         variance=variance_shaped,
+        invalid=invalid,
     )

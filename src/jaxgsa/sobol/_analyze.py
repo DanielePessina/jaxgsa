@@ -20,9 +20,17 @@ from typing import Literal
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import Array
 
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
+from jaxgsa._core.invalid import (
+    InvalidReport,
+    InvalidUnit,
+    OnInvalid,
+    check_invalid,
+    resolve_policy,
+)
 from jaxgsa._core.validation import (
     _prenormalize_outputs,
     _prepare_Y,
@@ -30,7 +38,6 @@ from jaxgsa._core.validation import (
     _validate_output,
     _warn_zero_variance_slices,
 )
-from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.sobol._indices import (
     _fused_first_total,
     _fused_second_order,
@@ -62,71 +69,6 @@ def _get_batched_kernel(calc_second_order: bool):
     if calc_second_order:
         return jax.jit(jax.vmap(_fused_second_order, in_axes=(0, 0, 0, 0)))
     return jax.jit(jax.vmap(_fused_first_total, in_axes=(0, 0, 0)))
-
-
-def _drop_nonfinite(Y: Array, step: int) -> tuple[Array, int]:
-    """Drop entire Saltelli groups that contain any non-finite (NaN/Inf) value.
-
-    Each Saltelli group is a contiguous block of ``step`` rows in Y. It holds
-    one base sample and its D (or 2D) cross-matrix evaluations. If any single
-    element in the group is non-finite, the whole group is removed. A partial
-    group would corrupt the A/B/AB/BA split.
-
-    Args:
-        Y: Model output array, shape ``(n_rows, ...)`` with
-            ``n_rows = N * step``. Trailing dimensions are typically
-            ``(T, K)`` or absent.
-        step: Number of rows per Saltelli group (D+2 or 2D+2).
-
-    Returns:
-        Tuple ``(Y_clean, n_dropped)``: the cleaned output array with shape
-        ``(N_good * step, ...)``, and the number of groups that were removed.
-    """
-    n_rows = Y.shape[0]
-    base_n = n_rows // step
-    trailing = Y.shape[1:]
-
-    # Each Saltelli group [A_i, AB_{i,0}, …, AB_{i,D-1}, B_i] is an
-    # indivisible sampling unit; a single NaN in any row invalidates the
-    # whole group, so we mask at the group level, not per row.
-    grouped = Y[: base_n * step].reshape(base_n, step, *trailing)
-    # Flatten each group to a single row for an efficient all-finite check
-    finite_mask = jnp.all(jnp.isfinite(grouped.reshape(base_n, -1)), axis=1)
-
-    n_good = int(jnp.sum(finite_mask))
-    n_dropped = base_n - n_good
-    if n_dropped > 0:
-        import numpy as np
-
-        # Boolean indexing (variable-length output) is not supported by JAX JIT,
-        # so we round-trip through NumPy for the filtering step.
-        mask_np = np.asarray(finite_mask)
-        grouped_clean = jnp.asarray(np.asarray(grouped)[mask_np])
-        Y_clean = grouped_clean.reshape(n_good * step, *trailing)
-        return Y_clean, n_dropped
-    return Y, 0
-
-
-def _count_nans(
-    S1: Array,
-    ST: Array,
-    S2: Array | None,
-) -> dict[str, int]:
-    """Count NaN values per index array, keyed by index name.
-
-    Callers decide whether to report the counts. For S2, only the strict upper
-    triangle is counted. The diagonal is NaN by construction (see
-    ``_normalize_s2_matrix``) and would inflate the count.
-    """
-    counts: dict[str, int] = {
-        "S1": int(jnp.sum(jnp.isnan(S1))),
-        "ST": int(jnp.sum(jnp.isnan(ST))),
-    }
-    if S2 is not None:
-        D = S2.shape[-1]
-        upper = jnp.triu(jnp.ones((*S2.shape[:-2], D, D), dtype=bool), k=1)
-        counts["S2"] = int(jnp.sum(jnp.isnan(S2) & upper))
-    return counts
 
 
 def _separate_output_values(
@@ -186,7 +128,7 @@ def _normalize_s2_matrix(S2: Array) -> Array:
 
 
 def _analyze_no_bootstrap(
-    sampling_result: SobolSamples, Y: Array, *, slice_chunk_size: int
+    sampling_result: SobolSamples, Y: Array, *, slice_chunk_size: int, invalid: InvalidReport
 ) -> SobolResult:
     """Compute Sobol indices without a bootstrap, picking the faster kernel.
 
@@ -229,13 +171,12 @@ def _analyze_no_bootstrap(
             S1_out, ST_out = kernel(a, ab, b)
             S2_out = None
 
-        nan_counts = _count_nans(S1_out, ST_out, S2_out)
         return SobolResult(
             S1=S1_out,
             ST=ST_out,
             S2=S2_out,
             problem=sampling_result.problem,
-            nan_counts=nan_counts,
+            invalid=invalid,
         )
 
     # Batched path (T*K > 1): flatten (T, K) into a single batch dimension
@@ -293,13 +234,12 @@ def _analyze_no_bootstrap(
     ST_out = _squeeze_output_axes(ST_out, squeeze_time, squeeze_output)
     if S2_out is not None:
         S2_out = _squeeze_output_axes(S2_out, squeeze_time, squeeze_output, n_trailing=2)
-    nan_counts = _count_nans(S1_out, ST_out, S2_out)
     return SobolResult(
         S1=S1_out,
         ST=ST_out,
         S2=S2_out,
         problem=sampling_result.problem,
-        nan_counts=nan_counts,
+        invalid=invalid,
     )
 
 
@@ -312,6 +252,7 @@ def _analyze_bootstrap(
     ci_method: Literal["quantile", "gaussian"],
     key: Array,
     slice_chunk_size: int,
+    invalid: InvalidReport,
 ) -> SobolResult:
     """Compute Sobol indices with bootstrap confidence intervals.
 
@@ -433,16 +374,15 @@ def _analyze_bootstrap(
         S2_out = _squeeze_output_axes(S2_out, squeeze_time, squeeze_output, n_trailing=2)
     if S2_conf is not None:
         S2_conf = _squeeze_output_axes(S2_conf, squeeze_time, squeeze_output, n_trailing=2)
-    nan_counts = _count_nans(S1_out, ST_out, S2_out)
     return SobolResult(
         S1=S1_out,
         ST=ST_out,
         S2=S2_out,
         problem=sampling_result.problem,
+        invalid=invalid,
         S1_conf=S1_conf,
         ST_conf=ST_conf,
         S2_conf=S2_conf,
-        nan_counts=nan_counts,
     )
 
 
@@ -456,6 +396,7 @@ def analyze(
     ci_method: Literal["quantile", "gaussian"] = "quantile",
     key: Array | None = None,
     slice_chunk_size: int = 2048,
+    on_invalid: OnInvalid = "raise",
 ) -> SobolResult:
     """Compute Sobol sensitivity indices from model outputs using JAX.
 
@@ -467,8 +408,8 @@ def analyze(
 
     The function takes the model outputs Y evaluated at the unique rows that
     ``jaxgsa.sobol.sample()`` returned. It rebuilds the expanded Saltelli
-    ordering internally and drops sample groups that contain non-finite
-    values, with a warning. It then dispatches on ``num_resamples``: to the
+    ordering internally and checks it for non-finite values under the
+    ``on_invalid`` policy. It then dispatches on ``num_resamples``: to the
     fast no-bootstrap path, or to the bootstrap confidence-interval path.
 
     Args:
@@ -504,6 +445,12 @@ def analyze(
             slices per vmap batch; in the bootstrap path it caps the
             number of bootstrap resamples per batch. Lower it if you hit
             device out-of-memory errors. Defaults to 2048.
+        on_invalid: What to do about non-finite model outputs. The unit here
+            is one Saltelli group, so a single bad value removes the whole
+            group of ``D + 2`` (or ``2D + 2``) rows. ``"raise"`` (the default)
+            refuses the sample, ``"propagate"`` lets the value reach the
+            indices, and ``"drop"`` analyzes the surviving groups. See
+            :mod:`jaxgsa._core.invalid`.
 
     Returns:
         SobolResult holding:
@@ -515,7 +462,16 @@ def analyze(
                 the design was drawn with ``calc_second_order=False``
             S1_conf, ST_conf, S2_conf: ``(2, ...)`` [lower, upper] CI bounds,
                 or None when ``num_resamples == 0``
+            invalid: What the non-finite check found, and what it did
+
+    Raises:
+        ValueError: If ``on_invalid`` is not one of the three policies, or if
+            the sample holds a non-finite value under ``on_invalid="raise"``,
+            or if fewer than 2 Saltelli groups survive a drop.
     """
+    method = "jaxgsa.sobol.analyze"
+    policy = resolve_policy(on_invalid, method=method, unit=InvalidUnit.SALTELLI_GROUP)
+
     # Resolve the user-supplied layout (sample axis first, labeled output axis
     # last) against the unique design rows, BEFORE any expansion or resampling
     # so every downstream stage sees canonical axes.
@@ -531,32 +487,26 @@ def analyze(
     # step = rows per Saltelli group: D+2 (first-order only) or 2D+2 (with S2)
     step = _saltelli_step(D, sampling_result.calc_second_order)
 
-    # Remove entire Saltelli groups containing NaN/Inf before analysis
-    Y, n_dropped = _drop_nonfinite(Y, step)
-    if n_dropped > 0:
-        import warnings
-
-        remaining = Y.shape[0] // step
-        total_groups = remaining + n_dropped
-        pct = 100.0 * n_dropped / total_groups
-        warnings.warn(
-            f"jaxgsa: dropped {n_dropped} of {total_groups} sample groups "
-            f"({pct:.1f}%) containing non-finite values; "
-            f"{remaining} groups remain",
-            stacklevel=2,
-            category=JaxgsaWarning,
-        )
-        if Y.shape[0] == 0:
-            raise ValueError("All samples contain non-finite values")
-        _MIN_GROUPS = 10
-        if remaining < _MIN_GROUPS:
-            warnings.warn(
-                f"jaxgsa: only {remaining} sample groups remain after dropping "
-                f"non-finite values — results may be statistically unreliable "
-                f"(recommend >= {_MIN_GROUPS})",
-                stacklevel=2,
-                category=JaxgsaWarning,
-            )
+    # A Saltelli group [A_i, AB_{i,0}, …, B_i] is one indivisible sampling
+    # unit, so the check runs at group granularity: a single bad row condemns
+    # the whole block of `step` rows, and a partial group would corrupt the
+    # A/B/AB/BA split.
+    base_n = Y.shape[0] // step
+    keep, invalid = check_invalid(
+        policy=policy,
+        method=method,
+        unit=InvalidUnit.SALTELLI_GROUP,
+        n_units=base_n,
+        Y=Y,
+        unit_of_row=np.repeat(np.arange(base_n), step),
+        min_kept=2,
+    )
+    if not keep.all():
+        trailing = Y.shape[1:]
+        # Boolean indexing gives a variable-length result, which JAX cannot
+        # trace, so the compaction round-trips through NumPy.
+        grouped = np.asarray(Y).reshape(base_n, step, *trailing)[keep]
+        Y = jnp.asarray(grouped.reshape(-1, *trailing))
 
     if prenormalize:
         Y, _, _, _ = _prenormalize_outputs(Y)
@@ -577,6 +527,9 @@ def analyze(
             ci_method=ci_method,
             key=key,
             slice_chunk_size=slice_chunk_size,
+            invalid=invalid,
         )
 
-    return _analyze_no_bootstrap(sampling_result, Y, slice_chunk_size=slice_chunk_size)
+    return _analyze_no_bootstrap(
+        sampling_result, Y, slice_chunk_size=slice_chunk_size, invalid=invalid
+    )

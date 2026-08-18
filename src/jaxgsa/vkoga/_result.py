@@ -10,6 +10,7 @@ import xarray as xr
 from jax import Array
 
 from jaxgsa._core.copula import is_independent
+from jaxgsa._core.invalid import InvalidReport
 from jaxgsa._core.surrogate import SurrogateResult, _PredictPlan
 from jaxgsa._core.validation import _dims_and_coords
 from jaxgsa.problem import Problem
@@ -66,6 +67,10 @@ class VKOGAResult(SurrogateResult):
         n_centers: Number of kernel centres the greedy selected.
         gamma: Fitted RBF shape parameter.
         ridge: Fitted regularisation parameter.
+        invalid: What the non-finite check found in ``(X, Y)`` and what the
+            ``on_invalid`` policy did about it. See
+            :class:`jaxgsa._core.invalid.InvalidReport`. ``n_invalid == 0``
+            means the check ran and found nothing.
         rmse: Training-fit RMSE, one value per output slice (shape ``()``,
             ``(K,)``, or ``(T, K)``). It measures how well the surrogate
             reproduces the rows it was fitted on, so it is optimistic. Read
@@ -90,6 +95,7 @@ class VKOGAResult(SurrogateResult):
     n_centers: int
     gamma: float
     ridge: float
+    invalid: InvalidReport
     rmse: Array | None = None
     cv_rmse: float | None = None
     _fit: _VKOGAState | None = field(default=None, repr=False)

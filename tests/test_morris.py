@@ -11,6 +11,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from jaxgsa import JaxgsaWarning
+from jaxgsa._core.invalid import InvalidUnit
 from jaxgsa.benchmarks import ishigami, linear, sobol_g
 from jaxgsa.morris import analyze, sample
 from jaxgsa.problem import GaussianInputSpec, Problem
@@ -666,18 +668,23 @@ class TestThinningWarning:
         assert "no measurable step" in message
         assert "statistically unreliable" in message
 
-    def test_nonfinite_loss_names_both_causes(self):
-        """Non-finite cleaning and an earlier block loss are reported together."""
+    def test_nonfinite_loss_and_block_loss_are_reported_separately(self):
+        """Each cause gets its own warning: the design's, and the policy's.
+
+        The upstream loss is a property of the design, so ``analyze`` reports
+        it. The non-finite loss belongs to the shared ``on_invalid`` policy,
+        which reports it in its own message with the affected positions.
+        """
         sr = sample(ishigami.PROBLEM, n_trajectories=12, method="radial", seed=8, verbose=False)
         sr = replace(sr, n_blocks_dropped=2)
         Y = np.asarray(ishigami.evaluate(jnp.asarray(sr.samples)), dtype=np.float64)
         Y[int(sr.expanded_to_unique[3 * (sr.n_params + 1)])] = np.nan
         with pytest.warns(UserWarning) as record:
-            analyze(sr, jnp.asarray(Y))
-        message = str(record[0].message)
-        assert "11 of the 14 requested trajectories remain" in message
-        assert "no measurable step" in message
-        assert "non-finite values" in message
+            analyze(sr, jnp.asarray(Y), on_invalid="drop")
+        messages = [str(w.message) for w in record]
+        assert any("12 of the 14 requested trajectories remain" in m for m in messages)
+        assert any("no measurable step" in m for m in messages)
+        assert any("dropped 1 of 12 trajectories" in m for m in messages)
 
 
 class TestValidation:
@@ -711,7 +718,7 @@ class TestValidation:
         Y_bad[poisoned_row] = np.nan
 
         with pytest.warns(UserWarning, match="dropped 1 of 12"):
-            res = analyze(sr, jnp.asarray(Y_bad))
+            res = analyze(sr, jnp.asarray(Y_bad), on_invalid="drop")
 
         # Manual reference: recompute measures from the 11 finite trajectories
         Y_exp = Y[sr.expanded_to_unique]
@@ -727,9 +734,8 @@ class TestValidation:
     def test_all_nonfinite_raises(self):
         sr = sample(UNIT_PROBLEM, n_trajectories=5, seed=1, verbose=False)
         Y = jnp.full(sr.n_runs, jnp.nan)
-        with pytest.warns(UserWarning, match="dropped"):
-            with pytest.raises(ValueError, match="Fewer than 2 trajectories"):
-                analyze(sr, Y)
+        with pytest.raises(ValueError, match="every usable trajectory was removed"):
+            analyze(sr, Y, on_invalid="drop")
 
     def test_prenormalize_scales_measures(self):
         sr = sample(linear.PROBLEM, n_trajectories=20, seed=0, verbose=False)
@@ -744,6 +750,126 @@ class TestValidation:
             np.asarray(res_raw.mu_star) / scale,
             rtol=1e-4,
         )
+
+
+class TestOnInvalidPolicy:
+    """T4 (behavioural): morris.analyze applies the shared non-finite policy."""
+
+    R = 12
+
+    def _design_and_Y(self):
+        """A radial Ishigami design plus its finite outputs on the unique rows."""
+        sr = sample(
+            ishigami.PROBLEM, n_trajectories=self.R, method="radial", seed=8, verbose=False
+        )
+        Y = np.asarray(ishigami.evaluate(jnp.asarray(sr.samples)), dtype=np.float64)
+        return sr, Y
+
+    def _poison(self, sr, Y: np.ndarray, trajectory: int) -> tuple[np.ndarray, list[int]]:
+        """Set one NaN inside one trajectory, and return its expanded rows."""
+        rows_per_traj = sr.n_params + 1
+        rows = list(range(trajectory * rows_per_traj, (trajectory + 1) * rows_per_traj))
+        poisoned = Y.copy()
+        poisoned[int(sr.expanded_to_unique[rows[0]])] = np.nan
+        return poisoned, rows
+
+    def test_raise_is_the_default_and_names_the_trajectory_and_its_rows(self):
+        """T4: the default refuses, and locates the failure in the design."""
+        sr, Y = self._design_and_Y()
+        bad, rows = self._poison(sr, Y, trajectory=3)
+        with pytest.raises(ValueError, match=f"1 of {self.R} trajectories") as exc:
+            analyze(sr, jnp.asarray(bad))
+        message = str(exc.value)
+        assert "jaxgsa.morris.analyze" in message
+        assert "Affected trajectories: [3]" in message
+        assert f"Rows: {rows}" in message
+
+    def test_propagate_warns_and_lets_the_value_reach_the_measures(self):
+        """T4: nothing is removed, so the screening measures come back NaN."""
+        sr, Y = self._design_and_Y()
+        bad, _ = self._poison(sr, Y, trajectory=3)
+        with pytest.warns(JaxgsaWarning, match="reaches the indices"):
+            res = analyze(sr, jnp.asarray(bad), on_invalid="propagate")
+        assert not np.all(np.isfinite(np.asarray(res.mu_star)))
+        assert res.invalid.n_invalid == 1
+
+    def test_one_bad_value_condemns_its_whole_trajectory(self):
+        """T4: the unit is the trajectory, not the row.
+
+        A trajectory is a chain of D+1 points, and each elementary effect is a
+        difference between two neighbours in that chain. Removing one row
+        would leave the neighbours adjacent and invent an effect that spans a
+        step nobody took, so the whole block of D+1 rows has to go.
+        """
+        sr, Y = self._design_and_Y()
+        bad, rows = self._poison(sr, Y, trajectory=3)
+        with pytest.warns(JaxgsaWarning):
+            res = analyze(sr, jnp.asarray(bad), on_invalid="drop")
+        assert res.invalid.unit_indices == (3,)
+        assert res.invalid.row_indices == tuple(rows)
+        assert len(rows) == sr.n_params + 1
+
+    @pytest.mark.parametrize("trajectory", [0, 5, 11])
+    def test_drop_reindexes_the_elementary_effects(self, trajectory):
+        """T4: dropping trajectory t equals never having generated it.
+
+        This is the part the shared helper cannot do. ``ee_idx_after`` and
+        ``ee_idx_before`` hold *global* expanded-row indices, so compacting
+        the output array shifts every later block and leaves those indices
+        pointing at the wrong rows. The reference gathers the effects with the
+        original, uncompacted indices and then removes the trajectory, so a
+        re-indexing mistake shows up as a wrong measure rather than as an
+        error. Trajectory 0 is included because its block offset is zero,
+        which is the one case a missing shift would still get right.
+        """
+        sr, Y = self._design_and_Y()
+        bad, _ = self._poison(sr, Y, trajectory=trajectory)
+        with pytest.warns(JaxgsaWarning):
+            res = analyze(sr, jnp.asarray(bad), on_invalid="drop")
+
+        Y_exp = Y[sr.expanded_to_unique]
+        ee = (Y_exp[sr.ee_idx_after] - Y_exp[sr.ee_idx_before]) / sr.ee_delta
+        keep = np.arange(self.R) != trajectory
+        np.testing.assert_allclose(np.asarray(res.mu), ee[keep].mean(axis=0), rtol=1e-4, atol=1e-4)
+        np.testing.assert_allclose(
+            np.asarray(res.mu_star), np.abs(ee[keep]).mean(axis=0), rtol=1e-4, atol=1e-4
+        )
+        np.testing.assert_allclose(
+            np.asarray(res.sigma), ee[keep].std(axis=0, ddof=1), rtol=1e-3, atol=1e-4
+        )
+
+    def test_dropping_several_trajectories_reindexes_all_survivors(self):
+        """T4: the re-indexing holds when the survivors are not contiguous."""
+        sr, Y = self._design_and_Y()
+        bad = Y.copy()
+        for trajectory in (1, 4, 9):
+            bad, _ = self._poison(sr, bad, trajectory=trajectory)
+        with pytest.warns(JaxgsaWarning) as record:
+            res = analyze(sr, jnp.asarray(bad), on_invalid="drop")
+        assert any("dropped 3 of 12 trajectories" in str(w.message) for w in record)
+
+        Y_exp = Y[sr.expanded_to_unique]
+        ee = (Y_exp[sr.ee_idx_after] - Y_exp[sr.ee_idx_before]) / sr.ee_delta
+        keep = np.isin(np.arange(self.R), (1, 4, 9), invert=True)
+        np.testing.assert_allclose(
+            np.asarray(res.mu_star), np.abs(ee[keep]).mean(axis=0), rtol=1e-4, atol=1e-4
+        )
+
+    @pytest.mark.parametrize("policy", ["raise", "propagate", "drop"])
+    def test_a_clean_sample_reports_nothing_and_stays_silent(self, policy, recwarn):
+        """T4: a clean run gives an empty report under every policy."""
+        sr, Y = self._design_and_Y()
+        res = analyze(sr, jnp.asarray(Y), on_invalid=policy)
+        assert res.invalid.n_invalid == 0
+        assert res.invalid.unit is InvalidUnit.TRAJECTORY
+        assert res.invalid.n_units == self.R
+        assert [w for w in recwarn if issubclass(w.category, JaxgsaWarning)] == []
+
+    def test_a_bad_on_invalid_value_is_rejected(self):
+        """T4: an unknown policy name is refused before anything is computed."""
+        sr, Y = self._design_and_Y()
+        with pytest.raises(ValueError, match="on_invalid must be one of"):
+            analyze(sr, jnp.asarray(Y), on_invalid="skip")
 
 
 def test_single_param():

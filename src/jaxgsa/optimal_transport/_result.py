@@ -6,6 +6,7 @@ import numpy as np
 import xarray as xr
 from jax import Array
 
+from jaxgsa._core.invalid import InvalidReport
 from jaxgsa._core.validation import _dims_and_coords
 from jaxgsa.problem import Problem
 
@@ -65,6 +66,9 @@ class OTResult:
         mode: Analysis mode that produced these shapes (``"univariate"``,
             ``"multivariate"``, or ``"trajectory"``).
         problem: Problem definition used for the analysis.
+        invalid: What the non-finite check found in the sample, and which
+            ``on_invalid`` policy ran. ``invalid.n_invalid == 0`` means the
+            check ran and found nothing.
     """
 
     ot: Array
@@ -76,6 +80,7 @@ class OTResult:
     ot_dummy: Array | None
     mode: str
     problem: Problem
+    invalid: InvalidReport
 
     def to_dataset(
         self,

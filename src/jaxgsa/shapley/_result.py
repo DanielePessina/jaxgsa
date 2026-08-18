@@ -9,6 +9,7 @@ import numpy as np
 import xarray as xr
 from jax import Array
 
+from jaxgsa._core.invalid import InvalidReport
 from jaxgsa._core.validation import _dims_and_coords
 from jaxgsa.problem import Problem
 
@@ -54,6 +55,9 @@ class ShapleyResult:
             the polynomial degree, which may be reduced from the requested
             value to fit the sample budget. For ``"hdmr"`` it is the HDMR
             expansion order.
+        invalid: What the non-finite check found in ``(X, Y)`` and what the
+            ``on_invalid`` policy did about it, as reported by whichever
+            backend ran. See :class:`jaxgsa._core.invalid.InvalidReport`.
         include_correlative: Whether the correlative ANCOVA variance (``Sb``)
             was folded into the allocation (HDMR backend only). When ``True``
             the indices credit variance shared through input correlation, so
@@ -69,6 +73,7 @@ class ShapleyResult:
     backend: Literal["hdmr", "pce"]
     explained_variance: Array
     order: int
+    invalid: InvalidReport
     include_correlative: bool = False
 
     def __repr__(self) -> str:

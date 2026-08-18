@@ -19,6 +19,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from jaxgsa._core.invalid import InvalidReport, OnInvalid
 from jaxgsa._core.validation import _raise_categorical_analysis
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.shapley._engine import shapley_from_variances
@@ -126,6 +127,7 @@ def _shapley_result_from_variances(
     problem: "Problem",
     backend: Literal["hdmr", "pce"],
     order: int,
+    invalid: InvalidReport,
     include_correlative: bool = False,
 ) -> ShapleyResult:
     """Finish a Shapley analysis from a surrogate's variance decomposition.
@@ -146,6 +148,9 @@ def _shapley_result_from_variances(
         problem: Problem definition carried onto the result.
         backend: Surrogate backend label, ``"hdmr"`` or ``"pce"``.
         order: Effective surrogate order actually used.
+        invalid: The non-finite report the surrogate's ``analyze`` produced,
+            carried through unchanged. This tail never applies the policy
+            itself; the backend already did, exactly once.
         include_correlative: Whether the correlative ANCOVA part was folded
             into ``partial`` (HDMR only).
 
@@ -168,6 +173,7 @@ def _shapley_result_from_variances(
         backend=backend,
         explained_variance=explained,
         order=order,
+        invalid=invalid,
         include_correlative=include_correlative,
     )
 
@@ -179,6 +185,7 @@ def analyze(
     *,
     backend: Literal["pce", "hdmr"] = "pce",
     include_correlative: bool = False,
+    on_invalid: OnInvalid = "raise",
     **backend_kwargs: Any,
 ) -> ShapleyResult:
     """Fit a surrogate and return its Shapley effects (convenience wrapper).
@@ -202,6 +209,14 @@ def analyze(
         include_correlative: HDMR-only flag. Set it to fold the correlative
             ANCOVA part (``Sb``) into the allocation. See
             ``HDMRResult.shapley``.
+        on_invalid: What to do about non-finite values in ``X`` or ``Y``. One
+            row is one unit for both backends, so ``"drop"`` removes the
+            affected ``(X, Y)`` pairs. See :mod:`jaxgsa._core.invalid`.
+
+            This is a named parameter rather than one of ``backend_kwargs``
+            on purpose. Naming it here forwards it to exactly one backend
+            ``analyze``, which applies the policy exactly once. The returned
+            ``ShapleyResult.invalid`` is that backend's report.
         **backend_kwargs: Passed through unchanged to the selected backend's
             ``analyze`` (e.g. ``order``/``ridge``/``fit_ratio`` for PCE,
             ``maxorder``/``m``/``lambdax`` for HDMR).
@@ -245,11 +260,11 @@ def analyze(
             )
         from jaxgsa.pce import analyze as analyze_pce
 
-        return analyze_pce(problem, X, Y, **backend_kwargs).shapley()
+        return analyze_pce(problem, X, Y, on_invalid=on_invalid, **backend_kwargs).shapley()
     if backend == "hdmr":
         from jaxgsa.hdmr import analyze as analyze_hdmr
 
-        return analyze_hdmr(problem, X, Y, **backend_kwargs).shapley(
+        return analyze_hdmr(problem, X, Y, on_invalid=on_invalid, **backend_kwargs).shapley(
             include_correlative=include_correlative
         )
     raise ValueError(f"backend must be 'pce' or 'hdmr', got {backend!r}")

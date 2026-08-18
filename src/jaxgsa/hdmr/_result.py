@@ -10,6 +10,7 @@ import numpy as np
 import xarray as xr
 from jax import Array
 
+from jaxgsa._core.invalid import InvalidReport
 from jaxgsa._core.surrogate import SurrogateResult, _PredictPlan
 from jaxgsa._core.validation import _dims_and_coords
 from jaxgsa.problem import Problem
@@ -121,6 +122,10 @@ class HDMRResult(SurrogateResult):
             in-memory fit would exceed the memory budget (see
             :func:`jaxgsa.config.set_memory_budget`). Read it when a fit takes
             much longer than expected: True means the budget engaged.
+        invalid: What the non-finite check found in ``(X, Y)`` and what the
+            ``on_invalid`` policy did about it. See
+            :class:`jaxgsa._core.invalid.InvalidReport`. ``n_invalid == 0``
+            means the check ran and found nothing.
         _c2: Private parameter index pairs of the second-order terms, in the
             order they occupy in the ``n_terms`` axis. Empty at
             ``maxorder=1``.
@@ -135,6 +140,7 @@ class HDMRResult(SurrogateResult):
     ST: Array
     problem: Problem
     terms: tuple[str, ...]
+    invalid: InvalidReport
     _fit: _HDMRFit | None = field(default=None, repr=False)
     select: Array | None = None
     rmse: Array | None = None
@@ -205,6 +211,7 @@ class HDMRResult(SurrogateResult):
             backend="hdmr",
             order=fit["maxorder"],
             include_correlative=include_correlative,
+            invalid=self.invalid,
         )
 
     @property

@@ -11,6 +11,7 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core.batching import get_memory_budget, resolve_batch_size
+from jaxgsa._core.invalid import InvalidUnit, OnInvalid, check_invalid, resolve_policy
 from jaxgsa._core.sampling import UNIT_CLIP
 from jaxgsa._core.surrogate import _PredictPlan
 from jaxgsa._core.validation import (
@@ -42,6 +43,13 @@ _WIDE_TRUNCATION_Z = 5.0
 # Measured max |G - I| for orthonormalised He_0..He_P against the truncated
 # normal at |z| = 7.03: 4.0e-8 (P=3), 2.8e-5 (P=6), 9.5e-3 (P=10).
 _MAX_HERMITE_ORDER_UNDER_TRUNCATION = 7
+
+# Fewest rows the fit can still run on after ``on_invalid="drop"`` removed
+# some. Two is the floor of the arithmetic itself: a sample variance, which
+# every index divides by, is undefined below it. `_auto_order` then shrinks the
+# expansion to whatever the surviving rows can carry, and the low-survivor
+# warning in the shared policy covers the rest.
+_MIN_ROWS = 2
 
 
 def _truncated_gaussian_is_wide(
@@ -387,6 +395,7 @@ def analyze_pce(
     ridge: float = 1e-8,
     fit_ratio: float = 0.5,
     batch_size: int | None = None,
+    on_invalid: OnInvalid = "raise",
 ) -> PCEResult:
     """Compute Sobol indices via polynomial chaos expansion (PCE).
 
@@ -427,6 +436,12 @@ def analyze_pce(
             paths solve the same normal equations and compute the same
             exact leave-one-out error; results differ only at the level of
             float32 summation order.
+        on_invalid: What to do about non-finite values in ``X`` or ``Y``.
+            One row is one unit here, so ``"drop"`` removes the affected
+            ``(X, Y)`` pairs and fits on the rest. See
+            :mod:`jaxgsa._core.invalid`. The check matters for PCE: a single
+            NaN reaches the normal equations and poisons every coefficient,
+            every leave-one-out RMSE and every index.
 
     Returns:
         PCEResult holding S1 and ST, shape ``(D,)`` / ``(K, D)`` /
@@ -443,12 +458,37 @@ def analyze_pce(
             ``problem.correlation`` declares a dependence structure (the
             Wiener-Askey basis is orthogonal only under independent
             inputs), or ``problem`` has categorical parameters (a
-            polynomial in an unordered level code has no meaning).
+            polynomial in an unordered level code has no meaning),
+            ``on_invalid`` is not one of the three policies, or
+            ``on_invalid="raise"`` (the default) and ``X`` or ``Y`` holds a
+            non-finite value.
     """
+    method = "jaxgsa.pce.analyze"
+    policy = resolve_policy(on_invalid, method=method, unit=InvalidUnit.ROW)
     X = jnp.asarray(X)
     # Wiener-Askey basis orthogonality assumes independent inputs, so a
     # correlated problem is rejected (correlation_ok stays False).
-    Y = _validate_xy_inputs(problem, X, jnp.asarray(Y), method="jaxgsa.pce.analyze")
+    Y = _validate_xy_inputs(problem, X, jnp.asarray(Y), method=method)
+
+    # The non-finite check runs here, in the public entry point only, and on
+    # the canonical Y. Everything downstream (`_fit_pce_core`, and Shapley
+    # routing through `PCEResult.shapley`) then works on data the policy has
+    # already passed, so the policy is applied exactly once per user call.
+    # X and Y are checked jointly: dropping a bad X row without its matching
+    # Y row would misalign every later row, undetectably.
+    keep, invalid = check_invalid(
+        policy=policy,
+        method=method,
+        unit=InvalidUnit.ROW,
+        n_units=int(X.shape[0]),
+        X=X,
+        Y=Y,
+        min_kept=_MIN_ROWS,
+    )
+    if not keep.all():
+        mask = jnp.asarray(keep)
+        X = X[mask]
+        Y = Y[mask]
 
     # Per-slice output variance, computed once and shared by the zero-variance
     # warning and the explained-variance diagnostic below.
@@ -501,6 +541,7 @@ def analyze_pce(
         loo_rmse=loo,
         explained_variance=explained_variance,
         streamed=fit.streamed,
+        invalid=invalid,
     )
 
 

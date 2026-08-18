@@ -4,6 +4,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from jaxgsa import JaxgsaWarning
+from jaxgsa._core.invalid import InvalidUnit
 from jaxgsa.benchmarks import ishigami, linear, sobol_g
 from jaxgsa.efast import EFASTSamples, analyze, sample
 from jaxgsa.efast._analyze import _compute_indices
@@ -169,7 +171,14 @@ class TestAnalysis:
         assert ishigami_efast_result.ST.shape == (3,)
 
     def test_no_s2(self, ishigami_efast_result):
-        assert set(vars(ishigami_efast_result).keys()) == {"S1", "ST", "problem", "omega_0", "M"}
+        assert set(vars(ishigami_efast_result).keys()) == {
+            "S1",
+            "ST",
+            "problem",
+            "invalid",
+            "omega_0",
+            "M",
+        }
 
     def test_omega_and_m(self, ishigami_efast_result):
         assert ishigami_efast_result.M == 4
@@ -638,6 +647,109 @@ class TestSobolGAccuracy:
         S1 = np.asarray(efast_sobol_g_result.S1)
         assert S1[0] > S1[1], f"S1[0]={S1[0]:.4f} should be > S1[1]={S1[1]:.4f}"
         assert S1[1] > S1[2], f"S1[1]={S1[1]:.4f} should be > S1[2]={S1[2]:.4f}"
+
+
+class TestOnInvalidPolicy:
+    """T4 (behavioural): efast.analyze applies the shared non-finite policy.
+
+    eFAST is the one method where dropping is undefined. A search curve is an
+    ordered sweep read by a discrete Fourier transform, so removing a point
+    does not shrink the sample: it changes the sequence the transform reads,
+    and every harmonic with it.
+    """
+
+    N = 257
+
+    def _design_and_Y(self):
+        """An Ishigami eFAST design plus its finite outputs, one row per run."""
+        sr = sample(ishigami.PROBLEM, n_per_curve=self.N, M=4, seed=3)
+        Y = np.asarray(ishigami.evaluate(jnp.asarray(sr.samples)), dtype=np.float64)
+        return sr, Y
+
+    def _poison(self, sr, Y: np.ndarray, curve: int) -> tuple[np.ndarray, int]:
+        """Set one NaN inside one search curve, and return the row it hit."""
+        row = curve * self.N + 7
+        poisoned = Y.copy()
+        poisoned[row] = np.nan
+        return poisoned, row
+
+    def test_drop_is_refused_and_the_message_names_the_search_curve(self):
+        """T4: 'drop' raises, because a curve cannot lose a point and stay valid."""
+        sr, Y = self._design_and_Y()
+        with pytest.raises(ValueError, match="not available for this method") as exc:
+            analyze(sr, jnp.asarray(Y), on_invalid="drop")
+        message = str(exc.value)
+        assert "jaxgsa.efast.analyze" in message
+        assert "search curve" in message
+        assert "'raise'" in message and "'propagate'" in message
+
+    def test_drop_is_refused_even_when_the_sample_is_clean(self):
+        """T4: the refusal is about the design, not about the data.
+
+        Validating ``on_invalid`` before the check means a user learns the
+        policy is unavailable on the first clean run, not later when a model
+        run happens to fail.
+        """
+        sr, Y = self._design_and_Y()
+        with pytest.raises(ValueError, match="not available for this method"):
+            analyze(sr, jnp.asarray(Y), on_invalid="drop")
+
+    def test_raise_is_the_default_and_names_the_curve_and_its_rows(self):
+        """T4: the default refuses, and locates the failure in the design.
+
+        The reported rows are the whole curve, not the single bad row: the
+        curve is the unit, and every one of its rows feeds the transform that
+        the failure invalidated.
+        """
+        sr, Y = self._design_and_Y()
+        bad, row = self._poison(sr, Y, curve=1)
+        with pytest.raises(ValueError, match="1 of 3 search curves") as exc:
+            analyze(sr, jnp.asarray(bad))
+        message = str(exc.value)
+        assert "jaxgsa.efast.analyze" in message
+        assert "Affected search curves: [1]" in message
+        assert f"Rows: [{self.N}," in message
+        assert f"{self.N - 10} more" in message
+        assert row // self.N == 1
+
+    def test_propagate_warns_and_lets_the_value_reach_the_indices(self):
+        """T4: nothing is removed, so the transform returns non-finite indices."""
+        sr, Y = self._design_and_Y()
+        bad, _ = self._poison(sr, Y, curve=1)
+        with pytest.warns(JaxgsaWarning, match="reaches the indices"):
+            result = analyze(sr, jnp.asarray(bad), on_invalid="propagate")
+        assert not np.all(np.isfinite(np.asarray(result.S1)))
+        assert result.invalid.policy == "propagate"
+        assert result.invalid.unit is InvalidUnit.CURVE
+
+    def test_one_bad_value_is_reported_against_its_own_curve(self):
+        """T4: the unit is the curve, so the report names one curve of D.
+
+        The rows of a curve are contiguous, so the report must attribute the
+        failure to the curve that owns the row and to no other.
+        """
+        sr, Y = self._design_and_Y()
+        bad, row = self._poison(sr, Y, curve=2)
+        with pytest.raises(ValueError) as exc:
+            analyze(sr, jnp.asarray(bad))
+        assert "Affected search curves: [2]" in str(exc.value)
+        assert row // self.N == 2
+
+    @pytest.mark.parametrize("policy", ["raise", "propagate"])
+    def test_a_clean_sample_reports_nothing_and_stays_silent(self, policy, recwarn):
+        """T4: a clean run gives an empty report under both usable policies."""
+        sr, Y = self._design_and_Y()
+        result = analyze(sr, jnp.asarray(Y), on_invalid=policy)
+        assert result.invalid.n_invalid == 0
+        assert result.invalid.n_units == 3
+        assert result.invalid.unit is InvalidUnit.CURVE
+        assert [w for w in recwarn if issubclass(w.category, JaxgsaWarning)] == []
+
+    def test_a_bad_on_invalid_value_is_rejected(self):
+        """T4: an unknown policy name is refused before anything is computed."""
+        sr, Y = self._design_and_Y()
+        with pytest.raises(ValueError, match="on_invalid must be one of"):
+            analyze(sr, jnp.asarray(Y), on_invalid="skip")
 
 
 def test_single_param():

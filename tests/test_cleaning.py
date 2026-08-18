@@ -1,9 +1,11 @@
 """Tests for data cleaning, division guards, and NaN reporting."""
 
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 import jaxgsa
+from jaxgsa._core.invalid import InvalidUnit
 from jaxgsa.problem import Problem
 from jaxgsa.sobol._indices import first_order, second_order, total_order
 
@@ -45,32 +47,31 @@ def test_second_order_zero_variance():
     assert jnp.isnan(result), f"Expected NaN, got {result}"
 
 
-# --- End-to-end: constant Y → NaN indices, nan_counts populated ---
+# --- End-to-end: constant Y → NaN indices ---
 
 
-def test_constant_y_produces_nan_counts(simple_problem):
+def test_constant_y_produces_nan_indices(simple_problem):
+    """A constant output has zero variance, so every index divides by zero."""
     sr = jaxgsa.sobol.sample(
         simple_problem, n_samples=64, seed=0, calc_second_order=False, verbose=False
     )
     Y = jnp.ones(sr.n_runs)
     with pytest.warns(UserWarning, match="zero variance"):
         result = jaxgsa.sobol.analyze(sr, Y)
-    assert result.nan_counts is not None
-    assert result.nan_counts["S1"] > 0
-    assert result.nan_counts["ST"] > 0
     assert jnp.all(jnp.isnan(result.S1))
     assert jnp.all(jnp.isnan(result.ST))
+    # A constant Y is finite, so the non-finite check has nothing to report.
+    assert result.invalid.n_invalid == 0
 
 
 def test_constant_y_second_order_nan(simple_problem):
+    """Zero variance carries through to the second-order indices too."""
     sr = jaxgsa.sobol.sample(
         simple_problem, n_samples=64, seed=0, calc_second_order=True, verbose=False
     )
     Y = jnp.ones(sr.n_runs)
     with pytest.warns(UserWarning, match="zero variance"):
         result = jaxgsa.sobol.analyze(sr, Y)
-    assert result.nan_counts is not None
-    assert result.nan_counts["S2"] > 0
     assert jnp.all(jnp.isnan(result.S2))
 
 
@@ -85,7 +86,7 @@ def test_drop_nonfinite_rows(simple_problem):
     # Inject NaN into the first group
     Y_bad = Y.at[0].set(jnp.nan)
     with pytest.warns(UserWarning, match="dropped"):
-        result = jaxgsa.sobol.analyze(sr, Y_bad)
+        result = jaxgsa.sobol.analyze(sr, Y_bad, on_invalid="drop")
     # Should still produce finite results from remaining groups
     assert result.S1.shape == (3,)
 
@@ -95,9 +96,8 @@ def test_all_nonfinite_raises(simple_problem):
         simple_problem, n_samples=64, seed=0, calc_second_order=False, verbose=False
     )
     Y = jnp.full(sr.n_runs, jnp.nan)
-    with pytest.warns(UserWarning, match="dropped"):
-        with pytest.raises(ValueError, match="All samples contain non-finite values"):
-            jaxgsa.sobol.analyze(sr, Y)
+    with pytest.raises(ValueError, match="every usable Saltelli group was removed"):
+        jaxgsa.sobol.analyze(sr, Y, on_invalid="drop")
 
 
 def test_inf_values_dropped(simple_problem):
@@ -107,5 +107,131 @@ def test_inf_values_dropped(simple_problem):
     Y = jnp.sin(jnp.sum(jnp.asarray(sr.samples), axis=1))
     Y_bad = Y.at[0].set(jnp.inf)
     with pytest.warns(UserWarning, match="dropped"):
-        result = jaxgsa.sobol.analyze(sr, Y_bad)
+        result = jaxgsa.sobol.analyze(sr, Y_bad, on_invalid="drop")
     assert result.S1.shape == (3,)
+
+
+# --- The shared on_invalid policy, at Saltelli-group granularity ---
+
+
+def _finite_Y(sr) -> np.ndarray:
+    """Evaluate a smooth model on the unique design rows."""
+    return np.sin(np.sum(np.asarray(sr.samples), axis=1))
+
+
+def _poison_one_group(sr, Y: np.ndarray, group: int) -> tuple[np.ndarray, list[int]]:
+    """Set one NaN that condemns exactly the given Saltelli group.
+
+    The design is deduplicated, so one unique row can feed several expanded
+    rows. Picking a unique row that feeds only one expanded row keeps the
+    damage inside a single group, which is what the granularity test needs.
+
+    Returns:
+        The poisoned copy of ``Y``, and the expanded rows of that group.
+    """
+    e2u = np.asarray(sr.expanded_to_unique)
+    counts = np.bincount(e2u, minlength=Y.shape[0])
+    step = sr.n_expanded // sr.base_n
+    rows = list(range(group * step, (group + 1) * step))
+    for row in rows:
+        if counts[e2u[row]] == 1:
+            poisoned = Y.copy()
+            poisoned[e2u[row]] = np.nan
+            return poisoned, rows
+    raise AssertionError(f"no uniquely-mapped row in Saltelli group {group}")
+
+
+class TestOnInvalidPolicy:
+    """T4 (behavioural): sobol.analyze applies the shared non-finite policy."""
+
+    def _sample(self, problem):
+        return jaxgsa.sobol.sample(
+            problem, n_samples=64, seed=0, calc_second_order=False, verbose=False
+        )
+
+    def test_raise_is_the_default_and_names_units_and_rows(self, simple_problem):
+        """T4: the default refuses, and says which group and which rows."""
+        sr = self._sample(simple_problem)
+        Y, rows = _poison_one_group(sr, _finite_Y(sr), group=2)
+        with pytest.raises(ValueError, match=f"1 of {sr.base_n} Saltelli groups") as exc:
+            jaxgsa.sobol.analyze(sr, jnp.asarray(Y))
+        message = str(exc.value)
+        assert "jaxgsa.sobol.analyze" in message
+        assert "Affected Saltelli groups: [2]" in message
+        assert f"Rows: {rows}" in message
+
+    def test_propagate_warns_and_lets_the_value_reach_the_indices(self, simple_problem):
+        """T4: nothing is removed, and the indices come back non-finite."""
+        sr = self._sample(simple_problem)
+        Y, _ = _poison_one_group(sr, _finite_Y(sr), group=2)
+        with pytest.warns(jaxgsa.JaxgsaWarning, match="reaches the indices"):
+            result = jaxgsa.sobol.analyze(sr, jnp.asarray(Y), on_invalid="propagate")
+        assert not np.all(np.isfinite(np.asarray(result.S1)))
+        assert result.invalid.policy == "propagate"
+        assert result.invalid.n_invalid == 1
+        assert result.invalid.unit_indices == (2,)
+
+    def test_drop_removes_the_group_and_leaves_finite_indices(self, simple_problem):
+        """T4: the surviving groups give a finite estimate."""
+        sr = self._sample(simple_problem)
+        Y, _ = _poison_one_group(sr, _finite_Y(sr), group=2)
+        with pytest.warns(jaxgsa.JaxgsaWarning, match="dropped 1 of 16 Saltelli groups"):
+            result = jaxgsa.sobol.analyze(sr, jnp.asarray(Y), on_invalid="drop")
+        assert np.all(np.isfinite(np.asarray(result.S1)))
+        assert result.invalid.n_kept == sr.base_n - 1
+
+    def test_one_bad_value_condemns_its_whole_group(self, simple_problem):
+        """T4: the unit is the group, not the row.
+
+        One NaN sits in one expanded row. The report must name every row of
+        that group, because a row-level drop would shift the A/B/AB split of
+        every later group and corrupt the estimate with no error.
+        """
+        sr = self._sample(simple_problem)
+        Y, rows = _poison_one_group(sr, _finite_Y(sr), group=5)
+        with pytest.warns(jaxgsa.JaxgsaWarning):
+            result = jaxgsa.sobol.analyze(sr, jnp.asarray(Y), on_invalid="drop")
+        assert result.invalid.unit_indices == (5,)
+        assert result.invalid.row_indices == tuple(rows)
+        assert len(rows) == sr.n_expanded // sr.base_n
+
+    def test_drop_matches_a_design_that_never_held_the_group(self, simple_problem):
+        """T4: dropping group 5 equals analyzing the survivors by hand.
+
+        The reference rebuilds the expanded outputs, deletes the group, and
+        runs the Jansen total-order formula over the remainder, so it checks
+        the compaction rather than restating it.
+        """
+        sr = self._sample(simple_problem)
+        Y = _finite_Y(sr)
+        poisoned, rows = _poison_one_group(sr, Y, group=5)
+        with pytest.warns(jaxgsa.JaxgsaWarning):
+            dropped = jaxgsa.sobol.analyze(sr, jnp.asarray(poisoned), on_invalid="drop")
+
+        expanded = Y[np.asarray(sr.expanded_to_unique)]
+        kept = np.delete(expanded, rows, axis=0)
+        A = kept[0::5]
+        B = kept[4::5]
+        AB = np.stack([kept[j::5] for j in (1, 2, 3)], axis=1)
+        # The estimators pool A and B for the variance; see sobol._indices.
+        var = np.var(np.concatenate([A, B]))
+        expected_st = 0.5 * np.mean((A[:, None] - AB) ** 2, axis=0) / var
+        np.testing.assert_allclose(np.asarray(dropped.ST), expected_st, rtol=1e-4, atol=1e-6)
+
+    @pytest.mark.parametrize("policy", ["raise", "propagate", "drop"])
+    def test_a_clean_sample_reports_nothing_and_stays_silent(
+        self, simple_problem, policy, recwarn
+    ):
+        """T4: a clean run gives an empty report under every policy."""
+        sr = self._sample(simple_problem)
+        result = jaxgsa.sobol.analyze(sr, jnp.asarray(_finite_Y(sr)), on_invalid=policy)
+        assert result.invalid.n_invalid == 0
+        assert not result.invalid.any_invalid
+        assert result.invalid.unit is InvalidUnit.SALTELLI_GROUP
+        assert [w for w in recwarn if issubclass(w.category, jaxgsa.JaxgsaWarning)] == []
+
+    def test_a_bad_on_invalid_value_is_rejected(self, simple_problem):
+        """T4: an unknown policy name is refused before anything is computed."""
+        sr = self._sample(simple_problem)
+        with pytest.raises(ValueError, match="on_invalid must be one of"):
+            jaxgsa.sobol.analyze(sr, jnp.asarray(_finite_Y(sr)), on_invalid="skip")

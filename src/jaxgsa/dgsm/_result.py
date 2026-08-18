@@ -6,6 +6,7 @@ import numpy as np
 import xarray as xr
 from jax import Array
 
+from jaxgsa._core.invalid import InvalidReport
 from jaxgsa._core.validation import _dims_and_coords
 from jaxgsa.problem import Problem
 
@@ -37,6 +38,11 @@ class DGSMResult:
             ``Var(x_i) * sigma_i^2 / Var(Y)``, same shape as ``nu``.
         var_y: Output variance per slice, shape ``()`` / ``(K,)`` / ``(T, K)``.
         problem: Problem definition used for the analysis.
+        invalid: What the non-finite check found in the sample, and which
+            ``on_invalid`` policy ran. ``invalid.n_invalid == 0`` means the
+            check ran and found nothing. On both calling conventions the
+            check covers the derivative as well as the output; a non-finite
+            derivative is reported under the source name ``"Y"``.
     """
 
     nu: Array
@@ -45,6 +51,7 @@ class DGSMResult:
     lower_bound: Array
     var_y: Array
     problem: Problem
+    invalid: InvalidReport
 
     def to_dataset(self, time_coords: np.ndarray | list | None = None) -> xr.Dataset:
         """Convert results to a labeled xarray Dataset.

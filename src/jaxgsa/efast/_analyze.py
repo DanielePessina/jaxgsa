@@ -22,8 +22,15 @@ from functools import lru_cache
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import Array
 
+from jaxgsa._core.invalid import (
+    InvalidUnit,
+    OnInvalid,
+    check_invalid,
+    resolve_policy,
+)
 from jaxgsa._core.validation import (
     _prenormalize_outputs,
     _prepare_Y,
@@ -124,6 +131,7 @@ def analyze(
     *,
     prenormalize: bool = False,
     slice_chunk_size: int = 2048,
+    on_invalid: OnInvalid = "raise",
 ) -> EFASTResult:
     """Compute eFAST first- and total-order sensitivity indices.
 
@@ -154,15 +162,26 @@ def analyze(
         slice_chunk_size: Maximum number of output slices to process in one
             vmapped batch. It caps peak device memory for a large ``T * K``. A
             smaller value trades speed for memory.
+        on_invalid: What to do about non-finite model outputs. Only
+            ``"raise"`` (the default) and ``"propagate"`` are available.
+            ``"drop"`` raises, because a search curve is an ordered sweep read
+            by a discrete Fourier transform: removing a point changes what the
+            estimator computes instead of shrinking the sample. See
+            :mod:`jaxgsa._core.invalid`.
 
     Returns:
         An ``EFASTResult`` with ``S1`` and ``ST``, shape ``(D,)`` /
-        ``(K, D)`` / ``(T, K, D)``, mirroring the layout of ``Y``.
+        ``(K, D)`` / ``(T, K, D)``, mirroring the layout of ``Y``, plus the
+        ``invalid`` report.
 
     Raises:
         ValueError: If ``Y``'s leading dimension does not equal
-            ``samples.n_runs``, or ``Y`` has an invalid rank.
+            ``samples.n_runs``, or ``Y`` has an invalid rank; if ``on_invalid``
+            is not one of the three policies or is ``"drop"``; or if the sample
+            holds a non-finite value under ``on_invalid="raise"``.
     """
+    method = "jaxgsa.efast.analyze"
+    policy = resolve_policy(on_invalid, method=method, unit=InvalidUnit.CURVE, allow_drop=False)
     problem = samples.problem
     M = samples.M
     D = problem.num_vars
@@ -177,16 +196,20 @@ def analyze(
             "evaluate the model on every row of samples.samples, in order"
         )
 
-    if not jnp.all(jnp.isfinite(Y)):
-        n_bad = int(jnp.sum(~jnp.isfinite(Y)))
-        warnings.warn(
-            f"eFAST: Y contains {n_bad} non-finite values (NaN/Inf) "
-            "which will propagate into indices",
-            stacklevel=2,
-            category=JaxgsaWarning,
-        )
-
     Y = _validate_output(Y, samples.n_runs, problem)
+
+    # The design lays the D search curves out contiguously, N rows each. The
+    # check runs after the shape contract, so the row map is known to match.
+    # A curve cannot be dropped, so `keep` is always all-True here and is
+    # never applied; the report still names the curve to investigate.
+    _, invalid = check_invalid(
+        policy=policy,
+        method=method,
+        unit=InvalidUnit.CURVE,
+        n_units=D,
+        Y=Y,
+        unit_of_row=np.repeat(np.arange(D), N),
+    )
 
     # Record scalar output now: _prepare_Y adds singleton dims below.
     is_scalar = Y.ndim == 1
@@ -275,6 +298,7 @@ def analyze(
         S1=S1,
         ST=ST,
         problem=problem,
+        invalid=invalid,
         omega_0=omega_0,
         M=M,
     )
