@@ -92,3 +92,10 @@ filterwarnings = [
     # pytest's own "class-scoped fixture as instance method" deprecation.
     "ignore::DeprecationWarning:_pytest",
 ]
+markers = [
+    # verbose=True is the default on every analyze() and sample(), so an
+    # autouse fixture in conftest.py silences the emit seam for the whole
+    # suite. This marker keeps the seam live for the tests that assert on
+    # the printed output (tests/test_verbose.py).
+    "verbose_output: keep the verbose emit seam live so the test can read stdout",
+]

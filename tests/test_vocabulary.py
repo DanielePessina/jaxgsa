@@ -340,6 +340,33 @@ def test_keep_replicates_is_keyword_only_and_last(spec: MethodSpec) -> None:
 
 
 @pytest.mark.parametrize("spec", ALL, ids=_ids(ALL))
+def test_every_entry_point_takes_verbose_defaulting_to_true(spec: MethodSpec) -> None:
+    """Every ``analyze()`` and every ``sample()`` takes ``verbose: bool = True``.
+
+    One keyword toggles the observability of the whole workflow: the problem
+    summary, the timings, the top-k results on ``analyze()``, and the design
+    narration on ``sample()``. Default ``True`` on all seventeen entry
+    points, so a first-time user sees what happened without reading anything,
+    and ``verbose=False`` is one spelling everywhere.
+    """
+    for fn_name, params in _entry_points(spec):
+        assert "verbose" in params, (
+            f"{spec.name}.{fn_name} takes no 'verbose'. Every entry point "
+            "offers the same observability toggle. See CONTEXT.md."
+        )
+        param = params["verbose"]
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY, (
+            f"{spec.name}.{fn_name}.verbose must be keyword-only, is {param.kind!r}."
+        )
+        assert param.annotation is bool, (
+            f"{spec.name}.{fn_name}.verbose is annotated {param.annotation!r}, not bool."
+        )
+        assert param.default is True, (
+            f"{spec.name}.{fn_name}.verbose defaults to {param.default!r}, not True."
+        )
+
+
+@pytest.mark.parametrize("spec", ALL, ids=_ids(ALL))
 def test_only_the_three_batching_axes_appear(spec: MethodSpec) -> None:
     """A batching keyword is one of exactly three, each counting a stated unit.
 

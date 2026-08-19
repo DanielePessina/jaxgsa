@@ -9,7 +9,27 @@ import pytest
 
 import jaxgsa
 from jaxgsa import JaxgsaWarning
+from jaxgsa._core import verbose as _verbose
 from jaxgsa.benchmarks import ishigami, linear, oakley_ohagan, sobol_g
+
+
+@pytest.fixture(autouse=True)
+def _silence_verbose(request, monkeypatch):
+    """Silence the verbose seam for the whole suite.
+
+    ``verbose`` defaults to ``True`` on every ``analyze()`` and ``sample()``,
+    so an unsilenced suite would bury real test output under thousands of
+    summaries. Every verbose line goes through one seam,
+    :func:`jaxgsa._core.verbose.emit`, so replacing that one function is
+    enough — and only the printing is skipped: the summary code still runs
+    and builds its lines, so a bug in the formatting still fails whichever
+    test triggers it. The tests that must see the real output carry the
+    ``verbose_output`` marker (tests/test_verbose.py), and for them the seam
+    stays live.
+    """
+    if request.node.get_closest_marker("verbose_output"):
+        return
+    monkeypatch.setattr(_verbose, "emit", lambda text: None)
 
 
 @contextlib.contextmanager
