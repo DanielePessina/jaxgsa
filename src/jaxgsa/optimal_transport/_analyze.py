@@ -56,7 +56,15 @@ import jax.numpy as jnp
 from jax import Array
 
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
-from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare, require
+from jaxgsa._core.entry import (
+    at_least,
+    check_scalars,
+    in_open_interval,
+    one_of,
+    prepare,
+    require,
+    validate_inputs,
+)
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.partition import (
     _build_class_indices,
@@ -68,6 +76,8 @@ from jaxgsa._core.partition import (
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
     _prenormalize_outputs,
+    _prepare_Y,
+    _validate_output,
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.optimal_transport._result import OTResult
@@ -447,6 +457,213 @@ def _joint_kernel(
     return ot, adv, diff, n_bad, degen
 
 
+def _static_dm_grid(group: tuple[Array, Array], levels: list[int] | None) -> Array:
+    """Flat ``d * Mg + m`` class slots the joint kernel must solve.
+
+    A categorical group's class axis is padded to the largest level count.
+    The pad slots are statically empty, because their counts are zero for
+    every replicate. They are excluded here instead of running dead
+    Sinkhorn solves.
+
+    Args:
+        group: One canonical ``(cls_idx, counts)`` partition group.
+        levels: Declared level count per column for a categorical group, or
+            ``None`` for the shared continuous layout.
+
+    Returns:
+        The int32 slot indices to solve.
+    """
+    D_g, M_g = group[0].shape[1], group[0].shape[2]
+    if levels is None:
+        return jnp.arange(D_g * M_g, dtype=jnp.int32)
+    return jnp.asarray(
+        [d * M_g + m for d, n_levels in enumerate(levels) for m in range(n_levels)],
+        dtype=jnp.int32,
+    )
+
+
+def _run_univariate(
+    Y_cols: Array,
+    T: int,
+    K: int,
+    all_idx: Array,
+    groups: list[tuple[Array, Array]],
+    col_order: Array | None,
+    slice_chunk_size: int | None,
+) -> tuple[Array, Array, Array, Array]:
+    """Run :func:`_ot_1d_kernel` over every chunk of output columns.
+
+    This is the whole ``"univariate"`` estimator, and nothing else: it
+    branches on shapes and Python scalars only, reads no array value on the
+    host, and raises and warns about nothing. :func:`analyze` and
+    :func:`indices` both go through it, so the two can never compute
+    different numbers.
+
+    Args:
+        Y_cols: Output columns, shape ``(N, T*K)``.
+        T: Time axis length of the promoted ``Y``.
+        K: Output axis length of the promoted ``Y``.
+        all_idx: Replicate row indices ``(R, N)``. Row 0 is the identity.
+        groups: Canonical partition groups; see
+            :mod:`jaxgsa._core.partition`.
+        col_order: Gather that restores the problem's column order, or
+            ``None`` when the groups are already in order.
+        slice_chunk_size: Output columns per kernel call, or ``None`` for a
+            memory-aware default.
+
+    Returns:
+        ``(ot, advective, diffusive, degenerate)`` of shapes
+        ``(R, T, K, D)`` three times and ``(R, T, K)``.
+    """
+    N, total = Y_cols.shape
+    R_run = all_idx.shape[0]
+    D_run = sum(g[0].shape[1] for g in groups)
+    # Peak memory scales with the summed per-group D_g * M_g
+    # conditional-quantile tensors.
+    layout_elems = sum(g[0].shape[1] * g[0].shape[2] for g in groups)
+    cs = slice_chunk_size
+    if cs is None:
+        cs = max(1, _CHUNK_ELEM_BUDGET // (layout_elems * N))
+    cs = min(cs, total)
+    parts: tuple[list[Array], list[Array], list[Array], list[Array]] = ([], [], [], [])
+    for start in range(0, total, cs):
+        chunk = Y_cols[:, start : start + cs]
+        merged = list(_ot_1d_kernel(chunk, all_idx, tuple(groups)))
+        if col_order is not None:
+            merged[:3] = [arr[..., col_order] for arr in merged[:3]]
+        for part, arr in zip(parts, merged):
+            part.append(arr)
+    ot, adv, diff, degen = (jnp.concatenate(p, axis=1) for p in parts)
+    return (
+        ot.reshape(R_run, T, K, D_run),
+        adv.reshape(R_run, T, K, D_run),
+        diff.reshape(R_run, T, K, D_run),
+        degen.reshape(R_run, T, K),
+    )
+
+
+def _build_clouds(Y_3d: Array, mode: str, standardize: bool) -> list[Array]:
+    """Split the promoted output into the point clouds a joint mode scores.
+
+    Args:
+        Y_3d: Output promoted to ``(N, T, K)``.
+        mode: ``"multivariate"`` (one flattened cloud) or ``"trajectory"``
+            (one cloud per output, each output's time course).
+        standardize: Divide each column by its standard deviation first, so
+            no single output dominates the joint distance through its units.
+
+    Returns:
+        The clouds, each of shape ``(N, E)``.
+    """
+    N, T, K = Y_3d.shape
+    clouds = (
+        [Y_3d.reshape(N, T * K)] if mode == "multivariate" else [Y_3d[:, :, k] for k in range(K)]
+    )
+    if standardize:
+        clouds = [_prenormalize_outputs(Z)[0] for Z in clouds]
+    return clouds
+
+
+def _run_joint(
+    clouds: list[Array],
+    mode: str,
+    all_idx: Array,
+    groups: list[tuple[Array, Array]],
+    group_levels: list[list[int] | None],
+    col_order: Array | None,
+    eps_s: Array,
+    max_iter_s: Array,
+    tol_s: Array,
+) -> tuple[Array, Array, Array, Array, Array, int]:
+    """Run :func:`_joint_kernel` over every point cloud.
+
+    This is the whole point-cloud estimator, and nothing else: it branches
+    on shapes and Python scalars only, reads no array value on the host, and
+    raises and warns about nothing. The Sinkhorn convergence counters come
+    back as an array and a Python integer for :func:`analyze` to warn from;
+    :func:`indices` drops them without reading either.
+
+    Args:
+        clouds: Output point clouds from :func:`_build_clouds`.
+        mode: ``"multivariate"`` or ``"trajectory"``. It decides only
+            whether the per-cloud results stack onto a new output axis.
+        all_idx: Replicate row indices ``(R, N)``. Row 0 is the identity.
+        groups: Canonical partition groups; see
+            :mod:`jaxgsa._core.partition`.
+        group_levels: Declared level counts per group, ``None`` for the
+            continuous group, in the same order as ``groups``.
+        col_order: Gather that restores the problem's column order, or
+            ``None`` when the groups are already in order.
+        eps_s: Entropic regularization strength.
+        max_iter_s: Sinkhorn iteration cap.
+        tol_s: Sinkhorn marginal stopping tolerance.
+
+    Returns:
+        ``(ot, advective, diffusive, degenerate, n_bad, n_solves)``. The
+        index arrays are ``(R, D)`` in ``"multivariate"`` mode and
+        ``(R, K, D)`` in ``"trajectory"`` mode, ``degenerate`` drops the
+        parameter axis, ``n_bad`` is a scalar array counting the solves that
+        stayed above ``tol``, and ``n_solves`` is how many ran.
+    """
+    dm_grids = tuple(_static_dm_grid(group, levels) for group, levels in zip(groups, group_levels))
+    n_solves = len(clouds) * all_idx.shape[0] * sum(grid.shape[0] for grid in dm_grids)
+
+    def _one_cloud(Z: Array) -> tuple[Array, Array, Array, Array, Array]:
+        ot, adv, diff, n_bad, degen = _joint_kernel(
+            Z, all_idx, tuple(groups), dm_grids, eps_s, max_iter_s, tol_s
+        )
+        merged = [ot, adv, diff]
+        if col_order is not None:
+            merged = [arr[..., col_order] for arr in merged]
+        return merged[0], merged[1], merged[2], n_bad.sum(), degen
+
+    cloud_outs = [_one_cloud(Z) for Z in clouds]
+    n_bad_total = jnp.stack([o[3] for o in cloud_outs]).sum()
+    if mode == "multivariate":
+        ot, adv, diff, _, degen = cloud_outs[0]  # (R, D) / (R,)
+        return ot, adv, diff, degen, n_bad_total, n_solves
+    return (
+        jnp.stack([o[0] for o in cloud_outs], axis=1),  # (R, K, D)
+        jnp.stack([o[1] for o in cloud_outs], axis=1),
+        jnp.stack([o[2] for o in cloud_outs], axis=1),
+        jnp.stack([o[4] for o in cloud_outs], axis=1),  # (R, K)
+        n_bad_total,
+        n_solves,
+    )
+
+
+def _group_levels(
+    cont_dims: list[int], cat_dims: list[int], dims_levels: tuple[tuple[int, int], ...]
+) -> list[list[int] | None]:
+    """Declared level counts per partition group, in group order.
+
+    Group order mirrors :func:`jaxgsa._core.partition.build_partition_groups`:
+    continuous (no level list) first when present, then categorical.
+
+    Args:
+        cont_dims: Continuous problem columns.
+        cat_dims: Categorical problem columns.
+        dims_levels: ``(dimension index, level count)`` pairs.
+
+    Returns:
+        One entry per group: ``None`` for the continuous group, the level
+        counts for the categorical one.
+    """
+    levels: list[list[int] | None] = []
+    if cont_dims:
+        levels.append(None)
+    if cat_dims:
+        levels.append([n_levels for _, n_levels in dims_levels])
+    return levels
+
+
+def _resolve_tol(tol: float | None, dtype: jnp.dtype) -> float:
+    """Default the Sinkhorn stopping tolerance to what the dtype can resolve."""
+    if tol is not None:
+        return tol
+    return 1e-9 if dtype == jnp.float64 else 1e-6
+
+
 def _boot_replicates(vals_all: Array, hat: Array, degen_all: Array) -> Array:
     """The bootstrap draws the interval is taken from.
 
@@ -698,8 +915,7 @@ def analyze(
     _, T, K = Y_3d.shape
 
     dtype = jnp.result_type(Y_3d.dtype, jnp.float32)
-    if tol is None:
-        tol = 1e-9 if dtype == jnp.float64 else 1e-6
+    tol = _resolve_tol(tol, dtype)
 
     # The bootstrap and the dummy column are independent consumers of
     # randomness, so each gets its own child key rather than sharing one.
@@ -735,30 +951,7 @@ def analyze(
     # is (cls_idx, counts); masks and quantile lookups are derived
     # in-kernel from the counts.
     groups, _, col_order = build_partition_groups(problem, X, all_idx, M, dims_levels)
-
-    def _static_dm_grid(group: tuple[Array, Array], levels: list[int] | None) -> Array:
-        """Flat ``d * Mg + m`` class slots the joint kernel must solve.
-
-        A categorical group's class axis is padded to the largest level
-        count. The pad slots are statically empty, because their counts
-        are zero for every replicate. They are excluded here instead of
-        running dead Sinkhorn solves.
-        """
-        D_g, M_g = group[0].shape[1], group[0].shape[2]
-        if levels is None:
-            return jnp.arange(D_g * M_g, dtype=jnp.int32)
-        return jnp.asarray(
-            [d * M_g + m for d, n_levels in enumerate(levels) for m in range(n_levels)],
-            dtype=jnp.int32,
-        )
-
-    # Group order mirrors build_partition_groups: continuous (no level
-    # list) first when present, then categorical.
-    group_levels: list[list[int] | None] = []
-    if cont_dims:
-        group_levels.append(None)
-    if cat_dims:
-        group_levels.append([n_levels for _, n_levels in dims_levels])
+    group_levels = _group_levels(cont_dims, cat_dims, dims_levels)
 
     # `_run` maps replicate indices and partition-layout groups to
     # (ot, advective, diffusive, degenerate) arrays with the parameter axis
@@ -771,7 +964,6 @@ def analyze(
 
     if mode == "univariate":
         Y_cols = Y_3d.reshape(N, T * K)
-        total = T * K
 
         def _run(
             idx: Array,
@@ -779,43 +971,12 @@ def analyze(
             run_levels: list[list[int] | None],
             order: Array | None,
         ) -> tuple[Array, Array, Array, Array]:
-            R_run = idx.shape[0]
-            D_run = sum(g[0].shape[1] for g in run_groups)
-            # Peak memory scales with the summed per-group D_g * M_g
-            # conditional-quantile tensors.
-            layout_elems = sum(g[0].shape[1] * g[0].shape[2] for g in run_groups)
-            cs = slice_chunk_size
-            if cs is None:
-                cs = max(1, _CHUNK_ELEM_BUDGET // (layout_elems * N))
-            cs = min(cs, total)
-            parts: tuple[list, list, list, list] = ([], [], [], [])
-            for start in range(0, total, cs):
-                chunk = Y_cols[:, start : start + cs]
-                merged = list(_ot_1d_kernel(chunk, idx, tuple(run_groups)))
-                if order is not None:
-                    merged[:3] = [arr[..., order] for arr in merged[:3]]
-                for part, arr in zip(parts, merged):
-                    part.append(arr)
-            ot, adv, diff, degen = (jnp.concatenate(p, axis=1) for p in parts)
-            return (
-                ot.reshape(R_run, T, K, D_run),
-                adv.reshape(R_run, T, K, D_run),
-                diff.reshape(R_run, T, K, D_run),
-                degen.reshape(R_run, T, K),
-            )
+            return _run_univariate(Y_cols, T, K, idx, run_groups, order, slice_chunk_size)
     else:
         eps_s = jnp.asarray(epsilon, dtype)
         max_iter_s = jnp.asarray(max_iter, jnp.int32)
         tol_s = jnp.asarray(tol, dtype)
-        # One point cloud for "multivariate" (flattened output), one per
-        # output for "trajectory". The runner stacks the per-cloud results
-        # on a new output axis only in the "trajectory" case.
-        if mode == "multivariate":
-            clouds = [Y_3d.reshape(N, T * K)]
-        else:
-            clouds = [Y_3d[:, :, k] for k in range(K)]
-        if standardize:
-            clouds = [_prenormalize_outputs(Z)[0] for Z in clouds]
+        clouds = _build_clouds(Y_3d, mode, standardize)
 
         def _run(
             idx: Array,
@@ -824,31 +985,12 @@ def analyze(
             order: Array | None,
         ) -> tuple[Array, Array, Array, Array]:
             nonlocal n_solves
-            dm_grids = tuple(
-                _static_dm_grid(group, levels) for group, levels in zip(run_groups, run_levels)
+            ot, adv, diff, degen, n_bad, solves = _run_joint(
+                clouds, mode, idx, run_groups, run_levels, order, eps_s, max_iter_s, tol_s
             )
-            n_solves += len(clouds) * idx.shape[0] * sum(grid.shape[0] for grid in dm_grids)
-
-            def _one_cloud(Z: Array) -> tuple[Array, Array, Array, Array, Array]:
-                ot, adv, diff, n_bad, degen = _joint_kernel(
-                    Z, idx, tuple(run_groups), dm_grids, eps_s, max_iter_s, tol_s
-                )
-                merged = [ot, adv, diff]
-                if order is not None:
-                    merged = [arr[..., order] for arr in merged]
-                return merged[0], merged[1], merged[2], n_bad.sum(), degen
-
-            cloud_outs = [_one_cloud(Z) for Z in clouds]
-            n_bad_parts.append(jnp.stack([o[3] for o in cloud_outs]).sum())
-            if mode == "multivariate":
-                ot, adv, diff, _, degen = cloud_outs[0]  # (R, D) / (R,)
-                return ot, adv, diff, degen
-            return (
-                jnp.stack([o[0] for o in cloud_outs], axis=1),  # (R, K, D)
-                jnp.stack([o[1] for o in cloud_outs], axis=1),
-                jnp.stack([o[2] for o in cloud_outs], axis=1),
-                jnp.stack([o[4] for o in cloud_outs], axis=1),  # (R, K)
-            )
+            n_solves += solves
+            n_bad_parts.append(n_bad)
+            return ot, adv, diff, degen
 
     ot_all, adv_all, diff_all, degen_all = _run(all_idx, groups, group_levels, col_order)
 
@@ -926,3 +1068,158 @@ def analyze(
         invalid=invalid,
         ci=ci_info,
     )
+
+
+def indices(
+    problem: Problem,
+    X: Array,
+    Y: Array,
+    *,
+    mode: Literal["univariate", "multivariate", "trajectory"] = "univariate",
+    n_partitions: int | None = None,
+    standardize: bool = True,
+    epsilon: float = 0.01,
+    max_iter: int = 1000,
+    tol: float | None = None,
+    slice_chunk_size: int | None = None,
+) -> tuple[Array, Array, Array]:
+    """Compute optimal-transport indices as plain arrays, with no diagnostics.
+
+    This is the transformable core of :func:`analyze`. It runs the same
+    kernels on the same data and returns the same numbers, but it does
+    nothing else: no non-finite check, no zero-variance warning, no
+    Sinkhorn convergence warning, no ``dummy`` baseline, no
+    :class:`jaxgsa.optimal_transport.OTResult`, and no read of any array
+    value on the host. So it composes with ``jax.jit``, ``jax.vmap``,
+    ``jax.grad`` and ``jax.jacrev``, which :func:`analyze` cannot, because
+    a policy decision needs a concrete value and a tracer has none.
+
+    Use :func:`analyze` for ordinary analysis. Nothing here checks the
+    outputs, so a single NaN silently turns every index into NaN, and a
+    Sinkhorn solve that never converged is reported as if it had.
+
+    ``mode`` stays a branch here, because it is a Python string and so is
+    static at trace time: one mode is traced per concrete value, exactly as
+    ``analyze`` compiles one. The point-cloud modes go through the
+    entropic solver, whose stopping rule is a ``while_loop`` on the
+    marginal residual; that is differentiable but the derivative is of the
+    iterate the loop stopped at, so tighten ``tol`` before trusting a
+    gradient through them.
+
+    There is no ``n_bootstrap``, no ``key`` and no ``dummy``. All three are
+    policy: the bootstrap and the dummy baseline draw randomness and return
+    a spread rather than an estimate, and both are diagnostics layered on
+    the same point estimate this returns.
+
+    Continuous parameters only. A categorical parameter's conditioning
+    classes are one class per observed level, and both their number and
+    their padded width are read off the data on the host, so that layout
+    cannot be built from a tracer. :func:`analyze` handles categorical
+    parameters.
+
+    Tier T4 (behavioural contract): the returned arrays must equal the
+    ``ot``, ``advective`` and ``diffusive`` fields of ``analyze``'s result
+    on clean outputs, and the function must survive ``jit``, ``vmap`` and
+    ``jit(jacrev(...))``. Checked in ``tests/test_optimal_transport.py``.
+
+    Args:
+        problem: Problem definition with D continuous parameters.
+        X: Parameter sample matrix, shape ``(N, D)``.
+        Y: Model output, shape ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
+        mode: Output treatment, as in :func:`analyze`.
+        n_partitions: Number of equal-frequency conditioning classes.
+            ``None`` selects ``min(25, N // 2)``, which reads ``N`` only, so
+            it stays static under a trace.
+        standardize: Joint modes only. Divide each output column by its
+            standard deviation before building the transport cost, as in
+            :func:`analyze`. It is arithmetic over the sample axis, not
+            policy, so it stays traceable.
+        epsilon: Joint modes only. Entropic regularization strength.
+        max_iter: Joint modes only. Sinkhorn iteration cap per solve.
+        tol: Joint modes only. Marginal stopping tolerance. ``None``
+            selects ``1e-9`` in float64 and ``1e-6`` in float32.
+        slice_chunk_size: ``"univariate"`` mode only. Output columns per
+            kernel call, as in :func:`analyze`.
+
+    Returns:
+        ``(ot, advective, diffusive)``. In ``"univariate"`` mode the shapes
+        are those of the caller's ``Y``: ``(D,)`` for a 1-D ``Y``,
+        ``(K, D)`` for 2-D, ``(T, K, D)`` for 3-D. ``"multivariate"``
+        returns ``(D,)`` and ``"trajectory"`` returns ``(K, D)``. The shapes
+        are those ``analyze`` reports.
+
+    Raises:
+        ValueError: If ``X`` is not ``(N, D)`` for the problem's ``D``; if
+            ``Y`` is not 1-D, 2-D or 3-D, or its row count does not match
+            ``X``; if ``mode`` is unknown; if ``mode="trajectory"`` is used
+            with a non-3-D ``Y``; if ``n_partitions`` is not in
+            ``[2, N // 2]``; if ``epsilon <= 0``, ``max_iter < 1`` or
+            ``tol <= 0``; if ``slice_chunk_size`` is below 1; or if any
+            parameter is categorical.
+    """
+    check_scalars(
+        (
+            require(mode in _MODES, f"mode must be one of {_MODES}, got {mode!r}"),
+            require(not epsilon <= 0, f"epsilon must be > 0, got {epsilon}"),
+            at_least("max_iter", max_iter, 1),
+            require(tol is None or tol > 0, f"tol must be > 0, got {tol}"),
+            at_least("slice_chunk_size", slice_chunk_size, 1),
+        )
+    )
+    X = validate_inputs(problem, X)
+    Y = _validate_output(Y, int(X.shape[0]), problem)
+    if mode == "trajectory" and Y.ndim != 3:
+        raise ValueError(f"mode='trajectory' requires a 3-D (N, T, K) Y, got ndim={Y.ndim}")
+    dims_levels = _categorical_dims(problem)
+    if dims_levels:
+        names = ", ".join(repr(problem.names[d]) for d, _ in dims_levels)
+        raise ValueError(
+            "jaxgsa.optimal_transport.indices supports continuous parameters "
+            f"only, but {names} is categorical. A categorical parameter "
+            "conditions on one class per observed level, and both the class "
+            "count and the padded class width are read off the sample on the "
+            "host, so the layout cannot be built from a tracer. Use "
+            "jaxgsa.optimal_transport.analyze instead; it supports "
+            "categorical parameters and is not traceable for this reason."
+        )
+
+    N = X.shape[0]
+    if n_partitions is None:
+        M = min(25, N // 2)
+        if M < 2:
+            raise ValueError(f"building conditioning classes needs N >= 4 samples, got N={N}")
+    else:
+        M = int(n_partitions)
+        if not 2 <= M <= N // 2:
+            raise ValueError(f"n_partitions must be in [2, N//2={N // 2}], got {n_partitions}")
+
+    Y_3d, layout = _prepare_Y(Y)
+    _, T, K = Y_3d.shape
+    dtype = jnp.result_type(Y_3d.dtype, jnp.float32)
+
+    # One replicate, the identity permutation: the original sample. The
+    # bootstrap axis exists only for the interval, which is policy.
+    all_idx = jnp.arange(N, dtype=jnp.int32)[None, :]
+    groups, _, col_order = build_partition_groups(problem, X, all_idx, M, dims_levels)
+
+    if mode == "univariate":
+        ot, adv, diff, _ = _run_univariate(
+            Y_3d.reshape(N, T * K), T, K, all_idx, groups, col_order, slice_chunk_size
+        )
+        return layout.squeeze(ot[0]), layout.squeeze(adv[0]), layout.squeeze(diff[0])
+
+    tol_v = _resolve_tol(tol, dtype)
+    ot, adv, diff, _, _, _ = _run_joint(
+        _build_clouds(Y_3d, mode, standardize),
+        mode,
+        all_idx,
+        groups,
+        # Every parameter is continuous here, so there is exactly one group
+        # and it carries no level list.
+        [None],
+        col_order,
+        jnp.asarray(epsilon, dtype),
+        jnp.asarray(max_iter, jnp.int32),
+        jnp.asarray(tol_v, dtype),
+    )
+    return ot[0], adv[0], diff[0]

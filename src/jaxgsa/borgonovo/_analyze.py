@@ -63,7 +63,15 @@ from jax import Array
 
 from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
-from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare, require
+from jaxgsa._core.entry import (
+    at_least,
+    check_scalars,
+    in_open_interval,
+    one_of,
+    prepare,
+    require,
+    validate_inputs,
+)
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.partition import (
     _mask_from_counts,
@@ -71,6 +79,7 @@ from jaxgsa._core.partition import (
     build_partition_groups,
 )
 from jaxgsa._core.result import CIInfo
+from jaxgsa._core.validation import _prepare_Y, _validate_output
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.borgonovo._result import DeltaResult
 from jaxgsa.problem import Problem, _categorical_dims
@@ -403,6 +412,122 @@ def _get_delta_kernel(
         return d_all, s1_all, degen_all, floored_all
 
     return jax.jit(_impl)
+
+
+def _resolve_slice_chunks(
+    groups: list[tuple[Array, Array]],
+    Y_cols: Array,
+    grid_size: int,
+    slice_chunk_size: int | None,
+) -> tuple[int, int]:
+    """Size the output-column chunk and the output-grid tile.
+
+    Peak memory is the conditional-KDE tensor. It holds one output-grid
+    point per padded class slot, so it costs
+    ``columns * sum_g(Dg * Mg * Pg) * grid_points`` elements. This sizes it
+    from the real per-group layout: assuming that product is ``~ D * N``
+    holds for equal-frequency continuous classes, but it under-counts badly
+    for an imbalanced categorical column, where every level is padded up to
+    the largest one.
+
+    Two knobs bound that tensor, and they answer different questions. The
+    slice chunk answers "how much of the output can be in flight at once",
+    and the transient-memory budget is its cap. The grid tile answers "how
+    much of the KDE has to be resident to keep the CPU busy", and a
+    working-set target is its cap; the tile is where nearly all of the
+    saving is, because tiling costs no extra passes over the data.
+
+    Both numbers come from shapes and Python scalars only, so this is
+    traceable: :func:`indices` and :func:`analyze` share it and therefore
+    pick the same chunking for the same call.
+
+    Args:
+        groups: Canonical partition groups from
+            :func:`jaxgsa._core.partition.build_partition_groups`.
+        Y_cols: Output columns ``(N, T*K)``, read for its dtype and width.
+        grid_size: Number of output-grid points.
+        slice_chunk_size: Caller override, or ``None`` for the budget.
+
+    Returns:
+        ``(slice_chunk, grid_chunk)``.
+    """
+    total = Y_cols.shape[1]
+    layout_elems = sum(g[0].shape[1] * g[0].shape[2] * g[0].shape[3] for g in groups)
+    itemsize = jnp.dtype(jnp.result_type(Y_cols.dtype, jnp.float32)).itemsize
+    bytes_per_column_grid_point = layout_elems * itemsize
+    cs = resolve_batch_size(
+        bytes_per_column_grid_point * _KDE_LIVE_TENSORS, total, slice_chunk_size
+    )
+    grid_chunk = min(
+        grid_size,
+        max(_MIN_GRID_TILE, _KDE_TILE_TARGET_BYTES // (cs * bytes_per_column_grid_point)),
+    )
+    return cs, grid_chunk
+
+
+def _run_delta_kernel(
+    Y_cols: Array,
+    all_idx: Array,
+    groups: list[tuple[Array, Array]],
+    col_order: Array | None,
+    *,
+    grid_size: int,
+    bw_factor: float | None,
+    degenerate_tol: float,
+    degenerate_bw: float | None,
+    slice_chunk_size: int | None,
+) -> tuple[Array, Array, Array, Array]:
+    """Run the jitted delta kernel over every chunk of output columns.
+
+    This is the whole estimator, and nothing else: it branches on shapes and
+    Python scalars only, reads no array value on the host, and raises and
+    warns about nothing. :func:`analyze` and :func:`indices` both go through
+    it, so the two can never compute different numbers.
+
+    Args:
+        Y_cols: Output columns, shape ``(N, T*K)``.
+        all_idx: Replicate row indices ``(R, N)``. Row 0 is the identity, so
+            replicate 0 is the original sample.
+        groups: Canonical partition groups; see
+            :mod:`jaxgsa._core.partition`.
+        col_order: Gather that restores the problem's column order, or
+            ``None`` when the groups are already in order.
+        grid_size: Number of output-grid points for the KDE.
+        bw_factor: Fixed KDE bandwidth factor, or ``None`` for Silverman.
+        degenerate_tol: Degenerate-class threshold, as a fraction of the
+            full-sample bandwidth.
+        degenerate_bw: Degenerate-class bandwidth floor, as a fraction of
+            the full-sample bandwidth, or ``None`` for ``"auto"``.
+        slice_chunk_size: Output columns per kernel call, or ``None`` for
+            the transient-memory budget.
+
+    Returns:
+        ``(d_all, s1_all, degen_all, floored_cols)``. ``d_all`` and
+        ``s1_all`` have shape ``(R, T*K, D)``, ``degen_all`` ``(R, T*K)``,
+        and ``floored_cols`` ``(T*K,)``.
+    """
+    total = Y_cols.shape[1]
+    cs, grid_chunk = _resolve_slice_chunks(groups, Y_cols, grid_size, slice_chunk_size)
+    kernel = _get_delta_kernel(grid_size, bw_factor, degenerate_tol, degenerate_bw, grid_chunk)
+    d_parts, s1_parts, degen_parts, floored_parts = [], [], [], []
+    for start in range(0, total, cs):
+        chunk = Y_cols[:, start : start + cs]
+        d, s1, degen, floored = kernel(chunk, all_idx, tuple(groups))
+        if col_order is not None:
+            d = d[..., col_order]
+            s1 = s1[..., col_order]
+        d_parts.append(d)
+        s1_parts.append(s1)
+        degen_parts.append(degen)
+        # Keep the flag per output column, not per chunk: a failure message
+        # has to name the column whose class was floored.
+        floored_parts.append(floored.any(axis=0))
+    return (
+        jnp.concatenate(d_parts, axis=1),
+        jnp.concatenate(s1_parts, axis=1),
+        jnp.concatenate(degen_parts, axis=1),
+        jnp.concatenate(floored_parts),
+    )
 
 
 def _slice_label(flat_index: int, trailing: tuple[int, ...], problem: Problem) -> str:
@@ -923,48 +1048,17 @@ def analyze(
     # Canonical partition-group layout, shared with optimal_transport.
     groups, _, col_order = build_partition_groups(problem, X, all_idx, M, dims_levels)
 
-    total = T * K
-    # Peak memory is the conditional-KDE tensor. It holds one output-grid
-    # point per padded class slot, so it costs
-    # ``columns * sum_g(Dg * Mg * Pg) * grid_points`` elements. Size it from
-    # the real per-group layout: assuming that product is ~ D * N holds for
-    # equal-frequency continuous classes, but it under-counts badly for an
-    # imbalanced categorical column, where every level is padded up to the
-    # largest one.
-    #
-    # Two knobs bound that tensor, and they answer different questions. The
-    # slice chunk answers "how much of the output can be in flight at once",
-    # and the transient-memory budget is its cap. The grid tile answers "how
-    # much of the KDE has to be resident to keep the CPU busy", and a working
-    # -set target is its cap; the tile is where nearly all of the saving is,
-    # because tiling costs no extra passes over the data.
-    layout_elems = sum(g[0].shape[1] * g[0].shape[2] * g[0].shape[3] for g in groups)
-    itemsize = jnp.dtype(jnp.result_type(Y_cols.dtype, jnp.float32)).itemsize
-    bytes_per_column_grid_point = layout_elems * itemsize
-    cs = resolve_batch_size(
-        bytes_per_column_grid_point * _KDE_LIVE_TENSORS, total, slice_chunk_size
+    d_all, s1_all, degen_all, floored_cols = _run_delta_kernel(
+        Y_cols,
+        all_idx,
+        groups,
+        col_order,
+        grid_size=grid_size,
+        bw_factor=bw_factor,
+        degenerate_tol=degenerate_tol,
+        degenerate_bw=degenerate_bw,
+        slice_chunk_size=slice_chunk_size,
     )
-    grid_chunk = min(
-        grid_size,
-        max(_MIN_GRID_TILE, _KDE_TILE_TARGET_BYTES // (cs * bytes_per_column_grid_point)),
-    )
-
-    kernel = _get_delta_kernel(grid_size, bw_factor, degenerate_tol, degenerate_bw, grid_chunk)
-    d_parts, s1_parts, degen_parts, floored_parts = [], [], [], []
-    for start in range(0, total, cs):
-        chunk = Y_cols[:, start : start + cs]
-        d, s1, degen, floored = kernel(chunk, all_idx, tuple(groups))
-        if col_order is not None:
-            d = d[..., col_order]
-            s1 = s1[..., col_order]
-        d_parts.append(d)
-        s1_parts.append(s1)
-        degen_parts.append(degen)
-        # Keep the flag per output column, not per chunk: a failure message
-        # has to name the column whose class was floored.
-        floored_parts.append(floored.any(axis=0))
-
-    floored_cols = jnp.concatenate(floored_parts)
     if bool(floored_cols.any()):
         warnings.warn(
             "jaxgsa: at least one conditioning class is too narrow for the "
@@ -977,9 +1071,9 @@ def analyze(
             category=JaxgsaWarning,
         )
 
-    d_all = jnp.concatenate(d_parts, axis=1).reshape(R, T, K, D)
-    s1_all = jnp.concatenate(s1_parts, axis=1).reshape(R, T, K, D)
-    degen_all = jnp.concatenate(degen_parts, axis=1).reshape(R, T, K)
+    d_all = d_all.reshape(R, T, K, D)
+    s1_all = s1_all.reshape(R, T, K, D)
+    degen_all = degen_all.reshape(R, T, K)
 
     d_hat = d_all[0]
     S1 = s1_all[0]
@@ -1075,6 +1169,145 @@ def analyze(
         invalid=invalid,
         ci=ci,
     )
+
+
+def indices(
+    problem: Problem,
+    X: Array,
+    Y: Array,
+    *,
+    n_classes: int | None = None,
+    grid_size: int = 100,
+    bandwidth: float | Literal["silverman"] = "silverman",
+    slice_chunk_size: int | None = None,
+    degenerate_tol: float = _DEGENERATE_BW_TOL,
+    degenerate_bandwidth: float | Literal["auto"] = "auto",
+) -> tuple[Array, Array]:
+    """Compute Borgonovo delta and given-data S1 as plain arrays.
+
+    This is the transformable core of :func:`analyze`. It runs the same
+    kernel on the same data and returns the same numbers, but it does
+    nothing else: no non-finite check, no discrete-output refusal, no
+    zero-variance warning, no bandwidth-floor warning, no ``[0, 1]`` range
+    check, no :class:`jaxgsa.borgonovo.DeltaResult`, and no read of any
+    array value on the host. So it composes with ``jax.jit``, ``jax.vmap``,
+    ``jax.grad`` and ``jax.jacrev``, which :func:`analyze` cannot, because
+    a policy decision needs a concrete value and a tracer has none.
+
+    Use :func:`analyze` for ordinary analysis. Nothing here checks the
+    outputs, so a single NaN silently turns every index into NaN, and a
+    discrete output silently returns a number that describes ``grid_size``
+    rather than the model.
+
+    There is no ``n_bootstrap`` and no bias correction. Both are policy.
+    The Plischke correction ``2*d_hat - mean(d_boot)`` needs bootstrap
+    replicates, which need a PRNG key and a resampling decision, and it
+    returns a *different estimand* from the plug-in delta: the correction
+    can leave ``[0, 1]``, which is why :func:`analyze` range-checks the
+    result afterwards. A core that returned it would carry the replicate
+    axis, the key and the range policy into every ``jacrev``. So
+    :func:`indices` returns the plug-in point estimate only — exactly what
+    ``analyze(..., n_bootstrap=0)`` reports.
+
+    Continuous parameters only. A categorical parameter's conditioning
+    classes are one class per observed level, and both their number and
+    their padded width are read off the data on the host, so that layout
+    cannot be built from a tracer. :func:`analyze` handles categorical
+    parameters.
+
+    Tier T4 (behavioural contract): the returned arrays must equal the
+    ``delta`` and ``S1`` fields of ``analyze``'s result on clean outputs
+    with ``n_bootstrap=0``, and the function must survive ``jit``, ``vmap``
+    and ``jit(jacrev(...))``. Checked in ``tests/test_borgonovo.py``.
+
+    Args:
+        problem: Problem definition with D continuous parameters.
+        X: Input samples, shape ``(N, D)``.
+        Y: Model outputs, shape ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
+        n_classes: Number of equal-frequency conditioning classes, as in
+            :func:`analyze`. ``None`` selects the Plischke heuristic, which
+            reads ``N`` only, so it stays static under a trace.
+        grid_size: Number of output-grid points, as in :func:`analyze`.
+        bandwidth: KDE bandwidth rule, as in :func:`analyze`.
+        slice_chunk_size: Output columns per kernel call, as in
+            :func:`analyze`.
+        degenerate_tol: Degenerate-class threshold, as in :func:`analyze`.
+            The floor it triggers is applied inside the kernel with
+            :func:`jax.numpy.where`, so it costs no host branch here; what
+            :func:`analyze` adds is only the warning that it engaged.
+        degenerate_bandwidth: Degenerate-class bandwidth floor, as in
+            :func:`analyze`.
+
+    Returns:
+        ``(delta, S1)``, at the rank the caller's ``Y`` had: ``(D,)`` for a
+        1-D ``Y``, ``(K, D)`` for 2-D, ``(T, K, D)`` for 3-D. The shapes
+        are those ``analyze`` reports.
+
+    Raises:
+        ValueError: If ``X`` is not ``(N, D)`` for the problem's ``D``; if
+            ``Y`` is not 1-D, 2-D or 3-D, or its row count does not match
+            ``X``; if ``grid_size < 2``; if ``n_classes`` is not in
+            ``[2, N]``; if ``slice_chunk_size`` is below 1; if
+            ``degenerate_tol`` is not in ``[0, 1)``; if ``bandwidth`` or
+            ``degenerate_bandwidth`` is neither its sentinel string nor a
+            positive float; or if any parameter is categorical.
+    """
+    check_scalars(
+        (
+            at_least("grid_size", grid_size, 2),
+            require(
+                0 <= float(degenerate_tol) < 1,
+                f"degenerate_tol must be in [0, 1), got {degenerate_tol}",
+            ),
+            at_least("slice_chunk_size", slice_chunk_size, 1),
+        )
+    )
+    X = validate_inputs(problem, X)
+    Y = _validate_output(Y, int(X.shape[0]), problem)
+    dims_levels = _categorical_dims(problem)
+    if dims_levels:
+        names = ", ".join(repr(problem.names[d]) for d, _ in dims_levels)
+        raise ValueError(
+            "jaxgsa.borgonovo.indices supports continuous parameters only, "
+            f"but {names} is categorical. A categorical parameter conditions "
+            "on one class per observed level, and both the class count and "
+            "the padded class width are read off the sample on the host, so "
+            "the layout cannot be built from a tracer. Use "
+            "jaxgsa.borgonovo.analyze instead; it supports categorical "
+            "parameters and is not traceable for this reason."
+        )
+
+    N = X.shape[0]
+    M = _plischke_n_classes(N) if n_classes is None else int(n_classes)
+    if not 2 <= M <= N:
+        raise ValueError(f"n_classes must be in [2, N={N}], got {n_classes}")
+    bw_factor = _resolve_sentinel_float(bandwidth, "bandwidth", "silverman")
+    degenerate_bw = _resolve_sentinel_float(degenerate_bandwidth, "degenerate_bandwidth", "auto")
+
+    Y_3d, layout = _prepare_Y(Y)
+    _, T, K = Y_3d.shape
+    Y_cols = Y_3d.reshape(N, T * K)
+
+    # One replicate, the identity permutation: the original sample. The
+    # bootstrap axis exists only for the interval and the bias correction,
+    # and both are policy.
+    all_idx = jnp.arange(N, dtype=jnp.int32)[None, :]
+    groups, _, col_order = build_partition_groups(problem, X, all_idx, M, dims_levels)
+    d_all, s1_all, _, _ = _run_delta_kernel(
+        Y_cols,
+        all_idx,
+        groups,
+        col_order,
+        grid_size=grid_size,
+        bw_factor=bw_factor,
+        degenerate_tol=float(degenerate_tol),
+        degenerate_bw=degenerate_bw,
+        slice_chunk_size=slice_chunk_size,
+    )
+    D = problem.num_vars
+    delta = layout.squeeze(d_all.reshape(1, T, K, D)[0])
+    S1 = layout.squeeze(s1_all.reshape(1, T, K, D)[0])
+    return delta, S1
 
 
 def _out_of_range_columns(

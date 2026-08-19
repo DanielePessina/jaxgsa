@@ -849,3 +849,138 @@ class TestBorgonovoInvalidPolicy:
         with pytest.warns(JaxgsaWarning):
             result = analyze(problem, X, Y, n_bootstrap=0, on_invalid="drop")
         assert result.invalid.sources == ("X",)
+
+
+class TestIndicesPureCore:
+    """The transformable core ``borgonovo.indices``.
+
+    Two claims. The core returns exactly what ``analyze`` reports on clean
+    outputs, and it survives ``jit``, ``vmap`` and ``jit(jacrev(...))``,
+    which ``analyze`` cannot.
+    """
+
+    def test_matches_analyze(self, ishigami_data):
+        """Tier T4: ``indices`` returns the ``delta`` and ``S1`` of ``analyze``.
+
+        ``analyze`` delegates to the same kernel runner, so this guards the
+        delegation wiring rather than the estimator maths.
+        """
+        X, Y = ishigami_data
+        result = analyze(ishigami.PROBLEM, X, Y)
+        delta, S1 = jaxgsa.borgonovo.indices(ishigami.PROBLEM, X, Y)
+
+        np.testing.assert_array_equal(np.asarray(delta), np.asarray(result.delta))
+        np.testing.assert_array_equal(np.asarray(S1), np.asarray(result.S1))
+
+    def test_matches_analyze_for_multi_output(self, ishigami_data):
+        """Tier T4: the (N, T, K) path agrees field for field, at the caller's rank."""
+        X, Y = ishigami_data
+        Y2 = jnp.stack([Y, Y**2], axis=1)
+        Y3 = jnp.stack([Y2, Y2 + 1.0], axis=1)
+        for outputs in (Y2, Y3):
+            result = analyze(ishigami.PROBLEM, X, outputs, grid_size=40)
+            delta, S1 = jaxgsa.borgonovo.indices(ishigami.PROBLEM, X, outputs, grid_size=40)
+            assert delta.shape == result.delta.shape
+            np.testing.assert_array_equal(np.asarray(delta), np.asarray(result.delta))
+            np.testing.assert_array_equal(np.asarray(S1), np.asarray(result.S1))
+
+    def test_bias_correction_is_not_in_the_core(self, ishigami_data):
+        """Tier T4: the core is the plug-in estimate, never the corrected one.
+
+        The Plischke correction needs bootstrap replicates, so it is policy
+        and stays in ``analyze``. The core must therefore equal
+        ``analyze(..., n_bootstrap=0)`` and differ from the corrected value.
+        """
+        X, Y = ishigami_data
+        delta, _ = jaxgsa.borgonovo.indices(ishigami.PROBLEM, X, Y)
+        plain = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0)
+        corrected = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=8, key=jax.random.key(0))
+
+        np.testing.assert_array_equal(np.asarray(delta), np.asarray(plain.delta))
+        assert not np.allclose(np.asarray(delta), np.asarray(corrected.delta))
+        assert not hasattr(jaxgsa.borgonovo.indices, "n_bootstrap")
+
+    def test_is_jittable(self, ishigami_data):
+        """Tier T4: ``jit`` traces ``indices`` over both X and Y."""
+        X, Y = ishigami_data
+        jitted = jax.jit(lambda x, y: jaxgsa.borgonovo.indices(ishigami.PROBLEM, x, y))
+        delta_jit, S1_jit = jitted(X, Y)
+        delta, S1 = jaxgsa.borgonovo.indices(ishigami.PROBLEM, X, Y)
+
+        np.testing.assert_allclose(np.asarray(delta_jit), np.asarray(delta), rtol=1e-5)
+        np.testing.assert_allclose(np.asarray(S1_jit), np.asarray(S1), rtol=1e-5)
+
+    def test_is_vmappable(self):
+        """Tier T4: ``vmap`` maps ``indices`` over a batch of output vectors."""
+        N = 512
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=N, seed=7))
+        batch = jnp.stack([ishigami.evaluate(X), X[:, 0], X[:, 1] ** 2])
+
+        mapped = jax.vmap(
+            lambda y: jaxgsa.borgonovo.indices(ishigami.PROBLEM, X, y, grid_size=30)
+        )(batch)
+
+        assert mapped[0].shape == (3, ishigami.PROBLEM.num_vars)
+        for row, outputs in enumerate(batch):
+            delta, S1 = jaxgsa.borgonovo.indices(ishigami.PROBLEM, X, outputs, grid_size=30)
+            np.testing.assert_allclose(np.asarray(mapped[0][row]), np.asarray(delta), rtol=1e-4)
+            np.testing.assert_allclose(np.asarray(mapped[1][row]), np.asarray(S1), rtol=1e-4)
+
+    def test_jit_of_jacrev(self):
+        """Tier T4: ``jit(jacrev(...))`` compiles a gradient through the core.
+
+        The KDE, the trapezoid rule and the class weights are all smooth in
+        Y, so a derivative of ``sum(delta)`` with respect to the outputs is
+        defined. The rank partition is not differentiable in X, which is why
+        the derivative is taken in Y.
+        """
+        with jax.enable_x64():
+            N = 256
+            X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=N, seed=3))
+            Y = ishigami.evaluate(X)
+
+            def total_delta(outputs):
+                return jaxgsa.borgonovo.indices(ishigami.PROBLEM, X, outputs, grid_size=20)[
+                    0
+                ].sum()
+
+            jac = jax.jit(jax.jacrev(total_delta))(Y)
+            eager = jax.jacrev(total_delta)(Y)
+
+        assert jac.shape == (N,)
+        assert np.all(np.isfinite(np.asarray(jac)))
+        np.testing.assert_allclose(np.asarray(jac), np.asarray(eager), rtol=1e-8)
+
+    def test_categorical_is_refused_with_a_pointer_to_analyze(self, degenerate_class_data):
+        """Tier T4: a categorical parameter cannot be traced, so the core says so.
+
+        The categorical class layout is built on the host from the observed
+        level counts, so neither the class count nor the padded width is
+        known from a tracer. ``analyze`` is the supported route.
+        """
+        problem, X, Y = degenerate_class_data
+        with pytest.raises(ValueError, match="continuous parameters only"):
+            jaxgsa.borgonovo.indices(problem, X, Y)
+
+    def test_no_policy_fires_in_the_core(self):
+        """Tier T4: the core neither warns nor raises where ``analyze`` does.
+
+        A constant output column trips the zero-variance warning in
+        ``analyze``, and a two-valued one is refused outright as a discrete
+        output. The core reports the same numbers for the constant case and
+        computes the discrete one without complaint.
+        """
+        problem = Problem.from_dict({"a": (0.0, 1.0), "b": (0.0, 1.0)})
+        X = jnp.asarray(monte_carlo(problem, n=400, seed=5))
+        constant = jnp.full((400,), 2.5)
+        discrete = jnp.where(X[:, 0] > 0.5, 1.0, 0.0)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            delta, S1 = jaxgsa.borgonovo.indices(problem, X, constant)
+            jaxgsa.borgonovo.indices(problem, X, discrete)
+
+        np.testing.assert_array_equal(np.asarray(delta), np.zeros(2))
+        np.testing.assert_array_equal(np.asarray(S1), np.zeros(2))
+        with pytest.raises(ValueError, match="continuous output distribution"):
+            analyze(problem, X, discrete)
