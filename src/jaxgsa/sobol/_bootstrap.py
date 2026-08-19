@@ -134,11 +134,11 @@ def _resample_so(estimator: str):
 
 
 def _bootstrap_first_total(
-    indices: Array, A: Array, AB: Array, B: Array, chunk_size: int, estimator: str
+    indices: Array, A: Array, AB: Array, B: Array, slice_chunk_size: int, estimator: str
 ) -> tuple[Array, Array]:
     """Bootstrap first-order and total-order Sobol indices over every slice.
 
-    Iterate over the output slices in chunks of ``chunk_size`` and call
+    Iterate over the output slices in chunks of ``slice_chunk_size`` and call
     :func:`_resample_ft` on each chunk. Chunking avoids materialising all
     ``S * R`` resampled slices in device memory at once.
 
@@ -149,7 +149,7 @@ def _bootstrap_first_total(
         A: Model outputs from sample matrix A, shape ``(S, N)``.
         AB: Model outputs from the AB cross-matrices, shape ``(S, N, D)``.
         B: Model outputs from sample matrix B, shape ``(S, N)``.
-        chunk_size: Maximum output slices to vmap in a single device call.
+        slice_chunk_size: Maximum output slices to vmap in a single device call.
         estimator: Which named estimator to resample. The bootstrap must use
             the same formulas as the point estimate, or the interval would
             describe a different quantity from the number at its centre.
@@ -162,7 +162,7 @@ def _bootstrap_first_total(
     n_slices = A.shape[0]
     s1_parts, st_parts = [], []
     resample = _resample_ft(estimator)
-    cs = max(1, min(chunk_size, n_slices))
+    cs = max(1, min(slice_chunk_size, n_slices))
     for start in range(0, n_slices, cs):
         end = min(start + cs, n_slices)
         # Process C slices x R resamples per device call; chunking bounds peak
@@ -181,7 +181,7 @@ def _bootstrap_second_order(
     AB: Array,
     BA: Array,
     B: Array,
-    chunk_size: int,
+    slice_chunk_size: int,
     estimator: str,
 ) -> tuple[Array, Array, Array]:
     """Bootstrap first-, total-, and second-order Sobol indices over every slice.
@@ -196,7 +196,7 @@ def _bootstrap_second_order(
         AB: Model outputs from the AB cross-matrices, shape ``(S, N, D)``.
         BA: Model outputs from the BA cross-matrices, shape ``(S, N, D)``.
         B: Model outputs from sample matrix B, shape ``(S, N)``.
-        chunk_size: Maximum output slices to vmap in a single device call.
+        slice_chunk_size: Maximum output slices to vmap in a single device call.
         estimator: Which named estimator to resample, matching the point
             estimate.
 
@@ -208,7 +208,7 @@ def _bootstrap_second_order(
     n_slices = A.shape[0]
     s1_parts, st_parts, s2_parts = [], [], []
     resample = _resample_so(estimator)
-    cs = max(1, min(chunk_size, n_slices))
+    cs = max(1, min(slice_chunk_size, n_slices))
     for start in range(0, n_slices, cs):
         end = min(start + cs, n_slices)
         # Same chunked nested-vmap strategy as _bootstrap_first_total

@@ -151,7 +151,7 @@ class TestMultiOutput:
     def test_shapes_and_bootstrap(self, derived):
         _, Y, m = derived
         Y3 = jnp.stack([Y, 2.0 * Y], axis=-1)[:, None, :]  # (N, T=1, K=2)
-        result = morris.analyze(m, Y3, num_resamples=20, key=jax.random.key(0))
+        result = morris.analyze(m, Y3, n_bootstrap=20, key=jax.random.key(0))
         assert result.mu_star.shape == (1, 2, D)
         assert result.mu_star_conf is not None
         assert result.mu_star_conf.shape == (2, 1, 2, D)

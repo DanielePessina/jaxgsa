@@ -297,13 +297,13 @@ def build_cases() -> list[Case]:
 def _m_sobol(case: Case) -> Any:
     sr = sobol.sample(case.problem, n_samples=case.n, seed=SEED, verbose=False)
     Y = case.model(jnp.asarray(sr.samples))
-    return sobol.analyze(sr, Y, num_resamples=20, key=jax.random.key(SEED))
+    return sobol.analyze(sr, Y, n_bootstrap=20, key=jax.random.key(SEED))
 
 
 def _m_morris(case: Case) -> Any:
     sr = morris.sample(case.problem, n_trajectories=32, seed=SEED, verbose=False)
     Y = case.model(jnp.asarray(sr.samples))
-    return morris.analyze(sr, Y, num_resamples=20, key=jax.random.key(SEED))
+    return morris.analyze(sr, Y, n_bootstrap=20, key=jax.random.key(SEED))
 
 
 def _m_efast(case: Case) -> Any:

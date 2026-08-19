@@ -16,7 +16,7 @@ def ishigami_bootstrap_result():
     """Run Ishigami analysis with bootstrap CIs once for all tests."""
     sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**14 * 8, seed=42, verbose=False)
     Y = evaluate(jnp.asarray(sr.samples))
-    return jaxgsa.sobol.analyze(sr, Y, num_resamples=200, key=jax.random.key(0))
+    return jaxgsa.sobol.analyze(sr, Y, n_bootstrap=200, key=jax.random.key(0))
 
 
 @pytest.fixture(scope="module")
@@ -27,7 +27,7 @@ def ishigami_bootstrap_result_gaussian():
     return jaxgsa.sobol.analyze(
         sr,
         Y,
-        num_resamples=200,
+        n_bootstrap=200,
         ci_method="gaussian",
         key=jax.random.key(0),
     )
@@ -109,8 +109,8 @@ def test_repeated_bootstrap_calls_identical():
     Y = evaluate(jnp.asarray(sr.samples))
     key = jax.random.key(123)
 
-    first = jaxgsa.sobol.analyze(sr, Y, num_resamples=20, key=key)
-    second = jaxgsa.sobol.analyze(sr, Y, num_resamples=20, key=key)
+    first = jaxgsa.sobol.analyze(sr, Y, n_bootstrap=20, key=key)
+    second = jaxgsa.sobol.analyze(sr, Y, n_bootstrap=20, key=key)
 
     np.testing.assert_allclose(np.asarray(first.S1), np.asarray(second.S1), rtol=1e-6, atol=1e-6)
     np.testing.assert_allclose(np.asarray(first.ST), np.asarray(second.ST), rtol=1e-6, atol=1e-6)
@@ -196,8 +196,8 @@ def test_prenormalize_bootstrap_is_offset_invariant():
     Y_shifted = Y + 123.0
     key = jax.random.key(321)
 
-    base = jaxgsa.sobol.analyze(sr, Y, num_resamples=20, key=key, prenormalize=True)
-    shifted = jaxgsa.sobol.analyze(sr, Y_shifted, num_resamples=20, key=key, prenormalize=True)
+    base = jaxgsa.sobol.analyze(sr, Y, n_bootstrap=20, key=key, prenormalize=True)
+    shifted = jaxgsa.sobol.analyze(sr, Y_shifted, n_bootstrap=20, key=key, prenormalize=True)
 
     np.testing.assert_allclose(np.asarray(base.S1), np.asarray(shifted.S1), rtol=1e-6, atol=1e-6)
     np.testing.assert_allclose(np.asarray(base.ST), np.asarray(shifted.ST), rtol=1e-6, atol=1e-6)
@@ -266,11 +266,11 @@ def test_unique_bootstrap_matches_expanded_layout():
     sr = jaxgsa.sobol.sample(PROBLEM, n_samples=1024, seed=7, verbose=False)
     Y_unique = evaluate(jnp.asarray(sr.samples))
     key = jax.random.key(123)
-    result_unique = jaxgsa.sobol.analyze(sr, Y_unique, num_resamples=50, key=key)
+    result_unique = jaxgsa.sobol.analyze(sr, Y_unique, n_bootstrap=50, key=key)
 
     legacy_sr = _legacy_sampling_result(sr)
     Y_expanded = Y_unique[sr.expanded_to_unique]
-    result_expanded = jaxgsa.sobol.analyze(legacy_sr, Y_expanded, num_resamples=50, key=key)
+    result_expanded = jaxgsa.sobol.analyze(legacy_sr, Y_expanded, n_bootstrap=50, key=key)
 
     assert np.allclose(np.asarray(result_unique.S1), np.asarray(result_expanded.S1))
     assert np.allclose(np.asarray(result_unique.ST), np.asarray(result_expanded.ST))
@@ -300,8 +300,8 @@ def test_gaussian_and_quantile_bootstrap_endpoints_differ():
     Y = evaluate(jnp.asarray(sr.samples))
     key = jax.random.key(222)
 
-    quantile = jaxgsa.sobol.analyze(sr, Y, num_resamples=50, ci_method="quantile", key=key)
-    gaussian = jaxgsa.sobol.analyze(sr, Y, num_resamples=50, ci_method="gaussian", key=key)
+    quantile = jaxgsa.sobol.analyze(sr, Y, n_bootstrap=50, ci_method="quantile", key=key)
+    gaussian = jaxgsa.sobol.analyze(sr, Y, n_bootstrap=50, ci_method="gaussian", key=key)
 
     assert not np.allclose(np.asarray(gaussian.S1_conf), np.asarray(quantile.S1_conf))
 
@@ -332,15 +332,15 @@ def _assert_sobol_fields_match(chunked, full, fields):
 def test_slice_chunk_size_invariance():
     """Tier T4 (internal consistency): chunking changes no index, on both paths.
 
-    ``sobol.analyze`` dispatches on ``num_resamples``, and ``slice_chunk_size``
+    ``sobol.analyze`` dispatches on ``n_bootstrap``, and ``slice_chunk_size``
     means a different thing on each side, so the test runs both halves.
 
-    * ``num_resamples=32`` takes ``_analyze_bootstrap``. There
+    * ``n_bootstrap=32`` takes ``_analyze_bootstrap``. There
       ``slice_chunk_size`` caps the *output slices* per device call, and the
       resamples of a slice ride along inside that call. So it chunks the
       point estimates and the draws alike, and all six fields are sensitive
       to this half.
-    * ``num_resamples=0`` takes ``_analyze_no_bootstrap``. That is the path
+    * ``n_bootstrap=0`` takes ``_analyze_no_bootstrap``. That is the path
       whose loop chunks the ``T*K`` output columns and reassembles them with
       ``jnp.concatenate`` plus ``_normalize_s2_matrix``. This half is the only
       coverage of that loop in the suite, so it uses three outputs and
@@ -354,15 +354,15 @@ def test_slice_chunk_size_invariance():
     Y_multi = jnp.stack([Y, 2.0 * Y, jnp.sin(Y)], axis=-1)
 
     # Bootstrap path: the *_conf fields are what slice_chunk_size touches.
-    full = jaxgsa.sobol.analyze(sr, Y_multi, num_resamples=32, key=jax.random.key(3))
+    full = jaxgsa.sobol.analyze(sr, Y_multi, n_bootstrap=32, key=jax.random.key(3))
     chunked = jaxgsa.sobol.analyze(
-        sr, Y_multi, num_resamples=32, key=jax.random.key(3), slice_chunk_size=1
+        sr, Y_multi, n_bootstrap=32, key=jax.random.key(3), slice_chunk_size=1
     )
     _assert_sobol_fields_match(chunked, full, ("S1", "ST", "S2", "S1_conf", "ST_conf", "S2_conf"))
 
     # Plain path: this is the half that exercises the output-column loop.
-    plain_full = jaxgsa.sobol.analyze(sr, Y_multi, num_resamples=0)
-    plain_chunked = jaxgsa.sobol.analyze(sr, Y_multi, num_resamples=0, slice_chunk_size=1)
+    plain_full = jaxgsa.sobol.analyze(sr, Y_multi, n_bootstrap=0)
+    plain_chunked = jaxgsa.sobol.analyze(sr, Y_multi, n_bootstrap=0, slice_chunk_size=1)
     assert plain_full.S1_conf is None
     _assert_sobol_fields_match(plain_chunked, plain_full, ("S1", "ST", "S2"))
 
@@ -392,8 +392,8 @@ def test_bootstrap_point_estimates_equal_the_plain_path_exactly():
     g = sobol_g.evaluate(jnp.asarray(sr.samples))
     Y_multi = jnp.stack([g, 2.0 * g + 0.37], axis=-1)
 
-    boot = jaxgsa.sobol.analyze(sr, Y_multi, num_resamples=8, key=jax.random.key(5))
-    plain = jaxgsa.sobol.analyze(sr, Y_multi, num_resamples=0)
+    boot = jaxgsa.sobol.analyze(sr, Y_multi, n_bootstrap=8, key=jax.random.key(5))
+    plain = jaxgsa.sobol.analyze(sr, Y_multi, n_bootstrap=0)
 
     for field in ("S1", "ST", "S2"):
         np.testing.assert_array_equal(
@@ -439,7 +439,7 @@ def test_the_bootstrap_batches_slices_instead_of_looping_over_them(monkeypatch):
         return recorder
 
     monkeypatch.setattr(sobol_bootstrap, "_resample_so", recording_get)
-    jaxgsa.sobol.analyze(sr, Y_multi, num_resamples=8, key=jax.random.key(2), slice_chunk_size=4)
+    jaxgsa.sobol.analyze(sr, Y_multi, n_bootstrap=8, key=jax.random.key(2), slice_chunk_size=4)
 
     assert widths == [4, 2], f"expected one full and one short chunk, got {widths}"
     assert n_resamples == [8, 8], "every call must carry the whole resample batch"

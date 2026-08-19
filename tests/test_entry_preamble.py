@@ -99,13 +99,13 @@ class TestConfLevelIsValidatedEverywhere:
         sr = _sobol_design()
         Y = jnp.asarray(np.asarray(sr.samples)[:, 0])
         with pytest.raises(ValueError, match="conf_level must be in"):
-            jaxgsa.sobol.analyze(sr, Y, num_resamples=4, key=jax.random.key(0), conf_level=-0.2)
+            jaxgsa.sobol.analyze(sr, Y, n_bootstrap=4, key=jax.random.key(0), conf_level=-0.2)
 
     def test_morris_refuses_a_conf_level_outside_the_unit_interval(self):
         sr = _morris_design()
         Y = jnp.asarray(np.asarray(sr.samples)[:, 0])
         with pytest.raises(ValueError, match="conf_level must be in"):
-            jaxgsa.morris.analyze(sr, Y, num_resamples=4, key=jax.random.key(0), conf_level=1.5)
+            jaxgsa.morris.analyze(sr, Y, n_bootstrap=4, key=jax.random.key(0), conf_level=1.5)
 
 
 class TestChunkSizeIsValidatedOnEveryPath:
@@ -121,7 +121,7 @@ class TestChunkSizeIsValidatedOnEveryPath:
         sr = _sobol_design()
         Y = jnp.asarray(np.asarray(sr.samples)[:, 0])
         with pytest.raises(ValueError, match="slice_chunk_size must be >= 1"):
-            jaxgsa.sobol.analyze(sr, Y, num_resamples=4, key=jax.random.key(0), slice_chunk_size=0)
+            jaxgsa.sobol.analyze(sr, Y, n_bootstrap=4, key=jax.random.key(0), slice_chunk_size=0)
 
     def test_the_multi_output_path_refuses_it(self):
         sr = _sobol_design()
@@ -134,7 +134,7 @@ class TestChunkSizeIsValidatedOnEveryPath:
 class TestNegativeResampleCountsAreRefused:
     """Defect 3: a negative count silently disabled the intervals.
 
-    ``num_resamples=-1`` failed the ``> 0`` test, so the no-bootstrap path
+    ``n_bootstrap=-1`` failed the ``> 0`` test, so the no-bootstrap path
     ran and the result came back with ``S1_conf=None``, as though the caller
     had asked for no interval.
     """
@@ -142,14 +142,14 @@ class TestNegativeResampleCountsAreRefused:
     def test_sobol(self):
         sr = _sobol_design()
         Y = jnp.asarray(np.asarray(sr.samples)[:, 0])
-        with pytest.raises(ValueError, match="num_resamples must be >= 0"):
-            jaxgsa.sobol.analyze(sr, Y, num_resamples=-1)
+        with pytest.raises(ValueError, match="n_bootstrap must be >= 0"):
+            jaxgsa.sobol.analyze(sr, Y, n_bootstrap=-1)
 
     def test_morris(self):
         sr = _morris_design()
         Y = jnp.asarray(np.asarray(sr.samples)[:, 0])
-        with pytest.raises(ValueError, match="num_resamples must be >= 0"):
-            jaxgsa.morris.analyze(sr, Y, num_resamples=-1)
+        with pytest.raises(ValueError, match="n_bootstrap must be >= 0"):
+            jaxgsa.morris.analyze(sr, Y, n_bootstrap=-1)
 
     def test_pawn(self):
         X, Y = _xy()

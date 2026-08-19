@@ -475,7 +475,7 @@ def _analyze_bootstrap(
     Y: Array,
     *,
     estimator: str,
-    num_resamples: int,
+    n_bootstrap: int,
     conf_level: float,
     ci_method: Literal["quantile", "gaussian"],
     key: Array,
@@ -516,7 +516,7 @@ def _analyze_bootstrap(
 
     # Pre-generate all R bootstrap index sets (sampling with replacement).
     # Shared across (T, K) slices so every output sees the same resamples.
-    indices = jax.random.randint(key, shape=(num_resamples, base_n), minval=0, maxval=base_n)
+    indices = jax.random.randint(key, shape=(n_bootstrap, base_n), minval=0, maxval=base_n)
 
     S1_out, ST_out, S2_out = _point_indices_3d(
         A_flat,
@@ -532,7 +532,7 @@ def _analyze_bootstrap(
     )
 
     cs = _resolve_slice_chunk_size(
-        slice_chunk_size, total, num_resamples, base_n, D, A_flat.dtype.itemsize
+        slice_chunk_size, total, n_bootstrap, base_n, D, A_flat.dtype.itemsize
     )
 
     S2_boot = None
@@ -543,12 +543,12 @@ def _analyze_bootstrap(
         )
         # (S, R, D, D) -> (R, T, K, D, D): the CI helpers and the replicate
         # layout both want the resample axis first.
-        S2_boot = jnp.moveaxis(s2_boot, 1, 0).reshape(num_resamples, T, K, D, D)
+        S2_boot = jnp.moveaxis(s2_boot, 1, 0).reshape(n_bootstrap, T, K, D, D)
     else:
         s1_boot, st_boot = _bootstrap_first_total(indices, A_flat, AB_flat, B_flat, cs, estimator)
 
-    S1_boot = jnp.moveaxis(s1_boot, 1, 0).reshape(num_resamples, T, K, D)
-    ST_boot = jnp.moveaxis(st_boot, 1, 0).reshape(num_resamples, T, K, D)
+    S1_boot = jnp.moveaxis(s1_boot, 1, 0).reshape(n_bootstrap, T, K, D)
+    ST_boot = jnp.moveaxis(st_boot, 1, 0).reshape(n_bootstrap, T, K, D)
 
     # Confidence intervals: stack [lower, upper] into leading dim of size 2.
     # Every endpoint reduces over the leading resample axis alone, so the
@@ -609,7 +609,7 @@ def _analyze_bootstrap(
         ci=CIInfo(
             level=conf_level,
             method=ci_method,
-            n_resamples=num_resamples,
+            n_resamples=n_bootstrap,
             replicates=replicates,
         ),
     )
@@ -621,7 +621,7 @@ def analyze(
     *,
     estimator: Estimator = DEFAULT_ESTIMATOR,
     prenormalize: bool = False,
-    num_resamples: int = 0,
+    n_bootstrap: int = 0,
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
     key: Array | None = None,
@@ -640,7 +640,7 @@ def analyze(
     The function takes the model outputs Y evaluated at the unique rows that
     ``jaxgsa.sobol.sample()`` returned. It rebuilds the expanded Saltelli
     ordering internally and checks it for non-finite values under the
-    ``on_invalid`` policy. It then dispatches on ``num_resamples``: to the
+    ``on_invalid`` policy. It then dispatches on ``n_bootstrap``: to the
     fast no-bootstrap path, or to the bootstrap confidence-interval path.
 
     Those checks read array values on the host, so ``analyze`` cannot be
@@ -687,7 +687,7 @@ def analyze(
             computing Sobol indices. Each output slice is centered to mean 0
             and scaled to unit standard deviation once, not per bootstrap
             resample. Defaults to ``False``.
-        num_resamples: R, the number of bootstrap resamples used to estimate
+        n_bootstrap: R, the number of bootstrap resamples used to estimate
             confidence intervals. Set to 0 (default) to skip the bootstrap
             entirely; a few hundred resamples is typically enough for stable
             intervals.
@@ -699,12 +699,12 @@ def analyze(
             from the bootstrap standard deviation around the point estimate.
             Both methods still return lower/upper bounds, not half-widths.
         key: JAX PRNG key for bootstrap randomness. Required when
-            ``num_resamples > 0``.
+            ``n_bootstrap > 0``.
         slice_chunk_size: Memory/speed trade-off for batched computation.
             It is the number of (T, K) output slices per vmap batch on both
             paths. On the bootstrap path each slice in a batch carries all
-            ``num_resamples`` of its draws, so one device call covers
-            ``slice_chunk_size * num_resamples`` estimator evaluations, and
+            ``n_bootstrap`` of its draws, so one device call covers
+            ``slice_chunk_size * n_bootstrap`` estimator evaluations, and
             the memory budget that :func:`jaxgsa.config.set_memory_budget`
             sets can lower the width further. Lower it yourself if you hit
             device out-of-memory errors. Defaults to 2048.
@@ -729,7 +729,7 @@ def analyze(
             S2: second-order indices with shape ``(..., D, D)``, or None when
                 the design was drawn with ``calc_second_order=False``
             S1_conf, ST_conf, S2_conf: ``(2, ...)`` [lower, upper] CI bounds,
-                or None when ``num_resamples == 0``
+                or None when ``n_bootstrap == 0``
             invalid: What the non-finite check found, and what it did
 
     Raises:
@@ -737,7 +737,7 @@ def analyze(
             blocks and the design has none; if ``on_invalid`` is not one of
             the three policies; if
             ``ci_method`` is not ``"quantile"`` or ``"gaussian"``; if
-            ``num_resamples`` is negative; if ``slice_chunk_size`` is below 1;
+            ``n_bootstrap`` is negative; if ``slice_chunk_size`` is below 1;
             if ``conf_level`` is not in ``(0, 1)``; if the sample holds a
             non-finite value under ``on_invalid="raise"``; or if fewer than 2
             Saltelli groups survive a drop.
@@ -766,7 +766,7 @@ def analyze(
         checks=(
             *_estimator_checks(estimator, sampling_result.calc_second_order),
             one_of("ci_method", ci_method, ("quantile", "gaussian")),
-            at_least("num_resamples", num_resamples, 0),
+            at_least("n_bootstrap", n_bootstrap, 0),
             at_least("slice_chunk_size", slice_chunk_size, 1),
             in_open_interval("conf_level", conf_level, 0.0, 1.0),
         ),
@@ -793,14 +793,14 @@ def analyze(
     if prenormalize:
         Y, _, _, _ = _prenormalize_outputs(Y)
 
-    if num_resamples > 0:
+    if n_bootstrap > 0:
         if key is None:
-            raise ValueError("key is required when num_resamples > 0")
+            raise ValueError("key is required when n_bootstrap > 0")
         return _analyze_bootstrap(
             sampling_result,
             Y,
             estimator=estimator,
-            num_resamples=num_resamples,
+            n_bootstrap=n_bootstrap,
             conf_level=conf_level,
             ci_method=ci_method,
             key=key,

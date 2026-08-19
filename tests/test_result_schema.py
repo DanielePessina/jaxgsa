@@ -232,7 +232,7 @@ def _bootstrapped(method: str, *, level: float, keep: bool, n: int = 6) -> Any:
         return jaxgsa.morris.analyze(
             sr,
             Ym,
-            num_resamples=n,
+            n_bootstrap=n,
             conf_level=level,
             keep_replicates=keep,
             key=jax.random.key(3),
@@ -270,7 +270,7 @@ def test_morris_records_the_gaussian_rule_when_asked() -> None:
     sr = jaxgsa.morris.sample(_PROBLEM, n_trajectories=8, seed=3, verbose=False)
     Y = _model(jnp.asarray(sr.samples))
     result = jaxgsa.morris.analyze(
-        sr, Y, num_resamples=6, ci_method="gaussian", key=jax.random.key(3)
+        sr, Y, n_bootstrap=6, ci_method="gaussian", key=jax.random.key(3)
     )
     assert result.ci is not None
     assert result.ci.method == "gaussian"
@@ -332,7 +332,7 @@ def _sobol_analyze(**kwargs: Any) -> Any:
 
     sr = sobol.sample(fixtures.PROBLEM, n_samples=128, seed=fixtures.SEED, verbose=False)
     Y = fixtures.MODELS["scalar"](jnp.asarray(sr.samples))
-    return sobol.analyze(sr, Y, num_resamples=8, key=jax.random.key(fixtures.SEED), **kwargs)
+    return sobol.analyze(sr, Y, n_bootstrap=8, key=jax.random.key(fixtures.SEED), **kwargs)
 
 
 def test_sobol_records_the_ci_method_it_actually_ran() -> None:

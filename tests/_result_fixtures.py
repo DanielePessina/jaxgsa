@@ -88,13 +88,13 @@ def _point_model(shape: str) -> Callable[[jax.Array], jax.Array]:
 def _sobol(shape: str) -> Any:
     sr = sobol.sample(PROBLEM, n_samples=128, seed=SEED, verbose=False)
     Y = MODELS[shape](jnp.asarray(sr.samples))
-    return sobol.analyze(sr, Y, num_resamples=8, key=jax.random.key(SEED))
+    return sobol.analyze(sr, Y, n_bootstrap=8, key=jax.random.key(SEED))
 
 
 def _morris(shape: str) -> Any:
     sr = morris.sample(PROBLEM, n_trajectories=8, seed=SEED, verbose=False)
     Y = MODELS[shape](jnp.asarray(sr.samples))
-    return morris.analyze(sr, Y, num_resamples=8, key=jax.random.key(SEED))
+    return morris.analyze(sr, Y, n_bootstrap=8, key=jax.random.key(SEED))
 
 
 def _efast(shape: str) -> Any:

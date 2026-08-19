@@ -32,7 +32,7 @@ SPEC = register(
         result=MorrisResult,
         correlation="refuses",
         categorical="refuses",
-        bootstrap="num_resamples",
+        bootstrap="n_bootstrap",
         # A trajectory is D+1 rows walked one parameter at a time. An
         # elementary effect is a difference between two of its rows.
         invalid_unit=InvalidUnit.TRAJECTORY,
