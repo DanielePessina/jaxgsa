@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import warnings
 
@@ -17,9 +18,36 @@ from jaxgsa.hsic._analyze import (
     _build_one_kernel,
     _linear_quantile_by_selection,
     _median_bandwidth_sq,
+    _resolve_bandwidth_sq,
 )
 from jaxgsa.problem import Problem
 from jaxgsa.sampling import monte_carlo
+
+
+@contextlib.contextmanager
+def single_precision_warning():
+    """Assert the float32 warning fires in float32, and is absent under x64.
+
+    ``analyze`` warns that the HSIC V-statistic loses most of its digits only
+    when JAX is in single precision, which is right. Written as a bare
+    ``pytest.warns``, the test therefore failed with ``DID NOT WARN`` the
+    moment the suite was run with ``JAX_ENABLE_X64=1`` — the test was
+    precision-blind, not the source. The flag is read here rather than at
+    import so a caller that switches precision with a context manager gets
+    the treatment that matches the precision actually in force.
+
+    This is a copy of the helper of the same name in ``tests/test_vkoga.py``,
+    which met the identical problem. Keep the two bodies identical; if one
+    needs to change, change both, or lift it into ``conftest.py``.
+    """
+    if bool(getattr(jax.config, "jax_enable_x64", False)):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            yield
+        assert not [w for w in caught if "single precision" in str(w.message)]
+    else:
+        with pytest.warns(JaxgsaWarning, match="single precision"):
+            yield
 
 
 @pytest.fixture(scope="module")
@@ -130,6 +158,91 @@ class TestBandwidthOverride:
         r2 = analyze(problem, Xj, Y, bandwidth=1.0, n_perms=20, key=jax.random.key(11))
         assert not np.allclose(np.asarray(r1.R2_HSIC), np.asarray(r2.R2_HSIC))
 
+    def test_unit_multiplier_is_the_bare_median_heuristic(self):
+        """Tier T0 (closed form): ``bandwidth=1.0`` scales nothing.
+
+        ``1.0`` is the default because it is the identity of the convention:
+        the resolved squared bandwidth is ``m**2 * median_sq``, and squaring
+        and multiplying by one are both exact in IEEE arithmetic. So the
+        default path is the median heuristic itself, bit for bit, and no
+        recorded number moves because the keyword changed meaning.
+        """
+        x = jnp.asarray(np.random.default_rng(2).normal(size=97))
+        np.testing.assert_array_equal(
+            np.asarray(_resolve_bandwidth_sq(x, 1.0)),
+            np.asarray(_median_bandwidth_sq(x)),
+        )
+
+    @pytest.mark.parametrize("multiplier", [0.25, 1.0, 4.0])
+    def test_multiplier_scales_the_median_width(self, multiplier):
+        """Tier T0 (closed form): the float multiplies, it does not replace.
+
+        The property that makes HSIC scale-free is that every width carries
+        the data's own scale. That holds only if the caller's number is a
+        factor on the heuristic rather than a width in the data's units, so
+        this is the algebraic statement of the convention.
+        """
+        x = jnp.asarray(np.random.default_rng(3).normal(size=64) * 17.0)
+        np.testing.assert_allclose(
+            float(_resolve_bandwidth_sq(x, multiplier)),
+            multiplier**2 * float(_median_bandwidth_sq(x)),
+            rtol=1e-12,
+        )
+
+
+class TestAffineInvariance:
+    """``Y -> a*Y + b`` must not move an index, at any multiplier.
+
+    The bandwidth is a multiplier on the median heuristic, and the heuristic
+    tracks the spread of the data, so an affine change of units cancels out
+    of the Gaussian kernel exactly. That is the whole reason the keyword is
+    relative: under the older convention, where a float was an absolute
+    width, the same rescaling moved ``R2_HSIC`` by 0.56 relative because the
+    fixed width did not follow ``a``.
+    """
+
+    @staticmethod
+    def _case():
+        """Ishigami inputs and outputs, in float64 so the check has digits."""
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=256, seed=3), dtype=jnp.float64)
+        return ishigami.PROBLEM, X, ishigami.evaluate(X)
+
+    @pytest.mark.parametrize("multiplier", [1.0, 0.35, 3.0])
+    def test_rescaling_the_output_changes_nothing(self, multiplier):
+        """Tier T0 (closed form): the Gaussian kernel is unchanged by units.
+
+        Both the default and an explicit multiplier are checked. The explicit
+        one is the case that used to fail, so it is the point of the test: a
+        caller who overrides the bandwidth must not thereby lose the
+        invariance the default has.
+        """
+        with jax.enable_x64():
+            problem, X, Y = self._case()
+            key = jax.random.key(0)
+            base = indices(problem, X, Y, n_perms=5, key=key, bandwidth=multiplier)
+            moved = indices(problem, X, 3.7 * Y - 12.0, n_perms=5, key=key, bandwidth=multiplier)
+        for a, b in zip(base, moved, strict=True):
+            np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-10, atol=1e-12)
+
+    def test_analyze_agrees_with_the_core_on_the_invariance(self):
+        """Tier T4 (internal consistency): the checked path is invariant too.
+
+        ``analyze`` adds a preamble but no arithmetic, so the invariance must
+        survive it. This is the form a caller actually sees.
+        """
+        with jax.enable_x64():
+            problem, X, Y = self._case()
+            base = analyze(problem, X, Y, n_perms=5, key=jax.random.key(0), bandwidth=0.6)
+            moved = analyze(
+                problem, X, -2.5 * Y + 4.0, n_perms=5, key=jax.random.key(0), bandwidth=0.6
+            )
+        np.testing.assert_allclose(
+            np.asarray(base.R2_HSIC), np.asarray(moved.R2_HSIC), rtol=1e-10, atol=1e-12
+        )
+        np.testing.assert_allclose(
+            np.asarray(base.T_HSIC), np.asarray(moved.T_HSIC), rtol=1e-10, atol=1e-12
+        )
+
 
 class TestMedianBandwidth:
     """The median heuristic reads the median of the off-diagonal distances."""
@@ -206,6 +319,27 @@ class TestMedianBandwidth:
         if not np.isnan(expected):
             np.testing.assert_array_equal(actual, expected)
 
+    @pytest.mark.parametrize("n", [64, 257])
+    def test_the_width_is_the_median_distance_not_the_rms_distance(self, n):
+        """Tier T0 (closed form): sqrt of the median square is the median.
+
+        The heuristic returns the median of the *squared* off-diagonal
+        distances and the kernel uses it directly as ``sigma**2``, so the
+        standard deviation in force is ``sqrt(median(d**2))``. That reads like
+        a root-mean-square, and it is not one: squaring is monotone on
+        distances, so it is the median distance itself. The docstring says
+        "median pairwise distance", and this is what makes that true.
+
+        The RMS is the foil. It is 50% larger here, so a test that only
+        checked the median would pass against either quantity; asserting the
+        gap is what gives this teeth.
+        """
+        x = np.random.default_rng(n).normal(size=n)
+        upper = np.abs(x[:, None] - x[None, :])[np.triu_indices(n, 1)]
+        sigma = float(np.sqrt(float(_median_bandwidth_sq(jnp.asarray(x)))))
+        np.testing.assert_allclose(sigma, float(np.median(upper)), rtol=1e-7)
+        assert float(np.sqrt(np.mean(upper**2))) > 1.3 * sigma
+
     def test_diagonal_zeros_would_bias_a_plain_median(self):
         """Tier T4 (internal consistency): the index adjustment does work.
 
@@ -217,11 +351,19 @@ class TestMedianBandwidth:
         dists_sq = (x[:, None] - x[None, :]) ** 2
         assert float(jnp.median(dists_sq)) < 0.99 * float(_median_bandwidth_sq(x))
 
-    def test_fixed_bandwidth_is_squared_once(self):
-        """Tier T0 (closed form): a fixed sigma yields exp(-d^2 / 2 sigma^2)."""
+    def test_the_resolved_bandwidth_is_squared_once(self):
+        """Tier T0 (closed form): the kernel is exp(-d^2 / 2 sigma^2).
+
+        ``sigma`` is the multiplier times the median-heuristic width, so the
+        closed form is written against the resolved width rather than against
+        the caller's number. A build that squared the multiplier twice, or
+        forgot the heuristic, would miss this.
+        """
         x = jnp.asarray([0.0, 1.0, 2.0])
-        K = _build_one_kernel(x, 0.5, None)
-        expected = np.exp(-np.array([0.0, 1.0, 4.0]) / (2.0 * 0.25))
+        multiplier = 0.5
+        sigma_sq = multiplier**2 * float(_median_bandwidth_sq(x))
+        K = _build_one_kernel(x, multiplier, None)
+        expected = np.exp(-np.array([0.0, 1.0, 4.0]) / (2.0 * sigma_sq))
         np.testing.assert_allclose(np.asarray(K[0]), expected, rtol=1e-6)
 
 
@@ -306,12 +448,12 @@ class TestChunked:
     def test_chunked_matches_unchunked_with_explicit_bandwidth(self):
         """Tier T4 (internal consistency): chunking is bandwidth-independent.
 
-        The kernel build used to be a two-by-two dispatch: {median, fixed}
+        The kernel build used to be a two-by-two dispatch: {default, explicit}
         bandwidth x {whole, chunked} matrix. The other three combinations are
         covered elsewhere in this file; this pins the fourth. Bandwidth
         resolution now happens once, before either kernel path runs, so the
-        two questions are independent — and this test is what says so. An
-        explicit ``bandwidth`` skips the median heuristic entirely, so any
+        two questions are independent — and this test is what says so. The
+        multiplier is resolved against the same median either way, so any
         difference here would come from the row blocking alone.
         """
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
@@ -403,17 +545,29 @@ class TestSinglePrecisionWarning:
         return problem, Xj, jnp.sin(3.0 * Xj[:, 0]) + Xj[:, 1]
 
     def test_float32_warns(self):
-        problem, Xj, Y = self._sample()
-        with pytest.warns(JaxgsaWarning, match="single precision"):
-            analyze(problem, Xj, Y, n_perms=5, key=jax.random.key(0))
+        """The warning fires in float32, whatever the suite's ambient flag.
+
+        ``jax.enable_x64(False)`` rather than the ambient default, because the
+        x64 CI job runs this same file with ``JAX_ENABLE_X64=1``. Left
+        implicit, this test would assert the *absence* of the warning there
+        and stop checking the thing it is named for. Forcing the precision
+        keeps one contract per test and checks both of them in both jobs.
+        """
+        with jax.enable_x64(False):
+            problem, Xj, Y = self._sample()
+            with single_precision_warning():
+                analyze(problem, Xj, Y, n_perms=5, key=jax.random.key(0))
 
     def test_x64_is_silent(self):
+        """And it is suppressed under x64 — the other half of the contract.
+
+        Asserted, not skipped: suppressing the warning correctly is as much
+        the behaviour as raising it.
+        """
         with jax.enable_x64():
             problem, Xj, Y = self._sample()
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
+            with single_precision_warning():
                 analyze(problem, Xj, Y, n_perms=5, key=jax.random.key(0))
-        assert [w for w in caught if "single precision" in str(w.message)] == []
 
     def test_reordering_the_rows_is_the_thing_it_warns_about(self):
         """The claim in the warning, measured: float32 is order-dependent.
@@ -421,6 +575,12 @@ class TestSinglePrecisionWarning:
         A permutation of the sample cannot change HSIC, so any difference is
         the arithmetic alone. float64 keeps it at the noise floor; float32
         does not.
+
+        Both precisions are named explicitly. The float32 half used to ride on
+        the ambient flag, which made it pass for the wrong reason under the
+        x64 CI job: both measurements ran in float64, came back at 1.3e-14,
+        and the comparison of one against a hundred times itself failed. The
+        two arms of a precision comparison have to set their own precision.
         """
         problem, Xj, Y = self._sample(n=512)
         perm = np.random.default_rng(0).permutation(512)
@@ -447,7 +607,8 @@ class TestSinglePrecisionWarning:
             b = np.asarray(shuffled.R2_HSIC, np.float64)
             return float(np.max(np.abs(a - b) / np.abs(a)))
 
-        shift_32 = shift()
+        with jax.enable_x64(False):
+            shift_32 = shift()
         with jax.enable_x64():
             shift_64 = shift()
         assert shift_64 < 1e-10
@@ -646,11 +807,11 @@ class TestIndicesCore:
         for produced, expected in zip(out, fields, strict=True):
             np.testing.assert_array_equal(np.asarray(produced), np.asarray(expected))
 
-    def test_matches_analyze_with_a_fixed_bandwidth_and_batched_build(self):
+    def test_matches_analyze_with_a_bandwidth_multiplier_and_batched_build(self):
         """T4: the two static keywords change nothing about the split.
 
         ``bandwidth`` and ``batch_size`` are Python scalars read while the
-        graph is traced, so they select a code path at compile time. The core
+        graph is traced, so they are baked into the compiled kernel. The core
         must still agree with ``analyze`` under either setting.
         """
         problem, X, Y = self._ishigami()
@@ -730,11 +891,21 @@ class TestIndicesCore:
     def test_jit_of_jacrev_of_the_full_chain(self):
         """T4: ``jit(jacrev(...))`` compiles a model-parameter-to-index chain.
 
-        The bandwidth is fixed rather than left to the median heuristic: the
-        heuristic selects an order statistic by bisecting bit patterns, which
-        has no derivative, so a gradient through it would silently be the
-        gradient of a piecewise-constant bandwidth. Finite differences are the
-        reference, so this runs in float64.
+        Every gradient here is taken at a frozen bandwidth, and there is no
+        way to ask for anything else: the median heuristic selects an order
+        statistic by bisecting bit patterns, which carries no derivative, and
+        the caller's ``bandwidth`` is a multiplier on that same selection.
+        ``test_the_median_heuristic_carries_no_derivative`` pins the zero this
+        rests on.
+
+        So a finite difference of this call is a *different* quantity: it
+        moves the median along with the data, and the returned gradient does
+        not. It is still worth comparing against, because the two agree to the
+        size of the term AD omits — measured at 8% here — which is loose
+        enough to admit the missing term and tight enough to catch a wrong
+        sign or a mis-wired chain. The exact oracle is ``jacrev`` run eagerly,
+        which the ``jit`` must reproduce to the last bit. Runs in float64
+        because the finite difference needs the digits.
         """
         with jax.enable_x64():
             X = self._sample(linear.PROBLEM, 64, 4).astype(jnp.float64)
@@ -759,7 +930,37 @@ class TestIndicesCore:
 
         assert np.isfinite(float(grad))
         np.testing.assert_allclose(float(grad), float(eager), rtol=1e-10)
-        np.testing.assert_allclose(float(grad), float(fd), rtol=1e-5)
+        np.testing.assert_allclose(float(grad), float(fd), rtol=0.15)
+
+    def test_the_median_heuristic_carries_no_derivative(self):
+        """T4: the bandwidth is frozen in every gradient, and cannot be freed.
+
+        This is the fact the ``bandwidth`` docstring promises, and it is worth
+        a test of its own because the promise inverted when the keyword became
+        a multiplier. Under the old absolute convention a caller could escape
+        the median by naming a width; under this one every width is a multiple
+        of the same selected order statistic, so the escape hatch is gone and
+        the docstring has to say so.
+
+        The zero is exact rather than approximate: the selection reads the
+        value back through ``bitcast_convert_type``, which has no tangent at
+        all. If anyone ever makes the selection differentiable, this fails,
+        and the docstring must be rewritten with it.
+        """
+        with jax.enable_x64():
+            X = self._sample(linear.PROBLEM, 64, 4).astype(jnp.float64)
+
+            def median_sq(a):
+                """Median-heuristic squared width of ``y = a * x1 + x2``."""
+                return _median_bandwidth_sq(a * X[:, 0] + X[:, 1])
+
+            assert float(jax.grad(median_sq)(2.0)) == 0.0
+
+            step = 1e-5
+            fd = (median_sq(2.0 + step) - median_sq(2.0 - step)) / (2 * step)
+
+        # The zero is a choice, not a coincidence: the width really does move.
+        assert abs(float(fd)) > 1e-3
 
     def test_reads_no_array_value_on_the_host(self):
         """T4: every array operation inside the core is traceable.
