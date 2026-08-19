@@ -1,5 +1,11 @@
 """Cross-method agreement on correlated variance-based indices.
 
+Tier T0 (closed form) for the anchors: both routes are held to the analytic
+linear-Gaussian indices of Li et al. (2010). The route-vs-route agreement
+checks are Tier T4 (internal consistency) — two of our own estimators
+agreeing proves nothing an anchor does not already prove, but it localizes a
+failure to one route.
+
 jaxgsa offers two estimation routes for the same two conditional-variance
 quantities under a Gaussian copula:
 

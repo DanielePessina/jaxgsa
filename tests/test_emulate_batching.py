@@ -1,5 +1,9 @@
 """Batched emulation must match single-shot emulation.
 
+Tier T4 (internal consistency) throughout. There is no external oracle for a
+batching seam; these tests prove only that the batched path agrees with the
+single-shot path, whose values are anchored elsewhere.
+
 Both ``predict`` and ``predict`` accept a ``batch_size`` kwarg that
 splits prediction over row batches to bound transient memory. Each row's
 basis contraction is independent, so batching must match the single-shot

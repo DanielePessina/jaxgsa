@@ -1,5 +1,9 @@
 """Tests for deriving Morris elementary effects from a Saltelli design.
 
+Tier T4 (internal consistency) throughout. The central check is an identity
+between two of our own estimators, not an external oracle: no library
+publishes Morris effects derived from a Saltelli design.
+
 ``SobolSamples.to_morris()`` reinterprets an existing Sobol/Saltelli design as
 a radial Morris design. The central check is the Jansen identity: the
 elementary-effect increments are literally the increments Jansen's total-order

@@ -1,4 +1,8 @@
-"""Tests for xarray Dataset conversion of SobolResult and HDMRResult."""
+"""Tests for xarray Dataset conversion of SobolResult and HDMRResult.
+
+Tier T4 (behavioural contract). No external oracle exists for our own export
+schema; these tests pin dimension names, coordinates, and attributes.
+"""
 
 import jax
 import jax.numpy as jnp

@@ -1,5 +1,8 @@
 """Tests for the namespace-only public API.
 
+Tier T4 (behavioural contract). No external oracle exists for our own import
+surface; these tests pin what the package exports.
+
 What the registry can express — which method namespaces exist, and what each
 one exports — is proved generically in ``tests/test_registry.py``. This file
 keeps only the claims the registry cannot make: that the support namespaces

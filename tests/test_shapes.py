@@ -1,3 +1,9 @@
+"""Tests for result shapes over the ``(N,)`` / ``(N, K)`` / ``(N, T, K)`` layouts.
+
+Tier T4 (behavioural contract). No external oracle exists for our own shape
+promotion rules; these tests pin the rank each result comes back at.
+"""
+
 import jax
 import jax.numpy as jnp
 

@@ -1,3 +1,12 @@
+"""Tests for the samplers: design layout, marginals, correlation, downsampling.
+
+Tier T4 (internal consistency) except where noted: most tests pin design
+invariants — uniqueness, nesting, determinism, bounds. The truncated-Gaussian
+moment checks compare live against ``scipy.stats.truncnorm`` (Tier T2), and
+the copula tests check recovered rank correlations against the declared
+targets (T4: the target is our own input).
+"""
+
 import jax
 import jax.numpy as jnp
 import numpy as np

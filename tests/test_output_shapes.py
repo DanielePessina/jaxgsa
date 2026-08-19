@@ -1,4 +1,8 @@
-"""Tests for the strict output-shape contract."""
+"""Tests for the strict output-shape contract.
+
+Tier T4 (behavioural contract). No external oracle exists for our own shape
+rules; these tests pin which ``Y`` layouts are accepted and how they are read.
+"""
 
 import jax.numpy as jnp
 import pytest
