@@ -25,10 +25,10 @@ import warnings
 from dataclasses import dataclass, replace
 from typing import Any, Literal, Mapping, overload
 
-import jax.numpy as jnp
 import numpy as np
 from scipy.stats.qmc import Sobol
 
+from jaxgsa._core.precision import float_eps
 from jaxgsa._core.samples import UniqueDesignSamples
 from jaxgsa._core.sampling import (
     _inverse_transform_samples,
@@ -55,11 +55,13 @@ def _min_radial_delta() -> float:
     the effect degenerates to ``0`` or to amplified rounding noise. JAX
     defaults to float32, and uses float64 only when x64 is enabled, so the
     guard tracks the JAX default dtype rather than the float64 design array.
+    :func:`jaxgsa._core.precision.float_eps` is the one place that question is
+    answered.
 
     Returns:
         ``10 * eps`` of the JAX default floating dtype.
     """
-    return 10.0 * float(np.finfo(jnp.zeros(1).dtype).eps)
+    return 10.0 * float_eps()
 
 
 @dataclass(frozen=True)

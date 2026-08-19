@@ -50,6 +50,7 @@ from jax.typing import DTypeLike
 
 from jaxgsa._core.entry import at_least, prepare, require
 from jaxgsa._core.invalid import OnInvalid
+from jaxgsa._core.precision import x64_enabled
 from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa._core.validation import (
     _prenormalize_outputs,
@@ -559,9 +560,7 @@ def _warn_single_precision() -> None:
     size as the gap HSIC is often asked to resolve between two weak
     parameters.
     """
-    # Read the flag off the config object directly; config.read() raises for
-    # flags that were never explicitly set.
-    if not getattr(jax.config, "jax_enable_x64", False):
+    if not x64_enabled():
         warnings.warn(
             "jaxgsa.hsic: JAX is in single precision; the HSIC V-statistic cancels three "
             "large sums against each other, so float32 leaves only about three or four "

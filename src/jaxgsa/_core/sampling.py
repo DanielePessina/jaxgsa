@@ -209,7 +209,9 @@ def _jax_transform_gaussian(
     # and an infinite sample would poison every downstream index. The host
     # twin runs in float64, where ``1 - UNIT_CLIP`` is a number below 1; this
     # copy runs in the caller's dtype, where in float32 it is not, so the
-    # upper bound is brought inside the dtype. See unit_clip_bounds.
+    # upper bound is brought inside the dtype. The lower bound is left alone:
+    # float32 represents 1e-12 exactly, and widening it for symmetry would
+    # discard information and move numbers for nothing. See unit_clip_bounds.
     unit_values = jnp.asarray(unit_values)
     clipped = jnp.clip(unit_values, *unit_clip_bounds(UNIT_CLIP, unit_values.dtype))
     std = jnp.sqrt(variance)

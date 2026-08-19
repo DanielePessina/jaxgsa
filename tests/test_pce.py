@@ -439,6 +439,29 @@ class TestTruncatedGaussianBasis:
         _, input_types = _map_to_reference(X, problem, 3)
         assert input_types == ("uniform", "uniform")
 
+    def test_a_saturated_cdf_stays_off_the_upper_edge_in_float32(self):
+        """T4: the unit clip has to bite in the dtype the map runs in.
+
+        The Legendre route clips its CDF values into
+        ``[UNIT_CLIP, 1 - UNIT_CLIP]`` so a sample at or past a truncation
+        bound stays distinguishable from the bound itself. At
+        ``UNIT_CLIP = 1e-12`` the upper half of that clip did nothing in
+        float32, because ``1 - 1e-12`` rounds back to exactly 1.0 there,
+        while the same expression in float64 clipped properly.
+
+        Only the upper edge is asserted. The lower one is exactly ``-1.0`` in
+        float32 whatever the clip does, because the affine ``2u - 1`` that
+        follows it cannot represent ``2e-12 - 1`` as anything else, and that
+        is a property of the map rather than of the clip.
+        """
+        from jaxgsa.pce._analyze import _map_to_reference
+
+        problem = self._problem(1, q=1e-3)  # bounds at |z| = 3.09
+        X = jnp.asarray([[0.0], [3.09], [40.0]], dtype=jnp.float32)
+        xi, input_types = _map_to_reference(X, problem, 3)
+        assert input_types == ("uniform",)
+        assert np.all(np.asarray(xi) < 1.0)
+
     def test_high_order_falls_back_to_legendre(self):
         """The Hermite Gram defect grows with degree, so a high order drops back."""
         from jaxgsa.pce._analyze import _map_to_reference

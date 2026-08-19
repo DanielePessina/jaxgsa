@@ -133,7 +133,10 @@ def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
         else:  # unbounded Gaussian -- stays on device via jax.scipy
             u = jax_norm.cdf(X[:, d], loc=spec.mean, scale=std)
         # The upper bound is pulled in to the last float below 1.0 when the
-        # dtype cannot tell 1 - UNIT_CLIP from 1; see unit_clip_bounds.
+        # dtype cannot tell 1 - UNIT_CLIP from 1. The lower bound is left at
+        # UNIT_CLIP, which float32 represents exactly; widening it for
+        # symmetry would discard information and move numbers for nothing.
+        # See unit_clip_bounds.
         cols.append(jnp.clip(u, *unit_clip_bounds(UNIT_CLIP, u.dtype)))
 
     return jnp.column_stack(cols)
