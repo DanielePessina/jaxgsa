@@ -23,7 +23,7 @@ See [Categorical Inputs](/examples/categorical-inputs).
 
 A Gaussian-copula `correlation` matrix declares dependence between parameters.
 It is optional. Pass `correlation=` to the constructor or to `from_dict`,
-together with `correlation_kind="latent"` or `correlation_kind="spearman"`. To
+together with `correlation_type="latent"` or `correlation_type="spearman"`. To
 attach a matrix to an existing (frozen) problem, call
 `problem.with_correlation(R)`.
 

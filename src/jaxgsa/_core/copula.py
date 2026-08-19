@@ -181,7 +181,7 @@ def canonicalize_correlation(
     correlation: npt.ArrayLike,
     n_params: int,
     *,
-    kind: Literal["latent", "spearman"] = "latent",
+    correlation_type: Literal["latent", "spearman"] = "latent",
     policy: RepairPolicy = "fitted",
     method: str = "jaxgsa",
 ) -> np.ndarray:
@@ -202,8 +202,9 @@ def canonicalize_correlation(
     Args:
         correlation: ``(D, D)`` candidate correlation matrix.
         n_params: Expected ``D``.
-        kind: Scale the matrix is expressed on. ``"latent"`` (default) is the
-            Pearson correlation of the latent normals; ``"spearman"`` is a
+        correlation_type: Scale the matrix is expressed on. ``"latent"``
+            (default) is the Pearson correlation of the latent normals;
+            ``"spearman"`` is a
             rank correlation, converted via ``2 sin(pi rho_s / 6)``. The
             repair also reports its severity on this scale.
         policy: Repair policy, see :data:`RepairPolicy`.
@@ -213,18 +214,20 @@ def canonicalize_correlation(
         ``(D, D)`` validated latent correlation matrix.
 
     Raises:
-        ValueError: If ``kind`` is unknown, the matrix fails validation, or
-            the repair of a declared matrix is material.
+        ValueError: If ``correlation_type`` is unknown, the matrix fails
+            validation, or the repair of a declared matrix is material.
     """
-    if kind not in ("latent", "spearman"):
-        raise ValueError(f"correlation_kind must be 'latent' or 'spearman', got {kind!r}")
+    if correlation_type not in ("latent", "spearman"):
+        raise ValueError(
+            f"correlation_type must be 'latent' or 'spearman', got {correlation_type!r}"
+        )
     R = np.asarray(correlation, dtype=np.float64)
     _validate_structure(R, n_params)
-    if kind == "spearman":
+    if correlation_type == "spearman":
         # The conversion is not guaranteed to preserve positive definiteness,
         # so the repair still runs on the result.
         R = _spearman_to_latent(R)
-    return _project_to_correlation(R, policy=policy, report_kind=kind, method=method)
+    return _project_to_correlation(R, policy=policy, report_type=correlation_type, method=method)
 
 
 def correlation_from_covariance(cov: npt.ArrayLike) -> np.ndarray:
@@ -241,7 +244,7 @@ def correlation_from_covariance(cov: npt.ArrayLike) -> np.ndarray:
     - The result is the Pearson correlation of the physical variables. Under
       a Gaussian copula that equals the latent correlation only when every
       marginal is Gaussian. For non-Gaussian marginals prefer a rank
-      correlation with ``correlation_kind="spearman"``, which is exactly
+      correlation with ``correlation_type="spearman"``, which is exactly
       invertible. Pearson matching for arbitrary marginals is the NORTA
       correlation-matching problem, and this function does not attempt it.
     - Variances always come from the marginals declared on the ``Problem``,
@@ -455,7 +458,7 @@ def _project_to_correlation(
     R: np.ndarray,
     *,
     policy: RepairPolicy = "fitted",
-    report_kind: Literal["latent", "spearman"] = "latent",
+    report_type: Literal["latent", "spearman"] = "latent",
     method: str = "jaxgsa",
 ) -> np.ndarray:
     """Return the nearest positive-definite matrix with a unit diagonal.
@@ -476,14 +479,14 @@ def _project_to_correlation(
 
     How loudly the repair reports itself depends on how far it had to move the
     matrix. The severity is the maximum entrywise change between the final
-    repaired matrix and the matrix as it arrived, measured on ``report_kind``.
+    repaired matrix and the matrix as it arrived, measured on ``report_type``.
     It is not a per-pass change. See :data:`RepairPolicy` for the bands.
 
     Args:
         R: ``(D, D)`` candidate correlation matrix (structurally valid), on
             the latent scale.
         policy: Repair policy, see :data:`RepairPolicy`.
-        report_kind: Scale the caller declared the matrix on. With
+        report_type: Scale the caller declared the matrix on. With
             ``"spearman"`` both matrices go back through
             ``rho_s = (6 / pi) arcsin(rho / 2)`` before the change is measured,
             so the number the user is asked to judge is in the units the user
@@ -530,12 +533,12 @@ def _project_to_correlation(
     # Measure the whole repair, first pass to last, on the scale the caller
     # declared. A Spearman user never wrote the latent numbers, so a latent
     # change would ask them to judge a quantity they cannot recognise.
-    if report_kind == "spearman":
+    if report_type == "spearman":
         before, after = _latent_to_spearman(original), _latent_to_spearman(current)
     else:
         before, after = original, current
     change = float(np.abs(after - before).max())
-    scale = "Spearman" if report_kind == "spearman" else "latent"
+    scale = "Spearman" if report_type == "spearman" else "latent"
     detail = (
         f"is not positive definite (minimum eigenvalue {declared_minimum:.3e}); "
         f"repairing it by eigenvalue clipping moves an entry by up to {change:.3e} "
@@ -551,7 +554,7 @@ def _project_to_correlation(
                 "correlations cannot hold at the same time, or two parameters are "
                 "redundant. Correct the matrix, or obtain a valid one from data with "
                 "jaxgsa.sampling.fit_correlation. If you declared a rank correlation, "
-                "pass correlation_kind='spearman' so it is converted instead of read "
+                "pass correlation_type='spearman' so it is converted instead of read "
                 "as a latent matrix."
             )
         if change >= _REPAIR_NOISE:

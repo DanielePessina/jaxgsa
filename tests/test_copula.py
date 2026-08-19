@@ -209,7 +209,9 @@ def test_spearman_repair_reports_the_change_on_the_spearman_scale():
 
     declared = _equicorrelated(-0.5325)
     with pytest.warns(UserWarning, match="Spearman scale") as record:
-        repaired = canonicalize_correlation(declared, 3, kind="spearman", policy="declared")
+        repaired = canonicalize_correlation(
+            declared, 3, correlation_type="spearman", policy="declared"
+        )
 
     latent_change = np.abs(repaired - _spearman_to_latent(declared)).max()
     spearman_change = np.abs(_latent_to_spearman(repaired) - declared).max()
@@ -250,9 +252,9 @@ def test_spearman_to_latent_maps_extremes_to_extremes():
 # ---------------------------------------------------------------------------
 
 
-def test_canonicalize_rejects_unknown_kind():
-    with pytest.raises(ValueError, match="correlation_kind"):
-        canonicalize_correlation(np.eye(2), 2, kind="pearson")
+def test_canonicalize_rejects_unknown_correlation_type():
+    with pytest.raises(ValueError, match="correlation_type"):
+        canonicalize_correlation(np.eye(2), 2, correlation_type="pearson")
 
 
 def test_canonicalize_latent_is_identity_on_valid_input():
@@ -261,8 +263,8 @@ def test_canonicalize_latent_is_identity_on_valid_input():
 
 
 @pytest.mark.parametrize("bad_diagonal", [0.0, 0.5, 2.0, -1.0])
-@pytest.mark.parametrize("kind", ["latent", "spearman"])
-def test_canonicalize_rejects_bad_diagonal_on_every_kind(bad_diagonal, kind):
+@pytest.mark.parametrize("correlation_type", ["latent", "spearman"])
+def test_canonicalize_rejects_bad_diagonal_on_every_type(bad_diagonal, correlation_type):
     """Structural checks must run on the declared matrix, before conversion.
 
     The Spearman conversion pins the diagonal to exactly 1, so a check made
@@ -270,15 +272,15 @@ def test_canonicalize_rejects_bad_diagonal_on_every_kind(bad_diagonal, kind):
     """
     R = [[bad_diagonal, 0.3], [0.3, bad_diagonal]]
     with pytest.raises(ValueError, match="unit diagonal"):
-        canonicalize_correlation(R, 2, kind=kind)
+        canonicalize_correlation(R, 2, correlation_type=correlation_type)
 
 
-@pytest.mark.parametrize("kind", ["latent", "spearman"])
-def test_canonicalize_rejects_asymmetry_and_out_of_range_on_every_kind(kind):
+@pytest.mark.parametrize("correlation_type", ["latent", "spearman"])
+def test_canonicalize_rejects_asymmetry_and_out_of_range_on_every_type(correlation_type):
     with pytest.raises(ValueError, match="symmetric"):
-        canonicalize_correlation([[1.0, 0.5], [0.2, 1.0]], 2, kind=kind)
+        canonicalize_correlation([[1.0, 0.5], [0.2, 1.0]], 2, correlation_type=correlation_type)
     with pytest.raises(ValueError, match=r"lie in \[-1, 1\]"):
-        canonicalize_correlation([[1.0, 1.5], [1.5, 1.0]], 2, kind=kind)
+        canonicalize_correlation([[1.0, 1.5], [1.5, 1.0]], 2, correlation_type=correlation_type)
 
 
 # ---------------------------------------------------------------------------

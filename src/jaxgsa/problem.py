@@ -324,14 +324,14 @@ def _canonical_correlation(
     correlation: "npt.ArrayLike | None",
     names: tuple[str, ...],
     input_specs: tuple[InputSpec, ...],
-    kind: Literal["latent", "spearman"] = "latent",
+    correlation_type: Literal["latent", "spearman"] = "latent",
     *,
     policy: "RepairPolicy",
 ) -> _CorrelationTuple | None:
     """Validate a correlation matrix and freeze it into hashable form.
 
     ``None`` passes through and means independent inputs. Any other matrix is
-    converted from ``kind`` to the latent scale and validated, which includes
+    converted from ``correlation_type`` to the latent scale and validated, which includes
     the positive-definiteness repair. The result is stored as a nested tuple
     of floats, so ``Problem`` stays frozen and hashable. ``policy`` grades how
     loudly the repair reports itself. Every ``Problem`` surface passes
@@ -353,8 +353,8 @@ def _canonical_correlation(
         names: Parameter names in model-input order.
         input_specs: Normalized input spec per parameter, in the same order
             as ``names``.
-        kind: Scale ``correlation`` is expressed on, ``"latent"`` or
-            ``"spearman"``.
+        correlation_type: Scale ``correlation`` is expressed on,
+            ``"latent"`` or ``"spearman"``.
         policy: Repair policy passed through to the copula validator.
 
     Returns:
@@ -379,7 +379,11 @@ def _canonical_correlation(
         # one, so checking before the conversion is equivalent.
         _check_correlation_touches_categorical(names, input_specs, R_declared)
     R = canonicalize_correlation(
-        R_declared, n_params, kind=kind, policy=policy, method="jaxgsa.Problem"
+        R_declared,
+        n_params,
+        correlation_type=correlation_type,
+        policy=policy,
+        method="jaxgsa.Problem",
     )
     cat_dims = [d for d, _ in _categorical_dims_from_specs(input_specs)]
     R = _force_categorical_identity(R, cat_dims)
@@ -543,7 +547,7 @@ class Problem:
         bounds: tuple[tuple[float, float], ...],
         output_names: tuple[str, ...] | None = None,
         correlation: "npt.ArrayLike | None" = None,
-        correlation_kind: Literal["latent", "spearman"] = "latent",
+        correlation_type: Literal["latent", "spearman"] = "latent",
     ) -> None:
         """Create a uniform-only problem from finite bounds.
 
@@ -560,7 +564,7 @@ class Problem:
                 with a ``JaxgsaWarning``. A matrix whose repair would have to
                 move an entry by 0.05 or more is rejected with a
                 ``ValueError``.
-            correlation_kind: Scale ``correlation`` is expressed on:
+            correlation_type: Scale ``correlation`` is expressed on:
                 ``"latent"`` (default) for the Pearson correlation of the
                 copula's latent normals, ``"spearman"`` for a rank
                 correlation (converted via ``2 sin(pi rho_s / 6)``).
@@ -580,7 +584,11 @@ class Problem:
             output_names=output_names,
             # User-declared matrices deserve the repair warning.
             correlation=_canonical_correlation(
-                correlation, normalized_names, input_specs, correlation_kind, policy="declared"
+                correlation,
+                normalized_names,
+                input_specs,
+                correlation_type,
+                policy="declared",
             ),
         )
 
@@ -592,7 +600,7 @@ class Problem:
         *,
         truncate_gaussians: float | None = None,
         correlation: "npt.ArrayLike | None" = None,
-        correlation_kind: Literal["latent", "spearman"] = "latent",
+        correlation_type: Literal["latent", "spearman"] = "latent",
     ) -> "Problem":
         """Create a ``Problem`` from per-parameter distribution specs.
 
@@ -625,7 +633,7 @@ class Problem:
                 matrix declaring the dependence between parameters; rows and
                 columns follow the dict's insertion order. ``None`` (default)
                 means independent inputs.
-            correlation_kind: Scale ``correlation`` is expressed on:
+            correlation_type: Scale ``correlation`` is expressed on:
                 ``"latent"`` (default) or ``"spearman"``.
 
         Returns:
@@ -649,7 +657,11 @@ class Problem:
             input_specs=input_specs,
             output_names=output_names,
             correlation=_canonical_correlation(
-                correlation, names, input_specs, correlation_kind, policy="declared"
+                correlation,
+                names,
+                input_specs,
+                correlation_type,
+                policy="declared",
             ),
         )
 
@@ -657,7 +669,7 @@ class Problem:
         self,
         correlation: "npt.ArrayLike | None",
         *,
-        kind: Literal["latent", "spearman"] = "latent",
+        correlation_type: Literal["latent", "spearman"] = "latent",
     ) -> "Problem":
         """Return a copy of this problem with the given correlation matrix.
 
@@ -673,8 +685,8 @@ class Problem:
         Args:
             correlation: ``(D, D)`` Gaussian-copula correlation matrix, or
                 ``None`` to drop a previously declared correlation.
-            kind: Scale ``correlation`` is expressed on: ``"latent"``
-                (default) or ``"spearman"``.
+            correlation_type: Scale ``correlation`` is expressed on:
+                ``"latent"`` (default) or ``"spearman"``.
 
         Returns:
             A new ``Problem`` with the same marginals, names, and output
@@ -685,7 +697,11 @@ class Problem:
             input_specs=self._input_specs,
             output_names=self.output_names,
             correlation=_canonical_correlation(
-                correlation, self.names, self._input_specs, kind, policy="declared"
+                correlation,
+                self.names,
+                self._input_specs,
+                correlation_type,
+                policy="declared",
             ),
         )
 
@@ -753,7 +769,7 @@ class Problem:
         """Latent Gaussian-copula correlation matrix, or ``None`` if independent.
 
         Always expressed on the latent scale regardless of the
-        ``correlation_kind`` it was declared with. Returns a fresh
+        ``correlation_type`` it was declared with. Returns a fresh
         ``(D, D)`` float64 array; mutating it does not affect the problem.
         """
         if self._correlation is None:

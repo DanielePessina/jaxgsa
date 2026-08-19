@@ -170,7 +170,7 @@ def test_spearman_kind_is_converted_to_latent_on_entry():
     p = Problem.from_dict(
         {"x1": (0.0, 1.0), "x2": (0.0, 1.0)},
         correlation=[[1.0, rho_s], [rho_s, 1.0]],
-        correlation_kind="spearman",
+        correlation_type="spearman",
     )
     stored = p.correlation
     assert stored is not None

@@ -109,7 +109,7 @@ method's answer. See [Categorical Inputs](/examples/categorical-inputs).
 ### Dependent inputs
 
 Declare dependence with the optional Gaussian-copula `correlation=` argument,
-together with `correlation_kind="latent"` or `correlation_kind="spearman"`.
+together with `correlation_type="latent"` or `correlation_type="spearman"`.
 To attach a matrix to an existing problem, call
 `problem.with_correlation(R)`. The validated latent matrix is then available
 as `problem.correlation`.

@@ -321,7 +321,7 @@ def test_spearman_kind_recovers_rank_correlation_with_uniform_marginals():
     rho_s = 0.7
     R = [[1.0, rho_s], [rho_s, 1.0]]
     spearman_problem = Problem.from_dict(
-        {"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=R, correlation_kind="spearman"
+        {"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=R, correlation_type="spearman"
     )
     X = monte_carlo(spearman_problem, 100_000, seed=3)
     assert abs(_spearman_of(X)[0, 1] - rho_s) < 0.01

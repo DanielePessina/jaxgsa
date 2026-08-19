@@ -44,13 +44,13 @@ By default the matrix is interpreted on the latent scale. That is the Pearson
 correlation of the copula's underlying normals. A rank (Spearman) correlation
 is the natural target for non-Gaussian marginals, and a Gaussian copula
 inverts it exactly. Declare a rank correlation with
-`correlation_kind="spearman"`:
+`correlation_type="spearman"`:
 
 ```python
 problem = jaxgsa.Problem.from_dict(
     {"x1": (0.0, 1.0), "x2": (0.0, 1.0)},
     correlation=[[1.0, 0.7], [0.7, 1.0]],
-    correlation_kind="spearman",  # converted via 2 sin(pi * rho_s / 6)
+    correlation_type="spearman",  # converted via 2 sin(pi * rho_s / 6)
 )
 ```
 
@@ -70,7 +70,7 @@ The measure is the largest change to a single entry, on the scale you declared:
 So you never silently sample a different dependence structure than you
 declared. If the third case applies, correct the matrix, or fit a valid one
 from data with `jaxgsa.sampling.fit_correlation`. Check also that you did not
-pass a rank correlation without `correlation_kind="spearman"`.
+pass a rank correlation without `correlation_type="spearman"`.
 
 `fit_correlation` itself never raises for this reason. Inconsistent data is
 not a user error. A fit that had to move an entry by `0.05` or more only
@@ -89,10 +89,10 @@ Match your starting point to the right entry path:
 
 | You have | Do this |
 |---|---|
-| A rank (Spearman) correlation you want the samples to have | Pass that matrix with `correlation_kind="spearman"`. The conversion to the latent scale is exact. |
-| A published covariance for Gaussian variables | `correlation_from_covariance(cov)`, default kind. Latent equals Pearson here, so this is exact. |
+| A rank (Spearman) correlation you want the samples to have | Pass that matrix with `correlation_type="spearman"`. The conversion to the latent scale is exact. |
+| A published covariance for Gaussian variables | `correlation_from_covariance(cov)`, default `correlation_type`. Latent equals Pearson here, so this is exact. |
 | Observed data | `fit_correlation(problem, X_observed)`, then `with_correlation`. The fit uses ranks and converts internally. |
-| A rough Pearson target with non-Gaussian marginals | Prefer `correlation_kind="spearman"` with the same number. Only the Spearman route carries an exact guarantee. The two scales differ little (Spearman 0.6 maps to latent 0.618). |
+| A rough Pearson target with non-Gaussian marginals | Prefer `correlation_type="spearman"` with the same number. Only the Spearman route carries an exact guarantee. The two scales differ little (Spearman 0.6 maps to latent 0.618). |
 
 The short version: the latent matrix is what the copula machinery uses; the
 Spearman matrix is what your samples measurably have. When in doubt, declare
@@ -235,7 +235,7 @@ matrix explicitly with `problem.with_correlation(None)`.
 - For non-Gaussian marginals, the Pearson correlation of the physical samples
   usually differs from the latent matrix. This is the NORTA
   correlation-matching problem. The Spearman rank correlation is the
-  exactly invertible route: declare it with `correlation_kind="spearman"`.
+  exactly invertible route: declare it with `correlation_type="spearman"`.
   When every marginal is Gaussian, latent and Pearson coincide and the
   sample covariance reproduces the declared one.
 - The correlation round-trips through problem serialization: NPZ design
