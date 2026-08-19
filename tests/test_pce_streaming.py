@@ -132,6 +132,53 @@ class TestForcedStreaming:
             pce.analyze(problem_4d, X, Y, order=3, batch_size=0)
 
 
+class TestPairMaskChunking:
+    """The S2 pair mask streams over pair chunks without moving a bit."""
+
+    def test_s2_survives_a_chunked_pair_axis(self, problem_4d, data_4d):
+        """Tier T4 (internal consistency): pair-axis chunking is honest.
+
+        ``sobol_from_coefficients`` builds an ``(n_terms, n_pairs)`` float
+        transient for S2, chunked over the pair axis against the memory
+        budget. Two claims, at two strengths. Where the budget allows one
+        chunk — every small-D case under the default budget — the code runs
+        the exact matmul it always ran and returns it without a concatenate,
+        so the shipped values are bit-for-bit unchanged; the analyze-level
+        S2 below pins that against the engine call. Where the budget forces
+        a split, each chunk computes the same per-column dot products, and
+        only XLA's per-shape reassociation of the reduction may move last
+        bits, so the split answer agrees to float tolerance.
+        """
+        from jaxgsa.pce._engine import build_multi_index, sobol_from_coefficients
+
+        X, Y = data_4d
+        result = pce.analyze(problem_4d, X, Y, order=3)
+        coeffs = jnp.asarray(result.coefficients)
+        mi = build_multi_index(4, result.order)
+
+        # Default budget: one chunk, and analyze's S2 came off this exact
+        # path, so the engine call must reproduce it bit for bit.
+        default = sobol_from_coefficients(coeffs, mi)
+        np.testing.assert_array_equal(
+            np.asarray(default[2]),
+            np.asarray(result.S2),
+            err_msg="single-chunk pair path moved a shipped value",
+        )
+
+        # 1-byte budget: one pair per chunk, agreement to reassociation only.
+        jaxgsa.config.set_memory_budget(1, unit="b")
+        chunked = sobol_from_coefficients(coeffs, mi)
+        for got, want in zip(chunked, default, strict=True):
+            np.testing.assert_allclose(
+                np.asarray(got),
+                np.asarray(want),
+                rtol=1e-6,
+                atol=0.0,
+                equal_nan=True,
+                err_msg="pair-axis chunking moved a value beyond reassociation",
+            )
+
+
 class TestAutoEngage:
     """A small global budget flips the default path to streaming."""
 

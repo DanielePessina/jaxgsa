@@ -15,6 +15,8 @@ import numpy as np
 from jax import Array
 from jax.scipy.linalg import solve_triangular
 
+from jaxgsa._core.batching import get_memory_budget
+
 # Shared recurrence in _core.legendre; the VKOGA component fit uses it too.
 from jaxgsa._core.legendre import legendre_orthonormal as _legendre_1d
 from jaxgsa._core.precision import unit_clip_bounds
@@ -187,12 +189,36 @@ def sobol_from_coefficients(
 
     # Second-order: for each unordered pair (i < j), sum the c_alpha^2 of terms
     # that activate exactly x_i and x_j. Enumerate the D*(D-1)/2 upper-triangle
-    # pairs once (numpy, at trace time), so extraction is a single masked matmul
-    # over the term axis: the same shape as S1/ST, and half the work of
-    # contracting the full symmetric (D, D) tensor.
+    # pairs once (numpy, at trace time), so extraction is masked matmuls over
+    # the term axis: the same shape as S1/ST, and half the work of contracting
+    # the full symmetric (D, D) tensor.
+    #
+    # The pair mask is (n_terms, n_pairs), and the matmul promotes it to the
+    # coefficient dtype, so as one array it is an unbudgeted quadratic-in-D
+    # float transient — ~3.5 GB at D=100, p=3. The pair axis is therefore
+    # walked in chunks sized against the memory budget. At small D the budget
+    # allows one chunk, and that path runs the exact matmul this function has
+    # always run, returned without a concatenate — bit-identical, which the
+    # chunking test pins. A split only happens where the transient would not
+    # fit; there each chunk computes the same per-column dot products, and
+    # only XLA's per-shape reassociation of a reduction can move last bits.
+    # The per-pair transient is the promoted mask column plus its boolean
+    # original (~2 * n_terms elements) plus one output column per slice.
     iu, ju = np.triu_indices(D, k=1)  # (n_pairs,) each
-    pair_mask = active[:, iu] & active[:, ju] & (active_count == 2)[:, None]  # (n_terms, n_pairs)
-    s2_upper = jnp.asarray(c2 @ pair_mask) * inv_var[..., None]  # (..., n_pairs)
+    n_pairs = iu.shape[0]
+    pair2 = (active_count == 2)[:, None]  # (n_terms, 1)
+    n_terms = mi.shape[0]
+    n_slices = int(np.prod(c2.shape[:-1], dtype=np.int64))
+    itemsize = jnp.dtype(c2.dtype).itemsize
+    bytes_per_pair = itemsize * (2 * n_terms + n_slices)
+    chunk = max(1, min(n_pairs, get_memory_budget() // max(bytes_per_pair, 1)))
+    parts = [jnp.zeros((*c2.shape[:-1], 0), dtype=c2.dtype)]  # covers D == 1
+    for start in range(0, n_pairs, chunk):
+        end = start + chunk
+        pair_mask = active[:, iu[start:end]] & active[:, ju[start:end]] & pair2
+        parts.append(jnp.asarray(c2 @ pair_mask))  # (..., <=chunk)
+    stacked = parts[-1] if len(parts) == 2 else jnp.concatenate(parts, axis=-1)
+    s2_upper = stacked * inv_var[..., None]  # (..., n_pairs)
     # Scatter into the symmetric matrix and mirror; the diagonal is not a pair
     # index, so keep it NaN to match SobolResult's S2.
     S2 = jnp.full((*c2.shape[:-1], D, D), jnp.nan)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import warnings
+from functools import lru_cache
 from typing import Literal, NamedTuple
 
 import jax
@@ -218,6 +219,72 @@ class _PCEFit(NamedTuple):
     streamed: bool  # True when the row-streamed fit path ran
 
 
+@lru_cache(maxsize=32)
+def _get_streamed_steps(input_types: tuple[str, ...], order: int):
+    """Build and cache the two jitted per-batch steps of the streamed fit.
+
+    The streamed fit used to rebuild the design block and run its
+    accumulation matmuls as eagerly dispatched ops, once per batch — the
+    same per-batch dispatch overhead the HDMR fit unification measured at
+    1.2-1.67x and fixed with jitted, padded per-batch steps (see
+    ``jaxgsa/hdmr/_fit.py``). This is the same house pattern: each step is
+    one jitted call, and the caller pads the ragged trailing batch so each
+    step compiles once per shape.
+
+    Masking. A padded row of ``X_ref`` is all zeros, and the constant basis
+    term evaluates to 1 there, so the raw design block is NOT zero on padded
+    rows. Both steps therefore multiply the design block by the 0/1 row mask
+    ``w``. A zeroed design row contributes a hard zero to ``G = Phi^T Phi``
+    and to ``B = Phi^T Y``, and in the LOO pass it makes the padded row's
+    leverage 0 and its residual ``Y_pad - 0 = 0`` (``Y`` is zero-padded), so
+    the accumulated sum of squares gains exactly nothing.
+
+    The multi-index is rebuilt from ``(D, order)`` inside the cache rather
+    than passed in: :func:`build_multi_index` is deterministic in those two
+    scalars, and an array argument would not be hashable as a cache key.
+
+    Args:
+        input_types: Per-dimension ``"uniform"`` / ``"gaussian"`` tags. Its
+            length is ``D``.
+        order: Effective (post-``_auto_order``) polynomial order.
+
+    Returns:
+        ``(acc_normal, acc_loo)``. ``acc_normal(X_b, Y_b, w, G, B)`` folds
+        one batch into the running normal equations; ``acc_loo(X_b, Y_b, w,
+        coeffs_flat, gram_chol, sse)`` folds one batch into the running LOO
+        sum of squares.
+    """
+    multi_index = build_multi_index(len(input_types), order)
+
+    @jax.jit
+    def acc_normal(X_b: Array, Y_b: Array, w: Array, G: Array, B: Array) -> tuple[Array, Array]:
+        Phi_b = build_design_matrix(X_b, multi_index, input_types, order) * w[:, None]
+        return G + Phi_b.T @ Phi_b, B + Phi_b.T @ Y_b
+
+    @jax.jit
+    def acc_loo(
+        X_b: Array,
+        Y_b: Array,
+        w: Array,
+        coeffs_flat: Array,
+        gram_chol: Array,
+        sse: Array,
+    ) -> Array:
+        Phi_b = build_design_matrix(X_b, multi_index, input_types, order) * w[:, None]
+        residuals = Y_b - Phi_b @ coeffs_flat  # (b, M); zero on padded rows
+        loo_residuals = residuals / (1.0 - hat_diagonal(Phi_b, gram_chol))[:, None]
+        return sse + jnp.sum(loo_residuals**2, axis=0)
+
+    return acc_normal, acc_loo
+
+
+def _pad_rows(A: Array, n_pad: int) -> Array:
+    """Pad ``A`` with ``n_pad`` zero rows on the sample axis."""
+    if n_pad == 0:
+        return A
+    return jnp.concatenate([A, jnp.zeros((n_pad, *A.shape[1:]), dtype=A.dtype)], axis=0)
+
+
 def _fit_pce_streamed(
     X_ref: Array,
     Y_flat: Array,
@@ -244,6 +311,10 @@ def _fit_pce_streamed(
        function, so they cannot disagree about the clip or the formula; only
        the ``mean`` over rows is re-derived here, from the accumulated sum.
 
+    Each per-batch step is one jitted call from :func:`_get_streamed_steps`,
+    and the ragged trailing batch is zero-padded back to the full width with
+    a row mask, so each step compiles once instead of once per batch shape.
+
     Args:
         X_ref: Inputs already mapped to the reference domain, shape
             ``(N, D)``.
@@ -269,13 +340,23 @@ def _fit_pce_streamed(
     bytes_per_row = jnp.dtype(dtype).itemsize * (3 * n_terms + 2 * M)
     b = resolve_batch_size(bytes_per_row, N, batch_size)
 
+    # Pad the sample axis so every batch traces at the same shape. The padded
+    # rows are masked to zero inside the jitted steps, so they contribute
+    # nothing to either pass.
+    n_batches = math.ceil(N / b)
+    n_pad = n_batches * b - N
+    X_p = _pad_rows(X_ref, n_pad)
+    Y_p = _pad_rows(Y_flat, n_pad)
+    w = jnp.concatenate([jnp.ones((N,), dtype=dtype), jnp.zeros((n_pad,), dtype=dtype)])
+    rows = [(i * b, i * b + b) for i in range(n_batches)]
+
+    acc_normal, acc_loo = _get_streamed_steps(input_types, order)
+
     # Pass 1: accumulate the Gram matrix and cross-moments batch by batch.
     G = jnp.zeros((n_terms, n_terms), dtype=dtype)
     B = jnp.zeros((n_terms, M), dtype=dtype)
-    for i in range(0, N, b):
-        Phi_b = build_design_matrix(X_ref[i : i + b], multi_index, input_types, order)
-        G = G + Phi_b.T @ Phi_b
-        B = B + Phi_b.T @ Y_flat[i : i + b]
+    for lo, hi in rows:
+        G, B = acc_normal(X_p[lo:hi], Y_p[lo:hi], w[lo:hi], G, B)
     gram = G + ridge * jnp.eye(n_terms, dtype=dtype)
     coeffs_flat = jnp.linalg.solve(gram, B)  # (n_terms, M)
 
@@ -285,11 +366,8 @@ def _fit_pce_streamed(
     # scales with N and applies the same clip as the single-pass path.
     gram_chol = jnp.linalg.cholesky(gram)
     sse = jnp.zeros((M,), dtype=dtype)
-    for i in range(0, N, b):
-        Phi_b = build_design_matrix(X_ref[i : i + b], multi_index, input_types, order)
-        residuals = Y_flat[i : i + b] - Phi_b @ coeffs_flat  # (b, M)
-        loo_residuals = residuals / (1.0 - hat_diagonal(Phi_b, gram_chol))[:, None]
-        sse = sse + jnp.sum(loo_residuals**2, axis=0)
+    for lo, hi in rows:
+        sse = acc_loo(X_p[lo:hi], Y_p[lo:hi], w[lo:hi], coeffs_flat, gram_chol, sse)
     loo_flat = jnp.sqrt(sse / N)  # == sqrt(mean(loo_residuals^2, axis=0))
 
     return coeffs_flat, loo_flat
