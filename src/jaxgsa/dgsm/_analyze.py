@@ -23,6 +23,7 @@ import numpy as np
 import numpy.typing as npt
 from jax import Array
 
+from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.entry import (
@@ -574,6 +575,7 @@ def analyze(
     key: Array | None = None,
     batch_size: int | None = None,
     on_invalid: OnInvalid = "raise",
+    verbose: bool = True,
     keep_replicates: bool = False,
 ) -> DGSMResult:
     """Compute DGSM sensitivity indices and Sobol index bounds.
@@ -672,6 +674,9 @@ def analyze(
             checked too, and the rows are masked before the batch reduction,
             so ``"drop"`` gives the same moments as re-running on the smaller
             sample. See :mod:`jaxgsa._core.invalid`.
+        verbose: If ``True`` (default), print a short summary to stdout: the
+            problem and the data, the wall-clock timing, and the top
+            parameters by ``nu``. Pass ``False`` for a silent run.
         keep_replicates: Keep the per-resample moments and bounds on
             ``DGSMResult.ci.replicates``. Off by default because they are
             large: ``n_bootstrap`` copies of four index arrays.
@@ -726,6 +731,10 @@ def analyze(
     )
     if n_bootstrap > 0 and key is None:
         raise ValueError("key is required when n_bootstrap > 0")
+    # The clock starts before the model is differentiated or evaluated: on
+    # the autodiff path the Jacobian sweep is the expensive work, so it
+    # belongs inside the timed span.
+    t0 = _verbose.tic()
     D = problem.num_vars
 
     # Resolve the calling convention once, before any computation, so that an
@@ -887,7 +896,7 @@ def analyze(
     lower = ctx.squeeze(lower)
     var_y = ctx.squeeze(var_y, n_trailing=0)
 
-    return DGSMResult(
+    result = DGSMResult(
         nu=nu,
         sigma=sigma,
         upper_bound=upper,
@@ -901,6 +910,39 @@ def analyze(
         lower_bound_conf=confs["lower_bound"],
         ci=ci,
     )
+
+    if verbose:
+        elapsed = _verbose.stop(t0, result.nu)
+        _, T, K = ctx.Y3.shape
+        # On the autodiff path the timed span includes the Jacobian sweep;
+        # on the pre-computed path only the estimator ran.
+        label = (
+            "model sweep + estimator (first call, includes compile)"
+            if use_autodiff
+            else "estimator (first call, includes compile)"
+        )
+        gradients = (
+            "gradients: reverse-mode autodiff" if use_autodiff else "gradients: user-supplied dfdx"
+        )
+        batching = (
+            f"batch_size: {batch_size} (user-set)"
+            if batch_size is not None
+            else "batch_size: auto (resolved from the memory budget)"
+        )
+        _verbose.analysis_summary(
+            method="jaxgsa.dgsm.analyze",
+            problem=problem,
+            n_runs=int(ctx.Y.shape[0]),
+            T=T,
+            K=K,
+            invalid=ctx.invalid,
+            timings=[(label, elapsed)],
+            notes=[gradients, batching],
+            index_name="nu",
+            values=result.nu,
+            conf=result.nu_conf,
+        )
+    return result
 
 
 def _array_batches(

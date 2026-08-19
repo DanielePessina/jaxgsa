@@ -22,6 +22,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import get_memory_budget
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare
@@ -288,6 +289,7 @@ def analyze(
     key: Array | None = None,
     resample_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
+    verbose: bool = True,
     keep_replicates: bool = False,
 ) -> MorrisResult:
     """Compute Morris elementary-effects screening measures using JAX.
@@ -356,6 +358,9 @@ def analyze(
             ``"propagate"`` lets the value reach the measures, and ``"drop"``
             analyzes the surviving trajectories. See
             :mod:`jaxgsa._core.invalid`.
+        verbose: If ``True`` (default), print a short summary to stdout: the
+            problem and the data, the wall-clock timing, and the top
+            parameters by ``mu_star``. Pass ``False`` for a silent run.
         keep_replicates: Keep the per-replicate measures on
             ``MorrisResult.ci.replicates``. Off by default because they are
             large: ``n_bootstrap`` copies of all three measure arrays. Turn
@@ -461,6 +466,7 @@ def analyze(
     if standardize_outputs:
         Y, _, _, _ = _standardize_outputs(Y)
 
+    t0 = _verbose.tic()
     ee = _elementary_effects(Y, idx_after, idx_before, delta)  # (r, D, T, K)
     mu, mu_star, sigma = _stats_from_ee(ee)  # each (T, K, D)
 
@@ -534,7 +540,7 @@ def analyze(
         else None
     )
 
-    return MorrisResult(
+    result = MorrisResult(
         mu=mu,
         mu_star=mu_star,
         sigma=sigma,
@@ -546,3 +552,26 @@ def analyze(
         space="unit",
         ci=ci,
     )
+
+    if verbose:
+        elapsed = _verbose.stop(t0, result.mu, result.mu_star, result.sigma)
+        _, T, K = ctx.Y3.shape
+        chunk_note = (
+            f"resample_chunk_size: {resample_chunk_size} (user-set)"
+            if resample_chunk_size is not None
+            else "resample_chunk_size: auto (resolved from the memory budget)"
+        )
+        _verbose.analysis_summary(
+            method="jaxgsa.morris.analyze",
+            problem=sampling_result.problem,
+            n_runs=int(Y.shape[0]),
+            T=T,
+            K=K,
+            invalid=invalid,
+            timings=[("estimator (first call, includes compile)", elapsed)],
+            notes=[chunk_note],
+            index_name="mu_star",
+            values=result.mu_star,
+            conf=result.mu_star_conf,
+        )
+    return result

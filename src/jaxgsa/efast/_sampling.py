@@ -19,6 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
+from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.samples import (
     _jaxgsa_version,
     _npz_path,
@@ -324,6 +325,7 @@ def sample(
     *,
     M: int = 4,
     seed: int | np.random.Generator | None = None,
+    verbose: bool = True,
 ) -> EFASTSamples:
     """Generate eFAST samples along sinusoidal search curves.
 
@@ -348,6 +350,9 @@ def sample(
             the focal parameter during analysis. Default 4, the standard
             choice, which rarely needs changing.
         seed: Random seed, for reproducible phase shifts.
+        verbose: If ``True`` (default), print a one-line summary of the
+            design: curves, rows per curve, total runs, and the focal
+            frequency. Pass ``False`` for a silent run.
 
     Returns:
         An ``EFASTSamples`` carrying the ``(n_per_curve * D, D)`` sample array
@@ -405,5 +410,20 @@ def sample(
     # CDF-based transform: map the [0, 1] samples into the problem's physical
     # parameter space.
     X = _transform_samples(problem, X)
+
+    if verbose:
+        # A search curve is an ordered sweep, so there is nothing to
+        # deduplicate: every row is kept, and n_runs is exact.
+        _verbose.sample_summary(
+            method="jaxgsa.efast.sample",
+            problem=problem,
+            entries=[
+                ("n_curves", D),
+                ("n_per_curve", n_per_curve),
+                ("n_runs", n_per_curve * D),
+                ("M", M),
+                ("omega_0", omega_0),
+            ],
+        )
 
     return EFASTSamples(samples=X, n_per_curve=n_per_curve, M=M, problem=problem)

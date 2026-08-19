@@ -31,6 +31,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.entry import (
     at_least,
@@ -677,6 +678,7 @@ def analyze(
     key: Array | None = None,
     slice_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
+    verbose: bool = True,
     keep_replicates: bool = False,
 ) -> SobolResult:
     """Compute Sobol sensitivity indices from model outputs using JAX.
@@ -777,6 +779,9 @@ def analyze(
             refuses the sample, ``"propagate"`` lets the value reach the
             indices, and ``"drop"`` analyzes the surviving groups. See
             :mod:`jaxgsa._core.invalid`.
+        verbose: If ``True`` (default), print a short summary to stdout: the
+            problem and the data, the wall-clock timing, and the top
+            parameters by ``ST``. Pass ``False`` for a silent run.
 
     Returns:
         SobolResult holding:
@@ -850,10 +855,11 @@ def analyze(
 
     # The outputs are standardized inside _separate_output_values, which both
     # paths below reach, so there is nothing to do to Y here.
+    t0 = _verbose.tic()
     if n_bootstrap > 0:
         if key is None:
             raise ValueError("key is required when n_bootstrap > 0")
-        return _analyze_bootstrap(
+        result = _analyze_bootstrap(
             sampling_result,
             Y,
             estimator=estimator,
@@ -865,11 +871,40 @@ def analyze(
             invalid=invalid,
             keep_replicates=keep_replicates,
         )
+    else:
+        result = _analyze_no_bootstrap(
+            sampling_result,
+            Y,
+            slice_chunk_size=slice_chunk_size,
+            estimator=estimator,
+            invalid=invalid,
+        )
 
-    return _analyze_no_bootstrap(
-        sampling_result,
-        Y,
-        slice_chunk_size=slice_chunk_size,
-        estimator=estimator,
-        invalid=invalid,
-    )
+    if verbose:
+        elapsed = _verbose.stop(t0, result.S1, result.ST)
+        _, T, K = ctx.Y3.shape
+        # Same resolver the point kernel ran, on the same shapes: cheap
+        # arithmetic, reported rather than re-derived by hand.
+        cs = resolve_point_chunk_size(
+            slice_chunk_size,
+            T * K,
+            int(Y.shape[0]) // step,
+            D,
+            sampling_result.calc_second_order,
+            Y.dtype.itemsize,
+        )
+        origin = "user-set" if slice_chunk_size is not None else "resolved from the memory budget"
+        _verbose.analysis_summary(
+            method="jaxgsa.sobol.analyze",
+            problem=sampling_result.problem,
+            n_runs=int(Y.shape[0]),
+            T=T,
+            K=K,
+            invalid=invalid,
+            timings=[("estimators (first call, includes compile)", elapsed)],
+            notes=[f"slice_chunk_size: {cs} ({origin})", f"estimator: {estimator}"],
+            index_name="ST",
+            values=result.ST,
+            conf=result.ST_conf,
+        )
+    return result

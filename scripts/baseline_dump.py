@@ -324,55 +324,66 @@ def build_cases() -> list[Case]:
 def _m_sobol(case: Case) -> Any:
     sr = sobol.sample(case.problem, n_samples=case.n, seed=SEED, verbose=False)
     Y = case.model(jnp.asarray(sr.samples))
-    return sobol.analyze(sr, Y, n_bootstrap=20, key=jax.random.key(SEED))
+    return sobol.analyze(sr, Y, n_bootstrap=20, key=jax.random.key(SEED), verbose=False)
 
 
 def _m_morris(case: Case) -> Any:
     sr = morris.sample(case.problem, n_trajectories=32, seed=SEED, verbose=False)
     Y = case.model(jnp.asarray(sr.samples))
-    return morris.analyze(sr, Y, n_bootstrap=20, key=jax.random.key(SEED))
+    return morris.analyze(sr, Y, n_bootstrap=20, key=jax.random.key(SEED), verbose=False)
 
 
 def _m_efast(case: Case) -> Any:
-    sr = efast.sample(case.problem, n_per_curve=case.efast_n, seed=SEED)
+    sr = efast.sample(case.problem, n_per_curve=case.efast_n, seed=SEED, verbose=False)
     Y = case.model(jnp.asarray(sr.samples))
-    return efast.analyze(sr, Y)
+    return efast.analyze(sr, Y, verbose=False)
 
 
 def _m_kucherenko(case: Case) -> Any:
-    sr = kucherenko.sample(case.problem, n_samples=case.n, seed=SEED)
+    sr = kucherenko.sample(case.problem, n_samples=case.n, seed=SEED, verbose=False)
     Y = case.model(jnp.asarray(sr.samples))
-    return kucherenko.analyze(sr, Y)
+    return kucherenko.analyze(sr, Y, verbose=False)
 
 
 def _m_borgonovo(case: Case, X: jax.Array, Y: jax.Array) -> Any:
-    return borgonovo.analyze(case.problem, X, Y, n_bootstrap=20, key=jax.random.key(SEED))
+    return borgonovo.analyze(
+        case.problem, X, Y, n_bootstrap=20, key=jax.random.key(SEED), verbose=False
+    )
 
 
 def _m_pawn(case: Case, X: jax.Array, Y: jax.Array) -> Any:
-    return pawn.analyze(case.problem, X, Y, n_bins=8, n_bootstrap=20, key=jax.random.key(SEED))
+    return pawn.analyze(
+        case.problem, X, Y, n_bins=8, n_bootstrap=20, key=jax.random.key(SEED), verbose=False
+    )
 
 
 def _m_hsic(case: Case, X: jax.Array, Y: jax.Array) -> Any:
-    return hsic.analyze(case.problem, X, Y, n_perms=50, key=jax.random.key(SEED))
+    return hsic.analyze(case.problem, X, Y, n_perms=50, key=jax.random.key(SEED), verbose=False)
 
 
 def _m_optimal_transport(case: Case, X: jax.Array, Y: jax.Array) -> Any:
     return optimal_transport.analyze(
-        case.problem, X, Y, n_partitions=8, n_bootstrap=10, dummy=True, key=jax.random.key(SEED)
+        case.problem,
+        X,
+        Y,
+        n_partitions=8,
+        n_bootstrap=10,
+        dummy=True,
+        key=jax.random.key(SEED),
+        verbose=False,
     )
 
 
 def _m_pce(case: Case, X: jax.Array, Y: jax.Array) -> Any:
-    return pce.analyze(case.problem, X, Y, order=3)
+    return pce.analyze(case.problem, X, Y, order=3, verbose=False)
 
 
 def _m_hdmr(case: Case, X: jax.Array, Y: jax.Array) -> Any:
-    return hdmr.analyze(case.problem, X, Y, maxorder=2, maxiter=50)
+    return hdmr.analyze(case.problem, X, Y, maxorder=2, maxiter=50, verbose=False)
 
 
 def _m_shapley(case: Case, X: jax.Array, Y: jax.Array) -> Any:
-    return shapley.analyze(case.problem, X, Y, backend="pce", order=3)
+    return shapley.analyze(case.problem, X, Y, backend="pce", order=3, verbose=False)
 
 
 def _m_vkoga(case: Case, X: jax.Array, Y: jax.Array) -> Any:
@@ -386,12 +397,13 @@ def _m_vkoga(case: Case, X: jax.Array, Y: jax.Array) -> Any:
         n_inner=32,
         n_variance=512,
         key=jax.random.key(SEED),
+        verbose=False,
     )
 
 
 def _m_dgsm(case: Case, X: jax.Array, _Y: jax.Array) -> Any:
     # dgsm.analyze differentiates a one-sample function, not a batch one.
-    return dgsm.analyze(case.problem, _as_point_model(case.model), X)
+    return dgsm.analyze(case.problem, _as_point_model(case.model), X, verbose=False)
 
 
 DESIGN_METHODS: dict[str, Callable[[Case], Any]] = {

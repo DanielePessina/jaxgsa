@@ -55,6 +55,7 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
+from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.entry import (
@@ -729,6 +730,7 @@ def analyze(
     key: Array | None = None,
     slice_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
+    verbose: bool = True,
     keep_replicates: bool = False,
 ) -> OTResult:
     """Compute optimal-transport sensitivity indices from given data.
@@ -837,6 +839,9 @@ def analyze(
             real ``X`` and ``Y`` the caller passed, not the synthetic
             ``dummy`` column, and it reads them together, so a bad input
             takes its own output with it. See :mod:`jaxgsa._core.invalid`.
+        verbose: If ``True`` (default), print a short summary to stdout: the
+            problem and the data, the wall-clock timing, and the top
+            parameters by ``ot``. Pass ``False`` for a silent run.
         keep_replicates: Keep the per-resample indices on
             ``OTResult.ci.replicates``. Off by default because they are
             large: ``n_bootstrap`` copies of all three index arrays. Turn it
@@ -984,6 +989,7 @@ def analyze(
     # Canonical partition-group layout, shared with borgonovo. Each group
     # is (cls_idx, counts); masks and quantile lookups are derived
     # in-kernel from the counts.
+    t0 = _verbose.tic()
     groups, _, col_order = build_partition_groups(
         problem, X, all_idx, M, dims_levels, method="jaxgsa.optimal_transport.analyze"
     )
@@ -1112,7 +1118,7 @@ def analyze(
     if ot_dummy is not None:
         above_dummy = jnp.maximum(hats["ot"] - jnp.asarray(ot_dummy)[..., None], 0.0)
 
-    return OTResult(
+    result = OTResult(
         ot=hats["ot"],
         ot_conf=confs["ot"],
         advective=hats["advective"],
@@ -1128,6 +1134,28 @@ def analyze(
         invalid=invalid,
         ci=ci_info,
     )
+
+    if verbose:
+        elapsed = _verbose.stop(t0, result.ot)
+        chunking = (
+            f"slice_chunk_size: {slice_chunk_size} (user-set)"
+            if slice_chunk_size is not None
+            else "slice_chunk_size: auto (resolved from the memory budget)"
+        )
+        _verbose.analysis_summary(
+            method="jaxgsa.optimal_transport.analyze",
+            problem=problem,
+            n_runs=N,
+            T=T,
+            K=K,
+            invalid=invalid,
+            timings=[("estimator (first call, includes compile)", elapsed)],
+            notes=[f"mode: {mode}", f"epsilon: {epsilon}", chunking],
+            index_name="ot",
+            values=result.ot,
+            conf=result.ot_conf,
+        )
+    return result
 
 
 def indices(

@@ -61,6 +61,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.entry import (
@@ -790,6 +791,7 @@ def analyze(
     degenerate_tol: float = _DEGENERATE_BW_TOL,
     degenerate_bandwidth: float | Literal["auto"] = "auto",
     on_invalid: OnInvalid = "raise",
+    verbose: bool = True,
     keep_replicates: bool = False,
 ) -> DeltaResult:
     """Compute Borgonovo delta and given-data first-order Sobol indices.
@@ -910,6 +912,9 @@ def analyze(
             The check runs before the KDE, so a failed model run is named
             for what it is instead of surfacing later as a bandwidth
             complaint. See :mod:`jaxgsa._core.invalid`.
+        verbose: If ``True`` (default), print a short summary to stdout: the
+            problem and the data, the wall-clock timing, and the top
+            parameters by ``delta``. Pass ``False`` for a silent run.
         keep_replicates: Keep the per-resample indices on
             ``DeltaResult.ci.replicates``. Off by default because they are
             large: ``n_bootstrap`` copies of both index arrays. Turn it on to
@@ -1017,6 +1022,7 @@ def analyze(
     # Check the continuous-output contract before any expensive work.
     _raise_discrete_output(problem, Y)
 
+    t0 = _verbose.tic()
     N = X.shape[0]
     # n_classes applies to the continuous columns only. A categorical column
     # always gets one conditioning class per level.
@@ -1192,7 +1198,7 @@ def analyze(
     if delta_conf is not None:
         _warn_conf_out_of_range(problem, delta_conf, allow_non_finite=propagated)
 
-    return DeltaResult(
+    result = DeltaResult(
         delta=ctx.squeeze(delta),
         delta_conf=delta_conf,
         S1=ctx.squeeze(S1),
@@ -1201,6 +1207,31 @@ def analyze(
         invalid=invalid,
         ci=ci,
     )
+
+    if verbose:
+        elapsed = _verbose.stop(t0, result.delta)
+        # Same resolver the kernel loop ran, on the same layout: cheap
+        # arithmetic, reported rather than re-derived by hand.
+        cs, _ = _resolve_slice_chunks(groups, Y_cols, grid_size, slice_chunk_size)
+        origin = "user-set" if slice_chunk_size is not None else "resolved from the memory budget"
+        _verbose.analysis_summary(
+            method="jaxgsa.borgonovo.analyze",
+            problem=problem,
+            n_runs=int(N),
+            T=T,
+            K=K,
+            invalid=invalid,
+            timings=[("estimator (first call, includes compile)", elapsed)],
+            notes=[
+                f"slice_chunk_size: {cs} ({origin})",
+                f"grid_size: {grid_size}",
+                f"bandwidth: {bandwidth}",
+            ],
+            index_name="delta",
+            values=result.delta,
+            conf=result.delta_conf,
+        )
+    return result
 
 
 def indices(

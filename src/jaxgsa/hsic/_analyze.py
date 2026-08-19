@@ -51,6 +51,7 @@ import numpy as np
 from jax import Array
 from jax.typing import DTypeLike
 
+from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.entry import at_least, prepare, require
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.precision import x64_enabled
@@ -691,6 +692,7 @@ def analyze(
     key: Array | None = None,
     bandwidth: float = 1.0,
     on_invalid: OnInvalid = "raise",
+    verbose: bool = True,
 ) -> HSICResult:
     """Compute HSIC (Hilbert-Schmidt Independence Criterion) sensitivity indices.
 
@@ -795,6 +797,9 @@ def analyze(
             ``"propagate"`` warns and computes anyway. ``X`` and ``Y`` are
             checked together, so a bad input takes its own output with it.
             See :mod:`jaxgsa._core.invalid`.
+        verbose: If ``True`` (default), print a short summary to stdout: the
+            problem and the data, the wall-clock timing, and the top
+            parameters by ``T_HSIC``. Pass ``False`` for a silent run.
 
     Returns:
         An :class:`HSICResult` with ``R2_HSIC``, ``T_HSIC``, ``p_values``, and
@@ -847,6 +852,7 @@ def analyze(
         raise ValueError("key is required for the permutation test")
     _warn_single_precision()
 
+    t0 = _verbose.tic()
     r2_all, t_all, p_all, raw_all = indices(
         problem,
         X,
@@ -861,7 +867,7 @@ def analyze(
     p_all = ctx.squeeze(p_all)
     raw_all = ctx.squeeze(raw_all)
 
-    return HSICResult(
+    result = HSICResult(
         R2_HSIC=r2_all,
         T_HSIC=t_all,
         p_values=p_all,
@@ -869,3 +875,23 @@ def analyze(
         problem=problem,
         invalid=invalid,
     )
+
+    if verbose:
+        elapsed = _verbose.stop(t0, result.T_HSIC)
+        n_runs, T, K = ctx.Y3.shape
+        _verbose.analysis_summary(
+            method="jaxgsa.hsic.analyze",
+            problem=problem,
+            n_runs=int(n_runs),
+            T=T,
+            K=K,
+            invalid=invalid,
+            timings=[("estimator (first call, includes compile)", elapsed)],
+            notes=[
+                f"n_perms: {n_perms}",
+                f"bandwidth: {bandwidth} (median-heuristic multiplier)",
+            ],
+            index_name="T_HSIC",
+            values=result.T_HSIC,
+        )
+    return result

@@ -12,6 +12,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import get_memory_budget, resolve_batch_size
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.entry import at_least, check_scalars, gates, in_open_interval, one_of, prepare
@@ -699,6 +700,7 @@ def analyze(
     ci_method: Literal["quantile", "gaussian"] = "quantile",
     key: Array | None = None,
     on_invalid: OnInvalid = "raise",
+    verbose: bool = True,
     keep_replicates: bool = False,
 ) -> PCEResult:
     """Compute Sobol indices via polynomial chaos expansion (PCE).
@@ -775,6 +777,9 @@ def analyze(
             :mod:`jaxgsa._core.invalid`. The check matters for PCE: a single
             NaN reaches the normal equations and poisons every coefficient,
             every leave-one-out RMSE and every index.
+        verbose: If ``True`` (default), print a short summary to stdout: the
+            problem and the data, the wall-clock timing, and the top
+            parameters by ``ST``. Pass ``False`` for a silent run.
         keep_replicates: Retain the per-replicate index arrays on
             ``result.ci``. Off by default: the draws are large.
 
@@ -829,6 +834,7 @@ def analyze(
     # Per-slice output variance for the explained-variance diagnostic below.
     total_var = jnp.var(ctx.Y3, axis=0)  # (T, K)
 
+    t0 = _verbose.tic()
     fit = _fit_pce_core(
         problem, X, Y, order=order, ridge=ridge, fit_ratio=fit_ratio, batch_size=batch_size
     )
@@ -914,7 +920,7 @@ def analyze(
     loo = ctx.squeeze(loo, n_trailing=0)
     explained_variance = ctx.squeeze(explained_variance, n_trailing=0)
 
-    return PCEResult(
+    result = PCEResult(
         S1=S1,
         ST=ST,
         S2=S2,
@@ -931,6 +937,32 @@ def analyze(
         S2_conf=S2_conf,
         ci=ci,
     )
+
+    if verbose:
+        elapsed = _verbose.stop(t0, result.ST)
+        batch_note = (
+            f"batch_size: {batch_size} (user-set)"
+            if batch_size is not None
+            else "batch_size: auto (resolved from the memory budget)"
+        )
+        _verbose.analysis_summary(
+            method="jaxgsa.pce.analyze",
+            problem=problem,
+            n_runs=int(ctx.Y.shape[0]),
+            T=T,
+            K=K,
+            invalid=invalid,
+            timings=[("fit + estimator (first call, includes compile)", elapsed)],
+            notes=[
+                f"order: {order}",
+                f"fit: {'streamed' if result.streamed else 'single-pass'}",
+                batch_note,
+            ],
+            index_name="ST",
+            values=result.ST,
+            conf=result.ST_conf,
+        )
+    return result
 
 
 def _pce_predict_plan(result: PCEResult, X_new: Array) -> _PredictPlan:

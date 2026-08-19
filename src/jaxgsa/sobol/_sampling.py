@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Mapping, NamedTuple, overload
 import numpy as np
 from scipy.stats.qmc import Sobol
 
+from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.samples import UniqueDesignSamples
 from jaxgsa._core.sampling import (
     Theta,
@@ -633,7 +634,7 @@ def _print_to_morris_summary(
 ) -> None:
     """Print a compact summary of the Morris design derived from a Saltelli design."""
     order_label = "second-order" if calc_second_order else "first/total-order"
-    print(
+    _verbose.emit(
         "jaxgsa.sobol.SobolSamples.to_morris: "
         f"D={n_params}, mode={order_label}, base_n={base_n}, "
         f"blocks={n_blocks}, effects={n_blocks * n_params}, "
@@ -655,7 +656,7 @@ def _print_sampling_summary(
     duplicates_removed = n_expanded - n_runs
     duplicate_fraction = duplicates_removed / n_expanded if n_expanded else 0.0
     order_label = "second-order" if calc_second_order else "first/total-order"
-    print(
+    _verbose.emit(
         "jaxgsa.sobol.sample: "
         f"D={n_params}, mode={order_label}, base_n={base_n}, "
         f"requested_runs>={target_n}, n_runs={n_runs}, "

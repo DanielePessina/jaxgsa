@@ -30,6 +30,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import apply_batched, resolve_batch_size
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.copula import (
@@ -108,6 +109,7 @@ def analyze(
     key: Array | None = None,
     batch_size: int | None = None,
     on_invalid: OnInvalid = "raise",
+    verbose: bool = True,
     keep_replicates: bool = False,
 ) -> VKOGAResult:
     """Correlated variance-based sensitivity indices via a VKOGA surrogate.
@@ -208,6 +210,9 @@ def analyze(
             otherwise meet a ``RuntimeError`` about failed kernel solves that
             names the wrong cause. ``"drop"`` needs at least ``n_folds`` rows
             to survive, because a fold with no rows in it scores nothing.
+        verbose: If ``True`` (default), print a short summary to stdout: the
+            problem and the data, the wall-clock timing, and the top
+            parameters by ``S_TC``. Pass ``False`` for a silent run.
 
     Returns:
         A :class:`VKOGAResult` with ``S_TC``, ``S_TU``, ``S_U``, ``S_C``, and
@@ -289,6 +294,9 @@ def analyze(
         raise ValueError("key is required for the Monte-Carlo index estimate")
     seed = _seed_from_key(key)
     X, Y, invalid = ctx.inputs, ctx.Y, ctx.invalid
+    # The clock starts before the hyperparameter search and the greedy fit:
+    # for this method the fit is the expensive work, not just the indices.
+    t0 = _verbose.tic()
 
     if max_centers is None:
         max_centers = _DEFAULT_MAX_CENTERS
@@ -392,7 +400,7 @@ def analyze(
         )
 
     output_shape = ctx.squeeze(jnp.zeros((n_time, n_out)), n_trailing=0).shape
-    return VKOGAResult(
+    result = VKOGAResult(
         S_TC=_shape_index(indices.S_TC),
         S_TU=_shape_index(indices.S_TU),
         S_U=_shape_index(indices.S_U),
@@ -417,6 +425,35 @@ def analyze(
         S_IU_conf=confs["S_IU"],
         ci=ci,
     )
+
+    if verbose:
+        # Host NumPy/SciPy end to end, so there is no compile to mention and
+        # stop() has nothing to block on.
+        elapsed = _verbose.stop(t0, result.S_TC)
+        batching = (
+            f"batch_size: {batch_size} (user-set)"
+            if batch_size is not None
+            else "batch_size: auto (resolved from the memory budget)"
+        )
+        _verbose.analysis_summary(
+            method="jaxgsa.vkoga.analyze",
+            problem=problem,
+            n_runs=int(ctx.Y.shape[0]),
+            T=n_time,
+            K=n_out,
+            invalid=invalid,
+            timings=[("fit + compute", elapsed)],
+            notes=[
+                f"n_centers: {result.n_centers}",
+                f"gamma: {_verbose.format_value(result.gamma)}",
+                f"ridge: {_verbose.format_value(result.ridge)}",
+                batching,
+            ],
+            index_name="S_TC",
+            values=result.S_TC,
+            conf=result.S_TC_conf,
+        )
+    return result
 
 
 def _fit_and_estimate(

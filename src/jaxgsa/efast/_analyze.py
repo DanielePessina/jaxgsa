@@ -34,6 +34,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.entry import at_least, check_scalars, prepare, require
 from jaxgsa._core.invalid import OnInvalid
@@ -296,6 +297,7 @@ def analyze(
     *,
     slice_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
+    verbose: bool = True,
 ) -> EFASTResult:
     """Compute eFAST first- and total-order sensitivity indices.
 
@@ -346,6 +348,9 @@ def analyze(
             by a discrete Fourier transform: removing a point changes what the
             estimator computes instead of shrinking the sample. See
             :mod:`jaxgsa._core.invalid`.
+        verbose: If ``True`` (default), print a short summary to stdout: the
+            problem and the data, the wall-clock timing, and the top
+            parameters by ``ST``. Pass ``False`` for a silent run.
 
     Returns:
         An ``EFASTResult`` with ``S1`` and ``ST``, shape ``(D,)`` /
@@ -419,6 +424,7 @@ def analyze(
             category=JaxgsaWarning,
         )
 
+    t0 = _verbose.tic()
     S1, ST = _indices_from_3d(Y, ctx.layout, D, N, M, omega_0, plan.analysis_max, slice_chunk_size)
 
     # An index outside [0, 1] means the frequency decomposition did not
@@ -431,7 +437,7 @@ def analyze(
             category=JaxgsaWarning,
         )
 
-    return EFASTResult(
+    result = EFASTResult(
         S1=S1,
         ST=ST,
         problem=problem,
@@ -439,3 +445,24 @@ def analyze(
         omega_0=omega_0,
         M=M,
     )
+
+    if verbose:
+        elapsed = _verbose.stop(t0, result.S1, result.ST)
+        chunk_note = (
+            f"slice_chunk_size: {slice_chunk_size} (user-set)"
+            if slice_chunk_size is not None
+            else "slice_chunk_size: auto (resolved from the memory budget)"
+        )
+        _verbose.analysis_summary(
+            method="jaxgsa.efast.analyze",
+            problem=problem,
+            n_runs=int(Y.shape[0]),
+            T=T,
+            K=K,
+            invalid=invalid,
+            timings=[("estimator (first call, includes compile)", elapsed)],
+            notes=[chunk_note, f"omega_0: {omega_0}, M: {M}"],
+            index_name="ST",
+            values=result.ST,
+        )
+    return result

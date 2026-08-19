@@ -16,6 +16,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.entry import (
     ScalarCheck,
@@ -274,6 +275,7 @@ def analyze(
     ci_method: Literal["quantile", "gaussian"] = "quantile",
     key: Array | None = None,
     on_invalid: OnInvalid = "raise",
+    verbose: bool = True,
     keep_replicates: bool = False,
 ) -> HDMRResult:
     """Compute sensitivity indices via RS-HDMR (public entry point).
@@ -319,6 +321,9 @@ def analyze(
             ``(X, Y)`` pairs and fits on the rest. See
             :mod:`jaxgsa._core.invalid`. Every other argument is documented on
             :func:`_analyze_hdmr_core`.
+        verbose: If ``True`` (default), print a short summary to stdout: the
+            problem and the data, the wall-clock timing, and the top
+            parameters by ``ST``. Pass ``False`` for a silent run.
         keep_replicates: Retain the per-replicate index arrays on
             ``result.ci``. Off by default: the draws are large.
 
@@ -358,7 +363,8 @@ def analyze(
     # in the public wrapper only, so Shapley routing through the core stays
     # quiet.
     _warn_correlated_index_reading(problem)
-    return _analyze_hdmr_core(
+    t0 = _verbose.tic()
+    result = _analyze_hdmr_core(
         problem,
         X,
         Y,
@@ -375,6 +381,34 @@ def analyze(
         key=key,
         keep_replicates=keep_replicates,
     )
+
+    if verbose:
+        elapsed = _verbose.stop(t0, result.ST)
+        _, T, K = ctx.Y3.shape
+        slice_note = (
+            f"slice_chunk_size: {slice_chunk_size} (user-set)"
+            if slice_chunk_size is not None
+            else "slice_chunk_size: auto (resolved from the memory budget)"
+        )
+        batch_note = (
+            f"batch_size: {batch_size} (user-set)"
+            if batch_size is not None
+            else "batch_size: auto (resolved from the memory budget)"
+        )
+        _verbose.analysis_summary(
+            method="jaxgsa.hdmr.analyze",
+            problem=problem,
+            n_runs=int(ctx.Y.shape[0]),
+            T=T,
+            K=K,
+            invalid=invalid,
+            timings=[("fit + estimator (first call, includes compile)", elapsed)],
+            notes=[f"maxorder: {maxorder}", slice_note, batch_note],
+            index_name="ST",
+            values=result.ST,
+            conf=result.ST_conf,
+        )
+    return result
 
 
 class _HDMRCore(NamedTuple):

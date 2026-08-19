@@ -59,6 +59,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import get_memory_budget
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.entry import (
@@ -623,6 +624,7 @@ def analyze(
     key: Array | None = None,
     slice_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
+    verbose: bool = True,
     keep_replicates: bool = False,
 ) -> PAWNResult:
     """Compute PAWN sensitivity indices.
@@ -698,6 +700,9 @@ def analyze(
             ``"propagate"`` warns and computes anyway. ``X`` and ``Y`` are
             checked together, so a bad input takes its own output with it.
             See :mod:`jaxgsa._core.invalid`.
+        verbose: If ``True`` (default), print a short summary to stdout: the
+            problem and the data, the wall-clock timing, and the top
+            parameters by ``PAWN``. Pass ``False`` for a silent run.
         keep_replicates: Keep the per-resample indices on
             ``PAWNResult.ci.replicates``. Off by default because they are
             large: ``n_bootstrap`` copies of the index array. Turn it on to
@@ -762,6 +767,7 @@ def analyze(
 
     X, invalid = ctx.inputs, ctx.invalid
     Y_3d = ctx.Y3
+    t0 = _verbose.tic()
     # Refusing a malformed categorical column needs concrete values, so it
     # runs here and not in the traceable binning it guards.
     _check_categorical_codes(problem, X)
@@ -810,7 +816,7 @@ def analyze(
 
     pawn_out = ctx.squeeze(pawn_3d)
 
-    return PAWNResult(
+    result = PAWNResult(
         pawn=pawn_out,
         pawn_conf=pawn_conf,
         # Constant across the output axes (bin occupancy never reads Y);
@@ -820,3 +826,33 @@ def analyze(
         invalid=invalid,
         ci=ci,
     )
+
+    if verbose:
+        elapsed = _verbose.stop(t0, result.pawn)
+        N, T, K = ctx.Y3.shape
+        # Same resolver and clamp _pawn_core ran, on the same shapes: cheap
+        # arithmetic, reported rather than re-derived by hand.
+        itemsize = jnp.result_type(Y_3d.dtype, jnp.float32).itemsize
+        cs = min(
+            _resolve_slice_chunk_size(slice_chunk_size, N, problem.num_vars, n_eff, itemsize),
+            T * K,
+        )
+        origin = "user-set" if slice_chunk_size is not None else "resolved from the memory budget"
+        _verbose.analysis_summary(
+            method="jaxgsa.pawn.analyze",
+            problem=problem,
+            n_runs=int(ctx.Y.shape[0]),
+            T=T,
+            K=K,
+            invalid=invalid,
+            timings=[("estimator (first call, includes compile)", elapsed)],
+            notes=[
+                f"slice_chunk_size: {cs} ({origin})",
+                f"statistic: {statistic}",
+                f"n_bins: {n_bins}",
+            ],
+            index_name="PAWN",
+            values=result.pawn,
+            conf=result.pawn_conf,
+        )
+    return result

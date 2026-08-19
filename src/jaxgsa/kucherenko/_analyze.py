@@ -56,6 +56,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare
 from jaxgsa._core.invalid import OnInvalid
@@ -116,6 +117,7 @@ def analyze(
     ci_method: Literal["quantile", "gaussian"] = "quantile",
     key: Array | None = None,
     on_invalid: OnInvalid = "raise",
+    verbose: bool = True,
     keep_replicates: bool = False,
 ) -> KucherenkoResult:
     """Compute Kucherenko first-order and total indices from model outputs.
@@ -160,6 +162,9 @@ def analyze(
             refuses the sample, ``"propagate"`` lets the value reach the
             indices, and ``"drop"`` analyzes the surviving base points. See
             :mod:`jaxgsa._core.invalid`.
+        verbose: If ``True`` (default), print a short summary to stdout: the
+            problem and the data, the wall-clock timing, and the top
+            parameters by ``ST``. Pass ``False`` for a silent run.
         keep_replicates: Keep the per-resample indices on
             ``KucherenkoResult.ci.replicates``. Off by default because they
             are large: ``n_bootstrap`` copies of two index arrays.
@@ -233,6 +238,7 @@ def analyze(
         output_names=problem.output_names,
         method="jaxgsa.kucherenko.analyze",
     )
+    t0 = _verbose.tic()
     S1, ST, variance = _estimate(f_joint, f_first, f_total)
 
     def _shape(index: np.ndarray) -> Array:
@@ -288,7 +294,7 @@ def analyze(
         )
 
     variance_shaped = ctx.squeeze(jnp.asarray(variance.reshape(n_time, n_out)), n_trailing=0)
-    return KucherenkoResult(
+    result = KucherenkoResult(
         S1=_shape(S1),
         ST=_shape(ST),
         problem=problem,
@@ -298,3 +304,22 @@ def analyze(
         ST_conf=ST_conf,
         ci=ci,
     )
+
+    if verbose:
+        elapsed = _verbose.stop(t0, result.S1, result.ST)
+        n_kept = f_joint.shape[0]
+        design = "copula-conditional" if problem.has_correlated_inputs else "independent"
+        _verbose.analysis_summary(
+            method="jaxgsa.kucherenko.analyze",
+            problem=problem,
+            n_runs=(2 * D + 1) * n_kept,
+            T=n_time,
+            K=n_out,
+            invalid=invalid,
+            timings=[("compute", elapsed)],
+            notes=[f"design: {design} (2D+1 = {2 * D + 1} blocks of {n_kept} base points)"],
+            index_name="ST",
+            values=result.ST,
+            conf=result.ST_conf,
+        )
+    return result

@@ -18,6 +18,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.entry import (
     at_least,
@@ -293,6 +294,7 @@ def analyze(
     ci_method: Literal["quantile", "gaussian"] = "quantile",
     key: Array | None = None,
     on_invalid: OnInvalid = "raise",
+    verbose: bool = True,
     keep_replicates: bool = False,
     **backend_kwargs: Any,
 ) -> ShapleyResult:
@@ -351,6 +353,11 @@ def analyze(
         key: A ``jax.random`` key for the bootstrap resampling. Required when
             ``n_bootstrap > 0``. Pass ``jax.random.key(0)`` if you have an
             integer seed.
+        verbose: If ``True`` (default), print a short summary to stdout: the
+            problem and the data, the wall-clock timing, and the top
+            parameters by ``Sh``. Pass ``False`` for a silent run. The
+            backend's own summary is always suppressed, so one call prints
+            one summary.
         keep_replicates: Retain the per-replicate index arrays on
             ``result.ci``. Off by default: the draws are large.
         **backend_kwargs: Passed through unchanged to the selected backend's
@@ -392,39 +399,73 @@ def analyze(
     )
     if n_bootstrap > 0 and key is None:
         raise ValueError("key is required when n_bootstrap > 0")
+    # The backend prints no summary of its own: one shapley call prints one
+    # block. A caller-supplied verbose inside backend_kwargs is stripped, not
+    # refused, so the explicit verbose=False below always wins.
+    backend_kwargs.pop("verbose", None)
+    t0 = _verbose.tic()
     if backend == "pce":
         if include_correlative:
             raise ValueError("include_correlative requires backend='hdmr'")
         _raise_correlated_pce_backend(problem, "jaxgsa.shapley.analyze")
         from jaxgsa.pce import analyze as analyze_pce
 
-        result = analyze_pce(problem, X, Y, on_invalid=on_invalid, **backend_kwargs).shapley()
+        result = analyze_pce(
+            problem, X, Y, on_invalid=on_invalid, verbose=False, **backend_kwargs
+        ).shapley()
     elif backend == "hdmr":
         from jaxgsa.hdmr import analyze as analyze_hdmr
 
-        result = analyze_hdmr(problem, X, Y, on_invalid=on_invalid, **backend_kwargs).shapley(
-            include_correlative=include_correlative
-        )
+        result = analyze_hdmr(
+            problem, X, Y, on_invalid=on_invalid, verbose=False, **backend_kwargs
+        ).shapley(include_correlative=include_correlative)
     else:
         raise ValueError(f"backend must be 'pce' or 'hdmr', got {backend!r}")
 
-    if n_bootstrap == 0:
-        return result
-    assert key is not None  # checked above, before the surrogate was fitted
-    return _with_intervals(
-        result,
-        problem,
-        X,
-        Y,
-        key,
-        n_bootstrap=n_bootstrap,
-        conf_level=conf_level,
-        ci_method=ci_method,
-        keep_replicates=keep_replicates,
-        backend=backend,
-        include_correlative=include_correlative,
-        backend_kwargs=backend_kwargs,
-    )
+    if n_bootstrap > 0:
+        assert key is not None  # checked above, before the surrogate was fitted
+        result = _with_intervals(
+            result,
+            problem,
+            X,
+            Y,
+            key,
+            n_bootstrap=n_bootstrap,
+            conf_level=conf_level,
+            ci_method=ci_method,
+            keep_replicates=keep_replicates,
+            backend=backend,
+            include_correlative=include_correlative,
+            backend_kwargs=backend_kwargs,
+        )
+
+    if verbose:
+        elapsed = _verbose.stop(t0, result.Sh)
+        # No prepare() context here: the backend validated everything. The
+        # promoted layout is read off the shapes at hand instead — Sh is
+        # (D,), (K, D) or (T, K, D) matching Y (N,), (N, K), (N, T, K).
+        n_runs = int(np.shape(Y)[0])
+        sh_shape = np.shape(result.Sh)
+        if len(sh_shape) == 3:
+            T, K = int(sh_shape[0]), int(sh_shape[1])
+        elif len(sh_shape) == 2:
+            T, K = 1, int(sh_shape[0])
+        else:
+            T, K = 1, 1
+        _verbose.analysis_summary(
+            method="jaxgsa.shapley.analyze",
+            problem=problem,
+            n_runs=n_runs,
+            T=T,
+            K=K,
+            invalid=result.invalid,
+            timings=[("backend fit + Shapley (first call, includes compile)", elapsed)],
+            notes=[f"backend: {backend}", f"order: {result.order}"],
+            index_name="Sh",
+            values=result.Sh,
+            conf=result.Sh_conf,
+        )
+    return result
 
 
 def _with_intervals(

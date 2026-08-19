@@ -28,6 +28,7 @@ from typing import Any, Literal, Mapping, overload
 import numpy as np
 from scipy.stats.qmc import Sobol
 
+from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.precision import float_eps
 from jaxgsa._core.samples import UniqueDesignSamples
 from jaxgsa._core.sampling import (
@@ -525,7 +526,7 @@ def _print_morris_summary(
     duplicates_removed = n_expanded - n_runs
     duplicate_fraction = duplicates_removed / n_expanded if n_expanded else 0.0
     levels_label = f", num_levels={num_levels}" if method == "trajectory" else ""
-    print(
+    _verbose.emit(
         "jaxgsa.morris.sample: "
         f"D={n_params}, method={method}, n_trajectories={n_trajectories}{levels_label}, "
         f"n_expanded={n_expanded}, n_runs={n_runs}, "

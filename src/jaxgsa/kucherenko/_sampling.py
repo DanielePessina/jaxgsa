@@ -33,6 +33,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.copula import (
     assemble_latent,
     build_conditional_plan,
@@ -125,6 +126,7 @@ def sample(
     *,
     scramble: bool = True,
     seed: int | np.random.Generator | None = None,
+    verbose: bool = True,
 ) -> KucherenkoSamples:
     """Generate the conditional-copula design for :func:`jaxgsa.kucherenko.analyze`.
 
@@ -148,6 +150,10 @@ def sample(
             different seeds then give statistically independent designs.
         seed: Random seed or generator for reproducibility. It seeds the
             scrambling, so it only applies with ``scramble=True``.
+        verbose: If ``True`` (default), print a one-line summary of the
+            design: base points, blocks, total runs, and whether the design
+            conditions on a declared correlation. Pass ``False`` for a
+            silent run.
 
     Returns:
         A :class:`KucherenkoSamples` carrying the stacked design.
@@ -199,6 +205,21 @@ def sample(
 
     X = latent_to_physical(problem, np.concatenate(blocks, axis=0))
     n_total = n * (2 * D + 1)
+    if verbose:
+        dependence = "copula-conditional" if problem.has_correlated_inputs else "independent"
+        # The conditional redraws make every row distinct, so there is no
+        # deduplication to report: n_runs equals the expanded size.
+        _verbose.sample_summary(
+            method="jaxgsa.kucherenko.sample",
+            problem=problem,
+            entries=[
+                ("base_n", n),
+                ("n_blocks", 2 * D + 1),
+                ("n_runs", n_total),
+                ("dependence", dependence),
+                ("scramble", scramble),
+            ],
+        )
     return KucherenkoSamples(
         samples=X,
         n_expanded=n_total,
