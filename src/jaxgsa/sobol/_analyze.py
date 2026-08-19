@@ -166,6 +166,152 @@ def _estimator_checks(estimator: str, calc_second_order: bool) -> tuple:
     )
 
 
+def _flatten_slices(
+    A: Array, B: Array, AB: Array, BA: Array | None
+) -> tuple[Array, Array, Array, Array | None]:
+    """Fold the (T, K) output axes of the separated matrices into one slice axis.
+
+    Every estimator kernel reads one output slice at a time, so the (T, K)
+    grid becomes a single leading batch axis of ``S = T * K`` slices. Both the
+    point-estimate path and the bootstrap path map over that axis, so they
+    flatten the same way and index the same slices in the same order.
+
+    Args:
+        A: Outputs from sample matrix A, shape ``(N, T, K)``.
+        B: Outputs from sample matrix B, shape ``(N, T, K)``.
+        AB: Outputs from the AB cross-matrices, shape ``(N, D, T, K)``.
+        BA: Outputs from the BA cross-matrices, shape ``(N, D, T, K)``, or
+            ``None`` when second order is off.
+
+    Returns:
+        ``(A_flat, B_flat, AB_flat, BA_flat)`` with shapes ``(S, N)``,
+        ``(S, N)``, ``(S, N, D)`` and ``(S, N, D)``. ``BA_flat`` is ``None``
+        when ``BA`` is.
+    """
+    base_n, T, K = A.shape
+    D = AB.shape[1]
+    total = T * K
+    # (N,T,K) -> transpose -> (T,K,N) -> reshape -> (T*K, N)
+    # AB is (N,D,T,K) so its transpose puts (T,K) first then (N,D).
+    A_flat = A.transpose(1, 2, 0).reshape(total, base_n)
+    B_flat = B.transpose(1, 2, 0).reshape(total, base_n)
+    AB_flat = AB.transpose(2, 3, 0, 1).reshape(total, base_n, D)
+    BA_flat = None if BA is None else BA.transpose(2, 3, 0, 1).reshape(total, base_n, D)
+    return A_flat, B_flat, AB_flat, BA_flat
+
+
+def _point_indices_3d(
+    A_flat: Array,
+    B_flat: Array,
+    AB_flat: Array,
+    BA_flat: Array | None,
+    *,
+    T: int,
+    K: int,
+    D: int,
+    is_scalar: bool,
+    slice_chunk_size: int,
+    estimator: str,
+) -> tuple[Array, Array, Array | None]:
+    """Run the estimator over every output slice, in the promoted 3-D layout.
+
+    This is the one place the point-estimate kernels are called. Both
+    :func:`_indices_from_expanded` and the bootstrap path go through it, so
+    an index and the centre of its confidence interval come from the same
+    arithmetic by construction.
+
+    The shape is the library's usual one: an atomic kernel for a single
+    slice, ``vmap`` over a chunk of slices, a host loop over the chunks. A
+    scalar output skips the ``vmap`` and calls the fused kernel directly,
+    which avoids the dispatch and traces a simpler graph.
+
+    Args:
+        A_flat: Outputs from sample matrix A, shape ``(S, N)``.
+        B_flat: Outputs from sample matrix B, shape ``(S, N)``.
+        AB_flat: Outputs from the AB cross-matrices, shape ``(S, N, D)``.
+        BA_flat: Outputs from the BA cross-matrices, shape ``(S, N, D)``, or
+            ``None`` when second order is off.
+        T: Number of time steps in the promoted layout.
+        K: Number of output variables in the promoted layout.
+        D: Number of input parameters.
+        is_scalar: Whether the caller passed a rank-1 ``Y``, which enables
+            the direct fused-kernel path.
+        slice_chunk_size: Number of output slices per vmap batch.
+        estimator: Which named estimator pair to use.
+
+    Returns:
+        ``(S1, ST, S2)`` shaped ``(T, K, D)``, ``(T, K, D)`` and
+        ``(T, K, D, D)``, with ``S2`` ``None`` when second order is off. The
+        S2 matrix is the kernel's raw output, not yet symmetrised: the
+        bootstrap path centres its Gaussian endpoints on the raw matrix and
+        symmetrises point and endpoints together afterwards. The inserted T
+        and K axes are still in place; the caller squeezes them.
+
+    Raises:
+        ValueError: If ``slice_chunk_size`` is below 1.
+    """
+    if slice_chunk_size < 1:
+        raise ValueError(f"slice_chunk_size must be >= 1, got {slice_chunk_size}")
+    calc_second_order = BA_flat is not None
+    total = T * K
+
+    if is_scalar:
+        # Scalar path (T*K=1): call the fused kernel directly on 1-D arrays.
+        # This avoids vmap dispatch overhead and produces a simpler XLA graph.
+        a, b, ab = A_flat[0], B_flat[0], AB_flat[0]
+        if calc_second_order:
+            assert BA_flat is not None
+            kernel = _get_scalar_kernel(True, estimator)
+            s1, st, s2_raw = kernel(a, ab, BA_flat[0], b)
+            S2_out = s2_raw.reshape(1, 1, D, D)
+        else:
+            kernel = _get_scalar_kernel(False, estimator)
+            s1, st = kernel(a, ab, b)
+            S2_out = None
+        return s1.reshape(1, 1, D), st.reshape(1, 1, D), S2_out
+
+    # Chunk the T*K batches to cap peak memory when many outputs exist
+    cs = min(slice_chunk_size, total)
+
+    if calc_second_order:
+        assert BA_flat is not None
+        batched = _get_batched_kernel(True, estimator)
+        s1_parts, st_parts, s2_parts = [], [], []
+        for start in range(0, total, cs):
+            end = min(start + cs, total)
+            s1, st, s2 = batched(
+                A_flat[start:end],
+                AB_flat[start:end],
+                BA_flat[start:end],
+                B_flat[start:end],
+            )
+            s1_parts.append(s1)
+            st_parts.append(st)
+            s2_parts.append(s2)
+
+        S1_out = jnp.concatenate(s1_parts).reshape(T, K, D)
+        ST_out = jnp.concatenate(st_parts).reshape(T, K, D)
+        S2_out = jnp.concatenate(s2_parts).reshape(T, K, D, D)
+    else:
+        batched = _get_batched_kernel(False, estimator)
+        s1_parts, st_parts = [], []
+        for start in range(0, total, cs):
+            end = min(start + cs, total)
+            s1, st = batched(
+                A_flat[start:end],
+                AB_flat[start:end],
+                B_flat[start:end],
+            )
+            s1_parts.append(s1)
+            st_parts.append(st)
+
+        S1_out = jnp.concatenate(s1_parts).reshape(T, K, D)
+        ST_out = jnp.concatenate(st_parts).reshape(T, K, D)
+        S2_out = None
+
+    return S1_out, ST_out, S2_out
+
+
 def _indices_from_expanded(
     Y: Array, D: int, calc_second_order: bool, slice_chunk_size: int, estimator: str
 ) -> tuple[Array, Array, Array | None]:
@@ -182,7 +328,7 @@ def _indices_from_expanded(
 
     For a scalar output (T*K=1) it calls a direct fused kernel that computes
     the variance once. For a multi-output analysis it vmaps the fused kernel
-    over the T*K batches.
+    over a chunk of the T*K slices at a time.
 
     Args:
         Y: Model outputs in the expanded Saltelli layout, shape
@@ -201,92 +347,29 @@ def _indices_from_expanded(
         ValueError: If ``slice_chunk_size`` is below 1.
     """
     # Promote to uniform 3-D shape (N, T, K) so downstream code is shape-agnostic.
-    # The scalar path skips vmap entirely, saving tracing and dispatch cost.
     Y, layout = _prepare_Y(Y)
-    is_scalar = layout is YLayout.SCALAR
     _, T, K = Y.shape
 
     A, B, AB, BA = _separate_output_values(Y, D, calc_second_order)
-    base_n = A.shape[0]
+    A_flat, B_flat, AB_flat, BA_flat = _flatten_slices(A, B, AB, BA)
 
-    total = T * K
-
-    if is_scalar:
-        # Scalar path (T*K=1): call the fused kernel directly on 1-D arrays.
-        # This avoids vmap dispatch overhead and produces a simpler XLA graph.
-        # Squeeze trailing (1,1) dims added by _prepare_Y.
-        a = A[:, 0, 0]
-        b = B[:, 0, 0]
-        ab = AB[:, :, 0, 0]
-
-        if calc_second_order:
-            assert BA is not None
-            ba = BA[:, :, 0, 0]
-            kernel = _get_scalar_kernel(True, estimator)
-            S1_out, ST_out, S2_raw = kernel(a, ab, ba, b)
-            S2_out = _normalize_s2_matrix(S2_raw)
-        else:
-            kernel = _get_scalar_kernel(False, estimator)
-            S1_out, ST_out = kernel(a, ab, b)
-            S2_out = None
-
-        return S1_out, ST_out, S2_out
-
-    # Batched path (T*K > 1): flatten (T, K) into a single batch dimension
-    # so vmap processes all output slices in one vectorised call.
-    # (N,T,K) -> transpose -> (T,K,N) -> reshape -> (T*K, N)
-    # AB is (N,D,T,K) so its transpose puts (T,K) first then (N,D).
-    A_flat = A.transpose(1, 2, 0).reshape(T * K, base_n)
-    B_flat = B.transpose(1, 2, 0).reshape(T * K, base_n)
-    AB_flat = AB.transpose(2, 3, 0, 1).reshape(T * K, base_n, D)
-
-    if slice_chunk_size < 1:
-        raise ValueError(f"slice_chunk_size must be >= 1, got {slice_chunk_size}")
-    # Chunk the T*K batches to cap peak memory when many outputs exist
-    cs = min(slice_chunk_size, total)
-
-    if calc_second_order:
-        assert BA is not None
-        BA_flat = BA.transpose(2, 3, 0, 1).reshape(T * K, base_n, D)
-
-        batched = _get_batched_kernel(True, estimator)
-        s1_parts, st_parts, s2_parts = [], [], []
-        for start in range(0, total, cs):
-            end = min(start + cs, total)
-            s1, st, s2 = batched(
-                A_flat[start:end],
-                AB_flat[start:end],
-                BA_flat[start:end],
-                B_flat[start:end],
-            )
-            s1_parts.append(s1)
-            st_parts.append(st)
-            s2_parts.append(s2)
-
-        S1_out = jnp.concatenate(s1_parts).reshape(T, K, D)
-        ST_out = jnp.concatenate(st_parts).reshape(T, K, D)
-        S2_out = _normalize_s2_matrix(jnp.concatenate(s2_parts).reshape(T, K, D, D))
-    else:
-        batched = _get_batched_kernel(False, estimator)
-        s1_parts, st_parts = [], []
-        for start in range(0, total, cs):
-            end = min(start + cs, total)
-            s1, st = batched(
-                A_flat[start:end],
-                AB_flat[start:end],
-                B_flat[start:end],
-            )
-            s1_parts.append(s1)
-            st_parts.append(st)
-
-        S1_out = jnp.concatenate(s1_parts).reshape(T, K, D)
-        ST_out = jnp.concatenate(st_parts).reshape(T, K, D)
-        S2_out = None
+    S1_out, ST_out, S2_out = _point_indices_3d(
+        A_flat,
+        B_flat,
+        AB_flat,
+        BA_flat,
+        T=T,
+        K=K,
+        D=D,
+        is_scalar=layout is YLayout.SCALAR,
+        slice_chunk_size=slice_chunk_size,
+        estimator=estimator,
+    )
 
     S1_out = layout.squeeze(S1_out)
     ST_out = layout.squeeze(ST_out)
     if S2_out is not None:
-        S2_out = layout.squeeze(S2_out, n_trailing=2)
+        S2_out = layout.squeeze(_normalize_s2_matrix(S2_out), n_trailing=2)
     return S1_out, ST_out, S2_out
 
 
@@ -402,13 +485,24 @@ def _analyze_bootstrap(
 ) -> SobolResult:
     """Compute Sobol indices with bootstrap confidence intervals.
 
-    The no-bootstrap path vmaps over output slices. This path instead loops
-    over the (T, K) combinations in Python and vmaps over the R resamples
-    inside each slice. That trades some Python-loop overhead for bounded
-    memory: each vmap call materialises R copies of a single (N,) or (N, D)
-    slice, not R * T * K.
+    The point estimates come from :func:`_point_indices_3d`, the same chunked
+    ``vmap`` the no-bootstrap path uses, so an interval is always centred on
+    the number the plain analysis reports.
+
+    The draws follow the same shape one level deeper. The atomic unit is one
+    estimator call on one slice and one resample; the resamples of a slice are
+    ``vmap``ped, that pair is ``vmap``ped over a chunk of slices, and the
+    chunks are looped over. One device call therefore covers
+    ``chunk * R`` estimator evaluations instead of the ``R`` a per-slice loop
+    managed. ``slice_chunk_size`` caps the slices per chunk and the memory
+    budget can lower it further, so the peak stays bounded: no call
+    materialises more than ``chunk * R`` copies of an (N,) or (N, D) slice.
     """
-    from jaxgsa.sobol._bootstrap import _bootstrap_first_total, _bootstrap_second_order
+    from jaxgsa.sobol._bootstrap import (
+        _bootstrap_first_total,
+        _bootstrap_second_order,
+        _resolve_slice_chunk_size,
+    )
 
     Y, layout = _prepare_Y(Y)
     D = sampling_result.n_params
@@ -417,112 +511,69 @@ def _analyze_bootstrap(
     _, T, K = Y.shape
     A, B, AB, BA = _separate_output_values(Y, D, calc_second_order)
     base_n = A.shape[0]
+    A_flat, B_flat, AB_flat, BA_flat = _flatten_slices(A, B, AB, BA)
+    total = T * K
 
     # Pre-generate all R bootstrap index sets (sampling with replacement).
     # Shared across (T, K) slices so every output sees the same resamples.
     indices = jax.random.randint(key, shape=(num_resamples, base_n), minval=0, maxval=base_n)
 
-    # Reuse the scalar (non-vmapped) kernel for point estimates per slice.
-    # Only the one this design calls for is built: azzini-rosati has no
-    # first-order-only kernel to compile.
-    kernel = _get_scalar_kernel(calc_second_order, estimator)
+    S1_out, ST_out, S2_out = _point_indices_3d(
+        A_flat,
+        B_flat,
+        AB_flat,
+        BA_flat,
+        T=T,
+        K=K,
+        D=D,
+        is_scalar=layout is YLayout.SCALAR,
+        slice_chunk_size=slice_chunk_size,
+        estimator=estimator,
+    )
 
-    S1_list, ST_list = [], []
-    S1_lo_list, S1_hi_list = [], []
-    ST_lo_list, ST_hi_list = [], []
-    S2_list, S2_lo_list, S2_hi_list = [], [], []
-    # Only filled when the caller asked for the draws. R copies of every index
-    # array is the largest thing this function can hold, so it is opt-in.
-    S1_draw_list: list[Array] = []
-    ST_draw_list: list[Array] = []
-    S2_draw_list: list[Array] = []
+    cs = _resolve_slice_chunk_size(
+        slice_chunk_size, total, num_resamples, base_n, D, A_flat.dtype.itemsize
+    )
 
-    for t in range(T):
-        for k in range(K):
-            # Extract 1-D slice for this (time, output) combo
-            a = A[:, t, k]
-            b = B[:, t, k]
-            ab = AB[:, :, t, k]
+    S2_boot = None
+    if calc_second_order:
+        assert BA_flat is not None
+        s1_boot, st_boot, s2_boot = _bootstrap_second_order(
+            indices, A_flat, AB_flat, BA_flat, B_flat, cs, estimator
+        )
+        # (S, R, D, D) -> (R, T, K, D, D): the CI helpers and the replicate
+        # layout both want the resample axis first.
+        S2_boot = jnp.moveaxis(s2_boot, 1, 0).reshape(num_resamples, T, K, D, D)
+    else:
+        s1_boot, st_boot = _bootstrap_first_total(indices, A_flat, AB_flat, B_flat, cs, estimator)
 
-            if calc_second_order:
-                assert BA is not None
-                ba = BA[:, :, t, k]
+    S1_boot = jnp.moveaxis(s1_boot, 1, 0).reshape(num_resamples, T, K, D)
+    ST_boot = jnp.moveaxis(st_boot, 1, 0).reshape(num_resamples, T, K, D)
 
-                s1, st, s2 = kernel(a, ab, ba, b)
-                S2_list.append(s2)
-
-                s1_boot, st_boot, s2_boot = _bootstrap_second_order(
-                    indices, a, ab, ba, b, slice_chunk_size, estimator
-                )
-                s2_lo, s2_hi = _bootstrap_ci_endpoints(
-                    s2,
-                    s2_boot,
-                    conf_level=conf_level,
-                    ci_method=ci_method,
-                )
-                S2_lo_list.append(s2_lo)
-                S2_hi_list.append(s2_hi)
-                if keep_replicates:
-                    S2_draw_list.append(s2_boot)
-            else:
-                s1, st = kernel(a, ab, b)
-                s1_boot, st_boot = _bootstrap_first_total(
-                    indices, a, ab, b, slice_chunk_size, estimator
-                )
-
-            S1_list.append(s1)
-            ST_list.append(st)
-            if keep_replicates:
-                S1_draw_list.append(s1_boot)
-                ST_draw_list.append(st_boot)
-
-            s1_lo, s1_hi = _bootstrap_ci_endpoints(
-                s1,
-                s1_boot,
-                conf_level=conf_level,
-                ci_method=ci_method,
-            )
-            st_lo, st_hi = _bootstrap_ci_endpoints(
-                st,
-                st_boot,
-                conf_level=conf_level,
-                ci_method=ci_method,
-            )
-            S1_lo_list.append(s1_lo)
-            S1_hi_list.append(s1_hi)
-            ST_lo_list.append(st_lo)
-            ST_hi_list.append(st_hi)
-
-    # Reassemble per-slice results into (T, K, D) arrays
-    S1_out = jnp.stack(S1_list).reshape(T, K, D)
-    ST_out = jnp.stack(ST_list).reshape(T, K, D)
-
-    # Confidence intervals: stack [lower, upper] into leading dim of size 2
+    # Confidence intervals: stack [lower, upper] into leading dim of size 2.
+    # Every endpoint reduces over the leading resample axis alone, so the
+    # whole (T, K, D) grid is one call rather than one call per slice.
     S1_conf = jnp.stack(
-        [
-            jnp.stack(S1_lo_list).reshape(T, K, D),
-            jnp.stack(S1_hi_list).reshape(T, K, D),
-        ]
+        _bootstrap_ci_endpoints(S1_out, S1_boot, conf_level=conf_level, ci_method=ci_method)
     )
     ST_conf = jnp.stack(
-        [
-            jnp.stack(ST_lo_list).reshape(T, K, D),
-            jnp.stack(ST_hi_list).reshape(T, K, D),
-        ]
+        _bootstrap_ci_endpoints(ST_out, ST_boot, conf_level=conf_level, ci_method=ci_method)
     )
 
     if calc_second_order:
-        S2_out = _normalize_s2_matrix(jnp.stack(S2_list).reshape(T, K, D, D))
+        assert S2_out is not None and S2_boot is not None
+        # Point and endpoints are both symmetrised, and only after the
+        # endpoints are read: a Gaussian endpoint is centred on the raw
+        # matrix, as the diagonal of the symmetrised one is NaN.
         S2_conf = _normalize_s2_matrix(
             jnp.stack(
-                [
-                    jnp.stack(S2_lo_list).reshape(T, K, D, D),
-                    jnp.stack(S2_hi_list).reshape(T, K, D, D),
-                ]
+                _bootstrap_ci_endpoints(
+                    S2_out, S2_boot, conf_level=conf_level, ci_method=ci_method
+                )
             )
         )
+        S2_out = _normalize_s2_matrix(S2_out)
     else:
-        S2_out = None
         S2_conf = None
 
     S1_out = layout.squeeze(S1_out)
@@ -536,25 +587,14 @@ def _analyze_bootstrap(
 
     replicates: dict[str, Array] | None = None
     if keep_replicates:
-
-        def _stack_draws(per_slice: list[Array], n_trailing: int) -> Array:
-            """Reorder per-slice draws into one array led by the resample axis.
-
-            Each entry is ``(R, ...)`` for one ``(t, k)``. Stacking gives
-            ``(T*K, R, ...)``; the resample axis has to move to the front so
-            the layout matches the other four methods, and so the squeeze can
-            address the inserted T and K axes from the end.
-            """
-            stacked = jnp.stack(per_slice).reshape(T, K, *per_slice[0].shape)
-            moved = jnp.moveaxis(stacked, 2, 0)
-            return layout.squeeze(moved, n_trailing=n_trailing)
-
+        # The draws already lead with the resample axis, which the squeeze
+        # leaves alone because it addresses T and K from the end.
         replicates = {
-            "S1": _stack_draws(S1_draw_list, 1),
-            "ST": _stack_draws(ST_draw_list, 1),
+            "S1": layout.squeeze(S1_boot, n_trailing=1),
+            "ST": layout.squeeze(ST_boot, n_trailing=1),
         }
-        if calc_second_order:
-            replicates["S2"] = _stack_draws(S2_draw_list, 2)
+        if S2_boot is not None:
+            replicates["S2"] = layout.squeeze(S2_boot, n_trailing=2)
 
     return SobolResult(
         S1=S1_out,
@@ -661,10 +701,18 @@ def analyze(
         key: JAX PRNG key for bootstrap randomness. Required when
             ``num_resamples > 0``.
         slice_chunk_size: Memory/speed trade-off for batched computation.
-            In the no-bootstrap path this is the number of (T, K) output
-            slices per vmap batch; in the bootstrap path it caps the
-            number of bootstrap resamples per batch. Lower it if you hit
+            It is the number of (T, K) output slices per vmap batch on both
+            paths. On the bootstrap path each slice in a batch carries all
+            ``num_resamples`` of its draws, so one device call covers
+            ``slice_chunk_size * num_resamples`` estimator evaluations, and
+            the memory budget that :func:`jaxgsa.config.set_memory_budget`
+            sets can lower the width further. Lower it yourself if you hit
             device out-of-memory errors. Defaults to 2048.
+
+            It changes no index beyond floating-point noise. The estimator
+            sums over the sample axis, and XLA schedules that reduction
+            differently for a different batch width, so two chunk sizes can
+            disagree in the last bits of a float32 result.
         on_invalid: What to do about non-finite model outputs. The unit here
             is one Saltelli group, so a single bad value removes the whole
             group of ``D + 2`` (or ``2D + 2``) rows. ``"raise"`` (the default)

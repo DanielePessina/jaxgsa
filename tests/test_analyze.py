@@ -5,6 +5,7 @@ import pytest
 from scipy.stats import truncnorm
 
 import jaxgsa
+from jaxgsa.benchmarks import sobol_g
 from jaxgsa.benchmarks.ishigami import ANALYTICAL_S1, ANALYTICAL_ST, PROBLEM, evaluate
 from jaxgsa.problem import GaussianInputSpec
 from jaxgsa.sobol import SobolSamples
@@ -335,11 +336,10 @@ def test_slice_chunk_size_invariance():
     means a different thing on each side, so the test runs both halves.
 
     * ``num_resamples=32`` takes ``_analyze_bootstrap``. There
-      ``slice_chunk_size`` is forwarded only to the resample loops, so it
-      chunks *resamples*. The point estimates ``S1``, ``ST`` and ``S2`` come
-      from the per-slice kernels and do not depend on it at all: only the
-      three ``*_conf`` fields are sensitive to this half. The point estimates
-      are still compared, but as a cheap guard, not as the thing under test.
+      ``slice_chunk_size`` caps the *output slices* per device call, and the
+      resamples of a slice ride along inside that call. So it chunks the
+      point estimates and the draws alike, and all six fields are sensitive
+      to this half.
     * ``num_resamples=0`` takes ``_analyze_no_bootstrap``. That is the path
       whose loop chunks the ``T*K`` output columns and reassembles them with
       ``jnp.concatenate`` plus ``_normalize_s2_matrix``. This half is the only
@@ -365,3 +365,81 @@ def test_slice_chunk_size_invariance():
     plain_chunked = jaxgsa.sobol.analyze(sr, Y_multi, num_resamples=0, slice_chunk_size=1)
     assert plain_full.S1_conf is None
     _assert_sobol_fields_match(plain_chunked, plain_full, ("S1", "ST", "S2"))
+
+
+def test_bootstrap_point_estimates_equal_the_plain_path_exactly():
+    """Tier T4 (internal consistency): asking for an interval moves no index.
+
+    ``S1``, ``ST`` and ``S2`` must not depend on whether a bootstrap was
+    requested. Both paths now run the same chunked ``vmap`` over output
+    slices, so the agreement is bit-for-bit and not merely to a tolerance.
+
+    This used not to hold. The bootstrap path called the scalar fused kernel
+    once per slice while the plain path vmapped the same kernel over a chunk
+    of slices, and XLA schedules the two reductions differently: the two
+    ``S2`` matrices for one design disagreed in the last bits. An interval
+    centred on a number the plain analysis does not report is the defect this
+    pins shut.
+
+    The model and the shape here are the ones that expose it. The g-function
+    with two outputs is the ``sobol_g_multi`` case from
+    ``scripts/baseline_dump.py``, and against the previous code this test
+    fails with ``S2`` differing by 1.4e-7. A wider output stack does not
+    discriminate -- both paths already agreed there -- so the narrow shape is
+    the point and not an arbitrary choice.
+    """
+    sr = jaxgsa.sobol.sample(sobol_g.PROBLEM, n_samples=2**9, seed=11, verbose=False)
+    g = sobol_g.evaluate(jnp.asarray(sr.samples))
+    Y_multi = jnp.stack([g, 2.0 * g + 0.37], axis=-1)
+
+    boot = jaxgsa.sobol.analyze(sr, Y_multi, num_resamples=8, key=jax.random.key(5))
+    plain = jaxgsa.sobol.analyze(sr, Y_multi, num_resamples=0)
+
+    for field in ("S1", "ST", "S2"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(boot, field)),
+            np.asarray(getattr(plain, field)),
+            err_msg=field,
+        )
+
+
+def test_the_bootstrap_batches_slices_instead_of_looping_over_them(monkeypatch):
+    """Tier T4 (internal consistency): one device call carries many slices.
+
+    This test patches an internal and records shapes, which the suite avoids
+    elsewhere. Keep it anyway: batching is *defined* to return the same
+    numbers, so it has no other observable effect, and
+    :func:`test_slice_chunk_size_invariance` passes just as well against a
+    per-slice Python loop. This is the only place the batching is asserted.
+
+    Two things are pinned. The resampler must see a chunk of slices, not one
+    slice at a time -- the recorded widths are the contract, ``[4, 2]`` for
+    six slices at a chunk of four, including the short trailing chunk. And
+    every call must carry the whole ``(R, N)`` index array, because the
+    resamples belong inside the batch rather than in a loop around it.
+    """
+    from jaxgsa.sobol import _bootstrap as sobol_bootstrap
+
+    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**8, seed=13, verbose=False)
+    Y = evaluate(jnp.asarray(sr.samples))
+    Y_multi = jnp.stack([(i + 1.0) * Y for i in range(6)], axis=-1).reshape(-1, 3, 2)
+
+    widths: list[int] = []
+    n_resamples: list[int] = []
+    real_get = sobol_bootstrap._resample_so
+
+    def recording_get(estimator: str):
+        kernel = real_get(estimator)
+
+        def recorder(idx, A, AB, BA, B):
+            widths.append(int(A.shape[0]))
+            n_resamples.append(int(idx.shape[0]))
+            return kernel(idx, A, AB, BA, B)
+
+        return recorder
+
+    monkeypatch.setattr(sobol_bootstrap, "_resample_so", recording_get)
+    jaxgsa.sobol.analyze(sr, Y_multi, num_resamples=8, key=jax.random.key(2), slice_chunk_size=4)
+
+    assert widths == [4, 2], f"expected one full and one short chunk, got {widths}"
+    assert n_resamples == [8, 8], "every call must carry the whole resample batch"

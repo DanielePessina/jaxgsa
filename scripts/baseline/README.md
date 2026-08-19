@@ -1,14 +1,37 @@
 # Numerical baseline
 
-`baseline-0.8.0.json` is a fixed-seed record of what jaxgsa computed before
-the 0.9 refactors started. It exists for gate 5 of the review protocol in
-`PLAN-V1.0.md` section 3.1.
+`baseline-1.0.0.json` is the file the check runs against. It is a fixed-seed
+record of what jaxgsa computes, and it exists for gate 5 of the review
+protocol in `PLAN-V1.0.md` section 3.1.
 
-**A changed number is a wiring error, not a tolerance issue.** The refactors
-that this file guards are declared "plumbing only": they move code, rename
-fields, and share helpers. None of them may change an index. There is no
+`baseline-0.8.0.json` is kept beside it as the earlier record. Nothing reads
+it; it is there so the one place a number was allowed to move stays auditable.
+
+**A changed number is a wiring error, not a tolerance issue.** Most of the
+work this file guards is declared "plumbing only": it moves code, renames
+fields, and shares helpers. None of that may change an index. There is no
 tolerance in the comparison, and adding one would defeat the purpose. If a
 number moves, find the mis-wired call before you touch this file.
+
+## The one reviewed exception
+
+Kernel work is not plumbing. Batching an estimator over more output slices at
+once is the whole speedup, and XLA schedules a float32 reduction differently
+at a different batch width, so the last bits move. That is a property of the
+hardware, not a choice in the code.
+
+Regenerating `baseline-1.0.0.json` absorbed exactly one such change: 44 sobol
+values, every delta 1 to 4 units in the last place of float32, from the
+bootstrap resampler moving to a chunked `vmap` over slices. Two facts made it
+reviewable rather than waved through. Feeding the *old* resampler from the
+new flattened arrays is bit-for-bit identical, so the layout change is not
+the cause; and the only batch width that reproduces the old bits is one
+holding a single slice, which is the same as not batching at all.
+
+One of the 44 is a fix. `sobol_g_multi.sobol.S2` moved because the bootstrap
+point estimate now runs the same kernel as the plain path. Before, the two
+disagreed by 1.4e-7 for one design, so an interval was centred on a number
+`analyze(num_resamples=0)` never reported.
 
 ## How to use it
 

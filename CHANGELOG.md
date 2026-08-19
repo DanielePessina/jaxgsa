@@ -141,6 +141,20 @@ the work, including seven corrections to the roadmap it replaces.
 
   No index changed. Every value is bit-for-bit what it was.
 
+- **The Sobol bootstrap is 9-20x faster on many outputs.** On a 1024-row
+  Ishigami problem with 128 output slices, `analyze(..., num_resamples=...)`
+  went from 84 ms to 4-9 ms. The resampler now runs one estimator kernel over
+  one output slice, mapped over the resample draws and then over a chunk of
+  slices; before, a Python loop dispatched twice per slice. Confidence
+  endpoints are one call on the whole grid instead of one per slice.
+
+  `slice_chunk_size` now caps output slices on both the plain and the
+  bootstrap path. On the bootstrap path it used to cap resample draws.
+
+  This moves 44 sobol values in the last 1 to 4 bits of float32. Widening the
+  batch is the speedup, and XLA schedules a float32 reduction differently at
+  a different width. `scripts/baseline/README.md` records the review.
+
 ### Fixed
 
 - **`to_dataset()` lost the analysis settings.** A result printed its settings
@@ -167,6 +181,13 @@ the work, including seven corrections to the roadmap it replaces.
   Every value is a plain string, number or boolean, so `to_netcdf` writes it. A
   setting that does not apply leaves its key out. VKOGA writes no `cv_rmse`
   when no cross-validation ran, because netCDF has no null attribute.
+
+- **A Sobol bootstrap no longer reports indices that differ from the plain
+  analysis.** `analyze(sr, Y, num_resamples=20).S2` and
+  `analyze(sr, Y, num_resamples=0).S2` could differ in the last bits for the
+  same design, because the two paths ran the estimator at different batch
+  widths. An interval was centred on a number the plain analysis never
+  reported. Both paths now run the same kernel and agree bit-for-bit.
 
 - **The first-order Sobol estimator is now attributed correctly.** The
   docstrings called `E[B (AB_j - A)] / Var(Y)` "the Saltelli (2010)

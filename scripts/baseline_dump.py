@@ -58,7 +58,7 @@ from jaxgsa.benchmarks import ishigami, sobol_g
 SEED = 20260818
 """The one seed used by every sampler, bootstrap and permutation test."""
 
-DEFAULT_OUT = Path(__file__).resolve().parent / "baseline" / "baseline-0.8.0.json"
+DEFAULT_OUT = Path(__file__).resolve().parent / "baseline" / "baseline-1.0.0.json"
 
 INLINE_ARRAY_LIMIT = 1024
 """Arrays with at most this many elements are written out element by element.
