@@ -57,16 +57,39 @@ between them is deliberate.
 
 ## Parameter vocabulary
 
-### The three batching axes
+### Batching: two questions, not three axes
 
-These are orthogonal. A method takes the ones that apply to it and no others;
-a keyword that does nothing is worse than an absent one.
+Every method is built the same way. Find the **atomic kernel** — the
+computation for one unit, usually one output slice. `vmap` it over many units.
+Loop over groups of units on the host.
 
-| Keyword | Unit | Meaning |
-|---|---|---|
-| `batch_size` | sample rows | How many rows of the sample axis to process per device call. Bounds the working set of a row-wise computation: a surrogate fit, a surrogate evaluation, a Jacobian, a kernel-matrix build. |
-| `slice_chunk_size` | output slices | How many `(t, k)` output slices to vmap per device call. Bounds the working set when `T*K` is large. |
-| `resample_chunk_size` | bootstrap replicates | How many bootstrap replicates to vmap per device call. Only for methods whose replicate axis, not their slice axis, is the memory bound. |
+That gives exactly two things a caller might need to make smaller, and each has
+one keyword:
+
+| Keyword | Question it answers |
+|---|---|
+| `slice_chunk_size` | How many atomic kernels to `vmap` at once. Lower it to run more, smaller vmaps. |
+| `resample_chunk_size` | The same question for a bootstrap replicate axis, when replicates rather than slices are the vectorised dimension. |
+| `batch_size` | How to subdivide the work *inside* one atomic kernel, for when a single kernel invocation is itself too large. |
+
+**A method takes a keyword when its shape calls for one, and not otherwise.**
+That is testable rather than a matter of taste:
+
+- `sobol` takes only `slice_chunk_size`. One slice is a few reductions over
+  `N`, so subdividing rows within a slice would buy nothing.
+- `hsic` takes `batch_size` because one slice materialises an `(N, N)` kernel
+  matrix, which can exceed memory on its own. Row-blocking bounds the build
+  without changing the result.
+- `pce` and `dgsm` take only `batch_size`. Their real work is not per-slice at
+  all — one multi-RHS solve, one Jacobian — so the slice axis is never the
+  bound.
+- `hdmr` takes both, and they must **compose**. Its B-spline bases are built
+  from `X` alone and shared across every slice, so they are large in `N` and
+  independent of `T*K`; the per-slice fit is large in `T*K`. Two bounds, two
+  keywords. A path that honours one and silently ignores the other is a defect.
+
+The "subdivide inside" case also covers a precomputation shared across kernels,
+not only the kernel body — HDMR's bases are the example.
 
 All three accept `int | None`, where `None` means "derive one from
 `jaxgsa.config.get_memory_budget()`". A hard-coded element budget is a defect,
@@ -79,7 +102,7 @@ not a default.
 | `n_bootstrap` | `int`, default `0` | Number of bootstrap replicates. `0` means no interval. The single spelling — not `num_resamples`. |
 | `conf_level` | `float`, default `0.95` | Two-sided confidence level. |
 | `ci_method` | `"quantile" \| "gaussian"`, default `"quantile"` | How endpoints are formed. Every method that offers `n_bootstrap` offers this. |
-| `key` | `Array \| None`, default `None` | A JAX PRNG key. Required when `n_bootstrap > 0`. The single spelling — not `seed: int`. |
+| `key` | `Array \| None`, default `None` | A JAX PRNG key. Required **wherever the method draws randomness** — a bootstrap, a permutation test, a Monte-Carlo integral — not only when `n_bootstrap > 0`. HSIC and VKOGA need one despite declaring no bootstrap. The single spelling — not `seed: int`. |
 | `keep_replicates` | `bool`, default `False` | Keyword-only, and the **last** keyword in the signature. Retains the per-replicate values on the result. |
 
 `key` rather than `seed` because a key can be split. An `int` seed forces
@@ -87,15 +110,25 @@ per-call reseeding, which silently correlates nested or repeated bootstraps —
 a correctness problem, not a style preference. Callers who have an integer
 write `jax.random.key(0)`.
 
-Borgonovo is the one method where `n_bootstrap` defaults to non-zero, because
-its bias correction needs the replicates. That default is documented on the
-method.
+**`n_bootstrap` defaults to `0` on every method, with no exceptions.** The
+plainest possible call must work, and a non-zero default plus a required `key`
+would make `borgonovo.analyze(problem, X, Y)` an error. Borgonovo's bias
+correction does need replicates, so it warns when `bias_correct` is asked for
+with `n_bootstrap == 0` rather than silently returning the uncorrected,
+positively-biased delta.
+
+**Never derive a key from a constant.** A method that falls back to
+`jax.random.key(0)` when none is given reintroduces exactly the silent
+correlated reseeding this contract removes. Raise instead. For the same reason,
+per-stream keys come from `jax.random.split` or `fold_in`, never from an
+integer offset like `seed + 1` or `seed + 7919`.
 
 ### Surrogate-backed methods
 
-`n_bootstrap` defaults to `0` on `pce`, `hdmr`, `vkoga` and `shapley` and must
-stay there: each replicate refits a surrogate, so the cost is a different order
-of magnitude from a row resample.
+`pce`, `hdmr`, `vkoga` and `shapley` do offer `n_bootstrap`, and it must stay
+defaulted to `0`: each replicate refits a surrogate, so the cost is a different
+order of magnitude from a row resample. An on-by-default interval would make a
+routine call an order of magnitude slower for a caller who never asked.
 
 ### Entry points
 
@@ -133,6 +166,14 @@ copyleft run out-of-process, T4 internal consistency. A method must not ship at
 T4 alone unless there is a recorded reason no external oracle exists. **A test
 that retypes the source's own formula is not an oracle. It is a mirror.**
 Record the tier in the test docstring.
+
+**Parity against another engine is run locally, not in CI.** The committed test
+checks a *recorded literal*, and the script that produced it lives in
+`scripts/oracles/` with the engine version recorded beside the numbers. Be
+honest about what that buys: a live comparison catches a regression on either
+side, a recorded literal only catches ours. That is the intended trade — the
+other engine changing is not a jaxgsa bug — but a recorded T2 number is weaker
+evidence than a live one, and the docstring should say which it is.
 
 **Atomic kernel, then vmap.** Write one kernel for one output slice. vmap it
 over a chunk of slices. Loop over chunks on the host. Size the chunk from the
