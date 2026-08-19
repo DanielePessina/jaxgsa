@@ -47,11 +47,28 @@ is recorded too, because a bad oracle is more expensive than none.
 - **It bounds superset importance, not the second-order index:**
   `D_ij <= D_ij^super <= C(mu_i) C(mu_j) nu_ij`. Advertising it as a bound on
   `S_ij` goes through the loose first inequality. Say "superset importance".
-- **Do not use GlobalSensitivity.jl's `DGSM(crossed=true)` as an oracle**
-  except for `crossedsq` on uniform `[0,1]`. Its `tao` weight is coded
-  `(1-3x+x^2)/6` where the literature has `(1-3x+3x^2)/6`, which goes negative
-  at `x = 1`; and `tao`/`sigma` assume uniform `[0,1]` but are applied to any
-  distribution.
+- **Check GlobalSensitivity.jl's `DGSM(crossed=true)` before trusting it as an
+  oracle.** A note carried through several planning documents claims its `tao`
+  weight is coded `(1-3x+x^2)/6` where the literature has `(1-3x+3x^2)/6`.
+
+  **That claim is UNVERIFIED.** It reached this ADR without a version, a
+  permalink or a line number, and nobody in the chain read the Julia source.
+  A dropped `3` is exactly as likely in the note-taking as in the original, so
+  do not repeat it as fact and do not file it as a bug report on this basis.
+
+  Two structural hints that it may be right: `(1-3x+3x^2)/6` is symmetric
+  about `x = 1/2` and the alleged form is not, and weights of this kind on the
+  unit interval are normally symmetric by construction. The integrals differ
+  too, `1/12` against `1/36`.
+
+  Before relying on either form: derive the weight from the crossed-DGSM
+  definition independently, then read the current source and get a permalink.
+  ADR 0001 and ADR 0002 are the precedent — a published number is not
+  automatically an oracle, and this project has already caught one corrupted
+  published table.
+
+  Separately, and not in doubt: `tao`/`sigma` assume uniform `[0,1]` but are
+  applied to any distribution.
 - `jax.hessian` costs about `D` times a gradient, per output, so this stays
   off by default.
 
