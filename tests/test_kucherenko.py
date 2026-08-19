@@ -196,6 +196,36 @@ def test_sampler_validation_errors():
         jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 1)
 
 
+def test_seed_with_scramble_false_raises():
+    """Tier T4: the inert seed/scramble combination is refused.
+
+    The unscrambled Sobol' sequence is deterministic, so a seed passed with
+    ``scramble=False`` would do nothing. The policy is to raise on a setting
+    that cannot do what it says, never to ignore it silently.
+    """
+    with pytest.raises(ValueError, match="scramble=False"):
+        jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 64, scramble=False, seed=0)
+
+
+def test_seed_interface_matches_the_other_samplers():
+    """Tier T4: ``seed`` takes an int or a Generator, and ``None`` is the default.
+
+    An explicit int seed reproduces the design; a ``np.random.Generator`` is
+    accepted the same way ``sobol.sample`` and ``morris.sample`` accept one.
+    ``scramble=False`` without a seed stays valid and deterministic.
+    """
+    a = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 64, seed=7)
+    b = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 64, seed=7)
+    np.testing.assert_array_equal(a.samples, b.samples)
+
+    from_rng = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 64, seed=np.random.default_rng(7))
+    assert from_rng.samples.shape == a.samples.shape
+
+    plain = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 64, scramble=False)
+    plain_again = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 64, scramble=False)
+    np.testing.assert_array_equal(plain.samples, plain_again.samples)
+
+
 # --- analyze contracts --------------------------------------------------------
 
 

@@ -823,7 +823,13 @@ def _safe_cholesky(cov: np.ndarray, lifts: list[float] | None = None) -> np.ndar
         return np.linalg.cholesky(lifted)
 
 
-def latent_normal_sample(n: int, dim: int, *, seed: int, scramble: bool = True) -> np.ndarray:
+def latent_normal_sample(
+    n: int,
+    dim: int,
+    *,
+    seed: int | np.random.Generator | None,
+    scramble: bool = True,
+) -> np.ndarray:
     """Draw ``(n, dim)`` standard normal variates from a scrambled Sobol' set.
 
     Every integrand here runs on a cheap surrogate, so memory rather than
@@ -836,7 +842,7 @@ def latent_normal_sample(n: int, dim: int, *, seed: int, scramble: bool = True) 
             round their sample sizes up before calling; the value is used
             as-is here.
         dim: Dimension of each point.
-        seed: Seed for the scrambling.
+        seed: Random seed or generator for the scrambling.
         scramble: Whether to scramble the sequence. With ``scramble=False``
             the sequence's first point (the origin) is skipped: the probit
             would map it to the clipped extreme deviate, a point no normal

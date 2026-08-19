@@ -34,7 +34,7 @@ Under independent inputs both reduce exactly to the classic Sobol' `S1` and
 
 ## Design
 
-`sample(problem, n_samples, *, scramble=True, seed=0)` builds
+`sample(problem, n_samples, *, scramble=True, seed=None)` builds
 `base_n * (2D + 1)` rows, where `base_n` is `n_samples` rounded up to the
 next power of two. The design holds one joint block, then two blocks per
 parameter. The first keeps $X_i$ and redraws the rest from

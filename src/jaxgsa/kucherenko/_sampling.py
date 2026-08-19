@@ -124,7 +124,7 @@ def sample(
     n_samples: int,
     *,
     scramble: bool = True,
-    seed: int = 0,
+    seed: int | np.random.Generator | None = None,
 ) -> KucherenkoSamples:
     """Generate the conditional-copula design for :func:`jaxgsa.kucherenko.analyze`.
 
@@ -146,15 +146,24 @@ def sample(
             the next power of two.
         scramble: Whether to Owen-scramble the Sobol' sequence. Keep it on:
             different seeds then give statistically independent designs.
-        seed: Seed for the scrambling.
+        seed: Random seed or generator for reproducibility. It seeds the
+            scrambling, so it only applies with ``scramble=True``.
 
     Returns:
         A :class:`KucherenkoSamples` carrying the stacked design.
 
     Raises:
         ValueError: If the problem has fewer than two parameters or any
-            categorical parameter, or if ``n_samples < 2``.
+            categorical parameter, if ``n_samples < 2``, or if a ``seed`` is
+            given with ``scramble=False`` (the unscrambled sequence is
+            deterministic, so the seed would do nothing).
     """
+    if not scramble and seed is not None:
+        raise ValueError(
+            "jaxgsa.kucherenko.sample: seed has no effect with scramble=False. "
+            "The unscrambled Sobol' sequence is deterministic, so the seed "
+            "would do nothing. Use scramble=True, or drop the seed."
+        )
     _raise_categorical_design(problem, "jaxgsa.kucherenko.sample")
     D = problem.num_vars
     if D < 2:
