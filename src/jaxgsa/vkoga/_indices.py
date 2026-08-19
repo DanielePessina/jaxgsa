@@ -79,6 +79,65 @@ _COMPONENT_RIDGE = 1e-8
 _S_U_CLIP_TOLERANCE = 0.01
 
 
+class _Streams(NamedTuple):
+    """One independent host-side RNG stream per consumer of randomness.
+
+    These estimators are scipy loops, so they cannot take a JAX key and split
+    it. :class:`numpy.random.SeedSequence` is the host-side equivalent:
+    ``spawn`` derives children whose states are decorrelated by construction,
+    which an integer offset such as ``seed + 1`` does not do. Every draw in
+    this module reaches its scrambling seed through one of these fields, so
+    there is nowhere left for an offset to be reintroduced.
+
+    Attributes:
+        variance: Stream for the unconditional joint sample.
+        total_correlated: One stream per parameter for
+            :func:`_total_correlated`.
+        total_uncorrelated: One stream per parameter for
+            :func:`_total_uncorrelated_and_conditional`.
+    """
+
+    variance: np.random.SeedSequence
+    total_correlated: list[np.random.SeedSequence]
+    total_uncorrelated: list[np.random.SeedSequence]
+
+
+def _spawn_streams(entropy: int, n_parameters: int) -> _Streams:
+    """Spawn the independent streams the estimators need from one root.
+
+    Args:
+        entropy: Root entropy, folded down from the caller's PRNG key.
+        n_parameters: Number of parameters ``D``.
+
+    Returns:
+        A :class:`_Streams` holding ``2 * D + 1`` independent child sequences.
+    """
+    root = np.random.SeedSequence(entropy)
+    variance, correlated, uncorrelated = root.spawn(3)
+    return _Streams(
+        variance=variance,
+        total_correlated=correlated.spawn(n_parameters),
+        total_uncorrelated=uncorrelated.spawn(n_parameters),
+    )
+
+
+def _qmc_seed(stream: np.random.SeedSequence) -> int:
+    """Draw the scrambling seed ``scipy.stats.qmc`` takes from a stream.
+
+    ``qmc.Sobol`` wants a plain integer (or a ``Generator``), so a spawned
+    child is turned into one here, and only here. The value comes out of the
+    sequence's own hashed state, so two children never produce neighbouring
+    integers the way ``seed + 1`` does.
+
+    Args:
+        stream: One spawned child sequence.
+
+    Returns:
+        A non-negative integer below ``2**32``.
+    """
+    return int(stream.generate_state(1, dtype=np.uint32)[0])
+
+
 class CorrelatedIndices(NamedTuple):
     """Raw index arrays produced by :func:`estimate_correlated_indices`.
 
@@ -114,7 +173,7 @@ def estimate_correlated_indices(
     n_outer: int,
     n_inner: int,
     n_variance: int,
-    seed: int,
+    entropy: int,
     batch_size: int | None,
 ) -> CorrelatedIndices:
     """Estimate the five correlated variance-based indices by quasi-Monte-Carlo.
@@ -136,7 +195,10 @@ def estimate_correlated_indices(
         n_inner: Inner (conditional) sample size per outer point.
         n_variance: Sample size for the unconditional output variance and for
             the component-function fit.
-        seed: Base seed. Each parameter and stage derives a distinct stream.
+        entropy: Root entropy for the host-side draws, folded down from the
+            caller's PRNG key. Each parameter and stage gets its own
+            :class:`numpy.random.SeedSequence` child spawned from it, never a
+            seed derived by arithmetic.
         batch_size: Sample rows per device call, or ``None`` to derive one
             from the memory budget. Required, with no default, because the
             value used to be droppable: it bounds the nested conditional draws as
@@ -148,9 +210,12 @@ def estimate_correlated_indices(
         A :class:`CorrelatedIndices` whose index arrays have shape ``(S, D)``.
     """
     D = plan.chol_full.shape[0]
+    streams = _spawn_streams(entropy, D)
 
     # --- Unconditional variance, and the additive component functions --------
-    Z_var = latent_normal_sample(n_variance, D, seed=seed) @ plan.chol_full.T
+    Z_var = (
+        latent_normal_sample(n_variance, D, seed=_qmc_seed(streams.variance)) @ plan.chol_full.T
+    )
     U_var = norm.cdf(Z_var)
     Y_var = np.asarray(predict(U_var), dtype=np.float64)
     variance = Y_var.var(axis=0)
@@ -173,7 +238,7 @@ def estimate_correlated_indices(
             n_outer=n_outer,
             n_inner=n_inner,
             n_slices=n_slices,
-            seed=seed + 1 + i,
+            stream=streams.total_correlated[i],
             batch_size=batch_size,
         )
         total_uncorrelated, conditional_component_var = _total_uncorrelated_and_conditional(
@@ -184,7 +249,7 @@ def estimate_correlated_indices(
             n_outer=n_outer,
             n_inner=n_inner,
             n_slices=n_slices,
-            seed=seed + 1 + D + i,
+            stream=streams.total_uncorrelated[i],
             batch_size=batch_size,
         )
         S_TU[:, i] = total_uncorrelated
@@ -357,7 +422,7 @@ def _total_correlated(
     n_outer: int,
     n_inner: int,
     n_slices: int,
-    seed: int,
+    stream: np.random.SeedSequence,
     batch_size: int | None,
 ) -> np.ndarray:
     """Estimate ``V(E(Y|X_i))`` for one parameter.
@@ -385,7 +450,8 @@ def _total_correlated(
         n_outer: Outer (conditioning) sample size.
         n_inner: Inner (conditional) sample size per outer point.
         n_slices: Number of output slices ``S``.
-        seed: Seed for this parameter's latent draws.
+        stream: This parameter's spawned :class:`numpy.random.SeedSequence`.
+            The outer and inner draws take two further children of it.
         batch_size: Sample rows per device call, or ``None`` to derive one
             from the memory budget.
 
@@ -394,11 +460,12 @@ def _total_correlated(
     """
     others = plan.others[index]
     D_rest = others.shape[0]
-    z_self = latent_normal_sample(n_outer, 1, seed=seed)[:, 0]
+    outer_stream, inner_stream = stream.spawn(2)
+    z_self = latent_normal_sample(n_outer, 1, seed=_qmc_seed(outer_stream))[:, 0]
     # One inner block, reused across every outer point. Sharing it makes the
     # inner integration rule identical for all conditioning values, which
     # cancels much of its error out of the outer variance.
-    inner = latent_normal_sample(n_inner, D_rest, seed=seed + 7919)
+    inner = latent_normal_sample(n_inner, D_rest, seed=_qmc_seed(inner_stream))
 
     inner_mean = np.empty((n_outer, n_slices), dtype=np.float64)
     chunk = _outer_chunk(n_outer, n_inner, D_rest + 1 + n_slices, batch_size)
@@ -429,7 +496,7 @@ def _total_uncorrelated_and_conditional(
     n_outer: int,
     n_inner: int,
     n_slices: int,
-    seed: int,
+    stream: np.random.SeedSequence,
     batch_size: int | None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Estimate ``E(V(Y|X_-i))`` and ``V(E(f_i|X_-i))`` for one parameter.
@@ -452,7 +519,8 @@ def _total_uncorrelated_and_conditional(
         n_outer: Outer (conditioning) sample size.
         n_inner: Inner (conditional) sample size per outer point.
         n_slices: Number of output slices ``S``.
-        seed: Seed for this parameter's latent draws.
+        stream: This parameter's spawned :class:`numpy.random.SeedSequence`.
+            The outer and inner draws take two further children of it.
         batch_size: Sample rows per device call, or ``None`` to derive one
             from the memory budget.
 
@@ -462,8 +530,12 @@ def _total_uncorrelated_and_conditional(
     """
     others = plan.others[index]
     D_rest = others.shape[0]
-    z_rest = latent_normal_sample(n_outer, D_rest, seed=seed) @ plan.chol_marginal[index].T
-    inner = latent_normal_sample(n_inner, 1, seed=seed + 7919)[:, 0]
+    outer_stream, inner_stream = stream.spawn(2)
+    z_rest = (
+        latent_normal_sample(n_outer, D_rest, seed=_qmc_seed(outer_stream))
+        @ plan.chol_marginal[index].T
+    )
+    inner = latent_normal_sample(n_inner, 1, seed=_qmc_seed(inner_stream))[:, 0]
 
     inner_var = np.empty((n_outer, n_slices), dtype=np.float64)
     f_hat = np.empty((n_outer, n_slices), dtype=np.float64)
