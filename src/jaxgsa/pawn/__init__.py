@@ -19,14 +19,19 @@ Example::
     X = monte_carlo(problem, n=5000, seed=42)
     Y = model(X)
     result = pawn.analyze(problem, X, Y)
+
+``pawn.indices`` is the same estimator with no diagnostics, as a bare tuple of
+arrays that ``jit``, ``vmap`` and ``jacrev`` accept. It returns the point
+estimate only: a bootstrap draws randomness and forms an interval, which is
+policy, so ``n_bootstrap`` stays on ``analyze``.
 """
 
 from jaxgsa._core.invalid import InvalidUnit
 from jaxgsa._core.registry import MethodSpec, register
-from jaxgsa.pawn._analyze import analyze
+from jaxgsa.pawn._analyze import analyze, indices
 from jaxgsa.pawn._result import PAWNResult
 
-__all__ = ["PAWNResult", "analyze"]
+__all__ = ["PAWNResult", "analyze", "indices"]
 
 SPEC = register(
     MethodSpec(

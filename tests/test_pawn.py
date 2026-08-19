@@ -11,7 +11,7 @@ import pytest
 
 from jaxgsa import JaxgsaWarning
 from jaxgsa.benchmarks import ishigami
-from jaxgsa.pawn import analyze
+from jaxgsa.pawn import analyze, indices
 from jaxgsa.problem import Problem
 from jaxgsa.sampling import monte_carlo
 
@@ -464,3 +464,170 @@ class TestPAWNInvalidPolicy:
                 result = analyze(problem, X, Y, on_invalid=policy)
             assert any(isinstance(r.message, JaxgsaWarning) for r in rec), policy
             assert result.invalid.unit_indices == (5,), policy
+
+
+class TestPureCore:
+    """The transformable core ``pawn.indices``.
+
+    Tier T4 throughout (internal consistency and transformability). The KS
+    statistic itself is checked against ``scipy.stats.ks_2samp`` elsewhere in
+    this file, and ``indices`` runs the same kernel ``analyze`` runs.
+    """
+
+    def test_matches_analyze_scalar(self, ishigami_data):
+        """T4: ``indices`` returns exactly what ``analyze`` reports."""
+        X, Y = ishigami_data
+
+        result = analyze(ishigami.PROBLEM, X, Y, n_bins=8)
+        (pawn,) = indices(ishigami.PROBLEM, X, Y, n_bins=8)
+
+        np.testing.assert_array_equal(np.asarray(pawn), np.asarray(result.pawn))
+
+    @pytest.mark.parametrize("statistic", ["median", "max", "mean"])
+    def test_matches_analyze_for_every_statistic(self, ishigami_data, statistic):
+        """T4: the aggregation choice is a Python branch, shared by both paths."""
+        X, Y = ishigami_data
+        kwargs: dict[str, Any] = {"n_bins": 8, "statistic": statistic}
+
+        result = analyze(ishigami.PROBLEM, X, Y, **kwargs)
+        (pawn,) = indices(ishigami.PROBLEM, X, Y, **kwargs)
+
+        np.testing.assert_array_equal(np.asarray(pawn), np.asarray(result.pawn))
+
+    def test_matches_analyze_time_series(self, ishigami_data):
+        """T4: the chunked ``(N, T, K)`` path agrees with ``analyze``."""
+        X, base = ishigami_data
+        Y = jnp.stack(
+            [
+                jnp.stack([base, 2.0 * base + X[:, 0]], axis=-1),
+                jnp.stack([base**2, X[:, 1]], axis=-1),
+            ],
+            axis=1,
+        )
+        assert Y.shape == (X.shape[0], 2, 2)
+
+        result = analyze(ishigami.PROBLEM, X, Y, n_bins=8)
+        (pawn,) = indices(ishigami.PROBLEM, X, Y, n_bins=8)
+
+        assert pawn.shape == (2, 2, 3)
+        np.testing.assert_array_equal(np.asarray(pawn), np.asarray(result.pawn))
+
+    def test_matches_analyze_with_a_categorical_parameter(self):
+        """T4: the traced level-code path bins a categorical column as ``analyze`` does."""
+        problem = Problem.from_dict(
+            {
+                "a": {"dist": "categorical", "probs": [0.4, 0.6]},
+                "b": (0.0, 1.0),
+            }
+        )
+        X = jnp.asarray(monte_carlo(problem, n=1000, seed=4))
+        Y = 2.0 * X[:, 0] + X[:, 1]
+
+        result = analyze(problem, X, Y, n_bins=5)
+        (pawn,) = indices(problem, X, Y, n_bins=5)
+
+        np.testing.assert_array_equal(np.asarray(pawn), np.asarray(result.pawn))
+
+    def test_returns_a_bare_tuple_of_one_array(self, ishigami_data):
+        """T4: the core hands back arrays, with no result object attached."""
+        X, Y = ishigami_data
+
+        out = indices(ishigami.PROBLEM, X, Y, n_bins=8)
+
+        assert isinstance(out, tuple)
+        assert len(out) == 1
+        assert isinstance(out[0], jax.Array)
+
+    def test_is_jittable(self, ishigami_data):
+        """T4: ``jit`` traces ``indices`` and returns the eager values."""
+        X, Y = ishigami_data
+
+        jitted = jax.jit(lambda outputs: indices(ishigami.PROBLEM, X, outputs, n_bins=8))
+        (pawn_jit,) = jitted(Y)
+        (pawn,) = indices(ishigami.PROBLEM, X, Y, n_bins=8)
+
+        np.testing.assert_allclose(np.asarray(pawn_jit), np.asarray(pawn), rtol=1e-6)
+
+    def test_is_vmappable(self, ishigami_data):
+        """T4: ``vmap`` maps ``indices`` over a batch of output vectors."""
+        X, base = ishigami_data
+        batch = jnp.stack([base, X[:, 0], X[:, 1] ** 2])
+
+        (pawn_batch,) = jax.vmap(lambda outputs: indices(ishigami.PROBLEM, X, outputs, n_bins=8))(
+            batch
+        )
+
+        assert pawn_batch.shape == (3, 3)
+        for row, outputs in enumerate(batch):
+            (pawn,) = indices(ishigami.PROBLEM, X, outputs, n_bins=8)
+            np.testing.assert_allclose(
+                np.asarray(pawn_batch[row]), np.asarray(pawn), rtol=1e-5, atol=1e-6
+            )
+
+    def test_jit_of_jacrev_compiles_and_the_derivative_is_zero(self, ishigami_data):
+        """T4: ``jit(jacrev(...))`` compiles, and the answer is a structural zero.
+
+        A PAWN index reads the *ordering* of the outputs and the bin an input
+        falls in, never the values themselves. Both are piecewise constant, so
+        the derivative is exactly 0 almost everywhere. This test therefore
+        checks two different things: that the core traces under reverse-mode
+        differentiation at all, and that what comes back is the honest zero of
+        a rank statistic rather than a NaN.
+        """
+        X, Y = ishigami_data
+
+        def total(scale):
+            return indices(ishigami.PROBLEM, X, Y * scale, n_bins=8)[0].sum()
+
+        jac = float(jax.jit(jax.jacrev(total))(1.0))
+
+        assert np.isfinite(jac)
+        assert jac == 0.0
+
+    def test_returns_the_point_estimate_only(self, ishigami_data):
+        """T4: a bootstrap is policy, so the core has no ``n_bootstrap``.
+
+        ``analyze`` keeps the interval, and its point estimate is the number
+        the core returns, so an interval is always centred on it.
+        """
+        import inspect
+
+        X, Y = ishigami_data
+        assert "n_bootstrap" not in inspect.signature(indices).parameters
+
+        result = analyze(ishigami.PROBLEM, X, Y, n_bins=8, n_bootstrap=5, key=jax.random.key(0))
+        (pawn,) = indices(ishigami.PROBLEM, X, Y, n_bins=8)
+
+        assert result.pawn_conf is not None
+        np.testing.assert_array_equal(np.asarray(pawn), np.asarray(result.pawn))
+
+    def test_an_all_empty_parameter_is_nan_without_a_warning(self, ishigami_data, recwarn):
+        """T4: the core drops the host sync that the empty-bin warning needs.
+
+        ``analyze`` reads the emptiness back to the host and warns. The core
+        cannot, because a warning needs a concrete value, so it returns NaN
+        and says nothing.
+        """
+        X, Y = ishigami_data
+        # Far outside the declared bounds, so every sample of that column
+        # takes the out-of-range sentinel and no bin is filled.
+        X = X.at[:, 0].set(1e6)
+
+        with pytest.warns(JaxgsaWarning, match="all bins empty"):
+            result = analyze(ishigami.PROBLEM, X, Y, n_bins=8)
+        assert np.isnan(np.asarray(result.pawn)[0])
+
+        recwarn.clear()
+        (pawn,) = indices(ishigami.PROBLEM, X, Y, n_bins=8)
+
+        assert np.isnan(np.asarray(pawn)[0])
+        assert [w for w in recwarn if issubclass(w.category, JaxgsaWarning)] == []
+
+    def test_rejects_mismatched_shapes(self, ishigami_data):
+        """T4: a shape check still raises; only data-driven policy is dropped."""
+        X, Y = ishigami_data
+
+        with pytest.raises(ValueError, match="rows"):
+            indices(ishigami.PROBLEM, X, Y[:-1], n_bins=8)
+        with pytest.raises(ValueError, match="columns"):
+            indices(ishigami.PROBLEM, X[:, :2], Y, n_bins=8)

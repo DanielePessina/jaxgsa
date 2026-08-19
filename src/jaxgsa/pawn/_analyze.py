@@ -59,11 +59,19 @@ from jax import Array
 
 from jaxgsa._core.batching import get_memory_budget
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
-from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare, require
+from jaxgsa._core.entry import (
+    at_least,
+    check_scalars,
+    in_open_interval,
+    one_of,
+    prepare,
+    require,
+)
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.partition import _extract_categorical_codes
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.transforms import cdf_to_unit_interval
+from jaxgsa._core.validation import _prepare_Y
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.pawn._result import PAWNResult
 from jaxgsa.problem import Problem, _categorical_dims
@@ -118,6 +126,15 @@ def _bin_indices(problem: Problem, X: Array, n_bins: int) -> tuple[Array, int]:
     the nan-aware aggregation drops it, so the padding changes no index. A
     continuous-only problem has ``n_eff == n_bins`` and is unaffected.
 
+    Nothing here reads an array value on the host, and every branch is on
+    ``problem`` metadata, which is a plain Python value and never a tracer. So
+    this runs under ``jit``, ``vmap`` and ``jacrev``. Refusing a malformed
+    categorical column is policy and needs a concrete value, so it lives in
+    :func:`_check_categorical_codes`, which :func:`analyze` calls and
+    :func:`indices` does not. A code outside ``[0, L)`` takes the same ``-1``
+    sentinel a continuous out-of-range sample takes, so it drops out of every
+    conditional set instead of aliasing onto a real level.
+
     Args:
         problem: Problem definition with D parameters.
         X: Input samples in physical units, shape ``(N, D)``. A categorical
@@ -128,17 +145,12 @@ def _bin_indices(problem: Problem, X: Array, n_bins: int) -> tuple[Array, int]:
         ``(bin_idx, n_eff)``. ``bin_idx`` holds integer bin indices of shape
         ``(N, D)``, where ``-1`` marks an excluded sample. ``n_eff`` is the
         padded bin count the kernel must be compiled at.
-
-    Raises:
-        ValueError: If a categorical column holds values other than its
-            integer level codes.
     """
     dims_levels = _categorical_dims(problem)
     if not dims_levels:
         return _equal_width_bins(cdf_to_unit_interval(X, problem), n_bins), n_bins
 
     n_eff = max(n_bins, max(n_levels for _, n_levels in dims_levels))
-    codes = _extract_categorical_codes(problem, np.asarray(X), dims_levels)
     cat_positions = {d: j for j, (d, _) in enumerate(dims_levels)}
 
     # cdf_to_unit_interval refuses a categorical parameter by design, so the
@@ -156,13 +168,50 @@ def _bin_indices(problem: Problem, X: Array, n_bins: int) -> tuple[Array, int]:
         cont_columns = [cont_idx[:, j].astype(jnp.int32) for j in range(len(cont_dims))]
 
     cont_iter = iter(cont_columns)
+    levels_of_dim = dict(dims_levels)
     columns = [
-        jnp.asarray(codes[:, cat_positions[d]], dtype=jnp.int32)
-        if d in cat_positions
-        else next(cont_iter)
+        _level_codes(X[:, d], levels_of_dim[d]) if d in cat_positions else next(cont_iter)
         for d in range(problem.num_vars)
     ]
     return jnp.stack(columns, axis=1), n_eff
+
+
+def _level_codes(column: Array, n_levels: int) -> Array:
+    """Read one categorical column's level codes as bin indices.
+
+    Args:
+        column: One column of ``X``, shape ``(N,)``, holding integer level
+            codes stored as floats.
+        n_levels: Number of declared levels for that parameter.
+
+    Returns:
+        Integer bin indices, shape ``(N,)``, in ``[0, n_levels)``, or ``-1``
+        for a value that is not one of the declared codes.
+    """
+    rounded = jnp.round(column)
+    valid = (rounded == column) & (rounded >= 0) & (rounded < n_levels)
+    return jnp.where(valid, rounded, -1).astype(jnp.int32)
+
+
+def _check_categorical_codes(problem: Problem, X: Array) -> None:
+    """Refuse a categorical column that does not hold its declared codes.
+
+    This is the host-side half of :func:`_bin_indices`: it needs concrete
+    values, so it belongs to :func:`analyze` and not to :func:`indices`.
+    Without it a mistyped column would silently take the ``-1`` sentinel and
+    empty every conditioning class.
+
+    Args:
+        problem: Problem definition with D parameters.
+        X: Input samples in physical units, shape ``(N, D)``.
+
+    Raises:
+        ValueError: If a categorical column holds non-integral values or
+            codes outside ``[0, L)``.
+    """
+    dims_levels = _categorical_dims(problem)
+    if dims_levels:
+        _extract_categorical_codes(problem, np.asarray(X), dims_levels)
 
 
 @lru_cache(maxsize=32)
@@ -359,6 +408,110 @@ def _pawn_core(
     return pawn.reshape(T, K, D)
 
 
+def indices(
+    problem: Problem,
+    X: Array,
+    Y: Array,
+    *,
+    n_bins: int = 10,
+    statistic: Literal["median", "max", "mean"] = "median",
+    slice_chunk_size: int | None = None,
+) -> tuple[Array]:
+    """Compute PAWN indices as plain arrays, with no diagnostics.
+
+    This is the transformable core of :func:`analyze`. It runs the same KS
+    kernel on the same data and returns the same numbers, but it does nothing
+    else: no non-finite check, no zero-variance warning, no empty-bin warning,
+    no categorical-code check, no :class:`jaxgsa.pawn.PAWNResult`, and no read
+    of any array value on the host. So it composes with ``jax.jit``,
+    ``jax.vmap``, ``jax.grad`` and ``jax.jacrev``, which :func:`analyze`
+    cannot, because a policy decision needs a concrete value and a tracer has
+    none.
+
+    It returns the point estimate only. A bootstrap is policy — it draws
+    randomness, needs a ``key``, and forms an interval — so it stays in
+    :func:`analyze`, which offers ``n_bootstrap`` for it.
+
+    Use :func:`analyze` for ordinary analysis. Nothing here checks the sample,
+    so a non-finite input silently leaves every conditioning class and a
+    malformed categorical code silently becomes an excluded sample rather than
+    an error.
+
+    Reverse-mode differentiation traces, but be clear about what it gives
+    back. A PAWN index reads the *ordering* of the outputs and the bin an
+    input falls in, and both are piecewise constant, so the derivative is
+    exactly 0 almost everywhere. The value of tracing here is ``jit`` and
+    ``vmap``, not a gradient.
+
+    One limit is not ours to lift: a **truncated Gaussian** marginal has no
+    CDF in JAX, so :func:`jaxgsa._core.transforms.cdf_to_unit_interval` routes
+    that column through SciPy, which reads ``X`` on the host. A problem with
+    such a marginal therefore cannot be traced through this function. Every
+    other marginal — uniform, unbounded Gaussian, categorical — stays on
+    device.
+
+    Tier T4 (behavioural contract): the returned array must equal the ``pawn``
+    field of ``analyze``'s result on clean outputs, and the function must
+    survive ``jit``, ``vmap`` and ``jit(jacrev(...))``. Checked in
+    ``tests/test_pawn.py``.
+
+    Args:
+        problem: Problem definition with D parameters.
+        X: Input samples, shape ``(N, D)``.
+        Y: Model outputs, shape ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
+        n_bins: Number of conditioning bins per continuous parameter, as in
+            :func:`analyze`.
+        statistic: Aggregation of the KS values across bins, as in
+            :func:`analyze`. All three are plain nan-aware reductions, so the
+            choice does not affect what ``jit``, ``vmap`` or ``jacrev`` can do
+            with this function.
+        slice_chunk_size: Number of flattened ``T*K`` output columns per
+            kernel call. ``None`` (default) derives one from the active memory
+            budget. It changes no index.
+
+    Returns:
+        A one-element tuple ``(pawn,)``, shaped ``(D,)``, ``(K, D)`` or
+        ``(T, K, D)`` to mirror the layout of ``Y``. A tuple, not a bare
+        array, because every method's core returns one.
+
+    Raises:
+        ValueError: If ``X`` is not 2-D, if its column count does not match
+            the problem, if ``X`` and ``Y`` have differing row counts, if
+            ``Y`` has an invalid rank, if ``statistic`` is not one of
+            ``"median"``/``"max"``/``"mean"``, if ``n_bins < 2``, or if
+            ``slice_chunk_size`` is given and is below 1.
+    """
+    X_arr, Y_arr = jnp.asarray(X), jnp.asarray(Y)
+    rank_ok = Y_arr.ndim in (1, 2, 3)
+    check_scalars(
+        (
+            require(
+                statistic in ("median", "max", "mean"),
+                f"statistic must be 'median', 'max', or 'mean', got {statistic!r}",
+            ),
+            at_least("n_bins", n_bins, 2),
+            at_least("slice_chunk_size", slice_chunk_size, 1),
+            require(X_arr.ndim == 2, f"X must be 2-D (N, D), got shape {X_arr.shape}"),
+            require(
+                X_arr.ndim != 2 or X_arr.shape[1] == problem.num_vars,
+                f"X has {X_arr.shape[-1] if X_arr.ndim else 0} columns but the problem "
+                f"declares {problem.num_vars} parameters",
+            ),
+            require(rank_ok, f"Y must have 1, 2 or 3 dimensions, got {Y_arr.ndim}"),
+            require(
+                not rank_ok or X_arr.ndim != 2 or Y_arr.shape[0] == X_arr.shape[0],
+                f"X has {X_arr.shape[0] if X_arr.ndim else 0} rows but Y has "
+                f"{Y_arr.shape[0] if Y_arr.ndim else 0}",
+            ),
+        )
+    )
+
+    Y3, layout = _prepare_Y(Y_arr)
+    bin_idx, n_eff = _bin_indices(problem, X_arr, n_bins)
+    pawn_3d = _pawn_core(bin_idx, Y3, n_eff, statistic, slice_chunk_size, warn=False)
+    return (layout.squeeze(pawn_3d),)
+
+
 def analyze(
     problem: Problem,
     X: Array,
@@ -391,6 +544,9 @@ def analyze(
     PAWN is a given-data method, so any (X, Y) sample works with no special
     design. It is a good choice when the output is skewed or multimodal, so
     that variance-based indices summarize its uncertainty poorly.
+
+    Use :func:`indices` when you need the same numbers inside ``jit``,
+    ``vmap`` or ``jacrev``.
 
     Correlated parameters are supported. PAWN conditions on bins of one
     parameter and compares output CDFs, so a declared ``problem.correlation``
@@ -503,6 +659,9 @@ def analyze(
 
     X, invalid = ctx.inputs, ctx.invalid
     Y_3d = ctx.Y3
+    # Refusing a malformed categorical column needs concrete values, so it
+    # runs here and not in the traceable binning it guards.
+    _check_categorical_codes(problem, X)
     bin_idx, n_eff = _bin_indices(problem, X, n_bins)
 
     pawn_3d = _pawn_core(bin_idx, Y_3d, n_eff, statistic, slice_chunk_size)

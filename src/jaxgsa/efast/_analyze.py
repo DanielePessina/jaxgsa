@@ -5,6 +5,15 @@ Fourier-transformed. First-order indices are estimated from the power
 at harmonics of the focal frequency omega_0, and total-order indices
 from the complementary low-frequency content.
 
+eFAST reports no confidence interval, and that is a property of the design
+rather than a missing feature. Its resampling unit is the search curve, one
+per parameter, and a curve is an ordered sweep read by a discrete Fourier
+transform: removing a point does not shrink the sample, it changes what the
+estimator computes. With exactly one curve per parameter there is nothing to
+resample, so :func:`analyze` takes no ``n_bootstrap``. An eFAST interval needs
+replicated designs drawn with different random phase shifts, which is a change
+to :func:`jaxgsa.efast.sample`, not a keyword on :func:`analyze`.
+
 Array shape conventions used throughout:
     N: number of samples per search curve (``n_per_curve``)
     D: number of input parameters
@@ -26,9 +35,9 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core.batching import resolve_batch_size
-from jaxgsa._core.entry import at_least, prepare, require
+from jaxgsa._core.entry import at_least, check_scalars, prepare, require
 from jaxgsa._core.invalid import OnInvalid
-from jaxgsa._core.validation import YLayout
+from jaxgsa._core.validation import YLayout, _prepare_Y
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.efast._result import EFASTResult
 from jaxgsa.efast._sampling import EFASTSamples, _frequency_plan
@@ -124,6 +133,161 @@ def _get_efast_kernel(N: int, M: int, omega_0: int, analysis_max: int, batched: 
     return jax.jit(kernel)
 
 
+def _indices_from_3d(
+    Y3: Array,
+    layout: YLayout,
+    D: int,
+    N: int,
+    M: int,
+    omega_0: int,
+    analysis_max: int,
+    slice_chunk_size: int | None,
+) -> tuple[Array, Array]:
+    """Run the eFAST kernel over every output slice of a promoted ``Y``.
+
+    This is the shared estimator body of :func:`analyze` and :func:`indices`,
+    so the two can never report different numbers. Everything it branches on
+    is a shape or a Python scalar, and it reads no array value on the host.
+
+    Args:
+        Y3: Model outputs promoted to ``(n_runs, T, K)``.
+        layout: Rank the caller passed, used to squeeze the promoted axes back
+            off the result.
+        D: Number of parameters, which is also the number of search curves.
+        N: Number of samples per search curve.
+        M: Interference factor.
+        omega_0: Primary frequency, from the design's frequency plan.
+        analysis_max: Top of the analysis band, from the same plan.
+        slice_chunk_size: Output slices per vmapped batch, or ``None`` to
+            derive one from the memory budget.
+
+    Returns:
+        ``(S1, ST)`` at the caller's own rank: ``(D,)``, ``(K, D)`` or
+        ``(T, K, D)``.
+    """
+    _, T, K = Y3.shape
+
+    # Split the contiguous search curves into (D, N, T, K).
+    Y_reshaped = Y3.reshape(D, N, T, K)
+
+    if layout is YLayout.SCALAR:
+        # Scalar path: squeeze the trailing singletons and vmap over the D
+        # curves only.
+        Y_curves = Y_reshaped[:, :, 0, 0]  # (D, N)
+        kernel = _get_efast_kernel(N, M, omega_0, analysis_max, batched=True)
+        return kernel(Y_curves)  # each (D,)
+
+    # Batched path: flatten (D, T, K) into a single vmap axis.
+    Y_batched = Y_reshaped.transpose(0, 2, 3, 1).reshape(D * T * K, N)
+
+    total = D * T * K
+    # One vmapped slice costs a handful of length-N arrays, so the chunk
+    # follows the transient-memory budget when the caller gives no size.
+    itemsize = jnp.dtype(jnp.result_type(Y_batched.dtype, jnp.float32)).itemsize
+    cs = resolve_batch_size(_EFAST_LIVE_ARRAYS * N * itemsize, total, slice_chunk_size)
+    batched = _get_efast_kernel(N, M, omega_0, analysis_max, batched=True)
+
+    s1_parts: list[Array] = []
+    st_parts: list[Array] = []
+    for start in range(0, total, cs):
+        end = min(start + cs, total)
+        actual = end - start
+        batch = Y_batched[start:end]
+        if actual < cs:
+            batch = jnp.concatenate([batch, jnp.zeros((cs - actual, N))], axis=0)
+        s1_chunk, st_chunk = batched(batch)
+        s1_parts.append(s1_chunk[:actual])
+        st_parts.append(st_chunk[:actual])
+
+    S1_flat = jnp.concatenate(s1_parts)  # (D*T*K,)
+    ST_flat = jnp.concatenate(st_parts)
+
+    # Reshape to (D, T, K), then transpose to the (T, K, D) convention.
+    S1 = S1_flat.reshape(D, T, K).transpose(1, 2, 0)
+    ST = ST_flat.reshape(D, T, K).transpose(1, 2, 0)
+
+    # Drop the singleton dims that _prepare_Y inserted.
+    return layout.squeeze(S1), layout.squeeze(ST)
+
+
+def indices(
+    sampling_result: EFASTSamples,
+    Y: Array,
+    *,
+    slice_chunk_size: int | None = None,
+) -> tuple[Array, Array]:
+    """Compute eFAST indices as plain arrays, with no diagnostics.
+
+    This is the transformable core of :func:`analyze`. It runs the same
+    Fourier decomposition on the same data and returns the same numbers, but
+    it does nothing else: no non-finite check, no zero-variance warning, no
+    out-of-range warning, no :class:`jaxgsa.efast.EFASTResult`, and no read of
+    any array value on the host. So it composes with ``jax.jit``, ``jax.vmap``,
+    ``jax.grad`` and ``jax.jacrev``, which :func:`analyze` cannot, because a
+    policy decision needs a concrete value and a tracer has none.
+
+    Use :func:`analyze` for ordinary analysis. Nothing here checks the outputs,
+    so a single NaN silently turns every index on that curve into NaN. A curve
+    with zero output variance yields NaN from inside the kernel rather than a
+    warning.
+
+    Like :func:`analyze`, this reports no confidence interval, and for a
+    reason that no keyword can fix: see the module docstring and
+    :func:`analyze`.
+
+    Tier T4 (behavioural contract): the returned arrays must equal the ``S1``
+    and ``ST`` fields of ``analyze``'s result on clean outputs, and the
+    function must survive ``jit``, ``vmap`` and ``jit(jacrev(...))``. Checked
+    in ``tests/test_efast.py``.
+
+    Args:
+        sampling_result: The design from :func:`jaxgsa.efast.sample`, used
+            only for its curve layout: ``n_per_curve``, ``M`` and the
+            parameter count.
+        Y: Model outputs evaluated at each row of
+            ``sampling_result.samples``, in the same row order. Shapes are
+            those :func:`analyze` accepts: ``(n_runs,)``, ``(n_runs, K)`` or
+            ``(n_runs, T, K)``.
+        slice_chunk_size: Number of output slices per vmapped batch. ``None``
+            (default) derives one from the active memory budget. Lower it if
+            you hit device out-of-memory errors. It changes no index.
+
+    Returns:
+        ``(S1, ST)``, each shaped ``(D,)``, ``(K, D)`` or ``(T, K, D)`` to
+        mirror the layout of ``Y``. The shapes are those ``analyze`` reports.
+
+    Raises:
+        ValueError: If ``Y`` has an invalid rank, if its leading dimension
+            does not equal ``sampling_result.n_runs``, or if
+            ``slice_chunk_size`` is given and is below 1.
+    """
+    problem = sampling_result.problem
+    D = problem.num_vars
+    N = sampling_result.n_per_curve
+    M = sampling_result.M
+
+    Y_arr = jnp.asarray(Y)
+    rank_ok = Y_arr.ndim in (1, 2, 3)
+    check_scalars(
+        (
+            at_least("slice_chunk_size", slice_chunk_size, 1),
+            require(rank_ok, f"Y must have 1, 2 or 3 dimensions, got {Y_arr.ndim}"),
+            require(
+                not rank_ok or Y_arr.shape[0] == sampling_result.n_runs,
+                f"Y has {Y_arr.shape[0] if Y_arr.ndim else 0} rows but this eFAST design "
+                f"requires n_runs = n_per_curve * D = {N} * {D} = {sampling_result.n_runs}; "
+                "evaluate the model on every row of sampling_result.samples, in order",
+            ),
+        )
+    )
+
+    # Rebuild the frequency plan sample() used, from the design metadata that
+    # travels inside EFASTSamples.
+    plan = _frequency_plan(D, N, M)
+    Y3, layout = _prepare_Y(Y_arr)
+    return _indices_from_3d(Y3, layout, D, N, M, plan.omega_0, plan.analysis_max, slice_chunk_size)
+
+
 def analyze(
     sampling_result: EFASTSamples,
     Y: Array,
@@ -143,6 +307,19 @@ def analyze(
     ``sampling_result.samples``, with the rows in the same order. The design
     metadata ``n_per_curve``, ``M``, and ``problem`` is read from
     ``sampling_result``, so it can never be mismatched with the sampling step.
+
+    **There is no confidence interval, and there is no ``n_bootstrap``
+    keyword.** This is a property of the eFAST design, not an omission. The
+    resampling unit is the search curve, and a curve is an ordered sweep read
+    by a discrete Fourier transform: removing a point does not shrink the
+    sample, it changes what the estimator computes. The design holds exactly
+    one curve per parameter, so there is nothing to resample. To put an
+    interval on an eFAST index, draw several designs with different random
+    phase shifts and compare the indices across those designs. That is a
+    change to :func:`jaxgsa.efast.sample`, not a keyword here.
+
+    Use :func:`indices` when you need the same numbers inside ``jit``,
+    ``vmap`` or ``jacrev``.
 
     Args:
         sampling_result: Design returned by ``jaxgsa.efast.sample()``,
@@ -215,7 +392,6 @@ def analyze(
         unit_of_row=np.repeat(np.arange(D), N),
     )
     invalid = ctx.invalid
-    is_scalar = ctx.layout is YLayout.SCALAR
     Y = ctx.Y3
 
     # Rebuild the frequency plan sample() used, from the design metadata that
@@ -225,8 +401,6 @@ def analyze(
     omega_0 = plan.omega_0
 
     _, T, K = Y.shape
-
-    # Split the contiguous search curves into (D, N, T, K).
     Y_reshaped = Y.reshape(D, N, T, K)
 
     # Per-curve zero-variance check. The global _warn_zero_variance_slices
@@ -242,45 +416,7 @@ def analyze(
             category=JaxgsaWarning,
         )
 
-    if is_scalar:
-        # Scalar path: squeeze the trailing singletons and vmap over the D
-        # curves only.
-        Y_curves = Y_reshaped[:, :, 0, 0]  # (D, N)
-        kernel = _get_efast_kernel(N, M, omega_0, plan.analysis_max, batched=True)
-        S1, ST = kernel(Y_curves)  # each (D,)
-    else:
-        # Batched path: flatten (D, T, K) into a single vmap axis.
-        Y_batched = Y_reshaped.transpose(0, 2, 3, 1).reshape(D * T * K, N)
-
-        total = D * T * K
-        # One vmapped slice costs a handful of length-N arrays, so the chunk
-        # follows the transient-memory budget when the caller gives no size.
-        itemsize = jnp.dtype(jnp.result_type(Y_batched.dtype, jnp.float32)).itemsize
-        cs = resolve_batch_size(_EFAST_LIVE_ARRAYS * N * itemsize, total, slice_chunk_size)
-        batched = _get_efast_kernel(N, M, omega_0, plan.analysis_max, batched=True)
-
-        s1_parts: list[Array] = []
-        st_parts: list[Array] = []
-        for start in range(0, total, cs):
-            end = min(start + cs, total)
-            actual = end - start
-            batch = Y_batched[start:end]
-            if actual < cs:
-                batch = jnp.concatenate([batch, jnp.zeros((cs - actual, N))], axis=0)
-            s1_chunk, st_chunk = batched(batch)
-            s1_parts.append(s1_chunk[:actual])
-            st_parts.append(st_chunk[:actual])
-
-        S1_flat = jnp.concatenate(s1_parts)  # (D*T*K,)
-        ST_flat = jnp.concatenate(st_parts)
-
-        # Reshape to (D, T, K), then transpose to the (T, K, D) convention.
-        S1 = S1_flat.reshape(D, T, K).transpose(1, 2, 0)
-        ST = ST_flat.reshape(D, T, K).transpose(1, 2, 0)
-
-        # Drop the singleton dims that _prepare_Y inserted.
-        S1 = ctx.squeeze(S1)
-        ST = ctx.squeeze(ST)
+    S1, ST = _indices_from_3d(Y, ctx.layout, D, N, M, omega_0, plan.analysis_max, slice_chunk_size)
 
     # An index outside [0, 1] means the frequency decomposition did not
     # converge.
