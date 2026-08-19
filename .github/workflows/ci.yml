@@ -45,8 +45,9 @@ jobs:
   # numerical dump stays out of local `pytest -q`, and so a moved number
   # reports as its own failure rather than one more red test.
   #
-  # PLAN-0.10.md: "Every pre-existing entry must stay bit-identical. Any
-  # movement is a defect until it is proved otherwise." Until this job existed
+  # Every pre-existing entry must stay bit-identical; any movement is a defect
+  # until it is proved otherwise. See
+  # docs/adr/0009-a-change-with-no-behavioural-target.md. Until this job existed
   # that rule was enforced by whoever remembered to run the script, which is
   # how the stored file stayed pinned at 0.8.0.
   #

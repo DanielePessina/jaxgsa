@@ -2,8 +2,7 @@
 
 ## Unreleased (0.10.0)
 
-Version 0.10 adds capability. `PLAN-0.10.md` records the plan and the order of
-the work, including seven corrections to the roadmap it replaces.
+Version 0.10 adds capability.
 
 **Breaking changes:** `SobolResult.nan_counts` is removed, and
 `Problem.input_specs` now returns dataclasses. See "Breaking".
@@ -319,8 +318,6 @@ in megabytes, not bytes. See "Breaking" below before you upgrade.
 Three further calls that were accepted before now raise. Each one was accepted
 while doing something the caller did not ask for, so refusing it is the fix,
 not a side effect. They are marked **now raises** below.
-
-`PLAN-V1.0.md` records the whole plan and the order of the work.
 
 ### Breaking
 

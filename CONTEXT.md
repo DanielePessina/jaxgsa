@@ -15,7 +15,8 @@ when a signature drifts from them.
 correlation, optional output names. A plain value object. It is deliberately
 *not* a JAX pytree, so passing one into a jitted function never turns its
 marginal parameters into tracers. Differentiation with respect to marginal
-parameters goes through **Theta** instead.
+parameters goes through **Theta** instead. See
+`docs/adr/0013-problem-is-not-a-pytree.md`.
 
 **Theta** — a mapping pytree of marginal parameters, consumed by
 `SobolSamples.transform(theta)`. This is the differentiation surface: it is
@@ -149,7 +150,9 @@ wrapper around `jax.enable_x64()` — that context manager is already the
 primitive, it is thread-local, and it works with jaxgsa as-is.
 
 What the library owes the caller: never silently destroy precision. Passing a
-float64 array while x64 is off truncates it to float32, so say so once.
+float64 array while x64 is off truncates it to float32, so say so once. The
+measurements behind this are in
+`docs/adr/0014-float32-default-no-x64-wrapper.md`.
 
 ---
 
@@ -165,7 +168,9 @@ T0 closed form, T1 published literals, T2 permissive-licence library, T3
 copyleft run out-of-process, T4 internal consistency. A method must not ship at
 T4 alone unless there is a recorded reason no external oracle exists. **A test
 that retypes the source's own formula is not an oracle. It is a mirror.**
-Record the tier in the test docstring.
+Record the tier in the test docstring. The full tier definitions, the mirror
+rule and the licence rules are in `docs/adr/0001-verification-oracle-tiers.md`
+and `docs/adr/0003-copyleft-oracles-and-licences.md`.
 
 **Parity against another engine is run locally, not in CI.** The committed test
 checks a *recorded literal*, and the script that produced it lives in
