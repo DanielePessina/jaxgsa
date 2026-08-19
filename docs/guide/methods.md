@@ -42,14 +42,14 @@ code.
 | [`borgonovo`](#borgonovo-delta-density-based-sensitivity) | $\delta$, $S_1$ | ✗ | ✓ § | ✓ | `n_bootstrap` |
 | [`dgsm`](#dgsm-derivative-based-global-sensitivity-measures) | bounds on $S_T$ | ✗ | ✗ | ✗ | — |
 | [`efast`](#efast-extended-fourier-amplitude-sensitivity-test) | $S_1$, $S_T$ | ✓ | ✗ | ✗ | — |
-| [`hdmr`](#rs-hdmr-random-sampling-high-dimensional-model-representation) | $S_a$ / $S_b$ / $S$ per term, surrogate | ✗ | ✓ † | ✗ | — |
+| [`hdmr`](#rs-hdmr-random-sampling-high-dimensional-model-representation) | $S_a$ / $S_b$ / $S$ per term, surrogate | ✗ | ✓ † | ✗ | `n_bootstrap` |
 | [`hsic`](#hsic-hilbert–schmidt-independence-criterion) | dependence measure | ✗ | ✓ § | ✗ | — |
 | [`kucherenko`](#kucherenko-dependent-input-sobol-indices) | $S_1$, $S_T$ under dependence | ✓ | ✓ | ✗ | — |
 | [`morris`](#morris-elementary-effects-screening) | $\mu^*$, $\sigma$ | ✓ | ✗ | ✗ | `n_bootstrap` |
 | [`optimal_transport`](#optimal-transport-wasserstein-based-sensitivity) | $W_2^2$ index, advective + diffusive | ✗ | ✓ § | ✓ | `n_bootstrap` |
 | [`pawn`](#pawn-cdf-based-sensitivity) | KS distance | ✗ | ✓ § | ✓ | `n_bootstrap` |
-| [`pce`](#pce-polynomial-chaos-expansion) | $S_1$, $S_2$, $S_T$, surrogate | ✗ | ✗ | ✗ | — |
-| [`shapley`](#shapley-effects) | allocation summing to 1 | ✗ | ✗ ‡ | ✗ | — |
+| [`pce`](#pce-polynomial-chaos-expansion) | $S_1$, $S_2$, $S_T$, surrogate | ✗ | ✗ | ✗ | `n_bootstrap` |
+| [`shapley`](#shapley-effects) | allocation summing to 1 | ✗ | ✗ ‡ | ✗ | `n_bootstrap` |
 | [`sobol`](#sobol-indices-via-saltelli-sampling) | $S_1$, $S_2$, $S_T$ | ✓ | ✗ | ✓ | `n_bootstrap` |
 | [`vkoga`](#vkoga-correlated-input-variance-indices) | $S_{TC}$, $S_{TU}$, $S_U$, $S_C$, $S_{IU}$, surrogate | ✗ | ✓ | ✗ | — |
 

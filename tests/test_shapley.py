@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import warnings
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -448,3 +449,251 @@ class TestShapleyOnInvalid:
         assert np.all(np.isfinite(np.asarray(dropped.Sh)))
         assert not np.all(np.isfinite(np.asarray(propagated.Sh)))
         assert dropped.invalid.unit_indices == (5,)
+
+
+class TestPureCore:
+    """``jaxgsa.shapley.indices``: the transformable core.
+
+    Tier T4 throughout: what a transformability contract can be checked
+    against is the untransformed call.
+    """
+
+    @staticmethod
+    def _data(n: int = 400, seed: int = 0):
+        rng = np.random.default_rng(seed)
+        X = jnp.asarray(rng.uniform(-np.pi, np.pi, size=(n, 3)))
+        return X, ishigami.evaluate(X)
+
+    def test_indices_matches_analyze_on_the_pce_backend(self):
+        """T4: the core allocates exactly what the wrapper reports.
+
+        The two paths are genuinely different code: ``analyze`` goes through
+        ``PCEResult.shapley``, the core goes straight from the fit. Their
+        agreement is what says the core did not quietly re-derive the
+        allocation.
+        """
+        X, Y = self._data()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = _analyze_shapley(ishigami.PROBLEM, X, Y, backend="pce", order=3)
+        Sh, S1, ST = jaxgsa.shapley.indices(ishigami.PROBLEM, X, Y, backend="pce", order=3)
+
+        np.testing.assert_array_equal(np.asarray(Sh), np.asarray(result.Sh))
+        np.testing.assert_array_equal(np.asarray(S1), np.asarray(result.S1))
+        np.testing.assert_array_equal(np.asarray(ST), np.asarray(result.ST))
+
+    def test_indices_matches_analyze_on_the_hdmr_backend(self):
+        """T4: the same holds through the other backend."""
+        X, Y = self._data()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = _analyze_shapley(ishigami.PROBLEM, X, Y, backend="hdmr", maxiter=50)
+        Sh, S1, ST = jaxgsa.shapley.indices(ishigami.PROBLEM, X, Y, backend="hdmr", maxiter=50)
+
+        np.testing.assert_array_equal(np.asarray(Sh), np.asarray(result.Sh))
+        np.testing.assert_array_equal(np.asarray(S1), np.asarray(result.S1))
+        np.testing.assert_array_equal(np.asarray(ST), np.asarray(result.ST))
+
+    def test_indices_returns_a_bare_tuple(self):
+        """T4: three arrays, no result object, no fit diagnostic."""
+        X, Y = self._data()
+        out = jaxgsa.shapley.indices(ishigami.PROBLEM, X, Y, order=2)
+
+        assert type(out) is tuple
+        assert len(out) == 3
+        assert all(isinstance(a, jax.Array) for a in out)
+
+    def test_indices_is_silent_about_a_bad_fit(self):
+        """T4: the core has no side effects, including the fit-quality warning.
+
+        ``analyze`` warns on this data. The core must not, because a warning
+        is a host-side side effect and the core is the thing that traces.
+        """
+        X, Y = self._data()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            jaxgsa.shapley.indices(ishigami.PROBLEM, X, Y, order=2)
+
+        with pytest.warns(jaxgsa.JaxgsaWarning, match="explained_variance"):
+            _analyze_shapley(ishigami.PROBLEM, X, Y, order=2)
+
+    def test_indices_is_jittable(self):
+        """T4: ``jit`` traces the core and returns the eager values."""
+        X, Y = self._data()
+        jitted = jax.jit(lambda outputs: jaxgsa.shapley.indices(ishigami.PROBLEM, X, outputs))
+
+        np.testing.assert_allclose(
+            np.asarray(jitted(Y)[0]),
+            np.asarray(jaxgsa.shapley.indices(ishigami.PROBLEM, X, Y)[0]),
+            rtol=1e-4,
+            atol=1e-6,
+        )
+
+    def test_indices_is_vmappable(self):
+        """T4: ``vmap`` maps the core over a batch of output vectors."""
+        X, Y = self._data()
+        batch = jnp.stack([Y, 2.0 * Y + 1.0])
+
+        Sh = jax.vmap(lambda outputs: jaxgsa.shapley.indices(ishigami.PROBLEM, X, outputs)[0])(
+            batch
+        )
+
+        assert Sh.shape == (2, 3)
+        # An affine rescaling of Y leaves every variance share unchanged.
+        np.testing.assert_allclose(np.asarray(Sh[0]), np.asarray(Sh[1]), rtol=1e-4, atol=1e-6)
+
+    def test_jit_of_jacrev_on_the_pce_backend(self):
+        """T4: ``jit(jacrev(...))`` differentiates a Shapley effect w.r.t. ``X``."""
+        X, Y = self._data(n=256)
+
+        def total(inputs):
+            return jaxgsa.shapley.indices(ishigami.PROBLEM, inputs, Y, order=2)[0].sum()
+
+        with jax.enable_x64():
+            jac = jax.jit(jax.jacrev(total))(jnp.asarray(X, dtype=jnp.float64))
+
+        assert jac.shape == X.shape
+        assert np.isfinite(np.asarray(jac)).all()
+
+    def test_the_hdmr_backend_differentiates_forwards(self):
+        """T4: the HDMR backend takes ``jacfwd``, as its own core does."""
+        X, Y = self._data()
+
+        def first_effect(inputs):
+            return jaxgsa.shapley.indices(ishigami.PROBLEM, inputs, Y, backend="hdmr", maxiter=20)[
+                0
+            ][0]
+
+        jac = jax.jit(jax.jacfwd(first_effect))(X)
+
+        assert jac.shape == X.shape
+        assert np.isfinite(np.asarray(jac)).all()
+
+    def test_include_correlative_is_still_hdmr_only(self):
+        """T4: the core refuses the same combination the wrapper refuses."""
+        X, Y = self._data()
+        with pytest.raises(ValueError, match="include_correlative"):
+            jaxgsa.shapley.indices(ishigami.PROBLEM, X, Y, backend="pce", include_correlative=True)
+
+
+class TestBootstrapIntervals:
+    """The opt-in confidence intervals on Shapley effects.
+
+    Tier T4 throughout.
+    """
+
+    @staticmethod
+    def _data(n: int = 300, seed: int = 0):
+        rng = np.random.default_rng(seed)
+        X = jnp.asarray(rng.uniform(-np.pi, np.pi, size=(n, 3)))
+        return X, ishigami.evaluate(X)
+
+    def test_no_bootstrap_by_default(self):
+        """T4: the plainest call reports no interval and pays for none.
+
+        Each replicate refits the backend surrogate, which is the most
+        expensive replicate of the three surrogate methods.
+        """
+        X, Y = self._data()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = _analyze_shapley(ishigami.PROBLEM, X, Y, order=3)
+
+        assert result.ci is None
+        assert result.Sh_conf is None
+        assert result.S1_conf is None
+        assert result.ST_conf is None
+
+    def test_the_interval_brackets_the_point_estimate(self):
+        """T4: lower <= upper for every effect, and the estimate sits inside."""
+        X, Y = self._data()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = _analyze_shapley(
+                ishigami.PROBLEM, X, Y, order=3, n_bootstrap=8, key=jax.random.key(0)
+            )
+
+        for point, conf in (
+            (result.Sh, result.Sh_conf),
+            (result.S1, result.S1_conf),
+            (result.ST, result.ST_conf),
+        ):
+            lower, upper = np.asarray(conf[0]), np.asarray(conf[1])
+            point = np.asarray(point)
+            assert (lower <= upper).all()
+            assert (point >= lower - 0.2).all()
+            assert (point <= upper + 0.2).all()
+
+    def test_the_replicate_goes_through_the_chosen_backend(self):
+        """T4: an HDMR-backed analysis gets HDMR-backed replicates.
+
+        Two backends on the same data give measurably different effects, so a
+        wrapper that resampled through the wrong one would produce an interval
+        that misses its own point estimate. Comparing the interval against the
+        *other* backend's estimate is what makes that visible.
+        """
+        X, Y = self._data(n=400)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = _analyze_shapley(
+                ishigami.PROBLEM,
+                X,
+                Y,
+                backend="hdmr",
+                maxiter=50,
+                n_bootstrap=5,
+                key=jax.random.key(1),
+                keep_replicates=True,
+            )
+            hdmr_point = np.asarray(result.Sh)
+
+        assert result.ci is not None
+        assert result.ci.replicates is not None
+        draws = np.asarray(result.ci.replicates["Sh"])
+        assert draws.shape == (5, 3)
+        # Every replicate lands near the HDMR point estimate, not near the
+        # PCE one, which differs on this model.
+        assert np.abs(draws.mean(axis=0) - hdmr_point).max() < 0.15
+
+    def test_a_key_is_required(self):
+        """T4: no key means no interval, and it is refused rather than seeded."""
+        X, Y = self._data()
+        with pytest.raises(ValueError, match="key is required"):
+            _analyze_shapley(ishigami.PROBLEM, X, Y, n_bootstrap=4)
+
+    def test_the_point_estimate_is_the_one_without_a_bootstrap(self):
+        """T4: asking for an interval does not move the number it is around."""
+        X, Y = self._data()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            plain = _analyze_shapley(ishigami.PROBLEM, X, Y, order=3)
+            with_ci = _analyze_shapley(
+                ishigami.PROBLEM, X, Y, order=3, n_bootstrap=3, key=jax.random.key(2)
+            )
+
+        np.testing.assert_array_equal(np.asarray(plain.Sh), np.asarray(with_ci.Sh))
+
+    def test_the_interval_survives_a_dropped_row(self):
+        """T4: replicates resample the rows the backend fitted, not the input rows.
+
+        Under ``on_invalid="drop"`` the backend removed a row before fitting.
+        Resampling the caller's full array would draw that NaN row back in and
+        hand every replicate a NaN fit.
+        """
+        X, Y = self._data()
+        Y = np.asarray(Y).copy()
+        Y[5] = np.nan
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = _analyze_shapley(
+                ishigami.PROBLEM,
+                X,
+                Y,
+                order=3,
+                on_invalid="drop",
+                n_bootstrap=4,
+                key=jax.random.key(3),
+            )
+
+        assert result.invalid.n_invalid == 1
+        assert np.isfinite(np.asarray(result.Sh_conf)).all()

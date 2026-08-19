@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import math
 import warnings
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
 from jaxgsa._core.batching import get_memory_budget, resolve_batch_size
-from jaxgsa._core.entry import prepare
+from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
+from jaxgsa._core.entry import at_least, check_scalars, in_open_interval, one_of, prepare
 from jaxgsa._core.invalid import OnInvalid
+from jaxgsa._core.result import CIInfo
 from jaxgsa._core.sampling import UNIT_CLIP
 from jaxgsa._core.surrogate import _PredictPlan
+from jaxgsa._core.transforms import _truncnorm_cdf
 from jaxgsa._core.validation import (
     _prepare_Y,
 )
@@ -103,9 +107,6 @@ def _map_to_reference(X: Array, problem: Problem, order: int) -> tuple[Array, tu
         ``build_design_matrix`` which 1-D polynomial family each dimension
         needs.
     """
-    import numpy as np
-    from scipy.stats import truncnorm
-
     D = problem.num_vars
     cols = []
     input_types: list[str] = []
@@ -124,16 +125,18 @@ def _map_to_reference(X: Array, problem: Problem, order: int) -> tuple[Array, tu
             continue
 
         mean, lo, hi = spec.mean, spec.low, spec.high
-        std = float(jnp.sqrt(spec.variance))
+        # math, not jnp: the standard deviation is a property of the declared
+        # marginal, so it must stay a host float. Under `jit` a `jnp` call on
+        # it returns a tracer, and `float()` on a tracer raises -- which is
+        # what made the reference map untraceable for a Gaussian input.
+        std = math.sqrt(float(spec.variance))
         truncated = lo is not None or hi is not None
         if truncated and not (
             hermite_safe_order and _truncated_gaussian_is_wide(lo, hi, mean, std)
         ):
-            a_std = -np.inf if lo is None else (lo - mean) / std
-            b_std = np.inf if hi is None else (hi - mean) / std
-            u = jnp.asarray(
-                truncnorm.cdf(np.asarray(X[:, d]), a=a_std, b=b_std, loc=mean, scale=std)
-            )
+            a = -np.inf if lo is None else (lo - mean) / std
+            b = np.inf if hi is None else (hi - mean) / std
+            u = _truncnorm_cdf((X[:, d] - mean) / std, a, b)
             u = jnp.clip(u, UNIT_CLIP, 1.0 - UNIT_CLIP)
             cols.append(2.0 * u - 1.0)
             input_types.append("uniform")
@@ -155,6 +158,38 @@ def _auto_order(D: int, N: int, max_order: int, fit_ratio: float) -> int:
     while order >= 1 and comb(D + order, order) > cap:
         order -= 1
     return max(order, 1)
+
+
+def effective_order(
+    problem: Problem, n_samples: int, *, order: int = 3, fit_ratio: float = 0.5
+) -> int:
+    """Report the polynomial degree a fit would actually use.
+
+    A PCE with ``C(D + order, order)`` terms cannot be fitted on fewer rows
+    than terms, so :func:`analyze` and :func:`indices` reduce ``order`` until
+    the term count fits within ``fit_ratio * n_samples``. That reduction is
+    real information: an expansion fitted at degree 2 does not represent the
+    cubic effects a caller who asked for degree 3 expects to see.
+
+    :func:`analyze` reports it twice, as a warning and as ``result.order``.
+    :func:`indices` reports it neither way — it is traceable, so it has no
+    result object to carry it and no place to put a side effect. This
+    function is where an ``indices`` caller reads it instead. It needs only
+    the sample size, so it answers before the model has been run.
+
+    Args:
+        problem: Parameter names and distributions. Only ``num_vars`` is
+            read.
+        n_samples: Number of rows the fit will run on, after any invalid
+            rows have been dropped.
+        order: Maximum total polynomial degree requested.
+        fit_ratio: Maximum ratio of terms to samples, as in :func:`analyze`.
+
+    Returns:
+        The degree a fit with these settings would use. Equal to ``order``
+        when the sample budget allows it, and lower otherwise, never below 1.
+    """
+    return _auto_order(problem.num_vars, n_samples, order, fit_ratio)
 
 
 class _PCEFit(NamedTuple):
@@ -305,9 +340,12 @@ def _fit_pce_core(
     X: Array,
     Y_canonical: Array,
     *,
-    order: int,
-    ridge: float,
-    fit_ratio: float,
+    # The defaults mirror `analyze`'s, so a caller that forwards only the
+    # arguments it was given -- `jaxgsa.shapley.indices` does -- fits the same
+    # expansion `analyze` would. `tests/test_shapley.py` compares the two.
+    order: int = 3,
+    ridge: float = 1e-8,
+    fit_ratio: float = 0.5,
     batch_size: int | None = None,
 ) -> _PCEFit:
     """Fit the shared PCE expansion for every output slice at once.
@@ -322,6 +360,12 @@ def _fit_pce_core(
     budget, or when ``batch_size`` is an explicit int. The streamed fit
     solves the same normal equations and computes the same exact LOO. It
     differs only in float32 summation order.
+
+    Nothing here warns. The order it actually fitted at comes back on
+    ``_PCEFit.order``, and :func:`analyze` compares that against the request
+    and warns. A warning inside the fit would put a host-side side effect on
+    the path :func:`indices` traces, for information the caller can also get
+    from :func:`effective_order` without running a fit at all.
     """
     Y_3d, _ = _prepare_Y(Y_canonical)
     N, D = X.shape
@@ -329,15 +373,6 @@ def _fit_pce_core(
 
     # Cap polynomial order so n_terms <= fit_ratio * N (prevents overfitting).
     effective_order = _auto_order(D, N, order, fit_ratio)
-    if effective_order < order:
-        # The fit is silently coarser than requested; surface it so callers
-        # do not mistake a truncated expansion for the order they asked for.
-        warnings.warn(
-            f"jaxgsa: PCE order reduced from {order} to {effective_order} to keep the "
-            f"term count within the sample budget (fit_ratio={fit_ratio}, N={N})",
-            stacklevel=3,
-            category=JaxgsaWarning,
-        )
     mi = build_multi_index(D, effective_order)
     n_terms = mi.shape[0]
 
@@ -380,6 +415,166 @@ def _fit_pce_core(
     )
 
 
+def _indices_3d(
+    problem: Problem,
+    X: Array,
+    Y_3d: Array,
+    *,
+    order: int,
+    ridge: float,
+    fit_ratio: float,
+    batch_size: int | None,
+) -> tuple[Array, Array, Array]:
+    """Fit the expansion and read the indices off it, in canonical layout.
+
+    The shared body of :func:`indices` and of one bootstrap replicate. It
+    takes ``Y`` already promoted to ``(N, T, K)`` and returns ``(T, K, ...)``
+    arrays, so neither caller squeezes twice.
+    """
+    fit = _fit_pce_core(
+        problem, X, Y_3d, order=order, ridge=ridge, fit_ratio=fit_ratio, batch_size=batch_size
+    )
+    return sobol_from_coefficients(fit.coefficients, fit.multi_index)
+
+
+def _bootstrap_indices(
+    problem: Problem,
+    X: Array,
+    Y_3d: Array,
+    key: Array,
+    *,
+    n_bootstrap: int,
+    order: int,
+    ridge: float,
+    fit_ratio: float,
+    batch_size: int | None,
+) -> tuple[Array, Array, Array]:
+    """Refit the expansion on ``n_bootstrap`` row resamples.
+
+    One replicate is a full refit: the rows are drawn with replacement, the
+    design matrix is rebuilt on them and the normal equations are solved
+    again. Nothing about a PCE index survives a resample without that — the
+    indices are functions of the coefficients, not of any per-row statistic
+    the point estimate already computed. So the replicates run as a Python
+    loop over independent fits rather than as a vmapped reduction, and the
+    cost is ``n_bootstrap`` fits.
+
+    The row draw is shared by every output slice, exactly as the point
+    estimate shares one basis across slices.
+
+    Args:
+        problem: Parameter names and distributions.
+        X: Input samples with invalid rows already removed, shape ``(N, D)``.
+        Y_3d: Outputs in canonical ``(N, T, K)`` layout.
+        key: A ``jax.random`` key, split once per replicate.
+        n_bootstrap: Number of replicates.
+        order: Requested maximum polynomial degree.
+        ridge: Tikhonov parameter.
+        fit_ratio: Terms-to-samples cap.
+        batch_size: Rows per fit batch, or ``None``.
+
+    Returns:
+        ``(S1, ST, S2)`` draws, each with a leading axis of length
+        ``n_bootstrap`` followed by the canonical ``(T, K, ...)`` shape.
+    """
+    N = X.shape[0]
+    S1_draws, ST_draws, S2_draws = [], [], []
+    for _ in range(n_bootstrap):
+        key, subkey = jax.random.split(key)
+        rows = jax.random.choice(subkey, N, shape=(N,), replace=True)
+        S1_b, ST_b, S2_b = _indices_3d(
+            problem,
+            X[rows],
+            Y_3d[rows],
+            order=order,
+            ridge=ridge,
+            fit_ratio=fit_ratio,
+            batch_size=batch_size,
+        )
+        S1_draws.append(S1_b)
+        ST_draws.append(ST_b)
+        S2_draws.append(S2_b)
+    return jnp.stack(S1_draws), jnp.stack(ST_draws), jnp.stack(S2_draws)
+
+
+def indices(
+    problem: Problem,
+    X: Array,
+    Y: Array,
+    *,
+    order: int = 3,
+    ridge: float = 1e-8,
+    fit_ratio: float = 0.5,
+    batch_size: int | None = None,
+) -> tuple[Array, ...]:
+    """Compute PCE Sobol indices as plain arrays, with no diagnostics.
+
+    This is the transformable core of :func:`analyze`. It fits the same
+    expansion on the same data and returns the same numbers, but it does
+    nothing else: no non-finite check, no zero-variance warning, no
+    reduced-order warning, no leave-one-out diagnostic, no
+    :class:`jaxgsa.pce.PCEResult`, and no read of any array value on the
+    host. So it composes with ``jax.jit``, ``jax.vmap``, ``jax.grad`` and
+    ``jax.jacrev``, which :func:`analyze` cannot, because a policy decision
+    needs a concrete value and a tracer has none.
+
+    Use :func:`analyze` for ordinary analysis. Nothing here checks the
+    inputs, so a single NaN reaches the normal equations and turns every
+    index into NaN without a word. Nothing here reports the fit quality
+    either: ``loo_rmse`` and ``explained_variance`` are what tell you whether
+    a PCE index means anything, and only :func:`analyze` computes them.
+
+    The polynomial degree may still be reduced to fit the sample budget, as
+    in :func:`analyze`, and here that happens silently. Call
+    :func:`effective_order` to find out what degree a fit will use.
+
+    Tier T4 (behavioural contract): the returned arrays must equal the
+    corresponding fields of ``analyze``'s result on clean outputs, and the
+    function must survive ``jit``, ``vmap`` and ``jit(jacrev(...))``. Checked
+    in ``tests/test_pce_gradients.py``.
+
+    Args:
+        problem: Parameter names and distributions.
+        X: Input samples, shape ``(N, D)``.
+        Y: Model outputs, shape ``(N,)``, ``(N, K)`` or ``(N, T, K)``, as
+            :func:`analyze` accepts them.
+        order: Maximum total polynomial degree, as in :func:`analyze`.
+        ridge: Tikhonov regularization for the least-squares fit.
+        fit_ratio: Maximum ratio of terms to samples before ``order`` is
+            reduced.
+        batch_size: Rows per batch during the fit, or ``None`` to keep the
+            single-shot fit unless the memory budget says otherwise. Both
+            paths trace; they differ only in float32 summation order.
+
+    Returns:
+        ``(S1, ST, S2)``, at the shapes ``analyze`` reports for this ``Y``.
+
+    Raises:
+        ValueError: If ``order``, ``ridge``, ``fit_ratio`` or ``batch_size``
+            is out of range, or ``problem`` has a categorical parameter,
+            which no orthogonal polynomial family covers.
+    """
+    check_scalars(
+        (
+            at_least("order", order, 1),
+            at_least("ridge", ridge, 0.0),
+            at_least("fit_ratio", fit_ratio, 0.0),
+            at_least("batch_size", batch_size, 1),
+        )
+    )
+    Y_3d, layout = _prepare_Y(Y)
+    S1, ST, S2 = _indices_3d(
+        problem,
+        jnp.asarray(X),
+        Y_3d,
+        order=order,
+        ridge=ridge,
+        fit_ratio=fit_ratio,
+        batch_size=batch_size,
+    )
+    return layout.squeeze(S1), layout.squeeze(ST), layout.squeeze(S2, n_trailing=2)
+
+
 def analyze(
     problem: Problem,
     X: Array,
@@ -389,7 +584,12 @@ def analyze(
     ridge: float = 1e-8,
     fit_ratio: float = 0.5,
     batch_size: int | None = None,
+    n_bootstrap: int = 0,
+    conf_level: float = 0.95,
+    ci_method: Literal["quantile", "gaussian"] = "quantile",
+    key: Array | None = None,
     on_invalid: OnInvalid = "raise",
+    keep_replicates: bool = False,
 ) -> PCEResult:
     """Compute Sobol indices via polynomial chaos expansion (PCE).
 
@@ -430,20 +630,50 @@ def analyze(
             paths solve the same normal equations and compute the same
             exact leave-one-out error; results differ only at the level of
             float32 summation order.
+        n_bootstrap: Number of bootstrap resamples for confidence intervals.
+            ``0`` (default) disables them. The resampling unit is one row of
+            ``(X, Y)``.
+
+            This is the expensive kind of bootstrap. Every replicate refits
+            the whole expansion — a fresh design matrix, a fresh Gram solve —
+            so the cost is an order of magnitude above the row resample of a
+            method such as ``jaxgsa.pawn``, which only re-reduces numbers it
+            already has. Twenty replicates cost about twenty fits. That is
+            why the default is ``0``, and why a small ``n_bootstrap`` is the
+            usual choice here.
+
+            The interval measures the sampling variability of ``(X, Y)``,
+            propagated through the fit. It does not measure truncation
+            error: an expansion too coarse to represent the model gives a
+            biased index, and every replicate inherits the same bias, so the
+            interval stays narrow and wrong. ``loo_rmse`` and
+            ``explained_variance`` are what report that.
+        conf_level: Two-sided confidence level for the intervals.
+        ci_method: How the interval endpoints are formed. ``"quantile"``
+            (default) reads them off the empirical bootstrap distribution.
+            ``"gaussian"`` centres them on the point estimate and takes
+            ``+/- z * sd`` of the draws, which is smoother for a small
+            ``n_bootstrap`` but assumes the draws are normal.
+        key: A ``jax.random`` key for the bootstrap resampling. Required when
+            ``n_bootstrap > 0``. Pass ``jax.random.key(0)`` if you have an
+            integer seed.
         on_invalid: What to do about non-finite values in ``X`` or ``Y``.
             One row is one unit here, so ``"drop"`` removes the affected
             ``(X, Y)`` pairs and fits on the rest. See
             :mod:`jaxgsa._core.invalid`. The check matters for PCE: a single
             NaN reaches the normal equations and poisons every coefficient,
             every leave-one-out RMSE and every index.
+        keep_replicates: Retain the per-replicate index arrays on
+            ``result.ci``. Off by default: the draws are large.
 
     Returns:
         PCEResult holding S1 and ST, shape ``(D,)`` / ``(K, D)`` /
         ``(T, K, D)``, and S2, shape ``(D, D)`` / ``(K, D, D)`` /
         ``(T, K, D, D)``, with leading output and time dims mirroring ``Y``.
         It also carries the fitted coefficients and multi-index (reused by
-        ``result.predict``), the effective ``order``, and the per-slice
-        leave-one-out RMSE goodness-of-fit diagnostic.
+        ``result.predict``), the effective ``order``, the per-slice
+        leave-one-out RMSE goodness-of-fit diagnostic, and the confidence
+        intervals when ``n_bootstrap > 0``.
 
     Raises:
         ValueError: If ``X`` fails validation against ``problem``, ``Y``'s
@@ -453,9 +683,9 @@ def analyze(
             Wiener-Askey basis is orthogonal only under independent
             inputs), or ``problem`` has categorical parameters (a
             polynomial in an unordered level code has no meaning),
-            ``on_invalid`` is not one of the three policies, or
+            ``on_invalid`` is not one of the three policies,
             ``on_invalid="raise"`` (the default) and ``X`` or ``Y`` holds a
-            non-finite value.
+            non-finite value, or ``n_bootstrap > 0`` without a ``key``.
     """
     from jaxgsa.pce import SPEC
 
@@ -463,7 +693,25 @@ def analyze(
     # Everything downstream (`_fit_pce_core`, and Shapley routing through
     # `PCEResult.shapley`) then works on data the policy has already passed,
     # so the policy is applied exactly once per user call.
-    ctx = prepare(SPEC, problem, Y, X=X, on_invalid=on_invalid, min_kept=_MIN_ROWS)
+    ctx = prepare(
+        SPEC,
+        problem,
+        Y,
+        X=X,
+        on_invalid=on_invalid,
+        checks=(
+            at_least("order", order, 1),
+            at_least("ridge", ridge, 0.0),
+            at_least("fit_ratio", fit_ratio, 0.0),
+            at_least("batch_size", batch_size, 1),
+            at_least("n_bootstrap", n_bootstrap, 0),
+            one_of("ci_method", ci_method, ("quantile", "gaussian")),
+            in_open_interval("conf_level", conf_level, 0.0, 1.0),
+        ),
+        min_kept=_MIN_ROWS,
+    )
+    if n_bootstrap > 0 and key is None:
+        raise ValueError("key is required when n_bootstrap > 0")
     X, Y, invalid = ctx.inputs, ctx.Y, ctx.invalid
 
     # Per-slice output variance for the explained-variance diagnostic below.
@@ -473,6 +721,18 @@ def analyze(
         problem, X, Y, order=order, ridge=ridge, fit_ratio=fit_ratio, batch_size=batch_size
     )
     T, K = fit.coefficients.shape[:2]
+    if fit.order < order:
+        # The fit is coarser than requested; surface it so callers do not
+        # mistake a truncated expansion for the order they asked for. The
+        # warning lives here rather than in the fit, so that `indices` stays
+        # free of host-side side effects. `effective_order` answers the same
+        # question without a fit.
+        warnings.warn(
+            f"jaxgsa: PCE order reduced from {order} to {fit.order} to keep the "
+            f"term count within the sample budget (fit_ratio={fit_ratio}, N={X.shape[0]})",
+            stacklevel=2,
+            category=JaxgsaWarning,
+        )
 
     # Sobol indices are extracted analytically from the coefficients
     # (Sudret 2008), batched over all slices: no extra sampling, no loops.
@@ -488,6 +748,53 @@ def analyze(
     # Drop the singleton axes _prepare_Y inserted. S1/ST/coeffs end in
     # (T, K, per-slice); S2 carries an extra trailing D and loo has no trailing
     # per-slice axis, so they pass n_trailing=2 and 0 respectively.
+    S1_conf: Array | None = None
+    ST_conf: Array | None = None
+    S2_conf: Array | None = None
+    ci: CIInfo | None = None
+    if n_bootstrap > 0:
+        assert key is not None  # checked above, before the fit ran
+        S1_draws, ST_draws, S2_draws = _bootstrap_indices(
+            problem,
+            X,
+            ctx.Y3,
+            key,
+            n_bootstrap=n_bootstrap,
+            order=order,
+            ridge=ridge,
+            fit_ratio=fit_ratio,
+            batch_size=batch_size,
+        )
+
+        def endpoints(point: Array, draws: Array, n_trailing: int) -> Array:
+            """Stack ``[lower, upper]`` into a leading axis of size 2."""
+            return ctx.squeeze(
+                jnp.stack(
+                    _bootstrap_ci_endpoints(
+                        point, draws, conf_level=conf_level, ci_method=ci_method
+                    )
+                ),
+                n_trailing=n_trailing,
+            )
+
+        S1_conf = endpoints(S1, S1_draws, 1)
+        ST_conf = endpoints(ST, ST_draws, 1)
+        S2_conf = endpoints(S2, S2_draws, 2)
+        ci = CIInfo(
+            level=conf_level,
+            method=ci_method,
+            n_bootstrap=n_bootstrap,
+            # The leading replicate axis survives the squeeze, which addresses
+            # the T/K axes from the end.
+            replicates={
+                "S1": ctx.squeeze(S1_draws),
+                "ST": ctx.squeeze(ST_draws),
+                "S2": ctx.squeeze(S2_draws, n_trailing=2),
+            }
+            if keep_replicates
+            else None,
+        )
+
     S1 = ctx.squeeze(S1)
     ST = ctx.squeeze(ST)
     coeffs = ctx.squeeze(fit.coefficients)
@@ -507,6 +814,10 @@ def analyze(
         explained_variance=explained_variance,
         streamed=fit.streamed,
         invalid=invalid,
+        S1_conf=S1_conf,
+        ST_conf=ST_conf,
+        S2_conf=S2_conf,
+        ci=ci,
     )
 
 

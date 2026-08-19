@@ -763,3 +763,124 @@ class TestHDMROnInvalid:
         with pytest.warns(JaxgsaWarning):
             result = analyze_hdmr(PROBLEM, X, Y, on_invalid="drop", **self.HDMR_KWARGS)
         assert result.shapley().invalid == result.invalid
+
+
+class TestBootstrapIntervals:
+    """The opt-in confidence intervals.
+
+    Tier T4 throughout. A bootstrap interval has no closed form to check
+    against; what these pin is that the interval brackets its estimate, that
+    it costs nothing when nobody asks for it, and that the shared interval
+    vocabulary is honoured here too.
+    """
+
+    @staticmethod
+    def _data(n: int = 400, seed: int = 0):
+        rng = np.random.default_rng(seed)
+        X = jnp.asarray(rng.uniform(-np.pi, np.pi, size=(n, 3)))
+        return X, evaluate(X)
+
+    def test_no_bootstrap_by_default(self):
+        """T4: the plainest call reports no interval and pays for none.
+
+        Each replicate refits the whole B-spline expansion, so an
+        on-by-default interval would make a routine call an order of
+        magnitude slower.
+        """
+        X, Y = self._data()
+        result = analyze_hdmr(PROBLEM, X, Y, maxorder=2, maxiter=50)
+
+        assert result.ci is None
+        assert result.Sa_conf is None
+        assert result.Sb_conf is None
+        assert result.S_conf is None
+        assert result.ST_conf is None
+
+    def test_the_interval_brackets_the_point_estimate(self):
+        """T4: lower <= upper, and the estimate sits inside, for all four fields."""
+        X, Y = self._data()
+        result = analyze_hdmr(
+            PROBLEM, X, Y, maxorder=2, maxiter=50, n_bootstrap=5, key=jax.random.key(0)
+        )
+
+        for point, conf in (
+            (result.Sa, result.Sa_conf),
+            (result.Sb, result.Sb_conf),
+            (result.S, result.S_conf),
+            (result.ST, result.ST_conf),
+        ):
+            lower, upper = np.asarray(conf[0]), np.asarray(conf[1])
+            point = np.asarray(point)
+            finite = np.isfinite(point) & np.isfinite(lower) & np.isfinite(upper)
+            assert (lower[finite] <= upper[finite]).all()
+            # A five-draw percentile interval need not straddle the estimate
+            # exactly, so the comparison carries slack.
+            assert (point[finite] >= lower[finite] - 0.25).all()
+            assert (point[finite] <= upper[finite] + 0.25).all()
+
+    def test_the_point_estimate_is_the_one_without_a_bootstrap(self):
+        """T4: asking for an interval does not move the number it is around."""
+        X, Y = self._data()
+        plain = analyze_hdmr(PROBLEM, X, Y, maxorder=2, maxiter=50)
+        with_ci = analyze_hdmr(
+            PROBLEM, X, Y, maxorder=2, maxiter=50, n_bootstrap=3, key=jax.random.key(1)
+        )
+
+        np.testing.assert_array_equal(np.asarray(plain.Sa), np.asarray(with_ci.Sa))
+        np.testing.assert_array_equal(np.asarray(plain.ST), np.asarray(with_ci.ST))
+
+    def test_ci_records_how_the_interval_was_made(self):
+        """T4: the level, the rule and the count travel with the numbers."""
+        X, Y = self._data()
+        result = analyze_hdmr(
+            PROBLEM,
+            X,
+            Y,
+            maxorder=2,
+            maxiter=50,
+            n_bootstrap=4,
+            conf_level=0.9,
+            ci_method="gaussian",
+            key=jax.random.key(2),
+        )
+
+        assert result.ci is not None
+        assert (result.ci.level, result.ci.method, result.ci.n_bootstrap) == (0.9, "gaussian", 4)
+        assert result.ci.replicates is None
+
+    def test_keep_replicates_retains_every_draw(self):
+        """T4: the draws come back with a leading resample axis."""
+        X, Y = self._data()
+        result = analyze_hdmr(
+            PROBLEM,
+            X,
+            Y,
+            maxorder=2,
+            maxiter=50,
+            n_bootstrap=3,
+            key=jax.random.key(3),
+            keep_replicates=True,
+        )
+
+        assert result.ci is not None
+        assert result.ci.replicates is not None
+        assert result.ci.replicates["Sa"].shape == (3, 6)
+        assert result.ci.replicates["ST"].shape == (3, 3)
+
+    def test_a_key_is_required(self):
+        """T4: no key means no interval, and it is refused rather than seeded."""
+        X, Y = self._data()
+        with pytest.raises(ValueError, match="key is required"):
+            analyze_hdmr(PROBLEM, X, Y, maxorder=2, maxiter=50, n_bootstrap=3)
+
+    def test_the_interval_reaches_the_dataset(self):
+        """T4: the export splits each interval into named lower/upper halves."""
+        X, Y = self._data()
+        result = analyze_hdmr(
+            PROBLEM, X, Y, maxorder=2, maxiter=50, n_bootstrap=3, key=jax.random.key(5)
+        )
+        dataset = result.to_dataset()
+
+        for name in ("Sa", "Sb", "S", "ST"):
+            assert f"{name}_lower" in dataset
+            assert f"{name}_upper" in dataset

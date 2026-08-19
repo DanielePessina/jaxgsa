@@ -9,7 +9,7 @@ import jax.numpy as jnp
 from jax import Array
 
 from jaxgsa._core.invalid import InvalidReport
-from jaxgsa._core.result import FieldSpec, ResultSchema, SchemaResult
+from jaxgsa._core.result import CIInfo, FieldSpec, ResultSchema, SchemaResult
 from jaxgsa._core.surrogate import SurrogateResult, _PredictPlan
 from jaxgsa.problem import Problem
 
@@ -126,6 +126,23 @@ class HDMRResult(SchemaResult, SurrogateResult):
         _c3: Private parameter index triples of the third-order terms, in the
             order they occupy in the ``n_terms`` axis. Empty below
             ``maxorder=3``.
+        Sa_conf: Bootstrap confidence interval for ``Sa``, shape ``(2, ...)``
+            for ``[lower, upper]``. ``None`` when ``n_bootstrap=0``. Each
+            replicate refits the expansion on a row resample, so the interval
+            measures the sampling variability of ``(X, Y)`` propagated
+            through the fit. It says nothing about how well the expansion
+            represents the model: every replicate shares the same basis and
+            the same maximum order, so a systematic misfit sits inside every
+            interval. ``rmse`` and ``S.sum()`` are what report that.
+        Sb_conf: Bootstrap confidence interval for ``Sb``, as ``Sa_conf``.
+        S_conf: Bootstrap confidence interval for ``S``, as ``Sa_conf``.
+        ST_conf: Bootstrap confidence interval for ``ST``, as ``Sa_conf``.
+            Under correlated inputs it is an interval on the SCSA total, with
+            every caveat that attaches to :attr:`ST` itself.
+        ci: How the intervals were produced: the confidence level, the
+            endpoint rule, the resample count, and the draws themselves when
+            the analysis ran with ``keep_replicates=True``. ``None`` without
+            a bootstrap. See :class:`jaxgsa._core.result.CIInfo`.
     """
 
     Sa: Array
@@ -141,6 +158,11 @@ class HDMRResult(SchemaResult, SurrogateResult):
     streamed: bool = False
     _c2: tuple[tuple[int, int], ...] = field(default=(), repr=False)
     _c3: tuple[tuple[int, int, int], ...] = field(default=(), repr=False)
+    Sa_conf: Array | None = None
+    Sb_conf: Array | None = None
+    S_conf: Array | None = None
+    ST_conf: Array | None = None
+    ci: CIInfo | None = None
 
     # Sa/Sb/S are indexed by expansion term, not by parameter, so they cannot
     # share the "param" axis that ST uses. "select" carries the term axis
@@ -148,10 +170,10 @@ class HDMRResult(SchemaResult, SurrogateResult):
     _schema = ResultSchema(
         primary="Sa",
         fields=(
-            FieldSpec("Sa", "term"),
-            FieldSpec("Sb", "term"),
-            FieldSpec("S", "term"),
-            FieldSpec("ST", "param"),
+            FieldSpec("Sa", "term", interval=True),
+            FieldSpec("Sb", "term", interval=True),
+            FieldSpec("S", "term", interval=True),
+            FieldSpec("ST", "param", interval=True),
             FieldSpec("S2", "pair"),
             FieldSpec("S3", "triple"),
             FieldSpec("select", "term_only"),
