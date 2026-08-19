@@ -1,7 +1,7 @@
 """Tier T4 (behavioural contract): the declared result schema.
 
 No external oracle applies. Nothing here is a number; it is what a result
-promises about how it prints and what it exports. Three things are checked.
+promises about how it prints and what it exports. Four things are checked.
 
 ``__repr__`` must summarize a result, not dump it. Five result classes used to
 have no ``__repr__`` at all, so printing one in a notebook printed every index
@@ -14,6 +14,12 @@ declared. The snapshot in ``tests/data/result_dataset_schema.json`` was taken
 from the hand-written ``to_dataset`` methods. Deriving them from a declaration
 was a refactor, so nothing in that file may move. Numbers are not compared
 here: ``scripts/baseline_check.py`` guards those.
+
+The declared provenance must reach the dataset. A result declares its scalar
+provenance once, as ``ResultSchema.meta``, and both the repr and
+``to_dataset().attrs`` read that one declaration. The check is parametrised
+off the registry and off the declaration itself, never off a written list,
+because a written list is the drift it exists to catch.
 
 ``CIInfo`` must record the level and the endpoint rule that actually ran, and
 must keep the bootstrap draws only when asked.
@@ -114,6 +120,47 @@ def test_dataset_schema_is_unchanged(name: str, shape: str) -> None:
     expected = _snapshot()[f"{name}@{shape}"]
     actual = fixtures.dataset_schema(_result(name, shape))
     assert actual == {k: v for k, v in expected.items() if k != "type"}
+
+
+@pytest.mark.parametrize("method", sorted(methods()))
+def test_declared_provenance_reaches_the_dataset(method: str) -> None:
+    """Every name a result prints as provenance, it also exports.
+
+    The repr and the dataset attributes used to come from two declarations.
+    Five results named provenance in the repr and exported none of it, and
+    two more exported it under other names, silently. This reads the one
+    declaration each class now has, so a name added to ``meta`` is covered
+    without touching this test, and a name dropped from the export fails it.
+    """
+    result = _result(method, "scalar")
+    attrs = result.to_dataset().attrs
+
+    for name in type(result)._schema.meta:
+        value = getattr(result, name)
+        if value is None:
+            assert name not in attrs, (
+                f"{type(result).__name__}.{name} is None; the key must be dropped, "
+                "because netCDF cannot store a null attribute"
+            )
+            continue
+        assert name in attrs, (
+            f"{type(result).__name__} declares {name!r} as provenance but "
+            f"to_dataset() exports {sorted(attrs)}"
+        )
+        assert attrs[name] == value, (
+            f"{type(result).__name__} exports {name}={attrs[name]!r}, "
+            f"but the result carries {value!r}"
+        )
+
+
+@pytest.mark.parametrize("method", sorted(methods()))
+def test_exported_provenance_is_a_plain_scalar(method: str) -> None:
+    """No attribute leaves as a JAX array, which netCDF cannot write."""
+    result = _result(method, "scalar")
+    for name, value in result.to_dataset().attrs.items():
+        assert isinstance(value, (str, bool, int, float, complex)), (
+            f"{type(result).__name__} exports {name} as {type(value).__name__}"
+        )
 
 
 def test_ot_multivariate_shape_comes_from_the_mode() -> None:

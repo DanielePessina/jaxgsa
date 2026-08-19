@@ -127,6 +127,31 @@ the work, including seven corrections to the roadmap it replaces.
 
 ### Fixed
 
+- **`to_dataset()` lost the analysis settings.** A result printed its settings
+  in its summary, but it did not always export them. `eFAST`, `HDMR`, `PCE`,
+  `Sobol` and `VKOGA` exported none of them. Shapley dropped its `order`.
+  Kucherenko exported `correlated` although it printed `is_correlated`. A saved
+  dataset therefore did not say which estimator, which order, or which mode
+  produced it.
+
+  A result now declares these settings once. The summary and
+  `ds.attrs` both read that declaration, so the two cannot disagree. Every
+  method exports what it prints, under the same name.
+
+  ```python
+  ds = jaxgsa.sobol.analyze(samples, Y).to_dataset()
+  ds.attrs["estimator"]  # 'saltelli-jansen'; was absent
+  ```
+
+  Two names change. `ds.attrs["correlated"]` is now
+  `ds.attrs["is_correlated"]`, on Kucherenko and on VKOGA. The `method` key is
+  removed from those two datasets. Only they wrote it, and the result class
+  already names the method.
+
+  Every value is a plain string, number or boolean, so `to_netcdf` writes it. A
+  setting that does not apply leaves its key out. VKOGA writes no `cv_rmse`
+  when no cross-validation ran, because netCDF has no null attribute.
+
 - **The first-order Sobol estimator is now attributed correctly.** The
   docstrings called `E[B (AB_j - A)] / Var(Y)` "the Saltelli (2010)
   estimator". Saltelli et al. (2010) tabulate and recommend it, but the

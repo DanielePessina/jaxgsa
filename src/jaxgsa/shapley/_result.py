@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Literal
 
 from jax import Array
 
@@ -84,7 +84,3 @@ class ShapleyResult(SchemaResult):
         ),
         meta=("backend", "order", "include_correlative"),
     )
-
-    def _dataset_attrs(self) -> dict[str, Any]:
-        """Record which surrogate produced the effects, and on what basis."""
-        return {"backend": self.backend, "include_correlative": self.include_correlative}

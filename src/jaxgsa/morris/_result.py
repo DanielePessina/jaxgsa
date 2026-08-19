@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Any, Literal
+from typing import Literal
 
 import numpy as np
 from jax import Array
@@ -77,10 +77,6 @@ class MorrisResult(SchemaResult):
         ),
         meta=("space",),
     )
-
-    def _dataset_attrs(self) -> dict[str, Any]:
-        """Record the coordinate space the measures are in."""
-        return {"space": self.space}
 
     def to_physical_units(self) -> MorrisResult:
         """Return a copy with measures rescaled to physical input units.

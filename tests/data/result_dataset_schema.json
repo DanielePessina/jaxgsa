@@ -156,7 +156,10 @@
     ]
   },
   "efast@multi": {
-    "attrs": [],
+    "attrs": [
+      "M",
+      "omega_0"
+    ],
     "coords": [
       "output",
       "param"
@@ -176,7 +179,10 @@
     ]
   },
   "efast@scalar": {
-    "attrs": [],
+    "attrs": [
+      "M",
+      "omega_0"
+    ],
     "coords": [
       "param"
     ],
@@ -194,7 +200,10 @@
     ]
   },
   "efast@series": {
-    "attrs": [],
+    "attrs": [
+      "M",
+      "omega_0"
+    ],
     "coords": [
       "output",
       "param",
@@ -216,7 +225,9 @@
     ]
   },
   "hdmr@multi": {
-    "attrs": [],
+    "attrs": [
+      "streamed"
+    ],
     "coords": [
       "output",
       "param",
@@ -252,7 +263,9 @@
     ]
   },
   "hdmr@scalar": {
-    "attrs": [],
+    "attrs": [
+      "streamed"
+    ],
     "coords": [
       "param",
       "param_i",
@@ -286,7 +299,9 @@
     ]
   },
   "hdmr@series": {
-    "attrs": [],
+    "attrs": [
+      "streamed"
+    ],
     "coords": [
       "output",
       "param",
@@ -324,7 +339,9 @@
     ]
   },
   "hdmr_third_order@multi": {
-    "attrs": [],
+    "attrs": [
+      "streamed"
+    ],
     "coords": [
       "output",
       "param",
@@ -364,7 +381,9 @@
     ]
   },
   "hdmr_third_order@scalar": {
-    "attrs": [],
+    "attrs": [
+      "streamed"
+    ],
     "coords": [
       "param",
       "param_i",
@@ -402,7 +421,9 @@
     ]
   },
   "hdmr_third_order@series": {
-    "attrs": [],
+    "attrs": [
+      "streamed"
+    ],
     "coords": [
       "output",
       "param",
@@ -517,8 +538,7 @@
   },
   "kucherenko@multi": {
     "attrs": [
-      "correlated",
-      "method"
+      "is_correlated"
     ],
     "coords": [
       "output",
@@ -542,8 +562,7 @@
   },
   "kucherenko@scalar": {
     "attrs": [
-      "correlated",
-      "method"
+      "is_correlated"
     ],
     "coords": [
       "param"
@@ -565,8 +584,7 @@
   },
   "kucherenko@series": {
     "attrs": [
-      "correlated",
-      "method"
+      "is_correlated"
     ],
     "coords": [
       "output",
@@ -949,7 +967,10 @@
     ]
   },
   "pce@multi": {
-    "attrs": [],
+    "attrs": [
+      "order",
+      "streamed"
+    ],
     "coords": [
       "output",
       "param",
@@ -979,7 +1000,10 @@
     ]
   },
   "pce@scalar": {
-    "attrs": [],
+    "attrs": [
+      "order",
+      "streamed"
+    ],
     "coords": [
       "param",
       "param_i",
@@ -1007,7 +1031,10 @@
     ]
   },
   "pce@series": {
-    "attrs": [],
+    "attrs": [
+      "order",
+      "streamed"
+    ],
     "coords": [
       "output",
       "param",
@@ -1041,7 +1068,8 @@
   "shapley@multi": {
     "attrs": [
       "backend",
-      "include_correlative"
+      "include_correlative",
+      "order"
     ],
     "coords": [
       "output",
@@ -1068,7 +1096,8 @@
   "shapley@scalar": {
     "attrs": [
       "backend",
-      "include_correlative"
+      "include_correlative",
+      "order"
     ],
     "coords": [
       "param"
@@ -1093,7 +1122,8 @@
   "shapley@series": {
     "attrs": [
       "backend",
-      "include_correlative"
+      "include_correlative",
+      "order"
     ],
     "coords": [
       "output",
@@ -1120,7 +1150,9 @@
     ]
   },
   "sobol@multi": {
-    "attrs": [],
+    "attrs": [
+      "estimator"
+    ],
     "coords": [
       "output",
       "param",
@@ -1158,7 +1190,9 @@
     ]
   },
   "sobol@scalar": {
-    "attrs": [],
+    "attrs": [
+      "estimator"
+    ],
     "coords": [
       "param",
       "param_i",
@@ -1194,7 +1228,9 @@
     ]
   },
   "sobol@series": {
-    "attrs": [],
+    "attrs": [
+      "estimator"
+    ],
     "coords": [
       "output",
       "param",
@@ -1235,10 +1271,9 @@
   },
   "vkoga@multi": {
     "attrs": [
-      "correlated",
       "cv_rmse",
       "gamma",
-      "method",
+      "is_correlated",
       "n_centers",
       "ridge"
     ],
@@ -1278,10 +1313,9 @@
   },
   "vkoga@scalar": {
     "attrs": [
-      "correlated",
       "cv_rmse",
       "gamma",
-      "method",
+      "is_correlated",
       "n_centers",
       "ridge"
     ],
@@ -1319,10 +1353,9 @@
   },
   "vkoga@series": {
     "attrs": [
-      "correlated",
       "cv_rmse",
       "gamma",
-      "method",
+      "is_correlated",
       "n_centers",
       "ridge"
     ],

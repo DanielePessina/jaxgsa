@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from jax import Array
 
@@ -56,7 +55,3 @@ class KucherenkoResult(SchemaResult):
     def is_correlated(self) -> bool:
         """Return ``True`` when the problem declares a non-identity correlation."""
         return self.problem.has_correlated_inputs
-
-    def _dataset_attrs(self) -> dict[str, Any]:
-        """Record the method and whether the inputs were treated as dependent."""
-        return {"method": "kucherenko", "correlated": bool(self.is_correlated)}

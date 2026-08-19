@@ -138,6 +138,33 @@ Each of these has the same dimensions as the index it bounds, so
 you how much of an index you can trust: an interval that spans zero means the
 sample size does not yet separate that parameter from noise.
 
+## Provenance attributes
+
+A dataset also carries the settings the analysis ran with, in `ds.attrs`.
+These are the same scalars the result prints, under the same names, so a saved
+dataset says what produced it:
+
+```python
+print(ds_sobol.attrs)  # {'estimator': 'saltelli-jansen'}
+print(ds_hdmr.attrs)   # {'streamed': False}
+```
+
+Read them as follows.
+
+- Sobol records its `estimator`. Six estimator pairs are available and they
+  disagree at a finite sample size, so the numbers are ambiguous without it.
+- HDMR and PCE record `streamed`, and PCE also records the `order` it fitted,
+  which can be lower than the one you asked for.
+- eFAST records `omega_0` and `M`, Morris records its `space`, optimal
+  transport records its `mode`, Shapley records `backend`, `order` and
+  `include_correlative`, and Kucherenko and VKOGA record `is_correlated`.
+  VKOGA adds the fitted `n_centers`, `gamma`, `ridge` and `cv_rmse`.
+
+Every value is a plain string, number or boolean, so `ds.to_netcdf(...)` writes
+them without further work. A setting that does not apply to a run leaves its
+key out, because netCDF has no null attribute. VKOGA drops `cv_rmse` when you
+fixed both hyperparameters, because no cross-validation ran.
+
 ## HDMR dataset
 
 RS-HDMR fits the output as a sum of terms, one per parameter and one per

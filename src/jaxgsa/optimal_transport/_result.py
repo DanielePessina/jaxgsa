@@ -122,7 +122,3 @@ class OTResult(SchemaResult):
             return ("param",), {"param": list(self.problem.names)}
         ndim = 2 if self.mode == "trajectory" else np.asarray(self.ot).ndim
         return _dims_and_coords(ndim, np.asarray(self.ot).shape, self.problem, time_coords)
-
-    def _dataset_attrs(self) -> dict[str, Any]:
-        """Record the analysis mode, which fixes how the shapes read."""
-        return {"mode": self.mode}

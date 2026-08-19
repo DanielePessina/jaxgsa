@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 from jax import Array
@@ -115,22 +115,12 @@ class VKOGAResult(SchemaResult, SurrogateResult):
             # slice, so it carries no output or time axis.
             FieldSpec("correlation", "pair_only"),
         ),
-        meta=("n_centers", "gamma", "ridge", "is_correlated"),
+        # ``cv_rmse`` is declared here, not as a field: it is one scalar for
+        # the whole fit, on no output axis, and every index is only as good
+        # as it is. A fit that ran no cross-validation carries ``None``, and
+        # the derived export drops the key rather than writing a null.
+        meta=("n_centers", "gamma", "ridge", "is_correlated", "cv_rmse"),
     )
-
-    def _dataset_attrs(self) -> dict[str, Any]:
-        """Record the fit's hyperparameters and its dependence assumption."""
-        attrs: dict[str, Any] = {
-            "method": "vkoga",
-            "n_centers": self.n_centers,
-            "gamma": self.gamma,
-            "ridge": self.ridge,
-            "correlated": bool(self.is_correlated),
-        }
-        # Omitted rather than stored as None: netCDF has no null attribute.
-        if self.cv_rmse is not None:
-            attrs["cv_rmse"] = float(self.cv_rmse)
-        return attrs
 
     def _predict_plan(self, X: Array) -> _PredictPlan:
         """Plan a batched evaluation of the fitted surrogate at ``X``.

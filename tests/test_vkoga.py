@@ -494,7 +494,7 @@ def test_to_dataset_carries_the_coordinate_and_attribute_values(gauss_result):
     assert list(ds.coords["param"].values) == ["x1", "x2", "x3"]
     assert list(ds.coords["param_i"].values) == ["x1", "x2", "x3"]
     np.testing.assert_allclose(ds["correlation"].values, R_GAUSS, atol=1e-12)
-    assert ds.attrs["correlated"] is True
+    assert ds.attrs["is_correlated"] is True
     assert ds.attrs["n_centers"] == gauss_result.n_centers
 
 

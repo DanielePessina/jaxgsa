@@ -14,6 +14,14 @@ A result now declares its fields once, as a :class:`ResultSchema`, and
 :class:`SchemaResult` derives ``to_dataset``, ``__repr__`` and the
 ``*_lower``/``*_upper`` split of a confidence array from that declaration.
 
+The scalar provenance of a result is declared the same way, as
+``ResultSchema.meta``, and it too feeds both the summary and the export. It
+used to feed only the summary: the dataset attributes came from a separate
+hand-written hook per class, so five results printed their provenance and
+saved none of it, and two more saved it under different names than they
+printed. ``tests/test_result_schema.py`` now reads the declaration and checks
+every declared name reaches ``to_dataset().attrs``.
+
 Three results are genuinely irregular, so the derivation has hooks rather
 than special cases:
 
@@ -123,6 +131,37 @@ _PAIR_DIMS = ("param_i", "param_j")
 _TRIPLE_DIMS = ("param_i", "param_j", "param_k")
 
 
+def _attr_value(value: Any) -> Any:
+    """Coerce one provenance value into something a dataset can hold.
+
+    ``xr.Dataset.attrs`` is written out as-is, so a JAX scalar would reach a
+    netCDF file as a device array and reach a reader as
+    ``Array(4, dtype=int32)``. The rule is: a string stays a string, and
+    every other scalar becomes the plain Python ``bool``, ``int``, ``float``
+    or ``complex`` NumPy reads it as. Anything that is not a numeric scalar
+    is recorded by its ``str``, so a declaration this function did not
+    anticipate degrades to a readable label instead of raising in the middle
+    of an export.
+
+    ``None`` never arrives here: :meth:`SchemaResult._dataset_attrs` drops
+    the key instead. netCDF has no null attribute, so a stored ``None``
+    would fail at ``to_netcdf`` time, far from the result that wrote it. An
+    absent key says the same thing and survives the round trip.
+
+    Args:
+        value: The declared provenance value read off the result.
+
+    Returns:
+        The value in a form ``xr.Dataset.attrs`` can carry.
+    """
+    if isinstance(value, str):
+        return value
+    array = np.asarray(value)
+    if array.ndim == 0 and array.dtype.kind in "biufc":
+        return array.item()
+    return str(value)
+
+
 @dataclass(frozen=True)
 class FieldSpec:
     """One declared field of a result.
@@ -155,7 +194,9 @@ class ResultSchema:
             dimensions. Every other field is placed relative to it.
         fields: The declared array fields, in export order.
         meta: Names of scalar provenance fields (``mode``, ``backend``,
-            ``order``, ...) shown in ``__repr__``.
+            ``order``, ...). They are shown in ``__repr__`` and written to
+            ``xr.Dataset.attrs`` under the same names, so a saved dataset
+            carries the same provenance the printed result does.
     """
 
     primary: str
@@ -220,10 +261,30 @@ class SchemaResult:
     def _dataset_attrs(self) -> dict[str, Any]:
         """Return the dataset-level attributes to record.
 
+        The default exports the schema's :attr:`ResultSchema.meta` names, so
+        one declaration drives both the summary and the export. Before this,
+        the attributes were hand-written per class and the two drifted: five
+        results named provenance in their repr and exported none of it, and
+        two more exported it under other names.
+
+        Each value passes through :func:`_attr_value`, and a value of
+        ``None`` drops its key rather than writing a null. See that function
+        for the rule.
+
+        Override it only for a key the declaration cannot supply. An
+        override that reproduces this mapping is drift waiting to happen; no
+        result class needs one today.
+
         Returns:
-            A mapping written to ``xr.Dataset.attrs``. Empty by default.
+            A mapping written to ``xr.Dataset.attrs``.
         """
-        return {}
+        attrs: dict[str, Any] = {}
+        for name in self._schema.meta:
+            value = getattr(self, name)
+            if value is None:
+                continue
+            attrs[name] = _attr_value(value)
+        return attrs
 
     # -- derivation -------------------------------------------------------
 
