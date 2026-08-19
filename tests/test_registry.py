@@ -24,6 +24,7 @@ import pathlib
 import warnings
 from collections.abc import Callable
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -56,6 +57,12 @@ DESIGN_SIZE = {"sobol": 64, "morris": 8, "efast": 400, "kucherenko": 64}
 # capability gate and not a size complaint. 64 rows are enough for all but
 # hdmr, whose regression needs 300.
 GIVEN_DATA_SIZE = {"hdmr": 320}
+NEEDS_A_KEY = ("hsic", "vkoga")
+"""Methods whose randomness is not optional, so ``key`` has no default.
+
+The gate has to be reached, and a missing required keyword would refuse the
+call before it ever got there.
+"""
 DEFAULT_GIVEN_DATA_SIZE = 64
 
 MIN_METHODS = 13
@@ -109,7 +116,8 @@ def _invoke(spec: MethodSpec, problem: jaxgsa.Problem) -> Callable[[], object]:
     X = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, n, seed=0))
     if spec.name == "dgsm":
         return lambda: spec.analyze(problem, _point_model, X)
-    return lambda: spec.analyze(problem, X, _batch_model(X))
+    extra = {"key": jax.random.key(0)} if spec.name in NEEDS_A_KEY else {}
+    return lambda: spec.analyze(problem, X, _batch_model(X), **extra)
 
 
 _UPDATE_INVOKE = (

@@ -18,6 +18,8 @@ inputs.
 
 Example::
 
+    import jax
+
     import jaxgsa
 
     problem = jaxgsa.Problem(names=("x1", "x2", "x3"), bounds=[(0, 1)] * 3)
@@ -29,7 +31,7 @@ Example::
     # published matrix.
     problem = problem.with_correlation(R)
 
-    result = jaxgsa.vkoga.analyze(problem, X, Y)
+    result = jaxgsa.vkoga.analyze(problem, X, Y, key=jax.random.key(0))
     result.S_TC   # total correlated: rank parameters to measure
     result.S_TU   # total uncorrelated: rank parameters to fix
     Y_pred = result.predict(X_new)
@@ -47,7 +49,7 @@ References:
 
 from jaxgsa._core.invalid import InvalidUnit
 from jaxgsa._core.registry import MethodSpec, register
-from jaxgsa.vkoga._analyze import analyze_vkoga as analyze
+from jaxgsa.vkoga._analyze import analyze
 from jaxgsa.vkoga._result import VKOGAResult
 
 __all__ = ["VKOGAResult", "analyze"]

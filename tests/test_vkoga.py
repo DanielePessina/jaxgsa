@@ -56,7 +56,7 @@ SMALL_KWARGS = dict(
     n_outer=64,
     n_inner=16,
     n_variance=512,
-    seed=0,
+    key=jax.random.key(0),
 )
 
 
@@ -89,7 +89,7 @@ def gauss_result():
             n_outer=256,
             n_inner=64,
             n_variance=4096,
-            seed=0,
+            key=jax.random.key(0),
         )
 
 
@@ -110,7 +110,7 @@ def asym_result():
             n_outer=256,
             n_inner=64,
             n_variance=4096,
-            seed=0,
+            key=jax.random.key(0),
         )
 
 
@@ -171,7 +171,7 @@ def test_independent_inputs_recover_sobol_indices():
             n_outer=256,
             n_inner=64,
             n_variance=4096,
-            seed=0,
+            key=jax.random.key(0),
         )
     assert not result.is_correlated
     np.testing.assert_allclose(result.correlation, np.eye(3), atol=1e-12)
@@ -222,7 +222,7 @@ def test_parameter_permutation_equivariance():
         n_outer=256,
         n_inner=64,
         n_variance=4096,
-        seed=0,
+        key=jax.random.key(0),
     )
     with jax.enable_x64():
         X = np.asarray(jaxgsa.sampling.monte_carlo(ASYM_PROBLEM, 2048, seed=7))
@@ -287,7 +287,7 @@ def test_interaction_model_clips_s_u_and_warns():
                 n_outer=256,
                 n_inner=64,
                 n_variance=4096,
-                seed=0,
+                key=jax.random.key(0),
             )
     S_TU = np.asarray(result.S_TU)
     S_U = np.asarray(result.S_U)
@@ -324,7 +324,7 @@ def test_additive_model_does_not_trigger_the_clip():
                 n_outer=256,
                 n_inner=64,
                 n_variance=4096,
-                seed=0,
+                key=jax.random.key(0),
             )
     assert not [w for w in caught if "S_U exceeded" in str(w.message)]
     np.testing.assert_allclose(np.asarray(result.S_IU), 0.0, atol=3e-2)
@@ -354,7 +354,7 @@ def test_oscillatory_model_warns_that_the_surrogate_failed():
             n_outer=64,
             n_inner=16,
             n_variance=512,
-            seed=0,
+            key=jax.random.key(0),
         )
     # The honest out-of-sample score reaches the result, and it is the thing
     # the warning fired on: the surrogate explains nothing.
@@ -369,7 +369,7 @@ def test_problem_correlation_is_read_by_default():
     """analyze() with no correlation argument reads problem.correlation.
 
     A problem that declares R and a plain problem with R passed per-call must
-    produce identical results on the same seed: same matrix, same draws.
+    produce identical results on the same key: same matrix, same draws.
     """
     X = jaxgsa.sampling.monte_carlo(GAUSS_PROBLEM, 256, seed=2)
     Y = X @ A_COEF
@@ -477,6 +477,64 @@ def test_predict_new_points_and_batching(uniform_fits):
     np.testing.assert_allclose(pred_batched, pred, rtol=2e-5, atol=1e-6)
 
 
+def test_batch_size_bounds_the_index_estimator_too(monkeypatch):
+    """Regression: ``batch_size`` used to reach ``predict`` and nothing else.
+
+    ``batch_size`` counts sample rows per device call, and the index
+    estimator processes far more rows than the surrogate fit does: every
+    outer point expands into ``n_inner`` conditional draws. That loop sized
+    its own chunk from the memory budget and ignored the caller's value, so
+    a caller who lowered ``batch_size`` to fit a small device still met the
+    full ``n_outer * n_inner`` block. This pins both halves: the value
+    arrives at the estimator, and the estimator honours it.
+    """
+    from jaxgsa._core.copula import build_conditional_plan
+    from jaxgsa.vkoga import _analyze as vkoga_analyze
+    from jaxgsa.vkoga._indices import estimate_correlated_indices
+
+    n_outer, n_inner = 64, 16
+    plan = build_conditional_plan(np.array([[1.0, 0.4], [0.4, 1.0]]))
+    rows: list[int] = []
+
+    def predict(U: np.ndarray) -> np.ndarray:
+        rows.append(U.shape[0])
+        return U[:, :1] + 0.5 * U[:, 1:2] ** 2
+
+    kwargs = dict(
+        plan=plan, predict=predict, n_outer=n_outer, n_inner=n_inner, n_variance=256, seed=0
+    )
+    # batch_size has no default on the estimator: that is what made it
+    # droppable, so every call has to say what it wants. The first predict
+    # call is the unconditional variance sample, one row per draw; the
+    # nested conditional calls after it are the ones that expand.
+    auto = estimate_correlated_indices(**kwargs, batch_size=None)
+    nested_auto = max(rows[1:])
+    rows.clear()
+    batched = estimate_correlated_indices(**kwargs, batch_size=32)
+    nested_batched = max(rows[1:])
+
+    assert nested_auto == n_outer * n_inner  # the whole block, as before
+    assert nested_batched == 32  # two outer points, 16 inner draws each
+    # Chunking is a memory decision: the latent draws are made up front, so
+    # the estimate itself must not move.
+    np.testing.assert_allclose(auto.S_TC, batched.S_TC, rtol=1e-12, atol=0.0)
+    np.testing.assert_allclose(auto.S_TU, batched.S_TU, rtol=1e-12, atol=0.0)
+
+    # And the public entry point hands its value over.
+    seen: dict[str, object] = {}
+
+    def spy(**call_kwargs):
+        seen["batch_size"] = call_kwargs.get("batch_size")
+        return estimate_correlated_indices(**call_kwargs)
+
+    monkeypatch.setattr(vkoga_analyze, "estimate_correlated_indices", spy)
+    X = jaxgsa.sampling.monte_carlo(UNIFORM_PROBLEM, 128, seed=3)
+    Y = _uniform_scalar(X)
+    with pytest.warns(JaxgsaWarning, match="single precision"):
+        jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, **dict(SMALL_KWARGS, batch_size=64))
+    assert seen["batch_size"] == 64
+
+
 def test_shapley_raises_not_implemented(uniform_fits):
     _, _, fits = uniform_fits
     with pytest.raises(NotImplementedError, match="Shapley"):
@@ -512,6 +570,7 @@ def test_scalar_argument_validation_raises_early():
         ({"n_variance": 1}, "n_variance must be >= 2"),
         ({"max_centers": 0}, "max_centers must be >= 1"),
         ({"batch_size": 0}, "batch_size must be >= 1"),
+        ({"key": None}, "key is required"),
         ({"gamma": -1.0}, "gamma must be a finite positive number"),
         ({"gamma": 0.0}, "gamma must be a finite positive number"),
         ({"gamma": float("nan")}, "gamma must be a finite positive number"),
@@ -586,13 +645,33 @@ def test_masked_selection_stops_like_a_training_rows_fit():
     assert int(m_masked) < int(mask.sum())
 
 
-def test_determinism_by_seed():
+def test_an_integer_seed_survives_the_key_wrapper():
+    """``jax.random.key(s)`` must still seed the QMC engines with ``s``.
+
+    The index integration is host-side scipy: ``qmc.Sobol`` and the fold
+    permutation take an integer, so the key is folded down to one. The fold
+    is the identity for a key made from an integer below 2**32, which is what
+    keeps the numerical baseline (and any result a caller has recorded) where
+    it was when the argument was spelled ``seed``.
+    """
+    from jaxgsa.vkoga._analyze import _seed_from_key
+
+    for seed in (0, 1, 42, 20260818):
+        assert _seed_from_key(jax.random.key(seed)) == seed
+    # A split key is a different stream, not the same one twice.
+    left, right = jax.random.split(jax.random.key(0))
+    assert _seed_from_key(left) != _seed_from_key(right)
+    with pytest.raises(TypeError):
+        _seed_from_key(0)  # an integer is not a key
+
+
+def test_determinism_by_key():
     X = jaxgsa.sampling.monte_carlo(UNIFORM_PROBLEM, 256, seed=11)
     Y = _uniform_scalar(X)
     R_uni = np.array([[1.0, 0.4], [0.4, 1.0]])
 
     def run(seed: int):
-        kwargs = dict(SMALL_KWARGS, seed=seed)
+        kwargs = dict(SMALL_KWARGS, key=jax.random.key(seed))
         with pytest.warns(UserWarning, match="single precision"):
             return jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, correlation=R_uni, **kwargs)
 
@@ -601,7 +680,8 @@ def test_determinism_by_seed():
     np.testing.assert_array_equal(np.asarray(first.S_TU), np.asarray(again.S_TU))
 
     other = run(1)
-    # A different quasi-random stream moves the estimates, but not by much.
+    # A different key is a different quasi-random stream. It moves the
+    # estimates, but not by much.
     assert not np.allclose(np.asarray(first.S_TC), np.asarray(other.S_TC), atol=1e-6)
     np.testing.assert_allclose(np.asarray(first.S_TC), np.asarray(other.S_TC), atol=0.25)
 
