@@ -833,8 +833,11 @@ def analyze(
 
     Returns:
         An :class:`OTResult` with the total, advective and diffusive
-        indices, optional confidence intervals, the optional dummy
-        baseline, and the non-finite report in ``invalid``. Every index is
+        indices, the given-data first-order Sobol index ``S1`` (the
+        advective component on borgonovo's ddof=0 Sobol convention),
+        optional confidence intervals, the optional dummy baseline together
+        with the floor-cleared ``above_dummy``, and the non-finite report in
+        ``invalid``. Every index is
         0 for a constant (zero-variance) output
         slice rather than NaN. In the point-cloud modes the entropic and
         finite-sample bias keeps the indices of irrelevant parameters
@@ -1073,6 +1076,24 @@ def analyze(
         if ot_dummy is not None:
             ot_dummy = ctx.squeeze(ot_dummy, n_trailing=0)
 
+    # Given-data first-order Sobol index. The advective numerator is exactly
+    # Var(E[Y|X_i]) in the population (ddof=0) convention, but the OT
+    # normalizer V = 2 * Var(Y) uses ddof=1. Rescaling by N / (N - 1) puts
+    # both variances on ddof=0, which is jaxgsa.borgonovo's S1 convention, so
+    # the identity "advective = S1 / 2" holds with no ddof caveat. Every
+    # bootstrap resample also has N rows, so the same constant rescales the
+    # interval exactly.
+    ddof_scale = 2.0 * N / (N - 1)
+    S1 = ddof_scale * hats["advective"]
+    S1_conf = None if confs["advective"] is None else ddof_scale * confs["advective"]
+
+    # The part of the total index that clears the irrelevance floor. The
+    # clamp only absorbs sampling noise: an irrelevant parameter's ot
+    # fluctuates around the floor, and a negative excess reads as influence.
+    above_dummy: Array | None = None
+    if ot_dummy is not None:
+        above_dummy = jnp.maximum(hats["ot"] - jnp.asarray(ot_dummy)[..., None], 0.0)
+
     return OTResult(
         ot=hats["ot"],
         ot_conf=confs["ot"],
@@ -1080,6 +1101,9 @@ def analyze(
         advective_conf=confs["advective"],
         diffusive=hats["diffusive"],
         diffusive_conf=confs["diffusive"],
+        S1=S1,
+        S1_conf=S1_conf,
+        above_dummy=above_dummy,
         ot_dummy=ot_dummy,
         mode=mode,
         problem=problem,

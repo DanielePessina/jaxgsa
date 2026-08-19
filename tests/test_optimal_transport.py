@@ -982,3 +982,96 @@ class TestIndicesPureCore:
             np.testing.assert_array_equal(np.asarray(arr), np.zeros(2))
         with pytest.warns(jaxgsa.JaxgsaWarning):
             analyze(problem, X, constant)
+
+
+class TestS1AndAboveDummy:
+    """The derived convenience fields: ``S1`` and ``above_dummy``."""
+
+    def test_s1_matches_the_analytic_first_order_index(self, gaussian_linear_data):
+        """Tier T0 (closed form): S1 estimates the true Sobol first order."""
+        X, Y = gaussian_linear_data
+        result = analyze(gaussian_linear.PROBLEM, X, Y)
+        np.testing.assert_allclose(np.asarray(result.S1), gaussian_linear.ANALYTICAL_S1, atol=0.02)
+
+    def test_s1_is_advective_on_the_ddof0_convention(self, ishigami_data):
+        """Tier T4: S1 == 2 * advective * N / (N - 1), exactly.
+
+        The advective numerator is the population (ddof=0) between-class
+        variance while the OT normalizer uses ddof=1, so the rescale is the
+        one constant that puts both on borgonovo's ddof=0 S1 convention.
+        """
+        X, Y = ishigami_data
+        N = X.shape[0]
+        result = analyze(ishigami.PROBLEM, X, Y)
+        np.testing.assert_allclose(
+            np.asarray(result.S1),
+            2.0 * (N / (N - 1)) * np.asarray(result.advective),
+            rtol=1e-6,
+        )
+
+    def test_s1_agrees_with_borgonovo_s1(self, ishigami_data):
+        """Tier T2 (cross-estimator): both given-data S1 estimates coincide."""
+        X, Y = ishigami_data
+        ot_result = analyze(ishigami.PROBLEM, X, Y)
+        delta_result = jaxgsa.borgonovo.analyze(ishigami.PROBLEM, X, Y)
+        np.testing.assert_allclose(
+            np.asarray(ot_result.S1), np.asarray(delta_result.S1), atol=0.02
+        )
+
+    def test_s1_conf_is_the_exactly_rescaled_advective_conf(self, ishigami_data):
+        X, Y = ishigami_data
+        N = X.shape[0]
+        result = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=8, key=jax.random.key(0))
+        np.testing.assert_allclose(
+            np.asarray(result.S1_conf),
+            2.0 * (N / (N - 1)) * np.asarray(result.advective_conf),
+            rtol=1e-6,
+        )
+
+    def test_s1_conf_is_none_without_a_bootstrap(self, ishigami_data):
+        X, Y = ishigami_data
+        assert analyze(ishigami.PROBLEM, X, Y).S1_conf is None
+
+    def test_above_dummy_requires_the_dummy_baseline(self, ishigami_data):
+        X, Y = ishigami_data
+        assert analyze(ishigami.PROBLEM, X, Y).above_dummy is None
+
+    def test_above_dummy_is_the_clipped_excess_over_the_floor(self, ishigami_data):
+        X, Y = ishigami_data
+        result = analyze(ishigami.PROBLEM, X, Y, dummy=True, key=jax.random.key(1))
+        above = np.asarray(result.above_dummy)
+        assert above.shape == np.asarray(result.ot).shape
+        assert (above >= 0.0).all()
+        np.testing.assert_allclose(
+            above,
+            np.maximum(np.asarray(result.ot) - np.asarray(result.ot_dummy), 0.0),
+        )
+        # The influential Ishigami parameters clear the floor.
+        assert above[0] > 0.1
+        assert above[1] > 0.1
+
+    def test_above_dummy_broadcasts_the_floor_in_trajectory_mode(self, multi_output_data):
+        X, Y2, Y3 = multi_output_data
+        result = analyze(
+            ishigami.PROBLEM,
+            X,
+            Y3,
+            mode="trajectory",
+            dummy=True,
+            key=jax.random.key(2),
+            n_partitions=10,
+        )
+        above = np.asarray(result.above_dummy)
+        assert above.shape == np.asarray(result.ot).shape  # (K, D)
+        np.testing.assert_allclose(
+            above,
+            np.maximum(np.asarray(result.ot) - np.asarray(result.ot_dummy)[..., None], 0.0),
+        )
+
+    def test_fields_reach_the_dataset(self, ishigami_data):
+        X, Y = ishigami_data
+        ds = analyze(ishigami.PROBLEM, X, Y, dummy=True, key=jax.random.key(3)).to_dataset()
+        assert "S1" in ds
+        assert "above_dummy" in ds
+        assert ds["S1"].dims == ("param",)
+        assert ds["above_dummy"].dims == ("param",)

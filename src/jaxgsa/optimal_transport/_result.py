@@ -57,6 +57,30 @@ class OTResult(SchemaResult):
         diffusive_conf: Percentile bootstrap confidence interval for
             ``diffusive``, shape ``(2, ..., D)`` for ``[lower, upper]``.
             ``None`` when ``n_bootstrap=0``.
+        S1: Given-data first-order Sobol index, shape ``(..., D)``. It is the
+            advective component rescaled to the Sobol convention:
+            ``S1 = Var(E[Y | X_i]) / Var(Y)`` with both variances taken as
+            population (``ddof=0``) variances, exactly matching
+            ``jaxgsa.borgonovo``'s ``S1``. The OT normalizer uses the
+            unbiased (``ddof=1``) sample variance, so ``2 * advective`` alone
+            would carry a factor ``(N - 1) / N`` against that convention;
+            this field absorbs it, so no ddof caveat is left for the reader.
+            In the point-cloud modes the variances generalize to the trace of
+            the output covariance.
+        S1_conf: Bootstrap confidence interval for ``S1``, shape
+            ``(2, ..., D)``. It is the exactly rescaled ``advective_conf``
+            (every bootstrap resample has the same size ``N``, so the ddof
+            factor is one constant). ``None`` when ``n_bootstrap=0``.
+        above_dummy: The total index above the irrelevance floor,
+            ``max(ot - ot_dummy, 0)``, shape ``(..., D)``. The dummy baseline
+            is the index a synthetic, provably irrelevant parameter receives
+            from finite-sample bias (and, in the point-cloud modes, entropic
+            bias), so this is the part of ``ot`` that clears that floor. A
+            value of 0 means the parameter is indistinguishable from noise at
+            this sample size. The name says what it is — the excess above the
+            dummy floor — rather than claiming the subtraction removes bias
+            in general, which it does only for irrelevant parameters.
+            ``None`` unless the analysis ran with ``dummy=True``.
         ot_dummy: Irrelevance baseline, the same shape as ``ot`` without
             the trailing parameter axis. It is the index of a synthetic
             parameter that is independent of the output by construction,
@@ -82,6 +106,9 @@ class OTResult(SchemaResult):
     advective_conf: Array | None
     diffusive: Array
     diffusive_conf: Array | None
+    S1: Array
+    S1_conf: Array | None
+    above_dummy: Array | None
     ot_dummy: Array | None
     mode: str
     problem: Problem
@@ -94,6 +121,8 @@ class OTResult(SchemaResult):
             FieldSpec("ot", "param", interval=True),
             FieldSpec("advective", "param", interval=True),
             FieldSpec("diffusive", "param", interval=True),
+            FieldSpec("S1", "param", interval=True),
+            FieldSpec("above_dummy", "param"),
             FieldSpec("ot_dummy", "slice"),
         ),
         meta=("mode",),
