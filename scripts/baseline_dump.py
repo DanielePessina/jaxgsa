@@ -262,13 +262,39 @@ def _categorical_problem() -> jaxgsa.Problem:
     )
 
 
+def _gaussian_mix_problem() -> jaxgsa.Problem:
+    """A truncated Gaussian, an unbounded Gaussian, and a uniform control.
+
+    Every other baseline case is uniform-marginal, so before this one the
+    Gaussian transforms were never exercised by the numerical baseline at all.
+    Three branches reach code no other case touches: the truncated marginal
+    takes PCE down its Legendre path (the truncation is 2 sigma, well inside
+    the 5-sigma threshold that would keep it on Hermite) and DGSM through the
+    finite-element Poincare solve, while the unbounded marginal is the only
+    thing that makes ``morris._squash_open_sides`` do any work.
+    """
+    return jaxgsa.Problem.from_dict(
+        {
+            "t": {"dist": "gaussian", "mean": 0.0, "variance": 1.0, "low": -2.0, "high": 2.0},
+            "g": {"dist": "gaussian", "mean": 1.0, "variance": 4.0},
+            "u": (0.0, 1.0),
+        }
+    )
+
+
+def _gaussian_mix_model(X: jax.Array) -> jax.Array:
+    """Additive in two inputs with one interaction, shape ``(N,)``."""
+    return X[:, 0] ** 2 + X[:, 1] + 0.5 * X[:, 1] * X[:, 2]
+
+
 def build_cases() -> list[Case]:
     """Build the fixed set of baseline problems.
 
     Returns:
         One case per output shape and per input feature that the refactors
-        touch: scalar, multi-output, time series, declared correlation, and
-        a categorical input.
+        touch: scalar, multi-output, time series, declared correlation, a
+        categorical input, and Gaussian marginals both truncated and
+        unbounded.
     """
     return [
         Case("ishigami_scalar", ishigami.PROBLEM, _ishigami_scalar, 512, "(N,)"),
@@ -282,6 +308,7 @@ def build_cases() -> list[Case]:
             "(N,)",
         ),
         Case("categorical_mixed", _categorical_problem(), _categorical_model, 512, "(N,)"),
+        Case("gaussian_mixed", _gaussian_mix_problem(), _gaussian_mix_model, 512, "(N,)"),
     ]
 
 
