@@ -14,6 +14,8 @@ import warnings
 from enum import Enum
 from typing import TYPE_CHECKING
 
+import jax
+import jax.core
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
@@ -556,6 +558,80 @@ _ZERO_VARIANCE_OUTCOMES: dict[str, tuple[str, str]] = {
 }
 
 
+def _zero_variance_message(
+    zero_mask: np.ndarray,
+    *,
+    n_outputs: int,
+    K: int,
+    n_trailing: int,
+    output_names: tuple[str, ...] | None,
+    outcome: str,
+) -> str | None:
+    """Build the zero-variance warning text, or ``None`` when nothing is wrong.
+
+    Split out of :func:`_warn_zero_variance_slices` so the same wording serves
+    the eager path and the host callback that runs under ``jit``/``vmap``. It
+    reads concrete values only, which is exactly why it cannot run while
+    tracing.
+
+    Args:
+        zero_mask: Flat boolean mask over the ``n_outputs`` slices, True where
+            the slice is constant. Must be concrete, not a tracer.
+        n_outputs: Number of flattened output slices.
+        K: Size of the output dimension, used to split a flat index into
+            ``(t, k)`` for a time-series output.
+        n_trailing: Number of trailing dimensions of the caller's ``Y``: 0 for
+            ``(N,)``, 1 for ``(N, K)``, 2 for ``(N, T, K)``.
+        output_names: Optional names for the K output dimension, already
+            length-checked against ``K``.
+        outcome: Which consequence to report; a key of
+            :data:`_ZERO_VARIANCE_OUTCOMES`.
+
+    Returns:
+        The warning message, or ``None`` when no slice is constant.
+    """
+    single_tail, plural_tail = _ZERO_VARIANCE_OUTCOMES[outcome]
+    mask = np.asarray(zero_mask).reshape(-1)
+    n_zero = int(mask.sum())
+    if n_zero == 0:
+        return None
+
+    if n_outputs == 1:
+        if output_names is not None and len(output_names) == 1:
+            return f"jaxgsa: output '{output_names[0]}' has zero variance — {single_tail}"
+        return f"jaxgsa: output has zero variance — {single_tail}"
+
+    def _fmt_k(k: int) -> str:
+        if output_names is not None:
+            return f"k={k} ('{output_names[k]}')"
+        return f"k={k}"
+
+    zero_indices = [int(i) for i in np.flatnonzero(mask)]
+
+    def _join(labels: list[str]) -> str:
+        if len(labels) > 5:  # cap displayed labels to keep warnings readable
+            return f"{', '.join(labels[:5])}, ... and {len(labels) - 5} more"
+        return ", ".join(labels)
+
+    if n_trailing == 1:  # single-timestep: flat index equals output index k
+        label_str = _join([_fmt_k(k) for k in zero_indices])
+        return (
+            f"jaxgsa: {n_zero}/{n_outputs} output(s) have zero variance "
+            f"({label_str}) — {plural_tail}"
+        )
+    if n_trailing == 2:  # multi-timestep: flat index encodes (t, k) in row-major order
+        affected = []
+        for idx in zero_indices:
+            t, k = divmod(idx, K)
+            affected.append(f"(t={t}, {_fmt_k(k)})")
+        return (
+            f"jaxgsa: {n_zero}/{n_outputs} output slice(s) have zero variance "
+            f"[{_join(affected)}] — {plural_tail}"
+        )
+    # A scalar output (no trailing dims) has n_outputs == 1 and was handled above.
+    return None
+
+
 def _warn_zero_variance_slices(
     Y: Array,
     output_names: tuple[str, ...] | None = None,
@@ -570,6 +646,13 @@ def _warn_zero_variance_slices(
     runs and reports NaN for that slice. The other slices are unaffected, so
     this warns rather than raising.
 
+    The check works under ``jax.jit`` and ``jax.vmap``. It reads no value on
+    the host while tracing: when ``Y`` is abstract, the warning is emitted from
+    a :func:`jax.debug.callback` that runs when the compiled function executes.
+    The message is the same, but it appears at run time rather than at trace
+    time, so it repeats on every call of the compiled function and once per
+    batch element under ``vmap``, and ``stacklevel`` does not apply to it.
+
     Args:
         Y: Model output array with shape ``(n_expanded, ...)`` where
             trailing dims are ``()``, ``(K,)``, or ``(T, K)``.
@@ -583,7 +666,7 @@ def _warn_zero_variance_slices(
         stacklevel: Frames to skip so the warning points at the user's
             ``analyze()`` call rather than at this helper.
     """
-    single_tail, plural_tail = _ZERO_VARIANCE_OUTCOMES[outcome]
+    _ = _ZERO_VARIANCE_OUTCOMES[outcome]  # fail fast on a bad outcome key
     # Collapse trailing dims so variance is computed per (t, k) slice.
     flat = Y.reshape(Y.shape[0], -1)
     n_outputs = flat.shape[1]
@@ -601,63 +684,37 @@ def _warn_zero_variance_slices(
         # Diagnostics should not mask the entrypoint's primary shape error.
         output_names = None
 
-    def _fmt_k(k: int) -> str:
-        if output_names is not None:
-            return f"k={k} ('{output_names[k]}')"
-        return f"k={k}"
-
     # Sample variance along axis 0; zero means the output is constant
     # and Sobol indices become 0/0 = NaN.
     if var_per_slice is None:
         var_per_slice = jnp.var(flat, axis=0)
     zero_mask = var_per_slice.reshape(-1) == 0
-    n_zero = int(jnp.sum(zero_mask))
 
-    if n_zero == 0:
+    def emit(mask: Array | np.ndarray, level: int) -> None:
+        """Warn about the constant slices `mask` marks, if there are any."""
+        msg = _zero_variance_message(
+            np.asarray(mask),
+            n_outputs=n_outputs,
+            K=K,
+            n_trailing=len(trailing),
+            output_names=output_names,
+            outcome=outcome,
+        )
+        if msg is not None:
+            warnings.warn(msg, stacklevel=level, category=JaxgsaWarning)
+
+    if isinstance(zero_mask, jax.core.Tracer):
+        # Under jit or vmap the mask is abstract: which slices are constant is
+        # not known while tracing, and `warnings.warn` cannot run there anyway.
+        # `jax.debug.callback` moves the decision to execution time, where the
+        # values are real, so the warning still reaches the user -- once per
+        # call of the compiled function, and once per batch element under vmap.
+        # The stacklevel is 1 because the callback runs from XLA, not from a
+        # Python frame chain that leads back to the user's `analyze()` call.
+        jax.debug.callback(lambda mask: emit(mask, 1), zero_mask)
         return
 
-    if n_outputs == 1:
-        if output_names is not None and len(output_names) == 1:
-            msg = f"jaxgsa: output '{output_names[0]}' has zero variance — {single_tail}"
-        else:
-            msg = f"jaxgsa: output has zero variance — {single_tail}"
-        warnings.warn(msg, stacklevel=stacklevel, category=JaxgsaWarning)
-        return
-
-    # Materialize indices eagerly -- this is a rare warning path, not a hot loop.
-    zero_indices = [int(i) for i in jnp.where(zero_mask)[0]]
-
-    if len(trailing) == 1:  # single-timestep: flat index equals output index k
-        labels = [_fmt_k(k) for k in zero_indices]
-        if len(labels) > 5:  # cap displayed labels to keep warnings readable
-            shown = ", ".join(labels[:5])
-            extra = f"... and {len(labels) - 5} more"
-            label_str = f"{shown}, {extra}"
-        else:
-            label_str = ", ".join(labels)
-        warnings.warn(
-            f"jaxgsa: {n_zero}/{n_outputs} output(s) have zero variance "
-            f"({label_str}) — {plural_tail}",
-            stacklevel=stacklevel,
-            category=JaxgsaWarning,
-        )
-    elif len(trailing) == 2:  # multi-timestep: flat index encodes (t, k) in row-major order
-        affected = []
-        for idx in zero_indices:
-            t, k = divmod(idx, K)
-            affected.append(f"(t={t}, {_fmt_k(k)})")
-        if len(affected) > 5:  # cap displayed labels to keep warnings readable
-            shown = ", ".join(affected[:5])
-            extra = f"... and {len(affected) - 5} more"
-            label_str = f"{shown}, {extra}"
-        else:
-            label_str = ", ".join(affected)
-        warnings.warn(
-            f"jaxgsa: {n_zero}/{n_outputs} output slice(s) have zero variance "
-            f"[{label_str}] — {plural_tail}",
-            stacklevel=stacklevel,
-            category=JaxgsaWarning,
-        )
+    emit(zero_mask, stacklevel)
 
 
 def _prenormalize_outputs(Y: Array) -> tuple[Array, Array, Array, Array]:

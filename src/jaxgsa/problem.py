@@ -1,12 +1,20 @@
-"""Defines the ``Problem`` dataclass and accepted input specifications."""
+"""Defines the ``Problem`` dataclass and accepted input specifications.
+
+Every class here is a registered JAX pytree, so a ``Problem`` can be passed
+straight through ``jax.jit``, ``jax.vmap``, ``jax.grad`` and friends. The split
+between leaves and static metadata is deliberate and is documented on
+:func:`_problem_flatten_with_keys`.
+"""
 
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar, Literal, NotRequired, TypeAlias, TypedDict
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NotRequired, TypeAlias, TypedDict
 
 import numpy as np
+from jax import tree_util
 
 if TYPE_CHECKING:
     import numpy.typing as npt
@@ -227,6 +235,95 @@ class CategoricalSpec:
         if len(set(label_values)) != n_levels:
             raise ValueError(f"Categorical labels must be unique, got {label_values!r}")
         object.__setattr__(self, "labels", label_values)
+
+
+def _build_unvalidated(cls: type, **fields: Any) -> Any:
+    """Build a frozen spec instance field by field, skipping ``__post_init__``.
+
+    Pytree reconstruction must accept whatever the leaves currently hold. That
+    can be a JAX tracer under ``jit``, a batched array under ``vmap``, a shape
+    placeholder under ``eval_shape``, or an arbitrary sentinel object that
+    ``tree_unflatten`` is called with. None of those survive the ``float()``
+    coercion and the ordering checks the spec constructors run, and none of
+    them need to: the values were validated when the user built the original
+    object, and a pytree round-trip cannot invalidate them.
+
+    Args:
+        cls: The frozen dataclass to instantiate.
+        **fields: Attribute values to set, one per declared field.
+
+    Returns:
+        A new instance of ``cls`` with those attributes set.
+    """
+    obj = object.__new__(cls)
+    for name, value in fields.items():
+        object.__setattr__(obj, name, value)
+    return obj
+
+
+def _uniform_flatten_with_keys(
+    spec: UniformSpec,
+) -> tuple[tuple[tuple[tree_util.GetAttrKey, Any], ...], None]:
+    """Flatten a uniform spec into its two bounds; nothing is static."""
+    return (
+        (tree_util.GetAttrKey("low"), spec.low),
+        (tree_util.GetAttrKey("high"), spec.high),
+    ), None
+
+
+def _uniform_unflatten(aux: None, children: Iterable[Any]) -> UniformSpec:
+    """Rebuild a uniform spec from its two bounds."""
+    low, high = children
+    return _build_unvalidated(UniformSpec, low=low, high=high)
+
+
+def _gaussian_flatten_with_keys(
+    spec: GaussianSpec,
+) -> tuple[tuple[tuple[tree_util.GetAttrKey, Any], ...], None]:
+    """Flatten a Gaussian spec into mean, variance and its truncation bounds.
+
+    An absent bound is ``None``, which JAX treats as an empty subtree. Whether
+    a side is truncated is therefore recorded in the tree structure, not in a
+    leaf, which is right: it decides which sampler runs, so it cannot be a
+    traced value.
+    """
+    return (
+        (tree_util.GetAttrKey("mean"), spec.mean),
+        (tree_util.GetAttrKey("variance"), spec.variance),
+        (tree_util.GetAttrKey("low"), spec.low),
+        (tree_util.GetAttrKey("high"), spec.high),
+    ), None
+
+
+def _gaussian_unflatten(aux: None, children: Iterable[Any]) -> GaussianSpec:
+    """Rebuild a Gaussian spec from its four (possibly absent) parameters."""
+    mean, variance, low, high = children
+    return _build_unvalidated(GaussianSpec, mean=mean, variance=variance, low=low, high=high)
+
+
+def _categorical_flatten_with_keys(
+    spec: CategoricalSpec,
+) -> tuple[tuple[tuple[tree_util.GetAttrKey, Any], ...], tuple[str, ...]]:
+    """Flatten a categorical spec into its probabilities; labels stay static.
+
+    Each level probability is a leaf, so a user can differentiate through the
+    level mix. The labels are strings that name the levels, so they are
+    structure and travel in the aux data.
+    """
+    return ((tree_util.GetAttrKey("probs"), spec.probs),), spec.labels
+
+
+def _categorical_unflatten(aux: tuple[str, ...], children: Iterable[Any]) -> CategoricalSpec:
+    """Rebuild a categorical spec from its probabilities and static labels."""
+    (probs,) = children
+    return _build_unvalidated(CategoricalSpec, probs=tuple(probs), labels=aux)
+
+
+tree_util.register_pytree_with_keys(UniformSpec, _uniform_flatten_with_keys, _uniform_unflatten)
+tree_util.register_pytree_with_keys(GaussianSpec, _gaussian_flatten_with_keys, _gaussian_unflatten)
+tree_util.register_pytree_with_keys(
+    CategoricalSpec, _categorical_flatten_with_keys, _categorical_unflatten
+)
 
 
 # Canonical stored form of one parameter's marginal. This is what
@@ -764,3 +861,79 @@ class Problem:
     def num_vars(self) -> int:
         """Return the number of parameters."""
         return len(self.names)
+
+
+# Static half of a flattened Problem: names, output names, correlation.
+_ProblemAux: TypeAlias = tuple[tuple[str, ...], tuple[str, ...] | None, _CorrelationTuple | None]
+
+
+def _problem_flatten_with_keys(
+    problem: "Problem",
+) -> tuple[tuple[tuple[tree_util.GetAttrKey, Any], ...], _ProblemAux]:
+    """Split a ``Problem`` into differentiable leaves and static metadata.
+
+    The leaves are the numeric parameters of the marginals, and nothing else:
+    a uniform's ``low`` and ``high``, a Gaussian's ``mean``, ``variance`` and
+    its truncation bounds, and a categorical's level probabilities. Those are
+    the numbers a sensitivity index is a function of, so ``d(index)/d(bounds)``
+    only exists if they are leaves.
+
+    Everything else is structure and travels in the aux data:
+
+    * ``names`` and ``output_names`` label axes and index result containers.
+    * The distribution family of each marginal picks which sampler runs, so it
+      decides the shape of the computation and cannot be traced. It is encoded
+      by the spec type itself, which the child treedefs record.
+    * The categorical labels are strings.
+    * ``correlation`` is static as well, which is the one judgement call here.
+      It is not merely numeric: whether it is ``None``, whether it is the
+      identity, and which entries are non-zero all steer control flow --
+      ``has_correlated_inputs`` gates whole methods, and the matrix is
+      validated and positive-definiteness-repaired on the host at construction
+      time. Making it a leaf would put a tracer where those decisions are
+      taken. A gradient with respect to a correlation matrix therefore stays
+      out of scope for now; it is additive to add later, because moving a value
+      from the aux data into the leaves does not break a user's code the way
+      the reverse would.
+
+    ``bounds`` is not flattened. It is a cache of the uniform ``low``/``high``
+    leaves, and is recomputed on unflatten so it can never disagree with them.
+
+    Args:
+        problem: The problem to flatten.
+
+    Returns:
+        A tuple ``(children_with_keys, aux)`` in the shape
+        :func:`jax.tree_util.register_pytree_with_keys` expects.
+    """
+    children = ((tree_util.GetAttrKey("input_specs"), problem._input_specs),)
+    aux: _ProblemAux = (problem.names, problem.output_names, problem._correlation)
+    return children, aux
+
+
+def _problem_unflatten(aux: _ProblemAux, children: Iterable[Any]) -> "Problem":
+    """Rebuild a ``Problem`` from its marginal leaves and static metadata.
+
+    No validation runs here, for the reason given on
+    :func:`_build_unvalidated`: the leaves may be tracers.
+
+    Args:
+        aux: The static metadata produced by :func:`_problem_flatten_with_keys`.
+        children: The single child, the tuple of input specs.
+
+    Returns:
+        The reconstructed problem.
+    """
+    names, output_names, correlation = aux
+    (specs,) = children
+    input_specs = tuple(specs)
+    obj = object.__new__(Problem)
+    object.__setattr__(obj, "names", names)
+    object.__setattr__(obj, "bounds", _derive_bounds(input_specs))
+    object.__setattr__(obj, "output_names", output_names)
+    object.__setattr__(obj, "_input_specs", input_specs)
+    object.__setattr__(obj, "_correlation", correlation)
+    return obj
+
+
+tree_util.register_pytree_with_keys(Problem, _problem_flatten_with_keys, _problem_unflatten)
