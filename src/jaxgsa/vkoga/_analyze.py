@@ -266,7 +266,7 @@ def analyze(
         n_outer=n_outer,
         n_inner=n_inner,
         n_variance=n_variance,
-        seed=seed,
+        entropy=seed,
         batch_size=batch_size,
     )
 

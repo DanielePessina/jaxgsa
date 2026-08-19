@@ -108,6 +108,16 @@ Version 0.10 adds capability.
   the same N=1024 with an offset of 1e4 the largest S1 error was 50.8, and it
   is now still 0.106.
 
+- **VKOGA derived its per-parameter streams by adding to a seed.** The index
+  estimator seeded its quasi-Monte-Carlo draws with `seed + 1 + i` and
+  `seed + 7919`. Streams that differ by a constant are not independent, which
+  is the reason the public interface moved from `seed` to `key`. The
+  estimators are host-side scipy, so they cannot split a key; they now spawn
+  one `numpy.random.SeedSequence` child per draw, which is the host-side
+  equivalent. Every VKOGA index moves by the size of its own Monte-Carlo
+  noise. The fitted surrogate is unchanged: `gamma`, `ridge` and the greedy
+  centres are bit-for-bit the same.
+
 - **VKOGA ignored `batch_size` in its index estimator.** The keyword reached
   the surrogate `predict` path only; the estimator's own chunking passed
   `None`, so the caller's value was silently dropped. It is now threaded

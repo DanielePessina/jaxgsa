@@ -323,11 +323,7 @@ def _m_borgonovo(case: Case, X: jax.Array, Y: jax.Array) -> Any:
 
 
 def _m_pawn(case: Case, X: jax.Array, Y: jax.Array) -> Any:
-    # SEED + 1 is the stream the old ``seed=SEED`` built: PAWN derived its
-    # key as ``PRNGKey(seed + 1)``. Keeping the stream keeps the recorded
-    # intervals comparable across the key-contract change, so a moved number
-    # here still means a wiring error and nothing else.
-    return pawn.analyze(case.problem, X, Y, n_bins=8, n_bootstrap=20, key=jax.random.key(SEED + 1))
+    return pawn.analyze(case.problem, X, Y, n_bins=8, n_bootstrap=20, key=jax.random.key(SEED))
 
 
 def _m_hsic(case: Case, X: jax.Array, Y: jax.Array) -> Any:
