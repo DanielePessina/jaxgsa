@@ -9,6 +9,41 @@ Version 0.10 adds capability.
 
 ### Breaking
 
+- **One batching contract for every method.** Four rules now hold everywhere,
+  and tests enforce them.
+
+  - **`batch_size` sizes row blocks, clamped to `N`. Nothing more.** It never
+    selects a different algorithm. In PCE, an explicit `batch_size` used to
+    force the streamed fit even when it was larger than `N`. Now the fit
+    streams only when `batch_size < N`, or when the single-pass fit would
+    exceed the memory budget. `batch_size >= N` is one full block, which is
+    the single-pass fit. Migration: to force the PCE streamed fit, pass a
+    `batch_size` smaller than your row count. A `batch_size` at or above the
+    row count now runs the single-pass fit and gives the exact default
+    numbers.
+  - **`None` on a batching keyword means "derive the width from the memory
+    budget".** This was already true for most methods. DGSM read `None` as
+    one batch of every row; it now derives the batch width from
+    `jaxgsa.config.get_memory_budget()` with a real bytes model (a few
+    Jacobian-sized transients per row, `T*K*D` floats each). At ordinary
+    sizes the derived width is one full block, so nothing changes. On a run
+    large enough that the budget now splits the sample, only the float32
+    summation order moves — the same statement PCE and HDMR make about
+    their streamed paths.
+  - **An explicit chunk value always wins.** The budget only sizes the `None`
+    default. Sobol's bootstrap path and Morris silently capped an explicit
+    `slice_chunk_size` / `resample_chunk_size` at the budget-derived width.
+    They now honour the caller's value, capped only at the axis length.
+    Migration: none needed, unless you relied on the budget to shrink a
+    too-large explicit value — pass the width you actually want.
+  - **`hsic` loses `batch_size`, with no replacement.** The keyword
+    row-blocked one kernel build while the resident kernel stacks — about
+    `(2D + 1) * N^2` floats — stayed whole. It never bounded peak memory,
+    and chunked evaluation was measured useless. A keyword that cannot do
+    what its name promises misleads, so it is gone. Migration: delete the
+    argument. If the sample does not fit in memory, reduce `N` (HSIC
+    converges quickly in `N`) or screen parameters first.
+
 - **One word for one concept across every method.** 1.0 freezes the public
   interface, so the same idea now has the same name, type and position
   everywhere it appears. Every rename below is a clean break with no alias.
@@ -85,6 +120,23 @@ Version 0.10 adds capability.
   fit no longer standardizes `Y`, so `predict()` and `rmse` need no inverse
   transform. The private fit state loses its `prenormalize`, `y_mean` and
   `y_std` entries. Numbers do not move: `prenormalize` defaulted to `False`.
+
+### Performance
+
+- **The PCE streamed fit dispatches one jitted step per row batch.** Each
+  batch used to run several eager ops: an unjitted design-matrix build plus
+  accumulation matmuls. The per-batch step is now one jitted call, and the
+  ragged trailing batch is zero-padded and masked, so each step compiles
+  once. Padded rows contribute exact zeros to the normal equations and to
+  the leave-one-out sum. This is the pattern the HDMR fit already uses,
+  where the same fix was measured at 1.2-1.67x.
+
+- **PCE second-order extraction no longer builds an unbudgeted transient.**
+  `sobol_from_coefficients` materialized an `(n_terms, D*(D-1)/2)` float
+  array for the S2 pair mask — about 3.5 GB at `D=100`, order 3. The pair
+  axis now streams in chunks sized by the memory budget. At small `D` the
+  budget allows one chunk, which runs the exact old matmul, so shipped
+  values are bit-for-bit unchanged.
 
 ### Fixed
 
