@@ -7,7 +7,7 @@ backfitting solve, the ANCOVA split and the F-test, is in
 :mod:`jaxgsa.hdmr._fit`.
 """
 
-from functools import partial
+from functools import lru_cache, partial
 
 import jax
 import jax.numpy as jnp
@@ -170,8 +170,31 @@ def _f_ppf(q: float, d1: float, d2: float) -> float:
     return float(d2 * x / (d1 * (1.0 - x + 1e-30)))
 
 
+@lru_cache(maxsize=128)
 def _compute_f_crits(alpha: float, m1: int, m2: int, m3: int, R: int) -> Array:
     """Precompute F critical values for each order (outside JIT).
+
+    Cached because it is expensive and it is pure. Each of the three values
+    costs up to 100 bisection steps, and every step reads a
+    ``jax.scipy.special.betainc`` back on the host, so the call takes about
+    9 ms -- for a small fit that was the single largest fixed cost of
+    ``analyze``, paid again on every call and on every bootstrap replicate
+    with the same arguments.
+
+    The cache key is five Python scalars and nothing else, which is what ADR
+    0018 requires of anything reachable from a compilation cache: no array,
+    no list, no container a pytree flattener would walk into. ``alpha``,
+    ``m1``, ``m2`` and ``m3`` come from the method's own constants and the
+    basis sizes; ``R`` is a row count. None of them is data. The cached value
+    is a JAX array, which is immutable, so handing the same one to several
+    callers cannot let one of them disturb another.
+
+    Args:
+        alpha: Significance level of the test.
+        m1: Basis count of a first-order term.
+        m2: Basis count of a second-order term.
+        m3: Basis count of a third-order term.
+        R: Number of sample rows.
 
     Returns:
         f_crits: Critical F values ``[order1, order2, order3]``, shape
