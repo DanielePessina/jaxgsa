@@ -1,7 +1,7 @@
 {
   "header": {
     "excluded_fields": {},
-    "git_commit": "09753b1a8056778d11c84d5ddec429ca529ea529",
+    "git_commit": "6690f1cca9dd913ac0496bedbde449a5f0b53f24",
     "inline_array_limit": 1024,
     "jax_default_backend": "cpu",
     "jax_version": "0.10.2",
@@ -628,6 +628,8 @@
                 0.3010678291320801
               ]
             },
+            "ST_conf": null,
+            "S_conf": null,
             "Sa": {
               "__array__": true,
               "dtype": "float32",
@@ -643,6 +645,7 @@
                 0.040131159126758575
               ]
             },
+            "Sa_conf": null,
             "Sb": {
               "__array__": true,
               "dtype": "float32",
@@ -658,6 +661,7 @@
                 0.04245734214782715
               ]
             },
+            "Sb_conf": null,
             "_c2": [
               [
                 0,
@@ -854,6 +858,7 @@
               "m": 2,
               "maxorder": 2
             },
+            "ci": null,
             "invalid": {
               "bad_row_indices": [],
               "n_invalid": 0,
@@ -996,6 +1001,7 @@
                 0.14566706120967865
               ]
             },
+            "S1_conf": null,
             "ST": {
               "__array__": true,
               "dtype": "float32",
@@ -1008,6 +1014,8 @@
                 0.22915488481521606
               ]
             },
+            "ST_conf": null,
+            "ci": null,
             "invalid": {
               "bad_row_indices": [],
               "n_invalid": 0,
@@ -1267,6 +1275,7 @@
                 -0.0013755911495536566
               ]
             },
+            "S_C_conf": null,
             "S_IU": {
               "__array__": true,
               "dtype": "float32",
@@ -1279,6 +1288,7 @@
                 0.3899368643760681
               ]
             },
+            "S_IU_conf": null,
             "S_TC": {
               "__array__": true,
               "dtype": "float32",
@@ -1291,6 +1301,7 @@
                 0.0013963617384433746
               ]
             },
+            "S_TC_conf": null,
             "S_TU": {
               "__array__": true,
               "dtype": "float32",
@@ -1303,6 +1314,7 @@
                 0.39270880818367004
               ]
             },
+            "S_TU_conf": null,
             "S_U": {
               "__array__": true,
               "dtype": "float32",
@@ -1315,6 +1327,7 @@
                 0.002771952887997031
               ]
             },
+            "S_U_conf": null,
             "_fit": {
               "centers": {
                 "__array__": true,
@@ -1632,6 +1645,7 @@
                 3.4587740898132324
               ]
             },
+            "ci": null,
             "correlation": {
               "__array__": true,
               "dtype": "float64",
@@ -1825,6 +1839,7 @@
         },
         "dgsm": {
           "fields": {
+            "ci": null,
             "invalid": {
               "bad_row_indices": [],
               "n_invalid": 0,
@@ -1850,6 +1865,7 @@
                 6.8692970671691e-05
               ]
             },
+            "lower_bound_conf": null,
             "nu": {
               "__array__": true,
               "dtype": "float32",
@@ -1862,6 +1878,7 @@
                 11.535835266113281
               ]
             },
+            "nu_conf": null,
             "problem": {
               "__problem__": [
                 "x1",
@@ -1881,6 +1898,7 @@
                 0.0171737689524889
               ]
             },
+            "sigma_conf": null,
             "upper_bound": {
               "__array__": true,
               "dtype": "float32",
@@ -1893,6 +1911,7 @@
                 3.2667179107666016
               ]
             },
+            "upper_bound_conf": null,
             "var_y": {
               "__array__": true,
               "dtype": "float32",
@@ -1984,6 +2003,8 @@
                 0.25543341040611267
               ]
             },
+            "ST_conf": null,
+            "S_conf": null,
             "Sa": {
               "__array__": true,
               "dtype": "float32",
@@ -1999,6 +2020,7 @@
                 0.004644588101655245
               ]
             },
+            "Sa_conf": null,
             "Sb": {
               "__array__": true,
               "dtype": "float32",
@@ -2014,6 +2036,7 @@
                 0.005143552087247372
               ]
             },
+            "Sb_conf": null,
             "_c2": [
               [
                 0,
@@ -2210,6 +2233,7 @@
               "m": 2,
               "maxorder": 2
             },
+            "ci": null,
             "invalid": {
               "bad_row_indices": [],
               "n_invalid": 0,
@@ -2352,6 +2376,7 @@
                 0.099870465695858
               ]
             },
+            "S1_conf": null,
             "ST": {
               "__array__": true,
               "dtype": "float32",
@@ -2364,6 +2389,8 @@
                 0.23850949108600616
               ]
             },
+            "ST_conf": null,
+            "ci": null,
             "invalid": {
               "bad_row_indices": [],
               "n_invalid": 0,
@@ -2736,6 +2763,7 @@
                 9.547288209432736e-05
               ]
             },
+            "S1_conf": null,
             "S2": {
               "__array__": true,
               "dtype": "float32",
@@ -2761,6 +2789,7 @@
                 ]
               ]
             },
+            "S2_conf": null,
             "ST": {
               "__array__": true,
               "dtype": "float32",
@@ -2773,6 +2802,8 @@
                 0.30044010281562805
               ]
             },
+            "ST_conf": null,
+            "ci": null,
             "coefficients": {
               "__array__": true,
               "dtype": "float32",
@@ -2964,6 +2995,7 @@
                 9.547288937028497e-05
               ]
             },
+            "S1_conf": null,
             "ST": {
               "__array__": true,
               "dtype": "float32",
@@ -2976,6 +3008,7 @@
                 0.30044013261795044
               ]
             },
+            "ST_conf": null,
             "Sh": {
               "__array__": true,
               "dtype": "float32",
@@ -2988,7 +3021,9 @@
                 0.15011245012283325
               ]
             },
+            "Sh_conf": null,
             "backend": "pce",
+            "ci": null,
             "explained_variance": {
               "__array__": true,
               "dtype": "float32",
@@ -3202,6 +3237,7 @@
                 -0.00039065047167241573
               ]
             },
+            "S_C_conf": null,
             "S_IU": {
               "__array__": true,
               "dtype": "float32",
@@ -3214,6 +3250,7 @@
                 0.38447263836860657
               ]
             },
+            "S_IU_conf": null,
             "S_TC": {
               "__array__": true,
               "dtype": "float32",
@@ -3226,6 +3263,7 @@
                 0.0012239115312695503
               ]
             },
+            "S_TC_conf": null,
             "S_TU": {
               "__array__": true,
               "dtype": "float32",
@@ -3238,6 +3276,7 @@
                 0.38608720898628235
               ]
             },
+            "S_TU_conf": null,
             "S_U": {
               "__array__": true,
               "dtype": "float32",
@@ -3250,6 +3289,7 @@
                 0.001614562002941966
               ]
             },
+            "S_U_conf": null,
             "_fit": {
               "centers": {
                 "__array__": true,
@@ -3567,6 +3607,7 @@
                 3.5042519569396973
               ]
             },
+            "ci": null,
             "correlation": {
               "__array__": true,
               "dtype": "float64",
@@ -3966,6 +4007,7 @@
         },
         "dgsm": {
           "fields": {
+            "ci": null,
             "invalid": {
               "bad_row_indices": [],
               "n_invalid": 0,
@@ -4026,6 +4068,7 @@
                 ]
               ]
             },
+            "lower_bound_conf": null,
             "nu": {
               "__array__": true,
               "dtype": "float32",
@@ -4073,6 +4116,7 @@
                 ]
               ]
             },
+            "nu_conf": null,
             "problem": {
               "__problem__": [
                 "x1",
@@ -4127,6 +4171,7 @@
                 ]
               ]
             },
+            "sigma_conf": null,
             "upper_bound": {
               "__array__": true,
               "dtype": "float32",
@@ -4174,6 +4219,7 @@
                 ]
               ]
             },
+            "upper_bound_conf": null,
             "var_y": {
               "__array__": true,
               "dtype": "float32",
@@ -4436,6 +4482,8 @@
                 ]
               ]
             },
+            "ST_conf": null,
+            "S_conf": null,
             "Sa": {
               "__array__": true,
               "dtype": "float32",
@@ -4501,6 +4549,7 @@
                 ]
               ]
             },
+            "Sa_conf": null,
             "Sb": {
               "__array__": true,
               "dtype": "float32",
@@ -4566,6 +4615,7 @@
                 ]
               ]
             },
+            "Sb_conf": null,
             "_c2": [
               [
                 0,
@@ -5568,6 +5618,7 @@
               "m": 2,
               "maxorder": 2
             },
+            "ci": null,
             "invalid": {
               "bad_row_indices": [],
               "n_invalid": 0,
@@ -5901,6 +5952,7 @@
                 ]
               ]
             },
+            "S1_conf": null,
             "ST": {
               "__array__": true,
               "dtype": "float32",
@@ -5948,6 +6000,8 @@
                 ]
               ]
             },
+            "ST_conf": null,
+            "ci": null,
             "invalid": {
               "bad_row_indices": [],
               "n_invalid": 0,
@@ -7108,6 +7162,7 @@
                 ]
               ]
             },
+            "S1_conf": null,
             "S2": {
               "__array__": true,
               "dtype": "float32",
@@ -7228,6 +7283,7 @@
                 ]
               ]
             },
+            "S2_conf": null,
             "ST": {
               "__array__": true,
               "dtype": "float32",
@@ -7275,6 +7331,8 @@
                 ]
               ]
             },
+            "ST_conf": null,
+            "ci": null,
             "coefficients": {
               "__array__": true,
               "dtype": "float32",
@@ -7653,6 +7711,7 @@
                 ]
               ]
             },
+            "S1_conf": null,
             "ST": {
               "__array__": true,
               "dtype": "float32",
@@ -7700,6 +7759,7 @@
                 ]
               ]
             },
+            "ST_conf": null,
             "Sh": {
               "__array__": true,
               "dtype": "float32",
@@ -7747,7 +7807,9 @@
                 ]
               ]
             },
+            "Sh_conf": null,
             "backend": "pce",
+            "ci": null,
             "explained_variance": {
               "__array__": true,
               "dtype": "float32",
@@ -8501,6 +8563,7 @@
                 ]
               ]
             },
+            "S_C_conf": null,
             "S_IU": {
               "__array__": true,
               "dtype": "float32",
@@ -8548,6 +8611,7 @@
                 ]
               ]
             },
+            "S_IU_conf": null,
             "S_TC": {
               "__array__": true,
               "dtype": "float32",
@@ -8595,6 +8659,7 @@
                 ]
               ]
             },
+            "S_TC_conf": null,
             "S_TU": {
               "__array__": true,
               "dtype": "float32",
@@ -8642,6 +8707,7 @@
                 ]
               ]
             },
+            "S_TU_conf": null,
             "S_U": {
               "__array__": true,
               "dtype": "float32",
@@ -8689,6 +8755,7 @@
                 ]
               ]
             },
+            "S_U_conf": null,
             "_fit": {
               "centers": {
                 "__array__": true,
@@ -9179,6 +9246,7 @@
                 2.1239371299743652
               ]
             },
+            "ci": null,
             "correlation": {
               "__array__": true,
               "dtype": "float64",
@@ -9517,6 +9585,7 @@
         },
         "dgsm": {
           "fields": {
+            "ci": null,
             "invalid": {
               "bad_row_indices": [],
               "n_invalid": 0,
@@ -9560,6 +9629,7 @@
                 ]
               ]
             },
+            "lower_bound_conf": null,
             "nu": {
               "__array__": true,
               "dtype": "float32",
@@ -9590,6 +9660,7 @@
                 ]
               ]
             },
+            "nu_conf": null,
             "problem": {
               "__problem__": [
                 "x1",
@@ -9632,6 +9703,7 @@
                 ]
               ]
             },
+            "sigma_conf": null,
             "upper_bound": {
               "__array__": true,
               "dtype": "float32",
@@ -9662,6 +9734,7 @@
                 ]
               ]
             },
+            "upper_bound_conf": null,
             "var_y": {
               "__array__": true,
               "dtype": "float32",
@@ -9888,6 +9961,8 @@
                 ]
               ]
             },
+            "ST_conf": null,
+            "S_conf": null,
             "Sa": {
               "__array__": true,
               "dtype": "float32",
@@ -9974,6 +10049,7 @@
                 ]
               ]
             },
+            "Sa_conf": null,
             "Sb": {
               "__array__": true,
               "dtype": "float32",
@@ -10060,6 +10136,7 @@
                 ]
               ]
             },
+            "Sb_conf": null,
             "_c2": [
               [
                 0,
@@ -10316,6 +10393,7 @@
               "m": 2,
               "maxorder": 2
             },
+            "ci": null,
             "invalid": {
               "bad_row_indices": [],
               "n_invalid": 0,
@@ -10623,6 +10701,7 @@
                 ]
               ]
             },
+            "S1_conf": null,
             "ST": {
               "__array__": true,
               "dtype": "float32",
@@ -10653,6 +10732,8 @@
                 ]
               ]
             },
+            "ST_conf": null,
+            "ci": null,
             "invalid": {
               "bad_row_indices": [],
               "n_invalid": 0,
@@ -11444,6 +11525,7 @@
                 ]
               ]
             },
+            "S1_conf": null,
             "S2": {
               "__array__": true,
               "dtype": "float32",
@@ -11619,6 +11701,7 @@
                 ]
               ]
             },
+            "S2_conf": null,
             "ST": {
               "__array__": true,
               "dtype": "float32",
@@ -11649,6 +11732,8 @@
                 ]
               ]
             },
+            "ST_conf": null,
+            "ci": null,
             "coefficients": {
               "__array__": true,
               "dtype": "float32",
@@ -12087,6 +12172,7 @@
                 ]
               ]
             },
+            "S1_conf": null,
             "ST": {
               "__array__": true,
               "dtype": "float32",
@@ -12117,6 +12203,7 @@
                 ]
               ]
             },
+            "ST_conf": null,
             "Sh": {
               "__array__": true,
               "dtype": "float32",
@@ -12147,7 +12234,9 @@
                 ]
               ]
             },
+            "Sh_conf": null,
             "backend": "pce",
+            "ci": null,
             "explained_variance": {
               "__array__": true,
               "dtype": "float32",
@@ -12949,6 +13038,7 @@
                 ]
               ]
             },
+            "S_C_conf": null,
             "S_IU": {
               "__array__": true,
               "dtype": "float32",
@@ -12979,6 +13069,7 @@
                 ]
               ]
             },
+            "S_IU_conf": null,
             "S_TC": {
               "__array__": true,
               "dtype": "float32",
@@ -13009,6 +13100,7 @@
                 ]
               ]
             },
+            "S_TC_conf": null,
             "S_TU": {
               "__array__": true,
               "dtype": "float32",
@@ -13039,6 +13131,7 @@
                 ]
               ]
             },
+            "S_TU_conf": null,
             "S_U": {
               "__array__": true,
               "dtype": "float32",
@@ -13069,6 +13162,7 @@
                 ]
               ]
             },
+            "S_U_conf": null,
             "_fit": {
               "centers": {
                 "__array__": true,
@@ -13582,6 +13676,7 @@
                 4.9529900550842285
               ]
             },
+            "ci": null,
             "correlation": {
               "__array__": true,
               "dtype": "float64",

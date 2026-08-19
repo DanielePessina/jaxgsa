@@ -271,3 +271,47 @@ class TestTheRegistryIsProtected:
         from jaxgsa._core.registry import register
 
         assert register(methods()["sobol"]) is methods()["sobol"]
+
+
+class TestPureCoreDeclaration:
+    """``pure_core`` is checked against the package, not merely recorded.
+
+    ADR 0015 exempts kucherenko and vkoga from the pure-core rule and requires
+    the exemption to be declared in the registry rather than left as an
+    absence. A declaration nobody checks is the same as an absence, so these
+    assert both directions.
+    """
+
+    @pytest.mark.parametrize("spec", ALL_SPECS, ids=SPEC_IDS)
+    def test_a_declared_core_exists_and_is_exported(self, spec):
+        """``pure_core=True`` means the package really exports ``indices``."""
+        import importlib
+
+        module = importlib.import_module(f"jaxgsa.{spec.name}")
+        has_indices = hasattr(module, "indices")
+        if spec.pure_core:
+            assert has_indices, (
+                f"{spec.name} declares pure_core=True but exports no indices(). "
+                "Either build the core or declare the exemption."
+            )
+            assert "indices" in module.__all__, (
+                f"{spec.name}.indices exists but is missing from __all__"
+            )
+        else:
+            assert not has_indices, (
+                f"{spec.name} declares pure_core=False but exports indices(). "
+                "Flip the declaration."
+            )
+
+    def test_exactly_the_two_documented_methods_are_exempt(self):
+        """The exemption list is closed.
+
+        A third method quietly opting out would pass the test above. ADR 0015
+        names two, and adding a third is a decision that should require
+        editing this line.
+        """
+        exempt = {s.name for s in ALL_SPECS if not s.pure_core}
+        assert exempt == {"kucherenko", "vkoga"}, (
+            f"exempt from the pure-core rule: {sorted(exempt)}. ADR 0015 names "
+            "kucherenko and vkoga. Changing that set is an ADR change."
+        )

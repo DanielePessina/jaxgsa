@@ -63,9 +63,25 @@ parameter. A ✗ is a refusal, not a silent approximation. The method raises a
 `ValueError` that names the parameters and the alternatives.
 
 **Bootstrap CI** gives the keyword that asks for bootstrap confidence
-intervals. Two spellings are in use. Eight methods report no intervals at all
-and show a —. See [Confidence intervals](/api/#confidence-intervals) for the
-`result.ci` record that comes back with them.
+intervals. There is one spelling, `n_bootstrap`, and it defaults to `0`
+everywhere, so you never pay for an interval you did not ask for. See
+[Confidence intervals](/api/#confidence-intervals) for the `result.ci` record
+that comes back with them.
+
+Two methods show a — and it is a deliberate absence, not a gap. **eFAST** has
+one search curve per parameter, so there is nothing to resample: removing a
+point does not shrink the sample, it changes what the estimator computes. An
+eFAST interval would need replicated designs with different random phase
+shifts, which is a change to `sample()`, not a keyword on `analyze()`.
+**HSIC** already reports permutation `p_values`, which is the uncertainty
+statement for a V-statistic; a row bootstrap would repeat rows onto the kernel
+diagonal, where the kernel is exactly 1, so the resampled index is biased
+upward by construction.
+
+The four surrogate-backed methods — `pce`, `hdmr`, `vkoga` and `shapley` —
+refit their surrogate on every replicate, so an interval there costs an order
+of magnitude more than a row resample on a direct estimator. That is why the
+default is `0` and not why it is unavailable.
 
 † HDMR handles dependence through its ANCOVA decomposition: $S_a$ is the
 structural share and $S_b$ the correlative share. Its $S_T$ is the SCSA

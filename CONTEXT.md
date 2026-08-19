@@ -46,7 +46,7 @@ point does not shrink the sample, it changes what the estimator computes.
 
 **Pure core** — a method's `indices()`: takes the design object or
 `(problem, X, Y)`, returns a bare tuple of arrays, and survives `jit`, `vmap`
-and `jacrev`. Every branch is on a shape or a Python scalar, never on data.
+and differentiation in **at least one mode**. Every branch is on a shape or a Python scalar, never on data.
 No result class, no diagnostics, no host read of an array value.
 
 Two limits are structural rather than incidental, and a core is allowed to
@@ -60,6 +60,12 @@ refuse rather than pretend:
 - **Dropped rows.** `analyze` decides which rows survive by looking at their
   values, so the row count is data-dependent. That is why `analyze` is not
   traceable and `indices()` is, and why the split exists at all.
+- **Reverse mode, for one method.** `hdmr.indices` supports `jacfwd` but not
+  `jacrev`: its backfitting stops early through a `lax.while_loop`, which JAX
+  refuses to differentiate in reverse. Supporting it would mean a fixed-trip
+  `lax.scan` of `maxiter` iterations, making every fit pay the iterations the
+  early stop saves. A test pins the refusal, so the exemption fails if the
+  loop is ever rewritten.
 
 Two methods have no core. `kucherenko` and `vkoga` are host NumPy and SciPy
 end to end; see `docs/adr/0015-pure-core-exemptions.md`. Every method
@@ -121,7 +127,7 @@ not a default.
 | `conf_level` | `float`, default `0.95` | Two-sided confidence level. |
 | `ci_method` | `"quantile" \| "gaussian"`, default `"quantile"` | How endpoints are formed. Every method that offers `n_bootstrap` offers this. |
 | `key` | `Array \| None`, default `None` | A JAX PRNG key. Required **wherever the method draws randomness** — a bootstrap, a permutation test, a Monte-Carlo integral — not only when `n_bootstrap > 0`. HSIC and VKOGA need one despite declaring no bootstrap. The single spelling — not `seed: int`. |
-| `keep_replicates` | `bool`, default `False` | Keyword-only, and the **last** keyword in the signature. Retains the per-replicate values on the result. |
+| `keep_replicates` | `bool`, default `False` | Keyword-only, and the **last named** parameter. Retains the per-replicate values on the result. "Last named" rather than "last" because Python requires `**kwargs` to be syntactically final, and `shapley.analyze` forwards `**backend_kwargs`. |
 
 `key` rather than `seed` because a key can be split. An `int` seed forces
 per-call reseeding, which silently correlates nested or repeated bootstraps —

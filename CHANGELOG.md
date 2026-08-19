@@ -136,6 +136,74 @@ Version 0.10 adds capability.
 
 ### Added
 
+- **Eleven methods gain a pure `indices()` core.** `sobol.indices` already
+  existed; `efast`, `pawn`, `morris`, `hsic`, `borgonovo`,
+  `optimal_transport`, `dgsm`, `pce`, `hdmr` and `shapley` now have one too.
+
+  A core takes the design object (or `problem, X, Y`) and returns a bare tuple
+  of arrays. No result class, no diagnostics, no host read of any array value,
+  and every branch on a shape or a Python scalar. It survives `jit`, `vmap`
+  and differentiation, so an index can sit inside a larger JAX computation.
+
+  ```python
+  S1, ST, S2 = jaxgsa.sobol.indices(samples, Y)
+  grad = jax.jacrev(lambda y: jaxgsa.pce.indices(problem, X, y)[0].sum())(Y)
+  ```
+
+  `analyze()` keeps the policy: validation, invalid-row handling, warnings and
+  the bootstrap. That split is why `analyze()` cannot be traced and
+  `indices()` can — dropping rows by value makes the row count depend on the
+  data, and `jit` needs static shapes.
+
+  `kucherenko` and `vkoga` have **no** core, and say so. Both are host NumPy
+  and SciPy end to end; kucherenko is the fastest method in the library
+  precisely because it never touches the device. The exemption is declared as
+  `MethodSpec.pure_core` and checked — a method claiming a core it does not
+  have now fails a test.
+
+  Two limits are structural, not incidental. A core refuses **categorical
+  inputs**, because a categorical partition pads to `counts.max()`, a shape
+  read off the data. And `hdmr.indices` supports `jacfwd` but not `jacrev`,
+  because its backfitting stops early through a `lax.while_loop`, which JAX
+  will not differentiate in reverse.
+
+- **Six more methods report confidence intervals.** `dgsm`, `kucherenko`,
+  `pce`, `hdmr`, `vkoga` and `shapley` now take `n_bootstrap`, alongside
+  `conf_level`, `ci_method`, `key` and `keep_replicates`. Eleven of thirteen
+  methods now offer an interval.
+
+  `n_bootstrap` defaults to `0` everywhere, so nothing costs more than before
+  unless asked. That default matters most for the four surrogate-backed
+  methods, which refit their surrogate on **every** replicate.
+
+  The resampling unit is the one the design allows: rows for the given-data
+  methods, and **base points** for kucherenko, each carrying `2D+1`
+  conditional rows — resampling individual rows there would leave the
+  estimator reading misaligned blocks.
+
+  Not every field gets an interval, and the omissions are deliberate.
+  `var_y` and `variance` are the denominators of the indices rather than
+  sensitivity measures, and their uncertainty is already inside the index
+  intervals. `rmse`, `cv_rmse` and `n_centers` describe the fit that was
+  reported, so an interval over other fits would not be about the thing they
+  name.
+
+- **`jaxgsa.pce.effective_order(problem, n_samples, *, order, fit_ratio)`**
+  answers what order a PCE fit will actually use, with no fit and no side
+  effect. PCE may reduce the requested order when the design matrix would be
+  underdetermined; that used to be reported only by a warning during the fit,
+  which a pure core cannot emit.
+
+### Changed
+
+- **eFAST and HSIC report no bootstrap interval, and the docs now say why.**
+  eFAST has one search curve per parameter, so there is nothing to resample —
+  removing a point does not shrink the sample, it changes what the estimator
+  computes. HSIC already reports permutation `p_values`, which is the
+  uncertainty statement for a V-statistic; a row bootstrap would repeat rows
+  onto the kernel diagonal, where the kernel is exactly 1, biasing the
+  resampled index upward by construction.
+
 - **`CONTEXT.md`** states the vocabulary the interface is frozen against, and
   `tests/test_vocabulary.py` reads it back off the method registry. A
   signature that drifts from the specification now fails a test rather than
