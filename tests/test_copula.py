@@ -592,9 +592,10 @@ def test_safe_cholesky_repair_is_unreachable_through_the_public_api():
     The declared matrix here is exactly singular, the worst case a user can
     write. Its repair moves an entry by about 4e-8, far under the noise
     threshold, so ``policy="declared"`` neither raises nor warns and the
-    sampler runs on the lifted matrix. That silence is the point of the test:
-    the guard against a truly inconsistent matrix is the material-repair band,
-    not the Cholesky.
+    sampler runs on the lifted matrix. The conditional plan is what speaks
+    up instead: with |rho| effectively 1 the conditional variances collapse,
+    so ``build_conditional_plan`` emits the one degenerate-conditionals
+    warning per sample() call, and the design itself stays finite.
     """
     R_declared = np.ones((2, 2))  # rank 1
     with warnings.catch_warnings():
@@ -606,8 +607,7 @@ def test_safe_cholesky_repair_is_unreachable_through_the_public_api():
     # Plain cholesky already works here, so the two functions agree.
     np.testing.assert_array_equal(_safe_cholesky(R), np.linalg.cholesky(R))
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
+    with pytest.warns(jaxgsa.JaxgsaWarning, match="deterministic function"):
         samples = jaxgsa.kucherenko.sample(problem, 64, seed=0).samples
     assert np.isfinite(np.asarray(samples, dtype=float)).all()
 
@@ -615,3 +615,47 @@ def test_safe_cholesky_repair_is_unreachable_through_the_public_api():
     # is taken, so no non-PD matrix reaches the sampler at all.
     with pytest.raises(ValueError, match="not positive definite"):
         _uniform_problem(D=3).with_correlation(_INDEFINITE_R)
+
+
+class TestDegenerateConditionalWarning:
+    """Tier T4 (internal consistency): the once-per-plan degeneracy warning.
+
+    ``build_conditional_plan`` used to repair near-singular conditional
+    covariances silently, so at |rho| close to 1 the conditional draws could
+    quietly stop following the requested conditional. The plan now warns
+    once, aggregated over parameters.
+    """
+
+    def test_extreme_rho_warns(self):
+        R = np.array([[1.0, 0.999], [0.999, 1.0]])
+        with pytest.warns(jaxgsa.JaxgsaWarning, match="deterministic function"):
+            build_conditional_plan(R)
+
+    def test_mild_rho_stays_silent(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            build_conditional_plan(_equicorrelated(0.5, D=3))
+
+    def test_kucherenko_extreme_rho_warns_once_per_sample_call(self):
+        problem = _uniform_problem(D=2).with_correlation(np.array([[1.0, 0.999], [0.999, 1.0]]))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            jaxgsa.kucherenko.sample(problem, 64, seed=0)
+        found = [w for w in caught if "deterministic function" in str(w.message)]
+        assert len(found) == 1
+        assert issubclass(found[0].category, jaxgsa.JaxgsaWarning)
+
+    def test_kucherenko_mild_rho_stays_silent(self):
+        problem = _uniform_problem(D=2).with_correlation(np.array([[1.0, 0.8], [0.8, 1.0]]))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            jaxgsa.kucherenko.sample(problem, 64, seed=0)
+
+    def test_actual_floor_engagement_reports_the_lift(self):
+        """A singular matrix fed straight to the plan reports the repair."""
+        R = np.ones((2, 2))  # rank 1: both conditionals collapse exactly
+        with pytest.warns(jaxgsa.JaxgsaWarning, match="floored"):
+            plan = build_conditional_plan(R)
+        # The floor kept the factors usable.
+        assert np.isfinite(plan.std_self).all()
+        assert plan.std_self.min() >= np.sqrt(_MIN_EIGENVALUE) / 2

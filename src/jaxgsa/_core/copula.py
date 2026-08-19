@@ -67,6 +67,20 @@ _REPAIR_NOISE = 1e-6
 # rounded, and the two policies below diverge.
 _REPAIR_MATERIAL = 0.05
 
+# Smallest conditional variance (latent scale, marginal variance 1) that the
+# conditional plan accepts without a warning. The hard numerical floor
+# ``_MIN_EIGENVALUE`` engages only when a conditional is singular to float64
+# precision, which a canonicalized correlation matrix never quite reaches: its
+# spectrum is floored at ``_EIGENVALUE_CLIP_TARGET``, and every conditional
+# variance is bounded below by the matrix's smallest eigenvalue. The practical
+# failure arrives much earlier. Below this threshold a parameter is an almost
+# deterministic function of the others (for a pairwise coupling it means
+# ``|rho| > ~0.9975``), the conditional draws span under ~7% of the marginal,
+# and the spectrum floor sits close enough to the conditional's own scale that
+# any repair materially distorts what is drawn. So the plan warns here, before
+# the silent floor is the only thing left standing.
+_NEAR_SINGULAR_CONDITIONAL = 5e-3
+
 # Policy applied when the repair actually engages.
 #
 # ``"declared"``  the matrix came from the user. A noise-level repair is
@@ -576,6 +590,13 @@ def build_conditional_plan(R: np.ndarray) -> _ConditionalPlan:
     Raises:
         ValueError: If ``D < 2``; conditioning on "the other parameters" is
             meaningless for a single-parameter problem.
+
+    Warns:
+        JaxgsaWarning: Once per plan, when a conditional covariance had to be
+            numerically repaired, a conditional variance was floored, or the
+            smallest conditional variance falls below
+            ``_NEAR_SINGULAR_CONDITIONAL``. See
+            :func:`_warn_degenerate_conditionals`.
     """
     D = R.shape[0]
     if D < 2:
@@ -588,6 +609,13 @@ def build_conditional_plan(R: np.ndarray) -> _ConditionalPlan:
     std_self = np.empty(D, dtype=np.float64)
     chol_marginal = np.empty((D, D - 1, D - 1), dtype=np.float64)
 
+    # One plan is built per analyze/sample call, so aggregating the repair
+    # diagnostics here and warning once at the end is exactly the
+    # once-per-call, not-per-parameter reporting the caller should see.
+    lifts: list[float] = []
+    n_floored = 0
+    min_cond_var = np.inf
+
     for i in range(D):
         rest = np.array([j for j in range(D) if j != i], dtype=np.int64)
         others[i] = rest
@@ -599,15 +627,20 @@ def build_conditional_plan(R: np.ndarray) -> _ConditionalPlan:
         # deterministic function of the others.
         beta_rest[i] = r_cross
         cov_rest = R_rest - np.outer(r_cross, r_cross)
-        chol_rest[i] = _safe_cholesky(cov_rest)
+        chol_rest[i] = _safe_cholesky(cov_rest, lifts)
 
         # Z_i | Z_-i: ordinary least squares of Z_i on the others.
         solved = np.linalg.solve(R_rest, r_cross)
         beta_self[i] = solved
-        residual_var = max(1.0 - float(r_cross @ solved), _MIN_EIGENVALUE)
-        std_self[i] = np.sqrt(residual_var)
+        raw_residual_var = 1.0 - float(r_cross @ solved)
+        if raw_residual_var < _MIN_EIGENVALUE:
+            n_floored += 1
+        min_cond_var = min(min_cond_var, raw_residual_var)
+        std_self[i] = np.sqrt(max(raw_residual_var, _MIN_EIGENVALUE))
 
-        chol_marginal[i] = _safe_cholesky(R_rest)
+        chol_marginal[i] = _safe_cholesky(R_rest, lifts)
+
+    _warn_degenerate_conditionals(lifts, n_floored, min_cond_var)
 
     return _ConditionalPlan(
         others=others,
@@ -617,6 +650,60 @@ def build_conditional_plan(R: np.ndarray) -> _ConditionalPlan:
         std_self=std_self,
         chol_marginal=chol_marginal,
         chol_full=_safe_cholesky(R),
+    )
+
+
+def _warn_degenerate_conditionals(lifts: list[float], n_floored: int, min_cond_var: float) -> None:
+    """Report, once per plan, conditionals too degenerate to trust silently.
+
+    Mirrors the graded tone of the declared-matrix repair policy: nothing is
+    said while every conditional keeps a healthy variance, one warning names
+    the numbers once anything drifts toward the numerical floor, and the
+    severity leads the message. An engaged repair (eigenvalue lift or
+    ``std_self`` floor) is the hard case — the draws then follow the repaired
+    conditional, not the requested one — and a merely near-singular
+    conditional is the early form of the same failure.
+
+    Args:
+        lifts: Eigenvalue lifts applied by :func:`_safe_cholesky`, one entry
+            per repaired factorization.
+        n_floored: How many ``Z_i | Z_-i`` conditional variances were floored
+            at ``_MIN_EIGENVALUE``.
+        min_cond_var: Smallest raw (pre-floor) conditional variance
+            ``Var(Z_i | Z_-i)`` across parameters, latent scale.
+
+    Warns:
+        JaxgsaWarning: If any repair engaged, or if ``min_cond_var`` is below
+            ``_NEAR_SINGULAR_CONDITIONAL``.
+    """
+    repaired = bool(lifts) or n_floored > 0
+    if not repaired and min_cond_var >= _NEAR_SINGULAR_CONDITIONAL:
+        return
+    if repaired:
+        severity = (
+            f"a numerical repair engaged: {len(lifts)} conditional covariance "
+            f"factorization(s) had eigenvalues lifted by up to "
+            f"{max(lifts, default=0.0):.3e}, and {n_floored} conditional "
+            f"variance(s) were floored at {_MIN_EIGENVALUE:g}. Conditional "
+            "draws follow the repaired conditionals, not the requested ones"
+        )
+    else:
+        severity = (
+            f"the smallest conditional variance is {min_cond_var:.3e} on the "
+            "latent scale, where each marginal variance is 1"
+        )
+    warnings.warn(
+        "jaxgsa: the correlation matrix makes at least one parameter an "
+        f"almost deterministic function of the others ({severity}). As |rho| "
+        "approaches 1 the conditional distributions collapse, so the "
+        "conditional draws behind the correlated estimators (Kucherenko "
+        "designs, VKOGA indices) carry noise near the scale of the "
+        "conditional itself. Reduce the extreme correlation entries, or drop "
+        "one of the nearly redundant parameters.",
+        # Two hops to the user: analyze()/sample() -> build_conditional_plan
+        # -> here.
+        stacklevel=4,
+        category=JaxgsaWarning,
     )
 
 
@@ -695,11 +782,19 @@ def assemble_latent(
     return Z
 
 
-def _safe_cholesky(cov: np.ndarray) -> np.ndarray:
+def _safe_cholesky(cov: np.ndarray, lifts: list[float] | None = None) -> np.ndarray:
     """Return the Cholesky factor of a covariance, lifting it if it is not PD.
 
     Args:
         cov: ``(D, D)`` symmetric covariance matrix.
+        lifts: Optional collector. When a repair engages, the maximum
+            eigenvalue lift ``_MIN_EIGENVALUE - min(eigenvalues)`` is appended
+            to it, so a caller building many factors can report one aggregate
+            warning instead of one per parameter (see
+            :func:`build_conditional_plan`). ``None`` keeps the repair silent,
+            which suits the full-matrix callers: their input was already
+            validated and repaired by :func:`canonicalize_correlation`, so a
+            repair here only removes float noise.
 
     Returns:
         ``(D, D)`` lower-triangular Cholesky factor. When ``cov`` is not
@@ -712,6 +807,8 @@ def _safe_cholesky(cov: np.ndarray) -> np.ndarray:
         # Conditional covariances lose rank as correlations approach +-1. Lift
         # the spectrum rather than failing: the caller is sampling, not solving.
         eigenvalues, eigenvectors = np.linalg.eigh(0.5 * (cov + cov.T))
+        if lifts is not None:
+            lifts.append(float(_MIN_EIGENVALUE - eigenvalues.min()))
         lifted = eigenvectors @ np.diag(np.maximum(eigenvalues, _MIN_EIGENVALUE)) @ eigenvectors.T
         return np.linalg.cholesky(lifted)
 
