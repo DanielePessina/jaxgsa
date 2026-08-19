@@ -18,11 +18,11 @@ Example::
 
 from jaxgsa._core.invalid import InvalidUnit
 from jaxgsa._core.registry import MethodSpec, register
-from jaxgsa.morris._analyze import analyze
+from jaxgsa.morris._analyze import analyze, indices
 from jaxgsa.morris._result import MorrisResult
 from jaxgsa.morris._sampling import MorrisSamples, sample
 
-__all__ = ["MorrisResult", "MorrisSamples", "analyze", "sample"]
+__all__ = ["MorrisResult", "MorrisSamples", "analyze", "indices", "sample"]
 
 SPEC = register(
     MethodSpec(

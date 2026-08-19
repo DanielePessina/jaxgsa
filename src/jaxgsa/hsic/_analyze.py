@@ -15,6 +15,21 @@ Alexanderian (2026), where k_c is the centered kernel. The product of
 augmented kernels captures all interaction orders, not just the highest.
 This gives correct total indices for additive models.
 
+No bootstrap. HSIC is the only index method here that offers no
+``n_bootstrap``, and the omission is deliberate rather than unfinished work.
+The uncertainty statement HSIC already makes is the permutation ``p_value``:
+it resamples the pairing between ``x_i`` and ``Y`` under the null of
+independence and reports where the measured index falls in that null. A row
+bootstrap would answer the same question about the same quantity, and worse.
+The index is a V-statistic, a double sum over all N^2 sample pairs, so
+resampling rows with replacement duplicates rows and the duplicates land on
+the diagonal of the kernel matrix, where the kernel is exactly 1. The
+resampled statistic is therefore biased upward by construction, and its
+spread mixes that bias with the sampling variability it was meant to
+measure. So HSIC reports a p-value and no interval, and ``key`` is still
+required — the permutation test draws randomness even though nothing here
+bootstraps.
+
 References:
     Gretton et al. (2005). JMLR 6:2075-2129.
     Da Veiga (2015). Rel. Eng. Sys. Safety 142:346-362.
@@ -38,6 +53,7 @@ from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa._core.validation import (
     _prenormalize_outputs,
+    _prepare_Y,
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.hsic._result import HSICResult
@@ -557,6 +573,128 @@ def _warn_single_precision() -> None:
         )
 
 
+def indices(
+    problem: Problem,
+    X: Array,
+    Y: Array,
+    *,
+    n_perms: int = 200,
+    key: Array,
+    bandwidth: float | None = None,
+    batch_size: int | None = None,
+    prenormalize: bool = False,
+) -> tuple[Array, Array, Array, Array]:
+    """Compute HSIC indices as plain arrays, with no diagnostics.
+
+    This is the transformable core of :func:`analyze`. It builds the same
+    kernels, runs the same permutation test and returns the same numbers, but
+    it does nothing else: no non-finite check, no row dropping, no
+    zero-variance warning, no single-precision warning, no sample-count
+    check, no :class:`jaxgsa.hsic.HSICResult`, and no read of any array value
+    on the host. So it composes with ``jax.jit``, ``jax.vmap``, ``jax.grad``
+    and ``jax.jacrev``, which :func:`analyze` cannot, because a policy
+    decision needs a concrete value and a tracer has none.
+
+    Every branch here is on a shape or on a Python scalar. ``n_perms``,
+    ``bandwidth``, ``batch_size`` and ``prenormalize`` are all static: they
+    are read while the graph is being traced and never at run time.
+    ``bandwidth`` selects between the median heuristic and a fixed value,
+    ``batch_size`` sets how many row blocks the kernel build unrolls into,
+    and both are baked into the compiled kernel, which is keyed on them (see
+    :func:`_get_hsic_kernel`). Changing one recompiles; neither costs a
+    device-side conditional.
+
+    No bootstrap and no confidence interval, here or on :func:`analyze`. The
+    permutation ``p_values`` are the uncertainty statement, and the module
+    docstring says why a row bootstrap of a V-statistic would be worse than
+    redundant.
+
+    Tier T4 (behavioural contract): the returned arrays must equal
+    ``R2_HSIC``, ``T_HSIC``, ``p_values`` and ``hsic_raw`` of ``analyze``'s
+    result on clean outputs, and the function must survive ``jit``, ``vmap``
+    and ``jit(jacrev(...))``. Checked in ``tests/test_hsic.py``.
+
+    One limit on tracing ``X``. A *truncated* Gaussian marginal sends the
+    column through ``scipy.stats.truncnorm.cdf``, which reads the values on
+    the host, so a problem with one cannot have ``X`` be a tracer. Uniform
+    and untruncated Gaussian marginals stay on the device, and ``Y`` is
+    always traceable whatever the marginals are.
+
+    Use :func:`analyze` for ordinary analysis. Nothing here checks the
+    inputs, so a single NaN silently poisons every index.
+
+    Args:
+        problem: Problem definition with D parameters, used only for the
+            marginal CDFs that map ``X`` to the unit interval.
+        X: Input samples in physical units, shape ``(N, D)``.
+        Y: Model outputs, shape ``(N,)``, ``(N, K)`` or ``(N, T, K)``.
+        n_perms: Number of permutations for the p-value test, as in
+            :func:`analyze`.
+        key: JAX PRNG key driving the permutation test. Required, and
+            keyword-only with no default: the p-values are random, and a
+            constant fallback would silently correlate repeated analyses.
+        bandwidth: Fixed Gaussian bandwidth, or ``None`` for the median
+            heuristic, as in :func:`analyze`. The median heuristic selects
+            an order statistic through a bit-pattern bisection, which has no
+            derivative, so a gradient taken with respect to ``X`` treats the
+            bandwidth as a constant. Pass an explicit ``bandwidth`` when that
+            matters.
+        batch_size: Row-block size for each ``(N, N)`` kernel build, as in
+            :func:`analyze`.
+        prenormalize: Standardize each output slice before the analysis, as
+            in :func:`analyze`.
+
+    Returns:
+        ``(R2_HSIC, T_HSIC, p_values, hsic_raw)``, each of shape
+        ``(D,)``, ``(K, D)`` or ``(T, K, D)`` to match the rank of ``Y``,
+        exactly as ``analyze`` reports them.
+
+    Raises:
+        ValueError: If any parameter is categorical. The Gaussian input
+            kernel would read a level code as a distance.
+        TypeError: If the float width of ``X`` or ``Y`` has no unsigned
+            integer counterpart for the median-heuristic selection.
+    """
+    D = problem.num_vars
+    X_unit = cdf_to_unit_interval(X, problem)
+
+    Y_3d, layout = _prepare_Y(Y)
+    _N, T, K = Y_3d.shape
+
+    if prenormalize:
+        Y_3d, _, _, _ = _prenormalize_outputs(Y_3d)
+
+    # Build input kernels and augmented products once (independent of Y).
+    Ks = _build_input_kernels(X_unit, bandwidth, batch_size)
+    Ks_stack = jnp.stack(Ks)
+    Ks_aug = _augmented_kernels(Ks)
+    K_aug_full, K_aug_compls = _complement_kernels(Ks_aug)
+    K_aug_compls_stack = jnp.stack(K_aug_compls)
+
+    # Self-HSIC HSIC(K_d, K_d) is output-independent, so compute it once
+    # here and share it across every output slice.
+    hsic_xxs = jax.vmap(lambda K: _hsic_v(K, K))(Ks_stack)
+
+    # One column per output slice, in the same (t, k) order the indices are
+    # written back in, and one key per column. Each slice reads its own key,
+    # so the permutation draws do not depend on how the columns are grouped.
+    N = X_unit.shape[0]
+    total = T * K
+    Y_cols = Y_3d.reshape(N, total)
+    keys = jax.vmap(lambda i: jax.random.fold_in(key, i))(jnp.arange(total))
+
+    kernel = _get_hsic_kernel(n_perms, bandwidth, batch_size)
+    r2_all, t_all, p_all, raw_all = kernel(
+        Ks_stack, K_aug_compls_stack, K_aug_full, hsic_xxs, Y_cols, keys
+    )
+    return (
+        layout.squeeze(r2_all.reshape(T, K, D)),
+        layout.squeeze(t_all.reshape(T, K, D)),
+        layout.squeeze(p_all.reshape(T, K, D)),
+        layout.squeeze(raw_all.reshape(T, K, D)),
+    )
+
+
 def analyze(
     problem: Problem,
     X: Array,
@@ -588,6 +726,25 @@ def analyze(
     A permutation test supplies p-values for the null hypothesis that x_i and
     Y are independent. HSIC can therefore screen out non-influential
     parameters with a significance level attached.
+
+    **No bootstrap, and no confidence interval.** Almost every other method
+    here takes ``n_bootstrap``; HSIC does not, on purpose. The ``p_values``
+    are already the uncertainty statement, and they are the right one for
+    this estimator: the permutation test breaks the pairing between ``x_i``
+    and ``Y`` and reports where the measured index sits in the resulting
+    null distribution. A row bootstrap would be redundant against that, and
+    it would also be wrong in a way the p-value is not. HSIC is a
+    V-statistic, a double sum over all ``N^2`` pairs of rows, so resampling
+    rows with replacement repeats rows, the repeats land on the kernel
+    diagonal where the kernel equals 1, and the resampled index is biased
+    upward by construction. The interval would then mix that bias with the
+    sampling spread it was meant to show. ``key`` is still required despite
+    the absence of a bootstrap, because the permutation test draws
+    randomness of its own.
+
+    :func:`jaxgsa.hsic.indices` is the transformable core: the same numbers
+    as bare arrays, with none of the checks, so it composes with ``jit``,
+    ``vmap`` and ``jacrev``.
 
     Correlated parameters are supported. HSIC is a dependence measure and
     assumes no input independence, so a declared ``problem.correlation`` does
@@ -654,8 +811,6 @@ def analyze(
     """
     from jaxgsa.hsic import SPEC
 
-    D = problem.num_vars
-
     ctx = prepare(
         SPEC,
         problem,
@@ -683,36 +838,16 @@ def analyze(
         raise ValueError("key is required for the permutation test")
     _warn_single_precision()
 
-    X_unit = cdf_to_unit_interval(X, problem)
-
-    Y_3d = ctx.Y3
-    _N, T, K = Y_3d.shape
-
-    if prenormalize:
-        Y_3d, _, _, _ = _prenormalize_outputs(Y_3d)
-
-    # Build input kernels and augmented products once (independent of Y).
-    Ks = _build_input_kernels(X_unit, bandwidth, batch_size)
-    Ks_stack = jnp.stack(Ks)
-    Ks_aug = _augmented_kernels(Ks)
-    K_aug_full, K_aug_compls = _complement_kernels(Ks_aug)
-    K_aug_compls_stack = jnp.stack(K_aug_compls)
-
-    # Self-HSIC HSIC(K_d, K_d) is output-independent, so compute it once
-    # here and share it across every output slice.
-    hsic_xxs = jax.vmap(lambda K: _hsic_v(K, K))(Ks_stack)
-
-    # One column per output slice, in the same (t, k) order the indices are
-    # written back in, and one key per column. Each slice reads its own key,
-    # so the permutation draws do not depend on how the columns are grouped.
-    N = X_unit.shape[0]
-    total = T * K
-    Y_cols = Y_3d.reshape(N, total)
-    keys = jax.vmap(lambda i: jax.random.fold_in(key, i))(jnp.arange(total))
-
-    kernel = _get_hsic_kernel(n_perms, bandwidth, batch_size)
-    out = kernel(Ks_stack, K_aug_compls_stack, K_aug_full, hsic_xxs, Y_cols, keys)
-    r2_all, t_all, p_all, raw_all = (values.reshape(T, K, D) for values in out)
+    r2_all, t_all, p_all, raw_all = indices(
+        problem,
+        X,
+        ctx.Y3,
+        n_perms=n_perms,
+        key=key,
+        bandwidth=bandwidth,
+        batch_size=batch_size,
+        prenormalize=prenormalize,
+    )
 
     r2_all = ctx.squeeze(r2_all)
     t_all = ctx.squeeze(t_all)

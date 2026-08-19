@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import warnings
 
 import jax
@@ -11,7 +12,7 @@ import pytest
 
 from jaxgsa import JaxgsaWarning
 from jaxgsa.benchmarks import ishigami, linear, sobol_g
-from jaxgsa.hsic import analyze
+from jaxgsa.hsic import analyze, indices
 from jaxgsa.hsic._analyze import (
     _build_one_kernel,
     _linear_quantile_by_selection,
@@ -581,3 +582,213 @@ class TestHSICInvalidPolicy:
         with pytest.warns(JaxgsaWarning):
             result = analyze(problem, X, Y, n_perms=5, key=jax.random.key(0), on_invalid="drop")
         assert result.invalid.sources == ("X",)
+
+
+# ---------------------------------------------------------------------------
+# indices(): the pure, transformable core
+# ---------------------------------------------------------------------------
+
+
+class TestIndicesCore:
+    """The traceable core against the policy-carrying ``analyze``.
+
+    Tier T4 throughout (behavioural contract). ``analyze`` is not an external
+    oracle for the HSIC arithmetic -- that is checked against closed forms and
+    independence cases elsewhere in this file. What is checked here is the
+    split: the core must return exactly the numbers the full entry point
+    reports, and it must survive the three transformations ``analyze`` cannot.
+    """
+
+    N = 128
+    PERMS = 8
+
+    @staticmethod
+    def _sample(problem, n, seed):
+        """Monte-Carlo inputs for ``problem`` as a device array."""
+        return jnp.asarray(monte_carlo(problem, n=n, seed=seed))
+
+    def _ishigami(self):
+        """Inputs and scalar outputs for the Ishigami benchmark."""
+        X = self._sample(ishigami.PROBLEM, self.N, 11)
+        return ishigami.PROBLEM, X, ishigami.evaluate(X)
+
+    def test_matches_analyze(self):
+        """T4: all four arrays equal ``analyze``'s fields exactly."""
+        problem, X, Y = self._ishigami()
+        key = jax.random.key(3)
+
+        out = indices(problem, X, Y, n_perms=self.PERMS, key=key)
+        result = analyze(problem, X, Y, n_perms=self.PERMS, key=key)
+
+        assert len(out) == 4
+        fields = (result.R2_HSIC, result.T_HSIC, result.p_values, result.hsic_raw)
+        for produced, expected in zip(out, fields, strict=True):
+            np.testing.assert_array_equal(np.asarray(produced), np.asarray(expected))
+
+    def test_matches_analyze_multi_output(self):
+        """T4: an ``(N, T, K)`` output comes back at the caller's rank."""
+        problem, X, base = self._ishigami()
+        Y = jnp.stack(
+            [
+                jnp.stack([base, 2.0 * base + X[:, 0]], axis=-1),
+                jnp.stack([base**2, X[:, 1]], axis=-1),
+            ],
+            axis=1,
+        )
+        assert Y.shape == (self.N, 2, 2)
+        key = jax.random.key(5)
+
+        out = indices(problem, X, Y, n_perms=self.PERMS, key=key)
+        result = analyze(problem, X, Y, n_perms=self.PERMS, key=key)
+
+        assert out[0].shape == (2, 2, problem.num_vars)
+        fields = (result.R2_HSIC, result.T_HSIC, result.p_values, result.hsic_raw)
+        for produced, expected in zip(out, fields, strict=True):
+            np.testing.assert_array_equal(np.asarray(produced), np.asarray(expected))
+
+    def test_matches_analyze_with_a_fixed_bandwidth_and_batched_build(self):
+        """T4: the two static keywords change nothing about the split.
+
+        ``bandwidth`` and ``batch_size`` are Python scalars read while the
+        graph is traced, so they select a code path at compile time. The core
+        must still agree with ``analyze`` under either setting.
+        """
+        problem, X, Y = self._ishigami()
+        key = jax.random.key(7)
+
+        out = indices(problem, X, Y, n_perms=self.PERMS, key=key, bandwidth=0.3, batch_size=32)
+        result = analyze(problem, X, Y, n_perms=self.PERMS, key=key, bandwidth=0.3, batch_size=32)
+
+        fields = (result.R2_HSIC, result.T_HSIC, result.p_values, result.hsic_raw)
+        for produced, expected in zip(out, fields, strict=True):
+            np.testing.assert_array_equal(np.asarray(produced), np.asarray(expected))
+
+    def test_offers_no_bootstrap_and_says_why(self):
+        """T4: HSIC declares no bootstrap, and the reason is written down.
+
+        The permutation p-values are the uncertainty statement. A row
+        bootstrap of a V-statistic would repeat rows onto the kernel diagonal
+        and bias the resampled index upward, so the absence is a decision and
+        has to read as one.
+        """
+        from jaxgsa import hsic
+        from jaxgsa.hsic import _analyze as hsic_module
+
+        assert hsic.SPEC.bootstrap is None
+        assert "n_bootstrap" not in inspect.signature(analyze).parameters
+        assert "n_bootstrap" not in inspect.signature(indices).parameters
+        # ... but a key is still required, because the permutation test draws.
+        assert inspect.signature(analyze).parameters["key"] is not None
+
+        for text in (hsic_module.__doc__, analyze.__doc__):
+            assert text is not None
+            assert "bootstrap" in text
+            assert "V-statistic" in text
+
+    def test_is_jittable(self):
+        """T4: ``jit`` traces the core and returns the eager values.
+
+        The tolerance is loose on purpose. An outer ``jit`` lets XLA fuse
+        across the whole core instead of across each eagerly dispatched op,
+        which reassociates the three large sums of the V-statistic. In
+        float32 that cancellation is what the module docstring warns about,
+        and it moves the last few digits. The claim under test is that the
+        traced graph computes the same quantity, not that float32 addition is
+        associative.
+        """
+        problem, X, Y = self._ishigami()
+        key = jax.random.key(3)
+
+        jitted = jax.jit(
+            lambda inputs, outputs, k: indices(problem, inputs, outputs, n_perms=self.PERMS, key=k)
+        )
+        for traced, eager in zip(
+            jitted(X, Y, key),
+            indices(problem, X, Y, n_perms=self.PERMS, key=key),
+            strict=True,
+        ):
+            np.testing.assert_allclose(np.asarray(traced), np.asarray(eager), rtol=1e-4, atol=1e-6)
+
+    def test_is_vmappable(self):
+        """T4: ``vmap`` maps the core over a batch of output vectors."""
+        problem, X, base = self._ishigami()
+        batch = jnp.stack([base, X[:, 0], X[:, 1] ** 2])
+        key = jax.random.key(9)
+
+        stacked = jax.vmap(
+            lambda outputs: indices(problem, X, outputs, n_perms=self.PERMS, key=key)
+        )(batch)
+
+        assert stacked[0].shape == (3, problem.num_vars)
+        for row, outputs in enumerate(batch):
+            eager = indices(problem, X, outputs, n_perms=self.PERMS, key=key)
+            for produced, expected in zip(stacked, eager, strict=True):
+                np.testing.assert_allclose(
+                    np.asarray(produced[row]), np.asarray(expected), rtol=1e-4, atol=1e-6
+                )
+
+    def test_jit_of_jacrev_of_the_full_chain(self):
+        """T4: ``jit(jacrev(...))`` compiles a model-parameter-to-index chain.
+
+        The bandwidth is fixed rather than left to the median heuristic: the
+        heuristic selects an order statistic by bisecting bit patterns, which
+        has no derivative, so a gradient through it would silently be the
+        gradient of a piecewise-constant bandwidth. Finite differences are the
+        reference, so this runs in float64.
+        """
+        with jax.enable_x64():
+            X = self._sample(linear.PROBLEM, 64, 4).astype(jnp.float64)
+
+            def total_r2(a):
+                """Sum of R2-HSIC for the model ``y = a * x1 + x2``."""
+                Y = a * X[:, 0] + X[:, 1]
+                return indices(
+                    linear.PROBLEM,
+                    X,
+                    Y,
+                    n_perms=4,
+                    key=jax.random.key(0),
+                    bandwidth=0.4,
+                )[0].sum()
+
+            grad = jax.jit(jax.jacrev(total_r2))(2.0)
+            eager = jax.jacrev(total_r2)(2.0)
+
+            step = 1e-5
+            fd = (total_r2(2.0 + step) - total_r2(2.0 - step)) / (2 * step)
+
+        assert np.isfinite(float(grad))
+        np.testing.assert_allclose(float(grad), float(eager), rtol=1e-10)
+        np.testing.assert_allclose(float(grad), float(fd), rtol=1e-5)
+
+    def test_reads_no_array_value_on_the_host(self):
+        """T4: every array operation inside the core is traceable.
+
+        A host read of ``X`` or ``Y`` would raise a tracer conversion error
+        under an abstract trace, so tracing with ``eval_shape`` alone is the
+        check: nothing concrete is available to read.
+        """
+        problem, X, Y = self._ishigami()
+
+        shapes = jax.eval_shape(
+            lambda inputs, outputs: indices(
+                problem, inputs, outputs, n_perms=self.PERMS, key=jax.random.key(1)
+            ),
+            X,
+            Y,
+        )
+
+        assert [s.shape for s in shapes] == [(problem.num_vars,)] * 4
+
+    def test_emits_no_warning_where_analyze_does(self):
+        """T4: the core carries none of the preamble's diagnostics.
+
+        ``analyze`` warns about single precision on every float32 run. The
+        core says nothing: a warning is a policy decision, and it is the
+        preamble's to make.
+        """
+        problem, X, Y = self._ishigami()
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", JaxgsaWarning)
+            indices(problem, X, Y, n_perms=self.PERMS, key=jax.random.key(1))

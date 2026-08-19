@@ -14,7 +14,7 @@ import pytest
 from jaxgsa import JaxgsaWarning
 from jaxgsa._core.invalid import InvalidUnit
 from jaxgsa.benchmarks import ishigami, linear, sobol_g
-from jaxgsa.morris import analyze, sample
+from jaxgsa.morris import analyze, indices, sample
 from jaxgsa.problem import GaussianInputSpec, Problem
 
 UNIT_PROBLEM = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
@@ -802,3 +802,158 @@ def test_single_param():
     assert res.mu_star.shape == (1,)
     assert res.sigma.shape == (1,)
     assert res.mu_star[0] > 0
+
+
+# ---------------------------------------------------------------------------
+# indices(): the pure, transformable core
+# ---------------------------------------------------------------------------
+
+
+class TestIndicesCore:
+    """The traceable core against the policy-carrying ``analyze``.
+
+    Tier T4 throughout (behavioural contract). ``analyze`` is not an external
+    oracle for the elementary-effect arithmetic -- the accuracy of that is
+    checked against closed forms elsewhere in this file. What is checked here
+    is the split itself: the core must return exactly the numbers the full
+    entry point reports, and it must survive the three transformations
+    ``analyze`` cannot.
+    """
+
+    @staticmethod
+    def _design_and_Y(n_trajectories: int = 20, seed: int = 7):
+        """A trajectory design on the Ishigami problem, plus its outputs."""
+        sr = sample(ishigami.PROBLEM, n_trajectories=n_trajectories, seed=seed, verbose=False)
+        return sr, ishigami.evaluate(jnp.asarray(sr.samples))
+
+    def test_matches_analyze(self):
+        """T4: the three measures equal ``analyze``'s fields exactly."""
+        sr, Y = self._design_and_Y()
+        mu, mu_star, sigma = indices(sr, Y)
+        result = analyze(sr, Y)
+
+        np.testing.assert_array_equal(np.asarray(mu), np.asarray(result.mu))
+        np.testing.assert_array_equal(np.asarray(mu_star), np.asarray(result.mu_star))
+        np.testing.assert_array_equal(np.asarray(sigma), np.asarray(result.sigma))
+
+    def test_matches_analyze_with_standardized_outputs(self):
+        """T4: the reporting-units flag agrees with ``analyze`` as well.
+
+        The flag is kept on the core because it reduces over the *expanded*
+        sample axis, which the caller never holds, so there is no equivalent
+        pre-pass on the unique rows.
+        """
+        sr, Y = self._design_and_Y()
+        mu, mu_star, sigma = indices(sr, Y, standardize_outputs=True)
+        result = analyze(sr, Y, standardize_outputs=True)
+
+        np.testing.assert_array_equal(np.asarray(mu), np.asarray(result.mu))
+        np.testing.assert_array_equal(np.asarray(mu_star), np.asarray(result.mu_star))
+        np.testing.assert_array_equal(np.asarray(sigma), np.asarray(result.sigma))
+
+    def test_matches_analyze_multi_output(self):
+        """T4: an ``(n_runs, T, K)`` output comes back at the caller's rank."""
+        sr = sample(UNIT_PROBLEM, n_trajectories=15, seed=3, verbose=False)
+        X = jnp.asarray(sr.samples)
+        base = jnp.asarray(X @ COEFFS)
+        # Two time steps, two outputs, each a different function of X, so a
+        # transposed slice axis cannot pass.
+        Y = jnp.stack(
+            [
+                jnp.stack([base, 2.0 * base + X[:, 0]], axis=-1),
+                jnp.stack([base**2, X[:, 1]], axis=-1),
+            ],
+            axis=1,
+        )
+        assert Y.shape == (sr.n_runs, 2, 2)
+
+        mu, mu_star, sigma = indices(sr, Y)
+        result = analyze(sr, Y)
+
+        assert mu.shape == (2, 2, sr.n_params)
+        np.testing.assert_array_equal(np.asarray(mu), np.asarray(result.mu))
+        np.testing.assert_array_equal(np.asarray(mu_star), np.asarray(result.mu_star))
+        np.testing.assert_array_equal(np.asarray(sigma), np.asarray(result.sigma))
+
+    def test_returns_point_estimates_only(self):
+        """T4: no bootstrap on the core -- three arrays, and no interval slot.
+
+        The bootstrap is policy: which interval to report, at what level, by
+        which endpoint rule. It stays on ``analyze``, which keeps
+        ``n_bootstrap`` and reports intervals as before.
+        """
+        sr, Y = self._design_and_Y()
+        out = indices(sr, Y)
+
+        assert len(out) == 3
+        assert all(arr.shape == (sr.n_params,) for arr in out)
+        # analyze still offers the interval the core does not.
+        result = analyze(sr, Y, n_bootstrap=32, key=jax.random.key(0))
+        assert result.mu_conf is not None
+        assert result.mu_conf.shape == (2, sr.n_params)
+
+    def test_is_jittable(self):
+        """T4: ``jit`` traces the core and returns the eager values."""
+        sr, Y = self._design_and_Y()
+        # The design is a closure constant: it holds NumPy index maps, and
+        # ``indices`` never reads a value out of ``Y`` on the host.
+        jitted = jax.jit(lambda outputs: indices(sr, outputs))
+
+        for traced, eager in zip(jitted(Y), indices(sr, Y), strict=True):
+            np.testing.assert_allclose(np.asarray(traced), np.asarray(eager), rtol=1e-6)
+
+    def test_is_vmappable(self):
+        """T4: ``vmap`` maps the core over a batch of output vectors."""
+        sr, _ = self._design_and_Y()
+        X = jnp.asarray(sr.samples)
+        batch = jnp.stack([ishigami.evaluate(X), X[:, 0], X[:, 1] ** 2])
+
+        mu_batch, mu_star_batch, sigma_batch = jax.vmap(lambda out: indices(sr, out))(batch)
+
+        assert mu_batch.shape == (3, sr.n_params)
+        for row, outputs in enumerate(batch):
+            mu, mu_star, sigma = indices(sr, outputs)
+            np.testing.assert_allclose(np.asarray(mu_batch[row]), np.asarray(mu), rtol=1e-5)
+            np.testing.assert_allclose(
+                np.asarray(mu_star_batch[row]), np.asarray(mu_star), rtol=1e-5
+            )
+            np.testing.assert_allclose(np.asarray(sigma_batch[row]), np.asarray(sigma), rtol=1e-5)
+
+    def test_jit_of_jacrev_of_the_full_chain(self):
+        """T4: ``jit(jacrev(...))`` compiles a model-parameter-to-measure chain.
+
+        ``mu_star`` is differentiable in the model parameter even though it
+        holds an absolute value, because the effects are away from zero here.
+        Finite differences are the reference, so this runs in float64.
+        """
+        with jax.enable_x64():
+            sr = sample(UNIT_PROBLEM, n_trajectories=8, seed=2, verbose=False)
+            X = jnp.asarray(sr.samples, dtype=jnp.float64)
+
+            def total_mu_star(a):
+                """Sum of mu_star for the model ``y = a * x1 + x2^2 + x3``."""
+                Y = a * X[:, 0] + X[:, 1] ** 2 + X[:, 2]
+                return indices(sr, Y)[1].sum()
+
+            grad = jax.jit(jax.jacrev(total_mu_star))(1.5)
+            eager = jax.jacrev(total_mu_star)(1.5)
+
+            step = 1e-6
+            fd = (total_mu_star(1.5 + step) - total_mu_star(1.5 - step)) / (2 * step)
+
+        assert np.isfinite(float(grad))
+        np.testing.assert_allclose(float(grad), float(eager), rtol=1e-10)
+        np.testing.assert_allclose(float(grad), float(fd), rtol=1e-6)
+
+    def test_reads_no_array_value_on_the_host(self):
+        """T4: every array operation inside the core is traceable.
+
+        A host read of ``Y`` would raise ``TracerArrayConversionError`` or
+        ``TracerBoolConversionError`` under an abstract trace, so tracing with
+        ``eval_shape`` alone is the check: nothing concrete is available.
+        """
+        sr, Y = self._design_and_Y()
+
+        shapes = jax.eval_shape(lambda outputs: indices(sr, outputs), Y)
+
+        assert [s.shape for s in shapes] == [(sr.n_params,)] * 3
