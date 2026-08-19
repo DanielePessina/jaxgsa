@@ -282,7 +282,7 @@ def analyze(
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
     key: Array | None = None,
-    resample_chunk_size: int | None = 2048,
+    resample_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
     keep_replicates: bool = False,
 ) -> MorrisResult:
@@ -340,10 +340,10 @@ def analyze(
             ``n_bootstrap > 0``.
         resample_chunk_size: Upper bound on the bootstrap replicates processed
             per vmap batch. The unit is bootstrap replicates, not output
-            slices. The active memory budget
-            (:func:`jaxgsa.config.get_memory_budget`) lowers it further when
-            the outputs are large, which keeps peak memory bounded. Pass
-            ``None`` to take the budget-derived width alone. Defaults to 2048.
+            slices. Defaults to ``None``, which takes the width the active
+            memory budget (:func:`jaxgsa.config.get_memory_budget`) allows.
+            An explicit value is an upper bound only: the budget can lower
+            it further when the outputs are large, never raise it.
         on_invalid: What to do about non-finite model outputs. The unit here
             is one trajectory, so a single bad value removes the whole block
             of ``D + 1`` rows: the elementary effects are differences between

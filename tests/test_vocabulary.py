@@ -72,11 +72,6 @@ BUDGET_GAPS: dict[str, str] = {
         "model for the point kernels, which is a behavioural change, not a "
         "rename. Tracked as the 'honour the memory budget everywhere' item."
     ),
-    "morris": (
-        "morris.resample_chunk_size defaults to 2048 to match sobol's width. "
-        "It does honour the budget as an upper bound; only the default "
-        "differs. Flip it with sobol's, not before."
-    ),
 }
 
 

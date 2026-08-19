@@ -88,6 +88,26 @@ class TestOTBasic:
         r_chunked = analyze(ishigami.PROBLEM, X, Y3, slice_chunk_size=1)
         np.testing.assert_allclose(np.asarray(r_default.ot), np.asarray(r_chunked.ot), atol=1e-7)
 
+    def test_memory_budget_narrows_the_working_set(self, multi_output_data):
+        """A small budget still returns the same answer.
+
+        The default chunk width comes from the active memory budget and the
+        working set in bytes, so a budget of 1 MiB has to cut the output
+        into narrower chunks than the default 512 MiB does. The budget
+        changes how the work is cut up, never what it computes. The
+        tolerance is there because a narrower vmap lets XLA reassociate the
+        float32 reductions, the same reason the chunk-size test beside this
+        one carries one.
+        """
+        X, _, Y3 = multi_output_data
+        r_default = analyze(ishigami.PROBLEM, X, Y3)
+        jaxgsa.config.set_memory_budget(1, unit="mib")
+        try:
+            r_small = analyze(ishigami.PROBLEM, X, Y3)
+        finally:
+            jaxgsa.config.set_memory_budget(512, unit="mib")
+        np.testing.assert_allclose(np.asarray(r_default.ot), np.asarray(r_small.ot), atol=1e-7)
+
     def test_unstable_class_sort_matches_a_stable_one(self, ishigami_data):
         """The kernel's unstable sort must return the stable sort's array.
 

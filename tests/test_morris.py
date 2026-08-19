@@ -597,7 +597,12 @@ class TestThinningWarning:
         """
         sr = sample(ishigami.PROBLEM, n_trajectories=12, method="radial", seed=8, verbose=False)
         sr = replace(sr, n_blocks_dropped=2)
-        Y = np.asarray(ishigami.evaluate(jnp.asarray(sr.samples)), dtype=np.float64)
+        # ``np.array`` rather than ``np.asarray``: a JAX array converts to a
+        # read-only NumPy view, and only a dtype change forces the copy that
+        # makes it writable. Asking for float64 was that copy under the
+        # float32 default and a no-op under x64, so the write failed there.
+        # Keep the model's own dtype and copy on purpose instead.
+        Y = np.array(ishigami.evaluate(jnp.asarray(sr.samples)))
         Y[int(sr.expanded_to_unique[3 * (sr.n_params + 1)])] = np.nan
         with pytest.warns(UserWarning) as record:
             analyze(sr, jnp.asarray(Y), on_invalid="drop")
