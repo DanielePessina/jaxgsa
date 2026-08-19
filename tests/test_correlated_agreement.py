@@ -54,7 +54,7 @@ def three_routes():
             n_outer=256,
             n_inner=64,
             n_variance=4096,
-            seed=0,
+            key=jax.random.key(0),
         )
 
     # Design route: the actual model evaluated on the conditional design.

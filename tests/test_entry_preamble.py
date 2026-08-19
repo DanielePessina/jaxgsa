@@ -192,8 +192,18 @@ def _constant_output_call(name):
         return lambda: jaxgsa.dgsm.analyze(PROBLEM, lambda x: jnp.asarray(3.0), X)
     if name == "vkoga":
         return lambda: jaxgsa.vkoga.analyze(
-            PROBLEM, X, Y, max_centers=8, n_outer=4, n_inner=4, n_variance=4, n_folds=2
+            PROBLEM,
+            X,
+            Y,
+            max_centers=8,
+            n_outer=4,
+            n_inner=4,
+            n_variance=4,
+            n_folds=2,
+            key=jax.random.key(0),
         )
+    if name == "hsic":
+        return lambda: jaxgsa.hsic.analyze(PROBLEM, X, Y, key=jax.random.key(0))
     if name == "shapley":
         return lambda: jaxgsa.shapley.analyze(PROBLEM, X, Y, order=2)
     return lambda: getattr(jaxgsa, name).analyze(PROBLEM, X, Y)
@@ -300,9 +310,18 @@ class TestACleanSampleStaysSilent:
             warnings.simplefilter("always")
             if name == "dgsm":
                 jaxgsa.dgsm.analyze(PROBLEM, lambda x: jnp.sum(x**2), X)
+            elif name == "hsic":
+                jaxgsa.hsic.analyze(PROBLEM, X, Y, key=jax.random.key(0))
             else:
                 getattr(jaxgsa, name).analyze(PROBLEM, X, Y)
-        assert [w for w in caught if issubclass(w.category, JaxgsaWarning)] == []
+        # The single-precision warning is about the arithmetic, not the data:
+        # it fires on a clean sample too, and hsic and vkoga both raise it.
+        left = [
+            w
+            for w in caught
+            if issubclass(w.category, JaxgsaWarning) and "single precision" not in str(w.message)
+        ]
+        assert left == []
 
 
 class TestTheTwoHalvesAreTheOnePreamble:

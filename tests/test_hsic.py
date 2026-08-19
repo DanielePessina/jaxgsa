@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import warnings
+
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -23,7 +26,7 @@ def linear_hsic_result():
     """HSIC result for linear benchmark."""
     X = monte_carlo(linear.PROBLEM, n=1024, seed=42)
     Y = linear.evaluate(jnp.asarray(X))
-    return analyze(linear.PROBLEM, jnp.asarray(X), Y, seed=42, n_perms=100)
+    return analyze(linear.PROBLEM, jnp.asarray(X), Y, key=jax.random.key(42), n_perms=100)
 
 
 @pytest.fixture(scope="module")
@@ -31,7 +34,7 @@ def ishigami_hsic_result():
     """HSIC result for Ishigami benchmark."""
     X = monte_carlo(ishigami.PROBLEM, n=1024, seed=42)
     Y = ishigami.evaluate(jnp.asarray(X))
-    return analyze(ishigami.PROBLEM, jnp.asarray(X), Y, seed=42, n_perms=100)
+    return analyze(ishigami.PROBLEM, jnp.asarray(X), Y, key=jax.random.key(42), n_perms=100)
 
 
 @pytest.fixture(scope="module")
@@ -39,7 +42,7 @@ def sobol_g_hsic_result():
     """HSIC result for Sobol G-function benchmark."""
     X = monte_carlo(sobol_g.PROBLEM, n=1024, seed=42)
     Y = sobol_g.evaluate(jnp.asarray(X))
-    return analyze(sobol_g.PROBLEM, jnp.asarray(X), Y, seed=42, n_perms=100)
+    return analyze(sobol_g.PROBLEM, jnp.asarray(X), Y, key=jax.random.key(42), n_perms=100)
 
 
 class TestLinearHSIC:
@@ -107,8 +110,8 @@ class TestMultiOutput:
         Xj = jnp.asarray(X)
         Y_scalar = Xj @ jnp.array([1.0, 2.0, 3.0])
         Y_multi = jnp.column_stack([Y_scalar, jnp.sum(Xj**2, axis=1)])
-        r_scalar = analyze(problem, Xj, Y_scalar, n_perms=50, seed=8)
-        r_multi = analyze(problem, Xj, Y_multi, n_perms=50, seed=8)
+        r_scalar = analyze(problem, Xj, Y_scalar, n_perms=50, key=jax.random.key(8))
+        r_multi = analyze(problem, Xj, Y_multi, n_perms=50, key=jax.random.key(8))
         np.testing.assert_allclose(
             np.asarray(r_scalar.R2_HSIC),
             np.asarray(r_multi.R2_HSIC[0]),
@@ -122,8 +125,8 @@ class TestBandwidthOverride:
         X = monte_carlo(problem, n=256, seed=11)
         Xj = jnp.asarray(X)
         Y = Xj[:, 0] * 2.0 + Xj[:, 1]
-        r1 = analyze(problem, Xj, Y, bandwidth=0.1, n_perms=20, seed=11)
-        r2 = analyze(problem, Xj, Y, bandwidth=1.0, n_perms=20, seed=11)
+        r1 = analyze(problem, Xj, Y, bandwidth=0.1, n_perms=20, key=jax.random.key(11))
+        r2 = analyze(problem, Xj, Y, bandwidth=1.0, n_perms=20, key=jax.random.key(11))
         assert not np.allclose(np.asarray(r1.R2_HSIC), np.asarray(r2.R2_HSIC))
 
 
@@ -251,8 +254,8 @@ class TestSliceIndependence:
         between slices.
         """
         problem, Xj, Y = self._four_slice_case()
-        together = analyze(problem, Xj, Y, n_perms=20, seed=5)
-        alone = analyze(problem, Xj, Y[:, column], n_perms=20, seed=5)
+        together = analyze(problem, Xj, Y, n_perms=20, key=jax.random.key(5))
+        alone = analyze(problem, Xj, Y[:, column], n_perms=20, key=jax.random.key(5))
         for field in ("R2_HSIC", "T_HSIC", "p_values", "hsic_raw"):
             np.testing.assert_array_equal(
                 np.asarray(getattr(together, field))[column],
@@ -268,8 +271,8 @@ class TestSliceIndependence:
         up here as soon as the two runs fell into different chunks.
         """
         problem, Xj, Y = self._four_slice_case()
-        two = analyze(problem, Xj, Y[:, :2], n_perms=20, seed=5)
-        four = analyze(problem, Xj, Y, n_perms=20, seed=5)
+        two = analyze(problem, Xj, Y[:, :2], n_perms=20, key=jax.random.key(5))
+        four = analyze(problem, Xj, Y, n_perms=20, key=jax.random.key(5))
         np.testing.assert_array_equal(np.asarray(two.R2_HSIC)[0], np.asarray(four.R2_HSIC)[0])
         np.testing.assert_array_equal(np.asarray(two.T_HSIC)[0], np.asarray(four.T_HSIC)[0])
 
@@ -286,8 +289,8 @@ class TestChunked:
         X = monte_carlo(problem, n=512, seed=13)
         Xj = jnp.asarray(X)
         Y = linear.evaluate(Xj)
-        r_full = analyze(problem, Xj, Y, n_perms=50, seed=13)
-        r_chunked = analyze(problem, Xj, Y, n_perms=50, seed=13, batch_size=128)
+        r_full = analyze(problem, Xj, Y, n_perms=50, key=jax.random.key(13))
+        r_chunked = analyze(problem, Xj, Y, n_perms=50, key=jax.random.key(13), batch_size=128)
         np.testing.assert_allclose(
             np.asarray(r_full.R2_HSIC),
             np.asarray(r_chunked.R2_HSIC),
@@ -314,8 +317,10 @@ class TestChunked:
         X = monte_carlo(problem, n=512, seed=13)
         Xj = jnp.asarray(X)
         Y = linear.evaluate(Xj)
-        r_full = analyze(problem, Xj, Y, n_perms=50, seed=13, bandwidth=0.3)
-        r_chunked = analyze(problem, Xj, Y, n_perms=50, seed=13, bandwidth=0.3, batch_size=128)
+        r_full = analyze(problem, Xj, Y, n_perms=50, key=jax.random.key(13), bandwidth=0.3)
+        r_chunked = analyze(
+            problem, Xj, Y, n_perms=50, key=jax.random.key(13), bandwidth=0.3, batch_size=128
+        )
         np.testing.assert_allclose(
             np.asarray(r_full.R2_HSIC),
             np.asarray(r_chunked.R2_HSIC),
@@ -329,30 +334,30 @@ class TestChunked:
         # The explicit bandwidth must actually be in force: the median
         # heuristic on this data gives different indices, so a chunked path
         # that ignored `bandwidth` would still pass the equality above.
-        r_median = analyze(problem, Xj, Y, n_perms=50, seed=13, batch_size=128)
+        r_median = analyze(problem, Xj, Y, n_perms=50, key=jax.random.key(13), batch_size=128)
         assert not np.allclose(np.asarray(r_chunked.R2_HSIC), np.asarray(r_median.R2_HSIC))
 
 
 class TestReproducibility:
-    def test_same_seed_same_result(self):
+    def test_same_key_same_result(self):
         problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
         X = monte_carlo(problem, n=256, seed=14)
         Xj = jnp.asarray(X)
         Y = Xj[:, 0] + Xj[:, 1] ** 2
-        r1 = analyze(problem, Xj, Y, seed=42, n_perms=50)
-        r2 = analyze(problem, Xj, Y, seed=42, n_perms=50)
+        r1 = analyze(problem, Xj, Y, key=jax.random.key(42), n_perms=50)
+        r2 = analyze(problem, Xj, Y, key=jax.random.key(42), n_perms=50)
         np.testing.assert_array_equal(np.asarray(r1.p_values), np.asarray(r2.p_values))
 
-    def test_different_seed_may_differ(self):
-        """Different seeds should produce different permutation sequences."""
+    def test_different_key_may_differ(self):
+        """Different keys should produce different permutation sequences."""
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
         X = monte_carlo(problem, n=256, seed=15)
         Xj = jnp.asarray(X)
         # x3 is independent of Y, so its p-value is not pinned at 0
         Y = Xj[:, 0] * 0.5
-        r1 = analyze(problem, Xj, Y, seed=1, n_perms=50)
-        r2 = analyze(problem, Xj, Y, seed=2, n_perms=50)
-        # At least one p-value should differ between seeds
+        r1 = analyze(problem, Xj, Y, key=jax.random.key(1), n_perms=50)
+        r2 = analyze(problem, Xj, Y, key=jax.random.key(2), n_perms=50)
+        # At least one p-value should differ between keys
         assert not np.array_equal(np.asarray(r1.p_values), np.asarray(r2.p_values))
 
 
@@ -368,10 +373,84 @@ class TestValidation:
         with pytest.raises(ValueError, match="bandwidth"):
             analyze(problem, jnp.ones((10, 1)), jnp.ones(10), bandwidth=bad)
 
+    def test_key_is_required(self):
+        """The permutation p-values are random, so there is no default key."""
+        problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
+        Xj = jnp.asarray(monte_carlo(problem, n=64, seed=1))
+        with pytest.raises(ValueError, match="key is required"):
+            analyze(problem, Xj, Xj[:, 0] * 2.0, n_perms=5)
+
     def test_too_few_samples_raises(self):
         problem = Problem(names=("x",), bounds=((0, 1),))
         with pytest.raises(ValueError, match="N must be"):
             analyze(problem, jnp.ones((2, 1)), jnp.ones(2))
+
+
+class TestSinglePrecisionWarning:
+    """T4: float32 is called out, because the V-statistic cannot carry it.
+
+    HSIC subtracts three sums of the same magnitude over the whole (N, N)
+    kernel matrix. What is left is small, so cancellation decides most of the
+    digits and the summation order decides the rest: reordering the sample
+    rows moves an index by about 2e-4 relative at N = 2048 in float32, and by
+    about 2e-13 in float64.
+    """
+
+    def _sample(self, n: int = 256):
+        problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
+        Xj = jnp.asarray(monte_carlo(problem, n=n, seed=31))
+        return problem, Xj, jnp.sin(3.0 * Xj[:, 0]) + Xj[:, 1]
+
+    def test_float32_warns(self):
+        problem, Xj, Y = self._sample()
+        with pytest.warns(JaxgsaWarning, match="single precision"):
+            analyze(problem, Xj, Y, n_perms=5, key=jax.random.key(0))
+
+    def test_x64_is_silent(self):
+        with jax.enable_x64():
+            problem, Xj, Y = self._sample()
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                analyze(problem, Xj, Y, n_perms=5, key=jax.random.key(0))
+        assert [w for w in caught if "single precision" in str(w.message)] == []
+
+    def test_reordering_the_rows_is_the_thing_it_warns_about(self):
+        """The claim in the warning, measured: float32 is order-dependent.
+
+        A permutation of the sample cannot change HSIC, so any difference is
+        the arithmetic alone. float64 keeps it at the noise floor; float32
+        does not.
+        """
+        problem, Xj, Y = self._sample(n=512)
+        perm = np.random.default_rng(0).permutation(512)
+
+        def shift() -> float:
+            X_np, Y_np = np.asarray(Xj, np.float64), np.asarray(Y, np.float64)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", JaxgsaWarning)
+                straight = analyze(
+                    problem,
+                    jnp.asarray(X_np),
+                    jnp.asarray(Y_np),
+                    n_perms=5,
+                    key=jax.random.key(0),
+                )
+                shuffled = analyze(
+                    problem,
+                    jnp.asarray(X_np[perm]),
+                    jnp.asarray(Y_np[perm]),
+                    n_perms=5,
+                    key=jax.random.key(0),
+                )
+            a = np.asarray(straight.R2_HSIC, np.float64)
+            b = np.asarray(shuffled.R2_HSIC, np.float64)
+            return float(np.max(np.abs(a - b) / np.abs(a)))
+
+        shift_32 = shift()
+        with jax.enable_x64():
+            shift_64 = shift()
+        assert shift_64 < 1e-10
+        assert shift_32 > 100.0 * shift_64
 
 
 class TestToDataset:
@@ -380,7 +459,7 @@ class TestToDataset:
         X = monte_carlo(problem, n=128, seed=17)
         Xj = jnp.asarray(X)
         Y = jnp.ones((128, 2, 1)) * Xj[:, 0:1, None]
-        result = analyze(problem, Xj, Y, n_perms=10, seed=17)
+        result = analyze(problem, Xj, Y, n_perms=10, key=jax.random.key(17))
         ds = result.to_dataset(time_coords=[0.0, 0.5])
         assert "time" in ds.dims
         assert list(ds.coords["time"].values) == [0.0, 0.5]
@@ -393,7 +472,7 @@ class TestIndependentInput:
         X = monte_carlo(problem, n=1024, seed=20)
         Xj = jnp.asarray(X)
         Y = jnp.sin(Xj[:, 0] * 6.0)
-        result = analyze(problem, Xj, Y, n_perms=100, seed=20)
+        result = analyze(problem, Xj, Y, n_perms=100, key=jax.random.key(20))
         r2 = np.asarray(result.R2_HSIC)
         assert r2[0] > r2[1] * 3.0
         p = np.asarray(result.p_values)
@@ -406,7 +485,7 @@ class TestIndependentInput:
         X = monte_carlo(problem, n=1024, seed=21)
         Xj = jnp.asarray(X)
         Y = Xj[:, 0]
-        result = analyze(problem, Xj, Y, n_perms=20, seed=21)
+        result = analyze(problem, Xj, Y, n_perms=20, key=jax.random.key(21))
         t = np.asarray(result.T_HSIC)
         assert t[0] > 0.5
         assert abs(t[1]) < 0.3
@@ -419,7 +498,7 @@ class TestSingleParamTotal:
         X = monte_carlo(problem, n=512, seed=22)
         Xj = jnp.asarray(X)
         Y = jnp.sin(Xj[:, 0])
-        result = analyze(problem, Xj, Y, n_perms=20, seed=22)
+        result = analyze(problem, Xj, Y, n_perms=20, key=jax.random.key(22))
         t = np.asarray(result.T_HSIC)
         assert t[0] > 0.8
 
@@ -431,7 +510,7 @@ class TestZeroVarianceOutput:
         X = monte_carlo(problem, n=64, seed=23)
         Xj = jnp.asarray(X)
         Y = jnp.ones(64)
-        result = analyze(problem, Xj, Y, n_perms=5, seed=23)
+        result = analyze(problem, Xj, Y, n_perms=5, key=jax.random.key(23))
         r2 = np.asarray(result.R2_HSIC)
         t = np.asarray(result.T_HSIC)
         assert np.all(np.isnan(r2))
@@ -476,7 +555,9 @@ class TestHSICInvalidPolicy:
         problem, X, Y = _invalid_sample()
         Y = Y.at[11].set(jnp.nan)
         with pytest.warns(JaxgsaWarning, match="reaches the indices"):
-            result = analyze(problem, X, Y, n_perms=5, on_invalid="propagate")
+            result = analyze(
+                problem, X, Y, n_perms=5, key=jax.random.key(0), on_invalid="propagate"
+            )
         assert result.invalid.policy == "propagate"
         assert result.invalid.unit_indices == (11,)
         assert not np.all(np.isfinite(np.asarray(result.R2_HSIC)))
@@ -486,7 +567,7 @@ class TestHSICInvalidPolicy:
         problem, X, Y = _invalid_sample()
         Y = Y.at[11].set(jnp.nan)
         with pytest.warns(JaxgsaWarning, match="dropped 1 of 64 rows"):
-            result = analyze(problem, X, Y, n_perms=5, on_invalid="drop")
+            result = analyze(problem, X, Y, n_perms=5, key=jax.random.key(0), on_invalid="drop")
         assert result.invalid.n_kept == 63
         assert np.all(np.isfinite(np.asarray(result.R2_HSIC)))
 
@@ -498,5 +579,5 @@ class TestHSICInvalidPolicy:
             analyze(problem, X, Y, n_perms=5)
         assert "[4]" in str(exc.value)
         with pytest.warns(JaxgsaWarning):
-            result = analyze(problem, X, Y, n_perms=5, on_invalid="drop")
+            result = analyze(problem, X, Y, n_perms=5, key=jax.random.key(0), on_invalid="drop")
         assert result.invalid.sources == ("X",)

@@ -115,6 +115,7 @@ def estimate_correlated_indices(
     n_inner: int,
     n_variance: int,
     seed: int,
+    batch_size: int | None,
 ) -> CorrelatedIndices:
     """Estimate the five correlated variance-based indices by quasi-Monte-Carlo.
 
@@ -136,6 +137,12 @@ def estimate_correlated_indices(
         n_variance: Sample size for the unconditional output variance and for
             the component-function fit.
         seed: Base seed. Each parameter and stage derives a distinct stream.
+        batch_size: Sample rows per device call, or ``None`` to derive one
+            from the memory budget. Required, with no default, because the
+            value used to be droppable: it bounds the nested conditional draws as
+            well as the surrogate evaluation: a chunk of outer points expands
+            to ``chunk * n_inner`` rows, and that expansion is what the
+            caller's value has to hold down.
 
     Returns:
         A :class:`CorrelatedIndices` whose index arrays have shape ``(S, D)``.
@@ -167,6 +174,7 @@ def estimate_correlated_indices(
             n_inner=n_inner,
             n_slices=n_slices,
             seed=seed + 1 + i,
+            batch_size=batch_size,
         )
         total_uncorrelated, conditional_component_var = _total_uncorrelated_and_conditional(
             plan=plan,
@@ -177,6 +185,7 @@ def estimate_correlated_indices(
             n_inner=n_inner,
             n_slices=n_slices,
             seed=seed + 1 + D + i,
+            batch_size=batch_size,
         )
         S_TU[:, i] = total_uncorrelated
         # The independent contribution is what f_i explains beyond the part of
@@ -244,7 +253,7 @@ def _clip_independent_part(S_U: np.ndarray, S_TU: np.ndarray) -> np.ndarray:
             "that S_IU stays non-negative. The additive component functions cannot represent "
             "this model's interactions under the correlated measure, so read S_U, S_C and "
             "S_IU for those parameters as indicative only. S_TC and S_TU are unaffected.",
-            # 1 here, 2 estimate_correlated_indices, 3 analyze_vkoga, 4 the caller.
+            # 1 here, 2 estimate_correlated_indices, 3 vkoga.analyze, 4 the caller.
             stacklevel=4,
             category=JaxgsaWarning,
         )
@@ -311,7 +320,7 @@ def _evaluate_component(u: np.ndarray, coefficients: np.ndarray) -> np.ndarray:
     return _legendre_basis(u, _COMPONENT_DEGREE) @ coefficients
 
 
-def _outer_chunk(n_outer: int, n_inner: int, n_columns: int) -> int:
+def _outer_chunk(n_outer: int, n_inner: int, n_columns: int, batch_size: int | None) -> int:
     """Return how many outer points fit in the transient-memory budget.
 
     Each outer point expands into ``n_inner`` rows. Each row holds the
@@ -319,15 +328,25 @@ def _outer_chunk(n_outer: int, n_inner: int, n_columns: int) -> int:
     Thin wrapper over the shared :func:`resolve_batch_size` with one outer
     point as the "row".
 
+    ``batch_size`` counts sample rows, not outer points, so a caller's value
+    is divided by the expansion factor before it is applied here. Passing it
+    through unchanged would let the loop hold ``n_inner`` times the rows the
+    caller asked for.
+
     Args:
         n_outer: Total outer points.
         n_inner: Inner draws per outer point.
         n_columns: Columns held per expanded row (``D + S``).
+        batch_size: Caller's row budget, or ``None`` to derive one from the
+            memory budget. A budget smaller than one outer point's expansion
+            still processes one outer point: the inner block is the smallest
+            unit the estimator can average over.
 
     Returns:
         Chunk size in ``[1, n_outer]``.
     """
-    return resolve_batch_size(8 * n_inner * n_columns, n_outer, None)
+    requested = None if batch_size is None else max(1, batch_size // n_inner)
+    return resolve_batch_size(8 * n_inner * n_columns, n_outer, requested)
 
 
 def _total_correlated(
@@ -339,6 +358,7 @@ def _total_correlated(
     n_inner: int,
     n_slices: int,
     seed: int,
+    batch_size: int | None,
 ) -> np.ndarray:
     """Estimate ``V(E(Y|X_i))`` for one parameter.
 
@@ -366,6 +386,8 @@ def _total_correlated(
         n_inner: Inner (conditional) sample size per outer point.
         n_slices: Number of output slices ``S``.
         seed: Seed for this parameter's latent draws.
+        batch_size: Sample rows per device call, or ``None`` to derive one
+            from the memory budget.
 
     Returns:
         Conditional-expectation variance, shape ``(S,)``. Not yet normalised.
@@ -379,7 +401,7 @@ def _total_correlated(
     inner = latent_normal_sample(n_inner, D_rest, seed=seed + 7919)
 
     inner_mean = np.empty((n_outer, n_slices), dtype=np.float64)
-    chunk = _outer_chunk(n_outer, n_inner, D_rest + 1 + n_slices)
+    chunk = _outer_chunk(n_outer, n_inner, D_rest + 1 + n_slices, batch_size)
     for start in range(0, n_outer, chunk):
         z_chunk = z_self[start : start + chunk]
         # Z_-i | Z_i, broadcast to (chunk, n_inner, D_rest).
@@ -408,6 +430,7 @@ def _total_uncorrelated_and_conditional(
     n_inner: int,
     n_slices: int,
     seed: int,
+    batch_size: int | None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Estimate ``E(V(Y|X_-i))`` and ``V(E(f_i|X_-i))`` for one parameter.
 
@@ -430,6 +453,8 @@ def _total_uncorrelated_and_conditional(
         n_inner: Inner (conditional) sample size per outer point.
         n_slices: Number of output slices ``S``.
         seed: Seed for this parameter's latent draws.
+        batch_size: Sample rows per device call, or ``None`` to derive one
+            from the memory budget.
 
     Returns:
         ``(conditional_variance_mean, component_conditional_variance)``, each
@@ -442,7 +467,7 @@ def _total_uncorrelated_and_conditional(
 
     inner_var = np.empty((n_outer, n_slices), dtype=np.float64)
     f_hat = np.empty((n_outer, n_slices), dtype=np.float64)
-    chunk = _outer_chunk(n_outer, n_inner, D_rest + 1 + n_slices)
+    chunk = _outer_chunk(n_outer, n_inner, D_rest + 1 + n_slices, batch_size)
     for start in range(0, n_outer, chunk):
         stop = start + chunk
         # Z_i | Z_-i, broadcast to (chunk, n_inner) via the batched mean.

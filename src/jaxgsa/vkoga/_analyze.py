@@ -57,7 +57,7 @@ _DEFAULT_MAX_CENTERS = 300
 _CV_RMSE_WARN_FRACTION = 0.5
 
 
-def analyze_vkoga(
+def analyze(
     problem: Problem,
     X: Array,
     Y: Array,
@@ -70,7 +70,7 @@ def analyze_vkoga(
     n_outer: int = 512,
     n_inner: int = 128,
     n_variance: int = 8192,
-    seed: int = 0,
+    key: Array | None = None,
     batch_size: int | None = None,
     on_invalid: OnInvalid = "raise",
 ) -> VKOGAResult:
@@ -112,9 +112,17 @@ def analyze_vkoga(
             ``n_inner`` inflates a small ``S_TC``. Raise ``n_outer`` instead.
         n_variance: Sample size for the output variance and the component-
             function fit, at least 2. Rounded up to the next power of two.
-        seed: Base seed for the quasi-random draws.
-        batch_size: Rows per batch when evaluating the surrogate, at least 1.
-            ``None`` derives one from the memory budget.
+        key: JAX PRNG key that drives the quasi-random index integration.
+            Required: the indices are a Monte-Carlo estimate, so there is no
+            sensible default. Write ``jax.random.key(0)`` if you only want
+            reproducibility. A key rather than an integer seed because a key
+            can be split, so repeated or nested analyses draw independent
+            streams instead of silently correlated ones.
+        batch_size: Sample rows per device call, at least 1. It bounds every
+            row-wise step of the method: the surrogate evaluations behind
+            :meth:`VKOGAResult.predict` and the nested conditional draws the
+            index estimators make. ``None`` derives one from the memory
+            budget.
         on_invalid: What to do about non-finite values in ``X`` or ``Y``. One
             training row is one unit here, so ``"drop"`` removes the affected
             ``(X, Y)`` pairs and fits the surrogate on the rest. See
@@ -134,7 +142,8 @@ def analyze_vkoga(
             has fewer than two parameters or any categorical parameter, if
             ``correlation`` is not ``None`` or a valid matrix, if ``gamma`` or
             ``ridge`` is not finite and positive, or if a size argument is out
-            of range, if ``on_invalid`` is not one of the three policies, or
+            of range, if ``key`` is ``None``, if ``on_invalid`` is not one of
+            the three policies, or
             if ``on_invalid="raise"`` (the default) and ``X`` or ``Y`` holds a
             non-finite value.
         RuntimeError: If every cross-validation score is non-finite. Non-finite
@@ -191,6 +200,11 @@ def analyze_vkoga(
         ),
         min_kept=n_folds,
     )
+    # Checked after the preamble so a problem this method refuses outright
+    # (categorical parameters) still reports that, and not a missing key.
+    if key is None:
+        raise ValueError("key is required for the Monte-Carlo index estimate")
+    seed = _seed_from_key(key)
     X, Y, invalid = ctx.inputs, ctx.Y, ctx.invalid
 
     if max_centers is None:
@@ -253,6 +267,7 @@ def analyze_vkoga(
         n_inner=n_inner,
         n_variance=n_variance,
         seed=seed,
+        batch_size=batch_size,
     )
 
     def _shape_index(flat: np.ndarray) -> Array:
@@ -285,6 +300,33 @@ def analyze_vkoga(
         _y_mean=y_mean,
         _output_shape=output_shape,
     )
+
+
+def _seed_from_key(key: Array) -> int:
+    """Fold a PRNG key down to the integer seed the QMC engines take.
+
+    The index estimators are host-side scipy loops: ``qmc.Sobol`` scrambling
+    and the cross-validation fold permutation both want a plain integer, and
+    neither has a JAX PRNG interface. The public contract is still a key,
+    because that is what the caller can split; this is the one place where the
+    key is turned into what the host-side engines accept.
+
+    The fold is an exclusive-or over the key's words. It is stable across the
+    key implementations JAX ships, and for ``jax.random.key(s)`` with a seed
+    below ``2**32`` it returns ``s`` itself, so an integer the caller wrapped
+    reaches scipy unchanged.
+
+    Args:
+        key: A JAX PRNG key, typed or in the legacy ``uint32`` form.
+
+    Returns:
+        A non-negative integer seed below ``2**32``.
+
+    Raises:
+        TypeError: If ``key`` is not PRNG key data — an integer, for example.
+    """
+    words = np.asarray(jax.random.key_data(key), dtype=np.uint32).ravel()
+    return int(np.bitwise_xor.reduce(words))
 
 
 def _warn_single_precision() -> None:

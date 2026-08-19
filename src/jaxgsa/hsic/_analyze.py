@@ -24,6 +24,7 @@ References:
 from __future__ import annotations
 
 import math
+import warnings
 from functools import lru_cache
 
 import jax
@@ -38,6 +39,7 @@ from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa._core.validation import (
     _prenormalize_outputs,
 )
+from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.hsic._result import HSICResult
 from jaxgsa.problem import Problem
 
@@ -528,13 +530,40 @@ def _get_hsic_kernel(n_perms: int, bandwidth: float | None, batch_size: int | No
     return jax.jit(_impl)
 
 
+def _warn_single_precision() -> None:
+    """Warn that float32 costs the HSIC V-statistic most of its digits.
+
+    The V-statistic is a difference of three sums over the whole ``(N, N)``
+    kernel matrix, and the three are of the same magnitude while the answer is
+    small. Cancellation therefore eats the leading digits, and what survives
+    is set by the summation order. Reordering the sample rows -- a change that
+    cannot alter the true value -- moves a measured index. On Ishigami with
+    ``N = 2048`` the shift is ``2e-4`` relative in float32 against ``2e-13``
+    in float64, and it grows with ``N`` because the sums do. That is the same
+    size as the gap HSIC is often asked to resolve between two weak
+    parameters.
+    """
+    # Read the flag off the config object directly; config.read() raises for
+    # flags that were never explicitly set.
+    if not getattr(jax.config, "jax_enable_x64", False):
+        warnings.warn(
+            "jaxgsa.hsic: JAX is in single precision; the HSIC V-statistic cancels three "
+            "large sums against each other, so float32 leaves only about three or four "
+            "correct digits and the index changes with the order of the sample rows. Small "
+            "indices and close rankings are not reliable. Enable float64 with "
+            'jax.config.update("jax_enable_x64", True) before the analysis.',
+            stacklevel=3,
+            category=JaxgsaWarning,
+        )
+
+
 def analyze(
     problem: Problem,
     X: Array,
     Y: Array,
     *,
     n_perms: int = 200,
-    seed: int = 0,
+    key: Array | None = None,
     bandwidth: float | None = None,
     batch_size: int | None = None,
     prenormalize: bool = False,
@@ -578,7 +607,12 @@ def analyze(
             permutations give finer p-value resolution at linearly higher
             cost. The smallest attainable p-value is ``1 / (n_perms + 1)``,
             so the default of 200 resolves down to p ~ 0.005.
-        seed: Random seed that makes the permutation test reproducible.
+        key: JAX PRNG key that drives the permutation test. Required: the
+            p-values are random, so there is no sensible default. Write
+            ``jax.random.key(0)`` if you only want reproducibility. A key
+            rather than an integer seed because a key can be split, so
+            nested or repeated analyses draw independent permutations
+            instead of silently correlated ones.
         bandwidth: Fixed Gaussian-kernel bandwidth applied to all parameters
             and to the output. None (default) selects it per variable with
             the median heuristic (median pairwise distance), a robust default.
@@ -606,11 +640,17 @@ def analyze(
             problem, X and Y have differing row counts, ``n_perms < 1``,
             ``N < 4``, ``bandwidth`` is non-positive or non-finite,
             ``on_invalid`` is not one of the three policies, the non-finite
-            policy refuses the sample, or
+            policy refuses the sample, ``key`` is ``None``, or
             ``problem`` has categorical parameters. Categorical parameters
             are rejected because the Gaussian input kernel reads a level code
             as a distance, and the arbitrary code order makes that
             meaningless.
+
+    Warns:
+        JaxgsaWarning: If an output slice has zero variance, or if JAX is in
+            single precision. The V-statistic subtracts three sums of the same
+            magnitude, so float32 keeps only three or four correct digits and
+            the index moves with the order of the sample rows.
     """
     from jaxgsa.hsic import SPEC
 
@@ -636,6 +676,12 @@ def analyze(
     # contract has held, and a sample this small costs nothing to have read.
     if X.shape[0] < _MIN_SAMPLES:
         raise ValueError(f"N must be >= {_MIN_SAMPLES} for HSIC, got {X.shape[0]}")
+    # Checked after the preamble and the shape contract, so a problem this
+    # method refuses outright (categorical parameters, a sample too small)
+    # still reports that, and not a missing key.
+    if key is None:
+        raise ValueError("key is required for the permutation test")
+    _warn_single_precision()
 
     X_unit = cdf_to_unit_interval(X, problem)
 
@@ -644,8 +690,6 @@ def analyze(
 
     if prenormalize:
         Y_3d, _, _, _ = _prenormalize_outputs(Y_3d)
-
-    key = jax.random.key(seed)
 
     # Build input kernels and augmented products once (independent of Y).
     Ks = _build_input_kernels(X_unit, bandwidth, batch_size)

@@ -126,7 +126,7 @@ def _pawn(shape: str) -> Any:
 
 def _hsic(shape: str) -> Any:
     X, Y = _given_data(shape)
-    return hsic.analyze(PROBLEM, X, Y, n_perms=20, seed=SEED)
+    return hsic.analyze(PROBLEM, X, Y, n_perms=20, key=jax.random.key(SEED))
 
 
 def _ot(shape: str) -> Any:
@@ -182,7 +182,7 @@ def _vkoga(shape: str) -> Any:
         n_outer=32,
         n_inner=16,
         n_variance=128,
-        seed=SEED,
+        key=jax.random.key(SEED),
     )
 
 
