@@ -21,10 +21,10 @@ Example::
 
 from jaxgsa._core.invalid import InvalidUnit
 from jaxgsa._core.registry import MethodSpec, register
-from jaxgsa.hsic._analyze import analyze
+from jaxgsa.hsic._analyze import analyze, indices
 from jaxgsa.hsic._result import HSICResult
 
-__all__ = ["HSICResult", "analyze"]
+__all__ = ["HSICResult", "analyze", "indices"]
 
 SPEC = register(
     MethodSpec(

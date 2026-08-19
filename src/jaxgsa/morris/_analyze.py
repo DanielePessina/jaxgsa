@@ -29,6 +29,7 @@ from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
     _prenormalize_outputs,
+    _prepare_Y,
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.morris._result import MorrisResult
@@ -140,6 +141,100 @@ def _resample_stats(idx_chunk: Array, ee: Array) -> tuple[Array, Array, Array]:
     return jax.vmap(single)(idx_chunk)
 
 
+def _ee_bookkeeping(sampling_result: MorrisSamples) -> tuple[Array, Array, Array]:
+    """Read the design's elementary-effect bookkeeping onto the device.
+
+    This is the whole traceable half of what :func:`_reindex_after_drop`
+    does. The design stores the index maps and the steps as host NumPy, and
+    every one of them is a *design* fact rather than a fact about ``Y``, so
+    moving them to the device is a constant fold and never a host read of an
+    array under trace.
+
+    Args:
+        sampling_result: The design from :func:`jaxgsa.morris.sample`.
+
+    Returns:
+        ``(idx_after, idx_before, delta)`` as device arrays, in the design's
+        own trajectory order and with nothing dropped.
+    """
+    return (
+        jnp.asarray(sampling_result.ee_idx_after),
+        jnp.asarray(sampling_result.ee_idx_before),
+        jnp.asarray(sampling_result.ee_delta),
+    )
+
+
+def indices(
+    sampling_result: MorrisSamples,
+    Y: Array,
+    *,
+    standardize_outputs: bool = False,
+) -> tuple[Array, Array, Array]:
+    """Compute the Morris screening measures as plain arrays, with no diagnostics.
+
+    This is the transformable core of :func:`analyze`. It runs the same
+    gather-subtract-divide on the same data and returns the same numbers, but
+    it does nothing else: no non-finite check, no trajectory dropping, no
+    zero-variance warning, no thinned-design warning, no bootstrap, no
+    :class:`jaxgsa.morris.MorrisResult`, and no read of any array value on
+    the host. So it composes with ``jax.jit``, ``jax.vmap``, ``jax.grad`` and
+    ``jax.jacrev``, which :func:`analyze` cannot, because a policy decision
+    needs a concrete value and a tracer has none.
+
+    The name is ``indices`` for the same reason it is ``indices`` everywhere
+    else in jaxgsa: it names the role, the traceable and policy-free core of
+    the method. Morris returns screening measures rather than variance
+    shares, and the name does not try to say otherwise.
+
+    Point estimates only. Morris's confidence intervals come from a bootstrap
+    over trajectories, and which interval to report is a policy choice, so
+    ``n_bootstrap``, ``conf_level``, ``ci_method`` and ``key`` stay on
+    :func:`analyze`.
+
+    Tier T4 (behavioural contract): the returned arrays must equal ``mu``,
+    ``mu_star`` and ``sigma`` of ``analyze``'s result on clean outputs, and
+    the function must survive ``jit``, ``vmap`` and ``jit(jacrev(...))``.
+    Checked in ``tests/test_morris.py``.
+
+    Use :func:`analyze` for ordinary analysis. Nothing here checks the
+    outputs, so a single NaN silently turns whole trajectories of effects
+    into NaN.
+
+    Args:
+        sampling_result: The design from :func:`jaxgsa.morris.sample`, used
+            only for its expansion map and its elementary-effect bookkeeping.
+        Y: Model outputs evaluated at each unique row of
+            ``sampling_result.samples``, in the same row order. Shapes are
+            those :func:`analyze` accepts: ``(n_runs,)``, ``(n_runs, K)`` or
+            ``(n_runs, T, K)``.
+        standardize_outputs: As in :func:`analyze`. It is kept on the core
+            rather than left to the caller for two reasons. It is a pure
+            affine rescale over the sample axis, selected by a Python
+            ``bool``, so the branch is resolved at trace time and the traced
+            graph is the same either way. And the caller cannot reproduce it
+            from outside: the standardization reduces over the *expanded*
+            sample axis, which this function builds and the caller never
+            holds, so a pre-pass on the unique rows would use different means
+            and a different scale whenever the design deduplicated a row.
+
+    Returns:
+        ``(mu, mu_star, sigma)``, shaped ``(D,)``, ``(K, D)`` or
+        ``(T, K, D)`` to match the rank of ``Y``, exactly as ``analyze``
+        reports them.
+
+    Raises:
+        ValueError: If ``Y``'s first axis does not match
+            ``sampling_result.n_runs``.
+    """
+    Y3, layout = _prepare_Y(sampling_result.expand_outputs(Y))
+    if standardize_outputs:
+        Y3, _, _, _ = _prenormalize_outputs(Y3)
+    idx_after, idx_before, delta = _ee_bookkeeping(sampling_result)
+    ee = _elementary_effects(Y3, idx_after, idx_before, delta)  # (r, D, T, K)
+    mu, mu_star, sigma = _stats_from_ee(ee)  # each (T, K, D)
+    return layout.squeeze(mu), layout.squeeze(mu_star), layout.squeeze(sigma)
+
+
 def _reindex_after_drop(
     sampling_result: MorrisSamples, keep: np.ndarray
 ) -> tuple[Array, Array, Array]:
@@ -163,7 +258,7 @@ def _reindex_after_drop(
     idx_before = np.asarray(sampling_result.ee_idx_before)
     delta = np.asarray(sampling_result.ee_delta)
     if keep.all():
-        return jnp.asarray(idx_after), jnp.asarray(idx_before), jnp.asarray(delta)
+        return _ee_bookkeeping(sampling_result)
 
     rows_per_traj = sampling_result.n_params + 1
     kept = np.flatnonzero(keep)
@@ -209,6 +304,10 @@ def analyze(
     values. That method works for uniform marginals only. It raises for a
     problem with Gaussian marginals, because their inverse-CDF transform is
     nonlinear.
+
+    :func:`jaxgsa.morris.indices` is the transformable core: the same three
+    measures as bare arrays, with none of the checks and no bootstrap, so it
+    composes with ``jit``, ``vmap`` and ``jacrev``.
 
     Args:
         sampling_result: Result from :func:`jaxgsa.morris.sample` with the
