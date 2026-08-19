@@ -23,6 +23,7 @@ import numpy as np
 import numpy.typing as npt
 from jax import Array
 
+from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.entry import (
     at_least,
@@ -37,6 +38,7 @@ from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import _prepare_Y, _warn_zero_variance_slices
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.dgsm._core import (
+    _jac_bytes_per_row,
     bounds_from_moments,
     jac_batches,
     moment_sums,
@@ -327,7 +329,7 @@ def _compute_moments(
             ``(D,) -> (T, K)``.
         X: Sample matrix, shape ``(N, D)``.
         batch_size: Number of N sample rows per batch, to limit memory. None
-            processes all N rows at once.
+            derives a width from the active memory budget.
 
     Returns:
         A :class:`_Moments`. Its sums carry the ``fn`` output's own slice
@@ -499,8 +501,9 @@ def indices(
         dfdx: Pre-computed Jacobian mirroring ``Y``'s layout with one extra
             trailing ``(D,)`` axis.
         standardize_outputs: As in :func:`analyze`.
-        batch_size: Sample rows per batch on the autodiff path, or ``None``
-            for one batch.
+        batch_size: Sample rows per batch on the autodiff path, clamped to
+            ``N``, or ``None`` to derive one from the active memory budget,
+            as in :func:`analyze`.
 
     Returns:
         ``(nu, sigma, upper_bound, lower_bound, var_y)``. The first four have
@@ -651,9 +654,13 @@ def analyze(
         key: A ``jax.random`` key for the bootstrap resampling. Required when
             ``n_bootstrap > 0``. Pass ``jax.random.key(0)`` if you have an
             integer seed.
-        batch_size: Number of N sample rows per batch on the autodiff path.
-            The Jacobian accumulates in batches of this many samples, which
-            bounds peak memory. None (default) processes all N samples at once.
+        batch_size: Number of N sample rows per batch on the autodiff path,
+            clamped to ``N``. The Jacobian accumulates in batches of this
+            many samples, which bounds peak memory. None (default) derives a
+            width from the active memory budget (see
+            ``jaxgsa.config.set_memory_budget``), pricing each row at a few
+            Jacobian-sized transients (``T*K*D`` floats per row times a
+            small live factor).
         on_invalid: What to do about a sample row that holds a non-finite
             value. ``"raise"`` (default) refuses the sample, ``"drop"``
             removes those rows and analyzes the rest, and ``"propagate"``
@@ -901,13 +908,21 @@ def _array_batches(
     Args:
         dfdx: The validated Jacobian, shape ``(N, T, K, D)``.
         Y_3d: The validated output, shape ``(N, T, K)``.
-        batch_size: Rows per batch, or ``None`` for one batch.
+        batch_size: Rows per batch, or ``None`` to derive one from the active
+            memory budget with the same Jacobian bytes model the autodiff
+            path uses. The Jacobian already exists whole here, so the batch
+            width only bounds the bootstrap's per-batch transients (the
+            weight matrix and the squared block), but the two calling
+            conventions read one keyword and must give it one meaning.
 
     Yields:
         ``(jac, Y)`` per batch, in row order.
     """
     N = int(Y_3d.shape[0])
-    step = N if not batch_size or batch_size <= 0 else batch_size
+    _, T, K, D = dfdx.shape
+    step = resolve_batch_size(
+        _jac_bytes_per_row(T * K, D, jnp.dtype(dfdx.dtype).itemsize), N, batch_size
+    )
     for start in range(0, N, step):
         end = min(start + step, N)
         yield dfdx[start:end], Y_3d[start:end]

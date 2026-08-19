@@ -26,8 +26,34 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa.dgsm._poincare import axis_constants
 from jaxgsa.problem import Problem
+
+# Live jac-sized arrays while one batch is reduced. The array the batch loop
+# exists to bound is the Jacobian block, T*K*D floats per row where the output
+# is one, so the model prices everything in multiples of it: the block itself,
+# the elementwise square the moment sums build from it, and the masked copy
+# with its square that the policy loop in ``analyze`` keeps alongside (see
+# ``_compute_moments``). The primal outputs are T*K floats per row, a factor D
+# smaller, so they are left out. Modelled from the code, not measured — the
+# same convention as sobol's ``slice_elements`` live-copy count and
+# borgonovo's ``_KDE_LIVE_TENSORS``.
+_JAC_LIVE_ARRAYS = 4
+
+
+def _jac_bytes_per_row(n_outputs: int, n_inputs: int, itemsize: int) -> int:
+    """Estimate the transient bytes one sample row costs in the batch loop.
+
+    Args:
+        n_outputs: ``T*K``, the number of scalar output slices.
+        n_inputs: ``D``, the number of parameters.
+        itemsize: Bytes per element of the working dtype.
+
+    Returns:
+        Estimated bytes per row: ``_JAC_LIVE_ARRAYS`` Jacobian-sized arrays.
+    """
+    return itemsize * _JAC_LIVE_ARRAYS * n_outputs * n_inputs
 
 
 def _fn_with_aux(fn: Callable) -> Callable:
@@ -113,6 +139,11 @@ def jac_batches(
     per row, where the output is one. So the sample axis is walked in batches
     and each batch is reduced by the caller before the next one is built.
 
+    ``batch_size=None`` derives the width from the active memory budget
+    through the shared :func:`jaxgsa._core.batching.resolve_batch_size`, with
+    :func:`_jac_bytes_per_row` as the per-row cost. An explicit value is
+    honoured as given, clamped to ``N``.
+
     The ragged trailing batch is padded back to the full width and sliced
     afterwards, so the vectorized kernel compiles once instead of twice. The
     padded rows never reach the caller.
@@ -120,31 +151,36 @@ def jac_batches(
     Args:
         fn: One-sample model, ``(D,) -> ()`` / ``(K,)`` / ``(T, K)``.
         X: Sample matrix, shape ``(N, D)``.
-        batch_size: Rows per batch, or ``None``/``0`` for one batch of every
-            row.
+        batch_size: Rows per batch, clamped to ``N``, or ``None`` to derive
+            one from the active memory budget.
 
     Yields:
         ``(jac, Y, X)`` for each batch: the Jacobian block, the forward
         outputs, and the rows they came from. The leading axis is the batch's
         true length, never the padded one.
+
+    Raises:
+        ValueError: If ``batch_size`` is given and not a positive integer.
     """
     n_inputs = int(X.shape[1])
-    combined = jax.jit(
-        jax.vmap(jacobian_of(fn, n_inputs=n_inputs, n_outputs=n_output_slices(fn, X)))
-    )
+    n_outputs = n_output_slices(fn, X)
+    combined = jax.jit(jax.vmap(jacobian_of(fn, n_inputs=n_inputs, n_outputs=n_outputs)))
 
     N = X.shape[0]
-    if not batch_size or batch_size <= 0 or N <= batch_size:
+    b = resolve_batch_size(
+        _jac_bytes_per_row(n_outputs, n_inputs, jnp.dtype(X.dtype).itemsize), N, batch_size
+    )
+    if N <= b:
         jac, Y = combined(X)
         yield jac, Y, X
         return
 
-    for start in range(0, N, batch_size):
-        end = min(start + batch_size, N)
+    for start in range(0, N, b):
+        end = min(start + b, N)
         actual_len = end - start
         X_chunk = X[start:end]
-        if actual_len < batch_size:
-            pad_size = batch_size - actual_len
+        if actual_len < b:
+            pad_size = b - actual_len
             # dtype= keeps the pad in X's own dtype: an unannotated jnp.zeros
             # is float64 under x64, which would promote the padded last batch
             # and call the user's fn at a different dtype than every other one.
@@ -168,7 +204,8 @@ def moment_sums(
     Args:
         fn: One-sample model, ``(D,) -> ()`` / ``(K,)`` / ``(T, K)``.
         X: Sample matrix, shape ``(N, D)``.
-        batch_size: Rows per batch, or ``None`` for all of them at once.
+        batch_size: Rows per batch, or ``None`` to derive one from the
+            active memory budget, as in :func:`jac_batches`.
 
     Returns:
         ``(sum_jac, sum_jac2, Y)``. The two sums carry ``fn``'s own slice axes
