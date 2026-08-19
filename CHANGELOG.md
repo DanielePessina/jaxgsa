@@ -198,6 +198,53 @@ Version 0.10 adds capability.
 
 ### Added
 
+- **`EFASTSamples` can now save and load.** It was the one design object
+  without persistence. `save()` writes one compressed NPZ file with the same
+  layout as the other designs: the sample matrix plus a JSON metadata blob
+  with the problem, the design parameters and the jaxgsa version. `load()`
+  rebuilds the design, and analyzing it gives the same numbers.
+
+- **PAWN reports how many bins carried each index.** A conditioning bin with
+  fewer than two samples gives no KS value and was dropped without a word.
+  `PAWNResult.n_valid_bins` now counts the contributing bins per parameter
+  (same shape as `pawn`, exported by `to_dataset`). When a parameter keeps
+  fewer than half of its bins, one warning names it and the fix: use fewer
+  bins or more samples.
+
+- **VKOGA checks that the training design is independent.** The estimator
+  needs an independent, space-filling training `X` even for a correlated
+  analysis, because `S_TU` resamples each `X_i` across its whole marginal. A
+  correlated analysis now fits the training sample's own rank correlation
+  and warns when an off-diagonal entry is above 0.3. The warning says why
+  (the surrogate extrapolates on the conditional draws) and where the
+  correlation belongs: in `problem.correlation`, not in the training data.
+
+- **Near-singular conditionals are no longer repaired in silence.** The
+  Gaussian-copula conditional plan (kucherenko designs, vkoga indices) used
+  to floor collapsing conditional covariances without a word as `|rho|`
+  approached 1. It now warns once per call, with the smallest conditional
+  variance — or the eigenvalue lift, when the floor really engaged — as the
+  severity.
+
+- **`OTResult` gains `S1` and `above_dummy`.** `S1` is the given-data
+  first-order Sobol index, the advective component rescaled onto the
+  population-variance (ddof=0) convention that `jaxgsa.borgonovo` uses, so
+  the two estimates share one definition and no ddof caveat is left.
+  `S1_conf` scales `advective_conf` the same exact way. `above_dummy` is
+  `max(ot - ot_dummy, 0)`: the part of the total index above the
+  irrelevance floor, present when the analysis ran with `dummy=True`.
+
+- **`jaxgsa.__version__`.** The installed package version, from
+  `importlib.metadata`.
+
+- **`Theta` is re-exported** at the top level and from `jaxgsa.sobol`, so
+  gradient users can type their `transform(theta)` code without importing
+  from `_core`.
+
+- **`Problem` rejects bad parameter names at construction.** A non-string
+  name or a duplicate now raises a `ValueError` that names the fix, instead
+  of failing later in a `Theta` lookup or a dataset export.
+
 - **Eleven methods gain a pure `indices()` core.** `sobol.indices` already
   existed; `efast`, `pawn`, `morris`, `hsic`, `borgonovo`,
   `optimal_transport`, `dgsm`, `pce`, `hdmr` and `shapley` now have one too.
