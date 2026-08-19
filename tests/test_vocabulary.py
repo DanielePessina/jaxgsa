@@ -65,11 +65,15 @@ POSITIONAL_EXCEPTIONS = {"dgsm"}
 # test before the assertion runs, so it can never notice the gap closing, and
 # the exemption would outlive the problem.
 BUDGET_GAPS: dict[str, str] = {
-    "morris": (
-        "morris.resample_chunk_size defaults to 2048 to match sobol's width. "
-        "It does honour the budget as an upper bound; only the default "
-        "differs. Flip it with sobol's, not before."
-    ),
+    # Empty, and kept rather than deleted for the same reason as
+    # BOOTSTRAP_ON_BY_DEFAULT: if a future method cannot derive a width from
+    # the budget, this is where that exception gets argued for in writing.
+    #
+    # Both original entries closed in the same round. sobol gained a
+    # bytes-per-slice model covering the point and bootstrap paths and both
+    # estimator orders; morris's resolver was already a bytes model, so only
+    # its 2048 default needed to become None. The strict markers are what
+    # forced the deletions: a non-strict xfail would have sat here passing.
 }
 
 

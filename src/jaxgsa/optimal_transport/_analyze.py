@@ -55,6 +55,7 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
+from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.entry import (
     at_least,
@@ -84,11 +85,14 @@ from jaxgsa.optimal_transport._result import OTResult
 from jaxgsa.optimal_transport._solver import _sinkhorn_w2
 from jaxgsa.problem import Problem, _categorical_dims
 
-# Target element budget for the default per-chunk working set of the
-# "univariate" mode. The dominant intermediate is the per-column conditional
-# quantile tensor of size ``chunk_columns * D * M * N`` elements, so the
-# default chunk width keeps it near this many float32 elements (~256 MB).
-_CHUNK_ELEM_BUDGET = 1 << 26
+# Live copies of the per-column conditional-quantile tensor to budget for.
+# The dominant intermediate of the "univariate" mode is that tensor, of size
+# ``chunk_columns * D * M * N`` elements; it is gathered and then reduced, so
+# two copies are resident at the peak. The chunk width is sized against this
+# multiple of the tensor, in bytes, so the peak stays inside the active
+# transient-memory budget at any dtype. Counting elements instead would be
+# wrong by the item size, and wrong by a further factor of two under x64.
+_CHUNK_LIVE_TENSORS = 2
 
 _MODES = ("univariate", "multivariate", "trajectory")
 
@@ -519,16 +523,25 @@ def _run_univariate(
     R_run = all_idx.shape[0]
     D_run = sum(g[0].shape[1] for g in groups)
     # Peak memory scales with the summed per-group D_g * M_g
-    # conditional-quantile tensors.
+    # conditional-quantile tensors, in bytes at the kernel's working dtype.
     layout_elems = sum(g[0].shape[1] * g[0].shape[2] for g in groups)
-    cs = slice_chunk_size
-    if cs is None:
-        cs = max(1, _CHUNK_ELEM_BUDGET // (layout_elems * N))
-    cs = min(cs, total)
+    itemsize = jnp.dtype(jnp.result_type(Y_cols.dtype, jnp.float32)).itemsize
+    bytes_per_column = _CHUNK_LIVE_TENSORS * layout_elems * N * itemsize
+    cs = resolve_batch_size(bytes_per_column, total, slice_chunk_size)
     parts: tuple[list[Array], list[Array], list[Array], list[Array]] = ([], [], [], [])
     for start in range(0, total, cs):
         chunk = Y_cols[:, start : start + cs]
+        n_real = chunk.shape[1]
+        if n_real < cs:
+            # Pad the ragged trailing chunk back to the full width so the
+            # jitted kernel compiles for one shape only. Output columns are
+            # scored independently, so a repeated column cannot change a real
+            # column's answer, and the padding is sliced off straight away.
+            pad = jnp.broadcast_to(chunk[:, :1], (chunk.shape[0], cs - n_real))
+            chunk = jnp.concatenate([chunk, pad], axis=1)
         merged = list(_ot_1d_kernel(chunk, all_idx, tuple(groups)))
+        if n_real < cs:
+            merged = [arr[:, :n_real] for arr in merged]
         if col_order is not None:
             merged[:3] = [arr[..., col_order] for arr in merged[:3]]
         for part, arr in zip(parts, merged):

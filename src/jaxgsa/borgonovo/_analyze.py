@@ -512,7 +512,18 @@ def _run_delta_kernel(
     d_parts, s1_parts, degen_parts, floored_parts = [], [], [], []
     for start in range(0, total, cs):
         chunk = Y_cols[:, start : start + cs]
+        n_real = chunk.shape[1]
+        if n_real < cs:
+            # Pad the ragged trailing chunk back to the full width so the
+            # jitted kernel compiles for one shape only. Output columns are
+            # analysed independently, so a repeated column cannot change a
+            # real column's answer, and the padding is sliced off at once.
+            pad = jnp.broadcast_to(chunk[:, :1], (chunk.shape[0], cs - n_real))
+            chunk = jnp.concatenate([chunk, pad], axis=1)
         d, s1, degen, floored = kernel(chunk, all_idx, tuple(groups))
+        if n_real < cs:
+            d, s1 = d[:, :n_real], s1[:, :n_real]
+            degen, floored = degen[:, :n_real], floored[:, :n_real]
         if col_order is not None:
             d = d[..., col_order]
             s1 = s1[..., col_order]
