@@ -28,6 +28,16 @@ class PAWNResult(SchemaResult):
         pawn_conf: Bootstrap confidence interval for ``pawn``, shape
             ``(2, ...)`` for ``[lower, upper]``. ``None`` when
             ``n_bootstrap=0``.
+        n_valid_bins: How many conditioning bins actually contributed to each
+            index, same shape as ``pawn``. A bin contributes only when it
+            holds at least two samples; an under-filled bin yields ``NaN``
+            from the KS kernel and is dropped by the nan-aware aggregation.
+            Bin occupancy depends on the inputs alone, so the count is
+            constant across the output (T/K) axes; it is broadcast to
+            ``pawn``'s shape so the exported dataset aligns the two. A
+            parameter whose count is well below ``n_bins`` (or below its
+            level count, for a categorical parameter) rests its index on few
+            KS values: use fewer bins or more samples.
         problem: Problem definition used for the analysis.
         invalid: What the non-finite check found in the sample, and which
             ``on_invalid`` policy ran. ``invalid.n_invalid == 0`` means the
@@ -40,11 +50,15 @@ class PAWNResult(SchemaResult):
 
     pawn: Array
     pawn_conf: Array | None
+    n_valid_bins: Array
     problem: Problem
     invalid: InvalidReport
     ci: CIInfo | None = None
 
     _schema = ResultSchema(
         primary="pawn",
-        fields=(FieldSpec("pawn", "param", interval=True),),
+        fields=(
+            FieldSpec("pawn", "param", interval=True),
+            FieldSpec("n_valid_bins", "param"),
+        ),
     )

@@ -686,3 +686,78 @@ class TestPureCore:
 
         (pawn_jit,) = jax.jit(lambda outputs: indices(problem, X, outputs, n_bins=6))(Y)
         np.testing.assert_allclose(np.asarray(pawn_jit), np.asarray(pawn), rtol=1e-6)
+
+
+class TestBinCountDiagnostic:
+    """Tier T4 (internal consistency): the contributing-bin diagnostic."""
+
+    def test_full_bins_report_n_bins_and_match_pawn_shape(self, ishigami_data):
+        X, Y = ishigami_data
+        result = analyze(ishigami.PROBLEM, X, Y, n_bins=10)
+        n_valid = np.asarray(result.n_valid_bins)
+        assert n_valid.shape == np.asarray(result.pawn).shape
+        # 5000 samples over 10 equal-probability bins: every bin holds
+        # hundreds of samples, so every bin contributes.
+        np.testing.assert_array_equal(n_valid, np.full_like(n_valid, 10))
+
+    def test_diagnostic_broadcasts_over_output_axes(self, ishigami_data):
+        """Bin occupancy never reads Y, so the count repeats across (T, K)."""
+        X, Y = ishigami_data
+        Y3 = jnp.stack([jnp.stack([Y, Y**2], axis=1)] * 2, axis=1)  # (N, 2, 2)
+        result = analyze(ishigami.PROBLEM, X, Y3, n_bins=8)
+        n_valid = np.asarray(result.n_valid_bins)
+        assert n_valid.shape == (2, 2, 3)
+        assert (n_valid == n_valid[0, 0]).all()
+
+    def test_to_dataset_carries_the_diagnostic(self, ishigami_data):
+        X, Y = ishigami_data
+        ds = analyze(ishigami.PROBLEM, X, Y).to_dataset()
+        assert "n_valid_bins" in ds
+        assert ds["n_valid_bins"].dims == ("param",)
+
+    def test_sparse_bins_warn_and_name_the_fix(self):
+        """A parameter whose samples pile into few bins gets one warning."""
+        problem = Problem(names=("narrow", "wide"), bounds=((0.0, 1.0), (0.0, 1.0)))
+        rng = np.random.default_rng(0)
+        X = np.column_stack(
+            [
+                # All mass in the first of 10 equal-width bins: 1/10 bins
+                # contribute, which is below half.
+                rng.uniform(0.0, 0.05, size=64),
+                rng.uniform(0.0, 1.0, size=64),
+            ]
+        )
+        Y = X[:, 0] + X[:, 1]
+        with pytest.warns(JaxgsaWarning, match="fewer bins .* or more samples"):
+            result = analyze(problem, jnp.asarray(X), jnp.asarray(Y), n_bins=10)
+        n_valid = np.asarray(result.n_valid_bins)
+        assert n_valid[0] == 1
+        assert n_valid[1] > 5
+
+    def test_healthy_sample_does_not_warn(self, ishigami_data):
+        import warnings as _warnings
+
+        X, Y = ishigami_data
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("error", JaxgsaWarning)
+            analyze(ishigami.PROBLEM, X, Y, n_bins=10)
+
+    def test_all_empty_warning_is_not_doubled(self):
+        """A fully out-of-range parameter keeps its own warning, once."""
+        import warnings as _warnings
+
+        problem = Problem(names=("out", "ok"), bounds=((0.0, 1.0), (0.0, 1.0)))
+        X = np.column_stack(
+            [
+                np.full(32, 2.0),  # outside the declared bounds: every bin empty
+                np.linspace(0.0, 1.0, 32),
+            ]
+        )
+        Y = X[:, 1]
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            analyze(problem, jnp.asarray(X), jnp.asarray(Y), n_bins=4)
+        empty = [w for w in caught if "all bins empty" in str(w.message)]
+        sparse = [w for w in caught if "fewer bins" in str(w.message)]
+        assert len(empty) == 1
+        assert not sparse

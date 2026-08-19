@@ -82,6 +82,69 @@ from jaxgsa.problem import Problem, _categorical_dims
 # ECDF, so that a KS distance is a distance and not an artefact.
 _MIN_KEPT = 4
 
+# Warn when fewer than this fraction of a parameter's conditioning bins
+# contribute a KS value. The nan-aware aggregation silently drops a bin with
+# fewer than two samples, so a heavily depleted parameter reports an index
+# that rests on a handful of bins without saying so.
+_MIN_VALID_BIN_FRACTION = 0.5
+
+
+def _count_valid_bins(bin_idx: Array, n_eff: int) -> np.ndarray:
+    """Count, per parameter, the conditioning bins that contribute a KS value.
+
+    A bin contributes only when it holds at least two samples; the KS kernel
+    returns ``NaN`` for anything smaller and the nan-aware aggregation drops
+    it. Bin occupancy depends on the inputs alone (never on ``Y``), so the
+    count is computed once per analysis, on the host.
+
+    Args:
+        bin_idx: Conditioning-bin indices from :func:`_bin_indices`, shape
+            ``(N, D)``, where ``-1`` marks an excluded sample.
+        n_eff: Number of bins the kernel is compiled at.
+
+    Returns:
+        Contributing-bin counts per parameter, shape ``(D,)``, int64.
+    """
+    idx = np.asarray(bin_idx)
+    counts = np.stack(
+        [np.bincount(col[col >= 0].astype(np.int64), minlength=n_eff) for col in idx.T]
+    )
+    return (counts >= 2).sum(axis=1)
+
+
+def _warn_sparse_bins(problem: Problem, n_valid: np.ndarray, n_bins: int) -> None:
+    """Warn once when parameters keep fewer than half their bins contributing.
+
+    Args:
+        problem: Problem definition, for the parameter names and the level
+            counts of categorical parameters.
+        n_valid: Contributing-bin counts from :func:`_count_valid_bins`,
+            shape ``(D,)``.
+        n_bins: Requested bin count for continuous parameters. A categorical
+            parameter is measured against its own level count instead.
+
+    Warns:
+        JaxgsaWarning: Naming every parameter whose contributing-bin fraction
+            is below ``_MIN_VALID_BIN_FRACTION`` (all-empty parameters are
+            excluded; they already get their own warning).
+    """
+    levels_of_dim = dict(_categorical_dims(problem))
+    sparse = []
+    for d, count in enumerate(n_valid):
+        expected = levels_of_dim.get(d, n_bins)
+        if 0 < count < _MIN_VALID_BIN_FRACTION * expected:
+            sparse.append(f"{problem.names[d]!r} ({int(count)}/{expected})")
+    if sparse:
+        warnings.warn(
+            f"PAWN: parameters {', '.join(sparse)} have fewer than half of "
+            "their conditioning bins contributing (a bin needs at least 2 "
+            "samples to define a conditional CDF; the rest are dropped). The "
+            "reported indices rest on those few bins. Use fewer bins "
+            "(lower n_bins) or more samples.",
+            stacklevel=3,
+            category=JaxgsaWarning,
+        )
+
 
 def _equal_width_bins(X_u01: Array, n_bins: int) -> Array:
     """Assign each sample to an equal-width bin in ``[0, 1]``.
@@ -639,7 +702,8 @@ def analyze(
 
     Returns:
         A :class:`PAWNResult` with ``pawn`` shaped ``(D,)``, ``(K, D)``, or
-        ``(T, K, D)``, optional confidence intervals in ``pawn_conf``, how
+        ``(T, K, D)``, optional confidence intervals in ``pawn_conf``, the
+        per-parameter contributing-bin diagnostic in ``n_valid_bins``, how
         those intervals were made in ``ci``, and the non-finite report in
         ``invalid``.
 
@@ -653,9 +717,13 @@ def analyze(
             ``"quantile"`` or ``"gaussian"``, ``n_bootstrap > 0`` and no
             ``key`` was given, or the non-finite policy refuses the sample.
     Warns:
-        JaxgsaWarning: If an output slice has zero variance. Every
-            conditional distribution then equals the unconditional one, so
-            the corresponding indices are an exact 0 rather than an answer.
+        JaxgsaWarning: In either of two cases. An output slice has zero
+            variance: every conditional distribution then equals the
+            unconditional one, so the corresponding indices are an exact 0
+            rather than an answer. Or a parameter keeps fewer than half of
+            its conditioning bins contributing (a bin needs at least two
+            samples): the index then rests on the few bins that survive, and
+            the fix is fewer bins or more samples.
     """
     from jaxgsa.pawn import SPEC
 
@@ -694,6 +762,11 @@ def analyze(
     # runs here and not in the traceable binning it guards.
     _check_categorical_codes(problem, X)
     bin_idx, n_eff = _bin_indices(problem, X, n_bins)
+
+    # The contributing-bin diagnostic depends on the binning alone, so it is
+    # computed once here, from the same bin assignment the kernel uses.
+    n_valid_bins_per_param = _count_valid_bins(bin_idx, n_eff)
+    _warn_sparse_bins(problem, n_valid_bins_per_param, n_bins)
 
     pawn_3d = _pawn_core(bin_idx, Y_3d, n_eff, statistic, slice_chunk_size)
 
@@ -736,6 +809,9 @@ def analyze(
     return PAWNResult(
         pawn=pawn_out,
         pawn_conf=pawn_conf,
+        # Constant across the output axes (bin occupancy never reads Y);
+        # broadcast to pawn's shape so the exported dataset aligns the two.
+        n_valid_bins=jnp.broadcast_to(jnp.asarray(n_valid_bins_per_param), pawn_out.shape),
         problem=problem,
         invalid=invalid,
         ci=ci,
