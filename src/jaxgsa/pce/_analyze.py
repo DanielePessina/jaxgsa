@@ -380,7 +380,7 @@ def _fit_pce_core(
     )
 
 
-def analyze_pce(
+def analyze(
     problem: Problem,
     X: Array,
     Y: Array,

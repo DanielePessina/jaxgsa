@@ -144,7 +144,7 @@ def _get_batched_hdmr_kernel(
 ):
     """Build and cache the jitted, vmapped HDMR fitting kernel."""
     # Caching by (D, maxorder, m, maxiter, lambdax, N) avoids re-tracing the
-    # JIT+vmap wrapper when analyze_hdmr is called repeatedly with the same
+    # JIT+vmap wrapper when hdmr.analyze is called repeatedly with the same
     # structural parameters but different data.
     sd = _get_hdmr_static_data(D, maxorder, m)
     kernel = _make_hdmr_kernel(
@@ -252,7 +252,7 @@ def _warn_correlated_index_reading(problem: Problem) -> None:
     )
 
 
-def analyze_hdmr(
+def analyze(
     problem: Problem,
     X: Array,
     Y: Array,
@@ -395,7 +395,7 @@ def _analyze_hdmr_core(
             always forces the streamed fit with that many rows per batch.
             Both fit paths solve the same regressions and the same F-test.
             Results differ only at the level of float32 summation order.
-        invalid: The non-finite report the public :func:`analyze_hdmr` wrapper
+        invalid: The non-finite report the public :func:`analyze` wrapper
             produced, carried onto the result. It is a required argument
             rather than a default so that no caller can construct an
             ``HDMRResult`` that silently claims the check ran. The check
@@ -432,7 +432,7 @@ def _analyze_hdmr_core(
             ``problem`` has categorical parameters. The B-spline component
             functions need an orderable axis, which an unordered level code
             does not give. The gate on categorical parameters runs in the
-            public :func:`analyze_hdmr` wrapper.
+            public :func:`analyze` wrapper.
 
     Note:
         On the in-memory path, the fit materializes full-N B-spline basis

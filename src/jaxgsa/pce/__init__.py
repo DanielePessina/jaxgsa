@@ -14,7 +14,7 @@ Example::
 
 from jaxgsa._core.invalid import InvalidUnit
 from jaxgsa._core.registry import MethodSpec, register
-from jaxgsa.pce._analyze import analyze_pce as analyze
+from jaxgsa.pce._analyze import analyze
 from jaxgsa.pce._result import PCEResult
 
 __all__ = ["PCEResult", "analyze"]

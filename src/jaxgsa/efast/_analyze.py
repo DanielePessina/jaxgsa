@@ -25,12 +25,20 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.entry import at_least, prepare, require
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.validation import YLayout, _prenormalize_outputs
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.efast._result import EFASTResult
 from jaxgsa.efast._sampling import EFASTSamples, _frequency_plan
+
+# Live length-N arrays the per-slice kernel holds at once: the padded curve
+# batch, the complex spectrum (two reals per element), its magnitude, and the
+# one-sided power spectrum, plus headroom for the reduction temporaries. The
+# automatic ``slice_chunk_size`` is sized against this, so it tracks the
+# memory budget instead of a hard-coded slice count.
+_EFAST_LIVE_ARRAYS = 8
 
 
 def _compute_indices(
@@ -117,11 +125,11 @@ def _get_efast_kernel(N: int, M: int, omega_0: int, analysis_max: int, batched: 
 
 
 def analyze(
-    samples: EFASTSamples,
+    sampling_result: EFASTSamples,
     Y: Array,
     *,
     prenormalize: bool = False,
-    slice_chunk_size: int = 2048,
+    slice_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
 ) -> EFASTResult:
     """Compute eFAST first- and total-order sensitivity indices.
@@ -132,17 +140,19 @@ def analyze(
     yields S1 and ST, but no second-order indices, from ``n_per_curve * D``
     model runs.
 
-    ``Y`` must be the model evaluated row by row on ``samples.samples``, with
-    the rows in the same order. The design metadata ``n_per_curve``, ``M``,
-    and ``problem`` is read from ``samples``, so it can never be mismatched
-    with the sampling step.
+    ``Y`` must be the model evaluated row by row on
+    ``sampling_result.samples``, with the rows in the same order. The design
+    metadata ``n_per_curve``, ``M``, and ``problem`` is read from
+    ``sampling_result``, so it can never be mismatched with the sampling step.
 
     Args:
-        samples: Design returned by ``jaxgsa.efast.sample()``, carrying the
-            sample matrix plus ``n_per_curve``, ``M``, and the problem.
-        Y: Model outputs evaluated at each row of ``samples.samples``, in the
-            same row order. Accepted shapes, where ``n_runs`` is
-            ``samples.n_runs = n_per_curve * D``:
+        sampling_result: Design returned by ``jaxgsa.efast.sample()``,
+            carrying the sample matrix plus ``n_per_curve``, ``M``, and the
+            problem.
+        Y: Model outputs evaluated at each row of
+            ``sampling_result.samples``, in the same row order. Accepted
+            shapes, where ``n_runs`` is
+            ``sampling_result.n_runs = n_per_curve * D``:
             - ``(n_runs,)`` for scalar output
             - ``(n_runs, K)`` for K output variables
             - ``(n_runs, T, K)`` for K outputs over T time steps
@@ -152,7 +162,10 @@ def analyze(
             magnitudes risk float overflow or underflow.
         slice_chunk_size: Maximum number of output slices to process in one
             vmapped batch. It caps peak device memory for a large ``T * K``. A
-            smaller value trades speed for memory.
+            smaller value trades speed for memory. ``None`` (default) derives
+            one from the active memory budget
+            (:func:`jaxgsa.config.set_memory_budget`). An explicit value must
+            be at least 1.
         on_invalid: What to do about non-finite model outputs. Only
             ``"raise"`` (the default) and ``"propagate"`` are available.
             ``"drop"`` raises, because a search curve is an ordered sweep read
@@ -167,21 +180,23 @@ def analyze(
 
     Raises:
         ValueError: If ``Y``'s leading dimension does not equal
-            ``samples.n_runs``, or ``Y`` has an invalid rank; if ``on_invalid``
-            is not one of the three policies or is ``"drop"``; or if the sample
-            holds a non-finite value under ``on_invalid="raise"``.
+            ``sampling_result.n_runs``, or ``Y`` has an invalid rank; if
+            ``on_invalid`` is not one of the three policies or is ``"drop"``;
+            if ``slice_chunk_size`` is given and is not a positive integer; or
+            if the sample holds a non-finite value under
+            ``on_invalid="raise"``.
     """
     from jaxgsa.efast import SPEC
 
-    problem = samples.problem
-    M = samples.M
+    problem = sampling_result.problem
+    M = sampling_result.M
     D = problem.num_vars
-    N = samples.n_per_curve
+    N = sampling_result.n_per_curve
 
     Y_arr = jnp.asarray(Y)
     # A row-count complaint reads better in the design's own terms than in the
     # generic one, so it is phrased here and handed to prepare as a check.
-    rows_match = Y_arr.ndim not in (1, 2, 3) or Y_arr.shape[0] == samples.n_runs
+    rows_match = Y_arr.ndim not in (1, 2, 3) or Y_arr.shape[0] == sampling_result.n_runs
 
     ctx = prepare(
         SPEC,
@@ -193,11 +208,11 @@ def analyze(
             require(
                 rows_match,
                 f"Y has {Y_arr.shape[0] if Y_arr.ndim else 0} rows but this eFAST design "
-                f"requires n_runs = n_per_curve * D = {N} * {D} = {samples.n_runs}; "
-                "evaluate the model on every row of samples.samples, in order",
+                f"requires n_runs = n_per_curve * D = {N} * {D} = {sampling_result.n_runs}; "
+                "evaluate the model on every row of sampling_result.samples, in order",
             ),
         ),
-        n_expected=samples.n_runs,
+        n_expected=sampling_result.n_runs,
         # The design lays the D search curves out contiguously, N rows each.
         # A curve cannot be dropped, so `keep` is always all-True; the report
         # still names the curve to investigate.
@@ -246,7 +261,10 @@ def analyze(
         Y_batched = Y_reshaped.transpose(0, 2, 3, 1).reshape(D * T * K, N)
 
         total = D * T * K
-        cs = min(slice_chunk_size, total)
+        # One vmapped slice costs a handful of length-N arrays, so the chunk
+        # follows the transient-memory budget when the caller gives no size.
+        itemsize = jnp.dtype(jnp.result_type(Y_batched.dtype, jnp.float32)).itemsize
+        cs = resolve_batch_size(_EFAST_LIVE_ARRAYS * N * itemsize, total, slice_chunk_size)
         batched = _get_efast_kernel(N, M, omega_0, plan.analysis_max, batched=True)
 
         s1_parts: list[Array] = []
