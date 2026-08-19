@@ -26,10 +26,10 @@ slices, and the bootstrap path now batches the same way.
 
 Chunking is what keeps the peak bounded. A single ``vmap`` over all
 ``S * R`` pairs would materialise ``S * R`` copies of every (N,) and (N, D)
-gather at once. ``analyze`` forwards its ``slice_chunk_size`` as the cap on
-slices per chunk, and the caller-independent memory budget can only lower it
-further. Every pair is independent of every other, so the chunked answer is
-the unchunked one, element for element.
+gather at once. ``analyze`` forwards its ``slice_chunk_size``, which is
+honoured as given; the memory budget only sizes the ``None`` default. Every
+pair is independent of every other, so the chunked answer is the unchunked
+one, element for element.
 
 A trailing chunk narrower than the rest would trace the jitted resampler a
 second time, so it is padded back to the full width and the answer is sliced
@@ -58,6 +58,12 @@ def _resolve_slice_chunk_size(
 ) -> int:
     """Resolve how many output slices one bootstrap device call may carry.
 
+    An explicit value is an upper bound the caller chose and is honoured as
+    given, capped only at the number of slices there are — exactly as on the
+    point-estimate path (:func:`jaxgsa.sobol._chunking.resolve_point_chunk_size`).
+    The memory budget only sizes the ``None`` default; it never overrides an
+    explicit choice.
+
     A bootstrap chunk is the point-estimate working set of one slice, ``R``
     times over: every resample of a slice rides inside the same device call.
     So the model is :func:`jaxgsa.sobol._chunking.slice_elements` scaled by
@@ -75,9 +81,8 @@ def _resolve_slice_chunk_size(
     device already runs out of memory.
 
     Args:
-        slice_chunk_size: Caller's cap on slices per chunk, or ``None`` to
-            let the budget decide alone. It is an upper bound only: the
-            memory budget may lower it, never raise it.
+        slice_chunk_size: Caller's cap on slices per chunk, honoured as
+            given, or ``None`` to derive one from the memory budget.
         n_slices: Total number of flattened (T, K) output slices.
         n_bootstrap: R, the number of bootstrap resamples.
         base_n: N, the number of base samples per resample.
@@ -87,13 +92,18 @@ def _resolve_slice_chunk_size(
 
     Returns:
         A chunk width in ``[1, n_slices]``.
+
+    Raises:
+        ValueError: If ``slice_chunk_size`` is given and is below 1.
     """
+    if slice_chunk_size is not None:
+        if slice_chunk_size < 1:
+            raise ValueError(f"slice_chunk_size must be >= 1, got {slice_chunk_size}")
+        return max(1, min(slice_chunk_size, n_slices))
     per_slice = slice_elements(base_n, D, calc_second_order)
     bytes_per_slice = n_bootstrap * per_slice * itemsize
     budget = max(1, get_memory_budget() // max(bytes_per_slice, 1))
-    if slice_chunk_size is None:
-        return max(1, min(budget, n_slices))
-    return max(1, min(slice_chunk_size, budget, n_slices))
+    return max(1, min(budget, n_slices))
 
 
 # lru_cache keys the compiled resampler on the estimator name, the one

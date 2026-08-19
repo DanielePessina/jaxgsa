@@ -50,26 +50,25 @@ def _resolve_resample_chunk_size(
 
     Each replicate gathers a full ``(r, D, T, K)`` copy of the elementary
     effects, so the working set of a chunk grows with output volume as well as
-    with the replicate count. The width is therefore capped by the active
-    memory budget as well as by the caller's request, which keeps multi-output
-    and time-series runs from exhausting device memory. This follows the same
-    rule as ``pawn`` and ``sobol`` use for their slice chunks: the caller's
-    value is an upper bound only, and the budget may lower it but never raise
-    it.
+    with the replicate count. An explicit value is an upper bound the caller
+    chose and is honoured as given, capped only at the replicate count — the
+    same rule as every other batching keyword. The memory budget only sizes
+    the ``None`` default, which keeps multi-output and time-series runs from
+    exhausting device memory without overriding an explicit choice.
 
     Args:
-        resample_chunk_size: Caller's cap on replicates per chunk, or ``None``
-            to take the budget-derived width alone.
+        resample_chunk_size: Caller's cap on replicates per chunk, honoured
+            as given, or ``None`` to derive one from the memory budget.
         n_bootstrap: R, the number of bootstrap replicates.
         bytes_per_replicate: Transient memory one replicate needs.
 
     Returns:
         A chunk width in ``[1, n_bootstrap]``.
     """
+    if resample_chunk_size is not None:
+        return max(1, min(resample_chunk_size, n_bootstrap))
     budget = max(1, get_memory_budget() // max(bytes_per_replicate, 1))
-    if resample_chunk_size is None:
-        return max(1, min(budget, n_bootstrap))
-    return max(1, min(resample_chunk_size, budget, n_bootstrap))
+    return max(1, min(budget, n_bootstrap))
 
 
 def _stats_from_ee(ee: Array) -> tuple[Array, Array, Array]:
@@ -342,8 +341,8 @@ def analyze(
             per vmap batch. The unit is bootstrap replicates, not output
             slices. Defaults to ``None``, which takes the width the active
             memory budget (:func:`jaxgsa.config.get_memory_budget`) allows.
-            An explicit value is an upper bound only: the budget can lower
-            it further when the outputs are large, never raise it.
+            An explicit value is honoured as given, capped only at
+            ``n_bootstrap``; the budget never overrides it.
         on_invalid: What to do about non-finite model outputs. The unit here
             is one trajectory, so a single bad value removes the whole block
             of ``D + 1`` rows: the elementary effects are differences between
