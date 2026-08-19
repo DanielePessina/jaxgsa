@@ -16,7 +16,7 @@ number moves, find the mis-wired call before you touch this file.
 
 ## The reviewed exceptions
 
-Two changes have been allowed to move numbers. Both are recorded here because
+Three changes have been allowed to move numbers. All are recorded here because
 the whole value of this file is that a moved number is a defect until someone
 writes down why it is not.
 
@@ -50,6 +50,26 @@ move**, and VKOGA's `gamma`, `ridge`, `n_centers`, `rmse` and `cv_rmse` are
 bit-identical — the surrogate is untouched and the movement is the integration
 reseed alone. The new values sit inside the old estimator's own key-to-key
 spread, measured over 8 keys.
+
+### 3. DGSM selects the autodiff mode by shape (2026-08-20)
+
+`dgsm` used to hard-code `jax.jacrev`. It now selects `jax.jacfwd` when the
+output slices outnumber the inputs (`T*K > D`) and `jax.jacrev` otherwise.
+This closes `docs/adr/0005-autodiff-mode-selection.md`. The two modes compute
+the same Jacobian; only the order of the float arithmetic differs.
+
+Moved: 24 dgsm values, all in `ishigami_series` — the one case with
+`T*K = 6 > D = 3`, so the one case where the mode changed. Only `sigma`
+(12 of 18 elements, deltas about 1e-8 absolute) and `lower_bound` (12 of 18,
+deltas about 1e-10) moved. `nu`, `upper_bound` and `var_y` are bit-identical,
+and every other case is untouched. This is exactly the movement the old
+`jacobian_of` docstring predicted when the flip was first measured and
+deferred.
+
+The same regeneration folds in the 24 schema additions from the 1.0 features
+PR as the new recorded surface: `optimal_transport` gained `S1`, `S1_conf`
+and `above_dummy`, and `pawn` gained `n_valid_bins`, on each of the six
+cases. Those are added fields, not moved numbers.
 
 ## The float32 batch-width exception
 

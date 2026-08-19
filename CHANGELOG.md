@@ -4,8 +4,10 @@
 
 Version 0.10 adds capability.
 
-**Breaking changes:** `SobolResult.nan_counts` is removed, and
-`Problem.input_specs` now returns dataclasses. See "Breaking".
+**Breaking changes:** `SobolResult.nan_counts` is removed,
+`Problem.input_specs` now returns dataclasses, DGSM selects its autodiff mode
+by shape (numbers move at float precision), and stored Sobol S2 bootstrap
+draws are now symmetrised. See "Breaking".
 
 ### Breaking
 
@@ -163,6 +165,29 @@ Version 0.10 adds capability.
   transform. The private fit state loses its `prenormalize`, `y_mean` and
   `y_std` entries. Numbers do not move: `prenormalize` defaulted to `False`.
 
+- **DGSM selects the autodiff mode from the output shape.** `dgsm.analyze`
+  and `dgsm.indices` used to run `jax.jacrev` always. They now run
+  `jax.jacfwd` when the output slices outnumber the inputs (`T*K > D`) and
+  `jax.jacrev` otherwise. There is no keyword: the right mode follows from
+  two numbers the library already has. This closes ADR 0005 and makes a
+  time-series DGSM call cheaper in proportion to `T*K / D`.
+
+  The two modes compute the same Jacobian. Only the order of the float
+  arithmetic differs, so where the mode changed (`T*K > D`), `sigma` and
+  `lower_bound` can move at float32 precision (about 1e-8). The numerical
+  baseline was regenerated once for this; see `scripts/baseline/README.md`.
+  The verbose summary now names the mode that ran.
+
+- **Stored Sobol S2 bootstrap draws are symmetrised.** With
+  `keep_replicates=True`, `result.ci.replicates["S2"]` used to hold the raw
+  estimator output, whose lower triangle is a different numerical path and
+  whose diagonal is meaningless. The stored draws now follow the reported
+  convention — symmetric, with a NaN diagonal — exactly as the `S2` point
+  estimate and its intervals always have. Point estimates and confidence
+  intervals do not move; only the stored replicates array changes. Code that
+  read the lower triangle or the diagonal of the draws must read the upper
+  triangle instead.
+
 ### Performance
 
 - **The PCE streamed fit dispatches one jitted step per row batch.** Each
@@ -172,6 +197,13 @@ Version 0.10 adds capability.
   once. Padded rows contribute exact zeros to the normal equations and to
   the leave-one-out sum. This is the pattern the HDMR fit already uses,
   where the same fix was measured at 1.2-1.67x.
+
+- **The truncated-Gaussian Poincare constant is cached.** DGSM's FEM
+  eigensolve for a truncated Gaussian marginal used to run on every
+  `analyze` call. It is a pure function of five scalars, so it is now
+  memoised with `functools.lru_cache` and runs once per distinct marginal
+  per process. Zero numeric change: the cached value is the value the solve
+  returned.
 
 - **PCE second-order extraction no longer builds an unbudgeted transient.**
   `sobol_from_coefficients` materialized an `(n_terms, D*(D-1)/2)` float
@@ -358,6 +390,22 @@ Version 0.10 adds capability.
   which a pure core cannot emit.
 
 ### Changed
+
+- **Borgonovo says so, once, when the default applies the bias correction.**
+  `bias_correct` keeps its tri-state default (`None`). `None` applies the
+  Plischke correction whenever `n_bootstrap > 0`, so adding bootstrap
+  intervals to a call also changes the reported `delta` from the plug-in
+  estimate to the corrected one. The first default call per process that
+  resolves this way now emits one `JaxgsaWarning` saying which delta it
+  returned; pass an explicit `bias_correct=True` or `False` to silence it.
+  The docstring now spells out the resolution rule. No numbers move.
+
+- **The Sobol default-estimator rationale is the real one.** The docstring
+  used to justify `estimator="saltelli-jansen"` with historical continuity.
+  The recorded reasons are now that Jansen's total-order estimator is a mean
+  of squares, so `ST` can never go negative, and that it matches SALib's
+  default pairing, so the two libraries agree out of the box. Recorded in
+  ADR 0021. The default itself does not change.
 
 - **Hygiene sweep for 1.0.** No number moves and no schema changes. In short:
 
