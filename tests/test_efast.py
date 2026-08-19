@@ -1,5 +1,6 @@
 """Tests for eFAST (extended FAST) sensitivity analysis."""
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -7,7 +8,7 @@ import pytest
 from jaxgsa import JaxgsaWarning
 from jaxgsa._core.invalid import InvalidUnit
 from jaxgsa.benchmarks import ishigami, linear, sobol_g
-from jaxgsa.efast import EFASTSamples, analyze, sample
+from jaxgsa.efast import EFASTSamples, analyze, indices, sample
 from jaxgsa.efast._analyze import _compute_indices
 from jaxgsa.efast._sampling import _frequency_plan
 from jaxgsa.problem import Problem
@@ -597,3 +598,158 @@ def test_single_param():
     assert result.ST.shape == (1,)
     assert float(result.S1[0]) > 0.5
     assert float(result.ST[0]) > 0.5
+
+
+class TestPureCore:
+    """The transformable core ``efast.indices``.
+
+    Tier T4 throughout (internal consistency and transformability): the
+    accuracy of the estimator itself is checked against the closed-form
+    Ishigami and linear values elsewhere in this file, and ``indices`` runs
+    the same kernel ``analyze`` runs.
+    """
+
+    @staticmethod
+    def _design_and_Y():
+        """Return an Ishigami eFAST design and its scalar outputs."""
+        sr = sample(ishigami.PROBLEM, n_per_curve=257, M=4, seed=7)
+        return sr, ishigami.evaluate(jnp.asarray(sr.samples))
+
+    def test_matches_analyze_scalar(self):
+        """T4: ``indices`` returns exactly what ``analyze`` reports."""
+        sr, Y = self._design_and_Y()
+
+        result = analyze(sr, Y)
+        S1, ST = indices(sr, Y)
+
+        np.testing.assert_array_equal(np.asarray(S1), np.asarray(result.S1))
+        np.testing.assert_array_equal(np.asarray(ST), np.asarray(result.ST))
+
+    def test_matches_analyze_time_series(self):
+        """T4: the batched path agrees with ``analyze`` for ``(n, T, K)`` outputs."""
+        sr, base = self._design_and_Y()
+        X = jnp.asarray(sr.samples)
+        # Four different functions of the inputs, so a mis-transposed batch
+        # axis cannot pass.
+        Y = jnp.stack(
+            [
+                jnp.stack([base, 2.0 * base + X[:, 0]], axis=-1),
+                jnp.stack([base**2, X[:, 1]], axis=-1),
+            ],
+            axis=1,
+        )
+        assert Y.shape == (sr.n_runs, 2, 2)
+
+        S1, ST = indices(sr, Y)
+        result = analyze(sr, Y)
+
+        assert S1.shape == (2, 2, 3)
+        np.testing.assert_array_equal(np.asarray(S1), np.asarray(result.S1))
+        np.testing.assert_array_equal(np.asarray(ST), np.asarray(result.ST))
+
+    def test_returns_a_bare_tuple(self):
+        """T4: the core hands back arrays, with no result object attached."""
+        sr, Y = self._design_and_Y()
+
+        out = indices(sr, Y)
+
+        assert isinstance(out, tuple)
+        assert len(out) == 2
+        assert all(isinstance(a, jax.Array) for a in out)
+
+    def test_is_jittable(self):
+        """T4: ``jit`` traces ``indices`` and returns the eager values."""
+        sr, Y = self._design_and_Y()
+
+        # The design is a closure constant: it holds NumPy arrays, not tracers.
+        jitted = jax.jit(lambda outputs: indices(sr, outputs))
+        S1_jit, ST_jit = jitted(Y)
+        S1, ST = indices(sr, Y)
+
+        np.testing.assert_allclose(np.asarray(S1_jit), np.asarray(S1), rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(ST_jit), np.asarray(ST), rtol=1e-6)
+
+    def test_is_vmappable(self):
+        """T4: ``vmap`` maps ``indices`` over a batch of output vectors."""
+        sr, base = self._design_and_Y()
+        X = jnp.asarray(sr.samples)
+        batch = jnp.stack([base, X[:, 0], X[:, 1] ** 2])
+
+        S1_batch, ST_batch = jax.vmap(lambda outputs: indices(sr, outputs))(batch)
+
+        assert S1_batch.shape == (3, 3)
+        for row, outputs in enumerate(batch):
+            S1, ST = indices(sr, outputs)
+            # vmap reassociates the reductions, so float32 agreement is to a
+            # few ULP of the index scale rather than bitwise.
+            np.testing.assert_allclose(
+                np.asarray(S1_batch[row]), np.asarray(S1), rtol=1e-5, atol=1e-6
+            )
+            np.testing.assert_allclose(
+                np.asarray(ST_batch[row]), np.asarray(ST), rtol=1e-5, atol=1e-6
+            )
+
+    def test_jit_of_jacrev(self):
+        """T4: ``jit(jacrev(...))`` compiles a scalar-to-index chain.
+
+        The differentiated quantity is a scale on the design, which changes
+        the model outputs and therefore the Fourier amplitudes. The derivative
+        is compared against a central finite difference under x64, so this
+        checks a number rather than only that the trace succeeded.
+        """
+        with jax.enable_x64():
+            sr = sample(ishigami.PROBLEM, n_per_curve=257, M=4, seed=7)
+            X = jnp.asarray(sr.samples, dtype=jnp.float64)
+
+            def total_s1(scale):
+                return indices(sr, ishigami.evaluate(X * scale))[0].sum()
+
+            jac = float(jax.jit(jax.jacrev(total_s1))(1.0))
+            h = 1e-5
+            fd = (float(total_s1(1.0 + h)) - float(total_s1(1.0 - h))) / (2 * h)
+
+        assert np.isfinite(jac)
+        np.testing.assert_allclose(jac, fd, rtol=1e-5)
+
+    def test_zero_variance_curve_is_nan_without_a_warning(self, recwarn):
+        """T4: the core handles a constant curve in the kernel, not on the host.
+
+        ``analyze`` warns about the same curve. The core cannot, because a
+        warning needs a concrete value, so it reports NaN from inside
+        ``jnp.where`` and says nothing.
+        """
+        sr, Y = self._design_and_Y()
+        # Exactly zero, so the spectrum is exactly zero and V == 0 holds in
+        # floating point. A constant non-zero curve leaves FFT round-off
+        # behind and is a different test.
+        Y = Y.at[: sr.n_per_curve].set(0.0)
+
+        S1, ST = indices(sr, Y)
+
+        assert np.isnan(np.asarray(S1)[0])
+        assert np.isnan(np.asarray(ST)[0])
+        assert [w for w in recwarn if issubclass(w.category, JaxgsaWarning)] == []
+
+    def test_rejects_a_row_count_the_design_cannot_hold(self):
+        """T4: a shape check still raises; only data-driven policy is dropped."""
+        sr, Y = self._design_and_Y()
+
+        with pytest.raises(ValueError, match="rows"):
+            indices(sr, Y[:-1])
+
+
+def test_analyze_offers_no_interval_and_says_why():
+    """T4: eFAST has no ``n_bootstrap``, and the docs give the design reason.
+
+    A curve cannot be resampled and there is one curve per parameter, so an
+    interval needs replicated designs rather than a keyword. That reason is
+    part of the public contract, so it is asserted rather than left to review.
+    """
+    import inspect
+
+    import jaxgsa.efast as efast_pkg
+
+    assert "n_bootstrap" not in inspect.signature(analyze).parameters
+    for text in (analyze.__doc__, efast_pkg.__doc__, efast_pkg._analyze.__doc__):
+        assert text is not None
+        assert "phase" in text
