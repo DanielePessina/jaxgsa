@@ -172,8 +172,14 @@ def _quantile_rank_indices(counts: Array, N: int) -> Array:
         An int32 lookup index into each class's sorted members, shape
         ``(..., M, N)``.
     """
-    # int32-exactness bound: t = r*S + a*digit <= 6N - 3 at S = 2.
-    assert N <= (2**31 + 2) // 6, f"long division is int32-exact only up to N={(2**31 + 2) // 6}"
+    # int32-exactness bound: t = r*S + a*digit <= 6N - 3 at S = 2. A raise,
+    # not an assert: asserts vanish under ``python -O`` and a violated bound
+    # here is silent wrong numbers, not a debug aid.
+    if N > (2**31 + 2) // 6:
+        raise ValueError(
+            f"jaxgsa.optimal_transport: N={N} exceeds {(2**31 + 2) // 6}, the "
+            "largest sample size whose rank arithmetic is int32-exact."
+        )
     # q = floor(a * c / m) with a = 2i + 1 (odd, < 2N) and m = 2N.
     a = 2 * jnp.arange(N, dtype=jnp.int32) + 1  # (N,)
     m = 2 * N

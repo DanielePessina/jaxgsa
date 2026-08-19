@@ -323,7 +323,8 @@ Version 0.10 adds capability.
     estimator trio and its legacy test module, an unused result-axes
     variant, and two never-used parameters.
   - Stale docstrings and comments now describe the current code, and the
-    eight remaining test modules carry oracle-tier lines (ADR 0001).
+    remaining test modules without per-test tier docstrings carry
+    module-level oracle-tier lines (ADR 0001).
 
 - **eFAST and HSIC report no bootstrap interval, and the docs now say why.**
   eFAST has one search curve per parameter, so there is nothing to resample —
