@@ -537,7 +537,7 @@ def analyze(
         ci = CIInfo(
             level=conf_level,
             method=ci_method,
-            n_resamples=n_bootstrap,
+            n_bootstrap=n_bootstrap,
             replicates={"pawn": ctx.squeeze(boot_stack)} if keep_replicates else None,
         )
 

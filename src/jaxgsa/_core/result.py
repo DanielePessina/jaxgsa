@@ -76,10 +76,10 @@ class CIInfo:
             approximation; ``jaxgsa.sobol`` and ``jaxgsa.morris`` offer both.
             The other three bootstrapping methods are hard-wired to the
             percentile interval and record ``"quantile"``.
-        n_resamples: Number of bootstrap resamples drawn.
+        n_bootstrap: Number of bootstrap resamples drawn.
         replicates: The per-resample index values, keyed by the name of the
             estimate they belong to (``"S1"``, ``"mu_star"``, ...). Each
-            array has a leading axis of length ``n_resamples`` followed by
+            array has a leading axis of length ``n_bootstrap`` followed by
             the shape of that estimate. ``None`` unless the analysis ran with
             ``keep_replicates=True``. Keep them to recompute an interval at
             another level, or to compute a bias-corrected one, without
@@ -88,7 +88,7 @@ class CIInfo:
 
     level: float
     method: str
-    n_resamples: int
+    n_bootstrap: int
     replicates: Mapping[str, "Array"] | None = field(default=None, repr=False)
 
     def __repr__(self) -> str:
@@ -99,7 +99,7 @@ class CIInfo:
             kept = "{" + ", ".join(sorted(self.replicates)) + "}"
         return (
             f"CIInfo(level={self.level}, method={self.method!r}, "
-            f"n_resamples={self.n_resamples}, replicates={kept})"
+            f"n_bootstrap={self.n_bootstrap}, replicates={kept})"
         )
 
 

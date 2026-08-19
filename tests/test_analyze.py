@@ -425,7 +425,7 @@ def test_the_bootstrap_batches_slices_instead_of_looping_over_them(monkeypatch):
     Y_multi = jnp.stack([(i + 1.0) * Y for i in range(6)], axis=-1).reshape(-1, 3, 2)
 
     widths: list[int] = []
-    n_resamples: list[int] = []
+    n_bootstrap: list[int] = []
     real_get = sobol_bootstrap._resample_so
 
     def recording_get(estimator: str):
@@ -433,7 +433,7 @@ def test_the_bootstrap_batches_slices_instead_of_looping_over_them(monkeypatch):
 
         def recorder(idx, A, AB, BA, B):
             widths.append(int(A.shape[0]))
-            n_resamples.append(int(idx.shape[0]))
+            n_bootstrap.append(int(idx.shape[0]))
             return kernel(idx, A, AB, BA, B)
 
         return recorder
@@ -442,4 +442,4 @@ def test_the_bootstrap_batches_slices_instead_of_looping_over_them(monkeypatch):
     jaxgsa.sobol.analyze(sr, Y_multi, n_bootstrap=8, key=jax.random.key(2), slice_chunk_size=4)
 
     assert widths == [4, 2], f"expected one full and one short chunk, got {widths}"
-    assert n_resamples == [8, 8], "every call must carry the whole resample batch"
+    assert n_bootstrap == [8, 8], "every call must carry the whole resample batch"

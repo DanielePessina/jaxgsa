@@ -92,7 +92,7 @@ def test_repr_does_not_grow_with_the_output_size(method: str) -> None:
 
 def test_ciinfo_repr_hides_the_stored_draws() -> None:
     """The interval summary names its kept draws without printing them."""
-    ci = CIInfo(level=0.9, method="quantile", n_resamples=3, replicates={"S1": jnp.zeros((3, 8))})
+    ci = CIInfo(level=0.9, method="quantile", n_bootstrap=3, replicates={"S1": jnp.zeros((3, 8))})
     text = repr(ci)
     assert "0." not in text.split("replicates=")[1]
 
@@ -282,7 +282,7 @@ def test_ci_records_the_level_that_ran(method: str) -> None:
     result = _bootstrapped(method, level=0.8, keep=False)
     assert result.ci is not None
     assert result.ci.level == 0.8
-    assert result.ci.n_resamples == 6
+    assert result.ci.n_bootstrap == 6
 
 
 def test_morris_records_the_gaussian_rule_when_asked() -> None:
@@ -330,7 +330,7 @@ def test_replicates_are_present_when_asked(method: str) -> None:
     assert result.ci.replicates
     for name, draws in result.ci.replicates.items():
         estimate = getattr(result, name)
-        assert draws.shape == (result.ci.n_resamples, *estimate.shape), name
+        assert draws.shape == (result.ci.n_bootstrap, *estimate.shape), name
 
 
 def test_morris_physical_units_rescales_the_kept_draws() -> None:
@@ -382,7 +382,7 @@ def test_sobol_keeps_its_draws_only_when_asked() -> None:
     # design carries second order, so S2 has draws as well.
     assert set(kept.ci.replicates) == {"S1", "ST", "S2"}
     for name, draws in kept.ci.replicates.items():
-        assert draws.shape[0] == kept.ci.n_resamples
+        assert draws.shape[0] == kept.ci.n_bootstrap
         assert draws.shape[1:] == getattr(kept, name).shape
 
 

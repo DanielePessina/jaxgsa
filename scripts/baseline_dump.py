@@ -331,7 +331,7 @@ def _m_pawn(case: Case, X: jax.Array, Y: jax.Array) -> Any:
 
 
 def _m_hsic(case: Case, X: jax.Array, Y: jax.Array) -> Any:
-    return hsic.analyze(case.problem, X, Y, n_perms=50, seed=SEED)
+    return hsic.analyze(case.problem, X, Y, n_perms=50, key=jax.random.key(SEED))
 
 
 def _m_optimal_transport(case: Case, X: jax.Array, Y: jax.Array) -> Any:
@@ -362,7 +362,7 @@ def _m_vkoga(case: Case, X: jax.Array, Y: jax.Array) -> Any:
         n_outer=64,
         n_inner=32,
         n_variance=512,
-        seed=SEED,
+        key=jax.random.key(SEED),
     )
 
 

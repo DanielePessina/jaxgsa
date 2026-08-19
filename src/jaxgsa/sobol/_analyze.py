@@ -609,7 +609,7 @@ def _analyze_bootstrap(
         ci=CIInfo(
             level=conf_level,
             method=ci_method,
-            n_resamples=n_bootstrap,
+            n_bootstrap=n_bootstrap,
             replicates=replicates,
         ),
     )

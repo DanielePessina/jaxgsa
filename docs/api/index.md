@@ -187,7 +187,7 @@ interval, or how many resamples it rests on. `CIInfo` does:
   quantiles and `"gaussian"` takes a normal approximation. `sobol` and
   `morris` choose between them with `ci_method`. The other three always use
   the percentile interval and record `"quantile"`.
-- `n_resamples` — the number of bootstrap resamples drawn.
+- `n_bootstrap` — the number of bootstrap resamples drawn.
 - `replicates` — the per-resample values, or `None`.
 
 `result.ci` is `None` when the analysis ran no bootstrap.
@@ -198,7 +198,7 @@ All five `analyze()` functions take `keep_replicates`. It defaults to `False`,
 which throws the draws away once the interval is computed. Pass
 `keep_replicates=True` to keep them in `result.ci.replicates`, a mapping from
 the name of an estimate (`"S1"`, `"mu_star"`, and so on) to an array whose
-leading axis has length `n_resamples`.
+leading axis has length `n_bootstrap`.
 
 Keep them to recompute an interval at another level, or to compute a
 bias-corrected one, without running the analysis again:
@@ -206,7 +206,7 @@ bias-corrected one, without running the analysis again:
 ```python
 result = jaxgsa.sobol.analyze(samples, Y, num_resamples=1000, keep_replicates=True)
 result.ci.level                      # 0.95
-result.ci.n_resamples                # 1000
+result.ci.n_bootstrap                # 1000
 lo, hi = jnp.quantile(result.ci.replicates["S1"], jnp.array([0.05, 0.95]), axis=0)
 ```
 

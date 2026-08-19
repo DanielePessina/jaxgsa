@@ -10,6 +10,71 @@ the work, including seven corrections to the roadmap it replaces.
 
 ### Breaking
 
+- **One word for one concept across every method.** 1.0 freezes the public
+  interface, so the same idea now has the same name, type and position
+  everywhere it appears. Every rename below is a clean break with no alias.
+
+  | Was | Now | Where |
+  |---|---|---|
+  | `num_resamples` | `n_bootstrap` | sobol, morris |
+  | `seed: int` | `key: Array` | pawn, borgonovo, optimal_transport, hsic, vkoga |
+  | `chunk_size` | `resample_chunk_size` | morris |
+  | `CIInfo.n_resamples` | `CIInfo.n_bootstrap` | every result with intervals |
+  | `samples` | `sampling_result` | efast |
+
+  `key` replaces `seed` because a key can be split and an integer cannot.
+  Reseeding from an integer silently correlates repeated or nested draws.
+  Pass `jax.random.key(0)` where you passed `seed=0`.
+
+  `sample()` keeps `seed`. Design generation is host-side `scipy.stats.qmc`
+  and has no JAX PRNG interface, so the split is real and now documented
+  rather than accidental.
+
+- **`borgonovo.analyze` no longer bootstraps by default.** `n_bootstrap` was
+  `100`; it is now `0`, matching every other method. Combined with the new
+  key requirement, the old default would have made the plainest possible call
+  an error.
+
+  `bias_correct` becomes tri-state to match. `None` (the default) applies the
+  Plischke correction whenever there are replicates and does nothing
+  otherwise; `True` asks explicitly and warns when `n_bootstrap` is `0`;
+  `False` never applies it. For a corrected delta, pass `n_bootstrap=100` and
+  a key. The uncorrected estimate is biased upward, because a KDE separation
+  is a distance and sampling noise can only increase it.
+
+- **`ci_method` reaches every method that bootstraps.** pawn, borgonovo and
+  optimal_transport were hard-wired to percentile endpoints while recording
+  `"quantile"`. All three now accept `"quantile"` or `"gaussian"`.
+
+- **`keep_replicates` is keyword-only and last** in every signature. It sat in
+  three different positions.
+
+### Fixed
+
+- **VKOGA ignored `batch_size` in its index estimator.** The keyword reached
+  the surrogate `predict` path only; the estimator's own chunking passed
+  `None`, so the caller's value was silently dropped. It is now threaded
+  through and is a required argument internally, so it cannot be dropped
+  again.
+
+- **HSIC now warns in single precision.** Its V-statistic is a difference of
+  three same-magnitude sums, so float32 keeps three or four digits and the
+  index moves with row order — measured at 6e-4 relative against 2.5e-12 in
+  float64. VKOGA was previously the only method in the library that checked
+  the x64 flag.
+
+- **eFAST derives its slice chunk from the memory budget.** It used a fixed
+  2048 that ignored both dtype and `N`, so one chunk was about 4 GiB at
+  `n_per_curve = 65536` in float64.
+
+### Added
+
+- **`CONTEXT.md`** states the vocabulary the interface is frozen against, and
+  `tests/test_vocabulary.py` reads it back off the method registry. A
+  signature that drifts from the specification now fails a test rather than
+  shipping. Two rules the code does not satisfy yet are recorded as strict
+  xfails, so closing the gap forces the exemption to be deleted.
+
 - **`Problem.input_specs` returns spec dataclasses.** Before, it returned a
   private 6-slot tuple. The tuple used the same two slots for different
   things: `(low, high)` for a uniform marginal, `(mean, variance)` for a
@@ -297,7 +362,7 @@ not a side effect. They are marked **now raises** below.
   whether it was a 95% or a 68% interval, which endpoint rule drew it, or how
   many resamples it rested on. The five results that carry intervals
   (`SobolResult`, `MorrisResult`, `DeltaResult`, `PAWNResult`, `OTResult`) now
-  carry a `ci` field holding `level`, `method`, `n_resamples` and, on request,
+  carry a `ci` field holding `level`, `method`, `n_bootstrap` and, on request,
   `replicates`. `S1` and `S1_conf` are unchanged plain arrays.
 - **`keep_replicates=True` keeps the bootstrap draws.** `analyze` discarded
   them, so recomputing an interval at another level meant re-running the whole

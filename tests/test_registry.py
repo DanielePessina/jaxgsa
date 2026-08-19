@@ -233,10 +233,17 @@ class TestTheSpecsAreTrue:
 
         params = inspect.signature(spec.analyze).parameters
         if spec.bootstrap is None:
-            assert not ({"num_resamples", "n_bootstrap"} & set(params)), (
+            # Only one spelling is legal, so check for that one. Checking a
+            # set of two would keep passing for a method that regressed to
+            # the retired name, which is the failure this guards against.
+            assert "n_bootstrap" not in params, (
                 f"{spec.name} declares no bootstrap but its signature offers one"
             )
         else:
+            assert spec.bootstrap == "n_bootstrap", (
+                f"{spec.name} declares bootstrap={spec.bootstrap!r}; the only "
+                "legal spelling is 'n_bootstrap' (see CONTEXT.md)"
+            )
             assert spec.bootstrap in params
 
 

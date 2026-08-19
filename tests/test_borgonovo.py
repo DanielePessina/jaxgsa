@@ -296,16 +296,17 @@ class TestDeltaBootstrap:
         assert np.all(np.asarray(result.S1_conf[0]) <= np.asarray(result.S1_conf[1]) + 1e-6)
 
     def test_bootstrap_without_a_key_raises(self, ishigami_data):
-        """Tier T4. A bootstrap needs a key, and an int seed is not one.
+        """Tier T4. Asking for a bootstrap without a key is refused.
 
-        ``n_bootstrap`` defaults to 100 here, so a call that passes nothing
-        at all asks for a bootstrap and is refused.
+        The refusal is tied to asking, not to calling: ``n_bootstrap``
+        defaults to 0, so a plain call draws no randomness and needs no key.
+        Both halves are asserted, because a version that demanded a key
+        unconditionally would pass the first check and still be wrong.
         """
         X, Y = ishigami_data
         with pytest.raises(ValueError, match="key is required"):
             analyze(ishigami.PROBLEM, X, Y, n_bootstrap=4)
-        with pytest.raises(ValueError, match="key is required"):
-            analyze(ishigami.PROBLEM, X, Y)
+        analyze(ishigami.PROBLEM, X, Y)
 
     def test_different_keys_differ(self, ishigami_data):
         """Tier T4. A different key draws a different resample."""

@@ -629,7 +629,7 @@ def analyze(
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
-    bias_correct: bool = True,
+    bias_correct: bool | None = None,
     key: Array | None = None,
     slice_chunk_size: int | None = None,
     degenerate_tol: float = _DEGENERATE_BW_TOL,
@@ -691,11 +691,17 @@ def analyze(
             ``+/- z * sd`` of the bootstrap draws, which is smoother for a
             small ``n_bootstrap`` but assumes the draws are normal.
         bias_correct: Apply the Plischke bias reduction
-            ``2*d_hat - mean(d_boot)`` to the delta estimate. It needs
-            replicates, so it does nothing unless you also pass
-            ``n_bootstrap > 0``; asking for it without them warns rather
-            than silently returning the uncorrected estimate. S1 is never
-            bias-corrected, matching SALib.
+            ``2*d_hat - mean(d_boot)`` to the delta estimate.
+
+            ``None`` (the default) applies it whenever there are replicates
+            to apply it with, and does nothing otherwise. ``True`` asks for
+            it explicitly, and warns if ``n_bootstrap`` is ``0``, because
+            then it cannot be delivered. ``False`` never applies it.
+
+            The tri-state exists because the correction needs replicates and
+            replicates are opt-in: a plain ``bias_correct=True`` default
+            beside ``n_bootstrap=0`` would be a contradiction that warns on
+            every default call. S1 is never bias-corrected, matching SALib.
 
             The uncorrected delta is positively biased: a KDE separation is
             a distance, so sampling noise can only push it up. Prefer
@@ -893,17 +899,17 @@ def analyze(
     # The remaining rows are the bootstrap resamples. Building them together
     # means the point estimate and its interval share one code path.
     identity = jnp.arange(N, dtype=jnp.int32)[None, :]
-    if bias_correct and n_bootstrap == 0:
+    if bias_correct is True and n_bootstrap == 0:
         warnings.warn(
             "jaxgsa.borgonovo: bias_correct=True needs bootstrap replicates, and "
             "n_bootstrap is 0, so no bias correction was applied. The delta "
             "returned is the raw estimate, which is biased upward because a KDE "
             "separation is a distance and sampling noise can only increase it. "
-            "Pass n_bootstrap=100 (and a key) for the corrected value, or "
-            "bias_correct=False to silence this.",
+            "Pass n_bootstrap=100 (and a key) for the corrected value.",
             JaxgsaWarning,
             stacklevel=2,
         )
+    apply_bias_correction = bias_correct is not False
 
     if n_bootstrap > 0:
         if key is None:
@@ -990,7 +996,7 @@ def analyze(
         d_boot = jnp.where(degen_boot, d_hat[None], d_all[1:])
         s1_boot = jnp.where(degen_boot, S1[None], s1_all[1:])
 
-        if bias_correct:
+        if apply_bias_correction:
             # Plischke eqn 30 with d_hat on the original sample.
             d_reps = 2.0 * d_hat[None] - d_boot
             delta = jnp.nanmean(d_reps, axis=0)
@@ -1016,7 +1022,7 @@ def analyze(
         ci = CIInfo(
             level=conf_level,
             method=ci_method,
-            n_resamples=n_bootstrap,
+            n_bootstrap=n_bootstrap,
             replicates=(
                 {
                     "delta": ctx.squeeze(d_reps),

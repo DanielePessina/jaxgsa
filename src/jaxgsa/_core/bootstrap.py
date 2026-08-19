@@ -19,7 +19,7 @@ def _percentile_ci(bootstrap_draws: Array, conf_level: float) -> Array:
     """Stack the two-tailed percentile CI endpoints of bootstrap draws.
 
     Args:
-        bootstrap_draws: ``(n_resamples, ...)`` bootstrap replicates.
+        bootstrap_draws: ``(n_bootstrap, ...)`` bootstrap replicates.
         conf_level: Two-sided confidence level, e.g. ``0.95``.
 
     Returns:
@@ -43,7 +43,7 @@ def _bootstrap_ci_endpoints(
     Args:
         estimate: Point estimate the interval is centered on. Used by the
             ``"gaussian"`` method only.
-        bootstrap_draws: ``(n_resamples, ...)`` bootstrap replicates.
+        bootstrap_draws: ``(n_bootstrap, ...)`` bootstrap replicates.
         conf_level: Two-sided confidence level, e.g. ``0.95``.
         ci_method: ``"quantile"`` for the empirical percentile interval, or
             ``"gaussian"`` for the normal-approximation interval.

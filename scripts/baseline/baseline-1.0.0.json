@@ -1,7 +1,7 @@
 {
   "header": {
     "excluded_fields": {},
-    "git_commit": "9d7ee48e10bdb73617c86676c8a8b1661b6996b9",
+    "git_commit": "ddba7b5ee8042db024bd25fd62b5ddb8e0542b3e",
     "inline_array_limit": 1024,
     "jax_default_backend": "cpu",
     "jax_version": "0.10.2",
@@ -51,7 +51,7 @@
             "ci": {
               "level": 0.95,
               "method": "quantile",
-              "n_resamples": 20,
+              "n_bootstrap": 20,
               "replicates": null
             },
             "delta": {
@@ -164,7 +164,7 @@
             "ci": {
               "level": 0.95,
               "method": "quantile",
-              "n_resamples": 10,
+              "n_bootstrap": 10,
               "replicates": null
             },
             "diffusive": {
@@ -260,7 +260,7 @@
             "ci": {
               "level": 0.95,
               "method": "quantile",
-              "n_resamples": 20,
+              "n_bootstrap": 20,
               "replicates": null
             },
             "invalid": {
@@ -435,7 +435,7 @@
             "ci": {
               "level": 0.95,
               "method": "quantile",
-              "n_resamples": 20,
+              "n_bootstrap": 20,
               "replicates": null
             },
             "estimator": "saltelli-jansen",
@@ -532,7 +532,7 @@
             "ci": {
               "level": 0.95,
               "method": "quantile",
-              "n_resamples": 20,
+              "n_bootstrap": 20,
               "replicates": null
             },
             "delta": {
@@ -1092,7 +1092,7 @@
             "ci": {
               "level": 0.95,
               "method": "quantile",
-              "n_resamples": 10,
+              "n_bootstrap": 10,
               "replicates": null
             },
             "diffusive": {
@@ -1195,7 +1195,7 @@
             "ci": {
               "level": 0.95,
               "method": "quantile",
-              "n_resamples": 20,
+              "n_bootstrap": 20,
               "replicates": null
             },
             "invalid": {
@@ -1777,7 +1777,7 @@
             "ci": {
               "level": 0.95,
               "method": "quantile",
-              "n_resamples": 20,
+              "n_bootstrap": 20,
               "replicates": null
             },
             "delta": {
@@ -2425,7 +2425,7 @@
             "ci": {
               "level": 0.95,
               "method": "quantile",
-              "n_resamples": 20,
+              "n_bootstrap": 20,
               "replicates": null
             },
             "invalid": {
@@ -2586,7 +2586,7 @@
             "ci": {
               "level": 0.95,
               "method": "quantile",
-              "n_resamples": 10,
+              "n_bootstrap": 10,
               "replicates": null
             },
             "diffusive": {
@@ -2689,7 +2689,7 @@
             "ci": {
               "level": 0.95,
               "method": "quantile",
-              "n_resamples": 20,
+              "n_bootstrap": 20,
               "replicates": null
             },
             "invalid": {
@@ -3186,7 +3186,7 @@
             "ci": {
               "level": 0.95,
               "method": "quantile",
-              "n_resamples": 20,
+              "n_bootstrap": 20,
               "replicates": null
             },
             "estimator": "saltelli-jansen",
@@ -3828,7 +3828,7 @@
             "ci": {
               "level": 0.95,
               "method": "quantile",
-              "n_resamples": 20,
+              "n_bootstrap": 20,
               "replicates": null
             },
             "delta": {
@@ -6070,7 +6070,7 @@
             "ci": {
               "level": 0.95,
               "method": "quantile",
-              "n_resamples": 20,
+              "n_bootstrap": 20,
               "replicates": null
             },
             "invalid": {
@@ -6643,7 +6643,7 @@
             "ci": {
               "level": 0.95,
               "method": "quantile",
-              "n_resamples": 10,
+              "n_bootstrap": 10,
               "replicates": null
             },
             "diffusive": {
@@ -6968,7 +6968,7 @@
             "ci": {
               "level": 0.95,
               "method": "quantile",
-              "n_resamples": 20,
+              "n_bootstrap": 20,
               "replicates": null
             },
             "invalid": {
@@ -8495,7 +8495,7 @@
             "ci": {
               "level": 0.95,
               "method": "quantile",
-              "n_resamples": 20,
+              "n_bootstrap": 20,
               "replicates": null
             },
             "estimator": "saltelli-jansen",
@@ -9469,7 +9469,7 @@
             "ci": {
               "level": 0.95,
               "method": "quantile",
-              "n_resamples": 20,
+              "n_bootstrap": 20,
               "replicates": null
             },
             "delta": {
@@ -10792,7 +10792,7 @@
             "ci": {
               "level": 0.95,
               "method": "quantile",
-              "n_resamples": 20,
+              "n_bootstrap": 20,
               "replicates": null
             },
             "invalid": {
@@ -11170,7 +11170,7 @@
             "ci": {
               "level": 0.95,
               "method": "quantile",
-              "n_resamples": 10,
+              "n_bootstrap": 10,
               "replicates": null
             },
             "diffusive": {
@@ -11389,7 +11389,7 @@
             "ci": {
               "level": 0.95,
               "method": "quantile",
-              "n_resamples": 20,
+              "n_bootstrap": 20,
               "replicates": null
             },
             "invalid": {
@@ -12978,7 +12978,7 @@
             "ci": {
               "level": 0.95,
               "method": "quantile",
-              "n_resamples": 20,
+              "n_bootstrap": 20,
               "replicates": null
             },
             "estimator": "saltelli-jansen",

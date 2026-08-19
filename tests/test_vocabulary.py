@@ -43,10 +43,12 @@ RETIRED_NAMES = {
     "rng": "key",
 }
 
-# Borgonovo is the one method that bootstraps by default, because its bias
-# correction needs the replicates. Recorded here so the exception is visible
-# rather than discovered.
-BOOTSTRAP_ON_BY_DEFAULT = {"borgonovo"}
+# No method bootstraps by default. Borgonovo's bias correction does need
+# replicates, but a non-zero default plus a required key would make the
+# plainest possible call an error, so it warns instead. Kept as an empty set
+# rather than deleted: if a future method wants an on-by-default interval,
+# this is where the exception gets argued for in writing.
+BOOTSTRAP_ON_BY_DEFAULT: set[str] = set()
 
 # DGSM differentiates a callable, so it cannot take (problem, X, Y) like the
 # other given-data methods. The vocabulary documents this; the test allows it
@@ -70,10 +72,6 @@ BUDGET_GAPS: dict[str, str] = {
         "model for the point kernels, which is a behavioural change, not a "
         "rename. Tracked as the 'honour the memory budget everywhere' item."
     ),
-    "efast": (
-        "efast.slice_chunk_size is int=2048 for the same reason as sobol: a "
-        "plain min() at _analyze.py:249 with no budget derivation."
-    ),
     "morris": (
         "morris.resample_chunk_size defaults to 2048 to match sobol's width. "
         "It does honour the budget as an upper bound; only the default "
@@ -93,8 +91,15 @@ def _budget_params(specs: list[MethodSpec]) -> list[Any]:
 
 
 def _params(spec: MethodSpec) -> dict[str, inspect.Parameter]:
-    """Return the analysis entry point's parameters, keyed by name."""
-    return dict(inspect.signature(spec.analyze).parameters)
+    """Return the analysis entry point's parameters, keyed by name.
+
+    ``eval_str=True`` matters. Most modules here use
+    ``from __future__ import annotations``, so their annotations arrive as
+    strings and ``get_origin`` on a string returns ``None`` — a check for
+    ``Literal`` would fail on the modules that postpone and pass on the ones
+    that do not, which tests the import style rather than the signature.
+    """
+    return dict(inspect.signature(spec.analyze, eval_str=True).parameters)
 
 
 def _all_methods() -> list[MethodSpec]:

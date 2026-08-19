@@ -43,7 +43,7 @@ from jaxgsa.sobol._estimators import first_total_kernel, second_order_kernel
 
 
 def _resolve_slice_chunk_size(
-    slice_chunk_size: int, n_slices: int, n_resamples: int, base_n: int, D: int, itemsize: int
+    slice_chunk_size: int, n_slices: int, n_bootstrap: int, base_n: int, D: int, itemsize: int
 ) -> int:
     """Resolve how many output slices one bootstrap device call may carry.
 
@@ -57,7 +57,7 @@ def _resolve_slice_chunk_size(
         slice_chunk_size: Caller's cap on slices per chunk. It is an upper
             bound only: the memory budget may lower it, never raise it.
         n_slices: Total number of flattened (T, K) output slices.
-        n_resamples: R, the number of bootstrap resamples.
+        n_bootstrap: R, the number of bootstrap resamples.
         base_n: N, the number of base samples per resample.
         D: Number of input parameters.
         itemsize: Bytes per element of the output dtype.
@@ -65,7 +65,7 @@ def _resolve_slice_chunk_size(
     Returns:
         A chunk width in ``[1, n_slices]``.
     """
-    bytes_per_slice = 2 * n_resamples * base_n * (D + 2) * itemsize
+    bytes_per_slice = 2 * n_bootstrap * base_n * (D + 2) * itemsize
     budget = max(1, get_memory_budget() // max(bytes_per_slice, 1))
     return max(1, min(slice_chunk_size, budget, n_slices))
 

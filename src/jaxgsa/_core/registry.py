@@ -47,10 +47,10 @@ class MethodSpec:
     Attributes:
         name: The namespace name, matching the package directory and the entry
             in ``jaxgsa.__all__``.
-        analyze: The public analysis entry point. Three methods export this
-            under a different function name (``analyze_pce``, ``analyze_hdmr``,
-            ``analyze_vkoga``), so a grep for ``def analyze(`` misses them;
-            reading it from here does not.
+        analyze: The public analysis entry point. Every method both exports
+            and defines this as ``analyze``, so a grep finds all thirteen;
+            reading it from here is still the way to enumerate them without
+            knowing the package names.
         sample: The design generator for a design-based method, or ``None``
             for a method that works on data you already have.
         result: The result class the analysis returns.
@@ -59,9 +59,10 @@ class MethodSpec:
         categorical: What the method does with a problem that has categorical
             parameters.
         bootstrap: The keyword that asks for bootstrap confidence intervals,
-            or ``None`` when the method reports no intervals. Two spellings
-            are in use, ``num_resamples`` and ``n_bootstrap``; recording which
-            one lets a caller find it without knowing the method.
+            or ``None`` when the method reports no intervals. There is one
+            spelling, ``n_bootstrap``; the field stays because it also records
+            *whether* a method offers intervals at all, which is not derivable
+            from the name.
         invalid_unit: The block of data the method treats as indivisible when
             dropping non-finite values, or ``None`` when the method delegates
             to a backend and has no unit of its own. Dropping half a Saltelli
