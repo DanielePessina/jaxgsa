@@ -590,6 +590,45 @@ class TestOTValidation:
         with pytest.raises(ValueError, match="epsilon"):
             analyze(ishigami.PROBLEM, X, Y, epsilon=0.0)
 
+    def test_negative_epsilon(self, ishigami_data):
+        """Tier T4. A negative epsilon is still refused up front."""
+        X, Y = ishigami_data
+        with pytest.raises(ValueError, match="epsilon"):
+            analyze(ishigami.PROBLEM, X, Y, epsilon=-0.01)
+
+    def test_nan_epsilon(self, ishigami_data):
+        """Tier T4. epsilon=NaN is refused at both entry points.
+
+        The check used to be ``not epsilon <= 0``, which NaN passes
+        (``NaN <= 0`` is False). NaN then poisoned ``log_K``, the Sinkhorn
+        loop exited at once (``NaN > tol`` is False), the convergence
+        warning counted zero failures, and the user got NaN indices with
+        zero diagnostics. The positive check ``epsilon > 0`` is also False
+        for NaN, so it raises.
+        """
+        X, Y = ishigami_data
+        with pytest.raises(ValueError, match="epsilon"):
+            analyze(ishigami.PROBLEM, X, Y, epsilon=float("nan"))
+        with pytest.raises(ValueError, match="epsilon"):
+            jaxgsa.optimal_transport.indices(ishigami.PROBLEM, X, Y, epsilon=float("nan"))
+
+    def test_nan_tol(self, ishigami_data):
+        """Tier T4. tol=NaN is refused at both entry points."""
+        X, Y = ishigami_data
+        with pytest.raises(ValueError, match="tol"):
+            analyze(ishigami.PROBLEM, X, Y, tol=float("nan"))
+        with pytest.raises(ValueError, match="tol"):
+            jaxgsa.optimal_transport.indices(ishigami.PROBLEM, X, Y, tol=float("nan"))
+
+    def test_valid_epsilon_and_tol_pass(self, ishigami_data):
+        """Tier T4. Valid epsilon and tol still pass validation."""
+        X, Y = ishigami_data
+        Y2 = jnp.stack([Y[:512], Y[:512] ** 2], axis=1)
+        result = analyze(
+            ishigami.PROBLEM, X[:512], Y2, mode="multivariate", epsilon=0.05, tol=1e-4
+        )
+        assert np.all(np.isfinite(np.asarray(result.ot)))
+
     def test_bad_tol(self, ishigami_data):
         X, Y = ishigami_data
         with pytest.raises(ValueError, match="tol"):

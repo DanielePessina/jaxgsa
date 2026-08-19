@@ -873,7 +873,12 @@ def analyze(
         on_invalid=on_invalid,
         checks=(
             require(mode in _MODES, f"mode must be one of {_MODES}, got {mode!r}"),
-            require(not epsilon <= 0, f"epsilon must be > 0, got {epsilon}"),
+            # Written as a positive comparison so NaN is rejected too:
+            # ``epsilon > 0`` is False for NaN, while ``not epsilon <= 0``
+            # was True for NaN and let it flow into log_K, where the
+            # Sinkhorn loop exits at once (NaN > tol is False) and returns
+            # NaN indices with zero diagnostics.
+            require(epsilon > 0, f"epsilon must be > 0, got {epsilon}"),
             at_least("max_iter", max_iter, 1),
             require(tol is None or tol > 0, f"tol must be > 0, got {tol}"),
             at_least("n_bootstrap", n_bootstrap, 0),
@@ -1173,7 +1178,12 @@ def indices(
     check_scalars(
         (
             require(mode in _MODES, f"mode must be one of {_MODES}, got {mode!r}"),
-            require(not epsilon <= 0, f"epsilon must be > 0, got {epsilon}"),
+            # Written as a positive comparison so NaN is rejected too:
+            # ``epsilon > 0`` is False for NaN, while ``not epsilon <= 0``
+            # was True for NaN and let it flow into log_K, where the
+            # Sinkhorn loop exits at once (NaN > tol is False) and returns
+            # NaN indices with zero diagnostics.
+            require(epsilon > 0, f"epsilon must be > 0, got {epsilon}"),
             at_least("max_iter", max_iter, 1),
             require(tol is None or tol > 0, f"tol must be > 0, got {tol}"),
             at_least("slice_chunk_size", slice_chunk_size, 1),

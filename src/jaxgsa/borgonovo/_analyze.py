@@ -120,15 +120,29 @@ _DELTA_RANGE_TOL = 0.05
 # A discrete output breaks the estimator. The KDE of an atomic density is a
 # spike the output grid cannot resolve, so delta is meaningless. An output
 # column counts as discrete when it takes at most this many distinct values
-# and those values are a vanishing fraction of the sample. Both conditions
-# must hold, so the guard does not refuse a continuous output rounded to a
-# few decimals, which has many distinct values at any useful N. A column
+# and each value repeats at least _DISCRETE_MIN_MULTIPLICITY times on
+# average, that is ``n_distinct * _DISCRETE_MIN_MULTIPLICITY <= N``. Both
+# conditions must hold, so the guard does not refuse a continuous output
+# rounded to a few decimals, which has many distinct values at any useful N.
+# The multiplicity term is the discriminator: a continuous float output
+# collides only through rounding, and even coarse rounding keeps the average
+# multiplicity near 1, while an atom must repeat to be an atom. Five repeats
+# per value on average cannot come from continuity. An earlier version used
+# a fraction test, ``n_distinct < 0.01 * N``, which is vacuous at small N:
+# a binary (0/1) output passed at N <= 200 (2 < 0.01*150 is false) and a
+# 10-level output passed up to N = 1000, so analyze returned a delta that
+# describes grid_size rather than the model. The multiplicity rule refuses
+# a binary output at N = 150 (2*5 <= 150) and a 10-level output at N = 500
+# (10*5 <= 500), still accepts a continuous output at N = 100 (~100
+# distinct values, above the cap), and is a strict superset of the old
+# refusals (d < 0.01*N implies 5*d < 0.05*N <= N), so no previously refused
+# case is now accepted and the large-N behavior is identical. A column
 # with a single distinct value is exempt. A constant output needs no
 # density, every conditional equals the unconditional, and delta = S1 = 0 is
 # the exact answer rather than a failed computation. That contract predates
 # this guard and stays.
 _DISCRETE_MAX_DISTINCT = 20
-_DISCRETE_DISTINCT_FRACTION = 0.01
+_DISCRETE_MIN_MULTIPLICITY = 5
 # Live copies of the conditional-KDE tensor to budget for. The tensor is
 # built, exponentiated, masked and then reduced, and the XLA CPU runtime was
 # measured holding roughly three of those stages resident at once. The slice
@@ -581,8 +595,8 @@ def _raise_discrete_output(problem: Problem, Y: Array) -> None:
     expensive work.
 
     An output column counts as discrete only when it takes at most
-    ``_DISCRETE_MAX_DISTINCT`` distinct values and those values are fewer
-    than ``_DISCRETE_DISTINCT_FRACTION`` of the sample. Both conditions
+    ``_DISCRETE_MAX_DISTINCT`` distinct values and each value repeats at
+    least ``_DISCRETE_MIN_MULTIPLICITY`` times on average. Both conditions
     must hold, so a continuous output rounded to a few decimals keeps
     working. A constant column, with one distinct value, is exempt. It
     needs no density, and ``delta = S1 = 0`` is its exact answer.
@@ -604,7 +618,7 @@ def _raise_discrete_output(problem: Problem, Y: Array) -> None:
     discrete = (
         (n_distinct > 1)
         & (n_distinct <= _DISCRETE_MAX_DISTINCT)
-        & (n_distinct < _DISCRETE_DISTINCT_FRACTION * N)
+        & (n_distinct * _DISCRETE_MIN_MULTIPLICITY <= N)
     )
     bad = np.flatnonzero(discrete)
     if bad.size == 0:
@@ -904,8 +918,8 @@ def analyze(
         compares Gaussian kernel density estimates on a shared output grid,
         and a discrete output has atoms that no grid resolves. ``analyze``
         checks the output up front and raises ``ValueError`` when a column
-        takes at most 20 distinct values and those values are fewer than 1%
-        of the sample. Use :func:`jaxgsa.optimal_transport.analyze` for a
+        takes at most 20 distinct values and each value repeats at least 5
+        times on average. Use :func:`jaxgsa.optimal_transport.analyze` for a
         discrete output: it compares empirical distributions directly and
         needs no density. The check does not refuse a continuous output
         rounded to a few decimals, and it does not refuse a constant

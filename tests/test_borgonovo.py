@@ -489,6 +489,55 @@ class TestDeltaRegression:
         with pytest.raises(ValueError, match="continuous output distribution only"):
             analyze(ishigami.PROBLEM, X, jnp.asarray(Y_np), n_bootstrap=0)
 
+    def test_discrete_guard_refuses_binary_output_at_small_n(self):
+        """Tier T4. A binary output is refused at N=150, not just at large N.
+
+        The old rule also required ``n_distinct < 0.01 * N``, which no
+        small sample can satisfy: a binary output passed at N <= 200, and
+        analyze returned a delta that describes ``grid_size`` rather than
+        the model. The rule is now an average-multiplicity test.
+        """
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=150, seed=2))
+        binary = jnp.asarray(np.random.default_rng(1).integers(0, 2, size=150).astype(np.float64))
+        with pytest.raises(ValueError, match="continuous output distribution only"):
+            analyze(ishigami.PROBLEM, X, binary)
+
+    def test_discrete_guard_refuses_ten_level_output_at_n_500(self):
+        """Tier T4. A 10-level output is refused at N=500.
+
+        Under the old fraction rule this needed N > 1000. At N=500 each
+        level repeats 50 times on average, which continuity cannot do.
+        """
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=500, seed=3))
+        ten = jnp.asarray(np.random.default_rng(2).integers(0, 10, size=500).astype(np.float64))
+        with pytest.raises(ValueError, match="continuous output distribution only"):
+            analyze(ishigami.PROBLEM, X, ten)
+
+    def test_discrete_guard_accepts_continuous_output_at_n_100(self):
+        """Tier T4. A continuous output at N=100 is accepted.
+
+        It has ~100 distinct values, above the 20-value cap, so it is
+        structurally safe whatever the multiplicity term says.
+        """
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=100, seed=4))
+        result = analyze(ishigami.PROBLEM, X, ishigami.evaluate(X))
+        assert np.all(np.isfinite(np.asarray(result.delta)))
+
+    def test_discrete_guard_large_n_baseline_unchanged(self):
+        """Tier T4. The large-N behavior of the guard does not move.
+
+        The multiplicity rule is a strict superset of the old fraction
+        rule (``d < 0.01*N`` implies ``5*d <= N``), so a rounded
+        continuous output with many distinct values stays accepted, and
+        the N=1000 rare-event refusal above stays a refusal.
+        """
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=5000, seed=5))
+        rounded = jnp.round(ishigami.evaluate(X), 1)
+        n_distinct = np.unique(np.asarray(rounded)).size
+        assert n_distinct > 20  # rounding to one decimal keeps many values
+        result = analyze(ishigami.PROBLEM, X, rounded)
+        assert np.all(np.isfinite(np.asarray(result.delta)))
+
     def test_rare_event_bias_correction_not_inflated(self):
         """A rare-event output must not make the bias correction inflate delta.
 

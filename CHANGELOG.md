@@ -59,8 +59,14 @@ Version 0.10 adds capability.
   | `morris` | `prenormalize: bool = False` | renamed `standardize_outputs` |
   | `dgsm` | — | new `standardize_outputs: bool = False` |
 
-  `hsic` and `optimal_transport` keep `prenormalize`. It does real work
-  there: both build kernels or distances from `Y` itself, not from a ratio.
+  `hsic` also loses the keyword, with no replacement. Its `bandwidth` is now
+  a multiplier on the median heuristic. The heuristic carries the scale of
+  `Y`, so the indices are invariant under `Y -> a*Y + b`. Standardizing `Y`
+  first therefore changes nothing, and a no-op keyword would mislead.
+
+  `optimal_transport` keeps this behavior under the name `standardize`
+  (default `True`). It does real work there: the method builds distances
+  from `Y` itself, not from a ratio.
 
   On `morris` and `dgsm` the keyword earns its place, because those two
   return dimensional quantities. Under `Y -> a*Y + b`, Morris's `mu`,
