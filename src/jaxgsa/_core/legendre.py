@@ -14,6 +14,8 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from jaxgsa._core.precision import default_float_dtype
+
 
 @overload
 def legendre_orthonormal(x: Array, max_degree: int) -> Array: ...
@@ -40,8 +42,12 @@ def legendre_orthonormal(x: Array | np.ndarray, max_degree: int) -> Array | np.n
     Returns:
         ``(..., max_degree + 1)`` basis values, in the default float dtype.
     """
-    xp = jnp if isinstance(x, jax.Array) else np
-    x = x.astype(xp.zeros(()).dtype)
+    on_device = isinstance(x, jax.Array)
+    xp = jnp if on_device else np
+    # The JAX backend's default float is float32 or float64 depending on the
+    # x64 flag; NumPy's is always float64. One helper answers the first
+    # question, so the flag is not read a third way here.
+    x = x.astype(default_float_dtype() if on_device else np.float64)
     columns = [xp.ones_like(x)]
     if max_degree >= 1:
         columns.append(x)

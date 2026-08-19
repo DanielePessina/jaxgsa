@@ -73,6 +73,7 @@ from jaxgsa._core.invalid import (
     check_invalid,
     resolve_policy,
 )
+from jaxgsa._core.precision import warn_on_float64_downcast
 from jaxgsa._core.validation import (
     YLayout,
     _prepare_Y,
@@ -363,6 +364,10 @@ class Preamble:
         """
         method, unit = self.method, self.unit
         problem = self.problem
+        # Before any jnp.asarray: that call is where a float64 array loses its
+        # extra digits with x64 off, and the dtype it had is unreadable
+        # afterwards. X is not a candidate; see warn_on_float64_downcast.
+        warn_on_float64_downcast(method, {"Y": Y})
         extra_arrays = {name: jnp.asarray(a) for name, a in (extra or {}).items()}
 
         if X is not None:
@@ -625,7 +630,7 @@ def validate_inputs(problem: Problem, X: Any) -> Array:
     return X
 
 
-def _model_side(Y: Array, extras: Iterable[Array]) -> npt.NDArray[np.floating]:
+def _model_side(Y: Array, extras: Iterable[Array]) -> Array:
     """Stack the output and its companion arrays into one block for the check.
 
     :func:`jaxgsa._core.invalid.check_invalid` takes two arrays and labels them
@@ -635,6 +640,14 @@ def _model_side(Y: Array, extras: Iterable[Array]) -> npt.NDArray[np.floating]:
     Flattening each array past its leading axis is what lets arrays of
     different rank sit side by side; only finiteness is read off the result.
 
+    The block is built on device, in whatever dtype the caller's arrays
+    promote to. It used to be built on the host in ``float64``, which was a
+    round trip to nothing: ``check_invalid`` hands the block straight back to
+    ``jnp.asarray``, so with x64 off the widened values were truncated again
+    on the way in. Worse, the truncation could change the verdict — a finite
+    float64 magnitude above the float32 range becomes ``inf``, and the row
+    would be reported as non-finite output the caller cannot find.
+
     Args:
         Y: Model output, leading axis the sample axis.
         extras: Further arrays with the same leading axis.
@@ -642,5 +655,5 @@ def _model_side(Y: Array, extras: Iterable[Array]) -> npt.NDArray[np.floating]:
     Returns:
         A 2-D array of shape ``(N, ·)`` holding all of them.
     """
-    blocks = [np.asarray(a, dtype=float).reshape(np.asarray(a).shape[0], -1) for a in (Y, *extras)]
-    return np.concatenate(blocks, axis=1)
+    blocks = [jnp.asarray(a).reshape(jnp.asarray(a).shape[0], -1) for a in (Y, *extras)]
+    return jnp.concatenate(blocks, axis=1)

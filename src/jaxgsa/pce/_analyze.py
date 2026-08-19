@@ -15,6 +15,7 @@ from jaxgsa._core.batching import get_memory_budget, resolve_batch_size
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.entry import at_least, check_scalars, in_open_interval, one_of, prepare
 from jaxgsa._core.invalid import OnInvalid
+from jaxgsa._core.precision import unit_clip_bounds
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.sampling import UNIT_CLIP
 from jaxgsa._core.surrogate import _PredictPlan
@@ -137,7 +138,15 @@ def _map_to_reference(X: Array, problem: Problem, order: int) -> tuple[Array, tu
             a = -np.inf if lo is None else (lo - mean) / std
             b = np.inf if hi is None else (hi - mean) / std
             u = _truncnorm_cdf((X[:, d] - mean) / std, a, b)
-            u = jnp.clip(u, UNIT_CLIP, 1.0 - UNIT_CLIP)
+            # The clip keeps u strictly inside (0, 1), so a sample at or
+            # beyond a truncation bound stays distinguishable from the bound
+            # itself. In float32 its upper half did nothing at all --
+            # ``1 - UNIT_CLIP`` is exactly 1.0 there -- so the bound is
+            # brought inside u's own dtype instead. The lower bound stays at
+            # UNIT_CLIP, which float32 represents exactly; widening it for
+            # symmetry would discard information and move numbers for
+            # nothing. See unit_clip_bounds.
+            u = jnp.clip(u, *unit_clip_bounds(UNIT_CLIP, u.dtype))
             cols.append(2.0 * u - 1.0)
             input_types.append("uniform")
         else:

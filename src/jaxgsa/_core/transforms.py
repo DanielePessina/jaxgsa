@@ -9,6 +9,7 @@ import numpy as np
 from jax import Array
 from jax.scipy.special import ndtr
 
+from jaxgsa._core.precision import unit_clip_bounds
 from jaxgsa._core.sampling import UNIT_CLIP
 from jaxgsa.problem import CategoricalSpec, Problem, UniformSpec
 
@@ -71,9 +72,10 @@ def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
     The two families do not treat the interval ends the same way, and the
     difference is deliberate.
 
-    * A Gaussian column is clipped to ``[UNIT_CLIP, 1 - UNIT_CLIP]``. The
-      normal CDF saturates to exactly 0 or 1 in the far tails at float
-      precision, and the clip keeps those samples off the ends.
+    * A Gaussian column is clipped to ``[UNIT_CLIP, 1 - UNIT_CLIP]``, with the
+      upper bound brought inside the column's own dtype. The normal CDF
+      saturates to exactly 0 or 1 in the far tails at float precision, and the
+      clip keeps those samples off the ends.
     * A uniform column is not clipped. The affine map is exact, so a sample
       inside the declared bounds already lands in ``[0, 1]``, and 0 and 1 are
       legitimate values for a sample that sits on a bound. A sample *outside*
@@ -130,6 +132,11 @@ def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
             u = _truncnorm_cdf((X[:, d] - spec.mean) / std, a, b)
         else:  # unbounded Gaussian -- stays on device via jax.scipy
             u = jax_norm.cdf(X[:, d], loc=spec.mean, scale=std)
-        cols.append(jnp.clip(u, UNIT_CLIP, 1.0 - UNIT_CLIP))
+        # The upper bound is pulled in to the last float below 1.0 when the
+        # dtype cannot tell 1 - UNIT_CLIP from 1. The lower bound is left at
+        # UNIT_CLIP, which float32 represents exactly; widening it for
+        # symmetry would discard information and move numbers for nothing.
+        # See unit_clip_bounds.
+        cols.append(jnp.clip(u, *unit_clip_bounds(UNIT_CLIP, u.dtype)))
 
     return jnp.column_stack(cols)

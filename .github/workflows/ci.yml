@@ -41,6 +41,37 @@ jobs:
       - name: Run tests
         run: uv run pytest -q
 
+  # The same suite in double precision.
+  #
+  # jaxgsa ships no x64 wrapper and sets no flag: it computes in whatever
+  # precision JAX is configured for (ADR 0014). Both settings are therefore
+  # supported configurations, and only one of them was ever run. The
+  # difference is not cosmetic — a warning that correctly fires only in
+  # float32, a clip bound that only bites in float64, a dtype-dependent
+  # tolerance — and ten tests had quietly accumulated a float32 assumption by
+  # the time anyone ran the suite with the flag on.
+  #
+  # One Python version, not the matrix: this job asks about a JAX flag, and
+  # nothing about it varies with the interpreter.
+  x64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install project and dev dependencies
+        run: uv sync --extra dev
+
+      - name: Run tests in double precision
+        env:
+          JAX_ENABLE_X64: "1"
+        run: uv run pytest -q
+
   # The fixed-seed numerical baseline. Separate from `test` so a multi-minute
   # numerical dump stays out of local `pytest -q`, and so a moved number
   # reports as its own failure rather than one more red test.

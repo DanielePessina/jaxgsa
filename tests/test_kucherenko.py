@@ -325,7 +325,15 @@ class TestOnInvalidPolicy:
         assert result.invalid.n_invalid == 0
         assert result.invalid.n_units == self.N
         assert result.invalid.unit is InvalidUnit.BASE_POINT
-        assert [w for w in recwarn if issubclass(w.category, JaxgsaWarning)] == []
+        # The precision warning is about the arithmetic, not the data: this
+        # Y is float64 on purpose, so with x64 off the preamble says it is
+        # about to be truncated. A clean sample must still report nothing.
+        left = [
+            w
+            for w in recwarn
+            if issubclass(w.category, JaxgsaWarning) and "truncated" not in str(w.message)
+        ]
+        assert left == []
 
     def test_a_bad_on_invalid_value_is_rejected(self):
         """T4: an unknown policy name is refused before anything is computed."""

@@ -40,7 +40,10 @@ from jaxgsa._core.entry import (
     prepare_scalars,
     require,
 )
+from jaxgsa._core.precision import unit_clip_bounds
 from jaxgsa._core.registry import methods
+from jaxgsa._core.sampling import UNIT_CLIP
+from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa._core.validation import _correlation_tolerant_methods
 
 D = 3
@@ -398,3 +401,100 @@ class TestExtraArraysRideWithY:
     def test_a_context_with_no_extra_carries_an_empty_mapping(self):
         X, Y = _xy()
         assert prepare(methods()["borgonovo"], PROBLEM, Y, X=X).extra == {}
+
+
+class TestAFloat64OutputIsNotTruncatedInSilence:
+    """Passing float64 with x64 off loses digits; the preamble says so once.
+
+    ``jnp.asarray`` on a float64 array returns float32 when ``jax_enable_x64``
+    is off, with no signal of any kind. A caller who produced double-precision
+    outputs on purpose then reads indices computed at a precision they did not
+    choose. ADR 0014 keeps float32 as the default and takes on exactly one
+    obligation in exchange: never destroy precision silently.
+    """
+
+    def _double(self):
+        X = np.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, N, seed=0), dtype=np.float64)
+        return X, np.asarray(X[:, 0] + 2.0 * X[:, 1] ** 2, dtype=np.float64)
+
+    def _downcast_warnings(self, Y, **kwargs):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            prepare_scalars(methods()["borgonovo"], PROBLEM).with_data(Y, **kwargs)
+        return [w for w in caught if "truncated" in str(w.message)]
+
+    def test_a_float64_output_warns_naming_the_fix(self):
+        X, Y = self._double()
+        caught = self._downcast_warnings(Y, X=X)
+        if bool(getattr(jax.config, "jax_enable_x64", False)):
+            assert caught == []  # nothing is lost, so there is nothing to say
+            return
+        assert len(caught) == 1
+        message = str(caught[0].message)
+        assert issubclass(caught[0].category, JaxgsaWarning)
+        assert "Y" in message and "jax_enable_x64" in message
+
+    def test_a_float32_output_stays_quiet(self):
+        X, Y = self._double()
+        assert self._downcast_warnings(np.asarray(Y, dtype=np.float32), X=X) == []
+
+    def test_one_warning_per_analysis(self):
+        """One sentence for the call, not one per array it looked at."""
+        if bool(getattr(jax.config, "jax_enable_x64", False)):
+            pytest.skip("nothing is downcast under x64")
+        X, Y = self._double()
+        caught = self._downcast_warnings(Y, X=X, extra={"jac": np.zeros((N, D))})
+        assert len(caught) == 1
+
+    def test_the_input_matrix_is_not_a_candidate(self):
+        """X is float64 because jaxgsa's own samplers build it that way.
+
+        Warning about it would fire on essentially every call and name a
+        downcast the caller cannot avoid without turning x64 on for the
+        design as well. The same goes for the companion arrays: dgsm's
+        autodiff path puts a synthetic float64 flag column in ``extra``.
+        """
+        X, Y = self._double()
+        Y32 = np.asarray(Y, dtype=np.float32)
+        assert np.asarray(X).dtype == np.float64  # the premise of the test
+        assert self._downcast_warnings(Y32, X=X) == []
+        assert self._downcast_warnings(Y32, X=X, extra={"jac": np.zeros((N, D))}) == []
+
+    def test_the_output_keeps_the_caller_s_dtype(self):
+        """Whatever JAX is configured for, the preamble does not widen it."""
+        X, Y = self._double()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", JaxgsaWarning)
+            ctx = prepare(methods()["borgonovo"], PROBLEM, np.asarray(Y, dtype=np.float32), X=X)
+        assert ctx.Y.dtype == jnp.float32
+        assert ctx.Y3.dtype == jnp.float32
+
+
+class TestTheUnitClipSurvivesFloat32:
+    """``1 - UNIT_CLIP`` has to be a number below 1 in the dtype it runs in.
+
+    The clip keeps a unit coordinate off 0 and 1 so an inverse CDF stays
+    finite. At ``UNIT_CLIP = 1e-12`` the upper half of it was a no-op in
+    float32 — ``1 - 1e-12`` rounds straight back to 1.0 there — while the
+    float64 host twin of the same transform clipped properly.
+    """
+
+    def test_the_upper_bound_is_below_one_in_both_dtypes(self):
+        for dtype in (np.float32, np.float64):
+            low, high = unit_clip_bounds(UNIT_CLIP, dtype)
+            assert low == UNIT_CLIP
+            assert dtype(high) < dtype(1.0)
+
+    def test_float64_keeps_the_nominal_bound(self):
+        """float64 can represent it, so nothing is given away."""
+        assert unit_clip_bounds(UNIT_CLIP, np.float64) == (UNIT_CLIP, 1.0 - UNIT_CLIP)
+
+    def test_a_saturated_normal_cdf_does_not_become_infinite(self):
+        """The reason the clip exists, at the dtype that used to skip it."""
+        problem = jaxgsa.Problem.from_dict(
+            {"g": jaxgsa.GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0)}
+        )
+        X = jnp.asarray([[40.0], [-40.0]], dtype=jnp.float32)
+        u = cdf_to_unit_interval(X, problem)
+        assert np.all(np.asarray(u) < 1.0)
+        assert np.all(np.isfinite(np.asarray(jax.scipy.special.ndtri(u))))
