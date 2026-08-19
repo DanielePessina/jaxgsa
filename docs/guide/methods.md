@@ -731,7 +731,7 @@ HSIC is a dependence measure rather than a variance fraction, so jaxgsa attaches
 2. You evaluate your model on the samples.
 3. `jaxgsa.hsic.analyze()` transforms each parameter to $[0, 1]$ via its marginal CDF, builds the kernel matrices with the median heuristic, and computes all indices and p-values in a single JIT-compiled pass.
 
-HSIC is $O(N^2)$ in time and memory because it forms $N \times N$ kernel matrices, about $2D + 1$ of them resident at once. No option bounds this; reduce $N$ if memory is the limit, or screen with a cheaper method first. For outputs of large magnitude, set `prenormalize=True` to standardise $Y$ before kernel construction.
+HSIC is $O(N^2)$ in time and memory because it forms $N \times N$ kernel matrices, about $2D + 1$ of them resident at once. No option bounds this; reduce $N$ if memory is the limit, or screen with a cheaper method first. The indices do not depend on the output units, but outputs of extreme magnitude can overflow float32 in the squared distances; rescale by hand with `(Y - Y.mean(0)) / Y.std(0)`, which changes nothing else.
 
 ### Index summary
 

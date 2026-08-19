@@ -238,8 +238,10 @@ D is always the last axis of the index arrays.
   not variance fractions.
 - The total HSIC index uses product kernels across all D inputs. For very
   high D (> 15), the product kernel can underflow in float32.
-- For outputs with large magnitude, set `prenormalize=True` to standardize
-  Y before kernel computation.
+- The indices do not depend on the output units: the bandwidth tracks the
+  data. Outputs of extreme magnitude are still worth rescaling by hand,
+  because the squared distances can overflow float32 first;
+  `(Y - Y.mean(0)) / Y.std(0)` changes nothing else.
 - Inputs are automatically transformed to [0, 1] via their marginal CDF,
   ensuring comparable bandwidths across dimensions. The marginal CDF of an
   input maps its values to the probability of drawing something smaller.

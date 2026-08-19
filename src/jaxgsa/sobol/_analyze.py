@@ -44,8 +44,8 @@ from jaxgsa._core.invalid import InvalidReport, OnInvalid
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
     YLayout,
-    _prenormalize_outputs,
     _prepare_Y,
+    _standardize_outputs,
 )
 from jaxgsa.sobol._chunking import pad_slice_axis, resolve_point_chunk_size
 from jaxgsa.sobol._estimators import (
@@ -125,7 +125,7 @@ def _separate_output_values(
     """
     # Per output slice: axis 0 is the expanded sample axis, every trailing
     # axis keeps its own mean and standard deviation.
-    Y, _, _, _ = _prenormalize_outputs(Y)
+    Y, _, _, _ = _standardize_outputs(Y)
 
     step = 2 * D + 2 if calc_second_order else D + 2
     n_rows = Y.shape[0]

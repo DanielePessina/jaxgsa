@@ -613,7 +613,7 @@ def _warn_zero_variance_slices(
         )
 
 
-def _prenormalize_outputs(Y: Array) -> tuple[Array, Array, Array, Array]:
+def _standardize_outputs(Y: Array) -> tuple[Array, Array, Array, Array]:
     """Standardize outputs over the sample axis.
 
     Args:

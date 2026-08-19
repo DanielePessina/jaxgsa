@@ -383,12 +383,17 @@ class TestOTPointCloud:
         assert np.all(joint_ot > sep_ot - 1e-4)
         np.testing.assert_allclose(joint_ot, sep_ot, atol=0.12)
 
-    def test_standardize_matters_for_mismatched_scales(self, multi_output_data):
+    def test_standardize_outputs_matters_for_mismatched_scales(self, multi_output_data):
         X, Y2, _ = multi_output_data
         Y_scaled = Y2.at[:, 1].multiply(1e4)
         r_std = analyze(ishigami.PROBLEM, X, Y_scaled, mode="multivariate", n_partitions=10)
         r_raw = analyze(
-            ishigami.PROBLEM, X, Y_scaled, mode="multivariate", n_partitions=10, standardize=False
+            ishigami.PROBLEM,
+            X,
+            Y_scaled,
+            mode="multivariate",
+            n_partitions=10,
+            standardize_outputs=False,
         )
         assert not np.allclose(np.asarray(r_std.ot), np.asarray(r_raw.ot), atol=1e-3)
 
@@ -867,8 +872,8 @@ class TestIndicesPureCore:
             np.testing.assert_array_equal(np.asarray(adv), np.asarray(result.advective))
             np.testing.assert_array_equal(np.asarray(diff), np.asarray(result.diffusive))
 
-    def test_standardize_reaches_the_joint_core(self, multi_output_data):
-        """Tier T4: ``standardize`` is honoured identically by core and ``analyze``.
+    def test_standardize_outputs_reaches_the_joint_core(self, multi_output_data):
+        """Tier T4: ``standardize_outputs`` is honoured identically by core and ``analyze``.
 
         The keyword is arithmetic over the sample axis, not policy, so the
         core carries it. Turning it off must change the joint indices and
@@ -879,9 +884,9 @@ class TestIndicesPureCore:
         kwargs: dict[str, Any] = {"mode": "multivariate", "n_partitions": 8}
         on = jaxgsa.optimal_transport.indices(ishigami.PROBLEM, X, Y3, **kwargs)[0]
         off = jaxgsa.optimal_transport.indices(
-            ishigami.PROBLEM, X, Y3, standardize=False, **kwargs
+            ishigami.PROBLEM, X, Y3, standardize_outputs=False, **kwargs
         )[0]
-        reference = analyze(ishigami.PROBLEM, X, Y3, standardize=False, **kwargs)
+        reference = analyze(ishigami.PROBLEM, X, Y3, standardize_outputs=False, **kwargs)
 
         assert not np.allclose(np.asarray(on), np.asarray(off))
         np.testing.assert_array_equal(np.asarray(off), np.asarray(reference.ot))

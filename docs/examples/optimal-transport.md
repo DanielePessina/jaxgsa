@@ -140,7 +140,7 @@ the entire curve at once, including temporal correlation, rather than a
 per-timepoint average.
 
 In the `multivariate` and `trajectory` modes, outputs are standardized
-per column by default (`standardize=True`) so no output dominates the
+per column by default (`standardize_outputs=True`) so no output dominates the
 transport cost through its units.
 
 ## The entropic floor and the dummy baseline

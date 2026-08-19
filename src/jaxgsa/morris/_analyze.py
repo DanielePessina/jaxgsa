@@ -28,8 +28,8 @@ from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
-    _prenormalize_outputs,
     _prepare_Y,
+    _standardize_outputs,
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.morris._result import MorrisResult
@@ -232,7 +232,7 @@ def indices(
     """
     Y3, layout = _prepare_Y(sampling_result.expand_outputs(Y))
     if standardize_outputs:
-        Y3, _, _, _ = _prenormalize_outputs(Y3)
+        Y3, _, _, _ = _standardize_outputs(Y3)
     idx_after, idx_before, delta = _ee_bookkeeping(sampling_result)
     ee = _elementary_effects(Y3, idx_after, idx_before, delta)  # (r, D, T, K)
     mu, mu_star, sigma = _stats_from_ee(ee)  # each (T, K, D)
@@ -459,7 +459,7 @@ def analyze(
         raise ValueError("Fewer than 2 trajectories remain after cleaning")
 
     if standardize_outputs:
-        Y, _, _, _ = _prenormalize_outputs(Y)
+        Y, _, _, _ = _standardize_outputs(Y)
 
     ee = _elementary_effects(Y, idx_after, idx_before, delta)  # (r, D, T, K)
     mu, mu_star, sigma = _stats_from_ee(ee)  # each (T, K, D)

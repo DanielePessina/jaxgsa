@@ -76,8 +76,8 @@ from jaxgsa._core.partition import (
 )
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
-    _prenormalize_outputs,
     _prepare_Y,
+    _standardize_outputs,
     _validate_output,
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
@@ -568,14 +568,14 @@ def _run_univariate(
     )
 
 
-def _build_clouds(Y_3d: Array, mode: str, standardize: bool) -> list[Array]:
+def _build_clouds(Y_3d: Array, mode: str, standardize_outputs: bool) -> list[Array]:
     """Split the promoted output into the point clouds a joint mode scores.
 
     Args:
         Y_3d: Output promoted to ``(N, T, K)``.
         mode: ``"multivariate"`` (one flattened cloud) or ``"trajectory"``
             (one cloud per output, each output's time course).
-        standardize: Divide each column by its standard deviation first, so
+        standardize_outputs: Divide each column by its standard deviation first, so
             no single output dominates the joint distance through its units.
 
     Returns:
@@ -585,8 +585,8 @@ def _build_clouds(Y_3d: Array, mode: str, standardize: bool) -> list[Array]:
     clouds = (
         [Y_3d.reshape(N, T * K)] if mode == "multivariate" else [Y_3d[:, :, k] for k in range(K)]
     )
-    if standardize:
-        clouds = [_prenormalize_outputs(Z)[0] for Z in clouds]
+    if standardize_outputs:
+        clouds = [_standardize_outputs(Z)[0] for Z in clouds]
     return clouds
 
 
@@ -718,7 +718,7 @@ def analyze(
     *,
     mode: Literal["univariate", "multivariate", "trajectory"] = "univariate",
     n_partitions: int | None = None,
-    standardize: bool = True,
+    standardize_outputs: bool = True,
     epsilon: float = 0.01,
     max_iter: int = 1000,
     tol: float | None = None,
@@ -789,7 +789,7 @@ def analyze(
             validated against ``[2, N // 2]``. If every parameter is
             categorical and ``dummy`` is false, nothing uses the value and
             a ``JaxgsaWarning`` says it is ignored.
-        standardize: Joint modes only. Divide each output column by its
+        standardize_outputs: Joint modes only. Divide each output column by its
             standard deviation before building the transport cost, so no
             single output dominates the joint distance through its units.
             Ignored in ``"univariate"`` mode, where each column is
@@ -1015,7 +1015,7 @@ def analyze(
         eps_s = jnp.asarray(epsilon, dtype)
         max_iter_s = jnp.asarray(max_iter, jnp.int32)
         tol_s = jnp.asarray(tol, dtype)
-        clouds = _build_clouds(Y_3d, mode, standardize)
+        clouds = _build_clouds(Y_3d, mode, standardize_outputs)
 
         def _run(
             idx: Array,
@@ -1137,7 +1137,7 @@ def indices(
     *,
     mode: Literal["univariate", "multivariate", "trajectory"] = "univariate",
     n_partitions: int | None = None,
-    standardize: bool = True,
+    standardize_outputs: bool = True,
     epsilon: float = 0.01,
     max_iter: int = 1000,
     tol: float | None = None,
@@ -1190,7 +1190,7 @@ def indices(
         n_partitions: Number of equal-frequency conditioning classes.
             ``None`` selects ``min(25, N // 2)``, which reads ``N`` only, so
             it stays static under a trace.
-        standardize: Joint modes only. Divide each output column by its
+        standardize_outputs: Joint modes only. Divide each output column by its
             standard deviation before building the transport cost, as in
             :func:`analyze`. It is arithmetic over the sample axis, not
             policy, so it stays traceable.
@@ -1277,7 +1277,7 @@ def indices(
 
     tol_v = _resolve_tol(tol, dtype)
     ot, adv, diff, _, _, _ = _run_joint(
-        _build_clouds(Y_3d, mode, standardize),
+        _build_clouds(Y_3d, mode, standardize_outputs),
         mode,
         all_idx,
         groups,
