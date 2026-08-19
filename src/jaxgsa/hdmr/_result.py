@@ -108,12 +108,12 @@ class HDMRResult(SchemaResult, SurrogateResult):
             term the F-test deems insignificant.
         rmse: Emulator fit RMSE per output slice in the units of ``Y``,
             shape ``()`` / ``(K,)`` / ``(T, K)``, or None.
-        streamed: True when the fit ran the row-streamed path, False when it
-            ran the in-memory path. Both paths fit the same components, pick
-            the same F-test term set, and report the same indices; they differ
-            only in float32 summation order and in peak memory. The streamed
-            path engages when ``batch_size`` is an explicit int, or when the
-            in-memory fit would exceed the memory budget (see
+        streamed: True when the fit read the rows in batches, False when one
+            batch held them all. Batching is exact: the fit accumulates the
+            same Gram matrices, picks the same F-test term set and reports the
+            same indices either way, differing only in float32 summation order
+            and in peak memory. It engages when ``batch_size`` is an int below
+            ``N``, or when a single batch would exceed the memory budget (see
             :func:`jaxgsa.config.set_memory_budget`). Read it when a fit takes
             much longer than expected: True means the budget engaged.
         invalid: What the non-finite check found in ``(X, Y)`` and what the
