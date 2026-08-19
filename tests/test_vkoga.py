@@ -20,6 +20,7 @@ warns about single precision.
 
 from __future__ import annotations
 
+import contextlib
 import warnings
 
 import jax
@@ -41,6 +42,29 @@ from _linear_gaussian import (  # isort: skip
     R_GAUSS,
     analytic_indices,
 )
+
+
+@contextlib.contextmanager
+def single_precision_warning():
+    """Assert the float32 warning fires in float32, and is absent under x64.
+
+    ``analyze`` warns that the kernel solve is ill-conditioned only when JAX
+    is in single precision, which is right. Written as a bare
+    ``pytest.warns``, every shape and error-path test in this file therefore
+    failed with ``DID NOT WARN`` the moment the suite was run with
+    ``JAX_ENABLE_X64=1`` — the tests were precision-blind, not the source. The
+    flag is read here rather than at import so the accuracy tests, which turn
+    x64 on with a context manager, get the same treatment.
+    """
+    if bool(getattr(jax.config, "jax_enable_x64", False)):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            yield
+        assert not [w for w in caught if "single precision" in str(w.message)]
+    else:
+        with pytest.warns(JaxgsaWarning, match="single precision"):
+            yield
+
 
 # --- cheap uniform model for shape/contract tests ---------------------------
 
@@ -121,7 +145,7 @@ def uniform_fits():
     outputs = _uniform_outputs(X)
     fits = {}
     for label, Y in outputs.items():
-        with pytest.warns(UserWarning, match="single precision"):
+        with single_precision_warning():
             fits[label] = jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, **SMALL_KWARGS)
     return X, outputs, fits
 
@@ -377,9 +401,9 @@ def test_problem_correlation_is_read_by_default():
     X = jaxgsa.sampling.monte_carlo(GAUSS_PROBLEM, 256, seed=2)
     Y = X @ A_COEF
     problem_corr = GAUSS_PROBLEM.with_correlation(R_GAUSS)
-    with pytest.warns(UserWarning, match="single precision"):
+    with single_precision_warning():
         from_problem = jaxgsa.vkoga.analyze(problem_corr, X, Y, **SMALL_KWARGS)
-    with pytest.warns(UserWarning, match="single precision"):
+    with single_precision_warning():
         from_override = jaxgsa.vkoga.analyze(
             GAUSS_PROBLEM, X, Y, correlation=R_GAUSS, **SMALL_KWARGS
         )
@@ -397,7 +421,7 @@ def test_explicit_matrix_overrides_problem_correlation():
     X = jaxgsa.sampling.monte_carlo(GAUSS_PROBLEM, 256, seed=2)
     Y = X @ A_COEF
     problem_corr = GAUSS_PROBLEM.with_correlation(R_GAUSS)
-    with pytest.warns(UserWarning, match="single precision"):
+    with single_precision_warning():
         result = jaxgsa.vkoga.analyze(problem_corr, X, Y, correlation=np.eye(3), **SMALL_KWARGS)
     assert not result.is_correlated
     np.testing.assert_allclose(result.correlation, np.eye(3), atol=1e-12)
@@ -408,10 +432,7 @@ def test_correlation_string_raises():
     X = jaxgsa.sampling.monte_carlo(GAUSS_PROBLEM, 32, seed=0)
     Y = X @ A_COEF
     for value in ("empirical", "bogus"):
-        with (
-            pytest.raises(ValueError, match="fit_correlation"),
-            pytest.warns(UserWarning),
-        ):
+        with pytest.raises(ValueError, match="fit_correlation"), single_precision_warning():
             jaxgsa.vkoga.analyze(GAUSS_PROBLEM, X, Y, correlation=value, **SMALL_KWARGS)
 
 
@@ -420,7 +441,7 @@ def test_correlation_matrix_validation_errors():
     X = jaxgsa.sampling.monte_carlo(GAUSS_PROBLEM, 32, seed=0)
     Y = X @ A_COEF
     # The single-precision warning fires before validation raises.
-    with pytest.raises(ValueError, match=r"must be \(3, 3\)"), pytest.warns(UserWarning):
+    with pytest.raises(ValueError, match=r"must be \(3, 3\)"), single_precision_warning():
         jaxgsa.vkoga.analyze(GAUSS_PROBLEM, X, Y, correlation=np.eye(2), **SMALL_KWARGS)
 
 
@@ -430,7 +451,7 @@ def test_indefinite_correlation_is_repaired():
     assert np.linalg.eigvalsh(R).min() < 0  # genuinely indefinite as declared
     X = jaxgsa.sampling.monte_carlo(GAUSS_PROBLEM, 256, seed=2)
     Y = X @ A_COEF
-    with pytest.warns(UserWarning, match="single precision"):
+    with single_precision_warning():
         result = jaxgsa.vkoga.analyze(GAUSS_PROBLEM, X, Y, correlation=R, **SMALL_KWARGS)
     assert np.linalg.eigvalsh(result.correlation).min() > 0
     np.testing.assert_allclose(np.diag(result.correlation), 1.0, atol=1e-12)
@@ -533,7 +554,7 @@ def test_batch_size_bounds_the_index_estimator_too(monkeypatch):
     monkeypatch.setattr(vkoga_analyze, "estimate_correlated_indices", spy)
     X = jaxgsa.sampling.monte_carlo(UNIFORM_PROBLEM, 128, seed=3)
     Y = _uniform_scalar(X)
-    with pytest.warns(JaxgsaWarning, match="single precision"):
+    with single_precision_warning():
         jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, **dict(SMALL_KWARGS, batch_size=64))
     assert seen["batch_size"] == 64
 
@@ -735,7 +756,7 @@ def test_determinism_by_key():
 
     def run(seed: int):
         kwargs = dict(SMALL_KWARGS, key=jax.random.key(seed))
-        with pytest.warns(UserWarning, match="single precision"):
+        with single_precision_warning():
             return jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, correlation=R_uni, **kwargs)
 
     first, again = run(0), run(0)
@@ -1017,7 +1038,9 @@ class TestBootstrap:
         """One warning per analysis, not one per replicate.
 
         The point estimate already said whatever there was to say about the
-        fit. Repeating it ``n_bootstrap`` times would bury it.
+        fit. Repeating it ``n_bootstrap`` times would bury it. Under x64 there
+        is nothing to say at all, so the count expected is zero rather than
+        one — the warning is about float32, not about bootstrapping.
         """
         X, Y = tiny_data
         with warnings.catch_warnings(record=True) as caught:
@@ -1026,9 +1049,9 @@ class TestBootstrap:
         precision = [
             w
             for w in caught
-            if issubclass(w.category, JaxgsaWarning) and "precision" in str(w.message)
+            if issubclass(w.category, JaxgsaWarning) and "single precision" in str(w.message)
         ]
-        assert len(precision) == 1
+        assert len(precision) == (0 if bool(getattr(jax.config, "jax_enable_x64", False)) else 1)
 
     def test_a_multi_output_interval_keeps_its_layout(self):
         """T4: an interval mirrors the output rank the caller passed."""

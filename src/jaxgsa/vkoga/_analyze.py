@@ -39,6 +39,7 @@ from jaxgsa._core.copula import (
 )
 from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare, require
 from jaxgsa._core.invalid import OnInvalid
+from jaxgsa._core.precision import x64_enabled
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.sampling import _next_power_of_2
 from jaxgsa._core.surrogate import _PredictPlan
@@ -572,9 +573,7 @@ def _warn_single_precision() -> None:
     validation partly self-corrects by scoring in the same arithmetic and so
     avoiding the blown-up corner of the grid, but the ceiling is real.
     """
-    # Read the flag off the config object directly; config.read() raises for
-    # flags that were never explicitly set.
-    if not getattr(jax.config, "jax_enable_x64", False):
+    if not x64_enabled():
         warnings.warn(
             "jaxgsa.vkoga: JAX is in single precision; the kernel solve is ill-conditioned for "
             "small gamma and the surrogate may be inaccurate. Enable float64 with "

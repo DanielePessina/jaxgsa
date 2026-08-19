@@ -20,6 +20,7 @@ from jax import Array
 from jax.scipy.special import ndtr, ndtri
 from scipy.stats import norm, truncnorm
 
+from jaxgsa._core.precision import unit_clip_bounds
 from jaxgsa.problem import CategoricalSpec, UniformSpec
 
 if TYPE_CHECKING:
@@ -47,6 +48,11 @@ Theta: TypeAlias = Mapping[str, Mapping[str, Any]]
 # and the moment error it introduces is about 1e-10, far below any sampling
 # error a user will see. A larger clip would visibly truncate the marginal. A
 # smaller one runs into the tail resolution of the scipy quantile functions.
+#
+# The value is a float64 one. A device path that clips in float32 cannot use
+# ``1 - UNIT_CLIP`` as written, because that expression rounds back to exactly
+# 1.0 there; it goes through
+# :func:`jaxgsa._core.precision.unit_clip_bounds` instead.
 UNIT_CLIP = 1e-12
 
 
@@ -200,8 +206,12 @@ def _jax_transform_gaussian(
 ) -> Array:
     """Transform unit-interval samples into Gaussian or truncated Gaussian values."""
     # Same clip as _transform_gaussian: ndtri(0) and ndtri(1) are -inf/+inf,
-    # and an infinite sample would poison every downstream index.
-    clipped = jnp.clip(unit_values, UNIT_CLIP, 1.0 - UNIT_CLIP)
+    # and an infinite sample would poison every downstream index. The host
+    # twin runs in float64, where ``1 - UNIT_CLIP`` is a number below 1; this
+    # copy runs in the caller's dtype, where in float32 it is not, so the
+    # upper bound is brought inside the dtype. See unit_clip_bounds.
+    unit_values = jnp.asarray(unit_values)
+    clipped = jnp.clip(unit_values, *unit_clip_bounds(UNIT_CLIP, unit_values.dtype))
     std = jnp.sqrt(variance)
     if low is None and high is None:
         return mean + std * ndtri(clipped)
