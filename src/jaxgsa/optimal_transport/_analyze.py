@@ -55,8 +55,8 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from jaxgsa._core.bootstrap import _percentile_ci
-from jaxgsa._core.entry import at_least, in_open_interval, prepare, require
+from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
+from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare, require
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.partition import (
     _build_class_indices,
@@ -482,10 +482,11 @@ def analyze(
     dummy: bool = False,
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
-    keep_replicates: bool = False,
-    seed: int = 0,
+    ci_method: Literal["quantile", "gaussian"] = "quantile",
+    key: Array | None = None,
     slice_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
+    keep_replicates: bool = False,
 ) -> OTResult:
     """Compute optimal-transport sensitivity indices from given data.
 
@@ -570,15 +571,17 @@ def analyze(
             fields are ``None``. Joint modes solve
             ``n_bootstrap * D * n_partitions`` transport problems, so keep
             the value modest there.
-        conf_level: Confidence level for percentile bootstrap intervals.
-        keep_replicates: Keep the per-resample indices on
-            ``OTResult.ci.replicates``. Off by default because they are
-            large: ``n_bootstrap`` copies of all three index arrays. Turn it
-            on to recompute an interval at another level without re-running
-            the analysis, which for this method means without re-solving
-            every transport problem.
-        seed: Random seed for bootstrap resampling and the dummy
-            parameter.
+        conf_level: Confidence level for the bootstrap intervals.
+        ci_method: How the interval endpoints are formed. ``"quantile"``
+            (default) reads them off the empirical bootstrap distribution.
+            ``"gaussian"`` centres them on the point estimate and takes
+            ``+/- z * sd`` of the bootstrap draws, which is smoother for a
+            small ``n_bootstrap`` but assumes the draws are normal.
+        key: A ``jax.random`` key. It feeds the bootstrap resampling and the
+            synthetic ``dummy`` parameter, which are two independent
+            consumers, so it is required when either ``n_bootstrap > 0`` or
+            ``dummy=True``. Pass ``jax.random.key(0)`` if you have an
+            integer seed.
         slice_chunk_size: ``"univariate"`` mode only. Number of flattened
             ``T*K`` output columns processed per kernel call. ``None``
             picks a memory-aware default. The point-cloud modes accept it
@@ -591,6 +594,12 @@ def analyze(
             real ``X`` and ``Y`` the caller passed, not the synthetic
             ``dummy`` column, and it reads them together, so a bad input
             takes its own output with it. See :mod:`jaxgsa._core.invalid`.
+        keep_replicates: Keep the per-resample indices on
+            ``OTResult.ci.replicates``. Off by default because they are
+            large: ``n_bootstrap`` copies of all three index arrays. Turn it
+            on to recompute an interval at another level without re-running
+            the analysis, which for this method means without re-solving
+            every transport problem.
 
     Returns:
         An :class:`OTResult` with the total, advective and diffusive
@@ -610,7 +619,9 @@ def analyze(
             ``[2, N // 2]``, a categorical column of X holds
             values other than its integer level codes, ``epsilon <= 0``,
             ``max_iter < 1``,
-            ``tol <= 0``, ``n_bootstrap < 0``, ``conf_level`` is not in
+            ``tol <= 0``, ``n_bootstrap < 0``, ``ci_method`` is neither
+            ``"quantile"`` nor ``"gaussian"``, no ``key`` was given while
+            ``n_bootstrap > 0`` or ``dummy=True``, ``conf_level`` is not in
             ``(0, 1)``, ``slice_chunk_size`` is not a positive integer,
             ``on_invalid`` is not one of the three policies, or the
             non-finite policy refuses the sample.
@@ -636,6 +647,7 @@ def analyze(
             at_least("max_iter", max_iter, 1),
             require(tol is None or tol > 0, f"tol must be > 0, got {tol}"),
             at_least("n_bootstrap", n_bootstrap, 0),
+            one_of("ci_method", ci_method, ("quantile", "gaussian")),
             in_open_interval("conf_level", conf_level, 0.0, 1.0),
             at_least("slice_chunk_size", slice_chunk_size, 1),
         ),
@@ -689,13 +701,24 @@ def analyze(
     if tol is None:
         tol = 1e-9 if dtype == jnp.float64 else 1e-6
 
-    key_boot, key_dummy = jax.random.split(jax.random.PRNGKey(seed))
+    # The bootstrap and the dummy column are independent consumers of
+    # randomness, so each gets its own child key rather than sharing one.
+    # Both are optional, so a caller who asks for neither needs no key.
+    key_boot: Array | None = None
+    key_dummy: Array | None = None
+    if key is not None:
+        key_boot, key_dummy = jax.random.split(key)
+    elif n_bootstrap > 0:
+        raise ValueError("key is required when n_bootstrap > 0")
+    elif dummy:
+        raise ValueError("key is required when dummy=True")
 
     # Replicate 0 is the identity permutation (the original sample); the
     # remaining rows are the bootstrap resamples. Building them together
     # means the point estimate and its interval share one code path.
     identity = jnp.arange(N, dtype=jnp.int32)[None, :]
     if n_bootstrap > 0:
+        assert key_boot is not None  # a missing key was refused above
         boot = jax.random.randint(key_boot, (n_bootstrap, N), 0, N, dtype=jnp.int32)
         all_idx = jnp.concatenate([identity, boot], axis=0)
     else:
@@ -837,6 +860,7 @@ def analyze(
         # because the baseline needs no bootstrap interval. The dummy is
         # continuous, so it always uses the shared equal-frequency layout.
         take_np, sizes_np = _class_layout(N, M)
+        assert key_dummy is not None  # a missing key was refused above
         dummy_col = jax.random.permutation(key_dummy, N)[:, None]
         dummy_cls_idx = _build_class_indices(dummy_col, identity, jnp.asarray(take_np))
         dummy_group = (dummy_cls_idx, jnp.asarray(sizes_np)[None, None, :])  # (1, 1, M, P)
@@ -862,7 +886,12 @@ def analyze(
         replicates: dict[str, Array] | None = {} if keep_replicates else None
         for name, vals in (("ot", ot_all), ("advective", adv_all), ("diffusive", diff_all)):
             draws = _boot_replicates(vals, hats[name], degen_all)
-            endpoints = _percentile_ci(draws, conf_level)
+            # Stack [lower, upper] into a leading axis of size 2.
+            endpoints = jnp.stack(
+                _bootstrap_ci_endpoints(
+                    hats[name], draws, conf_level=conf_level, ci_method=ci_method
+                )
+            )
             if mode == "univariate":
                 endpoints = ctx.squeeze(endpoints)
             confs[name] = endpoints
@@ -872,11 +901,9 @@ def analyze(
                 if mode == "univariate":
                     draws = ctx.squeeze(draws)
                 replicates[name] = draws
-        # This method has one hard-wired endpoint rule, the percentile
-        # interval, so "quantile" is what ran and not a guess.
         ci_info = CIInfo(
             level=conf_level,
-            method="quantile",
+            method=ci_method,
             n_resamples=n_bootstrap,
             replicates=replicates,
         )

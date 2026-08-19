@@ -58,8 +58,8 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core.batching import get_memory_budget
-from jaxgsa._core.bootstrap import _percentile_ci
-from jaxgsa._core.entry import at_least, in_open_interval, prepare, require
+from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
+from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare, require
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.partition import _extract_categorical_codes
 from jaxgsa._core.result import CIInfo
@@ -368,10 +368,11 @@ def analyze(
     statistic: Literal["median", "max", "mean"] = "median",
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
-    keep_replicates: bool = False,
-    seed: int = 0,
+    ci_method: Literal["quantile", "gaussian"] = "quantile",
+    key: Array | None = None,
     slice_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
+    keep_replicates: bool = False,
 ) -> PAWNResult:
     """Compute PAWN sensitivity indices.
 
@@ -417,12 +418,14 @@ def analyze(
         n_bootstrap: Number of bootstrap resamples for confidence intervals.
             ``0`` disables the confidence intervals.
         conf_level: Confidence level for the bootstrap intervals.
-        keep_replicates: Keep the per-resample indices on
-            ``PAWNResult.ci.replicates``. Off by default because they are
-            large: ``n_bootstrap`` copies of the index array. Turn it on to
-            recompute an interval at another level without re-running the
-            analysis.
-        seed: Random seed for the bootstrap resampling.
+        ci_method: How the interval endpoints are formed. ``"quantile"``
+            (default) reads them off the empirical bootstrap distribution.
+            ``"gaussian"`` centres them on the point estimate and takes
+            ``+/- z * sd`` of the bootstrap draws, which is smoother for a
+            small ``n_bootstrap`` but assumes the draws are normal.
+        key: A ``jax.random`` key for the bootstrap resampling. Required
+            when ``n_bootstrap > 0``. Pass ``jax.random.key(0)`` if you have
+            an integer seed.
         slice_chunk_size: Number of flattened ``T*K`` output columns
             processed per kernel call. ``None`` (default) derives one from
             the active memory budget, which
@@ -441,6 +444,11 @@ def analyze(
             ``"propagate"`` warns and computes anyway. ``X`` and ``Y`` are
             checked together, so a bad input takes its own output with it.
             See :mod:`jaxgsa._core.invalid`.
+        keep_replicates: Keep the per-resample indices on
+            ``PAWNResult.ci.replicates``. Off by default because they are
+            large: ``n_bootstrap`` copies of the index array. Turn it on to
+            recompute an interval at another level without re-running the
+            analysis.
 
     Returns:
         A :class:`PAWNResult` with ``pawn`` shaped ``(D,)``, ``(K, D)``, or
@@ -454,8 +462,9 @@ def analyze(
             not one of ``"median"``/``"max"``/``"mean"``, ``n_bins < 2``,
             ``conf_level`` is not in ``(0, 1)``, ``slice_chunk_size`` is
             given and is not a positive integer, ``on_invalid`` is not one
-            of the three policies, ``n_bootstrap < 0``, or the non-finite
-            policy refuses the sample.
+            of the three policies, ``n_bootstrap < 0``, ``ci_method`` is not
+            ``"quantile"`` or ``"gaussian"``, ``n_bootstrap > 0`` and no
+            ``key`` was given, or the non-finite policy refuses the sample.
     Warns:
         JaxgsaWarning: If an output slice has zero variance. Every
             conditional distribution then equals the unconditional one, so
@@ -479,6 +488,7 @@ def analyze(
             ),
             at_least("n_bins", n_bins, 2),
             at_least("n_bootstrap", n_bootstrap, 0),
+            one_of("ci_method", ci_method, ("quantile", "gaussian")),
             in_open_interval("conf_level", conf_level, 0.0, 1.0),
             at_least("slice_chunk_size", slice_chunk_size, 1),
         ),
@@ -488,6 +498,9 @@ def analyze(
         # the NaN a variance ratio would give.
         zero_variance_outcome="zero",
     )
+    if n_bootstrap > 0 and key is None:
+        raise ValueError("key is required when n_bootstrap > 0")
+
     X, invalid = ctx.inputs, ctx.invalid
     Y_3d = ctx.Y3
     bin_idx, n_eff = _bin_indices(problem, X, n_bins)
@@ -497,11 +510,12 @@ def analyze(
     pawn_conf: Array | None = None
     ci: CIInfo | None = None
     if n_bootstrap > 0:
-        key = jax.random.PRNGKey(seed + 1)
+        assert key is not None  # checked above, before the point estimate ran
+        boot_key = key
         N = X.shape[0]
         boot_draws = []
         for _ in range(n_bootstrap):
-            key, subkey = jax.random.split(key)
+            boot_key, subkey = jax.random.split(boot_key)
             idx = jax.random.choice(subkey, N, shape=(N,), replace=True)
             boot_pawn = _pawn_core(
                 bin_idx[idx], Y_3d[idx], n_eff, statistic, slice_chunk_size, warn=False
@@ -509,16 +523,20 @@ def analyze(
             boot_draws.append(boot_pawn)
 
         boot_stack = jnp.stack(boot_draws, axis=0)
-        pawn_conf_3d = _percentile_ci(boot_stack, conf_level)
+        # Stack [lower, upper] into a leading axis of size 2.
+        pawn_conf_3d = jnp.stack(
+            _bootstrap_ci_endpoints(
+                pawn_3d, boot_stack, conf_level=conf_level, ci_method=ci_method
+            )
+        )
 
         pawn_conf = ctx.squeeze(pawn_conf_3d)
 
-        # PAWN has one hard-wired endpoint rule, the percentile interval, so
-        # "quantile" is what ran and not a guess. The leading resample axis
-        # survives the squeeze, which addresses the T/K axes from the end.
+        # The leading resample axis survives the squeeze, which addresses the
+        # T/K axes from the end.
         ci = CIInfo(
             level=conf_level,
-            method="quantile",
+            method=ci_method,
             n_resamples=n_bootstrap,
             replicates={"pawn": ctx.squeeze(boot_stack)} if keep_replicates else None,
         )

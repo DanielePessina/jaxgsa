@@ -24,6 +24,7 @@ import pathlib
 import warnings
 from collections.abc import Callable
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -109,7 +110,9 @@ def _invoke(spec: MethodSpec, problem: jaxgsa.Problem) -> Callable[[], object]:
     X = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, n, seed=0))
     if spec.name == "dgsm":
         return lambda: spec.analyze(problem, _point_model, X)
-    return lambda: spec.analyze(problem, X, _batch_model(X))
+    # Borgonovo bootstraps by default, and a bootstrap needs a key.
+    kwargs = {"key": jax.random.key(0)} if spec.name == "borgonovo" else {}
+    return lambda: spec.analyze(problem, X, _batch_model(X), **kwargs)
 
 
 _UPDATE_INVOKE = (

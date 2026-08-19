@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import warnings
-from typing import cast
+from typing import Any, cast
 
 import jax
 import jax.numpy as jnp
@@ -87,10 +87,10 @@ class TestDeltaBasic:
         assert delta[0] > delta[2], "x1 should be more important than x3"
         assert delta[1] > delta[2], "x2 should be more important than x3"
 
-    def test_deterministic_given_seed(self, ishigami_data):
+    def test_deterministic_given_key(self, ishigami_data):
         X, Y = ishigami_data
-        r1 = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=20, seed=3)
-        r2 = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=20, seed=3)
+        r1 = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=20, key=jax.random.key(3))
+        r2 = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=20, key=jax.random.key(3))
         np.testing.assert_array_equal(np.asarray(r1.delta), np.asarray(r2.delta))
         assert r1.delta_conf is not None and r2.delta_conf is not None
         np.testing.assert_array_equal(np.asarray(r1.delta_conf), np.asarray(r2.delta_conf))
@@ -105,8 +105,10 @@ class TestDeltaBasic:
         """Chunked column processing must not change the result."""
         X, Y = ishigami_data
         Y2 = jnp.stack([Y, Y**2, jnp.sin(Y)], axis=1)
-        r_full = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=10, seed=0)
-        r_chunked = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=10, seed=0, slice_chunk_size=1)
+        r_full = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=10, key=jax.random.key(0))
+        r_chunked = analyze(
+            ishigami.PROBLEM, X, Y2, n_bootstrap=10, key=jax.random.key(0), slice_chunk_size=1
+        )
         np.testing.assert_allclose(
             np.asarray(r_full.delta), np.asarray(r_chunked.delta), rtol=1e-6
         )
@@ -157,10 +159,10 @@ class TestGridTiling:
         """
         X, Y = ishigami_data
         Y2 = jnp.stack([Y, Y**2, jnp.sin(Y)], axis=1)
-        r_default = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=5, seed=0)
+        r_default = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=5, key=jax.random.key(0))
         jaxgsa.config.set_memory_budget(1, unit="mib")
         try:
-            r_small = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=5, seed=0)
+            r_small = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=5, key=jax.random.key(0))
         finally:
             jaxgsa.config.set_memory_budget(512, unit="mib")
         np.testing.assert_allclose(
@@ -206,7 +208,9 @@ class TestDeltaSALibComparison:
         }
         salib_result = salib_delta.analyze(salib_problem, X_np, Y_np, num_resamples=100, seed=7)
 
-        result = analyze(ishigami.PROBLEM, ishigami_data[0], ishigami_data[1], seed=0)
+        result = analyze(
+            ishigami.PROBLEM, ishigami_data[0], ishigami_data[1], key=jax.random.key(0)
+        )
         np.testing.assert_allclose(np.asarray(result.delta), salib_result["delta"], atol=0.03)
         np.testing.assert_allclose(np.asarray(result.S1), salib_result["S1"], atol=0.02)
 
@@ -261,7 +265,7 @@ class TestGaussianLinearBenchmark:
 
     def test_estimator_converges_to_analytical_delta(self, gaussian_linear_data):
         X, Y = gaussian_linear_data
-        result = analyze(gaussian_linear.PROBLEM, X, Y, seed=0)
+        result = analyze(gaussian_linear.PROBLEM, X, Y, key=jax.random.key(0))
         np.testing.assert_allclose(
             np.asarray(result.delta), gaussian_linear.ANALYTICAL_DELTA, atol=0.02
         )
@@ -283,16 +287,72 @@ class TestGaussianLinearBenchmark:
 class TestDeltaBootstrap:
     def test_bootstrap_lower_leq_upper(self, ishigami_data):
         X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=20, conf_level=0.95, seed=0)
+        result = analyze(
+            ishigami.PROBLEM, X, Y, n_bootstrap=20, conf_level=0.95, key=jax.random.key(0)
+        )
         assert result.delta_conf is not None
         assert np.all(np.asarray(result.delta_conf[0]) <= np.asarray(result.delta_conf[1]) + 1e-6)
         assert result.S1_conf is not None
         assert np.all(np.asarray(result.S1_conf[0]) <= np.asarray(result.S1_conf[1]) + 1e-6)
 
+    def test_bootstrap_without_a_key_raises(self, ishigami_data):
+        """Tier T4. A bootstrap needs a key, and an int seed is not one.
+
+        ``n_bootstrap`` defaults to 100 here, so a call that passes nothing
+        at all asks for a bootstrap and is refused.
+        """
+        X, Y = ishigami_data
+        with pytest.raises(ValueError, match="key is required"):
+            analyze(ishigami.PROBLEM, X, Y, n_bootstrap=4)
+        with pytest.raises(ValueError, match="key is required"):
+            analyze(ishigami.PROBLEM, X, Y)
+
+    def test_different_keys_differ(self, ishigami_data):
+        """Tier T4. A different key draws a different resample."""
+        X, Y = ishigami_data
+        r1 = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=20, key=jax.random.key(1))
+        r2 = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=20, key=jax.random.key(2))
+        assert r1.delta_conf is not None and r2.delta_conf is not None
+        assert not np.array_equal(np.asarray(r1.delta_conf), np.asarray(r2.delta_conf))
+
+    def test_gaussian_ci_is_centred_on_the_estimate(self, ishigami_data):
+        """Tier T0 (closed form): the Gaussian interval is symmetric.
+
+        ``estimate +/- z * sd`` puts the point estimate exactly at the
+        midpoint of the two endpoints, which the percentile interval does
+        not do. Delta is bias-corrected, so the estimate the interval is
+        centred on is the corrected one the result reports.
+        """
+        X, Y = ishigami_data
+        result = analyze(
+            ishigami.PROBLEM, X, Y, n_bootstrap=20, ci_method="gaussian", key=jax.random.key(0)
+        )
+        assert result.ci is not None
+        assert result.ci.method == "gaussian"
+        assert result.delta_conf is not None and result.S1_conf is not None
+        delta_mid = 0.5 * (np.asarray(result.delta_conf[0]) + np.asarray(result.delta_conf[1]))
+        np.testing.assert_allclose(delta_mid, np.asarray(result.delta), atol=1e-6)
+        s1_mid = 0.5 * (np.asarray(result.S1_conf[0]) + np.asarray(result.S1_conf[1]))
+        np.testing.assert_allclose(s1_mid, np.asarray(result.S1), atol=1e-6)
+
+    def test_unknown_ci_method_rejected(self, ishigami_data):
+        X, Y = ishigami_data
+        with pytest.raises(ValueError, match="ci_method"):
+            analyze(
+                ishigami.PROBLEM,
+                X,
+                Y,
+                n_bootstrap=4,
+                ci_method=cast(Any, "bca"),
+                key=jax.random.key(0),
+            )
+
     def test_corrected_delta_within_conf(self, ishigami_data):
         """The bias-corrected estimate is the mean of the CI replicates."""
         X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=50, conf_level=0.99, seed=0)
+        result = analyze(
+            ishigami.PROBLEM, X, Y, n_bootstrap=50, conf_level=0.99, key=jax.random.key(0)
+        )
         delta = np.asarray(result.delta)
         assert result.delta_conf is not None
         assert np.all(delta >= np.asarray(result.delta_conf[0]) - 1e-6)
@@ -301,7 +361,9 @@ class TestDeltaBootstrap:
     def test_bias_correct_false_returns_plugin(self, ishigami_data):
         X, Y = ishigami_data
         r_plugin = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0)
-        r_uncorrected = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=20, bias_correct=False)
+        r_uncorrected = analyze(
+            ishigami.PROBLEM, X, Y, n_bootstrap=20, bias_correct=False, key=jax.random.key(0)
+        )
         np.testing.assert_allclose(
             np.asarray(r_uncorrected.delta), np.asarray(r_plugin.delta), rtol=1e-6
         )
@@ -311,7 +373,7 @@ class TestDeltaBootstrap:
         """The plug-in estimator is biased upward; correction should lower it."""
         X, Y = ishigami_data
         r_plugin = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0)
-        r_corrected = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=100, seed=0)
+        r_corrected = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=100, key=jax.random.key(0))
         assert np.all(np.asarray(r_corrected.delta) <= np.asarray(r_plugin.delta) + 1e-6)
 
 
@@ -323,7 +385,7 @@ class TestDeltaMultiOutput:
             axis=1,
         )
         assert Y3.shape == (Y.shape[0], 2, 2)
-        result = analyze(ishigami.PROBLEM, X, Y3, n_bootstrap=10, seed=0)
+        result = analyze(ishigami.PROBLEM, X, Y3, n_bootstrap=10, key=jax.random.key(0))
         assert result.delta.shape == (2, 2, 3)
         assert result.delta_conf is not None
         assert result.delta_conf.shape == (2, 2, 2, 3)
@@ -332,8 +394,8 @@ class TestDeltaMultiOutput:
         """Column 0 of a multi-output run must equal the scalar-output run."""
         X, Y = ishigami_data
         Y2 = jnp.stack([Y, Y**2], axis=1)
-        r_scalar = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=10, seed=0)
-        r_multi = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=10, seed=0)
+        r_scalar = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=10, key=jax.random.key(0))
+        r_multi = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=10, key=jax.random.key(0))
         np.testing.assert_allclose(
             np.asarray(r_multi.delta[0]), np.asarray(r_scalar.delta), rtol=1e-6
         )
@@ -344,7 +406,7 @@ class TestDeltaEdgeCases:
     def test_constant_output_yields_zero(self, ishigami_data):
         X, _ = ishigami_data
         Y_const = jnp.ones(X.shape[0])
-        result = analyze(ishigami.PROBLEM, X, Y_const, n_bootstrap=5, seed=0)
+        result = analyze(ishigami.PROBLEM, X, Y_const, n_bootstrap=5, key=jax.random.key(0))
         np.testing.assert_allclose(np.asarray(result.delta), 0.0)
         np.testing.assert_allclose(np.asarray(result.S1), 0.0)
         assert np.all(np.isfinite(np.asarray(result.delta)))
@@ -443,7 +505,7 @@ class TestDeltaRegression:
         Y_np[rng.integers(1000)] = 1.0
         Y = jnp.asarray(Y_np)
         plug = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0)
-        corrected = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=200, seed=0)
+        corrected = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=200, key=jax.random.key(0))
         c = np.asarray(corrected.delta)
         assert np.all(np.isfinite(c))
         assert np.all(c <= np.asarray(plug.delta) + 0.02)
@@ -456,7 +518,7 @@ class TestDeltaRegression:
         """
         X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=800, seed=2))
         Y = jnp.stack([ishigami.evaluate(X), jnp.ones(800)], axis=1)
-        result = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=32, seed=0)
+        result = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=32, key=jax.random.key(0))
         np.testing.assert_allclose(np.asarray(result.delta)[1], 0.0)
         assert result.delta_conf is not None
         np.testing.assert_allclose(np.asarray(result.delta_conf)[:, 1], 0.0)

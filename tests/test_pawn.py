@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -25,7 +28,7 @@ def ishigami_data():
 class TestPAWNBasic:
     def test_values_in_unit_interval(self, ishigami_data):
         X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y, seed=0)
+        result = analyze(ishigami.PROBLEM, X, Y)
         pawn = np.asarray(result.pawn)
         assert np.all(pawn >= 0.0)
         assert np.all(pawn <= 1.0)
@@ -33,7 +36,7 @@ class TestPAWNBasic:
     def test_x1_x2_more_important_than_x3(self, ishigami_data):
         """x1 and x2 should have higher PAWN than x3 (weak first-order)."""
         X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y, seed=0)
+        result = analyze(ishigami.PROBLEM, X, Y)
         pawn = np.asarray(result.pawn)
         assert pawn[0] > pawn[2], "x1 should be more important than x3"
         assert pawn[1] > pawn[2], "x2 should be more important than x3"
@@ -69,14 +72,16 @@ class TestPAWNBasic:
         assert total > chunk, "chunk must be smaller than T*K or nothing is split"
         assert total % chunk != 0, "an uneven split exercises the short trailing chunk"
 
-        full = analyze(ishigami.PROBLEM, X, Y_3d, n_bootstrap=8, conf_level=0.9, seed=3)
+        full = analyze(
+            ishigami.PROBLEM, X, Y_3d, n_bootstrap=8, conf_level=0.9, key=jax.random.key(3)
+        )
         chunked = analyze(
             ishigami.PROBLEM,
             X,
             Y_3d,
             n_bootstrap=8,
             conf_level=0.9,
-            seed=3,
+            key=jax.random.key(3),
             slice_chunk_size=chunk,
         )
 
@@ -169,7 +174,6 @@ class TestPAWNSALibComparison:
             ishigami_data[1],
             n_bins=10,
             statistic="median",
-            seed=0,
         )
         jaxgsa_pawn = np.asarray(jaxgsa_result.pawn)
 
@@ -179,19 +183,74 @@ class TestPAWNSALibComparison:
 class TestPAWNStatistics:
     def test_max_geq_median(self, ishigami_data):
         X, Y = ishigami_data
-        r_median = analyze(ishigami.PROBLEM, X, Y, statistic="median", seed=0)
-        r_max = analyze(ishigami.PROBLEM, X, Y, statistic="max", seed=0)
+        r_median = analyze(ishigami.PROBLEM, X, Y, statistic="median")
+        r_max = analyze(ishigami.PROBLEM, X, Y, statistic="max")
         assert np.all(np.asarray(r_max.pawn) >= np.asarray(r_median.pawn) - 1e-6)
 
 
 class TestPAWNBootstrap:
     def test_bootstrap_lower_leq_upper(self, ishigami_data):
         X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=20, conf_level=0.95, seed=0)
+        result = analyze(
+            ishigami.PROBLEM, X, Y, n_bootstrap=20, conf_level=0.95, key=jax.random.key(0)
+        )
         assert result.pawn_conf is not None
         lower = np.asarray(result.pawn_conf[0])
         upper = np.asarray(result.pawn_conf[1])
         assert np.all(lower <= upper + 1e-6)
+
+    def test_bootstrap_without_a_key_raises(self, ishigami_data):
+        """Tier T4. A bootstrap needs a key, and an int seed is not one."""
+        X, Y = ishigami_data
+        with pytest.raises(ValueError, match="key is required"):
+            analyze(ishigami.PROBLEM, X, Y, n_bootstrap=4)
+
+    def test_same_key_same_interval(self, ishigami_data):
+        """Tier T4. Determinism is a property of the key, not of a seed."""
+        X, Y = ishigami_data
+        r1 = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=8, key=jax.random.key(11))
+        r2 = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=8, key=jax.random.key(11))
+        assert r1.pawn_conf is not None and r2.pawn_conf is not None
+        np.testing.assert_array_equal(np.asarray(r1.pawn_conf), np.asarray(r2.pawn_conf))
+
+    def test_different_keys_differ(self, ishigami_data):
+        """Tier T4. A different key draws a different resample."""
+        X, Y = ishigami_data
+        r1 = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=8, key=jax.random.key(11))
+        r2 = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=8, key=jax.random.key(12))
+        assert r1.pawn_conf is not None and r2.pawn_conf is not None
+        assert not np.array_equal(np.asarray(r1.pawn_conf), np.asarray(r2.pawn_conf))
+        # The point estimate reads no key at all.
+        np.testing.assert_array_equal(np.asarray(r1.pawn), np.asarray(r2.pawn))
+
+    def test_gaussian_ci_is_centred_on_the_estimate(self, ishigami_data):
+        """Tier T0 (closed form): the Gaussian interval is symmetric.
+
+        ``estimate +/- z * sd`` puts the point estimate exactly at the
+        midpoint of the two endpoints, which the percentile interval does
+        not do. That is what tells the two branches apart.
+        """
+        X, Y = ishigami_data
+        result = analyze(
+            ishigami.PROBLEM, X, Y, n_bootstrap=20, ci_method="gaussian", key=jax.random.key(0)
+        )
+        assert result.ci is not None
+        assert result.ci.method == "gaussian"
+        assert result.pawn_conf is not None
+        midpoint = 0.5 * (np.asarray(result.pawn_conf[0]) + np.asarray(result.pawn_conf[1]))
+        np.testing.assert_allclose(midpoint, np.asarray(result.pawn), atol=1e-6)
+
+    def test_unknown_ci_method_rejected(self, ishigami_data):
+        X, Y = ishigami_data
+        with pytest.raises(ValueError, match="ci_method"):
+            analyze(
+                ishigami.PROBLEM,
+                X,
+                Y,
+                n_bootstrap=4,
+                ci_method=cast(Any, "bca"),
+                key=jax.random.key(0),
+            )
 
 
 class TestPAWNTiedOutputs:
@@ -268,7 +327,14 @@ class TestPAWNEmptyBinWarning:
         y = np.arange(8, dtype=float)
         with _warnings.catch_warnings(record=True) as rec:
             _warnings.simplefilter("always")
-            analyze(problem, jnp.asarray(X), jnp.asarray(y), n_bins=20, n_bootstrap=5)
+            analyze(
+                problem,
+                jnp.asarray(X),
+                jnp.asarray(y),
+                n_bins=20,
+                n_bootstrap=5,
+                key=jax.random.key(0),
+            )
         msgs = [r for r in rec if "all bins empty" in str(r.message)]
         assert len(msgs) == 1
 

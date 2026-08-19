@@ -237,16 +237,38 @@ def _bootstrapped(method: str, *, level: float, keep: bool, n: int = 6) -> Any:
             keep_replicates=keep,
             key=jax.random.key(3),
         )
+    import jax
+
     if method == "pawn":
         return jaxgsa.pawn.analyze(
-            _PROBLEM, X, Y, n_bins=4, n_bootstrap=n, conf_level=level, keep_replicates=keep
+            _PROBLEM,
+            X,
+            Y,
+            n_bins=4,
+            n_bootstrap=n,
+            conf_level=level,
+            key=jax.random.key(3),
+            keep_replicates=keep,
         )
     if method == "borgonovo":
         return jaxgsa.borgonovo.analyze(
-            _PROBLEM, X, Y, n_bootstrap=n, conf_level=level, keep_replicates=keep
+            _PROBLEM,
+            X,
+            Y,
+            n_bootstrap=n,
+            conf_level=level,
+            key=jax.random.key(3),
+            keep_replicates=keep,
         )
     return jaxgsa.optimal_transport.analyze(
-        _PROBLEM, X, Y, n_partitions=4, n_bootstrap=n, conf_level=level, keep_replicates=keep
+        _PROBLEM,
+        X,
+        Y,
+        n_partitions=4,
+        n_bootstrap=n,
+        conf_level=level,
+        key=jax.random.key(3),
+        keep_replicates=keep,
     )
 
 

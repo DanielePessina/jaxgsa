@@ -62,8 +62,8 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core.batching import resolve_batch_size
-from jaxgsa._core.bootstrap import _percentile_ci
-from jaxgsa._core.entry import at_least, in_open_interval, prepare, require
+from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
+from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare, require
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.partition import (
     _mask_from_counts,
@@ -628,13 +628,14 @@ def analyze(
     bandwidth: float | Literal["silverman"] = "silverman",
     n_bootstrap: int = 100,
     conf_level: float = 0.95,
-    keep_replicates: bool = False,
+    ci_method: Literal["quantile", "gaussian"] = "quantile",
     bias_correct: bool = True,
-    seed: int = 0,
+    key: Array | None = None,
     slice_chunk_size: int | None = None,
     degenerate_tol: float = _DEGENERATE_BW_TOL,
     degenerate_bandwidth: float | Literal["auto"] = "auto",
     on_invalid: OnInvalid = "raise",
+    keep_replicates: bool = False,
 ) -> DeltaResult:
     """Compute Borgonovo delta and given-data first-order Sobol indices.
 
@@ -683,19 +684,20 @@ def analyze(
             confidence intervals. ``0`` skips both: the result is the
             plug-in estimate and ``delta_conf`` and ``S1_conf`` are
             ``None``.
-        conf_level: Confidence level for percentile bootstrap intervals.
-        keep_replicates: Keep the per-resample indices on
-            ``DeltaResult.ci.replicates``. Off by default because they are
-            large: ``n_bootstrap`` copies of both index arrays. Turn it on to
-            recompute an interval at another level without re-running the
-            analysis. The ``delta`` draws are the ones the interval was taken
-            from, so they carry the bias correction when
-            ``bias_correct=True``.
+        conf_level: Confidence level for the bootstrap intervals.
+        ci_method: How the interval endpoints are formed. ``"quantile"``
+            (default) reads them off the empirical bootstrap distribution.
+            ``"gaussian"`` centres them on the point estimate and takes
+            ``+/- z * sd`` of the bootstrap draws, which is smoother for a
+            small ``n_bootstrap`` but assumes the draws are normal.
         bias_correct: Apply the Plischke bias reduction
             ``2*d_hat - mean(d_boot)`` to the delta estimate. It requires
             ``n_bootstrap > 0``. S1 is never bias-corrected, matching
             SALib.
-        seed: Random seed for bootstrap resampling.
+        key: A ``jax.random`` key for the bootstrap resampling. Required
+            when ``n_bootstrap > 0``, which is the default here, so a plain
+            call needs one. Pass ``jax.random.key(0)`` if you have an
+            integer seed.
         slice_chunk_size: Number of flattened ``T*K`` output columns
             processed per kernel call. ``None`` derives it from the
             transient-memory budget
@@ -741,6 +743,13 @@ def analyze(
             The check runs before the KDE, so a failed model run is named
             for what it is instead of surfacing later as a bandwidth
             complaint. See :mod:`jaxgsa._core.invalid`.
+        keep_replicates: Keep the per-resample indices on
+            ``DeltaResult.ci.replicates``. Off by default because they are
+            large: ``n_bootstrap`` copies of both index arrays. Turn it on to
+            recompute an interval at another level without re-running the
+            analysis. The ``delta`` draws are the ones the interval was taken
+            from, so they carry the bias correction when
+            ``bias_correct=True``.
 
     Note:
         This estimator supports a continuous output distribution only. It
@@ -790,7 +799,9 @@ def analyze(
             passed ``n_classes`` is not in ``[2, N]``; a categorical column
             of X holds values other than its integer level codes;
             ``grid_size < 2``; ``bandwidth`` is neither ``"silverman"`` nor
-            a positive float; ``n_bootstrap < 0``; ``conf_level`` is not in
+            a positive float; ``n_bootstrap < 0``; ``n_bootstrap > 0`` and no
+            ``key`` was given; ``ci_method`` is neither ``"quantile"`` nor
+            ``"gaussian"``; ``conf_level`` is not in
             ``(0, 1)``; ``slice_chunk_size`` is not a positive integer;
             ``degenerate_tol`` is not in ``[0, 1)``; or
             ``degenerate_bandwidth`` is neither ``"auto"`` nor a positive
@@ -821,6 +832,7 @@ def analyze(
         checks=(
             at_least("grid_size", grid_size, 2),
             at_least("n_bootstrap", n_bootstrap, 0),
+            one_of("ci_method", ci_method, ("quantile", "gaussian")),
             in_open_interval("conf_level", conf_level, 0.0, 1.0),
             require(
                 0 <= float(degenerate_tol) < 1,
@@ -876,9 +888,9 @@ def analyze(
     # means the point estimate and its interval share one code path.
     identity = jnp.arange(N, dtype=jnp.int32)[None, :]
     if n_bootstrap > 0:
-        boot = jax.random.randint(
-            jax.random.PRNGKey(seed), (n_bootstrap, N), 0, N, dtype=jnp.int32
-        )
+        if key is None:
+            raise ValueError("key is required when n_bootstrap > 0")
+        boot = jax.random.randint(key, (n_bootstrap, N), 0, N, dtype=jnp.int32)
         all_idx = jnp.concatenate([identity, boot], axis=0)
     else:
         all_idx = identity
@@ -968,15 +980,24 @@ def analyze(
             d_reps = d_boot
             delta = d_hat
 
-        delta_conf = ctx.squeeze(_percentile_ci(d_reps, conf_level))
-        S1_conf = ctx.squeeze(_percentile_ci(s1_boot, conf_level))
-        # Borgonovo has one hard-wired endpoint rule, the percentile
-        # interval, so "quantile" is what ran and not a guess. The leading
-        # resample axis survives the squeeze, which addresses the T/K axes
-        # from the end.
+        # Stack [lower, upper] into a leading axis of size 2. The Gaussian
+        # endpoints are centred on the estimate the method reports, so for
+        # delta that is the bias-corrected value the draws were built from.
+        delta_conf = ctx.squeeze(
+            jnp.stack(
+                _bootstrap_ci_endpoints(delta, d_reps, conf_level=conf_level, ci_method=ci_method)
+            )
+        )
+        S1_conf = ctx.squeeze(
+            jnp.stack(
+                _bootstrap_ci_endpoints(S1, s1_boot, conf_level=conf_level, ci_method=ci_method)
+            )
+        )
+        # The leading resample axis survives the squeeze, which addresses the
+        # T/K axes from the end.
         ci = CIInfo(
             level=conf_level,
-            method="quantile",
+            method=ci_method,
             n_resamples=n_bootstrap,
             replicates=(
                 {
