@@ -634,6 +634,9 @@ def analyze(
         expand=sampling_result.expand_outputs,
         n_units=base_n,
         unit_of_row=np.repeat(np.arange(base_n), step),
+        # Y is checked expanded, but the caller passed one output per unique
+        # run. Report the rows they hold, not the expanded ones.
+        row_labels=sampling_result.expanded_to_unique,
         min_kept=2,
     )
     # The estimator reads the expanded layout, and its scalar fast path

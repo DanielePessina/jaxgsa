@@ -103,8 +103,8 @@ class TestOnInvalidPolicy:
             jaxgsa.sobol.analyze(sr, jnp.asarray(Y))
         message = str(exc.value)
         assert "jaxgsa.sobol.analyze" in message
-        assert "Affected Saltelli groups: [2]" in message
-        assert f"Rows: {rows}" in message
+        assert "They condemn Saltelli groups [2]" in message
+        assert f"which covers {len(rows)} rows" in message
 
     def test_propagate_warns_and_lets_the_value_reach_the_indices(self, simple_problem):
         """T4: nothing is removed, and the indices come back non-finite."""

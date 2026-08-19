@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import enum
 import hashlib
 import importlib.metadata
 import json
@@ -131,6 +132,12 @@ def encode(value: Any) -> Any:
     """
     if value is None or isinstance(value, bool | int | float | str):
         return value
+    if isinstance(value, enum.Enum):
+        # By value, not by type name. `InvalidUnit` says which block of data a
+        # method treats as indivisible, so recording only "InvalidUnit" would
+        # let a wiring error that reports a Saltelli group where a trajectory
+        # belongs pass this gate unnoticed.
+        return {"__enum__": f"{type(value).__name__}.{value.name}", "value": encode(value.value)}
     if isinstance(value, jaxgsa.Problem):
         # Inputs, not outputs. The problem is echoed once per problem entry.
         return {"__problem__": list(value.names)}

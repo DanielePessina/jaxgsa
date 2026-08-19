@@ -258,8 +258,8 @@ class TestOnInvalidPolicy:
             jaxgsa.kucherenko.analyze(ks, Y)
         message = str(exc.value)
         assert "jaxgsa.kucherenko.analyze" in message
-        assert "Affected base points: [9]" in message
-        assert f"Rows: {self._rows_of(ks, 9)}" in message
+        assert "They condemn base points [9]" in message
+        assert f"which covers {len(self._rows_of(ks, 9))} rows" in message
 
     def test_propagate_warns_and_lets_the_value_reach_the_indices(self):
         """T4: nothing is removed, so the indices come back non-finite."""

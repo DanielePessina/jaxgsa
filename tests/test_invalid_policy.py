@@ -118,7 +118,7 @@ class TestRaisePolicy:
                 Y=_rows(),
                 X=_rows(2),
             )
-        assert "Y" not in str(exc.value).split("Affected")[0].replace("NaN", "")
+        assert "Y" not in str(exc.value).split("Non-finite rows")[0].replace("NaN", "")
 
     def test_raise_reports_both_arrays_when_both_are_bad(self):
         """T4: bad values in X and in Y are both named."""
@@ -308,8 +308,10 @@ class TestGroupedDesigns:
                 unit_of_row=unit_of_row,
             )
         message = str(exc.value)
-        assert "Affected trajectories: [2]" in message
-        assert "Rows: [6, 7, 8]" in message
+        # The failing row comes first: it is the model run to investigate.
+        assert "Non-finite rows: [7]." in message
+        assert "They condemn trajectories [2]" in message
+        assert "which covers 3 rows" in message
 
 
 class TestWhatCountsAsInvalid:
@@ -342,6 +344,177 @@ class TestWhatCountsAsInvalid:
         )
         assert keep.all()
         assert report.sources == ()
+
+
+class TestBadRowIndices:
+    """T4: the rows that actually failed, as opposed to the rows condemned.
+
+    ``row_indices`` answers "what does 'drop' remove?". ``bad_row_indices``
+    answers "which model run do I go and look at?". For a grouped design those
+    are very different lists, and conflating them was the defect this field
+    was added to fix: an eFAST curve is 257 rows and naming all of them tells
+    a user nothing.
+    """
+
+    def test_for_a_row_design_the_two_lists_agree(self):
+        """T4: when one row is one unit there is nothing to distinguish."""
+        with pytest.warns(JaxgsaWarning):
+            _, report = check_invalid(
+                policy="propagate",
+                method=METHOD,
+                unit=InvalidUnit.ROW,
+                n_units=6,
+                Y=_rows(1, 4),
+            )
+        assert report.bad_row_indices == (1, 4)
+        assert report.bad_row_indices == report.row_indices
+        assert report.bad_row_indices == report.unit_indices
+
+    def test_for_a_grouped_design_it_names_only_the_failing_row(self):
+        """T4: one bad row in a group of three is reported as one row.
+
+        The group still loses all three rows, and ``row_indices`` still says
+        so. Only ``bad_row_indices`` is allowed to shrink.
+        """
+        unit_of_row = np.repeat(np.arange(4), 3)
+        with pytest.warns(JaxgsaWarning):
+            _, report = check_invalid(
+                policy="propagate",
+                method=METHOD,
+                unit=InvalidUnit.SALTELLI_GROUP,
+                n_units=4,
+                Y=_rows(4, n=12),
+                unit_of_row=unit_of_row,
+            )
+        assert report.bad_row_indices == (4,)
+        assert report.row_indices == (3, 4, 5)
+        assert len(report.bad_row_indices) < len(report.row_indices)
+
+    def test_it_is_always_a_subset_of_the_condemned_rows(self):
+        """T4: a failing row is by construction one of the rows removed.
+
+        Two bad rows in two different groups, so the containment is not
+        satisfied by accident from a single block.
+        """
+        unit_of_row = np.repeat(np.arange(4), 3)
+        with pytest.warns(JaxgsaWarning):
+            _, report = check_invalid(
+                policy="propagate",
+                method=METHOD,
+                unit=InvalidUnit.TRAJECTORY,
+                n_units=4,
+                Y=_rows(1, 10, n=12),
+                unit_of_row=unit_of_row,
+            )
+        assert report.bad_row_indices == (1, 10)
+        assert report.row_indices == (0, 1, 2, 9, 10, 11)
+        assert set(report.bad_row_indices) <= set(report.row_indices)
+
+    def test_a_bad_row_in_x_and_one_in_y_are_both_listed(self):
+        """T4: the field pools both arrays, because either sends you to a run."""
+        with pytest.warns(JaxgsaWarning):
+            _, report = check_invalid(
+                policy="propagate",
+                method=METHOD,
+                unit=InvalidUnit.ROW,
+                n_units=6,
+                Y=_rows(5),
+                X=_rows(0),
+            )
+        assert report.bad_row_indices == (0, 5)
+
+    def test_a_clean_sample_reports_no_bad_rows(self):
+        """T4: nothing found leaves the field empty rather than unset."""
+        _, report = check_invalid(
+            policy="raise",
+            method=METHOD,
+            unit=InvalidUnit.ROW,
+            n_units=6,
+            Y=_rows(),
+        )
+        assert report.bad_row_indices == ()
+
+    def test_a_grouped_report_is_far_smaller_than_the_condemned_block(self):
+        """T4: the field stays short where the unit is long.
+
+        This is the eFAST shape: one unit of 64 rows, one failure inside it.
+        The condemned list is the whole curve; the failing list is one row.
+        """
+        unit_of_row = np.repeat(np.arange(3), 64)
+        with pytest.warns(JaxgsaWarning):
+            _, report = check_invalid(
+                policy="propagate",
+                method=METHOD,
+                unit=InvalidUnit.CURVE,
+                n_units=3,
+                Y=_rows(130, n=192),
+                unit_of_row=unit_of_row,
+            )
+        assert report.bad_row_indices == (130,)
+        assert len(report.row_indices) == 64
+
+
+class TestCallerRowNumbering:
+    """T4: reported rows are the caller's rows, not the expanded design's.
+
+    Sobol and Morris analyze an expanded design built by indexing the user's
+    outputs with ``expanded_to_unique``. Reporting an expanded position points
+    at a row the user's array does not have.
+    """
+
+    # Twelve expanded rows over four units of three, but only nine distinct
+    # runs: the last unit repeats the runs of the first.
+    ROW_LABELS = np.array([0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 1, 2])
+    UNIT_OF_ROW = np.repeat(np.arange(4), 3)
+
+    def test_the_failing_row_is_translated_back(self):
+        """T4: expanded row 10 is reported as the caller row it came from."""
+        with pytest.warns(JaxgsaWarning):
+            _, report = check_invalid(
+                policy="propagate",
+                method=METHOD,
+                unit=InvalidUnit.SALTELLI_GROUP,
+                n_units=4,
+                Y=_rows(10, n=12),
+                unit_of_row=self.UNIT_OF_ROW,
+                row_labels=self.ROW_LABELS,
+            )
+        assert report.unit_indices == (3,)
+        assert report.bad_row_indices == (1,)
+
+    def test_the_condemned_rows_are_translated_and_deduplicated(self):
+        """T4: a repeated run is named once, in the caller's numbering.
+
+        Unit 3 occupies expanded rows 9, 10 and 11, which are the same three
+        model runs as unit 0. The caller has nine rows, so a report naming
+        rows 9 to 11 would be unusable.
+        """
+        with pytest.warns(JaxgsaWarning):
+            _, report = check_invalid(
+                policy="propagate",
+                method=METHOD,
+                unit=InvalidUnit.SALTELLI_GROUP,
+                n_units=4,
+                Y=_rows(10, n=12),
+                unit_of_row=self.UNIT_OF_ROW,
+                row_labels=self.ROW_LABELS,
+            )
+        assert report.row_indices == (0, 1, 2)
+        assert max(report.row_indices) < len(np.unique(self.ROW_LABELS))
+
+    def test_without_labels_the_rows_stay_as_given(self):
+        """T4: the translation is opt-in, so an unexpanded caller is untouched."""
+        with pytest.warns(JaxgsaWarning):
+            _, report = check_invalid(
+                policy="propagate",
+                method=METHOD,
+                unit=InvalidUnit.SALTELLI_GROUP,
+                n_units=4,
+                Y=_rows(10, n=12),
+                unit_of_row=self.UNIT_OF_ROW,
+            )
+        assert report.row_indices == (9, 10, 11)
+        assert report.bad_row_indices == (10,)
 
 
 class TestSourceNames:

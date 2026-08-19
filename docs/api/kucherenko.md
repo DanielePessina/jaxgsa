@@ -64,11 +64,15 @@ the paired product over the shared-$X_i$ rows for `S1` and the Jansen squared
 difference over the shared-$\mathbf{X}_{\sim i}$ rows for `ST`. The exact
 formulas are stated in the `jaxgsa.kucherenko._analyze` module docstring.
 
-Two conditions raise a `JaxgsaWarning` instead of an error:
+A base point whose output is non-finite anywhere is governed by
+`on_invalid`, which raises by default. Pass `on_invalid="drop"` for the old
+behaviour, which removes the whole group of rows for that base point and warns.
+A base point is not contiguous: base point `k` occupies rows `k`, `N + k`,
+`2N + k` and so on, and `result.invalid` reports them. See
+[Failed model runs](/guide/methods#failed-model-runs).
 
-- A base point whose output is non-finite anywhere. `analyze` drops the whole
-  group of rows for that base point. Check the model for failed runs, because
-  the effective sample size falls with every dropped group.
+One condition raises a `JaxgsaWarning` instead of an error:
+
 - An output slice with zero variance. Its indices come back as NaN. Drop that
   slice, or widen the input ranges so the output varies.
 

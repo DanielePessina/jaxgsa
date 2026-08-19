@@ -1,5 +1,103 @@
 # Changelog
 
+## Unreleased (0.10.0)
+
+Version 0.10 adds capability. `PLAN-0.10.md` records the plan and the order of
+the work, including seven corrections to the roadmap it replaces.
+
+**One breaking change:** `SobolResult.nan_counts` is removed. See "Breaking".
+
+### Breaking
+
+- **`SobolResult.nan_counts` is removed.** It counted the `NaN` entries in the
+  computed indices and threw away which model run produced them, which is the
+  one thing you need in order to act. `result.invalid` replaces it and keeps
+  the positions. See "Failed model runs" below.
+
+- **A non-finite model output now raises by default.** Before, what happened
+  depended on the method you called: `sobol`, `morris` and `kucherenko` dropped
+  the affected data and warned, `efast` warned and computed anyway, and the
+  other nine let the value reach the indices with no warning at all.
+
+  To keep the old behaviour of those first three, pass `on_invalid="drop"`. To
+  keep `efast`'s, and that of the nine silent ones, pass
+  `on_invalid="propagate"`.
+
+### Added
+
+- **`on_invalid` on every `analyze()` function.** It takes `"raise"` (the
+  default), `"propagate"` or `"drop"`.
+
+  ```python
+  result = jaxgsa.sobol.analyze(samples, Y, on_invalid="drop")
+
+  result.invalid.n_invalid        # how many blocks held a non-finite value
+  result.invalid.unit_indices     # which blocks
+  result.invalid.bad_row_indices  # the rows that actually failed
+  result.invalid.row_indices      # every row those blocks cover
+  result.invalid.sources          # whether they were in X, in Y, or both
+  ```
+
+  `bad_row_indices` and `row_indices` answer different questions. One failed
+  run inside an eFAST search curve gives one entry in the first and 257 in the
+  second: the first says which model run to investigate, the second says what
+  `"drop"` would remove. Both use the numbering of the array you passed, so a
+  Saltelli or Morris design reports the unique rows you evaluated, not the
+  expanded rows it analyses internally.
+
+  The default refuses because an index computed from part of a sample is a
+  different quantity from the one you asked for, and `analyze()` is cheap to
+  run again once you know which runs failed.
+
+  What `"drop"` removes depends on the design. A Saltelli group, a Morris
+  trajectory and a Kucherenko base point are each read as one block, so one bad
+  value removes the whole block; keeping part of one would leave the estimator
+  reading rows that no longer line up, with nothing to report it. For the
+  given-data methods one bad value removes one row. A bad input row always
+  takes its matching output row with it.
+
+  `jaxgsa.efast.analyze` takes `"raise"` and `"propagate"` only. Its design is
+  an ordered sweep read by a Fourier transform, so removing a point does not
+  shrink the sample, it changes what the estimator computes. Asking for
+  `"drop"` raises and says so.
+
+- **`jaxgsa.InvalidReport` and `jaxgsa.InvalidUnit`**, the two supporting
+  types. Every result now carries `result.invalid`, whichever policy ran. A
+  report with `n_invalid == 0` means the check ran and found nothing, which is
+  not the same as no check having run. Positions always refer to the array as
+  you passed it, before anything was removed.
+
+### Fixed
+
+- **PAWN silently discarded non-finite inputs.** A `NaN` in `X` failed the
+  in-range comparison in `_equal_width_bins` and took the `-1` sentinel, so
+  that sample vanished from every conditional set with no warning. Genuinely
+  out-of-range values still use the sentinel; a non-finite value can no longer
+  reach it.
+
+- **Optimal transport reported a failed computation as zero influence.** The
+  normalization guarded with `V > 0`, which is false for a `NaN` variance, so a
+  non-finite output gave `ot = 0.0` for every parameter — indistinguishable
+  from a parameter that does nothing. It now gives `NaN`. A constant output
+  still gives exactly `0.0`.
+
+- **DGSM could not see a non-finite derivative.** Its bound-consistency warning
+  excludes non-finite entries from the comparison, so a `NaN` Jacobian with a
+  finite output passed unremarked. Both call styles now check the derivative as
+  well as the output.
+
+- **Borgonovo reported a failed run as a bandwidth problem.** A non-finite
+  output surfaced only after the whole kernel-density estimate and bootstrap
+  had run, as an out-of-range delta error mentioning `degenerate_bandwidth`.
+  It is now named as a bad row up front. The out-of-range check still guards
+  genuine estimator failure.
+
+- **VKOGA reported a failed run as a solver failure.** A non-finite output made
+  every cross-validation score non-finite, which surfaced as
+  `"Every cross-validation score is non-finite; the kernel solves failed"`.
+  That guard remains for real solver failure, but is no longer reachable from
+  non-finite input.
+
 ## Unreleased (0.9.0)
 
 Version 0.9.0 fixes defects. It adds no method and removes no API.

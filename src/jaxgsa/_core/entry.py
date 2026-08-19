@@ -258,6 +258,7 @@ def prepare(
     expand: Callable[[Array], Array] | None = None,
     n_units: int | None = None,
     unit_of_row: npt.NDArray[np.intp] | None = None,
+    row_labels: npt.NDArray[np.intp] | None = None,
     min_kept: int = 1,
     source_names: tuple[str, str] = ("X", "Y"),
     warn_zero_variance: bool = True,
@@ -301,6 +302,10 @@ def prepare(
             row count, which is right whenever one row is one unit.
         unit_of_row: For each row, the unit it belongs to. ``None`` when one
             row is one unit.
+        row_labels: For each row checked here, the row the caller holds.
+            A design-based method checks the expanded layout, but the caller
+            evaluated one output per unique run, so the report has to name the
+            rows they can act on. ``None`` when the two numberings agree.
         min_kept: Fewest surviving units the estimator can still work with.
         source_names: What to call the two arrays in messages.
         warn_zero_variance: Whether to check for a constant output slice. Off
@@ -363,6 +368,7 @@ def prepare(
         Y=Y,
         X=X,
         unit_of_row=unit_of_row,
+        row_labels=row_labels,
         min_kept=min_kept,
         source_names=source_names,
     )

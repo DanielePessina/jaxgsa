@@ -556,9 +556,8 @@ class TestOnInvalidPolicy:
             analyze(sr, jnp.asarray(bad))
         message = str(exc.value)
         assert "jaxgsa.efast.analyze" in message
-        assert "Affected search curves: [1]" in message
-        assert f"Rows: [{self.N}," in message
-        assert f"{self.N - 10} more" in message
+        assert "They condemn search curves [1]" in message
+        assert f"which covers {self.N} rows" in message
         assert row // self.N == 1
 
     def test_propagate_warns_and_lets_the_value_reach_the_indices(self):

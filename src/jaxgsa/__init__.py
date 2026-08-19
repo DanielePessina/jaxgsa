@@ -17,7 +17,7 @@ from . import (
     sobol,
     vkoga,
 )
-from ._core.invalid import InvalidReport, InvalidUnit
+from ._core.invalid import InvalidReport, InvalidUnit, OnInvalid
 from ._core.warning_types import JaxgsaWarning
 from .problem import CategoricalInputSpec, GaussianInputSpec, Problem, UniformInputSpec
 
@@ -27,6 +27,7 @@ __all__ = [
     "InvalidReport",
     "InvalidUnit",
     "JaxgsaWarning",
+    "OnInvalid",
     "Problem",
     "UniformInputSpec",
     "borgonovo",

@@ -35,10 +35,20 @@ Two supporting types live at the package root.
 
 `jaxgsa.InvalidReport` — what the non-finite check found, carried by every
 result as `result.invalid`. It records `n_invalid`, `n_units`, `n_kept`,
-`unit_indices`, `row_indices`, `sources` and the `policy` that ran. The
-positions refer to the array as it was passed in, before anything was
-removed, so they name the model runs to investigate. A report with
-`n_invalid == 0` means the check ran and found nothing.
+`unit_indices`, `bad_row_indices`, `row_indices`, `sources` and the `policy`
+that ran. A report with `n_invalid == 0` means the check ran and found
+nothing.
+
+`bad_row_indices` names the rows that actually held a non-finite value;
+`row_indices` names every row of the blocks those rows condemn, which is what
+`"drop"` removes. For a block design the two differ by a large factor. Both
+refer to the array as you passed it, so they name model runs you can find.
+
+#### OnInvalid
+
+`jaxgsa.OnInvalid` — the type of the `on_invalid` argument, the literal
+`"raise" | "propagate" | "drop"`. Exported so that typed code can name the
+policy it passes.
 
 #### InvalidUnit
 

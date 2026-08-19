@@ -566,7 +566,7 @@ Morris is closely related to DGSM. As $\Delta \to 0$, $\mu^*_i \to \mathbb{E}|\p
 
 1. `jaxgsa.morris.sample()` builds the trajectories, removes exact duplicate rows, and returns only the unique rows. Grid designs collide often in low dimensions, so this saves real model evaluations, just like Saltelli sampling.
 2. You evaluate your model on `sampling_result.samples`.
-3. `jaxgsa.morris.analyze()` reconstructs the expanded design internally, drops trajectories containing non-finite values with a warning, and reduces one elementary effect per trajectory and parameter to $\mu$, $\mu^*$, and $\sigma$. Pass `num_resamples > 0` (with a JAX PRNG `key`) for bootstrap confidence intervals over trajectories.
+3. `jaxgsa.morris.analyze()` reconstructs the expanded design internally, applies the `on_invalid` policy at trajectory granularity (see [Failed model runs](#failed-model-runs)), and reduces one elementary effect per trajectory and parameter to $\mu$, $\mu^*$, and $\sigma$. Pass `num_resamples > 0` (with a JAX PRNG `key`) for bootstrap confidence intervals over trajectories.
 
 Elementary effects are computed in unit-cube coordinates, so $\mu^*$ is directly comparable across parameters regardless of their physical ranges. `MorrisResult.to_physical_units()` rescales to derivative-scale values in the problem's native units. That rescaling covers uniform-marginal problems only: for Gaussian marginals the inverse-CDF transform is nonlinear, so the measures stay in grid coordinates. `MorrisSamples.downsample()` prefix-slices to fewer trajectories without re-simulation, mirroring `SobolSamples.downsample()`.
 
@@ -1067,13 +1067,18 @@ Whatever you choose, the result carries an `invalid` report:
 ```python
 result = jaxgsa.sobol.analyze(samples, Y, on_invalid="drop")
 
-result.invalid.n_invalid     # how many blocks held a bad value
-result.invalid.unit_indices  # which blocks
-result.invalid.row_indices   # which rows of the array you passed in
-result.invalid.sources       # whether the bad values were in X, in Y, or both
+result.invalid.n_invalid        # how many blocks held a bad value
+result.invalid.unit_indices     # which blocks
+result.invalid.bad_row_indices  # the rows that actually failed
+result.invalid.row_indices      # every row those blocks cover
+result.invalid.sources          # whether the bad values were in X, in Y, or both
 ```
 
-The positions are the useful part: they name the model runs to investigate. They always refer to the array as you passed it, before anything was removed.
+The positions are the useful part: they name the model runs to investigate.
+
+`bad_row_indices` and `row_indices` answer different questions, and for a block design the difference is large. One failed run inside an eFAST search curve gives one entry in `bad_row_indices` and 257 in `row_indices`. The first tells you which model run to look at. The second tells you what `"drop"` would remove.
+
+Both always refer to the array as you passed it. A Saltelli or Morris design is analysed in an expanded form that repeats rows, but you evaluated the model once per unique row, so the report is translated back to the numbering you hold.
 
 ## References
 

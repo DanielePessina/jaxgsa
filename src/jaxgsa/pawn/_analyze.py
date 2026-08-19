@@ -83,10 +83,13 @@ def _equal_width_bins(X_u01: Array, n_bins: int) -> Array:
     value of exactly ``0.0`` maps to the first bin and ``1.0`` maps to the
     last bin.
 
-    A non-finite input would take the same sentinel, but :func:`analyze`
-    never lets one reach here: the ``on_invalid`` policy handles it first, so
-    a failed model run is reported instead of quietly leaving every
-    conditional set.
+    A non-finite input takes the same sentinel. Under the two policies that
+    remove or refuse it, ``"raise"`` and ``"drop"``, :func:`analyze` settles
+    it before this point, so a failed model run is reported instead of
+    quietly leaving every conditional set. Under ``"propagate"`` the value
+    does reach here and is silently binned out, which is the behaviour that
+    policy asks for -- the caller was told the count and the row numbers
+    first.
 
     Args:
         X_u01: Unit-interval inputs, shape ``(N, D)``.

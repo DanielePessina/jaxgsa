@@ -39,8 +39,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Literal, TypeAlias, cast
 
+import jax.numpy as jnp
 import numpy as np
 import numpy.typing as npt
+from jax import Array
 
 from jaxgsa._core.warning_types import JaxgsaWarning
 
@@ -139,10 +141,15 @@ class InvalidReport:
         n_units: Total number of units in the sample before any removal.
         n_invalid: Number of units that held at least one non-finite value.
         unit_indices: Positions of those units, in the original numbering.
-        row_indices: Rows of the input arrays those units occupy, in the
-            original numbering. For ``InvalidUnit.ROW`` this equals
-            ``unit_indices``. For a grouped design it is larger, because one
-            bad value removes its whole group.
+        row_indices: Every row the affected units occupy, in the caller's
+            numbering. For ``InvalidUnit.ROW`` this equals ``unit_indices``.
+            For a grouped design it is larger, because one bad value condemns
+            its whole group. These are the rows that ``"drop"`` removes.
+        bad_row_indices: The rows that actually held a non-finite value, in
+            the caller's numbering. Always a subset of ``row_indices``, and
+            usually a much smaller one: an eFAST search curve is one unit of
+            256 rows, and this says which of them failed. These are the model
+            runs to investigate.
         sources: Which arrays held non-finite values. Empty when nothing was
             found. The names are usually ``"X"`` and ``"Y"``, but a caller
             that checks something else can rename them; see the
@@ -155,6 +162,7 @@ class InvalidReport:
     n_invalid: int
     unit_indices: tuple[int, ...]
     row_indices: tuple[int, ...]
+    bad_row_indices: tuple[int, ...]
     sources: tuple[str, ...]
 
     @property
@@ -196,6 +204,7 @@ def _clean_report(unit: InvalidUnit, n_units: int, policy: OnInvalid) -> Invalid
         n_invalid=0,
         unit_indices=(),
         row_indices=(),
+        bad_row_indices=(),
         sources=(),
     )
 
@@ -247,12 +256,12 @@ def resolve_policy(
 
 
 def _finite_by_unit(
-    array: npt.NDArray[np.generic] | None,
+    array: Array | None,
     *,
     n_units: int,
     unit_of_row: npt.NDArray[np.intp] | None,
-) -> npt.NDArray[np.bool_]:
-    """Return a per-unit mask that is False where the array holds a bad value.
+) -> tuple[npt.NDArray[np.bool_], npt.NDArray[np.bool_] | None]:
+    """Return per-unit and per-row masks, False where a bad value sits.
 
     Args:
         array: Array whose leading axis is the sample axis, or ``None`` to
@@ -262,29 +271,36 @@ def _finite_by_unit(
             ``None`` when rows and units are the same thing.
 
     Returns:
-        A boolean array of shape ``(n_units,)``, True where the unit is clean.
+        A tuple ``(unit_ok, row_ok)``. ``unit_ok`` has shape ``(n_units,)`` and
+        is True where the unit is clean. ``row_ok`` has one entry per row of
+        ``array`` and is True where that row is clean, or is ``None`` when
+        there was no array to check. The row verdict is kept because a unit
+        can span hundreds of rows and only one of them failed; the report
+        names both.
     """
     if array is None:
-        return np.ones(n_units, dtype=bool)
+        return np.ones(n_units, dtype=bool), None
 
-    flat = np.asarray(array).reshape(array.shape[0], -1)
     # A row is bad if any element in it is non-finite. `isfinite` rejects both
     # NaN and the infinities, which is what we want: an infinite output breaks
     # a variance just as thoroughly as a NaN does.
     #
-    # `.all(axis=1)` is typed as returning a scalar or an array, because the
-    # scalar case is what a bare `.all()` gives. With an explicit axis it is
-    # always an array, so re-wrap rather than widen the return type.
-    row_ok: npt.NDArray[np.bool_] = np.asarray(np.isfinite(flat).all(axis=1))
+    # Reduce on whichever device the array already sits on, and bring back only
+    # the one bit per row. Pulling the whole array to the host would move
+    # `n_rows * T * K` floats to decide `n_rows` booleans, and for a Saltelli
+    # design that array is the expanded one, not the caller's.
+    reduced = jnp.isfinite(array.reshape(array.shape[0], -1)).all(axis=1)
+    row_ok: npt.NDArray[np.bool_] = np.asarray(reduced)
 
     if unit_of_row is None:
-        return row_ok
+        return row_ok, row_ok
 
-    # Scatter the row verdicts onto their units. `logical_and.at` accumulates
-    # in place, so a unit is clean only when every one of its rows is.
-    unit_ok = np.ones(n_units, dtype=bool)
-    np.logical_and.at(unit_ok, unit_of_row, row_ok)
-    return unit_ok
+    # Scatter the row verdicts onto their units: a unit is clean only when
+    # every one of its rows is. `bincount` counts the bad rows per unit in one
+    # pass, which beats `np.logical_and.at` by more than a factor of ten, and
+    # works for any row map -- contiguous blocks and strided ones alike.
+    n_bad_per_unit = np.bincount(unit_of_row, weights=~row_ok, minlength=n_units)
+    return n_bad_per_unit == 0, row_ok
 
 
 def check_invalid(
@@ -296,6 +312,7 @@ def check_invalid(
     Y: npt.ArrayLike | None = None,
     X: npt.ArrayLike | None = None,
     unit_of_row: npt.NDArray[np.intp] | None = None,
+    row_labels: npt.NDArray[np.intp] | None = None,
     min_kept: int = 1,
     source_names: tuple[str, str] = ("X", "Y"),
 ) -> tuple[npt.NDArray[np.bool_], InvalidReport]:
@@ -317,9 +334,17 @@ def check_invalid(
             so a bad input takes its own output with it.
         unit_of_row: For each row, the unit it belongs to. Pass ``None`` when
             one row is one unit.
-        min_kept: Fewest surviving units the caller can still work with. Below
-            this the call raises even under ``"drop"``, because an estimate
-            from too little data is not an estimate.
+        row_labels: For each row of the arrays given here, the row of the
+            **caller's** array it came from. Pass it whenever the two differ,
+            so the report points at rows the caller can actually find. Sobol
+            and Morris are the cases: both analyze an expanded design, but the
+            user evaluated one output per unique run, and "row 18 of 24" means
+            nothing to someone holding 16 rows.
+        min_kept: Fewest surviving units the caller can still work with.
+            Enforced under ``"drop"`` only, because an estimate from too little
+            data is not an estimate. ``"raise"`` has already raised by then,
+            and ``"propagate"`` removes nothing, so what it computes from is
+            the whole sample.
         source_names: What to call the two arrays in messages and in
             :attr:`InvalidReport.sources`, as ``(name_of_X, name_of_Y)``.
             Override it where the defaults would mislead. DGSM is the case
@@ -334,11 +359,11 @@ def check_invalid(
         apply it unconditionally.
 
     Raises:
-        ValueError: Under ``"raise"`` when anything was found, and under any
-            policy when fewer than ``min_kept`` units would remain.
+        ValueError: Under ``"raise"`` when anything was found, and under
+            ``"drop"`` when fewer than ``min_kept`` units would remain.
     """
-    y_ok = _finite_by_unit(_as_numpy(Y), n_units=n_units, unit_of_row=unit_of_row)
-    x_ok = _finite_by_unit(_as_numpy(X), n_units=n_units, unit_of_row=unit_of_row)
+    y_ok, y_rows = _finite_by_unit(_as_array(Y), n_units=n_units, unit_of_row=unit_of_row)
+    x_ok, x_rows = _finite_by_unit(_as_array(X), n_units=n_units, unit_of_row=unit_of_row)
     clean = y_ok & x_ok
 
     n_invalid = int((~clean).sum())
@@ -354,7 +379,8 @@ def check_invalid(
         n_units=n_units,
         n_invalid=n_invalid,
         unit_indices=unit_indices,
-        row_indices=_rows_of_units(unit_indices, unit_of_row, n_units),
+        row_indices=_rows_of_units(unit_indices, unit_of_row, n_units, row_labels),
+        bad_row_indices=_bad_rows(y_rows, x_rows, row_labels),
         sources=sources,
     )
 
@@ -398,30 +424,61 @@ def check_invalid(
     return clean, report
 
 
-def _as_numpy(array: npt.ArrayLike | None) -> npt.NDArray[np.generic] | None:
-    """Bring an array to the host, or pass ``None`` through.
+def _as_array(array: npt.ArrayLike | None) -> Array | None:
+    """Present an input as a JAX array, or pass ``None`` through.
 
-    The check is host-side by necessity: which rows survive decides an array
-    shape, and a JIT-traced shape cannot depend on a value. Twelve of the
-    thirteen entry points already synchronize at this point for their own
-    reasons, so this costs no extra transfer in practice.
+    The decision this feeds is host-side by necessity: which units survive
+    decides an array shape, and a traced shape cannot depend on a value. Only
+    the per-row verdict crosses back to the host, though, never the data. See
+    :func:`_finite_by_unit`.
     """
     if array is None:
         return None
-    return np.asarray(array)
+    return jnp.asarray(array)
 
 
 def _rows_of_units(
     unit_indices: tuple[int, ...],
     unit_of_row: npt.NDArray[np.intp] | None,
     n_units: int,
+    row_labels: npt.NDArray[np.intp] | None = None,
 ) -> tuple[int, ...]:
-    """Return the rows occupied by the given units, in the original numbering."""
+    """Return the rows the given units occupy, in the caller's numbering."""
     if unit_of_row is None:
-        return unit_indices
-    wanted = np.zeros(n_units, dtype=bool)
-    wanted[list(unit_indices)] = True
-    return tuple(int(i) for i in np.flatnonzero(wanted[unit_of_row]))
+        rows = np.asarray(unit_indices, dtype=np.intp)
+    else:
+        wanted = np.zeros(n_units, dtype=bool)
+        wanted[list(unit_indices)] = True
+        rows = np.flatnonzero(wanted[unit_of_row])
+    if row_labels is not None:
+        # A design that repeats a run gives several internal rows the same
+        # caller row, so translating can produce duplicates. Report each
+        # caller row once, in order.
+        rows = np.unique(np.asarray(row_labels)[rows])
+    return tuple(int(i) for i in rows)
+
+
+def _bad_rows(
+    y_rows: npt.NDArray[np.bool_] | None,
+    x_rows: npt.NDArray[np.bool_] | None,
+    row_labels: npt.NDArray[np.intp] | None,
+) -> tuple[int, ...]:
+    """Return the rows that actually held a bad value, in caller numbering.
+
+    Distinct from the rows of the condemned units. A Saltelli group is 22 rows
+    and an eFAST curve is hundreds; naming all of them tells a user nothing
+    about which model run to look at.
+    """
+    verdicts = [v for v in (y_rows, x_rows) if v is not None]
+    if not verdicts:
+        return ()
+    bad = np.zeros(verdicts[0].shape, dtype=bool)
+    for verdict in verdicts:
+        bad |= ~verdict
+    rows = np.flatnonzero(bad)
+    if row_labels is not None:
+        rows = np.unique(np.asarray(row_labels)[rows])
+    return tuple(int(i) for i in rows)
 
 
 def _and_list(names: tuple[str, ...]) -> str:
@@ -430,11 +487,18 @@ def _and_list(names: tuple[str, ...]) -> str:
 
 
 def _positions_line(report: InvalidReport) -> str:
-    """Describe where the bad values sit, naming rows when they differ."""
-    line = f"Affected {report.unit.plural}: {_abbreviate(report.unit_indices)}."
-    if report.unit is not InvalidUnit.ROW:
-        line += f" Rows: {_abbreviate(report.row_indices)}."
-    return line
+    """Describe where the bad values sit.
+
+    For a grouped design the failing rows and the condemned rows are different
+    facts, and the failing ones are what a user acts on, so they come first.
+    """
+    if report.unit is InvalidUnit.ROW:
+        return f"Affected rows: {_abbreviate(report.row_indices)}."
+    return (
+        f"Non-finite rows: {_abbreviate(report.bad_row_indices)}. "
+        f"They condemn {report.unit.plural} {_abbreviate(report.unit_indices)}, "
+        f"which covers {len(report.row_indices)} rows."
+    )
 
 
 def _raise_message(method: str, report: InvalidReport) -> str:

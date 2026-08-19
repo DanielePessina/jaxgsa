@@ -30,6 +30,7 @@ def _clean_invalid(unit: InvalidUnit) -> InvalidReport:
         n_invalid=0,
         unit_indices=(),
         row_indices=(),
+        bad_row_indices=(),
         sources=(),
     )
 

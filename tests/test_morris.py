@@ -666,8 +666,8 @@ class TestOnInvalidPolicy:
             analyze(sr, jnp.asarray(bad))
         message = str(exc.value)
         assert "jaxgsa.morris.analyze" in message
-        assert "Affected trajectories: [3]" in message
-        assert f"Rows: {rows}" in message
+        assert "They condemn trajectories [3]" in message
+        assert f"which covers {len(rows)} rows" in message
 
     def test_propagate_warns_and_lets_the_value_reach_the_measures(self):
         """T4: nothing is removed, so the screening measures come back NaN."""

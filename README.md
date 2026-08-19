@@ -116,7 +116,9 @@ Dependence: HSIC does kernel-based dependence detection.
 - Bootstrap confidence intervals with JAX-accelerated resampling
 - Optional `prenormalize=True` mode for SALib-style output standardization before
   Sobol or HDMR analysis
-- Automatic data cleaning: non-finite values (NaN/Inf) are detected and dropped by group
+- `on_invalid` on every `analyze()`: a non-finite model output raises by default,
+  and `"drop"` or `"propagate"` say what to do instead. Every result carries a
+  report naming the runs that failed
 - **xarray integration** — `to_dataset()` on results for labeled, named dimensions (`param`, `output`, `time`)
 - Save and reload sample designs as one NPZ file via `SobolSamples.save()` / `.load()` (and the same on `MorrisSamples`)
 - Built-in Ishigami benchmark function with known analytical solutions

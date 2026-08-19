@@ -415,8 +415,10 @@ D is always the last axis.
   probable; odd values trigger a warning.
 - `Y` must be evaluated on `sr.samples` (the unique rows); `jaxgsa.morris.analyze()`
   reconstructs the expanded trajectory layout internally.
-- Trajectories containing any non-finite output (NaN/Inf) are dropped as
-  whole blocks with a warning. Fewer than 2 remaining trajectories raise an
+- A trajectory containing any non-finite output (NaN/Inf) raises by default.
+  Pass `on_invalid="drop"` to remove it instead; a trajectory is dropped as a
+  whole block, because an elementary effect is a difference between
+  neighbouring rows inside one. Fewer than 2 remaining trajectories raise an
   error; fewer than 10 trigger a reliability warning.
 - Measures derived through `SobolSamples.to_morris()` come from the same model
   outputs as that design's Sobol indices, so mu_star and ST agreeing is not an

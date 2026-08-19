@@ -279,6 +279,9 @@ def analyze(
         expand=sampling_result.expand_outputs,
         n_units=r,
         unit_of_row=np.repeat(np.arange(r), rows_per_traj),
+        # Y is checked expanded, but the caller evaluated one output per
+        # unique run. Report the rows they hold, not the expanded ones.
+        row_labels=sampling_result.expanded_to_unique,
         min_kept=2,
         # A constant slice gives elementary effects of exactly 0 (0/delta), so
         # the measures come out 0, not NaN as in the variance-based methods.
