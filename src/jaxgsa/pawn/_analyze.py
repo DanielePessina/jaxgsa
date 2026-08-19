@@ -443,12 +443,10 @@ def indices(
     exactly 0 almost everywhere. The value of tracing here is ``jit`` and
     ``vmap``, not a gradient.
 
-    One limit is not ours to lift: a **truncated Gaussian** marginal has no
-    CDF in JAX, so :func:`jaxgsa._core.transforms.cdf_to_unit_interval` routes
-    that column through SciPy, which reads ``X`` on the host. A problem with
-    such a marginal therefore cannot be traced through this function. Every
-    other marginal — uniform, unbounded Gaussian, categorical — stays on
-    device.
+    Every marginal traces: uniform, Gaussian, truncated Gaussian and
+    categorical. The binning of a continuous column goes through
+    :func:`jaxgsa._core.transforms.cdf_to_unit_interval`, which stays on
+    device for all of them.
 
     Tier T4 (behavioural contract): the returned array must equal the ``pawn``
     field of ``analyze``'s result on clean outputs, and the function must

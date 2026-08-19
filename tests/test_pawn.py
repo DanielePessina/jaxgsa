@@ -12,7 +12,7 @@ import pytest
 from jaxgsa import JaxgsaWarning
 from jaxgsa.benchmarks import ishigami
 from jaxgsa.pawn import analyze, indices
-from jaxgsa.problem import Problem
+from jaxgsa.problem import InputSpecValue, Problem
 from jaxgsa.sampling import monte_carlo
 
 
@@ -631,3 +631,52 @@ class TestPureCore:
             indices(ishigami.PROBLEM, X, Y[:-1], n_bins=8)
         with pytest.raises(ValueError, match="columns"):
             indices(ishigami.PROBLEM, X[:, :2], Y, n_bins=8)
+
+    # Each marginal family reaches ``cdf_to_unit_interval`` by a different
+    # branch, and two of those branches used to break tracing in different
+    # ways: a truncated Gaussian read ``X`` on the host through SciPy, and
+    # *every* Gaussian, truncated or not, took ``float()`` of a tracer while
+    # standardising. They were separate defects, so they get separate cases.
+    _MARGINALS: dict[str, InputSpecValue] = {
+        "uniform": (0.0, 1.0),
+        "gaussian": {"dist": "gaussian", "mean": 0.3, "variance": 2.0},
+        "truncated": {
+            "dist": "gaussian",
+            "mean": 0.0,
+            "variance": 1.0,
+            "low": -1.5,
+            "high": 2.0,
+        },
+        # Both bounds far out in the upper tail. The direct
+        # ``(Phi(z) - Phi(a)) / (Phi(b) - Phi(a))`` form cancels to noise here,
+        # so this case pins the survival-function branch of the transform.
+        "upper_tail": {
+            "dist": "gaussian",
+            "mean": 0.0,
+            "variance": 1.0,
+            "low": 5.0,
+            "high": 6.0,
+        },
+    }
+
+    @pytest.mark.parametrize("marginal", sorted(_MARGINALS))
+    def test_every_marginal_traces_and_matches_analyze(self, marginal):
+        """T4: ``jit`` holds for every marginal family, not only uniform.
+
+        A uniform-only contract test passes while the Gaussian branch of the
+        unit-interval transform cannot be traced at all, which is exactly the
+        state this package shipped in. The eager comparison against ``analyze``
+        and the jitted comparison against the eager core are both needed: the
+        first is the value contract, the second is the traceability one, and a
+        host read inside the transform breaks only the second.
+        """
+        problem = Problem.from_dict({"a": self._MARGINALS[marginal], "b": (0.0, 1.0)})
+        X = jnp.asarray(monte_carlo(problem, n=1200, seed=17))
+        Y = jnp.sin(X[:, 0]) + 0.5 * X[:, 1]
+
+        result = analyze(problem, X, Y, n_bins=6)
+        (pawn,) = indices(problem, X, Y, n_bins=6)
+        np.testing.assert_array_equal(np.asarray(pawn), np.asarray(result.pawn))
+
+        (pawn_jit,) = jax.jit(lambda outputs: indices(problem, X, outputs, n_bins=6))(Y)
+        np.testing.assert_allclose(np.asarray(pawn_jit), np.asarray(pawn), rtol=1e-6)
