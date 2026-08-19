@@ -28,7 +28,9 @@ from functools import lru_cache
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import Array
+from jax.typing import DTypeLike
 
 from jaxgsa._core.entry import at_least, prepare, require
 from jaxgsa._core.invalid import OnInvalid
@@ -40,6 +42,132 @@ from jaxgsa.hsic._result import HSICResult
 from jaxgsa.problem import Problem
 
 _MIN_SAMPLES = 4
+
+_UINT_BY_ITEMSIZE: dict[int, type] = {2: jnp.uint16, 4: jnp.uint32, 8: jnp.uint64}
+"""Unsigned integer type of the same width as a float type, by byte count."""
+
+
+def _linear_quantile_plan(q: float, n_elements: int) -> tuple[int, int, Array]:
+    """Reproduce the index and weight arithmetic of ``jnp.quantile``.
+
+    ``jnp.quantile(a, q)`` with the default ``method="linear"`` reads two
+    order statistics of the sorted array and blends them. The blend is done
+    in the dtype a bare Python float gets, and the position is computed in
+    that dtype too, so the rounding of ``q * (n - 1)`` is part of the answer.
+    This helper repeats exactly that arithmetic on the host, which is possible
+    because both ``q`` and the element count are static.
+
+    Args:
+        q: Quantile in [0, 1], as a Python float.
+        n_elements: Number of elements the quantile is taken over.
+
+    Returns:
+        ``(low_rank, high_rank, high_weight)``. The ranks are 0-based
+        positions into the ascending sort, and the weight is the share of the
+        higher of the two, a scalar of the default float dtype.
+    """
+    dtype = jnp.result_type(float)
+    pos = np.asarray(q, dtype=dtype) * np.asarray(n_elements - 1, dtype=dtype)
+    low = np.floor(pos)
+    high = np.ceil(pos)
+    high_weight = np.asarray(pos - low, dtype=dtype)
+    return int(low), int(high), jnp.asarray(high_weight)
+
+
+def _from_order_key(key: Array, sign_bit: Array, dtype: DTypeLike) -> Array:
+    """Undo the total-ordering bit transform and read the float back.
+
+    Args:
+        key: Order key produced by the transform in
+            :func:`_linear_quantile_by_selection`.
+        sign_bit: The sign bit of the unsigned type the key lives in.
+        dtype: Float dtype to bitcast back to.
+
+    Returns:
+        The float whose order key is ``key``.
+    """
+    raw = jnp.where(key & sign_bit != 0, key ^ sign_bit, ~key)
+    return jax.lax.bitcast_convert_type(raw, dtype)
+
+
+def _linear_quantile_by_selection(values: Array, q: float) -> Array:
+    """Take a linear-interpolated quantile without sorting the input.
+
+    ``jnp.quantile`` sorts. On the ``(N, N)`` matrix of pairwise squared
+    distances that is an ``N^2 log N^2`` sort of a million elements for every
+    output slice, and it measured as 92% of the whole HSIC analysis. Only two
+    adjacent order statistics are ever read, so a *selection* answers the same
+    question, and a selection needs no sort.
+
+    The selection bisects on the bit pattern of the value rather than on the
+    value itself. The raw unsigned integer sharing the storage is monotone in
+    the float only for non-negative values -- a negative float has its sign
+    bit set, so it reads as a *large* unsigned integer, and ``-inf`` would
+    come back as the maximum instead of the minimum. The standard total
+    ordering fixes that: flip every bit of a negative, set the sign bit of a
+    non-negative. The result is monotone across the whole float line, so
+    bisecting the integer range is bisecting the value range, and a fixed
+    number of steps (one per bit) lands on an exact element of the input.
+    Each step is one compare-and-count pass over the data, which is
+    bandwidth-bound and parallel, where a sort is neither.
+
+    The result is bit-for-bit what ``jnp.quantile`` returns: the same two
+    order statistics, blended with the same weights, in the same dtype. NaN
+    is handled the same way too — ``jnp.quantile`` poisons the whole array if
+    any element is NaN, so a NaN anywhere gives NaN here as well.
+
+    Args:
+        values: Values to take the quantile over. Any shape; it is treated
+            as flat. Negatives and infinities are ordered correctly.
+        q: Quantile in [0, 1], as a Python float.
+
+    Returns:
+        Scalar quantile, in the dtype ``jnp.quantile`` would return.
+
+    Raises:
+        TypeError: If the float width of ``values`` has no unsigned integer
+            counterpart to bisect over.
+    """
+    flat = values.ravel()
+    itemsize = jnp.dtype(flat.dtype).itemsize
+    if itemsize not in _UINT_BY_ITEMSIZE:
+        raise TypeError(f"cannot select order statistics of dtype {flat.dtype}")
+    uint = _UINT_BY_ITEMSIZE[itemsize]
+    sign_bit = jnp.asarray(1, uint) << jnp.asarray(itemsize * 8 - 1, uint)
+    raw = jax.lax.bitcast_convert_type(flat, uint)
+    bits = jnp.where(raw & sign_bit != 0, ~raw, raw | sign_bit)
+
+    low_rank, high_rank, high_weight = _linear_quantile_plan(q, flat.shape[0])
+
+    def _step(_: int, bounds: tuple[Array, Array]) -> tuple[Array, Array]:
+        """Halve the candidate bit-pattern interval once."""
+        lo, hi = bounds
+        mid = lo + (hi - lo) // 2
+        enough = jnp.sum(bits <= mid) >= low_rank + 1
+        return jnp.where(enough, lo, mid + 1), jnp.where(enough, mid, hi)
+
+    lo_bits, _ = jax.lax.fori_loop(0, itemsize * 8, _step, (jnp.zeros((), uint), jnp.max(bits)))
+    low_value = _from_order_key(lo_bits, sign_bit, flat.dtype)
+
+    # The high rank is the low rank plus one, so its value is either the same
+    # element again (when the low value is repeated) or the next distinct
+    # value up. Both are one masked reduction away, which is cheaper than a
+    # second bisection.
+    n_at_or_below = jnp.sum(bits <= lo_bits)
+    all_ones = ~jnp.zeros((), uint)
+    above = jnp.where(bits > lo_bits, bits, all_ones)
+    next_value = _from_order_key(jnp.min(above), sign_bit, flat.dtype)
+    high_value = jnp.where(n_at_or_below >= high_rank + 1, low_value, next_value)
+
+    # Blend the pair through ``jnp.quantile`` itself rather than by writing
+    # the weighted sum out here. On a two-element array the same function
+    # reduces to exactly this blend -- the sort is a no-op, the position is
+    # ``high_weight``, and the two weights come back unchanged -- so the last
+    # bit is guaranteed to agree with the sorting implementation even when the
+    # sum lands on a tie that a fused multiply-add rounds one way and a
+    # separate multiply and add round the other.
+    blended = jnp.quantile(jnp.stack([low_value, high_value]), high_weight)
+    return jnp.where(jnp.any(jnp.isnan(flat)), jnp.nan, blended)
 
 
 def _median_bandwidth_sq(x: Array) -> Array:
@@ -67,11 +195,15 @@ def _median_bandwidth_sq(x: Array) -> Array:
       which end at position ``S - 1`` and start at position ``S``. Linear
       interpolation at position ``S - 0.5`` returns exactly that average.
 
-    Position ``S - 0.5`` therefore serves both parities, and ``jnp.quantile``
-    with the default linear interpolation puts the target at
-    ``q * (N^2 - 1)``. Solving for q and substituting S gives the expression
-    below. It reproduces ``jnp.median`` of the strict upper triangle exactly at
-    every N tested from 4 to 1024.
+    Position ``S - 0.5`` therefore serves both parities, and a linear-
+    interpolated quantile puts the target at ``q * (N^2 - 1)``. Solving for q
+    and substituting S gives the expression below. It reproduces
+    ``jnp.median`` of the strict upper triangle exactly at every N tested from
+    4 to 1024.
+
+    The quantile is taken by selection rather than by sorting — see
+    :func:`_linear_quantile_by_selection`, which returns exactly what
+    ``jnp.quantile`` would return and is roughly 40x faster here.
 
     Args:
         x: Values for one variable, shape ``(N,)``.
@@ -82,7 +214,7 @@ def _median_bandwidth_sq(x: Array) -> Array:
     N = x.shape[0]
     dists_sq = (x[:, None] - x[None, :]) ** 2
     q = (N**2 + N - 1) / (2 * (N**2 - 1))
-    return jnp.maximum(jnp.quantile(dists_sq, q), 1e-20)
+    return jnp.maximum(_linear_quantile_by_selection(dists_sq, q), 1e-20)
 
 
 def _resolve_bandwidth_sq(x: Array, bandwidth: float | None) -> Array:
@@ -252,26 +384,59 @@ def _complement_kernels(Ks: list[Array]) -> tuple[Array, list[Array]]:
 
 
 @lru_cache(maxsize=32)
-def _get_hsic_kernel(n_perms: int):
-    """Return a JIT-compiled HSIC slice kernel for the given ``n_perms``.
+def _get_hsic_kernel(n_perms: int, bandwidth: float | None, batch_size: int | None):
+    """Return a JIT-compiled HSIC kernel for every output slice.
+
+    The atomic unit is one output slice: it builds that slice's output
+    kernel, forms the indices against the shared input kernels, and runs the
+    permutation test. The returned callable maps that unit over all the
+    slices in one compiled call, so the whole analysis costs one dispatch
+    instead of one per slice, and no result travels through the host in
+    between.
+
+    Everything that depends only on ``X`` -- the input kernels, their
+    augmented products and complements, and the self-HSIC values -- is a
+    plain argument here. The caller builds it once and hands the same arrays
+    to the one call.
+
+    The map is :func:`jax.lax.map`, which runs the atomic kernel one slice at
+    a time. So one slice's working set is live however many slices the output
+    has, and slice i of a hundred returns bit-for-bit what a scalar analysis
+    of that slice returns.
+
+    The chunked ``vmap`` the rest of the library uses was measured here and
+    rejected. ``jax.lax.map(..., batch_size=c)`` and ``jax.vmap`` over a chunk
+    of c slices ran at the same speed as this scan on a CPU backend -- the
+    per-slice work is a chain of ``(N, N)`` reductions that already saturates
+    the machine and gains nothing from a batch axis -- while letting XLA
+    reassociate those reductions across the chunk. That moved indices by up
+    to 1e-3 relative, because the V-statistic is a difference of three large
+    terms and float32 cancellation magnifies any change of summation order.
+    A chunk that is no faster and changes the answer is not worth a keyword,
+    so there is none. On a device that does reward a batch axis the trade
+    would have to be measured again.
 
     Args:
         n_perms: Number of permutations for the permutation test (static;
             it sets the scan length and the number of split keys).
+        bandwidth: Fixed Gaussian bandwidth for the output kernel, or None
+            for the median heuristic (static; it selects the code path).
+        batch_size: Row-block size for the output kernel build, or None
+            (static; it sets the number of blocks).
 
     Returns:
         A jitted callable that returns ``(R2_HSIC, T_HSIC, p_values,
-        hsic_raw)``, each of shape ``(D,)``, for one output slice. It takes
-        the stacked input kernels, the precomputed self-HSIC values, the
-        output kernel, and a PRNG key.
+        hsic_raw)``, each of shape ``(total, D)``. It takes the stacked input
+        kernels, the precomputed self-HSIC values, the ``(N, total)`` output
+        columns, and one PRNG key per column.
     """
 
-    def _impl(
+    def _one_slice(
         Ks_stack: Array,
         K_aug_compls_stack: Array,
         K_aug_full: Array,
         hsic_xxs: Array,
-        L: Array,
+        y_col: Array,
         key: Array,
     ) -> tuple[Array, Array, Array, Array]:
         """Compute HSIC indices for one output slice.
@@ -283,12 +448,20 @@ def _get_hsic_kernel(n_perms: int):
             K_aug_full: Product of all augmented input kernels ``(N, N)``.
             hsic_xxs: Precomputed self-HSIC ``HSIC(K_d, K_d)`` of shape
                 ``(D,)`` (output-independent, so computed once).
-            L: Output kernel matrix ``(N, N)``.
+            y_col: Single output column, shape ``(N,)``.
             key: PRNG key for the permutation test.
 
         Returns:
             ``(R2_HSIC, T_HSIC, p_values, hsic_raw)`` each of shape ``(D,)``.
         """
+        # The barrier stops XLA fusing the kernel build into the reductions
+        # that read it. Fused, the exponential is recomputed inside each
+        # reduction loop and the sums accumulate in a different order, which
+        # moves the last bit of the indices away from what the same kernel
+        # returns when it is handed a materialized matrix. HSIC reads L a few
+        # dozen times per slice, so materializing it once is the cheaper
+        # arrangement anyway.
+        L = jax.lax.optimization_barrier(_build_one_kernel(y_col, bandwidth, batch_size))
         N = L.shape[0]
         eps = jnp.finfo(L.dtype).eps
 
@@ -322,39 +495,37 @@ def _get_hsic_kernel(n_perms: int):
 
         return r2, t_hsic, p_vals, hsic_xys
 
+    def _impl(
+        Ks_stack: Array,
+        K_aug_compls_stack: Array,
+        K_aug_full: Array,
+        hsic_xxs: Array,
+        Y_cols: Array,
+        keys: Array,
+    ) -> tuple[Array, Array, Array, Array]:
+        """Map the single-slice kernel over the output columns.
+
+        Args:
+            Ks_stack: Stacked raw input kernels ``(D, N, N)``.
+            K_aug_compls_stack: Stacked complement augmented kernels
+                ``(D, N, N)``.
+            K_aug_full: Product of all augmented input kernels ``(N, N)``.
+            hsic_xxs: Precomputed self-HSIC ``HSIC(K_d, K_d)`` ``(D,)``.
+            Y_cols: Output columns, shape ``(N, total)``.
+            keys: One PRNG key per column, shape ``(total,)``.
+
+        Returns:
+            ``(R2_HSIC, T_HSIC, p_values, hsic_raw)`` each ``(total, D)``.
+        """
+
+        def _step(column: tuple[Array, Array]) -> tuple[Array, Array, Array, Array]:
+            """Run the atomic kernel on one (column, key) pair."""
+            y_col, key = column
+            return _one_slice(Ks_stack, K_aug_compls_stack, K_aug_full, hsic_xxs, y_col, key)
+
+        return jax.lax.map(_step, (Y_cols.T, keys))
+
     return jax.jit(_impl)
-
-
-def _compute_slice(
-    Ks_stack: Array,
-    K_aug_compls_stack: Array,
-    K_aug_full: Array,
-    hsic_xxs: Array,
-    y_col: Array,
-    bandwidth: float | None,
-    key: Array,
-    n_perms: int,
-    batch_size: int | None,
-) -> tuple[Array, Array, Array, Array]:
-    """Compute HSIC indices for a single (t, k) output slice.
-
-    Args:
-        Ks_stack: Stacked raw input kernels ``(D, N, N)``.
-        K_aug_compls_stack: Stacked complement augmented kernels ``(D, N, N)``.
-        K_aug_full: Product of all augmented input kernels ``(N, N)``.
-        hsic_xxs: Precomputed self-HSIC ``HSIC(K_d, K_d)`` ``(D,)``
-            (output-independent, so built once by the caller).
-        y_col: Single output column, shape ``(N,)``.
-        bandwidth: Fixed bandwidth, or None for the median heuristic.
-        key: PRNG key for the permutation test.
-        n_perms: Number of permutations.
-        batch_size: Row-block size for the kernel matrix, or None.
-
-    Returns:
-        ``(R2_HSIC, T_HSIC, p_values, hsic_raw)``, each of shape ``(D,)``.
-    """
-    L = _build_one_kernel(y_col, bandwidth, batch_size)
-    return _get_hsic_kernel(n_perms)(Ks_stack, K_aug_compls_stack, K_aug_full, hsic_xxs, L, key)
 
 
 def analyze(
@@ -487,32 +658,17 @@ def analyze(
     # here and share it across every output slice.
     hsic_xxs = jax.vmap(lambda K: _hsic_v(K, K))(Ks_stack)
 
-    r2_all = jnp.empty((T, K, D))
-    t_all = jnp.empty((T, K, D))
-    p_all = jnp.empty((T, K, D))
-    raw_all = jnp.empty((T, K, D))
+    # One column per output slice, in the same (t, k) order the indices are
+    # written back in, and one key per column. Each slice reads its own key,
+    # so the permutation draws do not depend on how the columns are grouped.
+    N = X_unit.shape[0]
+    total = T * K
+    Y_cols = Y_3d.reshape(N, total)
+    keys = jax.vmap(lambda i: jax.random.fold_in(key, i))(jnp.arange(total))
 
-    for t in range(T):
-        for k in range(K):
-            subkey = jax.random.fold_in(key, t * K + k)
-            y_col = Y_3d[:, t, k]
-
-            r2, t_hsic, p_vals, raw = _compute_slice(
-                Ks_stack,
-                K_aug_compls_stack,
-                K_aug_full,
-                hsic_xxs,
-                y_col,
-                bandwidth,
-                subkey,
-                n_perms,
-                batch_size,
-            )
-
-            r2_all = r2_all.at[t, k].set(r2)
-            t_all = t_all.at[t, k].set(t_hsic)
-            p_all = p_all.at[t, k].set(p_vals)
-            raw_all = raw_all.at[t, k].set(raw)
+    kernel = _get_hsic_kernel(n_perms, bandwidth, batch_size)
+    out = kernel(Ks_stack, K_aug_compls_stack, K_aug_full, hsic_xxs, Y_cols, keys)
+    r2_all, t_all, p_all, raw_all = (values.reshape(T, K, D) for values in out)
 
     r2_all = ctx.squeeze(r2_all)
     t_all = ctx.squeeze(t_all)

@@ -9,7 +9,11 @@ import pytest
 from jaxgsa import JaxgsaWarning
 from jaxgsa.benchmarks import ishigami, linear, sobol_g
 from jaxgsa.hsic import analyze
-from jaxgsa.hsic._analyze import _build_one_kernel, _median_bandwidth_sq
+from jaxgsa.hsic._analyze import (
+    _build_one_kernel,
+    _linear_quantile_by_selection,
+    _median_bandwidth_sq,
+)
 from jaxgsa.problem import Problem
 from jaxgsa.sampling import monte_carlo
 
@@ -150,6 +154,54 @@ class TestMedianBandwidth:
         reference = jnp.median(dists_sq[jnp.triu_indices(n, k=1)])
         np.testing.assert_allclose(float(_median_bandwidth_sq(x)), float(reference), rtol=1e-6)
 
+    @pytest.mark.parametrize("n", [4, 5, 33, 128])
+    @pytest.mark.parametrize("scale", [1.0, 1e8])
+    def test_selection_matches_the_sorting_quantile_bit_for_bit(self, n, scale):
+        """Tier T1 (reference implementation): selection reproduces the sort.
+
+        The bandwidth reads two order statistics of the ``(N, N)`` distance
+        matrix. ``jnp.quantile`` gets them by sorting; the estimator gets them
+        by bisecting on the float bit pattern, which is what makes HSIC fast.
+        The oracle is therefore ``jnp.quantile`` itself, and the tolerance is
+        zero: a selection that returned a neighbouring element, or blended it
+        differently, would be a different bandwidth and a different index.
+        The large scale is here because the blend can land on an exact tie
+        between two float32 values, which is where a hand-written weighted
+        sum stops agreeing with the library one.
+        """
+        x = jnp.asarray(np.random.default_rng(n).normal(size=n) * scale, dtype=jnp.float32)
+        dists_sq = (x[:, None] - x[None, :]) ** 2
+        q = (n**2 + n - 1) / (2 * (n**2 - 1))
+        np.testing.assert_array_equal(
+            np.asarray(_linear_quantile_by_selection(dists_sq, q)),
+            np.asarray(jnp.quantile(dists_sq, q)),
+        )
+
+    @pytest.mark.parametrize(
+        "poison", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "-inf"]
+    )
+    def test_non_finite_values_match_the_sorting_quantile(self, poison):
+        """Tier T1 (reference implementation): non-finite parity with the sort.
+
+        The selection bisects on the float bit pattern, which orders finite
+        non-negative floats correctly but says nothing useful about NaN. The
+        estimator therefore carries an explicit NaN branch, and infinities
+        ride on the bit ordering alone. Both behaviours only matter because
+        they must agree with ``jnp.quantile``, so ``jnp.quantile`` is the
+        oracle and the tolerance is zero.
+
+        This reaches the analyzer through invalid data, which is the only way
+        a non-finite distance appears in practice.
+        """
+        values = jnp.asarray(np.abs(np.random.default_rng(0).normal(size=64)), dtype=jnp.float32)
+        values = values.at[7].set(poison)
+        q = 0.5
+        expected = np.asarray(jnp.quantile(values, q))
+        actual = np.asarray(_linear_quantile_by_selection(values, q))
+        np.testing.assert_array_equal(np.isnan(actual), np.isnan(expected))
+        if not np.isnan(expected):
+            np.testing.assert_array_equal(actual, expected)
+
     def test_diagonal_zeros_would_bias_a_plain_median(self):
         """Tier T4 (internal consistency): the index adjustment does work.
 
@@ -167,6 +219,59 @@ class TestMedianBandwidth:
         K = _build_one_kernel(x, 0.5, None)
         expected = np.exp(-np.array([0.0, 1.0, 4.0]) / (2.0 * 0.25))
         np.testing.assert_allclose(np.asarray(K[0]), expected, rtol=1e-6)
+
+
+class TestSliceIndependence:
+    """Analysing many slices together must not disturb any one of them."""
+
+    @staticmethod
+    def _four_slice_case():
+        """Build a four-output problem with slices of unlike shape."""
+        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
+        Xj = jnp.asarray(monte_carlo(problem, n=256, seed=5))
+        Y = jnp.column_stack(
+            [
+                linear.evaluate(Xj),
+                Xj[:, 0] ** 2,
+                jnp.sin(3.0 * Xj[:, 1]),
+                jnp.sum(Xj, axis=1),
+            ]
+        )
+        return problem, Xj, Y
+
+    @pytest.mark.parametrize("column", [0, 1, 2, 3])
+    def test_each_slice_equals_its_own_scalar_analysis(self, column):
+        """Tier T4 (internal consistency): the slice map shares nothing.
+
+        Every output slice is computed by the same atomic kernel, mapped one
+        slice at a time, so a slice must return exactly what it returns when
+        it is the only output there is. Exactly, not nearly: the map runs the
+        same kernel on the same bits, and each slice draws its permutations
+        from its own key, so any difference here would mean state leaking
+        between slices.
+        """
+        problem, Xj, Y = self._four_slice_case()
+        together = analyze(problem, Xj, Y, n_perms=20, seed=5)
+        alone = analyze(problem, Xj, Y[:, column], n_perms=20, seed=5)
+        for field in ("R2_HSIC", "T_HSIC", "p_values", "hsic_raw"):
+            np.testing.assert_array_equal(
+                np.asarray(getattr(together, field))[column],
+                np.asarray(getattr(alone, field)),
+            )
+
+    def test_slice_count_does_not_change_a_shared_slice(self):
+        """Tier T4 (internal consistency): adding outputs changes no index.
+
+        The same first column analysed beside one other column and beside
+        three must give the same answer. This is the regression guard for a
+        future chunked map: a chunk width that reached the answer would show
+        up here as soon as the two runs fell into different chunks.
+        """
+        problem, Xj, Y = self._four_slice_case()
+        two = analyze(problem, Xj, Y[:, :2], n_perms=20, seed=5)
+        four = analyze(problem, Xj, Y, n_perms=20, seed=5)
+        np.testing.assert_array_equal(np.asarray(two.R2_HSIC)[0], np.asarray(four.R2_HSIC)[0])
+        np.testing.assert_array_equal(np.asarray(two.T_HSIC)[0], np.asarray(four.T_HSIC)[0])
 
 
 class TestChunked:

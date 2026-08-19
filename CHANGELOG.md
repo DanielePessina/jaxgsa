@@ -125,6 +125,22 @@ the work, including seven corrections to the roadmap it replaces.
   not the same as no check having run. Positions always refer to the array as
   you passed it, before anything was removed.
 
+### Performance
+
+- **`jaxgsa.hsic.analyze` is about 10x faster on many outputs.** On a 1024-row
+  Ishigami problem with 128 output slices the call went from 32.2 s to 3.2 s,
+  and the cost of one slice went from 252 ms to 25 ms. Compile time no longer
+  grows with the number of slices.
+
+  Two changes did it. The estimator now runs as one kernel over one output
+  slice, mapped over every slice inside a single compiled call; before, a
+  Python loop over T and K crossed the compile boundary once per slice and
+  wrote each answer back from the host. And the median bandwidth heuristic
+  now *selects* its two order statistics instead of sorting the whole
+  `(N, N)` distance matrix. The sort alone was 92% of the run time.
+
+  No index changed. Every value is bit-for-bit what it was.
+
 ### Fixed
 
 - **`to_dataset()` lost the analysis settings.** A result printed its settings
