@@ -27,7 +27,7 @@ from jax import Array
 
 from jaxgsa._core.entry import at_least, prepare, require
 from jaxgsa._core.invalid import OnInvalid
-from jaxgsa._core.validation import _prenormalize_outputs
+from jaxgsa._core.validation import YLayout, _prenormalize_outputs
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.efast._result import EFASTResult
 from jaxgsa.efast._sampling import EFASTSamples, _frequency_plan
@@ -205,9 +205,8 @@ def analyze(
         unit_of_row=np.repeat(np.arange(D), N),
     )
     invalid = ctx.invalid
-    # Record scalar output now: the promotion below added singleton dims.
-    is_scalar = ctx.Y.ndim == 1
-    Y, squeeze_time = ctx.Y3, ctx.squeeze_time
+    is_scalar = ctx.layout is YLayout.SCALAR
+    Y = ctx.Y3
 
     if prenormalize:
         Y, _, _, _ = _prenormalize_outputs(Y)
@@ -270,9 +269,8 @@ def analyze(
         ST = ST_flat.reshape(D, T, K).transpose(1, 2, 0)
 
         # Drop the singleton dims that _prepare_Y inserted.
-        if squeeze_time:
-            S1 = S1[0]
-            ST = ST[0]
+        S1 = ctx.squeeze(S1)
+        ST = ctx.squeeze(ST)
 
     # An index outside [0, 1] means the frequency decomposition did not
     # converge.

@@ -35,7 +35,6 @@ from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa._core.validation import (
     _prenormalize_outputs,
-    _squeeze_output_axes,
 )
 from jaxgsa.hsic._result import HSICResult
 from jaxgsa.problem import Problem
@@ -470,7 +469,6 @@ def analyze(
     X_unit = cdf_to_unit_interval(X, problem)
 
     Y_3d = ctx.Y3
-    squeeze_time, squeeze_output = ctx.squeeze_time, ctx.squeeze_output
     _N, T, K = Y_3d.shape
 
     if prenormalize:
@@ -516,10 +514,10 @@ def analyze(
             p_all = p_all.at[t, k].set(p_vals)
             raw_all = raw_all.at[t, k].set(raw)
 
-    r2_all = _squeeze_output_axes(r2_all, squeeze_time, squeeze_output)
-    t_all = _squeeze_output_axes(t_all, squeeze_time, squeeze_output)
-    p_all = _squeeze_output_axes(p_all, squeeze_time, squeeze_output)
-    raw_all = _squeeze_output_axes(raw_all, squeeze_time, squeeze_output)
+    r2_all = ctx.squeeze(r2_all)
+    t_all = ctx.squeeze(t_all)
+    p_all = ctx.squeeze(p_all)
+    raw_all = ctx.squeeze(raw_all)
 
     return HSICResult(
         R2_HSIC=r2_all,

@@ -34,7 +34,6 @@ from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.sampling import _next_power_of_2
 from jaxgsa._core.surrogate import _PredictPlan
 from jaxgsa._core.transforms import cdf_to_unit_interval
-from jaxgsa._core.validation import _squeeze_output_axes
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.problem import Problem
 from jaxgsa.vkoga._engine import _cross_validate, _fit_vkoga, _predict_vkoga
@@ -204,7 +203,6 @@ def analyze_vkoga(
     n_variance = _next_power_of_2(n_variance)
 
     Y_canonical = ctx.Y3
-    squeeze_time, squeeze_output = ctx.squeeze_time, ctx.squeeze_output
     n_time, n_out = Y_canonical.shape[1], Y_canonical.shape[2]
     Y_flat = Y_canonical.reshape(Y_canonical.shape[0], n_time * n_out)
 
@@ -260,16 +258,14 @@ def analyze_vkoga(
     def _shape_index(flat: np.ndarray) -> Array:
         """Reshape an ``(S, D)`` index block to the output contract."""
         arr = jnp.asarray(flat.reshape(n_time, n_out, D))
-        return _squeeze_output_axes(arr, squeeze_time, squeeze_output, n_trailing=1)
+        return ctx.squeeze(arr, n_trailing=1)
 
     def _shape_slice(flat: np.ndarray) -> Array:
         """Reshape an ``(S,)`` per-slice diagnostic to the output contract."""
         arr = jnp.asarray(flat.reshape(n_time, n_out))
-        return _squeeze_output_axes(arr, squeeze_time, squeeze_output, n_trailing=0)
+        return ctx.squeeze(arr, n_trailing=0)
 
-    output_shape = _squeeze_output_axes(
-        jnp.zeros((n_time, n_out)), squeeze_time, squeeze_output, n_trailing=0
-    ).shape
+    output_shape = ctx.squeeze(jnp.zeros((n_time, n_out)), n_trailing=0).shape
     return VKOGAResult(
         S_TC=_shape_index(indices.S_TC),
         S_TU=_shape_index(indices.S_TU),

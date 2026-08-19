@@ -48,7 +48,6 @@ from jax import Array
 from jaxgsa._core.entry import prepare
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.validation import (
-    _squeeze_output_axes,
     _warn_zero_variance_slices,
 )
 from jaxgsa.kucherenko._result import KucherenkoResult
@@ -125,7 +124,6 @@ def analyze(
         warn_zero_variance=False,
     )
     keep, invalid = ctx.keep, ctx.invalid
-    squeeze_time, squeeze_output = ctx.squeeze_time, ctx.squeeze_output
     Y_canonical = ctx.Y3
     n_time, n_out = Y_canonical.shape[1], Y_canonical.shape[2]
     n_slices = n_time * n_out
@@ -163,11 +161,9 @@ def analyze(
     def _shape(index: np.ndarray) -> Array:
         """Reshape a ``(D, S)`` block to the output contract, params last."""
         arr = jnp.asarray(index.T.reshape(n_time, n_out, D))
-        return _squeeze_output_axes(arr, squeeze_time, squeeze_output, n_trailing=1)
+        return ctx.squeeze(arr, n_trailing=1)
 
-    variance_shaped = _squeeze_output_axes(
-        jnp.asarray(variance.reshape(n_time, n_out)), squeeze_time, squeeze_output, n_trailing=0
-    )
+    variance_shaped = ctx.squeeze(jnp.asarray(variance.reshape(n_time, n_out)), n_trailing=0)
     return KucherenkoResult(
         S1=_shape(S1),
         ST=_shape(ST),

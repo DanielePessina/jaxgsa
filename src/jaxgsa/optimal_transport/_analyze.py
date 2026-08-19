@@ -68,7 +68,6 @@ from jaxgsa._core.partition import (
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
     _prenormalize_outputs,
-    _squeeze_output_axes,
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.optimal_transport._result import OTResult
@@ -662,7 +661,6 @@ def analyze(
                 category=JaxgsaWarning,
             )
     Y_3d = ctx.Y3
-    squeeze_time, squeeze_output = ctx.squeeze_time, ctx.squeeze_output
     _, T, K = Y_3d.shape
 
     dtype = jnp.result_type(Y_3d.dtype, jnp.float32)
@@ -844,13 +842,13 @@ def analyze(
             draws = _boot_replicates(vals, hats[name], degen_all)
             endpoints = _percentile_ci(draws, conf_level)
             if mode == "univariate":
-                endpoints = _squeeze_output_axes(endpoints, squeeze_time, squeeze_output)
+                endpoints = ctx.squeeze(endpoints)
             confs[name] = endpoints
             if replicates is not None:
                 # The leading resample axis survives the squeeze, which
                 # addresses the inserted T/K axes from the end.
                 if mode == "univariate":
-                    draws = _squeeze_output_axes(draws, squeeze_time, squeeze_output)
+                    draws = ctx.squeeze(draws)
                 replicates[name] = draws
         # This method has one hard-wired endpoint rule, the percentile
         # interval, so "quantile" is what ran and not a guess.
@@ -862,12 +860,9 @@ def analyze(
         )
 
     if mode == "univariate":
-        hats = {
-            name: _squeeze_output_axes(val, squeeze_time, squeeze_output)
-            for name, val in hats.items()
-        }
+        hats = {name: ctx.squeeze(val) for name, val in hats.items()}
         if ot_dummy is not None:
-            ot_dummy = _squeeze_output_axes(ot_dummy, squeeze_time, squeeze_output, n_trailing=0)
+            ot_dummy = ctx.squeeze(ot_dummy, n_trailing=0)
 
     return OTResult(
         ot=hats["ot"],

@@ -28,7 +28,6 @@ from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
     _prenormalize_outputs,
-    _squeeze_output_axes,
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.morris._result import MorrisResult
@@ -289,7 +288,6 @@ def analyze(
     )
     Y = ctx.Y3
     keep, invalid = ctx.keep, ctx.invalid
-    squeeze_time, squeeze_output = ctx.squeeze_time, ctx.squeeze_output
 
     idx_after, idx_before, delta = _reindex_after_drop(sampling_result, keep)
     if not keep.all():
@@ -373,18 +371,16 @@ def analyze(
             if replicates is not None:
                 # The leading resample axis survives the squeeze, which
                 # addresses the inserted T/K axes from the end.
-                replicates[name] = _squeeze_output_axes(draws, squeeze_time, squeeze_output)
+                replicates[name] = ctx.squeeze(draws)
         conf_triple = (conf_pairs[0], conf_pairs[1], conf_pairs[2])
 
-    mu = _squeeze_output_axes(mu, squeeze_time, squeeze_output)
-    mu_star = _squeeze_output_axes(mu_star, squeeze_time, squeeze_output)
-    sigma = _squeeze_output_axes(sigma, squeeze_time, squeeze_output)
+    mu = ctx.squeeze(mu)
+    mu_star = ctx.squeeze(mu_star)
+    sigma = ctx.squeeze(sigma)
     if conf_triple is None:
         mu_conf = mu_star_conf = sigma_conf = None
     else:
-        mu_conf, mu_star_conf, sigma_conf = (
-            _squeeze_output_axes(arr, squeeze_time, squeeze_output) for arr in conf_triple
-        )
+        mu_conf, mu_star_conf, sigma_conf = (ctx.squeeze(arr) for arr in conf_triple)
 
     ci = (
         CIInfo(

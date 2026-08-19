@@ -64,7 +64,6 @@ from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.partition import _extract_categorical_codes
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.transforms import cdf_to_unit_interval
-from jaxgsa._core.validation import _squeeze_output_axes
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.pawn._result import PAWNResult
 from jaxgsa.problem import Problem, _categorical_dims
@@ -491,7 +490,6 @@ def analyze(
     )
     X, invalid = ctx.inputs, ctx.invalid
     Y_3d = ctx.Y3
-    squeeze_time, squeeze_output = ctx.squeeze_time, ctx.squeeze_output
     bin_idx, n_eff = _bin_indices(problem, X, n_bins)
 
     pawn_3d = _pawn_core(bin_idx, Y_3d, n_eff, statistic, slice_chunk_size)
@@ -513,7 +511,7 @@ def analyze(
         boot_stack = jnp.stack(boot_draws, axis=0)
         pawn_conf_3d = _percentile_ci(boot_stack, conf_level)
 
-        pawn_conf = _squeeze_output_axes(pawn_conf_3d, squeeze_time, squeeze_output)
+        pawn_conf = ctx.squeeze(pawn_conf_3d)
 
         # PAWN has one hard-wired endpoint rule, the percentile interval, so
         # "quantile" is what ran and not a guess. The leading resample axis
@@ -522,14 +520,10 @@ def analyze(
             level=conf_level,
             method="quantile",
             n_resamples=n_bootstrap,
-            replicates=(
-                {"pawn": _squeeze_output_axes(boot_stack, squeeze_time, squeeze_output)}
-                if keep_replicates
-                else None
-            ),
+            replicates={"pawn": ctx.squeeze(boot_stack)} if keep_replicates else None,
         )
 
-    pawn_out = _squeeze_output_axes(pawn_3d, squeeze_time, squeeze_output)
+    pawn_out = ctx.squeeze(pawn_3d)
 
     return PAWNResult(
         pawn=pawn_out,

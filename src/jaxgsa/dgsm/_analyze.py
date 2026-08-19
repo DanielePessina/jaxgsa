@@ -31,7 +31,6 @@ from jaxgsa._core.invalid import (
 )
 from jaxgsa._core.validation import (
     _prepare_Y,
-    _squeeze_output_axes,
     _validate_output,
     _validate_x,
     _warn_zero_variance_slices,
@@ -667,7 +666,7 @@ def analyze(
     # Y's canonicalization above, so their slice axes must already match. A
     # mismatch means dfdx did not mirror Y's layout: wrong ndim, or a
     # transposed Jacobian that inference could not recover. Reject it.
-    Y_3d, squeeze_time, squeeze_output = _prepare_Y(Y_valid)
+    Y_3d, layout = _prepare_Y(Y_valid)
     if sigma.shape[:2] != Y_3d.shape[1:3]:
         raise ValueError(
             f"dfdx ndim/shape is incompatible with Y: derivative slice dims "
@@ -707,11 +706,11 @@ def analyze(
 
     # Drop the singleton axes _prepare_Y inserted; var_y has no trailing param
     # axis, so it passes n_trailing=0.
-    sigma = _squeeze_output_axes(sigma, squeeze_time, squeeze_output)
-    nu = _squeeze_output_axes(nu, squeeze_time, squeeze_output)
-    upper = _squeeze_output_axes(upper, squeeze_time, squeeze_output)
-    lower = _squeeze_output_axes(lower, squeeze_time, squeeze_output)
-    var_y = _squeeze_output_axes(var_y, squeeze_time, squeeze_output, n_trailing=0)
+    sigma = layout.squeeze(sigma)
+    nu = layout.squeeze(nu)
+    upper = layout.squeeze(upper)
+    lower = layout.squeeze(lower)
+    var_y = layout.squeeze(var_y, n_trailing=0)
 
     return DGSMResult(
         nu=nu,

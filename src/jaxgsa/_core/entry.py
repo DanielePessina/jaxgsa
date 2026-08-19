@@ -60,6 +60,7 @@ from jaxgsa._core.invalid import (
     resolve_policy,
 )
 from jaxgsa._core.validation import (
+    YLayout,
     _prepare_Y,
     _raise_categorical_analysis,
     _raise_correlated_analysis,
@@ -199,8 +200,8 @@ class Context:
         Y: The validated output in the caller's own rank, with the dropped
             rows removed.
         Y3: The same data promoted to ``(N, T, K)``.
-        squeeze_time: Whether ``Y3``'s T axis was inserted by the promotion.
-        squeeze_output: Whether ``Y3``'s K axis was inserted.
+        layout: Which rank the caller passed, so :meth:`squeeze` can undo the
+            promotion on each result field.
         keep: Per-unit mask of what survived. Already applied to ``X`` and
             ``Y`` when the unit is one row; left to the caller otherwise,
             because only the method knows how its groups are laid out.
@@ -213,8 +214,7 @@ class Context:
     X: Array | None
     Y: Array
     Y3: Array
-    squeeze_time: bool
-    squeeze_output: bool
+    layout: YLayout
     keep: npt.NDArray[np.bool_]
     invalid: InvalidReport
     policy: OnInvalid
@@ -243,6 +243,26 @@ class Context:
                 "read its design instead."
             )
         return self.X
+
+    def squeeze(self, arr: Array, *, n_trailing: int = 1) -> Array:
+        """Undo the promotion :func:`prepare` applied, for one result field.
+
+        Every estimator computes on ``Y3`` and so produces ``(..., T, K, ...)``
+        fields, which have to come back out at the rank the caller passed.
+        Reading the layout off the context means a call site names only the
+        thing it cannot know, ``n_trailing``.
+
+        Args:
+            arr: One result field, with its ``(T, K)`` slice axes immediately
+                before ``n_trailing`` trailing axes.
+            n_trailing: Number of axes after K. ``1`` for a ``(..., T, K, D)``
+                per-parameter field, ``2`` for a ``(..., T, K, D, D)`` pair
+                matrix, ``0`` for a per-slice ``(..., T, K)`` scalar.
+
+        Returns:
+            The field at the caller's own rank.
+        """
+        return self.layout.squeeze(arr, n_trailing=n_trailing)
 
 
 def prepare(
@@ -381,7 +401,7 @@ def prepare(
         if X is not None:
             X = X[mask]
 
-    Y3, squeeze_time, squeeze_output = _prepare_Y(Y)
+    Y3, layout = _prepare_Y(Y)
 
     if warn_zero_variance:
         # The warning has to see what the estimator will see. For a grouped
@@ -407,8 +427,7 @@ def prepare(
         X=X,
         Y=Y,
         Y3=Y3,
-        squeeze_time=squeeze_time,
-        squeeze_output=squeeze_output,
+        layout=layout,
         keep=keep,
         invalid=invalid,
         policy=policy,

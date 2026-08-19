@@ -33,9 +33,9 @@ from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare
 from jaxgsa._core.invalid import InvalidReport, OnInvalid
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
+    YLayout,
     _prenormalize_outputs,
     _prepare_Y,
-    _squeeze_output_axes,
 )
 from jaxgsa.sobol._indices import (
     _fused_first_total,
@@ -158,12 +158,10 @@ def _indices_from_expanded(
     Raises:
         ValueError: If ``slice_chunk_size`` is below 1.
     """
-    # Detect scalar output before _prepare_Y adds singleton T and K dims.
+    # Promote to uniform 3-D shape (N, T, K) so downstream code is shape-agnostic.
     # The scalar path skips vmap entirely, saving tracing and dispatch cost.
-    is_scalar = Y.ndim == 1
-
-    # Promote to uniform 3-D shape (N, T, K) so downstream code is shape-agnostic
-    Y, squeeze_time, squeeze_output = _prepare_Y(Y)
+    Y, layout = _prepare_Y(Y)
+    is_scalar = layout is YLayout.SCALAR
     _, T, K = Y.shape
 
     A, B, AB, BA = _separate_output_values(Y, D, calc_second_order)
@@ -243,10 +241,10 @@ def _indices_from_expanded(
         ST_out = jnp.concatenate(st_parts).reshape(T, K, D)
         S2_out = None
 
-    S1_out = _squeeze_output_axes(S1_out, squeeze_time, squeeze_output)
-    ST_out = _squeeze_output_axes(ST_out, squeeze_time, squeeze_output)
+    S1_out = layout.squeeze(S1_out)
+    ST_out = layout.squeeze(ST_out)
     if S2_out is not None:
-        S2_out = _squeeze_output_axes(S2_out, squeeze_time, squeeze_output, n_trailing=2)
+        S2_out = layout.squeeze(S2_out, n_trailing=2)
     return S1_out, ST_out, S2_out
 
 
@@ -350,7 +348,7 @@ def _analyze_bootstrap(
     """
     from jaxgsa.sobol._bootstrap import _bootstrap_first_total, _bootstrap_second_order
 
-    Y, squeeze_time, squeeze_output = _prepare_Y(Y)
+    Y, layout = _prepare_Y(Y)
     D = sampling_result.n_params
     calc_second_order = sampling_result.calc_second_order
 
@@ -462,14 +460,14 @@ def _analyze_bootstrap(
         S2_out = None
         S2_conf = None
 
-    S1_out = _squeeze_output_axes(S1_out, squeeze_time, squeeze_output)
-    ST_out = _squeeze_output_axes(ST_out, squeeze_time, squeeze_output)
-    S1_conf = _squeeze_output_axes(S1_conf, squeeze_time, squeeze_output)
-    ST_conf = _squeeze_output_axes(ST_conf, squeeze_time, squeeze_output)
+    S1_out = layout.squeeze(S1_out)
+    ST_out = layout.squeeze(ST_out)
+    S1_conf = layout.squeeze(S1_conf)
+    ST_conf = layout.squeeze(ST_conf)
     if S2_out is not None:
-        S2_out = _squeeze_output_axes(S2_out, squeeze_time, squeeze_output, n_trailing=2)
+        S2_out = layout.squeeze(S2_out, n_trailing=2)
     if S2_conf is not None:
-        S2_conf = _squeeze_output_axes(S2_conf, squeeze_time, squeeze_output, n_trailing=2)
+        S2_conf = layout.squeeze(S2_conf, n_trailing=2)
 
     replicates: dict[str, Array] | None = None
     if keep_replicates:
@@ -484,7 +482,7 @@ def _analyze_bootstrap(
             """
             stacked = jnp.stack(per_slice).reshape(T, K, *per_slice[0].shape)
             moved = jnp.moveaxis(stacked, 2, 0)
-            return _squeeze_output_axes(moved, squeeze_time, squeeze_output, n_trailing=n_trailing)
+            return layout.squeeze(moved, n_trailing=n_trailing)
 
         replicates = {
             "S1": _stack_draws(S1_draw_list, 1),

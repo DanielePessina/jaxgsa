@@ -17,7 +17,6 @@ from jaxgsa._core.sampling import UNIT_CLIP
 from jaxgsa._core.surrogate import _PredictPlan
 from jaxgsa._core.validation import (
     _prepare_Y,
-    _squeeze_output_axes,
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.pce._engine import (
@@ -172,8 +171,6 @@ class _PCEFit(NamedTuple):
     multi_index: np.ndarray  # (n_terms, D)
     order: int  # effective order after _auto_order
     loo_flat: Array  # (T*K,) per-slice LOO RMSE
-    squeeze_time: bool
-    squeeze_output: bool
     streamed: bool  # True when the row-streamed fit path ran
 
 
@@ -326,7 +323,7 @@ def _fit_pce_core(
     solves the same normal equations and computes the same exact LOO. It
     differs only in float32 summation order.
     """
-    Y_3d, squeeze_time, squeeze_output = _prepare_Y(Y_canonical)
+    Y_3d, _ = _prepare_Y(Y_canonical)
     N, D = X.shape
     _, T, K = Y_3d.shape
 
@@ -379,8 +376,6 @@ def _fit_pce_core(
         multi_index=mi,
         order=effective_order,
         loo_flat=loo_flat,
-        squeeze_time=squeeze_time,
-        squeeze_output=squeeze_output,
         streamed=streamed,
     )
 
@@ -477,7 +472,6 @@ def analyze_pce(
     fit = _fit_pce_core(
         problem, X, Y, order=order, ridge=ridge, fit_ratio=fit_ratio, batch_size=batch_size
     )
-    squeeze_time, squeeze_output = fit.squeeze_time, fit.squeeze_output
     T, K = fit.coefficients.shape[:2]
 
     # Sobol indices are extracted analytically from the coefficients
@@ -494,17 +488,12 @@ def analyze_pce(
     # Drop the singleton axes _prepare_Y inserted. S1/ST/coeffs end in
     # (T, K, per-slice); S2 carries an extra trailing D and loo has no trailing
     # per-slice axis, so they pass n_trailing=2 and 0 respectively.
-    S1 = _squeeze_output_axes(S1, squeeze_time, squeeze_output)
-    ST = _squeeze_output_axes(ST, squeeze_time, squeeze_output)
-    coeffs = _squeeze_output_axes(fit.coefficients, squeeze_time, squeeze_output)
-    S2 = _squeeze_output_axes(S2, squeeze_time, squeeze_output, n_trailing=2)
-    loo = _squeeze_output_axes(loo, squeeze_time, squeeze_output, n_trailing=0)
-    explained_variance = _squeeze_output_axes(
-        explained_variance,
-        squeeze_time,
-        squeeze_output,
-        n_trailing=0,
-    )
+    S1 = ctx.squeeze(S1)
+    ST = ctx.squeeze(ST)
+    coeffs = ctx.squeeze(fit.coefficients)
+    S2 = ctx.squeeze(S2, n_trailing=2)
+    loo = ctx.squeeze(loo, n_trailing=0)
+    explained_variance = ctx.squeeze(explained_variance, n_trailing=0)
 
     return PCEResult(
         S1=S1,

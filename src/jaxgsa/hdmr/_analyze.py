@@ -22,9 +22,9 @@ from jaxgsa._core.invalid import InvalidReport, OnInvalid
 from jaxgsa._core.surrogate import _PredictPlan
 from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa._core.validation import (
+    YLayout,
     _prenormalize_outputs,
     _prepare_Y,
-    _squeeze_output_axes,
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.hdmr._engine import (
@@ -207,28 +207,10 @@ def _compute_ST(
     return ST
 
 
-def _squeeze_hdmr(
-    Sa: Array,
-    Sb: Array,
-    S: Array,
-    ST: Array,
-    squeeze_time: bool,
-    squeeze_output: bool,
-) -> tuple:
-    """Remove singleton T/K dims from HDMR result arrays."""
-    return tuple(_squeeze_output_axes(a, squeeze_time, squeeze_output) for a in (Sa, Sb, S, ST))
-
-
-def _reshape_emulator_value(
-    value: Array,
-    T: int,
-    K_out: int,
-    squeeze_time: bool,
-    squeeze_output: bool,
-) -> Array:
+def _reshape_emulator_value(value: Array, T: int, K_out: int, layout: YLayout) -> Array:
     """Reshape flattened per-output emulator state back to the analyzed layout."""
     value = value.reshape((T, K_out) + value.shape[1:])
-    return _squeeze_output_axes(value, squeeze_time, squeeze_output, n_trailing=value.ndim - 2)
+    return layout.squeeze(value, n_trailing=value.ndim - 2)
 
 
 def _warn_correlated_index_reading(problem: Problem) -> None:
@@ -505,7 +487,7 @@ def _analyze_hdmr_core(
 
     # Promote Y to canonical (N, T, K) layout; track which dims were singleton
     # so the output arrays can be squeezed back to the user's original shape.
-    Y_3d, squeeze_time, squeeze_output = _prepare_Y(Y)
+    Y_3d, layout = _prepare_Y(Y)
     _, T, K_out = Y_3d.shape
     if prenormalize:
         # Standardize each (t, k) slice to zero-mean, unit-variance before
@@ -626,49 +608,18 @@ def _analyze_hdmr_core(
     ST_out = _compute_ST(S_out, c2_idx, c3_idx, n1)
 
     # Squeeze
-    Sa_out, Sb_out, S_out, ST_out = _squeeze_hdmr(
-        Sa_out,
-        Sb_out,
-        S_out,
-        ST_out,
-        squeeze_time,
-        squeeze_output,
-    )
+    Sa_out, Sb_out, S_out, ST_out = (layout.squeeze(a) for a in (Sa_out, Sb_out, S_out, ST_out))
 
-    C1_out = _reshape_emulator_value(
-        c1_cat,
-        T,
-        K_out,
-        squeeze_time,
-        squeeze_output,
-    )
+    C1_out = _reshape_emulator_value(c1_cat, T, K_out, layout)
     C2_out = None
     C3_out = None
     if c2_cat is not None:
-        C2_out = _reshape_emulator_value(
-            c2_cat,
-            T,
-            K_out,
-            squeeze_time,
-            squeeze_output,
-        )
+        C2_out = _reshape_emulator_value(c2_cat, T, K_out, layout)
     if c3_cat is not None:
-        C3_out = _reshape_emulator_value(
-            c3_cat,
-            T,
-            K_out,
-            squeeze_time,
-            squeeze_output,
-        )
-    f0_out = _reshape_emulator_value(
-        f0_cat,
-        T,
-        K_out,
-        squeeze_time,
-        squeeze_output,
-    )
-    y_mean_out = _squeeze_output_axes(y_mean, squeeze_time, squeeze_output, n_trailing=0)
-    y_std_out = _squeeze_output_axes(y_std, squeeze_time, squeeze_output, n_trailing=0)
+        C3_out = _reshape_emulator_value(c3_cat, T, K_out, layout)
+    f0_out = _reshape_emulator_value(f0_cat, T, K_out, layout)
+    y_mean_out = layout.squeeze(y_mean, n_trailing=0)
+    y_std_out = layout.squeeze(y_std, n_trailing=0)
 
     # Bundle all fitted state needed to reconstruct predictions at new points.
     fit_state: _HDMRFit = {
@@ -695,7 +646,7 @@ def _analyze_hdmr_core(
         select=select_sum,
         # RMSE is computed on the standardized scale inside the kernel;
         # multiply by y_std to report it on the original output scale.
-        rmse=_reshape_emulator_value(rmse_cat, T, K_out, squeeze_time, squeeze_output) * y_std_out,
+        rmse=_reshape_emulator_value(rmse_cat, T, K_out, layout) * y_std_out,
         streamed=streamed,
         _c2=tuple(c2),
         _c3=tuple(c3),

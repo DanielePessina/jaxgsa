@@ -69,7 +69,6 @@ from jaxgsa._core.partition import (
     build_partition_groups,
 )
 from jaxgsa._core.result import CIInfo
-from jaxgsa._core.validation import _squeeze_output_axes
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.borgonovo._result import DeltaResult
 from jaxgsa.problem import Problem, _categorical_dims
@@ -788,7 +787,6 @@ def analyze(
     degenerate_bw = _resolve_sentinel_float(degenerate_bandwidth, "degenerate_bandwidth", "auto")
 
     Y_3d = ctx.Y3
-    squeeze_time, squeeze_output = ctx.squeeze_time, ctx.squeeze_output
     _, T, K = Y_3d.shape
     D = problem.num_vars
     Y_cols = Y_3d.reshape(N, T * K)
@@ -879,12 +877,8 @@ def analyze(
             d_reps = d_boot
             delta = d_hat
 
-        delta_conf = _squeeze_output_axes(
-            _percentile_ci(d_reps, conf_level), squeeze_time, squeeze_output
-        )
-        S1_conf = _squeeze_output_axes(
-            _percentile_ci(s1_boot, conf_level), squeeze_time, squeeze_output
-        )
+        delta_conf = ctx.squeeze(_percentile_ci(d_reps, conf_level))
+        S1_conf = ctx.squeeze(_percentile_ci(s1_boot, conf_level))
         # Borgonovo has one hard-wired endpoint rule, the percentile
         # interval, so "quantile" is what ran and not a guess. The leading
         # resample axis survives the squeeze, which addresses the T/K axes
@@ -895,8 +889,8 @@ def analyze(
             n_resamples=n_bootstrap,
             replicates=(
                 {
-                    "delta": _squeeze_output_axes(d_reps, squeeze_time, squeeze_output),
-                    "S1": _squeeze_output_axes(s1_boot, squeeze_time, squeeze_output),
+                    "delta": ctx.squeeze(d_reps),
+                    "S1": ctx.squeeze(s1_boot),
                 }
                 if keep_replicates
                 else None
@@ -937,9 +931,9 @@ def analyze(
         _warn_conf_out_of_range(problem, delta_conf, allow_non_finite=propagated)
 
     return DeltaResult(
-        delta=_squeeze_output_axes(delta, squeeze_time, squeeze_output),
+        delta=ctx.squeeze(delta),
         delta_conf=delta_conf,
-        S1=_squeeze_output_axes(S1, squeeze_time, squeeze_output),
+        S1=ctx.squeeze(S1),
         S1_conf=S1_conf,
         problem=problem,
         invalid=invalid,

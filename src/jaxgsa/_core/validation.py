@@ -11,6 +11,7 @@ categorical problem.
 from __future__ import annotations
 
 import warnings
+from enum import Enum
 from typing import TYPE_CHECKING
 
 import jax.numpy as jnp
@@ -21,6 +22,54 @@ from jaxgsa._core.warning_types import JaxgsaWarning
 
 if TYPE_CHECKING:
     from jaxgsa.problem import Problem
+
+
+class YLayout(Enum):
+    """Which rank of ``Y`` the caller passed, before the promotion to 3-D.
+
+    Every analysis works on ``(N, T, K)``, and ``_prepare_Y`` inserts whatever
+    axes are missing. The result arrays then have to come back out at the
+    caller's own rank. That bookkeeping used to be two same-typed booleans,
+    ``squeeze_time`` and ``squeeze_output``, which admit a fourth combination
+    the promotion cannot produce (an inserted K axis with a real T axis) and
+    which are easy to hand over in the wrong order. One value with three
+    members can only say something true.
+
+    Attributes:
+        SCALAR: The caller passed ``(N,)``; both T and K were inserted.
+        MULTI_OUTPUT: The caller passed ``(N, K)``; only T was inserted.
+        TIME_SERIES: The caller passed ``(N, T, K)``; nothing was inserted.
+    """
+
+    SCALAR = 1
+    MULTI_OUTPUT = 2
+    TIME_SERIES = 3
+
+    def squeeze(self, arr: Array, *, n_trailing: int = 1) -> Array:
+        """Undo the promotion, for one result field.
+
+        The ``(T, K)`` slice axes sit immediately before ``n_trailing``
+        trailing axes, and are addressed relative to the end. The ``Ellipsis``
+        therefore leaves any leading axes alone, such as a confidence array's
+        ``[lower, upper]`` axis. ``n_trailing`` says how many axes follow
+        ``K``: ``1`` for the usual ``(..., T, K, D)`` point and confidence
+        arrays, ``2`` for ``(..., T, K, D, D)`` pair matrices, and ``0`` for
+        per-slice ``(..., T, K)`` scalars.
+
+        Args:
+            arr: Array whose axes are ``(..., T, K)`` plus ``n_trailing``
+                trailing axes.
+            n_trailing: Number of axes after K.
+
+        Returns:
+            The array with the inserted singleton axes removed.
+        """
+        tail = (slice(None),) * n_trailing
+        if self is YLayout.SCALAR:
+            return arr[(Ellipsis, 0, 0) + tail]
+        if self is YLayout.MULTI_OUTPUT:
+            return arr[(Ellipsis, 0, slice(None)) + tail]
+        return arr
 
 
 def _default_output_names(K: int, problem: Problem) -> list[str]:
@@ -426,40 +475,6 @@ def _validate_xy_inputs(
     return _validate_output(Y, int(X.shape[0]), problem)
 
 
-def _squeeze_output_axes(
-    arr: Array,
-    squeeze_time: bool,
-    squeeze_output: bool,
-    *,
-    n_trailing: int = 1,
-) -> Array:
-    """Remove the singleton T/K axes that ``_prepare_Y`` inserted.
-
-    The ``(T, K)`` slice axes sit immediately before ``n_trailing`` trailing
-    axes, and are addressed relative to the end. The ``Ellipsis`` therefore
-    leaves any leading axes alone, such as a confidence array's
-    ``[lower, upper]`` axis. ``n_trailing`` says how many axes follow ``K``:
-    ``1`` for the usual ``(..., T, K, D)`` point and confidence arrays, ``2``
-    for ``(..., T, K, D, D)`` pair matrices, and ``0`` for per-slice
-    ``(..., T, K)`` scalars.
-
-    Args:
-        arr: Array whose axes are ``(..., T, K) + n_trailing`` trailing axes.
-        squeeze_time: Whether the T axis was inserted (drop it).
-        squeeze_output: Whether the K axis was inserted (drop it).
-        n_trailing: Number of axes after K.
-
-    Returns:
-        The array with the inserted singleton axes removed.
-    """
-    tail = (slice(None),) * n_trailing
-    if squeeze_time and squeeze_output:
-        return arr[(Ellipsis, 0, 0) + tail]
-    if squeeze_time:
-        return arr[(Ellipsis, 0, slice(None)) + tail]
-    return arr
-
-
 def _dims_and_coords(
     ndim: int,
     shape: tuple[int, ...],
@@ -504,30 +519,23 @@ def _dims_and_coords(
     raise ValueError(f"Unexpected index array ndim={ndim}")
 
 
-def _prepare_Y(
-    Y: Array,
-) -> tuple[Array, bool, bool]:
-    """Promote Y to a canonical 3-D shape (N, T, K).
+def _prepare_Y(Y: Array) -> tuple[Array, YLayout]:
+    """Promote Y to the canonical 3-D shape ``(N, T, K)``.
 
     Args:
         Y: Model output array with 1, 2, or 3 dimensions.
 
     Returns:
-        A tuple ``(Y_3d, squeeze_time, squeeze_output)`` indicating which
-        singleton dimensions were inserted and should be removed later.
+        A tuple ``(Y_3d, layout)``, where ``layout`` records the rank the
+        caller passed so :meth:`YLayout.squeeze` can undo the promotion.
     """
-    squeeze_time = False
-    squeeze_output = False
     # Normalize to 3-D so downstream kernels always see (samples, T, K)
     # without shape-dependent branching.
     if Y.ndim == 1:  # scalar output per sample -- both T and K are singleton
-        Y = Y[:, None, None]
-        squeeze_time = True
-        squeeze_output = True
-    elif Y.ndim == 2:  # multi-output but single timestep -- only T is singleton
-        Y = Y[:, None, :]
-        squeeze_time = True
-    return Y, squeeze_time, squeeze_output
+        return Y[:, None, None], YLayout.SCALAR
+    if Y.ndim == 2:  # multi-output but single timestep -- only T is singleton
+        return Y[:, None, :], YLayout.MULTI_OUTPUT
+    return Y, YLayout.TIME_SERIES
 
 
 # What a constant output slice does to the numbers, per method family. A
