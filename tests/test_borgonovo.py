@@ -1033,3 +1033,42 @@ class TestIndicesPureCore:
         np.testing.assert_array_equal(np.asarray(S1), np.zeros(2))
         with pytest.raises(ValueError, match="continuous output distribution"):
             analyze(problem, X, discrete)
+
+
+class TestBiasCorrectDefaultWarning:
+    """The tri-state default warns once per process when None resolves to True."""
+
+    @staticmethod
+    def _reset(monkeypatch, value: bool):
+        import jaxgsa.borgonovo._analyze as mod
+
+        monkeypatch.setattr(mod, "_warned_bias_correct_default", value)
+
+    def test_default_with_bootstrap_warns_once(self, ishigami_data, monkeypatch):
+        self._reset(monkeypatch, False)
+        X, Y = ishigami_data
+        with pytest.warns(JaxgsaWarning, match="jaxgsa.borgonovo: bias_correct"):
+            analyze(ishigami.PROBLEM, X, Y, n_bootstrap=8, key=jax.random.key(0))
+        # Second default call in the same process: silent.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", JaxgsaWarning)
+            analyze(ishigami.PROBLEM, X, Y, n_bootstrap=8, key=jax.random.key(0))
+
+    def test_explicit_values_never_warn(self, ishigami_data, monkeypatch):
+        self._reset(monkeypatch, False)
+        X, Y = ishigami_data
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", JaxgsaWarning)
+            analyze(
+                ishigami.PROBLEM, X, Y, n_bootstrap=8, bias_correct=True, key=jax.random.key(0)
+            )
+            analyze(
+                ishigami.PROBLEM, X, Y, n_bootstrap=8, bias_correct=False, key=jax.random.key(0)
+            )
+
+    def test_default_without_bootstrap_stays_silent(self, ishigami_data, monkeypatch):
+        self._reset(monkeypatch, False)
+        X, Y = ishigami_data
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", JaxgsaWarning)
+            analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0)

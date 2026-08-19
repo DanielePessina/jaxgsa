@@ -87,6 +87,11 @@ from jaxgsa.problem import Problem, _categorical_dims
 
 _SQRT_2PI = math.sqrt(2.0 * math.pi)
 _MAX_CLASSES = 48
+# One-time-per-process flag for the bias_correct=None resolution warning. The
+# default is a tri-state, and a silent resolution to True surprised users, so
+# the first default call that applies the correction says so once. An explicit
+# True or False never warns, and never sets this.
+_warned_bias_correct_default = False
 # A class whose KDE bandwidth falls below this fraction of the full-sample
 # bandwidth counts as degenerate. Two failures live below this line. The
 # first is an exactly zero variance, that is a point mass, such as one
@@ -850,10 +855,18 @@ def analyze(
         bias_correct: Apply the Plischke bias reduction
             ``2*d_hat - mean(d_boot)`` to the delta estimate.
 
-            ``None`` (the default) applies it whenever there are replicates
-            to apply it with, and does nothing otherwise. ``True`` asks for
-            it explicitly, and warns if ``n_bootstrap`` is ``0``, because
-            then it cannot be delivered. ``False`` never applies it.
+            **This default is a tri-state, and what ``None`` does depends on
+            ``n_bootstrap``.** ``None`` (the default) applies the correction
+            whenever there are replicates to apply it with — that is,
+            whenever ``n_bootstrap > 0`` — and does nothing when
+            ``n_bootstrap == 0``. So adding ``n_bootstrap=100`` to a default
+            call does not only add intervals: it also changes the reported
+            ``delta`` from the plug-in estimate to the corrected one. The
+            first default call per process that resolves ``None`` to the
+            correction says so with a one-time ``JaxgsaWarning``; pass an
+            explicit ``True`` or ``False`` to silence it. ``True`` asks for
+            the correction explicitly, and warns if ``n_bootstrap`` is ``0``,
+            because then it cannot be delivered. ``False`` never applies it.
 
             The tri-state exists because the correction needs replicates and
             replicates are opt-in: a plain ``bias_correct=True`` default
@@ -1071,6 +1084,20 @@ def analyze(
             stacklevel=2,
         )
     apply_bias_correction = bias_correct is not False
+    if bias_correct is None and n_bootstrap > 0:
+        global _warned_bias_correct_default
+        if not _warned_bias_correct_default:
+            _warned_bias_correct_default = True
+            warnings.warn(
+                "jaxgsa.borgonovo: bias_correct was left at its default (None) and "
+                "n_bootstrap > 0, so the Plischke bias correction IS applied: the "
+                "delta reported is 2*d_hat - mean(d_boot), not the plug-in "
+                "estimate. Pass bias_correct=True to keep this and silence this "
+                "warning, or bias_correct=False for the uncorrected delta. "
+                "This warning is shown once per process.",
+                JaxgsaWarning,
+                stacklevel=2,
+            )
 
     if n_bootstrap > 0:
         if key is None:
