@@ -87,7 +87,11 @@ def test_repr_does_not_grow_with_the_output_size(method: str) -> None:
     """
     scalar = repr(_result(method, "scalar"))
     series = repr(_result(method, "series"))
-    assert len(series) <= len(scalar) + 40, f"scalar: {scalar}\nseries: {series}"
+    # A series result may only be longer by the widened shape tuples, about
+    # 6 characters per printed array ("(3,)" -> "(3, 2, 3)"). OTResult prints
+    # the most arrays (ten with intervals and the dummy fields), so the slack
+    # is sized for it; anything growing past that is printing array contents.
+    assert len(series) <= len(scalar) + 80, f"scalar: {scalar}\nseries: {series}"
 
 
 def test_ciinfo_repr_hides_the_stored_draws() -> None:

@@ -725,6 +725,10 @@
       "param"
     ],
     "data_vars": [
+      "S1",
+      "S1_lower",
+      "S1_upper",
+      "above_dummy",
       "advective",
       "advective_lower",
       "advective_upper",
@@ -742,6 +746,10 @@
     ],
     "type": "OTResult",
     "var_dims": [
+      "S1:output,param",
+      "S1_lower:output,param",
+      "S1_upper:output,param",
+      "above_dummy:output,param",
       "advective:output,param",
       "advective_lower:output,param",
       "advective_upper:output,param",
@@ -762,6 +770,10 @@
       "param"
     ],
     "data_vars": [
+      "S1",
+      "S1_lower",
+      "S1_upper",
+      "above_dummy",
       "advective",
       "advective_lower",
       "advective_upper",
@@ -778,6 +790,10 @@
     ],
     "type": "OTResult",
     "var_dims": [
+      "S1:param",
+      "S1_lower:param",
+      "S1_upper:param",
+      "above_dummy:param",
       "advective:param",
       "advective_lower:param",
       "advective_upper:param",
@@ -800,6 +816,10 @@
       "time"
     ],
     "data_vars": [
+      "S1",
+      "S1_lower",
+      "S1_upper",
+      "above_dummy",
       "advective",
       "advective_lower",
       "advective_upper",
@@ -818,6 +838,10 @@
     ],
     "type": "OTResult",
     "var_dims": [
+      "S1:time,output,param",
+      "S1_lower:time,output,param",
+      "S1_upper:time,output,param",
+      "above_dummy:time,output,param",
       "advective:time,output,param",
       "advective_lower:time,output,param",
       "advective_upper:time,output,param",
@@ -838,6 +862,9 @@
       "param"
     ],
     "data_vars": [
+      "S1",
+      "S1_lower",
+      "S1_upper",
       "advective",
       "advective_lower",
       "advective_upper",
@@ -853,6 +880,9 @@
     ],
     "type": "OTResult",
     "var_dims": [
+      "S1:param",
+      "S1_lower:param",
+      "S1_upper:param",
       "advective:param",
       "advective_lower:param",
       "advective_upper:param",
@@ -873,6 +903,9 @@
       "param"
     ],
     "data_vars": [
+      "S1",
+      "S1_lower",
+      "S1_upper",
       "advective",
       "advective_lower",
       "advective_upper",
@@ -889,6 +922,9 @@
     ],
     "type": "OTResult",
     "var_dims": [
+      "S1:output,param",
+      "S1_lower:output,param",
+      "S1_upper:output,param",
       "advective:output,param",
       "advective_lower:output,param",
       "advective_upper:output,param",
@@ -907,6 +943,7 @@
       "param"
     ],
     "data_vars": [
+      "n_valid_bins",
       "pawn",
       "pawn_lower",
       "pawn_upper"
@@ -917,6 +954,7 @@
     ],
     "type": "PAWNResult",
     "var_dims": [
+      "n_valid_bins:output,param",
       "pawn:output,param",
       "pawn_lower:output,param",
       "pawn_upper:output,param"
@@ -928,6 +966,7 @@
       "param"
     ],
     "data_vars": [
+      "n_valid_bins",
       "pawn",
       "pawn_lower",
       "pawn_upper"
@@ -937,6 +976,7 @@
     ],
     "type": "PAWNResult",
     "var_dims": [
+      "n_valid_bins:param",
       "pawn:param",
       "pawn_lower:param",
       "pawn_upper:param"
@@ -950,6 +990,7 @@
       "time"
     ],
     "data_vars": [
+      "n_valid_bins",
       "pawn",
       "pawn_lower",
       "pawn_upper"
@@ -961,6 +1002,7 @@
     ],
     "type": "PAWNResult",
     "var_dims": [
+      "n_valid_bins:time,output,param",
       "pawn:time,output,param",
       "pawn_lower:time,output,param",
       "pawn_upper:time,output,param"
