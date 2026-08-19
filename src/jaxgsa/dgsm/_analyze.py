@@ -26,6 +26,7 @@ from jax import Array
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.entry import (
     at_least,
+    gates,
     in_open_interval,
     one_of,
     prepare_scalars,
@@ -508,9 +509,18 @@ def indices(
 
     Raises:
         ValueError: If the calling convention is ambiguous or incomplete, if
-            ``fn`` cannot be traced on one sample row, or if ``dfdx`` does not
-            mirror ``Y``.
+            ``fn`` cannot be traced on one sample row, if ``dfdx`` does not
+            mirror ``Y``, if ``problem.correlation`` declares a dependence
+            structure (both Sobol-index bounds assume independent inputs, so
+            they would be silently wrong, exactly as in :func:`analyze`), or
+            if ``problem`` has a categorical parameter.
     """
+    from jaxgsa.dgsm import SPEC
+
+    # The same capability gates analyze applies through prepare_scalars().
+    # problem.has_correlated_inputs is static host-side metadata, so the check
+    # runs at trace time and the core still composes with jit/vmap/grad.
+    gates(SPEC, problem, method="jaxgsa.dgsm.indices")
     use_autodiff = _resolve_call_style(fn, X, Y, dfdx)
     D = problem.num_vars
 

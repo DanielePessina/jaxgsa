@@ -120,6 +120,27 @@ def _invoke(spec: MethodSpec, problem: jaxgsa.Problem) -> Callable[[], object]:
     return lambda: spec.analyze(problem, X, _batch_model(X), **extra)
 
 
+def _invoke_core(spec: MethodSpec, problem: jaxgsa.Problem) -> Callable[[], object]:
+    """Return a callable that puts ``problem`` through ``spec``'s pure core.
+
+    The pure ``indices()`` cores skip the diagnostics of ``analyze`` but must
+    not skip its capability gates: an ungated core silently returns wrong
+    numbers on a problem the method refuses. Only the given-data cores are
+    invocable here — a design-based core takes a ``SamplingResult`` that
+    ``sample()`` already refused to build for such a problem, so its gate is
+    proven by the sampler half of ``_invoke``.
+    """
+    import importlib
+
+    core = importlib.import_module(f"jaxgsa.{spec.name}").indices
+    n = GIVEN_DATA_SIZE.get(spec.name, DEFAULT_GIVEN_DATA_SIZE)
+    X = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, n, seed=0))
+    if spec.name == "dgsm":
+        return lambda: core(problem, _point_model, X)
+    extra = {"key": jax.random.key(0)} if spec.name in NEEDS_A_KEY else {}
+    return lambda: core(problem, X, _batch_model(X), **extra)
+
+
 _UPDATE_INVOKE = (
     "Update _invoke (and DESIGN_SIZE / GIVEN_DATA_SIZE) in tests/test_registry.py "
     "so the call reaches this method's capability gate."
@@ -172,6 +193,16 @@ def _gate_fires(spec: MethodSpec, call: Callable[[], object], topic: str) -> boo
 
 ALL_SPECS = sorted(methods().values(), key=lambda s: s.name)
 SPEC_IDS = [s.name for s in ALL_SPECS]
+
+CORE_SPECS = [s for s in ALL_SPECS if s.pure_core and not s.is_design_based]
+"""The given-data pure cores, the ones ``_invoke_core`` can reach directly.
+
+The design-based cores (sobol, morris, efast) are gated by construction:
+``indices()`` takes a ``SamplingResult``, and ``sample()`` refuses to build
+one for a problem the method cannot handle — which the sampler half of
+``TestTheSpecsAreTrue`` proves behaviorally.
+"""
+CORE_IDS = [s.name for s in CORE_SPECS]
 
 
 class TestCompleteness:
@@ -245,6 +276,63 @@ class TestTheSpecsAreTrue:
                 "legal spelling is 'n_bootstrap' (see CONTEXT.md)"
             )
             assert spec.bootstrap in params
+
+
+class TestPureCoresShareTheGates:
+    """The pure ``indices()`` cores enforce the same capability claims.
+
+    ``analyze`` gates through the shared preamble, but the cores skip the
+    preamble, so each one carries the gate itself. A core that skipped it
+    would silently return wrong numbers on a problem its ``analyze`` refuses
+    — which is exactly what dgsm, pce and shapley did before these tests.
+    The gates read only static host-side problem metadata, so they run at
+    trace time and cost the cores none of their transformability.
+    """
+
+    @pytest.mark.parametrize("spec", CORE_SPECS, ids=CORE_IDS)
+    def test_the_correlation_claim_matches_core_behaviour(self, spec):
+        fired = _gate_fires(spec, _invoke_core(spec, CORRELATED), "correlat")
+        assert fired == (spec.correlation == "refuses"), (
+            f"{spec.name}.indices: the spec declares correlation="
+            f"{spec.correlation!r} but the gate {'fired' if fired else 'did not fire'}"
+        )
+
+    # Cores allowed to refuse a categorical problem their analyze accepts.
+    # borgonovo.indices and optimal_transport.indices read the class count and
+    # padded class width off the sample on the host, so a categorical layout
+    # cannot be built from a tracer; each core refuses with a message that
+    # points at its analyze. The list is closed on purpose: a new entry is a
+    # design decision, not drift.
+    CORE_CATEGORICAL_OVER_REFUSERS = frozenset({"borgonovo", "optimal_transport"})
+
+    @pytest.mark.parametrize("spec", CORE_SPECS, ids=CORE_IDS)
+    def test_the_categorical_claim_matches_core_behaviour(self, spec):
+        fired = _gate_fires(spec, _invoke_core(spec, CATEGORICAL), "categorical")
+        if spec.name in self.CORE_CATEGORICAL_OVER_REFUSERS:
+            assert fired, (
+                f"{spec.name}.indices no longer refuses a categorical problem; "
+                "remove it from CORE_CATEGORICAL_OVER_REFUSERS"
+            )
+            return
+        assert fired == (spec.categorical == "refuses"), (
+            f"{spec.name}.indices: the spec declares categorical="
+            f"{spec.categorical!r} but the gate {'fired' if fired else 'did not fire'}"
+        )
+
+    @pytest.mark.parametrize("spec", CORE_SPECS, ids=CORE_IDS)
+    def test_an_identity_correlation_passes_every_core(self, spec):
+        """``with_correlation(I)`` declares independence, so no gate may fire.
+
+        ``has_correlated_inputs`` is ``not is_independent(R)``, and the gates
+        must preserve that: an explicit identity matrix is the independent
+        problem, spelled out.
+        """
+        identity = PLAIN.with_correlation(np.eye(D))
+        fired = _gate_fires(spec, _invoke_core(spec, identity), "correlat")
+        assert not fired, (
+            f"{spec.name}.indices refused an identity correlation matrix, "
+            "which declares independence"
+        )
 
 
 class TestTheRegistryIsProtected:

@@ -349,6 +349,37 @@ class TestChunked:
             atol=1e-5,
         )
 
+    def test_trailing_pad_keeps_dtype_under_x64(self):
+        """T4: the padded last batch calls ``fn`` at the data's own dtype.
+
+        Under x64 an unannotated ``jnp.zeros`` pad is float64, so a float32
+        ``X`` promoted on the trailing batch only: the user's model was
+        traced and called at a second dtype for the final batch, and its
+        Jacobian came back float64. The pad now carries ``X``'s dtype, so
+        every batch — padded or not — must reach ``fn`` as float32 and the
+        stitched Jacobian must equal the single-batch run exactly.
+        """
+        from jaxgsa.dgsm._core import jac_batches
+
+        with jax.enable_x64():
+            rng = np.random.default_rng(5)
+            X = jnp.asarray(rng.uniform(size=(11, 3)), dtype=jnp.float32)
+            seen_dtypes: list = []
+
+            def fn(x):
+                seen_dtypes.append(x.dtype)
+                return jnp.sum(x**2)
+
+            # batch_size=4 over 11 rows: 4 + 4 + a padded trailing 3.
+            parts = list(jac_batches(fn, X, 4))
+            jac_batched = jnp.concatenate([jac for jac, _, _ in parts], axis=0)
+            jac_full, _, _ = next(iter(jac_batches(fn, X, None)))
+
+        assert all(d == jnp.float32 for d in seen_dtypes)
+        assert jac_batched.dtype == jnp.float32
+        assert jac_batched.shape == jac_full.shape
+        np.testing.assert_array_equal(np.asarray(jac_batched), np.asarray(jac_full))
+
 
 class TestValidation:
     def test_dfdx_wrong_ndim(self):
@@ -1359,3 +1390,47 @@ class TestBootstrap:
         for name in ("nu", "sigma", "upper_bound", "lower_bound"):
             assert f"{name}_lower" in ds
             assert f"{name}_upper" in ds
+
+
+class TestIndicesSharesTheCapabilityGates:
+    """``indices`` refuses exactly the problems ``analyze`` refuses.
+
+    Tier T4 (behavioural contract). Both Sobol-index bounds assume
+    independent inputs. Before the gate, the core silently returned the
+    independence-assuming Poincare / Kucherenko-Song bounds on a correlated
+    problem that ``analyze`` refuses.
+    """
+
+    @staticmethod
+    def _correlated_problem():
+        R = np.eye(3)
+        R[0, 1] = R[1, 0] = 0.8
+        return ishigami.PROBLEM.with_correlation(R)
+
+    def test_a_correlated_problem_raises_the_analyze_message(self):
+        """The refusal is word-for-word analyze's, apart from the entry name."""
+        problem = self._correlated_problem()
+        X = jnp.asarray(monte_carlo(problem, 64, seed=0))
+
+        with pytest.raises(ValueError, match="assume independent inputs") as e_core:
+            indices(problem, _ishigami_single, X)
+        with pytest.raises(ValueError, match="assume independent inputs") as e_analyze:
+            analyze(problem, _ishigami_single, X)
+
+        assert "jaxgsa.dgsm.indices" in str(e_core.value)
+        assert str(e_core.value).replace("jaxgsa.dgsm.indices", "jaxgsa.dgsm.analyze") == str(
+            e_analyze.value
+        )
+
+    def test_an_identity_correlation_passes_under_jit(self):
+        """An explicit identity matrix declares independence, and the gate
+        reads only static problem metadata, so it must not break tracing."""
+        identity = ishigami.PROBLEM.with_correlation(np.eye(3))
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, 128, seed=0))
+
+        eager = indices(identity, _ishigami_single, X)
+        jitted = jax.jit(lambda X_: indices(identity, _ishigami_single, X_))(X)
+
+        np.testing.assert_allclose(
+            np.asarray(jitted[0]), np.asarray(eager[0]), rtol=1e-5, atol=1e-7
+        )

@@ -224,3 +224,47 @@ def test_indices_reduces_the_order_silently():
     with pytest.warns(Warning, match="order reduced"):
         result = pce.analyze(problem, X, Y, order=5)
     np.testing.assert_array_equal(np.asarray(S1), np.asarray(result.S1))
+
+
+class TestIndicesSharesTheCapabilityGates:
+    """``pce.indices`` refuses exactly the problems ``pce.analyze`` refuses.
+
+    Tier T4 (behavioural contract). The Wiener-Askey basis is orthogonal
+    under the independent product measure only. Before the gate, the core
+    silently returned Sobol indices from a basis that is not orthogonal under
+    the dependent measure ``problem.correlation`` declares.
+    """
+
+    @staticmethod
+    def _correlated_case(n: int = 64):
+        problem, X, Y = _uniform_case(n=n)
+        R = np.eye(3)
+        R[0, 1] = R[1, 0] = 0.8
+        return problem.with_correlation(R), X, Y
+
+    def test_a_correlated_problem_raises_the_analyze_message(self):
+        """The refusal is word-for-word analyze's, apart from the entry name."""
+        problem, X, Y = self._correlated_case()
+
+        with pytest.raises(ValueError, match="assume independent inputs") as e_core:
+            pce.indices(problem, X, Y)
+        with pytest.raises(ValueError, match="assume independent inputs") as e_analyze:
+            pce.analyze(problem, X, Y)
+
+        assert "jaxgsa.pce.indices" in str(e_core.value)
+        assert str(e_core.value).replace("jaxgsa.pce.indices", "jaxgsa.pce.analyze") == str(
+            e_analyze.value
+        )
+
+    def test_an_identity_correlation_passes_under_jit(self):
+        """An explicit identity matrix declares independence, and the gate
+        reads only static problem metadata, so it must not break tracing."""
+        problem, X, Y = _uniform_case(n=256)
+        identity = problem.with_correlation(np.eye(3))
+
+        eager = pce.indices(identity, X, Y, order=2)
+        jitted = jax.jit(lambda Y_: pce.indices(identity, X, Y_, order=2))(Y)
+
+        np.testing.assert_allclose(
+            np.asarray(jitted[0]), np.asarray(eager[0]), rtol=1e-5, atol=1e-7
+        )

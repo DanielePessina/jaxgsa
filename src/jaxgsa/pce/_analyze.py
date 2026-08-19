@@ -13,7 +13,7 @@ from jax import Array
 
 from jaxgsa._core.batching import get_memory_budget, resolve_batch_size
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
-from jaxgsa._core.entry import at_least, check_scalars, in_open_interval, one_of, prepare
+from jaxgsa._core.entry import at_least, check_scalars, gates, in_open_interval, one_of, prepare
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.precision import unit_clip_bounds
 from jaxgsa._core.result import CIInfo
@@ -560,9 +560,14 @@ def indices(
 
     Raises:
         ValueError: If ``order``, ``ridge``, ``fit_ratio`` or ``batch_size``
-            is out of range, or ``problem`` has a categorical parameter,
+            is out of range, ``problem.correlation`` declares a dependence
+            structure (the basis is not orthogonal under the dependent
+            measure, so the indices would be silently wrong, exactly as in
+            :func:`analyze`), or ``problem`` has a categorical parameter,
             which no orthogonal polynomial family covers.
     """
+    from jaxgsa.pce import SPEC
+
     check_scalars(
         (
             at_least("order", order, 1),
@@ -571,6 +576,10 @@ def indices(
             at_least("batch_size", batch_size, 1),
         )
     )
+    # The same capability gate analyze applies through prepare().
+    # problem.has_correlated_inputs is static host-side metadata, so the check
+    # runs at trace time and the core still composes with jit/vmap/grad.
+    gates(SPEC, problem, method="jaxgsa.pce.indices")
     Y_3d, layout = _prepare_Y(Y)
     S1, ST, S2 = _indices_3d(
         problem,

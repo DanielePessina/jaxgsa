@@ -697,3 +697,66 @@ class TestBootstrapIntervals:
 
         assert result.invalid.n_invalid == 1
         assert np.isfinite(np.asarray(result.Sh_conf)).all()
+
+
+class TestIndicesSharesTheCapabilityGates:
+    """``indices`` refuses per backend exactly what ``analyze`` refuses.
+
+    Tier T4 (behavioural contract). The PCE backend's variance allocation
+    assumes independent inputs, so a correlated problem is refused; the HDMR
+    backend allocates the ANCOVA decomposition and tolerates one. Before the
+    gate, the core silently returned the independence-assuming allocation on
+    the PCE backend.
+    """
+
+    @staticmethod
+    def _correlated_data(n: int = 400, seed: int = 0):
+        R = np.eye(3)
+        R[0, 1] = R[1, 0] = 0.8
+        problem = ishigami.PROBLEM.with_correlation(R)
+        X = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, n, seed=seed))
+        return problem, X, ishigami.evaluate(X)
+
+    def test_the_pce_backend_raises_the_analyze_message(self):
+        """The refusal is word-for-word analyze's, apart from the entry name."""
+        problem, X, Y = self._correlated_data(n=64)
+
+        with pytest.raises(ValueError, match="assumes independent inputs") as e_core:
+            jaxgsa.shapley.indices(problem, X, Y, backend="pce")
+        with pytest.raises(ValueError, match="assumes independent inputs") as e_analyze:
+            jaxgsa.shapley.analyze(problem, X, Y, backend="pce")
+
+        assert "jaxgsa.shapley.indices" in str(e_core.value)
+        assert str(e_core.value).replace(
+            "jaxgsa.shapley.indices", "jaxgsa.shapley.analyze"
+        ) == str(e_analyze.value)
+
+    def test_the_hdmr_backend_tolerates_a_correlation_like_analyze(self):
+        """analyze accepts a correlated problem on HDMR, so the core must too."""
+        problem, X, Y = self._correlated_data()
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = _analyze_shapley(
+                problem, X, Y, backend="hdmr", include_correlative=True, maxiter=50
+            )
+        Sh, _, _ = jaxgsa.shapley.indices(
+            problem, X, Y, backend="hdmr", include_correlative=True, maxiter=50
+        )
+
+        np.testing.assert_array_equal(np.asarray(Sh), np.asarray(result.Sh))
+
+    def test_an_identity_correlation_passes_under_jit(self):
+        """An explicit identity matrix declares independence, and the gate
+        reads only static problem metadata, so it must not break tracing."""
+        identity = ishigami.PROBLEM.with_correlation(np.eye(3))
+        rng = np.random.default_rng(0)
+        X = jnp.asarray(rng.uniform(-np.pi, np.pi, size=(256, 3)))
+        Y = ishigami.evaluate(X)
+
+        eager = jaxgsa.shapley.indices(identity, X, Y, order=2)
+        jitted = jax.jit(lambda Y_: jaxgsa.shapley.indices(identity, X, Y_, order=2))(Y)
+
+        np.testing.assert_allclose(
+            np.asarray(jitted[0]), np.asarray(eager[0]), rtol=1e-5, atol=1e-7
+        )

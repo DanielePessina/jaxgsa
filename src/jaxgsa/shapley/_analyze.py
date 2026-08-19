@@ -44,6 +44,41 @@ _INDEX_FIELDS = ("Sh", "S1", "ST")
 """The index arrays an interval is reported for, in ``indices`` order."""
 
 
+def _raise_correlated_pce_backend(problem: "Problem", method: str) -> None:
+    """Reject the PCE backend for a problem with correlated inputs.
+
+    The refusal is per backend, not per method: the HDMR backend allocates
+    the ANCOVA decomposition and tolerates a declared correlation, so the
+    registry record cannot answer for both. :func:`analyze` and
+    :func:`indices` share this helper so their refusals stay word-for-word
+    identical apart from the entry-point name.
+
+    Args:
+        problem: Problem the allocation was requested for.
+        method: Fully qualified entry-point name for the error message.
+
+    Raises:
+        ValueError: If ``problem`` declares a non-identity correlation. The
+            message names the HDMR alternative and the correlation-tolerant
+            methods.
+    """
+    if not problem.has_correlated_inputs:
+        return
+    # The delegated pce core would compute silently wrong numbers; this
+    # guard names the Shapley-specific alternative in the message.
+    raise ValueError(
+        f"{method} with backend='pce' computes a variance "
+        "allocation that assumes independent inputs, but "
+        "problem.correlation declares a dependence structure. Use "
+        "backend='hdmr' with include_correlative=True, which allocates "
+        "the ANCOVA (structural + correlative) decomposition instead — "
+        "an ANCOVA-based attribution, not conditional-variance Shapley "
+        "effects — or one of the correlation-tolerant methods: "
+        f"{_correlation_tolerant_methods()}. Those methods do not "
+        "return Shapley effects."
+    )
+
+
 def _indices_3d(
     problem: "Problem",
     X: Array,
@@ -115,11 +150,14 @@ def indices(
     """Compute Shapley effects as plain arrays, with no diagnostics.
 
     This is the transformable core of :func:`analyze`. It fits the same
-    surrogate on the same data and allocates the same variance, but it does
-    nothing else: no non-finite check, no capability gate, no zero-variance
-    warning, no pathological-fit warning, no ``explained_variance``
-    diagnostic, no :class:`jaxgsa.shapley.ShapleyResult`, and no read of any
-    array value on the host. So it composes with ``jax.jit``, ``jax.vmap``
+    surrogate on the same data and allocates the same variance, and it
+    applies the same capability gates (categorical inputs for both backends,
+    correlated inputs for the PCE backend; ``problem`` is static host-side
+    metadata, so the gates run at trace time). But it does nothing else: no
+    non-finite check, no zero-variance warning, no pathological-fit warning,
+    no ``explained_variance`` diagnostic, no
+    :class:`jaxgsa.shapley.ShapleyResult`, and no read of any array value on
+    the host. So it composes with ``jax.jit``, ``jax.vmap``
     and reverse- or forward-mode differentiation, which :func:`analyze`
     cannot, because a policy decision needs a concrete value and a tracer has
     none.
@@ -156,9 +194,17 @@ def indices(
         ``(Sh, S1, ST)``, at the shapes ``analyze`` reports for this ``Y``.
 
     Raises:
-        ValueError: If ``backend`` is unknown, or ``include_correlative`` is
-            asked for with the PCE backend.
+        ValueError: If ``backend`` is unknown, ``include_correlative`` is
+            asked for with the PCE backend, ``problem`` has a categorical
+            parameter (either backend), or ``problem.correlation`` declares a
+            dependence structure with the PCE backend — exactly the refusals
+            :func:`analyze` makes.
     """
+    from jaxgsa.shapley import SPEC
+
+    # The same gates analyze applies, in the same order: categorical for both
+    # backends from the registry record, correlation per backend below.
+    gates(SPEC, problem, method="jaxgsa.shapley.indices", check=("categorical",))
     check_scalars(
         (
             one_of("backend", backend, ("pce", "hdmr")),
@@ -168,6 +214,8 @@ def indices(
             ),
         )
     )
+    if backend == "pce":
+        _raise_correlated_pce_backend(problem, "jaxgsa.shapley.indices")
     Y_3d, layout = _prepare_Y(Y)
     return tuple(
         layout.squeeze(a)
@@ -347,20 +395,7 @@ def analyze(
     if backend == "pce":
         if include_correlative:
             raise ValueError("include_correlative requires backend='hdmr'")
-        if problem.has_correlated_inputs:
-            # The delegated pce.analyze would reject the problem anyway; this
-            # guard names the Shapley-specific alternative in the message.
-            raise ValueError(
-                "jaxgsa.shapley.analyze with backend='pce' computes a variance "
-                "allocation that assumes independent inputs, but "
-                "problem.correlation declares a dependence structure. Use "
-                "backend='hdmr' with include_correlative=True, which allocates "
-                "the ANCOVA (structural + correlative) decomposition instead — "
-                "an ANCOVA-based attribution, not conditional-variance Shapley "
-                "effects — or one of the correlation-tolerant methods: "
-                f"{_correlation_tolerant_methods()}. Those methods do not "
-                "return Shapley effects."
-            )
+        _raise_correlated_pce_backend(problem, "jaxgsa.shapley.analyze")
         from jaxgsa.pce import analyze as analyze_pce
 
         result = analyze_pce(problem, X, Y, on_invalid=on_invalid, **backend_kwargs).shapley()
