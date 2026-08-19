@@ -894,6 +894,22 @@ def analyze(
             Y.dtype.itemsize,
         )
         origin = "user-set" if slice_chunk_size is not None else "resolved from the memory budget"
+        notes = [f"slice_chunk_size: {cs} ({origin})", f"estimator: {estimator}"]
+        if n_bootstrap > 0:
+            # The bootstrap kernels ran with their own width (each chunk
+            # carries all R resamples of a slice); same resolver they used.
+            from jaxgsa.sobol._bootstrap import _resolve_slice_chunk_size
+
+            boot_cs = _resolve_slice_chunk_size(
+                slice_chunk_size,
+                T * K,
+                n_bootstrap,
+                int(Y.shape[0]) // step,
+                D,
+                sampling_result.calc_second_order,
+                Y.dtype.itemsize,
+            )
+            notes.insert(1, f"bootstrap slice_chunk_size: {boot_cs} ({origin})")
         _verbose.analysis_summary(
             method="jaxgsa.sobol.analyze",
             problem=sampling_result.problem,
@@ -901,8 +917,8 @@ def analyze(
             T=T,
             K=K,
             invalid=invalid,
-            timings=[("estimators (first call, includes compile)", elapsed)],
-            notes=[f"slice_chunk_size: {cs} ({origin})", f"estimator: {estimator}"],
+            timings=[("estimators (includes compile on the first call)", elapsed)],
+            notes=notes,
             index_name="ST",
             values=result.ST,
             conf=result.ST_conf,

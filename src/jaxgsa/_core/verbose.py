@@ -123,10 +123,8 @@ def _marginal_counts(problem: Problem) -> str:
     return ", ".join(f"{kind}={n}" for kind, n in counts.items())
 
 
-def _invalid_line(invalid: InvalidReport | None) -> str:
+def _invalid_line(invalid: InvalidReport) -> str:
     """Say what the non-finite check found and what was done about it."""
-    if invalid is None:
-        return "invalid: check delegated to the backend"
     if not invalid.any_invalid:
         return (
             f"invalid: none found in {invalid.n_units} "
@@ -150,7 +148,7 @@ def analysis_summary(
     n_runs: int,
     T: int,
     K: int,
-    invalid: InvalidReport | None,
+    invalid: InvalidReport,
     timings: Sequence[tuple[str, float]],
     index_name: str,
     values: Any,
@@ -174,17 +172,16 @@ def analysis_summary(
             drop.
         T: Time steps in the promoted ``(N, T, K)`` layout.
         K: Output columns in the promoted layout.
-        invalid: What the non-finite check found, or ``None`` for a method
-            that delegates the check to a backend.
+        invalid: What the non-finite check found.
         timings: ``(label, seconds)`` pairs, in print order. The caller
             measures them with :func:`tic` and :func:`stop`.
-        notes: Extra lines for the timing section, already formatted, e.g.
-            ``"slice_chunk_size: 8 (resolved from the memory budget)"``.
         index_name: The headline index the results section ranks by.
         values: The headline index array, shaped ``(..., D)`` in the
             caller's own rank.
         conf: The matching ``(2, ..., D)`` [lower, upper] interval array, or
             ``None`` when the caller did not bootstrap.
+        notes: Extra lines for the timing section, already formatted, e.g.
+            ``"slice_chunk_size: 8 (resolved from the memory budget)"``.
     """
     emit(method)
     emit(f"{_INDENT}problem: D={problem.num_vars} ({_preview_names(problem.names)})")

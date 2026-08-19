@@ -402,7 +402,7 @@ def analyze(
             T=T,
             K=K,
             invalid=invalid,
-            timings=[("fit + estimator (first call, includes compile)", elapsed)],
+            timings=[("fit + estimator (includes compile on the first call)", elapsed)],
             notes=[f"maxorder: {maxorder}", slice_note, batch_note],
             index_name="ST",
             values=result.ST,

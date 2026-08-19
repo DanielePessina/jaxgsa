@@ -917,9 +917,9 @@ def analyze(
         # On the autodiff path the timed span includes the Jacobian sweep;
         # on the pre-computed path only the estimator ran.
         label = (
-            "model sweep + estimator (first call, includes compile)"
+            "model sweep + estimator (includes compile on the first call)"
             if use_autodiff
-            else "estimator (first call, includes compile)"
+            else "estimator (includes compile on the first call)"
         )
         gradients = (
             "gradients: reverse-mode autodiff" if use_autodiff else "gradients: user-supplied dfdx"

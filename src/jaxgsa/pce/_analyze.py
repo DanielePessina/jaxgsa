@@ -952,7 +952,7 @@ def analyze(
             T=T,
             K=K,
             invalid=invalid,
-            timings=[("fit + estimator (first call, includes compile)", elapsed)],
+            timings=[("fit + estimator (includes compile on the first call)", elapsed)],
             notes=[
                 f"order: {order}",
                 f"fit: {'streamed' if result.streamed else 'single-pass'}",

@@ -444,7 +444,12 @@ def analyze(
         # No prepare() context here: the backend validated everything. The
         # promoted layout is read off the shapes at hand instead — Sh is
         # (D,), (K, D) or (T, K, D) matching Y (N,), (N, K), (N, T, K).
-        n_runs = int(np.shape(Y)[0])
+        # "After any drop", as the summary contract says: the backend's
+        # report counts what the fit actually used.
+        if result.invalid.policy == "drop" and result.invalid.any_invalid:
+            n_runs = int(result.invalid.n_kept)
+        else:
+            n_runs = int(np.shape(Y)[0])
         sh_shape = np.shape(result.Sh)
         if len(sh_shape) == 3:
             T, K = int(sh_shape[0]), int(sh_shape[1])
@@ -459,7 +464,7 @@ def analyze(
             T=T,
             K=K,
             invalid=result.invalid,
-            timings=[("backend fit + Shapley (first call, includes compile)", elapsed)],
+            timings=[("backend fit + Shapley (includes compile on the first call)", elapsed)],
             notes=[f"backend: {backend}", f"order: {result.order}"],
             index_name="Sh",
             values=result.Sh,

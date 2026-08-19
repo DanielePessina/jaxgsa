@@ -886,7 +886,7 @@ def analyze(
             T=T,
             K=K,
             invalid=invalid,
-            timings=[("estimator (first call, includes compile)", elapsed)],
+            timings=[("estimator (includes compile on the first call)", elapsed)],
             notes=[
                 f"n_perms: {n_perms}",
                 f"bandwidth: {bandwidth} (median-heuristic multiplier)",

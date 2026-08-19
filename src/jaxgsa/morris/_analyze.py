@@ -556,11 +556,15 @@ def analyze(
     if verbose:
         elapsed = _verbose.stop(t0, result.mu, result.mu_star, result.sigma)
         _, T, K = ctx.Y3.shape
-        chunk_note = (
-            f"resample_chunk_size: {resample_chunk_size} (user-set)"
-            if resample_chunk_size is not None
-            else "resample_chunk_size: auto (resolved from the memory budget)"
-        )
+        # The resample width only exists when bootstrapping ran.
+        if n_bootstrap > 0:
+            notes = [
+                f"resample_chunk_size: {resample_chunk_size} (user-set)"
+                if resample_chunk_size is not None
+                else "resample_chunk_size: auto (resolved from the memory budget)"
+            ]
+        else:
+            notes = []
         _verbose.analysis_summary(
             method="jaxgsa.morris.analyze",
             problem=sampling_result.problem,
@@ -568,8 +572,8 @@ def analyze(
             T=T,
             K=K,
             invalid=invalid,
-            timings=[("estimator (first call, includes compile)", elapsed)],
-            notes=[chunk_note],
+            timings=[("estimator (includes compile on the first call)", elapsed)],
+            notes=notes,
             index_name="mu_star",
             values=result.mu_star,
             conf=result.mu_star_conf,

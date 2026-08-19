@@ -460,7 +460,7 @@ def analyze(
             T=T,
             K=K,
             invalid=invalid,
-            timings=[("estimator (first call, includes compile)", elapsed)],
+            timings=[("estimator (includes compile on the first call)", elapsed)],
             notes=[chunk_note, f"omega_0: {omega_0}, M: {M}"],
             index_name="ST",
             values=result.ST,

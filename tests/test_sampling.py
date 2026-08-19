@@ -99,7 +99,9 @@ def test_reconstructing_expanded_samples_matches_mapping():
     assert np.unique(reconstructed, axis=0).shape[0] == result.n_runs
 
 
+@pytest.mark.verbose_output
 def test_sample_verbose_false_is_silent(capsys):
+    """The marker keeps the emit seam live; otherwise this asserts nothing."""
     p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
     sample(p, n_samples=32, seed=42, verbose=False)
     out = capsys.readouterr().out

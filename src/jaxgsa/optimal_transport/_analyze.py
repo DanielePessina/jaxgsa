@@ -1149,7 +1149,7 @@ def analyze(
             T=T,
             K=K,
             invalid=invalid,
-            timings=[("estimator (first call, includes compile)", elapsed)],
+            timings=[("estimator (includes compile on the first call)", elapsed)],
             notes=[f"mode: {mode}", f"epsilon: {epsilon}", chunking],
             index_name="ot",
             values=result.ot,

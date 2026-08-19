@@ -1221,7 +1221,7 @@ def analyze(
             T=T,
             K=K,
             invalid=invalid,
-            timings=[("estimator (first call, includes compile)", elapsed)],
+            timings=[("estimator (includes compile on the first call)", elapsed)],
             notes=[
                 f"slice_chunk_size: {cs} ({origin})",
                 f"grid_size: {grid_size}",
