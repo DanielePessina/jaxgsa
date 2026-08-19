@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import warnings
 
@@ -21,6 +22,32 @@ from jaxgsa.hsic._analyze import (
 )
 from jaxgsa.problem import Problem
 from jaxgsa.sampling import monte_carlo
+
+
+@contextlib.contextmanager
+def single_precision_warning():
+    """Assert the float32 warning fires in float32, and is absent under x64.
+
+    ``analyze`` warns that the HSIC V-statistic loses most of its digits only
+    when JAX is in single precision, which is right. Written as a bare
+    ``pytest.warns``, the test therefore failed with ``DID NOT WARN`` the
+    moment the suite was run with ``JAX_ENABLE_X64=1`` — the test was
+    precision-blind, not the source. The flag is read here rather than at
+    import so a caller that switches precision with a context manager gets
+    the treatment that matches the precision actually in force.
+
+    This is a copy of the helper of the same name in ``tests/test_vkoga.py``,
+    which met the identical problem. Keep the two bodies identical; if one
+    needs to change, change both, or lift it into ``conftest.py``.
+    """
+    if bool(getattr(jax.config, "jax_enable_x64", False)):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            yield
+        assert not [w for w in caught if "single precision" in str(w.message)]
+    else:
+        with pytest.warns(JaxgsaWarning, match="single precision"):
+            yield
 
 
 @pytest.fixture(scope="module")
@@ -518,17 +545,29 @@ class TestSinglePrecisionWarning:
         return problem, Xj, jnp.sin(3.0 * Xj[:, 0]) + Xj[:, 1]
 
     def test_float32_warns(self):
-        problem, Xj, Y = self._sample()
-        with pytest.warns(JaxgsaWarning, match="single precision"):
-            analyze(problem, Xj, Y, n_perms=5, key=jax.random.key(0))
+        """The warning fires in float32, whatever the suite's ambient flag.
+
+        ``jax.enable_x64(False)`` rather than the ambient default, because the
+        x64 CI job runs this same file with ``JAX_ENABLE_X64=1``. Left
+        implicit, this test would assert the *absence* of the warning there
+        and stop checking the thing it is named for. Forcing the precision
+        keeps one contract per test and checks both of them in both jobs.
+        """
+        with jax.enable_x64(False):
+            problem, Xj, Y = self._sample()
+            with single_precision_warning():
+                analyze(problem, Xj, Y, n_perms=5, key=jax.random.key(0))
 
     def test_x64_is_silent(self):
+        """And it is suppressed under x64 — the other half of the contract.
+
+        Asserted, not skipped: suppressing the warning correctly is as much
+        the behaviour as raising it.
+        """
         with jax.enable_x64():
             problem, Xj, Y = self._sample()
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
+            with single_precision_warning():
                 analyze(problem, Xj, Y, n_perms=5, key=jax.random.key(0))
-        assert [w for w in caught if "single precision" in str(w.message)] == []
 
     def test_reordering_the_rows_is_the_thing_it_warns_about(self):
         """The claim in the warning, measured: float32 is order-dependent.
@@ -536,6 +575,12 @@ class TestSinglePrecisionWarning:
         A permutation of the sample cannot change HSIC, so any difference is
         the arithmetic alone. float64 keeps it at the noise floor; float32
         does not.
+
+        Both precisions are named explicitly. The float32 half used to ride on
+        the ambient flag, which made it pass for the wrong reason under the
+        x64 CI job: both measurements ran in float64, came back at 1.3e-14,
+        and the comparison of one against a hundred times itself failed. The
+        two arms of a precision comparison have to set their own precision.
         """
         problem, Xj, Y = self._sample(n=512)
         perm = np.random.default_rng(0).permutation(512)
@@ -562,7 +607,8 @@ class TestSinglePrecisionWarning:
             b = np.asarray(shuffled.R2_HSIC, np.float64)
             return float(np.max(np.abs(a - b) / np.abs(a)))
 
-        shift_32 = shift()
+        with jax.enable_x64(False):
+            shift_32 = shift()
         with jax.enable_x64():
             shift_64 = shift()
         assert shift_64 < 1e-10
