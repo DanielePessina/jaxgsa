@@ -9,7 +9,7 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core.invalid import InvalidReport
-from jaxgsa._core.result import FieldSpec, ResultSchema, SchemaResult
+from jaxgsa._core.result import CIInfo, FieldSpec, ResultSchema, SchemaResult
 from jaxgsa._core.surrogate import SurrogateResult, _PredictPlan
 from jaxgsa.problem import Problem
 
@@ -73,6 +73,20 @@ class PCEResult(SchemaResult, SurrogateResult):
             would exceed the memory budget (see
             :func:`jaxgsa.config.set_memory_budget`). Read it when a fit takes
             much longer than expected: True means the budget engaged.
+        S1_conf: Bootstrap confidence interval for ``S1``, shape
+            ``(2, ...)`` for ``[lower, upper]``. ``None`` when
+            ``n_bootstrap=0``. Each replicate refits the expansion on a row
+            resample, so the interval measures the sampling variability of
+            ``(X, Y)`` propagated through the fit. It says nothing about
+            truncation error: every replicate uses the same basis and
+            inherits the same bias. ``loo_rmse`` and ``explained_variance``
+            are what report that.
+        ST_conf: Bootstrap confidence interval for ``ST``, as ``S1_conf``.
+        S2_conf: Bootstrap confidence interval for ``S2``, as ``S1_conf``.
+        ci: How the intervals were produced: the confidence level, the
+            endpoint rule, the resample count, and the draws themselves when
+            the analysis ran with ``keep_replicates=True``. ``None`` without
+            a bootstrap. See :class:`jaxgsa._core.result.CIInfo`.
     """
 
     S1: Array
@@ -86,13 +100,17 @@ class PCEResult(SchemaResult, SurrogateResult):
     loo_rmse: Array | None = None
     explained_variance: Array | None = None
     streamed: bool = False
+    S1_conf: Array | None = None
+    ST_conf: Array | None = None
+    S2_conf: Array | None = None
+    ci: CIInfo | None = None
 
     _schema = ResultSchema(
         primary="S1",
         fields=(
-            FieldSpec("S1"),
-            FieldSpec("ST"),
-            FieldSpec("S2", "pair"),
+            FieldSpec("S1", interval=True),
+            FieldSpec("ST", interval=True),
+            FieldSpec("S2", "pair", interval=True),
             FieldSpec("loo_rmse", "slice"),
             FieldSpec("explained_variance", "slice"),
         ),

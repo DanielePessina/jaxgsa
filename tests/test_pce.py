@@ -738,3 +738,133 @@ class TestPCEOnInvalid:
         with pytest.warns(JaxgsaWarning):
             result = pce.analyze(linear.PROBLEM, X, Y, on_invalid="drop", order=2)
         assert result.shapley().invalid == result.invalid
+
+
+class TestBootstrapIntervals:
+    """The opt-in confidence intervals.
+
+    Tier T4 throughout. A bootstrap interval has no closed form to check
+    against; what these pin is that the interval brackets the estimate it is
+    an interval for, that it costs nothing when nobody asks for it, and that
+    the vocabulary the rest of the package uses is honoured here too.
+    """
+
+    @staticmethod
+    def _data(n=256, seed=0):
+        rng = np.random.default_rng(seed)
+        X = jnp.asarray(rng.uniform(-np.pi, np.pi, size=(n, 3)))
+        return X, ishigami.evaluate(X)
+
+    def test_no_bootstrap_by_default(self):
+        """T4: the plainest call reports no interval and pays for none.
+
+        Each replicate refits the expansion, so an on-by-default interval
+        would make a routine call an order of magnitude slower.
+        """
+        X, Y = self._data()
+        result = pce.analyze(ishigami.PROBLEM, X, Y, order=3)
+
+        assert result.ci is None
+        assert result.S1_conf is None
+        assert result.ST_conf is None
+        assert result.S2_conf is None
+
+    def test_the_interval_brackets_the_point_estimate(self):
+        """T4: lower <= estimate <= upper, for all three index arrays."""
+        X, Y = self._data()
+        result = pce.analyze(ishigami.PROBLEM, X, Y, order=3, n_bootstrap=8, key=jax.random.key(0))
+
+        for point, conf in (
+            (result.S1, result.S1_conf),
+            (result.ST, result.ST_conf),
+            (result.S2, result.S2_conf),
+        ):
+            lower, upper = np.asarray(conf[0]), np.asarray(conf[1])
+            point = np.asarray(point)
+            finite = np.isfinite(point) & np.isfinite(lower) & np.isfinite(upper)
+            assert (lower[finite] <= upper[finite]).all()
+            # The percentile interval is read off the replicate distribution,
+            # which is centred near but not exactly on the point estimate, so
+            # a small slack is expected on a run of eight.
+            assert (point[finite] >= lower[finite] - 0.2).all()
+            assert (point[finite] <= upper[finite] + 0.2).all()
+
+    def test_the_point_estimate_is_the_one_without_a_bootstrap(self):
+        """T4: asking for an interval does not move the number it is around."""
+        X, Y = self._data()
+        plain = pce.analyze(ishigami.PROBLEM, X, Y, order=3)
+        with_ci = pce.analyze(
+            ishigami.PROBLEM, X, Y, order=3, n_bootstrap=4, key=jax.random.key(1)
+        )
+
+        np.testing.assert_array_equal(np.asarray(plain.S1), np.asarray(with_ci.S1))
+        np.testing.assert_array_equal(np.asarray(plain.ST), np.asarray(with_ci.ST))
+
+    def test_ci_records_how_the_interval_was_made(self):
+        """T4: the level, the rule and the count travel with the numbers."""
+        X, Y = self._data()
+        result = pce.analyze(
+            ishigami.PROBLEM,
+            X,
+            Y,
+            order=2,
+            n_bootstrap=5,
+            conf_level=0.8,
+            ci_method="gaussian",
+            key=jax.random.key(2),
+        )
+
+        assert result.ci is not None
+        assert result.ci.level == 0.8
+        assert result.ci.method == "gaussian"
+        assert result.ci.n_bootstrap == 5
+        assert result.ci.replicates is None
+
+    def test_keep_replicates_retains_every_draw(self):
+        """T4: the draws come back with a leading resample axis."""
+        X, Y = self._data()
+        result = pce.analyze(
+            ishigami.PROBLEM,
+            X,
+            Y,
+            order=2,
+            n_bootstrap=6,
+            key=jax.random.key(3),
+            keep_replicates=True,
+        )
+
+        assert result.ci is not None
+        assert result.ci.replicates is not None
+        assert result.ci.replicates["S1"].shape == (6, 3)
+        assert result.ci.replicates["S2"].shape == (6, 3, 3)
+
+    def test_a_key_is_required(self):
+        """T4: no key means no interval, and it is refused rather than seeded.
+
+        Falling back to a constant key would silently correlate every nested
+        or repeated bootstrap.
+        """
+        X, Y = self._data()
+        with pytest.raises(ValueError, match="key is required"):
+            pce.analyze(ishigami.PROBLEM, X, Y, n_bootstrap=4)
+
+    def test_the_same_key_gives_the_same_interval(self):
+        """T4: the draw is a function of the key, not of the call."""
+        X, Y = self._data()
+        kwargs = dict(order=2, n_bootstrap=4, key=jax.random.key(7))
+        first = pce.analyze(ishigami.PROBLEM, X, Y, **kwargs)
+        second = pce.analyze(ishigami.PROBLEM, X, Y, **kwargs)
+
+        np.testing.assert_array_equal(np.asarray(first.S1_conf), np.asarray(second.S1_conf))
+
+    def test_a_time_series_gets_intervals_at_the_same_rank(self):
+        """T4: the interval keeps the result's own layout, plus the [lo, hi] axis."""
+        X, Y = self._data()
+        Y3 = jnp.stack([jnp.stack([Y, 2.0 * Y], axis=-1)], axis=1)
+        result = pce.analyze(
+            ishigami.PROBLEM, X, Y3, order=2, n_bootstrap=3, key=jax.random.key(4)
+        )
+
+        assert result.S1.shape == (1, 2, 3)
+        assert result.S1_conf.shape == (2, 1, 2, 3)
+        assert result.S2_conf.shape == (2, 1, 2, 3, 3)

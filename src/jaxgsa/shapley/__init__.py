@@ -10,13 +10,16 @@ Example::
 ``.shapley()`` in one step::
 
     result = shapley.analyze(problem, X, Y, backend="pce")
+
+``shapley.indices`` is the traceable form: same fit, same allocation, three
+plain arrays and no diagnostics.
 """
 
 from jaxgsa._core.registry import MethodSpec, register
-from jaxgsa.shapley._analyze import analyze
+from jaxgsa.shapley._analyze import analyze, indices
 from jaxgsa.shapley._result import ShapleyResult
 
-__all__ = ["ShapleyResult", "analyze"]
+__all__ = ["ShapleyResult", "analyze", "indices"]
 
 SPEC = register(
     MethodSpec(
@@ -29,7 +32,7 @@ SPEC = register(
         # records the default; the backend argument overrides it.
         correlation="refuses",
         categorical="refuses",
-        bootstrap=None,
+        bootstrap="n_bootstrap",
         # No unit of its own: it forwards on_invalid to the backend, which
         # applies its own.
         invalid_unit=None,

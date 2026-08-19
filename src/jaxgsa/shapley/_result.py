@@ -8,7 +8,7 @@ from typing import Literal
 from jax import Array
 
 from jaxgsa._core.invalid import InvalidReport
-from jaxgsa._core.result import FieldSpec, ResultSchema, SchemaResult
+from jaxgsa._core.result import CIInfo, FieldSpec, ResultSchema, SchemaResult
 from jaxgsa.problem import Problem
 
 
@@ -62,6 +62,22 @@ class ShapleyResult(SchemaResult):
             ``Sh``/``S1``/``ST`` may be negative and the ordering
             ``S1 <= Sh <= ST`` need not hold. Efficiency (``Sh`` sums to 1) is
             preserved regardless.
+        Sh_conf: Bootstrap confidence interval for ``Sh``, shape ``(2, ...)``
+            for ``[lower, upper]``. ``None`` when ``n_bootstrap=0``. Each
+            replicate refits the backend surrogate on a row resample, so the
+            interval measures the sampling variability of ``(X, Y)``
+            propagated through the fit. It says nothing about how well the
+            surrogate represents the model: every replicate shares the same
+            basis, so a systematic misfit sits inside every interval.
+            ``explained_variance`` is what reports that. Available only from
+            ``jaxgsa.shapley.analyze``; ``result.shapley()`` on a fitted
+            surrogate has one fit and cannot resample it.
+        S1_conf: Bootstrap confidence interval for ``S1``, as ``Sh_conf``.
+        ST_conf: Bootstrap confidence interval for ``ST``, as ``Sh_conf``.
+        ci: How the intervals were produced: the confidence level, the
+            endpoint rule, the resample count, and the draws themselves when
+            the analysis ran with ``keep_replicates=True``. ``None`` without
+            a bootstrap. See :class:`jaxgsa._core.result.CIInfo`.
     """
 
     Sh: Array
@@ -73,13 +89,17 @@ class ShapleyResult(SchemaResult):
     order: int
     invalid: InvalidReport
     include_correlative: bool = False
+    Sh_conf: Array | None = None
+    S1_conf: Array | None = None
+    ST_conf: Array | None = None
+    ci: CIInfo | None = None
 
     _schema = ResultSchema(
         primary="Sh",
         fields=(
-            FieldSpec("Sh"),
-            FieldSpec("S1"),
-            FieldSpec("ST"),
+            FieldSpec("Sh", interval=True),
+            FieldSpec("S1", interval=True),
+            FieldSpec("ST", interval=True),
             FieldSpec("explained_variance", "slice"),
         ),
         meta=("backend", "order", "include_correlative"),

@@ -319,22 +319,31 @@ def _ancova(Y: Array, Y_em: Array, V_Y: Array) -> tuple[Array, Array, Array]:
 def _f_ppf(q: float, d1: float, d2: float) -> float:
     """Compute F-distribution percent point function via bisection on betainc.
 
-    Pure JAX, no scipy dependency. Only intended for scalar arguments computed
-    once outside JIT.
+    Pure JAX, no scipy dependency. The arguments are the degrees of freedom,
+    which come from the basis size and the sample count, so every value here
+    is a Python float known before any array is touched.
+
+    The bisection reads its own comparison on the host, and that would raise
+    inside a trace, because a ``jnp`` call on a constant returns a tracer
+    there. ``jax.ensure_compile_time_eval`` is what states the intent: these
+    are compile-time constants, so evaluate them eagerly wherever this runs.
+    Without it, ``hdmr.indices`` could not be jitted. With it, the value is
+    the same one the eager path computes, bit for bit.
     """
     # The F-distribution CDF can be written as I_x(d1/2, d2/2) where
     # x = d1*F / (d1*F + d2) and I_x is the regularized incomplete beta.
     # Bisection on x in [0, 1] inverts that relationship.
     a, b = d1 / 2.0, d2 / 2.0
     lo, hi = 0.0, 1.0
-    for _ in range(100):
-        mid = (lo + hi) / 2.0
-        if float(jax.scipy.special.betainc(a, b, mid)) < q:
-            lo = mid
-        else:
-            hi = mid
-        if hi - lo < 1e-12:
-            break
+    with jax.ensure_compile_time_eval():
+        for _ in range(100):
+            mid = (lo + hi) / 2.0
+            if float(jax.scipy.special.betainc(a, b, mid)) < q:
+                lo = mid
+            else:
+                hi = mid
+            if hi - lo < 1e-12:
+                break
     # Convert from beta variable x back to F value: F = d2*x / (d1*(1-x)).
     x = (lo + hi) / 2.0
     return float(d2 * x / (d1 * (1.0 - x + 1e-30)))

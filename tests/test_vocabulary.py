@@ -230,8 +230,18 @@ def test_keep_replicates_is_keyword_only_and_last(spec: MethodSpec) -> None:
     It was in three different positions before the freeze. Position matters
     even for a keyword-only argument, because the signature is what a reader
     scans and what the rendered docs show.
+
+    "Last" means last of the named parameters. A ``**kwargs`` catch-all is
+    excluded because Python requires it to come last syntactically, so a
+    method that forwards to a backend cannot put anything after it.
+    ``shapley`` is the one such method: it passes its fit arguments through to
+    ``pce`` or ``hdmr`` rather than naming them, so that a keyword only one
+    backend understands cannot be accepted and silently ignored by the other.
+    Reading the rule as "last named parameter" keeps the position fixed for
+    every method and stays satisfiable for that one. CONTEXT.md states the
+    rule without this qualification.
     """
-    params = list(_params(spec).values())
+    params = [p for p in _params(spec).values() if p.kind is not inspect.Parameter.VAR_KEYWORD]
     names = [p.name for p in params]
     assert names[-1] == "keep_replicates", (
         f"{spec.name}.analyze ends with {names[-1]!r}; keep_replicates must be "

@@ -9,7 +9,7 @@ import itertools
 import math
 from collections.abc import Callable
 from functools import lru_cache
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -17,8 +17,10 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core.batching import get_memory_budget
-from jaxgsa._core.entry import prepare
+from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
+from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare
 from jaxgsa._core.invalid import InvalidReport, OnInvalid
+from jaxgsa._core.result import CIInfo
 from jaxgsa._core.surrogate import _PredictPlan
 from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa._core.validation import (
@@ -262,7 +264,12 @@ def analyze(
     lambdax: float = 0.01,
     slice_chunk_size: int | None = None,
     batch_size: int | None = None,
+    n_bootstrap: int = 0,
+    conf_level: float = 0.95,
+    ci_method: Literal["quantile", "gaussian"] = "quantile",
+    key: Array | None = None,
     on_invalid: OnInvalid = "raise",
+    keep_replicates: bool = False,
 ) -> HDMRResult:
     """Compute sensitivity indices via RS-HDMR (public entry point).
 
@@ -278,28 +285,68 @@ def analyze(
     allocation.
 
     Args:
+        n_bootstrap: Number of bootstrap resamples for confidence intervals
+            on ``Sa``, ``Sb``, ``S`` and ``ST``. ``0`` (default) disables
+            them. The resampling unit is one row of ``(X, Y)``.
+
+            This is the expensive kind of bootstrap. Every replicate refits
+            the whole expansion — fresh B-spline bases, a fresh backfitting
+            solve, a fresh F-test — so the cost is an order of magnitude
+            above the row resample of a method such as ``jaxgsa.pawn``, which
+            only re-reduces numbers it already has. Twenty replicates cost
+            about twenty fits. That is why the default is ``0``.
+
+            The interval measures the sampling variability of ``(X, Y)``
+            propagated through the fit. It does not measure the surrogate's
+            truncation error: every replicate uses the same basis and the
+            same maximum order, so a systematic misfit stays inside every
+            interval. ``rmse`` and ``S.sum()`` are what report that.
+        conf_level: Two-sided confidence level for the intervals.
+        ci_method: How the interval endpoints are formed. ``"quantile"``
+            (default) reads them off the empirical bootstrap distribution.
+            ``"gaussian"`` centres them on the point estimate and takes
+            ``+/- z * sd`` of the draws.
+        key: A ``jax.random`` key for the bootstrap resampling. Required when
+            ``n_bootstrap > 0``. Pass ``jax.random.key(0)`` if you have an
+            integer seed.
         on_invalid: What to do about non-finite values in ``X`` or ``Y``. One
             row is one unit here, so ``"drop"`` removes the affected
             ``(X, Y)`` pairs and fits on the rest. See
             :mod:`jaxgsa._core.invalid`. Every other argument is documented on
             :func:`_analyze_hdmr_core`.
+        keep_replicates: Retain the per-replicate index arrays on
+            ``result.ci``. Off by default: the draws are large.
 
     Raises:
         ValueError: If ``X`` or ``Y`` violates the shared shape contract, or
             ``problem`` has categorical parameters. The B-spline component
             functions need an orderable axis, which an unordered level code
             does not give. Also if ``on_invalid`` is not one of the three
-            policies, or ``on_invalid="raise"`` (the default) and ``X`` or
-            ``Y`` holds a non-finite value.
-            :func:`_analyze_hdmr_core` raises for the remaining argument
-            checks.
+            policies, ``on_invalid="raise"`` (the default) and ``X`` or
+            ``Y`` holds a non-finite value, or ``n_bootstrap > 0`` without a
+            ``key``. :func:`_analyze_hdmr_core` raises for the remaining
+            argument checks.
     """
     from jaxgsa.hdmr import SPEC
 
     # The preamble runs in this public wrapper only. Callers routing through
     # `_analyze_hdmr_core` (Shapley) must not have the policy applied, or the
     # zero-variance warning issued, a second time.
-    ctx = prepare(SPEC, problem, Y, X=X, on_invalid=on_invalid, min_kept=_MIN_ROWS)
+    ctx = prepare(
+        SPEC,
+        problem,
+        Y,
+        X=X,
+        on_invalid=on_invalid,
+        checks=(
+            at_least("n_bootstrap", n_bootstrap, 0),
+            one_of("ci_method", ci_method, ("quantile", "gaussian")),
+            in_open_interval("conf_level", conf_level, 0.0, 1.0),
+        ),
+        min_kept=_MIN_ROWS,
+    )
+    if n_bootstrap > 0 and key is None:
+        raise ValueError("key is required when n_bootstrap > 0")
     X, Y, invalid = ctx.inputs, ctx.Y, ctx.invalid
     # ST and S1 change meaning under dependence; say so once per analyze call,
     # in the public wrapper only, so Shapley routing through the core stays
@@ -316,10 +363,58 @@ def analyze(
         slice_chunk_size=slice_chunk_size,
         batch_size=batch_size,
         invalid=invalid,
+        n_bootstrap=n_bootstrap,
+        conf_level=conf_level,
+        ci_method=ci_method,
+        key=key,
+        keep_replicates=keep_replicates,
     )
 
 
-def _analyze_hdmr_core(
+class _HDMRCore(NamedTuple):
+    """One HDMR fit, as arrays, before any result is built.
+
+    The index fields are in canonical ``(T, K, ...)`` layout: the caller
+    squeezes them back to its own rank. The emulator fields are still in the
+    flat ``(T*K, ...)`` layout the kernel produced, because only a caller
+    that wants a surrogate pays for reshaping them.
+
+    Attributes:
+        Sa: Structural variance fraction per term, shape ``(T, K, n_terms)``.
+        Sb: Correlative variance fraction per term, same shape.
+        S: ``Sa + Sb``, same shape.
+        ST: SCSA total per parameter, shape ``(T, K, D)``.
+        select: F-test significance count per term, shape ``(n_terms,)``.
+        rmse: Per-slice fit RMSE, shape ``(T*K,)``.
+        C1: First-order component coefficients, flat slice axis leading.
+        C2: Second-order coefficients, or ``None`` below ``maxorder=2``.
+        C3: Third-order coefficients, or ``None`` below ``maxorder=3``.
+        f0: Grand mean per slice.
+        maxorder: The expansion order actually fitted, clamped to ``D``.
+        streamed: Whether the row-streamed fit path ran.
+        c2: Parameter index pairs, in term order.
+        c3: Parameter index triples, in term order.
+        layout: Which rank the caller's ``Y`` had, for the squeeze back.
+    """
+
+    Sa: Array
+    Sb: Array
+    S: Array
+    ST: Array
+    select: Array
+    rmse: Array
+    C1: Array
+    C2: Array | None
+    C3: Array | None
+    f0: Array
+    maxorder: int
+    streamed: bool
+    c2: tuple[tuple[int, int], ...]
+    c3: tuple[tuple[int, int, int], ...]
+    layout: YLayout
+
+
+def _hdmr_core(
     problem: Problem,
     X: Array,
     Y: Array,
@@ -330,107 +425,39 @@ def _analyze_hdmr_core(
     lambdax: float = 0.01,
     slice_chunk_size: int | None = None,
     batch_size: int | None = None,
-    invalid: InvalidReport,
-) -> HDMRResult:
-    """Fit RS-HDMR on an already-canonical Y (no re-validation, no warn).
+) -> _HDMRCore:
+    """Fit RS-HDMR and return the arrays, with no result and no diagnostics.
 
-    Compute sensitivity indices via RS-HDMR with B-spline surrogate modelling.
+    This is the whole estimator: the CDF transform, the B-spline bases, the
+    backfitting solve, the F-test and the ANCOVA split. What it does not do
+    is anything that needs the host — no non-finite check, no zero-variance
+    warning, no clamp warning, no term labels, no result class. Every branch
+    it takes is on a shape or on a Python scalar, so it traces.
 
-    Works with any set of (X, Y) pairs. No structured sampling is required, so
-    it suits existing datasets and expensive models where Sobol/eFAST sampling
-    schemes are unaffordable. B-spline regression decomposes the input-output
-    relationship into hierarchical component functions: one per parameter, one
-    per parameter pair, and so on. The ANCOVA-based sensitivity indices then
-    come from the fitted components. Unlike pure Sobol
-    estimators, the ANCOVA split into structural (Sa) and correlative (Sb)
-    parts remains meaningful when inputs are correlated.
+    Both fit paths live here. The in-memory path builds the full-N bases once
+    and ``vmap``s the fitting kernel over chunks of output slices; the
+    streamed path accumulates the same normal equations over row batches.
+    Which one runs depends on ``batch_size`` and on the memory budget, both
+    Python values, so the choice is made at trace time and neither path reads
+    a sample value on the host.
 
     Args:
         problem: Parameter names and distributions.
         X: Input samples, shape ``(N, D)``.
-        Y: Model outputs, shape ``(N,)`` / ``(N, K)`` / ``(N, T, K)``. A 2-D
-            array is read as ``(N, K)`` unless ``problem.output_names`` has
-            exactly one entry. In that case the columns are T timepoints of
-            that single output.
-        maxorder: Maximum HDMR expansion order (1, 2, or 3), which is the
-            largest interaction size modelled. Order 2 (default) captures
-            pairwise interactions. Order 3 adds triples, but the term count
-            and the fit cost grow combinatorially. Clamped to D (with a
-            warning) when D < maxorder.
-        maxiter: Maximum backfitting iterations for the first-order terms.
-            The default rarely needs raising, because iteration stops early
-            once the coefficients stop changing.
-        m: Number of B-spline intervals per dimension (basis size m + 3).
-            Larger m resolves sharper features of the component functions.
-            It also multiplies the coefficient count (the per-term basis grows
-            as (m+3)^order) and needs more samples to avoid overfitting.
-        lambdax: Tikhonov regularization strength. Increase it for noisy Y or
-            small N, which gives smoother and more stable components.
-            Decrease it if genuine sharp features are being oversmoothed.
-        slice_chunk_size: Maximum number of (T, K) output slices fitted per
-            vmap batch on the in-memory (non-streamed) path. It caps peak
-            device memory for large T*K, and a smaller value trades speed for
-            memory. ``None`` (default) derives the chunk size from the active
-            memory budget (``jaxgsa.config.set_memory_budget``), because the
-            per-slice cost inside the fitting kernel scales with
-            ``N * n_terms``. Ignored when the fit streams over rows (see
-            ``batch_size``).
-        batch_size: Rows of ``X``/``Y`` processed per batch during the fit
-            (the package-wide ``batch_size`` convention). ``None`` (default)
-            keeps the in-memory fit unless its estimated resident memory
-            exceeds the active memory budget, in which case the fit streams
-            over auto-sized row batches. That estimate covers the full-N
-            B-spline bases plus the per-slice kernel transients: see
-            :func:`jaxgsa.hdmr._stream._full_fit_bytes`. An explicit int
-            always forces the streamed fit with that many rows per batch.
-            Both fit paths solve the same regressions and the same F-test.
-            Results differ only at the level of float32 summation order.
-        invalid: The non-finite report the public :func:`analyze` wrapper
-            produced, carried onto the result. It is a required argument
-            rather than a default so that no caller can construct an
-            ``HDMRResult`` that silently claims the check ran. The check
-            itself is deliberately not repeated here: applying it twice would
-            warn twice for one user call.
+        Y: Model outputs, at any of the three accepted ranks.
+        maxorder: Requested maximum expansion order; clamped to ``D``.
+        maxiter: Maximum backfitting iterations.
+        m: B-spline intervals per dimension.
+        lambdax: Tikhonov regularization strength.
+        slice_chunk_size: Output slices per vmap batch, or ``None``.
+        batch_size: Rows per fit batch, or ``None``.
 
     Returns:
-        HDMRResult with per-term indices Sa, Sb, S, per-parameter ST,
-        human-readable term labels, F-test selection counts, the fitted
-        surrogate state and its RMSE.
-
-        ``ST`` is the SCSA total: ``ST_i = sum over u containing i of
-        (Sa_u + Sb_u)``. Section 2.2.3 of Li et al. (2010) defines it from
-        the per-term indices of their Eqs. (19)-(22). It is the same
-        convention as SALib's HDMR. With independent inputs the
-        correlative shares vanish and it reduces to the ordinary Sobol
-        total-order index.
-
-    Warning:
-        With correlated inputs, ``ST`` is not a Sobol total-order index. It
-        can be negative. It is not bounded in ``[0, 1]``. It does not measure
-        the expected reduction of output variance from fixing a parameter. Do
-        not use it as a fixing criterion. It is also not comparable with the
-        ``ST`` of ``jaxgsa.kucherenko`` or the ``S_TU`` of ``jaxgsa.vkoga``.
-        Use one of those when you need a genuine total under dependence.
-        ``S1`` is the structural share only, not the Sobol first-order index.
-        The per-term ``Sa``, ``Sb`` and ``S`` fields keep their ANCOVA
-        meaning. A correlated problem emits one ``JaxgsaWarning`` that says
-        this.
+        The :class:`_HDMRCore` bundle.
 
     Raises:
-        ValueError: If ``N < 300``, ``maxorder`` is not 1/2/3, an explicit
-            ``slice_chunk_size < 1`` or ``batch_size < 1`` is passed, or
-            ``problem`` has categorical parameters. The B-spline component
-            functions need an orderable axis, which an unordered level code
-            does not give. The gate on categorical parameters runs in the
-            public :func:`analyze` wrapper.
-
-    Note:
-        On the in-memory path, the fit materializes full-N B-spline basis
-        tensors of roughly ``N * (m+3)^2 * n2`` floats at order 2 and
-        ``N * (m+3)^3 * n3`` floats at order 3 (``n2``/``n3`` = number of
-        parameter pairs/triples). ``slice_chunk_size`` does not change that
-        footprint. When it exceeds the memory budget, the fit switches to the
-        row-streamed path automatically.
+        ValueError: If ``N < 300``, ``maxorder`` is not 1/2/3, or a chunk
+            size is below 1. All three are decided on Python scalars.
     """
     N, D = X.shape
     # B-spline regression with backfitting needs a reasonable sample size
@@ -439,15 +466,10 @@ def _analyze_hdmr_core(
         raise ValueError(f"Need at least 300 samples, got {N}")
     if maxorder not in (1, 2, 3):
         raise ValueError(f"maxorder must be 1, 2, or 3, got {maxorder}")
-    if D < maxorder:
-        import warnings
-
-        maxorder = min(maxorder, D)
-        warnings.warn(
-            f"jaxgsa: maxorder clamped to {maxorder} (need D >= maxorder, got D={D})",
-            stacklevel=2,
-            category=JaxgsaWarning,
-        )
+    # Clamped silently: there is no more expansion order available than there
+    # are parameters. `analyze` warns about it; this is the traceable half,
+    # and the clamped value comes back on `_HDMRCore.maxorder`.
+    maxorder = min(maxorder, D)
     if slice_chunk_size is not None and slice_chunk_size < 1:
         raise ValueError(f"slice_chunk_size must be >= 1, got {slice_chunk_size}")
     if batch_size is not None and batch_size < 1:
@@ -456,11 +478,10 @@ def _analyze_hdmr_core(
 
     # Build term metadata (cached on host; only computed once per D/maxorder/m).
     static = _get_hdmr_static_data(D, maxorder, m)
-    c1, c2, c3 = static.c1, static.c2, static.c3
+    c2, c3 = static.c2, static.c3
     n1, n2, n3, n = static.n1, static.n2, static.n3, static.n
     m1, m2, m3 = static.m1, static.m2, static.m3
     beta2_host, beta3_host = static.beta2, static.beta3
-    term_labels = _build_term_labels(problem, c1, c2, c3)
     # Transfer index tables to device; empty arrays for inactive orders.
     c2_idx = jnp.asarray(c2, dtype=int) if n2 > 0 else jnp.zeros((0, 2), dtype=int)
     c3_idx = jnp.asarray(c3, dtype=int) if n3 > 0 else jnp.zeros((0, 3), dtype=int)
@@ -590,27 +611,377 @@ def _analyze_hdmr_core(
     # Aggregate per-term S into per-parameter total-order indices.
     ST_out = _compute_ST(S_out, c2_idx, c3_idx, n1)
 
-    # Squeeze
-    Sa_out, Sb_out, S_out, ST_out = (layout.squeeze(a) for a in (Sa_out, Sb_out, S_out, ST_out))
+    return _HDMRCore(
+        Sa=Sa_out,
+        Sb=Sb_out,
+        S=S_out,
+        ST=ST_out,
+        select=select_sum,
+        rmse=rmse_cat,
+        C1=c1_cat,
+        C2=c2_cat,
+        C3=c3_cat,
+        f0=f0_cat,
+        maxorder=maxorder,
+        streamed=streamed,
+        c2=tuple(c2),
+        c3=tuple(c3),
+        layout=layout,
+    )
 
-    C1_out = _reshape_emulator_value(c1_cat, T, K_out, layout)
-    C2_out = None
-    C3_out = None
-    if c2_cat is not None:
-        C2_out = _reshape_emulator_value(c2_cat, T, K_out, layout)
-    if c3_cat is not None:
-        C3_out = _reshape_emulator_value(c3_cat, T, K_out, layout)
-    f0_out = _reshape_emulator_value(f0_cat, T, K_out, layout)
+
+_INDEX_FIELDS = ("Sa", "Sb", "S", "ST")
+"""The index arrays an interval is reported for, in ``_HDMRCore`` order."""
+
+
+def indices(
+    problem: Problem,
+    X: Array,
+    Y: Array,
+    *,
+    maxorder: int = 2,
+    maxiter: int = 100,
+    m: int = 2,
+    lambdax: float = 0.01,
+    slice_chunk_size: int | None = None,
+    batch_size: int | None = None,
+) -> tuple[Array, ...]:
+    """Compute HDMR indices as plain arrays, with no diagnostics.
+
+    This is the transformable core of :func:`analyze`. It fits the same
+    B-spline expansion on the same data and returns the same numbers, but it
+    does nothing else: no non-finite check, no zero-variance warning, no
+    clamp warning, no SCSA reinterpretation warning, no term labels, no
+    F-test counts, no fitted surrogate, no :class:`jaxgsa.hdmr.HDMRResult`,
+    and no read of any array value on the host. So it composes with
+    ``jax.jit``, ``jax.vmap`` and ``jax.jacfwd``, which :func:`analyze`
+    cannot, because a policy decision needs a concrete value and a tracer has
+    none.
+
+    Use :func:`analyze` for ordinary analysis. Nothing here checks the
+    inputs, so a single NaN reaches the regression and turns every index into
+    NaN without a word, and nothing here says that ``ST`` and ``Sa[:D]``
+    change meaning under a declared correlation. That reading is in
+    :func:`analyze`'s warning and in :class:`jaxgsa.hdmr.HDMRResult`.
+
+    Tier T4 (behavioural contract): the returned arrays must equal the
+    corresponding fields of ``analyze``'s result on clean outputs, and the
+    function must survive ``jit``, ``vmap`` and ``jit(jacfwd(...))``. Checked
+    in ``tests/test_hdmr_gradients.py``.
+
+    Note:
+        **Reverse mode does not work, forward mode does.** The backfitting
+        solve stops early once the coefficients settle, and it expresses that
+        as a ``lax.while_loop``, which JAX cannot differentiate in reverse.
+        ``jacfwd`` works and is the right tool anyway here: the Jacobian this
+        core has is tall, one row per index against ``N`` outputs. Making
+        ``jacrev`` work means replacing the loop with a fixed-trip
+        ``lax.scan`` of ``maxiter`` iterations, which costs every fit the
+        iterations the early stop currently saves. That is a real trade, not
+        an oversight, so it is not made here.
+
+    Args:
+        problem: Parameter names and distributions.
+        X: Input samples, shape ``(N, D)``.
+        Y: Model outputs, shape ``(N,)``, ``(N, K)`` or ``(N, T, K)``, as
+            :func:`analyze` accepts them.
+        maxorder: Maximum expansion order, clamped to ``D`` silently rather
+            than with the warning :func:`analyze` gives.
+        maxiter: Maximum backfitting iterations.
+        m: B-spline intervals per dimension.
+        lambdax: Tikhonov regularization strength.
+        slice_chunk_size: Output slices per vmap batch, or ``None``.
+        batch_size: Rows per fit batch, or ``None``.
+
+    Returns:
+        ``(Sa, Sb, S, ST)``, at the shapes ``analyze`` reports for this
+        ``Y``. ``Sa``/``Sb``/``S`` are per term and ``ST`` is per parameter.
+
+    Raises:
+        ValueError: If ``N < 300``, ``maxorder`` is not 1/2/3, a chunk size
+            is below 1, or ``problem`` has a categorical parameter, whose
+            step CDF has no unit-interval image.
+    """
+    core = _hdmr_core(
+        problem,
+        X,
+        Y,
+        maxorder=maxorder,
+        maxiter=maxiter,
+        m=m,
+        lambdax=lambdax,
+        slice_chunk_size=slice_chunk_size,
+        batch_size=batch_size,
+    )
+    return tuple(core.layout.squeeze(getattr(core, name)) for name in _INDEX_FIELDS)
+
+
+def _bootstrap_indices(
+    problem: Problem,
+    X: Array,
+    Y: Array,
+    key: Array,
+    *,
+    n_bootstrap: int,
+    maxorder: int,
+    maxiter: int,
+    m: int,
+    lambdax: float,
+    slice_chunk_size: int | None,
+    batch_size: int | None,
+) -> dict[str, Array]:
+    """Refit the expansion on ``n_bootstrap`` row resamples.
+
+    One replicate is a full refit: the rows are drawn with replacement, the
+    B-spline bases are rebuilt on them, the backfitting runs again and the
+    F-test is redone. No part of an HDMR index survives a resample without
+    that, so the replicates run as a Python loop over independent fits and
+    the cost is ``n_bootstrap`` fits — an order of magnitude above a method
+    that only re-reduces per-row numbers it already holds.
+
+    The row draw is shared by every output slice, exactly as the point
+    estimate shares one basis across slices.
+
+    Args:
+        problem: Parameter names and distributions.
+        X: Input samples with invalid rows already removed, shape ``(N, D)``.
+        Y: Outputs at the caller's own rank.
+        key: A ``jax.random`` key, split once per replicate.
+        n_bootstrap: Number of replicates.
+        maxorder: Requested maximum expansion order.
+        maxiter: Maximum backfitting iterations.
+        m: B-spline intervals per dimension.
+        lambdax: Tikhonov regularization strength.
+        slice_chunk_size: Output slices per vmap batch, or ``None``.
+        batch_size: Rows per fit batch, or ``None``.
+
+    Returns:
+        One stacked draw array per index field, each with a leading axis of
+        length ``n_bootstrap`` followed by the canonical ``(T, K, ...)``
+        shape.
+    """
+    N = X.shape[0]
+    draws: dict[str, list[Array]] = {name: [] for name in _INDEX_FIELDS}
+    for _ in range(n_bootstrap):
+        key, subkey = jax.random.split(key)
+        rows = jax.random.choice(subkey, N, shape=(N,), replace=True)
+        replicate = _hdmr_core(
+            problem,
+            X[rows],
+            Y[rows],
+            maxorder=maxorder,
+            maxiter=maxiter,
+            m=m,
+            lambdax=lambdax,
+            slice_chunk_size=slice_chunk_size,
+            batch_size=batch_size,
+        )
+        for name in _INDEX_FIELDS:
+            draws[name].append(getattr(replicate, name))
+    return {name: jnp.stack(parts) for name, parts in draws.items()}
+
+
+def _analyze_hdmr_core(
+    problem: Problem,
+    X: Array,
+    Y: Array,
+    *,
+    maxorder: int = 2,
+    maxiter: int = 100,
+    m: int = 2,
+    lambdax: float = 0.01,
+    slice_chunk_size: int | None = None,
+    batch_size: int | None = None,
+    invalid: InvalidReport,
+    n_bootstrap: int = 0,
+    conf_level: float = 0.95,
+    ci_method: Literal["quantile", "gaussian"] = "quantile",
+    key: Array | None = None,
+    keep_replicates: bool = False,
+) -> HDMRResult:
+    """Fit RS-HDMR on an already-canonical Y (no re-validation, no warn).
+
+    Compute sensitivity indices via RS-HDMR with B-spline surrogate modelling.
+
+    Works with any set of (X, Y) pairs. No structured sampling is required, so
+    it suits existing datasets and expensive models where Sobol/eFAST sampling
+    schemes are unaffordable. B-spline regression decomposes the input-output
+    relationship into hierarchical component functions: one per parameter, one
+    per parameter pair, and so on. The ANCOVA-based sensitivity indices then
+    come from the fitted components. Unlike pure Sobol
+    estimators, the ANCOVA split into structural (Sa) and correlative (Sb)
+    parts remains meaningful when inputs are correlated.
+
+    Args:
+        problem: Parameter names and distributions.
+        X: Input samples, shape ``(N, D)``.
+        Y: Model outputs, shape ``(N,)`` / ``(N, K)`` / ``(N, T, K)``. A 2-D
+            array is read as ``(N, K)`` unless ``problem.output_names`` has
+            exactly one entry. In that case the columns are T timepoints of
+            that single output.
+        maxorder: Maximum HDMR expansion order (1, 2, or 3), which is the
+            largest interaction size modelled. Order 2 (default) captures
+            pairwise interactions. Order 3 adds triples, but the term count
+            and the fit cost grow combinatorially. Clamped to D (with a
+            warning) when D < maxorder.
+        maxiter: Maximum backfitting iterations for the first-order terms.
+            The default rarely needs raising, because iteration stops early
+            once the coefficients stop changing.
+        m: Number of B-spline intervals per dimension (basis size m + 3).
+            Larger m resolves sharper features of the component functions.
+            It also multiplies the coefficient count (the per-term basis grows
+            as (m+3)^order) and needs more samples to avoid overfitting.
+        lambdax: Tikhonov regularization strength. Increase it for noisy Y or
+            small N, which gives smoother and more stable components.
+            Decrease it if genuine sharp features are being oversmoothed.
+        slice_chunk_size: Maximum number of (T, K) output slices fitted per
+            vmap batch on the in-memory (non-streamed) path. It caps peak
+            device memory for large T*K, and a smaller value trades speed for
+            memory. ``None`` (default) derives the chunk size from the active
+            memory budget (``jaxgsa.config.set_memory_budget``), because the
+            per-slice cost inside the fitting kernel scales with
+            ``N * n_terms``. Ignored when the fit streams over rows (see
+            ``batch_size``).
+        batch_size: Rows of ``X``/``Y`` processed per batch during the fit
+            (the package-wide ``batch_size`` convention). ``None`` (default)
+            keeps the in-memory fit unless its estimated resident memory
+            exceeds the active memory budget, in which case the fit streams
+            over auto-sized row batches. That estimate covers the full-N
+            B-spline bases plus the per-slice kernel transients: see
+            :func:`jaxgsa.hdmr._stream._full_fit_bytes`. An explicit int
+            always forces the streamed fit with that many rows per batch.
+            Both fit paths solve the same regressions and the same F-test.
+            Results differ only at the level of float32 summation order.
+        invalid: The non-finite report the public :func:`analyze` wrapper
+            produced, carried onto the result. It is a required argument
+            rather than a default so that no caller can construct an
+            ``HDMRResult`` that silently claims the check ran. The check
+            itself is deliberately not repeated here: applying it twice would
+            warn twice for one user call.
+        n_bootstrap: Number of row resamples behind the confidence intervals,
+            or ``0`` for none. Each one is a full refit; see :func:`analyze`.
+        conf_level: Two-sided confidence level for the intervals.
+        ci_method: Endpoint rule, ``"quantile"`` or ``"gaussian"``.
+        key: A ``jax.random`` key. :func:`analyze` has already refused a
+            missing one when ``n_bootstrap > 0``.
+        keep_replicates: Retain the per-replicate arrays on ``result.ci``.
+
+    Returns:
+        HDMRResult with per-term indices Sa, Sb, S, per-parameter ST,
+        human-readable term labels, F-test selection counts, the fitted
+        surrogate state and its RMSE.
+
+        ``ST`` is the SCSA total: ``ST_i = sum over u containing i of
+        (Sa_u + Sb_u)``. Section 2.2.3 of Li et al. (2010) defines it from
+        the per-term indices of their Eqs. (19)-(22). It is the same
+        convention as SALib's HDMR. With independent inputs the
+        correlative shares vanish and it reduces to the ordinary Sobol
+        total-order index.
+
+    Warning:
+        With correlated inputs, ``ST`` is not a Sobol total-order index. It
+        can be negative. It is not bounded in ``[0, 1]``. It does not measure
+        the expected reduction of output variance from fixing a parameter. Do
+        not use it as a fixing criterion. It is also not comparable with the
+        ``ST`` of ``jaxgsa.kucherenko`` or the ``S_TU`` of ``jaxgsa.vkoga``.
+        Use one of those when you need a genuine total under dependence.
+        ``S1`` is the structural share only, not the Sobol first-order index.
+        The per-term ``Sa``, ``Sb`` and ``S`` fields keep their ANCOVA
+        meaning. A correlated problem emits one ``JaxgsaWarning`` that says
+        this.
+
+    Raises:
+        ValueError: If ``N < 300``, ``maxorder`` is not 1/2/3, an explicit
+            ``slice_chunk_size < 1`` or ``batch_size < 1`` is passed, or
+            ``problem`` has categorical parameters. The B-spline component
+            functions need an orderable axis, which an unordered level code
+            does not give. The gate on categorical parameters runs in the
+            public :func:`analyze` wrapper.
+
+    Note:
+        On the in-memory path, the fit materializes full-N B-spline basis
+        tensors of roughly ``N * (m+3)^2 * n2`` floats at order 2 and
+        ``N * (m+3)^3 * n3`` floats at order 3 (``n2``/``n3`` = number of
+        parameter pairs/triples). ``slice_chunk_size`` does not change that
+        footprint. When it exceeds the memory budget, the fit switches to the
+        row-streamed path automatically.
+    """
+    core = _hdmr_core(
+        problem,
+        X,
+        Y,
+        maxorder=maxorder,
+        maxiter=maxiter,
+        m=m,
+        lambdax=lambdax,
+        slice_chunk_size=slice_chunk_size,
+        batch_size=batch_size,
+    )
+    if core.maxorder < maxorder:
+        import warnings
+
+        warnings.warn(
+            f"jaxgsa: maxorder clamped to {core.maxorder} "
+            f"(need D >= maxorder, got D={X.shape[1]})",
+            stacklevel=2,
+            category=JaxgsaWarning,
+        )
+    layout = core.layout
+    T, K_out = core.Sa.shape[:2]
+    term_labels = _build_term_labels(problem, tuple(range(problem.num_vars)), core.c2, core.c3)
 
     # Bundle all fitted state needed to reconstruct predictions at new points.
     fit_state: _HDMRFit = {
-        "C1": C1_out,
-        "C2": C2_out,
-        "C3": C3_out,
-        "f0": f0_out,
+        "C1": _reshape_emulator_value(core.C1, T, K_out, layout),
+        "C2": None if core.C2 is None else _reshape_emulator_value(core.C2, T, K_out, layout),
+        "C3": None if core.C3 is None else _reshape_emulator_value(core.C3, T, K_out, layout),
+        "f0": _reshape_emulator_value(core.f0, T, K_out, layout),
         "m": m,
-        "maxorder": maxorder,
+        "maxorder": core.maxorder,
     }
+
+    conf: dict[str, Array | None] = {f"{name}_conf": None for name in _INDEX_FIELDS}
+    ci: CIInfo | None = None
+    if n_bootstrap > 0:
+        assert key is not None  # checked in analyze, before the fit ran
+        draws = _bootstrap_indices(
+            problem,
+            X,
+            Y,
+            key,
+            n_bootstrap=n_bootstrap,
+            maxorder=maxorder,
+            maxiter=maxiter,
+            m=m,
+            lambdax=lambdax,
+            slice_chunk_size=slice_chunk_size,
+            batch_size=batch_size,
+        )
+        for name in _INDEX_FIELDS:
+            conf[f"{name}_conf"] = layout.squeeze(
+                jnp.stack(
+                    _bootstrap_ci_endpoints(
+                        getattr(core, name),
+                        draws[name],
+                        conf_level=conf_level,
+                        ci_method=ci_method,
+                    )
+                )
+            )
+        ci = CIInfo(
+            level=conf_level,
+            method=ci_method,
+            n_bootstrap=n_bootstrap,
+            # The leading replicate axis survives the squeeze, which addresses
+            # the T/K axes from the end.
+            replicates={name: layout.squeeze(draw) for name, draw in draws.items()}
+            if keep_replicates
+            else None,
+        )
+
+    Sa_out, Sb_out, S_out, ST_out = (
+        layout.squeeze(a) for a in (core.Sa, core.Sb, core.S, core.ST)
+    )
 
     return HDMRResult(
         Sa=Sa_out,
@@ -621,11 +992,16 @@ def _analyze_hdmr_core(
         terms=term_labels,
         invalid=invalid,
         _fit=fit_state,
-        select=select_sum,
-        rmse=_reshape_emulator_value(rmse_cat, T, K_out, layout),
-        streamed=streamed,
-        _c2=tuple(c2),
-        _c3=tuple(c3),
+        select=core.select,
+        rmse=_reshape_emulator_value(core.rmse, T, K_out, layout),
+        streamed=core.streamed,
+        _c2=core.c2,
+        _c3=core.c3,
+        Sa_conf=conf["Sa_conf"],
+        Sb_conf=conf["Sb_conf"],
+        S_conf=conf["S_conf"],
+        ST_conf=conf["ST_conf"],
+        ci=ci,
     )
 
 
