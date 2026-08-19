@@ -49,6 +49,23 @@ point does not shrink the sample, it changes what the estimator computes.
 and `jacrev`. Every branch is on a shape or a Python scalar, never on data.
 No result class, no diagnostics, no host read of an array value.
 
+Two limits are structural rather than incidental, and a core is allowed to
+refuse rather than pretend:
+
+- **Categorical inputs.** A categorical partition pads its classes to
+  `counts.max()`, which is a *shape* read off the data. `jit` requires static
+  output shapes, so no amount of moving code fixes it — a traceable version
+  would need a pad width the data does not supply. A core that cannot support
+  them raises, pointing at `analyze`, which does.
+- **Dropped rows.** `analyze` decides which rows survive by looking at their
+  values, so the row count is data-dependent. That is why `analyze` is not
+  traceable and `indices()` is, and why the split exists at all.
+
+Two methods have no core. `kucherenko` and `vkoga` are host NumPy and SciPy
+end to end; see `docs/adr/0015-pure-core-exemptions.md`. Every method
+*declares* its status, which is the property 1.0 freezes — not that every
+method has the same one.
+
 **Preamble** — the shared policy layer every `analyze()` runs before its
 kernel: scalar validation, invalid handling, zero-variance detection. It is
 what makes `analyze()` untraceable and `indices()` traceable, and the split
