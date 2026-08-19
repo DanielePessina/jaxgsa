@@ -44,6 +44,9 @@ class SobolResult(SchemaResult):
         S2_conf: Bootstrap confidence bounds on ``S2``, shape ``(2, D, D)`` /
             ``(2, K, D, D)`` / ``(2, T, K, D, D)``, or ``None`` without a
             bootstrap. Symmetric with a ``NaN`` diagonal, like ``S2``.
+        estimator: Which estimator pair produced the indices. Six are
+            available and they disagree at finite sample size, so a stored
+            result is ambiguous without it. See :func:`jaxgsa.sobol.analyze`.
         ci: How the intervals were produced: the confidence level, the
             endpoint rule, the resample count, and the bootstrap draws when
             the analysis ran with ``keep_replicates=True``. ``None`` without
@@ -59,6 +62,7 @@ class SobolResult(SchemaResult):
     ST_conf: Array | None = None
     S2_conf: Array | None = None
     ci: CIInfo | None = None
+    estimator: str = "saltelli-jansen"
 
     _schema = ResultSchema(
         primary="S1",
@@ -67,4 +71,5 @@ class SobolResult(SchemaResult):
             FieldSpec("ST", "param", interval=True),
             FieldSpec("S2", "pair", interval=True),
         ),
+        meta=("estimator",),
     )

@@ -312,6 +312,7 @@ def _analyze_no_bootstrap(
         S2=S2_out,
         problem=sampling_result.problem,
         invalid=invalid,
+        estimator=estimator,
     )
 
 
@@ -561,6 +562,7 @@ def _analyze_bootstrap(
         S2=S2_out,
         problem=sampling_result.problem,
         invalid=invalid,
+        estimator=estimator,
         S1_conf=S1_conf,
         ST_conf=ST_conf,
         S2_conf=S2_conf,

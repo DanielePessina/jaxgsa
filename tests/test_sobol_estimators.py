@@ -458,3 +458,28 @@ class TestStaysTransformable:
 def test_first_order_design_list_covers_every_non_ba_estimator():
     """The hand-written list above must not drift from ``ESTIMATORS``."""
     assert set(FIRST_ORDER_DESIGN_ESTIMATORS) == set(ESTIMATORS) - {"azzini-rosati"}
+
+
+class TestTheResultSaysWhichEstimatorRanIt:
+    """T4: six estimators disagree at finite N, so a result must name its own.
+
+    Without this a stored result is ambiguous. The same design and the same
+    outputs give six different index vectors, and nothing on the result would
+    say which one is in front of you.
+    """
+
+    @pytest.mark.parametrize("estimator", ESTIMATORS)
+    def test_each_estimator_is_recorded_on_the_result(self, ishigami_design, estimator):
+        """The name the caller passed is the name the result reports."""
+        sr, Y = ishigami_design
+        assert jaxgsa.sobol.analyze(sr, Y, estimator=estimator).estimator == estimator
+
+    def test_the_default_names_itself_rather_than_staying_blank(self, ishigami_design):
+        """A caller who passes nothing still learns what ran."""
+        sr, Y = ishigami_design
+        assert jaxgsa.sobol.analyze(sr, Y).estimator == DEFAULT_ESTIMATOR
+
+    def test_the_repr_carries_it(self, ishigami_design):
+        """Provenance a user can read without knowing the field name."""
+        sr, Y = ishigami_design
+        assert "estimator='martinez'" in repr(jaxgsa.sobol.analyze(sr, Y, estimator="martinez"))
