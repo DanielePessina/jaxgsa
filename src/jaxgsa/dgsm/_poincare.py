@@ -28,15 +28,16 @@ import math
 import numpy as np
 from scipy.stats import truncnorm
 
-from jaxgsa.problem import Problem, _NormalizedInputSpec
+from jaxgsa.problem import CategoricalSpec, GaussianSpec, InputSpec, Problem, UniformSpec
 
 
-def poincare_constant(spec: _NormalizedInputSpec) -> float:
+def poincare_constant(spec: InputSpec) -> float:
     """Return the Poincare constant C(p) of a single marginal.
 
     Args:
-        spec: Normalized input spec tuple ``(dist, first, second, low, high,
-            categorical)``.
+        spec: Marginal spec of one parameter, as carried by
+            :attr:`jaxgsa.Problem.input_specs`: a :class:`jaxgsa.UniformSpec`
+            or :class:`jaxgsa.GaussianSpec`.
 
     Returns:
         The optimal Poincare constant.
@@ -45,24 +46,24 @@ def poincare_constant(spec: _NormalizedInputSpec) -> float:
         ValueError: If the marginal is categorical, which has no Poincare
             constant, or if the distribution type is unknown.
     """
-    dist, first, second, low, high, _ = spec
-    if dist == "uniform":
-        return (second - first) ** 2 / math.pi**2
-    if dist == "gaussian":
-        sigma2 = second
-        if low is None and high is None:
-            return sigma2
-        std = math.sqrt(sigma2)
-        fallback_lo = first - 8 * std if low is None else low
-        fallback_hi = first + 8 * std if high is None else high
-        return _truncnorm_poincare(first, std, fallback_lo, fallback_hi, 512)
-    if dist == "categorical":
+    if isinstance(spec, UniformSpec):
+        return (spec.high - spec.low) ** 2 / math.pi**2
+    if isinstance(spec, GaussianSpec):
+        if spec.low is None and spec.high is None:
+            return spec.variance
+        std = math.sqrt(spec.variance)
+        # An open side gets a far-tail stand-in bound; the spectral solve needs
+        # a finite interval, and 8 sigma carries the whole mass to float precision.
+        fallback_lo = spec.mean - 8 * std if spec.low is None else spec.low
+        fallback_hi = spec.mean + 8 * std if spec.high is None else spec.high
+        return _truncnorm_poincare(spec.mean, std, fallback_lo, fallback_hi, 512)
+    if isinstance(spec, CategoricalSpec):
         raise ValueError(
             "A categorical marginal has no Poincare constant (the inequality "
             "needs a continuous density); jaxgsa.dgsm does not support "
             "categorical parameters"
         )
-    raise ValueError(f"Unknown distribution type {dist!r}")
+    raise ValueError(f"Unknown input spec {spec!r}")
 
 
 def _truncnorm_poincare(mu: float, sigma: float, a: float, b: float, grid: int) -> float:
@@ -99,14 +100,16 @@ def _truncnorm_poincare(mu: float, sigma: float, a: float, b: float, grid: int) 
     return float(1.0 / vals[1])
 
 
-def marginal_variance(spec: _NormalizedInputSpec) -> float:
+def marginal_variance(spec: InputSpec) -> float:
     """Return the marginal variance of a single input distribution.
 
     The Kucherenko-Song lower bound on ST uses it:
         ST_i >= Var_i * w_i^2 / Var(Y)
 
     Args:
-        spec: Normalized input spec tuple.
+        spec: Marginal spec of one parameter, as carried by
+            :attr:`jaxgsa.Problem.input_specs`: a :class:`jaxgsa.UniformSpec`
+            or :class:`jaxgsa.GaussianSpec`.
 
     Returns:
         The variance of the marginal distribution.
@@ -116,25 +119,22 @@ def marginal_variance(spec: _NormalizedInputSpec) -> float:
             variance meaningful to the bounds, or if the distribution type is
             unknown.
     """
-    dist, first, second, low, high, _ = spec
-    if dist == "uniform":
-        return (second - first) ** 2 / 12.0
-    if dist == "gaussian":
-        sigma2 = second
-        if low is None and high is None:
-            return sigma2
-        mu = first
-        sd = math.sqrt(sigma2)
-        a_std = -np.inf if low is None else (low - mu) / sd
-        b_std = np.inf if high is None else (high - mu) / sd
-        return float(truncnorm.var(a_std, b_std, loc=mu, scale=sd))
-    if dist == "categorical":
+    if isinstance(spec, UniformSpec):
+        return (spec.high - spec.low) ** 2 / 12.0
+    if isinstance(spec, GaussianSpec):
+        if spec.low is None and spec.high is None:
+            return spec.variance
+        sd = math.sqrt(spec.variance)
+        a_std = -np.inf if spec.low is None else (spec.low - spec.mean) / sd
+        b_std = np.inf if spec.high is None else (spec.high - spec.mean) / sd
+        return float(truncnorm.var(a_std, b_std, loc=spec.mean, scale=sd))
+    if isinstance(spec, CategoricalSpec):
         raise ValueError(
             "A categorical marginal's level codes have no variance meaningful "
             "to the DGSM bounds; jaxgsa.dgsm does not support categorical "
             "parameters"
         )
-    raise ValueError(f"Unknown distribution type {dist!r}")
+    raise ValueError(f"Unknown input spec {spec!r}")
 
 
 def axis_constants(problem: Problem) -> tuple[np.ndarray, np.ndarray]:

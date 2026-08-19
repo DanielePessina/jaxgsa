@@ -5,9 +5,35 @@
 Version 0.10 adds capability. `PLAN-0.10.md` records the plan and the order of
 the work, including seven corrections to the roadmap it replaces.
 
-**One breaking change:** `SobolResult.nan_counts` is removed. See "Breaking".
+**Breaking changes:** `SobolResult.nan_counts` is removed, and
+`Problem.input_specs` now returns dataclasses. See "Breaking".
 
 ### Breaking
+
+- **`Problem.input_specs` returns spec dataclasses.** Before, it returned a
+  private 6-slot tuple. The tuple used the same two slots for different
+  things: `(low, high)` for a uniform marginal, `(mean, variance)` for a
+  Gaussian one, and dummy zeros for a categorical one. You had to know the
+  slot layout to read it.
+
+  Each entry is now a `jaxgsa.UniformSpec`, a `jaxgsa.GaussianSpec`, or a
+  `jaxgsa.CategoricalSpec`. Read the fields by name. Tell the three apart with
+  `isinstance`. `jaxgsa.InputSpec` is the union of the three, for annotations.
+
+  ```python
+  spec = problem.input_specs[0]
+  spec.low, spec.high        # was spec[1], spec[2]
+  ```
+
+  `jaxgsa.dgsm.poincare_constant()` and `jaxgsa.dgsm.marginal_variance()` take
+  the dataclass too. Before, they took the private tuple, so you could not call
+  them from outside the package.
+
+  The input side does not change. `Problem.from_dict` still accepts a
+  `(low, high)` tuple and the `UniformInputSpec` / `GaussianInputSpec` /
+  `CategoricalInputSpec` dicts, exactly as before. It also accepts the new
+  dataclasses. A saved `.npz` file keeps its dict form, so files written by
+  earlier versions still load.
 
 - **`SobolResult.nan_counts` is removed.** It counted the `NaN` entries in the
   computed indices and threw away which model run produced them, which is the

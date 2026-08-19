@@ -20,14 +20,16 @@ from jax import Array
 from jax.scipy.special import ndtr, ndtri
 from scipy.stats import norm, truncnorm
 
+from jaxgsa.problem import CategoricalSpec, UniformSpec
+
 if TYPE_CHECKING:
     from jaxgsa.problem import Problem
 
 
 # Distribution parameters keyed by parameter name, then by field name. The
-# field names are exactly those of the public input TypedDicts
-# (:class:`jaxgsa.problem.UniformInputSpec` and
-# :class:`jaxgsa.problem.GaussianInputSpec`), so a user writes the same words
+# field names are exactly those of the public input specs
+# (:class:`jaxgsa.problem.UniformSpec` and
+# :class:`jaxgsa.problem.GaussianSpec`), so a user writes the same words
 # here as when the problem was declared. The values may be Python floats or
 # JAX scalars, which is what makes the mapping a pytree that ``jax.grad`` and
 # ``jax.jacrev`` can differentiate with respect to.
@@ -138,19 +140,17 @@ def _transform_samples(problem: Problem, samples_unit: np.ndarray) -> np.ndarray
     transformed = np.empty_like(samples_unit, dtype=np.float64)
 
     for idx, spec in enumerate(problem.input_specs):
-        dist, first, second, low, high, categorical = spec
-        if dist == "uniform":
-            transformed[:, idx] = _transform_uniform(samples_unit[:, idx], first, second)
-        elif dist == "categorical":
-            assert categorical is not None  # categorical specs always carry (probs, labels)
-            transformed[:, idx] = _transform_categorical(samples_unit[:, idx], categorical[0])
+        if isinstance(spec, UniformSpec):
+            transformed[:, idx] = _transform_uniform(samples_unit[:, idx], spec.low, spec.high)
+        elif isinstance(spec, CategoricalSpec):
+            transformed[:, idx] = _transform_categorical(samples_unit[:, idx], spec.probs)
         else:
             transformed[:, idx] = _transform_gaussian(
                 samples_unit[:, idx],
-                first,
-                second,
-                low=low,
-                high=high,
+                spec.mean,
+                spec.variance,
+                low=spec.low,
+                high=spec.high,
             )
 
     return transformed
@@ -234,7 +234,7 @@ def _validate_theta(problem: Problem, theta: Theta) -> None:
                 f"theta names parameter {name!r}, which the problem does not declare. "
                 f"Known parameters: {list(problem.names)}"
             )
-        dist = problem.input_specs[problem.names.index(name)][0]
+        dist = problem.input_specs[problem.names.index(name)].dist
         allowed = _THETA_FIELDS.get(dist, frozenset())
         unknown = sorted(set(fields) - allowed)
         if unknown:
@@ -275,28 +275,27 @@ def _jax_transform_samples(
     samples_unit = jnp.asarray(samples_unit)
     columns = []
     for idx, (name, spec) in enumerate(zip(problem.names, problem.input_specs)):
-        dist, first, second, low, high, _ = spec
-        if dist == "categorical":
+        if isinstance(spec, CategoricalSpec):
             raise ValueError(
                 f"Parameter {name!r} is categorical; its inverse CDF is a step "
                 "function, which has no useful derivative"
             )
         fields = theta.get(name, {})
         unit_column = samples_unit[:, idx]
-        if dist == "uniform":
+        if isinstance(spec, UniformSpec):
             columns.append(
                 _jax_transform_uniform(
-                    unit_column, fields.get("low", first), fields.get("high", second)
+                    unit_column, fields.get("low", spec.low), fields.get("high", spec.high)
                 )
             )
         else:
             columns.append(
                 _jax_transform_gaussian(
                     unit_column,
-                    fields.get("mean", first),
-                    fields.get("variance", second),
-                    low=fields.get("low", low),
-                    high=fields.get("high", high),
+                    fields.get("mean", spec.mean),
+                    fields.get("variance", spec.variance),
+                    low=fields.get("low", spec.low),
+                    high=fields.get("high", spec.high),
                 )
             )
 
@@ -353,22 +352,23 @@ def _inverse_transform_samples(problem: Problem, samples_physical: np.ndarray) -
     unit = np.empty_like(samples_physical, dtype=np.float64)
 
     for idx, spec in enumerate(problem.input_specs):
-        dist, first, second, low, high, _ = spec
-        if dist == "categorical":
+        if isinstance(spec, CategoricalSpec):
             raise ValueError(
                 f"Parameter {problem.names[idx]!r} is categorical; its step CDF is "
                 "many-to-one, so physical samples cannot be mapped back onto the "
                 "unit cube"
             )
-        if dist == "uniform":
-            unit[:, idx] = _inverse_transform_uniform(samples_physical[:, idx], first, second)
+        if isinstance(spec, UniformSpec):
+            unit[:, idx] = _inverse_transform_uniform(
+                samples_physical[:, idx], spec.low, spec.high
+            )
         else:
             unit[:, idx] = _inverse_transform_gaussian(
                 samples_physical[:, idx],
-                first,
-                second,
-                low=low,
-                high=high,
+                spec.mean,
+                spec.variance,
+                low=spec.low,
+                high=spec.high,
             )
 
     return unit

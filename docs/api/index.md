@@ -8,12 +8,41 @@ sampling and analysis commands for the method.
 
 - `jaxgsa.Problem` — the set of input parameters and their marginal
   distributions.
-- `jaxgsa.UniformInputSpec` — a uniform marginal.
-- `jaxgsa.GaussianInputSpec` — a Gaussian marginal, optionally truncated.
-- `jaxgsa.CategoricalInputSpec` — an unordered discrete marginal.
+- `jaxgsa.UniformSpec(low, high)` — a uniform marginal.
+- `jaxgsa.GaussianSpec(mean, variance, low=None, high=None)` — a Gaussian
+  marginal. `low` and `high` are each optional, so the marginal can be open on
+  both sides, on one side, or on neither.
+- `jaxgsa.CategoricalSpec(probs, labels)` — an unordered discrete marginal.
+  `probs` and `labels` are tuples, so the spec stays hashable.
+- `jaxgsa.InputSpec` — the union of the three, for type annotations.
 
-Construct problems with `Problem.from_dict(...)`. Uniform inputs may use the
-short `(low, high)` form. Gaussian inputs use `GaussianInputSpec`.
+`Problem.input_specs` returns these dataclasses, one per parameter. Tell the
+families apart with `isinstance`, and read the fields by name.
+
+Construct problems with `Problem.from_dict(...)`. It accepts four input forms
+per parameter: one of the dataclasses above, a bare `(low, high)` tuple
+(shorthand for uniform), or the matching plain dict.
+
+- `jaxgsa.UniformInputSpec` — `{"dist": "uniform", "low": ..., "high": ...}`.
+- `jaxgsa.GaussianInputSpec` — `{"dist": "gaussian", "mean": ...,
+  "variance": ..., "low": ..., "high": ...}`, where `low` and `high` are
+  optional.
+- `jaxgsa.CategoricalInputSpec` — `{"dist": "categorical", "probs": [...],
+  "labels": [...]}`, where `labels` is optional.
+
+The three `...InputSpec` names are `TypedDict`s. They describe the dict form
+and give it type checking. A problem written that way is JSON-expressible.
+
+```python
+problem = jaxgsa.Problem.from_dict(
+    {
+        "x1": (0.0, 1.0),
+        "x2": jaxgsa.GaussianSpec(mean=0.0, variance=4.0, high=3.0),
+        "x3": {"dist": "categorical", "probs": [0.5, 0.5]},
+    }
+)
+problem.input_specs[1].variance  # 4.0
+```
 
 The package root also holds `jaxgsa.JaxgsaWarning`, the category of every
 warning that jaxgsa raises. It is a subclass of `UserWarning`, so existing

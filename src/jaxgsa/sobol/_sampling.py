@@ -39,7 +39,7 @@ from jaxgsa._core.sampling import (
 )
 from jaxgsa._core.validation import _raise_categorical_design, _raise_correlated_design
 from jaxgsa._core.warning_types import JaxgsaWarning
-from jaxgsa.problem import Problem, _categorical_dims
+from jaxgsa.problem import CategoricalSpec, GaussianSpec, Problem, _categorical_dims
 
 if TYPE_CHECKING:
     from jax import Array
@@ -175,7 +175,7 @@ class SobolSamples(UniqueDesignSamples):
             categorical = [
                 name
                 for name, spec in zip(self.problem.names, self.problem.input_specs)
-                if spec[0] == "categorical"
+                if isinstance(spec, CategoricalSpec)
             ]
             raise ValueError(
                 "jaxgsa.sobol.SobolSamples.transform cannot transform a categorical "
@@ -605,7 +605,7 @@ def _warn_unbounded_gaussian(problem: Problem) -> None:
     unbounded = [
         name
         for name, spec in zip(problem.names, problem.input_specs)
-        if spec[0] == "gaussian" and (spec[3] is None or spec[4] is None)
+        if isinstance(spec, GaussianSpec) and (spec.low is None or spec.high is None)
     ]
     if not unbounded:
         return

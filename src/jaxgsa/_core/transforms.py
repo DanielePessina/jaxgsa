@@ -7,7 +7,7 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core.sampling import UNIT_CLIP
-from jaxgsa.problem import Problem
+from jaxgsa.problem import CategoricalSpec, Problem, UniformSpec
 
 
 def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
@@ -58,28 +58,25 @@ def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
     # follow scipy's truncnorm convention. Only the Gaussian branches clip; see
     # the docstring for why the uniform branch must not.
     for d in range(D):
-        dist, first, second, lo, hi, _ = problem.input_specs[d]
-        if dist == "categorical":
+        spec = problem.input_specs[d]
+        if isinstance(spec, CategoricalSpec):
             raise ValueError(
                 f"Parameter {problem.names[d]!r} is categorical; its step CDF is "
                 "many-to-one and has no meaningful unit-interval image. Use "
                 "jaxgsa.optimal_transport, jaxgsa.borgonovo, or jaxgsa.sobol "
                 "for categorical inputs"
             )
-        if dist == "uniform":  # affine map (x - lo)/(hi - lo) is the CDF of U(lo, hi)
-            cols.append((X[:, d] - first) / (second - first))
+        if isinstance(spec, UniformSpec):  # affine map (x - lo)/(hi - lo) is the CDF of U(lo, hi)
+            cols.append((X[:, d] - spec.low) / (spec.high - spec.low))
+            continue
+        std = float(jnp.sqrt(spec.variance))
         # Truncated Gaussian -- need scipy because JAX lacks a truncnorm CDF.
-        elif lo is not None or hi is not None:
-            mean, variance = first, second
-            std = float(jnp.sqrt(variance))
-            a = -np.inf if lo is None else (lo - mean) / std
-            b = np.inf if hi is None else (hi - mean) / std
-            u = jnp.asarray(truncnorm.cdf(np.asarray(X[:, d]), a=a, b=b, loc=mean, scale=std))
-            cols.append(jnp.clip(u, UNIT_CLIP, 1.0 - UNIT_CLIP))
+        if spec.low is not None or spec.high is not None:
+            a = -np.inf if spec.low is None else (spec.low - spec.mean) / std
+            b = np.inf if spec.high is None else (spec.high - spec.mean) / std
+            u = jnp.asarray(truncnorm.cdf(np.asarray(X[:, d]), a=a, b=b, loc=spec.mean, scale=std))
         else:  # unbounded Gaussian -- stays on device via jax.scipy
-            mean, variance = first, second
-            std = float(jnp.sqrt(variance))
-            u = jax_norm.cdf(X[:, d], loc=mean, scale=std)
-            cols.append(jnp.clip(u, UNIT_CLIP, 1.0 - UNIT_CLIP))
+            u = jax_norm.cdf(X[:, d], loc=spec.mean, scale=std)
+        cols.append(jnp.clip(u, UNIT_CLIP, 1.0 - UNIT_CLIP))
 
     return jnp.column_stack(cols)

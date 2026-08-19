@@ -28,7 +28,7 @@ from jaxgsa.pce._engine import (
     sobol_from_coefficients,
 )
 from jaxgsa.pce._result import PCEResult
-from jaxgsa.problem import Problem
+from jaxgsa.problem import CategoricalSpec, Problem, UniformSpec
 
 # A truncated Gaussian is treated as effectively unbounded, and so kept on the
 # Hermite basis, when both of its bounds sit at least this many standard
@@ -112,20 +112,20 @@ def _map_to_reference(X: Array, problem: Problem, order: int) -> tuple[Array, tu
     input_types: list[str] = []
     hermite_safe_order = order <= _MAX_HERMITE_ORDER_UNDER_TRUNCATION
     for d in range(D):
-        dist, first, second, lo, hi, _ = problem.input_specs[d]
-        if dist == "categorical":
+        spec = problem.input_specs[d]
+        if isinstance(spec, CategoricalSpec):
             # Layered guard: pce.analyze rejects categorical problems up front.
             raise ValueError(
                 f"Parameter {problem.names[d]!r} is categorical; no orthogonal "
                 "polynomial family exists for an unordered marginal"
             )
-        if dist == "uniform":
-            cols.append(2.0 * (X[:, d] - first) / (second - first) - 1.0)
+        if isinstance(spec, UniformSpec):
+            cols.append(2.0 * (X[:, d] - spec.low) / (spec.high - spec.low) - 1.0)
             input_types.append("uniform")
             continue
 
-        mean, variance = first, second
-        std = float(jnp.sqrt(variance))
+        mean, lo, hi = spec.mean, spec.low, spec.high
+        std = float(jnp.sqrt(spec.variance))
         truncated = lo is not None or hi is not None
         if truncated and not (
             hermite_safe_order and _truncated_gaussian_is_wide(lo, hi, mean, std)

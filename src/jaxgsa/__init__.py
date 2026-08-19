@@ -19,17 +19,30 @@ from . import (
 )
 from ._core.invalid import InvalidReport, InvalidUnit, OnInvalid
 from ._core.warning_types import JaxgsaWarning
-from .problem import CategoricalInputSpec, GaussianInputSpec, Problem, UniformInputSpec
+from .problem import (
+    CategoricalInputSpec,
+    CategoricalSpec,
+    GaussianInputSpec,
+    GaussianSpec,
+    InputSpec,
+    Problem,
+    UniformInputSpec,
+    UniformSpec,
+)
 
 __all__ = [
     "CategoricalInputSpec",
+    "CategoricalSpec",
     "GaussianInputSpec",
+    "GaussianSpec",
+    "InputSpec",
     "InvalidReport",
     "InvalidUnit",
     "JaxgsaWarning",
     "OnInvalid",
     "Problem",
     "UniformInputSpec",
+    "UniformSpec",
     "borgonovo",
     "config",
     "dgsm",

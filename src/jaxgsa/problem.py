@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, NotRequired, TypeAlias, TypedDict
+from typing import TYPE_CHECKING, ClassVar, Literal, NotRequired, TypeAlias, TypedDict
 
 import numpy as np
 
@@ -60,26 +60,8 @@ class CategoricalInputSpec(TypedDict):
     labels: NotRequired[list[str | int | float]]
 
 
-# Public-facing union type -- users pass one of these per parameter.
-InputSpecValue: TypeAlias = (
-    tuple[float, float] | UniformInputSpec | GaussianInputSpec | CategoricalInputSpec
-)
 # Hashable canonical storage for a validated latent correlation matrix.
 _CorrelationTuple: TypeAlias = tuple[tuple[float, ...], ...]
-# Hashable categorical payload: (level probabilities, level labels).
-_CategoricalData: TypeAlias = tuple[tuple[float, ...], tuple[str, ...]]
-# Internal canonical form: (dist, param1, param2, lo_bound, hi_bound, categorical).
-# For uniform: param1=low, param2=high. For gaussian: param1=mean, param2=variance.
-# For categorical: param1=param2=0.0, bounds None, and the last slot carries
-# the (probs, labels) payload; it is None for the other distributions.
-_NormalizedInputSpec: TypeAlias = tuple[
-    Literal["uniform", "gaussian", "categorical"],
-    float,
-    float,
-    float | None,
-    float | None,
-    _CategoricalData | None,
-]
 
 # Renormalize probs whose sum is off by at most this much; raise beyond it.
 _PROB_SUM_TOL = 1e-3
@@ -92,80 +74,151 @@ _PROB_SUM_TOL = 1e-3
 _CATEGORICAL_COUPLING_TOL = 1e-8
 
 
-def _make_uniform_spec(low: float, high: float) -> _NormalizedInputSpec:
-    """Validate and normalize a uniform input specification."""
-    low = float(low)
-    high = float(high)
-    # `not <` instead of `>=` to also catch NaN (NaN comparisons are always False).
-    if not low < high:
-        raise ValueError(f"Uniform input requires low < high, got {(low, high)!r}")
-    return ("uniform", low, high, None, None, None)
+@dataclass(frozen=True)
+class UniformSpec:
+    """Uniform marginal distribution on ``[low, high]``.
 
+    This is the marginal every direct ``Problem(names, bounds)`` parameter
+    gets. Both bounds are finite and ``low`` is strictly below ``high``.
 
-def _make_gaussian_spec(
-    mean: float,
-    variance: float,
-    *,
-    low: float | None = None,
-    high: float | None = None,
-) -> _NormalizedInputSpec:
-    """Validate and normalize a Gaussian input specification."""
-    # Coerce to Python float to prevent JAX tracers or numpy scalars from leaking into metadata.
-    mean = float(mean)
-    variance = float(variance)
-    low = None if low is None else float(low)
-    high = None if high is None else float(high)
-
-    if variance <= 0:
-        raise ValueError(f"Gaussian input requires variance > 0, got {variance!r}")
-    if low is not None and high is not None and not low < high:
-        raise ValueError(f"Truncated Gaussian input requires low < high, got {(low, high)!r}")
-
-    return ("gaussian", mean, variance, low, high, None)
-
-
-def _make_categorical_spec(
-    probs: "npt.ArrayLike",
-    *,
-    labels: "list[str | int | float] | None" = None,
-) -> _NormalizedInputSpec:
-    """Validate and normalize a categorical input specification.
-
-    Args:
-        probs: Level probabilities, one per level, at least two. Must be
-            positive and sum to 1; a sum within ``1e-3`` of 1 is
-            renormalized, anything further off raises.
-        labels: Optional level labels (strings or numbers), one per level.
-            Defaults to ``"0" .. "L-1"``. Stored for reporting only.
-
-    Returns:
-        The normalized immutable spec tuple.
-
-    Raises:
-        ValueError: If fewer than two levels are given, any probability is
-            not positive and finite, the probabilities do not sum to 1
-            within tolerance, or ``labels`` has the wrong length or
-            duplicate entries.
+    Attributes:
+        low: Lower bound of the support.
+        high: Upper bound of the support, strictly above ``low``.
     """
-    # Coerce to Python floats to prevent JAX tracers or numpy scalars from
-    # leaking into hashable metadata.
-    prob_values = tuple(float(p) for p in np.asarray(probs, dtype=np.float64).ravel())
-    n_levels = len(prob_values)
-    if n_levels < 2:
-        raise ValueError(f"Categorical input requires at least 2 levels, got {n_levels}")
-    if not all(math.isfinite(p) and p > 0 for p in prob_values):
-        raise ValueError(f"Categorical probs must be positive and finite, got {prob_values!r}")
-    total = sum(prob_values)
-    if abs(total - 1.0) > _PROB_SUM_TOL:
-        raise ValueError(
-            f"Categorical probs must sum to 1 (within {_PROB_SUM_TOL}), got sum={total!r}"
-        )
-    prob_values = tuple(p / total for p in prob_values)
 
-    if labels is None:
-        label_values = tuple(str(level) for level in range(n_levels))
-    else:
-        label_values = tuple(str(label) for label in labels)
+    low: float
+    high: float
+
+    #: Distribution tag, matching the ``"dist"`` key of the dict input form.
+    dist: ClassVar[Literal["uniform"]] = "uniform"
+
+    def __post_init__(self) -> None:
+        """Coerce the bounds to Python floats and check their order.
+
+        Raises:
+            ValueError: If ``low`` is not strictly below ``high``.
+        """
+        # Coerce to Python float to keep JAX tracers and numpy scalars out of
+        # this hashable jit-cache metadata.
+        object.__setattr__(self, "low", float(self.low))
+        object.__setattr__(self, "high", float(self.high))
+        # `not <` instead of `>=` to also catch NaN (NaN comparisons are always False).
+        if not self.low < self.high:
+            raise ValueError(f"Uniform input requires low < high, got {(self.low, self.high)!r}")
+
+
+@dataclass(frozen=True)
+class GaussianSpec:
+    """Gaussian (normal) marginal distribution, optionally truncated.
+
+    ``low`` and ``high`` are each optional, so the support has four states:
+
+    * both ``None``: the marginal is the unbounded Gaussian.
+    * ``low`` set only: the marginal is truncated on the left, and the right
+      tail runs to ``+inf``.
+    * ``high`` set only: the marginal is truncated on the right, and the left
+      tail runs to ``-inf``.
+    * both set: the marginal is truncated on both sides, and its support is
+      the finite interval ``[low, high]``.
+
+    All four states are supported. ``Problem.from_dict(...,
+    truncate_gaussians=q)`` turns the first three into the fourth by filling
+    each open side with that marginal's own ``q`` quantile.
+
+    Attributes:
+        mean: Mean of the underlying (untruncated) Gaussian.
+        variance: Variance of the underlying Gaussian, strictly positive.
+            This is the variance, not the standard deviation.
+        low: Lower truncation bound, or ``None`` for an open left tail.
+        high: Upper truncation bound, or ``None`` for an open right tail.
+    """
+
+    mean: float
+    variance: float
+    low: float | None = None
+    high: float | None = None
+
+    #: Distribution tag, matching the ``"dist"`` key of the dict input form.
+    dist: ClassVar[Literal["gaussian"]] = "gaussian"
+
+    def __post_init__(self) -> None:
+        """Coerce the parameters to Python floats and validate them.
+
+        Raises:
+            ValueError: If ``variance`` is not positive, or if both bounds are
+                given and ``low`` is not strictly below ``high``.
+        """
+        # Coerce to Python float to prevent JAX tracers or numpy scalars from
+        # leaking into metadata.
+        object.__setattr__(self, "mean", float(self.mean))
+        object.__setattr__(self, "variance", float(self.variance))
+        object.__setattr__(self, "low", None if self.low is None else float(self.low))
+        object.__setattr__(self, "high", None if self.high is None else float(self.high))
+
+        if self.variance <= 0:
+            raise ValueError(f"Gaussian input requires variance > 0, got {self.variance!r}")
+        if self.low is not None and self.high is not None and not self.low < self.high:
+            raise ValueError(
+                f"Truncated Gaussian input requires low < high, got {(self.low, self.high)!r}"
+            )
+
+
+@dataclass(frozen=True)
+class CategoricalSpec:
+    """Categorical (unordered discrete) marginal distribution.
+
+    The parameter takes one of ``L = len(probs)`` levels. Samples carry the
+    integer level codes ``0 .. L-1`` (as floats), never physical values. Code
+    ``i`` maps to ``labels[i]``.
+
+    ``probs`` and ``labels`` are stored as tuples, so the spec stays immutable
+    and hashable and a ``Problem`` remains usable as jit-cache metadata. The
+    constructor accepts any sequence and converts it.
+
+    Attributes:
+        probs: Level probabilities, one per level, at least two. Each must be
+            positive and finite, and they must sum to 1. A sum within ``1e-3``
+            of 1 is renormalized; anything further off raises.
+        labels: Level labels, one per level, in level-code order. Defaults to
+            ``("0", ..., "L-1")``, which is what the empty default requests.
+            Labels are reporting metadata only: jaxgsa never relabels sample
+            arrays with them.
+    """
+
+    probs: tuple[float, ...]
+    labels: tuple[str, ...] = ()
+
+    #: Distribution tag, matching the ``"dist"`` key of the dict input form.
+    dist: ClassVar[Literal["categorical"]] = "categorical"
+
+    def __post_init__(self) -> None:
+        """Normalize the probabilities and labels into validated tuples.
+
+        Raises:
+            ValueError: If fewer than two levels are given, any probability is
+                not positive and finite, the probabilities do not sum to 1
+                within tolerance, or ``labels`` has the wrong length or
+                duplicate entries.
+        """
+        # Coerce to Python floats to prevent JAX tracers or numpy scalars from
+        # leaking into hashable metadata.
+        prob_values = tuple(float(p) for p in np.asarray(self.probs, dtype=np.float64).ravel())
+        n_levels = len(prob_values)
+        if n_levels < 2:
+            raise ValueError(f"Categorical input requires at least 2 levels, got {n_levels}")
+        if not all(math.isfinite(p) and p > 0 for p in prob_values):
+            raise ValueError(f"Categorical probs must be positive and finite, got {prob_values!r}")
+        total = sum(prob_values)
+        if abs(total - 1.0) > _PROB_SUM_TOL:
+            raise ValueError(
+                f"Categorical probs must sum to 1 (within {_PROB_SUM_TOL}), got sum={total!r}"
+            )
+        object.__setattr__(self, "probs", tuple(p / total for p in prob_values))
+
+        if not self.labels:
+            object.__setattr__(self, "labels", tuple(str(level) for level in range(n_levels)))
+            return
+        label_values = tuple(str(label) for label in self.labels)
         if len(label_values) != n_levels:
             raise ValueError(
                 f"Categorical labels length {len(label_values)} does not match "
@@ -173,33 +226,54 @@ def _make_categorical_spec(
             )
         if len(set(label_values)) != n_levels:
             raise ValueError(f"Categorical labels must be unique, got {label_values!r}")
+        object.__setattr__(self, "labels", label_values)
 
-    return ("categorical", 0.0, 0.0, None, None, (prob_values, label_values))
+
+# Canonical stored form of one parameter's marginal. This is what
+# `Problem.input_specs` returns, and what every internal consumer reads.
+InputSpec: TypeAlias = UniformSpec | GaussianSpec | CategoricalSpec
+
+# Public-facing input union -- users pass one of these per parameter.
+InputSpecValue: TypeAlias = (
+    tuple[float, float]
+    | UniformInputSpec
+    | GaussianInputSpec
+    | CategoricalInputSpec
+    | UniformSpec
+    | GaussianSpec
+    | CategoricalSpec
+)
 
 
-def _normalize_input_spec(spec: InputSpecValue) -> _NormalizedInputSpec:
-    """Normalize tuple or TypedDict user input into a private immutable spec."""
+def _normalize_input_spec(spec: InputSpecValue) -> InputSpec:
+    """Normalize any accepted user input form into a canonical spec dataclass."""
+    if isinstance(spec, UniformSpec | GaussianSpec | CategoricalSpec):
+        return spec  # already canonical and validated by its own __post_init__
     if isinstance(spec, tuple):  # bare (low, high) tuple is shorthand for uniform
         if len(spec) != 2:
             raise ValueError("Tuple input specs must have exactly two values: (low, high)")
-        return _make_uniform_spec(spec[0], spec[1])
+        return UniformSpec(spec[0], spec[1])
 
     if spec["dist"] == "uniform":
-        return _make_uniform_spec(spec["low"], spec["high"])
+        return UniformSpec(spec["low"], spec["high"])
     if spec["dist"] == "gaussian":
-        return _make_gaussian_spec(
+        return GaussianSpec(
             spec["mean"],
             spec["variance"],
             low=spec.get("low"),
             high=spec.get("high"),
         )
     if spec["dist"] == "categorical":
-        return _make_categorical_spec(spec["probs"], labels=spec.get("labels"))
+        labels = spec.get("labels")
+        return CategoricalSpec(
+            tuple(spec["probs"]),
+            labels=() if labels is None else tuple(str(label) for label in labels),
+        )
 
     raise ValueError(f"Unsupported input distribution {spec['dist']!r}")
 
 
-def _truncate_gaussian_spec(spec: _NormalizedInputSpec, q: float) -> _NormalizedInputSpec:
+def _truncate_gaussian_spec(spec: InputSpec, q: float) -> InputSpec:
     """Fill the open sides of a Gaussian spec with its own ``q`` quantiles.
 
     Only Gaussian marginals are touched. Uniform and categorical marginals
@@ -216,39 +290,40 @@ def _truncate_gaussian_spec(spec: _NormalizedInputSpec, q: float) -> _Normalized
     """
     from scipy.stats import norm
 
-    # Index rather than unpack: the normalized spec carries a trailing
-    # categorical payload slot, so its width is not fixed.
-    dist, mean, variance, low, high = spec[0], spec[1], spec[2], spec[3], spec[4]
-    if dist != "gaussian" or (low is not None and high is not None):
+    if not isinstance(spec, GaussianSpec):
+        return spec
+    if spec.low is not None and spec.high is not None:
         return spec
 
-    std = math.sqrt(variance)
+    std = math.sqrt(spec.variance)
+    low = spec.low
+    high = spec.high
     if low is None:
-        low = float(norm.ppf(q, loc=mean, scale=std))
+        low = float(norm.ppf(q, loc=spec.mean, scale=std))
     if high is None:
-        high = float(norm.ppf(1.0 - q, loc=mean, scale=std))
-    return ("gaussian", mean, variance, low, high, None)
+        high = float(norm.ppf(1.0 - q, loc=spec.mean, scale=std))
+    return GaussianSpec(spec.mean, spec.variance, low=low, high=high)
 
 
 def _derive_bounds(
-    input_specs: tuple[_NormalizedInputSpec, ...],
+    input_specs: tuple[InputSpec, ...],
 ) -> tuple[tuple[float, float], ...] | None:
     """Return finite bounds for uniform-only problems, otherwise ``None``."""
     # Bounds only meaningful for uniform-only problems; Gaussian inputs have
     # infinite (or truncated) support and categorical inputs carry codes, so
     # neither maps to simple lo/hi bounds.
     bounds: list[tuple[float, float]] = []
-    for dist, first, second, _, _, _ in input_specs:
-        if dist != "uniform":
+    for spec in input_specs:
+        if not isinstance(spec, UniformSpec):
             return None
-        bounds.append((first, second))
+        bounds.append((spec.low, spec.high))
     return tuple(bounds)
 
 
 def _canonical_correlation(
     correlation: "npt.ArrayLike | None",
     names: tuple[str, ...],
-    input_specs: tuple[_NormalizedInputSpec, ...],
+    input_specs: tuple[InputSpec, ...],
     kind: Literal["latent", "spearman"] = "latent",
     *,
     policy: "RepairPolicy",
@@ -310,34 +385,31 @@ def _canonical_correlation(
 
 
 def _normalized_input_to_dict(
-    spec: _NormalizedInputSpec,
+    spec: InputSpec,
 ) -> UniformInputSpec | GaussianInputSpec | CategoricalInputSpec:
-    """Convert a normalized immutable input spec into a JSON-friendly mapping."""
-    dist, first, second, low, high, _ = spec
-    if dist == "uniform":
-        return UniformInputSpec(dist="uniform", low=first, high=second)
-    payload = _categorical_payload(spec)
-    if payload is not None:
-        probs, labels = payload
-        label_list: list[str | int | float] = list(labels)
-        return CategoricalInputSpec(dist="categorical", probs=list(probs), labels=label_list)
+    """Convert a canonical input spec into a JSON-friendly mapping."""
+    if isinstance(spec, UniformSpec):
+        return UniformInputSpec(dist="uniform", low=spec.low, high=spec.high)
+    if isinstance(spec, CategoricalSpec):
+        label_list: list[str | int | float] = list(spec.labels)
+        return CategoricalInputSpec(dist="categorical", probs=list(spec.probs), labels=label_list)
 
     # Reconstruct the TypedDict for JSON serialization (used by SobolSamples.save).
     payload: GaussianInputSpec = GaussianInputSpec(
         dist="gaussian",
-        mean=first,
-        variance=second,
+        mean=spec.mean,
+        variance=spec.variance,
     )
-    if low is not None:
-        payload["low"] = low
-    if high is not None:
-        payload["high"] = high
+    if spec.low is not None:
+        payload["low"] = spec.low
+    if spec.high is not None:
+        payload["high"] = spec.high
     return payload
 
 
 def _check_correlation_touches_categorical(
     names: tuple[str, ...],
-    input_specs: tuple[_NormalizedInputSpec, ...],
+    input_specs: tuple[InputSpec, ...],
     correlation: "npt.ArrayLike | None",
 ) -> None:
     """Reject a correlation matrix that couples a categorical parameter.
@@ -366,7 +438,7 @@ def _check_correlation_touches_categorical(
         return
     R = np.asarray(correlation, dtype=np.float64)
     for d, spec in enumerate(input_specs):
-        if spec[0] != "categorical":
+        if not isinstance(spec, CategoricalSpec):
             continue
         off_diag = np.delete(R[d], d)
         if np.any(np.abs(off_diag) > _CATEGORICAL_COUPLING_TOL):
@@ -379,30 +451,15 @@ def _check_correlation_touches_categorical(
             )
 
 
-def _categorical_payload(spec: _NormalizedInputSpec) -> _CategoricalData | None:
-    """Return the ``(probs, labels)`` payload of a categorical spec.
-
-    Single accessor for the spec's payload slot, so callers never index or
-    ``None``-guard ``spec[5]`` themselves. Returns ``None`` for the other
-    distributions.
-    """
-    if spec[0] != "categorical":
-        return None
-    payload = spec[5]
-    assert payload is not None  # _make_categorical_spec always stores the payload
-    return payload
-
-
 def _categorical_dims_from_specs(
-    input_specs: tuple[_NormalizedInputSpec, ...],
+    input_specs: tuple[InputSpec, ...],
 ) -> tuple[tuple[int, int], ...]:
     """Return ``(dimension index, level count)`` per categorical spec."""
-    dims: list[tuple[int, int]] = []
-    for d, spec in enumerate(input_specs):
-        payload = _categorical_payload(spec)
-        if payload is not None:
-            dims.append((d, len(payload[0])))
-    return tuple(dims)
+    return tuple(
+        (d, len(spec.probs))
+        for d, spec in enumerate(input_specs)
+        if isinstance(spec, CategoricalSpec)
+    )
 
 
 def _categorical_dims(problem: "Problem") -> tuple[tuple[int, int], ...]:
@@ -443,7 +500,7 @@ class Problem:
 
     names: tuple[str, ...]
     bounds: tuple[tuple[float, float], ...] | None
-    _input_specs: tuple[_NormalizedInputSpec, ...] = field(repr=False)
+    _input_specs: tuple[InputSpec, ...] = field(repr=False)
     output_names: tuple[str, ...] | None = None
     _correlation: _CorrelationTuple | None = field(repr=False, default=None)
 
@@ -483,7 +540,7 @@ class Problem:
                 f"{len(normalized_names)} and {len(normalized_bounds)}"
             )
 
-        input_specs = tuple(_make_uniform_spec(low, high) for low, high in normalized_bounds)
+        input_specs = tuple(UniformSpec(low, high) for low, high in normalized_bounds)
         self._set_fields(
             names=normalized_names,
             input_specs=input_specs,
@@ -604,7 +661,7 @@ class Problem:
         cls,
         *,
         names: tuple[str, ...],
-        input_specs: tuple[_NormalizedInputSpec, ...],
+        input_specs: tuple[InputSpec, ...],
         output_names: tuple[str, ...] | None = None,
         correlation: _CorrelationTuple | None = None,
     ) -> "Problem":
@@ -633,7 +690,7 @@ class Problem:
         self,
         *,
         names: tuple[str, ...],
-        input_specs: tuple[_NormalizedInputSpec, ...],
+        input_specs: tuple[InputSpec, ...],
         output_names: tuple[str, ...] | None,
         correlation: _CorrelationTuple | None,
     ) -> None:
@@ -648,8 +705,13 @@ class Problem:
         object.__setattr__(self, "_correlation", correlation)
 
     @property
-    def input_specs(self) -> tuple[_NormalizedInputSpec, ...]:
-        """Normalized input distribution specs for each parameter."""
+    def input_specs(self) -> tuple[InputSpec, ...]:
+        """Canonical marginal spec of each parameter, in model-input order.
+
+        Each entry is a :class:`UniformSpec`, :class:`GaussianSpec`, or
+        :class:`CategoricalSpec`, whatever input form declared it. Read the
+        fields by name, and tell the families apart with ``isinstance``.
+        """
         return self._input_specs
 
     @property
@@ -676,12 +738,12 @@ class Problem:
     @property
     def has_non_uniform_inputs(self) -> bool:
         """Return ``True`` when any parameter uses a non-uniform marginal."""
-        return any(spec[0] != "uniform" for spec in self._input_specs)
+        return any(not isinstance(spec, UniformSpec) for spec in self._input_specs)
 
     @property
     def has_categorical_inputs(self) -> bool:
         """Return ``True`` when any parameter uses a categorical marginal."""
-        return any(spec[0] == "categorical" for spec in self._input_specs)
+        return any(isinstance(spec, CategoricalSpec) for spec in self._input_specs)
 
     @property
     def categorical_labels(self) -> dict[str, tuple[str, ...]]:
@@ -693,9 +755,9 @@ class Problem:
         dict is empty when the problem has no categorical parameters.
         """
         return {
-            self.names[d]: payload[1]
+            self.names[d]: spec.labels
             for d, spec in enumerate(self._input_specs)
-            if (payload := _categorical_payload(spec)) is not None
+            if isinstance(spec, CategoricalSpec)
         }
 
     @property

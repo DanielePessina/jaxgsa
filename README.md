@@ -593,7 +593,7 @@ Use it for:
 
 Quick map:
 
-- `Problem`, `UniformInputSpec`, and `GaussianInputSpec`
+- `Problem`, `UniformSpec`, `GaussianSpec`, and `CategoricalSpec`
 - `jaxgsa.sobol`: `sample` / `analyze` / `SobolSamples` / `SobolResult`
 - `jaxgsa.sampling`: `monte_carlo`
 - `jaxgsa.hdmr`: `analyze` / `HDMRResult`

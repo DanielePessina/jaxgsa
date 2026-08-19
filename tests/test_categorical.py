@@ -30,6 +30,7 @@ from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa.borgonovo._analyze import _warn_conf_out_of_range
 from jaxgsa.pawn._analyze import _bin_indices
 from jaxgsa.problem import (
+    CategoricalSpec,
     Problem,
     _categorical_dims,
     _normalized_input_to_dict,
@@ -85,9 +86,10 @@ def test_categorical_spec_normalizes_and_stores_probs_and_labels():
     cache keys, so both must stay tuples.
     """
     p = Problem.from_dict({"c": {"dist": "categorical", "probs": [0.25, 0.25, 0.5]}})
-    stored_probs, stored_labels = p.input_specs[0][5]
-    assert isinstance(stored_probs, tuple)
-    assert isinstance(stored_labels, tuple)
+    stored = p.input_specs[0]
+    assert isinstance(stored, CategoricalSpec)
+    assert isinstance(stored.probs, tuple)
+    assert isinstance(stored.labels, tuple)
     spec = _normalized_input_to_dict(p.input_specs[0])
     assert spec["dist"] == "categorical"
     assert list(spec["probs"]) == [0.25, 0.25, 0.5]
