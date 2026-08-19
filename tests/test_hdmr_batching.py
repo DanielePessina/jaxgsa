@@ -238,3 +238,108 @@ class TestBothAxesCompose:
         batched = analyze_hdmr(PROBLEM, X, Y_tk, maxorder=2, m=2, slice_chunk_size=1)
         assert batched.streamed is True
         _assert_results_match(batched, full)
+
+
+class TestPaddingIsInert:
+    """Padded rows and padded lanes contribute nothing to a real result.
+
+    Both loops pad their trailing chunk so a jitted step compiles once. That
+    is only sound if the padding cannot reach a real number. Comparing a
+    padded run against an unpadded one cannot show this, because the two also
+    differ in reduction width, and width alone moves float32 results. Each
+    test below therefore holds every width fixed and changes only whether a
+    slot holds padding or data.
+
+    Tier T4 (internal consistency).
+    """
+
+    def _fit_kwargs(self, N: int, slice_chunk_size: int, batch_size: int) -> dict:
+        """Static arguments for a direct ``_fit_hdmr`` call on 3 uniform inputs."""
+        from jaxgsa.hdmr._analyze import _get_hdmr_static_data
+        from jaxgsa.hdmr._engine import _compute_f_crits
+
+        sd = _get_hdmr_static_data(3, 2, 2)
+        return dict(
+            m=2,
+            maxorder=2,
+            maxiter=50,
+            lambdax=0.01,
+            f_crits=_compute_f_crits(0.95, sd.m1, sd.m2, sd.m3, N),
+            c2_idx=jnp.asarray(sd.c2, dtype=int),
+            c3_idx=jnp.zeros((0, 3), dtype=int),
+            beta2=jnp.asarray(sd.beta2, dtype=int),
+            beta3=jnp.asarray(sd.beta3, dtype=int),
+            n1=sd.n1,
+            n2=sd.n2,
+            n3=sd.n3,
+            n=sd.n,
+            m1=sd.m1,
+            m2=sd.m2,
+            m3=sd.m3,
+            batch_size=batch_size,
+            slice_chunk_size=slice_chunk_size,
+        )
+
+    @staticmethod
+    def _assert_lanes_identical(a, b, n_lanes: int) -> None:
+        """Assert the first ``n_lanes`` lanes of two fits agree bit for bit."""
+        names = ("Sa", "Sb", "S", "select", "rmse", "C1", "C2", "C3", "f0")
+        for name, u, v in zip(names, a[:9], b[:9], strict=True):
+            if u is None:
+                continue
+            np.testing.assert_array_equal(
+                np.asarray(u)[:n_lanes], np.asarray(v)[:n_lanes], err_msg=name
+            )
+
+    def _three_lanes(self, X, Y):
+        return jnp.stack([Y, jnp.cos(X[:, 1]) + 0.3 * X[:, 0] * X[:, 2], 0.5 * Y + 3.0], axis=1)
+
+    def test_a_padded_lane_does_not_touch_the_real_lanes(self, ishigami_data):
+        """Three lanes at chunk width 2: slot 3 is padding, or it is data.
+
+        ``slice_chunk_size=2`` on 3 lanes gives chunks [0:2] and [2:4], so the
+        last slot of the second chunk is padding. Running 4 real lanes at the
+        same chunk size gives the same two widths with that slot filled. Lanes
+        0-2 must not notice.
+        """
+        from jaxgsa._core.transforms import cdf_to_unit_interval
+        from jaxgsa.hdmr._fit import _fit_hdmr
+
+        X, Y = ishigami_data
+        X_n = cdf_to_unit_interval(X, PROBLEM)
+        kw = self._fit_kwargs(X.shape[0], slice_chunk_size=2, batch_size=X.shape[0])
+        lanes3 = self._three_lanes(X, Y)
+        extra = (jnp.sin(X[:, 0]) * X[:, 2] - 7.0)[:, None]
+
+        padded = _fit_hdmr(X_n, lanes3, **kw)
+        filled = _fit_hdmr(X_n, jnp.concatenate([lanes3, extra], axis=1), **kw)
+        self._assert_lanes_identical(padded, filled, 3)
+
+    def test_padded_row_content_cannot_reach_an_accumulator(self, ishigami_data, monkeypatch):
+        """Fill the row padding with 1e6 instead of 0 and change nothing.
+
+        Every accumulator contracts against a basis the row mask has already
+        zeroed, or against a residual the mask zeroes directly. So the value
+        sitting in a padded row is unobservable, and the strongest way to say
+        that is to put a number in it that would be impossible to miss.
+        """
+        from jaxgsa._core.transforms import cdf_to_unit_interval
+        from jaxgsa.hdmr import _fit as fit_mod
+
+        X, Y = ishigami_data
+        X_n = cdf_to_unit_interval(X, PROBLEM)
+        # 1000 rows in batches of 300: the trailing batch pads 200 rows.
+        kw = self._fit_kwargs(X.shape[0], slice_chunk_size=3, batch_size=300)
+        lanes3 = self._three_lanes(X, Y)
+
+        zero_padded = fit_mod._fit_hdmr(X_n, lanes3, **kw)
+
+        def loud_pad(A, n_pad):
+            if n_pad == 0:
+                return A
+            junk = jnp.full((n_pad, *A.shape[1:]), 1.0e6, dtype=A.dtype)
+            return jnp.concatenate([A, junk], axis=0)
+
+        monkeypatch.setattr(fit_mod, "_pad_rows", loud_pad)
+        loud_padded = fit_mod._fit_hdmr(X_n, lanes3, **kw)
+        self._assert_lanes_identical(zero_padded, loud_padded, 3)
