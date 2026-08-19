@@ -9,6 +9,18 @@ Version 0.10 adds capability.
 
 ### Breaking
 
+- **Every entry point now prints a summary by default.** All thirteen
+  `analyze()` functions and all four samplers take `verbose: bool = True`.
+  With the default, `analyze()` prints three short sections to stdout: the
+  problem and the data, the wall-clock timing, and the top parameters by the
+  method's headline index. Samplers print one line about the design. Your
+  numbers do not change, but a script that ran silently before this version
+  prints now. To keep a run silent, pass `verbose=False`:
+
+  ```python
+  result = jaxgsa.sobol.analyze(sr, Y, verbose=False)
+  ```
+
 - **One batching contract for every method.** Four rules now hold everywhere,
   and tests enforce them.
 
@@ -223,6 +235,22 @@ Version 0.10 adds capability.
   `n_per_curve = 65536` in float64.
 
 ### Added
+
+- **`verbose=True` observability on every entry point.** One keyword, the
+  same on all seventeen public entry points. On `analyze()` it prints three
+  sections. First, the problem and the data: dimensionality, parameter
+  names, marginal kinds, correlation status, output layout, and what the
+  non-finite check found. Second, the timings: wall-clock time for the
+  computation (the first call includes JIT compile time), and the resolved
+  batch or chunk widths where batching applies. Third, the results: the top
+  `min(D, 5)` parameters by the method's headline index, with confidence
+  intervals when you bootstrapped, averaged over the output slices for a
+  `(T, K)` output. On `sample()` it prints one line about the design: runs
+  generated, and duplicate rows removed where the design deduplicates. The
+  output is plain `print()` to stdout, always outside `jit`. The pure
+  `indices()` cores stay silent and traceable. Pass `verbose=False` for a
+  silent run; a test in `tests/test_vocabulary.py` pins the keyword on every
+  entry point.
 
 - **`EFASTSamples` can now save and load.** It was the one design object
   without persistence. `save()` writes one compressed NPZ file with the same
