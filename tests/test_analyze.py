@@ -428,11 +428,13 @@ def test_the_bootstrap_batches_slices_instead_of_looping_over_them(monkeypatch):
     :func:`test_slice_chunk_size_invariance` passes just as well against a
     per-slice Python loop. This is the only place the batching is asserted.
 
-    Two things are pinned. The resampler must see a chunk of slices, not one
-    slice at a time -- the recorded widths are the contract, ``[4, 2]`` for
-    six slices at a chunk of four, including the short trailing chunk. And
-    every call must carry the whole ``(R, N)`` index array, because the
-    resamples belong inside the batch rather than in a loop around it.
+    Three things are pinned. The resampler must see a chunk of slices, not
+    one slice at a time. Every call must carry the whole ``(R, N)`` index
+    array, because the resamples belong inside the batch rather than in a
+    loop around it. And every call must be the *same* width: six slices at a
+    chunk of four is two calls of four, not ``[4, 2]``, because the short
+    trailing chunk is padded back and the answer sliced out. A jitted kernel
+    is traced per input shape, so a ragged tail would compile it twice.
     """
     from jaxgsa.sobol import _bootstrap as sobol_bootstrap
 
@@ -457,5 +459,5 @@ def test_the_bootstrap_batches_slices_instead_of_looping_over_them(monkeypatch):
     monkeypatch.setattr(sobol_bootstrap, "_resample_so", recording_get)
     jaxgsa.sobol.analyze(sr, Y_multi, n_bootstrap=8, key=jax.random.key(2), slice_chunk_size=4)
 
-    assert widths == [4, 2], f"expected one full and one short chunk, got {widths}"
+    assert widths == [4, 4], f"expected two equal-width chunks, the tail padded back, got {widths}"
     assert n_bootstrap == [8, 8], "every call must carry the whole resample batch"

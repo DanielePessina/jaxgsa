@@ -66,9 +66,9 @@ POSITIONAL_EXCEPTIONS = {"dgsm"}
 # the exemption would outlive the problem.
 BUDGET_GAPS: dict[str, str] = {
     "morris": (
-        "morris.resample_chunk_size defaults to 2048 to match the width sobol "
-        "used to default to. It does honour the budget as an upper bound; "
-        "only the default differs. sobol has since flipped to None."
+        "morris.resample_chunk_size defaults to 2048 to match sobol's width. "
+        "It does honour the budget as an upper bound; only the default "
+        "differs. Flip it with sobol's, not before."
     ),
 }
 

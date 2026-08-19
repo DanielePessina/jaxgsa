@@ -43,7 +43,7 @@ import jax.numpy as jnp
 from jax import Array
 
 from jaxgsa._core.batching import get_memory_budget
-from jaxgsa.sobol._chunking import pad_slice_axis
+from jaxgsa.sobol._chunking import pad_slice_axis, slice_elements
 from jaxgsa.sobol._estimators import first_total_kernel, second_order_kernel
 
 
@@ -53,15 +53,26 @@ def _resolve_slice_chunk_size(
     n_bootstrap: int,
     base_n: int,
     D: int,
+    calc_second_order: bool,
     itemsize: int,
 ) -> int:
     """Resolve how many output slices one bootstrap device call may carry.
 
-    The working set of a chunk is the gathered outputs, ``chunk * R * N``
-    elements for each of A and B and ``chunk * R * N * D`` for AB (twice that
-    when the design also carries BA). The estimate below uses the
-    first-order-only working set with a factor of two for the estimator's own
-    intermediates, which is the same order of magnitude either way.
+    A bootstrap chunk is the point-estimate working set of one slice, ``R``
+    times over: every resample of a slice rides inside the same device call.
+    So the model is :func:`jaxgsa.sobol._chunking.slice_elements` scaled by
+    ``n_bootstrap``, and the two paths cannot drift apart.
+
+    ``calc_second_order`` is not a detail here. The second-order estimators
+    build an ``(N, D, D)`` outer product per slice, so the working set is
+    quadratic in ``D`` rather than linear. This function used to apply the
+    first-order formula on both paths, with a comment claiming the two were
+    "the same order of magnitude either way". They are not. Against the
+    first-order formula it applied, ``2 * N * (D + 2)``, the missing term is
+    worth ``1 + D / 2``, about 24 times at ``D = 50``; against a model that
+    already counts the second-order design, ``2 * N * (2D + 2)``, it is
+    ``1 + D / 4``, about 13 times. Either way this is the one path where a
+    device already runs out of memory.
 
     Args:
         slice_chunk_size: Caller's cap on slices per chunk, or ``None`` to
@@ -71,12 +82,14 @@ def _resolve_slice_chunk_size(
         n_bootstrap: R, the number of bootstrap resamples.
         base_n: N, the number of base samples per resample.
         D: Number of input parameters.
+        calc_second_order: Whether the design carries the BA blocks.
         itemsize: Bytes per element of the output dtype.
 
     Returns:
         A chunk width in ``[1, n_slices]``.
     """
-    bytes_per_slice = 2 * n_bootstrap * base_n * (D + 2) * itemsize
+    per_slice = slice_elements(base_n, D, calc_second_order)
+    bytes_per_slice = n_bootstrap * per_slice * itemsize
     budget = max(1, get_memory_budget() // max(bytes_per_slice, 1))
     if slice_chunk_size is None:
         return max(1, min(budget, n_slices))

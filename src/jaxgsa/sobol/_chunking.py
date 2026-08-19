@@ -14,9 +14,11 @@ the sliced answer is bit-for-bit the unpadded one. See ``efast/_analyze.py``,
 
 **A width from the budget, not a constant.** ``slice_chunk_size=None`` means
 "derive one from :func:`jaxgsa._core.batching.get_memory_budget`", which needs
-a model of what one slice actually costs. For the point kernels that is the
-gathered A, B and AB (and BA) arrays for one slice, which is what
-:func:`resolve_point_chunk_size` estimates.
+a model of what one slice actually costs. :func:`slice_elements` is that
+model and both paths share it: the gathered A, B and AB (and BA) arrays, plus
+the ``(N, D, D)`` outer product every second-order estimator forms. That last
+term is why second order is quadratic in ``D`` and first order is not, and it
+is the term the earlier bootstrap-only estimate left out.
 """
 
 from __future__ import annotations
@@ -28,8 +30,9 @@ from jaxgsa._core.batching import get_memory_budget
 
 # The estimator holds roughly one working copy of its inputs alive on top of
 # the inputs themselves (the centred products and the reduction temporaries),
-# so the per-slice estimate carries a factor of two. The bootstrap model in
-# ``_bootstrap.py`` uses the same factor, one resample per slice apart.
+# so the input term of the per-slice estimate carries a factor of two. The
+# bootstrap model in ``_bootstrap.py`` uses the same factor, one resample per
+# slice apart.
 _POINT_LIVE_COPIES = 2
 
 
@@ -68,10 +71,10 @@ def resolve_point_chunk_size(
     given, capped at the number of slices there are. ``None`` derives a width
     from the active memory budget and the kernel's real working set.
 
-    One slice of the working set is the gathered outputs: ``base_n`` elements
-    for each of A and B and ``base_n * D`` for AB, doubled when the design
-    also carries BA. That is ``base_n * (D + 2)`` elements, or
-    ``base_n * (2D + 2)`` with second order.
+    One slice of the working set is the gathered outputs, ``base_n * (D + 2)``
+    elements, plus the estimator's own intermediates. See
+    :func:`slice_elements` for what that comes to, and why second order is
+    not merely twice first order.
 
     Args:
         slice_chunk_size: Caller's cap on slices per chunk, or ``None`` to
@@ -92,7 +95,45 @@ def resolve_point_chunk_size(
         if slice_chunk_size < 1:
             raise ValueError(f"slice_chunk_size must be >= 1, got {slice_chunk_size}")
         return max(1, min(slice_chunk_size, n_slices))
-    per_slice = base_n * (2 * D + 2 if calc_second_order else D + 2)
-    bytes_per_slice = _POINT_LIVE_COPIES * per_slice * itemsize
+    bytes_per_slice = slice_elements(base_n, D, calc_second_order) * itemsize
     budget = get_memory_budget() // max(bytes_per_slice, 1)
     return max(1, min(n_slices, budget))
+
+
+def slice_elements(base_n: int, D: int, calc_second_order: bool) -> int:
+    """Estimate the live element count of one slice of estimator work.
+
+    First order is linear in ``D``: the gathered A, B and AB are
+    ``base_n * (D + 2)`` elements, and the estimator holds about one working
+    copy of them alive at a time.
+
+    Second order is **quadratic** in ``D``, and by a wide margin the larger
+    term. Every second-order estimator forms the joint-variance matrix as an
+    outer product over the parameter axis --- in ``_fused_second_order`` that
+    is ``BA[:, :, None] * AB[:, None, :]``, an ``(N, D, D)`` array that exists
+    in full before the reduction over the sample axis collapses it to
+    ``(D, D)``. Leaving that term out under-budgets a slice by about
+    ``1 + D / 4`` **relative to the same model without it**, that is against
+    ``2 * N * (2D + 2)``: at ``D = 50``, ``N = 65536`` and float32 that model
+    estimates 53 MB for one slice where the outer product alone needs
+    655 MB, a factor of 13. Read against the formula the code used to apply
+    to both paths, the first-order ``2 * N * (D + 2)``, the same term is
+    worth ``1 + D / 2``, about 24 at ``D = 50``. Same array, two baselines;
+    the first is the one measured above.
+
+    The quadratic term is counted once rather than doubled. It is one
+    materialised array feeding one reduction, so unlike the inputs it does not
+    carry a second working copy.
+
+    Args:
+        base_n: N, the number of base samples.
+        D: Number of input parameters.
+        calc_second_order: Whether the design carries the BA blocks, which is
+            what turns the outer product on.
+
+    Returns:
+        Live elements for one slice, for one resample.
+    """
+    inputs = base_n * (2 * D + 2 if calc_second_order else D + 2)
+    outer_product = base_n * D * D if calc_second_order else 0
+    return _POINT_LIVE_COPIES * inputs + outer_product

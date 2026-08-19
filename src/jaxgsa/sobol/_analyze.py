@@ -579,7 +579,7 @@ def _analyze_bootstrap(
     )
 
     cs = _resolve_slice_chunk_size(
-        slice_chunk_size, total, n_bootstrap, base_n, D, A_flat.dtype.itemsize
+        slice_chunk_size, total, n_bootstrap, base_n, D, calc_second_order, A_flat.dtype.itemsize
     )
 
     S2_boot = None
@@ -755,11 +755,13 @@ def analyze(
             ``slice_chunk_size * n_bootstrap`` estimator evaluations, and
             the memory budget that :func:`jaxgsa.config.set_memory_budget`
             sets can lower the width further. ``None`` (the default) derives
-            the width from that budget alone, on both paths: the point
-            kernels cost about ``2 * N * (D + 2)`` elements per slice, or
-            ``2 * N * (2D + 2)`` with second order, and the bootstrap
-            kernels cost ``n_bootstrap`` times that. Give an integer to cap
-            it yourself if you hit device out-of-memory errors.
+            the width from that budget alone, on both paths: a slice costs
+            about ``2 * N * (D + 2)`` elements first-order-only, and
+            ``2 * N * (2D + 2) + N * D * D`` with second order, because
+            every second-order estimator forms an ``(N, D, D)`` outer
+            product. The bootstrap kernels cost ``n_bootstrap`` times that.
+            Give an integer to cap it yourself if you hit device
+            out-of-memory errors.
 
             It changes no index beyond floating-point noise. The estimator
             sums over the sample axis, and XLA schedules that reduction
