@@ -176,6 +176,30 @@ def test_no_retired_spelling_in_analyze_or_sample(spec: MethodSpec) -> None:
         )
 
 
+def test_no_retired_spelling_on_the_problem_surfaces() -> None:
+    """The Problem correlation surfaces use ``correlation_type``, nothing else.
+
+    The registry walk above never sees ``Problem``, yet its three surfaces
+    are the only ones that ever carried ``correlation_kind`` and ``kind``.
+    Without this check, re-introducing either there would pass the suite.
+    """
+    from jaxgsa import Problem
+
+    surfaces = {
+        "Problem.__init__": inspect.signature(Problem.__init__),
+        "Problem.from_dict": inspect.signature(Problem.from_dict),
+        "Problem.with_correlation": inspect.signature(Problem.with_correlation),
+    }
+    for name, sig in surfaces.items():
+        found = sorted(set(sig.parameters) & set(RETIRED_EVERYWHERE))
+        assert not found, (
+            f"{name} uses retired keyword(s) {found}. "
+            f"Use instead: {', '.join(RETIRED_EVERYWHERE[k] for k in found)}. "
+            "See CONTEXT.md."
+        )
+    assert "correlation_type" in surfaces["Problem.with_correlation"].parameters
+
+
 @pytest.mark.parametrize("spec", ALL, ids=_ids(ALL))
 def test_output_standardization_is_spelled_standardize_outputs(spec: MethodSpec) -> None:
     """A flag that standardizes the outputs is spelled ``standardize_outputs``.
