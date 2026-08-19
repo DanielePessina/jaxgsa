@@ -12,7 +12,7 @@ Example::
 
 from jaxgsa._core.invalid import InvalidUnit
 from jaxgsa._core.registry import MethodSpec, register
-from jaxgsa.hdmr._analyze import analyze_hdmr as analyze
+from jaxgsa.hdmr._analyze import analyze
 from jaxgsa.hdmr._result import HDMRResult
 
 __all__ = ["HDMRResult", "analyze"]
