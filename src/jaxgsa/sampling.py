@@ -118,8 +118,10 @@ def correlate(
         column permuted) and ranks following the declared correlation.
 
     Raises:
-        ValueError: If ``problem`` has no correlation set, or ``X`` is not
-            ``(N, D)`` with ``D == problem.num_vars``.
+        ValueError: If ``problem`` has no correlation set, ``X`` is not
+            ``(N, D)`` with ``D == problem.num_vars``, or ``X`` holds
+            non-finite values (they would be paired deterministically with
+            the extreme rank scores and bias the result).
     """
     R = problem.correlation
     if R is None:
@@ -131,6 +133,17 @@ def correlate(
     D = problem.num_vars
     if X.ndim != 2 or X.shape[1] != D:
         raise ValueError(f"X must be (N, {D}) to match the problem, got {X.shape}")
+    if not np.all(np.isfinite(X)):
+        # np.sort puts NaN last, so every NaN would be deterministically
+        # paired with the highest-score rows and bias the achieved
+        # correlation of the finite rows — even if the NaNs are dropped later.
+        n_bad = int(np.count_nonzero(~np.all(np.isfinite(X), axis=1)))
+        raise ValueError(
+            f"X holds non-finite values (nan or inf) in {n_bad} row(s); rank "
+            "re-pairing would pair them with the extreme scores and bias the "
+            "correlation of the finite rows. Remove or impute the non-finite "
+            "rows before calling correlate()."
+        )
 
     rng = np.random.default_rng(seed)
     scores = _iman_conover_scores(X.shape[0], R, rng)

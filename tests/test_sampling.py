@@ -447,6 +447,25 @@ def test_correlate_sampling_error_matches_iman_conover():
     assert abs(achieved.mean() - target) < 0.004  # old implementation: ~-0.006
 
 
+def test_correlate_rejects_non_finite_X():
+    """Tier T4 (input-contract): NaN rows must be rejected, not silently paired.
+
+    np.sort puts NaN last, so every NaN row would deterministically take the
+    highest van der Waerden scores and bias the correlation of the finite
+    rows even if the NaNs were dropped afterwards.
+    """
+    problem = Problem.from_dict(
+        {"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=[[1.0, 0.5], [0.5, 1.0]]
+    )
+    X = monte_carlo(problem.with_correlation(None), 64, seed=5)
+    X[3, 1] = np.nan
+    with pytest.raises(ValueError, match="non-finite"):
+        correlate(X, problem, seed=5)
+    X[3, 1] = np.inf
+    with pytest.raises(ValueError, match="non-finite"):
+        correlate(X, problem, seed=5)
+
+
 def test_correlate_handles_degenerate_row_counts():
     """Too few rows to estimate corr(M): fall back, do not divide by zero."""
     problem = Problem.from_dict(

@@ -304,6 +304,11 @@ def fit_gaussian_copula(problem: Problem, X: np.ndarray) -> np.ndarray:
     ``JaxgsaWarning`` names them; polychoric estimation is future work. The
     continuous pairs are fitted normally.
 
+    A column that is constant or holds non-finite values carries no rank
+    information, so it is likewise decoupled — identity row and column — with
+    a ``JaxgsaWarning`` naming it, and every other pair is still fitted. The
+    fitted path warns on degraded data; it never raises because of it.
+
     Args:
         problem: Problem the samples were drawn for. Its parameter count
             shapes the fit, and its categorical parameters are excluded
@@ -331,9 +336,43 @@ def fit_gaussian_copula(problem: Problem, X: np.ndarray) -> np.ndarray:
     # follow the Spearman convention for tied values. Position-dependent tie
     # breaking would bias the estimate on discrete or quantized columns.
     ranks = rankdata(X, method="average", axis=0)
-    spearman = np.corrcoef(ranks, rowvar=False)
-    if D == 1:  # np.corrcoef collapses to a scalar for a single column
-        spearman = np.atleast_2d(spearman)
+
+    # A constant column has zero rank variance, and a column holding NaN or
+    # inf has no meaningful ranks at all. Feeding either to np.corrcoef emits
+    # raw divide warnings and produces NaN rows, which np.linalg.eigh in the
+    # repair then rejects with a bare LinAlgError — a raise the fitted policy
+    # forbids. Such a column carries no rank information, so it is decoupled:
+    # its row and column in the fit are exact identity, the remaining pairs
+    # are fitted normally, and one warning names the parameters.
+    # Non-finiteness is checked on X, not on the ranks: depending on the scipy
+    # version, rankdata either propagates the NaN or silently ranks it last,
+    # and only the first of those is visible in the rank matrix.
+    degenerate = [
+        d
+        for d in range(D)
+        if not np.all(np.isfinite(X[:, d]))
+        or not np.all(np.isfinite(ranks[:, d]))
+        or np.ptp(ranks[:, d]) == 0.0
+    ]
+    if degenerate:
+        warnings.warn(
+            f"jaxgsa: parameters {[problem.names[d] for d in degenerate]} are "
+            "constant or non-finite in X; a constant column carries no rank "
+            "information and a non-finite one has no meaningful ranks, so "
+            "their rows and columns are kept at identity (independent). Vary "
+            "these parameters in the data, or remove/impute the non-finite "
+            "values, to fit them.",
+            # The public entry point is jaxgsa.sampling.fit_correlation.
+            stacklevel=3,
+            category=JaxgsaWarning,
+        )
+    usable = [d for d in range(D) if d not in degenerate]
+    spearman = np.eye(D)
+    if len(usable) >= 2:
+        # Correlate only the usable columns so numpy never sees a
+        # zero-variance input and never emits its raw divide warnings.
+        sub = np.atleast_2d(np.corrcoef(ranks[:, usable], rowvar=False))
+        spearman[np.ix_(usable, usable)] = sub
 
     cat_dims = [d for d, _ in _categorical_dims(problem)]
     latent = _spearman_to_latent(spearman)
@@ -370,11 +409,20 @@ def _validate_structure(R: np.ndarray, n_params: int) -> None:
         n_params: Expected ``D``.
 
     Raises:
-        ValueError: If the shape is wrong, the matrix is not symmetric, the
-            diagonal is not unit, or any entry lies outside ``[-1, 1]``.
+        ValueError: If the shape is wrong, any entry is non-finite, the matrix
+            is not symmetric, the diagonal is not unit, or any entry lies
+            outside ``[-1, 1]``.
     """
     if R.shape != (n_params, n_params):
         raise ValueError(f"correlation must be ({n_params}, {n_params}), got {R.shape}")
+    # Checked before symmetry: np.allclose is False for a NaN entry, so
+    # without this a non-finite matrix would be misreported as asymmetric.
+    if not np.all(np.isfinite(R)):
+        bad = [(int(i), int(j)) for i, j in np.argwhere(~np.isfinite(R))]
+        raise ValueError(
+            f"correlation contains non-finite entries (nan or inf) at {bad}; "
+            "replace them with real values in [-1, 1]"
+        )
     if not np.allclose(R, R.T, atol=1e-10):
         raise ValueError("correlation must be symmetric")
     if not np.allclose(np.diag(R), 1.0, atol=1e-10):

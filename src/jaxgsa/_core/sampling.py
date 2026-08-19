@@ -204,7 +204,48 @@ def _jax_transform_gaussian(
     low: Any | None,
     high: Any | None,
 ) -> Array:
-    """Transform unit-interval samples into Gaussian or truncated Gaussian values."""
+    """Transform unit-interval samples into Gaussian or truncated Gaussian values.
+
+    The truncated inverse CDF is written out rather than taken from SciPy:
+    rescale the unit value into the probability window the truncation leaves,
+    then invert the standard normal. ``ndtr``/``ndtri`` are JAX primitives with
+    derivative rules, so the whole chain differentiates. Whether a bound exists
+    is a static Python fact, so that branch never blocks tracing; only the
+    bound's *value* flows through the graph.
+
+    Written directly, ``ndtri(Phi(a) + u (Phi(b) - Phi(a)))`` fails when the
+    truncation window sits in the upper tail: ``Phi`` of both bounds rounds to
+    exactly 1 (from about 8.2 standard deviations in float64), the window width
+    becomes 0, and the whole column silently turns into ``ndtri(1) = inf``. The
+    remedy is the same one :func:`jaxgsa._core.transforms._truncnorm_cdf` uses
+    in the forward direction — reflect to the survival-function side, where the
+    same probabilities are small and well separated. By the symmetry of the
+    normal, ``truncnorm_ppf(u; a, b) == -truncnorm_ppf(1 - u; -b, -a)`` in
+    standard units, so the upper-tail window is computed as a lower-tail one on
+    the negated axis. The side is chosen branchlessly with ``jnp.where`` on the
+    sign of the window midpoint, so the function stays ``jit``-, ``vmap``- and
+    ``grad``-safe even when the bounds are traced. Each side's inputs are
+    sanitised before ``ndtri`` (the double-``where`` idiom), because an ``inf``
+    in the *untaken* branch would still poison reverse-mode gradients.
+
+    Residual limit: when even the well-conditioned side underflows — both
+    ``ndtr`` endpoints identically 0, which needs the whole window beyond about
+    ``38.5`` standard deviations from the mean in float64 (about ``14`` in
+    float32) — the truncated distribution is genuinely unrepresentable in the
+    dtype and the result is infinite. The float64 host twin
+    (:func:`_transform_gaussian` via ``scipy.stats.truncnorm.ppf``) hits the
+    same wall at the same point.
+
+    Args:
+        unit_values: Unit-interval samples, any shape.
+        mean: Mean of the (untruncated) Gaussian. May be a tracer.
+        variance: Variance of the (untruncated) Gaussian. May be a tracer.
+        low: Lower truncation bound, or ``None`` for unbounded below.
+        high: Upper truncation bound, or ``None`` for unbounded above.
+
+    Returns:
+        Samples in physical units, same shape as ``unit_values``.
+    """
     # Same clip as _transform_gaussian: ndtri(0) and ndtri(1) are -inf/+inf,
     # and an infinite sample would poison every downstream index. The host
     # twin runs in float64, where ``1 - UNIT_CLIP`` is a number below 1; this
@@ -213,20 +254,52 @@ def _jax_transform_gaussian(
     # float32 represents 1e-12 exactly, and widening it for symmetry would
     # discard information and move numbers for nothing. See unit_clip_bounds.
     unit_values = jnp.asarray(unit_values)
-    clipped = jnp.clip(unit_values, *unit_clip_bounds(UNIT_CLIP, unit_values.dtype))
+    clip_lo, clip_hi = unit_clip_bounds(UNIT_CLIP, unit_values.dtype)
+    clipped = jnp.clip(unit_values, clip_lo, clip_hi)
     std = jnp.sqrt(variance)
     if low is None and high is None:
         return mean + std * ndtri(clipped)
 
-    # Truncated inverse CDF, written out rather than taken from SciPy: rescale
-    # the unit value into the probability window the truncation leaves, then
-    # invert the standard normal. ``ndtr``/``ndtri`` are JAX primitives with
-    # derivative rules, so the whole chain differentiates. Whether a bound
-    # exists is a static Python fact, so the branch never blocks tracing; only
-    # the bound's *value* flows through the graph.
-    a = 0.0 if low is None else ndtr((low - mean) / std)
-    b = 1.0 if high is None else ndtr((high - mean) / std)
-    return mean + std * ndtri(a + clipped * (b - a))
+    # The reflected side works with the complement of the unit coordinate. It
+    # is re-clipped because the complement of the asymmetric clip is not the
+    # clip: in float32, ``1 - UNIT_CLIP`` rounds back to exactly 1, and
+    # ``ndtri(1)`` is the very infinity the clip exists to prevent.
+    complement = jnp.clip(1.0 - clipped, clip_lo, clip_hi)
+
+    if low is None:
+        # (-inf, high]: the direct form is well conditioned everywhere. Phi of
+        # the bound only loses precision near 1, which here means the window
+        # covers essentially the whole line — the untruncated regime, where a
+        # width of exactly 1 is harmless.
+        return mean + std * ndtri(clipped * ndtr((high - mean) / std))
+    if high is None:
+        # [low, inf): the mirror image, always through the survival function.
+        return mean + std * -ndtri(complement * ndtr((mean - low) / std))
+
+    alpha = (low - mean) / std
+    beta = (high - mean) / std
+    # Reflect when the window midpoint sits above the mean. Near the mean both
+    # forms are exact, so the exact crossover point is immaterial.
+    upper = alpha + beta > 0.0
+    # Double-where: each side's ndtr/ndtri chain also runs where the *other*
+    # side is selected, and on a far-tail window the wrong side computes
+    # ndtri(1) = inf. jnp.where discards the value, but reverse-mode AD would
+    # still propagate a 0 * inf = nan cotangent through it, so the untaken
+    # side's inputs are replaced with a benign window first.
+    alpha_direct = jnp.where(upper, -1.0, alpha)
+    beta_direct = jnp.where(upper, 1.0, beta)
+    alpha_reflect = jnp.where(upper, alpha, -1.0)
+    beta_reflect = jnp.where(upper, beta, 1.0)
+
+    a = ndtr(alpha_direct)
+    b = ndtr(beta_direct)
+    direct = ndtri(a + clipped * (b - a))
+
+    sf_high = ndtr(-beta_reflect)
+    sf_low = ndtr(-alpha_reflect)
+    reflected = -ndtri(sf_high + complement * (sf_low - sf_high))
+
+    return mean + std * jnp.where(upper, reflected, direct)
 
 
 def _validate_theta(problem: Problem, theta: Theta) -> None:

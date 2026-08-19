@@ -120,14 +120,77 @@ def test_fitted_repair_warns_but_never_raises_when_material():
 
 
 def test_fit_gaussian_copula_never_raises_on_degenerate_data():
-    """A duplicated column makes the rank estimate singular; the fit survives."""
+    """Tier T4 (invariant): degenerate data degrades the fit, never raises.
+
+    A duplicated column makes the rank estimate singular, and a constant
+    column used to send NaN through np.corrcoef into np.linalg.eigh, which
+    died with a bare LinAlgError. Both must come back as a valid matrix.
+    """
     rng = np.random.default_rng(0)
     column = rng.normal(size=64)
-    X = np.column_stack([column, column, rng.normal(size=64)])
+    X = np.column_stack([column, column, rng.normal(size=64), np.full(64, 3.14)])
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        R = fit_gaussian_copula(_uniform_problem(3), X)
+        R = fit_gaussian_copula(_uniform_problem(4), X)
+    assert np.isfinite(R).all()
     assert np.linalg.eigvalsh(R).min() > 0
+
+
+def test_fit_gaussian_copula_decouples_a_constant_column_and_warns():
+    """Tier T4 (invariant): a constant column is identity-decoupled, named, and
+    the finite pairs are still fitted — with no raw numpy divide warnings."""
+    rng = np.random.default_rng(1)
+    z = rng.normal(size=256)
+    X = np.column_stack([z, z + 0.1 * rng.normal(size=256), np.full(256, 2.0)])
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        R = fit_gaussian_copula(_uniform_problem(3), X)
+
+    # One JaxgsaWarning names the constant parameter and says why.
+    ours = [w for w in record if issubclass(w.category, jaxgsa.JaxgsaWarning)]
+    assert len(ours) == 1
+    assert "x2" in str(ours[0].message)
+    assert "constant" in str(ours[0].message)
+    # No raw numpy divide/invalid warnings leak through.
+    assert not any(issubclass(w.category, RuntimeWarning) for w in record)
+
+    # The constant parameter is decoupled: exact identity row and column.
+    np.testing.assert_allclose(R[2], [0.0, 0.0, 1.0], atol=1e-12)
+    np.testing.assert_allclose(R[:, 2], [0.0, 0.0, 1.0], atol=1e-12)
+    # The remaining pair is still fitted, not zeroed along with it.
+    assert R[0, 1] > 0.9
+    assert np.linalg.eigvalsh(R).min() > 0
+
+
+def test_fit_gaussian_copula_decouples_a_non_finite_column_and_warns():
+    """Tier T4 (invariant): a NaN-poisoned column has no meaningful ranks, so
+    it is decoupled like a constant one, and the fit still never raises."""
+    rng = np.random.default_rng(2)
+    z = rng.normal(size=128)
+    bad = rng.normal(size=128)
+    bad[7] = np.nan
+    X = np.column_stack([z, z + 0.1 * rng.normal(size=128), bad])
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        R = fit_gaussian_copula(_uniform_problem(3), X)
+
+    ours = [w for w in record if issubclass(w.category, jaxgsa.JaxgsaWarning)]
+    assert len(ours) == 1
+    assert "x2" in str(ours[0].message)
+    assert not any(issubclass(w.category, RuntimeWarning) for w in record)
+    np.testing.assert_allclose(R[2], [0.0, 0.0, 1.0], atol=1e-12)
+    assert R[0, 1] > 0.9
+    assert np.isfinite(R).all()
+    assert np.linalg.eigvalsh(R).min() > 0
+
+
+def test_canonicalize_correlation_reports_non_finite_entries_by_name():
+    """Tier T4 (input-contract): a NaN entry must be reported as non-finite,
+    not misdiagnosed as asymmetry by np.allclose(R, R.T) being False."""
+    R = np.eye(3)
+    R[0, 1] = R[1, 0] = np.nan
+    with pytest.raises(ValueError, match="non-finite"):
+        canonicalize_correlation(R, 3)
 
 
 # ---------------------------------------------------------------------------
