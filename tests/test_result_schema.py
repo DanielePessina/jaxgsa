@@ -22,17 +22,19 @@ must keep the bootstrap draws only when asked.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import _result_fixtures as fixtures
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 import jaxgsa
 from jaxgsa._core.registry import methods
-from jaxgsa._core.result import CIInfo
+from jaxgsa._core.result import CIInfo, FieldSpec, ResultSchema, SchemaResult
 
 SNAPSHOT = Path(__file__).parent / "data" / "result_dataset_schema.json"
 
@@ -313,3 +315,47 @@ def test_sobol_keeps_its_draws_only_when_asked() -> None:
     for name, draws in kept.ci.replicates.items():
         assert draws.shape[0] == kept.ci.n_resamples
         assert draws.shape[1:] == getattr(kept, name).shape
+
+
+PROBLEM = jaxgsa.Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0), "x3": (0.0, 1.0)})
+"""Three parameters, so a D-long field mislabelled ``"param"`` still fits."""
+
+
+@dataclass(repr=False)
+class _SpectrumResult(SchemaResult):
+    """A stand-in for a method whose second field is not per-parameter.
+
+    ``ST`` is per-parameter. ``eigenvalues`` is the same length and is not.
+    """
+
+    problem: jaxgsa.Problem
+    ST: np.ndarray
+    eigenvalues: np.ndarray
+
+    _schema = ResultSchema(
+        primary="ST",
+        fields=(FieldSpec("ST", "param"), FieldSpec("eigenvalues", "index")),
+    )
+
+
+def _spectrum_result() -> _SpectrumResult:
+    return _SpectrumResult(
+        problem=PROBLEM,
+        ST=np.asarray([0.5, 0.3, 0.2]),
+        eigenvalues=np.asarray([9.0, 3.0, 1.0]),
+    )
+
+
+def test_an_index_field_gets_its_own_dimension() -> None:
+    """It must not share ``param``, or ``.sel(param=...)`` would return it."""
+    ds = _spectrum_result().to_dataset()
+    assert ds["ST"].dims == ("param",)
+    assert ds["eigenvalues"].dims == ("index",)
+
+
+def test_an_index_axis_is_labelled_with_integers() -> None:
+    """The parameter names would claim a meaning the field does not have."""
+    ds = _spectrum_result().to_dataset()
+    assert list(ds.coords["index"].values) == [0, 1, 2]
+    assert list(ds.coords["param"].values) == list(PROBLEM.names)
+    assert ds["eigenvalues"].sel(index=0) == 9.0

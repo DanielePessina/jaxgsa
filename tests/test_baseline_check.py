@@ -28,7 +28,10 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 import baseline_check  # noqa: E402  # isort: skip
+import baseline_dump  # noqa: E402  # isort: skip
 from baseline_check import compare  # noqa: E402  # isort: skip
+
+from jaxgsa._core.registry import methods  # noqa: E402  # isort: skip
 
 
 def _array(values: list[float], shape: list[int] | None = None) -> dict[str, Any]:
@@ -207,3 +210,46 @@ class TestTheTwoKindsStaySeparate:
         assert len(diffs.values) == 1, "the moved number must be reported on its own"
         assert len(diffs.schema) == 1
         assert "999.0" in diffs.values[0]
+
+
+class TestEveryMethodIsDumped:
+    """The one registration surface that had no guard.
+
+    ``scripts/baseline_dump.py`` lists its runners by hand. A method left out
+    of both tables produces no entry in the base dump and none in the head
+    dump, so the CI diff is clean and the method ships with no numerical
+    regression guard at all. Every other surface — the docs matrix, the
+    result-schema snapshot, the result fixtures — is checked against the
+    registry. This makes that one answerable too.
+
+    The runner bodies cannot be derived: they carry per-method keywords such
+    as ``n_variance=512``. The coverage can.
+    """
+
+    def test_the_runner_tables_cover_the_registry(self):
+        covered = set(baseline_dump.DESIGN_METHODS) | set(baseline_dump.GIVEN_DATA_METHODS)
+        registered = set(methods())
+        assert covered == registered, (
+            f"no baseline runner: {sorted(registered - covered)} — add one to "
+            "scripts/baseline_dump.py, in DESIGN_METHODS for a method with its own "
+            "sampler and in GIVEN_DATA_METHODS otherwise, then regenerate the stored "
+            "baseline. A method in neither table is dumped by neither side of the CI "
+            "diff, so it ships with no numerical guard. "
+            f"Runner but no registered method: {sorted(covered - registered)}."
+        )
+
+    def test_each_runner_sits_in_the_table_that_matches_its_calling_convention(self):
+        """The two tables call their runners with different arguments.
+
+        A design-based method in ``GIVEN_DATA_METHODS`` would be handed an
+        ``X`` and a ``Y`` it never asked for.
+        """
+        for name, spec in methods().items():
+            table = "DESIGN_METHODS" if spec.is_design_based else "GIVEN_DATA_METHODS"
+            other = "GIVEN_DATA_METHODS" if spec.is_design_based else "DESIGN_METHODS"
+            assert name in getattr(baseline_dump, table), (
+                f"{name} has sample={spec.sample!r} so its runner belongs in {table}"
+            )
+            assert name not in getattr(baseline_dump, other), (
+                f"{name} is listed in {other}, which calls it the wrong way"
+            )

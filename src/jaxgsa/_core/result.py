@@ -95,7 +95,7 @@ class CIInfo:
         )
 
 
-Axes = Literal["param", "slice", "pair", "triple", "term", "term_only", "pair_only"]
+Axes = Literal["param", "slice", "pair", "triple", "term", "term_only", "index", "pair_only"]
 """Which axes a declared field spans, relative to the result's base dims.
 
 The base dims come from :func:`jaxgsa._core.validation._dims_and_coords`:
@@ -110,6 +110,11 @@ Writing ``lead`` for the base dims without their trailing ``param``:
   /``param_k`` names, because xarray cannot give one dataset two dimensions
   called ``param``.
 * ``"term"``: ``lead`` plus an HDMR expansion-term axis.
+* ``"index"``: ``lead`` plus a plain ordinal axis. Use it for a field that is
+  as long as the number of parameters but is **not** indexed by parameter —
+  an eigenvalue spectrum, for instance. Its coordinates are integers
+  ``0..n-1``, never the parameter names, so a reader cannot mistake position
+  three for parameter three.
 * ``"term_only"`` / ``"pair_only"``: the term axis, or the two parameter
   axes, with no output or time axes at all.
 """
@@ -245,6 +250,8 @@ class SchemaResult:
             return (*lead, "term")
         if axes == "term_only":
             return ("term",)
+        if axes == "index":
+            return (*lead, "index")
         return _PAIR_DIMS
 
     def to_dataset(self, time_coords: np.ndarray | list | None = None) -> xr.Dataset:
@@ -273,23 +280,31 @@ class SchemaResult:
             if spec.dataset and spec.name not in omit and getattr(self, spec.name) is not None
         ]
 
-        def _name_axes(spec: FieldSpec) -> None:
-            """Declare the coordinates of a field's extra parameter axes.
+        def _name_axes(spec: FieldSpec, values: np.ndarray) -> None:
+            """Declare the coordinates of a field's extra axes.
 
             The coordinates belong to the axes, not to any one variable, so
             they are named whenever anything on that axis is exported. Naming
             them only alongside the point estimate would leave a lone
             ``*_lower`` unlabelled, and ``.sel(param_i=...)`` would raise.
+
+            An ``"index"`` axis gets integers, not parameter names: it is as
+            long as the parameter axis but means something else, and labelling
+            it with the names would read as a per-parameter result.
             """
-            for dim in self._field_dims(spec.axes, base):
+            dims = self._field_dims(spec.axes, base)
+            for dim in dims:
                 if dim in _TRIPLE_DIMS and dim not in coords:
                     coords[dim] = param_names
+                elif dim == "index" and dim not in coords:
+                    coords[dim] = np.arange(values.shape[dims.index(dim)])
 
         data_vars: dict[str, tuple[tuple[str, ...], np.ndarray]] = {}
         for spec in specs:
             dims = self._field_dims(spec.axes, base)
-            data_vars[spec.name] = (dims, np.asarray(getattr(self, spec.name)))
-            _name_axes(spec)
+            values = np.asarray(getattr(self, spec.name))
+            data_vars[spec.name] = (dims, values)
+            _name_axes(spec, values)
 
         for spec in self._schema.fields:
             if not (spec.interval and spec.dataset) or spec.name in omit:
@@ -301,7 +316,7 @@ class SchemaResult:
             conf = np.asarray(conf)
             data_vars[f"{spec.name}_lower"] = (dims, conf[0])
             data_vars[f"{spec.name}_upper"] = (dims, conf[1])
-            _name_axes(spec)
+            _name_axes(spec, conf[0])
 
         return xr.Dataset(data_vars, coords=coords, attrs=self._dataset_attrs())
 
