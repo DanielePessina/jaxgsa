@@ -423,6 +423,37 @@ class TestSliceChunkSize:
             atol=1e-6,
         )
 
+    def test_trailing_chunk_pad_keeps_dtype_under_x64(self):
+        """T4: the padded trailing chunk stays in the outputs' own dtype.
+
+        Under x64 an unannotated ``jnp.zeros`` pad is float64, so float32
+        outputs promoted on the trailing chunk only: the kernel re-traced at
+        a second dtype, the trailing slices were computed at a different
+        precision, and the concatenated indices came back float64. The pad
+        now carries the batch's dtype, so a chunk size that does not divide
+        the work must give the same numbers and the same dtype as the
+        un-chunked run.
+        """
+        with jax.enable_x64():
+            sr = sample(ishigami.PROBLEM, n_per_curve=257, M=4, seed=42)
+            X32 = jnp.asarray(sr.samples, dtype=jnp.float32)
+            Y = ishigami.evaluate(X32)
+            Y_multi = jnp.stack([Y, 2.0 * Y], axis=-1)  # (n_runs, 2), float32
+            assert Y_multi.dtype == jnp.float32
+
+            # D=3, K=2 -> 6 slices; chunks of 4 leave a padded trailing 2.
+            S1_full, ST_full = indices(sr, Y_multi)
+            S1_chunk, ST_chunk = indices(sr, Y_multi, slice_chunk_size=4)
+
+            assert S1_chunk.dtype == S1_full.dtype
+            assert ST_chunk.dtype == ST_full.dtype
+            np.testing.assert_allclose(
+                np.asarray(S1_chunk), np.asarray(S1_full), rtol=1e-6, atol=1e-7
+            )
+            np.testing.assert_allclose(
+                np.asarray(ST_chunk), np.asarray(ST_full), rtol=1e-6, atol=1e-7
+            )
+
 
 class TestToDatasetMultiOutput:
     """Tests for to_dataset with multi-output and time-series results."""

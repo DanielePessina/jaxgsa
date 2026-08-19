@@ -345,6 +345,60 @@ class TestLooRmse:
         H = Phi_np @ np.linalg.solve(gram, Phi_np.T)
         np.testing.assert_allclose(got, np.diag(H), rtol=1e-4, atol=1e-6)
 
+    def test_leverage_clip_holds_in_both_dtypes(self):
+        """T4: an interpolated row's leverage stays strictly below 1.
+
+        A square invertible ``Phi`` has ``H = I``, so every leverage is
+        exactly 1 before the clip. The old bound ``1 - 1e-10`` rounds back
+        to exactly 1.0 in float32 (the spacing below 1.0 is ~6e-8), which
+        made the clip a no-op and let ``1 - h_i`` reach zero. The bound is
+        now taken inside the leverage's own dtype, so the invariant must
+        hold in float32 and float64 alike.
+        """
+        eye32 = jnp.eye(6, dtype=jnp.float32)
+        lev32 = hat_diagonal(eye32, gram_cholesky(eye32, 0.0))
+        assert lev32.dtype == jnp.float32
+        assert np.all(np.asarray(lev32) < 1.0)
+
+        with jax.enable_x64():
+            eye64 = jnp.eye(6, dtype=jnp.float64)
+            lev64 = hat_diagonal(eye64, gram_cholesky(eye64, 0.0))
+            assert lev64.dtype == jnp.float64
+            assert np.all(np.asarray(lev64) < 1.0)
+
+    def test_interpolating_fit_keeps_loo_finite(self):
+        """T4: a fit with as many terms as rows reports a finite LOO RMSE.
+
+        With ``N == C(D + order, order)`` and ``fit_ratio=1.0`` the least
+        squares fit interpolates, every leverage is (up to the tiny ridge)
+        1, and the LOO shortcut divides by ``1 - h_i``. In float32 the old
+        no-op clip let that become residual/0 and an inf/NaN ``loo_rmse``
+        propagated to every slice. The number is legitimately huge — an
+        interpolating fit has no honest LOO — but it must be finite, in
+        float32 and under x64 alike.
+        """
+
+        def _fit():
+            key = jax.random.PRNGKey(3)
+            D, order = 3, 2
+            n_terms = 10  # C(D + order, order) = C(5, 2)
+            bounds = jnp.array(ishigami.PROBLEM.bounds)
+            X = jax.random.uniform(
+                key, shape=(n_terms, D), minval=bounds[:, 0], maxval=bounds[:, 1]
+            )
+            return pce.analyze(
+                ishigami.PROBLEM, X, ishigami.evaluate(X), order=order, fit_ratio=1.0
+            )
+
+        result32 = _fit()
+        assert result32.loo_rmse is not None
+        assert np.all(np.isfinite(np.asarray(result32.loo_rmse)))
+
+        with jax.enable_x64():
+            result64 = _fit()
+            assert result64.loo_rmse is not None
+            assert np.all(np.isfinite(np.asarray(result64.loo_rmse)))
+
 
 # ---------------------------------------------------------------------------
 # 8. Gaussian inputs (Hermite basis)

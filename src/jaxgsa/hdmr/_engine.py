@@ -224,13 +224,12 @@ def term_order_map(
 
     Terms are laid out in one flat axis: the ``n1`` single-parameter terms
     first, then the ``n2`` pairs, then the triples. The F-test needs three
-    per-term lookups derived from that layout, and both the in-memory kernel
-    (:func:`_f_test`) and the row-streamed fit
-    (:func:`jaxgsa.hdmr._stream._fit_hdmr_streamed`) need exactly the same
-    three. This is their single definition: the streamed fit is compared
-    against the in-memory one by exact equality on the selected term set, so
-    the two must agree bit for bit, which a second copy of the expressions
-    cannot guarantee.
+    per-term lookups derived from that layout, and this is their single
+    definition. The one consumer is the unified fit in
+    :mod:`jaxgsa.hdmr._fit`, which serves every batch and chunk size, so
+    term selection has exactly one definition no matter how the sample or
+    slice axes are split — a second copy of these expressions is what could
+    let two paths disagree on the selected term set.
 
     Args:
         n: Total number of terms.

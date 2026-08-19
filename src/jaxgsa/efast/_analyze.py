@@ -194,7 +194,11 @@ def _indices_from_3d(
         actual = end - start
         batch = Y_batched[start:end]
         if actual < cs:
-            batch = jnp.concatenate([batch, jnp.zeros((cs - actual, N))], axis=0)
+            # dtype= keeps the pad in the batch's own dtype: an unannotated
+            # jnp.zeros is float64 under x64, which would promote the whole
+            # trailing chunk and re-trace the kernel at a second dtype.
+            pad = jnp.zeros((cs - actual, N), dtype=Y_batched.dtype)
+            batch = jnp.concatenate([batch, pad], axis=0)
         s1_chunk, st_chunk = batched(batch)
         s1_parts.append(s1_chunk[:actual])
         st_parts.append(st_chunk[:actual])

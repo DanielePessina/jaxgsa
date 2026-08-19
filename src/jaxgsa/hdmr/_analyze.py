@@ -17,7 +17,14 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
-from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare
+from jaxgsa._core.entry import (
+    ScalarCheck,
+    at_least,
+    check_scalars,
+    in_open_interval,
+    one_of,
+    prepare,
+)
 from jaxgsa._core.invalid import InvalidReport, OnInvalid
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.surrogate import _PredictPlan
@@ -42,6 +49,39 @@ from jaxgsa.problem import Problem
 # dropping past it refuses in the policy's words rather than in the generic
 # "Need at least 300 samples" check further down.
 _MIN_ROWS = 300
+
+
+def _fit_scalar_checks(maxiter: int, m: int, lambdax: float) -> tuple[ScalarCheck, ...]:
+    """Build the scalar checks the HDMR fit arguments must pass.
+
+    One definition serves both entry points: :func:`analyze` hands these to
+    ``prepare`` and :func:`_hdmr_core` (which :func:`indices` routes through)
+    re-runs them with ``check_scalars``, so the two cannot drift apart.
+
+    The bounds are where the fit degenerates silently rather than loudly:
+
+    * ``m >= 1``: the cubic B-spline basis is scaled by ``m**3``
+      (see ``_engine._bspline_basis``), so ``m = 0`` makes every basis
+      function exactly zero and every index silently 0. ``m = 1`` is the
+      smallest valid basis — one knot interval, ``m + 3 = 4`` functions.
+    * ``maxiter >= 1``: zero iterations skips backfitting entirely and
+      returns the unfitted coefficients without a word.
+    * ``lambdax >= 0``: a negative value subtracts from the Gram diagonal,
+      which turns the regularized solve into NaN coefficients.
+
+    Args:
+        maxiter: Maximum backfitting iterations.
+        m: B-spline intervals per dimension.
+        lambdax: Tikhonov regularization strength.
+
+    Returns:
+        The checks, ready for ``prepare(checks=...)`` or ``check_scalars``.
+    """
+    return (
+        at_least("maxiter", maxiter, 1),
+        at_least("m", m, 1),
+        at_least("lambdax", lambdax, 0.0),
+    )
 
 
 class _HDMRStaticData(NamedTuple):
@@ -304,6 +344,7 @@ def analyze(
         X=X,
         on_invalid=on_invalid,
         checks=(
+            *_fit_scalar_checks(maxiter, m, lambdax),
             at_least("n_bootstrap", n_bootstrap, 0),
             one_of("ci_method", ci_method, ("quantile", "gaussian")),
             in_open_interval("conf_level", conf_level, 0.0, 1.0),
@@ -423,8 +464,10 @@ def _hdmr_core(
         The :class:`_HDMRCore` bundle.
 
     Raises:
-        ValueError: If ``N < 300``, ``maxorder`` is not 1/2/3, or a chunk
-            size is below 1. All three are decided on Python scalars.
+        ValueError: If ``N < 300``, ``maxorder`` is not 1/2/3, ``maxiter``
+            or ``m`` is below 1, ``lambdax`` is negative, or a chunk size is
+            below 1. All are decided on Python scalars. See
+            :func:`_fit_scalar_checks` for why those bounds.
     """
     N, D = X.shape
     # B-spline regression with backfitting needs a reasonable sample size
@@ -433,6 +476,7 @@ def _hdmr_core(
         raise ValueError(f"Need at least 300 samples, got {N}")
     if maxorder not in (1, 2, 3):
         raise ValueError(f"maxorder must be 1, 2, or 3, got {maxorder}")
+    check_scalars(_fit_scalar_checks(maxiter, m, lambdax))
     # Clamped silently: there is no more expansion order available than there
     # are parameters. `analyze` warns about it; this is the traceable half,
     # and the clamped value comes back on `_HDMRCore.maxorder`.
@@ -602,9 +646,10 @@ def indices(
         ``Y``. ``Sa``/``Sb``/``S`` are per term and ``ST`` is per parameter.
 
     Raises:
-        ValueError: If ``N < 300``, ``maxorder`` is not 1/2/3, a chunk size
-            is below 1, or ``problem`` has a categorical parameter, whose
-            step CDF has no unit-interval image.
+        ValueError: If ``N < 300``, ``maxorder`` is not 1/2/3, ``maxiter``
+            or ``m`` is below 1, ``lambdax`` is negative, a chunk size is
+            below 1, or ``problem`` has a categorical parameter, whose step
+            CDF has no unit-interval image.
     """
     core = _hdmr_core(
         problem,

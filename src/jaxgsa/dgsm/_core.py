@@ -145,7 +145,11 @@ def jac_batches(
         X_chunk = X[start:end]
         if actual_len < batch_size:
             pad_size = batch_size - actual_len
-            X_chunk = jnp.concatenate([X_chunk, jnp.zeros((pad_size, X.shape[1]))], axis=0)
+            # dtype= keeps the pad in X's own dtype: an unannotated jnp.zeros
+            # is float64 under x64, which would promote the padded last batch
+            # and call the user's fn at a different dtype than every other one.
+            pad = jnp.zeros((pad_size, X.shape[1]), dtype=X.dtype)
+            X_chunk = jnp.concatenate([X_chunk, pad], axis=0)
         jac, Y_chunk = combined(X_chunk)
         yield jac[:actual_len], Y_chunk[:actual_len], X[start:end]
 

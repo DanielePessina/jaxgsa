@@ -17,6 +17,11 @@ from jax.scipy.linalg import solve_triangular
 
 # Shared recurrence in _core.legendre; the VKOGA component fit uses it too.
 from jaxgsa._core.legendre import legendre_orthonormal as _legendre_1d
+from jaxgsa._core.precision import unit_clip_bounds
+
+# Nominal gap the leverage clip keeps between h_i and 1. The value the clip
+# actually uses is dtype-aware — see hat_diagonal.
+_LEVERAGE_CLIP = 1e-10
 
 
 def _hermite_1d(x: Array, max_degree: int) -> Array:
@@ -238,14 +243,21 @@ def hat_diagonal(Phi: Array, gram_chol: Array) -> Array:
             matrix, shape ``(n_terms, n_terms)``.
 
     Returns:
-        Leverage per row, shape ``(b,)``, clipped to ``[0, 1 - 1e-10]``. The
-        upper clip keeps ``1 - h_i`` away from zero: a row the fit
-        interpolates exactly has ``h_i = 1``, which would divide by zero.
+        Leverage per row, shape ``(b,)``, clipped to ``[0, high]`` with
+        ``high`` strictly below 1 in the leverage's own dtype. The upper clip
+        keeps ``1 - h_i`` away from zero: a row the fit interpolates exactly
+        has ``h_i = 1``, which would divide by zero and turn ``loo_rmse``
+        into inf/NaN for every output slice. The nominal bound is
+        ``1 - 1e-10``, but in float32 that rounds back to exactly 1.0 (the
+        spacing below 1.0 is about ``6e-8``), which made the clip a silent
+        no-op — the same dtype trap :func:`jaxgsa._core.precision.unit_clip_bounds`
+        exists for, so it supplies the bound.
     """
     # (n_terms, b): solve L Z = Phi^T, then h_i = sum_j Z[j, i]^2.
     Z = solve_triangular(gram_chol, Phi.T, lower=True)
     leverage = jnp.sum(Z * Z, axis=0)
-    return jnp.clip(leverage, 0.0, 1.0 - 1e-10)
+    _, high = unit_clip_bounds(_LEVERAGE_CLIP, leverage.dtype)
+    return jnp.clip(leverage, 0.0, high)
 
 
 def loo_error(

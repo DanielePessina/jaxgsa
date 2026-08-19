@@ -462,6 +462,51 @@ def test_validation_errors():
         analyze_hdmr(PROBLEM, X, Y, **legacy_kwargs)
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        # m=0 zeroes the whole basis (val * m**3 in _engine._bspline_basis),
+        # so every index came out 0 with no error at all.
+        ({"m": 0}, "m must be >= 1"),
+        ({"m": -1}, "m must be >= 1"),
+        # maxiter=0 silently skipped backfitting and returned unfitted
+        # coefficients.
+        ({"maxiter": 0}, "maxiter must be >= 1"),
+        # lambdax<0 subtracts from the Gram diagonal and yields NaN
+        # coefficients.
+        ({"lambdax": -1.0}, "lambdax must be >= 0"),
+    ],
+)
+def test_fit_scalars_rejected_in_analyze_and_indices(kwargs, match):
+    """T4: m, maxiter and lambdax are validated, in both entry points.
+
+    Each of the three used to reach the fit unchecked and degrade it
+    silently. Both ``analyze`` and ``indices`` run the same checks (one
+    definition, ``_fit_scalar_checks``), so the two cannot drift.
+    """
+    from jaxgsa.hdmr import indices as indices_hdmr
+
+    X = jnp.ones((500, 3))
+    Y = jnp.ones(500)
+    with pytest.raises(ValueError, match=match):
+        analyze_hdmr(PROBLEM, X, Y, **kwargs)
+    with pytest.raises(ValueError, match=match):
+        indices_hdmr(PROBLEM, X, Y, **kwargs)
+
+
+def test_fit_scalars_valid_edges_pass(ishigami_data):
+    """T4: the smallest legal values fit without an error.
+
+    ``m=1`` is the minimal cubic basis (one knot interval, four functions),
+    ``maxiter=1`` is one backfitting sweep, ``lambdax=0.0`` is an
+    unregularized solve. All three are degraded-but-defined, so they must
+    run, not raise.
+    """
+    X, Y = ishigami_data
+    result = analyze_hdmr(PROBLEM, X, Y, maxorder=1, m=1, maxiter=1, lambdax=0.0)
+    assert np.all(np.isfinite(np.asarray(result.S1)))
+
+
 # ---------------------------------------------------------------------------
 # S2 / S3 interaction-index properties
 # ---------------------------------------------------------------------------
