@@ -44,6 +44,7 @@ as useless as a deleted one. A superseded ADR keeps its number and gains a
 | [0017](0017-negative-sobol-estimates-are-not-clipped.md) | Negative Sobol estimates are reported, not clipped |
 | [0018](0018-jit-cache-keys-carry-no-data.md) | A jit cache key carries metadata, never data |
 | [0019](0019-pce-leave-one-out-uses-a-cholesky-factor.md) | PCE leave-one-out leverage comes from a Cholesky factor |
+| [0021](0021-sobol-default-estimator.md) | The default Sobol estimator is `saltelli-jansen`: Jansen's `ST` cannot go negative, and it matches SALib's default |
 
 ### Scope and process
 

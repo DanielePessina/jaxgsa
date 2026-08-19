@@ -34,6 +34,7 @@ from typing import Any
 
 import _result_fixtures as fixtures
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 import jaxgsa
@@ -388,3 +389,20 @@ def test_sobol_keeps_its_draws_only_when_asked() -> None:
     for name, draws in kept.ci.replicates.items():
         assert draws.shape[0] == kept.ci.n_bootstrap
         assert draws.shape[1:] == getattr(kept, name).shape
+
+
+def test_sobol_s2_draws_follow_the_reported_convention() -> None:
+    """Kept S2 draws are symmetric with a NaN diagonal, like the S2 estimate.
+
+    The bootstrap kernel returns the raw (D, D) matrix, whose lower triangle
+    is a different numerical path. The stored draws must match the convention
+    the point estimate is reported in, so a user who recomputes an interval
+    from them is describing the number at its centre.
+    """
+    kept = _sobol_analyze(keep_replicates=True)
+    assert kept.ci is not None and kept.ci.replicates is not None
+    draws = np.asarray(kept.ci.replicates["S2"])
+    D = draws.shape[-1]
+    diag = draws[..., np.arange(D), np.arange(D)]
+    assert np.all(np.isnan(diag))
+    np.testing.assert_array_equal(draws, np.swapaxes(draws, -1, -2))

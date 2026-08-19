@@ -646,7 +646,11 @@ def _analyze_bootstrap(
             "ST": layout.squeeze(ST_boot, n_trailing=1),
         }
         if S2_boot is not None:
-            replicates["S2"] = layout.squeeze(S2_boot, n_trailing=2)
+            # Stored draws follow the reported convention: symmetric with a
+            # NaN diagonal, exactly as the S2 point estimate is reported. The
+            # CI endpoints above were already read from the raw draws before
+            # this, so nothing derived from them changes.
+            replicates["S2"] = layout.squeeze(_normalize_s2_matrix(S2_boot), n_trailing=2)
 
     return SobolResult(
         S1=S1_out,
@@ -723,8 +727,11 @@ def analyze(
             can return a value outside ``[0, 1]``.
 
                 ``"saltelli-jansen"`` (default): Sobol'-Mauntz first order,
-                Jansen (1999) total order. This is what jaxgsa has always
-                computed, and changing it would move every stored number.
+                Jansen (1999) total order. It is the default because Jansen's
+                total-order estimator is a mean of squares, so ``ST`` can
+                never go negative, and because it is the same pairing SALib
+                uses by default, so the two libraries agree out of the box.
+                See ``docs/adr/0021-sobol-default-estimator.md``.
                 ``"jansen"``: Jansen (1999) for both orders. Neither index
                 can go negative, and both are biased upward at a true zero.
                 ``"janon-monod"``: one self-consistent normaliser shared
@@ -779,6 +786,13 @@ def analyze(
             refuses the sample, ``"propagate"`` lets the value reach the
             indices, and ``"drop"`` analyzes the surviving groups. See
             :mod:`jaxgsa._core.invalid`.
+        keep_replicates: Keep the per-resample index draws on
+            ``result.ci.replicates``, keyed ``"S1"``, ``"ST"`` and (with a
+            second-order design) ``"S2"``, each leading with the resample
+            axis. The stored ``S2`` draws follow the reported convention:
+            symmetrised, with a NaN diagonal, exactly as the ``S2`` point
+            estimate is. Off by default, because the draws are ``n_bootstrap``
+            copies of every index array.
         verbose: If ``True`` (default), print a short summary to stdout: the
             problem and the data, the wall-clock timing, and the top
             parameters by ``ST``. Pass ``False`` for a silent run.
