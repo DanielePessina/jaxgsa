@@ -14,7 +14,44 @@ fields, and shares helpers. None of that may change an index. There is no
 tolerance in the comparison, and adding one would defeat the purpose. If a
 number moves, find the mis-wired call before you touch this file.
 
-## The one reviewed exception
+## The reviewed exceptions
+
+Two changes have been allowed to move numbers. Both are recorded here because
+the whole value of this file is that a moved number is a defect until someone
+writes down why it is not.
+
+### 1. Sobol standardizes its outputs
+
+`sobol.analyze` used to leave the output as given unless you passed
+`prenormalize=True`. The Saltelli/Jansen `S1` and every estimator's `S2` are
+uncentred products, so a non-zero output mean injects an error proportional to
+that mean. SALib has always standardized unconditionally
+(`SALib/analyze/sobol.py`, `Y = (Y - Y.mean()) / Y.std()`); jaxgsa made that
+optional and defaulted it off.
+
+183 sobol values moved. The proof that this is the intended fix and not a
+wiring error is the asymmetry: `S1` moved by up to **3.6e-1**, while `ST`
+moved by **1.2e-7**. Jansen's total-order estimator is a difference and is
+therefore already shift-invariant, so it should see nothing but float32
+re-association from the changed operand magnitudes. It does not.
+
+Validated against the closed-form Ishigami values rather than against this
+file, because this file recorded the behaviour being corrected.
+
+### 2. VKOGA and PAWN draw independent RNG streams
+
+VKOGA derived per-stream seeds by arithmetic (`seed + 1 + i`, `seed + 7919`).
+Offset seeds are not independent streams. It now spawns children from one
+`numpy.random.SeedSequence` root. PAWN's harness carried a matching arbitrary
+`+1`.
+
+Moved: VKOGA's six index fields, and `pawn.pawn_conf`. **`pawn.pawn` did not
+move**, and VKOGA's `gamma`, `ridge`, `n_centers`, `rmse` and `cv_rmse` are
+bit-identical — the surrogate is untouched and the movement is the integration
+reseed alone. The new values sit inside the old estimator's own key-to-key
+spread, measured over 8 keys.
+
+## The float32 batch-width exception
 
 Kernel work is not plumbing. Batching an estimator over more output slices at
 once is the whole speedup, and XLA schedules a float32 reduction differently
