@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -11,7 +12,7 @@ import pytest
 from jaxgsa import JaxgsaWarning
 from jaxgsa._core.invalid import InvalidUnit
 from jaxgsa.benchmarks import ishigami, linear, sobol_g
-from jaxgsa.dgsm import analyze
+from jaxgsa.dgsm import analyze, indices
 from jaxgsa.dgsm._poincare import marginal_variance, poincare_constant
 from jaxgsa.problem import GaussianInputSpec, Problem
 from jaxgsa.sampling import monte_carlo
@@ -731,6 +732,16 @@ def _plain(x):
     return 3.0 * x[0] + 0.5 * x[1]
 
 
+def _quadratic(x):
+    """Model whose derivative varies over the sample: (2,) -> ().
+
+    ``_plain`` is linear, so every row has the same Jacobian and a row
+    resample cannot move ``nu`` at all. A bootstrap test needs a model whose
+    derivative actually differs from row to row.
+    """
+    return x[0] ** 2 + 0.5 * x[1] ** 3
+
+
 def _nan_output_at(bad_rows, X):
     """Return a model that gives a NaN **output** on the named rows of X.
 
@@ -1063,3 +1074,288 @@ class TestInvalidPolicyBatched:
         X = jnp.asarray(np.stack([np.linspace(0.6, 0.99, 17), np.linspace(1.0, 2.0, 17)], axis=1))
         result = analyze(_two_uniform_problem(), _nan_jacobian, X, batch_size=5)
         assert result.invalid.n_invalid == 0
+
+
+# --- The pure core, and the bootstrap ---------------------------------------
+
+
+class TestIndicesIsAPureCore:
+    """``indices`` returns the same numbers as ``analyze`` and stays traceable.
+
+    Tier T4 (internal consistency), which is the tier the contract itself is
+    stated at: there is no external oracle for "this function survives
+    ``jit``". What the numbers are is checked against published values
+    elsewhere in this file; what these tests prove is that the transformable
+    entry point computes the same ones, and that the transformations apply.
+    """
+
+    FIELDS = ("nu", "sigma", "upper_bound", "lower_bound", "var_y")
+
+    def _assert_matches_analyze(self, problem, *args, **kwargs):
+        """Assert every returned array equals the matching field of ``analyze``."""
+        got = indices(problem, *args, **kwargs)
+        expected = analyze(problem, *args, **kwargs)
+        assert len(got) == len(self.FIELDS)
+        for name, value in zip(self.FIELDS, got, strict=True):
+            np.testing.assert_array_equal(
+                np.asarray(value), np.asarray(getattr(expected, name)), err_msg=name
+            )
+
+    def test_scalar_output_matches_analyze(self):
+        """T4: the core equals the analysis, field for field, bit for bit."""
+        X = _grid_X(n=32)
+        self._assert_matches_analyze(_two_uniform_problem(), _plain, X)
+
+    def test_multi_output_matches_analyze(self):
+        """T4: the shapes the caller passed come back out of both paths."""
+        X = jnp.asarray(monte_carlo(linear.PROBLEM, 64, seed=3))
+        self._assert_matches_analyze(linear.PROBLEM, _multi_output, X)
+
+    def test_standardized_matches_analyze(self):
+        """T4: the affine rescaling is inside the shared core, not beside it."""
+        X = _grid_X(n=32)
+        self._assert_matches_analyze(_two_uniform_problem(), _plain, X, standardize_outputs=True)
+
+    def test_batched_matches_analyze(self):
+        """T4: batching is a memory choice, so it must not be a numerical one."""
+        X = _grid_X(n=32)
+        self._assert_matches_analyze(_two_uniform_problem(), _plain, X, batch_size=7)
+
+    def test_precomputed_path_matches_analyze(self):
+        """T4: both calling conventions reach the same core."""
+        X = _grid_X(n=32)
+        Y = jnp.asarray([3.0, 0.5]) @ jnp.asarray(X).T
+        dfdx = jnp.tile(jnp.asarray([3.0, 0.5]), (X.shape[0], 1))
+        got = indices(_two_uniform_problem(), Y=Y, dfdx=dfdx)
+        expected = analyze(_two_uniform_problem(), Y=Y, dfdx=dfdx)
+        for name, value in zip(self.FIELDS, got, strict=True):
+            np.testing.assert_array_equal(
+                np.asarray(value), np.asarray(getattr(expected, name)), err_msg=name
+            )
+
+    def test_a_gaussian_marginal_matches_analyze(self):
+        """T4: a Gaussian input reaches the same core as a uniform one.
+
+        Worth its own case because the Gaussian branch is the one with a
+        marginal variance and a truncated-normal CDF behind it, and those are
+        the places a host read hides.
+        """
+        problem = Problem.from_dict(
+            {
+                "x1": GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0),
+                "x2": GaussianInputSpec(
+                    dist="gaussian", mean=2.0, variance=0.25, low=1.0, high=3.0
+                ),
+            }
+        )
+        X = jnp.asarray(monte_carlo(problem, 64, seed=9))
+        self._assert_matches_analyze(problem, _quadratic, X)
+
+    def test_a_gaussian_marginal_survives_jit(self):
+        """T4: the Gaussian path traces.
+
+        A Gaussian marginal used to break ``jit`` while passing eagerly,
+        because the unit-interval transform read ``float(sqrt(variance))`` on
+        the host. DGSM does not call that transform, but its Poincare and
+        marginal-variance constants come off the same specs, so this pins the
+        Gaussian branch rather than assuming the uniform one covers it.
+        """
+        problem = Problem.from_dict(
+            {
+                "x1": GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0),
+                "x2": GaussianInputSpec(
+                    dist="gaussian", mean=2.0, variance=0.25, low=1.0, high=3.0
+                ),
+            }
+        )
+        X = jnp.asarray(monte_carlo(problem, 64, seed=10))
+        jitted = jax.jit(lambda x: indices(problem, _quadratic, x))
+        for got, expected in zip(jitted(X), indices(problem, _quadratic, X), strict=True):
+            np.testing.assert_allclose(np.asarray(got), np.asarray(expected), rtol=1e-5)
+
+    def test_it_survives_jit(self):
+        """T4: no branch reads an array value, so the whole core traces."""
+        problem = _two_uniform_problem()
+        X = _grid_X(n=32)
+        jitted = jax.jit(lambda x: indices(problem, _plain, x))
+        for got, expected in zip(jitted(X), indices(problem, _plain, X), strict=True):
+            np.testing.assert_allclose(np.asarray(got), np.asarray(expected), rtol=1e-6)
+
+    def test_it_survives_vmap(self):
+        """T4: a stack of samples maps without a Python loop."""
+        problem = _two_uniform_problem()
+        stack = jnp.stack([_grid_X(n=32), _grid_X(n=32) * 0.5 + 0.25])
+        mapped = jax.vmap(lambda x: indices(problem, _plain, x)[0])(stack)
+        assert mapped.shape == (2, 2)
+        np.testing.assert_allclose(
+            np.asarray(mapped[0]), np.asarray(indices(problem, _plain, stack[0])[0]), rtol=1e-6
+        )
+
+    def test_it_survives_jit_of_jacrev(self):
+        """T4: the bound is differentiable with respect to the sample.
+
+        This nests a differentiation inside one: ``fn``'s Jacobian is what the
+        outer pass differentiates. ``_plain`` is linear, so its ``nu`` does not
+        depend on ``X`` at all and the derivative of ``nu`` is exactly zero,
+        while ``upper_bound`` divides by ``Var(Y)`` and so does move.
+        """
+        problem = _two_uniform_problem()
+        X = _grid_X(n=32)
+        d_nu = jax.jit(jax.jacrev(lambda x: indices(problem, _plain, x)[0]))(X)
+        assert d_nu.shape == (2, 32, 2)
+        np.testing.assert_allclose(np.asarray(d_nu), 0.0, atol=1e-6)
+
+        d_upper = jax.jit(jax.jacrev(lambda x: indices(problem, _plain, x)[2]))(X)
+        assert d_upper.shape == (2, 32, 2)
+        assert np.isfinite(np.asarray(d_upper)).all()
+        assert np.abs(np.asarray(d_upper)).max() > 0.0
+
+    def test_it_reads_no_value_so_a_nan_passes_straight_through(self):
+        """T4: the core states it runs no policy, and that is testable.
+
+        ``analyze`` raises on this sample. The core cannot, because raising
+        would mean reading a value, which is the thing that makes ``analyze``
+        untraceable in the first place.
+        """
+        X = _grid_X(n=24)
+        with pytest.raises(ValueError, match="non-finite"):
+            analyze(_two_uniform_problem(), _nan_jacobian, X)
+        nu = indices(_two_uniform_problem(), _nan_jacobian, X)[0]
+        assert np.isnan(np.asarray(nu)).any()
+
+
+class TestBootstrap:
+    """Row-resampled confidence intervals for the moments and the bounds."""
+
+    def test_no_bootstrap_leaves_every_interval_unset(self):
+        """The default call reports no interval and no CI record."""
+        result = analyze(_two_uniform_problem(), _plain, _grid_X(n=32))
+        assert result.ci is None
+        for name in ("nu_conf", "sigma_conf", "upper_bound_conf", "lower_bound_conf"):
+            assert getattr(result, name) is None
+
+    def test_a_bootstrap_needs_a_key(self):
+        """No key is silently invented, per the vocabulary."""
+        with pytest.raises(ValueError, match="key is required"):
+            analyze(_two_uniform_problem(), _plain, _grid_X(n=32), n_bootstrap=8)
+
+    def test_the_point_estimate_does_not_move(self):
+        """T4: asking for an interval must not change the number it brackets."""
+        X = _grid_X(n=32)
+        plain = analyze(_two_uniform_problem(), _plain, X)
+        with_ci = analyze(_two_uniform_problem(), _plain, X, n_bootstrap=16, key=jax.random.key(0))
+        for name in ("nu", "sigma", "upper_bound", "lower_bound", "var_y"):
+            np.testing.assert_array_equal(
+                np.asarray(getattr(with_ci, name)), np.asarray(getattr(plain, name))
+            )
+
+    def test_intervals_bracket_the_estimate_and_var_y_has_none(self):
+        """Four fields get an interval; the denominator deliberately does not."""
+        X = jnp.asarray(monte_carlo(_two_uniform_problem(), 256, seed=5))
+        result = analyze(
+            _two_uniform_problem(), _quadratic, X, n_bootstrap=64, key=jax.random.key(1)
+        )
+        assert result.ci.n_bootstrap == 64
+        assert result.ci.level == 0.95
+        assert result.ci.method == "quantile"
+        assert not hasattr(result, "var_y_conf")
+        for name in ("nu", "sigma", "upper_bound", "lower_bound"):
+            conf = np.asarray(getattr(result, f"{name}_conf"))
+            point = np.asarray(getattr(result, name))
+            assert conf.shape == (2, *point.shape)
+            assert (conf[0] <= point + 1e-6).all()
+            assert (point <= conf[1] + 1e-6).all()
+
+    def test_a_replicate_moves_var_y_with_the_moments(self):
+        """The bounds are plug-in ratios, so the denominator is resampled too.
+
+        If ``Var(Y)`` were held at its full-sample value, ``upper_bound``'s
+        replicates would be an exact rescaling of ``nu``'s and the two
+        intervals would have identical relative width. They do not.
+        """
+        X = jnp.asarray(monte_carlo(_two_uniform_problem(), 256, seed=6))
+        result = analyze(
+            _two_uniform_problem(),
+            _quadratic,
+            X,
+            n_bootstrap=64,
+            key=jax.random.key(2),
+            keep_replicates=True,
+        )
+        nu_draws = np.asarray(result.ci.replicates["nu"])
+        upper_draws = np.asarray(result.ci.replicates["upper_bound"])
+        ratio = upper_draws / nu_draws
+        assert ratio.std(axis=0).max() > 0.0
+
+    def test_keep_replicates_off_by_default(self):
+        """The draws are large, so they are kept only when asked for."""
+        X = _grid_X(n=32)
+        result = analyze(_two_uniform_problem(), _plain, X, n_bootstrap=8, key=jax.random.key(3))
+        assert result.ci.replicates is None
+
+    def test_gaussian_endpoints_are_symmetric_about_the_estimate(self):
+        """T0: the normal-approximation interval is ``estimate +/- z*sd``."""
+        X = jnp.asarray(monte_carlo(_two_uniform_problem(), 256, seed=7))
+        result = analyze(
+            _two_uniform_problem(),
+            _quadratic,
+            X,
+            n_bootstrap=64,
+            ci_method="gaussian",
+            key=jax.random.key(4),
+        )
+        conf = np.asarray(result.nu_conf)
+        point = np.asarray(result.nu)
+        np.testing.assert_allclose(conf[1] - point, point - conf[0], rtol=1e-5)
+
+    def test_batching_does_not_change_the_interval(self):
+        """T4: the weighted resample must not notice where a batch ends."""
+        X = _grid_X(n=32)
+        whole = analyze(_two_uniform_problem(), _plain, X, n_bootstrap=16, key=jax.random.key(5))
+        batched = analyze(
+            _two_uniform_problem(),
+            _plain,
+            X,
+            batch_size=7,
+            n_bootstrap=16,
+            key=jax.random.key(5),
+        )
+        np.testing.assert_allclose(
+            np.asarray(batched.nu_conf), np.asarray(whole.nu_conf), rtol=1e-5
+        )
+
+    def test_the_precomputed_path_bootstraps_too(self):
+        """Both calling conventions reach the same resampler."""
+        X = _grid_X(n=32)
+        Y = jnp.asarray([3.0, 0.5]) @ jnp.asarray(X).T
+        dfdx = jnp.tile(jnp.asarray([3.0, 0.5]), (X.shape[0], 1))
+        result = analyze(
+            _two_uniform_problem(), Y=Y, dfdx=dfdx, n_bootstrap=16, key=jax.random.key(6)
+        )
+        assert np.asarray(result.nu_conf).shape == (2, 2)
+
+    def test_a_resample_of_a_dropped_sample_uses_the_surviving_rows(self):
+        """Under ``drop`` the interval is over the rows the estimate averaged."""
+        X = _grid_X(n=30)
+        fn = _nan_jacobian_at([4], X)
+        with pytest.warns(JaxgsaWarning, match="dropped"):
+            result = analyze(
+                _two_uniform_problem(),
+                fn,
+                X,
+                on_invalid="drop",
+                n_bootstrap=16,
+                key=jax.random.key(7),
+                keep_replicates=True,
+            )
+        assert result.invalid.unit_indices == (4,)
+        assert np.isfinite(np.asarray(result.ci.replicates["nu"])).all()
+
+    def test_the_dataset_carries_the_endpoints(self):
+        """An interval is only reported if it also exports."""
+        X = _grid_X(n=32)
+        result = analyze(_two_uniform_problem(), _plain, X, n_bootstrap=8, key=jax.random.key(8))
+        ds = result.to_dataset()
+        for name in ("nu", "sigma", "upper_bound", "lower_bound"):
+            assert f"{name}_lower" in ds
+            assert f"{name}_upper" in ds

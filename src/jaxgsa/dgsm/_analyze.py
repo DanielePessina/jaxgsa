@@ -13,8 +13,9 @@ References:
 from __future__ import annotations
 
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from typing import Literal
 
 import jax
 import jax.numpy as jnp
@@ -22,11 +23,26 @@ import numpy as np
 import numpy.typing as npt
 from jax import Array
 
-from jaxgsa._core.entry import at_least, prepare_scalars, validate_inputs
+from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
+from jaxgsa._core.entry import (
+    at_least,
+    in_open_interval,
+    one_of,
+    prepare_scalars,
+    validate_inputs,
+)
 from jaxgsa._core.invalid import OnInvalid
-from jaxgsa._core.validation import _warn_zero_variance_slices
+from jaxgsa._core.result import CIInfo
+from jaxgsa._core.validation import _prepare_Y, _warn_zero_variance_slices
 from jaxgsa._core.warning_types import JaxgsaWarning
-from jaxgsa.dgsm._poincare import axis_constants
+from jaxgsa.dgsm._core import (
+    bounds_from_moments,
+    jac_batches,
+    moment_sums,
+    promote_jac,
+    promote_moments,
+    resample_moment_sums,
+)
 from jaxgsa.dgsm._result import DGSMResult
 from jaxgsa.problem import Problem
 
@@ -42,53 +58,11 @@ _SOURCE_NAMES = ("X", "Y or its derivative")
 
 _METHOD = "jaxgsa.dgsm.analyze"
 
-
-def _promote_jac(jac: Array) -> Array:
-    """Promote a Jacobian to canonical 4-D ``(N, T, K, D)`` by axis position.
-
-    This step is positional only. ``analyze`` applies the label-aware
-    reinterpretation of the slice axes afterwards, by aligning against the
-    canonicalized ``Y``. That pass handles a single-output time series and
-    swapped trailing axes.
-
-    Args:
-        jac: Jacobian, shape ``(N, D)`` / ``(N, K, D)`` / ``(N, T, K, D)``.
-
-    Returns:
-        The Jacobian as a 4-D array of shape ``(N, T, K, D)``.
-
-    Raises:
-        ValueError: If ``jac`` is not 2-D, 3-D, or 4-D.
-    """
-    if jac.ndim == 2:  # (N, D) scalar output
-        return jac[:, None, None, :]
-    if jac.ndim == 3:  # (N, K, D) multi-output
-        return jac[:, None, :, :]
-    if jac.ndim == 4:  # (N, T, K, D) time series
-        return jac
-    raise ValueError(
-        f"Jacobian must be 2-D (N, D), 3-D (N, K, D), or 4-D (N, T, K, D), got ndim={jac.ndim}"
-    )
-
-
-def _promote_moments(m: Array) -> Array:
-    """Promote a reduced moment ``(*slice, D)`` to canonical ``(T, K, D)``.
-
-    This is the reduced-space analog of :func:`_promote_jac`, which acts on the
-    sample axis as well. The autodiff path needs it because it averages the
-    moments over N before the output layout is known.
-
-    Args:
-        m: Reduced moment, shape ``(D,)`` / ``(K, D)`` / ``(T, K, D)``.
-
-    Returns:
-        The moment as a 3-D array of shape ``(T, K, D)``.
-    """
-    if m.ndim == 1:  # (D,) scalar output
-        return m[None, None, :]
-    if m.ndim == 2:  # (K, D) multi-output
-        return m[None, :, :]
-    return m  # (T, K, D) time series
+# The fields a bootstrap reports an interval for. ``var_y`` is left out on
+# purpose: it is the denominator of both bounds, a property of the output
+# sample rather than a sensitivity measure, and its uncertainty is already
+# carried inside the two bound intervals.
+_INTERVAL_FIELDS = ("nu", "sigma", "upper_bound", "lower_bound")
 
 
 def _resolve_call_style(
@@ -329,16 +303,23 @@ def _compute_moments(
     X: Array,
     batch_size: int | None = None,
 ) -> _Moments:
-    """Compute DGSM derivative sums and forward outputs via reverse-mode autodiff.
+    """Compute DGSM derivative sums and forward outputs by autodiff.
 
     The reduction over the sample axis is one vectorized operation that covers
     every (t, k) output slice at once. The per-slice kernel needs no explicit
-    vmap, because the closed form already batches it.
+    vmap, because the closed form already batches it. Which differentiation
+    mode runs is decided in :func:`jaxgsa.dgsm._core.jacobian_of`, from the
+    output and input widths.
 
     Every batch is reduced twice: once over all of its rows, and once over the
     rows in which ``X``, the output and the Jacobian are all finite. See
     :class:`_Moments` for why both are needed. ``analyze`` divides by the
     matching row count.
+
+    This is the policy-aware twin of :func:`jaxgsa.dgsm._core.moment_sums`,
+    which the pure core uses and which masks nothing. Both walk the sample
+    axis through the same batch iterator, so there is one copy of the padding
+    and of the sweep.
 
     Args:
         fn: JAX-differentiable function ``(D,) -> ()``, ``(D,) -> (K,)``, or
@@ -352,37 +333,10 @@ def _compute_moments(
         axes, shape ``(D,)`` / ``(K, D)`` / ``(T, K, D)``. ``analyze`` applies
         the layout canonicalization (promotion and label-driven axis moves)
         once the semantic axes are known.
+
+    Raises:
+        ValueError: If ``X`` has no rows, so there is nothing to average.
     """
-
-    # Reverse-mode Jacobian is efficient when K (outputs) < D (inputs).
-    # has_aux=True returns both the Jacobian and the forward output from one
-    # forward+backward pass, avoiding a redundant model evaluation.
-    def _fn_aux(x: Array) -> tuple[Array, Array]:
-        y = fn(x)
-        return y, y
-
-    combined = jax.jit(jax.vmap(jax.jacrev(_fn_aux, has_aux=True)))
-
-    N = X.shape[0]
-    unbatched = not batch_size or batch_size <= 0 or N <= batch_size
-
-    if unbatched:
-        jac, Y = combined(X)
-        jac_finite = _rows_finite(jac)
-        row_ok = jac_finite & _rows_finite(Y) & _rows_finite(X)
-        jac_kept = _mask_rows(jac, row_ok)
-        return _Moments(
-            Y=Y,
-            jac_finite=np.asarray(jac_finite),
-            row_ok=np.asarray(row_ok),
-            sum_jac=jnp.sum(jac, axis=0),
-            sum_jac2=jnp.sum(jac**2, axis=0),
-            sum_jac_kept=jnp.sum(jac_kept, axis=0),
-            sum_jac2_kept=jnp.sum(jac_kept**2, axis=0),
-        )
-
-    # Batched path: accumulate running sums to bound peak memory.
-    # The first full batch triggers XLA compilation; subsequent batches reuse it.
     sum_jac: Array | None = None
     sum_jac2: Array | None = None
     sum_jac_kept: Array | None = None
@@ -390,26 +344,13 @@ def _compute_moments(
     Y_parts: list[Array] = []
     jac_finite_parts: list[Array] = []
     row_ok_parts: list[Array] = []
-    for start in range(0, N, batch_size):
-        end = min(start + batch_size, N)
-        actual_len = end - start
 
-        # Pad the ragged last batch, so a new shape does not force a JIT
-        # recompilation.
-        X_chunk = X[start:end]
-        if actual_len < batch_size:
-            pad_size = batch_size - actual_len
-            X_chunk = jnp.concatenate([X_chunk, jnp.zeros((pad_size, X.shape[1]))], axis=0)
-
-        jac, Y_chunk_full = combined(X_chunk)
-        Y_chunk = Y_chunk_full[:actual_len]
+    for jac, Y_chunk, X_chunk in jac_batches(fn, X, batch_size):
         Y_parts.append(Y_chunk)
-
-        jac = jac[:actual_len]
         # The mask is built and applied here, before the sums below fold this
         # batch into the running totals. After that point the batch is gone.
         chunk_jac_finite = _rows_finite(jac)
-        chunk_row_ok = chunk_jac_finite & _rows_finite(Y_chunk) & _rows_finite(X[start:end])
+        chunk_row_ok = chunk_jac_finite & _rows_finite(Y_chunk) & _rows_finite(X_chunk)
         jac_finite_parts.append(chunk_jac_finite)
         row_ok_parts.append(chunk_row_ok)
         jac_kept = _mask_rows(jac, chunk_row_ok)
@@ -423,16 +364,186 @@ def _compute_moments(
         sum_jac_kept = sjk if sum_jac_kept is None else sum_jac_kept + sjk
         sum_jac2_kept = sjk2 if sum_jac2_kept is None else sum_jac2_kept + sjk2
 
-    assert sum_jac is not None and sum_jac2 is not None
-    assert sum_jac_kept is not None and sum_jac2_kept is not None
+    if sum_jac is None or sum_jac2 is None or sum_jac_kept is None or sum_jac2_kept is None:
+        raise ValueError("X has no sample rows, so there is no derivative to average")
+
     return _Moments(
-        Y=jnp.concatenate(Y_parts, axis=0),
-        jac_finite=np.asarray(jnp.concatenate(jac_finite_parts, axis=0)),
-        row_ok=np.asarray(jnp.concatenate(row_ok_parts, axis=0)),
+        Y=_join(Y_parts),
+        jac_finite=np.asarray(_join(jac_finite_parts)),
+        row_ok=np.asarray(_join(row_ok_parts)),
         sum_jac=sum_jac,
         sum_jac2=sum_jac2,
         sum_jac_kept=sum_jac_kept,
         sum_jac2_kept=sum_jac2_kept,
+    )
+
+
+def _join(parts: list[Array]) -> Array:
+    """Concatenate batch pieces back into one sample-axis array.
+
+    Args:
+        parts: One array per batch, all sharing their trailing shape.
+
+    Returns:
+        The pieces stacked along the sample axis. A single piece is returned
+        unchanged, so the unbatched path copies nothing.
+    """
+    return parts[0] if len(parts) == 1 else jnp.concatenate(parts, axis=0)
+
+
+def _check_dfdx(dfdx: Array, Y: Array, D: int) -> Array:
+    """Check a pre-computed Jacobian against ``Y``, and promote it to 4-D.
+
+    The rules read against the validated ``Y``, so they run after any row
+    removal. Every one of them compares shapes, which is why the pure core can
+    run them as well.
+
+    Args:
+        dfdx: The caller's Jacobian.
+        Y: The validated model output, at the caller's own rank.
+        D: The problem's parameter count.
+
+    Returns:
+        The Jacobian as ``(N, T, K, D)``.
+
+    Raises:
+        ValueError: If ``dfdx`` has the wrong rank, the wrong trailing width,
+            or a leading shape that does not mirror ``Y``.
+    """
+    if dfdx.ndim != Y.ndim + 1:
+        raise ValueError("dfdx ndim must equal Y.ndim + 1 and end with the derivative axis")
+    if dfdx.shape[-1] != D:
+        raise ValueError(
+            f"dfdx last dimension ({dfdx.shape[-1]}) must match problem.num_vars ({D})"
+        )
+    if dfdx.shape[:-1] != Y.shape:
+        raise ValueError(
+            f"dfdx shape {dfdx.shape} does not match Y shape {Y.shape} with trailing D={D}"
+        )
+    return promote_jac(dfdx)
+
+
+def _check_moment_layout(sigma: Array, Y_3d: Array) -> None:
+    """Check the moments' slice axes against the canonicalized ``Y``.
+
+    The moments were realigned in lockstep with ``Y``'s canonicalization, so
+    their slice axes must already match. A mismatch means ``dfdx`` did not
+    mirror ``Y``'s layout: wrong ndim, or a transposed Jacobian that inference
+    could not recover.
+
+    Args:
+        sigma: The mean derivative, shape ``(T, K, D)``.
+        Y_3d: The canonicalized output, shape ``(N, T, K)``.
+
+    Raises:
+        ValueError: If the two slice shapes disagree.
+    """
+    if sigma.shape[:2] != Y_3d.shape[1:3]:
+        raise ValueError(
+            f"dfdx ndim/shape is incompatible with Y: derivative slice dims "
+            f"{sigma.shape[:2]} do not match Y's output dims {Y_3d.shape[1:3]}; "
+            "dfdx must mirror Y's layout with one extra trailing (D,) axis"
+        )
+
+
+def indices(
+    problem: Problem,
+    fn: Callable | None = None,
+    X: Array | None = None,
+    *,
+    Y: Array | None = None,
+    dfdx: Array | None = None,
+    standardize_outputs: bool = False,
+    batch_size: int | None = None,
+) -> tuple[Array, ...]:
+    """Compute the DGSM moments and bounds as plain arrays, with no diagnostics.
+
+    This is the transformable core of :func:`analyze`. It differentiates the
+    same model, runs the same estimator on the same data, and returns the same
+    numbers, but it does nothing else: no non-finite check, no zero-variance
+    warning, no bound-ordering warning, no :class:`jaxgsa.dgsm.DGSMResult`,
+    and no read of any array value on the host. So it composes with
+    ``jax.jit``, ``jax.vmap``, ``jax.grad`` and ``jax.jacrev``, which
+    :func:`analyze` cannot, because a policy decision needs a concrete value
+    and a tracer has none.
+
+    Differentiating a bound with respect to the sample is one line::
+
+        def upper(X):
+            return jaxgsa.dgsm.indices(problem, fn, X)[2]
+
+        d_upper = jax.jacrev(upper)(X)
+
+    That nests one differentiation inside another: the Jacobian of ``fn`` is
+    itself the thing being differentiated, so the outer pass needs ``fn`` to
+    be twice differentiable.
+
+    Use :func:`analyze` for ordinary analysis. Nothing here checks the model
+    output or its derivative, so a single NaN silently turns every returned
+    number into NaN.
+
+    Tier T4 (behavioural contract): the returned arrays must equal the
+    corresponding fields of ``analyze``'s result on clean outputs, and the
+    function must survive ``jit``, ``vmap`` and ``jit(jacrev(...))``. Checked
+    in ``tests/test_dgsm.py``.
+
+    Args:
+        problem: Problem definition with D parameters. Read for the Poincare
+            constants and the marginal variances only, and both are static, so
+            passing one never turns a marginal parameter into a tracer.
+        fn: JAX-differentiable **one-sample** function, as in :func:`analyze`.
+        X: Sample matrix in the problem's physical units, shape ``(N, D)``.
+        Y: Forward model outputs for the pre-computed path, shape ``(N,)`` /
+            ``(N, K)`` / ``(N, T, K)``.
+        dfdx: Pre-computed Jacobian mirroring ``Y``'s layout with one extra
+            trailing ``(D,)`` axis.
+        standardize_outputs: As in :func:`analyze`.
+        batch_size: Sample rows per batch on the autodiff path, or ``None``
+            for one batch.
+
+    Returns:
+        ``(nu, sigma, upper_bound, lower_bound, var_y)``. The first four have
+        the shapes ``analyze`` reports for them, and ``var_y`` is the
+        per-slice output variance.
+
+    Raises:
+        ValueError: If the calling convention is ambiguous or incomplete, if
+            ``fn`` cannot be traced on one sample row, or if ``dfdx`` does not
+            mirror ``Y``.
+    """
+    use_autodiff = _resolve_call_style(fn, X, Y, dfdx)
+    D = problem.num_vars
+
+    if use_autodiff:
+        assert fn is not None and X is not None  # guaranteed by _resolve_call_style
+        _check_point_callable(fn, X)
+        sum_jac, sum_jac2, Y_raw = moment_sums(fn, X, batch_size)
+        n_rows = X.shape[0]
+        sigma = promote_moments(sum_jac / n_rows)
+        nu = promote_moments(sum_jac2 / n_rows)
+        Y_3d, layout = _prepare_Y(jnp.asarray(Y_raw))
+    else:
+        assert Y is not None and dfdx is not None  # guaranteed by _resolve_call_style
+        Y_arr = jnp.asarray(Y)
+        dfdx_arr = _check_dfdx(jnp.asarray(dfdx), Y_arr, D)
+        sigma = jnp.mean(dfdx_arr, axis=0)
+        nu = jnp.mean(dfdx_arr**2, axis=0)
+        Y_3d, layout = _prepare_Y(Y_arr)
+
+    _check_moment_layout(sigma, Y_3d)
+    nu, sigma, upper, lower, var_y = bounds_from_moments(
+        problem,
+        nu=nu,
+        sigma=sigma,
+        var_y=jnp.var(Y_3d, axis=0),
+        standardize_outputs=standardize_outputs,
+    )
+    return (
+        layout.squeeze(nu),
+        layout.squeeze(sigma),
+        layout.squeeze(upper),
+        layout.squeeze(lower),
+        layout.squeeze(var_y, n_trailing=0),
     )
 
 
@@ -444,8 +555,13 @@ def analyze(
     Y: Array | None = None,
     dfdx: Array | None = None,
     standardize_outputs: bool = False,
+    n_bootstrap: int = 0,
+    conf_level: float = 0.95,
+    ci_method: Literal["quantile", "gaussian"] = "quantile",
+    key: Array | None = None,
     batch_size: int | None = None,
     on_invalid: OnInvalid = "raise",
+    keep_replicates: bool = False,
 ) -> DGSMResult:
     """Compute DGSM sensitivity indices and Sobol index bounds.
 
@@ -503,6 +619,28 @@ def analyze(
             different magnitude compare directly. ``upper_bound`` and
             ``lower_bound`` are ratios and do not move. Defaults to
             ``False``, which reports the moments in the output's own units.
+        n_bootstrap: Number of bootstrap resamples for confidence intervals.
+            ``0`` (default) computes no intervals. The resampling unit is one
+            row of the sample. ``nu`` and ``sigma`` are plain i.i.d. means
+            over rows, so a row bootstrap is exactly the right resample for
+            them, and both bounds are the plug-in ratios of those means to
+            ``Var(Y)``, recomputed on the same resampled rows. Intervals are
+            reported for all four: ``nu``, ``sigma``, ``upper_bound`` and
+            ``lower_bound``. ``var_y`` gets none. It is the denominator, a
+            property of the output sample rather than a sensitivity measure,
+            and its uncertainty is already inside the two bound intervals.
+            The cost is one extra sweep of the Jacobian over the sample, not
+            one sweep per replicate: a replicate is a weighted row sum, so
+            the resample is a matrix product against the same batches.
+        conf_level: Confidence level for the bootstrap intervals.
+        ci_method: How the interval endpoints are formed. ``"quantile"``
+            (default) reads them off the empirical bootstrap distribution.
+            ``"gaussian"`` centres them on the point estimate and takes
+            ``+/- z * sd`` of the bootstrap draws, which is smoother for a
+            small ``n_bootstrap`` but assumes the draws are normal.
+        key: A ``jax.random`` key for the bootstrap resampling. Required when
+            ``n_bootstrap > 0``. Pass ``jax.random.key(0)`` if you have an
+            integer seed.
         batch_size: Number of N sample rows per batch on the autodiff path.
             The Jacobian accumulates in batches of this many samples, which
             bounds peak memory. None (default) processes all N samples at once.
@@ -517,12 +655,16 @@ def analyze(
             checked too, and the rows are masked before the batch reduction,
             so ``"drop"`` gives the same moments as re-running on the smaller
             sample. See :mod:`jaxgsa._core.invalid`.
+        keep_replicates: Keep the per-resample moments and bounds on
+            ``DGSMResult.ci.replicates``. Off by default because they are
+            large: ``n_bootstrap`` copies of four index arrays.
 
     Returns:
         A ``DGSMResult`` with ``nu``, ``sigma``, ``upper_bound``, and
         ``lower_bound``, each of shape ``(D,)`` / ``(K, D)`` / ``(T, K, D)``
-        mirroring the output layout, plus ``var_y`` and the non-finite report
-        in ``invalid``.
+        mirroring the output layout, plus ``var_y``, the optional ``*_conf``
+        intervals with the ``ci`` record that describes them, and the
+        non-finite report in ``invalid``.
 
     Raises:
         ValueError: In any of these cases. ``on_invalid`` is not one of the
@@ -536,6 +678,9 @@ def analyze(
             declares a dependence structure, and the Poincare-inequality bounds
             assume independent inputs. ``problem`` has categorical parameters,
             and a derivative along an unordered level code has no meaning.
+            ``n_bootstrap`` is negative, ``conf_level`` is not in ``(0, 1)``,
+            ``ci_method`` is not ``"quantile"`` or ``"gaussian"``, or
+            ``n_bootstrap > 0`` and no ``key`` was given.
     Warns:
         JaxgsaWarning: If an output slice has zero variance, which makes both
             bounds for that slice NaN.
@@ -554,9 +699,16 @@ def analyze(
         SPEC,
         problem,
         on_invalid=on_invalid,
-        checks=(at_least("batch_size", batch_size, 1),),
+        checks=(
+            at_least("batch_size", batch_size, 1),
+            at_least("n_bootstrap", n_bootstrap, 0),
+            one_of("ci_method", ci_method, ("quantile", "gaussian")),
+            in_open_interval("conf_level", conf_level, 0.0, 1.0),
+        ),
         method=_METHOD,
     )
+    if n_bootstrap > 0 and key is None:
+        raise ValueError("key is required when n_bootstrap > 0")
     D = problem.num_vars
 
     # Resolve the calling convention once, before any computation, so that an
@@ -605,8 +757,8 @@ def analyze(
             n_kept = int(keep.sum())
             sigma = moments.sum_jac_kept / n_kept
             nu = moments.sum_jac2_kept / n_kept
-        sigma = _promote_moments(sigma)
-        nu = _promote_moments(nu)
+        sigma = promote_moments(sigma)
+        nu = promote_moments(nu)
     else:
         assert Y is not None and dfdx is not None  # guaranteed by _resolve_call_style
         # Pre-computed path: the caller supplies the Jacobian and the forward
@@ -625,70 +777,30 @@ def analyze(
         )
         invalid = ctx.invalid
         Y_valid = ctx.Y
-        dfdx_arr = ctx.extra["derivative"]
         # The mirror rules on dfdx are read against the validated Y, so they
         # come after the data half. Row counts are settled before this point:
         # with_data was told to expect one Y row per Jacobian row.
-        if dfdx_arr.ndim != Y_valid.ndim + 1:
-            raise ValueError("dfdx ndim must equal Y.ndim + 1 and end with the derivative axis")
-        if dfdx_arr.shape[-1] != D:
-            raise ValueError(
-                f"dfdx last dimension ({dfdx_arr.shape[-1]}) must match problem.num_vars ({D})"
-            )
-        if dfdx_arr.shape[:-1] != Y_valid.shape:
-            raise ValueError(
-                f"dfdx shape {dfdx_arr.shape} does not match Y shape {Y_valid.shape} "
-                f"with trailing D={D}"
-            )
-        dfdx_arr = _promote_jac(dfdx_arr)
+        dfdx_arr = _check_dfdx(ctx.extra["derivative"], Y_valid, D)
         # One vectorized reduction over N covers every (t, k) slice at once.
         sigma = jnp.mean(dfdx_arr, axis=0)  # E[df/dx_i], (T, K, D)
         nu = jnp.mean(dfdx_arr**2, axis=0)  # E[(df/dx_i)^2]
 
-    # Canonicalize Y to (N, T, K). The moments were realigned in lockstep with
-    # Y's canonicalization above, so their slice axes must already match. A
-    # mismatch means dfdx did not mirror Y's layout: wrong ndim, or a
-    # transposed Jacobian that inference could not recover. Reject it.
+    # Canonicalize Y to (N, T, K), then check the moments line up with it.
     Y_3d = ctx.Y3
-    if sigma.shape[:2] != Y_3d.shape[1:3]:
-        raise ValueError(
-            f"dfdx ndim/shape is incompatible with Y: derivative slice dims "
-            f"{sigma.shape[:2]} do not match Y's output dims {Y_3d.shape[1:3]}; "
-            "dfdx must mirror Y's layout with one extra trailing (D,) axis"
-        )
+    _check_moment_layout(sigma, Y_3d)
 
     # Var(Y) per (t, k) output slice, denominator of both bounds. A constant
     # slice makes both bounds NaN, so say so rather than returning it silently.
     var_y = jnp.var(Y_3d, axis=0)  # (T, K)
     _warn_zero_variance_slices(Y_valid, output_names=problem.output_names, var_per_slice=var_y)
 
-    if standardize_outputs:
-        # Y -> (Y - mean)/std is affine, so the moments of the standardized
-        # output are the moments already computed, rescaled: d/dx of a shift
-        # is zero, and the 1/std factor is a constant. Rescaling here rather
-        # than differentiating a wrapped function keeps the autodiff sweep
-        # untouched. Both bounds are ratios of quantities that scale the same
-        # way, so they come out unchanged, which the tests assert.
-        y_std = jnp.sqrt(var_y)  # (T, K)
-        safe_scale = jnp.where(y_std == 0, jnp.ones_like(y_std), y_std)
-        sigma = sigma / safe_scale[..., None]
-        nu = nu / (safe_scale**2)[..., None]
-        var_y = var_y / safe_scale**2
-
-    # Per-axis constants: C for the Poincare upper bound, Var for the lower.
-    C, Var = axis_constants(problem)
-    C_jnp = jnp.asarray(C)
-    Var_jnp = jnp.asarray(Var)
-
-    # A constant output slice has zero variance; map it to NaN bounds rather
-    # than dividing by zero.
-    denom = jnp.where(var_y == 0, jnp.nan, var_y)[..., None]  # (T, K, 1)
-
-    # Upper: ST_i <= C_i * nu_i / Var(Y)  (Sobol-Kucherenko inequality).
-    # The (D,) constants broadcast against (T, K, D) on the trailing axis.
-    upper = C_jnp * nu / denom
-    # Lower: ST_i >= Var_i * sigma_i^2 / Var(Y)  (Kucherenko-Song)
-    lower = Var_jnp * sigma**2 / denom
+    nu, sigma, upper, lower, var_y = bounds_from_moments(
+        problem,
+        nu=nu,
+        sigma=sigma,
+        var_y=var_y,
+        standardize_outputs=standardize_outputs,
+    )
 
     # The upper bound must sit at or above the lower bound. Check it within a
     # numerical tolerance and warn if it does not hold.
@@ -698,6 +810,47 @@ def analyze(
             "insufficient samples or numerical issues",
             stacklevel=2,
             category=JaxgsaWarning,
+        )
+
+    confs: dict[str, Array | None] = dict.fromkeys(_INTERVAL_FIELDS)
+    ci: CIInfo | None = None
+    if n_bootstrap > 0:
+        assert key is not None  # checked before the point estimate ran
+        batches: Iterator[tuple[Array, Array]]
+        if use_autodiff:
+            assert fn is not None
+            # ctx.inputs is X with the dropped rows already removed, so the
+            # resample draws from the same rows the point estimate averaged.
+            batches = ((jac, y) for jac, y, _ in jac_batches(fn, ctx.inputs, batch_size))
+        else:
+            batches = _array_batches(dfdx_arr, Y_3d, batch_size)
+        draws = _bootstrap_draws(
+            problem,
+            batches=batches,
+            n_rows=int(Y_3d.shape[0]),
+            slice_shape=(int(Y_3d.shape[1]), int(Y_3d.shape[2])),
+            n_params=D,
+            key=key,
+            n_bootstrap=n_bootstrap,
+            standardize_outputs=standardize_outputs,
+        )
+        point = {"nu": nu, "sigma": sigma, "upper_bound": upper, "lower_bound": lower}
+        for name in _INTERVAL_FIELDS:
+            lo, hi = _bootstrap_ci_endpoints(
+                point[name], draws[name], conf_level=conf_level, ci_method=ci_method
+            )
+            # Stack [lower, upper] into a leading axis of size 2. The squeeze
+            # addresses the (T, K) axes from the end, so that axis survives.
+            confs[name] = ctx.squeeze(jnp.stack((lo, hi)))
+        ci = CIInfo(
+            level=conf_level,
+            method=ci_method,
+            n_bootstrap=n_bootstrap,
+            replicates=(
+                {name: ctx.squeeze(draws[name]) for name in _INTERVAL_FIELDS}
+                if keep_replicates
+                else None
+            ),
         )
 
     # Drop the singleton axes the preamble inserted; var_y has no trailing
@@ -716,4 +869,93 @@ def analyze(
         var_y=var_y,
         problem=problem,
         invalid=invalid,
+        nu_conf=confs["nu"],
+        sigma_conf=confs["sigma"],
+        upper_bound_conf=confs["upper_bound"],
+        lower_bound_conf=confs["lower_bound"],
+        ci=ci,
     )
+
+
+def _array_batches(
+    dfdx: Array,
+    Y_3d: Array,
+    batch_size: int | None,
+) -> Iterator[tuple[Array, Array]]:
+    """Walk a pre-computed Jacobian and its output in batches of sample rows.
+
+    The pre-computed path holds both arrays already, so there is nothing to
+    differentiate. This only re-uses the batch protocol the autodiff path
+    yields, so one resampler serves both conventions.
+
+    Args:
+        dfdx: The validated Jacobian, shape ``(N, T, K, D)``.
+        Y_3d: The validated output, shape ``(N, T, K)``.
+        batch_size: Rows per batch, or ``None`` for one batch.
+
+    Yields:
+        ``(jac, Y)`` per batch, in row order.
+    """
+    N = int(Y_3d.shape[0])
+    step = N if not batch_size or batch_size <= 0 else batch_size
+    for start in range(0, N, step):
+        end = min(start + step, N)
+        yield dfdx[start:end], Y_3d[start:end]
+
+
+def _bootstrap_draws(
+    problem: Problem,
+    *,
+    batches: Iterator[tuple[Array, Array]],
+    n_rows: int,
+    slice_shape: tuple[int, int],
+    n_params: int,
+    key: Array,
+    n_bootstrap: int,
+    standardize_outputs: bool,
+) -> dict[str, Array]:
+    """Recompute the four reported fields on ``n_bootstrap`` row resamples.
+
+    Rows are drawn with replacement, and every quantity DGSM reports is a
+    weighted sum over rows, so the whole bootstrap is one weighted pass over
+    the same batches. ``Var(Y)`` is resampled along with the moments, which is
+    what makes each bound an honest plug-in ratio rather than a numerator
+    interval over a frozen denominator.
+
+    Args:
+        problem: Problem definition, for the bound constants.
+        batches: ``(jac, Y)`` per batch, over the surviving rows only.
+        n_rows: Number of surviving rows, which is also the resample size.
+        slice_shape: ``(T, K)``, the canonical output slice axes.
+        n_params: ``D``.
+        key: PRNG key for the row draws.
+        n_bootstrap: Number of replicates.
+        standardize_outputs: As in :func:`analyze`.
+
+    Returns:
+        Mapping from field name to a ``(n_bootstrap, T, K, D)`` array of
+        replicate values.
+    """
+    idx = jax.random.randint(key, shape=(n_bootstrap, n_rows), minval=0, maxval=n_rows)
+    sum_jac, sum_jac2, sum_y, sum_y2 = resample_moment_sums(batches, idx)
+
+    T, K = slice_shape
+    sigma = sum_jac.reshape(n_bootstrap, T, K, n_params) / n_rows
+    nu = sum_jac2.reshape(n_bootstrap, T, K, n_params) / n_rows
+    mean_y = sum_y.reshape(n_bootstrap, T, K) / n_rows
+    # Var(Y) from the two raw moments, because a replicate never materialises
+    # the rows it drew. Clipped at zero: the raw-moment form can go a rounding
+    # step negative on a near-constant slice, and a negative variance would
+    # turn into a NaN standard deviation.
+    var_y = jnp.maximum(sum_y2.reshape(n_bootstrap, T, K) / n_rows - mean_y**2, 0.0)
+
+    # Every step below broadcasts over the leading replicate axis, so a
+    # replicate runs through exactly the arithmetic the point estimate did.
+    nu, sigma, upper, lower, _ = bounds_from_moments(
+        problem,
+        nu=nu,
+        sigma=sigma,
+        var_y=var_y,
+        standardize_outputs=standardize_outputs,
+    )
+    return {"nu": nu, "sigma": sigma, "upper_bound": upper, "lower_bound": lower}

@@ -9,6 +9,10 @@ same two quantities against a kernel surrogate. Under independent inputs both
 indices reduce exactly to the Saltelli column-swap estimators of the classic
 Sobol' ``S1`` and ``ST``.
 
+This module has **no pure core**. It is host NumPy end to end, which is why
+it is the fastest method here, so there is no ``indices()`` that survives
+``jit``, ``vmap`` or ``jacrev``. See ``docs/adr/0015-pure-core-exemptions.md``.
+
 Gating: ``sample`` conditions on a declared ``problem.correlation``, so it is
 exempt from the correlated-design refusal that ``sobol``, ``morris``, and
 ``efast`` apply. It refuses categorical parameters. The copula conditionals
@@ -52,7 +56,10 @@ SPEC = register(
         # structure rather than assuming it away.
         correlation="accepts",
         categorical="refuses",
-        bootstrap=None,
+        bootstrap="n_bootstrap",
+        # Host NumPy end to end, so there is no traceable indices(). The
+        # exemption is measured, not an oversight: see ADR 0015.
+        pure_core=False,
         # One base point carries the 2D+1 conditional rows drawn around it.
         invalid_unit=InvalidUnit.BASE_POINT,
     )

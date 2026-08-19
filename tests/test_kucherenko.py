@@ -352,3 +352,118 @@ def test_save_load_round_trip(tmp_path):
     a = jaxgsa.kucherenko.analyze(ks, Y)
     b = jaxgsa.kucherenko.analyze(loaded, Y)
     np.testing.assert_array_equal(np.asarray(a.S1), np.asarray(b.S1))
+
+
+# --- bootstrap confidence intervals ------------------------------------------
+
+
+def _small_design(n=512, seed=2):
+    """Return an evaluated Ishigami design, small enough to resample quickly."""
+    problem = ishigami.PROBLEM
+    ks = jaxgsa.kucherenko.sample(problem, n, seed=seed)
+    return ks, ishigami.evaluate(ks.samples)
+
+
+class TestBootstrap:
+    """Base-point resampling, the one unit this design can drop safely."""
+
+    def test_no_bootstrap_leaves_every_interval_unset(self):
+        """The plainest call reports no interval and no CI record."""
+        ks, Y = _small_design()
+        result = jaxgsa.kucherenko.analyze(ks, Y)
+        assert result.ci is None
+        assert result.S1_conf is None
+        assert result.ST_conf is None
+
+    def test_a_bootstrap_needs_a_key(self):
+        """No key is silently invented, per the vocabulary."""
+        ks, Y = _small_design()
+        with pytest.raises(ValueError, match="key is required"):
+            jaxgsa.kucherenko.analyze(ks, Y, n_bootstrap=8)
+
+    def test_the_point_estimate_does_not_move(self):
+        """T4: asking for an interval must not change the number it brackets."""
+        ks, Y = _small_design()
+        plain = jaxgsa.kucherenko.analyze(ks, Y)
+        with_ci = jaxgsa.kucherenko.analyze(ks, Y, n_bootstrap=16, key=jax.random.key(0))
+        np.testing.assert_array_equal(np.asarray(with_ci.S1), np.asarray(plain.S1))
+        np.testing.assert_array_equal(np.asarray(with_ci.ST), np.asarray(plain.ST))
+        np.testing.assert_array_equal(np.asarray(with_ci.variance), np.asarray(plain.variance))
+
+    def test_intervals_bracket_the_estimate_and_variance_has_none(self):
+        """Both indices get an interval; the denominator deliberately does not."""
+        ks, Y = _small_design()
+        result = jaxgsa.kucherenko.analyze(ks, Y, n_bootstrap=64, key=jax.random.key(1))
+        assert result.ci.n_bootstrap == 64
+        assert result.ci.level == 0.95
+        assert result.ci.method == "quantile"
+        assert not hasattr(result, "variance_conf")
+        for name in ("S1", "ST"):
+            conf = np.asarray(getattr(result, f"{name}_conf"))
+            point = np.asarray(getattr(result, name))
+            assert conf.shape == (2, *point.shape)
+            assert (conf[0] <= point + 1e-5).all()
+            assert (point <= conf[1] + 1e-5).all()
+
+    def test_a_replicate_keeps_each_conditional_block_beside_its_base_point(self):
+        """The unit is the base point, and this is what says so numerically.
+
+        A replicate that resampled rows independently in each block would
+        pair ``f(y_k, z_k)`` with a conditional row drawn around a different
+        base point. ``ST`` is the Jansen squared difference of exactly that
+        pair, so a misaligned replicate inflates it towards
+        ``2 * V(Y) / V(Y) = 2``. Every replicate here stays in range.
+        """
+        ks, Y = _small_design()
+        result = jaxgsa.kucherenko.analyze(
+            ks, Y, n_bootstrap=32, key=jax.random.key(2), keep_replicates=True
+        )
+        ST_draws = np.asarray(result.ci.replicates["ST"])
+        assert ST_draws.shape == (32, ks.n_params)
+        assert (ST_draws >= -0.05).all()
+        assert (ST_draws <= 1.2).all()
+
+    def test_the_interval_narrows_as_the_design_grows(self):
+        """T4: a bootstrap interval must respond to the sample size."""
+        small = jaxgsa.kucherenko.analyze(
+            *_small_design(n=256, seed=3), n_bootstrap=64, key=jax.random.key(3)
+        )
+        large = jaxgsa.kucherenko.analyze(
+            *_small_design(n=2048, seed=3), n_bootstrap=64, key=jax.random.key(3)
+        )
+        small_width = np.asarray(small.S1_conf[1] - small.S1_conf[0])
+        large_width = np.asarray(large.S1_conf[1] - large.S1_conf[0])
+        assert large_width.mean() < small_width.mean()
+
+    def test_gaussian_endpoints_are_symmetric_about_the_estimate(self):
+        """T0: the normal-approximation interval is ``estimate +/- z*sd``."""
+        ks, Y = _small_design()
+        result = jaxgsa.kucherenko.analyze(
+            ks, Y, n_bootstrap=64, ci_method="gaussian", key=jax.random.key(4)
+        )
+        conf = np.asarray(result.S1_conf)
+        point = np.asarray(result.S1)
+        np.testing.assert_allclose(conf[1] - point, point - conf[0], rtol=1e-5)
+
+    def test_keep_replicates_off_by_default(self):
+        """The draws are large, so they are kept only when asked for."""
+        ks, Y = _small_design()
+        result = jaxgsa.kucherenko.analyze(ks, Y, n_bootstrap=8, key=jax.random.key(5))
+        assert result.ci.replicates is None
+
+    def test_a_time_series_keeps_its_layout(self):
+        """T4: an interval mirrors the output rank the caller passed."""
+        ks, Y = _small_design(n=256)
+        Y_ts = np.stack([Y, 2.0 * Y], axis=-1)[:, None, :]  # (n_runs, 1, 2)
+        result = jaxgsa.kucherenko.analyze(ks, Y_ts, n_bootstrap=16, key=jax.random.key(6))
+        assert np.asarray(result.S1).shape == (1, 2, ks.n_params)
+        assert np.asarray(result.S1_conf).shape == (2, 1, 2, ks.n_params)
+
+    def test_the_dataset_carries_the_endpoints(self):
+        """An interval is only reported if it also exports."""
+        ks, Y = _small_design(n=256)
+        result = jaxgsa.kucherenko.analyze(ks, Y, n_bootstrap=8, key=jax.random.key(7))
+        ds = result.to_dataset()
+        for name in ("S1", "ST"):
+            assert f"{name}_lower" in ds
+            assert f"{name}_upper" in ds
