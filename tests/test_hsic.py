@@ -780,6 +780,50 @@ class TestIndicesCore:
 
         assert [s.shape for s in shapes] == [(problem.num_vars,)] * 4
 
+    @pytest.mark.parametrize(
+        ("label", "second_spec"),
+        [
+            ("uniform", (0.0, 1.0)),
+            ("gaussian", {"dist": "gaussian", "mean": 0.3, "variance": 1.2}),
+            (
+                "truncated_gaussian",
+                {"dist": "gaussian", "mean": 0.3, "variance": 1.2, "low": -1.5, "high": 2.0},
+            ),
+        ],
+    )
+    def test_x_is_traceable_for_every_marginal_family(self, label, second_spec):
+        """T4: ``X`` traces whatever the marginals are, and jit changes nothing.
+
+        ``X`` is a jit *argument* here, not a closure constant, so every
+        column reaches ``cdf_to_unit_interval`` as a tracer. That is the only
+        arrangement that exercises the transform under trace, and the two
+        defects it used to hide were different. A truncated Gaussian went
+        through ``scipy.stats.truncnorm.cdf``, which converts a tracer to a
+        host array. Separately, every Gaussian -- truncated or not -- took
+        ``float(jnp.sqrt(spec.variance))``, which returns a tracer inside a
+        trace and raises on the ``float()``. So the untruncated case is not
+        redundant with the truncated one: it is the only one that would have
+        caught the second defect, and both passed eagerly.
+
+        The uniform row is the control. It was always traceable, so it fails
+        only if the fix broke the affine path.
+        """
+        problem = Problem.from_dict({"x1": (0.0, 1.0), "x2": second_spec})
+        X = self._sample(problem, self.N, 21)
+        Y = jnp.asarray(X[:, 0] + X[:, 1] ** 2)
+        key = jax.random.key(13)
+
+        def core(inputs, outputs):
+            """The core with X and Y both live arguments."""
+            return indices(problem, inputs, outputs, n_perms=self.PERMS, key=key)
+
+        # Tracing alone proves no host read: a conversion would raise here.
+        shapes = jax.eval_shape(core, X, Y)
+        assert [s.shape for s in shapes] == [(2,)] * 4, label
+
+        for traced, eager in zip(jax.jit(core)(X, Y), core(X, Y), strict=True):
+            np.testing.assert_allclose(np.asarray(traced), np.asarray(eager), rtol=1e-4, atol=1e-6)
+
     def test_emits_no_warning_where_analyze_does(self):
         """T4: the core carries none of the preamble's diagnostics.
 

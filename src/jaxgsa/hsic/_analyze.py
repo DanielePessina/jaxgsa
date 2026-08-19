@@ -614,11 +614,9 @@ def indices(
     result on clean outputs, and the function must survive ``jit``, ``vmap``
     and ``jit(jacrev(...))``. Checked in ``tests/test_hsic.py``.
 
-    One limit on tracing ``X``. A *truncated* Gaussian marginal sends the
-    column through ``scipy.stats.truncnorm.cdf``, which reads the values on
-    the host, so a problem with one cannot have ``X`` be a tracer. Uniform
-    and untruncated Gaussian marginals stay on the device, and ``Y`` is
-    always traceable whatever the marginals are.
+    ``X`` is traceable whatever the marginals are. The unit-interval
+    transform stays on device for uniform, Gaussian and truncated-Gaussian
+    columns alike, and the T4 test covers all three.
 
     Use :func:`analyze` for ordinary analysis. Nothing here checks the
     inputs, so a single NaN silently poisons every index.
