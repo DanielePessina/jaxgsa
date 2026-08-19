@@ -1073,3 +1073,54 @@ class TestBootstrap:
         for name in _CONF_FIELDS:
             assert f"{name}_lower" in ds
             assert f"{name}_upper" in ds
+
+
+class TestTrainingDesignIndependenceCheck:
+    """Tier T4 (internal consistency): the correlated-training-X warning.
+
+    The estimator needs an independent, space-filling training design even
+    for a correlated analysis, because S_TU resamples each X_i across its
+    whole marginal. These tests pin when the check speaks and when it stays
+    silent.
+    """
+
+    _R = np.array([[1.0, 0.7], [0.7, 1.0]])
+
+    @staticmethod
+    def _independent_X(n: int = 256) -> np.ndarray:
+        rng = np.random.default_rng(3)
+        return rng.uniform(0.0, 1.0, size=(n, 2))
+
+    @staticmethod
+    def _correlated_X(n: int = 256) -> np.ndarray:
+        from scipy.stats import norm
+
+        rng = np.random.default_rng(3)
+        Z = rng.standard_normal((n, 2))
+        Z[:, 1] = 0.8 * Z[:, 0] + 0.6 * Z[:, 1]  # latent correlation 0.8
+        return norm.cdf(Z)  # uniform marginals on [0, 1], dependent columns
+
+    def _run(self, X: np.ndarray, correlation: np.ndarray | None):
+        Y = _uniform_scalar(X)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, correlation=correlation, **SMALL_KWARGS)
+        return [w for w in caught if "training X is itself correlated" in str(w.message)]
+
+    def test_correlated_training_x_warns_and_names_the_fix(self):
+        X = self._correlated_X()
+        Y = _uniform_scalar(X)
+        with pytest.warns(JaxgsaWarning, match="training X is itself correlated"):
+            jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, correlation=self._R, **SMALL_KWARGS)
+        # And it warns once, saying where the correlation belongs instead.
+        found = self._run(self._correlated_X(), self._R)
+        assert len(found) == 1
+        assert "problem.correlation" in str(found[0].message)
+        assert "independent design" in str(found[0].message)
+
+    def test_independent_training_x_stays_silent(self):
+        assert self._run(self._independent_X(), self._R) == []
+
+    def test_independent_analysis_skips_the_check(self):
+        """With an identity analysis matrix nothing conditions, so no check."""
+        assert self._run(self._correlated_X(), None) == []

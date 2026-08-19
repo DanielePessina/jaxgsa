@@ -35,7 +35,9 @@ from jaxgsa._core.copula import (
     _ConditionalPlan,
     build_conditional_plan,
     canonicalize_correlation,
+    fit_gaussian_copula,
     independent_correlation,
+    is_independent,
 )
 from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare, require
 from jaxgsa._core.invalid import OnInvalid
@@ -65,6 +67,16 @@ _DEFAULT_MAX_CENTERS = 300
 # output variance unexplained; past that the measured indices stop tracking the
 # true ones, and on oscillatory models they can even invert the ranking.
 _CV_RMSE_WARN_FRACTION = 0.5
+
+# Largest fitted off-diagonal latent correlation the training X may show
+# before the design is called correlated. Spearman rank-correlation noise on
+# an independent design of n rows has standard deviation about 1/sqrt(n), so
+# even at the method's smallest viable training sets (tens of rows) the noise
+# stays well under 0.1 — comfortably below 0.3. A training set that was
+# actually drawn from the analysis copula, the mistake this check catches,
+# fits near the declared entries, which sit well above 0.3 whenever the
+# correlation matters at all.
+_TRAINING_CORRELATION_WARN = 0.3
 
 # The index fields a bootstrap reports an interval for. The diagnostics
 # (variance, rmse, cv_rmse, n_centers, gamma, ridge) get none: they describe
@@ -211,13 +223,17 @@ def analyze(
             solver failure.
 
     Warns:
-        JaxgsaWarning: In any of four cases. An output slice has zero variance.
+        JaxgsaWarning: In any of five cases. An output slice has zero variance.
             JAX is in single precision, where the kernel solve loses accuracy
             for small ``gamma`` (see :mod:`jaxgsa.vkoga`). The cross-validated
             surrogate error is a large fraction of the output standard
             deviation, which makes every index untrustworthy. ``S_U`` had to be
             clipped to ``S_TU`` by a wide margin, which says the additive
             component functions cannot represent the model's interactions.
+            The analysis is correlated but the training ``X`` is itself
+            correlated, so the surrogate extrapolates on the conditional
+            draws; train on an independent design and declare the dependence
+            in ``problem.correlation`` instead.
     """
     from jaxgsa.vkoga import SPEC
 
@@ -285,6 +301,7 @@ def analyze(
 
     _warn_single_precision()
     R = _resolve_correlation(problem, correlation)
+    _warn_correlated_training_design(problem, X, R)
 
     # The RBF kernel is isotropic, so every column must share a scale; the
     # marginal CDF map is the same transform HDMR uses for its basis.
@@ -581,6 +598,69 @@ def _warn_single_precision() -> None:
             stacklevel=3,
             category=JaxgsaWarning,
         )
+
+
+def _warn_correlated_training_design(
+    problem: Problem,
+    X: Array,
+    R: np.ndarray,
+) -> None:
+    """Warn when a correlated analysis is fed a correlated training design.
+
+    The estimator requires an independent, space-filling training ``X`` even
+    when the analysis correlation is not the identity. The correlated measure
+    concentrates on a ridge, but ``S_TU`` conditions on the other parameters
+    and then resamples ``X_i`` across its whole marginal, so the surrogate is
+    evaluated far off that ridge. A surrogate trained only on correlated data
+    extrapolates for exactly those draws, and every index quietly inherits
+    the extrapolation error.
+
+    The check fits the training design's own empirical latent correlation
+    (rank-based, so it is invariant to the marginals) and compares its
+    largest off-diagonal entry against ``_TRAINING_CORRELATION_WARN``. It
+    runs only when the analysis correlation is not the identity: an
+    independent analysis never conditions, so a structured training design is
+    then the user's own business. The fit's data-quality warnings are
+    suppressed here — this is a diagnostic on a sample the invalid check has
+    already vetted, not a fit the user asked for.
+
+    Args:
+        problem: Problem the training sample belongs to.
+        X: Training inputs in physical units, shape ``(N, D)``, after the
+            non-finite policy ran.
+        R: Resolved analysis correlation matrix, shape ``(D, D)``.
+
+    Warns:
+        JaxgsaWarning: If the training design's fitted latent correlation has
+            an off-diagonal entry above ``_TRAINING_CORRELATION_WARN``.
+    """
+    if is_independent(R):
+        return
+    with warnings.catch_warnings():
+        # fit_gaussian_copula warns about degenerate columns and material
+        # repairs. Those describe a fit the user asked for; this internal
+        # diagnostic only reads the magnitude.
+        warnings.simplefilter("ignore", JaxgsaWarning)
+        R_fit = fit_gaussian_copula(problem, np.asarray(X))
+    off_diag = np.abs(R_fit - np.diag(np.diag(R_fit)))
+    largest = float(off_diag.max())
+    if largest <= _TRAINING_CORRELATION_WARN:
+        return
+    i, j = np.unravel_index(int(off_diag.argmax()), off_diag.shape)
+    warnings.warn(
+        f"jaxgsa.vkoga: the training X is itself correlated (fitted latent "
+        f"correlation between {problem.names[int(i)]!r} and "
+        f"{problem.names[int(j)]!r} is {largest:.2f}). The estimator needs an "
+        "independent, space-filling training design even for a correlated "
+        "analysis: S_TU conditions on the other parameters and then resamples "
+        "each X_i across its whole marginal, so a surrogate trained only on "
+        "correlated data extrapolates for exactly those conditional draws. "
+        "Train on an independent design; the dependence structure belongs in "
+        "problem.correlation (or the correlation= argument), not in the "
+        "training data.",
+        stacklevel=3,
+        category=JaxgsaWarning,
+    )
 
 
 def _resolve_correlation(
