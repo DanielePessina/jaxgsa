@@ -64,9 +64,14 @@ def _resolve_resample_chunk_size(
 
     Returns:
         A chunk width in ``[1, n_bootstrap]``.
+
+    Raises:
+        ValueError: If ``resample_chunk_size`` is given and is below 1.
     """
     if resample_chunk_size is not None:
-        return max(1, min(resample_chunk_size, n_bootstrap))
+        if resample_chunk_size < 1:
+            raise ValueError(f"resample_chunk_size must be >= 1, got {resample_chunk_size}")
+        return min(resample_chunk_size, n_bootstrap)
     budget = max(1, get_memory_budget() // max(bytes_per_replicate, 1))
     return max(1, min(budget, n_bootstrap))
 

@@ -573,6 +573,40 @@ def test_each_resolver_family_reads_the_budget(_restore_memory_budget) -> None:
         )
 
 
+def test_explicit_widths_win_over_the_budget(_restore_memory_budget) -> None:
+    """An explicit width is honoured even when the budget would pick less.
+
+    The vocabulary's third rule: the memory budget only sizes the ``None``
+    default; it never caps a width the caller chose. Each probe asks for 8
+    under a 1-byte budget (which resolves to 1 when left to the budget, per
+    the test above) and must get exactly 8 back.
+    """
+    from jaxgsa._core.batching import resolve_batch_size
+    from jaxgsa.hdmr import _fit as hdmr_fit
+    from jaxgsa.morris import _analyze as morris_analyze
+    from jaxgsa.pawn import _analyze as pawn_analyze
+    from jaxgsa.sobol import _bootstrap as sobol_bootstrap
+    from jaxgsa.sobol import _chunking as sobol_chunking
+
+    probes: dict[str, Callable[[], int]] = {
+        "resolve_batch_size": lambda: resolve_batch_size(1024, 10_000, 8),
+        "sobol.point": lambda: sobol_chunking.resolve_point_chunk_size(8, 64, 256, 3, True, 4),
+        "sobol.bootstrap": lambda: sobol_bootstrap._resolve_slice_chunk_size(
+            8, 64, 16, 256, 3, True, 4
+        ),
+        "morris.resample": lambda: morris_analyze._resolve_resample_chunk_size(8, 64, 1024),
+        "pawn.slice": lambda: pawn_analyze._resolve_slice_chunk_size(8, 256, 3, 4, 4),
+        "hdmr.slice": lambda: hdmr_fit._resolve_slice_chunk_size(8, 64, 128, 1024),
+    }
+    jaxgsa.config.set_memory_budget(1, unit="b")
+    for name, probe in probes.items():
+        got = probe()
+        assert got == 8, (
+            f"{name}: an explicit width of 8 came back as {got} under a "
+            "1-byte budget. Explicit chunk widths must win over the budget."
+        )
+
+
 @pytest.mark.parametrize("spec", ALL, ids=_ids(ALL))
 def test_the_first_argument_says_what_kind_of_method_this_is(spec: MethodSpec) -> None:
     """A design-based method takes ``sampling_result``; a given-data one takes ``problem``.

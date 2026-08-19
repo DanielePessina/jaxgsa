@@ -14,22 +14,26 @@ Version 0.10 adds capability.
 
   - **`batch_size` sizes row blocks, clamped to `N`. Nothing more.** It never
     selects a different algorithm. In PCE, an explicit `batch_size` used to
-    force the streamed fit even when it was larger than `N`. Now the fit
-    streams only when `batch_size < N`, or when the single-pass fit would
-    exceed the memory budget. `batch_size >= N` is one full block, which is
-    the single-pass fit. Migration: to force the PCE streamed fit, pass a
-    `batch_size` smaller than your row count. A `batch_size` at or above the
-    row count now runs the single-pass fit and gives the exact default
-    numbers.
+    force the streamed fit even when it was larger than `N`. Now an explicit
+    `batch_size < N` streams; an explicit `batch_size >= N` is one full
+    block, which is the single-pass fit — even when the single pass exceeds
+    the memory budget, because an explicit width always wins. Only when
+    `batch_size` is `None` does the budget pick the path. Migration: to
+    force the PCE streamed fit, pass a `batch_size` smaller than your row
+    count. A `batch_size` at or above the row count now runs the single-pass
+    fit and gives the exact default numbers.
   - **`None` on a batching keyword means "derive the width from the memory
     budget".** This was already true for most methods. DGSM read `None` as
     one batch of every row; it now derives the batch width from
     `jaxgsa.config.get_memory_budget()` with a real bytes model (a few
-    Jacobian-sized transients per row, `T*K*D` floats each). At ordinary
+    Jacobian-sized transients per row, `T*K*D` floats each). This holds on
+    both DGSM paths: the autodiff path and a precomputed `dfdx`. At ordinary
     sizes the derived width is one full block, so nothing changes. On a run
     large enough that the budget now splits the sample, only the float32
     summation order moves — the same statement PCE and HDMR make about
-    their streamed paths.
+    their streamed paths. `dgsm.indices` also now raises `ValueError` on
+    `batch_size=0` or a negative value; it used to read them as "one batch"
+    (`dgsm.analyze` already rejected them).
   - **An explicit chunk value always wins.** The budget only sizes the `None`
     default. Sobol's bootstrap path and Morris silently capped an explicit
     `slice_chunk_size` / `resample_chunk_size` at the budget-derived width.

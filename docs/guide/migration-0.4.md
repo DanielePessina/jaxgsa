@@ -126,8 +126,9 @@ now raise `ValueError`. To fix the error, raise `n_per_curve` or lower `M`.
 0.4 uses one vocabulary for the two kinds of batching, package-wide:
 
 - `batch_size` always means rows of X/Y processed per batch. It appears on
-  `pce.analyze`, `hdmr.analyze`, `dgsm.analyze`, `hsic.analyze`, and
-  `result.predict`.
+  `pce.analyze`, `hdmr.analyze`, `dgsm.analyze`, and `result.predict`.
+  (`hsic.analyze` had it in 0.4; 1.0 removed it because no keyword bounds
+  the O(N²) kernel matrices.)
 - `slice_chunk_size` always means output slices (`T * K` columns) processed
   per batch.
 
@@ -142,7 +143,7 @@ If you passed `chunk_size` to any of the calls below, rename it as shown.
 | `gsax.analyze_borgonovo(..., chunk_size=...)` | `jaxgsa.borgonovo.analyze(..., slice_chunk_size=...)` |
 | `gsax.analyze_optimal_transport(..., chunk_size=...)` | `jaxgsa.optimal_transport.analyze(..., slice_chunk_size=...)` |
 | `gsax.analyze_dgsm(..., chunk_size=...)` | `jaxgsa.dgsm.analyze(..., batch_size=...)` |
-| `gsax.analyze_hsic(..., chunk_size=...)` | `jaxgsa.hsic.analyze(..., batch_size=...)` |
+| `gsax.analyze_hsic(..., chunk_size=...)` | `jaxgsa.hsic.analyze(...)` — removed in 1.0; no keyword bounds the O(N²) kernel matrices |
 
 `jaxgsa.morris.analyze` keeps its `chunk_size` parameter unchanged. There it
 bounds bootstrap resamples per batch, which is neither rows nor output slices.

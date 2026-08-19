@@ -99,7 +99,7 @@ def _resolve_slice_chunk_size(
     if slice_chunk_size is not None:
         if slice_chunk_size < 1:
             raise ValueError(f"slice_chunk_size must be >= 1, got {slice_chunk_size}")
-        return max(1, min(slice_chunk_size, n_slices))
+        return min(slice_chunk_size, n_slices)
     per_slice = slice_elements(base_n, D, calc_second_order)
     bytes_per_slice = n_bootstrap * per_slice * itemsize
     budget = max(1, get_memory_budget() // max(bytes_per_slice, 1))

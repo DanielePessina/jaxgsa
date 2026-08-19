@@ -442,11 +442,13 @@ def _fit_pce_core(
     fitting all ``T*K`` right-hand sides is a single Gram solve.
 
     The fit streams over row batches instead (see :func:`_fit_pce_streamed`)
-    in two cases: when the single-pass residents (design matrix, Gram
-    factorization, LOO residual arrays) would exceed the active memory
-    budget, or when an explicit ``batch_size`` is smaller than ``N``, so it
-    actually splits the sample. ``batch_size >= N`` degenerates to the
-    single-pass path, as one full row block. The streamed fit solves the
+    in two cases: when an explicit ``batch_size`` is smaller than ``N``, so
+    it actually splits the sample, or when ``batch_size`` is ``None`` and
+    the single-pass residents (design matrix, Gram factorization, LOO
+    residual arrays) would exceed the active memory budget. An explicit
+    width always wins over the budget: ``batch_size >= N`` degenerates to
+    the single-pass path, as one full row block, even when the single pass
+    is over budget. The streamed fit solves the
     same normal equations and computes the same exact LOO. It differs only
     in float32 summation order.
 
@@ -469,14 +471,17 @@ def _fit_pce_core(
     X_ref, input_types = _map_to_reference(X, problem, effective_order)
     Y_flat = Y_3d.reshape(N, T * K)  # column t*K + k is slice (t, k)
 
-    # Streamed iff the caller's batch width actually splits the sample, or the
-    # single-pass residents exceed the budget. ``batch_size >= N`` degenerates
-    # to the single-pass path — the library-wide ``batch_size`` semantics: it
-    # sizes row blocks, clamped to N, and never selects a different algorithm.
+    # Streamed iff the caller's explicit batch width actually splits the
+    # sample, or no width was given and the single-pass residents exceed the
+    # budget. An explicit ``batch_size`` always wins over the budget, so
+    # ``batch_size >= N`` runs the single-pass path even on an over-budget
+    # problem — the library-wide semantics: ``batch_size`` sizes row blocks,
+    # clamped to N, and never selects a different algorithm.
     single_pass_bytes = _single_pass_fit_bytes(N, n_terms, T * K, X_ref.dtype.itemsize)
-    streamed = (
-        batch_size is not None and batch_size < N
-    ) or single_pass_bytes > get_memory_budget()
+    if batch_size is not None:
+        streamed = batch_size < N
+    else:
+        streamed = single_pass_bytes > get_memory_budget()
     if not streamed:
         # Single-pass path: build the full design matrix and compute the Gram
         # factorization once, reused for both fitting and LOO.

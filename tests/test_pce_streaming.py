@@ -126,6 +126,22 @@ class TestForcedStreaming:
         assert split.streamed is True
         _assert_results_match(split, single)
 
+    def test_explicit_batch_size_wins_over_the_budget(self, problem_4d, data_4d):
+        """Tier T4 (internal consistency): explicit widths beat the budget.
+
+        The budget only decides when ``batch_size`` is ``None``. On a problem
+        whose single-pass residents exceed the budget, an explicit
+        ``batch_size >= N`` must still run the single pass — the caller chose
+        one full block, and explicit chunk widths always win.
+        """
+        X, Y = data_4d
+        jaxgsa.config.set_memory_budget(1, unit="b")
+        auto = pce.analyze(problem_4d, X, Y, order=3)
+        assert auto.streamed is True
+
+        forced_full = pce.analyze(problem_4d, X, Y, order=3, batch_size=X.shape[0])
+        assert forced_full.streamed is False
+
     def test_invalid_batch_size_raises(self, problem_4d, data_4d):
         X, Y = data_4d
         with pytest.raises(ValueError, match="batch_size"):

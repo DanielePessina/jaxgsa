@@ -8,11 +8,10 @@ The canonical API reference lives at [API Reference](/api/).
 
 ## Memory
 
-Each kernel matrix is `N x N`. The `batch_size` option builds a matrix in row
-blocks, then joins the blocks. It bounds the working memory of the build. It
-does **not** bound the kernel matrix, because the result is one full `N x N`
-array in every case. Peak memory therefore stays of order `N^2`. Reduce `N` if
-memory is the limit.
+Each kernel matrix is one full `N x N` array, and about `2D + 1` of them are
+resident at once. No option bounds this: peak memory is of order `N^2` in
+every case. Reduce `N` if memory is the limit, or screen with a cheaper
+method first.
 
 Jump directly to:
 

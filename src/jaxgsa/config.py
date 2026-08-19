@@ -124,11 +124,14 @@ def set_memory_budget(budget: int | float, *, unit: str | None = None) -> None:
     """Set the global transient-memory budget used for automatic batching.
 
     jaxgsa bounds peak memory in several places by processing data in batches
-    sized against this budget: surrogate ``predict`` (PCE, HDMR), the HDMR
-    output-slice chunking, the PAWN output-slice chunking, the Borgonovo
-    output-slice chunking, and the PCE and HDMR streaming fits that engage
-    when the single-pass design matrix would not fit. All of them derive
-    their automatic batch/chunk sizes from this budget (default: 512 MiB).
+    sized against this budget: surrogate ``predict`` (PCE, HDMR), the
+    output-slice chunking of HDMR, PAWN, Borgonovo, Sobol and eFAST, the
+    Sobol bootstrap and Morris resample chunking, the DGSM Jacobian batching,
+    the PCE S2 pair-mask chunking, and the PCE and HDMR streaming fits that
+    engage when the single-pass design matrix would not fit. All of them
+    derive their automatic batch/chunk sizes from this budget (default:
+    512 MiB); an explicit ``batch_size``/``*_chunk_size`` always wins over
+    the budget.
 
     Borgonovo also tiles its output grid, which is what bounds its peak in
     practice, but the tile width comes from a fixed working-set target rather

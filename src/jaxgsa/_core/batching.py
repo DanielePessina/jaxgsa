@@ -1,10 +1,11 @@
-"""Row-batching helpers for surrogate forward prediction.
+"""Row-batching helpers, sized against the transient-memory budget.
 
-Surrogate prediction materializes basis tensors. Their size grows linearly
-with the number of prediction rows, but the per-row constant is large
-(polynomial terms, B-spline tensor products). At large ``N_new`` a single-shot
-evaluation can exceed available memory. The helpers here therefore predict in
-row batches, sized against a transient-memory budget.
+Originally written for surrogate forward prediction (basis tensors grow
+linearly with the number of prediction rows, with a large per-row constant),
+:func:`resolve_batch_size` is now the library-wide resolver: every method
+that derives a ``None`` batch width from :func:`get_memory_budget` routes
+through it or follows its convention — explicit widths win over the budget,
+``None`` derives one from it.
 """
 
 from __future__ import annotations
