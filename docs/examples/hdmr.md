@@ -41,7 +41,6 @@ result = hdmr.analyze(
     PROBLEM,
     X,
     Y,
-    prenormalize=True,
     maxorder=2,
     slice_chunk_size=256,
 )
@@ -78,9 +77,8 @@ are a small part of the output range mean the expansion captured the response.
 A leftover gap points at effects the chosen `maxorder` and basis cannot
 represent, and raising `maxorder` is the way to test that.
 
-`prenormalize=True` applies SALib-style output standardization once over the
-sample axis before fitting the surrogate. The stored emulator still returns
-predictions on the original output scale.
+HDMR fits the surrogate on the outputs you supply. The stored emulator and
+`result.rmse` are on that same scale.
 
 ## What to look at
 
@@ -102,8 +100,6 @@ predictions on the original output scale.
 - `hdmr.analyze()` accepts `(N,)`, `(N, K)`, and `(N, T, K)` outputs, so the
   same shape rules from [Multi-Output & Time-Series](/examples/multi-output)
   still apply.
-- Leave `prenormalize=False` to preserve the current jaxgsa behavior. Enable it
-  when you want SALib-style output standardization before fitting.
 - HDMR does not use a structured Saltelli design; if you want exact Sobol
   estimators on independent inputs, start from [Basic Example](/examples/basic)
   instead.

@@ -443,6 +443,7 @@ def analyze(
     *,
     Y: Array | None = None,
     dfdx: Array | None = None,
+    standardize_outputs: bool = False,
     batch_size: int | None = None,
     on_invalid: OnInvalid = "raise",
 ) -> DGSMResult:
@@ -493,6 +494,15 @@ def analyze(
         dfdx: Pre-computed Jacobian, mirroring ``Y``'s layout with one extra
             trailing ``(D,)`` axis: ``(N, D)`` for ``(N,)`` Y, ``(N, K, D)``
             for ``(N, K)``, and ``(N, T, K, D)`` for ``(N, T, K)``.
+        standardize_outputs: When ``True``, report ``nu``, ``sigma`` and
+            ``var_y`` for the standardized output ``(Y - mean) / std``, one
+            mean and one standard deviation per output slice. DGSM returns
+            dimensional quantities: under ``Y -> a*Y + b``, ``sigma`` scales
+            by ``a`` and ``nu`` by ``a^2``. Dividing them out puts every
+            output slice in units of its own standard deviation, so slices of
+            different magnitude compare directly. ``upper_bound`` and
+            ``lower_bound`` are ratios and do not move. Defaults to
+            ``False``, which reports the moments in the output's own units.
         batch_size: Number of N sample rows per batch on the autodiff path.
             The Jacobian accumulates in batches of this many samples, which
             bounds peak memory. None (default) processes all N samples at once.
@@ -651,6 +661,19 @@ def analyze(
     # slice makes both bounds NaN, so say so rather than returning it silently.
     var_y = jnp.var(Y_3d, axis=0)  # (T, K)
     _warn_zero_variance_slices(Y_valid, output_names=problem.output_names, var_per_slice=var_y)
+
+    if standardize_outputs:
+        # Y -> (Y - mean)/std is affine, so the moments of the standardized
+        # output are the moments already computed, rescaled: d/dx of a shift
+        # is zero, and the 1/std factor is a constant. Rescaling here rather
+        # than differentiating a wrapped function keeps the autodiff sweep
+        # untouched. Both bounds are ratios of quantities that scale the same
+        # way, so they come out unchanged, which the tests assert.
+        y_std = jnp.sqrt(var_y)  # (T, K)
+        safe_scale = jnp.where(y_std == 0, jnp.ones_like(y_std), y_std)
+        sigma = sigma / safe_scale[..., None]
+        nu = nu / (safe_scale**2)[..., None]
+        var_y = var_y / safe_scale**2
 
     # Per-axis constants: C for the Poincare upper bound, Var for the lower.
     C, Var = axis_constants(problem)

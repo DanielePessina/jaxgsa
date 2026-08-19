@@ -694,13 +694,12 @@ def _benchmark(
         _Yb_exp = expand_sobol(_sr_b, _Yb)
 
         # jaxgsa: 0, 100, 1000 resamples
-        # Use prenormalize=True + ci_method="gaussian" to match SALib
+        # Use ci_method="gaussian" to match SALib
         for _nr in [0, 100, 1000]:
             jaxgsa.sobol.analyze(
                 _sr_b,
                 _Yb,
                 num_resamples=_nr,
-                prenormalize=True,
                 ci_method="gaussian",
                 key=jax.random.key(0),
             ).S1.block_until_ready()
@@ -710,7 +709,6 @@ def _benchmark(
                         _sr_b,
                         _Yb,
                         num_resamples=nr,
-                        prenormalize=True,
                         ci_method="gaussian",
                         key=jax.random.key(0),
                     ),
@@ -723,7 +721,6 @@ def _benchmark(
                     _sr_b,
                     _Yb,
                     num_resamples=_nr,
-                    prenormalize=True,
                     ci_method="gaussian",
                     key=jax.random.key(0),
                 )
@@ -731,7 +728,7 @@ def _benchmark(
                     jnp.mean(_r.S1_conf[1] - _r.S1_conf[0]),
                 )
 
-        # SALib: 100, 1000 resamples (prenormalize + gaussian by default)
+        # SALib: 100, 1000 resamples (standardization + gaussian by default)
         for _nr in [100, 1000]:
             salib_sobol_mod.analyze(
                 SALIB_ISHI,

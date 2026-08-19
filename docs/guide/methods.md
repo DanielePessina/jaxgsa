@@ -222,7 +222,7 @@ jaxgsa does not clip. Clipping to zero is a display choice, and it must never be
 2. You evaluate your model on `sampling_result.samples`.
 3. `jaxgsa.sobol.analyze()` reconstructs the Saltelli layout internally and computes all indices in a single `jit(vmap(...))` pass.
 
-Two optional knobs align results with SALib. `jaxgsa.sobol.analyze(..., prenormalize=True)` applies SALib-style output standardization once per output slice before computing the estimators, which changes the point-estimate path to match SALib more closely. When bootstrapping (`num_resamples > 0`), `ci_method="quantile"` reports percentile bootstrap bounds and `ci_method="gaussian"` reports symmetric bounds from the bootstrap standard deviation. Either way, jaxgsa returns explicit lower/upper endpoint arrays rather than SALib's symmetric confidence widths.
+`jaxgsa.sobol.analyze()` always standardizes each output slice over the sample axis before it computes the estimators. The Saltelli/Sobol'-Mauntz $S_1$ estimator and every $S_2$ estimator are uncentred products. A non-zero output mean therefore biases them. The standardization removes that bias. SALib standardizes in the same way. When bootstrapping (`num_resamples > 0`), `ci_method="quantile"` reports percentile bootstrap bounds and `ci_method="gaussian"` reports symmetric bounds from the bootstrap standard deviation. Either way, jaxgsa returns explicit lower/upper endpoint arrays rather than SALib's symmetric confidence widths.
 
 ### Index summary
 
@@ -266,12 +266,11 @@ This distinction matters because many real-world models have correlated paramete
 ### How to use it
 
 1. You provide any set of $(X, Y)$ pairs — no sampling design required.
-2. `jaxgsa.hdmr.analyze()` maps parameters to $[0, 1]$ via their marginal CDFs, optionally standardises outputs once over the sample axis (`prenormalize=True`), builds B-spline basis matrices, and fits component functions via backfitting with Tikhonov regularisation.
+2. `jaxgsa.hdmr.analyze()` maps parameters to $[0, 1]$ via their marginal CDFs, builds B-spline basis matrices, and fits component functions via backfitting with Tikhonov regularisation.
 3. The ANCOVA decomposition splits each component's variance into structural ($S_a$) and correlative ($S_b$) parts. Total-order indices ($S_T$) sum contributions from all terms involving a given parameter.
 
-When prenormalization is enabled, the surrogate is trained on standardized
-outputs. `result.predict(...)` maps predictions back to the original output
-scale before returning them.
+The surrogate is trained on the outputs you supply. `result.predict(...)` and
+`result.rmse` are on that same scale. There is no inverse transform.
 
 ### Index summary
 

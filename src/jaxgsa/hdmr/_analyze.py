@@ -23,7 +23,6 @@ from jaxgsa._core.surrogate import _PredictPlan
 from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa._core.validation import (
     YLayout,
-    _prenormalize_outputs,
     _prepare_Y,
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
@@ -257,7 +256,6 @@ def analyze(
     X: Array,
     Y: Array,
     *,
-    prenormalize: bool = False,
     maxorder: int = 2,
     maxiter: int = 100,
     m: int = 2,
@@ -311,7 +309,6 @@ def analyze(
         problem,
         X,
         Y,
-        prenormalize=prenormalize,
         maxorder=maxorder,
         maxiter=maxiter,
         m=m,
@@ -327,7 +324,6 @@ def _analyze_hdmr_core(
     X: Array,
     Y: Array,
     *,
-    prenormalize: bool = False,
     maxorder: int = 2,
     maxiter: int = 100,
     m: int = 2,
@@ -356,12 +352,6 @@ def _analyze_hdmr_core(
             array is read as ``(N, K)`` unless ``problem.output_names`` has
             exactly one entry. In that case the columns are T timepoints of
             that single output.
-        prenormalize: When ``True``, standardize each output slice over the
-            sample axis (subtract mean, divide by standard deviation) before
-            fitting. That puts disparate output magnitudes on an equal
-            numerical footing. The indices are ratios, so they are
-            unaffected. Predictions from the returned emulator are still on
-            the original output scale. Defaults to ``False``.
         maxorder: Maximum HDMR expansion order (1, 2, or 3), which is the
             largest interaction size modelled. Order 2 (default) captures
             pairwise interactions. Order 3 adds triples, but the term count
@@ -489,13 +479,6 @@ def _analyze_hdmr_core(
     # so the output arrays can be squeezed back to the user's original shape.
     Y_3d, layout = _prepare_Y(Y)
     _, T, K_out = Y_3d.shape
-    if prenormalize:
-        # Standardize each (t, k) slice to zero-mean, unit-variance before
-        # fitting. The scale factors are stored so prediction can invert it.
-        Y_3d, y_mean, y_std, _ = _prenormalize_outputs(Y_3d)
-    else:
-        y_mean = jnp.zeros(Y_3d.shape[1:], dtype=Y_3d.dtype)
-        y_std = jnp.ones(Y_3d.shape[1:], dtype=Y_3d.dtype)
 
     total = T * K_out
 
@@ -618,8 +601,6 @@ def _analyze_hdmr_core(
     if c3_cat is not None:
         C3_out = _reshape_emulator_value(c3_cat, T, K_out, layout)
     f0_out = _reshape_emulator_value(f0_cat, T, K_out, layout)
-    y_mean_out = layout.squeeze(y_mean, n_trailing=0)
-    y_std_out = layout.squeeze(y_std, n_trailing=0)
 
     # Bundle all fitted state needed to reconstruct predictions at new points.
     fit_state: _HDMRFit = {
@@ -627,9 +608,6 @@ def _analyze_hdmr_core(
         "C2": C2_out,
         "C3": C3_out,
         "f0": f0_out,
-        "prenormalize": prenormalize,
-        "y_mean": y_mean_out,
-        "y_std": y_std_out,
         "m": m,
         "maxorder": maxorder,
     }
@@ -644,9 +622,7 @@ def _analyze_hdmr_core(
         invalid=invalid,
         _fit=fit_state,
         select=select_sum,
-        # RMSE is computed on the standardized scale inside the kernel;
-        # multiply by y_std to report it on the original output scale.
-        rmse=_reshape_emulator_value(rmse_cat, T, K_out, layout) * y_std_out,
+        rmse=_reshape_emulator_value(rmse_cat, T, K_out, layout),
         streamed=streamed,
         _c2=tuple(c2),
         _c3=tuple(c3),
@@ -678,9 +654,9 @@ def _hdmr_predict_plan(result: HDMRResult, X_new: Array) -> _PredictPlan:
     together with a kernel that reconstructs ``f0 + sum of component
     functions``. The shared template in
     :class:`jaxgsa._core.surrogate.SurrogateResult` runs that kernel in row
-    batches sized against a transient-memory budget. The kernel also inverts
-    the output standardization when the fit used ``prenormalize=True``, so
-    batched predictions land on the original output scale.
+    batches sized against a transient-memory budget. The fit runs on the
+    output scale the caller passed in, so predictions land on that scale with
+    no inverse transform.
 
     Note: The kernel is not JIT-compatible because ``HDMRResult`` is not a
     registered JAX pytree type.
@@ -698,9 +674,6 @@ def _hdmr_predict_plan(result: HDMRResult, X_new: Array) -> _PredictPlan:
     maxorder = em["maxorder"]
     C1 = em["C1"]
     f0 = em["f0"]
-    prenormalize = em["prenormalize"]
-    y_mean = em["y_mean"]
-    y_std = em["y_std"]
 
     # Apply the same CDF -> [0,1] transform used during fitting.
     X_n = cdf_to_unit_interval(X_new, result.problem)
@@ -737,12 +710,8 @@ def _hdmr_predict_plan(result: HDMRResult, X_new: Array) -> _PredictPlan:
         Y_total = _emulator_contract(B1, C1)
         for build, c_idx, beta, C in higher_orders:
             Y_total = Y_total + _emulator_contract(build(B1, c_idx, beta), C)
-        # Add grand mean to recover the full surrogate prediction, then undo
-        # the standardization applied during fitting, if any. Both are
-        # elementwise per row, so doing them per batch matches single-shot.
-        Y_pred = Y_total + f0
-        if prenormalize:
-            Y_pred = Y_pred * y_std + y_mean
-        return Y_pred
+        # Add the grand mean to recover the full surrogate prediction. It is
+        # elementwise per row, so doing it per batch matches single-shot.
+        return Y_total + f0
 
     return _PredictPlan(X=X_n, bytes_per_row=X_n.dtype.itemsize * elems_per_row, kernel=_predict)

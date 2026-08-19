@@ -182,7 +182,7 @@ def analyze(
     sampling_result: MorrisSamples,
     Y: Array,
     *,
-    prenormalize: bool = False,
+    standardize_outputs: bool = False,
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
@@ -220,11 +220,16 @@ def analyze(
                 (n_runs, T, K)  — K outputs over T time steps
             ``n_runs`` is the unique row count. Any other number of dimensions
             raises ``ValueError``.
-        prenormalize: When ``True``, standardize each output slice to mean 0
-            and unit standard deviation over the expanded sample axis before
-            the elementary effects are computed. This makes the measures
-            comparable across outputs of different magnitude. Defaults to
-            ``False``.
+        standardize_outputs: When ``True``, standardize each output slice to
+            mean 0 and unit standard deviation over the expanded sample axis
+            before the elementary effects are computed. Morris returns
+            dimensional quantities: under ``Y -> a*Y + b`` every one of
+            ``mu``, ``mu_star`` and ``sigma`` scales by ``a``. So this keyword
+            changes what the numbers mean — they come back in units of the
+            output standard deviation, which is what makes slices of
+            different magnitude comparable with each other. It does not
+            change the ranking within one slice. Defaults to ``False``, which
+            reports the measures in the output's own units.
         n_bootstrap: R, the number of bootstrap resamples used for the
             confidence intervals. Resampling is over trajectories, with
             replacement. Set to 0 (default) to skip the bootstrap.
@@ -345,7 +350,7 @@ def analyze(
     if remaining < 2:
         raise ValueError("Fewer than 2 trajectories remain after cleaning")
 
-    if prenormalize:
+    if standardize_outputs:
         Y, _, _, _ = _prenormalize_outputs(Y)
 
     ee = _elementary_effects(Y, idx_after, idx_before, delta)  # (r, D, T, K)

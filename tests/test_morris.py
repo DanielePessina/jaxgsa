@@ -622,12 +622,12 @@ class TestValidation:
         with pytest.raises(ValueError, match="every usable trajectory was removed"):
             analyze(sr, Y, on_invalid="drop")
 
-    def test_prenormalize_scales_measures(self):
+    def test_standardize_outputs_divides_the_measures_by_the_output_std(self):
         sr = sample(linear.PROBLEM, n_trajectories=20, seed=0, verbose=False)
         Y = np.asarray(linear.evaluate(jnp.asarray(sr.samples)))
         Yj = jnp.asarray(Y)
         res_raw = analyze(sr, Yj)
-        res_norm = analyze(sr, Yj, prenormalize=True)
+        res_norm = analyze(sr, Yj, standardize_outputs=True)
         Y_exp = Y[sr.expanded_to_unique]
         scale = Y_exp.std()
         np.testing.assert_allclose(
@@ -635,6 +635,48 @@ class TestValidation:
             np.asarray(res_raw.mu_star) / scale,
             rtol=1e-4,
         )
+
+    def test_measures_scale_exactly_with_an_affine_change_of_output(self):
+        """``Y -> a*Y + b`` multiplies every Morris measure by ``a``.
+
+        Tier T0 (closed form): an elementary effect is a difference quotient,
+        so the shift cancels and the scale passes straight through. Morris
+        reports dimensional quantities and does not pretend otherwise.
+        """
+        sr = sample(linear.PROBLEM, n_trajectories=20, seed=3, verbose=False)
+        Y = jnp.asarray(linear.evaluate(jnp.asarray(sr.samples)))
+        a, b = 3.0, 1e3
+
+        base = analyze(sr, Y)
+        affine = analyze(sr, a * Y + b)
+
+        for name in ("mu", "mu_star", "sigma"):
+            np.testing.assert_allclose(
+                np.asarray(getattr(affine, name)),
+                a * np.asarray(getattr(base, name)),
+                rtol=1e-4,
+                atol=1e-4,
+            )
+
+    def test_standardize_outputs_makes_the_measures_affine_invariant(self):
+        """In output-standard-deviation units the same affine change moves nothing.
+
+        Tier T0 (closed form): the measures scale by ``a`` and the divisor,
+        the output standard deviation, scales by ``a`` too.
+        """
+        sr = sample(linear.PROBLEM, n_trajectories=20, seed=3, verbose=False)
+        Y = jnp.asarray(linear.evaluate(jnp.asarray(sr.samples)))
+
+        base = analyze(sr, Y, standardize_outputs=True)
+        affine = analyze(sr, 3.0 * Y + 1e3, standardize_outputs=True)
+
+        for name in ("mu", "mu_star", "sigma"):
+            np.testing.assert_allclose(
+                np.asarray(getattr(affine, name)),
+                np.asarray(getattr(base, name)),
+                rtol=1e-3,
+                atol=1e-4,
+            )
 
 
 class TestOnInvalidPolicy:

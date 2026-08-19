@@ -87,7 +87,29 @@ def _get_batched_kernel(calc_second_order: bool, estimator: str):
 def _separate_output_values(
     Y: Array, D: int, calc_second_order: bool
 ) -> tuple[Array, Array, Array, Array | None]:
-    """De-interleave flat Saltelli output rows into A, B, AB, BA matrices.
+    """Standardize the outputs, then de-interleave them into A, B, AB, BA.
+
+    The standardization is ``(Y - mean) / std`` over the sample axis, one mean
+    and one standard deviation per output slice, and it is not optional. The
+    Sobol'-Mauntz first-order estimator and every second-order estimator are
+    uncentred products, so a non-zero output mean adds an error term
+    proportional to that mean: on Ishigami at ``N = 4096`` an offset of 1e4
+    turns S1 into ``[6.26, 0.434, 1.71]`` against the analytic
+    ``[0.314, 0.442, 0.000]``, in float64 as well as float32. This is
+    estimator bias, not rounding, and SALib removes it the same way
+    (``SALib/analyze/sobol.py``: ``Y = (Y - Y.mean()) / Y.std()``).
+
+    Scaling by the standard deviation on top of centring moves no index
+    (every estimator is a ratio of two quantities of the same degree), but
+    doing both makes the arithmetic identical to SALib's rather than merely
+    equivalent to it.
+
+    This function is the one seam both the point-estimate path and the
+    bootstrap path pass through, which is why the standardization lives here:
+    :func:`indices` and :func:`analyze` cannot drift apart, and the bootstrap
+    resamples an already-standardized array, so an interval and its centre
+    describe the same quantity. It is plain arithmetic with no host read, so
+    the ``jit``/``vmap``/``jacrev`` guarantee on :func:`indices` survives.
 
     Args:
         Y: Expanded outputs, shape ``(N * step, ...)``, with rows in Saltelli
@@ -100,6 +122,10 @@ def _separate_output_values(
         ``(N, D, ...)`` and ``(N, D, ...)``. BA is None when second order is
         off.
     """
+    # Per output slice: axis 0 is the expanded sample axis, every trailing
+    # axis keeps its own mean and standard deviation.
+    Y, _, _, _ = _prenormalize_outputs(Y)
+
     step = 2 * D + 2 if calc_second_order else D + 2
     n_rows = Y.shape[0]
     base_n = n_rows // step
@@ -428,6 +454,12 @@ def indices(
     Use :func:`analyze` for ordinary analysis. Nothing here checks the outputs,
     so a single NaN silently turns every index into NaN.
 
+    Like :func:`analyze`, this standardizes every output slice to mean 0 and
+    unit standard deviation before the estimators run. That is arithmetic, not
+    policy: the first- and second-order estimators are uncentred products, so
+    the standardization removes a bias term proportional to the output mean.
+    It reduces over the sample axis only, so it stays traceable.
+
     Tier T4 (behavioural contract): the returned arrays must equal the
     corresponding fields of ``analyze``'s result on clean outputs, and the
     function must survive ``jit``, ``vmap`` and ``jit(jacrev(...))``. Checked
@@ -620,7 +652,6 @@ def analyze(
     Y: Array,
     *,
     estimator: Estimator = DEFAULT_ESTIMATOR,
-    prenormalize: bool = False,
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
@@ -636,6 +667,13 @@ def analyze(
     the fraction of output variance explained by each parameter alone. ST
     (total-order) also includes all of that parameter's interactions with the
     other parameters. S2 (second-order) isolates pairwise interactions.
+
+    Every output slice is standardized to mean 0 and unit standard deviation
+    over the sample axis before the estimators run, exactly as SALib does. The
+    first-order and second-order estimators are uncentred products, so a
+    non-zero output mean would otherwise add an error term proportional to
+    that mean. The indices are ratios, so the standardization itself moves
+    nothing else.
 
     The function takes the model outputs Y evaluated at the unique rows that
     ``jaxgsa.sobol.sample()`` returned. It rebuilds the expanded Saltelli
@@ -682,11 +720,6 @@ def analyze(
 
             See :mod:`jaxgsa.sobol._estimators` for the formulas and the
             references, and the methods guide for the measured errors.
-        prenormalize: When ``True``, apply SALib-style global output
-            standardization over the cleaned expanded sample axis before
-            computing Sobol indices. Each output slice is centered to mean 0
-            and scaled to unit standard deviation once, not per bootstrap
-            resample. Defaults to ``False``.
         n_bootstrap: R, the number of bootstrap resamples used to estimate
             confidence intervals. Set to 0 (default) to skip the bootstrap
             entirely; a few hundred resamples is typically enough for stable
@@ -790,9 +823,8 @@ def analyze(
         grouped = np.asarray(Y).reshape(base_n, step, *trailing)[ctx.keep]
         Y = jnp.asarray(grouped.reshape(-1, *trailing))
 
-    if prenormalize:
-        Y, _, _, _ = _prenormalize_outputs(Y)
-
+    # The outputs are standardized inside _separate_output_values, which both
+    # paths below reach, so there is nothing to do to Y here.
     if n_bootstrap > 0:
         if key is None:
             raise ValueError("key is required when n_bootstrap > 0")

@@ -27,7 +27,6 @@ Y = evaluate(sampling_result.samples)
 result = jaxgsa.sobol.analyze(
     sampling_result,
     Y,
-    prenormalize=True,
     num_resamples=200,
     conf_level=0.95,
     ci_method="quantile",
@@ -72,9 +71,9 @@ bootstrap draws:
 ## Practical caveats
 
 - A `jax.random.key(...)` is required when `num_resamples > 0`.
-- `prenormalize=True` applies SALib-style output standardization once over the
-  sample axis before the bootstrap starts. The resamples reuse that transformed
-  output array; they are not re-standardized per resample.
+- `sobol.analyze()` standardizes each output slice once over the sample axis
+  before the bootstrap starts. The resamples reuse that transformed output
+  array; they are not re-standardized per resample.
 - Set `num_resamples=0` to skip bootstrap entirely when you only need point
   estimates.
 - If `calc_second_order=False` during sampling, then `result.S2` and
@@ -82,8 +81,8 @@ bootstrap draws:
 - Bootstrap intervals follow the same output-shape rules as the point estimates,
   so the page on [Multi-Output & Time-Series](/examples/multi-output) is the
   right companion when your model is not scalar.
-- Confidence intervals always remain lower/upper endpoint arrays even when
-  `prenormalize=True`. `ci_method="gaussian"` is closer to SALib's CI
+- Confidence intervals are always lower/upper endpoint arrays.
+  `ci_method="gaussian"` is closer to SALib's CI
   construction, but `jaxgsa` still returns endpoints rather than SALib-style
   confidence half-widths.
 

@@ -83,22 +83,33 @@ def test_bootstrap_ci_contains_analytical(ishigami_bootstrap_result):
         )
 
 
-def test_prenormalize_point_estimates_are_offset_invariant():
-    """prenormalize=True should make Sobol point estimates shift-invariant."""
+def test_point_estimates_are_affine_invariant():
+    """``Y -> a*Y + b`` must not move a Sobol point estimate.
+
+    Tier T0 (closed form): every index is a variance ratio, so the shift
+    drops out and the scale cancels. The estimators do not get that for free
+    — the first-order and second-order formulas are uncentred products — so
+    ``analyze`` standardizes the outputs before they run. This test is the
+    guard on that: before it was unconditional, an offset of 1e4 turned
+    Ishigami's S1 into ``[6.26, 0.434, 1.71]``.
+    """
     sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**10, seed=19, verbose=False)
     Y = evaluate(jnp.asarray(sr.samples))
-    Y_shifted = Y + 123.0
+    Y_affine = 3.0 * Y + 1e4
 
-    base = jaxgsa.sobol.analyze(sr, Y, prenormalize=True)
-    shifted = jaxgsa.sobol.analyze(sr, Y_shifted, prenormalize=True)
+    base = jaxgsa.sobol.analyze(sr, Y)
+    shifted = jaxgsa.sobol.analyze(sr, Y_affine)
 
-    np.testing.assert_allclose(np.asarray(base.S1), np.asarray(shifted.S1), rtol=1e-6, atol=1e-6)
-    np.testing.assert_allclose(np.asarray(base.ST), np.asarray(shifted.ST), rtol=1e-6, atol=1e-6)
+    # The tolerance is float32 cancellation in the standardization itself:
+    # subtracting a mean of 1e4 from a float32 array costs about four digits,
+    # which lands near 1e-5 on an index. The bias this replaces was 1e0.
+    np.testing.assert_allclose(np.asarray(base.S1), np.asarray(shifted.S1), rtol=1e-3, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(base.ST), np.asarray(shifted.ST), rtol=1e-3, atol=1e-4)
     np.testing.assert_allclose(
         np.asarray(base.S2),
         np.asarray(shifted.S2),
-        rtol=1e-6,
-        atol=1e-6,
+        rtol=1e-3,
+        atol=1e-4,
         equal_nan=True,
     )
 
@@ -189,42 +200,47 @@ def test_mixed_uniform_and_gaussian_linear_model_matches_analytical_indices():
     assert result.S2 is None
 
 
-def test_prenormalize_bootstrap_is_offset_invariant():
-    """prenormalize=True should keep bootstrap outputs invariant to shifts in Y."""
+def test_bootstrap_is_affine_invariant():
+    """The bootstrap path standardizes too, so its endpoints move with nothing.
+
+    Tier T0 (closed form). The standardization happens once, before the
+    resampling, so every replicate reads the same standardized array and an
+    interval stays centred on the point estimate.
+    """
     sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**10, seed=23, verbose=False)
     Y = evaluate(jnp.asarray(sr.samples))
-    Y_shifted = Y + 123.0
+    Y_affine = 3.0 * Y + 1e4
     key = jax.random.key(321)
 
-    base = jaxgsa.sobol.analyze(sr, Y, n_bootstrap=20, key=key, prenormalize=True)
-    shifted = jaxgsa.sobol.analyze(sr, Y_shifted, n_bootstrap=20, key=key, prenormalize=True)
+    base = jaxgsa.sobol.analyze(sr, Y, n_bootstrap=20, key=key)
+    shifted = jaxgsa.sobol.analyze(sr, Y_affine, n_bootstrap=20, key=key)
 
-    np.testing.assert_allclose(np.asarray(base.S1), np.asarray(shifted.S1), rtol=1e-6, atol=1e-6)
-    np.testing.assert_allclose(np.asarray(base.ST), np.asarray(shifted.ST), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(np.asarray(base.S1), np.asarray(shifted.S1), rtol=1e-3, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(base.ST), np.asarray(shifted.ST), rtol=1e-3, atol=1e-4)
     np.testing.assert_allclose(
         np.asarray(base.S2),
         np.asarray(shifted.S2),
-        rtol=1e-6,
-        atol=1e-6,
+        rtol=1e-3,
+        atol=1e-4,
         equal_nan=True,
     )
     np.testing.assert_allclose(
         np.asarray(base.S1_conf),
         np.asarray(shifted.S1_conf),
-        rtol=1e-6,
-        atol=1e-6,
+        rtol=1e-3,
+        atol=1e-4,
     )
     np.testing.assert_allclose(
         np.asarray(base.ST_conf),
         np.asarray(shifted.ST_conf),
-        rtol=1e-6,
-        atol=1e-6,
+        rtol=1e-3,
+        atol=1e-4,
     )
     np.testing.assert_allclose(
         np.asarray(base.S2_conf),
         np.asarray(shifted.S2_conf),
-        rtol=1e-5,
-        atol=2e-6,
+        rtol=1e-3,
+        atol=1e-4,
         equal_nan=True,
     )
 

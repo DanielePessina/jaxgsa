@@ -28,7 +28,7 @@ from jax import Array
 from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.entry import at_least, prepare, require
 from jaxgsa._core.invalid import OnInvalid
-from jaxgsa._core.validation import YLayout, _prenormalize_outputs
+from jaxgsa._core.validation import YLayout
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.efast._result import EFASTResult
 from jaxgsa.efast._sampling import EFASTSamples, _frequency_plan
@@ -128,7 +128,6 @@ def analyze(
     sampling_result: EFASTSamples,
     Y: Array,
     *,
-    prenormalize: bool = False,
     slice_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
 ) -> EFASTResult:
@@ -156,10 +155,6 @@ def analyze(
             - ``(n_runs,)`` for scalar output
             - ``(n_runs, K)`` for K output variables
             - ``(n_runs, T, K)`` for K outputs over T time steps
-        prenormalize: If True, center and scale each output slice to unit
-            variance before computing indices. The indices are ratios, so this
-            changes nothing mathematically. It helps only when raw output
-            magnitudes risk float overflow or underflow.
         slice_chunk_size: Maximum number of output slices to process in one
             vmapped batch. It caps peak device memory for a large ``T * K``. A
             smaller value trades speed for memory. ``None`` (default) derives
@@ -222,9 +217,6 @@ def analyze(
     invalid = ctx.invalid
     is_scalar = ctx.layout is YLayout.SCALAR
     Y = ctx.Y3
-
-    if prenormalize:
-        Y, _, _, _ = _prenormalize_outputs(Y)
 
     # Rebuild the frequency plan sample() used, from the design metadata that
     # travels inside EFASTSamples. Both sides read the same numbers, so the

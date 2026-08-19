@@ -145,14 +145,6 @@ class TestForcedStreaming:
         assert streamed.rmse is not None and streamed.rmse.shape == (2, 2)
         _assert_results_match(streamed, full)
 
-    def test_prenormalize_matches(self, ishigami_data_ntk):
-        X, Y_tk = ishigami_data_ntk
-        full = analyze_hdmr(PROBLEM, X, Y_tk, maxorder=2, m=2, prenormalize=True)
-        streamed = analyze_hdmr(
-            PROBLEM, X, Y_tk, maxorder=2, m=2, prenormalize=True, batch_size=200
-        )
-        _assert_results_match(streamed, full)
-
     def test_batch_size_larger_than_n_streams_once(self, ishigami_data, full_result):
         """Tier T4 (internal consistency): batch_size >= N still streams.
 

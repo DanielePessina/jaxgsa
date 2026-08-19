@@ -5,8 +5,11 @@ solutions for the Ishigami, linear additive, and Sobol G-function
 benchmarks.
 """
 
+import jax.numpy as jnp
 import numpy as np
+import pytest
 
+import jaxgsa
 from jaxgsa.benchmarks import ishigami, linear, oakley_ohagan, sobol_g
 
 # ---------------------------------------------------------------------------
@@ -40,6 +43,33 @@ class TestIshigami:
         expected_02 = ishigami.ANALYTICAL_S2[0, 2]
         rel = abs(S2[0, 2] - expected_02) / expected_02
         assert rel < 0.10, f"S2[0,2]={S2[0, 2]:.4f}, expected {expected_02}"
+
+
+@pytest.mark.parametrize("offset", [0.0, 1e4])
+@pytest.mark.parametrize("n_samples", [1024, 4096, 16384])
+def test_ishigami_converges_to_the_analytic_indices_at_any_output_offset(n_samples, offset):
+    """Sobol converges on the closed form, and an output offset does not stop it.
+
+    Tier T0 (closed form): the target is
+    ``jaxgsa.benchmarks.ishigami.ANALYTICAL_S1`` / ``ANALYTICAL_ST``, not a
+    recorded number, so this test cannot certify the behaviour it is meant to
+    catch.
+
+    The tolerance tightens with N, which is the point: the error has to be
+    sampling error, so it has to shrink. It also has to be the *same* error
+    with and without the offset. Before the output standardization became
+    unconditional, an offset of 1e4 put S1 near ``[6.26, 0.434, 1.71]`` at
+    N=4096 — in float64 as well, so it was estimator bias and not rounding.
+    """
+    tolerance = {1024: 0.15, 4096: 0.05, 16384: 0.02}[n_samples]
+    sr = jaxgsa.sobol.sample(
+        ishigami.PROBLEM, n_samples=n_samples, seed=7, calc_second_order=False, verbose=False
+    )
+    Y = ishigami.evaluate(jnp.asarray(sr.samples)) + offset
+    result = jaxgsa.sobol.analyze(sr, Y)
+
+    assert np.abs(np.asarray(result.S1) - np.asarray(ishigami.ANALYTICAL_S1)).max() < tolerance
+    assert np.abs(np.asarray(result.ST) - np.asarray(ishigami.ANALYTICAL_ST)).max() < tolerance
 
 
 # ---------------------------------------------------------------------------

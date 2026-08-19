@@ -114,8 +114,10 @@ Dependence: HSIC does kernel-based dependence detection.
   - Cross-validated against VKOGA and the analytic linear-Gaussian closed form in the test suite
 - All thirteen methods use one strict output contract: scalar `(N,)`, multi-output `(N, K)`, or time-series `(N, T, K)`
 - Bootstrap confidence intervals with JAX-accelerated resampling
-- Optional `prenormalize=True` mode for SALib-style output standardization before
-  Sobol or HDMR analysis
+- Sobol analysis always standardizes each output slice before the estimators, so a
+  large output mean cannot bias S1 or S2
+- `standardize_outputs=True` on Morris and DGSM reports their dimensional
+  quantities in units of the output standard deviation
 - `on_invalid` on every `analyze()`: a non-finite model output raises by default,
   and `"drop"` or `"propagate"` say what to do instead. Every result carries a
   report naming the runs that failed
@@ -176,7 +178,6 @@ Y = evaluate(sampling_result.samples)  # Y.shape == (n_runs,)
 result = jaxgsa.sobol.analyze(
     sampling_result,
     Y,
-    prenormalize=False,  # default; set True for SALib-style output standardization
 )
 # result.S1.shape == (D,)    — first-order indices
 # result.ST.shape == (D,)    — total-order indices
@@ -226,7 +227,6 @@ Y = evaluate(X)  # Y.shape == (2000,)
 result = jaxgsa.hdmr.analyze(
     PROBLEM, X, Y,
     maxorder=2,
-    prenormalize=False,  # default; set True for SALib-style output standardization
     slice_chunk_size=64,  # optional: cap the vmap batch (timesteps x outputs) for memory control
 )
 
@@ -242,7 +242,7 @@ print("Terms:", result.terms)  # ('x1', 'x2', 'x3', 'x1/x2', 'x1/x3', 'x2/x3')
 
 # 4. Use the fitted surrogate as an emulator
 Y_pred = result.predict(X)
-# Y_pred stays on the original output scale even when prenormalize=True
+# HDMR fits on your output scale, so Y_pred is on that scale too
 ```
 
 ### PCE (analytical Sobol indices from a surrogate)
@@ -482,7 +482,6 @@ Y = my_model(sampling_result.samples)
 result = jaxgsa.sobol.analyze(
     sampling_result,
     Y,
-    prenormalize=False,  # optional SALib-style output standardization
     # ci_method="quantile",  # optional bootstrap CI summary method
     slice_chunk_size=64,  # optional: limit vmap batch size for memory control
 )
@@ -491,15 +490,17 @@ result = jaxgsa.sobol.analyze(
 # result.S2            — second-order interactions (None if not computed)
 ```
 
-`prenormalize=True` standardizes the outputs over the sample axis before
-analysis, SALib-style. The default `False` analyzes the raw outputs.
+jaxgsa always standardizes the outputs over the sample axis before the Sobol
+estimators run. It subtracts the mean of each output slice and divides by its
+standard deviation. The S1 and S2 estimators are uncentred products, so a
+non-zero output mean biases them. The standardization removes that bias. SALib
+does the same thing.
 
 For confidence intervals, set `num_resamples > 0`. Then choose how the
 bootstrap distribution is summarized. `ci_method="quantile"` gives percentile
 lower/upper endpoints. `ci_method="gaussian"` gives symmetric endpoints from
 the bootstrap standard deviation. Either way jaxgsa returns endpoint arrays,
-not SALib-style confidence half-widths. This holds even when
-`prenormalize=True`.
+not SALib-style confidence half-widths.
 
 ### Multi-output models
 

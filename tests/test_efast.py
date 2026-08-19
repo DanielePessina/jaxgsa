@@ -383,17 +383,23 @@ class TestMultiOutputAccuracy:
         np.testing.assert_allclose(multi_result.ST[0], scalar_result.ST, atol=1e-5)
 
 
-class TestPrenormalize:
-    """Prenormalize should handle large constant offsets."""
+class TestAffineInvariance:
+    """``Y -> a*Y + b`` must not move an eFAST index.
 
-    def test_prenormalize(self):
+    Tier T0 (closed form): the indices are ratios of Fourier power in
+    different frequency bands, and the shift lands entirely in the excluded
+    DC term while the scale cancels between numerator and denominator. No
+    keyword is involved: eFAST has no output-standardization switch, because
+    there is nothing for one to do.
+    """
+
+    def test_indices_are_affine_invariant(self):
         sr = sample(ishigami.PROBLEM, n_per_curve=4096, M=4, seed=42)
         Y = ishigami.evaluate(jnp.asarray(sr.samples))
         baseline = analyze(sr, jnp.asarray(Y))
-        Y_shifted = Y + 1e6
-        result = analyze(sr, jnp.asarray(Y_shifted), prenormalize=True)
-        np.testing.assert_allclose(np.asarray(result.S1), np.asarray(baseline.S1), atol=0.02)
-        np.testing.assert_allclose(np.asarray(result.ST), np.asarray(baseline.ST), atol=0.02)
+        result = analyze(sr, jnp.asarray(3.0 * Y + 1e4))
+        np.testing.assert_allclose(np.asarray(result.S1), np.asarray(baseline.S1), atol=1e-4)
+        np.testing.assert_allclose(np.asarray(result.ST), np.asarray(baseline.ST), atol=1e-4)
 
 
 class TestSliceChunkSize:

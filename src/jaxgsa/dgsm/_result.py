@@ -35,6 +35,9 @@ class DGSMResult(SchemaResult):
         lower_bound: Kucherenko-Song lower bound on ST,
             ``Var(x_i) * sigma_i^2 / Var(Y)``, same shape as ``nu``.
         var_y: Output variance per slice, shape ``()`` / ``(K,)`` / ``(T, K)``.
+            ``nu``, ``sigma`` and ``var_y`` are all reported for the
+            standardized output when the analysis ran with
+            ``standardize_outputs=True``, which makes ``var_y`` 1.
         problem: Problem definition used for the analysis.
         invalid: What the non-finite check found in the sample, and which
             ``on_invalid`` policy ran. ``invalid.n_invalid == 0`` means the

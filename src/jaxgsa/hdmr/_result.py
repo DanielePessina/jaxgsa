@@ -20,18 +20,14 @@ if TYPE_CHECKING:
 class _HDMRFit(TypedDict):
     """Fitted HDMR surrogate state carried inside ``HDMRResult``.
 
-    The coefficient arrays are stored on the fitted analysis scale. When
-    ``prenormalize`` is ``True``, :meth:`HDMRResult.predict` uses ``y_mean``
-    and ``y_std`` to map predictions back to the original scale.
+    The coefficient arrays are stored on the output scale the caller passed
+    in, so :meth:`HDMRResult.predict` needs no inverse transform.
     """
 
     C1: Array
     C2: Array | None
     C3: Array | None
     f0: Array
-    prenormalize: bool
-    y_mean: Array
-    y_std: Array
     m: int
     maxorder: int
 
@@ -189,9 +185,7 @@ class HDMRResult(SchemaResult, SurrogateResult):
         kernel that rebuilds the B-spline tensor-product bases and contracts
         them with the fitted component coefficients. Those bases are a large
         per-row constant: up to ``m1^3`` floats per interaction term at
-        ``maxorder=3``. When the fit used ``prenormalize=True``, the kernel
-        also inverse-transforms predictions back to the original output
-        scale. See :meth:`predict` for the full contract.
+        ``maxorder=3``. See :meth:`predict` for the full contract.
 
         Raises:
             ValueError: If this result carries no fitted surrogate state.

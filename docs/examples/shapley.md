@@ -135,7 +135,7 @@ input or one group of inputs.
 - `backend="hdmr"` fits the RS-HDMR B-spline surrogate and uses its
   structural (ANCOVA) component variances, truncated at `maxorder`.
   Supports `(N,)`, `(N, K)`, and `(N, T, K)` outputs. Knobs: `maxorder`
-  (default 2), `m`, `maxiter`, `lambdax`, `prenormalize`, `slice_chunk_size`.
+  (default 2), `m`, `maxiter`, `lambdax`, `slice_chunk_size`.
 
 Backend-specific keywords are validated: explicitly setting a knob that
 belongs to the non-selected backend (e.g. `backend="pce"` with

@@ -161,7 +161,6 @@ def _sobol_analysis(jaxgsa, jax, jnp, oscillator, problem):
         conf_level=0.95,
         ci_method="quantile",
         key=jax.random.key(0),
-        prenormalize=True,
     )
     print(sobol_result)
     return (sobol_result,)

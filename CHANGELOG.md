@@ -48,7 +48,65 @@ Version 0.10 adds capability.
 - **`keep_replicates` is keyword-only and last** in every signature. It sat in
   three different positions.
 
+- **`prenormalize` is gone.** It meant four different things across the
+  methods that took it, and on two of them it meant nothing at all.
+
+  | Method | Was | Now |
+  |---|---|---|
+  | `sobol` | `prenormalize: bool = False` | removed; the standardization always runs |
+  | `efast` | `prenormalize: bool = False` | removed; it was a measured no-op (6e-16) |
+  | `hdmr` | `prenormalize: bool = False` | removed; it was a measured no-op (1e-6) |
+  | `morris` | `prenormalize: bool = False` | renamed `standardize_outputs` |
+  | `dgsm` | — | new `standardize_outputs: bool = False` |
+
+  `hsic` and `optimal_transport` keep `prenormalize`. It does real work
+  there: both build kernels or distances from `Y` itself, not from a ratio.
+
+  On `morris` and `dgsm` the keyword earns its place, because those two
+  return dimensional quantities. Under `Y -> a*Y + b`, Morris's `mu`,
+  `mu_star` and `sigma` all scale by `a`, and DGSM's `sigma` scales by `a`
+  and `nu` by `a**2`. `standardize_outputs=True` reports them in units of the
+  output standard deviation, so output slices of different magnitude compare
+  with each other. DGSM's `upper_bound` and `lower_bound` are ratios and do
+  not move; its reported `var_y` becomes 1. DGSM had no way to ask for this
+  before.
+
+  On `efast` and `hdmr` the keyword did nothing measurable, because their
+  indices are ratios. A no-op keyword on a frozen interface is worse than an
+  absent one: a caller sets it and believes it acted.
+
+- **HDMR fits on the caller's output scale.** With `prenormalize` gone, the
+  fit no longer standardizes `Y`, so `predict()` and `rmse` need no inverse
+  transform. The private fit state loses its `prenormalize`, `y_mean` and
+  `y_std` entries. Numbers do not move: `prenormalize` defaulted to `False`.
+
 ### Fixed
+
+- **Sobol standardizes the outputs, always, and this fixes real numbers.**
+  The Sobol'-Mauntz first-order estimator and every second-order estimator
+  are *uncentred* products, so a non-zero output mean adds an error term
+  proportional to that mean. On Ishigami at N=4096 with an output offset of
+  1e4, `S1` came back `[6.26, 0.434, 1.71]` against the analytic
+  `[0.314, 0.442, 0.000]`. Float64 gave `[6.27, 0.433, 1.72]`, so this was
+  estimator bias and not rounding.
+
+  `sobol.analyze` and `sobol.indices` now standardize every output slice to
+  mean 0 and unit standard deviation over the sample axis before the
+  estimators run, which is what SALib has always done
+  (`SALib/analyze/sobol.py`: `Y = (Y - Y.mean()) / Y.std()`). It happens in
+  one place that both paths reach, so the traceable core and the checked
+  entry point cannot disagree, and the bootstrap resamples an
+  already-standardized array.
+
+  Sobol `S1` and `S2` point estimates and intervals move. `ST` moves only in
+  the last bits of a float32 result: the Jansen total-order estimator is a
+  difference, so it was already shift-invariant. Be clear about the size of
+  the win at a *small* output mean: Ishigami's own mean is 3.5, and there the
+  change is close to a wash (largest S1 error 0.106 against 0.123 at
+  N=1024, 0.0017 against 0.0017 at N=16384). What it removes is an error term
+  proportional to the output mean, whose size was otherwise unpredictable: at
+  the same N=1024 with an offset of 1e4 the largest S1 error was 50.8, and it
+  is now still 0.106.
 
 - **VKOGA ignored `batch_size` in its index estimator.** The keyword reached
   the surrogate `predict` path only; the estimator's own chunking passed

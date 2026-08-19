@@ -89,18 +89,6 @@ def test_hdmr_third_order_batched_matches_single_shot(problem):
     np.testing.assert_allclose(np.asarray(batched), np.asarray(single), rtol=1e-5, atol=1e-6)
 
 
-def test_prenormalized_hdmr_batched(problem):
-    """Batching must compose with the inverse output standardization."""
-    X, Y = _make_xy("scalar")
-    result = hdmr.analyze(problem, X, Y, maxorder=2, prenormalize=True)
-    X_new = _x_new()
-
-    single = result.predict(X_new, batch_size=N_NEW)
-    batched = result.predict(X_new, batch_size=32)
-
-    np.testing.assert_allclose(np.asarray(batched), np.asarray(single), rtol=1e-5, atol=1e-6)
-
-
 def test_invalid_batch_size_raises(problem):
     X, Y = _make_xy("scalar")
     result = pce.analyze(problem, X, Y, order=3)

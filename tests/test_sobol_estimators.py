@@ -148,19 +148,25 @@ class TestStructuralProperties:
     def test_negative_first_order_estimates_survive_a_large_sample(self):
         """A negative ``S1`` is sampling error, not under-sampling.
 
-        Sobol-G's four inert parameters have indices near zero, so about half
-        of their estimates fall below zero however large N is. This pins the
-        documented behaviour: the package does not clip, and the negatives do
-        not go away with more samples.
+        Ishigami's third parameter has ``S1`` exactly 0, so its estimate is
+        symmetric noise about zero and falls below it about half the time,
+        however large N is. This pins the documented behaviour: the package
+        does not clip, and the negatives do not go away with more samples.
+
+        Sobol-G is the wrong benchmark for this. Its four "inert" parameters
+        have ``S1`` near 7.2e-5, not 0, and once the outputs are standardized
+        the estimator resolves that at ``base_n = 8192``, so the estimates
+        stay positive. They only used to cross zero because the uncentred
+        estimator added an error term proportional to the output mean.
         """
         seen_negative = 0
         for seed in range(8):
             sr = jaxgsa.sobol.sample(
-                sobol_g.PROBLEM, n_samples=1, base_n=8192, seed=seed, verbose=False
+                ishigami.PROBLEM, n_samples=1, base_n=8192, seed=seed, verbose=False
             )
-            Y = sobol_g.evaluate(jnp.asarray(sr.samples))
+            Y = ishigami.evaluate(jnp.asarray(sr.samples))
             result = jaxgsa.sobol.analyze(sr, Y, estimator=DEFAULT_ESTIMATOR)
-            seen_negative += int(np.any(np.asarray(result.S1) < 0.0))
+            seen_negative += int(np.asarray(result.S1)[2] < 0.0)
         assert seen_negative > 0
 
 

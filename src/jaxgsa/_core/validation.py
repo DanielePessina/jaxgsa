@@ -676,9 +676,11 @@ def _prenormalize_outputs(Y: Array) -> tuple[Array, Array, Array, Array]:
             - ``safe_scale`` is the divisor actually used, with zeros replaced
               by ``1.0`` to avoid division by zero.
     """
-    # Centering + scaling stabilizes Sobol variance estimators when output
-    # magnitudes vary across slices (prevents large-magnitude slices from
-    # dominating numerical precision).
+    # Centering is what removes the mean-proportional bias of an uncentred
+    # estimator (see jaxgsa.sobol._analyze._separate_output_values, which
+    # applies this unconditionally). Scaling on top of it puts slices of
+    # different magnitude on one numerical footing, and matches what SALib
+    # does, so a comparison against SALib is exact rather than equivalent.
     y_mean = jnp.mean(Y, axis=0)
     y_std = jnp.std(Y, axis=0)
     # Replace zero std with 1.0 so division doesn't produce NaN; the

@@ -248,6 +248,92 @@ class TestPrecomputed:
             analyze(problem, Y=Y, dfdx=dfdx[:, None, :])
 
 
+class TestStandardizeOutputs:
+    """``nu`` and ``sigma`` are dimensional; the keyword says in which units."""
+
+    @staticmethod
+    def _precomputed_linear(a: float, b: float):
+        """Return ``(problem, Y, dfdx)`` for ``a * linear(x) + b``."""
+        import jax
+
+        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1),) * 3)
+        X = jnp.asarray(monte_carlo(problem, n=800, seed=17))
+
+        def fn(x):
+            return a * jnp.dot(jnp.array([1.0, 2.0, 3.0]), x) + b
+
+        Y = jax.vmap(fn)(X)
+        dfdx = jax.vmap(jax.jacrev(fn))(X)
+        return problem, Y, dfdx
+
+    def test_moments_scale_exactly_with_an_affine_change_of_output(self):
+        """``Y -> a*Y + b`` scales ``sigma`` by ``a`` and ``nu`` by ``a**2``.
+
+        Tier T0 (closed form): ``nu_i = E[(df/dx_i)^2]`` and
+        ``sigma_i = E[df/dx_i]``, and ``d(a*f + b)/dx = a * df/dx``. The
+        bounds are ratios, so they do not move.
+        """
+        a = 3.0
+        p_base, Y_base, d_base = self._precomputed_linear(1.0, 0.0)
+        p_aff, Y_aff, d_aff = self._precomputed_linear(a, 1e3)
+
+        base = analyze(p_base, Y=Y_base, dfdx=d_base)
+        affine = analyze(p_aff, Y=Y_aff, dfdx=d_aff)
+
+        np.testing.assert_allclose(
+            np.asarray(affine.sigma), a * np.asarray(base.sigma), rtol=1e-4, atol=1e-4
+        )
+        np.testing.assert_allclose(
+            np.asarray(affine.nu), a**2 * np.asarray(base.nu), rtol=1e-4, atol=1e-4
+        )
+        np.testing.assert_allclose(
+            np.asarray(affine.upper_bound), np.asarray(base.upper_bound), rtol=1e-4, atol=1e-4
+        )
+        np.testing.assert_allclose(
+            np.asarray(affine.lower_bound), np.asarray(base.lower_bound), rtol=1e-4, atol=1e-4
+        )
+
+    def test_standardize_outputs_makes_the_moments_affine_invariant(self):
+        """In output-standard-deviation units the same affine change moves nothing."""
+        p_base, Y_base, d_base = self._precomputed_linear(1.0, 0.0)
+        p_aff, Y_aff, d_aff = self._precomputed_linear(3.0, 1e3)
+
+        base = analyze(p_base, Y=Y_base, dfdx=d_base, standardize_outputs=True)
+        affine = analyze(p_aff, Y=Y_aff, dfdx=d_aff, standardize_outputs=True)
+
+        for name in ("nu", "sigma", "upper_bound", "lower_bound"):
+            np.testing.assert_allclose(
+                np.asarray(getattr(affine, name)),
+                np.asarray(getattr(base, name)),
+                rtol=1e-3,
+                atol=1e-4,
+            )
+        # The reported variance is the standardized one, so it is 1 by
+        # construction. Saying so keeps the units unambiguous.
+        np.testing.assert_allclose(np.asarray(base.var_y), 1.0, rtol=1e-5)
+
+    def test_standardize_outputs_leaves_the_bounds_alone(self):
+        """The bounds are ratios: the keyword must not touch them."""
+        problem, Y, dfdx = self._precomputed_linear(1.0, 0.0)
+
+        raw = analyze(problem, Y=Y, dfdx=dfdx)
+        std = analyze(problem, Y=Y, dfdx=dfdx, standardize_outputs=True)
+
+        np.testing.assert_allclose(
+            np.asarray(std.upper_bound), np.asarray(raw.upper_bound), rtol=1e-5, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            np.asarray(std.lower_bound), np.asarray(raw.lower_bound), rtol=1e-5, atol=1e-6
+        )
+        scale = float(np.sqrt(np.asarray(raw.var_y)))
+        np.testing.assert_allclose(
+            np.asarray(std.nu), np.asarray(raw.nu) / scale**2, rtol=1e-5, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            np.asarray(std.sigma), np.asarray(raw.sigma) / scale, rtol=1e-5, atol=1e-6
+        )
+
+
 class TestChunked:
     def test_ragged_chunk_matches(self):
         """N not divisible by batch_size should still produce correct results."""

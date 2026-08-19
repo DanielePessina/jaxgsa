@@ -250,13 +250,19 @@ def test_hdmr_accepts_gaussian_inputs():
     assert result.ST.shape == (3,)
 
 
-def test_prenormalize_is_shift_scale_invariant(ishigami_data):
-    """prenormalize=True should make HDMR sensitivities invariant to affine Y changes."""
+def test_indices_are_affine_invariant(ishigami_data):
+    """HDMR indices are variance ratios, so ``Y -> a*Y + b`` must not move them.
+
+    Tier T0 (closed form): an ANCOVA index is a ratio of two quantities that
+    both scale by ``a**2`` and both ignore ``b``, so invariance is exact up to
+    the fit's own conditioning. No keyword buys this and none can switch it
+    off.
+    """
     X, Y = ishigami_data
     Y_affine = 3.0 * Y + 17.0
 
-    base = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2, prenormalize=True)
-    affine = analyze_hdmr(PROBLEM, X, Y_affine, maxorder=2, m=2, prenormalize=True)
+    base = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2)
+    affine = analyze_hdmr(PROBLEM, X, Y_affine, maxorder=2, m=2)
 
     np.testing.assert_allclose(np.asarray(base.S1), np.asarray(affine.S1), rtol=1e-6, atol=1e-6)
     np.testing.assert_allclose(np.asarray(base.ST), np.asarray(affine.ST), rtol=1e-6, atol=1e-6)
@@ -304,17 +310,16 @@ def test_predict_rejects_wrong_shaped_x(hdmr_result, ishigami_data):
         hdmr_result.predict(X_wide)
 
 
-def test_prenormalize_emulator_predictions_and_rmse_stay_on_original_scale(ishigami_data):
-    """prenormalized HDMR fits should still predict and report RMSE in original units."""
+def test_emulator_predictions_and_rmse_stay_on_the_caller_scale(ishigami_data):
+    """A shifted, scaled Y must come back out of predict() on that same scale."""
     X, Y = ishigami_data
     Y_affine = 3.0 * Y + 17.0
 
-    result = analyze_hdmr(PROBLEM, X, Y_affine, maxorder=2, m=2, prenormalize=True)
+    result = analyze_hdmr(PROBLEM, X, Y_affine, maxorder=2, m=2)
     Y_pred = result.predict(X)
     rmse = float(jnp.sqrt(jnp.mean(jnp.square(Y_affine - Y_pred))))
 
     assert result._fit is not None
-    assert result._fit["prenormalize"] is True
     assert Y_pred.shape == Y_affine.shape
     assert result.rmse is not None
     np.testing.assert_allclose(np.asarray(result.rmse), rmse, rtol=1e-6, atol=1e-6)

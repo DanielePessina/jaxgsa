@@ -239,9 +239,10 @@ def _analyze_md(mo):
     bootstrap and populates the `_conf` arrays with `[lower, upper]`
     endpoints in a leading dimension of size 2.
 
-    `prenormalize=True` matches the SALib output-standardisation
-    convention: the cleaned output array is centred and scaled to unit
-    variance once, before the bootstrap, not per resample.
+    jaxgsa always standardises the outputs before the Sobol estimators.
+    The cleaned output array is centred and scaled to unit variance once,
+    before the bootstrap, not per resample. The S1 and S2 estimators are
+    uncentred products, so a non-zero output mean would bias them.
     """)
     return
 
@@ -255,7 +256,6 @@ def _analyze(Y, jaxgsa, jax, sampling_result):
         conf_level=0.95,
         ci_method="quantile",
         key=jax.random.key(0),
-        prenormalize=True,
     )
     print(result)
     return (result,)
