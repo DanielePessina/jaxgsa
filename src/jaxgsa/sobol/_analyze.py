@@ -47,6 +47,7 @@ from jaxgsa._core.validation import (
     _prenormalize_outputs,
     _prepare_Y,
 )
+from jaxgsa.sobol._chunking import pad_slice_axis, resolve_point_chunk_size
 from jaxgsa.sobol._estimators import (
     DEFAULT_ESTIMATOR,
     ESTIMATORS,
@@ -236,7 +237,7 @@ def _point_indices_3d(
     K: int,
     D: int,
     is_scalar: bool,
-    slice_chunk_size: int,
+    slice_chunk_size: int | None,
     estimator: str,
 ) -> tuple[Array, Array, Array | None]:
     """Run the estimator over every output slice, in the promoted 3-D layout.
@@ -262,7 +263,8 @@ def _point_indices_3d(
         D: Number of input parameters.
         is_scalar: Whether the caller passed a rank-1 ``Y``, which enables
             the direct fused-kernel path.
-        slice_chunk_size: Number of output slices per vmap batch.
+        slice_chunk_size: Number of output slices per vmap batch, or ``None``
+            to derive one from the active memory budget.
         estimator: Which named estimator pair to use.
 
     Returns:
@@ -276,10 +278,18 @@ def _point_indices_3d(
     Raises:
         ValueError: If ``slice_chunk_size`` is below 1.
     """
-    if slice_chunk_size < 1:
-        raise ValueError(f"slice_chunk_size must be >= 1, got {slice_chunk_size}")
     calc_second_order = BA_flat is not None
     total = T * K
+    # Sizes the automatic width, and refuses an explicit width below 1. Both
+    # happen before the scalar shortcut so every path validates the argument.
+    cs = resolve_point_chunk_size(
+        slice_chunk_size,
+        total,
+        A_flat.shape[1],
+        D,
+        calc_second_order,
+        A_flat.dtype.itemsize,
+    )
 
     if is_scalar:
         # Scalar path (T*K=1): call the fused kernel directly on 1-D arrays.
@@ -296,24 +306,25 @@ def _point_indices_3d(
             S2_out = None
         return s1.reshape(1, 1, D), st.reshape(1, 1, D), S2_out
 
-    # Chunk the T*K batches to cap peak memory when many outputs exist
-    cs = min(slice_chunk_size, total)
-
+    # Every chunk is padded back to `cs` slices, so the kernel traces once
+    # instead of once more for a ragged tail. The padded lanes are separate
+    # vmap lanes and are dropped before anything reads them.
     if calc_second_order:
         assert BA_flat is not None
         batched = _get_batched_kernel(True, estimator)
         s1_parts, st_parts, s2_parts = [], [], []
         for start in range(0, total, cs):
             end = min(start + cs, total)
+            actual = end - start
             s1, st, s2 = batched(
-                A_flat[start:end],
-                AB_flat[start:end],
-                BA_flat[start:end],
-                B_flat[start:end],
+                pad_slice_axis(A_flat[start:end], cs),
+                pad_slice_axis(AB_flat[start:end], cs),
+                pad_slice_axis(BA_flat[start:end], cs),
+                pad_slice_axis(B_flat[start:end], cs),
             )
-            s1_parts.append(s1)
-            st_parts.append(st)
-            s2_parts.append(s2)
+            s1_parts.append(s1[:actual])
+            st_parts.append(st[:actual])
+            s2_parts.append(s2[:actual])
 
         S1_out = jnp.concatenate(s1_parts).reshape(T, K, D)
         ST_out = jnp.concatenate(st_parts).reshape(T, K, D)
@@ -323,13 +334,14 @@ def _point_indices_3d(
         s1_parts, st_parts = [], []
         for start in range(0, total, cs):
             end = min(start + cs, total)
+            actual = end - start
             s1, st = batched(
-                A_flat[start:end],
-                AB_flat[start:end],
-                B_flat[start:end],
+                pad_slice_axis(A_flat[start:end], cs),
+                pad_slice_axis(AB_flat[start:end], cs),
+                pad_slice_axis(B_flat[start:end], cs),
             )
-            s1_parts.append(s1)
-            st_parts.append(st)
+            s1_parts.append(s1[:actual])
+            st_parts.append(st[:actual])
 
         S1_out = jnp.concatenate(s1_parts).reshape(T, K, D)
         ST_out = jnp.concatenate(st_parts).reshape(T, K, D)
@@ -339,7 +351,7 @@ def _point_indices_3d(
 
 
 def _indices_from_expanded(
-    Y: Array, D: int, calc_second_order: bool, slice_chunk_size: int, estimator: str
+    Y: Array, D: int, calc_second_order: bool, slice_chunk_size: int | None, estimator: str
 ) -> tuple[Array, Array, Array | None]:
     """Compute Sobol indices from expanded-layout outputs, picking the faster kernel.
 
@@ -361,7 +373,8 @@ def _indices_from_expanded(
             ``(base_n * step, ...)``.
         D: Number of input parameters.
         calc_second_order: Whether the layout includes the BA blocks.
-        slice_chunk_size: Number of (T, K) output slices per vmap batch.
+        slice_chunk_size: Number of (T, K) output slices per vmap batch, or
+            ``None`` to derive one from the active memory budget.
         estimator: Which named estimator pair to use. See
             :mod:`jaxgsa.sobol._estimators`.
 
@@ -403,7 +416,7 @@ def _analyze_no_bootstrap(
     sampling_result: SobolSamples,
     Y: Array,
     *,
-    slice_chunk_size: int,
+    slice_chunk_size: int | None,
     estimator: str,
     invalid: InvalidReport,
 ) -> SobolResult:
@@ -430,7 +443,7 @@ def indices(
     Y: Array,
     *,
     estimator: Estimator = DEFAULT_ESTIMATOR,
-    slice_chunk_size: int = 2048,
+    slice_chunk_size: int | None = None,
 ) -> tuple[Array, ...]:
     """Compute Sobol indices as plain arrays, with no diagnostics.
 
@@ -476,8 +489,10 @@ def indices(
             one of them is plain arithmetic on the output vectors, so the
             choice does not affect what ``jit``, ``vmap`` or ``jacrev`` can
             do with this function.
-        slice_chunk_size: Number of (T, K) output slices per vmap batch. Lower
-            it if you hit device out-of-memory errors.
+        slice_chunk_size: Number of (T, K) output slices per vmap batch, or
+            ``None`` (the default) to derive one from
+            :func:`jaxgsa.config.set_memory_budget`. Lower it if you hit
+            device out-of-memory errors.
 
     Returns:
         ``(S1, ST)``, or ``(S1, ST, S2)`` when the design was drawn with
@@ -511,7 +526,7 @@ def _analyze_bootstrap(
     conf_level: float,
     ci_method: Literal["quantile", "gaussian"],
     key: Array,
-    slice_chunk_size: int,
+    slice_chunk_size: int | None,
     invalid: InvalidReport,
     keep_replicates: bool,
 ) -> SobolResult:
@@ -656,7 +671,7 @@ def analyze(
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
     key: Array | None = None,
-    slice_chunk_size: int = 2048,
+    slice_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
     keep_replicates: bool = False,
 ) -> SobolResult:
@@ -739,8 +754,12 @@ def analyze(
             ``n_bootstrap`` of its draws, so one device call covers
             ``slice_chunk_size * n_bootstrap`` estimator evaluations, and
             the memory budget that :func:`jaxgsa.config.set_memory_budget`
-            sets can lower the width further. Lower it yourself if you hit
-            device out-of-memory errors. Defaults to 2048.
+            sets can lower the width further. ``None`` (the default) derives
+            the width from that budget alone, on both paths: the point
+            kernels cost about ``2 * N * (D + 2)`` elements per slice, or
+            ``2 * N * (2D + 2)`` with second order, and the bootstrap
+            kernels cost ``n_bootstrap`` times that. Give an integer to cap
+            it yourself if you hit device out-of-memory errors.
 
             It changes no index beyond floating-point noise. The estimator
             sums over the sample axis, and XLA schedules that reduction

@@ -30,6 +30,10 @@ gather at once. ``analyze`` forwards its ``slice_chunk_size`` as the cap on
 slices per chunk, and the caller-independent memory budget can only lower it
 further. Every pair is independent of every other, so the chunked answer is
 the unchunked one, element for element.
+
+A trailing chunk narrower than the rest would trace the jitted resampler a
+second time, so it is padded back to the full width and the answer is sliced
+back. The padded slices are separate ``vmap`` lanes, so this too is exact.
 """
 
 from functools import lru_cache
@@ -39,11 +43,17 @@ import jax.numpy as jnp
 from jax import Array
 
 from jaxgsa._core.batching import get_memory_budget
+from jaxgsa.sobol._chunking import pad_slice_axis
 from jaxgsa.sobol._estimators import first_total_kernel, second_order_kernel
 
 
 def _resolve_slice_chunk_size(
-    slice_chunk_size: int, n_slices: int, n_bootstrap: int, base_n: int, D: int, itemsize: int
+    slice_chunk_size: int | None,
+    n_slices: int,
+    n_bootstrap: int,
+    base_n: int,
+    D: int,
+    itemsize: int,
 ) -> int:
     """Resolve how many output slices one bootstrap device call may carry.
 
@@ -54,8 +64,9 @@ def _resolve_slice_chunk_size(
     intermediates, which is the same order of magnitude either way.
 
     Args:
-        slice_chunk_size: Caller's cap on slices per chunk. It is an upper
-            bound only: the memory budget may lower it, never raise it.
+        slice_chunk_size: Caller's cap on slices per chunk, or ``None`` to
+            let the budget decide alone. It is an upper bound only: the
+            memory budget may lower it, never raise it.
         n_slices: Total number of flattened (T, K) output slices.
         n_bootstrap: R, the number of bootstrap resamples.
         base_n: N, the number of base samples per resample.
@@ -67,6 +78,8 @@ def _resolve_slice_chunk_size(
     """
     bytes_per_slice = 2 * n_bootstrap * base_n * (D + 2) * itemsize
     budget = max(1, get_memory_budget() // max(bytes_per_slice, 1))
+    if slice_chunk_size is None:
+        return max(1, min(budget, n_slices))
     return max(1, min(slice_chunk_size, budget, n_slices))
 
 
@@ -165,11 +178,18 @@ def _bootstrap_first_total(
     cs = max(1, min(slice_chunk_size, n_slices))
     for start in range(0, n_slices, cs):
         end = min(start + cs, n_slices)
+        actual = end - start
         # Process C slices x R resamples per device call; chunking bounds peak
-        # device memory.
-        s1, st = resample(indices, A[start:end], AB[start:end], B[start:end])
-        s1_parts.append(s1)
-        st_parts.append(st)
+        # device memory. A short trailing chunk is padded back to C so the
+        # jitted resampler traces once rather than twice.
+        s1, st = resample(
+            indices,
+            pad_slice_axis(A[start:end], cs),
+            pad_slice_axis(AB[start:end], cs),
+            pad_slice_axis(B[start:end], cs),
+        )
+        s1_parts.append(s1[:actual])
+        st_parts.append(st[:actual])
 
     # Concatenate chunks along the slice axis -> (S, R, D)
     return jnp.concatenate(s1_parts), jnp.concatenate(st_parts)
@@ -211,11 +231,19 @@ def _bootstrap_second_order(
     cs = max(1, min(slice_chunk_size, n_slices))
     for start in range(0, n_slices, cs):
         end = min(start + cs, n_slices)
-        # Same chunked nested-vmap strategy as _bootstrap_first_total
-        s1, st, s2 = resample(indices, A[start:end], AB[start:end], BA[start:end], B[start:end])
-        s1_parts.append(s1)
-        st_parts.append(st)
-        s2_parts.append(s2)
+        actual = end - start
+        # Same chunked nested-vmap strategy as _bootstrap_first_total, ragged
+        # trailing chunk padded back to C included.
+        s1, st, s2 = resample(
+            indices,
+            pad_slice_axis(A[start:end], cs),
+            pad_slice_axis(AB[start:end], cs),
+            pad_slice_axis(BA[start:end], cs),
+            pad_slice_axis(B[start:end], cs),
+        )
+        s1_parts.append(s1[:actual])
+        st_parts.append(st[:actual])
+        s2_parts.append(s2[:actual])
 
     # Concatenate chunks along the slice axis -> (S, ...) for each output
     return (

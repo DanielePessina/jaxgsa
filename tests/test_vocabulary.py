@@ -65,17 +65,10 @@ POSITIONAL_EXCEPTIONS = {"dgsm"}
 # test before the assertion runs, so it can never notice the gap closing, and
 # the exemption would outlive the problem.
 BUDGET_GAPS: dict[str, str] = {
-    "sobol": (
-        "sobol.slice_chunk_size is int=2048 and cannot take None: the "
-        "point-estimate path (_analyze.py:253) has no budget derivation, only "
-        "min(slice_chunk_size, total). Closing this needs a bytes-per-slice "
-        "model for the point kernels, which is a behavioural change, not a "
-        "rename. Tracked as the 'honour the memory budget everywhere' item."
-    ),
     "morris": (
-        "morris.resample_chunk_size defaults to 2048 to match sobol's width. "
-        "It does honour the budget as an upper bound; only the default "
-        "differs. Flip it with sobol's, not before."
+        "morris.resample_chunk_size defaults to 2048 to match the width sobol "
+        "used to default to. It does honour the budget as an upper bound; "
+        "only the default differs. sobol has since flipped to None."
     ),
 }
 

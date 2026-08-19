@@ -23,9 +23,11 @@ computed once and shared across all output columns. One JIT-compiled kernel
 is vmapped over the flattened ``T*K`` output columns, with one compilation
 per unique ``(N, D, n_bins)`` and output-column count. The columns run in
 chunks of at most ``slice_chunk_size``, which bounds the working arrays, so
-the column count is the chunk width and a trailing part-chunk adds at most
-one more compilation. The ``statistic`` aggregation runs outside JIT so all
-three statistics share one compilation.
+the column count is the chunk width. A trailing part-chunk is padded back to
+that width and the answer sliced back, which keeps the kernel at one
+compilation instead of two; the padded columns are separate ``vmap`` lanes, so
+the sliced answer is bit-for-bit the unpadded one. The ``statistic``
+aggregation runs outside JIT so all three statistics share one compilation.
 
 The kernel's working set is not the ``(chunk, D, n_bins)`` result. The
 nested ``vmap`` builds a full ``(N, n_bins)`` ECDF table per (column,
@@ -306,6 +308,31 @@ def _resolve_slice_chunk_size(
     return max(1, get_memory_budget() // max(bytes_per_column, 1))
 
 
+def _pad_columns(Y_cols: Array, width: int) -> Array:
+    """Zero-pad the output-column axis of ``Y_cols`` up to ``width`` columns.
+
+    The KS kernel is jitted and ``vmap``ped over the column axis, so a
+    trailing chunk narrower than the rest traces it a second time. Padding the
+    chunk back to the full width keeps the kernel at one compilation. Each
+    column is its own ``vmap`` lane and no reduction crosses lanes, so the
+    padded columns cannot reach the real ones; the caller drops them.
+
+    Args:
+        Y_cols: Output columns, shape ``(N, m)`` with ``m <= width``.
+        width: Target number of columns.
+
+    Returns:
+        ``Y_cols`` unchanged when it is already ``width`` wide, otherwise a
+        ``(N, width)`` array with zero-filled trailing columns. The dtype is
+        preserved, so the padded call reuses the full chunk's compilation.
+    """
+    n_cols = Y_cols.shape[1]
+    if n_cols == width:
+        return Y_cols
+    pad = jnp.zeros((Y_cols.shape[0], width - n_cols), dtype=Y_cols.dtype)
+    return jnp.concatenate([Y_cols, pad], axis=1)
+
+
 def _aggregate_ks(
     ks: Array,
     statistic: Literal["median", "max", "mean"],
@@ -385,8 +412,14 @@ def _pawn_core(
     pawn_parts: list[Array] = []
     empty_parts: list[Array] = []
     for start in range(0, total, cs):
-        ks = kernel(bin_idx, Y_cols[:, start : start + cs])  # (chunk, D, n_eff)
-        pawn_parts.append(_aggregate_ks(ks, statistic))  # (chunk, D)
+        actual = min(cs, total - start)
+        # The trailing chunk is padded back to `cs` columns so the jitted
+        # kernel traces once rather than once more for the ragged tail. The
+        # padded columns are separate vmap lanes and are dropped here, before
+        # anything reads them.
+        padded = _pad_columns(Y_cols[:, start : start + cs], cs)
+        ks = kernel(bin_idx, padded)[:actual]  # (actual, D, n_eff)
+        pawn_parts.append(_aggregate_ks(ks, statistic))  # (actual, D)
         if warn:
             empty_parts.append(jnp.all(jnp.isnan(ks), axis=(0, 2)))
 
