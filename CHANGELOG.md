@@ -68,6 +68,31 @@ Version 0.10 adds capability.
   and has no JAX PRNG interface, so the split is real and now documented
   rather than accidental.
 
+- **The last vocabulary renames land: `standardize_outputs` and
+  `correlation_type`.** Each rename is a clean break. There is no alias and
+  no deprecation period. Change the keyword and the call works as before.
+
+  | Was | Now | Where |
+  |---|---|---|
+  | `standardize` | `standardize_outputs` | `optimal_transport.analyze`, `optimal_transport.indices` |
+  | `correlation_kind` | `correlation_type` | `Problem(...)`, `Problem.from_dict(...)` |
+  | `kind` | `correlation_type` | `Problem.with_correlation(...)` |
+
+  One flag standardizes outputs, so it has one name everywhere:
+  `standardize_outputs`. One keyword declares the scale of a correlation
+  matrix, so it has one name on all three `Problem` surfaces:
+  `correlation_type`. Error and warning messages use the new spellings too.
+
+- **`kucherenko.sample` gets the shared seed interface.** The keyword is now
+  `seed: int | np.random.Generator | None = None`, the same as `sobol`,
+  `morris` and `efast`. It was `seed: int = 0`. Pass `seed=0` to keep the old
+  default design bit for bit.
+
+  The sampler also rejects one inert setting: a seed passed with
+  `scramble=False` now raises `ValueError`. The seed only feeds the Owen
+  scrambling, so without scrambling it does nothing, and the project policy
+  is to raise on a setting that cannot do what it says.
+
 - **`borgonovo.analyze` no longer bootstraps by default.** `n_bootstrap` was
   `100`; it is now `0`, matching every other method. Combined with the new
   key requirement, the old default would have made the plainest possible call
@@ -103,9 +128,10 @@ Version 0.10 adds capability.
   `Y`, so the indices are invariant under `Y -> a*Y + b`. Standardizing `Y`
   first therefore changes nothing, and a no-op keyword would mislead.
 
-  `optimal_transport` keeps this behavior under the name `standardize`
-  (default `True`). It does real work there: the method builds distances
-  from `Y` itself, not from a ratio.
+  `optimal_transport` keeps this behavior (default `True`). It does real
+  work there: the method builds distances from `Y` itself, not from a
+  ratio. The keyword is now spelled `standardize_outputs`; see the rename
+  entry below.
 
   On `morris` and `dgsm` the keyword earns its place, because those two
   return dimensional quantities. Under `Y -> a*Y + b`, Morris's `mu`,

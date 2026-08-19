@@ -159,6 +159,22 @@ correlated reseeding this contract removes. Raise instead. For the same reason,
 per-stream keys come from `jax.random.split` or `fold_in`, never from an
 integer offset like `seed + 1` or `seed + 7919`.
 
+### Output standardization and correlation scale
+
+| Keyword | Where | Rule |
+|---|---|---|
+| `standardize_outputs` | any `analyze()` with an output-standardization flag | The single spelling — not `standardize`, not `prenormalize`. |
+| `correlation_type` | `Problem(...)`, `Problem.from_dict(...)`, `Problem.with_correlation(...)` | `"latent" \| "spearman"`, default `"latent"`. The single spelling — not `correlation_kind`, not `kind`. |
+
+### Sampler seeds
+
+Samplers draw host randomness, not JAX randomness, so they take
+`seed: int | np.random.Generator | None = None` — all four of them, including
+`kucherenko.sample`. In `kucherenko.sample` the seed only feeds the Owen
+scrambling, so a seed passed with `scramble=False` is inert (the unscrambled
+Sobol' sequence is deterministic); an inert setting raises rather than being
+silently ignored.
+
 ### Surrogate-backed methods
 
 `pce`, `hdmr`, `vkoga` and `shapley` do offer `n_bootstrap`, and it must stay

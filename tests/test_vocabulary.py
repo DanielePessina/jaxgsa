@@ -49,6 +49,18 @@ RETIRED_NAMES = {
     "rng": "key",
 }
 
+# Spellings the freeze retired from analyze() and sample() alike. Output
+# standardization has one spelling: `standardize` (optimal_transport) and
+# `prenormalize` (hsic, long removed) lost to `standardize_outputs`. The
+# correlation-scale keyword is `correlation_type` on every surface, so
+# neither `correlation_kind` nor a bare `kind` may appear as a parameter.
+RETIRED_EVERYWHERE = {
+    "standardize": "standardize_outputs",
+    "prenormalize": "standardize_outputs",
+    "correlation_kind": "correlation_type",
+    "kind": "correlation_type",
+}
+
 # No method bootstraps by default. Borgonovo's bias correction does need
 # replicates, but a non-zero default plus a required key would make the
 # plainest possible call an error, so it warns instead. Kept as an empty set
@@ -132,6 +144,55 @@ def test_no_retired_spelling_survives(spec: MethodSpec) -> None:
         f"Use instead: {', '.join(RETIRED_NAMES[name] for name in found)}. "
         "See CONTEXT.md."
     )
+
+
+def _entry_points(spec: MethodSpec) -> list[tuple[str, dict[str, inspect.Parameter]]]:
+    """Return the public entry points a spec exposes, with their parameters.
+
+    ``analyze`` always; ``sample`` when the method is design-based. Both are
+    read with ``eval_str=True`` for the reason ``_params`` documents.
+    """
+    out = [("analyze", _params(spec))]
+    if spec.sample is not None:
+        out.append(("sample", dict(inspect.signature(spec.sample, eval_str=True).parameters)))
+    return out
+
+
+@pytest.mark.parametrize("spec", ALL, ids=_ids(ALL))
+def test_no_retired_spelling_in_analyze_or_sample(spec: MethodSpec) -> None:
+    """Neither entry point uses a standardization or correlation spelling that lost.
+
+    ``optimal_transport`` said ``standardize`` and ``hsic`` once said
+    ``prenormalize`` for the same concept; ``Problem`` said both
+    ``correlation_kind`` and ``kind`` for one concept. One spelling each:
+    ``standardize_outputs`` and ``correlation_type``.
+    """
+    for fn_name, params in _entry_points(spec):
+        found = sorted(set(params) & set(RETIRED_EVERYWHERE))
+        assert not found, (
+            f"{spec.name}.{fn_name} uses retired keyword(s) {found}. "
+            f"Use instead: {', '.join(RETIRED_EVERYWHERE[name] for name in found)}. "
+            "See CONTEXT.md."
+        )
+
+
+@pytest.mark.parametrize("spec", ALL, ids=_ids(ALL))
+def test_output_standardization_is_spelled_standardize_outputs(spec: MethodSpec) -> None:
+    """A flag that standardizes the outputs is spelled ``standardize_outputs``.
+
+    The rule catches near-misses the retired list cannot enumerate: any
+    parameter whose name contains ``standardize`` must be exactly
+    ``standardize_outputs``, on ``analyze`` and ``sample`` alike.
+    """
+    for fn_name, params in _entry_points(spec):
+        offenders = sorted(
+            name for name in params if "standardize" in name and name != "standardize_outputs"
+        )
+        assert not offenders, (
+            f"{spec.name}.{fn_name} spells an output-standardization flag "
+            f"{offenders}; the vocabulary allows one spelling, "
+            "'standardize_outputs'. See CONTEXT.md."
+        )
 
 
 @pytest.mark.parametrize("spec", ALL, ids=_ids(ALL))
