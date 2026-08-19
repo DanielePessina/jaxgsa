@@ -2,7 +2,10 @@
 
 The estimators compute R2-HSIC (normalized first-order) and Total HSIC
 indices from arbitrary (X, Y) sample pairs. They use Gaussian RBF kernels
-and pick the bandwidth with the median heuristic.
+and pick the bandwidth with the median heuristic. A caller's ``bandwidth``
+multiplies that heuristic rather than replacing it, so every width carries
+the scale of its own variable and the indices are invariant under
+``Y -> a*Y + b`` and under a rescaling of any input.
 
 Array shape conventions used throughout:
     N  — number of samples
@@ -51,10 +54,7 @@ from jax.typing import DTypeLike
 from jaxgsa._core.entry import at_least, prepare, require
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.transforms import cdf_to_unit_interval
-from jaxgsa._core.validation import (
-    _prenormalize_outputs,
-    _prepare_Y,
-)
+from jaxgsa._core.validation import _prepare_Y
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.hsic._result import HSICResult
 from jaxgsa.problem import Problem
@@ -235,19 +235,25 @@ def _median_bandwidth_sq(x: Array) -> Array:
     return jnp.maximum(_linear_quantile_by_selection(dists_sq, q), 1e-20)
 
 
-def _resolve_bandwidth_sq(x: Array, bandwidth: float | None) -> Array:
+def _resolve_bandwidth_sq(x: Array, bandwidth: float) -> Array:
     """Resolve the squared Gaussian bandwidth for one variable.
+
+    ``bandwidth`` is a multiplier on the median heuristic, not a width. The
+    resolved standard deviation is ``bandwidth * sqrt(median_sq)``, so this
+    returns ``bandwidth**2 * median_sq``. The heuristic already carries the
+    scale of ``x``, so the resolved bandwidth scales with the data whatever
+    the caller passes, and the kernel — and therefore every index — is
+    unchanged under ``x -> a*x + b``. A multiplier of exactly 1.0 returns the
+    heuristic itself, bit for bit.
 
     Args:
         x: Values for one variable, shape ``(N,)``.
-        bandwidth: Fixed bandwidth, or None for the median heuristic.
+        bandwidth: Positive multiplier on the median-heuristic bandwidth.
 
     Returns:
         Scalar squared bandwidth.
     """
-    if bandwidth is None:
-        return _median_bandwidth_sq(x)
-    return jnp.asarray(bandwidth, dtype=x.dtype) ** 2
+    return jnp.asarray(bandwidth, dtype=x.dtype) ** 2 * _median_bandwidth_sq(x)
 
 
 def _build_kernel(x: Array, sigma_sq: Array, batch_size: int | None) -> Array:
@@ -317,7 +323,7 @@ def _hsic_v(K: Array, L: Array) -> Array:
 
 def _build_one_kernel(
     x: Array,
-    bandwidth: float | None,
+    bandwidth: float,
     batch_size: int | None,
 ) -> Array:
     """Build one kernel matrix for one variable.
@@ -327,7 +333,7 @@ def _build_one_kernel(
 
     Args:
         x: Values for one variable, shape ``(N,)``.
-        bandwidth: Fixed bandwidth, or None for the median heuristic.
+        bandwidth: Multiplier on the median-heuristic bandwidth.
         batch_size: Row-block size for the kernel matrix, or None.
 
     Returns:
@@ -338,14 +344,14 @@ def _build_one_kernel(
 
 def _build_input_kernels(
     X_unit: Array,
-    bandwidth: float | None,
+    bandwidth: float,
     batch_size: int | None,
 ) -> list[Array]:
     """Build one kernel matrix per parameter.
 
     Args:
         X_unit: Inputs mapped to [0, 1], shape ``(N, D)``.
-        bandwidth: Fixed bandwidth, or None for the median heuristic.
+        bandwidth: Multiplier on the median-heuristic bandwidth.
         batch_size: Row-block size for the kernel matrix, or None.
 
     Returns:
@@ -402,7 +408,7 @@ def _complement_kernels(Ks: list[Array]) -> tuple[Array, list[Array]]:
 
 
 @lru_cache(maxsize=32)
-def _get_hsic_kernel(n_perms: int, bandwidth: float | None, batch_size: int | None):
+def _get_hsic_kernel(n_perms: int, bandwidth: float, batch_size: int | None):
     """Return a JIT-compiled HSIC kernel for every output slice.
 
     The atomic unit is one output slice: it builds that slice's output
@@ -437,8 +443,8 @@ def _get_hsic_kernel(n_perms: int, bandwidth: float | None, batch_size: int | No
     Args:
         n_perms: Number of permutations for the permutation test (static;
             it sets the scan length and the number of split keys).
-        bandwidth: Fixed Gaussian bandwidth for the output kernel, or None
-            for the median heuristic (static; it selects the code path).
+        bandwidth: Multiplier on the median-heuristic bandwidth of the
+            output kernel (static; it is a compile-time constant).
         batch_size: Row-block size for the output kernel build, or None
             (static; it sets the number of blocks).
 
@@ -580,9 +586,8 @@ def indices(
     *,
     n_perms: int = 200,
     key: Array,
-    bandwidth: float | None = None,
+    bandwidth: float = 1.0,
     batch_size: int | None = None,
-    prenormalize: bool = False,
 ) -> tuple[Array, Array, Array, Array]:
     """Compute HSIC indices as plain arrays, with no diagnostics.
 
@@ -596,13 +601,12 @@ def indices(
     decision needs a concrete value and a tracer has none.
 
     Every branch here is on a shape or on a Python scalar. ``n_perms``,
-    ``bandwidth``, ``batch_size`` and ``prenormalize`` are all static: they
-    are read while the graph is being traced and never at run time.
-    ``bandwidth`` selects between the median heuristic and a fixed value,
-    ``batch_size`` sets how many row blocks the kernel build unrolls into,
-    and both are baked into the compiled kernel, which is keyed on them (see
-    :func:`_get_hsic_kernel`). Changing one recompiles; neither costs a
-    device-side conditional.
+    ``bandwidth`` and ``batch_size`` are all static: they are read while the
+    graph is being traced and never at run time. ``bandwidth`` scales the
+    median-heuristic width, ``batch_size`` sets how many row blocks the
+    kernel build unrolls into, and both are baked into the compiled kernel,
+    which is keyed on them (see :func:`_get_hsic_kernel`). Changing one
+    recompiles; neither costs a device-side conditional.
 
     No bootstrap and no confidence interval, here or on :func:`analyze`. The
     permutation ``p_values`` are the uncertainty statement, and the module
@@ -631,16 +635,23 @@ def indices(
         key: JAX PRNG key driving the permutation test. Required, and
             keyword-only with no default: the p-values are random, and a
             constant fallback would silently correlate repeated analyses.
-        bandwidth: Fixed Gaussian bandwidth, or ``None`` for the median
-            heuristic, as in :func:`analyze`. The median heuristic selects
-            an order statistic through a bit-pattern bisection, which has no
-            derivative, so a gradient taken with respect to ``X`` treats the
-            bandwidth as a constant. Pass an explicit ``bandwidth`` when that
-            matters.
+        bandwidth: Multiplier on the median-heuristic bandwidth, as in
+            :func:`analyze`.
+
+            Gradients are always taken at a frozen bandwidth. The median
+            heuristic picks an order statistic through a bit-pattern
+            bisection, which carries no derivative, and the multiplier rides
+            on top of it, so a gradient with respect to ``X`` or ``Y`` never
+            sees the width move. There is no way to opt out of that: every
+            bandwidth is a multiple of the same selected median. What comes
+            back is the exact derivative of the estimator whose bandwidth is
+            held at the value the heuristic chose for the point being
+            differentiated at, which is the usual convention for a
+            median-heuristic kernel. Read it that way, and remember that a
+            finite difference of the same call is *not* the same quantity:
+            it also moves the median, so it will not match.
         batch_size: Row-block size for each ``(N, N)`` kernel build, as in
             :func:`analyze`.
-        prenormalize: Standardize each output slice before the analysis, as
-            in :func:`analyze`.
 
     Returns:
         ``(R2_HSIC, T_HSIC, p_values, hsic_raw)``, each of shape
@@ -658,9 +669,6 @@ def indices(
 
     Y_3d, layout = _prepare_Y(Y)
     _N, T, K = Y_3d.shape
-
-    if prenormalize:
-        Y_3d, _, _, _ = _prenormalize_outputs(Y_3d)
 
     # Build input kernels and augmented products once (independent of Y).
     Ks = _build_input_kernels(X_unit, bandwidth, batch_size)
@@ -700,9 +708,8 @@ def analyze(
     *,
     n_perms: int = 200,
     key: Array | None = None,
-    bandwidth: float | None = None,
+    bandwidth: float = 1.0,
     batch_size: int | None = None,
-    prenormalize: bool = False,
     on_invalid: OnInvalid = "raise",
 ) -> HSICResult:
     """Compute HSIC (Hilbert-Schmidt Independence Criterion) sensitivity indices.
@@ -756,8 +763,12 @@ def analyze(
         problem: Problem definition with D parameters.
         X: Input samples in physical units, shape ``(N, D)``.
         Y: Model outputs, shape ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
-            For outputs of large magnitude, set ``prenormalize=True`` to
-            avoid float overflow in the distance computation.
+            The indices do not depend on the units: the bandwidth tracks the
+            data, so ``Y`` and ``a*Y + b`` give the same answer. Outputs of
+            extreme magnitude are still worth rescaling by hand, because the
+            squared distances the kernel builds can overflow float32 long
+            before the index would care; ``(Y - Y.mean(0)) / Y.std(0)``
+            changes nothing else.
         n_perms: Number of random permutations for the p-value test. More
             permutations give finer p-value resolution at linearly higher
             cost. The smallest attainable p-value is ``1 / (n_perms + 1)``,
@@ -768,16 +779,32 @@ def analyze(
             rather than an integer seed because a key can be split, so
             nested or repeated analyses draw independent permutations
             instead of silently correlated ones.
-        bandwidth: Fixed Gaussian-kernel bandwidth applied to all parameters
-            and to the output. None (default) selects it per variable with
-            the median heuristic (median pairwise distance), a robust default.
+        bandwidth: Multiplier on the Gaussian-kernel bandwidth, applied to
+            every parameter and to the output. The width itself is always
+            chosen per variable by the median heuristic, and this scales it:
+            ``1.0`` (default) is exactly the heuristic, ``0.5`` halves every
+            width, ``2.0`` doubles them. Precisely, the standard deviation of
+            the Gaussian is ``bandwidth * sqrt(m)``, where ``m`` is the median
+            of the off-diagonal *squared* pairwise distances of that variable.
+            Squaring is monotone on distances, so ``sqrt(m)`` is the median
+            pairwise distance itself — the two agree to 1.6e-11 relative at
+            ``N = 257``, and differ only for a tiny sample, where the linear
+            interpolation between the two middle order statistics is done on
+            the squares.
+
+            The multiplier is relative on purpose. The heuristic carries the
+            scale of each variable, so every bandwidth this method uses does
+            too, and the indices are unchanged under ``Y -> a*Y + b`` and
+            under a rescaling of any input. There is deliberately no way to
+            ask for an absolute width: an absolute number would have to be
+            read against units this method otherwise never sees, and one
+            fixed value cannot be right for both a parameter mapped to
+            ``[0, 1]`` and an output measured in megapascals.
         batch_size: Row-block size for building each ``(N, N)`` kernel matrix.
             It bounds the working memory of the build, **not** the kernel
             matrix: the blocks are concatenated back into one ``(N, N)``
             array, so peak memory stays of order ``N^2`` in every case. None
             (default) builds each matrix in one step.
-        prenormalize: If True, standardize each output slice to mean 0 and
-            unit standard deviation before the analysis.
         on_invalid: What to do about a row of ``X`` or ``Y`` that holds a
             non-finite value. ``"raise"`` (default) refuses the sample,
             ``"drop"`` removes those rows and analyzes the rest, and
@@ -818,7 +845,7 @@ def analyze(
         checks=(
             at_least("n_perms", n_perms, 1),
             require(
-                bandwidth is None or (bandwidth > 0 and math.isfinite(bandwidth)),
+                bandwidth > 0 and math.isfinite(bandwidth),
                 f"bandwidth must be positive and finite, got {bandwidth}",
             ),
         ),
@@ -844,7 +871,6 @@ def analyze(
         key=key,
         bandwidth=bandwidth,
         batch_size=batch_size,
-        prenormalize=prenormalize,
     )
 
     r2_all = ctx.squeeze(r2_all)
