@@ -70,12 +70,15 @@ _CV_RMSE_WARN_FRACTION = 0.5
 
 # Largest fitted off-diagonal latent correlation the training X may show
 # before the design is called correlated. Spearman rank-correlation noise on
-# an independent design of n rows has standard deviation about 1/sqrt(n), so
-# even at the method's smallest viable training sets (tens of rows) the noise
-# stays well under 0.1 — comfortably below 0.3. A training set that was
-# actually drawn from the analysis copula, the mistake this check catches,
-# fits near the declared entries, which sit well above 0.3 whenever the
-# correlation matters at all.
+# an independent design of n rows has standard deviation about 1/sqrt(n)
+# (~0.18 at n=30, ~0.07 at n=200), and the check takes a max over D(D-1)/2
+# entries, which inflates the expected extreme further. So at very small n
+# with many parameters this can fire on an independent design; at the
+# training sizes the surrogate needs to be any good (hundreds of rows) the
+# noise sits well below 0.3. A training set actually drawn from the analysis
+# copula, the mistake this check catches, fits near the declared entries,
+# which sit well above 0.3 whenever the correlation matters at all. The
+# consequence of a false positive is one warning, not a wrong number.
 _TRAINING_CORRELATION_WARN = 0.3
 
 # The index fields a bootstrap reports an interval for. The diagnostics

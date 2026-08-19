@@ -95,7 +95,11 @@ def _count_valid_bins(bin_idx: Array, n_eff: int) -> np.ndarray:
     A bin contributes only when it holds at least two samples; the KS kernel
     returns ``NaN`` for anything smaller and the nan-aware aggregation drops
     it. Bin occupancy depends on the inputs alone (never on ``Y``), so the
-    count is computed once per analysis, on the host.
+    count is computed once per analysis, on the host. This makes the count
+    exact for finite ``Y``; under ``on_invalid="propagate"`` with NaN in
+    ``Y``, an occupied bin can still yield a NaN KS value, so the count is
+    an upper bound there — in exactly the mode where the indices themselves
+    are already NaN.
 
     Args:
         bin_idx: Conditioning-bin indices from :func:`_bin_indices`, shape
