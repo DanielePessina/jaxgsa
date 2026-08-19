@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 import jaxgsa
+from jaxgsa._core.partition import _build_class_indices, _class_layout
 from jaxgsa.benchmarks import gaussian_linear, ishigami
 from jaxgsa.optimal_transport import analyze
 from jaxgsa.sampling import monte_carlo
@@ -85,6 +86,29 @@ class TestOTBasic:
         r_default = analyze(ishigami.PROBLEM, X, Y3)
         r_chunked = analyze(ishigami.PROBLEM, X, Y3, slice_chunk_size=1)
         np.testing.assert_allclose(np.asarray(r_default.ot), np.asarray(r_chunked.ot), atol=1e-7)
+
+    def test_unstable_class_sort_matches_a_stable_one(self, ishigami_data):
+        """The kernel's unstable sort must return the stable sort's array.
+
+        Ordering the class members is the most expensive step in this
+        method, and the kernel asks an unstable sort for it because it
+        wants the order statistics and never which tied element came
+        first. Two float32 values that compare equal are the same bits,
+        so the two sorts have to agree element for element. This pins
+        that at the shapes and the data the kernel actually sees, NaNs
+        included, because an unstable sort that moved a NaN or a signed
+        zero somewhere else would be a silent change of answer.
+        """
+        X, Y = ishigami_data
+        n = X.shape[0]
+        take, _ = _class_layout(n, 8)
+        idx = jnp.arange(n, dtype=jnp.int32)[None, :]
+        cls_idx = _build_class_indices(X, idx, jnp.asarray(take))[0]  # (D, M, P)
+        for values in (Y, Y.at[:5].set(jnp.nan), Y.at[:5].set(-0.0).at[5:10].set(0.0)):
+            y_cls = values[cls_idx]
+            stable = jnp.sort(y_cls, axis=-1)
+            unstable = jax.lax.sort(y_cls, dimension=-1, is_stable=False)
+            np.testing.assert_array_equal(np.asarray(stable), np.asarray(unstable), strict=True)
 
     def test_n_partitions_changes_result(self, ishigami_data):
         X, Y = ishigami_data

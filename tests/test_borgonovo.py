@@ -5,14 +5,21 @@ from __future__ import annotations
 import warnings
 from typing import cast
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
+import jaxgsa
 from jaxgsa import JaxgsaWarning
+from jaxgsa._core.partition import build_partition_groups
 from jaxgsa.benchmarks import gaussian_linear, ishigami
 from jaxgsa.borgonovo import analyze
-from jaxgsa.borgonovo._analyze import _DEGENERATE_BW_FRACTION, _plischke_n_classes
+from jaxgsa.borgonovo._analyze import (
+    _DEGENERATE_BW_FRACTION,
+    _get_delta_kernel,
+    _plischke_n_classes,
+)
 from jaxgsa.problem import Problem
 from jaxgsa.sampling import monte_carlo
 
@@ -102,6 +109,62 @@ class TestDeltaBasic:
         r_chunked = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=10, seed=0, slice_chunk_size=1)
         np.testing.assert_allclose(
             np.asarray(r_full.delta), np.asarray(r_chunked.delta), rtol=1e-6
+        )
+
+
+class TestGridTiling:
+    """The output grid is evaluated in tiles to bound peak memory.
+
+    Tiling is a memory decision only. Every grid point sums over its own
+    class members and over nothing else, so no tiling reorders a
+    reduction and the answer has to come back bit for bit the same. These
+    tests are what makes that claim checkable, so they compare with
+    ``assert_array_equal`` and not with a tolerance.
+    """
+
+    @staticmethod
+    def _kernel_inputs(X, Y_cols, n_bootstrap=4, seed=0):
+        """Build the arguments the jitted delta kernel takes."""
+        n = X.shape[0]
+        identity = jnp.arange(n, dtype=jnp.int32)[None, :]
+        boot = jax.random.randint(
+            jax.random.PRNGKey(seed), (n_bootstrap, n), 0, n, dtype=jnp.int32
+        )
+        all_idx = jnp.concatenate([identity, boot], axis=0)
+        groups, _, _ = build_partition_groups(
+            ishigami.PROBLEM, X, all_idx, _plischke_n_classes(n), ()
+        )
+        return Y_cols, all_idx, tuple(groups)
+
+    @pytest.mark.parametrize("grid_chunk", [2, 3, 4, 7, 8, 16, 50, 99])
+    def test_tiled_grid_is_bit_identical(self, ishigami_data, grid_chunk):
+        """Any tile width returns exactly the untiled result."""
+        X, Y = ishigami_data
+        Y_cols = jnp.stack([Y, Y**2, jnp.sin(Y)], axis=1)
+        args = self._kernel_inputs(X, Y_cols)
+        untiled = _get_delta_kernel(100, None, 1e-2, None, 100)(*args)
+        tiled = _get_delta_kernel(100, None, 1e-2, None, grid_chunk)(*args)
+        for a, b in zip(untiled, tiled):
+            np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+    def test_memory_budget_narrows_the_working_set(self, ishigami_data):
+        """A small budget still returns the same answer.
+
+        The budget changes how the work is cut up, never what it
+        computes. A slice chunk narrower than the output does reassociate
+        the float32 reductions XLA emits, so this one carries a
+        tolerance; the tile width above does not.
+        """
+        X, Y = ishigami_data
+        Y2 = jnp.stack([Y, Y**2, jnp.sin(Y)], axis=1)
+        r_default = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=5, seed=0)
+        jaxgsa.config.set_memory_budget(1, unit="mib")
+        try:
+            r_small = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=5, seed=0)
+        finally:
+            jaxgsa.config.set_memory_budget(512, unit="mib")
+        np.testing.assert_allclose(
+            np.asarray(r_default.delta), np.asarray(r_small.delta), rtol=1e-5, atol=1e-7
         )
 
 

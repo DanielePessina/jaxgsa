@@ -141,6 +141,25 @@ the work, including seven corrections to the roadmap it replaces.
 
   No index changed. Every value is bit-for-bit what it was.
 
+- **`jaxgsa.optimal_transport.analyze` is about 2x faster on many outputs.**
+  At 128 output slices the call went from 511 ms to 258 ms, and the cost of
+  one slice from 4.0 ms to 2.0 ms. The per-class sort inside the 1-D kernel
+  was a *stable* sort, which the estimator never needed: it only wants order
+  statistics, and equal float32 values are the same bits either way. An
+  unstable sort returns the identical array. The rank table is also built
+  once for the whole replicate scan instead of once per replicate. No index
+  changed.
+
+- **`jaxgsa.borgonovo.analyze` uses about half the memory on many outputs.**
+  At 128 output slices peak resident memory went from 402 MiB to 179 MiB.
+  The conditional-KDE tensor is now evaluated in tiles across the output
+  grid, and the slice chunk is sized from `set_memory_budget` instead of a
+  hardcoded element count. Run time is unchanged at 64 slices and below; at
+  128 slices it is flat to a few percent slower, which is the trade for the
+  memory. No index changed: each grid point keeps its own sum over its own
+  class members, and every tile width from 2 upward is bit-identical to the
+  untiled result.
+
 - **The Sobol bootstrap is 9-20x faster on many outputs.** On a 1024-row
   Ishigami problem with 128 output slices, `analyze(..., num_resamples=...)`
   went from 84 ms to 4-9 ms. The resampler now runs one estimator kernel over

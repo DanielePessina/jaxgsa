@@ -25,7 +25,8 @@ under identical conventions.
 Two things are computed once and reused. The class-partition indices are built
 per parameter for every replicate, then reused across output-column chunks.
 The JIT-compiled per-column kernel is cached only on the scalar estimator
-settings ``(grid_size, bandwidth)``, so it captures no sample-sized constants.
+settings, that is the grid size, the bandwidth rule, the degenerate-class
+floor and the grid tile width, so it captures no sample-sized constants.
 
 The estimator details mirror ``SALib.analyze.delta``: an equal-frequency
 ordinal rank partition, the Plischke class-count heuristic, Silverman KDE
@@ -60,6 +61,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import _percentile_ci
 from jaxgsa._core.entry import at_least, in_open_interval, prepare, require
 from jaxgsa._core.invalid import OnInvalid
@@ -118,11 +120,27 @@ _DELTA_RANGE_TOL = 0.05
 # this guard and stays.
 _DISCRETE_MAX_DISTINCT = 20
 _DISCRETE_DISTINCT_FRACTION = 0.01
-# Target element budget for the default per-chunk working set. The dominant
-# intermediate is the conditional-KDE tensor. Its size scales as
-# ``chunk_columns * sum_g(Dg * Mg * Pg) * grid_size``. The default chunk
-# width keeps that tensor near this many float32 elements (~256 MB).
-_CHUNK_ELEM_BUDGET = 1 << 26
+# Live copies of the conditional-KDE tensor to budget for. The tensor is
+# built, exponentiated, masked and then reduced, and the XLA CPU runtime was
+# measured holding roughly three of those stages resident at once. The slice
+# chunk is sized against this multiple so the peak stays inside the
+# transient-memory budget rather than three times over it.
+_KDE_LIVE_TENSORS = 3
+# Target size of one conditional-KDE grid tile, in bytes. This is a working
+# set, not a cap: the tile only has to be wide enough to keep the CPU busy,
+# and making it wider buys nothing but resident pages. 16 MiB was measured as
+# the point where the curve flattens; below it the per-tile dispatch starts to
+# show, above it the peak grows with no gain in speed. The real cap is the
+# transient-memory budget, which the slice chunk is sized against.
+_KDE_TILE_TARGET_BYTES = 16 * 1024**2
+# Narrowest conditional-KDE grid tile the sizing rule will pick. Tiling never
+# reorders the mathematics: each grid point keeps its own sum over its own
+# class members. XLA is still free to reassociate that sum differently for a
+# different tile shape, and at a tile of exactly one grid point it does,
+# because there is no longer a grid axis to vectorize over; the result then
+# moves in the last few bits (measured at 3e-8). Every wider tile returns the
+# untiled result exactly, which the test suite pins, so the rule stops at two.
+_MIN_GRID_TILE = 2
 
 
 # Fewest samples that still build two conditioning classes with a density
@@ -173,6 +191,7 @@ def _get_delta_kernel(
     bw_factor: float | None,
     degenerate_tol: float,
     degenerate_bw: float | None,
+    grid_chunk: int,
 ):
     """Return a JIT-compiled delta/S1 kernel for static estimator settings.
 
@@ -192,6 +211,14 @@ def _get_delta_kernel(
             fraction of the full-sample bandwidth, applied exactly; or
             ``None`` for the default ``max(_DEGENERATE_BW_FRACTION *
             h_full, grid_step)``.
+        grid_chunk: Output-grid points evaluated per conditional-KDE tile
+            (static). ``grid_chunk >= grid_size`` evaluates the whole grid
+            in one tile. A smaller value evaluates the grid in sequential
+            tiles, which bounds the ``(Dg, M, grid_chunk, P)`` kernel
+            tensor that dominates this method's peak memory. Every grid
+            point keeps its own untouched sum over the class members, so
+            tiling reorders nothing; any width of two or more returns the
+            untiled result exactly.
 
     Returns:
         A jitted callable ``(Y_cols (N, C), all_idx (R, N), groups) ->
@@ -211,12 +238,49 @@ def _get_delta_kernel(
         """Per-class (or full-sample) KDE bandwidths for this kernel's factor."""
         return _kde_bandwidths(counts, std, bw_factor)
 
+    def _over_grid(fn: Callable[[Array], Array], grid: Array) -> Array:
+        """Evaluate ``fn`` on tiles of the output grid and rejoin the tiles.
+
+        Every KDE this kernel builds costs one kernel evaluation per
+        (grid point, sample) pair, and those tensors are what the method
+        peaks at. Splitting the grid axis bounds them: only one
+        ``grid_chunk``-wide tile is live at a time, because
+        :func:`jax.lax.map` is sequential.
+
+        A grid point's density sums over the samples and over nothing
+        else, so no tiling reorders a reduction, and every tile width of
+        two or more was measured returning the untiled result exactly.
+        The grid is padded up to a whole
+        number of tiles and the padding is dropped again, so only one tile
+        shape is ever traced.
+
+        Args:
+            fn: Maps a grid tile ``(Gt,)`` to values ``(..., Gt)``.
+            grid: The full output grid ``(G,)``.
+
+        Returns:
+            ``fn(grid)``, shape ``(..., G)``.
+        """
+        if grid_chunk >= grid_size:
+            return fn(grid)
+        n_tiles = -(-grid_size // grid_chunk)
+        pad = n_tiles * grid_chunk - grid_size
+        padded = jnp.concatenate([grid, jnp.repeat(grid[-1:], pad)]) if pad else grid
+        tiles = jax.lax.map(fn, padded.reshape(n_tiles, grid_chunk))
+        # (n_tiles, ..., Gt) -> (..., n_tiles * Gt)
+        rejoined = jnp.moveaxis(tiles, 0, -2).reshape(*tiles.shape[1:-1], -1)
+        return rejoined[..., :grid_size]
+
     def _kde_full(y: Array, grid: Array, h: Array) -> Array:
         """Gaussian KDE of a full column ``y (N,)`` on ``grid (G,)``."""
         n = y.shape[0]
         safe_h = jnp.where(h > 0, h, 1.0)
-        u = (grid[:, None] - y[None, :]) / safe_h
-        f = jnp.exp(-0.5 * u * u).sum(axis=1) / (n * safe_h * _SQRT_2PI)
+
+        def _tile(grid_tile: Array) -> Array:
+            u = (grid_tile[:, None] - y[None, :]) / safe_h
+            return jnp.exp(-0.5 * u * u).sum(axis=1) / (n * safe_h * _SQRT_2PI)
+
+        f = _over_grid(_tile, grid)
         # A zero bandwidth means constant data. It drops the density from
         # the integrand, mirroring SALib's degenerate-class treatment.
         return jnp.where(h > 0, f, 0.0)
@@ -273,9 +337,20 @@ def _get_delta_kernel(
             h = jnp.where(floored_cls, floor, h)
             safe_h = jnp.where(h > 0, h, 1.0)
 
-            u = (grid[None, None, :, None] - y_cls[:, :, None, :]) / safe_h[..., None, None]
-            k = jnp.exp(-0.5 * u * u) * mask_b[..., None, :]
-            fyc = k.sum(axis=-1) / (safe_counts[..., None] * safe_h[..., None] * _SQRT_2PI)
+            def _density_tile(grid_tile: Array) -> Array:
+                """Conditional class densities on one tile of the output grid.
+
+                This is the largest tensor the estimator ever builds:
+                ``(Dg, M, len(grid_tile), P)``. Tiling the grid is what
+                keeps it, and with it the method's peak memory, bounded.
+                """
+                u = (grid_tile[None, None, :, None] - y_cls[:, :, None, :]) / safe_h[
+                    ..., None, None
+                ]
+                k = jnp.exp(-0.5 * u * u) * mask_b[..., None, :]
+                return k.sum(axis=-1) / (safe_counts[..., None] * safe_h[..., None] * _SQRT_2PI)
+
+            fyc = _over_grid(_density_tile, grid)
             fyc = jnp.where((h > 0)[..., None], fyc, 0.0)  # (Dg, M, G)
 
             l1 = jnp.trapezoid(jnp.abs(fy[None, None, :] - fyc), grid, axis=-1)
@@ -622,15 +697,17 @@ def analyze(
             SALib.
         seed: Random seed for bootstrap resampling.
         slice_chunk_size: Number of flattened ``T*K`` output columns
-            processed per kernel call. ``None`` picks a memory-aware
-            default from the sample size. Pass a positive integer to
-            override it. Peak memory scales with
-            ``slice_chunk_size * grid_size`` times the summed padded class
-            layout ``sum_g(Dg * Mg * Pg)``. That layout is about ``D * N``
-            for continuous parameters. An imbalanced categorical parameter
-            pads every level up to the largest one, so the layout can be
-            many times ``D * N``. The default accounts for the real
-            layout.
+            processed per kernel call. ``None`` derives it from the
+            transient-memory budget
+            (:func:`jaxgsa.config.set_memory_budget`) and the real class
+            layout. Pass a positive integer to override it. One column
+            costs the summed padded class layout ``sum_g(Dg * Mg * Pg)``
+            per output-grid point. That layout is about ``D * N`` for
+            continuous parameters; an imbalanced categorical parameter
+            pads every level up to the largest one, so it can be many
+            times ``D * N``. The grid is then evaluated in tiles, so peak
+            memory follows the tile rather than the whole grid, and a
+            narrower chunk is rarely the knob that saves memory here.
         degenerate_tol: A conditioning class counts as degenerate when its
             KDE bandwidth is below this fraction of the full-sample
             bandwidth. Degenerate classes get the floored bandwidth below.
@@ -810,19 +887,33 @@ def analyze(
     # Canonical partition-group layout, shared with optimal_transport.
     groups, _, col_order = build_partition_groups(problem, X, all_idx, M, dims_levels)
 
-    kernel = _get_delta_kernel(grid_size, bw_factor, degenerate_tol, degenerate_bw)
-
     total = T * K
-    if slice_chunk_size is None:
-        # Peak memory is the conditional-KDE tensor, which holds one grid of
-        # length grid_size per padded class slot. Size it from the real
-        # per-group layout Dg * Mg * Pg. Assuming that product is ~ D * N
-        # holds for equal-frequency continuous classes, but it under-counts
-        # badly for an imbalanced categorical column, where every level is
-        # padded up to the largest one.
-        layout_elems = sum(g[0].shape[1] * g[0].shape[2] * g[0].shape[3] for g in groups)
-        slice_chunk_size = max(1, _CHUNK_ELEM_BUDGET // (layout_elems * grid_size))
-    cs = min(slice_chunk_size, total)
+    # Peak memory is the conditional-KDE tensor. It holds one output-grid
+    # point per padded class slot, so it costs
+    # ``columns * sum_g(Dg * Mg * Pg) * grid_points`` elements. Size it from
+    # the real per-group layout: assuming that product is ~ D * N holds for
+    # equal-frequency continuous classes, but it under-counts badly for an
+    # imbalanced categorical column, where every level is padded up to the
+    # largest one.
+    #
+    # Two knobs bound that tensor, and they answer different questions. The
+    # slice chunk answers "how much of the output can be in flight at once",
+    # and the transient-memory budget is its cap. The grid tile answers "how
+    # much of the KDE has to be resident to keep the CPU busy", and a working
+    # -set target is its cap; the tile is where nearly all of the saving is,
+    # because tiling costs no extra passes over the data.
+    layout_elems = sum(g[0].shape[1] * g[0].shape[2] * g[0].shape[3] for g in groups)
+    itemsize = jnp.dtype(jnp.result_type(Y_cols.dtype, jnp.float32)).itemsize
+    bytes_per_column_grid_point = layout_elems * itemsize
+    cs = resolve_batch_size(
+        bytes_per_column_grid_point * _KDE_LIVE_TENSORS, total, slice_chunk_size
+    )
+    grid_chunk = min(
+        grid_size,
+        max(_MIN_GRID_TILE, _KDE_TILE_TARGET_BYTES // (cs * bytes_per_column_grid_point)),
+    )
+
+    kernel = _get_delta_kernel(grid_size, bw_factor, degenerate_tol, degenerate_bw, grid_chunk)
     d_parts, s1_parts, degen_parts, floored_parts = [], [], [], []
     for start in range(0, total, cs):
         chunk = Y_cols[:, start : start + cs]

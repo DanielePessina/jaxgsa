@@ -125,10 +125,15 @@ def set_memory_budget(budget: int | float, *, unit: str | None = None) -> None:
 
     jaxgsa bounds peak memory in several places by processing data in batches
     sized against this budget: surrogate ``predict`` (PCE, HDMR), the HDMR
-    output-slice chunking, the PAWN output-slice chunking, and the PCE and HDMR
-    streaming fits that engage when the single-pass design matrix would not
-    fit. All of them derive their automatic batch/chunk sizes from this budget
-    (default: 512 MiB).
+    output-slice chunking, the PAWN output-slice chunking, the Borgonovo
+    output-slice chunking, and the PCE and HDMR streaming fits that engage
+    when the single-pass design matrix would not fit. All of them derive
+    their automatic batch/chunk sizes from this budget (default: 512 MiB).
+
+    Borgonovo also tiles its output grid, which is what bounds its peak in
+    practice, but the tile width comes from a fixed working-set target rather
+    than from this budget. Lowering the budget narrows the slice chunk; it
+    does not narrow the tile.
 
     The budget is read in megabytes unless you say otherwise, so
     ``set_memory_budget(512)`` restates the default. Every unit is binary:
