@@ -220,7 +220,7 @@ def estimate_correlated_indices(
     Y_var = np.asarray(predict(U_var), dtype=np.float64)
     variance = Y_var.var(axis=0)
     # A zero-variance slice makes every index undefined rather than zero; NaN
-    # propagates that honestly, matching the convention in hdmr._engine._ancova.
+    # propagates that honestly, matching the convention in hdmr._fit._get_stats_step.
     safe_variance = np.where(variance > 0.0, variance, np.nan)
 
     coefficients = _fit_component_functions(U_var, Y_var)

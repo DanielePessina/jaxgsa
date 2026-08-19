@@ -52,3 +52,5 @@ oracles exist at which versions is in `docs/adr/0004-oracle-inventory.md`.
 | Script | Oracle | Tier | Regenerates |
 | --- | --- | --- | --- |
 | `salib_delta_class_counts.py` | SALib 1.5.2 | T2 | The seven class counts in `tests/test_borgonovo.py::TestPlischkeHeuristic::test_matches_reference_class_counts` |
+| `openturns_sobol_estimators.py` | OpenTURNS 1.27 | T2 | The recorded estimator literals in `tests/test_sobol_estimators.py` |
+| `hdmr_direct_form.py` | Re-derived direct-form HDMR + `scipy.stats.f.ppf` | T4 | Nothing. Run by hand to cross-check `jaxgsa.hdmr.analyze` against an independent estimator |

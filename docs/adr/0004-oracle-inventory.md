@@ -30,6 +30,19 @@ Active subspaces, which ATHENA would have checked, uses T0 oracles instead —
 the linear and quadratic cases have exact closed-form answers, which is
 strong evidence, not a fallback.
 
+RS-HDMR has no external oracle, and this is settled rather than open. SALib's
+`analyze.hdmr` differs in the sampling it assumes, in using the bootstrap to
+drive term selection, and in which terms it returns, so a literal taken from it
+would pin those three choices rather than the ANCOVA decomposition. Li et al.
+(2010) publish no numeric table for Ishigami. The cross-check is therefore a
+re-derived direct-form estimator in `scripts/oracles/hdmr_direct_form.py`: pure
+NumPy and SciPy, sample-space normal equations, and `scipy.stats.f.ppf` in place
+of jaxgsa's own bisection, so the critical values are an external check rather
+than a restatement. It shares the cubic B-spline basis by construction, because
+two implementations of different bases would disagree for reasons that say
+nothing about the estimator. T4 is the ceiling here, and it is the right
+ceiling.
+
 ## Consequences
 
 - Versions here are the ones recorded in test provenance blocks. When an
