@@ -1,13 +1,8 @@
 """One policy for non-finite model outputs and inputs.
 
-A model that fails on some of its runs returns ``NaN`` or ``inf``. Before
-release 0.10 each analysis module answered that in its own way: three dropped
-the affected rows and warned, one warned and let the value through, and the
-other nine let it reach the indices with no warning at all. The number a user
-got back therefore depended on which method they called.
-
-``on_invalid`` replaces all of it. Every ``analyze()`` entry point takes the
-same keyword, with the same three values:
+A model that fails on some of its runs returns ``NaN`` or ``inf``. Every
+``analyze()`` entry point answers that the same way, through one keyword,
+``on_invalid``, with the same three values:
 
 ``"raise"``
     Refuse the analysis. This is the default. An index computed from a partial

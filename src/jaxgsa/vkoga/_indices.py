@@ -47,6 +47,7 @@ References:
 from __future__ import annotations
 
 import warnings
+from collections.abc import Sequence
 from typing import Callable, NamedTuple
 
 import numpy as np
@@ -175,6 +176,7 @@ def estimate_correlated_indices(
     n_variance: int,
     entropy: int,
     batch_size: int | None,
+    param_names: Sequence[str] | None = None,
 ) -> CorrelatedIndices:
     """Estimate the five correlated variance-based indices by quasi-Monte-Carlo.
 
@@ -205,6 +207,8 @@ def estimate_correlated_indices(
             well as the surrogate evaluation: a chunk of outer points expands
             to ``chunk * n_inner`` rows, and that expansion is what the
             caller's value has to hold down.
+        param_names: Parameter names for the ``S_U`` clip warning, or
+            ``None`` to report column positions.
 
     Returns:
         A :class:`CorrelatedIndices` whose index arrays have shape ``(S, D)``.
@@ -263,7 +267,7 @@ def estimate_correlated_indices(
     S_TC /= safe_variance[:, None]
     S_TU /= safe_variance[:, None]
     S_U /= safe_variance[:, None]
-    S_U = _clip_independent_part(S_U, S_TU)
+    S_U = _clip_independent_part(S_U, S_TU, param_names)
     return CorrelatedIndices(
         S_TC=S_TC,
         S_TU=S_TU,
@@ -277,7 +281,9 @@ def estimate_correlated_indices(
     )
 
 
-def _clip_independent_part(S_U: np.ndarray, S_TU: np.ndarray) -> np.ndarray:
+def _clip_independent_part(
+    S_U: np.ndarray, S_TU: np.ndarray, param_names: Sequence[str] | None = None
+) -> np.ndarray:
     """Hold ``S_U <= S_TU`` so ``S_IU`` cannot go negative, and report the clip.
 
     ``S_TU`` is everything ``X_i`` alone explains, and ``S_U`` is the part of
@@ -299,6 +305,8 @@ def _clip_independent_part(S_U: np.ndarray, S_TU: np.ndarray) -> np.ndarray:
     Args:
         S_U: Independent contribution normalised by ``V(Y)``, shape ``(S, D)``.
         S_TU: Total uncorrelated index normalised by ``V(Y)``, shape ``(S, D)``.
+        param_names: Names to report clipped parameters by. ``None`` falls
+            back to column positions.
 
     Returns:
         ``S_U`` clipped elementwise to at most ``S_TU``.
@@ -311,7 +319,10 @@ def _clip_independent_part(S_U: np.ndarray, S_TU: np.ndarray) -> np.ndarray:
     # NaN slices (zero output variance) compare False and stay out of the report.
     flagged = excess > _S_U_CLIP_TOLERANCE
     if flagged.any():
-        params = sorted({int(j) for j in np.argwhere(flagged)[:, 1]})
+        cols = sorted({int(j) for j in np.argwhere(flagged)[:, 1]})
+        # Name the parameters like the zero-variance warning does; fall back
+        # to column positions when the caller has no names to give.
+        params = [param_names[j] for j in cols] if param_names is not None else cols
         warnings.warn(
             f"jaxgsa.vkoga: S_U exceeded S_TU by up to {float(excess[flagged].max()):.3g} "
             f"of the output variance for parameter(s) {params}; S_U was clipped to S_TU so "

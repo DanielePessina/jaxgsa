@@ -30,12 +30,12 @@ class DeltaResult(SchemaResult):
             ``bias_correct=True`` and ``n_bootstrap > 0``, and the
             corrected estimate can fall marginally below 0 for weak
             parameters.
-        delta_conf: Percentile bootstrap confidence interval for ``delta``,
+        delta_conf: Bootstrap confidence interval for ``delta``,
             shape ``(2, ...)`` for ``[lower, upper]``. ``None`` when
             ``n_bootstrap=0``.
         S1: Given-data first-order Sobol index per parameter, shape
             ``(..., D)``.
-        S1_conf: Percentile bootstrap confidence interval for ``S1``, shape
+        S1_conf: Bootstrap confidence interval for ``S1``, shape
             ``(2, ...)`` for ``[lower, upper]``. ``None`` when
             ``n_bootstrap=0``.
         problem: Problem definition used for the analysis.

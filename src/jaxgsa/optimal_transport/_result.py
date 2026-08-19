@@ -41,20 +41,20 @@ class OTResult(SchemaResult):
             ``(..., D)``. 0 means the parameter leaves the output
             distribution unchanged. 1 means the parameter determines the
             output distribution fully.
-        ot_conf: Percentile bootstrap confidence interval for ``ot``,
+        ot_conf: Bootstrap confidence interval for ``ot``,
             shape ``(2, ..., D)`` for ``[lower, upper]``. ``None`` when
             ``n_bootstrap=0``.
         advective: Location-shift component, shape ``(..., D)``. It is the
             class-averaged squared distance between the conditional and
             unconditional output means, on the same normalized scale. It
             equals half the given-data first-order Sobol index.
-        advective_conf: Percentile bootstrap confidence interval for
+        advective_conf: Bootstrap confidence interval for
             ``advective``, shape ``(2, ..., D)`` for ``[lower, upper]``.
             ``None`` when ``n_bootstrap=0``.
         diffusive: Spread/shape component ``ot - advective``, shape
             ``(..., D)``. It captures changes in the dispersion and in the
             higher moments of the output distribution.
-        diffusive_conf: Percentile bootstrap confidence interval for
+        diffusive_conf: Bootstrap confidence interval for
             ``diffusive``, shape ``(2, ..., D)`` for ``[lower, upper]``.
             ``None`` when ``n_bootstrap=0``.
         S1: Given-data first-order Sobol index, shape ``(..., D)``. It is the

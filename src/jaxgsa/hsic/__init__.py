@@ -16,7 +16,7 @@ Example::
 
     X = monte_carlo(problem, n=4096, seed=42)
     Y = model(X)
-    result = hsic.analyze(problem, jnp.asarray(X), Y, key=jax.random.key(0))
+    result = hsic.analyze(problem, X, Y, key=jax.random.key(0))
 """
 
 from jaxgsa._core.invalid import InvalidUnit

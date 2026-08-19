@@ -2,25 +2,16 @@
 
 Nothing in this module is public API. See :mod:`jaxgsa._core`.
 
-Before this module, each of the thirteen result classes wrote its own
-``to_dataset``. The four results with a second-order array each carried their
-own copy of the ``param_i``/``param_j`` splice, five results had no
-``__repr__`` at all (so printing one dumped whole index arrays and the entire
-``Problem``), and the eight that had one used three different styles. The
-export schema of a result was therefore only knowable by reading its
-``to_dataset`` body.
-
-A result now declares its fields once, as a :class:`ResultSchema`, and
+A result declares its fields once, as a :class:`ResultSchema`, and
 :class:`SchemaResult` derives ``to_dataset``, ``__repr__`` and the
 ``*_lower``/``*_upper`` split of a confidence array from that declaration.
+The export schema of a result is therefore readable off the declaration
+rather than off a hand-written ``to_dataset`` body.
 
 The scalar provenance of a result is declared the same way, as
-``ResultSchema.meta``, and it too feeds both the summary and the export. It
-used to feed only the summary: the dataset attributes came from a separate
-hand-written hook per class, so five results printed their provenance and
-saved none of it, and two more saved it under different names than they
-printed. ``tests/test_result_schema.py`` now reads the declaration and checks
-every declared name reaches ``to_dataset().attrs``.
+``ResultSchema.meta``, and it feeds both the summary and the export.
+``tests/test_result_schema.py`` reads the declaration and checks every
+declared name reaches ``to_dataset().attrs``.
 
 Three results are genuinely irregular, so the derivation has hooks rather
 than special cases:
@@ -73,9 +64,8 @@ class CIInfo:
             ``(0, 1)``. This is the ``conf_level`` the analysis ran with.
         method: Endpoint rule actually used. ``"quantile"`` takes empirical
             bootstrap quantiles and ``"gaussian"`` takes a normal
-            approximation; ``jaxgsa.sobol`` and ``jaxgsa.morris`` offer both.
-            The other three bootstrapping methods are hard-wired to the
-            percentile interval and record ``"quantile"``.
+            approximation. Every bootstrapping method offers both through its
+            ``ci_method`` argument and records the one that ran.
         n_bootstrap: Number of bootstrap resamples drawn.
         replicates: The per-resample index values, keyed by the name of the
             estimate they belong to (``"S1"``, ``"mu_star"``, ...). Each

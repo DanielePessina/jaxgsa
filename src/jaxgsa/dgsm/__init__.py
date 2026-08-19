@@ -16,7 +16,7 @@ Example::
     from jaxgsa.sampling import monte_carlo
 
     X = monte_carlo(problem, n=10000, seed=42)
-    result = dgsm.analyze(problem, fn, jnp.asarray(X))
+    result = dgsm.analyze(problem, fn, X)
 """
 
 from jaxgsa._core.invalid import InvalidUnit

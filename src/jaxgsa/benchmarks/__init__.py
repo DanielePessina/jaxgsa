@@ -17,12 +17,14 @@ Some submodules add further ground truths. ``ishigami``, ``linear``, and
 
 Example::
 
-    from jaxgsa.benchmarks import ishigami
-    from jaxgsa import sample, analyze
+    import jax.numpy as jnp
 
-    sr = sample(ishigami.PROBLEM, 4096)
-    Y = ishigami.evaluate(sr.samples)
-    result = analyze(sr, Y)
+    from jaxgsa import sobol
+    from jaxgsa.benchmarks import ishigami
+
+    sr = sobol.sample(ishigami.PROBLEM, n_samples=4096)
+    Y = ishigami.evaluate(jnp.asarray(sr.samples))
+    result = sobol.analyze(sr, Y)
 """
 
 from jaxgsa.benchmarks import gaussian_linear, ishigami, linear, oakley_ohagan, sobol_g

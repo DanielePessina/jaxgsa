@@ -2,19 +2,12 @@
 
 Nothing in this module is public API. See :mod:`jaxgsa._core`.
 
-Before this module there was no single place that recorded a method's
-capabilities. Whether a method tolerates correlated or categorical inputs was
-expressed four different ways: a ``correlation_ok=True`` argument in seven
-analysis modules, a bare ``_raise_*`` call in three, a gate in ``_sampling.py``
-for the four design-based methods, and one hand-written message in
-``shapley``. The answer was never available as data, so every consumer that
-needed it kept its own list: the alternatives named in error messages, three
-tables in the documentation, and five test modules. Those lists drifted.
-``tests/test_imports.py`` enumerated eleven of the thirteen methods, having
-silently missed ``kucherenko`` and ``vkoga``.
-
-A method now declares itself once, in its own package, and registers that
-record here. Consumers read the registry instead of keeping a list.
+A method declares itself once, in its own package, and registers that record
+here: its capabilities (whether it tolerates correlated or categorical
+inputs), its exports, and its non-finite unit. Consumers — error messages
+that name alternatives, the documentation tables, the test suite — read the
+registry instead of keeping their own lists, which is what stops those lists
+drifting apart.
 
 Registration happens as an import side effect: importing ``jaxgsa`` imports
 all thirteen method packages, and each one calls :func:`register` at module

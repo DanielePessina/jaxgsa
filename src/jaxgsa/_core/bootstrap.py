@@ -1,9 +1,9 @@
 """Shared bootstrap confidence-interval helpers.
 
-Every method that reports bootstrap confidence intervals (Sobol, Morris, PAWN,
-Borgonovo) goes through these helpers. One percentile convention therefore
-holds across the package: two-tailed, ``alpha/2`` per tail, and tolerant of
-NaN draws.
+Every method that reports bootstrap confidence intervals goes through these
+helpers, so one convention holds across the package: two-tailed, ``alpha/2``
+per tail, a choice between the empirical-quantile and normal-approximation
+endpoint rules, and tolerance of NaN draws.
 """
 
 from __future__ import annotations

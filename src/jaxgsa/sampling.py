@@ -25,10 +25,11 @@ def monte_carlo(
     """Draw Monte Carlo samples from a problem's marginals.
 
     Each column follows the corresponding parameter's declared input
-    distribution (uniform, Gaussian, or truncated Gaussian) via inverse-CDF
-    transformation of pseudo-random draws. Unlike :func:`jaxgsa.sobol.sample`,
-    this uses plain pseudo-random draws with no low-discrepancy structure and
-    no Saltelli layout.
+    distribution (uniform, Gaussian, truncated Gaussian, or categorical) via
+    inverse-CDF transformation of pseudo-random draws; a categorical column
+    comes back as level codes drawn with the declared probabilities. Unlike
+    :func:`jaxgsa.sobol.sample`, this uses plain pseudo-random draws with no
+    low-discrepancy structure and no Saltelli layout.
 
     A ``problem.correlation`` that declares a non-identity Gaussian-copula
     correlation matrix is honored transparently. Correlated standard normals

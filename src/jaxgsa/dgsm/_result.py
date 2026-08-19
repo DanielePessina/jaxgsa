@@ -43,7 +43,8 @@ class DGSMResult(SchemaResult):
             ``on_invalid`` policy ran. ``invalid.n_invalid == 0`` means the
             check ran and found nothing. On both calling conventions the
             check covers the derivative as well as the output; a non-finite
-            derivative is reported under the source name ``"Y"``.
+            derivative is reported under the source name
+            ``"Y or its derivative"``.
         nu_conf: Bootstrap confidence interval for ``nu``, shape ``(2, ...)``
             for ``[lower, upper]``. ``None`` when ``n_bootstrap=0``.
         sigma_conf: The same for ``sigma``.

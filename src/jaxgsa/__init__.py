@@ -4,6 +4,7 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 
 from . import (
+    benchmarks,
     borgonovo,
     config,
     dgsm,
@@ -54,7 +55,7 @@ __all__ = [
     "UniformInputSpec",
     "UniformSpec",
     "__version__",
-    "borgonovo",
+    "benchmarks",    "borgonovo",
     "config",
     "dgsm",
     "efast",
