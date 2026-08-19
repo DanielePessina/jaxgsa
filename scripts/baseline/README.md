@@ -1,8 +1,9 @@
 # Numerical baseline
 
 `baseline-1.0.0.json` is the file the check runs against. It is a fixed-seed
-record of what jaxgsa computes, and it exists for gate 5 of the review
-protocol in `PLAN-V1.0.md` section 3.1.
+record of what jaxgsa computes. It exists so that a change with no
+behavioural target can be proved not to have moved a number — see
+`docs/adr/0009-a-change-with-no-behavioural-target.md`.
 
 `baseline-0.8.0.json` is kept beside it as the earlier record. Nothing reads
 it; it is there so the one place a number was allowed to move stays auditable.

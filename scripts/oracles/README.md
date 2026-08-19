@@ -13,7 +13,7 @@ the oracle is run by hand, and its output is typed into the test as a literal.
 Because of that, every oracle-derived literal in the suite carries a provenance
 block in the test docstring. The block names five things:
 
-1. the tier (T0 to T4, see `ROADMAP-1.0.md`),
+1. the tier (T0 to T4, see `docs/adr/0001-verification-oracle-tiers.md`),
 2. the oracle,
 3. its exact version,
 4. the date it was run,
@@ -42,7 +42,10 @@ uv run --extra dev scripts/oracles/<script>.py
 
 R oracles (`sensitivity`, `sensobol`, `gsaot`) and copyleft Python oracles
 (SAFEpython) run in a separate process. Install them in your own local R or
-Python environment; each script says at the top what it needs.
+Python environment; each script says at the top what it needs. The licence
+rules that require the separate process are in
+`docs/adr/0003-copyleft-oracles-and-licences.md`, and the inventory of which
+oracles exist at which versions is in `docs/adr/0004-oracle-inventory.md`.
 
 ## Scripts
 
