@@ -1,8 +1,10 @@
 """DGSM analysis: compute derivative-based sensitivity measures and bounds.
 
 Computes the DGSM moments (nu, sigma) from a JAX-differentiable function
-via reverse-mode autodiff, then derives Poincare upper bounds and
-Kucherenko-Song lower bounds on the total Sobol index ST.
+via autodiff — forward mode when the output slices outnumber the inputs,
+reverse mode otherwise (see ``docs/adr/0005-autodiff-mode-selection.md``) —
+then derives Poincare upper bounds and Kucherenko-Song lower bounds on the
+total Sobol index ST.
 
 References:
     Sobol' & Kucherenko (2009). Math. Comp. Sim. 79:3009-3017.
@@ -42,6 +44,7 @@ from jaxgsa.dgsm._core import (
     _jac_bytes_per_row,
     bounds_from_moments,
     jac_batches,
+    jacobian_mode,
     moment_sums,
     promote_jac,
     promote_moments,
@@ -168,7 +171,7 @@ def _check_point_callable(fn: Callable, X: Array) -> None:
     The check uses :func:`jax.eval_shape`, which traces ``fn`` on an abstract
     row and never runs it. An expensive model therefore pays nothing: no
     forward evaluation, and no compilation. ``analyze`` already requires a
-    traceable function, because ``jax.jacrev`` has to differentiate it, so the
+    traceable function, because the autodiff has to differentiate it, so the
     check demands nothing the method did not already demand.
 
     A trace failure is reported with its original error and the expected
@@ -222,8 +225,8 @@ def _check_point_callable(fn: Callable, X: Array) -> None:
 class _Moments:
     """Unreduced derivative sums from the autodiff path, in two versions.
 
-    The autodiff path makes ``Y`` itself, inside a jitted ``vmap`` of
-    ``jax.jacrev``, and reduces each batch of Jacobian rows to a running total
+    The autodiff path makes ``Y`` itself, inside a jitted ``vmap`` of the
+    one-row Jacobian, and reduces each batch of Jacobian rows to a running total
     as soon as it has it. A row that is already inside that total cannot be
     taken out again: ``NaN`` plus anything is ``NaN``. So the batch loop keeps
     two totals side by side, one over every row and one over the clean rows
@@ -601,9 +604,12 @@ def analyze(
 
     There are two calling conventions, and you must use exactly one of them:
 
-    - **Autodiff path** (primary): pass ``fn`` and ``X``. ``jax.jacrev``
-      differentiates the function, and one pass returns both the Jacobian and
-      the forward outputs.
+    - **Autodiff path** (primary): pass ``fn`` and ``X``. JAX differentiates
+      the function, and one pass returns both the Jacobian and the forward
+      outputs. The autodiff mode is selected from the shapes: ``jax.jacfwd``
+      when the output slices outnumber the inputs (``T*K > D``), ``jax.jacrev``
+      otherwise (see ``docs/adr/0005-autodiff-mode-selection.md``). The two
+      modes compute the same Jacobian; only float arithmetic order differs.
     - **Pre-computed path**: pass ``Y`` and ``dfdx``. Use it when the model is
       not JAX-differentiable, or when the Jacobian comes from elsewhere.
 
@@ -748,7 +754,7 @@ def analyze(
         # about to be differentiated on it.
         X = validate_inputs(problem, X)
         # Free shape-only trace: catches a batch (N, D) callable here, instead
-        # of as an IndexError from inside jax.jacrev.
+        # of as an IndexError from inside the autodiff.
         _check_point_callable(fn, X)
         moments = _compute_moments(fn, X, batch_size=batch_size)
         N = int(X.shape[0])
@@ -921,9 +927,11 @@ def analyze(
             if use_autodiff
             else "estimator (includes compile on the first call)"
         )
-        gradients = (
-            "gradients: reverse-mode autodiff" if use_autodiff else "gradients: user-supplied dfdx"
-        )
+        if use_autodiff:
+            mode = jacobian_mode(n_inputs=problem.num_vars, n_outputs=T * K)
+            gradients = f"gradients: {mode}-mode autodiff (T*K={T * K}, D={problem.num_vars})"
+        else:
+            gradients = "gradients: user-supplied dfdx"
         batching = (
             f"batch_size: {batch_size} (user-set)"
             if batch_size is not None

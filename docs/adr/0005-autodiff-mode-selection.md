@@ -1,6 +1,10 @@
 # ADR 0005: Choose forward or reverse mode from the output shape
 
-Status: accepted (2026-08-18). Implementation open.
+Status: accepted (2026-08-18). Implemented and closed (2026-08-20): the
+v1.0 behavior-flips change made `jaxgsa.dgsm._core.jacobian_of` select
+`jax.jacfwd` when `T*K > D` and `jax.jacrev` otherwise, with no user-facing
+keyword. The numerical baseline was regenerated once for it; the reviewed
+exception is recorded in `scripts/baseline/README.md`.
 
 ## Context
 

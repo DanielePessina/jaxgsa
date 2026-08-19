@@ -98,23 +98,34 @@ def n_output_slices(fn: Callable, X: Array) -> int:
     return total
 
 
+def jacobian_mode(*, n_inputs: int, n_outputs: int) -> str:
+    """Return the autodiff mode the two shape numbers select.
+
+    Reverse mode costs one pass per output slice and forward mode costs one
+    pass per input (``docs/adr/0005-autodiff-mode-selection.md``), so forward
+    wins when there are more output slices than inputs. The tie goes to
+    reverse mode: the costs are equal there, and reverse is what every
+    scalar-output call has always run.
+
+    Args:
+        n_inputs: ``D``, the number of parameters.
+        n_outputs: ``T*K``, the number of output slices.
+
+    Returns:
+        ``"forward"`` when ``n_outputs > n_inputs``, else ``"reverse"``.
+    """
+    return "forward" if n_outputs > n_inputs else "reverse"
+
+
 def jacobian_of(fn: Callable, *, n_inputs: int, n_outputs: int) -> Callable:
     """Return the one-row Jacobian-with-primal of ``fn``.
 
-    ``docs/adr/0005-autodiff-mode-selection.md`` asks for a choice here.
-    Reverse mode costs one pass per output slice and forward mode costs one
-    pass per input, so reverse should win when ``n_outputs < n_inputs`` and
-    forward otherwise, which is a real speed gain on a time-series output.
-
-    **The choice is not made yet, and this returns reverse mode always.** The
-    switch was implemented and measured: the two modes agree to about 1e-8
-    absolute in float32, which is reassociation and not a different answer,
-    but it is enough to move ``sigma`` and ``lower_bound`` on the recorded
-    numerical baseline for a ``(N, 3, 2)`` output. ``CONTEXT.md`` treats a
-    moved baseline number as a wiring error until reviewed, so the flip is
-    left for the change that regenerates the baseline with it. Making that
-    change is one line: pick ``jacfwd`` when ``n_outputs >= n_inputs``. The
-    arguments are already threaded through for it.
+    The autodiff mode is selected by :func:`jacobian_mode`, which closes
+    ``docs/adr/0005-autodiff-mode-selection.md``: ``jax.jacfwd`` when
+    ``n_outputs > n_inputs``, ``jax.jacrev`` otherwise. The two modes compute
+    the same Jacobian; float arithmetic order differs, so results can move at
+    float precision where the mode changed. That move was reviewed once, in
+    the baseline regeneration recorded in ``scripts/baseline/README.md``.
 
     Args:
         fn: One-sample model, ``(D,) -> ()`` / ``(K,)`` / ``(T, K)``.
@@ -124,7 +135,8 @@ def jacobian_of(fn: Callable, *, n_inputs: int, n_outputs: int) -> Callable:
     Returns:
         A callable mapping one ``(D,)`` row to ``(jacobian, y)``.
     """
-    del n_inputs, n_outputs  # see the docstring: the selection is not live yet
+    if jacobian_mode(n_inputs=n_inputs, n_outputs=n_outputs) == "forward":
+        return jax.jacfwd(_fn_with_aux(fn), has_aux=True)
     return jax.jacrev(_fn_with_aux(fn), has_aux=True)
 
 

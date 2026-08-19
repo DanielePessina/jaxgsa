@@ -1434,3 +1434,46 @@ class TestIndicesSharesTheCapabilityGates:
         np.testing.assert_allclose(
             np.asarray(jitted[0]), np.asarray(eager[0]), rtol=1e-5, atol=1e-7
         )
+
+
+class TestJacobianModeSelection:
+    """ADR 0005: the autodiff mode is picked from the two shape numbers."""
+
+    def test_forward_only_when_outputs_outnumber_inputs(self):
+        from jaxgsa.dgsm._core import jacobian_mode
+
+        assert jacobian_mode(n_inputs=3, n_outputs=6) == "forward"
+        assert jacobian_mode(n_inputs=3, n_outputs=1) == "reverse"
+        # The tie keeps reverse: equal cost, and it is what scalar-output
+        # calls have always run.
+        assert jacobian_mode(n_inputs=3, n_outputs=3) == "reverse"
+
+    def test_jacobian_of_dispatches_on_the_mode(self):
+        """T4: both modes return the same Jacobian for the same function."""
+        from jaxgsa.dgsm._core import jacobian_of
+
+        def fn(x):  # (3,) -> (2, 2): T*K = 4 > D = 3, forward territory
+            return jnp.outer(jnp.sin(x[:2]), jnp.cos(x[1:]))
+
+        x = jnp.asarray([0.3, 0.7, 1.1])
+        jac_auto, y_auto = jacobian_of(fn, n_inputs=3, n_outputs=4)(x)
+        jac_rev, y_rev = jax.jacrev(lambda v: (fn(v), fn(v)), has_aux=True)(x)
+        np.testing.assert_allclose(np.asarray(jac_auto), np.asarray(jac_rev), rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(y_auto), np.asarray(y_rev), rtol=1e-6)
+
+
+class TestPoincareFEMCache:
+    """The truncated-Gaussian FEM solve is memoised per process."""
+
+    def test_repeated_spec_hits_the_cache(self):
+        from jaxgsa.dgsm._poincare import _truncnorm_poincare
+
+        _truncnorm_poincare.cache_clear()
+        spec = _spec(
+            GaussianInputSpec(dist="gaussian", mean=0.5, variance=2.0, low=-1.0, high=4.0)
+        )
+        first = poincare_constant(spec)
+        assert _truncnorm_poincare.cache_info().misses == 1
+        second = poincare_constant(spec)
+        assert second == first
+        assert _truncnorm_poincare.cache_info().hits == 1

@@ -24,6 +24,7 @@ References:
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 
 import numpy as np
 from scipy.stats import truncnorm
@@ -66,12 +67,19 @@ def poincare_constant(spec: InputSpec) -> float:
     raise ValueError(f"Unknown input spec {spec!r}")
 
 
+@lru_cache(maxsize=None)
 def _truncnorm_poincare(mu: float, sigma: float, a: float, b: float, grid: int) -> float:
     """Return the optimal Poincare constant of N(mu, sigma^2) on [a, b].
 
     Solves the weighted Neumann eigenproblem ``int rho g' h' = lam int rho g h``
     on [a, b] with a P1 finite-element basis. The constant is 1/lambda_1, where
     lambda_1 is the spectral gap: the smallest positive eigenvalue.
+
+    The solve is a pure function of five hashable scalars and it costs a dense
+    generalized eigensolve, so the result is memoised with
+    ``functools.lru_cache``: repeated ``analyze`` calls on the same truncated
+    Gaussian marginal pay for the FEM once per process. Zero numeric change —
+    the cached value is the value the solve returned.
 
     Args:
         mu: Mean of the underlying Gaussian.
