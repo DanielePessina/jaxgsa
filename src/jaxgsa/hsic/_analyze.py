@@ -257,30 +257,24 @@ def _resolve_bandwidth_sq(x: Array, bandwidth: float) -> Array:
     return jnp.asarray(bandwidth, dtype=x.dtype) ** 2 * _median_bandwidth_sq(x)
 
 
-def _build_kernel(x: Array, sigma_sq: Array, batch_size: int | None) -> Array:
+def _build_kernel(x: Array, sigma_sq: Array) -> Array:
     """Build a Gaussian RBF kernel matrix from a resolved squared bandwidth.
 
-    The matrix is built in row blocks when ``batch_size`` asks for it. Blocking
-    bounds the working memory of the build, not the size of the result: the
-    blocks are concatenated back into one ``(N, N)`` matrix either way.
+    There is deliberately no row blocking here, and no batching keyword
+    anywhere in HSIC. The estimator's peak memory is the *resident* kernel
+    stacks — the D raw input kernels, their D augmented complements, the full
+    augmented product and one output kernel, ~``(2D + 1) * N^2`` floats at
+    once — and a row-blocked build only bounded a transient of one build
+    while that stack stayed resident. It was measured useless and removed.
 
     Args:
         x: Values for one variable, shape ``(N,)``.
         sigma_sq: Scalar squared bandwidth.
-        batch_size: Number of rows per block, or None to build in one step.
 
     Returns:
         Kernel matrix, shape ``(N, N)``.
     """
-    N = x.shape[0]
-    if batch_size is None or batch_size <= 0 or N <= batch_size:
-        return jnp.exp(-((x[:, None] - x[None, :]) ** 2) / (2.0 * sigma_sq))
-
-    rows = []
-    for start in range(0, N, batch_size):
-        end = min(start + batch_size, N)
-        rows.append(jnp.exp(-((x[start:end, None] - x[None, :]) ** 2) / (2.0 * sigma_sq)))
-    return jnp.concatenate(rows, axis=0)
+    return jnp.exp(-((x[:, None] - x[None, :]) ** 2) / (2.0 * sigma_sq))
 
 
 def _center_kernel(K: Array) -> Array:
@@ -322,11 +316,7 @@ def _hsic_v(K: Array, L: Array) -> Array:
     return U / n_f**2 - 2.0 * V / n_f**3 + W / n_f**4
 
 
-def _build_one_kernel(
-    x: Array,
-    bandwidth: float,
-    batch_size: int | None,
-) -> Array:
+def _build_one_kernel(x: Array, bandwidth: float) -> Array:
     """Build one kernel matrix for one variable.
 
     How the bandwidth is chosen and how the matrix is built are independent
@@ -335,31 +325,25 @@ def _build_one_kernel(
     Args:
         x: Values for one variable, shape ``(N,)``.
         bandwidth: Multiplier on the median-heuristic bandwidth.
-        batch_size: Row-block size for the kernel matrix, or None.
 
     Returns:
         Kernel matrix, shape ``(N, N)``.
     """
-    return _build_kernel(x, _resolve_bandwidth_sq(x, bandwidth), batch_size)
+    return _build_kernel(x, _resolve_bandwidth_sq(x, bandwidth))
 
 
-def _build_input_kernels(
-    X_unit: Array,
-    bandwidth: float,
-    batch_size: int | None,
-) -> list[Array]:
+def _build_input_kernels(X_unit: Array, bandwidth: float) -> list[Array]:
     """Build one kernel matrix per parameter.
 
     Args:
         X_unit: Inputs mapped to [0, 1], shape ``(N, D)``.
         bandwidth: Multiplier on the median-heuristic bandwidth.
-        batch_size: Row-block size for the kernel matrix, or None.
 
     Returns:
         List of D kernel matrices, each of shape ``(N, N)``.
     """
     D = X_unit.shape[1]
-    return [_build_one_kernel(X_unit[:, d], bandwidth, batch_size) for d in range(D)]
+    return [_build_one_kernel(X_unit[:, d], bandwidth) for d in range(D)]
 
 
 def _augmented_kernels(Ks: list[Array]) -> list[Array]:
@@ -409,7 +393,7 @@ def _complement_kernels(Ks: list[Array]) -> tuple[Array, list[Array]]:
 
 
 @lru_cache(maxsize=32)
-def _get_hsic_kernel(n_perms: int, bandwidth: float, batch_size: int | None):
+def _get_hsic_kernel(n_perms: int, bandwidth: float):
     """Return a JIT-compiled HSIC kernel for every output slice.
 
     The atomic unit is one output slice: it builds that slice's output
@@ -446,8 +430,6 @@ def _get_hsic_kernel(n_perms: int, bandwidth: float, batch_size: int | None):
             it sets the scan length and the number of split keys).
         bandwidth: Multiplier on the median-heuristic bandwidth of the
             output kernel (static; it is a compile-time constant).
-        batch_size: Row-block size for the output kernel build, or None
-            (static; it sets the number of blocks).
 
     Returns:
         A jitted callable that returns ``(R2_HSIC, T_HSIC, p_values,
@@ -486,7 +468,7 @@ def _get_hsic_kernel(n_perms: int, bandwidth: float, batch_size: int | None):
         # returns when it is handed a materialized matrix. HSIC reads L a few
         # dozen times per slice, so materializing it once is the cheaper
         # arrangement anyway.
-        L = jax.lax.optimization_barrier(_build_one_kernel(y_col, bandwidth, batch_size))
+        L = jax.lax.optimization_barrier(_build_one_kernel(y_col, bandwidth))
         N = L.shape[0]
         eps = jnp.finfo(L.dtype).eps
 
@@ -586,7 +568,6 @@ def indices(
     n_perms: int = 200,
     key: Array,
     bandwidth: float = 1.0,
-    batch_size: int | None = None,
 ) -> tuple[Array, Array, Array, Array]:
     """Compute HSIC indices as plain arrays, with no diagnostics.
 
@@ -599,13 +580,16 @@ def indices(
     and ``jax.jacrev``, which :func:`analyze` cannot, because a policy
     decision needs a concrete value and a tracer has none.
 
-    Every branch here is on a shape or on a Python scalar. ``n_perms``,
-    ``bandwidth`` and ``batch_size`` are all static: they are read while the
-    graph is being traced and never at run time. ``bandwidth`` scales the
-    median-heuristic width, ``batch_size`` sets how many row blocks the
-    kernel build unrolls into, and both are baked into the compiled kernel,
-    which is keyed on them (see :func:`_get_hsic_kernel`). Changing one
-    recompiles; neither costs a device-side conditional.
+    Every branch here is on a shape or on a Python scalar. ``n_perms`` and
+    ``bandwidth`` are both static: they are read while the graph is being
+    traced and never at run time. ``bandwidth`` scales the median-heuristic
+    width and is baked into the compiled kernel, which is keyed on it (see
+    :func:`_get_hsic_kernel`). Changing it recompiles; it costs no
+    device-side conditional.
+
+    Peak memory is the resident kernel stacks, ~``(2D + 1) * N^2`` floats at
+    once, and no keyword bounds it — see :func:`analyze` for why there is
+    deliberately no batching keyword here.
 
     No bootstrap and no confidence interval, here or on :func:`analyze`. The
     permutation ``p_values`` are the uncertainty statement, and the module
@@ -649,8 +633,6 @@ def indices(
             median-heuristic kernel. Read it that way, and remember that a
             finite difference of the same call is *not* the same quantity:
             it also moves the median, so it will not match.
-        batch_size: Row-block size for each ``(N, N)`` kernel build, as in
-            :func:`analyze`.
 
     Returns:
         ``(R2_HSIC, T_HSIC, p_values, hsic_raw)``, each of shape
@@ -670,7 +652,7 @@ def indices(
     _N, T, K = Y_3d.shape
 
     # Build input kernels and augmented products once (independent of Y).
-    Ks = _build_input_kernels(X_unit, bandwidth, batch_size)
+    Ks = _build_input_kernels(X_unit, bandwidth)
     Ks_stack = jnp.stack(Ks)
     Ks_aug = _augmented_kernels(Ks)
     K_aug_full, K_aug_compls = _complement_kernels(Ks_aug)
@@ -688,7 +670,7 @@ def indices(
     Y_cols = Y_3d.reshape(N, total)
     keys = jax.vmap(lambda i: jax.random.fold_in(key, i))(jnp.arange(total))
 
-    kernel = _get_hsic_kernel(n_perms, bandwidth, batch_size)
+    kernel = _get_hsic_kernel(n_perms, bandwidth)
     r2_all, t_all, p_all, raw_all = kernel(
         Ks_stack, K_aug_compls_stack, K_aug_full, hsic_xxs, Y_cols, keys
     )
@@ -708,7 +690,6 @@ def analyze(
     n_perms: int = 200,
     key: Array | None = None,
     bandwidth: float = 1.0,
-    batch_size: int | None = None,
     on_invalid: OnInvalid = "raise",
 ) -> HSICResult:
     """Compute HSIC (Hilbert-Schmidt Independence Criterion) sensitivity indices.
@@ -749,6 +730,15 @@ def analyze(
     :func:`jaxgsa.hsic.indices` is the transformable core: the same numbers
     as bare arrays, with none of the checks, so it composes with ``jit``,
     ``vmap`` and ``jacrev``.
+
+    **Memory is quadratic in N, and no keyword bounds it.** The estimator
+    keeps the D raw input kernels, their D augmented complement products,
+    the full augmented product and one output kernel resident at once —
+    peak memory is ~``(2D + 1) * N^2`` floats. There is deliberately no
+    batching keyword: a row-blocked kernel build only bounded a transient
+    of the build while the resident stacks stayed, so it was measured
+    useless and removed. If the sample does not fit, thin ``N`` (HSIC
+    converges quickly in N) or lower ``D`` by screening first.
 
     Correlated parameters are supported. HSIC is a dependence measure and
     assumes no input independence, so a declared ``problem.correlation`` does
@@ -799,11 +789,6 @@ def analyze(
             read against units this method otherwise never sees, and one
             fixed value cannot be right for both a parameter mapped to
             ``[0, 1]`` and an output measured in megapascals.
-        batch_size: Row-block size for building each ``(N, N)`` kernel matrix.
-            It bounds the working memory of the build, **not** the kernel
-            matrix: the blocks are concatenated back into one ``(N, N)``
-            array, so peak memory stays of order ``N^2`` in every case. None
-            (default) builds each matrix in one step.
         on_invalid: What to do about a row of ``X`` or ``Y`` that holds a
             non-finite value. ``"raise"`` (default) refuses the sample,
             ``"drop"`` removes those rows and analyzes the rest, and
@@ -869,7 +854,6 @@ def analyze(
         n_perms=n_perms,
         key=key,
         bandwidth=bandwidth,
-        batch_size=batch_size,
     )
 
     r2_all = ctx.squeeze(r2_all)

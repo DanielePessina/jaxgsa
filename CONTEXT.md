@@ -101,9 +101,11 @@ That is testable rather than a matter of taste:
 
 - `sobol` takes only `slice_chunk_size`. One slice is a few reductions over
   `N`, so subdividing rows within a slice would buy nothing.
-- `hsic` takes `batch_size` because one slice materialises an `(N, N)` kernel
-  matrix, which can exceed memory on its own. Row-blocking bounds the build
-  without changing the result.
+- `hsic` takes **no** batching keyword. Its peak is the *resident* kernel
+  stacks — ~`(2D + 1) * N^2` floats at once — and a row-blocked build only
+  bounded a transient while the stacks stayed. A keyword that cannot bound
+  the peak would mislead, so there is none; the docstring carries the memory
+  story instead.
 - `pce` and `dgsm` take only `batch_size`. Their real work is not per-slice at
   all — one multi-RHS solve, one Jacobian — so the slice axis is never the
   bound.
@@ -118,6 +120,16 @@ not only the kernel body — HDMR's bases are the example.
 All three accept `int | None`, where `None` means "derive one from
 `jaxgsa.config.get_memory_budget()`". A hard-coded element budget is a defect,
 not a default.
+
+Two more rules bind every batching keyword:
+
+- **An explicit value always wins.** The budget only sizes the `None`
+  default; it never lowers (or raises) a width the caller chose. A value is
+  clamped only at the axis's own length.
+- **`batch_size` sizes row blocks, clamped to N — nothing more.** It never
+  selects a different algorithm: `batch_size >= N` is one full block and
+  degenerates to the single-shot path, which is what keeps a streamed path
+  publicly testable without a magic value.
 
 ### Bootstrap and confidence intervals
 

@@ -362,7 +362,7 @@ class TestMedianBandwidth:
         x = jnp.asarray([0.0, 1.0, 2.0])
         multiplier = 0.5
         sigma_sq = multiplier**2 * float(_median_bandwidth_sq(x))
-        K = _build_one_kernel(x, multiplier, None)
+        K = _build_one_kernel(x, multiplier)
         expected = np.exp(-np.array([0.0, 1.0, 4.0]) / (2.0 * sigma_sq))
         np.testing.assert_allclose(np.asarray(K[0]), expected, rtol=1e-6)
 
@@ -420,65 +420,21 @@ class TestSliceIndependence:
         np.testing.assert_array_equal(np.asarray(two.T_HSIC)[0], np.asarray(four.T_HSIC)[0])
 
 
-class TestChunked:
-    def test_chunked_matches_unchunked(self):
-        """Tier T4 (internal consistency): row blocking changes no index.
+class TestNoBatchingKeyword:
+    def test_batch_size_is_gone_from_both_entry_points(self):
+        """Tier T4 (internal consistency): HSIC takes no batching keyword.
 
-        Both paths now resolve one squared bandwidth and then evaluate the same
-        elementwise expression, so the kernels agree to floating-point noise
-        rather than to the loose tolerance the two old median forms needed.
+        The old ``batch_size`` row-blocked one kernel *build* while the
+        resident stacks — ~(2D+1)*N^2 floats — stayed whole, so it never
+        bounded peak memory and chunked-vmap was measured useless. A keyword
+        that cannot do what its name promises is removed rather than kept;
+        the memory story lives in the docstrings instead.
         """
-        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
-        X = monte_carlo(problem, n=512, seed=13)
-        Xj = jnp.asarray(X)
-        Y = linear.evaluate(Xj)
-        r_full = analyze(problem, Xj, Y, n_perms=50, key=jax.random.key(13))
-        r_chunked = analyze(problem, Xj, Y, n_perms=50, key=jax.random.key(13), batch_size=128)
-        np.testing.assert_allclose(
-            np.asarray(r_full.R2_HSIC),
-            np.asarray(r_chunked.R2_HSIC),
-            rtol=1e-6,
-        )
-        np.testing.assert_allclose(
-            np.asarray(r_full.T_HSIC),
-            np.asarray(r_chunked.T_HSIC),
-            rtol=1e-6,
-        )
-
-    def test_chunked_matches_unchunked_with_explicit_bandwidth(self):
-        """Tier T4 (internal consistency): chunking is bandwidth-independent.
-
-        The kernel build used to be a two-by-two dispatch: {default, explicit}
-        bandwidth x {whole, chunked} matrix. The other three combinations are
-        covered elsewhere in this file; this pins the fourth. Bandwidth
-        resolution now happens once, before either kernel path runs, so the
-        two questions are independent — and this test is what says so. The
-        multiplier is resolved against the same median either way, so any
-        difference here would come from the row blocking alone.
-        """
-        problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
-        X = monte_carlo(problem, n=512, seed=13)
-        Xj = jnp.asarray(X)
-        Y = linear.evaluate(Xj)
-        r_full = analyze(problem, Xj, Y, n_perms=50, key=jax.random.key(13), bandwidth=0.3)
-        r_chunked = analyze(
-            problem, Xj, Y, n_perms=50, key=jax.random.key(13), bandwidth=0.3, batch_size=128
-        )
-        np.testing.assert_allclose(
-            np.asarray(r_full.R2_HSIC),
-            np.asarray(r_chunked.R2_HSIC),
-            rtol=1e-6,
-        )
-        np.testing.assert_allclose(
-            np.asarray(r_full.T_HSIC),
-            np.asarray(r_chunked.T_HSIC),
-            rtol=1e-6,
-        )
-        # The explicit bandwidth must actually be in force: the median
-        # heuristic on this data gives different indices, so a chunked path
-        # that ignored `bandwidth` would still pass the equality above.
-        r_median = analyze(problem, Xj, Y, n_perms=50, key=jax.random.key(13), batch_size=128)
-        assert not np.allclose(np.asarray(r_chunked.R2_HSIC), np.asarray(r_median.R2_HSIC))
+        assert "batch_size" not in inspect.signature(analyze).parameters
+        assert "batch_size" not in inspect.signature(indices).parameters
+        for text in (analyze.__doc__, indices.__doc__):
+            assert text is not None
+            assert "N^2" in text  # the docstring carries the memory story
 
 
 class TestReproducibility:
@@ -807,18 +763,18 @@ class TestIndicesCore:
         for produced, expected in zip(out, fields, strict=True):
             np.testing.assert_array_equal(np.asarray(produced), np.asarray(expected))
 
-    def test_matches_analyze_with_a_bandwidth_multiplier_and_batched_build(self):
-        """T4: the two static keywords change nothing about the split.
+    def test_matches_analyze_with_a_bandwidth_multiplier(self):
+        """T4: the static ``bandwidth`` keyword changes nothing about the split.
 
-        ``bandwidth`` and ``batch_size`` are Python scalars read while the
-        graph is traced, so they are baked into the compiled kernel. The core
-        must still agree with ``analyze`` under either setting.
+        ``bandwidth`` is a Python scalar read while the graph is traced, so
+        it is baked into the compiled kernel. The core must still agree with
+        ``analyze`` under a non-default setting.
         """
         problem, X, Y = self._ishigami()
         key = jax.random.key(7)
 
-        out = indices(problem, X, Y, n_perms=self.PERMS, key=key, bandwidth=0.3, batch_size=32)
-        result = analyze(problem, X, Y, n_perms=self.PERMS, key=key, bandwidth=0.3, batch_size=32)
+        out = indices(problem, X, Y, n_perms=self.PERMS, key=key, bandwidth=0.3)
+        result = analyze(problem, X, Y, n_perms=self.PERMS, key=key, bandwidth=0.3)
 
         fields = (result.R2_HSIC, result.T_HSIC, result.p_values, result.hsic_raw)
         for produced, expected in zip(out, fields, strict=True):
