@@ -861,3 +861,192 @@ class TestVKOGAOnInvalid:
         with pytest.raises(ValueError, match="every usable row was removed") as exc:
             jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, on_invalid="drop", **SMALL_KWARGS)
         assert "at least 10" in str(exc.value)
+
+
+# --- bootstrap confidence intervals ------------------------------------------
+
+# Even smaller than SMALL_KWARGS: a bootstrap refits the surrogate and re-runs
+# the nested integration once per replicate, so these budgets are chosen to
+# keep the whole class under a few seconds. They are far too small for an
+# accurate index; every test here is about the interval machinery, and the
+# accuracy tests above use the real budgets.
+TINY_KWARGS = dict(
+    gamma=3.0,
+    ridge=1e-6,
+    max_centers=32,
+    n_outer=32,
+    n_inner=8,
+    n_variance=128,
+    key=jax.random.key(0),
+)
+
+_CONF_FIELDS = ("S_TC", "S_TU", "S_U", "S_C", "S_IU")
+
+
+@pytest.fixture(scope="module")
+def tiny_data():
+    """A small uniform training set for the interval tests."""
+    X = jaxgsa.sampling.monte_carlo(UNIFORM_PROBLEM, 128, seed=11)
+    return X, _uniform_scalar(X)
+
+
+class TestBootstrap:
+    """Refit-per-replicate intervals: what they measure, and that they hold."""
+
+    def test_no_bootstrap_leaves_every_interval_unset(self, tiny_data):
+        """The plainest call reports no interval and no CI record."""
+        X, Y = tiny_data
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", JaxgsaWarning)
+            result = jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, **TINY_KWARGS)
+        assert result.ci is None
+        for name in _CONF_FIELDS:
+            assert getattr(result, f"{name}_conf") is None
+
+    def test_the_point_estimate_does_not_move(self, tiny_data):
+        """T4: asking for an interval must not change the number it brackets.
+
+        This also pins that the reported surrogate is the full-sample fit, not
+        the last replicate's: ``n_centers``, ``gamma`` and ``rmse`` all have to
+        come back unchanged.
+        """
+        X, Y = tiny_data
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", JaxgsaWarning)
+            plain = jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, **TINY_KWARGS)
+            with_ci = jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, n_bootstrap=4, **TINY_KWARGS)
+        for name in _CONF_FIELDS:
+            np.testing.assert_array_equal(
+                np.asarray(getattr(with_ci, name)), np.asarray(getattr(plain, name))
+            )
+        np.testing.assert_array_equal(np.asarray(with_ci.rmse), np.asarray(plain.rmse))
+        assert with_ci.n_centers == plain.n_centers
+        assert with_ci.gamma == plain.gamma
+
+    def test_intervals_bracket_the_estimate_and_diagnostics_have_none(self, tiny_data):
+        """The five indices get intervals; the fit diagnostics do not."""
+        X, Y = tiny_data
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", JaxgsaWarning)
+            result = jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, n_bootstrap=8, **TINY_KWARGS)
+        assert result.ci.n_bootstrap == 8
+        assert result.ci.level == 0.95
+        assert result.ci.method == "quantile"
+        for name in ("variance", "rmse", "cv_rmse", "n_centers"):
+            assert not hasattr(result, f"{name}_conf")
+        for name in _CONF_FIELDS:
+            conf = np.asarray(getattr(result, f"{name}_conf"))
+            point = np.asarray(getattr(result, name))
+            assert conf.shape == (2, *point.shape)
+            assert (conf[0] <= conf[1] + 1e-6).all()
+
+    def test_each_replicate_fits_a_different_surrogate(self, tiny_data):
+        """The interval is over refits, which is the whole claim it makes.
+
+        If the surrogate were fitted once and only the integration resampled,
+        every replicate would differ only by quasi-random noise on a fixed
+        expansion, and the spread would collapse as ``n_outer`` grew. Here the
+        training rows are resampled, so the replicates spread by an amount
+        that does not depend on the integration budget. What this test can
+        check cheaply is the necessary condition: the replicates are not all
+        equal, and they are not merely the point estimate repeated.
+        """
+        X, Y = tiny_data
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", JaxgsaWarning)
+            result = jaxgsa.vkoga.analyze(
+                UNIFORM_PROBLEM,
+                X,
+                Y,
+                n_bootstrap=8,
+                keep_replicates=True,
+                **TINY_KWARGS,
+            )
+        draws = np.asarray(result.ci.replicates["S_TC"])
+        assert draws.shape == (8, UNIFORM_PROBLEM.num_vars)
+        assert draws.std(axis=0).max() > 0.0
+        assert not np.allclose(draws, np.asarray(result.S_TC))
+
+    def test_the_replicate_streams_are_independent_of_each_other(self, tiny_data):
+        """Per-replicate keys come from ``fold_in``, so no two draws coincide."""
+        X, Y = tiny_data
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", JaxgsaWarning)
+            result = jaxgsa.vkoga.analyze(
+                UNIFORM_PROBLEM,
+                X,
+                Y,
+                n_bootstrap=6,
+                keep_replicates=True,
+                **TINY_KWARGS,
+            )
+        draws = np.asarray(result.ci.replicates["S_TC"])
+        pairs = {tuple(np.round(row, 12)) for row in draws}
+        assert len(pairs) == len(draws)
+
+    def test_the_bootstrap_is_reproducible_from_the_key(self, tiny_data):
+        """The same key gives the same interval, twice."""
+        X, Y = tiny_data
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", JaxgsaWarning)
+            first = jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, n_bootstrap=4, **TINY_KWARGS)
+            second = jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, n_bootstrap=4, **TINY_KWARGS)
+        np.testing.assert_array_equal(np.asarray(first.S_TC_conf), np.asarray(second.S_TC_conf))
+
+    def test_gaussian_endpoints_are_symmetric_about_the_estimate(self, tiny_data):
+        """T0: the normal-approximation interval is ``estimate +/- z*sd``."""
+        X, Y = tiny_data
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", JaxgsaWarning)
+            result = jaxgsa.vkoga.analyze(
+                UNIFORM_PROBLEM, X, Y, n_bootstrap=8, ci_method="gaussian", **TINY_KWARGS
+            )
+        conf = np.asarray(result.S_TC_conf)
+        point = np.asarray(result.S_TC)
+        np.testing.assert_allclose(conf[1] - point, point - conf[0], rtol=1e-5)
+
+    def test_keep_replicates_off_by_default(self, tiny_data):
+        """The draws are large, so they are kept only when asked for."""
+        X, Y = tiny_data
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", JaxgsaWarning)
+            result = jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, n_bootstrap=4, **TINY_KWARGS)
+        assert result.ci.replicates is None
+
+    def test_a_replicate_warning_does_not_reach_the_caller(self, tiny_data):
+        """One warning per analysis, not one per replicate.
+
+        The point estimate already said whatever there was to say about the
+        fit. Repeating it ``n_bootstrap`` times would bury it.
+        """
+        X, Y = tiny_data
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, n_bootstrap=6, **TINY_KWARGS)
+        precision = [
+            w
+            for w in caught
+            if issubclass(w.category, JaxgsaWarning) and "precision" in str(w.message)
+        ]
+        assert len(precision) == 1
+
+    def test_a_multi_output_interval_keeps_its_layout(self):
+        """T4: an interval mirrors the output rank the caller passed."""
+        X = jaxgsa.sampling.monte_carlo(UNIFORM_PROBLEM, 128, seed=12)
+        Y = _uniform_outputs(X)["multi"]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", JaxgsaWarning)
+            result = jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, n_bootstrap=4, **TINY_KWARGS)
+        assert np.asarray(result.S_TC).shape == (3, UNIFORM_PROBLEM.num_vars)
+        assert np.asarray(result.S_TC_conf).shape == (2, 3, UNIFORM_PROBLEM.num_vars)
+
+    def test_the_dataset_carries_the_endpoints(self, tiny_data):
+        """An interval is only reported if it also exports."""
+        X, Y = tiny_data
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", JaxgsaWarning)
+            result = jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, n_bootstrap=4, **TINY_KWARGS)
+        ds = result.to_dataset()
+        for name in _CONF_FIELDS:
+            assert f"{name}_lower" in ds
+            assert f"{name}_upper" in ds

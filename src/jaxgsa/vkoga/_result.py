@@ -10,7 +10,7 @@ from jax import Array
 
 from jaxgsa._core.copula import is_independent
 from jaxgsa._core.invalid import InvalidReport
-from jaxgsa._core.result import FieldSpec, ResultSchema, SchemaResult
+from jaxgsa._core.result import CIInfo, FieldSpec, ResultSchema, SchemaResult
 from jaxgsa._core.surrogate import SurrogateResult, _PredictPlan
 from jaxgsa.problem import Problem
 from jaxgsa.vkoga._engine import _VKOGAState
@@ -81,6 +81,22 @@ class VKOGAResult(SchemaResult, SurrogateResult):
             indices unreliable, and ``analyze`` warns in that case. It is
             ``None`` when the caller fixed both ``gamma`` and ``ridge``,
             because no cross-validation ran.
+        S_TC_conf: Bootstrap confidence interval for ``S_TC``, shape
+            ``(2, ...)`` for ``[lower, upper]``. ``None`` when
+            ``n_bootstrap=0``.
+        S_TU_conf: The same for ``S_TU``.
+        S_U_conf: The same for ``S_U``.
+        S_C_conf: The same for ``S_C``.
+        S_IU_conf: The same for ``S_IU``.
+        ci: How the intervals were produced: the confidence level, the
+            endpoint rule, the resample count, and the bootstrap draws when
+            the analysis ran with ``keep_replicates=True``. ``None`` without a
+            bootstrap. Each replicate resampled the training rows, refitted
+            the surrogate and re-integrated, so the interval covers the
+            training-sample and Monte-Carlo error together, at fixed
+            ``gamma`` and ``ridge``. It says nothing about how far the
+            surrogate is from the true model; read ``cv_rmse`` for that. See
+            :class:`jaxgsa._core.result.CIInfo`.
     """
 
     S_TC: Array
@@ -100,15 +116,21 @@ class VKOGAResult(SchemaResult, SurrogateResult):
     _fit: _VKOGAState | None = field(default=None, repr=False)
     _y_mean: Array | None = field(default=None, repr=False)
     _output_shape: tuple[int, ...] = field(default=(), repr=False)
+    S_TC_conf: Array | None = None
+    S_TU_conf: Array | None = None
+    S_U_conf: Array | None = None
+    S_C_conf: Array | None = None
+    S_IU_conf: Array | None = None
+    ci: CIInfo | None = None
 
     _schema = ResultSchema(
         primary="S_TC",
         fields=(
-            FieldSpec("S_TC"),
-            FieldSpec("S_TU"),
-            FieldSpec("S_U"),
-            FieldSpec("S_C"),
-            FieldSpec("S_IU"),
+            FieldSpec("S_TC", interval=True),
+            FieldSpec("S_TU", interval=True),
+            FieldSpec("S_U", interval=True),
+            FieldSpec("S_C", interval=True),
+            FieldSpec("S_IU", interval=True),
             FieldSpec("variance", "slice"),
             FieldSpec("rmse", "slice"),
             # The copula matrix describes the input model, not any output

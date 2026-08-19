@@ -7,6 +7,11 @@ against that surrogate under a Gaussian copula. The split is what makes the
 method affordable. The indices need nested conditional sampling, which is
 unaffordable against an expensive model but cheap against a kernel expansion.
 
+**This module has no pure core.** Stage two is a host NumPy/SciPy quasi-Monte
+-Carlo loop end to end, so there is no ``indices()`` here that returns bare
+arrays and survives ``jit``, ``vmap`` and ``jacrev``. See
+``docs/adr/0015-pure-core-exemptions.md``.
+
 References:
     Hilhorst, Quicken, van de Vosse & Huberts (2024). Int. J. Numer. Meth.
         Biomed. Engng. 40(2):e3797.
@@ -17,6 +22,7 @@ References:
 from __future__ import annotations
 
 import warnings
+from typing import Literal
 
 import jax
 import jax.numpy as jnp
@@ -24,13 +30,16 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core.batching import apply_batched, resolve_batch_size
+from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.copula import (
+    _ConditionalPlan,
     build_conditional_plan,
     canonicalize_correlation,
     independent_correlation,
 )
-from jaxgsa._core.entry import at_least, prepare, require
+from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare, require
 from jaxgsa._core.invalid import OnInvalid
+from jaxgsa._core.result import CIInfo
 from jaxgsa._core.sampling import _next_power_of_2
 from jaxgsa._core.surrogate import _PredictPlan
 from jaxgsa._core.transforms import cdf_to_unit_interval
@@ -56,6 +65,12 @@ _DEFAULT_MAX_CENTERS = 300
 # true ones, and on oscillatory models they can even invert the ranking.
 _CV_RMSE_WARN_FRACTION = 0.5
 
+# The index fields a bootstrap reports an interval for. The diagnostics
+# (variance, rmse, cv_rmse, n_centers, gamma, ridge) get none: they describe
+# the fit, not the sensitivity of the model, and a caller reading them wants
+# the value the reported surrogate actually has.
+_INTERVAL_FIELDS = ("S_TC", "S_TU", "S_U", "S_C", "S_IU")
+
 
 def analyze(
     problem: Problem,
@@ -70,9 +85,13 @@ def analyze(
     n_outer: int = 512,
     n_inner: int = 128,
     n_variance: int = 8192,
+    n_bootstrap: int = 0,
+    conf_level: float = 0.95,
+    ci_method: Literal["quantile", "gaussian"] = "quantile",
     key: Array | None = None,
     batch_size: int | None = None,
     on_invalid: OnInvalid = "raise",
+    keep_replicates: bool = False,
 ) -> VKOGAResult:
     """Correlated variance-based sensitivity indices via a VKOGA surrogate.
 
@@ -112,6 +131,46 @@ def analyze(
             ``n_inner`` inflates a small ``S_TC``. Raise ``n_outer`` instead.
         n_variance: Sample size for the output variance and the component-
             function fit, at least 2. Rounded up to the next power of two.
+        n_bootstrap: Number of bootstrap resamples for confidence intervals.
+            ``0`` (default) computes no intervals, and leaving it there is
+            the right call for a routine analysis: **each replicate refits
+            the kernel surrogate and re-runs the nested conditional
+            integration**, so ``n_bootstrap=100`` costs about a hundred times
+            what the analysis costs without it.
+
+            The interval measures **total uncertainty in the reported index
+            given this training sample**: the training rows are resampled
+            with replacement, a new surrogate is fitted to each resample, and
+            a fresh quasi-random stream integrates against it. So it folds
+            two sources together, the sampling error of the ``(X, Y)`` data
+            and the Monte-Carlo error of the integration, and it is the
+            interval to quote when asking "how much would this index move if
+            I had drawn a different training set". It is *not* an
+            integration-only interval: fitting once and resampling only the
+            integration would measure how much ``n_outer``/``n_inner`` cost
+            you, which is the part a caller can shrink for free by raising
+            them, and it would understate the real uncertainty by leaving out
+            the surrogate.
+
+            Two things the interval holds fixed, so it is a conditional
+            statement rather than a full one. ``gamma`` and ``ridge`` are the
+            values cross-validated on the full sample and are not re-selected
+            per replicate, because a per-replicate grid search would multiply
+            the cost again for a nuisance parameter. And the interval is
+            about the *surrogate's* indices: it cannot see error the
+            surrogate makes against the true model, which is what ``cv_rmse``
+            is for.
+
+            Intervals are reported for the five index fields. The
+            diagnostics — ``variance``, ``rmse``, ``cv_rmse``, ``n_centers``
+            — get none: they describe the reported fit itself, so an interval
+            over other fits would not be about the thing they name.
+        conf_level: Confidence level for the bootstrap intervals.
+        ci_method: How the interval endpoints are formed. ``"quantile"``
+            (default) reads them off the empirical bootstrap distribution.
+            ``"gaussian"`` centres them on the point estimate and takes
+            ``+/- z * sd`` of the bootstrap draws, which is smoother for a
+            small ``n_bootstrap`` but assumes the draws are normal.
         key: JAX PRNG key that drives the quasi-random index integration.
             Required: the indices are a Monte-Carlo estimate, so there is no
             sensible default. Write ``jax.random.key(0)`` if you only want
@@ -193,6 +252,9 @@ def analyze(
                 )
             ),
             at_least("batch_size", batch_size, 1),
+            at_least("n_bootstrap", n_bootstrap, 0),
+            one_of("ci_method", ci_method, ("quantile", "gaussian")),
+            in_open_interval("conf_level", conf_level, 0.0, 1.0),
             require(
                 D >= 2,
                 f"Correlated sensitivity indices need at least 2 parameters, got {D}",
@@ -243,26 +305,14 @@ def analyze(
         seed=seed,
     )
     _warn_poor_surrogate(cv_rmse, Y_centered)
-    state = _fit_vkoga(
+    plan = build_conditional_plan(R)
+    state, indices = _fit_and_estimate(
         U,
-        Y_centered,
+        Y_flat,
         gamma=gamma_value,
-        max_centers=resolved_centers,
         ridge=ridge_value,
-    )
-    # The fitted state is padded to the static max_centers size (rows past
-    # n_centers hold zero coefficients). Slice it down host-side so predict
-    # and the index estimators pay only for the centres the greedy selected.
-    n_selected = int(state.n_centers)
-    state = state._replace(
-        centers=state.centers[:n_selected],
-        coefficients=state.coefficients[:n_selected],
-    )
-
-    predict = _make_unit_predictor(state, y_mean, batch_size)
-    indices = estimate_correlated_indices(
-        plan=build_conditional_plan(R),
-        predict=predict,
+        max_centers=resolved_centers,
+        plan=plan,
         n_outer=n_outer,
         n_inner=n_inner,
         n_variance=n_variance,
@@ -271,14 +321,51 @@ def analyze(
     )
 
     def _shape_index(flat: np.ndarray) -> Array:
-        """Reshape an ``(S, D)`` index block to the output contract."""
-        arr = jnp.asarray(flat.reshape(n_time, n_out, D))
+        """Reshape an ``(..., S, D)`` index block to the output contract."""
+        arr = jnp.asarray(flat.reshape(*flat.shape[:-2], n_time, n_out, D))
         return ctx.squeeze(arr, n_trailing=1)
 
     def _shape_slice(flat: np.ndarray) -> Array:
         """Reshape an ``(S,)`` per-slice diagnostic to the output contract."""
         arr = jnp.asarray(flat.reshape(n_time, n_out))
         return ctx.squeeze(arr, n_trailing=0)
+
+    confs: dict[str, Array | None] = dict.fromkeys(_INTERVAL_FIELDS)
+    ci: CIInfo | None = None
+    if n_bootstrap > 0:
+        replicates = _bootstrap_replicates(
+            U,
+            Y_flat,
+            gamma=gamma_value,
+            ridge=ridge_value,
+            max_centers=resolved_centers,
+            plan=plan,
+            n_outer=n_outer,
+            n_inner=n_inner,
+            n_variance=n_variance,
+            key=key,
+            n_bootstrap=n_bootstrap,
+            batch_size=batch_size,
+        )
+        for name in _INTERVAL_FIELDS:
+            point = jnp.asarray(getattr(indices, name).reshape(n_time, n_out, D))
+            draws = jnp.asarray(replicates[name].reshape(-1, n_time, n_out, D))
+            lo, hi = _bootstrap_ci_endpoints(
+                point, draws, conf_level=conf_level, ci_method=ci_method
+            )
+            # Stack [lower, upper] into a leading axis of size 2. The squeeze
+            # addresses the (T, K) axes from the end, so that axis survives.
+            confs[name] = ctx.squeeze(jnp.stack((lo, hi)), n_trailing=1)
+        ci = CIInfo(
+            level=conf_level,
+            method=ci_method,
+            n_bootstrap=n_bootstrap,
+            replicates=(
+                {name: _shape_index(replicates[name]) for name in _INTERVAL_FIELDS}
+                if keep_replicates
+                else None
+            ),
+        )
 
     output_shape = ctx.squeeze(jnp.zeros((n_time, n_out)), n_trailing=0).shape
     return VKOGAResult(
@@ -299,7 +386,155 @@ def analyze(
         _fit=state,
         _y_mean=y_mean,
         _output_shape=output_shape,
+        S_TC_conf=confs["S_TC"],
+        S_TU_conf=confs["S_TU"],
+        S_U_conf=confs["S_U"],
+        S_C_conf=confs["S_C"],
+        S_IU_conf=confs["S_IU"],
+        ci=ci,
     )
+
+
+def _fit_and_estimate(
+    U: Array,
+    Y_flat: Array,
+    *,
+    gamma: float,
+    ridge: float,
+    max_centers: int,
+    plan: _ConditionalPlan,
+    n_outer: int,
+    n_inner: int,
+    n_variance: int,
+    entropy: int,
+    batch_size: int | None,
+):
+    """Fit one surrogate to one training set and read the indices off it.
+
+    The two stages of the method, in one function, so that a bootstrap
+    replicate runs exactly what the reported analysis ran.
+
+    Args:
+        U: Training inputs in unit-cube coordinates, shape ``(N, D)``.
+        Y_flat: Training outputs, shape ``(N, S)``, uncentred.
+        gamma: RBF shape parameter to fit with.
+        ridge: Kernel regularisation to fit with.
+        max_centers: Maximum kernel centres the greedy may select.
+        plan: Precomputed Gaussian conditionals for the index integration.
+        n_outer: Outer (conditioning) sample size per parameter.
+        n_inner: Inner (conditional) sample size per outer point.
+        n_variance: Sample size for the variance and the component fit.
+        entropy: Root entropy for the host-side quasi-random draws.
+        batch_size: Sample rows per device call, or ``None`` for the budget.
+
+    Returns:
+        ``(state, indices)``: the fitted surrogate, sliced down to the centres
+        the greedy actually selected, and its
+        :class:`~jaxgsa.vkoga._indices.CorrelatedIndices`.
+    """
+    # VKOGA carries no constant term, so a non-zero output mean would have to
+    # be reconstructed by the kernel expansion itself. Centring removes that
+    # burden and measurably improves the fit.
+    y_mean = Y_flat.mean(axis=0)
+    state = _fit_vkoga(
+        U,
+        Y_flat - y_mean,
+        gamma=gamma,
+        max_centers=max_centers,
+        ridge=ridge,
+    )
+    # The fitted state is padded to the static max_centers size (rows past
+    # n_centers hold zero coefficients). Slice it down host-side so predict
+    # and the index estimators pay only for the centres the greedy selected.
+    n_selected = int(state.n_centers)
+    state = state._replace(
+        centers=state.centers[:n_selected],
+        coefficients=state.coefficients[:n_selected],
+    )
+    indices = estimate_correlated_indices(
+        plan=plan,
+        predict=_make_unit_predictor(state, y_mean, batch_size),
+        n_outer=n_outer,
+        n_inner=n_inner,
+        n_variance=n_variance,
+        entropy=entropy,
+        batch_size=batch_size,
+    )
+    return state, indices
+
+
+def _bootstrap_replicates(
+    U: Array,
+    Y_flat: Array,
+    *,
+    gamma: float,
+    ridge: float,
+    max_centers: int,
+    plan: _ConditionalPlan,
+    n_outer: int,
+    n_inner: int,
+    n_variance: int,
+    key: Array,
+    n_bootstrap: int,
+    batch_size: int | None,
+) -> dict[str, np.ndarray]:
+    """Refit the surrogate on resampled training rows, once per replicate.
+
+    This is the expensive path the ``n_bootstrap`` docstring warns about: one
+    greedy fit and one full nested integration per replicate. What it buys is
+    an interval that includes the surrogate's own sampling error, which an
+    integration-only resample would leave out entirely.
+
+    Each replicate gets its own quasi-random stream, split off the caller's
+    key with :func:`jax.random.fold_in` rather than by adding to a seed, so
+    the streams are independent rather than merely different.
+
+    The point estimate has already warned about a poor fit or a wide ``S_U``
+    clip. A replicate warning about the same thing tells the caller nothing
+    new and would arrive ``n_bootstrap`` times, so warnings raised inside the
+    loop are suppressed.
+
+    Args:
+        U: Training inputs in unit-cube coordinates, shape ``(N, D)``.
+        Y_flat: Training outputs, shape ``(N, S)``, uncentred.
+        gamma: RBF shape parameter, held at the cross-validated value.
+        ridge: Kernel regularisation, held at the cross-validated value.
+        max_centers: Maximum kernel centres the greedy may select.
+        plan: Precomputed Gaussian conditionals for the index integration.
+        n_outer: Outer (conditioning) sample size per parameter.
+        n_inner: Inner (conditional) sample size per outer point.
+        n_variance: Sample size for the variance and the component fit.
+        key: PRNG key the per-replicate streams are folded out of.
+        n_bootstrap: Number of replicates.
+        batch_size: Sample rows per device call, or ``None`` for the budget.
+
+    Returns:
+        Mapping from index name to an ``(n_bootstrap, S, D)`` array.
+    """
+    n_rows = int(U.shape[0])
+    draws: dict[str, list[np.ndarray]] = {name: [] for name in _INTERVAL_FIELDS}
+    for replicate in range(n_bootstrap):
+        stream = jax.random.fold_in(key, replicate)
+        row_key, index_key = jax.random.split(stream)
+        rows = jax.random.randint(row_key, shape=(n_rows,), minval=0, maxval=n_rows)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", JaxgsaWarning)
+            _, indices = _fit_and_estimate(
+                U[rows],
+                Y_flat[rows],
+                gamma=gamma,
+                ridge=ridge,
+                max_centers=max_centers,
+                plan=plan,
+                n_outer=n_outer,
+                n_inner=n_inner,
+                n_variance=n_variance,
+                entropy=_seed_from_key(index_key),
+                batch_size=batch_size,
+            )
+        for name in _INTERVAL_FIELDS:
+            draws[name].append(np.asarray(getattr(indices, name)))
+    return {name: np.stack(values) for name, values in draws.items()}
 
 
 def _seed_from_key(key: Array) -> int:

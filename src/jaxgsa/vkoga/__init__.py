@@ -10,6 +10,10 @@ assume independent inputs. They follow Li et al. (2010). The familiar main and
 total indices keep their formulas but change connotation, and they split into
 correlated and uncorrelated parts.
 
+This module has **no pure core**. The index stage is a host NumPy/SciPy
+quasi-Monte-Carlo loop, so there is no ``indices()`` that survives ``jit``,
+``vmap`` or ``jacrev``. See ``docs/adr/0015-pure-core-exemptions.md``.
+
 Gating: ``analyze`` accepts a declared ``problem.correlation``. It refuses
 categorical parameters. The isotropic kernel needs a continuous CDF map on
 every coordinate, and an unordered level code has none. Use
@@ -62,7 +66,10 @@ SPEC = register(
         result=VKOGAResult,
         correlation="accepts",
         categorical="refuses",
-        bootstrap=None,
+        bootstrap="n_bootstrap",
+        # The index stage is a host NumPy/SciPy quasi-Monte-Carlo loop, so
+        # there is no traceable indices(). See ADR 0015.
+        pure_core=False,
         invalid_unit=InvalidUnit.ROW,
     )
 )

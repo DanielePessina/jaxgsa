@@ -21,11 +21,11 @@ Example::
 
 from jaxgsa._core.invalid import InvalidUnit
 from jaxgsa._core.registry import MethodSpec, register
-from jaxgsa.dgsm._analyze import analyze
+from jaxgsa.dgsm._analyze import analyze, indices
 from jaxgsa.dgsm._poincare import axis_constants, poincare_constant
 from jaxgsa.dgsm._result import DGSMResult
 
-__all__ = ["DGSMResult", "analyze", "axis_constants", "poincare_constant"]
+__all__ = ["DGSMResult", "analyze", "axis_constants", "indices", "poincare_constant"]
 
 SPEC = register(
     MethodSpec(
@@ -38,7 +38,7 @@ SPEC = register(
         # Poincare bound assumes a product measure.
         correlation="refuses",
         categorical="refuses",
-        bootstrap=None,
+        bootstrap="n_bootstrap",
         invalid_unit=InvalidUnit.ROW,
     )
 )

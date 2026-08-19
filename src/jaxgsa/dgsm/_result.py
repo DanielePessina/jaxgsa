@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from jax import Array
 
 from jaxgsa._core.invalid import InvalidReport
-from jaxgsa._core.result import FieldSpec, ResultSchema, SchemaResult
+from jaxgsa._core.result import CIInfo, FieldSpec, ResultSchema, SchemaResult
 from jaxgsa.problem import Problem
 
 
@@ -44,6 +44,20 @@ class DGSMResult(SchemaResult):
             check ran and found nothing. On both calling conventions the
             check covers the derivative as well as the output; a non-finite
             derivative is reported under the source name ``"Y"``.
+        nu_conf: Bootstrap confidence interval for ``nu``, shape ``(2, ...)``
+            for ``[lower, upper]``. ``None`` when ``n_bootstrap=0``.
+        sigma_conf: The same for ``sigma``.
+        upper_bound_conf: The same for ``upper_bound``. The interval covers
+            the whole ratio: the resample moves ``nu`` and ``var_y`` together,
+            because both are averages over the rows that were drawn.
+        lower_bound_conf: The same for ``lower_bound``.
+        ci: How the intervals were produced: the confidence level, the
+            endpoint rule, the resample count, and the bootstrap draws when
+            the analysis ran with ``keep_replicates=True``. ``None`` without a
+            bootstrap. ``var_y`` carries no interval, because it is the
+            denominator of the two bounds rather than a sensitivity measure,
+            and its uncertainty is already inside their intervals. See
+            :class:`jaxgsa._core.result.CIInfo`.
     """
 
     nu: Array
@@ -53,16 +67,21 @@ class DGSMResult(SchemaResult):
     var_y: Array
     problem: Problem
     invalid: InvalidReport
+    nu_conf: Array | None = None
+    sigma_conf: Array | None = None
+    upper_bound_conf: Array | None = None
+    lower_bound_conf: Array | None = None
+    ci: CIInfo | None = None
 
     # var_y is declared but not exported: the dataset has never carried it,
     # and adding it here would change what an existing netCDF file holds.
     _schema = ResultSchema(
         primary="nu",
         fields=(
-            FieldSpec("nu"),
-            FieldSpec("sigma"),
-            FieldSpec("upper_bound"),
-            FieldSpec("lower_bound"),
+            FieldSpec("nu", interval=True),
+            FieldSpec("sigma", interval=True),
+            FieldSpec("upper_bound", interval=True),
+            FieldSpec("lower_bound", interval=True),
             FieldSpec("var_y", "slice", dataset=False),
         ),
     )
