@@ -51,6 +51,38 @@ the work, including seven corrections to the roadmap it replaces.
 
 ### Added
 
+- **`estimator=` on `sobol.analyze()` and `sobol.indices()`.** Six named
+  estimator pairs, where before the formulas were fixed with no option.
+
+  ```python
+  result = jaxgsa.sobol.analyze(samples, Y, estimator="azzini-rosati")
+  ```
+
+  | Name | First order | Total order | Design |
+  |---|---|---|---|
+  | `"saltelli-jansen"` (default) | Sobol' et al. (2007) | Jansen (1999) | `N(D+2)` |
+  | `"jansen"` | Jansen (1999) | Jansen (1999) | `N(D+2)` |
+  | `"janon-monod"` | Monod (2006), Janon (2014) | same | `N(D+2)` |
+  | `"martinez"` | Martinez (2011) | Martinez (2011) | `N(D+2)` |
+  | `"mauntz-kucherenko"` | Sobol' et al. (2007) | Sobol' et al. (2007) | `N(D+2)` |
+  | `"azzini-rosati"` | Azzini, Mara & Rosati (2021) | same | `N(2D+2)` |
+
+  **No number moves.** The default is the estimator jaxgsa has always used,
+  and the numerical baseline reports zero changed values. The default was
+  measured before it was kept: on Ishigami and Sobol-G against their
+  analytical indices, over 100 seeds, with each estimator given the design it
+  needs so the model-run budgets are comparable, `"saltelli-jansen"` is the
+  best or joint-best pair for the `N(D+2)` design at every budget tested.
+
+  `"azzini-rosati"` needs a design drawn with `calc_second_order=True`,
+  because it reads the `BA` blocks. It is the better choice at a small budget:
+  on Sobol-G at 640 model runs its `S1` error is 0.029 against 0.087 for the
+  default. It is also the only pair that can never report `S1 > ST`. The
+  advantage narrows as the budget grows.
+
+  Second-order indices keep the Saltelli (2002) pairwise formula for every
+  estimator. Only the `S1` terms it subtracts follow your choice.
+
 - **`on_invalid` on every `analyze()` function.** It takes `"raise"` (the
   default), `"propagate"` or `"drop"`.
 
@@ -94,6 +126,13 @@ the work, including seven corrections to the roadmap it replaces.
   you passed it, before anything was removed.
 
 ### Fixed
+
+- **The first-order Sobol estimator is now attributed correctly.** The
+  docstrings called `E[B (AB_j - A)] / Var(Y)` "the Saltelli (2010)
+  estimator". Saltelli et al. (2010) tabulate and recommend it, but the
+  formula is the improved form of Sobol', Tarantola, Gatelli, Kucherenko and
+  Mauntz (2007). The Saltelli (2002) estimator is the plain cross-moment,
+  which jaxgsa does not use. No number changes.
 
 - **PAWN silently discarded non-finite inputs.** A `NaN` in `X` failed the
   in-range comparison in `_equal_width_bins` and took the `-1` sentinel, so

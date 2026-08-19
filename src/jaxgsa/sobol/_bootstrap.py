@@ -23,67 +23,73 @@ the host. ``analyze`` forwards its ``slice_chunk_size`` argument as this
 resample cap.
 """
 
+from functools import lru_cache
+
 import jax
 import jax.numpy as jnp
 from jax import Array
 
-from jaxgsa.sobol._indices import _fused_first_total, _fused_second_order
-
-# @jax.jit is applied directly (not via lru_cache) because these functions
-# have a fixed signature: there is no configuration parameter to dispatch on.
+from jaxgsa.sobol._estimators import first_total_kernel, second_order_kernel
 
 
-@jax.jit
-def _resample_ft(idx_chunk: Array, A: Array, AB: Array, B: Array):
-    """Vectorised first/total-order Sobol computation for one chunk of resamples.
-
-    Args:
-        idx_chunk: Bootstrap index sets for this chunk, shape ``(C, N)``,
-            where C <= chunk_size and each row holds N indices in [0, N).
-        A: Base model outputs from sample matrix A, shape ``(N,)``.
-        AB: Model outputs from the AB cross-matrices, shape ``(N, D)``.
-        B: Base model outputs from sample matrix B, shape ``(N,)``.
-
-    Returns:
-        S1: first-order indices per resample, shape ``(C, D)``.
-        ST: total-order indices per resample, shape ``(C, D)``.
-    """
-
-    # Closure over A, AB, B lets vmap vary only the index vector per resample.
-    # A[idx] gathers N rows with replacement, the core of bootstrap resampling.
-    def single(idx):
-        return _fused_first_total(A[idx], AB[idx], B[idx])
-
-    # vmap maps `single` across C index sets in parallel on the accelerator
-    return jax.vmap(single)(idx_chunk)
-
-
-@jax.jit
-def _resample_so(idx_chunk: Array, A: Array, AB: Array, BA: Array, B: Array):
-    """Vectorised second-order Sobol computation for one chunk of resamples.
+# lru_cache keys the compiled resampler on the estimator name, the one
+# configuration parameter these functions dispatch on. Each named estimator
+# is traced once per process, as the point-estimate kernels are.
+@lru_cache(maxsize=None)
+def _resample_ft(estimator: str):
+    """Build the vectorised first/total-order resampler for one estimator.
 
     Args:
-        idx_chunk: Bootstrap index sets for this chunk, shape ``(C, N)``.
-        A: Base model outputs from sample matrix A, shape ``(N,)``.
-        AB: Model outputs from the AB cross-matrices, shape ``(N, D)``.
-        BA: Model outputs from the BA cross-matrices, shape ``(N, D)``.
-        B: Base model outputs from sample matrix B, shape ``(N,)``.
+        estimator: The estimator name, as validated by ``analyze``.
 
     Returns:
-        S1: first-order indices per resample, shape ``(C, D)``.
-        ST: total-order indices per resample, shape ``(C, D)``.
-        S2: second-order indices per resample, shape ``(C, D, D)``.
+        A jitted function ``(idx_chunk, A, AB, B) -> (S1, ST)`` where
+        ``idx_chunk`` has shape ``(C, N)``, each row holding N indices in
+        [0, N), and the two outputs have shape ``(C, D)``.
     """
+    kernel = first_total_kernel(estimator)
 
-    # Same closure+vmap pattern as _resample_ft, extended to include BA
-    def single(idx):
-        return _fused_second_order(A[idx], AB[idx], BA[idx], B[idx])
+    @jax.jit
+    def resample(idx_chunk: Array, A: Array, AB: Array, B: Array):
+        # Closure over A, AB, B lets vmap vary only the index vector per
+        # resample. A[idx] gathers N rows with replacement, the core of
+        # bootstrap resampling.
+        def single(idx):
+            return kernel(A[idx], AB[idx], B[idx])
 
-    return jax.vmap(single)(idx_chunk)
+        # vmap maps `single` across C index sets in parallel on the accelerator
+        return jax.vmap(single)(idx_chunk)
+
+    return resample
+
+
+@lru_cache(maxsize=None)
+def _resample_so(estimator: str):
+    """Build the vectorised second-order resampler for one estimator.
+
+    Args:
+        estimator: The estimator name, as validated by ``analyze``.
+
+    Returns:
+        A jitted function ``(idx_chunk, A, AB, BA, B) -> (S1, ST, S2)``, with
+        the two index arrays of shape ``(C, D)`` and S2 of shape
+        ``(C, D, D)``.
+    """
+    kernel = second_order_kernel(estimator)
+
+    @jax.jit
+    def resample(idx_chunk: Array, A: Array, AB: Array, BA: Array, B: Array):
+        # Same closure+vmap pattern as _resample_ft, extended to include BA
+        def single(idx):
+            return kernel(A[idx], AB[idx], BA[idx], B[idx])
+
+        return jax.vmap(single)(idx_chunk)
+
+    return resample
 
 
 def _bootstrap_first_total(
-    indices: Array, A: Array, AB: Array, B: Array, chunk_size: int
+    indices: Array, A: Array, AB: Array, B: Array, chunk_size: int, estimator: str
 ) -> tuple[Array, Array]:
     """Bootstrap first-order and total-order Sobol indices over R resamples.
 
@@ -98,6 +104,9 @@ def _bootstrap_first_total(
         AB: Model outputs from the AB cross-matrices, shape ``(N, D)``.
         B: Model outputs from sample matrix B, shape ``(N,)``.
         chunk_size: Maximum resamples to vmap in a single device call.
+        estimator: Which named estimator to resample. The bootstrap must use
+            the same formulas as the point estimate, or the interval would
+            describe a different quantity from the number at its centre.
 
     Returns:
         S1_boot: first-order indices for every resample, shape ``(R, D)``.
@@ -105,12 +114,13 @@ def _bootstrap_first_total(
     """
     R = indices.shape[0]
     s1_parts, st_parts = [], []
+    resample = _resample_ft(estimator)
     # Clamp chunk_size to R to avoid empty trailing slices
     cs = min(chunk_size, R)
     for start in range(0, R, cs):
         end = min(start + cs, R)
         # Process C resamples via vmap; chunking bounds peak device memory
-        s1, st = _resample_ft(indices[start:end], A, AB, B)
+        s1, st = resample(indices[start:end], A, AB, B)
         s1_parts.append(s1)
         st_parts.append(st)
 
@@ -119,7 +129,13 @@ def _bootstrap_first_total(
 
 
 def _bootstrap_second_order(
-    indices: Array, A: Array, AB: Array, BA: Array, B: Array, chunk_size: int
+    indices: Array,
+    A: Array,
+    AB: Array,
+    BA: Array,
+    B: Array,
+    chunk_size: int,
+    estimator: str,
 ) -> tuple[Array, Array, Array]:
     """Bootstrap first-, total-, and second-order Sobol indices over R resamples.
 
@@ -134,6 +150,8 @@ def _bootstrap_second_order(
         BA: Model outputs from the BA cross-matrices, shape ``(N, D)``.
         B: Model outputs from sample matrix B, shape ``(N,)``.
         chunk_size: Maximum resamples to vmap in a single device call.
+        estimator: Which named estimator to resample, matching the point
+            estimate.
 
     Returns:
         S1_boot: first-order indices for every resample, shape ``(R, D)``.
@@ -143,11 +161,12 @@ def _bootstrap_second_order(
     """
     R = indices.shape[0]
     s1_parts, st_parts, s2_parts = [], [], []
+    resample = _resample_so(estimator)
     cs = min(chunk_size, R)
     for start in range(0, R, cs):
         end = min(start + cs, R)
         # Same chunked-vmap strategy as _bootstrap_first_total
-        s1, st, s2 = _resample_so(indices[start:end], A, AB, BA, B)
+        s1, st, s2 = resample(indices[start:end], A, AB, BA, B)
         s1_parts.append(s1)
         st_parts.append(st)
         s2_parts.append(s2)

@@ -6,10 +6,13 @@ and their cross-matrices AB (plus BA for second order). It then computes
 first-order (S1), total-order (ST), and optionally second-order (S2) Sobol
 indices.
 
-The estimator maths lives in exactly one place, ``_indices_from_expanded``.
-``analyze`` runs the host-side diagnostics and wraps that core in a result
-object; ``indices`` calls the same core with nothing around it, so it stays
-traceable by ``jit``, ``vmap`` and ``jacrev``.
+The estimator formulas live in :mod:`jaxgsa.sobol._estimators`, one function
+per named ``estimator=``. This module reaches them through exactly one seam,
+``_indices_from_expanded``. ``analyze`` runs the host-side diagnostics and
+wraps that seam in a result object; ``indices`` calls it with nothing around
+it, so it stays traceable by ``jit``, ``vmap`` and ``jacrev``. The bootstrap
+path resamples through the same named estimator, so an interval always
+describes the quantity at its centre.
 
 Array shape conventions used throughout:
     N: number of base Sobol samples (base_n after cleaning)
@@ -29,7 +32,14 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
-from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare
+from jaxgsa._core.entry import (
+    at_least,
+    check_scalars,
+    in_open_interval,
+    one_of,
+    prepare,
+    require,
+)
 from jaxgsa._core.invalid import InvalidReport, OnInvalid
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
@@ -37,9 +47,13 @@ from jaxgsa._core.validation import (
     _prenormalize_outputs,
     _prepare_Y,
 )
-from jaxgsa.sobol._indices import (
-    _fused_first_total,
-    _fused_second_order,
+from jaxgsa.sobol._estimators import (
+    DEFAULT_ESTIMATOR,
+    ESTIMATORS,
+    Estimator,
+    first_total_kernel,
+    requires_second_order_design,
+    second_order_kernel,
 )
 from jaxgsa.sobol._result import SobolResult
 from jaxgsa.sobol._sampling import SobolSamples, _saltelli_step
@@ -49,25 +63,25 @@ from jaxgsa.sobol._sampling import SobolSamples, _saltelli_step
 # ---------------------------------------------------------------------------
 
 
-# lru_cache ensures each (calc_second_order,) variant is JIT-compiled exactly
-# once across the process lifetime, avoiding repeated tracing overhead.
+# lru_cache ensures each (calc_second_order, estimator) variant is JIT-compiled
+# exactly once across the process lifetime, avoiding repeated tracing overhead.
 
 
 @lru_cache(maxsize=None)
-def _get_scalar_kernel(calc_second_order: bool):
+def _get_scalar_kernel(calc_second_order: bool, estimator: str):
     """Cache JIT-compiled fused kernels for the scalar (T*K=1) path."""
     if calc_second_order:
-        return jax.jit(_fused_second_order)
-    return jax.jit(_fused_first_total)
+        return jax.jit(second_order_kernel(estimator))
+    return jax.jit(first_total_kernel(estimator))
 
 
 @lru_cache(maxsize=None)
-def _get_batched_kernel(calc_second_order: bool):
+def _get_batched_kernel(calc_second_order: bool, estimator: str):
     """Cache JIT-compiled batched kernels for the multi-output path."""
     # vmap over axis 0 maps fused kernels across T*K output slices in parallel
     if calc_second_order:
-        return jax.jit(jax.vmap(_fused_second_order, in_axes=(0, 0, 0, 0)))
-    return jax.jit(jax.vmap(_fused_first_total, in_axes=(0, 0, 0)))
+        return jax.jit(jax.vmap(second_order_kernel(estimator), in_axes=(0, 0, 0, 0)))
+    return jax.jit(jax.vmap(first_total_kernel(estimator), in_axes=(0, 0, 0)))
 
 
 def _separate_output_values(
@@ -126,8 +140,34 @@ def _normalize_s2_matrix(S2: Array) -> Array:
     return jnp.where(diag_mask, jnp.nan, mirrored)
 
 
+def _estimator_checks(estimator: str, calc_second_order: bool) -> tuple:
+    """Build the scalar checks that settle ``estimator`` before any array work.
+
+    Both entry points run these, so a bad name or an estimator the design
+    cannot feed is refused in the same words either way.
+
+    Args:
+        estimator: The requested estimator name, unvalidated.
+        calc_second_order: Whether the design carries the BA blocks.
+
+    Returns:
+        The checks, in the order they should be reported: the name first,
+        then whether the design can feed it.
+    """
+    return (
+        one_of("estimator", estimator, ESTIMATORS),
+        require(
+            not (requires_second_order_design(estimator) and not calc_second_order),
+            f"estimator={estimator!r} reads the BA blocks of the Saltelli design, "
+            "so it needs a design drawn with calc_second_order=True. Either "
+            "re-draw the design, or pick an estimator that runs on the N(D+2) "
+            "layout.",
+        ),
+    )
+
+
 def _indices_from_expanded(
-    Y: Array, D: int, calc_second_order: bool, slice_chunk_size: int
+    Y: Array, D: int, calc_second_order: bool, slice_chunk_size: int, estimator: str
 ) -> tuple[Array, Array, Array | None]:
     """Compute Sobol indices from expanded-layout outputs, picking the faster kernel.
 
@@ -150,6 +190,8 @@ def _indices_from_expanded(
         D: Number of input parameters.
         calc_second_order: Whether the layout includes the BA blocks.
         slice_chunk_size: Number of (T, K) output slices per vmap batch.
+        estimator: Which named estimator pair to use. See
+            :mod:`jaxgsa.sobol._estimators`.
 
     Returns:
         ``(S1, ST, S2)``, with ``S2`` ``None`` when second order is off. The
@@ -180,11 +222,11 @@ def _indices_from_expanded(
         if calc_second_order:
             assert BA is not None
             ba = BA[:, :, 0, 0]
-            kernel = _get_scalar_kernel(True)
+            kernel = _get_scalar_kernel(True, estimator)
             S1_out, ST_out, S2_raw = kernel(a, ab, ba, b)
             S2_out = _normalize_s2_matrix(S2_raw)
         else:
-            kernel = _get_scalar_kernel(False)
+            kernel = _get_scalar_kernel(False, estimator)
             S1_out, ST_out = kernel(a, ab, b)
             S2_out = None
 
@@ -207,7 +249,7 @@ def _indices_from_expanded(
         assert BA is not None
         BA_flat = BA.transpose(2, 3, 0, 1).reshape(T * K, base_n, D)
 
-        batched = _get_batched_kernel(True)
+        batched = _get_batched_kernel(True, estimator)
         s1_parts, st_parts, s2_parts = [], [], []
         for start in range(0, total, cs):
             end = min(start + cs, total)
@@ -225,7 +267,7 @@ def _indices_from_expanded(
         ST_out = jnp.concatenate(st_parts).reshape(T, K, D)
         S2_out = _normalize_s2_matrix(jnp.concatenate(s2_parts).reshape(T, K, D, D))
     else:
-        batched = _get_batched_kernel(False)
+        batched = _get_batched_kernel(False, estimator)
         s1_parts, st_parts = [], []
         for start in range(0, total, cs):
             end = min(start + cs, total)
@@ -249,7 +291,12 @@ def _indices_from_expanded(
 
 
 def _analyze_no_bootstrap(
-    sampling_result: SobolSamples, Y: Array, *, slice_chunk_size: int, invalid: InvalidReport
+    sampling_result: SobolSamples,
+    Y: Array,
+    *,
+    slice_chunk_size: int,
+    estimator: str,
+    invalid: InvalidReport,
 ) -> SobolResult:
     """Wrap the estimator core in a ``SobolResult``, without a bootstrap."""
     S1_out, ST_out, S2_out = _indices_from_expanded(
@@ -257,6 +304,7 @@ def _analyze_no_bootstrap(
         sampling_result.n_params,
         sampling_result.calc_second_order,
         slice_chunk_size,
+        estimator,
     )
     return SobolResult(
         S1=S1_out,
@@ -268,7 +316,11 @@ def _analyze_no_bootstrap(
 
 
 def indices(
-    sampling_result: SobolSamples, Y: Array, *, slice_chunk_size: int = 2048
+    sampling_result: SobolSamples,
+    Y: Array,
+    *,
+    estimator: Estimator = DEFAULT_ESTIMATOR,
+    slice_chunk_size: int = 2048,
 ) -> tuple[Array, ...]:
     """Compute Sobol indices as plain arrays, with no diagnostics.
 
@@ -304,6 +356,10 @@ def indices(
             ``sampling_result.samples``, in the same row order. Shapes are
             those :func:`analyze` accepts: ``(n_runs,)``, ``(n_runs, K)`` or
             ``(n_runs, T, K)``.
+        estimator: Which estimator pair to use, as in :func:`analyze`. Every
+            one of them is plain arithmetic on the output vectors, so the
+            choice does not affect what ``jit``, ``vmap`` or ``jacrev`` can
+            do with this function.
         slice_chunk_size: Number of (T, K) output slices per vmap batch. Lower
             it if you hit device out-of-memory errors.
 
@@ -312,14 +368,18 @@ def indices(
         ``calc_second_order=True``. The shapes are those ``analyze`` reports.
 
     Raises:
-        ValueError: If ``Y``'s first axis does not match
-            ``sampling_result.n_runs``, or ``slice_chunk_size`` is below 1.
+        ValueError: If ``estimator`` is not a known name; if it needs the BA
+            blocks and the design has none; if ``Y``'s first axis does not
+            match ``sampling_result.n_runs``; or if ``slice_chunk_size`` is
+            below 1.
     """
+    check_scalars(_estimator_checks(estimator, sampling_result.calc_second_order))
     S1, ST, S2 = _indices_from_expanded(
         sampling_result.expand_outputs(Y),
         sampling_result.n_params,
         sampling_result.calc_second_order,
         slice_chunk_size,
+        estimator,
     )
     if S2 is None:
         return S1, ST
@@ -330,6 +390,7 @@ def _analyze_bootstrap(
     sampling_result: SobolSamples,
     Y: Array,
     *,
+    estimator: str,
     num_resamples: int,
     conf_level: float,
     ci_method: Literal["quantile", "gaussian"],
@@ -360,9 +421,10 @@ def _analyze_bootstrap(
     # Shared across (T, K) slices so every output sees the same resamples.
     indices = jax.random.randint(key, shape=(num_resamples, base_n), minval=0, maxval=base_n)
 
-    # Reuse the scalar (non-vmapped) kernels for point estimates per slice
-    jit_ft = _get_scalar_kernel(False)
-    jit_so = _get_scalar_kernel(True)
+    # Reuse the scalar (non-vmapped) kernel for point estimates per slice.
+    # Only the one this design calls for is built: azzini-rosati has no
+    # first-order-only kernel to compile.
+    kernel = _get_scalar_kernel(calc_second_order, estimator)
 
     S1_list, ST_list = [], []
     S1_lo_list, S1_hi_list = [], []
@@ -385,11 +447,11 @@ def _analyze_bootstrap(
                 assert BA is not None
                 ba = BA[:, :, t, k]
 
-                s1, st, s2 = jit_so(a, ab, ba, b)
+                s1, st, s2 = kernel(a, ab, ba, b)
                 S2_list.append(s2)
 
                 s1_boot, st_boot, s2_boot = _bootstrap_second_order(
-                    indices, a, ab, ba, b, slice_chunk_size
+                    indices, a, ab, ba, b, slice_chunk_size, estimator
                 )
                 s2_lo, s2_hi = _bootstrap_ci_endpoints(
                     s2,
@@ -402,8 +464,10 @@ def _analyze_bootstrap(
                 if keep_replicates:
                     S2_draw_list.append(s2_boot)
             else:
-                s1, st = jit_ft(a, ab, b)
-                s1_boot, st_boot = _bootstrap_first_total(indices, a, ab, b, slice_chunk_size)
+                s1, st = kernel(a, ab, b)
+                s1_boot, st_boot = _bootstrap_first_total(
+                    indices, a, ab, b, slice_chunk_size, estimator
+                )
 
             S1_list.append(s1)
             ST_list.append(st)
@@ -513,6 +577,7 @@ def analyze(
     sampling_result: SobolSamples,
     Y: Array,
     *,
+    estimator: Estimator = DEFAULT_ESTIMATOR,
     prenormalize: bool = False,
     num_resamples: int = 0,
     conf_level: float = 0.95,
@@ -551,6 +616,30 @@ def analyze(
                 ``(n_runs, K)``: K outputs, single time step
                 ``(n_runs, T, K)``: K outputs over T time steps
             Indices are computed independently for every (t, k) output slice.
+        estimator: Which pair of estimator formulas to use. Every one of
+            them converges to the same indices; they differ in how much
+            sampling noise they carry at a small ``N``, and in whether they
+            can return a value outside ``[0, 1]``.
+
+                ``"saltelli-jansen"`` (default): Sobol'-Mauntz first order,
+                Jansen (1999) total order. This is what jaxgsa has always
+                computed, and changing it would move every stored number.
+                ``"jansen"``: Jansen (1999) for both orders. Neither index
+                can go negative, and both are biased upward at a true zero.
+                ``"janon-monod"``: one self-consistent normaliser shared
+                between numerator and denominator. Its asymptotic variance
+                is never worse than the classical one.
+                ``"martinez"``: the same pairings read as empirical
+                correlations.
+                ``"mauntz-kucherenko"``: Sobol' et al. (2007) for both
+                orders. Same first order as the default.
+                ``"azzini-rosati"``: Azzini, Mara and Rosati (2021). It is
+                the only scheme that holds ``S1 <= ST`` on every sample, and
+                the only one that reads the BA blocks, so it needs a design
+                drawn with ``calc_second_order=True``.
+
+            See :mod:`jaxgsa.sobol._estimators` for the formulas and the
+            references, and the methods guide for the measured errors.
         prenormalize: When ``True``, apply SALib-style global output
             standardization over the cleaned expanded sample axis before
             computing Sobol indices. Each output slice is centered to mean 0
@@ -594,7 +683,9 @@ def analyze(
             invalid: What the non-finite check found, and what it did
 
     Raises:
-        ValueError: If ``on_invalid`` is not one of the three policies; if
+        ValueError: If ``estimator`` is not a known name, or needs the BA
+            blocks and the design has none; if ``on_invalid`` is not one of
+            the three policies; if
             ``ci_method`` is not ``"quantile"`` or ``"gaussian"``; if
             ``num_resamples`` is negative; if ``slice_chunk_size`` is below 1;
             if ``conf_level`` is not in ``(0, 1)``; if the sample holds a
@@ -623,6 +714,7 @@ def analyze(
         Y,
         on_invalid=on_invalid,
         checks=(
+            *_estimator_checks(estimator, sampling_result.calc_second_order),
             one_of("ci_method", ci_method, ("quantile", "gaussian")),
             at_least("num_resamples", num_resamples, 0),
             at_least("slice_chunk_size", slice_chunk_size, 1),
@@ -657,6 +749,7 @@ def analyze(
         return _analyze_bootstrap(
             sampling_result,
             Y,
+            estimator=estimator,
             num_resamples=num_resamples,
             conf_level=conf_level,
             ci_method=ci_method,
@@ -667,5 +760,9 @@ def analyze(
         )
 
     return _analyze_no_bootstrap(
-        sampling_result, Y, slice_chunk_size=slice_chunk_size, invalid=invalid
+        sampling_result,
+        Y,
+        slice_chunk_size=slice_chunk_size,
+        estimator=estimator,
+        invalid=invalid,
     )

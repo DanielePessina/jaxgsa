@@ -23,11 +23,32 @@ decide what its `on_invalid` policy should do, and a policy decision needs a
 concrete number, so it cannot run under `jax.jit` or `jax.vmap`. `indices`
 reads nothing, so it can.
 
-Both call one estimator. The numbers are the same.
+Both call the same estimator, so the numbers are the same.
 
 ```python
 S1, ST = jaxgsa.sobol.indices(samples, Y)
 ```
+
+## Choosing an estimator
+
+Both functions take `estimator=`, and both default to `"saltelli-jansen"`,
+which is what jaxgsa has always computed. The accepted names are
+`"saltelli-jansen"`, `"jansen"`, `"janon-monod"`, `"martinez"`,
+`"mauntz-kucherenko"` and `"azzini-rosati"`. Anything else raises a
+`ValueError` before any array is touched.
+
+```python
+result = jaxgsa.sobol.analyze(samples, Y, estimator="azzini-rosati")
+```
+
+`"azzini-rosati"` reads the `BA` blocks of the design, so it needs
+`calc_second_order=True`; it is the only one that does, and the only one that
+can never report `S1 > ST`. Every estimator is plain arithmetic on the output
+vectors, so the choice costs `indices` none of its `jit`, `vmap` or `jacrev`
+support.
+
+See [Methods](/guide/methods#choosing-a-different-estimator) for the measured
+errors behind the default, and for what a negative index estimate means.
 
 ### Differentiating an index
 

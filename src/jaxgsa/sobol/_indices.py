@@ -1,7 +1,15 @@
-"""Sobol sensitivity index estimators (first-order, total-order, second-order).
+"""The default Sobol estimator pair, and the fused kernels that apply it.
 
-Implements the Saltelli (2010) estimators for variance-based global
-sensitivity analysis using a Sobol quasi-random sampling design.
+This module holds the ``saltelli-jansen`` scheme, which is what
+``estimator=`` selects when the caller does not choose. The other five
+schemes live in :mod:`jaxgsa.sobol._estimators`, which also documents the
+whole menu and the references.
+
+Attribution, because the labels are easy to get wrong. The first-order
+formula here is the improved form of Sobol', Tarantola, Gatelli,
+Kucherenko and Mauntz (2007), which Saltelli et al. (2010) tabulate and
+recommend. It is *not* the Saltelli (2002) estimator, which is the plain
+cross-moment. The total-order formula is Jansen (1999).
 
 Notation
 --------
@@ -30,7 +38,8 @@ from jax import Array
 def first_order(A: Array, AB_j: Array, B: Array) -> Array:
     """Estimate the first-order (main-effect) Sobol index for parameter j.
 
-    Uses the Saltelli (2010) estimator::
+    Uses the improved form of Sobol' et al. (2007), as tabulated by
+    Saltelli et al. (2010)::
 
         S1_j = E[B * (AB_j - A)] / Var(Y)
 
@@ -147,7 +156,7 @@ def _fused_first_total(A: Array, AB: Array, B: Array) -> tuple[Array, Array]:
 
     # [:, None] broadcasts (N,) to (N, 1), computing all D indices at once
     # without vmap: each column j of AB is paired with the full A and B.
-    # Saltelli (2010) S1 estimator: E[B * (AB_j - A)] / Var(Y)
+    # Sobol' et al. (2007) S1 estimator: E[B * (AB_j - A)] / Var(Y)
     S1 = jnp.mean(B[:, None] * (AB - A[:, None]), axis=0) * inv_var  # (D,)
     # Jansen (1999) ST estimator: E[(A - AB_j)^2] / (2 Var(Y))
     ST = 0.5 * jnp.mean((A[:, None] - AB) ** 2, axis=0) * inv_var  # (D,)
@@ -179,7 +188,7 @@ def _fused_second_order(A: Array, AB: Array, BA: Array, B: Array) -> tuple[Array
     var = (jnp.sum(A_c**2) + jnp.sum(B_c**2)) / (2 * N)
     inv_var = jnp.where(var == 0, jnp.nan, 1.0 / var)
 
-    # S1 and ST use the same Saltelli/Jansen estimators as _fused_first_total
+    # S1 and ST use the same Sobol'-Mauntz/Jansen pair as _fused_first_total
     S1 = jnp.mean(B[:, None] * (AB - A[:, None]), axis=0) * inv_var  # (D,)
     ST = 0.5 * jnp.mean((A[:, None] - AB) ** 2, axis=0) * inv_var  # (D,)
 

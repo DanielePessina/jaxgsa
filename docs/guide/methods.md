@@ -163,9 +163,9 @@ The cost is $N(D + 2)$ model evaluations for all first-order and total-order ind
 
 ### Estimators
 
-jaxgsa implements the following estimators.
+The default estimator pair is `estimator="saltelli-jansen"`.
 
-First-order, from Saltelli (2010):
+First-order, the improved form of Sobol' et al. (2007), tabulated by Saltelli et al. (2010):
 
 $$
 \hat{S}_i = \frac{\frac{1}{N}\sum_{n=1}^{N} f(\mathbf{B})_n \cdot \left(f(\mathbf{AB}^{(i)})_n - f(\mathbf{A})_n\right)}{\mathrm{Var}(Y)}
@@ -177,7 +177,44 @@ $$
 \hat{S}_{T_i} = \frac{\frac{1}{2N}\sum_{n=1}^{N}\left(f(\mathbf{A})_n - f(\mathbf{AB}^{(i)})_n\right)^2}{\mathrm{Var}(Y)}
 $$
 
-All estimators normalise by a pooled output variance computed over the concatenation of $\mathbf{A}$ and $\mathbf{B}$ outputs, that is $\mathrm{Var}([\mathbf{A}; \mathbf{B}])$ over $2N$ points. Pooling both base-sample vectors doubles the effective sample size and gives a more robust variance estimate.
+These two normalise by a pooled output variance computed over the concatenation of $\mathbf{A}$ and $\mathbf{B}$ outputs, that is $\mathrm{Var}([\mathbf{A}; \mathbf{B}])$ over $2N$ points. Pooling both base-sample vectors doubles the effective sample size and gives a more robust variance estimate.
+
+#### Choosing a different estimator
+
+`jaxgsa.sobol.analyze(..., estimator=...)` and `jaxgsa.sobol.indices(..., estimator=...)` accept six named pairs. All six converge to the same indices. They differ in how much sampling noise they carry at a small $N$, and in what they can report.
+
+| `estimator` | First order | Total order | Design |
+|---|---|---|---|
+| `"saltelli-jansen"` (default) | Sobol' et al. (2007) | Jansen (1999) | $N(D+2)$ |
+| `"jansen"` | Jansen (1999) | Jansen (1999) | $N(D+2)$ |
+| `"janon-monod"` | Monod et al. (2006), Janon et al. (2014) | same | $N(D+2)$ |
+| `"martinez"` | Martinez (2011) | Martinez (2011) | $N(D+2)$ |
+| `"mauntz-kucherenko"` | Sobol' et al. (2007) | Sobol' et al. (2007) | $N(D+2)$ |
+| `"azzini-rosati"` | Azzini, Mara & Rosati (2021) | same | $N(2D+2)$ |
+
+`"azzini-rosati"` reads the $\mathbf{BA}^{(j)}$ blocks, so it needs a design drawn with `calc_second_order=True`. Asking for it on a first-order-only design raises a `ValueError`.
+
+Second-order indices always use the Saltelli (2002) pairwise formula. Only the $S_1$ terms it subtracts come from the estimator you chose.
+
+#### Which one to use
+
+The defaults were measured, not assumed. On Ishigami and Sobol-G against their analytical indices, over 100 seeds per point, with each estimator given the design it actually needs so the model-run budget is comparable:
+
+- For the $N(D+2)$ design, `"saltelli-jansen"` is the best or joint-best choice at every budget tested. Its first-order formula ties with `"mauntz-kucherenko"` and beats `"jansen"`, `"janon-monod"` and `"martinez"` by about a factor of two on Sobol-G, where four parameters are nearly inert. Its total-order formula is the best or joint-best everywhere; `"mauntz-kucherenko"`'s total order is the worst of the menu, by up to a factor of three at a small $N$.
+- `"azzini-rosati"` is the better choice when your budget is tight, when you have many parameters, or when you are already paying for the $N(2D+2)$ design. On Sobol-G at 640 model runs its $S_1$ error is 0.029 against 0.087 for the default, and it is the only estimator that cannot report $S_1 > S_T$. Its advantage narrows as the budget grows, and on Ishigami above roughly 5000 runs the default overtakes it, because the cheaper design buys twice as many base points and the quasi-random design converges faster than $1/\sqrt{N}$.
+- `"janon-monod"` and `"martinez"` give nearly identical numbers. Pick `"martinez"` if you want the point estimate that OpenTURNS' `MartinezSensitivityAlgorithm` computes, which jaxgsa reproduces to machine precision.
+
+#### Negative index estimates
+
+A first-order estimate can come out below zero, whichever estimator you choose. That is expected, and it is not a sign that the sample is too small.
+
+Every first-order formula here is a difference of two correlated Monte Carlo estimates. The difference is unbiased but noisy, so when the true index is near zero the sampling error is bigger than the index and about half the estimates land below it. Owen (2013) states the mechanism: the cross-moment form "has very large variance when $\tau^2_u \ll \mu^2$", whereas a squared-difference form "is a sum of squares, hence nonnegative".
+
+Note the limit of that last point. Only the *total* order of `"saltelli-jansen"` and `"jansen"` is a bare sum of squares, and only it is guaranteed non-negative. A Jansen *first-order* estimate is one minus such a term, so it is bounded above by 1 and free to go below zero. In jaxgsa's measurements on Sobol-G, every estimator except `"azzini-rosati"` returns a negative first-order value somewhere in 15% to 35% of runs, and that fraction does not fall away as $N$ grows.
+
+So read a negative value as "the interval covers zero", and turn on the bootstrap (`num_resamples`) to see that directly. Investigate only if the value is large, if it appears for a parameter whose index is demonstrably not near zero, or if it grows with $N$.
+
+jaxgsa does not clip. Clipping to zero is a display choice, and it must never be done before ranking: it biases upward in exactly the near-zero regime where the ranking decision is being made.
 
 ### How to use it
 
