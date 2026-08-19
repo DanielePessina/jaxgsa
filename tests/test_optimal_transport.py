@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import jax
 import jax.numpy as jnp
@@ -75,8 +75,8 @@ class TestOTBasic:
 
     def test_deterministic(self, ishigami_data):
         X, Y = ishigami_data
-        r1 = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=10, seed=7)
-        r2 = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=10, seed=7)
+        r1 = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=10, key=jax.random.key(7))
+        r2 = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=10, key=jax.random.key(7))
         np.testing.assert_array_equal(np.asarray(r1.ot), np.asarray(r2.ot))
         assert r1.ot_conf is not None and r2.ot_conf is not None
         np.testing.assert_array_equal(np.asarray(r1.ot_conf), np.asarray(r2.ot_conf))
@@ -387,7 +387,7 @@ class TestOTPointCloud:
 class TestOTBootstrap:
     def test_conf_shapes_scalar(self, ishigami_data):
         X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=20)
+        result = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=20, key=jax.random.key(0))
         for conf in (result.ot_conf, result.advective_conf, result.diffusive_conf):
             assert conf is not None
             assert conf.shape == (2, 3)
@@ -395,20 +395,65 @@ class TestOTBootstrap:
 
     def test_conf_shapes_multi_output(self, multi_output_data):
         X, Y2, _ = multi_output_data
-        result = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=20)
+        result = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=20, key=jax.random.key(0))
         assert result.ot_conf is not None
         assert result.ot_conf.shape == (2, 2, 3)
 
     def test_point_estimate_independent_of_bootstrap(self, ishigami_data):
         X, Y = ishigami_data
         r0 = analyze(ishigami.PROBLEM, X, Y)
-        rb = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=15)
+        rb = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=15, key=jax.random.key(0))
         np.testing.assert_array_equal(np.asarray(r0.ot), np.asarray(rb.ot))
 
-    def test_different_seeds_differ(self, ishigami_data):
+    def test_bootstrap_without_a_key_raises(self, ishigami_data):
+        """Tier T4. A bootstrap needs a key, and an int seed is not one."""
         X, Y = ishigami_data
-        r1 = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=15, seed=1)
-        r2 = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=15, seed=2)
+        with pytest.raises(ValueError, match="key is required"):
+            analyze(ishigami.PROBLEM, X, Y, n_bootstrap=4)
+
+    def test_dummy_without_a_key_raises(self, ishigami_data):
+        """Tier T4. The dummy column is the method's other random draw.
+
+        It is independent of the bootstrap, so it needs a key of its own
+        even when no interval was asked for.
+        """
+        X, Y = ishigami_data
+        with pytest.raises(ValueError, match="key is required"):
+            analyze(ishigami.PROBLEM, X, Y, dummy=True)
+
+    def test_gaussian_ci_is_centred_on_the_estimate(self, ishigami_data):
+        """Tier T0 (closed form): the Gaussian interval is symmetric.
+
+        ``estimate +/- z * sd`` puts the point estimate exactly at the
+        midpoint of the two endpoints, which the percentile interval does
+        not do. That is what tells the two branches apart.
+        """
+        X, Y = ishigami_data
+        result = analyze(
+            ishigami.PROBLEM, X, Y, n_bootstrap=10, ci_method="gaussian", key=jax.random.key(0)
+        )
+        assert result.ci is not None
+        assert result.ci.method == "gaussian"
+        assert result.ot_conf is not None
+        midpoint = 0.5 * (np.asarray(result.ot_conf[0]) + np.asarray(result.ot_conf[1]))
+        np.testing.assert_allclose(midpoint, np.asarray(result.ot), atol=1e-6)
+
+    def test_unknown_ci_method_rejected(self, ishigami_data):
+        X, Y = ishigami_data
+        with pytest.raises(ValueError, match="ci_method"):
+            analyze(
+                ishigami.PROBLEM,
+                X,
+                Y,
+                n_bootstrap=4,
+                ci_method=cast(Any, "bca"),
+                key=jax.random.key(0),
+            )
+
+    def test_different_keys_differ(self, ishigami_data):
+        X, Y = ishigami_data
+        r1 = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=15, key=jax.random.key(1))
+        r2 = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=15, key=jax.random.key(2))
         assert r1.ot_conf is not None and r2.ot_conf is not None
         assert not np.array_equal(np.asarray(r1.ot_conf), np.asarray(r2.ot_conf))
 
@@ -421,6 +466,7 @@ class TestOTBootstrap:
             mode="multivariate",
             n_partitions=5,
             n_bootstrap=5,
+            key=jax.random.key(0),
         )
         assert result.ot_conf is not None
         assert result.ot_conf.shape == (2, 3)
@@ -467,7 +513,7 @@ class TestOTEdgeCases:
 
     def test_dummy_baseline(self, ishigami_data):
         X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y, dummy=True)
+        result = analyze(ishigami.PROBLEM, X, Y, dummy=True, key=jax.random.key(0))
         assert result.ot_dummy is not None
         assert result.ot_dummy.shape == ()
         # A synthetic independent input must sit far below real inputs.
@@ -477,7 +523,13 @@ class TestOTEdgeCases:
     def test_dummy_multivariate_mode(self, multi_output_data):
         X, Y2, _ = multi_output_data
         result = analyze(
-            ishigami.PROBLEM, X[:1500], Y2[:1500], mode="multivariate", n_partitions=5, dummy=True
+            ishigami.PROBLEM,
+            X[:1500],
+            Y2[:1500],
+            mode="multivariate",
+            n_partitions=5,
+            dummy=True,
+            key=jax.random.key(0),
         )
         assert result.ot_dummy is not None
         assert result.ot_dummy.shape == ()
@@ -693,12 +745,14 @@ class TestOTInvalidPolicy:
         problem, X, Y = _invalid_sample()
         X_bad = X.at[2, 1].set(jnp.nan)
         with pytest.warns(jaxgsa.JaxgsaWarning):
-            result = analyze(problem, X_bad, Y, dummy=True, on_invalid="drop")
+            result = analyze(
+                problem, X_bad, Y, dummy=True, key=jax.random.key(0), on_invalid="drop"
+            )
         assert result.invalid.sources == ("X",)
         assert result.invalid.unit_indices == (2,)
         assert result.ot_dummy is not None
         assert np.all(np.isfinite(np.asarray(result.ot_dummy)))
 
         # A clean sample with a dummy column reports nothing at all.
-        clean = analyze(problem, X, Y, dummy=True)
+        clean = analyze(problem, X, Y, dummy=True, key=jax.random.key(0))
         assert clean.invalid.n_invalid == 0

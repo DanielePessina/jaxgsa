@@ -342,11 +342,15 @@ def _prep_kucherenko(case: Case) -> Callable[[], Any]:
 
 
 def _prep_borgonovo(case: Case) -> Callable[[], Any]:
-    return lambda: borgonovo.analyze(case.problem, case.X, case.Y, n_bootstrap=10, seed=SEED)
+    return lambda: borgonovo.analyze(
+        case.problem, case.X, case.Y, n_bootstrap=10, key=jax.random.key(SEED)
+    )
 
 
 def _prep_pawn(case: Case) -> Callable[[], Any]:
-    return lambda: pawn.analyze(case.problem, case.X, case.Y, n_bins=8, n_bootstrap=10, seed=SEED)
+    return lambda: pawn.analyze(
+        case.problem, case.X, case.Y, n_bins=8, n_bootstrap=10, key=jax.random.key(SEED)
+    )
 
 
 def _prep_hsic(case: Case) -> Callable[[], Any]:
@@ -355,7 +359,13 @@ def _prep_hsic(case: Case) -> Callable[[], Any]:
 
 def _prep_optimal_transport(case: Case) -> Callable[[], Any]:
     return lambda: optimal_transport.analyze(
-        case.problem, case.X, case.Y, n_partitions=8, n_bootstrap=10, dummy=False, seed=SEED
+        case.problem,
+        case.X,
+        case.Y,
+        n_partitions=8,
+        n_bootstrap=10,
+        dummy=False,
+        key=jax.random.key(SEED),
     )
 
 

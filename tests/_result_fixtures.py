@@ -116,12 +116,12 @@ def _dgsm(shape: str) -> Any:
 
 def _borgonovo(shape: str) -> Any:
     X, Y = _given_data(shape)
-    return borgonovo.analyze(PROBLEM, X, Y, n_bootstrap=8, seed=SEED)
+    return borgonovo.analyze(PROBLEM, X, Y, n_bootstrap=8, key=jax.random.key(SEED))
 
 
 def _pawn(shape: str) -> Any:
     X, Y = _given_data(shape)
-    return pawn.analyze(PROBLEM, X, Y, n_bins=4, n_bootstrap=8, seed=SEED)
+    return pawn.analyze(PROBLEM, X, Y, n_bins=4, n_bootstrap=8, key=jax.random.key(SEED))
 
 
 def _hsic(shape: str) -> Any:
@@ -132,21 +132,21 @@ def _hsic(shape: str) -> Any:
 def _ot(shape: str) -> Any:
     X, Y = _given_data(shape)
     return optimal_transport.analyze(
-        PROBLEM, X, Y, n_partitions=4, n_bootstrap=4, dummy=True, seed=SEED
+        PROBLEM, X, Y, n_partitions=4, n_bootstrap=4, dummy=True, key=jax.random.key(SEED)
     )
 
 
 def _ot_multivariate(shape: str) -> Any:
     X, Y = _given_data(shape)
     return optimal_transport.analyze(
-        PROBLEM, X, Y, mode="multivariate", n_partitions=4, n_bootstrap=4, seed=SEED
+        PROBLEM, X, Y, mode="multivariate", n_partitions=4, n_bootstrap=4, key=jax.random.key(SEED)
     )
 
 
 def _ot_trajectory(shape: str) -> Any:
     X, Y = _given_data(shape)
     return optimal_transport.analyze(
-        PROBLEM, X, Y, mode="trajectory", n_partitions=4, n_bootstrap=4, seed=SEED
+        PROBLEM, X, Y, mode="trajectory", n_partitions=4, n_bootstrap=4, key=jax.random.key(SEED)
     )
 
 

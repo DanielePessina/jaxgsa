@@ -1,3 +1,4 @@
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -485,7 +486,7 @@ def test_correlated_end_to_end_ot_borgonovo_hdmr():
     assert float(ot.ot[0]) > 0.5  # Y is fully determined by X1
     assert float(ot.ot[1]) > 0.1  # X2 unused, but correlated with X1
 
-    delta = jaxgsa.borgonovo.analyze(problem, Xj, Y)
+    delta = jaxgsa.borgonovo.analyze(problem, Xj, Y, key=jax.random.key(0))
     assert float(delta.delta[0]) > 0.5
     assert float(delta.delta[1]) > 0.1
 

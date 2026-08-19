@@ -140,7 +140,7 @@ def _run_all(jaxgsa, ishigami, ishigami_fn, jax, jnp, problem, time):
 
     # --- Borgonovo delta ---
     _t0 = time.perf_counter()
-    result_borgonovo = jaxgsa.borgonovo.analyze(problem, _X_hdmr, _Y_hdmr, seed=42)
+    result_borgonovo = jaxgsa.borgonovo.analyze(problem, _X_hdmr, _Y_hdmr, key=jax.random.key(42))
     jax.block_until_ready(result_borgonovo.delta)
     time_borgonovo = time.perf_counter() - _t0
     n_evals_borgonovo = len(_X_hdmr)

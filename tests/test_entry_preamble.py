@@ -206,6 +206,10 @@ def _constant_output_call(name):
         return lambda: jaxgsa.hsic.analyze(PROBLEM, X, Y, key=jax.random.key(0))
     if name == "shapley":
         return lambda: jaxgsa.shapley.analyze(PROBLEM, X, Y, order=2)
+    # Borgonovo is the one method whose bootstrap is on by default, so it is
+    # the one that needs a key to run at all.
+    if name == "borgonovo":
+        return lambda: jaxgsa.borgonovo.analyze(PROBLEM, X, Y, key=jax.random.key(0))
     return lambda: getattr(jaxgsa, name).analyze(PROBLEM, X, Y)
 
 

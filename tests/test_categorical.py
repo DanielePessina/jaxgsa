@@ -3,6 +3,7 @@
 import json
 import warnings
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -376,7 +377,7 @@ def test_empty_declared_level_warns_and_completes():
     X = codes[:, None].astype(np.float64)
     Y = 1.0 * codes + 0.1 * rng.standard_normal(n)
     with pytest.warns(UserWarning, match="no\\s+samples at level"):
-        res = borgonovo.analyze(p, X, Y, n_bootstrap=4, seed=0)
+        res = borgonovo.analyze(p, X, Y, n_bootstrap=4, key=jax.random.key(0))
     assert np.all(np.isfinite(np.asarray(res.delta)))
     assert float(res.S1[0]) > 0.8
 
@@ -400,7 +401,7 @@ def test_borgonovo_degenerate_class_recovers_delta():
     """
     p, X, Y = _atom_data(1e-9)
     with pytest.warns(UserWarning, match="bandwidth"):
-        res = borgonovo.analyze(p, X, Y, seed=0)
+        res = borgonovo.analyze(p, X, Y, key=jax.random.key(0))
     assert abs(float(res.delta[0]) - 2.0 / 3.0) < 0.11
     assert float(res.S1[0]) == pytest.approx(1.0, abs=1e-6)
 
@@ -425,7 +426,7 @@ def test_borgonovo_refuses_a_discrete_output():
     p, X, Y = _atom_data(0.0)
     assert len(np.unique(Y)) == 3
     with pytest.raises(ValueError, match="continuous output distribution only"):
-        jaxgsa.borgonovo.analyze(p, X, Y, seed=0, n_bootstrap=0)
+        jaxgsa.borgonovo.analyze(p, X, Y, key=jax.random.key(0), n_bootstrap=0)
 
 
 def test_borgonovo_discrete_output_error_points_at_optimal_transport():
@@ -469,7 +470,7 @@ def test_borgonovo_atomic_class_delta_stays_in_range(noise):
     p, X, Y = _atom_data(noise)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
-        res = jaxgsa.borgonovo.analyze(p, X, Y, seed=0, n_bootstrap=0)
+        res = jaxgsa.borgonovo.analyze(p, X, Y, key=jax.random.key(0), n_bootstrap=0)
     delta = float(np.asarray(res.delta).ravel()[0])
     assert 0.0 <= delta <= 1.0
     assert abs(delta - 2.0 / 3.0) < 0.11
@@ -484,7 +485,9 @@ def test_borgonovo_aliasing_delta_raises_out_of_range():
     p, X, Y = _atom_data(1e-5)
     # degenerate_tol=1e-6 restores the old, too-low detection threshold.
     with pytest.raises(ValueError, match=r"delta is a half L1 distance") as excinfo:
-        jaxgsa.borgonovo.analyze(p, X, Y, seed=0, n_bootstrap=0, degenerate_tol=1e-6)
+        jaxgsa.borgonovo.analyze(
+            p, X, Y, key=jax.random.key(0), n_bootstrap=0, degenerate_tol=1e-6
+        )
     message = str(excinfo.value)
     assert "'c'" in message or "c:" in message
     assert "grid_size (currently 100)" in message
@@ -495,7 +498,7 @@ def test_borgonovo_in_range_delta_does_not_raise():
     p, X, Y = _atom_data(1e-5)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        jaxgsa.borgonovo.analyze(p, X, Y, seed=0, n_bootstrap=0)
+        jaxgsa.borgonovo.analyze(p, X, Y, key=jax.random.key(0), n_bootstrap=0)
     assert not [w for w in caught if "delta is defined on" in str(w.message)]
 
 
@@ -515,8 +518,12 @@ def test_borgonovo_grid_size_moves_the_atomic_estimate():
     p, X, Y = _atom_data(1e-9)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
-        coarse = jaxgsa.borgonovo.analyze(p, X, Y, seed=0, n_bootstrap=0, grid_size=50)
-        fine = jaxgsa.borgonovo.analyze(p, X, Y, seed=0, n_bootstrap=0, grid_size=200)
+        coarse = jaxgsa.borgonovo.analyze(
+            p, X, Y, key=jax.random.key(0), n_bootstrap=0, grid_size=50
+        )
+        fine = jaxgsa.borgonovo.analyze(
+            p, X, Y, key=jax.random.key(0), n_bootstrap=0, grid_size=200
+        )
     assert float(np.asarray(coarse.delta).ravel()[0]) < float(np.asarray(fine.delta).ravel()[0])
 
 
@@ -524,8 +531,10 @@ def test_borgonovo_degenerate_bandwidth_override_changes_the_estimate():
     p, X, Y = _atom_data(1e-9)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
-        default = jaxgsa.borgonovo.analyze(p, X, Y, seed=0, n_bootstrap=0)
-        wide = jaxgsa.borgonovo.analyze(p, X, Y, seed=0, n_bootstrap=0, degenerate_bandwidth=0.5)
+        default = jaxgsa.borgonovo.analyze(p, X, Y, key=jax.random.key(0), n_bootstrap=0)
+        wide = jaxgsa.borgonovo.analyze(
+            p, X, Y, key=jax.random.key(0), n_bootstrap=0, degenerate_bandwidth=0.5
+        )
     # A wider floor over-smooths the conditional, pulling delta down.
     assert float(np.asarray(wide.delta).ravel()[0]) < float(np.asarray(default.delta).ravel()[0])
 
@@ -548,7 +557,7 @@ def test_borgonovo_rejects_invalid_degenerate_settings(kwargs, match):
 
 def test_borgonovo_s1_matches_analytic_reference():
     problem, X, Y = _mixed_data(n=8000)
-    res = borgonovo.analyze(problem, X, Y, seed=0)
+    res = borgonovo.analyze(problem, X, Y, key=jax.random.key(0))
     s1_x1, s1_cat = _analytic_s1()
     np.testing.assert_allclose(np.asarray(res.S1), [s1_x1, s1_cat], atol=0.03)
     assert np.all(np.asarray(res.delta) > 0)
@@ -567,7 +576,7 @@ def test_pure_noise_categorical_index_is_near_zero():
     problem, X, _ = _mixed_data(n=8000)
     rng = np.random.default_rng(7)
     Y = X[:, 0] + 0.1 * rng.standard_normal(X.shape[0])
-    res_b = borgonovo.analyze(problem, X, Y, seed=0)
+    res_b = borgonovo.analyze(problem, X, Y, key=jax.random.key(0))
     res_o = optimal_transport.analyze(problem, X, Y)
     assert float(res_b.S1[1]) < 0.01
     assert float(res_o.ot[1]) < 0.02
@@ -589,12 +598,16 @@ def test_level_permutation_invariance(method):
     )
 
     if method == "borgonovo":
-        res = borgonovo.analyze(problem, X, Y, n_bootstrap=16, seed=0)
-        res_perm = borgonovo.analyze(problem_perm, X_perm, Y, n_bootstrap=16, seed=0)
+        res = borgonovo.analyze(problem, X, Y, n_bootstrap=16, key=jax.random.key(0))
+        res_perm = borgonovo.analyze(
+            problem_perm, X_perm, Y, n_bootstrap=16, key=jax.random.key(0)
+        )
         pairs = [(res.delta, res_perm.delta), (res.S1, res_perm.S1)]
     else:
-        res = optimal_transport.analyze(problem, X, Y, n_bootstrap=16, seed=0)
-        res_perm = optimal_transport.analyze(problem_perm, X_perm, Y, n_bootstrap=16, seed=0)
+        res = optimal_transport.analyze(problem, X, Y, n_bootstrap=16, key=jax.random.key(0))
+        res_perm = optimal_transport.analyze(
+            problem_perm, X_perm, Y, n_bootstrap=16, key=jax.random.key(0)
+        )
         pairs = [(res.ot, res_perm.ot), (res.advective, res_perm.advective)]
 
     for a, b in pairs:
@@ -630,7 +643,7 @@ def test_pawn_pads_the_kernel_when_levels_exceed_n_bins():
 
 def test_pawn_accepts_a_mixed_problem():
     problem, X, Y = _mixed_data(n=6000)
-    res = pawn.analyze(problem, X, Y, n_bootstrap=8, seed=0)
+    res = pawn.analyze(problem, X, Y, n_bootstrap=8, key=jax.random.key(0))
     values = np.asarray(res.pawn)
     assert values.shape == (2,)
     assert np.isfinite(values).all()
@@ -731,7 +744,7 @@ def test_ot_multivariate_mode_supports_categorical():
 
 def test_ot_dummy_baseline_works_with_categorical():
     problem, X, Y = _mixed_data(n=2000)
-    res = optimal_transport.analyze(problem, X, Y, dummy=True)
+    res = optimal_transport.analyze(problem, X, Y, dummy=True, key=jax.random.key(0))
     assert res.ot_dummy is not None
     assert float(res.ot_dummy) < float(res.ot[1])
 
@@ -776,21 +789,23 @@ def test_all_categorical_problem_default_n_partitions_is_silent():
     assert float(res.ot[0]) > 0.5
     # With a dummy the passed value is used; out of range names the dummy.
     with pytest.raises(ValueError, match="dummy baseline"):
-        optimal_transport.analyze(p, X, Y, n_partitions=10**9, dummy=True)
+        optimal_transport.analyze(p, X, Y, n_partitions=10**9, dummy=True, key=jax.random.key(0))
     # The dummy default adapts to small N instead of raising over a bare 25.
     p_small, X_small, Y_small = _all_categorical_data(n=40, seed=5)
-    res_small = optimal_transport.analyze(p_small, X_small, Y_small, dummy=True)
+    res_small = optimal_transport.analyze(
+        p_small, X_small, Y_small, dummy=True, key=jax.random.key(0)
+    )
     assert res_small.ot_dummy is not None
 
 
 def test_mixed_partition_bootstrap_cis_are_finite_and_ordered():
     problem, X, Y = _mixed_data(n=2000)
-    res = borgonovo.analyze(problem, X, Y, n_bootstrap=32, seed=0)
+    res = borgonovo.analyze(problem, X, Y, n_bootstrap=32, key=jax.random.key(0))
     assert res.delta_conf is not None
     lo, hi = np.asarray(res.delta_conf)
     assert np.all(lo <= hi)
     assert np.all(np.isfinite(lo)) and np.all(np.isfinite(hi))
-    res_o = optimal_transport.analyze(problem, X, Y, n_bootstrap=32, seed=0)
+    res_o = optimal_transport.analyze(problem, X, Y, n_bootstrap=32, key=jax.random.key(0))
     assert res_o.ot_conf is not None
     lo_o, hi_o = np.asarray(res_o.ot_conf)
     assert np.all(lo_o <= hi_o)
@@ -1029,7 +1044,9 @@ def test_combined_message_on_the_analysis_side(name, call):
 def test_combined_case_is_accepted_by_the_recommended_methods(name):
     """The advice must be true: every named method actually runs."""
     problem, X, Y = _categorical_and_correlated_data()
-    result = getattr(jaxgsa, name).analyze(problem, X, Y)
+    # Borgonovo bootstraps by default, and a bootstrap needs a key.
+    kwargs = {"key": jax.random.key(0)} if name == "borgonovo" else {}
+    result = getattr(jaxgsa, name).analyze(problem, X, Y, **kwargs)
     field = {"borgonovo": "delta", "optimal_transport": "ot", "pawn": "pawn"}[name]
     indices = getattr(result, field)
     assert np.asarray(indices).shape == (3,)

@@ -19,12 +19,15 @@ restriction applies to the output only.
 
 Example::
 
+    import jax
+
     from jaxgsa import borgonovo
     from jaxgsa.sampling import monte_carlo
 
     X = monte_carlo(problem, n=5000, seed=42)
     Y = model(X)
-    result = borgonovo.analyze(problem, X, Y)
+    # The bootstrap is on by default here, so a key is required.
+    result = borgonovo.analyze(problem, X, Y, key=jax.random.key(0))
 """
 
 from jaxgsa._core.invalid import InvalidUnit
