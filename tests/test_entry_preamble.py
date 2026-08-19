@@ -36,6 +36,8 @@ from jaxgsa._core.entry import (
     check_scalars,
     in_open_interval,
     one_of,
+    prepare,
+    prepare_scalars,
     require,
 )
 from jaxgsa._core.registry import methods
@@ -301,3 +303,75 @@ class TestACleanSampleStaysSilent:
             else:
                 getattr(jaxgsa, name).analyze(PROBLEM, X, Y)
         assert [w for w in caught if issubclass(w.category, JaxgsaWarning)] == []
+
+
+class TestTheTwoHalvesAreTheOnePreamble:
+    """``prepare`` is ``prepare_scalars`` plus ``with_data``, not a second copy.
+
+    ``dgsm`` cannot use the one-call form: on its autodiff path the model
+    output is what the preamble would validate, and it does not exist until
+    the model has been differentiated. It calls the halves instead, and these
+    pin that the halves do what the whole does.
+    """
+
+    def _spec(self):
+        return methods()["borgonovo"]
+
+    def test_the_halves_settle_what_the_one_call_form_settles(self):
+        X, Y = _xy()
+        spec = self._spec()
+        whole = prepare(spec, PROBLEM, Y, X=X)
+        halves = prepare_scalars(spec, PROBLEM).with_data(Y, X=X)
+        assert halves.method == whole.method
+        assert halves.policy == whole.policy
+        assert halves.Y3.shape == whole.Y3.shape
+        np.testing.assert_array_equal(np.asarray(halves.Y), np.asarray(whole.Y))
+        np.testing.assert_array_equal(halves.keep, whole.keep)
+
+    def test_the_scalar_half_settles_the_policy_before_any_data_exists(self):
+        with pytest.raises(ValueError, match="on_invalid must be one of"):
+            prepare_scalars(self._spec(), PROBLEM, on_invalid=cast(Any, "nope"))
+
+    def test_the_scalar_half_applies_the_gates(self):
+        correlated = jaxgsa.Problem(
+            ("x1", "x2", "x3"),
+            ((0.0, 1.0),) * D,
+            correlation=np.eye(D) + np.eye(D, k=1) * 0.4 + np.eye(D, k=-1) * 0.4,
+        )
+        with pytest.raises(ValueError, match="correlation"):
+            prepare_scalars(methods()["dgsm"], correlated)
+
+
+class TestExtraArraysRideWithY:
+    """A third sample-axis array is checked with ``Y`` and dropped with it.
+
+    ``dgsm`` passes its Jacobian this way. Keeping the drop in one place is
+    the point: a method that compacted its own third array could silently
+    disagree with the rows the report names.
+    """
+
+    def _preamble(self):
+        return prepare_scalars(methods()["borgonovo"], PROBLEM, on_invalid=cast(Any, "drop"))
+
+    def test_a_non_finite_extra_condemns_its_row(self):
+        X, Y = _xy()
+        jac = np.zeros((N, D))
+        jac[7, 1] = np.nan
+        with pytest.warns(JaxgsaWarning, match="dropped"):
+            ctx = self._preamble().with_data(Y, X=X, extra={"jac": jnp.asarray(jac)})
+        assert ctx.invalid.unit_indices == (7,)
+        assert ctx.Y.shape[0] == N - 1
+        assert ctx.extra["jac"].shape == (N - 1, D)
+
+    def test_the_extra_is_compacted_with_the_same_mask(self):
+        X, Y = _xy()
+        Y = np.asarray(Y).copy()
+        Y[3] = np.nan
+        jac = np.arange(N * D, dtype=float).reshape(N, D)
+        with pytest.warns(JaxgsaWarning, match="dropped"):
+            ctx = self._preamble().with_data(jnp.asarray(Y), X=X, extra={"jac": jnp.asarray(jac)})
+        np.testing.assert_allclose(np.asarray(ctx.extra["jac"]), np.delete(jac, 3, axis=0))
+
+    def test_a_context_with_no_extra_carries_an_empty_mapping(self):
+        X, Y = _xy()
+        assert prepare(methods()["borgonovo"], PROBLEM, Y, X=X).extra == {}

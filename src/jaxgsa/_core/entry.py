@@ -24,16 +24,30 @@ touched, and the capability gates come from the method's own
 :class:`~jaxgsa._core.registry.MethodSpec` rather than from a flag at the call
 site. What each ``analyze()`` keeps is its estimator.
 
-Four methods do not fit the common shape, and the module accommodates them
-rather than bending them:
+The preamble is available in two shapes, and they are the same code. Twelve
+methods know their model output by the time they call, and use the one-call
+form :func:`prepare`. A method that has to settle something before it can even
+name its output calls the two halves:
+
+.. code-block:: python
+
+    preamble = prepare_scalars(spec, problem, checks=..., on_invalid=...)
+    ctx = preamble.with_data(Y, X=X, extra={"dfdx": jac})
+
+``prepare`` is written as ``prepare_scalars(...).with_data(...)`` and nothing
+else, so the split is a seam in one implementation rather than a second one.
+``dgsm`` is the method the seam is cut for: it resolves two argument groups,
+and on its autodiff path it differentiates the model to obtain ``Y`` at all,
+so the scalar half has to run first and the data half afterwards. The
+gradient-based methods that will be written next have the same shape.
+
+Three methods still do not fit the common shape, and the module accommodates
+them rather than bending them:
 
 * The four design-based methods (sobol, morris, efast, kucherenko) have no
   ``X``, and their capability gates fire in ``sample()``. There is no design
   to analyze that the sampler did not already agree to build, so
   :func:`prepare` does not gate them a second time.
-* ``dgsm`` takes two different argument groups, and the array in its ``Y``
-  slot is not always the model output. It uses :func:`check_scalars` and
-  :func:`gates` directly and keeps its own data check.
 * ``shapley`` forwards ``on_invalid`` to a backend instead of applying it. It
   has no ``invalid_unit``, so it uses :func:`gates` only.
 * ``efast`` cannot drop anything. That is read off its unit — a search curve
@@ -43,8 +57,8 @@ rather than bending them:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import jax.numpy as jnp
@@ -75,6 +89,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "Context",
+    "Preamble",
     "ScalarCheck",
     "at_least",
     "check_scalars",
@@ -82,7 +97,9 @@ __all__ = [
     "in_open_interval",
     "one_of",
     "prepare",
+    "prepare_scalars",
     "require",
+    "validate_inputs",
 ]
 
 
@@ -207,6 +224,9 @@ class Context:
             because only the method knows how its groups are laid out.
         invalid: What the non-finite check found, and what it did.
         policy: The validated ``on_invalid`` policy.
+        extra: The further sample-axis arrays the caller handed to
+            :meth:`Preamble.with_data`, under the same names, checked with
+            ``Y`` and compacted with it.
     """
 
     method: str
@@ -218,6 +238,7 @@ class Context:
     keep: npt.NDArray[np.bool_]
     invalid: InvalidReport
     policy: OnInvalid
+    extra: Mapping[str, Array] = field(default_factory=dict)
 
     @property
     def inputs(self) -> Array:
@@ -265,6 +286,219 @@ class Context:
         return self.layout.squeeze(arr, n_trailing=n_trailing)
 
 
+@dataclass(frozen=True)
+class Preamble:
+    """The half of the preamble that touches no array, already run.
+
+    A method reaches this class only when it cannot name its model output yet.
+    ``dgsm`` is the case: on its autodiff path the output *is* the thing the
+    preamble's later half would validate, and it does not exist until the
+    model has been differentiated — which a misspelled ``on_invalid`` should
+    not have to pay for. Splitting the preamble here rather than letting the
+    method rebuild it keeps one copy of the ten steps and one order for them.
+
+    Attributes:
+        spec: The calling method's registry record.
+        problem: The problem, unchanged.
+        method: Fully qualified analyzer name, for every message from here on.
+        policy: The validated ``on_invalid`` policy.
+        unit: The block of data one non-finite value invalidates, from the
+            spec.
+    """
+
+    spec: MethodSpec
+    problem: Problem
+    method: str
+    policy: OnInvalid
+    unit: InvalidUnit
+
+    def with_data(
+        self,
+        Y: Any,
+        *,
+        X: Any = None,
+        extra: Mapping[str, Any] | None = None,
+        n_expected: int | None = None,
+        expand: Callable[[Array], Array] | None = None,
+        n_units: int | None = None,
+        unit_of_row: npt.NDArray[np.intp] | None = None,
+        row_labels: npt.NDArray[np.intp] | None = None,
+        min_kept: int = 1,
+        source_names: tuple[str, str] = ("X", "Y"),
+        warn_zero_variance: bool = True,
+        zero_variance_outcome: str = "nan",
+    ) -> Context:
+        """Run the half of the preamble that works on arrays.
+
+        Steps 3 to 6 of :func:`prepare`: the shape contracts, the non-finite
+        check and the removal it calls for, the promotion of ``Y``, and the
+        zero-variance warning.
+
+        Args:
+            Y: The caller's model output.
+            X: The input matrix, or ``None`` for a design-based method.
+            extra: Further arrays whose leading axis is the same sample axis
+                as ``Y``'s, by name. They are read as model-side evidence:
+                each is checked for non-finite values in the ``Y`` slot, and
+                each is compacted with the same mask, so a method with a third
+                array does not maintain its own copy of the drop. ``dgsm``
+                passes its Jacobian here.
+            n_expected: Rows ``Y`` must have. Defaults to ``X``'s row count.
+            expand: How to rebuild the full design layout from one output per
+                unique design row. See :func:`prepare`.
+            n_units: Units the non-finite check reports on.
+            unit_of_row: For each row, the unit it belongs to.
+            row_labels: For each row checked here, the row the caller holds.
+            min_kept: Fewest surviving units the estimator can work with.
+            source_names: What to call the two arrays in messages.
+            warn_zero_variance: Whether to check for a constant output slice.
+            zero_variance_outcome: Which consequence the warning reports.
+
+        Returns:
+            The :class:`Context` for the estimator to work from.
+
+        Raises:
+            ValueError: From any of the four steps. The first one to fail
+                wins.
+        """
+        method, unit = self.method, self.unit
+        problem = self.problem
+        extra_arrays = {name: jnp.asarray(a) for name, a in (extra or {}).items()}
+
+        if X is not None:
+            X = validate_inputs(problem, X)
+            if n_expected is None:
+                n_expected = int(X.shape[0])
+        Y = _validate_output(Y, n_expected, problem)
+        if expand is not None:
+            # The user evaluated the model once per unique row. The estimator,
+            # and the unit the check works in, both live in the expanded
+            # layout.
+            Y = expand(Y)
+
+        keep, invalid = check_invalid(
+            policy=self.policy,
+            method=method,
+            unit=unit,
+            n_units=int(Y.shape[0]) if n_units is None else n_units,
+            Y=_model_side(Y, extra_arrays.values()) if extra_arrays else Y,
+            X=X,
+            unit_of_row=unit_of_row,
+            row_labels=row_labels,
+            min_kept=min_kept,
+            source_names=source_names,
+        )
+        # One row is one unit only for InvalidUnit.ROW. For a grouped design
+        # the compaction has to respect the group layout, and only the method
+        # knows it, so the mask is handed back unapplied.
+        if unit is InvalidUnit.ROW and not keep.all():
+            mask = np.asarray(keep)
+            Y = Y[mask]
+            if X is not None:
+                X = X[mask]
+            extra_arrays = {name: a[mask] for name, a in extra_arrays.items()}
+
+        Y3, layout = _prepare_Y(Y)
+
+        if warn_zero_variance:
+            # The warning has to see what the estimator will see. For a
+            # grouped unit the caller has not compacted yet, so the surviving
+            # rows are selected here; leaving the dropped rows in would hide a
+            # constant slice behind the non-finite values that were removed.
+            Y_kept = Y
+            if unit_of_row is not None and not keep.all():
+                Y_kept = Y[np.asarray(keep)[unit_of_row]]
+            # Warned on the caller's own rank, not on Y3: a (N, K) output then
+            # gets "k=2" rather than the fabricated "(t=0, k=2)" that the
+            # inserted singleton time axis would produce.
+            _warn_zero_variance_slices(
+                Y_kept,
+                output_names=problem.output_names,
+                outcome=zero_variance_outcome,
+                stacklevel=3,
+            )
+
+        return Context(
+            method=method,
+            problem=problem,
+            X=X,
+            Y=Y,
+            Y3=Y3,
+            layout=layout,
+            keep=keep,
+            invalid=invalid,
+            policy=self.policy,
+            extra=extra_arrays,
+        )
+
+
+def prepare_scalars(
+    spec: MethodSpec,
+    problem: Problem,
+    *,
+    on_invalid: object = "raise",
+    checks: Sequence[ScalarCheck] = (),
+    method: str | None = None,
+) -> Preamble:
+    """Run the half of the preamble that touches no array.
+
+    Steps 1 and 2 of :func:`prepare`: the non-finite policy, the method's own
+    scalar arguments, and the capability gates. None of them reads a value out
+    of the sample, so a mistyped argument costs nothing — not even a model
+    evaluation, for a method that computes its own ``Y``.
+
+    Args:
+        spec: The calling method's registry record. Supplies the capability
+            gates, the unit the non-finite check works in, and the default
+            method name.
+        problem: The problem definition.
+        on_invalid: The caller's non-finite policy, unvalidated.
+        checks: Verdicts on the method's own scalar arguments, reported in
+            order before anything else runs.
+        method: Fully qualified analyzer name. Defaults to
+            ``f"jaxgsa.{spec.name}.analyze"``.
+
+    Returns:
+        The :class:`Preamble` to hand the data to.
+
+    Raises:
+        ValueError: On the first failing scalar argument, or on a problem the
+            method has declared it cannot handle.
+        TypeError: If the spec declares no ``invalid_unit``.
+    """
+    method = method or f"jaxgsa.{spec.name}.analyze"
+    unit = spec.invalid_unit
+    # Defensive: no registered method reaches this. Every spec that calls
+    # prepare declares an invalid_unit, and shapley, the one spec that does
+    # not, uses gates() instead. Nothing tests this branch; it is here so a
+    # new method that forgets the field fails with a sentence rather than an
+    # AttributeError deeper in the check.
+    if unit is None:  # pragma: no cover - defensive
+        raise TypeError(
+            f"{method}: {spec.name} declares no invalid_unit, so it cannot use prepare"
+        )
+
+    # A search curve is an ordered sweep read by a discrete Fourier transform.
+    # Removing one, or a point inside one, changes what the estimator computes
+    # rather than shrinking the sample. That is a property of the unit, so it
+    # is read off the unit instead of being passed in.
+    policy = resolve_policy(
+        on_invalid,
+        method=method,
+        unit=unit,
+        allow_drop=unit is not InvalidUnit.CURVE,
+    )
+    check_scalars(checks)
+
+    # The design-based methods gated in sample(). There is no design to
+    # analyze that the sampler did not already agree to build, so re-gating
+    # here would only add a second message for the same refusal.
+    if not spec.is_design_based:
+        gates(spec, problem, method=method)
+
+    return Preamble(spec=spec, problem=problem, method=method, policy=policy, unit=unit)
+
+
 def prepare(
     spec: MethodSpec,
     problem: Problem,
@@ -297,6 +531,11 @@ def prepare(
 
     Steps 1 and 2 touch no array, so a mistyped argument costs nothing. Step 4
     reads values on the host and is the first expensive thing that happens.
+
+    The function is :func:`prepare_scalars` followed by
+    :meth:`Preamble.with_data` and nothing else. A method that has to do work
+    between the two halves calls them itself and gets the same ten steps in
+    the same order.
 
     Args:
         spec: The calling method's registry record. Supplies the capability
@@ -340,102 +579,68 @@ def prepare(
     Raises:
         ValueError: From any of the six steps. The first one to fail wins.
     """
-    method = method or f"jaxgsa.{spec.name}.analyze"
-    unit = spec.invalid_unit
-    # Defensive: no registered method reaches this. Every spec that calls
-    # prepare declares an invalid_unit, and shapley, the one spec that does
-    # not, uses gates() instead. Nothing tests this branch; it is here so a
-    # new method that forgets the field fails with a sentence rather than an
-    # AttributeError deeper in the check.
-    if unit is None:  # pragma: no cover - defensive
-        raise TypeError(
-            f"{method}: {spec.name} declares no invalid_unit, so it cannot use prepare"
-        )
-
-    # A search curve is an ordered sweep read by a discrete Fourier transform.
-    # Removing one, or a point inside one, changes what the estimator computes
-    # rather than shrinking the sample. That is a property of the unit, so it
-    # is read off the unit instead of being passed in.
-    policy = resolve_policy(
-        on_invalid,
+    return prepare_scalars(
+        spec,
+        problem,
+        on_invalid=on_invalid,
+        checks=checks,
         method=method,
-        unit=unit,
-        allow_drop=unit is not InvalidUnit.CURVE,
-    )
-    check_scalars(checks)
-
-    # The design-based methods gated in sample(). There is no design to
-    # analyze that the sampler did not already agree to build, so re-gating
-    # here would only add a second message for the same refusal.
-    if not spec.is_design_based:
-        gates(spec, problem, method=method)
-
-    if X is not None:
-        X = _validate_x_array(problem, X)
-        if n_expected is None:
-            n_expected = int(X.shape[0])
-    Y = _validate_output(Y, n_expected, problem)
-    if expand is not None:
-        # The user evaluated the model once per unique row. The estimator, and
-        # the unit the check works in, both live in the expanded layout.
-        Y = expand(Y)
-
-    keep, invalid = check_invalid(
-        policy=policy,
-        method=method,
-        unit=unit,
-        n_units=int(Y.shape[0]) if n_units is None else n_units,
-        Y=Y,
+    ).with_data(
+        Y,
         X=X,
+        n_expected=n_expected,
+        expand=expand,
+        n_units=n_units,
         unit_of_row=unit_of_row,
         row_labels=row_labels,
         min_kept=min_kept,
         source_names=source_names,
-    )
-    # One row is one unit only for InvalidUnit.ROW. For a grouped design the
-    # compaction has to respect the group layout, and only the method knows
-    # it, so the mask is handed back unapplied.
-    if unit is InvalidUnit.ROW and not keep.all():
-        mask = np.asarray(keep)
-        Y = Y[mask]
-        if X is not None:
-            X = X[mask]
-
-    Y3, layout = _prepare_Y(Y)
-
-    if warn_zero_variance:
-        # The warning has to see what the estimator will see. For a grouped
-        # unit the caller has not compacted yet, so the surviving rows are
-        # selected here; leaving the dropped rows in would hide a constant
-        # slice behind the non-finite values that were removed.
-        Y_kept = Y
-        if unit_of_row is not None and not keep.all():
-            Y_kept = Y[np.asarray(keep)[unit_of_row]]
-        # Warned on the caller's own rank, not on Y3: a (N, K) output then
-        # gets "k=2" rather than the fabricated "(t=0, k=2)" that the
-        # inserted singleton time axis would produce.
-        _warn_zero_variance_slices(
-            Y_kept,
-            output_names=problem.output_names,
-            outcome=zero_variance_outcome,
-            stacklevel=3,
-        )
-
-    return Context(
-        method=method,
-        problem=problem,
-        X=X,
-        Y=Y,
-        Y3=Y3,
-        layout=layout,
-        keep=keep,
-        invalid=invalid,
-        policy=policy,
+        warn_zero_variance=warn_zero_variance,
+        zero_variance_outcome=zero_variance_outcome,
     )
 
 
-def _validate_x_array(problem: Problem, X: Any) -> Array:
-    """Bring ``X`` onto the device and check the ``(N, D)`` contract."""
+def validate_inputs(problem: Problem, X: Any) -> Array:
+    """Bring ``X`` onto the device and check the ``(N, D)`` contract.
+
+    :meth:`Preamble.with_data` calls this on the ``X`` it is given. It is
+    named rather than private because a method that *feeds* ``X`` to the model
+    has to check it before the data half runs: ``dgsm`` differentiates the
+    model on ``X``, and a mis-shaped sample should be reported before the
+    autodiff sweep rather than after it. Checking again inside ``with_data``
+    costs one shape comparison.
+
+    Args:
+        problem: The problem definition.
+        X: The caller's input matrix.
+
+    Returns:
+        The validated matrix, on the device.
+
+    Raises:
+        ValueError: If ``X`` is not ``(N, D)`` for the problem's ``D``.
+    """
     X = jnp.asarray(X)
     _validate_x(problem, X)
     return X
+
+
+def _model_side(Y: Array, extras: Iterable[Array]) -> npt.NDArray[np.floating]:
+    """Stack the output and its companion arrays into one block for the check.
+
+    :func:`jaxgsa._core.invalid.check_invalid` takes two arrays and labels them
+    ``"X"`` and ``"Y"``. A method with a third sample-axis array has to put it
+    somewhere, and everything the model produced belongs on the ``"Y"`` side:
+    a non-finite derivative is a non-finite model, whatever the output does.
+    Flattening each array past its leading axis is what lets arrays of
+    different rank sit side by side; only finiteness is read off the result.
+
+    Args:
+        Y: Model output, leading axis the sample axis.
+        extras: Further arrays with the same leading axis.
+
+    Returns:
+        A 2-D array of shape ``(N, ·)`` holding all of them.
+    """
+    blocks = [np.asarray(a, dtype=float).reshape(np.asarray(a).shape[0], -1) for a in (Y, *extras)]
+    return np.concatenate(blocks, axis=1)

@@ -22,19 +22,9 @@ import numpy as np
 import numpy.typing as npt
 from jax import Array
 
-from jaxgsa._core.entry import at_least, check_scalars, gates
-from jaxgsa._core.invalid import (
-    InvalidUnit,
-    OnInvalid,
-    check_invalid,
-    resolve_policy,
-)
-from jaxgsa._core.validation import (
-    _prepare_Y,
-    _validate_output,
-    _validate_x,
-    _warn_zero_variance_slices,
-)
+from jaxgsa._core.entry import at_least, prepare_scalars, validate_inputs
+from jaxgsa._core.invalid import OnInvalid
+from jaxgsa._core.validation import _warn_zero_variance_slices
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.dgsm._poincare import axis_constants
 from jaxgsa.dgsm._result import DGSMResult
@@ -321,30 +311,6 @@ def _mask_rows(array: Array, row_ok: Array) -> Array:
     return jnp.where(row_ok.reshape((-1,) + (1,) * (array.ndim - 1)), array, 0.0)
 
 
-def _model_side(Y: Array, jac_flag: npt.ArrayLike) -> npt.NDArray[np.floating]:
-    """Stack the output and its derivative into one block for the check.
-
-    :func:`jaxgsa._core.invalid.check_invalid` takes two arrays and labels
-    them ``"X"`` and ``"Y"``. DGSM has three things to check: the input
-    sample, the output, and the derivative. The output and the derivative are
-    both what the model produced, so they go into the ``"Y"`` slot together
-    and a non-finite derivative is reported as a non-finite ``"Y"``.
-
-    Args:
-        Y: Model output, leading axis the sample axis.
-        jac_flag: Derivative evidence, leading axis the sample axis. Either
-            the Jacobian itself, or a one-column stand-in that is ``NaN`` on
-            the rows whose Jacobian is not finite.
-
-    Returns:
-        A 2-D array of shape ``(N, ·)`` holding both.
-    """
-    blocks = [
-        np.asarray(a, dtype=float).reshape(np.asarray(a).shape[0], -1) for a in (Y, jac_flag)
-    ]
-    return np.concatenate(blocks, axis=1)
-
-
 def _finite_flag(row_finite: npt.NDArray[np.bool_]) -> npt.NDArray[np.floating]:
     """Turn a per-row verdict back into a one-column array the check reads.
 
@@ -566,17 +532,21 @@ def analyze(
     """
     from jaxgsa.dgsm import SPEC
 
-    # DGSM resolves two argument groups before it knows which array is even
-    # the model output, so it cannot hand its data to the shared prepare().
-    # It uses the two halves that do not need the data: the policy is settled
-    # before anything expensive runs, because the autodiff path evaluates the
-    # model and a misspelled on_invalid should not cost that; and the
-    # capability gates come from the registry record, as everywhere else. The
+    # DGSM cannot call the one-shot prepare(), because on the autodiff path
+    # the model output is what the preamble would validate and it does not
+    # exist yet. It runs the same preamble in its two halves instead. The
+    # scalar half settles the policy and batch_size before anything expensive
+    # runs — a misspelled on_invalid must not cost a differentiation sweep —
+    # and applies the capability gates from the registry record: the
     # Poincare-inequality bound on ST assumes independent inputs, so both
     # calling conventions are refused for a correlated problem.
-    policy = resolve_policy(on_invalid, method=_METHOD, unit=InvalidUnit.ROW)
-    check_scalars((at_least("batch_size", batch_size, 1),))
-    gates(SPEC, problem, method=_METHOD)
+    preamble = prepare_scalars(
+        SPEC,
+        problem,
+        on_invalid=on_invalid,
+        checks=(at_least("batch_size", batch_size, 1),),
+        method=_METHOD,
+    )
     D = problem.num_vars
 
     # Resolve the calling convention once, before any computation, so that an
@@ -586,27 +556,30 @@ def analyze(
 
     if use_autodiff:
         assert fn is not None and X is not None  # guaranteed by _resolve_call_style
-        X = jnp.asarray(X)
-        _validate_x(problem, X)
+        # X is checked here rather than in the data half, because the model is
+        # about to be differentiated on it.
+        X = validate_inputs(problem, X)
         # Free shape-only trace: catches a batch (N, D) callable here, instead
         # of as an IndexError from inside jax.jacrev.
         _check_point_callable(fn, X)
         moments = _compute_moments(fn, X, batch_size=batch_size)
         N = int(X.shape[0])
-        Y_valid = _validate_output(moments.Y, N, problem)
         # The Jacobian never leaves the device whole, so it reaches the check
         # as a per-row verdict rather than as its own array. The verdict is
-        # the same one the batch loop masked with.
-        keep, invalid = check_invalid(
-            policy=policy,
-            method=_METHOD,
-            unit=InvalidUnit.ROW,
-            n_units=N,
+        # the same one the batch loop masked with. It rides in as an extra
+        # array, which puts it on the model side of the check with Y.
+        ctx = preamble.with_data(
+            moments.Y,
             X=X,
-            Y=_model_side(Y_valid, _finite_flag(moments.jac_finite)),
+            extra={"derivative": _finite_flag(moments.jac_finite)},
             min_kept=_MIN_KEPT,
             source_names=_SOURCE_NAMES,
+            # The bounds need Var(Y) anyway, so DGSM warns with the variance
+            # it already has, further down.
+            warn_zero_variance=False,
         )
+        keep, invalid = ctx.keep, ctx.invalid
+        Y_valid = ctx.Y
         if keep.all():
             # No row was removed, so the totals over every row are the ones
             # to divide. Under "propagate" this is the branch that lets the
@@ -622,16 +595,30 @@ def analyze(
             n_kept = int(keep.sum())
             sigma = moments.sum_jac_kept / n_kept
             nu = moments.sum_jac2_kept / n_kept
-            Y_valid = Y_valid[keep]
         sigma = _promote_moments(sigma)
         nu = _promote_moments(nu)
     else:
         assert Y is not None and dfdx is not None  # guaranteed by _resolve_call_style
         # Pre-computed path: the caller supplies the Jacobian and the forward
         # outputs directly.
-        Y_out = jnp.asarray(Y)
         dfdx_arr = jnp.asarray(dfdx)
-        Y_valid = _validate_output(Y_out, int(dfdx_arr.shape[0]), problem)
+        # Both arrays are in hand here, so the derivative needs no stand-in:
+        # it goes into the check whole, on the model side with Y, and comes
+        # back compacted by the same mask.
+        ctx = preamble.with_data(
+            Y,
+            extra={"derivative": dfdx_arr},
+            n_expected=int(dfdx_arr.shape[0]),
+            min_kept=_MIN_KEPT,
+            source_names=_SOURCE_NAMES,
+            warn_zero_variance=False,
+        )
+        invalid = ctx.invalid
+        Y_valid = ctx.Y
+        dfdx_arr = ctx.extra["derivative"]
+        # The mirror rules on dfdx are read against the validated Y, so they
+        # come after the data half. Row counts are settled before this point:
+        # with_data was told to expect one Y row per Jacobian row.
         if dfdx_arr.ndim != Y_valid.ndim + 1:
             raise ValueError("dfdx ndim must equal Y.ndim + 1 and end with the derivative axis")
         if dfdx_arr.shape[-1] != D:
@@ -643,20 +630,6 @@ def analyze(
                 f"dfdx shape {dfdx_arr.shape} does not match Y shape {Y_valid.shape} "
                 f"with trailing D={D}"
             )
-        # Both arrays are in hand here, so the check needs no stand-in for
-        # the derivative: it goes into the "Y" slot whole, alongside Y.
-        keep, invalid = check_invalid(
-            policy=policy,
-            method=_METHOD,
-            unit=InvalidUnit.ROW,
-            n_units=int(dfdx_arr.shape[0]),
-            Y=_model_side(Y_valid, dfdx_arr),
-            min_kept=_MIN_KEPT,
-            source_names=_SOURCE_NAMES,
-        )
-        if not keep.all():
-            Y_valid = Y_valid[keep]
-            dfdx_arr = dfdx_arr[keep]
         dfdx_arr = _promote_jac(dfdx_arr)
         # One vectorized reduction over N covers every (t, k) slice at once.
         sigma = jnp.mean(dfdx_arr, axis=0)  # E[df/dx_i], (T, K, D)
@@ -666,7 +639,7 @@ def analyze(
     # Y's canonicalization above, so their slice axes must already match. A
     # mismatch means dfdx did not mirror Y's layout: wrong ndim, or a
     # transposed Jacobian that inference could not recover. Reject it.
-    Y_3d, layout = _prepare_Y(Y_valid)
+    Y_3d = ctx.Y3
     if sigma.shape[:2] != Y_3d.shape[1:3]:
         raise ValueError(
             f"dfdx ndim/shape is incompatible with Y: derivative slice dims "
@@ -704,13 +677,13 @@ def analyze(
             category=JaxgsaWarning,
         )
 
-    # Drop the singleton axes _prepare_Y inserted; var_y has no trailing param
-    # axis, so it passes n_trailing=0.
-    sigma = layout.squeeze(sigma)
-    nu = layout.squeeze(nu)
-    upper = layout.squeeze(upper)
-    lower = layout.squeeze(lower)
-    var_y = layout.squeeze(var_y, n_trailing=0)
+    # Drop the singleton axes the preamble inserted; var_y has no trailing
+    # param axis, so it passes n_trailing=0.
+    sigma = ctx.squeeze(sigma)
+    nu = ctx.squeeze(nu)
+    upper = ctx.squeeze(upper)
+    lower = ctx.squeeze(lower)
+    var_y = ctx.squeeze(var_y, n_trailing=0)
 
     return DGSMResult(
         nu=nu,
