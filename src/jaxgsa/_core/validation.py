@@ -514,6 +514,7 @@ def _warn_zero_variance_slices(
     *,
     outcome: str = "nan",
     stacklevel: int = 2,
+    method: str = "jaxgsa",
 ) -> None:
     """Check for zero-variance output slices before analysis and warn.
 
@@ -533,6 +534,7 @@ def _warn_zero_variance_slices(
             :data:`_ZERO_VARIANCE_OUTCOMES`.
         stacklevel: Frames to skip so the warning points at the user's
             ``analyze()`` call rather than at this helper.
+        method: Fully qualified analyzer name to prefix the warning with.
     """
     single_tail, plural_tail = _ZERO_VARIANCE_OUTCOMES[outcome]
     # Collapse trailing dims so variance is computed per (t, k) slice.
@@ -569,9 +571,9 @@ def _warn_zero_variance_slices(
 
     if n_outputs == 1:
         if output_names is not None and len(output_names) == 1:
-            msg = f"jaxgsa: output '{output_names[0]}' has zero variance — {single_tail}"
+            msg = f"{method}: output '{output_names[0]}' has zero variance — {single_tail}"
         else:
-            msg = f"jaxgsa: output has zero variance — {single_tail}"
+            msg = f"{method}: output has zero variance — {single_tail}"
         warnings.warn(msg, stacklevel=stacklevel, category=JaxgsaWarning)
         return
 
@@ -587,7 +589,7 @@ def _warn_zero_variance_slices(
         else:
             label_str = ", ".join(labels)
         warnings.warn(
-            f"jaxgsa: {n_zero}/{n_outputs} output(s) have zero variance "
+            f"{method}: {n_zero}/{n_outputs} output(s) have zero variance "
             f"({label_str}) — {plural_tail}",
             stacklevel=stacklevel,
             category=JaxgsaWarning,
@@ -604,7 +606,7 @@ def _warn_zero_variance_slices(
         else:
             label_str = ", ".join(affected)
         warnings.warn(
-            f"jaxgsa: {n_zero}/{n_outputs} output slice(s) have zero variance "
+            f"{method}: {n_zero}/{n_outputs} output slice(s) have zero variance "
             f"[{label_str}] — {plural_tail}",
             stacklevel=stacklevel,
             category=JaxgsaWarning,

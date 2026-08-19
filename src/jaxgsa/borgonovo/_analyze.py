@@ -532,6 +532,11 @@ def _run_delta_kernel(
             # jitted kernel compiles for one shape only. Output columns are
             # analysed independently, so a repeated column cannot change a
             # real column's answer, and the padding is sliced off at once.
+            # The chunk width does change how XLA tiles the in-column
+            # reductions, so a different slice_chunk_size can move a value
+            # by a couple of ulps in float32 — which is why
+            # test_slice_chunk_size_invariance compares at rtol=1e-6, not
+            # bitwise.
             pad = jnp.broadcast_to(chunk[:, :1], (chunk.shape[0], cs - n_real))
             chunk = jnp.concatenate([chunk, pad], axis=1)
         d, s1, degen, floored = kernel(chunk, all_idx, tuple(groups))
@@ -1028,7 +1033,7 @@ def analyze(
             raise ValueError(f"n_classes must be in [2, N={N}], got {n_classes}")
         if not cont_dims:
             warnings.warn(
-                "jaxgsa: n_classes is ignored because every parameter is "
+                "jaxgsa.borgonovo: n_classes is ignored because every parameter is "
                 "categorical (one conditioning class per level)",
                 stacklevel=2,
                 category=JaxgsaWarning,
@@ -1071,7 +1076,9 @@ def analyze(
     R = all_idx.shape[0]
 
     # Canonical partition-group layout, shared with optimal_transport.
-    groups, _, col_order = build_partition_groups(problem, X, all_idx, M, dims_levels)
+    groups, _, col_order = build_partition_groups(
+        problem, X, all_idx, M, dims_levels, method="jaxgsa.borgonovo.analyze"
+    )
 
     d_all, s1_all, degen_all, floored_cols = _run_delta_kernel(
         Y_cols,
@@ -1086,7 +1093,7 @@ def analyze(
     )
     if bool(floored_cols.any()):
         warnings.warn(
-            "jaxgsa: at least one conditioning class is too narrow for the "
+            "jaxgsa.borgonovo: at least one conditioning class is too narrow for the "
             "output grid to resolve (often a point mass, e.g. a categorical "
             "level that maps to one output value). Its KDE bandwidth was "
             "floored to a kernel the grid can integrate. Delta for such an "
@@ -1317,7 +1324,9 @@ def indices(
     # bootstrap axis exists only for the interval and the bias correction,
     # and both are policy.
     all_idx = jnp.arange(N, dtype=jnp.int32)[None, :]
-    groups, _, col_order = build_partition_groups(problem, X, all_idx, M, dims_levels)
+    groups, _, col_order = build_partition_groups(
+        problem, X, all_idx, M, dims_levels, method="jaxgsa.borgonovo.indices"
+    )
     d_all, s1_all, _, _ = _run_delta_kernel(
         Y_cols,
         all_idx,
@@ -1452,7 +1461,7 @@ def _warn_conf_out_of_range(
     if not parts:
         return
     warnings.warn(
-        "jaxgsa: delta is defined on [0, 1] but a bootstrap confidence "
+        "jaxgsa.borgonovo: delta is defined on [0, 1] but a bootstrap confidence "
         f"bound left that range — {'; '.join(parts)}. The point estimate is "
         "in range, so the index itself stands; the interval is the part to "
         "distrust. Raise n_bootstrap, or raise grid_size if a conditioning "

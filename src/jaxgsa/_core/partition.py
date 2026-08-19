@@ -116,6 +116,7 @@ def _warn_empty_levels(
     problem: "Problem",
     dims_levels: tuple[tuple[int, int], ...],
     counts0: np.ndarray,
+    method: str,
 ) -> None:
     """Warn about declared levels with no observed samples.
 
@@ -128,12 +129,13 @@ def _warn_empty_levels(
             ``counts0`` rows.
         counts0: Observed level counts of the original sample ``(Dc, M)``
             (padded level slots beyond a column's own count are ignored).
+        method: Fully qualified analyzer name to prefix the warning with.
     """
     for j, (d, n_levels) in enumerate(dims_levels):
         empty = [int(level) for level in range(n_levels) if counts0[j, level] == 0]
         if empty:
             warnings.warn(
-                f"jaxgsa: categorical parameter {problem.names[d]!r} has no "
+                f"{method}: categorical parameter {problem.names[d]!r} has no "
                 f"samples at level(s) {empty}; the empty conditioning "
                 "class(es) are dropped (zero weight) for this analysis",
                 # analyze() -> build_partition_groups() -> here; point at
@@ -265,6 +267,7 @@ def build_partition_groups(
     all_idx: Array,
     M: int,
     dims_levels: tuple[tuple[int, int], ...],
+    method: str = "jaxgsa",
 ) -> tuple[list[PartitionGroup], list[int], Array | None]:
     """Build the canonical partition-group layout for a given-data analysis.
 
@@ -283,6 +286,7 @@ def build_partition_groups(
         M: Number of equal-frequency classes for the continuous columns.
         dims_levels: ``(dimension index, level count)`` pairs from
             :func:`jaxgsa.problem._categorical_dims`.
+        method: Fully qualified analyzer name for the empty-level warning.
 
     Returns:
         ``(groups, group_dims, col_order)``. ``groups`` lists the
@@ -319,7 +323,7 @@ def build_partition_groups(
         codes = _extract_categorical_codes(problem, np.asarray(X), dims_levels)
         levels = [n_levels for _, n_levels in dims_levels]
         cat_cls_np, cat_counts_np = _categorical_class_layout(codes, np.asarray(all_idx), levels)
-        _warn_empty_levels(problem, dims_levels, cat_counts_np[0])
+        _warn_empty_levels(problem, dims_levels, cat_counts_np[0], method)
         groups.append((jnp.asarray(cat_cls_np), jnp.asarray(cat_counts_np)))
         group_dims.extend(cat_dims)
     # Kernel outputs concatenate the groups on the input axis; this gather

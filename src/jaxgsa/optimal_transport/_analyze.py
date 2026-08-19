@@ -157,9 +157,12 @@ def _quantile_rank_indices(counts: Array, N: int) -> Array:
     The quotient is therefore formed exactly by schoolbook long division
     over the base-``S`` digits of ``c``. ``S`` is a static power of two
     chosen so every intermediate stays below ``2**31``. The digit count is
-    static, so the Python loop unrolls at trace time. The result is exact
-    for any ``N < 2**29`` and bit-identical to a float64 host evaluation
-    (tested).
+    static, so the Python loop unrolls at trace time. The largest
+    intermediate is ``t <= 6N - 3`` (at ``S = 2``, the floor the shift
+    formula reaches once ``N`` has 29 bits), so the result is exact — and
+    bit-identical to a float64 host evaluation (tested) — for any
+    ``N <= (2**31 + 2) // 6``, about ``2**28``. The assert below guards
+    that bound; ``N`` is a static Python int, so it costs nothing traced.
 
     Args:
         counts: Integer class sizes, shape ``(..., M)``.
@@ -169,6 +172,8 @@ def _quantile_rank_indices(counts: Array, N: int) -> Array:
         An int32 lookup index into each class's sorted members, shape
         ``(..., M, N)``.
     """
+    # int32-exactness bound: t = r*S + a*digit <= 6N - 3 at S = 2.
+    assert N <= (2**31 + 2) // 6, f"long division is int32-exact only up to N={(2**31 + 2) // 6}"
     # q = floor(a * c / m) with a = 2i + 1 (odd, < 2N) and m = 2N.
     a = 2 * jnp.arange(N, dtype=jnp.int32) + 1  # (N,)
     m = 2 * N
@@ -333,7 +338,9 @@ def _joint_kernel(
     For every parameter and class, transports the unconditional output
     cloud onto the class's conditional cloud with entropic
     regularization. It then aggregates the per-class costs into one index
-    per parameter.
+    per parameter. The entropic bias of the regularized cost lands
+    entirely in ``diffusive``: ``advective`` comes from exact class means,
+    and ``diffusive`` is the remainder ``ot - advective``.
 
     ``groups`` is a tuple of canonical ``(cls_idx, counts)``
     partition-group layouts from
@@ -926,7 +933,7 @@ def analyze(
             )
         if not cont_dims and not dummy:
             warnings.warn(
-                "jaxgsa: n_partitions is ignored because every parameter is "
+                "jaxgsa.optimal_transport: n_partitions is ignored because every parameter is "
                 "categorical (one conditioning class per level) and no dummy "
                 "baseline was requested",
                 stacklevel=2,
@@ -971,7 +978,9 @@ def analyze(
     # Canonical partition-group layout, shared with borgonovo. Each group
     # is (cls_idx, counts); masks and quantile lookups are derived
     # in-kernel from the counts.
-    groups, _, col_order = build_partition_groups(problem, X, all_idx, M, dims_levels)
+    groups, _, col_order = build_partition_groups(
+        problem, X, all_idx, M, dims_levels, method="jaxgsa.optimal_transport.analyze"
+    )
     group_levels = _group_levels(cont_dims, cat_dims, dims_levels)
 
     # `_run` maps replicate indices and partition-layout groups to
@@ -1038,7 +1047,7 @@ def analyze(
         n_bad = int(sum(n_bad_parts))
         if n_bad:
             warnings.warn(
-                f"jaxgsa: {n_bad} of {n_solves} Sinkhorn solves did not reach "
+                f"jaxgsa.optimal_transport: {n_bad} of {n_solves} Sinkhorn solves did not reach "
                 f"tol={tol:g} within max_iter={max_iter}; results use the last "
                 "iterate (consider raising max_iter or epsilon)",
                 stacklevel=2,
@@ -1250,7 +1259,9 @@ def indices(
     # One replicate, the identity permutation: the original sample. The
     # bootstrap axis exists only for the interval, which is policy.
     all_idx = jnp.arange(N, dtype=jnp.int32)[None, :]
-    groups, _, col_order = build_partition_groups(problem, X, all_idx, M, dims_levels)
+    groups, _, col_order = build_partition_groups(
+        problem, X, all_idx, M, dims_levels, method="jaxgsa.optimal_transport.indices"
+    )
 
     if mode == "univariate":
         ot, adv, diff, _ = _run_univariate(

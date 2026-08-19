@@ -405,14 +405,15 @@ def analyze(
     _, T, K = Y.shape
     Y_reshaped = Y.reshape(D, N, T, K)
 
-    # Per-curve zero-variance check. The global _warn_zero_variance_slices
-    # above can miss a curve where a single parameter has no effect, giving
-    # V=0 on that curve alone and a silent NaN index.
+    # Per-curve zero-variance check. The global zero-variance warning that
+    # prepare() ran (see _core/entry.py) can miss a curve where a single
+    # parameter has no effect, giving V=0 on that curve alone and a silent
+    # NaN index.
     per_curve_var = jnp.var(Y_reshaped, axis=1)  # (D, T, K)
     n_zero_curves = int(jnp.sum(per_curve_var == 0))
     if n_zero_curves > 0:
         warnings.warn(
-            f"eFAST: {n_zero_curves} search-curve/output slice(s) have zero "
+            f"jaxgsa.efast: {n_zero_curves} search-curve/output slice(s) have zero "
             "variance — corresponding indices will be NaN",
             stacklevel=2,
             category=JaxgsaWarning,
@@ -424,7 +425,7 @@ def analyze(
     # converge.
     if jnp.any((S1 > 1.0) | (S1 < 0.0)) or jnp.any((ST > 1.0) | (ST < 0.0)):
         warnings.warn(
-            "eFAST: some indices are outside [0, 1], suggesting "
+            "jaxgsa.efast: some indices are outside [0, 1], suggesting "
             "insufficient samples or near-zero output variance",
             stacklevel=2,
             category=JaxgsaWarning,

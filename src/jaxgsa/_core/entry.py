@@ -2,25 +2,15 @@
 
 Nothing in this module is public API. See :mod:`jaxgsa._core`.
 
-Before this module, every entry point hand-wrote the same ten steps: validate
-the scalar arguments, refuse a problem the method cannot handle, resolve the
-non-finite policy, check the sample, drop what the policy says to drop,
-promote ``Y`` to ``(N, T, K)``, and warn about a constant output slice. Forty
-to sixty of the eighty to a hundred and sixty lines in a typical
-``_analyze.py`` were that skeleton, written thirteen times.
+Every ``analyze()`` shares the same ten preamble steps: validate the scalar
+arguments, refuse a problem the method cannot handle, resolve the non-finite
+policy, check the sample, drop what the policy says to drop, promote ``Y`` to
+``(N, T, K)``, and warn about a constant output slice.
 
-Thirteen copies drifted, and the drift is where the bugs were. Two methods
-never validated ``conf_level``, so a level of ``-0.2`` came back as an
-inverted interval. One validated ``slice_chunk_size`` on one of its three
-paths. Three accepted a negative resample count and silently returned no
-interval at all. Six never warned about a constant output slice, and returned
-NaN without a word. Three validated their scalar arguments *after* the
-host-side data check, so a typo cost a full pass over the sample before it was
-reported.
-
-:func:`prepare` is the one copy. It runs the steps in the order that makes
-those bugs impossible: every scalar argument is settled before any array is
-touched, and the capability gates come from the method's own
+:func:`prepare` is the one copy of that skeleton, so the steps cannot drift
+between methods. It runs them in the order that keeps mistakes cheap: every
+scalar argument is settled before any array is touched, and the capability
+gates come from the method's own
 :class:`~jaxgsa._core.registry.MethodSpec` rather than from a flag at the call
 site. What each ``analyze()`` keeps is its estimator.
 
@@ -419,6 +409,7 @@ class Preamble:
                 output_names=problem.output_names,
                 outcome=zero_variance_outcome,
                 stacklevel=3,
+                method=method,
             )
 
         return Context(

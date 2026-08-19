@@ -305,6 +305,26 @@ Version 0.10 adds capability.
 
 ### Changed
 
+- **Hygiene sweep for 1.0.** No number moves and no schema changes. In short:
+
+  - Every warning now starts with `jaxgsa.<method>:`, so you can see which
+    method spoke. Before, five prefix styles were in use, including bare
+    `PAWN:` and `eFAST:` and no prefix at all.
+  - The vkoga `S_U` clip warning now names the parameters. It used to give
+    integer positions.
+  - `benchmarks` is importable as `jaxgsa.benchmarks`, like every other
+    subpackage. The broken examples in the `benchmarks`, `hsic` and `dgsm`
+    package docstrings now run as written.
+  - `morris.analyze` refuses a missing bootstrap `key` right after the input
+    checks. It used to compute the full point estimate first.
+  - An internal dgsm consistency check is now a real error instead of an
+    `assert`, so it still fires under `python -O`.
+  - Dead code is gone: an unused validator, the unused per-parameter Sobol
+    estimator trio and its legacy test module, an unused result-axes
+    variant, and two never-used parameters.
+  - Stale docstrings and comments now describe the current code, and the
+    eight remaining test modules carry oracle-tier lines (ADR 0001).
+
 - **eFAST and HSIC report no bootstrap interval, and the docs now say why.**
   eFAST has one search curve per parameter, so there is nothing to resample —
   removing a point does not shrink the sample, it changes what the estimator

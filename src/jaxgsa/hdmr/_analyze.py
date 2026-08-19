@@ -240,7 +240,7 @@ def _warn_correlated_index_reading(problem: Problem) -> None:
     import warnings
 
     warnings.warn(
-        "jaxgsa: problem.correlation declares dependent inputs. HDMRResult.ST "
+        "jaxgsa.hdmr: problem.correlation declares dependent inputs. HDMRResult.ST "
         "is then the SCSA total, sum over every term u containing i of "
         "(Sa_u + Sb_u) (Li et al. 2010, Section 2.2.3; the SALib HDMR "
         "convention). It is not a Sobol total-order index: it can be "
@@ -868,7 +868,7 @@ def _analyze_hdmr_core(
         import warnings
 
         warnings.warn(
-            f"jaxgsa: maxorder clamped to {core.maxorder} "
+            f"jaxgsa.hdmr: maxorder clamped to {core.maxorder} "
             f"(need D >= maxorder, got D={X.shape[1]})",
             stacklevel=2,
             category=JaxgsaWarning,

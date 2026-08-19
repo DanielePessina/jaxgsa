@@ -22,6 +22,7 @@ References:
 from __future__ import annotations
 
 import warnings
+from collections.abc import Sequence
 from typing import Literal
 
 import jax
@@ -339,6 +340,7 @@ def analyze(
         n_variance=n_variance,
         entropy=seed,
         batch_size=batch_size,
+        param_names=problem.names,
     )
 
     def _shape_index(flat: np.ndarray) -> Array:
@@ -374,8 +376,9 @@ def analyze(
             lo, hi = _bootstrap_ci_endpoints(
                 point, draws, conf_level=conf_level, ci_method=ci_method
             )
-            # Stack [lower, upper] into a leading axis of size 2. The squeeze
-            # addresses the (T, K) axes from the end, so that axis survives.
+            # Stack [lower, upper] into a leading axis of size 2. n_trailing=1
+            # says one axis (D) follows the promoted (T, K) pair; the squeeze
+            # addresses those axes from the end, so the leading 2 survives.
             confs[name] = ctx.squeeze(jnp.stack((lo, hi)), n_trailing=1)
         ci = CIInfo(
             level=conf_level,
@@ -429,6 +432,7 @@ def _fit_and_estimate(
     n_variance: int,
     entropy: int,
     batch_size: int | None,
+    param_names: Sequence[str] | None = None,
 ):
     """Fit one surrogate to one training set and read the indices off it.
 
@@ -447,6 +451,8 @@ def _fit_and_estimate(
         n_variance: Sample size for the variance and the component fit.
         entropy: Root entropy for the host-side quasi-random draws.
         batch_size: Sample rows per device call, or ``None`` for the budget.
+        param_names: Parameter names for the clip warning, or ``None`` on a
+            bootstrap replicate, where the warning is suppressed anyway.
 
     Returns:
         ``(state, indices)``: the fitted surrogate, sliced down to the centres
@@ -480,6 +486,7 @@ def _fit_and_estimate(
         n_variance=n_variance,
         entropy=entropy,
         batch_size=batch_size,
+        param_names=param_names,
     )
     return state, indices
 
@@ -703,7 +710,9 @@ def _resolve_correlation(
         )
     # A per-call override is user-declared, so it takes the strict repair
     # policy: a matrix that has to move materially is rejected, not repaired.
-    return canonicalize_correlation(correlation, problem.num_vars, policy="declared")
+    return canonicalize_correlation(
+        correlation, problem.num_vars, policy="declared", method="jaxgsa.vkoga.analyze"
+    )
 
 
 def _resolve_hyperparameters(

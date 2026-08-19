@@ -840,7 +840,7 @@ def analyze(
         # free of host-side side effects. `effective_order` answers the same
         # question without a fit.
         warnings.warn(
-            f"jaxgsa: PCE order reduced from {order} to {fit.order} to keep the "
+            f"jaxgsa.pce: PCE order reduced from {order} to {fit.order} to keep the "
             f"term count within the sample budget (fit_ratio={fit_ratio}, N={X.shape[0]})",
             stacklevel=2,
             category=JaxgsaWarning,

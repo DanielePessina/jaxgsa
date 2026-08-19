@@ -183,6 +183,7 @@ def canonicalize_correlation(
     *,
     kind: Literal["latent", "spearman"] = "latent",
     policy: RepairPolicy = "fitted",
+    method: str = "jaxgsa",
 ) -> np.ndarray:
     """Normalize a user-supplied correlation matrix to the latent scale.
 
@@ -206,6 +207,7 @@ def canonicalize_correlation(
             rank correlation, converted via ``2 sin(pi rho_s / 6)``. The
             repair also reports its severity on this scale.
         policy: Repair policy, see :data:`RepairPolicy`.
+        method: Fully qualified caller name to prefix the repair report with.
 
     Returns:
         ``(D, D)`` validated latent correlation matrix.
@@ -222,7 +224,7 @@ def canonicalize_correlation(
         # The conversion is not guaranteed to preserve positive definiteness,
         # so the repair still runs on the result.
         R = _spearman_to_latent(R)
-    return _project_to_correlation(R, policy=policy, report_kind=kind)
+    return _project_to_correlation(R, policy=policy, report_kind=kind, method=method)
 
 
 def correlation_from_covariance(cov: npt.ArrayLike) -> np.ndarray:
@@ -370,7 +372,8 @@ def fit_gaussian_copula(problem: Problem, X: np.ndarray) -> np.ndarray:
     ]
     if degenerate:
         warnings.warn(
-            f"jaxgsa: parameters {[problem.names[d] for d in degenerate]} are "
+            f"jaxgsa.sampling.fit_correlation: parameters "
+            f"{[problem.names[d] for d in degenerate]} are "
             "constant or non-finite in X; a constant column carries no rank "
             "information and a non-finite one has no meaningful ranks, so "
             "their rows and columns are kept at identity (independent). Vary "
@@ -394,7 +397,8 @@ def fit_gaussian_copula(problem: Problem, X: np.ndarray) -> np.ndarray:
         # Level codes carry no order, so their Spearman numbers are
         # artifacts of the code assignment (relabeling flips them).
         warnings.warn(
-            f"jaxgsa: parameters {[problem.names[d] for d in cat_dims]} are "
+            f"jaxgsa.sampling.fit_correlation: parameters "
+            f"{[problem.names[d] for d in cat_dims]} are "
             "categorical; a rank correlation over unordered level codes "
             "depends on the arbitrary code order, so their rows and columns "
             "are kept at identity (independent). Polychoric estimation is "
@@ -409,7 +413,9 @@ def fit_gaussian_copula(problem: Problem, X: np.ndarray) -> np.ndarray:
     # rank correlation under a Gaussian copula. Zeroing before the repair
     # keeps the matrix block-diagonal (the repair preserves the blocks up to
     # float noise); zeroing again after it makes the zeros exact.
-    return _force_categorical_identity(_project_to_correlation(latent), cat_dims)
+    return _force_categorical_identity(
+        _project_to_correlation(latent, method="jaxgsa.sampling.fit_correlation"), cat_dims
+    )
 
 
 def _validate_structure(R: np.ndarray, n_params: int) -> None:
@@ -450,6 +456,7 @@ def _project_to_correlation(
     *,
     policy: RepairPolicy = "fitted",
     report_kind: Literal["latent", "spearman"] = "latent",
+    method: str = "jaxgsa",
 ) -> np.ndarray:
     """Return the nearest positive-definite matrix with a unit diagonal.
 
@@ -538,7 +545,7 @@ def _project_to_correlation(
     if policy == "declared":
         if change >= _REPAIR_MATERIAL:
             raise ValueError(
-                f"jaxgsa: the declared correlation matrix {detail}, which is too far "
+                f"{method}: the declared correlation matrix {detail}, which is too far "
                 "to accept. A matrix that has "
                 "to move this much is structurally inconsistent — the pairwise "
                 "correlations cannot hold at the same time, or two parameters are "
@@ -549,7 +556,7 @@ def _project_to_correlation(
             )
         if change >= _REPAIR_NOISE:
             warnings.warn(
-                f"jaxgsa: the declared correlation matrix {detail}. Samples will "
+                f"{method}: the declared correlation matrix {detail}. Samples will "
                 "follow the repaired dependence structure, not the declared one — "
                 "check the matrix for inconsistent pairwise correlations or redundant "
                 "parameters.",
@@ -560,7 +567,7 @@ def _project_to_correlation(
         # A fit is never refused: it is the data that is inconsistent, not the
         # user. A fit that moved this far is still worth reporting.
         warnings.warn(
-            f"jaxgsa: the fitted correlation matrix {detail}. The fit is usable but "
+            f"{method}: the fitted correlation matrix {detail}. The fit is usable but "
             "the data it came from is close to rank deficient — check for duplicated "
             "or collinear columns.",
             stacklevel=2,

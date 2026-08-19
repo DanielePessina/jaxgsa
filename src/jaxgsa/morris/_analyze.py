@@ -423,6 +423,11 @@ def analyze(
     Y = ctx.Y3
     keep, invalid = ctx.keep, ctx.invalid
 
+    # Checked here, with the other cheap argument checks, so a missing key is
+    # reported before the point estimate is paid for.
+    if n_bootstrap > 0 and key is None:
+        raise ValueError("key is required when n_bootstrap > 0")
+
     idx_after, idx_before, delta = _reindex_after_drop(sampling_result, keep)
     if not keep.all():
         trailing = Y.shape[1:]
@@ -441,7 +446,7 @@ def analyze(
     if n_lost_upstream > 0:
         requested = r + n_lost_upstream
         message = (
-            f"jaxgsa: {r} of the {requested} requested trajectories remain: "
+            f"jaxgsa.morris: {r} of the {requested} requested trajectories remain: "
             f"the source design dropped {n_lost_upstream} for having no measurable step"
         )
         if remaining < _MIN_TRAJECTORIES:
@@ -464,11 +469,12 @@ def analyze(
     conf_triple: tuple[Array, Array, Array] | None = None
     replicates: dict[str, Array] | None = {} if keep_replicates else None
     if n_bootstrap > 0:
-        if key is None:
-            raise ValueError("key is required when n_bootstrap > 0")
+        assert key is not None  # a missing key was refused right after prepare
         r = ee.shape[0]
         # Pre-generate all R bootstrap index sets, sampling with replacement.
-        indices = jax.random.randint(key, shape=(n_bootstrap, r), minval=0, maxval=r)
+        # Named resample_idx, not indices: `indices` is this module's public
+        # transformable entry point.
+        resample_idx = jax.random.randint(key, shape=(n_bootstrap, r), minval=0, maxval=r)
 
         # One chunk materialises cs copies of the (r, D, T, K) effects tensor,
         # so a large T*K would otherwise exhaust device memory at the caller's
@@ -481,7 +487,7 @@ def analyze(
         for start in range(0, n_bootstrap, cs):
             end = min(start + cs, n_bootstrap)
             n_real = end - start
-            idx_chunk = indices[start:end]
+            idx_chunk = resample_idx[start:end]
             if n_real < cs:
                 # Pad the final ragged chunk back up to cs so _resample_stats
                 # compiles one shape only. The padding rows are sliced off.

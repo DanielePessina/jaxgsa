@@ -310,7 +310,7 @@ def _radial_samples_from_blocks(
         block_rows = block_rows[keep]
         ee_delta = ee_delta[keep]
         warnings.warn(
-            f"jaxgsa: dropped {n_dropped} of {n_total} radial blocks whose step is below "
+            f"jaxgsa.morris: dropped {n_dropped} of {n_total} radial blocks whose step is below "
             f"{tol:.1e} in at least one parameter (base and perturbed points coincide at "
             f"the model's floating-point resolution); {block_rows.shape[0]} blocks remain",
             # Reached through a caller's conversion method, so the user's frame
@@ -634,7 +634,7 @@ def sample(
         raise ValueError(f"method must be 'trajectory' or 'radial', got {method!r}")
     if method == "trajectory" and num_levels % 2 != 0:
         warnings.warn(
-            f"jaxgsa: num_levels={num_levels} is odd — grid levels are not equally "
+            f"jaxgsa.morris: num_levels={num_levels} is odd — grid levels are not equally "
             "probable and steps land off-grid; an even value is recommended",
             stacklevel=2,
             category=JaxgsaWarning,

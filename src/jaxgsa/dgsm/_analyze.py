@@ -667,8 +667,8 @@ def analyze(
             warns and computes anyway. The check covers the **derivative** as
             well as the output, on both calling conventions: a derivative that
             blows up poisons ``nu`` even where the output itself is finite.
-            The derivative is checked in the ``"Y"`` slot, so the report names
-            ``"Y"`` for a bad derivative. On the autodiff path ``X`` is
+            The derivative is checked in the output slot, so the report names
+            ``"Y or its derivative"`` for a bad derivative. On the autodiff path ``X`` is
             checked too, and the rows are masked before the batch reduction,
             so ``"drop"`` gives the same moments as re-running on the smaller
             sample. See :mod:`jaxgsa._core.invalid`.
@@ -769,8 +769,15 @@ def analyze(
             # The batch loop masked with its own copy of this verdict, built
             # from the same three arrays. If the two ever disagreed, the
             # moments below would come from a different set of rows than the
-            # ones the report names.
-            assert np.array_equal(keep, moments.row_ok)
+            # ones the report names. Raised, not asserted: the check is
+            # load-bearing and must survive python -O.
+            if not np.array_equal(keep, moments.row_ok):
+                raise ValueError(
+                    "jaxgsa.dgsm.analyze: internal error: the non-finite check kept "
+                    f"{int(keep.sum())} rows but the batched moments kept "
+                    f"{int(moments.row_ok.sum())}; the reported rows would not be the "
+                    "rows the moments were computed from. Please report this bug."
+                )
             n_kept = int(keep.sum())
             sigma = moments.sum_jac_kept / n_kept
             nu = moments.sum_jac2_kept / n_kept
@@ -809,7 +816,9 @@ def analyze(
     # Var(Y) per (t, k) output slice, denominator of both bounds. A constant
     # slice makes both bounds NaN, so say so rather than returning it silently.
     var_y = jnp.var(Y_3d, axis=0)  # (T, K)
-    _warn_zero_variance_slices(Y_valid, output_names=problem.output_names, var_per_slice=var_y)
+    _warn_zero_variance_slices(
+        Y_valid, output_names=problem.output_names, var_per_slice=var_y, method=_METHOD
+    )
 
     nu, sigma, upper, lower, var_y = bounds_from_moments(
         problem,
@@ -823,7 +832,7 @@ def analyze(
     # numerical tolerance and warn if it does not hold.
     if jnp.any(jnp.isfinite(upper) & jnp.isfinite(lower) & (upper < lower * 0.9)):
         warnings.warn(
-            "DGSM: some upper bounds are below lower bounds, suggesting "
+            "jaxgsa.dgsm: some upper bounds are below lower bounds, suggesting "
             "insufficient samples or numerical issues",
             stacklevel=2,
             category=JaxgsaWarning,

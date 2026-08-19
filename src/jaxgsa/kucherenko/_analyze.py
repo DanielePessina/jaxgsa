@@ -229,7 +229,9 @@ def analyze(
     f_total = F[D + 1 :]  # (D, N, S) — x_i redrawn given z
 
     _warn_zero_variance_slices(
-        f_joint.reshape(-1, n_time, n_out), output_names=problem.output_names
+        f_joint.reshape(-1, n_time, n_out),
+        output_names=problem.output_names,
+        method="jaxgsa.kucherenko.analyze",
     )
     S1, ST, variance = _estimate(f_joint, f_first, f_total)
 
@@ -243,7 +245,7 @@ def analyze(
     ST_conf: Array | None = None
     ci: CIInfo | None = None
     if n_bootstrap > 0:
-        assert key is not None  # checked in the preamble, before any estimate
+        assert key is not None  # refused by the missing-key check above
         n_kept = f_joint.shape[0]
         idx = np.asarray(
             jax.random.randint(key, shape=(n_bootstrap, n_kept), minval=0, maxval=n_kept)

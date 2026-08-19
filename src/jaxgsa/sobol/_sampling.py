@@ -610,8 +610,9 @@ def _warn_unbounded_gaussian(problem: Problem) -> None:
     if not unbounded:
         return
     warnings.warn(
-        f"jaxgsa: parameters {unbounded} have unbounded gaussian marginals. An elementary "
-        "effect on an unbounded marginal has no fixed scale: how far the design reaches "
+        f"jaxgsa.sobol.to_morris: parameters {unbounded} have unbounded gaussian "
+        "marginals. An elementary effect on an unbounded marginal has no fixed "
+        "scale: how far the design reaches "
         "into the tail sets the magnitude of mu_star, and the Saltelli design and "
         "morris.sample reach different distances. Rankings are unaffected. Use "
         "Problem.from_dict(..., truncate_gaussians=q) if magnitudes must be comparable "

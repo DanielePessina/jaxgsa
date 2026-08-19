@@ -159,14 +159,14 @@ def _warn_pathological_fit(explained_variance: Array) -> None:
     ev = jnp.asarray(explained_variance)
     if bool(jnp.any(ev > _OVERFIT_THRESHOLD)):
         warnings.warn(
-            f"jaxgsa: surrogate explained_variance exceeds {_OVERFIT_THRESHOLD}; "
+            f"jaxgsa.shapley: surrogate explained_variance exceeds {_OVERFIT_THRESHOLD}; "
             "Shapley effects may be unreliable",
             stacklevel=_external_stacklevel(),
             category=JaxgsaWarning,
         )
     elif bool(jnp.any(ev < _POORFIT_THRESHOLD)):
         warnings.warn(
-            f"jaxgsa: surrogate explained_variance is below {_POORFIT_THRESHOLD}; "
+            f"jaxgsa.shapley: surrogate explained_variance is below {_POORFIT_THRESHOLD}; "
             "Shapley effects may be unreliable",
             stacklevel=_external_stacklevel(),
             category=JaxgsaWarning,

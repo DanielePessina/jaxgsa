@@ -563,7 +563,9 @@ def _analyze_bootstrap(
 
     # Pre-generate all R bootstrap index sets (sampling with replacement).
     # Shared across (T, K) slices so every output sees the same resamples.
-    indices = jax.random.randint(key, shape=(n_bootstrap, base_n), minval=0, maxval=base_n)
+    # Named resample_idx, not indices: `indices` is this module's public
+    # transformable entry point.
+    resample_idx = jax.random.randint(key, shape=(n_bootstrap, base_n), minval=0, maxval=base_n)
 
     S1_out, ST_out, S2_out = _point_indices_3d(
         A_flat,
@@ -586,13 +588,15 @@ def _analyze_bootstrap(
     if calc_second_order:
         assert BA_flat is not None
         s1_boot, st_boot, s2_boot = _bootstrap_second_order(
-            indices, A_flat, AB_flat, BA_flat, B_flat, cs, estimator
+            resample_idx, A_flat, AB_flat, BA_flat, B_flat, cs, estimator
         )
         # (S, R, D, D) -> (R, T, K, D, D): the CI helpers and the replicate
         # layout both want the resample axis first.
         S2_boot = jnp.moveaxis(s2_boot, 1, 0).reshape(n_bootstrap, T, K, D, D)
     else:
-        s1_boot, st_boot = _bootstrap_first_total(indices, A_flat, AB_flat, B_flat, cs, estimator)
+        s1_boot, st_boot = _bootstrap_first_total(
+            resample_idx, A_flat, AB_flat, B_flat, cs, estimator
+        )
 
     S1_boot = jnp.moveaxis(s1_boot, 1, 0).reshape(n_bootstrap, T, K, D)
     ST_boot = jnp.moveaxis(st_boot, 1, 0).reshape(n_bootstrap, T, K, D)

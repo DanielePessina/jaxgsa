@@ -26,7 +26,7 @@ chunks of at most ``slice_chunk_size``, which bounds the working arrays, so
 the column count is the chunk width. A trailing part-chunk is padded back to
 that width and the answer sliced back, which keeps the kernel at one
 compilation instead of two; the padded columns are separate ``vmap`` lanes, so
-the sliced answer is bit-for-bit the unpadded one. The ``statistic``
+a padded column cannot change a real column's answer. The ``statistic``
 aggregation runs outside JIT so all three statistics share one compilation.
 
 The kernel's working set is not the ``(chunk, D, n_bins)`` result. The
@@ -499,7 +499,7 @@ def _pawn_core(
         for d, empty in enumerate(all_empty):
             if empty:
                 warnings.warn(
-                    f"PAWN: all bins empty for parameter {d}, returning NaN",
+                    f"jaxgsa.pawn: all bins empty for parameter {d}, returning NaN",
                     stacklevel=3,
                     category=JaxgsaWarning,
                 )

@@ -378,7 +378,9 @@ def _canonical_correlation(
         # Spearman conversion cannot turn a zero coupling into a non-zero
         # one, so checking before the conversion is equivalent.
         _check_correlation_touches_categorical(names, input_specs, R_declared)
-    R = canonicalize_correlation(R_declared, n_params, kind=kind, policy=policy)
+    R = canonicalize_correlation(
+        R_declared, n_params, kind=kind, policy=policy, method="jaxgsa.Problem"
+    )
     cat_dims = [d for d, _ in _categorical_dims_from_specs(input_specs)]
     R = _force_categorical_identity(R, cat_dims)
     return tuple(tuple(float(value) for value in row) for row in R)
