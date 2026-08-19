@@ -251,3 +251,25 @@ def test_correlation_participates_in_equality_and_hash():
     assert plain != correlated
     assert correlated == correlated_again
     assert hash(correlated) == hash(correlated_again)
+
+
+class TestNameValidation:
+    """Tier T4 (contract): names must be unique strings, refused with a fix."""
+
+    def test_duplicate_names_raise_and_name_the_duplicates(self):
+        with pytest.raises(ValueError, match=r"unique.*'x1'.*Rename"):
+            Problem(names=("x1", "x2", "x1"), bounds=((0.0, 1.0),) * 3)
+
+    def test_non_string_names_raise_and_name_the_fix(self):
+        with pytest.raises(ValueError, match=r"strings.*str\(\.\.\.\)"):
+            Problem(names=("x1", 2), bounds=((0.0, 1.0),) * 2)  # type: ignore[arg-type]
+
+    def test_from_dict_rejects_non_string_keys(self):
+        # dict keys are usually strings by construction; an integer key still
+        # reaches the same validator.
+        with pytest.raises(ValueError, match="strings"):
+            Problem.from_dict({0: (0.0, 1.0), "x2": (0.0, 1.0)})  # type: ignore[dict-item]
+
+    def test_valid_names_still_construct(self):
+        p = Problem(names=("a", "b"), bounds=((0.0, 1.0), (0.0, 2.0)))
+        assert p.names == ("a", "b")

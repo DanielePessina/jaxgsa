@@ -451,6 +451,37 @@ def _check_correlation_touches_categorical(
             )
 
 
+def _validate_names(names: tuple[str, ...]) -> None:
+    """Reject parameter names that are not strings or not unique.
+
+    A non-string name breaks every keyed surface downstream — ``Theta``
+    mappings, dataset ``param`` coordinates, saved-design metadata — and a
+    duplicate makes those keys ambiguous, so both are refused at
+    construction, where the fix is one line away.
+
+    Args:
+        names: Parameter names in model-input order.
+
+    Raises:
+        ValueError: If any name is not a ``str`` (convert it with ``str(...)``
+            when declaring the problem), or if two parameters share a name
+            (rename one of them).
+    """
+    non_str = [name for name in names if not isinstance(name, str)]
+    if non_str:
+        raise ValueError(
+            f"parameter names must be strings, got {non_str!r}. Convert each "
+            "name with str(...) when declaring the problem."
+        )
+    if len(set(names)) != len(names):
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        raise ValueError(
+            f"parameter names must be unique, but {duplicates!r} appear more "
+            "than once. Rename the duplicated parameters so every name is "
+            "distinct."
+        )
+
+
 def _categorical_dims_from_specs(
     input_specs: tuple[InputSpec, ...],
 ) -> tuple[tuple[int, int], ...]:
@@ -695,6 +726,7 @@ class Problem:
         correlation: _CorrelationTuple | None,
     ) -> None:
         """Assign validated frozen dataclass fields in one place."""
+        _validate_names(names)
         _check_correlation_touches_categorical(names, input_specs, correlation)
         # Bypass frozen dataclass protection -- only called during construction.
         object.__setattr__(self, "names", names)

@@ -30,11 +30,12 @@ categorical problem for differentiation: a step CDF has no useful derivative.
 
 from jaxgsa._core.invalid import InvalidUnit
 from jaxgsa._core.registry import MethodSpec, register
+from jaxgsa._core.sampling import Theta
 from jaxgsa.sobol._analyze import analyze, indices
 from jaxgsa.sobol._result import SobolResult
 from jaxgsa.sobol._sampling import SobolSamples, sample
 
-__all__ = ["SobolResult", "SobolSamples", "analyze", "indices", "sample"]
+__all__ = ["SobolResult", "SobolSamples", "Theta", "analyze", "indices", "sample"]
 
 SPEC = register(
     MethodSpec(

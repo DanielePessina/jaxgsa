@@ -29,3 +29,17 @@ def test_removed_root_shortcuts_are_absent():
         "analyze_shapley",
     ):
         assert not hasattr(jaxgsa, name)
+
+
+def test_version_is_exposed():
+    from importlib.metadata import version
+
+    assert isinstance(jaxgsa.__version__, str)
+    assert jaxgsa.__version__ == version("jaxgsa")
+
+
+def test_theta_is_reexported_for_gradient_users():
+    from jaxgsa._core.sampling import Theta
+
+    assert jaxgsa.Theta is Theta
+    assert jaxgsa.sobol.Theta is Theta
