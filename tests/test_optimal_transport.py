@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, Literal, cast
 
 import jax
@@ -756,3 +757,169 @@ class TestOTInvalidPolicy:
         # A clean sample with a dummy column reports nothing at all.
         clean = analyze(problem, X, Y, dummy=True, key=jax.random.key(0))
         assert clean.invalid.n_invalid == 0
+
+
+class TestIndicesPureCore:
+    """The transformable core ``optimal_transport.indices``.
+
+    Two claims. The core returns exactly what ``analyze`` reports on clean
+    outputs, in every mode, and it survives ``jit``, ``vmap`` and
+    ``jit(jacrev(...))``, which ``analyze`` cannot.
+    """
+
+    def test_matches_analyze_univariate(self, ishigami_data):
+        """Tier T4: ``indices`` returns the three index fields of ``analyze``.
+
+        ``analyze`` delegates to the same kernel runner, so this guards the
+        delegation wiring rather than the estimator maths.
+        """
+        X, Y = ishigami_data
+        result = analyze(ishigami.PROBLEM, X, Y)
+        ot, adv, diff = jaxgsa.optimal_transport.indices(ishigami.PROBLEM, X, Y)
+
+        np.testing.assert_array_equal(np.asarray(ot), np.asarray(result.ot))
+        np.testing.assert_array_equal(np.asarray(adv), np.asarray(result.advective))
+        np.testing.assert_array_equal(np.asarray(diff), np.asarray(result.diffusive))
+
+    def test_matches_analyze_in_every_mode(self, multi_output_data):
+        """Tier T4: the ``mode`` branch is static, and each branch agrees.
+
+        ``mode`` is a Python string, so the branch stays inside the core:
+        one mode is traced per concrete value, exactly as ``analyze``
+        compiles one.
+        """
+        X, Y2, Y3 = multi_output_data
+        # The joint modes solve one Sinkhorn problem per class, so they run
+        # on a slice of the sample rather than all of it.
+        X_small, Y3_small = X[:1024], Y3[:1024]
+        cases: list[tuple[Any, Any, Literal["univariate", "multivariate", "trajectory"]]] = [
+            (X, Y2, "univariate"),
+            (X, Y3, "univariate"),
+            (X_small, Y3_small, "multivariate"),
+            (X_small, Y3_small, "trajectory"),
+        ]
+        for inputs, outputs, mode in cases:
+            result = analyze(ishigami.PROBLEM, inputs, outputs, mode=mode, n_partitions=8)
+            ot, adv, diff = jaxgsa.optimal_transport.indices(
+                ishigami.PROBLEM, inputs, outputs, mode=mode, n_partitions=8
+            )
+            assert ot.shape == result.ot.shape, mode
+            np.testing.assert_array_equal(np.asarray(ot), np.asarray(result.ot))
+            np.testing.assert_array_equal(np.asarray(adv), np.asarray(result.advective))
+            np.testing.assert_array_equal(np.asarray(diff), np.asarray(result.diffusive))
+
+    def test_standardize_reaches_the_joint_core(self, multi_output_data):
+        """Tier T4: ``standardize`` is honoured identically by core and ``analyze``.
+
+        The keyword is arithmetic over the sample axis, not policy, so the
+        core carries it. Turning it off must change the joint indices and
+        must change them the same way in both entry points.
+        """
+        X, _, Y3 = multi_output_data
+        X, Y3 = X[:1024], Y3[:1024]
+        kwargs: dict[str, Any] = {"mode": "multivariate", "n_partitions": 8}
+        on = jaxgsa.optimal_transport.indices(ishigami.PROBLEM, X, Y3, **kwargs)[0]
+        off = jaxgsa.optimal_transport.indices(
+            ishigami.PROBLEM, X, Y3, standardize=False, **kwargs
+        )[0]
+        reference = analyze(ishigami.PROBLEM, X, Y3, standardize=False, **kwargs)
+
+        assert not np.allclose(np.asarray(on), np.asarray(off))
+        np.testing.assert_array_equal(np.asarray(off), np.asarray(reference.ot))
+
+    def test_no_bootstrap_and_no_dummy_in_the_core(self, ishigami_data):
+        """Tier T4: the core is the point estimate, and takes no key.
+
+        The bootstrap interval and the ``dummy`` baseline both draw
+        randomness and both describe the point estimate rather than being
+        it, so both stay in ``analyze``.
+        """
+        X, Y = ishigami_data
+        ot, _, _ = jaxgsa.optimal_transport.indices(ishigami.PROBLEM, X, Y)
+        with_ci = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=4, key=jax.random.key(0))
+
+        # The interval is centred on exactly this estimate.
+        np.testing.assert_array_equal(np.asarray(ot), np.asarray(with_ci.ot))
+        with pytest.raises(TypeError):
+            cast(Any, jaxgsa.optimal_transport.indices)(
+                ishigami.PROBLEM, X, Y, n_bootstrap=4, key=jax.random.key(0)
+            )
+        with pytest.raises(TypeError):
+            cast(Any, jaxgsa.optimal_transport.indices)(ishigami.PROBLEM, X, Y, dummy=True)
+
+    def test_is_jittable(self, ishigami_data):
+        """Tier T4: ``jit`` traces ``indices`` over both X and Y."""
+        X, Y = ishigami_data
+        jitted = jax.jit(lambda x, y: jaxgsa.optimal_transport.indices(ishigami.PROBLEM, x, y))
+        ot_jit = jitted(X, Y)[0]
+        ot = jaxgsa.optimal_transport.indices(ishigami.PROBLEM, X, Y)[0]
+
+        np.testing.assert_allclose(np.asarray(ot_jit), np.asarray(ot), rtol=1e-5)
+
+    def test_is_vmappable(self):
+        """Tier T4: ``vmap`` maps ``indices`` over a batch of output vectors."""
+        N = 1024
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=N, seed=7))
+        batch = jnp.stack([ishigami.evaluate(X), X[:, 0], X[:, 1] ** 2])
+
+        mapped = jax.vmap(lambda y: jaxgsa.optimal_transport.indices(ishigami.PROBLEM, X, y))(
+            batch
+        )
+
+        assert mapped[0].shape == (3, ishigami.PROBLEM.num_vars)
+        for row, outputs in enumerate(batch):
+            ot = jaxgsa.optimal_transport.indices(ishigami.PROBLEM, X, outputs)[0]
+            np.testing.assert_allclose(np.asarray(mapped[0][row]), np.asarray(ot), rtol=1e-4)
+
+    def test_jit_of_jacrev(self):
+        """Tier T4: ``jit(jacrev(...))`` compiles a gradient through the core.
+
+        The 1-D coupling is a sort and a gather, so the index is piecewise
+        smooth in Y and its derivative is defined away from ties. The rank
+        partition is not differentiable in X, which is why the derivative is
+        taken in Y.
+        """
+        with jax.enable_x64():
+            N = 512
+            X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=N, seed=3))
+            Y = ishigami.evaluate(X)
+
+            def total_ot(outputs):
+                return jaxgsa.optimal_transport.indices(ishigami.PROBLEM, X, outputs)[0].sum()
+
+            jac = jax.jit(jax.jacrev(total_ot))(Y)
+            eager = jax.jacrev(total_ot)(Y)
+
+        assert jac.shape == (N,)
+        assert np.all(np.isfinite(np.asarray(jac)))
+        np.testing.assert_allclose(np.asarray(jac), np.asarray(eager), rtol=1e-8)
+
+    def test_categorical_is_refused_with_a_pointer_to_analyze(self):
+        """Tier T4: a categorical parameter cannot be traced, so the core says so."""
+        problem = jaxgsa.Problem.from_dict(
+            {"x": (0.0, 1.0), "c": {"dist": "categorical", "probs": [0.5, 0.5]}}
+        )
+        rng = np.random.default_rng(0)
+        n = 400
+        codes = rng.integers(0, 2, size=n).astype(np.float64)
+        x = rng.uniform(0.0, 1.0, size=n)
+        X = jnp.asarray(np.stack([x, codes], axis=1))
+        Y = jnp.asarray(codes + 0.3 * x)
+
+        with pytest.raises(ValueError, match="continuous parameters only"):
+            jaxgsa.optimal_transport.indices(problem, X, Y)
+
+    def test_no_policy_fires_in_the_core(self):
+        """Tier T4: a constant output warns in ``analyze`` and is silent here."""
+        problem = jaxgsa.Problem.from_dict({"a": (0.0, 1.0), "b": (0.0, 1.0)})
+        X = jnp.asarray(monte_carlo(problem, n=400, seed=5))
+        constant = jnp.full((400,), 2.5)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            ot, adv, diff = jaxgsa.optimal_transport.indices(problem, X, constant)
+
+        for arr in (ot, adv, diff):
+            np.testing.assert_array_equal(np.asarray(arr), np.zeros(2))
+        with pytest.warns(jaxgsa.JaxgsaWarning):
+            analyze(problem, X, constant)

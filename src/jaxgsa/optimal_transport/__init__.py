@@ -35,10 +35,10 @@ References:
 
 from jaxgsa._core.invalid import InvalidUnit
 from jaxgsa._core.registry import MethodSpec, register
-from jaxgsa.optimal_transport._analyze import analyze
+from jaxgsa.optimal_transport._analyze import analyze, indices
 from jaxgsa.optimal_transport._result import OTResult
 
-__all__ = ["OTResult", "analyze"]
+__all__ = ["OTResult", "analyze", "indices"]
 
 SPEC = register(
     MethodSpec(
