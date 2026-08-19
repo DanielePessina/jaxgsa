@@ -366,9 +366,11 @@ def _fit_pce_core(
     The fit streams over row batches instead (see :func:`_fit_pce_streamed`)
     in two cases: when the single-pass residents (design matrix, Gram
     factorization, LOO residual arrays) would exceed the active memory
-    budget, or when ``batch_size`` is an explicit int. The streamed fit
-    solves the same normal equations and computes the same exact LOO. It
-    differs only in float32 summation order.
+    budget, or when an explicit ``batch_size`` is smaller than ``N``, so it
+    actually splits the sample. ``batch_size >= N`` degenerates to the
+    single-pass path, as one full row block. The streamed fit solves the
+    same normal equations and computes the same exact LOO. It differs only
+    in float32 summation order.
 
     Nothing here warns. The order it actually fitted at comes back on
     ``_PCEFit.order``, and :func:`analyze` compares that against the request
@@ -389,8 +391,14 @@ def _fit_pce_core(
     X_ref, input_types = _map_to_reference(X, problem, effective_order)
     Y_flat = Y_3d.reshape(N, T * K)  # column t*K + k is slice (t, k)
 
+    # Streamed iff the caller's batch width actually splits the sample, or the
+    # single-pass residents exceed the budget. ``batch_size >= N`` degenerates
+    # to the single-pass path — the library-wide ``batch_size`` semantics: it
+    # sizes row blocks, clamped to N, and never selects a different algorithm.
     single_pass_bytes = _single_pass_fit_bytes(N, n_terms, T * K, X_ref.dtype.itemsize)
-    streamed = not (batch_size is None and single_pass_bytes <= get_memory_budget())
+    streamed = (
+        batch_size is not None and batch_size < N
+    ) or single_pass_bytes > get_memory_budget()
     if not streamed:
         # Single-pass path: build the full design matrix and compute the Gram
         # factorization once, reused for both fitting and LOO.
@@ -551,9 +559,10 @@ def indices(
         ridge: Tikhonov regularization for the least-squares fit.
         fit_ratio: Maximum ratio of terms to samples before ``order`` is
             reduced.
-        batch_size: Rows per batch during the fit, or ``None`` to keep the
-            single-shot fit unless the memory budget says otherwise. Both
-            paths trace; they differ only in float32 summation order.
+        batch_size: Rows per batch during the fit, clamped to ``N``, or
+            ``None`` to derive one from the memory budget, as in
+            :func:`analyze`. Both paths trace; they differ only in float32
+            summation order.
 
     Returns:
         ``(S1, ST, S2)``, at the shapes ``analyze`` reports for this ``Y``.
@@ -638,16 +647,18 @@ def analyze(
             reduced. Lower values demand more samples per term (a more
             conservative, less overfit-prone fit).
         batch_size: Rows of ``X``/``Y`` processed per batch during the fit
-            (the package-wide ``batch_size`` convention). ``None`` (default)
-            keeps the single-shot fit unless its estimated resident memory
-            (design matrix, Gram factorization, LOO residuals) exceeds the
-            active memory budget (~512 MiB, see
+            (the package-wide ``batch_size`` convention): it sizes row
+            blocks, clamped to ``N``. ``None`` (default) keeps the
+            single-shot fit unless its estimated resident memory (design
+            matrix, Gram factorization, LOO residuals) exceeds the active
+            memory budget (~512 MiB, see
             ``jaxgsa.config.set_memory_budget``), in which case the fit
-            streams over auto-sized row batches. An explicit int always
-            forces the streamed fit with that many rows per batch. Both fit
-            paths solve the same normal equations and compute the same
-            exact leave-one-out error; results differ only at the level of
-            float32 summation order.
+            streams over auto-sized row batches. An explicit
+            ``batch_size < N`` streams over row blocks of that many rows;
+            ``batch_size >= N`` is one full block, which is the single-pass
+            fit. Both fit paths solve the same normal equations and compute
+            the same exact leave-one-out error; results differ only at the
+            level of float32 summation order.
         n_bootstrap: Number of bootstrap resamples for confidence intervals.
             ``0`` (default) disables them. The resampling unit is one row of
             ``(X, Y)``.

@@ -99,17 +99,32 @@ class TestForcedStreaming:
         assert streamed.loo_rmse is not None and streamed.loo_rmse.shape == (2, 2)
         _assert_results_match(streamed, single)
 
-    def test_batch_size_larger_than_n_streams_once(self, problem_4d, data_4d):
-        """Tier T4 (internal consistency): batch_size >= N still streams.
+    def test_batch_size_at_least_n_degenerates_to_single_pass(self, problem_4d, data_4d):
+        """Tier T4 (internal consistency): batch_size >= N is the single pass.
 
-        One full batch is still the streamed path, and the reported flag says
-        so.
+        The library-wide ``batch_size`` contract: it sizes row blocks, clamped
+        to N, and never selects a different algorithm. One full block IS the
+        single-pass fit, so the flag says single-pass and the numbers are the
+        default's, bit for bit. Only ``batch_size < N`` (or the budget)
+        engages the streamed path, which keeps it publicly testable exactly
+        as HDMR's is.
         """
         X, Y = data_4d
         single = pce.analyze(problem_4d, X, Y, order=3)
-        streamed = pce.analyze(problem_4d, X, Y, order=3, batch_size=10**6)
-        assert streamed.streamed is True
-        _assert_results_match(streamed, single)
+        assert single.streamed is False
+
+        full_block = pce.analyze(problem_4d, X, Y, order=3, batch_size=10**6)
+        assert full_block.streamed is False
+        np.testing.assert_array_equal(
+            np.asarray(full_block.coefficients), np.asarray(single.coefficients)
+        )
+
+        exactly_n = pce.analyze(problem_4d, X, Y, order=3, batch_size=X.shape[0])
+        assert exactly_n.streamed is False
+
+        split = pce.analyze(problem_4d, X, Y, order=3, batch_size=X.shape[0] - 1)
+        assert split.streamed is True
+        _assert_results_match(split, single)
 
     def test_invalid_batch_size_raises(self, problem_4d, data_4d):
         X, Y = data_4d
