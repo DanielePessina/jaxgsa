@@ -16,11 +16,17 @@ the moment it registers.
 
 from __future__ import annotations
 
+import importlib
 import inspect
+import warnings
+from collections.abc import Callable
 from typing import Any, Literal, get_args, get_origin
 
+import jax
+import jax.numpy as jnp
 import pytest
 
+import jaxgsa
 from jaxgsa._core.registry import MethodSpec, methods
 
 # Every batching keyword the vocabulary allows, and the unit each one counts.
@@ -268,22 +274,302 @@ def test_only_the_three_batching_axes_appear(spec: MethodSpec) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# The budget rule, made checkable end to end.
+#
+# For every (method, batching axis) pair, name the resolver whose call is what
+# turns None into a width, and a tiny end-to-end run that reaches it. The test
+# spies on the resolver in the module that calls it and asserts the axis's
+# None default really arrives there as None. A companion test asserts each
+# resolver family derives its width from ``get_memory_budget()``. Together
+# they make the docstring's claim true, rather than only checking the default
+# is spelled None.
+# ---------------------------------------------------------------------------
+
+_PROBLEM = jaxgsa.Problem.from_dict({"x1": (-1.0, 1.0), "x2": (-1.0, 1.0), "x3": (-1.0, 1.0)})
+
+
+def _multi(X: jax.Array) -> jax.Array:
+    """Tiny non-additive model with two output columns, so slices exist."""
+    y = X[:, 0] + 2.0 * X[:, 1] + 0.5 * X[:, 0] * X[:, 2]
+    return jnp.stack([y, 2.0 * y + 1.0], axis=-1)
+
+
+def _given_data(n: int = 64) -> tuple[jax.Array, jax.Array]:
+    X = jnp.asarray(jaxgsa.sampling.monte_carlo(_PROBLEM, n, seed=3))
+    return X, _multi(X)
+
+
+def _run_sobol() -> None:
+    sr = jaxgsa.sobol.sample(_PROBLEM, n_samples=64, seed=3)
+    jaxgsa.sobol.analyze(sr, _multi(jnp.asarray(sr.samples)))
+
+
+def _run_morris() -> None:
+    sr = jaxgsa.morris.sample(_PROBLEM, n_trajectories=10, seed=3)
+    # The resample resolver only runs on the bootstrap path.
+    jaxgsa.morris.analyze(
+        sr, _multi(jnp.asarray(sr.samples)), n_bootstrap=8, key=jax.random.key(3)
+    )
+
+
+def _run_efast() -> None:
+    sr = jaxgsa.efast.sample(_PROBLEM, n_per_curve=257, seed=3)
+    jaxgsa.efast.analyze(sr, _multi(jnp.asarray(sr.samples)))
+
+
+def _run_pawn() -> None:
+    X, Y = _given_data()
+    jaxgsa.pawn.analyze(_PROBLEM, X, Y, n_bins=4)
+
+
+def _run_borgonovo() -> None:
+    X, Y = _given_data()
+    jaxgsa.borgonovo.analyze(_PROBLEM, X, Y)
+
+
+def _run_ot() -> None:
+    X, Y = _given_data()
+    jaxgsa.optimal_transport.analyze(_PROBLEM, X, Y, n_partitions=4)
+
+
+def _run_dgsm() -> None:
+    X, _ = _given_data()
+    jaxgsa.dgsm.analyze(_PROBLEM, lambda x: _multi(x[None, :])[0], X)
+
+
+def _run_pce() -> None:
+    X, Y = _given_data()
+    # The PCE row-batch resolver lives on the streamed path, which the None
+    # default only takes when the single-pass residents exceed the budget. A
+    # tiny budget is exactly the semantic under test: None must follow it.
+    jaxgsa.config.set_memory_budget(4, unit="kib")
+    jaxgsa.pce.analyze(_PROBLEM, X, Y, order=2)
+
+
+def _run_hdmr() -> None:
+    X, Y = _given_data(n=384)  # RS-HDMR refuses fewer than 300 rows
+    jaxgsa.hdmr.analyze(_PROBLEM, X, Y, maxorder=1, maxiter=5)
+
+
+def _run_vkoga() -> None:
+    X, Y = _given_data()
+    jaxgsa.vkoga.analyze(
+        _PROBLEM,
+        X,
+        Y,
+        max_centers=8,
+        n_folds=3,
+        n_outer=16,
+        n_inner=8,
+        n_variance=64,
+        key=jax.random.key(3),
+    )
+
+
+# method -> axis -> (module with the resolver binding, resolver attribute,
+# the resolver parameter that carries the caller's value). The spy asserts
+# that parameter arrives as None when the analyze() keyword is left at its
+# default.
+BUDGET_RESOLVERS: dict[str, dict[str, tuple[str, str, str]]] = {
+    "sobol": {
+        "slice_chunk_size": (
+            "jaxgsa.sobol._analyze",
+            "resolve_point_chunk_size",
+            "slice_chunk_size",
+        ),
+    },
+    "morris": {
+        "resample_chunk_size": (
+            "jaxgsa.morris._analyze",
+            "_resolve_resample_chunk_size",
+            "resample_chunk_size",
+        ),
+    },
+    "efast": {
+        "slice_chunk_size": ("jaxgsa.efast._analyze", "resolve_batch_size", "batch_size"),
+    },
+    "pawn": {
+        "slice_chunk_size": (
+            "jaxgsa.pawn._analyze",
+            "_resolve_slice_chunk_size",
+            "slice_chunk_size",
+        ),
+    },
+    "borgonovo": {
+        "slice_chunk_size": ("jaxgsa.borgonovo._analyze", "resolve_batch_size", "batch_size"),
+    },
+    "optimal_transport": {
+        "slice_chunk_size": (
+            "jaxgsa.optimal_transport._analyze",
+            "resolve_batch_size",
+            "batch_size",
+        ),
+    },
+    "dgsm": {
+        "batch_size": ("jaxgsa.dgsm._core", "resolve_batch_size", "batch_size"),
+    },
+    "pce": {
+        "batch_size": ("jaxgsa.pce._analyze", "resolve_batch_size", "batch_size"),
+    },
+    "hdmr": {
+        "batch_size": ("jaxgsa.hdmr._fit", "resolve_batch_size", "batch_size"),
+        "slice_chunk_size": (
+            "jaxgsa.hdmr._fit",
+            "_resolve_slice_chunk_size",
+            "slice_chunk_size",
+        ),
+    },
+    "vkoga": {
+        "batch_size": ("jaxgsa.vkoga._indices", "resolve_batch_size", "batch_size"),
+    },
+}
+
+BUDGET_RUNNERS: dict[str, Callable[[], None]] = {
+    "sobol": _run_sobol,
+    "morris": _run_morris,
+    "efast": _run_efast,
+    "pawn": _run_pawn,
+    "borgonovo": _run_borgonovo,
+    "optimal_transport": _run_ot,
+    "dgsm": _run_dgsm,
+    "pce": _run_pce,
+    "hdmr": _run_hdmr,
+    "vkoga": _run_vkoga,
+}
+
+
+@pytest.fixture
+def _restore_memory_budget():
+    """Snapshot and restore the process-global memory budget around a test."""
+    from jaxgsa._core import batching
+
+    saved = batching._memory_budget_bytes
+    yield
+    batching._memory_budget_bytes = saved
+
+
+def test_the_resolver_table_covers_every_batching_axis() -> None:
+    """Every (method, batching axis) pair in a signature is in the table.
+
+    Without this, a new method (or a new axis on an old one) would silently
+    skip the budget test below: the parametrisation would generate the same
+    cases and still pass. A table entry has to be written — with the runner
+    that reaches the resolver — before the axis exists.
+    """
+    for spec in ALL:
+        in_signature = {axis for axis in BATCHING_AXES if axis in _params(spec)}
+        in_table = set(BUDGET_RESOLVERS.get(spec.name, {}))
+        assert in_signature == in_table, (
+            f"{spec.name} takes batching axes {sorted(in_signature)} but "
+            f"BUDGET_RESOLVERS covers {sorted(in_table)}. Add (or remove) the "
+            "entry, with the resolver the axis routes through and a runner "
+            "that reaches it."
+        )
+    for name in BUDGET_RESOLVERS:
+        assert name in BUDGET_RUNNERS, f"BUDGET_RESOLVERS names {name} but no runner exists"
+
+
 @pytest.mark.parametrize("spec", _budget_params(ALL))
-def test_a_batching_axis_accepts_none_to_mean_use_the_budget(spec: MethodSpec) -> None:
-    """``None`` means "derive this from the memory budget".
+def test_a_batching_axis_accepts_none_to_mean_use_the_budget(
+    spec: MethodSpec, monkeypatch, _restore_memory_budget
+) -> None:
+    """``None`` means "derive this from the memory budget" — and really does.
 
     A hard-coded element budget is a defect: it ignores
     ``jaxgsa.config.set_memory_budget`` and so cannot be tuned for the machine
     the analysis is actually running on.
+
+    Two claims per axis. The default is spelled ``None``, and the default
+    actually reaches the method's budget-deriving resolver as ``None``: the
+    resolver in ``BUDGET_RESOLVERS`` is spied on in the module that calls it,
+    a tiny end-to-end run is made with the axis left at its default, and the
+    spy must record a call whose caller-value parameter is ``None`` and whose
+    result is a positive int. ``test_each_resolver_family_reads_the_budget``
+    closes the loop by checking the resolvers themselves shrink with the
+    budget.
     """
     params = _params(spec)
-    for axis in BATCHING_AXES:
-        if axis not in params:
-            continue
+    axes = [axis for axis in BATCHING_AXES if axis in params]
+    for axis in axes:
         assert params[axis].default is None, (
             f"{spec.name}.{axis} defaults to {params[axis].default!r}. The "
             "vocabulary requires None, meaning 'derive one from "
             "get_memory_budget()'."
+        )
+    if not axes:
+        return
+
+    calls: dict[str, list[tuple[Any, int]]] = {axis: [] for axis in axes}
+    for axis in axes:
+        module_path, attr, param_name = BUDGET_RESOLVERS[spec.name][axis]
+        module = importlib.import_module(module_path)
+        real = getattr(module, attr)
+        record = calls[axis]
+
+        def wrapper(*args, _real=real, _param=param_name, _record=record, **kwargs):
+            bound = inspect.signature(_real).bind(*args, **kwargs)
+            out = _real(*args, **kwargs)
+            _record.append((bound.arguments[_param], out))
+            return out
+
+        monkeypatch.setattr(module, attr, wrapper)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        BUDGET_RUNNERS[spec.name]()
+
+    for axis in axes:
+        assert calls[axis], (
+            f"{spec.name}: the run never reached the resolver for {axis}; the "
+            "BUDGET_RESOLVERS entry or its runner is stale."
+        )
+        none_calls = [(req, out) for req, out in calls[axis] if req is None]
+        assert none_calls, (
+            f"{spec.name}.{axis}: the None default never arrived at the "
+            f"resolver as None; recorded caller values "
+            f"{[req for req, _ in calls[axis]]}. Somewhere a literal width "
+            "replaces the budget-derived one."
+        )
+        for _, resolved in none_calls:
+            assert isinstance(resolved, int) and resolved >= 1
+
+
+def test_each_resolver_family_reads_the_budget(_restore_memory_budget) -> None:
+    """Every resolver the table names shrinks its width when the budget does.
+
+    The spy test above proves ``None`` reaches these functions; this one
+    proves the functions answer from ``get_memory_budget()``. Each probe
+    resolves a width for ``None`` on a workload big enough that the default
+    budget allows more than one unit, then again under a 1-byte budget, and
+    the width must shrink to the floor of 1.
+    """
+    from jaxgsa._core.batching import resolve_batch_size
+    from jaxgsa.hdmr import _fit as hdmr_fit
+    from jaxgsa.morris import _analyze as morris_analyze
+    from jaxgsa.pawn import _analyze as pawn_analyze
+    from jaxgsa.sobol import _bootstrap as sobol_bootstrap
+    from jaxgsa.sobol import _chunking as sobol_chunking
+
+    probes: dict[str, Callable[[], int]] = {
+        "resolve_batch_size": lambda: resolve_batch_size(1024, 10_000, None),
+        "sobol.point": lambda: sobol_chunking.resolve_point_chunk_size(None, 64, 256, 3, True, 4),
+        "sobol.bootstrap": lambda: sobol_bootstrap._resolve_slice_chunk_size(
+            None, 64, 16, 256, 3, True, 4
+        ),
+        "morris.resample": lambda: morris_analyze._resolve_resample_chunk_size(None, 64, 1024),
+        "pawn.slice": lambda: pawn_analyze._resolve_slice_chunk_size(None, 256, 3, 4, 4),
+        "hdmr.slice": lambda: hdmr_fit._resolve_slice_chunk_size(None, 64, 128, 1024),
+    }
+    for name, probe in probes.items():
+        jaxgsa.config.set_memory_budget(512, unit="mib")
+        wide = probe()
+        jaxgsa.config.set_memory_budget(1, unit="b")
+        narrow = probe()
+        assert narrow == 1 < wide, (
+            f"{name}: resolved width did not follow the budget "
+            f"(512 MiB -> {wide}, 1 B -> {narrow}). The resolver must derive "
+            "its None default from jaxgsa.config.get_memory_budget()."
         )
 
 
