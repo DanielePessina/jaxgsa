@@ -20,12 +20,12 @@ warns about single precision.
 
 from __future__ import annotations
 
-import contextlib
 import warnings
 
 import jax
 import numpy as np
 import pytest
+from conftest import single_precision_warning
 
 import jaxgsa
 from jaxgsa import JaxgsaWarning
@@ -42,28 +42,6 @@ from _linear_gaussian import (  # isort: skip
     R_GAUSS,
     analytic_indices,
 )
-
-
-@contextlib.contextmanager
-def single_precision_warning():
-    """Assert the float32 warning fires in float32, and is absent under x64.
-
-    ``analyze`` warns that the kernel solve is ill-conditioned only when JAX
-    is in single precision, which is right. Written as a bare
-    ``pytest.warns``, every shape and error-path test in this file therefore
-    failed with ``DID NOT WARN`` the moment the suite was run with
-    ``JAX_ENABLE_X64=1`` — the tests were precision-blind, not the source. The
-    flag is read here rather than at import so the accuracy tests, which turn
-    x64 on with a context manager, get the same treatment.
-    """
-    if bool(getattr(jax.config, "jax_enable_x64", False)):
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            yield
-        assert not [w for w in caught if "single precision" in str(w.message)]
-    else:
-        with pytest.warns(JaxgsaWarning, match="single precision"):
-            yield
 
 
 # --- cheap uniform model for shape/contract tests ---------------------------

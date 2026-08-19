@@ -992,6 +992,9 @@ def analyze(
             run_levels: list[list[int] | None],
             order: Array | None,
         ) -> tuple[Array, Array, Array, Array]:
+            # run_levels keeps the two _run signatures identical; the
+            # univariate estimator reads level sizes off the group counts.
+            del run_levels
             return _run_univariate(Y_cols, T, K, idx, run_groups, order, slice_chunk_size)
     else:
         eps_s = jnp.asarray(epsilon, dtype)

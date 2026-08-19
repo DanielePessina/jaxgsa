@@ -1,10 +1,37 @@
-"""Shared test fixtures for jaxgsa tests."""
+"""Shared test fixtures and helpers for jaxgsa tests."""
 
+import contextlib
+import warnings
+
+import jax
 import jax.numpy as jnp
 import pytest
 
 import jaxgsa
+from jaxgsa import JaxgsaWarning
 from jaxgsa.benchmarks import ishigami, linear, oakley_ohagan, sobol_g
+
+
+@contextlib.contextmanager
+def single_precision_warning():
+    """Assert the float32 warning fires in float32, and is absent under x64.
+
+    ``vkoga.analyze`` and ``hsic.analyze`` warn about single precision only
+    when JAX is actually in float32, which is right. Written as a bare
+    ``pytest.warns``, such a test fails with ``DID NOT WARN`` the moment the
+    suite runs with ``JAX_ENABLE_X64=1`` — the test would be precision-blind,
+    not the source. The flag is read here rather than at import so a caller
+    that switches precision with a context manager gets the treatment that
+    matches the precision actually in force.
+    """
+    if bool(getattr(jax.config, "jax_enable_x64", False)):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            yield
+        assert not [w for w in caught if "single precision" in str(w.message)]
+    else:
+        with pytest.warns(JaxgsaWarning, match="single precision"):
+            yield
 
 
 # Sobol estimation error scales as O(1/sqrt(N)).  Higher-dimensional or more

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import inspect
 import warnings
 
@@ -10,6 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from conftest import single_precision_warning
 
 from jaxgsa import JaxgsaWarning
 from jaxgsa.benchmarks import ishigami, linear, sobol_g
@@ -22,32 +22,6 @@ from jaxgsa.hsic._analyze import (
 )
 from jaxgsa.problem import Problem
 from jaxgsa.sampling import monte_carlo
-
-
-@contextlib.contextmanager
-def single_precision_warning():
-    """Assert the float32 warning fires in float32, and is absent under x64.
-
-    ``analyze`` warns that the HSIC V-statistic loses most of its digits only
-    when JAX is in single precision, which is right. Written as a bare
-    ``pytest.warns``, the test therefore failed with ``DID NOT WARN`` the
-    moment the suite was run with ``JAX_ENABLE_X64=1`` — the test was
-    precision-blind, not the source. The flag is read here rather than at
-    import so a caller that switches precision with a context manager gets
-    the treatment that matches the precision actually in force.
-
-    This is a copy of the helper of the same name in ``tests/test_vkoga.py``,
-    which met the identical problem. Keep the two bodies identical; if one
-    needs to change, change both, or lift it into ``conftest.py``.
-    """
-    if bool(getattr(jax.config, "jax_enable_x64", False)):
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            yield
-        assert not [w for w in caught if "single precision" in str(w.message)]
-    else:
-        with pytest.warns(JaxgsaWarning, match="single precision"):
-            yield
 
 
 @pytest.fixture(scope="module")

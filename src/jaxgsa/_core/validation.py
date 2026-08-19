@@ -426,55 +426,6 @@ def _raise_categorical_analysis(problem: Problem, method: str) -> None:
     )
 
 
-def _validate_xy_inputs(
-    problem: Problem,
-    X: Array,
-    Y: Array,
-    *,
-    correlation_ok: bool = False,
-    categorical_ok: bool = False,
-    method: str = "this method",
-) -> Array:
-    """Validate the shared ``(problem, X, Y)`` contract of given-data methods.
-
-    Checks ``X`` and ``Y`` against the canonical jaxgsa layouts, taking ``X``'s
-    row count as the expected sample count. jaxgsa never infers or transposes
-    an axis.
-
-    Args:
-        problem: Problem definition with ``num_vars`` parameters.
-        X: Input sample matrix, expected shape ``(N, D)``.
-        Y: Model output with shape ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
-        correlation_ok: Capability flag: whether the calling method's indices
-            remain valid when ``problem.correlation`` declares a dependence
-            structure. Correlation-tolerant methods (rank/CDF-based, or
-            ANCOVA-decomposing) pass ``True``; the default ``False`` rejects
-            a correlated problem with an actionable ``ValueError``.
-        categorical_ok: Capability flag: whether the calling method handles
-            categorical (unordered) parameters correctly. Methods that
-            condition on one class per level pass ``True``; the default
-            ``False`` rejects a categorical problem with an actionable
-            ``ValueError``.
-        method: Fully qualified caller name used in the rejection message.
-
-    Returns:
-        Y as a validated JAX array.
-
-    Raises:
-        ValueError: If X or Y violates the shared shape contract, the
-            problem is correlated and ``correlation_ok`` is ``False``, or
-            the problem has categorical parameters and ``categorical_ok``
-            is ``False``. A problem that trips both faults gets the combined
-            message, whichever of the two checks fires first.
-    """
-    if not correlation_ok:
-        _raise_correlated_analysis(problem, method)
-    if not categorical_ok:
-        _raise_categorical_analysis(problem, method)
-    _validate_x(problem, X)
-    return _validate_output(Y, int(X.shape[0]), problem)
-
-
 def _dims_and_coords(
     ndim: int,
     shape: tuple[int, ...],

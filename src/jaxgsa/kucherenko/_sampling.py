@@ -106,6 +106,9 @@ class KucherenkoSamples(UniqueDesignSamples):
         meta: Mapping[str, Any],
     ) -> KucherenkoSamples:
         """Rebuild a ``KucherenkoSamples`` from a loaded NPZ payload."""
+        # The signature is the UniqueDesignSamples._from_payload hook. This
+        # design stores no extra arrays, so the slot goes unread here.
+        del arrays
         return cls(
             samples=samples,
             n_expanded=n_expanded,

@@ -34,99 +34,11 @@ stays unbiased, because A and B are identically distributed.
 import jax.numpy as jnp
 from jax import Array
 
-
-def first_order(A: Array, AB_j: Array, B: Array) -> Array:
-    """Estimate the first-order (main-effect) Sobol index for parameter j.
-
-    Uses the improved form of Sobol' et al. (2007), as tabulated by
-    Saltelli et al. (2010)::
-
-        S1_j = E[B * (AB_j - A)] / Var(Y)
-
-    Args:
-        A: Model outputs evaluated on base sample matrix A, shape ``(N,)``.
-        AB_j: Model outputs from the cross-matrix where column j of A is
-            replaced by column j of B, shape ``(N,)``.
-        B: Model outputs evaluated on base sample matrix B, shape ``(N,)``.
-
-    Returns:
-        Scalar Array with the first-order index S1_j.
-    """
-    # Pool A and B (identically distributed) to double effective sample size
-    # for a more robust variance estimate: Var(Y) ~ var(concat(A, B)).
-    y = jnp.concatenate([A, B])
-    var = jnp.var(y)
-    # B*(AB_j - A) isolates how changing only parameter j (A->B) shifts output
-    numerator = jnp.mean(B * (AB_j - A))
-    # Zero variance means constant output; index is undefined, not zero
-    return jnp.where(var == 0, jnp.nan, numerator / var)
-
-
-def total_order(A: Array, AB_j: Array, B: Array) -> Array:
-    """Estimate the total-order Sobol index for parameter j.
-
-    Uses the Jansen (1999) estimator::
-
-        ST_j = (1/2) * E[(A - AB_j)^2] / Var(Y)
-
-    Args:
-        A: Model outputs evaluated on base sample matrix A, shape ``(N,)``.
-        AB_j: Model outputs from the cross-matrix where column j of A is
-            replaced by column j of B, shape ``(N,)``.
-        B: Model outputs evaluated on base sample matrix B, shape ``(N,)``.
-
-    Returns:
-        Scalar Array with the total-order index ST_j.
-    """
-    y = jnp.concatenate([A, B])
-    var = jnp.var(y)
-    # Jansen (1999) estimator: ST_j = E[(A - AB_j)^2] / (2 Var(Y)).
-    # Measures total variance attributable to param j (including interactions).
-    # Preferred over Sobol (1993) because it is non-negative by construction.
-    numerator = 0.5 * jnp.mean((A - AB_j) ** 2)
-    return jnp.where(var == 0, jnp.nan, numerator / var)
-
-
-def second_order(A: Array, AB_j: Array, AB_k: Array, BA_j: Array, B: Array) -> Array:
-    """Estimate the second-order Sobol interaction index between parameters j and k.
-
-    Uses the Saltelli (2002) estimator::
-
-        V_jk  = E[BA_j * AB_k - A * B] / Var(Y)
-        S2_jk = V_jk - S1_j - S1_k
-
-    Args:
-        A: Model outputs evaluated on base sample matrix A, shape ``(N,)``.
-        AB_j: Model outputs from the cross-matrix where column j of A is
-            replaced by column j of B, shape ``(N,)``.
-        AB_k: Model outputs from the cross-matrix where column k of A is
-            replaced by column k of B, shape ``(N,)``.
-        BA_j: Model outputs from the cross-matrix where column j of B is
-            replaced by column j of A, shape ``(N,)``.
-        B: Model outputs evaluated on base sample matrix B, shape ``(N,)``.
-
-    Returns:
-        Scalar Array with the second-order interaction index S2_jk.
-    """
-    y = jnp.concatenate([A, B])
-    var = jnp.var(y)
-    # V_jk estimates the joint variance contribution of params j and k
-    Vjk = jnp.where(var == 0, jnp.nan, jnp.mean(BA_j * AB_k - A * B) / var)
-    # Subtract marginal effects to isolate the pure interaction
-    Sj = first_order(A, AB_j, B)
-    Sk = first_order(A, AB_k, B)
-    # Sobol ANOVA decomposition: the second-order interaction is the joint
-    # variance contribution V_jk minus both marginal first-order effects,
-    # isolating the purely synergistic effect between parameters j and k.
-    return Vjk - Sj - Sk
-
-
 # ---------------------------------------------------------------------------
-# Fused kernels: compute variance ONCE, derive all indices from it.
-# The per-parameter functions above recompute pooled var(concat(A,B)) for
-# every parameter j independently.  These fused variants compute it once
-# and vectorise all D parameters via broadcasting, giving D-fold savings
-# on the most expensive reduction and enabling efficient JIT compilation.
+# Fused kernels: compute the pooled variance ONCE and derive all indices from
+# it, vectorising all D parameters via broadcasting. A per-parameter form
+# would recompute var(concat(A, B)) for every parameter j; fusing saves that
+# D-fold cost on the most expensive reduction and JIT-compiles as one kernel.
 # ---------------------------------------------------------------------------
 
 

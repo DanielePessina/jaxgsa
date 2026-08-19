@@ -107,30 +107,28 @@ def _compute_indices(
 
 
 @lru_cache(maxsize=4)
-def _get_efast_kernel(N: int, M: int, omega_0: int, analysis_max: int, batched: bool):
+def _get_efast_kernel(N: int, M: int, omega_0: int, analysis_max: int):
     """Build and cache a JIT-compiled eFAST kernel for one design.
 
-    Every argument is a plain Python int or bool, so it can serve as a cache
-    key. The frequency plan itself holds a NumPy array and must not be passed
-    here; read its fields instead.
+    Every argument is a plain Python int, so it can serve as a cache key. The
+    frequency plan itself holds a NumPy array and must not be passed here;
+    read its fields instead.
 
     Args:
         N: Number of samples per search curve.
         M: Interference factor.
         omega_0: Primary frequency, from the design's frequency plan.
         analysis_max: Top of the analysis band, from the same plan.
-        batched: If True, vmap the kernel over a leading curve axis.
 
     Returns:
-        A compiled callable mapping curve outputs to ``(S1, ST)``.
+        A compiled callable mapping a batch of curve outputs, vmapped over a
+        leading curve axis, to ``(S1, ST)``.
     """
 
     def kernel(Y_curve: Array) -> tuple[Array, Array]:
         return _compute_indices(Y_curve, N, M, omega_0, analysis_max)
 
-    if batched:
-        return jax.jit(jax.vmap(kernel))
-    return jax.jit(kernel)
+    return jax.jit(jax.vmap(kernel))
 
 
 def _indices_from_3d(
@@ -174,7 +172,7 @@ def _indices_from_3d(
         # Scalar path: squeeze the trailing singletons and vmap over the D
         # curves only.
         Y_curves = Y_reshaped[:, :, 0, 0]  # (D, N)
-        kernel = _get_efast_kernel(N, M, omega_0, analysis_max, batched=True)
+        kernel = _get_efast_kernel(N, M, omega_0, analysis_max)
         return kernel(Y_curves)  # each (D,)
 
     # Batched path: flatten (D, T, K) into a single vmap axis.
@@ -185,7 +183,7 @@ def _indices_from_3d(
     # follows the transient-memory budget when the caller gives no size.
     itemsize = jnp.dtype(jnp.result_type(Y_batched.dtype, jnp.float32)).itemsize
     cs = resolve_batch_size(_EFAST_LIVE_ARRAYS * N * itemsize, total, slice_chunk_size)
-    batched = _get_efast_kernel(N, M, omega_0, analysis_max, batched=True)
+    batched = _get_efast_kernel(N, M, omega_0, analysis_max)
 
     s1_parts: list[Array] = []
     st_parts: list[Array] = []

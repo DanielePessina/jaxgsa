@@ -299,7 +299,6 @@ class Preamble:
     method rebuild it keeps one copy of the ten steps and one order for them.
 
     Attributes:
-        spec: The calling method's registry record.
         problem: The problem, unchanged.
         method: Fully qualified analyzer name, for every message from here on.
         policy: The validated ``on_invalid`` policy.
@@ -307,7 +306,6 @@ class Preamble:
             spec.
     """
 
-    spec: MethodSpec
     problem: Problem
     method: str
     policy: OnInvalid
@@ -501,7 +499,7 @@ def prepare_scalars(
     if not spec.is_design_based:
         gates(spec, problem, method=method)
 
-    return Preamble(spec=spec, problem=problem, method=method, policy=policy, unit=unit)
+    return Preamble(problem=problem, method=method, policy=policy, unit=unit)
 
 
 def prepare(
@@ -519,7 +517,6 @@ def prepare(
     unit_of_row: npt.NDArray[np.intp] | None = None,
     row_labels: npt.NDArray[np.intp] | None = None,
     min_kept: int = 1,
-    source_names: tuple[str, str] = ("X", "Y"),
     warn_zero_variance: bool = True,
     zero_variance_outcome: str = "nan",
 ) -> Context:
@@ -571,7 +568,6 @@ def prepare(
             evaluated one output per unique run, so the report has to name the
             rows they can act on. ``None`` when the two numberings agree.
         min_kept: Fewest surviving units the estimator can still work with.
-        source_names: What to call the two arrays in messages.
         warn_zero_variance: Whether to check for a constant output slice. Off
             only where the caller has already computed the variance and warns
             with it itself.
@@ -599,7 +595,6 @@ def prepare(
         unit_of_row=unit_of_row,
         row_labels=row_labels,
         min_kept=min_kept,
-        source_names=source_names,
         warn_zero_variance=warn_zero_variance,
         zero_variance_outcome=zero_variance_outcome,
     )
