@@ -73,7 +73,7 @@ def _bootstrap_result(Y_shape_suffix, calc_second_order=True):
         p, n_samples=256, seed=42, calc_second_order=calc_second_order, verbose=False
     )
     Y = jax.random.normal(jax.random.key(1), (sr.n_runs, *Y_shape_suffix))
-    return jaxgsa.sobol.analyze(sr, Y, num_resamples=50, key=jax.random.key(99)), p
+    return jaxgsa.sobol.analyze(sr, Y, n_bootstrap=50, key=jax.random.key(99)), p
 
 
 def test_bootstrap_1d_shape():

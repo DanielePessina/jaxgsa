@@ -149,7 +149,7 @@ class TestSAResultToDataset:
         result = jaxgsa.sobol.analyze(
             sampling_result,
             Y,
-            num_resamples=20,
+            n_bootstrap=20,
             conf_level=0.9,
             ci_method=ci_method,
             key=jax.random.key(123),

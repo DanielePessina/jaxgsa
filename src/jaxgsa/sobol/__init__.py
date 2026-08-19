@@ -45,7 +45,7 @@ SPEC = register(
         # The Saltelli design and its estimators assume independent inputs.
         correlation="refuses",
         categorical="accepts",
-        bootstrap="num_resamples",
+        bootstrap="n_bootstrap",
         # A Saltelli group is D+2 or 2D+2 rows for one base point. Dropping
         # part of one leaves the estimator reading misaligned rows.
         invalid_unit=InvalidUnit.SALTELLI_GROUP,

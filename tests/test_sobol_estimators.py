@@ -400,7 +400,7 @@ class TestPathsAgree:
         sr, Y = ishigami_design
         plain = jaxgsa.sobol.analyze(sr, Y, estimator=estimator)
         boot = jaxgsa.sobol.analyze(
-            sr, Y, estimator=estimator, num_resamples=40, key=jax.random.key(0)
+            sr, Y, estimator=estimator, n_bootstrap=40, key=jax.random.key(0)
         )
         np.testing.assert_array_equal(np.asarray(plain.S1), np.asarray(boot.S1))
         np.testing.assert_array_equal(np.asarray(plain.ST), np.asarray(boot.ST))

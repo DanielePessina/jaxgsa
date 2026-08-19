@@ -22,6 +22,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from jaxgsa._core.batching import get_memory_budget
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare
 from jaxgsa._core.invalid import OnInvalid
@@ -40,11 +41,34 @@ from jaxgsa.morris._sampling import MorrisSamples
 # drops. A small design the user asked for is deliberate, so it stays silent.
 _MIN_TRAJECTORIES = 10
 
-# Peak-memory budget, in array elements, for one bootstrap chunk. Each resample
-# gathers a full (r, D, T, K) copy of the elementary effects. The batch size is
-# therefore capped by output volume as well as by the resample count, which
-# keeps multi-output and time-series runs from exhausting device memory.
-_BOOTSTRAP_ELEMENT_BUDGET = 64_000_000  # ~256 MB at float32
+
+def _resolve_resample_chunk_size(
+    resample_chunk_size: int | None, n_bootstrap: int, bytes_per_replicate: int
+) -> int:
+    """Resolve how many bootstrap replicates one device call may carry.
+
+    Each replicate gathers a full ``(r, D, T, K)`` copy of the elementary
+    effects, so the working set of a chunk grows with output volume as well as
+    with the replicate count. The width is therefore capped by the active
+    memory budget as well as by the caller's request, which keeps multi-output
+    and time-series runs from exhausting device memory. This follows the same
+    rule as ``pawn`` and ``sobol`` use for their slice chunks: the caller's
+    value is an upper bound only, and the budget may lower it but never raise
+    it.
+
+    Args:
+        resample_chunk_size: Caller's cap on replicates per chunk, or ``None``
+            to take the budget-derived width alone.
+        n_bootstrap: R, the number of bootstrap replicates.
+        bytes_per_replicate: Transient memory one replicate needs.
+
+    Returns:
+        A chunk width in ``[1, n_bootstrap]``.
+    """
+    budget = max(1, get_memory_budget() // max(bytes_per_replicate, 1))
+    if resample_chunk_size is None:
+        return max(1, min(budget, n_bootstrap))
+    return max(1, min(resample_chunk_size, budget, n_bootstrap))
 
 
 def _stats_from_ee(ee: Array) -> tuple[Array, Array, Array]:
@@ -159,13 +183,13 @@ def analyze(
     Y: Array,
     *,
     prenormalize: bool = False,
-    num_resamples: int = 0,
+    n_bootstrap: int = 0,
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
-    keep_replicates: bool = False,
     key: Array | None = None,
-    chunk_size: int = 2048,
+    resample_chunk_size: int | None = 2048,
     on_invalid: OnInvalid = "raise",
+    keep_replicates: bool = False,
 ) -> MorrisResult:
     """Compute Morris elementary-effects screening measures using JAX.
 
@@ -201,24 +225,21 @@ def analyze(
             the elementary effects are computed. This makes the measures
             comparable across outputs of different magnitude. Defaults to
             ``False``.
-        num_resamples: R, the number of bootstrap resamples used for the
+        n_bootstrap: R, the number of bootstrap resamples used for the
             confidence intervals. Resampling is over trajectories, with
             replacement. Set to 0 (default) to skip the bootstrap.
         conf_level: Confidence level for the bootstrap intervals (default
             0.95).
         ci_method: Bootstrap endpoint method, ``"quantile"`` (empirical
             percentiles) or ``"gaussian"`` (symmetric around the estimate).
-        keep_replicates: Keep the per-resample measures on
-            ``MorrisResult.ci.replicates``. Off by default because they are
-            large: ``num_resamples`` copies of all three measure arrays. Turn
-            it on to recompute an interval at another level without
-            re-running the analysis.
         key: JAX PRNG key for the bootstrap randomness. Required when
-            ``num_resamples > 0``.
-        chunk_size: Upper bound on the bootstrap resamples processed per vmap
-            batch. Large multi-output or time-series outputs reduce the
-            effective batch further, which keeps peak memory bounded. Defaults
-            to 2048.
+            ``n_bootstrap > 0``.
+        resample_chunk_size: Upper bound on the bootstrap replicates processed
+            per vmap batch. The unit is bootstrap replicates, not output
+            slices. The active memory budget
+            (:func:`jaxgsa.config.get_memory_budget`) lowers it further when
+            the outputs are large, which keeps peak memory bounded. Pass
+            ``None`` to take the budget-derived width alone. Defaults to 2048.
         on_invalid: What to do about non-finite model outputs. The unit here
             is one trajectory, so a single bad value removes the whole block
             of ``D + 1`` rows: the elementary effects are differences between
@@ -227,6 +248,11 @@ def analyze(
             ``"propagate"`` lets the value reach the measures, and ``"drop"``
             analyzes the surviving trajectories. See
             :mod:`jaxgsa._core.invalid`.
+        keep_replicates: Keep the per-replicate measures on
+            ``MorrisResult.ci.replicates``. Off by default because they are
+            large: ``n_bootstrap`` copies of all three measure arrays. Turn
+            it on to recompute an interval at another level without
+            re-running the analysis.
 
     Returns:
         A :class:`MorrisResult` holding:
@@ -244,9 +270,9 @@ def analyze(
             ``on_invalid`` is not one of the three policies; if the sample
             holds a non-finite value under ``on_invalid="raise"``; if fewer
             than 2 trajectories survive; if ``ci_method`` is invalid; if
-            ``num_resamples`` is negative; if ``conf_level`` is not in
-            ``(0, 1)``; if ``num_resamples > 0`` but ``key`` is ``None``; or
-            if ``chunk_size < 1``.
+            ``n_bootstrap`` is negative; if ``conf_level`` is not in
+            ``(0, 1)``; if ``n_bootstrap > 0`` but ``key`` is ``None``; or
+            if ``resample_chunk_size`` is given and below 1.
 
     Warns:
         JaxgsaWarning: If a derived design already lost blocks with no
@@ -270,8 +296,8 @@ def analyze(
         on_invalid=on_invalid,
         checks=(
             one_of("ci_method", ci_method, ("quantile", "gaussian")),
-            at_least("chunk_size", chunk_size, 1),
-            at_least("num_resamples", num_resamples, 0),
+            at_least("resample_chunk_size", resample_chunk_size, 1),
+            at_least("n_bootstrap", n_bootstrap, 0),
             in_open_interval("conf_level", conf_level, 0.0, 1.0),
         ),
         n_expected=int(sampling_result.samples.shape[0]),
@@ -329,22 +355,23 @@ def analyze(
     # all, so a single name keeps that fact checkable instead of implied.
     conf_triple: tuple[Array, Array, Array] | None = None
     replicates: dict[str, Array] | None = {} if keep_replicates else None
-    if num_resamples > 0:
+    if n_bootstrap > 0:
         if key is None:
-            raise ValueError("key is required when num_resamples > 0")
+            raise ValueError("key is required when n_bootstrap > 0")
         r = ee.shape[0]
         # Pre-generate all R bootstrap index sets, sampling with replacement.
-        indices = jax.random.randint(key, shape=(num_resamples, r), minval=0, maxval=r)
+        indices = jax.random.randint(key, shape=(n_bootstrap, r), minval=0, maxval=r)
 
-        # Cap the batch by the user's chunk_size and by an element budget. One
-        # chunk materialises cs copies of the (r, D, T, K) effects tensor, so a
-        # large T*K would otherwise exhaust device memory at chunk_size.
-        per_sample = int(np.prod(ee.shape))  # r * D * T * K
-        mem_cap = max(1, _BOOTSTRAP_ELEMENT_BUDGET // max(per_sample, 1))
-        cs = max(1, min(chunk_size, num_resamples, mem_cap))
+        # One chunk materialises cs copies of the (r, D, T, K) effects tensor,
+        # so a large T*K would otherwise exhaust device memory at the caller's
+        # width. The memory budget lowers it, never raises it.
+        per_replicate = int(np.prod(ee.shape))  # r * D * T * K
+        cs = _resolve_resample_chunk_size(
+            resample_chunk_size, n_bootstrap, per_replicate * ee.dtype.itemsize
+        )
         mu_parts, mu_star_parts, sigma_parts = [], [], []
-        for start in range(0, num_resamples, cs):
-            end = min(start + cs, num_resamples)
+        for start in range(0, n_bootstrap, cs):
+            end = min(start + cs, n_bootstrap)
             n_real = end - start
             idx_chunk = indices[start:end]
             if n_real < cs:
@@ -386,10 +413,10 @@ def analyze(
         CIInfo(
             level=conf_level,
             method=ci_method,
-            n_resamples=num_resamples,
+            n_resamples=n_bootstrap,
             replicates=replicates,
         )
-        if num_resamples > 0
+        if n_bootstrap > 0
         else None
     )
 

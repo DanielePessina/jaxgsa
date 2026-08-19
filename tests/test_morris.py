@@ -450,7 +450,7 @@ class TestMultiOutput:
 class TestBootstrap:
     def test_conf_shapes_and_bracket(self, ishigami_morris_result):
         sr, Y, _ = ishigami_morris_result
-        res = analyze(sr, Y, num_resamples=200, key=jax.random.PRNGKey(0))
+        res = analyze(sr, Y, n_bootstrap=200, key=jax.random.PRNGKey(0))
         for est, conf in [
             (res.mu, res.mu_conf),
             (res.mu_star, res.mu_star_conf),
@@ -463,14 +463,14 @@ class TestBootstrap:
 
     def test_deterministic_under_key(self, ishigami_morris_result):
         sr, Y, _ = ishigami_morris_result
-        r1 = analyze(sr, Y, num_resamples=50, key=jax.random.PRNGKey(3))
-        r2 = analyze(sr, Y, num_resamples=50, key=jax.random.PRNGKey(3))
+        r1 = analyze(sr, Y, n_bootstrap=50, key=jax.random.PRNGKey(3))
+        r2 = analyze(sr, Y, n_bootstrap=50, key=jax.random.PRNGKey(3))
         np.testing.assert_array_equal(np.asarray(r1.mu_star_conf), np.asarray(r2.mu_star_conf))
 
     def test_chunked_matches_unchunked(self, ishigami_morris_result):
         sr, Y, _ = ishigami_morris_result
-        r_full = analyze(sr, Y, num_resamples=64, key=jax.random.PRNGKey(5))
-        r_chunk = analyze(sr, Y, num_resamples=64, key=jax.random.PRNGKey(5), chunk_size=10)
+        r_full = analyze(sr, Y, n_bootstrap=64, key=jax.random.PRNGKey(5))
+        r_chunk = analyze(sr, Y, n_bootstrap=64, key=jax.random.PRNGKey(5), resample_chunk_size=10)
         # float32 reductions vary slightly with the vmap batch size
         np.testing.assert_allclose(
             np.asarray(r_full.mu_star_conf), np.asarray(r_chunk.mu_star_conf), atol=1e-5
@@ -478,19 +478,19 @@ class TestBootstrap:
 
     def test_gaussian_ci_method(self, ishigami_morris_result):
         sr, Y, _ = ishigami_morris_result
-        res = analyze(sr, Y, num_resamples=100, key=jax.random.PRNGKey(1), ci_method="gaussian")
+        res = analyze(sr, Y, n_bootstrap=100, key=jax.random.PRNGKey(1), ci_method="gaussian")
         assert res.mu_star_conf is not None
         assert np.all(np.asarray(res.mu_star_conf[1]) >= np.asarray(res.mu_star_conf[0]))
 
     def test_missing_key_raises(self, ishigami_morris_result):
         sr, Y, _ = ishigami_morris_result
         with pytest.raises(ValueError, match="key is required"):
-            analyze(sr, Y, num_resamples=10)
+            analyze(sr, Y, n_bootstrap=10)
 
     def test_invalid_ci_method_raises(self, ishigami_morris_result):
         sr, Y, _ = ishigami_morris_result
         with pytest.raises(ValueError, match="ci_method"):
-            analyze(sr, Y, num_resamples=10, key=jax.random.PRNGKey(0), ci_method=cast(Any, "bad"))
+            analyze(sr, Y, n_bootstrap=10, key=jax.random.PRNGKey(0), ci_method=cast(Any, "bad"))
 
 
 class TestPhysicalUnits:
@@ -506,7 +506,7 @@ class TestPhysicalUnits:
 
     def test_conf_scaled_too(self, ishigami_morris_result):
         sr, Y, _ = ishigami_morris_result
-        res = analyze(sr, Y, num_resamples=50, key=jax.random.PRNGKey(2))
+        res = analyze(sr, Y, n_bootstrap=50, key=jax.random.PRNGKey(2))
         res_phys = res.to_physical_units()
         assert res_phys.mu_star_conf is not None
         np.testing.assert_allclose(
