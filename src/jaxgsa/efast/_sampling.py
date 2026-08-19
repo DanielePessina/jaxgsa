@@ -12,11 +12,19 @@ References:
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
+from jaxgsa._core.samples import (
+    _jaxgsa_version,
+    _npz_path,
+    _problem_from_meta,
+    _problem_to_meta,
+)
 from jaxgsa._core.sampling import _transform_samples
 from jaxgsa._core.validation import _raise_categorical_design, _raise_correlated_design
 from jaxgsa.problem import Problem
@@ -83,6 +91,64 @@ class EFASTSamples:
     def n_runs(self) -> int:
         """Number of rows in ``samples``, which is the number of model runs."""
         return self.n_per_curve * self.problem.num_vars
+
+    def save(self, path: str | Path) -> None:
+        """Save the full design to one compressed NPZ file.
+
+        The on-disk layout follows the same conventions as the other design
+        objects (``jaxgsa.sobol.SobolSamples.save`` and friends): one
+        compressed file holding the sample matrix plus a JSON ``metadata``
+        blob that records the problem definition, the design parameters
+        (``n_per_curve``, ``M``), and the jaxgsa version that wrote the file.
+        eFAST has no deduplication, so there is no expansion map to store.
+
+        Args:
+            path: Destination file path. If it does not already end in
+                ``.npz``, the suffix is appended, matching NumPy's ``savez``
+                convention. The file written to disk may therefore differ
+                from the exact string passed: ``"run.A"`` is saved as
+                ``"run.A.npz"``.
+        """
+        meta = {
+            "jaxgsa_version": _jaxgsa_version(),
+            "problem": _problem_to_meta(self.problem),
+            "n_per_curve": self.n_per_curve,
+            "M": self.M,
+        }
+        np.savez_compressed(
+            _npz_path(path),
+            allow_pickle=False,
+            samples=self.samples,
+            metadata=np.asarray(json.dumps(meta)),
+        )
+
+    @classmethod
+    def load(cls, path: str | Path) -> "EFASTSamples":
+        """Load a design saved by :meth:`save`.
+
+        Args:
+            path: Path to the saved design. If it does not already end in
+                ``.npz``, the suffix is appended before opening, mirroring
+                the convention used by :meth:`save`. The file actually read
+                may therefore differ from the exact string passed.
+
+        Returns:
+            The reconstructed design, equal to the instance that was saved.
+            Analyzing it gives the same result as analyzing the original.
+
+        Raises:
+            FileNotFoundError: If no file exists at the resolved path.
+            KeyError: If the file is missing required arrays or metadata
+                entries (i.e. it was not written by :meth:`save`).
+        """
+        with np.load(_npz_path(path), allow_pickle=False) as data:
+            meta = json.loads(data["metadata"].item())
+            return cls(
+                samples=data["samples"],
+                n_per_curve=int(meta["n_per_curve"]),
+                M=int(meta["M"]),
+                problem=_problem_from_meta(meta["problem"]),
+            )
 
 
 @dataclass(frozen=True)

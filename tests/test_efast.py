@@ -784,3 +784,68 @@ def test_analyze_offers_no_interval_and_says_why():
     for text in (analyze.__doc__, efast_pkg.__doc__, efast_pkg._analyze.__doc__):
         assert text is not None
         assert "phase" in text
+
+
+class TestEFASTSaveLoad:
+    """Tier T4 (internal consistency): NPZ persistence round-trips the design."""
+
+    @staticmethod
+    def _mixed_problem() -> Problem:
+        from jaxgsa.problem import GaussianInputSpec
+
+        return Problem.from_dict(
+            {
+                "u": (0.0, 2.0),
+                "g": GaussianInputSpec(dist="gaussian", mean=1.0, variance=4.0),
+            }
+        )
+
+    def test_round_trip_preserves_every_field(self, tmp_path):
+        problem = self._mixed_problem()
+        sr = sample(problem, n_per_curve=128, M=4, seed=7)
+        sr.save(tmp_path / "design")
+
+        loaded = EFASTSamples.load(tmp_path / "design")
+        np.testing.assert_array_equal(loaded.samples, sr.samples)
+        assert loaded.samples.dtype == sr.samples.dtype
+        assert loaded.n_per_curve == sr.n_per_curve
+        assert loaded.M == sr.M
+        assert loaded.problem == sr.problem
+
+    def test_npz_suffix_is_appended_like_the_other_designs(self, tmp_path):
+        sr = sample(self._mixed_problem(), n_per_curve=80, M=4, seed=0)
+        sr.save(tmp_path / "run.A")
+        assert (tmp_path / "run.A.npz").exists()
+        loaded = EFASTSamples.load(tmp_path / "run.A")
+        np.testing.assert_array_equal(loaded.samples, sr.samples)
+
+    def test_metadata_matches_the_shared_format_family(self, tmp_path):
+        """The metadata blob carries the same common keys as the base class."""
+        import json
+
+        sr = sample(self._mixed_problem(), n_per_curve=80, M=4, seed=0)
+        sr.save(tmp_path / "design")
+        with np.load(tmp_path / "design.npz", allow_pickle=False) as data:
+            meta = json.loads(data["metadata"].item())
+        assert set(data.files) == {"samples", "metadata"}
+        assert "jaxgsa_version" in meta
+        assert meta["problem"]["names"] == ["u", "g"]
+        assert meta["n_per_curve"] == 80
+        assert meta["M"] == 4
+
+    def test_analyze_after_load_equals_analyze_before(self, tmp_path):
+        problem = self._mixed_problem()
+        sr = sample(problem, n_per_curve=256, M=4, seed=11)
+        Y = jnp.asarray(np.sin(sr.samples[:, 0]) + sr.samples[:, 1] ** 2)
+        sr.save(tmp_path / "design")
+
+        loaded = EFASTSamples.load(tmp_path / "design")
+        before = analyze(sr, Y)
+        after = analyze(loaded, Y)
+        np.testing.assert_array_equal(np.asarray(before.S1), np.asarray(after.S1))
+        np.testing.assert_array_equal(np.asarray(before.ST), np.asarray(after.ST))
+        assert after.problem == before.problem
+
+    def test_load_missing_file_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            EFASTSamples.load(tmp_path / "nope")
