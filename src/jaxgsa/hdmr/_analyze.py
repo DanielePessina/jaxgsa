@@ -16,7 +16,6 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
-from jaxgsa._core.batching import get_memory_budget
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare
 from jaxgsa._core.invalid import InvalidReport, OnInvalid
@@ -33,10 +32,9 @@ from jaxgsa.hdmr._engine import (
     _build_B2,
     _build_B3,
     _compute_f_crits,
-    _make_hdmr_kernel,
 )
+from jaxgsa.hdmr._fit import _fit_hdmr
 from jaxgsa.hdmr._result import HDMRResult, _HDMRFit
-from jaxgsa.hdmr._stream import _fit_hdmr_streamed, _full_fit_bytes
 from jaxgsa.problem import Problem
 
 # Fewest rows the B-spline backfitting fit can run on. It is the module's own
@@ -132,39 +130,6 @@ def _get_hdmr_static_data(D: int, maxorder: int, m: int) -> _HDMRStaticData:
         beta2=beta2,
         beta3=beta3,
     )
-
-
-@lru_cache(maxsize=None)
-def _get_batched_hdmr_kernel(
-    D: int,
-    maxorder: int,
-    m: int,
-    maxiter: int,
-    lambdax: float,
-    N: int,
-):
-    """Build and cache the jitted, vmapped HDMR fitting kernel."""
-    # Caching by (D, maxorder, m, maxiter, lambdax, N) avoids re-tracing the
-    # JIT+vmap wrapper when hdmr.analyze is called repeatedly with the same
-    # structural parameters but different data.
-    sd = _get_hdmr_static_data(D, maxorder, m)
-    kernel = _make_hdmr_kernel(
-        maxorder,
-        sd.m1,
-        sd.n1,
-        maxiter,
-        sd.m2,
-        sd.m3,
-        sd.n2,
-        sd.n3,
-        sd.n,
-        lambdax,
-        N,
-    )
-    # in_axes=(None, None, None, 0, None): B1/B2/B3 basis matrices and f_crits
-    # are shared across all output slices, while Y is batched along axis 0 so
-    # each (T*K) output slice gets its own response vector.
-    return jax.jit(jax.vmap(kernel, in_axes=(None, None, None, 0, None)))
 
 
 def _build_term_labels(
@@ -391,7 +356,7 @@ class _HDMRCore(NamedTuple):
         C3: Third-order coefficients, or ``None`` below ``maxorder=3``.
         f0: Grand mean per slice.
         maxorder: The expansion order actually fitted, clamped to ``D``.
-        streamed: Whether the row-streamed fit path ran.
+        streamed: Whether the sample axis was split into row batches.
         c2: Parameter index pairs, in term order.
         c3: Parameter index triples, in term order.
         layout: Which rank the caller's ``Y`` had, for the squeeze back.
@@ -434,12 +399,14 @@ def _hdmr_core(
     warning, no clamp warning, no term labels, no result class. Every branch
     it takes is on a shape or on a Python scalar, so it traces.
 
-    Both fit paths live here. The in-memory path builds the full-N bases once
-    and ``vmap``s the fitting kernel over chunks of output slices; the
-    streamed path accumulates the same normal equations over row batches.
-    Which one runs depends on ``batch_size`` and on the memory budget, both
-    Python values, so the choice is made at trace time and neither path reads
-    a sample value on the host.
+    There is one fit path, and it chunks both axes: row batches over the
+    sample axis, slice chunks over the output-slice axis. ``batch_size`` and
+    ``slice_chunk_size`` size them, and both compose. The old "in-memory"
+    fit is now the degenerate corner ``batch_size = N`` and
+    ``slice_chunk_size = T*K``, which is what the automatic sizes resolve to
+    whenever the whole fit fits the memory budget. Both sizes are Python
+    values, so the loop bounds are fixed at trace time and nothing reads a
+    sample value on the host. See :mod:`jaxgsa.hdmr._fit`.
 
     Args:
         problem: Parameter names and distributions.
@@ -503,106 +470,43 @@ def _hdmr_core(
 
     total = T * K_out
 
-    # Streamed path: engage when the user forces it with an explicit
-    # batch_size, or when the in-memory fit's resident footprint (full-N
-    # bases + one lane's kernel transients) would exceed the memory budget.
-    full_bytes = _full_fit_bytes(N, D, m1, m2, m3, n1, n2, n3, n, Y_3d.dtype.itemsize)
-    streamed = batch_size is not None or full_bytes > get_memory_budget()
-    if streamed:
-        # (N, T, K) -> (N, T*K): keep the sample axis leading so row batches
-        # are contiguous slices; column t*K + k is output slice (t, k).
-        Y_nl = Y_3d.reshape(N, total)
-        sa_cat, sb_cat, s_cat, select_lanes, rmse_cat, c1_cat, c2_cat, c3_cat, f0_cat = (
-            _fit_hdmr_streamed(
-                X_n,
-                Y_nl,
-                m=m,
-                maxorder=maxorder,
-                maxiter=maxiter,
-                lambdax=lambdax,
-                f_crits=f_crits,
-                c2_idx=c2_idx,
-                c3_idx=c3_idx,
-                beta2=beta2,
-                beta3=beta3,
-                n1=n1,
-                n2=n2,
-                n3=n3,
-                n=n,
-                m1=m1,
-                m2=m2,
-                m3=m3,
-                batch_size=batch_size,
-            )
-        )
-        select_sum = jnp.sum(select_lanes, axis=0)
-    else:
-        # In-memory path: build the full-N B-spline bases once (shared across
-        # output slices; only Y changes) and vmap the fitting kernel over
-        # chunks of output slices.
-        B1 = _build_B1(X_n, m)  # (N, m1, D)
-        B2 = _build_B2(B1, c2_idx, beta2) if n2 > 0 else jnp.zeros((N, 1, 1))
-        B3 = _build_B3(B1, c3_idx, beta3) if n3 > 0 else jnp.zeros((N, 1, 1))
-
-        # (N,T,K) -> (T,K,N) -> (T*K, N): move sample axis last, then flatten
-        # time x output into a single batch dim so each row is an independent
-        # response vector for the vmapped kernel.
-        Y_flat = Y_3d.transpose(1, 2, 0).reshape(T * K_out, N)
-        if slice_chunk_size is None:
-            # Peak per-lane transient inside the vmapped kernel is dominated by
-            # ~5 arrays of shape (chunk, N, n_terms) (Y_em, its centered copy,
-            # the leave-one-out sums Y0_minus, their centered copy, and slack),
-            # so derive the chunk count from a fixed bytes budget.
-            itemsize = Y_flat.dtype.itemsize
-            slice_chunk_size = max(1, get_memory_budget() // (5 * N * n * itemsize))
-        cs = min(slice_chunk_size, total)
-
-        # Accumulate chunk results; select_sum aggregates F-test pass counts
-        # across chunks to report how many output slices found each term
-        # significant.
-        sa_parts, sb_parts, s_parts, rmse_parts = [], [], [], []
-        c1_parts, c2_parts, c3_parts, f0_parts = [], [], [], []
-        select_sum = jnp.zeros(n)
-
-        batched_kernel = _get_batched_hdmr_kernel(
-            D,
-            maxorder,
-            m,
-            maxiter,
-            lambdax,
-            N,
-        )
-        # Process output slices in chunks to bound peak device memory when T*K
-        # is large. Each chunk is a vmap batch of independent HDMR fits.
-        for start in range(0, total, cs):
-            end = min(start + cs, total)
-            sa, sb, s, sel, rmse_val, c1_coef, c2_coef, c3_coef, f0_val = batched_kernel(
-                B1,
-                B2,
-                B3,
-                Y_flat[start:end],
-                f_crits,
-            )
-            sa_parts.append(sa)
-            sb_parts.append(sb)
-            s_parts.append(s)
-            rmse_parts.append(rmse_val)
-            c1_parts.append(c1_coef)
-            f0_parts.append(f0_val)
-            select_sum = select_sum + jnp.sum(sel, axis=0)
-            if n2 > 0:
-                c2_parts.append(c2_coef)
-            if n3 > 0:
-                c3_parts.append(c3_coef)
-
-        sa_cat = jnp.concatenate(sa_parts)
-        sb_cat = jnp.concatenate(sb_parts)
-        s_cat = jnp.concatenate(s_parts)
-        rmse_cat = jnp.concatenate(rmse_parts)
-        c1_cat = jnp.concatenate(c1_parts)
-        c2_cat = jnp.concatenate(c2_parts) if n2 > 0 else None
-        c3_cat = jnp.concatenate(c3_parts) if n3 > 0 else None
-        f0_cat = jnp.concatenate(f0_parts)
+    # (N, T, K) -> (N, T*K): keep the sample axis leading so row batches are
+    # contiguous slices; column t*K + k is output slice (t, k).
+    Y_nl = Y_3d.reshape(N, total)
+    (
+        sa_cat,
+        sb_cat,
+        s_cat,
+        select_lanes,
+        rmse_cat,
+        c1_cat,
+        c2_cat,
+        c3_cat,
+        f0_cat,
+        streamed,
+    ) = _fit_hdmr(
+        X_n,
+        Y_nl,
+        m=m,
+        maxorder=maxorder,
+        maxiter=maxiter,
+        lambdax=lambdax,
+        f_crits=f_crits,
+        c2_idx=c2_idx,
+        c3_idx=c3_idx,
+        beta2=beta2,
+        beta3=beta3,
+        n1=n1,
+        n2=n2,
+        n3=n3,
+        n=n,
+        m1=m1,
+        m2=m2,
+        m3=m3,
+        batch_size=batch_size,
+        slice_chunk_size=slice_chunk_size,
+    )
+    select_sum = jnp.sum(select_lanes, axis=0)
 
     # Reassemble into the full (T, K, n_terms) index arrays.
     Sa_out = sa_cat.reshape(T, K_out, n)
@@ -835,23 +739,20 @@ def _analyze_hdmr_core(
             small N, which gives smoother and more stable components.
             Decrease it if genuine sharp features are being oversmoothed.
         slice_chunk_size: Maximum number of (T, K) output slices fitted per
-            vmap batch on the in-memory (non-streamed) path. It caps peak
-            device memory for large T*K, and a smaller value trades speed for
-            memory. ``None`` (default) derives the chunk size from the active
-            memory budget (``jaxgsa.config.set_memory_budget``), because the
-            per-slice cost inside the fitting kernel scales with
-            ``N * n_terms``. Ignored when the fit streams over rows (see
-            ``batch_size``).
+            vmap. It caps peak device memory for large T*K, and a smaller
+            value trades speed for memory. ``None`` (default) derives the
+            chunk size from the active memory budget
+            (``jaxgsa.config.set_memory_budget``), because the per-slice
+            transient scales with ``batch_size * n_terms``. It composes with
+            ``batch_size``: there is one fit path and it honours both.
         batch_size: Rows of ``X``/``Y`` processed per batch during the fit
             (the package-wide ``batch_size`` convention). ``None`` (default)
-            keeps the in-memory fit unless its estimated resident memory
-            exceeds the active memory budget, in which case the fit streams
-            over auto-sized row batches. That estimate covers the full-N
-            B-spline bases plus the per-slice kernel transients: see
-            :func:`jaxgsa.hdmr._stream._full_fit_bytes`. An explicit int
-            always forces the streamed fit with that many rows per batch.
-            Both fit paths solve the same regressions and the same F-test.
-            Results differ only at the level of float32 summation order.
+            derives one from the active memory budget, which resolves to a
+            single batch whenever the whole fit fits; an explicit int forces
+            that many rows per batch. Row batching is exact: it accumulates
+            the same Gram matrices and moments, solves the same regressions
+            and runs the same F-test, so results differ only at the level of
+            float32 summation order.
         invalid: The non-finite report the public :func:`analyze` wrapper
             produced, carried onto the result. It is a required argument
             rather than a default so that no caller can construct an
@@ -899,12 +800,13 @@ def _analyze_hdmr_core(
             public :func:`analyze` wrapper.
 
     Note:
-        On the in-memory path, the fit materializes full-N B-spline basis
-        tensors of roughly ``N * (m+3)^2 * n2`` floats at order 2 and
-        ``N * (m+3)^3 * n3`` floats at order 3 (``n2``/``n3`` = number of
-        parameter pairs/triples). ``slice_chunk_size`` does not change that
-        footprint. When it exceeds the memory budget, the fit switches to the
-        row-streamed path automatically.
+        The fit materializes B-spline basis tensors of roughly
+        ``batch_size * (m+3)^2 * n2`` floats at order 2 and
+        ``batch_size * (m+3)^3 * n3`` floats at order 3 (``n2``/``n3`` =
+        number of parameter pairs/triples). That footprint is what
+        ``batch_size`` bounds; ``slice_chunk_size`` bounds the per-slice
+        statistics transient, ``batch_size * slice_chunk_size * n_terms``.
+        Both default to the whole axis when the memory budget allows it.
     """
     core = _hdmr_core(
         problem,
