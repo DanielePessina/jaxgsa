@@ -45,7 +45,14 @@ nan-aware aggregation drops it. A continuous-only problem has
 References:
     Pianosi & Wagener (2015). A simple and efficient method for global
     sensitivity analysis based on cumulative distribution functions.
-    Environmental Modelling & Software 67:1-11.
+    Environmental Modelling & Software 67:1-11. (Introduces the PAWN
+    index and its KS statistic.)
+    Pianosi & Wagener (2018). Distribution-based sensitivity analysis from
+    a generic input-output sample. Environmental Modelling & Software
+    108:197-207. (The estimator implemented here: bins are built on a
+    generic (X, Y) sample rather than a dedicated conditional design, and
+    the two-sample KS test runs against the whole-sample unconditional
+    CDF.)
 """
 
 from __future__ import annotations
@@ -60,8 +67,8 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core import verbose as _verbose
-from jaxgsa._core.batching import get_memory_budget
-from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
+from jaxgsa._core.batching import resolve_batch_size
+from jaxgsa._core.bootstrap import bootstrap_draws, interval
 from jaxgsa._core.entry import (
     at_least,
     check_scalars,
@@ -69,12 +76,13 @@ from jaxgsa._core.entry import (
     one_of,
     prepare,
     require,
+    validate_inputs,
 )
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.partition import _extract_categorical_codes
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.transforms import cdf_to_unit_interval
-from jaxgsa._core.validation import _prepare_Y
+from jaxgsa._core.validation import _prepare_Y, _validate_output
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.pawn._result import PAWNResult
 from jaxgsa.problem import Problem, _categorical_dims
@@ -96,11 +104,12 @@ def _count_valid_bins(bin_idx: Array, n_eff: int) -> np.ndarray:
     A bin contributes only when it holds at least two samples; the KS kernel
     returns ``NaN`` for anything smaller and the nan-aware aggregation drops
     it. Bin occupancy depends on the inputs alone (never on ``Y``), so the
-    count is computed once per analysis, on the host. This makes the count
-    exact for finite ``Y``; under ``on_invalid="propagate"`` with NaN in
-    ``Y``, an occupied bin can still yield a NaN KS value, so the count is
-    an upper bound there — in exactly the mode where the indices themselves
-    are already NaN.
+    count is computed once per analysis, on the host. The count stays exact
+    even under ``on_invalid="propagate"`` with a NaN in ``Y``: the KS kernel
+    reads ranks, not values, and ``jnp.argsort`` places a NaN row at the end
+    of the sort deterministically, so it still lands in a well-defined group
+    and the KS statistic stays finite. A propagated NaN in ``Y`` does not
+    make the index NaN.
 
     Args:
         bin_idx: Conditioning-bin indices from :func:`_bin_indices`, shape
@@ -141,7 +150,7 @@ def _warn_sparse_bins(problem: Problem, n_valid: np.ndarray, n_bins: int) -> Non
             sparse.append(f"{problem.names[d]!r} ({int(count)}/{expected})")
     if sparse:
         warnings.warn(
-            f"PAWN: parameters {', '.join(sparse)} have fewer than half of "
+            f"jaxgsa.pawn: parameters {', '.join(sparse)} have fewer than half of "
             "their conditioning bins contributing (a bin needs at least 2 "
             "samples to define a conditional CDF; the rest are dropped). The "
             "reported indices rest on those few bins. Use fewer bins "
@@ -345,37 +354,6 @@ def _get_pawn_ks(n_bins: int):
     return jax.jit(_impl)
 
 
-def _resolve_slice_chunk_size(
-    slice_chunk_size: int | None,
-    N: int,
-    D: int,
-    n_eff: int,
-    itemsize: int,
-) -> int:
-    """Resolve the number of output columns per kernel call.
-
-    An explicit value is honoured as given. ``None`` derives one from the
-    active memory budget (:func:`jaxgsa._core.batching.get_memory_budget`)
-    and the kernel's real working set, which is ``chunk * D * N * n_eff``
-    elements, not the ``chunk * D * n_eff`` result. Two such arrays are live
-    at once inside the kernel, so the estimate carries a factor of two.
-
-    Args:
-        slice_chunk_size: Caller's value, or ``None`` to derive one.
-        N: Number of samples.
-        D: Number of parameters.
-        n_eff: Number of bins the kernel is compiled at.
-        itemsize: Bytes per element of the kernel's working dtype.
-
-    Returns:
-        A chunk width of at least 1.
-    """
-    if slice_chunk_size is not None:
-        return slice_chunk_size
-    bytes_per_column = 2 * D * N * n_eff * itemsize
-    return max(1, get_memory_budget() // max(bytes_per_column, 1))
-
-
 def _pad_columns(Y_cols: Array, width: int) -> Array:
     """Zero-pad the output-column axis of ``Y_cols`` up to ``width`` columns.
 
@@ -472,7 +450,11 @@ def _pawn_core(
     total = T * K
     # The kernel promotes its working dtype to at least float32.
     itemsize = jnp.result_type(Y_3d.dtype, jnp.float32).itemsize
-    cs = min(_resolve_slice_chunk_size(slice_chunk_size, N, D, n_eff, itemsize), total)
+    # The kernel's real working set is `chunk * D * N * n_eff` elements, not
+    # the `chunk * D * n_eff` result; two such arrays are live at once inside
+    # the kernel, so the per-column byte estimate below carries a factor of
+    # two.
+    cs = resolve_batch_size(2 * D * N * n_eff * itemsize, total, slice_chunk_size)
     kernel = _get_pawn_ks(n_eff)
 
     # The KS values of one output column depend on no other column, so the
@@ -580,8 +562,6 @@ def indices(
             ``"median"``/``"max"``/``"mean"``, if ``n_bins < 2``, or if
             ``slice_chunk_size`` is given and is below 1.
     """
-    X_arr, Y_arr = jnp.asarray(X), jnp.asarray(Y)
-    rank_ok = Y_arr.ndim in (1, 2, 3)
     check_scalars(
         (
             require(
@@ -590,20 +570,10 @@ def indices(
             ),
             at_least("n_bins", n_bins, 2),
             at_least("slice_chunk_size", slice_chunk_size, 1),
-            require(X_arr.ndim == 2, f"X must be 2-D (N, D), got shape {X_arr.shape}"),
-            require(
-                X_arr.ndim != 2 or X_arr.shape[1] == problem.num_vars,
-                f"X has {X_arr.shape[-1] if X_arr.ndim else 0} columns but the problem "
-                f"declares {problem.num_vars} parameters",
-            ),
-            require(rank_ok, f"Y must have 1, 2 or 3 dimensions, got {Y_arr.ndim}"),
-            require(
-                not rank_ok or X_arr.ndim != 2 or Y_arr.shape[0] == X_arr.shape[0],
-                f"X has {X_arr.shape[0] if X_arr.ndim else 0} rows but Y has "
-                f"{Y_arr.shape[0] if Y_arr.ndim else 0}",
-            ),
         )
     )
+    X_arr = validate_inputs(problem, X)
+    Y_arr = _validate_output(Y, int(X_arr.shape[0]), problem)
 
     Y3, layout = _prepare_Y(Y_arr)
     bin_idx, n_eff = _bin_indices(problem, X_arr, n_bins)
@@ -755,6 +725,10 @@ def analyze(
             one_of("ci_method", ci_method, ("quantile", "gaussian")),
             in_open_interval("conf_level", conf_level, 0.0, 1.0),
             at_least("slice_chunk_size", slice_chunk_size, 1),
+            require(
+                n_bootstrap == 0 or key is not None,
+                "key is required when n_bootstrap > 0",
+            ),
         ),
         min_kept=_MIN_KEPT,
         # A constant slice leaves every conditional distribution equal to
@@ -762,10 +736,9 @@ def analyze(
         # the NaN a variance ratio would give.
         zero_variance_outcome="zero",
     )
-    if n_bootstrap > 0 and key is None:
-        raise ValueError("key is required when n_bootstrap > 0")
 
-    X, invalid = ctx.inputs, ctx.invalid
+    assert ctx.X is not None  # a given-data method always passes X to prepare()
+    X, invalid = ctx.X, ctx.invalid
     Y_3d = ctx.Y3
     t0 = _verbose.tic()
     # Refusing a malformed categorical column needs concrete values, so it
@@ -784,35 +757,27 @@ def analyze(
     ci: CIInfo | None = None
     if n_bootstrap > 0:
         assert key is not None  # checked above, before the point estimate ran
-        boot_key = key
         N = X.shape[0]
-        boot_draws = []
-        for _ in range(n_bootstrap):
-            boot_key, subkey = jax.random.split(boot_key)
-            idx = jax.random.choice(subkey, N, shape=(N,), replace=True)
-            boot_pawn = _pawn_core(
+        boot_stack = bootstrap_draws(
+            key,
+            N,
+            n_bootstrap,
+            lambda idx: _pawn_core(
                 bin_idx[idx], Y_3d[idx], n_eff, statistic, slice_chunk_size, warn=False
-            )
-            boot_draws.append(boot_pawn)
-
-        boot_stack = jnp.stack(boot_draws, axis=0)
-        # Stack [lower, upper] into a leading axis of size 2.
-        pawn_conf_3d = jnp.stack(
-            _bootstrap_ci_endpoints(
-                pawn_3d, boot_stack, conf_level=conf_level, ci_method=ci_method
-            )
+            ),
         )
 
-        pawn_conf = ctx.squeeze(pawn_conf_3d)
-
-        # The leading resample axis survives the squeeze, which addresses the
-        # T/K axes from the end.
-        ci = CIInfo(
+        # Squeeze the point estimate and the draws to the caller's own
+        # layout first; interval() returns conf/ci already at that layout.
+        confs, ci = interval(
+            {"pawn": ctx.squeeze(pawn_3d)},
+            {"pawn": ctx.squeeze(boot_stack)},
             level=conf_level,
             method=ci_method,
             n_bootstrap=n_bootstrap,
-            replicates={"pawn": ctx.squeeze(boot_stack)} if keep_replicates else None,
+            keep_replicates=keep_replicates,
         )
+        pawn_conf = confs["pawn"]
 
     pawn_out = ctx.squeeze(pawn_3d)
 
@@ -833,9 +798,8 @@ def analyze(
         # Same resolver and clamp _pawn_core ran, on the same shapes: cheap
         # arithmetic, reported rather than re-derived by hand.
         itemsize = jnp.result_type(Y_3d.dtype, jnp.float32).itemsize
-        cs = min(
-            _resolve_slice_chunk_size(slice_chunk_size, N, problem.num_vars, n_eff, itemsize),
-            T * K,
+        cs = resolve_batch_size(
+            2 * problem.num_vars * N * n_eff * itemsize, T * K, slice_chunk_size
         )
         origin = "user-set" if slice_chunk_size is not None else "resolved from the memory budget"
         _verbose.analysis_summary(

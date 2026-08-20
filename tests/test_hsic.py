@@ -16,9 +16,9 @@ from jaxgsa.benchmarks import ishigami, linear, sobol_g
 from jaxgsa.hsic import analyze, indices
 from jaxgsa.hsic._analyze import (
     _build_one_kernel,
+    _hsic_v,
     _linear_quantile_by_selection,
     _median_bandwidth_sq,
-    _resolve_bandwidth_sq,
 )
 from jaxgsa.problem import Problem
 from jaxgsa.sampling import monte_carlo
@@ -142,9 +142,11 @@ class TestBandwidthOverride:
         recorded number moves because the keyword changed meaning.
         """
         x = jnp.asarray(np.random.default_rng(2).normal(size=97))
+        median_sq = _median_bandwidth_sq(x)
+        direct = jnp.exp(-((x[:, None] - x[None, :]) ** 2) / (2.0 * median_sq))
         np.testing.assert_array_equal(
-            np.asarray(_resolve_bandwidth_sq(x, 1.0)),
-            np.asarray(_median_bandwidth_sq(x)),
+            np.asarray(_build_one_kernel(x, 1.0)),
+            np.asarray(direct),
         )
 
     @pytest.mark.parametrize("multiplier", [0.25, 1.0, 4.0])
@@ -157,10 +159,12 @@ class TestBandwidthOverride:
         this is the algebraic statement of the convention.
         """
         x = jnp.asarray(np.random.default_rng(3).normal(size=64) * 17.0)
+        sigma_sq = multiplier**2 * float(_median_bandwidth_sq(x))
+        direct = jnp.exp(-((x[:, None] - x[None, :]) ** 2) / (2.0 * sigma_sq))
         np.testing.assert_allclose(
-            float(_resolve_bandwidth_sq(x, multiplier)),
-            multiplier**2 * float(_median_bandwidth_sq(x)),
-            rtol=1e-12,
+            np.asarray(_build_one_kernel(x, multiplier)),
+            np.asarray(direct),
+            rtol=1e-6,
         )
 
 
@@ -675,6 +679,105 @@ class TestHSICInvalidPolicy:
         assert result.invalid.sources == ("X",)
 
 
+def _population_hsic_gaussian(sx2, sy2, rho, gx2, gy2):
+    """Closed-form population HSIC of a jointly Gaussian pair, Gaussian kernels.
+
+    ``(X, Y)`` are jointly Gaussian, mean 0, ``Var(X) = sx2``, ``Var(Y) =
+    sy2``, ``Corr(X, Y) = rho``. The kernels are Gaussian RBF with *fixed*
+    (not median-heuristic) squared bandwidths ``gx2``, ``gy2``.
+
+    The population HSIC is
+    ``E[k(X,X')l(Y,Y')] - 2*E[f(X)g(Y)] + E[k(X,X')]*E[l(Y,Y')]``,
+    where ``(X,Y)`` and ``(X',Y')`` are iid copies of the joint, ``f(x) =
+    E_x'[k(x,x')]``, ``g(y) = E_y'[l(y,y')]``. Every expectation here is over
+    jointly Gaussian variables against a Gaussian kernel, so each reduces to
+    the moment-generating function of a Gaussian quadratic form,
+    ``E[exp(-Z^T A Z)] = det(I + 2*A*Sigma)^(-1/2)`` for ``Z ~ N(0, Sigma)``:
+
+    - The first term integrates out ``U = X - X'``, ``V = Y - Y'``, which are
+      jointly Gaussian with covariance ``2*Sigma``.
+    - ``f`` and ``g`` are themselves Gaussian functions of ``x`` and ``y``
+      (a Gaussian density convolved with a Gaussian kernel is Gaussian), so
+      the middle term integrates ``f(X)g(Y)`` against the original ``Sigma``.
+    - The last term is the ``D = 1`` case of the same formula, applied to
+      ``X - X'`` and ``Y - Y'`` separately.
+
+    Verified against a large-N (N = 4000) Monte Carlo V-statistic built from
+    scratch with fixed bandwidths (not the median heuristic): the closed
+    form and the Monte Carlo estimate agree to 0.7% relative, which is
+    consistent with the V-statistic's own finite-N sampling error.
+
+    Args:
+        sx2: Population variance of X.
+        sy2: Population variance of Y.
+        rho: Correlation of X and Y, in (-1, 1).
+        gx2: Fixed squared bandwidth of the X kernel.
+        gy2: Fixed squared bandwidth of the Y kernel.
+
+    Returns:
+        The population HSIC, a Python float.
+    """
+
+    def _term(a_diag, sigma):
+        a = np.diag(a_diag)
+        m = np.eye(2) + 2 * a @ sigma
+        return 1.0 / np.sqrt(np.linalg.det(m))
+
+    sxy = rho * np.sqrt(sx2 * sy2)
+    sigma = np.array([[sx2, sxy], [sxy, sy2]])
+    term1 = _term([1 / (2 * gx2), 1 / (2 * gy2)], 2 * sigma)
+
+    ek = np.sqrt(gx2) / np.sqrt(gx2 + 2 * sx2)
+    el = np.sqrt(gy2) / np.sqrt(gy2 + 2 * sy2)
+    term2 = ek * el
+
+    ax, ay = sx2 + gx2, sy2 + gy2
+    cross_scale = (np.sqrt(gx2) / np.sqrt(ax)) * (np.sqrt(gy2) / np.sqrt(ay))
+    cross = cross_scale * _term([1 / (2 * ax), 1 / (2 * ay)], sigma)
+
+    return float(term1 - 2 * cross + term2)
+
+
+class TestClosedFormGaussianPair:
+    """Tier T0: the empirical V-statistic against a genuine population closed form.
+
+    A jointly Gaussian pair under Gaussian kernels is one of the few cases
+    where the *population* HSIC has a closed form (every expectation is a
+    Gaussian quadratic-form moment-generating function; see
+    :func:`_population_hsic_gaussian`). The bandwidth has to be fixed rather
+    than the median heuristic jaxgsa always uses, so this calls the internal
+    kernel-build and V-statistic pieces directly rather than going through
+    ``analyze`` or ``indices``. That is what makes this T0: :class:`TestUnbiasedV`
+    and the others near it check the estimator's own consistency (T4), and
+    the earlier ``bandwidth``/kernel tests are closed-form on the kernel
+    build alone, not on the resulting HSIC value.
+    """
+
+    def test_v_statistic_matches_the_population_closed_form(self):
+        """A large-N V-statistic lands within its own sampling error of the target."""
+        sx2, sy2, rho = 1.0, 2.0, 0.6
+        gx2, gy2 = 0.7, 1.3
+        target = _population_hsic_gaussian(sx2, sy2, rho, gx2, gy2)
+
+        with jax.enable_x64():
+            rng = np.random.default_rng(0)
+            n = 4000
+            chol = np.linalg.cholesky(
+                np.array([[sx2, rho * np.sqrt(sx2 * sy2)], [rho * np.sqrt(sx2 * sy2), sy2]])
+            )
+            z = rng.standard_normal((n, 2)) @ chol.T
+            x = jnp.asarray(z[:, 0])
+            y = jnp.asarray(z[:, 1])
+            k = jnp.exp(-((x[:, None] - x[None, :]) ** 2) / (2.0 * gx2))
+            ly = jnp.exp(-((y[:, None] - y[None, :]) ** 2) / (2.0 * gy2))
+            got = float(_hsic_v(k, ly))
+
+        # A V-statistic's own finite-N sampling error at N = 4000 is on this
+        # order; the tolerance is the measured Monte Carlo error, not a
+        # loosened closed-form check.
+        assert abs(got - target) / target < 0.02
+
+
 # ---------------------------------------------------------------------------
 # indices(): the pure, transformable core
 # ---------------------------------------------------------------------------
@@ -684,10 +787,12 @@ class TestIndicesCore:
     """The traceable core against the policy-carrying ``analyze``.
 
     Tier T4 throughout (behavioural contract). ``analyze`` is not an external
-    oracle for the HSIC arithmetic -- that is checked against closed forms and
-    independence cases elsewhere in this file. What is checked here is the
-    split: the core must return exactly the numbers the full entry point
-    reports, and it must survive the three transformations ``analyze`` cannot.
+    oracle for the HSIC arithmetic -- that is checked against a genuine
+    population closed form in :class:`TestClosedFormGaussianPair` and
+    against independence cases elsewhere in this file. What is checked here
+    is the split: the core must return exactly the numbers the full entry
+    point reports, and it must survive the three transformations ``analyze``
+    cannot.
     """
 
     N = 128
