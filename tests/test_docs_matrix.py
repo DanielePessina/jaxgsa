@@ -34,7 +34,7 @@ METHODS_PAGE = DOCS / "guide" / "methods.md"
 API_PAGE = DOCS / "api" / "index.md"
 
 CAPABILITY_HEADING = "### Method capabilities"
-GIVEN_DATA_HEADING = "## Given-Data Methods"
+GIVEN_DATA_HEADING = "## Given-data methods"
 
 EXPECTED_COLUMNS = [
     "Method",

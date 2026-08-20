@@ -1,39 +1,20 @@
 # Multi-Output & Time-Series
 
-By the end of this page you will have run one damped-oscillator model twice
-through the same `jaxgsa` call, once on a full time history and once on a
-single time step, and you will know how to read the index array that comes
-back in each case.
+`jaxgsa` reads the meaning of your output array from its rank alone. It does not
+guess, and it does not transpose. `(N,)` is a scalar output, `(N, K)` is `K`
+outputs at one instant, and `(N, T, K)` is `K` outputs over `T` timepoints. `N`
+is the number of model runs and `D` is the number of input parameters.
 
-A Sobol' index measures how much of the variance in a model output is caused by
-one input parameter. `jaxgsa` reports two of them here. `S1` is the first-order
-index: the share of output variance explained by that parameter on its own.
-`ST` is the total-order index: the share explained by that parameter on its own
-plus every interaction it takes part in.
+Two axes of the same length are where this bites, and a time axis and an output
+axis are both just integers. The last two sections give the full table of what
+is accepted, what raises, and the one case that is accepted and means something
+other than you intended.
 
-The same `jaxgsa.sobol.analyze()` call accepts scalar, multi-output, and
-time-series multi-output arrays. The letters used for the array axes are `N`
-for the number of model runs, `T` for timepoints, `K` for outputs, and `D` for
-input parameters. This page uses one concrete model to show both the `(N, K)`
-and the `(N, T, K)` layout.
+## One model, two layouts
 
-## Fully runnable example
-
-The example below runs in five steps.
-
-1. Declare the problem. `Problem.from_dict()` names the four input parameters
-   and their ranges. Naming the two outputs here means later index arrays and
-   dataset exports can be read by name instead of by position.
-2. Write the model. `oscillator_model` returns displacement and velocity at 40
-   timepoints, stacked on the last axis. Stacking outputs last is what produces
-   the `(N, T, K)` layout that `jaxgsa` expects.
-3. Sample. `jaxgsa.sobol.sample()` builds the Saltelli design that the Sobol'
-   estimator needs, and returns only the unique rows you have to evaluate.
-4. Build two output arrays from one model evaluation. `Y_time` keeps every
-   timepoint. `Y_snapshot` keeps only the last one. Reusing the same run means
-   the two analyses differ in output layout alone.
-5. Analyze both. The same function handles both layouts, so the only difference
-   is the shape of the array that comes back.
+A damped oscillator with four inputs, returning displacement and velocity at 40
+timepoints. Displacement carries an additive `offset` term; velocity does not.
+That asymmetry is the check later on.
 
 ```python
 import jax.numpy as jnp
@@ -53,117 +34,247 @@ problem = jaxgsa.Problem.from_dict(
 time_values = np.linspace(0.0, 5.0, 40)
 
 
-def oscillator_model(X):
+def oscillator(X):
     amp = X[:, 0, None]
     freq = X[:, 1, None]
     damping = X[:, 2, None]
     offset = X[:, 3, None]
     tt = jnp.asarray(time_values)[None, :]
 
-    displacement = (
-        amp * jnp.sin(2 * jnp.pi * freq * tt) * jnp.exp(-damping * tt) + offset
-    )
+    displacement = amp * jnp.sin(2 * jnp.pi * freq * tt) * jnp.exp(-damping * tt) + offset
     velocity = amp * jnp.cos(2 * jnp.pi * freq * tt) * jnp.exp(-damping * tt)
 
-    return jnp.stack([displacement, velocity], axis=-1)  # (N, T, K=2)
+    return jnp.stack([displacement, velocity], axis=-1)  # (N, T, K)
 
 
-sampling_result = jaxgsa.sobol.sample(problem, n_samples=2048, seed=42)
-X = jnp.asarray(sampling_result.samples)
+design = jaxgsa.sobol.sample(problem, n_samples=2048, seed=42)
+X = jnp.asarray(design.samples)
 
-Y_time = oscillator_model(X)      # (N, T, K)
-Y_snapshot = Y_time[:, -1, :]     # (N, K)
+Y_time = oscillator(X)         # (N, T, K) = (2560, 40, 2)
+Y_snapshot = Y_time[:, -1, :]  # (N, K)    = (2560, 2)
 
-time_result = jaxgsa.sobol.analyze(sampling_result, Y_time)
-snapshot_result = jaxgsa.sobol.analyze(sampling_result, Y_snapshot)
-
-print("Time-series S1 shape:", time_result.S1.shape)      # (T, K, D)
-print("Time-series ST shape:", time_result.ST.shape)      # (T, K, D)
-print("Snapshot S1 shape:", snapshot_result.S1.shape)     # (K, D)
-print("Snapshot ST shape:", snapshot_result.ST.shape)     # (K, D)
-
-print("Displacement sensitivities at the final time step:")
-print(time_result.S1[-1, 0, :])
-
-print("Velocity sensitivities for the snapshot:")
-print(snapshot_result.S1[1, :])
+time_result = jaxgsa.sobol.analyze(design, Y_time)
+snapshot_result = jaxgsa.sobol.analyze(design, Y_snapshot)
 ```
 
-## Reading the output
+`jnp.stack(..., axis=-1)` is the line that makes the layout work. Stack outputs
+on the last axis and you get `(N, T, K)` for free. Stack them anywhere else and
+you will spend the rest of this page fighting the shape rules.
 
-The two analyses return arrays of different rank, and the rank tells you what
-the leading axis means.
+```text
+jaxgsa.sobol.sample: D=4, mode=second-order, base_n=256, requested_runs>=2048, n_runs=2560, n_expanded=2560, duplicates_removed=0 (0.0%), scramble=True
+jaxgsa.sobol.analyze
+  problem: D=4 (amplitude, frequency, damping, offset)
+    marginals: uniform=4
+    correlation: independent
+    output: N=2560 runs, T=40 x K=2 output slices
+    invalid: none found in 256 Saltelli groups (policy 'raise')
+  timing:
+    estimators (includes compile on the first call): 0.4486 s
+    slice_chunk_size: 80 (resolved from the memory budget)
+    estimator: saltelli-jansen
+  results: top 4 of 4 parameters by ST, mean over 80 output slices
+    1. frequency  ST=0.7365
+    2. offset     ST=0.2497
+    3. amplitude  ST=0.09106
+    4. damping    ST=0.08931
+```
 
-- `time_result.S1` has shape `(T, K, D)`, so `(40, 2, 4)` here. That is one
-  first-order index per timepoint, per output, per input parameter: 320 numbers
-  in total. `time_result.S1[-1, 0, :]` selects the last of the 40 timepoints,
-  then output 0, which is `displacement` because it is first in
-  `output_names`. The four numbers printed are the first-order indices of
-  amplitude, frequency, damping, and offset, in the order they were declared
-  in `from_dict()`.
-- `snapshot_result.S1` has shape `(K, D)`, so `(2, 4)`. The time axis is gone
-  because `Y_snapshot` has no time axis. `snapshot_result.S1[1, :]` selects
-  output 1, which is `velocity`, and prints its four first-order indices.
+`T=40 x K=2 output slices` is the line that confirms `jaxgsa` read your array
+the way you meant it. Check it before you read any index. The ranking underneath
+is a mean over all 80 slices, which is a summary and nothing more. A parameter
+that dominates for the first ten timepoints and vanishes afterwards averages
+down to nothing here.
 
-The two printed rows are not the same numbers. `time_result.S1[-1, 0, :]` is
-displacement at the final time step, and `snapshot_result.S1[1, :]` is velocity
-at that same final time step. Displacement carries the `offset` term and
-velocity does not, so the two outputs do not have to rank their inputs the same
-way.
+The second call prints `T=1 x K=2 output slices` for the same reason, and it
+resolves `slice_chunk_size` to 2 instead of 80, because there are only 2 slices
+left to work on.
 
-## Shape rules
-
-`jaxgsa` decides what an array means from its rank, and from
-`problem.output_names` when the rank alone is ambiguous.
-
-- `(N,)` means scalar output.
-- `(N, K)` means multiple outputs with no time dimension.
-- `(N, T, K)` means time-series multi-output.
-- Without `problem.output_names`, a 2D array is always treated as `(N, K)`.
-- With exactly one entry in `problem.output_names`, a 2D array is treated as
-  `(N, T)` — timepoints of that single output — and flows through as
-  `(N, T, 1)`. Passing a pre-reshaped `(N, T, 1)` array also works.
-- Obvious layout mistakes (e.g. a transposed array) are fixed with a
-  `JaxgsaWarning`; ambiguous layouts raise.
-
-## Single-output edge case
-
-One output is the case where the rules above are easiest to trip over, so the
-snippet below prints the resulting shape in each direction. A truly scalar
-output drops both the time and the output axis. A single output measured over
-time keeps a length-1 output axis rather than dropping it.
+## What comes back
 
 ```python
-# Scalar output
-Y_scalar = Y_snapshot[:, 0]      # (N,)
-scalar_result = jaxgsa.sobol.analyze(sampling_result, Y_scalar)
-print(scalar_result.S1.shape)    # (D,)
+np.set_printoptions(precision=3, suppress=True)
 
-# Time-series with one output
-Y_one_output = Y_time[:, :, :1]  # (N, T, 1)
-one_output_result = jaxgsa.sobol.analyze(sampling_result, Y_one_output)
-print(one_output_result.S1.shape)  # (T, 1, D)
+print("time S1    ", time_result.S1.shape)
+print("snapshot S1", snapshot_result.S1.shape)
+print("displacement @ last t:", np.asarray(time_result.S1[-1, 0, :]))
+print("velocity     @ last t:", np.asarray(time_result.S1[-1, 1, :]))
+print("snapshot displacement:", np.asarray(snapshot_result.S1[0, :]))
+print("snapshot velocity    :", np.asarray(snapshot_result.S1[1, :]))
 ```
 
-The first result is `(D,)`, one index per input parameter and nothing else.
-The second is `(T, 1, D)`: the output axis stays, with length 1. Index it as
-`one_output_result.S1[:, 0, :]` to get a `(T, D)` array you can plot against
-time.
+```text
+time S1     (40, 2, 4)
+snapshot S1 (2, 4)
+displacement @ last t: [-0.003  0.161 -0.018  0.663]
+velocity     @ last t: [ 0.021  0.689 -0.07   0.   ]
+snapshot displacement: [-0.003  0.161 -0.018  0.663]
+snapshot velocity    : [ 0.021  0.689 -0.07   0.   ]
+```
+
+The index array mirrors the output array with `N` replaced by `D` and moved to
+the end. `(N, T, K)` in gives `(T, K, D)` out, 320 numbers. `(N, K)` in gives
+`(K, D)` out. The parameter order inside the last axis is the declaration order
+from `from_dict()`, so amplitude, frequency, damping, offset.
+
+The snapshot rows are identical to the last-timepoint rows, to every digit
+printed. They are the same data reaching the same estimator by two routes. If
+you ever slice a time result and get something different from analysing the
+slice directly, the layout was misread somewhere.
+
+Now read the numbers. For velocity, `offset` scores exactly 0.000. That is
+structural rather than a small estimate. Velocity has no `offset` term, so the
+estimator recovers a hard zero. Use a known-absent input this way whenever you
+can. It is the cheapest possible check that your outputs are lined up with your
+design.
+
+For displacement, `offset` is the largest contributor at 0.663 and `frequency`
+is second at 0.161. At `t = 0` the split is very different:
+
+```python
+print("displacement S1 for offset,    t = 0 / 2.56 / 5:", np.asarray(time_result.S1[[0, 20, 39], 0, 3]))
+print("displacement S1 for amplitude, t = 0 / 2.56 / 5:", np.asarray(time_result.S1[[0, 20, 39], 0, 0]))
+```
+
+```text
+displacement S1 for offset,    t = 0 / 2.56 / 5: [0.953 0.499 0.663]
+displacement S1 for amplitude, t = 0 / 2.56 / 5: [0.   0.008 -0.003]
+```
+
+At `t = 0` the sine is zero, so displacement is the offset and nothing else, and
+`S1` says 0.953. By the middle of the window the oscillation has taken half the
+variance. This is the reason to keep the time axis rather than analyse a
+summary statistic. A single number for the whole trajectory would have reported
+one blend of these and hidden the fact that the driver changes.
+
+`amplitude` scores near zero throughout, and at the last timepoint it is
+negative, -0.003. A negative Sobol index is impossible, so that is the noise
+floor. Amplitude only enters multiplied by a sine whose sign flips fast across
+the frequency range, so its main effect averages out. Its `ST` is 0.036, which
+is small but real.
+
+## When 256 base points is not enough
+
+The verbose block reported `base_n=256`, because a second-order design at `D=4`
+spends 10 rows per base point. Look at what that does to the total-order index:
+
+```python
+print("ST velocity @ last t:", np.asarray(time_result.ST[-1, 1, :]))
+```
+
+```text
+ST velocity @ last t: [0.103 1.158 0.349 0.   ]
+```
+
+`frequency` has `ST = 1.158`. A total-order index is a variance share and cannot
+exceed 1. Rerunning at `n_samples=65536`, so `base_n=8192`, brings it to 0.983.
+Nothing was fixed. The estimator was simply averaging 256 samples of a quantity
+that swings hard, because at `t = 5` a frequency anywhere in `[1, 5]` puts the
+cosine anywhere in `[-1, 1]`.
+
+Two things follow. An index above 1 or below 0 is a sample-size warning, and it
+is the only free one you get without bootstrapping. And a wildly oscillating
+output needs far more samples than a smooth one for the same accuracy, so pick
+`n_samples` from the roughness of your output, not from `D`. Confidence
+intervals from
+[Bootstrap Confidence Intervals](/examples/bootstrap) give you the same warning
+for every index rather than only for the ones that overshoot.
+
+## The full shape table
+
+Every row below was run against a design built from a 4-parameter problem, with
+`N = 2560` and 40 timepoints.
+
+| `Y` shape | `problem.output_names` | Result |
+| --- | --- | --- |
+| `(2560,)` | none, or 1 name | `S1` is `(4,)` |
+| `(2560,)` | 2 names | `ValueError: output_names length 2 does not match the output axis K=1` |
+| `(2560, 2)` | 2 names | `S1` is `(2, 4)` |
+| `(2560, 40, 2)` | 2 names | `S1` is `(40, 2, 4)` |
+| `(2560, 40, 1)` | 1 name | `S1` is `(40, 1, 4)` |
+| `(2560, 40)` | 1 name | `ValueError: output_names length 1 does not match the output axis K=40` |
+| `(2560, 40)` | none | `S1` is `(40, 4)`, and the 40 are read as outputs |
+| `(2, 2560)` | 2 names | `ValueError: Y has 2 sample rows but 2560 were expected` |
+| `(2560, 40, 2, 1)` | 2 names | `ValueError: Y must be 1-D (N,), 2-D (N, K), or 3-D (N, T, K)` |
+
+Four rules cover the table.
+
+The sample axis is always first. A transposed array is caught by the row count,
+not by an axis-shape heuristic, and there is no warning and no repair. If your
+model returns `(K, N)`, transpose it yourself.
+
+Rank fixes the meaning. A 2D array is `(N, K)`, always. There is no case in
+which `jaxgsa` reads a 2D array as `(N, T)`.
+
+`output_names` is a hard check, not a label. Its length must equal the size of
+the last axis, and 1 for a 1D array. Set it and it catches the mistakes in rows
+2 and 6 before any compute happens. This is the strongest reason to name your
+outputs even when you never plan to export a dataset.
+
+Rank above 3 raises immediately.
+
+## The one silent case
+
+Row 7 is the one to watch. Pass `(N, T)` with no `output_names` and it is
+accepted as `T` separate outputs at a single instant.
+
+The index values are unharmed. Sobol treats every slice independently, so
+`analyze(d0, Y_2d).S1` matches `analyze(d1, Y_2d[:, :, None]).S1[:, 0, :]`
+exactly, to a max difference of 0.0. What breaks is everything downstream of the
+labels:
+
+```python
+params = {
+    "amplitude": (0.5, 2.0),
+    "frequency": (1.0, 5.0),
+    "damping": (0.01, 0.5),
+    "offset": (-1.0, 1.0),
+}
+unnamed = jaxgsa.Problem.from_dict(params)
+named = jaxgsa.Problem.from_dict(params, output_names=("displacement",))
+
+d0 = jaxgsa.sobol.sample(unnamed, n_samples=2048, seed=42, verbose=False)
+d1 = jaxgsa.sobol.sample(named, n_samples=2048, seed=42, verbose=False)
+Y_2d = Y_time[:, :, 0]  # (2560, 40): displacement over time
+
+ds_wrong = jaxgsa.sobol.analyze(d0, Y_2d, verbose=False).to_dataset()
+ds_right = jaxgsa.sobol.analyze(d1, Y_2d[:, :, None], verbose=False).to_dataset(
+    time_coords=time_values
+)
+
+print(list(ds_wrong.dims))
+print(list(ds_right.dims))
+```
+
+```text
+['output', 'param', 'param_i', 'param_j']
+['time', 'output', 'param', 'param_i', 'param_j']
+```
+
+The wrong dataset has no time dimension and labels the 40 timepoints `y0`
+through `y39`. You cannot select by time, you cannot plot against `time_values`,
+and a colleague reading the netCDF file has no way to know that `y17` is a
+moment rather than a quantity.
+
+Add the trailing axis with `Y[:, :, None]` and name the single output. Two
+characters and one keyword, and the labels come out right.
 
 ## Practical caveats
 
-- Named outputs come from `problem.output_names`, so set them up early if you
-  plan to export with `to_dataset()`.
-- `calc_second_order=False` removes `S2`, the second-order indices for
-  parameter pairs. Dropping them can be a useful tradeoff for large `(T, K)`
-  outputs when you only need `S1` and `ST`.
-- The same shape rules apply to `jaxgsa.hdmr.analyze()`.
+- `problem.output_names` drives the `output` coordinate on export, so set it at
+  problem-declaration time rather than patching the dataset afterwards.
+- `calc_second_order=False` drops `S2` and cuts the rows per base point from
+  $2D+2$ to $D+2$. On a large `(T, K)` output that is the first knob to reach
+  for, because `S2` is `(T, K, D, D)` and grows quadratically in `D`.
+- The same shape rules hold for `jaxgsa.hdmr.analyze()` and every other
+  `analyze()` in the package. They come from one shared validator.
 
 ## See also
 
-- [xarray Labeled Output](/examples/xarray) for named access by parameter,
-  output, and time coordinate.
-- [RS-HDMR Example](/examples/hdmr) for the same shape rules on the surrogate
-  workflow.
-- [Advanced Workflow](/examples/advanced-workflow) for a bigger custom model
-  that combines Sobol, HDMR, emulator prediction, and dataset export.
+- [xarray Labeled Output](/examples/xarray) for selecting these arrays by
+  parameter, output and time name.
+- [Bootstrap Confidence Intervals](/examples/bootstrap) for putting an interval
+  on each of those 320 numbers.
+- [RS-HDMR Example](/examples/hdmr) for the same shapes on the surrogate route.
+- [Screen first, then quantify](/examples/advanced-workflow) for cutting 20 inputs to 4 with Morris,
+  then spending the Sobol budget on the survivors.

@@ -154,7 +154,7 @@ def benchmark_correctness() -> bool:
     Y_jax = ishigami_evaluate(jnp.asarray(sr.samples))
     Y_np = expand_sobol_outputs(sr, Y_jax)
 
-    jaxgsa_sobol = jaxgsa.sobol.analyze(sr, Y_jax)
+    jaxgsa_sobol = jaxgsa.sobol.analyze(sr, Y_jax, verbose=False)
     salib_sobol_result = salib_sobol_point_estimates(
         salib_problem,
         Y_np,
@@ -220,7 +220,9 @@ def benchmark_correctness() -> bool:
     X_jax_hdmr = jnp.asarray(X_np)
     Y_hdmr_jax = jnp.asarray(Y_hdmr_np)
 
-    jaxgsa_hdmr = jaxgsa.hdmr.analyze(ISHIGAMI_PROBLEM, X_jax_hdmr, Y_hdmr_jax, maxorder=2, m=2)
+    jaxgsa_hdmr = jaxgsa.hdmr.analyze(
+        ISHIGAMI_PROBLEM, X_jax_hdmr, Y_hdmr_jax, maxorder=2, m=2, verbose=False
+    )
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
@@ -370,11 +372,11 @@ def _best_of_n(fn, block_result, iters: int = N_TIMING_ITERS) -> float:
     return best
 
 
-def _time_jaxgsa_sobol(sr, Y_jax, *, num_resamples: int) -> float:
+def _time_jaxgsa_sobol(sr, Y_jax, *, n_bootstrap: int) -> float:
     """Time jaxgsa.sobol.analyze for either point estimates or bootstrap CIs."""
-    key = jax.random.key(SOBOL_BOOTSTRAP_SEED) if num_resamples > 0 else None
+    key = jax.random.key(SOBOL_BOOTSTRAP_SEED) if n_bootstrap > 0 else None
     return _best_of_n(
-        lambda: jaxgsa.sobol.analyze(sr, Y_jax, num_resamples=num_resamples, key=key),
+        lambda: jaxgsa.sobol.analyze(sr, Y_jax, n_bootstrap=n_bootstrap, key=key, verbose=False),
         _block_sobol_result,
     )
 
@@ -413,12 +415,12 @@ def _salib_sobol_bootstrap_slices(
     calc_second_order: bool,
     T: int,
     K: int,
-    num_resamples: int,
+    n_bootstrap: int,
 ) -> None:
     """Run SALib Sobol analysis with confidence-interval resampling."""
     kwargs = {
         "calc_second_order": calc_second_order,
-        "num_resamples": num_resamples,
+        "n_bootstrap": n_bootstrap,
         "print_to_console": False,
         "seed": SOBOL_BOOTSTRAP_SEED,
     }
@@ -440,10 +442,10 @@ def _time_salib_sobol(
     calc_second_order: bool,
     T: int,
     K: int,
-    num_resamples: int,
+    n_bootstrap: int,
 ) -> float:
     """Time SALib Sobol analysis with symmetric best-of-N timing."""
-    if num_resamples == 0:
+    if n_bootstrap == 0:
         return _best_of_n(
             lambda: _salib_sobol_point_estimate_slices(
                 salib_problem,
@@ -461,7 +463,7 @@ def _time_salib_sobol(
             calc_second_order=calc_second_order,
             T=T,
             K=K,
-            num_resamples=num_resamples,
+            n_bootstrap=n_bootstrap,
         ),
         lambda _unused: None,
     )
@@ -470,7 +472,7 @@ def _time_salib_sobol(
 def _time_jaxgsa_hdmr(problem, X_jax, Y_jax) -> float:
     """Time jaxgsa.analyze_hdmr, best of N_TIMING_ITERS."""
     return _best_of_n(
-        lambda: jaxgsa.hdmr.analyze(problem, X_jax, Y_jax, maxorder=2, m=2),
+        lambda: jaxgsa.hdmr.analyze(problem, X_jax, Y_jax, maxorder=2, m=2, verbose=False),
         _block_hdmr_result,
     )
 
@@ -597,21 +599,25 @@ def benchmark_timing(base_n: int = 1024) -> None:
     for scenario_label, T, K in SCENARIOS:
         for calc_s2 in (False, True):
             sr, Y_jax, _ = scenario_sobol_data[(scenario_label, T, K, calc_s2)]
-            for num_resamples in SOBOL_RESAMPLE_COUNTS:
-                key = jax.random.key(SOBOL_BOOTSTRAP_SEED) if num_resamples > 0 else None
+            for n_bootstrap in SOBOL_RESAMPLE_COUNTS:
+                key = jax.random.key(SOBOL_BOOTSTRAP_SEED) if n_bootstrap > 0 else None
                 _block_sobol_result(
-                    jaxgsa.sobol.analyze(sr, Y_jax, num_resamples=num_resamples, key=key)
+                    jaxgsa.sobol.analyze(
+                        sr, Y_jax, n_bootstrap=n_bootstrap, key=key, verbose=False
+                    )
                 )
 
         _, X_hdmr_jax, Y_hdmr_jax, _ = scenario_hdmr_data[(scenario_label, T, K)]
         _block_hdmr_result(
-            jaxgsa.hdmr.analyze(BENCH_PROBLEM, X_hdmr_jax, Y_hdmr_jax, maxorder=2, m=2)
+            jaxgsa.hdmr.analyze(
+                BENCH_PROBLEM, X_hdmr_jax, Y_hdmr_jax, maxorder=2, m=2, verbose=False
+            )
         )
     print("done.")
 
     # --- Run all scenarios ---
     sobol_rows: dict[int, list[tuple[str, str, float, float, float]]] = {
-        num_resamples: [] for num_resamples in SOBOL_RESAMPLE_COUNTS
+        n_bootstrap: [] for n_bootstrap in SOBOL_RESAMPLE_COUNTS
     }
     hdmr_rows: list[tuple[str, str, float, float, float]] = []
 
@@ -620,22 +626,22 @@ def benchmark_timing(base_n: int = 1024) -> None:
 
         for calc_s2, method_label in [(False, "analyze (no S2)"), (True, "analyze (S2)")]:
             sr, Y_jax, Y_salib = scenario_sobol_data[(scenario_label, T, K, calc_s2)]
-            for num_resamples in SOBOL_RESAMPLE_COUNTS:
-                if num_resamples == 0:
+            for n_bootstrap in SOBOL_RESAMPLE_COUNTS:
+                if n_bootstrap == 0:
                     bootstrap_label = "no bootstrap"
                 else:
-                    bootstrap_label = f"{num_resamples} bootstrap"
-                g_time = _time_jaxgsa_sobol(sr, Y_jax, num_resamples=num_resamples)
+                    bootstrap_label = f"{n_bootstrap} bootstrap"
+                g_time = _time_jaxgsa_sobol(sr, Y_jax, n_bootstrap=n_bootstrap)
                 s_time = _time_salib_sobol(
                     salib_problem,
                     Y_salib,
                     calc_second_order=calc_s2,
                     T=T,
                     K=K,
-                    num_resamples=num_resamples,
+                    n_bootstrap=n_bootstrap,
                 )
                 speedup = s_time / g_time if g_time > 0 else float("inf")
-                sobol_rows[num_resamples].append(
+                sobol_rows[n_bootstrap].append(
                     (
                         scenario_label,
                         f"{method_label}, {bootstrap_label}",
@@ -654,9 +660,9 @@ def benchmark_timing(base_n: int = 1024) -> None:
         hdmr_rows.append((scenario_label, "analyze_hdmr", g_time * 1e3, s_time * 1e3, speedup))
 
     # --- Print timing tables (post-JIT steady-state; one-off compile excluded) ---
-    for num_resamples in SOBOL_RESAMPLE_COUNTS:
-        label = "NO BOOTSTRAP" if num_resamples == 0 else f"{num_resamples} BOOTSTRAPS"
-        _print_timing_table(f"SOBOL TIMING — {label}", sobol_rows[num_resamples], method_width=30)
+    for n_bootstrap in SOBOL_RESAMPLE_COUNTS:
+        label = "NO BOOTSTRAP" if n_bootstrap == 0 else f"{n_bootstrap} BOOTSTRAPS"
+        _print_timing_table(f"SOBOL TIMING — {label}", sobol_rows[n_bootstrap], method_width=30)
 
     _print_timing_table("HDMR TIMING", hdmr_rows, method_width=20)
 

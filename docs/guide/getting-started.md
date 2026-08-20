@@ -1,18 +1,16 @@
-# Getting Started
+# Getting started
 
-jaxgsa answers one practical question: which of your model's inputs drive its
-output? You give it a set of input samples and the outputs your model produced
-for them. It returns sensitivity indices, that is, numbers that rank the inputs
-and show the interactions between them. jaxgsa computes everything in JAX, so
-the analysis is JIT-compiled and runs on CPU, GPU, or TPU with no code changes.
+jaxgsa answers one question: which of your model's inputs move its output? You
+give it input samples and the outputs your model produced for them. It gives
+back sensitivity indices, numbers that rank the inputs and measure the
+interactions between them. Everything runs in JAX, so the estimators are
+JIT-compiled and the same code runs on CPU, GPU, or TPU.
 
-This page runs one complete analysis with Sobol indices, the most widely used
-method. After it runs, the [Methods guide](/guide/methods) explains how to
-choose among the thirteen methods jaxgsa provides.
+This page runs one Sobol analysis end to end. Producing the numbers is the easy
+half. The harder half is knowing what they mean and when to distrust them, so
+most of this page is about reading the output rather than making it.
 
 ## Installation
-
-Install the released version from PyPI:
 
 ```bash
 pip install jaxgsa
@@ -20,13 +18,13 @@ pip install jaxgsa
 uv add jaxgsa
 ```
 
-To install the latest development version from GitHub:
+The development version:
 
 ```bash
 pip install git+https://github.com/DanielePessina/jaxgsa.git
 ```
 
-To work on jaxgsa itself, clone the repository and install it in place:
+To work on jaxgsa itself:
 
 ```bash
 git clone https://github.com/DanielePessina/jaxgsa.git
@@ -34,75 +32,296 @@ cd jaxgsa
 uv sync --extra dev   # or: pip install -e ".[dev]"
 ```
 
-## Your First Analysis
+## Your first analysis
 
-The workflow has four steps:
+Four steps: define the inputs, draw the design, run your model, analyze.
 
-1. Define the problem: the name and range of each input.
-2. Generate the input samples.
-3. Evaluate your model at every sample.
-4. Compute the Sobol indices.
-
-The model below is the Ishigami function, a standard test function whose
-sensitivity indices are known exactly. Replace it with your own model.
+The model here is the Ishigami function. Its exact indices are known on paper,
+which lets you check your reading of the output against the truth. Swap in your
+own model at step 3.
 
 ```python
 import jax.numpy as jnp
 import jaxgsa
 
-# 1. Define the problem: parameter names and their ranges
+# 1. Name each input and give it a range.
 problem = jaxgsa.Problem.from_dict({
     "x1": (-jnp.pi, jnp.pi),
     "x2": (-jnp.pi, jnp.pi),
     "x3": (-jnp.pi, jnp.pi),
 })
 
-# 2. Generate input samples. Sobol analysis needs a specific sample layout
-#    (a Saltelli design), so use jaxgsa.sobol.sample() rather than random points.
-sampling_result = jaxgsa.sobol.sample(problem, n_samples=4096, seed=42)
+# 2. Draw the design. Sobol estimators need a specific row layout, so use
+#    jaxgsa.sobol.sample() instead of random points.
+design = jaxgsa.sobol.sample(problem, n_samples=4096, seed=42)
 
-# 3. Evaluate your model at each sampled input
-def model(X):  # Ishigami test function — swap in your own model here
+# 3. Run your model on every row of design.samples, shape (n_runs, D).
+def model(X):
     return (
         jnp.sin(X[:, 0])
         + 7.0 * jnp.sin(X[:, 1]) ** 2
         + 0.1 * X[:, 2] ** 4 * jnp.sin(X[:, 0])
     )
 
-Y = model(sampling_result.samples)  # one output value per sample row
+Y = model(design.samples)
 
-# 4. Compute Sobol indices
-result = jaxgsa.sobol.analyze(sampling_result, Y)
-
-print("S1:", result.S1)   # first-order indices
-print("ST:", result.ST)   # total-order indices
+# 4. Analyze.
+result = jaxgsa.sobol.analyze(design, Y)
 ```
 
-Expected output:
+Both calls print, because `verbose=True` is the default:
 
 ```
-S1: [~0.31, ~0.44, ~0.00]
-ST: [~0.56, ~0.44, ~0.24]
+jaxgsa.sobol.sample: D=3, mode=second-order, base_n=512, requested_runs>=4096, n_runs=4096, n_expanded=4096, duplicates_removed=0 (0.0%), scramble=True
+jaxgsa.sobol.analyze
+  problem: D=3 (x1, x2, x3)
+    marginals: uniform=3
+    correlation: independent
+    output: N=4096 runs, T=1 x K=1 output slice
+    invalid: none found in 512 Saltelli groups (policy 'raise')
+  timing:
+    estimators (includes compile on the first call): 0.6519 s
+    slice_chunk_size: 1 (resolved from the memory budget)
+    estimator: saltelli-jansen
+  results: top 3 of 3 parameters by ST
+    1. x1  ST=0.6266
+    2. x2  ST=0.44
+    3. x3  ST=0.2423
 ```
 
-## Reading the Results
+`verbose=True` is the default on all thirteen `analyze()` functions and on the
+four design samplers, `jaxgsa.sobol.sample`, `jaxgsa.morris.sample`,
+`jaxgsa.efast.sample`, and `jaxgsa.kucherenko.sample`.
+`jaxgsa.sampling.monte_carlo` is the exception and takes no `verbose` keyword
+at all. Pass `verbose=False` to silence any call that has one.
 
-Each index is a fraction of the output variance, one value per input:
+## What the summary block tells you
 
-- **S1 (first-order)** is the share of output variance an input explains on
-  its own. Here `x2` has the largest direct effect (~0.44).
-- **ST (total-order)** adds every interaction the input takes part in. Use it
-  to decide whether you can fix an input to a constant: an input with ST near
-  zero has no effect on the output.
-- The gap between ST and S1 is that input's interaction share. `x3` shows why
-  this matters. Its S1 is about 0, so it has no effect on its own, but its ST
-  is about 0.24, so it acts only through its interaction with `x1`. To see
-  which pairs cause the interaction, read the pairwise matrix in `result.S2`.
+Read it top to bottom. Every line is there to catch a mistake before you act on
+the indices.
 
-## Define a Problem
+The `sample` line reports the budget it actually spent. You asked for at least
+4096 unique model runs. jaxgsa picked `base_n=512`, the smallest power of two
+whose Saltelli expansion of `base_n * (2D + 2)` reaches your request, giving
+`n_runs=4096`. `duplicates_removed=0 (0.0%)` matters in low dimensions, where
+the Saltelli construction repeats rows and jaxgsa strips the repeats so you do
+not pay to evaluate the same input twice.
 
-A `Problem` gives each input a name and a range. jaxgsa calls these inputs
-parameters in code:
+`problem: D=3 (x1, x2, x3)` and `marginals: uniform=3` echo the `Problem` back
+to you. If you meant a Gaussian input and see `uniform=3`, you built the wrong
+problem, and the indices below are answers to a different question.
+
+`correlation: independent` says no dependence structure was declared. Sobol
+indices assume independent inputs, and `jaxgsa.sobol.sample` refuses a
+correlated `Problem` outright rather than returning a number that looks fine.
+
+`output: N=4096 runs, T=1 x K=1 output slice` is jaxgsa telling you how it
+interpreted the shape of your `Y`. One scalar output per run here. If you pass a
+`(N, T, K)` array of time-resolved outputs and this line says `T=1`, your array
+was the wrong shape.
+
+`invalid: none found in 512 Saltelli groups (policy 'raise')` is the non-finite
+check. It reports groups, not rows, because one failed model run condemns the
+whole Saltelli group it sits in. See [when a model run
+fails](#when-a-model-run-fails) below.
+
+The timing line includes XLA compilation on the first call in a process. A
+second analysis of the same shape reuses the compiled kernel and is much faster,
+so do not read 0.65 s as the cost of the estimator. `slice_chunk_size: 1` is the
+batching width jaxgsa derived from its memory budget; with one output slice
+there is nothing to batch. See [Configuration](/guide/configuration).
+
+`estimator: saltelli-jansen` names which of the six estimator pairs produced
+these numbers. They disagree at finite sample size, so an index without its
+estimator is ambiguous. It is also stored on `result.estimator`.
+
+The results section ranks by `ST` and shows the top five parameters, or all of
+them when there are fewer.
+
+## Reading the numbers
+
+The full arrays live on the result object:
+
+```python
+import numpy as np
+np.set_printoptions(precision=4, suppress=True)
+
+print("S1:", np.asarray(result.S1))
+print("ST:", np.asarray(result.ST))
+print("S2:")
+print(np.asarray(result.S2))
+```
+
+```
+S1: [0.3387 0.4421 0.0155]
+ST: [0.6266 0.44   0.2423]
+S2:
+[[    nan -0.0356  0.2128]
+ [-0.0356     nan  0.0054]
+ [ 0.2128  0.0054     nan]]
+```
+
+Each number is a share of the output variance.
+
+`S1[i]` is the variance `x_i` explains on its own, averaged over everything the
+other inputs do. Here `x2` carries 0.44 of the variance by itself.
+
+`ST[i]` adds every interaction `x_i` takes part in. This is the one to use when
+you want to fix an input to a constant and stop sampling it. `ST` near zero is
+the licence to do that. `S1` near zero is not.
+
+`x3` is the whole reason that distinction exists. Its `S1` is 0.0155, near
+nothing, but its `ST` is 0.2423. On its own `x3` does nothing. Through its
+interaction with `x1` it accounts for a quarter of the variance. Screening on
+`S1` alone would have thrown it away.
+
+`S2[i, j]` is the pairwise interaction share. The diagonal is `NaN`, because a
+parameter's interaction with itself is not defined, and the matrix is mirrored
+so you can index it either way. `S2[0, 2] = 0.2128` finds exactly the `x1`-`x3`
+interaction that the `ST`-minus-`S1` gap pointed at. The `-0.0356` for `x1`-`x2`
+is a variance share estimated as negative, which is the estimator telling you
+the true value is small compared with its own sampling noise. jaxgsa does not
+clip negative estimates to zero, because the clip would hide that signal.
+
+## How much of that is sampling noise
+
+The indices above came from 4096 model runs. They are estimates. Before you
+report one, ask how wide it is, and bootstrap resampling answers that:
+
+```python
+import jax
+
+boot = jaxgsa.sobol.analyze(
+    design, Y, n_bootstrap=1000, key=jax.random.key(0), verbose=False
+)
+print("S1 lower/upper:")
+print(np.asarray(boot.S1_conf))
+print("ST lower/upper:")
+print(np.asarray(boot.ST_conf))
+```
+
+```
+S1 lower/upper:
+[[ 0.2529  0.3674 -0.065 ]
+ [ 0.4245  0.5199  0.0988]]
+ST lower/upper:
+[[0.4953 0.3853 0.2091]
+ [0.7702 0.5005 0.2799]]
+```
+
+`S1_conf` and `ST_conf` are bounds, not half-widths. The leading axis holds
+`[lower, upper]`, so column `i` of row 0 and row 1 bracket index `i` at the 95%
+level.
+
+Now read the point estimates again with those bounds beside them. `ST[0] =
+0.6266` is really 0.50 to 0.77, an interval a quarter of the total variance
+wide. `S1[2] = 0.0155` is really -0.065 to 0.099, an interval straddling zero,
+which is the correct statement that 4096 runs cannot tell `x3`'s direct effect
+apart from nothing. `ST[1] = 0.44` sits in 0.39 to 0.50 and is the only index
+here you could quote to two digits.
+
+The fix is more runs. Sobol convergence goes as roughly `1/sqrt(N)`, so
+narrowing an interval by 4x costs 16x the model evaluations. Here is 131072 runs
+of the same model:
+
+```python
+big = jaxgsa.sobol.sample(problem, n_samples=131072, seed=42, verbose=False)
+big_result = jaxgsa.sobol.analyze(big, model(big.samples), verbose=False)
+
+print("S1:", np.asarray(big_result.S1))
+print("ST:", np.asarray(big_result.ST))
+print("S2:")
+print(np.asarray(big_result.S2))
+```
+
+```
+S1: [0.3128 0.4426 0.0007]
+ST: [0.5572 0.4426 0.2437]
+S2:
+[[   nan 0.0009 0.2439]
+ [0.0009    nan 0.    ]
+ [0.2439 0.        nan]]
+```
+
+The exact values for this function, with `a = 7` and `b = 0.1` on
+$[-\pi, \pi]^3$, are `S1 = 0.3139, 0.4424, 0` and `ST = 0.5576, 0.4424,
+0.2437`. Every index now matches to three decimals, and `S2[0, 2] = 0.2439`
+against an exact `0.2437`. The `-0.0356` noise in the `x1`-`x2` cell collapsed
+to `0.0009`. Your own model has no such table to check against, which is the
+reason to run the bootstrap.
+
+::: tip
+Convergence is per index, not per analysis. `ST[1]` was already good at 4096
+runs while `ST[0]` needed 32x more. Size your budget against the index you
+actually care about.
+:::
+
+## When a model run fails
+
+Real models return `NaN`. jaxgsa checks for it and, by default, refuses to
+continue:
+
+```python
+Y_broken = Y.at[17].set(jnp.nan)
+jaxgsa.sobol.analyze(design, Y_broken)
+```
+
+```
+ValueError: jaxgsa.sobol.analyze: 1 of 512 Saltelli groups hold a non-finite
+value (NaN or inf) in Y. Non-finite rows: [17]. They condemn Saltelli groups
+[2], which covers 8 rows. An index computed from the rest is a different
+quantity from the one you asked for, so this raises by default. Investigate
+those runs, or pass on_invalid='drop' to analyze the remainder, or
+on_invalid='propagate' to let the value reach the indices.
+```
+
+One bad row takes eight rows with it, because the Sobol estimator reads a
+Saltelli group as a unit. That is why the error names groups. Dropping the
+group is a real option, and `on_invalid='drop'` does it, but understand that you
+are then estimating over a design with a hole in it. Chasing down run 17 is
+usually the better answer.
+
+## Controlling jaxgsa's warnings
+
+Not everything jaxgsa objects to is fatal. A result that is degraded but still
+valid gets a warning instead: a float64 array being truncated to float32, PAWN
+keeping too few usable bins, VKOGA trained on a correlated design. Every one of
+them carries the same category, `jaxgsa.JaxgsaWarning`, so you can act on
+jaxgsa's warnings without touching NumPy's, SciPy's, or JAX's.
+
+`JaxgsaWarning` subclasses `UserWarning`, so a filter you already have on
+`UserWarning` keeps working.
+
+```python
+import warnings
+from jaxgsa import JaxgsaWarning
+
+# Fail the run on anything jaxgsa warns about. Good for CI and for a
+# production pipeline where a degraded index must not pass silently.
+warnings.simplefilter("error", JaxgsaWarning)
+
+# Silence them, when you have read the warning and accepted it.
+warnings.simplefilter("ignore", JaxgsaWarning)
+
+# Show every occurrence instead of only the first from each call site.
+warnings.simplefilter("always", JaxgsaWarning)
+
+# Or capture them, to log or assert on.
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always", JaxgsaWarning)
+    result = jaxgsa.sobol.analyze(design, Y)
+for w in caught:
+    print(w.category.__name__, w.message)
+```
+
+Escalating to `"error"` is worth doing once on a new pipeline. jaxgsa's
+warnings name a specific defect in your setup, and reading them early is
+cheaper than discovering the defect in a published index.
+
+## Defining a problem
+
+A `Problem` gives each input a name and a distribution. jaxgsa calls the inputs
+parameters in code.
 
 ```python
 from jaxgsa import Problem
@@ -114,44 +333,48 @@ problem = Problem.from_dict({
 })
 ```
 
-A plain `(low, high)` tuple means a uniform input. For Gaussian or truncated
-Gaussian Sobol inputs, `Problem.from_dict(...)` also accepts tagged
-distribution specs. See [Non-Uniform Inputs](/examples/non-uniform-inputs) for
-the full `TypedDict` form and the Gaussian truncation rules.
+A bare `(low, high)` tuple means uniform. `from_dict` also takes
+`GaussianSpec`, `CategoricalSpec`, and the plain-dict form of each. Names must
+be strings and must be unique; a duplicate name raises rather than silently
+overwriting a parameter. See [Non-Uniform
+Inputs](/examples/non-uniform-inputs) for the Gaussian marginals and the
+truncation rules.
 
-## Save and Reuse Samples
+## Saving a design
 
-Sampling and model evaluation are often separate steps. The model may run on a
-cluster, or it may take hours. `jaxgsa.sobol.sample()` returns a
-`SobolSamples` object that you can save and reload later. The reloaded object
-keeps the metadata that `jaxgsa.sobol.analyze()` needs:
+Sampling and model evaluation are usually separate jobs. The model may run on a
+cluster or take hours. `jaxgsa.sobol.sample()` returns a `SobolSamples` you can
+write to disk and reload, and the reloaded object keeps the Saltelli metadata
+that `analyze()` needs.
 
 ```python
-sampling_result = jaxgsa.sobol.sample(problem, n_samples=4096, seed=42)
-sampling_result.save("runs/experiment")
+design = jaxgsa.sobol.sample(problem, n_samples=4096, seed=42)
+design.save("runs/ishigami")
 
-restored = jaxgsa.sobol.SobolSamples.load("runs/experiment")
-Y = my_model(restored.samples)
+restored = jaxgsa.sobol.SobolSamples.load("runs/ishigami")
+Y = model(restored.samples)
 result = jaxgsa.sobol.analyze(restored, Y)
 ```
 
-This writes `runs/experiment.npz`, containing the sample matrix, problem
-definition, and Saltelli reconstruction metadata.
+This writes `runs/ishigami.npz` holding the sample matrix, the problem
+definition, and the expansion metadata. The parent directory must already
+exist; `save` will not create it.
 
-## What's Next?
+Never rebuild a design by hand from a saved `X` matrix. The Saltelli row order
+is what the estimator reads, and a shuffled or re-sorted matrix gives numbers
+that look plausible and are wrong.
 
-Start with the core workflow. Then open the page that matches your next
-problem:
+## Where to go next
 
-- [Methods](/guide/methods) -- compare all thirteen methods before choosing a workflow
-- [Migrating to 0.4](/guide/migration-0.4) -- update sampling, analysis, prediction, and Shapley calls from 0.3
-- [Basic Example (Ishigami)](/examples/basic) -- run the canonical scalar-output Sobol analysis end to end
-- [Non-Uniform Inputs](/examples/non-uniform-inputs) -- mix uniform, Gaussian, and truncated Gaussian Sobol marginals in one `Problem`
-- [Save and Reload Samples](/examples/save-load) -- persist a `SobolSamples` and reuse it across runs
-- [Bootstrap CIs](/examples/bootstrap) -- quantify uncertainty with confidence intervals around `S1`, `ST`, and `S2`
-- [Multi-Output & Time-Series](/examples/multi-output) -- move from scalar outputs to `(N, K)` and `(N, T, K)` analyses
-- [xarray Output](/examples/xarray) -- export labeled datasets with named parameters, outputs, and time coordinates
-- [RS-HDMR](/examples/hdmr) -- switch to surrogate-based analysis when you already have arbitrary `(X, Y)` pairs
-- [Advanced Workflow](/examples/advanced-workflow) -- follow the full custom-model path with named outputs, Sobol, HDMR, emulation, and `to_dataset()`
-- [Batch Reactor (notebook)](/examples/batch_reactor) -- a self-contained walkthrough of Sobol GSA on a batch reactor with three uniform inputs $(C_{A,0}, T, \mathrm{pH})$, including bootstrap CIs and time-resolved $S_1$ / $S_T$ / $S_{ij}$
-- [API Reference](/api/) -- browse the single-page reference for signatures, shape contracts, and result objects
+- [Methods](/guide/methods) compares the thirteen methods, and tells you when Sobol is the wrong one
+- [Basic Example (Ishigami)](/examples/basic) is this analysis written out as a script
+- [Bootstrap CIs](/examples/bootstrap) goes further into confidence intervals for `S1`, `ST`, and `S2`
+- [Multi-Output & Time-Series](/examples/multi-output) moves from a scalar `Y` to `(N, K)` and `(N, T, K)`
+- [Non-Uniform Inputs](/examples/non-uniform-inputs) mixes uniform, Gaussian, and truncated Gaussian marginals
+- [Correlated Inputs](/examples/correlated-inputs) covers what to do when your inputs are not independent
+- [RS-HDMR](/examples/hdmr) analyzes arbitrary `(X, Y)` pairs you already have, with no special design
+- [Save and Reload Samples](/examples/save-load) covers the full persistence workflow
+- [xarray Output](/examples/xarray) exports labeled datasets with named parameters, outputs, and times
+- [Configuration](/guide/configuration) covers precision, the memory budget, and the batching contract
+- [Migrating to 0.4](/guide/migration-0.4) updates sampling, analysis, and Shapley calls written for 0.3
+- [API Reference](/api/) has the signatures, shape contracts, and result objects

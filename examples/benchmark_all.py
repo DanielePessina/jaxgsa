@@ -506,7 +506,7 @@ def _benchmark(
                             sp,
                             _sl,
                             M=4,
-                            num_resamples=0,
+                            n_bootstrap=0,
                             print_to_console=False,
                         )
 
@@ -589,7 +589,7 @@ def _benchmark(
                             sp,
                             X,
                             _sl,
-                            num_resamples=0,
+                            n_bootstrap=0,
                             print_to_console=False,
                         )
 
@@ -699,7 +699,7 @@ def _benchmark(
             jaxgsa.sobol.analyze(
                 _sr_b,
                 _Yb,
-                num_resamples=_nr,
+                n_bootstrap=_nr,
                 ci_method="gaussian",
                 key=jax.random.key(0),
             ).S1.block_until_ready()
@@ -708,7 +708,7 @@ def _benchmark(
                     lambda nr=_nr: jaxgsa.sobol.analyze(
                         _sr_b,
                         _Yb,
-                        num_resamples=nr,
+                        n_bootstrap=nr,
                         ci_method="gaussian",
                         key=jax.random.key(0),
                     ),
@@ -720,7 +720,7 @@ def _benchmark(
                 _r = jaxgsa.sobol.analyze(
                     _sr_b,
                     _Yb,
-                    num_resamples=_nr,
+                    n_bootstrap=_nr,
                     ci_method="gaussian",
                     key=jax.random.key(0),
                 )
@@ -734,7 +734,7 @@ def _benchmark(
                 SALIB_ISHI,
                 _Yb_exp,
                 calc_second_order=True,
-                num_resamples=_nr,
+                n_bootstrap=_nr,
                 print_to_console=False,
             )
             _sb = float("inf")
@@ -744,7 +744,7 @@ def _benchmark(
                     SALIB_ISHI,
                     _Yb_exp,
                     calc_second_order=True,
-                    num_resamples=_nr,
+                    n_bootstrap=_nr,
                     print_to_console=False,
                 )
                 _sb = min(_sb, time.perf_counter() - _t0)

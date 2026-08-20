@@ -1,156 +1,198 @@
-# Shapley Effects (Fair Variance Allocation)
+# Shapley effects
 
-This page turns a set of model runs into one importance score per input, and
-those scores add up to exactly 1. You finish with Shapley effects for the
-Ishigami test function, checked against the known analytical answer, plus the
-diagnostic that tells you whether to trust them.
+Sobol indices stop adding up when you care about interactions. `S1` sums to
+less than 1, because the variance an interaction creates belongs to no single
+input. `ST` sums to more than 1, because it hands that same variance to every
+participant in full. Neither is a budget you can divide.
 
-Shapley effects allocate the output variance fairly across inputs. Each
-interaction's variance is split equally among its participants (Owen, 2014;
-Song, Nelson & Staum, 2016), so the shares sum to exactly 1 with no gaps and
-no double counting. An interaction is output variance that only appears when
-two or more inputs vary together, and cannot be credited to either input
-alone.
+Shapley effects are the fix. You finish this page with one number per input,
+the numbers sum to 1, and you have the diagnostic that says whether they are
+worth reporting.
 
-jaxgsa computes Shapley effects analytically from a fitted surrogate's
-variance decomposition. A surrogate is a cheap function fitted to the model's
-inputs and outputs and used in its place; the two available ones are PCE
-(polynomial chaos expansion, the default) and RS-HDMR (a B-spline expansion).
-Working from the surrogate means no permutation Monte Carlo and no extra
-model runs. The result carries Sh alongside the first-order (S1) and
-total-order (ST) indices from the same surrogate. S1 is the variance share an
-input explains on its own; ST is the share it explains alone or in any
-interaction. Because all three come from one fit, the bracketing
-`S1 <= Sh <= ST` is visible at a glance.
+## What gets distributed, and why it sums
 
-When to use Shapley effects:
+Fit a surrogate and you get a partial variance $V_u$ for every subset $u$ of
+inputs the surrogate models. $V_{\{1\}}$ is what x1 does alone. $V_{\{1,3\}}$
+is the extra variance the x1-x3 pair creates that neither creates alone. The
+Shapley effect of input $i$ splits each subset's variance evenly among its
+members (Owen, 2014; Song, Nelson & Staum, 2016):
 
-- You want a single, fairly allocated importance score per parameter that
-  sums to exactly 1 — for ranking, reporting, or budget allocation.
-- Interactions matter and you want them attributed to their participants
-  rather than omitted (S1) or counted once per participant (ST).
-- You have existing (X, Y) pairs from any sampling strategy — no structured
-  design required — and your inputs are independent. For dependent inputs,
-  see the caveat below.
+$$
+Sh_i = \sum_{u \,:\, i \in u} \frac{V_u}{|u|}
+$$
+
+Sum that over all $i$. Each subset $u$ is counted once for each of its $|u|$
+members, at $V_u / |u|$ apiece, so it contributes exactly $V_u$. The total is
+$\sum_u V_u$, the whole decomposed variance. Divide through by it and the
+effects sum to 1 by construction, not by luck.
+
+That construction is also the warning. The sum is 1 whatever the surrogate
+did, including nothing useful, because it is a share of what the surrogate
+captured. Fit quality lives in a separate field, `explained_variance`, and the
+last section of this page is about reading it.
+
+jaxgsa computes the allocation from a fitted surrogate's variance
+decomposition, so there is no permutation Monte Carlo and no extra model runs.
+`S1` and `ST` come off the same fit, which makes the bracketing
+`S1 <= Sh <= ST` directly checkable.
+
+Reach for Shapley effects when you need a single ranked importance score that
+divides a fixed budget, or when interactions matter and you refuse both to
+drop them (`S1`) and to double-count them (`ST`). Your inputs must be
+independent; the caveats section covers what to do when they are not.
 
 A companion marimo notebook lives at
 [`examples/shapley_gsa.py`](https://github.com/danielepessina/jaxgsa/blob/master/examples/shapley_gsa.py).
-Run it interactively with `uv run marimo edit examples/shapley_gsa.py`.
+Run it with `uv run marimo edit examples/shapley_gsa.py`.
 
 ## Import style
 
-Shapley effects are methods on fitted PCE and HDMR results:
+There is a standalone entry point, and a method on any fitted PCE or HDMR
+result:
 
 ```python
 import jaxgsa
-# jaxgsa.pce.analyze(...).shapley()
+# jaxgsa.shapley.analyze(problem, X, Y)   # fits, then allocates
+# jaxgsa.pce.analyze(...).shapley()       # allocate from a fit you already have
 # jaxgsa.hdmr.analyze(...).shapley()
 ```
 
+Use `shapley.analyze` when Shapley effects are what you came for. Use
+`.shapley()` when you already have a fit and want the allocation for free.
+
 ## Scalar example (Ishigami)
 
-The Ishigami function is a three-input benchmark that ships with jaxgsa. The
-example runs in four steps.
-
-1. Draw 2000 Monte Carlo samples of the inputs. Shapley effects here are read
-   off a surrogate fit, so the samples only have to cover the input space.
-2. Run the model once on those samples. Every index below comes from this one
-   batch of runs.
-3. Fit a PCE surrogate of degree 8, then call `.shapley()` on the result.
-   Degree 8 is chosen because Ishigami's sine terms need it; the default
-   degree 3 leaves too much of the output unexplained.
-4. Print Sh next to its sum, S1, ST, and `explained_variance`. The sum
-   confirms the allocation is complete, and `explained_variance` says whether
-   the surrogate is worth allocating from.
+Ishigami is a three-input benchmark that ships with jaxgsa. Any `(X, Y)` pairs
+work, so plain Monte Carlo samples are enough. `order=8` is the argument that
+matters. Ishigami's sine terms need a degree-8 polynomial, and the default
+`order=3` under-fits badly enough to trip the warning shown later.
 
 ```python
 import jax.numpy as jnp
 import jaxgsa
 from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
-# Any (X, Y) pairs work — no structured design required
 X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n=2000, seed=42))
 Y = evaluate(X)
 
-# PCE effects are exact within the fitted polynomial.
-# Ishigami's sines need a degree-8 polynomial; the default order=3
-# under-fits here and would trigger the explained_variance warning.
-result = jaxgsa.pce.analyze(PROBLEM, X, Y, order=8).shapley()
+result = jaxgsa.shapley.analyze(PROBLEM, X, Y, order=8)
 
-print("Sh:", result.Sh)        # (D,) fair variance shares
-print("sum:", result.Sh.sum()) # exactly 1 (Shapley efficiency)
-print("S1:", result.S1)        # (D,) first-order, same surrogate
-print("ST:", result.ST)        # (D,) total-order, same surrogate
-print("explained_variance:", result.explained_variance)  # ~1.03 — good fit
-print("order:", result.order)  # effective polynomial degree used
+print("Sh:", result.Sh)
+print("sum:", result.Sh.sum())
+print("S1:", result.S1)
+print("ST:", result.ST)
+print("explained_variance:", result.explained_variance)
 ```
 
-Reading the printed numbers:
+```text
+jaxgsa.shapley.analyze
+  problem: D=3 (x1, x2, x3)
+    marginals: uniform=3
+    correlation: independent
+    output: N=2000 runs, T=1 x K=1 output slice
+    invalid: none found in 2000 rows (policy 'raise')
+  timing:
+    backend fit + Shapley (includes compile on the first call): 2.112 s
+    backend: pce
+    order: 8
+  results: top 3 of 3 parameters by Sh
+    1. x2  Sh=0.4418
+    2. x1  Sh=0.4362
+    3. x3  Sh=0.122
+Sh: [0.43615592 0.44182348 0.12202042]
+sum: 0.9999998
+S1: [3.1413424e-01 4.4180435e-01 9.9179010e-07]
+ST: [0.55818665 0.4418516  0.24404898]
+explained_variance: 1.0339365
+```
 
-- The sum of Sh is exactly 1. Every interaction's variance is split equally
-  among its participants, so the shares partition the decomposed variance
-  with no gaps (unlike S1, whose sum falls short of 1) and no double
-  counting (unlike ST, whose sum exceeds 1).
-- x3 shows what Shapley adds. Its first-order index is exactly zero —
-  it acts only through the `x1`–`x3` interaction — yet its Shapley effect
-  is clearly positive (about 0.12) because it owns half of that
-  interaction's variance. S1 would dismiss x3 entirely; ST counts the
-  interaction once for x1 and once for x3.
-- The bracketing holds. Under independent inputs `S1 <= Sh <= ST` holds
-  elementwise, and all three come from the same surrogate fit, so they are
-  directly comparable. Ishigami has a single two-way interaction, so
-  `Sh = (S1 + ST) / 2` here.
-- `explained_variance` prints around 1.03. That is close enough to 1 to
-  treat the surrogate as a faithful stand-in for the model. The section
-  below covers what other values mean.
+The summary block prints by default in 1.0. `verbose=False` silences it. The
+`backend: pce` line is worth a glance, because it is the default and the rest
+of the page depends on which one ran.
+
+x3 is the whole argument for this method. Its first-order index is 9.9e-07,
+which is zero. x3 does nothing on its own. Its Shapley effect is 0.122,
+because it owns half of the x1-x3 interaction. Rank by `S1` and you drop x3
+from the model. Rank by `ST` and x3 scores 0.244, the full interaction, as
+does x1 for the same variance counted twice. The Shapley split of 0.122 each
+is the honest answer.
+
+Ishigami has exactly one two-way interaction, so `Sh = (S1 + ST) / 2` holds
+here and you can check it by hand: `(0.31413 + 0.55819) / 2 = 0.43616`.
+
+The sum prints 0.9999998 rather than 1. That is float32 rounding over a
+165-term expansion, not a modelling gap. Do not chase it.
 
 ## Ground-truth check
 
-The Ishigami, linear, and Sobol-G benchmarks ship analytical Shapley
-effects (`ANALYTICAL_SHAPLEY`), so you can validate against ground truth
-rather than another implementation:
+Ishigami, the linear model and Sobol-G ship analytical Shapley effects, so you
+can check against truth rather than against another implementation:
 
 ```python
 import numpy as np
 from jaxgsa.benchmarks import ishigami
 
-print("estimated: ", np.round(result.Sh, 4))            # [0.4362 0.4418 0.122]
-print("analytical:", np.round(ishigami.ANALYTICAL_SHAPLEY, 4))  # [0.4357 0.4424 0.1218]
+print("estimated: ", np.round(result.Sh, 4))
+print("analytical:", np.round(ishigami.ANALYTICAL_SHAPLEY, 4))
 ```
 
-The two rows agree to three decimal places on all three inputs. The largest
-gap is on x2, at 0.4418 against 0.4424. The ranking is identical: x2 first,
-x1 a close second, x3 a distant third.
+```text
+estimated:  [0.4362     0.4418     0.12199999]
+analytical: [0.4357 0.4424 0.1218]
+```
 
-## Backend selection
+Three decimals on all three inputs, worst gap 0.0006 on x2. Same ranking.
 
-The `backend` argument picks the surrogate that supplies the partial
-variances. A partial variance is the amount of output variance owned by one
-input or one group of inputs.
+## What it costs
 
-- `backend="pce"` (default) reads subset variances off orthonormal
-  polynomial coefficients (Sudret, 2008) — exact within the fitted
-  polynomial. Scalar `(N,)` outputs only; a non-scalar `Y` raises
-  `ValueError`. Knobs: `order` (default 3), `ridge`, `fit_ratio`.
-- `backend="hdmr"` fits the RS-HDMR B-spline surrogate and uses its
-  structural (ANCOVA) component variances, truncated at `maxorder`.
-  Supports `(N,)`, `(N, K)`, and `(N, T, K)` outputs. Knobs: `maxorder`
-  (default 2), `m`, `maxiter`, `lambdax`, `slice_chunk_size`.
+Very little, and that is the point. The allocation is one matrix product
+against a boolean membership matrix of shape `(n_terms, D)`. On the fit above,
+165 terms and 3 inputs on an Apple M1 Pro, `.shapley()` takes 0.37 ms against
+12.5 ms to redo the PCE fit. It costs zero model evaluations.
 
-Backend-specific keywords are validated: explicitly setting a knob that
-belongs to the non-selected backend (e.g. `backend="pce"` with
-`maxorder=3`) raises `ValueError`.
+Compare that with the permutation Monte Carlo estimator, which walks random
+orderings of the inputs and needs a fresh batch of model runs at each step.
+Reading the effects off a surrogate replaces those runs with a fit you were
+going to do anyway. The bill you actually pay is the fit, and the fit is
+shared with `S1` and `ST`.
+
+## Backends
+
+`backend` picks the surrogate that supplies the partial variances. The default
+is `"pce"`.
+
+`backend="pce"` reads subset variances off orthonormal polynomial
+coefficients (Sudret, 2008), exact within the fitted polynomial. Its knobs are
+`order` (default 3), `ridge` and `fit_ratio`. It refuses a declared
+`problem.correlation`.
+
+`backend="hdmr"` fits the RS-HDMR B-spline surrogate and allocates its
+structural ANCOVA variances, truncated at `maxorder`. Its knobs are `maxorder`
+(default 2), `m`, `maxiter`, `lambdax` and `slice_chunk_size`. It accepts a
+declared correlation with `include_correlative=True`.
+
+Both take `(N,)`, `(N, K)` and `(N, T, K)` outputs as of 1.0. Older docs
+saying the PCE backend is scalar-only are wrong.
+
+Backend knobs are not shared. Passing `maxorder=3` with `backend="pce"` raises
+`TypeError: analyze() got an unexpected keyword argument 'maxorder'` rather
+than being ignored, so a typo cannot quietly change nothing.
+
+Pick PCE for smooth responses, where it is exact and cheap. Pick HDMR for
+responses with kinks or plateaus, and for correlated inputs, which PCE
+refuses.
 
 ## Multi-output example (HDMR backend)
 
-In the shapes below, N is the number of samples, D the number of inputs, K
-the number of outputs, and T the number of timepoints. When Y has shape
-`(N, K)`, the indices have shape `(K, D)` and each output row of Sh sums to
-1. Time-series outputs `(N, T, K)` produce `(T, K, D)`.
+N is samples, D inputs, K outputs, T timepoints. `(N, K)` gives indices of
+shape `(K, D)`, and every output row sums to 1 on its own. `(N, T, K)` gives
+`(T, K, D)`.
 
-This example builds a second output on purpose. Y2 is a sum of squared
-inputs, so it has no interactions at all and its three shares must come out
-equal. That gives a known answer to check the multi-output path against.
+This example adds a second output with a known answer. Y2 is a sum of squares
+over symmetric bounds, so it has no interactions and its three inputs are
+interchangeable. Its shares must come out at 1/3 each, which is how you check
+the multi-output path did not scramble an axis. `m=4` widens the B-spline
+basis, for the reason on the [RS-HDMR page](/examples/hdmr).
 
 ```python
 import jax.numpy as jnp
@@ -159,76 +201,127 @@ from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
 X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n=2000, seed=42))
 Y1 = evaluate(X)
-Y2 = jnp.sum(X**2, axis=1)  # purely additive: S1 = Sh = ST = 1/3 each
+Y2 = jnp.sum(X**2, axis=1)
 Y_multi = jnp.column_stack([Y1, Y2])
 
-result = jaxgsa.hdmr.analyze(PROBLEM, X, Y_multi).shapley()
+result = jaxgsa.shapley.analyze(PROBLEM, X, Y_multi, backend="hdmr", m=4)
 
-print("Sh shape:", result.Sh.shape)          # (K, D) = (2, 3)
-print("row sums:", result.Sh.sum(axis=-1))   # [1. 1.]
-print("explained_variance:", result.explained_variance)  # (K,)
+print("Sh:", result.Sh)
+print("row sums:", result.Sh.sum(axis=-1))
+print("explained_variance:", result.explained_variance)
 ```
 
-The `(2, 3)` shape is two outputs by three inputs, one row of shares per
-output. The printed `[1. 1.]` confirms the allocation is complete for both
-outputs independently, not just on average across them. `explained_variance`
-has one entry per output, so a poor fit on one output does not hide behind a
-good fit on the other.
+```text
+jaxgsa.shapley.analyze
+  problem: D=3 (x1, x2, x3)
+    marginals: uniform=3
+    correlation: independent
+    output: N=2000 runs, T=1 x K=2 output slices
+    invalid: none found in 2000 rows (policy 'raise')
+  timing:
+    backend fit + Shapley (includes compile on the first call): 2.266 s
+    backend: hdmr
+    order: 2
+  results: top 3 of 3 parameters by Sh, mean over 2 output slices
+    1. x2  Sh=0.3943
+    2. x1  Sh=0.3734
+    3. x3  Sh=0.2323
+Sh: [[0.4217161  0.45171946 0.12656444]
+ [0.32505286 0.3369298  0.33801743]]
+row sums: [1.        1.0000001]
+explained_variance: [1.0094421 0.9541204]
+```
 
-## The explained_variance diagnostic
+Row 1 is Ishigami and reproduces the scalar answer to two decimals. Row 2 is
+the sum of squares and comes out `[0.325, 0.337, 0.338]`, within 0.01 of the
+1/3 the construction demands. The residual spread is finite-sample noise in a
+2000-row fit.
 
-Indices are normalized by the surrogate's total decomposed variance
-`sum_u V_u`. Thus Sh always sums to exactly 1, even when the surrogate
-fits poorly. The fit-quality signal is reported separately in
-`explained_variance = sum_u V_u / Var(Y)`: close to 1 for a good fit,
-below 1 when truncation or fit error leaves variance unexplained, above 1
-when an overfit surrogate over-counts shared variance. A `JaxgsaWarning` is
-emitted when it drops below 0.5 or exceeds 1.3 — check it before trusting
-the allocation.
+The `results:` table averages over output slices, which is fine for a quick
+glance and useless when the outputs disagree. Read `result.Sh` per row.
+`explained_variance` also has one entry per output, so a bad fit on one output
+cannot hide behind a good fit on the other.
+
+## The `explained_variance` diagnostic
+
+`Sh` is normalized by the surrogate's total decomposed variance $\sum_u V_u$,
+so it sums to 1 however badly the surrogate fits. Fit quality is reported
+separately:
+
+$$
+\text{explained\_variance} = \frac{\sum_u V_u}{\mathrm{Var}(Y)}
+$$
+
+Near 1 is a faithful surrogate. Below 1 means truncation or fit error left
+variance unexplained. Above 1 means an overfit surrogate over-counted shared
+variance. A `JaxgsaWarning` fires below 0.5 or above 1.3.
+
+Here is what a bad fit looks like. Same data, `order=2`:
 
 ```python
-result_low = jaxgsa.pce.analyze(PROBLEM, X, Y1, order=2).shapley()
-# JaxgsaWarning: jaxgsa: surrogate explained_variance is below 0.5 ...
-print(result_low.Sh.sum())              # still exactly 1
-print(result_low.explained_variance)    # ~0.4 — do not trust these shares
+low = jaxgsa.pce.analyze(PROBLEM, X, Y1, order=2, verbose=False).shapley()
+print("Sh:", low.Sh)
+print("sum:", low.Sh.sum())
+print("explained_variance:", low.explained_variance)
 ```
 
-Those two printed lines are the point of the diagnostic. A degree-2
-polynomial captures about 40% of Ishigami's variance, yet the shares still
-sum to exactly 1, because they are shares of what the surrogate captured. The
-sum tells you nothing about fit quality. Only `explained_variance` does.
+```text
+JaxgsaWarning: jaxgsa.shapley: surrogate explained_variance is below 0.5;
+Shapley effects may be unreliable
+Sh: [0.86724067 0.12359249 0.0091669 ]
+sum: 1.0000001
+explained_variance: 0.24137108
+```
 
-Because of this normalization, `backend="pce"` returns S1/ST that match
-`jaxgsa.pce.analyze` exactly, while `backend="hdmr"` indices relate to
-`jaxgsa.hdmr.analyze`'s (which normalize by `Var(Y)`) by a factor of
-`explained_variance`.
+The sum is still 1. The effects are still ordered, positive, and completely
+wrong: x1 gets 0.867 against its true 0.436, x2 collapses from 0.442 to 0.124,
+and x3 all but vanishes. A degree-2 polynomial captured 24% of Ishigami's
+variance, and these are honest shares of that 24%.
+
+The sum tells you nothing about fit quality. Only `explained_variance` does.
+Read it first, every time. If it is off, raise `order` or `maxorder` and refit
+until it settles near 1.
+
+One consequence of the normalization. With `backend="pce"` the `S1` and `ST`
+on the result match `jaxgsa.pce.analyze` exactly. With `backend="hdmr"` they
+differ from `jaxgsa.hdmr.analyze`'s by a factor of `explained_variance`,
+because HDMR normalizes by `Var(Y)` instead.
 
 ## xarray export
 
-`ShapleyResult.to_dataset()` converts results to a labeled
-`xarray.Dataset`, just like the other jaxgsa result types. Labeling means you
-select an input or an output by name instead of by position.
+`to_dataset()` returns a labeled `xarray.Dataset`, so you select an input or
+an output by name:
 
 ```python
 ds = result.to_dataset()
 print(ds)
-# <xarray.Dataset>
-# Dimensions:  (output: 2, param: 3)
-# Data variables: Sh, S1, ST, explained_variance
-
-print(ds.Sh.sel(param="x1"))
-print(ds.explained_variance)
+print(ds.Sh.sel(param="x1").values)
 ```
 
-The two dimensions match the multi-output result fitted above: two outputs
-and three inputs, so you select along them by name.
-`ds.Sh.sel(param="x1")` returns x1's share for each of the two outputs.
-`ds.explained_variance` has no `param` dimension, so it prints one number per
-output.
+```text
+<xarray.Dataset> Size: 120B
+Dimensions:             (output: 2, param: 3)
+Coordinates:
+  * output              (output) <U2 16B 'y0' 'y1'
+  * param               (param) <U2 24B 'x1' 'x2' 'x3'
+Data variables:
+    Sh                  (output, param) float32 24B 0.4217 0.4517 ... 0.338
+    S1                  (output, param) float32 24B 0.3006 0.4445 ... 0.338
+    ST                  (output, param) float32 24B 0.5428 0.4589 ... 0.338
+    explained_variance  (output) float32 8B 1.009 0.9541
+Attributes:
+    backend:              hdmr
+    order:                2
+    include_correlative:  False
+[0.4217161  0.32505286]
+```
 
-For time-series results, pass `time_coords` to label the time dimension.
-`explained_variance` carries no `param` dimension — it is scalar,
-`(output,)`, or `(time, output)`.
+`ds.Sh.sel(param="x1")` gives x1's share for each output. `explained_variance`
+carries no `param` dimension, so it prints one value per output. The
+attributes record which backend and truncation produced the numbers, which
+matters when the dataset outlives the session. Set `problem.output_names` to
+replace `y0` and `y1` with real names, and pass `time_coords` to label a time
+dimension.
 
 ## Shape rules
 
@@ -238,50 +331,45 @@ For time-series results, pass `time_coords` to label the time dimension.
 | `(N, K)` | pce or hdmr | `(K, D)` | `(K,)` |
 | `(N, T, K)` | pce or hdmr | `(T, K, D)` | `(T, K)` |
 
-D is always the last axis. Without `problem.output_names`, a 2D `Y` is always
-read as `(N, K)`; with exactly one entry in `output_names`, a 2D `Y` is read
-as `(N, T)` — timepoints of that single output — and flows through as
-`(N, T, 1)`. Passing a pre-reshaped `(N, T, 1)` array also works.
+D is always the last axis. Without `problem.output_names`, a 2D `Y` is read as
+`(N, K)`. With exactly one entry in `output_names` it is read as `(N, T)`,
+timepoints of that single output, and flows through as `(N, T, 1)`. A
+pre-reshaped `(N, T, 1)` array works too.
 
 ## Practical caveats
 
-- Independent inputs are assumed. The Shapley value is especially
-  attractive for dependent inputs, but conditional-variance Shapley effects
-  need a conditional-variance estimator that jaxgsa does not have yet. A
-  conditional-variance estimator measures the output variance that remains
-  once a group of inputs is held fixed, which is harder to do when the inputs
-  move together. Do not read these indices as Shapley effects when the inputs
-  are strongly correlated.
-- Two routes exist instead.
-  `shapley.analyze(backend="hdmr", include_correlative=True)` allocates HDMR's
-  ANCOVA decomposition across the parameters. It accepts a declared
-  correlation, but it is an ANCOVA-based attribution, not a
-  conditional-variance Shapley effect. For conditional-variance indices under
-  dependence, leave Shapley behind and use [VKOGA](/examples/vkoga) (given
-  data, kernel surrogate) or [Kucherenko](/examples/kucherenko) (its own
-  design, your actual model). Neither returns a per-parameter allocation
-  summing to 1.
-- Both backends accept scalar `(N,)`, multi-output `(N, K)`, and
-  time-series `(N, T, K)` `Y`.
-- Interactions beyond the surrogate's truncation (`order` for PCE,
-  `maxorder` for HDMR) are absent from the allocation — raise the order
-  until `explained_variance` stabilizes near 1.
-- The HDMR backend inherits `jaxgsa.hdmr.analyze`'s input contract: at least 300
-  samples and `maxorder` in `{1, 2, 3}` (clamped with a warning when
-  `D < maxorder`).
-- Setting a keyword that belongs to the non-selected backend raises
-  `ValueError` rather than being silently ignored.
+**Independent inputs are assumed, and the PCE backend enforces it.** Pass a
+problem with a declared `correlation` and `shapley.analyze` raises
+`ValueError` rather than returning a silently wrong allocation. The message
+names the alternatives.
+
+**The HDMR route under dependence is an approximation, not a Shapley effect.**
+`backend="hdmr"` with `include_correlative=True` allocates the total ANCOVA
+contribution `Sa + Sb` and does accept a declared correlation. It is an
+ANCOVA-based attribution. A true conditional-variance Shapley effect needs an
+estimator of the variance remaining once a group of inputs is held fixed, and
+jaxgsa does not have one yet. For conditional-variance indices under
+dependence, leave Shapley behind: [VKOGA](/examples/vkoga) works from given
+data through a kernel surrogate, [Kucherenko](/examples/kucherenko) uses its
+own design and your actual model. Neither returns a per-parameter allocation
+summing to 1.
+
+**Interactions past the truncation are simply absent.** Anything beyond
+`order` for PCE or `maxorder` for HDMR contributes nothing to the allocation,
+and `explained_variance` is the only place that absence shows up.
+
+**The HDMR backend inherits `jaxgsa.hdmr.analyze`'s contract**: at least 300
+samples, `maxorder` in `{1, 2, 3}`, clamped with a warning when
+`D < maxorder`.
 
 ## See also
 
-- [PCE](/examples/pce) for the default backend's surrogate and its
-  emulator/LOO-RMSE workflow.
+- [PCE](/examples/pce) for the default backend's surrogate, its leave-one-out
+  error and its emulator.
 - [RS-HDMR](/examples/hdmr) for the multi-output backend's surrogate.
-- [Basic Example](/examples/basic) for the Sobol workflow when you can
-  afford a structured Saltelli design.
-- [Borgonovo Delta](/examples/borgonovo) for a moment-independent
-  importance measure from the same given-data setting.
-- [Methods](/guide/methods) for the theory behind Shapley effects and when
-  to choose them over S1/ST.
-- [API Reference](/api/#shapley-effects) for full parameter
-  documentation.
+- [Basic Example](/examples/basic) for the Sobol workflow when you can afford
+  a structured Saltelli design.
+- [Borgonovo Delta](/examples/borgonovo) for a moment-independent importance
+  measure from the same given-data setting.
+- [Methods](/guide/methods) for the theory and when to prefer Sh over S1/ST.
+- [API Reference](/api/#shapley-effects) for full parameter documentation.

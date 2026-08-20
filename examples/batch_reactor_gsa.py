@@ -234,7 +234,7 @@ def _analyze_md(mo):
 
     `jaxgsa.sobol.analyze(...)` accepts the `(N, T, K)` output array and
     returns indices with shape `(T, K, D)` for first-order, total-order
-    and `(T, K, D, D)` for second-order. Passing `num_resamples > 0`
+    and `(T, K, D, D)` for second-order. Passing `n_bootstrap > 0`
     together with a PRNG `key` switches on a vectorised non-parametric
     bootstrap and populates the `_conf` arrays with `[lower, upper]`
     endpoints in a leading dimension of size 2.
@@ -252,7 +252,7 @@ def _analyze(Y, jaxgsa, jax, sampling_result):
     result = jaxgsa.sobol.analyze(
         sampling_result,
         Y,
-        num_resamples=200,
+        n_bootstrap=200,
         conf_level=0.95,
         ci_method="quantile",
         key=jax.random.key(0),
@@ -427,11 +427,16 @@ def _outro(mo):
        time to bite. By steady state, all three inputs contribute, and
        the gap between $S_T$ and $S_1$ on $T$ and $\mathrm{pH}$ is wide
        enough to read off without help from the confidence intervals.
-    2. **Temperature and pH interact strongly.** Both enter the outlet
-       concentration only through the product $k(T, \mathrm{pH})\tau$,
-       so their joint variance is inseparable; the heatmap surfaces it
-       as the largest off-diagonal $S_{ij}$.
-    3. **Bootstrap is one extra argument.** Passing `num_resamples=200`
+    2. **Shared structure does not predict interaction.** $T$ and
+       $\mathrm{pH}$ enter only through the product
+       $k(T, \mathrm{pH})\tau$, which reads like a recipe for a large
+       $S_{ij}$. Measure it and the pair is the *weakest* of the three:
+       $S_{ij}$ is $0.0000$ at steady state and never exceeds $0.0020$.
+       The largest pair is $C_{A,0}$ with $\mathrm{pH}$ at $0.0125$, and
+       even that is small. Over these ranges the response is close to
+       additive, so the first-order indices carry almost all of it. Read
+       the heatmap; do not predict it from the algebra.
+    3. **Bootstrap is one extra argument.** Passing `n_bootstrap=200`
        and a PRNG key fills the `_conf` arrays at the same broadcast
        `(T, K, D)` shape as the point estimates, so plotting code stays
        the same with or without uncertainty bars.

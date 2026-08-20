@@ -157,7 +157,7 @@ def _sobol_analysis(jaxgsa, jax, jnp, oscillator, problem):
     sobol_result = jaxgsa.sobol.analyze(
         sampling_result,
         Y_sobol,
-        num_resamples=200,
+        n_bootstrap=200,
         conf_level=0.95,
         ci_method="quantile",
         key=jax.random.key(0),

@@ -171,7 +171,7 @@ def _bootstrap_md(mo):
     mo.md(r"""
     ## Bootstrap confidence intervals
 
-    Passing `num_resamples` and a JAX PRNG key bootstraps the screening
+    Passing `n_bootstrap` and a JAX PRNG key bootstraps the screening
     measures over trajectories (sampling $r$ of them with replacement).
     The result gains `mu_conf`, `mu_star_conf`, and `sigma_conf` arrays of
     shape $(2, D)$ holding the lower and upper bounds.
@@ -191,7 +191,7 @@ def _bootstrap(Y_traj, jaxgsa, jax, morris_problem, np, plt, sr_traj):
     result_ci = jaxgsa.morris.analyze(
         sr_traj,
         Y_traj,
-        num_resamples=500,
+        n_bootstrap=500,
         key=jax.random.PRNGKey(0),
     )
 

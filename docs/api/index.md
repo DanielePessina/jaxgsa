@@ -1,10 +1,13 @@
-# API Reference
+# API reference
 
-jaxgsa 0.4 uses a namespace-oriented API. The package root holds the problem
-types. Each method has its own namespace, and that namespace holds the
-sampling and analysis commands for the method.
+jaxgsa groups its API by namespace. The package root holds the problem types.
+Each method has its own namespace, and that namespace holds the sampling and
+analysis commands for the method.
 
-## Foundational Types
+`jaxgsa.__version__` is the installed version string, the same value as
+`importlib.metadata.version("jaxgsa")`.
+
+## Foundational types
 
 - `jaxgsa.Problem` — the set of input parameters and their marginal
   distributions.
@@ -44,11 +47,78 @@ problem = jaxgsa.Problem.from_dict(
 problem.input_specs[1].variance  # 4.0
 ```
 
-The package root also holds `jaxgsa.JaxgsaWarning`, the category of every
-warning that jaxgsa raises. It is a subclass of `UserWarning`, so existing
-`UserWarning` filters keep working. Filter on `JaxgsaWarning` to select the
-jaxgsa warnings alone, for example
-`warnings.filterwarnings("ignore", category=JaxgsaWarning)`.
+`jaxgsa.Theta` is the type of the distribution-parameter mapping that
+`SobolSamples.transform(theta)` takes: `Mapping[str, Mapping[str, Any]]`,
+keyed by parameter name and then by field name. It is re-exported from
+`jaxgsa.sobol` as well, next to the method that consumes it. See
+[Sampling](/api/sampling#sobolsamples).
+
+### Warnings
+
+`jaxgsa.JaxgsaWarning` is the category of every warning the library raises. It
+subclasses `UserWarning`, so filters you already have keep working, and it
+gives you one handle for jaxgsa alone.
+
+```python
+import warnings
+from jaxgsa import JaxgsaWarning
+
+# Turn every jaxgsa warning into an exception. Good for CI: a degraded run
+# fails the build instead of scrolling past.
+warnings.filterwarnings("error", category=JaxgsaWarning)
+
+# Or silence jaxgsa only, leaving other libraries' warnings alone.
+warnings.filterwarnings("ignore", category=JaxgsaWarning)
+
+# Or capture them and decide per warning.
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    result = jaxgsa.sobol.analyze(samples, Y)
+[(type(w.message).__name__, str(w.message)) for w in caught]
+```
+
+```
+[('JaxgsaWarning',
+  'jaxgsa.sobol.analyze: output has zero variance — all indices will be NaN')]
+```
+
+Escalating to `"error"` is the setting I would reach for in a pipeline. jaxgsa
+warns when a run is degraded but still valid: a repaired correlation matrix, a
+zero-variance output slice, a design thinned by deduplication. Every one of
+those produces numbers that look fine and mean less than they appear to.
+
+### Printed run summaries
+
+All thirteen `analyze()` functions and all four `sample()` functions take a
+keyword-only `verbose: bool = True`. The default prints, so a bare call writes
+to stdout:
+
+```python
+result = jaxgsa.sobol.analyze(samples, Y)
+```
+
+```
+jaxgsa.sobol.analyze
+  problem: D=3 (x1, x2, x3)
+    marginals: uniform=3
+    correlation: independent
+    output: N=8192 runs, T=1 x K=1 output slice
+    invalid: none found in 1024 Saltelli groups (policy 'raise')
+  timing:
+    estimators (includes compile on the first call): 0.5518 s
+    slice_chunk_size: 1 (resolved from the memory budget)
+    estimator: saltelli-jansen
+  results: top 3 of 3 parameters by ST
+    1. x1  ST=0.556
+    2. x2  ST=0.4417
+    3. x3  ST=0.2413
+```
+
+Read it as a receipt. It states the shape jaxgsa inferred from your `Y`, the
+resample unit the non-finite check used, whether the run compiled, and the
+ranking, so a transposed output array or a silently dropped block shows up
+before you plot anything. Pass `verbose=False` in loops, in tests, and
+anywhere the print is noise.
 
 ### Failed model runs
 
@@ -109,8 +179,8 @@ method's answer. See [Categorical Inputs](/examples/categorical-inputs).
 ### Dependent inputs
 
 Declare dependence with the optional Gaussian-copula `correlation=` argument,
-together with `correlation_type="latent"` or `correlation_type="spearman"`.
-To attach a matrix to an existing problem, call
+together with `correlation_type="latent"` (the default) or
+`correlation_type="spearman"`. To attach a matrix to an existing problem, call
 `problem.with_correlation(R)`. The validated latent matrix is then available
 as `problem.correlation`.
 
@@ -123,7 +193,7 @@ A correlation entry that touches a categorical parameter is also rejected.
 Polychoric coupling is future work. See
 [Correlated Inputs](/examples/correlated-inputs).
 
-## Shape Contract
+## Shape contract
 
 Every analysis accepts one of three output layouts:
 
@@ -134,16 +204,53 @@ Every analysis accepts one of three output layouts:
 | Time series with multiple outputs | `(N, T, K)` |
 
 The sample axis is always first and the output axis is always last. jaxgsa does
-not infer, transpose, or insert axes. When `problem.output_names` is set, its
-length must equal `K`. Represent a single time-varying output explicitly as
-`(N, T, 1)`.
+not infer, transpose, or insert axes.
+
+### How a 2-D Y is read
+
+A 2-D `Y` is always `(N, K)`. There is no heuristic that might read it as
+`(N, T)` instead, and no shape jaxgsa will quietly transpose for you. A time
+series is `(N, T, K)`, which means a single time-varying output is written
+explicitly as `(N, T, 1)`.
+
+```python
+result = jaxgsa.sobol.analyze(samples, Y_2d)     # Y_2d is (8192, 5)
+result.S1.shape                                  # (5, 3)  ->  (K, D)
+
+result = jaxgsa.sobol.analyze(samples, Y_2d[:, :, None])
+result.S1.shape                                  # (5, 1, 3)  ->  (T, K, D)
+```
+
+The index arrays are the tell. `(K, D)` means jaxgsa read 5 separate outputs
+at one time step. `(T, K, D)` means it read 5 time steps of one output. Check
+that shape once, on the first run, and a transposed array cannot survive to
+your plots.
+
+`problem.output_names` is the guard rail worth setting. When it is present its
+length must equal the trailing axis, and the mismatch is caught before any
+array work:
+
+```python
+problem = jaxgsa.Problem(("x1", "x2", "x3"), bounds, output_names=("y",))
+jaxgsa.sobol.analyze(samples, Y_2d)              # Y_2d is (8192, 5)
+```
+
+```
+ValueError: output_names length 1 does not match the output axis K=5
+```
+
+That is one time series passed as `(N, T)`, caught by the name list. Without
+`output_names` the same array is a perfectly valid five-output run and nothing
+complains, so declare your outputs whenever `T` and `K` could be confused.
 
 ## Sobol
 
 ```python
-samples = jaxgsa.sobol.sample(problem, n_samples=4096, seed=42)
+samples = jaxgsa.sobol.sample(problem, n_samples=8192, seed=0)
 Y = model(samples.samples)
 result = jaxgsa.sobol.analyze(samples, Y)
+result.S1   # Array([0.3223, 0.4361, 0.0014], dtype=float32)
+result.ST   # Array([0.556 , 0.4417, 0.2413], dtype=float32)
 ```
 
 Public objects:
@@ -153,6 +260,7 @@ Public objects:
 - `jaxgsa.sobol.indices`
 - `jaxgsa.sobol.SobolSamples`
 - `jaxgsa.sobol.SobolResult`
+- `jaxgsa.sobol.Theta`
 
 `SobolSamples.save(path)` and `SobolSamples.load(path)` use one compressed NPZ
 file. `SobolSamples.downsample(...)` returns a prefix-nested smaller design.
@@ -167,26 +275,48 @@ result, so it works inside `jax.jit`, `jax.vmap` and `jax.grad`. Pair it with
 `transform` to differentiate an index with respect to the input distribution
 parameters. See [Analyze (Sobol)](/api/analyze).
 
-## Confidence Intervals
+`morris`, `efast` and `dgsm` each expose an `indices()` with the same deal:
+raw arrays, no checks, no result object, safe under a JAX transformation.
 
-Five methods report bootstrap confidence intervals: `sobol`, `morris`,
-`pawn`, `borgonovo` and `optimal_transport`. Two keyword spellings are in
-use. `sobol.analyze` and `morris.analyze` take `num_resamples`, and
-`pawn.analyze`, `borgonovo.analyze` and `optimal_transport.analyze` take
-`n_bootstrap`. The
-[method capability table](/guide/methods#method-capabilities) records the
-spelling for each method. The other eight methods report no intervals.
+## Confidence intervals
+
+Eleven of the thirteen `analyze()` functions compute bootstrap confidence
+intervals. Only `jaxgsa.efast` and `jaxgsa.hsic` do not, and in both cases
+that is a decision rather than a gap.
+
+eFAST has nothing to resample. It draws one ordered search curve per
+parameter and reads it with a discrete Fourier transform, so dropping a point
+does not shrink the sample, it changes what the estimator computes. An eFAST
+interval needs replicated designs at different random phase shifts, which
+would be a change to `efast.sample`, not a keyword on `analyze`.
+
+HSIC already reports its uncertainty as a permutation `p_value`. Its index is
+a V-statistic, a double sum over all `N^2` pairs, so a row bootstrap would
+duplicate rows onto the kernel diagonal where the kernel is exactly 1. That
+biases the resampled statistic upward by construction. HSIC still requires
+`key`, because the permutation test needs randomness.
+
+The keyword is `n_bootstrap` on all eleven, and it defaults to `0`, meaning no
+interval. Three more keywords travel with it, everywhere with the same
+meaning:
+
+- `conf_level: float = 0.95` — the two-sided confidence level.
+- `ci_method: Literal["quantile", "gaussian"] = "quantile"` — how the
+  endpoints are formed. `"quantile"` reads them off the empirical bootstrap
+  distribution. `"gaussian"` centres them on the point estimate and takes
+  `± z · sd` of the draws, which is smoother at small `n_bootstrap` but
+  assumes the draws are normal.
+- `key: jax.Array | None = None` — a `jax.random` key for the resampling.
+  Required as soon as `n_bootstrap > 0`; the call raises without it rather
+  than seeding itself, so a reported interval is always reproducible. Pass
+  `jax.random.key(0)` if all you have is an integer.
 
 Every interval comes with `result.ci`, a `CIInfo` record that says how it was
 made. A bare `*_conf` array does not say whether it is a 95% or a 68%
 interval, or how many resamples it rests on. `CIInfo` does:
 
-- `level` — the two-sided confidence level, the `conf_level` the analysis ran
-  with.
-- `method` — the endpoint rule used. `"quantile"` takes empirical bootstrap
-  quantiles and `"gaussian"` takes a normal approximation. `sobol` and
-  `morris` choose between them with `ci_method`. The other three always use
-  the percentile interval and record `"quantile"`.
+- `level` — the `conf_level` the analysis ran with.
+- `method` — the `ci_method` that formed the endpoints.
 - `n_bootstrap` — the number of bootstrap resamples drawn.
 - `replicates` — the per-resample values, or `None`.
 
@@ -194,17 +324,19 @@ interval, or how many resamples it rests on. `CIInfo` does:
 
 ### Keeping the bootstrap draws
 
-All five `analyze()` functions take `keep_replicates`. It defaults to `False`,
-which throws the draws away once the interval is computed. Pass
-`keep_replicates=True` to keep them in `result.ci.replicates`, a mapping from
-the name of an estimate (`"S1"`, `"mu_star"`, and so on) to an array whose
-leading axis has length `n_bootstrap`.
+All eleven take `keep_replicates`. It defaults to `False`, which throws the
+draws away once the interval is computed. Pass `keep_replicates=True` to keep
+them in `result.ci.replicates`, a mapping from the name of an estimate
+(`"S1"`, `"mu_star"`, and so on) to an array whose leading axis has length
+`n_bootstrap`.
 
 Keep them to recompute an interval at another level, or to compute a
 bias-corrected one, without running the analysis again:
 
 ```python
-result = jaxgsa.sobol.analyze(samples, Y, num_resamples=1000, keep_replicates=True)
+result = jaxgsa.sobol.analyze(
+    samples, Y, n_bootstrap=1000, key=jax.random.key(0), keep_replicates=True
+)
 result.ci.level                      # 0.95
 result.ci.n_bootstrap                # 1000
 lo, hi = jnp.quantile(result.ci.replicates["S1"], jnp.array([0.05, 0.95]), axis=0)
@@ -214,7 +346,7 @@ The draws are large. 1000 resamples of a `(T=100, K=5, D=20)` index array is
 80 MB, which is more than the rest of the result put together. That is why
 they are dropped by default.
 
-## Given-Data Methods
+## Given-data methods
 
 These nine methods analyze arbitrary aligned `(X, Y)` pairs. They need no
 design of their own.
@@ -256,6 +388,8 @@ provides three more helpers:
 - `correlation_from_covariance(cov)` — rescale a covariance matrix to
   correlation form.
 
+See [Sampling](/api/sampling) for the signatures.
+
 ### Fitted surrogates
 
 PCE and HDMR results retain their fitted surrogate:
@@ -294,7 +428,28 @@ also carries the `correlation` matrix used and the `n_centers`, `gamma`,
 decomposition to allocate from. Use `jaxgsa.hdmr` or `jaxgsa.pce` for Shapley
 effects. See the [VKOGA page](/api/vkoga) for the full index reference.
 
-## Structured Methods
+### Batching
+
+Three keywords bound peak memory, and which one a method has depends on which
+axis it batches over:
+
+| Keyword | Batches over | On |
+| --- | --- | --- |
+| `batch_size` | sample rows | `dgsm`, `hdmr`, `pce`, `vkoga`, and the surrogate `predict` methods |
+| `slice_chunk_size` | `(T, K)` output slices | `sobol`, `hdmr`, `pawn`, `borgonovo`, `efast`, `optimal_transport` |
+| `resample_chunk_size` | bootstrap replicates | `morris` |
+
+All three follow the same contract. The value is clamped to the axis it sizes,
+and it never selects a different algorithm, so the answer does not depend on it
+beyond float summation order. `None` derives a width from the memory budget; an
+explicit value always overrides the budget.
+
+`hsic`, `shapley` and `kucherenko` take none of the three.
+`jaxgsa.hsic.analyze(..., batch_size=...)` raises a `TypeError`. HSIC holds
+`2D+1` kernel matrices of shape `(N, N)` at once, and no keyword bounds that,
+so `N` is the only knob.
+
+## Structured methods
 
 | Namespace | Workflow | Result |
 | --- | --- | --- |
@@ -309,7 +464,7 @@ already-evaluated Saltelli design as a radial Morris design, so screening
 measures cost no extra model runs:
 
 ```python
-samples = jaxgsa.sobol.sample(problem, 1024)
+samples = jaxgsa.sobol.sample(problem, 8192, seed=0)
 Y = model(samples.samples)
 sobol_result = jaxgsa.sobol.analyze(samples, Y)
 morris_result = jaxgsa.morris.analyze(samples.to_morris(), Y)
@@ -321,10 +476,13 @@ design metadata `n_per_curve`, `M`, and `problem` into
 mismatched:
 
 ```python
-samples = jaxgsa.efast.sample(problem, n_per_curve=4096, seed=42)
+samples = jaxgsa.efast.sample(problem, n_per_curve=1024, seed=0)
 Y = model(samples.samples)
 result = jaxgsa.efast.analyze(samples, Y)
 ```
+
+`EFASTSamples` gained `save(path)` and `load(path)` in 1.0, so all four design
+classes now persist the same way.
 
 ## Kucherenko
 
@@ -347,7 +505,7 @@ Public objects: `jaxgsa.kucherenko.sample`, `jaxgsa.kucherenko.analyze`,
 `load`), and `jaxgsa.kucherenko.KucherenkoResult`. A categorical problem
 raises a `ValueError`; see the [Kucherenko page](/api/kucherenko) for details.
 
-## Shapley Effects
+## Shapley effects
 
 The `jaxgsa.shapley` namespace exposes `analyze` and `ShapleyResult`. The
 canonical form derives Shapley effects from an existing PCE or HDMR result
@@ -357,17 +515,28 @@ that fits the chosen surrogate and calls `.shapley()` in one step.
 
 All result objects support `to_dataset(...)` for labeled xarray export.
 
+## Benchmarks
+
+`jaxgsa.benchmarks` holds analytical test functions whose Sobol indices are
+known in closed form. Use them to check an estimator, or to measure how fast
+it converges. The submodules are `ishigami`, `sobol_g`, `linear`,
+`gaussian_linear` and `oakley_ohagan`. Each provides a `PROBLEM`, a JAX
+`evaluate(X)`, the precomputed `ANALYTICAL_S1` / `ANALYTICAL_ST` /
+`ANALYTICAL_S2`, and an `analytical_indices(...)` for non-default parameters.
+
 ## Configuration
 
-Use `jaxgsa.config.enable_compilation_cache(path)` to configure JAX's persistent
-compilation cache.
+`jaxgsa.config.enable_compilation_cache(path)` points JAX's persistent
+compilation cache at a directory, so a second run skips the compile.
 
-Use `jaxgsa.config.set_memory_budget(megabytes)` and
-`jaxgsa.config.get_memory_budget()` to adjust the global transient-memory
-budget. The default is 512 MiB. This budget sizes automatic batching: the
-surrogate `predict` batches, the HDMR output-slice chunking, and the PCE
-streaming fit. An explicit per-call `batch_size` or `slice_chunk_size` always
-takes precedence.
+`jaxgsa.config.set_memory_budget(budget, *, unit=None)` and
+`jaxgsa.config.get_memory_budget()` read and write the process-global
+transient-memory budget, default 512 MiB. Every automatic `batch_size`,
+`slice_chunk_size` and `resample_chunk_size` is derived from it, and an
+explicit per-call value always wins.
+
+The [configuration guide](/guide/configuration) has the full list of what
+reads the budget, the unit rules, and worked demos.
 
 See the [0.3 to 0.4 migration guide](/guide/migration-0.4) for direct API
 replacements.

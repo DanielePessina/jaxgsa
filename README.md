@@ -8,690 +8,290 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org)
 
-`jaxgsa` tells you which of your model's inputs actually drive its output. You give it input samples and the outputs your model produced for them; it returns sensitivity indices that rank the inputs and expose interactions. Everything is computed in JAX, so analyses are JIT-compiled and run on CPU, GPU, or TPU without code changes.
+jaxgsa tells you which of your model's inputs drive its output. You give it
+input samples and the outputs your model produced for them. It returns
+sensitivity indices that rank the inputs and show their interactions.
 
-Thirteen complementary methods are included. They fall into four groups.
+Thirteen methods share one interface, one output contract, and one JAX
+implementation. Every estimator is JIT-compiled and vectorized over the output
+axes, so a model with 50 timesteps and 6 outputs costs one compiled pass, not
+300 Python loop iterations. A model written in JAX also hands over its
+derivatives, so DGSM costs about one gradient per sample point on a scalar
+output. It picks forward or reverse mode from the output shape, because a
+reverse pass costs one row of the Jacobian and a `T x K` output has `T * K` of
+them.
 
-Variance-based methods split the output variance among the inputs.
+jaxgsa does not run your model. You control that. It builds designs and reads
+indices off the results.
 
-| Method | What it does |
-|---|---|
-| Sobol indices | The standard variance decomposition, via Saltelli sampling. |
-| RS-HDMR | Surrogate-based: fits a cheap approximation of your model to any existing input–output pairs and reads the indices off the fit. |
-| PCE | Surrogate-based in the same way as RS-HDMR. |
-| Shapley effects | A fair, game-theoretic split of the output variance. Computed analytically from a PCE or HDMR surrogate. |
-| eFAST | Fourier-based S1 and ST. |
-| DGSM | Derivative-based bounds, via JAX autodiff. |
-| VKOGA | Variance-based indices for correlated inputs, from a greedy kernel surrogate under a Gaussian copula (Hilhorst et al., 2024). |
-| Kucherenko indices | Sobol' indices for dependent inputs. Estimated by evaluating the model on a conditional-copula design (Kucherenko et al., 2012). |
-
-Screening: Morris runs cheap elementary-effects screening, to discard
-unimportant inputs early.
-
-Moment-independent methods look at the whole output distribution rather than
-just its variance.
-
-| Method | What it does |
-|---|---|
-| PAWN | CDF-based (Pianosi & Wagener, 2015). |
-| Borgonovo delta | Density-based (Borgonovo, 2007). |
-| Optimal-transport indices | Wasserstein-based, with an advective/diffusive decomposition (Borgonovo et al., 2024). |
-
-Dependence: HSIC does kernel-based dependence detection.
-
-## Features
-
-- **Sobol indices** via Saltelli sampling with Sobol quasi-random sequences (`scipy.stats.qmc`)
-  - First-order (S1: an input's direct share of output variance), total-order (ST: including all its interactions), and second-order (S2: pairwise interactions)
-  - Fused JIT kernels and chunked `jit(vmap(...))` execution for bounded memory on large output grids
-  - [Up to 668× faster than SALib](#benchmark-results) (HDMR on multi-output workloads)
-- **RS-HDMR** (Random Sampling High-Dimensional Model Representation)
-  - Works with any set of (X, Y) pairs — no structured sampling required
-  - B-spline surrogate with ANCOVA decomposition (Sa, Sb, S, ST)
-  - Built-in emulator for prediction at new inputs
-  - S1/ST properties for direct comparison with Sobol results. Under
-    independent inputs `ST` is the ordinary Sobol' total-order index. Under
-    correlated inputs it is the SCSA total of Li et al. (2010, Section 2.2.3):
-    it can be negative, it is not bounded in `[0, 1]`, and it must not be used
-    to decide whether a parameter can be fixed. Use `jaxgsa.kucherenko` or
-    `jaxgsa.vkoga` for a conditional-variance total under dependence.
-- **PCE** (Polynomial Chaos Expansion)
-  - Analytical Sobol indices from orthogonal polynomial coefficients (Sudret, 2008)
-  - Wiener-Askey scheme: Legendre for uniform, Hermite for Gaussian inputs
-  - Built-in emulator and leave-one-out cross-validation RMSE
-  - Scalar, multi-output, and time-series outputs. All output slices share one basis, fitted in a single multi-right-hand-side solve
-- **Shapley effects** (Owen, 2014; Song, Nelson & Staum, 2016)
-  - Fair, game-theoretic allocation of output variance. Each interaction's variance is split equally among its participants
-  - Computed analytically from a fitted PCE (default) or RS-HDMR surrogate: no permutation Monte Carlo, no extra model runs
-  - Works with any set of (X, Y) pairs. Returns Sh alongside S1 and ST from the same surrogate, with S1 <= Sh <= ST
-  - Assumes independent inputs (v1). Sh sums to 1. `explained_variance` reports the fraction of Var(Y) the surrogate captured
-- **eFAST** (Extended Fourier Amplitude Sensitivity Test)
-  - Frequency-based S1 and ST via sinusoidal search curves and Fourier decomposition
-  - Supports scalar, multi-output, and time-series outputs
-  - Simple N x D sampling design, no cross-matrix structure needed
-- **DGSM** (Derivative-based Global Sensitivity Measures)
-  - Upper and lower bounds on total Sobol index via JAX reverse-mode autodiff
-  - Poincare constants for uniform, Gaussian, and truncated Gaussian inputs
-  - Pre-computed Jacobian path for non-JAX models
-- **Morris** (elementary-effects screening)
-  - Globalized one-at-a-time screening. It gives a mu_star importance ranking and a sigma interaction flag from only `r * (D + 1)` model runs, where r is the trajectory count and D the input count
-  - Trajectory (Morris, 1991) and radial (Campolongo et al., 2011) designs with unique-row deduplication
-  - Bootstrap confidence intervals over trajectories and prefix-nested trajectory downsampling
-- **HSIC** (Hilbert–Schmidt Independence Criterion)
-  - Kernel-based dependence: normalized first-order (R2-HSIC) and Total HSIC indices
-  - Works with any set of (X, Y) pairs — Gaussian RBF kernels with the median heuristic
-  - Detects nonlinear, non-monotone, and heteroscedastic dependence. Reports permutation-test p-values
-- **PAWN** — moment-independent, CDF-based sensitivity (Pianosi & Wagener, 2015)
-  - Kolmogorov–Smirnov distance between unconditional and conditional output CDFs
-  - Tie-aware KS matching `scipy.stats.ks_2samp` for discrete/continuous outputs
-  - Median / max / mean aggregation with bootstrap confidence intervals
-- **Borgonovo delta** — moment-independent, density-based sensitivity (Borgonovo, 2007)
-  - Plischke et al. (2013) given-data estimator: works with any set of (X, Y) pairs
-  - Bias-corrected delta plus the given-data first-order Sobol S1 (SALib-compatible)
-  - Percentile bootstrap confidence intervals
-- **Optimal transport** — Wasserstein-based distributional sensitivity (Borgonovo et al., 2024)
-  - Given-data estimator on any (X, Y) pairs; rank-based conditioning handles mixed uniform/Gaussian marginals and correlated inputs
-  - Advective (mean-shift, = S1/2) vs diffusive (spread/shape) decomposition of every index
-  - Per-column indices via exact 1-D transport (solver-free). Joint point-cloud modes over multivariate/time-series outputs use a pure-JAX log-domain Sinkhorn. A dummy-input irrelevance baseline is included
-- **Correlated inputs** — declare a Gaussian-copula correlation matrix on `Problem`
-  - Declare it with `correlation=` on the latent or Spearman scale, or with `problem.with_correlation(R)`
-  - `jaxgsa.sampling.monte_carlo` draws from it transparently. `correlate()` retrofits it onto existing samples. `fit_correlation()` estimates it from data
-  - Correlation-tolerant methods (OT, Borgonovo, HDMR, HSIC, PAWN, VKOGA) analyze it, and the Kucherenko design conditions on it
-  - Correlation-naive methods (Sobol, Morris, eFAST, PCE, DGSM, PCE-backed Shapley) refuse it with an actionable error
-- **Categorical inputs** — declare unordered discrete marginals with `{"dist": "categorical", "probs": [...], "labels": [...]}`
-  - Samples carry integer level codes
-  - Optimal transport, Borgonovo, and PAWN condition on one class per level
-  - The Saltelli-based Sobol pipeline works unchanged
-  - Every code-order-sensitive method (Morris, eFAST, DGSM, PCE, HDMR, HSIC, Shapley) refuses with a clear error
-- **VKOGA** — variance-based indices for correlated inputs (Hilhorst et al., 2024; Li et al., 2010)
-  - Given-data method: fits a greedy Gaussian-RBF kernel surrogate to whatever (X, Y) pairs you have
-  - Gaussian copula for the dependency structure: reads `problem.correlation`, with a per-call matrix override
-  - Splits each input's effect into correlated and uncorrelated parts (S_TC, S_TU, S_U, S_C, S_IU). S_TC ranks inputs for measurement, S_TU for fixing
-  - Built-in emulator for prediction at new inputs
-- **Kucherenko indices** — design-based Sobol' indices for dependent inputs (Kucherenko et al., 2012)
-  - `kucherenko.sample` builds a conditional-copula design from `problem.correlation`, and is exempt from the correlated-design error. You evaluate your actual model on it. No surrogate is fitted
-  - S1 is correlation-inclusive (VKOGA's S_TC) and ST is correlation-exclusive (VKOGA's S_TU). With independent inputs both reduce to the classic Sobol' indices
-  - Cross-validated against VKOGA and the analytic linear-Gaussian closed form in the test suite
-- All thirteen methods use one strict output contract: scalar `(N,)`, multi-output `(N, K)`, or time-series `(N, T, K)`
-- Bootstrap confidence intervals with JAX-accelerated resampling
-- Sobol analysis always standardizes each output slice before the estimators, so a
-  large output mean cannot bias S1 or S2
-- `standardize_outputs=True` on Morris and DGSM reports their dimensional
-  quantities in units of the output standard deviation
-- `on_invalid` on every `analyze()`: a non-finite model output raises by default,
-  and `"drop"` or `"propagate"` say what to do instead. Every result carries a
-  report naming the runs that failed
-- **xarray integration** — `to_dataset()` on results for labeled, named dimensions (`param`, `output`, `time`)
-- Save and reload sample designs as one NPZ file via `SobolSamples.save()` / `.load()` (and the same on `MorrisSamples`)
-- Built-in Ishigami benchmark function with known analytical solutions
-
-## Installation
+## Install
 
 ```bash
 pip install jaxgsa
-# or, with uv:
+# or
 uv add jaxgsa
 ```
 
-To install the latest development version from GitHub:
+Python 3.12 or newer. The runtime dependencies are `jax`, `jaxlib`, `scipy`,
+and `xarray`. Optional extras: `notebook` (marimo, matplotlib) and `dev`
+(pytest, ruff, ty, SALib, POT).
 
-```bash
-pip install git+https://github.com/DanielePessina/jaxgsa.git
-```
+## Quickstart
 
-For local development:
-
-```bash
-git clone https://github.com/DanielePessina/jaxgsa.git
-cd jaxgsa
-uv sync --extra dev   # or: pip install -e ".[dev]"
-```
-
-## Configuration
-
-jaxgsa inherits JAX's runtime defaults. Two optional knobs, documented in full in
-the [Configuration guide](https://danielepessina.github.io/jaxgsa/guide/configuration):
-
-- **Double precision** — JAX defaults to float32 and silently downcasts `float64`.
-  For precision-sensitive Sobol/HSIC work, enable 64-bit floats before the first
-  array is created: `jax.config.update("jax_enable_x64", True)`.
-- **Persistent compilation cache** — reuse compiled kernels across process
-  restarts (sweeps, CI, HPC) by calling
-  `jaxgsa.config.enable_compilation_cache("~/.cache/jaxgsa-jax")` once, before your first analysis.
-
-## Quick Start
+Sobol indices on the Ishigami function, which has known analytic indices.
 
 ```python
 import jaxgsa
 from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
-# 1. Generate unique Sobol/Saltelli samples
-sampling_result = jaxgsa.sobol.sample(PROBLEM, n_samples=4096, seed=42)
-# sampling_result.samples.shape == (n_runs, D)  — D parameters, n_runs unique rows
-# sampling_result.n_expanded is the internal Saltelli row count used by analyze()
-# by default, sample() also prints a short summary of unique vs expanded rows
+# 1. Build a Saltelli design. `samples` is the (n_runs, D) array to run your model on.
+design = jaxgsa.sobol.sample(PROBLEM, n_samples=16384, seed=42)
 
-# 2. Evaluate your model on the samples
-Y = evaluate(sampling_result.samples)  # Y.shape == (n_runs,)
+# 2. Run the model. Here it is the Ishigami test function.
+Y = evaluate(design.samples)  # shape (16384,)
 
-# 3. Compute Sobol indices
-result = jaxgsa.sobol.analyze(
-    sampling_result,
-    Y,
-)
-# result.S1.shape == (D,)    — first-order indices
-# result.ST.shape == (D,)    — total-order indices
-# result.S2.shape == (D, D)  — second-order interaction matrix
+# 3. Read the indices off the design and the outputs.
+result = jaxgsa.sobol.analyze(design, Y)
 
-print("First-order indices (S1):", result.S1)
-print("Total-order indices (ST):", result.ST)
-print("Second-order indices (S2):")
-print(result.S2)
+print("S1:", result.S1)
+print("S2 x1-x3:", result.S2[0, 2])
 ```
 
-Expected output (Ishigami function with A=7, B=0.1):
+Both `sample` and `analyze` print a summary by default. This is what the script
+writes, verbatim, apart from the timing line, which depends on your machine:
 
 ```
-First-order indices (S1): [~0.31, ~0.44, ~0.00]
-Total-order indices (ST): [~0.56, ~0.44, ~0.24]
+jaxgsa.sobol.sample: D=3, mode=second-order, base_n=2048, requested_runs>=16384, n_runs=16384, n_expanded=16384, duplicates_removed=0 (0.0%), scramble=True
+jaxgsa.sobol.analyze
+  problem: D=3 (x1, x2, x3)
+    marginals: uniform=3
+    correlation: independent
+    output: N=16384 runs, T=1 x K=1 output slice
+    invalid: none found in 2048 Saltelli groups (policy 'raise')
+  timing:
+    estimators (includes compile on the first call): 0.7828 s
+    slice_chunk_size: 1 (resolved from the memory budget)
+    estimator: saltelli-jansen
+  results: top 3 of 3 parameters by ST
+    1. x1  ST=0.5559
+    2. x2  ST=0.4414
+    3. x3  ST=0.2415
+S1: [ 0.308098   0.4440502 -0.0113217]
+S2 x1-x3: 0.24699646
 ```
 
-Each index is a fraction of the output variance. S1 is an input's direct
-effect. ST also counts every interaction it takes part in. Here `x2` has the
-largest direct effect. `x3` has no direct effect at all (S1 ≈ 0), but it still
-matters through its interaction with `x1` (ST ≈ 0.24). `result.S2` shows which
-pairs are responsible.
+Pass `verbose=False` to any `analyze()` or `sample()` call to silence it. The
+summary is worth reading once per new problem, because the `invalid` and
+`marginals` lines catch the mistakes that silently ruin an analysis.
 
-### RS-HDMR (surrogate-based)
+Every index is a fraction of the output variance. S1 is an input's direct
+effect. ST also counts every interaction the input takes part in. Reading the
+numbers above:
 
-RS-HDMR fits a surrogate to any existing (X, Y) pairs, then computes the
-indices from the fit. The surrogate is a cheap spline approximation of your
-model. Use it when your model runs already exist and rerunning on a Saltelli
-design isn't an option.
+- `x2` has the largest direct effect, 0.444 of the variance, and S1 equals ST,
+  so it acts alone.
+- `x1` has S1 = 0.308 but ST = 0.556. The gap is interaction.
+- `x3` has S1 = -0.011, which is zero plus estimator noise. On its own it does
+  nothing. Yet ST = 0.242. `result.S2[0, 2] = 0.247` names the partner. The
+  whole effect of `x3` runs through `x1`. Fixing `x3` at its nominal value
+  would still change the output, so you cannot drop it.
+
+A negative S1 is not a bug. The Saltelli estimator is a difference of
+Monte Carlo means, so a true zero comes out slightly either side of zero. Read
+it as "no direct effect", and read its size as your noise floor.
+
+The analytic answers are S1 = (0.3139, 0.4424, 0) and
+ST = (0.5576, 0.4424, 0.2437). At `n_samples=16384` every index above is within
+0.012 of the truth. At `n_samples=4096` the worst error is 0.07, on ST for
+`x1`. Monte Carlo error falls with the square root of the sample count, so
+budget for it. Quadrupling the runs roughly halves the error.
+
+## When you cannot choose the sample points
+
+The Saltelli design is the price of Sobol indices. Nine of the thirteen methods
+skip it and work on whatever (X, Y) pairs you already have, including runs
+from an old sweep. Polynomial chaos fits an orthogonal-polynomial surrogate to
+the pairs and reads exact Sobol indices off the coefficients.
 
 ```python
-import jax
-import jax.numpy as jnp
 import jaxgsa
 from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
-# 1. Generate any set of input samples (no structured sampling needed)
-key = jax.random.PRNGKey(42)
-bounds = jnp.array(PROBLEM.bounds)
-X = jax.random.uniform(key, (2000, 3), minval=bounds[:, 0], maxval=bounds[:, 1])
-
-# 2. Evaluate your model
-Y = evaluate(X)  # Y.shape == (2000,)
-
-# 3. Compute HDMR sensitivity indices
-result = jaxgsa.hdmr.analyze(
-    PROBLEM, X, Y,
-    maxorder=2,
-    slice_chunk_size=64,  # optional: cap the vmap batch (timesteps x outputs) for memory control
-)
-
-# Sobol-compatible first-order and total-order indices
-print("S1:", result.S1)   # Sa[:D] — structural first-order contribution
-print("ST:", result.ST)   # SCSA total per parameter; equals the Sobol' ST
-                          # only when the inputs are independent
-
-# HDMR-specific: per-term decomposition
-print("Sa:", result.Sa)   # structural (uncorrelated) contribution per term
-print("Sb:", result.Sb)   # correlative contribution per term
-print("Terms:", result.terms)  # ('x1', 'x2', 'x3', 'x1/x2', 'x1/x3', 'x2/x3')
-
-# 4. Use the fitted surrogate as an emulator
-Y_pred = result.predict(X)
-# HDMR fits on your output scale, so Y_pred is on that scale too
-```
-
-### PCE (analytical Sobol indices from a surrogate)
-
-Polynomial Chaos Expansion fits an orthogonal-polynomial surrogate. It then
-reads the Sobol indices straight off the coefficients. No Saltelli design is
-needed.
-
-```python
-import jax
-import jax.numpy as jnp
-import jaxgsa
-from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
-
-key = jax.random.PRNGKey(42)
-bounds = jnp.array(PROBLEM.bounds)
-X = jax.random.uniform(key, (2000, 3), minval=bounds[:, 0], maxval=bounds[:, 1])
+X = jaxgsa.sampling.monte_carlo(PROBLEM, n=2000, seed=0)  # any (N, D) points
 Y = evaluate(X)
 
-result = jaxgsa.pce.analyze(PROBLEM, X, Y, order=4)
-print("S1:", result.S1)              # (D,) first-order
-print("ST:", result.ST)              # (D,) total-order
-print("LOO RMSE:", result.loo_rmse)  # leave-one-out cross-validation error
-
-Y_pred = result.predict(X)
+result = jaxgsa.pce.analyze(PROBLEM, X, Y, order=6, verbose=False)
+print("S1:", result.S1)
+print("ST:", result.ST)
+print("LOO RMSE:", result.loo_rmse, "  output sd:", Y.std())
 ```
 
-### Shapley effects (fair variance allocation)
+```
+S1: [3.1933489e-01 4.4209677e-01 1.2573625e-04]
+ST: [0.5573787  0.44309324 0.23836787]
+LOO RMSE: 0.52724934   output sd: 3.5930953
+```
 
-Shapley effects split the output variance fairly among the inputs. Each
-interaction's variance is shared equally by its participants. jaxgsa computes
-them analytically from a fitted PCE (default) or RS-HDMR surrogate, with no
-permutation Monte Carlo. Inputs are assumed independent in this version.
+2000 unstructured points land within 0.0054 of every analytic index. The
+Saltelli run above needed 16384 and did worse. That is the surrogate paying
+off, and it is why PCE is the right first try for a smooth model.
+
+The catch is that you are now trusting a fit. `loo_rmse` is the number that
+decides whether to trust it. Leave-one-out error of 0.527 against an output
+standard deviation of 3.59 means the surrogate reproduces about 98% of the
+variance. If `loo_rmse` approaches the output standard deviation, the indices
+describe the surrogate and not your model. Raise `order`, add samples, or
+switch to `jaxgsa.hdmr`, whose B-spline basis handles kinks that polynomials
+cannot.
+
+## Multi-output and time series
+
+Every method takes `Y` as scalar `(N,)`, multi-output `(N, K)`, or time-series
+`(N, T, K)`. The output axes are never inferred or transposed, and one call
+covers all of them.
 
 ```python
 import jax.numpy as jnp
+
 import jaxgsa
-from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
-
-X = jaxgsa.sampling.monte_carlo(PROBLEM, n=2000, seed=42)
-Y = evaluate(jnp.asarray(X))
-
-result = jaxgsa.pce.analyze(PROBLEM, jnp.asarray(X), Y).shapley()
-print("Sh:", result.Sh)              # (D,) Shapley effects
-print("sum:", result.Sh.sum())       # == 1 (Shapley efficiency property)
-print("explained:", result.explained_variance)  # fraction of Var(Y) captured
-print("S1:", result.S1)              # (D,) first-order, same surrogate
-print("ST:", result.ST)              # (D,) total-order — S1 <= Sh <= ST per parameter
-
-# Both backends accept scalar (N,), multi-output (N, K), and
-# time-series (N, T, K) Y; backend="hdmr" swaps in the B-spline surrogate
-result_hdmr = jaxgsa.hdmr.analyze(PROBLEM, jnp.asarray(X), Y).shapley()
-```
-
-### HSIC (kernel-based dependence)
-
-The Hilbert–Schmidt Independence Criterion detects any statistical dependence,
-whether nonlinear, non-monotone, or heteroscedastic. It works on any (X, Y)
-pairs, including correlated inputs.
-
-```python
-import jax.numpy as jnp
-import jaxgsa
-from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
-
-X = jaxgsa.sampling.monte_carlo(PROBLEM, n=2000, seed=42)
-Y = evaluate(jnp.asarray(X))
-
-result = jaxgsa.hsic.analyze(PROBLEM, jnp.asarray(X), Y)
-print("R2-HSIC:", result.R2_HSIC)    # (D,) normalized first-order dependence
-print("Total HSIC:", result.T_HSIC)  # (D,) dependence through interactions
-print("p-values:", result.p_values)  # permutation-test significance
-```
-
-### PAWN (distribution/CDF-based)
-
-PAWN measures how much the entire output distribution (its CDF) shifts when
-an input is fixed. It uses the Kolmogorov–Smirnov distance between the
-unconditional and conditional distributions. Because it looks at the whole
-distribution rather than just the variance, it is called moment-independent.
-It catches effects on tails and extremes that Sobol indices can miss. No
-structured sampling is needed.
-
-```python
-import jax.numpy as jnp
-import jaxgsa
-from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
-
-X = jaxgsa.sampling.monte_carlo(PROBLEM, n=5000, seed=42)
-Y = evaluate(jnp.asarray(X))
-
-result = jaxgsa.pawn.analyze(PROBLEM, jnp.asarray(X), Y, statistic="median")
-print("PAWN:", result.pawn)  # (D,) median KS distance across conditioning bins
-```
-
-### Morris (elementary-effects screening)
-
-Morris ranks parameters from coarse finite-difference effects sampled across
-the whole domain. It is a cheap screening pass before a full Sobol run. jaxgsa
-removes exact duplicate design rows, so you evaluate fewer than `r * (D + 1)`
-points.
-
-```python
-import jax.numpy as jnp
-import jaxgsa
-from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
-
-sr = jaxgsa.morris.sample(PROBLEM, n_trajectories=50, seed=42)
-Y = evaluate(jnp.asarray(sr.samples))
-
-result = jaxgsa.morris.analyze(sr, Y)
-print("mu_star:", result.mu_star)  # (D,) mean |elementary effect| — importance
-print("sigma:", result.sigma)      # (D,) spread — nonlinearity/interactions
-```
-
-### Borgonovo delta (density-based, moment-independent)
-
-The Borgonovo delta measures the average shift of the entire output density
-when an input is fixed. It is moment-independent like PAWN, but density-based.
-The Plischke et al. (2013) "given-data" estimator works on any existing (X, Y)
-pairs, with no special sampling design required. It also returns the
-first-order Sobol index, estimated from the same data partition.
-
-```python
-import jax.numpy as jnp
-import jaxgsa
-from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
-
-X = jaxgsa.sampling.monte_carlo(PROBLEM, n=5000, seed=42)
-Y = evaluate(jnp.asarray(X))
-
-result = jaxgsa.borgonovo.analyze(PROBLEM, jnp.asarray(X), Y)
-print("delta:", result.delta)  # (D,) bias-corrected delta indices
-print("S1:", result.S1)        # (D,) given-data first-order Sobol
-```
-
-### Optimal transport (Wasserstein-based, moment-independent)
-
-The OT index measures how far knowing an input moves the entire output
-distribution. It is the class-averaged squared 2-Wasserstein distance between
-conditional and unconditional outputs, on a [0, 1] scale (Borgonovo et al.,
-2024).
-
-Every index splits exactly into an advective part and a diffusive part. The
-advective part is the mean shift, equal to half the first-order Sobol index.
-The diffusive part covers changes in spread and shape. An input with a large
-advective part moves the output. One with a large diffusive part reshapes it.
-
-Conditioning is rank-based, so mixed uniform/Gaussian marginals and correlated
-inputs work unchanged.
-
-```python
-import jax.numpy as jnp
-import jaxgsa
-from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
-
-X = jaxgsa.sampling.monte_carlo(PROBLEM, n=5000, seed=42)
-Y = evaluate(jnp.asarray(X))
-
-result = jaxgsa.optimal_transport.analyze(PROBLEM, jnp.asarray(X), Y)
-print("ot:", result.ot)                # (D,) total index
-print("advective:", result.advective)  # mean-shift part (= S1 / 2)
-print("diffusive:", result.diffusive)  # spread/shape part
-
-# Time-series outputs: one index per input over each output's whole
-# trajectory (point-cloud transport via pure-JAX Sinkhorn)
-# result = jaxgsa.optimal_transport.analyze(PROBLEM, X, Y_tk, mode="trajectory")
-```
-
-## Usage
-
-### Define a problem
-
-A `Problem` specifies the parameter names and their bounds:
-
-```python
 from jaxgsa import Problem
 
-# From a dictionary
-problem = Problem.from_dict({
-    "x1": (-3.14, 3.14),
-    "x2": (-3.14, 3.14),
-    "x3": (-3.14, 3.14),
-})
-
-# Or directly
-problem = Problem(
-    names=("x1", "x2", "x3"),
-    bounds=((-3.14, 3.14), (-3.14, 3.14), (-3.14, 3.14)),
+problem = Problem.from_dict(
+    {"amplitude": (0.5, 1.5), "decay": (0.1, 1.0), "freq": (1.0, 3.0)}
 )
+t = jnp.linspace(0.1, 5.0, 50)
+
+
+def model(X):  # X is (N, 3)
+    a, k, w = X[:, 0:1], X[:, 1:2], X[:, 2:3]
+    return (a * jnp.exp(-k * t) * jnp.sin(w * t))[:, :, None]  # (N, T=50, K=1)
+
+
+design = jaxgsa.sobol.sample(problem, n_samples=8192, seed=0, verbose=False)
+result = jaxgsa.sobol.analyze(design, model(jnp.asarray(design.samples)), verbose=False)
+
+print("S1 shape:", result.S1.shape)  # (T, K, D)
+print("t=0.6  S1:", result.S1[5, 0])
+print("t=4.5  S1:", result.S1[44, 0])
 ```
 
-### Generate samples
-
-```python
-sampling_result = jaxgsa.sobol.sample(
-    problem,
-    n_samples=4096,          # minimum desired unique model evaluations
-    calc_second_order=True,  # include second-order indices (default)
-    scramble=True,           # scramble Sobol sequence (default)
-    seed=42,                 # reproducibility
-    verbose=True,            # print a short sampling summary (default)
-)
-
-# sampling_result.samples is the unique NumPy array you pass to your model
-# sampling_result.n_expanded is the internal Saltelli row count
+```
+S1 shape: (50, 1, 3)
+t=0.6  S1: [0.6211161  0.18043584 0.16506985]
+t=4.5  S1: [-0.00563779 -0.01124666  0.4224577 ]
 ```
 
-### Save and reload samples
+150 index sets, one compiled pass, one set of model runs. The ranking flips
+along the trajectory. Early on, amplitude explains 62% of the variance. By
+t = 4.5 the signal has decayed and only the phase is left, so frequency
+explains 42% and amplitude explains nothing. A single index averaged over time
+would have hidden both facts.
 
-If you want to generate samples once and reuse them later, persist the
-`SobolSamples` to disk and reconstruct it with its class method:
+Watch for zero-variance slices. If your model returns a constant at t = 0, the
+indices there are 0/0 and jaxgsa returns NaN with a `JaxgsaWarning` that names
+the slice.
 
-```python
-sampling_result.save("runs/ishigami_samples")
+## The thirteen methods
 
-restored = jaxgsa.sobol.SobolSamples.load("runs/ishigami_samples")
-Y = my_model(restored.samples)
-result = jaxgsa.sobol.analyze(restored, Y)
-```
+| Method | Own design | Reach for it when |
+|---|---|---|
+| `sobol` | Saltelli | You can still choose where to run the model and you want the reference variance decomposition, S1, ST, and S2. |
+| `pce` | given data | The model is smooth. Fewest samples per unit of accuracy, plus an emulator. |
+| `hdmr` | given data | Same job as PCE, with B-splines. Better on kinks and non-polynomial shapes. |
+| `shapley` | given data | You want one number per input that sums to exactly 1. Computed from a PCE or HDMR fit, with no permutation Monte Carlo. Also available as `result.shapley()` on those results. |
+| `efast` | search curves | You want S1 and ST from a plain N x D design instead of Saltelli matrices. |
+| `dgsm` | given data + `fn` | The model is JAX-differentiable. Bounds on ST from gradients, at roughly one gradient per sample. You pass the model itself, or a precomputed Jacobian. |
+| `morris` | trajectories | The budget is tight. Ranks D inputs in `r * (D + 1)` runs, so you can drop the dead ones before spending on Sobol. |
+| `hsic` | given data | You want a dependence test, including nonlinear and heteroscedastic, with permutation p-values. |
+| `pawn` | given data | The output is skewed or heavy-tailed and variance is the wrong summary. CDF-based. |
+| `borgonovo` | given data | Same reason as PAWN, measured on the density instead of the CDF. Also returns given-data S1. |
+| `optimal_transport` | given data | You want to know how an input matters. Each index splits into a mean shift (= S1/2) and a shape change. |
+| `vkoga` | given data | The inputs are correlated and you still want variance fractions, split into correlated and uncorrelated parts. |
+| `kucherenko` | conditional copula | The inputs are correlated and you would rather run the real model on a dedicated design than fit a surrogate. |
 
-The call writes `runs/ishigami_samples.npz`, containing the unique sample
-matrix, problem definition, and Saltelli reconstruction metadata.
+Every method exposes `analyze()`. The design-based ones also expose `sample()`.
+Results carry `to_dataset()` for labeled xarray output. Every method except
+eFAST and HSIC reports bootstrap confidence intervals through `n_bootstrap`.
 
-### Analyze results
+The [methods guide](https://danielepessina.github.io/jaxgsa/guide/methods)
+carries the estimators, the references, and a capability table that a test
+checks against the code.
 
-```python
-# Y can be:
-#   - (n_runs,)       scalar output (single output, no time dimension)
-#   - (n_runs, K)     multi-output (K outputs, no time dimension)
-#   - (n_runs, T, K)  time-series multi-output (T timesteps, K outputs)
-#
-# Axes are never inferred or transposed. Use (N, T, 1) for one
-# time-varying output and make len(problem.output_names) match K.
-Y = my_model(sampling_result.samples)
+## Correlated and categorical inputs
 
-result = jaxgsa.sobol.analyze(
-    sampling_result,
-    Y,
-    # ci_method="quantile",  # optional bootstrap CI summary method
-    slice_chunk_size=64,  # optional: limit vmap batch size for memory control
-)
+Declare a Gaussian-copula correlation matrix on the `Problem` and
+`jaxgsa.sampling.monte_carlo` draws from it. Declare a categorical parameter
+with `{"dist": "categorical", "probs": [...], "labels": [...]}` and samples
+carry integer level codes.
 
-# result.S1, result.ST — sensitivity indices
-# result.S2            — second-order interactions (None if not computed)
-```
+Neither is universally supported, and jaxgsa refuses rather than approximates.
+Sobol, Morris, eFAST, PCE, DGSM, and PCE-backed Shapley raise a `ValueError` on
+a correlated problem that names the alternatives. Every method whose indices
+would depend on the arbitrary order of category codes raises on a categorical
+one. Sobol is fine with categoricals, because the Saltelli column-swap scheme
+never looks at the values.
 
-jaxgsa always standardizes the outputs over the sample axis before the Sobol
-estimators run. It subtracts the mean of each output slice and divides by its
-standard deviation. The S1 and S2 estimators are uncentred products, so a
-non-zero output mean biases them. The standardization removes that bias. SALib
-does the same thing.
+See [correlated inputs](https://danielepessina.github.io/jaxgsa/examples/correlated-inputs)
+and [categorical inputs](https://danielepessina.github.io/jaxgsa/examples/categorical-inputs).
 
-For confidence intervals, set `num_resamples > 0`. Then choose how the
-bootstrap distribution is summarized. `ci_method="quantile"` gives percentile
-lower/upper endpoints. `ci_method="gaussian"` gives symmetric endpoints from
-the bootstrap standard deviation. Either way jaxgsa returns endpoint arrays,
-not SALib-style confidence half-widths.
+## Performance
 
-### Multi-output models
+The gain is vectorization over output slices. SALib analyzes each `(t, k)`
+slice in a Python loop. jaxgsa fuses the estimators and maps one compiled
+kernel over all `T * K` slices, so its cost is nearly flat in output size while
+SALib's is linear.
 
-For models with multiple outputs, pass a 2D array `(n_runs, K)` evaluated on the unique rows. The returned indices will have shape `(K, D)`:
+On the widest gap measured, RS-HDMR on 50 timesteps by 6 outputs, jaxgsa runs
+in 27.4 ms against 29.06 s for SALib 1.5.2 on the same Apple M1 Pro. That is
+1060x, and the baseline is single-process NumPy on one CPU core, which is what
+SALib does by default. Do not read it as a claim against a parallel CPU or a
+tuned GPU comparison, where published speedups for Monte Carlo GSA are closer
+to 13x. Eight cores would already cut 1060x to roughly 130x.
 
-```python
-import jax.numpy as jnp
+Most of that ratio is Python loop overhead rather than arithmetic. Give the
+same RS-HDMR comparison one output slice instead of 300 and the gap falls to
+10.9x. Shrink the work further, to Sobol on a scalar output with no bootstrap,
+and SALib wins at 0.2 ms against jaxgsa's 0.9 ms, because JAX dispatch costs more
+than the arithmetic does.
 
-def multi_output_model(X):
-    y1 = jnp.sin(X[:, 0]) + X[:, 1] ** 2
-    y2 = X[:, 0] * X[:, 2]
-    return jnp.column_stack([y1, y2])
+So output size is what decides. `T * K = 1` gains little and can lose. Time
+series and multi-output work is where jaxgsa pays for itself. Any speedup
+quoted without its `T` and `K` is meaningless, including the ones above.
 
-Y = multi_output_model(sampling_result.samples)  # (n_runs, 2)
-result = jaxgsa.sobol.analyze(sampling_result, Y)
-# result.S1.shape == (2, 3)  — 2 outputs, 3 parameters (K, D)
-# result.ST.shape == (2, 3)  — (K, D)
-# result.S2.shape == (2, 3, 3)  — (K, D, D)
-```
-
-For time-series multi-output models, pass a 3D array `(n_runs, T, K)` evaluated on the unique rows:
-
-```python
-def time_series_model(X):
-    # Returns shape (n_runs, T, K) — e.g. 50 timesteps, 4 outputs
-    ...
-
-Y = time_series_model(sampling_result.samples)  # (n_runs, 50, 4)
-result = jaxgsa.sobol.analyze(sampling_result, Y)
-# result.S1.shape == (50, 4, D)  — (T, K, D)
-# result.ST.shape == (50, 4, D)  — (T, K, D)
-# result.S2.shape == (50, 4, D, D)  — (T, K, D, D)
-```
-
-### Edge cases: single output or single timestep
-
-How a 2D array is interpreted depends on `problem.output_names`. Without it, a 2D array is `(N, K)`: multiple outputs, no time dimension. With exactly one entry in `output_names`, a 2D array is `(N, T)`, the timepoints of that single output. It then flows through as `(N, T, 1)`:
-
-```python
-# Single output, no time dimension — pass a 1D array
-Y = my_model(X)          # shape (n_runs,)
-result = jaxgsa.sobol.analyze(sampling_result, Y)
-# result.S1.shape == (D,)
-
-# Single output WITH time dimension — reshape to (N, T, 1) ...
-Y = my_model(X)          # shape (n_runs, T) — e.g. 50 timesteps
-Y = Y[:, :, None]        # reshape to (n_runs, 50, 1)
-result = jaxgsa.sobol.analyze(sampling_result, Y)
-# result.S1.shape == (50, 1, D)  — (T, K=1, D)
-
-# ... or set output_names=["y"] on the problem and pass (N, T) directly:
-# with exactly one output name, a 2D array is read as timepoints of that
-# output and produces the same (50, 1, D) result.
-
-# Multiple outputs, single timestep — just pass (N, K)
-Y = my_model(X)          # shape (n_runs, 4) — 4 outputs
-result = jaxgsa.sobol.analyze(sampling_result, Y)
-# result.S1.shape == (4, D)  — (K, D)
-# No need for a time dimension; (N, 1, 4) also works but is unnecessary.
-```
-
-jaxgsa also resolves layouts that are off but unambiguously recoverable. Two cases qualify: a transposed `(K, N)` array, and a 3D `(N, K, T)` array whose middle axis matches `len(output_names)`. jaxgsa fixes them and emits a `JaxgsaWarning` that names the transformation. Ambiguous layouts raise. jaxgsa never guesses.
-
-`JaxgsaWarning` is the category of every warning that jaxgsa raises. It is a subclass of `UserWarning`, so code that already filters on `UserWarning` keeps working. Use the jaxgsa class when you want to select jaxgsa warnings alone:
-
-```python
-import warnings
-from jaxgsa import JaxgsaWarning
-
-# Silence them.
-warnings.filterwarnings("ignore", category=JaxgsaWarning)
-
-# Or turn them into errors. Pick one of the two lines, not both.
-warnings.simplefilter("error", JaxgsaWarning)
-```
-
----
-
-## API Reference
-
-The full site reference now lives at
-[danielepessina.github.io/jaxgsa/api/](https://danielepessina.github.io/jaxgsa/api/).
-
-Use it for:
-
-- the complete exported surface from `jaxgsa`
-- parameter, field, and shape contracts
-- validation and error behavior
-- `to_dataset()` labeling rules
-- Sobol, RS-HDMR, PCE, Shapley, eFAST, DGSM, Morris, HSIC, PAWN, Borgonovo delta, optimal-transport, VKOGA, and Kucherenko workflow examples
-
-Quick map:
-
-- `Problem`, `UniformSpec`, `GaussianSpec`, and `CategoricalSpec`
-- `jaxgsa.sobol`: `sample` / `analyze` / `SobolSamples` / `SobolResult`
-- `jaxgsa.sampling`: `monte_carlo`
-- `jaxgsa.hdmr`: `analyze` / `HDMRResult`
-- `jaxgsa.pce`: `analyze` / `PCEResult`
-- `jaxgsa.shapley`: `analyze` / `ShapleyResult`
-- `jaxgsa.efast`: `sample` / `analyze` / `EFASTResult` / `EFASTSamples`
-- `jaxgsa.dgsm`: `analyze` / `DGSMResult` / `poincare_constant` / `axis_constants`
-- `jaxgsa.morris`: `sample` / `analyze` / `MorrisResult` / `MorrisSamples`
-- `jaxgsa.hsic`: `analyze` / `HSICResult`
-- `jaxgsa.pawn`: `analyze` / `PAWNResult`
-- `jaxgsa.borgonovo`: `analyze` / `DeltaResult`
-- `jaxgsa.optimal_transport`: `analyze` / `OTResult`
-- `jaxgsa.vkoga`: `analyze` / `VKOGAResult`
-- `jaxgsa.kucherenko`: `sample` / `analyze` / `KucherenkoSamples` / `KucherenkoResult`
-
-Commands are intentionally not duplicated at the package root. Use the method
-namespaces shown above. PCE, HDMR, and VKOGA predictions are result methods:
-`result.predict(...)`. Shapley effects are result methods on PCE and HDMR:
-`result.shapley(...)`. VKOGA offers `predict` but not `shapley`, because a
-kernel expansion has no per-parameter-subset variance decomposition. For a
-Shapley-style allocation under dependent inputs, use `jaxgsa.hdmr` with
-`shapley(include_correlative=True)`. For conditional-variance indices under
-dependence, use `jaxgsa.vkoga` or `jaxgsa.kucherenko`.
-
-For runnable walkthroughs, start with the
-[Getting Started guide](https://danielepessina.github.io/jaxgsa/guide/getting-started)
-and the
-[examples section](https://danielepessina.github.io/jaxgsa/examples/basic).
-
----
-
-## Dependencies
-
-Core runtime dependencies (installed automatically): `jax`, `jaxlib`, `scipy`,
-and `xarray`. See [`pyproject.toml`](pyproject.toml) for exact version
-bounds.
-
-Optional extras: `notebook` (marimo, matplotlib) and `dev` (pytest, ruff, ty,
-SALib, POT).
-
-## License
-
-Released under the MIT License.
-
-See [LICENSE](LICENSE) for details.
-
-## Benchmark Results
-
-jaxgsa vs SALib on a coupled-oscillator model. Methodology:
-
-- Model: D=5 parameters, N=1024 base samples.
-- Hardware and versions: Apple M1 Pro CPU, JAX 0.10.2.
-- Repeats: every timing is the best of 5 runs, except the slow SALib HDMR path (best of 2).
-- JIT: jaxgsa figures are post-JIT steady-state. The one-off XLA compile takes roughly 0.3–1.1 s depending on scenario. It is paid once per process and excluded here. SALib is pure NumPy/SciPy and requires no compilation.
-- Scope: the tables below cover the two methods timed against SALib here, Sobol and RS-HDMR.
-
-The other methods are validated for correctness but not timed here: PCE, Shapley, eFAST, DGSM, Morris, HSIC, PAWN, Borgonovo delta, and optimal transport. Borgonovo delta also has a direct SALib counterpart, `SALib.analyze.delta`, and is validated against it in the test suite.
-
-### Sobol — point estimates (no bootstrap)
-
-| Scenario (T×K) | Method | jaxgsa (ms) | SALib (ms) | Speedup |
-|---|---|---:|---:|---:|
-| 1×1 | analyze (no S2) | 0.7 | 0.2 | 0.3× |
-| 1×1 | analyze (S2) | 0.9 | 0.9 | 0.9× |
-| 1×6 | analyze (no S2) | 0.9 | 1.4 | 1.5× |
-| 1×6 | analyze (S2) | 1.5 | 5.5 | 3.6× |
-| 50×1 | analyze (no S2) | 3.0 | 12.4 | 4.1× |
-| 50×1 | analyze (S2) | 3.7 | 46.7 | 12.5× |
-| 50×6 | analyze (no S2) | 12.1 | 73.4 | 6.1× |
-| 50×6 | analyze (S2) | 17.4 | 274.8 | 15.8× |
-
-### Sobol — 300 bootstrap resamples
-
-| Scenario (T×K) | Method | jaxgsa (ms) | SALib (ms) | Speedup |
-|---|---|---:|---:|---:|
-| 1×1 | analyze (no S2) | 8.2 | 22.2 | 2.7× |
-| 1×1 | analyze (S2) | 11.1 | 88.4 | 8.0× |
-| 1×6 | analyze (no S2) | 36.0 | 143.5 | 4.0× |
-| 1×6 | analyze (S2) | 51.6 | 471.4 | 9.1× |
-| 50×1 | analyze (no S2) | 283.4 | 1208.1 | 4.3× |
-| 50×1 | analyze (S2) | 414.7 | 3536.2 | 8.5× |
-| 50×6 | analyze (no S2) | 1955.7 | 7544.9 | 3.9× |
-| 50×6 | analyze (S2) | 2721.1 | 22933.8 | 8.4× |
-
-### HDMR
-
-| Scenario (T×K) | jaxgsa (ms) | SALib (ms) | Speedup |
-|---|---:|---:|---:|
-| 1×1 | 18.3 | 89.3 | 4.9× |
-| 1×6 | 18.8 | 506.1 | 26.9× |
-| 50×1 | 20.9 | 4000.7 | 191.6× |
-| 50×6 | 39.0 | 26063.1 | 667.7× |
-
-The speedup grows with output dimensionality. SALib loops over each (T, K) slice in Python, while jaxgsa vectorizes with `jax.vmap`. With bootstrap, JIT reuse across resamples adds further gains.
-
-Correctness is validated against analytical Ishigami solutions and SALib on every run. Full benchmark script: [`benchmark_salib.py`](https://github.com/DanielePessina/jaxgsa/blob/master/benchmark_salib.py). See the [docs](https://danielepessina.github.io/jaxgsa/guide/benchmarks) for methodology details.
+Full tables, methodology, and the script are in the
+[benchmarks guide](https://danielepessina.github.io/jaxgsa/guide/benchmarks).
 
 ```bash
 uv run --extra dev benchmark_salib.py
 ```
+
+## Documentation
+
+- [Getting started](https://danielepessina.github.io/jaxgsa/guide/getting-started)
+- [Methods guide](https://danielepessina.github.io/jaxgsa/guide/methods), including the capability table
+- [Configuration](https://danielepessina.github.io/jaxgsa/guide/configuration), including 64-bit floats and the persistent compilation cache
+- [API reference](https://danielepessina.github.io/jaxgsa/api/)
+- [Examples](https://danielepessina.github.io/jaxgsa/examples/basic), one page per method
+
+One configuration note is worth repeating here. JAX defaults to float32 and
+silently downcasts float64 arrays. For precision-sensitive Sobol or HSIC work,
+call `jax.config.update("jax_enable_x64", True)` before you create the first
+array.
+
+## Development
+
+```bash
+git clone https://github.com/DanielePessina/jaxgsa.git
+cd jaxgsa
+uv sync --extra dev
+uv run pytest
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+jaxgsa's Sobol sampling and analysis workflow follows
+[SALib](https://salib.readthedocs.io/), reimplemented for JAX.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

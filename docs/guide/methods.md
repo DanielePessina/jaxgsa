@@ -2,26 +2,41 @@
 
 jaxgsa implements thirteen methods for global sensitivity analysis (GSA). All of them answer the same broad question: which parameters actually drive my model's output? They differ in three ways. They measure different quantities, they cost different numbers of model evaluations, and some need a dedicated sampling design while others work with data you already have.
 
-If you are new to the package, start with [Choosing a Method](#choosing-a-method), then jump to the section for the method you picked. Every method section opens with what it measures, when to pick it, and what data it needs. The estimator details follow.
+If you are new to the package, start with [Choosing a method](#choosing-a-method), then jump to the section for the method you picked. Every method section opens with what it measures, when to pick it, and what data it needs. The estimator details follow.
 
 Throughout this page, $D$ is the number of parameters and $N$ is a sample count.
 
-## Choosing a Method
+Two conventions for the code on this page. `verbose` defaults to `True` on every `analyze()` and every `sample()`, so a plain call prints a problem summary, timings and a top-k table to stdout. Every example here passes `verbose=False` so the printed output is only what the example asks for; drop it and you get the report as well. And the examples share one setup, which is Ishigami unless the text says otherwise:
+
+```python
+import jax
+import jax.numpy as jnp
+import numpy as np
+import jaxgsa
+from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
+
+X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n=4000, seed=0))
+Y = evaluate(X)
+```
+
+## Choosing a method
 
 Three questions narrow the field quickly.
 
 1. Can you still choose where to run the model? Four methods need their own sampling design, which jaxgsa generates for you: Sobol' (Saltelli matrices), eFAST (search curves), Morris (trajectories), and Kucherenko (conditional-copula blocks for dependent parameters). The other nine are given-data methods: HDMR, PCE, Shapley effects, DGSM, HSIC, PAWN, Borgonovo delta, optimal transport, and VKOGA. They accept any set of $(X, Y)$ pairs, including simulation runs you already have. DGSM has no sampler of its own: draw plain Monte Carlo points with `jaxgsa.sampling.monte_carlo` and let autodiff do the rest.
 
-2. What should the number mean? Variance-based methods (Sobol', HDMR, PCE, eFAST, Shapley) report fractions of output variance, as in "parameter 3 explains 40% of the output's spread". Screening methods (Morris, DGSM) trade that precision for cheap, reliable rankings. Moment-independent methods (HSIC, PAWN, Borgonovo delta, optimal transport) measure how strongly a parameter affects the whole output distribution. Use them when your output is skewed or heavy-tailed and variance is the wrong summary. Optimal transport also splits its index into a mean-shift part and a shape-change part.
+2. What should the number mean? Variance-based methods (Sobol', HDMR, PCE, eFAST, Shapley) report fractions of output variance, as in "parameter 3 explains 40% of the output's spread". Screening methods (Morris, DGSM) trade that precision for a cheap answer to a narrower question: which parameters can I stop worrying about? They are good at finding the ones that do nothing and less good at ordering the ones that do. Both misrank Ishigami's top two; see their sections. Moment-independent methods (HSIC, PAWN, Borgonovo delta, optimal transport) measure how strongly a parameter affects the whole output distribution. Use them when your output is skewed or heavy-tailed and variance is the wrong summary. Optimal transport also splits its index into a mean-shift part and a shape-change part.
 
-3. What is your evaluation budget? Sobol' needs $N(2D+2)$ model runs by default, with $N$ typically 1024 or more. Morris needs only $r(D+1)$, with $r \approx 10\text{–}50$ trajectories. DGSM gets the whole gradient for roughly the price of one evaluation per sample point, for JAX-differentiable models only. The given-data methods cost nothing beyond the runs you already have.
+3. What is your evaluation budget? Sobol' needs $N(2D+2)$ model runs by default, where $N$ is the base sample count and is typically 128 or more. Morris needs only $r(D+1)$, with $r \approx 10\text{–}50$ trajectories. DGSM costs $N$ forward passes plus one Jacobian each, and one Jacobian costs about $\min(D,\,T K)$ evaluations, so it is cheap for a scalar output and stops being cheap for a long time series. The given-data methods cost nothing beyond the runs you already have.
+
+One thing to get straight before you read any cost formula on this page. The $N$ in $N(2D+2)$ is the base sample count, but `jaxgsa.sobol.sample(problem, n_samples)` takes the **total** evaluation budget and picks the base count for you. `sample(problem, 8192)` on a 3-parameter problem gives 8192 model runs from a base count of 1024, not 8192 × 8. `jaxgsa.efast.sample` and `jaxgsa.morris.sample` take per-curve and per-trajectory counts instead, so they do multiply. Check `samples.samples.shape[0]` if you are not sure.
 
 Common situations:
 
 - "I can run the model freely and want the standard variance decomposition." Use [Sobol' via Saltelli sampling](#sobol-indices-via-saltelli-sampling), the reference method, with first-order, total-order, and second-order indices.
 - "My model is expensive and has many parameters." Screen first with [Morris](#morris-elementary-effects-screening) at $r(D+1)$ runs, or with [DGSM](#dgsm-derivative-based-global-sensitivity-measures) if the model is JAX-differentiable. Fix the negligible parameters, then spend the remaining budget on Sobol' for the survivors.
 - "I only have existing simulation data." Any given-data method works. Use [HDMR](#rs-hdmr-random-sampling-high-dimensional-model-representation) or [PCE](#pce-polynomial-chaos-expansion) for variance-based indices via a surrogate, or [VKOGA](#vkoga-correlated-input-variance-indices) when the parameters are dependent. Use [HSIC](#hsic-hilbert–schmidt-independence-criterion), [PAWN](#pawn-cdf-based-sensitivity), [Borgonovo delta](#borgonovo-delta-density-based-sensitivity), or [optimal transport](#optimal-transport-wasserstein-based-sensitivity) for distribution-based indices.
-- "My parameters are correlated." Sobol', PCE, eFAST, DGSM, Morris, and PCE-backed Shapley all assume independent parameters, and they refuse to run when `problem.correlation` is declared. The full menu has three routes. To generate correlated samples, declare a Gaussian-copula matrix on the `Problem` (`correlation=`, or `problem.with_correlation(R)`) and draw with `jaxgsa.sampling.monte_carlo`. To analyze data you already have, use [VKOGA](#vkoga-correlated-input-variance-indices) for variance fractions split into correlated and uncorrelated parts via a kernel surrogate, HDMR for the ANCOVA separation of structural and correlative variance, or [optimal transport](#optimal-transport-wasserstein-based-sensitivity), [Borgonovo delta](#borgonovo-delta-density-based-sensitivity), HSIC, and PAWN, which make no independence assumption. `shapley.analyze(backend="hdmr", include_correlative=True)` allocates the HDMR decomposition, but HDMR's `ST` is not a total-effect index under dependence — see the [HDMR section](#rs-hdmr-random-sampling-high-dimensional-model-representation). To run your model on a dedicated design, use [Kucherenko](#kucherenko-dependent-input-sobol-indices): conditional-copula sampling that evaluates the actual model and returns $S_1$/$S_T$ under the declared dependence. See [Correlated Inputs](/examples/correlated-inputs).
+- "My parameters are correlated." Sobol', PCE, eFAST, DGSM, Morris, and PCE-backed Shapley all assume independent parameters, and they refuse to run when `problem.correlation` is declared. The full menu has three routes. To generate correlated samples, declare a Gaussian-copula matrix on the `Problem` (`correlation=`, or `problem.with_correlation(R)`) and draw with `jaxgsa.sampling.monte_carlo`. To analyze data you already have, use [VKOGA](#vkoga-correlated-input-variance-indices) for variance fractions split into correlated and uncorrelated parts via a kernel surrogate, HDMR for the ANCOVA separation of structural and correlative variance, or [optimal transport](#optimal-transport-wasserstein-based-sensitivity), [Borgonovo delta](#borgonovo-delta-density-based-sensitivity), HSIC, and PAWN, which make no independence assumption. `shapley.analyze(backend="hdmr", include_correlative=True)` allocates the HDMR decomposition, but HDMR's `ST` is not a total-effect index under dependence. See the [HDMR section](#rs-hdmr-random-sampling-high-dimensional-model-representation). To run your model on a dedicated design, use [Kucherenko](#kucherenko-dependent-input-sobol-indices): conditional-copula sampling that evaluates the actual model and returns $S_1$/$S_T$ under the declared dependence. See [Correlated Inputs](/examples/correlated-inputs).
 - "Some of my parameters are categorical." Declare them with `{"dist": "categorical", "probs": [...]}`, and samples then carry integer level codes. Four methods handle unordered levels correctly: [Sobol'](#sobol-indices-via-saltelli-sampling), because the Saltelli column-swap scheme is distribution-agnostic, plus [Borgonovo delta](#borgonovo-delta-density-based-sensitivity), [optimal transport](#optimal-transport-wasserstein-based-sensitivity), and [PAWN](#pawn-cdf-based-sensitivity), which all condition on one class per level. Every other method refuses with a `ValueError`, because its indices would depend on the arbitrary code order. See [Categorical Inputs](/examples/categorical-inputs).
 - "I need to decide what to measure more accurately, or what to hold fixed." Use [VKOGA](#vkoga-correlated-input-variance-indices): $S_{TC}$ is the prioritisation measure and $S_{TU}$ the fixing measure. Under dependence they can rank parameters very differently.
 - "My output distribution is skewed or heavy-tailed." Use [PAWN](#pawn-cdf-based-sensitivity), [Borgonovo delta](#borgonovo-delta-density-based-sensitivity), or [optimal transport](#optimal-transport-wasserstein-based-sensitivity). All three compare whole output distributions rather than variances.
@@ -29,6 +44,40 @@ Common situations:
 - "I want one number per parameter for a whole trajectory." Use [optimal transport](#optimal-transport-wasserstein-based-sensitivity) with `mode="trajectory"`. Point-cloud transport scores each parameter against the entire time course jointly.
 - "I want one fair importance number per parameter that sums to 1." Use [Shapley effects](#shapley-effects).
 - "I also want a fast surrogate of my model." Use HDMR or PCE and call `result.predict(...)`.
+
+### One model, four answers
+
+The methods disagree, and the disagreement is the point. Here is Ishigami, $f = \sin x_1 + 7\sin^2 x_2 + 0.1 x_3^4 \sin x_1$, under four methods. Parameter $x_3$ is the interesting one: on its own it does nothing, and it only acts through its product with $x_1$.
+
+```python
+samples = jaxgsa.sobol.sample(PROBLEM, 8192, seed=0, verbose=False)
+Ys = evaluate(samples.samples)
+
+sobol = jaxgsa.sobol.analyze(samples, Ys, verbose=False)
+morris = jaxgsa.morris.analyze(samples.to_morris(verbose=False), Ys, verbose=False)
+ot = jaxgsa.optimal_transport.analyze(PROBLEM, X, Y, verbose=False)
+
+print("S1     ", sobol.S1)
+print("ST     ", sobol.ST)
+print("mu*    ", morris.mu_star)
+print("advect ", ot.advective)
+print("diffuse", ot.diffusive)
+```
+
+```
+S1      [0.32232326 0.43612355 0.00139014]
+ST      [0.55598414 0.44165453 0.24129711]
+mu*     [ 8.70476  15.02531   6.620432]
+advect  [0.15357935 0.21982561 0.00371553]
+diffuse [0.04772941 0.05772171 0.09400754]
+```
+
+Four readings of the same model:
+
+- Sobol' says $x_3$ owns 0.1% of the variance alone and 24% once you count its interaction with $x_1$. The 24-point gap is the whole story about $x_3$, and only a method with a total-order index tells you it exists.
+- Morris ranks $x_2 > x_1 > x_3$, which is not the $S_T$ ranking $x_1 > x_2 > x_3$. $\mu^*$ is a mean absolute slope, not a variance share, and the two top parameters swap. If you screen with Morris and then drop everything but the top parameter, you drop the wrong one here. Drop only what is near the origin of the $\mu^*$–$\sigma$ plot.
+- Optimal transport splits $x_3$'s influence into 0.004 of mean shift and 0.094 of shape change. That is a quantitative statement that $x_3$ changes the spread of the output without moving its mean. No variance-based index says that.
+- The Morris measures cost zero extra model runs here: `to_morris()` reinterprets the Saltelli design you already paid for. See [Free screening from a Sobol' design](#free-screening-from-a-sobol-design).
 
 ### Method capabilities
 
@@ -64,11 +113,13 @@ parameter. A ✗ is a refusal, not a silent approximation. The method raises a
 
 **Bootstrap CI** gives the keyword that asks for bootstrap confidence
 intervals. There is one spelling, `n_bootstrap`, and it defaults to `0`
-everywhere, so you never pay for an interval you did not ask for. See
-[Confidence intervals](/api/#confidence-intervals) for the `result.ci` record
-that comes back with them.
+everywhere, so you never pay for an interval you did not ask for. Passing
+`n_bootstrap > 0` without a `key` raises `ValueError: key is required when
+n_bootstrap > 0`; pass `key=jax.random.key(0)` so the interval is
+reproducible. See [Confidence intervals](/api/#confidence-intervals) for the
+`result.ci` record that comes back with them.
 
-Two methods show a — and it is a deliberate absence, not a gap. **eFAST** has
+Two methods have no entry in that column, and the gap is deliberate. eFAST has
 one search curve per parameter, so there is nothing to resample: removing a
 point does not shrink the sample, it changes what the estimator computes. An
 eFAST interval would need replicated designs with different random phase
@@ -78,7 +129,7 @@ statement for a V-statistic; a row bootstrap would repeat rows onto the kernel
 diagonal, where the kernel is exactly 1, so the resampled index is biased
 upward by construction.
 
-The four surrogate-backed methods — `pce`, `hdmr`, `vkoga` and `shapley` —
+The four surrogate-backed methods, `pce`, `hdmr`, `vkoga` and `shapley`,
 refit their surrogate on every replicate, so an interval there costs an order
 of magnitude more than a row resample on a direct estimator. That is why the
 default is `0` and not why it is unavailable.
@@ -113,9 +164,9 @@ The rest of the differences, method by method. The capability columns above are 
 | Interaction detection | Via $S_2$ and the gap $S_T - S_1$ | Via explicit interaction component functions | Via $S_2$ from coefficients | Via the gaps $\mathrm{Sh} - S_1$ and $S_T - \mathrm{Sh}$ | Via the gap $S_T - S_1$ only | Not available (bounds only) | Via large $\sigma$ relative to $\mu^*$ (not pair-attributable) | Via the Total HSIC − R2-HSIC gap | Not available (first-order only) | Not available (the $\delta - S_1$ gap flags influence beyond first-order variance) | Not available (the diffusive component flags influence beyond mean shift) | Via $S_{IU}$, the independent-interaction index | Via the gap $S_T - S_1$ under independence (under correlation the gap mixes interactions and coupling) |
 | Reusable surrogate | No | Yes (`result.predict`) | Yes (`result.predict`) | Derived from either fitted result | No | No | No | No | No | No | No | Yes (`result.predict`) | No |
 
-## Background: Variance-Based Sensitivity Analysis
+## Background: variance-based sensitivity analysis
 
-### Why Global Sensitivity Analysis?
+### Why global sensitivity analysis?
 
 Local sensitivity methods, such as partial derivatives at a nominal point, describe the model at one location. Global sensitivity analysis explores the entire parameter space instead. This matters for non-linear models, where interactions and non-monotonic responses mean a gradient at one point can be misleading. GSA quantifies each parameter's contribution to output uncertainty across the whole parameter domain.
 
@@ -125,7 +176,7 @@ In practice, GSA serves several roles:
 - **Experimental design**: for time-series outputs, watching sensitivity indices evolve over time helps pick measurement times when outputs are most informative about the parameters of interest.
 - **Model simplification**: if interaction indices are negligible, the model response is approximately additive, and simpler surrogate models may suffice.
 
-### The Hoeffding–Sobol' Decomposition
+### The Hoeffding–Sobol' decomposition
 
 The theoretical foundation of variance-based GSA is the Hoeffding (ANOVA) decomposition. Any square-integrable function $f(\mathbf{X})$ of $D$ independent parameters can be uniquely decomposed into summands of increasing dimensionality:
 
@@ -141,7 +192,7 @@ $$
 
 where $V_i = \mathrm{Var}[f_i(X_i)]$, $V_{ij} = \mathrm{Var}[f_{ij}(X_i, X_j)]$, etc.
 
-### Sobol' Sensitivity Indices
+### Sobol' sensitivity indices
 
 Dividing each variance component by $\mathrm{Var}(Y)$ yields the Sobol' sensitivity indices.
 
@@ -165,13 +216,13 @@ $$
 
 where $\mathbf{X}_{\sim i}$ denotes all parameters except $X_i$. By construction, $S_{T_i} \geq S_i$ always holds, with equality when parameter $i$ has no interactions. The gap $S_{T_i} - S_i$ quantifies how much of parameter $i$'s influence comes through interactions.
 
-## Sobol' Indices via Saltelli Sampling
+## Sobol' indices via Saltelli sampling
 
 Sobol' indices split the output variance into the share each parameter owns alone and the share it owns through interactions. This is the reference method and jaxgsa's default workflow: an exact, model-free variance decomposition with well-understood convergence.
 
 Pick it when you can afford a dedicated sampling design and your parameters are independent. The method needs its own design, so you must be able to run the model at points jaxgsa chooses. jaxgsa uses the Saltelli sampling scheme (Saltelli 2002, 2010), which arranges quasi-random sample matrices so that first-order ($S_1$), total-order ($S_T$), and second-order ($S_2$) indices can all be estimated from a single batch of model evaluations.
 
-### The Saltelli Column-Swap Scheme
+### The Saltelli column-swap scheme
 
 The method generates two independent $N \times D$ quasi-random sample matrices $\mathbf{A}$ and $\mathbf{B}$ using a Sobol' low-discrepancy sequence (via `scipy.stats.qmc.Sobol`). For each parameter $j$, a cross-matrix $\mathbf{AB}^{(j)}$ is constructed by taking all columns from $\mathbf{A}$ except column $j$, which is replaced by column $j$ from $\mathbf{B}$. This column-swap construction allows conditional expectations to be estimated via sample averages.
 
@@ -179,7 +230,7 @@ The cost is $N(D + 2)$ model evaluations for all first-order and total-order ind
 
 ### Estimators
 
-The default estimator pair is `estimator="saltelli-jansen"`.
+The default estimator pair is `estimator="saltelli-jansen"`: Sobol'-Mauntz for the first order, Jansen (1999) for the total order. Two reasons pick it, both recorded in ADR 0021. Jansen's total-order estimator is a mean of squares, so it can never come out negative, and users screen on $S_T$. A negative $S_T$ invites the clipping that jaxgsa refuses to do. And SALib computes the same pairing by default, so moving between the two libraries needs no keyword.
 
 First-order, the improved form of Sobol' et al. (2007), tabulated by Saltelli et al. (2010):
 
@@ -228,7 +279,7 @@ Every first-order formula here is a difference of two correlated Monte Carlo est
 
 Note the limit of that last point. Only the *total* order of `"saltelli-jansen"` and `"jansen"` is a bare sum of squares, and only it is guaranteed non-negative. A Jansen *first-order* estimate is one minus such a term, so it is bounded above by 1 and free to go below zero. In jaxgsa's measurements on Sobol-G, every estimator except `"azzini-rosati"` returns a negative first-order value somewhere in 15% to 35% of runs, and that fraction does not fall away as $N$ grows.
 
-So read a negative value as "the interval covers zero", and turn on the bootstrap (`num_resamples`) to see that directly. Investigate only if the value is large, if it appears for a parameter whose index is demonstrably not near zero, or if it grows with $N$.
+So read a negative value as "the interval covers zero", and turn on the bootstrap (`n_bootstrap`, with a `key`) to see that directly. Investigate only if the value is large, if it appears for a parameter whose index is demonstrably not near zero, or if it grows with $N$.
 
 jaxgsa does not clip. Clipping to zero is a display choice, and it must never be done before ranking: it biases upward in exactly the near-zero regime where the ranking decision is being made.
 
@@ -238,7 +289,7 @@ jaxgsa does not clip. Clipping to zero is a display choice, and it must never be
 2. You evaluate your model on `sampling_result.samples`.
 3. `jaxgsa.sobol.analyze()` reconstructs the Saltelli layout internally and computes all indices in a single `jit(vmap(...))` pass.
 
-`jaxgsa.sobol.analyze()` always standardizes each output slice over the sample axis before it computes the estimators. The Saltelli/Sobol'-Mauntz $S_1$ estimator and every $S_2$ estimator are uncentred products. A non-zero output mean therefore biases them. The standardization removes that bias. SALib standardizes in the same way. When bootstrapping (`num_resamples > 0`), `ci_method="quantile"` reports percentile bootstrap bounds and `ci_method="gaussian"` reports symmetric bounds from the bootstrap standard deviation. Either way, jaxgsa returns explicit lower/upper endpoint arrays rather than SALib's symmetric confidence widths.
+`jaxgsa.sobol.analyze()` always standardizes each output slice over the sample axis before it computes the estimators. The Saltelli/Sobol'-Mauntz $S_1$ estimator and every $S_2$ estimator are uncentred products. A non-zero output mean therefore biases them. The standardization removes that bias. SALib standardizes in the same way. When bootstrapping (`n_bootstrap > 0`, with a `key`), `ci_method="quantile"` reports percentile bootstrap bounds and `ci_method="gaussian"` reports symmetric bounds from the bootstrap standard deviation. Either way, jaxgsa returns explicit lower/upper endpoint arrays rather than SALib's symmetric confidence widths.
 
 ### Index summary
 
@@ -254,13 +305,23 @@ jaxgsa does not clip. Clipping to zero is a display choice, and it must never be
 - You want an exact, model-free variance decomposition
 - Your parameters are independent
 
+If you can run the model and your parameters are independent, this is the first thing to try. It is the only method here that gives you $S_1$, $S_2$ and $S_T$ from one design with no surrogate in between.
+
+### When it is the wrong choice
+
+- **Your parameters are correlated.** `analyze` refuses, and it is right to. Use [Kucherenko](#kucherenko-dependent-input-sobol-indices) if you can still run the model, [VKOGA](#vkoga-correlated-input-variance-indices) if you cannot.
+- **You cannot choose the sample points.** No amount of existing $(X, Y)$ data can be reshaped into a Saltelli design. Go to [PCE](#pce-polynomial-chaos-expansion), [HDMR](#rs-hdmr-random-sampling-high-dimensional-model-representation) or [Borgonovo delta](#borgonovo-delta-density-based-sensitivity).
+- **Your budget is under about $100 \times D$ runs.** At that size the estimates carry more sampling noise than signal, and you are better off screening with Morris at $r(D+1)$ and coming back once you have fixed the inert parameters.
+- **Variance is the wrong summary.** A bimodal or heavy-tailed output makes $\mathrm{Var}(Y)$ a poor denominator. The indices are still correct; they just answer a question you did not mean to ask. Use [optimal transport](#optimal-transport-wasserstein-based-sensitivity) or [Borgonovo delta](#borgonovo-delta-density-based-sensitivity).
+- **You only need a ranking.** Second-order indices cost you $D$ extra columns of design. Pass `calc_second_order=False` and nearly halve the bill.
+
 ## RS-HDMR (Random Sampling High-Dimensional Model Representation)
 
 RS-HDMR is a variance-based method that works from data you already have. It fits a B-spline surrogate to any set of $(X, Y)$ pairs. It then derives sensitivity indices analytically from the surrogate's variance decomposition.
 
 Pick it in three situations. Model runs are expensive and you want to reuse existing data. Your parameters may be correlated. Or you also want a fast emulator of the model. No sampling design is required.
 
-### Theoretical Background
+### Theoretical background
 
 High-Dimensional Model Representation (HDMR) exploits the observation that, for many practical problems, only the low-order interactions among parameters significantly influence the output. The RS-HDMR variant constructs component functions from randomly sampled parameter and output data, rather than requiring structured grids. The model is decomposed as:
 
@@ -270,18 +331,18 @@ $$
 
 where each component function is expanded in a B-spline basis and fitted via backfitting with Tikhonov regularisation.
 
-### ANCOVA Decomposition
+### ANCOVA decomposition
 
 The classical Sobol' decomposition assumes independent parameters. RS-HDMR instead uses an ANCOVA (analysis of covariance) decomposition, which separates each component's variance into two parts:
 
-- **Structural variance ($S_a$)**: the contribution that would remain if all parameters were independent — analogous to the classical Sobol' index.
+- **Structural variance ($S_a$)**: the contribution that would remain if all parameters were independent. It is the analogue of the classical Sobol' index.
 - **Correlative variance ($S_b$)**: the additional contribution arising from correlations between parameters.
 
 This distinction matters because many real-world models have correlated parameters, for example coupled physical parameters. Conflating structural and correlative contributions can produce misleading sensitivity rankings.
 
 ### How to use it
 
-1. You provide any set of $(X, Y)$ pairs — no sampling design required.
+1. You provide any set of $(X, Y)$ pairs. No sampling design required.
 2. `jaxgsa.hdmr.analyze()` maps parameters to $[0, 1]$ via their marginal CDFs, builds B-spline basis matrices, and fits component functions via backfitting with Tikhonov regularisation.
 3. The ANCOVA decomposition splits each component's variance into structural ($S_a$) and correlative ($S_b$) parts. Total-order indices ($S_T$) sum contributions from all terms involving a given parameter.
 
@@ -300,7 +361,7 @@ The surrogate is trained on the outputs you supply. `result.predict(...)` and
 ::: warning HDMR's total under correlated inputs
 With correlated parameters, HDMR's $S_T$ is not a Sobol' total-order index. It is the SCSA total that Li et al. (2010) define in Section 2.2.3, from the per-term indices of their Eqs. (19)-(22): the sum of $S_a + S_b$ over every term that contains the parameter. It is the same convention SALib uses. Read it as a term-membership sum and nothing more.
 
-It can be negative, because $S_b$ can be. It is not bounded in $[0, 1]$. Sarazin, Viaud & Cournède (2017), who restate the total as their Eq. (8), say so explicitly. It does not measure the expected variance reduction $\mathrm{E}[\mathrm{Var}(Y \mid X_{\sim i})] / \mathrm{Var}(Y)$ that a total-order index normally reports, so it does not answer the parameter-fixing question. The bias runs toward "cannot be fixed", and it can be large. On a linear model at $\rho = 0.95$, HDMR reports 0.502 for a parameter whose true total effect is 0.025. A parameter the model ignores can outrank one that scored negative.
+It can be negative, because $S_b$ can be. It is not bounded in $[0, 1]$. Sarazin, Viaud & Cournède (2017), who restate the total as their Eq. (8), say so explicitly. It does not measure the expected variance reduction $\mathrm{E}[\mathrm{Var}(Y \mid X_{\sim i})] / \mathrm{Var}(Y)$ that a total-order index normally reports, so it does not answer the parameter-fixing question. The bias runs toward "cannot be fixed", and it can be an order of magnitude. On $Y = X_1 + X_2 + X_3$ with standard normal marginals and $\mathrm{corr}(X_1, X_2) = 0.95$, 8192 samples, HDMR reports `ST = [0.398, 0.397, 0.207]`. The true conditional-variance totals are $[0.020, 0.020, 0.207]$. HDMR is right about the independent parameter and 20 times too high on the two coupled ones, which are the two it was asked about.
 
 The source paper invites the confusion. Its Eq. (4) uses the symbol $S_{Ti}$ for the classical conditional-variance total, and Section 2.2.3 reuses the same symbol for the term-membership sum. Only the second is what HDMR reports.
 
@@ -314,8 +375,15 @@ When you need a conditional-variance total under dependence, use [Kucherenko](#k
 ### When to use it
 
 - Model evaluations are expensive and you want to reuse existing runs
-- Parameters may be correlated, and you want the per-term structural ($S_a$) versus correlative ($S_b$) split. Read $S_T$ with care under dependence — see the note above
+- Parameters may be correlated, and you want the per-term structural ($S_a$) versus correlative ($S_b$) split. Read $S_T$ with care under dependence. See the note above
 - You need a surrogate for fast prediction at new parameter values (`result.predict`)
+
+### When it is the wrong choice
+
+- **You want a total-order index under dependence.** Read the warning above; HDMR's $S_T$ is a different quantity. Use [Kucherenko](#kucherenko-dependent-input-sobol-indices) or [VKOGA](#vkoga-correlated-input-variance-indices).
+- **Your model is smooth and you only want $S_1$/$S_2$/$S_T$.** [PCE](#pce-polynomial-chaos-expansion) fits in one linear solve and reads the indices off the coefficients. HDMR runs 100 backfitting iterations over B-spline bases and gives you the same numbers with more knobs to get wrong. Reach for HDMR when you specifically want the per-term $S_a$/$S_b$ split, or when the response has kinks a polynomial cannot follow.
+- **`result.S.sum()` is far from 1.** That is unexplained variance, and every index derived from the fit inherits it. Raise `maxorder` or `m`, or accept that this model does not decompose into low-order terms.
+- **Any of your parameters is categorical.** HDMR raises. Use [Sobol'](#sobol-indices-via-saltelli-sampling), [Borgonovo delta](#borgonovo-delta-density-based-sensitivity), [optimal transport](#optimal-transport-wasserstein-based-sensitivity) or [PAWN](#pawn-cdf-based-sensitivity).
 
 ## PCE (Polynomial Chaos Expansion)
 
@@ -337,7 +405,30 @@ Pick it when your model is smooth. Any set of $(X, Y)$ pairs works, so no sampli
 | $S_1(i)$ | First-order Sobol index for parameter $i$, computed analytically from the squared coefficients. |
 | $S_T(i)$ | Total-order Sobol index for parameter $i$, computed analytically from the squared coefficients. |
 | $S_2(i,j)$ | Second-order Sobol index for the pair $(i, j)$, computed analytically from the squared coefficients. |
-| Leave-one-out RMSE | Cross-validation error of the fitted surrogate — a fit-quality diagnostic, not a per-parameter index. |
+| Leave-one-out RMSE | Cross-validation error of the fitted surrogate. A fit-quality diagnostic, not a per-parameter index. |
+
+### Check the fit before you read the indices
+
+The indices are exact within the fitted polynomial. If the polynomial is wrong, they are exactly wrong. `order` defaults to 3, and 3 is not enough for anything with a strong nonlinearity. Ishigami makes this concrete:
+
+```python
+for order in (3, 6, 10):
+    r = jaxgsa.pce.analyze(PROBLEM, X, Y, order=order, verbose=False)
+    print(order, round(float(r.explained_variance), 3),
+          np.round(np.asarray(r.loo_rmse), 3), np.round(np.asarray(r.S1), 3))
+```
+
+```
+3 0.475 2.72 [0.662 0.054 0.001]
+6 0.995 0.512 [0.32  0.442 0.   ]
+10 1.015 0.006 [0.314 0.442 0.   ]
+```
+
+Ishigami's analytical $S_1$ is $[0.3139, 0.4424, 0]$. At `order=3` the surrogate captured 47% of the variance and reported $S_1(x_1) = 0.662$, twice the truth, and $S_1(x_2) = 0.054$ against a truth of 0.442. The indices are not noisy. They are the correct indices of a cubic that is not this model.
+
+Two numbers decide whether to trust a PCE result, and both come back on the result. `explained_variance` should sit near 1. `loo_rmse` should be small next to `Y.std()`, which is 3.69 here. At `order=10` both pass and $S_1$ matches the analytical values to three decimals.
+
+Raising `order` costs basis terms, not model runs, so raise it until `loo_rmse` stops falling. Watch for it turning back up: that is overfitting, and `explained_variance` drifting above 1 (1.015 at `order=10`) is the same signal.
 
 ### When to use it
 
@@ -346,13 +437,20 @@ Pick it when your model is smooth. Any set of $(X, Y)$ pairs works, so no sampli
 - You have mixed uniform and Gaussian parameters (the Wiener-Askey scheme selects the appropriate basis automatically)
 - You need a fast surrogate (`result.predict` mirrors the training output layout)
 
-## Shapley Effects
+### When it is the wrong choice
+
+- **Your response has a discontinuity, a threshold, or a hard saturation.** Polynomials ring around a step and no `order` fixes it. Use [HDMR](#rs-hdmr-random-sampling-high-dimensional-model-representation)'s B-splines or a non-surrogate method like [Borgonovo delta](#borgonovo-delta-density-based-sensitivity).
+- **You have fewer samples than basis terms.** A total-degree basis at order $p$ in $D$ parameters has $\binom{D+p}{p}$ terms: 286 at $D=3, p=10$, but 3003 at $D=10, p=5$. `jaxgsa.pce.effective_order(problem, n_samples)` tells you the order the data can actually support, and `analyze` drops to it. On Ishigami it returns 10 for 2000 samples and 4 for 100. If it comes back at 1 or 2, PCE is not the method for this dataset.
+- **Your parameters are correlated.** The orthogonality that makes the coefficients readable as variances is orthogonality under the independent product measure. `analyze` refuses. Use [VKOGA](#vkoga-correlated-input-variance-indices) or [Kucherenko](#kucherenko-dependent-input-sobol-indices).
+- **You can run the model freely and want a guarantee.** A converged Saltelli estimate is model-free. PCE is only ever as good as its fit, and the fit is the thing you have to defend.
+
+## Shapley effects
 
 The Shapley effect $\mathrm{Sh}_i$ is a single, fairly allocated importance score per parameter. It gives each parameter its share of the output variance, with every interaction split evenly among its participants, so the scores sum to exactly 1. The method applies the Shapley value from cooperative game theory to variance-based sensitivity analysis. It treats the output variance as a payout divided among the parameters, viewed as players whose coalition worths are the partial variances of the ANOVA decomposition (Owen, 2014; Song, Nelson & Staum, 2016).
 
-Pick it when you need one defensible number per parameter — for ranking, reporting, or budget allocation — rather than the two-sided $S_1$/$S_T$ view. Like HDMR and PCE, it works from data you already have: any set of $(X, Y)$ pairs, with no sampling design.
+Pick it when you need one defensible number per parameter, for ranking, reporting, or budget allocation, rather than the two-sided $S_1$/$S_T$ view. Like HDMR and PCE, it works from data you already have: any set of $(X, Y)$ pairs, with no sampling design.
 
-### Theoretical Background
+### Theoretical background
 
 For independent parameters, the Hoeffding–Sobol' decomposition splits the output variance into partial variances $V_u$ indexed by subsets $u \subseteq \{1, \ldots, D\}$ of the parameters. The Shapley effect of parameter $i$ allocates each interaction's variance equally among its participants:
 
@@ -362,7 +460,7 @@ $$
 
 so a main-effect variance $V_i$ is attributed entirely to parameter $i$, a pairwise interaction variance $V_{ij}$ is split half-and-half between $i$ and $j$, and so on. Under independent parameters this yields two properties:
 
-- **Bracketing**: $S_{1,i} \leq \mathrm{Sh}_i \leq S_{T,i}$ — the Shapley effect always lies between the first-order and total-order Sobol indices.
+- **Bracketing**: $S_{1,i} \leq \mathrm{Sh}_i \leq S_{T,i}$. The Shapley effect always lies between the first-order and total-order Sobol indices.
 - **Exact partition**: $S_1$ omits interactions, so $\sum_i S_{1,i} \leq 1$, and $S_T$ counts each interaction once per participant, so $\sum_i S_{T,i} \geq 1$. Shapley effects split every interaction fairly and sum to exactly 1 with no gaps or double counting.
 
 The Hoeffding decomposition above defines the `backend="pce"` allocation, and it holds only for independent parameters. `jaxgsa.shapley.analyze(backend="pce")` refuses to run when `problem.correlation` declares a dependence structure. For correlated parameters, use `backend="hdmr"` with `include_correlative=True`. It folds HDMR's ANCOVA decomposition into the allocation: each term's structural plus correlation-induced variance ($S_a + S_b$) is split among its participants. Be clear about what that gives you. It is an ANCOVA-based attribution, and correlative shares can be negative. It is not the conditional-variance Shapley effects of Song et al. (2016), which remain future work. See [Correlated Inputs](/examples/correlated-inputs).
@@ -371,49 +469,50 @@ The Hoeffding decomposition above defines the `backend="pce"` allocation, and it
 
 jaxgsa computes Shapley effects analytically from a fitted surrogate's variance decomposition. There is no permutation Monte Carlo, no conditional-variance sampling, and no external `shap` dependency:
 
-- `backend="pce"` (default) fits a polynomial chaos expansion and groups the squared orthonormal coefficients by the support of their multi-index (Sudret, 2008) — exact within the fitted polynomial.
+- `backend="pce"` (default) fits a polynomial chaos expansion and groups the squared orthonormal coefficients by the support of their multi-index (Sudret, 2008), exact within the fitted polynomial.
 - `backend="hdmr"` fits the RS-HDMR B-spline surrogate and uses the structural ($S_a$) variances of its component functions as the partial variances $V_u$, truncated at `maxorder`.
 
 Both backends accept scalar `(N,)`, multi-output `(N, K)`, and time-series `(N, T, K)` `Y`.
 
-Normalization is by the surrogate's total decomposed variance $\sum_u V_u$, so $\sum_i \mathrm{Sh}_i = 1$ exactly — the Shapley efficiency property (Owen, 2014). $S_1$ and $S_T$ from the same surrogate use the same denominator. For `backend="pce"` they therefore match `jaxgsa.pce.analyze` exactly. For `backend="hdmr"` they differ from `jaxgsa.hdmr.analyze`, which normalizes by $\mathrm{Var}(Y)$, by a factor of `explained_variance`.
+Normalization is by the surrogate's total decomposed variance $\sum_u V_u$, so $\sum_i \mathrm{Sh}_i = 1$ exactly, the Shapley efficiency property (Owen, 2014). $S_1$ and $S_T$ from the same surrogate use the same denominator. For `backend="pce"` they therefore match `jaxgsa.pce.analyze` exactly. For `backend="hdmr"` they differ from `jaxgsa.hdmr.analyze`, which normalizes by $\mathrm{Var}(Y)$, by a factor of `explained_variance`.
 
 How much of the output variance the surrogate actually captured is reported separately in the `explained_variance` field, $\sum_u V_u / \mathrm{Var}(Y)$. It is close to 1 for a good fit, below 1 when truncation or fit error leaves variance unexplained, and above 1 when an overfit surrogate over-counts shared variance. It is an honest diagnostic rather than a silently renormalized result. A `JaxgsaWarning` is emitted when it strays far from 1. Interactions above `maxorder` (HDMR) or the polynomial order (PCE) are absent from the allocation.
 
 ### How to use it
 
-1. You provide any set of $(X, Y)$ pairs — no sampling design required.
+1. You provide any set of $(X, Y)$ pairs. No sampling design required.
 2. Call `.shapley()` on a fitted PCE or HDMR result. Each partial variance is
    allocated equally among the parameters in its interaction set.
 3. The result carries `Sh` alongside `S1` and `ST` computed from the same surrogate, so the three indices are directly comparable and the ordering $S_1 \leq \mathrm{Sh} \leq S_T$ is visible at a glance.
 
 ```python
-import jax.numpy as jnp
-import jaxgsa
-from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
-
-X = jaxgsa.sampling.monte_carlo(PROBLEM, n=2000, seed=42)
-Y = evaluate(jnp.asarray(X))
-
-# PCE backend (default) — exact within the fitted polynomial
-result = jaxgsa.pce.analyze(PROBLEM, jnp.asarray(X), Y).shapley()
-print("Sh:", result.Sh)              # (D,) Shapley effects
-print("sum:", result.Sh.sum())       # == 1 (Shapley efficiency property)
-print("explained:", result.explained_variance)  # sum_u V_u / Var(Y) — fit quality
-print("order:", result.order)        # effective surrogate order used
-print("S1:", result.S1)              # first-order, same surrogate
-print("ST:", result.ST)              # total-order, same surrogate
-
-# HDMR backend — B-spline surrogate; HDMR-only knobs
-result_hdmr = jaxgsa.hdmr.analyze(
-    PROBLEM,
-    jnp.asarray(X),
-    Y,
-    maxorder=2,
-).shapley()
+result = jaxgsa.pce.analyze(PROBLEM, X, Y, order=10, verbose=False).shapley()
+print("Sh        ", result.Sh)
+print("sum       ", result.Sh.sum())
+print("S1        ", result.S1)
+print("ST        ", result.ST)
+print("explained ", result.explained_variance)
 ```
 
-Backend-specific keyword arguments are validated: explicitly setting a knob that belongs to the non-selected backend (e.g. `backend="pce"` with `maxorder=3`) raises `ValueError`.
+```
+Sh         [0.4357344  0.44241303 0.12185235]
+sum        0.99999976
+S1         [3.1388217e-01 4.4241303e-01 1.8783025e-08]
+ST         [0.5575866  0.44241306 0.24370477]
+explained  1.0154463
+```
+
+Read it left to right. $x_3$ has $S_1 \approx 0$ and $S_T = 0.244$, so everything it does is an interaction. Shapley splits that interaction with $x_1$ and hands $x_3$ half of it, 0.122. $S_1$ sums to 0.756, $S_T$ sums to 1.244, and $\mathrm{Sh}$ sums to 1. The analytical Shapley effects for Ishigami are $[0.4357, 0.4424, 0.1218]$.
+
+That `order=10` is not decoration. At the default `order=3` the same call gives `Sh = [0.803, 0.055, 0.141]` and `explained_variance` drops to 0.475. The Shapley effects are exact within the surrogate, and a bad surrogate gives you exact nonsense. Check `explained_variance` first, every time. It sits on the result for that reason, and a `JaxgsaWarning` fires when it strays far from 1.
+
+The HDMR backend takes its own knobs:
+
+```python
+result_hdmr = jaxgsa.hdmr.analyze(PROBLEM, X, Y, maxorder=2, verbose=False).shapley()
+```
+
+Backend-specific keyword arguments are validated: explicitly setting a knob that belongs to the non-selected backend (for example `backend="pce"` with `maxorder=3`) raises `ValueError`.
 
 ### Index summary
 
@@ -422,7 +521,7 @@ Backend-specific keyword arguments are validated: explicitly setting a knob that
 | $\mathrm{Sh}(i)$ | Shapley effect: parameter $i$'s fair share of decomposed variance, including an equal split of every interaction it participates in. $\sum_i \mathrm{Sh}_i = 1$ exactly (Shapley efficiency). |
 | $S_1(i)$ | First-order index from the same surrogate (main effect only). |
 | $S_T(i)$ | Total-order index from the same surrogate (main effect plus all interactions counted in full). |
-| `explained_variance` | Fraction of $\mathrm{Var}(Y)$ the surrogate captured, $\sum_u V_u / \mathrm{Var}(Y)$ — a separate fit-quality diagnostic, not a per-parameter index. |
+| `explained_variance` | Fraction of $\mathrm{Var}(Y)$ the surrogate captured, $\sum_u V_u / \mathrm{Var}(Y)$. A separate fit-quality diagnostic, not a per-parameter index. |
 
 ### When to use it
 
@@ -431,13 +530,20 @@ Backend-specific keyword arguments are validated: explicitly setting a knob that
 - You have existing $(X, Y)$ pairs and want analytical indices without permutation Monte Carlo noise
 - Your parameters are independent (required for `backend="pce"`; under a declared correlation use `backend="hdmr"` with `include_correlative=True` for the ANCOVA-based allocation)
 
+### When it is the wrong choice
+
+- **You want to know which parameters you can fix.** Shapley gives every parameter a positive share, because splitting an interaction gives a share to both participants. A parameter can be safe to fix and still carry a visible $\mathrm{Sh}$. $S_T$ is the fixing measure; use it.
+- **You want the interaction itself.** Shapley dissolves interactions into the participants by design. If you need to know that $x_1$ and $x_3$ interact rather than that they both matter, read $S_2$ from [Sobol'](#sobol-indices-via-saltelli-sampling) or [PCE](#pce-polynomial-chaos-expansion), or the gap $S_T - S_1$.
+- **You cannot get the surrogate to fit.** Everything here rides on `explained_variance`. There is no surrogate-free route to Shapley effects in jaxgsa; the conditional-variance estimator of Song et al. (2016) is not implemented.
+- **Your parameters are correlated and you want a rigorous answer.** `backend="hdmr", include_correlative=True` gives an ANCOVA-based allocation whose correlative shares can go negative. It is a defensible reading, not the Song et al. Shapley effects, and it no longer has the "fair split" interpretation that makes the method attractive in the first place.
+
 ### References
 
 - Owen, A.B. (2014). Sobol' indices and Shapley value. *SIAM/ASA Journal on Uncertainty Quantification*, 2(1), 245-251.
 - Song, E., Nelson, B.L. & Staum, J. (2016). Shapley effects for global sensitivity analysis: Theory and computation. *SIAM/ASA Journal on Uncertainty Quantification*, 4(1), 1060-1083.
 - Sudret, B. (2008). Global sensitivity analysis using polynomial chaos expansions. *Reliability Engineering & System Safety*, 93(7), 964-979.
 
-## eFAST (Extended Fourier Amplitude Sensitivity Test)
+## eFAST (extended Fourier amplitude sensitivity test)
 
 eFAST computes the same first-order and total-order Sobol indices as the Saltelli workflow, but through a frequency-based decomposition. Instead of column-swapped sample matrices, eFAST evaluates the model along sinusoidal search curves in the parameter space. It then applies the discrete Fourier transform to extract variance contributions from the spectral content of the output.
 
@@ -471,6 +577,22 @@ The low-frequency content at or below $\lfloor\omega_0/2\rfloor$ is driven entir
 
 eFAST does not produce second-order ($S_2$) interaction indices. If pairwise interactions are needed, use the Sobol workflow instead.
 
+`EFASTSamples.save(path)` writes the design to an NPZ file and `EFASTSamples.load(path)` reads it back, including the problem, `M` and `n_per_curve`. Use it when the model runs somewhere else: save the design, ship the CSV of `samples.samples`, and load the design back to analyze the outputs weeks later. The other three design classes have the same pair.
+
+Ishigami at `n_per_curve=2048`, so 6144 model runs:
+
+```python
+samples = jaxgsa.efast.sample(PROBLEM, 2048, seed=0, verbose=False)
+result = jaxgsa.efast.analyze(samples, evaluate(jnp.asarray(samples.samples)), verbose=False)
+print(result.S1, result.ST)
+```
+
+```
+[3.0759403e-01 4.4230729e-01 7.8303506e-09] [0.5507463  0.46289188 0.23926514]
+```
+
+The analytical values are $S_1 = [0.3139, 0.4424, 0]$ and $S_T = [0.5576, 0.4424, 0.2437]$. Compare a Saltelli run at 8192 runs, $S_1 = [0.322, 0.436, 0.001]$: eFAST matched it on 25% fewer evaluations, and its $S_1(x_3)$ came back at $8 \times 10^{-9}$ rather than the small negative a Saltelli estimator can produce. The error sits in $S_T(x_2)$, 0.463 against 0.442, which is eFAST's known upward bias on the total order from harmonic interference.
+
 ### Index summary
 
 | Index | Meaning |
@@ -485,17 +607,28 @@ eFAST does not produce second-order ($S_2$) interaction indices. If pairwise int
 - You are screening a large number of parameters
 - The total cost is $N \times D$ evaluations, which can be lower than Saltelli's $N(D+2)$ (first/total only) or $N(2D+2)$ (with second-order, the default) when $N$ is chosen smaller than the Saltelli base count
 
+### When it is the wrong choice
+
+Honestly, most of the time. Saltelli gives you $S_2$ as well, takes `on_invalid="drop"`, and supports bootstrap intervals, none of which eFAST does. Pick eFAST when the run budget is the binding constraint and you have measured that $N \times D$ beats $N'(D+2)$ at the accuracy you need. Specifically, it is the wrong choice when:
+
+- **Any model run can fail.** eFAST's design is an ordered sweep read by a Fourier transform. One `NaN` and you have `"raise"` or `"propagate"` and nothing else. `on_invalid="drop"` raises, and says why.
+- **You need a confidence interval.** There is nothing to resample inside one search curve. An eFAST interval needs replicated designs at different random phases, which is a change to `sample()`, not a keyword on `analyze()`.
+- **You need $S_2$.** It cannot produce them at all.
+- **Your parameters are correlated or categorical.** eFAST refuses both.
+
 ### Reference
 
 Saltelli, A., Tarantola, S. & Chan, K.P.-S. (1999). A quantitative model-independent method for global sensitivity analysis of model output. *Technometrics*, 41(1), 39-56.
 
-## DGSM (Derivative-based Global Sensitivity Measures)
+## DGSM (derivative-based global sensitivity measures)
 
-DGSM uses exact gradients from automatic differentiation to compute bounds on the total Sobol index $S_T$. It is the cheapest quantitative method when your model is JAX-differentiable, costing roughly one model evaluation per sample point.
+DGSM uses exact gradients from automatic differentiation to compute bounds on the total Sobol index $S_T$. For a **scalar output** it is the cheapest quantitative method when your model is JAX-differentiable: one reverse-mode Jacobian costs about 3 model evaluations regardless of $D$, against $D+2$ for the Saltelli design.
+
+That advantage is scalar-only. Reverse mode costs one pass per output slice, so a model with $T \times K$ output slices costs $T K$ passes. jaxgsa therefore picks the mode from the shapes: `jax.jacfwd` when $T K > D$, `jax.jacrev` otherwise. A Jacobian costs about $\min(D,\, T K)$ evaluations, and the saving against Saltelli's $D+2$ disappears once your output is a long time series. See ADR 0005.
 
 Pick it as a fast screening or sanity-check step before committing to a full Sobol' analysis. Use Morris (below) instead if your model is a black box. DGSM needs its own design, but only a plain Monte Carlo sample of $N$ points.
 
-### The DGSM Moments
+### The DGSM moments
 
 For a model $f(\mathbf{X})$ with $D$ parameters, DGSM computes two statistics for each parameter $i$. The first is the mean squared derivative, which is the importance measure:
 
@@ -509,9 +642,9 @@ $$
 \sigma_i = \mathbb{E}\left[\frac{\partial f}{\partial X_i}\right]
 $$
 
-These moments are estimated from $N$ i.i.d. Monte Carlo samples. DGSM uses `jax.jacrev` (reverse-mode autodiff), so the cost of computing the full Jacobian for all $D$ parameters in a single pass is comparable to a single model evaluation. That makes DGSM particularly efficient for high-dimensional problems.
+These moments are estimated from $N$ i.i.d. Monte Carlo samples. For a scalar output, one reverse-mode pass returns the whole $D$-vector of derivatives, so DGSM stays cheap however many parameters you add. That is the case it is built for.
 
-### Bounds on the Total Sobol Index
+### Bounds on the total Sobol index
 
 DGSM does not compute Sobol indices directly. Instead, it provides an upper bound and a lower bound on the total-order index $S_{T_i}$.
 
@@ -529,9 +662,9 @@ $$
 S_{T_i} \geq \frac{\mathrm{Var}(X_i) \cdot \sigma_i^2}{\mathrm{Var}(Y)}
 $$
 
-When the upper and lower bounds are close, DGSM gives a tight bracket on $S_T$ without the cost of a full Sobol analysis.
+When the upper and lower bounds are close, DGSM gives a tight bracket on $S_T$ without the cost of a full Sobol analysis. They are often not close. Measure the width before you rely on the bracket; the next section shows what a useless one looks like.
 
-### Poincaré Constants by Distribution
+### Poincaré constants by distribution
 
 The Poincaré constant depends on the marginal distribution of each parameter:
 
@@ -547,10 +680,42 @@ For truncated normal parameters, the constant is computed numerically by solving
 
 1. `jaxgsa.sampling.monte_carlo()` generates plain Monte Carlo samples from the declared parameter distributions.
 2. You pass your JAX-differentiable function and the samples to `jaxgsa.dgsm.analyze()`.
-3. Internally, `jax.jacrev` computes the Jacobian via reverse-mode autodiff, and the DGSM moments and bounds are derived.
+3. jaxgsa differentiates it, choosing forward or reverse mode from the shapes, and derives the moments and bounds.
 4. The returned `DGSMResult` contains `nu`, `sigma`, `upper_bound`, `lower_bound`, and `var_y`.
 
-Alternatively, if the Jacobian has been computed externally (e.g. for non-JAX models), you can pass pre-computed `Y` and `dfdx` arrays directly.
+`fn` takes **one sample row**, shape `(D,)`, and returns a scalar, a `(K,)` vector, or a `(T, K)` array. jaxgsa vmaps it for you. A batch model that expects `(N, D)` must be wrapped:
+
+```python
+result = jaxgsa.dgsm.analyze(PROBLEM, lambda x: model(x[None, :])[0], X, verbose=False)
+```
+
+Passing a batch model unwrapped raises a `ValueError` that spells out this exact fix, so you will not be left guessing.
+
+Alternatively, if the Jacobian has been computed externally (for a non-JAX model, say), you can pass pre-computed `Y=` and `dfdx=` arrays directly and skip `fn` entirely.
+
+### The bounds can be far too loose to rank with
+
+DGSM on Ishigami, 1024 Monte Carlo points:
+
+```python
+X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n=1024, seed=0))
+d = jaxgsa.dgsm.analyze(PROBLEM, lambda x: evaluate(x[None, :])[0], X, verbose=False)
+print("lower", d.lower_bound)
+print("upper", d.upper_bound)
+```
+
+```
+lower [0.00099489 0.0073687  0.00224933]
+upper [2.3450265 7.3845625 3.10674  ]
+```
+
+The true $S_T$ is $[0.5576, 0.4424, 0.2437]$. Both bounds hold, and neither is worth anything.
+
+The lower bound is near zero for all three parameters, and raising $N$ to 131072 pushes it to $10^{-4}$, not up. It is built from $\mathbb{E}[\partial f/\partial X_i]^2$, and every Ishigami term is symmetric about the middle of its range, so the mean derivative cancels to zero. Any model that is not monotone in a parameter will do the same. Treat the Kucherenko–Song lower bound as informative only for monotone responses.
+
+The upper bound is above 1 on every parameter, which tells you nothing, since $S_T \le 1$ by definition. Worse, it ranks the parameters $x_2 > x_3 > x_1$ while the true $S_T$ ranks them $x_1 > x_2 > x_3$. All three marginals are uniform on $[-\pi, \pi]$, so they share the Poincaré constant $C = (2\pi)^2/\pi^2 = 4$ and the ranking is the ranking of $\nu$ alone, $[7.61, 24.52, 11.00]$. $\nu$ is a mean **squared** derivative, so a steep slope over a small part of the range dominates it. $x_3$'s derivative is $0.4 x_3^3 \sin x_1$, which reaches 12 at the ends of the range and is near zero over most of it. That gives $x_3$ a large $\nu$ and a small variance share. Raising $N$ does not fix it: at 131072 points the bounds settle at $[2.19, 7.06, 3.17]$ and the ranking is unchanged.
+
+So DGSM is a fast way to find parameters that do nothing at all. It is not a reliable ranking of the ones that do.
 
 ### Index summary
 
@@ -563,10 +728,18 @@ Alternatively, if the Jacobian has been computed externally (e.g. for non-JAX mo
 
 ### When to use it
 
-- You have a JAX-differentiable model and want fast screening without the cost of Saltelli or eFAST sampling
-- You want bounds on $S_T$ rather than exact indices
-- You are screening a large number of parameters where autodiff is cheaper than structured designs
+- You have a JAX-differentiable model, a scalar or short output, and want fast screening without the cost of Saltelli or eFAST sampling
+- You want to find the parameters with no effect at all, cheaply
+- You are screening many parameters where one Jacobian beats $D+2$ model runs
 - You want a quick sanity check before running a full Sobol analysis
+
+### When it is the wrong choice
+
+- **You need a ranking you can act on.** See above. The Poincaré bound is a bound, not an index, and on Ishigami it ranks the parameters wrong.
+- **Your output is a long time series.** At $T K \gg D$ the Jacobian costs $D$ forward passes and the cost argument for DGSM evaporates. Run Sobol'.
+- **Your model is not monotone in the parameter.** The lower bound goes to zero and only the upper bound is left, which by itself brackets $[0, \text{something}]$.
+- **Your model is not JAX-differentiable.** Use [Morris](#morris-elementary-effects-screening), which is the same idea at a finite step size and needs no gradient.
+- **Your parameters are correlated or categorical.** DGSM refuses both. A derivative with respect to an unordered level code is meaningless.
 
 ### References
 
@@ -574,7 +747,7 @@ Alternatively, if the Jacobian has been computed externally (e.g. for non-JAX mo
 - Kucherenko, S. & Song, S. (2016). Derivative-based global sensitivity measures and their link with Sobol' sensitivity indices. *Reliability Engineering & System Safety*, 148, 81-95.
 - Lamboni, M., Iooss, B., Popelin, A.-L. & Gamboa, F. (2013). Derivative-based global sensitivity measures: General links with Sobol' indices and numerical tests. *Mathematics and Computers in Simulation*, 87, 44-54.
 
-## Morris (Elementary Effects Screening)
+## Morris (elementary effects screening)
 
 Morris is a global screening method. With only $r(D+1)$ model evaluations, where $r$ is typically 10–50 trajectories, it ranks parameters and flags which ones are negligible. Technically it is a globalized one-at-a-time (OAT) design: it measures coarse finite-difference effects of each parameter at many locations spread across the parameter domain, then summarises them into robust importance measures.
 
@@ -582,7 +755,7 @@ Pick it as a triage step for expensive black-box models. Fix the parameters Morr
 
 ### How it works
 
-The design consists of $r$ trajectories, each a path of $D + 1$ points where consecutive points differ in exactly one coordinate. Each trajectory contributes one elementary effect per parameter — a finite-difference slope:
+The design consists of $r$ trajectories, each a path of $D + 1$ points where consecutive points differ in exactly one coordinate. Each trajectory contributes one elementary effect per parameter, a finite-difference slope:
 
 $$
 EE_i = \frac{f(\mathbf{x} + \Delta \mathbf{e}_i) - f(\mathbf{x})}{\Delta}
@@ -593,7 +766,7 @@ where $\mathbf{e}_i$ is the unit vector along parameter $i$ and $\Delta$ is the 
 - **Trajectory design** (Morris 1991, default): each trajectory is a random walk on a $p$-level grid (`num_levels`, default 4) with the canonical step $\Delta = p / (2(p-1))$, visiting parameters in a random order.
 - **Radial design** (Campolongo et al. 2011, `method="radial"`): star designs around scrambled-Sobol' base points, where each elementary effect compares a one-coordinate swap against the shared base point with a per-step $\Delta_i = b_i - a_i$.
 
-Both uniform and Gaussian marginals are supported. The design touches the unit-cube boundaries, and an unbounded inverse CDF maps 0 and 1 to infinity. Each open side of a Gaussian marginal is therefore pulled in by $q$ (`truncation_quantile`, default $q = 10^{-4}$ — the 0.01%–99.99% quantile range) before the inverse-CDF transform. A side the problem already bounds with an explicit `low` or `high` is left exactly where the user put it, so a two-sided truncated Gaussian is sampled as declared. Uniform marginals are untouched, and deduplication and prefix-nesting are unaffected. The elementary-effect divisor is the step the design really takes, so this rescaling does not bias $\mu^*$.
+Both uniform and Gaussian marginals are supported. The design touches the unit-cube boundaries, and an unbounded inverse CDF maps 0 and 1 to infinity. Each open side of a Gaussian marginal is therefore pulled in by $q$ (`truncation_quantile`, default $q = 10^{-4}$, the 0.01%–99.99% quantile range) before the inverse-CDF transform. A side the problem already bounds with an explicit `low` or `high` is left exactly where the user put it, so a two-sided truncated Gaussian is sampled as declared. Uniform marginals are untouched, and deduplication and prefix-nesting are unaffected. The elementary-effect divisor is the step the design really takes, so this rescaling does not bias $\mu^*$.
 
 On an unbounded marginal there is no $q \to 0$ limit for $\mu^*$. The design always includes unit levels 0 and 1 exactly, so a smaller $q$ always reaches further into the tail and the effects grow with it. $\mu^*$ magnitudes on an unbounded marginal are therefore scale-dependent by construction, and only rankings are comparable across truncation settings. If you want one bounded parameter model that every method shares, declare it once:
 
@@ -606,9 +779,9 @@ problem = jaxgsa.Problem.from_dict(
 
 The $r$ elementary effects per parameter are reduced to three screening measures:
 
-- $\mu_i$ — the mean elementary effect. Sign cancellation can mask non-monotonic influence, which is why $\mu$ alone is unreliable.
-- $\mu^*_i$ — the mean absolute elementary effect (Campolongo et al. 2007). This is the headline importance measure. Read it as "how strongly does the output respond, on average, when this parameter moves?". It is a good proxy for the total-order index $S_T$ ranking.
-- $\sigma_i$ — the standard deviation of the elementary effects (ddof=1). A large $\sigma_i$ relative to $\mu^*_i$ means the effect of parameter $i$ changes across the domain, indicating nonlinearity or interactions with other parameters.
+- $\mu_i$ is the mean elementary effect. Sign cancellation can mask non-monotonic influence, which is why $\mu$ alone is unreliable.
+- $\mu^*_i$ is the mean absolute elementary effect (Campolongo et al. 2007). This is the headline importance measure. Read it as "how strongly does the output respond, on average, when this parameter moves?". It is a good proxy for the total-order index $S_T$ ranking.
+- $\sigma_i$ is the standard deviation of the elementary effects (ddof=1). A large $\sigma_i$ relative to $\mu^*_i$ means the effect of parameter $i$ changes across the domain, indicating nonlinearity or interactions with other parameters.
 
 The canonical output is the $\mu^*$–$\sigma$ scatter plot. Parameters near the origin are negligible. Parameters far along the $\mu^*$ axis are influential. Parameters high above the diagonal act mainly through nonlinearity or interactions.
 
@@ -618,7 +791,7 @@ Morris is closely related to DGSM. As $\Delta \to 0$, $\mu^*_i \to \mathbb{E}|\p
 
 1. `jaxgsa.morris.sample()` builds the trajectories, removes exact duplicate rows, and returns only the unique rows. Grid designs collide often in low dimensions, so this saves real model evaluations, just like Saltelli sampling.
 2. You evaluate your model on `sampling_result.samples`.
-3. `jaxgsa.morris.analyze()` reconstructs the expanded design internally, applies the `on_invalid` policy at trajectory granularity (see [Failed model runs](#failed-model-runs)), and reduces one elementary effect per trajectory and parameter to $\mu$, $\mu^*$, and $\sigma$. Pass `num_resamples > 0` (with a JAX PRNG `key`) for bootstrap confidence intervals over trajectories.
+3. `jaxgsa.morris.analyze()` reconstructs the expanded design internally, applies the `on_invalid` policy at trajectory granularity (see [Failed model runs](#failed-model-runs)), and reduces one elementary effect per trajectory and parameter to $\mu$, $\mu^*$, and $\sigma$. Pass `n_bootstrap > 0` with a `key` for bootstrap confidence intervals over trajectories. Use `resample_chunk_size` to bound the peak memory of that resampling; Morris spells it that way, not `slice_chunk_size`.
 
 Elementary effects are computed in unit-cube coordinates, so $\mu^*$ is directly comparable across parameters regardless of their physical ranges. `MorrisResult.to_physical_units()` rescales to derivative-scale values in the problem's native units. That rescaling covers uniform-marginal problems only: for Gaussian marginals the inverse-CDF transform is nonlinear, so the measures stay in grid coordinates. `MorrisSamples.downsample()` prefix-slices to fewer trajectories without re-simulation, mirroring `SobolSamples.downsample()`.
 
@@ -634,37 +807,48 @@ $$S_{T_j} = \frac{\mathbb{E}\left[(f(A) - f(A_B^{(j)}))^2\right]}{2\,\mathrm{Var
 
 $$S_{1_j} = \frac{\mathbb{E}\left[f(B)\left(f(A_B^{(j)}) - f(A)\right)\right]}{\mathrm{Var}(Y)} = \frac{\mathbb{E}\left[f(B)\, \Delta_j\, EE_j\right]}{\mathrm{Var}(Y)} \quad \text{(Saltelli 2010)}$$
 
-against Morris's $\mu^*_j = \mathbb{E}|EE_j|$. Same increments, different weighting: Morris divides by $\Delta$ and takes a first absolute moment, Jansen keeps $\Delta$ and takes a second moment. Campolongo et al. (2011) call this the unified approach — one design serving both screening and quantitative indices. The chain closes at DGSM: as $\Delta_j \to 0$ the effect tends to $\partial f / \partial x_j$, so $\mathbb{E}[EE_j^2] \to \nu_j$, the quantity that bounds $S_{T_j}$ through the Poincaré inequality.
+against Morris's $\mu^*_j = \mathbb{E}|EE_j|$. Same increments, different weighting: Morris divides by $\Delta$ and takes a first absolute moment, Jansen keeps $\Delta$ and takes a second moment. Campolongo et al. (2011) call this the unified approach, one design serving both screening and quantitative indices. The chain closes at DGSM: as $\Delta_j \to 0$ the effect tends to $\partial f / \partial x_j$, so $\mathbb{E}[EE_j^2] \to \nu_j$, the quantity that bounds $S_{T_j}$ through the Poincaré inequality.
 
 `SobolSamples.to_morris()` performs this reinterpretation, so screening measures cost no extra model evaluations:
 
 ```python
-samples = jaxgsa.sobol.sample(problem, 1024)
-Y = model(samples.samples)
+samples = jaxgsa.sobol.sample(PROBLEM, 8192, seed=0, verbose=False)
+Y = evaluate(samples.samples)
 
-sobol_result = jaxgsa.sobol.analyze(samples, Y)          # S1, ST, S2
-morris_result = jaxgsa.morris.analyze(samples.to_morris(), Y)  # mu*, sigma
+sobol_result = jaxgsa.sobol.analyze(samples, Y, verbose=False)
+morris_result = jaxgsa.morris.analyze(samples.to_morris(), Y, verbose=False)
+
+print(sobol_result.ST)
+print(morris_result.mu_star, morris_result.sigma)
 ```
+
+```
+jaxgsa.sobol.SobolSamples.to_morris: D=3, mode=second-order, base_n=1024, blocks=1024, effects=3072, reusing n_runs=8192 existing evaluations (0 new model runs)
+[0.55598414 0.44165453 0.24129711]
+[ 8.70476  15.02531   6.620432] [12.5912485 20.024467  11.469142 ]
+```
+
+`to_morris()` prints that line because it is worth knowing what it reused; pass `verbose=False` to silence it. The 3072 elementary effects came out of model runs you had already paid for.
 
 You get one radial block per base point, so `n_trajectories == base_n` for both design variants. A second-order design also contains a block based at $B$ ($B$ with its $B_A^{(j)}$ rows), and it is tempting to harvest as a free doubling. `to_morris()` does not use it. The reason is not that it is a duplicate. That equality holds only for additive contributions: whenever parameter $j$'s contribution is additive,
 
 $$\frac{f(B_A^{(j)}) - f(B)}{A_j - B_j} = \frac{g_j(A_j) - g_j(B_j)}{A_j - B_j} = \frac{f(A_B^{(j)}) - f(A)}{B_j - A_j}$$
 
-but in general it does not. Measured on Ishigami the paired effects correlate 0.50 / 1.00 / −0.06, so only $x_2$ — from the purely additive $7\sin^2(x_2)$ term — is a genuine duplicate. The real reason is that pooling buys nothing: over 150 seeds at `base_n=128` the pooled estimator's variance ratio against the $A$-only estimator is $[1.07, 1.00, 1.59]$, so it reduces no variance and is worse on $x_3$. Pooling would also need a cluster bootstrap over base points to keep confidence intervals honest, because the two blocks in a base point share their sampling unit. That is real machinery for no gain.
+but in general it does not. Measured on Ishigami the paired effects correlate 0.50 / 1.00 / −0.06, so only $x_2$, from the purely additive $7\sin^2(x_2)$ term, is a genuine duplicate. The real reason is that pooling buys nothing: over 150 seeds at `base_n=128` the pooled estimator's variance ratio against the $A$-only estimator is $[1.07, 1.00, 1.59]$, so it reduces no variance and is worse on $x_3$. Pooling would also need a cluster bootstrap over base points to keep confidence intervals honest, because the two blocks in a base point share their sampling unit. That is real machinery for no gain.
 
-Take care over which estimand you get. The derived design is a radial design, so it estimates $\mathbb{E}\left|f(A \text{ with } B_j) - f(A)\right| / |B_j - A_j|$, in which the step varies from block to block. That is not the classical Morris quantity with one fixed grid step $\Delta$. `jaxgsa.morris.sample` defaults to `method="trajectory"`, so compare against `morris.sample(..., method="radial")`, never against the default. On Ishigami at $r = 8192$ the derived $\mu^*$ is $[8.68, 15.01, 6.62]$ against $[8.69, 15.02, 6.64]$ for the native radial design, but $[7.59, 7.88, 6.39]$ for the native trajectory design — a factor 1.9 on $x_2$, and 2.5 on its $\sigma$.
+Take care over which estimand you get. The derived design is a radial design, so it estimates $\mathbb{E}\left|f(A \text{ with } B_j) - f(A)\right| / |B_j - A_j|$, in which the step varies from block to block. That is not the classical Morris quantity with one fixed grid step $\Delta$. `jaxgsa.morris.sample` defaults to `method="trajectory"`, so compare against `morris.sample(..., method="radial")`, never against the default. On Ishigami at $r = 8192$ the derived $\mu^*$ is $[8.68, 15.01, 6.62]$ against $[8.69, 15.02, 6.64]$ for the native radial design, but $[7.59, 7.88, 6.39]$ for the native trajectory design, a factor 1.9 on $x_2$, and 2.5 on its $\sigma$.
 
 Three further caveats:
 
 - The derived measures reuse the same model outputs as the Sobol' indices, so agreement between $\mu^*$ and $S_T$ is not an independent check of either. They may also legitimately rank parameters differently, because $\mu^*$ is a mean absolute derivative, not a variance share.
-- Saltelli takes $A$ and $B$ from the same Sobol' row, whereas `jaxgsa.morris.sample`'s radial design offsets them by four draws precisely to keep $\Delta$ away from zero. Blocks whose step is unmeasurable are dropped with a warning. At the default `scramble=True` this is a non-issue: 0 of 65536 blocks were dropped across 8 seeds at $D = 3$. With `scramble=False` the drop rate is real but falls off with `base_n` — 21.9% at `base_n=64`, 9.4% at 256, 2.3% at 1024, 1.2% at 4096. The survivors are a biased subsequence, giving $\mu^* = [8.34, 14.88, 5.55]$ at `base_n=64` against $[8.68, 15.01, 6.62]$ scrambled, so $x_3$ reads 16% low. Keep `scramble=True`.
+- Saltelli takes $A$ and $B$ from the same Sobol' row, whereas `jaxgsa.morris.sample`'s radial design offsets them by four draws precisely to keep $\Delta$ away from zero. Blocks whose step is unmeasurable are dropped with a warning. At the default `scramble=True` this is a non-issue: 0 of 65536 blocks were dropped across 8 seeds at $D = 3$. With `scramble=False` the drop rate is real but falls off with `base_n`: 21.9% at `base_n=64`, 9.4% at 256, 2.3% at 1024, 1.2% at 4096. The survivors are a biased subsequence, giving $\mu^* = [8.34, 14.88, 5.55]$ at `base_n=64` against $[8.68, 15.01, 6.62]$ scrambled, so $x_3$ reads 16% low. Keep `scramble=True`.
 - For unbounded Gaussian marginals, $\mu^*$ has no fixed scale. How far a design reaches into the tail sets the magnitude, and the Saltelli design (bounded only by the library's own $\pm 7.03\sigma$ support clip) and `morris.sample` reach different distances. Only rankings are comparable. Bound the marginals once if magnitudes must match:
 
   ```python
   problem = jaxgsa.Problem.from_dict(params, truncate_gaussians=1e-4)
   ```
 
-  Both sides are then genuinely bounded, `morris.sample` does not squash them again, and the derived and native radial measures agree — measured ratios 0.999 (linear), 0.997 ($x^2$), 0.988 ($x^4$), 0.987 ($\exp(x^2/3)$), each within its own seed-to-seed spread. `to_morris()` warns when unbounded Gaussians are present.
+  Both sides are then genuinely bounded, `morris.sample` does not squash them again, and the derived and native radial measures agree. The measured ratios are 0.999 (linear), 0.997 ($x^2$), 0.988 ($x^4$), 0.987 ($\exp(x^2/3)$), each within its own seed-to-seed spread. `to_morris()` warns when unbounded Gaussians are present.
 
 The reverse derivation is impossible: a radial Morris design never evaluates the $B$ rows, so $S_1$ and $S_T$ cannot be recovered from it.
 
@@ -679,9 +863,18 @@ The reverse derivation is impossible: a radial Morris design never evaluates the
 ### When to use it
 
 - You want a cheap screening pass before committing to a full Sobol' run
-- Your model is a black box (not JAX-differentiable — otherwise consider DGSM)
-- You have many parameters and a tight evaluation budget — the cost is $r(D+1)$ with $r$ typically 10-50
+- Your model is a black box (not JAX-differentiable; otherwise consider DGSM)
+- You have many parameters and a tight evaluation budget. The cost is $r(D+1)$ with $r$ typically 10-50
 - You only need a ranking and an interaction flag, not exact variance fractions
+
+### When it is the wrong choice
+
+- **You want to trust the ranking of the parameters that matter.** $\mu^*$ is a mean absolute slope, and it is a proxy for the $S_T$ ranking, not a substitute. On Ishigami it swaps the top two: $\mu^* = [8.70, 15.03, 6.62]$ ranks $x_2$ first, while $S_T = [0.556, 0.442, 0.241]$ ranks $x_1$ first. Use Morris to decide what to **drop**, which is what it is good at, and let Sobol' rank what is left.
+- **You want a number that means something.** $\mu^*$ is on the scale of $\partial f / \partial x$ in unit-cube coordinates. It is not a variance fraction and it does not sum to anything. `to_physical_units()` puts it on a derivative scale, and only for uniform marginals.
+- **You have unbounded Gaussian marginals.** $\mu^*$ has no fixed magnitude then: how far the design reaches into the tail sets it, and `truncation_quantile` sets that. Only rankings survive a change of setting. Declare `truncate_gaussians=` once on the `Problem` if the magnitudes have to mean anything.
+- **You already have a Saltelli design.** Then Morris is free rather than cheap, via `to_morris()` above, and there is no reason to run a separate design.
+- **Your model is JAX-differentiable and the output is scalar.** [DGSM](#dgsm-derivative-based-global-sensitivity-measures) is the same measure at $\Delta \to 0$ and costs less. Take its warnings above with it.
+- **Your parameters are correlated or categorical.** Morris refuses both. A one-at-a-time step off a correlation ridge lands somewhere the model never sees.
 
 ### References
 
@@ -697,9 +890,9 @@ HSIC measures the statistical dependence between each parameter and the output. 
 
 Pick it when you suspect your model's behaviour is not well summarised by variance, when your parameters may be correlated, or when you want statistical significance tests attached to the indices. Like HDMR, it works from data you already have: any set of $(X, Y)$ pairs, with no independence assumption on the parameters and no sampling design.
 
-### The HSIC Dependence Measure
+### The HSIC dependence measure
 
-Each parameter $X_i$ and the output $Y$ are passed through a characteristic kernel — a Gaussian RBF whose bandwidth is set automatically by the median heuristic (the median pairwise distance between sample points). Writing $\mathbf{K}$ and $\mathbf{L}$ for the two $N \times N$ kernel matrices, jaxgsa uses the biased V-statistic estimator
+Each parameter $X_i$ and the output $Y$ are passed through a characteristic kernel, a Gaussian RBF whose bandwidth is set automatically by the median heuristic (the median pairwise distance between sample points). Writing $\mathbf{K}$ and $\mathbf{L}$ for the two $N \times N$ kernel matrices, jaxgsa uses the biased V-statistic estimator
 
 $$
 \widehat{\mathrm{HSIC}}(X_i, Y) = \frac{1}{N^2}\,\mathrm{tr}(\mathbf{K}\mathbf{H}\mathbf{L}\mathbf{H}), \qquad \mathbf{H} = \mathbf{I} - \tfrac{1}{N}\mathbf{1}\mathbf{1}^\top
@@ -707,7 +900,7 @@ $$
 
 where $\mathbf{H}$ is the centering matrix. For characteristic kernels, $\mathrm{HSIC}(X_i, Y) = 0$ if and only if $X_i$ and $Y$ are independent, so a larger value signals stronger dependence.
 
-### First-Order and Total Indices
+### First-order and total indices
 
 jaxgsa reports two normalised indices per parameter.
 
@@ -727,11 +920,33 @@ HSIC is a dependence measure rather than a variance fraction, so jaxgsa attaches
 
 ### How to use it
 
-1. `jaxgsa.sampling.monte_carlo()` generates plain Monte Carlo samples — any sampling strategy works, since no structured design is required.
+1. `jaxgsa.sampling.monte_carlo()` generates plain Monte Carlo samples. Any sampling strategy works, since no structured design is required.
 2. You evaluate your model on the samples.
 3. `jaxgsa.hsic.analyze()` transforms each parameter to $[0, 1]$ via its marginal CDF, builds the kernel matrices with the median heuristic, and computes all indices and p-values in a single JIT-compiled pass.
 
-HSIC is $O(N^2)$ in time and memory because it forms $N \times N$ kernel matrices, about $2D + 1$ of them resident at once. No option bounds this; reduce $N$ if memory is the limit, or screen with a cheaper method first. The indices do not depend on the output units, but outputs of extreme magnitude can overflow float32 in the squared distances; rescale by hand with `(Y - Y.mean(0)) / Y.std(0)`, which changes nothing else.
+HSIC is $O(N^2)$ in time and memory because it forms $N \times N$ kernel matrices, about $2D + 1$ of them resident at once. No option bounds this. `hsic.analyze` has no `batch_size` and no `slice_chunk_size`, because there is no axis to chunk along: the kernel matrices are the computation. Reduce $N$ if memory is the limit, or screen with a cheaper method first. The indices do not depend on the output units, but outputs of extreme magnitude can overflow float32 in the squared distances; rescale by hand with `(Y - Y.mean(0)) / Y.std(0)`, which changes nothing else.
+
+Turn on float64 before you run HSIC. The V-statistic cancels three large sums against each other, so float32 leaves about three or four correct digits, and the index changes with the order of the sample rows. `analyze` warns about this. Small indices and close rankings are not reliable without it.
+
+```python
+import jax
+jax.config.update("jax_enable_x64", True)  # before the analysis
+```
+
+### The bandwidth is a real choice
+
+`bandwidth` (default `1.0`) multiplies the median-heuristic length scale. It is not a tuning detail. On Ishigami with 2000 samples in float64, sweeping it changes which parameter comes first:
+
+| `bandwidth` | R2-HSIC |
+|---|---|
+| 0.25 | `[0.058, 0.111, 0.025]` |
+| 0.5 | `[0.085, 0.070, 0.028]` |
+| 1.0 | `[0.135, 0.008, 0.025]` |
+| 2.0 | `[0.177, 0.002, 0.009]` |
+
+At 0.25 the ranking is $x_2 > x_1 > x_3$, which agrees with $S_1 = [0.314, 0.442, 0]$. At the default 1.0 it is $x_1 > x_3 > x_2$, and $x_2$ has dropped to 0.008 despite owning 44% of the output variance. A wide kernel smooths $7\sin^2 x_2$, which oscillates twice across the range, into a near-constant, and the dependence disappears from the estimator.
+
+So sweep `bandwidth` before you report an HSIC ranking, and say which value you used. A single HSIC number without its bandwidth is not reproducible.
 
 ### Index summary
 
@@ -743,10 +958,18 @@ HSIC is $O(N^2)$ in time and memory because it forms $N \times N$ kernel matrice
 
 ### When to use it
 
-- You want a measure that captures any dependence — nonlinear, non-monotone, or heteroscedastic — not just variance contributions
+- You want a measure that captures any dependence, nonlinear, non-monotone or heteroscedastic, and not only variance contributions
 - Your parameters may be correlated (HSIC makes no independence assumption)
 - You have existing $(X, Y)$ pairs and want indices without additional model runs
 - You want statistical significance testing via permutation p-values
+
+### When it is the wrong choice
+
+- **You want a number to report.** R2-HSIC has no units, does not sum to 1, and moves with the bandwidth. What it answers well is "is this parameter doing anything at all", via the p-value. For a magnitude, use [optimal transport](#optimal-transport-wasserstein-based-sensitivity) or [Borgonovo delta](#borgonovo-delta-density-based-sensitivity), which are both on a fixed $[0, 1]$ scale.
+- **$N$ is above about 20000.** The kernel matrices are $N \times N$ and there are $2D+1$ of them. At $N = 20000$ and $D = 5$ that is 11 matrices of 3.2 GB each in float64, so 35 GB. Nothing chunks it.
+- **You want a confidence interval.** There is none, deliberately. A row bootstrap repeats rows onto the kernel diagonal where the kernel is exactly 1, which biases the resampled index upward by construction. The permutation p-values are the uncertainty statement.
+- **Any of your parameters is categorical.** HSIC refuses: the RBF kernel would read the level codes as distances.
+- **You want interaction attribution.** The Total HSIC minus R2-HSIC gap says interactions exist, not which pairs. No $S_2$.
 
 ### References
 
@@ -754,15 +977,15 @@ HSIC is $O(N^2)$ in time and memory because it forms $N \times N$ kernel matrice
 - Da Veiga, S. (2015). Global sensitivity analysis with dependence measures. *Reliability Engineering & System Safety*, 142, 346-362.
 - Larsen and Alexanderian (2026). Total HSIC sensitivity indices via augmented product kernels. *arXiv preprint* arXiv:2603.00849.
 
-## PAWN (CDF-Based Sensitivity)
+## PAWN (CDF-based sensitivity)
 
 PAWN asks a different question from the variance-based methods. Not "how much variance does this parameter explain?", but "how much does the entire output distribution shift when this parameter is held fixed?". It compares the unconditional output CDF against conditional CDFs obtained by fixing each parameter within a bin, using the Kolmogorov–Smirnov (KS) distance as the measure of separation (Pianosi & Wagener, 2015).
 
 Pick it when you care about tails, skewness, or other distributional features that variance misses. Like HSIC and HDMR, it works from data you already have: any $(X, Y)$ pairs, with no independence assumption on the parameters and no sampling design.
 
-### The KS Distance
+### The KS distance
 
-For parameter $i$, its range is partitioned into `n_bins` equal-width bins. Within each bin $b$, PAWN forms the conditional output CDF $F_{Y \mid X_i \in b}$ from the samples whose $i$-th parameter falls in that bin, and compares it with the unconditional CDF $F_Y$ (built from all samples) via the Kolmogorov–Smirnov statistic — the largest absolute gap between the two CDFs:
+For parameter $i$, its range is partitioned into `n_bins` equal-width bins. Within each bin $b$, PAWN forms the conditional output CDF $F_{Y \mid X_i \in b}$ from the samples whose $i$-th parameter falls in that bin, and compares it with the unconditional CDF $F_Y$ (built from all samples) via the Kolmogorov–Smirnov statistic, the largest absolute gap between the two CDFs:
 
 $$
 \mathrm{KS}_{i,b} = \sup_{y}\left| F_Y(y) - F_{Y \mid X_i \in b}(y) \right|
@@ -770,25 +993,38 @@ $$
 
 A large KS value in a bin means fixing $X_i$ there substantially changes the output distribution. A value near zero means the output is insensitive to that parameter over that region.
 
-### Aggregating Across Bins
+### Aggregating across bins
 
 Each parameter yields one KS value per bin. The PAWN index reduces these to a single number per parameter using one of three statistics:
 
-- **median** (default) — robust to a single anomalous bin.
-- **max** — the worst-case shift across the parameter range.
-- **mean** — the average shift.
+- **median** (default). Robust to a single anomalous bin.
+- **max**. The worst-case shift across the parameter range.
+- **mean**. The average shift.
 
 The PAWN index is built on CDFs rather than moments, so it is moment-independent and invariant under monotone transformations of the output. It captures tail and skewness changes that variance-based indices miss.
 
 ### How to use it
 
-1. `jaxgsa.sampling.monte_carlo()` generates plain Monte Carlo samples (Monte Carlo, Latin Hypercube, or Sobol sequences all work — no structured design required).
+1. `jaxgsa.sampling.monte_carlo()` generates plain Monte Carlo samples (Monte Carlo, Latin Hypercube, or Sobol sequences all work; no structured design required).
 2. You evaluate your model on the samples.
 3. `jaxgsa.pawn.analyze()` maps each parameter to $[0, 1]$, assigns samples to bins, and computes the per-bin KS distances and their aggregate in a single JIT-compiled pass. Pass `n_bootstrap > 0` for bootstrap confidence intervals.
 
 The number of bins (`n_bins`, default 10) trades conditioning resolution against sample density per bin. With very few samples per bin the KS statistic becomes noisy, so increase $N$ or decrease `n_bins`.
 
-Categorical parameters are supported. A categorical parameter needs no binning: its level code already names the conditioning class, so PAWN uses one bin per level and `n_bins` does not apply to it. Bins with too few samples yield `NaN`, and the median, max, and mean over bins all drop them. The index is therefore unchanged by the order of the level codes — relabel the levels and you get the same number.
+`result.n_valid_bins` tells you whether that happened. It counts, per parameter, the bins that held at least 2 samples. Bins below that are dropped, and the median, max and mean run over what is left. When a parameter keeps fewer than half its bins, `analyze` warns. Check the array whenever the parameter has a skewed marginal: equal-width bins over a lognormal parameter empty out in the tail long before the sample count looks small.
+
+```python
+result = jaxgsa.pawn.analyze(PROBLEM, X, Y, verbose=False)
+print(result.pawn, result.n_valid_bins)
+```
+
+```
+[0.2484047  0.402167   0.08681974] [10 10 10]
+```
+
+All 10 bins survived for all three Ishigami parameters, so those indices stand on the full sample.
+
+Categorical parameters are supported. A categorical parameter needs no binning: its level code already names the conditioning class, so PAWN uses one bin per level and `n_bins` does not apply to it. Bins with too few samples yield `NaN`, and the median, max, and mean over bins all drop them. The index is therefore unchanged by the order of the level codes. Relabel the levels and you get the same number.
 
 ### Index summary
 
@@ -802,13 +1038,20 @@ Categorical parameters are supported. A categorical parameter needs no binning: 
 - You want a moment-independent index, invariant under monotone output transforms
 - You have existing $(X, Y)$ pairs from any sampling strategy
 - Your parameters may be correlated (no independence assumption or structured design)
-- Some of your parameters are categorical, or your output is discrete — PAWN needs neither an ordering on the parameters nor a density on the output
+- Some of your parameters are categorical, or your output is discrete. PAWN needs neither an ordering on the parameters nor a density on the output
+
+### When it is the wrong choice
+
+- **You want to compare parameters on a meaningful scale.** The KS distance is bounded in $[0, 1]$, but the aggregate over bins is a summary statistic and not a share of anything. On Ishigami, PAWN gives $[0.248, 0.402, 0.087]$ where $\delta$ gives $[0.211, 0.334, 0.156]$ and OT gives $[0.201, 0.278, 0.098]$. They rank the same but the spacings differ, and none of them is "the" answer.
+- **You want interactions.** PAWN conditions on one parameter at a time and stops there. No total-order equivalent, no $S_2$.
+- **Your marginals are skewed and $N$ is small.** Equal-width bins go empty in the tail. `n_valid_bins` tells you; a parameter down to 3 or 4 bins has a median over 3 or 4 numbers.
+- **The KS statistic is the wrong summary for your question.** It is a supremum, so it reacts to the single largest gap between two CDFs and ignores everything else. If a parameter shifts the whole distribution a little, $\delta$ or the OT index sees more of it. If a parameter moves one part of the range a lot, PAWN is the sharper instrument.
 
 ### Reference
 
 Pianosi, F. & Wagener, T. (2015). A simple and efficient method for global sensitivity analysis based on cumulative distribution functions. *Environmental Modelling & Software*, 67, 1-11.
 
-## Borgonovo Delta (Density-Based Sensitivity)
+## Borgonovo delta (density-based sensitivity)
 
 Borgonovo's $\delta$ index measures the expected L1 distance between the whole output density and the output density conditional on a parameter (Borgonovo, 2007):
 
@@ -832,15 +1075,32 @@ $$
 \hat{\delta}_i = \sum_{m=1}^{M} \frac{n_m}{2N} \int \left| \hat{f}_Y(y) - \hat{f}_{Y \mid X_i \in \mathcal{C}_m}(y) \right| \mathrm{d}y
 $$
 
-The plug-in estimate is biased upward at finite $N$. By default jaxgsa therefore applies Plischke's bootstrap bias reduction $2\hat{\delta}_i - \overline{\hat{\delta}_i^{(b)}}$ over `n_bootstrap` resamples, with percentile confidence intervals from the same replicates. This correction subtracts a bootstrap mean from twice the plug-in estimate. The reported $\delta$ and its percentile-interval bounds can therefore fall marginally below $0$ for weak or near-noninfluential parameters at small $N$, even though the true index and the plug-in estimate both lie in $[0, 1]$.
+The plug-in estimate is biased upward at finite $N$. `bias_correct` defaults to `None`, which means "correct if you are bootstrapping anyway": with `n_bootstrap > 0` jaxgsa applies Plischke's bias reduction $2\hat{\delta}_i - \overline{\hat{\delta}_i^{(b)}}$ over the same replicates that give the percentile intervals, and it warns once per process to say so. The warning exists because the reported $\delta$ is then not the plug-in estimate, and a reader comparing against another library needs to know which one they are looking at. Pass `bias_correct=True` to keep the correction and silence the warning, or `bias_correct=False` to keep the intervals and report the uncorrected estimate.
 
-The same class partition also yields the given-data first-order Sobol index (variance of the class means over the total variance) at negligible extra cost, so every analysis returns both $\delta$ and $S_1$.
+The correction subtracts a bootstrap mean from twice the plug-in estimate, so the reported $\delta$ and its interval bounds can fall marginally below $0$ for weak parameters at small $N$, even though the true index and the plug-in estimate both lie in $[0, 1]$.
+
+The same class partition also yields the given-data first-order Sobol index (variance of the class means over the total variance) at negligible extra cost, so every analysis returns both $\delta$ and $S_1$. Reading them side by side is the point of the method. Ishigami, 4000 samples, 100 bootstrap replicates:
+
+```python
+result = jaxgsa.borgonovo.analyze(
+    PROBLEM, X, Y, n_bootstrap=100, key=jax.random.key(0), verbose=False
+)
+print(result.delta)
+print(result.S1)
+```
+
+```
+[0.21102615 0.33395138 0.15578218]
+[0.30567423 0.42081362 0.00262259]
+```
+
+$x_3$ has $S_1 = 0.003$ and $\delta = 0.156$. Fixing $x_3$ does not move the mean of the output at all, which is why the variance-based first-order index is zero, and it visibly reshapes the output density, which is why $\delta$ is not. That gap is the entire argument for a moment-independent index, and here it is in two lines of output.
 
 The estimator matches `SALib.analyze.delta` on the equal-frequency rank partition, the class-count heuristic, the Silverman KDE factors, and the 100-point output grid. It differs in three ways. The central estimate is computed on the original sample, so it is deterministic given the data, where SALib evaluates it on a random resample. A constant output column yields $\delta = S_1 = 0$ instead of an error. A bootstrap replicate that happens to be constant, which is reachable for rare-event outputs, contributes the point estimate rather than a spurious zero, where SALib raises `LinAlgError`.
 
 ### How to use it
 
-1. `jaxgsa.sampling.monte_carlo()` generates plain Monte Carlo samples (any sampling strategy works — no structured design is required).
+1. `jaxgsa.sampling.monte_carlo()` generates plain Monte Carlo samples (any sampling strategy works; no structured design is required).
 2. You evaluate your model on the samples.
 3. `jaxgsa.borgonovo.analyze()` partitions each parameter into rank classes and computes $\delta$, $S_1$, and their bootstrap intervals in a single JIT-compiled kernel, vmapped over output columns and scanned over bootstrap replicates.
 
@@ -856,7 +1116,7 @@ Two settings control how a near-degenerate conditioning class is treated. `degen
 
 `degenerate_bandwidth="auto"`, the default, floors the kernel at `max(0.1 * h_full, grid_step)`, so it never goes below what the output grid can integrate. A float is a fraction of the full-sample bandwidth and is applied exactly.
 
-`analyze` does not refuse a `degenerate_bandwidth` on the setting alone, because the setting alone does not say whether the run works. Two conditions have to hold first. The floor only ever reaches a class the estimator already called degenerate, so on data with no such class the setting changes nothing at any value. And even on a degenerate class, a kernel narrower than one grid step only aliases if a grid point lands on the narrow peak. On one test problem with a genuine point mass, a floor of 0.01 of the full-sample bandwidth — a tenth of one grid step — still returns a $\delta$ inside $[0, 1]$, and moving the same point mass off the grid boundary keeps the answer stable down to $10^{-5}$.
+`analyze` does not refuse a `degenerate_bandwidth` on the setting alone, because the setting alone does not say whether the run works. Two conditions have to hold first. The floor only ever reaches a class the estimator already called degenerate, so on data with no such class the setting changes nothing at any value. And even on a degenerate class, a kernel narrower than one grid step only aliases if a grid point lands on the narrow peak. On one test problem with a genuine point mass, a floor of 0.01 of the full-sample bandwidth, a tenth of one grid step, still returns a $\delta$ inside $[0, 1]$, and moving the same point mass off the grid boundary keeps the answer stable down to $10^{-5}$.
 
 `analyze` therefore checks the returned $\delta$, not the setting. When the estimate does leave $[0, 1]$, the error message reads what the run actually did and names the knob that applies to it. Every case names `grid_size`, because a finer grid always shortens the step. A run where no class was floored also names `degenerate_tol`, because the floor changed nothing and the tolerance is what kept it away. A run floored by an explicit `degenerate_bandwidth` adds that floor width, one grid step, and the fraction of the full-sample bandwidth that equals one grid step. Under the `"auto"` default there is no such fraction to give: the floor is already at least one grid step wide, so `grid_size` is the whole of the advice. The value is not clipped, for the same reason as above.
 
@@ -867,21 +1127,29 @@ Raising `degenerate_tol` also does not raise. A higher tolerance calls more clas
 | Index | Meaning |
 |-------|---------|
 | $\delta(i)$ | Expected L1 distance between the unconditional and conditional output densities for parameter $i$, in $[0, 1]$. Higher means stronger influence on the output distribution; $0$ means no influence at all. |
-| $S_1(i)$ | Given-data first-order Sobol index from the same class partition — the variance-based view of the same conditioning, for comparison at no extra cost. |
+| $S_1(i)$ | Given-data first-order Sobol index from the same class partition. The variance-based view of the same conditioning, for comparison at no extra cost. |
 
 ### When to use it
 
-- You care about influence on the whole output distribution — tails, skewness, multimodality — not just variance
+- You care about influence on the whole output distribution, so tails, skewness and multimodality, not only variance
 - You want a moment-independent index with a fixed $[0, 1]$ scale, invariant under monotone output transforms
 - You have existing $(X, Y)$ pairs from any sampling strategy, possibly with correlated parameters
 - You use `SALib.analyze.delta` and want a deterministic, JIT-compiled equivalent that also handles multi-output and time-series `Y`
+
+### When it is the wrong choice
+
+- **Your output is discrete.** `analyze` raises. It compares kernel density estimates, and a discrete output has atoms no grid resolves. The check fires when a column takes at most 20 distinct values and those are fewer than 1% of the samples. Use [PAWN](#pawn-cdf-based-sensitivity) or [optimal transport](#optimal-transport-wasserstein-based-sensitivity), which compare empirical distributions and need no density.
+- **You need interactions or a total-order index.** $\delta$ conditions on one parameter. The $\delta - S_1$ gap tells you influence exists beyond the first-order variance, and nothing more.
+- **You want to separate direct influence from correlation-borne influence.** $\delta$ is correlation-inclusive: a parameter the model never reads scores above zero when it correlates with one the model does read. That is the correct reading of the index, not an error. Use [VKOGA](#vkoga-correlated-input-variance-indices) or [Kucherenko](#kucherenko-dependent-input-sobol-indices) for the split.
+- **Your output has a point mass or a hard bound.** The KDE has to be told what to do with a near-degenerate conditioning class; see `degenerate_tol` and `degenerate_bandwidth` below. OT handles the same data with no bandwidth at all.
+- **$N$ is small.** The plug-in estimate is biased upward and the bias correction can push weak parameters below zero. Both are visible, neither is comfortable. Below about 500 samples, read the ranking and ignore the magnitudes.
 
 ### Reference
 
 - Borgonovo, E. (2007). A new uncertainty importance measure. *Reliability Engineering & System Safety*, 92(6), 771-784.
 - Plischke, E., Borgonovo, E. & Smith, C.L. (2013). Global sensitivity measures from given data. *European Journal of Operational Research*, 226(3), 536-550.
 
-## Optimal Transport (Wasserstein-Based Sensitivity)
+## Optimal transport (Wasserstein-based sensitivity)
 
 The optimal-transport index (Borgonovo, Figalli, Plischke & Savaré, 2024) measures how far knowing a parameter moves the whole output distribution. It uses the squared 2-Wasserstein distance, which is the minimal quadratic work needed to transport the unconditional output distribution onto the conditional one:
 
@@ -891,22 +1159,55 @@ $$
 
 The denominator is the theoretical maximum of the numerator, so $\iota_i \in [0, 1]$. A value of $0$ means the output distribution never reacts to $X_i$, and $1$ means it is fully determined by it. The defining feature is the exact decomposition of every index into two parts:
 
-- **advective** — the class-averaged squared shift of the conditional mean, which equals exactly half the given-data first-order Sobol index ($2 \cdot \mathrm{advective} = S_1$), and
-- **diffusive** — the remainder: changes in spread, tails, and shape.
+- **advective**, the class-averaged squared shift of the conditional mean, which equals exactly half the given-data first-order Sobol index ($2 \cdot \mathrm{advective} = S_1$), and
+- **diffusive**, the remainder: changes in spread, tails, and shape.
 
 So the OT index subsumes the variance-based first-order view and quantifies what lies beyond it, on one scale. It works from data you already have: any $(X, Y)$ pairs, with no sampling design.
 
 ### How it works
 
-1. For each parameter, samples are split into `n_partitions` equal-frequency classes by the parameter's rank (default `min(25, N // 2)`). Rank-based conditioning is distribution-free: uniform, Gaussian, or mixed marginals work unchanged, and monotone parameter transforms change nothing. Correlated parameters are supported — the index then measures total, correlation-inclusive influence. Categorical parameters instead get one class per level (`n_partitions` does not apply to them), so the index never depends on the arbitrary code order.
-2. Per class, $W_2^2$ between the conditional and unconditional output samples is computed. In the default `mode="univariate"` (per output column) this uses the closed form of 1-D optimal transport — both empirical quantile functions evaluated at the $N$ uniform mass points via sorting, no iterative solver. The `"multivariate"` and `"trajectory"` modes treat the output vector as a point cloud and solve entropic transport with a pure-JAX log-domain Sinkhorn solver (regularization `epsilon`, reported cost is the unregularized $\langle P, C\rangle$).
+1. For each parameter, samples are split into `n_partitions` equal-frequency classes by the parameter's rank (default `min(25, N // 2)`). Rank-based conditioning is distribution-free: uniform, Gaussian, or mixed marginals work unchanged, and monotone parameter transforms change nothing. Correlated parameters are supported, and the index then measures total, correlation-inclusive influence. Categorical parameters instead get one class per level (`n_partitions` does not apply to them), so the index never depends on the arbitrary code order.
+2. Per class, $W_2^2$ between the conditional and unconditional output samples is computed. In the default `mode="univariate"` (per output column) this uses the closed form of 1-D optimal transport: both empirical quantile functions evaluated at the $N$ uniform mass points via sorting, no iterative solver. The `"multivariate"` and `"trajectory"` modes treat the output vector as a point cloud and solve entropic transport with a pure-JAX log-domain Sinkhorn solver (regularization `epsilon`, reported cost is the unregularized $\langle P, C\rangle$).
 3. Class results are averaged with class-size weights and divided by $2\,\mathrm{Var}(Y)$ (point-cloud modes: $2\,\mathrm{Tr}\,\mathrm{Cov}(Y)$, with per-column standardization on by default so no output dominates through its units).
 
-Entropic and finite-sample bias keep point-cloud-mode indices of irrelevant parameters strictly positive. Pass `dummy=True` to run a synthetic, provably independent parameter through the same estimator: its index (`ot_dummy`) is the irrelevance floor to compare against.
+Entropic and finite-sample bias keep point-cloud-mode indices of irrelevant parameters strictly positive. Pass `dummy=True` (with a `key`) to run a synthetic, provably independent parameter through the same estimator. Its index comes back as `ot_dummy`, the irrelevance floor, and `above_dummy` is `max(ot - ot_dummy, 0)` computed for you.
+
+### The split, on real numbers
+
+Ishigami, 4000 samples:
+
+```python
+result = jaxgsa.optimal_transport.analyze(
+    PROBLEM, X, Y, dummy=True, key=jax.random.key(0), verbose=False
+)
+print("ot         ", result.ot)
+print("advective  ", result.advective)
+print("diffusive  ", result.diffusive)
+print("S1         ", result.S1)
+print("ot_dummy   ", result.ot_dummy)
+print("above_dummy", result.above_dummy)
+```
+
+```
+ot          [0.20130879 0.2775473  0.09772308]
+advective   [0.15357935 0.21982561 0.00371553]
+diffusive   [0.04772941 0.05772171 0.09400754]
+S1          [0.30723554 0.4397612  0.00743293]
+ot_dummy    0.01135613
+above_dummy [0.18995266 0.26619118 0.08636695]
+```
+
+Three things to read off it.
+
+`S1` is exactly $2 \times$ `advective`: $2 \times 0.003716 = 0.007433$. That identity is exact, not approximate, and it is what ties the OT index to the variance-based world.
+
+$x_1$ and $x_2$ are mean-shift parameters: 76% and 79% of their index is advective. $x_3$ is the opposite, 96% diffusive. Knowing $x_3$ tells you almost nothing about where the output will land and a lot about how far it will spread. No variance-based index distinguishes those two situations.
+
+`ot_dummy` is 0.011, so the 0.098 for $x_3$ is nine times the noise floor and is real. In `"univariate"` mode the floor is small; in the point-cloud modes it is not, and `dummy=True` stops being optional there.
 
 ### How to use it
 
-1. `jaxgsa.sampling.monte_carlo()` or any existing $(X, Y)$ data — no structured design required.
+1. `jaxgsa.sampling.monte_carlo()` or any existing $(X, Y)$ data. No structured design required.
 2. `jaxgsa.optimal_transport.analyze()` computes `ot`, `advective`, and `diffusive` per parameter (and per output column in `"univariate"` mode), with optional stratified bootstrap confidence intervals.
 
 Pick the mode by the question: `"univariate"` for per-column indices across `(N,)`/`(N, K)`/`(N, T, K)` outputs, `"multivariate"` for one index per parameter over the flattened joint output, `"trajectory"` for one index per parameter per output over the whole time course. Bootstrap in the point-cloud modes costs `n_bootstrap * D * n_partitions` Sinkhorn solves, so keep it modest.
@@ -918,7 +1219,9 @@ Pick the mode by the question: `"univariate"` for per-column indices across `(N,
 | $\iota(i)$ (`ot`) | Normalized expected $W_2^2$ between conditional and unconditional output distributions, in $[0, 1]$. |
 | `advective` | Mean-shift component; $2 \cdot \mathrm{advective}$ is the given-data first-order Sobol index. |
 | `diffusive` | Spread/shape component, `ot - advective`; flags influence invisible to the conditional mean. |
-| `ot_dummy` | Index of a synthetic independent parameter (with `dummy=True`) — the irrelevance floor. |
+| `S1` | The given-data first-order Sobol index, $2 \times$ `advective`, returned for convenience. |
+| `ot_dummy` | Index of a synthetic independent parameter (with `dummy=True`). The irrelevance floor. `None` otherwise. |
+| `above_dummy` | `max(ot - ot_dummy, 0)`, the index with the floor subtracted. `None` unless you passed `dummy=True`. |
 
 ### Valid under correlated inputs
 
@@ -933,15 +1236,25 @@ Read the index as total, correlation-inclusive influence. A parameter the model 
 - You want one index per parameter for a whole trajectory or multivariate output (`multivariate` / `trajectory` modes)
 - Your parameters have mixed marginals or are correlated
 
+If you have $(X, Y)$ data and no strong reason to prefer another method, this is where I would start. It is on a fixed $[0, 1]$ scale, it needs no bandwidth, it accepts correlated and categorical parameters, and it hands you the given-data $S_1$ for free so you can compare against the variance-based world without a second run.
+
+### When it is the wrong choice
+
+- **You need interactions.** OT conditions on one parameter at a time. The diffusive part says influence exists beyond the mean shift; it does not say which parameter it is shared with. No $S_2$, no total order.
+- **You need to separate direct from correlation-borne influence.** The index is correlation-inclusive by construction. Use [VKOGA](#vkoga-correlated-input-variance-indices) or [Kucherenko](#kucherenko-dependent-input-sobol-indices).
+- **You are in a point-cloud mode without a dummy.** `"multivariate"` and `"trajectory"` solve entropic transport, and the entropic bias keeps irrelevant parameters visibly above zero. Reading those indices without `dummy=True` will make you believe in parameters that do nothing.
+- **You are bootstrapping a point-cloud mode.** The bill is `n_bootstrap * D * n_partitions` Sinkhorn solves. At 100 replicates, 10 parameters and 25 partitions that is 25000 solves.
+- **You want a surrogate too.** OT gives you indices and nothing else. Use [PCE](#pce-polynomial-chaos-expansion), [HDMR](#rs-hdmr-random-sampling-high-dimensional-model-representation) or [VKOGA](#vkoga-correlated-input-variance-indices).
+
 ### Reference
 
 - Borgonovo, E., Figalli, A., Plischke, E. & Savaré, G. (2024). Global sensitivity analysis via optimal transport. *Management Science*. doi:10.1287/mnsc.2023.01796
 
-## VKOGA (Correlated-Input Variance Indices)
+## VKOGA (correlated-input variance indices)
 
 VKOGA reports variance-based sensitivity indices for parameters that are genuinely dependent. It separates what a parameter explains by itself from what it explains through its correlations. Apart from VKOGA and [Kucherenko](#kucherenko-dependent-input-sobol-indices), every variance-based method on this page assumes independent parameters, or sidesteps the question by measuring something other than variance.
 
-VKOGA is the given-data route of that pair. It is the surrogate-based sensitivity analysis (SSA) of Hilhorst, Quicken, van de Vosse & Huberts (2024), which computes the correlated variance-based indices of Li et al. (2010) — five of them. Pick it when your parameters are dependent and you still want variance fractions, not a distributional distance. Any set of $(X, Y)$ pairs works, with no sampling design.
+VKOGA is the given-data route of that pair. It is the surrogate-based sensitivity analysis (SSA) of Hilhorst, Quicken, van de Vosse & Huberts (2024), which computes the correlated variance-based indices of Li et al. (2010), five of them. Pick it when your parameters are dependent and you still want variance fractions, not a distributional distance. Any set of $(X, Y)$ pairs works, with no sampling design.
 
 The method runs in two stages, and the split is the whole point. The indices need nested conditional sampling. That is hopeless against an expensive model, but trivial against a cheap emulator:
 
@@ -964,6 +1277,42 @@ These are the same two formulas as $S_1$ and $S_T$. What changes is what they no
 
 Two strongly correlated parameters will both show a large $S_{TC}$ and a small $S_{TU}$. Either one is worth measuring, but you cannot fix one and keep the other free without changing the answer.
 
+Here it is on a model simple enough to check by hand: $Y = X_1 + X_2 + X_3$, standard normal marginals, $\mathrm{corr}(X_1, X_2) = 0.9$. The surrogate trains on 1024 points from an **independent** design, and the analysis then applies the declared correlation.
+
+```python
+import jax
+jax.config.update("jax_enable_x64", True)
+
+import numpy as np
+import jax.numpy as jnp
+import jaxgsa
+
+spec = {n: {"dist": "gaussian", "mean": 0.0, "variance": 1.0} for n in ("x1", "x2", "x3")}
+R = np.eye(3)
+R[0, 1] = R[1, 0] = 0.9
+problem = jaxgsa.Problem.from_dict(spec).with_correlation(R)
+
+X = jnp.asarray(jaxgsa.sampling.monte_carlo(jaxgsa.Problem.from_dict(spec), n=1024, seed=0))
+result = jaxgsa.vkoga.analyze(
+    problem, X, X.sum(axis=1), gamma=0.5, ridge=1e-8, key=jax.random.key(0), verbose=False
+)
+print("S_TC", np.round(np.asarray(result.S_TC), 3))
+print("S_TU", np.round(np.asarray(result.S_TU), 3))
+print("S_U ", np.round(np.asarray(result.S_U), 3))
+print("S_C ", np.round(np.asarray(result.S_C), 3))
+```
+
+```
+S_TC [0.74 0.74 0.22]
+S_TU [0.041 0.043 0.222]
+S_U  [0.04  0.041 0.22 ]
+S_C  [ 0.7    0.699 -0.  ]
+```
+
+The exact values are $S_{TC} = [0.752, 0.752, 0.208]$ and $S_{TU} = [0.040, 0.040, 0.208]$, so the kernel surrogate is within about 0.015 everywhere.
+
+Read the decision off it. $x_1$ and $x_2$ each explain 74% of the output variance, and each explains 4% that nothing else can account for. So both are worth measuring accurately, and either one can be fixed provided you keep the other free. $x_3$ has $S_{TC} = S_{TU} = 0.22$ and $S_C = 0$: it is uncorrelated, so its two answers coincide and it must be neither fixed nor ignored. A ranking on $S_{TC}$ alone would have told you $x_3$ was the least important parameter. On $S_{TU}$ it is the most important. Both readings are correct, and they answer different questions.
+
 The remaining three split $S_{TC}$ and $S_{TU}$ into their independent and correlation-borne parts:
 
 | Index | Definition | Meaning |
@@ -972,7 +1321,7 @@ The remaining three split $S_{TC}$ and $S_{TU}$ into their independent and corre
 | $S_{TU}(i)$ | $\mathbb{E}[\mathrm{Var}(Y \mid \mathbf{X}_{\sim i})] / \mathrm{Var}(Y)$ | Total uncorrelated: what only $X_i$ can explain. Use for parameter fixing. |
 | $S_U(i)$ | $\mathbb{E}[\mathrm{Var}(f_i \mid \mathbf{X}_{\sim i})] / \mathrm{Var}(Y)$ | The contribution of $X_i$ alone, with the part of it that $\mathbf{X}_{\sim i}$ already determines removed. $f_i$ is the fitted additive component of the output. |
 | $S_C(i)$ | $S_{TC} - S_U$ | The correlation-borne contribution. It can be negative, when a correlation works against a direct effect. |
-| $S_{IU}(i)$ | $S_{TU} - S_U$ | Independent interactions — zero for an additive model, non-negative always. |
+| $S_{IU}(i)$ | $S_{TU} - S_U$ | Independent interactions. Zero for an additive model, non-negative always. |
 
 The name $S_{TC}$ says "total", but the formula is a first-order conditional variance. "Total" names the pathways it counts, direct and correlated, not the interaction order. It is not a total-order Sobol' index.
 
@@ -991,13 +1340,13 @@ VKOGA fits a kernel expansion, which is a sum over centres rather than over para
 Practical guidance:
 
 - Want the prioritise / fix distinction under dependence, with an explicit and auditable dependency structure? Use VKOGA.
-- Want to know which interaction carries the variance, or a fair per-parameter allocation summing to 1? Use HDMR — its terms are labelled, and only it can produce Shapley effects. `VKOGAResult.shapley()` deliberately raises `NotImplementedError`.
+- Want to know which interaction carries the variance, or a fair per-parameter allocation summing to 1? Use HDMR: its terms are labelled, and only it can produce Shapley effects. `VKOGAResult.shapley()` deliberately raises `NotImplementedError`.
 - Want to declare a dependency structure rather than infer one from the data (a copula from expert knowledge, a sensitivity sweep over $\rho$, or the same data analysed under several correlation assumptions)? Only VKOGA takes a correlation matrix as an argument; HDMR reads correlation implicitly out of whatever $X$ you hand it.
 - The two are complementary, not redundant: HDMR's $S_b$ tells you that correlation matters, and VKOGA's $S_{TC} - S_{TU}$ gap tells you what to do about it.
 
 ### How to use it
 
-1. You provide any set of $(X, Y)$ pairs — no sampling design required.
+1. You provide any set of $(X, Y)$ pairs. No sampling design required.
 2. `jaxgsa.vkoga.analyze()` maps parameters to $[0, 1]$ through their marginal CDFs (the RBF kernel is isotropic, so every column must share a scale), centres the outputs, cross-validates `gamma` and `ridge`, and fits the greedy kernel surrogate.
 3. The same call then draws the nested conditional samples in latent copula space and returns the five indices, along with the surrogate's `n_centers`, `gamma`, `ridge`, and per-slice training `rmse`.
 4. `result.predict(X_new)` reuses the fitted surrogate; `result.to_dataset()` exports everything, including the correlation matrix, as a labeled `xarray.Dataset`.
@@ -1026,6 +1375,15 @@ jax.config.update("jax_enable_x64", True)  # before fitting
 - You want to state the dependency structure explicitly, or sweep over several
 - You have existing $(X, Y)$ pairs and also want a fast surrogate (`result.predict`)
 
+### When it is the wrong choice
+
+- **You can still run the model.** Then run [Kucherenko](#kucherenko-dependent-input-sobol-indices) and get the same two quantities with no surrogate error in between. VKOGA is the given-data fallback, not the better estimator.
+- **Your training data is correlated.** Caveat 1 above is the one that bites. $S_{TU}$ resamples $X_i$ across its whole marginal while holding the rest fixed, which is exactly the region off the correlation ridge that your training set never visited. The surrogate is extrapolating where the estimator leans on it hardest.
+- **You want to know which interaction carries the variance.** A kernel expansion sums over centres, not over parameter subsets, so there is no term to point at. No $S_2$, and `VKOGAResult.shapley()` raises `NotImplementedError` on purpose. Use HDMR.
+- **You cannot enable float64.** The coefficient step forms $A^\top A$ and squares the condition number. In float32 the surrogate can come out an order of magnitude worse. `analyze` warns; take the warning seriously.
+- **Any of your parameters is categorical.** VKOGA refuses. The isotropic RBF kernel would read level codes as distances.
+- **$D$ is large and you left `gamma` and `ridge` unset.** The default is a 10×10 grid of 10-fold refits, so 1000 surrogate fits before a single index is computed. Set them once you know good values.
+
 ### References
 
 - Hilhorst, G., Quicken, S., van de Vosse, F.N. & Huberts, W. (2024). Efficient sensitivity analysis for biomechanical models with correlated inputs. *International Journal for Numerical Methods in Biomedical Engineering*, 40(2), e3797.
@@ -1033,7 +1391,7 @@ jax.config.update("jax_enable_x64", True)  # before fitting
 - Wirtz, D. & Haasdonk, B. (2013). A vectorial kernel orthogonal greedy algorithm. *Dolomites Research Notes on Approximation*, 6, 83-100.
 - Santin, G. & Haasdonk, B. (2021). Kernel methods for surrogate modeling. In *Model Order Reduction, Volume 2*, De Gruyter, 311-354.
 
-## Kucherenko (Dependent-Input Sobol' Indices)
+## Kucherenko (dependent-input Sobol' indices)
 
 Kucherenko, Tarantola & Annoni (2012) generalise the Sobol' indices to dependent parameters. They keep the two defining quantities and estimate them by direct model evaluation:
 
@@ -1052,7 +1410,29 @@ This is the design-based counterpart to [VKOGA](#vkoga-correlated-input-variance
 2. You evaluate your model on `samples.samples`. This is the whole model cost.
 3. `jaxgsa.kucherenko.analyze(samples, Y)` applies the single-loop estimators: the paired product over the shared-$X_i$ rows for $S_i$, and the Jansen squared difference over the shared-$\mathbf{X}_{\sim i}$ rows for $S_{T_i}$. The exact formulas are stated in the `jaxgsa.kucherenko._analyze` module docstring.
 
-`kucherenko.sample` reads `problem.correlation` and is deliberately exempt from the correlated-design error on `sobol` / `morris` / `efast`, because conditioning on the declared copula is the method's purpose. Categorical problems raise, since the conditional copula needs continuous marginals, as do problems with fewer than two parameters.
+`kucherenko.sample` reads `problem.correlation` and is deliberately exempt from the correlated-design error on `sobol` / `morris` / `efast`, because conditioning on the declared copula is the method's purpose. Categorical problems raise, since the conditional copula needs continuous marginals, as do problems with fewer than two parameters. Like the other samplers it takes `seed: int | np.random.Generator | None`; `scramble=False` together with a seed raises `ValueError`.
+
+The same model as the VKOGA section, $Y = X_1 + X_2 + X_3$ at $\mathrm{corr}(X_1, X_2) = 0.9$:
+
+```python
+samples = jaxgsa.kucherenko.sample(problem, 4096, seed=0, verbose=False)
+print("model runs:", samples.samples.shape[0])
+result = jaxgsa.kucherenko.analyze(
+    samples, jnp.asarray(samples.samples).sum(axis=1), verbose=False
+)
+print("S1", np.round(np.asarray(result.S1), 3))
+print("ST", np.round(np.asarray(result.ST), 3))
+```
+
+```
+model runs: 28672
+S1 [0.752 0.752 0.208]
+ST [0.04  0.04  0.208]
+```
+
+Both match the closed-form values to three decimals. The cost is the point: $4096 \times (2 \times 3 + 1) = 28672$ model runs for a 3-parameter problem, against 1024 for the VKOGA surrogate. You are paying 28 times as much to remove the surrogate from the chain.
+
+Note $S_T < S_1$ for $x_1$ and $x_2$. Under independence that is impossible. Under dependence it is the normal case for coupled parameters, and the gap 0.752 − 0.040 is the share of $x_1$'s apparent influence that is carried by $x_2$.
 
 ### Index summary
 
@@ -1067,13 +1447,22 @@ This is the design-based counterpart to [VKOGA](#vkoga-correlated-input-variance
 - You want a design-based cross-check of a VKOGA (surrogate) analysis
 - Your parameters are independent and you want the classic Sobol' indices from a conditional design (it reduces to them exactly)
 
+### When it is the wrong choice
+
+- **Your parameters are independent.** The design reduces to the Saltelli column-swap scheme, so you get the same numbers for $N(2D+1)$ runs where `sobol` gives you $S_2$ as well for $N(2D+2)$. Just run `sobol`.
+- **You cannot run the model.** The whole method is a design. Use [VKOGA](#vkoga-correlated-input-variance-indices).
+- **You do not know the correlation matrix.** The design is built from the declared copula, and a wrong copula gives you clean estimates of the wrong quantity. Fit one with `jaxgsa.sampling.fit_correlation` if your data supports it, but understand that you are then assuming a Gaussian copula.
+- **Your dependence is not a Gaussian copula.** Conditioning is closed-form only in the latent normal space. A tail-dependent or non-monotone dependence is not representable here.
+- **Any of your parameters is categorical.** It raises: the conditional copula needs continuous marginals.
+- **You want $S_2$ or a surrogate.** Neither is available.
+
 ### Reference
 
 - Kucherenko, S., Tarantola, S. & Annoni, P. (2012). Estimation of global sensitivity indices for models with dependent variables. *Computer Physics Communications*, 183(4), 937-946.
 
-## Output Shapes
+## Output shapes
 
-All thirteen methods share the same output contract: scalar, multi-output, and time-series outputs. The shape of `Y` determines the shape of all returned index arrays. Read `S1 / ST` as the method's per-parameter measures — `mu / mu_star / sigma` for Morris, and `nu / sigma` and the bounds for DGSM. Only Sobol and PCE produce S2.
+All thirteen methods share the same output contract: scalar, multi-output, and time-series outputs. The shape of `Y` determines the shape of all returned index arrays. Read `S1 / ST` as the method's per-parameter measures: `mu / mu_star / sigma` for Morris, and `nu / sigma` and the bounds for DGSM. Only Sobol and PCE produce S2.
 
 | Y shape | S1 / ST shape | S2 shape |
 |---------|---------------|----------|
@@ -1083,9 +1472,23 @@ All thirteen methods share the same output contract: scalar, multi-output, and t
 
 D is always the last axis. Confidence interval arrays (when using bootstrap) prepend a leading dimension of 2 for `[lower, upper]`.
 
-How a 2-D `Y` is read depends on `problem.output_names`. Without it, a 2-D `Y` is always `(N, K)`: multiple outputs, no time dimension. With exactly one entry in `output_names` and more than one column, a 2-D `(N, M)` `Y` is read as `M` timepoints of that single labeled output and flows through as `(N, M, 1)`, keeping the labeled output axis in results. A lone column `(N, 1)` stays a scalar output `(N, K=1)`; pass `(N, 1, 1)` explicitly for a genuine 1-timepoint series. With several entries, the column count must equal `len(output_names)`. A 1-D `(N,)` `Y` is one output regardless of how many names are declared.
+### How a 2-D Y is read
 
-You need not pass exactly the canonical layout, because every public entry point resolves `Y` through the same inference ladder. Exact canonical shapes pass silently. Unambiguously recoverable layouts — a transposed `(K, N)` array, or a 3-D `(N, K, T)` array whose middle axis matches `len(output_names)` — are fixed with a `JaxgsaWarning` naming the transformation. Ambiguous layouts raise. jaxgsa never guesses.
+Shapes are taken as given. A 2-D `Y` is always `(N, K)`. There is no heuristic that might read it as `(N, T)` instead, `problem.output_names` does not change the reading, and there is no shape jaxgsa will quietly transpose for you. A time series is `(N, T, K)`, so a single time-varying output is written explicitly as `(N, T, 1)`.
+
+```python
+result = jaxgsa.sobol.analyze(samples, Y_2d)     # Y_2d is (8192, 5)
+result.S1.shape                                  # (5, 3)  ->  (K, D)
+
+result = jaxgsa.sobol.analyze(samples, Y_2d[:, :, None])
+result.S1.shape                                  # (5, 1, 3)  ->  (T, K, D)
+```
+
+The index shape is the tell. `(K, D)` means jaxgsa read 5 separate outputs at one time step. `(T, K, D)` means it read 5 time steps of one output. Check it once on the first run and a transposed array cannot reach your plots.
+
+A transposed array is caught by the row count, not repaired. Passing `(5, 8192)` where `(8192, 5)` was meant raises `ValueError: Y has 5 sample rows but 8192 were expected; pass Y as (N,), (N, K), or (N, T, K)`.
+
+Setting `problem.output_names` is the guard rail worth having. When it is present, its length must equal the trailing axis, and the mismatch is caught before any array work: `output_names` of length 1 against a `(8192, 5)` `Y` raises `ValueError: output_names length 1 does not match the output axis K=5`. A 1-D `(N,)` `Y` is one output whatever the names say.
 
 Every warning that jaxgsa raises uses the `JaxgsaWarning` category. The class is a subclass of `UserWarning`, so a filter on `UserWarning` still catches it. Filter on `JaxgsaWarning` to select the jaxgsa warnings alone:
 
@@ -1096,7 +1499,7 @@ from jaxgsa import JaxgsaWarning
 warnings.filterwarnings("ignore", category=JaxgsaWarning)
 ```
 
-Time-series outputs are particularly useful for dynamic models. Watching the sensitivity indices evolve over time reveals which parameters dominate at different stages of a process — for example, a parameter that is highly influential early in a batch but negligible later.
+Time-series outputs are particularly useful for dynamic models. Watching the sensitivity indices evolve over time reveals which parameters dominate at different stages of a process. For example, a parameter that is highly influential early in a batch but negligible later.
 
 ## Failed model runs
 
