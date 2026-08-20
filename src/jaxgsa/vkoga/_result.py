@@ -48,9 +48,11 @@ class VKOGAResult(SchemaResult, SurrogateResult):
             frozen.
         S_U: Independent contribution of ``X_i`` alone,
             ``E(V(f_i|X_-i)) / V(Y)``, shape ``(..., D)``. Here ``f_i`` is the
-            fitted additive component of the output, so this is the
-            decorrelated first-order index of Mara & Tarantola (2012). It is
-            clipped to at most ``S_TU``, and a wide clip raises a
+            fitted additive component of the output. It reads like the
+            decorrelated first-order index of Mara & Tarantola (2012), but it
+            is not their estimator: theirs conditions on the Rosenblatt
+            residual, and the two agree only when ``f_i`` is linear. ``S_U``
+            is clipped to at most ``S_TU``, and a wide clip raises a
             ``JaxgsaWarning``.
         S_C: Correlation-borne contribution ``S_TC - S_U``, shape ``(..., D)``.
             It can be negative when a correlation opposes a direct effect.

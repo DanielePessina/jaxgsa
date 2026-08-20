@@ -406,11 +406,11 @@ def test_explicit_matrix_overrides_problem_correlation():
 
 
 def test_correlation_string_raises():
-    """Every string is rejected: it is not a valid (D, D) matrix."""
+    """Every string is rejected; the error names the one supported workflow."""
     X = jaxgsa.sampling.monte_carlo(GAUSS_PROBLEM, 32, seed=0)
     Y = X @ A_COEF
     for value in ("empirical", "bogus"):
-        with pytest.raises(ValueError), single_precision_warning():
+        with pytest.raises(ValueError, match="fit_correlation"), single_precision_warning():
             jaxgsa.vkoga.analyze(GAUSS_PROBLEM, X, Y, correlation=value, **SMALL_KWARGS)
 
 

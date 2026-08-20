@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Sequence
+from math import factorial
 from typing import Callable, NamedTuple
 
 import numpy as np
@@ -75,10 +76,16 @@ from jaxgsa._core.legendre import legendre_orthonormal
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.problem import GaussianSpec, Problem
 
-# Degree of the marginal Legendre basis used to recover the first-order
-# component functions f_i. Six terms capture the smooth univariate shapes a
+# Degree of the marginal basis used to recover the first-order component
+# functions f_i. The basis itself depends on each parameter's marginal (see
+# _component_basis_kinds). Six terms capture the smooth univariate shapes a
 # kernel surrogate produces without making the joint least squares ill-posed.
 _COMPONENT_DEGREE = 6
+
+# Largest dimension a scipy Sobol' engine has direction numbers for. The
+# inner draw in _total_uncorrelated_and_conditional uses one dimension per
+# outer point, so it splits into blocks above this width.
+_MAX_QMC_DIM = 21201
 
 # Ridge added to the component-function normal equations. The basis is
 # marginally orthonormal, so the Gram matrix is well conditioned unless two
@@ -398,8 +405,6 @@ def _hermite_basis(z: np.ndarray, degree: int) -> np.ndarray:
     Returns:
         Basis values, shape ``(..., degree)``.
     """
-    from math import factorial
-
     columns = [np.ones_like(z), z] if degree >= 1 else [np.ones_like(z)]
     for n in range(1, degree):
         columns.append(z * columns[n] - n * columns[n - 1])
@@ -605,6 +610,40 @@ def _total_correlated(
     return inner_mean.var(axis=0)
 
 
+def _inner_noise(n_inner: int, n_outer: int, stream: np.random.SeedSequence) -> np.ndarray:
+    """Draw one independent stratified inner block per outer point.
+
+    Each outer point gets its own column of a scrambled Sobol' set, so the
+    inner integration error is independent across outer points and averages
+    away in ``S_TU``. The block comes out transposed, ``(n_outer, n_inner)``.
+
+    A Sobol' engine carries direction numbers for at most
+    ``_MAX_QMC_DIM`` dimensions, so one call cannot serve more than that many
+    outer points. A larger ``n_outer`` is split into consecutive blocks of
+    columns, each drawn from its own spawned child stream. The columns stay
+    independent across the split, which is all this estimator asks of them.
+
+    Args:
+        n_inner: Inner draws per outer point.
+        n_outer: Number of outer points, one column each.
+        stream: This estimator's inner :class:`numpy.random.SeedSequence`.
+
+    Returns:
+        Standard normal noise, shape ``(n_outer, n_inner)``.
+    """
+    if n_outer <= _MAX_QMC_DIM:
+        return latent_normal_sample(n_inner, n_outer, seed=_qmc_seed(stream)).T
+    n_blocks = -(-n_outer // _MAX_QMC_DIM)
+    blocks = []
+    for width, child in zip(
+        [min(_MAX_QMC_DIM, n_outer - start) for start in range(0, n_outer, _MAX_QMC_DIM)],
+        stream.spawn(n_blocks),
+        strict=True,
+    ):
+        blocks.append(latent_normal_sample(n_inner, width, seed=_qmc_seed(child)).T)
+    return np.concatenate(blocks, axis=0)
+
+
 def _total_uncorrelated_and_conditional(
     *,
     plan: _ConditionalPlan,
@@ -663,7 +702,7 @@ def _total_uncorrelated_and_conditional(
     # that a mean over outer points cannot average away, because S_TU is a
     # mean of inner variances, not a variance of inner means (contrast
     # :func:`_total_correlated`, where the shared block is correct).
-    inner = latent_normal_sample(n_inner, n_outer, seed=_qmc_seed(inner_stream)).T
+    inner = _inner_noise(n_inner, n_outer, inner_stream)
 
     inner_var = np.empty((n_outer, n_slices), dtype=np.float64)
     f_hat = np.empty((n_outer, n_slices), dtype=np.float64)
