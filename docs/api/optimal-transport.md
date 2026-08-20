@@ -7,7 +7,7 @@ jaxgsa.optimal_transport.analyze(
     n_partitions=None,
     standardize_outputs=True,
     epsilon=0.01,
-    max_iter=1000,
+    max_iter=2000,
     tol=None,
     dummy=False,
     n_bootstrap=0,
@@ -58,7 +58,7 @@ jaxgsa.optimal_transport.analyze
     output: N=4000 runs, T=1 x K=1 output slice
     invalid: none found in 4000 rows (policy 'raise')
   timing:
-    estimator (includes compile on the first call): 0.5295 s
+    estimator (includes compile on the first call): 0.9642 s
     mode: univariate
     epsilon: 0.01
     slice_chunk_size: auto (resolved from the memory budget)
@@ -71,9 +71,14 @@ ot           [0.2013 0.2775 0.0977]
 advective    [0.1536 0.2198 0.0037]
 diffusive    [0.0477 0.0577 0.094 ]
 S1           [0.3072 0.4398 0.0074]
-above_dummy  [0.19   0.2662 0.0864]
-ot_dummy     0.0114
+above_dummy  [0.1918 0.2681 0.0883]
+ot_dummy     [0.0095 0.0095 0.0095]
 ```
+
+All three parameters are continuous, so they share one dummy floor -- `ot_dummy`
+is still one value, just broadcast to `(D,)` to match `ot`'s own shape. A
+categorical parameter would get its own floor instead; see
+[The dummy floor](#the-dummy-floor).
 
 Look at `x3`. Its advective part is 0.004 and its diffusive part is 0.094, so
 essentially all of its influence is a change in the shape of the output
@@ -110,10 +115,15 @@ resample has size `N`, so the factor is one number, not a per-draw correction.
 
 ## The dummy floor
 
-`dummy=True` pushes one synthetic parameter, independent of the output by
-construction, through the identical pipeline and reports its index as
-`ot_dummy`. That is the score a provably irrelevant parameter picks up from
-finite-sample bias, and in the point-cloud modes from entropic bias as well.
+`dummy=True` pushes one synthetic parameter per real one through the identical
+pipeline and reports the result as `ot_dummy`, matched to `ot`'s own shape.
+That is the score a provably irrelevant parameter picks up from finite-sample
+bias, and in the point-cloud modes from entropic bias as well. All continuous
+parameters share one floor, from a synthetic parameter built with the same
+equal-frequency classes they use themselves. Each categorical parameter gets
+its own floor instead, matched to that column's own observed class sizes: a
+3-level column's finite-sample bias looks nothing like a 25-class continuous
+column's, so a shared floor would be the wrong one for it.
 
 `above_dummy` is `max(ot - ot_dummy, 0)`. A value of 0 means the parameter is
 indistinguishable from noise at this sample size. The name says what it is, the
@@ -121,10 +131,44 @@ excess above the dummy floor, rather than claiming the subtraction removes bias
 in general; it does that only for irrelevant parameters.
 
 Both fields are `None` unless the analysis ran with `dummy=True`. `dummy=True`
-also requires a `key`, because the synthetic parameter is drawn.
+also requires a `key`, because the synthetic parameters are drawn.
 
-In the run above `ot_dummy = 0.011` and `x3` scores 0.098, well clear of the
-floor.
+A mixed problem makes the per-parameter floor concrete. `x1` is continuous and
+`c3` is a 3-level categorical column:
+
+```python
+import numpy as np
+import jax
+import jaxgsa
+
+rng = np.random.default_rng(0)
+N = 4000
+mixed_problem = jaxgsa.Problem.from_dict(
+    {
+        "x1": (0.0, 1.0),
+        "c3": {"dist": "categorical", "probs": [0.5, 0.3, 0.2]},
+    }
+)
+X_mixed = np.column_stack(
+    [
+        rng.uniform(size=N),
+        rng.choice(3, size=N, p=[0.5, 0.3, 0.2]).astype(float),
+    ]
+)
+Y_mixed = np.sin(3 * X_mixed[:, 0]) + 0.15 * (X_mixed[:, 1] == 2) + 0.1 * rng.standard_normal(N)
+
+res = jaxgsa.optimal_transport.analyze(
+    mixed_problem, X_mixed, Y_mixed, dummy=True, key=jax.random.key(0), verbose=False
+)
+print(np.asarray(res.ot).round(4))          # [0.6305 0.0174]
+print(np.asarray(res.ot_dummy).round(4))    # [0.0089 0.0003]
+```
+
+`c3`'s floor (`0.0003`) is far below `x1`'s (`0.0089`), because `c3`'s 3
+observed-size classes carry far less finite-sample bias than the 25-class
+equal-frequency layout continuous parameters use. Comparing `c3` against `x1`'s
+floor -- what an earlier version of this method did -- would have overstated
+how far `c3` needs to clear noise before it counts as influential.
 
 ## Modes
 
@@ -142,9 +186,9 @@ point-cloud modes only.
 | Argument | Default | What it changes |
 | --- | --- | --- |
 | `n_partitions` | `None` | Equal-frequency conditioning classes per continuous parameter. More classes localize the conditioning and cut the discretization bias, but leave fewer samples per class and raise the noise. About 25 is customary at `N >= 2500`. `None` selects `min(25, N // 2)`. A passed value is validated against `[2, N // 2]`. Categorical parameters ignore it and use one class per level. If every parameter is categorical and `dummy` is false, nothing uses the value and a `JaxgsaWarning` says it is ignored. |
-| `standardize_outputs` | `True` | Joint modes only. Divides each output column by its standard deviation before the transport cost is built, so no single output dominates the joint distance through its units. Turn it off only when the outputs already share a scale and their relative magnitudes are meaningful. Ignored in `"univariate"` mode, where each column is normalized by its own variance anyway. |
-| `epsilon` | `0.01` | Joint modes only. Entropic regularization strength, relative to the cost matrix scaled to `[0, 1]`. Smaller values approach exact transport and need more iterations. It also sets the entropic part of the dummy floor, so lowering it lowers `ot_dummy`. |
-| `max_iter` | `1000` | Joint modes only. Sinkhorn iteration cap per solve. |
+| `standardize_outputs` | `True` | Joint modes only. Divides each output column by its standard deviation before the transport cost is built, so no single output dominates the joint distance through its units. In `"trajectory"` mode a "column" is one time step, so this standardizes every time step to unit variance on its own; the default therefore never computes a plain-units L2 trajectory transport, because it discards the trajectory's own relative shape over time. Pass `False` for that. Ignored in `"univariate"` mode, where each column is normalized by its own variance anyway. |
+| `epsilon` | `0.01` | Joint modes only. Entropic regularization strength, relative to `V`, the index's own normalizer (`2 * Var` or `2 * tr(Cov)`) -- the same fixed scale every parameter and class shares, so the regularization is comparable across them. Smaller values approach exact transport and need more iterations. It also sets the entropic part of the dummy floor, so lowering it lowers `ot_dummy`. |
+| `max_iter` | `2000` | Joint modes only. Sinkhorn iteration cap per solve. |
 | `tol` | `None` | Joint modes only. Stopping tolerance on the L1 target-marginal violation. `None` selects `1e-9` in float64 and `1e-6` in float32, where anything tighter is unresolvable. One warning is emitted if any solve fails to converge. |
 | `dummy` | `False` | See above. Requires `key`. |
 | `n_bootstrap` | `0` | Row resamples. `0` leaves every `*_conf` at `None`. The joint modes solve `n_bootstrap * D * n_partitions` transport problems, so keep it modest there. |
@@ -168,7 +212,7 @@ spelling.
 | `diffusive` | `ot - advective`, the dispersion and higher-moment part. |
 | `S1` | The advective component on the Sobol `ddof=0` convention. See above. |
 | `above_dummy` | `max(ot - ot_dummy, 0)`. `None` without `dummy=True`. |
-| `ot_dummy` | The irrelevance floor. Shape of `ot` without the trailing parameter axis. `None` without `dummy=True`. |
+| `ot_dummy` | The irrelevance floor, per parameter, same shape as `ot`. Continuous parameters share one floor; each categorical parameter gets its own, matched to that column's own class sizes. `None` without `dummy=True`. |
 | `mode` | The mode that produced these shapes. |
 | `ot_conf`, `advective_conf`, `diffusive_conf`, `S1_conf` | `(2, ...)` intervals, `None` when `n_bootstrap=0`. |
 | `problem`, `invalid`, `ci` | Problem, non-finite report, interval provenance. |
@@ -216,7 +260,7 @@ distribution equals the unconditional one and the indices are an exact 0.
 ## Traceable core
 
 `jaxgsa.optimal_transport.indices(problem, X, Y, *, mode="univariate",
-n_partitions=None, standardize_outputs=True, epsilon=0.01, max_iter=1000,
+n_partitions=None, standardize_outputs=True, epsilon=0.01, max_iter=2000,
 tol=None, slice_chunk_size=None)` returns `(ot, advective, diffusive)` as bare
 arrays with none of the checks, so it composes with `jit`, `vmap` and `jacrev`.
 `S1`, `above_dummy` and the intervals live on the result object only.

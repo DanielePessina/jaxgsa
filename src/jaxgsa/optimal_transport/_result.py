@@ -72,22 +72,27 @@ class OTResult(SchemaResult):
             (every bootstrap resample has the same size ``N``, so the ddof
             factor is one constant). ``None`` when ``n_bootstrap=0``.
         above_dummy: The total index above the irrelevance floor,
-            ``max(ot - ot_dummy, 0)``, shape ``(..., D)``. The dummy baseline
-            is the index a synthetic, provably irrelevant parameter receives
-            from finite-sample bias (and, in the point-cloud modes, entropic
-            bias), so this is the part of ``ot`` that clears that floor. A
-            value of 0 means the parameter is indistinguishable from noise at
-            this sample size. The name says what it is — the excess above the
-            dummy floor — rather than claiming the subtraction removes bias
-            in general, which it does only for irrelevant parameters.
-            ``None`` unless the analysis ran with ``dummy=True``.
-        ot_dummy: Irrelevance baseline, the same shape as ``ot`` without
-            the trailing parameter axis. It is the index of a synthetic
-            parameter that is independent of the output by construction,
-            computed through the identical pipeline. Parameters whose
-            ``ot`` is not clearly above this floor are indistinguishable
-            from noise. ``None`` unless the analysis ran with
-            ``dummy=True``.
+            ``max(ot - ot_dummy, 0)``, shape ``(..., D)``. Each dummy
+            baseline is the index a synthetic, provably irrelevant
+            parameter receives from finite-sample bias (and, in the
+            point-cloud modes, entropic bias), so this is the part of
+            ``ot`` that clears that floor. A value of 0 means the parameter
+            is indistinguishable from noise at this sample size. The name
+            says what it is — the excess above the dummy floor — rather
+            than claiming the subtraction removes bias in general, which it
+            does only for irrelevant parameters. ``None`` unless the
+            analysis ran with ``dummy=True``.
+        ot_dummy: Irrelevance floor per parameter, the same shape as
+            ``ot``. Every continuous parameter shares one floor, from a
+            synthetic parameter independent of the output by construction,
+            computed through the identical pipeline. Each categorical
+            parameter gets its own floor instead, matched to that column's
+            own observed class sizes: the finite-sample bias a synthetic
+            parameter picks up scales with class size, so a 3-level column
+            needs a 3-level floor, not the continuous one's classes.
+            Parameters whose ``ot`` is not clearly above their floor are
+            indistinguishable from noise. ``None`` unless the analysis ran
+            with ``dummy=True``.
         mode: Analysis mode that produced these shapes (``"univariate"``,
             ``"multivariate"``, or ``"trajectory"``).
         problem: Problem definition used for the analysis.
@@ -123,7 +128,7 @@ class OTResult(SchemaResult):
             FieldSpec("diffusive", "param", interval=True),
             FieldSpec("S1", "param", interval=True),
             FieldSpec("above_dummy", "param"),
-            FieldSpec("ot_dummy", "slice"),
+            FieldSpec("ot_dummy", "param"),
         ),
         meta=("mode",),
     )
