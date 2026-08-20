@@ -7,17 +7,17 @@ it can also predict at new points and give Shapley effects.
 
 import itertools
 import math
+import warnings
 from collections.abc import Callable
 from functools import lru_cache
 from typing import Literal, NamedTuple
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
 from jaxgsa._core import verbose as _verbose
-from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
+from jaxgsa._core.bootstrap import bootstrap_draws, interval
 from jaxgsa._core.entry import (
     ScalarCheck,
     at_least,
@@ -25,6 +25,7 @@ from jaxgsa._core.entry import (
     in_open_interval,
     one_of,
     prepare,
+    require,
 )
 from jaxgsa._core.invalid import InvalidReport, OnInvalid
 from jaxgsa._core.result import CIInfo
@@ -238,7 +239,6 @@ def _warn_correlated_index_reading(problem: Problem) -> None:
     """
     if not problem.has_correlated_inputs:
         return
-    import warnings
 
     warnings.warn(
         "jaxgsa.hdmr: problem.correlation declares dependent inputs. HDMRResult.ST "
@@ -353,12 +353,17 @@ def analyze(
             at_least("n_bootstrap", n_bootstrap, 0),
             one_of("ci_method", ci_method, ("quantile", "gaussian")),
             in_open_interval("conf_level", conf_level, 0.0, 1.0),
+            # Checked here, with the other cheap argument checks, so a
+            # missing key is reported before the point estimate is paid for.
+            require(
+                not (n_bootstrap > 0 and key is None),
+                "key is required when n_bootstrap > 0",
+            ),
         ),
         min_kept=_MIN_ROWS,
     )
-    if n_bootstrap > 0 and key is None:
-        raise ValueError("key is required when n_bootstrap > 0")
-    X, Y, invalid = ctx.inputs, ctx.Y, ctx.invalid
+    assert ctx.X is not None
+    X, Y, invalid = ctx.X, ctx.Y, ctx.invalid
     # ST and S1 change meaning under dependence; say so once per analyze call,
     # in the public wrapper only, so Shapley routing through the core stays
     # quiet.
@@ -538,8 +543,10 @@ def _hdmr_core(
     X_n = cdf_to_unit_interval(X, problem)
 
     # F critical values at alpha=0.95, precomputed outside JIT to avoid
-    # re-running the bisection solver on every vmap lane.
-    f_crits = _compute_f_crits(0.95, m1, m2, m3, N)
+    # re-running the bisection solver on every vmap lane. The cache returns a
+    # plain tuple (see _compute_f_crits), so the array conversion happens
+    # here, once per call, instead of inside the cached function.
+    f_crits = jnp.asarray(_compute_f_crits(0.95, m1, m2, m3, N))
 
     # Promote Y to canonical (N, T, K) layout; track which dims were singleton
     # so the output arrays can be squeezed back to the user's original shape.
@@ -551,18 +558,7 @@ def _hdmr_core(
     # (N, T, K) -> (N, T*K): keep the sample axis leading so row batches are
     # contiguous slices; column t*K + k is output slice (t, k).
     Y_nl = Y_3d.reshape(N, total)
-    (
-        sa_cat,
-        sb_cat,
-        s_cat,
-        select_lanes,
-        rmse_cat,
-        c1_cat,
-        c2_cat,
-        c3_cat,
-        f0_cat,
-        streamed,
-    ) = _fit_hdmr(
+    fit = _fit_hdmr(
         X_n,
         Y_nl,
         m=m,
@@ -584,12 +580,12 @@ def _hdmr_core(
         batch_size=batch_size,
         slice_chunk_size=slice_chunk_size,
     )
-    select_sum = jnp.sum(select_lanes, axis=0)
+    select_sum = jnp.sum(fit.select, axis=0)
 
     # Reassemble into the full (T, K, n_terms) index arrays.
-    Sa_out = sa_cat.reshape(T, K_out, n)
-    Sb_out = sb_cat.reshape(T, K_out, n)
-    S_out = s_cat.reshape(T, K_out, n)
+    Sa_out = fit.Sa.reshape(T, K_out, n)
+    Sb_out = fit.Sb.reshape(T, K_out, n)
+    S_out = fit.S.reshape(T, K_out, n)
     # Aggregate per-term S into per-parameter total-order indices.
     ST_out = _compute_ST(S_out, c2_idx, c3_idx, n1)
 
@@ -599,13 +595,13 @@ def _hdmr_core(
         S=S_out,
         ST=ST_out,
         select=select_sum,
-        rmse=rmse_cat,
-        C1=c1_cat,
-        C2=c2_cat,
-        C3=c3_cat,
-        f0=f0_cat,
+        rmse=fit.rmse,
+        C1=fit.C1,
+        C2=fit.C2,
+        C3=fit.C3,
+        f0=fit.f0,
         maxorder=maxorder,
-        streamed=streamed,
+        streamed=fit.streamed,
         c2=tuple(c2),
         c3=tuple(c3),
         layout=layout,
@@ -743,12 +739,9 @@ def _bootstrap_indices(
         length ``n_bootstrap`` followed by the canonical ``(T, K, ...)``
         shape.
     """
-    N = X.shape[0]
-    draws: dict[str, list[Array]] = {name: [] for name in _INDEX_FIELDS}
-    for _ in range(n_bootstrap):
-        key, subkey = jax.random.split(key)
-        rows = jax.random.choice(subkey, N, shape=(N,), replace=True)
-        replicate = _hdmr_core(
+
+    def _replicate(rows: Array) -> dict[str, Array]:
+        core = _hdmr_core(
             problem,
             X[rows],
             Y[rows],
@@ -759,9 +752,9 @@ def _bootstrap_indices(
             slice_chunk_size=slice_chunk_size,
             batch_size=batch_size,
         )
-        for name in _INDEX_FIELDS:
-            draws[name].append(getattr(replicate, name))
-    return {name: jnp.stack(parts) for name, parts in draws.items()}
+        return {name: getattr(core, name) for name in _INDEX_FIELDS}
+
+    return bootstrap_draws(key, X.shape[0], n_bootstrap, _replicate)
 
 
 def _analyze_hdmr_core(
@@ -899,12 +892,14 @@ def _analyze_hdmr_core(
         batch_size=batch_size,
     )
     if core.maxorder < maxorder:
-        import warnings
-
+        # This runs inside _analyze_hdmr_core, one call below the public
+        # analyze() the user actually called, so it needs stacklevel=3 (one
+        # more than a warning raised directly in analyze()'s own body) to
+        # report the user's line instead of the internal call site.
         warnings.warn(
             f"jaxgsa.hdmr: maxorder clamped to {core.maxorder} "
             f"(need D >= maxorder, got D={X.shape[1]})",
-            stacklevel=2,
+            stacklevel=3,
             category=JaxgsaWarning,
         )
     layout = core.layout
@@ -938,27 +933,21 @@ def _analyze_hdmr_core(
             slice_chunk_size=slice_chunk_size,
             batch_size=batch_size,
         )
-        for name in _INDEX_FIELDS:
-            conf[f"{name}_conf"] = layout.squeeze(
-                jnp.stack(
-                    _bootstrap_ci_endpoints(
-                        getattr(core, name),
-                        draws[name],
-                        conf_level=conf_level,
-                        ci_method=ci_method,
-                    )
-                )
-            )
-        ci = CIInfo(
+        # Squeeze before calling interval(): it reads no shape of its own,
+        # so points and draws must already be at the layout the result
+        # reports (the leading replicate axis on draws survives the
+        # squeeze, which addresses the T/K axes from the end).
+        points = {name: layout.squeeze(getattr(core, name)) for name in _INDEX_FIELDS}
+        draws_sq = {name: layout.squeeze(draw) for name, draw in draws.items()}
+        field_conf, ci = interval(
+            points,
+            draws_sq,
             level=conf_level,
             method=ci_method,
             n_bootstrap=n_bootstrap,
-            # The leading replicate axis survives the squeeze, which addresses
-            # the T/K axes from the end.
-            replicates={name: layout.squeeze(draw) for name, draw in draws.items()}
-            if keep_replicates
-            else None,
+            keep_replicates=keep_replicates,
         )
+        conf = {f"{name}_conf": field_conf[name] for name in _INDEX_FIELDS}
 
     Sa_out, Sb_out, S_out, ST_out = (
         layout.squeeze(a) for a in (core.Sa, core.Sb, core.S, core.ST)

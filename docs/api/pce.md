@@ -52,7 +52,7 @@ jaxgsa.pce.analyze
     output: N=2000 runs, T=1 x K=1 output slice
     invalid: none found in 2000 rows (policy 'raise')
   timing:
-    fit + estimator (includes compile on the first call): 1.435 s
+    fit + estimator (includes compile on the first call): 1.544 s
     order: 8
     fit: single-pass
     batch_size: auto (resolved from the memory budget)
@@ -94,7 +94,7 @@ silent run.
 | --- | --- | --- |
 | `order` | `3` | Maximum total polynomial degree. Higher orders capture sharper nonlinearity and larger interactions, but the term count `C(D+order, order)` grows fast and needs more rows to fit. It is reduced automatically, with a warning, when the term count would exceed `fit_ratio * N`. |
 | `ridge` | `1e-8` | Tikhonov regularization on the least-squares fit. The default is small enough to be a guard against a singular normal matrix and nothing more. Raise it when coefficients look unstable, which happens with noisy `Y` or near-duplicate rows. |
-| `fit_ratio` | `0.5` | The terms-to-samples ceiling that triggers the `order` reduction. Lower it to demand more samples per term, which gives a more conservative fit that is harder to overfit. |
+| `fit_ratio` | `0.5` | The terms-to-samples ceiling that triggers the `order` reduction. Lower it to demand more samples per term, which gives a more conservative fit that is harder to overfit. Must be `<= 1`: a value above 1 asks for more terms than one row per term can support. `order` is never reduced below 1 (`D + 1` terms), so a row count too small even for that raises `ValueError` instead of fitting an underdetermined system. |
 | `batch_size` | `None` | Rows per batch during the fit. See below. |
 | `n_bootstrap` | `0` | Row resamples. See below. |
 | `key` | `None` | A `jax.random` key for the resampling. Required when `n_bootstrap > 0`. |
@@ -121,10 +121,12 @@ default. Set that budget with `jaxgsa.config.set_memory_budget`.
 `fit: single-pass` or the streamed equivalent. Read it when a fit takes much
 longer than you expect: `True` means the budget engaged.
 
-The single-pass memory estimate used to charge for one array more than the fit
-needs. Version 0.9 corrects it, so the size at which streaming starts has moved
-and some fits that streamed before now run in one pass. The results do not
-change.
+The single-pass path holds two `(N, n_terms)` arrays at its peak, not three: the
+design matrix and the leverage solve inside the leave-one-out step. The
+coefficient solve reads `Phi.T @ Y` directly into the normal-equations solve,
+so it never separately builds and holds an `(n_terms, N)` product across the
+leave-one-out step. This changes the size at which streaming starts, but not
+the fitted numbers.
 
 ## Confidence intervals
 
@@ -194,7 +196,9 @@ caller reads it, and it answers before the model has been run.
 `ValueError` when `X` fails validation against the problem, when `Y`'s layout
 cannot be resolved against `X`'s row count, when `batch_size` is given and is
 not a positive integer, when `on_invalid` is unknown or refuses the sample, when
-`n_bootstrap > 0` without a `key`, and in two structural cases:
+`n_bootstrap > 0` without a `key`, when `fit_ratio > 1`, when the row count
+(after `on_invalid` has run) cannot fit even the order-1 expansion at the given
+`fit_ratio`, and in two structural cases:
 
 - `problem.correlation` declares a dependence. The Wiener-Askey basis is
   orthogonal only under independent inputs, so the coefficient-to-index reading

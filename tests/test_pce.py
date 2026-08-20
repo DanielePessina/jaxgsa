@@ -240,6 +240,32 @@ class TestInputValidation:
         with pytest.raises(ValueError, match="columns"):
             pce.analyze(problem, X, Y)
 
+    def test_underdetermined_fit_raises(self):
+        """M2: fewer rows than the order-1 expansion has terms must raise.
+
+        N = 3, D = 3: before the fix this fitted an underdetermined system
+        silently and returned a plausible-looking but meaningless S1.
+        """
+        problem = linear.PROBLEM  # 3 params
+        rng = np.random.default_rng(0)
+        X = rng.uniform(0.0, 1.0, size=(3, 3))
+        Y = X.sum(axis=1)
+        with pytest.raises(ValueError, match="cannot fit"):
+            pce.analyze(problem, X, Y, verbose=False)
+        with pytest.raises(ValueError, match="cannot fit"):
+            pce.indices(problem, X, Y)
+
+    def test_fit_ratio_above_one_raises(self):
+        """M2: fit_ratio > 1 is meaningless (more terms than rows per term)."""
+        problem = linear.PROBLEM
+        rng = np.random.default_rng(0)
+        X = rng.uniform(0.0, 1.0, size=(12, 3))
+        Y = X.sum(axis=1)
+        with pytest.raises(ValueError, match="fit_ratio"):
+            pce.analyze(problem, X, Y, fit_ratio=2.0, verbose=False)
+        with pytest.raises(ValueError, match="fit_ratio"):
+            pce.indices(problem, X, Y, fit_ratio=2.0)
+
 
 # ---------------------------------------------------------------------------
 # 6. S2 matrix properties

@@ -66,7 +66,19 @@ class HDMRResult(SchemaResult, SurrogateResult):
             near zero when inputs are independent. A non-zero value flags
             variance shared through input correlation, and it can be
             negative.
-        S: Total contribution per term, ``S = Sa + Sb``, same shape as ``Sa``.
+        S: Total contribution per term, ``S = Sa + Sb`` exactly, same shape as
+            ``Sa``. Li et al. (2010) define ``S`` as ``Cov(f_u, f_hat) /
+            Var(Y)``, measured against the fitted expansion ``f_hat = f0 +
+            sum of every term``, not against ``Y`` itself. ``Sa`` and ``Sb``
+            are already defined against the fit, so this keeps all three
+            consistent and makes ``S = Sa + Sb`` an identity rather than an
+            approximation. SALib's ``ancova`` instead measures ``S`` against
+            ``Y``, ``Cov(f_u, Y) / Var(Y)``, which differs by ``Cov(f_u, Y -
+            f_hat) / Var(Y)``: zero for a perfect fit, and up to a few
+            percent otherwise. ``S.sum()`` (the Eq. (24) reliability check;
+            see :attr:`ST`) reads this fitted-expansion sum, which equals
+            ``Var(f_hat) / Var(Y)``, the surrogate's explained-variance
+            fraction.
         ST: SCSA total per parameter, shape ``(D,)`` / ``(K, D)`` /
             ``(T, K, D)``. It sums ``S = Sa + Sb`` over every term that
             contains the parameter: ``ST_i = sum over u containing i of

@@ -153,6 +153,29 @@ def test_indices_is_jittable(case):
     np.testing.assert_allclose(np.asarray(ST_jit), np.asarray(ST), rtol=1e-3, atol=1e-4)
 
 
+def test_jit_then_eager_shares_the_f_crit_cache(case):
+    """Tier T4: a jitted call must not poison the eager path (H1 regression).
+
+    ``_compute_f_crits`` is ``lru_cache``\\ d on ``(alpha, m1, m2, m3, N)``. A
+    call made from inside ``jax.jit`` traces this function once for that key.
+    If the cached return value were a JAX array, it would be a tracer from
+    that trace, and every later caller with the same key -- including the
+    plain eager call right below -- would inherit a dead tracer and raise
+    ``UnexpectedTracerError``. This test must run the jitted call first so a
+    regression cannot hide behind test order the way it did before the fix:
+    the full suite always warmed the cache eagerly first, and only running
+    this test in isolation showed the crash.
+    """
+    problem, X, Y = case
+
+    jitted = jax.jit(lambda outputs: hdmr.indices(problem, X, outputs, maxorder=2, maxiter=50))
+    ST_jit = jitted(Y)[3]
+
+    result = hdmr.analyze(problem, X, Y, maxorder=2, maxiter=50)
+
+    np.testing.assert_allclose(np.asarray(ST_jit), np.asarray(result.ST), rtol=1e-3, atol=1e-4)
+
+
 def test_indices_is_vmappable(case):
     """Tier T4: ``vmap`` maps ``indices`` over a batch of output vectors."""
     problem, X, Y = case
