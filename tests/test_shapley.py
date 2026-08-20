@@ -216,14 +216,34 @@ def test_to_dataset_time_series(linear_data):
 
 
 def test_pce_overfit_sums_to_one_and_flags(ishigami_data):
-    """An overfit PCE keeps Sh summing to 1; the overshoot shows in ev + warns."""
+    """An overfit PCE keeps Sh summing to 1; the overfit shows in loo_rmse."""
     X, Y = ishigami_data
     Xs, Ys = X[:64], Y[:64]
-    with pytest.warns(UserWarning, match="explained_variance exceeds"):
+    with pytest.warns(UserWarning, match="loo_rmse"):
         result = _analyze_shapley(ishigami.PROBLEM, Xs, Ys, backend="pce", order=5, fit_ratio=0.9)
     np.testing.assert_allclose(float(np.asarray(result.Sh).sum()), 1.0, atol=1e-4)
-    # The over-counted variance surfaces in the diagnostic, not the sum.
-    assert float(result.explained_variance) > 1.3
+    # explained_variance is a true in-sample R-squared, so the overfit drives
+    # it towards 1 rather than past it. It cannot be the overfit signal.
+    assert float(result.explained_variance) <= 1.0
+    fit = jaxgsa.pce.analyze(ishigami.PROBLEM, Xs, Ys, order=5, fit_ratio=0.9, verbose=False)
+    # The out-of-sample error is above the spread of the data itself: the
+    # expansion predicts worse than the output mean would.
+    assert float(fit.loo_rmse) > float(jnp.std(Ys))
+
+
+def test_pce_healthy_fit_is_silent(ishigami_data):
+    """A well-resolved PCE fit raises no fit-quality warning."""
+    X, Y = ishigami_data
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", jaxgsa.JaxgsaWarning)
+        _analyze_shapley(ishigami.PROBLEM, X[:2000], Y[:2000], backend="pce", order=8)
+
+
+def test_pce_overfit_warning_names_the_ratio(ishigami_data):
+    """The overfit warning reports the loo_rmse-to-std(Y) ratio it measured."""
+    X, Y = ishigami_data
+    with pytest.warns(jaxgsa.JaxgsaWarning, match=r"loo_rmse is \d+\.\d+ times std\(Y\)"):
+        _analyze_shapley(ishigami.PROBLEM, X[:64], Y[:64], backend="pce", order=5, fit_ratio=0.9)
 
 
 def test_pce_shapley_matches_analyze_pce(ishigami_data):

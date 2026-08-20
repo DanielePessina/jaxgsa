@@ -111,8 +111,13 @@ def _truncnorm_poincare(mu: float, sigma: float, a: float, b: float, grid: int) 
 def marginal_variance(spec: InputSpec) -> float:
     """Return the marginal variance of a single input distribution.
 
-    The Kucherenko-Song lower bound on ST uses it:
-        ST_i >= Var_i * w_i^2 / Var(Y)
+    The reported ``lower_bound`` uses it:
+        lower_bound_i = Var_i * w_i^2 / Var(Y)
+
+    That expression is a proven lower bound on ST_i for a Gaussian marginal
+    (Kucherenko & Song 2016, Theorem 4.1). For a uniform or truncated-Gaussian
+    marginal it is an estimate, not a bound: see
+    :class:`jaxgsa.dgsm.DGSMResult`.
 
     Args:
         spec: Marginal spec of one parameter, as carried by

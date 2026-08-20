@@ -17,15 +17,23 @@ pass to `float32` on the way to the device. Producing double-precision outputs
 from your model therefore buys you nothing on its own. The cast happens before
 the estimator runs.
 
-jaxgsa will not let that go by silently. Pass a `float64` `Y` with x64 off and
-you get one warning per analysis:
+jaxgsa will not let a real loss go by silently. It does not read the dtype on
+its own, because NumPy makes `float64` arrays by default and an ordinary
+`Y = model(X)` is `float64` without you asking for double precision. Instead it
+casts `Y` to `float32` and back. If the values come through unchanged, within
+float32's own resolution, nothing is lost that float32 could have held and
+there is no warning. If they do not — a value too large for float32, which
+becomes `inf`, or too small, which collapses to zero — you get one warning per
+analysis:
 
 ```
 JaxgsaWarning: jaxgsa.sobol.analyze: Y was passed as float64, but JAX is
-configured for float32, so the values are truncated on the way to the device
-and the extra digits are lost. Turn float64 on with
+configured for float32, and some values do not survive the cast: they are
+outside the range float32 can hold, so they arrive as inf or collapse to
+zero. This is not a matter of lost trailing digits. Turn float64 on with
 jax.config.update("jax_enable_x64", True), or the
 jax.experimental.enable_x64() context manager, before the analysis.
+Rescaling the affected values into float32's range also works.
 ```
 
 The input matrix `X` is deliberately not a candidate for that warning. jaxgsa's

@@ -104,6 +104,27 @@ def warn_on_float64_downcast(
     precision" clause of ADR 0014, and it is a warning rather than an error
     because the float32 result is degraded, not wrong.
 
+    **The rule.** A float64 dtype on its own is not the signal. NumPy makes
+    float64 arrays by default on most platforms, so ``Y = model(X)`` in plain
+    NumPy — the first thing anyone who copies an example from the docs runs —
+    is float64 without the caller ever asking for double precision. Warning on
+    the dtype alone therefore fired on nearly every method on nearly every
+    page, and a first run looked broken.
+
+    An array is a candidate only when the narrowing **changes its values**:
+    cast to float32 and back, and warn if the result does not match the
+    original within float32's own resolution (relative tolerance
+    ``np.finfo(np.float32).eps``, absolute tolerance zero, NaN matching NaN).
+    A round trip through float32 always costs at most half an ulp of float32,
+    so any value inside float32's range passes and stays silent. What fails is
+    a value float32 genuinely cannot hold: one too large, which becomes
+    ``inf``; one too small, which collapses to zero or to a subnormal and
+    loses most of its digits. Those are real losses the caller can act on, and
+    the dropped last digits of an ordinary double are not.
+
+    The check is one extra pass over the array and one float32 temporary,
+    which is small next to the analysis it precedes.
+
     One warning per analysis, naming every array affected. Per-array warnings
     would repeat the same sentence up to three times for one call.
 
@@ -128,27 +149,53 @@ def warn_on_float64_downcast(
     """
     if x64_enabled():
         return
-    affected = sorted(name for name, value in arrays.items() if _is_float64(value))
+    affected = sorted(name for name, value in arrays.items() if _loses_precision(value))
     if not affected:
         return
     listed = " and ".join(affected)
     plural = "s were" if len(affected) > 1 else " was"
     warnings.warn(
         f"{method}: {listed}{plural} passed as float64, but JAX is configured for "
-        "float32, so the values are truncated on the way to the device and the extra "
-        'digits are lost. Turn float64 on with jax.config.update("jax_enable_x64", True), '
-        "or the jax.experimental.enable_x64() context manager, before the analysis.",
+        "float32, and some values do not survive the cast: they are outside the range "
+        "float32 can hold, so they arrive as inf or collapse to zero. This is not a "
+        "matter of lost trailing digits. Turn float64 on with "
+        'jax.config.update("jax_enable_x64", True), or the '
+        "jax.experimental.enable_x64() context manager, before the analysis. Rescaling "
+        "the affected values into float32's range also works.",
         category=JaxgsaWarning,
         stacklevel=stacklevel,
     )
 
 
-def _is_float64(value: Any) -> bool:
-    """Report whether a value already carries a float64 dtype.
+def _loses_precision(value: Any) -> bool:
+    """Report whether narrowing a value to float32 would change it.
 
-    Read off the object rather than through ``np.asarray``: converting to find
-    out would copy the sample, and a value with no dtype at all — a nested
-    Python list, say — was never in double precision to begin with.
+    Two conditions, in order. The dtype must already be float64, read off the
+    object rather than through ``np.asarray``, because a value with no dtype
+    at all — a nested Python list, say — was never in double precision to
+    begin with. Then the values must fail a float32 round trip within float32
+    resolution; see :func:`warn_on_float64_downcast` for why the dtype alone
+    is not enough.
+
+    Args:
+        value: A candidate input array.
+
+    Returns:
+        True when the array is float64 and holds values float32 cannot carry.
     """
     dtype = getattr(value, "dtype", None)
-    return dtype is not None and np.dtype(dtype) == np.float64
+    if dtype is None or np.dtype(dtype) != np.float64:
+        return False
+    original = np.asarray(value)
+    # The overflow this cast reports is the condition being measured, not a
+    # fault, so it must not reach the caller as a second, NumPy-worded warning.
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        round_tripped = original.astype(np.float32).astype(np.float64)
+    close = np.allclose(
+        round_tripped,
+        original,
+        rtol=float(np.finfo(np.float32).eps),
+        atol=0.0,
+        equal_nan=True,
+    )
+    return not bool(close)

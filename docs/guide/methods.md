@@ -406,6 +406,7 @@ Pick it when your model is smooth. Any set of $(X, Y)$ pairs works, so no sampli
 | $S_T(i)$ | Total-order Sobol index for parameter $i$, computed analytically from the squared coefficients. |
 | $S_2(i,j)$ | Second-order Sobol index for the pair $(i, j)$, computed analytically from the squared coefficients. |
 | Leave-one-out RMSE | Cross-validation error of the fitted surrogate. A fit-quality diagnostic, not a per-parameter index. |
+| `explained_variance` | Coefficient of determination of the fit: the sample variance of the fitted values over the sample variance of $Y$. In $[0, 1]$. An in-sample fit-quality diagnostic, not a per-parameter index. |
 
 ### Check the fit before you read the indices
 
@@ -419,16 +420,18 @@ for order in (3, 6, 10):
 ```
 
 ```
-3 0.475 2.72 [0.662 0.054 0.001]
-6 0.995 0.512 [0.32  0.442 0.   ]
-10 1.015 0.006 [0.314 0.442 0.   ]
+3 0.463 2.72 [0.662 0.054 0.001]
+6 0.982 0.512 [0.32  0.442 0.   ]
+10 1.0 0.006 [0.314 0.442 0.   ]
 ```
 
-Ishigami's analytical $S_1$ is $[0.3139, 0.4424, 0]$. At `order=3` the surrogate captured 47% of the variance and reported $S_1(x_1) = 0.662$, twice the truth, and $S_1(x_2) = 0.054$ against a truth of 0.442. The indices are not noisy. They are the correct indices of a cubic that is not this model.
+Ishigami's analytical $S_1$ is $[0.3139, 0.4424, 0]$. At `order=3` the surrogate captured 46% of the variance and reported $S_1(x_1) = 0.662$, twice the truth, and $S_1(x_2) = 0.054$ against a truth of 0.442. The indices are not noisy. They are the correct indices of a cubic that is not this model.
 
 Two numbers decide whether to trust a PCE result, and both come back on the result. `explained_variance` should sit near 1. `loo_rmse` should be small next to `Y.std()`, which is 3.69 here. At `order=10` both pass and $S_1$ matches the analytical values to three decimals.
 
-Raising `order` costs basis terms, not model runs, so raise it until `loo_rmse` stops falling. Watch for it turning back up: that is overfitting, and `explained_variance` drifting above 1 (1.015 at `order=10`) is the same signal.
+For PCE, `explained_variance` is a coefficient of determination: the sample variance of the fitted values over the sample variance of `Y`. It measures the fit in sample, so it lies in $[0, 1]$ and cannot rise above 1. It also keeps climbing as you add basis terms, even when the surrogate is getting worse out of sample, so it cannot detect an overfit on its own.
+
+Raising `order` costs basis terms, not model runs, so raise it until `loo_rmse` stops falling. Watch for it turning back up: that is overfitting. `loo_rmse` is the signal, because it is the out-of-sample number. A high `explained_variance` next to a `loo_rmse` that approaches or passes `Y.std()` is the overfit signature, and jaxgsa warns when `loo_rmse` grows too large next to `Y.std()`.
 
 ### When to use it
 
@@ -476,7 +479,12 @@ Both backends accept scalar `(N,)`, multi-output `(N, K)`, and time-series `(N, 
 
 Normalization is by the surrogate's total decomposed variance $\sum_u V_u$, so $\sum_i \mathrm{Sh}_i = 1$ exactly, the Shapley efficiency property (Owen, 2014). $S_1$ and $S_T$ from the same surrogate use the same denominator. For `backend="pce"` they therefore match `jaxgsa.pce.analyze` exactly. For `backend="hdmr"` they differ from `jaxgsa.hdmr.analyze`, which normalizes by $\mathrm{Var}(Y)$, by a factor of `explained_variance`.
 
-How much of the output variance the surrogate actually captured is reported separately in the `explained_variance` field, $\sum_u V_u / \mathrm{Var}(Y)$. It is close to 1 for a good fit, below 1 when truncation or fit error leaves variance unexplained, and above 1 when an overfit surrogate over-counts shared variance. It is an honest diagnostic rather than a silently renormalized result. A `JaxgsaWarning` is emitted when it strays far from 1. Interactions above `maxorder` (HDMR) or the polynomial order (PCE) are absent from the allocation.
+How much of the output variance the surrogate actually captured is reported separately in the `explained_variance` field. It is an honest diagnostic rather than a silently renormalized result, but the two backends put a different quantity in it, so read it against the backend you ran.
+
+- `backend="pce"`: a coefficient of determination. It is the sample variance of the fitted values over the sample variance of $Y$. It lies in $[0, 1]$ and cannot exceed 1. Close to 1 means the polynomial reproduces the sample; well below 1 means it misses variance, and a `JaxgsaWarning` fires. It is an in-sample number, so it does not flag an overfit. For that, read `loo_rmse` on the PCE result: the surrogate is unreliable once `loo_rmse` approaches or passes `Y.std()`, and jaxgsa warns on that ratio.
+- `backend="hdmr"`: the decomposed fraction $\sum_u V_u / \mathrm{Var}(Y)$. It is close to 1 for a good fit, below 1 when truncation or fit error leaves variance unexplained, and above 1 when an overfit surrogate over-counts shared variance. A `JaxgsaWarning` is emitted when it strays far from 1 in either direction.
+
+Interactions above `maxorder` (HDMR) or the polynomial order (PCE) are absent from the allocation.
 
 ### How to use it
 
@@ -499,12 +507,12 @@ Sh         [0.4357344  0.44241303 0.12185235]
 sum        0.99999976
 S1         [3.1388217e-01 4.4241303e-01 1.8783025e-08]
 ST         [0.5575866  0.44241306 0.24370477]
-explained  1.0154463
+explained  0.9999983
 ```
 
 Read it left to right. $x_3$ has $S_1 \approx 0$ and $S_T = 0.244$, so everything it does is an interaction. Shapley splits that interaction with $x_1$ and hands $x_3$ half of it, 0.122. $S_1$ sums to 0.756, $S_T$ sums to 1.244, and $\mathrm{Sh}$ sums to 1. The analytical Shapley effects for Ishigami are $[0.4357, 0.4424, 0.1218]$.
 
-That `order=10` is not decoration. At the default `order=3` the same call gives `Sh = [0.803, 0.055, 0.141]` and `explained_variance` drops to 0.475. The Shapley effects are exact within the surrogate, and a bad surrogate gives you exact nonsense. Check `explained_variance` first, every time. It sits on the result for that reason, and a `JaxgsaWarning` fires when it strays far from 1.
+That `order=10` is not decoration. At the default `order=3` the same call gives `Sh = [0.803, 0.055, 0.141]` and `explained_variance` drops to 0.463. The Shapley effects are exact within the surrogate, and a bad surrogate gives you exact nonsense. Check `explained_variance` first, every time. It sits on the result for that reason, and a `JaxgsaWarning` fires when the fit is too poor to trust.
 
 The HDMR backend takes its own knobs:
 
@@ -521,7 +529,7 @@ Backend-specific keyword arguments are validated: explicitly setting a knob that
 | $\mathrm{Sh}(i)$ | Shapley effect: parameter $i$'s fair share of decomposed variance, including an equal split of every interaction it participates in. $\sum_i \mathrm{Sh}_i = 1$ exactly (Shapley efficiency). |
 | $S_1(i)$ | First-order index from the same surrogate (main effect only). |
 | $S_T(i)$ | Total-order index from the same surrogate (main effect plus all interactions counted in full). |
-| `explained_variance` | Fraction of $\mathrm{Var}(Y)$ the surrogate captured, $\sum_u V_u / \mathrm{Var}(Y)$. A separate fit-quality diagnostic, not a per-parameter index. |
+| `explained_variance` | How much of the output variance the surrogate captured. A separate fit-quality diagnostic, not a per-parameter index. For `backend="pce"` it is the coefficient of determination of the fit, in $[0, 1]$. For `backend="hdmr"` it is the decomposed fraction $\sum_u V_u / \mathrm{Var}(Y)$, which can exceed 1. |
 
 ### When to use it
 

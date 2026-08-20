@@ -18,8 +18,10 @@ and the two expressions built from them are
   is a genuine bound: `ST_i` is never above it. `C_i` is the Poincare constant of
   input `i`'s own marginal, the smallest factor for which
   `Var(g(X_i)) <= C_i * E[g'(X_i)^2]` holds for every smooth `g`.
-- `lower_bound_i = Var(x_i) * sigma_i^2 / Var(Y)`, the Kucherenko-Song
-  expression. It equals `ST_i` when the response is linear in that input and it
+- `lower_bound_i = Var(x_i) * sigma_i^2 / Var(Y)`. Kucherenko & Song (2016)
+  prove this is a lower bound on `ST_i` when input `i`'s marginal is an
+  untruncated Gaussian. Under a uniform or truncated marginal it is an
+  estimate: it equals `ST_i` when the response is linear in that input and it
   degrades gracefully near linearity, but it is not safe as a floor for a
   strongly curved response. There is a worked counter-example further down.
 
@@ -153,8 +155,22 @@ down this precisely took 655360 model runs against DGSM's 20000.
 of 0.696. That is not sampling noise. The Sobol run above agrees with the
 closed-form answer for this model to four digits.
 
-`Var(x_i) * sigma_i^2 / Var(Y)` is exact when `f` is linear in `x_i`, because
-then `sigma_i` is the slope and the conditional variance is `slope^2 * Var(x_i)`.
+The literature says exactly when this can happen. Kucherenko & Song (2016)
+prove `ST_i >= Var(x_i) * sigma_i^2 / Var(Y)` in their Theorem 4.1, for a
+**Gaussian** input, and nowhere else. The proof runs through Stein's identity,
+`Cov(f, x_i) = E[tau(x_i) * df/dx_i]`, whose kernel `tau` is the constant
+`Var(x_i)` for an untruncated Gaussian and is not constant for anything else.
+For `U(a, b)` it is `tau(x) = (x - a)(b - x)/2`, which is small near the
+endpoints and largest in the middle. Replacing it by its mean `Var(x_i)` is an
+approximation, not an inequality, and the approximation is what fails here.
+The paper's lower bounds for uniform inputs, LB1 and LB2, are different
+quantities that need boundary evaluations and the higher moments
+`E[x_i^m * df/dx_i]`. jaxgsa does not compute them. `porosity` is uniform, so
+the printed floor carries no proof.
+
+Concretely, `Var(x_i) * sigma_i^2 / Var(Y)` is exact when `f` is linear in
+`x_i`, because then `sigma_i` is the slope and the conditional variance is
+`slope^2 * Var(x_i)`.
 For a curved response `sigma_i` is the average slope, and a function that is
 steep over a small part of its range and flat over the rest has an average slope
 much larger than its spread justifies. Strip the model down to one input to see
@@ -174,11 +190,12 @@ lower_bound: [1.2888439]  upper_bound: [2.7395327]
 With one input the total Sobol index is 1 by definition, and the reported lower
 bound is 1.289. Any value above 1 is impossible.
 
-So the practical rule is short. Trust `upper_bound`. The Poincare inequality is
-unconditional, and a small upper bound is a proof you can act on. Read
-`lower_bound` as an estimate that is right for a nearly linear response and
-optimistic for a convex or concave one, and confirm anything that rests on it
-with Sobol.
+So the practical rule is short. Trust `upper_bound`. The Poincare inequality
+holds for every marginal jaxgsa supports, and a small upper bound is a proof
+you can act on. Trust `lower_bound` as a floor only on a Gaussian input. On a
+uniform or truncated input, read it as an estimate that is right for a nearly
+linear response and optimistic for a convex or concave one, and confirm
+anything that rests on it with Sobol.
 
 ## What it costs
 
@@ -373,9 +390,11 @@ ValueError: Provide either (fn, X) or (Y, dfdx), not both: got fn, X from the au
 
 Half-filling one group raises the same way. Nothing is dropped in silence.
 
-Note the `dtype=np.float32` cast. JAX defaults to 32-bit, and passing a float64
-`Y` warns that the extra digits are truncated on the way to the device. Turn on
-float64 with `jax.config.update("jax_enable_x64", True)` if you need it.
+Note the `dtype=np.float32` cast. JAX defaults to 32-bit and truncates a float64
+`Y` on the way to the device, so the cast makes the precision you get explicit.
+A float64 `Y` is accepted too, and jaxgsa warns about it only when the values
+themselves do not survive float32. Turn on float64 with
+`jax.config.update("jax_enable_x64", True)` if you need it.
 
 ## xarray export
 
@@ -426,9 +445,10 @@ On the pre-computed path, `dfdx` mirrors `Y` with one extra trailing `(D,)`:
   responses, and it can exceed 1, at which point it says nothing. It tightens
   towards equality as the model becomes monotone in that input. For a purely
   additive linear model both bounds collapse onto the exact `ST`.
-- `lower_bound` is exact for a linear response and can sit above the true `ST`
-  for a strongly curved one, as shown above. Treat it as an estimate, not a
-  floor.
+- `lower_bound` is a proven floor only for a Gaussian marginal (Kucherenko &
+  Song 2016, Theorem 4.1). On a uniform or truncated marginal it is exact for
+  a linear response and can sit above the true `ST` for a strongly curved one,
+  as shown above. Treat it there as an estimate, not a floor.
 - Poincare constants by marginal: `(b-a)^2 / pi^2` for uniform `[a, b]`, `s^2`
   for `N(mu, s^2)`, and a finite-element spectral solve for a truncated normal.
   The truncated-normal solve is memoised per process, so repeated calls on the

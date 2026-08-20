@@ -78,11 +78,11 @@ misattributes the variance to `x1`:
 
 ```
 S1 [0.6499 0.0585 0.0009]   ST [0.9396 0.0627 0.2885]
-loo_rmse 2.709   explained_variance 0.4644
+loo_rmse 2.709   explained_variance 0.4437
 ```
 
 Nothing in the index arrays says they are wrong. `loo_rmse` jumping from 0.08 to
-2.71, and `explained_variance` at 0.46, are the only signal. Read them first,
+2.71, and `explained_variance` at 0.44, are the only signal. Read them first,
 every time.
 
 `verbose=True` is the default and printed the block. Pass `verbose=False` for a
@@ -151,7 +151,7 @@ bias, and the interval stays narrow and wrong. `loo_rmse` and
 | `coefficients`, `multi_index` | | The fitted expansion, reused by `predict`. |
 | `order` | | The degree the fit actually used, after any reduction. |
 | `loo_rmse` | `()` / `(K,)` / `(T, K)` | Exact leave-one-out RMSE per output slice, in the units of `Y`. |
-| `explained_variance` | | Share of output variance the fit explains. |
+| `explained_variance` | | Share of the sample output variance the fit reproduces: the in-sample R^2, so it stays in `[0, 1]`. |
 | `streamed` | | Which fit path ran. |
 | `problem`, `invalid`, `ci` | | Problem, non-finite report, interval provenance. |
 

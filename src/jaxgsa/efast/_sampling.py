@@ -25,6 +25,7 @@ from jaxgsa._core.samples import (
     _npz_path,
     _problem_from_meta,
     _problem_to_meta,
+    _save_target,
 )
 from jaxgsa._core.sampling import _transform_samples
 from jaxgsa._core.validation import _raise_categorical_design, _raise_correlated_design
@@ -109,6 +110,10 @@ class EFASTSamples:
                 convention. The file written to disk may therefore differ
                 from the exact string passed: ``"run.A"`` is saved as
                 ``"run.A.npz"``.
+
+        Raises:
+            FileNotFoundError: If the parent directory of ``path`` does not
+                exist. The directory is never created for you.
         """
         meta = {
             "jaxgsa_version": _jaxgsa_version(),
@@ -117,7 +122,7 @@ class EFASTSamples:
             "M": self.M,
         }
         np.savez_compressed(
-            _npz_path(path),
+            _save_target(path),
             allow_pickle=False,
             samples=self.samples,
             metadata=np.asarray(json.dumps(meta)),

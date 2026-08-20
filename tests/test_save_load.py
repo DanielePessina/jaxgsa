@@ -281,3 +281,58 @@ def test_npz_round_trip_carries_identity_correlation(tmp_path):
     with np.load(tmp_path / "correlated_design.npz", allow_pickle=False) as data:
         meta = json.loads(data["metadata"].item())
     assert meta["problem"]["correlation"] == [[1.0, 0.0], [0.0, 1.0]]
+
+
+def _every_design(problem: Problem):
+    """One design object of each class that can be saved, by class name."""
+    return {
+        "SobolSamples": jaxgsa.sobol.sample(problem, 16, seed=1, verbose=False),
+        "MorrisSamples": jaxgsa.morris.sample(problem, 4, seed=1, verbose=False),
+        "EFASTSamples": jaxgsa.efast.sample(problem, 65, seed=1, verbose=False),
+        "KucherenkoSamples": jaxgsa.kucherenko.sample(problem, 16, seed=1, verbose=False),
+    }
+
+
+def test_save_to_a_missing_directory_names_the_directory(tmp_path):
+    """NumPy's own error names a temporary file, not the caller's mistake.
+
+    ``np.savez_compressed`` under a directory that is not there fails deep
+    inside NumPy. The check moves the failure to the front, names the missing
+    directory, and says what to do about it. It does not make the directory:
+    creating one the caller never asked for is a side effect a save should
+    not have.
+    """
+    problem = Problem.from_dict({"x": (0.0, 1.0), "y": (0.0, 1.0)})
+    samples = jaxgsa.sobol.sample(problem, 16, seed=1, verbose=False)
+    missing = tmp_path / "not_there"
+
+    with pytest.raises(FileNotFoundError) as excinfo:
+        samples.save(missing / "design")
+
+    message = str(excinfo.value)
+    assert str(missing) in message
+    assert "does not exist" in message
+    assert "mkdir" in message
+    assert not missing.exists()  # the save made nothing
+
+
+def test_every_design_class_reports_a_missing_directory_the_same_way(tmp_path):
+    problem = Problem.from_dict({"x": (0.0, 1.0), "y": (0.0, 1.0)})
+    missing = tmp_path / "not_there"
+
+    for name, samples in _every_design(problem).items():
+        with pytest.raises(FileNotFoundError) as excinfo:
+            samples.save(missing / "design")
+        assert "does not exist" in str(excinfo.value), name
+    assert not missing.exists()
+
+
+def test_a_bare_filename_saves_into_the_working_directory(tmp_path, monkeypatch):
+    """A path with no directory part must still work: its parent is '.'."""
+    monkeypatch.chdir(tmp_path)
+    samples = jaxgsa.sobol.sample(Problem.from_dict({"x": (0.0, 1.0)}), 16, seed=2, verbose=False)
+
+    samples.save("design")
+
+    assert (tmp_path / "design.npz").exists()
+    _assert_equal(samples, SobolSamples.load("design"))

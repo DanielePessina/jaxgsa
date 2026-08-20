@@ -55,6 +55,39 @@ def _npz_path(path: str | Path) -> Path:
     return path if path.suffix == ".npz" else Path(str(path) + ".npz")
 
 
+def _save_target(path: str | Path) -> Path:
+    """Resolve a save destination and check its parent directory exists.
+
+    ``np.savez_compressed`` on a path under a directory that is not there
+    raises ``FileNotFoundError`` from inside NumPy, and the message names a
+    NumPy temporary file rather than the directory the caller has to make.
+    This check moves the failure to the front and names the real problem.
+
+    The directory is not created here. A missing parent is a violated
+    precondition, and making directories the caller never asked for is a side
+    effect a save call should not have.
+
+    Args:
+        path: Destination path, with or without the ``.npz`` suffix.
+
+    Returns:
+        The destination path ending in ``.npz``.
+
+    Raises:
+        FileNotFoundError: If the parent directory does not exist.
+    """
+    target = _npz_path(path)
+    parent = target.parent
+    if not parent.is_dir():
+        raise FileNotFoundError(
+            f"cannot save to {target}: the directory {parent} does not exist. "
+            "Make it first, for example with "
+            f'Path("{parent}").mkdir(parents=True, exist_ok=True), '
+            "or save to a directory that is already there."
+        )
+    return target
+
+
 def _jaxgsa_version() -> str:
     """Return the installed jaxgsa version, or ``"unknown"`` outside a package."""
     try:
@@ -275,6 +308,10 @@ class UniqueDesignSamples:
                 convention. The file written to disk may therefore differ
                 from the exact string passed: ``"run.A"`` is saved as
                 ``"run.A.npz"``.
+
+        Raises:
+            FileNotFoundError: If the parent directory of ``path`` does not
+                exist. The directory is never created for you.
         """
         # Identity-mapping optimization: when no duplicate rows were removed,
         # expanded_to_unique is exactly arange(n_expanded) (the common
@@ -300,7 +337,7 @@ class UniqueDesignSamples:
         if not identity_mapping:
             arrays["expanded_to_unique"] = self.expanded_to_unique
         arrays["metadata"] = np.asarray(json.dumps(meta))
-        np.savez_compressed(_npz_path(path), allow_pickle=False, **arrays)
+        np.savez_compressed(_save_target(path), allow_pickle=False, **arrays)
 
     @classmethod
     def load(cls, path: str | Path) -> Self:

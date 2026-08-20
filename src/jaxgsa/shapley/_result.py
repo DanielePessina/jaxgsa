@@ -24,7 +24,9 @@ class ShapleyResult(SchemaResult):
     All indices are normalized by the surrogate's total decomposed variance
     ``sum_u V_u``, so ``Sh.sum(axis=-1)`` is exactly 1 (the Shapley-value
     efficiency property; Owen 2014). ``explained_variance`` reports
-    separately how much of the output variance the surrogate captured.
+    separately how much of the output variance the surrogate captured: the
+    coefficient of determination of the fit for the ``"pce"`` backend, and
+    the decomposed fraction ``sum_u V_u / Var(Y)`` for ``"hdmr"``.
 
     For the ``"hdmr"`` backend the indices are normalized by ``sum_u V_u``
     rather than ``Var(Y)``. They therefore relate to HDMR indices by a factor
@@ -44,11 +46,16 @@ class ShapleyResult(SchemaResult):
             ``(K, D)`` / ``(T, K, D)``.
         problem: Problem definition used for the analysis.
         backend: Surrogate backend used, ``"hdmr"`` or ``"pce"``.
-        explained_variance: Fraction of ``Var(Y)`` captured by the surrogate,
-            ``sum_u V_u / Var(Y)``, shape ``()`` / ``(K,)`` / ``(T, K)``.
-            Close to 1 for a good fit, below 1 when truncation or fit error
-            leaves variance unexplained, and above 1 when an overfit surrogate
-            over-counts shared variance.
+        explained_variance: How much of the output variance the surrogate
+            captured, shape ``()`` / ``(K,)`` / ``(T, K)``. The quantity
+            depends on the backend. For ``"pce"`` it is the coefficient of
+            determination of the fit, the sample variance of the fitted
+            values over the sample variance of ``Y``, so it lies in
+            ``[0, 1]``; read ``loo_rmse`` on the PCE result for the
+            out-of-sample view. For ``"hdmr"`` it is ``sum_u V_u / Var(Y)``,
+            which can go above 1 when an overfit surrogate over-counts
+            shared variance. Both are close to 1 for a good fit and below 1
+            when truncation or fit error leaves variance unexplained.
         order: Effective surrogate order actually used. For ``"pce"`` it is
             the polynomial degree, which may be reduced from the requested
             value to fit the sample budget. For ``"hdmr"`` it is the HDMR

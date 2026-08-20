@@ -40,7 +40,7 @@ from jaxgsa._core.entry import (
     prepare_scalars,
     require,
 )
-from jaxgsa._core.precision import unit_clip_bounds
+from jaxgsa._core.precision import _loses_precision, unit_clip_bounds
 from jaxgsa._core.registry import methods
 from jaxgsa._core.sampling import UNIT_CLIP
 from jaxgsa._core.transforms import cdf_to_unit_interval
@@ -321,12 +321,18 @@ class TestACleanSampleStaysSilent:
                 jaxgsa.hsic.analyze(PROBLEM, X, Y, key=jax.random.key(0))
             else:
                 getattr(jaxgsa, name).analyze(PROBLEM, X, Y)
-        # The single-precision warning is about the arithmetic, not the data:
-        # it fires on a clean sample too, and hsic and vkoga both raise it.
+        # Two warnings here are not about the data, and both fire on a clean
+        # sample by design. The single-precision one is about the arithmetic,
+        # and hsic and vkoga both raise it. The dgsm lower-bound one is about
+        # the problem definition: PROBLEM has uniform marginals, so
+        # lower_bound is outside the case Kucherenko & Song prove, whatever
+        # the sample looks like.
+        exempt = ("single precision", "untruncated Gaussian")
         left = [
             w
             for w in caught
-            if issubclass(w.category, JaxgsaWarning) and "single precision" not in str(w.message)
+            if issubclass(w.category, JaxgsaWarning)
+            and not any(phrase in str(w.message) for phrase in exempt)
         ]
         assert left == []
 
@@ -404,13 +410,20 @@ class TestExtraArraysRideWithY:
 
 
 class TestAFloat64OutputIsNotTruncatedInSilence:
-    """Passing float64 with x64 off loses digits; the preamble says so once.
+    """Truncation to float32 is announced only when it really costs something.
 
     ``jnp.asarray`` on a float64 array returns float32 when ``jax_enable_x64``
-    is off, with no signal of any kind. A caller who produced double-precision
-    outputs on purpose then reads indices computed at a precision they did not
-    choose. ADR 0014 keeps float32 as the default and takes on exactly one
-    obligation in exchange: never destroy precision silently.
+    is off, with no signal of any kind. ADR 0014 keeps float32 as the default
+    and takes on exactly one obligation in exchange: never destroy precision
+    silently.
+
+    A float64 dtype on its own does not mean precision is being destroyed.
+    NumPy makes float64 arrays by default, so an ordinary ``Y = model(X)``
+    written from a documentation example is float64 without anyone asking for
+    double precision, and its values fit in float32 with room to spare. The
+    warning therefore fires on the round trip, not on the dtype: it speaks
+    only when casting to float32 and back changes the numbers by more than
+    float32's own resolution.
     """
 
     def _double(self):
@@ -421,11 +434,29 @@ class TestAFloat64OutputIsNotTruncatedInSilence:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             prepare_scalars(methods()["borgonovo"], PROBLEM).with_data(Y, **kwargs)
-        return [w for w in caught if "truncated" in str(w.message)]
+        # Match the category and the fix the message names, not its prose.
+        # Filtering on a phrase means a reworded warning silently stops
+        # being captured and every test here passes for the wrong reason.
+        return [
+            w
+            for w in caught
+            if issubclass(w.category, JaxgsaWarning) and "jax_enable_x64" in str(w.message)
+        ]
 
-    def test_a_float64_output_warns_naming_the_fix(self):
+    def test_an_ordinary_float64_output_stays_quiet(self):
+        """The path someone takes when they copy an example from the docs.
+
+        NumPy hands them float64 and every value fits in float32. Nothing is
+        lost that float32 could have held, so there is nothing to say.
+        """
         X, Y = self._double()
-        caught = self._downcast_warnings(Y, X=X)
+        assert Y.dtype == np.float64  # the premise of the test
+        assert self._downcast_warnings(Y, X=X) == []
+
+    def test_an_output_too_small_for_float32_warns_naming_the_fix(self):
+        X, Y = self._double()
+        tiny = Y * 1e-300  # below the float32 range: narrowing gives zero
+        caught = self._downcast_warnings(tiny, X=X)
         if bool(getattr(jax.config, "jax_enable_x64", False)):
             assert caught == []  # nothing is lost, so there is nothing to say
             return
@@ -433,6 +464,29 @@ class TestAFloat64OutputIsNotTruncatedInSilence:
         message = str(caught[0].message)
         assert issubclass(caught[0].category, JaxgsaWarning)
         assert "Y" in message and "jax_enable_x64" in message
+
+    def test_the_round_trip_rule_reads_the_values_not_the_dtype(self):
+        """Both directions of the rule, on the check itself.
+
+        Overflow is tested here rather than through ``analyze()`` because a
+        float64 value above the float32 maximum becomes ``inf`` on the device,
+        and the non-finite check raises before the run gets any further.
+        """
+        if bool(getattr(jax.config, "jax_enable_x64", False)):
+            pytest.skip("nothing is downcast under x64")
+        ordinary = np.linspace(-3.0, 3.0, 64, dtype=np.float64)
+        assert not _loses_precision(ordinary)
+        assert not _loses_precision(np.asarray(ordinary, dtype=np.float32))
+        assert not _loses_precision([1.0, 2.0, 3.0])  # no dtype at all
+        assert _loses_precision(ordinary * 1e39)  # overflows to inf
+        assert _loses_precision(ordinary * 1e-300)  # underflows to zero
+
+    def test_measuring_the_loss_raises_no_numpy_warning_of_its_own(self):
+        """The overflow is the thing being measured, not a fault to report."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _loses_precision(np.full(8, 1e300, dtype=np.float64))
+        assert [w for w in caught if "overflow" in str(w.message)] == []
 
     def test_a_float32_output_stays_quiet(self):
         X, Y = self._double()
@@ -443,7 +497,7 @@ class TestAFloat64OutputIsNotTruncatedInSilence:
         if bool(getattr(jax.config, "jax_enable_x64", False)):
             pytest.skip("nothing is downcast under x64")
         X, Y = self._double()
-        caught = self._downcast_warnings(Y, X=X, extra={"jac": np.zeros((N, D))})
+        caught = self._downcast_warnings(Y * 1e-300, X=X, extra={"jac": np.zeros((N, D))})
         assert len(caught) == 1
 
     def test_the_input_matrix_is_not_a_candidate(self):
@@ -456,9 +510,14 @@ class TestAFloat64OutputIsNotTruncatedInSilence:
         """
         X, Y = self._double()
         Y32 = np.asarray(Y, dtype=np.float32)
-        assert np.asarray(X).dtype == np.float64  # the premise of the test
-        assert self._downcast_warnings(Y32, X=X) == []
-        assert self._downcast_warnings(Y32, X=X, extra={"jac": np.zeros((N, D))}) == []
+        # Values that would fail the round trip on their own, and stay inside
+        # the problem bounds so nothing else in the preamble objects.
+        lossy_X = np.array(X, dtype=np.float64)
+        lossy_X[0, 0] = 1e-300
+        lossy_jac = np.full((N, D), 1e-300, dtype=np.float64)
+        assert _loses_precision(lossy_X) and _loses_precision(lossy_jac)
+        assert self._downcast_warnings(Y32, X=lossy_X) == []
+        assert self._downcast_warnings(Y32, X=lossy_X, extra={"jac": lossy_jac}) == []
 
     def test_the_output_keeps_the_caller_s_dtype(self):
         """Whatever JAX is configured for, the preamble does not widen it."""

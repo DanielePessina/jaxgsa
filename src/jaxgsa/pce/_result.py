@@ -60,11 +60,16 @@ class PCEResult(SchemaResult, SurrogateResult):
             means the surrogate (and its indices) is unreliable.
         explained_variance: Fraction of each output slice's sample variance
             captured by the expansion, shape ``()`` / ``(K,)`` / ``(T, K)``
-            to match ``loo_rmse``, or None. Computed as the sum of squared
-            non-constant coefficients divided by ``Var(Y)`` for that slice,
-            and NaN for constant (zero-variance) slices. Values well below 1
-            mean the surrogate misses variance. Values above 1 mean it
-            attributes more variance than the data holds (overfit).
+            to match ``loo_rmse``, or None. Computed as the sample variance
+            of the fitted values divided by the sample variance of ``Y`` for
+            that slice, both over the rows that were fitted, and NaN for
+            constant (zero-variance) slices. This is the coefficient of
+            determination of the fit, so it lies in ``[0, 1]``: values near 1
+            mean the expansion reproduces the sample, and values well below 1
+            mean it misses variance. It measures the fit *in sample* and says
+            nothing about prediction; ``loo_rmse`` is the out-of-sample
+            number, and a high ``explained_variance`` beside a ``loo_rmse``
+            near ``Y.std()`` is the signature of an overfit.
         streamed: True when the fit ran the row-streamed path, False when it
             ran in one pass. Both paths solve the same normal equations and
             report the same leave-one-out error; they differ only in float32
@@ -147,9 +152,9 @@ class PCEResult(SchemaResult, SurrogateResult):
                 diagnostic (e.g. constructed by hand without one).
 
         Warns:
-            JaxgsaWarning: If ``explained_variance`` indicates a pathological
-                fit (well below 1, or above 1, which is an overfit), making
-                the Shapley effects unreliable.
+            JaxgsaWarning: If ``explained_variance`` sits well below 1, so the
+                expansion missed much of the sample variance and the Shapley
+                effects it carries are unreliable.
         """
         from jaxgsa.shapley._engine import _shapley_result_from_variances
 

@@ -51,7 +51,7 @@ from jaxgsa.dgsm._core import (
     resample_moment_sums,
 )
 from jaxgsa.dgsm._result import DGSMResult
-from jaxgsa.problem import Problem
+from jaxgsa.problem import GaussianSpec, InputSpec, Problem
 
 # Both bounds divide by Var(Y), so a single surviving row leaves nothing to
 # divide by. Two is the fewest rows that still define a variance.
@@ -70,6 +70,69 @@ _METHOD = "jaxgsa.dgsm.analyze"
 # sample rather than a sensitivity measure, and its uncertainty is already
 # carried inside the two bound intervals.
 _INTERVAL_FIELDS = ("nu", "sigma", "upper_bound", "lower_bound")
+
+# How many offending parameter names the lower-bound warning prints before it
+# stops and counts the rest. A 50-parameter uniform problem must not paste 50
+# names into one warning line.
+_MAX_NAMED = 8
+
+
+def _meets_lower_bound_condition(spec: InputSpec) -> bool:
+    """Report whether a marginal satisfies the Kucherenko-Song condition.
+
+    ``lower_bound`` is ``Var(x_i) * sigma_i^2 / Var(Y)``. Kucherenko & Song
+    (2016), Theorem 4.1, prove it is a lower bound on ``ST_i`` through Stein's
+    identity ``Cov(f, x_i) = E[tau(x_i) * df/dx_i]``. The kernel ``tau`` is the
+    constant ``Var(x_i)`` only for an untruncated Gaussian. Truncating the
+    Gaussian bends ``tau`` back to zero at each finite edge, so a truncated
+    marginal fails the condition just as a uniform one does.
+
+    Args:
+        spec: Marginal spec of one parameter.
+
+    Returns:
+        True only for an untruncated Gaussian marginal.
+    """
+    return isinstance(spec, GaussianSpec) and spec.low is None and spec.high is None
+
+
+def _warn_lower_bound_condition(problem: Problem) -> None:
+    """Warn once when ``lower_bound`` is reported outside its proven case.
+
+    The docstrings state the condition, but a result object read on its own
+    carries no docstring, and the uniform marginal — the common case — is
+    exactly where the number can mislead. So ``analyze`` says it at runtime
+    too, once per call rather than once per parameter.
+
+    ``upper_bound`` is deliberately left out. The Poincare inequality holds for
+    every marginal this package supports, so that bound is a certificate
+    whatever the distribution is.
+
+    Args:
+        problem: Problem definition whose marginals are checked.
+    """
+    offenders = [
+        name
+        for name, spec in zip(problem.names, problem.input_specs, strict=True)
+        if not _meets_lower_bound_condition(spec)
+    ]
+    if not offenders:
+        return
+    shown = ", ".join(offenders[:_MAX_NAMED])
+    if len(offenders) > _MAX_NAMED:
+        shown += f", and {len(offenders) - _MAX_NAMED} more"
+    warnings.warn(
+        "jaxgsa.dgsm: lower_bound is a valid lower bound on the total Sobol index "
+        "only for untruncated Gaussian marginals (Kucherenko & Song 2016, "
+        f"Theorem 4.1). These marginals do not meet that condition: {shown}. For "
+        "them lower_bound is an estimate, not a bound: it is exact when the "
+        "response is linear in that input, and it can exceed the true total "
+        "index when the response is curved. Confirm anything that rests on it "
+        "with jaxgsa.sobol. upper_bound is unaffected: the Poincare bound holds "
+        "for every supported marginal.",
+        stacklevel=3,
+        category=JaxgsaWarning,
+    )
 
 
 def _resolve_call_style(
@@ -468,7 +531,8 @@ def indices(
     This is the transformable core of :func:`analyze`. It differentiates the
     same model, runs the same estimator on the same data, and returns the same
     numbers, but it does nothing else: no non-finite check, no zero-variance
-    warning, no bound-ordering warning, no :class:`jaxgsa.dgsm.DGSMResult`,
+    warning, no bound-ordering warning, no warning that ``lower_bound`` is
+    outside its proven Gaussian case, no :class:`jaxgsa.dgsm.DGSMResult`,
     and no read of any array value on the host. So it composes with
     ``jax.jit``, ``jax.vmap``, ``jax.grad`` and ``jax.jacrev``, which
     :func:`analyze` cannot, because a policy decision needs a concrete value
@@ -589,18 +653,31 @@ def analyze(
     model is JAX-differentiable: one autodiff sweep over an ordinary Monte
     Carlo sample replaces a dedicated Sobol design.
 
-    Two inequalities convert the moments into a bracket on the total Sobol
+    The moments then convert into two numbers that frame the total Sobol
     index:
 
     - **Upper bound** (Poincare / Sobol-Kucherenko inequality):
       ``ST_i <= C_i * nu_i / Var(Y)``. ``C_i`` is the Poincare constant of
       input i's marginal distribution, the sharpest factor for which the
-      inequality holds (see :mod:`jaxgsa.dgsm._poincare`).
-    - **Lower bound** (Kucherenko-Song):
-      ``ST_i >= Var(x_i) * sigma_i^2 / Var(Y)``, with
-      ``sigma_i = E[df/dx_i]``, the mean (signed) derivative.
+      inequality holds (see :mod:`jaxgsa.dgsm._poincare`). This holds for
+      every marginal this package supports, so an input whose upper bound is
+      near zero is provably negligible.
+    - **Lower bound**: ``Var(x_i) * sigma_i^2 / Var(Y)``, with
+      ``sigma_i = E[df/dx_i]``, the mean (signed) derivative. Kucherenko &
+      Song (2016), Theorem 4.1, prove ``ST_i >=`` this expression when input
+      i's marginal is an **untruncated Gaussian**. That condition is not
+      decoration: the proof needs Stein's identity, which holds with a
+      constant kernel only for the Gaussian. On a uniform or truncated
+      marginal the expression is exact for a response linear in that input
+      and near-exact for a nearly linear one, but a strongly curved response
+      can push it above the true ``ST_i``. ``f(p) = 1/p`` on
+      ``p ~ U(0.1, 0.4)`` returns 1.29 for the only input of a one-input
+      model, whose ``ST`` is 1 by definition.
 
-    An input whose upper bound is near zero is provably negligible.
+    So ``upper_bound`` is a proof and, off the Gaussian case,
+    ``lower_bound`` is a guide. Confirm anything that rests on the latter
+    with :mod:`jaxgsa.sobol`. :class:`jaxgsa.dgsm.DGSMResult` carries the
+    full statement.
 
     There are two calling conventions, and you must use exactly one of them:
 
@@ -711,7 +788,10 @@ def analyze(
             ``n_bootstrap > 0`` and no ``key`` was given.
     Warns:
         JaxgsaWarning: If an output slice has zero variance, which makes both
-            bounds for that slice NaN.
+            bounds for that slice NaN. Also, once per call, if any marginal is
+            not an untruncated Gaussian, because ``lower_bound`` is a proven
+            bound only there; the warning names the marginals that fail the
+            condition. ``upper_bound`` is never in question.
     """
     from jaxgsa.dgsm import SPEC
 
@@ -737,6 +817,11 @@ def analyze(
     )
     if n_bootstrap > 0 and key is None:
         raise ValueError("key is required when n_bootstrap > 0")
+    # Say once, before the expensive work, that lower_bound is only a proven
+    # bound for untruncated Gaussian marginals. The gates above already
+    # rejected categorical parameters, so the check only separates untruncated
+    # Gaussians from uniform and truncated ones.
+    _warn_lower_bound_condition(problem)
     # The clock starts before the model is differentiated or evaluated: on
     # the autodiff path the Jacobian sweep is the expensive work, so it
     # belongs inside the timed span.

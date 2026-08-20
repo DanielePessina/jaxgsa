@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -1477,3 +1478,137 @@ class TestPoincareFEMCache:
         second = poincare_constant(spec)
         assert second == first
         assert _truncnorm_poincare.cache_info().hits == 1
+
+
+class TestLowerBoundValidityConditions:
+    """Pin what ``lower_bound`` does and does not prove.
+
+    ``lower_bound_i = Var(x_i) * sigma_i^2 / Var(Y)`` is a proven floor under
+    ``ST_i`` only when input i's marginal is an untruncated Gaussian
+    (Kucherenko & Song 2016, Theorem 4.1). These tests hold that line from both
+    sides, so a future change that quietly widens or narrows the claim fails
+    here.
+
+    Every model below has exactly one input, which makes ``ST = 1`` exact by
+    definition and removes the need for a reference Sobol run.
+    """
+
+    def test_uniform_marginal_can_exceed_st(self):
+        """A convex response on a uniform input pushes it above ST = 1.
+
+        This is the counter-example the documentation quotes: ``f(p) = 1/p``
+        on ``p ~ U(0.1, 0.4)``. With one input ``ST`` is 1, so any value above
+        1 is impossible as a bound. It reads about 1.29.
+        """
+        problem = Problem.from_dict({"p": (0.1, 0.4)})
+        X = monte_carlo(problem, n=200_000, seed=0)
+        result = analyze(problem, lambda x: 1.0 / x[0], jnp.asarray(X), verbose=False)
+        lower = float(np.asarray(result.lower_bound)[0])
+        assert lower > 1.05, f"expected the documented overshoot, got {lower}"
+        # The Poincare upper bound stays a bound: it is above ST, not below.
+        assert float(np.asarray(result.upper_bound)[0]) >= 1.0
+
+    def test_gaussian_marginal_holds(self):
+        """On a Gaussian input the same expression is a genuine floor.
+
+        ``f(x) = exp(x)`` with ``x ~ N(0, 1)`` is as convex as the uniform
+        case above, yet the bound holds, because Stein's identity makes the
+        Kucherenko-Song proof go through. The closed form is
+        ``Var(x) * E[f']^2 / Var(f) = 1 / (e - 1) = 0.582``, comfortably under
+        ``ST = 1``.
+        """
+        problem = Problem.from_dict(
+            {"x": GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0)}
+        )
+        X = monte_carlo(problem, n=200_000, seed=0)
+        result = analyze(problem, lambda x: jnp.exp(x[0]), jnp.asarray(X), verbose=False)
+        lower = float(np.asarray(result.lower_bound)[0])
+        assert lower <= 1.0
+        np.testing.assert_allclose(lower, 1.0 / (math.e - 1.0), rtol=0.05)
+
+    def test_truncated_gaussian_marginal_can_exceed_st(self):
+        """Truncation breaks it too, which is why the docs say "untruncated".
+
+        A truncated Gaussian has a non-constant Stein kernel, exactly like a
+        uniform, so the proof does not apply and a steep convex response
+        overshoots ``ST = 1`` again.
+        """
+        problem = Problem.from_dict(
+            {"x": GaussianInputSpec(dist="gaussian", mean=2.0, variance=2.25, low=-1.0, high=4.0)}
+        )
+        X = monte_carlo(problem, n=200_000, seed=0)
+        result = analyze(problem, lambda x: jnp.exp(2.2 * x[0]), jnp.asarray(X), verbose=False)
+        assert float(np.asarray(result.lower_bound)[0]) > 1.05
+
+
+class TestLowerBoundConditionWarning:
+    """``analyze`` says at runtime when ``lower_bound`` is outside its proof.
+
+    A docstring does not reach someone who reads a result object, and the
+    uniform marginal — the common case — is exactly where the number can
+    mislead. So the condition is also a warning, emitted once per call.
+    """
+
+    @staticmethod
+    def _run(problem, n=64):
+        """Run a tiny linear analysis on one input, returning nothing."""
+        X = monte_carlo(problem, n=n, seed=0)
+        return analyze(problem, lambda x: 2.0 * x[0], jnp.asarray(X), verbose=False)
+
+    def test_a_uniform_marginal_warns(self):
+        problem = Problem.from_dict({"p": (0.1, 0.4)})
+        with pytest.warns(JaxgsaWarning, match="untruncated Gaussian"):
+            self._run(problem)
+
+    def test_a_truncated_gaussian_warns(self):
+        problem = Problem.from_dict(
+            {"x": GaussianInputSpec(dist="gaussian", mean=2.0, variance=2.25, low=-1.0, high=4.0)}
+        )
+        with pytest.warns(JaxgsaWarning, match="untruncated Gaussian"):
+            self._run(problem)
+
+    def test_a_one_sided_gaussian_warns(self):
+        """One finite edge is still truncation, so the proof still fails."""
+        problem = Problem.from_dict(
+            {"x": GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0, low=-1.0)}
+        )
+        with pytest.warns(JaxgsaWarning, match="untruncated Gaussian"):
+            self._run(problem)
+
+    def test_an_untruncated_gaussian_problem_is_silent(self):
+        problem = Problem.from_dict(
+            {
+                "x0": GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0),
+                "x1": GaussianInputSpec(dist="gaussian", mean=1.0, variance=4.0),
+            }
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", JaxgsaWarning)
+            X = monte_carlo(problem, n=64, seed=0)
+            analyze(problem, lambda x: 2.0 * x[0] + x[1], jnp.asarray(X), verbose=False)
+
+    def test_it_warns_once_and_names_only_the_offenders(self):
+        """One warning per call, listing the marginals that fail the condition."""
+        problem = Problem.from_dict(
+            {
+                "good": GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0),
+                "flat": (0.0, 1.0),
+                "clipped": GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0, high=2.0),
+            }
+        )
+        with pytest.warns(JaxgsaWarning) as record:
+            X = monte_carlo(problem, n=64, seed=0)
+            analyze(problem, lambda x: jnp.sum(x), jnp.asarray(X), verbose=False)
+        messages = [str(w.message) for w in record if "untruncated Gaussian" in str(w.message)]
+        assert len(messages) == 1
+        assert "flat" in messages[0]
+        assert "clipped" in messages[0]
+        assert "good" not in messages[0]
+
+    def test_indices_stays_silent(self):
+        """The pure core reads no policy and emits no warning."""
+        problem = Problem.from_dict({"p": (0.1, 0.4)})
+        X = monte_carlo(problem, n=64, seed=0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", JaxgsaWarning)
+            indices(problem, lambda x: 2.0 * x[0], jnp.asarray(X))

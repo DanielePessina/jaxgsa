@@ -308,7 +308,7 @@ Data variables:
     ST                  (param) float32 12B 0.5571 0.4429 0.2432
     S2                  (param_i, param_j) float32 36B nan 8.761e-06 ... nan
     loo_rmse            float32 4B 0.0738
-    explained_variance  float32 4B 0.9711
+    explained_variance  float32 4B 0.9997
 Attributes:
     order:     8
     streamed:  False
@@ -317,9 +317,11 @@ Attributes:
 
 S1 and ST carry one `param` dimension. S2 is a matrix, so it needs `param_i`
 for rows and `param_j` for columns. Both diagnostics travel with the indices:
-`loo_rmse` and `explained_variance`, the fraction of `Var(Y)` the decomposed
-terms account for, which is 0.971 here. The `streamed: False` attribute
-records which fit path produced the numbers.
+`loo_rmse` and `explained_variance`, the fraction of the sample `Var(Y)` the
+fitted expansion reproduces, which is 0.9997 here. That one is the in-sample
+R^2, so it cannot pass 1; a fit that memorises the sample reads near 1 while
+`loo_rmse` climbs, which is why the two travel together. The
+`streamed: False` attribute records which fit path produced the numbers.
 
 ## Limitations
 

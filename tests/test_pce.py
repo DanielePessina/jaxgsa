@@ -945,3 +945,79 @@ class TestBootstrapIntervals:
         assert result.S1.shape == (1, 2, 3)
         assert result.S1_conf.shape == (2, 1, 2, 3)
         assert result.S2_conf.shape == (2, 1, 2, 3, 3)
+
+
+class TestExplainedVariance:
+    """``explained_variance`` is the in-sample R^2, so it stays within [0, 1].
+
+    Regression cover for a fault where the numerator was the sum of squared
+    non-constant coefficients, which is the surrogate's variance under the
+    *input measure*, while the denominator was the *sample* variance of ``Y``.
+    At finite ``N`` the empirical Gram is not the identity, so the two
+    disagree, and an order-8 Ishigami fit on ``N=2000`` reported 1.0709 for a
+    fit whose true R^2 was 0.9997.
+    """
+
+    def test_high_order_ishigami_does_not_exceed_one(self, ishigami_pce_data):
+        """The exact case that used to report 1.0709."""
+        X, Y = ishigami_pce_data
+        result = pce.analyze(ishigami.PROBLEM, X, Y, order=8, verbose=False)
+        ev = float(np.asarray(result.explained_variance))
+        assert 0.0 <= ev <= 1.0, f"explained_variance out of range: {ev}"
+        assert ev > 0.99, f"an order-8 Ishigami fit should be near-perfect, got {ev}"
+
+    def test_matches_r_squared(self, ishigami_pce_data):
+        """It equals ``1 - SS_res / SS_tot`` of the fitted values."""
+        X, Y = ishigami_pce_data
+        for order in (1, 3, 8):
+            result = pce.analyze(ishigami.PROBLEM, X, Y, order=order, verbose=False)
+            residual = Y - result.predict(X)
+            r2 = 1.0 - float(jnp.sum(residual**2)) / float(jnp.sum((Y - jnp.mean(Y)) ** 2))
+            np.testing.assert_allclose(
+                float(np.asarray(result.explained_variance)), r2, rtol=1e-3, atol=1e-4
+            )
+
+    def test_underfit_sits_well_below_one(self, ishigami_pce_data):
+        """Order 1 cannot represent Ishigami, and the diagnostic says so."""
+        X, Y = ishigami_pce_data
+        result = pce.analyze(ishigami.PROBLEM, X, Y, order=1, verbose=False)
+        assert float(np.asarray(result.explained_variance)) < 0.5
+
+    def test_linear_in_basis_reaches_one(self):
+        """A model inside the basis is fitted exactly, at 1.0 and not above."""
+        problem = linear.PROBLEM
+        bounds = jnp.array(problem.bounds)
+        X = jax.random.uniform(
+            jax.random.PRNGKey(3),
+            shape=(500, problem.num_vars),
+            minval=bounds[:, 0],
+            maxval=bounds[:, 1],
+        )
+        Y = 2.0 + 3.0 * X[:, 0] - 1.5 * X[:, 1]
+        result = pce.analyze(problem, X, Y, order=1, verbose=False)
+        ev = float(np.asarray(result.explained_variance))
+        assert ev <= 1.0 + 1e-6
+        np.testing.assert_allclose(ev, 1.0, atol=1e-4)
+
+    def test_consistent_with_loo_rmse(self, ishigami_pce_data):
+        """A near-1 diagnostic must come with a LOO error far below std(Y)."""
+        X, Y = ishigami_pce_data
+        result = pce.analyze(ishigami.PROBLEM, X, Y, order=8, verbose=False)
+        ratio = float(np.asarray(result.loo_rmse)) / float(jnp.std(Y))
+        # 1 - (loo/std)^2 is the out-of-sample analogue; the two agree closely
+        # when the surrogate is neither underfitted nor overfitted.
+        np.testing.assert_allclose(
+            float(np.asarray(result.explained_variance)), 1.0 - ratio**2, atol=5e-3
+        )
+
+    def test_streamed_path_agrees(self, ishigami_pce_data):
+        """Both fit paths read the diagnostic off the same Gram identity."""
+        X, Y = ishigami_pce_data
+        single = pce.analyze(ishigami.PROBLEM, X, Y, order=6, verbose=False)
+        streamed = pce.analyze(ishigami.PROBLEM, X, Y, order=6, batch_size=256, verbose=False)
+        assert streamed.streamed
+        np.testing.assert_allclose(
+            float(np.asarray(streamed.explained_variance)),
+            float(np.asarray(single.explained_variance)),
+            rtol=1e-4,
+        )

@@ -801,7 +801,37 @@ class TestIndicesCore:
             np.testing.assert_allclose(np.asarray(traced), np.asarray(eager), rtol=1e-4, atol=1e-6)
 
     def test_is_vmappable(self):
-        """T4: ``vmap`` maps the core over a batch of output vectors."""
+        """T4: ``vmap`` maps the core over a batch of output vectors.
+
+        The tolerance here is ``rtol=1e-3, atol=1e-5``, and it is looser
+        than the ``jit`` test above by design rather than by accident.
+
+        ``vmap`` gives every ``(N, N)`` reduction in the core a batch
+        axis, and XLA is then free to reassociate those reductions across
+        the batch. :func:`jaxgsa.hsic._analyze._get_hsic_kernel` records
+        that measurement: a batch axis over the output slices moved
+        indices by up to 1e-3 relative, which is why the shipped map is a
+        sequential :func:`jax.lax.map` and takes no chunk width.
+
+        What makes HSIC that sensitive is the estimator, not the
+        transform. The V-statistic is ``U/n^2 - 2V/n^3 + W/n^4``, and on
+        this sample the three terms are all near 0.3 to 0.65 while the
+        index they produce runs from 3e-4 to 1e-1. So a weak parameter
+        cancels away about 2000 parts in 2001 of the sums that make it,
+        and a change of summation order at the float32 epsilon of those
+        sums lands on the index magnified by that same 2000. Measured
+        here: the worst relative gap between the two paths is 2.6e-4 in
+        float32 and 4.0e-13 in float64, and both are the machine epsilon
+        of their dtype times the cancellation ratio. That is float32
+        conditioning, not a difference between the two graphs.
+
+        A user reads the same fact from ``analyze``: it warns in single
+        precision that only three or four digits survive and that small
+        indices are not reliable. A transform test cannot be tighter than
+        the number the library itself refuses to promise, so 1e-3 is that
+        documented figure and the atol covers the near-zero indices,
+        where no relative tolerance can mean anything in float32.
+        """
         problem, X, base = self._ishigami()
         batch = jnp.stack([base, X[:, 0], X[:, 1] ** 2])
         key = jax.random.key(9)
@@ -815,7 +845,7 @@ class TestIndicesCore:
             eager = indices(problem, X, outputs, n_perms=self.PERMS, key=key)
             for produced, expected in zip(stacked, eager, strict=True):
                 np.testing.assert_allclose(
-                    np.asarray(produced[row]), np.asarray(expected), rtol=1e-4, atol=1e-6
+                    np.asarray(produced[row]), np.asarray(expected), rtol=1e-3, atol=1e-5
                 )
 
     def test_jit_of_jacrev_of_the_full_chain(self):

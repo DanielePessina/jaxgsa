@@ -28,11 +28,12 @@ from jaxgsa._core.entry import (
     one_of,
     require,
 )
-from jaxgsa._core.invalid import OnInvalid
+from jaxgsa._core.invalid import InvalidReport, OnInvalid
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import _correlation_tolerant_methods, _prepare_Y
 from jaxgsa.shapley._engine import (
     _normalize_partial_variances,
+    _warn_pce_overfit,
     build_membership,
     shapley_from_variances,
 )
@@ -78,6 +79,32 @@ def _raise_correlated_pce_backend(problem: "Problem", method: str) -> None:
         f"{_correlation_tolerant_methods()}. Those methods do not "
         "return Shapley effects."
     )
+
+
+def _fitted_std_y(Y: Array, invalid: InvalidReport) -> Array:
+    """Return ``std(Y)`` per output slice, over the rows the surrogate fitted.
+
+    The PCE overfit signal reads ``loo_rmse`` against the spread of the data,
+    so the two must be measured on the same rows: under ``on_invalid="drop"``
+    the backend removed some, and ``invalid.row_indices`` says which, in the
+    caller's own numbering. The result is squeezed back to the layout the
+    backend reports ``loo_rmse`` in, so the ratio divides element by element.
+
+    Args:
+        Y: The caller's outputs, before any drop, shape ``(N,)`` / ``(N, K)`` /
+            ``(N, T, K)``.
+        invalid: The backend's non-finite report, which names the dropped rows.
+
+    Returns:
+        Per-slice standard deviation, shape ``()`` / ``(K,)`` / ``(T, K)``.
+    """
+    Y_arr = jnp.asarray(Y)
+    if invalid.policy == "drop" and invalid.any_invalid:
+        dropped = np.asarray(invalid.row_indices, dtype=int)
+        keep = np.setdiff1d(np.arange(Y_arr.shape[0]), dropped)
+        Y_arr = Y_arr[keep]
+    Y_3d, layout = _prepare_Y(Y_arr)
+    return layout.squeeze(jnp.sqrt(jnp.var(Y_3d, axis=0)), n_trailing=0)
 
 
 def _indices_3d(
@@ -382,6 +409,16 @@ def analyze(
             its inputs.
         TypeError: If ``backend_kwargs`` contains a keyword the selected
             backend's ``analyze`` does not accept.
+
+    Warns:
+        JaxgsaWarning: If the surrogate fit looks pathological. Both backends
+            warn when ``explained_variance`` sits well below 1, and the HDMR
+            backend also warns when it sits above 1. On the PCE backend
+            ``explained_variance`` is a true in-sample R-squared, which an
+            overfit expansion drives *towards* 1, so overfitting is caught
+            out of sample instead: the fit's ``loo_rmse`` approaching
+            ``std(Y)`` means the expansion predicts no better than the output
+            mean.
     """
     from jaxgsa.shapley import SPEC
 
@@ -410,9 +447,18 @@ def analyze(
         _raise_correlated_pce_backend(problem, "jaxgsa.shapley.analyze")
         from jaxgsa.pce import analyze as analyze_pce
 
-        result = analyze_pce(
+        pce_result = analyze_pce(
             problem, X, Y, on_invalid=on_invalid, verbose=False, **backend_kwargs
-        ).shapley()
+        )
+        result = pce_result.shapley()
+        # The overfit signal for this backend is out-of-sample, and std(Y) is
+        # the scale to read it on. Neither the fitted result nor the shared
+        # engine tail holds Y, so the check runs here, where both are in hand.
+        _warn_pce_overfit(
+            pce_result.loo_rmse,
+            _fitted_std_y(Y, pce_result.invalid),
+            result.explained_variance,
+        )
     elif backend == "hdmr":
         from jaxgsa.hdmr import analyze as analyze_hdmr
 

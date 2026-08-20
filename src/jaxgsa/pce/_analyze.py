@@ -210,13 +210,15 @@ class _PCEFit(NamedTuple):
     from this state. :meth:`PCEResult.shapley` reuses its coefficients and
     multi-index. The design matrix and Gram factorization are deliberately
     NOT carried: the streamed path never materializes them at full ``N``, so
-    both fit paths reduce to the same coefficient and LOO summary.
+    both fit paths reduce to the same coefficient, LOO and fitted-variance
+    summary.
     """
 
     coefficients: Array  # (T, K, n_terms), terms-last
     multi_index: np.ndarray  # (n_terms, D)
     order: int  # effective order after _auto_order
     loo_flat: Array  # (T*K,) per-slice LOO RMSE
+    fitted_var: Array  # (T*K,) sample variance of the fitted values
     streamed: bool  # True when the row-streamed fit path ran
 
 
@@ -286,6 +288,42 @@ def _pad_rows(A: Array, n_pad: int) -> Array:
     return jnp.concatenate([A, jnp.zeros((n_pad, *A.shape[1:]), dtype=A.dtype)], axis=0)
 
 
+def _fitted_variance(gram_raw: Array, coeffs_flat: Array, n_rows: int) -> Array:
+    """Sample variance of the fitted values, per output slice.
+
+    The fitted values are ``Yhat = Phi @ coeffs_flat``. Their sample mean and
+    mean square are both read off the *unregularized* Gram matrix
+    ``G = Phi^T Phi``, so neither path has to hold an ``(N, T*K)`` array of
+    predictions, and the streamed path gets the same number as the single-pass
+    one without a third sweep over the rows:
+
+    - ``mean(Yhat) = (G[0, :] @ c) / N``, because the first basis function of
+      an orthonormal Wiener-Askey family is the constant 1, which makes
+      ``G[0, :]`` the column sums of ``Phi``.
+    - ``mean(Yhat^2) = diag(c^T G c) / N``.
+
+    This is the *sample* variance of the surrogate on the fitted rows, not the
+    surrogate's variance under the input measure. The two differ whenever the
+    empirical Gram is not the identity, which is the usual case at finite
+    ``N``. :func:`analyze` needs the sample one, because it divides by the
+    sample variance of ``Y``.
+
+    Args:
+        gram_raw: ``Phi^T Phi`` without the ridge term, shape
+            ``(n_terms, n_terms)``.
+        coeffs_flat: Fitted coefficients, shape ``(n_terms, T*K)``.
+        n_rows: Number of rows the Gram was accumulated over.
+
+    Returns:
+        Per-slice sample variance of the fitted values, shape ``(T*K,)``.
+    """
+    mean_hat = (gram_raw[0, :] @ coeffs_flat) / n_rows  # (T*K,)
+    mean_sq = jnp.einsum("jk,ji,ik->k", coeffs_flat, gram_raw, coeffs_flat) / n_rows
+    # A variance is never negative; rounding on a near-constant slice can put
+    # this difference a step below zero.
+    return jnp.maximum(mean_sq - mean_hat**2, 0.0)
+
+
 def _fit_pce_streamed(
     X_ref: Array,
     Y_flat: Array,
@@ -294,7 +332,7 @@ def _fit_pce_streamed(
     order: int,
     ridge: float,
     batch_size: int | None,
-) -> tuple[Array, Array]:
+) -> tuple[Array, Array, Array]:
     """Fit the PCE by streaming row batches: exact normal equations + LOO.
 
     Two passes over row batches of ``X_ref``/``Y_flat``, never holding more
@@ -328,8 +366,11 @@ def _fit_pce_streamed(
             active memory budget.
 
     Returns:
-        Tuple of ``coeffs_flat``, shape ``(n_terms, T*K)``, and the per-slice
-        LOO RMSE, shape ``(T*K,)``.
+        Tuple of ``coeffs_flat``, shape ``(n_terms, T*K)``, the per-slice LOO
+        RMSE, shape ``(T*K,)``, and the unregularized Gram matrix
+        ``G = Phi^T Phi``, shape ``(n_terms, n_terms)``. ``G`` is
+        ``n_terms``-square, so returning it carries nothing that scales with
+        ``N``; :func:`_fitted_variance` reads the fitted-value moments off it.
     """
     N = X_ref.shape[0]
     n_terms = multi_index.shape[0]
@@ -371,7 +412,7 @@ def _fit_pce_streamed(
         sse = acc_loo(X_p[lo:hi], Y_p[lo:hi], w[lo:hi], coeffs_flat, gram_chol, sse)
     loo_flat = jnp.sqrt(sse / N)  # == sqrt(mean(loo_residuals^2, axis=0))
 
-    return coeffs_flat, loo_flat
+    return coeffs_flat, loo_flat, G
 
 
 def _single_pass_fit_bytes(N: int, n_terms: int, M: int, itemsize: int) -> int:
@@ -487,7 +528,8 @@ def _fit_pce_core(
         # Single-pass path: build the full design matrix and compute the Gram
         # factorization once, reused for both fitting and LOO.
         Phi = build_design_matrix(X_ref, mi, input_types, effective_order)
-        gram = Phi.T @ Phi + ridge * jnp.eye(Phi.shape[1])
+        gram_raw = Phi.T @ Phi
+        gram = gram_raw + ridge * jnp.eye(Phi.shape[1])
         gram_inv_PhiT = jnp.linalg.solve(gram, Phi.T)
         # The basis is identical for every output slice (the effective order
         # depends only on N and D), so fitting all T*K slices is ONE shared
@@ -501,7 +543,7 @@ def _fit_pce_core(
     else:
         # Streamed path: same normal equations and exact LOO, accumulated
         # over row batches so peak memory stays within the budget.
-        coeffs_flat, loo_flat = _fit_pce_streamed(
+        coeffs_flat, loo_flat, gram_raw = _fit_pce_streamed(
             X_ref, Y_flat, mi, input_types, effective_order, ridge, batch_size
         )
     # Terms-last layout, matching HDMR's Sa convention (slices lead).
@@ -512,6 +554,7 @@ def _fit_pce_core(
         multi_index=mi,
         order=effective_order,
         loo_flat=loo_flat,
+        fitted_var=_fitted_variance(gram_raw, coeffs_flat, N),
         streamed=streamed,
     )
 
@@ -860,8 +903,14 @@ def analyze(
     # the fit path (single-pass hat-matrix diagonal, or the streamed
     # equivalent); the leverage is shared by every slice.
     loo = fit.loo_flat.reshape(T, K)
-    partial_var = jnp.sum(fit.coefficients[..., 1:] ** 2, axis=-1)
-    explained_variance = jnp.where(total_var == 0, jnp.nan, partial_var / total_var)
+    # Numerator and denominator are both sample quantities on the same rows:
+    # the sample variance of the fitted values over the sample variance of Y.
+    # Summing the squared non-constant coefficients instead would measure the
+    # surrogate under the *input measure* while the denominator measures the
+    # data, and that mismatch is what used to push a good fit above 1.
+    explained_variance = jnp.where(
+        total_var == 0, jnp.nan, fit.fitted_var.reshape(T, K) / total_var
+    )
 
     # Drop the singleton axes _prepare_Y inserted. S1/ST/coeffs end in
     # (T, K, per-slice); S2 carries an extra trailing D and loo has no trailing

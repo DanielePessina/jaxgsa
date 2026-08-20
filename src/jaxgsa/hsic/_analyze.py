@@ -548,6 +548,17 @@ def _warn_single_precision() -> None:
     in float64, and it grows with ``N`` because the sums do. That is the same
     size as the gap HSIC is often asked to resolve between two weak
     parameters.
+
+    The damage is not spread evenly over the parameters. What the rounding
+    costs is roughly a fixed *absolute* amount, set by the epsilon of the
+    three sums, so the *relative* error on an index is that amount divided by
+    the index. On Ishigami at ``N = 128`` the three sums all sit between 0.3
+    and 0.65 while the indices they produce run from ``3e-4`` to ``1e-1``, a
+    cancellation ratio of 6 for the strongest parameter and 2100 for the
+    weakest. The measured relative shift follows that ratio times the machine
+    epsilon of the dtype in both precisions. So a strong parameter keeps most
+    of its float32 digits and a weak one keeps almost none, which is exactly
+    the wrong way round for reading a ranking off the small end.
     """
     if not x64_enabled():
         warnings.warn(

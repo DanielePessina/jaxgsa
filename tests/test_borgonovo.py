@@ -118,10 +118,26 @@ class TestGridTiling:
     """The output grid is evaluated in tiles to bound peak memory.
 
     Tiling is a memory decision only. Every grid point sums over its own
-    class members and over nothing else, so no tiling reorders a
-    reduction and the answer has to come back bit for bit the same. These
-    tests are what makes that claim checkable, so they compare with
-    ``assert_array_equal`` and not with a tolerance.
+    class members and over nothing else, so the tile width changes no
+    term of any sum and no sum reads a term that belongs to another one.
+    That is the guarantee, and it is a guarantee about the algorithm.
+
+    It is not a guarantee about the compiled code. The reduction runs
+    over an array of shape ``(tile_width, n_samples)``, and XLA picks how
+    to vectorize it from that whole shape, not from the reduced axis
+    alone. A two-row tile and a hundred-row tile get different emitted
+    loops, so the additions along the sample axis land in a different
+    order and float32 addition is not associative. The tile width is the
+    trip count, so the tile width reaches the last bit of the answer.
+
+    So these tests compare with a tolerance, and the tolerance is
+    ``rtol=1e-6``. That is roughly ten times the largest gap measured
+    across the tile widths below, which sits at one to two float32 ULP of
+    the values involved. It is also three or more orders of magnitude
+    below what a real tiling bug costs: dropping a tile, mis-joining the
+    tiles, or letting the padding survive changes a density by the share
+    of the grid it touches, which is percent-level, not ULP-level. The
+    tolerance passes reordered addition and fails everything else.
     """
 
     @staticmethod
@@ -139,23 +155,32 @@ class TestGridTiling:
         return Y_cols, all_idx, tuple(groups)
 
     @pytest.mark.parametrize("grid_chunk", [2, 3, 4, 7, 8, 16, 50, 99])
-    def test_tiled_grid_is_bit_identical(self, ishigami_data, grid_chunk):
-        """Any tile width returns exactly the untiled result."""
+    def test_tiled_grid_matches_the_untiled_result(self, ishigami_data, grid_chunk):
+        """Any tile width returns the untiled result to float32 rounding.
+
+        The widths span the awkward cases on purpose: 2 and 3 are far
+        narrower than any vectorization XLA would choose, 7 and 99 do not
+        divide the 100-point grid and so exercise the padding, and 50 and
+        100 divide it exactly. See the class docstring for why this is a
+        tolerance and not an equality.
+        """
         X, Y = ishigami_data
         Y_cols = jnp.stack([Y, Y**2, jnp.sin(Y)], axis=1)
         args = self._kernel_inputs(X, Y_cols)
         untiled = _get_delta_kernel(100, None, 1e-2, None, 100)(*args)
         tiled = _get_delta_kernel(100, None, 1e-2, None, grid_chunk)(*args)
         for a, b in zip(untiled, tiled):
-            np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+            np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-6)
 
     def test_memory_budget_narrows_the_working_set(self, ishigami_data):
         """A small budget still returns the same answer.
 
         The budget changes how the work is cut up, never what it
-        computes. A slice chunk narrower than the output does reassociate
-        the float32 reductions XLA emits, so this one carries a
-        tolerance; the tile width above does not.
+        computes. Cutting it up reassociates the float32 reductions XLA
+        emits, so this carries a tolerance for the same reason the tile
+        width above does. The tolerance is looser here because a small
+        budget moves the slice chunk as well as the tile width, and the
+        slice chunk crosses the bootstrap replicates.
         """
         X, Y = ishigami_data
         Y2 = jnp.stack([Y, Y**2, jnp.sin(Y)], axis=1)

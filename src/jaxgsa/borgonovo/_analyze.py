@@ -277,9 +277,14 @@ def _get_delta_kernel(
         :func:`jax.lax.map` is sequential.
 
         A grid point's density sums over the samples and over nothing
-        else, so no tiling reorders a reduction, and every tile width of
-        two or more was measured returning the untiled result exactly.
-        The grid is padded up to a whole
+        else, so the tile width changes no term of any sum and lets no
+        sum read a term belonging to another tile. That is an algorithmic
+        guarantee, not a bit-level one: the reduction runs over an array
+        whose shape carries the tile width, and XLA picks its
+        vectorization from the whole shape, so the last bit can still
+        move. Measured differences sit at one to two float32 units in the
+        last place, and they differ by target, so the tests compare with
+        a tolerance rather than exactly. The grid is padded up to a whole
         number of tiles and the padding is dropped again, so only one tile
         shape is ever traced.
 

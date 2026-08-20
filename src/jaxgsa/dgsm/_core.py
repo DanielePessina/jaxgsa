@@ -353,8 +353,14 @@ def bounds_from_moments(
     This is the whole numerical statement of the method, and both entry points
     run this one copy of it:
 
-    - upper (Poincare / Sobol-Kucherenko): ``ST_i <= C_i * nu_i / Var(Y)``
-    - lower (Kucherenko-Song): ``ST_i >= Var(x_i) * sigma_i^2 / Var(Y)``
+    - upper (Poincare / Sobol-Kucherenko): ``ST_i <= C_i * nu_i / Var(Y)``,
+      which holds for every marginal this package supports.
+    - lower: ``Var(x_i) * sigma_i^2 / Var(Y)``. Kucherenko & Song (2016),
+      Theorem 4.1, prove ``ST_i >=`` this for a Gaussian marginal only; on a
+      uniform or truncated marginal it is an estimate that is exact for a
+      linear response and can overshoot ``ST_i`` for a curved one. See
+      :class:`jaxgsa.dgsm.DGSMResult` for why the condition is on the
+      marginal.
 
     A zero-variance slice makes both bounds ``0 / 0``, so the denominator is
     mapped to ``NaN`` rather than divided by. That is arithmetic, not policy:

@@ -71,6 +71,34 @@ PR as the new recorded surface: `optimal_transport` gained `S1`, `S1_conf`
 and `above_dummy`, and `pawn` gained `n_valid_bins`, on each of the six
 cases. Those are added fields, not moved numbers.
 
+### 4. PCE explained_variance measured two different things (2026-08-20)
+
+`explained_variance` divided the surrogate's variance under the input
+measure, from Parseval on the coefficients, by the sample variance of `Y`.
+Those are two different measures. At finite `N` the empirical Gram is not the
+identity, so Parseval overstates the surrogate's variance on the sample and
+the ratio could pass 1. The numerator is now the sample variance of the
+fitted values, so both sides measure the same rows, and the field is a
+coefficient of determination.
+
+The old definition was wrong rather than merely differently scaled, and the
+baseline recorded that wrongness as ground truth: the `gaussian_mixed` entry
+held `1.0284`, a share of explained variance above 1, which is not reachable.
+
+Moved: 20 values, every one an `explained_variance`, on `pce` and on
+`shapley`, which carries the PCE backend's diagnostic through unchanged. All
+move downward. `gaussian_mixed` `1.0284 -> 0.9917`, `ishigami_scalar`
+`0.47374 -> 0.47261`, `ishigami_series` the same shift across its six slices,
+`sobol_g_multi` `0.89231 -> 0.87967` across its two. No `S1`, `ST`, `S2` or
+`Sh` value moved, because the Shapley normalizer reads
+`explained_variance` only as a finiteness mask.
+
+Because a corrected R-squared cannot exceed 1, the Shapley overfit warning
+that fired on `explained_variance` crossing a threshold became unreachable
+for the PCE backend. It now reads `loo_rmse` against `std(Y)` instead. The
+HDMR backend keeps the old check, whose `sum(V_u) / Var(Y)` genuinely can
+exceed 1.
+
 ## The float32 batch-width exception
 
 Kernel work is not plumbing. Batching an estimator over more output slices at

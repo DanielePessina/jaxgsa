@@ -6,15 +6,24 @@ the input distribution. When the model is JAX-differentiable this is the
 cheapest useful method in the package: one autodiff sweep over an ordinary
 Monte Carlo sample replaces a whole Saltelli design.
 
-Two inequalities turn those moments into a bracket on the total Sobol index:
+Those moments turn into two numbers that frame the total Sobol index:
 
-- Poincare / Sobol-Kucherenko: `ST_i <= C_i * nu_i / Var(Y)`, where `C_i` is
-  the Poincare constant of input `i`'s marginal.
-- Kucherenko-Song: `ST_i >= Var(x_i) * sigma_i^2 / Var(Y)`, where
-  `sigma_i = E[df/dx_i]` is the mean signed derivative.
+- `upper_bound_i = C_i * nu_i / Var(Y)`, where `C_i` is the Poincare constant
+  of input `i`'s marginal. The Poincare / Sobol-Kucherenko inequality makes
+  this a genuine cap: `ST_i` is never above it, for every marginal this
+  package supports.
+- `lower_bound_i = Var(x_i) * sigma_i^2 / Var(Y)`, where
+  `sigma_i = E[df/dx_i]` is the mean signed derivative. Kucherenko & Song
+  (2016), Theorem 4.1, prove `ST_i >=` this **when input `i`'s marginal is an
+  untruncated Gaussian**, and only then. On a uniform or truncated marginal it
+  is an estimate: exact when the response is linear in that input, and able to
+  sit above the true `ST_i` when it is strongly curved. The
+  [DGSM example](/examples/dgsm/) works through a case where it reads 1.29 for
+  an input whose `ST` is 1 by definition.
 
 An input whose `upper_bound` is near zero is provably negligible. That is a
 stronger statement than a small estimated index, and it is what DGSM is for.
+Confirm anything that rests on `lower_bound` with `jaxgsa.sobol`.
 
 ## How to call it
 
@@ -160,8 +169,8 @@ unordered level code has no meaning.
 | --- | --- |
 | `nu` | `E[(df/dx_i)^2]`, shape `(D,)` / `(K, D)` / `(T, K, D)` |
 | `sigma` | `E[df/dx_i]`, the mean signed derivative, same shape |
-| `upper_bound` | Poincare upper bound on `ST` |
-| `lower_bound` | Kucherenko-Song lower bound on `ST` |
+| `upper_bound` | Poincare upper bound on `ST`, valid for every supported marginal |
+| `lower_bound` | `Var(x_i) * sigma_i^2 / Var(Y)`; a lower bound on `ST` for a Gaussian marginal, an estimate otherwise |
 | `var_y` | output variance per slice, the denominator of both bounds |
 | `nu_conf`, `sigma_conf`, `upper_bound_conf`, `lower_bound_conf` | `(2, ...)` for `[lower, upper]`, or `None` |
 | `ci`, `problem`, `invalid` | the interval record, the problem, the non-finite report |

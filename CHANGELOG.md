@@ -5,9 +5,8 @@
 Version 0.10 adds capability.
 
 **Breaking changes:** `SobolResult.nan_counts` is removed,
-`Problem.input_specs` now returns dataclasses, DGSM selects its autodiff mode
-by shape (numbers move at float precision), and stored Sobol S2 bootstrap
-draws are now symmetrised. See "Breaking".
+`Problem.input_specs` now returns dataclasses, and DGSM selects its autodiff
+mode by shape (numbers move at float precision). See "Breaking".
 
 ### Breaking
 
@@ -15,9 +14,11 @@ draws are now symmetrised. See "Breaking".
   `analyze()` functions and all four samplers take `verbose: bool = True`.
   With the default, `analyze()` prints three short sections to stdout: the
   problem and the data, the wall-clock timing, and the top parameters by the
-  method's headline index. Samplers print one line about the design. Your
-  numbers do not change, but a script that ran silently before this version
-  prints now. To keep a run silent, pass `verbose=False`:
+  method's headline index. Samplers print one line about the design. No
+  `analyze()` printed anything before, so a script that ran silently prints
+  now. `sobol.sample` and `morris.sample` already printed and already took
+  `verbose`; `efast.sample` and `kucherenko.sample` join them. Your numbers do
+  not change. To keep a run silent, pass `verbose=False`:
 
   ```python
   result = jaxgsa.sobol.analyze(sr, Y, verbose=False)
@@ -37,23 +38,29 @@ draws are now symmetrised. See "Breaking".
     count. A `batch_size` at or above the row count now runs the single-pass
     fit and gives the exact default numbers.
   - **`None` on a batching keyword means "derive the width from the memory
-    budget".** This was already true for most methods. DGSM read `None` as
-    one batch of every row; it now derives the batch width from
+    budget".** Only `pce`, `hdmr` and `vkoga` read the budget before. The
+    other methods each had their own rule: `sobol`, `morris`, `efast` and
+    `pawn` defaulted to a fixed 2048 that ignored the dtype, `N` and the
+    budget, and `borgonovo` and `optimal_transport` read `None` as a
+    hardcoded element count. Every one of them now defaults to `None` and
+    derives its width from `jaxgsa.config.get_memory_budget()`. DGSM read
+    `None` as one batch of every row; it now derives the batch width from
     `jaxgsa.config.get_memory_budget()` with a real bytes model (a few
     Jacobian-sized transients per row, `T*K*D` floats each). This holds on
     both DGSM paths: the autodiff path and a precomputed `dfdx`. At ordinary
     sizes the derived width is one full block, so nothing changes. On a run
     large enough that the budget now splits the sample, only the float32
     summation order moves — the same statement PCE and HDMR make about
-    their streamed paths. `dgsm.indices` also now raises `ValueError` on
-    `batch_size=0` or a negative value; it used to read them as "one batch"
-    (`dgsm.analyze` already rejected them).
+    their streamed paths. `dgsm.analyze`, and the new `dgsm.indices`, now
+    raise `ValueError` on `batch_size=0` or a negative value. `dgsm.analyze`
+    used to read both as "one batch of every row".
   - **An explicit chunk value always wins.** The budget only sizes the `None`
-    default. Sobol's bootstrap path and Morris silently capped an explicit
-    `slice_chunk_size` / `resample_chunk_size` at the budget-derived width.
-    They now honour the caller's value, capped only at the axis length.
-    Migration: none needed, unless you relied on the budget to shrink a
-    too-large explicit value — pass the width you actually want.
+    default. Morris silently capped an explicit `chunk_size` at an internal
+    element budget, so a caller who asked for a wide chunk could get a narrow
+    one. Under its new name `resample_chunk_size` it honours the caller's
+    value, capped only at the axis length. Migration: none needed, unless you
+    relied on that cap to shrink a too-large explicit value — pass the width
+    you actually want.
   - **`hsic` loses `batch_size`, with no replacement.** The keyword
     row-blocked one kernel build while the resident kernel stacks — about
     `(2D + 1) * N^2` floats — stayed whole. It never bounded peak memory,
@@ -71,7 +78,6 @@ draws are now symmetrised. See "Breaking".
   | `num_resamples` | `n_bootstrap` | sobol, morris |
   | `seed: int` | `key: Array` | pawn, borgonovo, optimal_transport, hsic, vkoga |
   | `chunk_size` | `resample_chunk_size` | morris |
-  | `CIInfo.n_resamples` | `CIInfo.n_bootstrap` | every result with intervals |
   | `samples` | `sampling_result` | efast |
 
   `key` replaces `seed` because a key can be split and an integer cannot.
@@ -88,7 +94,7 @@ draws are now symmetrised. See "Breaking".
 
   | Was | Now | Where |
   |---|---|---|
-  | `standardize` | `standardize_outputs` | `optimal_transport.analyze`, `optimal_transport.indices` |
+  | `standardize` | `standardize_outputs` | `optimal_transport.analyze` |
   | `correlation_kind` | `correlation_type` | `Problem(...)`, `Problem.from_dict(...)` |
   | `kind` | `correlation_type` | `Problem.with_correlation(...)` |
 
@@ -110,7 +116,10 @@ draws are now symmetrised. See "Breaking".
 - **`borgonovo.analyze` no longer bootstraps by default.** `n_bootstrap` was
   `100`; it is now `0`, matching every other method. Combined with the new
   key requirement, the old default would have made the plainest possible call
-  an error.
+  an error. **The reported `delta` moves for a default call**: with
+  `bias_correct=True` and 100 resamples, the old default returned the
+  Plischke-corrected delta, and the new default returns the plug-in estimate
+  with no interval. Pass `n_bootstrap=100` and a key to get the old numbers.
 
   `bias_correct` becomes tri-state to match. `None` (the default) applies the
   Plischke correction whenever there are replicates and does nothing
@@ -118,13 +127,6 @@ draws are now symmetrised. See "Breaking".
   `False` never applies it. For a corrected delta, pass `n_bootstrap=100` and
   a key. The uncorrected estimate is biased upward, because a KDE separation
   is a distance and sampling noise can only increase it.
-
-- **`ci_method` reaches every method that bootstraps.** pawn, borgonovo and
-  optimal_transport were hard-wired to percentile endpoints while recording
-  `"quantile"`. All three now accept `"quantile"` or `"gaussian"`.
-
-- **`keep_replicates` is keyword-only and last** in every signature. It sat in
-  three different positions.
 
 - **`prenormalize` is gone.** It meant four different things across the
   methods that took it, and on two of them it meant nothing at all.
@@ -137,15 +139,26 @@ draws are now symmetrised. See "Breaking".
   | `morris` | `prenormalize: bool = False` | renamed `standardize_outputs` |
   | `dgsm` | — | new `standardize_outputs: bool = False` |
 
-  `hsic` also loses the keyword, with no replacement. Its `bandwidth` is now
-  a multiplier on the median heuristic. The heuristic carries the scale of
-  `Y`, so the indices are invariant under `Y -> a*Y + b`. Standardizing `Y`
-  first therefore changes nothing, and a no-op keyword would mislead.
+  `hsic` also loses the keyword, with no replacement. The median heuristic
+  carries the scale of `Y`, so the indices are invariant under
+  `Y -> a*Y + b`. Standardizing `Y` first therefore changes nothing, and a
+  no-op keyword would mislead.
+
+  `hsic.bandwidth` changes meaning in the same pass. It was
+  `float | None = None`: `None` picked the median heuristic and a number was
+  the kernel width itself. It is now `float = 1.0`, a multiplier on the
+  median heuristic, so the heuristic always runs and every value is relative
+  to it. The resolved width is `bandwidth * sqrt(median_sq)`, per parameter.
+  A default call is unchanged, because `bandwidth=None` and `bandwidth=1.0`
+  both give the plain heuristic. Migration: a caller who passed an absolute
+  width has no exact replacement, because the heuristic is per parameter and
+  one absolute width was not. Pass a multiplier around 1 instead, or scale
+  the inputs.
 
   `optimal_transport` keeps this behavior (default `True`). It does real
   work there: the method builds distances from `Y` itself, not from a
   ratio. The keyword is now spelled `standardize_outputs`; see the rename
-  entry below.
+  entry above.
 
   On `morris` and `dgsm` the keyword earns its place, because those two
   return dimensional quantities. Under `Y -> a*Y + b`, Morris's `mu`,
@@ -178,103 +191,52 @@ draws are now symmetrised. See "Breaking".
   baseline was regenerated once for this; see `scripts/baseline/README.md`.
   The verbose summary now names the mode that ran.
 
-- **Stored Sobol S2 bootstrap draws are symmetrised.** With
-  `keep_replicates=True`, `result.ci.replicates["S2"]` used to hold the raw
-  estimator output, whose lower triangle is a different numerical path and
-  whose diagonal is meaningless. The stored draws now follow the reported
-  convention — symmetric, with a NaN diagonal — exactly as the `S2` point
-  estimate and its intervals always have. Point estimates and confidence
-  intervals do not move; only the stored replicates array changes. Code that
-  read the lower triangle or the diagonal of the draws must read the upper
-  triangle instead.
+- **`jaxgsa.dgsm.poincare_constant` loses its `grid` keyword.** It took
+  `grid: int = 512`, the element count of the finite-element solve for a
+  truncated Gaussian marginal. The count is now fixed at that same 512, which
+  is what the memoised solve caches on (see "Performance"). Migration: delete
+  the argument. Every value the function returns is unchanged.
 
-### Performance
+- **`Problem.input_specs` returns spec dataclasses.** Before, it returned a
+  private 6-slot tuple. The tuple used the same two slots for different
+  things: `(low, high)` for a uniform marginal, `(mean, variance)` for a
+  Gaussian one, and dummy zeros for a categorical one. You had to know the
+  slot layout to read it.
 
-- **The Sobol bootstrap is about 2.2x faster on a scalar output.** Batching
-  the bootstrap over output slices made every gather batched on two axes,
-  and XLA compiles that to a slower gather than a single-axis one. A chunk
-  holding one slice has no outer axis worth mapping, so it now drops the
-  outer `vmap`. On an Apple M1 Pro at N=1024, D=3 and 1000 resamples, one
-  output slice went from 18.9 ms to 8.5 ms. Chunks holding more than one
-  slice are unchanged, and so are the numbers: every interval endpoint is
-  bit-identical, on every estimator. The same shortcut applies when many
-  slices exist but the memory budget has narrowed the chunk to one.
+  Each entry is now a `jaxgsa.UniformSpec`, a `jaxgsa.GaussianSpec`, or a
+  `jaxgsa.CategoricalSpec`. Read the fields by name. Tell the three apart with
+  `isinstance`. `jaxgsa.InputSpec` is the union of the three, for annotations.
 
-- **The PCE streamed fit dispatches one jitted step per row batch.** Each
-  batch used to run several eager ops: an unjitted design-matrix build plus
-  accumulation matmuls. The per-batch step is now one jitted call, and the
-  ragged trailing batch is zero-padded and masked, so each step compiles
-  once. Padded rows contribute exact zeros to the normal equations and to
-  the leave-one-out sum. This is the pattern the HDMR fit already uses,
-  where the same fix was measured at 1.2-1.67x.
+  ```python
+  spec = problem.input_specs[0]
+  spec.low, spec.high        # was spec[1], spec[2]
+  ```
 
-- **The truncated-Gaussian Poincare constant is cached.** DGSM's FEM
-  eigensolve for a truncated Gaussian marginal used to run on every
-  `analyze` call. It is a pure function of five scalars, so it is now
-  memoised with `functools.lru_cache` and runs once per distinct marginal
-  per process. Zero numeric change: the cached value is the value the solve
-  returned.
+  `jaxgsa.dgsm.poincare_constant()` takes the dataclass too. It is public, and
+  it took the private tuple before, so reading its argument meant knowing the
+  slot layout.
 
-- **PCE second-order extraction no longer builds an unbudgeted transient.**
-  `sobol_from_coefficients` materialized an `(n_terms, D*(D-1)/2)` float
-  array for the S2 pair mask — about 3.5 GB at `D=100`, order 3. The pair
-  axis now streams in chunks sized by the memory budget. At small `D` the
-  budget allows one chunk, which runs the exact old matmul, so shipped
-  values are bit-for-bit unchanged.
+  The input side does not change. `Problem.from_dict` still accepts a
+  `(low, high)` tuple and the `UniformInputSpec` / `GaussianInputSpec` /
+  `CategoricalInputSpec` dicts, exactly as before. It also accepts the new
+  dataclasses. A saved `.npz` file keeps its dict form, so files written by
+  earlier versions still load.
 
-### Fixed
+- **`SobolResult.nan_counts` is removed.** It counted the `NaN` entries in the
+  computed indices and threw away which model run produced them, which is the
+  one thing you need in order to act. `result.invalid` replaces it and keeps
+  the positions. See the `on_invalid` entry under "Added".
 
-- **Sobol standardizes the outputs, always, and this fixes real numbers.**
-  The Sobol'-Mauntz first-order estimator and every second-order estimator
-  are *uncentred* products, so a non-zero output mean adds an error term
-  proportional to that mean. On Ishigami at N=4096 with an output offset of
-  1e4, `S1` came back `[6.26, 0.434, 1.71]` against the analytic
-  `[0.314, 0.442, 0.000]`. Float64 gave `[6.27, 0.433, 1.72]`, so this was
-  estimator bias and not rounding.
+- **A non-finite model output now raises by default.** Before, what happened
+  depended on the method you called: `sobol`, `morris` and `kucherenko` dropped
+  the affected data and warned, `efast` warned and computed anyway, and the
+  other nine let the value into the estimator, where it either reached the
+  indices unremarked or surfaced later as an error about something else. The
+  "Fixed" entries below name those late errors one by one.
 
-  `sobol.analyze` and `sobol.indices` now standardize every output slice to
-  mean 0 and unit standard deviation over the sample axis before the
-  estimators run, which is what SALib has always done
-  (`SALib/analyze/sobol.py`: `Y = (Y - Y.mean()) / Y.std()`). It happens in
-  one place that both paths reach, so the traceable core and the checked
-  entry point cannot disagree, and the bootstrap resamples an
-  already-standardized array.
-
-  Sobol `S1` and `S2` point estimates and intervals move. `ST` moves only in
-  the last bits of a float32 result: the Jansen total-order estimator is a
-  difference, so it was already shift-invariant. Be clear about the size of
-  the win at a *small* output mean: Ishigami's own mean is 3.5, and there the
-  change is close to a wash (largest S1 error 0.106 against 0.123 at
-  N=1024, 0.0017 against 0.0017 at N=16384). What it removes is an error term
-  proportional to the output mean, whose size was otherwise unpredictable: at
-  the same N=1024 with an offset of 1e4 the largest S1 error was 50.8, and it
-  is now still 0.106.
-
-- **VKOGA derived its per-parameter streams by adding to a seed.** The index
-  estimator seeded its quasi-Monte-Carlo draws with `seed + 1 + i` and
-  `seed + 7919`. Streams that differ by a constant are not independent, which
-  is the reason the public interface moved from `seed` to `key`. The
-  estimators are host-side scipy, so they cannot split a key; they now spawn
-  one `numpy.random.SeedSequence` child per draw, which is the host-side
-  equivalent. Every VKOGA index moves by the size of its own Monte-Carlo
-  noise. The fitted surrogate is unchanged: `gamma`, `ridge` and the greedy
-  centres are bit-for-bit the same.
-
-- **VKOGA ignored `batch_size` in its index estimator.** The keyword reached
-  the surrogate `predict` path only; the estimator's own chunking passed
-  `None`, so the caller's value was silently dropped. It is now threaded
-  through and is a required argument internally, so it cannot be dropped
-  again.
-
-- **HSIC now warns in single precision.** Its V-statistic is a difference of
-  three same-magnitude sums, so float32 keeps three or four digits and the
-  index moves with row order — measured at 6e-4 relative against 2.5e-12 in
-  float64. VKOGA was previously the only method in the library that checked
-  the x64 flag.
-
-- **eFAST derives its slice chunk from the memory budget.** It used a fixed
-  2048 that ignored both dtype and `N`, so one chunk was about 4 GiB at
-  `n_per_curve = 65536` in float64.
+  To keep the old behaviour of those first three, pass `on_invalid="drop"`. To
+  keep `efast`'s, and that of the nine that let the value through, pass
+  `on_invalid="propagate"`.
 
 ### Added
 
@@ -341,9 +303,9 @@ draws are now symmetrised. See "Breaking".
   name or a duplicate now raises a `ValueError` that names the fix, instead
   of failing later in a `Theta` lookup or a dataset export.
 
-- **Eleven methods gain a pure `indices()` core.** `sobol.indices` already
-  existed; `efast`, `pawn`, `morris`, `hsic`, `borgonovo`,
-  `optimal_transport`, `dgsm`, `pce`, `hdmr` and `shapley` now have one too.
+- **Eleven methods gain a pure `indices()` core.** `sobol`, `efast`, `pawn`,
+  `morris`, `hsic`, `borgonovo`, `optimal_transport`, `dgsm`, `pce`, `hdmr`
+  and `shapley` each export one. No method exported an `indices()` before.
 
   A core takes the design object (or `problem, X, Y`) and returns a bare tuple
   of arrays. No result class, no diagnostics, no host read of any array value,
@@ -377,6 +339,11 @@ draws are now symmetrised. See "Breaking".
   `conf_level`, `ci_method`, `key` and `keep_replicates`. Eleven of thirteen
   methods now offer an interval.
 
+  `ci_method` now reaches every method that bootstraps. `pawn`, `borgonovo`
+  and `optimal_transport` bootstrapped already but were hard-wired to
+  percentile endpoints. All three now accept `"quantile"` or `"gaussian"`,
+  and `"quantile"` is the default, so their intervals do not move.
+
   `n_bootstrap` defaults to `0` everywhere, so nothing costs more than before
   unless asked. That default matters most for the four surrogate-backed
   methods, which refit their surrogate on **every** replicate.
@@ -398,100 +365,6 @@ draws are now symmetrised. See "Breaking".
   effect. PCE may reduce the requested order when the design matrix would be
   underdetermined; that used to be reported only by a warning during the fit,
   which a pure core cannot emit.
-
-### Changed
-
-- **Borgonovo says so, once, when the default applies the bias correction.**
-  `bias_correct` keeps its tri-state default (`None`). `None` applies the
-  Plischke correction whenever `n_bootstrap > 0`, so adding bootstrap
-  intervals to a call also changes the reported `delta` from the plug-in
-  estimate to the corrected one. The first default call per process that
-  resolves this way now emits one `JaxgsaWarning` saying which delta it
-  returned; pass an explicit `bias_correct=True` or `False` to silence it.
-  The docstring now spells out the resolution rule. No numbers move.
-
-- **The Sobol default-estimator rationale is the real one.** The docstring
-  used to justify `estimator="saltelli-jansen"` with historical continuity.
-  The recorded reasons are now that Jansen's total-order estimator is a mean
-  of squares, so `ST` can never go negative, and that it matches SALib's
-  default pairing, so the two libraries agree out of the box. Recorded in
-  ADR 0021. The default itself does not change.
-
-- **Hygiene sweep for 1.0.** No number moves and no schema changes. In short:
-
-  - Every warning now starts with `jaxgsa.<method>:`, so you can see which
-    method spoke. Before, five prefix styles were in use, including bare
-    `PAWN:` and `eFAST:` and no prefix at all.
-  - The vkoga `S_U` clip warning now names the parameters. It used to give
-    integer positions.
-  - `benchmarks` is importable as `jaxgsa.benchmarks`, like every other
-    subpackage. The broken examples in the `benchmarks`, `hsic` and `dgsm`
-    package docstrings now run as written.
-  - `morris.analyze` refuses a missing bootstrap `key` right after the input
-    checks. It used to compute the full point estimate first.
-  - An internal dgsm consistency check is now a real error instead of an
-    `assert`, so it still fires under `python -O`.
-  - Dead code is gone: an unused validator, the unused per-parameter Sobol
-    estimator trio and its legacy test module, an unused result-axes
-    variant, and two never-used parameters.
-  - Stale docstrings and comments now describe the current code, and the
-    remaining test modules without per-test tier docstrings carry
-    module-level oracle-tier lines (ADR 0001).
-
-- **eFAST and HSIC report no bootstrap interval, and the docs now say why.**
-  eFAST has one search curve per parameter, so there is nothing to resample —
-  removing a point does not shrink the sample, it changes what the estimator
-  computes. HSIC already reports permutation `p_values`, which is the
-  uncertainty statement for a V-statistic; a row bootstrap would repeat rows
-  onto the kernel diagonal, where the kernel is exactly 1, biasing the
-  resampled index upward by construction.
-
-- **`CONTEXT.md`** states the vocabulary the interface is frozen against, and
-  `tests/test_vocabulary.py` reads it back off the method registry. A
-  signature that drifts from the specification now fails a test rather than
-  shipping. Two rules the code does not satisfy yet are recorded as strict
-  xfails, so closing the gap forces the exemption to be deleted.
-
-- **`Problem.input_specs` returns spec dataclasses.** Before, it returned a
-  private 6-slot tuple. The tuple used the same two slots for different
-  things: `(low, high)` for a uniform marginal, `(mean, variance)` for a
-  Gaussian one, and dummy zeros for a categorical one. You had to know the
-  slot layout to read it.
-
-  Each entry is now a `jaxgsa.UniformSpec`, a `jaxgsa.GaussianSpec`, or a
-  `jaxgsa.CategoricalSpec`. Read the fields by name. Tell the three apart with
-  `isinstance`. `jaxgsa.InputSpec` is the union of the three, for annotations.
-
-  ```python
-  spec = problem.input_specs[0]
-  spec.low, spec.high        # was spec[1], spec[2]
-  ```
-
-  `jaxgsa.dgsm.poincare_constant()` and `jaxgsa.dgsm.marginal_variance()` take
-  the dataclass too. Before, they took the private tuple, so you could not call
-  them from outside the package.
-
-  The input side does not change. `Problem.from_dict` still accepts a
-  `(low, high)` tuple and the `UniformInputSpec` / `GaussianInputSpec` /
-  `CategoricalInputSpec` dicts, exactly as before. It also accepts the new
-  dataclasses. A saved `.npz` file keeps its dict form, so files written by
-  earlier versions still load.
-
-- **`SobolResult.nan_counts` is removed.** It counted the `NaN` entries in the
-  computed indices and threw away which model run produced them, which is the
-  one thing you need in order to act. `result.invalid` replaces it and keeps
-  the positions. See "Failed model runs" below.
-
-- **A non-finite model output now raises by default.** Before, what happened
-  depended on the method you called: `sobol`, `morris` and `kucherenko` dropped
-  the affected data and warned, `efast` warned and computed anyway, and the
-  other nine let the value reach the indices with no warning at all.
-
-  To keep the old behaviour of those first three, pass `on_invalid="drop"`. To
-  keep `efast`'s, and that of the nine silent ones, pass
-  `on_invalid="propagate"`.
-
-### Added
 
 - **`estimator=` on `sobol.analyze()` and `sobol.indices()`.** Six named
   estimator pairs, where before the formulas were fixed with no option.
@@ -567,7 +440,94 @@ draws are now symmetrised. See "Breaking".
   not the same as no check having run. Positions always refer to the array as
   you passed it, before anything was removed.
 
+### Changed
+
+- **Borgonovo says so, once, when the default applies the bias correction.**
+  `bias_correct` keeps its tri-state default (`None`). `None` applies the
+  Plischke correction whenever `n_bootstrap > 0`, so adding bootstrap
+  intervals to a call also changes the reported `delta` from the plug-in
+  estimate to the corrected one. The first default call per process that
+  resolves this way now emits one `JaxgsaWarning` saying which delta it
+  returned; pass an explicit `bias_correct=True` or `False` to silence it.
+  The docstring now spells out the resolution rule. No numbers move.
+
+- **The Sobol default-estimator rationale is the real one.** The docstring
+  used to justify `estimator="saltelli-jansen"` with historical continuity.
+  The recorded reasons are now that Jansen's total-order estimator is a mean
+  of squares, so `ST` can never go negative, and that it matches SALib's
+  default pairing, so the two libraries agree out of the box. Recorded in
+  ADR 0021. The default itself does not change.
+
+- **Hygiene sweep for 1.0.** No number moves and no schema changes. In short:
+
+  - Every warning now starts with `jaxgsa.<method>:`, so you can see which
+    method spoke. Before, six prefix spellings were in use: a bare `jaxgsa:` on
+    most warnings, `jaxgsa.vkoga:`, `jaxgsa.sobol.sample:`, and the bare
+    `PAWN:`, `eFAST:` and `DGSM:`.
+  - The vkoga `S_U` clip warning now names the parameters. It used to give
+    integer positions.
+  - `benchmarks` is importable as `jaxgsa.benchmarks`, like every other
+    subpackage. The broken examples in the `benchmarks`, `hsic` and `dgsm`
+    package docstrings now run as written.
+  - `morris.analyze` refuses a missing bootstrap `key` right after the input
+    checks. It used to compute the full point estimate first.
+  - An internal dgsm consistency check is now a real error instead of an
+    `assert`, so it still fires under `python -O`.
+  - Dead code is gone: an unused validator, the unused per-parameter Sobol
+    estimator trio and its legacy test module, an unused result-axes
+    variant, and two never-used parameters.
+  - Stale docstrings and comments now describe the current code, and the
+    remaining test modules without per-test tier docstrings carry
+    module-level oracle-tier lines (ADR 0001).
+
+- **eFAST and HSIC report no bootstrap interval, and the docs now say why.**
+  eFAST has one search curve per parameter, so there is nothing to resample —
+  removing a point does not shrink the sample, it changes what the estimator
+  computes. HSIC already reports permutation `p_values`, which is the
+  uncertainty statement for a V-statistic; a row bootstrap would repeat rows
+  onto the kernel diagonal, where the kernel is exactly 1, biasing the
+  resampled index upward by construction.
+
+- **`CONTEXT.md`** states the vocabulary the interface is frozen against, and
+  `tests/test_vocabulary.py` reads it back off the method registry. A
+  signature that drifts from the specification now fails a test rather than
+  shipping. Two rules the code does not satisfy yet are recorded as strict
+  xfails, so closing the gap forces the exemption to be deleted.
+
 ### Performance
+
+- **The Sobol bootstrap keeps a single-axis gather on a scalar output.**
+  Mapping the bootstrap over output slices, which is what makes it fast on
+  many outputs, would make every gather batched on two axes, and XLA compiles
+  that to a slower gather than a single-axis one. A chunk holding one slice
+  has no outer axis worth mapping, so it drops the outer `vmap`. On an Apple
+  M1 Pro at N=1024, D=3 and 1000 resamples, one output slice takes 8.5 ms.
+  Chunks holding more than one slice take the mapped path. The numbers are
+  the same either way: every interval endpoint is bit-identical, on every
+  estimator. The shortcut also applies when many slices exist but the memory
+  budget has narrowed the chunk to one.
+
+- **The PCE streamed fit dispatches one jitted step per row batch.** Each
+  batch used to run several eager ops: an unjitted design-matrix build plus
+  accumulation matmuls. The per-batch step is now one jitted call, and the
+  ragged trailing batch is zero-padded and masked, so each step compiles
+  once. Padded rows contribute exact zeros to the normal equations and to
+  the leave-one-out sum. This is the pattern the HDMR fit already uses,
+  where the same fix was measured at 1.2-1.67x.
+
+- **The truncated-Gaussian Poincare constant is cached.** DGSM's FEM
+  eigensolve for a truncated Gaussian marginal used to run on every
+  `analyze` call. It is a pure function of five scalars, so it is now
+  memoised with `functools.lru_cache` and runs once per distinct marginal
+  per process. Zero numeric change: the cached value is the value the solve
+  returned.
+
+- **PCE second-order extraction no longer builds an unbudgeted transient.**
+  `sobol_from_coefficients` materialized an `(n_terms, D*(D-1)/2)` float
+  array for the S2 pair mask — about 3.5 GB at `D=100`, order 3. The pair
+  axis now streams in chunks sized by the memory budget. At small `D` the
+  budget allows one chunk, which runs the exact old matmul, so shipped
+  values are bit-for-bit unchanged.
 
 - **`jaxgsa.hsic.analyze` is about 10x faster on many outputs.** On a 1024-row
   Ishigami problem with 128 output slices the call went from 32.2 s to 3.2 s,
@@ -603,7 +563,7 @@ draws are now symmetrised. See "Breaking".
   untiled result.
 
 - **The Sobol bootstrap is 9-20x faster on many outputs.** On a 1024-row
-  Ishigami problem with 128 output slices, `analyze(..., num_resamples=...)`
+  Ishigami problem with 128 output slices, `analyze(..., n_bootstrap=...)`
   went from 84 ms to 4-9 ms. The resampler now runs one estimator kernel over
   one output slice, mapped over the resample draws and then over a chunk of
   slices; before, a Python loop dispatched twice per slice. Confidence
@@ -617,6 +577,58 @@ draws are now symmetrised. See "Breaking".
   a different width. `scripts/baseline/README.md` records the review.
 
 ### Fixed
+
+- **Sobol standardizes the outputs, always, and this fixes real numbers.**
+  The Sobol'-Mauntz first-order estimator and every second-order estimator
+  are *uncentred* products, so a non-zero output mean adds an error term
+  proportional to that mean. On Ishigami at N=4096 with an output offset of
+  1e4, `S1` came back `[6.26, 0.434, 1.71]` against the analytic
+  `[0.314, 0.442, 0.000]`. Float64 gave `[6.27, 0.433, 1.72]`, so this was
+  estimator bias and not rounding.
+
+  `sobol.analyze` and `sobol.indices` now standardize every output slice to
+  mean 0 and unit standard deviation over the sample axis before the
+  estimators run, which is what SALib has always done
+  (`SALib/analyze/sobol.py`: `Y = (Y - Y.mean()) / Y.std()`). It happens in
+  one place that both paths reach, so the traceable core and the checked
+  entry point cannot disagree, and the bootstrap resamples an
+  already-standardized array.
+
+  Sobol `S1` and `S2` point estimates and intervals move. `ST` moves only in
+  the last bits of a float32 result: the Jansen total-order estimator is a
+  difference, so it was already shift-invariant. Be clear about the size of
+  the win at a *small* output mean: Ishigami's own mean is 3.5, and there the
+  change is close to a wash (largest S1 error 0.106 against 0.123 at
+  N=1024, 0.0017 against 0.0017 at N=16384). What it removes is an error term
+  proportional to the output mean, whose size was otherwise unpredictable: at
+  the same N=1024 with an offset of 1e4 the largest S1 error was 50.8, and it
+  is now still 0.106.
+
+- **VKOGA derived its per-parameter streams by adding to a seed.** The index
+  estimator seeded its quasi-Monte-Carlo draws with `seed + 1 + i` and
+  `seed + 7919`. Streams that differ by a constant are not independent, which
+  is the reason the public interface moved from `seed` to `key`. The
+  estimators are host-side scipy, so they cannot split a key; they now spawn
+  one `numpy.random.SeedSequence` child per draw, which is the host-side
+  equivalent. Every VKOGA index moves by the size of its own Monte-Carlo
+  noise. The fitted surrogate is unchanged: `gamma`, `ridge` and the greedy
+  centres are bit-for-bit the same.
+
+- **VKOGA ignored `batch_size` in its index estimator.** The keyword reached
+  the surrogate `predict` path only; the estimator's own chunking passed
+  `None`, so the caller's value was silently dropped. It is now threaded
+  through and is a required argument internally, so it cannot be dropped
+  again.
+
+- **HSIC now warns in single precision.** Its V-statistic is a difference of
+  three same-magnitude sums, so float32 keeps three or four digits and the
+  index moves with row order — measured at 6e-4 relative against 2.5e-12 in
+  float64. VKOGA was previously the only method in the library that checked
+  the x64 flag.
+
+- **eFAST derives its slice chunk from the memory budget.** It used a fixed
+  2048 that ignored both dtype and `N`, so one chunk was about 4 GiB at
+  `n_per_curve = 65536` in float64.
 
 - **`to_dataset()` lost the analysis settings.** A result printed its settings
   in its summary, but it did not always export them. `eFAST`, `HDMR`, `PCE`,
@@ -644,8 +656,8 @@ draws are now symmetrised. See "Breaking".
   when no cross-validation ran, because netCDF has no null attribute.
 
 - **A Sobol bootstrap no longer reports indices that differ from the plain
-  analysis.** `analyze(sr, Y, num_resamples=20).S2` and
-  `analyze(sr, Y, num_resamples=0).S2` could differ in the last bits for the
+  analysis.** `analyze(sr, Y, n_bootstrap=20).S2` and
+  `analyze(sr, Y, n_bootstrap=0).S2` could differ in the last bits for the
   same design, because the two paths ran the estimator at different batch
   widths. An interval was centred on a number the plain analysis never
   reported. Both paths now run the same kernel and agree bit-for-bit.
@@ -735,25 +747,21 @@ not a side effect. They are marked **now raises** below.
 - **`result.ci` records how a confidence interval was made.** Until now a
   `*_conf` array was an interval of unknown level: nothing on the result said
   whether it was a 95% or a 68% interval, which endpoint rule drew it, or how
-  many resamples it rested on. The five results that carry intervals
-  (`SobolResult`, `MorrisResult`, `DeltaResult`, `PAWNResult`, `OTResult`) now
-  carry a `ci` field holding `level`, `method`, `n_bootstrap` and, on request,
+  many resamples it rested on. Every result that reports intervals now carries
+  a `ci` field holding `level`, `method`, `n_bootstrap` and, on request,
   `replicates`. `S1` and `S1_conf` are unchanged plain arrays.
 - **`keep_replicates=True` keeps the bootstrap draws.** `analyze` discarded
   them, so recomputing an interval at another level meant re-running the whole
   analysis. Pass `keep_replicates=True` and the draws arrive on
   `result.ci.replicates`, keyed by the estimate they belong to. It is off by
   default because the draws are large: 1000 resamples of a
-  `(T=100, K=5, D=20)` index array is 80 MB.
+  `(T=100, K=5, D=20)` index array is 80 MB. Every method that reports an
+  interval accepts the keyword, and it is keyword-only and last in each
+  signature.
 
-  All five methods that report intervals accept the keyword: `jaxgsa.sobol`,
-  `jaxgsa.morris`, `jaxgsa.pawn`, `jaxgsa.borgonovo` and
-  `jaxgsa.optimal_transport`.
-- **`jaxgsa.sobol.indices()` computes the indices with nothing around them.**
-  `analyze` reads output values on the host to apply its `on_invalid` policy,
-  and a policy decision needs a concrete number, so it cannot run inside
-  `jax.jit` or `jax.vmap`. `indices` reads nothing, so it can. Both call one
-  estimator, so the numbers are the same.
+  The stored draws follow the reported convention. Sobol's `S2` replicates are
+  symmetric with a NaN diagonal, exactly as the `S2` point estimate and its
+  intervals are, so read the upper triangle.
 - **`SobolSamples.unit` and `SobolSamples.transform(theta)`.** `unit` holds the
   design in the unit cube, before any input distribution is applied, so it does
   not depend on the distributions at all. `transform` applies a set of
@@ -811,9 +819,9 @@ not a side effect. They are marked **now raises** below.
   base class. This also removes an inverted dependency: `jaxgsa._core` no
   longer imports a method package's private module.
 - **NumPy is now a declared dependency**, at `numpy>=2`. NumPy is imported
-  directly by about twenty modules but reached users only through JAX and
-  SciPy, both of which allow NumPy 1.x. An install from PyPI could therefore
-  get a NumPy the package does not support.
+  directly by 45 of the package's 74 modules, but it reached users only
+  through JAX and SciPy, both of which allow NumPy 1.x. An install from PyPI
+  could therefore get a NumPy the package does not support.
 - **The SciPy floor rises to `scipy>=1.15`**, from `>=1.10`. This makes
   `scipy.stats.chatterjeexi` always available as a verification oracle.
 - **PAWN's `slice_chunk_size` default is now derived from the memory budget**,

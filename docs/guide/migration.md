@@ -26,8 +26,14 @@ you compare a 1.0 result against one you stored under 0.8.
 ### Your scripts print now
 
 Every one of the thirteen `analyze()` functions and all four samplers take
-`verbose: bool = True`. The default is on. A script that ran silently under
-0.8 writes to stdout under 1.0:
+`verbose: bool = True`. The default is on.
+
+Not all of that is new. Under 0.8 `sobol.sample` and `morris.sample` already
+printed a summary by default. What changed is that no `analyze()` printed
+anything before, and `efast.sample` and `kucherenko.sample` were silent too.
+So a script that only sampled with Sobol or Morris sees more output than
+before, and a script that analysed anything sees output where there was
+none:
 
 ```python
 import jaxgsa

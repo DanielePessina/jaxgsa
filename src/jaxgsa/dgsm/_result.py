@@ -13,9 +13,12 @@ from jaxgsa.problem import Problem
 class DGSMResult(SchemaResult):
     """Derivative-based global sensitivity measures and Sobol index bounds.
 
-    ``upper_bound`` and ``lower_bound`` bracket the total Sobol index ``ST_i``
-    of each input. An input whose upper bound is near zero is provably
-    negligible. A large lower bound certifies that the input matters.
+    ``upper_bound`` is a proven cap on the total Sobol index ``ST_i`` of each
+    input, so an input whose upper bound is near zero is provably negligible.
+    ``lower_bound`` is a floor on ``ST_i`` only when input i's marginal is an
+    untruncated Gaussian. For a uniform or truncated marginal it is an
+    estimate, exact for a response that is linear in that input and able to
+    sit above the true ``ST_i`` for a curved one. See ``lower_bound`` below.
 
     The index arrays mirror the output layout. A scalar-output model gives
     ``(D,)`` indices and a scalar ``var_y``. Multi-output gives ``(K, D)``
@@ -32,8 +35,23 @@ class DGSMResult(SchemaResult):
         upper_bound: Poincare upper bound on ST, ``C_i * nu_i / Var(Y)``, same
             shape as ``nu``. ``C_i`` is the Poincare constant of input i's
             marginal.
-        lower_bound: Kucherenko-Song lower bound on ST,
-            ``Var(x_i) * sigma_i^2 / Var(Y)``, same shape as ``nu``.
+        lower_bound: ``Var(x_i) * sigma_i^2 / Var(Y)``, same shape as ``nu``.
+            Kucherenko & Song (2016) prove this is a lower bound on ``ST_i``
+            for a **Gaussian** marginal (their Theorem 4.1), and only there.
+            The proof goes through Stein's identity
+            ``Cov(f, x_i) = E[tau(x_i) * df/dx_i]``, whose kernel ``tau``
+            equals the constant ``Var(x_i)`` for an untruncated Gaussian and
+            for no other marginal this package supports. For ``U(a, b)``,
+            ``tau(x) = (x - a)(b - x)/2``, and replacing it by its mean
+            ``Var(x_i)`` is an approximation rather than an inequality. So on
+            a uniform or truncated-Gaussian input this is exact when the
+            response is linear in that input, close when it is nearly linear,
+            and can exceed the true ``ST_i`` when it is strongly curved: on
+            ``f(p) = 1/p`` with ``p ~ U(0.1, 0.4)`` it reads 1.29, while the
+            only input of a one-input model has ``ST = 1`` by definition. The
+            paper's lower bounds for uniform inputs (LB1 and LB2) are
+            different quantities, needing boundary evaluations and the higher
+            moments ``E[x_i^m * df/dx_i]``; neither is computed here.
         var_y: Output variance per slice, shape ``()`` / ``(K,)`` / ``(T, K)``.
             ``nu``, ``sigma`` and ``var_y`` are all reported for the
             standardized output when the analysis ran with

@@ -4,11 +4,16 @@ DGSM ranks inputs by the mean squared partial derivative
 ``nu_i = E[(df/dx_i)^2]``, averaged over the input distribution. Reverse-mode
 autodiff gives it cheaply when the model is written in JAX.
 
-Two inequalities turn the derivative moments into a bracket on the total
-Sobol index ``ST_i``. A Poincare inequality turns ``nu_i`` into an upper
-bound. The Kucherenko-Song inequality turns the mean derivative
-``E[df/dx_i]`` into a lower bound. One derivative sample therefore brackets
-ST at a fraction of the cost of a Sobol design.
+A Poincare inequality turns ``nu_i`` into an upper bound on the total Sobol
+index ``ST_i``, for every marginal this package supports. One derivative
+sample therefore caps ST at a fraction of the cost of a Sobol design, and a
+cap near zero settles the input.
+
+``lower_bound`` reports ``Var(x_i) * E[df/dx_i]^2 / Var(Y)``. Kucherenko &
+Song (2016) prove this is a floor under ``ST_i`` for a Gaussian marginal, and
+only there. On a uniform or truncated marginal it is an estimate, exact for a
+response linear in that input and able to overshoot the true ``ST_i`` for a
+curved one. Read the upper bound as a proof and the lower one as a guide.
 
 Example::
 
