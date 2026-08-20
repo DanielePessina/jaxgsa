@@ -1,5 +1,54 @@
 # Code findings from the v1.0 docs pass (2026-08-20)
 
+## 0. CI is red across the whole stack, and master is green
+
+This one blocks the merge, so it goes first. It was found by checking CI
+rather than by the docs pass.
+
+`master` passes CI (last five runs green, newest `03ee1f3`). Every PR in the
+stack fails, as far down as #59, with the SAME nine tests:
+
+    tests/test_borgonovo.py::TestGridTiling::test_tiled_grid_is_bit_identical
+      [2, 3, 4, 7, 8, 16, 50, 99]
+    tests/test_hsic.py::TestIndicesCore::test_is_vmappable
+
+So the stack introduced them. Merging it as it stands turns master red.
+
+They pass on an Apple M1 Pro and fail on the x86 Linux runner, which is why
+local runs are green. Both tests assert bit-identity between two paths that
+the algorithm says cannot differ.
+
+- Borgonovo: 12 of 45 elements differ, max absolute 2.98e-08 on values near
+  0.21, so roughly one float32 ULP. The test's docstring states the
+  reasoning plainly: every grid point sums over its own class members and
+  nothing else, so no tiling reorders a reduction. That is true of the
+  algorithm. It is not true of the compiled code, because XLA is free to
+  vectorize a reduction differently at a different trip count, and the tile
+  width is the trip count.
+- HSIC: max absolute 8.88e-06, max relative 2.43e-04, against a tolerance of
+  rtol=1e-4. That is about a hundred times the Borgonovo gap, so it may be a
+  different cause and should not be assumed to be the same one.
+
+Two ways to resolve, and the choice is a real decision about what the
+library promises, so it is left alone here:
+
+1. Accept that bit-identity across tile widths is not portable, and compare
+   with a tight tolerance plus a comment naming compiler vectorization as
+   the reason. Cheapest, and honest, but it weakens a guarantee someone
+   deliberately wrote `assert_array_equal` for, with the reasoning recorded
+   in the docstring.
+2. Make the kernels genuinely bit-identical on every target, by fixing the
+   reduction order rather than leaving it to XLA. Keeps the promise, costs
+   speed, and needs measurement before anyone commits to it.
+
+The HSIC failure deserves its own look before either is applied to it.
+
+Note for whoever reads the CI dashboard: #67's `baseline` job failing is a
+different thing and is expected. It compares against the PR's base and
+reports the 22 dgsm values that the sanctioned jacfwd regeneration moves on
+purpose. #69's baseline job passes.
+
+
 The docs pass ran every code example against the branch. That found bugs the
 test suite does not cover, because `examples/` and the doc pages are not
 tested. Listed worst first. None of these are fixed on the docs branch; the
