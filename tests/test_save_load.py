@@ -14,7 +14,6 @@ from jaxgsa.sobol import SobolSamples
 
 def _assert_equal(left: SobolSamples, right: SobolSamples) -> None:
     _assert_array_identical(left.samples, right.samples)
-    _assert_array_identical(left.sample_ids, right.sample_ids)
     _assert_array_identical(left.expanded_to_unique, right.expanded_to_unique)
     assert left.n_expanded == right.n_expanded
     assert left.base_n == right.base_n

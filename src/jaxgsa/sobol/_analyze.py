@@ -23,6 +23,7 @@ Array shape conventions used throughout:
     step: rows per Saltelli group, 2D+2 (second order) or D+2 (first only)
 """
 
+import dataclasses
 from functools import lru_cache
 from typing import Literal
 
@@ -32,7 +33,7 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core import verbose as _verbose
-from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
+from jaxgsa._core.bootstrap import interval
 from jaxgsa._core.entry import (
     at_least,
     check_scalars,
@@ -42,12 +43,12 @@ from jaxgsa._core.entry import (
     require,
 )
 from jaxgsa._core.invalid import InvalidReport, OnInvalid
-from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
     YLayout,
     _prepare_Y,
     _standardize_outputs,
 )
+from jaxgsa.sobol._bootstrap import _bootstrap_indices
 from jaxgsa.sobol._chunking import pad_slice_axis, resolve_point_chunk_size
 from jaxgsa.sobol._estimators import (
     DEFAULT_ESTIMATOR,
@@ -88,8 +89,8 @@ def _get_batched_kernel(calc_second_order: bool, estimator: str):
 
 def _separate_output_values(
     Y: Array, D: int, calc_second_order: bool
-) -> tuple[Array, Array, Array, Array | None]:
-    """Standardize the outputs, then de-interleave them into A, B, AB, BA.
+) -> tuple[Array, Array, Array | None, Array]:
+    """Standardize the outputs, then de-interleave them into A, AB, BA, B.
 
     The standardization is ``(Y - mean) / std`` over the sample axis, one mean
     and one standard deviation per output slice, and it is not optional. The
@@ -120,9 +121,11 @@ def _separate_output_values(
         calc_second_order: Whether the layout includes BA blocks.
 
     Returns:
-        Tuple ``(A, B, AB, BA)`` with shapes ``(N, ...)``, ``(N, ...)``,
-        ``(N, D, ...)`` and ``(N, D, ...)``. BA is None when second order is
-        off.
+        Tuple ``(A, AB, BA, B)`` with shapes ``(N, ...)``, ``(N, D, ...)``,
+        ``(N, D, ...)`` and ``(N, ...)``. This is the order every estimator
+        kernel in :mod:`jaxgsa.sobol._estimators` consumes, so a caller that
+        unpacks this tuple straight into a kernel call cannot swap two
+        blocks by accident. BA is None when second order is off.
     """
     # Per output slice: axis 0 is the expanded sample axis, every trailing
     # axis keeps its own mean and standard deviation.
@@ -151,21 +154,45 @@ def _separate_output_values(
     if calc_second_order:
         BA = grouped[:, D + 1 : 2 * D + 1]  # (N, D, ...)
 
-    return A, B, AB, BA
+    return A, AB, BA, B
+
+
+def _symmetrize_s2(S2: Array) -> Array:
+    """Average the upper and lower triangles of a raw S2 matrix.
+
+    The kernel computes ``S2_jk`` and ``S2_kj`` independently, from the same
+    formula with ``j`` and ``k`` swapped. They estimate the same second-order
+    index, and the two triangles differ only by Monte Carlo noise, not
+    floating-point drift: on Ishigami at ``base_n = 256`` the mean absolute
+    gap is 0.026. Averaging the two is a deliberate departure from SALib,
+    which reports the upper triangle alone; it cuts S2 RMSE 5-16% for free
+    (measured in ``scratchpad/fix/sobol/repro_s2_symmetrise.py``), at the
+    cost of matching SALib's output only up to that noise, not bit for bit.
+
+    Args:
+        S2: The kernel's raw ``(D, D)``-trailing output, both triangles
+            populated, diagonal undefined.
+
+    Returns:
+        The symmetric average, same shape. The diagonal is meaningless here
+        too; :func:`_normalize_s2_matrix` masks it.
+    """
+    return 0.5 * (S2 + jnp.swapaxes(S2, -1, -2))
+
+
+def _mask_s2_diagonal(S2: Array) -> Array:
+    """Set the diagonal of an already-symmetric S2 matrix to NaN.
+
+    ``S2_jj`` (a parameter's interaction with itself) is undefined in Sobol
+    ANOVA, so it is never a value to read; NaN says so.
+    """
+    D = S2.shape[-1]
+    return jnp.where(jnp.eye(D, dtype=bool), jnp.nan, S2)
 
 
 def _normalize_s2_matrix(S2: Array) -> Array:
-    """Symmetrise the S2 matrix and set diagonal entries to NaN."""
-    # The fused kernel computes the full (D,D) matrix, but only the upper
-    # triangle S2_{j<k} is meaningful; the lower triangle has a different
-    # numerical path and slight floating-point drift.  We canonicalise by
-    # keeping the upper triangle and mirroring it.
-    D = S2.shape[-1]
-    upper = jnp.triu(S2, k=1)
-    mirrored = upper + jnp.swapaxes(upper, -1, -2)
-    # Diagonal S2_{jj} (self-interaction) is undefined in Sobol ANOVA
-    diag_mask = jnp.eye(D, dtype=bool)
-    return jnp.where(diag_mask, jnp.nan, mirrored)
+    """Symmetrise the S2 matrix (see :func:`_symmetrize_s2`) and NaN the diagonal."""
+    return _mask_s2_diagonal(_symmetrize_s2(S2))
 
 
 def _estimator_checks(estimator: str, calc_second_order: bool) -> tuple:
@@ -195,8 +222,8 @@ def _estimator_checks(estimator: str, calc_second_order: bool) -> tuple:
 
 
 def _flatten_slices(
-    A: Array, B: Array, AB: Array, BA: Array | None
-) -> tuple[Array, Array, Array, Array | None]:
+    A: Array, AB: Array, BA: Array | None, B: Array
+) -> tuple[Array, Array, Array | None, Array]:
     """Fold the (T, K) output axes of the separated matrices into one slice axis.
 
     Every estimator kernel reads one output slice at a time, so the (T, K)
@@ -204,16 +231,20 @@ def _flatten_slices(
     point-estimate path and the bootstrap path map over that axis, so they
     flatten the same way and index the same slices in the same order.
 
+    Args and return both use ``(A, AB, BA, B)``, the order every estimator
+    kernel consumes, so unpacking straight into a kernel call cannot swap two
+    blocks by accident.
+
     Args:
         A: Outputs from sample matrix A, shape ``(N, T, K)``.
-        B: Outputs from sample matrix B, shape ``(N, T, K)``.
         AB: Outputs from the AB cross-matrices, shape ``(N, D, T, K)``.
         BA: Outputs from the BA cross-matrices, shape ``(N, D, T, K)``, or
             ``None`` when second order is off.
+        B: Outputs from sample matrix B, shape ``(N, T, K)``.
 
     Returns:
-        ``(A_flat, B_flat, AB_flat, BA_flat)`` with shapes ``(S, N)``,
-        ``(S, N)``, ``(S, N, D)`` and ``(S, N, D)``. ``BA_flat`` is ``None``
+        ``(A_flat, AB_flat, BA_flat, B_flat)`` with shapes ``(S, N)``,
+        ``(S, N, D)``, ``(S, N, D)`` and ``(S, N)``. ``BA_flat`` is ``None``
         when ``BA`` is.
     """
     base_n, T, K = A.shape
@@ -225,14 +256,14 @@ def _flatten_slices(
     B_flat = B.transpose(1, 2, 0).reshape(total, base_n)
     AB_flat = AB.transpose(2, 3, 0, 1).reshape(total, base_n, D)
     BA_flat = None if BA is None else BA.transpose(2, 3, 0, 1).reshape(total, base_n, D)
-    return A_flat, B_flat, AB_flat, BA_flat
+    return A_flat, AB_flat, BA_flat, B_flat
 
 
 def _point_indices_3d(
     A_flat: Array,
-    B_flat: Array,
     AB_flat: Array,
     BA_flat: Array | None,
+    B_flat: Array,
     *,
     T: int,
     K: int,
@@ -255,10 +286,10 @@ def _point_indices_3d(
 
     Args:
         A_flat: Outputs from sample matrix A, shape ``(S, N)``.
-        B_flat: Outputs from sample matrix B, shape ``(S, N)``.
         AB_flat: Outputs from the AB cross-matrices, shape ``(S, N, D)``.
         BA_flat: Outputs from the BA cross-matrices, shape ``(S, N, D)``, or
             ``None`` when second order is off.
+        B_flat: Outputs from sample matrix B, shape ``(S, N)``.
         T: Number of time steps in the promoted layout.
         K: Number of output variables in the promoted layout.
         D: Number of input parameters.
@@ -271,10 +302,12 @@ def _point_indices_3d(
     Returns:
         ``(S1, ST, S2)`` shaped ``(T, K, D)``, ``(T, K, D)`` and
         ``(T, K, D, D)``, with ``S2`` ``None`` when second order is off. The
-        S2 matrix is the kernel's raw output, not yet symmetrised: the
-        bootstrap path centres its Gaussian endpoints on the raw matrix and
-        symmetrises point and endpoints together afterwards. The inserted T
-        and K axes are still in place; the caller squeezes them.
+        S2 matrix is the kernel's raw output, not yet symmetrised: see
+        :func:`_symmetrize_s2`. The bootstrap path symmetrises the point
+        estimate and every draw the same way before either feeds a
+        confidence interval, so an interval always describes the symmetrised
+        quantity the point estimate reports. The inserted T and K axes are
+        still in place; the caller squeezes them.
 
     Raises:
         ValueError: If ``slice_chunk_size`` is below 1.
@@ -390,14 +423,14 @@ def _indices_from_expanded(
     Y, layout = _prepare_Y(Y)
     _, T, K = Y.shape
 
-    A, B, AB, BA = _separate_output_values(Y, D, calc_second_order)
-    A_flat, B_flat, AB_flat, BA_flat = _flatten_slices(A, B, AB, BA)
+    A, AB, BA, B = _separate_output_values(Y, D, calc_second_order)
+    A_flat, AB_flat, BA_flat, B_flat = _flatten_slices(A, AB, BA, B)
 
     S1_out, ST_out, S2_out = _point_indices_3d(
         A_flat,
-        B_flat,
         AB_flat,
         BA_flat,
+        B_flat,
         T=T,
         K=K,
         D=D,
@@ -546,20 +579,14 @@ def _analyze_bootstrap(
     budget can lower it further, so the peak stays bounded: no call
     materialises more than ``chunk * R`` copies of an (N,) or (N, D) slice.
     """
-    from jaxgsa.sobol._bootstrap import (
-        _bootstrap_first_total,
-        _bootstrap_second_order,
-        _resolve_slice_chunk_size,
-    )
-
     Y, layout = _prepare_Y(Y)
     D = sampling_result.n_params
     calc_second_order = sampling_result.calc_second_order
 
     _, T, K = Y.shape
-    A, B, AB, BA = _separate_output_values(Y, D, calc_second_order)
+    A, AB, BA, B = _separate_output_values(Y, D, calc_second_order)
     base_n = A.shape[0]
-    A_flat, B_flat, AB_flat, BA_flat = _flatten_slices(A, B, AB, BA)
+    A_flat, AB_flat, BA_flat, B_flat = _flatten_slices(A, AB, BA, B)
     total = T * K
 
     # Pre-generate all R bootstrap index sets (sampling with replacement).
@@ -568,11 +595,11 @@ def _analyze_bootstrap(
     # transformable entry point.
     resample_idx = jax.random.randint(key, shape=(n_bootstrap, base_n), minval=0, maxval=base_n)
 
-    S1_out, ST_out, S2_out = _point_indices_3d(
+    S1_out, ST_out, S2_raw = _point_indices_3d(
         A_flat,
-        B_flat,
         AB_flat,
         BA_flat,
+        B_flat,
         T=T,
         K=K,
         D=D,
@@ -581,52 +608,67 @@ def _analyze_bootstrap(
         estimator=estimator,
     )
 
-    cs = _resolve_slice_chunk_size(
-        slice_chunk_size, total, n_bootstrap, base_n, D, calc_second_order, A_flat.dtype.itemsize
+    cs = resolve_point_chunk_size(
+        slice_chunk_size,
+        total,
+        base_n,
+        D,
+        calc_second_order,
+        A_flat.dtype.itemsize,
+        n_bootstrap=n_bootstrap,
     )
 
-    S2_boot = None
-    if calc_second_order:
-        assert BA_flat is not None
-        s1_boot, st_boot, s2_boot = _bootstrap_second_order(
-            resample_idx, A_flat, AB_flat, BA_flat, B_flat, cs, estimator
-        )
-        # (S, R, D, D) -> (R, T, K, D, D): the CI helpers and the replicate
-        # layout both want the resample axis first.
-        S2_boot = jnp.moveaxis(s2_boot, 1, 0).reshape(n_bootstrap, T, K, D, D)
-    else:
-        s1_boot, st_boot = _bootstrap_first_total(
-            resample_idx, A_flat, AB_flat, B_flat, cs, estimator
-        )
-
+    s1_boot, st_boot, s2_boot_raw = _bootstrap_indices(
+        resample_idx, A_flat, AB_flat, BA_flat, B_flat, cs, estimator
+    )
     S1_boot = jnp.moveaxis(s1_boot, 1, 0).reshape(n_bootstrap, T, K, D)
     ST_boot = jnp.moveaxis(st_boot, 1, 0).reshape(n_bootstrap, T, K, D)
 
-    # Confidence intervals: stack [lower, upper] into leading dim of size 2.
-    # Every endpoint reduces over the leading resample axis alone, so the
-    # whole (T, K, D) grid is one call rather than one call per slice.
-    S1_conf = jnp.stack(
-        _bootstrap_ci_endpoints(S1_out, S1_boot, conf_level=conf_level, ci_method=ci_method)
-    )
-    ST_conf = jnp.stack(
-        _bootstrap_ci_endpoints(ST_out, ST_boot, conf_level=conf_level, ci_method=ci_method)
-    )
+    points = {"S1": S1_out, "ST": ST_out}
+    draws = {"S1": S1_boot, "ST": ST_boot}
 
+    S2_sym = None
     if calc_second_order:
-        assert S2_out is not None and S2_boot is not None
-        # Point and endpoints are both symmetrised, and only after the
-        # endpoints are read: a Gaussian endpoint is centred on the raw
-        # matrix, as the diagonal of the symmetrised one is NaN.
-        S2_conf = _normalize_s2_matrix(
-            jnp.stack(
-                _bootstrap_ci_endpoints(
-                    S2_out, S2_boot, conf_level=conf_level, ci_method=ci_method
-                )
-            )
-        )
-        S2_out = _normalize_s2_matrix(S2_out)
-    else:
-        S2_conf = None
+        assert S2_raw is not None and s2_boot_raw is not None
+        # (S, R, D, D) -> (R, T, K, D, D): the CI helpers and the replicate
+        # layout both want the resample axis first.
+        S2_boot_raw = jnp.moveaxis(s2_boot_raw, 1, 0).reshape(n_bootstrap, T, K, D, D)
+        # Symmetrise the point estimate and every draw before either reaches
+        # a confidence interval, so the interval describes the same
+        # symmetrised quantity the point estimate reports (see
+        # _symmetrize_s2). The diagonal stays whatever it computed to here;
+        # it is masked to NaN once, below, after the interval is read.
+        S2_sym = _symmetrize_s2(S2_raw)
+        points["S2"] = S2_sym
+        draws["S2"] = _symmetrize_s2(S2_boot_raw)
+
+    # One call turns every point/draws pair into its `*_conf` endpoints and
+    # the CIInfo the result carries; see jaxgsa._core.bootstrap.interval.
+    conf, ci = interval(
+        points,
+        draws,
+        level=conf_level,
+        method=ci_method,
+        n_bootstrap=n_bootstrap,
+        keep_replicates=keep_replicates,
+    )
+    S1_conf = conf["S1"]
+    ST_conf = conf["ST"]
+
+    S2_out = None
+    S2_conf = None
+    if calc_second_order:
+        assert S2_sym is not None
+        S2_out = _mask_s2_diagonal(S2_sym)
+        S2_conf = _mask_s2_diagonal(conf["S2"])
+        if ci.replicates is not None:
+            # dataclasses are frozen, so build the replacement dict first and
+            # swap it in below with dataclasses.replace. Every other key
+            # (S1, ST) is already the reported quantity; only S2 needs its
+            # diagonal masked after the fact.
+            replicates = dict(ci.replicates)
+            replicates["S2"] = _mask_s2_diagonal(replicates["S2"])
+            ci = dataclasses.replace(ci, replicates=replicates)
 
     S1_out = layout.squeeze(S1_out)
     ST_out = layout.squeeze(ST_out)
@@ -636,21 +678,16 @@ def _analyze_bootstrap(
         S2_out = layout.squeeze(S2_out, n_trailing=2)
     if S2_conf is not None:
         S2_conf = layout.squeeze(S2_conf, n_trailing=2)
-
-    replicates: dict[str, Array] | None = None
-    if keep_replicates:
+    if ci.replicates is not None:
         # The draws already lead with the resample axis, which the squeeze
         # leaves alone because it addresses T and K from the end.
-        replicates = {
-            "S1": layout.squeeze(S1_boot, n_trailing=1),
-            "ST": layout.squeeze(ST_boot, n_trailing=1),
+        squeezed = {
+            "S1": layout.squeeze(ci.replicates["S1"], n_trailing=1),
+            "ST": layout.squeeze(ci.replicates["ST"], n_trailing=1),
         }
-        if S2_boot is not None:
-            # Stored draws follow the reported convention: symmetric with a
-            # NaN diagonal, exactly as the S2 point estimate is reported. The
-            # CI endpoints above were already read from the raw draws before
-            # this, so nothing derived from them changes.
-            replicates["S2"] = layout.squeeze(_normalize_s2_matrix(S2_boot), n_trailing=2)
+        if "S2" in ci.replicates:
+            squeezed["S2"] = layout.squeeze(ci.replicates["S2"], n_trailing=2)
+        ci = dataclasses.replace(ci, replicates=squeezed)
 
     return SobolResult(
         S1=S1_out,
@@ -662,12 +699,7 @@ def _analyze_bootstrap(
         S1_conf=S1_conf,
         ST_conf=ST_conf,
         S2_conf=S2_conf,
-        ci=CIInfo(
-            level=conf_level,
-            method=ci_method,
-            n_bootstrap=n_bootstrap,
-            replicates=replicates,
-        ),
+        ci=ci,
     )
 
 
@@ -731,9 +763,9 @@ def analyze(
                 total-order estimator is a mean of squares, so ``ST`` can
                 never go negative, and because it is the same pairing SALib
                 uses by default, so the two libraries agree out of the box.
-                See ``docs/adr/0021-sobol-default-estimator.md``.
-                ``"jansen"``: Jansen (1999) for both orders. Neither index
-                can go negative, and both are biased upward at a true zero.
+                ``"jansen"``: Jansen (1999) for both orders. ``ST`` cannot go
+                negative; ``S1`` can, and is unbounded below (see
+                :mod:`jaxgsa.sobol._estimators`).
                 ``"janon-monod"``: one self-consistent normaliser shared
                 between numerator and denominator. Its asymptotic variance
                 is never worse than the classical one.
@@ -846,6 +878,12 @@ def analyze(
             at_least("n_bootstrap", n_bootstrap, 0),
             at_least("slice_chunk_size", slice_chunk_size, 1),
             in_open_interval("conf_level", conf_level, 0.0, 1.0),
+            # Checked here, with the other cheap argument checks, so a
+            # missing key is reported before the point estimate is paid for.
+            require(
+                not (n_bootstrap > 0 and key is None),
+                "key is required when n_bootstrap > 0",
+            ),
         ),
         n_expected=int(sampling_result.samples.shape[0]),
         expand=sampling_result.expand_outputs,
@@ -871,8 +909,7 @@ def analyze(
     # paths below reach, so there is nothing to do to Y here.
     t0 = _verbose.tic()
     if n_bootstrap > 0:
-        if key is None:
-            raise ValueError("key is required when n_bootstrap > 0")
+        assert key is not None  # checked above, in checks=
         result = _analyze_bootstrap(
             sampling_result,
             Y,
@@ -911,17 +948,16 @@ def analyze(
         notes = [f"slice_chunk_size: {cs} ({origin})", f"estimator: {estimator}"]
         if n_bootstrap > 0:
             # The bootstrap kernels ran with their own width (each chunk
-            # carries all R resamples of a slice); same resolver they used.
-            from jaxgsa.sobol._bootstrap import _resolve_slice_chunk_size
-
-            boot_cs = _resolve_slice_chunk_size(
+            # carries all R resamples of a slice); same resolver, scaled by
+            # n_bootstrap, that they used.
+            boot_cs = resolve_point_chunk_size(
                 slice_chunk_size,
                 T * K,
-                n_bootstrap,
                 int(Y.shape[0]) // step,
                 D,
                 sampling_result.calc_second_order,
                 Y.dtype.itemsize,
+                n_bootstrap=n_bootstrap,
             )
             notes.insert(1, f"bootstrap slice_chunk_size: {boot_cs} ({origin})")
         _verbose.analysis_summary(

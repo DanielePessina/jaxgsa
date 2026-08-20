@@ -64,8 +64,10 @@ def resolve_point_chunk_size(
     D: int,
     calc_second_order: bool,
     itemsize: int,
+    *,
+    n_bootstrap: int = 1,
 ) -> int:
-    """Resolve how many output slices one point-estimate device call may carry.
+    """Resolve how many output slices one device call may carry.
 
     An explicit value is an upper bound the caller chose and is honoured as
     given, capped at the number of slices there are. ``None`` derives a width
@@ -76,14 +78,28 @@ def resolve_point_chunk_size(
     :func:`slice_elements` for what that comes to, and why second order is
     not merely twice first order.
 
+    This one resolver serves both the point-estimate path (default
+    ``n_bootstrap=1``) and the bootstrap path (``n_bootstrap=R``). A
+    bootstrap chunk is the point-estimate working set of one slice, ``R``
+    times over: every resample of a slice rides inside the same device call,
+    so its working set is ``slice_elements(...) * R``. The two paths used to
+    resolve this width through separate functions that could drift apart;
+    now there is one model, scaled by the multiplier that tells them apart.
+
     Args:
-        slice_chunk_size: Caller's cap on slices per chunk, or ``None`` to
-            derive one from :func:`jaxgsa._core.batching.get_memory_budget`.
+        slice_chunk_size: Caller's cap on slices per chunk, honoured as
+            given, or ``None`` to derive one from
+            :func:`jaxgsa._core.batching.get_memory_budget`. The memory
+            budget only sizes the ``None`` default; it never overrides an
+            explicit choice.
         n_slices: Total number of flattened (T, K) output slices.
         base_n: N, the number of base samples.
         D: Number of input parameters.
         calc_second_order: Whether the design carries the BA blocks.
         itemsize: Bytes per element of the output dtype.
+        n_bootstrap: R, the number of bootstrap resamples riding inside one
+            chunk. ``1`` (the default) is the point-estimate case: no
+            resample axis, so no extra factor.
 
     Returns:
         A chunk width in ``[1, n_slices]``.
@@ -95,8 +111,8 @@ def resolve_point_chunk_size(
         if slice_chunk_size < 1:
             raise ValueError(f"slice_chunk_size must be >= 1, got {slice_chunk_size}")
         return max(1, min(slice_chunk_size, n_slices))
-    bytes_per_slice = slice_elements(base_n, D, calc_second_order) * itemsize
-    budget = get_memory_budget() // max(bytes_per_slice, 1)
+    bytes_per_slice = slice_elements(base_n, D, calc_second_order) * itemsize * n_bootstrap
+    budget = max(1, get_memory_budget() // max(bytes_per_slice, 1))
     return max(1, min(n_slices, budget))
 
 
@@ -109,8 +125,9 @@ def slice_elements(base_n: int, D: int, calc_second_order: bool) -> int:
 
     Second order is **quadratic** in ``D``, and by a wide margin the larger
     term. Every second-order estimator forms the joint-variance matrix as an
-    outer product over the parameter axis --- in ``_fused_second_order`` that
-    is ``BA[:, :, None] * AB[:, None, :]``, an ``(N, D, D)`` array that exists
+    outer product over the parameter axis --- in
+    :func:`jaxgsa.sobol._estimators.second_order_kernel` that is
+    ``BA[:, :, None] * AB[:, None, :]``, an ``(N, D, D)`` array that exists
     in full before the reduction over the sample axis collapses it to
     ``(D, D)``. Leaving that term out under-budgets a slice by about
     ``1 + D / 4`` **relative to the same model without it**, that is against

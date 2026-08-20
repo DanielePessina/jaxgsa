@@ -628,6 +628,12 @@ removals, and the few changes that move reported values.
 
 ### Removed
 
+- **`SobolSamples.sample_ids`.** It always held `arange(n_runs)`, had no
+  reader anywhere in `src/`, and existed only to be saved, loaded and
+  documented. Join on row position instead; it was always the same thing.
+  `.npz` files written by an older jaxgsa still load: the field is dropped
+  from the metadata, not required.
+
 - `_PCEFit.coeffs_flat`, a private field that was written and never read. It
   kept a large array alive inside the module whose purpose is bounding memory.
 
@@ -736,6 +742,17 @@ removals, and the few changes that move reported values.
   matters because the design prefix logic depends on it.
 
 ### Fixed
+
+- **Sobol's `S2` now averages its two triangles instead of keeping one.**
+  `S2[j, k]` and `S2[k, j]` come from the same formula with `j` and `k`
+  swapped, so both are independent Monte Carlo estimates of the same
+  pairwise index. The previous code kept the upper triangle and mirrored it,
+  discarding the lower triangle's estimate. The two differ by sampling
+  noise, not floating-point drift (mean absolute gap 0.026 on Ishigami at
+  `base_n=256`), and averaging them cuts `S2`'s RMSE by 5-16% (measured on
+  Ishigami). This is a deliberate departure from SALib, which reports the
+  upper triangle alone, so `S2` no longer matches SALib bit for bit, only up
+  to that same noise.
 
 - **Sobol standardizes the outputs, always, and this fixes real numbers.**
   The Sobol'-Mauntz first-order estimator and every second-order estimator

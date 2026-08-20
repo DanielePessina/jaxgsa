@@ -159,7 +159,8 @@ class TestOnInvalidPolicy:
         A = kept[0::5]
         B = kept[4::5]
         AB = np.stack([kept[j::5] for j in (1, 2, 3)], axis=1)
-        # The estimators pool A and B for the variance; see sobol._indices.
+        # The estimators pool A and B for the variance; see
+        # sobol._estimators._pooled_inv_var.
         var = np.var(np.concatenate([A, B]))
         expected_st = 0.5 * np.mean((A[:, None] - AB) ** 2, axis=0) / var
         np.testing.assert_allclose(np.asarray(dropped.ST), expected_st, rtol=1e-4, atol=1e-6)

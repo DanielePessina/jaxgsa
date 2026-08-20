@@ -4,8 +4,8 @@ Bootstrap strategy
 ------------------
 Given N base model evaluations, the code generates R sets of N random indices
 into [0, N), which is sampling with replacement. For each of the R resamples it
-gathers the matching rows from the model-output arrays (A, B, AB, and
-optionally BA) and recomputes the Sobol indices. That gives an empirical
+gathers the matching rows from the model-output arrays (A, AB, and optionally
+BA, and B) and recomputes the Sobol indices. That gives an empirical
 distribution over each index, from which confidence intervals follow.
 
 Dimensions used throughout:
@@ -17,12 +17,12 @@ Dimensions used throughout:
 Chunked vmap
 ~~~~~~~~~~~~
 The atomic unit is one estimator call on one output slice and one resample.
-The kernels below build that unit up in the shape the rest of the library
-uses: the estimator kernel is vmapped over the R resamples of a slice, that
-pair is vmapped over a chunk of output slices, and the chunks are looped over
-on the host. So one device call covers ``chunk * R`` estimator evaluations,
-which is the whole point -- the point-estimate path already batches its
-slices, and the bootstrap path now batches the same way.
+:func:`_resample_kernel` builds that unit up in the shape the rest of the
+library uses: the estimator kernel is vmapped over the R resamples of a
+slice, that pair is vmapped over a chunk of output slices, and the chunks are
+looped over on the host. So one device call therefore covers ``chunk * R``
+estimator evaluations, which is the whole point -- the point-estimate path
+already batches its slices, and the bootstrap path now batches the same way.
 
 Chunking is what keeps the peak bounded. A single ``vmap`` over all
 ``S * R`` pairs would materialise ``S * R`` copies of every (N,) and (N, D)
@@ -42,203 +42,107 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from jaxgsa._core.batching import get_memory_budget
-from jaxgsa.sobol._chunking import pad_slice_axis, slice_elements
+from jaxgsa.sobol._chunking import pad_slice_axis
 from jaxgsa.sobol._estimators import first_total_kernel, second_order_kernel
 
-
-def _resolve_slice_chunk_size(
-    slice_chunk_size: int | None,
-    n_slices: int,
-    n_bootstrap: int,
-    base_n: int,
-    D: int,
-    calc_second_order: bool,
-    itemsize: int,
-) -> int:
-    """Resolve how many output slices one bootstrap device call may carry.
-
-    An explicit value is an upper bound the caller chose and is honoured as
-    given, capped only at the number of slices there are — exactly as on the
-    point-estimate path (:func:`jaxgsa.sobol._chunking.resolve_point_chunk_size`).
-    The memory budget only sizes the ``None`` default; it never overrides an
-    explicit choice.
-
-    A bootstrap chunk is the point-estimate working set of one slice, ``R``
-    times over: every resample of a slice rides inside the same device call.
-    So the model is :func:`jaxgsa.sobol._chunking.slice_elements` scaled by
-    ``n_bootstrap``, and the two paths cannot drift apart.
-
-    ``calc_second_order`` is not a detail here. The second-order estimators
-    build an ``(N, D, D)`` outer product per slice, so the working set is
-    quadratic in ``D`` rather than linear. This function used to apply the
-    first-order formula on both paths, with a comment claiming the two were
-    "the same order of magnitude either way". They are not. Against the
-    first-order formula it applied, ``2 * N * (D + 2)``, the missing term is
-    worth ``1 + D / 2``, about 24 times at ``D = 50``; against a model that
-    already counts the second-order design, ``2 * N * (2D + 2)``, it is
-    ``1 + D / 4``, about 13 times. Either way this is the one path where a
-    device already runs out of memory.
-
-    Args:
-        slice_chunk_size: Caller's cap on slices per chunk, honoured as
-            given, or ``None`` to derive one from the memory budget.
-        n_slices: Total number of flattened (T, K) output slices.
-        n_bootstrap: R, the number of bootstrap resamples.
-        base_n: N, the number of base samples per resample.
-        D: Number of input parameters.
-        calc_second_order: Whether the design carries the BA blocks.
-        itemsize: Bytes per element of the output dtype.
-
-    Returns:
-        A chunk width in ``[1, n_slices]``.
-
-    Raises:
-        ValueError: If ``slice_chunk_size`` is given and is below 1.
-    """
-    if slice_chunk_size is not None:
-        if slice_chunk_size < 1:
-            raise ValueError(f"slice_chunk_size must be >= 1, got {slice_chunk_size}")
-        return min(slice_chunk_size, n_slices)
-    per_slice = slice_elements(base_n, D, calc_second_order)
-    bytes_per_slice = n_bootstrap * per_slice * itemsize
-    budget = max(1, get_memory_budget() // max(bytes_per_slice, 1))
-    return max(1, min(budget, n_slices))
-
-
-# lru_cache keys the compiled resampler on the estimator name, the one
-# configuration parameter these functions dispatch on. Each named estimator
-# is traced once per process, as the point-estimate kernels are.
-@lru_cache(maxsize=None)
-def _resample_ft(estimator: str):
-    """Build the vectorised first/total-order resampler for one estimator.
-
-    Args:
-        estimator: The estimator name, as validated by ``analyze``.
-
-    Returns:
-        A jitted function ``(idx, A, AB, B) -> (S1, ST)``. ``idx`` has shape
-        ``(R, N)``, each row holding N indices in [0, N); ``A`` and ``B`` have
-        shape ``(C, N)`` and ``AB`` shape ``(C, N, D)`` for a chunk of C
-        output slices; both outputs have shape ``(C, R, D)``.
-    """
-    kernel = first_total_kernel(estimator)
-
-    @jax.jit
-    def resample(idx: Array, A: Array, AB: Array, B: Array):
-        def one_slice(a: Array, ab: Array, b: Array):
-            # a[rows] gathers N rows with replacement, the core of bootstrap
-            # resampling. The inner vmap maps it across the R index sets.
-            def one_draw(rows: Array):
-                return kernel(a[rows], ab[rows], b[rows])
-
-            return jax.vmap(one_draw)(idx)
-
-        # The outer vmap maps the whole per-slice bootstrap across a chunk of
-        # output slices, so one device call covers C * R estimator evaluations.
-        return jax.vmap(one_slice)(A, AB, B)
-
-    return resample
+# lru_cache keys the compiled resampler on the estimator name and the two
+# axes it varies along, the same three keys _bootstrap_indices dispatches on:
+# whether the design carries the BA blocks (calc_second_order), and whether a
+# chunk holds one output slice (single) or several. A length-one slice axis
+# compiles to a slower gather than no slice axis at all (measured 14.93 ms vs
+# 3.74 ms on an Apple M1 Pro, N=256, D=3, R=1000), so the degenerate chunk
+# skips the outer vmap rather than mapping over it. Each of the four
+# combinations is traced once per process, as the point-estimate kernels are.
 
 
 @lru_cache(maxsize=None)
-def _resample_ft_one(estimator: str):
-    """Build the first/total-order resampler for a chunk holding one slice.
+def _resample_kernel(estimator: str, calc_second_order: bool, single: bool):
+    """Build the jitted bootstrap resampler for one estimator/design/chunk-shape.
 
-    A chunk of one slice has no outer axis worth mapping, and the nested form
-    is not free: mapping over a length-one slice axis makes every gather
-    batched on two axes, and XLA compiles that to a slower gather than the
-    single-axis one. Measured on an Apple M1 Pro at N=256, D=3, R=1000, the
-    nested kernel takes 14.93 ms against 3.74 ms here, for the same
-    arithmetic. The library-wide rule applies: a degenerate chunk takes the
-    unchunked path.
+    This replaces what used to be four separate functions
+    (``_resample_ft``, ``_resample_ft_one``, ``_resample_so``,
+    ``_resample_so_one``), which differed only in these two booleans.
 
     Args:
         estimator: The estimator name, as validated by ``analyze``.
+        calc_second_order: Whether the design carries the BA blocks. Selects
+            the estimator's ``(A, AB, B) -> (S1, ST)`` formula or its
+            ``(A, AB, BA, B) -> (S1, ST, S2)`` one, and whether the returned
+            function reads and returns BA/S2 at all.
+        single: Whether the chunk this resampler will be called on holds one
+            output slice. ``True`` builds a function with no slice axis to
+            map over; ``False`` builds one that vmaps a chunk of slices.
 
     Returns:
-        A jitted function ``(idx, a, ab, b) -> (S1, ST)``. ``idx`` has shape
-        ``(R, N)``; ``a`` and ``b`` have shape ``(N,)`` and ``ab`` shape
-        ``(N, D)``; both outputs have shape ``(R, D)``.
+        A jitted function. With ``calc_second_order=True`` it is
+        ``(idx, a, ab, ba, b) -> (S1, ST, S2)`` when ``single``, or
+        ``(idx, A, AB, BA, B) -> (S1, ST, S2)`` otherwise. With
+        ``calc_second_order=False`` the same, minus the BA argument and the
+        S2 return. ``idx`` has shape ``(R, N)``. A single chunk's inputs have
+        shape ``(N,)`` / ``(N, D)``; a multi-slice chunk's have shape
+        ``(C, N)`` / ``(C, N, D)`` for its ``C`` output slices.
     """
-    kernel = first_total_kernel(estimator)
+    if calc_second_order:
+        so_kernel = second_order_kernel(estimator)
 
-    @jax.jit
-    def resample(idx: Array, a: Array, ab: Array, b: Array):
-        # Closing over the slice keeps vmap varying only the index vector, so
-        # each gather stays single-axis.
-        def one_draw(rows: Array):
-            return kernel(a[rows], ab[rows], b[rows])
+        if single:
 
-        return jax.vmap(one_draw)(idx)
+            def resample(idx: Array, a: Array, ab: Array, ba: Array, b: Array):
+                def one_draw(rows: Array):
+                    return so_kernel(a[rows], ab[rows], ba[rows], b[rows])
 
-    return resample
+                return jax.vmap(one_draw)(idx)
+        else:
 
+            def resample(idx: Array, A: Array, AB: Array, BA: Array, B: Array):
+                def one_slice(a: Array, ab: Array, ba: Array, b: Array):
+                    def one_draw(rows: Array):
+                        return so_kernel(a[rows], ab[rows], ba[rows], b[rows])
 
-@lru_cache(maxsize=None)
-def _resample_so_one(estimator: str):
-    """Build the second-order resampler for a chunk holding one slice.
+                    return jax.vmap(one_draw)(idx)
 
-    The single-slice counterpart of :func:`_resample_so`, for the same reason
-    :func:`_resample_ft_one` exists.
+                return jax.vmap(one_slice)(A, AB, BA, B)
+    else:
+        ft_kernel = first_total_kernel(estimator)
 
-    Args:
-        estimator: The estimator name, as validated by ``analyze``.
+        if single:
 
-    Returns:
-        A jitted function ``(idx, a, ab, ba, b) -> (S1, ST, S2)``. ``idx`` has
-        shape ``(R, N)``; ``a`` and ``b`` have shape ``(N,)``, ``ab`` and
-        ``ba`` shape ``(N, D)``. ``S1`` and ``ST`` come back ``(R, D)`` and
-        ``S2`` ``(R, D, D)``.
-    """
-    kernel = second_order_kernel(estimator)
+            def resample(idx: Array, a: Array, ab: Array, b: Array):
+                def one_draw(rows: Array):
+                    return ft_kernel(a[rows], ab[rows], b[rows])
 
-    @jax.jit
-    def resample(idx: Array, a: Array, ab: Array, ba: Array, b: Array):
-        def one_draw(rows: Array):
-            return kernel(a[rows], ab[rows], ba[rows], b[rows])
+                return jax.vmap(one_draw)(idx)
+        else:
 
-        return jax.vmap(one_draw)(idx)
+            def resample(idx: Array, A: Array, AB: Array, B: Array):
+                def one_slice(a: Array, ab: Array, b: Array):
+                    def one_draw(rows: Array):
+                        return ft_kernel(a[rows], ab[rows], b[rows])
 
-    return resample
+                    return jax.vmap(one_draw)(idx)
 
+                return jax.vmap(one_slice)(A, AB, B)
 
-@lru_cache(maxsize=None)
-def _resample_so(estimator: str):
-    """Build the vectorised second-order resampler for one estimator.
-
-    Args:
-        estimator: The estimator name, as validated by ``analyze``.
-
-    Returns:
-        A jitted function ``(idx, A, AB, BA, B) -> (S1, ST, S2)``. The inputs
-        follow :func:`_resample_ft` with BA shaped like AB; ``S1`` and ``ST``
-        have shape ``(C, R, D)`` and ``S2`` shape ``(C, R, D, D)``.
-    """
-    kernel = second_order_kernel(estimator)
-
-    @jax.jit
-    def resample(idx: Array, A: Array, AB: Array, BA: Array, B: Array):
-        # Same nested-vmap pattern as _resample_ft, extended to include BA
-        def one_slice(a: Array, ab: Array, ba: Array, b: Array):
-            def one_draw(rows: Array):
-                return kernel(a[rows], ab[rows], ba[rows], b[rows])
-
-            return jax.vmap(one_draw)(idx)
-
-        return jax.vmap(one_slice)(A, AB, BA, B)
-
-    return resample
+    return jax.jit(resample)
 
 
-def _bootstrap_first_total(
-    indices: Array, A: Array, AB: Array, B: Array, slice_chunk_size: int, estimator: str
-) -> tuple[Array, Array]:
-    """Bootstrap first-order and total-order Sobol indices over every slice.
+def _bootstrap_indices(
+    indices: Array,
+    A: Array,
+    AB: Array,
+    BA: Array | None,
+    B: Array,
+    slice_chunk_size: int,
+    estimator: str,
+) -> tuple[Array, Array, Array | None]:
+    """Bootstrap Sobol indices over every output slice.
 
-    Iterate over the output slices in chunks of ``slice_chunk_size`` and call
-    :func:`_resample_ft` on each chunk. Chunking avoids materialising all
-    ``S * R`` resampled slices in device memory at once.
+    This replaces what used to be two separate functions
+    (``_bootstrap_first_total``, ``_bootstrap_second_order``), which differed
+    only in whether BA was given. Iterates over the output slices in chunks
+    of ``slice_chunk_size`` and calls :func:`_resample_kernel` on each chunk.
+    Chunking avoids materialising all ``S * R`` resampled slices in device
+    memory at once.
 
     Args:
         indices: Integer array of resampling indices in [0, N), shape
@@ -246,118 +150,67 @@ def _bootstrap_first_total(
             resamples.
         A: Model outputs from sample matrix A, shape ``(S, N)``.
         AB: Model outputs from the AB cross-matrices, shape ``(S, N, D)``.
+        BA: Model outputs from the BA cross-matrices, shape ``(S, N, D)``, or
+            ``None`` to run the first/total-order-only formulas.
         B: Model outputs from sample matrix B, shape ``(S, N)``.
-        slice_chunk_size: Maximum output slices to vmap in a single device call.
+        slice_chunk_size: Maximum output slices to vmap in a single device
+            call.
         estimator: Which named estimator to resample. The bootstrap must use
             the same formulas as the point estimate, or the interval would
             describe a different quantity from the number at its centre.
 
     Returns:
-        S1_boot: first-order indices per slice and resample, shape
-            ``(S, R, D)``.
-        ST_boot: total-order indices per slice and resample, same shape.
+        ``S1_boot``, ``ST_boot``: first- and total-order indices per slice
+        and resample, shape ``(S, R, D)``. ``S2_boot``: second-order indices,
+        shape ``(S, R, D, D)``, or ``None`` when ``BA`` is ``None``.
     """
+    calc_second_order = BA is not None
     n_slices = A.shape[0]
-    s1_parts, st_parts = [], []
     cs = max(1, min(slice_chunk_size, n_slices))
-    if cs == 1:
-        # One slice per chunk leaves nothing to map over, so drop the outer
-        # vmap and keep every gather single-axis. See _resample_ft_one.
-        resample_one = _resample_ft_one(estimator)
-        for start in range(n_slices):
-            s1, st = resample_one(indices, A[start], AB[start], B[start])
-            s1_parts.append(s1[None])
-            st_parts.append(st[None])
-        return jnp.concatenate(s1_parts), jnp.concatenate(st_parts)
+    single = cs == 1
+    resample = _resample_kernel(estimator, calc_second_order, single)
 
-    resample = _resample_ft(estimator)
-    for start in range(0, n_slices, cs):
-        end = min(start + cs, n_slices)
-        actual = end - start
-        # Process C slices x R resamples per device call; chunking bounds peak
-        # device memory. A short trailing chunk is padded back to C so the
-        # jitted resampler traces once rather than twice.
-        s1, st = resample(
-            indices,
-            pad_slice_axis(A[start:end], cs),
-            pad_slice_axis(AB[start:end], cs),
-            pad_slice_axis(B[start:end], cs),
-        )
-        s1_parts.append(s1[:actual])
-        st_parts.append(st[:actual])
-
-    # Concatenate chunks along the slice axis -> (S, R, D)
-    return jnp.concatenate(s1_parts), jnp.concatenate(st_parts)
-
-
-def _bootstrap_second_order(
-    indices: Array,
-    A: Array,
-    AB: Array,
-    BA: Array,
-    B: Array,
-    slice_chunk_size: int,
-    estimator: str,
-) -> tuple[Array, Array, Array]:
-    """Bootstrap first-, total-, and second-order Sobol indices over every slice.
-
-    Same chunked strategy as :func:`_bootstrap_first_total`, extended with the
-    BA matrices that second-order index estimation requires.
-
-    Args:
-        indices: Integer array of resampling indices in [0, N), shape
-            ``(R, N)``.
-        A: Model outputs from sample matrix A, shape ``(S, N)``.
-        AB: Model outputs from the AB cross-matrices, shape ``(S, N, D)``.
-        BA: Model outputs from the BA cross-matrices, shape ``(S, N, D)``.
-        B: Model outputs from sample matrix B, shape ``(S, N)``.
-        slice_chunk_size: Maximum output slices to vmap in a single device call.
-        estimator: Which named estimator to resample, matching the point
-            estimate.
-
-    Returns:
-        S1_boot: first-order indices, shape ``(S, R, D)``.
-        ST_boot: total-order indices, shape ``(S, R, D)``.
-        S2_boot: second-order indices, shape ``(S, R, D, D)``.
-    """
-    n_slices = A.shape[0]
     s1_parts, st_parts, s2_parts = [], [], []
-    cs = max(1, min(slice_chunk_size, n_slices))
-    if cs == 1:
-        # One slice per chunk: drop the outer vmap, as _bootstrap_first_total
-        # does, for the reason _resample_ft_one records.
-        resample_one = _resample_so_one(estimator)
+    if single:
+        # One slice per chunk leaves nothing to map over, so the resampler
+        # built above has no outer slice axis at all.
         for start in range(n_slices):
-            s1, st, s2 = resample_one(indices, A[start], AB[start], BA[start], B[start])
+            if calc_second_order:
+                assert BA is not None
+                s1, st, s2 = resample(indices, A[start], AB[start], BA[start], B[start])
+                s2_parts.append(s2[None])
+            else:
+                s1, st = resample(indices, A[start], AB[start], B[start])
             s1_parts.append(s1[None])
             st_parts.append(st[None])
-            s2_parts.append(s2[None])
-        return (
-            jnp.concatenate(s1_parts),
-            jnp.concatenate(st_parts),
-            jnp.concatenate(s2_parts),
-        )
+    else:
+        for start in range(0, n_slices, cs):
+            end = min(start + cs, n_slices)
+            actual = end - start
+            # Process C slices x R resamples per device call; chunking bounds
+            # peak device memory. A short trailing chunk is padded back to C
+            # so the jitted resampler traces once rather than twice.
+            if calc_second_order:
+                assert BA is not None
+                s1, st, s2 = resample(
+                    indices,
+                    pad_slice_axis(A[start:end], cs),
+                    pad_slice_axis(AB[start:end], cs),
+                    pad_slice_axis(BA[start:end], cs),
+                    pad_slice_axis(B[start:end], cs),
+                )
+                s2_parts.append(s2[:actual])
+            else:
+                s1, st = resample(
+                    indices,
+                    pad_slice_axis(A[start:end], cs),
+                    pad_slice_axis(AB[start:end], cs),
+                    pad_slice_axis(B[start:end], cs),
+                )
+            s1_parts.append(s1[:actual])
+            st_parts.append(st[:actual])
 
-    resample = _resample_so(estimator)
-    for start in range(0, n_slices, cs):
-        end = min(start + cs, n_slices)
-        actual = end - start
-        # Same chunked nested-vmap strategy as _bootstrap_first_total, ragged
-        # trailing chunk padded back to C included.
-        s1, st, s2 = resample(
-            indices,
-            pad_slice_axis(A[start:end], cs),
-            pad_slice_axis(AB[start:end], cs),
-            pad_slice_axis(BA[start:end], cs),
-            pad_slice_axis(B[start:end], cs),
-        )
-        s1_parts.append(s1[:actual])
-        st_parts.append(st[:actual])
-        s2_parts.append(s2[:actual])
-
-    # Concatenate chunks along the slice axis -> (S, ...) for each output
-    return (
-        jnp.concatenate(s1_parts),  # (S, R, D)
-        jnp.concatenate(st_parts),  # (S, R, D)
-        jnp.concatenate(s2_parts),  # (S, R, D, D)
-    )
+    S1 = jnp.concatenate(s1_parts)
+    ST = jnp.concatenate(st_parts)
+    S2 = jnp.concatenate(s2_parts) if calc_second_order else None
+    return S1, ST, S2

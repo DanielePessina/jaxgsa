@@ -78,8 +78,6 @@ class SobolSamples(UniqueDesignSamples):
             marginal is transformed into the problem's declared input
             distribution. The rows are deduplicated, so the empirical marginal
             is distorted (see the paragraph above).
-        sample_ids: Stable integer identifiers aligned 1:1 with ``samples``.
-            Use them to join model outputs back onto the sampling table.
         n_expanded: Row count of the full expanded Saltelli layout before
             deduplication. This is the number of rows analyzed internally.
         expanded_to_unique: Integer index map, shape ``(n_expanded,)``. For
@@ -100,25 +98,22 @@ class SobolSamples(UniqueDesignSamples):
             parameter they do not, and ``n_unit`` is larger: many unit values
             map to one level code, and those rows are collapsed after the
             transform. ``None`` only on a design that :func:`sample` did not
-            build, such as one constructed by hand or loaded from a file
-            written before jaxgsa 0.9.
+            build, such as one constructed by hand.
         expanded_to_unit: Integer index map, shape ``(n_expanded,)``, from
             each expanded Saltelli row to its row in ``unit``. Equal to
             ``expanded_to_unique`` unless the categorical collapse pass merged
-            rows. ``None`` under the same conditions as ``unit``.
+            rows. ``None`` under the same condition as ``unit``.
     """
 
     samples: np.ndarray  # shape (n_unique, D), scaled to bounds
-    sample_ids: np.ndarray
     n_expanded: int
     expanded_to_unique: np.ndarray
     base_n: int
     n_params: int
     calc_second_order: bool
     problem: Problem
-    # Defaulted so a design built before these fields existed -- by hand, or
-    # by an older version of save() -- still constructs. Everything that
-    # sample() returns has them set.
+    # Defaulted so a hand-built design that skips the unit-cube design can
+    # still construct. Everything that sample() returns has both set.
     unit: np.ndarray | None = None
     expanded_to_unit: np.ndarray | None = None
 
@@ -190,8 +185,7 @@ class SobolSamples(UniqueDesignSamples):
             raise ValueError(
                 "This SobolSamples carries no unit-cube design, so it cannot be "
                 "re-transformed. Only a design returned by jaxgsa.sobol.sample has "
-                "one; a hand-built design, or one loaded from a file written before "
-                "jaxgsa 0.9, does not."
+                "one; a hand-built design does not."
             )
         return _jax_transform_samples(self.problem, self.unit, theta)
 
@@ -247,11 +241,11 @@ class SobolSamples(UniqueDesignSamples):
 
         step = _saltelli_step(self.n_params, self.calc_second_order)
         new_expanded_n = base_n * step
-        samples_small, new_exp2uniq, n_unique_new, Y_small = self._prefix_slice(new_expanded_n, Y)
+        samples_small, new_exp2uniq, _n_unique_new, Y_small = self._prefix_slice(new_expanded_n, Y)
 
         # The unit design is prefix-sliced on its own map, not on the physical
         # one: the categorical collapse pass can leave the two with different
-        # row counts, so `n_unique_new` does not index `unit`.
+        # row counts, so the unique count above does not index `unit`.
         unit_small = None
         exp2unit_small = None
         if self.unit is not None and self.expanded_to_unit is not None:
@@ -260,7 +254,6 @@ class SobolSamples(UniqueDesignSamples):
 
         sr_small = SobolSamples(
             samples=samples_small,
-            sample_ids=np.arange(n_unique_new, dtype=np.int64),
             n_expanded=new_expanded_n,
             expanded_to_unique=new_exp2uniq,
             base_n=base_n,
@@ -423,8 +416,8 @@ class SobolSamples(UniqueDesignSamples):
         return derived
 
     def _extra_arrays(self) -> dict[str, np.ndarray]:
-        """Persist the sample identifiers and the unit design."""
-        arrays = {"sample_ids": self.sample_ids}
+        """Persist the unit-cube design."""
+        arrays: dict[str, np.ndarray] = {}
         # The unit design cannot be recovered from `samples` bit-for-bit (the
         # inverse CDFs round differently), and transform() needs it exactly,
         # so it is stored rather than recomputed on load.
@@ -451,15 +444,15 @@ class SobolSamples(UniqueDesignSamples):
         """Rebuild a ``SobolSamples`` from a loaded NPZ payload."""
         return cls(
             samples=samples,
-            sample_ids=arrays["sample_ids"],
             n_expanded=n_expanded,
             expanded_to_unique=expanded_to_unique,
             base_n=int(meta["base_n"]),
             n_params=problem.num_vars,
             calc_second_order=bool(meta["calc_second_order"]),
             problem=problem,
-            # `.get`: files written before jaxgsa 0.9 carry no unit design.
-            # Such a design still analyzes; only transform() is unavailable.
+            # `.get`: a hand-built design can be saved without a unit-cube
+            # design. Such a design still analyzes; only transform() ever
+            # needs one.
             unit=arrays.get("unit"),
             expanded_to_unit=arrays.get("expanded_to_unit"),
         )
@@ -802,7 +795,6 @@ def sample(
             n_expanded = expanded_unit.shape[0]
             design = _dedupe_design(problem, expanded_unit)
 
-    sample_ids = np.arange(design.samples.shape[0], dtype=np.int64)
     if verbose:
         _print_sampling_summary(
             n_params=D,
@@ -816,7 +808,6 @@ def sample(
 
     return SobolSamples(
         samples=design.samples,
-        sample_ids=sample_ids,
         n_expanded=n_expanded,
         expanded_to_unique=design.expanded_to_unique,
         base_n=base_n,

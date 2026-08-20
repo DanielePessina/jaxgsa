@@ -78,19 +78,22 @@ estimate is 0 with probability one".
 
 Note what that last sentence does *not* say about first order. A Jansen
 first-order estimate is *one minus* a sum of squares, so it is bounded
-above by 1 and free to fall below zero; only the total order is a bare
-sum of squares and therefore non-negative. jaxgsa's measurements agree:
-on Sobol-G, whose four inert parameters have indices near zero, every
-estimator in the menu except ``azzini-rosati`` returns a negative
-first-order value for one parameter or another in 15 to 35 per cent of
-runs, and that fraction does not fall away as N grows. Negative values
-are expected, not a bug.
+above by 1 and unbounded below (measured -0.59 on Sobol-G at
+``base_n = 32``); only the total order is a bare sum of squares and
+therefore non-negative. ``ST`` cannot go negative; ``S1`` can.
+
+jaxgsa's measurements agree, on Sobol-G with 40 seeds at
+``base_n`` = 64 / 256 / 1024 / 4096: the default ``saltelli-jansen``
+pairing returns a negative first-order value for one parameter or
+another in 100 / 88 / 65 / 30 per cent of runs, ``jansen`` in
+50 / 57 / 30 / 45 per cent, and ``azzini-rosati`` in 0 per cent, every
+time. The rate falls with N for the default pairing; it does not fall
+monotonically for ``jansen``. Negative values are expected, not a bug.
 
 What is non-negative, exactly and on every sample:
 
 * the total order of ``saltelli-jansen`` and ``jansen``, both Jansen's
-  mean of squares. It pays for that with an upward bias at a true zero,
-  because a squared error can only add.
+  mean of squares.
 * nothing in ``janon-monod``, ``martinez`` or ``mauntz-kucherenko``.
 
 ``azzini-rosati`` is the only scheme that holds ``S1_j <= ST_j`` on every
@@ -133,8 +136,6 @@ from typing import Literal
 
 import jax.numpy as jnp
 from jax import Array
-
-from jaxgsa.sobol._indices import _fused_first_total, _fused_second_order
 
 Estimator = Literal[
     "saltelli-jansen",
@@ -267,7 +268,9 @@ def _jansen(A: Array, AB: Array, B: Array) -> tuple[Array, Array]:
     """Jansen (1999) for both orders.
 
     Both numerators are mean squared differences. That makes the total
-    order non-negative, and biased upward at a true zero. First order is
+    order non-negative and, unlike the first-order estimators, exactly
+    unbiased: ``E[(A - AB_j)^2] / 2 = V_Tj``, so an inert input reads
+    ``ST = 0`` (measured 40/40 out of 40 runs on Sobol-G). First order is
     *one minus* such a term, so it is bounded above by 1 and can still
     come out negative::
 
@@ -341,9 +344,11 @@ def _mauntz_kucherenko(A: Array, AB: Array, B: Array) -> tuple[Array, Array]:
 
     The first-order formula is the one the default scheme also uses. The
     total-order formula differs from Jansen: it is not a sum of squares, so
-    it can return a small negative value, and it carries the uncentered
-    second moment ``E[A^2]``, which makes it noisier when the output mean is
-    large next to the output spread.
+    it can return a small negative value. It also carries the uncentred
+    second moment ``E[A^2]``, which would make it noisier next to a large
+    output mean; in practice this is moot, because every caller standardizes
+    ``A`` and ``B`` to mean 0 before either estimator formula runs (see
+    :func:`jaxgsa.sobol._analyze._separate_output_values`).
 
     Args:
         A: Model outputs from the A base matrix, shape ``(N,)``.
@@ -395,8 +400,35 @@ def _azzini_rosati(A: Array, AB: Array, BA: Array, B: Array) -> tuple[Array, Arr
     return S1, ST
 
 
+def _saltelli_jansen(A: Array, AB: Array, B: Array) -> tuple[Array, Array]:
+    """The default pairing: Sobol'-Mauntz first order, Jansen total order.
+
+    Built from the two formulas this module already has, rather than a
+    separately maintained fused kernel: ``_mauntz_kucherenko``'s ``S1`` and
+    ``_jansen``'s ``ST`` are exactly the formulas ``saltelli-jansen`` uses.
+    An earlier version of this module hand-fused the two into one function
+    that computed the pooled variance once and shared it, and kept a comment
+    claiming that fusion was needed for the default scheme to produce
+    bit-for-bit its historical numbers. It was verified bitwise identical to
+    this construction, in float32 and float64, under ``jit``
+    (``scratchpad/fix/sobol/repro_fused_vs_generic.py``), so the fusion
+    bought nothing but a second place to keep the same two formulas in sync.
+
+    Args:
+        A: Model outputs from the A base matrix, shape ``(N,)``.
+        AB: Model outputs from each cross-matrix AB_j, shape ``(N, D)``.
+        B: Model outputs from the B base matrix, shape ``(N,)``.
+
+    Returns:
+        ``(S1, ST)``, each of shape ``(D,)``.
+    """
+    S1, _ = _mauntz_kucherenko(A, AB, B)
+    _, ST = _jansen(A, AB, B)
+    return S1, ST
+
+
 _FIRST_TOTAL: dict[str, Callable[[Array, Array, Array], tuple[Array, Array]]] = {
-    "saltelli-jansen": _fused_first_total,
+    "saltelli-jansen": _saltelli_jansen,
     "jansen": _jansen,
     "janon-monod": _janon_monod,
     "martinez": _martinez,
@@ -426,7 +458,10 @@ def first_total_kernel(
             Both entry points validate the name and the design before
             reaching here, so either is a programming error.
     """
-    if estimator not in _FIRST_TOTAL:
+    # requires_second_order_design (backed by NEEDS_BA) is the one place that
+    # says which estimators need the BA blocks; this used to ask the same
+    # question a second way, by dict membership, which could drift from it.
+    if requires_second_order_design(estimator):
         raise KeyError(
             f"{estimator!r} has no first-order-only kernel; use second_order_kernel for it"
         )
@@ -453,10 +488,6 @@ def second_order_kernel(
     Returns:
         A pure JAX function of the four output vectors.
     """
-    if estimator == "saltelli-jansen":
-        # The historical fused kernel, kept verbatim so the default scheme
-        # produces bit-for-bit the numbers it always has.
-        return _fused_second_order
 
     def kernel(A: Array, AB: Array, BA: Array, B: Array) -> tuple[Array, Array, Array]:
         if estimator == "azzini-rosati":
