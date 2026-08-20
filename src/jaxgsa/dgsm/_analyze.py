@@ -84,9 +84,10 @@ def _meets_lower_bound_condition(spec: InputSpec) -> bool:
     """Report whether a marginal satisfies the Kucherenko-Song condition.
 
     ``lower_bound`` is ``Var(x_i) * sigma_i^2 / Var(Y)``. Kucherenko & Song
-    (2016), Theorem 6 (Section 4.1, eq. 31), prove it is a lower bound on ``ST_i`` through Stein's
-    identity ``Cov(f, x_i) = E[tau(x_i) * df/dx_i]``. The kernel ``tau`` is the
-    constant ``Var(x_i)`` only for an untruncated Gaussian. Truncating the
+    (2016), Theorem 6 (Section 4.1, eq. 31), prove it is a lower bound on
+    ``ST_i`` through Stein's identity ``Cov(f, x_i) = E[tau(x_i) * df/dx_i]``.
+    The kernel ``tau`` is the constant ``Var(x_i)`` only for an untruncated
+    Gaussian. Truncating the
     Gaussian bends ``tau`` back to zero at each finite edge, so a truncated
     marginal fails the condition just as a uniform one does.
 
@@ -127,11 +128,11 @@ def _warn_lower_bound_condition(problem: Problem) -> None:
     warnings.warn(
         "jaxgsa.dgsm: lower_bound is a valid lower bound on the total Sobol index "
         "only for untruncated Gaussian marginals (Kucherenko & Song 2016, "
-        f"Theorem 6 (Section 4.1, eq. 31)). These marginals do not meet that "
+        "Theorem 6, Section 4.1, eq. 31). These marginals do not meet that "
         f"condition: {shown}. For them lower_bound is an estimate, not a bound: "
         "it is exact when the response is linear in that input, and it can "
-        "exceed the true total "
-        "index when the response is curved. Confirm anything that rests on it "
+        "exceed the true total index when the response is curved. Confirm "
+        "anything that rests on it "
         "with jaxgsa.sobol. upper_bound is unaffected: the Poincare bound holds "
         "for every supported marginal.",
         stacklevel=3,
@@ -439,7 +440,7 @@ def indices(
     """
     from jaxgsa.dgsm import SPEC
 
-    # The same capability gates analyze applies through prepare_scalars().
+    # The same capability gates analyze applies through prepare().
     # problem.has_correlated_inputs is static host-side metadata, so the check
     # runs at trace time and the core still composes with jit/vmap/grad.
     gates(SPEC, problem, method="jaxgsa.dgsm.indices")
@@ -515,9 +516,10 @@ def analyze(
       near zero is provably negligible.
     - **Lower bound**: ``Var(x_i) * sigma_i^2 / Var(Y)``, with
       ``sigma_i = E[df/dx_i]``, the mean (signed) derivative. Kucherenko &
-      Song (2016), Theorem 6 (Section 4.1, eq. 31), prove ``ST_i >=`` this expression when input
-      i's marginal is an **untruncated Gaussian**. That condition is not
-      decoration: the proof needs Stein's identity, which holds with a
+      Song (2016), Theorem 6 (Section 4.1, eq. 31), prove ``ST_i >=`` this
+      expression when input i's marginal is an **untruncated Gaussian**. That
+      condition is not decoration: the proof needs Stein's identity, which
+      holds with a
       constant kernel only for the Gaussian. On a uniform or truncated
       marginal the expression is exact for a response linear in that input
       and near-exact for a nearly linear one, but a strongly curved response

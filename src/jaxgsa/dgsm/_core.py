@@ -17,7 +17,7 @@ the two is picked from those two numbers, both of which are shapes.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Hashable, Iterator
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -34,8 +34,8 @@ from jaxgsa.problem import Problem
 # exists to bound is the Jacobian block, T*K*D floats per row where the output
 # is one, so the model prices everything in multiples of it: the block itself,
 # the elementwise square the moment sums build from it, and the masked copy
-# with its square that the policy loop in ``analyze`` keeps alongside (see
-# ``_compute_moments``). The primal outputs are T*K floats per row, a factor D
+# with its square that the same loop keeps alongside (see
+# ``jacobian_sums``). The primal outputs are T*K floats per row, a factor D
 # smaller, so they are left out. Modelled from the code, not measured — the
 # same convention as sobol's ``slice_elements`` live-copy count and
 # borgonovo's ``_KDE_LIVE_TENSORS``.
@@ -145,9 +145,15 @@ def _get_jacobian_kernel(fn: Callable, n_inputs: int, n_outputs: int) -> Callabl
     n_outputs)`` — the same three quantities that decide the kernel's shape
     and mode — reuses one compiled kernel across calls, the way
     :func:`jaxgsa.efast._analyze._get_efast_kernel` memoises its kernel by
-    design shape. ``fn`` is hashable by identity, so two structurally equal
-    but distinct function objects (for example two lambdas) still get one
-    cache entry each.
+    design shape. A plain function is hashable by identity, so two
+    structurally equal but distinct function objects (for example two
+    lambdas) still get one cache entry each.
+
+    Not every model object is hashable: a model written as a plain
+    ``@dataclass`` with ``__call__`` has ``__hash__`` set to ``None``.
+    :func:`jac_batches` tests for that and builds the kernel without the
+    cache in that case, so an unhashable model still runs. It pays one trace
+    per call, which is what every model paid before this cache existed.
 
     Args:
         fn: One-sample model, ``(D,) -> ()`` / ``(K,)`` / ``(T, K)``.
@@ -226,7 +232,12 @@ def jac_batches(
     n_inputs = int(X.shape[1])
     if n_outputs is None:
         n_outputs = n_output_slices(fn, X)
-    combined = _get_jacobian_kernel(fn, n_inputs, n_outputs)
+    if isinstance(fn, Hashable):
+        combined = _get_jacobian_kernel(fn, n_inputs, n_outputs)
+    else:
+        # A model written as a plain dataclass has __hash__ set to None, so it
+        # cannot key the cache. Build the kernel directly rather than fail.
+        combined = jax.jit(jax.vmap(jacobian_of(fn, n_inputs=n_inputs, n_outputs=n_outputs)))
 
     N = X.shape[0]
     b = resolve_batch_size(
@@ -564,9 +575,10 @@ def bounds_from_moments(
     - upper (Poincare / Sobol-Kucherenko): ``ST_i <= C_i * nu_i / Var(Y)``,
       which holds for every marginal this package supports.
     - lower: ``Var(x_i) * sigma_i^2 / Var(Y)``. Kucherenko & Song (2016),
-      Theorem 4.1, prove ``ST_i >=`` this for a Gaussian marginal only; on a
-      uniform or truncated marginal it is an estimate that is exact for a
-      linear response and can overshoot ``ST_i`` for a curved one. See
+      Theorem 6 (Section 4.1, eq. 31), prove ``ST_i >=`` this for a Gaussian
+      marginal only. On a uniform or truncated marginal it is an estimate.
+      It is exact for a linear response and can overshoot ``ST_i`` for a
+      curved one. See
       :class:`jaxgsa.dgsm.DGSMResult` for why the condition is on the
       marginal.
 

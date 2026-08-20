@@ -122,8 +122,8 @@ def marginal_variance(spec: InputSpec) -> float:
         lower_bound_i = Var_i * w_i^2 / Var(Y)
 
     That expression is a proven lower bound on ST_i for a Gaussian marginal
-    (Kucherenko & Song 2016, Theorem 6 (Section 4.1, eq. 31)). For a uniform or truncated-Gaussian
-    marginal it is an estimate, not a bound: see
+    (Kucherenko & Song 2016, Theorem 6, Section 4.1, eq. 31). For a uniform
+    or truncated-Gaussian marginal it is an estimate, not a bound: see
     :class:`jaxgsa.dgsm.DGSMResult`.
 
     Args:

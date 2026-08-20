@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import warnings
 
@@ -1616,3 +1617,48 @@ class TestLowerBoundConditionWarning:
         with warnings.catch_warnings():
             warnings.simplefilter("error", JaxgsaWarning)
             indices(problem, lambda x: 2.0 * x[0], jnp.asarray(X))
+
+
+class TestJacobianKernelCache:
+    """The compiled Jacobian kernel is memoised, and an unhashable model still runs.
+
+    The cache keys on the model object, so a model whose type sets
+    ``__hash__`` to ``None`` — a plain ``@dataclass`` with ``__call__`` is the
+    common case — must not fall over on the cache lookup.
+    """
+
+    def test_the_kernel_is_traced_once_across_calls(self):
+        """T0: a second analyze() on the same model retraces nothing."""
+        problem = Problem(names=("a", "b"), bounds=((0.0, 1.0), (0.0, 1.0)))
+        X = jnp.asarray(monte_carlo(problem, n=64, seed=0))
+        traces = []
+
+        def fn(x):
+            traces.append(1)
+            return jnp.sin(x[0]) * x[1]
+
+        analyze(problem, fn, X, verbose=False)
+        first = len(traces)
+        analyze(problem, fn, X, verbose=False)
+
+        assert first > 0
+        assert len(traces) == first, "the second call retraced the model"
+
+    def test_an_unhashable_model_object_still_runs(self):
+        """T0: a dataclass model has no __hash__, so the cache must be skipped."""
+
+        @dataclasses.dataclass
+        class Model:
+            k: float
+
+            def __call__(self, x):
+                return self.k * x[0] + x[1] ** 2
+
+        problem = Problem(names=("a", "b"), bounds=((0.0, 1.0), (0.0, 1.0)))
+        X = jnp.asarray(monte_carlo(problem, n=4096, seed=0))
+
+        result = analyze(problem, Model(2.0), X, verbose=False)
+
+        # nu_a = E[(2)^2] = 4 exactly; nu_b = E[(2 x_b)^2] = 4/3.
+        assert float(np.asarray(result.nu)[0]) == pytest.approx(4.0, rel=1e-5)
+        assert float(np.asarray(result.nu)[1]) == pytest.approx(4.0 / 3.0, rel=0.10)
