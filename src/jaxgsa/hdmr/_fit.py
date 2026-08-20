@@ -188,8 +188,11 @@ def _get_gram_backfit(m1: int, n1: int, maxiter: int, lambdax: float):
     Tikhonov regularization keeps an ill-conditioned ``B^T B`` from blowing up
     the coefficients when the basis functions are nearly collinear or the
     sample count is low. Iteration stops when the largest change in any
-    dimension's coefficient energy falls below 1e-3, or after ``maxiter``
-    sweeps.
+    dimension's coefficient energy falls below one part in a thousand of the
+    largest energy itself, or after ``maxiter`` sweeps. The test is relative,
+    not absolute: the coefficients scale with ``Y`` and with ``m**-3``, so an
+    absolute cutoff stops the sweep after one pass whenever ``Y`` is small or
+    ``m`` is large (H4).
 
     Returns:
         A jitted function ``(G1, G1_diag, b1res) -> C1``. ``G1``

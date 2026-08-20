@@ -511,12 +511,14 @@ def _fit_pce_core(
     from :func:`effective_order` without running a fit at all.
 
     Args:
-        diagnostics: Compute ``loo_flat`` and ``fitted_var`` (``None``
-            otherwise). Off for :func:`indices` and every bootstrap
-            replicate, neither of which reads them: on the single-pass path
-            this skips a Cholesky factor, an ``(n_terms, N)`` triangular
-            solve and an ``(N, T*K)`` residual array that the Sobol-index
-            extraction never touches.
+        diagnostics: Compute ``loo_flat`` and ``fitted_var``. Off for
+            :func:`indices` and every bootstrap replicate, neither of which
+            reads them: on the single-pass path this skips a Cholesky
+            factor, an ``(n_terms, N)`` triangular solve and an ``(N, T*K)``
+            residual array that the Sobol-index extraction never touches.
+            ``fitted_var`` is then ``None``. So is ``loo_flat`` on the
+            single-pass path; the streamed path returns it either way,
+            because its accumulation gives the exact LOO for free.
     """
     Y_3d, _ = _prepare_Y(Y_canonical)
     N, D = X.shape
@@ -714,7 +716,8 @@ def indices(
         order: Maximum total polynomial degree, as in :func:`analyze`.
         ridge: Tikhonov regularization for the least-squares fit.
         fit_ratio: Maximum ratio of terms to samples before ``order`` is
-            reduced.
+            reduced. Must be at most 1, and must leave room for the order-1
+            expansion: ``D + 1 <= int(fit_ratio * N)``.
         batch_size: Rows per batch during the fit, clamped to ``N``, or
             ``None`` to derive one from the memory budget, as in
             :func:`analyze`. Both paths trace; they differ only in float32
@@ -725,7 +728,10 @@ def indices(
 
     Raises:
         ValueError: If ``order``, ``ridge``, ``fit_ratio`` or ``batch_size``
-            is out of range, ``problem.correlation`` declares a dependence
+            is out of range, ``fit_ratio`` is above 1, ``X`` has too few rows
+            for even the order-1 expansion at that ``fit_ratio``
+            (``D + 1 > int(fit_ratio * N)``, which would make the fit
+            underdetermined), ``problem.correlation`` declares a dependence
             structure (the basis is not orthogonal under the dependent
             measure, so the indices would be silently wrong, exactly as in
             :func:`analyze`), or ``problem`` has a categorical parameter,
@@ -812,7 +818,9 @@ def analyze(
             it if coefficients look unstable (noisy Y, near-duplicate rows).
         fit_ratio: Maximum ratio of terms to samples before ``order`` is
             reduced. Lower values demand more samples per term (a more
-            conservative, less overfit-prone fit).
+            conservative, less overfit-prone fit). Must be at most 1, and
+            must leave room for the order-1 expansion:
+            ``D + 1 <= int(fit_ratio * N)``.
         batch_size: Rows of ``X``/``Y`` processed per batch during the fit
             (the package-wide ``batch_size`` convention): it sizes row
             blocks, clamped to ``N``. ``None`` (default) keeps the
@@ -884,7 +892,11 @@ def analyze(
             polynomial in an unordered level code has no meaning),
             ``on_invalid`` is not one of the three policies,
             ``on_invalid="raise"`` (the default) and ``X`` or ``Y`` holds a
-            non-finite value, or ``n_bootstrap > 0`` without a ``key``.
+            non-finite value, ``n_bootstrap > 0`` without a ``key``,
+            ``fit_ratio`` is above 1, or too few rows survive
+            ``on_invalid`` for even the order-1 expansion
+            (``D + 1 > int(fit_ratio * N)``, which would make the fit
+            underdetermined).
     """
     from jaxgsa.pce import SPEC
 

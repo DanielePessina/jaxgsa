@@ -63,7 +63,7 @@ jaxgsa.pce.analyze
 
 S1       [0.3146 0.4424 0.    ]
 ST       [0.5576 0.4425 0.243 ]
-loo_rmse 0.08115970949711526
+loo_rmse 0.08116015046834946
 streamed False
 ```
 

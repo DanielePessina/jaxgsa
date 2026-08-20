@@ -27,6 +27,7 @@ import pytest
 
 from jaxgsa import hdmr
 from jaxgsa.benchmarks import ishigami
+from jaxgsa.hdmr._engine import _compute_f_crits
 from jaxgsa.problem import Problem
 
 # HDMR refuses to fit below this, so every case here is at least this large.
@@ -165,8 +166,15 @@ def test_jit_then_eager_shares_the_f_crit_cache(case):
     regression cannot hide behind test order the way it did before the fix:
     the full suite always warmed the cache eagerly first, and only running
     this test in isolation showed the crash.
+
+    Clearing the cache first is what makes the order hold. Another test in
+    this file has already run the eager path on the same key, so without the
+    clear the jitted call below is a cache hit and the poisoning never
+    happens: the test passes against the broken code in a full-file run, and
+    fails only in isolation. That is the exact gap this test exists to close.
     """
     problem, X, Y = case
+    _compute_f_crits.cache_clear()
 
     jitted = jax.jit(lambda outputs: hdmr.indices(problem, X, outputs, maxorder=2, maxiter=50))
     ST_jit = jitted(Y)[3]
