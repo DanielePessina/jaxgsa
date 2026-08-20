@@ -34,12 +34,13 @@ from jaxgsa import JaxgsaWarning
 from jaxgsa._core.entry import (
     at_least,
     check_scalars,
+    gates,
     in_open_interval,
     one_of,
     prepare,
-    prepare_scalars,
     require,
 )
+from jaxgsa._core.invalid import InvalidUnit, resolve_policy
 from jaxgsa._core.precision import _loses_precision, unit_clip_bounds
 from jaxgsa._core.registry import methods
 from jaxgsa._core.sampling import UNIT_CLIP
@@ -337,41 +338,56 @@ class TestACleanSampleStaysSilent:
         assert left == []
 
 
-class TestTheTwoHalvesAreTheOnePreamble:
-    """``prepare`` is ``prepare_scalars`` plus ``with_data``, not a second copy.
+class TestDgsmsEarlyGateSettlesWhatPrepareSettles:
+    """``dgsm`` runs prepare()'s own early steps itself, then calls prepare().
 
-    ``dgsm`` cannot use the one-call form: on its autodiff path the model
-    output is what the preamble would validate, and it does not exist until
-    the model has been differentiated. It calls the halves instead, and these
-    pin that the halves do what the whole does.
+    ``dgsm`` cannot use the one-call form directly: on its autodiff path the
+    model output is what ``prepare`` would validate, and it does not exist
+    until the model has been differentiated. It runs ``resolve_policy``,
+    ``check_scalars`` and ``gates`` -- the same three calls ``prepare`` makes
+    internally, before it touches any array -- and then calls ``prepare``
+    once, in full, with the output in hand. These pin that running the three
+    pieces first and then the whole settles the same things a single
+    ``prepare`` call would.
     """
 
     def _spec(self):
         return methods()["borgonovo"]
 
-    def test_the_halves_settle_what_the_one_call_form_settles(self):
+    def _early_gate(self, spec, problem, *, on_invalid="raise"):
+        """The three pieces a two-phase caller runs before it has ``Y``."""
+        unit = spec.invalid_unit
+        resolve_policy(
+            on_invalid, method="test", unit=unit, allow_drop=unit is not InvalidUnit.CURVE
+        )
+        check_scalars(())
+        if not spec.is_design_based:
+            gates(spec, problem, method="test")
+
+    def test_the_early_gate_then_prepare_settles_what_one_call_settles(self):
         X, Y = _xy()
         spec = self._spec()
         whole = prepare(spec, PROBLEM, Y, X=X)
-        halves = prepare_scalars(spec, PROBLEM).with_data(Y, X=X)
-        assert halves.method == whole.method
-        assert halves.policy == whole.policy
-        assert halves.Y3.shape == whole.Y3.shape
-        np.testing.assert_array_equal(np.asarray(halves.Y), np.asarray(whole.Y))
-        np.testing.assert_array_equal(halves.keep, whole.keep)
+        self._early_gate(spec, PROBLEM)
+        two_phase = prepare(spec, PROBLEM, Y, X=X)
+        assert two_phase.method == whole.method
+        assert two_phase.policy == whole.policy
+        assert two_phase.Y3.shape == whole.Y3.shape
+        np.testing.assert_array_equal(np.asarray(two_phase.Y), np.asarray(whole.Y))
+        np.testing.assert_array_equal(two_phase.keep, whole.keep)
 
-    def test_the_scalar_half_settles_the_policy_before_any_data_exists(self):
+    def test_the_early_gate_settles_the_policy_before_any_data_exists(self):
         with pytest.raises(ValueError, match="on_invalid must be one of"):
-            prepare_scalars(self._spec(), PROBLEM, on_invalid=cast(Any, "nope"))
+            self._early_gate(self._spec(), PROBLEM, on_invalid=cast(Any, "nope"))
 
-    def test_the_scalar_half_applies_the_gates(self):
+    def test_the_early_gate_applies_the_gates(self):
         correlated = jaxgsa.Problem(
             ("x1", "x2", "x3"),
             ((0.0, 1.0),) * D,
             correlation=np.eye(D) + np.eye(D, k=1) * 0.4 + np.eye(D, k=-1) * 0.4,
         )
         with pytest.raises(ValueError, match="correlation"):
-            prepare_scalars(methods()["dgsm"], correlated)
+            self._early_gate(methods()["dgsm"], correlated)
 
 
 class TestExtraArraysRideWithY:
@@ -382,15 +398,15 @@ class TestExtraArraysRideWithY:
     disagree with the rows the report names.
     """
 
-    def _preamble(self):
-        return prepare_scalars(methods()["borgonovo"], PROBLEM, on_invalid=cast(Any, "drop"))
+    def _prepare(self, Y, **kwargs):
+        return prepare(methods()["borgonovo"], PROBLEM, Y, on_invalid=cast(Any, "drop"), **kwargs)
 
     def test_a_non_finite_extra_condemns_its_row(self):
         X, Y = _xy()
         jac = np.zeros((N, D))
         jac[7, 1] = np.nan
         with pytest.warns(JaxgsaWarning, match="dropped"):
-            ctx = self._preamble().with_data(Y, X=X, extra={"jac": jnp.asarray(jac)})
+            ctx = self._prepare(Y, X=X, extra={"jac": jnp.asarray(jac)})
         assert ctx.invalid.unit_indices == (7,)
         assert ctx.Y.shape[0] == N - 1
         assert ctx.extra["jac"].shape == (N - 1, D)
@@ -401,7 +417,7 @@ class TestExtraArraysRideWithY:
         Y[3] = np.nan
         jac = np.arange(N * D, dtype=float).reshape(N, D)
         with pytest.warns(JaxgsaWarning, match="dropped"):
-            ctx = self._preamble().with_data(jnp.asarray(Y), X=X, extra={"jac": jnp.asarray(jac)})
+            ctx = self._prepare(jnp.asarray(Y), X=X, extra={"jac": jnp.asarray(jac)})
         np.testing.assert_allclose(np.asarray(ctx.extra["jac"]), np.delete(jac, 3, axis=0))
 
     def test_a_context_with_no_extra_carries_an_empty_mapping(self):
@@ -433,7 +449,7 @@ class TestAFloat64OutputIsNotTruncatedInSilence:
     def _downcast_warnings(self, Y, **kwargs):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            prepare_scalars(methods()["borgonovo"], PROBLEM).with_data(Y, **kwargs)
+            prepare(methods()["borgonovo"], PROBLEM, Y, **kwargs)
         # Match the category and the fix the message names, not its prose.
         # Filtering on a phrase means a reworded warning silently stops
         # being captured and every test here passes for the wrong reason.

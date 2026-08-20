@@ -1,11 +1,9 @@
 """Row-batching helpers, sized against the transient-memory budget.
 
-Originally written for surrogate forward prediction (basis tensors grow
-linearly with the number of prediction rows, with a large per-row constant),
-:func:`resolve_batch_size` is now the library-wide resolver: every method
-that derives a ``None`` batch width from :func:`get_memory_budget` routes
-through it or follows its convention — explicit widths win over the budget,
-``None`` derives one from it.
+:func:`resolve_batch_size` is the library-wide resolver: every method that
+derives a ``None`` batch width from :func:`get_memory_budget` routes through
+it or follows its convention — explicit widths win over the budget, ``None``
+derives one from it.
 """
 
 from __future__ import annotations
@@ -17,10 +15,10 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
-# Transient-memory budget (bytes) used to derive the automatic batch size.
-# 512 MiB keeps the per-batch basis tensors comfortably resident while making
-# per-batch dispatch overhead negligible next to the basis construction cost.
-DEFAULT_EMULATE_BUDGET_BYTES: int = 512 * 1024**2
+# Default transient-memory budget, in bytes, for deriving an automatic batch
+# size. 512 MiB keeps the per-batch tensors comfortably resident while making
+# per-batch dispatch overhead negligible next to the work done per batch.
+_DEFAULT_MEMORY_BUDGET_BYTES: int = 512 * 1024**2
 
 # Module-level override for the transient-memory budget, set through
 # ``jaxgsa.config.set_memory_budget``. ``None`` means "use the default"; the
@@ -40,9 +38,9 @@ def get_memory_budget() -> int:
 
     Returns:
         The budget set via :func:`jaxgsa.config.set_memory_budget`, or
-        ``DEFAULT_EMULATE_BUDGET_BYTES`` if none was set.
+        ``_DEFAULT_MEMORY_BUDGET_BYTES`` if none was set.
     """
-    return DEFAULT_EMULATE_BUDGET_BYTES if _memory_budget_bytes is None else _memory_budget_bytes
+    return _DEFAULT_MEMORY_BUDGET_BYTES if _memory_budget_bytes is None else _memory_budget_bytes
 
 
 def _set_memory_budget(budget_bytes: int) -> None:
@@ -51,7 +49,7 @@ def _set_memory_budget(budget_bytes: int) -> None:
     Internal state mutator behind :func:`jaxgsa.config.set_memory_budget`,
     which performs the input validation. To go back to the default, read
     :func:`get_memory_budget` first and set that value again: it resolves
-    the unset state to ``DEFAULT_EMULATE_BUDGET_BYTES``.
+    the unset state to ``_DEFAULT_MEMORY_BUDGET_BYTES``.
 
     Args:
         budget_bytes: New budget in bytes.
@@ -86,6 +84,26 @@ def resolve_batch_size(
         return min(batch_size, n_rows)
     auto = get_memory_budget() // max(bytes_per_row, 1)
     return max(1, min(n_rows, auto))
+
+
+def pad_rows(A: Array, n_pad: int) -> Array:
+    """Pad ``A`` with ``n_pad`` zero rows on the sample axis.
+
+    Used by a streamed fit (HDMR, PCE) to round the row count up to a whole
+    number of batches, so every batch traces at the same shape and the step
+    function compiles once. The padded rows carry zero weight in the caller's
+    own mask, so they never change the fit.
+
+    Args:
+        A: Array to pad, sample axis first.
+        n_pad: Zero rows to append. ``0`` returns ``A`` unchanged.
+
+    Returns:
+        ``A`` with ``n_pad`` zero rows appended.
+    """
+    if n_pad == 0:
+        return A
+    return jnp.concatenate([A, jnp.zeros((n_pad, *A.shape[1:]), dtype=A.dtype)], axis=0)
 
 
 def apply_batched(fn: Callable[[Array], Array], X: Array, batch_size: int) -> Array:

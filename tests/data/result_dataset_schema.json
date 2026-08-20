@@ -1,6 +1,10 @@
 {
   "borgonovo@multi": {
-    "attrs": [],
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap"
+    ],
     "coords": [
       "output",
       "param"
@@ -28,7 +32,11 @@
     ]
   },
   "borgonovo@scalar": {
-    "attrs": [],
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap"
+    ],
     "coords": [
       "param"
     ],
@@ -54,7 +62,11 @@
     ]
   },
   "borgonovo@series": {
-    "attrs": [],
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap"
+    ],
     "coords": [
       "output",
       "param",
@@ -610,6 +622,9 @@
   },
   "morris@multi": {
     "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap",
       "space"
     ],
     "coords": [
@@ -646,6 +661,9 @@
   },
   "morris@scalar": {
     "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap",
       "space"
     ],
     "coords": [
@@ -680,6 +698,9 @@
   },
   "morris@series": {
     "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap",
       "space"
     ],
     "coords": [
@@ -718,6 +739,9 @@
   },
   "optimal_transport@multi": {
     "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap",
       "mode"
     ],
     "coords": [
@@ -764,6 +788,9 @@
   },
   "optimal_transport@scalar": {
     "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap",
       "mode"
     ],
     "coords": [
@@ -808,6 +835,9 @@
   },
   "optimal_transport@series": {
     "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap",
       "mode"
     ],
     "coords": [
@@ -856,6 +886,9 @@
   },
   "optimal_transport_multivariate@scalar": {
     "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap",
       "mode"
     ],
     "coords": [
@@ -896,6 +929,9 @@
   },
   "optimal_transport_trajectory@series": {
     "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap",
       "mode"
     ],
     "coords": [
@@ -937,7 +973,11 @@
     ]
   },
   "pawn@multi": {
-    "attrs": [],
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap"
+    ],
     "coords": [
       "output",
       "param"
@@ -961,7 +1001,11 @@
     ]
   },
   "pawn@scalar": {
-    "attrs": [],
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap"
+    ],
     "coords": [
       "param"
     ],
@@ -983,7 +1027,11 @@
     ]
   },
   "pawn@series": {
-    "attrs": [],
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap"
+    ],
     "coords": [
       "output",
       "param",
@@ -1193,6 +1241,9 @@
   },
   "sobol@multi": {
     "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap",
       "estimator"
     ],
     "coords": [
@@ -1233,6 +1284,9 @@
   },
   "sobol@scalar": {
     "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap",
       "estimator"
     ],
     "coords": [
@@ -1271,6 +1325,9 @@
   },
   "sobol@series": {
     "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap",
       "estimator"
     ],
     "coords": [

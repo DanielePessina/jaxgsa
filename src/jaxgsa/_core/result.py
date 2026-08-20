@@ -260,6 +260,13 @@ class SchemaResult:
         override that reproduces this mapping is drift waiting to happen; no
         result class needs one today.
 
+        A saved interval must say what it is, so a result that carries a
+        ``ci`` (a :class:`CIInfo`) also gets ``ci_level``, ``ci_method`` and
+        ``ci_n_bootstrap`` written here, under those exact names. ``ci`` is
+        not in ``_schema.meta``, because it is one object with three
+        provenance values, not one; the loop above only handles a single
+        scalar per name.
+
         Returns:
             A mapping written to ``xr.Dataset.attrs``.
         """
@@ -269,6 +276,11 @@ class SchemaResult:
             if value is None:
                 continue
             attrs[name] = _attr_value(value)
+        ci = getattr(self, "ci", None)
+        if ci is not None:
+            attrs["ci_level"] = ci.level
+            attrs["ci_method"] = ci.method
+            attrs["ci_n_bootstrap"] = ci.n_bootstrap
         return attrs
 
     # -- derivation -------------------------------------------------------

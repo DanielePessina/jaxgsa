@@ -29,9 +29,11 @@ Note:
 
 from __future__ import annotations
 
+import os
 import warnings
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Literal, TypeAlias, cast
 
 import jax.numpy as jnp
@@ -40,6 +42,15 @@ import numpy.typing as npt
 from jax import Array
 
 from jaxgsa._core.warning_types import JaxgsaWarning
+
+# Every jaxgsa source file starts with this prefix. A preamble warning raised
+# from deep inside the package (this module, called through prepare()) skips
+# every frame under it, so Python attributes the warning to the caller's own
+# line instead of to a helper several calls up. A hand-counted stacklevel
+# breaks the moment another internal call is added between the warning and
+# the caller; this does not, because it is a property of the file, not of the
+# call depth.
+_PACKAGE_DIR = str(Path(__file__).resolve().parent.parent) + os.sep
 
 __all__ = [
     "InvalidReport",
@@ -54,8 +65,8 @@ OnInvalid: TypeAlias = Literal["raise", "propagate", "drop"]
 _POLICIES: tuple[str, ...] = ("raise", "propagate", "drop")
 
 # Below this many surviving units the estimate is not worth reporting without
-# saying so. The three modules that dropped before 0.10 each carried their own
-# floor; this is the smallest of them, applied everywhere.
+# saying so. One floor, applied everywhere a "drop" policy can leave a sample
+# this small.
 _LOW_SURVIVOR_WARN = 10
 
 # How many individual positions an error message or repr lists before it
@@ -398,7 +409,7 @@ def check_invalid(
             "reaches the indices and they will be non-finite too. "
             f"{_positions_line(report)}",
             category=JaxgsaWarning,
-            stacklevel=3,
+            skip_file_prefixes=(_PACKAGE_DIR,),
         )
         return np.ones(n_units, dtype=bool), report
 
@@ -407,14 +418,14 @@ def check_invalid(
         f"non-finite value in {_and_list(sources)}. The indices are computed from "
         f"the remaining {n_kept}. {_positions_line(report)}",
         category=JaxgsaWarning,
-        stacklevel=3,
+        skip_file_prefixes=(_PACKAGE_DIR,),
     )
     if n_kept < _LOW_SURVIVOR_WARN:
         warnings.warn(
             f"{method}: only {n_kept} {unit.plural} remain after dropping. "
             "Sensitivity indices from a sample this small are not reliable.",
             category=JaxgsaWarning,
-            stacklevel=3,
+            skip_file_prefixes=(_PACKAGE_DIR,),
         )
     return clean, report
 

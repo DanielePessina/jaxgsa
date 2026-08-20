@@ -58,10 +58,10 @@ class MethodSpec:
             from the name.
         pure_core: Whether the package exports a traceable ``indices()``.
             ``True`` for eleven methods. ``False`` for ``kucherenko`` and
-            ``vkoga``, which are host NumPy and SciPy end to end -- see
-            ``docs/adr/0015-pure-core-exemptions.md``. Recorded here rather
-            than left as an absence so the exemption is a declaration that
-            gets checked, not a gap someone has to notice.
+            ``vkoga``, which are host NumPy and SciPy end to end and so have
+            no traceable core to export. Recorded here rather than left as an
+            absence so the exemption is a declaration that gets checked, not
+            a gap someone has to notice.
         invalid_unit: The block of data the method treats as indivisible when
             dropping non-finite values, or ``None`` when the method delegates
             to a backend and has no unit of its own. Dropping half a Saltelli
