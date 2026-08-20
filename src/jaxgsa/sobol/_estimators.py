@@ -28,7 +28,9 @@ Name                First order                  Total order
 ``azzini-rosati``   Azzini, Mara, Rosati 2021    Azzini, Mara, Rosati 2021
 =================== ============================ =========================
 
-``saltelli-jansen`` is the default. It is what jaxgsa has always computed.
+``saltelli-jansen`` is the default: Jansen's total-order estimator is a
+mean of squares, so it can never go negative, and it is also SALib's
+default, which keeps cross-library comparisons plain (ADR 0021).
 
 A note on the first-order label. The default's first-order formula is
 ``E[B (AB_j - A)] / Var(Y)``. That is not the Saltelli (2002) estimator,

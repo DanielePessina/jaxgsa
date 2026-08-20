@@ -28,19 +28,20 @@ jaxgsa supports `Y` of shape `(N, T, K)`, so `T*K` output slices, not one.
 
 - Forward mode costs `d` passes regardless of `T`. Reverse mode costs `T*K`
   passes regardless of `d`. So: **use reverse when `T*K < d`, forward when
-  `T*K > d`.** Select at call time by comparing the two.
+  `T*K > d`.** Select at call time by comparing the two. A tie (`T*K == d`)
+  costs the same either way; the implementation keeps reverse there, so
+  every case that was reverse-only before the change stays bit-identical.
 - **Every cost or speed claim must either carry the `T` factor or state that
   it applies to scalar output only.** This includes README and docs prose.
 
-`dgsm/_analyze.py` currently hard-codes `jax.jacrev`, which is reverse mode.
-Its own comment already notes the limitation. Switching to a comparison is a
-real speed gain on time-series outputs, not a cosmetic change. The natural
-oracle for the change is T4: the two paths must return equal Jacobians.
+Before this change, `dgsm/_analyze.py` hard-coded `jax.jacrev` (reverse
+mode); its own comment noted the limitation. The comparison is a real speed
+gain on time-series outputs, not a cosmetic change, in proportion to
+`T*K / d`. The oracle for the change is T4: the two modes must return equal
+Jacobians, which `tests/test_dgsm.py::TestJacobianModeSelection` pins.
 
 ## Consequences
 
-- A DGSM call on a long time series is currently much slower than it needs to
-  be, in proportion to `T*K / d`.
 - Any benchmark table that does not say what `T` was is not comparable.
 - **An open obligation on the README.** It claims jaxgsa is "up to 668x faster
   than SALib". That figure compares against a single-process NumPy baseline.

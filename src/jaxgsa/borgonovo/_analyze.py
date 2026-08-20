@@ -1084,24 +1084,26 @@ def analyze(
             stacklevel=2,
         )
     apply_bias_correction = bias_correct is not False
-    if bias_correct is None and n_bootstrap > 0:
-        global _warned_bias_correct_default
-        if not _warned_bias_correct_default:
-            _warned_bias_correct_default = True
-            warnings.warn(
-                "jaxgsa.borgonovo: bias_correct was left at its default (None) and "
-                "n_bootstrap > 0, so the Plischke bias correction IS applied: the "
-                "delta reported is 2*d_hat - mean(d_boot), not the plug-in "
-                "estimate. Pass bias_correct=True to keep this and silence this "
-                "warning, or bias_correct=False for the uncorrected delta. "
-                "This warning is shown once per process.",
-                JaxgsaWarning,
-                stacklevel=2,
-            )
 
     if n_bootstrap > 0:
         if key is None:
             raise ValueError("key is required when n_bootstrap > 0")
+        # Warn after the key check, so the one shot lands on a call that
+        # actually runs; a failed first call must not burn the warning.
+        if bias_correct is None:
+            global _warned_bias_correct_default
+            if not _warned_bias_correct_default:
+                _warned_bias_correct_default = True
+                warnings.warn(
+                    "jaxgsa.borgonovo: bias_correct was left at its default (None) and "
+                    "n_bootstrap > 0, so the Plischke bias correction IS applied: the "
+                    "delta reported is 2*d_hat - mean(d_boot), not the plug-in "
+                    "estimate. Pass bias_correct=True to keep this and silence this "
+                    "warning, or bias_correct=False for the uncorrected delta. "
+                    "This warning is shown once per process.",
+                    JaxgsaWarning,
+                    stacklevel=2,
+                )
         boot = jax.random.randint(key, (n_bootstrap, N), 0, N, dtype=jnp.int32)
         all_idx = jnp.concatenate([identity, boot], axis=0)
     else:
