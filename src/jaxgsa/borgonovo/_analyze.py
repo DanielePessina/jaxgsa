@@ -99,14 +99,21 @@ _warned_bias_correct_default = False
 # which in the worst case can alias: the trapezoid rule lands on a narrow
 # peak and integrates a spike over a step-wide interval, biasing delta.
 #
-# In practice the class bandwidth has to fall much further than this
-# threshold before that shows up in delta. A repro at N = 5000..50000
-# (scratchpad/givendata/borg_alias.py) drove the class-to-full bandwidth
-# ratio down to 0.056 -- about 30x below this 1e-2 threshold -- and delta
-# still moved by at most 0.003 between grid_size = 100 and grid_size = 2000.
-# So 1e-2 is a conservative floor, not the point where the grid actually
-# starts to alias; it costs nothing because the fallback bandwidth below is
-# already clamped to the grid step, which is the load-bearing guard.
+# This 1e-2 is not the grid step, and an earlier comment here wrongly said
+# it was. The test is h_cls < 1e-2 * h_full, so the threshold is a bandwidth
+# of 1e-2 * h_full. At the default grid_size = 100 the step is 1/99 of the
+# output range, while h_full is a Silverman bandwidth of a few percent of
+# that range, so 1e-2 * h_full sits 18x to 29x *below* the step, not at it
+# (scratchpad/givendata/borg_alias.py: h_full = 0.056 and step = 0.0101 at
+# N = 5000; h_full = 0.035 and step = 0.0101 at N = 50000, on a unit range).
+#
+# The aliasing it guards against is also milder than the old comment
+# claimed. The same repro drove the class bandwidth down to 0.19 of the grid
+# step, well inside the regime the old comment predicted would blow delta
+# past 1, and delta still moved by at most 0.003 between grid_size = 100 and
+# grid_size = 2000. So 1e-2 is a conservative floor rather than a measured
+# cliff. Keeping it conservative costs nothing: the floor applied below is
+# clamped to the grid step, and that clamp is the load-bearing guard.
 _DEGENERATE_BW_TOL = 1e-2
 # Bandwidth given to a degenerate class, as a fraction of the full-sample
 # Silverman bandwidth. The applied floor is ``max(fraction * h_full,

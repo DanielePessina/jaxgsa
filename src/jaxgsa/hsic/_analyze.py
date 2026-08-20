@@ -72,33 +72,37 @@ _UINT_BY_ITEMSIZE: dict[int, type] = {2: jnp.uint16, 4: jnp.uint32, 8: jnp.uint6
 """Unsigned integer type of the same width as a float type, by byte count."""
 
 
-def _linear_quantile_plan(q: float, n_elements: int, dtype: DTypeLike) -> tuple[int, int, Array]:
+def _linear_quantile_plan(q: float, n_elements: int) -> tuple[int, int, Array]:
     """Reproduce the index and weight arithmetic of ``jnp.quantile``.
 
     ``jnp.quantile(a, q)`` with the default ``method="linear"`` reads two
-    order statistics of the sorted array and blends them. It computes the
-    position ``q * (n - 1)`` in the array's own dtype, so the rounding of
-    that product is part of the answer. This helper repeats exactly that
+    order statistics of the sorted array and blends them. The position
+    ``q * (n - 1)`` is computed in the dtype ``q`` promotes to, which for a
+    bare Python float is the default float dtype, and only the finished
+    value is cast back to the dtype of ``a``. So the rounding of that
+    product is part of the answer, and it is the *default* float dtype that
+    decides it, not the dtype of ``a``. This helper repeats exactly that
     arithmetic on the host, which is possible because both ``q`` and the
     element count are static.
 
-    ``dtype`` must be the dtype of the array the quantile is taken over, not
-    a default. At ``float32`` and ``n_elements`` above about ``2^23``, the
-    target position can be a half-integer (``x.5``) that ``float32`` cannot
-    represent exactly, which silently rounds the plan to the wrong pair of
-    order statistics unless the arithmetic here is done in that same
-    ``float32``, matching the rounding ``jnp.quantile`` itself would apply.
+    Taking the dtype from ``a`` instead breaks the match. With x64 on and a
+    ``float32`` ``a`` of about ``2^23`` elements or more, the target
+    position is a half-integer that ``float32`` cannot hold: ``jnp.quantile``
+    still computes ``8390655.5`` in ``float64`` and returns ``8390656.0``,
+    while a ``float32`` plan collapses to the single rank ``8390655`` and
+    returns ``8390655.0``. The float32 rounding at that size is
+    ``jnp.quantile``'s own, and reproducing it is this helper's job.
 
     Args:
         q: Quantile in [0, 1], as a Python float.
         n_elements: Number of elements the quantile is taken over.
-        dtype: Float dtype of the array the quantile is taken over.
 
     Returns:
         ``(low_rank, high_rank, high_weight)``. The ranks are 0-based
         positions into the ascending sort, and the weight is the share of the
-        higher of the two, a scalar of ``dtype``.
+        higher of the two, a scalar of the default float dtype.
     """
+    dtype = jnp.result_type(float)
     pos = np.asarray(q, dtype=dtype) * np.asarray(n_elements - 1, dtype=dtype)
     low = np.floor(pos)
     high = np.ceil(pos)
@@ -169,7 +173,7 @@ def _linear_quantile_by_selection(values: Array, q: float) -> Array:
     raw = jax.lax.bitcast_convert_type(flat, uint)
     bits = jnp.where(raw & sign_bit != 0, ~raw, raw | sign_bit)
 
-    low_rank, high_rank, high_weight = _linear_quantile_plan(q, flat.shape[0], flat.dtype)
+    low_rank, high_rank, high_weight = _linear_quantile_plan(q, flat.shape[0])
 
     def _step(_: int, bounds: tuple[Array, Array]) -> tuple[Array, Array]:
         """Halve the candidate bit-pattern interval once."""
