@@ -53,5 +53,6 @@ as useless as a deleted one. A superseded ADR keeps its number and gains a
 | [0009](0009-a-change-with-no-behavioural-target.md) | A change with no behavioural target must earn its place |
 | [0010](0010-multi-agent-file-ownership.md) | One file, one agent |
 | [0011](0011-out-of-scope-for-1.0.md) | Out of scope for 1.0: plotting, CLI, distance correlation as a module, RSA |
-| [0012](0012-open-questions.md) | **Open:** non-Gaussian copulas; the "pick-freeze" terminology rule |
+| [0012](0012-open-questions.md) | **Closed:** the Gaussian copula is the scope of the library; "Saltelli column-swap scheme" everywhere, with a cited exception for a published estimator's own name |
 | [0020](0020-constraints-on-methods-not-yet-built.md) | Constraints on methods not yet built — read before implementing one |
+| [0022](0022-the-1-0-interface-freeze.md) | The 1.0 interface freeze: what was fixed, and what the numbers promise |

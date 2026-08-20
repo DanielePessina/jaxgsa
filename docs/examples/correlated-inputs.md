@@ -451,6 +451,14 @@ matrix explicitly with `problem.with_correlation(None)`.
   correlation. It has no tail dependence. On the latent scale, the variables
   are conditionally independent given the rest. Real data may carry
   asymmetric or tail dependence that this smooths away.
+- **The Gaussian copula is the dependence model jaxgsa implements, and that
+  is a fixed scope rather than a gap waiting to be filled.** Every method
+  that reads `problem.correlation` assumes a Gaussian conditional, so other
+  copula families are not planned (ADR 0012). Your declared rank correlation
+  still holds, so the marginals and the pairwise ranks are right, but the
+  joint behaviour in the tails is not what your data does. If tail dependence
+  drives your problem, GlobalSensitivity.jl with Copulas.jl covers Clayton,
+  Frank, Gumbel and t, and is the honest recommendation.
 - For non-Gaussian marginals, the Pearson correlation of the physical samples
   usually differs from the latent matrix. This is the NORTA
   correlation-matching problem. The Spearman rank correlation is the

@@ -1,12 +1,17 @@
 # Changelog
 
-## Unreleased (0.10.0)
+## 1.0.0
 
-Version 0.10 adds capability.
+Version 1.0.0 freezes the public interface. It gives eleven methods a pure
+`indices()` core that survives `jit`, `vmap` and differentiation. It adds
+confidence intervals to six more methods, a printed run summary on every entry
+point, one batching contract for the whole library, and one policy for a
+non-finite model output. It also fixes defects, and some of them move reported
+numbers.
 
-**Breaking changes:** `SobolResult.nan_counts` is removed,
-`Problem.input_specs` now returns dataclasses, and DGSM selects its autodiff
-mode by shape (numbers move at float precision). See "Breaking".
+**Read "Breaking" before you upgrade.** It covers keyword renames, one batching
+contract for every method, `verbose=True` as the new default, changed defaults,
+removals, and the few changes that move reported values.
 
 ### Breaking
 
@@ -128,6 +133,13 @@ mode by shape (numbers move at float precision). See "Breaking".
   a key. The uncorrected estimate is biased upward, because a KDE separation
   is a distance and sampling noise can only increase it.
 
+  Because `None` resolves by the replicate count, adding bootstrap intervals
+  to a call also changes the reported `delta` from the plug-in estimate to
+  the corrected one. Borgonovo says so: the first default call per process
+  that resolves this way emits one `JaxgsaWarning` naming which delta it
+  returned. Pass an explicit `bias_correct=True` or `False` to silence it.
+  The docstring spells out the resolution rule.
+
 - **`prenormalize` is gone.** It meant four different things across the
   methods that took it, and on two of them it meant nothing at all.
 
@@ -237,6 +249,37 @@ mode by shape (numbers move at float precision). See "Breaking".
   To keep the old behaviour of those first three, pass `on_invalid="drop"`. To
   keep `efast`'s, and that of the nine that let the value through, pass
   `on_invalid="propagate"`.
+
+- **`jaxgsa.config.set_memory_budget` now reads megabytes.** It took bytes
+  before, so the same call means a million times more than it used to.
+
+  ```python
+  jaxgsa.config.set_memory_budget(512)              # 512 MiB, the default
+  jaxgsa.config.set_memory_budget(2, unit="gb")     # 2 GiB
+  jaxgsa.config.set_memory_budget(536870912, unit="b")   # the old spelling
+  ```
+
+  `unit` accepts `b`, `bytes`, `kb`, `mb`, `gb`, `tb` and the explicit binary
+  spellings `kib`, `mib`, `gib`, `tib`. Case and surrounding spaces do not
+  matter. The multiples are binary, so `mb` is 1024 squared and
+  `set_memory_budget(512)` is exactly the previous default. Values may be
+  floats.
+
+  A call that gives no unit and a value of 1048576 or more now raises, because
+  such a value is almost certainly bytes and reading it as megabytes would ask
+  for more memory than any machine has. The message shows both ways to say what
+  you meant. A unit-less value below that is read as megabytes without
+  complaint, so a caller who deliberately set a budget under 1 MiB should add
+  `unit="b"`.
+
+  Two smaller consequences: the first parameter is now called `budget`, not
+  `budget_bytes`, so a keyword call must be renamed; and `unit` is
+  keyword-only.
+
+  `get_memory_budget()` is **unchanged**. It still returns an `int` of bytes,
+  because a silently changed return value cannot be guarded the way an argument
+  can. It gained an optional `unit=`, which returns a float for any unit other
+  than bytes.
 
 ### Added
 
@@ -440,16 +483,70 @@ mode by shape (numbers move at float precision). See "Breaking".
   not the same as no check having run. Positions always refer to the array as
   you passed it, before anything was removed.
 
-### Changed
+- **`result.ci` records how a confidence interval was made.** Until now a
+  `*_conf` array was an interval of unknown level: nothing on the result said
+  whether it was a 95% or a 68% interval, which endpoint rule drew it, or how
+  many resamples it rested on. Every result that reports intervals now carries
+  a `ci` field holding `level`, `method`, `n_bootstrap` and, on request,
+  `replicates`. `S1` and `S1_conf` are unchanged plain arrays.
 
-- **Borgonovo says so, once, when the default applies the bias correction.**
-  `bias_correct` keeps its tri-state default (`None`). `None` applies the
-  Plischke correction whenever `n_bootstrap > 0`, so adding bootstrap
-  intervals to a call also changes the reported `delta` from the plug-in
-  estimate to the corrected one. The first default call per process that
-  resolves this way now emits one `JaxgsaWarning` saying which delta it
-  returned; pass an explicit `bias_correct=True` or `False` to silence it.
-  The docstring now spells out the resolution rule. No numbers move.
+- **`keep_replicates=True` keeps the bootstrap draws.** `analyze` discarded
+  them, so recomputing an interval at another level meant re-running the whole
+  analysis. Pass `keep_replicates=True` and the draws arrive on
+  `result.ci.replicates`, keyed by the estimate they belong to. It is off by
+  default because the draws are large: 1000 resamples of a
+  `(T=100, K=5, D=20)` index array is 80 MB. Every method that reports an
+  interval accepts the keyword, and it is keyword-only and last in each
+  signature.
+
+  The stored draws follow the reported convention. Sobol's `S2` replicates are
+  symmetric with a NaN diagonal, exactly as the `S2` point estimate and its
+  intervals are, so read the upper triangle.
+
+- **`SobolSamples.unit` and `SobolSamples.transform(theta)`.** `unit` holds the
+  design in the unit cube, before any input distribution is applied, so it does
+  not depend on the distributions at all. `transform` applies a set of
+  distribution parameters to it. That allows one design to be reused across
+  different assumed input ranges, and, because `transform` is written in JAX,
+  it allows a Sobol index to be differentiated with respect to those
+  parameters:
+
+  ```python
+  def s1(theta):
+      return jaxgsa.sobol.indices(samples, model(samples.transform(theta)))[0]
+
+  dS1_dtheta = jax.jacrev(s1)(theta)
+  ```
+
+  The chain runs through the model, so the model must be differentiable in
+  JAX, and float64 should be enabled. `transform` raises for a categorical
+  problem: a categorical inverse CDF is a step function, so it has no useful
+  derivative and `unit` and `samples` do not have the same number of rows.
+
+- **Every result class now prints a one-line summary.** `MorrisResult`,
+  `DGSMResult`, `DeltaResult`, `PAWNResult` and `OTResult` had no `__repr__`,
+  so echoing one in a notebook printed every index array and the whole
+  `Problem`. All thirteen now print their field shapes and their provenance,
+  in one style.
+
+- **`PCEResult.streamed` and `HDMRResult.streamed`.** They record which fit path
+  ran. A fit that took much longer than expected is a real reason to ask whether
+  the memory budget engaged, and until now nothing answered that.
+
+- **`jaxgsa.JaxgsaWarning`**, exported from the package root. Every warning the
+  package raises now passes this category. Before, all of them defaulted to
+  `UserWarning`, so the only way to tell a jaxgsa warning from a NumPy or JAX
+  one was the message text, and no filter selected exactly this package's
+  warnings. To silence them:
+
+  ```python
+  warnings.filterwarnings("ignore", category=jaxgsa.JaxgsaWarning)
+  ```
+
+  `JaxgsaWarning` subclasses `UserWarning`, so filters and
+  `pytest.warns(UserWarning, ...)` assertions that worked before still work.
+
+### Changed
 
 - **The Sobol default-estimator rationale is the real one.** The docstring
   used to justify `estimator="saltelli-jansen"` with historical continuity.
@@ -494,18 +591,56 @@ mode by shape (numbers move at float precision). See "Breaking".
   shipping. Two rules the code does not satisfy yet are recorded as strict
   xfails, so closing the gap forces the exemption to be deleted.
 
-### Performance
+- **A result declares its fields, and `to_dataset` is derived from that.**
+  There were thirteen hand-written `to_dataset` methods and four copies of the
+  `param_i`/`param_j` splice. Each result now declares a field schema, and the
+  export, the summary and the `*_lower`/`*_upper` split all read it. The
+  exported dims, coordinates and variable names are unchanged for all thirteen
+  results, which `tests/test_result_schema.py` pins against a snapshot taken
+  from the old methods.
 
-- **The Sobol bootstrap keeps a single-axis gather on a scalar output.**
-  Mapping the bootstrap over output slices, which is what makes it fast on
-  many outputs, would make every gather batched on two axes, and XLA compiles
-  that to a slower gather than a single-axis one. A chunk holding one slice
-  has no outer axis worth mapping, so it drops the outer `vmap`. On an Apple
-  M1 Pro at N=1024, D=3 and 1000 resamples, one output slice takes 8.5 ms.
-  Chunks holding more than one slice take the mapped path. The numbers are
-  the same either way: every interval endpoint is bit-identical, on every
-  estimator. The shortcut also applies when many slices exist but the memory
-  budget has narrowed the chunk to one.
+- **`SurrogateResult` no longer declares `shapley`.** The abstract method fixed
+  no contract: `VKOGAResult` could only satisfy it by raising, and
+  `HDMRResult` widened the signature. `PCEResult.shapley` and
+  `HDMRResult.shapley` are plain methods now, and `VKOGAResult.shapley` still
+  raises `NotImplementedError` with the same message. `predict` stays on the
+  base class. This also removes an inverted dependency: `jaxgsa._core` no
+  longer imports a method package's private module.
+
+- **NumPy is now a declared dependency**, at `numpy>=2`. NumPy is imported
+  directly by 45 of the package's 74 modules, but it reached users only
+  through JAX and SciPy, both of which allow NumPy 1.x. An install from PyPI
+  could therefore get a NumPy the package does not support.
+
+- **The SciPy floor rises to `scipy>=1.15`**, from `>=1.10`. This makes
+  `scipy.stats.chatterjeexi` always available as a verification oracle.
+
+- **One compatibility matrix, and a test that keeps it true.** The
+  documentation stated it three times and the three disagreed: one table had a
+  short row that rendered a column blank, one credited DGSM with a sampler it
+  does not have, and one listed eight of the nine given-data methods. There is
+  now one table, "Method capabilities" in `docs/guide/methods.md`. It gains a
+  Bootstrap CI column that names the keyword each method uses.
+  `docs/index.md` and `docs/api/index.md` link to it instead of restating it.
+  `tests/test_docs_matrix.py` checks every cell against the method
+  registry, so a fourteenth method, or a changed capability, fails the
+  suite rather than leaving the documentation stale.
+
+### Removed
+
+- `_PCEFit.coeffs_flat`, a private field that was written and never read. It
+  kept a large array alive inside the module whose purpose is bounding memory.
+
+- The private `validate_correlation` helper. It had no production caller and
+  stayed alive only because tests used it. `canonicalize_correlation` runs the
+  same code, and its tests now call that instead.
+
+- The `version` and `date-released` fields in `CITATION.cff`. Nothing updated
+  them and nothing checked them, so they had drifted three releases behind.
+  Both are optional, and GitHub and Zenodo take the version from the release
+  tag when they are absent.
+
+### Performance
 
 - **The PCE streamed fit dispatches one jitted step per row batch.** Each
   batch used to run several eager ops: an unjitted design-matrix build plus
@@ -541,6 +676,13 @@ mode by shape (numbers move at float precision). See "Breaking".
   now *selects* its two order statistics instead of sorting the whole
   `(N, N)` distance matrix. The sort alone was 92% of the run time.
 
+  The same heuristic also allocates about a third of what it did. It built a
+  distance matrix, two index arrays and a copy of the upper triangle, only to
+  skip the diagonal zeros. Those zeros are the smallest entries, so their
+  effect folds into the quantile position instead. Measured on an Apple M1 Pro
+  in float32: peak transient memory falls from `3.57 * N^2` to `1.00 * N^2`,
+  which is 228 MiB down to 64 MiB at `N = 4096`.
+
   No index changed. Every value is bit-for-bit what it was.
 
 - **`jaxgsa.optimal_transport.analyze` is about 2x faster on many outputs.**
@@ -572,9 +714,26 @@ mode by shape (numbers move at float precision). See "Breaking".
   `slice_chunk_size` now caps output slices on both the plain and the
   bootstrap path. On the bootstrap path it used to cap resample draws.
 
+  A chunk that holds one slice takes a single-axis path instead. Mapping over
+  a length-one slice axis makes every gather batched on two axes, and XLA
+  compiles that to a slower gather than a single-axis one, so the outer
+  `vmap` is dropped there. On an Apple M1 Pro at N=1024, D=3 and 1000
+  resamples, one output slice takes 8.5 ms. Every interval endpoint is
+  bit-identical between the two paths, on every estimator. The shortcut also
+  applies when many slices exist but the memory budget has narrowed the chunk
+  to one.
+
   This moves 44 sobol values in the last 1 to 4 bits of float32. Widening the
   batch is the speedup, and XLA schedules a float32 reduction differently at
   a different width. `scripts/baseline/README.md` records the review.
+
+- **Row deduplication is about 3.4 times faster.** `_stable_unique_rows` runs
+  twice on the Sobol sampling path and once on the Morris path. It built one
+  array view and one `bytes` key per row in Python. It now builds every key in
+  one C-level call and keeps the dictionary that was already doing the work.
+  Measured on an Apple M1 Pro at `N = 2**20`, `D = 20`, float64: 1099 ms
+  before, 325 ms after. Output is bit-identical, including row order, which
+  matters because the design prefix logic depends on it.
 
 ### Fixed
 
@@ -689,178 +848,19 @@ mode by shape (numbers move at float precision). See "Breaking".
 - **Borgonovo reported a failed run as a bandwidth problem.** A non-finite
   output surfaced only after the whole kernel-density estimate and bootstrap
   had run, as an out-of-range delta error mentioning `degenerate_bandwidth`.
-  It is now named as a bad row up front. The out-of-range check still guards
-  genuine estimator failure.
+  It is now named as a bad row up front.
+
+  The out-of-range check still guards genuine estimator failure, and it now
+  says how to fix it. The estimate is a half L1 distance, so a value outside
+  `[0, 1]` is a failed computation. The error reports whether a conditioning
+  class was floored, which output column failed, the bandwidth actually used
+  against the real grid step, and the value that would resolve it.
 
 - **VKOGA reported a failed run as a solver failure.** A non-finite output made
   every cross-validation score non-finite, which surfaced as
   `"Every cross-validation score is non-finite; the kernel solves failed"`.
   That guard remains for real solver failure, but is no longer reachable from
   non-finite input.
-
-## Unreleased (0.9.0)
-
-Version 0.9.0 fixes defects. It adds no method and removes no API.
-
-**One breaking change:** `jaxgsa.config.set_memory_budget` now reads its value
-in megabytes, not bytes. See "Breaking" below before you upgrade.
-
-Three further calls that were accepted before now raise. Each one was accepted
-while doing something the caller did not ask for, so refusing it is the fix,
-not a side effect. They are marked **now raises** below.
-
-### Breaking
-
-- **`jaxgsa.config.set_memory_budget` now reads megabytes.** It took bytes
-  before, so the same call means a million times more than it used to.
-
-  ```python
-  jaxgsa.config.set_memory_budget(512)              # 512 MiB, the default
-  jaxgsa.config.set_memory_budget(2, unit="gb")     # 2 GiB
-  jaxgsa.config.set_memory_budget(536870912, unit="b")   # the old spelling
-  ```
-
-  `unit` accepts `b`, `bytes`, `kb`, `mb`, `gb`, `tb` and the explicit binary
-  spellings `kib`, `mib`, `gib`, `tib`. Case and surrounding spaces do not
-  matter. The multiples are binary, so `mb` is 1024 squared and
-  `set_memory_budget(512)` is exactly the previous default. Values may be
-  floats.
-
-  A call that gives no unit and a value of 1048576 or more now raises, because
-  such a value is almost certainly bytes and reading it as megabytes would ask
-  for more memory than any machine has. The message shows both ways to say what
-  you meant. A unit-less value below that is read as megabytes without
-  complaint, so a caller who deliberately set a budget under 1 MiB should add
-  `unit="b"`.
-
-  Two smaller consequences: the first parameter is now called `budget`, not
-  `budget_bytes`, so a keyword call must be renamed; and `unit` is
-  keyword-only.
-
-  `get_memory_budget()` is **unchanged**. It still returns an `int` of bytes,
-  because a silently changed return value cannot be guarded the way an argument
-  can. It gained an optional `unit=`, which returns a float for any unit other
-  than bytes.
-
-### Added
-
-- **`result.ci` records how a confidence interval was made.** Until now a
-  `*_conf` array was an interval of unknown level: nothing on the result said
-  whether it was a 95% or a 68% interval, which endpoint rule drew it, or how
-  many resamples it rested on. Every result that reports intervals now carries
-  a `ci` field holding `level`, `method`, `n_bootstrap` and, on request,
-  `replicates`. `S1` and `S1_conf` are unchanged plain arrays.
-- **`keep_replicates=True` keeps the bootstrap draws.** `analyze` discarded
-  them, so recomputing an interval at another level meant re-running the whole
-  analysis. Pass `keep_replicates=True` and the draws arrive on
-  `result.ci.replicates`, keyed by the estimate they belong to. It is off by
-  default because the draws are large: 1000 resamples of a
-  `(T=100, K=5, D=20)` index array is 80 MB. Every method that reports an
-  interval accepts the keyword, and it is keyword-only and last in each
-  signature.
-
-  The stored draws follow the reported convention. Sobol's `S2` replicates are
-  symmetric with a NaN diagonal, exactly as the `S2` point estimate and its
-  intervals are, so read the upper triangle.
-- **`SobolSamples.unit` and `SobolSamples.transform(theta)`.** `unit` holds the
-  design in the unit cube, before any input distribution is applied, so it does
-  not depend on the distributions at all. `transform` applies a set of
-  distribution parameters to it. That allows one design to be reused across
-  different assumed input ranges, and, because `transform` is written in JAX,
-  it allows a Sobol index to be differentiated with respect to those
-  parameters:
-
-  ```python
-  def s1(theta):
-      return jaxgsa.sobol.indices(samples, model(samples.transform(theta)))[0]
-
-  dS1_dtheta = jax.jacrev(s1)(theta)
-  ```
-
-  The chain runs through the model, so the model must be differentiable in
-  JAX, and float64 should be enabled. `transform` raises for a categorical
-  problem: a categorical inverse CDF is a step function, so it has no useful
-  derivative and `unit` and `samples` do not have the same number of rows.
-- **Every result class now prints a one-line summary.** `MorrisResult`,
-  `DGSMResult`, `DeltaResult`, `PAWNResult` and `OTResult` had no `__repr__`,
-  so echoing one in a notebook printed every index array and the whole
-  `Problem`. All thirteen now print their field shapes and their provenance,
-  in one style.
-- **`PCEResult.streamed` and `HDMRResult.streamed`.** They record which fit path
-  ran. A fit that took much longer than expected is a real reason to ask whether
-  the memory budget engaged, and until now nothing answered that.
-- **`jaxgsa.JaxgsaWarning`**, exported from the package root. Every warning the
-  package raises now passes this category. Before, all of them defaulted to
-  `UserWarning`, so the only way to tell a jaxgsa warning from a NumPy or JAX
-  one was the message text, and no filter selected exactly this package's
-  warnings. To silence them:
-
-  ```python
-  warnings.filterwarnings("ignore", category=jaxgsa.JaxgsaWarning)
-  ```
-
-  `JaxgsaWarning` subclasses `UserWarning`, so filters and
-  `pytest.warns(UserWarning, ...)` assertions that worked before still work.
-
-### Changed
-
-- **A result declares its fields, and `to_dataset` is derived from that.**
-  There were thirteen hand-written `to_dataset` methods and four copies of the
-  `param_i`/`param_j` splice. Each result now declares a field schema, and the
-  export, the summary and the `*_lower`/`*_upper` split all read it. The
-  exported dims, coordinates and variable names are unchanged for all thirteen
-  results, which `tests/test_result_schema.py` pins against a snapshot taken
-  from the old methods.
-- **`SurrogateResult` no longer declares `shapley`.** The abstract method fixed
-  no contract: `VKOGAResult` could only satisfy it by raising, and
-  `HDMRResult` widened the signature. `PCEResult.shapley` and
-  `HDMRResult.shapley` are plain methods now, and `VKOGAResult.shapley` still
-  raises `NotImplementedError` with the same message. `predict` stays on the
-  base class. This also removes an inverted dependency: `jaxgsa._core` no
-  longer imports a method package's private module.
-- **NumPy is now a declared dependency**, at `numpy>=2`. NumPy is imported
-  directly by 45 of the package's 74 modules, but it reached users only
-  through JAX and SciPy, both of which allow NumPy 1.x. An install from PyPI
-  could therefore get a NumPy the package does not support.
-- **The SciPy floor rises to `scipy>=1.15`**, from `>=1.10`. This makes
-  `scipy.stats.chatterjeexi` always available as a verification oracle.
-- **PAWN's `slice_chunk_size` default is now derived from the memory budget**,
-  as `None`, rather than a fixed 2048. The fixed value never engaged: it is
-  compared against `T*K`, which is smaller than 2048 in every realistic case,
-  so the knob did nothing unless you found and lowered it yourself. The default
-  now adapts to `N`, `D` and `n_bins` through
-  `jaxgsa.config.set_memory_budget`. Only peak memory changes; every index is
-  identical.
-
-- **One compatibility matrix, and a test that keeps it true.** The
-  documentation stated it three times and the three disagreed: one table had a
-  short row that rendered a column blank, one credited DGSM with a sampler it
-  does not have, and one listed eight of the nine given-data methods. There is
-  now one table, "Method capabilities" in `docs/guide/methods.md`. It gains a
-  Bootstrap CI column that names the keyword each method uses.
-  `docs/index.md` and `docs/api/index.md` link to it instead of restating it.
-  `tests/test_docs_matrix.py` checks every cell against the method
-  registry, so a fourteenth method, or a changed capability, fails the
-  suite rather than leaving the documentation stale.
-
-### Performance
-
-- **HSIC allocates about a third of what it did** when it picks its own kernel
-  bandwidth. The median heuristic built a distance matrix, two index arrays and
-  a copy of the upper triangle, only to skip the diagonal zeros. Those zeros are
-  the smallest entries, so their effect folds into the quantile position
-  instead. Measured on an Apple M1 Pro in float32: peak transient memory falls
-  from `3.57 * N^2` to `1.00 * N^2`, which is 228 MiB down to 64 MiB at
-  `N = 4096`. Every index is unchanged.
-- **Row deduplication is about 3.4 times faster.** `_stable_unique_rows` runs
-  twice on the Sobol sampling path and once on the Morris path. It built one
-  array view and one `bytes` key per row in Python. It now builds every key in
-  one C-level call and keeps the dictionary that was already doing the work.
-  Measured on an Apple M1 Pro at `N = 2**20`, `D = 20`, float64: 1099 ms
-  before, 325 ms after. Output is bit-identical, including row order, which
-  matters because the design prefix logic depends on it.
-
-### Fixed
 
 - **DGSM: passing arguments from both call styles now raises.** `dgsm.analyze`
   accepts either a model and inputs, or precomputed outputs and derivatives.
@@ -870,6 +870,7 @@ not a side effect. They are marked **now raises** below.
   shape runs only in the other branch, so a user who passed inputs and believed
   they were checked had them thrown away unchecked. **Now raises**, naming the
   conflicting arguments.
+
 - **DGSM: a batch model now raises up front.** `dgsm.analyze` differentiates a
   one-sample function, `(D,) -> ...`. Every other method in the package takes
   `(N, D)`, so passing a batch model is an easy mistake, and it used to fail
@@ -877,23 +878,24 @@ not a side effect. They are marked **now raises** below.
   with the expected signature and a wrapper snippet. The check costs no model
   evaluations: it traces shapes only. An unrelated failure inside your model is
   reported plainly, without the wrapper advice.
+
 - **PAWN: `slice_chunk_size` now does something.** It was declared, documented
   as "accepted for signature parity", never validated, and never used, so the
   whole `(T*K, D, N, n_bins)` working set was built in one call — on the
   time-series case this project recommends. It now chunks the output columns,
-  and `slice_chunk_size=0` **now raises** like it does elsewhere. Results are
-  unchanged.
+  and `slice_chunk_size=0` **now raises** like it does elsewhere. Its default
+  is `None`, derived from the memory budget, so the width adapts to `N`, `D`
+  and `n_bins`; the old fixed 2048 was compared against `T*K`, which is
+  smaller than 2048 in every realistic case. Only peak memory changes. Every
+  index is identical.
+
 - **eFAST computed its frequency plan twice.** The sampler built the design
   from one copy of the formula and the analyzer recomputed it from another. The
   two agreed only because one frequency band happened to contain the other, and
   no test could catch a divergence, because the tests recomputed the formula
   too. Both sides now read one plan, which checks its own invariant, and a new
   test recovers the bands from a synthetic signal instead of from the formula.
-- **Borgonovo: a failed delta estimate now says how to fix it.** The estimate
-  is a half L1 distance, so a value outside `[0, 1]` is a failed computation.
-  The error now reports whether a conditioning class was floored, which output
-  column failed, the bandwidth actually used against the real grid step, and
-  the value that would resolve it.
+
 - **PCE computed its leave-one-out error twice, two different ways**, with a
   comment asserting the two agreed. One copy built an array of `(n_terms, N)`
   and then transposed it, so a third array scaling with the sample count was
@@ -909,27 +911,17 @@ not a side effect. They are marked **now raises** below.
   two. It now charges the larger of the fit's two phases, which leaves a
   scalar-output fit exactly where it was and only moves the threshold for
   multi-slice fits.
+
 - **HDMR unpacked twelve values positionally** at three call sites, two of them
   with blind placeholders. Reordering them produced silently wrong indices
   rather than an error. They are now named fields. The per-term order map, which
   was written out identically in two files, is now written once.
+
 - `MorrisSamples.downsample` no longer carries a previous design's dropped-block
   count into the smaller design. A `downsample` caller names the trajectory
   count and receives exactly it, so nothing is missing. Carrying the count
   forward made `morris.analyze` warn about a "requested" total the user had
   never asked for.
-
-### Removed
-
-- `_PCEFit.coeffs_flat`, a private field that was written and never read. It
-  kept a large array alive inside the module whose purpose is bounding memory.
-- The private `validate_correlation` helper. It had no production caller and
-  stayed alive only because tests used it. `canonicalize_correlation` runs the
-  same code, and its tests now call that instead.
-- The `version` and `date-released` fields in `CITATION.cff`. Nothing updated
-  them and nothing checked them, so they had drifted three releases behind.
-  Both are optional, and GitHub and Zenodo take the version from the release
-  tag when they are absent.
 
 ## 0.8.0
 

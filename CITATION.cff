@@ -2,9 +2,15 @@ cff-version: 1.2.0
 message: "If you use this software, please cite it using these metadata."
 title: "jaxgsa: Global Sensitivity Analysis in JAX"
 abstract: >-
-  jaxgsa computes global sensitivity indices entirely in JAX, providing Sobol,
-  RS-HDMR, PCE, eFAST, DGSM, HSIC, and PAWN methods with GPU/TPU acceleration.
+  jaxgsa computes global sensitivity indices entirely in JAX. It provides
+  thirteen methods, covering variance-based indices (Sobol, eFAST, Kucherenko),
+  screening (Morris, DGSM), moment-independent and given-data measures
+  (Borgonovo delta, PAWN, HSIC, optimal transport), and surrogate-based
+  analysis (PCE, RS-HDMR, Shapley effects, VKOGA). Every estimator runs under
+  jit, vmap and grad, on CPU, GPU or TPU.
 type: software
+version: 1.0.0
+date-released: "2026-08-20"
 authors:
   - family-names: Pessina
     given-names: Daniele
