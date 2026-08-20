@@ -96,12 +96,17 @@ class UniformSpec:
         """Coerce the bounds to Python floats and check their order.
 
         Raises:
-            ValueError: If ``low`` is not strictly below ``high``.
+            ValueError: If either bound is not finite, or ``low`` is not
+                strictly below ``high``.
         """
         # Coerce to Python float to keep JAX tracers and numpy scalars out of
         # this hashable jit-cache metadata.
         object.__setattr__(self, "low", float(self.low))
         object.__setattr__(self, "high", float(self.high))
+        if not math.isfinite(self.low) or not math.isfinite(self.high):
+            raise ValueError(
+                f"Uniform input requires finite bounds, got {(self.low, self.high)!r}"
+            )
         # `not <` instead of `>=` to also catch NaN (NaN comparisons are always False).
         if not self.low < self.high:
             raise ValueError(f"Uniform input requires low < high, got {(self.low, self.high)!r}")
@@ -126,11 +131,13 @@ class GaussianSpec:
     each open side with that marginal's own ``q`` quantile.
 
     Attributes:
-        mean: Mean of the underlying (untruncated) Gaussian.
-        variance: Variance of the underlying Gaussian, strictly positive.
-            This is the variance, not the standard deviation.
-        low: Lower truncation bound, or ``None`` for an open left tail.
+        mean: Mean of the underlying (untruncated) Gaussian. Must be finite.
+        variance: Variance of the underlying Gaussian, strictly positive and
+            finite. This is the variance, not the standard deviation.
+        low: Lower truncation bound, or ``None`` for an open left tail. Must
+            be finite when given.
         high: Upper truncation bound, or ``None`` for an open right tail.
+            Must be finite when given.
     """
 
     mean: float
@@ -145,8 +152,10 @@ class GaussianSpec:
         """Coerce the parameters to Python floats and validate them.
 
         Raises:
-            ValueError: If ``variance`` is not positive, or if both bounds are
-                given and ``low`` is not strictly below ``high``.
+            ValueError: If ``mean`` is not finite, if ``variance`` is not
+                finite and positive, if a given bound is not finite, or if
+                both bounds are given and ``low`` is not strictly below
+                ``high``.
         """
         # Coerce to Python float to prevent JAX tracers or numpy scalars from
         # leaking into metadata.
@@ -155,8 +164,16 @@ class GaussianSpec:
         object.__setattr__(self, "low", None if self.low is None else float(self.low))
         object.__setattr__(self, "high", None if self.high is None else float(self.high))
 
-        if self.variance <= 0:
-            raise ValueError(f"Gaussian input requires variance > 0, got {self.variance!r}")
+        if not math.isfinite(self.mean):
+            raise ValueError(f"Gaussian input requires a finite mean, got {self.mean!r}")
+        if not math.isfinite(self.variance) or self.variance <= 0:
+            raise ValueError(
+                f"Gaussian input requires variance > 0 and finite, got {self.variance!r}"
+            )
+        if self.low is not None and not math.isfinite(self.low):
+            raise ValueError(f"Gaussian input low bound must be finite, got {self.low!r}")
+        if self.high is not None and not math.isfinite(self.high):
+            raise ValueError(f"Gaussian input high bound must be finite, got {self.high!r}")
         if self.low is not None and self.high is not None and not self.low < self.high:
             raise ValueError(
                 f"Truncated Gaussian input requires low < high, got {(self.low, self.high)!r}"
@@ -246,29 +263,52 @@ InputSpecValue: TypeAlias = (
 
 
 def _normalize_input_spec(spec: InputSpecValue) -> InputSpec:
-    """Normalize any accepted user input form into a canonical spec dataclass."""
+    """Normalize any accepted user input form into a canonical spec dataclass.
+
+    Raises:
+        ValueError: If ``spec`` is not a tuple, a dict with a ``"dist"`` key,
+            or one of the three spec dataclasses, or if a dict with a known
+            ``"dist"`` is missing one of that distribution's required keys.
+    """
     if isinstance(spec, UniformSpec | GaussianSpec | CategoricalSpec):
         return spec  # already canonical and validated by its own __post_init__
     if isinstance(spec, tuple):  # bare (low, high) tuple is shorthand for uniform
         if len(spec) != 2:
             raise ValueError("Tuple input specs must have exactly two values: (low, high)")
         return UniformSpec(spec[0], spec[1])
+    if not isinstance(spec, dict):
+        raise ValueError(
+            f"Unsupported input spec {spec!r}; pass a (low, high) tuple, a "
+            "UniformSpec, GaussianSpec, or CategoricalSpec instance, or a "
+            "dict with a 'dist' key ('uniform', 'gaussian', or 'categorical')"
+        )
+    if "dist" not in spec:
+        raise ValueError(
+            f"Input spec dict {spec!r} has no 'dist' key; give one of "
+            "'uniform', 'gaussian', or 'categorical', or pass a bare "
+            "(low, high) tuple for a uniform marginal"
+        )
 
-    if spec["dist"] == "uniform":
-        return UniformSpec(spec["low"], spec["high"])
-    if spec["dist"] == "gaussian":
-        return GaussianSpec(
-            spec["mean"],
-            spec["variance"],
-            low=spec.get("low"),
-            high=spec.get("high"),
-        )
-    if spec["dist"] == "categorical":
-        labels = spec.get("labels")
-        return CategoricalSpec(
-            tuple(spec["probs"]),
-            labels=() if labels is None else tuple(str(label) for label in labels),
-        )
+    try:
+        if spec["dist"] == "uniform":
+            return UniformSpec(spec["low"], spec["high"])
+        if spec["dist"] == "gaussian":
+            return GaussianSpec(
+                spec["mean"],
+                spec["variance"],
+                low=spec.get("low"),
+                high=spec.get("high"),
+            )
+        if spec["dist"] == "categorical":
+            labels = spec.get("labels")
+            return CategoricalSpec(
+                tuple(spec["probs"]),
+                labels=() if labels is None else tuple(str(label) for label in labels),
+            )
+    except KeyError as exc:
+        raise ValueError(
+            f"{spec['dist']!r} input spec dict {spec!r} is missing {exc.args[0]!r}"
+        ) from exc
 
     raise ValueError(f"Unsupported input distribution {spec['dist']!r}")
 
@@ -536,7 +576,6 @@ class Problem:
     """
 
     names: tuple[str, ...]
-    bounds: tuple[tuple[float, float], ...] | None
     _input_specs: tuple[InputSpec, ...] = field(repr=False)
     output_names: tuple[str, ...] | None = None
     _correlation: _CorrelationTuple | None = field(repr=False, default=None)
@@ -748,11 +787,32 @@ class Problem:
         _check_correlation_touches_categorical(names, input_specs, correlation)
         # Bypass frozen dataclass protection -- only called during construction.
         object.__setattr__(self, "names", names)
-        object.__setattr__(self, "bounds", _derive_bounds(input_specs))
         normalized = tuple(output_names) if output_names is not None else None
         object.__setattr__(self, "output_names", normalized)
         object.__setattr__(self, "_input_specs", input_specs)
         object.__setattr__(self, "_correlation", correlation)
+
+    def __repr__(self) -> str:
+        """Show every parameter's marginal, not just uniform bounds.
+
+        The generated dataclass ``repr`` would show only ``names`` and
+        ``output_names``: :attr:`bounds` is a property, and ``_input_specs``
+        and ``_correlation`` are marked ``repr=False`` because their tuple
+        form is not meant for a human to read directly. A uniform-only
+        problem is still shown by its bounds, the familiar and compact form;
+        any other problem is shown by its full :attr:`input_specs`, so a
+        Gaussian or categorical marginal is never silently missing.
+        """
+        parts = [f"names={self.names!r}"]
+        if self.bounds is not None:
+            parts.append(f"bounds={self.bounds!r}")
+        else:
+            parts.append(f"input_specs={self._input_specs!r}")
+        if self.output_names is not None:
+            parts.append(f"output_names={self.output_names!r}")
+        if self._correlation is not None:
+            parts.append("correlation=<declared>")
+        return f"Problem({', '.join(parts)})"
 
     @property
     def input_specs(self) -> tuple[InputSpec, ...]:
@@ -763,6 +823,17 @@ class Problem:
         fields by name, and tell the families apart with ``isinstance``.
         """
         return self._input_specs
+
+    @property
+    def bounds(self) -> tuple[tuple[float, float], ...] | None:
+        """Per-parameter ``(low, high)`` tuples, or ``None``.
+
+        Derived from :attr:`input_specs` on every read: ``None`` as soon as
+        one marginal is not uniform, since a Gaussian support has no
+        meaningful finite bounds and a categorical marginal carries level
+        codes rather than a range.
+        """
+        return _derive_bounds(self._input_specs)
 
     @property
     def correlation(self) -> "np.ndarray | None":

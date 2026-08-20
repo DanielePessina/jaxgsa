@@ -11,6 +11,7 @@ import math
 from pathlib import Path
 
 import jax
+import numpy as np
 
 from jaxgsa._core import batching as _batching
 
@@ -39,8 +40,9 @@ _UNIT_BYTES: dict[str, int] = {
 
 # Guard threshold for a unit-less call, in the default unit of MB.
 #
-# ``set_memory_budget`` used to take bytes. A pre-0.9 call such as
-# ``set_memory_budget(536870912)`` still runs under the new default unit, but it
+# ``set_memory_budget`` took bytes before the 1.0.0 rename to megabytes (see
+# CHANGELOG.md). A call written for the old signature, such as
+# ``set_memory_budget(536870912)``, still runs under the new default unit, but
 # now asks for 512 TB instead of 512 MiB. Nothing would fail at the call site,
 # so the mistake would only show up much later as strange batching. This
 # threshold separates the two readings: 1048576 MB is 1 TiB of *transient*
@@ -152,9 +154,11 @@ def set_memory_budget(budget: int | float, *, unit: str | None = None) -> None:
     precedence over this budget.
 
     Args:
-        budget: New budget, counted in ``unit``. May be an ``int`` or a
-            ``float`` (``set_memory_budget(1.5, unit="gb")`` is fine). It must
-            be positive and finite. ``bool`` is rejected. The resolved byte
+        budget: New budget, counted in ``unit``. May be a Python ``int`` or
+            ``float``, or a NumPy integer or floating scalar
+            (``set_memory_budget(1.5, unit="gb")`` and
+            ``set_memory_budget(np.int64(512))`` are both fine). It must be
+            positive and finite. ``bool`` is rejected. The resolved byte
             count is rounded to the nearest whole byte and must come to at
             least one byte.
         unit: Unit of ``budget``. One of ``"b"``, ``"bytes"``, ``"kb"``,
@@ -168,13 +172,15 @@ def set_memory_budget(budget: int | float, *, unit: str | None = None) -> None:
             enough to be a leftover bytes figure (see below).
 
     Warning:
-        Before jaxgsa 0.9 this function took bytes. A unit-less call of
+        This function took bytes before jaxgsa 1.0.0. A unit-less call of
         ``1048576`` or more is therefore rejected, because such a value is
         almost certainly a bytes figure written for the old signature and would
         now silently mean a budget a million times larger. Pass ``unit="b"`` to
         keep the old meaning, or restate the value in megabytes.
     """
-    if isinstance(budget, bool) or not isinstance(budget, int | float):
+    if isinstance(budget, bool | np.bool_) or not isinstance(
+        budget, int | float | np.integer | np.floating
+    ):
         raise ValueError(f"memory budget must be a positive, finite number, got {budget!r}")
     if not math.isfinite(budget) or budget <= 0:
         raise ValueError(f"memory budget must be a positive, finite number, got {budget!r}")

@@ -2,18 +2,14 @@
 
 Nothing in this module is public API. See :mod:`jaxgsa._core`.
 
-jaxgsa computes in whatever precision JAX is configured for and infers the
+jaxgsa computes in whatever precision JAX is configured for, and infers the
 dtype from the caller's arrays. It does not set ``jax_enable_x64`` and it
-ships no wrapper around ``jax.enable_x64()``; see
-``docs/adr/0014-float32-default-no-x64-wrapper.md``. The one obligation the
-library takes on is the last line of that ADR: **never silently destroy
-precision**.
-
-Two idioms for the same question had grown up side by side — reading the flag
-off ``jax.config`` and reading the dtype off a throwaway array — which is one
-idiom too many for a question the answer to which decides a warning, a clip
-bound and a tolerance. :func:`x64_enabled` and :func:`default_float_dtype` are
-that one answer.
+ships no wrapper around ``jax.enable_x64()``: the flag has to be set before
+JAX creates its first array, so a library call cannot guarantee it runs
+first. The one obligation the library takes on in exchange is to never
+silently destroy precision. :func:`x64_enabled` and :func:`default_float_dtype`
+are the one place that answer decides a warning, a clip bound, or a
+tolerance.
 """
 
 from __future__ import annotations
@@ -160,9 +156,9 @@ def warn_on_float64_downcast(
         "float32, and some values do not survive the cast: they are outside the range "
         "float32 can hold, so they arrive as inf or collapse to zero. This is not a "
         "matter of lost trailing digits. Turn float64 on with "
-        'jax.config.update("jax_enable_x64", True), or the '
-        "jax.experimental.enable_x64() context manager, before the analysis. Rescaling "
-        "the affected values into float32's range also works.",
+        'jax.config.update("jax_enable_x64", True), or the jax.enable_x64() '
+        "context manager, before the analysis. Rescaling the affected values into "
+        "float32's range also works.",
         category=JaxgsaWarning,
         stacklevel=stacklevel,
     )

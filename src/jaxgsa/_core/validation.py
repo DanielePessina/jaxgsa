@@ -29,11 +29,10 @@ class YLayout(Enum):
 
     Every analysis works on ``(N, T, K)``, and ``_prepare_Y`` inserts whatever
     axes are missing. The result arrays then have to come back out at the
-    caller's own rank. That bookkeeping used to be two same-typed booleans,
-    ``squeeze_time`` and ``squeeze_output``, which admit a fourth combination
-    the promotion cannot produce (an inserted K axis with a real T axis) and
-    which are easy to hand over in the wrong order. One value with three
-    members can only say something true.
+    caller's own rank. Two same-typed booleans could not do this job: they
+    admit a fourth combination the promotion never produces (an inserted K
+    axis with a real T axis), and are easy to hand over in the wrong order.
+    One value with three members can only say something true.
 
     Attributes:
         SCALAR: The caller passed ``(N,)``; both T and K were inserted.
@@ -148,37 +147,38 @@ def _validate_output(
     return Y
 
 
-# The parenthetical each recommended method carries. The *set* of methods is
-# read from the registry; only this extra prose is written by hand, and a
-# method with no entry here is simply named without one. Keying the prose
-# separately is what stops the list drifting: a new correlation-tolerant
-# method appears in the message the moment it registers, note or no note.
-_CORRELATION_NOTES: dict[str, str] = {
+# Correlation-tolerant routes, keyed in the order the rejection message
+# lists them: the variance-based routes come first, since they answer the
+# same question the refused method was asked. A method registered but not
+# listed here sorts after these, alphabetically. The value is the hand-kept
+# parenthetical for that route, or "" for a route that needs none. Keying
+# order and note together in one dict is what stops the list drifting: a new
+# correlation-tolerant method appears in the message the moment it registers,
+# note or no note.
+_CORRELATION_ROUTES: dict[str, str] = {
     "vkoga": " (variance-based indices from given data, through a kernel surrogate)",
     "kucherenko": " (variance-based indices from its own conditional-copula design)",
+    "optimal_transport": "",
+    "borgonovo": "",
     "hdmr": (
         " (whose ANCOVA Sb term quantifies the correlation-induced contribution, "
         "and whose result supports shapley(include_correlative=True))"
     ),
 }
 
-# The variance-based routes come first: they answer the same question the
-# refused method was asked, so they are what the user most likely wants. Any
-# method not named here sorts after these, alphabetically.
-_CORRELATION_ORDER = ("vkoga", "kucherenko", "optimal_transport", "borgonovo", "hdmr")
-
 # The one route the registry cannot express. ``jaxgsa.shapley`` declares
 # correlation="refuses" because its default backend does refuse; the hdmr
 # backend does not. A capability that depends on an argument has no place in a
 # per-method record, so it is named here instead.
-_EXTRA_CORRELATION_ROUTES = ('jaxgsa.shapley with backend="hdmr"',)
+_EXTRA_CORRELATION_ROUTE = 'jaxgsa.shapley with backend="hdmr"'
 
-_CATEGORICAL_NOTES: dict[str, str] = {
+# Same idea for categorical-tolerant routes: order and note in one dict.
+_CATEGORICAL_ROUTES: dict[str, str] = {
+    "optimal_transport": "",
+    "borgonovo": "",
     "pawn": " (one conditioning class per level)",
     "sobol": " Saltelli pipeline",
 }
-
-_CATEGORICAL_ORDER = ("optimal_transport", "borgonovo", "pawn")
 
 
 def _tolerant_names(kind: str, order: tuple[str, ...]) -> list[tuple[str, bool]]:
@@ -209,17 +209,17 @@ def _tolerant_names(kind: str, order: tuple[str, ...]) -> list[tuple[str, bool]]
 
 def _correlation_tolerant_methods() -> str:
     """Name every correlation-tolerant route, for a rejection message."""
-    named = _tolerant_names("correlation", _CORRELATION_ORDER)
-    items = [f"jaxgsa.{n}{_CORRELATION_NOTES.get(n, '')}" for n, _ in named]
-    items.extend(_EXTRA_CORRELATION_ROUTES)
+    named = _tolerant_names("correlation", tuple(_CORRELATION_ROUTES))
+    items = [f"jaxgsa.{n}{_CORRELATION_ROUTES.get(n, '')}" for n, _ in named]
+    items.append(_EXTRA_CORRELATION_ROUTE)
     return f"{', '.join(items[:-1])}, or {items[-1]}"
 
 
 def _categorical_tolerant_methods() -> str:
     """Name every categorical-tolerant route, for a rejection message."""
-    named = _tolerant_names("categorical", _CATEGORICAL_ORDER)
-    given = [f"jaxgsa.{n}{_CATEGORICAL_NOTES.get(n, '')}" for n, design in named if not design]
-    design = [f"jaxgsa.{n}{_CATEGORICAL_NOTES.get(n, '')}" for n, is_d in named if is_d]
+    named = _tolerant_names("categorical", tuple(_CATEGORICAL_ROUTES))
+    given = [f"jaxgsa.{n}{_CATEGORICAL_ROUTES.get(n, '')}" for n, design in named if not design]
+    design = [f"jaxgsa.{n}{_CATEGORICAL_ROUTES.get(n, '')}" for n, is_d in named if is_d]
     listed = f"{', '.join(given[:-1])}, and {given[-1]}" if len(given) > 1 else given[0]
     if not design:
         return listed
@@ -507,6 +507,45 @@ _ZERO_VARIANCE_OUTCOMES: dict[str, tuple[str, str]] = {
 }
 
 
+def _is_constant_slice(flat: Array) -> Array:
+    """Report which columns of a flattened output are numerically constant.
+
+    Every caller that has to know whether a ``Y`` slice is constant — because
+    a constant slice turns its index into ``0 / 0`` — should call this
+    instead of comparing its own sample variance to zero. A constant float32
+    slice's sample variance is almost never bit-exact zero: the mean itself
+    rounds, so ``var(full(N, 0.1))`` comes out around ``1e-16``, not ``0``,
+    and a ``var == 0`` guard misses it silently. Testing the two extremes
+    for exact equality has no such rounding gap, and traces cleanly under
+    ``jit``.
+
+    Args:
+        flat: ``(N, S)`` array, one column per output slice.
+
+    Returns:
+        Boolean array of shape ``(S,)``, ``True`` where every sample in that
+        column is the same value.
+    """
+    return jnp.max(flat, axis=0) == jnp.min(flat, axis=0)
+
+
+def _join_capped(labels: list[str], *, limit: int = 5) -> str:
+    """Join warning labels, capping the list so a long warning stays readable.
+
+    Args:
+        labels: Labels to join, already formatted.
+        limit: Maximum number of labels to show before summarizing the rest.
+
+    Returns:
+        A comma-joined string, with any labels past ``limit`` collapsed into
+        an "... and N more" tail.
+    """
+    if len(labels) <= limit:
+        return ", ".join(labels)
+    shown = ", ".join(labels[:limit])
+    return f"{shown}, ... and {len(labels) - limit} more"
+
+
 def _warn_zero_variance_slices(
     Y: Array,
     output_names: tuple[str, ...] | None = None,
@@ -520,16 +559,19 @@ def _warn_zero_variance_slices(
 
     A constant slice turns every index into ``0 / 0``, so the analysis still
     runs and reports NaN for that slice. The other slices are unaffected, so
-    this warns rather than raising.
+    this warns rather than raising. Constancy is tested exactly, with
+    :func:`_is_constant_slice`, not by comparing a sample variance to zero.
 
     Args:
         Y: Model output array with shape ``(n_expanded, ...)`` where
             trailing dims are ``()``, ``(K,)``, or ``(T, K)``.
         output_names: Optional names for the K output dimension.
-        var_per_slice: Optional pre-computed per-slice sample variance of
-            ``Y`` over its first axis (any shape reshapeable to the flat
-            slice axis). Pass it when the caller already computed the same
-            variance, so it is not recomputed here.
+        var_per_slice: Deprecated and ignored. Zero variance used to be
+            detected by comparing this value to zero, which a constant
+            float32 slice rarely satisfies exactly (see
+            :func:`_is_constant_slice`). Kept only so existing callers that
+            still pass their own precomputed variance keep working; stop
+            passing it.
         outcome: Which consequence to report, ``"nan"`` or ``"zero"``. See
             :data:`_ZERO_VARIANCE_OUTCOMES`.
         stacklevel: Frames to skip so the warning points at the user's
@@ -559,11 +601,9 @@ def _warn_zero_variance_slices(
             return f"k={k} ('{output_names[k]}')"
         return f"k={k}"
 
-    # Sample variance along axis 0; zero means the output is constant
-    # and Sobol indices become 0/0 = NaN.
-    if var_per_slice is None:
-        var_per_slice = jnp.var(flat, axis=0)
-    zero_mask = var_per_slice.reshape(-1) == 0
+    # An exactly constant slice is what turns Sobol indices into 0/0 = NaN;
+    # see _is_constant_slice for why this is not a variance-near-zero test.
+    zero_mask = _is_constant_slice(flat)
     n_zero = int(jnp.sum(zero_mask))
 
     if n_zero == 0:
@@ -582,32 +622,17 @@ def _warn_zero_variance_slices(
 
     if len(trailing) == 1:  # single-timestep: flat index equals output index k
         labels = [_fmt_k(k) for k in zero_indices]
-        if len(labels) > 5:  # cap displayed labels to keep warnings readable
-            shown = ", ".join(labels[:5])
-            extra = f"... and {len(labels) - 5} more"
-            label_str = f"{shown}, {extra}"
-        else:
-            label_str = ", ".join(labels)
         warnings.warn(
             f"{method}: {n_zero}/{n_outputs} output(s) have zero variance "
-            f"({label_str}) — {plural_tail}",
+            f"({_join_capped(labels)}) — {plural_tail}",
             stacklevel=stacklevel,
             category=JaxgsaWarning,
         )
     elif len(trailing) == 2:  # multi-timestep: flat index encodes (t, k) in row-major order
-        affected = []
-        for idx in zero_indices:
-            t, k = divmod(idx, K)
-            affected.append(f"(t={t}, {_fmt_k(k)})")
-        if len(affected) > 5:  # cap displayed labels to keep warnings readable
-            shown = ", ".join(affected[:5])
-            extra = f"... and {len(affected) - 5} more"
-            label_str = f"{shown}, {extra}"
-        else:
-            label_str = ", ".join(affected)
+        affected = [f"(t={idx // K}, {_fmt_k(idx % K)})" for idx in zero_indices]
         warnings.warn(
             f"{method}: {n_zero}/{n_outputs} output slice(s) have zero variance "
-            f"[{label_str}] — {plural_tail}",
+            f"[{_join_capped(affected)}] — {plural_tail}",
             stacklevel=stacklevel,
             category=JaxgsaWarning,
         )
