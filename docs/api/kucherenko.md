@@ -4,7 +4,7 @@
 jaxgsa.kucherenko.sample(problem, n_samples, *, scramble=True, seed=None,
                          verbose=True) -> KucherenkoSamples
 
-jaxgsa.kucherenko.analyze(samples, Y, *, n_bootstrap=0, conf_level=0.95,
+jaxgsa.kucherenko.analyze(sampling_result, Y, *, n_bootstrap=0, conf_level=0.95,
                           ci_method="quantile", key=None, on_invalid="raise",
                           verbose=True, keep_replicates=False) -> KucherenkoResult
 ```

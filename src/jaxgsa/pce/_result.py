@@ -169,7 +169,6 @@ class PCEResult(SchemaResult, SurrogateResult):
             partial,
             membership,
             explained,
-            total=partial.sum(axis=-1),
             problem=self.problem,
             backend="pce",
             order=self.order,

@@ -11,6 +11,7 @@ convenience over those result methods.
 from __future__ import annotations
 
 import dataclasses
+import warnings
 from typing import TYPE_CHECKING, Any, Literal
 
 import jax
@@ -19,7 +20,7 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core import verbose as _verbose
-from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
+from jaxgsa._core.bootstrap import interval
 from jaxgsa._core.entry import (
     at_least,
     check_scalars,
@@ -29,8 +30,8 @@ from jaxgsa._core.entry import (
     require,
 )
 from jaxgsa._core.invalid import InvalidReport, OnInvalid
-from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import _correlation_tolerant_methods, _prepare_Y
+from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.shapley._engine import (
     _normalize_partial_variances,
     _warn_pce_overfit,
@@ -162,7 +163,7 @@ def _indices_3d(
         total = partial.sum(axis=-1)
         explained = total
 
-    normalized = _normalize_partial_variances(partial, explained, total)
+    normalized = _normalize_partial_variances(partial, explained)
     return shapley_from_variances(normalized, membership)
 
 
@@ -419,6 +420,12 @@ def analyze(
             out of sample instead: the fit's ``loo_rmse`` approaching
             ``std(Y)`` means the expansion predicts no better than the output
             mean.
+        JaxgsaWarning: If ``backend="hdmr"``, ``problem`` declares a
+            correlation, and ``include_correlative=False``. That combination
+            allocates the structural share ``Sa`` only, renormalized to sum
+            to 1, and silently drops the correlative share the correlation
+            carries. ``HDMRResult.shapley()`` does not warn about this on its
+            own; only the wrapper does.
     """
     from jaxgsa.shapley import SPEC
 
@@ -432,10 +439,12 @@ def analyze(
             at_least("n_bootstrap", n_bootstrap, 0),
             one_of("ci_method", ci_method, ("quantile", "gaussian")),
             in_open_interval("conf_level", conf_level, 0.0, 1.0),
+            require(
+                n_bootstrap == 0 or key is not None,
+                "key is required when n_bootstrap > 0",
+            ),
         )
     )
-    if n_bootstrap > 0 and key is None:
-        raise ValueError("key is required when n_bootstrap > 0")
     # The backend prints no summary of its own: one shapley call prints one
     # block. A caller-supplied verbose inside backend_kwargs is stripped, not
     # refused, so the explicit verbose=False below always wins.
@@ -462,6 +471,19 @@ def analyze(
     elif backend == "hdmr":
         from jaxgsa.hdmr import analyze as analyze_hdmr
 
+        if problem.has_correlated_inputs and not include_correlative:
+            warnings.warn(
+                "jaxgsa.shapley.analyze: backend='hdmr' with a correlated "
+                "problem and include_correlative=False allocates the "
+                "structural ANCOVA share (Sa) only, renormalized to sum to "
+                "1. That drops the correlative share (Sb) the correlation "
+                "carries, so Sh reads too high for parameters whose "
+                "correlation opposes their direct effect and too low "
+                "otherwise. Pass include_correlative=True to fold the "
+                "correlative share back in.",
+                stacklevel=2,
+                category=JaxgsaWarning,
+            )
         result = analyze_hdmr(
             problem, X, Y, on_invalid=on_invalid, verbose=False, **backend_kwargs
         ).shapley(include_correlative=include_correlative)
@@ -577,28 +599,20 @@ def _with_intervals(
         include_correlative=include_correlative,
         backend_kwargs=backend_kwargs,
     )
-    conf = {
-        f"{name}_conf": jnp.stack(
-            _bootstrap_ci_endpoints(
-                getattr(result, name),
-                layout.squeeze(draws[name]),
-                conf_level=conf_level,
-                ci_method=ci_method,
-            )
-        )
-        for name in _INDEX_FIELDS
-    }
+    # The leading replicate axis survives the squeeze, which addresses the
+    # T/K axes from the end.
+    points = {name: getattr(result, name) for name in _INDEX_FIELDS}
+    squeezed_draws = {name: layout.squeeze(draws[name]) for name in _INDEX_FIELDS}
+    confs, ci = interval(
+        points,
+        squeezed_draws,
+        level=conf_level,
+        method=ci_method,
+        n_bootstrap=n_bootstrap,
+        keep_replicates=keep_replicates,
+    )
     return dataclasses.replace(
         result,
-        **conf,
-        ci=CIInfo(
-            level=conf_level,
-            method=ci_method,
-            n_bootstrap=n_bootstrap,
-            # The leading replicate axis survives the squeeze, which addresses
-            # the T/K axes from the end.
-            replicates={name: layout.squeeze(draw) for name, draw in draws.items()}
-            if keep_replicates
-            else None,
-        ),
+        **{f"{name}_conf": confs[name] for name in _INDEX_FIELDS},
+        ci=ci,
     )

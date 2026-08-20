@@ -217,18 +217,23 @@ class HDMRResult(SchemaResult, SurrogateResult):
         return _hdmr_predict_plan(self, X)
 
     def shapley(self, *, include_correlative: bool = False) -> "ShapleyResult":
-        """Compute Shapley effects from this fitted HDMR decomposition.
+        """Compute a Shapley-style variance allocation from this HDMR fit.
 
         Allocates each fitted ANCOVA term's variance share equally among the
-        parameters that take part in that term. The per-parameter Shapley
-        effects sum to one.
+        parameters that take part in that term. The per-parameter shares sum
+        to one. On a correlated problem this is an ANCOVA variance
+        allocation, not the conditional-variance Shapley effect (Owen 2014;
+        Owen & Prieur 2017): an exact linear-Gaussian check gives true Shapley
+        effects ``[0.339, 0.661]`` (D=2, rho=0.5) against this allocation's
+        ``[0.284, 0.716]``. See :class:`jaxgsa.shapley.ShapleyResult`.
 
         Args:
             include_correlative: When ``True``, allocate the total ANCOVA
                 contribution ``Sa + Sb`` (structural plus correlative
                 fold-in). That keeps the allocation meaningful under
                 correlated inputs. Defaults to ``False``, which allocates the
-                structural part ``Sa`` only.
+                structural part ``Sa`` only and is silent about the
+                correlative share it drops.
 
         Returns:
             ShapleyResult with per-parameter effects ``Sh`` (plus ``S1`` and
@@ -248,14 +253,12 @@ class HDMRResult(SchemaResult, SurrogateResult):
         subsets.extend(self._c3)
         membership = build_membership(subsets, self.problem.num_vars)
         # For HDMR the per-term sum doubles as the explained-variance
-        # diagnostic (indices are already output-variance fractions);
-        # compute it once and reuse it as the normalizer.
+        # diagnostic: indices are already output-variance fractions.
         explained = partial.sum(axis=-1)
         return _shapley_result_from_variances(
             partial,
             membership,
             explained,
-            total=explained,
             problem=self.problem,
             backend="hdmr",
             order=fit["maxorder"],

@@ -153,7 +153,7 @@ equals `S_TC`, and `S_C` is zero.
 | Value | Meaning |
 | --- | --- |
 | `None` (default) | Read `problem.correlation`. Independent (identity) when the problem declares none. |
-| `(D, D)` array | Override the problem's declaration for this call. The matrix must be symmetric with a unit diagonal. A non-positive-definite matrix is projected to the nearest positive-definite one with a `JaxgsaWarning`. |
+| `(D, D)` array | Override the problem's declaration for this call. The matrix must be symmetric with a unit diagonal. A non-positive-definite matrix is repaired by clipping its negative eigenvalues and renormalising the diagonal, with a `JaxgsaWarning`. This is a cheap heuristic, not Higham's nearest correlation matrix; the two can disagree by a visible margin. |
 
 To fit a matrix from observed data use
 `jaxgsa.sampling.fit_correlation(problem, X_data)` and attach it with
@@ -170,8 +170,8 @@ The matrix actually used is always on `result.correlation`.
 | `ridge` | `None` | RKHS regularisation. `None` cross-validates over a grid. |
 | `max_centers` | `None` | Cap on greedily selected kernel centres. `None` means 300, itself capped at `N`. Lower it to cut fit time; too low and the surrogate underfits, which `cv_rmse` reports. |
 | `n_folds` | `10` | Folds for the hyperparameter cross-validation. At least 2. |
-| `n_outer` | `512` | Outer (conditioning) sample size per parameter. Rounded up to the next power of two for Sobol' balance. This is the knob to raise when an index looks noisy. |
-| `n_inner` | `128` | Inner (conditional) sample size per outer point, rounded up to a power of two. Do not lower it to buy speed: the estimators drop the i.i.d. inner-noise correction and lean on a large shared inner block, so a small `n_inner` inflates a small `S_TC`. Raise `n_outer` instead. |
+| `n_outer` | `512` | Outer (conditioning) sample size per parameter. Rounded up to the next power of two for Sobol' balance. Raise this when `S_TU` looks noisy: it draws a fresh inner block per outer point, so its sampling error falls as `n_outer` grows. It does not help `S_TC`, which reuses one inner block across every outer point. |
+| `n_inner` | `128` | Inner (conditional) sample size per outer point, rounded up to a power of two. `S_TC` drops the i.i.d. inner-noise correction and leans on a large shared inner block, so do not lower `n_inner` to buy speed there: a small `n_inner` inflates a small `S_TC`, and raising `n_outer` will not fix it. |
 | `n_variance` | `8192` | Sample size for the output variance and the component-function fit, rounded up to a power of two. |
 | `key` | `None`, but required | A `jax.random` key driving the quasi-random index integration. No default, because the indices are a Monte-Carlo estimate. Use `jax.random.key(0)` for reproducibility. |
 | `batch_size` | `None` | Rows per device call. It bounds every row-wise step: the surrogate evaluations behind `predict`, and the nested conditional draws. `None` derives one from the memory budget. It never changes the answer. |

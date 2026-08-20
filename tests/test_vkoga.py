@@ -406,11 +406,11 @@ def test_explicit_matrix_overrides_problem_correlation():
 
 
 def test_correlation_string_raises():
-    """Every string is rejected; the error names the one supported workflow."""
+    """Every string is rejected: it is not a valid (D, D) matrix."""
     X = jaxgsa.sampling.monte_carlo(GAUSS_PROBLEM, 32, seed=0)
     Y = X @ A_COEF
     for value in ("empirical", "bogus"):
-        with pytest.raises(ValueError, match="fit_correlation"), single_precision_warning():
+        with pytest.raises(ValueError), single_precision_warning():
             jaxgsa.vkoga.analyze(GAUSS_PROBLEM, X, Y, correlation=value, **SMALL_KWARGS)
 
 
@@ -503,7 +503,13 @@ def test_batch_size_bounds_the_index_estimator_too(monkeypatch):
         return U[:, :1] + 0.5 * U[:, 1:2] ** 2
 
     kwargs = dict(
-        plan=plan, predict=predict, n_outer=n_outer, n_inner=n_inner, n_variance=256, entropy=0
+        problem=UNIFORM_PROBLEM,
+        plan=plan,
+        predict=predict,
+        n_outer=n_outer,
+        n_inner=n_inner,
+        n_variance=256,
+        entropy=0,
     )
     # batch_size has no default on the estimator: that is what made it
     # droppable, so every call has to say what it wants. The first predict
@@ -705,6 +711,7 @@ def test_index_streams_are_spawned_and_not_offset(monkeypatch):
     def seeds_for(entropy: int) -> list[int]:
         seen.clear()
         _indices.estimate_correlated_indices(
+            problem=UNIFORM_PROBLEM,
             plan=plan,
             predict=predict,
             n_outer=64,

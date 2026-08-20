@@ -11,7 +11,9 @@ Sobol' ``S1`` and ``ST``.
 
 This module has **no pure core**. It is host NumPy end to end, which is why
 it is the fastest method here, so there is no ``indices()`` that survives
-``jit``, ``vmap`` or ``jacrev``. See ``docs/adr/0015-pure-core-exemptions.md``.
+``jit``, ``vmap`` or ``jacrev``. That is a declared exemption (see
+``jaxgsa._core.registry.MethodRecord.pure_core``), not a gap: no traceable
+core exists to export.
 
 Gating: ``sample`` conditions on a declared ``problem.correlation``, so it is
 exempt from the correlated-design refusal that ``sobol``, ``morris``, and

@@ -12,7 +12,9 @@ correlated and uncorrelated parts.
 
 This module has **no pure core**. The index stage is a host NumPy/SciPy
 quasi-Monte-Carlo loop, so there is no ``indices()`` that survives ``jit``,
-``vmap`` or ``jacrev``. See ``docs/adr/0015-pure-core-exemptions.md``.
+``vmap`` or ``jacrev``. That is a declared exemption (see
+``jaxgsa._core.registry.MethodRecord.pure_core``), not a gap: no traceable
+core exists to export.
 
 Gating: ``analyze`` accepts a declared ``problem.correlation``. It refuses
 categorical parameters. The isotropic kernel needs a continuous CDF map on

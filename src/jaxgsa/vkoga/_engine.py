@@ -1,11 +1,15 @@
 """Pure-JAX VKOGA: greedy kernel interpolation with a Newton basis.
 
-Implements the Vectorial Kernel Orthogonal Greedy Algorithm (Wirtz &
-Haasdonk, 2013; Santin & Haasdonk) as used for surrogate-based sensitivity
-analysis by Hilhorst et al. (2024). The surrogate is a Gaussian RBF expansion.
-Its centres are chosen by the P-greedy rule, which maximises the power
-function. Its coefficients come from an RKHS-regularised least-squares solve
-over the selected centres.
+Implements the surrogate-based sensitivity analysis of Hilhorst et al.
+(2024), who name their kernel expansion VKOGA (Vectorial Kernel Orthogonal
+Greedy Algorithm). The surrogate is a Gaussian RBF expansion. Its centres are
+chosen by the P-greedy rule, which maximises the power function and does not
+read ``Y``; this is the target-independent selection rule of De Marchi,
+Schaback & Wendland (2005), not the target-dependent f-greedy rule of Wirtz
+& Haasdonk (2013), whose own "VKOGA" name this module borrows for
+consistency with Hilhorst et al. Its coefficients come from an
+RKHS-regularised least-squares solve over the selected centres, following
+Santin & Haasdonk's presentation of the Newton basis.
 
 Two properties make this cheap enough to drive a Monte-Carlo sensitivity loop.
 First, the P-greedy selection does not depend on ``Y``, so one greedy sweep
@@ -29,6 +33,20 @@ carries ``X.dtype`` throughout so it needs no other change. Grid-searching the
 hyperparameters with :func:`_cross_validate` also helps, because the scores are
 computed in the same arithmetic and so penalise the ill-conditioned corner of
 the grid.
+
+References:
+    De Marchi, Schaback & Wendland (2005). Adv. Comput. Math. 23:317-330.
+        The P-greedy centre-selection rule.
+    Santin & Haasdonk (2021). "Kernel Methods for Surrogate Modeling", in
+        Model Order Reduction, Volume 1: System- and Data-Driven Methods and
+        Algorithms, De Gruyter, pp. 311-354. The Newton basis and the
+        RKHS-regularised coefficient solve.
+    Wirtz & Haasdonk (2013). Dolomites Res. Notes Approx. 6:83-100. Source of
+        the "VKOGA" name, for a target-dependent f-greedy variant this
+        module does not implement.
+    Hilhorst, Quicken, van de Vosse & Huberts (2024). Int. J. Numer. Meth.
+        Biomed. Engng. 40(2):e3797. Surrogate-based sensitivity analysis
+        built on this expansion.
 """
 
 from __future__ import annotations
@@ -362,13 +380,22 @@ def _solve_coefficients(
     Coefficients solve the RKHS-regularised normal equations over the
     selected centres::
 
-        (A_nm^T A_nm + ridge * A_mm) alpha = A_nm^T Y
+        (A_nm^T A_nm + ridge * A_mm + JITTER * diag_mean * I) alpha = A_nm^T Y
 
     ``A_nm`` is the ``(n, m)`` cross-kernel between training points and
-    centres, and ``A_mm`` is the ``(m, m)`` centre Gram. When ``m = n`` this
-    collapses to the paper's eq. (6). ``A_nm = A_mm = A`` is then symmetric, so
-    the system is ``A (A + ridge*I) alpha = A Y``, that is
-    ``(A + ridge*I) alpha = Y``.
+    centres, and ``A_mm`` is the ``(m, m)`` centre Gram. When ``m = n`` and
+    ``ridge`` dominates the jitter term this collapses to the paper's eq. (6):
+    ``A_nm = A_mm = A`` is then symmetric, so the system is
+    ``A (A + ridge*I) alpha = A Y``, that is ``(A + ridge*I) alpha = Y``.
+
+    The ``JITTER * diag_mean * I`` term (see :func:`_solve_ridge`) is added
+    unconditionally, not just when the Gram is singular. ``diag_mean`` is the
+    mean active diagonal of ``A_nm^T A_nm + ridge * A_mm``, so this term
+    scales with the problem the same way ``ridge * A_mm`` does. At the module
+    default ``_JITTER = 1e-8`` it is about 2.2e-6 at a training size of 1024
+    rows. A caller-supplied ``ridge`` below that scale is therefore not the
+    regularisation in force: the jitter already dominates the diagonal, and
+    the reported ``VKOGAResult.ridge`` undercounts it.
 
     Args:
         X: Training inputs, shape ``(n, D)``.
