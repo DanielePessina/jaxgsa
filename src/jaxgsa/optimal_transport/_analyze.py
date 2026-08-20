@@ -718,24 +718,22 @@ def _resolve_tol(tol: float | None, dtype: jnp.dtype) -> float:
     return 1e-9 if dtype == jnp.float64 else 1e-6
 
 
-def _resolve_n_classes(n_partitions: int | None, N: int, *, needs_M: bool, scope: str = "") -> int:
+def _resolve_n_classes(n_partitions: int | None, N: int, *, needs_M: bool) -> int:
     """Resolve ``M``, the equal-frequency class count, from ``n_partitions``.
 
     Shared between :func:`analyze` and :func:`indices`: both default
     ``n_partitions`` to ``min(25, N // 2)`` and validate an explicit value
     against ``[2, N // 2]``. Only the default path can skip the too-small
     floor check, and only when nothing in this call actually consumes
-    ``M`` -- an all-categorical problem with no dummy baseline requested
-    (:func:`indices` always needs it, since it refuses categorical
-    parameters outright).
+    ``M`` -- an all-categorical problem, whose parameters and whose dummy
+    floors all use one class per level. :func:`indices` always needs
+    ``M``, since it refuses categorical parameters outright.
 
     Args:
         n_partitions: The caller's ``n_partitions`` argument.
         N: Sample size.
         needs_M: Whether anything in this call consumes ``M``. Only
             relevant when ``n_partitions is None``.
-        scope: Text appended to the "n_partitions must be in..." message,
-            naming which consumer ``M`` is for, or ``""`` for none.
 
     Returns:
         ``M``, resolved and validated.
@@ -754,7 +752,7 @@ def _resolve_n_classes(n_partitions: int | None, N: int, *, needs_M: bool, scope
         return M
     M = int(n_partitions)
     if not 2 <= M <= N // 2:
-        raise ValueError(f"n_partitions must be in [2, N//2={N // 2}]{scope}, got {n_partitions}")
+        raise ValueError(f"n_partitions must be in [2, N//2={N // 2}], got {n_partitions}")
     return M
 
 
@@ -882,10 +880,11 @@ def analyze(
             samples per class and raise the estimation noise. About 25 is
             customary for the OT index at N >= 2500. ``None`` (default)
             selects ``min(25, N // 2)``. Categorical parameters ignore it
-            and always use one class per level. A passed value is always
-            validated against ``[2, N // 2]``. If every parameter is
-            categorical and ``dummy`` is false, nothing uses the value and
-            a ``JaxgsaWarning`` says it is ignored.
+            and always use one class per level, and so does the dummy
+            floor each of them is measured against. A passed value is
+            always validated against ``[2, N // 2]``. If every parameter is
+            categorical, nothing uses the value and a ``JaxgsaWarning``
+            says it is ignored.
         standardize_outputs: Joint modes only. Divide each output column by its
             standard deviation before building the transport cost, so no
             single output dominates the joint distance through its units.
@@ -897,13 +896,21 @@ def analyze(
             Ignored in ``"univariate"`` mode, where each column is
             normalized by its own variance regardless.
         epsilon: Joint modes only. Entropic regularization strength,
-            relative to the cost matrix scaled to [0, 1]. Smaller values
-            approach exact transport at the price of more iterations.
+            relative to ``V``, the index's own normalizer (``2 * Var`` or
+            ``2 * tr(Cov)``). Every parameter and every class share that
+            one scale, so the regularization means the same thing for all
+            of them. Smaller values approach exact transport at the price
+            of more iterations.
         max_iter: Joint modes only. Sinkhorn iteration cap per solve.
         tol: Joint modes only. Stopping tolerance on the L1 target-
             marginal violation. ``None`` selects ``1e-9`` in float64 and
             ``1e-6`` in float32, where a tighter value is unresolvable.
-            One warning is emitted if any solve fails to converge.
+            One warning is emitted if any solve fails to converge. In
+            float32 the residual can stop falling a little above ``1e-6``
+            for a large cloud, because the residual is a sum over ``N``
+            rounded terms. The cost itself is converged there, so raising
+            ``max_iter`` does not clear the warning. Raise ``tol`` or
+            enable float64 if you need it silent.
         dummy: Also push one synthetic parameter through the identical
             pipeline per parameter and report the result as ``ot_dummy``.
             Every synthetic parameter is independent of the output by
@@ -1028,25 +1035,19 @@ def analyze(
     if mode == "trajectory" and Y.ndim != 3:
         raise ValueError(f"mode='trajectory' requires a 3-D (N, T, K) Y, got ndim={Y.ndim}")
     N = X.shape[0]
-    # n_partitions applies to the continuous columns and the dummy
-    # parameter. Categorical columns always get one class per level.
+    # n_partitions applies to the continuous columns only. Categorical
+    # columns always get one class per level, and so does the matched dummy
+    # each of them is measured against (M4), so an all-categorical problem
+    # has no consumer for the value even when it asks for a dummy floor.
     dims_levels = _categorical_dims(problem)
     cat_dims = [d for d, _ in dims_levels]
     cont_dims = [d for d in range(problem.num_vars) if d not in set(cat_dims)]
-    # Name the dummy baseline when it is the only consumer, so an
-    # out-of-range n_partitions does not read as a complaint about
-    # categorical columns.
-    scope = (
-        " for the dummy baseline (categorical columns use one class per level)"
-        if dummy and not cont_dims
-        else ""
-    )
-    M = _resolve_n_classes(n_partitions, N, needs_M=bool(cont_dims or dummy), scope=scope)
-    if n_partitions is not None and not cont_dims and not dummy:
+    M = _resolve_n_classes(n_partitions, N, needs_M=bool(cont_dims))
+    if n_partitions is not None and not cont_dims:
         warnings.warn(
             "jaxgsa.optimal_transport: n_partitions is ignored because every parameter is "
-            "categorical (one conditioning class per level) and no dummy "
-            "baseline was requested",
+            "categorical (one conditioning class per level, and each dummy floor "
+            "matches its own parameter's level sizes)",
             stacklevel=2,
             category=JaxgsaWarning,
         )
@@ -1350,10 +1351,14 @@ def indices(
             standard deviation before building the transport cost, as in
             :func:`analyze`. It is arithmetic over the sample axis, not
             policy, so it stays traceable.
-        epsilon: Joint modes only. Entropic regularization strength.
+        epsilon: Joint modes only. Entropic regularization strength,
+            relative to ``V``, as in :func:`analyze`.
         max_iter: Joint modes only. Sinkhorn iteration cap per solve.
         tol: Joint modes only. Marginal stopping tolerance. ``None``
-            selects ``1e-9`` in float64 and ``1e-6`` in float32.
+            selects ``1e-9`` in float64 and ``1e-6`` in float32. In
+            float32 the residual can floor a little above ``1e-6`` for a
+            large cloud without the cost being wrong, as in
+            :func:`analyze`.
         slice_chunk_size: ``"univariate"`` mode only. Output columns per
             kernel call, as in :func:`analyze`.
 
