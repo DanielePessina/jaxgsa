@@ -39,8 +39,8 @@ class EFASTResult(SchemaResult):
     ST: Array
     problem: Problem
     invalid: InvalidReport
-    omega_0: int = 0
-    M: int = 4
+    omega_0: int
+    M: int
 
     _schema = ResultSchema(
         primary="S1",

@@ -37,7 +37,7 @@ class DGSMResult(SchemaResult):
             marginal.
         lower_bound: ``Var(x_i) * sigma_i^2 / Var(Y)``, same shape as ``nu``.
             Kucherenko & Song (2016) prove this is a lower bound on ``ST_i``
-            for a **Gaussian** marginal (their Theorem 4.1), and only there.
+            for a **Gaussian** marginal (their Theorem 6 (Section 4.1, eq. 31)), and only there.
             The proof goes through Stein's identity
             ``Cov(f, x_i) = E[tau(x_i) * df/dx_i]``, whose kernel ``tau``
             equals the constant ``Var(x_i)`` for an untruncated Gaussian and

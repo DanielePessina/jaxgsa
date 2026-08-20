@@ -1,8 +1,9 @@
 """Derivative-based Global Sensitivity Measures (DGSM).
 
 DGSM ranks inputs by the mean squared partial derivative
-``nu_i = E[(df/dx_i)^2]``, averaged over the input distribution. Reverse-mode
-autodiff gives it cheaply when the model is written in JAX.
+``nu_i = E[(df/dx_i)^2]``, averaged over the input distribution. Autodiff
+gives it cheaply when the model is written in JAX: reverse mode when the
+output slices outnumber the inputs, forward mode otherwise.
 
 A Poincare inequality turns ``nu_i`` into an upper bound on the total Sobol
 index ``ST_i``, for every marginal this package supports. One derivative

@@ -17,8 +17,9 @@ Poincare constants by marginal type:
 
 References:
     Sobol' & Kucherenko (2009). Math. Comp. Sim. 79:3009-3017.
-    Lamboni et al. (2013). Math. Comp. Sim. 87:44-54.
-    Roustant et al. (2017). Stat. Comp. 27:879-894.
+    Lamboni et al. (2013). Math. Comp. Sim. 87:45-54.
+    Roustant et al. (2017). Electron. J. Statist. 11(2):3081-3119.
+        doi: 10.1214/17-EJS1310.
 """
 
 from __future__ import annotations
@@ -96,7 +97,13 @@ def _truncnorm_poincare(mu: float, sigma: float, a: float, b: float, grid: int) 
     x = np.linspace(a, b, grid + 1)
     h = np.diff(x)
     xm = 0.5 * (x[:-1] + x[1:])
-    w = np.exp(-0.5 * ((xm - mu) / sigma) ** 2)
+    z2 = ((xm - mu) / sigma) ** 2
+    # exp(-0.5 * z**2) underflows to 0 for z beyond about 37 (float64), which
+    # would make the mass matrix singular and eigh raise LinAlgError. The
+    # eigenvalue solved for is a ratio of the same weight applied to both
+    # matrices, so subtracting a constant off z**2 before exponentiating
+    # rescales stiff and mass by the same factor and leaves it unchanged.
+    w = np.exp(-0.5 * (z2 - z2.min()))
     n = grid + 1
     stiff = np.zeros((n, n))
     mass = np.zeros((n, n))
@@ -115,7 +122,7 @@ def marginal_variance(spec: InputSpec) -> float:
         lower_bound_i = Var_i * w_i^2 / Var(Y)
 
     That expression is a proven lower bound on ST_i for a Gaussian marginal
-    (Kucherenko & Song 2016, Theorem 4.1). For a uniform or truncated-Gaussian
+    (Kucherenko & Song 2016, Theorem 6 (Section 4.1, eq. 31)). For a uniform or truncated-Gaussian
     marginal it is an estimate, not a bound: see
     :class:`jaxgsa.dgsm.DGSMResult`.
 

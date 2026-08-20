@@ -23,7 +23,7 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core import verbose as _verbose
-from jaxgsa._core.batching import get_memory_budget
+from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare
 from jaxgsa._core.invalid import OnInvalid
@@ -42,39 +42,6 @@ from jaxgsa.morris._sampling import MorrisSamples
 # shared non-finite policy carries its own copy of the floor for the blocks it
 # drops. A small design the user asked for is deliberate, so it stays silent.
 _MIN_TRAJECTORIES = 10
-
-
-def _resolve_resample_chunk_size(
-    resample_chunk_size: int | None, n_bootstrap: int, bytes_per_replicate: int
-) -> int:
-    """Resolve how many bootstrap replicates one device call may carry.
-
-    Each replicate gathers a full ``(r, D, T, K)`` copy of the elementary
-    effects, so the working set of a chunk grows with output volume as well as
-    with the replicate count. An explicit value is an upper bound the caller
-    chose and is honoured as given, capped only at the replicate count — the
-    same rule as every other batching keyword. The memory budget only sizes
-    the ``None`` default, which keeps multi-output and time-series runs from
-    exhausting device memory without overriding an explicit choice.
-
-    Args:
-        resample_chunk_size: Caller's cap on replicates per chunk, honoured
-            as given, or ``None`` to derive one from the memory budget.
-        n_bootstrap: R, the number of bootstrap replicates.
-        bytes_per_replicate: Transient memory one replicate needs.
-
-    Returns:
-        A chunk width in ``[1, n_bootstrap]``.
-
-    Raises:
-        ValueError: If ``resample_chunk_size`` is given and is below 1.
-    """
-    if resample_chunk_size is not None:
-        if resample_chunk_size < 1:
-            raise ValueError(f"resample_chunk_size must be >= 1, got {resample_chunk_size}")
-        return min(resample_chunk_size, n_bootstrap)
-    budget = max(1, get_memory_budget() // max(bytes_per_replicate, 1))
-    return max(1, min(budget, n_bootstrap))
 
 
 def _stats_from_ee(ee: Array) -> tuple[Array, Array, Array]:
@@ -124,6 +91,40 @@ def _elementary_effects(Y: Array, idx_after: Array, idx_before: Array, delta: Ar
     return (Y[idx_after] - Y[idx_before]) / delta[:, :, None, None]
 
 
+def _measures(
+    Y: Array,
+    idx_after: Array,
+    idx_before: Array,
+    delta: Array,
+    standardize_outputs: bool,
+) -> tuple[Array, Array, Array, Array]:
+    """Standardize, gather elementary effects, and reduce to the screening measures.
+
+    Shared by :func:`indices` and :func:`analyze`: both run this exact
+    standardize-gather-reduce body over the expanded outputs, so the two can
+    never drift apart.
+
+    Args:
+        Y: Expanded model outputs, shape ``(r * (D + 1), T, K)``.
+        idx_after: Expanded-row indices of the perturbed points, shape
+            ``(r, D)``.
+        idx_before: Expanded-row indices of the reference points, shape
+            ``(r, D)``.
+        delta: Signed unit-cube steps, shape ``(r, D)``.
+        standardize_outputs: Standardize ``Y`` over the expanded sample axis
+            before gathering, as in :func:`analyze`.
+
+    Returns:
+        ``(ee, mu, mu_star, sigma)``: the elementary effects, shape
+        ``(r, D, T, K)``, and the three measures, each shape ``(T, K, D)``.
+    """
+    if standardize_outputs:
+        Y, _, _, _ = _standardize_outputs(Y)
+    ee = _elementary_effects(Y, idx_after, idx_before, delta)  # (r, D, T, K)
+    mu, mu_star, sigma = _stats_from_ee(ee)  # each (T, K, D)
+    return ee, mu, mu_star, sigma
+
+
 @jax.jit
 def _resample_stats(idx_chunk: Array, ee: Array) -> tuple[Array, Array, Array]:
     """Compute vectorised Morris statistics for one chunk of resamples.
@@ -144,29 +145,6 @@ def _resample_stats(idx_chunk: Array, ee: Array) -> tuple[Array, Array, Array]:
         return _stats_from_ee(ee[idx])
 
     return jax.vmap(single)(idx_chunk)
-
-
-def _ee_bookkeeping(sampling_result: MorrisSamples) -> tuple[Array, Array, Array]:
-    """Read the design's elementary-effect bookkeeping onto the device.
-
-    This is the whole traceable half of what :func:`_reindex_after_drop`
-    does. The design stores the index maps and the steps as host NumPy, and
-    every one of them is a *design* fact rather than a fact about ``Y``, so
-    moving them to the device is a constant fold and never a host read of an
-    array under trace.
-
-    Args:
-        sampling_result: The design from :func:`jaxgsa.morris.sample`.
-
-    Returns:
-        ``(idx_after, idx_before, delta)`` as device arrays, in the design's
-        own trajectory order and with nothing dropped.
-    """
-    return (
-        jnp.asarray(sampling_result.ee_idx_after),
-        jnp.asarray(sampling_result.ee_idx_before),
-        jnp.asarray(sampling_result.ee_delta),
-    )
 
 
 def indices(
@@ -232,11 +210,12 @@ def indices(
             ``sampling_result.n_runs``.
     """
     Y3, layout = _prepare_Y(sampling_result.expand_outputs(Y))
-    if standardize_outputs:
-        Y3, _, _, _ = _standardize_outputs(Y3)
-    idx_after, idx_before, delta = _ee_bookkeeping(sampling_result)
-    ee = _elementary_effects(Y3, idx_after, idx_before, delta)  # (r, D, T, K)
-    mu, mu_star, sigma = _stats_from_ee(ee)  # each (T, K, D)
+    # Design facts, not facts about Y: moving them to the device under trace
+    # is a constant fold, never a host read of an array.
+    idx_after = jnp.asarray(sampling_result.ee_idx_after)
+    idx_before = jnp.asarray(sampling_result.ee_idx_before)
+    delta = jnp.asarray(sampling_result.ee_delta)
+    _, mu, mu_star, sigma = _measures(Y3, idx_after, idx_before, delta, standardize_outputs)
     return layout.squeeze(mu), layout.squeeze(mu_star), layout.squeeze(sigma)
 
 
@@ -259,12 +238,16 @@ def _reindex_after_drop(
         surviving trajectories. All three are unchanged when nothing is
         dropped.
     """
+    if keep.all():
+        return (
+            jnp.asarray(sampling_result.ee_idx_after),
+            jnp.asarray(sampling_result.ee_idx_before),
+            jnp.asarray(sampling_result.ee_delta),
+        )
+
     idx_after = np.asarray(sampling_result.ee_idx_after)
     idx_before = np.asarray(sampling_result.ee_idx_before)
     delta = np.asarray(sampling_result.ee_delta)
-    if keep.all():
-        return _ee_bookkeeping(sampling_result)
-
     rows_per_traj = sampling_result.n_params + 1
     kept = np.flatnonzero(keep)
     old_offsets = (idx_after // rows_per_traj) * rows_per_traj
@@ -463,12 +446,8 @@ def analyze(
     if remaining < 2:
         raise ValueError("Fewer than 2 trajectories remain after cleaning")
 
-    if standardize_outputs:
-        Y, _, _, _ = _standardize_outputs(Y)
-
     t0 = _verbose.tic()
-    ee = _elementary_effects(Y, idx_after, idx_before, delta)  # (r, D, T, K)
-    mu, mu_star, sigma = _stats_from_ee(ee)  # each (T, K, D)
+    ee, mu, mu_star, sigma = _measures(Y, idx_after, idx_before, delta, standardize_outputs)
 
     # One value for all three intervals: they are produced together or not at
     # all, so a single name keeps that fact checkable instead of implied.
@@ -486,8 +465,8 @@ def analyze(
         # so a large T*K would otherwise exhaust device memory at the caller's
         # width. The memory budget lowers it, never raises it.
         per_replicate = int(np.prod(ee.shape))  # r * D * T * K
-        cs = _resolve_resample_chunk_size(
-            resample_chunk_size, n_bootstrap, per_replicate * ee.dtype.itemsize
+        cs = resolve_batch_size(
+            per_replicate * ee.dtype.itemsize, n_bootstrap, resample_chunk_size
         )
         mu_parts, mu_star_parts, sigma_parts = [], [], []
         for start in range(0, n_bootstrap, cs):

@@ -70,12 +70,16 @@ def _compute_indices(
     """
     # Discrete Fourier spectrum of the model output along one search curve.
     f = jnp.fft.fft(Y_curve)
-    # One-sided power spectrum |F_k|^2/N^2, positive frequencies only. The DC
-    # term at k=0 is skipped.
-    Sp = jnp.abs(f[1 : (N + 1) // 2]) ** 2 / N**2
+    # One-sided power spectrum |F_k/N|^2, positive frequencies only. The DC
+    # term at k=0 is skipped. Dividing by N before squaring keeps N**2 out of
+    # the jitted kernel: as a Python int it would trace as int32, which
+    # overflows for N >= 46341 (SALib divides the same way, for the same
+    # reason). S1 and ST are both ratios of these values, so the normaliser
+    # cancels either way.
+    Sp = (jnp.abs(f[1 : (N + 1) // 2]) / N) ** 2
     V = 2.0 * jnp.sum(Sp)
     if N % 2 == 0:
-        V = V + jnp.abs(f[N // 2]) ** 2 / N**2
+        V = V + (jnp.abs(f[N // 2]) / N) ** 2
 
     # First-order partial variance: sum the power at the harmonics p*omega_0
     # for p = 1..M. Those frequencies carry variance attributable to the focal
@@ -102,6 +106,26 @@ def _compute_indices(
 # ---------------------------------------------------------------------------
 # Cached JIT kernels
 # ---------------------------------------------------------------------------
+
+
+def _row_count_message(n_rows: int, N: int, D: int, n_runs: int) -> str:
+    """Build the "wrong number of Y rows" message shared by ``indices`` and ``analyze``.
+
+    Args:
+        n_rows: The number of rows ``Y`` actually has.
+        N: ``n_per_curve`` from the design.
+        D: Number of parameters, one search curve each.
+        n_runs: The row count the design expects.
+
+    Returns:
+        The error text, naming both the mismatch and how to fix it.
+    """
+    return (
+        f"Y has {n_rows} rows but this eFAST design requires "
+        f"n_runs = n_per_curve * D = {N} * {D} = {n_runs}; "
+        "evaluate the model on every row of sampling_result.samples, in order"
+    )
+
 
 # The closure captures concrete (N, M, omega_0), so jnp.arange() sees Python
 # ints rather than JAX tracers. vmap traces the Y_curve argument only.
@@ -277,9 +301,9 @@ def indices(
             require(rank_ok, f"Y must have 1, 2 or 3 dimensions, got {Y_arr.ndim}"),
             require(
                 not rank_ok or Y_arr.shape[0] == sampling_result.n_runs,
-                f"Y has {Y_arr.shape[0] if Y_arr.ndim else 0} rows but this eFAST design "
-                f"requires n_runs = n_per_curve * D = {N} * {D} = {sampling_result.n_runs}; "
-                "evaluate the model on every row of sampling_result.samples, in order",
+                _row_count_message(
+                    Y_arr.shape[0] if Y_arr.ndim else 0, N, D, sampling_result.n_runs
+                ),
             ),
         )
     )
@@ -386,9 +410,9 @@ def analyze(
             at_least("slice_chunk_size", slice_chunk_size, 1),
             require(
                 rows_match,
-                f"Y has {Y_arr.shape[0] if Y_arr.ndim else 0} rows but this eFAST design "
-                f"requires n_runs = n_per_curve * D = {N} * {D} = {sampling_result.n_runs}; "
-                "evaluate the model on every row of sampling_result.samples, in order",
+                _row_count_message(
+                    Y_arr.shape[0] if Y_arr.ndim else 0, N, D, sampling_result.n_runs
+                ),
             ),
         ),
         n_expected=sampling_result.n_runs,
@@ -426,16 +450,6 @@ def analyze(
 
     t0 = _verbose.tic()
     S1, ST = _indices_from_3d(Y, ctx.layout, D, N, M, omega_0, plan.analysis_max, slice_chunk_size)
-
-    # An index outside [0, 1] means the frequency decomposition did not
-    # converge.
-    if jnp.any((S1 > 1.0) | (S1 < 0.0)) or jnp.any((ST > 1.0) | (ST < 0.0)):
-        warnings.warn(
-            "jaxgsa.efast: some indices are outside [0, 1], suggesting "
-            "insufficient samples or near-zero output variance",
-            stacklevel=2,
-            category=JaxgsaWarning,
-        )
 
     result = EFASTResult(
         S1=S1,

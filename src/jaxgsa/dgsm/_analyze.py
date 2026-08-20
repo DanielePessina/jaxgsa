@@ -2,21 +2,21 @@
 
 Computes the DGSM moments (nu, sigma) from a JAX-differentiable function
 via autodiff — forward mode when the output slices outnumber the inputs,
-reverse mode otherwise (see ``docs/adr/0005-autodiff-mode-selection.md``) —
-then derives Poincare upper bounds and Kucherenko-Song lower bounds on the
-total Sobol index ST.
+reverse mode otherwise — then derives Poincare upper bounds and
+Kucherenko-Song lower bounds on the total Sobol index ST.
 
 References:
     Sobol' & Kucherenko (2009). Math. Comp. Sim. 79:3009-3017.
-    Kucherenko & Song (2016). Rel. Eng. Sys. Safety 148:81-95.
-    Lamboni et al. (2013). Math. Comp. Sim. 87:44-54.
+    Kucherenko & Song (2016). In: Monte Carlo and Quasi-Monte Carlo Methods
+        2014 (MCQMC 2014), Springer Proceedings in Mathematics & Statistics
+        163, pp. 455-469. doi: 10.1007/978-3-319-33507-0_23.
+    Lamboni et al. (2013). Math. Comp. Sim. 87:45-54.
 """
 
 from __future__ import annotations
 
 import warnings
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
 from typing import Literal
 
 import jax
@@ -30,13 +30,14 @@ from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.entry import (
     at_least,
+    check_scalars,
     gates,
     in_open_interval,
     one_of,
-    prepare_scalars,
+    prepare,
     validate_inputs,
 )
-from jaxgsa._core.invalid import OnInvalid
+from jaxgsa._core.invalid import InvalidUnit, OnInvalid, resolve_policy
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import _prepare_Y, _warn_zero_variance_slices
 from jaxgsa._core.warning_types import JaxgsaWarning
@@ -45,10 +46,12 @@ from jaxgsa.dgsm._core import (
     bounds_from_moments,
     jac_batches,
     jacobian_mode,
+    jacobian_sums,
     moment_sums,
     promote_jac,
     promote_moments,
     resample_moment_sums,
+    slice_count,
 )
 from jaxgsa.dgsm._result import DGSMResult
 from jaxgsa.problem import GaussianSpec, InputSpec, Problem
@@ -81,7 +84,7 @@ def _meets_lower_bound_condition(spec: InputSpec) -> bool:
     """Report whether a marginal satisfies the Kucherenko-Song condition.
 
     ``lower_bound`` is ``Var(x_i) * sigma_i^2 / Var(Y)``. Kucherenko & Song
-    (2016), Theorem 4.1, prove it is a lower bound on ``ST_i`` through Stein's
+    (2016), Theorem 6 (Section 4.1, eq. 31), prove it is a lower bound on ``ST_i`` through Stein's
     identity ``Cov(f, x_i) = E[tau(x_i) * df/dx_i]``. The kernel ``tau`` is the
     constant ``Var(x_i)`` only for an untruncated Gaussian. Truncating the
     Gaussian bends ``tau`` back to zero at each finite edge, so a truncated
@@ -124,9 +127,10 @@ def _warn_lower_bound_condition(problem: Problem) -> None:
     warnings.warn(
         "jaxgsa.dgsm: lower_bound is a valid lower bound on the total Sobol index "
         "only for untruncated Gaussian marginals (Kucherenko & Song 2016, "
-        f"Theorem 4.1). These marginals do not meet that condition: {shown}. For "
-        "them lower_bound is an estimate, not a bound: it is exact when the "
-        "response is linear in that input, and it can exceed the true total "
+        f"Theorem 6 (Section 4.1, eq. 31)). These marginals do not meet that "
+        f"condition: {shown}. For them lower_bound is an estimate, not a bound: "
+        "it is exact when the response is linear in that input, and it can "
+        "exceed the true total "
         "index when the response is curved. Confirm anything that rests on it "
         "with jaxgsa.sobol. upper_bound is unaffected: the Poincare bound holds "
         "for every supported marginal.",
@@ -222,7 +226,7 @@ def _looks_like_missing_axis(exc: BaseException) -> bool:
     return "out of bounds for array of dimension 1" in message
 
 
-def _check_point_callable(fn: Callable, X: Array) -> None:
+def _check_point_callable(fn: Callable, X: Array) -> int:
     """Reject a batch callable before it reaches the autodiff machinery.
 
     ``analyze`` differentiates a **one-sample** function: it maps one row of
@@ -237,6 +241,10 @@ def _check_point_callable(fn: Callable, X: Array) -> None:
     traceable function, because the autodiff has to differentiate it, so the
     check demands nothing the method did not already demand.
 
+    That same trace also answers ``T*K``, the number of output slices the
+    autodiff mode is picked from, so the caller reads it off here instead of
+    tracing the row a second time through :func:`jaxgsa.dgsm._core.n_output_slices`.
+
     A trace failure is reported with its original error and the expected
     signature. The "wrap the batch model" advice is added only where it is
     indicated: an output with more than two axes, or a trace failure that
@@ -247,6 +255,9 @@ def _check_point_callable(fn: Callable, X: Array) -> None:
         fn: The candidate one-sample function.
         X: The validated sample matrix, shape ``(N, D)``. Only its column
             count and dtype are used.
+
+    Returns:
+        ``T*K``, the number of scalar output slices ``fn`` produces.
 
     Raises:
         ValueError: If ``fn`` cannot be traced on a single row, or if it
@@ -282,81 +293,14 @@ def _check_point_callable(fn: Callable, X: Array) -> None:
                 f"fn returned an output of shape {tuple(leaf.shape)} for one sample "
                 f"row, which has more than two axes. {expected} {wrap_hint}"
             )
+    return slice_count(out)
 
 
-@dataclass(frozen=True)
-class _Moments:
-    """Unreduced derivative sums from the autodiff path, in two versions.
-
-    The autodiff path makes ``Y`` itself, inside a jitted ``vmap`` of the
-    one-row Jacobian, and reduces each batch of Jacobian rows to a running total
-    as soon as it has it. A row that is already inside that total cannot be
-    taken out again: ``NaN`` plus anything is ``NaN``. So the batch loop keeps
-    two totals side by side, one over every row and one over the clean rows
-    only, and ``analyze`` picks the one its policy calls for. The masking
-    happens where the row still exists, which is inside the loop.
-
-    Keeping both costs one extra pair of sums per batch. The Jacobian itself
-    is what the batch loop exists to bound, and neither total holds a sample
-    axis, so peak memory is unchanged.
-
-    Attributes:
-        Y: Stacked raw ``fn`` output, shape ``(N,)`` / ``(N, K)`` /
-            ``(N, T, K)``.
-        jac_finite: For each row, whether every entry of its Jacobian block is
-            finite, shape ``(N,)``. Reported separately from ``Y`` because a
-            derivative can blow up where the output does not, and ``nu`` is
-            built from the derivative.
-        row_ok: For each row, whether ``X``, ``Y`` and the Jacobian are all
-            finite, shape ``(N,)``. This is the mask the ``*_kept`` totals
-            used.
-        sum_jac: Sum of the Jacobian over every row, shape ``(D,)`` /
-            ``(K, D)`` / ``(T, K, D)``.
-        sum_jac2: Sum of the squared Jacobian over every row, same shape.
-        sum_jac_kept: Sum of the Jacobian over the rows in ``row_ok``.
-        sum_jac2_kept: Sum of the squared Jacobian over those same rows.
-    """
-
-    Y: Array
-    jac_finite: npt.NDArray[np.bool_]
-    row_ok: npt.NDArray[np.bool_]
-    sum_jac: Array
-    sum_jac2: Array
-    sum_jac_kept: Array
-    sum_jac2_kept: Array
-
-
-def _rows_finite(array: Array) -> Array:
-    """Return a ``(N,)`` mask that is True where a whole row is finite.
-
-    Args:
-        array: Any array whose leading axis is the sample axis.
-
-    Returns:
-        A boolean array of shape ``(N,)``.
-    """
-    return jnp.all(jnp.isfinite(array.reshape(array.shape[0], -1)), axis=1)
-
-
-def _mask_rows(array: Array, row_ok: Array) -> Array:
-    """Zero out the rows a mask rejects, without arithmetic on their values.
-
-    ``jnp.where`` is required here rather than a multiply by ``0.0``: a
-    multiply leaves ``NaN * 0 == NaN``, which is exactly the value the mask
-    exists to remove.
-
-    Args:
-        array: Array whose leading axis is the sample axis.
-        row_ok: Boolean mask of shape ``(N,)``.
-
-    Returns:
-        ``array`` with the rejected rows replaced by zeros.
-    """
-    return jnp.where(row_ok.reshape((-1,) + (1,) * (array.ndim - 1)), array, 0.0)
-
-
-def _finite_flag(row_finite: npt.NDArray[np.bool_]) -> npt.NDArray[np.floating]:
+def _finite_flag(row_finite: Array | npt.NDArray[np.bool_]) -> npt.NDArray[np.floating]:
     """Turn a per-row verdict back into a one-column array the check reads.
+
+    This runs only from ``analyze``, which is eager, so converting a JAX
+    array to NumPy here reads a value that already exists on the host.
 
     Args:
         row_finite: True where the row is clean, shape ``(N,)``.
@@ -365,100 +309,7 @@ def _finite_flag(row_finite: npt.NDArray[np.bool_]) -> npt.NDArray[np.floating]:
         A ``(N, 1)`` array holding ``0.0`` on the clean rows and ``NaN`` on
         the rest.
     """
-    return np.where(row_finite, 0.0, np.nan)[:, None]
-
-
-def _compute_moments(
-    fn: Callable,
-    X: Array,
-    batch_size: int | None = None,
-) -> _Moments:
-    """Compute DGSM derivative sums and forward outputs by autodiff.
-
-    The reduction over the sample axis is one vectorized operation that covers
-    every (t, k) output slice at once. The per-slice kernel needs no explicit
-    vmap, because the closed form already batches it. Which differentiation
-    mode runs is decided in :func:`jaxgsa.dgsm._core.jacobian_of`, from the
-    output and input widths.
-
-    Every batch is reduced twice: once over all of its rows, and once over the
-    rows in which ``X``, the output and the Jacobian are all finite. See
-    :class:`_Moments` for why both are needed. ``analyze`` divides by the
-    matching row count.
-
-    This is the policy-aware twin of :func:`jaxgsa.dgsm._core.moment_sums`,
-    which the pure core uses and which masks nothing. Both walk the sample
-    axis through the same batch iterator, so there is one copy of the padding
-    and of the sweep.
-
-    Args:
-        fn: JAX-differentiable function ``(D,) -> ()``, ``(D,) -> (K,)``, or
-            ``(D,) -> (T, K)``.
-        X: Sample matrix, shape ``(N, D)``.
-        batch_size: Number of N sample rows per batch, to limit memory. None
-            derives a width from the active memory budget.
-
-    Returns:
-        A :class:`_Moments`. Its sums carry the ``fn`` output's own slice
-        axes, shape ``(D,)`` / ``(K, D)`` / ``(T, K, D)``. ``analyze`` applies
-        the layout canonicalization (promotion and label-driven axis moves)
-        once the semantic axes are known.
-
-    Raises:
-        ValueError: If ``X`` has no rows, so there is nothing to average.
-    """
-    sum_jac: Array | None = None
-    sum_jac2: Array | None = None
-    sum_jac_kept: Array | None = None
-    sum_jac2_kept: Array | None = None
-    Y_parts: list[Array] = []
-    jac_finite_parts: list[Array] = []
-    row_ok_parts: list[Array] = []
-
-    for jac, Y_chunk, X_chunk in jac_batches(fn, X, batch_size):
-        Y_parts.append(Y_chunk)
-        # The mask is built and applied here, before the sums below fold this
-        # batch into the running totals. After that point the batch is gone.
-        chunk_jac_finite = _rows_finite(jac)
-        chunk_row_ok = chunk_jac_finite & _rows_finite(Y_chunk) & _rows_finite(X_chunk)
-        jac_finite_parts.append(chunk_jac_finite)
-        row_ok_parts.append(chunk_row_ok)
-        jac_kept = _mask_rows(jac, chunk_row_ok)
-
-        sj = jnp.sum(jac, axis=0)
-        sj2 = jnp.sum(jac**2, axis=0)
-        sjk = jnp.sum(jac_kept, axis=0)
-        sjk2 = jnp.sum(jac_kept**2, axis=0)
-        sum_jac = sj if sum_jac is None else sum_jac + sj
-        sum_jac2 = sj2 if sum_jac2 is None else sum_jac2 + sj2
-        sum_jac_kept = sjk if sum_jac_kept is None else sum_jac_kept + sjk
-        sum_jac2_kept = sjk2 if sum_jac2_kept is None else sum_jac2_kept + sjk2
-
-    if sum_jac is None or sum_jac2 is None or sum_jac_kept is None or sum_jac2_kept is None:
-        raise ValueError("X has no sample rows, so there is no derivative to average")
-
-    return _Moments(
-        Y=_join(Y_parts),
-        jac_finite=np.asarray(_join(jac_finite_parts)),
-        row_ok=np.asarray(_join(row_ok_parts)),
-        sum_jac=sum_jac,
-        sum_jac2=sum_jac2,
-        sum_jac_kept=sum_jac_kept,
-        sum_jac2_kept=sum_jac2_kept,
-    )
-
-
-def _join(parts: list[Array]) -> Array:
-    """Concatenate batch pieces back into one sample-axis array.
-
-    Args:
-        parts: One array per batch, all sharing their trailing shape.
-
-    Returns:
-        The pieces stacked along the sample axis. A single piece is returned
-        unchanged, so the unbatched path copies nothing.
-    """
-    return parts[0] if len(parts) == 1 else jnp.concatenate(parts, axis=0)
+    return np.where(np.asarray(row_finite), 0.0, np.nan)[:, None]
 
 
 def _check_dfdx(dfdx: Array, Y: Array, D: int) -> Array:
@@ -597,8 +448,8 @@ def indices(
 
     if use_autodiff:
         assert fn is not None and X is not None  # guaranteed by _resolve_call_style
-        _check_point_callable(fn, X)
-        sum_jac, sum_jac2, Y_raw = moment_sums(fn, X, batch_size)
+        n_outputs = _check_point_callable(fn, X)
+        sum_jac, sum_jac2, Y_raw = moment_sums(fn, X, batch_size, n_outputs=n_outputs)
         n_rows = X.shape[0]
         sigma = promote_moments(sum_jac / n_rows)
         nu = promote_moments(sum_jac2 / n_rows)
@@ -664,7 +515,7 @@ def analyze(
       near zero is provably negligible.
     - **Lower bound**: ``Var(x_i) * sigma_i^2 / Var(Y)``, with
       ``sigma_i = E[df/dx_i]``, the mean (signed) derivative. Kucherenko &
-      Song (2016), Theorem 4.1, prove ``ST_i >=`` this expression when input
+      Song (2016), Theorem 6 (Section 4.1, eq. 31), prove ``ST_i >=`` this expression when input
       i's marginal is an **untruncated Gaussian**. That condition is not
       decoration: the proof needs Stein's identity, which holds with a
       constant kernel only for the Gaussian. On a uniform or truncated
@@ -685,8 +536,8 @@ def analyze(
       the function, and one pass returns both the Jacobian and the forward
       outputs. The autodiff mode is selected from the shapes: ``jax.jacfwd``
       when the output slices outnumber the inputs (``T*K > D``), ``jax.jacrev``
-      otherwise (see ``docs/adr/0005-autodiff-mode-selection.md``). The two
-      modes compute the same Jacobian; only float arithmetic order differs.
+      otherwise. The two modes compute the same Jacobian; only float
+      arithmetic order differs.
     - **Pre-computed path**: pass ``Y`` and ``dfdx``. Use it when the model is
       not JAX-differentiable, or when the Jacobian comes from elsewhere.
 
@@ -803,18 +654,22 @@ def analyze(
     # and applies the capability gates from the registry record: the
     # Poincare-inequality bound on ST assumes independent inputs, so both
     # calling conventions are refused for a correlated problem.
-    preamble = prepare_scalars(
-        SPEC,
-        problem,
-        on_invalid=on_invalid,
-        checks=(
-            at_least("batch_size", batch_size, 1),
-            at_least("n_bootstrap", n_bootstrap, 0),
-            one_of("ci_method", ci_method, ("quantile", "gaussian")),
-            in_open_interval("conf_level", conf_level, 0.0, 1.0),
-        ),
-        method=_METHOD,
+    checks = (
+        at_least("batch_size", batch_size, 1),
+        at_least("n_bootstrap", n_bootstrap, 0),
+        one_of("ci_method", ci_method, ("quantile", "gaussian")),
+        in_open_interval("conf_level", conf_level, 0.0, 1.0),
     )
+    unit = SPEC.invalid_unit
+    assert unit is not None  # dgsm declares InvalidUnit.ROW
+    resolve_policy(
+        on_invalid,
+        method=_METHOD,
+        unit=unit,
+        allow_drop=unit is not InvalidUnit.CURVE,
+    )
+    check_scalars(checks)
+    gates(SPEC, problem, method=_METHOD)
     if n_bootstrap > 0 and key is None:
         raise ValueError("key is required when n_bootstrap > 0")
     # Say once, before the expensive work, that lower_bound is only a proven
@@ -840,16 +695,21 @@ def analyze(
         X = validate_inputs(problem, X)
         # Free shape-only trace: catches a batch (N, D) callable here, instead
         # of as an IndexError from inside the autodiff.
-        _check_point_callable(fn, X)
-        moments = _compute_moments(fn, X, batch_size=batch_size)
+        n_outputs = _check_point_callable(fn, X)
+        moments = jacobian_sums(fn, X, batch_size, n_outputs=n_outputs)
         N = int(X.shape[0])
         # The Jacobian never leaves the device whole, so it reaches the check
         # as a per-row verdict rather than as its own array. The verdict is
         # the same one the batch loop masked with. It rides in as an extra
         # array, which puts it on the model side of the check with Y.
-        ctx = preamble.with_data(
+        ctx = prepare(
+            SPEC,
+            problem,
             moments.Y,
             X=X,
+            on_invalid=on_invalid,
+            checks=checks,
+            method=_METHOD,
             extra={"derivative": _finite_flag(moments.jac_finite)},
             min_kept=_MIN_KEPT,
             source_names=_SOURCE_NAMES,
@@ -891,8 +751,13 @@ def analyze(
         # Both arrays are in hand here, so the derivative needs no stand-in:
         # it goes into the check whole, on the model side with Y, and comes
         # back compacted by the same mask.
-        ctx = preamble.with_data(
+        ctx = prepare(
+            SPEC,
+            problem,
             Y,
+            on_invalid=on_invalid,
+            checks=checks,
+            method=_METHOD,
             extra={"derivative": dfdx_arr},
             n_expected=int(dfdx_arr.shape[0]),
             min_kept=_MIN_KEPT,
@@ -903,7 +768,7 @@ def analyze(
         Y_valid = ctx.Y
         # The mirror rules on dfdx are read against the validated Y, so they
         # come after the data half. Row counts are settled before this point:
-        # with_data was told to expect one Y row per Jacobian row.
+        # prepare() was told to expect one Y row per Jacobian row.
         dfdx_arr = _check_dfdx(ctx.extra["derivative"], Y_valid, D)
         # One vectorized reduction over N covers every (t, k) slice at once.
         sigma = jnp.mean(dfdx_arr, axis=0)  # E[df/dx_i], (T, K, D)
@@ -916,9 +781,7 @@ def analyze(
     # Var(Y) per (t, k) output slice, denominator of both bounds. A constant
     # slice makes both bounds NaN, so say so rather than returning it silently.
     var_y = jnp.var(Y_3d, axis=0)  # (T, K)
-    _warn_zero_variance_slices(
-        Y_valid, output_names=problem.output_names, var_per_slice=var_y, method=_METHOD
-    )
+    _warn_zero_variance_slices(Y_valid, output_names=problem.output_names, method=_METHOD)
 
     nu, sigma, upper, lower, var_y = bounds_from_moments(
         problem,
@@ -945,9 +808,10 @@ def analyze(
         batches: Iterator[tuple[Array, Array]]
         if use_autodiff:
             assert fn is not None
-            # ctx.inputs is X with the dropped rows already removed, so the
+            # ctx.X is X with the dropped rows already removed, so the
             # resample draws from the same rows the point estimate averaged.
-            batches = ((jac, y) for jac, y, _ in jac_batches(fn, ctx.inputs, batch_size))
+            assert ctx.X is not None  # the autodiff path always passes X to prepare()
+            batches = ((jac, y) for jac, y, _ in jac_batches(fn, ctx.X, batch_size))
         else:
             batches = _array_batches(dfdx_arr, Y_3d, batch_size)
         draws = _bootstrap_draws(

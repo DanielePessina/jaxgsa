@@ -14,7 +14,7 @@ Those moments turn into two numbers that frame the total Sobol index:
   package supports.
 - `lower_bound_i = Var(x_i) * sigma_i^2 / Var(Y)`, where
   `sigma_i = E[df/dx_i]` is the mean signed derivative. Kucherenko & Song
-  (2016), Theorem 4.1, prove `ST_i >=` this **when input `i`'s marginal is an
+  (2016), Theorem 6 (Section 4.1, eq. 31), prove `ST_i >=` this **when input `i`'s marginal is an
   untruncated Gaussian**, and only then. On a uniform or truncated marginal it
   is an estimate: exact when the response is linear in that input, and able to
   sit above the true `ST_i` when it is strongly curved. The
@@ -122,8 +122,6 @@ The verbose summary reports which one ran, with the numbers behind the choice:
 ```
     gradients: forward-mode autodiff (T*K=10, D=3)
 ```
-
-See `docs/adr/0005-autodiff-mode-selection.md`.
 
 ## Arguments
 
