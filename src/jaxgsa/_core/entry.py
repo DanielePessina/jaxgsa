@@ -433,11 +433,18 @@ def prepare(
         # Warned on the caller's own rank, not on Y3: a (N, K) output then
         # gets "k=2" rather than the fabricated "(t=0, k=2)" that the
         # inserted singleton time axis would produce.
+        # Four frames reach the user: the helper, this function, the
+        # ``analyze()`` that called it, and the user's own call. Every
+        # ``prepare`` call site sits directly in a public ``analyze()``, so
+        # the count is the same for all of them. The non-finite warnings next
+        # door skip by file prefix instead, which needs no count at all;
+        # _warn_zero_variance_slices takes a stacklevel and lives in
+        # validation.py, so it cannot do the same until that helper changes.
         _warn_zero_variance_slices(
             Y_kept,
             output_names=problem.output_names,
             outcome=zero_variance_outcome,
-            stacklevel=3,
+            stacklevel=4,
             method=method,
         )
 
@@ -491,10 +498,10 @@ def _model_side(Y: Array, extras: Iterable[Array]) -> Array:
     different rank sit side by side; only finiteness is read off the result.
 
     The block is built on device, in whatever dtype the caller's arrays
-    promote to. It used to be built on the host in ``float64``, which was a
-    round trip to nothing: ``check_invalid`` hands the block straight back to
-    ``jnp.asarray``, so with x64 off the widened values were truncated again
-    on the way in. Worse, the truncation could change the verdict — a finite
+    promote to. Building it on the host in ``float64`` would be a round trip
+    to nothing: ``check_invalid`` hands the block straight back to
+    ``jnp.asarray``, so with x64 off the widened values are truncated again on
+    the way in. Worse, that truncation can change the verdict — a finite
     float64 magnitude above the float32 range becomes ``inf``, and the row
     would be reported as non-finite output the caller cannot find.
 

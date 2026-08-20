@@ -247,10 +247,8 @@ class SchemaResult:
         """Return the dataset-level attributes to record.
 
         The default exports the schema's :attr:`ResultSchema.meta` names, so
-        one declaration drives both the summary and the export. Before this,
-        the attributes were hand-written per class and the two drifted: five
-        results named provenance in their repr and exported none of it, and
-        two more exported it under other names.
+        one declaration drives both the summary and the export. A per-class
+        attribute list would let the repr and the export drift apart.
 
         Each value passes through :func:`_attr_value`, and a value of
         ``None`` drops its key rather than writing a null. See that function
@@ -265,7 +263,10 @@ class SchemaResult:
         ``ci_n_bootstrap`` written here, under those exact names. ``ci`` is
         not in ``_schema.meta``, because it is one object with three
         provenance values, not one; the loop above only handles a single
-        scalar per name.
+        scalar per name. The three values take the same
+        :func:`_attr_value` coercion as every other attribute, so a
+        ``conf_level`` the caller passed as a NumPy or JAX scalar still
+        reaches a netCDF file as a plain number.
 
         Returns:
             A mapping written to ``xr.Dataset.attrs``.
@@ -278,9 +279,9 @@ class SchemaResult:
             attrs[name] = _attr_value(value)
         ci = getattr(self, "ci", None)
         if ci is not None:
-            attrs["ci_level"] = ci.level
-            attrs["ci_method"] = ci.method
-            attrs["ci_n_bootstrap"] = ci.n_bootstrap
+            attrs["ci_level"] = _attr_value(ci.level)
+            attrs["ci_method"] = _attr_value(ci.method)
+            attrs["ci_n_bootstrap"] = _attr_value(ci.n_bootstrap)
         return attrs
 
     # -- derivation -------------------------------------------------------

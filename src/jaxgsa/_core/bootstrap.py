@@ -59,7 +59,10 @@ def bootstrap_draws(
             ``n_bootstrap``-long split sequence draws the row resamples, so
             passing the same key twice reproduces the same draws.
         N: Row count of the pool ``replicate_fn`` resamples from.
-        n_bootstrap: Number of bootstrap replicates to draw.
+        n_bootstrap: Number of bootstrap replicates to draw. Must be at
+            least 1. Every caller already guards its bootstrap branch with
+            ``if n_bootstrap > 0``, so this function does not repeat the
+            check; there is no empty pytree to return for 0.
         replicate_fn: Called once per replicate with that replicate's row
             indices, shape ``(N,)`` (drawn with replacement). Must return the
             same pytree structure every call — the same set of dict keys, the
@@ -80,7 +83,7 @@ def bootstrap_draws(
 
 def _bootstrap_ci_endpoints(
     estimate: Array,
-    bootstrap_draws: Array,
+    draws: Array,
     *,
     conf_level: float,
     ci_method: Literal["quantile", "gaussian"],
@@ -90,7 +93,7 @@ def _bootstrap_ci_endpoints(
     Args:
         estimate: Point estimate the interval is centered on. Used by the
             ``"gaussian"`` method only.
-        bootstrap_draws: ``(n_bootstrap, ...)`` bootstrap replicates.
+        draws: ``(n_bootstrap, ...)`` bootstrap replicates.
         conf_level: Two-sided confidence level, e.g. ``0.95``.
         ci_method: ``"quantile"`` for the empirical percentile interval, or
             ``"gaussian"`` for the normal-approximation interval.
@@ -105,7 +108,7 @@ def _bootstrap_ci_endpoints(
         # Non-parametric: read endpoints directly from the empirical bootstrap
         # distribution.  No normality assumption, but needs enough resamples.
         percentiles = jnp.array([alpha * 100, (1.0 - alpha) * 100])
-        endpoints = jnp.nanpercentile(bootstrap_draws, percentiles, axis=0)
+        endpoints = jnp.nanpercentile(draws, percentiles, axis=0)
         return endpoints[0], endpoints[1]
 
     # Parametric (Gaussian) CI: assumes the bootstrap distribution is normal.
@@ -113,7 +116,7 @@ def _bootstrap_ci_endpoints(
     # CI = estimate +/- z * sigma_boot.  nanstd tolerates degenerate bootstrap
     # resamples that collapse to a single unique value and produce NaN.
     z_score = jax.scipy.special.ndtri(1.0 - alpha)
-    bootstrap_sd = jnp.nanstd(bootstrap_draws, axis=0, ddof=1)
+    bootstrap_sd = jnp.nanstd(draws, axis=0, ddof=1)
     half_width = z_score * bootstrap_sd
     return estimate - half_width, estimate + half_width
 
