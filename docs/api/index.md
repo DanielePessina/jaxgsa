@@ -273,7 +273,7 @@ of distribution parameters to it. See
 runs the same estimator as `analyze`, but it checks nothing and builds no
 result, so it works inside `jax.jit`, `jax.vmap` and `jax.grad`. Pair it with
 `transform` to differentiate an index with respect to the input distribution
-parameters. See [Analyze (Sobol)](/api/analyze).
+parameters. See [Sobol](/api/sobol).
 
 `morris`, `efast` and `dgsm` each expose an `indices()` with the same deal:
 raw arrays, no checks, no result object, safe under a JAX transformation.

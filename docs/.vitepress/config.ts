@@ -56,12 +56,12 @@ export default defineConfig({
           items: [
             { text: 'Problem', link: '/api/problem' },
             { text: 'Sampling', link: '/api/sampling' },
-            { text: 'Sobol analysis', link: '/api/analyze' },
           ],
         },
         {
           text: 'Methods that build a design',
           items: [
+            { text: 'Sobol', link: '/api/sobol' },
             { text: 'Morris', link: '/api/morris' },
             { text: 'eFAST', link: '/api/efast' },
             { text: 'DGSM', link: '/api/dgsm' },

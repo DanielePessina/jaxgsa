@@ -169,7 +169,7 @@ uniform, `mean` and `variance` for a Gaussian, and all four for a truncated
 Gaussian.
 
 `transform` is written in JAX, so it is differentiable with respect to
-`theta`. See [Analyze (Sobol)](/api/analyze) for how to get the derivative of
+`theta`. See [Sobol](/api/sobol) for how to get the derivative of
 an index.
 
 `transform` raises for a problem with categorical parameters. A categorical

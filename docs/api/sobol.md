@@ -1,4 +1,4 @@
-# Analyze (Sobol)
+# Sobol
 
 `jaxgsa.sobol.analyze()` turns model outputs on a Saltelli design into
 variance-based Sobol indices: `S1` per parameter, `ST` per parameter, and `S2`
