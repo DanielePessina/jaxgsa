@@ -1541,8 +1541,7 @@ removals, and the few changes that move reported values.
 
 - **BREAKING: renamed the package from `gsax` to `jaxgsa`.** The distribution
   and import name are now `jaxgsa` (`pip install jaxgsa`, `import jaxgsa`). The
-  old `gsax` project on PyPI is frozen at `0.3.0b1` with no compatibility shim;
-  see the [0.3 → 0.4 migration guide](docs/guide/migration-0.4.md).
+  old `gsax` project on PyPI is frozen at `0.3.0b1` with no compatibility shim.
 - Replaced root-level command aliases with method namespaces such as
   `jaxgsa.sobol.sample`, `jaxgsa.sobol.analyze`, `jaxgsa.pce.analyze`, and
   `jaxgsa.hdmr.analyze`.

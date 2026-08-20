@@ -413,7 +413,7 @@ class TestAFloat64OutputIsNotTruncatedInSilence:
     """Truncation to float32 is announced only when it really costs something.
 
     ``jnp.asarray`` on a float64 array returns float32 when ``jax_enable_x64``
-    is off, with no signal of any kind. ADR 0014 keeps float32 as the default
+    is off, with no signal of any kind. jaxgsa keeps float32 as the default
     and takes on exactly one obligation in exchange: never destroy precision
     silently.
 

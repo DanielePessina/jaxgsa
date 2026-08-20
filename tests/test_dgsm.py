@@ -1438,7 +1438,11 @@ class TestIndicesSharesTheCapabilityGates:
 
 
 class TestJacobianModeSelection:
-    """ADR 0005: the autodiff mode is picked from the two shape numbers."""
+    """The autodiff mode is picked from the two shape numbers.
+
+    Forward mode costs one pass per input, reverse mode one pass per output
+    slice, so the cheaper mode follows from comparing ``T*K`` with ``D``.
+    """
 
     def test_forward_only_when_outputs_outnumber_inputs(self):
         from jaxgsa.dgsm._core import jacobian_mode

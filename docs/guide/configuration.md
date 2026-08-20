@@ -80,9 +80,9 @@ matters.
 
 It will not make repeated runs bit-identical. Batching an estimator at a
 different width changes the order XLA sums the reduction in, and reassociating
-a sum changes its last bits. That is arithmetic, not precision. ADR 0014
-measured it: the batch-width discrepancy falls from about `2e-7` to about
-`2e-16` under x64, and never reaches zero.
+a sum changes its last bits. That is arithmetic, not precision. We measured
+it: the batch-width discrepancy falls from about `2e-7` to about `2e-16` under
+x64, and never reaches zero.
 
 The cost is real. Up to 2.1x memory, and as little as 1/64 of float32
 throughput on consumer NVIDIA GPUs. TPUs have no float64 at all.
@@ -91,7 +91,6 @@ jaxgsa ships no `jaxgsa.enable_x64()` helper on purpose. `jax.config.update`
 and `jax.experimental.enable_x64()` already do the job, the flag has to be set
 before JAX initialises any array so a library call cannot guarantee it runs
 first, and a wrapper would imply jaxgsa-specific behaviour that does not exist.
-See [ADR 0014](https://github.com/DanielePessina/jaxgsa/blob/master/docs/adr/0014-float32-default-no-x64-wrapper.md).
 
 ## Persistent compilation cache
 

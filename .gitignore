@@ -111,3 +111,9 @@ latex.out/
 *~
 
 docs/node_modules/
+
+# Internal working documents. Kept on disk, out of the repository.
+docs/adr/
+docs/agents/
+CONTEXT.md
+.scratch/

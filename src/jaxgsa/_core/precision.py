@@ -100,9 +100,10 @@ def warn_on_float64_downcast(
     ``jnp.asarray`` on a float64 array with x64 off silently returns float32.
     A caller who went to the trouble of producing double-precision outputs
     then loses them with no signal at all, and reads indices computed at a
-    precision they did not ask for. This is the "never silently destroy
-    precision" clause of ADR 0014, and it is a warning rather than an error
-    because the float32 result is degraded, not wrong.
+    precision they did not ask for. jaxgsa keeps float32 as its default and
+    takes on one obligation in exchange: never destroy precision in silence.
+    This is that obligation. It is a warning rather than an error because the
+    float32 result is degraded, not wrong.
 
     **The rule.** A float64 dtype on its own is not the signal. NumPy makes
     float64 arrays by default on most platforms, so ``Y = model(X)`` in plain

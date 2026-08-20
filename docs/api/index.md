@@ -537,6 +537,3 @@ explicit per-call value always wins.
 
 The [configuration guide](/guide/configuration) has the full list of what
 reads the budget, the unit rules, and worked demos.
-
-See the [migration guide](/guide/migration) for direct API
-replacements.

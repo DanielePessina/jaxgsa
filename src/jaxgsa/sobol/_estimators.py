@@ -30,7 +30,9 @@ Name                First order                  Total order
 
 ``saltelli-jansen`` is the default: Jansen's total-order estimator is a
 mean of squares, so it can never go negative, and it is also SALib's
-default, which keeps cross-library comparisons plain (ADR 0021).
+default, which keeps cross-library comparisons plain. Users screen on
+``ST``, and a negative ``ST`` invites the clipping that jaxgsa refuses to
+do.
 
 A note on the first-order label. The default's first-order formula is
 ``E[B (AB_j - A)] / Var(Y)``. That is not the Saltelli (2002) estimator,

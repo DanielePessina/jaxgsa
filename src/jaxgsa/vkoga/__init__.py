@@ -68,7 +68,9 @@ SPEC = register(
         categorical="refuses",
         bootstrap="n_bootstrap",
         # The index stage is a host NumPy/SciPy quasi-Monte-Carlo loop, so
-        # there is no traceable indices(). See ADR 0015.
+        # there is no traceable indices(). The flag declares that on purpose:
+        # this method is not jit-able, vmap-able or differentiable, and the
+        # declaration keeps that apart from an oversight.
         pure_core=False,
         invalid_unit=InvalidUnit.ROW,
     )

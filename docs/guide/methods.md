@@ -230,7 +230,7 @@ The cost is $N(D + 2)$ model evaluations for all first-order and total-order ind
 
 ### Estimators
 
-The default estimator pair is `estimator="saltelli-jansen"`: Sobol'-Mauntz for the first order, Jansen (1999) for the total order. Two reasons pick it, both recorded in ADR 0021. Jansen's total-order estimator is a mean of squares, so it can never come out negative, and users screen on $S_T$. A negative $S_T$ invites the clipping that jaxgsa refuses to do. And SALib computes the same pairing by default, so moving between the two libraries needs no keyword.
+The default estimator pair is `estimator="saltelli-jansen"`: Sobol'-Mauntz for the first order, Jansen (1999) for the total order. Two reasons pick it. Jansen's total-order estimator is a mean of squares, so it can never come out negative, and users screen on $S_T$. A negative $S_T$ invites the clipping that jaxgsa refuses to do. And SALib computes the same pairing by default, so moving between the two libraries needs no keyword.
 
 First-order, the improved form of Sobol' et al. (2007), tabulated by Saltelli et al. (2010):
 
@@ -632,7 +632,9 @@ Saltelli, A., Tarantola, S. & Chan, K.P.-S. (1999). A quantitative model-indepen
 
 DGSM uses exact gradients from automatic differentiation to compute bounds on the total Sobol index $S_T$. For a **scalar output** it is the cheapest quantitative method when your model is JAX-differentiable: one reverse-mode Jacobian costs about 3 model evaluations regardless of $D$, against $D+2$ for the Saltelli design.
 
-That advantage is scalar-only. Reverse mode costs one pass per output slice, so a model with $T \times K$ output slices costs $T K$ passes. jaxgsa therefore picks the mode from the shapes: `jax.jacfwd` when $T K > D$, `jax.jacrev` otherwise. A Jacobian costs about $\min(D,\, T K)$ evaluations, and the saving against Saltelli's $D+2$ disappears once your output is a long time series. See ADR 0005.
+That advantage is scalar-only. Reverse mode costs one pass per output slice, so a model with $T \times K$ output slices costs $T K$ passes. jaxgsa therefore picks the mode from the shapes: `jax.jacfwd` when $T K > D$, `jax.jacrev` otherwise. A Jacobian costs about $\min(D,\, T K)$ evaluations, and the saving against Saltelli's $D+2$ disappears once your output is a long time series. There is no keyword for
+the mode: the two shape numbers already decide it, so exporting the choice
+would only invite a wrong answer.
 
 Pick it as a fast screening or sanity-check step before committing to a full Sobol' analysis. Use Morris (below) instead if your model is a black box. DGSM needs its own design, but only a plain Monte Carlo sample of $N$ points.
 

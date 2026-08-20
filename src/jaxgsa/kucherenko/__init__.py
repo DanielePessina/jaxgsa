@@ -58,7 +58,11 @@ SPEC = register(
         categorical="refuses",
         bootstrap="n_bootstrap",
         # Host NumPy end to end, so there is no traceable indices(). The
-        # exemption is measured, not an oversight: see ADR 0015.
+        # exemption is measured, not an oversight. This method is the fastest
+        # in the library because it never touches the device: its work is many
+        # small operations on modest arrays, where dispatch and transfer
+        # dominate. The flag is declared here so a conformance sweep reads it
+        # instead of treating the missing core as a defect.
         pure_core=False,
         # One base point carries the 2D+1 conditional rows drawn around it.
         invalid_unit=InvalidUnit.BASE_POINT,
