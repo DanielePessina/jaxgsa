@@ -190,6 +190,16 @@ draws are now symmetrised. See "Breaking".
 
 ### Performance
 
+- **The Sobol bootstrap is about 2.2x faster on a scalar output.** Batching
+  the bootstrap over output slices made every gather batched on two axes,
+  and XLA compiles that to a slower gather than a single-axis one. A chunk
+  holding one slice has no outer axis worth mapping, so it now drops the
+  outer `vmap`. On an Apple M1 Pro at N=1024, D=3 and 1000 resamples, one
+  output slice went from 18.9 ms to 8.5 ms. Chunks holding more than one
+  slice are unchanged, and so are the numbers: every interval endpoint is
+  bit-identical, on every estimator. The same shortcut applies when many
+  slices exist but the memory budget has narrowed the chunk to one.
+
 - **The PCE streamed fit dispatches one jitted step per row batch.** Each
   batch used to run several eager ops: an unjitted design-matrix build plus
   accumulation matmuls. The per-batch step is now one jitted call, and the

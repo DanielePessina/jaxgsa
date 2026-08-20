@@ -413,6 +413,34 @@ class TestPathsAgree:
         lower, upper = np.asarray(boot.S1_conf)
         assert np.all(lower <= upper)
 
+    @pytest.mark.parametrize("estimator", ESTIMATORS)
+    def test_single_slice_bootstrap_matches_the_mapped_one(self, ishigami_design, estimator):
+        """Tier T4 (internal consistency): one slice takes a different kernel.
+
+        A chunk holding one output slice drops the outer ``vmap``, because
+        mapping a length-one axis makes every gather batched on two axes and
+        XLA compiles that to a slower gather. The two kernels must still
+        agree bit for bit, or the shortcut would buy speed with numbers.
+        Feeding the same output as ``(N,)`` and as ``(N, 1, 1)`` runs the
+        single-slice kernel and the mapped one on identical data.
+
+        Only the interval endpoints are compared. The point estimate comes
+        from a different pair of kernels that this shortcut does not touch,
+        and two estimators already disagree there between the scalar and 3-D
+        paths by up to 1e-6 in float32, which predates this test.
+        """
+        sr, Y = ishigami_design
+        key = jax.random.key(5)
+        one = jaxgsa.sobol.analyze(sr, Y, estimator=estimator, n_bootstrap=32, key=key)
+        mapped = jaxgsa.sobol.analyze(
+            sr, Y[:, None, None], estimator=estimator, n_bootstrap=32, key=key
+        )
+        for name in ("S1_conf", "ST_conf", "S2_conf"):
+            got, want = getattr(one, name), getattr(mapped, name)
+            np.testing.assert_array_equal(
+                np.asarray(got), np.asarray(want).reshape(np.shape(got)), err_msg=name
+            )
+
 
 class TestStaysTransformable:
     """``indices`` is the differentiable entry point, for every estimator."""

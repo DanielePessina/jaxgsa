@@ -142,6 +142,68 @@ def _resample_ft(estimator: str):
 
 
 @lru_cache(maxsize=None)
+def _resample_ft_one(estimator: str):
+    """Build the first/total-order resampler for a chunk holding one slice.
+
+    A chunk of one slice has no outer axis worth mapping, and the nested form
+    is not free: mapping over a length-one slice axis makes every gather
+    batched on two axes, and XLA compiles that to a slower gather than the
+    single-axis one. Measured on an Apple M1 Pro at N=256, D=3, R=1000, the
+    nested kernel takes 14.93 ms against 3.74 ms here, for the same
+    arithmetic. The library-wide rule applies: a degenerate chunk takes the
+    unchunked path.
+
+    Args:
+        estimator: The estimator name, as validated by ``analyze``.
+
+    Returns:
+        A jitted function ``(idx, a, ab, b) -> (S1, ST)``. ``idx`` has shape
+        ``(R, N)``; ``a`` and ``b`` have shape ``(N,)`` and ``ab`` shape
+        ``(N, D)``; both outputs have shape ``(R, D)``.
+    """
+    kernel = first_total_kernel(estimator)
+
+    @jax.jit
+    def resample(idx: Array, a: Array, ab: Array, b: Array):
+        # Closing over the slice keeps vmap varying only the index vector, so
+        # each gather stays single-axis.
+        def one_draw(rows: Array):
+            return kernel(a[rows], ab[rows], b[rows])
+
+        return jax.vmap(one_draw)(idx)
+
+    return resample
+
+
+@lru_cache(maxsize=None)
+def _resample_so_one(estimator: str):
+    """Build the second-order resampler for a chunk holding one slice.
+
+    The single-slice counterpart of :func:`_resample_so`, for the same reason
+    :func:`_resample_ft_one` exists.
+
+    Args:
+        estimator: The estimator name, as validated by ``analyze``.
+
+    Returns:
+        A jitted function ``(idx, a, ab, ba, b) -> (S1, ST, S2)``. ``idx`` has
+        shape ``(R, N)``; ``a`` and ``b`` have shape ``(N,)``, ``ab`` and
+        ``ba`` shape ``(N, D)``. ``S1`` and ``ST`` come back ``(R, D)`` and
+        ``S2`` ``(R, D, D)``.
+    """
+    kernel = second_order_kernel(estimator)
+
+    @jax.jit
+    def resample(idx: Array, a: Array, ab: Array, ba: Array, b: Array):
+        def one_draw(rows: Array):
+            return kernel(a[rows], ab[rows], ba[rows], b[rows])
+
+        return jax.vmap(one_draw)(idx)
+
+    return resample
+
+
+@lru_cache(maxsize=None)
 def _resample_so(estimator: str):
     """Build the vectorised second-order resampler for one estimator.
 
@@ -197,8 +259,18 @@ def _bootstrap_first_total(
     """
     n_slices = A.shape[0]
     s1_parts, st_parts = [], []
-    resample = _resample_ft(estimator)
     cs = max(1, min(slice_chunk_size, n_slices))
+    if cs == 1:
+        # One slice per chunk leaves nothing to map over, so drop the outer
+        # vmap and keep every gather single-axis. See _resample_ft_one.
+        resample_one = _resample_ft_one(estimator)
+        for start in range(n_slices):
+            s1, st = resample_one(indices, A[start], AB[start], B[start])
+            s1_parts.append(s1[None])
+            st_parts.append(st[None])
+        return jnp.concatenate(s1_parts), jnp.concatenate(st_parts)
+
+    resample = _resample_ft(estimator)
     for start in range(0, n_slices, cs):
         end = min(start + cs, n_slices)
         actual = end - start
@@ -250,8 +322,23 @@ def _bootstrap_second_order(
     """
     n_slices = A.shape[0]
     s1_parts, st_parts, s2_parts = [], [], []
-    resample = _resample_so(estimator)
     cs = max(1, min(slice_chunk_size, n_slices))
+    if cs == 1:
+        # One slice per chunk: drop the outer vmap, as _bootstrap_first_total
+        # does, for the reason _resample_ft_one records.
+        resample_one = _resample_so_one(estimator)
+        for start in range(n_slices):
+            s1, st, s2 = resample_one(indices, A[start], AB[start], BA[start], B[start])
+            s1_parts.append(s1[None])
+            st_parts.append(st[None])
+            s2_parts.append(s2[None])
+        return (
+            jnp.concatenate(s1_parts),
+            jnp.concatenate(st_parts),
+            jnp.concatenate(s2_parts),
+        )
+
+    resample = _resample_so(estimator)
     for start in range(0, n_slices, cs):
         end = min(start + cs, n_slices)
         actual = end - start

@@ -42,6 +42,25 @@ and change nothing else.
 Cost of the fix: it touches `sobol/_bootstrap.py`, which sits at the bottom
 of the PR stack, so landing it means rebasing everything above it.
 
+## 1b. Two estimators disagree between the scalar and 3-D point-estimate paths
+
+Found while testing the fix for item 1, and unrelated to it. Feeding one
+output as `(N,)` and as `(N, 1, 1)` should give the same point estimate. For
+four of the six estimators it does, bit for bit. Two do not:
+
+| estimator | max abs difference in S1 |
+| --- | --- |
+| `janon-monod` | 3.278e-07 |
+| `azzini-rosati` | 1.073e-06 |
+
+Confirmed present before the bootstrap fix, so it is pre-existing, and the
+interval endpoints agree exactly for every estimator. It is float32
+reassociation between two kernels rather than a wrong formula, and 1e-6 is
+below the noise floor of any design that would be used in practice. Recorded
+because a user comparing the two layouts could otherwise think one is wrong,
+and because `test_single_slice_bootstrap_matches_the_mapped_one` documents
+the same fact in the suite.
+
 ## 2. PCE `explained_variance` returns 1.0709 on Ishigami
 
 Order 8, N=2000, and the same value in float32 and float64, so it is not a
