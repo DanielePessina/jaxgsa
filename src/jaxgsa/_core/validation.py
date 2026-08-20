@@ -559,19 +559,20 @@ def _warn_zero_variance_slices(
 
     A constant slice turns every index into ``0 / 0``, so the analysis still
     runs and reports NaN for that slice. The other slices are unaffected, so
-    this warns rather than raising. Constancy is tested exactly, with
-    :func:`_is_constant_slice`, not by comparing a sample variance to zero.
+    this warns rather than raising. A slice counts as constant when
+    :func:`_is_constant_slice` says so, or when its sample variance underflows
+    to zero in the working dtype. The first test alone misses a slice too
+    small for its dtype; the second alone misses a constant float32 slice.
 
     Args:
         Y: Model output array with shape ``(n_expanded, ...)`` where
             trailing dims are ``()``, ``(K,)``, or ``(T, K)``.
         output_names: Optional names for the K output dimension.
-        var_per_slice: Deprecated and ignored. Zero variance used to be
-            detected by comparing this value to zero, which a constant
-            float32 slice rarely satisfies exactly (see
-            :func:`_is_constant_slice`). Kept only so existing callers that
-            still pass their own precomputed variance keep working; stop
-            passing it.
+        var_per_slice: Deprecated and ignored. This value alone cannot
+            answer the question: a constant float32 slice rarely has a
+            bit-exact zero variance (see :func:`_is_constant_slice`), so the
+            check is made here instead. Kept only so callers that still pass
+            their own precomputed variance keep working; stop passing it.
         outcome: Which consequence to report, ``"nan"`` or ``"zero"``. See
             :data:`_ZERO_VARIANCE_OUTCOMES`.
         stacklevel: Frames to skip so the warning points at the user's
@@ -601,9 +602,12 @@ def _warn_zero_variance_slices(
             return f"k={k} ('{output_names[k]}')"
         return f"k={k}"
 
-    # An exactly constant slice is what turns Sobol indices into 0/0 = NaN;
-    # see _is_constant_slice for why this is not a variance-near-zero test.
-    zero_mask = _is_constant_slice(flat)
+    # Two different slices turn every index into 0/0 = NaN, and both must be
+    # caught. A slice that is exactly constant: tested with _is_constant_slice,
+    # because a constant float32 slice rarely has a bit-exact zero variance.
+    # A slice that does vary, but so little that its variance underflows to
+    # zero in the working dtype: only the variance test sees that one.
+    zero_mask = _is_constant_slice(flat) | (jnp.var(flat, axis=0) == 0)
     n_zero = int(jnp.sum(zero_mask))
 
     if n_zero == 0:

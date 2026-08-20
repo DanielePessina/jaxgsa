@@ -21,8 +21,8 @@ def _truncnorm_cdf(z: Array, a: float, b: float, *, clip: bool = True) -> Array:
     needs a host read of the array, which raises ``TracerArrayConversionError``
     under ``jit``, ``vmap``, or ``jacrev``.
 
-    The definition is ``(Phi(z) - Phi(a)) / (Phi(b) - Phi(a))``, clamped to the
-    interval. Written that way it cancels catastrophically when ``a`` and ``b``
+    The definition is ``(Phi(z) - Phi(a)) / (Phi(b) - Phi(a))``. Written that
+    way it cancels catastrophically when ``a`` and ``b``
     both sit far out in the *upper* tail, because ``Phi`` of both is within
     rounding of 1 and the difference is all round-off. The standard remedy,
     which scipy also uses, is to work with the survival function there:
@@ -96,9 +96,10 @@ def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
         problem: Problem with per-dimension distribution specs.
 
     Returns:
-        ``(N, D)`` array. Every Gaussian column lies in ``[0, 1]``. A uniform
-        column lies in ``[0, 1]`` for every sample within the declared
-        bounds.
+        ``(N, D)`` array. Every column lies in ``[0, 1]`` for every sample
+        within its declared support. A sample outside the declared support
+        of a uniform or truncated Gaussian marginal maps outside ``[0, 1]``,
+        which is the out-of-range signal the callers read.
 
     Raises:
         ValueError: If any parameter is categorical. Its step CDF collapses

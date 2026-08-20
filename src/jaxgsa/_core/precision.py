@@ -103,10 +103,9 @@ def warn_on_float64_downcast(
 
     **The rule.** A float64 dtype on its own is not the signal. NumPy makes
     float64 arrays by default on most platforms, so ``Y = model(X)`` in plain
-    NumPy — the first thing anyone who copies an example from the docs runs —
-    is float64 without the caller ever asking for double precision. Warning on
-    the dtype alone therefore fired on nearly every method on nearly every
-    page, and a first run looked broken.
+    NumPy is float64 without the caller ever asking for double precision. A
+    warning on the dtype alone would fire on almost every call and tell the
+    caller nothing.
 
     An array is a candidate only when the narrowing **changes its values**:
     cast to float32 and back, and warn if the result does not match the
