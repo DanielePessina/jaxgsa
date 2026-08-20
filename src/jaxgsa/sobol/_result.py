@@ -32,9 +32,12 @@ class SobolResult(SchemaResult):
             ``S2[j, k]`` and ``S2[k, j]`` are estimated independently, from
             the same formula with j and k swapped, and are averaged
             together: the two differ by Monte Carlo noise, not
-            floating-point drift, and averaging cuts S2's RMSE by 5-16%
-            (measured on Ishigami). This is a deliberate departure from
-            SALib, which reports the upper triangle alone. The diagonal
+            floating-point drift. Averaging usually lowers the error but
+            does not always (measured on Ishigami: 25% and 13% lower at
+            ``base_n`` 64 and 1024, 9% higher at 256; see
+            :func:`jaxgsa.sobol._analyze._symmetrize_s2`). This is a
+            deliberate departure from SALib, which reports the upper
+            triangle alone. The diagonal
             holds a parameter's interaction with itself, which is undefined,
             so it is set to ``NaN``.
         problem: Problem definition used for the analysis.

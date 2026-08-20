@@ -80,7 +80,9 @@ Note what that last sentence does *not* say about first order. A Jansen
 first-order estimate is *one minus* a sum of squares, so it is bounded
 above by 1 and unbounded below (measured -0.59 on Sobol-G at
 ``base_n = 32``); only the total order is a bare sum of squares and
-therefore non-negative. ``ST`` cannot go negative; ``S1`` can.
+therefore non-negative. So for Jansen, and for the default pairing that
+borrows Jansen's total order, ``ST`` cannot go negative but ``S1`` can.
+The other schemes do not even have that: see the list below.
 
 jaxgsa's measurements agree, on Sobol-G with 40 seeds at
 ``base_n`` = 64 / 256 / 1024 / 4096: the default ``saltelli-jansen``
@@ -268,9 +270,12 @@ def _jansen(A: Array, AB: Array, B: Array) -> tuple[Array, Array]:
     """Jansen (1999) for both orders.
 
     Both numerators are mean squared differences. That makes the total
-    order non-negative and, unlike the first-order estimators, exactly
-    unbiased: ``E[(A - AB_j)^2] / 2 = V_Tj``, so an inert input reads
-    ``ST = 0`` (measured 40/40 out of 40 runs on Sobol-G). First order is
+    order non-negative, and its numerator is unbiased for ``V_Tj``:
+    ``E[(A - AB_j)^2] / 2 = V_Tj``. An inert input reads ``ST = 0``
+    exactly, not merely on average, because the model then returns the same
+    value for ``A`` and for ``AB_j``, so every squared difference is zero.
+    (The reported index divides that numerator by an estimated variance, so
+    the ratio itself is not exactly unbiased.) First order is
     *one minus* such a term, so it is bounded above by 1 and can still
     come out negative::
 

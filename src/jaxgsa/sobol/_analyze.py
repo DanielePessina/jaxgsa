@@ -165,9 +165,19 @@ def _symmetrize_s2(S2: Array) -> Array:
     index, and the two triangles differ only by Monte Carlo noise, not
     floating-point drift: on Ishigami at ``base_n = 256`` the mean absolute
     gap is 0.026. Averaging the two is a deliberate departure from SALib,
-    which reports the upper triangle alone; it cuts S2 RMSE 5-16% for free
-    (measured in ``scratchpad/fix/sobol/repro_s2_symmetrise.py``), at the
-    cost of matching SALib's output only up to that noise, not bit for bit.
+    which reports the upper triangle alone. The cost is that S2 matches
+    SALib only up to that noise, not bit for bit.
+
+    Averaging usually lowers the error, but it is not a guarantee. Measured
+    on Ishigami over 200 seeds, against the analytic S2, over all three
+    parameter pairs: RMSE falls 25 per cent at ``base_n = 64`` and 13 per
+    cent at ``base_n = 1024``, and rises 9 per cent at ``base_n = 256``.
+    The rise comes from one pair whose lower-triangle estimate happened to
+    be three times noisier than its upper one at that design size, which
+    the scrambled Sobol' sequence can do. Averaging two estimates of
+    unequal spread can beat neither of them. It is still the better default:
+    the caller cannot know which triangle is the lucky one, and picking the
+    upper one always, as SALib does, is a coin flip.
 
     Args:
         S2: The kernel's raw ``(D, D)``-trailing output, both triangles

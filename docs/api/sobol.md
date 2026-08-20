@@ -64,22 +64,30 @@ Drop `verbose=False` to get the printed run summary described in the
 `S2` is symmetric with a NaN diagonal. `S2[j, k]` and `S2[k, j]` are two
 independent Monte Carlo estimates of the same pairwise index, so jaxgsa
 reports their average; the two differ by sampling noise, not
-floating-point drift, and averaging cuts `S2`'s RMSE by 5-16% (measured on
-Ishigami). This is a deliberate departure from SALib, which reports only
-the upper triangle. A parameter has no pairwise interaction with itself,
-and the diagonal is NaN so that reads louder than a zero would.
+floating-point drift. Averaging usually lowers the error, but not always.
+Measured on Ishigami over 200 seeds and all three parameter pairs, the
+RMSE falls 25% at `base_n=64` and 13% at `base_n=1024`, and rises 9% at
+`base_n=256`, where one pair drew a lower-triangle estimate three times
+noisier than its upper one. Averaging is still the better default, because
+you cannot tell in advance which triangle is the lucky one. This is a
+deliberate departure from SALib, which reports only the upper triangle. A
+parameter has no pairwise interaction with itself, and the diagonal is NaN
+so that reads louder than a zero would.
 
 Every result supports `to_dataset(time_coords=None)` for a labeled xarray
 export.
 
 The bootstrap resamples base points as if they were an i.i.d. sample. A
-scrambled Sobol' design converges faster than that, so the interval is
-conservative in a way that is not free of cost: measured coverage of the
-95% interval on an exact-zero index (Ishigami's `S1` for `x3`) is
-90.7-91.5% at `base_n=256` (`"quantile"`), 92.7% (`"gaussian"`), and the
-bootstrap standard deviation runs 3.3x the true seed-to-seed spread at
-`base_n=2048`; `"azzini-rosati"` covers 96-97% at `base_n=256`. This is the
-only interval in the package that was measured for coverage.
+scrambled Sobol' design converges faster than that, so the interval does
+not describe the true spread. It is too narrow at a small design and far
+too wide at a large one. Measured coverage of the 95% interval on an
+exact-zero index (Ishigami's `S1` for `x3`) is 90.7-91.5% at `base_n=256`
+(`"quantile"`) and 92.7-93.0% (`"gaussian"`), so the interval under-covers
+there. At `base_n=2048` the bootstrap standard deviation runs 3.2x the
+true seed-to-seed spread and coverage reaches 100%. `"azzini-rosati"`
+covers 96-97% at `base_n=256`. Read the interval as a rough guide, not as
+a calibrated 95% statement. This is the only interval in the package that
+was measured for coverage.
 
 ## jaxgsa.sobol.indices()
 

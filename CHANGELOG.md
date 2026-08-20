@@ -749,10 +749,18 @@ removals, and the few changes that move reported values.
   pairwise index. The previous code kept the upper triangle and mirrored it,
   discarding the lower triangle's estimate. The two differ by sampling
   noise, not floating-point drift (mean absolute gap 0.026 on Ishigami at
-  `base_n=256`), and averaging them cuts `S2`'s RMSE by 5-16% (measured on
-  Ishigami). This is a deliberate departure from SALib, which reports the
-  upper triangle alone, so `S2` no longer matches SALib bit for bit, only up
-  to that same noise.
+  `base_n=256`). Averaging them usually lowers the error but does not always:
+  measured on Ishigami over 200 seeds and all three parameter pairs, the RMSE
+  falls 25% at `base_n=64` and 13% at `base_n=1024`, and rises 9% at
+  `base_n=256`, where one pair's lower-triangle estimate happened to be three
+  times noisier than its upper one. Averaging is still the better default,
+  because a caller cannot tell which triangle is the lucky one. This is a
+  deliberate departure from SALib, which reports the upper triangle alone, so
+  `S2` no longer matches SALib bit for bit, only up to that same noise.
+  `S2_conf` moves too: the bootstrap now averages the two triangles of every
+  draw before it reads an endpoint, so the interval describes the same
+  averaged quantity the point estimate reports. It used to read its endpoints
+  from the raw draws and average afterwards.
 
 - **Sobol standardizes the outputs, always, and this fixes real numbers.**
   The Sobol'-Mauntz first-order estimator and every second-order estimator
