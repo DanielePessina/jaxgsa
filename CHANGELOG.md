@@ -1069,7 +1069,14 @@ removals, and the few changes that move reported values.
   parameters, leaving up to a +45% bias in the multivariate index against an
   exact-EMD oracle. `epsilon` is now relative to `V`, the index's own
   `2*tr(Cov)` normaliser. Convergence needs more iterations at the same
-  `epsilon`, so the `max_iter` default rises from 1000 to 2000. Every
+  `epsilon`, so the `max_iter` default rises from 1000 to 2000 and the
+  `epsilon` default rises from 0.01 to 0.03. Against POT's exact `emd2` on
+  Ishigami (N=1000, 10 classes) the pair reads 7.3 per cent high, against 45
+  per cent before; 0.01 would read 2.4 per cent high but leaves a third of
+  the solves at the iteration cap on an ordinary run, and four times slower.
+  Because one `V` scales every cost, the residual bias is close to uniform
+  across parameters, so it shifts the indices together and leaves their
+  ranking and the `above_dummy` comparison alone. Every
   `multivariate`/`trajectory`-mode `ot`, `advective`, `diffusive`, `ot_dummy`
   and `above_dummy` value moves.
 

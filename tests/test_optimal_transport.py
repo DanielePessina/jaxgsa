@@ -455,6 +455,7 @@ class TestOTAnalytic:
 
 
 class TestOTPointCloud:
+    @pytest.mark.slow
     def test_multivariate_decomposition_sums_to_total(self, multi_output_data):
         X, Y2, _ = multi_output_data
         result = analyze(ishigami.PROBLEM, X, Y2, mode="multivariate", n_partitions=10)
@@ -479,6 +480,7 @@ class TestOTPointCloud:
         assert np.all(joint_ot > sep_ot - 1e-4)
         np.testing.assert_allclose(joint_ot, sep_ot, atol=0.12)
 
+    @pytest.mark.slow
     def test_standardize_outputs_matters_for_mismatched_scales(self, multi_output_data):
         X, Y2, _ = multi_output_data
         Y_scaled = Y2.at[:, 1].multiply(1e4)
@@ -586,6 +588,7 @@ class TestOTBootstrap:
         assert r1.ot_conf is not None and r2.ot_conf is not None
         assert not np.array_equal(np.asarray(r1.ot_conf), np.asarray(r2.ot_conf))
 
+    @pytest.mark.slow
     def test_multivariate_bootstrap(self, multi_output_data):
         X, Y2, _ = multi_output_data
         result = analyze(
@@ -1193,6 +1196,7 @@ class TestS1AndAboveDummy:
         assert above[0] > 0.1
         assert above[1] > 0.1
 
+    @pytest.mark.slow
     def test_above_dummy_matches_ots_shape_in_trajectory_mode(self, multi_output_data):
         X, Y2, Y3 = multi_output_data
         result = analyze(

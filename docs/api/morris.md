@@ -194,6 +194,18 @@ sobol_result = jaxgsa.sobol.analyze(samples, Y)
 morris_result = jaxgsa.morris.analyze(samples.to_morris(), Y)
 ```
 
+### Why a lossy conversion warns twice
+
+Not every Saltelli block carries a measurable step for every parameter. When
+`to_morris()` has to drop blocks, you see two warnings with the same count: one
+from the conversion and one from every `analyze()` of the converted design.
+
+Both are deliberate. The conversion warning names the tolerance and the reason
+a block failed it, which the design itself does not store. The analysis warning
+is the one that survives `save()` and `load()`, so a design read back from disk
+still tells you it is lossy. Reporting it once would mean putting per-design
+state on `MorrisSamples`, which is frozen.
+
 Related docs:
 
 - [Morris Example](/examples/morris)

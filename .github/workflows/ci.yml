@@ -5,6 +5,9 @@ on:
     branches: [master]
   pull_request:
   workflow_dispatch:
+  schedule:
+    # 03:17 UTC daily, for the `slow` tests that pytest deselects by default.
+    - cron: "17 3 * * *"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -182,3 +185,26 @@ jobs:
             --baseline scripts/baseline/baseline-1.0.0.json \
             --current /tmp/head.json \
             --allow-schema-change
+
+  # The joint-mode optimal-transport tests that run every Sinkhorn solve at
+  # full sample size. `addopts = "-m 'not slow'"` in pyproject.toml keeps them
+  # out of every ordinary run, because together they cost more than the rest
+  # of the suite. They still have to run somewhere, so they run here: nightly,
+  # and on demand through workflow_dispatch.
+  slow-tests:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install project and dev dependencies
+        run: uv sync --extra dev
+
+      - name: Run the deselected slow tests
+        run: uv run pytest -m slow -v

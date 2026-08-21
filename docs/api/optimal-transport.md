@@ -60,7 +60,7 @@ jaxgsa.optimal_transport.analyze
   timing:
     estimator (includes compile on the first call): 0.9642 s
     mode: univariate
-    epsilon: 0.01
+    epsilon: 0.03
     slice_chunk_size: auto (resolved from the memory budget)
   results: top 3 of 3 parameters by ot
     1. x2  ot=0.2775
@@ -187,7 +187,7 @@ point-cloud modes only.
 | --- | --- | --- |
 | `n_partitions` | `None` | Equal-frequency conditioning classes per continuous parameter. More classes localize the conditioning and cut the discretization bias, but leave fewer samples per class and raise the noise. About 25 is customary at `N >= 2500`. `None` selects `min(25, N // 2)`. A passed value is validated against `[2, N // 2]`. Categorical parameters ignore it and use one class per level, and so does the dummy floor each of them is measured against. If every parameter is categorical, nothing uses the value and a `JaxgsaWarning` says it is ignored. |
 | `standardize_outputs` | `True` | Joint modes only. Divides each output column by its standard deviation before the transport cost is built, so no single output dominates the joint distance through its units. In `"trajectory"` mode a "column" is one time step, so this standardizes every time step to unit variance on its own; the default therefore never computes a plain-units L2 trajectory transport, because it discards the trajectory's own relative shape over time. Pass `False` for that. Ignored in `"univariate"` mode, where each column is normalized by its own variance anyway. |
-| `epsilon` | `0.01` | Joint modes only. Entropic regularization strength, relative to `V`, the index's own normalizer (`2 * Var` or `2 * tr(Cov)`) -- the same fixed scale every parameter and class shares, so the regularization is comparable across them. Smaller values approach exact transport and need more iterations. It also sets the entropic part of the dummy floor, so lowering it lowers `ot_dummy`. |
+| `epsilon` | `0.03` | Joint modes only. Entropic regularization strength, relative to `V`, the index's own normalizer (`2 * Var` or `2 * tr(Cov)`) -- the same fixed scale every parameter and class shares, so the regularization is comparable across them. Smaller values approach exact transport and need more iterations. Against POT's exact `emd2` on Ishigami (N=1000, 10 classes) the default reads 7.3 per cent high, `0.02` reads 4.8 per cent high, `0.05` reads 12.1 per cent high; because one `V` scales every cost, the offset is close to uniform across parameters and does not change their ranking. It also sets the entropic part of the dummy floor, so lowering it lowers `ot_dummy`. |
 | `max_iter` | `2000` | Joint modes only. Sinkhorn iteration cap per solve. |
 | `tol` | `None` | Joint modes only. Stopping tolerance on the L1 target-marginal violation. `None` selects `1e-9` in float64 and `1e-6` in float32, where anything tighter is unresolvable. One warning is emitted if any solve fails to converge. In float32 the residual can stop falling a little above `1e-6` for a large cloud, because it is a sum over `N` rounded terms. The cost is converged there, so raising `max_iter` does not clear the warning; raise `tol` or enable float64 instead. |
 | `dummy` | `False` | See above. Requires `key`. |
