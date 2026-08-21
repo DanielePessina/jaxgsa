@@ -527,7 +527,7 @@ def _warn_single_precision() -> None:
     small. Cancellation therefore eats the leading digits, and what survives
     is set by the summation order. Reordering the sample rows -- a change that
     cannot alter the true value -- moves a measured index. On Ishigami with
-    ``N = 2048`` the shift is ``2e-4`` relative in float32 against ``2e-13``
+    ``N = 2048`` the shift is ``4e-4`` relative in float32 against ``8e-13``
     in float64, and it grows with ``N`` because the sums do. That is the same
     size as the gap HSIC is often asked to resolve between two weak
     parameters.

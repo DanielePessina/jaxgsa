@@ -147,7 +147,7 @@ removals, and the few changes that move reported values.
   |---|---|---|
   | `sobol` | `prenormalize: bool = False` | removed; the standardization always runs |
   | `efast` | `prenormalize: bool = False` | removed; it was a measured no-op (6e-16) |
-  | `hdmr` | `prenormalize: bool = False` | removed; it was a measured no-op (1e-6) |
+  | `hdmr` | `prenormalize: bool = False` | removed; a no-op only after the backfit stop rule below became relative — see "Fixed" |
   | `morris` | `prenormalize: bool = False` | renamed `standardize_outputs` |
   | `dgsm` | — | new `standardize_outputs: bool = False` |
 
@@ -194,8 +194,8 @@ removals, and the few changes that move reported values.
   and `dgsm.indices` used to run `jax.jacrev` always. They now run
   `jax.jacfwd` when the output slices outnumber the inputs (`T*K > D`) and
   `jax.jacrev` otherwise. There is no keyword: the right mode follows from
-  two numbers the library already has. This closes ADR 0005 and makes a
-  time-series DGSM call cheaper in proportion to `T*K / D`.
+  two numbers the library already has. This makes a time-series DGSM call
+  cheaper in proportion to `T*K / D`.
 
   The two modes compute the same Jacobian. Only the order of the float
   arithmetic differs, so where the mode changed (`T*K > D`), `sigma` and
@@ -552,8 +552,8 @@ removals, and the few changes that move reported values.
   used to justify `estimator="saltelli-jansen"` with historical continuity.
   The recorded reasons are now that Jansen's total-order estimator is a mean
   of squares, so `ST` can never go negative, and that it matches SALib's
-  default pairing, so the two libraries agree out of the box. Recorded in
-  ADR 0021. The default itself does not change.
+  default pairing, so the two libraries agree out of the box. The default
+  itself does not change.
 
 - **Hygiene sweep for 1.0.** No number moves and no schema changes. In short:
 
@@ -574,8 +574,10 @@ removals, and the few changes that move reported values.
     estimator trio and its legacy test module, an unused result-axes
     variant, and two never-used parameters.
   - Stale docstrings and comments now describe the current code, and the
-    remaining test modules without per-test tier docstrings carry
-    module-level oracle-tier lines (ADR 0001).
+    remaining test modules without per-test tier docstrings carry a
+    module-level oracle-tier line instead (T0 closed form, T1 recorded
+    external literal, T2 external library at test time, T4 internal
+    consistency only).
 
 - **eFAST and HSIC report no bootstrap interval, and the docs now say why.**
   eFAST has one search curve per parameter, so there is nothing to resample —
@@ -585,8 +587,8 @@ removals, and the few changes that move reported values.
   onto the kernel diagonal, where the kernel is exactly 1, biasing the
   resampled index upward by construction.
 
-- **`CONTEXT.md`** states the vocabulary the interface is frozen against, and
-  `tests/test_vocabulary.py` reads it back off the method registry. A
+- **One vocabulary for the whole interface**, enforced by
+  `tests/test_vocabulary.py` reading it back off the method registry. A
   signature that drifts from the specification now fails a test rather than
   shipping. Two rules the code does not satisfy yet are recorded as strict
   xfails, so closing the gap forces the exemption to be deleted.
@@ -806,7 +808,7 @@ removals, and the few changes that move reported values.
 
 - **HSIC now warns in single precision.** Its V-statistic is a difference of
   three same-magnitude sums, so float32 keeps three or four digits and the
-  index moves with row order — measured at 6e-4 relative against 2.5e-12 in
+  index moves with row order — measured at 4e-4 relative against 8e-13 in
   float64. VKOGA was previously the only method in the library that checked
   the x64 flag.
 
@@ -947,6 +949,155 @@ removals, and the few changes that move reported values.
   count and receives exactly it, so nothing is missing. Carrying the count
   forward made `morris.analyze` warn about a "requested" total the user had
   never asked for.
+
+- **`jax.jit(hdmr.indices)` used to poison every later `hdmr` call at the same
+  row count.** `_compute_f_crits` cached its result with `functools.lru_cache`
+  and returned a `jnp.array`. Under a `jit` trace that array is a tracer, and
+  the cache kept it: the next call from outside that trace raised
+  `UnexpectedTracerError`. The cached function now returns a plain tuple, and
+  the caller converts it to an array itself. No number changes.
+
+- **eFAST raised `OverflowError` for `n_per_curve >= 46341` in the default
+  float32 config.** The kernel divided by the Python integer `N**2` before
+  taking the ratio; JAX passes that literal into the jitted call as `int32`,
+  and `46341**2` overflows it. It now divides by `N` before squaring, which
+  is the same ratio and cannot overflow. `S1` and `ST` move by rounding only
+  (float32 reassociation, on the order of 1e-8) at every `n_per_curve`,
+  including sizes well under the old crash threshold.
+
+- **VKOGA's `S_TU` reused one inner Monte Carlo block for every outer point.**
+  The estimator averages an inner-conditional variance over outer draws, so a
+  block shared across outer points is a *bias* that raising `n_outer` cannot
+  reduce — the opposite of the advice `analyze`'s docstring gave. Each outer
+  point now gets its own stratified inner block. Measured on an exact model
+  with no surrogate error, the run-to-run standard deviation of `S_TU` drops
+  by one to two orders of magnitude at the default sizes (0.044 → 0.0023 on a
+  quadratic term, 0.317 → 0.022 on a cubic one). `_total_correlated`'s shared
+  block is untouched: there the shared block is a variance of means, which is
+  correct.
+
+- **VKOGA's additive components fit a fixed Legendre basis regardless of the
+  marginal.** Legendre in `u = Φ(x)` is not orthonormal for a Gaussian
+  marginal in `z`, so `S_C` and `S_IU` read nonzero for models that are
+  provably additive or independent, with no warning. Each component now fits
+  in a basis orthonormal under its own marginal — probabilists' Hermite in
+  `z` for an untruncated Gaussian column, Legendre in `u` otherwise, reusing
+  the basis machinery `pce` already has. `S_U`, `S_C` and `S_IU` move for any
+  problem with a Gaussian marginal; `S_TC` and `S_TU` do not.
+
+- **VKOGA's cross-validation grid for `ridge` started an order of magnitude
+  below the numerical noise floor.** `_RIDGE_GRID` started at `1e-16`, but the
+  kernel matrix already carries a `1e-8`-relative jitter (about `2.2e-6` at
+  `n = 1024`), so six of the ten grid points were numerically indistinguishable
+  and a cross-validation pick among them reported whichever tied first.
+  `VKOGAResult.ridge` was therefore not always the regularisation actually in
+  force. The grid now starts at the jitter scale. Indices do not move; the
+  reported `ridge` can pick a different (still tied) grid point.
+
+- **HDMR's backfitting stop rule used an absolute threshold, so it stopped
+  after one sweep on a correlated problem with a small or large output
+  scale, or `m >= 4`.** The coefficients it compares scale with `Y` and with
+  `m**-3`, so `varmax > 1e-3` is not a fixed bar. The rule is now relative:
+  `varmax > 1e-3 * max(var_new)`. Independent-input fits barely move (backfitting
+  only does work when dimensions couple); a correlated fit that used to stop
+  early can move a lot — the reviewed case moved `x1`'s `S1` from a
+  stopped-early 0.014-0.066 to a converged ~0.104, more than 5x. This also
+  means the earlier claim that dropping `prenormalize` from `hdmr` was "a
+  measured no-op (1e-6)" held only for the independent, `O(1)`-scaled test
+  problem it was measured on: with the old absolute stop rule, a correlated
+  or differently-scaled problem's backfit could stop at a different sweep
+  depending on `Y`'s scale, so `prenormalize` was not provably a no-op there.
+  With the relative rule above, it now is, for every case.
+
+- **HDMR's `S` did not equal `Sa + Sb`, so `ST` and `shapley()` summed
+  different quantities.** `S` was `Cov(f_u, Y) / Var(Y)`, referenced against
+  the raw output; `Sa + Sb` is the ANCOVA split referenced against the fitted
+  expansion. Li et al. (2010) define `S_u = Cov(f_u, f_hat) / Var(f_hat)`,
+  which makes the identity exact by construction. `S` now reads that way.
+  `S` and `ST` move: about 6e-3 per term on independent Ishigami, up to 4e-2
+  on a correlated one. This is a deliberate departure from SALib's `ancova`,
+  which references `Y`; the `S` docstring says so.
+
+- **PCE's zero-variance guard tested `var == 0`, which a constant float32
+  output almost never satisfies exactly.** For `Y = full(N, 0.1)`, the mean
+  rounds and the measured variance is around 1e-16, not bit-exact zero, so
+  `sobol` and `hdmr` returned all-`NaN` silently and `pce.analyze` returned a
+  plausible-looking finite `S1` with no warning. The guard now tests
+  constancy directly (`flat.max(0) == flat.min(0)`), which is exact and
+  traceable. A constant-output slice now reads `NaN` with a warning
+  everywhere, including `pce`.
+
+- **PCE accepted an underdetermined fit silently.** `_auto_order` never
+  dropped below order 1 (`D + 1` terms), and `fit_ratio > 1` passed
+  validation, so `N <= D` rows produced a full-rank-looking answer with
+  `explained_variance = 1.0` and no warning. `fit_ratio` is now bounded to
+  `<= 1`, and both `analyze` and `indices` raise `ValueError` when the number
+  of order-1 terms exceeds `int(fit_ratio * N)`.
+
+- **PCE's truncated-Gaussian gate kept a Hermite basis past the width it was
+  calibrated for.** The gate compared a truncation to 5 standard deviations,
+  but the orthonormality error of the Hermite basis at that width is already
+  1.5e-3 to 2.0e-1 depending on the order — nothing a caller could see, since
+  `explained_variance` and `loo_rmse` do not detect a basis mismatch. The gate
+  is now 7 standard deviations, where the same error is 4e-8 to 1.6e-4. A
+  truncated Gaussian between 5 and 7 sigma now routes to Legendre after CDF
+  mapping instead of Hermite; `S1`/`ST`/`S2` move for such a problem only.
+
+- **Optimal transport's Sinkhorn `epsilon` was relative to each class's own
+  maximum cost**, which is outlier-driven and not comparable across
+  parameters, leaving up to a +45% bias in the multivariate index against an
+  exact-EMD oracle. `epsilon` is now relative to `V`, the index's own
+  `2*tr(Cov)` normaliser. Convergence needs more iterations at the same
+  `epsilon`, so the `max_iter` default rises from 1000 to 2000. Every
+  `multivariate`/`trajectory`-mode `ot`, `advective`, `diffusive`, `ot_dummy`
+  and `above_dummy` value moves.
+
+- **`above_dummy` compared a categorical parameter against a continuous
+  dummy's floor.** The finite-sample permutation floor scales with the
+  inverse of the class size, so a 3-level categorical column was measured
+  against a 25-class continuous floor roughly 8x too strict, hiding a real
+  effect. Each categorical parameter now gets its own permutation dummy built
+  from that column's own level counts. `ot_dummy` and `above_dummy` move for
+  any analysis with `dummy=True` on a problem with at least one categorical
+  parameter; `ot_dummy`'s shape also changes, from one value per output slice
+  to one value per parameter per output slice (`FieldSpec` `"slice"` ->
+  `"param"`).
+
+- **`Problem` and the marginal spec dataclasses accepted non-finite bounds.**
+  `Problem(("x",), ((0, inf),))`, `GaussianSpec(nan, 1)` and similar all
+  passed validation, and the resulting non-finite sample surfaced later as an
+  unrelated-looking error deep in whichever method ran on it. The three
+  `__post_init__` methods now check `math.isfinite` directly, so the error
+  points at the parameter that is actually wrong.
+
+- **`shapley(include_correlative=True)` is renamed on the result and in the
+  docs to what it computes: an ANCOVA variance allocation, not the
+  conditional-variance Shapley effect.** Exact linear-Gaussian Shapley (Owen
+  2014; Owen & Prieur 2017) and the ANCOVA allocation disagree — measured
+  [0.339, 0.661] against a reported [0.284, 0.716] on a 2-parameter,
+  `rho=0.5` case. `ShapleyResult`, `HDMRResult.shapley()` and
+  `docs/api/shapley.md` now say so. Numbers do not change.
+  `analyze(backend="hdmr")` on a correlated problem with
+  `include_correlative=False` now warns that the reported shares are
+  structural-only, renormalised by `sum(Sa)`.
+
+- **Every result class is now frozen.** `SobolResult`, `MorrisResult`,
+  `EFASTResult`, `DGSMResult`, `HDMRResult`, `PCEResult`, `DeltaResult`,
+  `PAWNResult`, `HSICResult`, `KucherenkoResult`, `VKOGAResult`,
+  `ShapleyResult` and `OTResult` all take `@dataclass(frozen=True)`. Before
+  1.0, only `KucherenkoResult` did: `result.S1 = None` silently succeeded on
+  every other result, and `result.space = "physical"` followed by
+  `to_physical_units()` raised "already in physical units" instead of naming
+  the field that was hand-edited. 1.0 freezes the public interface, so this
+  is the last chance to close the gap without a breaking change later.
+
+- **`optimal_transport`'s partition grouping always returns `(R, Dg, Mg)`
+  counts.** `_replicate_slice`, which rebuilt a replicate axis by hand at the
+  one call site that needed it, is gone; the partition builder now
+  guarantees the shape every caller wants. The `dm // M` clamp used to read
+  `jnp.minimum(dm // M, G - 1)`, a defensive clamp against a group count `G`
+  that could only accidentally be smaller than `Dg`; `G` is always `Dg` now,
+  so the clamp is gone too. No number moves.
 
 ## 0.8.0
 
