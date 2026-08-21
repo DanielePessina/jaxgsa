@@ -1,8 +1,8 @@
 """Verify Sobol indices against analytical benchmark values.
 
-Each test compares jaxgsa-computed indices to the closed-form analytical
-solutions for the Ishigami, linear additive, and Sobol G-function
-benchmarks.
+Tier T0 (closed form) throughout. Each test compares jaxgsa-computed indices
+to the closed-form analytical solutions for the Ishigami, linear additive,
+Sobol G-function, and Oakley-O'Hagan benchmarks.
 """
 
 import jax.numpy as jnp

@@ -12,7 +12,7 @@ from jaxgsa._core.validation import _dims_and_coords
 from jaxgsa.problem import Problem
 
 
-@dataclass(repr=False)
+@dataclass(frozen=True, repr=False)
 class OTResult(SchemaResult):
     """Optimal-transport sensitivity analysis results.
 

@@ -266,6 +266,27 @@ class TestInputValidation:
         with pytest.raises(ValueError, match="fit_ratio"):
             pce.indices(problem, X, Y, fit_ratio=2.0)
 
+    def test_constant_output_with_float32_rounding_noise_still_reads_as_zero_variance(self):
+        """M1: a constant Y whose naive sample variance is not bit-exact zero still warns.
+
+        The old guard tested ``var == 0``, which almost never holds for a
+        constant float32 output because the mean itself rounds.
+        ``Y = full(N, 0.1)`` has a naive sample variance of about 2e-16, not
+        zero, and used to return a plausible-looking finite S1 with no
+        warning instead of NaN.
+        """
+        problem = linear.PROBLEM
+        rng = np.random.default_rng(0)
+        X = jnp.asarray(rng.uniform(0.0, 1.0, size=(500, 3)))
+        Y = jnp.full(500, 0.1)
+        assert float(jnp.var(Y)) != 0.0, (
+            "the naive variance must be nonzero for this to test the fix"
+        )
+        with pytest.warns(UserWarning, match="zero variance"):
+            result = pce.analyze(problem, X, Y, verbose=False)
+        assert jnp.all(jnp.isnan(result.S1))
+        assert jnp.all(jnp.isnan(result.ST))
+
 
 # ---------------------------------------------------------------------------
 # 6. S2 matrix properties

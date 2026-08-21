@@ -465,6 +465,27 @@ def test_constant_y():
     assert jnp.all(jnp.isnan(result.ST))
 
 
+def test_constant_output_with_float32_rounding_noise_still_reads_as_zero_variance():
+    """A constant Y whose naive sample variance is not bit-exact zero still warns.
+
+    Regression for M1 (REVIEW-1.0.md): the old guard tested ``var == 0``,
+    which almost never holds for a constant float32 output because the mean
+    itself rounds. ``Y = full(N, 0.1)`` has a naive sample variance of about
+    2e-16, not zero, so this case would have slipped past the old guard.
+    """
+    N = 500
+    D = PROBLEM.num_vars
+    key = jax.random.PRNGKey(99)
+    bounds = jnp.array(PROBLEM.bounds)
+    X = jax.random.uniform(key, shape=(N, D), minval=bounds[:, 0], maxval=bounds[:, 1])
+    Y = jnp.full(N, 0.1)
+    assert float(jnp.var(Y)) != 0.0, "the naive variance must be nonzero for this to test the fix"
+    with pytest.warns(UserWarning, match="zero variance"):
+        result = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2)
+    assert jnp.all(jnp.isnan(result.Sa))
+    assert jnp.all(jnp.isnan(result.ST))
+
+
 def test_validation_errors():
     """Input validation should raise on bad inputs."""
     X = jnp.ones((100, 3))

@@ -460,3 +460,21 @@ def test_the_bootstrap_batches_slices_instead_of_looping_over_them(monkeypatch):
 
     assert widths == [4, 4], f"expected two equal-width chunks, the tail padded back, got {widths}"
     assert n_bootstrap == [8, 8], "every call must carry the whole resample batch"
+
+
+def test_constant_output_with_float32_rounding_noise_still_reads_as_zero_variance():
+    """A constant Y whose sample variance is not bit-exact zero still warns and returns NaN.
+
+    Regression for M1 (REVIEW-1.0.md): the guard used to test ``var == 0``,
+    which almost never holds for a constant float32 output because the mean
+    itself rounds. ``Y = full(N, 0.1)`` has a naive sample variance of about
+    2e-16, not zero, so this fixture would have slipped past the old guard
+    silently instead of warning.
+    """
+    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=256, base_n=64, seed=0, verbose=False)
+    Y = jnp.full(sr.n_runs, 0.1)
+    assert float(jnp.var(Y)) != 0.0, "the naive variance must be nonzero for this to test the fix"
+    with pytest.warns(UserWarning, match="zero variance"):
+        result = jaxgsa.sobol.analyze(sr, Y, verbose=False)
+    assert jnp.all(jnp.isnan(result.S1))
+    assert jnp.all(jnp.isnan(result.ST))

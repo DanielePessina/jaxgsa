@@ -9,7 +9,7 @@ from jaxgsa._core.result import CIInfo, FieldSpec, ResultSchema, SchemaResult
 from jaxgsa.problem import Problem
 
 
-@dataclass(repr=False)
+@dataclass(frozen=True, repr=False)
 class DGSMResult(SchemaResult):
     """Derivative-based global sensitivity measures and Sobol index bounds.
 

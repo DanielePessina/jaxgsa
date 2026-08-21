@@ -449,11 +449,31 @@ def test_unscrambled_latent_sample_skips_the_origin():
 
 
 def test_scrambled_latent_sample_unchanged_by_origin_skip():
-    """The scrambled path is a fixed-seed regression: no fast-forward there."""
+    """The scrambled path draws point 0, unlike the unscrambled path.
+
+    ``scramble=False`` skips the Sobol' sequence's all-zeros origin point
+    (:func:`test_unscrambled_latent_sample_skips_the_origin`, above) because
+    the probit would otherwise map it to a -7 sigma deviate. Scrambling
+    already displaces that point, so there is nothing to skip. This is a
+    fixed-seed regression (mismatch just detects the value changed, not why),
+    pinned as a literal rather than by recomputing the same scipy call the
+    source makes, so a rewrite of the source's own plumbing cannot make the
+    test agree with itself no matter what it computes.
+    """
     Z = latent_normal_sample(16, 3, seed=42, scramble=True)
-    unit = scipy.stats.qmc.Sobol(d=3, scramble=True, seed=42).random(16)
-    expected = scipy.stats.norm.ppf(np.clip(unit, 1e-12, 1.0 - 1e-12))
-    np.testing.assert_array_equal(Z, expected)
+    assert np.all(np.isfinite(Z))
+    expected_first_two_rows = np.array(
+        [
+            [-0.17375381, 0.8941081, 0.86475283],
+            [1.12551012, -0.15732484, -0.00317167],
+        ]
+    )
+    np.testing.assert_allclose(Z[:2], expected_first_two_rows, atol=1e-8)
+    # The unscrambled path's first two points are (0, 0, 0) (skipped, tested
+    # separately) then (0.5, 0.5, 0.5) -> the origin of latent space. Neither
+    # appears here: scrambling has already moved the sequence's low-discrepancy
+    # points away from those coordinates.
+    assert not np.allclose(Z[0], 0.0, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------

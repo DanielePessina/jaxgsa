@@ -1,4 +1,12 @@
-"""Tests for categorical (unordered discrete) input support."""
+"""Tests for categorical (unordered discrete) input support.
+
+Mostly Tier T4 (internal consistency): validation, sampling, persistence,
+the partition layer, and method gating check the library's own stated
+contract, not an external reference. The "OT + Borgonovo estimates" section
+is the exception -- it compares against a closed-form true value (Tier T0)
+built from balanced categorical levels with known offsets, with a tolerance
+wide enough for the estimator's own measured bias.
+"""
 
 import json
 import warnings
@@ -743,10 +751,11 @@ def test_ot_multivariate_mode_supports_categorical():
 
 
 def test_ot_dummy_baseline_works_with_categorical():
+    """M4: ot_dummy is per parameter now, so index each side the same way."""
     problem, X, Y = _mixed_data(n=2000)
     res = optimal_transport.analyze(problem, X, Y, dummy=True, key=jax.random.key(0))
     assert res.ot_dummy is not None
-    assert float(res.ot_dummy) < float(res.ot[1])
+    assert float(res.ot_dummy[1]) < float(res.ot[1])
 
 
 def _all_categorical_data(n=2000, seed=2):
@@ -787,8 +796,11 @@ def test_all_categorical_problem_default_n_partitions_is_silent():
     p, X, Y = _all_categorical_data()
     res = optimal_transport.analyze(p, X, Y)
     assert float(res.ot[0]) > 0.5
-    # With a dummy the passed value is used; out of range names the dummy.
-    with pytest.raises(ValueError, match="dummy baseline"):
+    # With a dummy the passed value is used; out of range names n_partitions.
+    # M4: no dummy reads n_partitions any more (each categorical column gets
+    # its own permutation floor), so the scope text this used to match is
+    # gone; the bound itself still applies.
+    with pytest.raises(ValueError, match="n_partitions"):
         optimal_transport.analyze(p, X, Y, n_partitions=10**9, dummy=True, key=jax.random.key(0))
     # The dummy default adapts to small N instead of raising over a bare 25.
     p_small, X_small, Y_small = _all_categorical_data(n=40, seed=5)

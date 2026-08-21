@@ -1,4 +1,9 @@
-"""Tests for the NPZ-only sampling persistence API (Sobol and Morris)."""
+"""Tests for the NPZ-only sampling persistence API (Sobol and Morris).
+
+Tier T4 (internal consistency) throughout: a save/load round trip has no
+external oracle to check against, only the claim that what comes back out
+equals what went in.
+"""
 
 import json
 

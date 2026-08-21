@@ -9,7 +9,7 @@ from jaxgsa._core.result import FieldSpec, ResultSchema, SchemaResult
 from jaxgsa.problem import Problem
 
 
-@dataclass(repr=False)
+@dataclass(frozen=True, repr=False)
 class EFASTResult(SchemaResult):
     """Extended FAST sensitivity analysis results.
 

@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from jaxgsa.shapley._result import ShapleyResult
 
 
-@dataclass(repr=False)
+@dataclass(frozen=True, repr=False)
 class VKOGAResult(SchemaResult, SurrogateResult):
     """Correlated variance-based sensitivity indices from a VKOGA surrogate.
 

@@ -215,6 +215,30 @@ def test_jit_of_jacfwd_of_the_inputs(case):
     assert np.isfinite(np.asarray(jac)).all()
     assert np.abs(np.asarray(jac)).max() > 0.0
 
+    # Finite and non-zero is not the same as correct: spot check a handful of
+    # entries against a central finite difference, which re-runs the whole
+    # backfitting fit at X +/- h and so exercises none of the autodiff path.
+    # A full-Jacobian check would refit the whole design 2 * N * D times,
+    # which is too slow here; a fixed, seeded sample of entries is cheap and
+    # deterministic. The F-test term selection makes this comparison
+    # genuinely discontinuous in float32 near a threshold crossing, so this
+    # step -- like every other gradient check in this file family -- runs
+    # under x64. Measured worst-case agreement on this chain is 2e-5.
+    step = 1e-4
+    rng = np.random.default_rng(0)
+    n_rows, n_cols = X.shape
+    sample_rows = rng.choice(n_rows, size=min(4, n_rows), replace=False)
+    with jax.enable_x64():
+        X64 = jnp.asarray(X, dtype=jnp.float64)
+        jac64 = np.asarray(jax.jacfwd(total_st)(X64))
+        for row in sample_rows:
+            for col in range(n_cols):
+                delta = jnp.zeros_like(X64).at[row, col].set(step)
+                plus = float(total_st(X64 + delta))
+                minus = float(total_st(X64 - delta))
+                fd = (plus - minus) / (2.0 * step)
+                np.testing.assert_allclose(jac64[row, col], fd, rtol=0, atol=2e-5)
+
 
 def test_reverse_mode_is_refused_by_the_backfitting_loop():
     """Tier T4: ``jacrev`` fails, and it fails for the documented reason.

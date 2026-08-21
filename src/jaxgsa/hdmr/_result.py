@@ -32,7 +32,7 @@ class _HDMRFit(TypedDict):
     maxorder: int
 
 
-@dataclass(repr=False)
+@dataclass(frozen=True, repr=False)
 class HDMRResult(SchemaResult, SurrogateResult):
     """RS-HDMR (Random Sampling High-Dimensional Model Representation) results.
 

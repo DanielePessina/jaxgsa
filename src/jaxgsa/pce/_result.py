@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from jaxgsa.shapley import ShapleyResult
 
 
-@dataclass(repr=False)
+@dataclass(frozen=True, repr=False)
 class PCEResult(SchemaResult, SurrogateResult):
     """Polynomial chaos expansion sensitivity analysis results.
 
