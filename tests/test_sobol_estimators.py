@@ -209,7 +209,7 @@ class TestSALibParity:
         np.testing.assert_allclose(np.asarray(ST), expected["ST"], atol=1e-6)
 
 
-# Recorded from OpenTURNS 1.27 by
+# Recorded from OpenTURNS 1.27 on 2026-08-21 by
 # ``scripts/oracles/openturns_sobol_estimators.py``. Read that script for the
 # convention differences, which set the tolerances below.
 OPENTURNS_ISHIGAMI = {

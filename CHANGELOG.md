@@ -1064,6 +1064,13 @@ removals, and the few changes that move reported values.
   baseline at up to 6e-6 absolute on a coefficient and 9e-7 on an index.
   `shapley(backend="pce")` carries the same shift through.
 
+- **`HDMRResult.shapley()` was silent on a correlated problem with
+  `include_correlative=False`**, while `jaxgsa.shapley.analyze` warned about
+  the same thing. That path allocates the structural ANCOVA share `Sa` only,
+  renormalized to sum to 1, and drops the correlative share. The warning now
+  lives on `HDMRResult.shapley()`, so both routes raise it, and each raises it
+  once.
+
 - **Optimal transport's Sinkhorn `epsilon` was relative to each class's own
   maximum cost**, which is outlier-driven and not comparable across
   parameters, leaving up to a +45% bias in the multivariate index against an

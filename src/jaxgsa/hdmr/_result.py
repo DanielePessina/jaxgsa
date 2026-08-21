@@ -1,6 +1,7 @@
 """Defines the HDMRResult dataclass for RS-HDMR sensitivity analysis results."""
 
 import itertools
+import warnings
 from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, TypedDict
@@ -11,6 +12,7 @@ from jax import Array
 from jaxgsa._core.invalid import InvalidReport
 from jaxgsa._core.result import CIInfo, FieldSpec, ResultSchema, SchemaResult
 from jaxgsa._core.surrogate import SurrogateResult, _PredictPlan
+from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.problem import Problem
 
 if TYPE_CHECKING:
@@ -244,8 +246,9 @@ class HDMRResult(SchemaResult, SurrogateResult):
                 contribution ``Sa + Sb`` (structural plus correlative
                 fold-in). That keeps the allocation meaningful under
                 correlated inputs. Defaults to ``False``, which allocates the
-                structural part ``Sa`` only and is silent about the
-                correlative share it drops.
+                structural part ``Sa`` only and warns when the problem
+                declares a correlation, because the correlative share it
+                drops is then not zero.
 
         Returns:
             ShapleyResult with per-parameter effects ``Sh`` (plus ``S1`` and
@@ -253,12 +256,29 @@ class HDMRResult(SchemaResult, SurrogateResult):
 
         Raises:
             ValueError: If this result carries no fitted surrogate state.
+
+        Warns:
+            JaxgsaWarning: If the problem declares a correlation and
+                ``include_correlative`` is ``False``.
         """
         from jaxgsa.shapley._engine import _shapley_result_from_variances, build_membership
 
         fit = self._fit
         if fit is None:
             raise ValueError("HDMRResult does not contain fitted surrogate state")
+        if self.problem.has_correlated_inputs and not include_correlative:
+            warnings.warn(
+                "HDMRResult.shapley: include_correlative=False on a "
+                "correlated problem allocates the structural ANCOVA share "
+                "(Sa) only, renormalized to sum to 1. That drops the "
+                "correlative share (Sb) the correlation carries, so Sh reads "
+                "too high for parameters whose correlation opposes their "
+                "direct effect and too low otherwise. Pass "
+                "include_correlative=True to fold the correlative share back "
+                "in.",
+                stacklevel=2,
+                category=JaxgsaWarning,
+            )
         partial = self.Sa + self.Sb if include_correlative else self.Sa
         subsets: list[tuple[int, ...]] = [(i,) for i in range(self.problem.num_vars)]
         subsets.extend(self._c2)

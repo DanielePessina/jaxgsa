@@ -11,7 +11,6 @@ convenience over those result methods.
 from __future__ import annotations
 
 import dataclasses
-import warnings
 from typing import TYPE_CHECKING, Any, Literal
 
 import jax
@@ -31,7 +30,6 @@ from jaxgsa._core.entry import (
 )
 from jaxgsa._core.invalid import InvalidReport, OnInvalid
 from jaxgsa._core.validation import _correlation_tolerant_methods, _prepare_Y
-from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.shapley._engine import (
     _normalize_partial_variances,
     _warn_pce_overfit,
@@ -423,9 +421,9 @@ def analyze(
         JaxgsaWarning: If ``backend="hdmr"``, ``problem`` declares a
             correlation, and ``include_correlative=False``. That combination
             allocates the structural share ``Sa`` only, renormalized to sum
-            to 1, and silently drops the correlative share the correlation
-            carries. ``HDMRResult.shapley()`` does not warn about this on its
-            own; only the wrapper does.
+            to 1, and drops the correlative share the correlation carries.
+            The warning comes from :meth:`HDMRResult.shapley`, so the direct
+            route raises it too.
     """
     from jaxgsa.shapley import SPEC
 
@@ -471,19 +469,9 @@ def analyze(
     elif backend == "hdmr":
         from jaxgsa.hdmr import analyze as analyze_hdmr
 
-        if problem.has_correlated_inputs and not include_correlative:
-            warnings.warn(
-                "jaxgsa.shapley.analyze: backend='hdmr' with a correlated "
-                "problem and include_correlative=False allocates the "
-                "structural ANCOVA share (Sa) only, renormalized to sum to "
-                "1. That drops the correlative share (Sb) the correlation "
-                "carries, so Sh reads too high for parameters whose "
-                "correlation opposes their direct effect and too low "
-                "otherwise. Pass include_correlative=True to fold the "
-                "correlative share back in.",
-                stacklevel=2,
-                category=JaxgsaWarning,
-            )
+        # The warning for a correlated problem with include_correlative=False
+        # lives on HDMRResult.shapley, which is the call below and is also
+        # reachable on its own. Warning here as well would report it twice.
         result = analyze_hdmr(
             problem, X, Y, on_invalid=on_invalid, verbose=False, **backend_kwargs
         ).shapley(include_correlative=include_correlative)
