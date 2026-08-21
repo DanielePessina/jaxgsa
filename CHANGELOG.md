@@ -1007,7 +1007,10 @@ removals, and the few changes that move reported values.
   problem it was measured on: with the old absolute stop rule, a correlated
   or differently-scaled problem's backfit could stop at a different sweep
   depending on `Y`'s scale, so `prenormalize` was not provably a no-op there.
-  With the relative rule above, it now is, for every case.
+  The relative rule removes the scale dependence that made it uncertain:
+  re-measured on a correlated additive model at `N = 1500`, every combination
+  of `m` in {2, 4, 8} and output scale in {1e-3, 1, 1e3} agrees to within
+  2e-4, where before the same sweep spread by up to 0.09.
 
 - **HDMR's `S` did not equal `Sa + Sb`, so `ST` and `shapley()` summed
   different quantities.** `S` was `Cov(f_u, Y) / Var(Y)`, referenced against
@@ -1043,6 +1046,18 @@ removals, and the few changes that move reported values.
   truncated Gaussian between 5 and 7 sigma now routes to Legendre after CDF
   mapping instead of Hermite; `S1`/`ST`/`S2` move for such a problem only.
 
+- **PCE's single-pass fit built an `(n_terms, N)` intermediate it did not
+  need.** It solved `solve(gram, Phi.T)` and then multiplied by `Y`, holding
+  a second sample-sized array alive across the leave-one-out step. It now
+  solves `solve(gram, Phi.T @ Y)` in one step, which is the same coefficients
+  in exact arithmetic and one array fewer in memory. The per-row memory
+  estimate that decides when the streaming fit engages drops from three
+  arrays to two, matching the streamed path. In float32 the arithmetic
+  reassociates, so every PCE `coefficients`, `S1`, `ST`, `S2`, `loo_rmse` and
+  `explained_variance` value moves in its last bits — measured on the stored
+  baseline at up to 6e-6 absolute on a coefficient and 9e-7 on an index.
+  `shapley(backend="pce")` carries the same shift through.
+
 - **Optimal transport's Sinkhorn `epsilon` was relative to each class's own
   maximum cost**, which is outlier-driven and not comparable across
   parameters, leaving up to a +45% bias in the multivariate index against an
@@ -1052,11 +1067,33 @@ removals, and the few changes that move reported values.
   `multivariate`/`trajectory`-mode `ot`, `advective`, `diffusive`, `ot_dummy`
   and `above_dummy` value moves.
 
+- **The one-dimensional transport cost used a nearest-rank lookup, which is
+  only exact when the class size divides the sample count.** A class of `c`
+  rows out of `N` needs a coupling that splits weight between two neighbouring
+  order statistics whenever `c` does not divide `N`; the old code took the
+  midpoint rank instead. The kernel now builds the exact two-gather,
+  split-weight coupling. Checked against POT's `wasserstein_1d` at a
+  non-dividing size (`N = 1013`): the gap falls from 1.7e-3 to 3.5e-3 relative
+  down to 1.4e-7. Every `univariate`-mode `ot`, `advective` and `diffusive`
+  value moves by up to about 3.5e-3 relative when the class size does not
+  divide `N`, and is unchanged to float32 precision when it does.
+
+- **A large output offset ate the precision of the transport cost in float32.**
+  The sort, gather and squared-difference arithmetic ran on the raw output, so
+  an output far from zero spent its mantissa on the offset. Each output column
+  is now centred before the cost is built. Transport is invariant to a shift of
+  both clouds, so this changes no estimand. Measured on an output offset of
+  1e5, the spurious drift in `advective` falls from 1.2e-3 to 6.5e-6.
+
 - **`above_dummy` compared a categorical parameter against a continuous
   dummy's floor.** The finite-sample permutation floor scales with the
   inverse of the class size, so a 3-level categorical column was measured
-  against a 25-class continuous floor roughly 8x too strict, hiding a real
-  effect. Each categorical parameter now gets its own permutation dummy built
+  against a 25-class continuous floor. On the reviewed case (`N = 4000`,
+  pure-noise output) that floor read 0.010 to 0.012, while the 3-level
+  column's own noise level was 0.00074, about fifteen times lower. A real
+  0.25-sigma level shift on that column raised its index to 0.0081, eight
+  times its own floor, and `above_dummy` still read 0 for every parameter.
+  Each categorical parameter now gets its own permutation dummy built
   from that column's own level counts. `ot_dummy` and `above_dummy` move for
   any analysis with `dummy=True` on a problem with at least one categorical
   parameter; `ot_dummy`'s shape also changes, from one value per output slice
@@ -1073,9 +1110,10 @@ removals, and the few changes that move reported values.
 - **`shapley(include_correlative=True)` is renamed on the result and in the
   docs to what it computes: an ANCOVA variance allocation, not the
   conditional-variance Shapley effect.** Exact linear-Gaussian Shapley (Owen
-  2014; Owen & Prieur 2017) and the ANCOVA allocation disagree — measured
-  [0.339, 0.661] against a reported [0.284, 0.716] on a 2-parameter,
-  `rho=0.5` case. `ShapleyResult`, `HDMRResult.shapley()` and
+  2014; Owen & Prieur 2017) and the ANCOVA allocation disagree — an exact
+  [0.339, 0.661] against a reported [0.288, 0.712] on a 2-parameter,
+  `rho=0.5` case, re-measured after the HDMR `S` fix below. `ShapleyResult`,
+  `HDMRResult.shapley()` and
   `docs/api/shapley.md` now say so. Numbers do not change.
   `analyze(backend="hdmr")` on a correlated problem with
   `include_correlative=False` now warns that the reported shares are
