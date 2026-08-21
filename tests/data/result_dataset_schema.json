@@ -781,7 +781,7 @@
       "diffusive_lower:output,param",
       "diffusive_upper:output,param",
       "ot:output,param",
-      "ot_dummy:output",
+      "ot_dummy:output,param",
       "ot_lower:output,param",
       "ot_upper:output,param"
     ]
@@ -828,7 +828,7 @@
       "diffusive_lower:param",
       "diffusive_upper:param",
       "ot:param",
-      "ot_dummy:",
+      "ot_dummy:param",
       "ot_lower:param",
       "ot_upper:param"
     ]
@@ -879,7 +879,7 @@
       "diffusive_lower:time,output,param",
       "diffusive_upper:time,output,param",
       "ot:time,output,param",
-      "ot_dummy:time,output",
+      "ot_dummy:time,output,param",
       "ot_lower:time,output,param",
       "ot_upper:time,output,param"
     ]
