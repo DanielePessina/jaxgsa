@@ -12,10 +12,13 @@ jaxgsa tells you which of your model's inputs drive its output. You give it
 input samples and the outputs your model produced for them. It returns
 sensitivity indices that rank the inputs and show their interactions.
 
-Thirteen methods share one interface, one output contract, and one JAX
-implementation. Every estimator is JIT-compiled and vectorized over the output
-axes, so a model with 50 timesteps and 6 outputs costs one compiled pass, not
-300 Python loop iterations.
+Thirteen methods share one interface and one output contract. Eleven of them
+are JIT-compiled and vectorized over the output axes. A model with 50
+timesteps and 6 outputs then costs one compiled pass, not 300 Python loop
+iterations. Those eleven also export a traceable `indices()`, so you can put
+the estimator itself under `jit`, `vmap` and `grad`. The other two,
+`kucherenko` and `vkoga`, run on the host in NumPy and SciPy by design. They
+have no traceable core.
 
 One method, DGSM, needs a model written in JAX so it can take derivatives
 instead of running many samples. It costs about one gradient per sample point

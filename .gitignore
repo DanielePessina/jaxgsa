@@ -118,6 +118,17 @@ docs/agents/
 CONTEXT.md
 .scratch/
 
+# Planning and review documents for a release. They record how a decision was
+# reached, which is working material, not part of the shipped package.
+.agents/
+AUDIT-DECISIONS.md
+PLAN-V1.0.md
+REVIEW-1.0.md
+ROADMAP-1.0.md
+
+# Skill pins for the local AI agents. Machine-specific.
+skills-lock.json
+
 # marimo session state: local edit history for the examples, not part of
 # the shipped documentation.
 examples/__marimo__/session/

@@ -628,6 +628,17 @@ removals, and the few changes that move reported values.
   registry, so a fourteenth method, or a changed capability, fails the
   suite rather than leaving the documentation stale.
 
+- **Packaging metadata for a stable release.** The PyPI classifier moves from
+  `Development Status :: 4 - Beta` to `5 - Production/Stable`. `CITATION.cff`
+  keeps its `version` and `date-released` fields, and the release process now
+  sets them from the tag. The planning documents at the repository root are
+  gitignored, so a working tree during a release is clean.
+
+- **"Every estimator runs under jit" was not true.** `README.md` and the
+  `CITATION.cff` abstract both said it. Eleven methods export a traceable
+  core. `kucherenko` and `vkoga` are host NumPy and SciPy by design, as the
+  registry has recorded all along. Both texts now say so.
+
 ### Removed
 
 - **`SobolSamples.sample_ids`.** It always held `arange(n_runs)`, had no
@@ -642,11 +653,6 @@ removals, and the few changes that move reported values.
 - The private `validate_correlation` helper. It had no production caller and
   stayed alive only because tests used it. `canonicalize_correlation` runs the
   same code, and its tests now call that instead.
-
-- The `version` and `date-released` fields in `CITATION.cff`. Nothing updated
-  them and nothing checked them, so they had drifted three releases behind.
-  Both are optional, and GitHub and Zenodo take the version from the release
-  tag when they are absent.
 
 ### Performance
 
