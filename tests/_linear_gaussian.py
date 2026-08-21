@@ -108,13 +108,38 @@ def analytic_indices(a: np.ndarray, R: np.ndarray) -> tuple[np.ndarray, np.ndarr
 def analytic_independent_first_order(a: np.ndarray, R: np.ndarray) -> np.ndarray:
     """Closed-form ``S_U`` (independent first-order index) for this model.
 
-    For an additive model, ``S_U`` and ``S_TU`` are the same expression (see
-    the module docstring), so this returns exactly what
-    :func:`analytic_indices` returns as its ``S_TU``. It is a separate
-    function so a caller can assert the identity instead of assuming it.
+    ``S_U_i`` is the share of ``V(Y)`` explained by the part of ``X_i`` that
+    the other inputs cannot predict. Write that part as the linear residual
+    ``Z_i = X_i - b' X_-i`` with ``b = R_-i,-i^-1 R_-i,i``. Then
+
+        ``S_U_i = Cov(Y, Z_i)^2 / (V(Z_i) V(Y))``
+
+    which is what this function computes, straight from ``R``. It uses the
+    whole ``i``-th column of ``R`` and the whole coefficient vector, so it is
+    a different calculation from the ``a_i^2 (1 - r' R^-1 r)`` line in
+    :func:`analytic_indices`, not a rename of it. For this additive model the
+    two must agree, and :func:`_check_su_le_stu` asserts that they do.
+
+    Args:
+        a: Coefficient vector of the linear model.
+        R: Correlation matrix of the inputs (unit diagonal).
+
+    Returns:
+        ``S_U``, one entry per parameter.
     """
-    _, S_TU, _ = analytic_indices(a, R)
-    return S_TU
+    D = a.shape[0]
+    var_y = float(a @ R @ a)
+    S_U = np.empty(D)
+    for i in range(D):
+        rest = [j for j in range(D) if j != i]
+        r = R[rest, i]
+        b = np.linalg.solve(R[np.ix_(rest, rest)], r)
+        # Cov(X_j, Z_i) for every j at once. It is 0 for every j in rest, by
+        # construction of the residual, and V(Z_i) at j == i.
+        cov_x_z = R[:, i] - R[:, rest] @ b
+        var_z = float(R[i, i] - r @ b)
+        S_U[i] = float(a @ cov_x_z) ** 2 / (var_z * var_y)
+    return S_U
 
 
 def _check_su_le_stu(a: np.ndarray, R: np.ndarray, label: str) -> None:
@@ -122,8 +147,11 @@ def _check_su_le_stu(a: np.ndarray, R: np.ndarray, label: str) -> None:
 
     ``S_U <= S_TU`` always holds by construction (``S_IU = S_TU - S_U`` is a
     variance and cannot be negative). For this additive model the two are
-    equal, so this also pins the "``S_U = S_TU``" claim in the module
-    docstring against silent drift.
+    equal, and the two sides come from different algebra: ``S_TU`` from the
+    conditional variance of ``X_i``, ``S_U`` from the residual projection
+    (see :func:`analytic_independent_first_order`). The check therefore
+    fails if either formula drifts on its own. Measured agreement on both
+    fixtures is 1e-16.
     """
     S_U = analytic_independent_first_order(a, R)
     _, S_TU, _ = analytic_indices(a, R)

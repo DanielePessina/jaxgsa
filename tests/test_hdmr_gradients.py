@@ -223,7 +223,11 @@ def test_jit_of_jacfwd_of_the_inputs(case):
     # deterministic. The F-test term selection makes this comparison
     # genuinely discontinuous in float32 near a threshold crossing, so this
     # step -- like every other gradient check in this file family -- runs
-    # under x64. Measured worst-case agreement on this chain is 2e-5.
+    # under x64. The review measured 2e-5 in float32; under x64 the sampled
+    # entries agree to 3.6e-9 against Jacobian entries of order 1e-3, so the
+    # tolerance is set at 1e-7. That is still 30x the measured error, and it
+    # is tight enough to catch a wrong scale factor, which 2e-5 (2% of a
+    # typical entry) would not.
     step = 1e-4
     rng = np.random.default_rng(0)
     n_rows, n_cols = X.shape
@@ -237,7 +241,7 @@ def test_jit_of_jacfwd_of_the_inputs(case):
                 plus = float(total_st(X64 + delta))
                 minus = float(total_st(X64 - delta))
                 fd = (plus - minus) / (2.0 * step)
-                np.testing.assert_allclose(jac64[row, col], fd, rtol=0, atol=2e-5)
+                np.testing.assert_allclose(jac64[row, col], fd, rtol=0, atol=1e-7)
 
 
 def test_reverse_mode_is_refused_by_the_backfitting_loop():
