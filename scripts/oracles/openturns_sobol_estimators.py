@@ -151,6 +151,10 @@ def main() -> int:
 
         pinned = OPENTURNS_ISHIGAMI.get(ot_name)
         if pinned is None:
+            print(
+                "    # not pinned in tests/test_sobol_estimators.py, so nothing to check. "
+                "Printed for reference."
+            )
             continue
         pinned_s1, pinned_st = (np.asarray(v) for v in pinned)
         d_s1 = np.max(np.abs(s1 - pinned_s1))
@@ -164,7 +168,11 @@ def main() -> int:
         )
 
     if ok:
-        print("\nSelf-check PASSED: OpenTURNS still matches the pinned literals.")
+        print(
+            "\nSelf-check PASSED: OpenTURNS still matches every literal pinned in "
+            "tests/test_sobol_estimators.py. Saltelli is printed but not pinned "
+            "there, so it is not checked."
+        )
     else:
         print(
             "\nSelf-check FAILED: OpenTURNS disagrees with the literals pinned "

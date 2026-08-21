@@ -133,6 +133,42 @@ def salib_sobol_point_estimates(
     return result
 
 
+def salib_symmetric_s2(salib_problem: dict, Y_np: np.ndarray) -> np.ndarray:
+    """Compute SALib's second-order indices in both orientations and average them.
+
+    SALib reports one estimate per pair. jaxgsa reports the average of two.
+    The kernel that makes the second estimate is SALib's own: pass the pair
+    in the other order, so ``AB_k`` and ``BA_k`` take the place of ``AB_j``
+    and ``BA_j``. Averaging the two gives the quantity jaxgsa reports, so
+    the parity check stays a real check instead of a loose tolerance.
+
+    This is a correctness helper only. It costs twice as many SALib calls as
+    :func:`salib_sobol_point_estimates`, so the timing benchmarks keep using
+    that function and this one stays out of every timed path.
+
+    Args:
+        salib_problem: The SALib problem dictionary.
+        Y_np: The model output in Saltelli row order, ``N(2D+2)`` rows.
+
+    Returns:
+        A ``(D, D)`` matrix. Both triangles hold the averaged estimate. The
+        diagonal is NaN, as it is in jaxgsa's own output.
+    """
+    D = salib_problem["num_vars"]
+    Y_norm = (Y_np - Y_np.mean()) / Y_np.std()
+    N = Y_norm.size // (2 * D + 2)
+    A, B, AB, BA = salib_separate_output_values(Y_norm, D, N, True)
+    assert BA is not None
+
+    S2 = np.full((D, D), np.nan, dtype=float)
+    for j in range(D):
+        for k in range(j + 1, D):
+            upper = np.asarray(salib_second_order(A, AB[:, j], AB[:, k], BA[:, j], B)).item()
+            lower = np.asarray(salib_second_order(A, AB[:, k], AB[:, j], BA[:, k], B)).item()
+            S2[j, k] = S2[k, j] = 0.5 * (upper + lower)
+    return S2
+
+
 # ---------------------------------------------------------------------------
 # Correctness (Ishigami)
 # ---------------------------------------------------------------------------
@@ -174,15 +210,19 @@ def benchmark_correctness() -> bool:
         rows.append(("analyze (S2)", f"ST[{i}]", g_ST[i], s_ST[i], analytical_ST[i], match, True))
 
     # S2 check (upper triangle). jaxgsa averages both S2 triangles to cut
-    # Monte Carlo noise, a deliberate departure from SALib's raw upper
-    # triangle (see docs/api/sobol.md). So this row is not part of the
-    # pass/fail gate; it is printed for context, like the HDMR rows below.
+    # Monte Carlo noise, a deliberate departure from SALib, which reports the
+    # upper triangle alone (see docs/api/sobol.md). The reference here is
+    # therefore SALib's own kernel run in both orientations and averaged, not
+    # its raw upper triangle. Against the raw upper triangle the gap is the
+    # Monte Carlo noise between the two triangles, 5.0e-4 here; against the
+    # averaged reference it is 4.1e-7, so the row keeps the same 1e-5 gate as
+    # S1 and ST.
     mask = np.triu(np.ones((D, D), dtype=bool), k=1)
     g_S2 = np.asarray(jaxgsa_sobol.S2)[mask]
-    s_S2 = salib_sobol_result["S2"][mask]
+    s_S2 = salib_symmetric_s2(salib_problem, Y_np)[mask]
     for idx, (g, s) in enumerate(zip(g_S2, s_S2)):
-        close = bool(np.abs(g - s) < 5e-2)
-        rows.append(("analyze (S2)", f"S2[{idx}]", float(g), float(s), float("nan"), close, False))
+        match = bool(np.abs(g - s) < 1e-5)
+        rows.append(("analyze (S2)", f"S2[{idx}]", float(g), float(s), float("nan"), match, True))
 
     # --- Sobol jaxgsa vs analytical ---
     for i in range(D):
@@ -295,12 +335,12 @@ def benchmark_correctness() -> bool:
     )
     print("-" * 78)
     print(
-        "NOTE: overall PASS/FAIL is driven by jaxgsa-vs-SALib S1/ST agreement "
+        "NOTE: overall PASS/FAIL is driven by jaxgsa-vs-SALib agreement "
         "plus Sobol-vs-analytical rows."
     )
-    print(
-        "      S2 and HDMR-vs-analytical rows are reported for context only (see comments above)."
-    )
+    print("      The S2 rows compare against SALib averaged over both pair orientations,")
+    print("      because jaxgsa averages both S2 triangles and SALib reports only one.")
+    print("      HDMR-vs-analytical rows are reported for context only.")
     print("-" * 78)
     for method, index, g_val, s_val, a_val, ok, gate in rows:
         if gate:
