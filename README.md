@@ -15,11 +15,18 @@ sensitivity indices that rank the inputs and show their interactions.
 Thirteen methods share one interface, one output contract, and one JAX
 implementation. Every estimator is JIT-compiled and vectorized over the output
 axes, so a model with 50 timesteps and 6 outputs costs one compiled pass, not
-300 Python loop iterations. A model written in JAX also hands over its
-derivatives, so DGSM costs about one gradient per sample point on a scalar
-output. It picks forward or reverse mode from the output shape, because a
-reverse pass costs one row of the Jacobian and a `T x K` output has `T * K` of
-them.
+300 Python loop iterations.
+
+One method, DGSM, needs a model written in JAX so it can take derivatives
+instead of running many samples. It costs about one gradient per sample point
+on a scalar output. For a model with several outputs, jaxgsa picks whichever
+of forward-mode or reverse-mode automatic differentiation is cheaper: reverse
+mode computes one output's full gradient per pass, so it gets expensive as
+the output count grows, while forward mode computes one input's effect on
+every output per pass, so it gets expensive as the input count grows instead.
+Later sections call the output shape `(N, T, K)`, for `N` samples, `T` time
+steps, and `K` output channels; jaxgsa compares `T * K` against the number of
+inputs to pick the cheaper mode.
 
 jaxgsa does not run your model. You control that. It builds designs and reads
 indices off the results.
@@ -32,9 +39,9 @@ pip install jaxgsa
 uv add jaxgsa
 ```
 
-Python 3.12 or newer. The runtime dependencies are `jax`, `jaxlib`, `scipy`,
-and `xarray`. Optional extras: `notebook` (marimo, matplotlib) and `dev`
-(pytest, ruff, ty, SALib, POT).
+Python 3.12 or newer. The runtime dependencies are `jax`, `jaxlib`, `numpy`,
+`scipy`, and `xarray`. Optional extras: `notebook` (marimo, matplotlib) and
+`dev` (pytest, ruff, ty, SALib, POT).
 
 ## Quickstart
 
@@ -108,10 +115,13 @@ budget for it. Quadrupling the runs roughly halves the error.
 
 ## When you cannot choose the sample points
 
-The Saltelli design is the price of Sobol indices. Nine of the thirteen methods
-skip it and work on whatever (X, Y) pairs you already have, including runs
-from an old sweep. Polynomial chaos fits an orthogonal-polynomial surrogate to
-the pairs and reads exact Sobol indices off the coefficients.
+Sobol indices normally require the Saltelli design: a specific pattern of
+sample points, built and evaluated ahead of time. Nine of the thirteen
+methods skip that requirement. They work on whatever (X, Y) pairs you already
+have, including runs from an old sweep. Polynomial chaos, one of the nine,
+fits a polynomial surrogate to those pairs. The polynomials it uses are
+mutually orthogonal, which lets it read exact Sobol indices straight off the
+fitted coefficients, with no extra integration step.
 
 ```python
 import jaxgsa

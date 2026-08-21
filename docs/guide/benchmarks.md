@@ -18,9 +18,13 @@ biggest ones measure a Python loop rather than arithmetic.
 `PROBLEM`, a batched `evaluate(X)`, precomputed `ANALYTICAL_*` arrays, and an
 `analytical_*(...)` function for non-default parameters.
 
-All five give `S1`, `ST`, `S2` and Shapley effects. `gaussian_linear` also
-gives a Borgonovo delta and an optimal-transport index, which makes it the
+All five give `S1`, `ST` and `S2`. Three of the five also give Shapley
+effects: `ishigami`, `sobol_g`, and `linear`. `gaussian_linear` gives a
+Borgonovo delta and an optimal-transport index instead, which makes it the
 only ground truth in the library for a moment-independent estimator.
+`oakley_ohagan` gives neither Shapley effects nor a moment-independent
+ground truth; it ships the published `PUBLISHED_S1` literal alongside its
+own closed-form `S1`/`ST`/`S2`.
 
 | Module | D | Marginals | Extra ground truth |
 | --- | ---: | --- | --- |
@@ -51,9 +55,14 @@ A method that reports $x_3$ as unimportant has failed.
 `analytical_shapley(A=7.0, B=0.1)` returns the effects.
 
 The $[-\pi, \pi]$ domain and `A=7, B=0.1` are the SALib convention, and
-`docs/adr/0002-ishigami-reference-values.md` pins them. Other papers use other
-constants and get different reference numbers, so check the domain before you
-compare against a published table.
+jaxgsa pins them as the default because at least three conventions circulate
+in the literature with very different indices (`A=7, B=0.05` gives
+`S1=0.2185`; `A=2, B=1` gives `S1=0.3830`). Other papers use other constants
+and get different reference numbers, so check the domain and both constants
+before you compare against a published table, and treat a published
+Ishigami table as unverified until you have re-derived at least one row: an
+often-cited one prints its `S2`/`ST2` swapped for `x2`, which has no
+interactions and so must give them equal.
 
 ### `sobol_g`
 
@@ -290,9 +299,8 @@ removes a scheduling cost that SALib pays. It does not say jaxgsa's floating
 point is hundreds of times faster, and it does not transfer to a workload with
 one output slice, where the same comparison gives 10.9x.
 
-**Cost claims carry a `T` factor.** `docs/adr/0005-autodiff-mode-selection.md`
-requires every speed or cost statement in this project to state `T` or to say
-it is scalar-output-only. One reverse-mode pass
+**Cost claims carry a `T` factor.** Every speed or cost statement in this
+project states `T` or says it is scalar-output-only. One reverse-mode pass
 returns one *row* of the Jacobian, so a model with `T*K` output slices costs
 `T*K` reverse passes. The textbook argument that a gradient costs about 3
 model runs, and so beats a `N*(D+2)` Saltelli design for `D >= 2`, holds only

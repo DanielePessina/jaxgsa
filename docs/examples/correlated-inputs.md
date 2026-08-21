@@ -311,9 +311,20 @@ normal draw.
 
 Optimal transport, Borgonovo delta, HSIC, and PAWN take any `(X, Y)` pairs.
 They are rank- and distribution-based, so they need no independence assumption
-at all:
+at all. Go back to the `problem`, `X` and `Y` from the top of this page (the
+sections above reused those names for other examples):
 
 ```python
+problem = jaxgsa.Problem.from_dict(
+    {
+        "x1": {"dist": "gaussian", "mean": 0.0, "variance": 1.0},
+        "x2": {"dist": "gaussian", "mean": 0.0, "variance": 1.0},
+    },
+    correlation=[[1.0, 0.8], [0.8, 1.0]],
+)
+X = jaxgsa.sampling.monte_carlo(problem, n=8192, seed=42)
+Y = X[:, 0]  # the model reads x1 and ignores x2
+
 ot = jaxgsa.optimal_transport.analyze(problem, X, Y)
 delta = jaxgsa.borgonovo.analyze(problem, X, Y)
 pawn = jaxgsa.pawn.analyze(problem, X, Y)
@@ -355,7 +366,7 @@ On the same `Y = x1` data as above:
 
 ```
 terms: ('x1', 'x2', 'x1/x2')
-Sa: [0.971 0.    0.005]
+Sa: [0.97  0.    0.005]
 Sb: [0.01 0.01 0.  ]
 ```
 

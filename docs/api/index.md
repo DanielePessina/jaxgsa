@@ -275,8 +275,11 @@ result, so it works inside `jax.jit`, `jax.vmap` and `jax.grad`. Pair it with
 `transform` to differentiate an index with respect to the input distribution
 parameters. See [Sobol](/api/sobol).
 
-`morris`, `efast` and `dgsm` each expose an `indices()` with the same deal:
-raw arrays, no checks, no result object, safe under a JAX transformation.
+Eleven of the thirteen methods expose an `indices()` with the same deal: raw
+arrays, no checks, no result object, safe under a JAX transformation. Only
+`kucherenko` and `vkoga` do not, because both run host-side work (a
+conditional-copula design evaluation, and a greedy kernel-centre search)
+that cannot trace under `jit`.
 
 ## Confidence intervals
 
