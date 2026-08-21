@@ -277,9 +277,9 @@ parameters. See [Sobol](/api/sobol).
 
 Eleven of the thirteen methods expose an `indices()` with the same deal: raw
 arrays, no checks, no result object, safe under a JAX transformation. Only
-`kucherenko` and `vkoga` do not, because both run host-side work (a
-conditional-copula design evaluation, and a greedy kernel-centre search)
-that cannot trace under `jit`.
+`kucherenko` and `vkoga` do not. `kucherenko` is host NumPy from end to end,
+which is what makes it the fastest method here, and `vkoga`'s index stage is
+a host quasi-Monte-Carlo loop. Neither has a traceable core to export.
 
 ## Confidence intervals
 

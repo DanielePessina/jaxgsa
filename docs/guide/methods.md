@@ -285,7 +285,7 @@ A first-order estimate can come out below zero, whichever estimator you choose. 
 
 Every first-order formula here is a difference of two correlated Monte Carlo estimates. The difference is unbiased but noisy, so when the true index is near zero the sampling error is bigger than the index and about half the estimates land below it. Owen (2013) states the mechanism: the cross-moment form "has very large variance when $\tau^2_u \ll \mu^2$", whereas a squared-difference form "is a sum of squares, hence nonnegative".
 
-Note the limit of that last point. Only the *total* order of `"saltelli-jansen"` and `"jansen"` is a bare sum of squares, and only it is guaranteed non-negative. A Jansen *first-order* estimate is one minus such a term, so it is bounded above by 1 and free to go below zero. Measured on Sobol-G over 40 seeds at `base_n` 64/256/1024/4096, the default estimator's negative-$S_1$ rate is 100%/88%/65%/30%, the Jansen family's is 50%/57%/30%/45%, and `"azzini-rosati"`'s is 0% throughout. The rate falls as $N$ grows for the default estimator, does not fall monotonically for the Jansen family, and is exactly zero for `"azzini-rosati"` by construction (see the table above).
+Note the limit of that last point. Only the *total* order of `"saltelli-jansen"` and `"jansen"` is a bare sum of squares, and only it is guaranteed non-negative. A Jansen *first-order* estimate is one minus such a term, so it is bounded above by 1 and free to go below zero. Measured on Sobol-G over 40 seeds at `base_n` 64/256/1024/4096, the default estimator's negative-$S_1$ rate is 100%/88%/65%/30%, the Jansen family's is 50%/58%/30%/45%, and `"azzini-rosati"`'s is 0% throughout. The rate falls as $N$ grows for the default estimator, does not fall monotonically for the Jansen family, and is exactly zero for `"azzini-rosati"` by construction (see the table above).
 
 So read a negative value as "the interval covers zero", and turn on the bootstrap (`n_bootstrap`, with a `key`) to see that directly. Investigate only if the value is large, if it appears for a parameter whose index is demonstrably not near zero, or if it grows with $N$.
 
@@ -1248,14 +1248,14 @@ Three things to read off it.
 
 $x_1$ and $x_2$ are mean-shift parameters: 76% and 79% of their index is advective. $x_3$ is the opposite, 96% diffusive. Knowing $x_3$ tells you almost nothing about where the output will land and a lot about how far it will spread. No variance-based index distinguishes those two situations.
 
-`ot_dummy` is a per-parameter array now, one permutation floor per column, all three read 0.0095 here because every Ishigami parameter shares the same continuous marginal and class count. The 0.098 for $x_3$ is about ten times its own floor and is real. In `"univariate"` mode the floor is small; in the point-cloud modes it is not, and `dummy=True` stops being optional there.
+`ot_dummy` is a per-parameter array, one permutation floor per column. All three read 0.0095 here because every Ishigami parameter shares the same continuous marginal and class count. The 0.098 for $x_3$ is about ten times its own floor and is real. In `"univariate"` mode the floor is small; in the point-cloud modes it is not, and `dummy=True` stops being optional there.
 
 ### How to use it
 
 1. `jaxgsa.sampling.monte_carlo()` or any existing $(X, Y)$ data. No structured design required.
 2. `jaxgsa.optimal_transport.analyze()` computes `ot`, `advective`, and `diffusive` per parameter (and per output column in `"univariate"` mode), with an optional row bootstrap for confidence intervals.
 
-Pick the mode by the question: `"univariate"` for per-column indices across `(N,)`/`(N, K)`/`(N, T, K)` outputs, `"multivariate"` for one index per parameter over the flattened joint output, `"trajectory"` for one index per parameter per output over the whole time course. The point-cloud modes solve entropic transport per parameter per class per replicate, so the bill is `(n_bootstrap + 1) * D * n_partitions` Sinkhorn solves, times the output count in `"trajectory"` mode and plus `n_partitions` more if `dummy=True`. Keep it modest.
+Pick the mode by the question: `"univariate"` for per-column indices across `(N,)`/`(N, K)`/`(N, T, K)` outputs, `"multivariate"` for one index per parameter over the flattened joint output, `"trajectory"` for one index per parameter per output over the whole time course. The point-cloud modes solve one entropic transport problem per parameter, per class, per replicate, and per point cloud. For continuous parameters that is `(n_bootstrap + 1) * D * n_partitions` solves, and `dummy=True` adds one more single-replicate pass of `n_partitions` solves. Both figures multiply by the output count `K` in `"trajectory"` mode, which builds one cloud per output; `"multivariate"` mode builds one cloud in total. A categorical parameter costs its own level count instead of `n_partitions`, and adds its own dummy pass. Keep it modest.
 
 ### Index summary
 
@@ -1349,14 +1349,14 @@ print("S_C ", np.round(np.asarray(result.S_C), 3))
 
 ```
 S_TC [0.74 0.74 0.22]
-S_TU [0.041 0.043 0.222]
-S_U  [0.04  0.041 0.22 ]
-S_C  [ 0.7    0.699 -0.  ]
+S_TU [0.041 0.041 0.222]
+S_U  [0.039 0.039 0.219]
+S_C  [0.7   0.701 0.001]
 ```
 
 The exact values are $S_{TC} = [0.752, 0.752, 0.208]$ and $S_{TU} = [0.040, 0.040, 0.208]$, so the kernel surrogate is within about 0.015 everywhere.
 
-Read the decision off it. $x_1$ and $x_2$ each explain 74% of the output variance, and each explains 4% that nothing else can account for. So both are worth measuring accurately, and either one can be fixed provided you keep the other free. $x_3$ has $S_{TC} = S_{TU} = 0.22$ and $S_C = 0$: it is uncorrelated, so its two answers coincide and it must be neither fixed nor ignored. A ranking on $S_{TC}$ alone would have told you $x_3$ was the least important parameter. On $S_{TU}$ it is the most important. Both readings are correct, and they answer different questions.
+Read the decision off it. $x_1$ and $x_2$ each explain 74% of the output variance, and each explains 4% that nothing else can account for. So both are worth measuring accurately, and either one can be fixed provided you keep the other free. $x_3$ has $S_{TC} = S_{TU} = 0.22$ and $S_C = 0.001$, which is zero to the accuracy of the surrogate: it is uncorrelated, so its two answers coincide and it must be neither fixed nor ignored. A ranking on $S_{TC}$ alone would have told you $x_3$ was the least important parameter. On $S_{TU}$ it is the most important. Both readings are correct, and they answer different questions.
 
 The remaining three split $S_{TC}$ and $S_{TU}$ into their independent and correlation-borne parts:
 
@@ -1393,7 +1393,7 @@ Practical guidance:
 
 1. You provide any set of $(X, Y)$ pairs. No sampling design required.
 2. `jaxgsa.vkoga.analyze()` maps parameters to $[0, 1]$ through their marginal CDFs (the RBF kernel is isotropic, so every column must share a scale), centres the outputs, cross-validates `gamma` and `ridge`, and fits the greedy kernel surrogate.
-3. The same call then draws the nested conditional samples in latent copula space and returns the five indices, along with the surrogate's `n_centers`, `gamma`, `ridge`, and per-slice training `rmse`.
+3. The same call then draws the nested conditional samples in latent copula space and returns the five indices, along with the surrogate's `n_centers`, `gamma`, `ridge`, and per-slice training `rmse`. `key` is required, because that draw is always a Monte-Carlo estimate: `vkoga.analyze(problem, X, Y)` without one raises `ValueError`.
 4. `result.predict(X_new)` reuses the fitted surrogate; `result.to_dataset()` exports everything, including the correlation matrix, as a labeled `xarray.Dataset`.
 
 The dependency structure comes from the problem. `analyze` reads `problem.correlation` by default and falls back to independent parameters when the problem declares none. A `(D, D)` matrix passed as `correlation=` overrides the declaration for one call. To fit a matrix from observed data, use `jaxgsa.sampling.fit_correlation(problem, X_data)` and attach it with `problem.with_correlation(...)`. Whichever route you choose, the matrix actually used is returned on `result.correlation`.

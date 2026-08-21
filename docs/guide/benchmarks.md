@@ -60,9 +60,11 @@ in the literature with very different indices (`A=7, B=0.05` gives
 `S1=0.2185`; `A=2, B=1` gives `S1=0.3830`). Other papers use other constants
 and get different reference numbers, so check the domain and both constants
 before you compare against a published table, and treat a published
-Ishigami table as unverified until you have re-derived at least one row: an
-often-cited one prints its `S2`/`ST2` swapped for `x2`, which has no
-interactions and so must give them equal.
+Ishigami table as unverified until you have re-derived at least one row.
+Azzini and Rosati (2022), *Data in Brief* 42:108071, for example, prints a
+first-order 0.4413 for $x_2$ against a total of 0.4424111. $x_2$ has no
+interactions, so the two must be equal, and it is the first-order figure that
+is wrong.
 
 ### `sobol_g`
 
