@@ -1490,7 +1490,7 @@ class TestLowerBoundValidityConditions:
 
     ``lower_bound_i = Var(x_i) * sigma_i^2 / Var(Y)`` is a proven floor under
     ``ST_i`` only when input i's marginal is an untruncated Gaussian
-    (Kucherenko & Song 2016, Theorem 4.1). These tests hold that line from both
+    (Kucherenko & Song 2016, Theorem 6). These tests hold that line from both
     sides, so a future change that quietly widens or narrows the claim fails
     here.
 

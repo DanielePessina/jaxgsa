@@ -4,7 +4,7 @@ layout: home
 hero:
   name: jaxgsa
   text: Global Sensitivity Analysis in JAX
-  tagline: Thirteen methods, one interface, one JIT-compiled implementation. Scalar, multi-output, and time-series models.
+  tagline: Thirteen methods, one interface, eleven of them JIT-compiled. Scalar, multi-output, and time-series models.
   actions:
     - theme: brand
       text: Get Started

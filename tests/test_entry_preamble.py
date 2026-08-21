@@ -55,7 +55,10 @@ N = 128
 def _xy(*, constant: bool = False, n: int = N):
     """A clean given-data sample, optionally with a constant output."""
     X = np.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n, seed=0))
-    Y = np.full(n, 3.0) if constant else X[:, 0] + 2.0 * X[:, 1] ** 2
+    # 0.1, not a value like 3.0 whose float32 mean is exact: a constant whose
+    # mean rounds leaves var ~1e-16 rather than 0, which is the case the
+    # exact-constancy guard exists for. A test using 3.0 passes either way.
+    Y = np.full(n, 0.1) if constant else X[:, 0] + 2.0 * X[:, 1] ** 2
     return jnp.asarray(X), jnp.asarray(Y)
 
 
@@ -182,18 +185,18 @@ def _constant_output_call(name):
     X, Y = _xy(constant=True, n=320 if name == "hdmr" else N)
     if name == "sobol":
         sobol_design = _sobol_design()
-        return lambda: jaxgsa.sobol.analyze(sobol_design, jnp.full(sobol_design.n_runs, 3.0))
+        return lambda: jaxgsa.sobol.analyze(sobol_design, jnp.full(sobol_design.n_runs, 0.1))
     if name == "morris":
         morris_design = _morris_design()
-        return lambda: jaxgsa.morris.analyze(morris_design, jnp.full(morris_design.n_runs, 3.0))
+        return lambda: jaxgsa.morris.analyze(morris_design, jnp.full(morris_design.n_runs, 0.1))
     if name == "efast":
         efast_design = jaxgsa.efast.sample(PROBLEM, 400, seed=0)
-        return lambda: jaxgsa.efast.analyze(efast_design, jnp.full(efast_design.n_runs, 3.0))
+        return lambda: jaxgsa.efast.analyze(efast_design, jnp.full(efast_design.n_runs, 0.1))
     if name == "kucherenko":
         kuch_design = jaxgsa.kucherenko.sample(PROBLEM, 64, seed=0)
-        return lambda: jaxgsa.kucherenko.analyze(kuch_design, jnp.full(kuch_design.n_runs, 3.0))
+        return lambda: jaxgsa.kucherenko.analyze(kuch_design, jnp.full(kuch_design.n_runs, 0.1))
     if name == "dgsm":
-        return lambda: jaxgsa.dgsm.analyze(PROBLEM, lambda x: jnp.asarray(3.0), X)
+        return lambda: jaxgsa.dgsm.analyze(PROBLEM, lambda x: jnp.asarray(0.1), X)
     if name == "vkoga":
         return lambda: jaxgsa.vkoga.analyze(
             PROBLEM,

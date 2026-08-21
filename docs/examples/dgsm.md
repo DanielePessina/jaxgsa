@@ -156,7 +156,7 @@ of 0.696. That is not sampling noise. The Sobol run above agrees with the
 closed-form answer for this model to four digits.
 
 The literature says exactly when this can happen. Kucherenko & Song (2016)
-prove `ST_i >= Var(x_i) * sigma_i^2 / Var(Y)` in their Theorem 4.1, for a
+prove `ST_i >= Var(x_i) * sigma_i^2 / Var(Y)` in their Theorem 6, for a
 **Gaussian** input, and nowhere else. The proof runs through Stein's identity,
 `Cov(f, x_i) = E[tau(x_i) * df/dx_i]`, whose kernel `tau` is the constant
 `Var(x_i)` for an untruncated Gaussian and is not constant for anything else.
@@ -446,7 +446,7 @@ On the pre-computed path, `dfdx` mirrors `Y` with one extra trailing `(D,)`:
   towards equality as the model becomes monotone in that input. For a purely
   additive linear model both bounds collapse onto the exact `ST`.
 - `lower_bound` is a proven floor only for a Gaussian marginal (Kucherenko &
-  Song 2016, Theorem 4.1). On a uniform or truncated marginal it is exact for
+  Song 2016, Theorem 6). On a uniform or truncated marginal it is exact for
   a linear response and can sit above the true `ST` for a strongly curved one,
   as shown above. Treat it there as an estimate, not a floor.
 - Poincare constants by marginal: `(b-a)^2 / pi^2` for uniform `[a, b]`, `s^2`

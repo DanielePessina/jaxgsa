@@ -189,7 +189,9 @@ problem = problem.with_correlation(R)
 
 The matrix is checked on entry, not at first use. A slightly
 non-positive-definite matrix, the usual result of estimating one from data, is
-repaired to the nearest positive-definite correlation matrix and the repair is
+repaired by clipping the negative eigenvalues to zero and rescaling the
+diagonal back to one. This is not Higham's nearest positive-definite matrix:
+it can move an entry further than the true nearest one does. The repair is
 reported with a `JaxgsaWarning`. A matrix whose repair would have to move any
 entry by 0.05 or more is rejected with a `ValueError` instead. The threshold
 separates float noise from a matrix that does not describe a joint

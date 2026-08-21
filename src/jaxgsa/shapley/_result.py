@@ -29,7 +29,7 @@ class ShapleyResult(SchemaResult):
     Shapley formula. The two quantities agree only when the inputs are
     independent. On an exact linear-Gaussian check (D=2, rho=0.5) the true
     Shapley effects are ``[0.339, 0.661]`` against this allocation's
-    ``[0.284, 0.716]``; on an asymmetric D=3 check, ``[0.565, 0.409, 0.026]``
+    ``[0.287, 0.713]``; on an asymmetric D=3 check, ``[0.565, 0.409, 0.026]``
     against ``[0.675, 0.320, 0.005]``. See ``include_correlative`` below.
 
     All indices are normalized by the surrogate's total decomposed variance

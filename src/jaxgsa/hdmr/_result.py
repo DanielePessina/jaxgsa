@@ -237,7 +237,7 @@ class HDMRResult(SchemaResult, SurrogateResult):
         allocation, not the conditional-variance Shapley effect (Owen 2014;
         Owen & Prieur 2017): an exact linear-Gaussian check gives true Shapley
         effects ``[0.339, 0.661]`` (D=2, rho=0.5) against this allocation's
-        ``[0.284, 0.716]``. See :class:`jaxgsa.shapley.ShapleyResult`.
+        ``[0.287, 0.713]``. See :class:`jaxgsa.shapley.ShapleyResult`.
 
         Args:
             include_correlative: When ``True``, allocate the total ANCOVA

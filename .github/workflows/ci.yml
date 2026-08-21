@@ -162,7 +162,12 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
-          python-version: "3.13"
+          # Matches `python_version` in the header of
+          # `scripts/baseline/baseline-1.0.0.json`. The comparison below is
+          # bit-exact, so the interpreter must match the one that produced the
+          # file, exactly as the CPU must. Regenerate on the same pair or move
+          # both together.
+          python-version: "3.12"
           enable-cache: true
 
       - name: Install project and dev dependencies

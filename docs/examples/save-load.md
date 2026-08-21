@@ -154,7 +154,7 @@ print("spec[0]: ", meta["problem"]["input_specs"][0])
 ```
 
 ```
-arrays:   ['samples', 'sample_ids', 'unit', 'expanded_to_unit', 'metadata']
+arrays:   ['samples', 'unit', 'expanded_to_unit', 'metadata']
 metadata: ['base_n', 'calc_second_order', 'identity_mapping', 'jaxgsa_version', 'n_expanded', 'problem']
 design:   {'base_n': 512, 'calc_second_order': True, 'n_expanded': 4096}
 names:    ['x1', 'x2', 'x3']
