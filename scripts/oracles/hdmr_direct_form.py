@@ -23,8 +23,8 @@ was that check.
 Unifying the two onto the Gram formulation removed the sample-space
 implementation, and with it the only second opinion on the estimator. Copying
 the deleted kernel into the test suite would not restore it: a test that
-retypes the source's own formula is a mirror, not an oracle
-(`docs/adr/0001-verification-oracle-tiers.md`). So the direct form lives here
+retypes the source's own formula is a mirror, not an oracle. An oracle must
+come from outside the library under test. So the direct form lives here
 instead, re-derived rather than copied:
 
 - pure NumPy and SciPy, no JAX, no import from `src/jaxgsa/`;

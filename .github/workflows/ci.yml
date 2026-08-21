@@ -44,8 +44,8 @@ jobs:
   # The same suite in double precision.
   #
   # jaxgsa ships no x64 wrapper and sets no flag: it computes in whatever
-  # precision JAX is configured for (ADR 0014). Both settings are therefore
-  # supported configurations, and only one of them was ever run. The
+  # precision JAX is configured for. Both settings are therefore supported
+  # configurations, and only one of them was ever run. The
   # difference is not cosmetic — a warning that correctly fires only in
   # float32, a clip bound that only bites in float64, a dtype-dependent
   # tolerance — and ten tests had quietly accumulated a float32 assumption by
@@ -77,10 +77,9 @@ jobs:
   # reports as its own failure rather than one more red test.
   #
   # Every pre-existing entry must stay bit-identical; any movement is a defect
-  # until it is proved otherwise. See
-  # docs/adr/0009-a-change-with-no-behavioural-target.md. Until this job existed
-  # that rule was enforced by whoever remembered to run the script, which is
-  # how the stored file stayed pinned at 0.8.0.
+  # until it is proved otherwise. Until this job existed that rule was
+  # enforced by whoever remembered to run the script, which is how the
+  # stored file stayed pinned at 0.8.0.
   #
   # This job does NOT compare against the stored file. That file records
   # float32 results to the last bit and those bits depend on the CPU: a dump
@@ -135,4 +134,46 @@ jobs:
         run: |
           uv run python scripts/baseline_check.py \
             --baseline /tmp/base.json --current /tmp/head.json \
+            --allow-schema-change
+
+  # Does the tracked file still match what jaxgsa computes today?
+  #
+  # The job above only tells you whether *this PR* moved a number; it never
+  # opens `scripts/baseline/baseline-1.0.0.json`, so a file that drifted from
+  # the code before the PR started would stay hidden. This job closes that
+  # gap by dumping the head commit and diffing it straight against the
+  # tracked file.
+  #
+  # It runs on `macos-14` (Apple silicon), not `ubuntu-latest`, because the
+  # stored file's own float32 bits depend on the CPU that produced them (see
+  # the comment above and `scripts/baseline/README.md`): the same computation
+  # on x86-64 would report about a thousand values off by 1e-5 to 1e-7 with
+  # no code change involved. Matching the runner to the platform the file
+  # records removes that noise, so no tolerance is needed here either.
+  #
+  # Only the head commit is dumped, so this adds one dump and one compare to
+  # CI, not two.
+  baseline-drift:
+    runs-on: macos-14
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install project and dev dependencies
+        run: uv sync --extra dev
+
+      - name: Dump this commit
+        run: uv run python scripts/baseline_dump.py --out /tmp/head.json --quiet
+
+      - name: Compare against the tracked baseline
+        run: |
+          uv run python scripts/baseline_check.py \
+            --baseline scripts/baseline/baseline-1.0.0.json \
+            --current /tmp/head.json \
             --allow-schema-change

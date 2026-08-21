@@ -173,13 +173,16 @@ def benchmark_correctness() -> bool:
         match = bool(np.abs(g_ST[i] - s_ST[i]) < 1e-5)
         rows.append(("analyze (S2)", f"ST[{i}]", g_ST[i], s_ST[i], analytical_ST[i], match, True))
 
-    # S2 check (upper triangle)
+    # S2 check (upper triangle). jaxgsa averages both S2 triangles to cut
+    # Monte Carlo noise, a deliberate departure from SALib's raw upper
+    # triangle (see docs/api/sobol.md). So this row is not part of the
+    # pass/fail gate; it is printed for context, like the HDMR rows below.
     mask = np.triu(np.ones((D, D), dtype=bool), k=1)
     g_S2 = np.asarray(jaxgsa_sobol.S2)[mask]
     s_S2 = salib_sobol_result["S2"][mask]
     for idx, (g, s) in enumerate(zip(g_S2, s_S2)):
-        match = bool(np.abs(g - s) < 1e-5)
-        rows.append(("analyze (S2)", f"S2[{idx}]", float(g), float(s), float("nan"), match, True))
+        close = bool(np.abs(g - s) < 5e-2)
+        rows.append(("analyze (S2)", f"S2[{idx}]", float(g), float(s), float("nan"), close, False))
 
     # --- Sobol jaxgsa vs analytical ---
     for i in range(D):
@@ -292,10 +295,12 @@ def benchmark_correctness() -> bool:
     )
     print("-" * 78)
     print(
-        "NOTE: overall PASS/FAIL is driven by jaxgsa-vs-SALib agreement "
+        "NOTE: overall PASS/FAIL is driven by jaxgsa-vs-SALib S1/ST agreement "
         "plus Sobol-vs-analytical rows."
     )
-    print("      HDMR-vs-analytical rows are reported for context only.")
+    print(
+        "      S2 and HDMR-vs-analytical rows are reported for context only (see comments above)."
+    )
     print("-" * 78)
     for method, index, g_val, s_val, a_val, ok, gate in rows:
         if gate:
@@ -420,7 +425,7 @@ def _salib_sobol_bootstrap_slices(
     """Run SALib Sobol analysis with confidence-interval resampling."""
     kwargs = {
         "calc_second_order": calc_second_order,
-        "n_bootstrap": n_bootstrap,
+        "num_resamples": n_bootstrap,
         "print_to_console": False,
         "seed": SOBOL_BOOTSTRAP_SEED,
     }
