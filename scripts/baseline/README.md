@@ -302,6 +302,21 @@ All thirteen methods run against every case: `borgonovo`, `dgsm`, `efast`,
 refactor that removes a gate shows up as a status change. The exception
 message is deliberately not recorded, because wording is allowed to change.
 
+`optimal_transport` runs three times, under the keys `optimal_transport`,
+`optimal_transport_multivariate` and `optimal_transport_trajectory`, because
+its three modes are three different estimators. The default univariate mode
+never calls Sinkhorn and ignores `epsilon` entirely, so until the two joint
+entries were added this file pinned no joint-mode number at all: the entropic
+solver, the regularization scale and the per-parameter dummy floor were
+outside the net, including through the 1.0 changes that moved every one of
+them. The multivariate mode takes every case, degenerating to a single
+point cloud where the output is scalar. The trajectory mode needs a
+three-dimensional output, so only `ishigami_series` runs it and the other five
+record the refusal, which is the pinned behaviour for them.
+
+Adding the two entries moved no existing number: the dump gained 12 entries
+and every value already in the file stayed bit-identical.
+
 Each case also records the Monte Carlo design and the model output it was
 built from, so a change in the samplers is caught as well as a change in the
 estimators.
