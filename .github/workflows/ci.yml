@@ -132,12 +132,27 @@ jobs:
       # number. A result that gains or loses a field is a deliberate edit to
       # the public surface, reviewed in the diff like any other, and it must
       # not read as a numerical regression. Moved values still fail.
+      #
+      # A release pull request moves numbers on purpose, so it would pin this
+      # job red and train everyone to merge past it. The `baseline-approved`
+      # label is the way to say "yes, and here is where it is written down":
+      # apply it only when `scripts/baseline/README.md` records what moved and
+      # why, which is that file's own standing rule. The comparison still runs
+      # and still prints the whole diff, so the numbers stay in the log.
       - name: Compare the two dumps
         if: steps.base.outputs.skip != 'true'
+        continue-on-error: ${{ contains(github.event.pull_request.labels.*.name, 'baseline-approved') }}
         run: |
           uv run python scripts/baseline_check.py \
             --baseline /tmp/base.json --current /tmp/head.json \
             --allow-schema-change
+
+      - name: Say that the diff was acknowledged
+        if: steps.base.outputs.skip != 'true' && contains(github.event.pull_request.labels.*.name, 'baseline-approved')
+        run: |
+          echo "The baseline diff above is acknowledged by the" \
+               "'baseline-approved' label. scripts/baseline/README.md must" \
+               "record what moved and why."
 
   # There is deliberately no job that diffs the tracked
   # `scripts/baseline/baseline-1.0.0.json` against a fresh dump. One existed
