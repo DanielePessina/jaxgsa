@@ -208,7 +208,18 @@ none is left over.** By method:
 | `borgonovo` | 35 | Cross-cutting bootstrap plumbing (`interval()`/`bootstrap_draws()` adoption) and the D4 partition consumer fix; float32 reassociation only |
 | `efast` | 29 | H2 (`/ N**2` moved inside the square to avoid the int32 overflow); float32 reassociation only, none of the baseline's `n_per_curve` values are near the overflow threshold itself |
 
-`kucherenko`, `morris`, `dgsm`, `hsic` and `pawn` did not move at all.
+`kucherenko`, `morris`, `dgsm` and `pawn` did not move at all.
+
+`hsic` did not move on the machine this file was produced on (macOS arm64),
+but it does move on x86-64: the CI base-versus-head diff reports every
+`T_HSIC` value shifting by up to 5.5e-6 on values between 0.04 and 0.78. That
+is the HSIC V-statistic's own float32 noise, which the package warns about at
+`hsic/_analyze.py` because the statistic cancels three large sums and keeps
+only three or four correct digits in single precision. The resident-kernel
+restructure of this release reordered those sums; on arm64 the reordering
+happened to cancel and on x86-64 it did not. No definition changed. Read the
+"did not move" rows as "did not move here", not as a platform-independent
+claim.
 
 `pce.explained_variance` and `shapley.explained_variance` did move, in three
 cases each, by at most 8.3e-7 — about fourteen units in the last place of
