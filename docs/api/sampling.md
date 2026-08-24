@@ -118,7 +118,6 @@ scramble=True, seed=None, verbose=True)` returns a `SobolSamples`.
 Fields:
 
 - `samples` — `(n_runs, D)`, the rows to evaluate, in physical units.
-- `sample_ids` — the identifier of each unique row.
 - `n_runs` — unique rows to evaluate, one model run per row.
 - `n_expanded` — the design size before deduplication.
 - `expanded_to_unique` — the index map from the expanded design back to
@@ -169,7 +168,7 @@ uniform, `mean` and `variance` for a Gaussian, and all four for a truncated
 Gaussian.
 
 `transform` is written in JAX, so it is differentiable with respect to
-`theta`. See [Analyze (Sobol)](/api/analyze) for how to get the derivative of
+`theta`. See [Sobol](/api/sobol) for how to get the derivative of
 an index.
 
 `transform` raises for a problem with categorical parameters. A categorical

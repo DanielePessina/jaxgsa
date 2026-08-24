@@ -171,7 +171,9 @@ def _f_ppf(q: float, d1: float, d2: float) -> float:
 
 
 @lru_cache(maxsize=128)
-def _compute_f_crits(alpha: float, m1: int, m2: int, m3: int, R: int) -> Array:
+def _compute_f_crits(
+    alpha: float, m1: int, m2: int, m3: int, R: int
+) -> tuple[float, float, float]:
     """Precompute F critical values for each order (outside JIT).
 
     Cached because it is expensive and it is pure. Each of the three values
@@ -185,9 +187,16 @@ def _compute_f_crits(alpha: float, m1: int, m2: int, m3: int, R: int) -> Array:
     0018 requires of anything reachable from a compilation cache: no array,
     no list, no container a pytree flattener would walk into. ``alpha``,
     ``m1``, ``m2`` and ``m3`` come from the method's own constants and the
-    basis sizes; ``R`` is a row count. None of them is data. The cached value
-    is a JAX array, which is immutable, so handing the same one to several
-    callers cannot let one of them disturb another.
+    basis sizes; ``R`` is a row count. None of them is data.
+
+    The return value is a plain Python tuple, not a JAX array. A call made
+    from inside ``jax.jit`` traces this function on its first call with a
+    given key, and a ``jnp.array`` built during that trace is a tracer tied
+    to that specific trace. Caching a tracer poisons every later call with
+    the same key: a caller outside the trace inherits a dead tracer and
+    raises ``UnexpectedTracerError``. A tuple of Python floats carries no
+    trace, so the cached value is equally valid inside a trace and outside
+    one, and one caller cannot disturb another.
 
     Args:
         alpha: Significance level of the test.
@@ -197,10 +206,9 @@ def _compute_f_crits(alpha: float, m1: int, m2: int, m3: int, R: int) -> Array:
         R: Number of sample rows.
 
     Returns:
-        f_crits: Critical F values ``[order1, order2, order3]``, shape
-            ``(3,)``.
+        f_crits: Critical F values ``(order1, order2, order3)``.
     """
-    crits = []
+    crits: list[float] = []
     for p in (m1, m2, m3):
         if R > p:
             crits.append(_f_ppf(alpha, float(p), float(R - p)))
@@ -208,7 +216,7 @@ def _compute_f_crits(alpha: float, m1: int, m2: int, m3: int, R: int) -> Array:
             # Fewer samples than basis functions makes the F-test undefined.
             # Set inf so no term at this order can pass the significance test.
             crits.append(float("inf"))
-    return jnp.array(crits)
+    return crits[0], crits[1], crits[2]
 
 
 def term_order_map(

@@ -12,7 +12,7 @@ from jaxgsa._core.result import CIInfo, FieldSpec, ResultSchema, SchemaResult
 from jaxgsa.problem import Problem
 
 
-@dataclass(repr=False)
+@dataclass(frozen=True, repr=False)
 class ShapleyResult(SchemaResult):
     """Shapley-effect sensitivity analysis results.
 
@@ -20,6 +20,17 @@ class ShapleyResult(SchemaResult):
     variance decomposition, alongside the first-order (S1) and total-order
     (ST) indices derived from the same decomposition so the ordering
     ``S1 <= Sh <= ST`` is visible at a glance.
+
+    On a correlated problem with ``backend="hdmr"`` and
+    ``include_correlative=True``, ``Sh`` is not the conditional-variance
+    Shapley effect (Owen 2014; Owen & Prieur 2017). It is an ANCOVA variance
+    allocation: the HDMR structural terms (``Sa``) plus the correlative terms
+    (``Sb``) that Cost-of-play credits back to each parameter through the
+    Shapley formula. The two quantities agree only when the inputs are
+    independent. On an exact linear-Gaussian check (D=2, rho=0.5) the true
+    Shapley effects are ``[0.339, 0.661]`` against this allocation's
+    ``[0.287, 0.713]``; on an asymmetric D=3 check, ``[0.565, 0.409, 0.026]``
+    against ``[0.675, 0.320, 0.005]``. See ``include_correlative`` below.
 
     All indices are normalized by the surrogate's total decomposed variance
     ``sum_u V_u``, so ``Sh.sum(axis=-1)`` is exactly 1 (the Shapley-value
@@ -68,7 +79,9 @@ class ShapleyResult(SchemaResult):
             the indices credit variance shared through input correlation, so
             ``Sh``/``S1``/``ST`` may be negative and the ordering
             ``S1 <= Sh <= ST`` need not hold. Efficiency (``Sh`` sums to 1) is
-            preserved regardless.
+            preserved regardless. ``Sh`` under ``True`` is an ANCOVA variance
+            allocation, not the conditional-variance Shapley effect; see the
+            class docstring.
         Sh_conf: Bootstrap confidence interval for ``Sh``, shape ``(2, ...)``
             for ``[lower, upper]``. ``None`` when ``n_bootstrap=0``. Each
             replicate refits the backend surrogate on a row resample, so the

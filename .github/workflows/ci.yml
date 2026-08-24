@@ -5,6 +5,9 @@ on:
     branches: [master]
   pull_request:
   workflow_dispatch:
+  schedule:
+    # 03:17 UTC daily, for the `slow` tests that pytest deselects by default.
+    - cron: "17 3 * * *"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -44,8 +47,8 @@ jobs:
   # The same suite in double precision.
   #
   # jaxgsa ships no x64 wrapper and sets no flag: it computes in whatever
-  # precision JAX is configured for (ADR 0014). Both settings are therefore
-  # supported configurations, and only one of them was ever run. The
+  # precision JAX is configured for. Both settings are therefore supported
+  # configurations, and only one of them was ever run. The
   # difference is not cosmetic — a warning that correctly fires only in
   # float32, a clip bound that only bites in float64, a dtype-dependent
   # tolerance — and ten tests had quietly accumulated a float32 assumption by
@@ -77,10 +80,9 @@ jobs:
   # reports as its own failure rather than one more red test.
   #
   # Every pre-existing entry must stay bit-identical; any movement is a defect
-  # until it is proved otherwise. See
-  # docs/adr/0009-a-change-with-no-behavioural-target.md. Until this job existed
-  # that rule was enforced by whoever remembered to run the script, which is
-  # how the stored file stayed pinned at 0.8.0.
+  # until it is proved otherwise. Until this job existed that rule was
+  # enforced by whoever remembered to run the script, which is how the
+  # stored file stayed pinned at 0.8.0.
   #
   # This job does NOT compare against the stored file. That file records
   # float32 results to the last bit and those bits depend on the CPU: a dump
@@ -130,9 +132,57 @@ jobs:
       # number. A result that gains or loses a field is a deliberate edit to
       # the public surface, reviewed in the diff like any other, and it must
       # not read as a numerical regression. Moved values still fail.
+      #
+      # A release pull request moves numbers on purpose, so it would pin this
+      # job red and train everyone to merge past it. The `baseline-approved`
+      # label is the way to say "yes, and here is where it is written down":
+      # apply it only when `scripts/baseline/README.md` records what moved and
+      # why, which is that file's own standing rule. The comparison still runs
+      # and still prints the whole diff, so the numbers stay in the log.
       - name: Compare the two dumps
         if: steps.base.outputs.skip != 'true'
+        continue-on-error: ${{ contains(github.event.pull_request.labels.*.name, 'baseline-approved') }}
         run: |
           uv run python scripts/baseline_check.py \
             --baseline /tmp/base.json --current /tmp/head.json \
             --allow-schema-change
+
+      - name: Say that the diff was acknowledged
+        if: steps.base.outputs.skip != 'true' && contains(github.event.pull_request.labels.*.name, 'baseline-approved')
+        run: |
+          echo "The baseline diff above is acknowledged by the" \
+               "'baseline-approved' label. scripts/baseline/README.md must" \
+               "record what moved and why."
+
+  # There is deliberately no job that diffs the tracked
+  # `scripts/baseline/baseline-1.0.0.json` against a fresh dump. One existed
+  # and could never pass: float32 XLA output is not reproducible across
+  # machines, so a file produced on a maintainer's Mac differs from any runner
+  # by 1e-11 to 1e-7 on hundreds of values with no code change involved, and
+  # `baseline_check.py` has no tolerance on purpose. The job above catches what
+  # matters, which is a number this PR moved, by dumping both sides on one
+  # runner. Whether the stored file still matches the code is checked by hand
+  # when it is regenerated: see `scripts/baseline/README.md`.
+
+  # The joint-mode optimal-transport tests that run every Sinkhorn solve at
+  # full sample size. `addopts = "-m 'not slow'"` in pyproject.toml keeps them
+  # out of every ordinary run, because together they cost more than the rest
+  # of the suite. They still have to run somewhere, so they run here: nightly,
+  # and on demand through workflow_dispatch.
+  slow-tests:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install project and dev dependencies
+        run: uv sync --extra dev
+
+      - name: Run the deselected slow tests
+        run: uv run pytest -m slow -v

@@ -160,13 +160,25 @@ class TestOTPOTComparison:
         val = ot.wasserstein_1d(np.array([0.0]), np.array([2.0]), p=2)
         assert val == pytest.approx(4.0), "POT changed wasserstein_1d semantics"
 
-    def test_per_bin_w2_matches_pot(self):
-        """Per-bin 1-D W2^2 vs POT in the exact regime (n_m divides N)."""
+    @pytest.mark.parametrize(
+        ("N", "M", "label"),
+        [
+            (1000, 25, "divisible: n_m = 40 divides N"),
+            (1013, 25, "not divisible: n_m does not divide N (Section 5)"),
+        ],
+    )
+    def test_per_bin_w2_matches_pot(self, N, M, label):
+        """Per-bin 1-D W2^2 vs POT, divisible and not.
+
+        The exact quantile coupling (:func:`_quantile_rank_split`) couples
+        every mass point to at most two class members with a split weight,
+        so it is exact for any class size, not only one that divides N. The
+        prior version of this test covered the divisible case only.
+        """
         ot = pytest.importorskip("ot")
         from jaxgsa._core.partition import _build_class_indices, _class_layout
         from jaxgsa.optimal_transport._analyze import _ot_1d_kernel
 
-        N, M = 1000, 25  # n_m = 40 divides N -> exact quantile coupling
         key = jax.random.PRNGKey(1)
         X = jax.random.uniform(key, (N, 2))
         Y = jnp.sin(3 * X[:, 0]) + 0.3 * jax.random.normal(jax.random.PRNGKey(2), (N,))
@@ -177,7 +189,7 @@ class TestOTPOTComparison:
         # Canonical partition-group layout: (cls_idx, counts) with
         # length-1 leading axes on the shared counts.
         group = (cls_idx, jnp.asarray(sizes)[None, None, :])
-        ot_idx, _, _, _ = _ot_1d_kernel(Y[:, None], all_idx, (group,))
+        ot_idx, _, _, _ = _ot_1d_kernel(Y[:, None], all_idx, (group,), (None,))
 
         y_np = np.asarray(Y, dtype=np.float64)
         V = 2 * np.var(y_np, ddof=1)
@@ -208,12 +220,17 @@ class TestOTPOTComparison:
         emd = ot.emd2(a, b, C)
         prev = np.inf
         for eps in (0.05, 0.02, 0.008):
-            # POT solves on the same max-scaled cost our solver uses
-            # internally, so the eps values mean the same thing.
+            # Pass the cost matrix's own max as the scale, so POT's
+            # convention (dividing by C.max()) and ours mean the same eps.
             ref = ot.sinkhorn2(a, b, C / C.max(), reg=eps, numItermax=20000, stopThr=1e-12)
             ref *= C.max()
             ours, err = _sinkhorn_w2(
-                jnp.asarray(C), log_b, jnp.asarray(eps), jnp.asarray(20000), jnp.asarray(1e-6)
+                jnp.asarray(C),
+                log_b,
+                jnp.asarray(eps),
+                jnp.asarray(20000),
+                jnp.asarray(1e-6),
+                jnp.asarray(C.max()),
             )
             assert float(err) <= 1e-6
             assert float(ours) == pytest.approx(ref, rel=1e-4)
@@ -226,9 +243,10 @@ class TestOTPOTComparison:
         """Padded target columns (zero mass, zeroed cost) change nothing.
 
         Pads are clamped duplicates of a real sample, so the kernel zeroes
-        their cost columns before solving -- otherwise an outlier pad
-        would set the max-cost scale and change the effective epsilon.
-        This mimics that contract with deliberately extreme pad points.
+        their cost columns before solving. This mimics that contract with
+        deliberately extreme pad points, holding the scale fixed across
+        both calls -- the caller's own normalizer (M3), not each cost
+        matrix's own max, so an outlier pad cannot even reach the scale.
         """
         from jaxgsa.optimal_transport._solver import _sinkhorn_w2
 
@@ -243,10 +261,69 @@ class TestOTPOTComparison:
         log_b = np.full(P_pad, -np.inf)
         log_b[:P] = -np.log(P)
 
-        args = (jnp.asarray(0.02), jnp.asarray(5000), jnp.asarray(1e-6))
+        args = (jnp.asarray(0.02), jnp.asarray(5000), jnp.asarray(1e-6), jnp.asarray(C.max()))
         ref, _ = _sinkhorn_w2(jnp.asarray(C), jnp.log(jnp.full(P, 1.0 / P)), *args)
         padded, _ = _sinkhorn_w2(jnp.asarray(C_pad), jnp.asarray(log_b), *args)
         assert float(padded) == pytest.approx(float(ref), abs=1e-6)
+
+    def test_multivariate_mode_matches_pot_exact_emd(self):
+        """T2: the whole 'multivariate' pipeline against POT's exact emd2.
+
+        Nothing in the suite checked the point-cloud modes against an
+        external oracle end to end (only the solver alone, above), which is
+        exactly the gap M3 slipped through: the Sinkhorn regularization was
+        scaled by each class's own max cost instead of the index's own
+        normalizer, biasing 'ot' by tens of percent, and no test caught it.
+        This drives epsilon small enough that the entropic bias is under
+        the tolerance, and cross-checks jaxgsa's whole per-class weighting
+        and normalization against POT's exact transport, not just the
+        solver kernel.
+        """
+        ot = pytest.importorskip("ot")
+
+        N, M = 300, 5
+        rng = np.random.default_rng(7)
+        X = rng.uniform(size=(N, 2))
+        Y = np.stack(
+            [
+                np.sin(3 * X[:, 0]) + 0.2 * rng.normal(size=N),
+                0.5 * X[:, 0] + X[:, 1] ** 2 + 0.2 * rng.normal(size=N),
+            ],
+            axis=1,
+        )
+        problem = jaxgsa.Problem(("x1", "x2"), ((0.0, 1.0), (0.0, 1.0)))
+        # epsilon is deliberately small (tight entropic bias) so 20000
+        # iterations do not always reach tol; that non-convergence warning
+        # is expected here and not what this test checks.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=jaxgsa.JaxgsaWarning)
+            result = analyze(
+                problem,
+                jnp.asarray(X),
+                jnp.asarray(Y),
+                mode="multivariate",
+                n_partitions=M,
+                epsilon=0.002,
+                max_iter=20000,
+                tol=1e-6,
+                verbose=False,
+            )
+
+        V = 2.0 * np.var(Y, axis=0, ddof=1).sum()
+        edges = np.floor(np.linspace(0.0, N, M + 1)).astype(np.int64)
+        ref = np.zeros(2)
+        for d in range(2):
+            order = np.argsort(X[:, d])
+            for m in range(M):
+                cls = order[edges[m] : edges[m + 1]]
+                w = cls.shape[0] / N
+                a = np.full(N, 1.0 / N)
+                b = np.full(cls.shape[0], 1.0 / cls.shape[0])
+                C = ((Y[:, None, :] - Y[cls][None, :, :]) ** 2).sum(-1)
+                ref[d] += w * ot.emd2(a, b, C)
+            ref[d] /= V
+
+        np.testing.assert_allclose(np.asarray(result.ot), ref, atol=0.01)
 
 
 class TestOTAnalytic:
@@ -301,14 +378,33 @@ class TestOTAnalytic:
             2.0 * np.asarray(result.advective), ishigami.ANALYTICAL_S1, atol=0.05
         )
 
-    def test_ishigami_published_anchor(self, ishigami_data):
-        """Published Var(Y)-normalized W2^2 for Ishigami X1 is ~0.423.
+    def test_ishigami_x1_matches_pot_exact_emd(self, ishigami_data):
+        """T2: jaxgsa's ot(x1) on the Ishigami benchmark against POT's exact emd2.
 
-        jaxgsa normalizes by 2*Var(Y), so the anchor is compared at 2*ot.
+        A previous version of this test asserted a literal ``0.423`` labeled
+        "Published", with no citation anywhere in the repository or the
+        commit that added it, and no reviewer could find it in the OT
+        paper's own Ishigami table. An unsourced number is not an oracle,
+        so this replaces it with a live comparison against POT on the same
+        benchmark data, at the default ``n_partitions``.
         """
+        ot = pytest.importorskip("ot")
         X, Y = ishigami_data
         result = analyze(ishigami.PROBLEM, X, Y)
-        assert 2.0 * float(result.ot[0]) == pytest.approx(0.423, abs=0.03)
+
+        N = X.shape[0]
+        M = min(25, N // 2)
+        y_np = np.asarray(Y, dtype=np.float64)
+        V = 2.0 * np.var(y_np, ddof=1)
+        order = np.argsort(np.asarray(X[:, 0]))
+        edges = np.floor(np.linspace(0.0, N, M + 1)).astype(np.int64)
+        ref = 0.0
+        for m in range(M):
+            cls = order[edges[m] : edges[m + 1]]
+            ref += cls.shape[0] / N * ot.wasserstein_1d(y_np, y_np[cls], p=2)
+        ref /= V
+
+        assert float(result.ot[0]) == pytest.approx(ref, rel=1e-3)
 
     def test_mixed_uniform_gaussian_marginals(self):
         """Rank-based conditioning handles mixed input marginals unchanged."""
@@ -359,6 +455,7 @@ class TestOTAnalytic:
 
 
 class TestOTPointCloud:
+    @pytest.mark.slow
     def test_multivariate_decomposition_sums_to_total(self, multi_output_data):
         X, Y2, _ = multi_output_data
         result = analyze(ishigami.PROBLEM, X, Y2, mode="multivariate", n_partitions=10)
@@ -383,6 +480,7 @@ class TestOTPointCloud:
         assert np.all(joint_ot > sep_ot - 1e-4)
         np.testing.assert_allclose(joint_ot, sep_ot, atol=0.12)
 
+    @pytest.mark.slow
     def test_standardize_outputs_matters_for_mismatched_scales(self, multi_output_data):
         X, Y2, _ = multi_output_data
         Y_scaled = Y2.at[:, 1].multiply(1e4)
@@ -426,10 +524,17 @@ class TestOTBootstrap:
         assert result.ot_conf.shape == (2, 2, 3)
 
     def test_point_estimate_independent_of_bootstrap(self, ishigami_data):
+        """The two calls compile the scanned kernel for a different replicate
+        count (1 vs. 16), and XLA is free to fuse a reduction differently per
+        compiled shape even though replicate 0 is the identical computation
+        both times, so this compares at a tight float32 tolerance rather than
+        bit-for-bit -- the same one-ULP hazard as ``indices`` vs. ``analyze``
+        below, not a dependence on the bootstrap draws themselves.
+        """
         X, Y = ishigami_data
         r0 = analyze(ishigami.PROBLEM, X, Y)
         rb = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=15, key=jax.random.key(0))
-        np.testing.assert_array_equal(np.asarray(r0.ot), np.asarray(rb.ot))
+        np.testing.assert_allclose(np.asarray(r0.ot), np.asarray(rb.ot), rtol=1e-6, atol=1e-7)
 
     def test_bootstrap_without_a_key_raises(self, ishigami_data):
         """Tier T4. A bootstrap needs a key, and an int seed is not one."""
@@ -483,6 +588,7 @@ class TestOTBootstrap:
         assert r1.ot_conf is not None and r2.ot_conf is not None
         assert not np.array_equal(np.asarray(r1.ot_conf), np.asarray(r2.ot_conf))
 
+    @pytest.mark.slow
     def test_multivariate_bootstrap(self, multi_output_data):
         X, Y2, _ = multi_output_data
         result = analyze(
@@ -541,10 +647,14 @@ class TestOTEdgeCases:
         X, Y = ishigami_data
         result = analyze(ishigami.PROBLEM, X, Y, dummy=True, key=jax.random.key(0))
         assert result.ot_dummy is not None
-        assert result.ot_dummy.shape == ()
+        # All three ishigami parameters are continuous, so they share one
+        # floor, broadcast to (D,) -- same shape as ot (M4).
+        assert result.ot_dummy.shape == (3,)
+        dummy = np.asarray(result.ot_dummy)
+        np.testing.assert_allclose(dummy, dummy[0])
         # A synthetic independent input must sit far below real inputs.
-        assert float(result.ot_dummy) < float(np.asarray(result.ot).min())
-        assert float(result.ot_dummy) < 0.05
+        assert float(dummy[0]) < float(np.asarray(result.ot).min())
+        assert float(dummy[0]) < 0.05
 
     def test_dummy_multivariate_mode(self, multi_output_data):
         X, Y2, _ = multi_output_data
@@ -558,7 +668,7 @@ class TestOTEdgeCases:
             key=jax.random.key(0),
         )
         assert result.ot_dummy is not None
-        assert result.ot_dummy.shape == ()
+        assert result.ot_dummy.shape == (3,)
 
 
 class TestOTValidation:
@@ -658,15 +768,15 @@ class TestOTXarray:
         assert list(ds.coords["time"].values) == [0.5, 1.0]
 
 
-class TestQuantileRankIndices:
+class TestQuantileRankSplit:
     def test_matches_float64_host_reference_exactly(self):
         """The in-kernel int32 long division must match float64 exactly.
 
         Includes boundary-heavy cases like (N=1000, c=800), where the true
-        value (i + 0.5) * c / N hits exact integers and a naive float32
-        product can floor to the wrong index.
+        value i * c / N hits exact integers and a naive float32 product can
+        floor to the wrong index.
         """
-        from jaxgsa.optimal_transport._analyze import _quantile_rank_indices
+        from jaxgsa.optimal_transport._analyze import _quantile_rank_split
 
         rng = np.random.default_rng(0)
         for N in (7, 100, 1000, 1024, 8000, 100_000):
@@ -675,11 +785,38 @@ class TestQuantileRankIndices:
                 | {int(s) for s in rng.integers(0, N + 1, size=8)}
             )
             counts = np.array([s for s in sizes if s <= N], dtype=np.int64)
-            i_grid = np.arange(N, dtype=np.float64) + 0.5
-            ref = np.floor(i_grid * counts[:, None].astype(np.float64) / N).astype(np.int64)
-            ref = np.minimum(ref, np.maximum(counts[:, None] - 1, 0))
-            got = np.asarray(_quantile_rank_indices(jnp.asarray(counts), N))
-            np.testing.assert_array_equal(got, ref)
+            i_grid = np.arange(N, dtype=np.float64)
+            c = counts[:, None].astype(np.float64)
+            q = np.floor(i_grid * c / N).astype(np.int64)
+            r = (i_grid * c - q * N).astype(np.int64)
+            j_left_ref = np.minimum(q, np.maximum(counts[:, None] - 1, 0))
+            j_right_ref = np.minimum(q + 1, np.maximum(counts[:, None] - 1, 0))
+            width_left = np.minimum(N - r, counts[:, None])
+            frac_left_ref = width_left / np.maximum(counts[:, None], 1)
+
+            j_left, j_right, frac_left = _quantile_rank_split(jnp.asarray(counts), N)
+            np.testing.assert_array_equal(np.asarray(j_left), j_left_ref)
+            np.testing.assert_array_equal(np.asarray(j_right), j_right_ref)
+            np.testing.assert_allclose(np.asarray(frac_left), frac_left_ref, atol=1e-6)
+
+    def test_recovers_the_exact_1d_wasserstein_when_not_divisible(self):
+        """The split weights reproduce POT's exact emd2, class size not dividing N."""
+        ot = pytest.importorskip("ot")
+        from jaxgsa.optimal_transport._analyze import _quantile_rank_split
+
+        N = 37
+        c = 6  # 37 / 6 does not divide evenly
+        rng = np.random.default_rng(4)
+        y = np.sort(rng.normal(size=N))
+        cond = np.sort(rng.normal(loc=1.0, size=c))
+
+        j_left, j_right, frac_left = _quantile_rank_split(jnp.asarray([c]), N)
+        j_left, j_right, frac_left = (np.asarray(a)[0] for a in (j_left, j_right, frac_left))
+        q_left, q_right = cond[j_left], cond[j_right]
+        got = (frac_left * (y - q_left) ** 2 + (1.0 - frac_left) * (y - q_right) ** 2).mean()
+
+        ref = ot.wasserstein_1d(y, cond, p=2)
+        assert got == pytest.approx(ref, rel=1e-6)
 
 
 class TestOTCorrelatedInputs:
@@ -902,8 +1039,12 @@ class TestIndicesPureCore:
         ot, _, _ = jaxgsa.optimal_transport.indices(ishigami.PROBLEM, X, Y)
         with_ci = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=4, key=jax.random.key(0))
 
-        # The interval is centred on exactly this estimate.
-        np.testing.assert_array_equal(np.asarray(ot), np.asarray(with_ci.ot))
+        # The interval is centred on exactly this estimate. Compared at a
+        # tight float32 tolerance, not bit-for-bit: the two calls compile
+        # the scanned kernel for a different replicate count (1 vs. 5), and
+        # XLA is free to fuse a reduction differently per compiled shape
+        # even though replicate 0 is the identical computation both times.
+        np.testing.assert_allclose(np.asarray(ot), np.asarray(with_ci.ot), rtol=1e-6, atol=1e-7)
         with pytest.raises(TypeError):
             cast(Any, jaxgsa.optimal_transport.indices)(
                 ishigami.PROBLEM, X, Y, n_bootstrap=4, key=jax.random.key(0)
@@ -1055,7 +1196,8 @@ class TestS1AndAboveDummy:
         assert above[0] > 0.1
         assert above[1] > 0.1
 
-    def test_above_dummy_broadcasts_the_floor_in_trajectory_mode(self, multi_output_data):
+    @pytest.mark.slow
+    def test_above_dummy_matches_ots_shape_in_trajectory_mode(self, multi_output_data):
         X, Y2, Y3 = multi_output_data
         result = analyze(
             ishigami.PROBLEM,
@@ -1068,9 +1210,10 @@ class TestS1AndAboveDummy:
         )
         above = np.asarray(result.above_dummy)
         assert above.shape == np.asarray(result.ot).shape  # (K, D)
+        assert np.asarray(result.ot_dummy).shape == np.asarray(result.ot).shape  # (K, D)
         np.testing.assert_allclose(
             above,
-            np.maximum(np.asarray(result.ot) - np.asarray(result.ot_dummy)[..., None], 0.0),
+            np.maximum(np.asarray(result.ot) - np.asarray(result.ot_dummy), 0.0),
         )
 
     def test_fields_reach_the_dataset(self, ishigami_data):

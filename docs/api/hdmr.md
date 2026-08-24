@@ -58,20 +58,20 @@ jaxgsa.hdmr.analyze
     output: N=2000 runs, T=1 x K=1 output slice
     invalid: none found in 2000 rows (policy 'raise')
   timing:
-    fit + estimator (includes compile on the first call): 1.744 s
+    fit + estimator (includes compile on the first call): 1.559 s
     maxorder: 2
     slice_chunk_size: auto (resolved from the memory budget)
     batch_size: auto (resolved from the memory budget)
   results: top 3 of 3 parameters by ST
-    1. x1  ST=0.5364
-    2. x2  ST=0.379
-    3. x3  ST=0.2428
+    1. x1  ST=0.545
+    2. x2  ST=0.3904
+    3. x3  ST=0.25
 
 terms  ('x1', 'x2', 'x3', 'x1/x2', 'x1/x3', 'x2/x3')
 Sa     [0.3016 0.3772 0.0018 0.0057 0.2304 0.004 ]
 Sb     [-0.0072 -0.0026 -0.0002  0.0033  0.0112  0.0028]
 select [1. 1. 0. 0. 1. 0.]
-S.sum  0.9111435958754145
+S.sum  0.9279446005821228
 ```
 
 The per-term layout is what makes this method different from PCE. `x1/x3` carries
@@ -82,7 +82,7 @@ are independent here, so every `Sb` sits near zero, as it should.
 `select` is the F-test significance count per term. `x3`, `x1/x2` and `x2/x3`
 scored 0 out of 1 output slice, so the F-test did not keep them.
 
-`S.sum() = 0.911` is the precondition check, not a decoration. Li et al. attach
+`S.sum() = 0.928` is the precondition check, not a decoration. Li et al. attach
 their totals to the condition that the per-term `S` values sum to about 1; the
 shortfall is unexplained variance. Read it before ranking anything.
 
@@ -120,8 +120,8 @@ batch would exceed the memory budget (`jaxgsa.config.set_memory_budget`).
 `result.streamed` reports which path ran. Read it when a fit takes much longer
 than you expect: `True` means the budget engaged.
 
-The HDMR estimate is unchanged in 0.9. The PCE one was corrected, so a PCE fit
-can now start streaming at a different size than before.
+See [`jaxgsa.pce`](/api/pce) for the equivalent memory estimate there; the two
+methods size their single-pass thresholds independently.
 
 ## Confidence intervals
 
@@ -144,7 +144,7 @@ trailing `D` axis.
 | --- | --- | --- |
 | `Sa` | `(..., n_terms)` | Structural variance fraction per term, the part independent of other inputs. |
 | `Sb` | `(..., n_terms)` | Correlative contribution per term. Near zero under independence. A non-zero value flags variance shared through input correlation, and it can be negative. |
-| `S` | `(..., n_terms)` | `Sa + Sb`. |
+| `S` | `(..., n_terms)` | `Sa + Sb`, exactly. Measured against the fitted expansion (Li et al. 2010), not against `Y` itself: this is why the identity holds exactly rather than approximately, and it is what `S.sum()` reads for the Eq. (24) reliability check. SALib's `ancova` instead measures against `Y`, which differs by a few percent under correlated inputs. |
 | `ST` | `(..., D)` | SCSA total per parameter. See the warning below. |
 | `terms` | | Human-readable term labels, e.g. `("x1", "x2", "x1/x2")`. Interaction terms join names with `/`. |
 | `select` | `(n_terms,)` | F-test significance count per term, summed over the `T*K` output slices, so the maximum is `T*K`. A low count marks a term the F-test deems insignificant. |

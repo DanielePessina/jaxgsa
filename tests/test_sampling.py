@@ -36,7 +36,6 @@ def test_sample_returns_unique_rows():
     assert result.n_runs >= 100
     assert result.samples.shape == (result.n_runs, p.num_vars)
     assert np.unique(result.samples, axis=0).shape[0] == result.n_runs
-    assert result.sample_ids.tolist() == list(range(result.n_runs))
     assert result.expanded_to_unique.shape == (result.n_expanded,)
     assert result.expanded_to_unique.max() < result.n_runs
     assert result.n_params == p.num_vars
@@ -286,7 +285,6 @@ class TestSamplingResultDownsample:
 
         np.testing.assert_array_equal(sr_small.samples, sr_direct.samples)
         np.testing.assert_array_equal(sr_small.expanded_to_unique, sr_direct.expanded_to_unique)
-        np.testing.assert_array_equal(sr_small.sample_ids, sr_direct.sample_ids)
         assert sr_small.n_expanded == sr_direct.n_expanded
         assert sr_small.base_n == sr_direct.base_n == K
 

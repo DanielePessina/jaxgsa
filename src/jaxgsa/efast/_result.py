@@ -9,7 +9,7 @@ from jaxgsa._core.result import FieldSpec, ResultSchema, SchemaResult
 from jaxgsa.problem import Problem
 
 
-@dataclass(repr=False)
+@dataclass(frozen=True, repr=False)
 class EFASTResult(SchemaResult):
     """Extended FAST sensitivity analysis results.
 
@@ -39,8 +39,8 @@ class EFASTResult(SchemaResult):
     ST: Array
     problem: Problem
     invalid: InvalidReport
-    omega_0: int = 0
-    M: int = 4
+    omega_0: int
+    M: int
 
     _schema = ResultSchema(
         primary="S1",

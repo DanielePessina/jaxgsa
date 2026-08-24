@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Validate namespace coverage for the public jaxgsa surface."""
+"""Validate documentation coverage for the public jaxgsa surface.
+
+Two levels. The first checks that every name in ``jaxgsa.__all__`` has a
+heading or anchor in ``docs/api/index.md``. The second checks that every
+public name each of those namespaces exports is written down somewhere under
+``docs/``, so a new estimator keyword or result field cannot ship undocumented.
+
+The second level reads the installed package rather than the source tree,
+because a namespace re-exports names it does not define.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +19,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 API_DOC = ROOT / "docs" / "api" / "index.md"
+DOCS_DIR = ROOT / "docs"
+SRC = ROOT / "src" / "jaxgsa"
 INIT_FILE = ROOT / "src" / "jaxgsa" / "__init__.py"
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 HTML_ID_RE = re.compile(r'<a\s+id="([^"]+)"', re.IGNORECASE)
@@ -28,8 +39,8 @@ def _normalize(text: str) -> str:
     return " ".join(text.split())
 
 
-def _load_exports() -> list[str]:
-    tree = ast.parse(INIT_FILE.read_text(encoding="utf-8"), filename=str(INIT_FILE))
+def _load_exports(path: Path = INIT_FILE) -> list[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in tree.body:
         if isinstance(node, ast.Assign):
             for target in node.targets:
@@ -42,7 +53,7 @@ def _load_exports() -> list[str]:
                             raise ValueError("__all__ entries must be literal strings")
                         exports.append(elt.value)
                     return exports
-    raise ValueError("Could not find __all__ in src/jaxgsa/__init__.py")
+    raise ValueError(f"Could not find __all__ in {path}")
 
 
 def _build_required_entries() -> list[str]:
@@ -84,6 +95,42 @@ def _entry_variants(entry: str) -> set[str]:
     return {variant for variant in variants if variant}
 
 
+def _member_coverage() -> list[str]:
+    """Return ``"namespace.name"`` for every public member no doc page names.
+
+    Reads each namespace's ``__all__`` with ``ast``, never by importing it:
+    the docs job runs this script with a bare interpreter and does not install
+    the package.
+
+    Returns:
+        Sorted list of undocumented members. Empty when every public name of
+        every exported namespace appears in some file under ``docs/``.
+    """
+    corpus = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted(DOCS_DIR.rglob("*.md"))
+        if ".vitepress" not in path.parts
+    )
+
+    undocumented: list[str] = []
+    for namespace in _load_exports():
+        package = SRC / namespace / "__init__.py"
+        module = SRC / f"{namespace}.py"
+        source = package if package.exists() else module
+        if not source.exists():
+            continue  # a class or function re-exported at the top level
+        try:
+            members = _load_exports(source)
+        except ValueError:
+            continue  # a namespace with no __all__ declares no public surface
+        for member in members:
+            if member.startswith("_"):
+                continue
+            if member not in corpus:
+                undocumented.append(f"{namespace}.{member}")
+    return sorted(undocumented)
+
+
 def main() -> int:
     required_entries = _build_required_entries()
     doc_tokens, normalized_doc = _load_doc_tokens()
@@ -101,9 +148,23 @@ def main() -> int:
             print(f"  - {entry}", file=sys.stderr)
         return 1
 
+    undocumented = _member_coverage()
+    if undocumented:
+        print("API docs coverage check failed.", file=sys.stderr)
+        print("Public names no page under docs/ mentions:", file=sys.stderr)
+        for entry in undocumented:
+            print(f"  - {entry}", file=sys.stderr)
+        print(
+            "Document each on its method page, or drop it from that "
+            "namespace's __all__ if it was never meant to be public.",
+            file=sys.stderr,
+        )
+        return 1
+
     print(
         f"API namespace coverage OK: {len(required_entries)} entries documented "
-        f"in {API_DOC.relative_to(ROOT)}"
+        f"in {API_DOC.relative_to(ROOT)}, and every public member of each is "
+        "named under docs/"
     )
     return 0
 

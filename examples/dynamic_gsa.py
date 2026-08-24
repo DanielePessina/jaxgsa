@@ -293,9 +293,11 @@ def _dgsm_md(mo):
     ## DGSM bounds over time
 
     DGSM computes derivative-based bounds on the total Sobol index $S_T$
-    from partial derivatives via reverse-mode autodiff. For a time-series
-    model, the unbatched function maps $(D,) \to (T,)$, so DGSM treats
-    each time step as an independent output ($K = T$).
+    from partial derivatives via autodiff. For a time-series model, the
+    unbatched function maps $(D,) \to (T,)$, so DGSM treats each time step
+    as an independent output ($K = T$). jaxgsa picks the autodiff mode by
+    shape: forward mode when there are more output slices than inputs
+    ($T \times K > D$, the case here), reverse mode otherwise.
 
     The result has `upper_bound` and `lower_bound` with shape $(T, D)$.
     Plotting these as shaded regions shows that the DGSM bracket

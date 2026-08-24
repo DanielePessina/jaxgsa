@@ -102,7 +102,7 @@ summary.
 | Argument | Default | What it changes |
 | --- | --- | --- |
 | `backend` | `"pce"` | Which surrogate supplies the variance decomposition. `"pce"` reads subset variances off orthonormal polynomial coefficients. `"hdmr"` fits B-spline component functions and also separates correlation-induced variance, which makes it the only route to a correlated problem here. |
-| `include_correlative` | `False` | HDMR only. Allocates `Sa + Sb` instead of `Sa` alone, which keeps the allocation meaningful under correlated inputs. Passing it with `backend="pce"` raises. |
+| `include_correlative` | `False` | HDMR only. Allocates `Sa + Sb` instead of `Sa` alone, which keeps the allocation meaningful under correlated inputs. Passing it with `backend="pce"` raises. `Sh` under `True` is an ANCOVA variance allocation, not the conditional-variance Shapley effect (Owen 2014; Owen & Prieur 2017): on an exact linear-Gaussian check (D=2, rho=0.5) the true Shapley effects are `[0.339, 0.661]` against this allocation's `[0.287, 0.713]`. Under `False` on a correlated problem the reported `Sh` is the structural share `Sa` renormalized to sum to 1, which drops the correlative share; both `jaxgsa.shapley.analyze` and `HDMRResult.shapley()` warn about it, and the warning is raised once, by `HDMRResult.shapley()`. |
 | `on_invalid` | `"raise"` | Named here rather than left to `backend_kwargs` on purpose: naming it forwards it to exactly one backend `analyze`, which applies the policy exactly once. `ShapleyResult.invalid` is that backend's report. |
 | `n_bootstrap` | `0` | Row resamples on `Sh`, `S1` and `ST`. See below. |
 | `key` | `None` | A `jax.random` key. Required when `n_bootstrap > 0`. |

@@ -273,10 +273,13 @@ of distribution parameters to it. See
 runs the same estimator as `analyze`, but it checks nothing and builds no
 result, so it works inside `jax.jit`, `jax.vmap` and `jax.grad`. Pair it with
 `transform` to differentiate an index with respect to the input distribution
-parameters. See [Analyze (Sobol)](/api/analyze).
+parameters. See [Sobol](/api/sobol).
 
-`morris`, `efast` and `dgsm` each expose an `indices()` with the same deal:
-raw arrays, no checks, no result object, safe under a JAX transformation.
+Eleven of the thirteen methods expose an `indices()` with the same deal: raw
+arrays, no checks, no result object, safe under a JAX transformation. Only
+`kucherenko` and `vkoga` do not. `kucherenko` is host NumPy from end to end,
+which is what makes it the fastest method here, and `vkoga`'s index stage is
+a host quasi-Monte-Carlo loop. Neither has a traceable core to export.
 
 ## Confidence intervals
 
@@ -537,6 +540,3 @@ explicit per-call value always wins.
 
 The [configuration guide](/guide/configuration) has the full list of what
 reads the budget, the unit rules, and worked demos.
-
-See the [migration guide](/guide/migration) for direct API
-replacements.

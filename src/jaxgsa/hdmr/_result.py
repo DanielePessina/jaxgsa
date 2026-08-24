@@ -1,6 +1,7 @@
 """Defines the HDMRResult dataclass for RS-HDMR sensitivity analysis results."""
 
 import itertools
+import warnings
 from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, TypedDict
@@ -11,6 +12,7 @@ from jax import Array
 from jaxgsa._core.invalid import InvalidReport
 from jaxgsa._core.result import CIInfo, FieldSpec, ResultSchema, SchemaResult
 from jaxgsa._core.surrogate import SurrogateResult, _PredictPlan
+from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.problem import Problem
 
 if TYPE_CHECKING:
@@ -32,7 +34,7 @@ class _HDMRFit(TypedDict):
     maxorder: int
 
 
-@dataclass(repr=False)
+@dataclass(frozen=True, repr=False)
 class HDMRResult(SchemaResult, SurrogateResult):
     """RS-HDMR (Random Sampling High-Dimensional Model Representation) results.
 
@@ -66,7 +68,19 @@ class HDMRResult(SchemaResult, SurrogateResult):
             near zero when inputs are independent. A non-zero value flags
             variance shared through input correlation, and it can be
             negative.
-        S: Total contribution per term, ``S = Sa + Sb``, same shape as ``Sa``.
+        S: Total contribution per term, ``S = Sa + Sb`` exactly, same shape as
+            ``Sa``. Li et al. (2010) define ``S`` as ``Cov(f_u, f_hat) /
+            Var(Y)``, measured against the fitted expansion ``f_hat = f0 +
+            sum of every term``, not against ``Y`` itself. ``Sa`` and ``Sb``
+            are already defined against the fit, so this keeps all three
+            consistent and makes ``S = Sa + Sb`` an identity rather than an
+            approximation. SALib's ``ancova`` instead measures ``S`` against
+            ``Y``, ``Cov(f_u, Y) / Var(Y)``, which differs by ``Cov(f_u, Y -
+            f_hat) / Var(Y)``: zero for a perfect fit, and up to a few
+            percent otherwise. ``S.sum()`` (the Eq. (24) reliability check;
+            see :attr:`ST`) reads this fitted-expansion sum, which equals
+            ``Var(f_hat) / Var(Y)``, the surrogate's explained-variance
+            fraction.
         ST: SCSA total per parameter, shape ``(D,)`` / ``(K, D)`` /
             ``(T, K, D)``. It sums ``S = Sa + Sb`` over every term that
             contains the parameter: ``ST_i = sum over u containing i of
@@ -217,18 +231,24 @@ class HDMRResult(SchemaResult, SurrogateResult):
         return _hdmr_predict_plan(self, X)
 
     def shapley(self, *, include_correlative: bool = False) -> "ShapleyResult":
-        """Compute Shapley effects from this fitted HDMR decomposition.
+        """Compute a Shapley-style variance allocation from this HDMR fit.
 
         Allocates each fitted ANCOVA term's variance share equally among the
-        parameters that take part in that term. The per-parameter Shapley
-        effects sum to one.
+        parameters that take part in that term. The per-parameter shares sum
+        to one. On a correlated problem this is an ANCOVA variance
+        allocation, not the conditional-variance Shapley effect (Owen 2014;
+        Owen & Prieur 2017): an exact linear-Gaussian check gives true Shapley
+        effects ``[0.339, 0.661]`` (D=2, rho=0.5) against this allocation's
+        ``[0.287, 0.713]``. See :class:`jaxgsa.shapley.ShapleyResult`.
 
         Args:
             include_correlative: When ``True``, allocate the total ANCOVA
                 contribution ``Sa + Sb`` (structural plus correlative
                 fold-in). That keeps the allocation meaningful under
                 correlated inputs. Defaults to ``False``, which allocates the
-                structural part ``Sa`` only.
+                structural part ``Sa`` only and warns when the problem
+                declares a correlation, because the correlative share it
+                drops is then not zero.
 
         Returns:
             ShapleyResult with per-parameter effects ``Sh`` (plus ``S1`` and
@@ -236,26 +256,41 @@ class HDMRResult(SchemaResult, SurrogateResult):
 
         Raises:
             ValueError: If this result carries no fitted surrogate state.
+
+        Warns:
+            JaxgsaWarning: If the problem declares a correlation and
+                ``include_correlative`` is ``False``.
         """
         from jaxgsa.shapley._engine import _shapley_result_from_variances, build_membership
 
         fit = self._fit
         if fit is None:
             raise ValueError("HDMRResult does not contain fitted surrogate state")
+        if self.problem.has_correlated_inputs and not include_correlative:
+            warnings.warn(
+                "HDMRResult.shapley: include_correlative=False on a "
+                "correlated problem allocates the structural ANCOVA share "
+                "(Sa) only, renormalized to sum to 1. That drops the "
+                "correlative share (Sb) the correlation carries, so Sh reads "
+                "too high for parameters whose correlation opposes their "
+                "direct effect and too low otherwise. Pass "
+                "include_correlative=True to fold the correlative share back "
+                "in.",
+                stacklevel=2,
+                category=JaxgsaWarning,
+            )
         partial = self.Sa + self.Sb if include_correlative else self.Sa
         subsets: list[tuple[int, ...]] = [(i,) for i in range(self.problem.num_vars)]
         subsets.extend(self._c2)
         subsets.extend(self._c3)
         membership = build_membership(subsets, self.problem.num_vars)
         # For HDMR the per-term sum doubles as the explained-variance
-        # diagnostic (indices are already output-variance fractions);
-        # compute it once and reuse it as the normalizer.
+        # diagnostic: indices are already output-variance fractions.
         explained = partial.sum(axis=-1)
         return _shapley_result_from_variances(
             partial,
             membership,
             explained,
-            total=explained,
             problem=self.problem,
             backend="hdmr",
             order=fit["maxorder"],

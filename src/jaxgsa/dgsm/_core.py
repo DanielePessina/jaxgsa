@@ -9,17 +9,17 @@ about a non-finite row, and a tracer has no value to decide on.
 Both entry points share this module, so the pure core and the policy path run
 one copy of the estimator rather than two that have to be kept equal by hand.
 
-The Jacobian mode is chosen here too. See
-``docs/adr/0005-autodiff-mode-selection.md``: one reverse pass yields one
-output's gradient and one forward pass yields one input's column, so a
-``(N, T, K)`` Jacobian costs ``T*K`` reverse passes or ``D`` forward passes.
-The cheaper of the two is picked from those two numbers, both of which are
-shapes.
+The Jacobian mode is chosen here too. One reverse pass yields one output's
+gradient and one forward pass yields one input's column, so a ``(N, T, K)``
+Jacobian costs ``T*K`` reverse passes or ``D`` forward passes. The cheaper of
+the two is picked from those two numbers, both of which are shapes.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Hashable, Iterator
+from dataclasses import dataclass
+from functools import lru_cache
 
 import jax
 import jax.numpy as jnp
@@ -34,8 +34,8 @@ from jaxgsa.problem import Problem
 # exists to bound is the Jacobian block, T*K*D floats per row where the output
 # is one, so the model prices everything in multiples of it: the block itself,
 # the elementwise square the moment sums build from it, and the masked copy
-# with its square that the policy loop in ``analyze`` keeps alongside (see
-# ``_compute_moments``). The primal outputs are T*K floats per row, a factor D
+# with its square that the same loop keeps alongside (see
+# ``jacobian_sums``). The primal outputs are T*K floats per row, a factor D
 # smaller, so they are left out. Modelled from the code, not measured — the
 # same convention as sobol's ``slice_elements`` live-copy count and
 # borgonovo's ``_KDE_LIVE_TENSORS``.
@@ -76,6 +76,28 @@ def _fn_with_aux(fn: Callable) -> Callable:
     return wrapped
 
 
+def slice_count(out: object) -> int:
+    """Return ``T*K``, the number of scalar slices in one evaluated ``fn`` output.
+
+    Shared by :func:`n_output_slices`, which builds ``out`` itself with
+    :func:`jax.eval_shape`, and by
+    :func:`jaxgsa.dgsm._analyze._check_point_callable`, which already has an
+    ``out`` from its own shape check and would otherwise trace the same row a
+    second time to learn the same number.
+
+    Args:
+        out: A pytree of shaped leaves, such as the result of
+            :func:`jax.eval_shape`.
+
+    Returns:
+        The number of scalar output slices, at least 1.
+    """
+    total = 1
+    for leaf in jax.tree.leaves(out):
+        total *= max(1, int(np.prod(leaf.shape, dtype=np.int64)))
+    return total
+
+
 def n_output_slices(fn: Callable, X: Array) -> int:
     """Return ``T*K``, the number of output slices one call of ``fn`` produces.
 
@@ -91,21 +113,16 @@ def n_output_slices(fn: Callable, X: Array) -> int:
         The number of scalar output slices, at least 1.
     """
     row = jax.ShapeDtypeStruct((int(X.shape[1]),), X.dtype)
-    out = jax.eval_shape(fn, row)
-    total = 1
-    for leaf in jax.tree.leaves(out):
-        total *= max(1, int(np.prod(leaf.shape, dtype=np.int64)))
-    return total
+    return slice_count(jax.eval_shape(fn, row))
 
 
 def jacobian_mode(*, n_inputs: int, n_outputs: int) -> str:
     """Return the autodiff mode the two shape numbers select.
 
     Reverse mode costs one pass per output slice and forward mode costs one
-    pass per input (``docs/adr/0005-autodiff-mode-selection.md``), so forward
-    wins when there are more output slices than inputs. The tie goes to
-    reverse mode: the costs are equal there, and reverse is what every
-    scalar-output call has always run.
+    pass per input, so forward wins when there are more output slices than
+    inputs. The tie goes to reverse mode: the costs are equal there, and
+    reverse is what every scalar-output call has always run.
 
     Args:
         n_inputs: ``D``, the number of parameters.
@@ -117,12 +134,44 @@ def jacobian_mode(*, n_inputs: int, n_outputs: int) -> str:
     return "forward" if n_outputs > n_inputs else "reverse"
 
 
+@lru_cache(maxsize=32)
+def _get_jacobian_kernel(fn: Callable, n_inputs: int, n_outputs: int) -> Callable:
+    """Build and cache the jitted, vmapped Jacobian-with-primal kernel for one model.
+
+    ``jacobian_of`` returns a fresh closure on every call, and wrapping a
+    fresh closure in ``jax.jit`` builds a fresh compilation cache entry too:
+    two calls to ``analyze`` on the same model would otherwise retrace and
+    recompile from nothing. Caching this builder on ``(fn, n_inputs,
+    n_outputs)`` — the same three quantities that decide the kernel's shape
+    and mode — reuses one compiled kernel across calls, the way
+    :func:`jaxgsa.efast._analyze._get_efast_kernel` memoises its kernel by
+    design shape. A plain function is hashable by identity, so two
+    structurally equal but distinct function objects (for example two
+    lambdas) still get one cache entry each.
+
+    Not every model object is hashable: a model written as a plain
+    ``@dataclass`` with ``__call__`` has ``__hash__`` set to ``None``.
+    :func:`jac_batches` tests for that and builds the kernel without the
+    cache in that case, so an unhashable model still runs. It pays one trace
+    per call, which is what every model paid before this cache existed.
+
+    Args:
+        fn: One-sample model, ``(D,) -> ()`` / ``(K,)`` / ``(T, K)``.
+        n_inputs: ``D``, the number of parameters.
+        n_outputs: ``T*K``, the number of output slices.
+
+    Returns:
+        A compiled callable mapping a batch of ``(D,)`` rows, vmapped over
+        the leading axis, to ``(jacobian, y)``.
+    """
+    return jax.jit(jax.vmap(jacobian_of(fn, n_inputs=n_inputs, n_outputs=n_outputs)))
+
+
 def jacobian_of(fn: Callable, *, n_inputs: int, n_outputs: int) -> Callable:
     """Return the one-row Jacobian-with-primal of ``fn``.
 
-    The autodiff mode is selected by :func:`jacobian_mode`, which closes
-    ``docs/adr/0005-autodiff-mode-selection.md``: ``jax.jacfwd`` when
-    ``n_outputs > n_inputs``, ``jax.jacrev`` otherwise. The two modes compute
+    The autodiff mode is selected by :func:`jacobian_mode`: ``jax.jacfwd``
+    when ``n_outputs > n_inputs``, ``jax.jacrev`` otherwise. The two modes compute
     the same Jacobian; float arithmetic order differs, so results can move at
     float precision where the mode changed. That move was reviewed once, in
     the baseline regeneration recorded in ``scripts/baseline/README.md``.
@@ -144,6 +193,8 @@ def jac_batches(
     fn: Callable,
     X: Array,
     batch_size: int | None,
+    *,
+    n_outputs: int | None = None,
 ) -> Iterator[tuple[Array, Array, Array]]:
     """Yield ``(jac, Y, X)`` one batch of sample rows at a time.
 
@@ -165,6 +216,10 @@ def jac_batches(
         X: Sample matrix, shape ``(N, D)``.
         batch_size: Rows per batch, clamped to ``N``, or ``None`` to derive
             one from the active memory budget.
+        n_outputs: ``T*K``, if the caller already traced ``fn`` once (for
+            example through :func:`jaxgsa.dgsm._analyze._check_point_callable`)
+            and knows the answer. ``None`` (default) traces it here through
+            :func:`n_output_slices`.
 
     Yields:
         ``(jac, Y, X)`` for each batch: the Jacobian block, the forward
@@ -175,8 +230,14 @@ def jac_batches(
         ValueError: If ``batch_size`` is given and not a positive integer.
     """
     n_inputs = int(X.shape[1])
-    n_outputs = n_output_slices(fn, X)
-    combined = jax.jit(jax.vmap(jacobian_of(fn, n_inputs=n_inputs, n_outputs=n_outputs)))
+    if n_outputs is None:
+        n_outputs = n_output_slices(fn, X)
+    if isinstance(fn, Hashable):
+        combined = _get_jacobian_kernel(fn, n_inputs, n_outputs)
+    else:
+        # A model written as a plain dataclass has __hash__ set to None, so it
+        # cannot key the cache. Build the kernel directly rather than fail.
+        combined = jax.jit(jax.vmap(jacobian_of(fn, n_inputs=n_inputs, n_outputs=n_outputs)))
 
     N = X.shape[0]
     b = resolve_batch_size(
@@ -202,40 +263,198 @@ def jac_batches(
         yield jac[:actual_len], Y_chunk[:actual_len], X[start:end]
 
 
-def moment_sums(
+def _rows_finite(array: Array) -> Array:
+    """Return a ``(N,)`` mask that is True where a whole row is finite.
+
+    Args:
+        array: Any array whose leading axis is the sample axis.
+
+    Returns:
+        A boolean array of shape ``(N,)``.
+    """
+    return jnp.all(jnp.isfinite(array.reshape(array.shape[0], -1)), axis=1)
+
+
+def _mask_rows(array: Array, row_ok: Array) -> Array:
+    """Zero out the rows a mask rejects, without arithmetic on their values.
+
+    ``jnp.where`` is required here rather than a multiply by ``0.0``: a
+    multiply leaves ``NaN * 0 == NaN``, which is exactly the value the mask
+    exists to remove.
+
+    Args:
+        array: Array whose leading axis is the sample axis.
+        row_ok: Boolean mask of shape ``(N,)``.
+
+    Returns:
+        ``array`` with the rejected rows replaced by zeros.
+    """
+    return jnp.where(row_ok.reshape((-1,) + (1,) * (array.ndim - 1)), array, 0.0)
+
+
+def _join(parts: list[Array]) -> Array:
+    """Concatenate batch pieces back into one sample-axis array.
+
+    Args:
+        parts: One array per batch, all sharing their trailing shape.
+
+    Returns:
+        The pieces stacked along the sample axis. A single piece is returned
+        unchanged, so the unbatched path copies nothing.
+    """
+    return parts[0] if len(parts) == 1 else jnp.concatenate(parts, axis=0)
+
+
+@dataclass(frozen=True)
+class _JacobianSums:
+    """Unreduced derivative sums from one autodiff sweep, in two versions.
+
+    The autodiff path makes ``Y`` itself, inside a jitted ``vmap`` of the
+    one-row Jacobian, and reduces each batch of Jacobian rows to a running
+    total as soon as it has it. A row that is already inside that total
+    cannot be taken out again: ``NaN`` plus anything is ``NaN``. So the batch
+    loop keeps two totals side by side, one over every row and one over the
+    clean rows only, and a caller picks the one its policy calls for. The
+    masking happens where the row still exists, which is inside the loop.
+
+    Keeping both costs one extra pair of sums per batch. The Jacobian itself
+    is what the batch loop exists to bound, and neither total holds a sample
+    axis, so peak memory is unchanged.
+
+    ``jac_finite`` and ``row_ok`` stay JAX arrays here, not NumPy ones:
+    :func:`moment_sums` reuses this same loop from inside
+    :func:`jaxgsa.dgsm.indices`, which must survive ``jit``, ``vmap`` and
+    ``jacrev``, and a NumPy conversion forces a concrete host read that a
+    tracer cannot give. The policy path in ``analyze`` runs eagerly, so it
+    converts them itself where it consumes them.
+
+    Attributes:
+        Y: Stacked raw ``fn`` output, shape ``(N,)`` / ``(N, K)`` /
+            ``(N, T, K)``.
+        jac_finite: For each row, whether every entry of its Jacobian block is
+            finite, shape ``(N,)``. Reported separately from ``Y`` because a
+            derivative can blow up where the output does not, and ``nu`` is
+            built from the derivative.
+        row_ok: For each row, whether ``X``, ``Y`` and the Jacobian are all
+            finite, shape ``(N,)``. This is the mask the ``*_kept`` totals
+            used.
+        sum_jac: Sum of the Jacobian over every row, shape ``(D,)`` /
+            ``(K, D)`` / ``(T, K, D)``.
+        sum_jac2: Sum of the squared Jacobian over every row, same shape.
+        sum_jac_kept: Sum of the Jacobian over the rows in ``row_ok``.
+        sum_jac2_kept: Sum of the squared Jacobian over those same rows.
+    """
+
+    Y: Array
+    jac_finite: Array
+    row_ok: Array
+    sum_jac: Array
+    sum_jac2: Array
+    sum_jac_kept: Array
+    sum_jac2_kept: Array
+
+
+def jacobian_sums(
     fn: Callable,
     X: Array,
     batch_size: int | None,
-) -> tuple[Array, Array, Array]:
-    """Sum the Jacobian and its square over every sample row.
+    *,
+    n_outputs: int | None = None,
+) -> _JacobianSums:
+    """Sum the Jacobian and its square over every sample row, masked and not.
 
-    No masking and no finite check: this is the pure-core reduction, and it
-    reports what the model returned. :func:`jaxgsa.dgsm.analyze` runs its own
-    masked version of the same loop.
+    Both :func:`moment_sums`, the pure core, and
+    :func:`jaxgsa.dgsm.analyze` reduce the same batches of
+    :func:`jac_batches` the same way; this is that one shared loop. Every
+    batch is reduced twice: once over all of its rows, and once over the rows
+    where ``X``, the output and the Jacobian are all finite. Producing both
+    totals is mechanical arithmetic over already-computed batches, not a
+    policy choice — the choice of which total to read is made by the caller.
 
     Args:
         fn: One-sample model, ``(D,) -> ()`` / ``(K,)`` / ``(T, K)``.
         X: Sample matrix, shape ``(N, D)``.
         batch_size: Rows per batch, or ``None`` to derive one from the
             active memory budget, as in :func:`jac_batches`.
+        n_outputs: ``T*K``, passed straight to :func:`jac_batches` for a
+            caller that already knows it.
+
+    Returns:
+        A :class:`_JacobianSums` holding both pairs of sums, the stacked
+        outputs, and the two per-row finite masks.
+
+    Raises:
+        ValueError: If ``X`` has no sample rows.
+    """
+    sum_jac: Array | None = None
+    sum_jac2: Array | None = None
+    sum_jac_kept: Array | None = None
+    sum_jac2_kept: Array | None = None
+    Y_parts: list[Array] = []
+    jac_finite_parts: list[Array] = []
+    row_ok_parts: list[Array] = []
+
+    for jac, Y_chunk, X_chunk in jac_batches(fn, X, batch_size, n_outputs=n_outputs):
+        Y_parts.append(Y_chunk)
+        # The mask is built and applied here, before the sums below fold this
+        # batch into the running totals. After that point the batch is gone.
+        chunk_jac_finite = _rows_finite(jac)
+        chunk_row_ok = chunk_jac_finite & _rows_finite(Y_chunk) & _rows_finite(X_chunk)
+        jac_finite_parts.append(chunk_jac_finite)
+        row_ok_parts.append(chunk_row_ok)
+        jac_kept = _mask_rows(jac, chunk_row_ok)
+
+        sj = jnp.sum(jac, axis=0)
+        sj2 = jnp.sum(jac**2, axis=0)
+        sjk = jnp.sum(jac_kept, axis=0)
+        sjk2 = jnp.sum(jac_kept**2, axis=0)
+        sum_jac = sj if sum_jac is None else sum_jac + sj
+        sum_jac2 = sj2 if sum_jac2 is None else sum_jac2 + sj2
+        sum_jac_kept = sjk if sum_jac_kept is None else sum_jac_kept + sjk
+        sum_jac2_kept = sjk2 if sum_jac2_kept is None else sum_jac2_kept + sjk2
+
+    if sum_jac is None or sum_jac2 is None or sum_jac_kept is None or sum_jac2_kept is None:
+        raise ValueError("X has no sample rows, so there is no derivative to average")
+
+    return _JacobianSums(
+        Y=_join(Y_parts),
+        jac_finite=_join(jac_finite_parts),
+        row_ok=_join(row_ok_parts),
+        sum_jac=sum_jac,
+        sum_jac2=sum_jac2,
+        sum_jac_kept=sum_jac_kept,
+        sum_jac2_kept=sum_jac2_kept,
+    )
+
+
+def moment_sums(
+    fn: Callable,
+    X: Array,
+    batch_size: int | None,
+    *,
+    n_outputs: int | None = None,
+) -> tuple[Array, Array, Array]:
+    """Sum the Jacobian and its square over every sample row.
+
+    No masking read: this is the pure-core reduction, and it reports what the
+    model returned. It shares its loop with :func:`jacobian_sums`, which also
+    computes the masked totals :func:`jaxgsa.dgsm.analyze` needs, and just
+    reads off the unmasked pair.
+
+    Args:
+        fn: One-sample model, ``(D,) -> ()`` / ``(K,)`` / ``(T, K)``.
+        X: Sample matrix, shape ``(N, D)``.
+        batch_size: Rows per batch, or ``None`` to derive one from the
+            active memory budget, as in :func:`jac_batches`.
+        n_outputs: ``T*K``, passed straight to :func:`jac_batches` for a
+            caller that already knows it.
 
     Returns:
         ``(sum_jac, sum_jac2, Y)``. The two sums carry ``fn``'s own slice axes
         with a trailing ``(D,)``; ``Y`` is the stacked forward output.
     """
-    sum_jac: Array | None = None
-    sum_jac2: Array | None = None
-    Y_parts: list[Array] = []
-    for jac, Y_chunk, _ in jac_batches(fn, X, batch_size):
-        Y_parts.append(Y_chunk)
-        sj = jnp.sum(jac, axis=0)
-        sj2 = jnp.sum(jac**2, axis=0)
-        sum_jac = sj if sum_jac is None else sum_jac + sj
-        sum_jac2 = sj2 if sum_jac2 is None else sum_jac2 + sj2
-    if sum_jac is None or sum_jac2 is None:
-        raise ValueError("X has no sample rows, so there is no derivative to average")
-    Y = Y_parts[0] if len(Y_parts) == 1 else jnp.concatenate(Y_parts, axis=0)
-    return sum_jac, sum_jac2, Y
+    sums = jacobian_sums(fn, X, batch_size, n_outputs=n_outputs)
+    return sums.sum_jac, sums.sum_jac2, sums.Y
 
 
 def resample_moment_sums(
@@ -356,9 +575,10 @@ def bounds_from_moments(
     - upper (Poincare / Sobol-Kucherenko): ``ST_i <= C_i * nu_i / Var(Y)``,
       which holds for every marginal this package supports.
     - lower: ``Var(x_i) * sigma_i^2 / Var(Y)``. Kucherenko & Song (2016),
-      Theorem 4.1, prove ``ST_i >=`` this for a Gaussian marginal only; on a
-      uniform or truncated marginal it is an estimate that is exact for a
-      linear response and can overshoot ``ST_i`` for a curved one. See
+      Theorem 6 (Section 4.1, eq. 31), prove ``ST_i >=`` this for a Gaussian
+      marginal only. On a uniform or truncated marginal it is an estimate.
+      It is exact for a linear response and can overshoot ``ST_i`` for a
+      curved one. See
       :class:`jaxgsa.dgsm.DGSMResult` for why the condition is on the
       marginal.
 

@@ -43,6 +43,7 @@ def _sinkhorn_w2(
     epsilon: Array,
     max_iter: Array,
     tol: Array,
+    scale: Array,
 ) -> tuple[Array, Array]:
     """Entropic OT cost from a uniform source onto one masked target class.
 
@@ -53,22 +54,30 @@ def _sinkhorn_w2(
     epsilon-regularized objective. The value therefore approaches the
     exact squared Wasserstein distance as ``epsilon -> 0``.
 
-    The function scales the cost matrix by its maximum before solving, so
-    ``epsilon`` is a scale-free regularization strength, and it rescales
-    the returned cost back. Updates run in the log domain. ``log_b =
-    -inf`` handles padded target columns exactly: they carry zero mass and
-    stay inert in every ``logsumexp``.
+    The caller passes ``scale``, the same normalizer that turns the index
+    itself into a [0, 1] quantity (``V = 2 * Var`` or ``2 * tr(Cov)``), so
+    ``epsilon`` is a regularization strength relative to that one fixed
+    scale. Scaling by the cost matrix's own per-class maximum instead (an
+    earlier version of this function did that) makes the effective
+    regularization outlier-driven and different for every class, which
+    left a class-dependent entropic bias that did not cancel between
+    parameters. Updates run in the log domain. ``log_b = -inf`` handles
+    padded target columns exactly: they carry zero mass and stay inert in
+    every ``logsumexp``.
 
     Args:
         C: Cost matrix of squared Euclidean distances, shape ``(N, P)``.
         log_b: Log target weights, shape ``(P,)``. The value is
             ``-log(n_m)`` for the class's ``n_m`` valid entries and
             ``-inf`` at padded entries.
-        epsilon: Entropic regularization strength relative to the
-            max-scaled cost (scalar).
+        epsilon: Entropic regularization strength relative to ``scale``
+            (scalar).
         max_iter: Iteration cap (scalar).
         tol: Stopping tolerance on the L1 violation of the target
             marginal (scalar).
+        scale: The cost normalizer (scalar), the same one the caller
+            divides the index by. Must be positive; the caller guards the
+            degenerate (zero-variance) case before calling.
 
     Returns:
         A tuple ``(cost, err)``. ``cost`` is the transport cost ``<P, C>``
@@ -79,9 +88,10 @@ def _sinkhorn_w2(
     dtype = C.dtype
     N = C.shape[0]
     b = jnp.exp(log_b)
-    # Scale-free regularization: epsilon acts on a cost normalized to [0, 1].
-    c_max = jnp.maximum(C.max(), jnp.asarray(jnp.finfo(dtype).tiny, dtype))
-    log_K = -(C / c_max) / epsilon  # (N, P) log-kernel
+    # Regularization relative to the index's own normalizer, not the cost
+    # matrix's per-class maximum: see the docstring above.
+    scale = jnp.maximum(scale, jnp.asarray(jnp.finfo(dtype).tiny, dtype))
+    log_K = -(C / scale) / epsilon  # (N, P) log-kernel
     log_a = jnp.full((N,), -jnp.log(N), dtype=dtype)
 
     def _err(log_f: Array, log_g: Array) -> Array:
@@ -122,5 +132,5 @@ def _sinkhorn_w2(
     log_plan = log_f[:, None] + log_K + log_g[None, :]
     # <P, C> on the scaled cost, mapped back to the original scale. exp of
     # -inf (padded columns) is exactly 0, so pads contribute nothing.
-    cost = (jnp.exp(log_plan) * (C / c_max)).sum() * c_max
+    cost = (jnp.exp(log_plan) * (C / scale)).sum() * scale
     return cost, err

@@ -1,6 +1,6 @@
 [project]
 name = "jaxgsa"
-version = "0.8.0"
+version = "1.0.0"
 description = "Global Sensitivity Analysis in JAX"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -22,7 +22,7 @@ keywords = [
     "uncertainty-quantification",
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Science/Research",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
@@ -98,4 +98,11 @@ markers = [
     # suite. This marker keeps the seam live for the tests that assert on
     # the printed output (tests/test_verbose.py).
     "verbose_output: keep the verbose emit seam live so the test can read stdout",
+    # A handful of joint-mode optimal-transport tests run every Sinkhorn solve
+    # at full sample size. Together they cost about twenty minutes, which is
+    # more than the rest of the suite. They are deselected by default and run
+    # on a schedule; `-m slow` runs them, `-m "not slow"` is the default via
+    # addopts below.
+    "slow: a multi-minute test, deselected by default (run with -m slow)",
 ]
+addopts = "-m 'not slow'"

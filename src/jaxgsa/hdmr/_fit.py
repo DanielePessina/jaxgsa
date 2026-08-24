@@ -40,6 +40,7 @@ reassociation that adding a zero to a float32 reduction can cause.
 
 import math
 from functools import lru_cache
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -187,8 +188,11 @@ def _get_gram_backfit(m1: int, n1: int, maxiter: int, lambdax: float):
     Tikhonov regularization keeps an ill-conditioned ``B^T B`` from blowing up
     the coefficients when the basis functions are nearly collinear or the
     sample count is low. Iteration stops when the largest change in any
-    dimension's coefficient energy falls below 1e-3, or after ``maxiter``
-    sweeps.
+    dimension's coefficient energy falls below one part in a thousand of the
+    largest energy itself, or after ``maxiter`` sweeps. The test is relative,
+    not absolute: the coefficients scale with ``Y`` and with ``m**-3``, so an
+    absolute cutoff stops the sweep after one pass whenever ``Y`` is small or
+    ``m`` is large (H4).
 
     Returns:
         A jitted function ``(G1, G1_diag, b1res) -> C1``. ``G1``
@@ -214,8 +218,13 @@ def _get_gram_backfit(m1: int, n1: int, maxiter: int, lambdax: float):
             return C1, None
 
         def _backfit_cond(state: tuple) -> Array:
-            _, _, varmax, it = state
-            return (varmax > 1e-3) & (it < maxiter)
+            _, var, varmax, it = state
+            # Relative to the current coefficient energy, not an absolute
+            # threshold: the coefficients scale with Y and with m**-3 (the
+            # basis is scaled by m**3), so an absolute cutoff stops a
+            # correlated fit after one sweep whenever Y is small or m is
+            # large, well before the coupling terms have converged.
+            return (varmax > 1e-3 * jnp.max(var)) & (it < maxiter)
 
         def _backfit_body(state: tuple) -> tuple:
             C1, var_old, _, it = state
@@ -440,18 +449,27 @@ def _get_stats_step(n1: int, n2: int):
         )  # (b, cs, n)
 
         # ANCOVA (Li et al., 2010). Sa = Var(f_j)/Var(Y) is the structural
-        # share, S = Cov(f_j, Y)/Var(Y) the total, and
-        # Sb = Cov(f_j, sum_{k != j} f_k)/Var(Y) the correlative remainder.
-        # With independent inputs Sb -> 0 and S -> Sa.
+        # share, Sb = Cov(f_j, sum_{k != j} f_k)/Var(Y) the correlative
+        # remainder, and S = Sa + Sb = Cov(f_j, f_hat)/Var(Y) the total,
+        # where f_hat = f0 + sum_k f_k is the fitted expansion. Measuring S
+        # against the fitted expansion rather than against Y itself is what
+        # makes S = Sa + Sb exact: summing S over every term gives
+        # Var(f_hat)/Var(Y), the surrogate's explained-variance fraction,
+        # matching the direct sum of Sa + Sb term by term. SALib's `ancova`
+        # measures S against Y instead, which leaves a gap of
+        # Cov(f_j, Y - f_hat)/Var(Y) that does not cancel under correlated
+        # inputs. With independent inputs Sb -> 0 and S -> Sa either way.
         fc = (F - mean_f_c[None]) * w[:, None, None]
         acc_var_f = acc_var_f + jnp.sum(fc * fc, axis=0)
 
-        r0 = ((Y_bc - shift_c[None, :]) - mean_z_c[None, :]) * w[:, None]  # Y - f0
-        acc_cov_fy = acc_cov_fy + jnp.sum(fc * r0[:, :, None], axis=0)
+        y0 = jnp.sum(F, axis=2)  # (b, cs) total emulator, sans f0 (= f_hat - f0)
+        y0_w = y0 * w[:, None]
+        acc_cov_fy = acc_cov_fy + jnp.sum(fc * y0_w[:, :, None], axis=0)
 
-        y0 = jnp.sum(F, axis=2)  # (b, cs) total emulator, sans f0
         y0m_c = (y0[:, :, None] - F) - mean_y0m_c[None]  # leave-one-out sums
         acc_cov_fy0m = acc_cov_fy0m + jnp.sum(fc * y0m_c, axis=0)
+
+        r0 = ((Y_bc - shift_c[None, :]) - mean_z_c[None, :]) * w[:, None]  # Y - f0
 
         # F-test for incremental model selection (Li et al., 2002). The null
         # model for a term of order k holds every term of order < k, so the
@@ -535,6 +553,41 @@ def _pad_rows(A: Array, n_pad: int) -> Array:
     return jnp.concatenate([A, jnp.zeros((n_pad, *A.shape[1:]), dtype=A.dtype)], axis=0)
 
 
+class _FitHDMR(NamedTuple):
+    """The raw fit :func:`_fit_hdmr` returns, one field per name.
+
+    A bare positional tuple let two of its ten fields swap silently at a
+    call site with no type error to catch it (the D16 hazard). Every field
+    here is read by name instead.
+
+    Attributes:
+        Sa: Structural variance fraction per term, shape ``(L, n)``.
+        Sb: Correlative variance fraction per term, same shape.
+        S: ``Sa + Sb``, same shape.
+        select: F-test significance flag per term, same shape.
+        rmse: Per-slice fit RMSE, shape ``(L,)``.
+        C1: First-order component coefficients, shape ``(L, m1, n1)``.
+        C2: Second-order coefficients, shape ``(L, m2, n2)``, or ``None``
+            below ``maxorder=2``.
+        C3: Third-order coefficients, shape ``(L, m3, n3)``, or ``None``
+            below ``maxorder=3``.
+        f0: Grand mean per slice, shape ``(L,)``.
+        streamed: Whether the sample axis was actually split into row
+            batches.
+    """
+
+    Sa: Array
+    Sb: Array
+    S: Array
+    select: Array
+    rmse: Array
+    C1: Array
+    C2: Array | None
+    C3: Array | None
+    f0: Array
+    streamed: bool
+
+
 def _fit_hdmr(
     X_n: Array,
     Y_nl: Array,
@@ -557,7 +610,7 @@ def _fit_hdmr(
     m3: int,
     batch_size: int | None,
     slice_chunk_size: int | None,
-) -> tuple[Array, Array, Array, Array, Array, Array, Array | None, Array | None, Array, bool]:
+) -> _FitHDMR:
     """Fit RS-HDMR over row batches and output-slice chunks.
 
     Runs ``1 + (maxorder - 1) + 1`` passes over the row batches. Each pass
@@ -601,10 +654,10 @@ def _fit_hdmr(
             from the active memory budget.
 
     Returns:
-        Tuple ``(Sa, Sb, S, select, rmse, C1, C2, C3, f0, batched)`` with
-        lane-leading shapes: (L, n) indices and selection, (L,) rmse and f0,
-        (L, m1, n1) C1, (L, m2, n2) C2 or None, (L, m3, n3) C3 or None.
-        ``batched`` says whether the sample axis was actually split.
+        A :class:`_FitHDMR` with lane-leading shapes: (L, n) indices and
+        selection, (L,) rmse and f0, (L, m1, n1) C1, (L, m2, n2) C2 or None,
+        (L, m3, n3) C3 or None. ``streamed`` says whether the sample axis was
+        actually split.
     """
     N, D = X_n.shape
     L = Y_nl.shape[1]
@@ -746,15 +799,15 @@ def _fit_hdmr(
     Sa, Sb, S, select, rmse = _get_finalize(n, n1, n2, m1, m2, m3, N)(V_Y, acc, f_crits)
 
     C = [jnp.concatenate(chunks)[:L] for chunks in coef_chunks]
-    return (
-        Sa[:L],
-        Sb[:L],
-        S[:L],
-        select[:L],
-        rmse[:L],
-        C[0],
-        C[1] if order2 else None,
-        C[2] if order3 else None,
-        f0[:L],
-        b < N,
+    return _FitHDMR(
+        Sa=Sa[:L],
+        Sb=Sb[:L],
+        S=S[:L],
+        select=select[:L],
+        rmse=rmse[:L],
+        C1=C[0],
+        C2=C[1] if order2 else None,
+        C3=C[2] if order3 else None,
+        f0=f0[:L],
+        streamed=b < N,
     )

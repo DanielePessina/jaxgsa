@@ -14,19 +14,15 @@ from jaxgsa._core.sampling import UNIT_CLIP
 from jaxgsa.problem import CategoricalSpec, Problem, UniformSpec
 
 
-def _truncnorm_cdf(z: Array, a: float, b: float) -> Array:
+def _truncnorm_cdf(z: Array, a: float, b: float, *, clip: bool = True) -> Array:
     """CDF of a standard normal truncated to ``[a, b]``, evaluated at ``z``.
 
-    This exists so the transform stays on device. It used to call
-    ``scipy.stats.truncnorm.cdf`` through ``np.asarray(X[:, d])``, which is a
-    host read of an array value: correct, but it raises
-    ``TracerArrayConversionError`` under ``jit``, ``vmap`` or ``jacrev``. Every
-    method's pure ``indices()`` core runs through this transform, so one scipy
-    call made the whole traceability contract fail for any problem with a
-    truncated Gaussian input.
+    This exists so the transform stays on device: ``scipy.stats.truncnorm.cdf``
+    needs a host read of the array, which raises ``TracerArrayConversionError``
+    under ``jit``, ``vmap``, or ``jacrev``.
 
-    The definition is ``(Phi(z) - Phi(a)) / (Phi(b) - Phi(a))``, clamped to the
-    interval. Written that way it cancels catastrophically when ``a`` and ``b``
+    The definition is ``(Phi(z) - Phi(a)) / (Phi(b) - Phi(a))``. Written that
+    way it cancels catastrophically when ``a`` and ``b``
     both sit far out in the *upper* tail, because ``Phi`` of both is within
     rounding of 1 and the difference is all round-off. The standard remedy,
     which scipy also uses, is to work with the survival function there:
@@ -44,9 +40,16 @@ def _truncnorm_cdf(z: Array, a: float, b: float) -> Array:
         z: Standardised values, any shape.
         a: Lower truncation bound in standard units. May be ``-inf``.
         b: Upper truncation bound in standard units. May be ``+inf``.
+        clip: Clamp the result to ``[0, 1]`` when ``True`` (the default). A
+            ``z`` outside ``[a, b]`` otherwise computes to a value outside
+            ``[0, 1]``, which is what :func:`cdf_to_unit_interval` needs to
+            tell an out-of-declared-support sample from an in-range one; pass
+            ``False`` there.
 
     Returns:
-        Values in ``[0, 1]``, the same shape as ``z``.
+        Values in ``[0, 1]`` when ``clip`` is ``True``, the same shape as
+        ``z``. Otherwise a value outside ``[0, 1]`` marks ``z`` outside
+        ``[a, b]``.
     """
     # Cast the bounds to z's dtype: ndtr rejects integer inputs, and matching
     # the dtype keeps the whole expression in the caller's precision instead
@@ -59,7 +62,7 @@ def _truncnorm_cdf(z: Array, a: float, b: float) -> Array:
     else:
         cdf_a, cdf_b = ndtr(lo), ndtr(hi)
         u = (ndtr(z) - cdf_a) / (cdf_b - cdf_a)
-    return jnp.clip(u, 0.0, 1.0)
+    return jnp.clip(u, 0.0, 1.0) if clip else u
 
 
 def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
@@ -73,9 +76,13 @@ def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
     difference is deliberate.
 
     * A Gaussian column is clipped to ``[UNIT_CLIP, 1 - UNIT_CLIP]``, with the
-      upper bound brought inside the column's own dtype. The normal CDF
-      saturates to exactly 0 or 1 in the far tails at float precision, and the
-      clip keeps those samples off the ends.
+      upper bound brought inside the column's own dtype — but only when the
+      raw CDF value already lies in ``[0, 1]``. The normal CDF saturates to
+      exactly 0 or 1 in the far tails at float precision, and the clip keeps
+      those in-range samples off the ends. A *truncated* Gaussian sample
+      outside its declared ``[low, high]`` computes a value outside ``[0, 1]``
+      instead (see :func:`_truncnorm_cdf`), and that value is left alone, for
+      the same reason a uniform column is (next bullet).
     * A uniform column is not clipped. The affine map is exact, so a sample
       inside the declared bounds already lands in ``[0, 1]``, and 0 and 1 are
       legitimate values for a sample that sits on a bound. A sample *outside*
@@ -89,9 +96,10 @@ def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
         problem: Problem with per-dimension distribution specs.
 
     Returns:
-        ``(N, D)`` array. Every Gaussian column lies in ``[0, 1]``. A uniform
-        column lies in ``[0, 1]`` for every sample within the declared
-        bounds.
+        ``(N, D)`` array. Every column lies in ``[0, 1]`` for every sample
+        within its declared support. A sample outside the declared support
+        of a uniform or truncated Gaussian marginal maps outside ``[0, 1]``,
+        which is the out-of-range signal the callers read.
 
     Raises:
         ValueError: If any parameter is categorical. Its step CDF collapses
@@ -129,14 +137,20 @@ def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
         if spec.low is not None or spec.high is not None:
             a = -np.inf if spec.low is None else (spec.low - spec.mean) / std
             b = np.inf if spec.high is None else (spec.high - spec.mean) / std
-            u = _truncnorm_cdf((X[:, d] - spec.mean) / std, a, b)
+            # clip=False: an out-of-declared-bounds sample must compute to a
+            # value outside [0, 1], not be silently folded into the nearest
+            # edge bin. See the docstring above and _truncnorm_cdf.
+            u = _truncnorm_cdf((X[:, d] - spec.mean) / std, a, b, clip=False)
         else:  # unbounded Gaussian -- stays on device via jax.scipy
             u = jax_norm.cdf(X[:, d], loc=spec.mean, scale=std)
         # The upper bound is pulled in to the last float below 1.0 when the
         # dtype cannot tell 1 - UNIT_CLIP from 1. The lower bound is left at
         # UNIT_CLIP, which float32 represents exactly; widening it for
         # symmetry would discard information and move numbers for nothing.
-        # See unit_clip_bounds.
-        cols.append(jnp.clip(u, *unit_clip_bounds(UNIT_CLIP, u.dtype)))
+        # See unit_clip_bounds. Only applied to values already in [0, 1]: a
+        # truncated sample outside its declared bounds must stay outside.
+        clip_lo, clip_hi = unit_clip_bounds(UNIT_CLIP, u.dtype)
+        in_range = (u >= 0.0) & (u <= 1.0)
+        cols.append(jnp.where(in_range, jnp.clip(u, clip_lo, clip_hi), u))
 
     return jnp.column_stack(cols)

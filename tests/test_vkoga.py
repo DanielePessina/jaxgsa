@@ -503,7 +503,13 @@ def test_batch_size_bounds_the_index_estimator_too(monkeypatch):
         return U[:, :1] + 0.5 * U[:, 1:2] ** 2
 
     kwargs = dict(
-        plan=plan, predict=predict, n_outer=n_outer, n_inner=n_inner, n_variance=256, entropy=0
+        problem=UNIFORM_PROBLEM,
+        plan=plan,
+        predict=predict,
+        n_outer=n_outer,
+        n_inner=n_inner,
+        n_variance=256,
+        entropy=0,
     )
     # batch_size has no default on the estimator: that is what made it
     # droppable, so every call has to say what it wants. The first predict
@@ -647,6 +653,70 @@ def test_masked_selection_stops_like_a_training_rows_fit():
     assert int(m_masked) < int(mask.sum())
 
 
+def test_s_tu_sampling_error_shrinks_with_n_outer():
+    """H3: ``S_TU``'s per-seed spread must fall as ``n_outer`` grows.
+
+    Before the fix, every outer point in the inner-loop QMC block reused the
+    same draw, so the estimator carried a per-run bias that more outer
+    points could not reduce: the spread across seeds barely moved from
+    ``n_outer=512`` to ``n_outer=4096``. This calls the correlated-index
+    kernel directly (no surrogate fit) on the exact model from the review,
+    ``x1*x2 + x3**2 + sin(x1) + 0.5*x2``, so any spread across seeds is pure
+    estimator sampling error, not surrogate error.
+    """
+    from scipy.stats import norm
+
+    from jaxgsa._core.copula import build_conditional_plan, latent_normal_sample
+    from jaxgsa.vkoga._indices import _total_uncorrelated_and_conditional
+
+    R = np.array([[1.0, 0.6, -0.3], [0.6, 1.0, 0.15], [-0.3, 0.15, 1.0]])
+    plan = build_conditional_plan(R)
+
+    def model(X):
+        return X[:, 0] * X[:, 1] + X[:, 2] ** 2 + np.sin(X[:, 0]) + 0.5 * X[:, 1]
+
+    def predict(U):
+        return model(norm.ppf(U))[:, None]
+
+    V = np.var(
+        model(norm.ppf(norm.cdf(latent_normal_sample(2**14, 3, seed=0) @ plan.chol_full.T)))
+    )
+
+    def s_tu_over_seeds(n_outer, n_seeds=6):
+        vals = []
+        for seed in range(n_seeds):
+            component_dummy = np.zeros((6, 1))
+            stu, _ = _total_uncorrelated_and_conditional(
+                plan=plan,
+                index=2,
+                predict=predict,
+                component=component_dummy,
+                basis_kind="legendre",
+                n_outer=n_outer,
+                n_inner=128,
+                n_slices=1,
+                stream=np.random.SeedSequence(seed),
+                batch_size=None,
+            )
+            vals.append(stu[0] / V)
+        return np.array(vals)
+
+    small = s_tu_over_seeds(512)
+    large = s_tu_over_seeds(4096)
+
+    # The true value (independent-model closed form check elsewhere) is
+    # about 0.44; both sizes must be centred near it.
+    assert abs(small.mean() - 0.44) < 0.05
+    assert abs(large.mean() - 0.44) < 0.05
+
+    # The regression signature: a shared inner block barely improves with
+    # more outer points. The fixed estimator's spread should drop sharply.
+    assert small.std() < 0.02, f"n_outer=512 spread too large: {small.std():.4f}"
+    assert large.std() < small.std(), (
+        f"spread did not shrink with n_outer: 512 -> {small.std():.4f}, 4096 -> {large.std():.4f}"
+    )
+
+
 def test_an_integer_seed_survives_the_key_wrapper():
     """``jax.random.key(s)`` must still seed the QMC engines with ``s``.
 
@@ -705,6 +775,7 @@ def test_index_streams_are_spawned_and_not_offset(monkeypatch):
     def seeds_for(entropy: int) -> list[int]:
         seen.clear()
         _indices.estimate_correlated_indices(
+            problem=UNIFORM_PROBLEM,
             plan=plan,
             predict=predict,
             n_outer=64,

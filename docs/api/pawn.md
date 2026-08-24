@@ -88,10 +88,11 @@ print(np.asarray(res.n_valid_bins))
 ```
 
 ```
-JaxgsaWarning: PAWN: parameters 'x1' (19/40), 'x2' (18/40), 'x3' (15/40) have
-fewer than half of their conditioning bins contributing (a bin needs at least 2
-samples to define a conditional CDF; the rest are dropped). The reported
-indices rest on those few bins. Use fewer bins (lower n_bins) or more samples.
+JaxgsaWarning: jaxgsa.pawn: parameters 'x1' (19/40), 'x2' (18/40), 'x3' (15/40)
+have fewer than half of their conditioning bins contributing (a bin needs at
+least 2 samples to define a conditional CDF; the rest are dropped). The
+reported indices rest on those few bins. Use fewer bins (lower n_bins) or more
+samples.
 
 [19 18 15]
 ```

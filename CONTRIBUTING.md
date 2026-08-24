@@ -47,7 +47,7 @@ touchpoint fails a test, a convention touchpoint fails nothing.
 | 2 | `src/jaxgsa/<method>/_analyze.py` | The analysis function the spec names | Convention. Name the module what you like; the registry holds the function |
 | 3 | `src/jaxgsa/<method>/_result.py` | The result class, with a `_schema = ResultSchema(...)` | `tests/test_result_schema.py` |
 | 4 | `src/jaxgsa/__init__.py` | Import the package, add its name to `__all__` | `tests/test_registry.py` and `scripts/check_api_docs_coverage.py` |
-| 5 | `docs/guide/methods.md` | One row in the table under `### Method capabilities` | `tests/test_docs_matrix.py` — every cell is read back against the spec |
+| 5 | `docs/guide/methods.md` | One row in the table under `### Method capabilities` | `tests/test_docs_matrix.py` — the Own design, Correlated, Categorical and Bootstrap CI cells are read back against the spec; Reports is only checked for being non-empty |
 | 6 | `docs/api/index.md` | One row in the method table, plus a reference heading | `tests/test_docs_matrix.py` and `scripts/check_api_docs_coverage.py` |
 | 7 | `tests/_result_fixtures.py` | A builder in `BUILDERS`, then run `uv run scripts/dump_result_schema.py` to regenerate `tests/data/result_dataset_schema.json` | `tests/test_result_schema.py` |
 | 8 | `scripts/baseline_dump.py` | A runner in `DESIGN_METHODS` (own sampler) or `GIVEN_DATA_METHODS` (given data), then regenerate the stored baseline | `tests/test_baseline_check.py` |

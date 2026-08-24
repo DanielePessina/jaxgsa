@@ -39,8 +39,9 @@ that returns bare arrays and survives ``jit``, ``vmap`` and ``jacrev``.
 Kucherenko does not, and is not going to: it is host NumPy end to end, and
 that is why it is the fastest method in the library. Its work is many small
 operations on modest arrays, where dispatch and host-device transfer dominate,
-so a JAX rewrite measured slower, and in float32 less accurate as well. See
-``docs/adr/0015-pure-core-exemptions.md``.
+so a JAX rewrite measured slower, and in float32 less accurate as well. That
+is a declared exemption (see ``jaxgsa._core.registry.MethodRecord.pure_core``),
+not a gap: no traceable core exists to export.
 
 References:
     Kucherenko, Tarantola & Annoni (2012). Comput. Phys. Commun. 183:937-946.
@@ -57,8 +58,8 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core import verbose as _verbose
-from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
-from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare
+from jaxgsa._core.bootstrap import interval
+from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare, require
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
@@ -204,6 +205,10 @@ def analyze(
             at_least("n_bootstrap", n_bootstrap, 0),
             one_of("ci_method", ci_method, ("quantile", "gaussian")),
             in_open_interval("conf_level", conf_level, 0.0, 1.0),
+            require(
+                n_bootstrap == 0 or key is not None,
+                "key is required when n_bootstrap > 0",
+            ),
         ),
         n_expected=sampling_result.n_runs,
         # A base point k feeds the joint row and every conditional row with
@@ -218,8 +223,6 @@ def analyze(
         # wait until that block has been separated out below.
         warn_zero_variance=False,
     )
-    if n_bootstrap > 0 and key is None:
-        raise ValueError("key is required when n_bootstrap > 0")
     keep, invalid = ctx.keep, ctx.invalid
     Y_canonical = ctx.Y3
     n_time, n_out = Y_canonical.shape[1], Y_canonical.shape[2]
@@ -259,39 +262,21 @@ def analyze(
         # One resample takes the same base points out of all 2D+1 blocks, so
         # every conditional row still sits beside the joint row it was drawn
         # around.
-        draws = [_estimate(f_joint[i], f_first[:, i], f_total[:, i]) for i in idx]
-        boot_S1 = np.stack([d[0] for d in draws])  # (R, D, S)
-        boot_ST = np.stack([d[1] for d in draws])
-        S1_conf = ctx.squeeze(
-            jnp.stack(
-                _bootstrap_ci_endpoints(
-                    jnp.asarray(S1.T.reshape(n_time, n_out, D)),
-                    jnp.asarray(np.moveaxis(boot_S1, -2, -1).reshape(-1, n_time, n_out, D)),
-                    conf_level=conf_level,
-                    ci_method=ci_method,
-                )
-            ),
-            n_trailing=1,
-        )
-        ST_conf = ctx.squeeze(
-            jnp.stack(
-                _bootstrap_ci_endpoints(
-                    jnp.asarray(ST.T.reshape(n_time, n_out, D)),
-                    jnp.asarray(np.moveaxis(boot_ST, -2, -1).reshape(-1, n_time, n_out, D)),
-                    conf_level=conf_level,
-                    ci_method=ci_method,
-                )
-            ),
-            n_trailing=1,
-        )
-        ci = CIInfo(
+        replicates = [_estimate(f_joint[i], f_first[:, i], f_total[:, i]) for i in idx]
+        boot_S1 = np.stack([d[0] for d in replicates])  # (R, D, S)
+        boot_ST = np.stack([d[1] for d in replicates])
+        # _shape already squeezes to the caller's own rank; interval() reads
+        # a shape only to broadcast [lower, upper], so it works the same on
+        # this squeezed layout as on the raw (T, K, D) one.
+        confs, ci = interval(
+            {"S1": _shape(S1), "ST": _shape(ST)},
+            {"S1": _shape(boot_S1), "ST": _shape(boot_ST)},
             level=conf_level,
             method=ci_method,
             n_bootstrap=n_bootstrap,
-            replicates=(
-                {"S1": _shape(boot_S1), "ST": _shape(boot_ST)} if keep_replicates else None
-            ),
+            keep_replicates=keep_replicates,
         )
+        S1_conf, ST_conf = confs["S1"], confs["ST"]
 
     variance_shaped = ctx.squeeze(jnp.asarray(variance.reshape(n_time, n_out)), n_trailing=0)
     result = KucherenkoResult(

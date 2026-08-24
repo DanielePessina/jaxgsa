@@ -25,12 +25,22 @@ index            definition                           reading
 ``f_i`` is the additive first-order component of ``Y``. It is fitted by least
 squares under the correlated input measure (see
 :func:`_fit_component_functions`). ``S_U`` therefore measures the part of
-``f_i`` that ``X_-i`` cannot predict. This is the decorrelated first-order
-index of Mara & Tarantola (2012), not the structural index
-``Var(f_i) / V(Y)`` of Li et al. (2010, Equation 25). The two differ on a
-linear-Gaussian model: Li's keeps the correlated share of ``Var(f_i)`` and this
-one removes it. The pair ``(S_U, S_C)`` splits ``S_TC`` along exactly the
-boundary the decorrelated index draws.
+``f_i`` that ``X_-i`` cannot predict. This reading matches the decorrelated
+first-order index of Mara & Tarantola (2012) only when ``f_i`` is linear;
+their own estimator instead conditions on the Rosenblatt residual, a
+different construction that this module does not implement. ``S_U`` is not
+the structural index ``Var(f_i) / V(Y)`` of Li et al. (2010, Equation 25)
+either. The two differ on a linear-Gaussian model: Li's keeps the correlated
+share of ``Var(f_i)`` and this one removes it. The pair ``(S_U, S_C)`` splits
+``S_TC`` along exactly the boundary this module's estimator draws.
+
+``f_i`` is fitted in the basis each parameter's own marginal is orthonormal
+under: probabilists' Hermite polynomials of the latent normal ``Z_i`` for an
+untruncated Gaussian marginal, shifted Legendre polynomials of the copula
+uniform ``U_i`` otherwise (:func:`_component_basis_kinds`). A Legendre fit of
+a polynomial or exponential response in ``Z_i`` converges slowly, because
+``Z_i = Phi^{-1}(U_i)`` is steep near the tails; picking the basis the
+marginal matches removes that gap.
 
 Every expectation is taken under a Gaussian copula, whose conditionals are
 closed-form in the latent normal space. Every model evaluation goes through a
@@ -48,6 +58,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Sequence
+from math import factorial
 from typing import Callable, NamedTuple
 
 import numpy as np
@@ -63,11 +74,18 @@ from jaxgsa._core.copula import (
 )
 from jaxgsa._core.legendre import legendre_orthonormal
 from jaxgsa._core.warning_types import JaxgsaWarning
+from jaxgsa.problem import GaussianSpec, Problem
 
-# Degree of the marginal Legendre basis used to recover the first-order
-# component functions f_i. Six terms capture the smooth univariate shapes a
+# Degree of the marginal basis used to recover the first-order component
+# functions f_i. The basis itself depends on each parameter's marginal (see
+# _component_basis_kinds). Six terms capture the smooth univariate shapes a
 # kernel surrogate produces without making the joint least squares ill-posed.
 _COMPONENT_DEGREE = 6
+
+# Largest dimension a scipy Sobol' engine has direction numbers for. The
+# inner draw in _total_uncorrelated_and_conditional uses one dimension per
+# outer point, so it splits into blocks above this width.
+_MAX_QMC_DIM = 21201
 
 # Ridge added to the component-function normal equations. The basis is
 # marginally orthonormal, so the Gram matrix is well conditioned unless two
@@ -106,6 +124,11 @@ class _Streams(NamedTuple):
 def _spawn_streams(entropy: int, n_parameters: int) -> _Streams:
     """Spawn the independent streams the estimators need from one root.
 
+    ``SeedSequence.spawn`` decorrelates its children by construction,
+    regardless of how deep the spawning tree is, so one flat
+    ``1 + 2 * n_parameters``-way spawn is exactly as independent as spawning
+    three then spawning ``n_parameters`` from two of those.
+
     Args:
         entropy: Root entropy, folded down from the caller's PRNG key.
         n_parameters: Number of parameters ``D``.
@@ -113,12 +136,11 @@ def _spawn_streams(entropy: int, n_parameters: int) -> _Streams:
     Returns:
         A :class:`_Streams` holding ``2 * D + 1`` independent child sequences.
     """
-    root = np.random.SeedSequence(entropy)
-    variance, correlated, uncorrelated = root.spawn(3)
+    children = np.random.SeedSequence(entropy).spawn(1 + 2 * n_parameters)
     return _Streams(
-        variance=variance,
-        total_correlated=correlated.spawn(n_parameters),
-        total_uncorrelated=uncorrelated.spawn(n_parameters),
+        variance=children[0],
+        total_correlated=children[1 : 1 + n_parameters],
+        total_uncorrelated=children[1 + n_parameters :],
     )
 
 
@@ -169,6 +191,7 @@ class CorrelatedIndices(NamedTuple):
 
 def estimate_correlated_indices(
     *,
+    problem: Problem,
     plan: _ConditionalPlan,
     predict: Callable[[np.ndarray], np.ndarray],
     n_outer: int,
@@ -186,6 +209,8 @@ def estimate_correlated_indices(
     need no round-trip through physical units.
 
     Args:
+        problem: Problem whose declared marginals pick each parameter's
+            component-fit basis (see :func:`_component_basis_kinds`).
         plan: Precomputed Gaussian conditionals from
             :func:`jaxgsa._core.copula.build_conditional_plan`. Its
             ``chol_full`` field supplies the joint factor for the
@@ -215,6 +240,7 @@ def estimate_correlated_indices(
     """
     D = plan.chol_full.shape[0]
     streams = _spawn_streams(entropy, D)
+    basis_kinds = _component_basis_kinds(problem)
 
     # --- Unconditional variance, and the additive component functions --------
     Z_var = (
@@ -227,7 +253,7 @@ def estimate_correlated_indices(
     # propagates that honestly, matching the convention in hdmr._fit._get_stats_step.
     safe_variance = np.where(variance > 0.0, variance, np.nan)
 
-    coefficients = _fit_component_functions(U_var, Y_var)
+    coefficients = _fit_component_functions(U_var, Z_var, Y_var, basis_kinds)
 
     n_slices = Y_var.shape[1]
     S_TC = np.empty((n_slices, D), dtype=np.float64)
@@ -250,6 +276,7 @@ def estimate_correlated_indices(
             index=i,
             predict=predict,
             component=coefficients[:, i, :],
+            basis_kind=basis_kinds[i],
             n_outer=n_outer,
             n_inner=n_inner,
             n_slices=n_slices,
@@ -261,7 +288,8 @@ def estimate_correlated_indices(
         # itself that X_-i already determines through the correlation. V(f_i)
         # is a marginal quantity, so it comes from the joint variance sample
         # rather than from the nested conditional draws.
-        f_i = _evaluate_component(U_var[:, i], coefficients[:, i, :])
+        value = _component_value(U_var[:, i], Z_var[:, i], basis_kinds[i])
+        f_i = _evaluate_component(value, coefficients[:, i, :], basis_kinds[i])
         S_U[:, i] = np.maximum(f_i.var(axis=0) - conditional_component_var, 0.0)
 
     S_TC /= safe_variance[:, None]
@@ -357,7 +385,79 @@ def _legendre_basis(u: np.ndarray, degree: int) -> np.ndarray:
     return legendre_orthonormal(2.0 * u - 1.0, degree)[..., 1:]
 
 
-def _fit_component_functions(U: np.ndarray, Y: np.ndarray) -> np.ndarray:
+def _hermite_basis(z: np.ndarray, degree: int) -> np.ndarray:
+    """Evaluate orthonormal probabilists' Hermite polynomials 1..degree on ``z``.
+
+    Each ``z_i = Phi^-1(u_i)`` is exactly standard normal, so probabilists'
+    Hermite polynomials are marginally orthonormal and mean-zero here, the
+    same reasoning :func:`_legendre_basis` uses for a uniform marginal.
+
+    Same three-term recurrence as
+    :func:`jaxgsa.pce._engine._hermite_1d`, transcribed for a host NumPy
+    array: ``He_0(z) = 1``, ``He_1(z) = z``,
+    ``He_{n+1}(z) = z He_n(z) - n He_{n-1}(z)``, normalised by
+    ``1 / sqrt(n!)``.
+
+    Args:
+        z: Standard normal values, shape ``(...,)``.
+        degree: Highest polynomial degree. Term 0 (the constant) is dropped.
+
+    Returns:
+        Basis values, shape ``(..., degree)``.
+    """
+    columns = [np.ones_like(z), z] if degree >= 1 else [np.ones_like(z)]
+    for n in range(1, degree):
+        columns.append(z * columns[n] - n * columns[n - 1])
+    basis = np.stack(columns, axis=-1)
+    norms = np.array([1.0 / np.sqrt(factorial(k)) for k in range(degree + 1)])
+    return (basis * norms)[..., 1:]
+
+
+def _component_basis_kinds(problem: Problem) -> tuple[str, ...]:
+    """Pick each parameter's component-fit basis from its declared marginal.
+
+    ``"hermite"`` for an untruncated Gaussian marginal, where the physical
+    variable is an affine map of the latent normal ``Z_i`` and Hermite
+    polynomials of ``Z_i`` represent a polynomial response exactly.
+    ``"legendre"`` otherwise (uniform, or a truncated Gaussian, whose CDF
+    is not the standard normal CDF, so ``Z_i`` no longer maps affinely to
+    the physical variable): the copula uniform ``U_i`` is always exactly
+    uniform, whatever the marginal, so Legendre stays a safe fallback there.
+
+    Args:
+        problem: Problem whose ``input_specs`` decide the per-parameter
+            basis.
+
+    Returns:
+        Length-``D`` tuple of ``"hermite"`` or ``"legendre"``.
+    """
+    kinds = []
+    for spec in problem.input_specs:
+        is_untruncated_gaussian = (
+            isinstance(spec, GaussianSpec) and spec.low is None and spec.high is None
+        )
+        kinds.append("hermite" if is_untruncated_gaussian else "legendre")
+    return tuple(kinds)
+
+
+def _component_value(u: np.ndarray, z: np.ndarray, kind: str) -> np.ndarray:
+    """Pick the coordinate a component-fit basis of the given kind reads.
+
+    Args:
+        u: Copula-uniform values for one parameter, shape ``(...,)``.
+        z: Latent-normal values for the same parameter, shape ``(...,)``.
+        kind: ``"hermite"`` or ``"legendre"``, from
+            :func:`_component_basis_kinds`.
+
+    Returns:
+        ``z`` for ``"hermite"``, ``u`` for ``"legendre"``.
+    """
+    return z if kind == "hermite" else u
+
+
+def _fit_component_functions(
+    U: np.ndarray, Z: np.ndarray, Y: np.ndarray, basis_kinds: Sequence[str]
+) -> np.ndarray:
     """Fit the additive first-order component functions ``f_i``.
 
     Least squares of the output onto ``sum_i f_i(X_i)`` under the correlated
@@ -367,14 +467,22 @@ def _fit_component_functions(U: np.ndarray, Y: np.ndarray) -> np.ndarray:
     to be extracted afterwards by conditioning.
 
     Args:
-        U: Marginal CDF values of the sample, shape ``(N, D)``.
+        U: Copula-uniform values of the sample, shape ``(N, D)``.
+        Z: Latent-normal values of the sample, shape ``(N, D)``.
         Y: Surrogate outputs, shape ``(N, S)``.
+        basis_kinds: Per-parameter basis choice from
+            :func:`_component_basis_kinds`, length ``D``.
 
     Returns:
         Basis coefficients, shape ``(degree, D, S)``.
     """
     N, D = U.shape
-    basis = _legendre_basis(U, _COMPONENT_DEGREE)  # (N, D, degree)
+    columns = []
+    for d, kind in enumerate(basis_kinds):
+        value = _component_value(U[:, d], Z[:, d], kind)
+        basis_fn = _hermite_basis if kind == "hermite" else _legendre_basis
+        columns.append(basis_fn(value, _COMPONENT_DEGREE))
+    basis = np.stack(columns, axis=1)  # (N, D, degree)
     design = basis.reshape(N, D * _COMPONENT_DEGREE)
 
     gram = design.T @ design
@@ -383,17 +491,21 @@ def _fit_component_functions(U: np.ndarray, Y: np.ndarray) -> np.ndarray:
     return coefficients.reshape(D, _COMPONENT_DEGREE, -1).transpose(1, 0, 2)
 
 
-def _evaluate_component(u: np.ndarray, coefficients: np.ndarray) -> np.ndarray:
-    """Evaluate one component function ``f_i`` at ``u``.
+def _evaluate_component(value: np.ndarray, coefficients: np.ndarray, kind: str) -> np.ndarray:
+    """Evaluate one component function ``f_i``.
 
     Args:
-        u: Marginal CDF values for parameter ``i``, shape ``(...,)``.
+        value: ``u`` (``kind="legendre"``) or ``z`` (``kind="hermite"``)
+            values for parameter ``i``, shape ``(...,)``.
         coefficients: Coefficients for that parameter, shape ``(degree, S)``.
+        kind: ``"hermite"`` or ``"legendre"``, from
+            :func:`_component_basis_kinds`.
 
     Returns:
         Component values, shape ``(..., S)``.
     """
-    return _legendre_basis(u, _COMPONENT_DEGREE) @ coefficients
+    basis_fn = _hermite_basis if kind == "hermite" else _legendre_basis
+    return basis_fn(value, _COMPONENT_DEGREE) @ coefficients
 
 
 def _outer_chunk(n_outer: int, n_inner: int, n_columns: int, batch_size: int | None) -> int:
@@ -498,12 +610,47 @@ def _total_correlated(
     return inner_mean.var(axis=0)
 
 
+def _inner_noise(n_inner: int, n_outer: int, stream: np.random.SeedSequence) -> np.ndarray:
+    """Draw one independent stratified inner block per outer point.
+
+    Each outer point gets its own column of a scrambled Sobol' set, so the
+    inner integration error is independent across outer points and averages
+    away in ``S_TU``. The block comes out transposed, ``(n_outer, n_inner)``.
+
+    A Sobol' engine carries direction numbers for at most
+    ``_MAX_QMC_DIM`` dimensions, so one call cannot serve more than that many
+    outer points. A larger ``n_outer`` is split into consecutive blocks of
+    columns, each drawn from its own spawned child stream. The columns stay
+    independent across the split, which is all this estimator asks of them.
+
+    Args:
+        n_inner: Inner draws per outer point.
+        n_outer: Number of outer points, one column each.
+        stream: This estimator's inner :class:`numpy.random.SeedSequence`.
+
+    Returns:
+        Standard normal noise, shape ``(n_outer, n_inner)``.
+    """
+    if n_outer <= _MAX_QMC_DIM:
+        return latent_normal_sample(n_inner, n_outer, seed=_qmc_seed(stream)).T
+    n_blocks = -(-n_outer // _MAX_QMC_DIM)
+    blocks = []
+    for width, child in zip(
+        [min(_MAX_QMC_DIM, n_outer - start) for start in range(0, n_outer, _MAX_QMC_DIM)],
+        stream.spawn(n_blocks),
+        strict=True,
+    ):
+        blocks.append(latent_normal_sample(n_inner, width, seed=_qmc_seed(child)).T)
+    return np.concatenate(blocks, axis=0)
+
+
 def _total_uncorrelated_and_conditional(
     *,
     plan: _ConditionalPlan,
     index: int,
     predict: Callable[[np.ndarray], np.ndarray],
     component: np.ndarray,
+    basis_kind: str,
     n_outer: int,
     n_inner: int,
     n_slices: int,
@@ -527,6 +674,8 @@ def _total_uncorrelated_and_conditional(
         predict: Fitted surrogate. It maps ``(n, D)`` unit-cube samples to
             ``(n, S)`` outputs.
         component: Basis coefficients of ``f_i``, shape ``(degree, S)``.
+        basis_kind: ``"hermite"`` or ``"legendre"``, the basis ``component``
+            was fitted in (see :func:`_component_basis_kinds`).
         n_outer: Outer (conditioning) sample size.
         n_inner: Inner (conditional) sample size per outer point.
         n_slices: Number of output slices ``S``.
@@ -546,7 +695,14 @@ def _total_uncorrelated_and_conditional(
         latent_normal_sample(n_outer, D_rest, seed=_qmc_seed(outer_stream))
         @ plan.chol_marginal[index].T
     )
-    inner = latent_normal_sample(n_inner, 1, seed=_qmc_seed(inner_stream))[:, 0]
+    # One inner draw per outer point: latent_normal_sample(n_inner, n_outer, ...)
+    # gives an (n_inner, n_outer) scrambled Sobol' block, one column per outer
+    # point, transposed here to (n_outer, n_inner). A single shared column
+    # (the old behaviour) freezes the inner sampling error into a per-run bias
+    # that a mean over outer points cannot average away, because S_TU is a
+    # mean of inner variances, not a variance of inner means (contrast
+    # :func:`_total_correlated`, where the shared block is correct).
+    inner = _inner_noise(n_inner, n_outer, inner_stream)
 
     inner_var = np.empty((n_outer, n_slices), dtype=np.float64)
     f_hat = np.empty((n_outer, n_slices), dtype=np.float64)
@@ -554,7 +710,7 @@ def _total_uncorrelated_and_conditional(
     for start in range(0, n_outer, chunk):
         stop = start + chunk
         # Z_i | Z_-i, broadcast to (chunk, n_inner) via the batched mean.
-        z_self = draw_self_given_rest(plan, index, z_rest[start:stop, None, :], inner[None, :])
+        z_self = draw_self_given_rest(plan, index, z_rest[start:stop, None, :], inner[start:stop])
         z_rest_tiled = np.repeat(z_rest[start:stop], n_inner, axis=0)
         Z = assemble_latent(index, others, z_self.reshape(-1), z_rest_tiled)
 
@@ -563,10 +719,8 @@ def _total_uncorrelated_and_conditional(
 
         # E(f_i | X_-i), averaged over the same inner draws of X_i. Its
         # variance over the outer sample is the correlation-explained part of
-        # f_i that Equation (25) removes. No inner-noise correction here
-        # either: the same shared-QMC-block argument as in _total_correlated
-        # applies, so both estimators use the same (empirically validated)
-        # convention.
-        f_hat[start:stop] = _evaluate_component(norm.cdf(z_self), component).mean(axis=1)
+        # f_i that Equation (25) removes.
+        value = z_self if basis_kind == "hermite" else norm.cdf(z_self)
+        f_hat[start:stop] = _evaluate_component(value, component, basis_kind).mean(axis=1)
 
     return inner_var.mean(axis=0), f_hat.var(axis=0)

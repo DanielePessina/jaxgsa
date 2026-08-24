@@ -27,6 +27,7 @@ import pytest
 
 from jaxgsa import hdmr
 from jaxgsa.benchmarks import ishigami
+from jaxgsa.hdmr._engine import _compute_f_crits
 from jaxgsa.problem import Problem
 
 # HDMR refuses to fit below this, so every case here is at least this large.
@@ -153,6 +154,36 @@ def test_indices_is_jittable(case):
     np.testing.assert_allclose(np.asarray(ST_jit), np.asarray(ST), rtol=1e-3, atol=1e-4)
 
 
+def test_jit_then_eager_shares_the_f_crit_cache(case):
+    """Tier T4: a jitted call must not poison the eager path (H1 regression).
+
+    ``_compute_f_crits`` is ``lru_cache``\\ d on ``(alpha, m1, m2, m3, N)``. A
+    call made from inside ``jax.jit`` traces this function once for that key.
+    If the cached return value were a JAX array, it would be a tracer from
+    that trace, and every later caller with the same key -- including the
+    plain eager call right below -- would inherit a dead tracer and raise
+    ``UnexpectedTracerError``. This test must run the jitted call first so a
+    regression cannot hide behind test order the way it did before the fix:
+    the full suite always warmed the cache eagerly first, and only running
+    this test in isolation showed the crash.
+
+    Clearing the cache first is what makes the order hold. Another test in
+    this file has already run the eager path on the same key, so without the
+    clear the jitted call below is a cache hit and the poisoning never
+    happens: the test passes against the broken code in a full-file run, and
+    fails only in isolation. That is the exact gap this test exists to close.
+    """
+    problem, X, Y = case
+    _compute_f_crits.cache_clear()
+
+    jitted = jax.jit(lambda outputs: hdmr.indices(problem, X, outputs, maxorder=2, maxiter=50))
+    ST_jit = jitted(Y)[3]
+
+    result = hdmr.analyze(problem, X, Y, maxorder=2, maxiter=50)
+
+    np.testing.assert_allclose(np.asarray(ST_jit), np.asarray(result.ST), rtol=1e-3, atol=1e-4)
+
+
 def test_indices_is_vmappable(case):
     """Tier T4: ``vmap`` maps ``indices`` over a batch of output vectors."""
     problem, X, Y = case
@@ -183,6 +214,34 @@ def test_jit_of_jacfwd_of_the_inputs(case):
     assert jac.shape == X.shape
     assert np.isfinite(np.asarray(jac)).all()
     assert np.abs(np.asarray(jac)).max() > 0.0
+
+    # Finite and non-zero is not the same as correct: spot check a handful of
+    # entries against a central finite difference, which re-runs the whole
+    # backfitting fit at X +/- h and so exercises none of the autodiff path.
+    # A full-Jacobian check would refit the whole design 2 * N * D times,
+    # which is too slow here; a fixed, seeded sample of entries is cheap and
+    # deterministic. The F-test term selection makes this comparison
+    # genuinely discontinuous in float32 near a threshold crossing, so this
+    # step -- like every other gradient check in this file family -- runs
+    # under x64. The review measured 2e-5 in float32; under x64 the sampled
+    # entries agree to 3.6e-9 against Jacobian entries of order 1e-3, so the
+    # tolerance is set at 1e-7. That is still 30x the measured error, and it
+    # is tight enough to catch a wrong scale factor, which 2e-5 (2% of a
+    # typical entry) would not.
+    step = 1e-4
+    rng = np.random.default_rng(0)
+    n_rows, n_cols = X.shape
+    sample_rows = rng.choice(n_rows, size=min(4, n_rows), replace=False)
+    with jax.enable_x64():
+        X64 = jnp.asarray(X, dtype=jnp.float64)
+        jac64 = np.asarray(jax.jacfwd(total_st)(X64))
+        for row in sample_rows:
+            for col in range(n_cols):
+                delta = jnp.zeros_like(X64).at[row, col].set(step)
+                plus = float(total_st(X64 + delta))
+                minus = float(total_st(X64 - delta))
+                fd = (plus - minus) / (2.0 * step)
+                np.testing.assert_allclose(jac64[row, col], fd, rtol=0, atol=1e-7)
 
 
 def test_reverse_mode_is_refused_by_the_backfitting_loop():

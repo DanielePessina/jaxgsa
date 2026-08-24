@@ -14,8 +14,16 @@ from jax import Array
 
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import get_memory_budget, resolve_batch_size
-from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
-from jaxgsa._core.entry import at_least, check_scalars, gates, in_open_interval, one_of, prepare
+from jaxgsa._core.bootstrap import bootstrap_draws, interval
+from jaxgsa._core.entry import (
+    at_least,
+    check_scalars,
+    gates,
+    in_open_interval,
+    one_of,
+    prepare,
+    require,
+)
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.precision import unit_clip_bounds
 from jaxgsa._core.result import CIInfo
@@ -23,6 +31,7 @@ from jaxgsa._core.sampling import UNIT_CLIP
 from jaxgsa._core.surrogate import _PredictPlan
 from jaxgsa._core.transforms import _truncnorm_cdf
 from jaxgsa._core.validation import (
+    _is_constant_slice,
     _prepare_Y,
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
@@ -41,7 +50,16 @@ from jaxgsa.problem import CategoricalSpec, Problem, UniformSpec
 # deviations from the mean. Below the threshold the truncated measure differs
 # enough from the standard normal that Hermite polynomials are no longer
 # orthogonal against it.
-_WIDE_TRUNCATION_Z = 5.0
+#
+# M12: this gate and the order cap below must be calibrated at the same
+# width. Measured max |G - I| for orthonormalised He_0..He_P under a
+# truncated N(0, 1) at |z| = 5.0: 1.5e-3 (P=3), 3.1e-2 (P=5), 2.0e-1 (P=7) --
+# large enough that a response with its variance concentrated in a degree-7
+# mode returned S1 that missed the true split by 0.05 with no warning. At
+# |z| = 7.03, the width used below, the same defects are 4.0e-8 (P=3),
+# 2.8e-5 (P=6), 9.5e-3 (P=10): negligible up to the order cap this module
+# enforces.
+_WIDE_TRUNCATION_Z = 7.0
 
 # Above this polynomial degree the Hermite Gram defect against even a very wide
 # truncated normal stops being negligible, so Legendre is the safer basis.
@@ -51,9 +69,10 @@ _MAX_HERMITE_ORDER_UNDER_TRUNCATION = 7
 
 # Fewest rows the fit can still run on after ``on_invalid="drop"`` removed
 # some. Two is the floor of the arithmetic itself: a sample variance, which
-# every index divides by, is undefined below it. `_auto_order` then shrinks the
-# expansion to whatever the surviving rows can carry, and the low-survivor
-# warning in the shared policy covers the rest.
+# every index divides by, is undefined below it. `_auto_order` never drops
+# below the order-1 expansion (D + 1 terms), so a row count between this
+# floor and that expansion's term budget still fails, with a clear message
+# (M2), rather than fitting an underdetermined system silently.
 _MIN_ROWS = 2
 
 
@@ -217,8 +236,8 @@ class _PCEFit(NamedTuple):
     coefficients: Array  # (T, K, n_terms), terms-last
     multi_index: np.ndarray  # (n_terms, D)
     order: int  # effective order after _auto_order
-    loo_flat: Array  # (T*K,) per-slice LOO RMSE
-    fitted_var: Array  # (T*K,) sample variance of the fitted values
+    loo_flat: Array | None  # (T*K,) per-slice LOO RMSE, or None (diagnostics=False)
+    fitted_var: Array | None  # (T*K,) fitted-value variance, or None (diagnostics=False)
     streamed: bool  # True when the row-streamed fit path ran
 
 
@@ -419,15 +438,17 @@ def _single_pass_fit_bytes(N: int, n_terms: int, M: int, itemsize: int) -> int:
     """Estimate the resident bytes of the single-pass PCE fit path.
 
     Derived from the arrays the single-pass code actually materializes. At the
-    peak, which is inside the leave-one-out step, three (N, n_terms) arrays are
+    peak, which is inside the leave-one-out step, two (N, n_terms) arrays are
     resident at once:
 
     - ``Phi``, the design matrix.
-    - ``gram_inv_PhiT``, the ``(n_terms, N)`` product the coefficient solve
-      builds. It is still a live local while ``loo_error`` runs, because the
-      caller holds it for the coefficient step that precedes it.
     - the triangular-solve result inside
       :func:`jaxgsa.pce._engine.hat_diagonal`.
+
+    The coefficient solve reads ``Phi.T @ Y_flat`` (an ``(n_terms, M)``
+    product, not an ``(n_terms, N)`` one) straight into ``jnp.linalg.solve``,
+    matching the streamed path: there is no third ``(n_terms, N)`` array held
+    across the leave-one-out step.
 
     Plus the (N, M) prediction and residual arrays ``loo_error`` materializes,
     for ``2 * N * M``.
@@ -440,18 +461,6 @@ def _single_pass_fit_bytes(N: int, n_terms: int, M: int, itemsize: int) -> int:
     caller holds Y either way, and the Gram factors are negligible next to
     the N-sized arrays.
 
-    Note:
-        An audit read the three ``n_terms`` terms as charging for an array the
-        Cholesky rewrite had removed, and asked for two. That was wrong, and
-        measurement settled it: the rewrite removed a *transpose* inside the
-        leave-one-out step, not ``gram_inv_PhiT``, which the coefficient solve
-        still needs and still holds. Counting live arrays during a real fit
-        (N=4000, n_terms=35) gives 3.16 times ``N * n_terms``, not 2. Charging
-        two would under-estimate the peak by up to a quarter and let a fit run
-        in one pass that does not fit — on the multi-output case, where
-        ``M`` is near ``n_terms / 2``, the under-count is worst. The term count
-        stays at three.
-
     Args:
         N: Number of sample rows.
         n_terms: Number of expansion terms.
@@ -461,7 +470,7 @@ def _single_pass_fit_bytes(N: int, n_terms: int, M: int, itemsize: int) -> int:
     Returns:
         Estimated peak resident bytes of the single-pass fit + LOO.
     """
-    return itemsize * N * (3 * n_terms + 2 * M)
+    return itemsize * N * (2 * n_terms + 2 * M)
 
 
 def _fit_pce_core(
@@ -476,6 +485,7 @@ def _fit_pce_core(
     ridge: float = 1e-8,
     fit_ratio: float = 0.5,
     batch_size: int | None = None,
+    diagnostics: bool = True,
 ) -> _PCEFit:
     """Fit the shared PCE expansion for every output slice at once.
 
@@ -499,6 +509,16 @@ def _fit_pce_core(
     and warns. A warning inside the fit would put a host-side side effect on
     the path :func:`indices` traces, for information the caller can also get
     from :func:`effective_order` without running a fit at all.
+
+    Args:
+        diagnostics: Compute ``loo_flat`` and ``fitted_var``. Off for
+            :func:`indices` and every bootstrap replicate, neither of which
+            reads them: on the single-pass path this skips a Cholesky
+            factor, an ``(n_terms, N)`` triangular solve and an ``(N, T*K)``
+            residual array that the Sobol-index extraction never touches.
+            ``fitted_var`` is then ``None``. So is ``loo_flat`` on the
+            single-pass path; the streamed path returns it either way,
+            because its accumulation gives the exact LOO for free.
     """
     Y_3d, _ = _prepare_Y(Y_canonical)
     N, D = X.shape
@@ -530,16 +550,21 @@ def _fit_pce_core(
         Phi = build_design_matrix(X_ref, mi, input_types, effective_order)
         gram_raw = Phi.T @ Phi
         gram = gram_raw + ridge * jnp.eye(Phi.shape[1])
-        gram_inv_PhiT = jnp.linalg.solve(gram, Phi.T)
         # The basis is identical for every output slice (the effective order
         # depends only on N and D), so fitting all T*K slices is ONE shared
-        # solve with multiple right-hand sides: a single vectorized matmul.
-        coeffs_flat = gram_inv_PhiT @ Y_flat  # (n_terms, T*K)
-        # Per-slice LOO RMSE from the shared hat-matrix leverage. Pass the
-        # small Cholesky factor of the Gram matrix already built above, so
-        # loo_error reuses the factorization without carrying anything that
-        # scales with N.
-        loo_flat = loo_error(Phi, Y_flat, coeffs_flat, gram_chol=jnp.linalg.cholesky(gram))
+        # solve with multiple right-hand sides. Solving against
+        # ``Phi.T @ Y_flat`` (an (n_terms, M) product) rather than building
+        # ``solve(gram, Phi.T)`` (an (n_terms, N) product held across the LOO
+        # step) matches the streamed path and drops a third N-sized array.
+        coeffs_flat = jnp.linalg.solve(gram, Phi.T @ Y_flat)  # (n_terms, T*K)
+        if diagnostics:
+            # Per-slice LOO RMSE from the shared hat-matrix leverage. Pass
+            # the small Cholesky factor of the Gram matrix already built
+            # above, so loo_error reuses the factorization without carrying
+            # anything that scales with N.
+            loo_flat = loo_error(Phi, Y_flat, coeffs_flat, gram_chol=jnp.linalg.cholesky(gram))
+        else:
+            loo_flat = None
     else:
         # Streamed path: same normal equations and exact LOO, accumulated
         # over row batches so peak memory stays within the budget.
@@ -554,7 +579,7 @@ def _fit_pce_core(
         multi_index=mi,
         order=effective_order,
         loo_flat=loo_flat,
-        fitted_var=_fitted_variance(gram_raw, coeffs_flat, N),
+        fitted_var=_fitted_variance(gram_raw, coeffs_flat, N) if diagnostics else None,
         streamed=streamed,
     )
 
@@ -573,12 +598,23 @@ def _indices_3d(
 
     The shared body of :func:`indices` and of one bootstrap replicate. It
     takes ``Y`` already promoted to ``(N, T, K)`` and returns ``(T, K, ...)``
-    arrays, so neither caller squeezes twice.
+    arrays, so neither caller squeezes twice. Neither caller reads
+    ``loo_flat`` or ``fitted_var``, so the fit skips them
+    (``diagnostics=False``); a bootstrap run is ``n_bootstrap`` of these.
     """
     fit = _fit_pce_core(
-        problem, X, Y_3d, order=order, ridge=ridge, fit_ratio=fit_ratio, batch_size=batch_size
+        problem,
+        X,
+        Y_3d,
+        order=order,
+        ridge=ridge,
+        fit_ratio=fit_ratio,
+        batch_size=batch_size,
+        diagnostics=False,
     )
-    return sobol_from_coefficients(fit.coefficients, fit.multi_index)
+    N = Y_3d.shape[0]
+    is_constant = _is_constant_slice(Y_3d.reshape(N, -1)).reshape(Y_3d.shape[1:])
+    return sobol_from_coefficients(fit.coefficients, fit.multi_index, is_constant)
 
 
 def _bootstrap_indices(
@@ -621,12 +657,9 @@ def _bootstrap_indices(
         ``(S1, ST, S2)`` draws, each with a leading axis of length
         ``n_bootstrap`` followed by the canonical ``(T, K, ...)`` shape.
     """
-    N = X.shape[0]
-    S1_draws, ST_draws, S2_draws = [], [], []
-    for _ in range(n_bootstrap):
-        key, subkey = jax.random.split(key)
-        rows = jax.random.choice(subkey, N, shape=(N,), replace=True)
-        S1_b, ST_b, S2_b = _indices_3d(
+
+    def _replicate(rows: Array) -> tuple[Array, Array, Array]:
+        return _indices_3d(
             problem,
             X[rows],
             Y_3d[rows],
@@ -635,10 +668,8 @@ def _bootstrap_indices(
             fit_ratio=fit_ratio,
             batch_size=batch_size,
         )
-        S1_draws.append(S1_b)
-        ST_draws.append(ST_b)
-        S2_draws.append(S2_b)
-    return jnp.stack(S1_draws), jnp.stack(ST_draws), jnp.stack(S2_draws)
+
+    return bootstrap_draws(key, X.shape[0], n_bootstrap, _replicate)
 
 
 def indices(
@@ -685,7 +716,8 @@ def indices(
         order: Maximum total polynomial degree, as in :func:`analyze`.
         ridge: Tikhonov regularization for the least-squares fit.
         fit_ratio: Maximum ratio of terms to samples before ``order`` is
-            reduced.
+            reduced. Must be at most 1, and must leave room for the order-1
+            expansion: ``D + 1 <= int(fit_ratio * N)``.
         batch_size: Rows per batch during the fit, clamped to ``N``, or
             ``None`` to derive one from the memory budget, as in
             :func:`analyze`. Both paths trace; they differ only in float32
@@ -696,7 +728,10 @@ def indices(
 
     Raises:
         ValueError: If ``order``, ``ridge``, ``fit_ratio`` or ``batch_size``
-            is out of range, ``problem.correlation`` declares a dependence
+            is out of range, ``fit_ratio`` is above 1, ``X`` has too few rows
+            for even the order-1 expansion at that ``fit_ratio``
+            (``D + 1 > int(fit_ratio * N)``, which would make the fit
+            underdetermined), ``problem.correlation`` declares a dependence
             structure (the basis is not orthogonal under the dependent
             measure, so the indices would be silently wrong, exactly as in
             :func:`analyze`), or ``problem`` has a categorical parameter,
@@ -704,12 +739,22 @@ def indices(
     """
     from jaxgsa.pce import SPEC
 
+    D = problem.num_vars
+    N = X.shape[0]
+    min_terms = D + 1  # term count of the order-1 expansion
     check_scalars(
         (
             at_least("order", order, 1),
             at_least("ridge", ridge, 0.0),
             at_least("fit_ratio", fit_ratio, 0.0),
+            require(fit_ratio <= 1.0, f"fit_ratio must be <= 1, got {fit_ratio}"),
             at_least("batch_size", batch_size, 1),
+            require(
+                min_terms <= int(fit_ratio * N),
+                f"fit_ratio={fit_ratio} and N={N} rows cannot fit even the "
+                f"order-1 expansion ({min_terms} terms for D={D} parameters); "
+                "raise fit_ratio or provide more rows",
+            ),
         )
     )
     # The same capability gate analyze applies through prepare().
@@ -773,7 +818,9 @@ def analyze(
             it if coefficients look unstable (noisy Y, near-duplicate rows).
         fit_ratio: Maximum ratio of terms to samples before ``order`` is
             reduced. Lower values demand more samples per term (a more
-            conservative, less overfit-prone fit).
+            conservative, less overfit-prone fit). Must be at most 1, and
+            must leave room for the order-1 expansion:
+            ``D + 1 <= int(fit_ratio * N)``.
         batch_size: Rows of ``X``/``Y`` processed per batch during the fit
             (the package-wide ``batch_size`` convention): it sizes row
             blocks, clamped to ``N``. ``None`` (default) keeps the
@@ -845,7 +892,11 @@ def analyze(
             polynomial in an unordered level code has no meaning),
             ``on_invalid`` is not one of the three policies,
             ``on_invalid="raise"`` (the default) and ``X`` or ``Y`` holds a
-            non-finite value, or ``n_bootstrap > 0`` without a ``key``.
+            non-finite value, ``n_bootstrap > 0`` without a ``key``,
+            ``fit_ratio`` is above 1, or too few rows survive
+            ``on_invalid`` for even the order-1 expansion
+            (``D + 1 > int(fit_ratio * N)``, which would make the fit
+            underdetermined).
     """
     from jaxgsa.pce import SPEC
 
@@ -863,16 +914,36 @@ def analyze(
             at_least("order", order, 1),
             at_least("ridge", ridge, 0.0),
             at_least("fit_ratio", fit_ratio, 0.0),
+            require(fit_ratio <= 1.0, f"fit_ratio must be <= 1, got {fit_ratio}"),
             at_least("batch_size", batch_size, 1),
             at_least("n_bootstrap", n_bootstrap, 0),
             one_of("ci_method", ci_method, ("quantile", "gaussian")),
             in_open_interval("conf_level", conf_level, 0.0, 1.0),
+            # Checked here, with the other cheap argument checks, so a
+            # missing key is reported before the point estimate is paid for.
+            require(
+                not (n_bootstrap > 0 and key is None),
+                "key is required when n_bootstrap > 0",
+            ),
         ),
         min_kept=_MIN_ROWS,
     )
-    if n_bootstrap > 0 and key is None:
-        raise ValueError("key is required when n_bootstrap > 0")
-    X, Y, invalid = ctx.inputs, ctx.Y, ctx.invalid
+    assert ctx.X is not None
+    X, Y, invalid = ctx.X, ctx.Y, ctx.invalid
+
+    # M2: an underdetermined fit (fewer rows than even the order-1 expansion
+    # has terms) used to pass silently and hand back a plausible-looking but
+    # meaningless index. N is the row count after `on_invalid` has run, so
+    # this reads the fit's real sample budget.
+    _D = problem.num_vars
+    _N = X.shape[0]
+    _min_terms = _D + 1
+    if _min_terms > int(fit_ratio * _N):
+        raise ValueError(
+            f"fit_ratio={fit_ratio} and N={_N} rows (after invalid-row handling) "
+            f"cannot fit even the order-1 expansion ({_min_terms} terms for "
+            f"D={_D} parameters); raise fit_ratio or provide more rows"
+        )
 
     # Per-slice output variance for the explained-variance diagnostic below.
     total_var = jnp.var(ctx.Y3, axis=0)  # (T, K)
@@ -897,11 +968,21 @@ def analyze(
 
     # Sobol indices are extracted analytically from the coefficients
     # (Sudret 2008), batched over all slices: no extra sampling, no loops.
-    S1, ST, S2 = sobol_from_coefficients(fit.coefficients, fit.multi_index)  # (T,K,D), (T,K,D,D)
+    # is_constant reads the raw Y column, not the fit: a constant slice's
+    # fitted non-constant coefficients are rarely bit-exact zero in float32
+    # (M1), so the fit-only guard inside sobol_from_coefficients would miss
+    # most of them.
+    is_constant = _is_constant_slice(ctx.Y3.reshape(ctx.Y3.shape[0], -1)).reshape(T, K)
+    S1, ST, S2 = sobol_from_coefficients(
+        fit.coefficients, fit.multi_index, is_constant
+    )  # (T,K,D), (T,K,D,D)
 
     # Per-slice LOO RMSE as a cheap goodness-of-fit diagnostic, computed by
     # the fit path (single-pass hat-matrix diagonal, or the streamed
-    # equivalent); the leverage is shared by every slice.
+    # equivalent); the leverage is shared by every slice. _fit_pce_core ran
+    # with its default diagnostics=True here, so both fields are populated.
+    assert fit.loo_flat is not None
+    assert fit.fitted_var is not None
     loo = fit.loo_flat.reshape(T, K)
     # Numerator and denominator are both sample quantities on the same rows:
     # the sample variance of the fitted values over the sample variance of Y.
@@ -932,35 +1013,29 @@ def analyze(
             fit_ratio=fit_ratio,
             batch_size=batch_size,
         )
-
-        def endpoints(point: Array, draws: Array, n_trailing: int) -> Array:
-            """Stack ``[lower, upper]`` into a leading axis of size 2."""
-            return ctx.squeeze(
-                jnp.stack(
-                    _bootstrap_ci_endpoints(
-                        point, draws, conf_level=conf_level, ci_method=ci_method
-                    )
-                ),
-                n_trailing=n_trailing,
-            )
-
-        S1_conf = endpoints(S1, S1_draws, 1)
-        ST_conf = endpoints(ST, ST_draws, 1)
-        S2_conf = endpoints(S2, S2_draws, 2)
-        ci = CIInfo(
+        # Squeeze before calling interval(): it reads no shape of its own, so
+        # points and draws must already be at the layout the result reports
+        # (the leading replicate axis on the draws survives the squeeze,
+        # which addresses the T/K axes from the end).
+        points = {
+            "S1": ctx.squeeze(S1),
+            "ST": ctx.squeeze(ST),
+            "S2": ctx.squeeze(S2, n_trailing=2),
+        }
+        draws_sq = {
+            "S1": ctx.squeeze(S1_draws),
+            "ST": ctx.squeeze(ST_draws),
+            "S2": ctx.squeeze(S2_draws, n_trailing=2),
+        }
+        field_conf, ci = interval(
+            points,
+            draws_sq,
             level=conf_level,
             method=ci_method,
             n_bootstrap=n_bootstrap,
-            # The leading replicate axis survives the squeeze, which addresses
-            # the T/K axes from the end.
-            replicates={
-                "S1": ctx.squeeze(S1_draws),
-                "ST": ctx.squeeze(ST_draws),
-                "S2": ctx.squeeze(S2_draws, n_trailing=2),
-            }
-            if keep_replicates
-            else None,
+            keep_replicates=keep_replicates,
         )
+        S1_conf, ST_conf, S2_conf = field_conf["S1"], field_conf["ST"], field_conf["S2"]
 
     S1 = ctx.squeeze(S1)
     ST = ctx.squeeze(ST)

@@ -374,6 +374,47 @@ def _m_optimal_transport(case: Case, X: jax.Array, Y: jax.Array) -> Any:
     )
 
 
+def _m_optimal_transport_multivariate(case: Case, X: jax.Array, Y: jax.Array) -> Any:
+    """Point-cloud transport over the output columns jointly.
+
+    The default mode above is univariate, which ignores ``epsilon`` and never
+    calls Sinkhorn. Until this entry existed the baseline pinned no joint-mode
+    number at all, so the entropic solver, the regularization scale and the
+    per-parameter dummy floor were outside the regression net. A case whose
+    output is scalar refuses here, and the refusal is pinned too.
+    """
+    return optimal_transport.analyze(
+        case.problem,
+        X,
+        Y,
+        mode="multivariate",
+        n_partitions=8,
+        n_bootstrap=10,
+        dummy=True,
+        key=jax.random.key(SEED),
+        verbose=False,
+    )
+
+
+def _m_optimal_transport_trajectory(case: Case, X: jax.Array, Y: jax.Array) -> Any:
+    """Point-cloud transport over the whole time course, per output column.
+
+    Needs a three-dimensional ``Y``; every other case refuses, which is the
+    behaviour being pinned for them.
+    """
+    return optimal_transport.analyze(
+        case.problem,
+        X,
+        Y,
+        mode="trajectory",
+        n_partitions=8,
+        n_bootstrap=10,
+        dummy=True,
+        key=jax.random.key(SEED),
+        verbose=False,
+    )
+
+
 def _m_pce(case: Case, X: jax.Array, Y: jax.Array) -> Any:
     return pce.analyze(case.problem, X, Y, order=3, verbose=False)
 
@@ -413,12 +454,24 @@ DESIGN_METHODS: dict[str, Callable[[Case], Any]] = {
     "sobol": _m_sobol,
 }
 
+# Runner keys that are an extra mode of a registered method rather than a
+# method of their own. Maps the runner key to the registry name it varies.
+# optimal_transport's three modes are three different estimators: the default
+# univariate mode never calls Sinkhorn and ignores epsilon, so pinning it alone
+# leaves the joint modes with no numerical guard.
+MODE_VARIANTS: dict[str, str] = {
+    "optimal_transport_multivariate": "optimal_transport",
+    "optimal_transport_trajectory": "optimal_transport",
+}
+
 GIVEN_DATA_METHODS: dict[str, Callable[[Case, jax.Array, jax.Array], Any]] = {
     "borgonovo": _m_borgonovo,
     "dgsm": _m_dgsm,
     "hdmr": _m_hdmr,
     "hsic": _m_hsic,
     "optimal_transport": _m_optimal_transport,
+    "optimal_transport_multivariate": _m_optimal_transport_multivariate,
+    "optimal_transport_trajectory": _m_optimal_transport_trajectory,
     "pawn": _m_pawn,
     "pce": _m_pce,
     "shapley": _m_shapley,

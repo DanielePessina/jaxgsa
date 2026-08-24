@@ -69,6 +69,27 @@ class TestLinearAccuracy:
         assert abs(total - 1.0) < 0.10, f"sum(S1) = {total:.4f}"
 
 
+class TestLargeNPerCurve:
+    """Regression test for H2: N**2 overflowed int32 at n_per_curve >= 46341.
+
+    ``jnp.abs(f) ** 2 / N**2`` traced the Python int ``N**2`` as int32, and
+    46341**2 exceeds ``2**31 - 1``. The fix divides by ``N`` before squaring,
+    so ``N`` never appears squared as a Python int.
+    """
+
+    def test_n_per_curve_above_int32_sqrt_bound(self):
+        """T0: a linear model still gives the closed-form S1 at N = 65537."""
+        sr = sample(linear.PROBLEM, n_per_curve=65537, M=4, seed=1)
+        Y = linear.evaluate(jnp.asarray(sr.samples))
+
+        result = analyze(sr, Y, verbose=False)
+
+        S1 = np.asarray(result.S1)
+        for i, expected in enumerate(linear.ANALYTICAL_S1):
+            rel = abs(S1[i] - expected) / expected
+            assert rel < 0.10, f"S1[{i}]={S1[i]:.4f}, expected {expected:.4f}"
+
+
 class TestSampling:
     def test_within_bounds(self):
         problem = Problem(names=("a", "b"), bounds=((2.0, 5.0), (-1.0, 3.0)))

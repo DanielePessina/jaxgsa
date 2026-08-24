@@ -31,9 +31,9 @@ JaxgsaWarning: jaxgsa.sobol.analyze: Y was passed as float64, but JAX is
 configured for float32, and some values do not survive the cast: they are
 outside the range float32 can hold, so they arrive as inf or collapse to
 zero. This is not a matter of lost trailing digits. Turn float64 on with
-jax.config.update("jax_enable_x64", True), or the
-jax.experimental.enable_x64() context manager, before the analysis.
-Rescaling the affected values into float32's range also works.
+jax.config.update("jax_enable_x64", True), or the jax.enable_x64()
+context manager, before the analysis. Rescaling the affected values into
+float32's range also works.
 ```
 
 The input matrix `X` is deliberately not a candidate for that warning. jaxgsa's
@@ -80,18 +80,17 @@ matters.
 
 It will not make repeated runs bit-identical. Batching an estimator at a
 different width changes the order XLA sums the reduction in, and reassociating
-a sum changes its last bits. That is arithmetic, not precision. ADR 0014
-measured it: the batch-width discrepancy falls from about `2e-7` to about
-`2e-16` under x64, and never reaches zero.
+a sum changes its last bits. That is arithmetic, not precision. We measured
+it: the batch-width discrepancy falls from about `2e-7` to about `2e-16` under
+x64, and never reaches zero.
 
 The cost is real. Up to 2.1x memory, and as little as 1/64 of float32
 throughput on consumer NVIDIA GPUs. TPUs have no float64 at all.
 
 jaxgsa ships no `jaxgsa.enable_x64()` helper on purpose. `jax.config.update`
-and `jax.experimental.enable_x64()` already do the job, the flag has to be set
-before JAX initialises any array so a library call cannot guarantee it runs
-first, and a wrapper would imply jaxgsa-specific behaviour that does not exist.
-See [ADR 0014](https://github.com/DanielePessina/jaxgsa/blob/master/docs/adr/0014-float32-default-no-x64-wrapper.md).
+and `jax.enable_x64()` already do the job, the flag has to be set before JAX
+initialises any array so a library call cannot guarantee it runs first, and a
+wrapper would imply jaxgsa-specific behaviour that does not exist.
 
 ## Persistent compilation cache
 
@@ -214,7 +213,7 @@ code that divides an array size by it would quietly compute the wrong block
 size and never raise. Pass `unit=` and you get a `float`, because the budget
 need not be a whole number of them.
 
-::: warning Before 0.9 this function took bytes
+::: warning Before jaxgsa 1.0.0 this function took bytes
 An old `set_memory_budget(536870912)` would now mean 512 TB. A unit-less call
 of 1 048 576 or more is therefore rejected:
 

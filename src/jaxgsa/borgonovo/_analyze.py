@@ -63,7 +63,7 @@ from jax import Array
 
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import resolve_batch_size
-from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
+from jaxgsa._core.bootstrap import interval
 from jaxgsa._core.entry import (
     at_least,
     check_scalars,
@@ -76,7 +76,6 @@ from jaxgsa._core.entry import (
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.partition import (
     _mask_from_counts,
-    _replicate_slice,
     build_partition_groups,
 )
 from jaxgsa._core.result import CIInfo
@@ -96,16 +95,25 @@ _warned_bias_correct_default = False
 # bandwidth counts as degenerate. Two failures live below this line. The
 # first is an exactly zero variance, that is a point mass, such as one
 # categorical level that maps to one output value. The second is a spread so
-# small that the shared output grid cannot resolve the conditional density.
-# The second failure is the dangerous one. The grid step is
-# (y_max - y_min) / (grid_size - 1). A class whose bandwidth is far below
-# that step is sampled at a spacing of many sigma. The trapezoid rule then
-# either misses the peak, or lands on it and integrates a spike of height
-# ~1/(h*sqrt(2*pi)) over a step-wide interval. Either way the L1 distance,
-# and with it delta, explodes far above 1. At the default grid_size = 100 the
-# step is about 1/99 of the output range. A Silverman bandwidth of 1e-2 of
-# the full-sample bandwidth is already at that scale, so 1e-2 is the
-# threshold below which the grid is untrustworthy.
+# small that the shared output grid cannot resolve the conditional density,
+# which in the worst case can alias: the trapezoid rule lands on a narrow
+# peak and integrates a spike over a step-wide interval, biasing delta.
+#
+# This 1e-2 is not the grid step, and an earlier comment here wrongly said
+# it was. The test is h_cls < 1e-2 * h_full, so the threshold is a bandwidth
+# of 1e-2 * h_full. At the default grid_size = 100 the step is 1/99 of the
+# output range, while h_full is a Silverman bandwidth of a few percent of
+# that range, so 1e-2 * h_full sits 18x to 29x *below* the step, not at it
+# (scratchpad/givendata/borg_alias.py: h_full = 0.056 and step = 0.0101 at
+# N = 5000; h_full = 0.035 and step = 0.0101 at N = 50000, on a unit range).
+#
+# The aliasing it guards against is also milder than the old comment
+# claimed. The same repro drove the class bandwidth down to 0.19 of the grid
+# step, well inside the regime the old comment predicted would blow delta
+# past 1, and delta still moved by at most 0.003 between grid_size = 100 and
+# grid_size = 2000. So 1e-2 is a conservative floor rather than a measured
+# cliff. Keeping it conservative costs nothing: the floor applied below is
+# clamped to the grid step, and that clamp is the load-bearing guard.
 _DEGENERATE_BW_TOL = 1e-2
 # Bandwidth given to a degenerate class, as a fraction of the full-sample
 # Silverman bandwidth. The applied floor is ``max(fraction * h_full,
@@ -263,10 +271,6 @@ def _get_delta_kernel(
         parameter axis in group order. Zero-size classes carry zero weight.
     """
 
-    def _bandwidths(counts: Array, std: Array) -> Array:
-        """Per-class (or full-sample) KDE bandwidths for this kernel's factor."""
-        return _kde_bandwidths(counts, std, bw_factor)
-
     def _over_grid(fn: Callable[[Array], Array], grid: Array) -> Array:
         """Evaluate ``fn`` on tiles of the output grid and rejoin the tiles.
 
@@ -353,7 +357,7 @@ def _get_delta_kernel(
             mean = (y_cls * mask_b).sum(axis=-1) / safe_counts  # (Dg, M)
             dev = (y_cls - mean[..., None]) * mask_b
             var = (dev**2).sum(axis=-1) / jnp.maximum(counts_b - 1.0, 1.0)
-            h = _bandwidths(safe_counts, jnp.sqrt(var))  # (Dg, M)
+            h = _kde_bandwidths(safe_counts, jnp.sqrt(var), bw_factor)  # (Dg, M)
             # A degenerate class is one the output grid cannot resolve. A
             # zero-variance class gets bandwidth 0 and a zeroed density,
             # which biases delta far low. A class narrower than the grid
@@ -402,7 +406,9 @@ def _get_delta_kernel(
             order.
             """
             y_r = y[r]  # resampled column
-            h_full = _bandwidths(jnp.asarray(float(N), dtype=dtype), jnp.std(y_r, ddof=1))
+            h_full = _kde_bandwidths(
+                jnp.asarray(float(N), dtype=dtype), jnp.std(y_r, ddof=1), bw_factor
+            )
             fy = _kde_full(y_r, grid, h_full)
             degenerate = y_r.max() == y_r.min()
             y_mean = y_r.mean()
@@ -423,7 +429,7 @@ def _get_delta_kernel(
             i, r, cls_parts = xs
             layouts = []
             for cls_r, counts_g in zip(cls_parts, counts_list):
-                counts_r = _replicate_slice(counts_g, i)  # (G, M)
+                counts_r = counts_g[i]  # (G, M)
                 mask_r = _mask_from_counts(counts_r, cls_r.shape[-1]).astype(dtype)
                 layouts.append((cls_r, mask_r, counts_r.astype(dtype)))
             d, s1, degen, floored = jax.vmap(lambda y, grid: _col_stats(y, grid, r, layouts))(
@@ -1004,9 +1010,17 @@ def analyze(
             computation failed rather than returned an estimate.
 
     Warns:
-        JaxgsaWarning: If an output slice has zero variance. Every
-            conditional density then equals the unconditional one, so delta
-            is an exact 0 rather than an answer.
+        JaxgsaWarning: On any of five conditions. An output slice has zero
+            variance, so every conditional density equals the unconditional
+            one and delta is an exact 0 rather than an answer. A passed
+            ``n_classes`` is ignored because every parameter is categorical.
+            ``bias_correct=True`` was given but ``n_bootstrap=0``, so no
+            correction ran and the raw, upward-biased delta is returned.
+            ``bias_correct`` was left at its default (``None``) and
+            ``n_bootstrap > 0``, so the Plischke bias correction runs
+            silently unless this warning is read; shown once per process.
+            At least one conditioning class is too narrow for the output
+            grid, and its bandwidth was floored.
     """
     from jaxgsa.borgonovo import SPEC
 
@@ -1029,6 +1043,10 @@ def analyze(
                 f"degenerate_tol must be in [0, 1), got {degenerate_tol}",
             ),
             at_least("slice_chunk_size", slice_chunk_size, 1),
+            require(
+                n_bootstrap == 0 or key is not None,
+                "key is required when n_bootstrap > 0",
+            ),
         ),
         min_kept=_MIN_KEPT,
         # A constant slice leaves every conditional distribution equal to
@@ -1036,7 +1054,8 @@ def analyze(
         # the NaN a variance ratio would give.
         zero_variance_outcome="zero",
     )
-    X, Y, invalid = ctx.inputs, ctx.Y, ctx.invalid
+    assert ctx.X is not None  # a given-data method always passes X to prepare()
+    X, Y, invalid = ctx.X, ctx.Y, ctx.invalid
     # Check the continuous-output contract before any expensive work.
     _raise_discrete_output(problem, Y)
 
@@ -1071,9 +1090,6 @@ def analyze(
     D = problem.num_vars
     Y_cols = Y_3d.reshape(N, T * K)
 
-    if slice_chunk_size is not None and slice_chunk_size < 1:
-        raise ValueError(f"slice_chunk_size must be >= 1, got {slice_chunk_size}")
-
     # Replicate 0 is the identity permutation, that is the original sample.
     # The remaining rows are the bootstrap resamples. Building them together
     # means the point estimate and its interval share one code path.
@@ -1091,10 +1107,11 @@ def analyze(
     apply_bias_correction = bias_correct is not False
 
     if n_bootstrap > 0:
-        if key is None:
-            raise ValueError("key is required when n_bootstrap > 0")
-        # Warn after the key check, so the one shot lands on a call that
-        # actually runs; a failed first call must not burn the warning.
+        # key is required by then, checked in the checks= above (fires
+        # before prepare() has done any work).
+        assert key is not None
+        # Warn after that, so the one shot lands on a call that actually
+        # runs; a failed first call must not burn the warning.
         if bias_correct is None:
             global _warned_bias_correct_default
             if not _warned_bias_correct_default:
@@ -1170,34 +1187,20 @@ def analyze(
             d_reps = d_boot
             delta = d_hat
 
-        # Stack [lower, upper] into a leading axis of size 2. The Gaussian
-        # endpoints are centred on the estimate the method reports, so for
-        # delta that is the bias-corrected value the draws were built from.
-        delta_conf = ctx.squeeze(
-            jnp.stack(
-                _bootstrap_ci_endpoints(delta, d_reps, conf_level=conf_level, ci_method=ci_method)
-            )
-        )
-        S1_conf = ctx.squeeze(
-            jnp.stack(
-                _bootstrap_ci_endpoints(S1, s1_boot, conf_level=conf_level, ci_method=ci_method)
-            )
-        )
-        # The leading resample axis survives the squeeze, which addresses the
-        # T/K axes from the end.
-        ci = CIInfo(
+        # Squeeze the point estimates and the draws to the caller's own
+        # layout first, then hand both to interval(): the leading resample
+        # axis on the draws survives ctx.squeeze, which addresses the T/K
+        # axes from the end, and interval() returns conf/ci already at that
+        # layout, matching every other field on the result.
+        confs, ci = interval(
+            {"delta": ctx.squeeze(delta), "S1": ctx.squeeze(S1)},
+            {"delta": ctx.squeeze(d_reps), "S1": ctx.squeeze(s1_boot)},
             level=conf_level,
             method=ci_method,
             n_bootstrap=n_bootstrap,
-            replicates=(
-                {
-                    "delta": ctx.squeeze(d_reps),
-                    "S1": ctx.squeeze(s1_boot),
-                }
-                if keep_replicates
-                else None
-            ),
+            keep_replicates=keep_replicates,
         )
+        delta_conf, S1_conf = confs["delta"], confs["S1"]
     else:
         delta = d_hat
 

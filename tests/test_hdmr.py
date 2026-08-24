@@ -276,6 +276,37 @@ def test_indices_are_affine_invariant(ishigami_data):
     np.testing.assert_allclose(np.asarray(base.ST), np.asarray(affine.ST), rtol=1e-5, atol=1e-5)
 
 
+def test_backfitting_stop_rule_does_not_depend_on_y_scale_or_m():
+    """H4 regression: the backfit stop rule is relative, not absolute.
+
+    ``3.0 * Y + 17.0`` above is too large a shift to trigger the old bug: the
+    absolute threshold only stopped a correlated fit early when the
+    coefficients were small, which happens for a small ``Y`` scale or a
+    large basis count ``m`` (the basis is scaled by ``m**3``, so the
+    coefficients shrink as ``m**-3``). This reproduces the review's case: a
+    correlated additive model, N = 1500, rho(x1, x2) = 0.7. Before the fix,
+    ``S1[0]`` read 0.014-0.066 instead of ~0.104 for ``m in (4, 8)`` and for
+    ``Y * 1e-3``.
+    """
+    rng = np.random.default_rng(0)
+    N = 1500
+    corr = np.array([[1.0, 0.7, 0.3], [0.7, 1.0, 0.0], [0.3, 0.0, 1.0]])
+    problem = Problem(("a", "b", "c"), ((0.0, 1.0),) * 3, correlation=corr)
+    Z = rng.multivariate_normal(np.zeros(3), corr, size=N)
+    from scipy.stats import norm
+
+    X = jnp.asarray(norm.cdf(Z))
+    Y = X[:, 0] + 2.0 * X[:, 1] ** 2 + jnp.sin(3.0 * X[:, 2])
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        s1_ref = np.asarray(analyze_hdmr(problem, X, Y, m=2, maxiter=100).S1)
+        for m in (4, 8):
+            for scale in (1e-3, 1.0, 1e3):
+                result = analyze_hdmr(problem, X, Y * scale, m=m, maxiter=100)
+                np.testing.assert_allclose(np.asarray(result.S1), s1_ref, atol=0.02)
+
+
 # ---------------------------------------------------------------------------
 # maxorder tests
 # ---------------------------------------------------------------------------
@@ -430,6 +461,27 @@ def test_constant_y():
     with pytest.warns(UserWarning, match="zero variance"):
         result = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2)
     # Matches Sobol/PCE: 0/0 indices are NaN, not silent zeros.
+    assert jnp.all(jnp.isnan(result.Sa))
+    assert jnp.all(jnp.isnan(result.ST))
+
+
+def test_constant_output_with_float32_rounding_noise_still_reads_as_zero_variance():
+    """A constant Y whose naive sample variance is not bit-exact zero still warns.
+
+    Regression for M1 (REVIEW-1.0.md): the old guard tested ``var == 0``,
+    which almost never holds for a constant float32 output because the mean
+    itself rounds. ``Y = full(N, 0.1)`` has a naive sample variance of about
+    2e-16, not zero, so this case would have slipped past the old guard.
+    """
+    N = 500
+    D = PROBLEM.num_vars
+    key = jax.random.PRNGKey(99)
+    bounds = jnp.array(PROBLEM.bounds)
+    X = jax.random.uniform(key, shape=(N, D), minval=bounds[:, 0], maxval=bounds[:, 1])
+    Y = jnp.full(N, 0.1)
+    assert float(jnp.var(Y)) != 0.0, "the naive variance must be nonzero for this to test the fix"
+    with pytest.warns(UserWarning, match="zero variance"):
+        result = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2)
     assert jnp.all(jnp.isnan(result.Sa))
     assert jnp.all(jnp.isnan(result.ST))
 
@@ -658,10 +710,14 @@ def test_st_is_scsa_total_under_correlation(correlated_hdmr_result):
     ST = np.array(result.ST)
     # Exact: ST scatters the per-term total S onto its participating params.
     np.testing.assert_allclose(ST, _scatter(np.array(result.S)), rtol=1e-5, atol=1e-7)
-    # And S is the structural plus correlative share, so the SCSA identity
-    # ST_i = sum over u containing i of (Sa_u + Sb_u) holds to float32 noise
-    # (S is accumulated separately in the kernel, not as Sa + Sb).
-    np.testing.assert_allclose(ST, _scatter(np.array(result.Sa) + np.array(result.Sb)), atol=2e-3)
+    # M8: S is measured against the fitted expansion (Li et al., 2010), so
+    # S = Sa + Sb is an identity, not an approximation. This is float32
+    # noise only now, not the few-percent gap SALib's Y-referenced ancova
+    # leaves under correlation.
+    np.testing.assert_allclose(
+        np.array(result.S), np.array(result.Sa) + np.array(result.Sb), atol=1e-6
+    )
+    np.testing.assert_allclose(ST, _scatter(np.array(result.Sa) + np.array(result.Sb)), atol=1e-6)
     # The correlative shares are what make this differ from the structural
     # sum; if they were negligible the test would not be pinning anything.
     assert np.abs(np.array(result.Sb)).max() > 1e-3

@@ -15,11 +15,11 @@ to import a sibling's private analysis module to reach it.
 
 from __future__ import annotations
 
-import inspect
 import math
 import os
 import warnings
 from collections.abc import Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import jax.numpy as jnp
@@ -84,6 +84,11 @@ def shapley_from_variances(
     return Sh, S1, ST
 
 
+# Directory this package's own frames live under, so a warning can point past
+# every jaxgsa frame regardless of which call chain reached it (result.shapley()
+# directly, or the jaxgsa.shapley.analyze wrapper, which adds a frame).
+_PACKAGE_DIR = str(Path(__file__).resolve().parent.parent) + os.sep
+
 _POORFIT_THRESHOLD = 0.5
 _OVERFIT_THRESHOLD = 1.3
 
@@ -109,42 +114,9 @@ _OVERFIT_THRESHOLD = 1.3
 _LOO_RATIO_THRESHOLD = math.sqrt(1.0 - _POORFIT_THRESHOLD)
 
 
-def _external_stacklevel(default: int = 2) -> int:
-    """``warnings`` stacklevel of the first caller frame outside jaxgsa.
-
-    A shared tail emits the Shapley fit-quality warning, and two call chains
-    of different depth reach that tail: ``result.shapley()`` directly, or the
-    ``jaxgsa.shapley.analyze`` wrapper, which adds a frame. No fixed
-    ``stacklevel`` points at the user's frame in both cases. Walking out of
-    the package locates it regardless of chain length.
-
-    Args:
-        default: Fallback level for interpreters without frame introspection.
-
-    Returns:
-        The ``stacklevel`` that attributes a warning issued by the immediate
-        caller to the nearest frame outside the ``jaxgsa`` package.
-    """
-    import jaxgsa
-
-    frame = inspect.currentframe()
-    if frame is None:  # pragma: no cover - non-CPython fallback
-        return default
-    pkg_root = os.path.dirname(jaxgsa.__file__)
-    frame = frame.f_back  # the frame that will call warnings.warn
-    level = 1
-    while frame is not None:
-        if not frame.f_code.co_filename.startswith(pkg_root):
-            return level
-        frame = frame.f_back
-        level += 1
-    return level
-
-
 def _normalize_partial_variances(
     partial: Array,
     explained_variance: Array,
-    total: Array,
 ) -> Array:
     """Normalize term contributions while preserving degenerate output slices.
 
@@ -152,15 +124,12 @@ def _normalize_partial_variances(
         partial: Per-term variance contributions, shape ``(..., n_terms)``.
         explained_variance: Per-slice fit diagnostic, shape ``(...,)``;
             non-finite slices are propagated as NaN.
-        total: Pre-computed ``partial.sum(axis=-1)``, shape ``(...,)``.
-            Passed in so callers that already hold the sum do not trigger a
-            recomputation.
 
     Returns:
-        ``partial / total`` with degenerate slices (zero or non-finite total,
-        non-finite explained variance) set to NaN.
+        ``partial / partial.sum(axis=-1)`` with degenerate slices (zero or
+        non-finite total, non-finite explained variance) set to NaN.
     """
-    total = jnp.asarray(total)[..., None]
+    total = jnp.sum(partial, axis=-1, keepdims=True)
     invalid = (
         (total == 0)
         | ~jnp.isfinite(total)
@@ -173,24 +142,24 @@ def _warn_pathological_fit(explained_variance: Array) -> None:
     """Warn when a surrogate captured implausibly little or too much variance.
 
     Two call chains of different depth reach this function:
-    ``result.shapley()`` and the ``jaxgsa.shapley.analyze`` wrapper.
-    :func:`_external_stacklevel` therefore resolves the warning's
-    ``stacklevel`` dynamically, so the warning points at the user's frame in
-    either case.
+    ``result.shapley()`` and the ``jaxgsa.shapley.analyze`` wrapper, which
+    adds a frame. ``skip_file_prefixes`` points the warning at the first
+    frame outside the package regardless of which chain reached it, so no
+    hand-counted ``stacklevel`` is needed for either.
     """
     ev = jnp.asarray(explained_variance)
     if bool(jnp.any(ev > _OVERFIT_THRESHOLD)):
         warnings.warn(
             f"jaxgsa.shapley: surrogate explained_variance exceeds {_OVERFIT_THRESHOLD}; "
             "Shapley effects may be unreliable",
-            stacklevel=_external_stacklevel(),
+            skip_file_prefixes=(_PACKAGE_DIR,),
             category=JaxgsaWarning,
         )
     elif bool(jnp.any(ev < _POORFIT_THRESHOLD)):
         warnings.warn(
             f"jaxgsa.shapley: surrogate explained_variance is below {_POORFIT_THRESHOLD}; "
             "Shapley effects may be unreliable",
-            stacklevel=_external_stacklevel(),
+            skip_file_prefixes=(_PACKAGE_DIR,),
             category=JaxgsaWarning,
         )
 
@@ -250,7 +219,7 @@ def _warn_pce_overfit(
         "signature of an overfit expansion, which a high in-sample "
         "explained_variance will not show. Refit with a lower order or more "
         "samples; the Shapley effects from this fit may be unreliable.",
-        stacklevel=_external_stacklevel(),
+        skip_file_prefixes=(_PACKAGE_DIR,),
         category=JaxgsaWarning,
     )
 
@@ -260,7 +229,6 @@ def _shapley_result_from_variances(
     membership: np.ndarray,
     explained: Array,
     *,
-    total: Array,
     problem: "Problem",
     backend: Literal["hdmr", "pce"],
     order: int,
@@ -280,8 +248,8 @@ def _shapley_result_from_variances(
         membership: Boolean matrix marking which parameters participate in
             each term, shape ``(n_terms, D)``.
         explained: Per-slice explained-variance diagnostic, shape ``(...,)``.
-        total: Pre-computed ``partial.sum(axis=-1)`` (for HDMR this is the
-            same array as ``explained``, so passing it avoids a recompute).
+            For HDMR this is the same array as ``partial.sum(axis=-1)``; for
+            PCE it is that sum divided by ``Var(Y)``.
         problem: Problem definition carried onto the result.
         backend: Surrogate backend label, ``"hdmr"`` or ``"pce"``.
         order: Effective surrogate order actually used.
@@ -299,7 +267,7 @@ def _shapley_result_from_variances(
         JaxgsaWarning: If ``explained`` flags a pathological fit (well below
             1, or above 1, which is an overfit).
     """
-    normalized = _normalize_partial_variances(partial, explained, total)
+    normalized = _normalize_partial_variances(partial, explained)
     Sh, S1, ST = shapley_from_variances(normalized, membership)
     _warn_pathological_fit(explained)
     return ShapleyResult(

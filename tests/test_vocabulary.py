@@ -1,8 +1,11 @@
 """The public interface uses one word for one concept.
 
-``CONTEXT.md`` states the vocabulary the 1.0 interface freezes. This module
-reads it back off the method registry and off the real signatures, so a
-signature that drifts from the vocabulary fails here rather than shipping.
+This module pins the vocabulary the 1.0 interface freezes: one spelling per
+concept across every method, the four keywords that go with ``n_bootstrap``,
+``verbose`` on every entry point, the batching axis names, and the first
+argument that says which family a method belongs to. It reads the rules back
+off the method registry and off the real signatures, so a signature that
+drifts from the vocabulary fails here rather than shipping.
 
 Tier T4 (internal consistency) throughout. There is no external oracle for a
 naming convention; what these tests prove is that thirteen methods agree with
@@ -141,8 +144,7 @@ def test_no_retired_spelling_survives(spec: MethodSpec) -> None:
     found = sorted(set(_params(spec)) & set(RETIRED_NAMES))
     assert not found, (
         f"{spec.name}.analyze uses retired keyword(s) {found}. "
-        f"Use instead: {', '.join(RETIRED_NAMES[name] for name in found)}. "
-        "See CONTEXT.md."
+        f"Use instead: {', '.join(RETIRED_NAMES[name] for name in found)}."
     )
 
 
@@ -171,8 +173,7 @@ def test_no_retired_spelling_in_analyze_or_sample(spec: MethodSpec) -> None:
         found = sorted(set(params) & set(RETIRED_EVERYWHERE))
         assert not found, (
             f"{spec.name}.{fn_name} uses retired keyword(s) {found}. "
-            f"Use instead: {', '.join(RETIRED_EVERYWHERE[name] for name in found)}. "
-            "See CONTEXT.md."
+            f"Use instead: {', '.join(RETIRED_EVERYWHERE[name] for name in found)}."
         )
 
 
@@ -194,8 +195,7 @@ def test_no_retired_spelling_on_the_problem_surfaces() -> None:
         found = sorted(set(sig.parameters) & set(RETIRED_EVERYWHERE))
         assert not found, (
             f"{name} uses retired keyword(s) {found}. "
-            f"Use instead: {', '.join(RETIRED_EVERYWHERE[k] for k in found)}. "
-            "See CONTEXT.md."
+            f"Use instead: {', '.join(RETIRED_EVERYWHERE[k] for k in found)}."
         )
     assert "correlation_type" in surfaces["Problem.with_correlation"].parameters
 
@@ -215,7 +215,7 @@ def test_output_standardization_is_spelled_standardize_outputs(spec: MethodSpec)
         assert not offenders, (
             f"{spec.name}.{fn_name} spells an output-standardization flag "
             f"{offenders}; the vocabulary allows one spelling, "
-            "'standardize_outputs'. See CONTEXT.md."
+            "'standardize_outputs'."
         )
 
 
@@ -259,7 +259,8 @@ def test_a_bootstrapper_offers_the_whole_interval_vocabulary(spec: MethodSpec) -
     for required in ("conf_level", "ci_method", "key", "keep_replicates"):
         assert required in params, (
             f"{spec.name} takes n_bootstrap but not {required!r}. "
-            "See the interval table in CONTEXT.md."
+            "A method that offers replicates offers all four of conf_level, "
+            "ci_method, key and keep_replicates."
         )
 
 
@@ -326,8 +327,8 @@ def test_keep_replicates_is_keyword_only_and_last(spec: MethodSpec) -> None:
     ``pce`` or ``hdmr`` rather than naming them, so that a keyword only one
     backend understands cannot be accepted and silently ignored by the other.
     Reading the rule as "last named parameter" keeps the position fixed for
-    every method and stays satisfiable for that one. CONTEXT.md states the
-    rule without this qualification.
+    every method and stays satisfiable for that one. The plain rule, that
+    ``keep_replicates`` comes last, is stated without this qualification.
     """
     params = [p for p in _params(spec).values() if p.kind is not inspect.Parameter.VAR_KEYWORD]
     names = [p.name for p in params]
@@ -352,7 +353,8 @@ def test_every_entry_point_takes_verbose_defaulting_to_true(spec: MethodSpec) ->
     for fn_name, params in _entry_points(spec):
         assert "verbose" in params, (
             f"{spec.name}.{fn_name} takes no 'verbose'. Every entry point "
-            "offers the same observability toggle. See CONTEXT.md."
+            "offers the same observability toggle, keyword-only and "
+            "defaulting to True."
         )
         param = params["verbose"]
         assert param.kind is inspect.Parameter.KEYWORD_ONLY, (
@@ -381,8 +383,8 @@ def test_only_the_three_batching_axes_appear(spec: MethodSpec) -> None:
     }
     assert not suspicious, (
         f"{spec.name}.analyze takes batching keyword(s) {sorted(suspicious)}, "
-        f"which are not in the vocabulary. Allowed: {sorted(BATCHING_AXES)}. "
-        "See the three-axis table in CONTEXT.md."
+        f"which are not in the vocabulary. Allowed: {sorted(BATCHING_AXES)}, "
+        "one name per batching axis."
     )
 
 
@@ -492,21 +494,13 @@ BUDGET_RESOLVERS: dict[str, dict[str, tuple[str, str, str]]] = {
         ),
     },
     "morris": {
-        "resample_chunk_size": (
-            "jaxgsa.morris._analyze",
-            "_resolve_resample_chunk_size",
-            "resample_chunk_size",
-        ),
+        "resample_chunk_size": ("jaxgsa.morris._analyze", "resolve_batch_size", "batch_size"),
     },
     "efast": {
         "slice_chunk_size": ("jaxgsa.efast._analyze", "resolve_batch_size", "batch_size"),
     },
     "pawn": {
-        "slice_chunk_size": (
-            "jaxgsa.pawn._analyze",
-            "_resolve_slice_chunk_size",
-            "slice_chunk_size",
-        ),
+        "slice_chunk_size": ("jaxgsa.pawn._analyze", "resolve_batch_size", "batch_size"),
     },
     "borgonovo": {
         "slice_chunk_size": ("jaxgsa.borgonovo._analyze", "resolve_batch_size", "batch_size"),
@@ -658,19 +652,17 @@ def test_each_resolver_family_reads_the_budget(_restore_memory_budget) -> None:
     """
     from jaxgsa._core.batching import resolve_batch_size
     from jaxgsa.hdmr import _fit as hdmr_fit
-    from jaxgsa.morris import _analyze as morris_analyze
-    from jaxgsa.pawn import _analyze as pawn_analyze
-    from jaxgsa.sobol import _bootstrap as sobol_bootstrap
     from jaxgsa.sobol import _chunking as sobol_chunking
 
+    # morris and pawn used to own a private resolver each. Both now call the
+    # shared resolve_batch_size, which the first probe already covers, so
+    # they no longer need a row of their own here.
     probes: dict[str, Callable[[], int]] = {
         "resolve_batch_size": lambda: resolve_batch_size(1024, 10_000, None),
         "sobol.point": lambda: sobol_chunking.resolve_point_chunk_size(None, 64, 256, 3, True, 4),
-        "sobol.bootstrap": lambda: sobol_bootstrap._resolve_slice_chunk_size(
-            None, 64, 16, 256, 3, True, 4
+        "sobol.bootstrap": lambda: sobol_chunking.resolve_point_chunk_size(
+            None, 64, 256, 3, True, 4, n_bootstrap=16
         ),
-        "morris.resample": lambda: morris_analyze._resolve_resample_chunk_size(None, 64, 1024),
-        "pawn.slice": lambda: pawn_analyze._resolve_slice_chunk_size(None, 256, 3, 4, 4),
         "hdmr.slice": lambda: hdmr_fit._resolve_slice_chunk_size(None, 64, 128, 1024),
     }
     for name, probe in probes.items():
@@ -695,19 +687,16 @@ def test_explicit_widths_win_over_the_budget(_restore_memory_budget) -> None:
     """
     from jaxgsa._core.batching import resolve_batch_size
     from jaxgsa.hdmr import _fit as hdmr_fit
-    from jaxgsa.morris import _analyze as morris_analyze
-    from jaxgsa.pawn import _analyze as pawn_analyze
-    from jaxgsa.sobol import _bootstrap as sobol_bootstrap
     from jaxgsa.sobol import _chunking as sobol_chunking
 
+    # Same set as the probe above; morris and pawn now route through the
+    # shared resolve_batch_size row.
     probes: dict[str, Callable[[], int]] = {
         "resolve_batch_size": lambda: resolve_batch_size(1024, 10_000, 8),
         "sobol.point": lambda: sobol_chunking.resolve_point_chunk_size(8, 64, 256, 3, True, 4),
-        "sobol.bootstrap": lambda: sobol_bootstrap._resolve_slice_chunk_size(
-            8, 64, 16, 256, 3, True, 4
+        "sobol.bootstrap": lambda: sobol_chunking.resolve_point_chunk_size(
+            8, 64, 256, 3, True, 4, n_bootstrap=16
         ),
-        "morris.resample": lambda: morris_analyze._resolve_resample_chunk_size(8, 64, 1024),
-        "pawn.slice": lambda: pawn_analyze._resolve_slice_chunk_size(8, 256, 3, 4, 4),
         "hdmr.slice": lambda: hdmr_fit._resolve_slice_chunk_size(8, 64, 128, 1024),
     }
     jaxgsa.config.set_memory_budget(1, unit="b")
@@ -727,7 +716,7 @@ def test_the_first_argument_says_what_kind_of_method_this_is(spec: MethodSpec) -
     it is worth having it never lie.
     """
     if spec.name in POSITIONAL_EXCEPTIONS:
-        pytest.skip(f"{spec.name} differentiates a callable; see CONTEXT.md")
+        pytest.skip(f"{spec.name} differentiates a callable, so it takes the model first")
 
     first = next(iter(_params(spec)))
     expected = "sampling_result" if spec.is_design_based else "problem"

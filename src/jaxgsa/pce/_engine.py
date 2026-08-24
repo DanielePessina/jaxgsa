@@ -137,6 +137,7 @@ def build_design_matrix(
 def sobol_from_coefficients(
     coefficients: Array,
     multi_index: np.ndarray,
+    is_constant: Array | None = None,
 ) -> tuple[Array, Array, Array]:
     """Compute Sobol indices from PCE coefficients (Sudret 2008).
 
@@ -151,6 +152,14 @@ def sobol_from_coefficients(
             outputs.
         multi_index: Multi-index array, shape ``(n_terms, D)``, shared by all
             slices.
+        is_constant: Boolean array, shape ``(...,)`` matching the leading
+            output-slice dims, ``True`` where the caller's ``Y`` slice is
+            numerically constant. Pass this whenever ``Y`` is available: the
+            fitted non-constant coefficients of a constant slice are rarely
+            bit-exact zero in float32, so a fit-only ``total_var == 0`` guard
+            (the fallback below) misses most constant slices and returns a
+            plausible-looking but meaningless index instead of NaN. When
+            ``None``, only the fit-only guard runs.
 
     Returns:
         Tuple ``(S1, ST, S2)`` where:
@@ -168,8 +177,11 @@ def sobol_from_coefficients(
     # Total variance = sum of all c_alpha^2 excluding the constant term
     # (alpha=0), per output slice.
     total_var = jnp.sum(c2[..., 1:], axis=-1)
+    zero = total_var == 0
+    if is_constant is not None:
+        zero = zero | is_constant
     # Guard against zero-variance slices (constant output).
-    inv_var = jnp.where(total_var == 0, jnp.nan, 1.0 / total_var)
+    inv_var = jnp.where(zero, jnp.nan, 1.0 / total_var)
 
     # "Active" means variable d has nonzero degree in multi-index alpha.
     active = mi > 0  # (n_terms, D) bool

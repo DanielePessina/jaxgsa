@@ -229,14 +229,29 @@ class TestEveryMethodIsDumped:
     def test_the_runner_tables_cover_the_registry(self):
         covered = set(baseline_dump.DESIGN_METHODS) | set(baseline_dump.GIVEN_DATA_METHODS)
         registered = set(methods())
-        assert covered == registered, (
+        variants = set(baseline_dump.MODE_VARIANTS)
+        assert registered <= covered, (
             f"no baseline runner: {sorted(registered - covered)} — add one to "
             "scripts/baseline_dump.py, in DESIGN_METHODS for a method with its own "
             "sampler and in GIVEN_DATA_METHODS otherwise, then regenerate the stored "
             "baseline. A method in neither table is dumped by neither side of the CI "
-            "diff, so it ships with no numerical guard. "
-            f"Runner but no registered method: {sorted(covered - registered)}."
+            "diff, so it ships with no numerical guard."
         )
+        assert covered - registered == variants, (
+            "runner with no registered method and no MODE_VARIANTS entry: "
+            f"{sorted(covered - registered - variants)}. A runner that pins an extra "
+            "mode of an existing method belongs in MODE_VARIANTS, which says which "
+            "method it varies. Any other extra key is a typo."
+        )
+
+    def test_every_mode_variant_names_a_registered_method(self):
+        """A variant pins another mode of a method, so that method must exist."""
+        registered = set(methods())
+        for variant, base in baseline_dump.MODE_VARIANTS.items():
+            assert base in registered, f"{variant} varies {base!r}, which is not registered"
+            assert variant not in registered, (
+                f"{variant} is a registered method, so it is not a variant of {base!r}"
+            )
 
     def test_each_runner_sits_in_the_table_that_matches_its_calling_convention(self):
         """The two tables call their runners with different arguments.
@@ -250,6 +265,11 @@ class TestEveryMethodIsDumped:
             assert name in getattr(baseline_dump, table), (
                 f"{name} has sample={spec.sample!r} so its runner belongs in {table}"
             )
+            for variant, base in baseline_dump.MODE_VARIANTS.items():
+                if base == name:
+                    assert variant in getattr(baseline_dump, table), (
+                        f"{variant} varies {name}, so its runner belongs in {table} too"
+                    )
             assert name not in getattr(baseline_dump, other), (
                 f"{name} is listed in {other}, which calls it the wrong way"
             )

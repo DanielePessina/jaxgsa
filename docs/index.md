@@ -4,7 +4,7 @@ layout: home
 hero:
   name: jaxgsa
   text: Global Sensitivity Analysis in JAX
-  tagline: Thirteen methods, one interface, one JIT-compiled implementation. Scalar, multi-output, and time-series models.
+  tagline: Thirteen methods, one interface, eleven of them JIT-compiled. Scalar, multi-output, and time-series models.
   actions:
     - theme: brand
       text: Get Started
@@ -47,7 +47,8 @@ mean, and what is your evaluation budget.
 The [method capability table](/guide/methods#method-capabilities) is the one
 place that records which methods accept correlated parameters, which accept
 categorical parameters, and which report bootstrap confidence intervals.
-`tests/test_docs_matrix.py` checks every cell against the code.
+`tests/test_docs_matrix.py` checks those three columns, plus Own design,
+against the code.
 
 ## A note on the speed numbers
 

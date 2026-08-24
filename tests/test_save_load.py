@@ -1,4 +1,9 @@
-"""Tests for the NPZ-only sampling persistence API (Sobol and Morris)."""
+"""Tests for the NPZ-only sampling persistence API (Sobol and Morris).
+
+Tier T4 (internal consistency) throughout: a save/load round trip has no
+external oracle to check against, only the claim that what comes back out
+equals what went in.
+"""
 
 import json
 
@@ -14,7 +19,6 @@ from jaxgsa.sobol import SobolSamples
 
 def _assert_equal(left: SobolSamples, right: SobolSamples) -> None:
     _assert_array_identical(left.samples, right.samples)
-    _assert_array_identical(left.sample_ids, right.sample_ids)
     _assert_array_identical(left.expanded_to_unique, right.expanded_to_unique)
     assert left.n_expanded == right.n_expanded
     assert left.base_n == right.base_n

@@ -63,18 +63,18 @@ jaxgsa.optimal_transport.analyze
     output: N=8192 runs, T=1 x K=1 output slice
     invalid: none found in 8192 rows (policy 'raise')
   timing:
-    estimator (includes compile on the first call): 0.1946 s
+    estimator (includes compile on the first call): 0.2112 s
     mode: univariate
-    epsilon: 0.01
+    epsilon: 0.03
     slice_chunk_size: auto (resolved from the memory budget)
   results: top 3 of 3 parameters by ot
     1. x2  ot=0.2764
     2. x1  ot=0.2013
     3. x3  ot=0.0955
-ot:        [0.2012687  0.27641615 0.09550098]
-advective: [0.1566093  0.22097291 0.00218869]
-diffusive: [0.04465945 0.05544327 0.0933123 ]
-S1:        [0.31325683 0.44199976 0.00437791]
+ot:        [0.20126827 0.27642566 0.09550273]
+advective: [0.15660933 0.22097293 0.00218868]
+diffusive: [0.04465894 0.05545274 0.09331405]
+S1:        [0.3132569  0.4419998  0.0043779 ]
 above_dummy: None
 ```
 
@@ -119,9 +119,9 @@ print("borgonovo S1:           ", b.S1)
 ```
 
 ```
-2 * advective * N/(N-1): [0.31325683 0.44199976 0.00437791]
-result.S1:               [0.31325683 0.44199976 0.00437791]
-borgonovo S1:            [0.3125267  0.43882066 0.00308204]
+2 * advective * N/(N-1): [0.3132569 0.4419998 0.0043779]
+result.S1:               [0.3132569 0.4419998 0.0043779]
+borgonovo S1:            [0.3125267  0.43882057 0.00308205]
 ```
 
 The first two lines agree bit for bit, because the second is computed from
@@ -189,21 +189,21 @@ jaxgsa.optimal_transport.analyze
     output: N=2048 runs, T=12 x K=2 output slices
     invalid: none found in 2048 rows (policy 'raise')
   timing:
-    estimator (includes compile on the first call): 7.453 s
+    estimator (includes compile on the first call): 15.65 s
     mode: trajectory
-    epsilon: 0.01
+    epsilon: 0.03
     slice_chunk_size: auto (resolved from the memory budget)
   results: top 3 of 3 parameters by ot, mean over 2 output slices
-    1. k_elim  ot=0.4594
-    2. dose    ot=0.4352
-    3. k_abs   ot=0.1186
-[[0.26304573 0.15762493 0.6728184 ]
- [0.6074043  0.079532   0.24592847]]
+    1. k_elim  ot=0.4213
+    2. dose    ot=0.3977
+    3. k_abs   ot=0.06826
+[[0.20636825 0.09548865 0.6179264 ]
+ [0.5889322  0.04103512 0.22462082]]
 ```
 
 Row 0 is plasma, row 1 tissue, in the `output_names` order. Elimination rate
-dominates the plasma curve (0.673) and dose dominates the tissue curve
-(0.607), which is what the two formulas say.
+dominates the plasma curve (0.618) and dose dominates the tissue curve
+(0.589), which is what the two formulas say.
 
 Now compare against the default mode on the same data, and look at what
 absorption rate does over time:
@@ -216,8 +216,8 @@ print("plasma, per-time ot for k_abs:", r_uni.ot[:, 0, 1])
 
 ```
 univariate ot shape: (12, 2, 3)
-plasma, per-time ot for k_abs: [0.3315365  0.10241234 0.02204981 0.01721671 0.02212655 0.0251486
- 0.02644053 0.02720482 0.02776806 0.02825176 0.02877845 0.0295321 ]
+plasma, per-time ot for k_abs: [0.33156434 0.10242031 0.02204348 0.01721405 0.02212418 0.02514748
+ 0.02643897 0.02720752 0.02776908 0.02825276 0.0287764  0.02952859]
 ```
 
 `k_abs` scores 0.332 at the first timepoint, 0.102 at the second, and then
@@ -274,35 +274,47 @@ jaxgsa.optimal_transport.analyze
     output: N=2048 runs, T=1 x K=2 output slices
     invalid: none found in 2048 rows (policy 'raise')
   timing:
-    estimator (includes compile on the first call): 5.897 s
+    estimator (includes compile on the first call): 15.52 s
     mode: multivariate
-    epsilon: 0.01
+    epsilon: 0.03
     slice_chunk_size: auto (resolved from the memory budget)
   results: top 4 of 4 parameters by ot
-    1. dose    ot=0.5356
-    2. k_elim  ot=0.5137
-    3. inert   ot=0.09749
-    4. k_abs   ot=0.09711
-ot:          [0.5355592  0.09711429 0.5137086  0.0974879 ]
-ot_dummy:    0.09990064
-above_dummy: [0.43565854 0.         0.41380796 0.        ]
+    1. dose    ot=0.5128
+    2. k_elim  ot=0.479
+    3. inert   ot=0.05479
+    4. k_abs   ot=0.05432
+ot:          [0.51277184 0.05431536 0.4790215  0.05478629]
+ot_dummy:    [0.05469289 0.05469289 0.05469289 0.05469289]
+above_dummy: [4.5807895e-01 0.0000000e+00 4.2432860e-01 9.3400478e-05]
 ```
 
 This is the whole argument for the dummy in one printout. `k_abs` scores
-0.0971 and `inert` scores 0.0975. Without a baseline you would report a small
-but real absorption effect at 24 hours. The dummy scores 0.0999, above both
-of them, so neither is distinguishable from noise, and `above_dummy` zeroes
-both. Which is right: by 24 hours the absorption phase is long over, and
-`inert` was never in the model at all.
+0.0543 and `inert` scores 0.0548. Without a baseline you would report a small
+but real absorption effect at 24 hours. Each parameter's own permutation floor
+is 0.0547, so `above_dummy` leaves nothing of `k_abs` and 9e-05 of `inert`,
+which is the floor's own sampling noise rather than an effect. Neither is
+distinguishable from noise, which is right: by 24 hours the absorption phase
+is long over, and `inert` was never in the model at all.
 
-The floor is not small. It is 0.0999 on a [0, 1] scale, and it eats
-everything below about 0.1. Pass `dummy=True` on any point-cloud run where
+Read `above_dummy` as a screen, not as a measurement. A value at the 1e-4
+scale here means "at the floor", because the floor itself is one permutation
+draw and carries error of that size. Only the two large values, 0.458 and
+0.424, say anything.
+
+All four floors read the same 0.0547 because all four parameters are
+continuous and share one class count. They are separate draws all the same:
+since 1.0 each parameter is permuted against its own partition, so a
+categorical parameter meets a floor built from its own number of levels
+instead of the continuous default.
+
+The floor is not small. It is 0.0547 on a [0, 1] scale, and it eats
+everything below about 0.055. Pass `dummy=True` on any point-cloud run where
 you intend to call an input unimportant. It costs one more input's worth of
 transport solves.
 
 `epsilon` trades entropic bias against solver iterations. Smaller means less
-bias and more iterations. The default 0.01 is relative to a cost matrix
-scaled to [0, 1].
+bias and more iterations. The default 0.03 is relative to `V`, the index's
+own normalizer, so it means the same thing for every parameter and class.
 
 Note that `key` is required here. It feeds both the bootstrap and the
 synthetic dummy input, which are independent consumers, so `analyze` raises
@@ -331,8 +343,8 @@ for flag in (True, False):
 ```
 
 ```
-standardize_outputs=True: ot=[0.314138   0.34358105 0.23528925]
-standardize_outputs=False: ot=[0.25355068 0.25373605 0.2465351 ]
+standardize_outputs=True: ot=[0.2525107  0.27313423 0.18136299]
+standardize_outputs=False: ot=[0.20489204 0.20539744 0.19824935]
 ```
 
 The second output here is a thousand times larger than the first, as it would
@@ -349,7 +361,7 @@ print("the large output alone:", r_big.ot)
 ```
 
 ```
-the large output alone: [0.25355035 0.25373566 0.24653472]
+the large output alone: [0.20489164 0.20539705 0.198249  ]
 ```
 
 Agreement to six digits with the unstandardized joint run. The first output
@@ -376,12 +388,12 @@ print("S1_conf:", result.S1_conf)
 ```
 
 ```
-ot:      [0.2012687  0.27641615 0.09550098]
-ot_conf: [[0.19533639 0.2703077  0.09074909]
- [0.21178016 0.2910235  0.10534795]]
-S1:      [0.31325674 0.44199976 0.00437791]
-S1_conf: [[0.30253428 0.4288565  0.0032733 ]
- [0.32742235 0.46053672 0.01214939]]
+ot:      [0.20126826 0.27642566 0.09550272]
+ot_conf: [[0.19533463 0.2703142  0.09075195]
+ [0.21177857 0.29103354 0.10534613]]
+S1:      [0.3132569  0.44199982 0.0043779 ]
+S1_conf: [[0.30253425 0.4288566  0.00327331]
+ [0.32742247 0.46053672 0.01214939]]
 ```
 
 Every `*_conf` is shaped `(2, ...)`: row 0 lower, row 1 upper. They are
@@ -423,8 +435,9 @@ outputs, D the number of inputs.
 | `multivariate` | any | `(D,)` |
 | `trajectory` | `(N, T, K)` only | `(K, D)` |
 
-Every `*_conf` adds a leading axis of size 2. `ot_dummy` has the shape of
-`ot` with the parameter axis removed; `above_dummy` has the shape of `ot`.
+Every `*_conf` adds a leading axis of size 2. Since 1.0 each parameter is
+permuted against its own partition, so `ot_dummy` has the same shape as `ot`,
+one floor per parameter, and so does `above_dummy`.
 
 ## Selecting by name with xarray
 
@@ -440,9 +453,9 @@ Coordinates:
   * output     (output) <U6 48B 'plasma' 'tissue'
   * param      (param) <U6 72B 'dose' 'k_abs' 'k_elim'
 Data variables:
-    ot         (output, param) float32 24B 0.263 0.1576 ... 0.07953 0.2459
+    ot         (output, param) float32 24B 0.2064 0.09549 ... 0.04104 0.2246
     advective  (output, param) float32 24B 0.09774 0.0355 ... 0.005924 0.141
-    diffusive  (output, param) float32 24B 0.1653 0.1221 ... 0.07361 0.105
+    diffusive  (output, param) float32 24B 0.1086 0.05999 ... 0.03511 0.08365
     S1         (output, param) float32 24B 0.1956 0.07103 ... 0.01185 0.2821
 Attributes:
     mode:     trajectory
@@ -450,8 +463,8 @@ Attributes:
 
 The mode is recorded in `attrs`, which is worth having when a saved dataset
 outlives the script that made it. Bootstrap bounds arrive as `*_lower` and
-`*_upper`, and `ot_dummy` as its own variable, both only when you asked for
-them.
+`*_upper`, and `ot_dummy` as its own per-parameter variable, both only when
+you asked for them.
 
 ## Other things worth knowing
 

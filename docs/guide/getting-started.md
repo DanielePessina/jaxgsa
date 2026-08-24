@@ -376,5 +376,4 @@ that look plausible and are wrong.
 - [Save and Reload Samples](/examples/save-load) covers the full persistence workflow
 - [xarray Output](/examples/xarray) exports labeled datasets with named parameters, outputs, and times
 - [Configuration](/guide/configuration) covers precision, the memory budget, and the batching contract
-- [Migration guide](/guide/migration) covers upgrading from 0.8 to 1.0, and from 0.3 to 0.4
 - [API Reference](/api/) has the signatures, shape contracts, and result objects

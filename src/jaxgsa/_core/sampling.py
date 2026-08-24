@@ -230,11 +230,14 @@ def _jax_transform_gaussian(
 
     Residual limit: when even the well-conditioned side underflows — both
     ``ndtr`` endpoints identically 0, which needs the whole window beyond about
-    ``38.5`` standard deviations from the mean in float64 (about ``14`` in
-    float32) — the truncated distribution is genuinely unrepresentable in the
-    dtype and the result is infinite. The float64 host twin
-    (:func:`_transform_gaussian` via ``scipy.stats.truncnorm.ppf``) hits the
-    same wall at the same point.
+    ``38`` standard deviations from the mean in float64 (about ``14`` in
+    float32) — the result is infinite. The float64 host twin
+    (:func:`_transform_gaussian` via ``scipy.stats.truncnorm.ppf``) does not
+    hit this wall: scipy's algorithm stays finite past 1000 standard
+    deviations (measured). For a declared truncation window that far out,
+    ``SobolSamples.samples`` (built on the scipy host path) and
+    ``.transform()`` (built on this function) therefore disagree for the
+    affected rows — finite against ``inf``.
 
     Args:
         unit_values: Unit-interval samples, any shape.

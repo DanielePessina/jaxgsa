@@ -9,7 +9,7 @@ from jaxgsa._core.result import CIInfo, FieldSpec, ResultSchema, SchemaResult
 from jaxgsa.problem import Problem
 
 
-@dataclass(repr=False)
+@dataclass(repr=False, frozen=True)
 class SobolResult(SchemaResult):
     """Sobol sensitivity analysis results, returned by :func:`jaxgsa.sobol.analyze`.
 
@@ -28,10 +28,18 @@ class SobolResult(SchemaResult):
             ``(T, K, D)``.
         ST: Total-order Sobol indices, same shape as ``S1``.
         S2: Second-order Sobol indices, shape ``(D, D)`` / ``(K, D, D)`` /
-            ``(T, K, D, D)``, or ``None`` when they were not computed. Only the
-            upper triangle is estimated directly. The lower triangle mirrors it
-            for convenience. The diagonal holds a parameter's interaction with
-            itself, which is undefined, so it is set to ``NaN``.
+            ``(T, K, D, D)``, or ``None`` when they were not computed.
+            ``S2[j, k]`` and ``S2[k, j]`` are estimated independently, from
+            the same formula with j and k swapped, and are averaged
+            together: the two differ by Monte Carlo noise, not
+            floating-point drift. Averaging usually lowers the error but
+            does not always (measured on Ishigami: 25% and 13% lower at
+            ``base_n`` 64 and 1024, 9% higher at 256; see
+            :func:`jaxgsa.sobol._analyze._symmetrize_s2`). This is a
+            deliberate departure from SALib, which reports the upper
+            triangle alone. The diagonal
+            holds a parameter's interaction with itself, which is undefined,
+            so it is set to ``NaN``.
         problem: Problem definition used for the analysis.
         invalid: What the non-finite check found and what it did about it. A
             report with ``n_invalid == 0`` means the check ran and found

@@ -273,7 +273,7 @@ class TestTheSpecsAreTrue:
         else:
             assert spec.bootstrap == "n_bootstrap", (
                 f"{spec.name} declares bootstrap={spec.bootstrap!r}; the only "
-                "legal spelling is 'n_bootstrap' (see CONTEXT.md)"
+                "legal spelling is 'n_bootstrap'"
             )
             assert spec.bootstrap in params
 
@@ -364,10 +364,11 @@ class TestTheRegistryIsProtected:
 class TestPureCoreDeclaration:
     """``pure_core`` is checked against the package, not merely recorded.
 
-    ADR 0015 exempts kucherenko and vkoga from the pure-core rule and requires
-    the exemption to be declared in the registry rather than left as an
-    absence. A declaration nobody checks is the same as an absence, so these
-    assert both directions.
+    Every method is expected to have a pure ``indices()`` that survives
+    ``jit``, ``vmap`` and ``jacrev``. kucherenko and vkoga are host
+    NumPy/SciPy end to end and are exempt, and they declare the exemption in
+    the registry rather than leaving it as an absence. A declaration nobody
+    checks is the same as an absence, so these assert both directions.
     """
 
     @pytest.mark.parametrize("spec", ALL_SPECS, ids=SPEC_IDS)
@@ -394,12 +395,13 @@ class TestPureCoreDeclaration:
     def test_exactly_the_two_documented_methods_are_exempt(self):
         """The exemption list is closed.
 
-        A third method quietly opting out would pass the test above. ADR 0015
-        names two, and adding a third is a decision that should require
-        editing this line.
+        A third method quietly opting out would pass the test above. Only
+        kucherenko and vkoga are exempt, and adding a third is a decision that
+        should require editing this line.
         """
         exempt = {s.name for s in ALL_SPECS if not s.pure_core}
         assert exempt == {"kucherenko", "vkoga"}, (
-            f"exempt from the pure-core rule: {sorted(exempt)}. ADR 0015 names "
-            "kucherenko and vkoga. Changing that set is an ADR change."
+            f"exempt from the pure-core rule: {sorted(exempt)}. Only kucherenko "
+            "and vkoga are exempt, each for a measured reason. A new method "
+            "must not join them without one."
         )

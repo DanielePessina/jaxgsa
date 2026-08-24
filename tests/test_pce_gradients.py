@@ -170,6 +170,28 @@ def test_jit_of_jacrev_of_the_inputs(case):
     assert np.isfinite(np.asarray(jac)).all()
     assert np.abs(np.asarray(jac)).max() > 0.0
 
+    # A finite, non-zero Jacobian is not evidence it is the *right* Jacobian:
+    # a constant offset or a wrong sign would pass both checks above. Spot
+    # check a handful of entries against a central finite difference, which
+    # re-runs the whole chain (design matrix, Gram solve, index) at X +/- h
+    # and so exercises none of the autodiff path. Full-size X makes checking
+    # every entry too slow; a fixed, seeded sample of entries is cheap and
+    # deterministic. Measured worst-case agreement on this chain is 3e-9.
+    step = 1e-5
+    rng = np.random.default_rng(0)
+    n_rows, n_cols = X.shape
+    sample_rows = rng.choice(n_rows, size=min(6, n_rows), replace=False)
+    with jax.enable_x64():
+        X64 = jnp.asarray(X, dtype=jnp.float64)
+        jac64 = np.asarray(jax.jacrev(total_s1)(X64))
+        for row in sample_rows:
+            for col in range(n_cols):
+                delta = jnp.zeros_like(X64).at[row, col].set(step)
+                plus = float(total_s1(X64 + delta))
+                minus = float(total_s1(X64 - delta))
+                fd = (plus - minus) / (2.0 * step)
+                np.testing.assert_allclose(jac64[row, col], fd, rtol=0, atol=3e-9)
+
 
 def test_analyze_is_not_jittable(case):
     """Tier T4: the split is real -- ``analyze`` cannot be traced.

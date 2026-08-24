@@ -250,7 +250,6 @@ def _legacy_sampling_result(sr: SobolSamples) -> SobolSamples:
     expanded_samples = sr.samples[sr.expanded_to_unique]
     return SobolSamples(
         samples=expanded_samples,
-        sample_ids=np.arange(n_expanded, dtype=np.int64),
         n_expanded=n_expanded,
         expanded_to_unique=np.arange(n_expanded, dtype=np.int64),
         base_n=sr.base_n,
@@ -444,10 +443,10 @@ def test_the_bootstrap_batches_slices_instead_of_looping_over_them(monkeypatch):
 
     widths: list[int] = []
     n_bootstrap: list[int] = []
-    real_get = sobol_bootstrap._resample_so
+    real_get = sobol_bootstrap._resample_kernel
 
-    def recording_get(estimator: str):
-        kernel = real_get(estimator)
+    def recording_get(estimator: str, calc_second_order: bool, single: bool):
+        kernel = real_get(estimator, calc_second_order, single)
 
         def recorder(idx, A, AB, BA, B):
             widths.append(int(A.shape[0]))
@@ -456,8 +455,26 @@ def test_the_bootstrap_batches_slices_instead_of_looping_over_them(monkeypatch):
 
         return recorder
 
-    monkeypatch.setattr(sobol_bootstrap, "_resample_so", recording_get)
+    monkeypatch.setattr(sobol_bootstrap, "_resample_kernel", recording_get)
     jaxgsa.sobol.analyze(sr, Y_multi, n_bootstrap=8, key=jax.random.key(2), slice_chunk_size=4)
 
     assert widths == [4, 4], f"expected two equal-width chunks, the tail padded back, got {widths}"
     assert n_bootstrap == [8, 8], "every call must carry the whole resample batch"
+
+
+def test_constant_output_with_float32_rounding_noise_still_reads_as_zero_variance():
+    """A constant Y whose sample variance is not bit-exact zero still warns and returns NaN.
+
+    Regression for M1 (REVIEW-1.0.md): the guard used to test ``var == 0``,
+    which almost never holds for a constant float32 output because the mean
+    itself rounds. ``Y = full(N, 0.1)`` has a naive sample variance of about
+    2e-16, not zero, so this fixture would have slipped past the old guard
+    silently instead of warning.
+    """
+    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=256, base_n=64, seed=0, verbose=False)
+    Y = jnp.full(sr.n_runs, 0.1)
+    assert float(jnp.var(Y)) != 0.0, "the naive variance must be nonzero for this to test the fix"
+    with pytest.warns(UserWarning, match="zero variance"):
+        result = jaxgsa.sobol.analyze(sr, Y, verbose=False)
+    assert jnp.all(jnp.isnan(result.S1))
+    assert jnp.all(jnp.isnan(result.ST))

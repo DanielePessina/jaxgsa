@@ -279,7 +279,6 @@ def test_transform_unavailable_without_a_unit_design():
     sr = sobol.sample(GRAD_PROBLEM, 256, seed=2, verbose=False)
     hand_built = type(sr)(
         samples=sr.samples,
-        sample_ids=sr.sample_ids,
         n_expanded=sr.n_expanded,
         expanded_to_unique=sr.expanded_to_unique,
         base_n=sr.base_n,

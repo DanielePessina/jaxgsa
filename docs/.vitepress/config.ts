@@ -18,7 +18,6 @@ export default defineConfig({
     sidebar: {
       '/guide/': [
         { text: 'Getting started', link: '/guide/getting-started' },
-        { text: 'Migrating', link: '/guide/migration' },
         { text: 'Methods', link: '/guide/methods' },
         { text: 'Benchmarks', link: '/guide/benchmarks' },
         { text: 'Configuration', link: '/guide/configuration' },
@@ -56,12 +55,12 @@ export default defineConfig({
           items: [
             { text: 'Problem', link: '/api/problem' },
             { text: 'Sampling', link: '/api/sampling' },
-            { text: 'Sobol analysis', link: '/api/analyze' },
           ],
         },
         {
           text: 'Methods that build a design',
           items: [
+            { text: 'Sobol', link: '/api/sobol' },
             { text: 'Morris', link: '/api/morris' },
             { text: 'eFAST', link: '/api/efast' },
             { text: 'DGSM', link: '/api/dgsm' },

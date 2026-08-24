@@ -11,7 +11,7 @@ from jaxgsa._core.result import FieldSpec, ResultSchema, SchemaResult
 from jaxgsa.problem import Problem
 
 
-@dataclass(repr=False)
+@dataclass(frozen=True, repr=False)
 class HSICResult(SchemaResult):
     """HSIC (Hilbert-Schmidt Independence Criterion) sensitivity analysis results.
 

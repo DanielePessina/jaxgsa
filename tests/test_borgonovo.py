@@ -696,9 +696,15 @@ class TestDegenerateBandwidthIsNotAPrecondition:
         On smooth continuous data no conditioning class is degenerate, so
         the floor is never applied and ``degenerate_bandwidth`` is dead
         code for this run. Every value must therefore be accepted, and
-        every result must be bit-identical to ``"auto"``. Both cases here
+        every result must match ``"auto"`` to rounding. Both cases here
         were refused by the 0.8.0 up-front guard, including 0.1, which is
         the fraction ``"auto"`` itself uses.
+
+        Not bit-identity: passing the bandwidth explicitly skips the
+        arithmetic that derives it, so the two paths can land one unit in
+        the last place apart. Measured at 2.8e-17 on x86-64 float64, and
+        exactly zero on arm64, which is why an equality assertion here
+        passed locally and failed in CI.
         """
         X, Y = ishigami_data
         explicit = analyze(
@@ -710,8 +716,12 @@ class TestDegenerateBandwidthIsNotAPrecondition:
             degenerate_bandwidth=bandwidth,
         )
         auto = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0, grid_size=grid_size)
-        np.testing.assert_array_equal(np.asarray(explicit.delta), np.asarray(auto.delta))
-        np.testing.assert_array_equal(np.asarray(explicit.S1), np.asarray(auto.S1))
+        np.testing.assert_allclose(
+            np.asarray(explicit.delta), np.asarray(auto.delta), rtol=1e-12, atol=0.0
+        )
+        np.testing.assert_allclose(
+            np.asarray(explicit.S1), np.asarray(auto.S1), rtol=1e-12, atol=0.0
+        )
 
     def test_sub_grid_step_bandwidth_on_a_degenerate_class_can_still_work(
         self, degenerate_class_data

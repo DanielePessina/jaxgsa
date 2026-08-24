@@ -14,12 +14,13 @@ It returns partition groups in a canonical layout: every group is a
 
 - ``cls_idx (R, Dg, Mg, Pg)``: per-replicate global sample indices of
   every class's members (padded entries are clamped duplicates), and
-- ``counts (R1, G1, Mg)``: true class sizes, where ``R1`` is ``R`` or 1
-  and ``G1`` is ``Dg`` or 1. A length-1 leading axis means the layout is
-  shared (broadcast) across replicates and/or inputs; it is never tiled,
-  so the shared continuous layout stays O(M) rather than O(R * D * M).
+- ``counts (R, Dg, Mg)``: true class sizes, matching the first three axes
+  of ``cls_idx``. The continuous layout is the same for every replicate
+  and input, so its ``counts`` is a broadcast of one ``(Mg,)`` row; that
+  row is about ``1/Pg`` the size of ``cls_idx``, so broadcasting it costs
+  little next to the class indices already held at full size.
 
-Kernels slice one replicate with :func:`_replicate_slice` and derive the
+Kernels index a replicate with plain ``counts[i]`` and derive the
 validity mask from the counts with :func:`_mask_from_counts`, so no mask
 or per-replicate lookup table is ever materialized over all replicates.
 """
@@ -40,7 +41,7 @@ if TYPE_CHECKING:
     from jaxgsa.problem import Problem
 
 # One canonical-layout partition group: (cls_idx (R, Dg, Mg, Pg),
-# counts (R-or-1, Dg-or-1, Mg)).
+# counts (R, Dg, Mg)).
 PartitionGroup = tuple[Array, Array]
 
 
@@ -228,22 +229,6 @@ def _build_class_indices(X: Array, all_idx: Array, take: Array) -> Array:
     return jax.vmap(_one_replicate)(all_idx)
 
 
-def _replicate_slice(arr: Array, i: Array) -> Array:
-    """Select replicate ``i`` from a canonical ``(R-or-1, ...)`` array.
-
-    A length-1 leading axis marks a layout shared by every replicate. The
-    static Python branch keeps that shared case free of dynamic gathers.
-
-    Args:
-        arr: Array whose leading axis is ``R`` or 1.
-        i: Replicate index, used only when the leading axis is ``R``.
-
-    Returns:
-        The array with its leading replicate axis removed.
-    """
-    return arr[i] if arr.shape[0] > 1 else arr[0]
-
-
 def _mask_from_counts(counts: Array, n_pad: int) -> Array:
     """Derive the class-validity mask ``(..., M, P)`` from true class sizes.
 
@@ -268,16 +253,16 @@ def build_partition_groups(
     M: int,
     dims_levels: tuple[tuple[int, int], ...],
     method: str = "jaxgsa",
-) -> tuple[list[PartitionGroup], list[int], Array | None]:
+) -> tuple[list[PartitionGroup], list[list[int] | None], Array | None]:
     """Build the canonical partition-group layout for a given-data analysis.
 
     One group per column kind. Continuous columns share one
-    equal-frequency rank layout, identical for every replicate, so its
-    ``counts`` carry length-1 leading axes. Categorical columns get one
+    equal-frequency rank layout, identical for every replicate and input,
+    broadcast to the full ``counts`` shape. Categorical columns get one
     class per level, with sizes that vary per column and per bootstrap
-    resample, so their ``counts`` carry full ``(R, Dc)`` leading axes.
-    Grouping keeps the padded class tensors rectangular without padding
-    continuous classes up to a categorical level size (or vice versa).
+    resample. Grouping keeps the padded class tensors rectangular without
+    padding continuous classes up to a categorical level size (or vice
+    versa).
 
     Args:
         problem: Problem definition (names for errors/warnings).
@@ -289,13 +274,15 @@ def build_partition_groups(
         method: Fully qualified analyzer name for the empty-level warning.
 
     Returns:
-        ``(groups, group_dims, col_order)``. ``groups`` lists the
+        ``(groups, group_levels, col_order)``. ``groups`` lists the
         canonical ``(cls_idx, counts)`` layouts (continuous first, then
-        categorical; either may be absent). ``group_dims`` gives the
-        problem column index behind each kernel output column (groups
-        concatenated). ``col_order`` is the gather that restores the
-        problem's column order, or ``None`` when one group is already in
-        order.
+        categorical; either may be absent). ``group_levels`` has one entry
+        per group, in the same order: ``None`` for the continuous group,
+        the declared level count per column for the categorical group. A
+        caller never needs to rebuild ``cont_dims``/``cat_dims`` to read
+        this off; it is returned in group order already. ``col_order`` is
+        the gather that restores the problem's column order, or ``None``
+        when one group is already in order.
 
     Raises:
         ValueError: If a categorical column of ``X`` holds values other
@@ -306,18 +293,22 @@ def build_partition_groups(
             samples (its class is dropped with zero weight).
     """
     N = X.shape[0]
+    R = all_idx.shape[0]
     cat_dims = [d for d, _ in dims_levels]
     cont_dims = [d for d in range(problem.num_vars) if d not in set(cat_dims)]
 
     groups: list[PartitionGroup] = []
-    group_dims: list[int] = []
+    group_levels: list[list[int] | None] = []
+    group_dims: list[int] = []  # local only: feeds col_order below
     if cont_dims:
         take_np, sizes_np = _class_layout(N, M)
         X_cont = X[:, jnp.asarray(cont_dims)] if cat_dims else X
         # Rank the inputs once for every replicate (never per output-column
         # chunk); the kernels reuse the class indices across chunks.
         cls_idx = _build_class_indices(X_cont, all_idx, jnp.asarray(take_np))
-        groups.append((cls_idx, jnp.asarray(sizes_np)[None, None, :]))
+        counts = jnp.broadcast_to(jnp.asarray(sizes_np), (R, len(cont_dims), sizes_np.shape[0]))
+        groups.append((cls_idx, counts))
+        group_levels.append(None)
         group_dims.extend(cont_dims)
     if cat_dims:
         codes = _extract_categorical_codes(problem, np.asarray(X), dims_levels)
@@ -325,9 +316,10 @@ def build_partition_groups(
         cat_cls_np, cat_counts_np = _categorical_class_layout(codes, np.asarray(all_idx), levels)
         _warn_empty_levels(problem, dims_levels, cat_counts_np[0], method)
         groups.append((jnp.asarray(cat_cls_np), jnp.asarray(cat_counts_np)))
+        group_levels.append(levels)
         group_dims.extend(cat_dims)
     # Kernel outputs concatenate the groups on the input axis; this gather
     # restores the problem's column order (None when one group is already
     # in order).
     col_order = jnp.asarray(np.argsort(group_dims)) if len(groups) > 1 else None
-    return groups, group_dims, col_order
+    return groups, group_levels, col_order

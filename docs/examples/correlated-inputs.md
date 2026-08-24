@@ -45,7 +45,7 @@ jaxgsa.optimal_transport.analyze
   timing:
     estimator (includes compile on the first call): 0.2385 s
     mode: univariate
-    epsilon: 0.01
+    epsilon: 0.03
     slice_chunk_size: auto (resolved from the memory budget)
   results: top 2 of 2 parameters by ot
     1. x1  ot=0.9348
@@ -311,9 +311,20 @@ normal draw.
 
 Optimal transport, Borgonovo delta, HSIC, and PAWN take any `(X, Y)` pairs.
 They are rank- and distribution-based, so they need no independence assumption
-at all:
+at all. Go back to the `problem`, `X` and `Y` from the top of this page (the
+sections above reused those names for other examples):
 
 ```python
+problem = jaxgsa.Problem.from_dict(
+    {
+        "x1": {"dist": "gaussian", "mean": 0.0, "variance": 1.0},
+        "x2": {"dist": "gaussian", "mean": 0.0, "variance": 1.0},
+    },
+    correlation=[[1.0, 0.8], [0.8, 1.0]],
+)
+X = jaxgsa.sampling.monte_carlo(problem, n=8192, seed=42)
+Y = X[:, 0]  # the model reads x1 and ignores x2
+
 ot = jaxgsa.optimal_transport.analyze(problem, X, Y)
 delta = jaxgsa.borgonovo.analyze(problem, X, Y)
 pawn = jaxgsa.pawn.analyze(problem, X, Y)
@@ -355,7 +366,7 @@ On the same `Y = x1` data as above:
 
 ```
 terms: ('x1', 'x2', 'x1/x2')
-Sa: [0.971 0.    0.005]
+Sa: [0.97  0.    0.005]
 Sb: [0.01 0.01 0.  ]
 ```
 
@@ -451,6 +462,14 @@ matrix explicitly with `problem.with_correlation(None)`.
   correlation. It has no tail dependence. On the latent scale, the variables
   are conditionally independent given the rest. Real data may carry
   asymmetric or tail dependence that this smooths away.
+- **The Gaussian copula is the dependence model jaxgsa implements, and that
+  is a fixed scope rather than a gap waiting to be filled.** Every method
+  that reads `problem.correlation` assumes a Gaussian conditional, so other
+  copula families are not planned. Your declared rank correlation
+  still holds, so the marginals and the pairwise ranks are right, but the
+  joint behaviour in the tails is not what your data does. If tail dependence
+  drives your problem, GlobalSensitivity.jl with Copulas.jl covers Clayton,
+  Frank, Gumbel and t, and is the honest recommendation.
 - For non-Gaussian marginals, the Pearson correlation of the physical samples
   usually differs from the latent matrix. This is the NORTA
   correlation-matching problem. The Spearman rank correlation is the

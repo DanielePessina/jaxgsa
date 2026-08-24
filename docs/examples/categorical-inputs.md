@@ -104,7 +104,7 @@ jaxgsa.optimal_transport.analyze
   timing:
     estimator (includes compile on the first call): 0.4148 s
     mode: univariate
-    epsilon: 0.01
+    epsilon: 0.03
     slice_chunk_size: auto (resolved from the memory budget)
   results: top 2 of 2 parameters by ot
     1. temperature  ot=0.5539

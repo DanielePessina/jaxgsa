@@ -9,8 +9,9 @@ unaffordable against an expensive model but cheap against a kernel expansion.
 
 **This module has no pure core.** Stage two is a host NumPy/SciPy quasi-Monte
 -Carlo loop end to end, so there is no ``indices()`` here that returns bare
-arrays and survives ``jit``, ``vmap`` and ``jacrev``. See
-``docs/adr/0015-pure-core-exemptions.md``.
+arrays and survives ``jit``, ``vmap`` and ``jacrev``. That is a declared
+exemption (see ``jaxgsa._core.registry.MethodRecord.pure_core``), not a gap:
+no traceable core exists to export.
 
 References:
     Hilhorst, Quicken, van de Vosse & Huberts (2024). Int. J. Numer. Meth.
@@ -32,7 +33,7 @@ from jax import Array
 
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import apply_batched, resolve_batch_size
-from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
+from jaxgsa._core.bootstrap import interval
 from jaxgsa._core.copula import (
     _ConditionalPlan,
     build_conditional_plan,
@@ -57,7 +58,14 @@ from jaxgsa.vkoga._result import VKOGAResult
 # Hyperparameter search grid, following Hilhorst et al. Section 2.4.1: ten
 # log-spaced values each, cross-validated as a 10x10 product.
 _GAMMA_GRID = np.logspace(-2, np.log10(50.0), 10)
-_RIDGE_GRID = np.logspace(-16, -2, 10)
+# _engine._JITTER always adds an unconditional 1e-8 * mean(diag(AtA)) to the
+# solved system, on top of whatever ridge asks for. At a typical training
+# size (n ~ 1024) that jitter is about 2.2e-6. A ridge value below that scale
+# changes nothing: the jitter already dominates, so those candidates tie in
+# cross-validation and VKOGAResult.ridge would report a value smaller than
+# the regularisation actually in force. The grid starts at the jitter scale
+# instead, so every candidate is distinguishable.
+_RIDGE_GRID = np.logspace(-6, -2, 10)
 
 # Cap on kernel centres when the caller does not choose one. Greedy selection
 # cost is O(max_centers * n), and the marginal accuracy of further centres
@@ -144,10 +152,15 @@ def analyze(
         n_outer: Outer (conditioning) sample size per parameter, at least 2.
             Rounded up to the next power of two (Sobol' balance).
         n_inner: Inner (conditional) sample size per outer point, at least 2.
-            Rounded up to the next power of two. Do not lower it below the
-            default to buy speed: the estimators drop the iid inner-noise
-            correction and depend on a large shared inner block, so a small
-            ``n_inner`` inflates a small ``S_TC``. Raise ``n_outer`` instead.
+            Rounded up to the next power of two. ``S_TC`` reuses one inner
+            block across every outer point and drops the iid inner-noise
+            correction, so do not lower ``n_inner`` below the default to buy
+            speed there: a small ``n_inner`` inflates a small ``S_TC``, and
+            raising ``n_outer`` does not fix it, because the same shared
+            block still drives every outer point. ``S_TU`` draws a fresh
+            inner block per outer point, so its sampling noise falls as
+            ``n_outer`` grows; raise ``n_outer`` when a noisy ``S_TU`` is the
+            concern.
         n_variance: Sample size for the output variance and the component-
             function fit, at least 2. Rounded up to the next power of two.
         n_bootstrap: Number of bootstrap resamples for confidence intervals.
@@ -293,7 +306,8 @@ def analyze(
     if key is None:
         raise ValueError("key is required for the Monte-Carlo index estimate")
     seed = _seed_from_key(key)
-    X, Y, invalid = ctx.inputs, ctx.Y, ctx.invalid
+    assert ctx.X is not None  # a given-data method always passes X to prepare()
+    X, Y, invalid = ctx.X, ctx.Y, ctx.invalid
     # The clock starts before the hyperparameter search and the greedy fit:
     # for this method the fit is the expensive work, not just the indices.
     t0 = _verbose.tic()
@@ -343,6 +357,7 @@ def analyze(
         ridge=ridge_value,
         max_centers=resolved_centers,
         plan=plan,
+        problem=problem,
         n_outer=n_outer,
         n_inner=n_inner,
         n_variance=n_variance,
@@ -371,6 +386,7 @@ def analyze(
             ridge=ridge_value,
             max_centers=resolved_centers,
             plan=plan,
+            problem=problem,
             n_outer=n_outer,
             n_inner=n_inner,
             n_variance=n_variance,
@@ -378,26 +394,20 @@ def analyze(
             n_bootstrap=n_bootstrap,
             batch_size=batch_size,
         )
-        for name in _INTERVAL_FIELDS:
-            point = jnp.asarray(getattr(indices, name).reshape(n_time, n_out, D))
-            draws = jnp.asarray(replicates[name].reshape(-1, n_time, n_out, D))
-            lo, hi = _bootstrap_ci_endpoints(
-                point, draws, conf_level=conf_level, ci_method=ci_method
-            )
-            # Stack [lower, upper] into a leading axis of size 2. n_trailing=1
-            # says one axis (D) follows the promoted (T, K) pair; the squeeze
-            # addresses those axes from the end, so the leading 2 survives.
-            confs[name] = ctx.squeeze(jnp.stack((lo, hi)), n_trailing=1)
-        ci = CIInfo(
+        # _shape_index already squeezes to the caller's own rank; interval()
+        # reads a shape only to broadcast [lower, upper], so it works the
+        # same on this squeezed layout as on the raw (T, K, D) one.
+        points = {name: _shape_index(getattr(indices, name)) for name in _INTERVAL_FIELDS}
+        draws = {name: _shape_index(replicates[name]) for name in _INTERVAL_FIELDS}
+        interval_confs, ci = interval(
+            points,
+            draws,
             level=conf_level,
             method=ci_method,
             n_bootstrap=n_bootstrap,
-            replicates=(
-                {name: _shape_index(replicates[name]) for name in _INTERVAL_FIELDS}
-                if keep_replicates
-                else None
-            ),
+            keep_replicates=keep_replicates,
         )
+        confs.update(interval_confs)
 
     output_shape = ctx.squeeze(jnp.zeros((n_time, n_out)), n_trailing=0).shape
     result = VKOGAResult(
@@ -464,6 +474,7 @@ def _fit_and_estimate(
     ridge: float,
     max_centers: int,
     plan: _ConditionalPlan,
+    problem: Problem,
     n_outer: int,
     n_inner: int,
     n_variance: int,
@@ -483,6 +494,8 @@ def _fit_and_estimate(
         ridge: Kernel regularisation to fit with.
         max_centers: Maximum kernel centres the greedy may select.
         plan: Precomputed Gaussian conditionals for the index integration.
+        problem: Problem whose declared marginals pick each parameter's
+            component-fit basis.
         n_outer: Outer (conditioning) sample size per parameter.
         n_inner: Inner (conditional) sample size per outer point.
         n_variance: Sample size for the variance and the component fit.
@@ -516,6 +529,7 @@ def _fit_and_estimate(
         coefficients=state.coefficients[:n_selected],
     )
     indices = estimate_correlated_indices(
+        problem=problem,
         plan=plan,
         predict=_make_unit_predictor(state, y_mean, batch_size),
         n_outer=n_outer,
@@ -536,6 +550,7 @@ def _bootstrap_replicates(
     ridge: float,
     max_centers: int,
     plan: _ConditionalPlan,
+    problem: Problem,
     n_outer: int,
     n_inner: int,
     n_variance: int,
@@ -566,6 +581,8 @@ def _bootstrap_replicates(
         ridge: Kernel regularisation, held at the cross-validated value.
         max_centers: Maximum kernel centres the greedy may select.
         plan: Precomputed Gaussian conditionals for the index integration.
+        problem: Problem whose declared marginals pick each parameter's
+            component-fit basis.
         n_outer: Outer (conditioning) sample size per parameter.
         n_inner: Inner (conditional) sample size per outer point.
         n_variance: Sample size for the variance and the component fit.
@@ -591,6 +608,7 @@ def _bootstrap_replicates(
                 ridge=ridge,
                 max_centers=max_centers,
                 plan=plan,
+                problem=problem,
                 n_outer=n_outer,
                 n_inner=n_inner,
                 n_variance=n_variance,
@@ -718,8 +736,8 @@ def _resolve_correlation(
 
     ``None`` reads ``problem.correlation``, and falls back to independent
     inputs when the problem declares none. A matrix is an explicit per-call
-    override and is canonicalized like a constructor argument. Strings are
-    rejected. The one workflow for fitting a matrix from data is
+    override and is canonicalized like a constructor argument. The one
+    workflow for fitting a matrix from data is
     ``problem.with_correlation(jaxgsa.sampling.fit_correlation(problem, X))``,
     which states in the call which sample the copula comes from.
 
@@ -731,7 +749,7 @@ def _resolve_correlation(
         A canonicalized latent correlation matrix, shape ``(D, D)``.
 
     Raises:
-        ValueError: If ``correlation`` is a string, or not a valid matrix.
+        ValueError: If ``correlation`` is not a valid matrix.
     """
     if correlation is None:
         declared = problem.correlation
@@ -739,12 +757,6 @@ def _resolve_correlation(
             return independent_correlation(problem.num_vars)
         # Problem construction already canonicalized the declared matrix.
         return declared
-    if isinstance(correlation, str):
-        raise ValueError(
-            f"correlation must be None or a (D, D) matrix, got {correlation!r}. To fit a "
-            "matrix from observed data, use jaxgsa.sampling.fit_correlation(problem, X_data) "
-            "and attach it with problem.with_correlation(...)."
-        )
     # A per-call override is user-declared, so it takes the strict repair
     # policy: a matrix that has to move materially is rejected, not repaired.
     return canonicalize_correlation(

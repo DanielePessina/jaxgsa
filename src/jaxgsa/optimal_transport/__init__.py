@@ -28,9 +28,9 @@ Example::
     result = optimal_transport.analyze(problem, X, Y)
 
 References:
-    Borgonovo, Figalli, Plischke & Savare (2024). Global sensitivity
-    analysis via optimal transport. Management Science.
-    doi:10.1287/mnsc.2023.01796.
+    Borgonovo, Figalli, Plischke & Savare (2024, online first; 2025 in
+    print). Global sensitivity analysis via optimal transport. Management
+    Science 71(5):3809-3828. doi:10.1287/mnsc.2023.01796.
 """
 
 from jaxgsa._core.invalid import InvalidUnit

@@ -34,8 +34,13 @@ required — the permutation test draws randomness even though nothing here
 bootstraps.
 
 References:
-    Gretton et al. (2005). JMLR 6:2075-2129.
-    Da Veiga (2015). Rel. Eng. Sys. Safety 142:346-362.
+    Gretton, Bousquet, Smola & Schölkopf (2005). Measuring statistical
+    dependence with Hilbert-Schmidt norms. ALT 2005, LNCS 3734:63-77.
+    (The ``tr(KHLH)/n^2`` V-statistic estimator used here is from this
+    paper, not from Gretton et al.'s separate JMLR 6:2075-2129 paper on
+    kernel independence tests.)
+    Da Veiga (2015). Global sensitivity analysis with dependence measures.
+    J. Stat. Comput. Simul. 85(7):1283-1305, doi 10.1080/00949655.2014.945932.
     Larsen & Alexanderian (2026). arXiv:2603.00849.
 """
 
@@ -71,11 +76,22 @@ def _linear_quantile_plan(q: float, n_elements: int) -> tuple[int, int, Array]:
     """Reproduce the index and weight arithmetic of ``jnp.quantile``.
 
     ``jnp.quantile(a, q)`` with the default ``method="linear"`` reads two
-    order statistics of the sorted array and blends them. The blend is done
-    in the dtype a bare Python float gets, and the position is computed in
-    that dtype too, so the rounding of ``q * (n - 1)`` is part of the answer.
-    This helper repeats exactly that arithmetic on the host, which is possible
-    because both ``q`` and the element count are static.
+    order statistics of the sorted array and blends them. The position
+    ``q * (n - 1)`` is computed in the dtype ``q`` promotes to, which for a
+    bare Python float is the default float dtype, and only the finished
+    value is cast back to the dtype of ``a``. So the rounding of that
+    product is part of the answer, and it is the *default* float dtype that
+    decides it, not the dtype of ``a``. This helper repeats exactly that
+    arithmetic on the host, which is possible because both ``q`` and the
+    element count are static.
+
+    Taking the dtype from ``a`` instead breaks the match. With x64 on and a
+    ``float32`` ``a`` of about ``2^23`` elements or more, the target
+    position is a half-integer that ``float32`` cannot hold: ``jnp.quantile``
+    still computes ``8390655.5`` in ``float64`` and returns ``8390656.0``,
+    while a ``float32`` plan collapses to the single rank ``8390655`` and
+    returns ``8390655.0``. The float32 rounding at that size is
+    ``jnp.quantile``'s own, and reproducing it is this helper's job.
 
     Args:
         q: Quantile in [0, 1], as a Python float.
@@ -237,47 +253,6 @@ def _median_bandwidth_sq(x: Array) -> Array:
     return jnp.maximum(_linear_quantile_by_selection(dists_sq, q), 1e-20)
 
 
-def _resolve_bandwidth_sq(x: Array, bandwidth: float) -> Array:
-    """Resolve the squared Gaussian bandwidth for one variable.
-
-    ``bandwidth`` is a multiplier on the median heuristic, not a width. The
-    resolved standard deviation is ``bandwidth * sqrt(median_sq)``, so this
-    returns ``bandwidth**2 * median_sq``. The heuristic already carries the
-    scale of ``x``, so the resolved bandwidth scales with the data whatever
-    the caller passes, and the kernel — and therefore every index — is
-    unchanged under ``x -> a*x + b``. A multiplier of exactly 1.0 returns the
-    heuristic itself, bit for bit.
-
-    Args:
-        x: Values for one variable, shape ``(N,)``.
-        bandwidth: Positive multiplier on the median-heuristic bandwidth.
-
-    Returns:
-        Scalar squared bandwidth.
-    """
-    return jnp.asarray(bandwidth, dtype=x.dtype) ** 2 * _median_bandwidth_sq(x)
-
-
-def _build_kernel(x: Array, sigma_sq: Array) -> Array:
-    """Build a Gaussian RBF kernel matrix from a resolved squared bandwidth.
-
-    There is deliberately no row blocking here, and no batching keyword
-    anywhere in HSIC. The estimator's peak memory is the *resident* kernel
-    stacks — the D raw input kernels, their D augmented complements, the full
-    augmented product and one output kernel, ~``(2D + 1) * N^2`` floats at
-    once — and a row-blocked build only bounded a transient of one build
-    while that stack stayed resident. It was measured useless and removed.
-
-    Args:
-        x: Values for one variable, shape ``(N,)``.
-        sigma_sq: Scalar squared bandwidth.
-
-    Returns:
-        Kernel matrix, shape ``(N, N)``.
-    """
-    return jnp.exp(-((x[:, None] - x[None, :]) ** 2) / (2.0 * sigma_sq))
-
-
 def _center_kernel(K: Array) -> Array:
     """Center a kernel matrix: K_c = HKH where H = I - (1/n)11^T.
 
@@ -318,79 +293,88 @@ def _hsic_v(K: Array, L: Array) -> Array:
 
 
 def _build_one_kernel(x: Array, bandwidth: float) -> Array:
-    """Build one kernel matrix for one variable.
+    """Build a Gaussian RBF kernel matrix for one variable.
 
-    How the bandwidth is chosen and how the matrix is built are independent
-    questions, so the bandwidth is resolved first and the build follows.
+    ``bandwidth`` is a multiplier on the median heuristic, not a width: the
+    resolved squared bandwidth is ``bandwidth**2 * median_sq``, so a
+    multiplier of exactly 1.0 uses the heuristic itself, bit for bit. The
+    heuristic already carries the scale of ``x``, so the kernel -- and every
+    index built from it -- is unchanged under ``x -> a*x + b``.
+
+    There is deliberately no row blocking here, and no batching keyword
+    anywhere in HSIC. The estimator's peak memory is the *resident* kernel
+    stacks -- the D raw input kernels, their D augmented complements, the full
+    augmented product and one output kernel, ~``(2D + 1) * N^2`` floats at
+    once -- and a row-blocked build only bounded a transient of one build
+    while that stack stayed resident. It was measured useless and removed.
 
     Args:
         x: Values for one variable, shape ``(N,)``.
-        bandwidth: Multiplier on the median-heuristic bandwidth.
+        bandwidth: Positive multiplier on the median-heuristic bandwidth.
 
     Returns:
         Kernel matrix, shape ``(N, N)``.
     """
-    return _build_kernel(x, _resolve_bandwidth_sq(x, bandwidth))
+    sigma_sq = jnp.asarray(bandwidth, dtype=x.dtype) ** 2 * _median_bandwidth_sq(x)
+    return jnp.exp(-((x[:, None] - x[None, :]) ** 2) / (2.0 * sigma_sq))
 
 
-def _build_input_kernels(X_unit: Array, bandwidth: float) -> list[Array]:
-    """Build one kernel matrix per parameter.
-
-    Args:
-        X_unit: Inputs mapped to [0, 1], shape ``(N, D)``.
-        bandwidth: Multiplier on the median-heuristic bandwidth.
-
-    Returns:
-        List of D kernel matrices, each of shape ``(N, N)``.
-    """
-    D = X_unit.shape[1]
-    return [_build_one_kernel(X_unit[:, d], bandwidth) for d in range(D)]
-
-
-def _augmented_kernels(Ks: list[Array]) -> list[Array]:
+def _augmented_kernels(Ks_stack: Array) -> Array:
     """Build augmented kernels: K*_d = 1 + center(K_d).
 
     The augmented kernel carries a constant term. The product of augmented
     kernels therefore captures all interaction orders, not just the highest.
     Correct total HSIC indices need this.
 
+    Takes and returns a stacked array, not a list. Building each input
+    kernel as a Python list element and stacking it, alongside a second list
+    for its augmented form, doubled the resident kernel memory for no
+    reason: this and :func:`_complement_kernels` both work on the stack the
+    caller already holds, so :func:`indices` never has to keep more than the
+    two stacks it actually reads plus the full product -- ``(2D + 1) * N^2``
+    floats, not ``5D + 1``.
+
     Args:
-        Ks: List of D raw kernel matrices, each of shape ``(N, N)``.
+        Ks_stack: Stacked raw kernel matrices, shape ``(D, N, N)``.
 
     Returns:
-        List of D augmented kernel matrices, each of shape ``(N, N)``.
+        Stacked augmented kernel matrices, shape ``(D, N, N)``.
     """
-    return [jnp.ones_like(K) + _center_kernel(K) for K in Ks]
+    return jax.vmap(lambda K: jnp.ones_like(K) + _center_kernel(K))(Ks_stack)
 
 
-def _complement_kernels(Ks: list[Array]) -> tuple[Array, list[Array]]:
+def _complement_kernels(Ks_stack: Array) -> tuple[Array, Array]:
     """Build the full product kernel and every complement product kernel.
 
-    A prefix-suffix pass gives all D complements in linear time.
+    A prefix-suffix pass gives all D complements in linear time. The pass
+    itself still walks a Python list -- each step depends on the last, so
+    there is no batched primitive for it -- but that list is local to this
+    function and is freed on return; only the stacked complements go back
+    to the caller. See :func:`_augmented_kernels` for why the stack-in,
+    stack-out shape matters here.
 
     Args:
-        Ks: List of D kernel matrices, each of shape ``(N, N)``.
+        Ks_stack: Stacked kernel matrices, shape ``(D, N, N)``.
 
     Returns:
         ``(K_full, complements)``. ``K_full`` is the Hadamard product of all
-        Ks, shape ``(N, N)``. ``complements[d]`` is the product of all Ks
-        except d, each of shape ``(N, N)``.
+        of ``Ks_stack``, shape ``(N, N)``. ``complements[d]`` is the product
+        of every entry of ``Ks_stack`` except ``d``, stacked to ``(D, N, N)``.
     """
-    D = len(Ks)
+    D = Ks_stack.shape[0]
     if D == 1:
-        return Ks[0], [jnp.ones_like(Ks[0])]
+        return Ks_stack[0], jnp.ones_like(Ks_stack)
 
-    prefix = [jnp.ones_like(Ks[0])] * D
+    prefix = [jnp.ones_like(Ks_stack[0])] * D
     for i in range(1, D):
-        prefix[i] = prefix[i - 1] * Ks[i - 1]
+        prefix[i] = prefix[i - 1] * Ks_stack[i - 1]
 
-    suffix = [jnp.ones_like(Ks[0])] * D
+    suffix = [jnp.ones_like(Ks_stack[0])] * D
     for i in range(D - 2, -1, -1):
-        suffix[i] = suffix[i + 1] * Ks[i + 1]
+        suffix[i] = suffix[i + 1] * Ks_stack[i + 1]
 
-    K_full = prefix[-1] * Ks[-1]
-    compls = [prefix[d] * suffix[d] for d in range(D)]
-    return K_full, compls
+    K_full = prefix[-1] * Ks_stack[-1]
+    return K_full, jnp.stack([prefix[d] * suffix[d] for d in range(D)])
 
 
 @lru_cache(maxsize=32)
@@ -481,8 +465,7 @@ def _get_hsic_kernel(n_perms: int, bandwidth: float):
         r2 = jnp.where(zero_var, jnp.nan, hsic_xys / denoms)
 
         hsic_full = _hsic_v(K_aug_full, L)
-        full_thresh = jnp.maximum(jnp.abs(hsic_full) * eps * 100, eps)
-        hsic_full_safe = jnp.where(jnp.abs(hsic_full) < full_thresh, jnp.nan, hsic_full)
+        hsic_full_safe = jnp.where(jnp.abs(hsic_full) < eps, jnp.nan, hsic_full)
         hsic_compls = jax.vmap(lambda K: _hsic_v(K, L))(K_aug_compls_stack)
         t_hsic = jnp.where(zero_var, jnp.nan, 1.0 - hsic_compls / hsic_full_safe)
 
@@ -544,7 +527,7 @@ def _warn_single_precision() -> None:
     small. Cancellation therefore eats the leading digits, and what survives
     is set by the summation order. Reordering the sample rows -- a change that
     cannot alter the true value -- moves a measured index. On Ishigami with
-    ``N = 2048`` the shift is ``2e-4`` relative in float32 against ``2e-13``
+    ``N = 2048`` the shift is ``4e-4`` relative in float32 against ``8e-13``
     in float64, and it grows with ``N`` because the sums do. That is the same
     size as the gap HSIC is often asked to resolve between two weak
     parameters.
@@ -664,11 +647,12 @@ def indices(
     _N, T, K = Y_3d.shape
 
     # Build input kernels and augmented products once (independent of Y).
-    Ks = _build_input_kernels(X_unit, bandwidth)
-    Ks_stack = jnp.stack(Ks)
-    Ks_aug = _augmented_kernels(Ks)
-    K_aug_full, K_aug_compls = _complement_kernels(Ks_aug)
-    K_aug_compls_stack = jnp.stack(K_aug_compls)
+    # Stack directly and build the augmented/complement kernels from the
+    # stack, so no per-input Python list of (N, N) matrices survives to the
+    # kernel call below -- resident memory is the two stacks and the full
+    # product, (2D + 1) * N^2 floats, not 5D + 1.
+    Ks_stack = jnp.stack([_build_one_kernel(X_unit[:, d], bandwidth) for d in range(D)])
+    K_aug_full, K_aug_compls_stack = _complement_kernels(_augmented_kernels(Ks_stack))
 
     # Self-HSIC HSIC(K_d, K_d) is output-independent, so compute it once
     # here and share it across every output slice.
@@ -851,7 +835,8 @@ def analyze(
         ),
         min_kept=_MIN_SAMPLES,
     )
-    X, invalid = ctx.inputs, ctx.invalid
+    assert ctx.X is not None  # a given-data method always passes X to prepare()
+    X, invalid = ctx.X, ctx.invalid
     # A sample count, not a scalar argument: it is checked once the shape
     # contract has held, and a sample this small costs nothing to have read.
     if X.shape[0] < _MIN_SAMPLES:

@@ -415,10 +415,10 @@ def _benchmark(
                 jax.block_until_ready(_Yj)
                 _Ys = expand_sobol(_sr, _Yj)
 
-                jaxgsa.sobol.analyze(_sr, _Yj).S1.block_until_ready()
+                jaxgsa.sobol.analyze(_sr, _Yj, verbose=False).S1.block_until_ready()
                 _g = (
                     best_of(
-                        lambda sr=_sr, Y=_Yj: jaxgsa.sobol.analyze(sr, Y),
+                        lambda sr=_sr, Y=_Yj: jaxgsa.sobol.analyze(sr, Y, verbose=False),
                     )
                     * 1e3
                 )
@@ -474,12 +474,14 @@ def _benchmark(
                 jaxgsa.efast.analyze(
                     _Xe,
                     _Ye,
+                    verbose=False,
                 ).S1.block_until_ready()
                 _g = (
                     best_of(
                         lambda Y=_Ye, sr=_Xe: jaxgsa.efast.analyze(
                             sr,
                             Y,
+                            verbose=False,
                         ),
                     )
                     * 1e3
@@ -539,6 +541,7 @@ def _benchmark(
                     _prob,
                     _fn,
                     _Xmc,
+                    verbose=False,
                 ).nu.block_until_ready()
 
                 # Pre-compute Y and Jacobian (excluded from timer)
@@ -554,6 +557,7 @@ def _benchmark(
                     _prob,
                     Y=_Yd,
                     dfdx=_dfdx,
+                    verbose=False,
                 ).nu.block_until_ready()
                 _gb = float("inf")
                 for _ in range(N_REPEATS):
@@ -562,6 +566,7 @@ def _benchmark(
                         _prob,
                         Y=_Yd,
                         dfdx=_dfdx,
+                        verbose=False,
                     )
                     jax.block_until_ready(_r.nu)
                     _gb = min(_gb, time.perf_counter() - _t0)
@@ -625,6 +630,7 @@ def _benchmark(
                     _Yj,
                     maxorder=2,
                     m=2,
+                    verbose=False,
                 ).Sa.block_until_ready()
                 _g = (
                     best_of(
@@ -634,6 +640,7 @@ def _benchmark(
                             Y,
                             maxorder=2,
                             m=2,
+                            verbose=False,
                         ),
                     )
                     * 1e3
@@ -702,6 +709,7 @@ def _benchmark(
                 n_bootstrap=_nr,
                 ci_method="gaussian",
                 key=jax.random.key(0),
+                verbose=False,
             ).S1.block_until_ready()
             _g = (
                 best_of(
@@ -711,6 +719,7 @@ def _benchmark(
                         n_bootstrap=nr,
                         ci_method="gaussian",
                         key=jax.random.key(0),
+                        verbose=False,
                     ),
                 )
                 * 1e3
@@ -723,6 +732,7 @@ def _benchmark(
                     n_bootstrap=_nr,
                     ci_method="gaussian",
                     key=jax.random.key(0),
+                    verbose=False,
                 )
                 _boot[f"jaxgsa_ci_{_nr}"] = float(
                     jnp.mean(_r.S1_conf[1] - _r.S1_conf[0]),
@@ -734,7 +744,7 @@ def _benchmark(
                 SALIB_ISHI,
                 _Yb_exp,
                 calc_second_order=True,
-                n_bootstrap=_nr,
+                num_resamples=_nr,
                 print_to_console=False,
             )
             _sb = float("inf")
@@ -744,7 +754,7 @@ def _benchmark(
                     SALIB_ISHI,
                     _Yb_exp,
                     calc_second_order=True,
-                    n_bootstrap=_nr,
+                    num_resamples=_nr,
                     print_to_console=False,
                 )
                 _sb = min(_sb, time.perf_counter() - _t0)

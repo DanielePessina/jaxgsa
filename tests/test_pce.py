@@ -240,6 +240,53 @@ class TestInputValidation:
         with pytest.raises(ValueError, match="columns"):
             pce.analyze(problem, X, Y)
 
+    def test_underdetermined_fit_raises(self):
+        """M2: fewer rows than the order-1 expansion has terms must raise.
+
+        N = 3, D = 3: before the fix this fitted an underdetermined system
+        silently and returned a plausible-looking but meaningless S1.
+        """
+        problem = linear.PROBLEM  # 3 params
+        rng = np.random.default_rng(0)
+        X = rng.uniform(0.0, 1.0, size=(3, 3))
+        Y = X.sum(axis=1)
+        with pytest.raises(ValueError, match="cannot fit"):
+            pce.analyze(problem, X, Y, verbose=False)
+        with pytest.raises(ValueError, match="cannot fit"):
+            pce.indices(problem, X, Y)
+
+    def test_fit_ratio_above_one_raises(self):
+        """M2: fit_ratio > 1 is meaningless (more terms than rows per term)."""
+        problem = linear.PROBLEM
+        rng = np.random.default_rng(0)
+        X = rng.uniform(0.0, 1.0, size=(12, 3))
+        Y = X.sum(axis=1)
+        with pytest.raises(ValueError, match="fit_ratio"):
+            pce.analyze(problem, X, Y, fit_ratio=2.0, verbose=False)
+        with pytest.raises(ValueError, match="fit_ratio"):
+            pce.indices(problem, X, Y, fit_ratio=2.0)
+
+    def test_constant_output_with_float32_rounding_noise_still_reads_as_zero_variance(self):
+        """M1: a constant Y whose naive sample variance is not bit-exact zero still warns.
+
+        The old guard tested ``var == 0``, which almost never holds for a
+        constant float32 output because the mean itself rounds.
+        ``Y = full(N, 0.1)`` has a naive sample variance of about 2e-16, not
+        zero, and used to return a plausible-looking finite S1 with no
+        warning instead of NaN.
+        """
+        problem = linear.PROBLEM
+        rng = np.random.default_rng(0)
+        X = jnp.asarray(rng.uniform(0.0, 1.0, size=(500, 3)))
+        Y = jnp.full(500, 0.1)
+        assert float(jnp.var(Y)) != 0.0, (
+            "the naive variance must be nonzero for this to test the fix"
+        )
+        with pytest.warns(UserWarning, match="zero variance"):
+            result = pce.analyze(problem, X, Y, verbose=False)
+        assert jnp.all(jnp.isnan(result.S1))
+        assert jnp.all(jnp.isnan(result.ST))
+
 
 # ---------------------------------------------------------------------------
 # 6. S2 matrix properties
