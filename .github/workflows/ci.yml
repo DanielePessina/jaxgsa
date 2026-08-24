@@ -139,52 +139,15 @@ jobs:
             --baseline /tmp/base.json --current /tmp/head.json \
             --allow-schema-change
 
-  # Does the tracked file still match what jaxgsa computes today?
-  #
-  # The job above only tells you whether *this PR* moved a number; it never
-  # opens `scripts/baseline/baseline-1.0.0.json`, so a file that drifted from
-  # the code before the PR started would stay hidden. This job closes that
-  # gap by dumping the head commit and diffing it straight against the
-  # tracked file.
-  #
-  # It runs on `macos-14` (Apple silicon), not `ubuntu-latest`, because the
-  # stored file's own float32 bits depend on the CPU that produced them (see
-  # the comment above and `scripts/baseline/README.md`): the same computation
-  # on x86-64 would report about a thousand values off by 1e-5 to 1e-7 with
-  # no code change involved. Matching the runner to the platform the file
-  # records removes that noise, so no tolerance is needed here either.
-  #
-  # Only the head commit is dumped, so this adds one dump and one compare to
-  # CI, not two.
-  baseline-drift:
-    runs-on: macos-14
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          # Matches `python_version` in the header of
-          # `scripts/baseline/baseline-1.0.0.json`. The comparison below is
-          # bit-exact, so the interpreter must match the one that produced the
-          # file, exactly as the CPU must. Regenerate on the same pair or move
-          # both together.
-          python-version: "3.12"
-          enable-cache: true
-
-      - name: Install project and dev dependencies
-        run: uv sync --extra dev
-
-      - name: Dump this commit
-        run: uv run python scripts/baseline_dump.py --out /tmp/head.json --quiet
-
-      - name: Compare against the tracked baseline
-        run: |
-          uv run python scripts/baseline_check.py \
-            --baseline scripts/baseline/baseline-1.0.0.json \
-            --current /tmp/head.json \
-            --allow-schema-change
+  # There is deliberately no job that diffs the tracked
+  # `scripts/baseline/baseline-1.0.0.json` against a fresh dump. One existed
+  # and could never pass: float32 XLA output is not reproducible across
+  # machines, so a file produced on a maintainer's Mac differs from any runner
+  # by 1e-11 to 1e-7 on hundreds of values with no code change involved, and
+  # `baseline_check.py` has no tolerance on purpose. The job above catches what
+  # matters, which is a number this PR moved, by dumping both sides on one
+  # runner. Whether the stored file still matches the code is checked by hand
+  # when it is regenerated: see `scripts/baseline/README.md`.
 
   # The joint-mode optimal-transport tests that run every Sinkhorn solve at
   # full sample size. `addopts = "-m 'not slow'"` in pyproject.toml keeps them

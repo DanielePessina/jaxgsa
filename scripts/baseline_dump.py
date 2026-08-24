@@ -454,6 +454,16 @@ DESIGN_METHODS: dict[str, Callable[[Case], Any]] = {
     "sobol": _m_sobol,
 }
 
+# Runner keys that are an extra mode of a registered method rather than a
+# method of their own. Maps the runner key to the registry name it varies.
+# optimal_transport's three modes are three different estimators: the default
+# univariate mode never calls Sinkhorn and ignores epsilon, so pinning it alone
+# leaves the joint modes with no numerical guard.
+MODE_VARIANTS: dict[str, str] = {
+    "optimal_transport_multivariate": "optimal_transport",
+    "optimal_transport_trajectory": "optimal_transport",
+}
+
 GIVEN_DATA_METHODS: dict[str, Callable[[Case, jax.Array, jax.Array], Any]] = {
     "borgonovo": _m_borgonovo,
     "dgsm": _m_dgsm,
