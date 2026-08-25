@@ -702,9 +702,14 @@ class TestDegenerateBandwidthIsNotAPrecondition:
 
         Not bit-identity: passing the bandwidth explicitly skips the
         arithmetic that derives it, so the two paths can land one unit in
-        the last place apart. Measured at 2.8e-17 on x86-64 float64, and
-        exactly zero on arm64, which is why an equality assertion here
-        passed locally and failed in CI.
+        the last place apart. The tolerance has to be read in the dtype the
+        test actually runs in, which is float32 unless something else
+        enabled x64 first. One float32 ulp at a delta of 0.21 is 1.5e-8, so
+        the earlier ``rtol=1e-12`` was a float64 figure (2.8e-17 measured)
+        applied to a float32 result. It held on arm64, where the two paths
+        agree exactly, and failed on x86-64, where they differ by that one
+        ulp. ``rtol=1e-6`` leaves room for a few ulp and still refuses any
+        difference that would change a reported digit.
         """
         X, Y = ishigami_data
         explicit = analyze(
@@ -717,10 +722,10 @@ class TestDegenerateBandwidthIsNotAPrecondition:
         )
         auto = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0, grid_size=grid_size)
         np.testing.assert_allclose(
-            np.asarray(explicit.delta), np.asarray(auto.delta), rtol=1e-12, atol=0.0
+            np.asarray(explicit.delta), np.asarray(auto.delta), rtol=1e-6, atol=0.0
         )
         np.testing.assert_allclose(
-            np.asarray(explicit.S1), np.asarray(auto.S1), rtol=1e-12, atol=0.0
+            np.asarray(explicit.S1), np.asarray(auto.S1), rtol=1e-6, atol=0.0
         )
 
     def test_sub_grid_step_bandwidth_on_a_degenerate_class_can_still_work(
