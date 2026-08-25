@@ -1,7 +1,7 @@
 {
   "header": {
     "excluded_fields": {},
-    "git_commit": "b7c14f5b7b51284e57a4901f2399615e2a39e6eb",
+    "git_commit": "db00a0504cca85b2b5f1608a613748ab7e50d030",
     "inline_array_limit": 1024,
     "jax_default_backend": "cpu",
     "jax_version": "0.10.2",
@@ -1298,6 +1298,7 @@
                 0.019146839156746864
               ]
             },
+            "bandwidth": 1.0,
             "hsic_raw": {
               "__array__": true,
               "dtype": "float32",
@@ -1323,6 +1324,7 @@
               },
               "unit_indices": []
             },
+            "n_perms": 50,
             "p_values": {
               "__array__": true,
               "dtype": "float32",
@@ -3382,6 +3384,7 @@
                 0.22172167897224426
               ]
             },
+            "bandwidth": 1.0,
             "hsic_raw": {
               "__array__": true,
               "dtype": "float32",
@@ -3407,6 +3410,7 @@
               },
               "unit_indices": []
             },
+            "n_perms": 50,
             "p_values": {
               "__array__": true,
               "dtype": "float32",
@@ -5008,6 +5012,7 @@
                 0.18637388944625854
               ]
             },
+            "bandwidth": 1.0,
             "hsic_raw": {
               "__array__": true,
               "dtype": "float32",
@@ -5033,6 +5038,7 @@
               },
               "unit_indices": []
             },
+            "n_perms": 50,
             "p_values": {
               "__array__": true,
               "dtype": "float32",
@@ -8730,6 +8736,7 @@
                 ]
               ]
             },
+            "bandwidth": 1.0,
             "hsic_raw": {
               "__array__": true,
               "dtype": "float32",
@@ -8790,6 +8797,7 @@
               },
               "unit_indices": []
             },
+            "n_perms": 50,
             "p_values": {
               "__array__": true,
               "dtype": "float32",
@@ -14257,6 +14265,7 @@
                 ]
               ]
             },
+            "bandwidth": 1.0,
             "hsic_raw": {
               "__array__": true,
               "dtype": "float32",
@@ -14300,6 +14309,7 @@
               },
               "unit_indices": []
             },
+            "n_perms": 50,
             "p_values": {
               "__array__": true,
               "dtype": "float32",

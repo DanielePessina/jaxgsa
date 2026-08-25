@@ -371,6 +371,34 @@ Choosing a method:
 - Want one fair number per parameter that sums to 1: Shapley effects.
 - Want a reusable surrogate too: `pce`, `hdmr`, `vkoga`.
 
+### Four indices under dependence
+
+There is no single generalisation of the Sobol indices to dependent inputs.
+jaxgsa ships four variance-based routes, they measure different things, and
+they disagree on the same data. Pick by the question, not by what is closest to
+hand.
+
+| Route | What it estimates | What it needs |
+| --- | --- | --- |
+| `kucherenko` | `S1 = V(E(Y given X_i))/V(Y)` and `ST = E(V(Y given X_~i))/V(Y)`, exactly, under the declared copula | Its own design, `N(2D+1)` model runs, a declared correlation |
+| `vkoga` | The same two, as `S_TC` and `S_TU`, plus `S_U`, `S_C`, `S_IU`, sampled from a fitted kernel surrogate | Any (X, Y) pairs, a declared correlation |
+| `hdmr` ANCOVA split | Per term, not per parameter: each component's variance split into a structural share `Sa` and a coupling share `Sb` | Any (X, Y) pairs |
+| `shapley(backend="hdmr", include_correlative=True)` | One allocation per parameter summing to 1, splitting each term's `Sa + Sb` among its participants | Any (X, Y) pairs |
+
+Three things to hold on to:
+
+- **They are different estimands.** A disagreement is not a bug in one of them.
+  `kucherenko` and `vkoga` estimate the same pair and should agree up to
+  surrogate and Monte Carlo error. The other two estimate something else and
+  have no reason to match.
+- **Only two of the four are conditional-variance indices.** HDMR's `ST` under
+  dependence is a term-membership sum, and the ANCOVA Shapley allocation is not
+  the Song et al. (2016) Shapley effects. Both warn at runtime.
+- **None of them is comparable to `jaxgsa.sobol`.** Under dependence a
+  first-order index that includes coupling is a different number from one that
+  does not, so a `kucherenko` `S1` and a `sobol` `S1` do not belong in the same
+  table.
+
 ## Methods
 
 ### sobol, variance decomposition on a Saltelli design
@@ -471,18 +499,33 @@ result.variance
 ```
 
 Cost is `N(2D + 1)` model runs. It evaluates the real model on a
-conditional-copula design and uses no surrogate.
+conditional-copula design and uses no surrogate. Every parameter needs its own
+pair of blocks, because the redraw for parameter `i` comes from a conditional
+that depends on `i`, which is why the design cannot reuse one `B` block the way
+`sobol` does.
 
 Keep in mind:
 
-- `ST >= S1` no longer holds in general under dependence.
+- **These are not `sobol`'s indices under another name.** Under a declared
+  correlation `S1` is correlation-inclusive: it counts what a parameter
+  explains through its coupling as well as what it explains alone. `ST` is
+  correlation-exclusive. `ST >= S1` does not hold, and neither number belongs
+  in a table beside `sobol.S1` or `sobol.ST`.
+- **An uncorrelated problem is paying for a design it does not need.** With no
+  declared correlation the conditionals collapse to independent draws, the
+  design reduces to the Saltelli column-swap scheme, and the indices are the
+  classic Sobol `S1` and `ST`. On a 3-parameter problem at `base_n=4096` that
+  is 28,672 model runs against `sobol`'s 20,480, or 32,768 with `S2`.
+  `sample` warns and quotes all three counts. It warns rather than raises,
+  because cross-checking a correlated analysis against a design-based
+  reference is a valid reason to run it that way.
+- Even then the two do not agree bit for bit: Kucherenko's `S1` is the
+  Homma-Saltelli estimator, not the Sobol-Mauntz form `sobol` uses by default,
+  so they agree only up to Monte Carlo noise.
 - The design is built from the declared copula, so a wrong matrix gives clean
   estimates of the wrong quantity. Conditioning is closed-form only in latent
   normal space, which means tail-dependent or non-monotone dependence is not
   representable here.
-- With no declared correlation it reduces to the Saltelli column-swap scheme,
-  but uses the Homma-Saltelli S1 estimator, so it agrees with `sobol` only up to
-  Monte Carlo noise. Run `sobol` in that case, which also gives you `S2`.
 - No `S2`, no surrogate, and a categorical parameter raises.
 
 ### pce, polynomial chaos expansion
