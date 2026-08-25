@@ -319,6 +319,34 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 jaxgsa's Sobol sampling and analysis workflow follows
 [SALib](https://salib.readthedocs.io/), reimplemented for JAX.
 
+## Citing jaxgsa
+
+If jaxgsa contributed to work you publish, please cite it. GitHub reads
+[`CITATION.cff`](CITATION.cff), so the "Cite this repository" button on the
+repository page gives you APA or BibTeX directly. The BibTeX is:
+
+```bibtex
+@software{pessina_jaxgsa_2026,
+  author  = {Pessina, Daniele},
+  title   = {{jaxgsa}: Global Sensitivity Analysis in {JAX}},
+  version = {1.0.1},
+  year    = {2026},
+  license = {MIT},
+  url     = {https://github.com/DanielePessina/jaxgsa}
+}
+```
+
+Cite the version you ran, not the latest one. Indices move between releases
+when an estimator defect is fixed, and `CHANGELOG.md` records every such
+change under "Numbers that moved". `jaxgsa.__version__` tells you what you
+have.
+
+The methods themselves have their own primary sources, and a paper reporting
+Sobol indices should cite Saltelli or Jansen rather than this package alone.
+Every method's page in the [Methods
+guide](https://danielepessina.github.io/jaxgsa/guide/methods) ends with its
+references.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
