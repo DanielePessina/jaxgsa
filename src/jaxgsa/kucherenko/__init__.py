@@ -9,6 +9,25 @@ same two quantities against a kernel surrogate. Under independent inputs both
 indices reduce exactly to the Saltelli column-swap estimators of the classic
 Sobol' ``S1`` and ``ST``.
 
+**Under a declared correlation these numbers are not comparable to
+:mod:`jaxgsa.sobol`'s.** They are a different estimand, not the same estimand
+reached by a different route. ``S1`` here is correlation-inclusive: it counts
+what ``X_i`` explains through its coupling with the other parameters as well
+as what it explains alone. ``ST`` is correlation-exclusive. ``ST >= S1``, which
+always holds for the classic indices, does not hold here. Do not put a
+``kucherenko`` index and a ``sobol`` index in the same table or the same plot
+unless the problem is independent.
+
+On the name: Kucherenko calls these Sobol' sensitivity indices, generalized to
+dependent inputs, and the 2012 paper is titled for the general case rather than
+for its author. The module is named ``kucherenko`` because that is the handle
+UQLab and UQpy use for this specific estimator pair, and because a name that
+reads as ``sobol`` would invite exactly the false comparison the paragraph
+above warns about. It is one of several competing generalizations of Sobol' to
+dependent inputs; :mod:`jaxgsa.vkoga`, :mod:`jaxgsa.hdmr`'s ANCOVA split, and
+the ANCOVA-based Shapley allocation are three others, and they do not agree
+with each other. See the Methods guide for what each one answers.
+
 This module has **no pure core**. It is host NumPy end to end, which is why
 it is the fastest method here, so there is no ``indices()`` that survives
 ``jit``, ``vmap`` or ``jacrev``. That is a declared exemption (see

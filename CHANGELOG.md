@@ -330,6 +330,17 @@ removals, and the few changes that move reported values.
 
 ### Added
 
+- **`jaxgsa.kucherenko.sample` warns when the problem declares no
+  correlation.** Without a correlation the conditional redraws are plain
+  independent draws, so the design reduces to the Saltelli column-swap scheme
+  and the indices are the classic Sobol' `S1` and `ST`. You then pay
+  `base_n * (2D + 1)` model runs for numbers `jaxgsa.sobol` gives from
+  `base_n * (D + 2)`, with `S2` available for one block more. On a
+  3-parameter problem at `base_n = 4096` that is 28,672 runs against 20,480,
+  or 32,768 with `S2`. The warning quotes all three counts. Nothing raises:
+  running Kucherenko on an independent problem to cross-check a correlated
+  analysis is a valid use. Silence it with a filter on `jaxgsa.JaxgsaWarning`.
+
 - **`verbose=True` observability on every entry point.** One keyword, the
   same on all seventeen public entry points. On `analyze()` it prints three
   sections. First, the problem and the data: dimensionality, parameter
@@ -1203,6 +1214,26 @@ removals, and the few changes that move reported values.
   `jnp.minimum(dm // M, G - 1)`, a defensive clamp against a group count `G`
   that could only accidentally be smaller than `Dg`; `G` is always `Dg` now,
   so the clamp is gone too. No number moves.
+
+### Documentation
+
+- **`kucherenko` indices are not comparable to `sobol` indices, and the
+  module docstring and API page lead with it.** Under a declared correlation
+  `kucherenko.S1` is correlation-inclusive and `kucherenko.ST` is
+  correlation-exclusive, so `ST >= S1` does not hold and neither number
+  belongs in a table beside a `sobol` index. They are a different estimand,
+  not the same estimand reached by a different route.
+- **The module name is explained where it is used.** Kucherenko calls these
+  Sobol' sensitivity indices generalised to dependent inputs; the 2012 paper
+  is titled for the general problem, not for its author. The module follows
+  the UQLab and UQpy naming instead, because a name reading as `sobol` would
+  invite exactly the comparison above.
+- **"Four indices under dependence" in the Methods guide.** One table putting
+  `kucherenko`, `vkoga`, HDMR's ANCOVA split, and the ANCOVA Shapley
+  allocation side by side: what each estimates, what each needs, and when to
+  ask for it. They measure different things and disagree on the same data, so
+  the section also states which two are conditional-variance indices and which
+  two are not.
 
 ## 0.8.0
 
