@@ -28,6 +28,7 @@ References:
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -46,6 +47,7 @@ from jaxgsa._core.copula import (
 from jaxgsa._core.samples import UniqueDesignSamples
 from jaxgsa._core.sampling import _next_power_of_2
 from jaxgsa._core.validation import _raise_categorical_design
+from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.problem import Problem
 
 
@@ -120,6 +122,46 @@ class KucherenkoSamples(UniqueDesignSamples):
         )
 
 
+def _warn_independent_problem(problem: Problem, n: int) -> None:
+    """Say that an uncorrelated problem is paying for a design it does not need.
+
+    With no declared correlation the conditional redraws are plain independent
+    draws, so the design degenerates to a Saltelli column-swap scheme that
+    carries one block per parameter where ``sobol`` reuses a single ``B`` block
+    for all of them. The indices are then the classic Sobol' ``S1`` and ``ST``:
+    the same estimand, at ``(2D + 1) / (D + 2)`` times the model cost, and with
+    no ``S2``. Running it that way on purpose is legitimate — it is how you
+    cross-check a correlated analysis against a design-based reference — so
+    this warns rather than raises.
+
+    The message quotes all three run counts. The choice is a budget choice, and
+    the ratio between the three block formulas is not obvious at a glance.
+
+    Args:
+        problem: Problem the design was requested for.
+        n: Base points per block, already rounded up to a power of two.
+
+    Warns:
+        JaxgsaWarning: If ``problem`` declares no correlation.
+    """
+    if problem.has_correlated_inputs:
+        return
+    D = problem.num_vars
+    warnings.warn(
+        "jaxgsa.kucherenko.sample: problem.correlation is None. The "
+        "conditional redraws are then plain independent draws, so this design "
+        "reduces to the Saltelli column-swap scheme and the indices are the "
+        f"classic Sobol' S1 and ST. It costs {n * (2 * D + 1)} runs "
+        f"(base_n {n} x (2D+1)). jaxgsa.sobol.sample gives the same two "
+        f"indices from {n * (D + 2)} runs (base_n x (D+2)), or those plus S2 "
+        f"from {n * (2 * D + 2)} runs (base_n x (2D+2)). Run kucherenko on an "
+        "independent problem only to cross-check a correlated analysis, or "
+        "declare the dependence with problem.with_correlation(R).",
+        category=JaxgsaWarning,
+        stacklevel=3,
+    )
+
+
 def sample(
     problem: Problem,
     n_samples: int,
@@ -136,7 +178,10 @@ def sample(
 
     The dependence structure comes from ``problem.correlation``. An
     uncorrelated problem gives the classic Saltelli column-swap design, and
-    the analysis then reproduces the classic Sobol' indices. This sampler is
+    the analysis then reproduces the classic Sobol' indices. It warns in that
+    case: the same indices cost ``base_n * (D + 2)`` runs through
+    :func:`jaxgsa.sobol.sample`, or ``base_n * (2D + 2)`` runs with ``S2``
+    included, against ``base_n * (2D + 1)`` here. This sampler is
     deliberately exempt from the correlated-design guard on ``sobol``,
     ``morris``, and ``efast``. Conditioning on the declared copula is exactly
     what the Kucherenko estimators are for.
@@ -158,6 +203,11 @@ def sample(
     Returns:
         A :class:`KucherenkoSamples` carrying the stacked design.
 
+    Warns:
+        JaxgsaWarning: If the problem declares no correlation. The design then
+            reduces to a Saltelli column-swap scheme and ``jaxgsa.sobol``
+            reaches the same two indices for fewer model runs.
+
     Raises:
         ValueError: If the problem has fewer than two parameters or any
             categorical parameter, if ``n_samples < 2``, or if a ``seed`` is
@@ -177,6 +227,7 @@ def sample(
     if n_samples < 2:
         raise ValueError(f"n_samples must be >= 2, got {n_samples}")
     n = _next_power_of_2(n_samples)
+    _warn_independent_problem(problem, n)
 
     R = problem.correlation
     if R is None:

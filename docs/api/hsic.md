@@ -121,9 +121,14 @@ overflow float32 long before the index would care.
 | `hsic_raw` | `(..., D)` | Unnormalized `HSIC(x_i, Y)`. Kernel- and scale-dependent, so compare only within one analysis. |
 | `problem` | | The problem the analysis ran on. |
 | `invalid` | | What the non-finite check found and which policy ran. |
+| `bandwidth` | | The median-heuristic multiplier the kernels were built with. The index moves with it, so a stored `R2_HSIC` without it does not say what it measured. |
+| `n_perms` | | How many permutations the p-values rest on. A p-value cannot fall below `1 / (n_perms + 1)`. |
 
 The leading axes follow the shape contract: `(D,)` for `Y` of shape `(N,)`,
 `(K, D)` for `(N, K)`, `(T, K, D)` for `(N, T, K)`.
+
+`bandwidth` and `n_perms` are provenance rather than indices, so `to_dataset()`
+writes them into the dataset attributes rather than as variables.
 
 There is no `ci` field and no `*_conf` field. See the section above.
 

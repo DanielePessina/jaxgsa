@@ -27,6 +27,7 @@ from jaxgsa._core.entry import (
     prepare,
     require,
 )
+from jaxgsa._core.fit_quality import warn_variance_fit
 from jaxgsa._core.invalid import InvalidReport, OnInvalid
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.surrogate import _PredictPlan
@@ -385,6 +386,26 @@ def analyze(
         ci_method=ci_method,
         key=key,
         keep_replicates=keep_replicates,
+    )
+    # Li et al. (2010) attach a precondition to every index this fit reports:
+    # the per-term S values must sum to about 1 (their Eq. 24). The shortfall
+    # is variance the decomposition did not capture, and Sa, Sb, S and ST all
+    # inherit it. The check lives here, in the public wrapper, so that Shapley
+    # routing through the core stays quiet and one analyze call speaks once.
+    warn_variance_fit(
+        "jaxgsa.hdmr",
+        jnp.sum(jnp.asarray(result.S), axis=-1),
+        quantity="result.S.sum()",
+        advice_low=(
+            "Li et al. (2010, Eq. 24) require the per-term S values to sum to about 1 "
+            "before the indices are read. Raise maxorder or m, or accept that this "
+            "model does not decompose into low-order terms."
+        ),
+        advice_high=(
+            "The terms overlap rather than partition the variance, which happens when "
+            "the component functions are not orthogonal on this sample. Treat the "
+            "per-parameter indices as unreliable and check the fit with result.rmse."
+        ),
     )
 
     if verbose:

@@ -40,6 +40,8 @@ Common situations:
   - **Declare the dependence and sample it.** Put a Gaussian-copula matrix on the `Problem` (`correlation=`, or `problem.with_correlation(R)`), then draw with `jaxgsa.sampling.monte_carlo`. A copula is a way to build correlated samples that still keep each parameter's own declared marginal distribution exactly.
   - **Analyze data you already have.** Use [VKOGA](#vkoga-correlated-input-variance-indices) for variance fractions split into a correlated part and an uncorrelated part, fitted through a kernel surrogate. Use HDMR for the ANCOVA separation, which splits each interaction term's variance into a structural share and a correlation-driven share the same way. Or use [optimal transport](#optimal-transport-wasserstein-based-sensitivity), [Borgonovo delta](#borgonovo-delta-density-based-sensitivity), HSIC, or PAWN, none of which assume independence in the first place. `shapley.analyze(backend="hdmr", include_correlative=True)` turns the HDMR split into one allocation per parameter, but read the [HDMR section](#rs-hdmr-random-sampling-high-dimensional-model-representation) first: its `ST` is not a total-effect index under dependence.
   - **Run your model on a dedicated design.** Use [Kucherenko](#kucherenko-dependent-input-sobol-indices): it samples conditionally on the declared copula, evaluates your actual model, and returns $S_1$/$S_T$ under the declared dependence. See [Correlated Inputs](/examples/correlated-inputs) for a worked example of all three routes.
+
+  The four variance-based routes measure different things and disagree on the same data. [Four indices under dependence](#four-indices-under-dependence) puts them side by side.
 - "Some of my parameters are categorical." Declare them with `{"dist": "categorical", "probs": [...]}`, and samples then carry integer level codes. Four methods handle unordered levels correctly: [Sobol'](#sobol-indices-via-saltelli-sampling), because the Saltelli column-swap scheme is distribution-agnostic, plus [Borgonovo delta](#borgonovo-delta-density-based-sensitivity), [optimal transport](#optimal-transport-wasserstein-based-sensitivity), and [PAWN](#pawn-cdf-based-sensitivity), which all condition on one class per level. Every other method refuses with a `ValueError`, because its indices would depend on the arbitrary code order. See [Categorical Inputs](/examples/categorical-inputs).
 - "I need to decide what to measure more accurately, or what to hold fixed." Use [VKOGA](#vkoga-correlated-input-variance-indices): $S_{TC}$ is the prioritisation measure and $S_{TU}$ the fixing measure. Under dependence they can rank parameters very differently.
 - "My output distribution is skewed or heavy-tailed." Use [PAWN](#pawn-cdf-based-sensitivity), [Borgonovo delta](#borgonovo-delta-density-based-sensitivity), or [optimal transport](#optimal-transport-wasserstein-based-sensitivity). All three compare whole output distributions rather than variances.
@@ -171,6 +173,27 @@ The rest of the differences, method by method. The capability columns above are 
 | Reusable surrogate | No | Yes (`result.predict`) | Yes (`result.predict`) | Derived from either fitted result | No | No | No | No | No | No | No | Yes (`result.predict`) | No |
 
 ‖ A truncated Gaussian marginal is not special to any one row here; every method that accepts a Gaussian marginal accepts a truncated one the same way it accepts the untruncated case. DGSM is the exception worth naming: it needs the Poincaré constant of the truncated marginal, computed by a finite-element spectral solve rather than read off a closed form, so it earns its own paragraph in [Poincaré constants by distribution](#poincare-constants-by-distribution) even though the cell above says the same "Uniform + Gaussian" as its neighbours.
+
+### Four indices under dependence
+
+There is no single generalisation of the Sobol' indices to dependent inputs. There are several, they measure different things, and they disagree on the same data. jaxgsa ships four variance-based routes. Pick by the question you are asking, not by which one is closest to hand.
+
+| Route | What it estimates | What it needs | Ask for it when |
+|-------|-------------------|---------------|-----------------|
+| [`kucherenko`](#kucherenko-dependent-input-sobol-indices) | $S_1 = V(\mathbb{E}(Y \mid X_i))/V(Y)$ and $S_T = \mathbb{E}(V(Y \mid \mathbf{X}_{\sim i}))/V(Y)$, exactly, under the declared copula. $S_1$ is correlation-inclusive, $S_T$ correlation-exclusive. | Its own design, $N(2D+1)$ model runs, and a declared correlation matrix. | You can still run the model and you want the conditional-variance quantities with no surrogate in the chain. |
+| [`vkoga`](#vkoga-correlated-input-variance-indices) | The same two quantities as $S_{TC}$ and $S_{TU}$, plus $S_U$, $S_C$ and $S_{IU}$, sampled from a fitted kernel surrogate. | Any $(X, Y)$ pairs and a declared correlation matrix. | You cannot run the model again, or you want to sweep the same data under several correlation assumptions. |
+| [`hdmr`](#rs-hdmr-random-sampling-high-dimensional-model-representation) ANCOVA split | Per **term**, not per parameter: each component function's variance split into a structural share $S_a$ and a correlation-driven share $S_b$. | Any $(X, Y)$ pairs. The correlation is read implicitly out of $X$. | You want to know which interaction carries the variance, and how much of it is coupling rather than structure. |
+| [`shapley(backend="hdmr", include_correlative=True)`](#shapley-effects) | One allocation per parameter, summing to 1, by splitting each term's $S_a + S_b$ among its participants. | Any $(X, Y)$ pairs. | You want a single fair-share number per parameter and you accept an ANCOVA attribution. |
+
+Three things to hold on to.
+
+**They are different estimands.** A disagreement between them is not a bug in one of them. `kucherenko` and `vkoga` estimate the same pair of conditional-variance quantities and should agree up to surrogate and Monte Carlo error; the test suite pins both to the same closed-form linear-Gaussian reference. The HDMR split and the ANCOVA Shapley allocation estimate something else entirely and have no reason to match.
+
+**Only two of the four are conditional-variance indices.** HDMR's $S_T$ under dependence is a term-membership sum, not a total-effect index, and the ANCOVA Shapley allocation is not the conditional-variance Shapley effects of Song et al. (2016); its correlative shares can be negative. Both are documented in their own sections and both warn at runtime.
+
+**None of them is comparable to `jaxgsa.sobol`.** `sobol` refuses a correlated problem, and it is right to. Under dependence a first-order index that includes coupling is a different number from one that does not, so a `kucherenko` $S_1$ and a `sobol` $S_1$ do not belong in the same table.
+
+For the distribution-based alternatives, which never assumed independence in the first place, see [optimal transport](#optimal-transport-wasserstein-based-sensitivity), [Borgonovo delta](#borgonovo-delta-density-based-sensitivity), [HSIC](#hsic-hilbert–schmidt-independence-criterion), and [PAWN](#pawn-cdf-based-sensitivity). [Correlated Inputs](/examples/correlated-inputs) works one model through several of these routes side by side.
 
 ## Background: variance-based sensitivity analysis
 
@@ -373,7 +396,7 @@ It can be negative, because $S_b$ can be. It is not bounded in $[0, 1]$. Sarazin
 
 The source paper invites the confusion. Its Eq. (4) uses the symbol $S_{Ti}$ for the classical conditional-variance total, and Section 2.2.3 reuses the same symbol for the term-membership sum. Only the second is what HDMR reports.
 
-Li et al. also attach a precondition to the totals. They are reliable only when the per-term $S$ values sum to about 1 (Eq. 24). The shortfall is the variance the surrogate leaves unexplained. Check `result.S.sum()` before you rank parameters from a correlated fit.
+Li et al. also attach a precondition to the totals. They are reliable only when the per-term $S$ values sum to about 1 (Eq. 24). The shortfall is the variance the surrogate leaves unexplained. `analyze` reads that sum and warns when it falls below 0.5 or rises above 1.3 on any output slice, so a decomposition that never captured the model says so before you rank anything.
 
 $S_1$ has the matching caveat: it is the structural share $S_a$ of the first-order term, not the Sobol' first-order index.
 
@@ -390,7 +413,7 @@ When you need a conditional-variance total under dependence, use [Kucherenko](#k
 
 - **You want a total-order index under dependence.** Read the warning above; HDMR's $S_T$ is a different quantity. Use [Kucherenko](#kucherenko-dependent-input-sobol-indices) or [VKOGA](#vkoga-correlated-input-variance-indices).
 - **Your model is smooth and you only want $S_1$/$S_2$/$S_T$.** [PCE](#pce-polynomial-chaos-expansion) fits in one linear solve and reads the indices off the coefficients. HDMR backfits only its first-order components, up to `maxiter=100` sweeps with an early stop once the coefficients settle (relative to their own scale); every higher-order component is a single ridge solve, no backfitting. That gives you the same numbers with more knobs to get wrong. Reach for HDMR when you specifically want the per-term $S_a$/$S_b$ split, or when the response has kinks a polynomial cannot follow.
-- **`result.S.sum()` is far from 1.** That is unexplained variance, and every index derived from the fit inherits it. Raise `maxorder` or `m`, or accept that this model does not decompose into low-order terms.
+- **`result.S.sum()` is far from 1.** That is unexplained variance, and every index derived from the fit inherits it. `analyze` warns about it. Raise `maxorder` or `m`, or accept that this model does not decompose into low-order terms.
 - **Any of your parameters is categorical.** HDMR raises. Use [Sobol'](#sobol-indices-via-saltelli-sampling), [Borgonovo delta](#borgonovo-delta-density-based-sensitivity), [optimal transport](#optimal-transport-wasserstein-based-sensitivity) or [PAWN](#pawn-cdf-based-sensitivity).
 
 ## PCE (Polynomial Chaos Expansion)
@@ -439,7 +462,7 @@ Two numbers decide whether to trust a PCE result, and both come back on the resu
 
 For PCE, `explained_variance` is a coefficient of determination: the sample variance of the fitted values over the sample variance of `Y`. It measures the fit in sample, so it lies in $[0, 1]$ and cannot rise above 1. It also keeps climbing as you add basis terms, even when the surrogate is getting worse out of sample, so it cannot detect an overfit on its own.
 
-Raising `order` costs basis terms, not model runs, so raise it until `loo_rmse` stops falling. Watch for it turning back up: that is overfitting. `loo_rmse` is the signal, because it is the out-of-sample number. A high `explained_variance` next to a `loo_rmse` that approaches or passes `Y.std()` is the overfit signature. `pce.analyze` itself does not warn about it; check the two numbers yourself, or read them through `jaxgsa.shapley.analyze(backend="pce")`, which does warn when `loo_rmse` grows too large next to `Y.std()`.
+Raising `order` costs basis terms, not model runs, so raise it until `loo_rmse` stops falling. Watch for it turning back up: that is overfitting. `loo_rmse` is the signal, because it is the out-of-sample number. A high `explained_variance` next to a `loo_rmse` that approaches or passes `Y.std()` is the overfit signature. `pce.analyze` warns about both failures: it fires when `explained_variance` drops below 0.5 on any output slice, and separately when `loo_rmse` passes 0.71 times `std(Y)`, which is the same line read out of sample. A silent run means both diagnostics passed. `jaxgsa.pce.indices` warns about neither, because it has to stay traceable.
 
 ### When to use it
 
@@ -742,7 +765,7 @@ The true $S_T$ is $[0.5576, 0.4424, 0.2437]$. Both bounds hold, and neither is w
 
 The lower bound is near zero for all three parameters, and raising $N$ to 131072 pushes it to $10^{-4}$, not up. It is built from $\mathbb{E}[\partial f/\partial X_i]^2$, and every Ishigami term is symmetric about the middle of its range, so the mean derivative cancels to zero. Any model that is not monotone in a parameter will do the same. Treat the Kucherenko–Song lower bound as informative only for monotone responses.
 
-The upper bound is above 1 on every parameter, which tells you nothing, since $S_T \le 1$ by definition. Worse, it ranks the parameters $x_2 > x_3 > x_1$ while the true $S_T$ ranks them $x_1 > x_2 > x_3$. All three marginals are uniform on $[-\pi, \pi]$, so they share the Poincaré constant $C = (2\pi)^2/\pi^2 = 4$ and the ranking is the ranking of $\nu$ alone. At $N = 1024$, $\nu = [7.75, 24.41, 10.27]$; the ranking does not settle down with more samples, either: at $N = 131072$, $\nu = [7.61, 24.52, 11.00]$. $\nu$ is a mean **squared** derivative, so a steep slope over a small part of the range dominates it. $x_3$'s derivative is $0.4 x_3^3 \sin x_1$, which reaches 12 at the ends of the range and is near zero over most of it. That gives $x_3$ a large $\nu$ and a small variance share. Raising $N$ does not fix it: at 131072 points the bounds settle at $[2.19, 7.06, 3.17]$ and the ranking is unchanged.
+The upper bound is above 1 on every parameter, which tells you nothing, since $S_T \le 1$ by definition. `analyze` warns when that happens on an output slice, because an array of plausible positive numbers reads like a ranking whether or not it constrains anything. Worse, it ranks the parameters $x_2 > x_3 > x_1$ while the true $S_T$ ranks them $x_1 > x_2 > x_3$. All three marginals are uniform on $[-\pi, \pi]$, so they share the Poincaré constant $C = (2\pi)^2/\pi^2 = 4$ and the ranking is the ranking of $\nu$ alone. At $N = 1024$, $\nu = [7.75, 24.41, 10.27]$; the ranking does not settle down with more samples, either: at $N = 131072$, $\nu = [7.61, 24.52, 11.00]$. $\nu$ is a mean **squared** derivative, so a steep slope over a small part of the range dominates it. $x_3$'s derivative is $0.4 x_3^3 \sin x_1$, which reaches 12 at the ends of the range and is near zero over most of it. That gives $x_3$ a large $\nu$ and a small variance share. Raising $N$ does not fix it: at 131072 points the bounds settle at $[2.19, 7.06, 3.17]$ and the ranking is unchanged.
 
 So DGSM is a fast way to find parameters that do nothing at all. It is not a reliable ranking of the ones that do.
 
@@ -981,7 +1004,7 @@ jax.config.update("jax_enable_x64", True)  # before the analysis
 
 At 0.25 the ranking is $x_2 > x_1 > x_3$, which agrees with $S_1 = [0.314, 0.442, 0]$. At the default 1.0 it is $x_1 > x_3 > x_2$, and $x_2$ has dropped to 0.008 despite owning 44% of the output variance. A wide kernel smooths $7\sin^2 x_2$, which oscillates twice across the range, into a near-constant, and the dependence disappears from the estimator.
 
-So sweep `bandwidth` before you report an HSIC ranking, and say which value you used. A single HSIC number without its bandwidth is not reproducible.
+So sweep `bandwidth` before you report an HSIC ranking, and say which value you used. A single HSIC number without its bandwidth is not reproducible. The result carries `bandwidth` and `n_perms` for that reason, and `to_dataset()` writes both into the dataset attributes.
 
 ### Index summary
 
@@ -1287,7 +1310,7 @@ If you have $(X, Y)$ data and no strong reason to prefer another method, this is
 
 - **You need interactions.** OT conditions on one parameter at a time. The diffusive part says influence exists beyond the mean shift; it does not say which parameter it is shared with. No $S_2$, no total order.
 - **You need to separate direct from correlation-borne influence.** The index is correlation-inclusive by construction. Use [VKOGA](#vkoga-correlated-input-variance-indices) or [Kucherenko](#kucherenko-dependent-input-sobol-indices).
-- **You are in a point-cloud mode without a dummy.** `"multivariate"` and `"trajectory"` solve entropic transport, and the entropic bias keeps irrelevant parameters visibly above zero. Reading those indices without `dummy=True` will make you believe in parameters that do nothing.
+- **You are in a point-cloud mode without a dummy.** `"multivariate"` and `"trajectory"` solve entropic transport, and the entropic bias keeps irrelevant parameters visibly above zero. Reading those indices without `dummy=True` will make you believe in parameters that do nothing, which is why `analyze` warns when either mode runs without one.
 - **You are bootstrapping a point-cloud mode.** The bill is `(n_bootstrap + 1) * D * n_partitions` Sinkhorn solves. At 100 replicates, 10 parameters and 25 partitions that is just over 25000 solves.
 - **You want a surrogate too.** OT gives you indices and nothing else. Use [PCE](#pce-polynomial-chaos-expansion), [HDMR](#rs-hdmr-random-sampling-high-dimensional-model-representation) or [VKOGA](#vkoga-correlated-input-variance-indices).
 

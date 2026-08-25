@@ -20,6 +20,36 @@ The trade is straightforward. Kucherenko costs `base_n * (2D + 1)` model
 evaluations and has no surrogate error. VKOGA costs one `(X, Y)` sample of any
 size and inherits whatever the surrogate gets wrong.
 
+:::: warning These indices are not comparable to `jaxgsa.sobol`'s
+Under a declared correlation, `kucherenko.S1` is a different estimand from
+`sobol.S1`, not the same estimand computed a different way. It is
+correlation-inclusive: it counts what $X_i$ explains through its coupling with
+the other parameters as well as what it explains alone. `ST` is
+correlation-exclusive. `ST >= S1` does not hold. Do not read a `kucherenko`
+index against a `sobol` index in the same table or plot unless the problem is
+independent, in which case the two estimate the same thing.
+::::
+
+::: info On the name
+Kucherenko calls these Sobol' sensitivity indices generalised to dependent
+inputs; the 2012 paper is titled for the general problem, not for its author.
+The module is named `kucherenko` because that is the handle
+[UQLab](https://www.uqlab.com/) and [UQpy](https://uqpyproject.readthedocs.io/)
+use for this estimator pair, and because a name reading as `sobol` would invite
+the comparison the box above warns against. It is one of several competing
+generalisations of Sobol' indices to dependent inputs. See
+[the four dependence routes](/guide/methods#four-indices-under-dependence) for
+how it differs from VKOGA, HDMR's ANCOVA split, and the ANCOVA Shapley
+allocation.
+:::
+
+`sample` warns when `problem.correlation` is `None`. The conditional redraws
+are plain independent draws in that case, so the design collapses to a Saltelli
+column-swap scheme and you pay `base_n * (2D + 1)` runs for indices
+[`jaxgsa.sobol`](/api/sobol) gives from `base_n * (D + 2)`, with `S2` available
+for one more block. Run it on an independent problem only to cross-check a
+correlated analysis.
+
 ## A run
 
 ```python

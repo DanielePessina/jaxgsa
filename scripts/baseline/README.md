@@ -30,12 +30,13 @@ this release (see the Sobol `S2` fix below), so a change to one off-diagonal
 value there is counted twice — once at `[i, j]` and once at `[j, i]`. That
 convention is stated once here rather than repeated per entry.
 
-Eight commits have written this file. Six of them moved a number, and each of
+Nine commits have written this file. Six of them moved a number, and each of
 those six is recorded: `784746a` in items 1 and 2 below, `315effe` in item 3,
 `6c2a151` in item 4, `229d8b0` in item 5, `c7d0269` under "The float32
 batch-width exception", and `ead2da5` under "The 1.0.0 review-fix pass". The
-other two, `f84de70` and `cc58c12`, moved zero values and only gained or lost
-fields, so there is nothing to justify for them.
+other three, `f84de70`, `cc58c12`, and the write that added `bandwidth` and
+`n_perms` to `HSICResult`, moved zero values and only gained or lost fields, so
+there is nothing to justify for them.
 
 ### 1. Sobol standardizes its outputs (commit `784746a`)
 

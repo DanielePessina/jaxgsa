@@ -1662,3 +1662,37 @@ class TestJacobianKernelCache:
         # nu_a = E[(2)^2] = 4 exactly; nu_b = E[(2 x_b)^2] = 4/3.
         assert float(np.asarray(result.nu)[0]) == pytest.approx(4.0, rel=1e-5)
         assert float(np.asarray(result.nu)[1]) == pytest.approx(4.0 / 3.0, rel=0.10)
+
+
+# ---------------------------------------------------------------------------
+# Vacuous bounds
+# ---------------------------------------------------------------------------
+
+
+class TestVacuousUpperBoundWarning:
+    """A total Sobol index is at most 1, so a bound above 1 excludes nothing.
+
+    That state is the common one rather than the exotic one, and the numbers
+    alone do not say so: an array of plausible positive values reads like a
+    ranking. On Ishigami the bounds also rank the parameters wrong.
+    """
+
+    def test_ishigami_bounds_are_flagged_as_vacuous(self):
+        """Every Poincare bound clears 1 here, and analyze says so."""
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=1024, seed=0))
+        with pytest.warns(JaxgsaWarning, match="every upper_bound exceeds 1"):
+            result = analyze(
+                ishigami.PROBLEM, lambda x: ishigami.evaluate(x[None, :])[0], X, verbose=False
+            )
+        assert bool(np.all(np.asarray(result.upper_bound) > 1.0))
+
+    def test_a_usable_bound_is_not_flagged(self):
+        """A bound that does constrain the index passes without comment."""
+        X = jnp.asarray(monte_carlo(linear.PROBLEM, n=512, seed=0))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = analyze(
+                linear.PROBLEM, lambda x: linear.evaluate(x[None, :])[0], X, verbose=False
+            )
+        assert not bool(np.all(np.asarray(result.upper_bound) > 1.0))
+        assert not any("every upper_bound" in str(w.message) for w in caught)

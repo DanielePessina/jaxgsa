@@ -100,6 +100,10 @@ _CHUNK_LIVE_TENSORS = 2
 
 _MODES = ("univariate", "multivariate", "trajectory")
 
+# The two modes that solve an entropic transport problem, and so carry the
+# entropic bias floor that ``dummy=True`` measures.
+_POINT_CLOUD_MODES = ("multivariate", "trajectory")
+
 # Fewest samples that still build two conditioning classes of two points
 # each, which is what the default ``M = min(25, N // 2)`` already assumes.
 _MIN_KEPT = 4
@@ -1040,6 +1044,23 @@ def analyze(
 
     if mode == "trajectory" and Y.ndim != 3:
         raise ValueError(f"mode='trajectory' requires a 3-D (N, T, K) Y, got ndim={Y.ndim}")
+    if mode in _POINT_CLOUD_MODES and not dummy:
+        # The univariate mode reads a closed-form 1-D transport cost, but the
+        # point-cloud modes solve an entropic problem, and that regularization
+        # biases every index upward by an amount that does not vanish with N.
+        # A parameter the model never reads still scores visibly above zero,
+        # and nothing in the index array says which part of the value is bias.
+        # `dummy=True` measures the floor on a synthetic independent column
+        # and reports it as `ot_dummy`, with `above_dummy` holding the index
+        # with the floor subtracted.
+        warnings.warn(
+            f"jaxgsa.optimal_transport: mode={mode!r} solves entropic transport, whose "
+            "bias holds an irrelevant parameter's index above zero however large N is. "
+            "Pass dummy=True (with a key) to measure that floor and read above_dummy, "
+            "or read these indices against each other rather than against 0.",
+            stacklevel=2,
+            category=JaxgsaWarning,
+        )
     N = X.shape[0]
     # n_partitions applies to the continuous columns only. Categorical
     # columns always get one class per level, and so does the matched dummy

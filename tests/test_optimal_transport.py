@@ -1223,3 +1223,66 @@ class TestS1AndAboveDummy:
         assert "above_dummy" in ds
         assert ds["S1"].dims == ("param",)
         assert ds["above_dummy"].dims == ("param",)
+
+
+# ---------------------------------------------------------------------------
+# Entropic bias floor
+# ---------------------------------------------------------------------------
+
+
+class TestDummyFloorWarning:
+    """The point-cloud modes need a dummy floor to be readable.
+
+    Entropic transport biases every index upward by an amount that does not
+    vanish with N, so a parameter the model never reads still scores visibly
+    above zero. Nothing in the index array separates the bias from the
+    signal, and ``dummy=False`` is the default.
+    """
+
+    @staticmethod
+    def _data():
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=512, seed=0))
+        Y = ishigami.evaluate(X)
+        return X, jnp.stack([Y, 2.0 * Y], axis=-1)
+
+    @pytest.mark.parametrize("mode", ["multivariate", "trajectory"])
+    def test_point_cloud_without_a_dummy_warns(self, mode):
+        """Both entropic modes say the floor is unmeasured."""
+        X, Y2 = self._data()
+        Y = Y2[:, None, :] if mode == "trajectory" else Y2
+        with pytest.warns(jaxgsa.JaxgsaWarning, match="entropic transport"):
+            analyze(
+                ishigami.PROBLEM,
+                X,
+                Y,
+                mode=cast(Any, mode),
+                n_partitions=5,
+                verbose=False,
+            )
+
+    def test_a_dummy_floor_silences_it(self):
+        """Asking for the floor is the fix, so it stops warning."""
+        X, Y2 = self._data()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = analyze(
+                ishigami.PROBLEM,
+                X,
+                Y2,
+                mode="multivariate",
+                n_partitions=5,
+                dummy=True,
+                key=jax.random.key(0),
+                verbose=False,
+            )
+        assert not any("entropic transport" in str(w.message) for w in caught)
+        assert result.ot_dummy is not None
+        assert result.above_dummy is not None
+
+    def test_univariate_is_not_affected(self):
+        """The 1-D mode reads a closed-form cost, so it has no floor to warn about."""
+        X, Y2 = self._data()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            analyze(ishigami.PROBLEM, X, Y2, verbose=False)
+        assert not any("entropic transport" in str(w.message) for w in caught)
