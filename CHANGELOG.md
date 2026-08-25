@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Documentation
+
+- **How to cite jaxgsa is now written down.** The README and the Getting
+  started guide both carry a `Citing jaxgsa` section with the BibTeX entry,
+  and both say to cite the version that was run rather than the latest one,
+  because indices move between releases when an estimator defect is fixed.
+  Both also say to cite the methods' own primary sources, not the package
+  alone.
+- `CITATION.cff` gains an ORCID and an affiliation, and its `date-released`
+  now matches the commit the `v1.0.0` tag points at.
+- A `.zenodo.json` records the archive metadata, so a DOI minted from a future
+  release carries the right title, creator and keywords rather than whatever
+  Zenodo infers from the repository.
+
 ## 1.0.0
 
 Version 1.0.0 freezes the public interface. It gives eleven methods a pure

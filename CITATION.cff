@@ -11,11 +11,15 @@ abstract: >-
   GPU or TPU. Kucherenko and VKOGA are host NumPy and SciPy by design.
 type: software
 version: 1.0.0
-date-released: "2026-08-24"
+date-released: "2026-08-25"
 authors:
   - family-names: Pessina
     given-names: Daniele
     email: danielepessina99@gmail.com
+    orcid: "https://orcid.org/0009-0004-3107-6857"
+    affiliation: >-
+      Department of Chemical Engineering and Sargent Centre for Process
+      Systems Engineering, Imperial College London
 license: MIT
 repository-code: "https://github.com/DanielePessina/jaxgsa"
 url: "https://danielepessina.github.io/jaxgsa/"

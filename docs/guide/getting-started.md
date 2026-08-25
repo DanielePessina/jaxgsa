@@ -364,6 +364,32 @@ Never rebuild a design by hand from a saved `X` matrix. The Saltelli row order
 is what the estimator reads, and a shuffled or re-sorted matrix gives numbers
 that look plausible and are wrong.
 
+## Citing jaxgsa
+
+If jaxgsa contributed to work you publish, please cite it. The repository
+carries a `CITATION.cff`, so GitHub's "Cite this repository" button gives you
+APA or BibTeX directly:
+
+```bibtex
+@software{pessina_jaxgsa_2026,
+  author  = {Pessina, Daniele},
+  title   = {{jaxgsa}: Global Sensitivity Analysis in {JAX}},
+  version = {1.0.0},
+  year    = {2026},
+  license = {MIT},
+  url     = {https://github.com/DanielePessina/jaxgsa}
+}
+```
+
+Cite the version you ran rather than the latest one. Indices move between
+releases when an estimator defect is fixed, and the changelog records every
+such change under "Numbers that moved". `jaxgsa.__version__` tells you what
+you have.
+
+Cite the methods too. A paper reporting Sobol indices should cite Saltelli or
+Jansen, not this package alone; every method section in
+[Methods](/guide/methods) ends with its own references.
+
 ## Where to go next
 
 - [Methods](/guide/methods) compares the thirteen methods, and tells you when Sobol is the wrong one
