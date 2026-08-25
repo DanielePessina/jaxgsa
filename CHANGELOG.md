@@ -313,9 +313,13 @@ removals, and the few changes that move reported values.
     moves with the bandwidth, so a stored number without it does not say what
     it measured. This mirrors `SobolResult.estimator`.
 
-- **An agent skill at `skills/jaxgsa/SKILL.md`.** It documents the sampling
-  designs, all thirteen methods, and the caveats that decide whether an index
-  means anything. Install it with
+- **An agent skill at `skills/jaxgsa/SKILL.md`.** `SKILL.md` carries the
+  `Problem`, the four sampling designs, the shape contract, the keywords every
+  method shares, and the capability table. Four files under
+  `skills/jaxgsa/reference/` carry the per-method call, a worked example against
+  a benchmark with the values it prints, and the caveats that decide whether an
+  index means anything: `variance-based.md`, `dependent-inputs.md`,
+  `screening.md` and `moment-independent.md`. Install it with
   `npx skills add https://github.com/DanielePessina/jaxgsa`.
 
 - **`jaxgsa.kucherenko.sample` warns when the problem declares no

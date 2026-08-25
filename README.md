@@ -56,8 +56,9 @@ an index means anything. Install it into a project with
 npx skills add https://github.com/DanielePessina/jaxgsa
 ```
 
-The skill lives at [`skills/jaxgsa/SKILL.md`](skills/jaxgsa/SKILL.md) and needs
-no extra setup once installed.
+The skill lives at [`skills/jaxgsa/SKILL.md`](skills/jaxgsa/SKILL.md), with one
+reference file per method family under `skills/jaxgsa/reference/`. It needs no
+extra setup once installed.
 
 ## Quickstart
 
