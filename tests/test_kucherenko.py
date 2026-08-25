@@ -13,6 +13,8 @@ Tolerances are set from the measured estimator error at the test sample sizes
 
 from __future__ import annotations
 
+import warnings
+
 import jax
 import numpy as np
 import pytest
@@ -189,6 +191,31 @@ def test_correlated_problem_is_accepted():
         jaxgsa.sobol.sample(problem, 64, verbose=False)
 
 
+def test_an_independent_problem_warns_and_quotes_the_cheaper_design():
+    """T4: sample() says an uncorrelated problem is overpaying, with numbers.
+
+    The design degenerates to a Saltelli column-swap scheme under no
+    correlation, so the user pays base_n(2D+1) for indices sobol reaches from
+    base_n(D+2). The warning must carry all three run counts, because the
+    point of it is the budget comparison rather than the fact itself.
+    """
+    D = GAUSS_PROBLEM.num_vars
+    base_n = 64
+    with pytest.warns(JaxgsaWarning, match="problem.correlation is None") as caught:
+        jaxgsa.kucherenko.sample(GAUSS_PROBLEM, base_n, seed=0)
+    message = str(caught[0].message)
+    assert f"{base_n * (2 * D + 1)} runs" in message
+    assert f"{base_n * (D + 2)} runs" in message
+    assert f"{base_n * (2 * D + 2)} runs" in message
+    assert "jaxgsa.sobol.sample" in message
+    # A declared correlation is the intended use and must stay silent.
+    correlated = GAUSS_PROBLEM.with_correlation(R_GAUSS)
+    with warnings.catch_warnings(record=True) as quiet:
+        warnings.simplefilter("always")
+        jaxgsa.kucherenko.sample(correlated, base_n, seed=0)
+    assert [w for w in quiet if "problem.correlation is None" in str(w.message)] == []
+
+
 def test_sampler_validation_errors():
     with pytest.raises(ValueError, match="at least 2 parameters"):
         jaxgsa.kucherenko.sample(Problem(names=("x",), bounds=((0.0, 1.0),)), 64)
@@ -355,13 +382,19 @@ class TestOnInvalidPolicy:
         assert result.invalid.n_invalid == 0
         assert result.invalid.n_units == self.N
         assert result.invalid.unit is InvalidUnit.BASE_POINT
-        # The precision warning is about the arithmetic, not the data: this
-        # Y is float64 on purpose, so with x64 off the preamble says it is
-        # about to be truncated. A clean sample must still report nothing.
+        # Two warnings are about something other than the data and are
+        # expected here. The precision one is about the arithmetic: this Y is
+        # float64 on purpose, so with x64 off the preamble says it is about to
+        # be truncated. The sample-time one is about the design budget:
+        # GAUSS_PROBLEM carries no correlation, so sample() points at
+        # jaxgsa.sobol. Neither is an invalid-data report, and a clean sample
+        # must still report nothing.
         left = [
             w
             for w in recwarn
-            if issubclass(w.category, JaxgsaWarning) and "truncated" not in str(w.message)
+            if issubclass(w.category, JaxgsaWarning)
+            and "truncated" not in str(w.message)
+            and "jaxgsa.kucherenko.sample" not in str(w.message)
         ]
         assert left == []
 

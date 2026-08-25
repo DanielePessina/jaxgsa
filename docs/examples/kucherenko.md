@@ -186,6 +186,13 @@ analytic S1 = ST: [0.762 0.19  0.048]
 answer. The gap between the two indices closed because the correlation that
 opened it is gone.
 
+That call also raises a `JaxgsaWarning`, and it is right to. This run cost
+28,672 model evaluations. [`jaxgsa.sobol`](/api/sobol) reaches the same two
+indices from 20,480 at the same base count, and adds `S2` for 32,768. Use
+Kucherenko on an independent problem to cross-check a correlated analysis, as
+here, and use `sobol` when independence is the actual situation. Silence the
+warning with a filter on `jaxgsa.JaxgsaWarning`.
+
 ## Seeding the design
 
 `kucherenko.sample` takes `seed: int | np.random.Generator | None = None`, the

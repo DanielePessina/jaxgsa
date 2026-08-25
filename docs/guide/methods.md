@@ -40,6 +40,8 @@ Common situations:
   - **Declare the dependence and sample it.** Put a Gaussian-copula matrix on the `Problem` (`correlation=`, or `problem.with_correlation(R)`), then draw with `jaxgsa.sampling.monte_carlo`. A copula is a way to build correlated samples that still keep each parameter's own declared marginal distribution exactly.
   - **Analyze data you already have.** Use [VKOGA](#vkoga-correlated-input-variance-indices) for variance fractions split into a correlated part and an uncorrelated part, fitted through a kernel surrogate. Use HDMR for the ANCOVA separation, which splits each interaction term's variance into a structural share and a correlation-driven share the same way. Or use [optimal transport](#optimal-transport-wasserstein-based-sensitivity), [Borgonovo delta](#borgonovo-delta-density-based-sensitivity), HSIC, or PAWN, none of which assume independence in the first place. `shapley.analyze(backend="hdmr", include_correlative=True)` turns the HDMR split into one allocation per parameter, but read the [HDMR section](#rs-hdmr-random-sampling-high-dimensional-model-representation) first: its `ST` is not a total-effect index under dependence.
   - **Run your model on a dedicated design.** Use [Kucherenko](#kucherenko-dependent-input-sobol-indices): it samples conditionally on the declared copula, evaluates your actual model, and returns $S_1$/$S_T$ under the declared dependence. See [Correlated Inputs](/examples/correlated-inputs) for a worked example of all three routes.
+
+  The four variance-based routes measure different things and disagree on the same data. [Four indices under dependence](#four-indices-under-dependence) puts them side by side.
 - "Some of my parameters are categorical." Declare them with `{"dist": "categorical", "probs": [...]}`, and samples then carry integer level codes. Four methods handle unordered levels correctly: [Sobol'](#sobol-indices-via-saltelli-sampling), because the Saltelli column-swap scheme is distribution-agnostic, plus [Borgonovo delta](#borgonovo-delta-density-based-sensitivity), [optimal transport](#optimal-transport-wasserstein-based-sensitivity), and [PAWN](#pawn-cdf-based-sensitivity), which all condition on one class per level. Every other method refuses with a `ValueError`, because its indices would depend on the arbitrary code order. See [Categorical Inputs](/examples/categorical-inputs).
 - "I need to decide what to measure more accurately, or what to hold fixed." Use [VKOGA](#vkoga-correlated-input-variance-indices): $S_{TC}$ is the prioritisation measure and $S_{TU}$ the fixing measure. Under dependence they can rank parameters very differently.
 - "My output distribution is skewed or heavy-tailed." Use [PAWN](#pawn-cdf-based-sensitivity), [Borgonovo delta](#borgonovo-delta-density-based-sensitivity), or [optimal transport](#optimal-transport-wasserstein-based-sensitivity). All three compare whole output distributions rather than variances.
@@ -171,6 +173,27 @@ The rest of the differences, method by method. The capability columns above are 
 | Reusable surrogate | No | Yes (`result.predict`) | Yes (`result.predict`) | Derived from either fitted result | No | No | No | No | No | No | No | Yes (`result.predict`) | No |
 
 ‖ A truncated Gaussian marginal is not special to any one row here; every method that accepts a Gaussian marginal accepts a truncated one the same way it accepts the untruncated case. DGSM is the exception worth naming: it needs the Poincaré constant of the truncated marginal, computed by a finite-element spectral solve rather than read off a closed form, so it earns its own paragraph in [Poincaré constants by distribution](#poincare-constants-by-distribution) even though the cell above says the same "Uniform + Gaussian" as its neighbours.
+
+### Four indices under dependence
+
+There is no single generalisation of the Sobol' indices to dependent inputs. There are several, they measure different things, and they disagree on the same data. jaxgsa ships four variance-based routes. Pick by the question you are asking, not by which one is closest to hand.
+
+| Route | What it estimates | What it needs | Ask for it when |
+|-------|-------------------|---------------|-----------------|
+| [`kucherenko`](#kucherenko-dependent-input-sobol-indices) | $S_1 = V(\mathbb{E}(Y \mid X_i))/V(Y)$ and $S_T = \mathbb{E}(V(Y \mid \mathbf{X}_{\sim i}))/V(Y)$, exactly, under the declared copula. $S_1$ is correlation-inclusive, $S_T$ correlation-exclusive. | Its own design, $N(2D+1)$ model runs, and a declared correlation matrix. | You can still run the model and you want the conditional-variance quantities with no surrogate in the chain. |
+| [`vkoga`](#vkoga-correlated-input-variance-indices) | The same two quantities as $S_{TC}$ and $S_{TU}$, plus $S_U$, $S_C$ and $S_{IU}$, sampled from a fitted kernel surrogate. | Any $(X, Y)$ pairs and a declared correlation matrix. | You cannot run the model again, or you want to sweep the same data under several correlation assumptions. |
+| [`hdmr`](#rs-hdmr-random-sampling-high-dimensional-model-representation) ANCOVA split | Per **term**, not per parameter: each component function's variance split into a structural share $S_a$ and a correlation-driven share $S_b$. | Any $(X, Y)$ pairs. The correlation is read implicitly out of $X$. | You want to know which interaction carries the variance, and how much of it is coupling rather than structure. |
+| [`shapley(backend="hdmr", include_correlative=True)`](#shapley-effects) | One allocation per parameter, summing to 1, by splitting each term's $S_a + S_b$ among its participants. | Any $(X, Y)$ pairs. | You want a single fair-share number per parameter and you accept an ANCOVA attribution. |
+
+Three things to hold on to.
+
+**They are different estimands.** A disagreement between them is not a bug in one of them. `kucherenko` and `vkoga` estimate the same pair of conditional-variance quantities and should agree up to surrogate and Monte Carlo error; the test suite pins both to the same closed-form linear-Gaussian reference. The HDMR split and the ANCOVA Shapley allocation estimate something else entirely and have no reason to match.
+
+**Only two of the four are conditional-variance indices.** HDMR's $S_T$ under dependence is a term-membership sum, not a total-effect index, and the ANCOVA Shapley allocation is not the conditional-variance Shapley effects of Song et al. (2016); its correlative shares can be negative. Both are documented in their own sections and both warn at runtime.
+
+**None of them is comparable to `jaxgsa.sobol`.** `sobol` refuses a correlated problem, and it is right to. Under dependence a first-order index that includes coupling is a different number from one that does not, so a `kucherenko` $S_1$ and a `sobol` $S_1$ do not belong in the same table.
+
+For the distribution-based alternatives, which never assumed independence in the first place, see [optimal transport](#optimal-transport-wasserstein-based-sensitivity), [Borgonovo delta](#borgonovo-delta-density-based-sensitivity), [HSIC](#hsic-hilbert–schmidt-independence-criterion), and [PAWN](#pawn-cdf-based-sensitivity). [Correlated Inputs](/examples/correlated-inputs) works one model through several of these routes side by side.
 
 ## Background: variance-based sensitivity analysis
 
