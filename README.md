@@ -329,7 +329,7 @@ repository page gives you APA or BibTeX directly. The BibTeX is:
 @software{pessina_jaxgsa_2026,
   author  = {Pessina, Daniele},
   title   = {{jaxgsa}: Global Sensitivity Analysis in {JAX}},
-  version = {1.0.0},
+  version = {1.0.1},
   year    = {2026},
   license = {MIT},
   url     = {https://github.com/DanielePessina/jaxgsa}

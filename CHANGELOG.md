@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 1.0.1
+
+A citation release. No source file changes, so no reported number moves.
 
 ### Documentation
 

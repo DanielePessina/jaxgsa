@@ -10,7 +10,7 @@ abstract: >-
   methods export a traceable core that runs under jit, vmap and grad, on CPU,
   GPU or TPU. Kucherenko and VKOGA are host NumPy and SciPy by design.
 type: software
-version: 1.0.0
+version: 1.0.1
 date-released: "2026-08-25"
 authors:
   - family-names: Pessina
