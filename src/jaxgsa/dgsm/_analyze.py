@@ -140,6 +140,46 @@ def _warn_lower_bound_condition(problem: Problem) -> None:
     )
 
 
+def _warn_vacuous_upper_bounds(upper: Array) -> None:
+    """Warn when the Poincare bound exceeds 1 for every parameter in a slice.
+
+    A total Sobol index is a variance fraction, so it is at most 1 by
+    definition. An upper bound above 1 therefore rules nothing out, and a
+    slice where every parameter is above 1 rules nothing out at all: the
+    bounds cannot rank the parameters and cannot say any of them is
+    negligible. That state is common rather than exotic. On Ishigami at
+    ``N=1024`` the bounds come out ``[2.35, 7.38, 3.11]``, and raising ``N``
+    does not bring them down, because the Poincare constant, not the sample
+    size, is what sets the slack.
+
+    The bounds are still correct. They are simply not usable, and the numbers
+    alone do not say so.
+
+    Args:
+        upper: Poincare upper bounds, shape ``(T, K, D)``.
+
+    Warns:
+        JaxgsaWarning: If some output slice has every bound above 1.
+    """
+    finite = jnp.isfinite(upper)
+    # Per slice: every parameter finite and above 1. A slice holding a NaN is
+    # not evidence either way, so it is not counted.
+    vacuous = jnp.all(finite & (upper > 1.0), axis=-1)
+    if not bool(jnp.any(vacuous)):
+        return
+    worst = float(jnp.min(jnp.where(vacuous[..., None], upper, jnp.inf)))
+    warnings.warn(
+        "jaxgsa.dgsm: every upper_bound exceeds 1 on at least one output slice "
+        f"(the smallest is {worst:.2f}), and a total Sobol index is at most 1 by "
+        "definition, so the bound excludes nothing there. The Poincare constant "
+        "sets the slack, not the sample size, so more samples will not tighten "
+        "it. Screen on nu for parameters that do nothing, and rank the rest with "
+        "jaxgsa.sobol.",
+        stacklevel=3,
+        category=JaxgsaWarning,
+    )
+
+
 def _resolve_call_style(
     fn: Callable | None,
     X: Array | None,
@@ -802,6 +842,7 @@ def analyze(
             stacklevel=2,
             category=JaxgsaWarning,
         )
+    _warn_vacuous_upper_bounds(upper)
 
     confs: dict[str, Array | None] = dict.fromkeys(_INTERVAL_FIELDS)
     ci: CIInfo | None = None

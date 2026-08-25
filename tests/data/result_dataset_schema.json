@@ -477,7 +477,10 @@
     ]
   },
   "hsic@multi": {
-    "attrs": [],
+    "attrs": [
+      "bandwidth",
+      "n_perms"
+    ],
     "coords": [
       "output",
       "param"
@@ -501,7 +504,10 @@
     ]
   },
   "hsic@scalar": {
-    "attrs": [],
+    "attrs": [
+      "bandwidth",
+      "n_perms"
+    ],
     "coords": [
       "param"
     ],
@@ -523,7 +529,10 @@
     ]
   },
   "hsic@series": {
-    "attrs": [],
+    "attrs": [
+      "bandwidth",
+      "n_perms"
+    ],
     "coords": [
       "output",
       "param",

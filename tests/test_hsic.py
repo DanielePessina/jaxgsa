@@ -1140,3 +1140,54 @@ class TestIndicesCore:
         with warnings.catch_warnings():
             warnings.simplefilter("error", JaxgsaWarning)
             indices(problem, X, Y, n_perms=self.PERMS, key=jax.random.key(1))
+
+
+# ---------------------------------------------------------------------------
+# Provenance
+# ---------------------------------------------------------------------------
+
+
+class TestBandwidthProvenance:
+    """The index moves with the bandwidth, so the result must carry it.
+
+    A stored ``R2_HSIC`` without its bandwidth does not say what it measured:
+    the same data at 0.25 and at the default 1.0 can rank the parameters
+    differently. This is the same reason ``SobolResult`` carries
+    ``estimator``.
+    """
+
+    @staticmethod
+    def _data():
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=200, seed=0))
+        return X, ishigami.evaluate(X)
+
+    def test_result_records_the_run_settings(self):
+        """bandwidth and n_perms come back as they were passed."""
+        X, Y = self._data()
+        result = analyze(
+            ishigami.PROBLEM,
+            X,
+            Y,
+            n_perms=20,
+            bandwidth=0.25,
+            key=jax.random.key(0),
+            verbose=False,
+        )
+        assert result.bandwidth == 0.25
+        assert result.n_perms == 20
+
+    def test_defaults_are_recorded_too(self):
+        """A run that passes neither still says what it used."""
+        X, Y = self._data()
+        result = analyze(ishigami.PROBLEM, X, Y, n_perms=20, key=jax.random.key(0), verbose=False)
+        assert result.bandwidth == 1.0
+
+    def test_export_carries_them_as_attributes(self):
+        """to_dataset writes both into the dataset attrs."""
+        X, Y = self._data()
+        result = analyze(
+            ishigami.PROBLEM, X, Y, n_perms=20, bandwidth=0.5, key=jax.random.key(0), verbose=False
+        )
+        attrs = result.to_dataset().attrs
+        assert attrs["bandwidth"] == 0.5
+        assert attrs["n_perms"] == 20

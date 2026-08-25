@@ -38,6 +38,14 @@ class HSICResult(SchemaResult):
         invalid: What the non-finite check found in the sample, and which
             ``on_invalid`` policy ran. ``invalid.n_invalid == 0`` means the
             check ran and found nothing.
+        bandwidth: The median-heuristic multiplier the kernels were built
+            with. It is carried because the index depends on it: the same
+            data at ``0.25`` and at the default ``1.0`` can rank the
+            parameters differently, so a stored ``R2_HSIC`` without its
+            bandwidth does not say what it measured.
+        n_perms: How many permutations the p-values rest on. A p-value
+            cannot fall below ``1 / (n_perms + 1)``, so the floor of the
+            reported values is a property of this number.
     """
 
     R2_HSIC: Array
@@ -46,6 +54,8 @@ class HSICResult(SchemaResult):
     hsic_raw: Array
     problem: Problem
     invalid: InvalidReport
+    bandwidth: float = 1.0
+    n_perms: int = 200
 
     _schema = ResultSchema(
         primary="R2_HSIC",
@@ -55,4 +65,5 @@ class HSICResult(SchemaResult):
             FieldSpec("p_values"),
             FieldSpec("hsic_raw"),
         ),
+        meta=("bandwidth", "n_perms"),
     )

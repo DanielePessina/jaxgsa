@@ -1,5 +1,52 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Five fit-quality and usability warnings.** Each one names a state where the
+  reported numbers look fine and mean less than they appear to. All are
+  `JaxgsaWarning`, so `warnings.filterwarnings("error", category=JaxgsaWarning)`
+  turns them into CI failures. No index value changes.
+
+  - `jaxgsa.pce.analyze` now reads its own two fit diagnostics and warns.
+    `explained_variance` below 0.5 on any output slice means the expansion does
+    not represent the model, and `loo_rmse` above 0.71 times `std(Y)` is the
+    same line read out of sample, which is the only place an overfit shows.
+    The default `order=3` does not resolve a strong nonlinearity: on Ishigami
+    it reports `S1(x1) = 0.662` against a truth of 0.314, and until now it did
+    so in silence. `jaxgsa.pce.indices` stays silent, because it traces.
+  - `jaxgsa.hdmr.analyze` now checks that the per-term `S` values sum to about
+    1, which is the precondition Li et al. (2010, Eq. 24) attach to every index
+    the fit reports. The shortfall is variance the decomposition never
+    captured, and `Sa`, `Sb`, `S` and `ST` all inherit it.
+  - `jaxgsa.optimal_transport.analyze` now warns when `mode="multivariate"` or
+    `mode="trajectory"` runs with `dummy=False`. Those modes solve entropic
+    transport, whose bias holds an irrelevant parameter's index above zero
+    however large `N` is. `dummy=True` measures that floor and reports
+    `above_dummy`.
+  - `jaxgsa.dgsm.analyze` now warns when every `upper_bound` on an output slice
+    exceeds 1. A total Sobol index is at most 1 by definition, so the bound
+    then excludes nothing, and the Poincare constant rather than the sample
+    size sets the slack, so more samples will not tighten it.
+  - `HSICResult` now carries the `bandwidth` and `n_perms` the run used, and
+    `to_dataset()` writes both into the dataset attributes. The HSIC index
+    moves with the bandwidth, so a stored number without it does not say what
+    it measured. This mirrors `SobolResult.estimator`.
+
+- **An agent skill at `skills/jaxgsa/SKILL.md`.** It documents the sampling
+  designs, all thirteen methods, and the caveats that decide whether an index
+  means anything. Install it with
+  `npx skills add https://github.com/DanielePessina/jaxgsa`.
+
+### Changed
+
+- The PCE fit-quality warning now comes from `jaxgsa.pce` rather than
+  `jaxgsa.shapley`. `jaxgsa.shapley.analyze(backend="pce")` and
+  `PCEResult.shapley()` both reach it through the backend's own `analyze`, so
+  the warning still fires on the same fits, once, under the namespace that owns
+  the number. `HDMRResult.shapley()` likewise defers to `jaxgsa.hdmr.analyze`.
+
 ## 1.0.0
 
 Version 1.0.0 freezes the public interface. It gives eleven methods a pure

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -1068,3 +1070,50 @@ class TestExplainedVariance:
             float(np.asarray(single.explained_variance)),
             rtol=1e-4,
         )
+
+
+# ---------------------------------------------------------------------------
+# Fit-quality warnings
+# ---------------------------------------------------------------------------
+
+
+class TestFitQualityWarnings:
+    """analyze must say when the fit is too poor for its own indices.
+
+    Every PCE index is exact within the fitted polynomial, so a polynomial
+    that is not this model gives indices that are exactly wrong and look
+    exactly right. The default ``order=3`` does not resolve a strong
+    nonlinearity, which makes the silent version of this the most likely way
+    to read a wrong number off the library.
+    """
+
+    def test_underfit_warns_and_names_explained_variance(self, ishigami_pce_data):
+        """order=3 on Ishigami explains under half the variance, and says so."""
+        X, Y = ishigami_pce_data
+        with pytest.warns(JaxgsaWarning, match=r"explained_variance is 0\.\d+"):
+            result = pce.analyze(ishigami.PROBLEM, X, Y, order=3, verbose=False)
+        assert float(np.asarray(result.explained_variance)) < 0.5
+
+    def test_overfit_warns_on_the_loo_ratio(self, ishigami_pce_data):
+        """A fit with too few rows per term is caught out of sample only."""
+        X, Y = ishigami_pce_data
+        Xs, Ys = X[:64], Y[:64]
+        with pytest.warns(JaxgsaWarning, match=r"loo_rmse is \d+\.\d+ times std\(Y\)"):
+            result = pce.analyze(ishigami.PROBLEM, Xs, Ys, order=5, fit_ratio=0.9, verbose=False)
+        # The in-sample number reports nothing wrong at all, which is the
+        # reason the out-of-sample check exists.
+        assert float(np.asarray(result.explained_variance)) > 0.9
+
+    def test_healthy_fit_is_silent(self, ishigami_pce_data):
+        """A well-resolved fit raises neither warning."""
+        X, Y = ishigami_pce_data
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", JaxgsaWarning)
+            pce.analyze(ishigami.PROBLEM, X, Y, order=10, verbose=False)
+
+    def test_indices_stays_silent(self, ishigami_pce_data):
+        """The traceable core has no host-side side effects, warnings included."""
+        X, Y = ishigami_pce_data
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", JaxgsaWarning)
+            pce.indices(ishigami.PROBLEM, X, Y, order=3)

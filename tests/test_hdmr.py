@@ -993,3 +993,41 @@ class TestBootstrapIntervals:
         for name in ("Sa", "Sb", "S", "ST"):
             assert f"{name}_lower" in dataset
             assert f"{name}_upper" in dataset
+
+
+# ---------------------------------------------------------------------------
+# Decomposition completeness
+# ---------------------------------------------------------------------------
+
+
+class TestUnexplainedVarianceWarning:
+    """Li et al. (2010, Eq. 24) require the per-term S to sum to about 1.
+
+    Below that, the shortfall is variance the decomposition never captured,
+    and Sa, Sb, S and ST all inherit it. Nothing in the index arrays says so,
+    which is why analyze reads the sum and speaks.
+    """
+
+    @staticmethod
+    def _oscillatory():
+        """Data a first-order, coarse-basis HDMR cannot follow."""
+        problem = Problem(("x1", "x2"), ((0.0, 1.0), (0.0, 1.0)))
+        X = jnp.asarray(monte_carlo(problem, 400, seed=0))
+        Y = jnp.sin(30.0 * X[:, 0]) + jnp.sin(30.0 * X[:, 1])
+        return problem, X, Y
+
+    def test_shortfall_warns_and_names_the_sum(self):
+        """A decomposition that captures 7% of the variance says so."""
+        problem, X, Y = self._oscillatory()
+        with pytest.warns(JaxgsaWarning, match=r"result\.S\.sum\(\) is 0\.\d+"):
+            result = analyze_hdmr(problem, X, Y, maxorder=1, m=2, verbose=False)
+        assert float(np.asarray(result.S).sum()) < 0.5
+
+    def test_a_complete_decomposition_is_silent(self):
+        """A fit whose terms account for the variance raises nothing."""
+        X = jnp.asarray(monte_carlo(PROBLEM, 2000, seed=3))
+        Y = evaluate(X)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", JaxgsaWarning)
+            result = analyze_hdmr(PROBLEM, X, Y, maxorder=2, verbose=False)
+        assert 0.5 <= float(np.asarray(result.S).sum()) <= 1.3

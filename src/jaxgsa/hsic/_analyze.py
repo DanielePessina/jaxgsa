@@ -798,8 +798,11 @@ def analyze(
 
     Returns:
         An :class:`HSICResult` with ``R2_HSIC``, ``T_HSIC``, ``p_values``, and
-        ``hsic_raw``, each shaped ``(D,)``, ``(K, D)``, or ``(T, K, D)``, and
-        the non-finite report in ``invalid``.
+        ``hsic_raw``, each shaped ``(D,)``, ``(K, D)``, or ``(T, K, D)``, the
+        non-finite report in ``invalid``, and the ``bandwidth`` and
+        ``n_perms`` the run used. Those two are on the result because the
+        index moves with the bandwidth, so a stored HSIC number is ambiguous
+        without it.
 
     Raises:
         ValueError: If X is not 2-D, its column count does not match the
@@ -870,6 +873,8 @@ def analyze(
         hsic_raw=raw_all,
         problem=problem,
         invalid=invalid,
+        bandwidth=bandwidth,
+        n_perms=n_perms,
     )
 
     if verbose:

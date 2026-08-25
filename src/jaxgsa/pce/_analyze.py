@@ -24,6 +24,7 @@ from jaxgsa._core.entry import (
     prepare,
     require,
 )
+from jaxgsa._core.fit_quality import warn_loo_overfit, warn_variance_fit
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.precision import unit_clip_bounds
 from jaxgsa._core.result import CIInfo
@@ -991,6 +992,32 @@ def analyze(
     # data, and that mismatch is what used to push a good fit above 1.
     explained_variance = jnp.where(
         total_var == 0, jnp.nan, fit.fitted_var.reshape(T, K) / total_var
+    )
+
+    # Both fit-quality checks run here, in the public entry point only, so
+    # that `indices` stays free of host-side side effects and one analyze call
+    # speaks once. They are the difference between an index that is wrong and
+    # an index that says it is wrong: `order` defaults to 3, which does not
+    # resolve a strong nonlinearity, and the indices of a cubic that is not
+    # this model look exactly like the indices of this model.
+    warn_variance_fit(
+        "jaxgsa.pce",
+        explained_variance,
+        quantity="explained_variance",
+        advice_low=(
+            "Raise order until loo_rmse stops falling, or use jaxgsa.hdmr for a "
+            "response with kinks a polynomial cannot follow."
+        ),
+        # Unreachable for PCE, whose diagnostic is a true in-sample R-squared
+        # and so cannot pass 1. Passed for the shared signature.
+        advice_high="Check the output for a near-constant slice.",
+    )
+    warn_loo_overfit(
+        "jaxgsa.pce",
+        loo,
+        jnp.sqrt(total_var),
+        explained_variance,
+        advice="Refit with a lower order or more samples.",
     )
 
     # Drop the singleton axes _prepare_Y inserted. S1/ST/coeffs end in

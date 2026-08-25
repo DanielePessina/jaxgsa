@@ -46,6 +46,19 @@ Python 3.12 or newer. The runtime dependencies are `jax`, `jaxlib`, `numpy`,
 `scipy`, and `xarray`. Optional extras: `notebook` (marimo, matplotlib) and
 `dev` (pytest, ruff, ty, SALib, POT).
 
+### Coding agent skill
+
+The repository ships an agent skill that teaches a coding agent the jaxgsa API:
+the sampling designs, all thirteen methods, and the caveats that decide whether
+an index means anything. Install it into a project with
+
+```bash
+npx skills add https://github.com/DanielePessina/jaxgsa
+```
+
+The skill lives at [`skills/jaxgsa/SKILL.md`](skills/jaxgsa/SKILL.md) and needs
+no extra setup once installed.
+
 ## Quickstart
 
 Sobol indices on the Ishigami function, which has known analytic indices.
