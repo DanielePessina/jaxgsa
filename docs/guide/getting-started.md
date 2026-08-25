@@ -372,14 +372,21 @@ APA or BibTeX directly:
 
 ```bibtex
 @software{pessina_jaxgsa_2026,
-  author  = {Pessina, Daniele},
-  title   = {{jaxgsa}: Global Sensitivity Analysis in {JAX}},
-  version = {1.0.1},
-  year    = {2026},
-  license = {MIT},
-  url     = {https://github.com/DanielePessina/jaxgsa}
+  author    = {Pessina, Daniele},
+  title     = {{jaxgsa}: Global Sensitivity Analysis in {JAX}},
+  version   = {1.0.1},
+  year      = {2026},
+  license   = {MIT},
+  doi       = {10.5281/zenodo.22099117},
+  url       = {https://doi.org/10.5281/zenodo.22099117},
+  publisher = {Zenodo}
 }
 ```
+
+That DOI is the concept DOI: it resolves to the newest version and stays
+valid across every release. Each release also gets its own version DOI, on
+the [Zenodo record](https://doi.org/10.5281/zenodo.22099117), for when the
+exact version is the point.
 
 Cite the version you ran rather than the latest one. Indices move between
 releases when an estimator defect is fixed, and the changelog records every

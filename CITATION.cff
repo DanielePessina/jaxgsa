@@ -20,6 +20,7 @@ authors:
     affiliation: >-
       Department of Chemical Engineering and Sargent Centre for Process
       Systems Engineering, Imperial College London
+doi: "10.5281/zenodo.22099117"
 license: MIT
 repository-code: "https://github.com/DanielePessina/jaxgsa"
 url: "https://danielepessina.github.io/jaxgsa/"
@@ -29,3 +30,13 @@ keywords:
   - sobol
   - jax
   - uncertainty-quantification
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.22099117"
+    description: >-
+      Concept DOI. Resolves to the newest version and stays valid across
+      every release, so it is the one to cite when the specific version
+      does not matter.
+  - type: doi
+    value: "10.5281/zenodo.22099118"
+    description: Version DOI for 1.0.1.

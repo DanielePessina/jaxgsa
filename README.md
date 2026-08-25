@@ -7,6 +7,7 @@
 [![Documentation](https://img.shields.io/badge/docs-online-blue)](https://danielepessina.github.io/jaxgsa/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22099117.svg)](https://doi.org/10.5281/zenodo.22099117)
 
 jaxgsa tells you which of your model's inputs drive its output. You give it
 input samples and the outputs your model produced for them. It returns
@@ -327,14 +328,22 @@ repository page gives you APA or BibTeX directly. The BibTeX is:
 
 ```bibtex
 @software{pessina_jaxgsa_2026,
-  author  = {Pessina, Daniele},
-  title   = {{jaxgsa}: Global Sensitivity Analysis in {JAX}},
-  version = {1.0.1},
-  year    = {2026},
-  license = {MIT},
-  url     = {https://github.com/DanielePessina/jaxgsa}
+  author    = {Pessina, Daniele},
+  title     = {{jaxgsa}: Global Sensitivity Analysis in {JAX}},
+  version   = {1.0.1},
+  year      = {2026},
+  license   = {MIT},
+  doi       = {10.5281/zenodo.22099117},
+  url       = {https://doi.org/10.5281/zenodo.22099117},
+  publisher = {Zenodo}
 }
 ```
+
+That DOI is the concept DOI. It resolves to the newest version and stays
+valid across every release, so it is the one to cite when the specific
+version does not matter. Each release also gets its own version DOI, listed
+on the [Zenodo record](https://doi.org/10.5281/zenodo.22099117); use that one
+when the exact version is the point.
 
 Cite the version you ran, not the latest one. Indices move between releases
 when an estimator defect is fixed, and `CHANGELOG.md` records every such

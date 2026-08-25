@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Documentation
+
+- **jaxgsa has a DOI.** `10.5281/zenodo.22099117` is the concept DOI: it
+  resolves to the newest version and stays valid across every release, so it
+  is the one to cite when the specific version does not matter. Each release
+  also gets a version DOI, `10.5281/zenodo.22099118` for 1.0.1. Both are in
+  `CITATION.cff` under `identifiers`, the concept DOI is in the BibTeX entry
+  in the README and the Getting started guide, and the README carries a DOI
+  badge.
+
 ## 1.0.1
 
 A citation release. No source file changes, so no reported number moves.

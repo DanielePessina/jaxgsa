@@ -30,6 +30,11 @@
       "identifier": "https://pypi.org/project/jaxgsa/",
       "relation": "isIdenticalTo",
       "scheme": "url"
+    },
+    {
+      "identifier": "10.5281/zenodo.22099117",
+      "relation": "isVersionOf",
+      "scheme": "doi"
     }
   ]
 }
