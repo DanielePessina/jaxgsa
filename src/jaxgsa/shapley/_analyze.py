@@ -126,9 +126,7 @@ def _indices_3d(
         # A constant slice's sample variance is almost never bit-exact zero
         # in float32 (the mean itself rounds), so gate on the slice being
         # numerically constant instead of on var == 0.
-        is_constant = _is_constant_slice(Y_3d.reshape(Y_3d.shape[0], -1)).reshape(
-            Y_3d.shape[1:]
-        )
+        is_constant = _is_constant_slice(Y_3d.reshape(Y_3d.shape[0], -1)).reshape(Y_3d.shape[1:])
         explained = jnp.where(is_constant, jnp.nan, total / total_var)
     else:
         from jaxgsa.hdmr._analyze import _hdmr_core

@@ -990,9 +990,7 @@ def analyze(
     # Summing the squared non-constant coefficients instead would measure the
     # surrogate under the *input measure* while the denominator measures the
     # data, and that mismatch is what used to push a good fit above 1.
-    explained_variance = jnp.where(
-        is_constant, jnp.nan, fit.fitted_var.reshape(T, K) / total_var
-    )
+    explained_variance = jnp.where(is_constant, jnp.nan, fit.fitted_var.reshape(T, K) / total_var)
 
     # Both fit-quality checks run here, in the public entry point only, so
     # that `indices` stays free of host-side side effects and one analyze call

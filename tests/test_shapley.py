@@ -382,9 +382,7 @@ def test_constant_output_with_float32_rounding_noise_is_nan(ishigami_data, backe
     """
     X, _ = ishigami_data
     Yc = jnp.full(X.shape[0], 0.1)
-    assert float(jnp.var(Yc)) != 0.0, (
-        "the naive variance must be nonzero for this to test the fix"
-    )
+    assert float(jnp.var(Yc)) != 0.0, "the naive variance must be nonzero for this to test the fix"
     with pytest.warns(UserWarning, match="zero variance"):
         result = _analyze_shapley(ishigami.PROBLEM, X, Yc, backend=backend)
     assert np.all(np.isnan(np.asarray(result.Sh)))

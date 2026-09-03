@@ -1155,9 +1155,7 @@ class TestExplainedVariance:
         )
         Y = 2.0 + 3.0 * X[:, 0] - 1.5 * X[:, 1]
         result = pce.analyze(problem, X, Y, order=1, verbose=False)
-        np.testing.assert_allclose(
-            float(np.asarray(result.explained_variance)), 1.0, atol=1e-4
-        )
+        np.testing.assert_allclose(float(np.asarray(result.explained_variance)), 1.0, atol=1e-4)
         Sh = result.shapley().Sh
         assert jnp.all(jnp.isfinite(Sh))
         np.testing.assert_allclose(float(Sh.sum()), 1.0, atol=1e-5)
