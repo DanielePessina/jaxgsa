@@ -1,0 +1,183 @@
+{
+  "speed": [
+    {
+      "problem": "Ishigami",
+      "method": "Sobol",
+      "scenario": "1x1",
+      "jaxgsa_ms": 1.262540987227112,
+      "salib_ms": 0.14629197539761662
+    },
+    {
+      "problem": "Ishigami",
+      "method": "Sobol",
+      "scenario": "1x6",
+      "jaxgsa_ms": 1.790583017282188,
+      "salib_ms": 0.9053749963641167
+    },
+    {
+      "problem": "Ishigami",
+      "method": "Sobol",
+      "scenario": "50x1",
+      "jaxgsa_ms": 4.912707954645157,
+      "salib_ms": 8.284084033221006
+    },
+    {
+      "problem": "Ishigami",
+      "method": "Sobol",
+      "scenario": "50x6",
+      "jaxgsa_ms": 13.112790999002755,
+      "salib_ms": 48.68566698860377
+    },
+    {
+      "problem": "Ishigami",
+      "method": "eFAST",
+      "scenario": "1x1",
+      "jaxgsa_ms": 0.5577919655479491,
+      "salib_ms": 0.5353750311769545
+    },
+    {
+      "problem": "Ishigami",
+      "method": "eFAST",
+      "scenario": "1x6",
+      "jaxgsa_ms": 1.0768749634735286,
+      "salib_ms": 2.913624979555607
+    },
+    {
+      "problem": "Ishigami",
+      "method": "eFAST",
+      "scenario": "50x1",
+      "jaxgsa_ms": 5.669458012562245,
+      "salib_ms": 24.059707997366786
+    },
+    {
+      "problem": "Ishigami",
+      "method": "eFAST",
+      "scenario": "50x6",
+      "jaxgsa_ms": 23.142999969422817,
+      "salib_ms": 155.6117910076864
+    },
+    {
+      "problem": "Ishigami",
+      "method": "DGSM",
+      "scenario": "1x1",
+      "jaxgsa_ms": 0.5830420413985848,
+      "salib_ms": 0.258082989603281
+    },
+    {
+      "problem": "Ishigami",
+      "method": "DGSM",
+      "scenario": "1x6",
+      "jaxgsa_ms": 0.4353750264272094,
+      "salib_ms": 1.5475830296054482
+    },
+    {
+      "problem": "Ishigami",
+      "method": "DGSM",
+      "scenario": "50x1",
+      "jaxgsa_ms": 0.8859999943524599,
+      "salib_ms": 13.06812500115484
+    },
+    {
+      "problem": "Ishigami",
+      "method": "DGSM",
+      "scenario": "50x6",
+      "jaxgsa_ms": 5.416875006631017,
+      "salib_ms": 88.3204170386307
+    },
+    {
+      "problem": "Ishigami",
+      "method": "HDMR",
+      "scenario": "1x1",
+      "jaxgsa_ms": 19.412374997045845,
+      "salib_ms": 32.90379099780694
+    },
+    {
+      "problem": "Ishigami",
+      "method": "HDMR",
+      "scenario": "1x6",
+      "jaxgsa_ms": 19.159540999680758,
+      "salib_ms": 220.44762503355742
+    },
+    {
+      "problem": "Ishigami",
+      "method": "HDMR",
+      "scenario": "50x1",
+      "jaxgsa_ms": 21.502582996618003,
+      "salib_ms": 1822.8114999947138
+    },
+    {
+      "problem": "Ishigami",
+      "method": "HDMR",
+      "scenario": "50x6",
+      "jaxgsa_ms": 31.33666602661833,
+      "salib_ms": 11204.557916033082
+    },
+    {
+      "problem": "O'Hagan",
+      "method": "Sobol",
+      "scenario": "1x1",
+      "jaxgsa_ms": 1.1823329841718078,
+      "salib_ms": 0.6157499738037586
+    },
+    {
+      "problem": "O'Hagan",
+      "method": "Sobol",
+      "scenario": "50x1",
+      "jaxgsa_ms": 8.639584004413337,
+      "salib_ms": 33.00212504109368
+    },
+    {
+      "problem": "O'Hagan",
+      "method": "eFAST",
+      "scenario": "1x1",
+      "jaxgsa_ms": 0.9834999800659716,
+      "salib_ms": 2.421917044557631
+    },
+    {
+      "problem": "O'Hagan",
+      "method": "eFAST",
+      "scenario": "50x1",
+      "jaxgsa_ms": 22.743457986507565,
+      "salib_ms": 122.79804103309289
+    },
+    {
+      "problem": "O'Hagan",
+      "method": "DGSM",
+      "scenario": "1x1",
+      "jaxgsa_ms": 0.6108750239945948,
+      "salib_ms": 1.3552919845096767
+    },
+    {
+      "problem": "O'Hagan",
+      "method": "DGSM",
+      "scenario": "50x1",
+      "jaxgsa_ms": 1.2753329938277602,
+      "salib_ms": 68.45170800806955
+    },
+    {
+      "problem": "O'Hagan",
+      "method": "HDMR",
+      "scenario": "1x1",
+      "jaxgsa_ms": 35.68216599524021,
+      "salib_ms": 887.9496660083532
+    },
+    {
+      "problem": "O'Hagan",
+      "method": "HDMR",
+      "scenario": "50x1",
+      "jaxgsa_ms": 61.25400000018999,
+      "salib_ms": 60039.459457970224
+    }
+  ],
+  "bootstrap": {
+    "jaxgsa_0": 1.2141659972257912,
+    "jaxgsa_100": 4.870207980275154,
+    "jaxgsa_ci_100": 0.1459731012582779,
+    "jaxgsa_1000": 16.769582987762988,
+    "jaxgsa_ci_1000": 0.15583713352680206,
+    "salib_100": 8.626457944046706,
+    "salib_ci_100": 0.11511583512179781,
+    "salib_1000": 108.34479203913361,
+    "salib_ci_1000": 0.11346305938808539
+  }
+}

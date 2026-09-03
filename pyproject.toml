@@ -1,0 +1,108 @@
+[project]
+name = "jaxgsa"
+version = "0.9.0"
+description = "Global Sensitivity Analysis in JAX"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Daniele Pessina", email = "danielepessina99@gmail.com" },
+    { name = "Maria M. Papathanasiou" },
+]
+keywords = [
+    "sensitivity-analysis",
+    "global-sensitivity-analysis",
+    "sobol",
+    "hdmr",
+    "pce",
+    "shapley",
+    "morris",
+    "hsic",
+    "pawn",
+    "borgonovo",
+    "jax",
+    "uncertainty-quantification",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Typing :: Typed",
+]
+dependencies = [
+    "jax>=0.6",
+    "jaxlib>=0.6",
+    "numpy>=2",
+    "scipy>=1.15",
+    "xarray>=2026.2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/DanielePessina/jaxgsa"
+Repository = "https://github.com/DanielePessina/jaxgsa"
+Documentation = "https://danielepessina.github.io/jaxgsa/"
+Issues = "https://github.com/DanielePessina/jaxgsa/issues"
+Changelog = "https://github.com/DanielePessina/jaxgsa/blob/master/CHANGELOG.md"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.4",
+    "ty>=0.0.21",
+    "SALib>=1.4",
+    "pot>=0.9",
+]
+examples = [
+    "matplotlib>=3.10.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = []
+
+[tool.ty.environment]
+# `scripts/` is not a package and is not installed. The scripts import each
+# other by plain module name, the way they do when run directly, and the
+# baseline tests reach them the same way after a sys.path insert. Naming the
+# directory here lets ty resolve those imports statically instead of needing a
+# suppression at each import site. `tests/` is listed for the same reason in
+# the other direction: `scripts/dump_result_schema.py` builds the schema
+# snapshot from `tests/_result_fixtures.py`, the module the test reads it with.
+extra-paths = ["scripts", "tests"]
+
+[tool.pytest.ini_options]
+# Surface deprecations early: promote every DeprecationWarning/FutureWarning to
+# a test failure so upcoming API removals (JAX especially) are caught in CI
+# instead of passing silently. Module-scoping does NOT work for this — JAX emits
+# its deprecations with a stacklevel pointing at the *caller* (jaxgsa/tests), not
+# at a `jax.*` module — so we go global and ignore-list the known, non-actionable
+# third-party deprecations we don't control. Ignore entries come last so they
+# take precedence over the blanket `error` rules above.
+filterwarnings = [
+    "error::DeprecationWarning",
+    "error::FutureWarning",
+    # pytest's own "class-scoped fixture as instance method" deprecation.
+    "ignore::DeprecationWarning:_pytest",
+]
+markers = [
+    # verbose=True is the default on every analyze() and sample(), so an
+    # autouse fixture in conftest.py silences the emit seam for the whole
+    # suite. This marker keeps the seam live for the tests that assert on
+    # the printed output (tests/test_verbose.py).
+    "verbose_output: keep the verbose emit seam live so the test can read stdout",
+    # A handful of joint-mode optimal-transport tests run every Sinkhorn solve
+    # at full sample size. Together they cost about twenty minutes, which is
+    # more than the rest of the suite. They are deselected by default and run
+    # on a schedule; `-m slow` runs them, `-m "not slow"` is the default via
+    # addopts below.
+    "slow: a multi-minute test, deselected by default (run with -m slow)",
+]
+addopts = "-m 'not slow'"

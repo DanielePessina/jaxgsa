@@ -1,0 +1,37 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using these metadata."
+title: "jaxgsa: Global Sensitivity Analysis in JAX"
+abstract: >-
+  jaxgsa computes global sensitivity indices entirely in JAX. It provides
+  thirteen methods, covering variance-based indices (Sobol, eFAST, Kucherenko),
+  screening (Morris, DGSM), moment-independent and given-data measures
+  (Borgonovo delta, PAWN, HSIC, optimal transport), and surrogate-based
+  analysis (PCE, RS-HDMR, Shapley effects, VKOGA). Eleven of the thirteen
+  methods export a traceable core that runs under jit, vmap and grad, on CPU,
+  GPU or TPU. Kucherenko and VKOGA are host NumPy and SciPy by design.
+type: software
+version: 0.9.0
+date-released: "2026-09-03"
+authors:
+  - family-names: Pessina
+    given-names: Daniele
+    email: danielepessina99@gmail.com
+    orcid: "https://orcid.org/0009-0004-3107-6857"
+    affiliation: >-
+      Department of Chemical Engineering and Sargent Centre for Process
+      Systems Engineering, Imperial College London
+  - family-names: Papathanasiou
+    given-names: Maria M.
+    orcid: "https://orcid.org/0000-0002-8886-0624"
+    affiliation: >-
+      Department of Chemical Engineering and Sargent Centre for Process
+      Systems Engineering, Imperial College London
+license: BSD-3-Clause
+repository-code: "https://github.com/DanielePessina/jaxgsa"
+url: "https://danielepessina.github.io/jaxgsa/"
+keywords:
+  - sensitivity-analysis
+  - global-sensitivity-analysis
+  - sobol
+  - jax
+  - uncertainty-quantification

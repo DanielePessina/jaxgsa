@@ -1,0 +1,143 @@
+"""Sobol G-function for sensitivity analysis benchmarking.
+
+A standard D-dimensional multiplicative benchmark. Its analytical Sobol
+indices are known for any choice of the importance parameters ``a``.
+
+The variance decomposition of the G-function has a closed form. The ``a``
+vector also sets each input's importance directly. ``a_j = 0`` makes ``x_j``
+highly influential, and a large ``a_j`` makes it nearly irrelevant.
+
+References:
+    Saltelli, A. and Sobol, I. M. (1995). About the use of rank
+    transformation in sensitivity analysis of model output.
+    Reliability Engineering & System Safety, 50(3):225-239.
+"""
+
+from itertools import combinations
+
+import jax.numpy as jnp
+import numpy as np
+from jax import Array
+
+from jaxgsa.problem import Problem
+
+# a_j=0 => maximally influential; a_j=99 => nearly inert.
+# This mix creates 4 tiers: dominant (x1), moderate (x2), weak (x3-x4), negligible (x5-x8).
+DEFAULT_A = (0.0, 1.0, 4.5, 9.0, 99.0, 99.0, 99.0, 99.0)
+
+PROBLEM = Problem.from_dict({f"x{i + 1}": (0.0, 1.0) for i in range(len(DEFAULT_A))})
+
+
+def evaluate(X: Array, a: tuple[float, ...] = DEFAULT_A) -> Array:
+    """Evaluate the Sobol G-function.
+
+    .. math::
+        g(\\mathbf{x}) = \\prod_{j=1}^{D}
+        \\frac{|4 x_j - 2| + a_j}{1 + a_j}
+
+    Args:
+        X: Input array, shape ``(N, D)``, with ``x_j \\in [0, 1]``.
+        a: Importance parameters, one per dimension.
+
+    Returns:
+        Function values, shape ``(N,)``.
+    """
+    a_arr = jnp.asarray(a)
+    # Each factor (|4x_j-2|+a_j)/(1+a_j) has mean 1 and variance 1/(3(1+a_j)^2).
+    # The product form makes every subset of inputs interact: no additive structure.
+    return jnp.prod((jnp.abs(4.0 * X - 2.0) + a_arr) / (1.0 + a_arr), axis=1)
+
+
+def analytical_indices(
+    a: tuple[float, ...] = DEFAULT_A,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Compute analytical first-order, total-order, and second-order Sobol indices.
+
+    For the G-function with independent uniform inputs, the indices have a
+    closed form:
+
+    .. math::
+        V_j = \\frac{1}{3(1 + a_j)^2}, \\quad
+        V(Y) = \\prod_j (1 + V_j) - 1
+
+    The G-function is multiplicatively separable, so the ANOVA decomposition
+    gives closed-form indices at all orders.
+
+    Args:
+        a: Importance parameters.
+
+    Returns:
+        ``(S1, ST, S2)``. ``S1`` and ``ST`` have shape ``(D,)``. ``S2`` is a
+        symmetric ``(D, D)`` matrix with NaN on the diagonal.
+    """
+    a_arr = np.asarray(a, dtype=float)
+    D = len(a_arr)
+
+    # Each factor's variance: Vi = Var(g_j) = 1/(3(1+a_j)^2), from integrating
+    # Var((|4U-2|+a)/(1+a)) over U~Uniform[0,1].
+    Vi = 1.0 / (3.0 * (1.0 + a_arr) ** 2)
+    # Total variance via multiplicative ANOVA: V(Y) = prod(1 + V_j) - 1,
+    # because the factors are independent and each has mean 1.
+    VY = np.prod(1.0 + Vi) - 1.0
+
+    S1 = Vi / VY
+
+    # Total-order index includes all interactions containing x_j.
+    # For a product model: ST_j = V_j * prod_{k!=j}(1 + V_k) / V(Y).
+    ST = np.empty(D)
+    for j in range(D):
+        others = np.prod(1.0 + np.delete(Vi, j))
+        ST[j] = Vi[j] * others / VY
+
+    # Second-order interaction S2_jk = V_j * V_k / V(Y), a direct consequence
+    # of the multiplicative structure (each pair's joint effect factorizes).
+    S2 = np.full((D, D), np.nan)
+    for j in range(D):
+        for k in range(j + 1, D):
+            val = Vi[j] * Vi[k] / VY
+            S2[j, k] = val
+            S2[k, j] = val
+
+    return S1, ST, S2
+
+
+def analytical_shapley(a: tuple[float, ...] = DEFAULT_A) -> np.ndarray:
+    """Compute analytical Shapley effects for the Sobol G-function.
+
+    For independent inputs the Shapley effect of input j is (Owen, 2014)
+
+    .. math::
+        \\mathrm{Sh}_j = \\frac{1}{V(Y)} \\sum_{u \\ni j} \\frac{V_u}{|u|}
+
+    where the sum runs over all non-empty subsets ``u`` that contain j. The
+    multiplicative structure of the G-function puts every partial variance in
+    product form, ``V_u = \\prod_{k \\in u} V_k``. The sum is therefore
+    evaluated by exact enumeration over all ``2^D - 1`` non-empty subsets.
+
+    Args:
+        a: Importance parameters.
+
+    Returns:
+        Shapley effects, shape ``(D,)``. They sum to 1 exactly.
+    """
+    a_arr = np.asarray(a, dtype=float)
+    D = len(a_arr)
+
+    # Same per-factor variances and total variance as in analytical_indices.
+    Vi = 1.0 / (3.0 * (1.0 + a_arr) ** 2)
+    VY = np.prod(1.0 + Vi) - 1.0
+
+    # Each subset's partial variance V_u = prod_{k in u} V_k is split
+    # equally among its |u| members (the Shapley symmetric allocation).
+    Sh = np.zeros(D)
+    for size in range(1, D + 1):
+        for u in combinations(range(D), size):
+            share = np.prod(Vi[list(u)]) / size
+            for j in u:
+                Sh[j] += share
+
+    return Sh / VY
+
+
+ANALYTICAL_S1, ANALYTICAL_ST, ANALYTICAL_S2 = analytical_indices()
+ANALYTICAL_SHAPLEY = analytical_shapley()

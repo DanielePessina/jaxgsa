@@ -1,0 +1,133 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# MacOS
+.DS_Store
+
+# Aim
+.aim/
+
+# VS Code config
+.vscode/settings.json
+
+# Repomix
+.repomix/
+*.xml
+
+# Claude Code
+.claude/
+
+# Local AI-agent instructions (kept on disk, not published)
+AGENTS.md
+CLAUDE.md
+
+# Temporary files
+tmp/
+
+
+.Rproj.user
+
+# GSA simulation results (keep metadata, ignore large output files)
+scripts/results/salib_runs/**/*_sim.xlsx
+scripts/results/salib_runs/**/*_sim.csv
+scripts/results/salib_runs/**/*_sim.feather
+# scripts/results/salib_runs/**/*_sim__*.parquet
+
+### Core LaTeX files
+*.aux
+*.lof
+*.log
+*.lot
+*.fls
+*.out
+*.toc
+*.fmt
+*.fot
+*.cb
+*.cb2
+.*.lb
+
+## Intermediate documents
+*.dvi
+*.xdv
+*-converted-to.*
+
+## Bibliography auxiliary files
+*.bbl
+*.bcf
+*.blg
+*-blx.aux
+*-blx.bib
+*.run.xml
+
+## Build tool auxiliary files
+*.fdb_latexmk
+*.synctex
+*.synctex(busy)
+*.synctex.gz
+*.synctex.gz(busy)
+*.pdfsync
+
+## Build tool directories
+latex.out/
+
+## Auxiliary and intermediate files from other packages
+*.makefile
+*.idx
+*.ilg
+*.ind
+
+## Glossaries
+*.acn
+*.acr
+*.glg
+*.glo
+*.gls
+*.glsdefs
+*.lzo
+*.lzs
+
+## Uncomment if you don't want to keep the PDF output
+# *.pdf
+
+## Backup files
+*.backup
+*.bak
+*~
+
+## Editor-specific files
+.vscode/
+.DS_Store
+*.swp
+*.swo
+*~
+
+docs/node_modules/
+
+# Internal working documents. Kept on disk, out of the repository.
+docs/adr/
+docs/agents/
+CONTEXT.md
+.scratch/
+
+# Planning and review documents for a release. They record how a decision was
+# reached, which is working material, not part of the shipped package.
+.agents/
+AUDIT-DECISIONS.md
+PLAN-V1.0.md
+REVIEW-1.0.md
+ROADMAP-1.0.md
+
+# Skill pins for the local AI agents. Machine-specific.
+skills-lock.json
+
+# marimo session state: local edit history for the examples, not part of
+# the shipped documentation.

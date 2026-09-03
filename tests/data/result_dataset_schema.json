@@ -1,0 +1,1506 @@
+{
+  "borgonovo@multi": {
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap"
+    ],
+    "coords": [
+      "output",
+      "param"
+    ],
+    "data_vars": [
+      "S1",
+      "S1_lower",
+      "S1_upper",
+      "delta",
+      "delta_lower",
+      "delta_upper"
+    ],
+    "dims": [
+      "output",
+      "param"
+    ],
+    "type": "DeltaResult",
+    "var_dims": [
+      "S1:output,param",
+      "S1_lower:output,param",
+      "S1_upper:output,param",
+      "delta:output,param",
+      "delta_lower:output,param",
+      "delta_upper:output,param"
+    ]
+  },
+  "borgonovo@scalar": {
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap"
+    ],
+    "coords": [
+      "param"
+    ],
+    "data_vars": [
+      "S1",
+      "S1_lower",
+      "S1_upper",
+      "delta",
+      "delta_lower",
+      "delta_upper"
+    ],
+    "dims": [
+      "param"
+    ],
+    "type": "DeltaResult",
+    "var_dims": [
+      "S1:param",
+      "S1_lower:param",
+      "S1_upper:param",
+      "delta:param",
+      "delta_lower:param",
+      "delta_upper:param"
+    ]
+  },
+  "borgonovo@series": {
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap"
+    ],
+    "coords": [
+      "output",
+      "param",
+      "time"
+    ],
+    "data_vars": [
+      "S1",
+      "S1_lower",
+      "S1_upper",
+      "delta",
+      "delta_lower",
+      "delta_upper"
+    ],
+    "dims": [
+      "output",
+      "param",
+      "time"
+    ],
+    "type": "DeltaResult",
+    "var_dims": [
+      "S1:time,output,param",
+      "S1_lower:time,output,param",
+      "S1_upper:time,output,param",
+      "delta:time,output,param",
+      "delta_lower:time,output,param",
+      "delta_upper:time,output,param"
+    ]
+  },
+  "dgsm@multi": {
+    "attrs": [],
+    "coords": [
+      "output",
+      "param"
+    ],
+    "data_vars": [
+      "lower_bound",
+      "nu",
+      "sigma",
+      "upper_bound"
+    ],
+    "dims": [
+      "output",
+      "param"
+    ],
+    "type": "DGSMResult",
+    "var_dims": [
+      "lower_bound:output,param",
+      "nu:output,param",
+      "sigma:output,param",
+      "upper_bound:output,param"
+    ]
+  },
+  "dgsm@scalar": {
+    "attrs": [],
+    "coords": [
+      "param"
+    ],
+    "data_vars": [
+      "lower_bound",
+      "nu",
+      "sigma",
+      "upper_bound"
+    ],
+    "dims": [
+      "param"
+    ],
+    "type": "DGSMResult",
+    "var_dims": [
+      "lower_bound:param",
+      "nu:param",
+      "sigma:param",
+      "upper_bound:param"
+    ]
+  },
+  "dgsm@series": {
+    "attrs": [],
+    "coords": [
+      "output",
+      "param",
+      "time"
+    ],
+    "data_vars": [
+      "lower_bound",
+      "nu",
+      "sigma",
+      "upper_bound"
+    ],
+    "dims": [
+      "output",
+      "param",
+      "time"
+    ],
+    "type": "DGSMResult",
+    "var_dims": [
+      "lower_bound:time,output,param",
+      "nu:time,output,param",
+      "sigma:time,output,param",
+      "upper_bound:time,output,param"
+    ]
+  },
+  "efast@multi": {
+    "attrs": [
+      "M",
+      "omega_0"
+    ],
+    "coords": [
+      "output",
+      "param"
+    ],
+    "data_vars": [
+      "S1",
+      "ST"
+    ],
+    "dims": [
+      "output",
+      "param"
+    ],
+    "type": "EFASTResult",
+    "var_dims": [
+      "S1:output,param",
+      "ST:output,param"
+    ]
+  },
+  "efast@scalar": {
+    "attrs": [
+      "M",
+      "omega_0"
+    ],
+    "coords": [
+      "param"
+    ],
+    "data_vars": [
+      "S1",
+      "ST"
+    ],
+    "dims": [
+      "param"
+    ],
+    "type": "EFASTResult",
+    "var_dims": [
+      "S1:param",
+      "ST:param"
+    ]
+  },
+  "efast@series": {
+    "attrs": [
+      "M",
+      "omega_0"
+    ],
+    "coords": [
+      "output",
+      "param",
+      "time"
+    ],
+    "data_vars": [
+      "S1",
+      "ST"
+    ],
+    "dims": [
+      "output",
+      "param",
+      "time"
+    ],
+    "type": "EFASTResult",
+    "var_dims": [
+      "S1:time,output,param",
+      "ST:time,output,param"
+    ]
+  },
+  "hdmr@multi": {
+    "attrs": [
+      "streamed"
+    ],
+    "coords": [
+      "output",
+      "param",
+      "param_i",
+      "param_j",
+      "term"
+    ],
+    "data_vars": [
+      "S",
+      "S2",
+      "ST",
+      "Sa",
+      "Sb",
+      "rmse",
+      "select"
+    ],
+    "dims": [
+      "output",
+      "param",
+      "param_i",
+      "param_j",
+      "term"
+    ],
+    "type": "HDMRResult",
+    "var_dims": [
+      "S2:output,param_i,param_j",
+      "S:output,term",
+      "ST:output,param",
+      "Sa:output,term",
+      "Sb:output,term",
+      "rmse:output",
+      "select:term"
+    ]
+  },
+  "hdmr@scalar": {
+    "attrs": [
+      "streamed"
+    ],
+    "coords": [
+      "param",
+      "param_i",
+      "param_j",
+      "term"
+    ],
+    "data_vars": [
+      "S",
+      "S2",
+      "ST",
+      "Sa",
+      "Sb",
+      "rmse",
+      "select"
+    ],
+    "dims": [
+      "param",
+      "param_i",
+      "param_j",
+      "term"
+    ],
+    "type": "HDMRResult",
+    "var_dims": [
+      "S2:param_i,param_j",
+      "S:term",
+      "ST:param",
+      "Sa:term",
+      "Sb:term",
+      "rmse:",
+      "select:term"
+    ]
+  },
+  "hdmr@series": {
+    "attrs": [
+      "streamed"
+    ],
+    "coords": [
+      "output",
+      "param",
+      "param_i",
+      "param_j",
+      "term",
+      "time"
+    ],
+    "data_vars": [
+      "S",
+      "S2",
+      "ST",
+      "Sa",
+      "Sb",
+      "rmse",
+      "select"
+    ],
+    "dims": [
+      "output",
+      "param",
+      "param_i",
+      "param_j",
+      "term",
+      "time"
+    ],
+    "type": "HDMRResult",
+    "var_dims": [
+      "S2:time,output,param_i,param_j",
+      "S:time,output,term",
+      "ST:time,output,param",
+      "Sa:time,output,term",
+      "Sb:time,output,term",
+      "rmse:time,output",
+      "select:term"
+    ]
+  },
+  "hdmr_third_order@multi": {
+    "attrs": [
+      "streamed"
+    ],
+    "coords": [
+      "output",
+      "param",
+      "param_i",
+      "param_j",
+      "param_k",
+      "term"
+    ],
+    "data_vars": [
+      "S",
+      "S2",
+      "S3",
+      "ST",
+      "Sa",
+      "Sb",
+      "rmse",
+      "select"
+    ],
+    "dims": [
+      "output",
+      "param",
+      "param_i",
+      "param_j",
+      "param_k",
+      "term"
+    ],
+    "type": "HDMRResult",
+    "var_dims": [
+      "S2:output,param_i,param_j",
+      "S3:output,param_i,param_j,param_k",
+      "S:output,term",
+      "ST:output,param",
+      "Sa:output,term",
+      "Sb:output,term",
+      "rmse:output",
+      "select:term"
+    ]
+  },
+  "hdmr_third_order@scalar": {
+    "attrs": [
+      "streamed"
+    ],
+    "coords": [
+      "param",
+      "param_i",
+      "param_j",
+      "param_k",
+      "term"
+    ],
+    "data_vars": [
+      "S",
+      "S2",
+      "S3",
+      "ST",
+      "Sa",
+      "Sb",
+      "rmse",
+      "select"
+    ],
+    "dims": [
+      "param",
+      "param_i",
+      "param_j",
+      "param_k",
+      "term"
+    ],
+    "type": "HDMRResult",
+    "var_dims": [
+      "S2:param_i,param_j",
+      "S3:param_i,param_j,param_k",
+      "S:term",
+      "ST:param",
+      "Sa:term",
+      "Sb:term",
+      "rmse:",
+      "select:term"
+    ]
+  },
+  "hdmr_third_order@series": {
+    "attrs": [
+      "streamed"
+    ],
+    "coords": [
+      "output",
+      "param",
+      "param_i",
+      "param_j",
+      "param_k",
+      "term",
+      "time"
+    ],
+    "data_vars": [
+      "S",
+      "S2",
+      "S3",
+      "ST",
+      "Sa",
+      "Sb",
+      "rmse",
+      "select"
+    ],
+    "dims": [
+      "output",
+      "param",
+      "param_i",
+      "param_j",
+      "param_k",
+      "term",
+      "time"
+    ],
+    "type": "HDMRResult",
+    "var_dims": [
+      "S2:time,output,param_i,param_j",
+      "S3:time,output,param_i,param_j,param_k",
+      "S:time,output,term",
+      "ST:time,output,param",
+      "Sa:time,output,term",
+      "Sb:time,output,term",
+      "rmse:time,output",
+      "select:term"
+    ]
+  },
+  "hsic@multi": {
+    "attrs": [
+      "bandwidth",
+      "n_perms"
+    ],
+    "coords": [
+      "output",
+      "param"
+    ],
+    "data_vars": [
+      "R2_HSIC",
+      "T_HSIC",
+      "hsic_raw",
+      "p_values"
+    ],
+    "dims": [
+      "output",
+      "param"
+    ],
+    "type": "HSICResult",
+    "var_dims": [
+      "R2_HSIC:output,param",
+      "T_HSIC:output,param",
+      "hsic_raw:output,param",
+      "p_values:output,param"
+    ]
+  },
+  "hsic@scalar": {
+    "attrs": [
+      "bandwidth",
+      "n_perms"
+    ],
+    "coords": [
+      "param"
+    ],
+    "data_vars": [
+      "R2_HSIC",
+      "T_HSIC",
+      "hsic_raw",
+      "p_values"
+    ],
+    "dims": [
+      "param"
+    ],
+    "type": "HSICResult",
+    "var_dims": [
+      "R2_HSIC:param",
+      "T_HSIC:param",
+      "hsic_raw:param",
+      "p_values:param"
+    ]
+  },
+  "hsic@series": {
+    "attrs": [
+      "bandwidth",
+      "n_perms"
+    ],
+    "coords": [
+      "output",
+      "param",
+      "time"
+    ],
+    "data_vars": [
+      "R2_HSIC",
+      "T_HSIC",
+      "hsic_raw",
+      "p_values"
+    ],
+    "dims": [
+      "output",
+      "param",
+      "time"
+    ],
+    "type": "HSICResult",
+    "var_dims": [
+      "R2_HSIC:time,output,param",
+      "T_HSIC:time,output,param",
+      "hsic_raw:time,output,param",
+      "p_values:time,output,param"
+    ]
+  },
+  "kucherenko@multi": {
+    "attrs": [
+      "is_correlated"
+    ],
+    "coords": [
+      "output",
+      "param"
+    ],
+    "data_vars": [
+      "S1",
+      "ST",
+      "variance"
+    ],
+    "dims": [
+      "output",
+      "param"
+    ],
+    "type": "KucherenkoResult",
+    "var_dims": [
+      "S1:output,param",
+      "ST:output,param",
+      "variance:output"
+    ]
+  },
+  "kucherenko@scalar": {
+    "attrs": [
+      "is_correlated"
+    ],
+    "coords": [
+      "param"
+    ],
+    "data_vars": [
+      "S1",
+      "ST",
+      "variance"
+    ],
+    "dims": [
+      "param"
+    ],
+    "type": "KucherenkoResult",
+    "var_dims": [
+      "S1:param",
+      "ST:param",
+      "variance:"
+    ]
+  },
+  "kucherenko@series": {
+    "attrs": [
+      "is_correlated"
+    ],
+    "coords": [
+      "output",
+      "param",
+      "time"
+    ],
+    "data_vars": [
+      "S1",
+      "ST",
+      "variance"
+    ],
+    "dims": [
+      "output",
+      "param",
+      "time"
+    ],
+    "type": "KucherenkoResult",
+    "var_dims": [
+      "S1:time,output,param",
+      "ST:time,output,param",
+      "variance:time,output"
+    ]
+  },
+  "morris@multi": {
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap",
+      "space"
+    ],
+    "coords": [
+      "output",
+      "param"
+    ],
+    "data_vars": [
+      "mu",
+      "mu_lower",
+      "mu_star",
+      "mu_star_lower",
+      "mu_star_upper",
+      "mu_upper",
+      "sigma",
+      "sigma_lower",
+      "sigma_upper"
+    ],
+    "dims": [
+      "output",
+      "param"
+    ],
+    "type": "MorrisResult",
+    "var_dims": [
+      "mu:output,param",
+      "mu_lower:output,param",
+      "mu_star:output,param",
+      "mu_star_lower:output,param",
+      "mu_star_upper:output,param",
+      "mu_upper:output,param",
+      "sigma:output,param",
+      "sigma_lower:output,param",
+      "sigma_upper:output,param"
+    ]
+  },
+  "morris@scalar": {
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap",
+      "space"
+    ],
+    "coords": [
+      "param"
+    ],
+    "data_vars": [
+      "mu",
+      "mu_lower",
+      "mu_star",
+      "mu_star_lower",
+      "mu_star_upper",
+      "mu_upper",
+      "sigma",
+      "sigma_lower",
+      "sigma_upper"
+    ],
+    "dims": [
+      "param"
+    ],
+    "type": "MorrisResult",
+    "var_dims": [
+      "mu:param",
+      "mu_lower:param",
+      "mu_star:param",
+      "mu_star_lower:param",
+      "mu_star_upper:param",
+      "mu_upper:param",
+      "sigma:param",
+      "sigma_lower:param",
+      "sigma_upper:param"
+    ]
+  },
+  "morris@series": {
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap",
+      "space"
+    ],
+    "coords": [
+      "output",
+      "param",
+      "time"
+    ],
+    "data_vars": [
+      "mu",
+      "mu_lower",
+      "mu_star",
+      "mu_star_lower",
+      "mu_star_upper",
+      "mu_upper",
+      "sigma",
+      "sigma_lower",
+      "sigma_upper"
+    ],
+    "dims": [
+      "output",
+      "param",
+      "time"
+    ],
+    "type": "MorrisResult",
+    "var_dims": [
+      "mu:time,output,param",
+      "mu_lower:time,output,param",
+      "mu_star:time,output,param",
+      "mu_star_lower:time,output,param",
+      "mu_star_upper:time,output,param",
+      "mu_upper:time,output,param",
+      "sigma:time,output,param",
+      "sigma_lower:time,output,param",
+      "sigma_upper:time,output,param"
+    ]
+  },
+  "optimal_transport@multi": {
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap",
+      "mode"
+    ],
+    "coords": [
+      "output",
+      "param"
+    ],
+    "data_vars": [
+      "S1",
+      "S1_lower",
+      "S1_upper",
+      "above_dummy",
+      "advective",
+      "advective_lower",
+      "advective_upper",
+      "diffusive",
+      "diffusive_lower",
+      "diffusive_upper",
+      "ot",
+      "ot_dummy",
+      "ot_lower",
+      "ot_upper"
+    ],
+    "dims": [
+      "output",
+      "param"
+    ],
+    "type": "OTResult",
+    "var_dims": [
+      "S1:output,param",
+      "S1_lower:output,param",
+      "S1_upper:output,param",
+      "above_dummy:output,param",
+      "advective:output,param",
+      "advective_lower:output,param",
+      "advective_upper:output,param",
+      "diffusive:output,param",
+      "diffusive_lower:output,param",
+      "diffusive_upper:output,param",
+      "ot:output,param",
+      "ot_dummy:output,param",
+      "ot_lower:output,param",
+      "ot_upper:output,param"
+    ]
+  },
+  "optimal_transport@scalar": {
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap",
+      "mode"
+    ],
+    "coords": [
+      "param"
+    ],
+    "data_vars": [
+      "S1",
+      "S1_lower",
+      "S1_upper",
+      "above_dummy",
+      "advective",
+      "advective_lower",
+      "advective_upper",
+      "diffusive",
+      "diffusive_lower",
+      "diffusive_upper",
+      "ot",
+      "ot_dummy",
+      "ot_lower",
+      "ot_upper"
+    ],
+    "dims": [
+      "param"
+    ],
+    "type": "OTResult",
+    "var_dims": [
+      "S1:param",
+      "S1_lower:param",
+      "S1_upper:param",
+      "above_dummy:param",
+      "advective:param",
+      "advective_lower:param",
+      "advective_upper:param",
+      "diffusive:param",
+      "diffusive_lower:param",
+      "diffusive_upper:param",
+      "ot:param",
+      "ot_dummy:param",
+      "ot_lower:param",
+      "ot_upper:param"
+    ]
+  },
+  "optimal_transport@series": {
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap",
+      "mode"
+    ],
+    "coords": [
+      "output",
+      "param",
+      "time"
+    ],
+    "data_vars": [
+      "S1",
+      "S1_lower",
+      "S1_upper",
+      "above_dummy",
+      "advective",
+      "advective_lower",
+      "advective_upper",
+      "diffusive",
+      "diffusive_lower",
+      "diffusive_upper",
+      "ot",
+      "ot_dummy",
+      "ot_lower",
+      "ot_upper"
+    ],
+    "dims": [
+      "output",
+      "param",
+      "time"
+    ],
+    "type": "OTResult",
+    "var_dims": [
+      "S1:time,output,param",
+      "S1_lower:time,output,param",
+      "S1_upper:time,output,param",
+      "above_dummy:time,output,param",
+      "advective:time,output,param",
+      "advective_lower:time,output,param",
+      "advective_upper:time,output,param",
+      "diffusive:time,output,param",
+      "diffusive_lower:time,output,param",
+      "diffusive_upper:time,output,param",
+      "ot:time,output,param",
+      "ot_dummy:time,output,param",
+      "ot_lower:time,output,param",
+      "ot_upper:time,output,param"
+    ]
+  },
+  "optimal_transport_multivariate@scalar": {
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap",
+      "mode"
+    ],
+    "coords": [
+      "param"
+    ],
+    "data_vars": [
+      "S1",
+      "S1_lower",
+      "S1_upper",
+      "advective",
+      "advective_lower",
+      "advective_upper",
+      "diffusive",
+      "diffusive_lower",
+      "diffusive_upper",
+      "ot",
+      "ot_lower",
+      "ot_upper"
+    ],
+    "dims": [
+      "param"
+    ],
+    "type": "OTResult",
+    "var_dims": [
+      "S1:param",
+      "S1_lower:param",
+      "S1_upper:param",
+      "advective:param",
+      "advective_lower:param",
+      "advective_upper:param",
+      "diffusive:param",
+      "diffusive_lower:param",
+      "diffusive_upper:param",
+      "ot:param",
+      "ot_lower:param",
+      "ot_upper:param"
+    ]
+  },
+  "optimal_transport_trajectory@series": {
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap",
+      "mode"
+    ],
+    "coords": [
+      "output",
+      "param"
+    ],
+    "data_vars": [
+      "S1",
+      "S1_lower",
+      "S1_upper",
+      "advective",
+      "advective_lower",
+      "advective_upper",
+      "diffusive",
+      "diffusive_lower",
+      "diffusive_upper",
+      "ot",
+      "ot_lower",
+      "ot_upper"
+    ],
+    "dims": [
+      "output",
+      "param"
+    ],
+    "type": "OTResult",
+    "var_dims": [
+      "S1:output,param",
+      "S1_lower:output,param",
+      "S1_upper:output,param",
+      "advective:output,param",
+      "advective_lower:output,param",
+      "advective_upper:output,param",
+      "diffusive:output,param",
+      "diffusive_lower:output,param",
+      "diffusive_upper:output,param",
+      "ot:output,param",
+      "ot_lower:output,param",
+      "ot_upper:output,param"
+    ]
+  },
+  "pawn@multi": {
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap"
+    ],
+    "coords": [
+      "output",
+      "param"
+    ],
+    "data_vars": [
+      "n_valid_bins",
+      "pawn",
+      "pawn_lower",
+      "pawn_upper"
+    ],
+    "dims": [
+      "output",
+      "param"
+    ],
+    "type": "PAWNResult",
+    "var_dims": [
+      "n_valid_bins:output,param",
+      "pawn:output,param",
+      "pawn_lower:output,param",
+      "pawn_upper:output,param"
+    ]
+  },
+  "pawn@scalar": {
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap"
+    ],
+    "coords": [
+      "param"
+    ],
+    "data_vars": [
+      "n_valid_bins",
+      "pawn",
+      "pawn_lower",
+      "pawn_upper"
+    ],
+    "dims": [
+      "param"
+    ],
+    "type": "PAWNResult",
+    "var_dims": [
+      "n_valid_bins:param",
+      "pawn:param",
+      "pawn_lower:param",
+      "pawn_upper:param"
+    ]
+  },
+  "pawn@series": {
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap"
+    ],
+    "coords": [
+      "output",
+      "param",
+      "time"
+    ],
+    "data_vars": [
+      "n_valid_bins",
+      "pawn",
+      "pawn_lower",
+      "pawn_upper"
+    ],
+    "dims": [
+      "output",
+      "param",
+      "time"
+    ],
+    "type": "PAWNResult",
+    "var_dims": [
+      "n_valid_bins:time,output,param",
+      "pawn:time,output,param",
+      "pawn_lower:time,output,param",
+      "pawn_upper:time,output,param"
+    ]
+  },
+  "pce@multi": {
+    "attrs": [
+      "order",
+      "streamed"
+    ],
+    "coords": [
+      "output",
+      "param",
+      "param_i",
+      "param_j"
+    ],
+    "data_vars": [
+      "S1",
+      "S2",
+      "ST",
+      "explained_variance",
+      "loo_rmse"
+    ],
+    "dims": [
+      "output",
+      "param",
+      "param_i",
+      "param_j"
+    ],
+    "type": "PCEResult",
+    "var_dims": [
+      "S1:output,param",
+      "S2:output,param_i,param_j",
+      "ST:output,param",
+      "explained_variance:output",
+      "loo_rmse:output"
+    ]
+  },
+  "pce@scalar": {
+    "attrs": [
+      "order",
+      "streamed"
+    ],
+    "coords": [
+      "param",
+      "param_i",
+      "param_j"
+    ],
+    "data_vars": [
+      "S1",
+      "S2",
+      "ST",
+      "explained_variance",
+      "loo_rmse"
+    ],
+    "dims": [
+      "param",
+      "param_i",
+      "param_j"
+    ],
+    "type": "PCEResult",
+    "var_dims": [
+      "S1:param",
+      "S2:param_i,param_j",
+      "ST:param",
+      "explained_variance:",
+      "loo_rmse:"
+    ]
+  },
+  "pce@series": {
+    "attrs": [
+      "order",
+      "streamed"
+    ],
+    "coords": [
+      "output",
+      "param",
+      "param_i",
+      "param_j",
+      "time"
+    ],
+    "data_vars": [
+      "S1",
+      "S2",
+      "ST",
+      "explained_variance",
+      "loo_rmse"
+    ],
+    "dims": [
+      "output",
+      "param",
+      "param_i",
+      "param_j",
+      "time"
+    ],
+    "type": "PCEResult",
+    "var_dims": [
+      "S1:time,output,param",
+      "S2:time,output,param_i,param_j",
+      "ST:time,output,param",
+      "explained_variance:time,output",
+      "loo_rmse:time,output"
+    ]
+  },
+  "shapley@multi": {
+    "attrs": [
+      "backend",
+      "include_correlative",
+      "order"
+    ],
+    "coords": [
+      "output",
+      "param"
+    ],
+    "data_vars": [
+      "S1",
+      "ST",
+      "Sh",
+      "explained_variance"
+    ],
+    "dims": [
+      "output",
+      "param"
+    ],
+    "type": "ShapleyResult",
+    "var_dims": [
+      "S1:output,param",
+      "ST:output,param",
+      "Sh:output,param",
+      "explained_variance:output"
+    ]
+  },
+  "shapley@scalar": {
+    "attrs": [
+      "backend",
+      "include_correlative",
+      "order"
+    ],
+    "coords": [
+      "param"
+    ],
+    "data_vars": [
+      "S1",
+      "ST",
+      "Sh",
+      "explained_variance"
+    ],
+    "dims": [
+      "param"
+    ],
+    "type": "ShapleyResult",
+    "var_dims": [
+      "S1:param",
+      "ST:param",
+      "Sh:param",
+      "explained_variance:"
+    ]
+  },
+  "shapley@series": {
+    "attrs": [
+      "backend",
+      "include_correlative",
+      "order"
+    ],
+    "coords": [
+      "output",
+      "param",
+      "time"
+    ],
+    "data_vars": [
+      "S1",
+      "ST",
+      "Sh",
+      "explained_variance"
+    ],
+    "dims": [
+      "output",
+      "param",
+      "time"
+    ],
+    "type": "ShapleyResult",
+    "var_dims": [
+      "S1:time,output,param",
+      "ST:time,output,param",
+      "Sh:time,output,param",
+      "explained_variance:time,output"
+    ]
+  },
+  "sobol@multi": {
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap",
+      "estimator"
+    ],
+    "coords": [
+      "output",
+      "param",
+      "param_i",
+      "param_j"
+    ],
+    "data_vars": [
+      "S1",
+      "S1_lower",
+      "S1_upper",
+      "S2",
+      "S2_lower",
+      "S2_upper",
+      "ST",
+      "ST_lower",
+      "ST_upper"
+    ],
+    "dims": [
+      "output",
+      "param",
+      "param_i",
+      "param_j"
+    ],
+    "type": "SobolResult",
+    "var_dims": [
+      "S1:output,param",
+      "S1_lower:output,param",
+      "S1_upper:output,param",
+      "S2:output,param_i,param_j",
+      "S2_lower:output,param_i,param_j",
+      "S2_upper:output,param_i,param_j",
+      "ST:output,param",
+      "ST_lower:output,param",
+      "ST_upper:output,param"
+    ]
+  },
+  "sobol@scalar": {
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap",
+      "estimator"
+    ],
+    "coords": [
+      "param",
+      "param_i",
+      "param_j"
+    ],
+    "data_vars": [
+      "S1",
+      "S1_lower",
+      "S1_upper",
+      "S2",
+      "S2_lower",
+      "S2_upper",
+      "ST",
+      "ST_lower",
+      "ST_upper"
+    ],
+    "dims": [
+      "param",
+      "param_i",
+      "param_j"
+    ],
+    "type": "SobolResult",
+    "var_dims": [
+      "S1:param",
+      "S1_lower:param",
+      "S1_upper:param",
+      "S2:param_i,param_j",
+      "S2_lower:param_i,param_j",
+      "S2_upper:param_i,param_j",
+      "ST:param",
+      "ST_lower:param",
+      "ST_upper:param"
+    ]
+  },
+  "sobol@series": {
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap",
+      "estimator"
+    ],
+    "coords": [
+      "output",
+      "param",
+      "param_i",
+      "param_j",
+      "time"
+    ],
+    "data_vars": [
+      "S1",
+      "S1_lower",
+      "S1_upper",
+      "S2",
+      "S2_lower",
+      "S2_upper",
+      "ST",
+      "ST_lower",
+      "ST_upper"
+    ],
+    "dims": [
+      "output",
+      "param",
+      "param_i",
+      "param_j",
+      "time"
+    ],
+    "type": "SobolResult",
+    "var_dims": [
+      "S1:time,output,param",
+      "S1_lower:time,output,param",
+      "S1_upper:time,output,param",
+      "S2:time,output,param_i,param_j",
+      "S2_lower:time,output,param_i,param_j",
+      "S2_upper:time,output,param_i,param_j",
+      "ST:time,output,param",
+      "ST_lower:time,output,param",
+      "ST_upper:time,output,param"
+    ]
+  },
+  "vkoga@multi": {
+    "attrs": [
+      "cv_rmse",
+      "gamma",
+      "is_correlated",
+      "n_centers",
+      "ridge"
+    ],
+    "coords": [
+      "output",
+      "param",
+      "param_i",
+      "param_j"
+    ],
+    "data_vars": [
+      "S_C",
+      "S_IU",
+      "S_TC",
+      "S_TU",
+      "S_U",
+      "correlation",
+      "rmse",
+      "variance"
+    ],
+    "dims": [
+      "output",
+      "param",
+      "param_i",
+      "param_j"
+    ],
+    "type": "VKOGAResult",
+    "var_dims": [
+      "S_C:output,param",
+      "S_IU:output,param",
+      "S_TC:output,param",
+      "S_TU:output,param",
+      "S_U:output,param",
+      "correlation:param_i,param_j",
+      "rmse:output",
+      "variance:output"
+    ]
+  },
+  "vkoga@scalar": {
+    "attrs": [
+      "cv_rmse",
+      "gamma",
+      "is_correlated",
+      "n_centers",
+      "ridge"
+    ],
+    "coords": [
+      "param",
+      "param_i",
+      "param_j"
+    ],
+    "data_vars": [
+      "S_C",
+      "S_IU",
+      "S_TC",
+      "S_TU",
+      "S_U",
+      "correlation",
+      "rmse",
+      "variance"
+    ],
+    "dims": [
+      "param",
+      "param_i",
+      "param_j"
+    ],
+    "type": "VKOGAResult",
+    "var_dims": [
+      "S_C:param",
+      "S_IU:param",
+      "S_TC:param",
+      "S_TU:param",
+      "S_U:param",
+      "correlation:param_i,param_j",
+      "rmse:",
+      "variance:"
+    ]
+  },
+  "vkoga@series": {
+    "attrs": [
+      "cv_rmse",
+      "gamma",
+      "is_correlated",
+      "n_centers",
+      "ridge"
+    ],
+    "coords": [
+      "output",
+      "param",
+      "param_i",
+      "param_j",
+      "time"
+    ],
+    "data_vars": [
+      "S_C",
+      "S_IU",
+      "S_TC",
+      "S_TU",
+      "S_U",
+      "correlation",
+      "rmse",
+      "variance"
+    ],
+    "dims": [
+      "output",
+      "param",
+      "param_i",
+      "param_j",
+      "time"
+    ],
+    "type": "VKOGAResult",
+    "var_dims": [
+      "S_C:time,output,param",
+      "S_IU:time,output,param",
+      "S_TC:time,output,param",
+      "S_TU:time,output,param",
+      "S_U:time,output,param",
+      "correlation:param_i,param_j",
+      "rmse:time,output",
+      "variance:time,output"
+    ]
+  }
+}
