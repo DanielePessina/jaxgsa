@@ -228,6 +228,7 @@ def test_pce_overfit_sums_to_one_and_flags(ishigami_data):
     fit = jaxgsa.pce.analyze(ishigami.PROBLEM, Xs, Ys, order=5, fit_ratio=0.9, verbose=False)
     # The out-of-sample error is above the spread of the data itself: the
     # expansion predicts worse than the output mean would.
+    assert fit.loo_rmse is not None
     assert float(fit.loo_rmse) > float(jnp.std(Ys))
 
 
@@ -373,16 +374,18 @@ def test_constant_output_nan_and_warns(ishigami_data, backend):
 
 
 @pytest.mark.parametrize("backend", ["hdmr", "pce"])
-def test_constant_output_with_float32_rounding_noise_is_nan(ishigami_data, backend):
-    """A constant float32 slice whose naive variance is not bit-exact zero is NaN.
+def test_constant_output_with_nonexact_float32_value_is_nan(ishigami_data, backend):
+    """A bitwise-constant float32 slice with a non-exact value is NaN.
 
-    Regression for the constant-output Shapley bug: ``Y = full(N, 0.1)`` has
-    a sample variance of about 2e-16, not zero, so the old ``var == 0`` guard
-    missed it and ``Sh`` came out finite and plausible-looking instead of NaN.
+    ``0.1`` is not exactly representable in float32, but every element of
+    ``Yc`` is the same stored value. Whether ``jnp.var(Yc)`` exposes a tiny
+    reduction-rounding artifact depends on the backend, so the test allows a
+    small variance while checking the invariant used by the constant detector.
     """
     X, _ = ishigami_data
     Yc = jnp.full(X.shape[0], 0.1)
-    assert float(jnp.var(Yc)) != 0.0, "the naive variance must be nonzero for this to test the fix"
+    assert jnp.max(Yc) == jnp.min(Yc)
+    np.testing.assert_allclose(float(jnp.var(Yc)), 0.0, atol=1e-8)
     with pytest.warns(UserWarning, match="zero variance"):
         result = _analyze_shapley(ishigami.PROBLEM, X, Yc, backend=backend)
     assert np.all(np.isnan(np.asarray(result.Sh)))
