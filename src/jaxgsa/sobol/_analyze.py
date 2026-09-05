@@ -92,6 +92,53 @@ def _get_batched_kernel(calc_second_order: bool, estimator: str):
     return jax.jit(jax.vmap(first_total_kernel(estimator), in_axes=(0, 0, 0)))
 
 
+@lru_cache(maxsize=None)
+def _get_fused_scalar_indices(D: int, calc_second_order: bool, estimator: str):
+    """Build the one-executable take + standardize + split + flatten + kernel.
+
+    The expansion gather is fused into the scalar front half when the
+    non-finite check was skipped (``on_invalid='none'``, see
+    :func:`jaxgsa._core.entry.prepare`): the expanded array is then read by
+    nothing but the estimator, so materialising it as an eager pass wastes a
+    write and a read of the whole array. Measured ~2.2x faster than the
+    eager pipeline on a million-row ishigami scalar analysis. The fused
+    graph takes the unique-row outputs and the design's expansion map, both
+    plain arrays, so the take stays traceable.
+
+    Only the scalar layout (``T * K == 1``) uses this. Wide layouts run
+    slower fused (measured ~20% worse at 32 slices: the memory planner
+    composes the big gather worse than the eager dispatch), so they expand
+    eagerly instead.
+
+    Args:
+        D: Number of input parameters.
+        calc_second_order: Whether the layout includes the BA blocks.
+        estimator: Which named estimator pair to use.
+
+    Returns:
+        A jitted function of ``(Y_raw, index_map)`` returning the raw
+        ``(S1, ST, S2)`` tuples in the pre-squeezed ``(1, 1, ...)`` shapes.
+    """
+
+    def fn(Y_raw: Array, index_map: Array) -> tuple[Array, Array, Array | None]:
+        Y3 = jnp.take(Y_raw, index_map, axis=0).reshape(-1, 1, 1)
+        A_flat, AB_flat, BA_flat, B_flat = _separate_flattened(Y3, D, calc_second_order)
+        return _point_indices_3d(
+            A_flat,
+            AB_flat,
+            BA_flat,
+            B_flat,
+            T=1,
+            K=1,
+            D=D,
+            is_scalar=True,
+            slice_chunk_size=1,
+            estimator=estimator,
+        )
+
+    return jax.jit(fn)
+
+
 def _separate_output_values(
     Y: Array, D: int, calc_second_order: bool
 ) -> tuple[Array, Array, Array | None, Array]:
@@ -460,7 +507,13 @@ def _point_indices_3d(
 
 
 def _indices_from_expanded(
-    Y: Array, D: int, calc_second_order: bool, slice_chunk_size: int | None, estimator: str
+    Y: Array,
+    D: int,
+    calc_second_order: bool,
+    slice_chunk_size: int | None,
+    estimator: str,
+    *,
+    expand_map: Array | None = None,
 ) -> tuple[Array, Array, Array | None]:
     """Compute Sobol indices from expanded-layout outputs, picking the faster kernel.
 
@@ -479,13 +532,22 @@ def _indices_from_expanded(
 
     Args:
         Y: Model outputs in the expanded Saltelli layout, shape
-            ``(base_n * step, ...)``.
+            ``(base_n * step, ...)``. The callers that defer the expansion
+            pass the unique-row outputs instead, with the design's
+            ``expanded_to_unique`` map in ``expand_map``; the gather then
+            runs fused with the standardization on the scalar layout (see
+            :func:`_get_fused_scalar_indices`) or eagerly before the
+            standard path on a wide layout.
         D: Number of input parameters.
         calc_second_order: Whether the layout includes the BA blocks.
         slice_chunk_size: Number of (T, K) output slices per vmap batch, or
             ``None`` to derive one from the active memory budget.
         estimator: Which named estimator pair to use. See
             :mod:`jaxgsa.sobol._estimators`.
+        expand_map: The design's ``expanded_to_unique`` index map, when
+            ``Y`` holds one output per unique run instead of the expanded
+            layout. ``None`` (the default, and always for the transformable
+            :func:`indices`) means ``Y`` is already expanded.
 
     Returns:
         ``(S1, ST, S2)``, with ``S2`` ``None`` when second order is off. The
@@ -494,6 +556,23 @@ def _indices_from_expanded(
     Raises:
         ValueError: If ``slice_chunk_size`` is below 1.
     """
+    if expand_map is not None:
+        # The non-finite check was skipped (on_invalid='none'), so nothing
+        # read the expanded rows before here. The scalar layout fuses the
+        # gather into the front half (one executable, measured ~2.2x faster
+        # than the eager pipeline); wide layouts run slower fused, so they
+        # gather eagerly and take the standard path below.
+        _, layout = _prepare_Y(Y)
+        if layout is YLayout.SCALAR:
+            fused = _get_fused_scalar_indices(D, calc_second_order, estimator)
+            S1_out, ST_out, S2_out = fused(Y, expand_map)
+            S1_out = layout.squeeze(S1_out)
+            ST_out = layout.squeeze(ST_out)
+            if S2_out is not None:
+                S2_out = layout.squeeze(_normalize_s2_matrix(S2_out), n_trailing=2)
+            return S1_out, ST_out, S2_out
+        Y = jnp.take(Y, expand_map, axis=0)
+
     # Promote to uniform 3-D shape (N, T, K) so downstream code is shape-agnostic.
     Y, layout = _prepare_Y(Y)
     _, T, K = Y.shape
@@ -527,6 +606,7 @@ def _analyze_no_bootstrap(
     slice_chunk_size: int | None,
     estimator: str,
     invalid: InvalidReport,
+    expand_map: Array | None = None,
 ) -> SobolResult:
     """Wrap the estimator core in a ``SobolResult``, without a bootstrap."""
     S1_out, ST_out, S2_out = _indices_from_expanded(
@@ -535,6 +615,7 @@ def _analyze_no_bootstrap(
         sampling_result.calc_second_order,
         slice_chunk_size,
         estimator,
+        expand_map=expand_map,
     )
     return SobolResult(
         S1=S1_out,
@@ -1016,7 +1097,10 @@ def analyze(
     # A/B/AB/BA split. The group count comes from the design, not from Y, so
     # it is known before Y is looked at.
     base_n = sampling_result.n_expanded // step
-
+    # The row map is the one thing the preamble builds on the host; under
+    # on_invalid='none' the check never reads it (measured ~0.6 ms of the
+    # fixed cost at base_n=16384), so it is built only where it is used.
+    unit_of_row = None if on_invalid == "none" else np.repeat(np.arange(base_n), step)
     ctx = prepare(
         SPEC,
         sampling_result.problem,
@@ -1038,13 +1122,18 @@ def analyze(
         n_expected=int(sampling_result.samples.shape[0]),
         expand=sampling_result.expand_outputs,
         n_units=base_n,
-        unit_of_row=np.repeat(np.arange(base_n), step),
+        unit_of_row=unit_of_row,
         # The Saltelli layout groups units contiguously, step rows each.
         unit_stride=step,
         # Y is checked expanded, but the caller passed one output per unique
         # run. Report the rows they hold, not the expanded ones.
         row_labels=sampling_result.expanded_to_unique,
         min_kept=2,
+        # Under on_invalid='none' the check never reads the expanded rows, so
+        # the expansion can ride along with the estimator, which fuses the
+        # gather into the front half on the scalar layout (see
+        # _get_fused_scalar_indices). Every other policy expands here.
+        defer_expand_on_none=True,
     )
     # The estimator reads the expanded layout, and its scalar fast path
     # branches on Y's own rank, so this is ctx.Y and not ctx.Y3.
@@ -1056,6 +1145,21 @@ def analyze(
         # trace, so the compaction round-trips through NumPy.
         grouped = np.asarray(Y).reshape(base_n, step, *trailing)[ctx.keep]
         Y = jnp.asarray(grouped.reshape(-1, *trailing))
+
+    # on_invalid='none' held the expansion back from the preamble (see
+    # prepare's defer_expand_on_none). A scalar analysis without a bootstrap
+    # fuses the gather into the estimator front half -- measured ~2.2x
+    # faster than the eager expansion, the gather becoming part of one
+    # executed graph instead of one pass over the expanded array. Wide
+    # layouts run slower fused (measured), and the bootstrap resamples from
+    # the expanded rows, so both expand eagerly here: the same thing prepare
+    # would have done, one dispatch earlier in the pipeline.
+    expand_map = None
+    if ctx.deferred_expand is not None:
+        if n_bootstrap == 0 and ctx.keep.all() and ctx.layout is YLayout.SCALAR:
+            expand_map = sampling_result._expanded_to_unique_jax
+        else:
+            Y = ctx.deferred_expand(Y)
 
     # The outputs are standardized inside _separate_output_values, which both
     # paths below reach, so there is nothing to do to Y here.
@@ -1081,6 +1185,7 @@ def analyze(
             slice_chunk_size=slice_chunk_size,
             estimator=estimator,
             invalid=invalid,
+            expand_map=expand_map,
         )
 
     if verbose:

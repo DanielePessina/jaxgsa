@@ -13,6 +13,7 @@ point is warranted.
 
 from __future__ import annotations
 
+import functools
 import json
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
@@ -162,6 +163,25 @@ class UniqueDesignSamples:
     # Output re-expansion
     # ------------------------------------------------------------------
 
+    @functools.cached_property
+    def _expanded_to_unique_jax(self) -> Array:
+        """Return ``expanded_to_unique`` on the device, computed once.
+
+        The map has one entry per expanded row, so at million-row scales it
+        is an 8 MB array and the per-call ``jnp.asarray`` is a measurable
+        fixed cost of every ``analyze`` (measured ~0.8 ms at base_n=16384,
+        D=30, second order). Caching it on the object makes repeat analyses
+        of the same design pay for the transfer once.
+
+        This accessor is only for eager, host-side callers (:func:`analyze`
+        and its helpers, which never run under a JAX transform). It must not
+        be called from traced code: the cache write is a side effect, and
+        the transformable :meth:`expand_outputs` deliberately converts the
+        map per call instead of using this, so ``indices`` under ``jit``
+        keeps creating its take's index as an ordinary constant.
+        """
+        return jnp.asarray(self.expanded_to_unique)
+
     def expand_outputs(self, Y: Array) -> Array:
         """Rebuild expanded-layout outputs from unique user-evaluated outputs.
 
@@ -184,6 +204,10 @@ class UniqueDesignSamples:
                 f"Y.shape[0] must match sampling_result.n_runs ({self.n_runs}), got {Y.shape[0]}"
             )
         # expanded_to_unique[i] gives the unique-row index for expanded position i
+        # The per-call conversion is deliberate: expand_outputs runs inside
+        # jit(indices(...)) traces, where a cached jit-created array on the
+        # object would be a traced-value side effect. A fresh conversion is
+        # an ordinary constant and traces cleanly.
         expanded_to_unique = jnp.asarray(self.expanded_to_unique)
         return jnp.take(Y, expanded_to_unique, axis=0)
 
