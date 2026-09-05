@@ -313,6 +313,58 @@ class TestGroupedDesigns:
         assert "They condemn trajectories [2]" in message
         assert "which covers 3 rows" in message
 
+    def test_unit_stride_fast_path_matches_generic_path(self):
+        """T4: the contiguous-block device collapse changes no verdict.
+
+        The fast path must agree with the generic weighted-bincount path on
+        every mask and every report field, and a wrong ``unit_stride`` must
+        fall back to the generic path rather than compute a wrong mask.
+        """
+        unit_of_row = np.repeat(np.arange(4), 3)
+
+        def run(policy: str, stride: int | None):
+            kwargs = {"unit_stride": stride} if stride is not None else {}
+            with pytest.warns(JaxgsaWarning):
+                return check_invalid(
+                    policy=policy,
+                    method=METHOD,
+                    unit=InvalidUnit.SALTELLI_GROUP,
+                    n_units=4,
+                    Y=_rows(4, n=12),
+                    unit_of_row=unit_of_row,
+                    **kwargs,
+                )
+
+        for policy in ("propagate", "drop"):
+            fast_keep, fast_report = run(policy, 3)
+            generic_keep, generic_report = run(policy, None)
+            # A wrong stride must fall back to the generic path, never mask.
+            wrong_keep, wrong_report = run(policy, 2)
+            assert list(fast_keep) == list(generic_keep) == list(wrong_keep)
+            assert fast_report.unit_indices == generic_report.unit_indices
+            assert np.array_equal(
+                np.asarray(fast_report.bad_row_indices),
+                np.asarray(generic_report.bad_row_indices),
+            )
+            assert fast_report.row_indices == generic_report.row_indices
+
+        # A clean sample returns the same all-True keep either way.
+        def run_clean(stride: int | None):
+            kwargs = {"unit_stride": stride} if stride is not None else {}
+            return check_invalid(
+                policy="propagate",
+                method=METHOD,
+                unit=InvalidUnit.SALTELLI_GROUP,
+                n_units=4,
+                Y=_rows(n=12),
+                unit_of_row=unit_of_row,
+                **kwargs,
+            )
+
+        fast_keep, _ = run_clean(3)
+        generic_keep, _ = run_clean(None)
+        assert list(fast_keep) == list(generic_keep) == [True, True, True, True]
+
 
 class TestWhatCountsAsInvalid:
     """T4: which values the check rejects."""

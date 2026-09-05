@@ -175,6 +175,53 @@ def _separate_output_values(
     return A, AB, BA, B
 
 
+def _separate_flattened(
+    Y: Array, D: int, calc_second_order: bool
+) -> tuple[Array, Array, Array | None, Array]:
+    """Standardize, split into the Saltelli blocks and fold the slices in one call.
+
+    Exactly :func:`_separate_output_values` followed by :func:`_flatten_slices`,
+    traced as a single executable instead of the ~8 eager dispatches the two
+    functions make over the expanded array. Both the point-estimate path and
+    the bootstrap path go through it, so they stay the one seam the estimator
+    front half always was. The row-count check of
+    :func:`_separate_output_values` runs at trace time, so a hand-built
+    misaligned ``Y`` still raises the same error.
+
+    Args:
+        Y: Expanded outputs, shape ``(N * step, ...)``, rows in Saltelli
+            group order.
+        D: Number of input parameters.
+        calc_second_order: Whether the layout includes the BA blocks.
+
+    Returns:
+        ``(A_flat, AB_flat, BA_flat, B_flat)`` with shapes ``(S, N)``,
+        ``(S, N, D)``, ``(S, N, D)`` and ``(S, N)``; ``BA_flat`` is ``None``
+        when second order is off. Standardized per output slice, exactly as
+        the two component functions produced.
+    """
+    return _get_separate_flatten(D, calc_second_order)(Y)
+
+
+@lru_cache(maxsize=None)
+def _get_separate_flatten(D: int, calc_second_order: bool):
+    """Build the jitted standardize-split-flatten for one (D, design) pair.
+
+    ``D`` and ``calc_second_order`` are Python ints and bools in every traced
+    call, but as jit arguments they would arrive as tracers and break the
+    ``step`` arithmetic and the bounded slices inside
+    :func:`_separate_output_values`. Closing over them, and keying the jit
+    cache on them, keeps both static, the same pattern the estimator kernels
+    use for ``calc_second_order`` and ``estimator``.
+    """
+
+    def fn(Y: Array) -> tuple[Array, Array, Array | None, Array]:
+        A, AB, BA, B = _separate_output_values(Y, D, calc_second_order)
+        return _flatten_slices(A, AB, BA, B)
+
+    return jax.jit(fn)
+
+
 def _symmetrize_s2(S2: Array) -> Array:
     """Average the upper and lower triangles of a raw S2 matrix.
 
@@ -451,8 +498,7 @@ def _indices_from_expanded(
     Y, layout = _prepare_Y(Y)
     _, T, K = Y.shape
 
-    A, AB, BA, B = _separate_output_values(Y, D, calc_second_order)
-    A_flat, AB_flat, BA_flat, B_flat = _flatten_slices(A, AB, BA, B)
+    A_flat, AB_flat, BA_flat, B_flat = _separate_flattened(Y, D, calc_second_order)
 
     S1_out, ST_out, S2_out = _point_indices_3d(
         A_flat,
@@ -612,9 +658,8 @@ def _analyze_bootstrap(
     calc_second_order = sampling_result.calc_second_order
 
     _, T, K = Y.shape
-    A, AB, BA, B = _separate_output_values(Y, D, calc_second_order)
-    base_n = A.shape[0]
-    A_flat, AB_flat, BA_flat, B_flat = _flatten_slices(A, AB, BA, B)
+    A_flat, AB_flat, BA_flat, B_flat = _separate_flattened(Y, D, calc_second_order)
+    base_n = A_flat.shape[1]
     total = T * K
 
     # Pre-generate all R bootstrap index sets (sampling with replacement).
@@ -994,6 +1039,8 @@ def analyze(
         expand=sampling_result.expand_outputs,
         n_units=base_n,
         unit_of_row=np.repeat(np.arange(base_n), step),
+        # The Saltelli layout groups units contiguously, step rows each.
+        unit_stride=step,
         # Y is checked expanded, but the caller passed one output per unique
         # run. Report the rows they hold, not the expanded ones.
         row_labels=sampling_result.expanded_to_unique,

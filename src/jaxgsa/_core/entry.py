@@ -271,6 +271,7 @@ def prepare(
     expand: Callable[[Array], Array] | None = None,
     n_units: int | None = None,
     unit_of_row: npt.NDArray[np.intp] | None = None,
+    unit_stride: int | None = None,
     row_labels: npt.NDArray[np.intp] | None = None,
     min_kept: int = 1,
     source_names: tuple[str, str] = ("X", "Y"),
@@ -333,6 +334,13 @@ def prepare(
             row count, which is right whenever one row is one unit.
         unit_of_row: For each row, the unit it belongs to. ``None`` when one
             row is one unit.
+        unit_stride: Rows per unit, when ``unit_of_row`` is the
+            equal-contiguous-blocks pattern
+            ``np.repeat(np.arange(n_units), unit_stride)``. Forwarded to the
+            non-finite check, which collapses the per-unit verdict on the
+            device instead of counting bad rows on the host; verified
+            exactly, so a wrong stride falls back to the generic path.
+            ``None`` (the default) always takes the generic path.
         row_labels: For each row checked here, the row the caller holds.
             A design-based method checks the expanded layout, but the caller
             evaluated one output per unique run, so the report has to name the
@@ -407,6 +415,7 @@ def prepare(
         X=X,
         extras=extra_arrays.values(),
         unit_of_row=unit_of_row,
+        unit_stride=unit_stride,
         row_labels=row_labels,
         min_kept=min_kept,
         source_names=source_names,

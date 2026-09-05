@@ -402,6 +402,8 @@ def analyze(
         expand=sampling_result.expand_outputs,
         n_units=r,
         unit_of_row=np.repeat(np.arange(r), rows_per_traj),
+        # One trajectory is one unit of rows_per_traj contiguous rows.
+        unit_stride=rows_per_traj,
         # Y is checked expanded, but the caller evaluated one output per
         # unique run. Report the rows they hold, not the expanded ones.
         row_labels=sampling_result.expanded_to_unique,

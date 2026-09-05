@@ -267,6 +267,7 @@ def _finite_by_unit(
     *,
     n_units: int,
     unit_of_row: npt.NDArray[np.intp] | None,
+    unit_stride: int | None = None,
 ) -> tuple[npt.NDArray[np.bool_], npt.NDArray[np.bool_] | None]:
     """Return per-unit and per-row masks, False where a bad value sits.
 
@@ -276,14 +277,21 @@ def _finite_by_unit(
         n_units: Number of units to report on.
         unit_of_row: For each row of ``array``, the unit it belongs to. Pass
             ``None`` when rows and units are the same thing.
+        unit_stride: Rows per unit, when the caller knows the map is the
+            equal-contiguous-blocks pattern ``repeat(arange(n_units),
+            unit_stride)``. Enables a device-side collapse that skips the
+            per-row host verdicts; see the fast path below. ``None`` (the
+            default) always takes the generic weighted-``bincount`` path.
 
     Returns:
         A tuple ``(unit_ok, row_ok)``. ``unit_ok`` has shape ``(n_units,)`` and
         is True where the unit is clean. ``row_ok`` has one entry per row of
         ``array`` and is True where that row is clean, or is ``None`` when
-        there was no array to check. The row verdict is kept because a unit
-        can span hundreds of rows and only one of them failed; the report
-        names both.
+        there was no array to check **or when the contiguous fast path ran**
+        (the caller needs row verdicts only for the invalid report, which is
+        the rare path, and re-derives them there). The row verdict is kept
+        because a unit can span hundreds of rows and only one of them failed;
+        the report names both.
     """
     if array is None:
         return np.ones(n_units, dtype=bool), None
@@ -296,18 +304,68 @@ def _finite_by_unit(
     # the one bit per row. Pulling the whole array to the host would move
     # `n_rows * T * K` floats to decide `n_rows` booleans, and for a Saltelli
     # design that array is the expanded one, not the caller's.
-    reduced = jnp.isfinite(array.reshape(array.shape[0], -1)).all(axis=1)
-    row_ok: npt.NDArray[np.bool_] = np.asarray(reduced)
-
+    #
+    # The row scan is computed exactly once, inside whichever branch uses it:
+    # both scans feed the same verdict, and eager JAX executes every op it
+    # traces, so computing the row mask before the branch would run the
+    # million-row scan twice on designs that take the fast path below.
     if unit_of_row is None:
+        row_ok = np.asarray(jnp.isfinite(array.reshape(array.shape[0], -1)).all(axis=1))
         return row_ok, row_ok
 
+    if unit_stride is not None and _is_contiguous_blocks(unit_of_row, n_units, unit_stride):
+        # The units are equal contiguous blocks of rows, so the verdict can
+        # collapse straight to one boolean per unit on the device. Only
+        # ``n_units`` booleans cross to the host, instead of one per row:
+        # the alternative, ``bincount``-ing a float weight per row, is the
+        # single most expensive host op in the entry path of a large
+        # design (measured ~5 ms over a million rows, vs under a
+        # millisecond for this path at scalar width). The collapse is two
+        # reductions: row verdicts over the trailing (contiguous) axis,
+        # then the block verdicts over the short unit axis. Collapsing
+        # straight from the raw array -- ``(n_units, unit_stride,
+        # trailing).all(axis=(1, 2))`` -- reduces a strided middle axis
+        # instead, which XLA vectorises poorly and measured 8-10x slower
+        # on wide outputs. The per-row verdict is returned as ``None`` on
+        # purpose: the caller needs it only for the invalid report, which
+        # is the rare path, and re-derives it there.
+        row_ok_dev = jnp.all(jnp.isfinite(array.reshape(array.shape[0], -1)), axis=1)
+        unit_ok = np.asarray(jnp.all(row_ok_dev.reshape(n_units, unit_stride), axis=1))
+        return unit_ok, None
+
+    row_ok = np.asarray(jnp.isfinite(array.reshape(array.shape[0], -1)).all(axis=1))
     # Scatter the row verdicts onto their units: a unit is clean only when
     # every one of its rows is. `bincount` counts the bad rows per unit in one
     # pass, which beats `np.logical_and.at` by more than a factor of ten, and
     # works for any row map -- contiguous blocks and strided ones alike.
     n_bad_per_unit = np.bincount(unit_of_row, weights=~row_ok, minlength=n_units)
     return n_bad_per_unit == 0, row_ok
+
+
+def _is_contiguous_blocks(
+    unit_of_row: npt.NDArray[np.intp], n_units: int, unit_stride: int
+) -> bool:
+    """Report whether ``unit_of_row`` groups units into equal contiguous blocks.
+
+    The fast path of :func:`_finite_by_unit` relies on the row map being
+    ``np.repeat(np.arange(n_units), unit_stride)``: that is what lets the
+    per-unit verdict be computed with a device reshape-reduce instead of a
+    host weighted ``bincount`` over every row. The check is exact (no
+    tolerance), so a caller that passes a wrong ``unit_stride`` gets the
+    correct slow path, never a wrong mask.
+
+    Args:
+        unit_of_row: Row-to-unit map, one entry per row.
+        n_units: Number of units.
+        unit_stride: Rows per unit the caller claims.
+
+    Returns:
+        True only when the map is exactly the equal-contiguous-blocks pattern.
+    """
+    if unit_of_row.shape[0] != n_units * unit_stride:
+        return False
+    expected = np.repeat(np.arange(n_units), unit_stride)
+    return bool(np.array_equal(unit_of_row, expected))
 
 
 def check_invalid(
@@ -320,6 +378,7 @@ def check_invalid(
     X: npt.ArrayLike | None = None,
     extras: Iterable[npt.ArrayLike] = (),
     unit_of_row: npt.NDArray[np.intp] | None = None,
+    unit_stride: int | None = None,
     row_labels: npt.NDArray[np.intp] | None = None,
     min_kept: int = 1,
     source_names: tuple[str, str] = ("X", "Y"),
@@ -345,6 +404,14 @@ def check_invalid(
             combined, so large companion arrays do not get concatenated.
         unit_of_row: For each row, the unit it belongs to. Pass ``None`` when
             one row is one unit.
+        unit_stride: Rows per unit, when the caller knows ``unit_of_row`` is
+            ``np.repeat(np.arange(n_units), unit_stride)``, i.e. units are
+            equal contiguous blocks of rows. Lets the per-unit verdict be
+            computed on the device, skipping a host ``bincount`` over every
+            row -- the dominant fixed cost of the entry path on designs with
+            millions of expanded rows. The pattern is verified exactly, so a
+            wrong stride falls back to the generic path, never a wrong mask.
+            ``None`` (the default) always takes the generic path.
         row_labels: For each row of the arrays given here, the row of the
             **caller's** array it came from. Pass it whenever the two differ,
             so the report points at rows the caller can actually find. Sobol
@@ -378,22 +445,38 @@ def check_invalid(
     extra_arrays = tuple(_as_array(array) for array in extras)
     _check_extra_row_counts(y_array, x_array, extra_arrays, unit_of_row=unit_of_row)
 
-    y_ok, y_rows = _finite_by_unit(y_array, n_units=n_units, unit_of_row=unit_of_row)
+    y_ok, y_rows = _finite_by_unit(
+        y_array, n_units=n_units, unit_of_row=unit_of_row, unit_stride=unit_stride
+    )
     for extra_array in extra_arrays:
         extra_ok, extra_rows = _finite_by_unit(
-            extra_array, n_units=n_units, unit_of_row=unit_of_row
+            extra_array,
+            n_units=n_units,
+            unit_of_row=unit_of_row,
+            unit_stride=unit_stride,
         )
         y_ok = y_ok & extra_ok
         if y_rows is None:
             y_rows = extra_rows
         elif extra_rows is not None:
             y_rows = y_rows & extra_rows
-    x_ok, x_rows = _finite_by_unit(x_array, n_units=n_units, unit_of_row=unit_of_row)
+    x_ok, x_rows = _finite_by_unit(
+        x_array, n_units=n_units, unit_of_row=unit_of_row, unit_stride=unit_stride
+    )
     clean = y_ok & x_ok
 
     n_invalid = int((~clean).sum())
     if n_invalid == 0:
         return np.ones(n_units, dtype=bool), _clean_report(unit, n_units, policy)
+
+    # The report names the bad rows, which the fast path deliberately left on
+    # the device. Re-derive the per-row verdicts only here, on the rare path
+    # that actually uses them; the fast path is then no slower than the
+    # generic one when something is wrong.
+    if y_rows is None:
+        _, y_rows = _finite_by_unit(y_array, n_units=n_units, unit_of_row=unit_of_row)
+    if x_rows is None:
+        _, x_rows = _finite_by_unit(x_array, n_units=n_units, unit_of_row=unit_of_row)
 
     x_name, y_name = source_names
     sources = tuple(name for name, ok in ((x_name, x_ok), (y_name, y_ok)) if bool((~ok).any()))

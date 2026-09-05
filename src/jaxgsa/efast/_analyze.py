@@ -423,6 +423,8 @@ def analyze(
         # still names the curve to investigate.
         n_units=D,
         unit_of_row=np.repeat(np.arange(D), N),
+        # One search curve is one unit of N contiguous rows.
+        unit_stride=N,
     )
     invalid = ctx.invalid
     Y = ctx.Y3
