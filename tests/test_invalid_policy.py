@@ -40,7 +40,7 @@ class TestResolvePolicy:
         message = str(exc.value)
         assert repr(bad) in message
         assert METHOD in message
-        for policy in ("raise", "propagate", "drop"):
+        for policy in ("raise", "propagate", "drop", "none"):
             assert repr(policy) in message
 
     def test_drop_refused_where_it_is_undefined(self):
@@ -85,6 +85,87 @@ class TestCleanSample:
         assert report.n_kept == 6
         assert report.sources == ()
         assert len(recwarn) == 0
+
+
+class TestNonePolicy:
+    """T4: on_invalid='none' skips the scan entirely."""
+
+    def test_resolve_accepts_none_for_every_unit(self):
+        """T4: 'none' survives allow_drop=False, where 'drop' does not."""
+        for unit in InvalidUnit:
+            assert (
+                resolve_policy("none", method=METHOD, unit=unit, allow_drop=False)
+                == "none"
+            )
+
+    def test_nan_data_is_not_looked_at(self):
+        """T4: bad data under 'none' keeps everything and reports clean.
+
+        The check never runs, so the verdict is the clean one even though two
+        rows hold NaN. The keep mask stays all-True, so the caller applies no
+        compaction, and the report cannot name rows that were never scanned.
+        """
+        keep, report = check_invalid(
+            policy="none",
+            method=METHOD,
+            unit=InvalidUnit.ROW,
+            n_units=6,
+            Y=_rows(2, 5),
+            X=_rows(3),
+        )
+        assert keep.all()
+        assert report.policy == "none"
+        assert report.n_invalid == 0
+        assert not report.any_invalid
+        assert report.n_kept == 6
+        assert report.sources == ()
+
+    def test_nan_extra_arrays_are_not_looked_at(self):
+        """T4: companion arrays are skipped with Y -- no raise, no drop.
+
+        The shape consistency check still runs: an extra array with a
+        different row count is a design error, not a data-quality question.
+        """
+        keep, report = check_invalid(
+            policy="none",
+            method=METHOD,
+            unit=InvalidUnit.SALTELLI_GROUP,
+            n_units=2,
+            Y=np.arange(12.0).reshape(12, 1),
+            extras=[np.full((12, 3), np.nan)],
+            unit_of_row=np.repeat(np.arange(2), 6),
+        )
+        assert keep.all()
+        assert report.n_invalid == 0
+        with pytest.raises(ValueError, match="same number of sample rows"):
+            check_invalid(
+                policy="none",
+                method=METHOD,
+                unit=InvalidUnit.ROW,
+                n_units=6,
+                Y=_rows(),
+                extras=[np.zeros((5, 1))],
+            )
+
+    def test_clean_data_verdict_matches_propagate_exactly(self):
+        """T4: on clean data 'none' and 'propagate' agree on keep and report.
+
+        Everything but the policy field has to be identical, because that is
+        the contract the estimator relies on: keep + report decide the rest,
+        whatever policy ran.
+        """
+        Y = _rows()
+        keep_none, report_none = check_invalid(
+            policy="none", method=METHOD, unit=InvalidUnit.ROW, n_units=6, Y=Y
+        )
+        keep_prop, report_prop = check_invalid(
+            policy="propagate", method=METHOD, unit=InvalidUnit.ROW, n_units=6, Y=Y
+        )
+        assert np.array_equal(keep_none, keep_prop)
+        assert report_none.n_invalid == report_prop.n_invalid == 0
+        assert report_none.unit_indices == report_prop.unit_indices == ()
+        assert report_none.bad_row_indices == report_prop.bad_row_indices == ()
+        assert report_none.n_kept == report_prop.n_kept
 
 
 class TestRaisePolicy:

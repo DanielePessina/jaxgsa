@@ -1,3 +1,5 @@
+import warnings
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -561,5 +563,45 @@ def test_constant_output_with_float32_rounding_noise_still_reads_as_zero_varianc
     assert float(jnp.var(Y)) != 0.0, "the naive variance must be nonzero for this to test the fix"
     with pytest.warns(UserWarning, match="zero variance"):
         result = jaxgsa.sobol.analyze(sr, Y, verbose=False)
+    assert jnp.all(jnp.isnan(result.S1))
+    assert jnp.all(jnp.isnan(result.ST))
+
+
+def test_on_invalid_none_matches_raise_exactly_on_clean_data():
+    """on_invalid='none' skips the scans; on clean data the indices are bit-identical.
+
+    The estimator sees the same standardized arrays under both policies, so
+    nothing but the missing validation can differ -- and validation cannot
+    change a clean sample. The report records that the check never ran.
+    """
+    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**12 * 8, seed=0, verbose=False)
+    Y = evaluate(jnp.asarray(sr.samples))
+    ref = jaxgsa.sobol.analyze(sr, Y, verbose=False)
+    fast = jaxgsa.sobol.analyze(sr, Y, on_invalid="none", verbose=False)
+    assert np.array_equal(np.array(fast.S1), np.array(ref.S1))
+    assert np.array_equal(np.array(fast.ST), np.array(ref.ST))
+    assert np.array_equal(np.array(fast.S2), np.array(ref.S2), equal_nan=True)
+    assert fast.invalid.policy == "none"
+    assert not fast.invalid.any_invalid
+    assert fast.invalid.n_units == ref.invalid.n_units
+
+
+def test_on_invalid_none_lets_nan_reach_the_indices_without_raising():
+    """A NaN under 'none' is not looked at: no raise, no warning, NaN indices."""
+    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=256, base_n=64, seed=0, verbose=False)
+    Y = evaluate(jnp.asarray(sr.samples))
+    Y_broken = Y.at[0].set(jnp.nan)
+    result = jaxgsa.sobol.analyze(sr, Y_broken, on_invalid="none", verbose=False)
+    assert jnp.all(jnp.isnan(result.S1))
+    assert jnp.all(jnp.isnan(result.ST))
+
+
+def test_on_invalid_none_skips_the_zero_variance_warning():
+    """A constant slice under 'none' produces NaN indices without a warning."""
+    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=256, base_n=64, seed=0, verbose=False)
+    Y = jnp.full(sr.n_runs, 0.1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        result = jaxgsa.sobol.analyze(sr, Y, on_invalid="none", verbose=False)
     assert jnp.all(jnp.isnan(result.S1))
     assert jnp.all(jnp.isnan(result.ST))

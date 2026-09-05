@@ -290,6 +290,15 @@ group is a real option, and `on_invalid='drop'` does it, but understand that you
 are then estimating over a design with a hole in it. Chasing down run 17 is
 usually the better answer.
 
+If you have already sanitized the output yourself, `on_invalid='none'` skips
+both validation passes over it (the non-finite check and the constant-slice
+warning) and analyzes the data exactly as given. A `NaN` that reaches the
+estimator then flows into the indices, and a constant slice turns into `NaN`
+indices without a warning — which is precisely the trade it is for: on a
+million-row Saltelli design the two scans are most of the fixed cost of an
+analysis. The shape checks stay, because a misaligned output would silently
+corrupt the block split.
+
 ## Controlling jaxgsa's warnings
 
 Not everything jaxgsa objects to is fatal. A result that is degraded but still

@@ -311,7 +311,11 @@ def prepare(
         problem: The problem definition.
         Y: The caller's model output.
         X: The input matrix, or ``None`` for a design-based method.
-        on_invalid: The caller's non-finite policy, unvalidated.
+        on_invalid: The caller's non-finite policy, unvalidated. Under
+            ``"none"`` (see :mod:`jaxgsa._core.invalid`) the non-finite scan
+            does not run, no row is dropped, and the constant-slice warning is
+            skipped with it: the analysis runs on the data exactly as given.
+            The shape contracts still run, because they cost no scan.
         checks: Verdicts on the method's own scalar arguments, reported in
             order before anything else runs.
         method: Fully qualified analyzer name. Defaults to
@@ -432,7 +436,7 @@ def prepare(
 
     Y3, layout = _prepare_Y(Y)
 
-    if warn_zero_variance:
+    if warn_zero_variance and policy != "none":
         # The warning has to see what the estimator will see. For a grouped
         # unit the caller has not compacted yet, so the surviving rows are
         # selected here; leaving the dropped rows in would hide a constant

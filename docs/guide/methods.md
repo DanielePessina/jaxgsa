@@ -672,7 +672,7 @@ The analytical values are $S_1 = [0.3139, 0.4424, 0]$ and $S_T = [0.5576, 0.4424
 
 Honestly, most of the time. Saltelli gives you $S_2$ as well, takes `on_invalid="drop"`, and supports bootstrap intervals, none of which eFAST does. Pick eFAST when the run budget is the binding constraint and you have measured that $N \times D$ beats $N'(D+2)$ at the accuracy you need. Specifically, it is the wrong choice when:
 
-- **Any model run can fail.** eFAST's design is an ordered sweep read by a Fourier transform. One `NaN` and you have `"raise"` or `"propagate"` and nothing else. `on_invalid="drop"` raises, and says why.
+- **Any model run can fail.** eFAST's design is an ordered sweep read by a Fourier transform. One `NaN` and you have `"raise"`, `"propagate"` or `"none"` and nothing else. `on_invalid="drop"` raises, and says why.
 - **You need a confidence interval.** There is nothing to resample inside one search curve. An eFAST interval needs replicated designs at different random phases, which is a change to `sample()`, not a keyword on `analyze()`.
 - **You need $S_2$.** It cannot produce them at all.
 - **Your parameters are correlated or categorical.** eFAST refuses both.
@@ -1604,7 +1604,7 @@ The default refuses, because an index computed from part of a sample is a differ
 
 What `"drop"` removes depends on the design. A Saltelli group, a Morris trajectory and a Kucherenko base point are each read as one block, so a single bad value removes the whole block. Keeping part of a block would leave the estimator reading rows that no longer line up, and nothing would report an error. For the methods that take any `(X, Y)` sample, one bad value removes one row. A bad input row always takes its matching output row with it.
 
-`jaxgsa.efast.analyze()` accepts only `"raise"` and `"propagate"`. Its design is an ordered sweep read by a Fourier transform, so removing a point does not shrink the sample; it changes what the estimator computes. Asking for `"drop"` there raises and says so.
+`jaxgsa.efast.analyze()` accepts `"raise"`, `"propagate"` and `"none"`; `"drop"` is refused. Its design is an ordered sweep read by a Fourier transform, so removing a point does not shrink the sample; it changes what the estimator computes. Asking for `"drop"` there raises and says so.
 
 Whatever you choose, the result carries an `invalid` report:
 

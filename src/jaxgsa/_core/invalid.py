@@ -2,7 +2,7 @@
 
 A model that fails on some of its runs returns ``NaN`` or ``inf``. Every
 ``analyze()`` entry point answers that the same way, through one keyword,
-``on_invalid``, with the same three values:
+``on_invalid``, with four values:
 
 ``"raise"``
     Refuse the analysis. This is the default. An index computed from a partial
@@ -18,9 +18,20 @@ A model that fails on some of its runs returns ``NaN`` or ``inf``. Every
     Remove the affected data and analyze what is left. What "affected data"
     means depends on the design; see :class:`InvalidUnit`.
 
+``"none"``
+    Skip the non-finite check entirely. The analysis runs on the data exactly
+    as given, and the constant-slice warning is skipped with it. On a design
+    with millions of expanded rows the two scans are most of the fixed cost
+    of an analysis, so this is the fast path for a user who has already
+    sanitized the output. A ``NaN`` that reaches the estimator flows into the
+    indices, and a constant slice turns into ``NaN`` indices without a word.
+    The shape contracts still run: a misaligned output would silently corrupt
+    a block split, and checking the shape costs no data scan.
+
 Whatever the policy, the count and the position of the affected data are
-recorded in an :class:`InvalidReport`, which every result class carries. The
-report is the part that matters in practice: it names the runs to investigate.
+recorded in an :class:`InvalidReport` — under ``"none"`` the check never
+ran, so the report always says clean. The report is the part that matters in
+practice: it names the runs to investigate.
 
 Note:
     ``"drop"`` is not available everywhere, and the restrictions are not
@@ -61,9 +72,9 @@ __all__ = [
     "resolve_policy",
 ]
 
-OnInvalid: TypeAlias = Literal["raise", "propagate", "drop"]
+OnInvalid: TypeAlias = Literal["raise", "propagate", "drop", "none"]
 
-_POLICIES: tuple[str, ...] = ("raise", "propagate", "drop")
+_POLICIES: tuple[str, ...] = ("raise", "propagate", "drop", "none")
 
 # Below this many surviving units the estimate is not worth reporting without
 # saying so. One floor, applied everywhere a "drop" policy can leave a sample
@@ -140,9 +151,11 @@ class InvalidReport:
     was removed, because that is the numbering the caller can act on.
 
     Attributes:
-        policy: The policy that ran: ``"raise"``, ``"propagate"`` or
-            ``"drop"``. A report with ``policy="raise"`` only exists when
-            nothing was found, since otherwise the call raised.
+        policy: The policy that ran: ``"raise"``, ``"propagate"``,
+            ``"drop"`` or ``"none"``. A report with ``policy="raise"`` only
+            exists when nothing was found, since otherwise the call raised. A
+            report with ``policy="none"`` means the check never ran: it is
+            always clean, because nothing was looked at.
         unit: The block of data one bad value invalidates. See
             :class:`InvalidUnit`.
         n_units: Total number of units in the sample before any removal.
@@ -240,7 +253,7 @@ def resolve_policy(
         The validated policy.
 
     Raises:
-        ValueError: If the value is not one of the three policies, or if it is
+        ValueError: If the value is not one of the four policies, or if it is
             ``"drop"`` where dropping is not defined.
     """
     if not isinstance(on_invalid, str) or on_invalid not in _POLICIES:
@@ -391,7 +404,12 @@ def check_invalid(
     tables alongside the outputs, and only Morris knows that.
 
     Args:
-        policy: The validated policy, from :func:`resolve_policy`.
+        policy: The validated policy, from :func:`resolve_policy`. Under
+            ``"none"`` the scan does not run at all: the verdict is that every
+            unit is clean, the report is the clean report, and the caller
+            applies no mask. The shape consistency check on the companion
+            arrays still runs, because a misnumbered array would silently
+            corrupt an estimator even when nothing is scanned.
         method: Fully qualified name of the calling function, for messages.
         unit: The block of data one bad value invalidates.
         n_units: Number of units in the sample.
@@ -444,6 +462,15 @@ def check_invalid(
     x_array = _as_array(X)
     extra_arrays = tuple(_as_array(array) for array in extras)
     _check_extra_row_counts(y_array, x_array, extra_arrays, unit_of_row=unit_of_row)
+
+    if policy == "none":
+        # No scan: the caller has asserted the data is clean. The keep mask is
+        # all-True and the report is the clean one, so the estimator's book-
+        # keeping sees exactly what it sees under "propagate" on a clean
+        # sample, without a single pass over the expanded rows. The contract
+        # the other policies hold -- keep + report decide the rest -- is
+        # intact, so the callers below need no "none" branches of their own.
+        return np.ones(n_units, dtype=bool), _clean_report(unit, n_units, policy)
 
     y_ok, y_rows = _finite_by_unit(
         y_array, n_units=n_units, unit_of_row=unit_of_row, unit_stride=unit_stride
