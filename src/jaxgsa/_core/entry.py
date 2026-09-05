@@ -54,7 +54,7 @@ them rather than bending them:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -403,8 +403,9 @@ def prepare(
         method=method,
         unit=unit,
         n_units=int(Y.shape[0]) if n_units is None else n_units,
-        Y=_model_side(Y, extra_arrays.values()) if extra_arrays else Y,
+        Y=Y,
         X=X,
+        extras=extra_arrays.values(),
         unit_of_row=unit_of_row,
         row_labels=row_labels,
         min_kept=min_kept,
@@ -485,32 +486,3 @@ def validate_inputs(problem: Problem, X: Any) -> Array:
     X = jnp.asarray(X)
     _validate_x(problem, X)
     return X
-
-
-def _model_side(Y: Array, extras: Iterable[Array]) -> Array:
-    """Stack the output and its companion arrays into one block for the check.
-
-    :func:`jaxgsa._core.invalid.check_invalid` takes two arrays and labels them
-    ``"X"`` and ``"Y"``. A method with a third sample-axis array has to put it
-    somewhere, and everything the model produced belongs on the ``"Y"`` side:
-    a non-finite derivative is a non-finite model, whatever the output does.
-    Flattening each array past its leading axis is what lets arrays of
-    different rank sit side by side; only finiteness is read off the result.
-
-    The block is built on device, in whatever dtype the caller's arrays
-    promote to. Building it on the host in ``float64`` would be a round trip
-    to nothing: ``check_invalid`` hands the block straight back to
-    ``jnp.asarray``, so with x64 off the widened values are truncated again on
-    the way in. Worse, that truncation can change the verdict — a finite
-    float64 magnitude above the float32 range becomes ``inf``, and the row
-    would be reported as non-finite output the caller cannot find.
-
-    Args:
-        Y: Model output, leading axis the sample axis.
-        extras: Further arrays with the same leading axis.
-
-    Returns:
-        A 2-D array of shape ``(N, ·)`` holding all of them.
-    """
-    blocks = [jnp.asarray(a).reshape(jnp.asarray(a).shape[0], -1) for a in (Y, *extras)]
-    return jnp.concatenate(blocks, axis=1)

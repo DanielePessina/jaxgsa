@@ -316,7 +316,7 @@ def _prep_sobol(case: Case) -> Callable[[], Any]:
     y = widen(ishigami.evaluate(jnp.asarray(sr.samples)), case.shape)
     jax.block_until_ready(y)
     key = jax.random.key(SEED)
-    return lambda: sobol.analyze(sr, y, num_resamples=20, key=key)
+    return lambda: sobol.analyze(sr, y, n_bootstrap=20, key=key)
 
 
 def _prep_morris(case: Case) -> Callable[[], Any]:
@@ -324,7 +324,7 @@ def _prep_morris(case: Case) -> Callable[[], Any]:
     y = widen(ishigami.evaluate(jnp.asarray(sr.samples)), case.shape)
     jax.block_until_ready(y)
     key = jax.random.key(SEED)
-    return lambda: morris.analyze(sr, y, num_resamples=20, key=key)
+    return lambda: morris.analyze(sr, y, n_bootstrap=20, key=key)
 
 
 def _prep_efast(case: Case) -> Callable[[], Any]:

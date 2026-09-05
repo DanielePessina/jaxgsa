@@ -33,7 +33,7 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core import verbose as _verbose
-from jaxgsa._core.bootstrap import interval
+from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints, interval
 from jaxgsa._core.entry import (
     at_least,
     check_scalars,
@@ -43,13 +43,18 @@ from jaxgsa._core.entry import (
     require,
 )
 from jaxgsa._core.invalid import InvalidReport, OnInvalid
+from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
     YLayout,
     _prepare_Y,
     _standardize_outputs,
 )
 from jaxgsa.sobol._bootstrap import _bootstrap_indices
-from jaxgsa.sobol._chunking import pad_slice_axis, resolve_point_chunk_size
+from jaxgsa.sobol._chunking import (
+    pad_slice_axis,
+    resolve_point_chunk_size,
+    resolve_resample_chunk_size,
+)
 from jaxgsa.sobol._estimators import (
     DEFAULT_ESTIMATOR,
     ESTIMATORS,
@@ -595,12 +600,12 @@ def _analyze_bootstrap(
 
     The draws follow the same shape one level deeper. The atomic unit is one
     estimator call on one slice and one resample; the resamples of a slice are
-    ``vmap``ped, that pair is ``vmap``ped over a chunk of slices, and the
-    chunks are looped over. One device call therefore covers
-    ``chunk * R`` estimator evaluations instead of the ``R`` a per-slice loop
-    managed. ``slice_chunk_size`` caps the slices per chunk and the memory
-    budget can lower it further, so the peak stays bounded: no call
-    materialises more than ``chunk * R`` copies of an (N,) or (N, D) slice.
+    vmapped in a bounded batch, that pair is vmapped over a chunk of slices,
+    and both loops run on the host. The pre-generated random index matrix is
+    sliced contiguously, so changing either width does not change any draw.
+    When ``keep_replicates=False``, each output chunk is reduced to CI
+    endpoints before the next chunk is processed. Keeping replicates opts in
+    to assembling the full public draw arrays.
     """
     Y, layout = _prepare_Y(Y)
     D = sampling_result.n_params
@@ -641,40 +646,115 @@ def _analyze_bootstrap(
         n_bootstrap=n_bootstrap,
     )
 
-    s1_boot, st_boot, s2_boot_raw = _bootstrap_indices(
-        resample_idx, A_flat, AB_flat, BA_flat, B_flat, cs, estimator
+    # A slice chunk can be large enough for the point path but still leave an
+    # unbounded R axis in the bootstrap gather. Resolve the second width from
+    # the same transient working-set model. The input/resample arrays and the
+    # final result remain resident, so this bounds the estimator transient.
+    rs = resolve_resample_chunk_size(
+        n_bootstrap,
+        base_n,
+        D,
+        calc_second_order,
+        A_flat.dtype.itemsize,
+        cs,
     )
-    S1_boot = jnp.moveaxis(s1_boot, 1, 0).reshape(n_bootstrap, T, K, D)
-    ST_boot = jnp.moveaxis(st_boot, 1, 0).reshape(n_bootstrap, T, K, D)
 
-    points = {"S1": S1_out, "ST": ST_out}
-    draws = {"S1": S1_boot, "ST": ST_boot}
-
+    S1_flat = S1_out.reshape(total, D)
+    ST_flat = ST_out.reshape(total, D)
     S2_sym = None
     if calc_second_order:
-        assert S2_raw is not None and s2_boot_raw is not None
-        # (S, R, D, D) -> (R, T, K, D, D): the CI helpers and the replicate
-        # layout both want the resample axis first.
-        S2_boot_raw = jnp.moveaxis(s2_boot_raw, 1, 0).reshape(n_bootstrap, T, K, D, D)
-        # Symmetrise the point estimate and every draw before either reaches
-        # a confidence interval, so the interval describes the same
-        # symmetrised quantity the point estimate reports (see
-        # _symmetrize_s2). The diagonal stays whatever it computed to here;
-        # it is masked to NaN once, below, after the interval is read.
+        assert S2_raw is not None
         S2_sym = _symmetrize_s2(S2_raw)
-        points["S2"] = S2_sym
-        draws["S2"] = _symmetrize_s2(S2_boot_raw)
+        S2_flat = S2_sym.reshape(total, D, D)
+    else:
+        S2_flat = None
 
-    # One call turns every point/draws pair into its `*_conf` endpoints and
-    # the CIInfo the result carries; see jaxgsa._core.bootstrap.interval.
-    conf, ci = interval(
-        points,
-        draws,
-        level=conf_level,
-        method=ci_method,
-        n_bootstrap=n_bootstrap,
-        keep_replicates=keep_replicates,
-    )
+    s1_draw_parts, st_draw_parts, s2_draw_parts = [], [], []
+    s1_conf_parts, st_conf_parts, s2_conf_parts = [], [], []
+    for start in range(0, total, cs):
+        end = min(start + cs, total)
+        actual = end - start
+        A_chunk = pad_slice_axis(A_flat[start:end], cs)
+        AB_chunk = pad_slice_axis(AB_flat[start:end], cs)
+        B_chunk = pad_slice_axis(B_flat[start:end], cs)
+        BA_chunk = None if BA_flat is None else pad_slice_axis(BA_flat[start:end], cs)
+        s1_chunk, st_chunk, s2_chunk = _bootstrap_indices(
+            resample_idx,
+            A_chunk,
+            AB_chunk,
+            BA_chunk,
+            B_chunk,
+            cs,
+            estimator,
+            resample_chunk_size=rs,
+        )
+        s1_draws = jnp.moveaxis(s1_chunk[:actual], 1, 0)
+        st_draws = jnp.moveaxis(st_chunk[:actual], 1, 0)
+        if keep_replicates:
+            s1_draw_parts.append(s1_draws)
+            st_draw_parts.append(st_draws)
+
+        if not keep_replicates:
+            s1_lo, s1_hi = _bootstrap_ci_endpoints(
+                S1_flat[start:end],
+                s1_draws,
+                conf_level=conf_level,
+                ci_method=ci_method,
+            )
+            st_lo, st_hi = _bootstrap_ci_endpoints(
+                ST_flat[start:end],
+                st_draws,
+                conf_level=conf_level,
+                ci_method=ci_method,
+            )
+            s1_conf_parts.append(jnp.stack([s1_lo, s1_hi]))
+            st_conf_parts.append(jnp.stack([st_lo, st_hi]))
+
+        if calc_second_order:
+            assert s2_chunk is not None and S2_flat is not None
+            s2_draws = _symmetrize_s2(jnp.moveaxis(s2_chunk[:actual], 1, 0))
+            if keep_replicates:
+                s2_draw_parts.append(s2_draws)
+            if not keep_replicates:
+                s2_lo, s2_hi = _bootstrap_ci_endpoints(
+                    S2_flat[start:end],
+                    s2_draws,
+                    conf_level=conf_level,
+                    ci_method=ci_method,
+                )
+                s2_conf_parts.append(jnp.stack([s2_lo, s2_hi]))
+
+    if keep_replicates:
+        S1_boot = jnp.concatenate(s1_draw_parts, axis=1).reshape(n_bootstrap, T, K, D)
+        ST_boot = jnp.concatenate(st_draw_parts, axis=1).reshape(n_bootstrap, T, K, D)
+        points = {"S1": S1_out, "ST": ST_out}
+        draws = {"S1": S1_boot, "ST": ST_boot}
+        if calc_second_order:
+            assert S2_sym is not None
+            S2_boot = jnp.concatenate(s2_draw_parts, axis=1).reshape(n_bootstrap, T, K, D, D)
+            points["S2"] = S2_sym
+            draws["S2"] = S2_boot
+        conf, ci = interval(
+            points,
+            draws,
+            level=conf_level,
+            method=ci_method,
+            n_bootstrap=n_bootstrap,
+            keep_replicates=True,
+        )
+    else:
+        conf = {
+            "S1": jnp.concatenate(s1_conf_parts, axis=1).reshape(2, T, K, D),
+            "ST": jnp.concatenate(st_conf_parts, axis=1).reshape(2, T, K, D),
+        }
+        if calc_second_order:
+            conf["S2"] = jnp.concatenate(s2_conf_parts, axis=1).reshape(2, T, K, D, D)
+        ci = CIInfo(
+            level=conf_level,
+            method=ci_method,
+            n_bootstrap=n_bootstrap,
+            replicates=None,
+        )
     S1_conf = conf["S1"]
     ST_conf = conf["ST"]
 
@@ -818,18 +898,20 @@ def analyze(
             ``n_bootstrap > 0``.
         slice_chunk_size: Memory/speed trade-off for batched computation.
             It is the number of (T, K) output slices per vmap batch on both
-            paths. On the bootstrap path each slice in a batch carries all
-            ``n_bootstrap`` of its draws, so one device call covers
-            ``slice_chunk_size * n_bootstrap`` estimator evaluations, and
-            the memory budget that :func:`jaxgsa.config.set_memory_budget`
-            sets can lower the width further. ``None`` (the default) derives
-            the width from that budget alone, on both paths: a slice costs
-            about ``2 * N * (D + 2)`` elements first-order-only, and
-            ``2 * N * (2D + 2) + N * D * D`` with second order, because
-            every second-order estimator forms an ``(N, D, D)`` outer
-            product. The bootstrap kernels cost ``n_bootstrap`` times that.
-            Give an integer to cap it yourself if you hit device
-            out-of-memory errors.
+            paths. On the bootstrap path the resample axis is batched too;
+            its width is derived from the transient memory budget after this
+            slice width is chosen. ``None`` (the default) derives the slice
+            width from that budget, on both paths: a slice costs about
+            ``2 * N * (D + 2)`` elements first-order-only, and
+            ``2 * N * (2D + 2)`` with second order. Both orders are now
+            linear in ``D``: the second-order cross-moment is written as a
+            matrix product (``BA.T @ AB``), so the ``(N, D, D)`` outer
+            product earlier versions materialised no longer exists. The
+            bootstrap transient is sized for the product of slice width and
+            resample width. Resident inputs, the pre-generated index matrix,
+            and final results are outside this estimate. Give an integer to
+            cap the slice width yourself if you hit device out-of-memory
+            errors; the resample width remains budget-bounded.
 
             It changes no index beyond floating-point noise. The estimator
             sums over the sample axis, and XLA schedules that reduction
@@ -970,19 +1052,18 @@ def analyze(
         origin = "user-set" if slice_chunk_size is not None else "resolved from the memory budget"
         notes = [f"slice_chunk_size: {cs} ({origin})", f"estimator: {estimator}"]
         if n_bootstrap > 0:
-            # The bootstrap kernels ran with their own width (each chunk
-            # carries all R resamples of a slice); same resolver, scaled by
-            # n_bootstrap, that they used.
-            boot_cs = resolve_point_chunk_size(
-                slice_chunk_size,
-                T * K,
+            # The bootstrap path resolves both axes from the transient model.
+            # ``cs`` is the slice width; ``boot_rs`` is the resample width
+            # after accounting for that chosen slice width.
+            boot_rs = resolve_resample_chunk_size(
+                n_bootstrap,
                 int(Y.shape[0]) // step,
                 D,
                 sampling_result.calc_second_order,
                 Y.dtype.itemsize,
-                n_bootstrap=n_bootstrap,
+                cs,
             )
-            notes.insert(1, f"bootstrap slice_chunk_size: {boot_cs} ({origin})")
+            notes.insert(1, f"bootstrap resample_chunk_size: {boot_rs} ({origin})")
         _verbose.analysis_summary(
             method="jaxgsa.sobol.analyze",
             problem=sampling_result.problem,

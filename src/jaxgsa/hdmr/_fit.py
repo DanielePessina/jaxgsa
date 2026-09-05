@@ -706,19 +706,17 @@ def _fit_hdmr(
     rows = [(i * b, i * b + b) for i in range(n_row_batches)]
     lanes = [(j * cs, j * cs + cs) for j in range(n_chunks)]
 
-    build_bases = _get_build_bases(m, order2, order3)
-
-    def bases(lo: int, hi: int) -> list[Array]:
-        return build_bases(X_p[lo:hi], w_full[lo:hi], c2_idx, c3_idx, beta2, beta3)
-
     # ---- Pass 1: first-order Gram + moments and Y statistics -------------
+    # This pass only needs the first-order basis. Higher-order tensor products
+    # are expensive and would otherwise be built and discarded here.
+    build_bases1 = _get_build_bases(m, False, False)
     shift = Y_p[0]  # (L_pad,)
     G1 = jnp.zeros((n1, m1, n1, m1), dtype=dtype)
     colsum1 = jnp.zeros((m1, n1), dtype=dtype)
     zeros_l = jnp.zeros((cs,), dtype=dtype)
     carry1 = [(jnp.zeros((cs, n1, m1), dtype=dtype), zeros_l, zeros_l) for _ in lanes]
     for lo, hi in rows:
-        B1_b = bases(lo, hi)[0]
+        B1_b = build_bases1(X_p[lo:hi], w_full[lo:hi], c2_idx, c3_idx, beta2, beta3)[0]
         G1, colsum1 = _acc_cross_gram1(B1_b, G1, colsum1)
         for j, (s, e) in enumerate(lanes):
             carry1[j] = _acc_moments1(B1_b, Y_p[lo:hi, s:e], w_full[lo:hi], shift[s:e], carry1[j])
@@ -749,8 +747,12 @@ def _fit_hdmr(
         BtB = jnp.zeros((n_terms, m_basis, m_basis), dtype=dtype)
         colsum = jnp.zeros((m_basis, n_terms), dtype=dtype)
         BtY = [jnp.zeros((cs, n_terms, m_basis), dtype=dtype) for _ in lanes]
+        # Solving order ``k`` needs the bases up through order ``k`` to
+        # reconstruct the exact sequential residual. Do not build a higher
+        # order basis that this pass cannot consume.
+        build_bases_order = _get_build_bases(m, order >= 2, order >= 3)
         for lo, hi in rows:
-            B_all = bases(lo, hi)
+            B_all = build_bases_order(X_p[lo:hi], w_full[lo:hi], c2_idx, c3_idx, beta2, beta3)
             B_new = B_all[order - 1]
             BtB, colsum = _acc_gram(B_new, BtB, colsum)
             for j, (s, e) in enumerate(lanes):
@@ -783,6 +785,7 @@ def _fit_hdmr(
     mean_y0m = [jnp.sum(mf, axis=1, keepdims=True) - mf for mf in mean_f]
 
     # ---- Final pass: ANCOVA / F-test / RMSE reductions ---------------------
+    build_bases_final = _get_build_bases(m, order2, order3)
     stats_step = _get_stats_step(n1, n2)
     accs = [
         (
@@ -797,7 +800,7 @@ def _fit_hdmr(
         for _ in lanes
     ]
     for lo, hi in rows:
-        B_all = bases(lo, hi)
+        B_all = build_bases_final(X_p[lo:hi], w_full[lo:hi], c2_idx, c3_idx, beta2, beta3)
         for j, (s, e) in enumerate(lanes):
             accs[j] = stats_step(
                 B_all,

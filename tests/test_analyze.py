@@ -446,8 +446,8 @@ def test_bootstrap_point_estimates_equal_the_plain_path_exactly():
         )
 
 
-def test_the_bootstrap_batches_slices_instead_of_looping_over_them(monkeypatch):
-    """Tier T4 (internal consistency): one device call carries many slices.
+def test_the_bootstrap_batches_slices_and_resamples(monkeypatch):
+    """Tier T4: bounded batching preserves every bootstrap draw.
 
     This test patches an internal and records shapes, which the suite avoids
     elsewhere. Keep it anyway: batching is *defined* to return the same
@@ -455,13 +455,12 @@ def test_the_bootstrap_batches_slices_instead_of_looping_over_them(monkeypatch):
     :func:`test_slice_chunk_size_invariance` passes just as well against a
     per-slice Python loop. This is the only place the batching is asserted.
 
-    Three things are pinned. The resampler must see a chunk of slices, not
-    one slice at a time. Every call must carry the whole ``(R, N)`` index
-    array, because the resamples belong inside the batch rather than in a
-    loop around it. And every call must be the *same* width: six slices at a
-    chunk of four is two calls of four, not ``[4, 2]``, because the short
-    trailing chunk is padded back and the answer sliced out. A jitted kernel
-    is traced per input shape, so a ragged tail would compile it twice.
+    The memory budget is forced below the full ``R`` resample axis while the
+    requested output chunk remains four slices. The resampler must therefore
+    see four slices and at most two resamples per call, with a padded tail
+    reusing the same compiled shape. The pre-generated random rows are still
+    consumed in order: retaining the draws gives exactly the same bootstrap
+    distribution as the unbounded reference call.
     """
     from jaxgsa.sobol import _bootstrap as sobol_bootstrap
 
@@ -469,8 +468,23 @@ def test_the_bootstrap_batches_slices_instead_of_looping_over_them(monkeypatch):
     Y = evaluate(jnp.asarray(sr.samples))
     Y_multi = jnp.stack([(i + 1.0) * Y for i in range(6)], axis=-1).reshape(-1, 3, 2)
 
+    reference = jaxgsa.sobol.analyze(
+        sr,
+        Y_multi,
+        n_bootstrap=7,
+        key=jax.random.key(2),
+        slice_chunk_size=4,
+        keep_replicates=True,
+    )
+
+    from jaxgsa.sobol import _chunking as sobol_chunking
+
+    per_slice = sobol_chunking.slice_elements(sr.base_n, sr.n_params, sr.calc_second_order)
+    budget = per_slice * Y.dtype.itemsize * 4 * 2
+    monkeypatch.setattr(sobol_chunking, "get_memory_budget", lambda: budget)
+
     widths: list[int] = []
-    n_bootstrap: list[int] = []
+    resample_widths: list[int] = []
     real_get = sobol_bootstrap._resample_kernel
 
     def recording_get(estimator: str, calc_second_order: bool, single: bool):
@@ -478,16 +492,59 @@ def test_the_bootstrap_batches_slices_instead_of_looping_over_them(monkeypatch):
 
         def recorder(idx, A, AB, BA, B):
             widths.append(int(A.shape[0]))
-            n_bootstrap.append(int(idx.shape[0]))
+            resample_widths.append(int(idx.shape[0]))
             return kernel(idx, A, AB, BA, B)
 
         return recorder
 
     monkeypatch.setattr(sobol_bootstrap, "_resample_kernel", recording_get)
-    jaxgsa.sobol.analyze(sr, Y_multi, n_bootstrap=8, key=jax.random.key(2), slice_chunk_size=4)
+    bounded = jaxgsa.sobol.analyze(
+        sr,
+        Y_multi,
+        n_bootstrap=7,
+        key=jax.random.key(2),
+        slice_chunk_size=4,
+        keep_replicates=True,
+    )
 
-    assert widths == [4, 4], f"expected two equal-width chunks, the tail padded back, got {widths}"
-    assert n_bootstrap == [8, 8], "every call must carry the whole resample batch"
+    assert widths == [4] * 8, f"expected padded four-slice chunks, got {widths}"
+    assert resample_widths == [2] * 8, f"expected two resamples per call, got {resample_widths}"
+    assert bounded.ci is not None and bounded.ci.replicates is not None
+    assert reference.ci is not None and reference.ci.replicates is not None
+    for name in ("S1", "ST", "S2", "S1_conf", "ST_conf", "S2_conf"):
+        np.testing.assert_allclose(
+            np.asarray(getattr(bounded, name)),
+            np.asarray(getattr(reference, name)),
+            rtol=1e-5,
+            atol=1e-7,
+            equal_nan=True,
+        )
+    for name in ("S1", "ST", "S2"):
+        np.testing.assert_allclose(
+            np.asarray(bounded.ci.replicates[name]),
+            np.asarray(reference.ci.replicates[name]),
+            rtol=1e-5,
+            atol=1e-7,
+            equal_nan=True,
+        )
+
+    bounded_without_draws = jaxgsa.sobol.analyze(
+        sr,
+        Y_multi,
+        n_bootstrap=7,
+        key=jax.random.key(2),
+        slice_chunk_size=4,
+    )
+    assert bounded_without_draws.ci is not None
+    assert bounded_without_draws.ci.replicates is None
+    for name in ("S1_conf", "ST_conf", "S2_conf"):
+        np.testing.assert_allclose(
+            np.asarray(getattr(bounded_without_draws, name)),
+            np.asarray(getattr(bounded, name)),
+            rtol=1e-5,
+            atol=1e-7,
+            equal_nan=True,
+        )
 
 
 def test_constant_output_with_float32_rounding_noise_still_reads_as_zero_variance():

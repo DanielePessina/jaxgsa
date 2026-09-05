@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import os
 import warnings
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -317,6 +318,7 @@ def check_invalid(
     n_units: int,
     Y: npt.ArrayLike | None = None,
     X: npt.ArrayLike | None = None,
+    extras: Iterable[npt.ArrayLike] = (),
     unit_of_row: npt.NDArray[np.intp] | None = None,
     row_labels: npt.NDArray[np.intp] | None = None,
     min_kept: int = 1,
@@ -338,6 +340,9 @@ def check_invalid(
             sample axis.
         X: Input matrix, or ``None`` to skip it. Checked jointly with ``Y``,
             so a bad input takes its own output with it.
+        extras: Further model-side arrays to check alongside ``Y``. Their
+            leading axis must match ``Y``; only per-row finite flags are
+            combined, so large companion arrays do not get concatenated.
         unit_of_row: For each row, the unit it belongs to. Pass ``None`` when
             one row is one unit.
         row_labels: For each row of the arrays given here, the row of the
@@ -368,8 +373,22 @@ def check_invalid(
         ValueError: Under ``"raise"`` when anything was found, and under
             ``"drop"`` when fewer than ``min_kept`` units would remain.
     """
-    y_ok, y_rows = _finite_by_unit(_as_array(Y), n_units=n_units, unit_of_row=unit_of_row)
-    x_ok, x_rows = _finite_by_unit(_as_array(X), n_units=n_units, unit_of_row=unit_of_row)
+    y_array = _as_array(Y)
+    x_array = _as_array(X)
+    extra_arrays = tuple(_as_array(array) for array in extras)
+    _check_extra_row_counts(y_array, x_array, extra_arrays, unit_of_row=unit_of_row)
+
+    y_ok, y_rows = _finite_by_unit(y_array, n_units=n_units, unit_of_row=unit_of_row)
+    for extra_array in extra_arrays:
+        extra_ok, extra_rows = _finite_by_unit(
+            extra_array, n_units=n_units, unit_of_row=unit_of_row
+        )
+        y_ok = y_ok & extra_ok
+        if y_rows is None:
+            y_rows = extra_rows
+        elif extra_rows is not None:
+            y_rows = y_rows & extra_rows
+    x_ok, x_rows = _finite_by_unit(x_array, n_units=n_units, unit_of_row=unit_of_row)
     clean = y_ok & x_ok
 
     n_invalid = int((~clean).sum())
@@ -441,6 +460,39 @@ def _as_array(array: npt.ArrayLike | None) -> Array | None:
     if array is None:
         return None
     return jnp.asarray(array)
+
+
+def _check_extra_row_counts(
+    Y: Array | None,
+    X: Array | None,
+    extras: tuple[Array | None, ...],
+    *,
+    unit_of_row: npt.NDArray[np.intp] | None,
+) -> None:
+    """Check that companion arrays have the same sample axis as the data."""
+    extra_arrays = tuple(array for array in extras if array is not None)
+    if not extra_arrays:
+        return
+
+    for array in extra_arrays:
+        if array.ndim == 0:
+            raise ValueError("arrays checked for invalid values must have a sample axis")
+
+    reference = Y if Y is not None else X
+    expected = (
+        len(unit_of_row)
+        if unit_of_row is not None
+        else int(reference.shape[0])
+        if reference is not None
+        else None
+    )
+    if expected is None:
+        return
+    for array in extra_arrays:
+        if int(array.shape[0]) != expected:
+            raise ValueError(
+                "arrays checked for invalid values must have the same number of sample rows"
+            )
 
 
 def _rows_of_units(
