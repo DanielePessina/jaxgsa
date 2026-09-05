@@ -176,8 +176,10 @@ def _bootstrap_indices(
     n_slices = A.shape[0]
     n_bootstrap = indices.shape[0]
     cs = max(1, min(slice_chunk_size, n_slices))
-    rs = n_bootstrap if resample_chunk_size is None else max(
-        1, min(resample_chunk_size, n_bootstrap)
+    rs = (
+        n_bootstrap
+        if resample_chunk_size is None
+        else max(1, min(resample_chunk_size, n_bootstrap))
     )
     single = cs == 1
     resample = _resample_kernel(estimator, calc_second_order, single)
@@ -200,16 +202,12 @@ def _bootstrap_indices(
                     idx_chunk = jnp.concatenate(
                         [
                             idx_chunk,
-                            jnp.broadcast_to(
-                                idx_chunk[:1], (rs - n_real, idx_chunk.shape[1])
-                            ),
+                            jnp.broadcast_to(idx_chunk[:1], (rs - n_real, idx_chunk.shape[1])),
                         ]
                     )
                 if calc_second_order:
                     assert BA is not None
-                    s1, st, s2 = resample(
-                        idx_chunk, A[start], AB[start], BA[start], B[start]
-                    )
+                    s1, st, s2 = resample(idx_chunk, A[start], AB[start], BA[start], B[start])
                     s2_draws.append(s2[:n_real])
                 else:
                     s1, st = resample(idx_chunk, A[start], AB[start], B[start])
@@ -241,16 +239,12 @@ def _bootstrap_indices(
                     idx_chunk = jnp.concatenate(
                         [
                             idx_chunk,
-                            jnp.broadcast_to(
-                                idx_chunk[:1], (rs - n_real, idx_chunk.shape[1])
-                            ),
+                            jnp.broadcast_to(idx_chunk[:1], (rs - n_real, idx_chunk.shape[1])),
                         ]
                     )
                 if calc_second_order:
                     assert BA_chunk is not None
-                    s1, st, s2 = resample(
-                        idx_chunk, A_chunk, AB_chunk, BA_chunk, B_chunk
-                    )
+                    s1, st, s2 = resample(idx_chunk, A_chunk, AB_chunk, BA_chunk, B_chunk)
                     s2_draws.append(s2[:, :n_real])
                 else:
                     s1, st = resample(idx_chunk, A_chunk, AB_chunk, B_chunk)
