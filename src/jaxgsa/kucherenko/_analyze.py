@@ -216,7 +216,10 @@ def analyze(
         # them. The design is block-major, so base point k sits at rows
         # k, N + k, 2N + k, … rather than in a contiguous run.
         n_units=N,
-        unit_of_row=np.tile(np.arange(N), 2 * D + 1),
+        # The map is the interleaved base-point pattern; built on the host
+        # per call, and under on_invalid='none' never read by the check, so
+        # it is built only where it is used.
+        unit_of_row=(None if on_invalid == "none" else np.tile(np.arange(N), 2 * D + 1)),
         min_kept=2,
         # The denominator of both indices is the variance of the joint block
         # alone, not of the whole design, so the zero-variance check has to

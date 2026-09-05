@@ -13,12 +13,11 @@ point is warranted.
 
 from __future__ import annotations
 
-import functools
 import json
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Mapping, Self
 
 import jax.numpy as jnp
 import numpy as np
@@ -159,28 +158,40 @@ class UniqueDesignSamples:
         """Number of unique rows in ``samples`` (model runs to evaluate)."""
         return self.samples.shape[0]
 
+    # Set by __post_init__; declared here so the type checker sees it.
+    # ClassVar (not a plain annotation) so a subclass's dataclass machinery
+    # can never turn it into a field.
+    _jax_expansion_map: ClassVar[Array]
+
     # ------------------------------------------------------------------
     # Output re-expansion
     # ------------------------------------------------------------------
 
-    @functools.cached_property
-    def _expanded_to_unique_jax(self) -> Array:
-        """Return ``expanded_to_unique`` on the device, computed once.
+    def __post_init__(self) -> None:
+        """Warm the device copy of the expansion map at construction time.
 
         The map has one entry per expanded row, so at million-row scales it
-        is an 8 MB array and the per-call ``jnp.asarray`` is a measurable
+        is an 8 MB array and a per-call ``jnp.asarray`` is a measurable
         fixed cost of every ``analyze`` (measured ~0.8 ms at base_n=16384,
-        D=30, second order). Caching it on the object makes repeat analyses
-        of the same design pay for the transfer once.
-
-        This accessor is only for eager, host-side callers (:func:`analyze`
-        and its helpers, which never run under a JAX transform). It must not
-        be called from traced code: the cache write is a side effect, and
-        the transformable :meth:`expand_outputs` deliberately converts the
-        map per call instead of using this, so ``indices`` under ``jit``
-        keeps creating its take's index as an ordinary constant.
+        D=30, second order). Creating the device copy once, here, makes
+        every later read a constant: :meth:`expand_outputs` is also called
+        inside ``jit(indices(...))`` traces, where a cache *write* would
+        leak a tracer (JAX forbids side effects under transformation), but
+        a read of an already-existing array is harmless. Subclasses are
+        frozen dataclasses, so the warmed cache is stored with
+        ``object.__setattr__``, which the frozen contract does not block.
         """
-        return jnp.asarray(self.expanded_to_unique)
+        object.__setattr__(self, "_jax_expansion_map", jnp.asarray(self.expanded_to_unique))
+
+    @property
+    def _expanded_to_unique_jax(self) -> Array:
+        """Return the device copy of ``expanded_to_unique``.
+
+        Set once by :meth:`__post_init__`; the property is a plain read so
+        it stays safe under JAX tracing (a cache *write* under a transform
+        would leak a tracer, but nothing writes here).
+        """
+        return self._jax_expansion_map
 
     def expand_outputs(self, Y: Array) -> Array:
         """Rebuild expanded-layout outputs from unique user-evaluated outputs.
@@ -203,13 +214,10 @@ class UniqueDesignSamples:
             raise ValueError(
                 f"Y.shape[0] must match sampling_result.n_runs ({self.n_runs}), got {Y.shape[0]}"
             )
-        # expanded_to_unique[i] gives the unique-row index for expanded position i
-        # The per-call conversion is deliberate: expand_outputs runs inside
-        # jit(indices(...)) traces, where a cached jit-created array on the
-        # object would be a traced-value side effect. A fresh conversion is
-        # an ordinary constant and traces cleanly.
-        expanded_to_unique = jnp.asarray(self.expanded_to_unique)
-        return jnp.take(Y, expanded_to_unique, axis=0)
+        # expanded_to_unique[i] gives the unique-row index for expanded
+        # position i. The map was warmed at construction (see
+        # __post_init__), so this read is a constant even under a jit trace.
+        return jnp.take(Y, self._expanded_to_unique_jax, axis=0)
 
     # ------------------------------------------------------------------
     # Downsample mechanics (semantics stay per-class)
