@@ -354,7 +354,9 @@ def _prep_pawn(case: Case) -> Callable[[], Any]:
 
 
 def _prep_hsic(case: Case) -> Callable[[], Any]:
-    return lambda: hsic.analyze(case.problem, case.X, case.Y, n_perms=10, seed=SEED)
+    return lambda: hsic.analyze(
+        case.problem, case.X, case.Y, n_perms=10, key=jax.random.key(SEED)
+    )
 
 
 def _prep_optimal_transport(case: Case) -> Callable[[], Any]:
@@ -391,7 +393,7 @@ def _prep_vkoga(case: Case) -> Callable[[], Any]:
         n_outer=64,
         n_inner=32,
         n_variance=512,
-        seed=SEED,
+        key=jax.random.key(SEED),
     )
 
 
