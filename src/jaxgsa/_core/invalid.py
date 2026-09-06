@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import os
 import warnings
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -379,6 +379,32 @@ def _is_contiguous_blocks(
         return False
     expected = np.repeat(np.arange(n_units), unit_stride)
     return bool(np.array_equal(unit_of_row, expected))
+
+
+def _unit_of_row_for_policy(
+    on_invalid: object, build: Callable[[], npt.NDArray[np.intp]]
+) -> npt.NDArray[np.intp] | None:
+    """Build the row map only where the non-finite check will read it.
+
+    Under ``on_invalid='none'`` :func:`check_invalid` returns before it ever
+    touches the map (a per-row map over the expanded design is exactly the
+    scan the policy skips, and building it on the host costs ~0.3-0.6 ms at
+    million-row scales), so the call sites pass ``None`` there instead of
+    paying for a dead array. The three design-based methods each build a
+    different map (contiguous blocks for sobol and morris, interleaved
+    base points for kucherenko), so the map itself stays at the call site;
+    only the skip decision is shared.
+
+    Args:
+        on_invalid: The caller's unvalidated policy value.
+        build: How to build the map, called only when a check will read it.
+
+    Returns:
+        The built map, or ``None`` under ``on_invalid='none'``.
+    """
+    if on_invalid == "none":
+        return None
+    return build()
 
 
 def check_invalid(

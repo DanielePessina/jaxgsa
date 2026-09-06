@@ -42,7 +42,7 @@ from jaxgsa._core.entry import (
     prepare,
     require,
 )
-from jaxgsa._core.invalid import InvalidReport, OnInvalid
+from jaxgsa._core.invalid import InvalidReport, OnInvalid, _unit_of_row_for_policy
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
     YLayout,
@@ -565,12 +565,7 @@ def _indices_from_expanded(
         _, layout = _prepare_Y(Y)
         if layout is YLayout.SCALAR:
             fused = _get_fused_scalar_indices(D, calc_second_order, estimator)
-            S1_out, ST_out, S2_out = fused(Y, expand_map)
-            S1_out = layout.squeeze(S1_out)
-            ST_out = layout.squeeze(ST_out)
-            if S2_out is not None:
-                S2_out = layout.squeeze(_normalize_s2_matrix(S2_out), n_trailing=2)
-            return S1_out, ST_out, S2_out
+            return _squeeze_indices(layout, fused(Y, expand_map))
         Y = jnp.take(Y, expand_map, axis=0)
 
     # Promote to uniform 3-D shape (N, T, K) so downstream code is shape-agnostic.
@@ -591,7 +586,28 @@ def _indices_from_expanded(
         slice_chunk_size=slice_chunk_size,
         estimator=estimator,
     )
+    return _squeeze_indices(layout, (S1_out, ST_out, S2_out))
 
+
+def _squeeze_indices(
+    layout: YLayout, raw: tuple[Array, Array, Array | None]
+) -> tuple[Array, Array, Array | None]:
+    """Bring the raw ``(T, K, ...)`` kernel outputs back to the caller's rank.
+
+    Both the fused scalar path and the standard front half produce the same
+    pre-squeezed shapes, so the demotion is one helper instead of two copies
+    of the three squeezes (the S2 symmetrising is part of the demotion: the
+    raw pair matrix is symmetric only after :func:`_symmetrize_s2`).
+
+    Args:
+        layout: The caller's rank, read off the promoted array.
+        raw: ``(S1, ST, S2)`` from the estimator, with inserted ``(T, K)``
+            axes; ``S2`` may be ``None`` when second order is off.
+
+    Returns:
+        ``(S1, ST, S2)`` at the caller's rank.
+    """
+    S1_out, ST_out, S2_out = raw
     S1_out = layout.squeeze(S1_out)
     ST_out = layout.squeeze(ST_out)
     if S2_out is not None:
@@ -1097,10 +1113,10 @@ def analyze(
     # A/B/AB/BA split. The group count comes from the design, not from Y, so
     # it is known before Y is looked at.
     base_n = sampling_result.n_expanded // step
-    # The row map is the one thing the preamble builds on the host; under
-    # on_invalid='none' the check never reads it (measured ~0.6 ms of the
-    # fixed cost at base_n=16384), so it is built only where it is used.
-    unit_of_row = None if on_invalid == "none" else np.repeat(np.arange(base_n), step)
+    # Under on_invalid='none' the check never reads the row map (measured
+    # ~0.6 ms of the fixed cost at base_n=16384), so it is built only where
+    # it is used.
+    unit_of_row = _unit_of_row_for_policy(on_invalid, lambda: np.repeat(np.arange(base_n), step))
     ctx = prepare(
         SPEC,
         sampling_result.problem,
@@ -1130,10 +1146,9 @@ def analyze(
         row_labels=sampling_result.expanded_to_unique,
         min_kept=2,
         # Under on_invalid='none' the check never reads the expanded rows, so
-        # the expansion can ride along with the estimator, which fuses the
-        # gather into the front half on the scalar layout (see
-        # _get_fused_scalar_indices). Every other policy expands here.
-        defer_expand_on_none=True,
+        # the expansion is deferred to the estimator, which fuses the gather
+        # into the scalar front half (see _get_fused_scalar_indices). Every
+        # other policy expands here, inside prepare.
     )
     # The estimator reads the expanded layout, and its scalar fast path
     # branches on Y's own rank, so this is ctx.Y and not ctx.Y3.
@@ -1147,7 +1162,7 @@ def analyze(
         Y = jnp.asarray(grouped.reshape(-1, *trailing))
 
     # on_invalid='none' held the expansion back from the preamble (see
-    # prepare's defer_expand_on_none). A scalar analysis without a bootstrap
+    # Context.deferred_expand). A scalar analysis without a bootstrap
     # fuses the gather into the estimator front half -- measured ~2.2x
     # faster than the eager expansion, the gather becoming part of one
     # executed graph instead of one pass over the expanded array. Wide

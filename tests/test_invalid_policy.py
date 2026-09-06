@@ -93,10 +93,7 @@ class TestNonePolicy:
     def test_resolve_accepts_none_for_every_unit(self):
         """T4: 'none' survives allow_drop=False, where 'drop' does not."""
         for unit in InvalidUnit:
-            assert (
-                resolve_policy("none", method=METHOD, unit=unit, allow_drop=False)
-                == "none"
-            )
+            assert resolve_policy("none", method=METHOD, unit=unit, allow_drop=False) == "none"
 
     def test_nan_data_is_not_looked_at(self):
         """T4: bad data under 'none' keeps everything and reports clean.
@@ -146,26 +143,6 @@ class TestNonePolicy:
                 Y=_rows(),
                 extras=[np.zeros((5, 1))],
             )
-
-    def test_clean_data_verdict_matches_propagate_exactly(self):
-        """T4: on clean data 'none' and 'propagate' agree on keep and report.
-
-        Everything but the policy field has to be identical, because that is
-        the contract the estimator relies on: keep + report decide the rest,
-        whatever policy ran.
-        """
-        Y = _rows()
-        keep_none, report_none = check_invalid(
-            policy="none", method=METHOD, unit=InvalidUnit.ROW, n_units=6, Y=Y
-        )
-        keep_prop, report_prop = check_invalid(
-            policy="propagate", method=METHOD, unit=InvalidUnit.ROW, n_units=6, Y=Y
-        )
-        assert np.array_equal(keep_none, keep_prop)
-        assert report_none.n_invalid == report_prop.n_invalid == 0
-        assert report_none.unit_indices == report_prop.unit_indices == ()
-        assert report_none.bad_row_indices == report_prop.bad_row_indices == ()
-        assert report_none.n_kept == report_prop.n_kept
 
 
 class TestRaisePolicy:

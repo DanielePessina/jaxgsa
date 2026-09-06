@@ -27,7 +27,7 @@ from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare
-from jaxgsa._core.invalid import OnInvalid
+from jaxgsa._core.invalid import OnInvalid, _unit_of_row_for_policy
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
     YLayout,
@@ -446,10 +446,11 @@ def analyze(
         n_expected=int(sampling_result.samples.shape[0]),
         expand=sampling_result.expand_outputs,
         n_units=r,
-        # The row map is built on the host; under on_invalid='none' the
-        # check never reads it (measured ~0.3 ms at r=16384), so it is
-        # built only where it is used.
-        unit_of_row=(None if on_invalid == "none" else np.repeat(np.arange(r), rows_per_traj)),
+        # Under on_invalid='none' the check never reads the row map
+        # (measured ~0.3 ms at r=16384), so it is built only where it is used.
+        unit_of_row=_unit_of_row_for_policy(
+            on_invalid, lambda: np.repeat(np.arange(r), rows_per_traj)
+        ),
         # One trajectory is one unit of rows_per_traj contiguous rows.
         unit_stride=rows_per_traj,
         # Y is checked expanded, but the caller evaluated one output per
@@ -459,11 +460,6 @@ def analyze(
         # A constant slice gives elementary effects of exactly 0 (0/delta), so
         # the measures come out 0, not NaN as in the variance-based methods.
         zero_variance_outcome="morris",
-        # Under on_invalid='none' the check never reads the expanded rows, so
-        # the expansion can ride along with the estimator, which fuses the
-        # gather into the scalar front half (see
-        # _get_morris_fused_measures). Every other policy expands here.
-        defer_expand_on_none=True,
     )
     Y = ctx.Y3
     keep, invalid = ctx.keep, ctx.invalid
@@ -510,8 +506,8 @@ def analyze(
         and keep.all()
         and ctx.layout is YLayout.SCALAR
     ):
-        # on_invalid='none' held the expansion back (see prepare's
-        # defer_expand_on_none). The scalar no-bootstrap path fuses the
+        # on_invalid='none' held the expansion back (see
+        # Context.deferred_expand). The scalar no-bootstrap path fuses the
         # gather into the estimator -- one executable, measured ~1.3x
         # faster than the eager expansion on a half-million-row design.
         # Wide layouts run slower fused, and the bootstrap resamples from
@@ -527,6 +523,10 @@ def analyze(
         )
     else:
         if ctx.deferred_expand is not None:
+            # Deferral only happens under on_invalid='none', where keep is
+            # all-True, so the compaction above never ran and Y is still
+            # the raw promoted rows; expanding here is exactly what prepare
+            # would have done under any other policy.
             Y = ctx.deferred_expand(Y)
         ee, mu, mu_star, sigma = _measures(Y, idx_after, idx_before, delta, standardize_outputs)
 

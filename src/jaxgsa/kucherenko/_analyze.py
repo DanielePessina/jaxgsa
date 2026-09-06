@@ -60,7 +60,7 @@ from jax import Array
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.bootstrap import interval
 from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare, require
-from jaxgsa._core.invalid import OnInvalid
+from jaxgsa._core.invalid import OnInvalid, _unit_of_row_for_policy
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
     _warn_zero_variance_slices,
@@ -216,10 +216,9 @@ def analyze(
         # them. The design is block-major, so base point k sits at rows
         # k, N + k, 2N + k, … rather than in a contiguous run.
         n_units=N,
-        # The map is the interleaved base-point pattern; built on the host
-        # per call, and under on_invalid='none' never read by the check, so
-        # it is built only where it is used.
-        unit_of_row=(None if on_invalid == "none" else np.tile(np.arange(N), 2 * D + 1)),
+        # The map is the interleaved base-point pattern, built on the host
+        # only where the check reads it (never under on_invalid='none').
+        unit_of_row=_unit_of_row_for_policy(on_invalid, lambda: np.tile(np.arange(N), 2 * D + 1)),
         min_kept=2,
         # The denominator of both indices is the variance of the joint block
         # alone, not of the whole design, so the zero-variance check has to

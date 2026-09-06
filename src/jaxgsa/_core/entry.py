@@ -224,12 +224,11 @@ class Context:
             :func:`prepare`, under the same names, checked with ``Y`` and
             compacted with it.
         deferred_expand: The design's output re-expansion, held back from
-            the eager preamble. Only set under ``on_invalid="none"`` when
-            the caller asked to defer: the non-finite check never reads the
-            expanded rows then, so the expansion can ride along with the
-            estimator instead of materialising the expanded array first.
-            ``None`` when the preamble ran it, or when no expansion is
-            needed.
+            the eager preamble. Only set under ``on_invalid="none"`` (the
+            non-finite check never reads the expanded rows then), so the
+            expansion can ride along with the estimator instead of
+            materialising the expanded array first. ``None`` when the
+            preamble ran it, or when no expansion is needed.
     """
 
     method: str
@@ -285,7 +284,6 @@ def prepare(
     source_names: tuple[str, str] = ("X", "Y"),
     warn_zero_variance: bool = True,
     zero_variance_outcome: str = "nan",
-    defer_expand_on_none: bool = False,
 ) -> Context:
     """Run the shared analysis preamble and return what it settled.
 
@@ -365,14 +363,6 @@ def prepare(
             with it itself.
         zero_variance_outcome: Which consequence the warning reports; see
             :data:`jaxgsa._core.validation._ZERO_VARIANCE_OUTCOMES`.
-        defer_expand_on_none: Under ``on_invalid="none"``, hold the design
-            expansion back from the preamble and hand it to the caller as
-            :attr:`Context.deferred_expand`, so the estimator can fuse it
-            with the standardization (measured ~2.2x faster on scalar
-            outputs: the expansion gather becomes part of one jitted
-            executable instead of one eager pass over the expanded array).
-            Under any other policy the preamble still expands eagerly,
-            because the non-finite check reads the expanded rows.
 
     Returns:
         The :class:`Context` for the estimator to work from.
@@ -427,10 +417,11 @@ def prepare(
         # The user evaluated the model once per unique row. The estimator,
         # and the unit the check works in, both live in the expanded layout.
         # Under on_invalid='none' the check never reads the expanded rows,
-        # so the expansion can be deferred to the estimator (which may fuse
-        # it with the standardization); under every other policy it must
-        # happen here, before the check sees the data.
-        if policy == "none" and defer_expand_on_none:
+        # so the expansion is deferred to the estimator (which may fuse it
+        # with the standardization; see Context.deferred_expand); under
+        # every other policy it must happen here, before the check sees the
+        # data, and the context carries the already-expanded layout.
+        if policy == "none":
             deferred_expand = expand
         else:
             Y = expand(Y)
