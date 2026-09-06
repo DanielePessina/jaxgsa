@@ -61,7 +61,7 @@ from jaxgsa import (
 from jaxgsa.benchmarks import ishigami, sobol_g
 
 SEED = 20260819
-DEFAULT_REPEATS = 3
+DEFAULT_REPEATS = 9
 
 # ---------------------------------------------------------------------------
 # Workload matrix. Each row is one (method, workload) case. ``N`` is the
@@ -477,7 +477,12 @@ def main(argv: list[str] | None = None) -> int:
     latest.write_text(table)
 
     ok = [r for r in records if r.get("status") == "ok"]
-    times = [float(r["run_best_s"]) for r in ok if float(r["run_best_s"]) > 0]
+    # Median of the steady-state calls, not best: best-of-N is a minimum
+    # over a noisy sample and tracks OS jitter down to the dispatch floor,
+    # whereas the median is robust to a single slow outlier and so reflects
+    # the honest per-case cost. Cheap cases (0.3-3 ms) have 40-300% raw
+    # spread, so the median is what keeps the geomean usable.
+    times = [float(r["run_median_s"]) for r in ok if float(r["run_median_s"]) > 0]
     rss = [int(r["peak_rss_bytes"]) for r in ok]
     geomean_ms = float(np.exp(np.mean(np.log(np.asarray(times)))) * 1000.0) if times else 0.0
     total_s = float(np.sum(np.asarray(times))) if times else 0.0
