@@ -9,6 +9,8 @@
 // Types
 // ---------------------------------------------------------------------------
 
+import { numpy as np } from "@jax-js/jax";
+
 export type MarginalSpec =
   | { kind: "uniform"; low: number; high: number }
   | {
@@ -178,6 +180,78 @@ export function transformSamples(problem: ProblemSpec, unit: Float64Array): Floa
     }
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Shared design-layer helpers (`jaxgsa._core.sampling`)
+// ---------------------------------------------------------------------------
+
+export function isPowerOfTwo(n: number): boolean {
+  return n > 0 && (n & (n - 1)) === 0;
+}
+
+export function nextPowerOfTwo(n: number): number {
+  let p = 1;
+  while (p < n) p <<= 1;
+  return p;
+}
+
+/**
+ * Shared preflight for the design samplers: reject correlated problems
+ * (kucherenko correlation is not yet ported; sobol/morris refuse them by
+ * design), categorical marginals (level transform not ported), and malformed
+ * problems. Errors carry the `jaxgsa.<method>.sample:` prefix.
+ */
+export function validateProblem(
+  problem: ProblemSpec,
+  method: "sobol" | "morris" | "kucherenko",
+): void {
+  const prefix = `jaxgsa.${method}.sample:`;
+  if (problem.correlation != null) {
+    throw new Error(
+      method === "kucherenko"
+        ? `${prefix} correlated problems are not yet ported (independent copula only)`
+        : `${prefix} correlated problems are not supported (the ${method} estimator assumes independent inputs)`,
+    );
+  }
+  if (problem.marginals.some((m) => m.kind === "categorical")) {
+    throw new Error(
+      `${prefix} categorical marginals are not supported (the level transform is not yet ported)`,
+    );
+  }
+  const D = problem.names.length;
+  if (D < 1) {
+    throw new Error(`${prefix} problem must declare at least one parameter`);
+  }
+  if (problem.marginals.length !== D) {
+    throw new Error(
+      `${prefix} problem declares ${D} names but ${problem.marginals.length} marginals`,
+    );
+  }
+}
+
+/**
+ * Deduplicate on the unit cube first (bitwise row equality), then transform
+ * into physical units (`_dedupe_design`).
+ */
+export function dedupeDesign(
+  problem: ProblemSpec,
+  expandedUnit: Float64Array,
+): { samples: Float64Array; expandedToUnique: Int32Array; nExpanded: number } {
+  const D = problem.names.length;
+  const { unique, expandedToUnique } = stableUniqueRows(expandedUnit, D);
+  const samples = transformSamples(problem, unique);
+  return { samples, expandedToUnique, nExpanded: expandedUnit.length / D };
+}
+
+/** Wrap a host float64 buffer as a jax-js np array. */
+export function toNp64(arr: Float64Array): np.Array {
+  return np.array(arr as Float64Array<ArrayBuffer>, { dtype: np.float64 });
+}
+
+/** Wrap a host int32 buffer as a jax-js np array. */
+export function toNp32(arr: Int32Array): np.Array {
+  return np.array(arr as Int32Array<ArrayBuffer>, { dtype: np.int32 });
 }
 
 // ---------------------------------------------------------------------------

@@ -56,17 +56,17 @@ export function analyzeMorris(
 
   const Yafter = np.take(expanded.ref, afterFlat, 0); // (r * D,)
   const Ybefore = np.take(expanded, beforeFlat, 0); // (r * D,)  (expanded consumed)
-  const diff = np.subtract(Yafter.ref, Ybefore.ref); // (r * D,)
-  const eeFlat = np.divide(diff.ref, deltaFlat.ref); // (r * D,)
-  const ee = np.reshape(eeFlat.ref, [r, D]); // (r, D)
+  const diff = np.subtract(Yafter, Ybefore); // (r * D,)  (Yafter, Ybefore consumed)
+  const eeFlat = np.divide(diff, deltaFlat); // (r * D,)  (diff, deltaFlat consumed)
+  const ee = np.reshape(eeFlat, [r, D]); // (r, D)  (eeFlat consumed)
 
   // _stats_from_ee
   const mu = np.mean(ee.ref, 0); // (D,)
   const muStar = np.mean(np.abs(ee.ref), 0); // (D,)
   // sigma = std(ee, axis=0, ddof=1) = sqrt(sum((ee - mean)^2, axis=0) / (r - 1))
   const centered = np.subtract(ee, np.expandDims(mu.ref, 0)); // (r, D)  (ee consumed)
-  const sumSq = np.sum(np.square(centered.ref), 0); // (D,)
-  const sigma = np.sqrt(np.divide(sumSq.ref, r - 1)); // (D,)
+  const sumSq = np.sum(np.square(centered), 0); // (D,)  (centered consumed)
+  const sigma = np.sqrt(np.divide(sumSq, r - 1)); // (D,)  (sumSq consumed)
 
   return {
     mu: mu.dataSync() as Float64Array,

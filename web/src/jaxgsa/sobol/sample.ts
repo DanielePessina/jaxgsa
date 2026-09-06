@@ -1,7 +1,9 @@
 import { sobolSequence } from "./sampler";
 import {
-  stableUniqueRows,
-  transformSamples,
+  dedupeDesign,
+  isPowerOfTwo,
+  nextPowerOfTwo,
+  validateProblem,
   type ProblemSpec,
 } from "../sampling";
 
@@ -106,34 +108,14 @@ export {
   transformValue,
   transformSamples,
   stableUniqueRows,
+  dedupeDesign,
 } from "../sampling";
-
-/** Deduplicate on the unit cube first, then transform (`_dedupe_design`). */
-export function dedupeDesign(
-  problem: ProblemSpec,
-  expandedUnit: Float64Array,
-): { samples: Float64Array; expandedToUnique: Int32Array; nExpanded: number } {
-  const D = problem.names.length;
-  const { unique, expandedToUnique } = stableUniqueRows(expandedUnit, D);
-  const samples = transformSamples(problem, unique);
-  return { samples, expandedToUnique, nExpanded: expandedUnit.length / D };
-}
 
 // ---------------------------------------------------------------------------
 // Public entry point (`sample`)
 // ---------------------------------------------------------------------------
 
 export const MAX_BASE_N = 1 << 24;
-
-function isPowerOfTwo(n: number): boolean {
-  return n > 0 && (n & (n - 1)) === 0;
-}
-
-function nextPowerOfTwo(n: number): number {
-  let p = 1;
-  while (p < n) p <<= 1;
-  return p;
-}
 
 export interface SampleOptions {
   /** Exact Sobol' base size; must be a power of 2. */
@@ -165,25 +147,12 @@ export function sample(
     verbose = true,
   } = options;
 
-  if (problem.correlation != null) {
-    throw new Error(
-      "jaxgsa.sobol.sample: correlated problems are not supported (the " +
-        "Saltelli design and its estimators assume independent inputs)",
-    );
-  }
+  validateProblem(problem, "sobol");
   const D = problem.names.length;
-  if (D < 1) {
-    throw new Error("jaxgsa.sobol.sample: problem must declare at least one parameter");
-  }
   if (D > 20) {
     throw new Error(
       `jaxgsa.sobol.sample: at most 20 parameters supported (a Saltelli design ` +
         `needs 2D = ${2 * D} Sobol' dimensions, capped at 40)`,
-    );
-  }
-  if (problem.marginals.length !== D) {
-    throw new Error(
-      `jaxgsa.sobol.sample: problem declares ${D} names but ${problem.marginals.length} marginals`,
     );
   }
 

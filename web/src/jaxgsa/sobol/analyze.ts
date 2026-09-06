@@ -112,23 +112,22 @@ export function analyzeSobol(
   const B = grouped.ref.slice([], -1); // (N,)
   const AB = grouped.slice([], [1, D + 1]); // (N, D)  (grouped consumed)
 
-  // _saltelli_jansen: _mauntz_kucherenko S1 + _jansen ST, one pooled
-  // inv_var each (as the Python composition computes it twice).
-  const invVarS1 = pooledInvVar(A.ref, B.ref);
-  const invVarST = pooledInvVar(A.ref, B.ref);
-
-  // S1 = mean(B[:, None] * (AB - A[:, None]), axis=0) * inv_var
-  const Acol = np.expandDims(A, 1); // (N, 1)  (A consumed)
-  const Bcol = np.expandDims(B, 1); // (N, 1)  (B consumed)
+  // _saltelli_jansen: _mauntz_kucherenko S1 + _jansen ST. The Python
+  // composition computes the identical pooled inv_var twice; one call is
+  // bit-identical, and it avoids leaking A and B (which the double .ref
+  // call would leave at refcount 1).
+  const Acol = np.expandDims(A.ref, 1); // (N, 1)
+  const Bcol = np.expandDims(B.ref, 1); // (N, 1)
   const diff = np.subtract(AB.ref, Acol.ref); // (N, D)
   const prod = np.multiply(Bcol, diff); // (N, D)  (Bcol, diff consumed)
-  const S1 = np.multiply(np.mean(prod, 0), invVarS1); // (D,)  (prod, invVarS1 consumed)
+  const meanProd = np.mean(prod, 0); // (D,)  (prod consumed)
 
-  // ST = 0.5 * mean((A[:, None] - AB)**2, axis=0) * inv_var
   const diff2 = np.subtract(Acol, AB); // (N, D)  (Acol, AB consumed)
-  const sq = np.square(diff2); // (N, D)  (diff2 consumed)
-  const meanSq = np.mean(sq, 0); // (D,)  (sq consumed)
-  const ST = np.multiply(np.multiply(0.5, meanSq), invVarST); // (D,)  (meanSq, invVarST consumed)
+  const meanSq = np.mean(np.square(diff2), 0); // (D,)  (diff2 consumed)
+
+  const invVar = pooledInvVar(A, B); // consumes A, B
+  const S1 = np.multiply(meanProd, invVar.ref); // (D,)
+  const ST = np.multiply(np.multiply(0.5, meanSq), invVar); // (D,)  (meanSq, invVar consumed)
 
   return {
     S1: S1.dataSync() as Float64Array,

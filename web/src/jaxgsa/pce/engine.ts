@@ -304,7 +304,7 @@ export function buildDesignMatrix(
       np.array(miCols[d] as Int32Array<ArrayBuffer>, { dtype: np.int32 }),
       1,
     );
-    Phi = np.multiply(Phi.ref, factor);
+    Phi = np.multiply(Phi, factor); // Phi consumed, factor consumed
   }
   return Phi;
 }

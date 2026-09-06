@@ -10,7 +10,6 @@
  */
 
 import { defaultDevice, init, numpy as np } from "@jax-js/jax";
-import { ishigami } from "@/jaxgsa/benchmarks";
 import { analyzeKucherenko } from "@/jaxgsa/kucherenko";
 import { sampleKucherenkoDesign, type KucherenkoDesign } from "@/jaxgsa/kucherenko/sample";
 import { analyzeMorris, type MorrisMeasures } from "@/jaxgsa/morris/analyze";
@@ -20,6 +19,7 @@ import { analyzeSobol, type SobolIndices } from "@/jaxgsa/sobol/analyze";
 import { sample, type SobolDesign } from "@/jaxgsa/sobol/sample";
 import { type ProblemSpec } from "@/jaxgsa/sampling";
 import { analyzeShapleyPce, type ShapleyIndices } from "@/jaxgsa/shapley/analyze";
+import type { Demo } from "./demos";
 
 // ---------------------------------------------------------------------------
 // Device bootstrap
@@ -334,22 +334,6 @@ function result(
   return { method, parameters, columns, notes };
 }
 
-/** Evaluate the Ishigami benchmark at every design row (nRuns outputs). */
-export function evaluateIshigami(design: {
-  samples: Float64Array;
-  nParams: number;
-}): Float64Array {
-  const D = design.nParams;
-  const nRuns = design.samples.length / D;
-  const y = new Float64Array(nRuns);
-  const row: number[] = new Array(D);
-  for (let r = 0; r < nRuns; r++) {
-    for (let j = 0; j < D; j++) row[j] = design.samples[r * D + j];
-    y[r] = ishigami(row);
-  }
-  return y;
-}
-
 /**
  * Run the analysis for a generated design. `y` carries one output per design
  * row in run_id order (use `alignYByRunId` after an upload). Fresh device
@@ -442,17 +426,134 @@ export function analyzeCloud(
   ], []);
 }
 
-/** Ishigami point cloud for the "load example" path of workflow B. */
-export function loadExampleCloud(
+/** Demo point cloud for the "load example" path of the given-data workflow. */
+export function loadDemoCloud(
+  demo: Demo,
   nSamples = 1024,
   seed = 0,
 ): { x: Float64Array; y: Float64Array; n: number } {
-  const port = sample(ISHIGAMI_PROBLEM, nSamples, {
+  const port = sample(demo.problem, nSamples, {
     calcSecondOrder: false,
     seed,
     verbose: false,
   });
   const x = port.samples;
-  const y = evaluateIshigami({ samples: x, nParams: port.nParams });
+  const y = demo.evaluate({ samples: x, nParams: port.nParams });
   return { x, y, n: x.length / port.nParams };
+}
+
+// ---------------------------------------------------------------------------
+// Given-data uploads (workflow B)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse an X CSV for the given-data path: one header row naming the
+ * parameters (must match the problem's names, in order) followed by N rows
+ * of D values. Returns the point cloud row-major, (N, D).
+ */
+export function parseXGiven(parsed: ParsedCsv, problem: ProblemSpec): Float64Array {
+  const D = problem.names.length;
+  if (parsed.rows.length === 0) {
+    throw new Error("the X CSV has no data rows");
+  }
+  const header = parsed.headers.map((h) => h.trim());
+  if (header.length !== D || header.some((h, j) => h !== problem.names[j])) {
+    throw new Error(
+      `the X CSV header must be exactly: ${problem.names.join(", ")}`,
+    );
+  }
+  for (let i = 0; i < parsed.rows.length; i++) {
+    if (parsed.rows[i].length !== D) {
+      throw new Error(`line ${i + 2}: expected ${D} columns, found ${parsed.rows[i].length}`);
+    }
+  }
+  const flat = new Float64Array(parsed.rows.length * D);
+  for (let i = 0; i < parsed.rows.length; i++) {
+    for (let j = 0; j < D; j++) flat[i * D + j] = parsed.rows[i][j];
+  }
+  return flat;
+}
+
+/**
+ * Parse a Y CSV for the given-data path: one output per row, first column
+ * (extra columns are ignored).
+ */
+export function parseYGiven(parsed: ParsedCsv): Float64Array {
+  const flat = new Float64Array(parsed.rows.length);
+  for (let i = 0; i < parsed.rows.length; i++) {
+    if (parsed.rows[i].length < 1) {
+      throw new Error(`line ${i + 2}: row has no output value`);
+    }
+    flat[i] = parsed.rows[i][0];
+  }
+  return flat;
+}
+
+// ---------------------------------------------------------------------------
+// Results + session serialization
+// ---------------------------------------------------------------------------
+
+/** Serialize an analysis result to CSV: one row per parameter. */
+export function resultToCsv(result: AnalysisResult): string {
+  const lines = [`parameter,${result.columns.map((c) => c.label).join(",")}`];
+  for (let i = 0; i < result.parameters.length; i++) {
+    lines.push(
+      [result.parameters[i], ...result.columns.map((c) => String(c.values[i]))].join(
+        ",",
+      ),
+    );
+  }
+  return lines.join("\n") + "\n";
+}
+
+export interface SessionJson {
+  app: "jaxgsa-web";
+  version: 1;
+  problem: ProblemSpec;
+  /** One entry per generated design, keyed by method. */
+  designs: Record<string, { csv: string; nRuns: number; summary: [string, string][] }>;
+  y: { label: string; values: number[] } | null;
+  /** Results with plain-number columns (JSON-serializable). */
+  results: Array<
+    Omit<AnalysisResult, "columns"> & {
+      columns: Array<Omit<ResultColumn, "values"> & { values: number[] }>;
+    }
+  >;
+}
+
+/**
+ * Bundle the whole session — problem, generated designs (as CSV), the
+ * aligned outputs, and every result — into one JSON document for download.
+ */
+export function buildSessionJson(
+  problem: ProblemSpec,
+  designs: Partial<Record<DesignMethod, GeneratedDesign>>,
+  y: { label: string; values: Float64Array } | null,
+  results: AnalysisResult[],
+): SessionJson {
+  const designEntries: SessionJson["designs"] = {};
+  for (const method of Object.keys(designs) as DesignMethod[]) {
+    const gen = designs[method];
+    if (gen) {
+      designEntries[method] = {
+        csv: buildDesignCsv(problem, gen),
+        nRuns: gen.nRuns,
+        summary: gen.summary,
+      };
+    }
+  }
+  return {
+    app: "jaxgsa-web",
+    version: 1,
+    problem,
+    designs: designEntries,
+    y: y ? { label: y.label, values: Array.from(y.values) } : null,
+    results: results.map((r) => ({
+      ...r,
+      columns: r.columns.map((c) => ({
+        ...c,
+        values: Array.from(c.values),
+      })),
+    })),
+  };
 }

@@ -125,6 +125,8 @@
         @apply border-border outline-ring/50;
     }
     html {
+        /* ~2pt larger than the 16px default: every rem-based size grows. */
+        font-size: 18px;
         @apply font-sans;
     }
     body {

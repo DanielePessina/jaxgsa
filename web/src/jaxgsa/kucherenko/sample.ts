@@ -20,7 +20,12 @@
  */
 
 import { sobolSequence } from "@/jaxgsa/sobol/sampler";
-import { transformSamples, type ProblemSpec } from "@/jaxgsa/sampling";
+import {
+  nextPowerOfTwo,
+  transformSamples,
+  validateProblem,
+  type ProblemSpec,
+} from "@/jaxgsa/sampling";
 
 export interface KucherenkoDesign {
   /** Rows in physical units, (n_runs, D) row-major, block-major layout. */
@@ -29,22 +34,19 @@ export interface KucherenkoDesign {
   baseN: number;
 }
 
-function nextPowerOfTwo(n: number): number {
-  let p = 1;
-  while (p < n) p <<= 1;
-  return p;
-}
-
 export function sampleKucherenkoDesign(
   problem: ProblemSpec,
   nSamples: number,
   seed: number,
 ): KucherenkoDesign {
-  const D = problem.names.length;
-  if (D < 1) {
-    throw new Error("kucherenko: problem must declare at least one parameter");
+  validateProblem(problem, "kucherenko");
+  if (!Number.isInteger(nSamples) || nSamples < 1) {
+    throw new Error(
+      `jaxgsa.kucherenko.sample: n_samples must be a positive integer, got ${nSamples}`,
+    );
   }
-  const baseN = nextPowerOfTwo(Math.max(2, Math.floor(nSamples)));
+  const D = problem.names.length;
+  const baseN = nextPowerOfTwo(Math.max(2, nSamples));
   const blocks = 2 * D + 1;
   const draws = sobolSequence(2 * D, baseN, true, seed);
   // Block-major layout: block b holds base points 0..baseN-1 in rows

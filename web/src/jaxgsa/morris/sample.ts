@@ -1,7 +1,7 @@
 import { splitmix32 } from "../sobol/sampler";
 import {
-  stableUniqueRows,
-  transformSamples,
+  dedupeDesign,
+  validateProblem,
   type ProblemSpec,
 } from "../sampling";
 
@@ -209,19 +209,6 @@ export function sampleMorris(
     truncationQuantile = 1e-4,
   } = options;
 
-  if (problem.correlation != null) {
-    throw new Error(
-      "jaxgsa.morris.sample: correlated problems are not supported (the " +
-        "one-at-a-time design assumes independent inputs)",
-    );
-  }
-  if (problem.marginals.some((m) => m.kind === "categorical")) {
-    throw new Error(
-      "jaxgsa.morris.sample: categorical marginals are not supported (the " +
-        "design steps each parameter along a grid, and a grid has no meaning " +
-        "for unordered level codes)",
-    );
-  }
   if (!(truncationQuantile > 0 && truncationQuantile < 0.5)) {
     throw new Error(
       `jaxgsa.morris.sample: truncationQuantile must be in (0, 0.5), got ${truncationQuantile}`,
@@ -251,15 +238,8 @@ export function sampleMorris(
     );
   }
 
+  validateProblem(problem, "morris");
   const D = problem.names.length;
-  if (D < 1) {
-    throw new Error("jaxgsa.morris.sample: problem must declare at least one parameter");
-  }
-  if (problem.marginals.length !== D) {
-    throw new Error(
-      `jaxgsa.morris.sample: problem declares ${D} names but ${problem.marginals.length} marginals`,
-    );
-  }
 
   const rng = splitmix32(seed >>> 0);
   const { expandedUnit, eeIdxAfter, eeIdxBefore, eeDelta } = buildTrajectories(
@@ -272,9 +252,7 @@ export function sampleMorris(
   squashOpenSides(expandedUnit, eeDelta, problem, D, truncationQuantile);
 
   // Deduplicate on the unit cube first (bitwise row equality), then transform.
-  const { unique, expandedToUnique } = stableUniqueRows(expandedUnit, D);
-  const samples = transformSamples(problem, unique);
-  const nExpanded = expandedUnit.length / D;
+  const { samples, expandedToUnique, nExpanded } = dedupeDesign(problem, expandedUnit);
   const nRuns = samples.length / D;
 
   if (verbose) {

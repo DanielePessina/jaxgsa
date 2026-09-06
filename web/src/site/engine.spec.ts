@@ -4,7 +4,12 @@ import {
   ISHIGAMI_PROBLEM,
   alignYByRunId,
   buildDesignCsv,
+  buildSessionJson,
   parseCsv,
+  parseXGiven,
+  parseYGiven,
+  resultToCsv,
+  type AnalysisResult,
 } from "./engine";
 
 describe("parseCsv", () => {
@@ -111,6 +116,90 @@ describe("alignYByRunId (the run_id join)", () => {
     expect(() => alignYByRunId([[1], [2]], [0, 0], design2)).toThrow(
       /duplicate/,
     );
+  });
+});
+
+describe("parseXGiven / parseYGiven", () => {
+  const csv = parseCsv("x1,x2,x3\n1,2,3\n4,5,6\n");
+
+  it("flattens an X CSV row-major when the header matches the problem", () => {
+    const flat = parseXGiven(csv, ISHIGAMI_PROBLEM);
+    expect(Array.from(flat)).toEqual([1, 2, 3, 4, 5, 6]);
+  });
+
+  it("rejects a header that does not match the problem names", () => {
+    expect(() =>
+      parseXGiven(parseCsv("a,b,c\n1,2,3\n"), ISHIGAMI_PROBLEM),
+    ).toThrow(/header must be exactly: x1, x2, x3/);
+  });
+
+  it("rejects ragged rows", () => {
+    expect(() =>
+      parseXGiven(parseCsv("x1,x2,x3\n1,2\n"), ISHIGAMI_PROBLEM),
+    ).toThrow(/expected 3 columns, found 2/);
+  });
+
+  it("rejects an empty X CSV", () => {
+    expect(() => parseXGiven(parseCsv("x1,x2,x3\n"), ISHIGAMI_PROBLEM)).toThrow(
+      /no data rows/,
+    );
+  });
+
+  it("takes the first column of a Y CSV", () => {
+    const y = parseYGiven(parseCsv("y,extra\n1.5,99\n2.5,88\n"));
+    expect(Array.from(y)).toEqual([1.5, 2.5]);
+  });
+});
+
+describe("resultToCsv", () => {
+  const result: AnalysisResult = {
+    method: "sobol",
+    parameters: ["x1", "x2"],
+    columns: [
+      { key: "S1", label: "S1", values: new Float64Array([0.5, 0.25]) },
+      { key: "ST", label: "ST", values: new Float64Array([0.6, 0.25]) },
+    ],
+    notes: [],
+  };
+
+  it("emits a header row plus one row per parameter", () => {
+    const csv = resultToCsv(result);
+    const lines = csv.trim().split("\n");
+    expect(lines[0]).toBe("parameter,S1,ST");
+    expect(lines[1]).toBe("x1,0.5,0.6");
+    expect(lines[2]).toBe("x2,0.25,0.25");
+  });
+});
+
+describe("buildSessionJson", () => {
+  it("bundles problem, designs, y and results", () => {
+    const y = { label: "uploaded Y · 2 runs", values: new Float64Array([7, 8]) };
+    const session = buildSessionJson(
+      ISHIGAMI_PROBLEM,
+      {},
+      y,
+      [],
+    );
+    expect(session.app).toBe("jaxgsa-web");
+    expect(session.problem.names).toEqual(["x1", "x2", "x3"]);
+    expect(session.y?.values).toEqual([7, 8]);
+    expect(session.results).toEqual([]);
+  });
+
+  it("serializes each generated design as CSV", () => {
+    const gen = {
+      method: "sobol" as const,
+      problem: ISHIGAMI_PROBLEM,
+      samples: new Float64Array([1, 2, 3, 4, 5, 6]),
+      nRuns: 2,
+      nParams: 3,
+      port: null as never,
+      summary: [["base_n", "2"]] as [string, string][],
+      notes: [],
+    };
+    const session = buildSessionJson(ISHIGAMI_PROBLEM, { sobol: gen }, null, []);
+    expect(session.designs.sobol?.csv.split("\n")[0]).toBe("run_id,x1,x2,x3");
+    expect(session.designs.sobol?.nRuns).toBe(2);
   });
 });
 
