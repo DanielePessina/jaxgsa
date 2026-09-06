@@ -90,6 +90,7 @@ def _estimate(
     """
     variance = f_joint.var(axis=0)  # (S,)
     safe_variance = np.where(variance > 0.0, variance, np.nan)
+    N = f_joint.shape[0]
 
     # Shift both S1 factors by one shared constant (the joint-block mean)
     # before the product. The estimator is algebraically unchanged: for any
@@ -102,8 +103,15 @@ def _estimate(
     f0_joint = f_joint.mean(axis=0)  # (S,)
     g_joint = f_joint - f0_joint  # (N, S), centered
     g_first = f_first - f0_joint[None, None]  # (D, N, S), same shift
+    # The S1 cross-moment is a sum over the sample axis of a per-(d, s)
+    # dot product. The broadcast-multiply-then-mean form materialises a
+    # (D, N, S) intermediate; einsum accumulates the same dot without it.
+    # Both operate on the *centred* factors, so the shift-safety the
+    # estimator was designed for is unchanged (the two agree to ~1e-17 in
+    # float64, pure reassociation noise).
     S1 = (
-        (g_joint[None] * g_first).mean(axis=1) - g_joint.mean(axis=0)[None] * g_first.mean(axis=1)
+        np.einsum("dns,ns->ds", g_first, g_joint) / N
+        - g_joint.mean(axis=0)[None] * g_first.mean(axis=1)
     ) / safe_variance
     ST = 0.5 * ((f_joint[None] - f_total) ** 2).mean(axis=1) / safe_variance
     return S1, ST, variance
