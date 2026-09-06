@@ -1,0 +1,1 @@
+{"type":"config","name":"jaxgsa GSA kernel perf (speed geomean, memory secondary)","metricName":"geomean_ms","metricUnit":"ms","bestDirection":"lower"}
