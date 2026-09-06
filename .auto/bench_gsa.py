@@ -105,8 +105,12 @@ CASES: list[dict[str, Any]] = [
     # ---- moment-independent / distributional (given data) -----------------
     {"key": "borgonovo_small", "method": "borgonovo", "D": 3, "N": 1024, "dims": (), "boot": 10},
     {"key": "pawn_slices", "method": "pawn", "D": 3, "N": 1024, "dims": (32,), "boot": 10},
+    {"key": "ot_small", "method": "optimal_transport", "D": 3, "N": 256, "dims": (), "boot": 0},
     {"key": "ot_slices", "method": "optimal_transport", "D": 3, "N": 1024,
      "dims": (32,), "boot": 10},
+    {"key": "ot_high_d", "method": "optimal_transport", "D": 15, "N": 1024, "dims": (), "boot": 0},
+    {"key": "ot_high_n", "method": "optimal_transport", "D": 3, "N": 8192, "dims": (), "boot": 0},
+    {"key": "ot_boot", "method": "optimal_transport", "D": 3, "N": 1024, "dims": (), "boot": 50},
     # ---- O(N^2) / greedy methods (kept small so the sweep stays bounded) --
     {"key": "hsic_small", "method": "hsic", "D": 3, "N": 512, "dims": ()},
     {"key": "vkoga_small", "method": "vkoga", "D": 3, "N": 512, "dims": ()},
