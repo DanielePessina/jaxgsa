@@ -1,5 +1,7 @@
 import rawKucherenko from "../../goldens/v0.9.0/kucherenko.json";
 import rawMorris from "../../goldens/v0.9.0/morris.json";
+import rawPce from "../../goldens/v0.9.0/pce.json";
+import rawShapley from "../../goldens/v0.9.0/shapley.json";
 import rawSobol from "../../goldens/v0.9.0/sobol.json";
 
 export interface Golden {
@@ -106,5 +108,65 @@ export function loadMorrisGolden(): MorrisGolden {
     expected: RAW_MORRIS.expected,
     tolerance: RAW_MORRIS.tolerance,
     design: RAW_MORRIS.design,
+  };
+}
+
+export interface PceGolden {
+  x: number[][];
+  y: number[];
+  expected: { S1: number[]; ST: number[] };
+  tolerance: { rtol: number; atol: number };
+  config: { order: number; ridge: number };
+}
+
+interface RawPceGolden {
+  method: string;
+  n: number;
+  x: number[][];
+  y: number[];
+  expected: { S1: number[]; ST: number[] };
+  tolerance: { rtol: number; atol: number };
+  config: { order: number; ridge: number; n: number; seed: number };
+}
+
+const RAW_PCE = rawPce as RawPceGolden;
+
+export function loadPceGolden(): PceGolden {
+  return {
+    x: RAW_PCE.x,
+    y: RAW_PCE.y,
+    expected: RAW_PCE.expected,
+    tolerance: RAW_PCE.tolerance,
+    config: { order: RAW_PCE.config.order, ridge: RAW_PCE.config.ridge },
+  };
+}
+
+export interface ShapleyGolden {
+  x: number[][];
+  y: number[];
+  expected: { S1: number[]; ST: number[]; Sh: number[] };
+  tolerance: { rtol: number; atol: number };
+  config: { backend: string; order: number };
+}
+
+interface RawShapleyGolden {
+  method: string;
+  n: number;
+  x: number[][];
+  y: number[];
+  expected: { S1: number[]; ST: number[]; Sh: number[] };
+  tolerance: { rtol: number; atol: number };
+  config: { backend: string; order: number; n: number; seed: number };
+}
+
+const RAW_SHAPLEY = rawShapley as RawShapleyGolden;
+
+export function loadShapleyGolden(): ShapleyGolden {
+  return {
+    x: RAW_SHAPLEY.x,
+    y: RAW_SHAPLEY.y,
+    expected: RAW_SHAPLEY.expected,
+    tolerance: RAW_SHAPLEY.tolerance,
+    config: { backend: RAW_SHAPLEY.config.backend, order: RAW_SHAPLEY.config.order },
   };
 }
