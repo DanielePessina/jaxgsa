@@ -81,9 +81,16 @@ def to_list(a) -> list:
     return np.asarray(a).tolist()
 
 
-def doc(method: str, x: np.ndarray, y: np.ndarray, expected: dict, config: dict) -> dict:
+def doc(
+    method: str,
+    x: np.ndarray,
+    y: np.ndarray,
+    expected: dict,
+    config: dict,
+    design: dict | None = None,
+) -> dict:
     """Assemble one golden document per the schema in goldens/README.md."""
-    return {
+    document = {
         "method": method,
         "jaxgsa_version": JAXGSA_VERSION,
         "n": int(x.shape[0]),
@@ -93,6 +100,9 @@ def doc(method: str, x: np.ndarray, y: np.ndarray, expected: dict, config: dict)
         "tolerance": TOLERANCES[method],
         "config": config,
     }
+    if design is not None:
+        document["design"] = design
+    return document
 
 
 def summarize(method: str, doc_: dict) -> None:
@@ -142,7 +152,9 @@ def build_kucherenko() -> dict:
 
 def build_morris() -> dict:
     # 40 trajectories x (D + 1) = 160 expanded rows, deduplicated to the
-    # unique design stored below.
+    # unique design stored below. The estimator needs the design bookkeeping
+    # (expansion map + elementary-effect indices) that the JS analyze reads,
+    # so it is stored in the "design" block rather than reconstructed.
     mr = morris.sample(PROBLEM, n_trajectories=N_TRAJECTORIES, seed=SEED, verbose=False)
     X = np.asarray(mr.samples)
     Y = evaluate(X)
@@ -153,6 +165,15 @@ def build_morris() -> dict:
         "morris", X, Y,
         {"mu": res.mu, "mu_star": res.mu_star, "sigma": res.sigma},
         {"n_trajectories": N_TRAJECTORIES, "num_levels": 4, "method": "trajectory", "seed": SEED},
+        design={
+            "n_expanded": mr.n_expanded,
+            "n_trajectories": mr.n_trajectories,
+            "num_levels": mr.num_levels,
+            "expanded_to_unique": to_list(mr.expanded_to_unique),
+            "ee_idx_after": to_list(mr.ee_idx_after),
+            "ee_idx_before": to_list(mr.ee_idx_before),
+            "ee_delta": to_list(mr.ee_delta),
+        },
     )
 
 

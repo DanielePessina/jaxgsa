@@ -78,6 +78,7 @@ Flat and explicit; one file per method:
 | `expected`         | object | method-specific index arrays (see below)              |
 | `tolerance`        | object | `rtol` / `atol` the TS tests must use                 |
 | `config`           | object | seed and parameters that produced the file (informational) |
+| `design`           | object | design bookkeeping the estimator needs (morris only)  |
 
 `expected` keys per method:
 
@@ -85,6 +86,12 @@ Flat and explicit; one file per method:
 - `kucherenko`: `S1`, `ST`, `variance`
 - `morris`: `mu`, `mu_star`, `sigma`
 - `pce` / `hdmr` / `shapley`: `S1`, `ST`
+
+`design` (morris only) carries the bookkeeping the elementary-effect estimator
+reads, exactly as `MorrisSamples` stores it: `expanded_to_unique` (map from each
+expanded row to its unique row), `ee_idx_after` / `ee_idx_before` (expanded-row
+indices of the perturbed/reference points, `(r, D)`), `ee_delta` (signed
+unit-cube steps, `(r, D)`), plus `n_expanded`, `n_trajectories`, `num_levels`.
 
 All arrays are plain JSON lists of Python `float` (64-bit double precision),
 stored verbatim — no rounding, no truncation.
