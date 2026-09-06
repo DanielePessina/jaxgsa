@@ -147,15 +147,20 @@ errors behind the default, and for what a negative index estimate means.
 ## slice_chunk_size
 
 `slice_chunk_size` is the number of `(T, K)` output slices per vmap batch. It
-is a memory knob, not an algorithm switch. On the bootstrap path each slice in
-a batch carries all `n_bootstrap` of its draws, so one device call covers
-`slice_chunk_size * n_bootstrap` estimator evaluations.
+is a memory knob, not an algorithm switch. On the bootstrap path, resamples
+are also batched using the memory budget. One device call covers the chosen
+output-slice width times the resample-batch width; it need not carry all
+`n_bootstrap` draws at once.
 
 `None` (the default) derives the width from the memory budget. A slice costs
-about `2 * N * (D + 2)` elements first-order-only, and
-`2 * N * (2D + 2) + N * D * D` with second order, because every second-order
-estimator forms an `(N, D, D)` outer product. Set it yourself when you hit a
-device out-of-memory error, and lower it in factors of two.
+about `2 * N * (D + 2)` elements first-order-only, and `2 * N * (2D + 2)`
+with second order: the second-order cross-moment is written as a matrix
+product (`BA.T @ AB`), so the `(N, D, D)` outer product earlier versions
+materialised no longer exists and both orders are linear in `D`. Set it
+yourself when you hit a device out-of-memory error, and lower it in factors
+of two. These are transient working-set estimates, not a hard memory cap:
+resident inputs, the resampling index matrix, and retained results still
+occupy memory.
 
 It changes no index beyond float noise. The estimator sums over the sample
 axis, and XLA schedules that reduction differently for a different batch width,

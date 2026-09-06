@@ -33,7 +33,7 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core import verbose as _verbose
-from jaxgsa._core.bootstrap import interval
+from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints, interval
 from jaxgsa._core.entry import (
     at_least,
     check_scalars,
@@ -42,14 +42,19 @@ from jaxgsa._core.entry import (
     prepare,
     require,
 )
-from jaxgsa._core.invalid import InvalidReport, OnInvalid
+from jaxgsa._core.invalid import InvalidReport, OnInvalid, _unit_of_row_for_policy
+from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
     YLayout,
     _prepare_Y,
     _standardize_outputs,
 )
 from jaxgsa.sobol._bootstrap import _bootstrap_indices
-from jaxgsa.sobol._chunking import pad_slice_axis, resolve_point_chunk_size
+from jaxgsa.sobol._chunking import (
+    pad_slice_axis,
+    resolve_point_chunk_size,
+    resolve_resample_chunk_size,
+)
 from jaxgsa.sobol._estimators import (
     DEFAULT_ESTIMATOR,
     ESTIMATORS,
@@ -85,6 +90,53 @@ def _get_batched_kernel(calc_second_order: bool, estimator: str):
     if calc_second_order:
         return jax.jit(jax.vmap(second_order_kernel(estimator), in_axes=(0, 0, 0, 0)))
     return jax.jit(jax.vmap(first_total_kernel(estimator), in_axes=(0, 0, 0)))
+
+
+@lru_cache(maxsize=None)
+def _get_fused_scalar_indices(D: int, calc_second_order: bool, estimator: str):
+    """Build the one-executable take + standardize + split + flatten + kernel.
+
+    The expansion gather is fused into the scalar front half when the
+    non-finite check was skipped (``on_invalid='none'``, see
+    :func:`jaxgsa._core.entry.prepare`): the expanded array is then read by
+    nothing but the estimator, so materialising it as an eager pass wastes a
+    write and a read of the whole array. Measured ~2.2x faster than the
+    eager pipeline on a million-row ishigami scalar analysis. The fused
+    graph takes the unique-row outputs and the design's expansion map, both
+    plain arrays, so the take stays traceable.
+
+    Only the scalar layout (``T * K == 1``) uses this. Wide layouts run
+    slower fused (measured ~20% worse at 32 slices: the memory planner
+    composes the big gather worse than the eager dispatch), so they expand
+    eagerly instead.
+
+    Args:
+        D: Number of input parameters.
+        calc_second_order: Whether the layout includes the BA blocks.
+        estimator: Which named estimator pair to use.
+
+    Returns:
+        A jitted function of ``(Y_raw, index_map)`` returning the raw
+        ``(S1, ST, S2)`` tuples in the pre-squeezed ``(1, 1, ...)`` shapes.
+    """
+
+    def fn(Y_raw: Array, index_map: Array) -> tuple[Array, Array, Array | None]:
+        Y3 = jnp.take(Y_raw, index_map, axis=0).reshape(-1, 1, 1)
+        A_flat, AB_flat, BA_flat, B_flat = _separate_flattened(Y3, D, calc_second_order)
+        return _point_indices_3d(
+            A_flat,
+            AB_flat,
+            BA_flat,
+            B_flat,
+            T=1,
+            K=1,
+            D=D,
+            is_scalar=True,
+            slice_chunk_size=1,
+            estimator=estimator,
+        )
+
+    return jax.jit(fn)
 
 
 def _separate_output_values(
@@ -168,6 +220,53 @@ def _separate_output_values(
         BA = grouped[:, D + 1 : 2 * D + 1]  # (N, D, ...)
 
     return A, AB, BA, B
+
+
+def _separate_flattened(
+    Y: Array, D: int, calc_second_order: bool
+) -> tuple[Array, Array, Array | None, Array]:
+    """Standardize, split into the Saltelli blocks and fold the slices in one call.
+
+    Exactly :func:`_separate_output_values` followed by :func:`_flatten_slices`,
+    traced as a single executable instead of the ~8 eager dispatches the two
+    functions make over the expanded array. Both the point-estimate path and
+    the bootstrap path go through it, so they stay the one seam the estimator
+    front half always was. The row-count check of
+    :func:`_separate_output_values` runs at trace time, so a hand-built
+    misaligned ``Y`` still raises the same error.
+
+    Args:
+        Y: Expanded outputs, shape ``(N * step, ...)``, rows in Saltelli
+            group order.
+        D: Number of input parameters.
+        calc_second_order: Whether the layout includes the BA blocks.
+
+    Returns:
+        ``(A_flat, AB_flat, BA_flat, B_flat)`` with shapes ``(S, N)``,
+        ``(S, N, D)``, ``(S, N, D)`` and ``(S, N)``; ``BA_flat`` is ``None``
+        when second order is off. Standardized per output slice, exactly as
+        the two component functions produced.
+    """
+    return _get_separate_flatten(D, calc_second_order)(Y)
+
+
+@lru_cache(maxsize=None)
+def _get_separate_flatten(D: int, calc_second_order: bool):
+    """Build the jitted standardize-split-flatten for one (D, design) pair.
+
+    ``D`` and ``calc_second_order`` are Python ints and bools in every traced
+    call, but as jit arguments they would arrive as tracers and break the
+    ``step`` arithmetic and the bounded slices inside
+    :func:`_separate_output_values`. Closing over them, and keying the jit
+    cache on them, keeps both static, the same pattern the estimator kernels
+    use for ``calc_second_order`` and ``estimator``.
+    """
+
+    def fn(Y: Array) -> tuple[Array, Array, Array | None, Array]:
+        A, AB, BA, B = _separate_output_values(Y, D, calc_second_order)
+        return _flatten_slices(A, AB, BA, B)
+
+    return jax.jit(fn)
 
 
 def _symmetrize_s2(S2: Array) -> Array:
@@ -408,7 +507,13 @@ def _point_indices_3d(
 
 
 def _indices_from_expanded(
-    Y: Array, D: int, calc_second_order: bool, slice_chunk_size: int | None, estimator: str
+    Y: Array,
+    D: int,
+    calc_second_order: bool,
+    slice_chunk_size: int | None,
+    estimator: str,
+    *,
+    expand_map: Array | None = None,
 ) -> tuple[Array, Array, Array | None]:
     """Compute Sobol indices from expanded-layout outputs, picking the faster kernel.
 
@@ -427,13 +532,22 @@ def _indices_from_expanded(
 
     Args:
         Y: Model outputs in the expanded Saltelli layout, shape
-            ``(base_n * step, ...)``.
+            ``(base_n * step, ...)``. The callers that defer the expansion
+            pass the unique-row outputs instead, with the design's
+            ``expanded_to_unique`` map in ``expand_map``; the gather then
+            runs fused with the standardization on the scalar layout (see
+            :func:`_get_fused_scalar_indices`) or eagerly before the
+            standard path on a wide layout.
         D: Number of input parameters.
         calc_second_order: Whether the layout includes the BA blocks.
         slice_chunk_size: Number of (T, K) output slices per vmap batch, or
             ``None`` to derive one from the active memory budget.
         estimator: Which named estimator pair to use. See
             :mod:`jaxgsa.sobol._estimators`.
+        expand_map: The design's ``expanded_to_unique`` index map, when
+            ``Y`` holds one output per unique run instead of the expanded
+            layout. ``None`` (the default, and always for the transformable
+            :func:`indices`) means ``Y`` is already expanded.
 
     Returns:
         ``(S1, ST, S2)``, with ``S2`` ``None`` when second order is off. The
@@ -442,12 +556,23 @@ def _indices_from_expanded(
     Raises:
         ValueError: If ``slice_chunk_size`` is below 1.
     """
+    if expand_map is not None:
+        # The non-finite check was skipped (on_invalid='none'), so nothing
+        # read the expanded rows before here. The scalar layout fuses the
+        # gather into the front half (one executable, measured ~2.2x faster
+        # than the eager pipeline); wide layouts run slower fused, so they
+        # gather eagerly and take the standard path below.
+        _, layout = _prepare_Y(Y)
+        if layout is YLayout.SCALAR:
+            fused = _get_fused_scalar_indices(D, calc_second_order, estimator)
+            return _squeeze_indices(layout, fused(Y, expand_map))
+        Y = jnp.take(Y, expand_map, axis=0)
+
     # Promote to uniform 3-D shape (N, T, K) so downstream code is shape-agnostic.
     Y, layout = _prepare_Y(Y)
     _, T, K = Y.shape
 
-    A, AB, BA, B = _separate_output_values(Y, D, calc_second_order)
-    A_flat, AB_flat, BA_flat, B_flat = _flatten_slices(A, AB, BA, B)
+    A_flat, AB_flat, BA_flat, B_flat = _separate_flattened(Y, D, calc_second_order)
 
     S1_out, ST_out, S2_out = _point_indices_3d(
         A_flat,
@@ -461,7 +586,28 @@ def _indices_from_expanded(
         slice_chunk_size=slice_chunk_size,
         estimator=estimator,
     )
+    return _squeeze_indices(layout, (S1_out, ST_out, S2_out))
 
+
+def _squeeze_indices(
+    layout: YLayout, raw: tuple[Array, Array, Array | None]
+) -> tuple[Array, Array, Array | None]:
+    """Bring the raw ``(T, K, ...)`` kernel outputs back to the caller's rank.
+
+    Both the fused scalar path and the standard front half produce the same
+    pre-squeezed shapes, so the demotion is one helper instead of two copies
+    of the three squeezes (the S2 symmetrising is part of the demotion: the
+    raw pair matrix is symmetric only after :func:`_symmetrize_s2`).
+
+    Args:
+        layout: The caller's rank, read off the promoted array.
+        raw: ``(S1, ST, S2)`` from the estimator, with inserted ``(T, K)``
+            axes; ``S2`` may be ``None`` when second order is off.
+
+    Returns:
+        ``(S1, ST, S2)`` at the caller's rank.
+    """
+    S1_out, ST_out, S2_out = raw
     S1_out = layout.squeeze(S1_out)
     ST_out = layout.squeeze(ST_out)
     if S2_out is not None:
@@ -476,6 +622,7 @@ def _analyze_no_bootstrap(
     slice_chunk_size: int | None,
     estimator: str,
     invalid: InvalidReport,
+    expand_map: Array | None = None,
 ) -> SobolResult:
     """Wrap the estimator core in a ``SobolResult``, without a bootstrap."""
     S1_out, ST_out, S2_out = _indices_from_expanded(
@@ -484,6 +631,7 @@ def _analyze_no_bootstrap(
         sampling_result.calc_second_order,
         slice_chunk_size,
         estimator,
+        expand_map=expand_map,
     )
     return SobolResult(
         S1=S1_out,
@@ -595,21 +743,20 @@ def _analyze_bootstrap(
 
     The draws follow the same shape one level deeper. The atomic unit is one
     estimator call on one slice and one resample; the resamples of a slice are
-    ``vmap``ped, that pair is ``vmap``ped over a chunk of slices, and the
-    chunks are looped over. One device call therefore covers
-    ``chunk * R`` estimator evaluations instead of the ``R`` a per-slice loop
-    managed. ``slice_chunk_size`` caps the slices per chunk and the memory
-    budget can lower it further, so the peak stays bounded: no call
-    materialises more than ``chunk * R`` copies of an (N,) or (N, D) slice.
+    vmapped in a bounded batch, that pair is vmapped over a chunk of slices,
+    and both loops run on the host. The pre-generated random index matrix is
+    sliced contiguously, so changing either width does not change any draw.
+    When ``keep_replicates=False``, each output chunk is reduced to CI
+    endpoints before the next chunk is processed. Keeping replicates opts in
+    to assembling the full public draw arrays.
     """
     Y, layout = _prepare_Y(Y)
     D = sampling_result.n_params
     calc_second_order = sampling_result.calc_second_order
 
     _, T, K = Y.shape
-    A, AB, BA, B = _separate_output_values(Y, D, calc_second_order)
-    base_n = A.shape[0]
-    A_flat, AB_flat, BA_flat, B_flat = _flatten_slices(A, AB, BA, B)
+    A_flat, AB_flat, BA_flat, B_flat = _separate_flattened(Y, D, calc_second_order)
+    base_n = A_flat.shape[1]
     total = T * K
 
     # Pre-generate all R bootstrap index sets (sampling with replacement).
@@ -641,40 +788,115 @@ def _analyze_bootstrap(
         n_bootstrap=n_bootstrap,
     )
 
-    s1_boot, st_boot, s2_boot_raw = _bootstrap_indices(
-        resample_idx, A_flat, AB_flat, BA_flat, B_flat, cs, estimator
+    # A slice chunk can be large enough for the point path but still leave an
+    # unbounded R axis in the bootstrap gather. Resolve the second width from
+    # the same transient working-set model. The input/resample arrays and the
+    # final result remain resident, so this bounds the estimator transient.
+    rs = resolve_resample_chunk_size(
+        n_bootstrap,
+        base_n,
+        D,
+        calc_second_order,
+        A_flat.dtype.itemsize,
+        cs,
     )
-    S1_boot = jnp.moveaxis(s1_boot, 1, 0).reshape(n_bootstrap, T, K, D)
-    ST_boot = jnp.moveaxis(st_boot, 1, 0).reshape(n_bootstrap, T, K, D)
 
-    points = {"S1": S1_out, "ST": ST_out}
-    draws = {"S1": S1_boot, "ST": ST_boot}
-
+    S1_flat = S1_out.reshape(total, D)
+    ST_flat = ST_out.reshape(total, D)
     S2_sym = None
     if calc_second_order:
-        assert S2_raw is not None and s2_boot_raw is not None
-        # (S, R, D, D) -> (R, T, K, D, D): the CI helpers and the replicate
-        # layout both want the resample axis first.
-        S2_boot_raw = jnp.moveaxis(s2_boot_raw, 1, 0).reshape(n_bootstrap, T, K, D, D)
-        # Symmetrise the point estimate and every draw before either reaches
-        # a confidence interval, so the interval describes the same
-        # symmetrised quantity the point estimate reports (see
-        # _symmetrize_s2). The diagonal stays whatever it computed to here;
-        # it is masked to NaN once, below, after the interval is read.
+        assert S2_raw is not None
         S2_sym = _symmetrize_s2(S2_raw)
-        points["S2"] = S2_sym
-        draws["S2"] = _symmetrize_s2(S2_boot_raw)
+        S2_flat = S2_sym.reshape(total, D, D)
+    else:
+        S2_flat = None
 
-    # One call turns every point/draws pair into its `*_conf` endpoints and
-    # the CIInfo the result carries; see jaxgsa._core.bootstrap.interval.
-    conf, ci = interval(
-        points,
-        draws,
-        level=conf_level,
-        method=ci_method,
-        n_bootstrap=n_bootstrap,
-        keep_replicates=keep_replicates,
-    )
+    s1_draw_parts, st_draw_parts, s2_draw_parts = [], [], []
+    s1_conf_parts, st_conf_parts, s2_conf_parts = [], [], []
+    for start in range(0, total, cs):
+        end = min(start + cs, total)
+        actual = end - start
+        A_chunk = pad_slice_axis(A_flat[start:end], cs)
+        AB_chunk = pad_slice_axis(AB_flat[start:end], cs)
+        B_chunk = pad_slice_axis(B_flat[start:end], cs)
+        BA_chunk = None if BA_flat is None else pad_slice_axis(BA_flat[start:end], cs)
+        s1_chunk, st_chunk, s2_chunk = _bootstrap_indices(
+            resample_idx,
+            A_chunk,
+            AB_chunk,
+            BA_chunk,
+            B_chunk,
+            cs,
+            estimator,
+            resample_chunk_size=rs,
+        )
+        s1_draws = jnp.moveaxis(s1_chunk[:actual], 1, 0)
+        st_draws = jnp.moveaxis(st_chunk[:actual], 1, 0)
+        if keep_replicates:
+            s1_draw_parts.append(s1_draws)
+            st_draw_parts.append(st_draws)
+
+        if not keep_replicates:
+            s1_lo, s1_hi = _bootstrap_ci_endpoints(
+                S1_flat[start:end],
+                s1_draws,
+                conf_level=conf_level,
+                ci_method=ci_method,
+            )
+            st_lo, st_hi = _bootstrap_ci_endpoints(
+                ST_flat[start:end],
+                st_draws,
+                conf_level=conf_level,
+                ci_method=ci_method,
+            )
+            s1_conf_parts.append(jnp.stack([s1_lo, s1_hi]))
+            st_conf_parts.append(jnp.stack([st_lo, st_hi]))
+
+        if calc_second_order:
+            assert s2_chunk is not None and S2_flat is not None
+            s2_draws = _symmetrize_s2(jnp.moveaxis(s2_chunk[:actual], 1, 0))
+            if keep_replicates:
+                s2_draw_parts.append(s2_draws)
+            if not keep_replicates:
+                s2_lo, s2_hi = _bootstrap_ci_endpoints(
+                    S2_flat[start:end],
+                    s2_draws,
+                    conf_level=conf_level,
+                    ci_method=ci_method,
+                )
+                s2_conf_parts.append(jnp.stack([s2_lo, s2_hi]))
+
+    if keep_replicates:
+        S1_boot = jnp.concatenate(s1_draw_parts, axis=1).reshape(n_bootstrap, T, K, D)
+        ST_boot = jnp.concatenate(st_draw_parts, axis=1).reshape(n_bootstrap, T, K, D)
+        points = {"S1": S1_out, "ST": ST_out}
+        draws = {"S1": S1_boot, "ST": ST_boot}
+        if calc_second_order:
+            assert S2_sym is not None
+            S2_boot = jnp.concatenate(s2_draw_parts, axis=1).reshape(n_bootstrap, T, K, D, D)
+            points["S2"] = S2_sym
+            draws["S2"] = S2_boot
+        conf, ci = interval(
+            points,
+            draws,
+            level=conf_level,
+            method=ci_method,
+            n_bootstrap=n_bootstrap,
+            keep_replicates=True,
+        )
+    else:
+        conf = {
+            "S1": jnp.concatenate(s1_conf_parts, axis=1).reshape(2, T, K, D),
+            "ST": jnp.concatenate(st_conf_parts, axis=1).reshape(2, T, K, D),
+        }
+        if calc_second_order:
+            conf["S2"] = jnp.concatenate(s2_conf_parts, axis=1).reshape(2, T, K, D, D)
+        ci = CIInfo(
+            level=conf_level,
+            method=ci_method,
+            n_bootstrap=n_bootstrap,
+            replicates=None,
+        )
     S1_conf = conf["S1"]
     ST_conf = conf["ST"]
 
@@ -818,18 +1040,20 @@ def analyze(
             ``n_bootstrap > 0``.
         slice_chunk_size: Memory/speed trade-off for batched computation.
             It is the number of (T, K) output slices per vmap batch on both
-            paths. On the bootstrap path each slice in a batch carries all
-            ``n_bootstrap`` of its draws, so one device call covers
-            ``slice_chunk_size * n_bootstrap`` estimator evaluations, and
-            the memory budget that :func:`jaxgsa.config.set_memory_budget`
-            sets can lower the width further. ``None`` (the default) derives
-            the width from that budget alone, on both paths: a slice costs
-            about ``2 * N * (D + 2)`` elements first-order-only, and
-            ``2 * N * (2D + 2) + N * D * D`` with second order, because
-            every second-order estimator forms an ``(N, D, D)`` outer
-            product. The bootstrap kernels cost ``n_bootstrap`` times that.
-            Give an integer to cap it yourself if you hit device
-            out-of-memory errors.
+            paths. On the bootstrap path the resample axis is batched too;
+            its width is derived from the transient memory budget after this
+            slice width is chosen. ``None`` (the default) derives the slice
+            width from that budget, on both paths: a slice costs about
+            ``2 * N * (D + 2)`` elements first-order-only, and
+            ``2 * N * (2D + 2)`` with second order. Both orders are now
+            linear in ``D``: the second-order cross-moment is written as a
+            matrix product (``BA.T @ AB``), so the ``(N, D, D)`` outer
+            product earlier versions materialised no longer exists. The
+            bootstrap transient is sized for the product of slice width and
+            resample width. Resident inputs, the pre-generated index matrix,
+            and final results are outside this estimate. Give an integer to
+            cap the slice width yourself if you hit device out-of-memory
+            errors; the resample width remains budget-bounded.
 
             It changes no index beyond floating-point noise. The estimator
             sums over the sample axis, and XLA schedules that reduction
@@ -889,7 +1113,10 @@ def analyze(
     # A/B/AB/BA split. The group count comes from the design, not from Y, so
     # it is known before Y is looked at.
     base_n = sampling_result.n_expanded // step
-
+    # Under on_invalid='none' the check never reads the row map (measured
+    # ~0.6 ms of the fixed cost at base_n=16384), so it is built only where
+    # it is used.
+    unit_of_row = _unit_of_row_for_policy(on_invalid, lambda: np.repeat(np.arange(base_n), step))
     ctx = prepare(
         SPEC,
         sampling_result.problem,
@@ -911,11 +1138,17 @@ def analyze(
         n_expected=int(sampling_result.samples.shape[0]),
         expand=sampling_result.expand_outputs,
         n_units=base_n,
-        unit_of_row=np.repeat(np.arange(base_n), step),
+        unit_of_row=unit_of_row,
+        # The Saltelli layout groups units contiguously, step rows each.
+        unit_stride=step,
         # Y is checked expanded, but the caller passed one output per unique
         # run. Report the rows they hold, not the expanded ones.
         row_labels=sampling_result.expanded_to_unique,
         min_kept=2,
+        # Under on_invalid='none' the check never reads the expanded rows, so
+        # the expansion is deferred to the estimator, which fuses the gather
+        # into the scalar front half (see _get_fused_scalar_indices). Every
+        # other policy expands here, inside prepare.
     )
     # The estimator reads the expanded layout, and its scalar fast path
     # branches on Y's own rank, so this is ctx.Y and not ctx.Y3.
@@ -927,6 +1160,21 @@ def analyze(
         # trace, so the compaction round-trips through NumPy.
         grouped = np.asarray(Y).reshape(base_n, step, *trailing)[ctx.keep]
         Y = jnp.asarray(grouped.reshape(-1, *trailing))
+
+    # on_invalid='none' held the expansion back from the preamble (see
+    # Context.deferred_expand). A scalar analysis without a bootstrap
+    # fuses the gather into the estimator front half -- measured ~2.2x
+    # faster than the eager expansion, the gather becoming part of one
+    # executed graph instead of one pass over the expanded array. Wide
+    # layouts run slower fused (measured), and the bootstrap resamples from
+    # the expanded rows, so both expand eagerly here: the same thing prepare
+    # would have done, one dispatch earlier in the pipeline.
+    expand_map = None
+    if ctx.deferred_expand is not None:
+        if n_bootstrap == 0 and ctx.keep.all() and ctx.layout is YLayout.SCALAR:
+            expand_map = sampling_result._expanded_to_unique_jax
+        else:
+            Y = ctx.deferred_expand(Y)
 
     # The outputs are standardized inside _separate_output_values, which both
     # paths below reach, so there is nothing to do to Y here.
@@ -952,6 +1200,7 @@ def analyze(
             slice_chunk_size=slice_chunk_size,
             estimator=estimator,
             invalid=invalid,
+            expand_map=expand_map,
         )
 
     if verbose:
@@ -970,19 +1219,18 @@ def analyze(
         origin = "user-set" if slice_chunk_size is not None else "resolved from the memory budget"
         notes = [f"slice_chunk_size: {cs} ({origin})", f"estimator: {estimator}"]
         if n_bootstrap > 0:
-            # The bootstrap kernels ran with their own width (each chunk
-            # carries all R resamples of a slice); same resolver, scaled by
-            # n_bootstrap, that they used.
-            boot_cs = resolve_point_chunk_size(
-                slice_chunk_size,
-                T * K,
+            # The bootstrap path resolves both axes from the transient model.
+            # ``cs`` is the slice width; ``boot_rs`` is the resample width
+            # after accounting for that chosen slice width.
+            boot_rs = resolve_resample_chunk_size(
+                n_bootstrap,
                 int(Y.shape[0]) // step,
                 D,
                 sampling_result.calc_second_order,
                 Y.dtype.itemsize,
-                n_bootstrap=n_bootstrap,
+                cs,
             )
-            notes.insert(1, f"bootstrap slice_chunk_size: {boot_cs} ({origin})")
+            notes.insert(1, f"bootstrap resample_chunk_size: {boot_rs} ({origin})")
         _verbose.analysis_summary(
             method="jaxgsa.sobol.analyze",
             problem=sampling_result.problem,

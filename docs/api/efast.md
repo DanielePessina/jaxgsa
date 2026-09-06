@@ -109,9 +109,10 @@ batch. It bounds peak device memory when `T * K` is large, and trades speed
 for memory. `None` derives a width from the memory budget. It changes no index
 beyond float summation order.
 
-`on_invalid` accepts only `"raise"` (the default) and `"propagate"` here.
-`"drop"` raises a `ValueError`. Dropping a point from a search curve does not
-shrink the sample, it changes what the discrete Fourier transform computes,
+`on_invalid` accepts `"raise"` (the default), `"propagate"` and `"none"`
+here. `"drop"` raises a `ValueError`. Dropping a point from a search curve
+does not shrink the sample, it changes what the discrete Fourier transform
+computes,
 so there is no honest way to analyze the survivors. The non-finite report
 still names the curve to investigate.
 

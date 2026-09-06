@@ -146,8 +146,8 @@ refer to the array as you passed it, so they name model runs you can find.
 #### OnInvalid
 
 `jaxgsa.OnInvalid` — the type of the `on_invalid` argument, the literal
-`"raise" | "propagate" | "drop"`. Exported so that typed code can name the
-policy it passes.
+`"raise" | "propagate" | "drop" | "none"`. Exported so that typed code can
+name the policy it passes.
 
 #### InvalidUnit
 

@@ -54,7 +54,7 @@ them rather than bending them:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -223,6 +223,12 @@ class Context:
         extra: The further sample-axis arrays the caller handed to
             :func:`prepare`, under the same names, checked with ``Y`` and
             compacted with it.
+        deferred_expand: The design's output re-expansion, held back from
+            the eager preamble. Only set under ``on_invalid="none"`` (the
+            non-finite check never reads the expanded rows then), so the
+            expansion can ride along with the estimator instead of
+            materialising the expanded array first. ``None`` when the
+            preamble ran it, or when no expansion is needed.
     """
 
     method: str
@@ -235,6 +241,7 @@ class Context:
     invalid: InvalidReport
     policy: OnInvalid
     extra: Mapping[str, Array] = field(default_factory=dict)
+    deferred_expand: Callable[[Array], Array] | None = None
 
     def squeeze(self, arr: Array, *, n_trailing: int = 1) -> Array:
         """Undo the promotion :func:`prepare` applied, for one result field.
@@ -271,6 +278,7 @@ def prepare(
     expand: Callable[[Array], Array] | None = None,
     n_units: int | None = None,
     unit_of_row: npt.NDArray[np.intp] | None = None,
+    unit_stride: int | None = None,
     row_labels: npt.NDArray[np.intp] | None = None,
     min_kept: int = 1,
     source_names: tuple[str, str] = ("X", "Y"),
@@ -310,7 +318,11 @@ def prepare(
         problem: The problem definition.
         Y: The caller's model output.
         X: The input matrix, or ``None`` for a design-based method.
-        on_invalid: The caller's non-finite policy, unvalidated.
+        on_invalid: The caller's non-finite policy, unvalidated. Under
+            ``"none"`` (see :mod:`jaxgsa._core.invalid`) the non-finite scan
+            does not run, no row is dropped, and the constant-slice warning is
+            skipped with it: the analysis runs on the data exactly as given.
+            The shape contracts still run, because they cost no scan.
         checks: Verdicts on the method's own scalar arguments, reported in
             order before anything else runs.
         method: Fully qualified analyzer name. Defaults to
@@ -333,6 +345,13 @@ def prepare(
             row count, which is right whenever one row is one unit.
         unit_of_row: For each row, the unit it belongs to. ``None`` when one
             row is one unit.
+        unit_stride: Rows per unit, when ``unit_of_row`` is the
+            equal-contiguous-blocks pattern
+            ``np.repeat(np.arange(n_units), unit_stride)``. Forwarded to the
+            non-finite check, which collapses the per-unit verdict on the
+            device instead of counting bad rows on the host; verified
+            exactly, so a wrong stride falls back to the generic path.
+            ``None`` (the default) always takes the generic path.
         row_labels: For each row checked here, the row the caller holds.
             A design-based method checks the expanded layout, but the caller
             evaluated one output per unique run, so the report has to name the
@@ -393,19 +412,30 @@ def prepare(
         if n_expected is None:
             n_expected = int(X.shape[0])
     Y = _validate_output(Y, n_expected, problem)
+    deferred_expand: Callable[[Array], Array] | None = None
     if expand is not None:
         # The user evaluated the model once per unique row. The estimator,
         # and the unit the check works in, both live in the expanded layout.
-        Y = expand(Y)
+        # Under on_invalid='none' the check never reads the expanded rows,
+        # so the expansion is deferred to the estimator (which may fuse it
+        # with the standardization; see Context.deferred_expand); under
+        # every other policy it must happen here, before the check sees the
+        # data, and the context carries the already-expanded layout.
+        if policy == "none":
+            deferred_expand = expand
+        else:
+            Y = expand(Y)
 
     keep, invalid = check_invalid(
         policy=policy,
         method=method,
         unit=unit,
         n_units=int(Y.shape[0]) if n_units is None else n_units,
-        Y=_model_side(Y, extra_arrays.values()) if extra_arrays else Y,
+        Y=Y,
         X=X,
+        extras=extra_arrays.values(),
         unit_of_row=unit_of_row,
+        unit_stride=unit_stride,
         row_labels=row_labels,
         min_kept=min_kept,
         source_names=source_names,
@@ -422,7 +452,7 @@ def prepare(
 
     Y3, layout = _prepare_Y(Y)
 
-    if warn_zero_variance:
+    if warn_zero_variance and policy != "none":
         # The warning has to see what the estimator will see. For a grouped
         # unit the caller has not compacted yet, so the surviving rows are
         # selected here; leaving the dropped rows in would hide a constant
@@ -459,6 +489,7 @@ def prepare(
         invalid=invalid,
         policy=policy,
         extra=extra_arrays,
+        deferred_expand=deferred_expand,
     )
 
 
@@ -485,32 +516,3 @@ def validate_inputs(problem: Problem, X: Any) -> Array:
     X = jnp.asarray(X)
     _validate_x(problem, X)
     return X
-
-
-def _model_side(Y: Array, extras: Iterable[Array]) -> Array:
-    """Stack the output and its companion arrays into one block for the check.
-
-    :func:`jaxgsa._core.invalid.check_invalid` takes two arrays and labels them
-    ``"X"`` and ``"Y"``. A method with a third sample-axis array has to put it
-    somewhere, and everything the model produced belongs on the ``"Y"`` side:
-    a non-finite derivative is a non-finite model, whatever the output does.
-    Flattening each array past its leading axis is what lets arrays of
-    different rank sit side by side; only finiteness is read off the result.
-
-    The block is built on device, in whatever dtype the caller's arrays
-    promote to. Building it on the host in ``float64`` would be a round trip
-    to nothing: ``check_invalid`` hands the block straight back to
-    ``jnp.asarray``, so with x64 off the widened values are truncated again on
-    the way in. Worse, that truncation can change the verdict — a finite
-    float64 magnitude above the float32 range becomes ``inf``, and the row
-    would be reported as non-finite output the caller cannot find.
-
-    Args:
-        Y: Model output, leading axis the sample axis.
-        extras: Further arrays with the same leading axis.
-
-    Returns:
-        A 2-D array of shape ``(N, ·)`` holding all of them.
-    """
-    blocks = [jnp.asarray(a).reshape(jnp.asarray(a).shape[0], -1) for a in (Y, *extras)]
-    return jnp.concatenate(blocks, axis=1)

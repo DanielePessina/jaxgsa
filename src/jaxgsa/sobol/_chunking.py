@@ -12,13 +12,21 @@ every other under ``vmap``, so the padded lanes cannot reach the real ones and
 the sliced answer is bit-for-bit the unpadded one. See ``efast/_analyze.py``,
 ``morris/_analyze.py`` and ``dgsm/_core.py`` for the same pattern.
 
-**A width from the budget, not a constant.** ``slice_chunk_size=None`` means
+**Widths from the budget, not constants.** ``slice_chunk_size=None`` means
 "derive one from :func:`jaxgsa._core.batching.get_memory_budget`", which needs
 a model of what one slice actually costs. :func:`slice_elements` is that
 model and both paths share it: the gathered A, B and AB (and BA) arrays, plus
-the ``(N, D, D)`` outer product every second-order estimator forms. That last
-term is why second order is quadratic in ``D`` and first order is not, and it
-is the term the earlier bootstrap-only estimate left out.
+a second live working copy. Second order used to be quadratic in ``D``
+because every second-order estimator formed an ``(N, D, D)`` outer product;
+since ``_estimators.second_order_kernel`` writes the cross-moment as an
+explicit matrix product (``BA.T @ AB``), that term no longer materialises and
+the per-slice cost is linear in ``D`` for both orders. Bootstrap also derives
+a resample width from the same model, so a small output chunk cannot leave
+an arbitrarily large ``R`` axis in one device call.
+
+The budget is a transient working-set estimate. Resident input arrays,
+already assembled results, and the pre-generated resampling index matrix are
+not included, so it is a sizing aid rather than a hard process-memory cap.
 """
 
 from __future__ import annotations
@@ -116,41 +124,72 @@ def resolve_point_chunk_size(
     return max(1, min(n_slices, budget))
 
 
+def resolve_resample_chunk_size(
+    n_bootstrap: int,
+    base_n: int,
+    D: int,
+    calc_second_order: bool,
+    itemsize: int,
+    slice_chunk_size: int,
+) -> int:
+    """Resolve bootstrap resamples per device call for one slice chunk.
+
+    The output-slice resolver sizes ``slice_chunk_size`` for the point path
+    and, when bootstrapping, may already have accounted for all ``R`` draws.
+    That is not enough when a caller explicitly asks for a narrow slice chunk:
+    the resampler would still carry every draw for that slice. This resolver
+    applies the transient budget to the product of the chosen slice width and
+    one resample, then caps the resulting width at ``n_bootstrap``.
+
+    Args:
+        n_bootstrap: Total number of bootstrap resamples, ``R``.
+        base_n: Number of base sample evaluations, ``N``.
+        D: Number of input parameters.
+        calc_second_order: Whether the design carries the BA blocks, which
+            adds an ``(N, D)`` array to the per-slice input set.
+        itemsize: Bytes per output element.
+        slice_chunk_size: Number of output slices carried by one call.
+
+    Returns:
+        A resample width in ``[1, n_bootstrap]``.
+    """
+    bytes_per_resample = (
+        slice_elements(base_n, D, calc_second_order) * itemsize * max(1, slice_chunk_size)
+    )
+    budget = max(1, get_memory_budget() // max(bytes_per_resample, 1))
+    return max(1, min(n_bootstrap, budget))
+
+
 def slice_elements(base_n: int, D: int, calc_second_order: bool) -> int:
     """Estimate the live element count of one slice of estimator work.
 
-    First order is linear in ``D``: the gathered A, B and AB are
-    ``base_n * (D + 2)`` elements, and the estimator holds about one working
-    copy of them alive at a time.
+    Both orders are linear in ``D``. The gathered A, B, AB (and BA for second
+    order) are ``base_n * (D + 2)`` or ``base_n * (2D + 2)`` elements, and the
+    estimator holds about one working copy of them alive at a time, hence the
+    factor ``_POINT_LIVE_COPIES``.
 
-    Second order is **quadratic** in ``D``, and by a wide margin the larger
-    term. Every second-order estimator forms the joint-variance matrix as an
-    outer product over the parameter axis --- in
-    :func:`jaxgsa.sobol._estimators.second_order_kernel` that is
-    ``BA[:, :, None] * AB[:, None, :]``, an ``(N, D, D)`` array that exists
-    in full before the reduction over the sample axis collapses it to
-    ``(D, D)``. Leaving that term out under-budgets a slice by about
-    ``1 + D / 4`` **relative to the same model without it**, that is against
-    ``2 * N * (2D + 2)``: at ``D = 50``, ``N = 65536`` and float32 that model
-    estimates 53 MB for one slice where the outer product alone needs
-    655 MB, a factor of 13. Read against the formula the code used to apply
-    to both paths, the first-order ``2 * N * (D + 2)``, the same term is
-    worth ``1 + D / 2``, about 24 at ``D = 50``. Same array, two baselines;
-    the first is the one measured above.
+    This used to be quadratic in ``D`` for second order, because the
+    joint-variance matrix was formed as an ``(N, D, D)`` outer product
+    (``BA[:, :, None] * AB[:, None, :]``) that existed in full before the
+    reduction collapsed it to ``(D, D)``. The kernel now writes the same
+    quantity as ``BA.T @ AB``, a GEMM that accumulates inside the matmul
+    kernel, so no ``(N, D, D)`` intermediate is materialised and second order
+    costs no more transient than first order plus its larger input set. The
+    output of one slice is at most a ``(D, D)`` matrix, negligible next to
+    the inputs.
 
-    The quadratic term is counted once rather than doubled. It is one
-    materialised array feeding one reduction, so unlike the inputs it does not
-    carry a second working copy.
+    The estimate is deliberately conservative: it counts the inputs twice
+    and counts no XLA scheduling slack, so the derived chunk width stays
+    comfortably inside the budget rather than riding its edge.
 
     Args:
         base_n: N, the number of base samples.
         D: Number of input parameters.
-        calc_second_order: Whether the design carries the BA blocks, which is
-            what turns the outer product on.
+        calc_second_order: Whether the design carries the BA blocks, which
+            adds the ``(N, D)`` BA array to the input set.
 
     Returns:
         Live elements for one slice, for one resample.
     """
     inputs = base_n * (2 * D + 2 if calc_second_order else D + 2)
-    outer_product = base_n * D * D if calc_second_order else 0
-    return _POINT_LIVE_COPIES * inputs + outer_product
+    return _POINT_LIVE_COPIES * inputs

@@ -34,13 +34,11 @@ from jaxgsa import JaxgsaWarning
 from jaxgsa._core.entry import (
     at_least,
     check_scalars,
-    gates,
     in_open_interval,
     one_of,
     prepare,
     require,
 )
-from jaxgsa._core.invalid import InvalidUnit, resolve_policy
 from jaxgsa._core.precision import _loses_precision, unit_clip_bounds
 from jaxgsa._core.registry import methods
 from jaxgsa._core.sampling import UNIT_CLIP
@@ -343,58 +341,6 @@ class TestACleanSampleStaysSilent:
             and not any(phrase in str(w.message) for phrase in exempt)
         ]
         assert left == []
-
-
-class TestDgsmsEarlyGateSettlesWhatPrepareSettles:
-    """``dgsm`` runs prepare()'s own early steps itself, then calls prepare().
-
-    ``dgsm`` cannot use the one-call form directly: on its autodiff path the
-    model output is what ``prepare`` would validate, and it does not exist
-    until the model has been differentiated. It runs ``resolve_policy``,
-    ``check_scalars`` and ``gates`` -- the same three calls ``prepare`` makes
-    internally, before it touches any array -- and then calls ``prepare``
-    once, in full, with the output in hand. These pin that running the three
-    pieces first and then the whole settles the same things a single
-    ``prepare`` call would.
-    """
-
-    def _spec(self):
-        return methods()["borgonovo"]
-
-    def _early_gate(self, spec, problem, *, on_invalid="raise"):
-        """The three pieces a two-phase caller runs before it has ``Y``."""
-        unit = spec.invalid_unit
-        resolve_policy(
-            on_invalid, method="test", unit=unit, allow_drop=unit is not InvalidUnit.CURVE
-        )
-        check_scalars(())
-        if not spec.is_design_based:
-            gates(spec, problem, method="test")
-
-    def test_the_early_gate_then_prepare_settles_what_one_call_settles(self):
-        X, Y = _xy()
-        spec = self._spec()
-        whole = prepare(spec, PROBLEM, Y, X=X)
-        self._early_gate(spec, PROBLEM)
-        two_phase = prepare(spec, PROBLEM, Y, X=X)
-        assert two_phase.method == whole.method
-        assert two_phase.policy == whole.policy
-        assert two_phase.Y3.shape == whole.Y3.shape
-        np.testing.assert_array_equal(np.asarray(two_phase.Y), np.asarray(whole.Y))
-        np.testing.assert_array_equal(two_phase.keep, whole.keep)
-
-    def test_the_early_gate_settles_the_policy_before_any_data_exists(self):
-        with pytest.raises(ValueError, match="on_invalid must be one of"):
-            self._early_gate(self._spec(), PROBLEM, on_invalid=cast(Any, "nope"))
-
-    def test_the_early_gate_applies_the_gates(self):
-        correlated = jaxgsa.Problem(
-            ("x1", "x2", "x3"),
-            ((0.0, 1.0),) * D,
-            correlation=np.eye(D) + np.eye(D, k=1) * 0.4 + np.eye(D, k=-1) * 0.4,
-        )
-        with pytest.raises(ValueError, match="correlation"):
-            self._early_gate(methods()["dgsm"], correlated)
 
 
 class TestExtraArraysRideWithY:

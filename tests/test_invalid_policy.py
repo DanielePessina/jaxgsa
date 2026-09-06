@@ -40,7 +40,7 @@ class TestResolvePolicy:
         message = str(exc.value)
         assert repr(bad) in message
         assert METHOD in message
-        for policy in ("raise", "propagate", "drop"):
+        for policy in ("raise", "propagate", "drop", "none"):
             assert repr(policy) in message
 
     def test_drop_refused_where_it_is_undefined(self):
@@ -85,6 +85,64 @@ class TestCleanSample:
         assert report.n_kept == 6
         assert report.sources == ()
         assert len(recwarn) == 0
+
+
+class TestNonePolicy:
+    """T4: on_invalid='none' skips the scan entirely."""
+
+    def test_resolve_accepts_none_for_every_unit(self):
+        """T4: 'none' survives allow_drop=False, where 'drop' does not."""
+        for unit in InvalidUnit:
+            assert resolve_policy("none", method=METHOD, unit=unit, allow_drop=False) == "none"
+
+    def test_nan_data_is_not_looked_at(self):
+        """T4: bad data under 'none' keeps everything and reports clean.
+
+        The check never runs, so the verdict is the clean one even though two
+        rows hold NaN. The keep mask stays all-True, so the caller applies no
+        compaction, and the report cannot name rows that were never scanned.
+        """
+        keep, report = check_invalid(
+            policy="none",
+            method=METHOD,
+            unit=InvalidUnit.ROW,
+            n_units=6,
+            Y=_rows(2, 5),
+            X=_rows(3),
+        )
+        assert keep.all()
+        assert report.policy == "none"
+        assert report.n_invalid == 0
+        assert not report.any_invalid
+        assert report.n_kept == 6
+        assert report.sources == ()
+
+    def test_nan_extra_arrays_are_not_looked_at(self):
+        """T4: companion arrays are skipped with Y -- no raise, no drop.
+
+        The shape consistency check still runs: an extra array with a
+        different row count is a design error, not a data-quality question.
+        """
+        keep, report = check_invalid(
+            policy="none",
+            method=METHOD,
+            unit=InvalidUnit.SALTELLI_GROUP,
+            n_units=2,
+            Y=np.arange(12.0).reshape(12, 1),
+            extras=[np.full((12, 3), np.nan)],
+            unit_of_row=np.repeat(np.arange(2), 6),
+        )
+        assert keep.all()
+        assert report.n_invalid == 0
+        with pytest.raises(ValueError, match="same number of sample rows"):
+            check_invalid(
+                policy="none",
+                method=METHOD,
+                unit=InvalidUnit.ROW,
+                n_units=6,
+                Y=_rows(),
+                extras=[np.zeros((5, 1))],
+            )
 
 
 class TestRaisePolicy:
@@ -312,6 +370,58 @@ class TestGroupedDesigns:
         assert "Non-finite rows: [7]." in message
         assert "They condemn trajectories [2]" in message
         assert "which covers 3 rows" in message
+
+    def test_unit_stride_fast_path_matches_generic_path(self):
+        """T4: the contiguous-block device collapse changes no verdict.
+
+        The fast path must agree with the generic weighted-bincount path on
+        every mask and every report field, and a wrong ``unit_stride`` must
+        fall back to the generic path rather than compute a wrong mask.
+        """
+        unit_of_row = np.repeat(np.arange(4), 3)
+
+        def run(policy: str, stride: int | None):
+            kwargs = {"unit_stride": stride} if stride is not None else {}
+            with pytest.warns(JaxgsaWarning):
+                return check_invalid(
+                    policy=policy,
+                    method=METHOD,
+                    unit=InvalidUnit.SALTELLI_GROUP,
+                    n_units=4,
+                    Y=_rows(4, n=12),
+                    unit_of_row=unit_of_row,
+                    **kwargs,
+                )
+
+        for policy in ("propagate", "drop"):
+            fast_keep, fast_report = run(policy, 3)
+            generic_keep, generic_report = run(policy, None)
+            # A wrong stride must fall back to the generic path, never mask.
+            wrong_keep, wrong_report = run(policy, 2)
+            assert list(fast_keep) == list(generic_keep) == list(wrong_keep)
+            assert fast_report.unit_indices == generic_report.unit_indices
+            assert np.array_equal(
+                np.asarray(fast_report.bad_row_indices),
+                np.asarray(generic_report.bad_row_indices),
+            )
+            assert fast_report.row_indices == generic_report.row_indices
+
+        # A clean sample returns the same all-True keep either way.
+        def run_clean(stride: int | None):
+            kwargs = {"unit_stride": stride} if stride is not None else {}
+            return check_invalid(
+                policy="propagate",
+                method=METHOD,
+                unit=InvalidUnit.SALTELLI_GROUP,
+                n_units=4,
+                Y=_rows(n=12),
+                unit_of_row=unit_of_row,
+                **kwargs,
+            )
+
+        fast_keep, _ = run_clean(3)
+        generic_keep, _ = run_clean(None)
+        assert list(fast_keep) == list(generic_keep) == [True, True, True, True]
 
 
 class TestWhatCountsAsInvalid:

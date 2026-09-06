@@ -23,8 +23,8 @@ References:
 from __future__ import annotations
 
 import warnings
-from collections.abc import Sequence
-from typing import Literal
+from collections.abc import Callable, Sequence
+from typing import Any, Literal
 
 import jax
 import jax.numpy as jnp
@@ -54,6 +54,12 @@ from jaxgsa.problem import Problem
 from jaxgsa.vkoga._engine import _cross_validate, _fit_vkoga, _predict_vkoga
 from jaxgsa.vkoga._indices import estimate_correlated_indices
 from jaxgsa.vkoga._result import VKOGAResult
+
+# Memo of the compiled surrogate predictor, keyed on the fitted state and
+# output mean it freezes as closure constants (see
+# :func:`_make_unit_predictor`). Bounded so frozen fit state cannot accumulate.
+_PREDICTOR_CACHE_MAX = 4
+_PREDICTOR_CACHE: dict[tuple[Any, ...], Callable[[np.ndarray], np.ndarray]] = {}
 
 # Hyperparameter search grid, following Hilhorst et al. Section 2.4.1: ten
 # log-spaced values each, cross-validated as a 10x10 product.
@@ -902,6 +908,18 @@ def _make_unit_predictor(state, y_mean: Array, batch_size: int | None):
     function is plain NumPy-in and NumPy-out. Batching keeps the kernel matrix
     within the configured memory budget for the millions of conditional draws.
 
+    The jitted kernel is memoised per distinct ``(state, y_mean)`` content
+    (see :data:`_PREDICTOR_CACHE`). Building the predictor wraps the surrogate
+    kernel in a fresh ``jax.jit`` whose closure freezes the fitted state; a
+    fresh wrapper on every :func:`_fit_and_estimate` call re-traces and
+    recompiles it inside the estimator's first prediction (~30 ms at
+    ``n_centers=32``), even though every steady-state analysis on the same
+    data fits the identical state. Memoising on the content reuses the exact
+    compiled kernel for repeated analyses (bootstrap / parameter sweep /
+    interactive re-runs), while a genuinely new fit -- new centres,
+    coefficients or output mean -- still builds and compiles its own
+    predictor, exactly as before.
+
     Args:
         state: Fitted (sliced) surrogate state.
         y_mean: Training output mean to restore, shape ``(S,)``.
@@ -911,6 +929,20 @@ def _make_unit_predictor(state, y_mean: Array, batch_size: int | None):
     Returns:
         A callable mapping ``(n, D)`` unit-cube rows to ``(n, S)`` outputs.
     """
+    # The kernel reads centres, coefficients and gamma, and adds ``y_mean``;
+    # those four arrays decide the compiled executable, so the memo key is
+    # their full content plus the (runtime) batch policy.
+    key = (
+        np.asarray(state.centers).tobytes(),
+        np.asarray(state.coefficients).tobytes(),
+        np.asarray(state.gamma).tobytes(),
+        np.asarray(y_mean).tobytes(),
+        batch_size,
+    )
+    pred = _PREDICTOR_CACHE.get(key)
+    if pred is not None:
+        return pred
+
     kernel, bytes_per_row = _unit_evaluator(state, y_mean)
     compiled = jax.jit(kernel)
 
@@ -919,6 +951,9 @@ def _make_unit_predictor(state, y_mean: Array, batch_size: int | None):
         batch = resolve_batch_size(bytes_per_row, U_device.shape[0], batch_size)
         return np.asarray(apply_batched(compiled, U_device, batch))
 
+    if len(_PREDICTOR_CACHE) >= _PREDICTOR_CACHE_MAX:
+        _PREDICTOR_CACHE.pop(next(iter(_PREDICTOR_CACHE)))
+    _PREDICTOR_CACHE[key] = predict
     return predict
 
 

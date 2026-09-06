@@ -352,18 +352,20 @@ def _fit_pce_streamed(
     order: int,
     ridge: float,
     batch_size: int | None,
-) -> tuple[Array, Array, Array]:
-    """Fit the PCE by streaming row batches: exact normal equations + LOO.
+    diagnostics: bool,
+) -> tuple[Array, Array | None, Array]:
+    """Fit the PCE by streaming row batches.
 
-    Two passes over row batches of ``X_ref``/``Y_flat``, never holding more
-    than one ``(batch, n_terms)`` design block:
+    The normal-equation pass always runs. A second pass computes LOO only when
+    ``diagnostics`` is true. Neither pass holds more than one
+    ``(batch, n_terms)`` design block:
 
     1. Accumulate ``G = Phi^T Phi`` (n_terms, n_terms) and ``B = Phi^T Y``
        (n_terms, T*K), then solve ``(G + ridge*I) c = B`` once. This is
        mathematically identical to the single-pass normal equations. Only
        the float32 summation order differs.
-    2. With the Cholesky factor of ``G + ridge*I`` known, rebuild each design
-       block, get its hat-matrix diagonal from
+    2. When diagnostics are enabled, with the Cholesky factor of ``G + ridge*I``
+       known, rebuild each design block, get its hat-matrix diagonal from
        :func:`jaxgsa.pce._engine.hat_diagonal` and its per-row residuals, and
        accumulate the exact LOO sum of squares as defined by
        :func:`jaxgsa.pce._engine.loo_error`. Both paths call the same leverage
@@ -384,11 +386,13 @@ def _fit_pce_streamed(
         ridge: Tikhonov parameter added to the Gram matrix.
         batch_size: Rows per batch, or ``None`` to derive one from the
             active memory budget.
+        diagnostics: Whether to run the streamed LOO pass.
 
     Returns:
         Tuple of ``coeffs_flat``, shape ``(n_terms, T*K)``, the per-slice LOO
-        RMSE, shape ``(T*K,)``, and the unregularized Gram matrix
-        ``G = Phi^T Phi``, shape ``(n_terms, n_terms)``. ``G`` is
+        RMSE, shape ``(T*K,)`` or ``None`` when diagnostics are disabled, and
+        the unregularized Gram matrix ``G = Phi^T Phi``, shape
+        ``(n_terms, n_terms)``. ``G`` is
         ``n_terms``-square, so returning it carries nothing that scales with
         ``N``; :func:`_fitted_variance` reads the fitted-value moments off it.
     """
@@ -422,15 +426,19 @@ def _fit_pce_streamed(
     gram = G + ridge * jnp.eye(n_terms, dtype=dtype)
     coeffs_flat = jnp.linalg.solve(gram, B)  # (n_terms, M)
 
-    # Pass 2: exact LOO from the hat-matrix diagonal, streamed. The leverage
-    # comes from the shared hat_diagonal helper, which only needs the small
-    # (n_terms, n_terms) Cholesky factor, so this path holds nothing that
-    # scales with N and applies the same clip as the single-pass path.
-    gram_chol = jnp.linalg.cholesky(gram)
-    sse = jnp.zeros((M,), dtype=dtype)
-    for lo, hi in rows:
-        sse = acc_loo(X_p[lo:hi], Y_p[lo:hi], w[lo:hi], coeffs_flat, gram_chol, sse)
-    loo_flat = jnp.sqrt(sse / N)  # == sqrt(mean(loo_residuals^2, axis=0))
+    if diagnostics:
+        # Pass 2: exact LOO from the hat-matrix diagonal, streamed. The
+        # leverage comes from the shared hat_diagonal helper, which only needs
+        # the small (n_terms, n_terms) Cholesky factor, so this path holds
+        # nothing that scales with N and applies the same clip as the
+        # single-pass path.
+        gram_chol = jnp.linalg.cholesky(gram)
+        sse = jnp.zeros((M,), dtype=dtype)
+        for lo, hi in rows:
+            sse = acc_loo(X_p[lo:hi], Y_p[lo:hi], w[lo:hi], coeffs_flat, gram_chol, sse)
+        loo_flat = jnp.sqrt(sse / N)  # == sqrt(mean(loo_residuals^2, axis=0))
+    else:
+        loo_flat = None
 
     return coeffs_flat, loo_flat, G
 
@@ -517,9 +525,8 @@ def _fit_pce_core(
             reads them: on the single-pass path this skips a Cholesky
             factor, an ``(n_terms, N)`` triangular solve and an ``(N, T*K)``
             residual array that the Sobol-index extraction never touches.
-            ``fitted_var`` is then ``None``. So is ``loo_flat`` on the
-            single-pass path; the streamed path returns it either way,
-            because its accumulation gives the exact LOO for free.
+            ``fitted_var`` is then ``None``. So is ``loo_flat`` on either fit
+            path.
     """
     Y_3d, _ = _prepare_Y(Y_canonical)
     N, D = X.shape
@@ -570,7 +577,14 @@ def _fit_pce_core(
         # Streamed path: same normal equations and exact LOO, accumulated
         # over row batches so peak memory stays within the budget.
         coeffs_flat, loo_flat, gram_raw = _fit_pce_streamed(
-            X_ref, Y_flat, mi, input_types, effective_order, ridge, batch_size
+            X_ref,
+            Y_flat,
+            mi,
+            input_types,
+            effective_order,
+            ridge,
+            batch_size,
+            diagnostics,
         )
     # Terms-last layout, matching HDMR's Sa convention (slices lead).
     coeffs = coeffs_flat.T.reshape(T, K, n_terms)

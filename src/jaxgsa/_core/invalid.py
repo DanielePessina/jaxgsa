@@ -2,7 +2,7 @@
 
 A model that fails on some of its runs returns ``NaN`` or ``inf``. Every
 ``analyze()`` entry point answers that the same way, through one keyword,
-``on_invalid``, with the same three values:
+``on_invalid``, with four values:
 
 ``"raise"``
     Refuse the analysis. This is the default. An index computed from a partial
@@ -18,9 +18,20 @@ A model that fails on some of its runs returns ``NaN`` or ``inf``. Every
     Remove the affected data and analyze what is left. What "affected data"
     means depends on the design; see :class:`InvalidUnit`.
 
+``"none"``
+    Skip the non-finite check entirely. The analysis runs on the data exactly
+    as given, and the constant-slice warning is skipped with it. On a design
+    with millions of expanded rows the two scans are most of the fixed cost
+    of an analysis, so this is the fast path for a user who has already
+    sanitized the output. A ``NaN`` that reaches the estimator flows into the
+    indices, and a constant slice turns into ``NaN`` indices without a word.
+    The shape contracts still run: a misaligned output would silently corrupt
+    a block split, and checking the shape costs no data scan.
+
 Whatever the policy, the count and the position of the affected data are
-recorded in an :class:`InvalidReport`, which every result class carries. The
-report is the part that matters in practice: it names the runs to investigate.
+recorded in an :class:`InvalidReport` — under ``"none"`` the check never
+ran, so the report always says clean. The report is the part that matters in
+practice: it names the runs to investigate.
 
 Note:
     ``"drop"`` is not available everywhere, and the restrictions are not
@@ -31,6 +42,7 @@ from __future__ import annotations
 
 import os
 import warnings
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -60,9 +72,9 @@ __all__ = [
     "resolve_policy",
 ]
 
-OnInvalid: TypeAlias = Literal["raise", "propagate", "drop"]
+OnInvalid: TypeAlias = Literal["raise", "propagate", "drop", "none"]
 
-_POLICIES: tuple[str, ...] = ("raise", "propagate", "drop")
+_POLICIES: tuple[str, ...] = ("raise", "propagate", "drop", "none")
 
 # Below this many surviving units the estimate is not worth reporting without
 # saying so. One floor, applied everywhere a "drop" policy can leave a sample
@@ -139,9 +151,11 @@ class InvalidReport:
     was removed, because that is the numbering the caller can act on.
 
     Attributes:
-        policy: The policy that ran: ``"raise"``, ``"propagate"`` or
-            ``"drop"``. A report with ``policy="raise"`` only exists when
-            nothing was found, since otherwise the call raised.
+        policy: The policy that ran: ``"raise"``, ``"propagate"``,
+            ``"drop"`` or ``"none"``. A report with ``policy="raise"`` only
+            exists when nothing was found, since otherwise the call raised. A
+            report with ``policy="none"`` means the check never ran: it is
+            always clean, because nothing was looked at.
         unit: The block of data one bad value invalidates. See
             :class:`InvalidUnit`.
         n_units: Total number of units in the sample before any removal.
@@ -239,7 +253,7 @@ def resolve_policy(
         The validated policy.
 
     Raises:
-        ValueError: If the value is not one of the three policies, or if it is
+        ValueError: If the value is not one of the four policies, or if it is
             ``"drop"`` where dropping is not defined.
     """
     if not isinstance(on_invalid, str) or on_invalid not in _POLICIES:
@@ -266,6 +280,7 @@ def _finite_by_unit(
     *,
     n_units: int,
     unit_of_row: npt.NDArray[np.intp] | None,
+    unit_stride: int | None = None,
 ) -> tuple[npt.NDArray[np.bool_], npt.NDArray[np.bool_] | None]:
     """Return per-unit and per-row masks, False where a bad value sits.
 
@@ -275,14 +290,21 @@ def _finite_by_unit(
         n_units: Number of units to report on.
         unit_of_row: For each row of ``array``, the unit it belongs to. Pass
             ``None`` when rows and units are the same thing.
+        unit_stride: Rows per unit, when the caller knows the map is the
+            equal-contiguous-blocks pattern ``repeat(arange(n_units),
+            unit_stride)``. Enables a device-side collapse that skips the
+            per-row host verdicts; see the fast path below. ``None`` (the
+            default) always takes the generic weighted-``bincount`` path.
 
     Returns:
         A tuple ``(unit_ok, row_ok)``. ``unit_ok`` has shape ``(n_units,)`` and
         is True where the unit is clean. ``row_ok`` has one entry per row of
         ``array`` and is True where that row is clean, or is ``None`` when
-        there was no array to check. The row verdict is kept because a unit
-        can span hundreds of rows and only one of them failed; the report
-        names both.
+        there was no array to check **or when the contiguous fast path ran**
+        (the caller needs row verdicts only for the invalid report, which is
+        the rare path, and re-derives them there). The row verdict is kept
+        because a unit can span hundreds of rows and only one of them failed;
+        the report names both.
     """
     if array is None:
         return np.ones(n_units, dtype=bool), None
@@ -295,18 +317,94 @@ def _finite_by_unit(
     # the one bit per row. Pulling the whole array to the host would move
     # `n_rows * T * K` floats to decide `n_rows` booleans, and for a Saltelli
     # design that array is the expanded one, not the caller's.
-    reduced = jnp.isfinite(array.reshape(array.shape[0], -1)).all(axis=1)
-    row_ok: npt.NDArray[np.bool_] = np.asarray(reduced)
-
+    #
+    # The row scan is computed exactly once, inside whichever branch uses it:
+    # both scans feed the same verdict, and eager JAX executes every op it
+    # traces, so computing the row mask before the branch would run the
+    # million-row scan twice on designs that take the fast path below.
     if unit_of_row is None:
+        row_ok = np.asarray(jnp.isfinite(array.reshape(array.shape[0], -1)).all(axis=1))
         return row_ok, row_ok
 
+    if unit_stride is not None and _is_contiguous_blocks(unit_of_row, n_units, unit_stride):
+        # The units are equal contiguous blocks of rows, so the verdict can
+        # collapse straight to one boolean per unit on the device. Only
+        # ``n_units`` booleans cross to the host, instead of one per row:
+        # the alternative, ``bincount``-ing a float weight per row, is the
+        # single most expensive host op in the entry path of a large
+        # design (measured ~5 ms over a million rows, vs under a
+        # millisecond for this path at scalar width). The collapse is two
+        # reductions: row verdicts over the trailing (contiguous) axis,
+        # then the block verdicts over the short unit axis. Collapsing
+        # straight from the raw array -- ``(n_units, unit_stride,
+        # trailing).all(axis=(1, 2))`` -- reduces a strided middle axis
+        # instead, which XLA vectorises poorly and measured 8-10x slower
+        # on wide outputs. The per-row verdict is returned as ``None`` on
+        # purpose: the caller needs it only for the invalid report, which
+        # is the rare path, and re-derives it there.
+        row_ok_dev = jnp.all(jnp.isfinite(array.reshape(array.shape[0], -1)), axis=1)
+        unit_ok = np.asarray(jnp.all(row_ok_dev.reshape(n_units, unit_stride), axis=1))
+        return unit_ok, None
+
+    row_ok = np.asarray(jnp.isfinite(array.reshape(array.shape[0], -1)).all(axis=1))
     # Scatter the row verdicts onto their units: a unit is clean only when
     # every one of its rows is. `bincount` counts the bad rows per unit in one
     # pass, which beats `np.logical_and.at` by more than a factor of ten, and
     # works for any row map -- contiguous blocks and strided ones alike.
     n_bad_per_unit = np.bincount(unit_of_row, weights=~row_ok, minlength=n_units)
     return n_bad_per_unit == 0, row_ok
+
+
+def _is_contiguous_blocks(
+    unit_of_row: npt.NDArray[np.intp], n_units: int, unit_stride: int
+) -> bool:
+    """Report whether ``unit_of_row`` groups units into equal contiguous blocks.
+
+    The fast path of :func:`_finite_by_unit` relies on the row map being
+    ``np.repeat(np.arange(n_units), unit_stride)``: that is what lets the
+    per-unit verdict be computed with a device reshape-reduce instead of a
+    host weighted ``bincount`` over every row. The check is exact (no
+    tolerance), so a caller that passes a wrong ``unit_stride`` gets the
+    correct slow path, never a wrong mask.
+
+    Args:
+        unit_of_row: Row-to-unit map, one entry per row.
+        n_units: Number of units.
+        unit_stride: Rows per unit the caller claims.
+
+    Returns:
+        True only when the map is exactly the equal-contiguous-blocks pattern.
+    """
+    if unit_of_row.shape[0] != n_units * unit_stride:
+        return False
+    expected = np.repeat(np.arange(n_units), unit_stride)
+    return bool(np.array_equal(unit_of_row, expected))
+
+
+def _unit_of_row_for_policy(
+    on_invalid: object, build: Callable[[], npt.NDArray[np.intp]]
+) -> npt.NDArray[np.intp] | None:
+    """Build the row map only where the non-finite check will read it.
+
+    Under ``on_invalid='none'`` :func:`check_invalid` returns before it ever
+    touches the map (a per-row map over the expanded design is exactly the
+    scan the policy skips, and building it on the host costs ~0.3-0.6 ms at
+    million-row scales), so the call sites pass ``None`` there instead of
+    paying for a dead array. The three design-based methods each build a
+    different map (contiguous blocks for sobol and morris, interleaved
+    base points for kucherenko), so the map itself stays at the call site;
+    only the skip decision is shared.
+
+    Args:
+        on_invalid: The caller's unvalidated policy value.
+        build: How to build the map, called only when a check will read it.
+
+    Returns:
+        The built map, or ``None`` under ``on_invalid='none'``.
+    """
+    if on_invalid == "none":
+        return None
+    return build()
 
 
 def check_invalid(
@@ -317,7 +415,9 @@ def check_invalid(
     n_units: int,
     Y: npt.ArrayLike | None = None,
     X: npt.ArrayLike | None = None,
+    extras: Iterable[npt.ArrayLike] = (),
     unit_of_row: npt.NDArray[np.intp] | None = None,
+    unit_stride: int | None = None,
     row_labels: npt.NDArray[np.intp] | None = None,
     min_kept: int = 1,
     source_names: tuple[str, str] = ("X", "Y"),
@@ -330,7 +430,12 @@ def check_invalid(
     tables alongside the outputs, and only Morris knows that.
 
     Args:
-        policy: The validated policy, from :func:`resolve_policy`.
+        policy: The validated policy, from :func:`resolve_policy`. Under
+            ``"none"`` the scan does not run at all: the verdict is that every
+            unit is clean, the report is the clean report, and the caller
+            applies no mask. The shape consistency check on the companion
+            arrays still runs, because a misnumbered array would silently
+            corrupt an estimator even when nothing is scanned.
         method: Fully qualified name of the calling function, for messages.
         unit: The block of data one bad value invalidates.
         n_units: Number of units in the sample.
@@ -338,8 +443,19 @@ def check_invalid(
             sample axis.
         X: Input matrix, or ``None`` to skip it. Checked jointly with ``Y``,
             so a bad input takes its own output with it.
+        extras: Further model-side arrays to check alongside ``Y``. Their
+            leading axis must match ``Y``; only per-row finite flags are
+            combined, so large companion arrays do not get concatenated.
         unit_of_row: For each row, the unit it belongs to. Pass ``None`` when
             one row is one unit.
+        unit_stride: Rows per unit, when the caller knows ``unit_of_row`` is
+            ``np.repeat(np.arange(n_units), unit_stride)``, i.e. units are
+            equal contiguous blocks of rows. Lets the per-unit verdict be
+            computed on the device, skipping a host ``bincount`` over every
+            row -- the dominant fixed cost of the entry path on designs with
+            millions of expanded rows. The pattern is verified exactly, so a
+            wrong stride falls back to the generic path, never a wrong mask.
+            ``None`` (the default) always takes the generic path.
         row_labels: For each row of the arrays given here, the row of the
             **caller's** array it came from. Pass it whenever the two differ,
             so the report points at rows the caller can actually find. Sobol
@@ -368,13 +484,52 @@ def check_invalid(
         ValueError: Under ``"raise"`` when anything was found, and under
             ``"drop"`` when fewer than ``min_kept`` units would remain.
     """
-    y_ok, y_rows = _finite_by_unit(_as_array(Y), n_units=n_units, unit_of_row=unit_of_row)
-    x_ok, x_rows = _finite_by_unit(_as_array(X), n_units=n_units, unit_of_row=unit_of_row)
+    y_array = _as_array(Y)
+    x_array = _as_array(X)
+    extra_arrays = tuple(_as_array(array) for array in extras)
+    _check_extra_row_counts(y_array, x_array, extra_arrays, unit_of_row=unit_of_row)
+
+    if policy == "none":
+        # No scan: the caller has asserted the data is clean. The keep mask is
+        # all-True and the report is the clean one, so the estimator's book-
+        # keeping sees exactly what it sees under "propagate" on a clean
+        # sample, without a single pass over the expanded rows. The contract
+        # the other policies hold -- keep + report decide the rest -- is
+        # intact, so the callers below need no "none" branches of their own.
+        return np.ones(n_units, dtype=bool), _clean_report(unit, n_units, policy)
+
+    y_ok, y_rows = _finite_by_unit(
+        y_array, n_units=n_units, unit_of_row=unit_of_row, unit_stride=unit_stride
+    )
+    for extra_array in extra_arrays:
+        extra_ok, extra_rows = _finite_by_unit(
+            extra_array,
+            n_units=n_units,
+            unit_of_row=unit_of_row,
+            unit_stride=unit_stride,
+        )
+        y_ok = y_ok & extra_ok
+        if y_rows is None:
+            y_rows = extra_rows
+        elif extra_rows is not None:
+            y_rows = y_rows & extra_rows
+    x_ok, x_rows = _finite_by_unit(
+        x_array, n_units=n_units, unit_of_row=unit_of_row, unit_stride=unit_stride
+    )
     clean = y_ok & x_ok
 
     n_invalid = int((~clean).sum())
     if n_invalid == 0:
         return np.ones(n_units, dtype=bool), _clean_report(unit, n_units, policy)
+
+    # The report names the bad rows, which the fast path deliberately left on
+    # the device. Re-derive the per-row verdicts only here, on the rare path
+    # that actually uses them; the fast path is then no slower than the
+    # generic one when something is wrong.
+    if y_rows is None:
+        _, y_rows = _finite_by_unit(y_array, n_units=n_units, unit_of_row=unit_of_row)
+    if x_rows is None:
+        _, x_rows = _finite_by_unit(x_array, n_units=n_units, unit_of_row=unit_of_row)
 
     x_name, y_name = source_names
     sources = tuple(name for name, ok in ((x_name, x_ok), (y_name, y_ok)) if bool((~ok).any()))
@@ -441,6 +596,39 @@ def _as_array(array: npt.ArrayLike | None) -> Array | None:
     if array is None:
         return None
     return jnp.asarray(array)
+
+
+def _check_extra_row_counts(
+    Y: Array | None,
+    X: Array | None,
+    extras: tuple[Array | None, ...],
+    *,
+    unit_of_row: npt.NDArray[np.intp] | None,
+) -> None:
+    """Check that companion arrays have the same sample axis as the data."""
+    extra_arrays = tuple(array for array in extras if array is not None)
+    if not extra_arrays:
+        return
+
+    for array in extra_arrays:
+        if array.ndim == 0:
+            raise ValueError("arrays checked for invalid values must have a sample axis")
+
+    reference = Y if Y is not None else X
+    expected = (
+        len(unit_of_row)
+        if unit_of_row is not None
+        else int(reference.shape[0])
+        if reference is not None
+        else None
+    )
+    if expected is None:
+        return
+    for array in extra_arrays:
+        if int(array.shape[0]) != expected:
+            raise ValueError(
+                "arrays checked for invalid values must have the same number of sample rows"
+            )
 
 
 def _rows_of_units(

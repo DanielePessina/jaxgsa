@@ -15,6 +15,7 @@ Array shape conventions used throughout:
 """
 
 import warnings
+from functools import lru_cache
 from typing import Literal
 
 import jax
@@ -26,9 +27,10 @@ from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare
-from jaxgsa._core.invalid import OnInvalid
+from jaxgsa._core.invalid import OnInvalid, _unit_of_row_for_policy
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
+    YLayout,
     _prepare_Y,
     _standardize_outputs,
     _validate_output,
@@ -124,6 +126,49 @@ def _measures(
     ee = _elementary_effects(Y, idx_after, idx_before, delta)  # (r, D, T, K)
     mu, mu_star, sigma = _stats_from_ee(ee)  # each (T, K, D)
     return ee, mu, mu_star, sigma
+
+
+@lru_cache(maxsize=None)
+def _get_morris_fused_measures(D: int, standardize_outputs: bool):
+    """Build the one-executable take + standardize + measures caller.
+
+    The expansion gather is fused into the estimator when the non-finite
+    check was skipped (``on_invalid='none'``, see
+    :func:`jaxgsa._core.entry.prepare`): the expanded array is then read by
+    nothing but the estimator, so materialising it as an eager pass wastes a
+    write and a read of the whole array. Measured ~1.3x faster than the
+    eager pipeline on a half-million-row isotropic design. The fused graph
+    takes the unique-row outputs, the design's expansion map and the
+    elementary-effect bookkeeping as plain arrays, so the gather stays
+    traceable.
+
+    Only the scalar layout (``T * K == 1``) uses this, matching the Sobol
+    front half: wide layouts run slower fused (measured there), so they
+    expand eagerly instead.
+
+    Args:
+        D: Number of input parameters (``n_params + 1`` rows per
+            trajectory).
+        standardize_outputs: Whether to standardize the expanded outputs
+            before gathering, as :func:`analyze` defines it.
+
+    Returns:
+        A jitted function of ``(Y_raw, index_map, idx_after, idx_before,
+        delta)`` returning the same ``(ee, mu, mu_star, sigma)`` tuple as
+        :func:`_measures`, with the inserted ``(T, K)`` axes in place.
+    """
+
+    def fn(
+        Y_raw: Array,
+        index_map: Array,
+        idx_after: Array,
+        idx_before: Array,
+        delta: Array,
+    ) -> tuple[Array, Array, Array, Array]:
+        Y3 = jnp.take(Y_raw, index_map, axis=0).reshape(-1, 1, 1)
+        return _measures(Y3, idx_after, idx_before, delta, standardize_outputs)
+
+    return jax.jit(fn)
 
 
 @jax.jit
@@ -401,7 +446,13 @@ def analyze(
         n_expected=int(sampling_result.samples.shape[0]),
         expand=sampling_result.expand_outputs,
         n_units=r,
-        unit_of_row=np.repeat(np.arange(r), rows_per_traj),
+        # Under on_invalid='none' the check never reads the row map
+        # (measured ~0.3 ms at r=16384), so it is built only where it is used.
+        unit_of_row=_unit_of_row_for_policy(
+            on_invalid, lambda: np.repeat(np.arange(r), rows_per_traj)
+        ),
+        # One trajectory is one unit of rows_per_traj contiguous rows.
+        unit_stride=rows_per_traj,
         # Y is checked expanded, but the caller evaluated one output per
         # unique run. Report the rows they hold, not the expanded ones.
         row_labels=sampling_result.expanded_to_unique,
@@ -449,7 +500,35 @@ def analyze(
         raise ValueError("Fewer than 2 trajectories remain after cleaning")
 
     t0 = _verbose.tic()
-    ee, mu, mu_star, sigma = _measures(Y, idx_after, idx_before, delta, standardize_outputs)
+    if (
+        ctx.deferred_expand is not None
+        and n_bootstrap == 0
+        and keep.all()
+        and ctx.layout is YLayout.SCALAR
+    ):
+        # on_invalid='none' held the expansion back (see
+        # Context.deferred_expand). The scalar no-bootstrap path fuses the
+        # gather into the estimator -- one executable, measured ~1.3x
+        # faster than the eager expansion on a half-million-row design.
+        # Wide layouts run slower fused, and the bootstrap resamples from
+        # the expanded rows, so both expand eagerly below.
+        ee, mu, mu_star, sigma = _get_morris_fused_measures(
+            sampling_result.n_params, standardize_outputs
+        )(
+            ctx.Y,
+            sampling_result._expanded_to_unique_jax,
+            idx_after,
+            idx_before,
+            delta,
+        )
+    else:
+        if ctx.deferred_expand is not None:
+            # Deferral only happens under on_invalid='none', where keep is
+            # all-True, so the compaction above never ran and Y is still
+            # the raw promoted rows; expanding here is exactly what prepare
+            # would have done under any other policy.
+            Y = ctx.deferred_expand(Y)
+        ee, mu, mu_star, sigma = _measures(Y, idx_after, idx_before, delta, standardize_outputs)
 
     # One value for all three intervals: they are produced together or not at
     # all, so a single name keeps that fact checkable instead of implied.

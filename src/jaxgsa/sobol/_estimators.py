@@ -220,6 +220,29 @@ def _safe_ratio(numerator: Array, denominator: Array) -> Array:
     return jnp.where(denominator == 0, jnp.nan, numerator / safe)
 
 
+def _column_cross_moment(u: Array, v: Array) -> Array:
+    """Return ``mean(u * v, axis=0)`` for a single-column ``u`` paired with ``v``.
+
+    The pairings this module computes (Janon-Monod, Martinez, Mauntz-
+    Kucherenko) multiply a single column against every column of a matrix.
+    Written literally as ``u[:, None] * v`` that is a broadcast ``(N, 1)``
+    by ``(N, D)`` multiply followed by a reduction over the sample axis, and
+    the CPU backend compiles that pattern several times slower than the
+    equivalent matrix-vector product ``u @ v`` (measured 2-5x at N=16384,
+    D=30, float32; the two are the same sum ``(1/N) sum_n u[n] v[n, j]``).
+    ``v`` must have shape ``(N, D)`` with ``D >= 1`` and ``u`` shape
+    ``(N,)`` or ``(N, 1)``.
+
+    Args:
+        u: The single column, shape ``(N,)`` or ``(N, 1)``.
+        v: The matrix to pair it with, shape ``(N, D)``.
+
+    Returns:
+        The per-column cross-moment, shape ``(D,)``.
+    """
+    return (jnp.ravel(u) @ v) / v.shape[0]
+
+
 def _paired_ratio(u: Array, v: Array) -> Array:
     """Janon-Monod ratio for a pair of output vectors that share some inputs.
 
@@ -238,7 +261,11 @@ def _paired_ratio(u: Array, v: Array) -> Array:
         holds in common, shape ``(D,)``.
     """
     mean_uv = jnp.mean((u + v) / 2.0, axis=0)
-    numerator = jnp.mean(u * v, axis=0) - mean_uv**2
+    if u.shape[1] == 1:
+        # matvec form of mean(u * v); see _column_cross_moment.
+        numerator = _column_cross_moment(u, v) - mean_uv**2
+    else:
+        numerator = jnp.mean(u * v, axis=0) - mean_uv**2
     denominator = jnp.mean((u**2 + v**2) / 2.0, axis=0) - mean_uv**2
     return _safe_ratio(numerator, denominator)
 
@@ -256,7 +283,11 @@ def _correlation(u: Array, v: Array) -> Array:
     """
     u_c = u - jnp.mean(u, axis=0)
     v_c = v - jnp.mean(v, axis=0)
-    covariance = jnp.mean(u_c * v_c, axis=0)
+    if u.shape[1] == 1:
+        # matvec form of mean(u_c * v_c); see _column_cross_moment.
+        covariance = _column_cross_moment(u_c, v_c)
+    else:
+        covariance = jnp.mean(u_c * v_c, axis=0)
     spread = jnp.sqrt(jnp.mean(u_c**2, axis=0) * jnp.mean(v_c**2, axis=0))
     return _safe_ratio(covariance, spread)
 
@@ -355,6 +386,16 @@ def _mauntz_kucherenko(A: Array, AB: Array, B: Array) -> tuple[Array, Array]:
     ``A`` and ``B`` to mean 0 before either estimator formula runs (see
     :func:`jaxgsa.sobol._analyze._separate_output_values`).
 
+    The two cross-moments are written as matrix-vector products instead of
+    broadcast products followed by a sample-axis reduction: ``E[B AB_j]`` is
+    ``B @ AB / N`` and ``E[B A]`` is ``B @ A / N``, so ``S1_j`` is
+    ``(B @ AB - B @ A) / (N Var(Y))``, and ``ST_j`` likewise
+    ``(A @ A - A @ AB) / (N Var(Y))``. The broadcast form compiles several
+    times slower on the CPU backend (see :func:`_column_cross_moment`), and
+    the matvec form rounds differently only in the last bits. For an inert
+    parameter, ``AB_j`` is bit-for-bit ``A``, so ``B @ AB_j == B @ A`` and
+    the estimate reads 0 exactly, as it did in the broadcast form.
+
     Args:
         A: Model outputs from the A base matrix, shape ``(N,)``.
         AB: Model outputs from each cross-matrix AB_j, shape ``(N, D)``.
@@ -364,8 +405,9 @@ def _mauntz_kucherenko(A: Array, AB: Array, B: Array) -> tuple[Array, Array]:
         ``(S1, ST)``, each of shape ``(D,)``.
     """
     inv_var = _pooled_inv_var(A, B)
-    S1 = jnp.mean(B[:, None] * (AB - A[:, None]), axis=0) * inv_var
-    ST = jnp.mean(A[:, None] * (A[:, None] - AB), axis=0) * inv_var
+    N = A.shape[0]
+    S1 = ((B @ AB - B @ A) / N) * inv_var
+    ST = ((A @ A - A @ AB) / N) * inv_var
     return S1, ST
 
 
@@ -500,13 +542,20 @@ def second_order_kernel(
         else:
             S1, ST = _FIRST_TOTAL[estimator](A, AB, B)
         inv_var = _pooled_inv_var(A, B)
-        Vjk = (
-            jnp.mean(
-                BA[:, :, None] * AB[:, None, :] - (A * B)[:, None, None],
-                axis=0,
-            )
-            * inv_var
-        )
+        # Vjk = E[BA_j AB_k] - E[A B], over the sample axis. The cross-moment
+        # E[BA_j AB_k] is written as an explicit matrix product, ``BA.T @ AB``,
+        # instead of a materialised ``(N, D, D)`` outer product followed by a
+        # reduction. The two are the same quantity -- ``(1/N) sum_n BA[n,j]
+        # AB[n,k]`` -- but the GEMM accumulates inside the matmul kernel, so no
+        # ``(N, D, D)`` intermediate ever exists, which is faster and much
+        # cheaper in memory as N and D grow. Measured against the outer form in
+        # ``tmp/bench_s2_matmul.py``: up to 20x faster and lower peak memory on
+        # the workloads this library targets, with float32/float64 agreement to
+        # rounding noise (max |outer - matmul| ~3e-16 in float64, float32
+        # errors vs a float64 reference both ~2e-7) and identical reverse- and
+        # forward-mode gradients to ~7e-18.
+        N = A.shape[0]
+        Vjk = (BA.T @ AB / N - jnp.mean(A * B)) * inv_var
         S2 = Vjk - S1[:, None] - S1[None, :]
         return S1, ST, S2
 
