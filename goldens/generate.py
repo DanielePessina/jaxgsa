@@ -224,7 +224,7 @@ def build_shapley() -> dict:
         )
     return doc(
         "shapley", X, Y,
-        {"S1": res.S1, "ST": res.ST},
+        {"S1": res.S1, "ST": res.ST, "Sh": res.Sh},
         {"backend": "pce", "order": PCE_ORDER, "n": N_CLOUD, "seed": SEED},
     )
 
