@@ -144,16 +144,6 @@ def _select_centers(
 ) -> tuple[Array, Array]:
     """Select kernel centres by the P-greedy rule.
 
-    Jitted with ``max_centers`` static. Selection is a chain of elementwise
-    Newton-basis updates and reductions whose compiled form selects
-    bit-identical centres to the eager form (verified over D=3..10,
-    N=512..1024 and the whole gamma grid) -- unlike the coefficient solve,
-    it contains no matmul whose reassociation would move the answer in the
-    ill-conditioned float32 regime. Jitting matters because the eager path
-    re-traces this whole greedy sweep on every :func:`_fit_vkoga` call
-    (~85 ms measured at n=512) while the compiled executable runs it in
-    well under a millisecond.
-
     Centres are picked one at a time at the current maximiser of the power
     function (Hilhorst et al. 2024, eq. 8). The rule is expressed in the Newton
     basis of Pazouki & Schaback, which keeps the basis nested: adding a centre
@@ -513,84 +503,6 @@ def _predict_vkoga(state: _VKOGAState, X_new: Array) -> Array:
     return _gaussian_kernel(X_new, state.centers, state.gamma) @ state.coefficients
 
 
-def _cv_score_gamma_impl(
-    X: Array,
-    Y: Array,
-    gamma: Array,
-    fold_of: Array,
-    fold_ids: Array,
-    ridge_vec: Array,
-    max_centers: int,
-    tol_power: float,
-    tol_residual: float,
-) -> Array:
-    """Pooled out-of-sample RMSE for one ``gamma`` over every fold, jitted.
-
-    Hoisted to module scope so the ``@jax.jit`` wrapper is created exactly
-    once and the compiled executable is cached across :func:`_cross_validate`
-    calls. A ``jit`` defined *inside* ``_cross_validate`` wraps a fresh
-    function object on every call, so every call retraces and recompiles the
-    whole fold-map even though nothing about the graph changed -- measured
-    ~175 ms per call at n = 512 against ~1.1 ms for the cached executable
-    (the analysis pays that recompile on every steady-state ``analyze``
-    call). ``max_centers`` is static because the greedy allocates its
-    buffers at that size; ``tol_power`` and ``tol_residual`` ride along as
-    scalars because the greedy's stopping rule reads them under trace.
-
-    Args:
-        X: Training inputs, shape ``(n, D)``, already in unit-cube
-            coordinates.
-        Y: Training outputs, shape ``(n, S)``.
-        gamma: The RBF shape parameter to score.
-        fold_of: Fold assignment per row, shape ``(n,)``.
-        fold_ids: Fold ids, shape ``(n_folds,)``.
-        ridge_vec: Ridge candidates to score, shape ``(n_ridges,)``.
-        max_centers: Centre cap for the greedy, static.
-        tol_power: Absolute power-function stopping tolerance, static.
-        tol_residual: Relative residual stopping tolerance, static.
-
-    Returns:
-        Scalar pooled out-of-sample RMSE over the whole grid point.
-    """
-    n = X.shape[0]
-    n_slices = Y.shape[1]
-
-    def _fold_sse(fold: Array) -> Array:
-        """Out-of-sample SSE summed over ridges for one held-out fold."""
-        train = fold_of != fold
-        # One greedy sweep per (fold, gamma): selection is ridge-free.
-        idx, m = _select_centers(
-            X,
-            Y,
-            gamma=gamma,
-            max_centers=max_centers,
-            tol_power=tol_power,
-            tol_residual=tol_residual,
-            train_mask=train,
-        )
-        # The normal-equation matrices and the prediction kernel are also
-        # ridge-free: build them once per (fold, gamma) and reuse them for
-        # the whole ridge grid. Only the assembly-and-solve repeats.
-        eq = _normal_equations(X, Y, idx, m, gamma=gamma, train_mask=train)
-        K_pred = _gaussian_kernel(X, eq.centers, gamma)
-
-        def _ridge_sse(ridge: Array) -> Array:
-            """Sum of squared held-out errors for one ridge candidate."""
-            err = Y - K_pred @ _solve_ridge(eq, ridge)
-            return jnp.sum(jnp.where(train[:, None], 0.0, err**2))
-
-        return jax.lax.map(_ridge_sse, ridge_vec)  # (n_ridges,)
-
-    # lax.map runs the folds sequentially: vmap would hold n_folds copies
-    # of the (n, n) kernel work live at once, which is the memory wall
-    # here long before it is a speed win.
-    sse = jnp.sum(jax.lax.map(_fold_sse, fold_ids), axis=0)
-    return jnp.sqrt(sse / (n * n_slices))
-
-
-_cv_score_gamma = jax.jit(_cv_score_gamma_impl, static_argnames=("max_centers",))
-
-
 def _cross_validate(
     X: Array,
     Y: Array,
@@ -646,6 +558,7 @@ def _cross_validate(
     ridge_grid = np.atleast_1d(np.asarray(ridges, dtype=np.float64)).ravel()
 
     n = X.shape[0]
+    n_slices = Y.shape[1]
     n_folds = min(n_folds, n)
 
     # Interleaved fold assignment (row i -> fold i % k) after an optional
@@ -656,22 +569,39 @@ def _cross_validate(
     fold_ids = jnp.arange(n_folds)
     ridge_vec = jnp.asarray(ridge_grid, dtype=X.dtype)
 
+    @jax.jit
+    def _score_gamma(gamma: Array) -> Array:
+        def _fold_sse(fold: Array) -> Array:
+            train = fold_of != fold
+            # One greedy sweep per (fold, gamma): selection is ridge-free.
+            idx, m = _select_centers(
+                X,
+                Y,
+                gamma=gamma,
+                max_centers=max_centers,
+                tol_power=tol_power,
+                tol_residual=tol_residual,
+                train_mask=train,
+            )
+            # The normal-equation matrices and the prediction kernel are also
+            # ridge-free: build them once per (fold, gamma) and reuse them for
+            # the whole ridge grid. Only the assembly-and-solve repeats.
+            eq = _normal_equations(X, Y, idx, m, gamma=gamma, train_mask=train)
+            K_pred = _gaussian_kernel(X, eq.centers, gamma)
+
+            def _ridge_sse(ridge: Array) -> Array:
+                err = Y - K_pred @ _solve_ridge(eq, ridge)
+                return jnp.sum(jnp.where(train[:, None], 0.0, err**2))
+
+            return jax.lax.map(_ridge_sse, ridge_vec)  # (n_ridges,)
+
+        # lax.map runs the folds sequentially: vmap would hold n_folds copies
+        # of the (n, n) kernel work live at once, which is the memory wall
+        # here long before it is a speed win.
+        sse = jnp.sum(jax.lax.map(_fold_sse, fold_ids), axis=0)
+        return jnp.sqrt(sse / (n * n_slices))
+
     # The gamma grid is host-side and static, so loop over it in Python; the
-    # jitted body (:func:`_cv_score_gamma`) is traced once and reused for
-    # every value. The callable itself is module-level so its compiled
-    # executable survives across calls to this function (see its docstring).
-    scores = [
-        _cv_score_gamma(
-            X,
-            Y,
-            jnp.asarray(g, dtype=X.dtype),
-            fold_of,
-            fold_ids,
-            ridge_vec,
-            max_centers,
-            tol_power,
-            tol_residual,
-        )
-        for g in gamma_grid
-    ]
+    # jitted body is traced once and reused for every value.
+    scores = [_score_gamma(jnp.asarray(g, dtype=X.dtype)) for g in gamma_grid]
     return jnp.asarray(scores)
