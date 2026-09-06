@@ -33,13 +33,14 @@ function pooledInvVar(A: np.Array, B: np.Array): np.Array {
     np.add(np.mean(A.ref, 0), np.mean(B.ref, 0)),
     2,
   );
-  const A_c = np.subtract(A.ref, pooledMean.ref);
-  const B_c = np.subtract(B.ref, pooledMean.ref);
+  const A_c = np.subtract(A, pooledMean.ref); // A consumed
+  const B_c = np.subtract(B, pooledMean); // B + pooledMean consumed
   const pooledVar = np.divide(
-    np.add(np.sum(np.square(A_c.ref), 0), np.sum(np.square(B_c.ref), 0)),
+    np.add(np.sum(np.square(A_c), 0), np.sum(np.square(B_c), 0)), // A_c, B_c consumed
     2 * N,
   );
-  return np.where(np.equal(pooledVar.ref, 0), np.nan, np.divide(1, pooledVar.ref));
+  // pooledVar consumed on its last (raw) use
+  return np.where(np.equal(pooledVar.ref, 0), np.nan, np.divide(1, pooledVar));
 }
 
 /**
@@ -79,7 +80,7 @@ export function analyzeSobol(
     const idx = np.array(options.expandedToUnique as Int32Array<ArrayBuffer>, {
       dtype: np.int32,
     });
-    expanded = np.take(expanded.ref, idx, 0);
+    expanded = np.take(expanded, idx, 0);
   }
 
   const nExpanded = expanded.shape[0];
@@ -102,32 +103,32 @@ export function analyzeSobol(
   // with zero std replaced by 1 so constant slices stay all-zero (NaN-free).
   const yMean = np.mean(expanded.ref, 0);
   const yStd = np.std(expanded.ref, 0);
-  const safeScale = np.where(np.equal(yStd.ref, 0), 1, yStd.ref);
-  const Ystd = np.divide(np.subtract(expanded.ref, yMean.ref), safeScale.ref);
+  const safeScale = np.where(np.equal(yStd.ref, 0), 1, yStd); // yStd consumed
+  const Ystd = np.divide(np.subtract(expanded, yMean), safeScale); // expanded, yMean, safeScale consumed
 
   // _separate_output_values: reshape (base_n, step) then slice.
-  const grouped = np.reshape(Ystd.ref, [baseN, step]);
+  const grouped = np.reshape(Ystd, [baseN, step]); // Ystd consumed
   const A = grouped.ref.slice([], 0); // (N,)
   const B = grouped.ref.slice([], -1); // (N,)
-  const AB = grouped.ref.slice([], [1, D + 1]); // (N, D)
+  const AB = grouped.slice([], [1, D + 1]); // (N, D)  (grouped consumed)
 
   // _saltelli_jansen: _mauntz_kucherenko S1 + _jansen ST, one pooled
   // inv_var each (as the Python composition computes it twice).
-  const invVarS1 = pooledInvVar(A, B);
-  const invVarST = pooledInvVar(A, B);
+  const invVarS1 = pooledInvVar(A.ref, B.ref);
+  const invVarST = pooledInvVar(A.ref, B.ref);
 
   // S1 = mean(B[:, None] * (AB - A[:, None]), axis=0) * inv_var
-  const Acol = np.expandDims(A.ref, 1); // (N, 1)
-  const Bcol = np.expandDims(B.ref, 1); // (N, 1)
+  const Acol = np.expandDims(A, 1); // (N, 1)  (A consumed)
+  const Bcol = np.expandDims(B, 1); // (N, 1)  (B consumed)
   const diff = np.subtract(AB.ref, Acol.ref); // (N, D)
-  const prod = np.multiply(Bcol.ref, diff.ref); // (N, D)
-  const S1 = np.multiply(np.mean(prod.ref, 0), invVarS1.ref); // (D,)
+  const prod = np.multiply(Bcol, diff); // (N, D)  (Bcol, diff consumed)
+  const S1 = np.multiply(np.mean(prod, 0), invVarS1); // (D,)  (prod, invVarS1 consumed)
 
   // ST = 0.5 * mean((A[:, None] - AB)**2, axis=0) * inv_var
-  const diff2 = np.subtract(Acol.ref, AB.ref); // (N, D)
-  const sq = np.square(diff2.ref); // (N, D)
-  const meanSq = np.mean(sq.ref, 0); // (D,)
-  const ST = np.multiply(np.multiply(0.5, meanSq.ref), invVarST.ref); // (D,)
+  const diff2 = np.subtract(Acol, AB); // (N, D)  (Acol, AB consumed)
+  const sq = np.square(diff2); // (N, D)  (diff2 consumed)
+  const meanSq = np.mean(sq, 0); // (D,)  (sq consumed)
+  const ST = np.multiply(np.multiply(0.5, meanSq), invVarST); // (D,)  (meanSq, invVarST consumed)
 
   return {
     S1: S1.dataSync() as Float64Array,

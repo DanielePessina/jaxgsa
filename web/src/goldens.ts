@@ -1,4 +1,5 @@
 import rawKucherenko from "../../goldens/v0.9.0/kucherenko.json";
+import rawMorris from "../../goldens/v0.9.0/morris.json";
 import rawSobol from "../../goldens/v0.9.0/sobol.json";
 
 export interface Golden {
@@ -65,5 +66,45 @@ export function loadSobolGolden(): SobolGolden {
       baseN: RAW_SOBOL.config.base_n,
       calcSecondOrder: RAW_SOBOL.config.calc_second_order,
     },
+  };
+}
+
+export interface MorrisGoldenDesign {
+  n_expanded: number;
+  n_trajectories: number;
+  num_levels: number;
+  expanded_to_unique: number[];
+  ee_idx_after: number[][];
+  ee_idx_before: number[][];
+  ee_delta: number[][];
+}
+
+export interface MorrisGolden {
+  x: number[][];
+  y: number[];
+  expected: { mu: number[]; mu_star: number[]; sigma: number[] };
+  tolerance: { rtol: number; atol: number };
+  design: MorrisGoldenDesign;
+}
+
+interface RawMorrisGolden {
+  method: string;
+  n: number;
+  x: number[][];
+  y: number[];
+  expected: { mu: number[]; mu_star: number[]; sigma: number[] };
+  tolerance: { rtol: number; atol: number };
+  design: MorrisGoldenDesign;
+}
+
+const RAW_MORRIS = rawMorris as RawMorrisGolden;
+
+export function loadMorrisGolden(): MorrisGolden {
+  return {
+    x: RAW_MORRIS.x,
+    y: RAW_MORRIS.y,
+    expected: RAW_MORRIS.expected,
+    tolerance: RAW_MORRIS.tolerance,
+    design: RAW_MORRIS.design,
   };
 }

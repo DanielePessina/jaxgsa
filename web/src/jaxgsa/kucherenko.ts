@@ -26,7 +26,7 @@ export function estimateKucherenko(
   // so both are already shift-safe.
   const f0Joint = np.mean(fJoint.ref, 0); // (S,)
   const gJoint = np.subtract(fJoint.ref, f0Joint.ref); // (N, S), centered
-  // (D, N, S), same shift
+  // (D, N, S), same shift — f0Joint consumed on this, its last use
   const gFirst = np.subtract(fFirst, np.expandDims(f0Joint, [0, 1]));
 
   const S1 = np.divide(
