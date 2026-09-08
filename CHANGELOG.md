@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.9.1
+
+Version 0.9.1 is a performance and behavior-contract release with no API
+changes. All thirteen methods keep their 0.9.0 interface; the work is in the
+kernels and in the entry path.
+
+### Performance
+
+- **Sobol.** `S2` is computed as `BA.T @ AB` instead of a materialised
+  `(N, D, D)` outer product (no quadratic intermediate, up to ~6x on the
+  kernel, lower peak memory); the first-order cross-moments
+  (Mauntz-Kucherenko, Janon-Monod, Martinez) are matmuls instead of
+  broadcast-multiply-plus-reduce. The bootstrap resampler chunks the
+  resample axis from the same transient budget and, with
+  `keep_replicates=False`, reduces each chunk to CI endpoints before the
+  next runs. True-scale scalar second-order `analyze`
+  (`base_n=16384`, `D=30`): **12.25 ms -> 1.77 ms** with
+  `on_invalid='none'` (6.65 ms default path).
+- **Entry path.** The host `np.bincount` wall over every expanded row is
+  gone (per-unit verdicts collapse on device), the zero-variance
+  max/min/var mask runs in one jitted scan, and the scalar front half
+  (standardize + split + slice flatten) traces as one executable.
+- **`on_invalid='none'`.** A new policy value that skips the isfinite and
+  constant-slice scans entirely and runs the analysis on the data exactly
+  as given. On clean data the indices are bit-identical to the default
+  policy.
+- **Deferred design expansion.** Under `on_invalid='none'` the expansion
+  gather is deferred and fused into the scalar estimator front half for
+  sobol and morris; the design map is warmed once at construction, so the
+  per-call device transfer disappears from every path.
+- **HSIC.** The median-bandwidth selection replaces a 32-step bitwise
+  bisection with a 2-level 16-bit bincount radix select:
+  **142 ms -> 23 ms**, bit-exact.
+- **VKOGA.** The nested CV scorer and the greedy center selection are
+  jitted once (module-level hoist, content-keyed memo of the surrogate
+  predictor) instead of re-traced per call: **341 ms -> 23 ms** on the
+  benchmark case, with no coefficient or CV-rounding drift (the unsafe
+  variants that moved numbers were reverted).
+- **Kucherenko.** `S1` uses an einsum that removes the `(D, N, S)`
+  broadcast temporary.
+
+### Behavior
+
+- New `on_invalid='none'` policy (see above): shape-contract checks still
+  run, but no isfinite scan, no drop, and no constant-slice warning. A
+  `NaN` reaches the estimator and flows into the indices.
+- Sobol and Morris call `analyze(..., n_bootstrap=...)` (the renamed
+  `num_resamples=`); HSIC and VKOGA take `key=` instead of `seed=` in the
+  benchmark harness.
+
+### Numerics
+
+The kernel rewrites reorder float32 arithmetic, so a few reported values
+move by units in the last place. The numerical baseline
+(`scripts/baseline_check.py`) still passes at the recorded 406 accepted
+moves; all parity tests (SALib, OpenTURNS) still pass.
+
 ## 0.9.0
 
 Version 0.9.0 freezes the public interface. It gives eleven methods a pure

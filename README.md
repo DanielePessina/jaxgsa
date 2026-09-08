@@ -55,11 +55,11 @@ DOI; otherwise cite the corresponding Git tag or GitHub release. Also cite the
 primary paper for each sensitivity method you use, as listed in the methods
 guide.
 
-For version 0.9.0, before a DOI is available, the citation is:
+For version 0.9.1, before a DOI is available, the citation is:
 
 ```text
 Pessina, D., and Papathanasiou, M. M. (2026). jaxgsa: Global Sensitivity
-Analysis in JAX (Version 0.9.0) [Computer software]. Imperial College London.
+Analysis in JAX (Version 0.9.1) [Computer software]. Imperial College London.
 https://github.com/DanielePessina/jaxgsa
 ```
 
