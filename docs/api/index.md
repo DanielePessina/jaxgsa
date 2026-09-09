@@ -243,6 +243,34 @@ That is one time series passed as `(N, T)`, caught by the name list. Without
 `output_names` the same array is a perfectly valid five-output run and nothing
 complains, so declare your outputs whenever `T` and `K` could be confused.
 
+### Irregular output grids
+
+When output channels have different time grids, pass a list of
+`(times, values)` pairs or a dict keyed by output name. Each `times` array is
+one-dimensional; each `values` array is `(N, T_k)` or `(N,)` for a
+single-time channel. jaxgsa sorts the times, runs one regular analysis per
+channel, and returns a wrapper whose `channels` mapping holds those ordinary
+method results:
+
+```python
+Y = [
+    (t_concentration, concentration),  # (N, 5)
+    (t_diameter, diameter),             # (N, 3)
+]
+result = jaxgsa.sobol.analyze(design, Y)
+
+result.channels["concentration"].S1  # shape (5, 1, D)
+result.to_dataset()                   # time_concentration and time_diameter
+```
+
+Ragged `Y` automatically selects bucketing; there is no mode keyword. The
+analysis does not pad channels or fabricate values. It is implemented on twelve
+of the thirteen `analyze` entry points; `dgsm` refuses the ragged form because
+it requires a fixed-layout Jacobian. There is no mask mode: a padded/masked
+estimator would be a separate missing-data contract rather than the
+per-channel analysis described here. See [Irregular output grids](/examples/irregular-outputs)
+for the complete input and result contract.
+
 ## Sobol
 
 ```python

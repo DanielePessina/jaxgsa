@@ -10,7 +10,7 @@ import math
 import warnings
 from collections.abc import Callable
 from functools import lru_cache
-from typing import Literal, NamedTuple
+from typing import Literal, NamedTuple, cast
 
 import jax.numpy as jnp
 import numpy as np
@@ -29,6 +29,13 @@ from jaxgsa._core.entry import (
 )
 from jaxgsa._core.fit_quality import warn_variance_fit
 from jaxgsa._core.invalid import InvalidReport, OnInvalid
+from jaxgsa._core.irregular import (
+    IrregularResult,
+    IrregularY,
+    _fwd_kwargs,
+    _is_irregular_y,
+    analyze_irregular,
+)
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.surrogate import _PredictPlan
 from jaxgsa._core.transforms import cdf_to_unit_interval
@@ -46,6 +53,24 @@ from jaxgsa.hdmr._engine import (
 from jaxgsa.hdmr._fit import _fit_hdmr
 from jaxgsa.hdmr._result import HDMRResult, _HDMRFit
 from jaxgsa.problem import Problem
+
+# Keyword-only parameters the irregular engine forwards unchanged to the
+# per-channel recursive analyze() calls. verbose is excluded:
+# the engine owns it.
+_IRREGULAR_KWARGS = (
+    "maxorder",
+    "maxiter",
+    "m",
+    "lambdax",
+    "slice_chunk_size",
+    "batch_size",
+    "n_bootstrap",
+    "conf_level",
+    "ci_method",
+    "key",
+    "on_invalid",
+    "keep_replicates",
+)
 
 # Fewest rows the B-spline backfitting fit can run on. It is the module's own
 # documented minimum, re-used as the floor for ``on_invalid="drop"`` so that
@@ -263,7 +288,7 @@ def _warn_correlated_index_reading(problem: Problem) -> None:
 def analyze(
     problem: Problem,
     X: Array,
-    Y: Array,
+    Y: Array | IrregularY,
     *,
     maxorder: int = 2,
     maxiter: int = 100,
@@ -278,7 +303,7 @@ def analyze(
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
     keep_replicates: bool = False,
-) -> HDMRResult:
+) -> HDMRResult | IrregularResult:
     """Compute sensitivity indices via RS-HDMR (public entry point).
 
     Validates ``(X, Y)``, warns once about any zero-variance output slice, then
@@ -338,6 +363,19 @@ def analyze(
             ``key``. :func:`_analyze_hdmr_core` raises for the remaining
             argument checks.
     """
+    if _is_irregular_y(Y):
+        return analyze_irregular(
+            analyze,
+            channel_data=X,
+            problem=problem,
+            Y=Y,
+            n_expected=int(X.shape[0]),
+            design_based=False,
+            verbose=verbose,
+            kwargs=_fwd_kwargs(locals(), _IRREGULAR_KWARGS),
+        )
+    Y = cast(Array, Y)
+
     from jaxgsa.hdmr import SPEC
 
     # The preamble runs in this public wrapper only. Callers routing through

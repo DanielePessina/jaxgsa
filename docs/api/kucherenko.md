@@ -6,7 +6,8 @@ jaxgsa.kucherenko.sample(problem, n_samples, *, scramble=True, seed=None,
 
 jaxgsa.kucherenko.analyze(sampling_result, Y, *, n_bootstrap=0, conf_level=0.95,
                           ci_method="quantile", key=None, on_invalid="raise",
-                          verbose=True, keep_replicates=False) -> KucherenkoResult
+                          verbose=True, keep_replicates=False)
+                          -> KucherenkoResult | IrregularResult
 ```
 
 `jaxgsa.kucherenko` estimates the Sobol' indices generalised to dependent
@@ -19,6 +20,10 @@ a fitted kernel surrogate instead.
 The trade is straightforward. Kucherenko costs `base_n * (2D + 1)` model
 evaluations and has no surrogate error. VKOGA costs one `(X, Y)` sample of any
 size and inherits whatever the surrogate gets wrong.
+
+`analyze` also accepts ragged outputs. Pass a list or dict of `(times, values)`
+pairs; each channel is analyzed on its own grid. See
+[Irregular output grids](/examples/irregular-outputs).
 
 :::: warning These indices are not comparable to `jaxgsa.sobol`'s
 Under a declared correlation, `kucherenko.S1` is a different estimand from

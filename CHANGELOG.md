@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### New: irregularly sampled outputs
+
+`Y` now accepts per-output-channel time grids: each channel lives on its own
+(non-uniform) time axis. Pass a list of `(times, values)` pairs — or a dict
+keyed by output name — to any of the twelve `analyze` entry points that accept
+ragged outputs:
+
+```python
+sr = jaxgsa.sobol.sample(problem, n_samples=1024, seed=0)
+Y = [(t_conc, y_conc), (t_d43, y_d43)]   # y_conc: (n_runs, 5), y_d43: (n_runs, 4)
+result = jaxgsa.sobol.analyze(sr, Y)
+```
+
+Each channel runs through the method's regular kernels on its own grid (no
+padding, no fabricated values), and the returned
+`jaxgsa._core.irregular.IrregularResult` holds one normal result per channel,
+with `to_dataset()` emitting one variable per channel on its own `time`
+coordinate. Bootstrap and permutation randomness is folded per channel, so
+the channels' confidence bands are independent. `dgsm` is the one method
+that refuses the ragged form (its pre-computed Jacobian path would need a
+per-channel `dfdx`). There is no mask mode: padding onto a common grid would
+add work without helping the per-channel estimators.
+Performance is the sum of the per-channel analyses plus a host-side coercion
+pass; `scripts/benchmark_irregular.py` measures it.
+
 ## 0.9.1
 
 Version 0.9.1 is a performance and behavior-contract release with no API

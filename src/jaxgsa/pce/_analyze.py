@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import warnings
 from functools import lru_cache
-from typing import Literal, NamedTuple
+from typing import Literal, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -26,6 +26,13 @@ from jaxgsa._core.entry import (
 )
 from jaxgsa._core.fit_quality import warn_loo_overfit, warn_variance_fit
 from jaxgsa._core.invalid import OnInvalid
+from jaxgsa._core.irregular import (
+    IrregularResult,
+    IrregularY,
+    _fwd_kwargs,
+    _is_irregular_y,
+    analyze_irregular,
+)
 from jaxgsa._core.precision import unit_clip_bounds
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.sampling import UNIT_CLIP
@@ -45,6 +52,22 @@ from jaxgsa.pce._engine import (
 )
 from jaxgsa.pce._result import PCEResult
 from jaxgsa.problem import CategoricalSpec, Problem, UniformSpec
+
+# Keyword-only parameters the irregular engine forwards unchanged to the
+# per-channel recursive analyze() calls. verbose is excluded:
+# the engine owns it.
+_IRREGULAR_KWARGS = (
+    "order",
+    "ridge",
+    "fit_ratio",
+    "batch_size",
+    "n_bootstrap",
+    "conf_level",
+    "ci_method",
+    "key",
+    "on_invalid",
+    "keep_replicates",
+)
 
 # A truncated Gaussian is treated as effectively unbounded, and so kept on the
 # Hermite basis, when both of its bounds sit at least this many standard
@@ -792,7 +815,7 @@ def indices(
 def analyze(
     problem: Problem,
     X: Array,
-    Y: Array,
+    Y: Array | IrregularY,
     *,
     order: int = 3,
     ridge: float = 1e-8,
@@ -805,7 +828,7 @@ def analyze(
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
     keep_replicates: bool = False,
-) -> PCEResult:
+) -> PCEResult | IrregularResult:
     """Compute Sobol indices via polynomial chaos expansion (PCE).
 
     Fits an orthogonal polynomial surrogate to arbitrary (X, Y) pairs, so no
@@ -913,6 +936,19 @@ def analyze(
             (``D + 1 > int(fit_ratio * N)``, which would make the fit
             underdetermined).
     """
+    if _is_irregular_y(Y):
+        return analyze_irregular(
+            analyze,
+            channel_data=X,
+            problem=problem,
+            Y=Y,
+            n_expected=int(X.shape[0]),
+            design_based=False,
+            verbose=verbose,
+            kwargs=_fwd_kwargs(locals(), _IRREGULAR_KWARGS),
+        )
+    Y = cast(Array, Y)
+
     from jaxgsa.pce import SPEC
 
     # The non-finite check runs here, in the public entry point only.

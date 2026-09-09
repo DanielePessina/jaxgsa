@@ -13,7 +13,7 @@ jaxgsa.pawn.analyze(
     on_invalid="raise",
     verbose=True,
     keep_replicates=False,
-) -> PAWNResult
+) -> PAWNResult | IrregularResult
 ```
 
 PAWN asks how much fixing a parameter changes the whole output distribution,

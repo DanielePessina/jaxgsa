@@ -65,40 +65,26 @@ def _restore_memory_budget():
 class TestMemoryBudgetUnits:
     """T4: the unit keyword on set_memory_budget / get_memory_budget."""
 
-    @pytest.mark.parametrize(
-        ("unit", "factor"),
-        [
-            ("b", 1),
-            ("kb", 1024),
-            ("kib", 1024),
-        ],
-    )
-    def test_each_unit_resolves_to_its_exact_byte_count(
-        self, unit, factor, _restore_memory_budget
-    ):
+    def test_each_unit_resolves_to_its_exact_byte_count(self, _restore_memory_budget):
         """T4: every accepted unit is binary, and its byte value is exact.
 
         Oracle: the definition itself. ``kb``/``mb``/``gb``/``tb`` are powers of
         1024, and the ``*ib`` spellings are exact synonyms.
         """
-        jaxgsa.config.set_memory_budget(3, unit=unit)
-        assert jaxgsa.config.get_memory_budget() == 3 * factor
+        for unit, factor in (("b", 1), ("kb", 1024), ("kib", 1024)):
+            jaxgsa.config.set_memory_budget(3, unit=unit)
+            assert jaxgsa.config.get_memory_budget() == 3 * factor
 
-    @pytest.mark.parametrize("spelling", ["\tMiB\n"])
-    def test_unit_ignores_case_and_whitespace(self, spelling, _restore_memory_budget):
+    def test_unit_ignores_case_and_whitespace(self, _restore_memory_budget):
         """T4: unit names are harmonised by stripping and lowercasing."""
-        jaxgsa.config.set_memory_budget(7, unit=spelling)
+        jaxgsa.config.set_memory_budget(7, unit="\tMiB\n")
         assert jaxgsa.config.get_memory_budget() == 7 * 1024**2
 
-    @pytest.mark.parametrize("bad", ["megabytes"])
-    def test_unknown_unit_raises(self, bad):
+    def test_unknown_unit_raises_on_set_and_get(self):
         """T4: an unknown unit names the input it rejected."""
         with pytest.raises(ValueError, match="unknown memory unit") as exc:
-            jaxgsa.config.set_memory_budget(1, unit=bad)
-        assert repr(bad) in str(exc.value)
-
-    def test_unknown_unit_raises_on_getter_too(self):
-        """T4: the getter validates its unit with the same rule."""
+            jaxgsa.config.set_memory_budget(1, unit="megabytes")
+        assert repr("megabytes") in str(exc.value)
         with pytest.raises(ValueError, match="unknown memory unit"):
             jaxgsa.config.get_memory_budget(unit="megabytes")
 
@@ -146,67 +132,46 @@ class TestMemoryBudgetValue:
         with pytest.raises(ValueError, match="at least 1 byte"):
             jaxgsa.config.set_memory_budget(0.4, unit="b")
 
-    @pytest.mark.parametrize("bad", [True, False])
-    def test_bool_rejected(self, bad):
+    def test_invalid_values_rejected(self):
         """T4: bool is an int subclass in Python, and must not slip through."""
-        with pytest.raises(ValueError, match="positive, finite number"):
-            jaxgsa.config.set_memory_budget(bad)
-
-    @pytest.mark.parametrize("bad", [0, -0.5])
-    def test_zero_and_negative_rejected(self, bad):
-        """T4: the budget must be strictly positive."""
-        with pytest.raises(ValueError, match="positive, finite number"):
-            jaxgsa.config.set_memory_budget(bad)
-
-    @pytest.mark.parametrize("bad", [math.inf, -math.inf, math.nan])
-    def test_non_finite_rejected(self, bad):
-        """T4: infinities and NaN are not budgets."""
-        with pytest.raises(ValueError, match="positive, finite number"):
-            jaxgsa.config.set_memory_budget(bad)
-
-    @pytest.mark.parametrize("bad", ["512MiB", None, [512]])
-    def test_non_numeric_rejected(self, bad):
-        """T4: the budget must be a number, not a string or container."""
-        with pytest.raises(ValueError, match="positive, finite number"):
-            jaxgsa.config.set_memory_budget(bad)
+        for bad in (True, False, 0, -0.5, math.inf, -math.inf, math.nan, "512MiB", None, [512]):
+            with pytest.raises(ValueError, match="positive, finite number"):
+                jaxgsa.config.set_memory_budget(bad)
 
 
 class TestBytesShapedGuard:
     """T4: the guard against pre-0.9 byte counts passed without a unit."""
 
-    @pytest.mark.parametrize("legacy", [512 * 1024**2, 1024**2, 2**30, 1e9])
-    def test_guard_fires_without_unit(self, legacy):
+    def test_guard_fires_without_unit(self):
         """T4: a unit-less bytes-shaped value raises instead of meaning TB.
 
         ``512 * 1024**2`` used to mean 512 MiB. Under the MB default it would
         mean 512 TB. The guard turns that silent reinterpretation into an
         error.
         """
-        with pytest.raises(ValueError, match="megabytes by default") as exc:
-            jaxgsa.config.set_memory_budget(legacy)
-        message = str(exc.value)
-        assert "unit='b'" in message  # shows the old meaning
-        assert f"set_memory_budget({legacy / 1024**2:g})" in message  # and the MB one
+        for legacy in (512 * 1024**2, 1024**2, 2**30, 1e9):
+            with pytest.raises(ValueError, match="megabytes by default") as exc:
+                jaxgsa.config.set_memory_budget(legacy)
+            message = str(exc.value)
+            assert "unit='b'" in message
+            assert f"set_memory_budget({legacy / 1024**2:g})" in message
 
-    @pytest.mark.parametrize("plausible", [512, 64000, 1024**2 - 1])
-    def test_guard_does_not_reject_plausible_mb_figures(self, plausible, _restore_memory_budget):
+    def test_guard_does_not_reject_plausible_mb_figures(self, _restore_memory_budget):
         """T4: a large but real MB budget (64000 MB = 62.5 GiB) still works."""
-        jaxgsa.config.set_memory_budget(plausible)
-        assert jaxgsa.config.get_memory_budget() == plausible * 1024**2
+        for plausible in (512, 64000, 1024**2 - 1):
+            jaxgsa.config.set_memory_budget(plausible)
+            assert jaxgsa.config.get_memory_budget() == plausible * 1024**2
 
 
 class TestGetMemoryBudget:
     """T4: the getter keeps returning bytes by default."""
 
-    def test_default_return_is_bytes_and_int(self, _restore_memory_budget):
+    def test_default_and_explicit_units_return_expected_values(self, _restore_memory_budget):
         """T4: the no-argument return value is unchanged by this work."""
         jaxgsa.config.set_memory_budget(256)
         budget = jaxgsa.config.get_memory_budget()
         assert budget == 268435456
         assert isinstance(budget, int)
-
-    def test_unit_keyword_converts(self, _restore_memory_budget):
-        """T4: an explicit unit returns a float in that unit."""
         jaxgsa.config.set_memory_budget(1536, unit="mb")
         assert jaxgsa.config.get_memory_budget(unit="mb") == 1536.0
         assert jaxgsa.config.get_memory_budget(unit="gb") == 1.5

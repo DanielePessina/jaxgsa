@@ -50,7 +50,7 @@ References:
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, cast
 
 import jax
 import jax.numpy as jnp
@@ -61,12 +61,31 @@ from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.bootstrap import interval
 from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare, require
 from jaxgsa._core.invalid import OnInvalid, _unit_of_row_for_policy
+from jaxgsa._core.irregular import (
+    IrregularResult,
+    IrregularY,
+    _fwd_kwargs,
+    _is_irregular_y,
+    analyze_irregular,
+)
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
     _warn_zero_variance_slices,
 )
 from jaxgsa.kucherenko._result import KucherenkoResult
 from jaxgsa.kucherenko._sampling import KucherenkoSamples
+
+# Keyword-only parameters the irregular engine forwards unchanged to the
+# per-channel recursive analyze() calls. verbose is excluded:
+# the engine owns it.
+_IRREGULAR_KWARGS = (
+    "n_bootstrap",
+    "conf_level",
+    "ci_method",
+    "key",
+    "on_invalid",
+    "keep_replicates",
+)
 
 
 def _estimate(
@@ -119,7 +138,7 @@ def _estimate(
 
 def analyze(
     sampling_result: KucherenkoSamples,
-    Y: Array,
+    Y: Array | IrregularY,
     *,
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
@@ -128,7 +147,7 @@ def analyze(
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
     keep_replicates: bool = False,
-) -> KucherenkoResult:
+) -> KucherenkoResult | IrregularResult:
     """Compute Kucherenko first-order and total indices from model outputs.
 
     The estimators run on the actual model outputs. No surrogate is fitted.
@@ -198,6 +217,19 @@ def analyze(
             NaN), or if non-finite outputs are found under a policy that does
             not raise.
     """
+    if _is_irregular_y(Y):
+        return analyze_irregular(
+            analyze,
+            channel_data=sampling_result,
+            problem=sampling_result.problem,
+            Y=Y,
+            n_expected=int(sampling_result.n_runs),
+            design_based=True,
+            verbose=verbose,
+            kwargs=_fwd_kwargs(locals(), _IRREGULAR_KWARGS),
+        )
+    Y = cast(Array, Y)
+
     from jaxgsa.kucherenko import SPEC
 
     problem = sampling_result.problem

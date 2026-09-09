@@ -18,12 +18,16 @@ analyze(
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
     keep_replicates: bool = False,
-) -> SobolResult
+) -> SobolResult | IrregularResult
 ```
 
 `Y` holds the model outputs at each unique row of `sampling_result.samples`,
 in that row order. Accepted shapes are `(n_runs,)`, `(n_runs, K)` and
 `(n_runs, T, K)`. Indices are computed independently for every `(t, k)` slice.
+
+For channels with different time grids, pass a ragged list or dict of
+`(times, values)` pairs. Ragged `Y` is automatically analyzed one channel at a
+time. See [Irregular output grids](/examples/irregular-outputs).
 
 ```python
 import numpy as np, jax.numpy as jnp, jaxgsa

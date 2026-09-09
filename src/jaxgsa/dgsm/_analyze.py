@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable, Iterator
-from typing import Literal
+from typing import Literal, cast
 
 import jax
 import jax.numpy as jnp
@@ -38,6 +38,7 @@ from jaxgsa._core.entry import (
     validate_inputs,
 )
 from jaxgsa._core.invalid import InvalidUnit, OnInvalid, resolve_policy
+from jaxgsa._core.irregular import IrregularY, _is_irregular_y
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import _prepare_Y, _warn_zero_variance_slices
 from jaxgsa._core.warning_types import JaxgsaWarning
@@ -525,7 +526,7 @@ def analyze(
     fn: Callable | None = None,
     X: Array | None = None,
     *,
-    Y: Array | None = None,
+    Y: Array | IrregularY | None = None,
     dfdx: Array | None = None,
     standardize_outputs: bool = False,
     n_bootstrap: int = 0,
@@ -656,7 +657,6 @@ def analyze(
         keep_replicates: Keep the per-resample moments and bounds on
             ``DGSMResult.ci.replicates``. Off by default because they are
             large: ``n_bootstrap`` copies of four index arrays.
-
     Returns:
         A ``DGSMResult`` with ``nu``, ``sigma``, ``upper_bound``, and
         ``lower_bound``, each of shape ``(D,)`` / ``(K, D)`` / ``(T, K, D)``
@@ -686,6 +686,15 @@ def analyze(
             bound only there; the warning names the marginals that fail the
             condition. ``upper_bound`` is never in question.
     """
+    if _is_irregular_y(Y):
+        raise NotImplementedError(
+            "jaxgsa.dgsm.analyze does not support irregularly sampled outputs yet: "
+            "the pre-computed Jacobian path would need a per-channel dfdx. "
+            "Analyze with a method that supports ragged Y instead, "
+            "or re-grid the outputs to a shared grid first."
+        )
+    Y = cast(Array | None, Y)
+
     from jaxgsa.dgsm import SPEC
 
     # DGSM cannot call the one-shot prepare(), because on the autodiff path

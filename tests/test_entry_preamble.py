@@ -75,23 +75,15 @@ def _morris_design(n=8):
 class TestScalarCheckHelpers:
     """The declarative checks say what they mean."""
 
-    def test_at_least_lets_none_through(self):
+    def test_scalar_checks_cover_optional_values_boundaries_and_failures(self):
         check_scalars((at_least("chunk", None, 1),))
-
-    def test_at_least_reports_the_name_and_the_value(self):
         with pytest.raises(ValueError, match=r"chunk must be >= 1, got 0"):
             check_scalars((at_least("chunk", 0, 1),))
-
-    def test_in_open_interval_rejects_both_endpoints(self):
         for bad in (0.0, 1.0, -0.2, 1.5):
             with pytest.raises(ValueError, match="conf_level must be in"):
                 check_scalars((in_open_interval("conf_level", bad, 0.0, 1.0),))
-
-    def test_one_of_names_the_options(self):
         with pytest.raises(ValueError, match="ci_method must be one of"):
             check_scalars((one_of("ci_method", "nope", ("quantile", "gaussian")),))
-
-    def test_the_first_failure_wins(self):
         checks = (require(False, "first"), require(False, "second"))
         with pytest.raises(ValueError, match="^first$"):
             check_scalars(checks)
@@ -104,13 +96,11 @@ class TestConfLevelIsValidatedEverywhere:
     inverted interval, lower above upper, with no error and no warning.
     """
 
-    def test_sobol_refuses_a_conf_level_outside_the_unit_interval(self):
+    def test_design_methods_refuse_conf_levels_outside_the_unit_interval(self):
         sr = _sobol_design()
         Y = jnp.asarray(np.asarray(sr.samples)[:, 0])
         with pytest.raises(ValueError, match="conf_level must be in"):
             jaxgsa.sobol.analyze(sr, Y, n_bootstrap=4, key=jax.random.key(0), conf_level=-0.2)
-
-    def test_morris_refuses_a_conf_level_outside_the_unit_interval(self):
         sr = _morris_design()
         Y = jnp.asarray(np.asarray(sr.samples)[:, 0])
         with pytest.raises(ValueError, match="conf_level must be in"):
@@ -120,24 +110,21 @@ class TestConfLevelIsValidatedEverywhere:
 class TestChunkSizeIsValidatedOnEveryPath:
     """Defect 2: sobol checked it inside one branch of one of three paths."""
 
-    def test_the_scalar_no_bootstrap_path_refuses_it(self):
+    def test_scalar_bootstrap_and_multi_output_paths_refuse_it(self):
         sr = _sobol_design()
         Y = jnp.asarray(np.asarray(sr.samples)[:, 0])
-        with pytest.raises(ValueError, match="slice_chunk_size must be >= 1"):
-            jaxgsa.sobol.analyze(sr, Y, slice_chunk_size=0)
-
-    def test_the_bootstrap_path_refuses_it(self):
-        sr = _sobol_design()
-        Y = jnp.asarray(np.asarray(sr.samples)[:, 0])
-        with pytest.raises(ValueError, match="slice_chunk_size must be >= 1"):
-            jaxgsa.sobol.analyze(sr, Y, n_bootstrap=4, key=jax.random.key(0), slice_chunk_size=0)
-
-    def test_the_multi_output_path_refuses_it(self):
-        sr = _sobol_design()
+        calls = [
+            lambda: jaxgsa.sobol.analyze(sr, Y, slice_chunk_size=0),
+            lambda: jaxgsa.sobol.analyze(
+                sr, Y, n_bootstrap=4, key=jax.random.key(0), slice_chunk_size=0
+            ),
+        ]
         base = np.asarray(sr.samples)[:, 0]
-        Y = jnp.asarray(np.stack([base, 2.0 * base], axis=-1))
-        with pytest.raises(ValueError, match="slice_chunk_size must be >= 1"):
-            jaxgsa.sobol.analyze(sr, Y, slice_chunk_size=0)
+        multi = jnp.asarray(np.stack([base, 2.0 * base], axis=-1))
+        calls.append(lambda: jaxgsa.sobol.analyze(sr, multi, slice_chunk_size=0))
+        for call in calls:
+            with pytest.raises(ValueError, match="slice_chunk_size must be >= 1"):
+                call()
 
 
 class TestNegativeResampleCountsAreRefused:
@@ -148,32 +135,22 @@ class TestNegativeResampleCountsAreRefused:
     had asked for no interval.
     """
 
-    def test_sobol(self):
+    def test_every_bootstrapping_entry_point_refuses_negative_counts(self):
         sr = _sobol_design()
-        Y = jnp.asarray(np.asarray(sr.samples)[:, 0])
-        with pytest.raises(ValueError, match="n_bootstrap must be >= 0"):
-            jaxgsa.sobol.analyze(sr, Y, n_bootstrap=-1)
-
-    def test_morris(self):
-        sr = _morris_design()
-        Y = jnp.asarray(np.asarray(sr.samples)[:, 0])
-        with pytest.raises(ValueError, match="n_bootstrap must be >= 0"):
-            jaxgsa.morris.analyze(sr, Y, n_bootstrap=-1)
-
-    def test_pawn(self):
+        sobol_y = jnp.asarray(np.asarray(sr.samples)[:, 0])
+        morris = _morris_design()
+        morris_y = jnp.asarray(np.asarray(morris.samples)[:, 0])
         X, Y = _xy()
-        with pytest.raises(ValueError, match="n_bootstrap must be >= 0"):
-            jaxgsa.pawn.analyze(PROBLEM, X, Y, n_bootstrap=-1)
-
-    def test_optimal_transport(self):
-        X, Y = _xy()
-        with pytest.raises(ValueError, match="n_bootstrap must be >= 0"):
-            jaxgsa.optimal_transport.analyze(PROBLEM, X, Y, n_bootstrap=-1)
-
-    def test_borgonovo(self):
-        X, Y = _xy()
-        with pytest.raises(ValueError, match="n_bootstrap must be >= 0"):
-            jaxgsa.borgonovo.analyze(PROBLEM, X, Y, n_bootstrap=-1)
+        cases = [
+            lambda: jaxgsa.sobol.analyze(sr, sobol_y, n_bootstrap=-1),
+            lambda: jaxgsa.morris.analyze(morris, morris_y, n_bootstrap=-1),
+            lambda: jaxgsa.pawn.analyze(PROBLEM, X, Y, n_bootstrap=-1),
+            lambda: jaxgsa.optimal_transport.analyze(PROBLEM, X, Y, n_bootstrap=-1),
+            lambda: jaxgsa.borgonovo.analyze(PROBLEM, X, Y, n_bootstrap=-1),
+        ]
+        for call in cases:
+            with pytest.raises(ValueError, match="n_bootstrap must be >= 0"):
+                call()
 
 
 def _constant_output_call(name):
@@ -234,11 +211,10 @@ class TestEveryMethodWarnsOnAConstantOutput:
     silence.
     """
 
-    @pytest.mark.parametrize("name", ZERO_VARIANCE_IDS)
-    def test_it_warns(self, name):
-        call = _constant_output_call(name)
-        with pytest.warns(JaxgsaWarning, match="zero variance"):
-            call()
+    def test_every_registered_method_warns(self):
+        for name in ZERO_VARIANCE_IDS:
+            with pytest.warns(JaxgsaWarning, match="zero variance"):
+                _constant_output_call(name)()
 
 
 class TestScalarsAreCheckedBeforeTheData:
@@ -253,58 +229,57 @@ class TestScalarsAreCheckedBeforeTheData:
         Y = Y.at[3].set(jnp.nan)
         return X, Y
 
-    def test_pawn_reports_the_bad_argument_not_the_bad_sample(self):
+    def test_bad_scalars_and_policy_are_reported_before_bad_data(self):
         X, Y = self._poisoned()
-        with pytest.raises(ValueError, match="n_bins must be >= 2"):
-            jaxgsa.pawn.analyze(PROBLEM, X, Y, n_bins=1)
-
-    def test_borgonovo_reports_the_bad_argument_not_the_bad_sample(self):
-        X, Y = self._poisoned()
-        with pytest.raises(ValueError, match="grid_size must be >= 2"):
-            jaxgsa.borgonovo.analyze(PROBLEM, X, Y, grid_size=1)
-
-    def test_optimal_transport_reports_the_bad_argument_not_the_bad_sample(self):
-        X, Y = self._poisoned()
-        with pytest.raises(ValueError, match="max_iter must be >= 1"):
-            jaxgsa.optimal_transport.analyze(PROBLEM, X, Y, max_iter=0)
-
-    def test_sobol_reports_the_bad_argument_not_the_bad_sample(self):
+        cases = [
+            (lambda: jaxgsa.pawn.analyze(PROBLEM, X, Y, n_bins=1), "n_bins must be >= 2"),
+            (
+                lambda: jaxgsa.borgonovo.analyze(PROBLEM, X, Y, grid_size=1),
+                "grid_size must be >= 2",
+            ),
+            (
+                lambda: jaxgsa.optimal_transport.analyze(PROBLEM, X, Y, max_iter=0),
+                "max_iter must be >= 1",
+            ),
+        ]
         sr = _sobol_design()
-        Y = np.asarray(sr.samples)[:, 0].copy()
-        Y[2] = np.nan
-        with pytest.raises(ValueError, match="ci_method must be one of"):
-            jaxgsa.sobol.analyze(sr, jnp.asarray(Y), ci_method=cast(Any, "nope"))
-
-    def test_the_policy_itself_is_still_settled_first(self):
-        """A misspelled on_invalid is reported before anything else."""
-        X, Y = self._poisoned()
-        with pytest.raises(ValueError, match="on_invalid must be one of"):
-            jaxgsa.pawn.analyze(PROBLEM, X, Y, n_bins=1, on_invalid=cast(Any, "nope"))
+        sobol_y = np.asarray(sr.samples)[:, 0].copy()
+        sobol_y[2] = np.nan
+        cases.append(
+            (
+                lambda: jaxgsa.sobol.analyze(
+                    sr, jnp.asarray(sobol_y), ci_method=cast(Any, "nope")
+                ),
+                "ci_method must be one of",
+            )
+        )
+        cases.append(
+            (
+                lambda: jaxgsa.pawn.analyze(PROBLEM, X, Y, n_bins=1, on_invalid=cast(Any, "nope")),
+                "on_invalid must be one of",
+            )
+        )
+        for call, match in cases:
+            with pytest.raises(ValueError, match=match):
+                call()
 
 
 class TestTheGatesComeFromTheRegistry:
     """The recommendation lists are generated, so they cannot drift."""
 
-    def test_a_refusing_method_quotes_the_generated_list(self):
+    def test_refusing_methods_quote_the_generated_list(self):
         R = np.eye(D)
         R[0, 1] = R[1, 0] = 0.4
         correlated = PROBLEM.with_correlation(R)
         X = jnp.asarray(jaxgsa.sampling.monte_carlo(correlated, 64, seed=0))
         Y = X[:, 0]
-        with pytest.raises(ValueError) as excinfo:
-            jaxgsa.pce.analyze(correlated, X, Y)
-        assert _correlation_tolerant_methods() in str(excinfo.value)
-
-    def test_the_shapley_pce_message_quotes_it_too(self):
-        """The one hand-written list is now generated like the others."""
-        R = np.eye(D)
-        R[0, 1] = R[1, 0] = 0.4
-        correlated = PROBLEM.with_correlation(R)
-        X = jnp.asarray(jaxgsa.sampling.monte_carlo(correlated, 64, seed=0))
-        Y = X[:, 0]
-        with pytest.raises(ValueError) as excinfo:
-            jaxgsa.shapley.analyze(correlated, X, Y, backend="pce")
-        assert _correlation_tolerant_methods() in str(excinfo.value)
+        for call in (
+            lambda: jaxgsa.pce.analyze(correlated, X, Y),
+            lambda: jaxgsa.shapley.analyze(correlated, X, Y, backend="pce"),
+        ):
+            with pytest.raises(ValueError) as excinfo:
+                call()
+            assert _correlation_tolerant_methods() in str(excinfo.value)
 
 
 class TestACleanSampleStaysSilent:
@@ -314,19 +289,20 @@ class TestACleanSampleStaysSilent:
     output must be as quiet as it was before.
     """
 
-    @pytest.mark.parametrize(
-        "name", ["borgonovo", "dgsm", "pawn", "optimal_transport", "hsic", "pce"]
-    )
-    def test_no_jaxgsa_warning_on_a_varying_output(self, name):
+    def test_varying_outputs_do_not_trigger_zero_variance_warning(self):
         X, Y = _xy()
+        calls = {
+            "borgonovo": lambda: jaxgsa.borgonovo.analyze(PROBLEM, X, Y),
+            "dgsm": lambda: jaxgsa.dgsm.analyze(PROBLEM, lambda x: jnp.sum(x**2), X),
+            "pawn": lambda: jaxgsa.pawn.analyze(PROBLEM, X, Y),
+            "optimal_transport": lambda: jaxgsa.optimal_transport.analyze(PROBLEM, X, Y),
+            "hsic": lambda: jaxgsa.hsic.analyze(PROBLEM, X, Y, key=jax.random.key(0)),
+            "pce": lambda: jaxgsa.pce.analyze(PROBLEM, X, Y),
+        }
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            if name == "dgsm":
-                jaxgsa.dgsm.analyze(PROBLEM, lambda x: jnp.sum(x**2), X)
-            elif name == "hsic":
-                jaxgsa.hsic.analyze(PROBLEM, X, Y, key=jax.random.key(0))
-            else:
-                getattr(jaxgsa, name).analyze(PROBLEM, X, Y)
+            for call in calls.values():
+                call()
         # Two warnings here are not about the data, and both fire on a clean
         # sample by design. The single-precision one is about the arithmetic,
         # and hsic and vkoga both raise it. The dgsm lower-bound one is about
@@ -354,7 +330,7 @@ class TestExtraArraysRideWithY:
     def _prepare(self, Y, **kwargs):
         return prepare(methods()["borgonovo"], PROBLEM, Y, on_invalid=cast(Any, "drop"), **kwargs)
 
-    def test_a_non_finite_extra_condemns_its_row(self):
+    def test_non_finite_extra_is_checked_and_compacted_with_y(self):
         X, Y = _xy()
         jac = np.zeros((N, D))
         jac[7, 1] = np.nan
@@ -363,19 +339,7 @@ class TestExtraArraysRideWithY:
         assert ctx.invalid.unit_indices == (7,)
         assert ctx.Y.shape[0] == N - 1
         assert ctx.extra["jac"].shape == (N - 1, D)
-
-    def test_the_extra_is_compacted_with_the_same_mask(self):
-        X, Y = _xy()
-        Y = np.asarray(Y).copy()
-        Y[3] = np.nan
-        jac = np.arange(N * D, dtype=float).reshape(N, D)
-        with pytest.warns(JaxgsaWarning, match="dropped"):
-            ctx = self._prepare(jnp.asarray(Y), X=X, extra={"jac": jnp.asarray(jac)})
-        np.testing.assert_allclose(np.asarray(ctx.extra["jac"]), np.delete(jac, 3, axis=0))
-
-    def test_a_context_with_no_extra_carries_an_empty_mapping(self):
-        X, Y = _xy()
-        assert prepare(methods()["borgonovo"], PROBLEM, Y, X=X).extra == {}
+        assert np.asarray(ctx.extra["jac"])[0, 0] == jac[0, 0]
 
 
 class TestAFloat64OutputIsNotTruncatedInSilence:

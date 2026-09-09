@@ -86,11 +86,15 @@ analyze(
     slice_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
-) -> EFASTResult
+) -> EFASTResult | IrregularResult
 ```
 
 `Y` holds the model output at each row of `sampling_result.samples`, in that
 row order, as `(n_runs,)`, `(n_runs, K)` or `(n_runs, T, K)`.
+
+For output channels with different time grids, pass a ragged list or dict of
+`(times, values)` pairs. eFAST automatically analyzes each channel on its own
+grid. See [Irregular output grids](/examples/irregular-outputs).
 
 ```python
 result = jaxgsa.efast.analyze(samples, ishigami(samples.samples), verbose=False)

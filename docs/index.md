@@ -22,6 +22,8 @@ features:
     details: Four methods create dedicated sample designs. Nine work with ordinary input samples, including simulation runs you already have.
   - title: Analyze every output together
     details: Use scalar, multi-output, or time-series model outputs. The same result contract carries parameter and output labels into xarray.
+  - title: Keep irregular output grids
+    details: Give each output channel its own time coordinates. Compatible channels are bucketed automatically without padding, and the result preserves those coordinates.
   - title: Differentiate the analysis
     details: Eleven methods expose JAX-transformable estimator cores. DGSM separately uses automatic differentiation of the model to construct derivative-based measures.
   - title: Work with dependent inputs

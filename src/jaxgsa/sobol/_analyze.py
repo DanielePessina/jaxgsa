@@ -25,7 +25,7 @@ Array shape conventions used throughout:
 
 import dataclasses
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, cast
 
 import jax
 import jax.numpy as jnp
@@ -43,6 +43,13 @@ from jaxgsa._core.entry import (
     require,
 )
 from jaxgsa._core.invalid import InvalidReport, OnInvalid, _unit_of_row_for_policy
+from jaxgsa._core.irregular import (
+    IrregularResult,
+    IrregularY,
+    _fwd_kwargs,
+    _is_irregular_y,
+    analyze_irregular,
+)
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
     YLayout,
@@ -65,6 +72,20 @@ from jaxgsa.sobol._estimators import (
 )
 from jaxgsa.sobol._result import SobolResult
 from jaxgsa.sobol._sampling import SobolSamples, _saltelli_step
+
+# Keyword-only parameters the irregular engine forwards unchanged to the
+# per-channel recursive analyze() calls. verbose is excluded:
+# the engine owns it.
+_IRREGULAR_KWARGS = (
+    "estimator",
+    "n_bootstrap",
+    "conf_level",
+    "ci_method",
+    "key",
+    "slice_chunk_size",
+    "on_invalid",
+    "keep_replicates",
+)
 
 # ---------------------------------------------------------------------------
 # Cached JIT kernels
@@ -962,7 +983,7 @@ def _analyze_bootstrap(
 
 def analyze(
     sampling_result: SobolSamples,
-    Y: Array,
+    Y: Array | IrregularY,
     *,
     estimator: Estimator = DEFAULT_ESTIMATOR,
     n_bootstrap: int = 0,
@@ -973,7 +994,7 @@ def analyze(
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
     keep_replicates: bool = False,
-) -> SobolResult:
+) -> SobolResult | IrregularResult:
     """Compute Sobol sensitivity indices from model outputs using JAX.
 
     This is the main entry point of the package. Sobol indices apportion the
@@ -1087,7 +1108,6 @@ def analyze(
         verbose: If ``True`` (default), print a short summary to stdout: the
             problem and the data, the wall-clock timing, and the top
             parameters by ``ST``. Pass ``False`` for a silent run.
-
     Returns:
         SobolResult holding:
             S1: first-order indices, shape ``(D,)`` / ``(K, D)`` /
@@ -1114,6 +1134,19 @@ def analyze(
         JaxgsaWarning: If an output slice has zero variance, which makes its
             indices NaN.
     """
+    if _is_irregular_y(Y):
+        return analyze_irregular(
+            analyze,
+            channel_data=sampling_result,
+            problem=sampling_result.problem,
+            Y=Y,
+            n_expected=int(sampling_result.n_runs),
+            design_based=True,
+            verbose=verbose,
+            kwargs=_fwd_kwargs(locals(), _IRREGULAR_KWARGS),
+        )
+    Y = cast(Array, Y)
+
     from jaxgsa.sobol import SPEC
 
     D = sampling_result.n_params

@@ -49,6 +49,7 @@ from __future__ import annotations
 import math
 import warnings
 from functools import lru_cache
+from typing import cast
 
 import jax
 import jax.numpy as jnp
@@ -59,12 +60,24 @@ from jax.typing import DTypeLike
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.entry import at_least, prepare, require
 from jaxgsa._core.invalid import OnInvalid
+from jaxgsa._core.irregular import (
+    IrregularResult,
+    IrregularY,
+    _fwd_kwargs,
+    _is_irregular_y,
+    analyze_irregular,
+)
 from jaxgsa._core.precision import x64_enabled
 from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa._core.validation import _prepare_Y
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.hsic._result import HSICResult
 from jaxgsa.problem import Problem
+
+# Keyword-only parameters the irregular engine forwards unchanged to the
+# per-channel recursive analyze() calls. verbose is excluded:
+# the engine owns it.
+_IRREGULAR_KWARGS = ("n_perms", "key", "bandwidth", "on_invalid")
 
 _MIN_SAMPLES = 4
 
@@ -785,14 +798,14 @@ def indices(
 def analyze(
     problem: Problem,
     X: Array,
-    Y: Array,
+    Y: Array | IrregularY,
     *,
     n_perms: int = 200,
     key: Array | None = None,
     bandwidth: float = 1.0,
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
-) -> HSICResult:
+) -> HSICResult | IrregularResult:
     """Compute HSIC (Hilbert-Schmidt Independence Criterion) sensitivity indices.
 
     HSIC uses kernel embeddings to measure the statistical dependence between
@@ -901,7 +914,6 @@ def analyze(
         verbose: If ``True`` (default), print a short summary to stdout: the
             problem and the data, the wall-clock timing, and the top
             parameters by ``T_HSIC``. Pass ``False`` for a silent run.
-
     Returns:
         An :class:`HSICResult` with ``R2_HSIC``, ``T_HSIC``, ``p_values``, and
         ``hsic_raw``, each shaped ``(D,)``, ``(K, D)``, or ``(T, K, D)``, the
@@ -929,6 +941,19 @@ def analyze(
             four correct digits and the index moves with the order of the
             sample rows.
     """
+    if _is_irregular_y(Y):
+        return analyze_irregular(
+            analyze,
+            channel_data=X,
+            problem=problem,
+            Y=Y,
+            n_expected=int(X.shape[0]),
+            design_based=False,
+            verbose=verbose,
+            kwargs=_fwd_kwargs(locals(), _IRREGULAR_KWARGS),
+        )
+    Y = cast(Array, Y)
+
     from jaxgsa.hsic import SPEC
 
     ctx = prepare(

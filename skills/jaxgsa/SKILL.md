@@ -1,6 +1,6 @@
 ---
 name: jaxgsa
-description: Use when writing, reviewing, or documenting code that uses jaxgsa for global sensitivity analysis in JAX. Covers defining a Problem, drawing a Sobol, Morris, eFAST, or Kucherenko design, drawing plain Monte Carlo samples, and running any of the thirteen analysis methods (sobol, morris, efast, kucherenko, pce, hdmr, shapley, dgsm, hsic, pawn, borgonovo, optimal_transport, vkoga), including correlated and categorical inputs, confidence intervals, batching, and xarray export.
+description: Use when writing, reviewing, or documenting code that uses jaxgsa for global sensitivity analysis in JAX. Covers defining a Problem, drawing a Sobol, Morris, eFAST, or Kucherenko design, drawing plain Monte Carlo samples, and running any of the thirteen analysis methods (sobol, morris, efast, kucherenko, pce, hdmr, shapley, dgsm, hsic, pawn, borgonovo, optimal_transport, vkoga), including correlated and categorical inputs, regular and bucketed irregular outputs, confidence intervals, batching, and xarray export.
 ---
 
 # jaxgsa
@@ -196,6 +196,24 @@ time-varying output must be written `(N, T, 1)`. The index arrays follow:
 `(D,)` for a scalar, `(K, D)` for multi-output, `(T, K, D)` for a time series.
 Check that shape once, on the first run, and a transposed array cannot survive
 to your plots.
+
+For channels with different time grids, use automatic bucketing instead:
+
+```python
+Y = [
+    (times_a, values_a),  # values_a: (N, T_a) or (N,)
+    (times_b, values_b),  # values_b: (N, T_b) or (N,)
+]
+result = jaxgsa.sobol.analyze(samples, Y)
+result.channels["y0"].S1
+result.to_dataset()
+```
+
+Ragged `Y` automatically selects bucketing. It analyzes each channel through
+the regular method kernels without padding or fabricated values. Bucketing is
+available on twelve methods; DGSM needs a fixed-layout Jacobian and rejects the
+ragged form. There is no mask mode: a padded/masked estimator would be a
+separate missing-data contract rather than this per-channel path.
 
 ## Cross-cutting keywords
 

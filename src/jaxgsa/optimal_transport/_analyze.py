@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import functools
 import warnings
-from typing import Literal
+from typing import Literal, cast
 
 import jax
 import jax.numpy as jnp
@@ -71,6 +71,13 @@ from jaxgsa._core.entry import (
     validate_inputs,
 )
 from jaxgsa._core.invalid import OnInvalid
+from jaxgsa._core.irregular import (
+    IrregularResult,
+    IrregularY,
+    _fwd_kwargs,
+    _is_irregular_y,
+    analyze_irregular,
+)
 from jaxgsa._core.partition import (
     PartitionGroup,
     _build_class_indices,
@@ -88,6 +95,26 @@ from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.optimal_transport._result import OTResult
 from jaxgsa.optimal_transport._solver import _sinkhorn_w2
 from jaxgsa.problem import Problem, _categorical_dims
+
+# Keyword-only parameters the irregular engine forwards unchanged to the
+# per-channel recursive analyze() calls. verbose is excluded:
+# the engine owns it.
+_IRREGULAR_KWARGS = (
+    "mode",
+    "n_partitions",
+    "standardize_outputs",
+    "epsilon",
+    "max_iter",
+    "tol",
+    "dummy",
+    "n_bootstrap",
+    "conf_level",
+    "ci_method",
+    "key",
+    "slice_chunk_size",
+    "on_invalid",
+    "keep_replicates",
+)
 
 # Live copies of the per-column conditional-quantile tensor to budget for.
 # The dominant intermediate of the "univariate" mode is that tensor, of size
@@ -812,7 +839,7 @@ def _boot_replicates(vals_all: Array, hat: Array, degen_all: Array) -> Array:
 def analyze(
     problem: Problem,
     X: Array,
-    Y: Array,
+    Y: Array | IrregularY,
     *,
     mode: Literal["univariate", "multivariate", "trajectory"] = "univariate",
     n_partitions: int | None = None,
@@ -829,7 +856,7 @@ def analyze(
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
     keep_replicates: bool = False,
-) -> OTResult:
+) -> OTResult | IrregularResult:
     """Compute optimal-transport sensitivity indices from given data.
 
     The optimal-transport (OT) index measures how much knowing a
@@ -1003,6 +1030,19 @@ def analyze(
             conditional distribution then equals the unconditional one, so
             the corresponding indices are an exact 0 rather than an answer.
     """
+    if _is_irregular_y(Y):
+        return analyze_irregular(
+            analyze,
+            channel_data=X,
+            problem=problem,
+            Y=Y,
+            n_expected=int(X.shape[0]),
+            design_based=False,
+            verbose=verbose,
+            kwargs=_fwd_kwargs(locals(), _IRREGULAR_KWARGS),
+        )
+    Y = cast(Array, Y)
+
     from jaxgsa.optimal_transport import SPEC
 
     # The check runs on the user's own sample, before any partition layout is

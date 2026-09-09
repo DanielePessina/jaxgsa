@@ -125,6 +125,11 @@ The verbose summary reports which one ran, with the numbers behind the choice:
 
 ## Arguments
 
+DGSM does not support ragged output channels. It requires `dfdx` with one fixed
+output layout, so a ragged `Y` raises `NotImplementedError`. Use one
+of the methods listed in the [irregular output grids guide](/examples/irregular-outputs)
+or analyze each channel with its own derivative array.
+
 `dfdx` mirrors `Y`'s layout with one extra trailing `(D,)` axis: `(N, D)` for a
 `(N,)` `Y`, `(N, K, D)` for `(N, K)`, and `(N, T, K, D)` for `(N, T, K)`.
 

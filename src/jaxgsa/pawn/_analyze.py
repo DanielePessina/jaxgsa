@@ -59,7 +59,7 @@ from __future__ import annotations
 
 import warnings
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, cast
 
 import jax
 import jax.numpy as jnp
@@ -79,6 +79,13 @@ from jaxgsa._core.entry import (
     validate_inputs,
 )
 from jaxgsa._core.invalid import OnInvalid
+from jaxgsa._core.irregular import (
+    IrregularResult,
+    IrregularY,
+    _fwd_kwargs,
+    _is_irregular_y,
+    analyze_irregular,
+)
 from jaxgsa._core.partition import _extract_categorical_codes
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.transforms import cdf_to_unit_interval
@@ -86,6 +93,21 @@ from jaxgsa._core.validation import _prepare_Y, _validate_output
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.pawn._result import PAWNResult
 from jaxgsa.problem import Problem, _categorical_dims
+
+# Keyword-only parameters the irregular engine forwards unchanged to the
+# per-channel recursive analyze() calls. verbose is excluded:
+# the engine owns it.
+_IRREGULAR_KWARGS = (
+    "n_bins",
+    "statistic",
+    "n_bootstrap",
+    "conf_level",
+    "ci_method",
+    "key",
+    "slice_chunk_size",
+    "on_invalid",
+    "keep_replicates",
+)
 
 # Fewest samples that still define both an unconditional and a conditional
 # ECDF, so that a KS distance is a distance and not an artefact.
@@ -584,7 +606,7 @@ def indices(
 def analyze(
     problem: Problem,
     X: Array,
-    Y: Array,
+    Y: Array | IrregularY,
     *,
     n_bins: int = 10,
     statistic: Literal["median", "max", "mean"] = "median",
@@ -596,7 +618,7 @@ def analyze(
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
     keep_replicates: bool = False,
-) -> PAWNResult:
+) -> PAWNResult | IrregularResult:
     """Compute PAWN sensitivity indices.
 
     PAWN measures how much fixing a parameter changes the whole output
@@ -704,6 +726,19 @@ def analyze(
             samples): the index then rests on the few bins that survive, and
             the fix is fewer bins or more samples.
     """
+    if _is_irregular_y(Y):
+        return analyze_irregular(
+            analyze,
+            channel_data=X,
+            problem=problem,
+            Y=Y,
+            n_expected=int(X.shape[0]),
+            design_based=False,
+            verbose=verbose,
+            kwargs=_fwd_kwargs(locals(), _IRREGULAR_KWARGS),
+        )
+    Y = cast(Array, Y)
+
     from jaxgsa.pawn import SPEC
 
     # The non-finite check runs before any transform, and before binning above

@@ -56,6 +56,7 @@ export default defineConfig({
             { text: 'Correlated inputs', link: '/examples/correlated-inputs' },
             { text: 'Categorical inputs', link: '/examples/categorical-inputs' },
             { text: 'Multi-output and time series', link: '/examples/multi-output' },
+            { text: 'Irregular output grids', link: '/examples/irregular-outputs' },
             { text: 'xarray output', link: '/examples/xarray' },
           ],
         },

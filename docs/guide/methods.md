@@ -206,6 +206,12 @@ methods offer bootstrap confidence intervals through `n_bootstrap`; eFAST has
 no row-bootstrap interval, while HSIC reports permutation p-values. The
 [API overview](/api/#confidence-intervals) documents the shared result shape.
 
+Most methods also accept irregular output grids: pass each channel as a
+`(times, values)` pair when channels do not share the same time coordinates.
+The analyzer buckets compatible channels without padding and preserves their
+coordinates in the returned result. See [Irregular output grids](/examples/irregular-outputs)
+for the supported-method matrix and limitations.
+
 ## Where to go next
 
 - Read [GSA concepts](/guide/concepts) to understand the reported quantities.

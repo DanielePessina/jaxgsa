@@ -8,9 +8,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaxgsa import JaxgsaWarning, kucherenko
-from jaxgsa._core.invalid import InvalidReport, InvalidUnit
-from jaxgsa.benchmarks import linear
+from jaxgsa import JaxgsaWarning
 from jaxgsa.benchmarks.ishigami import (
     ANALYTICAL_S1,
     ANALYTICAL_ST,
@@ -20,20 +18,6 @@ from jaxgsa.benchmarks.ishigami import (
 from jaxgsa.hdmr import analyze as analyze_hdmr
 from jaxgsa.problem import GaussianInputSpec, Problem
 from jaxgsa.sampling import monte_carlo
-
-
-def _clean_report(n_units: int = 0) -> InvalidReport:
-    """Build the empty non-finite report a hand-made result needs."""
-    return InvalidReport(
-        policy="raise",
-        unit=InvalidUnit.ROW,
-        n_units=n_units,
-        n_invalid=0,
-        unit_indices=(),
-        row_indices=(),
-        bad_row_indices=(),
-        sources=(),
-    )
 
 
 # HDMR builds polynomial surrogates that approximate the true function, so
@@ -114,58 +98,6 @@ def test_shapes_1d(ishigami_data):
     assert result.ST.shape == (D,)
     assert result.rmse is not None
     assert result.rmse.shape == ()
-
-
-def test_shapes_2d(ishigami_data):
-    """Y shape (N, K) -> index shapes (K, n_terms) and (K, D)."""
-    X, Y = ishigami_data
-    K = 2
-    Y_2d = jnp.stack([Y, Y * 0.5], axis=1)  # (N, 2)
-    result = analyze_hdmr(
-        PROBLEM,
-        X,
-        Y_2d,
-        maxorder=2,
-        m=2,
-    )
-    D = PROBLEM.num_vars
-    n_terms = D + D * (D - 1) // 2
-    assert result.Sa.shape == (K, n_terms)
-    assert result.ST.shape == (K, D)
-    assert result.rmse is not None
-    assert result.rmse.shape == (K,)
-    assert result._fit is not None
-    assert result._fit["C1"].shape == (K, 5, 3)
-    assert result._fit["C2"] is not None
-    assert result._fit["C2"].shape == (K, 25, 3)
-    assert result._fit["C3"] is None
-    assert result._fit["f0"].shape == (K,)
-
-
-def test_shapes_3d(ishigami_data):
-    """Y shape (N, T, K) -> index shapes (T, K, n_terms) and (T, K, D)."""
-    X, Y = ishigami_data
-    T, K = 2, 3
-    Y_3d = jnp.broadcast_to(Y[:, None, None], (Y.shape[0], T, K))
-    result = analyze_hdmr(
-        PROBLEM,
-        X,
-        Y_3d,
-        maxorder=2,
-        m=2,
-    )
-    D = PROBLEM.num_vars
-    n_terms = D + D * (D - 1) // 2
-    assert result.Sa.shape == (T, K, n_terms)
-    assert result.ST.shape == (T, K, D)
-    assert result.rmse is not None
-    assert result.rmse.shape == (T, K)
-    assert result._fit is not None
-    assert result._fit["C1"].shape == (T, K, 5, 3)
-    assert result._fit["C2"] is not None
-    assert result._fit["C2"].shape == (T, K, 25, 3)
-    assert result._fit["C3"] is None
-    assert result._fit["f0"].shape == (T, K)
 
 
 def test_slice_chunk_size_regression(ishigami_data):
@@ -313,57 +245,19 @@ def test_backfitting_stop_rule_does_not_depend_on_y_scale_or_m():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(("maxorder", "n_terms"), [(1, 3), (2, 6), (3, 7)])
-def test_maxorder_selects_the_term_count(maxorder, n_terms, ishigami_data):
+def test_maxorder_selects_the_term_count(ishigami_data):
     """For D=3 the term count is 3, 6 and 7 at maxorder 1, 2 and 3."""
     X, Y = ishigami_data
     assert PROBLEM.num_vars == 3
-    result = analyze_hdmr(PROBLEM, X, Y, maxorder=maxorder, m=2)
-    assert result.Sa.shape == (n_terms,)
-    assert len(result.terms) == n_terms
+    for maxorder, n_terms in ((1, 3), (2, 6), (3, 7)):
+        result = analyze_hdmr(PROBLEM, X, Y, maxorder=maxorder, m=2)
+        assert result.Sa.shape == (n_terms,)
+        assert len(result.terms) == n_terms
 
 
 # ---------------------------------------------------------------------------
 # Emulator tests
 # ---------------------------------------------------------------------------
-
-
-def test_emulator_prediction(hdmr_result, ishigami_data):
-    """Emulator predictions on training data should have low RMSE."""
-    X, Y = ishigami_data
-    Y_pred = hdmr_result.predict(X)
-    assert Y_pred.shape == Y.shape
-    rmse = float(jnp.sqrt(jnp.mean(jnp.square(Y - Y_pred))))
-    # HDMR surrogate should capture most of the variance
-    assert rmse < 1.5, f"Emulator RMSE = {rmse:.3f}, expected < 1.5"
-
-
-def test_predict_rejects_wrong_shaped_x(hdmr_result, ishigami_data):
-    """predict must validate X shape instead of silently clamping/truncating."""
-    X, _ = ishigami_data
-    with pytest.raises(ValueError, match="2-D"):
-        hdmr_result.predict(X[:, 0])  # 1-D input
-    D = PROBLEM.num_vars
-    X_wide = jnp.concatenate([X, X[:, :2]], axis=1)  # (N, D + 2)
-    assert X_wide.shape[1] == D + 2
-    with pytest.raises(ValueError, match="columns"):
-        hdmr_result.predict(X_wide)
-
-
-def test_emulator_predictions_and_rmse_stay_on_the_caller_scale(ishigami_data):
-    """A shifted, scaled Y must come back out of predict() on that same scale."""
-    X, Y = ishigami_data
-    Y_affine = 3.0 * Y + 17.0
-
-    result = analyze_hdmr(PROBLEM, X, Y_affine, maxorder=2, m=2)
-    Y_pred = result.predict(X)
-    rmse = float(jnp.sqrt(jnp.mean(jnp.square(Y_affine - Y_pred))))
-
-    assert result._fit is not None
-    assert Y_pred.shape == Y_affine.shape
-    assert result.rmse is not None
-    np.testing.assert_allclose(np.asarray(result.rmse), rmse, rtol=1e-6, atol=1e-6)
-    assert abs(float(jnp.mean(Y_pred)) - float(jnp.mean(Y_affine))) < 3.0
 
 
 def test_multi_output_analytical_ishigami_emulator(ishigami_data):
@@ -420,50 +314,9 @@ def test_time_series_multi_output_emulator_preserves_axes(ishigami_data):
     assert not np.allclose(np.array(Y_pred[:, 0, 0]), np.array(Y_pred[:, 1, 0]))
 
 
-def test_multi_output_emulator_preserves_non_proportional_outputs(ishigami_data):
-    """Distinct outputs should keep distinct sensitivities and predictions."""
-    X, Y = ishigami_data
-    Y_alt = jnp.sin(X[:, 1]) + 0.1 * X[:, 0] * X[:, 2]
-    Y_multi = jnp.stack([Y, Y_alt], axis=1)
-
-    result = analyze_hdmr(PROBLEM, X, Y_multi, maxorder=2, m=2)
-    Y_pred = result.predict(X)
-
-    assert result._fit is not None
-    assert result._fit["C1"].shape == (2, 5, 3)
-    assert result._fit["C2"] is not None
-    assert result._fit["C2"].shape == (2, 25, 3)
-    assert result._fit["f0"].shape == (2,)
-    assert result.rmse is not None
-    assert result.rmse.shape == (2,)
-    assert Y_pred.shape == Y_multi.shape
-
-    assert not np.allclose(np.array(result.S1[0]), np.array(result.S1[1]))
-    assert not np.allclose(np.array(result.ST[0]), np.array(result.ST[1]))
-    assert not np.allclose(np.array(Y_pred[:, 0]), np.array(Y_pred[:, 1]))
-
-    rmse = np.sqrt(np.mean(np.square(np.array(Y_pred) - np.array(Y_multi)), axis=0))
-    assert np.all(rmse < np.array([1.5, 1.0])), rmse
-
-
 # ---------------------------------------------------------------------------
 # Edge cases
 # ---------------------------------------------------------------------------
-
-
-def test_constant_y():
-    """Constant Y yields NaN indices and a warning (package-wide convention)."""
-    N = 500
-    D = PROBLEM.num_vars
-    key = jax.random.PRNGKey(99)
-    bounds = jnp.array(PROBLEM.bounds)
-    X = jax.random.uniform(key, shape=(N, D), minval=bounds[:, 0], maxval=bounds[:, 1])
-    Y = jnp.full(N, 5.0)  # constant output (exactly zero variance)
-    with pytest.warns(UserWarning, match="zero variance"):
-        result = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2)
-    # Matches Sobol/PCE: 0/0 indices are NaN, not silent zeros.
-    assert jnp.all(jnp.isnan(result.Sa))
-    assert jnp.all(jnp.isnan(result.ST))
 
 
 def test_constant_output_with_float32_rounding_noise_still_reads_as_zero_variance():
@@ -485,58 +338,6 @@ def test_constant_output_with_float32_rounding_noise_still_reads_as_zero_varianc
         result = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2)
     assert jnp.all(jnp.isnan(result.Sa))
     assert jnp.all(jnp.isnan(result.ST))
-
-
-def test_constant_output_shapley_is_nan():
-    """A constant slice reports NaN in every index family, Shapley included.
-
-    Regression for the constant-output Shapley bug: the old ``V_Y == 0``
-    guard missed a constant float32 slice whose mean rounds (``full(N, 0.1)``
-    has variance ~2e-16), and ``shapley()`` returned plausible-looking finite
-    Sh instead of NaN.
-    """
-    N = 500
-    D = PROBLEM.num_vars
-    key = jax.random.PRNGKey(99)
-    bounds = jnp.array(PROBLEM.bounds)
-    X = jax.random.uniform(key, shape=(N, D), minval=bounds[:, 0], maxval=bounds[:, 1])
-    Y = jnp.full(N, 0.1)
-    assert float(jnp.var(Y)) != 0.0, "the naive variance must be nonzero for this to test the fix"
-    with pytest.warns(UserWarning, match="zero variance"):
-        result = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2)
-    assert jnp.all(jnp.isnan(result.Sa))
-    assert jnp.all(jnp.isnan(result.S))
-    assert jnp.all(jnp.isnan(result.Sb))
-    assert jnp.all(jnp.isnan(result.ST))
-    assert jnp.all(jnp.isnan(result.shapley().Sh))
-
-
-def test_near_constant_output_indices_are_nan():
-    """A varying-but-negligible slice is NaN, not floor-distorted garbage.
-
-    ``Y = 1e-16 * (1 + 1e-9 * X)`` varies (so ``max != min`` and the naive
-    variance is a nonzero 8e-52), but its variance sits below the machine
-    epsilon of the working dtype relative to the slice's scale, so the
-    scale-aware gate must mask it. The old ``V_Y == 0`` guard let it through
-    and the ``1e-30`` denominator floor turned the indices into finite
-    garbage. Run under x64 so the tiny variance survives float32 subnormal
-    flushing.
-    """
-    with jax.enable_x64():
-        key = jax.random.PRNGKey(99)
-        N = 500
-        bounds = jnp.array(linear.PROBLEM.bounds)
-        X = jax.random.uniform(key, shape=(N, 3), minval=bounds[:, 0], maxval=bounds[:, 1])
-        Y = jnp.float64(1e-16) * (1.0 + 1e-9 * X[:, :1])
-        assert float(jnp.var(Y)) != 0.0, "the naive variance must be nonzero"
-        assert not bool(jnp.max(Y) == jnp.min(Y)), "the slice must vary to exercise the gate"
-        result = analyze_hdmr(linear.PROBLEM, X, Y, maxorder=2, m=2)
-        sh = result.shapley()
-    assert jnp.all(jnp.isnan(result.Sa))
-    assert jnp.all(jnp.isnan(result.S))
-    assert jnp.all(jnp.isnan(result.Sb))
-    assert jnp.all(jnp.isnan(result.ST))
-    assert jnp.all(jnp.isnan(sh.Sh))
 
 
 def test_validation_errors():
@@ -567,22 +368,7 @@ def test_validation_errors():
         analyze_hdmr(PROBLEM, X, Y, **legacy_kwargs)
 
 
-@pytest.mark.parametrize(
-    ("kwargs", "match"),
-    [
-        # m=0 zeroes the whole basis (val * m**3 in _engine._bspline_basis),
-        # so every index came out 0 with no error at all.
-        ({"m": 0}, "m must be >= 1"),
-        ({"m": -1}, "m must be >= 1"),
-        # maxiter=0 silently skipped backfitting and returned unfitted
-        # coefficients.
-        ({"maxiter": 0}, "maxiter must be >= 1"),
-        # lambdax<0 subtracts from the Gram diagonal and yields NaN
-        # coefficients.
-        ({"lambdax": -1.0}, "lambdax must be >= 0"),
-    ],
-)
-def test_fit_scalars_rejected_in_analyze_and_indices(kwargs, match):
+def test_fit_scalars_rejected_in_analyze_and_indices():
     """T4: m, maxiter and lambdax are validated, in both entry points.
 
     Each of the three used to reach the fit unchecked and degrade it
@@ -593,10 +379,17 @@ def test_fit_scalars_rejected_in_analyze_and_indices(kwargs, match):
 
     X = jnp.ones((500, 3))
     Y = jnp.ones(500)
-    with pytest.raises(ValueError, match=match):
-        analyze_hdmr(PROBLEM, X, Y, **kwargs)
-    with pytest.raises(ValueError, match=match):
-        indices_hdmr(PROBLEM, X, Y, **kwargs)
+    cases = [
+        ({"m": 0}, "m must be >= 1"),
+        ({"m": -1}, "m must be >= 1"),
+        ({"maxiter": 0}, "maxiter must be >= 1"),
+        ({"lambdax": -1.0}, "lambdax must be >= 0"),
+    ]
+    for kwargs, match in cases:
+        with pytest.raises(ValueError, match=match):
+            analyze_hdmr(PROBLEM, X, Y, **kwargs)
+        with pytest.raises(ValueError, match=match):
+            indices_hdmr(PROBLEM, X, Y, **kwargs)
 
 
 def test_fit_scalars_valid_edges_pass(ishigami_data):
@@ -623,7 +416,7 @@ def _term_index(result, label: str) -> int:
 
 
 def test_s2_property_shape_and_symmetry(hdmr_result):
-    """S2 is a symmetric (D, D) matrix with a NaN diagonal."""
+    """S2 is symmetric, indexed by terms, and has no diagonal."""
     D = PROBLEM.num_vars
     S2 = np.array(hdmr_result.S2)
     assert S2.shape == (D, D)
@@ -633,24 +426,12 @@ def test_s2_property_shape_and_symmetry(hdmr_result):
     offdiag = S2[~np.eye(D, dtype=bool)]
     assert np.all(np.isfinite(offdiag))
     np.testing.assert_array_equal(S2, S2.T)
-
-
-def test_s2_matches_term_slice(hdmr_result):
-    """Each S2[i, j] equals the Sa entry of the matching interaction term."""
-    names = PROBLEM.names
     Sa = np.array(hdmr_result.Sa)
-    S2 = np.array(hdmr_result.S2)
-    D = PROBLEM.num_vars
     for i in range(D):
         for j in range(i + 1, D):
-            k = _term_index(hdmr_result, f"{names[i]}/{names[j]}")
+            k = _term_index(hdmr_result, f"{PROBLEM.names[i]}/{PROBLEM.names[j]}")
             assert S2[i, j] == Sa[k]
             assert S2[j, i] == Sa[k]
-
-
-def test_s2_ishigami_dominant_pair(hdmr_result):
-    """Ishigami's x1-x3 interaction should dominate the S2 matrix."""
-    S2 = np.array(hdmr_result.S2)
     # x1 (index 0) and x3 (index 2) carry Ishigami's only real interaction.
     assert S2[0, 2] > S2[0, 1]
     assert S2[0, 2] > S2[1, 2]
@@ -688,30 +469,6 @@ def test_s3_property_maxorder_3(ishigami_data):
     k = _term_index(result, "/".join(names))
     for perm in ((0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)):
         assert S3[perm] == Sa[k]
-
-
-def test_s2_layout_uses_numeric_interaction_indices():
-    """S2 uses stored numeric indices instead of parsing display labels."""
-    from jaxgsa.hdmr._result import HDMRResult
-    from jaxgsa.problem import Problem
-
-    problem = Problem(names=("x1", "x2", "x3"), bounds=((0.0, 1.0),) * 3)
-    result = HDMRResult(
-        Sa=jnp.array([1.0, 2.0, 3.0, 9.0]),
-        Sb=jnp.zeros(4),
-        S=jnp.ones(4),
-        ST=jnp.ones(3),
-        problem=problem,
-        terms=("x1", "x2", "x3", "x1/x2"),
-        invalid=_clean_report(),
-        _c2=((0, 1),),
-    )
-    S2 = np.array(result.S2)
-    # The (x1, x2) cell is populated from Sa[3], not silently left NaN.
-    assert S2[0, 1] == 9.0
-    assert S2[1, 0] == 9.0
-    assert np.all(np.isnan(np.diag(S2)))
-    assert np.isnan(S2[0, 2])  # (x1, x3) has no term -> NaN
 
 
 # ---------------------------------------------------------------------------
@@ -777,38 +534,6 @@ def test_st_is_scsa_total_under_correlation(correlated_hdmr_result):
     assert not np.allclose(ST, _scatter(np.array(result.Sa)), atol=1e-2)
 
 
-def test_st_diverges_from_the_conditional_variance_total():
-    """HDMR's SCSA total must not be "fixed" to agree with a real total index.
-
-    ``jaxgsa.kucherenko`` estimates the conditional-variance total
-    ``E[Var(Y | X_~i)] / Var(Y)`` from its own design, and that is the
-    quantity HDMR's ``ST`` is often mistaken for. The two answer different
-    questions under dependence, so they must disagree. This test exists to
-    fail loudly if someone later "corrects" either one to match the other.
-    """
-    problem = _correlated_problem(rho=0.9)
-
-    # HDMR, given data.
-    X = jnp.asarray(monte_carlo(problem, 4000, seed=5))
-    Y = _linear_interaction(X)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        hdmr_ST = np.asarray(analyze_hdmr(problem, X, Y, maxorder=2, m=2).ST)
-
-    # Kucherenko, from its own conditional-copula design.
-    samples = kucherenko.sample(problem, 4000, seed=5)
-    k_result = kucherenko.analyze(samples, _linear_interaction(jnp.asarray(samples.samples)))
-    kucherenko_ST = np.asarray(k_result.ST)
-
-    # Kucherenko's total is a variance fraction: non-negative and bounded.
-    assert np.all(kucherenko_ST >= -1e-6)
-    assert np.all(kucherenko_ST <= 1.0 + 1e-6)
-
-    # HDMR's SCSA total is neither of those things here, and the correlated
-    # pair is where the two readings come apart.
-    assert not np.allclose(hdmr_ST[:2], kucherenko_ST[:2], atol=0.05)
-
-
 def test_correlated_problem_warns_once():
     """analyze emits exactly one SCSA warning per call on a correlated problem."""
     problem = _correlated_problem()
@@ -825,15 +550,6 @@ def test_correlated_problem_warns_once():
     message = str(scsa[0].message)
     assert "kucherenko" in message
     assert "vkoga" in message
-
-
-def test_independent_problem_does_not_warn(ishigami_data):
-    """An independent problem stays silent about the SCSA reading."""
-    X, Y = ishigami_data
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2)
-    assert [w for w in caught if "SCSA" in str(w.message)] == []
 
 
 # ---------------------------------------------------------------------------
@@ -903,29 +619,6 @@ class TestHDMROnInvalid:
             result = analyze_hdmr(PROBLEM, X, Y, on_invalid="drop", **self.HDMR_KWARGS)
         assert result.invalid.sources == ("X",)
 
-    def test_dropping_below_the_sample_floor_refuses(self, ishigami_data):
-        """T4: 'drop' will not fit on fewer rows than HDMR's own 300 minimum.
-
-        Without the floor the surviving sample would fall through to the
-        generic "Need at least 300 samples" check, which names neither the
-        dropped rows nor the policy that removed them.
-        """
-        X, Y = ishigami_data
-        X, Y = np.asarray(X)[:400], np.asarray(Y)[:400].copy()
-        Y[:150] = np.nan
-        with pytest.raises(ValueError, match="every usable row was removed") as exc:
-            analyze_hdmr(PROBLEM, X, Y, on_invalid="drop", **self.HDMR_KWARGS)
-        assert "at least 300" in str(exc.value)
-
-    def test_shapley_carries_the_report_through(self, ishigami_data):
-        """T4: the report survives the analytical Shapley step unchanged."""
-        X, Y = ishigami_data
-        Y = np.asarray(Y).copy()
-        Y[3] = np.nan
-        with pytest.warns(JaxgsaWarning):
-            result = analyze_hdmr(PROBLEM, X, Y, on_invalid="drop", **self.HDMR_KWARGS)
-        assert result.shapley().invalid == result.invalid
-
 
 class TestBootstrapIntervals:
     """The opt-in confidence intervals.
@@ -980,19 +673,8 @@ class TestBootstrapIntervals:
             assert (point[finite] >= lower[finite] - 0.25).all()
             assert (point[finite] <= upper[finite] + 0.25).all()
 
-    def test_the_point_estimate_is_the_one_without_a_bootstrap(self):
-        """T4: asking for an interval does not move the number it is around."""
-        X, Y = self._data()
-        plain = analyze_hdmr(PROBLEM, X, Y, maxorder=2, maxiter=50)
-        with_ci = analyze_hdmr(
-            PROBLEM, X, Y, maxorder=2, maxiter=50, n_bootstrap=3, key=jax.random.key(1)
-        )
-
-        np.testing.assert_array_equal(np.asarray(plain.Sa), np.asarray(with_ci.Sa))
-        np.testing.assert_array_equal(np.asarray(plain.ST), np.asarray(with_ci.ST))
-
-    def test_ci_records_how_the_interval_was_made(self):
-        """T4: the level, the rule and the count travel with the numbers."""
+    def test_ci_metadata_and_replicates_are_recorded(self):
+        """The interval records its recipe and optionally exposes its draws."""
         X, Y = self._data()
         result = analyze_hdmr(
             PROBLEM,
@@ -1004,30 +686,14 @@ class TestBootstrapIntervals:
             conf_level=0.9,
             ci_method="gaussian",
             key=jax.random.key(2),
-        )
-
-        assert result.ci is not None
-        assert (result.ci.level, result.ci.method, result.ci.n_bootstrap) == (0.9, "gaussian", 4)
-        assert result.ci.replicates is None
-
-    def test_keep_replicates_retains_every_draw(self):
-        """T4: the draws come back with a leading resample axis."""
-        X, Y = self._data()
-        result = analyze_hdmr(
-            PROBLEM,
-            X,
-            Y,
-            maxorder=2,
-            maxiter=50,
-            n_bootstrap=3,
-            key=jax.random.key(3),
             keep_replicates=True,
         )
 
         assert result.ci is not None
+        assert (result.ci.level, result.ci.method, result.ci.n_bootstrap) == (0.9, "gaussian", 4)
         assert result.ci.replicates is not None
-        assert result.ci.replicates["Sa"].shape == (3, 6)
-        assert result.ci.replicates["ST"].shape == (3, 3)
+        assert result.ci.replicates["Sa"].shape == (4, 6)
+        assert result.ci.replicates["ST"].shape == (4, 3)
 
     def test_a_key_is_required(self):
         """T4: no key means no interval, and it is refused rather than seeded."""

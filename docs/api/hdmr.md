@@ -16,7 +16,7 @@ jaxgsa.hdmr.analyze(
     on_invalid="raise",
     verbose=True,
     keep_replicates=False,
-) -> HDMRResult
+) -> HDMRResult | IrregularResult
 ```
 
 RS-HDMR fits B-spline component functions to arbitrary `(X, Y)` pairs: one per

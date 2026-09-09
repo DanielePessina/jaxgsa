@@ -12,8 +12,10 @@ jaxgsa tells you which of your model's inputs drive its output. You give it
 input samples and the outputs your model produced for them. It returns
 sensitivity indices that rank the inputs and show their interactions.
 
-Thirteen methods share one interface and one output contract. Eleven of them
-are JIT-compiled and vectorized over the output axes. A model with 50
+Thirteen methods share one interface and one output contract. Regular outputs
+can be scalar, multi-output, or time-series; twelve methods also accept
+bucketed channels with their own irregular time grids. Eleven methods are
+JIT-compiled and vectorized over regular output axes. A model with 50
 timesteps and 6 outputs then costs one compiled pass, not 300 Python loop
 iterations. Those eleven also export a traceable `indices()`, so you can put
 the estimator itself under `jit`, `vmap` and `grad`. The other two,
@@ -234,6 +236,25 @@ would have hidden both facts.
 Watch for zero-variance slices. If your model returns a constant at t = 0, the
 indices there are 0/0 and jaxgsa returns NaN with a `JaxgsaWarning` that names
 the slice.
+
+If output channels do not share a time grid, pass a list or dict of
+`(times, values)` pairs instead. Automatic bucketing analyzes each channel on its own
+grid and preserves those coordinates without padding or fabricated values:
+
+```python
+Y = [
+    (t_concentration, concentration),  # values: (N, T_concentration)
+    (t_diameter, diameter),             # values: (N, T_diameter)
+]
+result = jaxgsa.sobol.analyze(design, Y, verbose=False)
+ds = result.to_dataset()
+```
+
+The ragged form automatically selects bucketing. There is no mask mode because
+padding a common grid would add work without helping the per-channel
+estimators; DGSM requires a fixed Jacobian layout and does not accept the ragged
+form. See the
+[irregular output grids guide](https://danielepessina.github.io/jaxgsa/examples/irregular-outputs).
 
 ## The thirteen methods
 

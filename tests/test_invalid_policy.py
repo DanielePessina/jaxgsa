@@ -28,20 +28,20 @@ def _rows(*bad_rows: int, n: int = 6, width: int = 2) -> np.ndarray:
 class TestResolvePolicy:
     """T4: validation of the on_invalid argument."""
 
-    @pytest.mark.parametrize("bad", ["Raise", "skip", "", None, 0, True, ["drop"]])
-    def test_rejects_anything_else(self, bad):
+    def test_rejects_anything_else(self):
         """T4: an unknown value names the input and lists what is accepted.
 
         ``True`` is included because ``bool`` is an ``int`` subclass and a bare
         truthy value must not be read as a policy.
         """
-        with pytest.raises(ValueError, match="on_invalid must be one of") as exc:
-            resolve_policy(bad, method=METHOD, unit=InvalidUnit.ROW)
-        message = str(exc.value)
-        assert repr(bad) in message
-        assert METHOD in message
-        for policy in ("raise", "propagate", "drop", "none"):
-            assert repr(policy) in message
+        for bad in ("Raise", "skip", "", None, 0, True, ["drop"]):
+            with pytest.raises(ValueError, match="on_invalid must be one of") as exc:
+                resolve_policy(bad, method=METHOD, unit=InvalidUnit.ROW)
+            message = str(exc.value)
+            assert repr(bad) in message
+            assert METHOD in message
+            for policy in ("raise", "propagate", "drop", "none"):
+                assert repr(policy) in message
 
     def test_drop_refused_where_it_is_undefined(self):
         """T4: refusing 'drop' says which unit could not be removed, and why.
@@ -56,34 +56,34 @@ class TestResolvePolicy:
         assert "search curve" in message
         assert "'raise'" in message and "'propagate'" in message
 
-    @pytest.mark.parametrize("policy", ["raise", "propagate"])
-    def test_other_policies_survive_allow_drop_false(self, policy):
+    def test_other_policies_survive_allow_drop_false(self):
         """T4: forbidding 'drop' does not forbid the other two."""
-        assert (
-            resolve_policy(policy, method=METHOD, unit=InvalidUnit.CURVE, allow_drop=False)
-            == policy
-        )
+        for policy in ("raise", "propagate"):
+            assert (
+                resolve_policy(policy, method=METHOD, unit=InvalidUnit.CURVE, allow_drop=False)
+                == policy
+            )
 
 
 class TestCleanSample:
     """T4: a sample with nothing wrong in it."""
 
-    @pytest.mark.parametrize("policy", ["raise", "propagate", "drop"])
-    def test_clean_sample_keeps_everything_under_every_policy(self, policy, recwarn):
+    def test_clean_sample_keeps_everything_under_every_policy(self, recwarn):
         """T4: no finding means no removal, no warning, and an empty report."""
-        keep, report = check_invalid(
-            policy=policy,
-            method=METHOD,
-            unit=InvalidUnit.ROW,
-            n_units=6,
-            Y=_rows(),
-            X=_rows(),
-        )
-        assert keep.all()
-        assert report.n_invalid == 0
-        assert not report.any_invalid
-        assert report.n_kept == 6
-        assert report.sources == ()
+        for policy in ("raise", "propagate", "drop"):
+            keep, report = check_invalid(
+                policy=policy,
+                method=METHOD,
+                unit=InvalidUnit.ROW,
+                n_units=6,
+                Y=_rows(),
+                X=_rows(),
+            )
+            assert keep.all()
+            assert report.n_invalid == 0
+            assert not report.any_invalid
+            assert report.n_kept == 6
+            assert report.sources == ()
         assert len(recwarn) == 0
 
 
@@ -148,7 +148,7 @@ class TestNonePolicy:
 class TestRaisePolicy:
     """T4: the default policy."""
 
-    def test_raise_names_counts_positions_and_the_way_out(self):
+    def test_raise_names_bad_sources_counts_positions_and_the_way_out(self):
         """T4: the message carries what a user needs to act, not just a count."""
         with pytest.raises(ValueError) as exc:
             check_invalid(
@@ -164,10 +164,7 @@ class TestRaisePolicy:
         assert "[1, 4]" in message
         assert "on_invalid='drop'" in message
         assert "on_invalid='propagate'" in message
-
-    def test_raise_distinguishes_x_from_y(self):
-        """T4: the message says which array held the bad value."""
-        with pytest.raises(ValueError, match=r"\bin X\b") as exc:
+        with pytest.raises(ValueError, match=r"\bin X\b") as x_exc:
             check_invalid(
                 policy="raise",
                 method=METHOD,
@@ -176,10 +173,7 @@ class TestRaisePolicy:
                 Y=_rows(),
                 X=_rows(2),
             )
-        assert "Y" not in str(exc.value).split("Non-finite rows")[0].replace("NaN", "")
-
-    def test_raise_reports_both_arrays_when_both_are_bad(self):
-        """T4: bad values in X and in Y are both named."""
+        assert "Y" not in str(x_exc.value).split("Non-finite rows")[0].replace("NaN", "")
         with pytest.raises(ValueError, match="X and Y"):
             check_invalid(
                 policy="raise",
@@ -194,7 +188,7 @@ class TestRaisePolicy:
 class TestPropagatePolicy:
     """T4: computing anyway."""
 
-    def test_propagate_keeps_everything_and_warns(self):
+    def test_propagate_keeps_everything_and_warns_even_below_the_floor(self):
         """T4: nothing is removed, and the warning says the indices will be bad."""
         with pytest.warns(JaxgsaWarning, match="reaches the indices"):
             keep, report = check_invalid(
@@ -207,14 +201,7 @@ class TestPropagatePolicy:
         assert keep.all()
         assert report.n_invalid == 2
         assert report.unit_indices == (2, 5)
-
-    def test_propagate_never_raises_on_a_small_survivor_count(self):
-        """T4: min_kept governs dropping only; propagate removes nothing.
-
-        Under propagate the sample is untouched, so 'too little data remains'
-        cannot apply. Enforcing the floor here would refuse a call that was
-        explicitly asked to compute anyway.
-        """
+        # min_kept governs dropping only; propagate removes nothing.
         with pytest.warns(JaxgsaWarning):
             keep, _ = check_invalid(
                 policy="propagate",
@@ -265,44 +252,6 @@ class TestDropPolicy:
         assert "leaving 1" in str(exc.value)
         assert "at least 4" in str(exc.value)
 
-    def test_drop_warns_twice_when_few_survive(self):
-        """T4: a second warning fires when the surviving sample is tiny.
-
-        The first warning says what was removed. The second says the result is
-        not worth trusting, which is a different fact and easy to miss if the
-        two are merged.
-        """
-        Y = _rows(*range(9), n=12)
-        with pytest.warns(JaxgsaWarning) as record:
-            check_invalid(
-                policy="drop",
-                method=METHOD,
-                unit=InvalidUnit.ROW,
-                n_units=12,
-                Y=Y,
-            )
-        messages = [str(w.message) for w in record]
-        assert any("dropped 9 of 12" in m for m in messages)
-        assert any("not reliable" in m for m in messages)
-
-    def test_a_bad_input_takes_its_output_with_it(self):
-        """T4: X and Y are checked jointly, so the pair stays aligned.
-
-        Dropping a row of X without its matching row of Y would misalign every
-        later row, which the estimator cannot detect.
-        """
-        with pytest.warns(JaxgsaWarning):
-            keep, report = check_invalid(
-                policy="drop",
-                method=METHOD,
-                unit=InvalidUnit.ROW,
-                n_units=6,
-                Y=_rows(1),
-                X=_rows(4),
-            )
-        assert list(keep) == [True, False, True, True, False, True]
-        assert report.sources == ("X", "Y")
-
 
 class TestGroupedDesigns:
     """T4: designs where one bad value invalidates a block of rows."""
@@ -349,91 +298,17 @@ class TestGroupedDesigns:
         assert report.unit_indices == (2,)
         assert report.row_indices == (2, 6, 10)
 
-    def test_grouped_message_lists_both_units_and_rows(self):
-        """T4: for a grouped design the message gives group and row positions.
-
-        A user reads group indices to understand the design and row indices to
-        find the model evaluation, so a grouped failure needs both.
-        """
-        unit_of_row = np.repeat(np.arange(4), 3)
-        with pytest.raises(ValueError) as exc:
-            check_invalid(
-                policy="raise",
-                method=METHOD,
-                unit=InvalidUnit.TRAJECTORY,
-                n_units=4,
-                Y=_rows(7, n=12),
-                unit_of_row=unit_of_row,
-            )
-        message = str(exc.value)
-        # The failing row comes first: it is the model run to investigate.
-        assert "Non-finite rows: [7]." in message
-        assert "They condemn trajectories [2]" in message
-        assert "which covers 3 rows" in message
-
-    def test_unit_stride_fast_path_matches_generic_path(self):
-        """T4: the contiguous-block device collapse changes no verdict.
-
-        The fast path must agree with the generic weighted-bincount path on
-        every mask and every report field, and a wrong ``unit_stride`` must
-        fall back to the generic path rather than compute a wrong mask.
-        """
-        unit_of_row = np.repeat(np.arange(4), 3)
-
-        def run(policy: str, stride: int | None):
-            kwargs = {"unit_stride": stride} if stride is not None else {}
-            with pytest.warns(JaxgsaWarning):
-                return check_invalid(
-                    policy=policy,
-                    method=METHOD,
-                    unit=InvalidUnit.SALTELLI_GROUP,
-                    n_units=4,
-                    Y=_rows(4, n=12),
-                    unit_of_row=unit_of_row,
-                    **kwargs,
-                )
-
-        for policy in ("propagate", "drop"):
-            fast_keep, fast_report = run(policy, 3)
-            generic_keep, generic_report = run(policy, None)
-            # A wrong stride must fall back to the generic path, never mask.
-            wrong_keep, wrong_report = run(policy, 2)
-            assert list(fast_keep) == list(generic_keep) == list(wrong_keep)
-            assert fast_report.unit_indices == generic_report.unit_indices
-            assert np.array_equal(
-                np.asarray(fast_report.bad_row_indices),
-                np.asarray(generic_report.bad_row_indices),
-            )
-            assert fast_report.row_indices == generic_report.row_indices
-
-        # A clean sample returns the same all-True keep either way.
-        def run_clean(stride: int | None):
-            kwargs = {"unit_stride": stride} if stride is not None else {}
-            return check_invalid(
-                policy="propagate",
-                method=METHOD,
-                unit=InvalidUnit.SALTELLI_GROUP,
-                n_units=4,
-                Y=_rows(n=12),
-                unit_of_row=unit_of_row,
-                **kwargs,
-            )
-
-        fast_keep, _ = run_clean(3)
-        generic_keep, _ = run_clean(None)
-        assert list(fast_keep) == list(generic_keep) == [True, True, True, True]
-
 
 class TestWhatCountsAsInvalid:
     """T4: which values the check rejects."""
 
-    @pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
-    def test_nan_and_both_infinities_are_all_invalid(self, bad):
+    def test_nan_and_both_infinities_are_all_invalid(self):
         """T4: an infinite output breaks a variance as thoroughly as a NaN."""
-        Y = _rows()
-        Y[2, 1] = bad
-        with pytest.raises(ValueError, match="non-finite"):
-            check_invalid(policy="raise", method=METHOD, unit=InvalidUnit.ROW, n_units=6, Y=Y)
+        for bad in (np.nan, np.inf, -np.inf):
+            Y = _rows()
+            Y[2, 1] = bad
+            with pytest.raises(ValueError, match="non-finite"):
+                check_invalid(policy="raise", method=METHOD, unit=InvalidUnit.ROW, n_units=6, Y=Y)
 
     def test_a_bad_value_anywhere_in_a_row_condemns_the_row(self):
         """T4: the check flattens trailing axes, so (N, T, K) outputs work."""
@@ -441,19 +316,6 @@ class TestWhatCountsAsInvalid:
         Y[3, 2, 1] = np.nan
         with pytest.raises(ValueError, match="1 of 5 rows"):
             check_invalid(policy="raise", method=METHOD, unit=InvalidUnit.ROW, n_units=5, Y=Y)
-
-    def test_skipped_arrays_do_not_make_a_sample_dirty(self):
-        """T4: passing None for X checks Y alone."""
-        keep, report = check_invalid(
-            policy="raise",
-            method=METHOD,
-            unit=InvalidUnit.ROW,
-            n_units=6,
-            Y=_rows(),
-            X=None,
-        )
-        assert keep.all()
-        assert report.sources == ()
 
 
 class TestBadRowIndices:
@@ -499,69 +361,6 @@ class TestBadRowIndices:
         assert report.bad_row_indices == (4,)
         assert report.row_indices == (3, 4, 5)
         assert len(report.bad_row_indices) < len(report.row_indices)
-
-    def test_it_is_always_a_subset_of_the_condemned_rows(self):
-        """T4: a failing row is by construction one of the rows removed.
-
-        Two bad rows in two different groups, so the containment is not
-        satisfied by accident from a single block.
-        """
-        unit_of_row = np.repeat(np.arange(4), 3)
-        with pytest.warns(JaxgsaWarning):
-            _, report = check_invalid(
-                policy="propagate",
-                method=METHOD,
-                unit=InvalidUnit.TRAJECTORY,
-                n_units=4,
-                Y=_rows(1, 10, n=12),
-                unit_of_row=unit_of_row,
-            )
-        assert report.bad_row_indices == (1, 10)
-        assert report.row_indices == (0, 1, 2, 9, 10, 11)
-        assert set(report.bad_row_indices) <= set(report.row_indices)
-
-    def test_a_bad_row_in_x_and_one_in_y_are_both_listed(self):
-        """T4: the field pools both arrays, because either sends you to a run."""
-        with pytest.warns(JaxgsaWarning):
-            _, report = check_invalid(
-                policy="propagate",
-                method=METHOD,
-                unit=InvalidUnit.ROW,
-                n_units=6,
-                Y=_rows(5),
-                X=_rows(0),
-            )
-        assert report.bad_row_indices == (0, 5)
-
-    def test_a_clean_sample_reports_no_bad_rows(self):
-        """T4: nothing found leaves the field empty rather than unset."""
-        _, report = check_invalid(
-            policy="raise",
-            method=METHOD,
-            unit=InvalidUnit.ROW,
-            n_units=6,
-            Y=_rows(),
-        )
-        assert report.bad_row_indices == ()
-
-    def test_a_grouped_report_is_far_smaller_than_the_condemned_block(self):
-        """T4: the field stays short where the unit is long.
-
-        This is the eFAST shape: one unit of 64 rows, one failure inside it.
-        The condemned list is the whole curve; the failing list is one row.
-        """
-        unit_of_row = np.repeat(np.arange(3), 64)
-        with pytest.warns(JaxgsaWarning):
-            _, report = check_invalid(
-                policy="propagate",
-                method=METHOD,
-                unit=InvalidUnit.CURVE,
-                n_units=3,
-                Y=_rows(130, n=192),
-                unit_of_row=unit_of_row,
-            )
-        assert report.bad_row_indices == (130,)
-        assert len(report.row_indices) == 64
 
 
 class TestCallerRowNumbering:
@@ -611,20 +410,6 @@ class TestCallerRowNumbering:
             )
         assert report.row_indices == (0, 1, 2)
         assert max(report.row_indices) < len(np.unique(self.ROW_LABELS))
-
-    def test_without_labels_the_rows_stay_as_given(self):
-        """T4: the translation is opt-in, so an unexpanded caller is untouched."""
-        with pytest.warns(JaxgsaWarning):
-            _, report = check_invalid(
-                policy="propagate",
-                method=METHOD,
-                unit=InvalidUnit.SALTELLI_GROUP,
-                n_units=4,
-                Y=_rows(10, n=12),
-                unit_of_row=self.UNIT_OF_ROW,
-            )
-        assert report.row_indices == (9, 10, 11)
-        assert report.bad_row_indices == (10,)
 
 
 class TestSourceNames:

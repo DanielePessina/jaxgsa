@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import warnings
 from functools import lru_cache
+from typing import cast
 
 import jax
 import jax.numpy as jnp
@@ -38,10 +39,22 @@ from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.entry import at_least, check_scalars, prepare, require
 from jaxgsa._core.invalid import OnInvalid
+from jaxgsa._core.irregular import (
+    IrregularResult,
+    IrregularY,
+    _fwd_kwargs,
+    _is_irregular_y,
+    analyze_irregular,
+)
 from jaxgsa._core.validation import YLayout, _prepare_Y
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.efast._result import EFASTResult
 from jaxgsa.efast._sampling import EFASTSamples, _frequency_plan
+
+# Keyword-only parameters the irregular engine forwards unchanged to the
+# per-channel recursive analyze() calls. verbose is excluded:
+# the engine owns it.
+_IRREGULAR_KWARGS = ("slice_chunk_size", "on_invalid")
 
 # Live length-N arrays the per-slice kernel holds at once: the padded curve
 # batch, the complex spectrum (two reals per element), its magnitude, and the
@@ -319,12 +332,12 @@ def indices(
 
 def analyze(
     sampling_result: EFASTSamples,
-    Y: Array,
+    Y: Array | IrregularY,
     *,
     slice_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
-) -> EFASTResult:
+) -> EFASTResult | IrregularResult:
     """Compute eFAST first- and total-order sensitivity indices.
 
     eFAST attributes output variance to each parameter from the Fourier
@@ -377,7 +390,6 @@ def analyze(
         verbose: If ``True`` (default), print a short summary to stdout: the
             problem and the data, the wall-clock timing, and the top
             parameters by ``ST``. Pass ``False`` for a silent run.
-
     Returns:
         An ``EFASTResult`` with ``S1`` and ``ST``, shape ``(D,)`` /
         ``(K, D)`` / ``(T, K, D)``, mirroring the layout of ``Y``, plus the
@@ -391,6 +403,19 @@ def analyze(
             if the sample holds a non-finite value under
             ``on_invalid="raise"``.
     """
+    if _is_irregular_y(Y):
+        return analyze_irregular(
+            analyze,
+            channel_data=sampling_result,
+            problem=sampling_result.problem,
+            Y=Y,
+            n_expected=int(sampling_result.n_runs),
+            design_based=True,
+            verbose=verbose,
+            kwargs=_fwd_kwargs(locals(), _IRREGULAR_KWARGS),
+        )
+    Y = cast(Array, Y)
+
     from jaxgsa.efast import SPEC
 
     problem = sampling_result.problem

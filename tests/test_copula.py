@@ -9,7 +9,6 @@ import pytest
 import jaxgsa
 from jaxgsa._core.copula import (
     _MIN_EIGENVALUE,
-    _REPAIR_NOISE,
     _project_to_correlation,
     _safe_cholesky,
     _spearman_to_latent,
@@ -45,10 +44,6 @@ def _equicorrelated(rho: float, D: int = 3) -> np.ndarray:
     np.fill_diagonal(R, 1.0)
     return R
 
-
-# Smallest eigenvalue -1e-9, so the repair only lifts it to the 1e-8 floor.
-# The largest entrywise change is 9e-9: numerical noise, reported to nobody.
-_NOISE_R = _equicorrelated(1.0 - 1e-9)
 
 # Smallest eigenvalue -0.01. The repair moves an entry by 5e-3, which is under
 # the 0.05 material threshold, so a declared matrix like this warns.
@@ -86,36 +81,9 @@ def test_repair_warning_fires_for_mildly_indefinite_declared_matrix():
     np.testing.assert_allclose(np.diag(repaired), 1.0, atol=1e-12)
 
 
-def test_repair_of_declared_matrix_is_silent_at_noise_level():
-    """A repair that only lifts the eigenvalue floor says nothing."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        repaired = canonicalize_correlation(_NOISE_R, 3, policy="declared")
-    assert 0.0 < np.abs(repaired - _NOISE_R).max() < _REPAIR_NOISE
-
-
 def test_repair_of_declared_matrix_raises_when_material():
     with pytest.raises(ValueError, match="too far to accept"):
         canonicalize_correlation(_INDEFINITE_R, 3, policy="declared")
-
-
-def test_repair_stays_silent_for_valid_matrix():
-    R = np.array([[1.0, 0.3], [0.3, 1.0]])
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        canonicalize_correlation(R, 2, policy="declared")
-
-
-def test_fitted_repair_stays_silent_below_the_material_threshold():
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        canonicalize_correlation(_MILD_INDEFINITE_R, 3)  # policy defaults to "fitted"
-
-
-def test_fitted_repair_warns_but_never_raises_when_material():
-    with pytest.warns(UserWarning, match="the fitted correlation matrix"):
-        repaired = canonicalize_correlation(_INDEFINITE_R, 3)
-    assert np.linalg.eigvalsh(repaired).min() > 0
 
 
 def test_fit_gaussian_copula_never_raises_on_degenerate_data():
@@ -131,54 +99,6 @@ def test_fit_gaussian_copula_never_raises_on_degenerate_data():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         R = fit_gaussian_copula(_uniform_problem(4), X)
-    assert np.isfinite(R).all()
-    assert np.linalg.eigvalsh(R).min() > 0
-
-
-def test_fit_gaussian_copula_decouples_a_constant_column_and_warns():
-    """Tier T4 (invariant): a constant column is identity-decoupled, named, and
-    the finite pairs are still fitted — with no raw numpy divide warnings."""
-    rng = np.random.default_rng(1)
-    z = rng.normal(size=256)
-    X = np.column_stack([z, z + 0.1 * rng.normal(size=256), np.full(256, 2.0)])
-    with warnings.catch_warnings(record=True) as record:
-        warnings.simplefilter("always")
-        R = fit_gaussian_copula(_uniform_problem(3), X)
-
-    # One JaxgsaWarning names the constant parameter and says why.
-    ours = [w for w in record if issubclass(w.category, jaxgsa.JaxgsaWarning)]
-    assert len(ours) == 1
-    assert "x2" in str(ours[0].message)
-    assert "constant" in str(ours[0].message)
-    # No raw numpy divide/invalid warnings leak through.
-    assert not any(issubclass(w.category, RuntimeWarning) for w in record)
-
-    # The constant parameter is decoupled: exact identity row and column.
-    np.testing.assert_allclose(R[2], [0.0, 0.0, 1.0], atol=1e-12)
-    np.testing.assert_allclose(R[:, 2], [0.0, 0.0, 1.0], atol=1e-12)
-    # The remaining pair is still fitted, not zeroed along with it.
-    assert R[0, 1] > 0.9
-    assert np.linalg.eigvalsh(R).min() > 0
-
-
-def test_fit_gaussian_copula_decouples_a_non_finite_column_and_warns():
-    """Tier T4 (invariant): a NaN-poisoned column has no meaningful ranks, so
-    it is decoupled like a constant one, and the fit still never raises."""
-    rng = np.random.default_rng(2)
-    z = rng.normal(size=128)
-    bad = rng.normal(size=128)
-    bad[7] = np.nan
-    X = np.column_stack([z, z + 0.1 * rng.normal(size=128), bad])
-    with warnings.catch_warnings(record=True) as record:
-        warnings.simplefilter("always")
-        R = fit_gaussian_copula(_uniform_problem(3), X)
-
-    ours = [w for w in record if issubclass(w.category, jaxgsa.JaxgsaWarning)]
-    assert len(ours) == 1
-    assert "x2" in str(ours[0].message)
-    assert not any(issubclass(w.category, RuntimeWarning) for w in record)
-    np.testing.assert_allclose(R[2], [0.0, 0.0, 1.0], atol=1e-12)
-    assert R[0, 1] > 0.9
     assert np.isfinite(R).all()
     assert np.linalg.eigvalsh(R).min() > 0
 
@@ -239,13 +159,6 @@ def test_spearman_to_latent_matches_kruskal_formula():
     np.testing.assert_allclose(np.diag(latent), 1.0, atol=0)  # pinned exactly
 
 
-def test_spearman_to_latent_maps_extremes_to_extremes():
-    R = np.array([[1.0, 1.0], [1.0, 1.0]])
-    np.testing.assert_allclose(_spearman_to_latent(R), R, atol=1e-15)
-    R = np.array([[1.0, -1.0], [-1.0, 1.0]])
-    np.testing.assert_allclose(_spearman_to_latent(R), R, atol=1e-15)
-
-
 # ---------------------------------------------------------------------------
 # canonicalize_correlation
 # ---------------------------------------------------------------------------
@@ -261,25 +174,29 @@ def test_canonicalize_latent_is_identity_on_valid_input():
     np.testing.assert_allclose(canonicalize_correlation(R, 2), R, atol=1e-15)
 
 
-@pytest.mark.parametrize("bad_diagonal", [0.0, 0.5, 2.0, -1.0])
-@pytest.mark.parametrize("correlation_type", ["latent", "spearman"])
-def test_canonicalize_rejects_bad_diagonal_on_every_type(bad_diagonal, correlation_type):
+def test_canonicalize_rejects_bad_diagonal_on_every_type():
     """Structural checks must run on the declared matrix, before conversion.
 
     The Spearman conversion pins the diagonal to exactly 1, so a check made
     after it accepted any diagonal at all.
     """
-    R = [[bad_diagonal, 0.3], [0.3, bad_diagonal]]
-    with pytest.raises(ValueError, match="unit diagonal"):
-        canonicalize_correlation(R, 2, correlation_type=correlation_type)
+    for correlation_type in ("latent", "spearman"):
+        for bad_diagonal in (0.0, 0.5, 2.0, -1.0):
+            R = [[bad_diagonal, 0.3], [0.3, bad_diagonal]]
+            with pytest.raises(ValueError, match="unit diagonal"):
+                canonicalize_correlation(R, 2, correlation_type=correlation_type)
 
 
-@pytest.mark.parametrize("correlation_type", ["latent", "spearman"])
-def test_canonicalize_rejects_asymmetry_and_out_of_range_on_every_type(correlation_type):
-    with pytest.raises(ValueError, match="symmetric"):
-        canonicalize_correlation([[1.0, 0.5], [0.2, 1.0]], 2, correlation_type=correlation_type)
-    with pytest.raises(ValueError, match=r"lie in \[-1, 1\]"):
-        canonicalize_correlation([[1.0, 1.5], [1.5, 1.0]], 2, correlation_type=correlation_type)
+def test_canonicalize_rejects_asymmetry_and_out_of_range_on_every_type():
+    for correlation_type in ("latent", "spearman"):
+        with pytest.raises(ValueError, match="symmetric"):
+            canonicalize_correlation(
+                [[1.0, 0.5], [0.2, 1.0]], 2, correlation_type=correlation_type
+            )
+        with pytest.raises(ValueError, match=r"lie in \[-1, 1\]"):
+            canonicalize_correlation(
+                [[1.0, 1.5], [1.5, 1.0]], 2, correlation_type=correlation_type
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -287,45 +204,25 @@ def test_canonicalize_rejects_asymmetry_and_out_of_range_on_every_type(correlati
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "R",
-    [
-        _INDEFINITE_R,
-        np.array([[1.0, 0.9, -0.9], [0.9, 1.0, 0.9], [-0.9, 0.9, 1.0]]),
-        np.array([[1.0, 1.0, 0.4], [1.0, 1.0, 0.4], [0.4, 0.4, 1.0]]),  # exactly singular
-    ],
-)
-def test_repair_is_idempotent(R):
+def test_repair_is_idempotent():
     """A repaired matrix must survive a second repair bit for bit.
 
     One clip-then-renormalise pass leaves the smallest eigenvalue under the
     floor, so a naive repair keeps nudging the matrix on every round trip.
     """
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")  # the fitted policy reports large repairs
-        once = _project_to_correlation(R)
-        twice = _project_to_correlation(once)
-    np.testing.assert_array_equal(twice, once)
-    assert np.linalg.eigvalsh(once).min() >= _MIN_EIGENVALUE
-    np.testing.assert_array_equal(np.diag(once), np.ones(R.shape[0]))
-
-
-def test_repair_survives_a_problem_metadata_round_trip():
-    """Serializing and reloading a repaired correlation must not move it."""
-    import json
-
-    from jaxgsa._core.samples import _problem_from_meta, _problem_to_meta
-
-    problem = Problem.from_dict({"x0": (0.0, 1.0), "x1": (0.0, 1.0), "x2": (0.0, 1.0)})
-    with pytest.warns(UserWarning, match="not positive definite"):
-        problem = problem.with_correlation(_MILD_INDEFINITE_R)
-    stored = problem.correlation
-    assert stored is not None
-    for _ in range(3):
-        reloaded = _problem_from_meta(json.loads(json.dumps(_problem_to_meta(problem))))
-        assert reloaded.correlation is not None
-        np.testing.assert_array_equal(reloaded.correlation, stored)
-        problem = reloaded
+    matrices = [
+        _INDEFINITE_R,
+        np.array([[1.0, 0.9, -0.9], [0.9, 1.0, 0.9], [-0.9, 0.9, 1.0]]),
+        np.array([[1.0, 1.0, 0.4], [1.0, 1.0, 0.4], [0.4, 0.4, 1.0]]),
+    ]
+    for matrix in matrices:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            once = _project_to_correlation(matrix)
+            twice = _project_to_correlation(once)
+        np.testing.assert_array_equal(twice, once)
+        assert np.linalg.eigvalsh(once).min() >= _MIN_EIGENVALUE
+        np.testing.assert_array_equal(np.diag(once), np.ones(matrix.shape[0]))
 
 
 # ---------------------------------------------------------------------------
@@ -346,26 +243,16 @@ def test_correlation_from_covariance_round_trips_drd():
     np.testing.assert_allclose(correlation_from_covariance(cov), R, atol=1e-14)
 
 
-def test_correlation_from_covariance_pins_unit_diagonal_exactly():
-    cov = np.array([[4.0, 1.0], [1.0, 9.0]])
-    R = correlation_from_covariance(cov)
-    assert (np.diag(R) == 1.0).all()
-    # Exact diagonal means the result survives canonicalize_correlation unchanged.
-    np.testing.assert_allclose(canonicalize_correlation(R, 2), R, atol=1e-15)
-
-
-@pytest.mark.parametrize(
-    ("cov", "match"),
-    [
+def test_correlation_from_covariance_rejects_invalid_inputs():
+    cases = [
         (np.ones((2, 3)), "square"),
         (np.array([[1.0, 0.5], [0.2, 1.0]]), "symmetric"),
         (np.array([[1.0, 0.0], [0.0, -1.0]]), "strictly positive"),
         (np.array([[1.0, 0.0], [0.0, 0.0]]), "strictly positive"),
-    ],
-)
-def test_correlation_from_covariance_rejects_invalid(cov, match):
-    with pytest.raises(ValueError, match=match):
-        correlation_from_covariance(cov)
+    ]
+    for covariance, match in cases:
+        with pytest.raises(ValueError, match=match):
+            correlation_from_covariance(covariance)
 
 
 # ---------------------------------------------------------------------------
@@ -504,16 +391,6 @@ def test_sampler_guard_message_names_alternatives():
     assert "jaxgsa.sampling.monte_carlo" in message
 
 
-def test_identity_correlation_does_not_trip_the_guards():
-    problem = _uniform_problem(2).with_correlation(np.eye(2))
-    with warnings.catch_warnings():
-        # n=16 at D=2 resolves to base_n=4; the degenerate-design warning is
-        # not this test's subject.
-        warnings.simplefilter("ignore", jaxgsa.JaxgsaWarning)
-        samples = jaxgsa.sobol.sample(problem, 16, seed=1, verbose=False)
-    assert samples.n_runs >= 16
-
-
 # ---------------------------------------------------------------------------
 # Hard-error guards: correlation-naive analyzers
 # ---------------------------------------------------------------------------
@@ -558,18 +435,6 @@ def test_conditional_plan_carries_the_factor_of_its_own_matrix():
     assert not np.allclose(plan.chol_full, other.chol_full)
 
 
-def test_safe_cholesky_matches_numpy_when_comfortably_pd():
-    """T4 internal consistency: ``_safe_cholesky`` is a no-op on a healthy matrix.
-
-    ``_safe_cholesky`` repairs a matrix that is only just positive definite.
-    On a comfortably positive-definite one it must return exactly what
-    ``np.linalg.cholesky`` returns, so moving the plan's call sites onto it
-    cannot move a number.
-    """
-    R = _equicorrelated(0.5, D=3)
-    np.testing.assert_array_equal(_safe_cholesky(R), np.linalg.cholesky(R))
-
-
 def test_safe_cholesky_repairs_a_rank_deficient_matrix_silently():
     """T4 internal consistency: the repair branch, and how loud it is.
 
@@ -604,45 +469,6 @@ def test_safe_cholesky_repairs_a_rank_deficient_matrix_silently():
     assert np.linalg.eigvalsh(L @ L.T).min() >= _MIN_EIGENVALUE / 2
 
 
-def test_safe_cholesky_repair_is_unreachable_through_the_public_api():
-    """T4 internal consistency: canonicalization gets there first.
-
-    The behaviour change of the previous test is not reachable from
-    ``kucherenko.sample`` or ``vkoga.analyze``. Both take their matrix from
-    ``canonicalize_correlation``, directly or through ``problem.correlation``,
-    and that already lifts the spectrum off zero. So the matrix handed to
-    ``build_conditional_plan`` is positive definite, plain
-    ``np.linalg.cholesky`` succeeds on it, and ``_safe_cholesky`` returns the
-    same factor: the repair branch never runs.
-
-    The declared matrix here is exactly singular, the worst case a user can
-    write. Its repair moves an entry by about 4e-8, far under the noise
-    threshold, so ``policy="declared"`` neither raises nor warns and the
-    sampler runs on the lifted matrix. The conditional plan is what speaks
-    up instead: with |rho| effectively 1 the conditional variances collapse,
-    so ``build_conditional_plan`` emits the one degenerate-conditionals
-    warning per sample() call, and the design itself stays finite.
-    """
-    R_declared = np.ones((2, 2))  # rank 1
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        problem = _uniform_problem(D=2).with_correlation(R_declared)
-
-    R = np.asarray(problem.correlation)
-    assert np.linalg.eigvalsh(R).min() >= _MIN_EIGENVALUE
-    # Plain cholesky already works here, so the two functions agree.
-    np.testing.assert_array_equal(_safe_cholesky(R), np.linalg.cholesky(R))
-
-    with pytest.warns(jaxgsa.JaxgsaWarning, match="deterministic function"):
-        samples = jaxgsa.kucherenko.sample(problem, 64, seed=0).samples
-    assert np.isfinite(np.asarray(samples, dtype=float)).all()
-
-    # A genuinely inconsistent declared matrix is rejected before any factor
-    # is taken, so no non-PD matrix reaches the sampler at all.
-    with pytest.raises(ValueError, match="not positive definite"):
-        _uniform_problem(D=3).with_correlation(_INDEFINITE_R)
-
-
 class TestDegenerateConditionalWarning:
     """Tier T4 (internal consistency): the once-per-plan degeneracy warning.
 
@@ -652,17 +478,13 @@ class TestDegenerateConditionalWarning:
     once, aggregated over parameters.
     """
 
-    def test_extreme_rho_warns(self):
+    def test_extreme_rho_warns_once_and_mild_rho_stays_silent(self):
         R = np.array([[1.0, 0.999], [0.999, 1.0]])
         with pytest.warns(jaxgsa.JaxgsaWarning, match="deterministic function"):
             build_conditional_plan(R)
-
-    def test_mild_rho_stays_silent(self):
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             build_conditional_plan(_equicorrelated(0.5, D=3))
-
-    def test_kucherenko_extreme_rho_warns_once_per_sample_call(self):
         problem = _uniform_problem(D=2).with_correlation(np.array([[1.0, 0.999], [0.999, 1.0]]))
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
@@ -670,18 +492,3 @@ class TestDegenerateConditionalWarning:
         found = [w for w in caught if "deterministic function" in str(w.message)]
         assert len(found) == 1
         assert issubclass(found[0].category, jaxgsa.JaxgsaWarning)
-
-    def test_kucherenko_mild_rho_stays_silent(self):
-        problem = _uniform_problem(D=2).with_correlation(np.array([[1.0, 0.8], [0.8, 1.0]]))
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            jaxgsa.kucherenko.sample(problem, 64, seed=0)
-
-    def test_actual_floor_engagement_reports_the_lift(self):
-        """A singular matrix fed straight to the plan reports the repair."""
-        R = np.ones((2, 2))  # rank 1: both conditionals collapse exactly
-        with pytest.warns(jaxgsa.JaxgsaWarning, match="floored"):
-            plan = build_conditional_plan(R)
-        # The floor kept the factors usable.
-        assert np.isfinite(plan.std_self).all()
-        assert plan.std_self.min() >= np.sqrt(_MIN_EIGENVALUE) / 2

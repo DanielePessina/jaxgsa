@@ -16,7 +16,7 @@ Array shape conventions used throughout:
 
 import warnings
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, cast
 
 import jax
 import jax.numpy as jnp
@@ -28,6 +28,13 @@ from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare
 from jaxgsa._core.invalid import OnInvalid, _unit_of_row_for_policy
+from jaxgsa._core.irregular import (
+    IrregularResult,
+    IrregularY,
+    _fwd_kwargs,
+    _is_irregular_y,
+    analyze_irregular,
+)
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
     YLayout,
@@ -38,6 +45,20 @@ from jaxgsa._core.validation import (
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.morris._result import MorrisResult
 from jaxgsa.morris._sampling import MorrisSamples
+
+# Keyword-only parameters the irregular engine forwards unchanged to the
+# per-channel recursive analyze() calls. verbose is excluded:
+# the engine owns it.
+_IRREGULAR_KWARGS = (
+    "standardize_outputs",
+    "n_bootstrap",
+    "conf_level",
+    "ci_method",
+    "key",
+    "resample_chunk_size",
+    "on_invalid",
+    "keep_replicates",
+)
 
 # Fewest trajectories that still give statistically meaningful screening
 # measures. The analysis reports this floor only when the design lost blocks
@@ -310,7 +331,7 @@ def _reindex_after_drop(
 
 def analyze(
     sampling_result: MorrisSamples,
-    Y: Array,
+    Y: Array | IrregularY,
     *,
     standardize_outputs: bool = False,
     n_bootstrap: int = 0,
@@ -321,7 +342,7 @@ def analyze(
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
     keep_replicates: bool = False,
-) -> MorrisResult:
+) -> MorrisResult | IrregularResult:
     """Compute Morris elementary-effects screening measures using JAX.
 
     Pass the model outputs ``Y`` evaluated at the unique rows that
@@ -424,6 +445,19 @@ def analyze(
             for is deliberate, so it gives no warning.
         JaxgsaWarning: If an output slice has zero variance.
     """
+    if _is_irregular_y(Y):
+        return analyze_irregular(
+            analyze,
+            channel_data=sampling_result,
+            problem=sampling_result.problem,
+            Y=Y,
+            n_expected=int(sampling_result.n_runs),
+            design_based=True,
+            verbose=verbose,
+            kwargs=_fwd_kwargs(locals(), _IRREGULAR_KWARGS),
+        )
+    Y = cast(Array, Y)
+
     from jaxgsa.morris import SPEC
 
     # A trajectory is an indivisible sampling unit: it occupies a contiguous

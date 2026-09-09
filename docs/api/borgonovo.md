@@ -17,7 +17,7 @@ jaxgsa.borgonovo.analyze(
     on_invalid="raise",
     verbose=True,
     keep_replicates=False,
-) -> DeltaResult
+) -> DeltaResult | IrregularResult
 ```
 
 The delta index is moment-independent. It measures how much fixing an input

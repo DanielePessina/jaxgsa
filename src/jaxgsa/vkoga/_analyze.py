@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable, Sequence
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import jax
 import jax.numpy as jnp
@@ -44,6 +44,13 @@ from jaxgsa._core.copula import (
 )
 from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare, require
 from jaxgsa._core.invalid import OnInvalid
+from jaxgsa._core.irregular import (
+    IrregularResult,
+    IrregularY,
+    _fwd_kwargs,
+    _is_irregular_y,
+    analyze_irregular,
+)
 from jaxgsa._core.precision import x64_enabled
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.sampling import _next_power_of_2
@@ -54,6 +61,27 @@ from jaxgsa.problem import Problem
 from jaxgsa.vkoga._engine import _cross_validate, _fit_vkoga, _predict_vkoga
 from jaxgsa.vkoga._indices import estimate_correlated_indices
 from jaxgsa.vkoga._result import VKOGAResult
+
+# Keyword-only parameters the irregular engine forwards unchanged to the
+# per-channel recursive analyze() calls. verbose is excluded:
+# the engine owns it.
+_IRREGULAR_KWARGS = (
+    "correlation",
+    "gamma",
+    "ridge",
+    "max_centers",
+    "n_folds",
+    "n_outer",
+    "n_inner",
+    "n_variance",
+    "n_bootstrap",
+    "conf_level",
+    "ci_method",
+    "key",
+    "batch_size",
+    "on_invalid",
+    "keep_replicates",
+)
 
 # Memo of the compiled surrogate predictor, keyed on the fitted state and
 # output mean it freezes as closure constants (see
@@ -107,7 +135,7 @@ _INTERVAL_FIELDS = ("S_TC", "S_TU", "S_U", "S_C", "S_IU")
 def analyze(
     problem: Problem,
     X: Array,
-    Y: Array,
+    Y: Array | IrregularY,
     *,
     correlation: Array | np.ndarray | None = None,
     gamma: float | None = None,
@@ -125,7 +153,7 @@ def analyze(
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
     keep_replicates: bool = False,
-) -> VKOGAResult:
+) -> VKOGAResult | IrregularResult:
     """Correlated variance-based sensitivity indices via a VKOGA surrogate.
 
     Fits a Vectorial Kernel Orthogonal Greedy Algorithm surrogate to given
@@ -232,7 +260,6 @@ def analyze(
         verbose: If ``True`` (default), print a short summary to stdout: the
             problem and the data, the wall-clock timing, and the top
             parameters by ``S_TC``. Pass ``False`` for a silent run.
-
     Returns:
         A :class:`VKOGAResult` with ``S_TC``, ``S_TU``, ``S_U``, ``S_C``, and
         ``S_IU`` shaped ``(D,)``, ``(K, D)``, or ``(T, K, D)`` to mirror ``Y``.
@@ -263,6 +290,19 @@ def analyze(
             draws; train on an independent design and declare the dependence
             in ``problem.correlation`` instead.
     """
+    if _is_irregular_y(Y):
+        return analyze_irregular(
+            analyze,
+            channel_data=X,
+            problem=problem,
+            Y=Y,
+            n_expected=int(X.shape[0]),
+            design_based=False,
+            verbose=verbose,
+            kwargs=_fwd_kwargs(locals(), _IRREGULAR_KWARGS),
+        )
+    Y = cast(Array, Y)
+
     from jaxgsa.vkoga import SPEC
 
     D = problem.num_vars

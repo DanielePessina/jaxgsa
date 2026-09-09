@@ -763,6 +763,28 @@ class Problem:
             ),
         )
 
+    def with_output_names(self, output_names: tuple[str, ...] | None) -> "Problem":
+        """Return a copy of this problem with the given output labels.
+
+        ``Problem`` is frozen, so changing the output labels goes through
+        this copy constructor. The irregular-output path uses it to analyze
+        one output channel at a time under a single-name label.
+
+        Args:
+            output_names: New labels for the model's outputs, or ``None`` to
+                drop previously declared labels.
+
+        Returns:
+            A new ``Problem`` with the same marginals, names, and
+            correlation, and the given output labels.
+        """
+        return Problem._from_normalized_inputs(
+            names=self.names,
+            input_specs=self._input_specs,
+            output_names=None if output_names is None else tuple(output_names),
+            correlation=self._correlation,
+        )
+
     @classmethod
     def _from_normalized_inputs(
         cls,
