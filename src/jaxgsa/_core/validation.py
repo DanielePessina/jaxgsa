@@ -691,8 +691,13 @@ def _standardize_outputs(Y: Array) -> tuple[Array, Array, Array, Array]:
     # does, so a comparison against SALib is exact rather than equivalent.
     y_mean = jnp.mean(Y, axis=0)
     y_std = jnp.std(Y, axis=0)
-    # Replace zero std with 1.0 so division doesn't produce NaN; the
-    # corresponding zero-variance output slices remain all-zero after scaling.
-    safe_scale = jnp.where(y_std == 0, jnp.ones_like(y_std), y_std)
+    # ``jnp.std`` can leave a tiny positive residue for an exactly constant
+    # float64 slice (the mean reduction is not necessarily bit-identical to
+    # each input element). Detect exact constancy on device, without the host
+    # warning scan, so a constant output still reaches the estimators as a
+    # zero-variance slice and their NaN contract remains intact under x64.
+    flat = Y.reshape(Y.shape[0], -1)
+    constant = _is_constant_slice(flat).reshape(Y.shape[1:])
+    safe_scale = jnp.where(constant | (y_std == 0), jnp.ones_like(y_std), y_std)
     Y_norm = (Y - y_mean) / safe_scale
     return Y_norm, y_mean, y_std, safe_scale
