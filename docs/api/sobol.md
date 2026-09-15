@@ -141,7 +141,7 @@ holds `S1 <= ST` on every sample. Every estimator is plain arithmetic on the
 output vectors, so the choice costs `indices` none of its `jit`, `vmap` or
 `jacrev` support.
 
-See [Methods](/guide/methods#choosing-a-different-estimator) for the measured
+See [Choosing an estimator](#choosing-an-estimator) for the measured
 errors behind the default, and for what a negative index estimate means.
 
 ## slice_chunk_size

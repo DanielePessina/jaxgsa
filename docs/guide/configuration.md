@@ -213,23 +213,6 @@ code that divides an array size by it would quietly compute the wrong block
 size and never raise. Pass `unit=` and you get a `float`, because the budget
 need not be a whole number of them.
 
-::: warning Before jaxgsa 0.9.0 this function took bytes
-An old `set_memory_budget(536870912)` would now mean 512 TB. A unit-less call
-of 1 048 576 or more is therefore rejected:
-
-```
-ValueError: set_memory_budget now reads its value in megabytes by default, and
-536870912 is too large to be a plausible MB figure. It looks like a byte count
-written for the old bytes-only signature. Say which you mean:
-set_memory_budget(536870912, unit='b') for the old meaning, or
-set_memory_budget(512) for the same budget in MB.
-```
-
-The threshold is 1 TiB read as MB, more transient memory than any machine gives
-one process, so a genuinely large figure such as `set_memory_budget(64000)`
-(62.5 GiB) still goes through. An explicit `unit=` skips the check.
-:::
-
 A new budget applies only to calls made after it. An analysis already running
 keeps the budget it started with.
 

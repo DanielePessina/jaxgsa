@@ -313,7 +313,7 @@ uv run --extra dev benchmark_salib.py
 
 - [Getting started](https://danielepessina.github.io/jaxgsa/guide/getting-started)
 - [Methods guide](https://danielepessina.github.io/jaxgsa/guide/methods), including the capability table
-- [Scale and limits](https://danielepessina.github.io/jaxgsa/guide/scale), including high-dimensional planning guidance
+- [Scaling to large problems](https://danielepessina.github.io/jaxgsa/guide/scale), including high-dimensional planning guidance
 - [Configuration](https://danielepessina.github.io/jaxgsa/guide/configuration), including 64-bit floats and the persistent compilation cache
 - [API reference](https://danielepessina.github.io/jaxgsa/api/)
 - [Examples](https://danielepessina.github.io/jaxgsa/examples/basic), one page per method

@@ -125,7 +125,7 @@ anywhere the print is noise.
 Every `analyze()` function takes `on_invalid`, which says what to do when the
 model output holds `NaN` or `Inf`. It accepts `"raise"` (the default),
 `"propagate"` and `"drop"`. See
-[Failed model runs](/guide/methods#failed-model-runs) for what each one does
+[Failed model runs](#failed-model-runs) for what each one does
 and which unit of data `"drop"` removes.
 
 Two supporting types live at the package root.
