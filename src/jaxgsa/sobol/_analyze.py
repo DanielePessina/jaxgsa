@@ -122,8 +122,15 @@ def _get_fused_scalar_indices(D: int, calc_second_order: bool, estimator: str):
 
     def fn(Y_raw: Array, index_map: Array) -> tuple[Array, Array, Array | None]:
         Y3 = jnp.take(Y_raw, index_map, axis=0).reshape(-1, 1, 1)
+        # A constant float64 slice can acquire a tiny nonzero pooled variance
+        # when XLA reassociates the fused standardization and estimator. Keep
+        # the ``on_invalid='none'`` contract (constant output -> NaN indices)
+        # without bringing the host-side validation scan back into the hot
+        # path: this exact-equality reduction is fused into the same device
+        # executable as the gather and estimator.
+        constant = jnp.all(Y3 == Y3[0], axis=0)
         A_flat, AB_flat, BA_flat, B_flat = _separate_flattened(Y3, D, calc_second_order)
-        return _point_indices_3d(
+        S1, ST, S2 = _point_indices_3d(
             A_flat,
             AB_flat,
             BA_flat,
@@ -135,6 +142,11 @@ def _get_fused_scalar_indices(D: int, calc_second_order: bool, estimator: str):
             slice_chunk_size=1,
             estimator=estimator,
         )
+        S1 = jnp.where(constant, jnp.nan, S1)
+        ST = jnp.where(constant, jnp.nan, ST)
+        if S2 is not None:
+            S2 = jnp.where(constant, jnp.nan, S2)
+        return S1, ST, S2
 
     return jax.jit(fn)
 
