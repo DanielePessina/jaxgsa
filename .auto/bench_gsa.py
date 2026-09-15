@@ -35,6 +35,7 @@ import resource
 import subprocess
 import sys
 import time
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -73,18 +74,61 @@ DEFAULT_REPEATS = 9
 
 CASES: list[dict[str, Any]] = [
     # ---- sobol (design-based, Saltelli) ----------------------------------
-    {"key": "sobol_small", "method": "sobol", "D": 3, "N": 1024,
-     "dims": (), "s2": False, "boot": 0},
-    {"key": "sobol_high_n", "method": "sobol", "D": 3, "N": 65536,
-     "dims": (), "s2": False, "boot": 0},
-    {"key": "sobol_high_d", "method": "sobol", "D": 30, "N": 0,
-     "base_n": 8192, "dims": (), "s2": True, "boot": 0},
-    {"key": "sobol_tk", "method": "sobol", "D": 3, "N": 8192,
-     "dims": (50, 6), "s2": False, "boot": 0},
-    {"key": "sobol_many_slices", "method": "sobol", "D": 3, "N": 16384,
-     "dims": (32, 16), "s2": True, "boot": 0},
-    {"key": "sobol_boot", "method": "sobol", "D": 3, "N": 4096,
-     "dims": (32,), "s2": False, "boot": 100},
+    {
+        "key": "sobol_small",
+        "method": "sobol",
+        "D": 3,
+        "N": 1024,
+        "dims": (),
+        "s2": False,
+        "boot": 0,
+    },
+    {
+        "key": "sobol_high_n",
+        "method": "sobol",
+        "D": 3,
+        "N": 65536,
+        "dims": (),
+        "s2": False,
+        "boot": 0,
+    },
+    {
+        "key": "sobol_high_d",
+        "method": "sobol",
+        "D": 30,
+        "N": 0,
+        "base_n": 8192,
+        "dims": (),
+        "s2": True,
+        "boot": 0,
+    },
+    {
+        "key": "sobol_tk",
+        "method": "sobol",
+        "D": 3,
+        "N": 8192,
+        "dims": (50, 6),
+        "s2": False,
+        "boot": 0,
+    },
+    {
+        "key": "sobol_many_slices",
+        "method": "sobol",
+        "D": 3,
+        "N": 16384,
+        "dims": (32, 16),
+        "s2": True,
+        "boot": 0,
+    },
+    {
+        "key": "sobol_boot",
+        "method": "sobol",
+        "D": 3,
+        "N": 4096,
+        "dims": (32,),
+        "s2": False,
+        "boot": 100,
+    },
     # ---- morris -----------------------------------------------------------
     {"key": "morris_small", "method": "morris", "D": 3, "N": 128, "dims": (), "boot": 0},
     {"key": "morris_high_d", "method": "morris", "D": 30, "N": 1240, "dims": (), "boot": 0},
@@ -106,8 +150,14 @@ CASES: list[dict[str, Any]] = [
     {"key": "borgonovo_small", "method": "borgonovo", "D": 3, "N": 1024, "dims": (), "boot": 10},
     {"key": "pawn_slices", "method": "pawn", "D": 3, "N": 1024, "dims": (32,), "boot": 10},
     {"key": "ot_small", "method": "optimal_transport", "D": 3, "N": 256, "dims": (), "boot": 0},
-    {"key": "ot_slices", "method": "optimal_transport", "D": 3, "N": 1024,
-     "dims": (32,), "boot": 10},
+    {
+        "key": "ot_slices",
+        "method": "optimal_transport",
+        "D": 3,
+        "N": 1024,
+        "dims": (32,),
+        "boot": 10,
+    },
     {"key": "ot_high_d", "method": "optimal_transport", "D": 15, "N": 1024, "dims": (), "boot": 0},
     {"key": "ot_high_n", "method": "optimal_transport", "D": 3, "N": 8192, "dims": (), "boot": 0},
     {"key": "ot_boot", "method": "optimal_transport", "D": 3, "N": 1024, "dims": (), "boot": 50},
@@ -164,16 +214,12 @@ def widen(y: jax.Array, dims: tuple[int, ...]) -> jax.Array:
 
 def _build_sobol(c: dict[str, Any], X: jax.Array | None, y: jax.Array, sr: Any) -> Any:
     key = jax.random.key(SEED) if c["boot"] else None
-    return lambda: sobol.analyze(
-        sr, y, n_bootstrap=int(c["boot"]), key=key, verbose=False
-    )
+    return lambda: sobol.analyze(sr, y, n_bootstrap=int(c["boot"]), key=key, verbose=False)
 
 
 def _build_morris(c: dict[str, Any], X: jax.Array | None, y: jax.Array, sr: Any) -> Any:
     key = jax.random.key(SEED) if c["boot"] else None
-    return lambda: morris.analyze(
-        sr, y, n_bootstrap=int(c["boot"]), key=key, verbose=False
-    )
+    return lambda: morris.analyze(sr, y, n_bootstrap=int(c["boot"]), key=key, verbose=False)
 
 
 def _build_efast(c: dict[str, Any], X: jax.Array | None, y: jax.Array, sr: Any) -> Any:
@@ -187,21 +233,37 @@ def _build_kucherenko(c: dict[str, Any], X: jax.Array | None, y: jax.Array, sr: 
 def _build_borgonovo(c: dict[str, Any], X: jax.Array | None, y: jax.Array, sr: Any) -> Any:
     assert X is not None
     return lambda: borgonovo.analyze(
-        c["_problem"], X, y, n_bootstrap=int(c["boot"]), key=jax.random.key(SEED)
+        c["_problem"],
+        X,
+        y,
+        n_bootstrap=int(c["boot"]),
+        key=jax.random.key(SEED),
+        verbose=False,
     )
 
 
 def _build_pawn(c: dict[str, Any], X: jax.Array | None, y: jax.Array, sr: Any) -> Any:
     assert X is not None
     return lambda: pawn.analyze(
-        c["_problem"], X, y, n_bins=8, n_bootstrap=int(c["boot"]), key=jax.random.key(SEED)
+        c["_problem"],
+        X,
+        y,
+        n_bins=8,
+        n_bootstrap=int(c["boot"]),
+        key=jax.random.key(SEED),
+        verbose=False,
     )
 
 
 def _build_hsic(c: dict[str, Any], X: jax.Array | None, y: jax.Array, sr: Any) -> Any:
     assert X is not None
     return lambda: hsic.analyze(
-        c["_problem"], X, y, n_perms=10, key=jax.random.key(SEED)
+        c["_problem"],
+        X,
+        y,
+        n_perms=10,
+        key=jax.random.key(SEED),
+        verbose=False,
     )
 
 
@@ -215,22 +277,23 @@ def _build_ot(c: dict[str, Any], X: jax.Array | None, y: jax.Array, sr: Any) -> 
         n_bootstrap=int(c["boot"]),
         dummy=False,
         key=jax.random.key(SEED),
+        verbose=False,
     )
 
 
 def _build_pce(c: dict[str, Any], X: jax.Array | None, y: jax.Array, sr: Any) -> Any:
     assert X is not None
-    return lambda: pce.analyze(c["_problem"], X, y, order=3)
+    return lambda: pce.analyze(c["_problem"], X, y, order=3, verbose=False)
 
 
 def _build_hdmr(c: dict[str, Any], X: jax.Array | None, y: jax.Array, sr: Any) -> Any:
     assert X is not None
-    return lambda: hdmr.analyze(c["_problem"], X, y, maxorder=2, maxiter=50)
+    return lambda: hdmr.analyze(c["_problem"], X, y, maxorder=2, maxiter=50, verbose=False)
 
 
 def _build_shapley(c: dict[str, Any], X: jax.Array | None, y: jax.Array, sr: Any) -> Any:
     assert X is not None
-    return lambda: shapley.analyze(c["_problem"], X, y, backend="pce", order=3)
+    return lambda: shapley.analyze(c["_problem"], X, y, backend="pce", order=3, verbose=False)
 
 
 def _build_vkoga(c: dict[str, Any], X: jax.Array | None, y: jax.Array, sr: Any) -> Any:
@@ -245,13 +308,14 @@ def _build_vkoga(c: dict[str, Any], X: jax.Array | None, y: jax.Array, sr: Any) 
         n_inner=32,
         n_variance=512,
         key=jax.random.key(SEED),
+        verbose=False,
     )
 
 
 def _build_dgsm(c: dict[str, Any], X: jax.Array | None, y: jax.Array, sr: Any) -> Any:
     assert X is not None
     model = point_model(c["_model"])
-    return lambda: dgsm.analyze(c["_problem"], model, X)
+    return lambda: dgsm.analyze(c["_problem"], model, X, verbose=False)
 
 
 BUILDERS = {
@@ -352,6 +416,7 @@ def _maxrss_bytes() -> int:
 
 
 def measure_worker(c: dict[str, Any], repeats: int) -> dict[str, Any]:
+    warnings.filterwarnings("ignore", category=jaxgsa.JaxgsaWarning)
     record: dict[str, Any] = {
         "case": c["key"],
         "method": c["method"],

@@ -280,27 +280,22 @@ and [categorical inputs](https://danielepessina.github.io/jaxgsa/examples/catego
 
 ## Performance
 
-The gain is vectorization over output slices. SALib analyzes each `(t, k)`
-slice in a Python loop. jaxgsa fuses the estimators and maps one compiled
-kernel over all `T * K` slices, so its cost is nearly flat in output size while
-SALib's is linear.
+The performance suite covers all thirteen methods across scalar,
+high-sample, high-dimensional, multi-output, time-series, and bootstrap
+workloads. On an Apple M1 Pro CPU, the current performance branch reduced the
+sum of warm median analysis times across 27 isolated cases from 0.921 s to
+0.430 s relative to `master`.
 
-On the widest gap measured, RS-HDMR on 50 timesteps by 6 outputs, jaxgsa runs
-in 27.4 ms against 29.06 s for SALib 1.5.2 on the same Apple M1 Pro. That is
-1060x, and the baseline is single-process NumPy on one CPU core, which is what
-SALib does by default. Do not read it as a claim against a parallel CPU or a
-tuned GPU comparison, where published speedups for Monte Carlo GSA are closer
-to 13x. Eight cores would already cut 1060x to roughly 130x.
+The largest isolated changes were HSIC, from 153.0 ms to 23.1 ms, and VKOGA,
+from 348.3 ms to 27.1 ms. A 30-parameter Sobol analysis with second-order
+indices fell from 7.37 ms to 3.45 ms. These are analysis timings; model
+evaluation and sampling are excluded.
 
-Most of that ratio is Python loop overhead rather than arithmetic. Give the
-same RS-HDMR comparison one output slice instead of 300 and the gap falls to
-10.9x. Shrink the work further, to Sobol on a scalar output with no bootstrap,
-and SALib wins at 0.2 ms against jaxgsa's 0.9 ms, because JAX dispatch costs more
-than the arithmetic does.
-
-So output size is what decides. `T * K = 1` gains little and can lose. Time
-series and multi-output work is where jaxgsa pays for itself. Any speedup
-quoted without its `T` and `K` is meaningless, including the ones above.
+Against SALib 1.5.2 on the same machine, scalar Sobol without bootstrap still
+favours SALib (0.2 ms against 0.6 ms). With 300 output slices and second-order
+indices, jaxgsa takes 7.4 ms against 262.8 ms. The gain comes from compiling
+and vectorizing work across output slices, so every comparison must state its
+shape and whether compilation is included.
 
 Full tables, methodology, and the script are in the
 [benchmarks guide](https://danielepessina.github.io/jaxgsa/guide/benchmarks).
