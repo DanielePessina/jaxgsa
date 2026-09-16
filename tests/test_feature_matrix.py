@@ -10,7 +10,7 @@ indices, and the metadata for the feature being exercised.
 The cases are intentionally small. A method-specific lower bound is retained
 where the algorithm needs it (RS-HDMR needs 300 rows); all other rows use a
 few dozen deterministic samples. The matrix is the default CI gate, while the
-larger method and oracle checks remain useful for focused local work.
+larger method checks remain useful for focused local work.
 """
 
 from __future__ import annotations
@@ -95,7 +95,7 @@ def _point_model(model: Callable[[jax.Array], jax.Array]) -> Callable[[jax.Array
 
 
 def _categorical_data() -> tuple[jax.Array, jax.Array]:
-    """Build balanced mixed data without a second implementation as oracle."""
+    """Build balanced mixed data without a second implementation."""
     unit = jnp.linspace(0.01, 0.99, 64)
     levels = jnp.tile(jnp.asarray([0.0, 1.0]), 32)
     X = jnp.stack([unit, levels], axis=1)
@@ -325,7 +325,9 @@ MATRIX = (
         "ot-categorical-dummy-bootstrap",
         "optimal_transport",
         (2,),
-        frozenset({"given-data", "scalar-output", "categorical", "dummy", "bootstrap"}),
+        frozenset(
+            {"given-data", "scalar-output", "categorical", "dummy", "bootstrap", "ot-scalar"}
+        ),
         _run_ot_categorical,
     ),
     FeatureCase(
@@ -378,6 +380,103 @@ MATRIX = (
         _run_vkoga,
     ),
 )
+
+
+def _methods_with_feature(feature: str) -> frozenset[str]:
+    """Return methods whose matrix row exercises ``feature``."""
+    return frozenset(case.method for case in MATRIX if feature in case.features)
+
+
+def _registered_with(feature: str, value: object = True) -> frozenset[str]:
+    """Return registry methods whose declaration field has ``value``."""
+    return frozenset(name for name, spec in methods().items() if getattr(spec, feature) == value)
+
+
+REGISTERED_FEATURES = {
+    "own-design": _registered_with("is_design_based"),
+    "given-data": _registered_with("is_design_based", False),
+    "correlation-accepts": _registered_with("correlation", "accepts"),
+    "correlation-refuses": _registered_with("correlation", "refuses"),
+    "categorical-accepts": _registered_with("categorical", "accepts"),
+    "categorical-refuses": _registered_with("categorical", "refuses"),
+    "bootstrap-supported": frozenset(
+        name for name, spec in methods().items() if spec.bootstrap is not None
+    ),
+    "pure-core": _registered_with("pure_core"),
+}
+"""Capability sets derived directly from the method registry."""
+
+MATRIX_FEATURE_COVERAGE = {
+    "own-design": _methods_with_feature("own-design"),
+    "given-data": _methods_with_feature("given-data"),
+    "correlated": _methods_with_feature("correlated"),
+    "categorical": _methods_with_feature("categorical"),
+    "bootstrap": _methods_with_feature("bootstrap"),
+    "surrogate": _methods_with_feature("surrogate"),
+    "output-shape": frozenset(case.method for case in MATRIX),
+    "pure-core-row": frozenset(case.method for case in MATRIX if methods()[case.method].pure_core),
+}
+"""Actual feature coverage, kept separate from registry capability support."""
+
+EXPECTED_CAPABILITY_COVERAGE = {
+    # These subsets are intentional: the registry tests cover every gate, but
+    # the fast end-to-end rows avoid repeating expensive fits for every option.
+    "correlated": ("correlation-accepts", frozenset({"hsic", "vkoga"})),
+    "categorical": (
+        "categorical-accepts",
+        frozenset({"borgonovo", "optimal_transport", "pawn"}),
+    ),
+    "bootstrap": (
+        "bootstrap-supported",
+        frozenset({"kucherenko", "morris", "optimal_transport", "sobol"}),
+    ),
+}
+"""The deliberately small positive capability routes in this fast matrix."""
+
+SURROGATE_METHODS = frozenset({"hdmr", "pce", "shapley", "vkoga"})
+"""Methods whose matrix row exercises a fitted surrogate path."""
+
+
+MATRIX_METHOD_MODES = {
+    "optimal_transport": frozenset(
+        feature.removeprefix("ot-")
+        for case in MATRIX
+        if case.method == "optimal_transport"
+        for feature in case.features
+        if feature.startswith("ot-")
+    )
+}
+"""Method-specific modes exercised without rerunning a method unnecessarily."""
+
+
+def test_matrix_routes_and_shapes_match_the_registry() -> None:
+    """Every registry method has exactly one route and a checked shape."""
+    registered = frozenset(methods())
+    assert MATRIX_FEATURE_COVERAGE["own-design"] == REGISTERED_FEATURES["own-design"]
+    assert MATRIX_FEATURE_COVERAGE["given-data"] == REGISTERED_FEATURES["given-data"]
+    assert MATRIX_FEATURE_COVERAGE["output-shape"] == registered
+    assert MATRIX_FEATURE_COVERAGE["pure-core-row"] == REGISTERED_FEATURES["pure-core"]
+
+
+def test_matrix_capability_coverage_is_explicit_and_supported() -> None:
+    """Capability subsets never claim support the registry does not declare."""
+    for feature, (registry_feature, expected) in EXPECTED_CAPABILITY_COVERAGE.items():
+        actual = MATRIX_FEATURE_COVERAGE[feature]
+        assert actual == expected
+        assert actual <= REGISTERED_FEATURES[registry_feature]
+
+    assert MATRIX_FEATURE_COVERAGE["surrogate"] == SURROGATE_METHODS
+
+    registered = frozenset(methods())
+    for capability in ("correlation", "categorical"):
+        accepts = REGISTERED_FEATURES[f"{capability}-accepts"]
+        refuses = REGISTERED_FEATURES[f"{capability}-refuses"]
+        assert accepts | refuses == registered
+        assert accepts.isdisjoint(refuses)
+
+    assert MATRIX_METHOD_MODES["optimal_transport"] == frozenset(
+        {"scalar", "multivariate", "trajectory"}
+    )
 
 
 @pytest.mark.parametrize("case", MATRIX, ids=[case.name for case in MATRIX])
