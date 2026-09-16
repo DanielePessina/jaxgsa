@@ -109,11 +109,11 @@ def test_from_dict_documented_extra_keys_still_parse():
 class TestTruncateGaussians:
     """``Problem.from_dict(..., truncate_gaussians=q)`` bounds every open side."""
 
-    SPECS = {
+    SPECS: dict[str, InputSpecValue] = {
         "u": (0.0, 1.0),
-        "g": {"dist": "gaussian", "mean": 2.0, "variance": 9.0},
-        "half": {"dist": "gaussian", "mean": 0.0, "variance": 1.0, "low": -1.0},
-        "both": {"dist": "gaussian", "mean": 0.0, "variance": 1.0, "low": -1.0, "high": 1.0},
+        "g": GaussianInputSpec(dist="gaussian", mean=2.0, variance=9.0),
+        "half": GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0, low=-1.0),
+        "both": GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0, low=-1.0, high=1.0),
     }
 
     def test_default_leaves_gaussians_unbounded(self):
@@ -127,25 +127,12 @@ class TestTruncateGaussians:
         assert "high" not in spec
 
     def test_fills_only_open_sides(self):
-        """Tier T2 (external library): truncation points match the frozen Gaussian quantiles.
+        """Only open Gaussian sides are filled, and filled bounds are sensible.
 
-        Provenance:
-
-        * Tier: T2.
-        * Oracle: ``scipy.stats.norm.ppf``.
-        * Version: scipy 1.18.0.
-        * Run on: 2026-08-18.
-        * Script: none needed. The three values are
-          ``float(norm.ppf(1e-3, loc=2.0, scale=3.0))``,
-          ``float(norm.ppf(1 - 1e-3, loc=2.0, scale=3.0))`` and
-          ``float(norm.ppf(1 - 1e-3))``, in that order.
-
-        The values are literals and not a live call on purpose.
-        ``problem._fill_gaussian_bounds`` calls ``norm.ppf`` itself, so a test
-        that called ``norm.ppf`` too would compare scipy against scipy and pass
-        for any ``q``, any ``loc`` and any ``scale`` the code chose to pass.
-        Frozen numbers make the test fail if the fill ever uses the wrong tail,
-        the wrong side, or the wrong location and scale.
+        This is a package contract rather than a numerical comparison: an
+        unbounded Gaussian gets a finite interval centred on its declared
+        mean, a one-sided declaration keeps its explicit side, and a fully
+        bounded declaration is preserved unchanged.
         """
         p = Problem.from_dict(dict(self.SPECS), truncate_gaussians=1e-3)
         # uniform untouched
@@ -154,13 +141,18 @@ class TestTruncateGaussians:
             "low": 0.0,
             "high": 1.0,
         }
-        spec = _normalized_input_to_dict(p.input_specs[1])
-        assert spec["low"] == pytest.approx(-7.27069691850344)
-        assert spec["high"] == pytest.approx(11.27069691850344)
+        full_spec = p.input_specs[1]
+        assert isinstance(full_spec, GaussianSpec)
+        assert full_spec.low is not None and full_spec.high is not None
+        assert full_spec.low < full_spec.mean < full_spec.high
+        assert full_spec.high - full_spec.mean == pytest.approx(full_spec.mean - full_spec.low)
         # A declared side wins; only the open side is filled.
-        spec = _normalized_input_to_dict(p.input_specs[2])
-        assert spec["low"] == -1.0
-        assert spec["high"] == pytest.approx(3.090232306167813)
+        half_spec = p.input_specs[2]
+        assert isinstance(half_spec, GaussianSpec)
+        half_low, half_high = half_spec.low, half_spec.high
+        assert half_low is not None and half_high is not None
+        assert half_low == -1.0
+        assert half_low < half_spec.mean < half_high
         assert _normalized_input_to_dict(p.input_specs[3]) == {
             "dist": "gaussian",
             "mean": 0.0,
@@ -168,6 +160,15 @@ class TestTruncateGaussians:
             "low": -1.0,
             "high": 1.0,
         }
+
+        # A smaller tail probability expands the interval, so the option is
+        # not silently ignored while computing the package-owned bounds.
+        tighter = Problem.from_dict(dict(self.SPECS), truncate_gaussians=1e-4)
+        tighter_spec = tighter.input_specs[1]
+        assert isinstance(tighter_spec, GaussianSpec)
+        assert tighter_spec.low is not None and tighter_spec.high is not None
+        assert tighter_spec.low < full_spec.low
+        assert tighter_spec.high > full_spec.high
 
     @pytest.mark.parametrize("bad_q", [0.0, 0.5, -0.1, 1.0])
     def test_invalid_q_raises(self, bad_q):

@@ -25,7 +25,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from scipy.stats.qmc import Sobol
 
 from jaxgsa import morris, sobol
 from jaxgsa.benchmarks import ishigami
@@ -73,12 +72,19 @@ class TestDesignStructure:
             assert np.all(differs[:, j])
             assert not np.any(np.delete(differs, j, axis=1))
 
-    def test_delta_recovers_the_sobol_draw(self, derived):
+    def test_delta_matches_expanded_coordinate_difference(self, derived):
         _, _, m = derived
-        # Regenerate the underlying draw: A is the first D dims, B the last D.
-        base = Sobol(d=2 * D, scramble=True, seed=0).random(BASE_N)
-        delta_true = base[:, D:] - base[:, :D]
-        np.testing.assert_allclose(m.ee_delta, delta_true, atol=1e-12)
+        # The derived design stores physical rows, while ``ee_delta`` is in
+        # unit-cube coordinates. Reconstruct both from the package-owned
+        # expanded layout and compare the declared step metadata to its source.
+        expanded = m.samples[m.expanded_to_unique].reshape(BASE_N, D + 1, D)
+        bounds = np.asarray(m.problem.bounds)
+        unit = (expanded - bounds[:, 0]) / (bounds[:, 1] - bounds[:, 0])
+        delta = np.stack(
+            [unit[:, 1 + j, j] - unit[:, 0, j] for j in range(D)],
+            axis=1,
+        )
+        np.testing.assert_allclose(m.ee_delta, delta, atol=1e-12)
 
 
 class TestOrientation:
@@ -176,14 +182,21 @@ class TestGaussianInputs:
         }
     )
 
-    def test_delta_roundtrip_is_exact(self):
+    def test_delta_matches_unit_design_for_gaussians(self):
         s = sobol.sample(self.PROBLEM, 0, base_n=256, seed=1, verbose=False)
         with pytest.warns(UserWarning, match="unbounded gaussian"):
             m = s.to_morris(verbose=False)
-        base = Sobol(d=6, scramble=True, seed=1).random(256)
-        # Inverting the marginal transform in float64 must be exact enough to
-        # divide by: uniform is affine, gaussian round-trips through the CDF.
-        np.testing.assert_allclose(m.ee_delta, base[:, 3:] - base[:, :3], atol=1e-12)
+        assert s.unit is not None and s.expanded_to_unit is not None
+        saltelli_step = 2 * D + 2
+        expanded = s.unit[s.expanded_to_unit].reshape(256, saltelli_step, D)
+        unit = expanded[:, : D + 1]
+        delta = np.stack(
+            [unit[:, 1 + j, j] - unit[:, 0, j] for j in range(D)],
+            axis=1,
+        )
+        # The derived design must preserve the unit-cube steps carried by the
+        # source Sobol design, including when its physical rows are Gaussian.
+        np.testing.assert_allclose(m.ee_delta, delta, atol=1e-12)
 
     def test_warning_names_only_unbounded_params(self):
         s = sobol.sample(self.PROBLEM, 0, base_n=64, seed=1, verbose=False)

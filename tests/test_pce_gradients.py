@@ -13,9 +13,9 @@ transformability contract can be checked against is the untransformed call,
 and there is no external oracle for "this function traces".
 
 Every case runs on a truncated Gaussian as well as a uniform problem. The
-truncated marginal is the one that used to break: its CDF went through scipy
-on the host, and the standard deviation went through ``jnp`` inside a trace.
-A uniform-only test sees neither.
+truncated marginal is the one that used to break: its CDF went through a
+host-only implementation, and the standard deviation went through ``jnp``
+inside a trace. A uniform-only test sees neither.
 """
 
 from __future__ import annotations

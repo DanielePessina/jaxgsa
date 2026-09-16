@@ -21,7 +21,7 @@ from jaxgsa.pce._engine import (
     hat_diagonal,
     sobol_from_coefficients,
 )
-from jaxgsa.problem import GaussianInputSpec, Problem
+from jaxgsa.problem import GaussianInputSpec, InputSpecValue, Problem
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -519,12 +519,11 @@ class TestTruncatedGaussianBasis:
 
     @staticmethod
     def _problem(D, *, q=None):
-        from scipy.stats import norm
-
-        spec = {"dist": "gaussian", "mean": 0.0, "variance": 1.0}
-        if q is not None:
-            spec = {**spec, "low": float(norm.ppf(q)), "high": float(norm.ppf(1.0 - q))}
-        return Problem.from_dict({f"x{i + 1}": dict(spec) for i in range(D)})
+        params: dict[str, InputSpecValue] = {
+            f"x{i + 1}": GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0)
+            for i in range(D)
+        }
+        return Problem.from_dict(params, truncate_gaussians=q)
 
     def test_wide_truncation_uses_hermite(self):
         from jaxgsa.pce._analyze import _map_to_reference

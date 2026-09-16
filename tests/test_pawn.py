@@ -425,9 +425,9 @@ class TestPAWNInvalidPolicy:
 class TestPureCore:
     """The transformable core ``pawn.indices``.
 
-    Tier T4 throughout (internal consistency and transformability). The KS
-    statistic itself is checked against ``scipy.stats.ks_2samp`` elsewhere in
-    this file, and ``indices`` runs the same kernel ``analyze`` runs.
+    Tier T4 throughout (internal consistency and transformability). The
+    statistic's bounded behavior is checked on package-owned data above, and
+    ``indices`` runs the same kernel ``analyze`` runs.
     """
 
     def test_matches_analyze_scalar(self, ishigami_data):
@@ -590,8 +590,9 @@ class TestPureCore:
 
     # Each marginal family reaches ``cdf_to_unit_interval`` by a different
     # branch, and two of those branches used to break tracing in different
-    # ways: a truncated Gaussian read ``X`` on the host through SciPy, and
-    # *every* Gaussian, truncated or not, took ``float()`` of a tracer while
+    # ways: a truncated Gaussian read ``X`` on the host through an external
+    # CDF implementation, and *every* Gaussian, truncated or not, took
+    # ``float()`` of a tracer while
     # standardising. They were separate defects, so they get separate cases.
     _MARGINALS: dict[str, InputSpecValue] = {
         "uniform": (0.0, 1.0),

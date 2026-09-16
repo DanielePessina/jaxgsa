@@ -456,9 +456,9 @@ def test_scrambled_latent_sample_unchanged_by_origin_skip():
     the probit would otherwise map it to a -7 sigma deviate. Scrambling
     already displaces that point, so there is nothing to skip. This is a
     fixed-seed regression (mismatch just detects the value changed, not why),
-    pinned as a literal rather than by recomputing the same scipy call the
-    source makes, so a rewrite of the source's own plumbing cannot make the
-    test agree with itself no matter what it computes.
+    pinned as a literal rather than by recomputing the same internal transform
+    call the source makes, so a rewrite of the source's own plumbing cannot
+    make the test agree with itself no matter what it computes.
     """
     Z = latent_normal_sample(16, 3, seed=42, scramble=True)
     assert np.all(np.isfinite(Z))

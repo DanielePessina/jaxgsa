@@ -366,7 +366,7 @@ class TestPureCoreDeclaration:
 
     Every method is expected to have a pure ``indices()`` that survives
     ``jit``, ``vmap`` and ``jacrev``. kucherenko and vkoga are host
-    NumPy/SciPy end to end and are exempt, and they declare the exemption in
+    host numerical routines end to end and are exempt, and they declare the exemption in
     the registry rather than leaving it as an absence. A declaration nobody
     checks is the same as an absence, so these assert both directions.
     """
