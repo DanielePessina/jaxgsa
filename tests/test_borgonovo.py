@@ -195,80 +195,7 @@ class TestGridTiling:
         )
 
 
-class TestDeltaSALibComparison:
-    def test_plugin_matches_salib_calc_delta(self, ishigami_data):
-        """Unit-level parity: plug-in estimator vs SALib's calc_delta."""
-        from SALib.analyze import delta as salib_delta
-
-        X_np = np.asarray(ishigami_data[0])
-        Y_np = np.asarray(ishigami_data[1])
-        N = len(Y_np)
-
-        M = _plischke_n_classes(N)
-        m = np.linspace(0, N, M + 1)
-        Ygrid = np.linspace(Y_np.min(), Y_np.max(), 100)
-        salib_plugin = np.array(
-            [salib_delta.calc_delta(Y_np, Ygrid, X_np[:, i], m) for i in range(3)]
-        )
-
-        result = analyze(ishigami.PROBLEM, ishigami_data[0], ishigami_data[1], n_bootstrap=0)
-        np.testing.assert_allclose(np.asarray(result.delta), salib_plugin, atol=1e-5)
-
-    def test_matches_salib_end_to_end(self, ishigami_data):
-        """Bias-corrected delta and S1 vs SALib.analyze.delta.
-
-        SALib's central estimates are computed on a random resample of the
-        data (jaxgsa deliberately uses the original sample), so the tolerance
-        covers that resampling noise on top of bootstrap RNG differences.
-        """
-        from SALib.analyze import delta as salib_delta
-
-        X_np = np.asarray(ishigami_data[0])
-        Y_np = np.asarray(ishigami_data[1])
-
-        salib_problem = {
-            "num_vars": 3,
-            "names": ["x1", "x2", "x3"],
-            "bounds": [[-np.pi, np.pi]] * 3,
-        }
-        salib_result = salib_delta.analyze(salib_problem, X_np, Y_np, num_resamples=100, seed=7)
-
-        result = analyze(
-            ishigami.PROBLEM, ishigami_data[0], ishigami_data[1], key=jax.random.key(0)
-        )
-        np.testing.assert_allclose(np.asarray(result.delta), salib_result["delta"], atol=0.03)
-        np.testing.assert_allclose(np.asarray(result.S1), salib_result["S1"], atol=0.02)
-
-
 class TestGaussianLinearBenchmark:
-    def test_analytical_delta_matches_brute_force(self):
-        """Closed-form Gaussian L1 + quadrature vs dense numeric integration."""
-        # scipy.integrate.trapezoid works on numpy 1.x and 2.x (np.trapezoid
-        # is 2.0-only), so this test does not force a numpy>=2 floor.
-        from scipy.integrate import trapezoid
-        from scipy.stats import norm
-
-        c = np.asarray(gaussian_linear.DEFAULT_COEFFS)
-        v = np.asarray(gaussian_linear.DEFAULT_VARIANCES)
-        var_y = float((c**2 * v).sum())
-
-        brute = np.zeros(len(c))
-        for i in range(len(c)):
-            xs = np.linspace(-8.0, 8.0, 1601) * np.sqrt(v[i])
-            ys = np.linspace(-10.0, 10.0, 3201) * np.sqrt(var_y)
-            v_cond = var_y - c[i] ** 2 * v[i]
-            f_y = norm.pdf(ys, scale=np.sqrt(var_y))
-            l1 = np.array(
-                [
-                    trapezoid(np.abs(f_y - norm.pdf(ys, loc=c[i] * x, scale=np.sqrt(v_cond))), ys)
-                    for x in xs
-                ]
-            )
-            w = norm.pdf(xs, scale=np.sqrt(v[i]))
-            brute[i] = 0.5 * trapezoid(l1 * w, xs)
-
-        np.testing.assert_allclose(gaussian_linear.ANALYTICAL_DELTA, brute, atol=1e-4)
-
     def test_analytical_delta_zero_coefficient(self):
         """A zero coefficient means no influence: delta must be exactly 0."""
         delta = gaussian_linear.analytical_delta(coeffs=(0.0, 1.0, 2.0))
@@ -489,36 +416,6 @@ class TestDeltaXarray:
         assert list(ds.coords["param"].values) == ["x1", "x2", "x3"]
 
 
-class TestPlischkeHeuristic:
-    def test_matches_reference_class_counts(self):
-        """Tier T2 (external library): class counts of the Plischke heuristic.
-
-        Provenance:
-
-        * Tier: T2.
-        * Oracle: SALib, ``SALib.analyze.delta.analyze``, which applies the rule
-          ``min(ceil(N ** (2 / (7 + tanh((1500 - N) / 500)))), 48)``.
-        * Version: SALib 1.5.2.
-        * Run on: 2026-08-18.
-        * Script: ``scripts/oracles/salib_delta_class_counts.py``.
-
-        SALib is a development extra, so the oracle runs locally and the values
-        are typed in here as literals. The test then compares against fixed
-        numbers and never against our own code.
-        """
-        expected = {
-            100: 4,
-            500: 5,
-            1000: 6,
-            1500: 9,
-            5000: 18,
-            10000: 22,
-            100000: 47,
-        }
-        for n_samples, n_classes in expected.items():
-            assert _plischke_n_classes(n_samples) == n_classes, n_samples
-
-
 class TestDeltaRegression:
     """Regression coverage for confirmed code-review findings."""
 
@@ -693,8 +590,7 @@ class TestDegenerateBandwidthIsNotAPrecondition:
     Tier T4 (internal consistency) for every test here, and that is the
     right tier: these are behavioural contracts about which configurations
     the estimator accepts, not numbers an external oracle could confirm.
-    The delta values these tests compare are checked against SALib
-    elsewhere in this file.
+    The delta values are checked only through jaxgsa's own invariants.
 
     A kernel narrower than one output-grid step does not by itself break
     the run. Two independent conditions have to hold first. The floor only

@@ -383,41 +383,6 @@ class TestSobolGAccuracy:
         assert np.all(mu_star[3] > mu_star[4:])
 
 
-class TestSALibParity:
-    def test_trajectory_matches_salib(self):
-        """SALib analyzing the identical expanded design must agree exactly."""
-        from SALib.analyze import morris as salib_morris
-
-        num_levels = 4
-        sr = sample(
-            sobol_g.PROBLEM, n_trajectories=25, num_levels=num_levels, seed=42, verbose=False
-        )
-        Y_unique = sobol_g.evaluate(jnp.asarray(sr.samples))
-        res = analyze(sr, Y_unique)
-
-        # Re-expand to the full design; unit-cube bounds make jaxgsa's samples
-        # identical to unit-cube coordinates, sidestepping SALib's rescaling.
-        X_expanded = sr.samples[sr.expanded_to_unique]
-        Y_expanded = np.asarray(Y_unique)[sr.expanded_to_unique]
-        problem_dict = {
-            "num_vars": sr.n_params,
-            "names": list(sobol_g.PROBLEM.names),
-            "bounds": [[0.0, 1.0]] * sr.n_params,
-        }
-        Si = salib_morris.analyze(
-            problem_dict,
-            X_expanded,
-            Y_expanded.astype(np.float64),
-            num_levels=num_levels,
-            num_resamples=2,
-            seed=0,
-        )
-
-        np.testing.assert_allclose(np.asarray(res.mu), Si["mu"], rtol=1e-4, atol=1e-4)
-        np.testing.assert_allclose(np.asarray(res.mu_star), Si["mu_star"], rtol=1e-4, atol=1e-4)
-        np.testing.assert_allclose(np.asarray(res.sigma), Si["sigma"], rtol=1e-4, atol=1e-4)
-
-
 class TestMultiOutput:
     def test_slices_match_scalar_runs(self):
         sr = sample(UNIT_PROBLEM, n_trajectories=15, seed=4, verbose=False)

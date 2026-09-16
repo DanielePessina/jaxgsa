@@ -747,7 +747,7 @@ def test_st_is_scsa_total_under_correlation(correlated_hdmr_result):
     """ST is sum over terms u containing i of (Sa_u + Sb_u), not a Sobol total.
 
     Pins the SCSA convention that Li et al. (2010) define in Section 2.2.3,
-    which is also SALib's HDMR convention. Recomputed here from the per-term
+    which is also the documented HDMR convention. Recomputed here from the per-term
     fields so a change of convention cannot pass silently.
     """
     result = correlated_hdmr_result
@@ -765,8 +765,8 @@ def test_st_is_scsa_total_under_correlation(correlated_hdmr_result):
     np.testing.assert_allclose(ST, _scatter(np.array(result.S)), rtol=1e-5, atol=1e-7)
     # M8: S is measured against the fitted expansion (Li et al., 2010), so
     # S = Sa + Sb is an identity, not an approximation. This is float32
-    # noise only now, not the few-percent gap SALib's Y-referenced ancova
-    # leaves under correlation.
+    # noise only now, not a few-percent gap from a different output convention
+    # under correlation.
     np.testing.assert_allclose(
         np.array(result.S), np.array(result.Sa) + np.array(result.Sb), atol=1e-6
     )
