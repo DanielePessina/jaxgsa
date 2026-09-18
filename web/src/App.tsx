@@ -54,17 +54,17 @@ function scrollTo(id: string) {
 /** Compact status rail over the four stages of the workflow. */
 function StepRail({ steps }: { steps: StepState[] }) {
   return (
-    <nav aria-label="workflow steps">
-      <ol className="flex flex-wrap items-center gap-1">
+    <nav aria-label="workflow steps" className="overflow-x-auto">
+      <ol className="flex min-w-max items-center gap-1">
         {steps.map((s, i) => (
           <li key={s.id} className="flex items-center gap-1">
-            {i > 0 && <span className="mx-1 text-muted-foreground/40">→</span>}
+            {i > 0 && <span className="mx-1 text-muted-foreground/30">/</span>}
             <button
               type="button"
               onClick={() => scrollTo(s.id)}
               aria-current={s.active ? "step" : undefined}
               aria-label={`${s.title}: ${s.done ? "complete" : s.active ? "current" : "not started"}`}
-              className={`relative flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs transition-colors ${
+              className={`relative flex items-center gap-2 rounded-full px-3 py-1.5 text-xs transition-colors ${
                 s.active
                   ? "text-foreground"
                   : s.done
@@ -79,7 +79,9 @@ function StepRail({ steps }: { steps: StepState[] }) {
                   transition={{ type: "spring", stiffness: 380, damping: 34 }}
                 />
               )}
-              <span className="relative">{s.done ? "✓" : "·"}</span>
+              <span className="relative font-mono text-[10px]">
+                {s.done ? "✓" : String(i + 1).padStart(2, "0")}
+              </span>
               <span className="relative">{s.title}</span>
             </button>
           </li>
@@ -258,57 +260,30 @@ export default function App() {
 
   return (
     <div className="min-h-screen">
-      <header className="border-b border-border/60">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-6 py-5">
-          <div>
-            <h1 className="text-xl font-medium tracking-tight">
-              jaxgsa
-              <span className="ml-3 text-sm font-normal text-muted-foreground">
-                global sensitivity analysis, in your browser
-              </span>
-            </h1>
-          </div>
-          <div className="flex items-center gap-2">
+      <header className="border-b border-border/60 bg-background/85 backdrop-blur">
+        <div className="mx-auto flex max-w-[1560px] flex-wrap items-center justify-between gap-4 px-5 py-4 sm:px-8">
+          <a href="#" className="flex items-baseline gap-3" aria-label="jaxgsa workbench home">
+            <span className="text-xl font-semibold tracking-tight">jaxgsa</span>
+            <span className="hidden text-sm text-muted-foreground sm:inline">browser workbench</span>
+          </a>
+          <div className="flex items-center gap-4">
+            <a
+              href="https://danielepessina.github.io/jaxgsa"
+              target="_blank"
+              rel="noreferrer"
+              className="text-sm text-muted-foreground transition-colors hover:text-foreground"
+            >
+              Documentation ↗
+            </a>
             <Badge variant="outline" className="font-mono text-xs">
-              wasm · float64
+              WASM · f64
             </Badge>
           </div>
         </div>
       </header>
 
-      <div className="border-b border-border/60 bg-muted/10">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-3 gap-y-2 px-6 py-2.5 text-sm">
-          <span className="text-muted-foreground">Full package:</span>
-          <InstallCommand command="pip install jaxgsa" />
-          <span className="text-muted-foreground/50">or</span>
-          <InstallCommand command="uv add jaxgsa" />
-          <a
-            href="https://danielepessina.github.io/jaxgsa"
-            target="_blank"
-            rel="noreferrer"
-            className="ml-1 text-sm underline decoration-dotted underline-offset-4 hover:text-foreground"
-          >
-            docs
-          </a>
-        </div>
-      </div>
-
-      {device?.webgpuAvailable && (
-        <div className="mx-auto max-w-6xl px-6 pt-4">
-          <Alert>
-            <AlertTitle className="font-mono text-xs uppercase tracking-wider">
-              WebGPU detected
-            </AlertTitle>
-            <AlertDescription>
-              GPU acceleration is not wired up yet — running on wasm float64
-              for exactness.
-            </AlertDescription>
-          </Alert>
-        </div>
-      )}
-
       {initError && (
-        <div className="mx-auto max-w-6xl px-6 pt-4">
+        <div className="mx-auto max-w-[1560px] px-5 pt-4 sm:px-8">
           <Alert variant="destructive">
             <AlertTitle>engine failed to start</AlertTitle>
             <AlertDescription className="font-mono">{initError}</AlertDescription>
@@ -316,20 +291,45 @@ export default function App() {
         </div>
       )}
 
-      <main className="mx-auto max-w-6xl px-6 py-8">
-        <p className="mb-8 max-w-3xl text-sm leading-relaxed text-muted-foreground">
-          Global sensitivity analysis (GSA) shows how much each input of your
-          model contributes to the variability of its output. Define your
-          inputs, draw a design, run your own model, upload the outputs — the
-          indices compute entirely in your browser.
-        </p>
-
-        <div className="mb-6">
-          <StepRail steps={steps} />
+      <main className="mx-auto max-w-[1560px] px-5 py-8 sm:px-8 lg:py-10">
+        <div className="mb-9 grid gap-6 border-b border-border/60 pb-8 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+          <div>
+            <p className="mb-3 font-mono text-xs uppercase tracking-[0.18em] text-primary">
+              Global sensitivity analysis · local compute
+            </p>
+            <h1 className="max-w-4xl text-3xl font-medium tracking-[-0.035em] sm:text-4xl lg:text-5xl">
+              Find which inputs move your model.
+            </h1>
+            <p className="mt-4 max-w-3xl text-base leading-relaxed text-muted-foreground">
+              Define the input space, create an evaluation design, then bring
+              back your model outputs. Sampling, analysis, and result export
+              all run in this browser.
+            </p>
+          </div>
+          <div className="flex flex-col items-start gap-2 lg:items-end">
+            <span className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
+              Python package
+            </span>
+            <div className="flex flex-wrap items-center gap-2">
+              <InstallCommand command="pip install jaxgsa" />
+              <InstallCommand command="uv add jaxgsa" />
+            </div>
+          </div>
         </div>
 
-        <div className="xl:grid xl:grid-cols-[minmax(0,1fr)_400px] xl:items-start xl:gap-8">
-          <div className="space-y-10">
+        <div className="sticky top-0 z-20 -mx-5 mb-8 border-y border-border/60 bg-background/90 px-5 py-3 backdrop-blur sm:-mx-8 sm:px-8 lg:static lg:mx-0 lg:rounded-lg lg:border lg:bg-card/35 lg:px-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <StepRail steps={steps} />
+            <div className="hidden items-center gap-4 font-mono text-[11px] text-muted-foreground md:flex">
+              <span>files stay local</span>
+              <span className="text-border">·</span>
+              <span>{device?.webgpuAvailable ? "WebGPU available · using WASM f64" : "WASM float64"}</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="xl:grid xl:grid-cols-[minmax(620px,1fr)_minmax(500px,0.82fr)] xl:items-start xl:gap-10 2xl:gap-14">
+          <div className="min-w-0 space-y-12">
             <Section
               id="problem"
               step={1}
@@ -380,11 +380,16 @@ export default function App() {
 
           <aside
             id="results"
-            className="mt-10 scroll-mt-6 xl:sticky xl:top-6 xl:mt-0 xl:max-h-[calc(100vh-3rem)] xl:overflow-y-auto xl:pr-1"
+            className="mt-12 min-w-0 scroll-mt-20 border-t border-border/60 pt-8 xl:sticky xl:top-6 xl:mt-0 xl:max-h-[calc(100vh-3rem)] xl:overflow-y-auto xl:border-l xl:border-t-0 xl:pl-8 xl:pr-2 xl:pt-0 2xl:pl-10"
           >
-            <div className="mb-4">
-              <p className="text-lg font-normal tracking-tight">Results</p>
-              <div className="mt-2 border-t border-border/60" />
+            <div className="mb-5 flex items-baseline justify-between gap-4">
+              <div>
+                <p className="font-mono text-xs uppercase tracking-[0.16em] text-muted-foreground">Output</p>
+                <p className="mt-1 text-2xl font-medium tracking-tight">Results</p>
+              </div>
+              <span className="text-xs text-muted-foreground">
+                {results.length === 0 ? "waiting for an analysis" : `${results.length} saved in this session`}
+              </span>
             </div>
             <ResultsPanel
               problem={problem}
@@ -399,8 +404,9 @@ export default function App() {
       </main>
 
       <footer className="border-t border-border/60">
-        <div className="mx-auto max-w-6xl px-6 py-5 text-sm text-muted-foreground">
-          Runs entirely in your browser — nothing leaves this page.
+        <div className="mx-auto flex max-w-[1560px] flex-wrap items-center justify-between gap-3 px-5 py-5 text-sm text-muted-foreground sm:px-8">
+          <span>Runs entirely in your browser — nothing leaves this page.</span>
+          <span className="font-mono text-xs">jaxgsa 0.9.1 reference</span>
         </div>
       </footer>
     </div>

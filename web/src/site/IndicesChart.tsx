@@ -191,7 +191,7 @@ export function IndicesChart({
           png
         </Button>
       </div>
-      <div className="min-h-[300px]">
+      <div className="min-h-[340px] sm:min-h-[380px]">
         <ChartErrorBoundary>
           <AgCharts ref={chartRef} options={options} />
         </ChartErrorBoundary>

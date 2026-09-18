@@ -190,10 +190,19 @@ export function ResultsPanel({
       </AnimatePresence>
 
       {results.length === 0 && (
-        <Card>
-          <CardContent className="py-10 text-center text-sm text-muted-foreground">
-            No results yet — run an analysis in section 03. Each method card
-            there sends its result here.
+        <Card className="border-dashed bg-card/45">
+          <CardContent className="py-12 sm:py-16">
+            <div className="mx-auto max-w-md text-center">
+              <div className="mx-auto mb-5 flex size-12 items-center justify-center rounded-full border border-border bg-muted/35 font-mono text-sm text-muted-foreground">
+                03
+              </div>
+              <p className="text-base text-foreground">Your analysis will appear here</p>
+              <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+                Load a demo for a quick tour, or attach your own model outputs
+                in Analyze. Results include an interactive chart, exact values,
+                and reproducible downloads.
+              </p>
+            </div>
           </CardContent>
         </Card>
       )}
