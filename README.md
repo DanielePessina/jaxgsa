@@ -48,6 +48,40 @@ Python 3.12 or newer. The runtime dependencies are `jax`, `jaxlib`, `numpy`,
 `scipy`, and `xarray`. Optional extras: `examples` (matplotlib) and
 `dev` (pytest, ruff, ty, SALib, POT).
 
+## Develop the web workbench
+
+The browser workbench is a separate Vite app under [`web/`](web/). It runs the
+ported analysis code locally in the browser; it does not start a Python server.
+
+```bash
+cd web
+npm install
+npm run dev          # start the local Vite server
+```
+
+The web checks are:
+
+```bash
+cd web
+npm run typecheck
+npm run lint
+npm test
+npm run build
+```
+
+The VitePress documentation site is a separate project under [`docs/`](docs/).
+Run its commands from `docs/`, or use `npm --prefix docs ...` from the
+repository root:
+
+```bash
+npm --prefix docs install
+npm --prefix docs run docs:dev
+npm --prefix docs run docs:check
+```
+
+The web workbench and the documentation site have separate dependency installs
+and development servers.
+
 ## Citing jaxgsa
 
 If you use jaxgsa in research, cite the exact version that produced your
