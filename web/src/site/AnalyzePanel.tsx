@@ -47,23 +47,27 @@ const DEFAULT_SELECTION: Record<MethodKey, boolean> = {
 function availability(
   x: XSource | null,
 ): Record<MethodKey, MethodAvailability> {
-  const design = x?.kind === "design" ? x.method : null;
-  const uploaded = x?.kind === "uploaded";
-  const needsDesign = (m: DesignMethod) =>
-    design === m
-      ? { available: true, reason: null }
-      : {
-          available: false,
-          reason: uploaded
-            ? `Its analysis needs the ${m} design; only PCE and Shapley run on arbitrary point clouds.`
-            : `Requires the ${m} design — generate one in section 02.`,
-        };
-  return {
-    sobol: needsDesign("sobol"),
-    morris: needsDesign("morris"),
-    pce: { available: true, reason: null },
-    shapley: { available: true, reason: null },
-  };
+  return Object.fromEntries(
+    ALL_METHODS.map((method) => {
+      const input = METHOD_META[method].input;
+      if (input.kind === "dedicated") {
+        const available = x?.kind === "design" && x.method === input.design;
+        return [method, {
+          available,
+          reason: available
+            ? null
+            : `Requires its own ${input.design} design.`,
+        }];
+      }
+      const available = x?.kind === "uploaded";
+      return [method, {
+        available,
+        reason: available
+          ? null
+          : "Uses an ordinary uploaded X/Y point cloud, not a dedicated estimator design.",
+      }];
+    }),
+  ) as Record<MethodKey, MethodAvailability>;
 }
 
 export function AnalyzePanel({
@@ -125,14 +129,11 @@ export function AnalyzePanel({
   // Selecting a design's X source auto-enables its analysis method.
   useEffect(() => {
     if (xSource?.kind === "design") {
-      setSelected((s) => ({
-        ...s,
-        // Only the selected design can run its design-specific estimator.
-        // Clear the other one so a source switch cannot leave a checked but
-        // disabled method behind.
+      setSelected(() => ({
         sobol: xSource.method === "sobol",
         morris: xSource.method === "morris",
-        [xSource.method]: true,
+        pce: false,
+        shapley: false,
       }));
     }
   }, [xSource]);
@@ -148,7 +149,7 @@ export function AnalyzePanel({
     setXSource({ kind: "uploaded" });
     setGivenX(x);
     setGivenXLabel(label);
-    setSelected((s) => ({ ...s, sobol: false, morris: false }));
+    setSelected({ sobol: false, morris: false, pce: true, shapley: false });
     setYData(null);
     setError(null);
   };
@@ -212,6 +213,7 @@ export function AnalyzePanel({
   const selectedAvailable = ALL_METHODS.filter(
     (m) => selected[m] && avail[m].available,
   );
+  const compatibleMethods = ALL_METHODS.filter((m) => avail[m].available);
 
   const onRun = async () => {
     if (!problem || !yData) return;
@@ -276,9 +278,10 @@ export function AnalyzePanel({
             Input data
           </CardTitle>
           <CardDescription>
-            X is either a design you sampled above or your own point cloud.
-            The methods you can run depend on which one you load — PCE and
-            Shapley work on any data, the other two only on their own design.
+            Choose a dedicated design for its paired estimator, or upload an
+            ordinary point cloud for the given-data methods. The workbench
+            keeps those routes separate so a shape-compatible array is not
+            mistaken for a method-compatible design.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -361,8 +364,8 @@ export function AnalyzePanel({
               label="Upload outputs (Y)"
               hint={
                 xSource?.kind === "design"
-                  ? "CSV/Parquet with a run_id column (any order) + one or more output columns — y, or name / name_t0, name_t1…"
-                  : "one column per output — y, or name / name_t0, name_t1… — one value per X row"
+                  ? "CSV/Parquet with run_id (any order) + outputs — y, or name_t0, name_t0.5… for time-resolved data"
+                  : "one column per output slice — y, or name_t0, name_t0.5… — one value per X row"
               }
               disabled={busy || running !== null}
               onLoaded={onUploadY}
@@ -414,17 +417,19 @@ export function AnalyzePanel({
               />
             </div>
           </div>
+          {xSource === null ? (
+            <div className="rounded-sm border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
+              Select a sampled design or upload X to see compatible analyses.
+            </div>
+          ) : (
           <div className="grid gap-3 md:grid-cols-2">
-            {ALL_METHODS.map((m) => {
-              const a = avail[m];
+            {compatibleMethods.map((m) => {
               const on = selected[m];
               return (
                 <label
                   key={m}
                   className={`rounded-sm border p-3 transition-colors ${
-                    !a.available
-                      ? "cursor-not-allowed opacity-50"
-                      : on
+                    on
                         ? "cursor-pointer border-primary/50 bg-accent/30"
                         : "cursor-pointer border-border hover:bg-muted/40"
                   }`}
@@ -433,7 +438,6 @@ export function AnalyzePanel({
                     <input
                       type="checkbox"
                       checked={on}
-                      disabled={!a.available}
                       onChange={(e) =>
                         setSelected((s) => ({ ...s, [m]: e.target.checked }))
                       }
@@ -443,12 +447,10 @@ export function AnalyzePanel({
                     <span className="ml-auto flex items-center gap-2">
                       <span
                         className={`rounded-sm border px-1.5 py-0.5 font-mono text-[10px] ${
-                          a.available
-                            ? "border-primary/40 bg-primary/10 text-primary"
-                            : "border-border bg-muted/30 text-muted-foreground/60"
+                          "border-primary/40 bg-primary/10 text-primary"
                         }`}
                       >
-                        {a.available ? "ready" : "locked"}
+                        compatible
                       </span>
                       <span className="font-mono text-[10px] text-muted-foreground">
                         {METHOD_META[m].tag}
@@ -456,15 +458,25 @@ export function AnalyzePanel({
                     </span>
                   </div>
                   <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
-                    {a.reason ?? METHOD_META[m].blurb}
+                    {METHOD_META[m].blurb}
                   </p>
                 </label>
               );
             })}
           </div>
+          )}
+          {xSource && (
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              {xSource.kind === "design"
+                ? `This ${xSource.method} design is paired with ${xSource.method} analysis. To use PCE or Shapley, switch to “my own X” and upload an ordinary point cloud.`
+                : "PCE and PCE-backed Shapley can share this uploaded point cloud. Dedicated Sobol and Morris estimators require designs generated in section 02."}
+            </p>
+          )}
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="font-mono text-xs text-muted-foreground">
-              runs on the same (X, Y) — no permutation Monte Carlo
+              {compatibleMethods.length > 1
+                ? "selected methods share this uploaded (X, Y)"
+                : "design and estimator are paired"}
             </p>
             <Button
               type="button"

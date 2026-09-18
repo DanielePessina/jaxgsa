@@ -9,6 +9,7 @@ import {
   buildDesignCsv,
   buildSessionJson,
   classifyYColumn,
+  describeY,
   generateDesign,
   parseCsv,
   parseXGiven,
@@ -63,10 +64,14 @@ describe("buildDesignCsv", () => {
   });
 });
 
-describe("classifyYColumn (the _t{t} contract)", () => {
-  it("maps name_t{digits} to output at a timepoint", () => {
+describe("classifyYColumn (the _t{time} contract)", () => {
+  it("maps numeric time suffixes to arbitrary finite coordinates", () => {
     expect(classifyYColumn("y_t0")).toEqual({ output: "y", time: 0 });
     expect(classifyYColumn("pressure_t12")).toEqual({ output: "pressure", time: 12 });
+    expect(classifyYColumn("pressure_t0.5")).toEqual({ output: "pressure", time: 0.5 });
+    expect(classifyYColumn("pressure_t-1.25")).toEqual({ output: "pressure", time: -1.25 });
+    expect(classifyYColumn("pressure_t2e-3")).toEqual({ output: "pressure", time: 0.002 });
+    expect(classifyYColumn("pressure_t-0")).toEqual({ output: "pressure", time: 0 });
   });
 
   it("treats anything else as time 0", () => {
@@ -97,6 +102,19 @@ describe("parseYColumns (Y schema classification)", () => {
     expect(columns.map((c) => [c.output, c.time])).toEqual([
       ["y", 0],
       ["y", 1],
+    ]);
+  });
+
+  it("groups channels in first-seen order and sorts each irregular time grid", () => {
+    const parsed = parseCsv(
+      "run_id,temp_t3,pressure_t4,temp_t0.5,pressure_t0\n0,1,2,3,4\n",
+    );
+    const { columns } = parseYColumns(parsed, ISHIGAMI_PROBLEM);
+    expect(columns.map((c) => [c.output, c.time])).toEqual([
+      ["temp", 0.5],
+      ["temp", 3],
+      ["pressure", 0],
+      ["pressure", 4],
     ]);
   });
 
@@ -134,6 +152,35 @@ describe("parseYColumns (Y schema classification)", () => {
   it("rejects a duplicate run_id column", () => {
     const parsed = parseCsv("run_id,run_id,y\n0,0,1\n");
     expect(() => parseYColumns(parsed, ISHIGAMI_PROBLEM)).toThrow(/duplicate run_id/);
+  });
+});
+
+describe("describeY", () => {
+  const values = new Float64Array([1, 2]);
+
+  it("describes a shared regular grid", () => {
+    expect(describeY({
+      columns: [
+        { output: "a", time: 0, values },
+        { output: "a", time: 0.5, values },
+        { output: "b", time: 0, values },
+        { output: "b", time: 0.5, values },
+      ],
+      rowCount: 2,
+      label: "test",
+    })).toBe("2 outputs · 2 time points · 2 runs");
+  });
+
+  it("calls out irregular grids instead of inferring max(time) + 1", () => {
+    expect(describeY({
+      columns: [
+        { output: "a", time: 0.5, values },
+        { output: "a", time: 3, values },
+        { output: "b", time: 4, values },
+      ],
+      rowCount: 2,
+      label: "test",
+    })).toBe("2 outputs · 3 slices · irregular time grids · 2 runs");
   });
 });
 

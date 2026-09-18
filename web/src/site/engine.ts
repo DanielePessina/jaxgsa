@@ -90,18 +90,21 @@ export interface YData {
   label: string;
 }
 
-/** The `_t{t}` timepoint suffix: `<output>_t<digits>`. */
-const TIME_SUFFIX_RE = /^(.+)_t([0-9]+)$/;
+/** The `_t{time}` suffix. Time coordinates may be any finite decimal. */
+const TIME_SUFFIX_RE = /^(.+)_t([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)$/;
 
 /**
- * Classify one output column name per the `_t{t}` exchange contract:
- * `<output>_t<digits>` names that output at a time point; anything else is
- * `<name>` at time 0. `_t<digits>` is a reserved suffix — an output literally
- * named e.g. `foo_t2` must be written `foo_t2_t0`. See PLAN-WEB-UI.md D1.
+ * Classify one output column name per the `_t{time}` exchange contract:
+ * `<output>_t<number>` names that output at an arbitrary time coordinate;
+ * anything else is `<name>` at time 0. A numeric `_t...` suffix is reserved —
+ * an output literally named e.g. `foo_t2` must be written `foo_t2_t0`.
  */
 export function classifyYColumn(name: string): { output: string; time: number } {
   const m = TIME_SUFFIX_RE.exec(name);
-  if (m) return { output: m[1], time: Number(m[2]) };
+  if (m) {
+    const time = Number(m[2]);
+    return { output: m[1], time: Object.is(time, -0) ? 0 : time };
+  }
   return { output: name, time: 0 };
 }
 
@@ -165,6 +168,18 @@ export function parseYColumns(
     }
   }
 
+  // Match the Python irregular-output contract: retain channel order, but
+  // sort each channel's finite time coordinates rather than requiring the
+  // upload header to already be chronological.
+  const outputOrder = new Map<string, number>();
+  for (const d of defs) {
+    if (!outputOrder.has(d.output)) outputOrder.set(d.output, outputOrder.size);
+  }
+  defs.sort(
+    (a, b) =>
+      outputOrder.get(a.output)! - outputOrder.get(b.output)! || a.time - b.time,
+  );
+
   const columns: YColumn[] = defs.map((d) => {
     const values = new Float64Array(n);
     for (let i = 0; i < n; i++) values[i] = parsed.rows[i][d.src];
@@ -189,10 +204,22 @@ export function scalarYData(values: Float64Array, label: string): YData {
 
 /** Short human summary of the slices a YData carries. */
 export function describeY(y: YData): string {
-  const outs = new Set(y.columns.map((c) => c.output));
-  const maxT = Math.max(...y.columns.map((c) => c.time));
-  const tDesc = maxT === 0 ? "1 time step" : `${maxT + 1} time steps`;
-  return `${outs.size} output${outs.size > 1 ? "s" : ""} · ${tDesc} · ${y.rowCount} runs`;
+  const grids = new Map<string, number[]>();
+  for (const c of y.columns) {
+    const times = grids.get(c.output) ?? [];
+    times.push(c.time);
+    grids.set(c.output, times);
+  }
+  const entries = [...grids.values()];
+  const first = entries[0] ?? [];
+  const sharedGrid = entries.every(
+    (times) => times.length === first.length && times.every((t, i) => t === first[i]),
+  );
+  const outputDesc = `${grids.size} output${grids.size === 1 ? "" : "s"}`;
+  const timeDesc = sharedGrid
+    ? `${first.length} time point${first.length === 1 ? "" : "s"}`
+    : `${y.columns.length} slices · irregular time grids`;
+  return `${outputDesc} · ${timeDesc} · ${y.rowCount} runs`;
 }
 
 /**

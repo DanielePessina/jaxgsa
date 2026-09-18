@@ -234,7 +234,8 @@ export function SamplePanel({
           <CardDescription>
             Each method draws its own design from your problem's marginals.
             Sampling and analysis are linked: a method can only analyze the
-            design it generated. PCE and Shapley work on any data.
+            design it generated. PCE and Shapley instead use an ordinary
+            uploaded X/Y point cloud.
           </CardDescription>
         </CardHeader>
         <CardContent>

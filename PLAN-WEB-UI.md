@@ -21,7 +21,7 @@ Everything stays client-side (GitHub Pages static). No server compute.
 
 | # | Topic | Decision |
 |---|---|---|
-| D1 | Y schema | **Wide format + `Problem.outputNames`.** `_t{t}` suffix is the reserved timepoint marker. X columns allowed & ignored in Y files. Default scalar output name `y`. |
+| D1 | Y schema | **Wide format + `Problem.outputNames`.** `_t{time}` accepts finite numeric coordinates and is the reserved timepoint marker. X columns allowed & ignored in Y files. Default scalar output name `y`. |
 | D2 | File formats | **CSV + Parquet read, CSV/JSON write.** Upload accepts `.csv` and `.parquet` (via `hyparquet`, pure-JS). Downloads remain CSV + session JSON. `.pkl/.joblib/.npy/.npz/.pt` rejected with a clear "unsafe/unsupported" message (pickle = arbitrary code execution). |
 | D3 | Plotting | **AG Charts** (`ag-charts-community` + `ag-charts-react`) as the working default, isolated behind an `IndicesChart` component so **Reaviz** is a one-file swap (user still deciding; this is the "decide later" slot). |
 | D4 | Typography | **Geist Sans + Geist Mono**, self-hosted via `@fontsource`. |
@@ -29,6 +29,7 @@ Everything stays client-side (GitHub Pages static). No server compute.
 | D4c | Animation (decided) | **Full Motion pass**: `motion` (framer-motion v12), copy-paste animated primitives (step rail, collapsible cards, slice tabs, results-dock transitions). |
 | D5 | Layout | **Two-column workbench.** Left = Problem → Sample → Analyze (collapsible cards + step-status rail). Right = sticky Results dock, live-updating. Stacks to a single column below `xl`. |
 | D6 | Analysis scope | **Schema + full multi-output/time analysis.** Ports stay per-slice scalar; engine loops over slices. |
+| D7 | Method compatibility | **Two explicit routes.** A dedicated Sobol or Morris design only exposes its paired analyzer. Uploaded ordinary X/Y exposes PCE and PCE-backed Shapley together. Cross-running a surrogate on a dedicated estimator design is deferred to a clearly labelled advanced mode with fit diagnostics. |
 
 Deferred (already documented in PLAN-WASM.md): hdmr, S2 estimator, correlation
 sampling, categorical marginals, WebGPU float32 acceleration.
@@ -58,7 +59,7 @@ this exact order:
 
 Output column name parsing:
 
-- Match `^(?<base>.+)_t(?<t>[0-9]+)$` → output `base` at time `t`.
+- Match a final `_t<number>` suffix → output `base` at that finite time coordinate (integers, decimals, signs, and scientific notation are accepted).
 - Otherwise → output `<name>` at time `t=0`.
 - Reserved rule: an output `base` must not itself end in `_t<digits>`
   (`foo_t2_t0` is the escape hatch for an output literally named `foo_t2`).
@@ -90,7 +91,7 @@ Validation rules:
 - All data rows have the same column count (existing `parseCsv` behavior).
 - ≥ 1 output column after classification.
 - No duplicate `(output, time)` pair (e.g. `y_t0` twice) → error naming both.
-- Time indices may be sparse (`y_t0, y_t3`) — slices are independent.
+- Time coordinates may be sparse or irregular (`y_t0, y_t0.5, y_t3`) — slices are independent and sorted within each output channel.
 - Design workflow: `run_id` required, must be a permutation of `0..rowCount-1`
   (existing `alignYByRunId` semantics, generalized to every column).
 - Given-data workflow: positional, N rows must equal X's N; `run_id` if present
