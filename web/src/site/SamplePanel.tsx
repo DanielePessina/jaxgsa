@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { AnimatePresence, motion } from "motion/react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -43,7 +44,6 @@ function DesignMethodCell({
 }) {
   const meta = DESIGN_METHOD_META[method];
   const [baseN, setBaseN] = useState("128");
-  const [secondOrder, setSecondOrder] = useState(false);
   const [nTrajectories, setNTrajectories] = useState("20");
   const [numLevels, setNumLevels] = useState("4");
   const [seed, setSeed] = useState("0");
@@ -52,7 +52,7 @@ function DesignMethodCell({
   const onGenerate = () => {
     const config =
       method === "sobol"
-        ? { baseN: Number(baseN), calcSecondOrder: secondOrder, seed: Number(seed) }
+        ? { baseN: Number(baseN), calcSecondOrder: false, seed: Number(seed) }
         : {
             nTrajectories: Number(nTrajectories),
             numLevels: Number(numLevels),
@@ -62,6 +62,10 @@ function DesignMethodCell({
   };
 
   const D = problem.names.length;
+  const plannedRuns =
+    method === "sobol"
+      ? Number(baseN) * (D + 2)
+      : Number(nTrajectories) * (D + 1);
   const preview = design
     ? Array.from({ length: Math.min(3, design.nRuns) }, (_, r) => {
         const row = new Array<number>(D);
@@ -95,15 +99,10 @@ function DesignMethodCell({
               min={16}
             />
             <div className="flex items-end pb-1">
-              <label className="flex cursor-pointer items-center gap-1.5 text-xs">
-                <input
-                  type="checkbox"
-                  checked={secondOrder}
-                  onChange={(e) => setSecondOrder(e.target.checked)}
-                  className="size-3.5 accent-[oklch(0.78_0.14_195)]"
-                />
-                Second order
-              </label>
+              <div className="rounded-sm border border-border/70 bg-muted/20 px-2.5 py-1.5 text-xs text-muted-foreground">
+                S1 + ST
+                <span className="ml-2 font-mono text-[10px]">S2 not ported yet</span>
+              </div>
             </div>
           </>
         )}
@@ -132,6 +131,15 @@ function DesignMethodCell({
           onChange={setSeed}
         />
       </div>
+
+      {Number.isFinite(plannedRuns) && plannedRuns > 0 && (
+        <div className="flex items-center justify-between rounded-sm border border-border/60 bg-muted/20 px-3 py-2 text-xs">
+          <span className="text-muted-foreground">Model evaluation budget</span>
+          <span className="font-mono tabular-nums">
+            up to {plannedRuns.toLocaleString()} runs
+          </span>
+        </div>
+      )}
 
       <Button type="button" size="sm" onClick={onGenerate} disabled={busy}>
         {busy ? "Generating…" : "Generate design"}
@@ -207,11 +215,15 @@ export function SamplePanel({
   problem,
   designs,
   onDesign,
+  onUseExisting,
 }: {
   problem: ProblemSpec | null;
   designs: Partial<Record<DesignMethod, GeneratedDesign>>;
   onDesign: (gen: GeneratedDesign) => void;
+  onUseExisting: () => void;
 }) {
+  const [selectedMethod, setSelectedMethod] = useState<DesignMethod>("sobol");
+
   if (!problem) {
     return (
       <Card>
@@ -228,28 +240,80 @@ export function SamplePanel({
       <ProblemChips problem={problem} />
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="font-mono text-sm uppercase tracking-wider text-muted-foreground">
-            design methods
+          <CardTitle className="text-base font-normal tracking-tight">
+            Choose how you are starting
           </CardTitle>
           <CardDescription>
-            Each method draws its own design from your problem's marginals.
-            Sampling and analysis are linked: a method can only analyze the
-            design it generated. PCE and Shapley instead use an ordinary
-            uploaded X/Y point cloud.
+            Pick the question first. A new experiment uses a method-specific
+            design; completed model runs use the given-data route.
           </CardDescription>
         </CardHeader>
-        <CardContent>
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {DESIGN_METHODS.map((m) => (
+        <CardContent className="space-y-5">
+          <div className="grid gap-2 md:grid-cols-3">
+            {DESIGN_METHODS.map((method) => {
+              const selected = selectedMethod === method;
+              const generated = designs[method] !== undefined;
+              return (
+                <button
+                  key={method}
+                  type="button"
+                  aria-pressed={selected}
+                  onClick={() => setSelectedMethod(method)}
+                  className={`group rounded-md border p-3 text-left transition-colors ${
+                    selected
+                      ? "border-primary/55 bg-accent/30"
+                      : "border-border bg-background/35 hover:border-border/90 hover:bg-muted/30"
+                  }`}
+                >
+                  <span className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-medium capitalize">{method}</span>
+                    <span className={`size-2 rounded-full ${selected ? "bg-primary" : "bg-muted-foreground/25"}`} />
+                  </span>
+                  <span className="mt-2 block text-xs leading-relaxed text-muted-foreground">
+                    {method === "sobol"
+                      ? "Quantify first-order and total variance. Best general default."
+                      : "Screen many inputs with fewer model evaluations."}
+                  </span>
+                  <span className="mt-3 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+                    {generated ? "design ready" : method === "sobol" ? "new experiment" : "lower budget"}
+                  </span>
+                </button>
+              );
+            })}
+            <button
+              type="button"
+              onClick={onUseExisting}
+              className="group rounded-md border border-border bg-background/35 p-3 text-left transition-colors hover:border-border/90 hover:bg-muted/30"
+            >
+              <span className="flex items-center justify-between gap-2">
+                <span className="text-sm font-medium">Existing X/Y</span>
+                <span className="text-muted-foreground transition-transform group-hover:translate-x-0.5">→</span>
+              </span>
+              <span className="mt-2 block text-xs leading-relaxed text-muted-foreground">
+                Fit PCE or calculate PCE-backed Shapley from completed runs.
+              </span>
+              <span className="mt-3 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+                upload data
+              </span>
+            </button>
+          </div>
+
+          <AnimatePresence mode="wait" initial={false}>
+            <motion.div
+              key={selectedMethod}
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -4 }}
+              transition={{ duration: 0.16, ease: "easeOut" }}
+            >
               <DesignMethodCell
-                key={m}
-                method={m}
+                method={selectedMethod}
                 problem={problem}
-                design={designs[m] ?? null}
+                design={designs[selectedMethod] ?? null}
                 onDesign={onDesign}
               />
-            ))}
-          </div>
+            </motion.div>
+          </AnimatePresence>
         </CardContent>
       </Card>
     </div>

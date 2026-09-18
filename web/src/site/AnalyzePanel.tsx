@@ -285,9 +285,10 @@ export function AnalyzePanel({
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs font-medium text-muted-foreground">X source</span>
-            <MonoSelect
+          <div className="grid gap-4 md:grid-cols-[auto_minmax(0,1fr)] md:items-start">
+            <div className="space-y-2">
+              <span className="block text-xs font-medium text-muted-foreground">X source</span>
+              <MonoSelect
               value={
                 xSource === null
                   ? "none"
@@ -308,7 +309,7 @@ export function AnalyzePanel({
                   pickDesign(v as DesignMethod);
                 }
               }}
-            >
+              >
               <option value="none" disabled>
                 no X loaded
               </option>
@@ -318,7 +319,11 @@ export function AnalyzePanel({
                 </option>
               ))}
               <option value="uploaded">my own X</option>
-            </MonoSelect>
+              </MonoSelect>
+              <p className="max-w-52 font-mono text-[11px] leading-relaxed text-muted-foreground">
+                {xLabel}
+              </p>
+            </div>
             <FileUpload
               label="Upload X"
               hint={`header: ${problem.names.join(", ")} — N rows`}
@@ -330,8 +335,6 @@ export function AnalyzePanel({
               exampleDisabled={busy || running !== null}
             />
           </div>
-
-          <p className="font-mono text-xs text-muted-foreground">{xLabel}</p>
 
           {activeDesign && activeDesign.summary.length > 0 && (
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-sm border border-border/60 bg-muted/20 px-3 py-2">
@@ -367,7 +370,7 @@ export function AnalyzePanel({
                   ? "CSV/Parquet with run_id (any order) + outputs — y, or name_t0, name_t0.5… for time-resolved data"
                   : "one column per output slice — y, or name_t0, name_t0.5… — one value per X row"
               }
-              disabled={busy || running !== null}
+              disabled={!xSource || busy || running !== null}
               onLoaded={onUploadY}
               onError={setError}
               exampleLabel={
@@ -392,31 +395,40 @@ export function AnalyzePanel({
               Methods
             </CardTitle>
             <CardDescription>
-              Select the analyses to run on this data. Methods that need a
-              different design are listed dimmed with the reason.
+              Only analyses compatible with the active X source are shown.
+              Given-data methods may be combined; dedicated designs stay
+              paired with their estimator.
             </CardDescription>
           </div>
-          <Button type="button" variant="ghost" size="sm" onClick={onResetMethods}>
-            reset
-          </Button>
+          {compatibleMethods.length > 1 && (
+            <Button type="button" variant="ghost" size="sm" onClick={onResetMethods}>
+              reset
+            </Button>
+          )}
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="flex flex-wrap items-end gap-4">
-            <div className="space-y-1.5">
-              <Label htmlFor="order" className="font-mono text-xs">
-                PCE polynomial order
-              </Label>
-              <Input
-                id="order"
-                type="number"
-                min={1}
-                step={1}
-                value={order}
-                onChange={(e) => setOrder(e.target.value)}
-                className="w-28 font-mono"
-              />
+          {xSource?.kind === "uploaded" && (
+            <div className="flex flex-wrap items-end gap-4 rounded-sm border border-border/60 bg-muted/20 p-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="order" className="font-mono text-xs">
+                  PCE polynomial order
+                </Label>
+                <Input
+                  id="order"
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={order}
+                  onChange={(e) => setOrder(e.target.value)}
+                  className="w-28 font-mono"
+                />
+              </div>
+              <p className="max-w-sm pb-1 text-xs leading-relaxed text-muted-foreground">
+                Shared by PCE and PCE-backed Shapley. Higher orders add basis
+                terms quickly as the parameter count grows.
+              </p>
             </div>
-          </div>
+          )}
           {xSource === null ? (
             <div className="rounded-sm border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
               Select a sampled design or upload X to see compatible analyses.

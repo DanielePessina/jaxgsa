@@ -253,7 +253,7 @@ export default function App() {
           : "results";
   const steps: StepState[] = [
     { id: "problem", title: "Problem", done: problem !== null, active: activeStep === "problem" },
-    { id: "sample", title: "Sample", done: sampleDone, active: activeStep === "sample" },
+    { id: "sample", title: "Data", done: sampleDone, active: activeStep === "sample" },
     { id: "analyze", title: "Analyze", done: analyzeDone, active: activeStep === "analyze" },
     { id: "results", title: "Results", done: resultsDone, active: activeStep === "results" },
   ];
@@ -347,10 +347,15 @@ export default function App() {
             <Section
               id="sample"
               step={2}
-              title="Sample"
-              description="Generate the input designs. Download the CSV, evaluate it with your model, and bring the outputs back to the Analyze section."
+              title="Choose data"
+              description="Start a new Sobol or Morris experiment, or continue with input-output data you already have."
             >
-              <SamplePanel problem={problem} designs={designs} onDesign={onDesign} />
+              <SamplePanel
+                problem={problem}
+                designs={designs}
+                onDesign={onDesign}
+                onUseExisting={() => scrollTo("analyze")}
+              />
             </Section>
 
             <Section

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { niceSteps, shapeChartData, type ChartDataRow } from "./IndicesChart";
+import { chartDomain, shapeChartData, type ChartDataRow } from "./IndicesChart";
 import type { AnalysisResult } from "./engine";
 
 const result: AnalysisResult = {
@@ -47,16 +47,15 @@ describe("shapeChartData", () => {
   });
 });
 
-describe("niceSteps", () => {
-  it("picks a ~5-line major step and a 1/5 minor step", () => {
-    expect(niceSteps(1)).toEqual({ major: 0.2, minor: 0.04 });
-    expect(niceSteps(0.8)).toEqual({ major: 0.2, minor: 0.04 });
-    expect(niceSteps(5)).toEqual({ major: 1, minor: 0.2 });
-    expect(niceSteps(0.03)).toEqual({ major: 0.01, minor: 0.002 });
+describe("chartDomain", () => {
+  it("keeps negative estimates visible around a zero baseline", () => {
+    const [min, max] = chartDomain([-0.1, 0.6]);
+    expect(min).toBeLessThan(-0.1);
+    expect(max).toBeGreaterThan(0.6);
   });
 
-  it("falls back for degenerate spans", () => {
-    expect(niceSteps(0)).toEqual({ major: 0.2, minor: 0.04 });
-    expect(niceSteps(Number.NaN)).toEqual({ major: 0.2, minor: 0.04 });
+  it("handles constant and non-finite input", () => {
+    expect(chartDomain([0])).toEqual([0, 1.08]);
+    expect(chartDomain([Number.NaN, Number.POSITIVE_INFINITY])).toEqual([0, 1.08]);
   });
 });
