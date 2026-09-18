@@ -3,7 +3,7 @@
 For each of the six hand-ported methods (sobol, kucherenko, morris, pce,
 hdmr, shapley) this script builds one fixed deterministic test case on the
 Ishigami benchmark (D=3, uniform [-pi, pi], scalar output) and writes the
-inputs plus the expected results as JSON under ``goldens/v0.9.0/<method>.json``.
+inputs plus the expected results as JSON under ``goldens/v<version>/<method>.json``.
 
 All math runs in float64 (``jax_enable_x64=True``), all random draws use the
 same fixed seed, and no RNG is ever left unseeded, so re-running the script
@@ -54,7 +54,7 @@ PCE_ORDER = 9
 PROBLEM = ishigami.PROBLEM
 JAXGSA_VERSION = jaxgsa.__version__
 
-OUT_DIR = Path(__file__).resolve().parent / "v0.9.0"
+OUT_DIR = Path(__file__).resolve().parent / f"v{JAXGSA_VERSION}"
 
 # Tolerances the TypeScript tests must use. Design methods are exact
 # estimator arithmetic on stored data, so they are allowed tight bands;

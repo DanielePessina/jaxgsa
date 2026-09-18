@@ -1,7 +1,7 @@
 # PLAN-WASM: jaxgsa in the browser (client-side wasm/WebGPU)
 
-Local planning doc (untracked, like PLAN-V1.0.md). Decides where to continue the
-jaxgsa-wasm work. Source of truth for the port remains the Python package.
+Local planning doc for the jaxgsa-wasm work. Source of truth for the port is
+the Python package at the head of stacked PR #82 (including PR #80).
 
 ## Goal
 
@@ -97,7 +97,8 @@ CI (GitHub Actions): regen goldens from pinned jaxgsa tag -> run TS tests in Nod
 ## Validation
 
 - Tolerance + ranking agreement vs Python goldens, never bit-exact.
-- Golden files generated from a pinned released jaxgsa tag (not master).
+- Golden files generated from the stacked package source and labelled with its
+  package version (currently 0.9.1).
 - pytest (Python) + Vitest (TS) both green in CI.
 
 ## Risks / open questions

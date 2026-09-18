@@ -1,7 +1,7 @@
 # Golden fixtures for the jaxgsa JavaScript port
 
 Deterministic reference outputs for the six hand-ported methods, produced by
-the Python package `jaxgsa` **0.9.0** in full float64. The TypeScript tests
+the Python package `jaxgsa` **0.9.1** in full float64. The TypeScript tests
 validate the wasm port against these files.
 
 ## Files
@@ -10,7 +10,7 @@ validate the wasm port against these files.
 goldens/
   generate.py            the generator (uv run python goldens/generate.py)
   README.md              this file
-  v0.9.0/
+  v0.9.1/
     sobol.json
     kucherenko.json
     morris.json
@@ -58,7 +58,7 @@ Flat and explicit; one file per method:
 ```json
 {
   "method": "sobol",
-  "jaxgsa_version": "0.9.0",
+  "jaxgsa_version": "0.9.1",
   "n": 2560,
   "x": [[...], ...],
   "y": [...],

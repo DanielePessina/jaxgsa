@@ -1,8 +1,8 @@
-import rawKucherenko from "../../goldens/v0.9.0/kucherenko.json";
-import rawMorris from "../../goldens/v0.9.0/morris.json";
-import rawPce from "../../goldens/v0.9.0/pce.json";
-import rawShapley from "../../goldens/v0.9.0/shapley.json";
-import rawSobol from "../../goldens/v0.9.0/sobol.json";
+import rawKucherenko from "../../goldens/v0.9.1/kucherenko.json";
+import rawMorris from "../../goldens/v0.9.1/morris.json";
+import rawPce from "../../goldens/v0.9.1/pce.json";
+import rawShapley from "../../goldens/v0.9.1/shapley.json";
+import rawSobol from "../../goldens/v0.9.1/sobol.json";
 
 export interface Golden {
   x: number[][];
@@ -30,7 +30,7 @@ export function loadKucherenkoGolden(): Golden {
     expected: {
       S1: RAW.expected.S1,
       ST: RAW.expected.ST,
-      // The v0.9.0 fixture stores the single variance as a bare float, not a
+      // The fixture stores the single variance as a bare float, not a
       // one-element list; normalize it so consumers always see number[].
       variance: Array.isArray(variance) ? variance : [variance],
     },
