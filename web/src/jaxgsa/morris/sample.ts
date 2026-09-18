@@ -70,13 +70,16 @@ function randomInt(rng: Rng, n: number): number {
 /** Fisher-Yates shuffle of [0, n), mirroring `rng.permutation(D)`. */
 function permutation(rng: Rng, n: number): Int32Array {
   const p = new Int32Array(n);
+
   for (let i = 0; i < n; i++) p[i] = i;
+
   for (let i = n - 1; i > 0; i--) {
     const j = randomInt(rng, i + 1);
     const tmp = p[i];
     p[i] = p[j];
     p[j] = tmp;
   }
+
   return p;
 }
 
@@ -124,16 +127,20 @@ function buildTrajectories(
   for (let j = 0; j < nTrajectories; j++) {
     // Per-trajectory draws, fixed order: base levels, step signs, order.
     for (let i = 0; i < D; i++) base[i] = 2 * randomInt(rng, nStartLevels); // even = on-grid
+
     for (let i = 0; i < D; i++) signs[i] = 2 * randomInt(rng, 2) - 1; // each +/-1
     const perm = permutation(rng, D);
 
     // A -delta step needs headroom below, so shift its start up by delta.
     for (let i = 0; i < D; i++) x[i] = base[i] + (signs[i] < 0 ? deltaInt : 0);
     const offset = j * (D + 1);
+
     for (let i = 0; i < D; i++) levelsInt[offset * D + i] = x[i];
+
     for (let s = 0; s < D; s++) {
       const i = perm[s];
       x[i] += signs[i] * deltaInt;
+
       for (let k = 0; k < D; k++) levelsInt[(offset + s + 1) * D + k] = x[k];
       eeIdxBefore[j * D + i] = offset + s;
       eeIdxAfter[j * D + i] = offset + s + 1;
@@ -143,6 +150,7 @@ function buildTrajectories(
 
   const denom = 2 * (p - 1);
   const expandedUnit = new Float64Array(levelsInt.length);
+
   for (let i = 0; i < levelsInt.length; i++) expandedUnit[i] = levelsInt[i] / denom;
 
   return { expandedUnit, eeIdxAfter, eeIdxBefore, eeDelta };
@@ -171,16 +179,21 @@ function squashOpenSides(
 ): void {
   for (let idx = 0; idx < D; idx++) {
     const spec = problem.marginals[idx];
+
     if (spec.kind !== "gaussian") continue;
     const loTarget = spec.low === undefined ? q : 0.0;
     const hiTarget = spec.high === undefined ? 1.0 - q : 1.0;
     const scale = hiTarget - loTarget;
+
     if (scale === 1.0) continue; // both sides already bounded, nothing to squash
     const nRows = expandedUnit.length / D;
+
     for (let r = 0; r < nRows; r++) {
       expandedUnit[r * D + idx] = loTarget + expandedUnit[r * D + idx] * scale;
     }
+
     const nEffects = eeDelta.length / D;
+
     for (let j = 0; j < nEffects; j++) eeDelta[j * D + idx] *= scale;
   }
 }
@@ -214,23 +227,28 @@ export function sampleMorris(
       `jaxgsa.morris.sample: truncationQuantile must be in (0, 0.5), got ${truncationQuantile}`,
     );
   }
+
   if (nTrajectories < 2) {
     throw new Error(
       `jaxgsa.morris.sample: n_trajectories must be >= 2, got ${nTrajectories}`,
     );
   }
+
   if (numLevels < 2) {
     throw new Error(`jaxgsa.morris.sample: num_levels must be >= 2, got ${numLevels}`);
   }
+
   if (method === "radial") {
     throw new Error(
       "jaxgsa.morris.sample: method='radial' is not yet ported (only the " +
         "trajectory Morris design is implemented)",
     );
   }
+
   if (method !== "trajectory") {
     throw new Error(`jaxgsa.morris.sample: method must be "trajectory", got ${method}`);
   }
+
   if (numLevels % 2 !== 0) {
     console.warn(
       `jaxgsa.morris.sample: num_levels=${numLevels} is odd — grid levels are not ` +
@@ -242,6 +260,7 @@ export function sampleMorris(
   const D = problem.names.length;
 
   const rng = splitmix32(seed >>> 0);
+
   const { expandedUnit, eeIdxAfter, eeIdxBefore, eeDelta } = buildTrajectories(
     nTrajectories,
     D,

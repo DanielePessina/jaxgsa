@@ -18,12 +18,14 @@ const TWO_32 = 4294967296;
  */
 export function splitmix32(seed: number): () => number {
   let a = seed >>> 0;
+
   return () => {
     a = (a + 0x9e3779b9) | 0;
     let t = a ^ (a >>> 16);
     t = Math.imul(t, 0x21f0aaad);
     t = t ^ (t >>> 15);
     t = Math.imul(t, 0x735a2d97);
+
     return (t = t ^ (t >>> 15)) >>> 0;
   };
 }
@@ -36,6 +38,7 @@ export function scrambleParams(seed: number, dim: number): [number, number] {
   g();
   const mask = g();
   const shift = g();
+
   return [mask, shift];
 }
 
@@ -80,9 +83,11 @@ export function sobolSequence(
       `Sobol' sequence dimension ${dim} out of range [1, ${SOBOL_MAX_DIM}]`,
     );
   }
+
   if (!Number.isInteger(count) || count < 1) {
     throw new RangeError(`Sobol' point count must be a positive integer (got ${count})`);
   }
+
   if (count > MAX_SOBOL_POINTS) {
     throw new RangeError(
       `Sobol' point count ${count} exceeds the cap of 2^24 = ${MAX_SOBOL_POINTS} ` +
@@ -94,6 +99,7 @@ export function sobolSequence(
   const out = new Float64Array(count * dim);
   const masks = new Uint32Array(dim);
   const shifts = new Uint32Array(dim);
+
   if (scramble) {
     for (let d = 0; d < dim; d++) {
       const [mask, shift] = scrambleParams(seed, d + 1);
@@ -103,22 +109,28 @@ export function sobolSequence(
   }
 
   const acc = new Uint32Array(dim);
+
   for (let i = 1; i <= count; i++) {
     const base = (i - 1) * dim;
     let n = i;
     // Accumulate, per dimension, the XOR of v[d][k] over the set bits k of i.
     acc.fill(0);
+
     while (n !== 0) {
       const lsb = n & -n;
       const k = 31 - Math.clz32(lsb);
+
       for (let d = 0; d < dim; d++) acc[d] ^= v[d][k];
       n &= n - 1;
     }
+
     for (let d = 0; d < dim; d++) {
       let x = acc[d];
+
       if (scramble) x = ((x ^ masks[d]) + shifts[d]) >>> 0;
       out[base + d] = x / TWO_32;
     }
   }
+
   return out;
 }

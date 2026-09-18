@@ -18,6 +18,7 @@ export function ErrorBanner({
   message: string;
 }) {
   const [copied, setCopied] = useState(false);
+
   return (
     <Alert variant="destructive">
       <div className="flex items-start justify-between gap-3">

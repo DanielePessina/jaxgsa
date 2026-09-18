@@ -58,18 +58,23 @@ function DesignMethodCell({
             numLevels: Number(numLevels),
             seed: Number(seed),
           };
+
     void run(() => onDesign(generateDesign(method, problem, config)));
   };
 
   const D = problem.names.length;
+
   const plannedRuns =
     method === "sobol"
       ? Number(baseN) * (D + 2)
       : Number(nTrajectories) * (D + 1);
+
   const preview = design
     ? Array.from({ length: Math.min(3, design.nRuns) }, (_, r) => {
         const row = new Array<number>(D);
+
         for (let j = 0; j < D; j++) row[j] = design.samples[r * D + j];
+
         return { id: r, row };
       })
     : [];
@@ -253,6 +258,7 @@ export function SamplePanel({
             {DESIGN_METHODS.map((method) => {
               const selected = selectedMethod === method;
               const generated = designs[method] !== undefined;
+
               return (
                 <button
                   key={method}

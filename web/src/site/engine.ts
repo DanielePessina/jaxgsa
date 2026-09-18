@@ -43,9 +43,11 @@ export function initEngine(): Promise<DeviceInfo> {
     engineInit = (async () => {
       const devices = await init();
       defaultDevice("wasm");
+
       return { device: "wasm", webgpuAvailable: devices.includes("webgpu") };
     })();
   }
+
   return engineInit;
 }
 
@@ -102,10 +104,13 @@ const TIME_SUFFIX_RE = /^(.+)_t([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)$/
  */
 export function classifyYColumn(name: string): { output: string; time: number } {
   const m = TIME_SUFFIX_RE.exec(name);
+
   if (m) {
     const time = Number(m[2]);
+
     return { output: m[1], time: Object.is(time, -0) ? 0 : time };
   }
+
   return { output: name, time: 0 };
 }
 
@@ -128,6 +133,7 @@ export function parseYColumns(
   const headers = parsed.headers.map((h) => h.trim());
   const xCols = new Set(problem.names);
   let runIdIdx = -1;
+
   for (let j = 0; j < headers.length; j++) {
     if (headers[j] === "run_id") {
       if (runIdIdx >= 0) throw new Error("duplicate run_id column");
@@ -136,11 +142,14 @@ export function parseYColumns(
   }
 
   const defs: { header: string; output: string; time: number; src: number }[] = [];
+
   for (let j = 0; j < headers.length; j++) {
     if (j === runIdIdx) continue;
+
     if (xCols.has(headers[j])) continue;
     defs.push({ header: headers[j], ...classifyYColumn(headers[j]), src: j });
   }
+
   if (defs.length === 0) {
     throw new Error(
       "no output columns found: the Y file needs at least one column " +
@@ -149,18 +158,22 @@ export function parseYColumns(
   }
 
   const seen = new Set<string>();
+
   for (const d of defs) {
     const key = `${d.output}\u0000${d.time}`;
+
     if (seen.has(key)) {
       throw new Error(
         `duplicate output column "${d.header}": ${d.output} at t${d.time} ` +
           `appears more than once`,
       );
     }
+
     seen.add(key);
   }
 
   const n = parsed.rows.length;
+
   for (let i = 0; i < n; i++) {
     if (parsed.rows[i].length !== headers.length) {
       throw new Error(
@@ -173,9 +186,11 @@ export function parseYColumns(
   // sort each channel's finite time coordinates rather than requiring the
   // upload header to already be chronological.
   const outputOrder = new Map<string, number>();
+
   for (const d of defs) {
     if (!outputOrder.has(d.output)) outputOrder.set(d.output, outputOrder.size);
   }
+
   defs.sort(
     (a, b) =>
       outputOrder.get(a.output)! - outputOrder.get(b.output)! || a.time - b.time,
@@ -183,12 +198,16 @@ export function parseYColumns(
 
   const columns: YColumn[] = defs.map((d) => {
     const values = new Float64Array(n);
+
     for (let i = 0; i < n; i++) values[i] = parsed.rows[i][d.src];
+
     return { output: d.output, time: d.time, values };
   });
 
   let runIds: number[] | null = null;
+
   if (runIdIdx >= 0) runIds = parsed.rows.map((r) => r[runIdIdx]);
+
   return { columns, runIds, rowCount: n };
 }
 
@@ -206,20 +225,26 @@ export function scalarYData(values: Float64Array, label: string): YData {
 /** Short human summary of the slices a YData carries. */
 export function describeY(y: YData): string {
   const grids = new Map<string, number[]>();
+
   for (const c of y.columns) {
     const times = grids.get(c.output) ?? [];
     times.push(c.time);
     grids.set(c.output, times);
   }
+
   const entries = [...grids.values()];
   const first = entries[0] ?? [];
+
   const sharedGrid = entries.every(
     (times) => times.length === first.length && times.every((t, i) => t === first[i]),
   );
+
   const outputDesc = `${grids.size} output${grids.size === 1 ? "" : "s"}`;
+
   const timeDesc = sharedGrid
     ? `${first.length} time point${first.length === 1 ? "" : "s"}`
     : `${y.columns.length} slices · irregular time grids`;
+
   return `${outputDesc} · ${timeDesc} · ${y.rowCount} runs`;
 }
 
@@ -229,28 +254,38 @@ export function describeY(y: YData): string {
  */
 export function parseCsv(text: string): ParsedCsv {
   const lines = text.split(/\r?\n/);
+
   while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
+
   if (lines.length === 0) return { headers: [], rows: [] };
 
   const headers = lines[0].split(",").map((s) => s.trim());
   const rows: number[][] = [];
+
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i].trim();
+
     if (line === "") continue;
     const cells = line.split(",").map((s) => s.trim());
     const row: number[] = [];
+
     for (let j = 0; j < cells.length; j++) {
       if (cells[j] === "") {
         throw new Error(`line ${i + 1}: empty cell in column ${j + 1}`);
       }
+
       const v = Number(cells[j]);
+
       if (Number.isNaN(v)) {
         throw new Error(`line ${i + 1}: "${cells[j]}" is not a number`);
       }
+
       row.push(v);
     }
+
     rows.push(row);
   }
+
   return { headers, rows };
 }
 
@@ -265,11 +300,14 @@ export function buildDesignCsv(
   const D = problem.names.length;
   const nRuns = design.samples.length / D;
   const lines = [`run_id,${problem.names.join(",")}`];
+
   for (let r = 0; r < nRuns; r++) {
     const cells = [String(r)];
+
     for (let j = 0; j < D; j++) cells.push(String(design.samples[r * D + j]));
     lines.push(cells.join(","));
   }
+
   return lines.join("\n") + "\n";
 }
 
@@ -286,15 +324,18 @@ export function alignColumnsByRunId(
   design: { samples: Float64Array; nParams: number },
 ): YColumn[] {
   const nRuns = design.samples.length / design.nParams;
+
   if (!Number.isInteger(nRuns)) {
     throw new Error("design.samples is not a whole number of rows");
   }
+
   if (columns.length > 0 && columns[0].values.length !== nRuns) {
     throw new Error(
       `run_id row count mismatch: the design has ${nRuns} rows but the ` +
         `uploaded Y CSV has ${columns[0].values.length}`,
     );
   }
+
   if (runIds.length !== nRuns) {
     throw new Error(
       `run_id column mismatch: expected ${nRuns} ids, found ${runIds.length}`,
@@ -302,18 +343,23 @@ export function alignColumnsByRunId(
   }
 
   const seen = new Uint8Array(nRuns);
+
   for (let i = 0; i < nRuns; i++) {
     const id = runIds[i];
+
     if (!Number.isInteger(id) || id < 0 || id >= nRuns) {
       throw new Error(
         `line ${i + 2}: invalid run_id ${id} (expected an integer in [0, ${nRuns}))`,
       );
     }
+
     if (seen[id] === 1) {
       throw new Error(`line ${i + 2}: duplicate run_id ${id}`);
     }
+
     seen[id] = 1;
   }
+
   for (let id = 0; id < nRuns; id++) {
     if (seen[id] === 0) {
       throw new Error(
@@ -324,7 +370,9 @@ export function alignColumnsByRunId(
 
   return columns.map((c) => {
     const out = new Float64Array(nRuns);
+
     for (let i = 0; i < nRuns; i++) out[runIds[i]] = c.values[i];
+
     return { output: c.output, time: c.time, values: out };
   });
 }
@@ -334,6 +382,7 @@ export function alignColumnsByRunId(
 // ---------------------------------------------------------------------------
 
 export type DesignMethod = "sobol" | "morris" | "kucherenko";
+
 export type GivenDataMethod = "pce" | "shapley";
 
 /** Where the X input comes from: a sampled design or an uploaded point cloud. */
@@ -344,15 +393,18 @@ export interface SobolConfig {
   calcSecondOrder: boolean;
   seed: number;
 }
+
 export interface MorrisConfig {
   nTrajectories: number;
   numLevels: number;
   seed: number;
 }
+
 export interface KucherenkoConfig {
   nSamples: number;
   seed: number;
 }
+
 export type DesignConfig = SobolConfig | MorrisConfig | KucherenkoConfig;
 
 export type PortDesign = SobolDesign | MorrisDesign | KucherenkoDesign;
@@ -386,18 +438,22 @@ export function generateDesign(
 
   if (method === "sobol") {
     const cfg = config as SobolConfig;
+
     if (cfg.calcSecondOrder) {
       notes.push(
         "S2 is not ported yet — the design was generated in first/total-order layout.",
       );
     }
+
     const port = sample(problem, 0, {
       baseN: cfg.baseN,
       calcSecondOrder: false,
       seed: cfg.seed,
       verbose: false,
     });
+
     const nRuns = port.samples.length / D;
+
     return {
       method,
       problem,
@@ -420,12 +476,15 @@ export function generateDesign(
 
   if (method === "morris") {
     const cfg = config as MorrisConfig;
+
     const port = sampleMorris(problem, cfg.nTrajectories, {
       numLevels: cfg.numLevels,
       seed: cfg.seed,
       verbose: false,
     });
+
     const nRuns = port.samples.length / D;
+
     return {
       method,
       problem,
@@ -446,6 +505,7 @@ export function generateDesign(
   const cfg = config as KucherenkoConfig;
   const port = sampleKucherenkoDesign(problem, cfg.nSamples, cfg.seed);
   const nRuns = port.samples.length / D;
+
   return {
     method,
     problem,
@@ -512,9 +572,11 @@ export function analyzeGenerated(gen: GeneratedDesign, y: YData): AnalysisResult
   for (const col of y.columns) {
     if (gen.method === "sobol") {
       const design = gen.port as SobolDesign;
+
       const { S1, ST }: SobolIndices = analyzeSobol(col.values, design.nParams, {
         expandedToUnique: design.expandedToUnique,
       });
+
       slices.push({
         output: col.output,
         time: col.time,
@@ -538,12 +600,15 @@ export function analyzeGenerated(gen: GeneratedDesign, y: YData): AnalysisResult
     } else {
       const design = gen.port as KucherenkoDesign;
       const nRuns = design.samples.length / design.nParams;
+
       const xNp = np
         .array(design.samples as Float64Array<ArrayBuffer>, { dtype: np.float64 })
         .reshape([nRuns, design.nParams]);
+
       const yNp = np.array(col.values as Float64Array<ArrayBuffer>, {
         dtype: np.float64,
       });
+
       const { S1, ST } = analyzeKucherenko(xNp, yNp);
       slices.push({
         output: col.output,
@@ -556,9 +621,7 @@ export function analyzeGenerated(gen: GeneratedDesign, y: YData): AnalysisResult
     }
   }
 
-  return result(gen.method, params, slices, gen.notes, {
-    ...Object.fromEntries(gen.summary),
-  });
+  return result(gen.method, params, slices, gen.notes, Object.fromEntries(gen.summary));
 }
 
 // ---------------------------------------------------------------------------
@@ -581,6 +644,7 @@ export function analyzeCloud(
   const params = problem.names;
   const xf = x instanceof Float64Array ? x : Float64Array.from(x);
   const N = xf.length / problem.names.length;
+
   if (!Number.isInteger(N)) {
     throw new Error(
       `x has ${xf.length} values, not a multiple of D=${problem.names.length}`,
@@ -588,12 +652,14 @@ export function analyzeCloud(
   }
 
   const slices: ResultSlice[] = [];
+
   for (const col of y.columns) {
     if (col.values.length !== N) {
       throw new Error(
         `x has ${N} rows but output "${col.output}" (t${col.time}) has ${col.values.length} values`,
       );
     }
+
     if (method === "pce") {
       const { S1, ST }: PceIndices = analyzePce(problem, xf, col.values, { order });
       slices.push({
@@ -608,6 +674,7 @@ export function analyzeCloud(
       const { Sh, S1, ST }: ShapleyIndices = analyzeShapleyPce(problem, xf, col.values, {
         order,
       });
+
       slices.push({
         output: col.output,
         time: col.time,
@@ -633,6 +700,7 @@ export function loadDemoCloud(
   const unit = sobolSequence(D, nSamples, true, seed);
   const x = transformSamples(demo.problem, unit);
   const y = demo.evaluate({ samples: x, nParams: D });
+
   return { x, y, n: nSamples };
 }
 
@@ -647,24 +715,31 @@ export function loadDemoCloud(
  */
 export function parseXGiven(parsed: ParsedCsv, problem: ProblemSpec): Float64Array {
   const D = problem.names.length;
+
   if (parsed.rows.length === 0) {
     throw new Error("the X CSV has no data rows");
   }
+
   const header = parsed.headers.map((h) => h.trim());
+
   if (header.length !== D || header.some((h, j) => h !== problem.names[j])) {
     throw new Error(
       `the X CSV header must be exactly: ${problem.names.join(", ")}`,
     );
   }
+
   for (let i = 0; i < parsed.rows.length; i++) {
     if (parsed.rows[i].length !== D) {
       throw new Error(`line ${i + 2}: expected ${D} columns, found ${parsed.rows[i].length}`);
     }
   }
+
   const flat = new Float64Array(parsed.rows.length * D);
+
   for (let i = 0; i < parsed.rows.length; i++) {
     for (let j = 0; j < D; j++) flat[i * D + j] = parsed.rows[i][j];
   }
+
   return flat;
 }
 
@@ -676,6 +751,7 @@ export function parseXGiven(parsed: ParsedCsv, problem: ProblemSpec): Float64Arr
 export function resultToCsv(result: AnalysisResult): string {
   const indexCols = result.slices[0]?.columns.map((c) => c.label) ?? [];
   const lines = [`output,time,parameter,${indexCols.join(",")}`];
+
   for (const s of result.slices) {
     for (let i = 0; i < result.parameters.length; i++) {
       lines.push(
@@ -688,6 +764,7 @@ export function resultToCsv(result: AnalysisResult): string {
       );
     }
   }
+
   return lines.join("\n") + "\n";
 }
 
@@ -727,8 +804,10 @@ export function buildSessionJson(
   results: AnalysisResult[],
 ): SessionJson {
   const designEntries: SessionJson["designs"] = {};
+
   for (const method of Object.keys(designs) as DesignMethod[]) {
     const gen = designs[method];
+
     if (gen) {
       designEntries[method] = {
         csv: buildDesignCsv(problem, gen),
@@ -737,6 +816,7 @@ export function buildSessionJson(
       };
     }
   }
+
   return {
     app: "jaxgsa-web",
     version: 2,

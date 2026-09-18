@@ -22,6 +22,7 @@ import type { ProblemSpec } from "@/jaxgsa/sampling";
 
 function InstallCommand({ command }: { command: string }) {
   const [copied, setCopied] = useState(false);
+
   return (
     <button
       type="button"
@@ -105,6 +106,7 @@ function Section({
   children: React.ReactNode;
 }) {
   const [open, setOpen] = useState(true);
+
   return (
     <section id={id} className="scroll-mt-6">
       <div className="mb-4">
@@ -154,9 +156,11 @@ export default function App() {
   const [device, setDevice] = useState<DeviceInfo | null>(null);
   const [initError, setInitError] = useState<string | null>(null);
   const [problem, setProblem] = useState<ProblemSpec | null>(null);
+
   const [designs, setDesigns] = useState<
     Partial<Record<DesignMethod, GeneratedDesign>>
   >({});
+
   const [yData, setYData] = useState<YData | null>(null);
   const [results, setResults] = useState<AnalysisResult[]>([]);
   const [xSource, setXSource] = useState<XSource | null>(null);
@@ -177,6 +181,7 @@ export default function App() {
       .catch((err) => {
         if (!cancelled) setInitError(err instanceof Error ? err.message : String(err));
       });
+
     return () => {
       cancelled = true;
     };
@@ -186,6 +191,7 @@ export default function App() {
     if (problemRef.current && JSON.stringify(problemRef.current) === JSON.stringify(p)) {
       return;
     }
+
     problemRef.current = p;
     setProblem(p);
     setDesigns({});
@@ -223,12 +229,14 @@ export default function App() {
     setGivenX(null);
     setGivenXLabel("no X data loaded");
     setXSource(null);
+
     try {
       const gen = generateDesign("sobol", demo.problem, {
         baseN: 64,
         calcSecondOrder: false,
         seed: 0,
       });
+
       const y = demo.evaluate(gen);
       setDesigns({ sobol: gen });
       setYData(scalarYData(y, `demo model (${demo.label}) · ${y.length} runs`));
@@ -243,6 +251,7 @@ export default function App() {
   const sampleDone = xSource !== null;
   const analyzeDone = yData !== null;
   const resultsDone = results.length > 0;
+
   const activeStep: StepId =
     problem === null
       ? "problem"
@@ -251,6 +260,7 @@ export default function App() {
         : !analyzeDone
           ? "analyze"
           : "results";
+
   const steps: StepState[] = [
     { id: "problem", title: "Problem", done: problem !== null, active: activeStep === "problem" },
     { id: "sample", title: "Data", done: sampleDone, active: activeStep === "sample" },

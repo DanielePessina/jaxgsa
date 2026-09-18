@@ -26,29 +26,37 @@ function sharingStructure(x: number[][], D: number, N: number) {
   let totalOk = true;
   let firstOthersRedrawn = true;
   let totalOthersRedrawn = true;
+
   for (let k = 0; k < Math.min(N, 16); k++) {
     for (let i = 0; i < D; i++) {
       if (first(i, k, i) !== joint(k, i)) firstOk = false;
+
       if (total(i, k, i) === joint(k, i)) totalOthersRedrawn = false;
+
       for (let j = 0; j < D; j++) {
         if (j !== i) {
           if (first(i, k, j) === joint(k, j)) firstOthersRedrawn = false;
+
           if (total(i, k, j) !== joint(k, j)) totalOk = false;
         }
       }
     }
   }
+
   return { firstOk, totalOk, firstOthersRedrawn, totalOthersRedrawn };
 }
 
 function toRows(samples: Float64Array, D: number): number[][] {
   const rows: number[][] = [];
   const nRuns = samples.length / D;
+
   for (let r = 0; r < nRuns; r++) {
     const row: number[] = [];
+
     for (let j = 0; j < D; j++) row.push(samples[r * D + j]);
     rows.push(row);
   }
+
   return rows;
 }
 
@@ -102,18 +110,22 @@ describe("kucherenko sampler: indices on a JS-sampled design", () => {
     const nRuns = design.samples.length / D;
     const y = new Float64Array(nRuns);
     const row: number[] = new Array(D);
+
     for (let r = 0; r < nRuns; r++) {
       for (let j = 0; j < D; j++) row[j] = design.samples[r * D + j];
       y[r] = ishigami(row);
     }
+
     const xNp = np
       .array(design.samples as Float64Array<ArrayBuffer>, { dtype: np.float64 })
       .reshape([nRuns, D]);
+
     const yNp = np.array(y as Float64Array<ArrayBuffer>, { dtype: np.float64 });
     const { S1, ST } = analyzeKucherenko(xNp, yNp);
 
     const s1Exp = [0.314, 0.443, 0.0];
     const stExp = [0.558, 0.443, 0.244];
+
     for (let i = 0; i < 3; i++) {
       expect(Math.abs(S1[i] - s1Exp[i])).toBeLessThan(0.06);
       expect(Math.abs(ST[i] - stExp[i])).toBeLessThan(0.06);

@@ -42,9 +42,12 @@ function outputNamesFromInput(raw: string): string[] | null {
     .split(",")
     .map((s) => s.trim())
     .filter((s) => s !== "");
+
   if (names.length === 0) return null;
   const dup = names.find((n, i) => names.indexOf(n) !== i);
+
   if (dup !== undefined) throw new Error(`duplicate output name: ${dup}`);
+
   return names;
 }
 
@@ -66,35 +69,48 @@ function rowToSpec(row: ProblemRow): {
   error: string | null;
 } {
   const name = row.name.trim();
+
   if (name === "") return { spec: null, error: "name is required" };
+
   if (row.dist === "uniform") {
     const low = Number(row.low);
     const high = Number(row.high);
+
     if (row.low.trim() === "" || row.high.trim() === "" || Number.isNaN(low) || Number.isNaN(high)) {
       return { spec: null, error: "low and high must be numbers" };
     }
+
     if (low >= high) return { spec: null, error: "low must be < high" };
+
     return { spec: { kind: "uniform", low, high }, error: null };
   }
+
   const mean = Number(row.mean);
   const variance = Number(row.variance);
+
   if (row.mean.trim() === "" || row.variance.trim() === "" || Number.isNaN(mean) || Number.isNaN(variance)) {
     return { spec: null, error: "mean and variance must be numbers" };
   }
+
   if (variance <= 0) return { spec: null, error: "variance must be > 0" };
   const low = row.gLow.trim() === "" ? undefined : Number(row.gLow);
   const high = row.gHigh.trim() === "" ? undefined : Number(row.gHigh);
+
   if (low !== undefined && Number.isNaN(low)) return { spec: null, error: "lower bound must be a number" };
+
   if (high !== undefined && Number.isNaN(high)) return { spec: null, error: "upper bound must be a number" };
+
   if (low !== undefined && high !== undefined && low >= high) {
     return { spec: null, error: "lower bound must be < upper bound" };
   }
+
   return { spec: { kind: "gaussian", mean, variance, low, high }, error: null };
 }
 
 function rowsFromProblem(p: ProblemSpec): ProblemRow[] {
   return p.names.map((name, j) => {
     const m = p.marginals[j];
+
     if (m.kind === "uniform") {
       return {
         name,
@@ -107,9 +123,11 @@ function rowsFromProblem(p: ProblemSpec): ProblemRow[] {
         gHigh: "",
       };
     }
+
     if (m.kind !== "gaussian") {
       throw new Error("categorical marginals are not ported yet");
     }
+
     return {
       name,
       dist: "gaussian" as const,
@@ -137,6 +155,7 @@ export function ProblemPanel({
   const [rows, setRows] = useState<ProblemRow[]>(() =>
     rowsFromProblem(demoById("linear").problem),
   );
+
   const [demoId, setDemoId] = useState<DemoId>("linear");
   const [outputNamesRaw, setOutputNamesRaw] = useState("");
 
@@ -146,6 +165,7 @@ export function ProblemPanel({
 
   let outputNames: string[] | null = null;
   let outputNamesError: string | null = null;
+
   if (outputNamesRaw.trim() !== "") {
     try {
       outputNames = outputNamesFromInput(outputNamesRaw);
@@ -228,6 +248,7 @@ export function ProblemPanel({
               <tbody>
                 {rows.map((row, i) => {
                   const err = specs[i].error ?? (dupNames ? "names must be unique" : null);
+
                   return (
                     <tr key={i} className="border-b border-border/60">
                       <td className="px-2 py-2">
@@ -387,12 +408,14 @@ export function ProblemPanel({
               </Badge>
               {current.names.map((n, j) => {
                 const m = current.marginals[j];
+
                 const label =
                   m.kind === "uniform"
                     ? `~ U(${m.low.toFixed(3)}, ${m.high.toFixed(3)})`
                     : m.kind === "gaussian"
                       ? `~ N(${m.mean}, ${m.variance}${m.low !== undefined || m.high !== undefined ? " truncated" : ""})`
                       : "categorical";
+
                 return (
                   <span
                     key={n}

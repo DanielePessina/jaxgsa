@@ -21,11 +21,13 @@ function allclose(
   tol: { atol: number; rtol: number },
 ): boolean {
   if (actual.length !== expected.length) return false;
+
   for (let i = 0; i < actual.length; i++) {
     if (!(Math.abs(actual[i] - expected[i]) <= tol.atol + tol.rtol * Math.abs(expected[i]))) {
       return false;
     }
   }
+
   return true;
 }
 
@@ -34,15 +36,19 @@ function flattenRows(x: number[][]): Float64Array {
   const n = x.length;
   const d = x[0].length;
   const out = new Float64Array(n * d);
+
   for (let i = 0; i < n; i++) {
     for (let j = 0; j < d; j++) out[i * d + j] = x[i][j];
   }
+
   return out;
 }
 
 function totalDegree(mi: MultiIndex, t: number): number {
   let s = 0;
+
   for (let d = 0; d < mi.D; d++) s += mi.flat[t * mi.D + d];
+
   return s;
 }
 
@@ -135,6 +141,7 @@ describe("buildMultiIndex", () => {
     expect(mi.nTerms).toBe(comb(12, 9));
     expect(mi.nTerms).toBe(220);
     expect(mi.flat.length).toBe(mi.nTerms * mi.D);
+
     for (let d = 0; d < mi.D; d++) expect(mi.flat[d]).toBe(0);
   });
 
@@ -142,6 +149,7 @@ describe("buildMultiIndex", () => {
     const mi = buildMultiIndex(3, 2);
     expect(mi.nTerms).toBe(comb(5, 2));
     expect(mi.nTerms).toBe(10);
+
     // Python order for D=3, p=2: (0,0,0), then degree 1 lex, then degree 2 lex.
     const expected = [
       [0, 0, 0],
@@ -155,6 +163,7 @@ describe("buildMultiIndex", () => {
       [1, 1, 0],
       [2, 0, 0],
     ];
+
     for (let t = 0; t < expected.length; t++) {
       for (let d = 0; d < 3; d++) expect(mi.flat[t * 3 + d]).toBe(expected[t][d]);
     }
@@ -163,6 +172,7 @@ describe("buildMultiIndex", () => {
   it("keeps total degrees non-decreasing across all rows", () => {
     const mi = buildMultiIndex(3, 9);
     let prev = 0;
+
     for (let t = 0; t < mi.nTerms; t++) {
       const deg = totalDegree(mi, t);
       expect(deg).toBeGreaterThanOrEqual(prev);
@@ -186,10 +196,12 @@ describe("analyzePce fit sanity (order 9 on the golden cloud)", () => {
     const golden = loadPceGolden();
     const x = flattenRows(golden.x);
     const y = Float64Array.from(golden.y);
+
     const fit = fitPce(PCE_GOLDEN_PROBLEM, x, y, {
       order: golden.config.order,
       ridge: golden.config.ridge,
     });
+
     expect(fit.coeffs.shape).toEqual([fit.mi.nTerms]);
     coeffs = fit.coeffs.ref.dataSync() as Float64Array; // ref'd: sobol consumes the array below
     ({ S1, ST } = sobolFromCoefficients(fit.coeffs, fit.mi));
@@ -197,6 +209,7 @@ describe("analyzePce fit sanity (order 9 on the golden cloud)", () => {
 
   it("fitted coefficients are finite", () => {
     expect(coeffs.length).toBe(220);
+
     for (const c of coeffs) expect(Number.isFinite(c)).toBe(true);
   });
 
@@ -206,6 +219,7 @@ describe("analyzePce fit sanity (order 9 on the golden cloud)", () => {
       expect(v).toBeGreaterThanOrEqual(0);
       expect(v).toBeLessThanOrEqual(1.2);
     }
+
     for (const v of ST) {
       expect(Number.isFinite(v)).toBe(true);
       expect(v).toBeGreaterThanOrEqual(0);

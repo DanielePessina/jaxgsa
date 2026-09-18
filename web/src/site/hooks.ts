@@ -13,11 +13,14 @@ export function useBusyAction() {
     setError(null);
     setBusy(true);
     await new Promise((r) => setTimeout(r, 10));
+
     try {
       fn();
+
       return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+
       return false;
     } finally {
       setBusy(false);

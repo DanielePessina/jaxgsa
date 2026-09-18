@@ -25,6 +25,7 @@ describe("jax-js wasm runtime (Phase 0 spike)", () => {
       ],
       { dtype: np.float64 },
     );
+
     expect(x.dtype).toBe(np.float64);
     expect(x.ref.dataSync()).toBeInstanceOf(Float64Array);
 

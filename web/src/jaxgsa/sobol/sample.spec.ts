@@ -27,6 +27,7 @@ describe("Sobol' sequence machinery (van der Corput gate)", () => {
   it("dimension 1, unscrambled, is exactly the base-2 van der Corput sequence", () => {
     const seq = sobolSequence(1, 8, false, 0);
     const expected = [0.5, 0.25, 0.75, 0.125, 0.625, 0.375, 0.875, 0.0625];
+
     for (let i = 0; i < 8; i++) expect(seq[i]).toBe(expected[i]);
   });
 
@@ -36,6 +37,7 @@ describe("Sobol' sequence machinery (van der Corput gate)", () => {
     // rationals, hence exact float64 comparisons.
     const dims = [1, 2, 3, 5, 8, 13, 21, 34, 40];
     const indices = [2, 3, 8, 16, 127, 256, 512, 2048, 4096];
+
     const golden = [
       [0.25, 0.75, 0.0625, 0.03125, 0.9921875, 0.001953125, 0.0009765625, 0.000244140625, 0.0001220703125],
       [0.75, 0.25, 0.9375, 0.53125, 0.9921875, 0.501953125, 0.7529296875, 0.941162109375, 0.5333251953125],
@@ -47,9 +49,11 @@ describe("Sobol' sequence machinery (van der Corput gate)", () => {
       [0.25, 0.75, 0.3125, 0.71875, 0.0859375, 0.740234375, 0.8740234375, 0.262939453125, 0.8524169921875],
       [0.75, 0.25, 0.6875, 0.34375, 0.2421875, 0.236328125, 0.6982421875, 0.227294921875, 0.5374755859375],
     ] as const;
+
     for (let d = 0; d < dims.length; d++) {
       const dim = dims[d];
       const seq = sobolSequence(dim, 4096, false, 0);
+
       for (let k = 0; k < indices.length; k++) {
         const i = indices[k];
         expect(sample2D(seq, dim, i, dim - 1)).toBe(golden[d][k]);
@@ -69,6 +73,7 @@ describe("scrambling (affine linear scramble + digital shift)", () => {
     const a = sobolSequence(5, 512, true, 12345);
     const b = sobolSequence(5, 512, true, 12345);
     expect(a.length).toBe(b.length);
+
     for (let i = 0; i < a.length; i++) expect(a[i]).toBe(b[i]);
   });
 
@@ -76,21 +81,26 @@ describe("scrambling (affine linear scramble + digital shift)", () => {
     const a = sobolSequence(5, 64, true, 1);
     const b = sobolSequence(5, 64, true, 2);
     let anyDifferent = false;
+
     for (let i = 0; i < a.length; i++) {
       if (a[i] !== b[i]) anyDifferent = true;
     }
+
     expect(anyDifferent).toBe(true);
   });
 
   it("keeps values in [0, 1) and ignores the seed when unscrambled", () => {
     for (const seed of [0, 7, 424242]) {
       const seq = sobolSequence(3, 256, true, seed);
+
       for (let i = 0; i < seq.length; i++) {
         expect(seq[i]).toBeGreaterThanOrEqual(0);
         expect(seq[i]).toBeLessThan(1);
       }
+
       const unscrambledA = sobolSequence(3, 64, false, 0);
       const unscrambledB = sobolSequence(3, 64, false, 99);
+
       for (let i = 0; i < unscrambledA.length; i++) {
         expect(unscrambledA[i]).toBe(unscrambledB[i]);
       }
@@ -115,14 +125,17 @@ describe("Saltelli layout", () => {
       scramble: true,
       seed,
     });
+
     // The underlying draw is a 2D-dimensional sequence; A uses the first D
     // columns and B the last D.
     const base = sobolSequence(2 * D, baseN, true, seed);
     expect(raw.length).toBe(baseN * 5 * D);
+
     for (const i of [0, 1, 7, 100, 511]) {
       for (let j = 0; j < D; j++) {
         expect(raw[i * 5 * D + j]).toBe(base[i * 2 * D + j]); // A_i
         expect(raw[i * 5 * D + 4 * D + j]).toBe(base[i * 2 * D + D + j]); // B_i
+
         for (let jj = 0; jj < D; jj++) {
           // AB_jj = A with column jj replaced by B's column jj
           const ab = raw[i * 5 * D + (1 + jj) * D + j];
@@ -141,6 +154,7 @@ describe("Saltelli layout", () => {
       seed,
       verbose: false,
     });
+
     expect(design.baseN).toBe(baseN);
     expect(design.nParams).toBe(D);
     expect(design.calcSecondOrder).toBe(false);
@@ -156,20 +170,26 @@ describe("Saltelli layout", () => {
       scramble: true,
       seed,
     });
+
     const seen = new Set<number>();
     let expectFirstOccurrence = true;
+
     for (let r = 0; r < design.nExpanded; r++) {
       const u = design.expandedToUnique[r];
       expect(u).toBeGreaterThanOrEqual(0);
       expect(u).toBeLessThan(nRuns);
+
       for (let j = 0; j < D; j++) {
         const physical = transformValue(raw[r * D + j], PROBLEM.marginals[j]);
         expect(design.samples[u * D + j]).toBe(physical);
       }
+
       if (expectFirstOccurrence && seen.has(u)) expectFirstOccurrence = false;
       seen.add(u);
     }
+
     expect(seen.size).toBe(nRuns);
+
     // A_1 == B_1 for the unscrambled design (every dim starts at x_1 = 0.5):
     // the first base point's A and B rows must dedup onto the same row.
     const plain = sample(PROBLEM, 1, {
@@ -179,17 +199,20 @@ describe("Saltelli layout", () => {
       seed: 0,
       verbose: false,
     });
+
     const rawPlain = buildExpandedSamples(D, 16, {
       calcSecondOrder: false,
       scramble: false,
       seed: 0,
     });
+
     for (let j = 0; j < D; j++) {
       expect(rawPlain[0 * D + j]).toBe(rawPlain[4 * D + j]); // A_1 == B_1
       expect(plain.samples[plain.expandedToUnique[0] * D + j]).toBe(
         plain.samples[plain.expandedToUnique[4] * D + j],
       );
     }
+
     expect(plain.samples.length / D).toBeLessThan(plain.nExpanded);
   });
 });
@@ -203,15 +226,18 @@ describe("marginal transforms", () => {
       seed: 3,
       verbose: false,
     });
+
     const raw = buildExpandedSamples(3, 128, {
       calcSecondOrder: false,
       scramble: true,
       seed: 3,
     });
+
     for (let i = 0; i < raw.length; i++) {
       expect(raw[i]).toBeGreaterThanOrEqual(0);
       expect(raw[i]).toBeLessThan(1);
     }
+
     for (let i = 0; i < design.samples.length; i++) {
       expect(design.samples[i]).toBeGreaterThanOrEqual(-Math.PI);
       expect(design.samples[i]).toBeLessThan(Math.PI);
@@ -226,18 +252,23 @@ describe("marginal transforms", () => {
       seed: 11,
       verbose: false,
     });
+
     const D = 3;
     const nRuns = design.samples.length / D;
+
     for (let j = 0; j < D; j++) {
       let mean = 0;
+
       for (let r = 0; r < nRuns; r++) mean += design.samples[r * D + j];
       mean /= nRuns;
       expect(Math.abs(mean)).toBeLessThan(0.15);
       let variance = 0;
+
       for (let r = 0; r < nRuns; r++) {
         const d = design.samples[r * D + j] - mean;
         variance += d * d;
       }
+
       variance /= nRuns - 1;
       expect(Math.abs(variance - (PI2 * PI2) / 12)).toBeLessThan(0.5);
     }
@@ -248,22 +279,28 @@ describe("marginal transforms", () => {
       names: ["g"],
       marginals: [{ kind: "gaussian", mean: 2, variance: 4, low: -10, high: 10 }],
     };
+
     const raw = buildExpandedSamples(1, 4096, {
       calcSecondOrder: false,
       scramble: true,
       seed: 5,
     });
+
     let mean = 0;
+
     for (let i = 0; i < raw.length; i++) mean += transformValue(raw[i], gaussProblem.marginals[0]);
     mean /= raw.length;
     expect(Math.abs(mean - 2)).toBeLessThan(0.2);
     let anyTruncated = false;
+
     for (let i = 0; i < raw.length; i++) {
       const v = transformValue(raw[i], gaussProblem.marginals[0]);
       expect(v).toBeGreaterThanOrEqual(-10);
       expect(v).toBeLessThanOrEqual(10);
+
       if (v === -10 || v === 10) anyTruncated = true;
     }
+
     expect(anyTruncated).toBe(false); // truncation window is generous: no clamping mass
   });
 
@@ -272,6 +309,7 @@ describe("marginal transforms", () => {
       names: ["c"],
       marginals: [{ kind: "categorical", probs: [0.5, 0.5] }],
     };
+
     expect(() => transformValue(0.3, catProblem.marginals[0])).toThrow(/not yet ported/);
     expect(() => sample(catProblem, 1, { baseN: 8, verbose: false })).toThrow(/not yet ported/);
   });
@@ -284,6 +322,7 @@ describe("sample(): seed handling, validation, doubling loop", () => {
     const b = sample(PROBLEM, 1, { ...opts, seed: 42 });
     const c = sample(PROBLEM, 1, { ...opts, seed: 43 });
     expect(a.samples.length).toBe(b.samples.length);
+
     for (let i = 0; i < a.samples.length; i++) expect(a.samples[i]).toBe(b.samples[i]);
     expect(Array.from(a.expandedToUnique)).toEqual(Array.from(b.expandedToUnique));
 
@@ -293,9 +332,11 @@ describe("sample(): seed handling, validation, doubling loop", () => {
     const rawC = buildExpandedSamples(3, 256, { ...opts, seed: 43 });
     const aLen = 256 * 3;
     let anyDifferent = false;
+
     for (let i = 0; i < aLen; i++) {
       if (rawA[i] !== rawC[i]) anyDifferent = true;
     }
+
     expect(anyDifferent).toBe(true);
     expect(Array.from(a.samples)).not.toEqual(Array.from(c.samples));
   });
@@ -322,11 +363,13 @@ describe("sample(): seed handling, validation, doubling loop", () => {
 
   it("rejects more than 20 parameters", () => {
     const names = Array.from({ length: 21 }, (_, i) => `x${i}`);
+
     const marginals: ProblemSpec["marginals"] = names.map(() => ({
       kind: "uniform",
       low: 0,
       high: 1,
     }));
+
     expect(() => sample({ names, marginals }, 1, { baseN: 8, verbose: false })).toThrow(
       /at most 20/,
     );

@@ -70,28 +70,36 @@ export function buildExpandedSamples(
   const step = saltelliStep(D, options.calcSecondOrder);
   const base = sobolSequence(2 * D, baseN, options.scramble, options.seed);
   const out = new Float64Array(baseN * step * D);
+
   for (let i = 0; i < baseN; i++) {
     const b = i * 2 * D;
     const o = i * step * D;
+
     // A_i
     for (let j = 0; j < D; j++) out[o + j] = base[b + j];
+
     // AB_0..AB_{D-1}
     for (let jj = 0; jj < D; jj++) {
       const oo = o + (1 + jj) * D;
+
       for (let j = 0; j < D; j++) out[oo + j] = base[b + j];
       out[oo + jj] = base[b + D + jj];
     }
+
     // BA_0..BA_{D-1} (second order only)
     if (options.calcSecondOrder) {
       for (let jj = 0; jj < D; jj++) {
         const oo = o + (1 + D + jj) * D;
+
         for (let j = 0; j < D; j++) out[oo + j] = base[b + D + j];
         out[oo + jj] = base[b + jj];
       }
     }
+
     // B_i
     for (let j = 0; j < D; j++) out[o + (step - 1) * D + j] = base[b + D + j];
   }
+
   return out;
 }
 
@@ -149,6 +157,7 @@ export function sample(
 
   validateProblem(problem, "sobol");
   const D = problem.names.length;
+
   if (D > 20) {
     throw new Error(
       `jaxgsa.sobol.sample: at most 20 parameters supported (a Saltelli design ` +
@@ -159,17 +168,20 @@ export function sample(
   const step = saltelliStep(D, calcSecondOrder);
   let baseN: number;
   let targetN: number | null;
+
   if (baseNGiven !== undefined) {
     if (!isPowerOfTwo(baseNGiven)) {
       throw new Error(
         `jaxgsa.sobol.sample: base_n must be a power of 2 (got ${baseNGiven})`,
       );
     }
+
     baseN = baseNGiven;
     targetN = null;
   } else {
     targetN = Math.max(1, nSamples);
     baseN = nextPowerOfTwo(Math.ceil(targetN / step));
+
     if (baseN > MAX_BASE_N) {
       throw new Error(
         `jaxgsa.sobol.sample: n_samples=${targetN} needs base_n=${baseN}, above ` +
@@ -194,6 +206,7 @@ export function sample(
 
   if (targetN !== null) {
     let doublings = 0;
+
     while (design.samples.length / D < targetN) {
       if (doublings >= 32 || baseN >= MAX_BASE_N) {
         console.warn(
@@ -204,6 +217,7 @@ export function sample(
         );
         break;
       }
+
       baseN *= 2;
       doublings += 1;
       design = build();
@@ -212,6 +226,7 @@ export function sample(
   }
 
   const nRuns = design.samples.length / D;
+
   if (verbose) {
     const duplicatesRemoved = nExpanded - nRuns;
     const duplicateFraction = nExpanded > 0 ? duplicatesRemoved / nExpanded : 0;

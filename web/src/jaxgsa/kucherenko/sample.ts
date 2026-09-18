@@ -40,11 +40,13 @@ export function sampleKucherenkoDesign(
   seed: number,
 ): KucherenkoDesign {
   validateProblem(problem, "kucherenko");
+
   if (!Number.isInteger(nSamples) || nSamples < 1) {
     throw new Error(
       `jaxgsa.kucherenko.sample: n_samples must be a positive integer, got ${nSamples}`,
     );
   }
+
   const D = problem.names.length;
   const baseN = nextPowerOfTwo(Math.max(2, nSamples));
   const blocks = 2 * D + 1;
@@ -52,22 +54,29 @@ export function sampleKucherenkoDesign(
   // Block-major layout: block b holds base points 0..baseN-1 in rows
   // [b*baseN, (b+1)*baseN).
   const unit = new Float64Array(baseN * blocks * D);
+
   for (let k = 0; k < baseN; k++) {
     const b = k * 2 * D;
+
     // Joint block: row k.
     for (let j = 0; j < D; j++) unit[k * D + j] = draws[b + j];
+
     // First-order blocks: keep x_i from the joint row, redraw the rest.
     for (let i = 0; i < D; i++) {
       const oo = ((1 + i) * baseN + k) * D;
+
       for (let j = 0; j < D; j++) unit[oo + j] = draws[b + D + j];
       unit[oo + i] = draws[b + i]; // x_i kept from joint
     }
+
     // Total blocks: keep the joint others, redraw x_i.
     for (let i = 0; i < D; i++) {
       const oo = ((1 + D + i) * baseN + k) * D;
+
       for (let j = 0; j < D; j++) unit[oo + j] = draws[b + j];
       unit[oo + i] = draws[b + D + i]; // x_i redrawn
     }
   }
+
   return { samples: transformSamples(problem, unit), nParams: D, baseN };
 }

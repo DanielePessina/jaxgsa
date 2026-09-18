@@ -10,6 +10,7 @@ export function estimateKucherenko(
   fTotal: np.Array,
 ): { S1: np.Array; ST: np.Array; variance: np.Array } {
   const variance = np.var_(fJoint.ref, 0); // (S,)
+
   const safeVariance = np.where(
     np.greater(variance.ref, 0),
     variance.ref,
@@ -42,6 +43,7 @@ export function estimateKucherenko(
     ),
     safeVariance.ref,
   );
+
   const ST = np.divide(
     np.multiply(
       0.5,
@@ -49,6 +51,7 @@ export function estimateKucherenko(
     ),
     safeVariance,
   );
+
   return { S1, ST, variance };
 }
 
@@ -65,11 +68,13 @@ export function analyzeKucherenko(
   const n = x.shape[0];
   const blocks = 2 * D + 1;
   const N = n / blocks;
+
   if (!Number.isInteger(N)) {
     throw new Error(
       `n_runs ${n} must be divisible by 2*D+1 = ${blocks} (got N = ${N})`,
     );
   }
+
   x.dispose();
 
   const F = np.reshape(y, [blocks, N, 1]); // (2D+1, N, 1) — block-major
@@ -82,5 +87,6 @@ export function analyzeKucherenko(
   const s1 = np.reshape(S1, [D]).dataSync() as Float64Array;
   const st = np.reshape(ST, [D]).dataSync() as Float64Array;
   const varOut = np.reshape(variance, [1]).dataSync() as Float64Array;
+
   return { S1: s1, ST: st, variance: varOut };
 }

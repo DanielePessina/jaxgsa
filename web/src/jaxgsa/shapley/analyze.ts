@@ -61,18 +61,23 @@ export function shapleyFromPceCoefficients(
   // membership = mi[1:] > 0 as 0/1 float64; card = |u| per term.
   const membership = new Float64Array((nTerms - 1) * D);
   const card = new Float64Array(nTerms - 1);
+
   for (let t = 1; t < nTerms; t++) {
     let c = 0;
+
     for (let d = 0; d < D; d++) {
       if (miCols[d][t] > 0) {
         membership[(t - 1) * D + d] = 1;
         c++;
       }
     }
+
     card[t - 1] = c;
   }
+
   // membership & (card == 1): singleton rows carry exactly one active entry.
   const singletons = new Float64Array((nTerms - 1) * D);
+
   for (let t = 1; t < nTerms; t++) {
     if (card[t - 1] === 1) {
       for (let d = 0; d < D; d++) singletons[(t - 1) * D + d] = membership[(t - 1) * D + d];
@@ -82,6 +87,7 @@ export function shapleyFromPceCoefficients(
   const membershipNp = np
     .array(membership as Float64Array<ArrayBuffer>, { dtype: np.float64 })
     .reshape([nTerms - 1, D]); // (n_terms-1, D)
+
   const singletonsNp = np
     .array(singletons as Float64Array<ArrayBuffer>, { dtype: np.float64 })
     .reshape([nTerms - 1, D]); // (n_terms-1, D)
@@ -113,5 +119,6 @@ export function analyzeShapleyPce(
   const fit = fitPce(problem, x, y, options);
   const sobol = sobolFromCoefficients(fit.coeffs.ref, fit.mi); // coeffs ref'd; shapley consumes raw
   const shapley = shapleyFromPceCoefficients(fit.coeffs, fit.mi, fit.mi.D);
+
   return { Sh: shapley.Sh, S1: sobol.S1, ST: sobol.ST };
 }

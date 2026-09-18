@@ -27,10 +27,12 @@ function evaluateDemo(
     const nRuns = design.samples.length / D;
     const y = new Float64Array(nRuns);
     const row: number[] = new Array(D);
+
     for (let r = 0; r < nRuns; r++) {
       for (let j = 0; j < D; j++) row[j] = design.samples[r * D + j];
       y[r] = fn(row);
     }
+
     return y;
   };
 }
@@ -40,12 +42,18 @@ const PI = Math.PI;
 // Sobol' G analytical indices: V_j = 1/(3(1+a_j)^2), V = prod(1+V_j) - 1,
 // S1_j = V_j/V, ST_j = 1 - V_{-j}/V (Saltelli, Sobol' 1995).
 const G_A = [0, 1, 4.5, 9, 99, 99, 99, 99];
+
 const G_VJ = G_A.map((a) => 1 / (3 * (1 + a) ** 2));
+
 const G_ONE_PLUS = G_VJ.map((v) => 1 + v);
+
 const G_V = G_ONE_PLUS.reduce((p, v) => p * v, 1) - 1;
+
 const G_S1 = G_VJ.map((v) => v / G_V);
+
 const G_ST = G_ONE_PLUS.map((_, j) => {
   const vMinus = G_ONE_PLUS.reduce((p, v, k) => (k === j ? p : p * v), 1) - 1;
+
   return 1 - vMinus / G_V;
 });
 
@@ -115,7 +123,9 @@ export const DEMOS: Demo[] = [
 
 export function demoById(id: DemoId): Demo {
   const demo = DEMOS.find((d) => d.id === id);
+
   if (!demo) throw new Error(`unknown demo problem: ${id}`);
+
   return demo;
 }
 
@@ -123,5 +133,6 @@ export function demoById(id: DemoId): Demo {
 export function demoForProblem(problem: ProblemSpec | null): Demo | null {
   if (!problem) return null;
   const key = JSON.stringify(problem);
+
   return DEMOS.find((d) => JSON.stringify(d.problem) === key) ?? null;
 }

@@ -36,6 +36,7 @@ export function FileUpload({
 
   const handleFile = async (file: File | undefined) => {
     if (!file) return;
+
     try {
       const parsed = await parseUpload(file);
       setFileLabel(`${file.name} · ${parsed.rows.length} rows × ${parsed.headers.length} cols`);
@@ -66,6 +67,7 @@ export function FileUpload({
           onClick={() => inputRef.current?.click()}
           onDragEnter={(e) => {
             e.preventDefault();
+
             if (!disabled) setDragging(true);
           }}
           onDragOver={(e) => e.preventDefault()}
@@ -77,6 +79,7 @@ export function FileUpload({
           onDrop={(e) => {
             e.preventDefault();
             setDragging(false);
+
             if (!disabled) void handleFile(e.dataTransfer.files[0]);
           }}
           className={`flex w-full items-center gap-3 rounded-md border border-dashed px-3 py-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${

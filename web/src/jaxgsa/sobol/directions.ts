@@ -22,6 +22,7 @@
 // was validated to reproduce scipy's direction-number matrix bit-for-bit for
 // dims 1..40.
 export const SOBOL_MAX_DIM = 40;
+
 export const SOBOL_BITS = 32;
 
 /** Raw published rows for dims 2..40: [d, s, a, m1, ..., ms]. */
@@ -109,36 +110,48 @@ export const JOE_KUO_ROWS: ReadonlyArray<readonly number[]> = [
 /** Bratley-Fox / scipy-identical recurrence. Returns v[d] for Sobol' dim `dim`. */
 export function buildDirectionNumbers(dim: number): Uint32Array {
   const v = new Uint32Array(SOBOL_BITS);
+
   if (dim < 1 || dim > SOBOL_MAX_DIM) {
     throw new RangeError(`Sobol' dimension ${dim} out of range [1, ${SOBOL_MAX_DIM}]`);
   }
+
   if (dim === 1) {
     // van der Corput: every direction number is 1 << (32 - i).
     let pow = 1 << 31;
+
     for (let j = 0; j < SOBOL_BITS; j++) {
       v[j] = pow >>> 0;
       pow >>>= 1;
     }
+
     return v;
   }
+
   const [, s, a, ...ms] = JOE_KUO_ROWS[dim - 2];
   const p = 2 * a + (1 << s) + 1;
+
   for (let i = 0; i < s; i++) v[i] = ms[i];
+
   for (let j = s; j < SOBOL_BITS; j++) {
     let newv = v[j - s];
     let pow2 = 1;
+
     for (let k = 0; k < s; k++) {
       pow2 <<= 1;
+
       if (((p >>> (s - 1 - k)) & 1) === 1) {
         newv = (newv ^ Math.imul(pow2, v[j - k - 1])) >>> 0;
       }
     }
+
     v[j] = newv;
   }
+
   // Scale column j by 2^(31-j) mod 2^32 (scipy's final multiply step).
   for (let j = 0; j < SOBOL_BITS; j++) {
     v[j] = Math.imul(v[j], 1 << (SOBOL_BITS - 1 - j)) >>> 0;
   }
+
   return v;
 }
 
@@ -148,7 +161,9 @@ let cached: Uint32Array[] | null = null;
 export function directionNumbers(): Uint32Array[] {
   if (cached === null) {
     cached = new Array(SOBOL_MAX_DIM);
+
     for (let d = 1; d <= SOBOL_MAX_DIM; d++) cached[d - 1] = buildDirectionNumbers(d);
   }
+
   return cached;
 }

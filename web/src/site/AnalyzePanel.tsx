@@ -50,8 +50,10 @@ function availability(
   return Object.fromEntries(
     ALL_METHODS.map((method) => {
       const input = METHOD_META[method].input;
+
       if (input.kind === "dedicated") {
         const available = x?.kind === "design" && x.method === input.design;
+
         return [method, {
           available,
           reason: available
@@ -59,7 +61,9 @@ function availability(
             : `Requires its own ${input.design} design.`,
         }];
       }
+
       const available = x?.kind === "uploaded";
+
       return [method, {
         available,
         reason: available
@@ -102,14 +106,17 @@ export function AnalyzePanel({
   onGoResults: () => void;
 }) {
   const [order, setOrder] = useState("3");
+
   const [selected, setSelected] = useState<Record<MethodKey, boolean>>({
     ...DEFAULT_SELECTION,
   });
+
   const [running, setRunning] = useState<{
     current: number;
     total: number;
     label: string;
   } | null>(null);
+
   const { busy, error, setError } = useBusyAction();
 
   const demo = activeDemo ?? demoForProblem(problem);
@@ -156,6 +163,7 @@ export function AnalyzePanel({
 
   const onUploadX = (parsed: ParsedCsv) => {
     if (!problem) return;
+
     try {
       const flat = parseXGiven(parsed, problem);
       pickUploaded(
@@ -177,23 +185,30 @@ export function AnalyzePanel({
   const onUploadY = (parsed: ParsedCsv) => {
     if (!problem) return;
     setError(null);
+
     try {
       const { columns, runIds, rowCount } = parseYColumns(parsed, problem);
+
       if (xSource?.kind === "design") {
         const design = designs[xSource.method];
+
         if (!design) return;
+
         if (runIds === null) {
           throw new Error(
             'the Y file must contain a "run_id" column matching the design download',
           );
         }
+
         const aligned = alignColumnsByRunId(columns, runIds, design);
         setYData({ columns: aligned, rowCount, label: `uploaded Y · ${rowCount} runs` });
       } else {
         const N = givenX ? givenX.length / problem.names.length : 0;
+
         if (rowCount !== N) {
           throw new Error(`X has ${N} rows but Y has ${rowCount} values`);
         }
+
         setYData({ columns, rowCount, label: `uploaded Y · ${rowCount} outputs` });
       }
     } catch (err) {
@@ -204,6 +219,7 @@ export function AnalyzePanel({
   const onDemoY = () => {
     if (!demo || xSource?.kind !== "design") return;
     const design = designs[xSource.method];
+
     if (!design) return;
     setError(null);
     const y = demo.evaluate(design);
@@ -213,25 +229,32 @@ export function AnalyzePanel({
   const selectedAvailable = ALL_METHODS.filter(
     (m) => selected[m] && avail[m].available,
   );
+
   const compatibleMethods = ALL_METHODS.filter((m) => avail[m].available);
 
   const onRun = async () => {
     if (!problem || !yData) return;
     const methods = ALL_METHODS.filter((m) => selected[m] && avail[m].available);
+
     if (methods.length === 0) {
       setError("Select at least one available method.");
+
       return;
     }
+
     const design = xSource?.kind === "design" ? designs[xSource.method] : null;
     const x = design ? design.samples : givenX;
+
     if (!x) return;
 
     setError(null);
     setRunning({ current: 0, total: methods.length, label: methods[0] });
+
     for (let i = 0; i < methods.length; i++) {
       const m = methods[i];
       setRunning({ current: i, total: methods.length, label: m });
       await new Promise((r) => setTimeout(r, 30)); // let the progress label paint
+
       try {
         if (m === "pce" || m === "shapley") {
           appendResult(analyzeCloud(m, problem, x, yData, Number(order)));
@@ -243,9 +266,11 @@ export function AnalyzePanel({
           `${m}: ${err instanceof Error ? err.message : String(err)}`,
         );
         setRunning(null);
+
         return;
       }
     }
+
     setRunning(null);
     onGoResults();
   };
@@ -437,6 +462,7 @@ export function AnalyzePanel({
           <div className="grid gap-3 md:grid-cols-2">
             {compatibleMethods.map((m) => {
               const on = selected[m];
+
               return (
                 <label
                   key={m}

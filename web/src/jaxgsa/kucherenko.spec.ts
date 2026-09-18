@@ -9,11 +9,13 @@ function allclose(
   tol: { atol: number; rtol: number },
 ): boolean {
   if (actual.length !== expected.length) return false;
+
   for (let i = 0; i < actual.length; i++) {
     if (!(Math.abs(actual[i] - expected[i]) <= tol.atol + tol.rtol * Math.abs(expected[i]))) {
       return false;
     }
   }
+
   return true;
 }
 

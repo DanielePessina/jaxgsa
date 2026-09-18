@@ -121,6 +121,7 @@ describe("parseYColumns (Y schema classification)", () => {
     const parsed = parseCsv(
       "run_id,temp_t3,pressure_t4,temp_t0.5,pressure_t0\n0,1,2,3,4\n",
     );
+
     const { columns } = parseYColumns(parsed, ISHIGAMI_PROBLEM);
     expect(columns.map((c) => [c.output, c.time])).toEqual([
       ["temp", 0.5],
@@ -283,6 +284,7 @@ describe("parseXGiven / parseYColumns (given-data path)", () => {
       parseCsv("y_t0,pressure\n1.5,99\n2.5,88\n"),
       ISHIGAMI_PROBLEM,
     );
+
     expect(runIds).toBeNull();
     expect(rowCount).toBe(2);
     expect(columns.map((c) => [c.output, c.time])).toEqual([
@@ -337,6 +339,7 @@ describe("buildSessionJson (v2)", () => {
       rowCount: 2,
       label: "uploaded Y · 2 runs",
     };
+
     const session = buildSessionJson(ISHIGAMI_PROBLEM, {}, y, []);
     expect(session.app).toBe("jaxgsa-web");
     expect(session.version).toBe(2);
@@ -357,6 +360,7 @@ describe("buildSessionJson (v2)", () => {
       summary: [["base_n", "2"]] as [string, string][],
       notes: [],
     };
+
     const session = buildSessionJson(ISHIGAMI_PROBLEM, { sobol: gen }, null, []);
     expect(session.designs.sobol?.csv.split("\n")[0]).toBe("run_id,x1,x2,x3");
     expect(session.designs.sobol?.nRuns).toBe(2);
@@ -378,6 +382,7 @@ describe("buildSessionJson (v2)", () => {
       notes: [],
       settings: { order: 3 },
     };
+
     const session = buildSessionJson(ISHIGAMI_PROBLEM, {}, null, [result]);
     expect(session.results[0].slices[0]).toEqual({
       output: "temp",
@@ -400,14 +405,17 @@ describe("analyzeGenerated with multi-output Y (slice loop)", () => {
       calcSecondOrder: false,
       seed: 0,
     });
+
     const n = gen.nRuns;
     const y0 = new Float64Array(n);
     const y1 = new Float64Array(n);
+
     for (let r = 0; r < n; r++) {
       const row = Array.from(gen.samples.subarray(r * 3, r * 3 + 3));
       y0[r] = ishigami(row);
       y1[r] = 2 * ishigami(row);
     }
+
     const y: YData = {
       columns: [
         { output: "y", time: 0, values: y0 },
@@ -416,16 +424,19 @@ describe("analyzeGenerated with multi-output Y (slice loop)", () => {
       rowCount: n,
       label: "two slices",
     };
+
     const res = analyzeGenerated(gen, y);
     expect(res.slices).toHaveLength(2);
     expect(res.slices.map((s) => [s.output, s.time])).toEqual([
       ["y", 0],
       ["y", 1],
     ]);
+
     for (const s of res.slices) {
       expect(s.columns.map((c) => c.key)).toEqual(["S1", "ST"]);
       expect(s.columns[0].values.length).toBe(3);
     }
+
     // Sobol indices are invariant to scaling of Y: both slices agree.
     for (let j = 0; j < res.slices[0].columns[0].values.length; j++) {
       expect(res.slices[0].columns[0].values[j]).toBeCloseTo(
@@ -433,6 +444,7 @@ describe("analyzeGenerated with multi-output Y (slice loop)", () => {
         6,
       );
     }
+
     expect(res.settings["base_n"]).toBe("64");
   });
 });
@@ -443,6 +455,7 @@ describe("sampleKucherenkoDesign", () => {
     const D = 3;
     expect(design.baseN).toBe(128);
     expect(design.samples.length / D).toBe(128 * (2 * D + 1));
+
     for (let i = 0; i < design.samples.length; i++) {
       expect(design.samples[i]).toBeGreaterThanOrEqual(-Math.PI);
       expect(design.samples[i]).toBeLessThanOrEqual(Math.PI);
@@ -455,6 +468,7 @@ describe("sampleKucherenkoDesign", () => {
     const baseN = design.baseN;
     const blocks = 2 * D + 1;
     expect(design.samples.length / D).toBe(baseN * blocks);
+
     for (let k = 0; k < baseN; k++) {
       const joint = design.samples.subarray(k * D, k * D + D);
       const first = design.samples.subarray((baseN + k) * D, (baseN + k) * D + D);

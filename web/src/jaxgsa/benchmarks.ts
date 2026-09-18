@@ -38,8 +38,10 @@ export function gaussianLinear(x: number[]): number {
 export function sobolG(x: number[]): number {
   const a = [0, 1, 4.5, 9, 99, 99, 99, 99];
   let p = 1;
+
   for (let j = 0; j < x.length; j++) {
     p *= (Math.abs(4 * x[j] - 2) + a[j]) / (1 + a[j]);
   }
+
   return p;
 }

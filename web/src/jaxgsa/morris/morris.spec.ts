@@ -12,11 +12,13 @@ function allclose(
   tol: { atol: number; rtol: number },
 ): boolean {
   if (actual.length !== expected.length) return false;
+
   for (let i = 0; i < actual.length; i++) {
     if (!(Math.abs(actual[i] - expected[i]) <= tol.atol + tol.rtol * Math.abs(expected[i]))) {
       return false;
     }
   }
+
   return true;
 }
 
@@ -24,6 +26,7 @@ function evaluate(design: MorrisDesign): Float64Array {
   const D = design.nParams;
   const n = design.samples.length / D;
   const y = new Float64Array(n);
+
   for (let i = 0; i < n; i++) {
     y[i] = ishigami([
       design.samples[i * D],
@@ -31,6 +34,7 @@ function evaluate(design: MorrisDesign): Float64Array {
       design.samples[i * D + 2],
     ]);
   }
+
   return y;
 }
 
@@ -59,9 +63,11 @@ describe("analyzeMorris vs golden fixture (trajectory, scalar)", () => {
     const d = golden.design;
     const D = 3;
     const xFlat = new Float64Array(golden.x.length * D);
+
     for (let r = 0; r < golden.x.length; r++) {
       for (let j = 0; j < D; j++) xFlat[r * D + j] = golden.x[r][j];
     }
+
     design = {
       samples: xFlat,
       expandedToUnique: Int32Array.from(d.expanded_to_unique),
@@ -87,12 +93,15 @@ describe("analyzeMorris vs golden fixture (trajectory, scalar)", () => {
     expect(golden.design.n_trajectories * (design.nParams + 1)).toBe(golden.design.n_expanded);
     expect(golden.design.expanded_to_unique.length).toBe(160);
     expect(golden.y.length).toBe(61);
+
     // ee_delta entries are ±p / (2 (p - 1)) = ±4 / 6 = ±0.666...
     for (const v of design.eeDelta) {
       expect(Math.abs(Math.abs(v) - 4 / 6)).toBeLessThan(1e-15);
     }
+
     // expanding the unique rows by expandedToUnique yields 160 expanded rows.
     const nUnique = golden.x.length;
+
     for (const u of design.expandedToUnique) {
       expect(u).toBeGreaterThanOrEqual(0);
       expect(u).toBeLessThan(nUnique);
@@ -141,9 +150,11 @@ describe("analyzeMorris expansion path vs direct expanded computation", () => {
     const r = design.nTrajectories;
     const D = design.nParams;
     const yExpanded = new Float64Array(design.nExpanded);
+
     for (let i = 0; i < design.nExpanded; i++) yExpanded[i] = yUnique[design.expandedToUnique[i]];
     const sums = new Float64Array(D);
     const absSums = new Float64Array(D);
+
     for (let t = 0; t < r; t++) {
       for (let j = 0; j < D; j++) {
         const after = design.eeIdxAfter[t * D + j];
@@ -153,13 +164,17 @@ describe("analyzeMorris expansion path vs direct expanded computation", () => {
         absSums[j] += Math.abs(ee);
       }
     }
+
     directMu = new Float64Array(D);
     directMuStar = new Float64Array(D);
+
     for (let j = 0; j < D; j++) {
       directMu[j] = sums[j] / r;
       directMuStar[j] = absSums[j] / r;
     }
+
     const sqSums = new Float64Array(D);
+
     for (let t = 0; t < r; t++) {
       for (let j = 0; j < D; j++) {
         const after = design.eeIdxAfter[t * D + j];
@@ -168,7 +183,9 @@ describe("analyzeMorris expansion path vs direct expanded computation", () => {
         sqSums[j] += (ee - directMu[j]) * (ee - directMu[j]);
       }
     }
+
     directSigma = new Float64Array(D);
+
     for (let j = 0; j < D; j++) directSigma[j] = Math.sqrt(sqSums[j] / (r - 1));
     console.log("nExpanded =", design.nExpanded, "nUnique =", design.samples.length / D);
     console.log("direct   mu =", Array.from(directMu));
@@ -213,6 +230,7 @@ describe("sampleMorris trajectory sampler structure", () => {
 
   it("ee index arrays stay within [0, nExpanded) and delta is ±p / (2 (p - 1))", () => {
     const p = design.numLevels;
+
     for (let i = 0; i < design.eeIdxAfter.length; i++) {
       expect(design.eeIdxAfter[i]).toBeGreaterThanOrEqual(0);
       expect(design.eeIdxAfter[i]).toBeLessThan(design.nExpanded);
@@ -220,6 +238,7 @@ describe("sampleMorris trajectory sampler structure", () => {
       expect(design.eeIdxBefore[i]).toBeLessThan(design.nExpanded);
       expect(design.eeIdxBefore[i]).toBeLessThan(design.eeIdxAfter[i]);
     }
+
     for (let i = 0; i < design.eeDelta.length; i++) {
       expect(Math.abs(Math.abs(design.eeDelta[i]) - p / (2 * (p - 1)))).toBeLessThan(1e-15);
     }
@@ -228,10 +247,12 @@ describe("sampleMorris trajectory sampler structure", () => {
   it("expandedToUnique maps each expanded row to [0, nUnique) and dedup removed rows", () => {
     const nUnique = design.samples.length / D;
     expect(design.expandedToUnique.length).toBe(design.nExpanded);
+
     for (let i = 0; i < design.expandedToUnique.length; i++) {
       expect(design.expandedToUnique[i]).toBeGreaterThanOrEqual(0);
       expect(design.expandedToUnique[i]).toBeLessThan(nUnique);
     }
+
     // 160 rows over the 4^3 grid: duplicates are guaranteed.
     expect(nUnique).toBeLessThan(design.nExpanded);
   });
@@ -266,10 +287,12 @@ describe("sampleMorris trajectory sampler structure", () => {
     expect(() => sampleMorris(ISHIGAMI_PROBLEM, 10, { numLevels: 1 })).toThrow(
       /num_levels must be >= 2/,
     );
+
     const catProblem: ProblemSpec = {
       names: ["c"],
       marginals: [{ kind: "categorical", probs: [0.5, 0.5] }],
     };
+
     expect(() => sampleMorris(catProblem, 10)).toThrow(/categorical/);
   });
 });
@@ -286,11 +309,13 @@ describe("analyzeMorris statistical sanity on Ishigami (r=100)", () => {
   beforeAll(async () => {
     await init();
     defaultDevice("wasm");
+
     const design = sampleMorris(ISHIGAMI_PROBLEM, 100, {
       numLevels: 4,
       seed: 3,
       verbose: false,
     });
+
     const yUnique = evaluate(design);
     ({ mu, mu_star, sigma } = analyzeMorris(design, yUnique));
     console.log("sanity mu       =", Array.from(mu));
@@ -306,7 +331,9 @@ describe("analyzeMorris statistical sanity on Ishigami (r=100)", () => {
 
   it("all measures are finite", () => {
     for (const v of mu) expect(Number.isFinite(v)).toBe(true);
+
     for (const v of mu_star) expect(Number.isFinite(v)).toBe(true);
+
     for (const v of sigma) expect(Number.isFinite(v)).toBe(true);
   });
 });

@@ -67,6 +67,7 @@ export function fitPce(
   const yf = y instanceof Float64Array ? y : Float64Array.from(y);
   const D = problem.names.length;
   const N = xf.length / D;
+
   if (!Number.isInteger(N)) {
     throw new Error(`pce: x length ${xf.length} is not a multiple of D=${D}`);
   }
@@ -81,10 +82,12 @@ export function fitPce(
   // gram = Phi.T @ Phi + ridge * eye(n_terms)
   const PhiT = Phi.ref.transpose(); // (n_terms, N) — Phi ref'd (used once, in gram)
   const gram = np.matmul(PhiT.ref, Phi); // (n_terms, n_terms) — Phi consumed; PhiT ref'd (used again for B)
+
   const ridgeEye = np.multiply(
     ridge,
     np.eye(nTerms, nTerms, { dtype: np.float64 }),
   );
+
   const gramReg = np.add(gram, ridgeEye); // gram, ridgeEye consumed
 
   // coeffs = solve(gram, Phi.T @ Y)
@@ -107,5 +110,6 @@ export function analyzePce(
   options: PceFitOptions = {},
 ): PceIndices {
   const fit = fitPce(problem, x, y, options);
+
   return sobolFromCoefficients(fit.coeffs, fit.mi); // coeffs consumed
 }

@@ -24,6 +24,7 @@ const RAW = rawKucherenko as RawGolden;
 
 export function loadKucherenkoGolden(): Golden {
   const variance = RAW.expected.variance;
+
   return {
     x: RAW.x,
     y: RAW.y,

@@ -16,6 +16,7 @@ import { parseCsv, type ParsedCsv } from "./engine";
 
 /** Human cap on the number of cells we parse (rows x cols) before bailing. */
 export const MAX_CELLS = 5_000_000;
+
 /** Hard cap on the raw file size (bytes). */
 export const MAX_FILE_BYTES = 512 * 1024 * 1024;
 
@@ -46,7 +47,9 @@ export const UNSAFE_EXTENSIONS: Record<string, string> = {
 /** Lowercased file extension including the dot, or "" when none. */
 export function fileExtension(name: string): string {
   const dot = name.lastIndexOf(".");
+
   if (dot < 0 || dot === name.length - 1) return "";
+
   return name.slice(dot).toLowerCase();
 }
 
@@ -54,31 +57,42 @@ export function fileExtension(name: string): string {
 export function rejectUnsafeName(name: string): string | null {
   const ext = fileExtension(name);
   const direct = UNSAFE_EXTENSIONS[ext];
+
   if (direct) return direct;
+
   // Multi-part names like "out.pkl.gz": look under the gzip wrapper too.
   if (ext === ".gz") {
     const inner = UNSAFE_EXTENSIONS[fileExtension(name.slice(0, -3))];
+
     if (inner) return inner;
   }
+
   return null;
 }
 
 /** True when the first 4 bytes are the Parquet "PAR1" magic. */
 export function isParquetMagic(bytes: Uint8Array): boolean {
   if (bytes.length < 4) return false;
+
   for (let i = 0; i < 4; i++) if (bytes[i] !== PARQUET_MAGIC[i]) return false;
+
   return true;
 }
 
 /** Coerce one parquet cell to a finite number, matching CSV tolerance. */
 function cellToNumber(name: string, row: number, v: unknown): number {
   if (typeof v === "number") return v;
+
   if (typeof v === "bigint") return Number(v);
+
   if (typeof v === "boolean") return v ? 1 : 0;
+
   if (typeof v === "string" && v.trim() !== "") {
     const n = Number(v);
+
     if (!Number.isNaN(n)) return n;
   }
+
   throw new Error(`row ${row + 1}, column "${name}": ${String(v)} is not a number`);
 }
 
@@ -86,6 +100,7 @@ function cellToNumber(name: string, row: number, v: unknown): number {
 async function parseParquet(file: File): Promise<ParsedCsv> {
   const buf = await file.arrayBuffer();
   let rows: Record<string, unknown>[];
+
   try {
     rows = await parquetReadObjects({ file: buf, compressors });
   } catch (err) {
@@ -93,23 +108,31 @@ async function parseParquet(file: File): Promise<ParsedCsv> {
       `could not read parquet: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
+
   if (rows.length === 0) {
     throw new Error("the parquet file has no data rows");
   }
+
   const headers = Object.keys(rows[0]);
   const out: number[][] = [];
+
   for (let r = 0; r < rows.length; r++) {
     const row = rows[r];
     const cells: number[] = [];
+
     for (const h of headers) {
       const v = row[h];
+
       if (v === null || v === undefined) {
         throw new Error(`row ${r + 1}, column "${h}": empty cell`);
       }
+
       cells.push(cellToNumber(h, r, v));
     }
+
     out.push(cells);
   }
+
   return { headers, rows: out };
 }
 
@@ -125,23 +148,29 @@ export async function parseUpload(file: File): Promise<ParsedCsv> {
         `${Math.round(MAX_FILE_BYTES / 1024 / 1024)} MB`,
     );
   }
+
   const unsafe = rejectUnsafeName(file.name);
+
   if (unsafe) throw new Error(`${file.name}: ${unsafe}`);
 
   const ext = fileExtension(file.name);
+
   if (ext === ".parquet" || ext === ".pq") {
     return parseParquet(file);
   }
 
   const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+
   if (isParquetMagic(head)) return parseParquet(file);
 
   const parsed = parseCsv(await file.text());
+
   if (parsed.headers.length * parsed.rows.length > MAX_CELLS) {
     throw new Error(
       `file is too large: ${parsed.rows.length} rows x ${parsed.headers.length} ` +
         `columns exceeds the ${MAX_CELLS.toLocaleString()} cell limit`,
     );
   }
+
   return parsed;
 }

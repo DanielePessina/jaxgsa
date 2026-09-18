@@ -79,9 +79,11 @@ describe("parseUpload", () => {
         { name: "y", data: [3.3, 1.1, 5.5], type: "DOUBLE" },
       ],
     });
+
     const parsed = await parseUpload(
       new File([buf], "outputs.parquet", { type: "application/vnd.apache.parquet" }),
     );
+
     expect(parsed.headers).toEqual(["run_id", "y"]);
     expect(parsed.rows).toEqual([
       [1, 3.3],
@@ -96,6 +98,7 @@ describe("parseUpload", () => {
         { name: "y", data: [1, 2], type: "INT32" },
       ],
     });
+
     const parsed = await parseUpload(new File([buf], "outputs.csv"));
     expect(parsed.headers).toEqual(["y"]);
     expect(parsed.rows).toEqual([[1], [2]]);
@@ -108,6 +111,7 @@ describe("parseUpload", () => {
         { name: "y", data: ["one", "two"], type: "STRING" },
       ],
     });
+
     await expect(
       parseUpload(new File([buf], "outputs.parquet")),
     ).rejects.toThrow(/not a number/);

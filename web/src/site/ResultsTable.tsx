@@ -18,11 +18,14 @@ export function ResultsTable({
   sliceIndex: number;
 }) {
   const slice = result.slices[sliceIndex];
+
   if (!slice) return null;
 
   const maxAbs = slice.columns.map((c) => {
     let m = 0;
+
     for (const v of c.values) m = Math.max(m, Math.abs(v));
+
     return m;
   });
 
@@ -44,6 +47,7 @@ export function ResultsTable({
               const v = c.values[i];
               const pct = maxAbs[j] > 0 ? (Math.abs(v) / maxAbs[j]) * 100 : 0;
               const negative = v < 0;
+
               return (
                 <TableCell key={c.key}>
                   <div className="font-mono text-sm tabular-nums">

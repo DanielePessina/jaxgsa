@@ -16,11 +16,13 @@ function allclose(
   tol: { atol: number; rtol: number },
 ): boolean {
   if (actual.length !== expected.length) return false;
+
   for (let i = 0; i < actual.length; i++) {
     if (!(Math.abs(actual[i] - expected[i]) <= tol.atol + tol.rtol * Math.abs(expected[i]))) {
       return false;
     }
   }
+
   return true;
 }
 
@@ -28,9 +30,11 @@ function flattenRows(x: number[][]): Float64Array {
   const n = x.length;
   const d = x[0].length;
   const out = new Float64Array(n * d);
+
   for (let i = 0; i < n; i++) {
     for (let j = 0; j < d; j++) out[i * d + j] = x[i][j];
   }
+
   return out;
 }
 
@@ -55,12 +59,15 @@ describe("shapleyFromPceCoefficients aggregation (D=2, order 2)", () => {
     // partial = [1,4,9,16,25], total 55:
     //   Sh = [37/55, 18/55], S1 = [29/55, 10/55], ST = [45/55, 26/55]
     const { Sh, S1, ST } = shapleyFromPceCoefficients(coeffs, multiIndexColumns(mi), 2);
+
     const close = (a: Float64Array, b: number[]) =>
       allclose(a, b, { atol: 1e-12, rtol: 0 });
+
     expect(close(Sh, [37 / 55, 18 / 55])).toBe(true);
     expect(close(S1, [29 / 55, 10 / 55])).toBe(true);
     expect(close(ST, [45 / 55, 26 / 55])).toBe(true);
     let shSum = 0;
+
     for (const v of Sh) shSum += v;
     expect(Math.abs(shSum - 1)).toBeLessThanOrEqual(1e-12);
   });
@@ -112,6 +119,7 @@ describe("analyzeShapleyPce vs golden fixture (backend pce, order 9)", () => {
 
   it("Sh sums to 1 within 1e-9", () => {
     let sum = 0;
+
     for (const v of Sh) sum += v;
     console.log("sum(Sh) =", sum);
     expect(Math.abs(sum - 1)).toBeLessThanOrEqual(1e-9);

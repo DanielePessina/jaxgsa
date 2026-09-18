@@ -22,9 +22,11 @@ function referenceLine(
   demo: Demo | null,
 ): string | null {
   if (result.method === "morris") return null;
+
   if (!demo) return null;
   const s1 = demo.reference.S1.map((v) => v.toFixed(3)).join(", ");
   const st = demo.reference.ST.map((v) => v.toFixed(3)).join(", ");
+
   return `reference (${demo.label}, analytical): S1 ≈ ${s1} · ST ≈ ${st}`;
 }
 

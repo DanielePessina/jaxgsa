@@ -7,8 +7,11 @@ import { formatIndex } from "./format";
 import type { AnalysisResult } from "./engine";
 
 const WIDTH = 720;
+
 const HEIGHT = 400;
+
 const MARGIN = { top: 24, right: 18, bottom: 70, left: 54 };
+
 const PALETTE = ["#5cc3c8", "#4f8fe5", "#d6a25c", "#bd72c7", "#62b68c"];
 
 export interface ChartDataRow {
@@ -22,19 +25,26 @@ export function chartDomain(values: number[]): [number, number] {
   const [rawMin = 0, rawMax = 1] = extent(finite);
   let min = Math.min(0, rawMin);
   let max = Math.max(0, rawMax);
+
   if (min === max) max = min + 1;
   const padding = (max - min) * 0.08;
+
   if (min < 0) min -= padding;
   max += padding;
+
   return [min, max];
 }
 
 export function shapeChartData(result: AnalysisResult, sliceIndex: number): ChartDataRow[] {
   const slice = result.slices[sliceIndex];
+
   if (!slice) throw new Error(`IndicesChart: no slice ${sliceIndex} in ${result.method} result`);
+
   return result.parameters.map((parameter, i) => {
     const row: ChartDataRow = { parameter };
+
     for (const column of slice.columns) row[column.label] = column.values[i];
+
     return row;
   });
 }
@@ -44,9 +54,11 @@ function toCsv(result: AnalysisResult, sliceIndex: number): string {
   const rows = shapeChartData(result, sliceIndex);
   const labels = slice.columns.map((column) => column.label);
   const lines = [`parameter,${labels.join(",")}`];
+
   for (const row of rows) {
     lines.push([row.parameter, ...labels.map((label) => String(row[label]))].join(","));
   }
+
   return lines.join("\n") + "\n";
 }
 
@@ -60,6 +72,7 @@ function downloadPng(svg: SVGSVGElement, fileName: string) {
     canvas.width = WIDTH * scale;
     canvas.height = HEIGHT * scale;
     const ctx = canvas.getContext("2d");
+
     if (!ctx) return;
     ctx.scale(scale, scale);
     ctx.fillStyle = "#111318";
@@ -71,6 +84,7 @@ function downloadPng(svg: SVGSVGElement, fileName: string) {
     link.click();
     URL.revokeObjectURL(url);
   };
+
   image.src = url;
 }
 
@@ -93,14 +107,17 @@ export function IndicesChart({ result, sliceIndex, fileName }: {
       .range([MARGIN.left, WIDTH - MARGIN.right])
       .paddingInner(0.22)
       .paddingOuter(0.08);
+
     const series = scaleBand<string>()
       .domain(slice.columns.map((column) => column.label))
       .range([0, x.bandwidth()])
       .padding(0.1);
+
     const y = scaleLinear()
       .domain([min, max])
       .nice(5)
       .range([HEIGHT - MARGIN.bottom, MARGIN.top]);
+
     return { data, x, series, y, ticks: y.ticks(5), zero: y(0) };
   }, [result, slice, sliceIndex]);
 
@@ -136,6 +153,7 @@ export function IndicesChart({ result, sliceIndex, fileName }: {
             const x = chart.x(String(row.parameter))! + chart.series(column.label)!;
             const y = value >= 0 ? chart.y(value) : chart.zero;
             const height = Math.max(1, Math.abs(chart.y(value) - chart.zero));
+
             return (
               <rect key={`${row.parameter}-${column.key}`} x={x} y={y} width={chart.series.bandwidth()} height={height} rx="2" fill={value < 0 ? "#df6b63" : PALETTE[seriesIndex % PALETTE.length]}>
                 <title>{row.parameter} · {column.label}: {formatIndex(value)}</title>

@@ -37,9 +37,11 @@ export function analyzeMorris(
 
   // _expand_outputs: Y_expanded = Y_unique[expanded_to_unique]  (axis 0)
   let expanded = np.array(y as Float64Array<ArrayBuffer>, { dtype: np.float64 }); // (n_unique,)
+
   const e2u = np.array(design.expandedToUnique as Int32Array<ArrayBuffer>, {
     dtype: np.int32,
   });
+
   expanded = np.take(expanded, e2u, 0); // (n_expanded,)
 
   // Elementary effects: flatten the (r, D) index arrays, gather along axis 0,
@@ -47,9 +49,11 @@ export function analyzeMorris(
   const afterFlat = np.array(design.eeIdxAfter as Int32Array<ArrayBuffer>, {
     dtype: np.int32,
   }); // (r * D,)
+
   const beforeFlat = np.array(design.eeIdxBefore as Int32Array<ArrayBuffer>, {
     dtype: np.int32,
   });
+
   const deltaFlat = np.array(design.eeDelta as Float64Array<ArrayBuffer>, {
     dtype: np.float64,
   });

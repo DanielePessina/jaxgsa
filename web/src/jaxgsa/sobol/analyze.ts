@@ -29,16 +29,20 @@ export interface SobolIndices {
  */
 function pooledInvVar(A: np.Array, B: np.Array): np.Array {
   const N = A.shape[0];
+
   const pooledMean = np.divide(
     np.add(np.mean(A.ref, 0), np.mean(B.ref, 0)),
     2,
   );
+
   const A_c = np.subtract(A, pooledMean.ref); // A consumed
   const B_c = np.subtract(B, pooledMean); // B + pooledMean consumed
+
   const pooledVar = np.divide(
     np.add(np.sum(np.square(A_c), 0), np.sum(np.square(B_c), 0)), // A_c, B_c consumed
     2 * N,
   );
+
   // pooledVar consumed on its last (raw) use
   return np.where(np.equal(pooledVar.ref, 0), np.nan, np.divide(1, pooledVar));
 }
@@ -66,25 +70,30 @@ export function analyzeSobol(
   options: AnalyzeSobolOptions = {},
 ): SobolIndices {
   const calcSecondOrder = options.calcSecondOrder ?? false;
+
   if (calcSecondOrder) {
     throw new Error(
       "jaxgsa.sobol.analyze: calcSecondOrder=true is not supported yet " +
         "(the S2 estimator needs the BA blocks and is not ported)",
     );
   }
+
   const D = nParams;
   const step = D + 2;
 
   let expanded = np.array(y as Float64Array<ArrayBuffer>, { dtype: np.float64 }); // (n_expanded,)
+
   if (options.expandedToUnique !== undefined) {
     const idx = np.array(options.expandedToUnique as Int32Array<ArrayBuffer>, {
       dtype: np.int32,
     });
+
     expanded = np.take(expanded, idx, 0);
   }
 
   const nExpanded = expanded.shape[0];
   const baseN = nExpanded / step;
+
   if (!Number.isInteger(baseN)) {
     throw new Error(
       `jaxgsa.sobol.analyze: n_expanded=${nExpanded} is not a multiple of the ` +
@@ -92,6 +101,7 @@ export function analyzeSobol(
         `whole groups (base_n = n_expanded / step = ${nExpanded} / ${step})`,
     );
   }
+
   if (options.baseN !== undefined && options.baseN !== baseN) {
     throw new Error(
       `jaxgsa.sobol.analyze: baseN=${options.baseN} does not match the ` +
