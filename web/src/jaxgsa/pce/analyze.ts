@@ -91,6 +91,7 @@ export function fitPce(
   const gramReg = np.add(gram, ridgeEye); // gram, ridgeEye consumed
 
   // coeffs = solve(gram, Phi.T @ Y)
+  // SAFETY: yf is the validated scalar output copied into a host Float64Array.
   const Ynp = np.array(yf as Float64Array<ArrayBuffer>, { dtype: np.float64 }); // (N,)
   const B = np.matmul(PhiT, Ynp); // (n_terms,) — PhiT, Ynp consumed
   const coeffs = np.linalg.solve(gramReg, B); // (n_terms,) — gramReg, B consumed

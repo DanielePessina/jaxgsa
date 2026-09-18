@@ -48,6 +48,7 @@ export function shapleyFromPceCoefficients(
   const miCols = Array.isArray(mi) ? mi : multiIndexColumns(mi);
   const nTerms = miCols[0].length;
 
+  // SAFETY: coeffs is produced by the PCE fit as a host Float64Array.
   const coeffsNp =
     coeffs instanceof np.Array
       ? coeffs
@@ -84,10 +85,12 @@ export function shapleyFromPceCoefficients(
     }
   }
 
+  // SAFETY: membership is a host Float64Array built from the validated multi-index.
   const membershipNp = np
     .array(membership as Float64Array<ArrayBuffer>, { dtype: np.float64 })
     .reshape([nTerms - 1, D]); // (n_terms-1, D)
 
+  // SAFETY: singletons is a host Float64Array built from the validated multi-index.
   const singletonsNp = np
     .array(singletons as Float64Array<ArrayBuffer>, { dtype: np.float64 })
     .reshape([nTerms - 1, D]); // (n_terms-1, D)
@@ -99,8 +102,11 @@ export function shapleyFromPceCoefficients(
   const ST = np.matmul(V, membershipNp); // (D,) — V, membershipNp consumed
 
   return {
+    // SAFETY: jax-js dataSync returns float64 host buffers for float64 estimator outputs.
     Sh: Sh.dataSync() as Float64Array,
+    // SAFETY: jax-js dataSync returns float64 host buffers for float64 estimator outputs.
     S1: S1.dataSync() as Float64Array,
+    // SAFETY: jax-js dataSync returns float64 host buffers for float64 estimator outputs.
     ST: ST.dataSync() as Float64Array,
   };
 }

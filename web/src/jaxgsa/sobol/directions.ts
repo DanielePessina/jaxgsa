@@ -160,7 +160,7 @@ let cached: Uint32Array[] | null = null;
 /** Cached direction-number rows for dims 1..SOBOL_MAX_DIM. */
 export function directionNumbers(): Uint32Array[] {
   if (cached === null) {
-    cached = new Array(SOBOL_MAX_DIM);
+    cached = Array.from({ length: SOBOL_MAX_DIM }, () => new Uint32Array(0));
 
     for (let d = 1; d <= SOBOL_MAX_DIM; d++) cached[d - 1] = buildDirectionNumbers(d);
   }

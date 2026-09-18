@@ -35,7 +35,7 @@ export function chartDomain(values: number[]): [number, number] {
   return [min, max];
 }
 
-export function shapeChartData(result: AnalysisResult, sliceIndex: number): ChartDataRow[] {
+export function chartRowsForSlice(result: AnalysisResult, sliceIndex: number): ChartDataRow[] {
   const slice = result.slices[sliceIndex];
 
   if (!slice) throw new Error(`IndicesChart: no slice ${sliceIndex} in ${result.method} result`);
@@ -51,7 +51,7 @@ export function shapeChartData(result: AnalysisResult, sliceIndex: number): Char
 
 function toCsv(result: AnalysisResult, sliceIndex: number): string {
   const slice = result.slices[sliceIndex];
-  const rows = shapeChartData(result, sliceIndex);
+  const rows = chartRowsForSlice(result, sliceIndex);
   const labels = slice.columns.map((column) => column.label);
   const lines = [`parameter,${labels.join(",")}`];
 
@@ -98,7 +98,7 @@ export function IndicesChart({ result, sliceIndex, fileName }: {
   const slice = result.slices[sliceIndex];
 
   const chart = useMemo(() => {
-    const data = shapeChartData(result, sliceIndex);
+    const data = chartRowsForSlice(result, sliceIndex);
     const values = slice.columns.flatMap((column) => Array.from(column.values));
     const [min, max] = chartDomain(values);
 

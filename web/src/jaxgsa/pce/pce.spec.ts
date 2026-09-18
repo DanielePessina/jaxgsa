@@ -203,6 +203,7 @@ describe("analyzePce fit sanity (order 9 on the golden cloud)", () => {
     });
 
     expect(fit.coeffs.shape).toEqual([fit.mi.nTerms]);
+    // SAFETY: dataSync returns the float64 coefficient buffer retained for this assertion.
     coeffs = fit.coeffs.ref.dataSync() as Float64Array; // ref'd: sobol consumes the array below
     ({ S1, ST } = sobolFromCoefficients(fit.coeffs, fit.mi));
   });

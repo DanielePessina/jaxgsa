@@ -13,6 +13,7 @@ describe("jax-js wasm runtime (Phase 0 spike)", () => {
 
   it("reports at least the wasm device after init()", () => {
     expect(availableDevices).toContain("wasm");
+    // SAFETY: init() reports the finite device-name union exercised by this test.
     expect(availableDevices.every((d) => KNOWN_DEVICES.includes(d as never))).toBe(true);
     expect(() => defaultDevice("wasm")).not.toThrow();
   });

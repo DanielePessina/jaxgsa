@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chartDomain, shapeChartData, type ChartDataRow } from "./IndicesChart";
+import { chartDomain, chartRowsForSlice, type ChartDataRow } from "./IndicesChart";
 import type { AnalysisResult } from "./engine";
 
 const result: AnalysisResult = {
@@ -27,9 +27,9 @@ const result: AnalysisResult = {
   settings: {},
 };
 
-describe("shapeChartData", () => {
+describe("chartRowsForSlice", () => {
   it("emits one row per parameter with one field per index column", () => {
-    const rows: ChartDataRow[] = shapeChartData(result, 0);
+    const rows: ChartDataRow[] = chartRowsForSlice(result, 0);
     expect(rows).toEqual([
       { parameter: "x1", S1: 0.32, ST: 0.56 },
       { parameter: "x2", S1: 0.44, ST: 0.44 },
@@ -38,12 +38,12 @@ describe("shapeChartData", () => {
   });
 
   it("selects the requested slice", () => {
-    const rows = shapeChartData(result, 1);
+    const rows = chartRowsForSlice(result, 1);
     expect(rows[2]).toEqual({ parameter: "x3", S1: 0.3, ST: 0.6 });
   });
 
   it("throws for a missing slice index", () => {
-    expect(() => shapeChartData(result, 9)).toThrow(/no slice 9/);
+    expect(() => chartRowsForSlice(result, 9)).toThrow(/no slice 9/);
   });
 });
 

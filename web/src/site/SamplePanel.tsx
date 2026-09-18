@@ -71,7 +71,7 @@ function DesignMethodCell({
 
   const preview = design
     ? Array.from({ length: Math.min(3, design.nRuns) }, (_, r) => {
-        const row = new Array<number>(D);
+        const row = Array.from({ length: D }, () => 0);
 
         for (let j = 0; j < D; j++) row[j] = design.samples[r * D + j];
 

@@ -37,6 +37,8 @@ interface MethodAvailability {
   reason: string | null;
 }
 
+const DESIGN_METHODS: DesignMethod[] = ["sobol", "morris", "kucherenko"];
+
 const DEFAULT_SELECTION: Record<MethodKey, boolean> = {
   sobol: false,
   morris: false,
@@ -47,31 +49,36 @@ const DEFAULT_SELECTION: Record<MethodKey, boolean> = {
 function availability(
   x: XSource | null,
 ): Record<MethodKey, MethodAvailability> {
-  return Object.fromEntries(
-    ALL_METHODS.map((method) => {
-      const input = METHOD_META[method].input;
+  const dedicated = (method: DesignMethod): MethodAvailability => {
+    const available = x?.kind === "design" && x.method === method;
 
-      if (input.kind === "dedicated") {
-        const available = x?.kind === "design" && x.method === input.design;
+    return {
+      available,
+      reason: available ? null : `Requires its own ${method} design.`,
+    };
+  };
 
-        return [method, {
-          available,
-          reason: available
-            ? null
-            : `Requires its own ${input.design} design.`,
-        }];
-      }
+  const given = (): MethodAvailability => {
+    const available = x?.kind === "uploaded";
 
-      const available = x?.kind === "uploaded";
+    return {
+      available,
+      reason: available
+        ? null
+        : "Uses an ordinary uploaded X/Y point cloud, not a dedicated estimator design.",
+    };
+  };
 
-      return [method, {
-        available,
-        reason: available
-          ? null
-          : "Uses an ordinary uploaded X/Y point cloud, not a dedicated estimator design.",
-      }];
-    }),
-  ) as Record<MethodKey, MethodAvailability>;
+  return {
+    sobol: dedicated("sobol"),
+    morris: dedicated("morris"),
+    pce: given(),
+    shapley: given(),
+  };
+}
+
+function isDesignMethod(value: string): value is DesignMethod {
+  return value === "sobol" || value === "morris" || value === "kucherenko";
 }
 
 export function AnalyzePanel({
@@ -121,12 +128,18 @@ export function AnalyzePanel({
 
   const demo = activeDemo ?? demoForProblem(problem);
   const avail = availability(xSource);
-  const designMethods = Object.keys(designs) as DesignMethod[];
+
+  const designMethods = DESIGN_METHODS.filter(
+    (method): method is DesignMethod => designs[method] !== undefined,
+  );
 
   // Fall back when the selected design disappears.
   useEffect(() => {
     if (xSource?.kind === "design" && !designs[xSource.method]) {
-      const methods = Object.keys(designs) as DesignMethod[];
+      const methods = DESIGN_METHODS.filter(
+        (method): method is DesignMethod => designs[method] !== undefined,
+      );
+
       const last = methods[methods.length - 1];
       setXSource(last ? { kind: "design", method: last } : null);
       setYData(null);
@@ -330,8 +343,8 @@ export function AnalyzePanel({
                       "Upload an X CSV/Parquet (or load a demo cloud) to use your own data.",
                     );
                   }
-                } else if (designs[v as DesignMethod]) {
-                  pickDesign(v as DesignMethod);
+                } else if (isDesignMethod(v) && designs[v]) {
+                  pickDesign(v);
                 }
               }}
               >

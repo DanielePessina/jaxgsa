@@ -241,7 +241,7 @@ export default function App() {
       setDesigns({ sobol: gen });
       setYData(scalarYData(y, `demo model (${demo.label}) · ${y.length} runs`));
       setXSource({ kind: "design", method: "sobol" });
-    } catch (err) {
+    } catch {
       // Sampling failed (engine not ready yet, etc.): leave X unset; the
       // user can still generate a design in section 02.
       setXSource(null);

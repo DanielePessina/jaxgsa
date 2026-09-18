@@ -207,7 +207,7 @@ describe("Saltelli layout", () => {
     });
 
     for (let j = 0; j < D; j++) {
-      expect(rawPlain[0 * D + j]).toBe(rawPlain[4 * D + j]); // A_1 == B_1
+      expect(rawPlain[j]).toBe(rawPlain[4 * D + j]); // A_1 == B_1
       expect(plain.samples[plain.expandedToUnique[0] * D + j]).toBe(
         plain.samples[plain.expandedToUnique[4] * D + j],
       );

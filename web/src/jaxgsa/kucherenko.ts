@@ -8,7 +8,7 @@ export function estimateKucherenko(
   fJoint: np.Array,
   fFirst: np.Array,
   fTotal: np.Array,
-): { S1: np.Array; ST: np.Array; variance: np.Array } {
+) {
   const variance = np.var_(fJoint.ref, 0); // (S,)
 
   const safeVariance = np.where(
@@ -63,7 +63,7 @@ export function estimateKucherenko(
 export function analyzeKucherenko(
   x: np.Array,
   y: np.Array,
-): { S1: Float64Array; ST: Float64Array; variance: Float64Array } {
+) {
   const D = x.shape[1];
   const n = x.shape[0];
   const blocks = 2 * D + 1;
@@ -84,8 +84,11 @@ export function analyzeKucherenko(
 
   const { S1, ST, variance } = estimateKucherenko(fJoint, fFirst, fTotal);
 
+  // SAFETY: jax-js dataSync returns float64 host buffers after the explicit reshapes.
   const s1 = np.reshape(S1, [D]).dataSync() as Float64Array;
+  // SAFETY: jax-js dataSync returns float64 host buffers after the explicit reshapes.
   const st = np.reshape(ST, [D]).dataSync() as Float64Array;
+  // SAFETY: jax-js dataSync returns float64 host buffers after the explicit reshape.
   const varOut = np.reshape(variance, [1]).dataSync() as Float64Array;
 
   return { S1: s1, ST: st, variance: varOut };

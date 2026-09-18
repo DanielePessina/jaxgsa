@@ -351,12 +351,15 @@ describe("buildSessionJson (v2)", () => {
 
   it("serializes each generated design as CSV", () => {
     const gen = {
+      // SAFETY: this fixture deliberately models the literal Sobol method.
       method: "sobol" as const,
       problem: ISHIGAMI_PROBLEM,
       samples: new Float64Array([1, 2, 3, 4, 5, 6]),
       nRuns: 2,
       nParams: 3,
+      // SAFETY: buildSessionJson only serializes the host design fields in this fixture.
       port: null as never,
+      // SAFETY: this fixture intentionally uses the session summary tuple shape.
       summary: [["base_n", "2"]] as [string, string][],
       notes: [],
     };

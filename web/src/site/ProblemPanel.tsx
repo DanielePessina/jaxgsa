@@ -18,7 +18,7 @@ import {
 } from "@/components/ui/select";
 import { demoById, DEMOS, type Demo, type DemoId } from "./demos";
 import { MonoSelect } from "./primitives";
-import type { ProblemSpec } from "@/jaxgsa/sampling";
+import type { MarginalSpec, ProblemSpec } from "@/jaxgsa/sampling";
 
 type DistKind = "uniform" | "gaussian";
 
@@ -31,6 +31,11 @@ interface ProblemRow {
   variance: string;
   gLow: string;
   gHigh: string;
+}
+
+interface RowSpecResult {
+  spec: MarginalSpec | null;
+  error: string | null;
 }
 
 /**
@@ -64,10 +69,7 @@ function blankRow(): ProblemRow {
   };
 }
 
-function rowToSpec(row: ProblemRow): {
-  spec: ProblemSpec["marginals"][number] | null;
-  error: string | null;
-} {
+function rowToSpec(row: ProblemRow): RowSpecResult {
   const name = row.name.trim();
 
   if (name === "") return { spec: null, error: "name is required" };
@@ -175,17 +177,24 @@ export function ProblemPanel({
     }
   }
 
-  const validSpec =
+  let validSpec: ProblemSpec | null = null;
+
+  if (
     specs.every((s) => s.error === null) &&
     !dupNames &&
     rows.length >= 1 &&
     outputNamesError === null
-      ? {
-          names: rows.map((r) => r.name.trim()),
-          marginals: specs.map((s) => s.spec) as ProblemSpec["marginals"],
-          ...(outputNames ? { outputNames } : {}),
-        }
-      : null;
+  ) {
+    const marginals: ProblemSpec["marginals"] = specs.map((s) => {
+      if (s.spec === null) throw new Error("validated problem has a missing marginal");
+
+      return s.spec;
+    });
+
+    validSpec = { names: rows.map((r) => r.name.trim()), marginals };
+
+    if (outputNames) validSpec.outputNames = outputNames;
+  }
 
   // `rows` only changes identity on a real edit (set/add/remove/load), so
   // this fires exactly when the problem definition changes — never on
@@ -262,7 +271,10 @@ export function ProblemPanel({
                       <td className="px-2 py-2">
                         <Select
                           value={row.dist}
-                          onValueChange={(v) => set(i, { dist: v as DistKind })}
+                          onValueChange={(v) => {
+                            // SAFETY: Select only emits the two values declared below.
+                            set(i, { dist: v as DistKind });
+                          }}
                         >
                           <SelectTrigger className="w-32 font-mono text-xs">
                             <SelectValue />
@@ -383,7 +395,10 @@ export function ProblemPanel({
             </span>
             <MonoSelect
               value={demoId}
-              onChange={(v) => setDemoId(v as DemoId)}
+              onChange={(v) => {
+                // SAFETY: MonoSelect options are generated exclusively from DEMOS.
+                setDemoId(v as DemoId);
+              }}
             >
               {DEMOS.map((d) => (
                 <option key={d.id} value={d.id}>

@@ -109,17 +109,19 @@ describe("kucherenko sampler: indices on a JS-sampled design", () => {
     const D = design.nParams;
     const nRuns = design.samples.length / D;
     const y = new Float64Array(nRuns);
-    const row: number[] = new Array(D);
+    const row: number[] = Array.from({ length: D }, () => 0);
 
     for (let r = 0; r < nRuns; r++) {
       for (let j = 0; j < D; j++) row[j] = design.samples[r * D + j];
       y[r] = ishigami(row);
     }
 
+    // SAFETY: sampler samples are stored as host Float64Array values.
     const xNp = np
       .array(design.samples as Float64Array<ArrayBuffer>, { dtype: np.float64 })
       .reshape([nRuns, D]);
 
+    // SAFETY: the benchmark evaluator returns a host Float64Array.
     const yNp = np.array(y as Float64Array<ArrayBuffer>, { dtype: np.float64 });
     const { S1, ST } = analyzeKucherenko(xNp, yNp);
 

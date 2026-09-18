@@ -72,6 +72,7 @@ export function FileUpload({
           }}
           onDragOver={(e) => e.preventDefault()}
           onDragLeave={(e) => {
+            // SAFETY: drag event relatedTarget is either a Node or null in the browser DOM.
             if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
               setDragging(false);
             }

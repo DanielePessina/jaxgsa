@@ -102,7 +102,7 @@ const TIME_SUFFIX_RE = /^(.+)_t([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)$/
  * anything else is `<name>` at time 0. A numeric `_t...` suffix is reserved —
  * an output literally named e.g. `foo_t2` must be written `foo_t2_t0`.
  */
-export function classifyYColumn(name: string): { output: string; time: number } {
+export function classifyYColumn(name: string) {
   const m = TIME_SUFFIX_RE.exec(name);
 
   if (m) {
@@ -129,7 +129,7 @@ export function yColumnLabel(output: string, time: number): string {
 export function parseYColumns(
   parsed: ParsedCsv,
   problem: ProblemSpec,
-): { columns: YColumn[]; runIds: number[] | null; rowCount: number } {
+) {
   const headers = parsed.headers.map((h) => h.trim());
   const xCols = new Set(problem.names);
   let runIdIdx = -1;
@@ -437,6 +437,7 @@ export function generateDesign(
   const notes: string[] = [];
 
   if (method === "sobol") {
+    // SAFETY: this branch is selected by the method discriminator; callers pass SobolConfig here.
     const cfg = config as SobolConfig;
 
     if (cfg.calcSecondOrder) {
@@ -475,6 +476,7 @@ export function generateDesign(
   }
 
   if (method === "morris") {
+    // SAFETY: this branch is selected by the method discriminator; callers pass MorrisConfig here.
     const cfg = config as MorrisConfig;
 
     const port = sampleMorris(problem, cfg.nTrajectories, {
@@ -502,6 +504,7 @@ export function generateDesign(
     };
   }
 
+  // SAFETY: the remaining method branch is Kucherenko and therefore uses KucherenkoConfig.
   const cfg = config as KucherenkoConfig;
   const port = sampleKucherenkoDesign(problem, cfg.nSamples, cfg.seed);
   const nRuns = port.samples.length / D;
@@ -545,15 +548,17 @@ export interface AnalysisResult {
   slices: ResultSlice[];
   notes: string[];
   /** The settings the analysis ran with (seed, order, base_n, ...) for repro. */
-  settings: Record<string, unknown>;
+  settings: AnalysisSettings;
 }
+
+export type AnalysisSettings = Record<string, string | number | boolean | null>;
 
 function result(
   method: string,
   parameters: string[],
   slices: ResultSlice[],
   notes: string[],
-  settings: Record<string, unknown>,
+  settings: AnalysisSettings,
 ): AnalysisResult {
   return { method, parameters, slices, notes, settings };
 }
@@ -571,6 +576,7 @@ export function analyzeGenerated(gen: GeneratedDesign, y: YData): AnalysisResult
 
   for (const col of y.columns) {
     if (gen.method === "sobol") {
+      // SAFETY: the generated design's method discriminator matches its Sobol port.
       const design = gen.port as SobolDesign;
 
       const { S1, ST }: SobolIndices = analyzeSobol(col.values, design.nParams, {
@@ -586,6 +592,7 @@ export function analyzeGenerated(gen: GeneratedDesign, y: YData): AnalysisResult
         ],
       });
     } else if (gen.method === "morris") {
+      // SAFETY: the generated design's method discriminator matches its Morris port.
       const design = gen.port as MorrisDesign;
       const { mu, mu_star, sigma }: MorrisMeasures = analyzeMorris(design, col.values);
       slices.push({
@@ -598,13 +605,16 @@ export function analyzeGenerated(gen: GeneratedDesign, y: YData): AnalysisResult
         ],
       });
     } else {
+      // SAFETY: the remaining generated design is Kucherenko by the DesignMethod union.
       const design = gen.port as KucherenkoDesign;
       const nRuns = design.samples.length / design.nParams;
 
+      // SAFETY: generated design samples are stored as host Float64Array values.
       const xNp = np
         .array(design.samples as Float64Array<ArrayBuffer>, { dtype: np.float64 })
         .reshape([nRuns, design.nParams]);
 
+      // SAFETY: normalized Y columns own host Float64Array values.
       const yNp = np.array(col.values as Float64Array<ArrayBuffer>, {
         dtype: np.float64,
       });
@@ -695,7 +705,7 @@ export function loadDemoCloud(
   demo: Demo,
   nSamples = 1024,
   seed = 0,
-): { x: Float64Array; y: Float64Array; n: number } {
+) {
   const D = demo.problem.names.length;
   const unit = sobolSequence(D, nSamples, true, seed);
   const x = transformSamples(demo.problem, unit);
@@ -784,7 +794,7 @@ export interface SessionJson {
     method: string;
     parameters: string[];
     notes: string[];
-    settings: Record<string, unknown>;
+    settings: AnalysisSettings;
     slices: Array<{
       output: string;
       time: number;
@@ -805,7 +815,8 @@ export function buildSessionJson(
 ): SessionJson {
   const designEntries: SessionJson["designs"] = {};
 
-  for (const method of Object.keys(designs) as DesignMethod[]) {
+  for (const method of ["sobol", "morris", "kucherenko"] as const) {
+    if (!designs[method]) continue;
     const gen = designs[method];
 
     if (gen) {

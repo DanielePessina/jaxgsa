@@ -268,7 +268,7 @@ export function validateProblem(
 export function dedupeDesign(
   problem: ProblemSpec,
   expandedUnit: Float64Array,
-): { samples: Float64Array; expandedToUnique: Int32Array; nExpanded: number } {
+) {
   const D = problem.names.length;
   const { unique, expandedToUnique } = stableUniqueRows(expandedUnit, D);
   const samples = transformSamples(problem, unique);
@@ -278,11 +278,13 @@ export function dedupeDesign(
 
 /** Wrap a host float64 buffer as a jax-js np array. */
 export function toNp64(arr: Float64Array): np.Array {
+  // SAFETY: arr is a host Float64Array owned by the caller.
   return np.array(arr as Float64Array<ArrayBuffer>, { dtype: np.float64 });
 }
 
 /** Wrap a host int32 buffer as a jax-js np array. */
 export function toNp32(arr: Int32Array): np.Array {
+  // SAFETY: arr is a host Int32Array owned by the caller.
   return np.array(arr as Int32Array<ArrayBuffer>, { dtype: np.int32 });
 }
 
@@ -304,7 +306,7 @@ export function toNp32(arr: Int32Array): np.Array {
 export function stableUniqueRows(
   samples: Float64Array,
   dim: number,
-): { unique: Float64Array; expandedToUnique: Int32Array } {
+) {
   const nRows = dim === 0 ? 0 : samples.length / dim;
 
   if (nRows === 0) {

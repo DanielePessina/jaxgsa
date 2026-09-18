@@ -110,7 +110,7 @@ export function buildMultiIndex(D: number, p: number): MultiIndex {
         positiveCompositions(degree, nNonzero, [], parts);
 
         for (const part of parts) {
-          const values = new Array<number>(D).fill(0);
+          const values = Array.from({ length: D }, () => 0);
 
           for (let k = 0; k < nNonzero; k++) values[pos[k]] = part[k];
           rows.push({ degree, values });
@@ -249,7 +249,7 @@ export function autoOrder(D: number, N: number, maxOrder: number, fitRatio = 0.5
 export function mapToReference(
   x: Float64Array,
   problem: ProblemSpec,
-): { xRef: Float64Array; inputTypes: ("uniform" | "gaussian")[] } {
+) {
   const D = problem.names.length;
   const N = x.length / D;
 
@@ -336,20 +336,24 @@ export function buildDesignMatrix(
   }
 
   let Phi = np.take(
+    // SAFETY: basisTables contains host Float64Arrays created by the basis evaluators above.
     np.array(basisTables[0] as Float64Array<ArrayBuffer>, { dtype: np.float64 }).reshape([
       N,
       maxDegree + 1,
     ]),
+    // SAFETY: miCols is populated with Int32Array columns matching the multi-index shape.
     np.array(miCols[0] as Int32Array<ArrayBuffer>, { dtype: np.int32 }),
     1,
   );
 
   for (let d = 1; d < D; d++) {
     const factor = np.take(
+      // SAFETY: each basis table is a host Float64Array for the current input dimension.
       np.array(basisTables[d] as Float64Array<ArrayBuffer>, { dtype: np.float64 }).reshape([
         N,
         maxDegree + 1,
       ]),
+      // SAFETY: each multi-index column is an Int32Array with one entry per term.
       np.array(miCols[d] as Int32Array<ArrayBuffer>, { dtype: np.int32 }),
       1,
     );
@@ -373,7 +377,7 @@ export function buildDesignMatrix(
 export function sobolFromCoefficients(
   coeffs: np.Array,
   mi: MultiIndex,
-): { S1: Float64Array; ST: Float64Array } {
+) {
   const D = mi.D;
   const nTerms = mi.nTerms;
 
@@ -409,11 +413,13 @@ export function sobolFromCoefficients(
     }
   }
 
+  // SAFETY: onlyI is a freshly allocated Float64Array with nTerms * D entries.
   const onlyNp = np.array(onlyI as Float64Array<ArrayBuffer>, { dtype: np.float64 }).reshape([
     nTerms,
     D,
   ]); // (n_terms, D)
 
+  // SAFETY: active is a freshly allocated Float64Array with nTerms * D entries.
   const activeNp = np.array(active as Float64Array<ArrayBuffer>, { dtype: np.float64 }).reshape([
     nTerms,
     D,
@@ -426,7 +432,9 @@ export function sobolFromCoefficients(
   const ST = np.multiply(STraw, invVar); // (D,) — STraw, invVar consumed
 
   return {
+    // SAFETY: jax-js dataSync returns the Float64Array matching the float64 computation.
     S1: S1.dataSync() as Float64Array,
+    // SAFETY: jax-js dataSync returns the Float64Array matching the float64 computation.
     ST: ST.dataSync() as Float64Array,
   };
 }

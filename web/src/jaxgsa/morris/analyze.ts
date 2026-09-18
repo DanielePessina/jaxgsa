@@ -36,8 +36,10 @@ export function analyzeMorris(
   const D = design.nParams;
 
   // _expand_outputs: Y_expanded = Y_unique[expanded_to_unique]  (axis 0)
+  // SAFETY: the caller's y is a host float64 buffer, and the method only reads its unique rows.
   let expanded = np.array(y as Float64Array<ArrayBuffer>, { dtype: np.float64 }); // (n_unique,)
 
+  // SAFETY: the sampler stores expandedToUnique as an Int32Array of valid row indices.
   const e2u = np.array(design.expandedToUnique as Int32Array<ArrayBuffer>, {
     dtype: np.int32,
   });
@@ -46,14 +48,17 @@ export function analyzeMorris(
 
   // Elementary effects: flatten the (r, D) index arrays, gather along axis 0,
   // reshape to (r, D). delta broadcasts over trailing output dims.
+  // SAFETY: elementary-effect indices are emitted as Int32Array with shape (r, D).
   const afterFlat = np.array(design.eeIdxAfter as Int32Array<ArrayBuffer>, {
     dtype: np.int32,
   }); // (r * D,)
 
+  // SAFETY: elementary-effect indices are emitted as Int32Array with shape (r, D).
   const beforeFlat = np.array(design.eeIdxBefore as Int32Array<ArrayBuffer>, {
     dtype: np.int32,
   });
 
+  // SAFETY: elementary-effect deltas are emitted as Float64Array with shape (r, D).
   const deltaFlat = np.array(design.eeDelta as Float64Array<ArrayBuffer>, {
     dtype: np.float64,
   });
@@ -73,8 +78,11 @@ export function analyzeMorris(
   const sigma = np.sqrt(np.divide(sumSq, r - 1)); // (D,)  (sumSq consumed)
 
   return {
+    // SAFETY: jax-js dataSync returns float64 host buffers for these float64 arrays.
     mu: mu.dataSync() as Float64Array,
+    // SAFETY: jax-js dataSync returns float64 host buffers for these float64 arrays.
     mu_star: muStar.dataSync() as Float64Array,
+    // SAFETY: jax-js dataSync returns float64 host buffers for these float64 arrays.
     sigma: sigma.dataSync() as Float64Array,
   };
 }

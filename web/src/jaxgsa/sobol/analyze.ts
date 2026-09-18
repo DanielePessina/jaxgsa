@@ -81,9 +81,11 @@ export function analyzeSobol(
   const D = nParams;
   const step = D + 2;
 
+  // SAFETY: the caller supplies the scalar output as a host float64 buffer.
   let expanded = np.array(y as Float64Array<ArrayBuffer>, { dtype: np.float64 }); // (n_expanded,)
 
   if (options.expandedToUnique !== undefined) {
+    // SAFETY: the sampler's expandedToUnique map is an Int32Array of row indices.
     const idx = np.array(options.expandedToUnique as Int32Array<ArrayBuffer>, {
       dtype: np.int32,
     });
@@ -140,7 +142,9 @@ export function analyzeSobol(
   const ST = np.multiply(np.multiply(0.5, meanSq), invVar); // (D,)  (meanSq, invVar consumed)
 
   return {
+    // SAFETY: jax-js dataSync returns float64 host buffers for the float64 estimator outputs.
     S1: S1.dataSync() as Float64Array,
+    // SAFETY: jax-js dataSync returns float64 host buffers for the float64 estimator outputs.
     ST: ST.dataSync() as Float64Array,
   };
 }

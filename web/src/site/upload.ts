@@ -27,7 +27,7 @@ const PARQUET_MAGIC = new Uint8Array([0x50, 0x41, 0x52, 0x31]); // "PAR1"
  * the user. Pickle-family formats are a code-execution hazard; array formats
  * carry no column names and would be silently misread.
  */
-export const UNSAFE_EXTENSIONS: Record<string, string> = {
+export const UNSAFE_EXTENSIONS = {
   ".pkl": "pickle cannot be loaded safely (it executes arbitrary code); use CSV or Parquet",
   ".pkl.gz": "pickle cannot be loaded safely (it executes arbitrary code); use CSV or Parquet",
   ".joblib": "joblib/pickle cannot be loaded safely (it executes arbitrary code); use CSV or Parquet",
@@ -42,7 +42,11 @@ export const UNSAFE_EXTENSIONS: Record<string, string> = {
   ".dta": "Stata is not supported; use CSV or Parquet",
   ".xlsx": "Excel is not supported; export a CSV or Parquet instead",
   ".xls": "Excel is not supported; export a CSV or Parquet instead",
-};
+} satisfies Record<string, string>;
+
+function unsafeMessage(extension: string): string | undefined {
+  return Object.entries(UNSAFE_EXTENSIONS).find(([key]) => key === extension)?.[1];
+}
 
 /** Lowercased file extension including the dot, or "" when none. */
 export function fileExtension(name: string): string {
@@ -56,13 +60,13 @@ export function fileExtension(name: string): string {
 /** Reason a file name should be refused, or null when it is acceptable. */
 export function rejectUnsafeName(name: string): string | null {
   const ext = fileExtension(name);
-  const direct = UNSAFE_EXTENSIONS[ext];
+  const direct = unsafeMessage(ext);
 
   if (direct) return direct;
 
   // Multi-part names like "out.pkl.gz": look under the gzip wrapper too.
   if (ext === ".gz") {
-    const inner = UNSAFE_EXTENSIONS[fileExtension(name.slice(0, -3))];
+    const inner = unsafeMessage(fileExtension(name.slice(0, -3)));
 
     if (inner) return inner;
   }
@@ -79,15 +83,19 @@ export function isParquetMagic(bytes: Uint8Array): boolean {
   return true;
 }
 
+type ParquetCell = number | bigint | boolean | string | null | undefined;
+
 /** Coerce one parquet cell to a finite number, matching CSV tolerance. */
-function cellToNumber(name: string, row: number, v: unknown): number {
-  if (typeof v === "number") return v;
+function cellToNumber(name: string, row: number, v: ParquetCell): number {
+  const kind = Object.prototype.toString.call(v);
 
-  if (typeof v === "bigint") return Number(v);
+  if (kind === "[object Number]") return Number(v);
 
-  if (typeof v === "boolean") return v ? 1 : 0;
+  if (kind === "[object BigInt]") return Number(v);
 
-  if (typeof v === "string" && v.trim() !== "") {
+  if (kind === "[object Boolean]") return v === true ? 1 : 0;
+
+  if (kind === "[object String]" && String(v).trim() !== "") {
     const n = Number(v);
 
     if (!Number.isNaN(n)) return n;
@@ -99,7 +107,7 @@ function cellToNumber(name: string, row: number, v: unknown): number {
 /** Parse a Parquet file (with full codec support) into the shared CSV shape. */
 async function parseParquet(file: File): Promise<ParsedCsv> {
   const buf = await file.arrayBuffer();
-  let rows: Record<string, unknown>[];
+  let rows;
 
   try {
     rows = await parquetReadObjects({ file: buf, compressors });

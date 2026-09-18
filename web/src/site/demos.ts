@@ -26,7 +26,7 @@ function evaluateDemo(
     const D = design.nParams;
     const nRuns = design.samples.length / D;
     const y = new Float64Array(nRuns);
-    const row: number[] = new Array(D);
+    const row: number[] = Array.from({ length: D }, () => 0);
 
     for (let r = 0; r < nRuns; r++) {
       for (let j = 0; j < D; j++) row[j] = design.samples[r * D + j];
