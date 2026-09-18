@@ -71,6 +71,130 @@ export interface ParsedCsv {
   rows: number[][];
 }
 
+// ---------------------------------------------------------------------------
+// Y exchange model (PLAN-WEB-UI.md D1)
+// ---------------------------------------------------------------------------
+
+/** One output column of a Y upload: an output at a single time point. */
+export interface YColumn {
+  output: string;
+  time: number;
+  /** One value per run, in upload row order (unaligned). */
+  values: Float64Array;
+}
+
+/** The normalized Y upload: every (output, time) slice of the model outputs. */
+export interface YData {
+  columns: YColumn[];
+  rowCount: number;
+  label: string;
+}
+
+/** The `_t{t}` timepoint suffix: `<output>_t<digits>`. */
+const TIME_SUFFIX_RE = /^(.+)_t([0-9]+)$/;
+
+/**
+ * Classify one output column name per the `_t{t}` exchange contract:
+ * `<output>_t<digits>` names that output at a time point; anything else is
+ * `<name>` at time 0. `_t<digits>` is a reserved suffix — an output literally
+ * named e.g. `foo_t2` must be written `foo_t2_t0`. See PLAN-WEB-UI.md D1.
+ */
+export function classifyYColumn(name: string): { output: string; time: number } {
+  const m = TIME_SUFFIX_RE.exec(name);
+  if (m) return { output: m[1], time: Number(m[2]) };
+  return { output: name, time: 0 };
+}
+
+/** Stable display label for a parsed column (round-trips the source header). */
+export function yColumnLabel(output: string, time: number): string {
+  return time === 0 ? output : `${output}_t${time}`;
+}
+
+/**
+ * Classify a parsed CSV into output columns per the contract. `run_id` is
+ * extracted (not a data column) and columns whose header matches a problem
+ * parameter name are ignored — so a user may append outputs to the downloaded
+ * design CSV and upload the whole file. Rejects rows that do not match the
+ * header width and duplicate (output, time) columns.
+ */
+export function parseYColumns(
+  parsed: ParsedCsv,
+  problem: ProblemSpec,
+): { columns: YColumn[]; runIds: number[] | null; rowCount: number } {
+  const headers = parsed.headers.map((h) => h.trim());
+  const xCols = new Set(problem.names);
+  let runIdIdx = -1;
+  for (let j = 0; j < headers.length; j++) {
+    if (headers[j] === "run_id") {
+      if (runIdIdx >= 0) throw new Error("duplicate run_id column");
+      runIdIdx = j;
+    }
+  }
+
+  const defs: { header: string; output: string; time: number; src: number }[] = [];
+  for (let j = 0; j < headers.length; j++) {
+    if (j === runIdIdx) continue;
+    if (xCols.has(headers[j])) continue;
+    defs.push({ header: headers[j], ...classifyYColumn(headers[j]), src: j });
+  }
+  if (defs.length === 0) {
+    throw new Error(
+      "no output columns found: the Y file needs at least one column " +
+        "besides run_id and the parameter names",
+    );
+  }
+
+  const seen = new Set<string>();
+  for (const d of defs) {
+    const key = `${d.output}\u0000${d.time}`;
+    if (seen.has(key)) {
+      throw new Error(
+        `duplicate output column "${d.header}": ${d.output} at t${d.time} ` +
+          `appears more than once`,
+      );
+    }
+    seen.add(key);
+  }
+
+  const n = parsed.rows.length;
+  for (let i = 0; i < n; i++) {
+    if (parsed.rows[i].length !== headers.length) {
+      throw new Error(
+        `line ${i + 2}: expected ${headers.length} columns, found ${parsed.rows[i].length}`,
+      );
+    }
+  }
+
+  const columns: YColumn[] = defs.map((d) => {
+    const values = new Float64Array(n);
+    for (let i = 0; i < n; i++) values[i] = parsed.rows[i][d.src];
+    return { output: d.output, time: d.time, values };
+  });
+
+  let runIds: number[] | null = null;
+  if (runIdIdx >= 0) runIds = parsed.rows.map((r) => r[runIdIdx]);
+  return { columns, runIds, rowCount: n };
+}
+
+/**
+ * Wrap scalar values as the canonical single-output YData (demo path).
+ */
+export function scalarYData(values: Float64Array, label: string): YData {
+  return {
+    columns: [{ output: "y", time: 0, values }],
+    rowCount: values.length,
+    label,
+  };
+}
+
+/** Short human summary of the slices a YData carries. */
+export function describeY(y: YData): string {
+  const outs = new Set(y.columns.map((c) => c.output));
+  const maxT = Math.max(...y.columns.map((c) => c.time));
+  const tDesc = maxT === 0 ? "1 time step" : `${maxT + 1} time steps`;
+  return `${outs.size} output${outs.size > 1 ? "s" : ""} · ${tDesc} · ${y.rowCount} runs`;
+}
+
 /**
  * Parse a plain CSV: one header row, comma-separated numbers, tolerant of
  * trailing newlines and blank lines. Throws on non-numeric cells.
@@ -122,26 +246,25 @@ export function buildDesignCsv(
 }
 
 /**
- * The run_id join: `runIds[i]` is the run_id of `yRows[i]`; the returned
- * array has output `runIds[i]` written at position `runIds[i]`, i.e. the
- * design's canonical row order. Validates that the ids form a permutation of
- * 0..n_runs-1 (right count, no duplicates, nothing missing) and that every
- * row carries at least one output value (the first column is the scalar
- * output).
+ * The run_id join, generalized to every output column: `runIds[i]` is the
+ * run_id of the upload row `i`; each returned column has output
+ * `runIds[i]` written at position `runIds[i]`, i.e. the design's canonical
+ * row order. Validates that the ids form a permutation of 0..n_runs-1
+ * (right count, no duplicates, nothing missing).
  */
-export function alignYByRunId(
-  yRows: number[][],
+export function alignColumnsByRunId(
+  columns: YColumn[],
   runIds: number[],
   design: { samples: Float64Array; nParams: number },
-): Float64Array {
+): YColumn[] {
   const nRuns = design.samples.length / design.nParams;
   if (!Number.isInteger(nRuns)) {
     throw new Error("design.samples is not a whole number of rows");
   }
-  if (yRows.length !== nRuns) {
+  if (columns.length > 0 && columns[0].values.length !== nRuns) {
     throw new Error(
       `run_id row count mismatch: the design has ${nRuns} rows but the ` +
-        `uploaded Y CSV has ${yRows.length}`,
+        `uploaded Y CSV has ${columns[0].values.length}`,
     );
   }
   if (runIds.length !== nRuns) {
@@ -151,7 +274,6 @@ export function alignYByRunId(
   }
 
   const seen = new Uint8Array(nRuns);
-  const out = new Float64Array(nRuns);
   for (let i = 0; i < nRuns; i++) {
     const id = runIds[i];
     if (!Number.isInteger(id) || id < 0 || id >= nRuns) {
@@ -162,11 +284,7 @@ export function alignYByRunId(
     if (seen[id] === 1) {
       throw new Error(`line ${i + 2}: duplicate run_id ${id}`);
     }
-    if (yRows[i].length < 1) {
-      throw new Error(`line ${i + 2}: row for run_id ${id} has no output value`);
-    }
     seen[id] = 1;
-    out[id] = yRows[i][0];
   }
   for (let id = 0; id < nRuns; id++) {
     if (seen[id] === 0) {
@@ -175,7 +293,12 @@ export function alignYByRunId(
       );
     }
   }
-  return out;
+
+  return columns.map((c) => {
+    const out = new Float64Array(nRuns);
+    for (let i = 0; i < nRuns; i++) out[runIds[i]] = c.values[i];
+    return { output: c.output, time: c.time, values: out };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +307,9 @@ export function alignYByRunId(
 
 export type DesignMethod = "sobol" | "morris" | "kucherenko";
 export type GivenDataMethod = "pce" | "shapley";
+
+/** Where the X input comes from: a sampled design or an uploaded point cloud. */
+export type XSource = { kind: "design"; method: DesignMethod } | { kind: "uploaded" };
 
 export interface SobolConfig {
   baseN: number;
@@ -318,65 +444,93 @@ export interface ResultColumn {
   values: Float64Array;
 }
 
+/** One (output, time) slice of a result — the indices for that output column. */
+export interface ResultSlice {
+  output: string;
+  time: number;
+  columns: ResultColumn[];
+}
+
 export interface AnalysisResult {
   method: string;
   parameters: string[];
-  columns: ResultColumn[];
+  slices: ResultSlice[];
   notes: string[];
+  /** The settings the analysis ran with (seed, order, base_n, ...) for repro. */
+  settings: Record<string, unknown>;
 }
 
 function result(
   method: string,
   parameters: string[],
-  columns: ResultColumn[],
+  slices: ResultSlice[],
   notes: string[],
+  settings: Record<string, unknown>,
 ): AnalysisResult {
-  return { method, parameters, columns, notes };
+  return { method, parameters, slices, notes, settings };
 }
 
 /**
- * Run the analysis for a generated design. `y` carries one output per design
- * row in run_id order (use `alignYByRunId` after an upload). Fresh device
- * arrays are built per port call; nothing is reused.
+ * Run the analysis for a generated design. `y` carries one or more output
+ * columns in run_id order (use `parseYColumns` + `alignColumnsByRunId` after
+ * an upload). Every (output, time) slice is analyzed independently through
+ * the scalar ports. Fresh device arrays are built per port call; nothing is
+ * reused.
  */
-export function analyzeGenerated(
-  gen: GeneratedDesign,
-  y: Float64Array | number[],
-): AnalysisResult {
+export function analyzeGenerated(gen: GeneratedDesign, y: YData): AnalysisResult {
   const params = gen.problem.names;
+  const slices: ResultSlice[] = [];
 
-  if (gen.method === "sobol") {
-    const design = gen.port as SobolDesign;
-    const { S1, ST }: SobolIndices = analyzeSobol(y, design.nParams, {
-      expandedToUnique: design.expandedToUnique,
-    });
-    return result(gen.method, params, [
-      { key: "S1", label: "S1", values: S1 },
-      { key: "ST", label: "ST", values: ST },
-    ], gen.notes);
+  for (const col of y.columns) {
+    if (gen.method === "sobol") {
+      const design = gen.port as SobolDesign;
+      const { S1, ST }: SobolIndices = analyzeSobol(col.values, design.nParams, {
+        expandedToUnique: design.expandedToUnique,
+      });
+      slices.push({
+        output: col.output,
+        time: col.time,
+        columns: [
+          { key: "S1", label: "S1", values: S1 },
+          { key: "ST", label: "ST", values: ST },
+        ],
+      });
+    } else if (gen.method === "morris") {
+      const design = gen.port as MorrisDesign;
+      const { mu, mu_star, sigma }: MorrisMeasures = analyzeMorris(design, col.values);
+      slices.push({
+        output: col.output,
+        time: col.time,
+        columns: [
+          { key: "mu", label: "mu", values: mu },
+          { key: "mu_star", label: "mu*", values: mu_star },
+          { key: "sigma", label: "sigma", values: sigma },
+        ],
+      });
+    } else {
+      const design = gen.port as KucherenkoDesign;
+      const nRuns = design.samples.length / design.nParams;
+      const xNp = np
+        .array(design.samples as Float64Array<ArrayBuffer>, { dtype: np.float64 })
+        .reshape([nRuns, design.nParams]);
+      const yNp = np.array(col.values as Float64Array<ArrayBuffer>, {
+        dtype: np.float64,
+      });
+      const { S1, ST } = analyzeKucherenko(xNp, yNp);
+      slices.push({
+        output: col.output,
+        time: col.time,
+        columns: [
+          { key: "S1", label: "S1", values: S1 },
+          { key: "ST", label: "ST", values: ST },
+        ],
+      });
+    }
   }
 
-  if (gen.method === "morris") {
-    const design = gen.port as MorrisDesign;
-    const { mu, mu_star, sigma }: MorrisMeasures = analyzeMorris(design, y);
-    return result(gen.method, params, [
-      { key: "mu", label: "mu", values: mu },
-      { key: "mu_star", label: "mu*", values: mu_star },
-      { key: "sigma", label: "sigma", values: sigma },
-    ], gen.notes);
-  }
-
-  const design = gen.port as KucherenkoDesign;
-  const nRuns = design.samples.length / design.nParams;
-  const xNp = np
-    .array(design.samples as Float64Array<ArrayBuffer>, { dtype: np.float64 })
-    .reshape([nRuns, design.nParams]);
-  const yNp = np.array(y as Float64Array<ArrayBuffer>, { dtype: np.float64 });
-  const { S1, ST } = analyzeKucherenko(xNp, yNp);
-  return result(gen.method, params, [
-    { key: "S1", label: "S1", values: S1 },
-    { key: "ST", label: "ST", values: ST },
-  ], gen.notes);
+  return result(gen.method, params, slices, gen.notes, {
+    ...Object.fromEntries(gen.summary),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -385,45 +539,60 @@ export function analyzeGenerated(
 
 /**
  * Run a PCE or Shapley(PCE) analysis on an arbitrary (X, Y) point cloud.
- * `x` is (N, D) row-major. Each port call builds its own device arrays from
- * the host inputs.
+ * `x` is (N, D) row-major; `y` carries one or more output columns of length
+ * N. Each (output, time) slice is analyzed independently. Each port call
+ * builds its own device arrays from the host inputs.
  */
 export function analyzeCloud(
   method: GivenDataMethod,
   problem: ProblemSpec,
   x: Float64Array | number[],
-  y: Float64Array | number[],
+  y: YData,
   order: number,
 ): AnalysisResult {
   const params = problem.names;
   const xf = x instanceof Float64Array ? x : Float64Array.from(x);
-  const yf = y instanceof Float64Array ? y : Float64Array.from(y);
   const N = xf.length / problem.names.length;
   if (!Number.isInteger(N)) {
     throw new Error(
       `x has ${xf.length} values, not a multiple of D=${problem.names.length}`,
     );
   }
-  if (yf.length !== N) {
-    throw new Error(`x has ${N} rows but y has ${yf.length} values`);
+
+  const slices: ResultSlice[] = [];
+  for (const col of y.columns) {
+    if (col.values.length !== N) {
+      throw new Error(
+        `x has ${N} rows but output "${col.output}" (t${col.time}) has ${col.values.length} values`,
+      );
+    }
+    if (method === "pce") {
+      const { S1, ST }: PceIndices = analyzePce(problem, xf, col.values, { order });
+      slices.push({
+        output: col.output,
+        time: col.time,
+        columns: [
+          { key: "S1", label: "S1", values: S1 },
+          { key: "ST", label: "ST", values: ST },
+        ],
+      });
+    } else {
+      const { Sh, S1, ST }: ShapleyIndices = analyzeShapleyPce(problem, xf, col.values, {
+        order,
+      });
+      slices.push({
+        output: col.output,
+        time: col.time,
+        columns: [
+          { key: "Sh", label: "Sh", values: Sh },
+          { key: "S1", label: "S1", values: S1 },
+          { key: "ST", label: "ST", values: ST },
+        ],
+      });
+    }
   }
 
-  if (method === "pce") {
-    const { S1, ST }: PceIndices = analyzePce(problem, xf, yf, { order });
-    return result(method, params, [
-      { key: "S1", label: "S1", values: S1 },
-      { key: "ST", label: "ST", values: ST },
-    ], []);
-  }
-
-  const { Sh, S1, ST }: ShapleyIndices = analyzeShapleyPce(problem, xf, yf, {
-    order,
-  });
-  return result(method, params, [
-    { key: "Sh", label: "Sh", values: Sh },
-    { key: "S1", label: "S1", values: S1 },
-    { key: "ST", label: "ST", values: ST },
-  ], []);
+  return result(method, params, slices, [], { order });
 }
 
 /** Demo point cloud for the "load example" path of the given-data workflow. */
@@ -474,61 +643,62 @@ export function parseXGiven(parsed: ParsedCsv, problem: ProblemSpec): Float64Arr
   return flat;
 }
 
-/**
- * Parse a Y CSV for the given-data path: one output per row, first column
- * (extra columns are ignored).
- */
-export function parseYGiven(parsed: ParsedCsv): Float64Array {
-  const flat = new Float64Array(parsed.rows.length);
-  for (let i = 0; i < parsed.rows.length; i++) {
-    if (parsed.rows[i].length < 1) {
-      throw new Error(`line ${i + 2}: row has no output value`);
-    }
-    flat[i] = parsed.rows[i][0];
-  }
-  return flat;
-}
-
 // ---------------------------------------------------------------------------
 // Results + session serialization
 // ---------------------------------------------------------------------------
 
-/** Serialize an analysis result to CSV: one row per parameter. */
+/** Serialize a result to CSV: one row per (output, time, parameter) slice. */
 export function resultToCsv(result: AnalysisResult): string {
-  const lines = [`parameter,${result.columns.map((c) => c.label).join(",")}`];
-  for (let i = 0; i < result.parameters.length; i++) {
-    lines.push(
-      [result.parameters[i], ...result.columns.map((c) => String(c.values[i]))].join(
-        ",",
-      ),
-    );
+  const indexCols = result.slices[0]?.columns.map((c) => c.label) ?? [];
+  const lines = [`output,time,parameter,${indexCols.join(",")}`];
+  for (const s of result.slices) {
+    for (let i = 0; i < result.parameters.length; i++) {
+      lines.push(
+        [
+          s.output,
+          String(s.time),
+          result.parameters[i],
+          ...s.columns.map((c) => String(c.values[i])),
+        ].join(","),
+      );
+    }
   }
   return lines.join("\n") + "\n";
 }
 
 export interface SessionJson {
   app: "jaxgsa-web";
-  version: 1;
+  version: 2;
   problem: ProblemSpec;
   /** One entry per generated design, keyed by method. */
   designs: Record<string, { csv: string; nRuns: number; summary: [string, string][] }>;
-  y: { label: string; values: number[] } | null;
+  y: {
+    columns: Array<{ output: string; time: number; values: number[] }>;
+    rowCount: number;
+    label: string;
+  } | null;
   /** Results with plain-number columns (JSON-serializable). */
-  results: Array<
-    Omit<AnalysisResult, "columns"> & {
-      columns: Array<Omit<ResultColumn, "values"> & { values: number[] }>;
-    }
-  >;
+  results: Array<{
+    method: string;
+    parameters: string[];
+    notes: string[];
+    settings: Record<string, unknown>;
+    slices: Array<{
+      output: string;
+      time: number;
+      columns: Array<{ key: string; label: string; values: number[] }>;
+    }>;
+  }>;
 }
 
 /**
  * Bundle the whole session — problem, generated designs (as CSV), the
- * aligned outputs, and every result — into one JSON document for download.
+ * labeled outputs, and every result — into one JSON document for download.
  */
 export function buildSessionJson(
   problem: ProblemSpec,
   designs: Partial<Record<DesignMethod, GeneratedDesign>>,
-  y: { label: string; values: Float64Array } | null,
+  y: YData | null,
   results: AnalysisResult[],
 ): SessionJson {
   const designEntries: SessionJson["designs"] = {};
@@ -544,15 +714,33 @@ export function buildSessionJson(
   }
   return {
     app: "jaxgsa-web",
-    version: 1,
+    version: 2,
     problem,
     designs: designEntries,
-    y: y ? { label: y.label, values: Array.from(y.values) } : null,
+    y: y
+      ? {
+          columns: y.columns.map((c) => ({
+            output: c.output,
+            time: c.time,
+            values: Array.from(c.values),
+          })),
+          rowCount: y.rowCount,
+          label: y.label,
+        }
+      : null,
     results: results.map((r) => ({
-      ...r,
-      columns: r.columns.map((c) => ({
-        ...c,
-        values: Array.from(c.values),
+      method: r.method,
+      parameters: r.parameters,
+      notes: r.notes,
+      settings: r.settings,
+      slices: r.slices.map((s) => ({
+        output: s.output,
+        time: s.time,
+        columns: s.columns.map((c) => ({
+          key: c.key,
+          label: c.label,
+          values: Array.from(c.values),
+        })),
       })),
     })),
   };

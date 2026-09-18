@@ -1,8 +1,9 @@
 import { useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { parseCsv, type ParsedCsv } from "./engine";
+import { parseUpload } from "./upload";
+import type { ParsedCsv } from "./engine";
 
-export interface CsvUploadProps {
+export interface FileUploadProps {
   label: string;
   hint?: string;
   disabled?: boolean;
@@ -14,10 +15,11 @@ export interface CsvUploadProps {
 }
 
 /**
- * A labeled file input that parses a CSV on selection and hands the parsed
- * rows to the parent. Optional "load example" button variant.
+ * A labeled file input that accepts CSV or Parquet, parses it on selection
+ * (via `parseUpload`, which rejects unsafe formats like pickle) and hands the
+ * shared `ParsedCsv` shape to the parent. Optional "load example" button.
  */
-export function CsvUpload({
+export function FileUpload({
   label,
   hint,
   disabled,
@@ -26,18 +28,18 @@ export function CsvUpload({
   exampleLabel,
   onExample,
   exampleDisabled,
-}: CsvUploadProps) {
+}: FileUploadProps) {
   const inputRef = useRef<HTMLInputElement>(null);
-  const [fileName, setFileName] = useState<string | null>(null);
+  const [fileLabel, setFileLabel] = useState<string | null>(null);
 
   const handleFile = async (file: File | undefined) => {
     if (!file) return;
     try {
-      const parsed = parseCsv(await file.text());
-      setFileName(file.name);
+      const parsed = await parseUpload(file);
+      setFileLabel(`${file.name} · ${parsed.rows.length} rows × ${parsed.headers.length} cols`);
       onLoaded(parsed);
     } catch (err) {
-      setFileName(null);
+      setFileLabel(null);
       onError(err instanceof Error ? err.message : String(err));
     }
   };
@@ -48,7 +50,7 @@ export function CsvUpload({
         <input
           ref={inputRef}
           type="file"
-          accept=".csv,text/csv"
+          accept=".csv,.parquet,.pq,text/csv,application/vnd.apache.parquet"
           className="hidden"
           disabled={disabled}
           onChange={(e) => {
@@ -78,7 +80,7 @@ export function CsvUpload({
         )}
       </div>
       <p className="font-mono text-xs text-muted-foreground">
-        {fileName ?? hint ?? "no file loaded"}
+        {fileLabel ?? hint ?? "no file loaded"}
       </p>
     </div>
   );

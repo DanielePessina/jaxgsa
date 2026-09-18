@@ -26,6 +26,13 @@ export type MarginalSpec =
 export interface ProblemSpec {
   names: string[];
   marginals: MarginalSpec[];
+  /**
+   * Optional labels for the model's outputs (mirrors Python
+   * `Problem.output_names`). Used to name Y columns and validate uploads; the
+   * default output name when absent is `y`. Does not affect the sampling or
+   * estimation math.
+   */
+  outputNames?: string[];
   /** Declared dependence structure -> the design is invalid. */
   correlation?: unknown;
 }

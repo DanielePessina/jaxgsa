@@ -28,7 +28,7 @@ import { DESIGN_METHOD_META } from "./methods";
 import { ErrorBanner, NumberField, ProblemChips } from "./primitives";
 import type { ProblemSpec } from "@/jaxgsa/sampling";
 
-const DESIGN_METHODS: DesignMethod[] = ["sobol", "kucherenko", "morris"];
+const DESIGN_METHODS: DesignMethod[] = ["sobol", "morris"];
 
 function DesignMethodCell({
   method,
@@ -46,7 +46,6 @@ function DesignMethodCell({
   const [secondOrder, setSecondOrder] = useState(false);
   const [nTrajectories, setNTrajectories] = useState("20");
   const [numLevels, setNumLevels] = useState("4");
-  const [nSamples, setNSamples] = useState("100");
   const [seed, setSeed] = useState("0");
   const { busy, error, run } = useBusyAction();
 
@@ -54,13 +53,11 @@ function DesignMethodCell({
     const config =
       method === "sobol"
         ? { baseN: Number(baseN), calcSecondOrder: secondOrder, seed: Number(seed) }
-        : method === "morris"
-          ? {
-              nTrajectories: Number(nTrajectories),
-              numLevels: Number(numLevels),
-              seed: Number(seed),
-            }
-          : { nSamples: Number(nSamples), seed: Number(seed) };
+        : {
+            nTrajectories: Number(nTrajectories),
+            numLevels: Number(numLevels),
+            seed: Number(seed),
+          };
     void run(() => onDesign(generateDesign(method, problem, config)));
   };
 
@@ -92,7 +89,7 @@ function DesignMethodCell({
           <>
             <NumberField
               id={`${method}-baseN`}
-              label="base_n"
+              label="Base N"
               value={baseN}
               onChange={setBaseN}
               min={16}
@@ -105,7 +102,7 @@ function DesignMethodCell({
                   onChange={(e) => setSecondOrder(e.target.checked)}
                   className="size-3.5 accent-[oklch(0.78_0.14_195)]"
                 />
-                calc_second_order
+                Second order
               </label>
             </div>
           </>
@@ -114,32 +111,23 @@ function DesignMethodCell({
           <>
             <NumberField
               id={`${method}-traj`}
-              label="n_trajectories"
+              label="Trajectories"
               value={nTrajectories}
               onChange={setNTrajectories}
               min={2}
             />
             <NumberField
               id={`${method}-levels`}
-              label="num_levels"
+              label="Levels"
               value={numLevels}
               onChange={setNumLevels}
               min={2}
             />
           </>
         )}
-        {method === "kucherenko" && (
-          <NumberField
-            id={`${method}-nSamples`}
-            label="n_samples"
-            value={nSamples}
-            onChange={setNSamples}
-            min={2}
-          />
-        )}
         <NumberField
           id={`${method}-seed`}
-          label="seed"
+          label="Seed"
           value={seed}
           onChange={setSeed}
         />

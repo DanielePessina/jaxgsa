@@ -16,7 +16,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { demoById, DEMOS, type DemoId } from "./demos";
+import { demoById, DEMOS, type Demo, type DemoId } from "./demos";
 import { MonoSelect } from "./primitives";
 import type { ProblemSpec } from "@/jaxgsa/sampling";
 
@@ -33,12 +33,27 @@ interface ProblemRow {
   gHigh: string;
 }
 
+/**
+ * Comma-separated optional output labels, normalized to a trimmed list.
+ * Empty input yields `null` (the package default: outputs are just `y`).
+ */
+function outputNamesFromInput(raw: string): string[] | null {
+  const names = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s !== "");
+  if (names.length === 0) return null;
+  const dup = names.find((n, i) => names.indexOf(n) !== i);
+  if (dup !== undefined) throw new Error(`duplicate output name: ${dup}`);
+  return names;
+}
+
 function blankRow(): ProblemRow {
   return {
     name: "",
     dist: "uniform",
-    low: "",
-    high: "",
+    low: "0",
+    high: "1",
     mean: "",
     variance: "",
     gLow: "",
@@ -111,26 +126,44 @@ function rowsFromProblem(p: ProblemSpec): ProblemRow[] {
 export function ProblemPanel({
   problem,
   onProblemChange,
+  onDemoChange,
+  onLoadDemo,
 }: {
   problem: ProblemSpec | null;
   onProblemChange: (p: ProblemSpec) => void;
+  onDemoChange?: (demo: Demo) => void;
+  onLoadDemo?: (demo: Demo) => void;
 }) {
   const [rows, setRows] = useState<ProblemRow[]>(() =>
-    rowsFromProblem(demoById("ishigami").problem),
+    rowsFromProblem(demoById("linear").problem),
   );
-  const [demoId, setDemoId] = useState<DemoId>("ishigami");
+  const [demoId, setDemoId] = useState<DemoId>("linear");
+  const [outputNamesRaw, setOutputNamesRaw] = useState("");
 
   const specs = rows.map(rowToSpec);
   const names = rows.map((r) => r.name.trim());
   const dupNames = names.some((n, i) => n !== "" && names.indexOf(n) !== i);
 
+  let outputNames: string[] | null = null;
+  let outputNamesError: string | null = null;
+  if (outputNamesRaw.trim() !== "") {
+    try {
+      outputNames = outputNamesFromInput(outputNamesRaw);
+    } catch (err) {
+      outputNames = null;
+      outputNamesError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
   const validSpec =
     specs.every((s) => s.error === null) &&
     !dupNames &&
-    rows.length >= 1
+    rows.length >= 1 &&
+    outputNamesError === null
       ? {
           names: rows.map((r) => r.name.trim()),
           marginals: specs.map((s) => s.spec) as ProblemSpec["marginals"],
+          ...(outputNames ? { outputNames } : {}),
         }
       : null;
 
@@ -147,8 +180,17 @@ export function ProblemPanel({
   };
 
   const loadDemo = () => {
-    setRows(rowsFromProblem(demoById(demoId).problem));
+    const demo = demoById(demoId);
+    setRows(rowsFromProblem(demo.problem));
+    onLoadDemo?.(demo);
   };
+
+  // Keep the app informed of the demo selected here so the Analyze section's
+  // "Load Demo Results" tracks this tab, not just Ishigami.
+  useEffect(() => {
+    onDemoChange?.(demoById(demoId));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [demoId]);
 
   const current = validSpec ?? problem;
 
@@ -282,6 +324,27 @@ export function ProblemPanel({
                 })}
               </tbody>
             </table>
+          </div>
+
+          <div className="space-y-1.5">
+            <label htmlFor="output-names" className="font-mono text-xs uppercase tracking-widest text-muted-foreground">
+              output names
+            </label>
+            <div className="flex flex-wrap items-center gap-2">
+              <Input
+                id="output-names"
+                value={outputNamesRaw}
+                placeholder="y (default)"
+                onChange={(e) => setOutputNamesRaw(e.target.value)}
+                className="w-72 font-mono"
+              />
+              <span className="text-xs text-muted-foreground">
+                comma-separated; used to name the Y columns you upload
+              </span>
+            </div>
+            {outputNamesError && (
+              <p className="text-xs text-destructive">{outputNamesError}</p>
+            )}
           </div>
 
           <div className="flex flex-wrap items-center gap-2">

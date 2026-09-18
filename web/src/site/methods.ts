@@ -6,10 +6,11 @@
 
 import type { DesignMethod, GivenDataMethod } from "./engine";
 
-export type MethodKey = DesignMethod | GivenDataMethod;
+/** The methods exposed in the UI (kucherenko is not ported; see PLAN-WASM). */
+export type MethodKey = "sobol" | "morris" | "pce" | "shapley";
 
 export interface MethodMeta {
-  name: MethodKey;
+  name: string;
   tag: string;
   blurb: string;
 }
@@ -62,7 +63,6 @@ export const METHOD_META: Record<MethodKey, MethodMeta> = {
 
 export const ALL_METHODS: MethodKey[] = [
   "sobol",
-  "kucherenko",
   "morris",
   "pce",
   "shapley",

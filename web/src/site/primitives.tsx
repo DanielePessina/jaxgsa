@@ -3,6 +3,7 @@
  * select, per-name chips, and the compact number field.
  */
 
+import { useState } from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -16,10 +17,29 @@ export function ErrorBanner({
   title: string;
   message: string;
 }) {
+  const [copied, setCopied] = useState(false);
   return (
     <Alert variant="destructive">
-      <AlertTitle>{title}</AlertTitle>
-      <AlertDescription className="font-mono text-xs">{message}</AlertDescription>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <AlertTitle>{title}</AlertTitle>
+          <AlertDescription className="mt-1 break-words font-mono text-xs leading-relaxed">
+            {message}
+          </AlertDescription>
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            void navigator.clipboard.writeText(message);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+          }}
+          className="shrink-0 cursor-pointer rounded-sm border border-border px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground transition-colors hover:border-destructive/50 hover:text-foreground"
+          title="copy error message"
+        >
+          {copied ? "copied ✓" : "copy"}
+        </button>
+      </div>
     </Alert>
   );
 }
