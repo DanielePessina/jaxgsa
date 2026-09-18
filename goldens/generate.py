@@ -41,10 +41,10 @@ from jaxgsa.benchmarks import ishigami  # noqa: E402
 SEED = 42
 
 # Per-method sizes (small but stable).
-N_SOBOL_BASE = 512      # sobol base points (passed as base_n=...)
-N_KUCHERENKO = 512      # kucherenko base points
-N_TRAJECTORIES = 40     # morris trajectories
-N_CLOUD = 512           # pce / hdmr / shapley rows
+N_SOBOL_BASE = 512  # sobol base points (passed as base_n=...)
+N_KUCHERENKO = 512  # kucherenko base points
+N_TRAJECTORIES = 40  # morris trajectories
+N_CLOUD = 512  # pce / hdmr / shapley rows
 
 # PCE surrogate order. Default order=3 leaves >50% of Ishigami's variance
 # unexplained (warns, ev ~0.5); order=9 gives ev > 0.999 with indices stable
@@ -118,8 +118,12 @@ def build_sobol() -> dict:
     # base_n=512 gives the requested 512 base points; n_samples is ignored
     # when base_n is given. First/total only: 512 * (D+2) = 2560 rows.
     sr = sobol.sample(
-        PROBLEM, n_samples=1, base_n=N_SOBOL_BASE,
-        calc_second_order=False, seed=SEED, verbose=False,
+        PROBLEM,
+        n_samples=1,
+        base_n=N_SOBOL_BASE,
+        calc_second_order=False,
+        seed=SEED,
+        verbose=False,
     )
     X = np.asarray(sr.samples)
     Y = evaluate(X)
@@ -127,7 +131,9 @@ def build_sobol() -> dict:
         warnings.simplefilter("ignore")
         res = sobol.analyze(sr, jnp.asarray(Y), verbose=False)
     return doc(
-        "sobol", X, Y,
+        "sobol",
+        X,
+        Y,
         {"S1": res.S1, "ST": res.ST},
         {"base_n": N_SOBOL_BASE, "calc_second_order": False, "seed": SEED},
     )
@@ -144,7 +150,9 @@ def build_kucherenko() -> dict:
         Y = evaluate(X)
         res = kucherenko.analyze(kr, jnp.asarray(Y), verbose=False)
     return doc(
-        "kucherenko", X, Y,
+        "kucherenko",
+        X,
+        Y,
         {"S1": res.S1, "ST": res.ST, "variance": res.variance},
         {"n_samples": N_KUCHERENKO, "seed": SEED},
     )
@@ -162,7 +170,9 @@ def build_morris() -> dict:
         warnings.simplefilter("ignore")
         res = morris.analyze(mr, jnp.asarray(Y), verbose=False)
     return doc(
-        "morris", X, Y,
+        "morris",
+        X,
+        Y,
         {"mu": res.mu, "mu_star": res.mu_star, "sigma": res.sigma},
         {"n_trajectories": N_TRAJECTORIES, "num_levels": 4, "method": "trajectory", "seed": SEED},
         design={
@@ -184,8 +194,12 @@ def build_cloud() -> tuple[np.ndarray, np.ndarray]:
     by the sobol golden: 512 unique, space-filling rows in physical units.
     """
     sr = sobol.sample(
-        PROBLEM, n_samples=1, base_n=N_SOBOL_BASE,
-        calc_second_order=False, seed=SEED, verbose=False,
+        PROBLEM,
+        n_samples=1,
+        base_n=N_SOBOL_BASE,
+        calc_second_order=False,
+        seed=SEED,
+        verbose=False,
     )
     X = np.asarray(sr.samples)[:N_CLOUD]
     return X, evaluate(X)
@@ -197,7 +211,9 @@ def build_pce() -> dict:
         warnings.simplefilter("ignore")
         res = pce.analyze(PROBLEM, jnp.asarray(X), jnp.asarray(Y), order=PCE_ORDER, verbose=False)
     return doc(
-        "pce", X, Y,
+        "pce",
+        X,
+        Y,
         {"S1": res.S1, "ST": res.ST},
         {"order": PCE_ORDER, "ridge": 1e-8, "n": N_CLOUD, "seed": SEED},
     )
@@ -209,7 +225,9 @@ def build_hdmr() -> dict:
         warnings.simplefilter("ignore")
         res = hdmr.analyze(PROBLEM, jnp.asarray(X), jnp.asarray(Y), verbose=False)
     return doc(
-        "hdmr", X, Y,
+        "hdmr",
+        X,
+        Y,
         {"S1": res.S1, "ST": res.ST},
         {"n": N_CLOUD, "seed": SEED, "maxorder": 2, "maxiter": 100, "lambdax": 0.01},
     )
@@ -223,7 +241,9 @@ def build_shapley() -> dict:
             PROBLEM, jnp.asarray(X), jnp.asarray(Y), backend="pce", order=PCE_ORDER, verbose=False
         )
     return doc(
-        "shapley", X, Y,
+        "shapley",
+        X,
+        Y,
         {"S1": res.S1, "ST": res.ST, "Sh": res.Sh},
         {"backend": "pce", "order": PCE_ORDER, "n": N_CLOUD, "seed": SEED},
     )
