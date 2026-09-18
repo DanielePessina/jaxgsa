@@ -17,7 +17,8 @@ import { sampleMorris, type MorrisDesign } from "@/jaxgsa/morris/sample";
 import { analyzePce, type PceIndices } from "@/jaxgsa/pce/analyze";
 import { analyzeSobol, type SobolIndices } from "@/jaxgsa/sobol/analyze";
 import { sample, type SobolDesign } from "@/jaxgsa/sobol/sample";
-import { type ProblemSpec } from "@/jaxgsa/sampling";
+import { sobolSequence } from "@/jaxgsa/sobol/sampler";
+import { transformSamples, type ProblemSpec } from "@/jaxgsa/sampling";
 import { analyzeShapleyPce, type ShapleyIndices } from "@/jaxgsa/shapley/analyze";
 import type { Demo } from "./demos";
 
@@ -628,14 +629,11 @@ export function loadDemoCloud(
   nSamples = 1024,
   seed = 0,
 ): { x: Float64Array; y: Float64Array; n: number } {
-  const port = sample(demo.problem, nSamples, {
-    calcSecondOrder: false,
-    seed,
-    verbose: false,
-  });
-  const x = port.samples;
-  const y = demo.evaluate({ samples: x, nParams: port.nParams });
-  return { x, y, n: x.length / port.nParams };
+  const D = demo.problem.names.length;
+  const unit = sobolSequence(D, nSamples, true, seed);
+  const x = transformSamples(demo.problem, unit);
+  const y = demo.evaluate({ samples: x, nParams: D });
+  return { x, y, n: nSamples };
 }
 
 // ---------------------------------------------------------------------------

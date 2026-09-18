@@ -170,7 +170,7 @@ export function AnalyzePanel({
   const onDemoCloud = () => {
     if (!demo) return;
     const { x, y, n } = loadDemoCloud(demo, 1024);
-    pickUploaded(x, `demo results (${demo.label}) · ${n} rows`);
+    pickUploaded(x, `example point cloud (${demo.label}) · ${n} rows`);
     setYData(scalarYData(y, `demo model (${demo.label}) · ${n} outputs`));
   };
 
@@ -330,7 +330,7 @@ export function AnalyzePanel({
               disabled={busy || running !== null}
               onLoaded={onUploadX}
               onError={setError}
-              exampleLabel={demo ? `Load Demo Results (${demo.label})` : undefined}
+              exampleLabel={demo ? `Try PCE/Shapley example (${demo.label})` : undefined}
               onExample={demo ? onDemoCloud : undefined}
               exampleDisabled={busy || running !== null}
             />

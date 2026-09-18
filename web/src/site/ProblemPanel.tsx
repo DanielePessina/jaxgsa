@@ -370,14 +370,14 @@ export function ProblemPanel({
                 </option>
               ))}
             </MonoSelect>
-            <Button type="button" variant="ghost" size="sm" onClick={loadDemo}>
-              Load
+            <Button type="button" variant="outline" size="sm" onClick={loadDemo}>
+              Start Sobol demo
             </Button>
           </div>
           <p className="text-xs text-muted-foreground">
-            Demo problems include a built-in model and analytical reference
-            indices, so you can try every method end to end before switching
-            to your own problem.
+            This loads the benchmark, creates its Saltelli design, evaluates
+            the built-in model, and prepares a Sobol analysis. The benchmark
+            itself is not tied to one method; other routes remain available.
           </p>
 
           {current && (

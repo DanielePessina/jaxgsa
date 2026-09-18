@@ -11,6 +11,7 @@ import {
   classifyYColumn,
   describeY,
   generateDesign,
+  loadDemoCloud,
   parseCsv,
   parseXGiven,
   parseYColumns,
@@ -18,6 +19,7 @@ import {
   type AnalysisResult,
   type YData,
 } from "./engine";
+import { demoById } from "./demos";
 
 describe("parseCsv", () => {
   it("parses a header row and numeric rows", () => {
@@ -61,6 +63,16 @@ describe("buildDesignCsv", () => {
     expect(lines[1]).toBe("0,1,2,3");
     expect(lines[2]).toBe("1,4,5,6");
     expect(csv.endsWith("\n")).toBe(true);
+  });
+});
+
+describe("loadDemoCloud", () => {
+  it("builds an ordinary N-by-D QMC cloud rather than a Saltelli expansion", () => {
+    const demo = demoById("ishigami");
+    const cloud = loadDemoCloud(demo, 32, 7);
+    expect(cloud.n).toBe(32);
+    expect(cloud.x).toHaveLength(32 * 3);
+    expect(cloud.y).toHaveLength(32);
   });
 });
 
