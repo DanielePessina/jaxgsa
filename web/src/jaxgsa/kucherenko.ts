@@ -30,17 +30,15 @@ export function estimateKucherenko(
   // (D, N, S), same shift — f0Joint consumed on this, its last use
   const gFirst = np.subtract(fFirst, np.expandDims(f0Joint, [0, 1]));
 
+  // The cross-moment is a per-(D, S) dot over N. Einsum avoids materialising
+  // the (D, N, S) broadcast product that the literal multiply would create.
+  const cross = np.einsum("dns,ns->ds", gFirst.ref, gJoint.ref);
+  const crossMean = np.divide(cross, gJoint.shape[0]);
+  const meanJoint = np.mean(gJoint, 0);
+  const meanFirst = np.mean(gFirst, 1);
+
   const S1 = np.divide(
-    np.subtract(
-      np.mean(
-        np.multiply(np.expandDims(gJoint.ref, 0), gFirst.ref),
-        1,
-      ),
-      np.multiply(
-        np.expandDims(np.mean(gJoint, 0), 0),
-        np.mean(gFirst, 1),
-      ),
-    ),
+    np.subtract(crossMean, np.multiply(np.expandDims(meanJoint, 0), meanFirst)),
     safeVariance.ref,
   );
 

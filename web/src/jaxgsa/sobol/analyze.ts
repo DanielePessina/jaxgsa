@@ -128,18 +128,43 @@ export function analyzeSobol(
   // composition computes the identical pooled inv_var twice; one call is
   // bit-identical, and it avoids leaking A and B (which the double .ref
   // call would leave at refcount 1).
-  const Acol = np.expandDims(A.ref, 1); // (N, 1)
-  const Bcol = np.expandDims(B.ref, 1); // (N, 1)
-  const diff = np.subtract(AB.ref, Acol.ref); // (N, D)
-  const prod = np.multiply(Bcol, diff); // (N, D)  (Bcol, diff consumed)
-  const meanProd = np.mean(prod, 0); // (D,)  (prod consumed)
+  // Compute the squared-difference means from reductions and matrix-vector
+  // products. This keeps the estimator from materialising one temporary
+  // (N, D) product per first/total-order numerator.
+  const sumA2 = np.sum(np.square(A.ref), 0);
 
-  const diff2 = np.subtract(Acol, AB); // (N, D)  (Acol, AB consumed)
-  const meanSq = np.mean(np.square(diff2), 0); // (D,)  (diff2 consumed)
+  const bTimesAB = np.reshape(
+    np.matmul(np.reshape(B.ref, [1, baseN]), AB.ref),
+    [D],
+  );
+
+  const bTimesA = np.reshape(
+    np.matmul(np.reshape(B.ref, [1, baseN]), np.reshape(A.ref, [baseN, 1])),
+    [1],
+  );
+
+  const aTimesAB = np.reshape(
+    np.matmul(np.reshape(A.ref, [1, baseN]), AB.ref),
+    [D],
+  );
+
+  const sumAB2 = np.sum(np.square(AB), 0);
+
+  const meanAMinusAB2 = np.divide(
+    np.subtract(np.add(sumA2, sumAB2), np.multiply(2, aTimesAB)),
+    baseN,
+  );
 
   const invVar = pooledInvVar(A, B); // consumes A, B
-  const S1 = np.multiply(meanProd, invVar.ref); // (D,)
-  const ST = np.multiply(np.multiply(0.5, meanSq), invVar); // (D,)  (meanSq, invVar consumed)
+
+  // Saltelli-Jansen uses the optimized Mauntz-Kucherenko first-order
+  // cross-moment, while Jansen's squared-difference form supplies ST.
+  const S1 = np.multiply(
+    np.divide(np.subtract(bTimesAB, bTimesA), baseN),
+    invVar.ref,
+  );
+
+  const ST = np.multiply(np.multiply(0.5, meanAMinusAB2), invVar);
 
   return {
     // SAFETY: jax-js dataSync returns float64 host buffers for the float64 estimator outputs.
