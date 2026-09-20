@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.1
 
 ### New: irregularly sampled outputs
 
@@ -27,7 +27,7 @@ add work without helping the per-channel estimators.
 Performance is the sum of the per-channel analyses plus a host-side coercion
 pass; `scripts/benchmark_irregular.py` measures it.
 
-## 0.9.1
+### Release summary
 
 Version 0.9.1 is a performance and behavior-contract release with no API
 changes. All thirteen methods keep their 0.9.0 interface; the work is in the
