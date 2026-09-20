@@ -51,14 +51,14 @@ Four readings decide most method choices.
 
 | Method | Best for |
 | --- | --- |
-| [Sobol'](/guide/methods#sobol-indices-via-saltelli-sampling) | Gold standard for $S_2$ |
-| [eFAST](/guide/methods#efast-extended-fourier-amplitude-sensitivity-test) | Screening at $N \times D$ |
-| [DGSM](/guide/methods#dgsm-derivative-based-global-sensitivity-measures) | Differentiable models via autodiff |
-| [HDMR](/guide/methods#rs-hdmr-random-sampling-high-dimensional-model-representation) | Arbitrary $(X, Y)$ data |
-| [PCE](/guide/methods#pce-polynomial-chaos-expansion) | Emulation with a reusable surrogate |
-| [Morris](/guide/methods#morris-elementary-effects-screening) | Cheapest screening / factor fixing |
-| [Shapley](/guide/methods#shapley-effects) | Fair variance shares summing to 1 |
-| [Borgonovo delta](/guide/methods#borgonovo-delta-density-based-sensitivity) | Moment-independent influence on the whole output density |
+| [Sobol'](/api/sobol) | Gold standard for $S_2$ |
+| [eFAST](/api/efast) | Screening at $N \times D$ |
+| [DGSM](/api/dgsm) | Differentiable models via autodiff |
+| [HDMR](/api/hdmr) | Arbitrary $(X, Y)$ data |
+| [PCE](/api/pce) | Emulation with a reusable surrogate |
+| [Morris](/api/morris) | Cheapest screening / factor fixing |
+| [Shapley](/api/shapley) | Fair variance shares summing to 1 |
+| [Borgonovo delta](/api/borgonovo) | Moment-independent influence on the whole output density |
 
 HSIC and PAWN are given-data methods that sit outside this variance-share comparison: they measure dependence and distributional distance rather than variance shares, and they are the better choice when the output is skewed or heavy-tailed. For the estimator details behind every row, see [Methods](/guide/methods).
 

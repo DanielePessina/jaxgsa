@@ -6,11 +6,13 @@ files ``{script}_{title-slug}.png``. The docs pages reference these files
 with relative links, so re-run this script whenever an example's plotting
 code changes.
 
-Run: ``uv run python scripts/build_example_figures.py``
+Run every example: ``uv run scripts/build_example_figures.py``
+Run selected examples: ``uv run scripts/build_example_figures.py benchmark_all.py``
 """
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import io
 import os
@@ -68,14 +70,34 @@ def _run_script(script: str) -> None:
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load {path}")
     module = importlib.util.module_from_spec(spec)
-    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-        spec.loader.exec_module(module)
+    original_argv = sys.argv
+    try:
+        sys.argv = [str(path)]
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            spec.loader.exec_module(module)
+            entrypoint = getattr(module, "main", None)
+            if callable(entrypoint):
+                entrypoint()
+    finally:
+        sys.argv = original_argv
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "scripts",
+        nargs="*",
+        choices=SCRIPTS,
+        help="example scripts to render; omit to render every configured script",
+    )
+    args = parser.parse_args()
+    scripts = args.scripts or SCRIPTS
+
     OUT.mkdir(parents=True, exist_ok=True)
-    for stale in OUT.glob("*.png"):
-        stale.unlink()
+    for script in scripts:
+        stem = Path(script).stem
+        for stale in OUT.glob(f"{stem}_*.png"):
+            stale.unlink()
 
     original_show = plt.show
     seen: set[str] = set()
@@ -97,7 +119,7 @@ def main() -> None:
 
     plt.show = cast(Any, save_and_show)
 
-    for script in SCRIPTS:
+    for script in scripts:
         plt.close("all")
         current_script = Path(script).stem
         _run_script(script)

@@ -23,8 +23,8 @@ References:
 from __future__ import annotations
 
 import warnings
-from collections.abc import Sequence
-from typing import Literal
+from collections.abc import Callable, Sequence
+from typing import Any, Literal, cast
 
 import jax
 import jax.numpy as jnp
@@ -44,6 +44,13 @@ from jaxgsa._core.copula import (
 )
 from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare, require
 from jaxgsa._core.invalid import OnInvalid
+from jaxgsa._core.irregular import (
+    IrregularResult,
+    IrregularY,
+    _fwd_kwargs,
+    _is_irregular_y,
+    analyze_irregular,
+)
 from jaxgsa._core.precision import x64_enabled
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.sampling import _next_power_of_2
@@ -54,6 +61,33 @@ from jaxgsa.problem import Problem
 from jaxgsa.vkoga._engine import _cross_validate, _fit_vkoga, _predict_vkoga
 from jaxgsa.vkoga._indices import estimate_correlated_indices
 from jaxgsa.vkoga._result import VKOGAResult
+
+# Keyword-only parameters the irregular engine forwards unchanged to the
+# per-channel recursive analyze() calls. verbose is excluded:
+# the engine owns it.
+_IRREGULAR_KWARGS = (
+    "correlation",
+    "gamma",
+    "ridge",
+    "max_centers",
+    "n_folds",
+    "n_outer",
+    "n_inner",
+    "n_variance",
+    "n_bootstrap",
+    "conf_level",
+    "ci_method",
+    "key",
+    "batch_size",
+    "on_invalid",
+    "keep_replicates",
+)
+
+# Memo of the compiled surrogate predictor, keyed on the fitted state and
+# output mean it freezes as closure constants (see
+# :func:`_make_unit_predictor`). Bounded so frozen fit state cannot accumulate.
+_PREDICTOR_CACHE_MAX = 4
+_PREDICTOR_CACHE: dict[tuple[Any, ...], Callable[[np.ndarray], np.ndarray]] = {}
 
 # Hyperparameter search grid, following Hilhorst et al. Section 2.4.1: ten
 # log-spaced values each, cross-validated as a 10x10 product.
@@ -101,7 +135,7 @@ _INTERVAL_FIELDS = ("S_TC", "S_TU", "S_U", "S_C", "S_IU")
 def analyze(
     problem: Problem,
     X: Array,
-    Y: Array,
+    Y: Array | IrregularY,
     *,
     correlation: Array | np.ndarray | None = None,
     gamma: float | None = None,
@@ -119,7 +153,7 @@ def analyze(
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
     keep_replicates: bool = False,
-) -> VKOGAResult:
+) -> VKOGAResult | IrregularResult:
     """Correlated variance-based sensitivity indices via a VKOGA surrogate.
 
     Fits a Vectorial Kernel Orthogonal Greedy Algorithm surrogate to given
@@ -226,7 +260,6 @@ def analyze(
         verbose: If ``True`` (default), print a short summary to stdout: the
             problem and the data, the wall-clock timing, and the top
             parameters by ``S_TC``. Pass ``False`` for a silent run.
-
     Returns:
         A :class:`VKOGAResult` with ``S_TC``, ``S_TU``, ``S_U``, ``S_C``, and
         ``S_IU`` shaped ``(D,)``, ``(K, D)``, or ``(T, K, D)`` to mirror ``Y``.
@@ -257,6 +290,19 @@ def analyze(
             draws; train on an independent design and declare the dependence
             in ``problem.correlation`` instead.
     """
+    if _is_irregular_y(Y):
+        return analyze_irregular(
+            analyze,
+            channel_data=X,
+            problem=problem,
+            Y=Y,
+            n_expected=int(X.shape[0]),
+            design_based=False,
+            verbose=verbose,
+            kwargs=_fwd_kwargs(locals(), _IRREGULAR_KWARGS),
+        )
+    Y = cast(Array, Y)
+
     from jaxgsa.vkoga import SPEC
 
     D = problem.num_vars
@@ -902,6 +948,18 @@ def _make_unit_predictor(state, y_mean: Array, batch_size: int | None):
     function is plain NumPy-in and NumPy-out. Batching keeps the kernel matrix
     within the configured memory budget for the millions of conditional draws.
 
+    The jitted kernel is memoised per distinct ``(state, y_mean)`` content
+    (see :data:`_PREDICTOR_CACHE`). Building the predictor wraps the surrogate
+    kernel in a fresh ``jax.jit`` whose closure freezes the fitted state; a
+    fresh wrapper on every :func:`_fit_and_estimate` call re-traces and
+    recompiles it inside the estimator's first prediction (~30 ms at
+    ``n_centers=32``), even though every steady-state analysis on the same
+    data fits the identical state. Memoising on the content reuses the exact
+    compiled kernel for repeated analyses (bootstrap / parameter sweep /
+    interactive re-runs), while a genuinely new fit -- new centres,
+    coefficients or output mean -- still builds and compiles its own
+    predictor, exactly as before.
+
     Args:
         state: Fitted (sliced) surrogate state.
         y_mean: Training output mean to restore, shape ``(S,)``.
@@ -911,6 +969,20 @@ def _make_unit_predictor(state, y_mean: Array, batch_size: int | None):
     Returns:
         A callable mapping ``(n, D)`` unit-cube rows to ``(n, S)`` outputs.
     """
+    # The kernel reads centres, coefficients and gamma, and adds ``y_mean``;
+    # those four arrays decide the compiled executable, so the memo key is
+    # their full content plus the (runtime) batch policy.
+    key = (
+        np.asarray(state.centers).tobytes(),
+        np.asarray(state.coefficients).tobytes(),
+        np.asarray(state.gamma).tobytes(),
+        np.asarray(y_mean).tobytes(),
+        batch_size,
+    )
+    pred = _PREDICTOR_CACHE.get(key)
+    if pred is not None:
+        return pred
+
     kernel, bytes_per_row = _unit_evaluator(state, y_mean)
     compiled = jax.jit(kernel)
 
@@ -919,6 +991,9 @@ def _make_unit_predictor(state, y_mean: Array, batch_size: int | None):
         batch = resolve_batch_size(bytes_per_row, U_device.shape[0], batch_size)
         return np.asarray(apply_batched(compiled, U_device, batch))
 
+    if len(_PREDICTOR_CACHE) >= _PREDICTOR_CACHE_MAX:
+        _PREDICTOR_CACHE.pop(next(iter(_PREDICTOR_CACHE)))
+    _PREDICTOR_CACHE[key] = predict
     return predict
 
 

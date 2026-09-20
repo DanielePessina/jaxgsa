@@ -6,7 +6,8 @@ jaxgsa.kucherenko.sample(problem, n_samples, *, scramble=True, seed=None,
 
 jaxgsa.kucherenko.analyze(sampling_result, Y, *, n_bootstrap=0, conf_level=0.95,
                           ci_method="quantile", key=None, on_invalid="raise",
-                          verbose=True, keep_replicates=False) -> KucherenkoResult
+                          verbose=True, keep_replicates=False)
+                          -> KucherenkoResult | IrregularResult
 ```
 
 `jaxgsa.kucherenko` estimates the Sobol' indices generalised to dependent
@@ -19,6 +20,10 @@ a fitted kernel surrogate instead.
 The trade is straightforward. Kucherenko costs `base_n * (2D + 1)` model
 evaluations and has no surrogate error. VKOGA costs one `(X, Y)` sample of any
 size and inherits whatever the surrogate gets wrong.
+
+`analyze` also accepts ragged outputs. Pass a list or dict of `(times, values)`
+pairs; each channel is analyzed on its own grid. See
+[Irregular output grids](/examples/irregular-outputs).
 
 :::: warning These indices are not comparable to `jaxgsa.sobol`'s
 Under a declared correlation, `kucherenko.S1` is a different estimand from
@@ -38,7 +43,7 @@ The module is named `kucherenko` because that is the handle
 use for this estimator pair, and because a name reading as `sobol` would invite
 the comparison the box above warns against. It is one of several competing
 generalisations of Sobol' indices to dependent inputs. See
-[the four dependence routes](/guide/methods#four-indices-under-dependence) for
+[the dependent-input guide](/guide/dependent-inputs) for
 how it differs from VKOGA, HDMR's ANCOVA split, and the ANCOVA Shapley
 allocation.
 :::
@@ -164,7 +169,7 @@ removes all `2D + 1` of its rows. `"raise"` is the default, `"drop"` analyzes
 the surviving base points and warns, `"propagate"` lets the value reach the
 indices. Base points are not contiguous in the array: base point `k` occupies
 rows `k`, `N + k`, `2N + k` and so on, and `result.invalid` reports them. See
-[Failed model runs](/guide/methods#failed-model-runs).
+[Failed model runs](/api/#failed-model-runs).
 
 `analyze` raises `ValueError` on a `Y` that violates the shape contract, on an
 unknown `on_invalid`, on a non-finite sample under `"raise"`, when fewer than 2

@@ -8,7 +8,7 @@ jaxgsa.hsic.analyze(
     bandwidth=1.0,
     on_invalid="raise",
     verbose=True,
-) -> HSICResult
+) -> HSICResult | IrregularResult
 ```
 
 HSIC measures kernel dependence between each input and the output. It is not a

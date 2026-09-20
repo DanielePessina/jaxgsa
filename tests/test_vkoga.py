@@ -594,7 +594,7 @@ def test_scalar_argument_validation_raises_early():
 
 
 def test_odd_sample_sizes_round_up_to_powers_of_two():
-    """Non-power-of-two sizes are rounded up; scipy emits no balance warnings."""
+    """Non-power-of-two sizes are rounded up without balance warnings."""
     X = jaxgsa.sampling.monte_carlo(UNIFORM_PROBLEM, 128, seed=0)
     Y = _uniform_scalar(X)
     kwargs = dict(SMALL_KWARGS, n_outer=100, n_inner=9, n_variance=1000)
@@ -720,11 +720,11 @@ def test_s_tu_sampling_error_shrinks_with_n_outer():
 def test_an_integer_seed_survives_the_key_wrapper():
     """``jax.random.key(s)`` must still seed the QMC engines with ``s``.
 
-    The index integration is host-side scipy: ``qmc.Sobol`` and the fold
-    permutation take an integer, so the key is folded down to one. The fold
-    is the identity for a key made from an integer below 2**32, which is what
-    keeps the numerical baseline (and any result a caller has recorded) where
-    it was when the argument was spelled ``seed``.
+    The index integration's host-side QMC and fold-permutation routines take
+    an integer, so the key is folded down to one. The fold is the identity for
+    a key made from an integer below 2**32, which is what keeps the numerical
+    baseline (and any result a caller has recorded) where it was when the
+    argument was spelled ``seed``.
     """
     from jaxgsa.vkoga._analyze import _seed_from_key
 
@@ -740,7 +740,7 @@ def test_an_integer_seed_survives_the_key_wrapper():
 def test_index_streams_are_spawned_and_not_offset(monkeypatch):
     """Every latent draw takes a seed spawned from the root, never ``seed + k``.
 
-    T4 internal consistency, and deliberately so: two scipy QMC engines seeded
+    T4 internal consistency, and deliberately so: two QMC engines seeded
     ``s`` and ``s + 1`` produce no *visible* defect on a small model, which is
     exactly why the offset survived. What can be pinned is the derivation, and
     two properties separate a spawn from an offset without asserting any

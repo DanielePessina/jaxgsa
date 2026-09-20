@@ -1129,7 +1129,7 @@ class TestIndicesCore:
         column reaches ``cdf_to_unit_interval`` as a tracer. That is the only
         arrangement that exercises the transform under trace, and the two
         defects it used to hide were different. A truncated Gaussian went
-        through ``scipy.stats.truncnorm.cdf``, which converts a tracer to a
+        through a host-only CDF implementation, which converted a tracer to a
         host array. Separately, every Gaussian -- truncated or not -- took
         ``float(jnp.sqrt(spec.variance))``, which returns a tracer inside a
         trace and raises on the ``float()``. So the untruncated case is not

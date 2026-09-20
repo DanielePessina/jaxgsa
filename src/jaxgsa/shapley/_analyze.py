@@ -11,7 +11,7 @@ convenience over those result methods.
 from __future__ import annotations
 
 import dataclasses
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import jax
 import jax.numpy as jnp
@@ -29,6 +29,13 @@ from jaxgsa._core.entry import (
     require,
 )
 from jaxgsa._core.invalid import OnInvalid
+from jaxgsa._core.irregular import (
+    IrregularResult,
+    IrregularY,
+    _fwd_kwargs,
+    _is_irregular_y,
+    analyze_irregular,
+)
 from jaxgsa._core.validation import (
     _correlation_tolerant_methods,
     _is_constant_slice,
@@ -40,6 +47,20 @@ from jaxgsa.shapley._engine import (
     shapley_from_variances,
 )
 from jaxgsa.shapley._result import ShapleyResult
+
+# Keyword-only parameters the irregular engine forwards unchanged to the
+# per-channel recursive analyze() calls. verbose is excluded:
+# the engine owns it.
+_IRREGULAR_KWARGS = (
+    "backend",
+    "include_correlative",
+    "n_bootstrap",
+    "conf_level",
+    "ci_method",
+    "key",
+    "on_invalid",
+    "keep_replicates",
+)
 
 if TYPE_CHECKING:
     from jaxgsa.problem import Problem
@@ -292,7 +313,7 @@ def _bootstrap_indices(
 def analyze(
     problem: "Problem",
     X: Array,
-    Y: Array,
+    Y: Array | IrregularY,
     *,
     backend: Literal["pce", "hdmr"] = "pce",
     include_correlative: bool = False,
@@ -304,7 +325,7 @@ def analyze(
     verbose: bool = True,
     keep_replicates: bool = False,
     **backend_kwargs: Any,
-) -> ShapleyResult:
+) -> ShapleyResult | IrregularResult:
     """Fit a surrogate and return its Shapley effects (convenience wrapper).
 
     This is literally ``jaxgsa.pce.analyze(problem, X, Y, **kw).shapley()`` /
@@ -406,6 +427,22 @@ def analyze(
             The warning comes from :meth:`HDMRResult.shapley`, so the direct
             route raises it too.
     """
+    if _is_irregular_y(Y):
+        return analyze_irregular(
+            analyze,
+            channel_data=X,
+            problem=problem,
+            Y=Y,
+            n_expected=int(X.shape[0]),
+            design_based=False,
+            verbose=verbose,
+            # The backend keyword arguments are re-expanded by the recursive
+            # call's own ``**backend_kwargs``, so they must be flattened here
+            # rather than forwarded as one nested ``backend_kwargs`` dict.
+            kwargs={**_fwd_kwargs(locals(), _IRREGULAR_KWARGS), **backend_kwargs},
+        )
+    Y = cast(Array, Y)
+
     from jaxgsa.shapley import SPEC
 
     # Both backends fit smooth surrogates over the inputs, which is undefined
@@ -438,6 +475,11 @@ def analyze(
         pce_result = analyze_pce(
             problem, X, Y, on_invalid=on_invalid, verbose=False, **backend_kwargs
         )
+        # Unreachable: the irregular path returned at the top of this
+        # function, so Y is a regular array by the time the backend runs.
+        # The guard keeps the union return type honest without a cast.
+        if isinstance(pce_result, IrregularResult):
+            raise AssertionError("shapley pce backend returned an irregular result")
         # No fit-quality warning here. jaxgsa.pce.analyze, one frame below,
         # already read both diagnostics off this fit and warned about them.
         result = pce_result.shapley()
@@ -447,9 +489,12 @@ def analyze(
         # The warning for a correlated problem with include_correlative=False
         # lives on HDMRResult.shapley, which is the call below and is also
         # reachable on its own. Warning here as well would report it twice.
-        result = analyze_hdmr(
+        hdmr_result = analyze_hdmr(
             problem, X, Y, on_invalid=on_invalid, verbose=False, **backend_kwargs
-        ).shapley(include_correlative=include_correlative)
+        )
+        if isinstance(hdmr_result, IrregularResult):
+            raise AssertionError("shapley hdmr backend returned an irregular result")
+        result = hdmr_result.shapley(include_correlative=include_correlative)
     else:
         raise ValueError(f"backend must be 'pce' or 'hdmr', got {backend!r}")
 

@@ -18,7 +18,7 @@ jaxgsa.optimal_transport.analyze(
     on_invalid="raise",
     verbose=True,
     keep_replicates=False,
-) -> OTResult
+) -> OTResult | IrregularResult
 ```
 
 The OT index is the class-averaged squared 2-Wasserstein distance between the

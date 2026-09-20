@@ -14,6 +14,7 @@ import warnings
 from enum import Enum
 from typing import TYPE_CHECKING
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
@@ -533,6 +534,27 @@ def _is_constant_slice(flat: Array) -> Array:
     return jnp.max(flat, axis=0) == jnp.min(flat, axis=0)
 
 
+@jax.jit
+def _zero_variance_mask(flat: Array) -> Array:
+    """Per-slice constant-or-zero-variance mask, computed in one device call.
+
+    The three reductions behind the zero-variance warning (max, min, var)
+    all walk the same array. Run in one executable they cost one dispatch
+    and XLA can schedule the loads together, which matters when the warned
+    array is the expanded design with millions of rows. The mask is
+    bit-identical to running the three ops separately: same reductions, same
+    comparisons, nothing reordered.
+
+    Args:
+        flat: ``(N, S)`` array, one column per output slice.
+
+    Returns:
+        Boolean array of shape ``(S,)``: True where the column is constant
+        or its variance underflows to zero in the working dtype.
+    """
+    return _is_constant_slice(flat) | (jnp.var(flat, axis=0) == 0)
+
+
 def _join_capped(labels: list[str], *, limit: int = 5) -> str:
     """Join warning labels, capping the list so a long warning stays readable.
 
@@ -611,7 +633,7 @@ def _warn_zero_variance_slices(
     # because a constant float32 slice rarely has a bit-exact zero variance.
     # A slice that does vary, but so little that its variance underflows to
     # zero in the working dtype: only the variance test sees that one.
-    zero_mask = _is_constant_slice(flat) | (jnp.var(flat, axis=0) == 0)
+    zero_mask = _zero_variance_mask(flat)
     n_zero = int(jnp.sum(zero_mask))
 
     if n_zero == 0:
@@ -669,8 +691,13 @@ def _standardize_outputs(Y: Array) -> tuple[Array, Array, Array, Array]:
     # does, so a comparison against SALib is exact rather than equivalent.
     y_mean = jnp.mean(Y, axis=0)
     y_std = jnp.std(Y, axis=0)
-    # Replace zero std with 1.0 so division doesn't produce NaN; the
-    # corresponding zero-variance output slices remain all-zero after scaling.
-    safe_scale = jnp.where(y_std == 0, jnp.ones_like(y_std), y_std)
+    # ``jnp.std`` can leave a tiny positive residue for an exactly constant
+    # float64 slice (the mean reduction is not necessarily bit-identical to
+    # each input element). Detect exact constancy on device, without the host
+    # warning scan, so a constant output still reaches the estimators as a
+    # zero-variance slice and their NaN contract remains intact under x64.
+    flat = Y.reshape(Y.shape[0], -1)
+    constant = _is_constant_slice(flat).reshape(Y.shape[1:])
+    safe_scale = jnp.where(constant | (y_std == 0), jnp.ones_like(y_std), y_std)
     Y_norm = (Y - y_mean) / safe_scale
     return Y_norm, y_mean, y_std, safe_scale

@@ -62,7 +62,7 @@ jaxgsa.shapley.analyze(
     verbose=True,
     keep_replicates=False,
     **backend_kwargs,
-) -> ShapleyResult
+) -> ShapleyResult | IrregularResult
 ```
 
 This is literally `jaxgsa.pce.analyze(problem, X, Y, **kw).shapley()`, or the

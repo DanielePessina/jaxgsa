@@ -2,7 +2,8 @@
 
 Decision D21 gives the package one warning class, ``JaxgsaWarning``. A warning
 that does not pass ``category=`` falls back to ``UserWarning``, and a user can
-then no longer filter jaxgsa warnings apart from NumPy, SciPy or JAX ones.
+then no longer filter jaxgsa warnings apart from the numeric libraries that
+emit them.
 
 This test walks the source with the ``ast`` module, not a regular expression,
 so a new module cannot drift back to an uncategorised warning.
@@ -74,7 +75,7 @@ def test_every_warning_passes_a_category():
     real ``DeprecationWarning`` or ``RuntimeWarning``, and that is correct
     behaviour, not a defect. What must never happen is a warning with no
     category at all, because that silently becomes ``UserWarning`` and can no
-    longer be filtered apart from NumPy, SciPy or JAX warnings.
+    longer be filtered apart from the numeric libraries that emit warnings.
     """
     offenders = _uncategorised()
     assert offenders == [], (

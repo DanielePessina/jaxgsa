@@ -15,7 +15,8 @@ Array shape conventions used throughout:
 """
 
 import warnings
-from typing import Literal
+from functools import lru_cache
+from typing import Literal, cast
 
 import jax
 import jax.numpy as jnp
@@ -26,9 +27,17 @@ from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare
-from jaxgsa._core.invalid import OnInvalid
+from jaxgsa._core.invalid import OnInvalid, _unit_of_row_for_policy
+from jaxgsa._core.irregular import (
+    IrregularResult,
+    IrregularY,
+    _fwd_kwargs,
+    _is_irregular_y,
+    analyze_irregular,
+)
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
+    YLayout,
     _prepare_Y,
     _standardize_outputs,
     _validate_output,
@@ -36,6 +45,20 @@ from jaxgsa._core.validation import (
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.morris._result import MorrisResult
 from jaxgsa.morris._sampling import MorrisSamples
+
+# Keyword-only parameters the irregular engine forwards unchanged to the
+# per-channel recursive analyze() calls. verbose is excluded:
+# the engine owns it.
+_IRREGULAR_KWARGS = (
+    "standardize_outputs",
+    "n_bootstrap",
+    "conf_level",
+    "ci_method",
+    "key",
+    "resample_chunk_size",
+    "on_invalid",
+    "keep_replicates",
+)
 
 # Fewest trajectories that still give statistically meaningful screening
 # measures. The analysis reports this floor only when the design lost blocks
@@ -124,6 +147,49 @@ def _measures(
     ee = _elementary_effects(Y, idx_after, idx_before, delta)  # (r, D, T, K)
     mu, mu_star, sigma = _stats_from_ee(ee)  # each (T, K, D)
     return ee, mu, mu_star, sigma
+
+
+@lru_cache(maxsize=None)
+def _get_morris_fused_measures(D: int, standardize_outputs: bool):
+    """Build the one-executable take + standardize + measures caller.
+
+    The expansion gather is fused into the estimator when the non-finite
+    check was skipped (``on_invalid='none'``, see
+    :func:`jaxgsa._core.entry.prepare`): the expanded array is then read by
+    nothing but the estimator, so materialising it as an eager pass wastes a
+    write and a read of the whole array. Measured ~1.3x faster than the
+    eager pipeline on a half-million-row isotropic design. The fused graph
+    takes the unique-row outputs, the design's expansion map and the
+    elementary-effect bookkeeping as plain arrays, so the gather stays
+    traceable.
+
+    Only the scalar layout (``T * K == 1``) uses this, matching the Sobol
+    front half: wide layouts run slower fused (measured there), so they
+    expand eagerly instead.
+
+    Args:
+        D: Number of input parameters (``n_params + 1`` rows per
+            trajectory).
+        standardize_outputs: Whether to standardize the expanded outputs
+            before gathering, as :func:`analyze` defines it.
+
+    Returns:
+        A jitted function of ``(Y_raw, index_map, idx_after, idx_before,
+        delta)`` returning the same ``(ee, mu, mu_star, sigma)`` tuple as
+        :func:`_measures`, with the inserted ``(T, K)`` axes in place.
+    """
+
+    def fn(
+        Y_raw: Array,
+        index_map: Array,
+        idx_after: Array,
+        idx_before: Array,
+        delta: Array,
+    ) -> tuple[Array, Array, Array, Array]:
+        Y3 = jnp.take(Y_raw, index_map, axis=0).reshape(-1, 1, 1)
+        return _measures(Y3, idx_after, idx_before, delta, standardize_outputs)
+
+    return jax.jit(fn)
 
 
 @jax.jit
@@ -265,7 +331,7 @@ def _reindex_after_drop(
 
 def analyze(
     sampling_result: MorrisSamples,
-    Y: Array,
+    Y: Array | IrregularY,
     *,
     standardize_outputs: bool = False,
     n_bootstrap: int = 0,
@@ -276,7 +342,7 @@ def analyze(
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
     keep_replicates: bool = False,
-) -> MorrisResult:
+) -> MorrisResult | IrregularResult:
     """Compute Morris elementary-effects screening measures using JAX.
 
     Pass the model outputs ``Y`` evaluated at the unique rows that
@@ -379,6 +445,19 @@ def analyze(
             for is deliberate, so it gives no warning.
         JaxgsaWarning: If an output slice has zero variance.
     """
+    if _is_irregular_y(Y):
+        return analyze_irregular(
+            analyze,
+            channel_data=sampling_result,
+            problem=sampling_result.problem,
+            Y=Y,
+            n_expected=int(sampling_result.n_runs),
+            design_based=True,
+            verbose=verbose,
+            kwargs=_fwd_kwargs(locals(), _IRREGULAR_KWARGS),
+        )
+    Y = cast(Array, Y)
+
     from jaxgsa.morris import SPEC
 
     # A trajectory is an indivisible sampling unit: it occupies a contiguous
@@ -401,7 +480,13 @@ def analyze(
         n_expected=int(sampling_result.samples.shape[0]),
         expand=sampling_result.expand_outputs,
         n_units=r,
-        unit_of_row=np.repeat(np.arange(r), rows_per_traj),
+        # Under on_invalid='none' the check never reads the row map
+        # (measured ~0.3 ms at r=16384), so it is built only where it is used.
+        unit_of_row=_unit_of_row_for_policy(
+            on_invalid, lambda: np.repeat(np.arange(r), rows_per_traj)
+        ),
+        # One trajectory is one unit of rows_per_traj contiguous rows.
+        unit_stride=rows_per_traj,
         # Y is checked expanded, but the caller evaluated one output per
         # unique run. Report the rows they hold, not the expanded ones.
         row_labels=sampling_result.expanded_to_unique,
@@ -449,7 +534,35 @@ def analyze(
         raise ValueError("Fewer than 2 trajectories remain after cleaning")
 
     t0 = _verbose.tic()
-    ee, mu, mu_star, sigma = _measures(Y, idx_after, idx_before, delta, standardize_outputs)
+    if (
+        ctx.deferred_expand is not None
+        and n_bootstrap == 0
+        and keep.all()
+        and ctx.layout is YLayout.SCALAR
+    ):
+        # on_invalid='none' held the expansion back (see
+        # Context.deferred_expand). The scalar no-bootstrap path fuses the
+        # gather into the estimator -- one executable, measured ~1.3x
+        # faster than the eager expansion on a half-million-row design.
+        # Wide layouts run slower fused, and the bootstrap resamples from
+        # the expanded rows, so both expand eagerly below.
+        ee, mu, mu_star, sigma = _get_morris_fused_measures(
+            sampling_result.n_params, standardize_outputs
+        )(
+            ctx.Y,
+            sampling_result._expanded_to_unique_jax,
+            idx_after,
+            idx_before,
+            delta,
+        )
+    else:
+        if ctx.deferred_expand is not None:
+            # Deferral only happens under on_invalid='none', where keep is
+            # all-True, so the compaction above never ran and Y is still
+            # the raw promoted rows; expanding here is exactly what prepare
+            # would have done under any other policy.
+            Y = ctx.deferred_expand(Y)
+        ee, mu, mu_star, sigma = _measures(Y, idx_after, idx_before, delta, standardize_outputs)
 
     # One value for all three intervals: they are produced together or not at
     # all, so a single name keeps that fact checkable instead of implied.

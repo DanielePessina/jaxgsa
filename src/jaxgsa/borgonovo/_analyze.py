@@ -54,7 +54,7 @@ import math
 import warnings
 from collections.abc import Callable
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, cast
 
 import jax
 import jax.numpy as jnp
@@ -74,6 +74,13 @@ from jaxgsa._core.entry import (
     validate_inputs,
 )
 from jaxgsa._core.invalid import OnInvalid
+from jaxgsa._core.irregular import (
+    IrregularResult,
+    IrregularY,
+    _fwd_kwargs,
+    _is_irregular_y,
+    analyze_irregular,
+)
 from jaxgsa._core.partition import (
     _mask_from_counts,
     build_partition_groups,
@@ -83,6 +90,25 @@ from jaxgsa._core.validation import _prepare_Y, _validate_output
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.borgonovo._result import DeltaResult
 from jaxgsa.problem import Problem, _categorical_dims
+
+# Keyword-only parameters the irregular engine forwards unchanged to the
+# per-channel recursive analyze() calls. verbose is excluded:
+# the engine owns it.
+_IRREGULAR_KWARGS = (
+    "n_classes",
+    "grid_size",
+    "bandwidth",
+    "n_bootstrap",
+    "conf_level",
+    "ci_method",
+    "bias_correct",
+    "key",
+    "slice_chunk_size",
+    "degenerate_tol",
+    "degenerate_bandwidth",
+    "on_invalid",
+    "keep_replicates",
+)
 
 _SQRT_2PI = math.sqrt(2.0 * math.pi)
 _MAX_CLASSES = 48
@@ -793,7 +819,7 @@ def _bandwidth_advice(
 def analyze(
     problem: Problem,
     X: Array,
-    Y: Array,
+    Y: Array | IrregularY,
     *,
     n_classes: int | None = None,
     grid_size: int = 100,
@@ -809,7 +835,7 @@ def analyze(
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
     keep_replicates: bool = False,
-) -> DeltaResult:
+) -> DeltaResult | IrregularResult:
     """Compute Borgonovo delta and given-data first-order Sobol indices.
 
     The delta index measures how much knowing a parameter's value shifts the
@@ -1027,6 +1053,19 @@ def analyze(
             At least one conditioning class is too narrow for the output
             grid, and its bandwidth was floored.
     """
+    if _is_irregular_y(Y):
+        return analyze_irregular(
+            analyze,
+            channel_data=X,
+            problem=problem,
+            Y=Y,
+            n_expected=int(X.shape[0]),
+            design_based=False,
+            verbose=verbose,
+            kwargs=_fwd_kwargs(locals(), _IRREGULAR_KWARGS),
+        )
+    Y = cast(Array, Y)
+
     from jaxgsa.borgonovo import SPEC
 
     # A non-finite value has to be settled before the KDE runs. Left alone it

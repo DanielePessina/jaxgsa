@@ -50,7 +50,7 @@ References:
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, cast
 
 import jax
 import jax.numpy as jnp
@@ -60,13 +60,32 @@ from jax import Array
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.bootstrap import interval
 from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare, require
-from jaxgsa._core.invalid import OnInvalid
+from jaxgsa._core.invalid import OnInvalid, _unit_of_row_for_policy
+from jaxgsa._core.irregular import (
+    IrregularResult,
+    IrregularY,
+    _fwd_kwargs,
+    _is_irregular_y,
+    analyze_irregular,
+)
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
     _warn_zero_variance_slices,
 )
 from jaxgsa.kucherenko._result import KucherenkoResult
 from jaxgsa.kucherenko._sampling import KucherenkoSamples
+
+# Keyword-only parameters the irregular engine forwards unchanged to the
+# per-channel recursive analyze() calls. verbose is excluded:
+# the engine owns it.
+_IRREGULAR_KWARGS = (
+    "n_bootstrap",
+    "conf_level",
+    "ci_method",
+    "key",
+    "on_invalid",
+    "keep_replicates",
+)
 
 
 def _estimate(
@@ -90,6 +109,7 @@ def _estimate(
     """
     variance = f_joint.var(axis=0)  # (S,)
     safe_variance = np.where(variance > 0.0, variance, np.nan)
+    N = f_joint.shape[0]
 
     # Shift both S1 factors by one shared constant (the joint-block mean)
     # before the product. The estimator is algebraically unchanged: for any
@@ -102,8 +122,15 @@ def _estimate(
     f0_joint = f_joint.mean(axis=0)  # (S,)
     g_joint = f_joint - f0_joint  # (N, S), centered
     g_first = f_first - f0_joint[None, None]  # (D, N, S), same shift
+    # The S1 cross-moment is a sum over the sample axis of a per-(d, s)
+    # dot product. The broadcast-multiply-then-mean form materialises a
+    # (D, N, S) intermediate; einsum accumulates the same dot without it.
+    # Both operate on the *centred* factors, so the shift-safety the
+    # estimator was designed for is unchanged (the two agree to ~1e-17 in
+    # float64, pure reassociation noise).
     S1 = (
-        (g_joint[None] * g_first).mean(axis=1) - g_joint.mean(axis=0)[None] * g_first.mean(axis=1)
+        np.einsum("dns,ns->ds", g_first, g_joint) / N
+        - g_joint.mean(axis=0)[None] * g_first.mean(axis=1)
     ) / safe_variance
     ST = 0.5 * ((f_joint[None] - f_total) ** 2).mean(axis=1) / safe_variance
     return S1, ST, variance
@@ -111,7 +138,7 @@ def _estimate(
 
 def analyze(
     sampling_result: KucherenkoSamples,
-    Y: Array,
+    Y: Array | IrregularY,
     *,
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
@@ -120,7 +147,7 @@ def analyze(
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
     keep_replicates: bool = False,
-) -> KucherenkoResult:
+) -> KucherenkoResult | IrregularResult:
     """Compute Kucherenko first-order and total indices from model outputs.
 
     The estimators run on the actual model outputs. No surrogate is fitted.
@@ -190,6 +217,19 @@ def analyze(
             NaN), or if non-finite outputs are found under a policy that does
             not raise.
     """
+    if _is_irregular_y(Y):
+        return analyze_irregular(
+            analyze,
+            channel_data=sampling_result,
+            problem=sampling_result.problem,
+            Y=Y,
+            n_expected=int(sampling_result.n_runs),
+            design_based=True,
+            verbose=verbose,
+            kwargs=_fwd_kwargs(locals(), _IRREGULAR_KWARGS),
+        )
+    Y = cast(Array, Y)
+
     from jaxgsa.kucherenko import SPEC
 
     problem = sampling_result.problem
@@ -216,7 +256,9 @@ def analyze(
         # them. The design is block-major, so base point k sits at rows
         # k, N + k, 2N + k, … rather than in a contiguous run.
         n_units=N,
-        unit_of_row=np.tile(np.arange(N), 2 * D + 1),
+        # The map is the interleaved base-point pattern, built on the host
+        # only where the check reads it (never under on_invalid='none').
+        unit_of_row=_unit_of_row_for_policy(on_invalid, lambda: np.tile(np.arange(N), 2 * D + 1)),
         min_kept=2,
         # The denominator of both indices is the variance of the joint block
         # alone, not of the whole design, so the zero-variance check has to

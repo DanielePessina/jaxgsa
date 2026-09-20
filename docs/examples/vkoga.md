@@ -619,6 +619,6 @@ the input model, not of any output slice, so it stays `(D, D)` throughout.
 - [HSIC](/examples/hsic), [PAWN](/examples/pawn), and
   [Optimal Transport](/examples/optimal-transport) for correlation-tolerant
   measures that are not variance fractions.
-- [Methods](/guide/methods#vkoga-correlated-input-variance-indices) for the
+- [VKOGA API](/api/vkoga) for the
   theory, and for when to choose VKOGA over HDMR's ANCOVA split.
 - [API Reference](/api/vkoga) for full parameter documentation.

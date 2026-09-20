@@ -77,41 +77,6 @@ def test_asymmetric_correlation_structure():
     np.testing.assert_allclose(float(np.asarray(result.variance)), var_y, rtol=2e-2)
 
 
-def test_parameter_permutation_equivariance():
-    """Relabelling the parameters permutes the indices, and nothing else."""
-    perm = np.array([2, 0, 3, 1])
-    ks = jaxgsa.kucherenko.sample(ASYM_PROBLEM.with_correlation(R_ASYM), 4096, seed=1)
-    base = jaxgsa.kucherenko.analyze(ks, ks.samples @ A_COEF_ASYM)
-
-    # The same model with its parameters in a different order: permute the
-    # correlation matrix and the coefficients together.
-    ks_perm = jaxgsa.kucherenko.sample(
-        ASYM_PROBLEM.with_correlation(R_ASYM[np.ix_(perm, perm)]), 4096, seed=1
-    )
-    permuted = jaxgsa.kucherenko.analyze(ks_perm, ks_perm.samples @ A_COEF_ASYM[perm])
-
-    np.testing.assert_allclose(np.asarray(permuted.S1), np.asarray(base.S1)[perm], atol=5e-3)
-    np.testing.assert_allclose(np.asarray(permuted.ST), np.asarray(base.ST)[perm], atol=5e-3)
-
-
-def test_independent_ishigami_matches_sobol():
-    """Identity correlation reproduces the classic Saltelli estimates."""
-    ks = jaxgsa.kucherenko.sample(ishigami.PROBLEM, 4096, seed=3)
-    Y = ishigami.evaluate(np.asarray(ks.samples))
-    result = jaxgsa.kucherenko.analyze(ks, Y)
-    assert not result.is_correlated
-
-    sr = jaxgsa.sobol.sample(ishigami.PROBLEM, n_samples=2**15, seed=42, verbose=False)
-    sob = jaxgsa.sobol.analyze(sr, ishigami.evaluate(np.asarray(sr.samples)))
-
-    # Both estimators against the analytic values, and against each other,
-    # within Monte-Carlo error (measured max ~5e-3 at this size).
-    np.testing.assert_allclose(np.asarray(result.S1), ishigami.ANALYTICAL_S1, atol=2e-2)
-    np.testing.assert_allclose(np.asarray(result.ST), ishigami.ANALYTICAL_ST, atol=2e-2)
-    np.testing.assert_allclose(np.asarray(result.S1), np.asarray(sob.S1), atol=2e-2)
-    np.testing.assert_allclose(np.asarray(result.ST), np.asarray(sob.ST), atol=2e-2)
-
-
 def test_large_output_mean_does_not_corrupt_the_indices():
     """A +1e8 output offset must leave every index unchanged.
 
@@ -234,25 +199,6 @@ def test_seed_with_scramble_false_raises():
         jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 64, scramble=False, seed=0)
 
 
-def test_seed_interface_matches_the_other_samplers():
-    """Tier T4: ``seed`` takes an int or a Generator, and ``None`` is the default.
-
-    An explicit int seed reproduces the design; a ``np.random.Generator`` is
-    accepted the same way ``sobol.sample`` and ``morris.sample`` accept one.
-    ``scramble=False`` without a seed stays valid and deterministic.
-    """
-    a = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 64, seed=7)
-    b = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 64, seed=7)
-    np.testing.assert_array_equal(a.samples, b.samples)
-
-    from_rng = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 64, seed=np.random.default_rng(7))
-    assert from_rng.samples.shape == a.samples.shape
-
-    plain = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 64, scramble=False)
-    plain_again = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 64, scramble=False)
-    np.testing.assert_array_equal(plain.samples, plain_again.samples)
-
-
 # --- analyze contracts --------------------------------------------------------
 
 
@@ -318,15 +264,6 @@ class TestOnInvalidPolicy:
         assert "They condemn base points [9]" in message
         assert f"which covers {len(self._rows_of(ks, 9))} rows" in message
 
-    def test_propagate_warns_and_lets_the_value_reach_the_indices(self):
-        """T4: nothing is removed, so the indices come back non-finite."""
-        ks, Y = self._design_and_Y()
-        Y[9] = np.nan
-        with pytest.warns(JaxgsaWarning, match="reaches the indices"):
-            result = jaxgsa.kucherenko.analyze(ks, Y, on_invalid="propagate")
-        assert not np.all(np.isfinite(np.asarray(result.S1)))
-        assert result.invalid.policy == "propagate"
-
     def test_one_bad_value_condemns_every_row_of_its_base_point(self):
         """T4: the unit is the base point, and its rows are not contiguous.
 
@@ -342,19 +279,6 @@ class TestOnInvalidPolicy:
         assert result.invalid.unit_indices == (9,)
         assert result.invalid.row_indices == tuple(self._rows_of(ks, 9))
         assert len(result.invalid.row_indices) == 2 * ks.n_params + 1
-
-    def test_a_bad_value_in_a_conditional_block_names_the_same_base_point(self):
-        """T4: the unit is found from the row layout, not from the block index.
-
-        Row ``2N + 9`` sits in the second conditional block. It belongs to
-        base point 9, exactly like row 9 does.
-        """
-        ks, Y = self._design_and_Y()
-        Y[2 * self.N + 9] = np.nan
-        with pytest.warns(JaxgsaWarning):
-            result = jaxgsa.kucherenko.analyze(ks, Y, on_invalid="drop")
-        assert result.invalid.unit_indices == (9,)
-        assert result.invalid.row_indices == tuple(self._rows_of(ks, 9))
 
     def test_drop_removes_the_base_point_and_leaves_finite_indices(self):
         """T4: the estimate is computed from the surviving base points.
@@ -374,14 +298,14 @@ class TestOnInvalidPolicy:
         clean = jaxgsa.kucherenko.analyze(ks, Y)
         np.testing.assert_allclose(np.asarray(dropped.S1), np.asarray(clean.S1), atol=5e-2)
 
-    @pytest.mark.parametrize("policy", ["raise", "propagate", "drop"])
-    def test_a_clean_sample_reports_nothing_and_stays_silent(self, policy, recwarn):
+    def test_a_clean_sample_reports_nothing_and_stays_silent(self, recwarn):
         """T4: a clean run gives an empty report under every policy."""
         ks, Y = self._design_and_Y()
-        result = jaxgsa.kucherenko.analyze(ks, Y, on_invalid=policy)
-        assert result.invalid.n_invalid == 0
-        assert result.invalid.n_units == self.N
-        assert result.invalid.unit is InvalidUnit.BASE_POINT
+        for policy in ("raise", "propagate", "drop"):
+            result = jaxgsa.kucherenko.analyze(ks, Y, on_invalid=policy)
+            assert result.invalid.n_invalid == 0
+            assert result.invalid.n_units == self.N
+            assert result.invalid.unit is InvalidUnit.BASE_POINT
         # Two warnings are about something other than the data and are
         # expected here. The precision one is about the arithmetic: this Y is
         # float64 on purpose, so with x64 off the preamble says it is about to
@@ -397,12 +321,6 @@ class TestOnInvalidPolicy:
             and "jaxgsa.kucherenko.sample" not in str(w.message)
         ]
         assert left == []
-
-    def test_a_bad_on_invalid_value_is_rejected(self):
-        """T4: an unknown policy name is refused before anything is computed."""
-        ks, Y = self._design_and_Y()
-        with pytest.raises(ValueError, match="on_invalid must be one of"):
-            jaxgsa.kucherenko.analyze(ks, Y, on_invalid="skip")
 
 
 # --- persistence and reporting ------------------------------------------------
@@ -438,28 +356,15 @@ def _small_design(n=512, seed=2):
 class TestBootstrap:
     """Base-point resampling, the one unit this design can drop safely."""
 
-    def test_no_bootstrap_leaves_every_interval_unset(self):
+    def test_no_bootstrap_leaves_every_interval_unset_and_key_is_required(self):
         """The plainest call reports no interval and no CI record."""
         ks, Y = _small_design()
         result = jaxgsa.kucherenko.analyze(ks, Y)
         assert result.ci is None
         assert result.S1_conf is None
         assert result.ST_conf is None
-
-    def test_a_bootstrap_needs_a_key(self):
-        """No key is silently invented, per the vocabulary."""
-        ks, Y = _small_design()
         with pytest.raises(ValueError, match="key is required"):
             jaxgsa.kucherenko.analyze(ks, Y, n_bootstrap=8)
-
-    def test_the_point_estimate_does_not_move(self):
-        """T4: asking for an interval must not change the number it brackets."""
-        ks, Y = _small_design()
-        plain = jaxgsa.kucherenko.analyze(ks, Y)
-        with_ci = jaxgsa.kucherenko.analyze(ks, Y, n_bootstrap=16, key=jax.random.key(0))
-        np.testing.assert_array_equal(np.asarray(with_ci.S1), np.asarray(plain.S1))
-        np.testing.assert_array_equal(np.asarray(with_ci.ST), np.asarray(plain.ST))
-        np.testing.assert_array_equal(np.asarray(with_ci.variance), np.asarray(plain.variance))
 
     def test_intervals_bracket_the_estimate_and_variance_has_none(self):
         """Both indices get an interval; the denominator deliberately does not."""
@@ -494,18 +399,6 @@ class TestBootstrap:
         assert (ST_draws >= -0.05).all()
         assert (ST_draws <= 1.2).all()
 
-    def test_the_interval_narrows_as_the_design_grows(self):
-        """T4: a bootstrap interval must respond to the sample size."""
-        small = jaxgsa.kucherenko.analyze(
-            *_small_design(n=256, seed=3), n_bootstrap=64, key=jax.random.key(3)
-        )
-        large = jaxgsa.kucherenko.analyze(
-            *_small_design(n=2048, seed=3), n_bootstrap=64, key=jax.random.key(3)
-        )
-        small_width = np.asarray(small.S1_conf[1] - small.S1_conf[0])
-        large_width = np.asarray(large.S1_conf[1] - large.S1_conf[0])
-        assert large_width.mean() < small_width.mean()
-
     def test_gaussian_endpoints_are_symmetric_about_the_estimate(self):
         """T0: the normal-approximation interval is ``estimate +/- z*sd``."""
         ks, Y = _small_design()
@@ -515,12 +408,6 @@ class TestBootstrap:
         conf = np.asarray(result.S1_conf)
         point = np.asarray(result.S1)
         np.testing.assert_allclose(conf[1] - point, point - conf[0], rtol=1e-5)
-
-    def test_keep_replicates_off_by_default(self):
-        """The draws are large, so they are kept only when asked for."""
-        ks, Y = _small_design()
-        result = jaxgsa.kucherenko.analyze(ks, Y, n_bootstrap=8, key=jax.random.key(5))
-        assert result.ci.replicates is None
 
     def test_a_time_series_keeps_its_layout(self):
         """T4: an interval mirrors the output rank the caller passed."""

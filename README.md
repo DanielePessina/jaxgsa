@@ -12,8 +12,10 @@ jaxgsa tells you which of your model's inputs drive its output. You give it
 input samples and the outputs your model produced for them. It returns
 sensitivity indices that rank the inputs and show their interactions.
 
-Thirteen methods share one interface and one output contract. Eleven of them
-are JIT-compiled and vectorized over the output axes. A model with 50
+Thirteen methods share one interface and one output contract. Regular outputs
+can be scalar, multi-output, or time-series; twelve methods also accept
+bucketed channels with their own irregular time grids. Eleven methods are
+JIT-compiled and vectorized over regular output axes. A model with 50
 timesteps and 6 outputs then costs one compiled pass, not 300 Python loop
 iterations. Those eleven also export a traceable `indices()`, so you can put
 the estimator itself under `jit`, `vmap` and `grad`. The other two,
@@ -46,6 +48,40 @@ Python 3.12 or newer. The runtime dependencies are `jax`, `jaxlib`, `numpy`,
 `scipy`, and `xarray`. Optional extras: `examples` (matplotlib) and
 `dev` (pytest, ruff, ty, SALib, POT).
 
+## Develop the web workbench
+
+The browser workbench is a separate Vite app under [`web/`](web/). It runs the
+ported analysis code locally in the browser; it does not start a Python server.
+
+```bash
+cd web
+npm install
+npm run dev          # start the local Vite server
+```
+
+The web checks are:
+
+```bash
+cd web
+npm run typecheck
+npm run lint
+npm test
+npm run build
+```
+
+The VitePress documentation site is a separate project under [`docs/`](docs/).
+Run its commands from `docs/`, or use `npm --prefix docs ...` from the
+repository root:
+
+```bash
+npm --prefix docs install
+npm --prefix docs run docs:dev
+npm --prefix docs run docs:check
+```
+
+The web workbench and the documentation site have separate dependency installs
+and development servers.
+
 ## Citing jaxgsa
 
 If you use jaxgsa in research, cite the exact version that produced your
@@ -55,11 +91,11 @@ DOI; otherwise cite the corresponding Git tag or GitHub release. Also cite the
 primary paper for each sensitivity method you use, as listed in the methods
 guide.
 
-For version 0.9.0, before a DOI is available, the citation is:
+For version 0.9.1, before a DOI is available, the citation is:
 
 ```text
 Pessina, D., and Papathanasiou, M. M. (2026). jaxgsa: Global Sensitivity
-Analysis in JAX (Version 0.9.0) [Computer software]. Imperial College London.
+Analysis in JAX (Version 0.9.1) [Computer software]. Imperial College London.
 https://github.com/DanielePessina/jaxgsa
 ```
 
@@ -235,6 +271,25 @@ Watch for zero-variance slices. If your model returns a constant at t = 0, the
 indices there are 0/0 and jaxgsa returns NaN with a `JaxgsaWarning` that names
 the slice.
 
+If output channels do not share a time grid, pass a list or dict of
+`(times, values)` pairs instead. Automatic bucketing analyzes each channel on its own
+grid and preserves those coordinates without padding or fabricated values:
+
+```python
+Y = [
+    (t_concentration, concentration),  # values: (N, T_concentration)
+    (t_diameter, diameter),             # values: (N, T_diameter)
+]
+result = jaxgsa.sobol.analyze(design, Y, verbose=False)
+ds = result.to_dataset()
+```
+
+The ragged form automatically selects bucketing. There is no mask mode because
+padding a common grid would add work without helping the per-channel
+estimators; DGSM requires a fixed Jacobian layout and does not accept the ragged
+form. See the
+[irregular output grids guide](https://danielepessina.github.io/jaxgsa/examples/irregular-outputs).
+
 ## The thirteen methods
 
 | Method | Own design | Reach for it when |
@@ -280,27 +335,22 @@ and [categorical inputs](https://danielepessina.github.io/jaxgsa/examples/catego
 
 ## Performance
 
-The gain is vectorization over output slices. SALib analyzes each `(t, k)`
-slice in a Python loop. jaxgsa fuses the estimators and maps one compiled
-kernel over all `T * K` slices, so its cost is nearly flat in output size while
-SALib's is linear.
+The performance suite covers all thirteen methods across scalar,
+high-sample, high-dimensional, multi-output, time-series, and bootstrap
+workloads. On an Apple M1 Pro CPU, the current performance branch reduced the
+sum of warm median analysis times across 27 isolated cases from 0.921 s to
+0.430 s relative to `master`.
 
-On the widest gap measured, RS-HDMR on 50 timesteps by 6 outputs, jaxgsa runs
-in 27.4 ms against 29.06 s for SALib 1.5.2 on the same Apple M1 Pro. That is
-1060x, and the baseline is single-process NumPy on one CPU core, which is what
-SALib does by default. Do not read it as a claim against a parallel CPU or a
-tuned GPU comparison, where published speedups for Monte Carlo GSA are closer
-to 13x. Eight cores would already cut 1060x to roughly 130x.
+The largest isolated changes were HSIC, from 153.0 ms to 23.1 ms, and VKOGA,
+from 348.3 ms to 27.1 ms. A 30-parameter Sobol analysis with second-order
+indices fell from 7.37 ms to 3.45 ms. These are analysis timings; model
+evaluation and sampling are excluded.
 
-Most of that ratio is Python loop overhead rather than arithmetic. Give the
-same RS-HDMR comparison one output slice instead of 300 and the gap falls to
-10.9x. Shrink the work further, to Sobol on a scalar output with no bootstrap,
-and SALib wins at 0.2 ms against jaxgsa's 0.9 ms, because JAX dispatch costs more
-than the arithmetic does.
-
-So output size is what decides. `T * K = 1` gains little and can lose. Time
-series and multi-output work is where jaxgsa pays for itself. Any speedup
-quoted without its `T` and `K` is meaningless, including the ones above.
+Against SALib 1.5.2 on the same machine, scalar Sobol without bootstrap still
+favours SALib (0.2 ms against 0.6 ms). With 300 output slices and second-order
+indices, jaxgsa takes 7.4 ms against 262.8 ms. The gain comes from compiling
+and vectorizing work across output slices, so every comparison must state its
+shape and whether compilation is included.
 
 Full tables, methodology, and the script are in the
 [benchmarks guide](https://danielepessina.github.io/jaxgsa/guide/benchmarks).
@@ -313,7 +363,7 @@ uv run --extra dev benchmark_salib.py
 
 - [Getting started](https://danielepessina.github.io/jaxgsa/guide/getting-started)
 - [Methods guide](https://danielepessina.github.io/jaxgsa/guide/methods), including the capability table
-- [Scale and limits](https://danielepessina.github.io/jaxgsa/guide/scale), including high-dimensional planning guidance
+- [Scaling to large problems](https://danielepessina.github.io/jaxgsa/guide/scale), including high-dimensional planning guidance
 - [Configuration](https://danielepessina.github.io/jaxgsa/guide/configuration), including 64-bit floats and the persistent compilation cache
 - [API reference](https://danielepessina.github.io/jaxgsa/api/)
 - [Examples](https://danielepessina.github.io/jaxgsa/examples/basic), one page per method

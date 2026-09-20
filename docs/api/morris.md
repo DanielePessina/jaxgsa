@@ -109,8 +109,11 @@ analyze(
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
     keep_replicates: bool = False,
-) -> MorrisResult
+) -> MorrisResult | IrregularResult
 ```
+
+Ragged `Y` is automatically analyzed one output channel at a time; see
+[Irregular output grids](/examples/irregular-outputs).
 
 ```python
 samples = jaxgsa.morris.sample(problem, n_trajectories=512, seed=0, verbose=False)

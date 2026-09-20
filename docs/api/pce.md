@@ -14,7 +14,7 @@ jaxgsa.pce.analyze(
     on_invalid="raise",
     verbose=True,
     keep_replicates=False,
-) -> PCEResult
+) -> PCEResult | IrregularResult
 ```
 
 `analyze` fits an orthogonal polynomial surrogate to arbitrary `(X, Y)` pairs,

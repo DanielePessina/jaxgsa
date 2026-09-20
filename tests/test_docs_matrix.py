@@ -25,8 +25,6 @@ from __future__ import annotations
 import pathlib
 import re
 
-import pytest
-
 from jaxgsa._core.registry import methods
 
 DOCS = pathlib.Path(__file__).resolve().parents[1] / "docs"
@@ -141,7 +139,6 @@ def _mark(cell: str, column: str, name: str) -> bool:
 
 ROWS = _capability_rows()
 SPECS = sorted(methods().values(), key=lambda s: s.name)
-IDS = [s.name for s in SPECS]
 
 
 class TestTheTableCoversEveryMethod:
@@ -159,63 +156,51 @@ class TestTheTableCoversEveryMethod:
 class TestEveryCellIsTrue:
     """Each documented cell is answerable to the registry."""
 
-    @pytest.mark.parametrize("spec", SPECS, ids=IDS)
-    def test_the_reports_cell_says_something(self, spec):
-        """The registry declares no list of what a method reports.
+    def test_every_registered_row_and_cell_matches_the_registry(self):
+        """Check the whole matrix in one drift-resistant contract test.
 
-        The cell is prose — "bounds on $S_T$", "dependence measure",
-        "$W_2^2$ index" — and none of those is answerable to a field on the
-        result class, so the wording cannot be checked. What can be checked is
-        that the cell holds prose at all: a blank cell, or a capability mark
-        that slipped one column to the left, is the defect that put this test
-        module here in the first place.
+        These assertions are deliberately kept together. Splitting the same
+        six-column comparison into one parametrized test per method produced
+        dozens of tests without adding a distinct failure mode.
         """
-        cell = ROWS[spec.name][EXPECTED_COLUMNS.index("Reports")]
-        assert cell, f"the Reports cell for {spec.name} is empty"
-        assert cell.strip(FOOTNOTE_MARKERS + " ") not in (YES, NO, DASH), (
-            f"the Reports cell for {spec.name} is {cell!r}; a tick, a cross or "
-            f"a dash there means a capability mark landed in the wrong column"
-        )
+        for spec in SPECS:
+            name = spec.name
+            row = ROWS[name]
 
-    @pytest.mark.parametrize("spec", SPECS, ids=IDS)
-    def test_the_own_design_cell(self, spec):
-        cell = ROWS[spec.name][EXPECTED_COLUMNS.index("Own design")]
-        documented = _mark(cell, "Own design", spec.name)
-        assert documented == spec.is_design_based, (
-            f"the docs say {spec.name} "
-            f"{'has' if documented else 'has no'} sampler of its own, but the "
-            f"registry says sample={spec.sample!r}"
-        )
+            reports = row[EXPECTED_COLUMNS.index("Reports")]
+            assert reports, f"the Reports cell for {name} is empty"
+            assert reports.strip(FOOTNOTE_MARKERS + " ") not in (YES, NO, DASH), (
+                f"the Reports cell for {name} is {reports!r}; a tick, a cross or "
+                "a dash there means a capability mark landed in the wrong column"
+            )
 
-    @pytest.mark.parametrize("spec", SPECS, ids=IDS)
-    def test_the_correlated_cell(self, spec):
-        cell = ROWS[spec.name][EXPECTED_COLUMNS.index("Correlated")]
-        documented = _mark(cell, "Correlated", spec.name)
-        assert documented == (spec.correlation == "accepts"), (
-            f"the docs say {spec.name} "
-            f"{'accepts' if documented else 'refuses'} a correlated problem, "
-            f"but the registry declares correlation={spec.correlation!r}"
-        )
+            documented = _mark(row[EXPECTED_COLUMNS.index("Own design")], "Own design", name)
+            assert documented == spec.is_design_based, (
+                f"the docs say {name} "
+                f"{'has' if documented else 'has no'} sampler of its own, but the "
+                f"registry says sample={spec.sample!r}"
+            )
 
-    @pytest.mark.parametrize("spec", SPECS, ids=IDS)
-    def test_the_categorical_cell(self, spec):
-        cell = ROWS[spec.name][EXPECTED_COLUMNS.index("Categorical")]
-        documented = _mark(cell, "Categorical", spec.name)
-        assert documented == (spec.categorical == "accepts"), (
-            f"the docs say {spec.name} "
-            f"{'accepts' if documented else 'refuses'} a categorical problem, "
-            f"but the registry declares categorical={spec.categorical!r}"
-        )
+            documented = _mark(row[EXPECTED_COLUMNS.index("Correlated")], "Correlated", name)
+            assert documented == (spec.correlation == "accepts"), (
+                f"the docs say {name} "
+                f"{'accepts' if documented else 'refuses'} a correlated problem, "
+                f"but the registry declares correlation={spec.correlation!r}"
+            )
 
-    @pytest.mark.parametrize("spec", SPECS, ids=IDS)
-    def test_the_bootstrap_cell_names_the_real_keyword(self, spec):
-        """Two spellings are in use, so the table must give the right one."""
-        cell = ROWS[spec.name][EXPECTED_COLUMNS.index("Bootstrap CI")]
-        documented = None if cell == DASH else cell.strip("`")
-        assert documented == spec.bootstrap, (
-            f"the docs give {spec.name} the bootstrap keyword "
-            f"{documented!r}, but the registry declares {spec.bootstrap!r}"
-        )
+            documented = _mark(row[EXPECTED_COLUMNS.index("Categorical")], "Categorical", name)
+            assert documented == (spec.categorical == "accepts"), (
+                f"the docs say {name} "
+                f"{'accepts' if documented else 'refuses'} a categorical problem, "
+                f"but the registry declares categorical={spec.categorical!r}"
+            )
+
+            cell = row[EXPECTED_COLUMNS.index("Bootstrap CI")]
+            documented_bootstrap = None if cell == DASH else cell.strip("`")
+            assert documented_bootstrap == spec.bootstrap, (
+                f"the docs give {name} the bootstrap keyword "
+                f"{documented_bootstrap!r}, but the registry declares {spec.bootstrap!r}"
+            )
 
 
 class TestTheProseAgreesWithTheTable:

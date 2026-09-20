@@ -316,7 +316,7 @@ def _prep_sobol(case: Case) -> Callable[[], Any]:
     y = widen(ishigami.evaluate(jnp.asarray(sr.samples)), case.shape)
     jax.block_until_ready(y)
     key = jax.random.key(SEED)
-    return lambda: sobol.analyze(sr, y, num_resamples=20, key=key)
+    return lambda: sobol.analyze(sr, y, n_bootstrap=20, key=key)
 
 
 def _prep_morris(case: Case) -> Callable[[], Any]:
@@ -324,7 +324,7 @@ def _prep_morris(case: Case) -> Callable[[], Any]:
     y = widen(ishigami.evaluate(jnp.asarray(sr.samples)), case.shape)
     jax.block_until_ready(y)
     key = jax.random.key(SEED)
-    return lambda: morris.analyze(sr, y, num_resamples=20, key=key)
+    return lambda: morris.analyze(sr, y, n_bootstrap=20, key=key)
 
 
 def _prep_efast(case: Case) -> Callable[[], Any]:
@@ -354,7 +354,7 @@ def _prep_pawn(case: Case) -> Callable[[], Any]:
 
 
 def _prep_hsic(case: Case) -> Callable[[], Any]:
-    return lambda: hsic.analyze(case.problem, case.X, case.Y, n_perms=10, seed=SEED)
+    return lambda: hsic.analyze(case.problem, case.X, case.Y, n_perms=10, key=jax.random.key(SEED))
 
 
 def _prep_optimal_transport(case: Case) -> Callable[[], Any]:
@@ -391,7 +391,7 @@ def _prep_vkoga(case: Case) -> Callable[[], Any]:
         n_outer=64,
         n_inner=32,
         n_variance=512,
-        seed=SEED,
+        key=jax.random.key(SEED),
     )
 
 

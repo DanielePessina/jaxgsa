@@ -19,7 +19,7 @@ jaxgsa.vkoga.analyze(
     on_invalid="raise",
     verbose=True,
     keep_replicates=False,
-) -> VKOGAResult
+) -> VKOGAResult | IrregularResult
 ```
 
 `analyze` fits a Vectorial Kernel Orthogonal Greedy Algorithm surrogate to
