@@ -5,7 +5,7 @@
 [![PyPI](https://img.shields.io/pypi/v/jaxgsa)](https://pypi.org/project/jaxgsa/)
 [![CI](https://github.com/DanielePessina/jaxgsa/actions/workflows/ci.yml/badge.svg)](https://github.com/DanielePessina/jaxgsa/actions/workflows/ci.yml)
 [![Documentation](https://img.shields.io/badge/docs-online-blue)](https://danielepessina.github.io/jaxgsa/)
-[![Browser workbench](https://img.shields.io/badge/browser%20workbench-WASM-16a6c7)](web/)
+[![Browser workbench](https://img.shields.io/badge/browser%20workbench-WASM-16a6c7)](https://danielepessina.github.io/jaxgsa/workbench/)
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org)
 
