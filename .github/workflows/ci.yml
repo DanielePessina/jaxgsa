@@ -17,7 +17,7 @@ jobs:
   # Keep the pull-request gate small and explicit: this exercises one public
   # analyze path for every registered method without running the long-form
   # numerical/oracle suite.
-  method-matrix:
+  test:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -56,7 +56,7 @@ jobs:
   #
   # One Python version, not the matrix: this job asks about a JAX flag, and
   # nothing about it varies with the interpreter.
-  method-matrix-x64:
+  x64:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
