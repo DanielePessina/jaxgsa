@@ -7,7 +7,7 @@ where every other row had fourteen, so one column silently rendered blank.
 ``docs/api/index.md`` listed eight of the nine given-data methods. Nothing
 caught any of it, because a table in Markdown is answerable to nobody.
 
-There is now one table, under ``### Method capabilities`` in
+There is now one table, under ``## Method capabilities`` in
 ``docs/guide/methods.md``. These tests parse it and check every cell against
 :func:`jaxgsa._core.registry.methods`, which ``tests/test_registry.py`` in
 turn checks against what the methods actually do. A fourteenth method, or a
@@ -31,7 +31,7 @@ DOCS = pathlib.Path(__file__).resolve().parents[1] / "docs"
 METHODS_PAGE = DOCS / "guide" / "methods.md"
 API_PAGE = DOCS / "api" / "index.md"
 
-CAPABILITY_HEADING = "### Method capabilities"
+CAPABILITY_HEADING = "## Method capabilities"
 GIVEN_DATA_HEADING = "## Given-data methods"
 
 EXPECTED_COLUMNS = [

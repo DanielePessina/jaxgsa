@@ -1,11 +1,11 @@
-import rawKucherenko from "../../goldens/v0.9.1/kucherenko.json";
-import rawMorris from "../../goldens/v0.9.1/morris.json";
-import rawPce from "../../goldens/v0.9.1/pce.json";
-import rawShapley from "../../goldens/v0.9.1/shapley.json";
-import rawSobol from "../../goldens/v0.9.1/sobol.json";
-import rawBorgonovo from "../../goldens/v0.9.1/borgonovo.json";
-import rawPawn from "../../goldens/v0.9.1/pawn.json";
-import rawEfast from "../../goldens/v0.9.1/efast.json";
+import rawKucherenko from "../../goldens/v1.0.0/kucherenko.json";
+import rawMorris from "../../goldens/v1.0.0/morris.json";
+import rawPce from "../../goldens/v1.0.0/pce.json";
+import rawShapley from "../../goldens/v1.0.0/shapley.json";
+import rawSobol from "../../goldens/v1.0.0/sobol.json";
+import rawBorgonovo from "../../goldens/v1.0.0/borgonovo.json";
+import rawPawn from "../../goldens/v1.0.0/pawn.json";
+import rawEfast from "../../goldens/v1.0.0/efast.json";
 
 export interface Golden {
   x: number[][];

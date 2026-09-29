@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.0
+
+First stable release. The API contract of 0.9.1 is unchanged; 1.0.0 marks it
+as supported.
+
+### New: the browser workbench
+
+A WASM/React companion at `github.io/jaxgsa` runs six ported methods locally
+in the browser (float64, no data leaves the page): define a problem, sample a
+Sobol/Morris/Kucherenko/eFAST design, bring the model outputs back, and read
+the indices — plus the fit-any-data estimators (PCE, Shapley, Borgonovo,
+PAWN) on uploaded point clouds. The tolerances are pinned against the Python
+package through golden fixtures in `goldens/`.
+
+### Release summary
+
+The Python API, its behavior contract, and its performance characteristics
+are as of 0.9.1; nothing changed numerically. 1.0.0 is the API-stability
+statement: breaking changes now require a major version.
+
 ## 0.9.1
 
 ### New: irregularly sampled outputs

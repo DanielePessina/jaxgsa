@@ -501,7 +501,7 @@ export default function App() {
             <InstallCommand command="pip install jaxgsa" />
             <InstallCommand command="uv add jaxgsa" />
           </span>
-          <span className="font-mono text-xs">jaxgsa 0.9.1 reference</span>
+          <span className="font-mono text-xs">jaxgsa 1.0.0 reference</span>
         </div>
       </footer>
     </div>
