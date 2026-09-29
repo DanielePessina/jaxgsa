@@ -129,5 +129,8 @@ ROADMAP-1.0.md
 # Skill pins for the local AI agents. Machine-specific.
 skills-lock.json
 
+# Autoresearch harness and logs (local experiment loop; not release content).
+.auto/
+
 # marimo session state: local edit history for the examples, not part of
 # the shipped documentation.

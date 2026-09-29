@@ -303,8 +303,17 @@ def _ot_1d_kernel(
     counts_list = tuple(counts for _, counts in groups)
     cls_list = tuple(cls_idx for cls_idx, _ in groups)
     group_is_shared = tuple(levels is None for levels in group_levels)
+    # Per-column order statistics and position->rank maps, computed once per
+    # kernel call instead of once per (replicate, column). Sorting int32 ranks
+    # is far cheaper on XLA CPU than sorting the float32 values, and gathering
+    # the pre-sorted column back at those ranks yields the same order
+    # statistics to the last bit.
+    Y_sorted = jax.lax.sort(Y_cols, dimension=0, is_stable=False)  # (N, C)
+    pos2rank = jnp.argsort(jnp.argsort(Y_cols, axis=0), axis=0).astype(jnp.int32)  # (N, C)
 
-    def _group_stats(y, y_sorted, mean_r, V, cls_idx, mask_b, counts_b, j_b):
+    def _group_stats(
+        y, y_sorted, mean_r, V, cls_idx, mask_b, counts_b, j_b, y_sorted_col, pos2rank_col
+    ):
         """Weighted, normalized cost sums for one group's parameters.
 
         ``mask_b (G, M, P)``, ``counts_b (G, M)``, and ``j_b (G, M, N)``
@@ -315,19 +324,25 @@ def _ot_1d_kernel(
         valid = counts_b > 0
 
         y_cls = y[cls_idx]  # (Dg, M, P) resampled class members
-        # Pads sort to the tail as +inf and are unreachable through j.
+        # Pads sort to the tail (rank INT32_MAX) and are unreachable through j.
         #
-        # This sort is the single most expensive operation in the method:
-        # it orders every sample of every parameter, once per output
-        # column and once per replicate. It asks only for the order
-        # statistics, never for which tied element came first, so the
-        # stable sort ``jnp.sort`` would emit is wasted work. An unstable
-        # sort returns the identical array, because two float32 values
-        # that compare equal are the same bits, and it measured about
-        # 1.8x faster on the CPU backend.
-        y_cls_sorted = jax.lax.sort(
-            jnp.where(mask_b, y_cls, jnp.inf), dimension=-1, is_stable=False
-        )
+        # This class sort is the single most expensive operation in the
+        # method: it orders every sample of every parameter, once per
+        # output column and once per replicate. It asks only for the order
+        # statistics, never for which tied element came first, so sorting
+        # the int32 position->rank map instead of the float values is
+        # equivalent to the last bit (equal float32 values are the same
+        # bits) while measuring far cheaper on the CPU backend.
+        y_cls_sorted = y_sorted_col[
+            jnp.minimum(
+                jax.lax.sort(
+                    jnp.where(mask_b, pos2rank_col[cls_idx], jnp.iinfo(jnp.int32).max),
+                    dimension=-1,
+                    is_stable=False,
+                ),
+                N - 1,
+            )
+        ]
         j_left_b, j_right_b, frac_left_b = j_b
         shape = (y_cls.shape[0],) + j_left_b.shape[-2:]
         j_left_full = jnp.broadcast_to(j_left_b, shape)
@@ -359,7 +374,7 @@ def _ot_1d_kernel(
             _aggregate_normalized(diff, weights, V),
         )
 
-    def _col_stats(y: Array, r: Array, layouts):
+    def _col_stats(y: Array, y_sorted_col: Array, pos2rank_col: Array, r: Array, layouts):
         """OT/advective/diffusive indices for one column and replicate."""
         y_r = y[r]  # resampled column
         # Order statistics only, so an unstable sort is both equivalent
@@ -372,7 +387,9 @@ def _ot_1d_kernel(
         degenerate = ~(V > 0)
 
         outs = [
-            _group_stats(y, y_sorted, mean_r, V, cls_idx, mask_b, counts_b, j_b)
+            _group_stats(
+                y, y_sorted, mean_r, V, cls_idx, mask_b, counts_b, j_b, y_sorted_col, pos2rank_col
+            )
             for cls_idx, mask_b, counts_b, j_b in layouts
         ]
         merged = [jnp.concatenate([o[i] for o in outs]) for i in range(3)]
@@ -395,7 +412,9 @@ def _ot_1d_kernel(
             mask_r = _mask_from_counts(counts_r, cls_r.shape[-1])
             j_r = _quantile_rank_split(counts_r, N) if j_shared is None else j_shared
             layouts.append((cls_r, mask_r, counts_r.astype(dtype), j_r))
-        out = jax.vmap(lambda y: _col_stats(y, r, layouts))(Y_cols.T)
+        out = jax.vmap(lambda t: _col_stats(t[0], t[1], t[2], r, layouts))(
+            (Y_cols.T, Y_sorted.T, pos2rank.T)
+        )
         return carry, out
 
     R = all_idx.shape[0]
