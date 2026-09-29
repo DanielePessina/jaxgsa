@@ -33,7 +33,17 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
 import jaxgsa  # noqa: E402
-from jaxgsa import hdmr, kucherenko, morris, pce, shapley, sobol  # noqa: E402
+from jaxgsa import (  # noqa: E402
+    borgonovo,
+    efast,
+    hdmr,
+    kucherenko,
+    morris,
+    pawn,
+    pce,
+    shapley,
+    sobol,
+)
 from jaxgsa.benchmarks import ishigami  # noqa: E402
 
 # Fixed, documented in goldens/README.md. Everything downstream of this seed
@@ -45,6 +55,7 @@ N_SOBOL_BASE = 512  # sobol base points (passed as base_n=...)
 N_KUCHERENKO = 512  # kucherenko base points
 N_TRAJECTORIES = 40  # morris trajectories
 N_CLOUD = 512  # pce / hdmr / shapley rows
+N_EFAST_CURVE = 256  # efast points per search curve (>= 4*M^2*(D-1)+1)
 
 # PCE surrogate order. Default order=3 leaves >50% of Ishigami's variance
 # unexplained (warns, ev ~0.5); order=9 gives ev > 0.999 with indices stable
@@ -67,6 +78,9 @@ TOLERANCES = {
     "pce": {"rtol": 1e-5, "atol": 1e-6},
     "hdmr": {"rtol": 1e-5, "atol": 1e-6},
     "shapley": {"rtol": 1e-5, "atol": 1e-6},
+    "borgonovo": {"rtol": 1e-5, "atol": 1e-6},
+    "pawn": {"rtol": 1e-5, "atol": 1e-6},
+    "efast": {"rtol": 1e-5, "atol": 1e-6},
 }
 
 
@@ -249,6 +263,56 @@ def build_shapley() -> dict:
     )
 
 
+def build_borgonovo() -> dict:
+    X, Y = build_cloud()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = borgonovo.analyze(PROBLEM, jnp.asarray(X), jnp.asarray(Y), verbose=False)
+    return doc(
+        "borgonovo",
+        X,
+        Y,
+        {"delta": res.delta, "S1": res.S1},
+        {"n": N_CLOUD, "seed": SEED, "grid_size": 100, "n_bootstrap": 0},
+    )
+
+
+def build_pawn() -> dict:
+    X, Y = build_cloud()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = pawn.analyze(PROBLEM, jnp.asarray(X), jnp.asarray(Y), verbose=False)
+    return doc(
+        "pawn",
+        X,
+        Y,
+        {"pawn": res.pawn},
+        {"n": N_CLOUD, "seed": SEED, "n_bins": 10, "statistic": "median"},
+    )
+
+
+def build_efast() -> dict:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        sr = efast.sample(
+            PROBLEM,
+            n_per_curve=N_EFAST_CURVE,
+            M=4,
+            seed=SEED,
+            verbose=False,
+        )
+        X = np.asarray(sr.samples)
+        Y = evaluate(X)
+        res = efast.analyze(sr, jnp.asarray(Y), verbose=False)
+    return doc(
+        "efast",
+        X,
+        Y,
+        {"S1": res.S1, "ST": res.ST},
+        {"n_per_curve": N_EFAST_CURVE, "M": 4, "seed": SEED},
+    )
+
+
 def main() -> int:
     builders = {
         "sobol": build_sobol,
@@ -257,6 +321,9 @@ def main() -> int:
         "pce": build_pce,
         "hdmr": build_hdmr,
         "shapley": build_shapley,
+        "borgonovo": build_borgonovo,
+        "pawn": build_pawn,
+        "efast": build_efast,
     }
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     for name, build in builders.items():

@@ -40,6 +40,32 @@ describe("analysis method availability", () => {
     expect(methods.shapley.available).toBe(true);
   });
 
+  it("ties kucherenko and efast to their own designs", () => {
+    const kucherenko = availability({ kind: "design", method: "kucherenko" }, independent);
+
+    expect(kucherenko.kucherenko.available).toBe(true);
+    expect(kucherenko.sobol.available).toBe(false);
+    expect(kucherenko.morris.available).toBe(false);
+    expect(kucherenko.efast.available).toBe(false);
+
+    const efast = availability({ kind: "design", method: "efast" }, independent);
+
+    expect(efast.efast.available).toBe(true);
+    expect(efast.kucherenko.available).toBe(false);
+  });
+
+  it("allows borgonovo and pawn on any X source", () => {
+    const methods = availability({ kind: "design", method: "sobol" }, independent);
+
+    expect(methods.borgonovo.available).toBe(true);
+    expect(methods.pawn.available).toBe(true);
+
+    const uploaded = availability({ kind: "uploaded" }, independent);
+
+    expect(uploaded.borgonovo.available).toBe(true);
+    expect(uploaded.pawn.available).toBe(true);
+  });
+
   it("explains when browser PCE cannot handle a truncated Gaussian", () => {
     const problem: ProblemSpec = {
       names: ["x1"],

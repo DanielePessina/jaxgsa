@@ -37,13 +37,17 @@ interface MethodAvailability {
   reason: string | null;
 }
 
-const DESIGN_METHODS: DesignMethod[] = ["sobol", "morris", "kucherenko"];
+const DESIGN_METHODS: DesignMethod[] = ["sobol", "morris", "kucherenko", "efast"];
 
 const DEFAULT_SELECTION: Record<MethodKey, boolean> = {
   sobol: false,
   morris: false,
+  kucherenko: false,
+  efast: false,
   pce: true,
   shapley: false,
+  borgonovo: false,
+  pawn: false,
 };
 
 export function availability(
@@ -84,8 +88,12 @@ export function availability(
   return {
     sobol: dedicated("sobol"),
     morris: dedicated("morris"),
+    kucherenko: dedicated("kucherenko"),
+    efast: dedicated("efast"),
     pce: given(),
     shapley: given(),
+    borgonovo: given(),
+    pawn: given(),
   };
 }
 
@@ -164,8 +172,12 @@ export function AnalyzePanel({
       setSelected(() => ({
         sobol: xSource.method === "sobol",
         morris: xSource.method === "morris",
+        kucherenko: xSource.method === "kucherenko",
+        efast: xSource.method === "efast",
         pce: false,
         shapley: false,
+        borgonovo: false,
+        pawn: false,
       }));
     }
   }, [xSource]);
@@ -180,7 +192,16 @@ export function AnalyzePanel({
     setXSource({ kind: "uploaded" });
     setGivenX(x);
     setGivenXLabel(label);
-    setSelected({ sobol: false, morris: false, pce: true, shapley: false });
+    setSelected({
+      sobol: false,
+      morris: false,
+      kucherenko: false,
+      efast: false,
+      pce: true,
+      shapley: false,
+      borgonovo: false,
+      pawn: false,
+    });
     setYData(null);
     setError(null);
   };
@@ -280,10 +301,10 @@ export function AnalyzePanel({
       await new Promise((r) => setTimeout(r, 30)); // let the progress label paint
 
       try {
-        if (m === "pce" || m === "shapley") {
+        if (m === "pce" || m === "shapley" || m === "borgonovo" || m === "pawn") {
           appendResult(analyzeCloud(m, problem, x, yData, Number(order)));
         } else if (design) {
-          appendResult(analyzeGenerated(design, yData));
+          appendResult(await analyzeGenerated(design, yData));
         }
       } catch (err) {
         setError(
@@ -303,8 +324,12 @@ export function AnalyzePanel({
     setSelected({
       sobol: xSource?.kind === "design" && xSource.method === "sobol",
       morris: xSource?.kind === "design" && xSource.method === "morris",
+      kucherenko: xSource?.kind === "design" && xSource.method === "kucherenko",
+      efast: xSource?.kind === "design" && xSource.method === "efast",
       pce: xSource?.kind === "uploaded" && avail.pce.available,
       shapley: false,
+      borgonovo: false,
+      pawn: false,
     });
 
   if (!problem) {
@@ -333,8 +358,9 @@ export function AnalyzePanel({
             Input data
           </CardTitle>
           <CardDescription>
-            Choose a sampled design or upload your own inputs. Sobol and Morris
-            need their own designs; PCE and Shapley can use either source.
+            Choose a sampled design or upload your own inputs. Dedicated
+            designs are paired with their estimator; PCE, Shapley, Borgonovo
+            and PAWN fit any input–output data.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -437,6 +463,60 @@ export function AnalyzePanel({
             <p className="mt-2 font-mono text-xs text-muted-foreground">
               {yData ? `${yData.label} · ${describeY(yData)}` : "no outputs loaded"}
             </p>
+          </div>
+
+          <div className="rounded-sm border border-border/60 bg-muted/20 p-3">
+            <p className="font-mono text-[11px] uppercase tracking-widest text-muted-foreground">
+              expected schema
+            </p>
+            {xSource?.kind === "design" ? (
+              <ul className="mt-2 space-y-1.5 text-xs leading-relaxed text-muted-foreground">
+                <li>
+                  <span className="font-mono text-foreground">X</span> — the{" "}
+                  {xSource.method} design generated in section 02 (rows in
+                  run_id order). Use it as-is or download the CSV.
+                </li>
+                <li>
+                  <span className="font-mono text-foreground">Y</span> — one
+                  output column per model output, aligned by{" "}
+                  <span className="font-mono text-foreground">run_id</span>:
+                  your CSV may append output columns to the design CSV (any row
+                  order) or carry a{" "}
+                  <span className="font-mono text-foreground">run_id</span>{" "}
+                  column. One value per design row.
+                </li>
+                <li>
+                  Time-resolved outputs are named{" "}
+                  <span className="font-mono text-foreground">y_t0</span>,{" "}
+                  <span className="font-mono text-foreground">y_t0.5</span>, …
+                  — one column per time slice.
+                </li>
+              </ul>
+            ) : (
+              <ul className="mt-2 space-y-1.5 text-xs leading-relaxed text-muted-foreground">
+                <li>
+                  <span className="font-mono text-foreground">X</span> — a CSV
+                  whose header is exactly the parameter names in order:{" "}
+                  <span className="font-mono text-foreground">
+                    {problem.names.join(", ")}
+                  </span>
+                  , then one row per model run.
+                </li>
+                <li>
+                  <span className="font-mono text-foreground">Y</span> — one
+                  output column per model output, one value per X row, in the
+                  same row order. No{" "}
+                  <span className="font-mono text-foreground">run_id</span>{" "}
+                  needed.
+                </li>
+                <li>
+                  Time-resolved outputs are named{" "}
+                  <span className="font-mono text-foreground">y_t0</span>,{" "}
+                  <span className="font-mono text-foreground">y_t0.5</span>, …
+                  — one column per time slice.
+                </li>
+              </ul>
+            )}
           </div>
         </CardContent>
       </Card>

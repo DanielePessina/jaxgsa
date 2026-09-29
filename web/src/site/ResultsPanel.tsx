@@ -21,13 +21,24 @@ function referenceLine(
   result: AnalysisResult,
   demo: Demo | null,
 ): string | null {
-  if (result.method === "morris") return null;
+  if (result.method === "morris" || result.method === "pawn" || result.method === "borgonovo") return null;
 
   if (!demo) return null;
   const s1 = demo.reference.S1.map((v) => v.toFixed(3)).join(", ");
   const st = demo.reference.ST.map((v) => v.toFixed(3)).join(", ");
 
   return `reference (${demo.label}, analytical): S1 ≈ ${s1} · ST ≈ ${st}`;
+}
+
+function interpretation(result: AnalysisResult): string | null {
+  switch (result.method) {
+    case "pawn":
+      return "PAWN is the largest KS gap between a parameter's conditioned and the overall output distribution. Higher means the parameter matters; 0 means no effect.";
+    case "borgonovo":
+      return "delta measures how much fixing a parameter shifts the whole output distribution. Higher means the parameter matters beyond variance; S1 is the usual variance share for comparison.";
+    default:
+      return null;
+  }
 }
 
 function SliceTabs({
@@ -75,6 +86,7 @@ function ResultCard({
 }) {
   const [sliceIndex, setSliceIndex] = useState(0);
   const ref = referenceLine(result, demo);
+  const interp = interpretation(result);
   const settings = Object.entries(result.settings);
   const multi = result.slices.length > 1;
   const fileName = `jaxgsa-${result.method}-${index}`;
@@ -121,6 +133,7 @@ function ResultCard({
           {result.notes.length > 0 && (
             <p className="text-xs text-muted-foreground">{result.notes.join(" ")}</p>
           )}
+          {interp && <p className="text-xs leading-relaxed text-muted-foreground">{interp}</p>}
           {ref && <p className="font-mono text-[11px] text-muted-foreground">{ref}</p>}
 
           <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border/60 pt-3">

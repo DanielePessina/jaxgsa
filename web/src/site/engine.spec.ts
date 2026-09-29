@@ -5,6 +5,7 @@ import { sampleKucherenkoDesign } from "@/jaxgsa/kucherenko/sample";
 import {
   ISHIGAMI_PROBLEM,
   alignColumnsByRunId,
+  analyzeCloud,
   analyzeGenerated,
   buildDesignCsv,
   buildSessionJson,
@@ -402,7 +403,7 @@ describe("analyzeGenerated with multi-output Y (slice loop)", () => {
     defaultDevice("wasm");
   });
 
-  it("computes one slice per (output, time) column", () => {
+  it("computes one slice per (output, time) column", async () => {
     const gen = generateDesign("sobol", ISHIGAMI_PROBLEM, {
       baseN: 64,
       calcSecondOrder: false,
@@ -428,7 +429,7 @@ describe("analyzeGenerated with multi-output Y (slice loop)", () => {
       label: "two slices",
     };
 
-    const res = analyzeGenerated(gen, y);
+    const res = await analyzeGenerated(gen, y);
     expect(res.slices).toHaveLength(2);
     expect(res.slices.map((s) => [s.output, s.time])).toEqual([
       ["y", 0],
@@ -479,5 +480,53 @@ describe("sampleKucherenkoDesign", () => {
       expect(first[1]).not.toBe(joint[1]); // x2 redrawn
       expect(first[2]).not.toBe(joint[2]); // x3 redrawn
     }
+  });
+});
+
+describe("new-method engine wiring (borgonovo, pawn, efast)", () => {
+  beforeAll(async () => {
+    await init();
+    defaultDevice("wasm");
+  });
+
+  it("runs borgonovo and pawn through analyzeCloud on a demo cloud", () => {
+    const demo = demoById("linear");
+    const { x, y, n } = loadDemoCloud(demo, 256);
+    const yData: YData = { columns: [{ output: "y", time: 0, values: y }], rowCount: n, label: "demo" };
+
+    const borg = analyzeCloud("borgonovo", demo.problem, x, yData, 0);
+    expect(borg.method).toBe("borgonovo");
+    expect(borg.slices[0].columns.map((c) => c.key)).toEqual(["delta", "S1"]);
+
+    const pawn = analyzeCloud("pawn", demo.problem, x, yData, 0);
+    expect(pawn.method).toBe("pawn");
+    expect(pawn.slices[0].columns.map((c) => c.key)).toEqual(["pawn"]);
+  });
+
+  it("generates and analyzes an efast design end to end", async () => {
+    const demo = demoById("linear");
+    const gen = generateDesign("efast", demo.problem, { nPerCurve: 256, M: 4, seed: 0 });
+    expect(gen.method).toBe("efast");
+    expect(gen.samples.length / demo.problem.names.length).toBe(256 * 3);
+
+    const y = demo.evaluate(gen);
+
+    const yData: YData = {
+      columns: [{ output: "y", time: 0, values: y }],
+      rowCount: y.length,
+      label: "demo efast",
+    };
+
+    const res = await analyzeGenerated(gen, yData);
+    expect(res.slices[0].columns.map((c) => c.key)).toEqual(["S1", "ST"]);
+    expect(res.slices[0].columns[0].values.length).toBe(3);
+  });
+
+  it("serializes an efast design into the session JSON", () => {
+    const demo = demoById("linear");
+    const gen = generateDesign("efast", demo.problem, { nPerCurve: 256, M: 4, seed: 0 });
+    const session = buildSessionJson(demo.problem, { efast: gen }, null, []);
+    expect(session.designs.efast).toBeDefined();
+    expect(session.designs.efast?.nRuns).toBe(256 * 3);
   });
 });

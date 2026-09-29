@@ -29,7 +29,7 @@ import { DESIGN_METHOD_META } from "./methods";
 import { ErrorBanner, NumberField, ProblemChips } from "./primitives";
 import type { ProblemSpec } from "@/jaxgsa/sampling";
 
-const DESIGN_METHODS: DesignMethod[] = ["sobol", "morris"];
+const DESIGN_METHODS: DesignMethod[] = ["sobol", "morris", "kucherenko", "efast"];
 
 function DesignMethodCell({
   method,
@@ -46,28 +46,45 @@ function DesignMethodCell({
   const [baseN, setBaseN] = useState("128");
   const [nTrajectories, setNTrajectories] = useState("20");
   const [numLevels, setNumLevels] = useState("4");
+  const [nSamples, setNSamples] = useState("128");
+  const [nPerCurve, setNPerCurve] = useState("");
   const [seed, setSeed] = useState("0");
   const { busy, error, run } = useBusyAction();
+
+  const D = problem.names.length;
+
+  // eFAST minimum points per curve: 4*M^2*max(D-1, 1) + 1 with M=4.
+  const efastMin = 4 * 16 * Math.max(D - 1, 1) + 1;
 
   const onGenerate = () => {
     const config =
       method === "sobol"
         ? { baseN: Number(baseN), calcSecondOrder: false, seed: Number(seed) }
-        : {
-            nTrajectories: Number(nTrajectories),
-            numLevels: Number(numLevels),
-            seed: Number(seed),
-          };
+        : method === "morris"
+          ? {
+              nTrajectories: Number(nTrajectories),
+              numLevels: Number(numLevels),
+              seed: Number(seed),
+            }
+          : method === "kucherenko"
+            ? { nSamples: Number(nSamples), seed: Number(seed) }
+            : {
+                nPerCurve: Number(nPerCurve || efastMin),
+                M: 4,
+                seed: Number(seed),
+              };
 
     void run(() => onDesign(generateDesign(method, problem, config)));
   };
 
-  const D = problem.names.length;
-
   const plannedRuns =
     method === "sobol"
       ? Number(baseN) * (D + 2)
-      : Number(nTrajectories) * (D + 1);
+      : method === "morris"
+        ? Number(nTrajectories) * (D + 1)
+        : method === "kucherenko"
+          ? Number(nSamples) * (2 * D + 1)
+          : Number(nPerCurve || efastMin) * D;
 
   const preview = design
     ? Array.from({ length: Math.min(3, design.nRuns) }, (_, r) => {
@@ -127,6 +144,38 @@ function DesignMethodCell({
               onChange={setNumLevels}
               min={2}
             />
+          </>
+        )}
+        {method === "kucherenko" && (
+          <>
+            <NumberField
+              id={`${method}-samples`}
+              label="Samples"
+              value={nSamples}
+              onChange={setNSamples}
+              min={2}
+            />
+            <div className="flex items-end pb-1">
+              <div className="rounded-sm border border-border/70 bg-muted/20 px-2.5 py-1.5 text-xs text-muted-foreground">
+                independent inputs only
+              </div>
+            </div>
+          </>
+        )}
+        {method === "efast" && (
+          <>
+            <NumberField
+              id={`${method}-curve`}
+              label="Points per curve"
+              value={nPerCurve || String(efastMin)}
+              onChange={setNPerCurve}
+              min={efastMin}
+            />
+            <div className="flex items-end pb-1">
+              <div className="rounded-sm border border-border/70 bg-muted/20 px-2.5 py-1.5 text-xs text-muted-foreground">
+                M = 4 · min {efastMin}
+              </div>
+            </div>
           </>
         )}
         <NumberField
@@ -278,10 +327,22 @@ export function SamplePanel({
                   <span className="mt-2 block text-xs leading-relaxed text-muted-foreground">
                     {method === "sobol"
                       ? "Quantify first-order and total variance. Best general default."
-                      : "Screen many inputs with fewer model evaluations."}
+                      : method === "morris"
+                        ? "Screen many inputs with fewer model evaluations."
+                        : method === "kucherenko"
+                          ? "Variance decomposition on a conditional-copula design (independent inputs only)."
+                          : "Deterministic Fourier-spectrum S1/ST from sinusoidal search curves."}
                   </span>
                   <span className="mt-3 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-                    {generated ? "design ready" : method === "sobol" ? "new experiment" : "lower budget"}
+                    {generated
+                      ? "design ready"
+                      : method === "sobol"
+                        ? "new experiment"
+                        : method === "morris"
+                          ? "lower budget"
+                          : method === "kucherenko"
+                            ? "cross-check"
+                            : "deterministic"}
                   </span>
                 </button>
               );
