@@ -29,6 +29,7 @@ import {
 } from "./engine";
 import { ALL_METHODS, METHOD_META, type MethodKey } from "./methods";
 import { ErrorBanner, MonoSelect } from "./primitives";
+import { SchemaGuide } from "./SchemaGuide";
 import { useBusyAction } from "./hooks";
 import type { ProblemSpec } from "@/jaxgsa/sampling";
 
@@ -405,7 +406,7 @@ export function AnalyzePanel({
             </div>
             <FileUpload
               label="Upload X"
-              hint={`header: ${problem.names.join(", ")} — N rows`}
+              hint={`header must be exactly: ${problem.names.join(", ")} — one row per run, in order. No run_id.`}
               disabled={busy || running !== null}
               onLoaded={onUploadX}
               onError={setError}
@@ -446,8 +447,10 @@ export function AnalyzePanel({
               label="Upload outputs (Y)"
               hint={
                 xSource?.kind === "design"
-                  ? "CSV/Parquet with run_id (any order) + outputs — y, or name_t0, name_t0.5… for time-resolved data"
-                  : "one column per output slice — y, or name_t0, name_t0.5… — one value per X row"
+                  ? "must include run_id — the row numbers 0…N−1 from the downloaded design CSV · outputs: y, or name_t0, name_t0.5… for time-resolved data"
+                  : xSource === null
+                    ? "load X first"
+                    : "no run_id needed — one output column per output slice (y, or name_t0, name_t0.5…), one value per X row, same row order"
               }
               disabled={!xSource || busy || running !== null}
               onLoaded={onUploadY}
@@ -465,59 +468,11 @@ export function AnalyzePanel({
             </p>
           </div>
 
-          <div className="rounded-sm border border-border/60 bg-muted/20 p-3">
-            <p className="font-mono text-[11px] uppercase tracking-widest text-muted-foreground">
-              expected schema
-            </p>
-            {xSource?.kind === "design" ? (
-              <ul className="mt-2 space-y-1.5 text-xs leading-relaxed text-muted-foreground">
-                <li>
-                  <span className="font-mono text-foreground">X</span> — the{" "}
-                  {xSource.method} design generated in section 02 (rows in
-                  run_id order). Use it as-is or download the CSV.
-                </li>
-                <li>
-                  <span className="font-mono text-foreground">Y</span> — one
-                  output column per model output, aligned by{" "}
-                  <span className="font-mono text-foreground">run_id</span>:
-                  your CSV may append output columns to the design CSV (any row
-                  order) or carry a{" "}
-                  <span className="font-mono text-foreground">run_id</span>{" "}
-                  column. One value per design row.
-                </li>
-                <li>
-                  Time-resolved outputs are named{" "}
-                  <span className="font-mono text-foreground">y_t0</span>,{" "}
-                  <span className="font-mono text-foreground">y_t0.5</span>, …
-                  — one column per time slice.
-                </li>
-              </ul>
-            ) : (
-              <ul className="mt-2 space-y-1.5 text-xs leading-relaxed text-muted-foreground">
-                <li>
-                  <span className="font-mono text-foreground">X</span> — a CSV
-                  whose header is exactly the parameter names in order:{" "}
-                  <span className="font-mono text-foreground">
-                    {problem.names.join(", ")}
-                  </span>
-                  , then one row per model run.
-                </li>
-                <li>
-                  <span className="font-mono text-foreground">Y</span> — one
-                  output column per model output, one value per X row, in the
-                  same row order. No{" "}
-                  <span className="font-mono text-foreground">run_id</span>{" "}
-                  needed.
-                </li>
-                <li>
-                  Time-resolved outputs are named{" "}
-                  <span className="font-mono text-foreground">y_t0</span>,{" "}
-                  <span className="font-mono text-foreground">y_t0.5</span>, …
-                  — one column per time slice.
-                </li>
-              </ul>
-            )}
-          </div>
+          <SchemaGuide
+            problem={problem}
+            route={xSource === null ? "none" : xSource.kind === "design" ? "design" : "uploaded"}
+            method={xSource?.kind === "design" ? xSource.method : undefined}
+          />
         </CardContent>
       </Card>
 
