@@ -24,8 +24,8 @@ export const DESIGN_METHOD_META: Record<DesignMethod, MethodMeta> = {
     tag: "Saltelli design · S1, ST",
     input: { kind: "dedicated", design: "sobol" },
     blurb:
-      "The reference variance decomposition — first-order (S1) and total (ST) indices from a Saltelli design. " +
-      "Use it when you can still choose where to run the model.",
+      "Estimate each input's share of output variation alone (S1) and with interactions (ST). " +
+      "Use it when you can evaluate your model at the inputs generated here.",
   },
   kucherenko: {
     name: "kucherenko",
@@ -40,8 +40,8 @@ export const DESIGN_METHOD_META: Record<DesignMethod, MethodMeta> = {
     tag: "trajectory screening · mu, mu*, sigma",
     input: { kind: "dedicated", design: "morris" },
     blurb:
-      "Cheap trajectory-based screening that ranks inputs by elementary-effect means (mu, mu*) and spreads (sigma). " +
-      "Use it on a tight budget to drop dead inputs before a full Sobol' run.",
+      "Screen many inputs with fewer model runs. " +
+      "Mu-star ranks overall influence; sigma suggests interactions or nonlinear effects.",
   },
 };
 
@@ -51,16 +51,16 @@ export const GIVEN_METHOD_META: Record<GivenDataMethod, MethodMeta> = {
     tag: "polynomial chaos · S1, ST",
     input: { kind: "given" },
     blurb:
-      "Fits a polynomial-chaos surrogate to any (X, Y) data and reads S1/ST off its coefficients — the given-data route to Sobol indices. " +
-      "Best for smooth models; fewest samples per unit of accuracy.",
+      "Fit a polynomial approximation to model runs you already have, then estimate S1 and ST. " +
+      "Best for smooth models; check the fit before trusting its indices.",
   },
   shapley: {
     name: "shapley",
     tag: "PCE-based · Sh",
     input: { kind: "given" },
     blurb:
-      "One number per input that sums to exactly 1. " +
-      "Computed from a PCE fit, with no permutation Monte Carlo.",
+      "Allocate the fitted model's output variation across inputs, including interactions. " +
+      "The shares sum to one; check the PCE fit before interpreting them.",
   },
 };
 

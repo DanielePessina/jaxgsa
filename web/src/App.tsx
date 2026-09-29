@@ -6,6 +6,7 @@ import { AnalyzePanel } from "@/site/AnalyzePanel";
 import { ProblemPanel } from "@/site/ProblemPanel";
 import { ResultsPanel } from "@/site/ResultsPanel";
 import { SamplePanel } from "@/site/SamplePanel";
+import { ThemeToggle } from "@/site/ThemeToggle";
 import {
   generateDesign,
   initEngine,
@@ -70,7 +71,7 @@ function StepRail({ steps }: { steps: StepState[] }) {
                   ? "text-foreground"
                   : s.done
                     ? "text-muted-foreground hover:text-foreground"
-                    : "text-muted-foreground/50 hover:text-muted-foreground"
+                    : "text-muted-foreground/80 hover:text-foreground"
               }`}
             >
               {s.active && (
@@ -115,7 +116,7 @@ function Section({
           onClick={() => setOpen((o) => !o)}
           className="group flex w-full items-baseline gap-3 text-left"
         >
-          <span className="font-mono text-xs tabular-nums text-muted-foreground/60">
+          <span className="font-mono text-xs tabular-nums text-muted-foreground">
             {String(step).padStart(2, "0")}
           </span>
           <span className="flex-1">
@@ -128,7 +129,7 @@ function Section({
               </span>
             )}
           </span>
-          <span className="font-mono text-xs text-muted-foreground/60">
+          <span className="font-mono text-xs text-muted-foreground">
             {open ? "—" : "+"}
           </span>
         </button>
@@ -214,6 +215,11 @@ export default function App() {
     setResults((rs) => [...rs, r]);
   }, []);
 
+  const onYDataChange = useCallback((next: YData | null) => {
+    setYData(next);
+    setResults([]);
+  }, []);
+
   /**
    * One-click demo pipeline (PLAN-WEB-UI D5b): load the demo's problem,
    * sample a Sobol' design in the wasm runtime, evaluate the demo model on
@@ -249,8 +255,8 @@ export default function App() {
   }, []);
 
   const sampleDone = xSource !== null;
-  const analyzeDone = yData !== null;
   const resultsDone = results.length > 0;
+  const analyzeDone = resultsDone;
 
   const activeStep: StepId =
     problem === null
@@ -277,6 +283,7 @@ export default function App() {
             <span className="hidden text-sm text-muted-foreground sm:inline">browser workbench</span>
           </a>
           <div className="flex items-center gap-4">
+            <ThemeToggle />
             <a
               href="https://danielepessina.github.io/jaxgsa"
               target="_blank"
@@ -372,13 +379,13 @@ export default function App() {
               id="analyze"
               step={3}
               title="Analyze"
-              description="Attach the outputs and run the methods. Sampled a design? Upload the matching Y, joined by run_id. No design? Upload your own X and Y — PCE and Shapley work on any point cloud."
+              description="Attach the model outputs and choose an analysis. Sobol and Morris need their own sampled designs; PCE and Shapley can also use those runs or your uploaded inputs."
             >
               <AnalyzePanel
                 problem={problem}
                 designs={designs}
                 yData={yData}
-                setYData={setYData}
+                setYData={onYDataChange}
                 appendResult={appendResult}
                 xSource={xSource}
                 setXSource={setXSource}
