@@ -132,5 +132,8 @@ skills-lock.json
 # Autoresearch harness and logs (local experiment loop; not release content).
 .auto/
 
+# Pi agent delegate artifacts and task logs (local session state; not release content).
+.pi/
+
 # marimo session state: local edit history for the examples, not part of
 # the shipped documentation.
