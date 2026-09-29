@@ -6,35 +6,40 @@ description: Use when working on the jaxgsa browser workbench under web/, especi
 # jaxgsa-web
 
 The WASM/React workbench at `web/` runs ported sensitivity analyses locally in the
-browser (float64, no data leaves the page). The user flow is three sections plus a
-results dock: **01 Problem → 02 Choose data → 03 Analyze**, with results in a sticky
-panel (`App.tsx` step rail; `App.tsx:270-275`, `App.tsx:350-399`).
+browser (float64, no data leaves the page). The user flow is four stages rendered
+one at a time by the stepper: **01 Problem → 02 Data → 03 Analyze → 04 Results**
+(`App.tsx` stage state + `StageNav`; data route readiness via `DataPanel.dataRouteStatus`).
 
 ```ts
-web/src/site/App.tsx           // state machine: problem, designs, givenX, yData, results
-web/src/site/ProblemPanel.tsx  // marginals + optional output names
-web/src/site/SamplePanel.tsx   // design generation + "Download design CSV"
-web/src/site/AnalyzePanel.tsx  // X/Y uploads + expected-schema UI + method selection
-web/src/site/FileUpload.tsx    // drag-drop file input (CSV/Parquet)
-web/src/site/upload.ts         // format sniffing, unsafe-format rejection, size guards
-web/src/site/engine.ts         // parse/align/build helpers (the contract lives here)
-web/src/site/SchemaGuide.tsx   // rendered CSV sample tables under "expected schema"
-web/src/site/demos.ts          // loadable benchmarks (demo model evaluate)
-web/src/site/ResultsPanel.tsx  // results cards, downloads, session JSON
-web/src/jaxgsa/                // ported method math (borgonovo, efast, pawn, ...)
+web/src/App.tsx                 // stage state machine: stage 0..3, problem, designs, givenX, yData, results
+web/src/site/StageNav.tsx       // stepper rail (done/locked states, locked = upstream data missing)
+web/src/site/PanelHeading.tsx   // shared panel heading (kicker + title + sub)
+web/src/site/ProblemPanel.tsx   // marginals + optional output names; accepts hero `demoRequest`
+web/src/site/DataPanel.tsx      // ONE place for data: route cards (new design vs. uploads),
+                                // design generation (ex-SamplePanel), X/Y uploads, SchemaGuide
+web/src/site/AnalyzePanel.tsx   // method selection + run (no uploads); exports `availability()`
+web/src/site/FileUpload.tsx     // drag-drop file input (CSV/Parquet)
+web/src/site/upload.ts          // format sniffing, unsafe-format rejection, size guards
+web/src/site/engine.ts          // parse/align/build helpers (the contract lives here)
+web/src/site/SchemaGuide.tsx    // rendered CSV sample tables under "expected schema"
+web/src/site/demos.ts           // loadable benchmarks (demo model evaluate)
+web/src/site/ResultsPanel.tsx   // results cards, downloads, session JSON
+web/src/jaxgsa/                 // ported method math (borgonovo, efast, pawn, ...)
 ```
 
-## The three-step flow
+## The four-stage flow
 
 1. **01 Problem** — parameter names, marginals (uniform/gaussian/truncated-gaussian),
    optional comma-separated output names. `outputNames` mirror Python
    `Problem.output_names`; the default output is `y` when absent.
-2. **02 Choose data** — either generate a method-specific design (sobol, morris,
-   kucherenko, efast) or upload existing X/Y. Each design card shows its config
-   fields, the model-evaluation budget, a 3-row table preview, and a
-   "Download design CSV" button.
-3. **03 Analyze** — upload X (your own) and Y, pick methods, run. Uploaded X goes
-   through the given-data route; sampled designs use the design route.
+2. **02 Data** — one panel owning the data decision: two route cards
+   ("Start a new experiment" → generate a Sobol/Morris/Kucherenko/eFAST design,
+   download the CSV, upload Y with `run_id`; or "I have completed model runs" →
+   upload X then Y positionally). The expected-schema guide renders below the
+   uploads keyed off `xSource`. Ready = X source chosen + Y attached.
+3. **03 Analyze** — pick methods (availability-aware) + run. No uploads here;
+   X/Y summaries only.
+4. **04 Results** — full-width results stage (no longer a sticky side dock).
 
 ## X/Y CSV contracts
 
@@ -105,7 +110,7 @@ section 03. It has three states keyed off `xSource`:
 The examples derive headers live from `problem.names` and `problem.outputNames` so
 they always match the user's problem. Sample tables use the shadcn `Table` primitives
 with `font-mono text-xs` + `tabular-nums` cells and an `sr-only` caption (matches the
-table style in `SamplePanel.tsx`). Keep this UI, the engine parsers, and the tests in
+table style in `DataPanel.tsx`). Keep this UI, the engine parsers, and the tests in
 sync — they pin the same contract.
 
 ## Method availability
@@ -126,6 +131,9 @@ sync — they pin the same contract.
   Parquet fixture, cell-count guard.
 - `web/src/site/AnalyzePanel.spec.ts` — method `availability()` and a PCE run.
 - Method math ports under `web/src/jaxgsa/` have their own goldens in `goldens/v0.9.1/`.
+- After UI wiring changes, smoke the stage flow end to end: dev server +
+  Playwright — hero "Run the 2-minute demo" → analyze stage → "Run selected" →
+  results stage.
 
 ## Keep in mind
 

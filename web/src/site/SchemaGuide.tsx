@@ -10,9 +10,10 @@ import {
 import type { ProblemSpec } from "@/jaxgsa/sampling";
 
 /**
- * Renders the X/Y CSV contract as small sample tables so a first-time user
- * can match their file to what the uploaders accept. Two variants: the design
- * route (run_id-aligned) and the uploaded-data route (row order).
+ * Renders the X/Y CSV contract as file cards: an explicit column layout and
+ * row layout statement per file, with a small sample table under each. Two
+ * variants: the design route (run_id-aligned) and the uploaded-data route
+ * (row order).
  */
 
 const SAMPLE_X = [
@@ -65,11 +66,62 @@ function SampleTable({
   );
 }
 
+function Meta({ children }: { children: ReactNode }) {
+  return (
+    <p className="text-xs leading-relaxed text-muted-foreground">{children}</p>
+  );
+}
+
+function Mono({ children }: { children: ReactNode }) {
+  return (
+    <span className="font-mono text-foreground">{children}</span>
+  );
+}
+
 function SectionLabel({ children }: { children: ReactNode }) {
   return (
     <p className="font-mono text-[11px] uppercase tracking-widest text-muted-foreground">
       {children}
     </p>
+  );
+}
+
+/** One expected-file card: name, explicit column layout, explicit row layout. */
+function FileCard({
+  label,
+  title,
+  columns,
+  rows,
+  extra,
+  table,
+}: {
+  label: string;
+  title: string;
+  /** Explicit column list rendered in mono. */
+  columns: ReactNode;
+  /** Explicit row contract sentence. */
+  rows: ReactNode;
+  extra?: ReactNode;
+  table: ReactNode;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <SectionLabel>
+        {label} · {title}
+      </SectionLabel>
+      <div className="space-y-0.5 rounded-sm border border-border/60 bg-background/60 px-2.5 py-2">
+        <p className="font-mono text-xs">
+          <span className="text-muted-foreground">columns: </span>
+          {columns}
+        </p>
+        <p className="font-mono text-xs leading-relaxed">
+          <span className="text-muted-foreground">rows: </span>
+          {rows}
+        </p>
+      </div>
+      {extra}
+      {table}
+    </div>
   );
 }
 
@@ -94,115 +146,194 @@ export function SchemaGuide({
       </p>
       {route === "none" ? (
         <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-          Load X first — the file format depends on your X source. A sampled
-          design uses a <span className="font-mono text-foreground">run_id</span>{" "}
-          join key; your own uploads match by row order.
+          Load a data route first — the X and Y file layouts depend on it. A
+          sampled design joins output files with a{" "}
+          <Mono>run_id</Mono> column; your own uploads match by row order.
         </p>
       ) : route === "design" ? (
-        <div className="mt-2 space-y-3">
-          <div className="space-y-1">
-            <SectionLabel>X · {method} design CSV</SectionLabel>
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              The design from section 02, in{" "}
-              <span className="font-mono text-foreground">run_id</span> order.
-              Use it as-is or download the CSV.
-            </p>
-            <SampleTable
-              caption="X design CSV: run_id followed by one column per parameter"
-              headers={["run_id", ...names]}
-              rows={[
-                ["0", ...SAMPLE_X[0].slice(0, D)],
-                ["1", ...SAMPLE_X[1].slice(0, D)],
-                ["2", ...SAMPLE_X[2].slice(0, D)],
-              ]}
-            />
-          </div>
-          <div className="space-y-1">
-            <SectionLabel>Y · run_id-aligned</SectionLabel>
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              One output column per model output.{" "}
-              <span className="font-mono text-foreground">run_id</span> is the
-              join key — it may be in{" "}
-              <span className="font-mono text-foreground">any row order</span>{" "}
-              and need not start at 0. Parameter columns are ignored, so you can
-              append outputs to the downloaded design CSV.
-            </p>
-            <SampleTable
-              caption="Y CSV: run_id in any order, output columns appended"
-              headers={["run_id", ...names.slice(0, 1), output]}
-              muted={[false, true, false]}
-              rows={[
-                ["2", SAMPLE_X[2][0], "0.98"],
-                ["0", SAMPLE_X[0][0], "0.33"],
-                ["1", SAMPLE_X[1][0], "-0.71"],
-              ]}
-            />
-          </div>
-          <div className="space-y-1">
-            <SectionLabel>Y · time-resolved</SectionLabel>
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              Time slices are named{" "}
-              <span className="font-mono text-foreground">
-                {yTimeCols.join(", ")}
-              </span>
-              , … — any finite decimal works ({`y_t0.25`}, {`y_t3`}).
-            </p>
-            <SampleTable
-              caption="Time-resolved Y CSV: one column per time slice"
-              headers={["run_id", ...yTimeCols]}
-              rows={[
-                ["0", "0.33", "0.29", "0.12"],
-                ["1", "-0.71", "-0.66", "-0.52"],
-              ]}
-            />
-          </div>
+        <div className="mt-2 space-y-4">
+          <FileCard
+            label="X file"
+            title={`${method ?? "design"} design CSV`}
+            columns={
+              <>
+                <Mono>run_id</Mono>
+                {names.map((n) => (
+                  <span key={n}>
+                    , <Mono>{n}</Mono>
+                  </span>
+                ))}
+              </>
+            }
+            rows="one per design point; run_id counts the rows 0…N−1 in order"
+            table={
+              <SampleTable
+                caption="X design CSV: run_id followed by one column per parameter"
+                headers={["run_id", ...names]}
+                rows={[
+                  ["0", ...SAMPLE_X[0].slice(0, D)],
+                  ["1", ...SAMPLE_X[1].slice(0, D)],
+                  ["2", ...SAMPLE_X[2].slice(0, D)],
+                ]}
+              />
+            }
+          />
+          <FileCard
+            label="Y file (inputs sampled here)"
+            title="outputs aligned by run_id"
+            columns={
+              <>
+                <Mono>run_id</Mono> then one or more output columns
+                {names.slice(0, 1).length > 0 && (
+                  <>
+                    {" "}
+                    (parameter columns like <Mono>{names[0]}</Mono> are ignored)
+                  </>
+                )}
+              </>
+            }
+            rows="one per design row, in ANY row order — run_id says which design row each value belongs to"
+            extra={
+              <Meta>
+                Each output column must cover every design row exactly once.
+              </Meta>
+            }
+            table={
+              <SampleTable
+                caption="Y CSV: run_id in any order, output columns appended"
+                headers={["run_id", ...names.slice(0, 1), output]}
+                muted={[false, true, false]}
+                rows={[
+                  ["2", SAMPLE_X[2][0], "0.98"],
+                  ["0", SAMPLE_X[0][0], "0.33"],
+                  ["1", SAMPLE_X[1][0], "-0.71"],
+                ]}
+              />
+            }
+          />
+          <FileCard
+            label="Y file variant"
+            title="time-resolved outputs"
+            columns={
+              <>
+                one column per time slice:{" "}
+                {yTimeCols.map((c, j) => (
+                  <span key={c}>
+                    {j > 0 && ", "}
+                    <Mono>{c}</Mono>
+                  </span>
+                ))}
+              </>
+            }
+            rows="same as above — one row per design row, aligned by run_id; any row order"
+            extra={
+              <Meta>
+                <Mono>{output}</Mono> alone means time 0; any finite decimal
+                time works (<Mono>y_t0.25</Mono>, <Mono>y_t3</Mono>). An output
+                literally named <Mono>{output}_t2</Mono> must be written{" "}
+                <Mono>{output}_t2_t0</Mono>.
+              </Meta>
+            }
+            table={
+              <SampleTable
+                caption="Time-resolved Y CSV: one column per time slice"
+                headers={["run_id", ...yTimeCols]}
+                rows={[
+                  ["0", "0.33", "0.29", "0.12"],
+                  ["1", "-0.71", "-0.66", "-0.52"],
+                ]}
+              />
+            }
+          />
         </div>
       ) : (
-        <div className="mt-2 space-y-3">
-          <div className="space-y-1">
-            <SectionLabel>X · your upload</SectionLabel>
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              Header is exactly the parameter names in order, one row per model
-              run. No <span className="font-mono text-foreground">run_id</span>.
-            </p>
-            <SampleTable
-              caption="X upload: header exactly the parameter names, in order"
-              headers={names}
-              rows={SAMPLE_X.slice(0, 3).map((r) => r.slice(0, D))}
-            />
-          </div>
-          <div className="space-y-1">
-            <SectionLabel>Y · your upload</SectionLabel>
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              One output column per model output, one value per X row, in the{" "}
-              <span className="font-mono text-foreground">same row order</span>.
-              No <span className="font-mono text-foreground">run_id</span>{" "}
-              needed.
-            </p>
-            <SampleTable
-              caption="Y upload: one value per X row, in row order"
-              headers={[output]}
-              rows={[["0.33"], ["-0.71"], ["0.98"]]}
-            />
-          </div>
-          <div className="space-y-1">
-            <SectionLabel>Y · time-resolved</SectionLabel>
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              Time slices are named{" "}
-              <span className="font-mono text-foreground">
-                {yTimeCols.join(", ")}
-              </span>
-              , … — one column per time slice, same row order.
-            </p>
-            <SampleTable
-              caption="Time-resolved Y upload: one column per time slice"
-              headers={yTimeCols}
-              rows={[
-                ["0.33", "0.29", "0.12"],
-                ["-0.71", "-0.66", "-0.52"],
-              ]}
-            />
-          </div>
+        <div className="mt-2 space-y-4">
+          <FileCard
+            label="X file"
+            title="your upload"
+            columns={
+              names.length > 0 ? (
+                <>
+                  exactly{" "}
+                  {names.map((n, j) => (
+                    <span key={n}>
+                      {j > 0 && ", "}
+                      <Mono>{n}</Mono>
+                    </span>
+                  ))}{" "}
+                  in this order — no <Mono>run_id</Mono>
+                </>
+              ) : null
+            }
+            rows="one per model run"
+            extra={
+              D === 0 ? (
+                <Meta>Define at least one input in step 01.</Meta>
+              ) : undefined
+            }
+            table={
+              <SampleTable
+                caption="X upload: header exactly the parameter names, in order"
+                headers={names}
+                rows={SAMPLE_X.slice(0, 3).map((r) => r.slice(0, D))}
+              />
+            }
+          />
+          <FileCard
+            label="Y file (X uploaded)"
+            title="outputs by row order"
+            columns={
+              <>
+                one output column per output slice: <Mono>{output}</Mono>
+                {D > 0 && <> — no <Mono>run_id</Mono></>}
+              </>
+            }
+            rows={
+              <>
+                one per X row, in the <strong>same row order</strong> as the X
+                file
+              </>
+            }
+            extra={
+              <Meta>
+                Row 3 of the Y file is the output of row 3 of the X file — the
+                values are matched by position.
+              </Meta>
+            }
+            table={
+              <SampleTable
+                caption="Y upload: one value per X row, in row order"
+                headers={[output]}
+                rows={[["0.33"], ["-0.71"], ["0.98"]]}
+              />
+            }
+          />
+          <FileCard
+            label="Y file variant"
+            title="time-resolved outputs"
+            columns={
+              <>
+                one column per time slice:{" "}
+                {yTimeCols.map((c, j) => (
+                  <span key={c}>
+                    {j > 0 && ", "}
+                    <Mono>{c}</Mono>
+                  </span>
+                ))}
+              </>
+            }
+            rows="one per X row, in the same row order as the X file"
+            table={
+              <SampleTable
+                caption="Time-resolved Y upload: one column per time slice"
+                headers={yTimeCols}
+                rows={[
+                  ["0.33", "0.29", "0.12"],
+                  ["-0.71", "-0.66", "-0.52"],
+                ]}
+              />
+            }
+          />
         </div>
       )}
     </div>

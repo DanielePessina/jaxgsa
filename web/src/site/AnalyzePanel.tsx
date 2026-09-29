@@ -1,35 +1,20 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { FileUpload } from "./FileUpload";
-import { demoForProblem, type Demo } from "./demos";
 import {
-  alignColumnsByRunId,
   analyzeCloud,
   analyzeGenerated,
-  describeY,
-  loadDemoCloud,
-  parseXGiven,
-  parseYColumns,
-  scalarYData,
   type AnalysisResult,
   type DesignMethod,
   type GeneratedDesign,
-  type ParsedCsv,
   type XSource,
   type YData,
 } from "./engine";
 import { ALL_METHODS, METHOD_META, type MethodKey } from "./methods";
-import { ErrorBanner, MonoSelect } from "./primitives";
-import { SchemaGuide } from "./SchemaGuide";
+import { ErrorBanner } from "./primitives";
+import { PanelHeading } from "./PanelHeading";
 import { useBusyAction } from "./hooks";
 import type { ProblemSpec } from "@/jaxgsa/sampling";
 
@@ -98,39 +83,23 @@ export function availability(
   };
 }
 
-function isDesignMethod(value: string): value is DesignMethod {
-  return value === "sobol" || value === "morris" || value === "kucherenko";
-}
-
 export function AnalyzePanel({
   problem,
   designs,
   yData,
-  setYData,
   appendResult,
   xSource,
   setXSource,
   givenX,
-  setGivenX,
-  givenXLabel,
-  setGivenXLabel,
-  activeDemo,
-  onGoSample,
   onGoResults,
 }: {
-  problem: ProblemSpec | null;
+  problem: ProblemSpec;
   designs: Partial<Record<DesignMethod, GeneratedDesign>>;
   yData: YData | null;
-  setYData: (y: YData | null) => void;
   appendResult: (r: AnalysisResult) => void;
   xSource: XSource | null;
   setXSource: (x: XSource | null) => void;
   givenX: Float64Array | null;
-  setGivenX: (x: Float64Array | null) => void;
-  givenXLabel: string;
-  setGivenXLabel: (label: string) => void;
-  activeDemo: Demo | null;
-  onGoSample: () => void;
   onGoResults: () => void;
 }) {
   const [order, setOrder] = useState("3");
@@ -147,12 +116,7 @@ export function AnalyzePanel({
 
   const { busy, error, setError } = useBusyAction();
 
-  const demo = activeDemo ?? demoForProblem(problem);
   const avail = availability(xSource, problem);
-
-  const designMethods = DESIGN_METHODS.filter(
-    (method): method is DesignMethod => designs[method] !== undefined,
-  );
 
   // Fall back when the selected design disappears.
   useEffect(() => {
@@ -163,9 +127,8 @@ export function AnalyzePanel({
 
       const last = methods[methods.length - 1];
       setXSource(last ? { kind: "design", method: last } : null);
-      setYData(null);
     }
-  }, [designs, xSource, setXSource, setYData]);
+  }, [designs, xSource, setXSource]);
 
   // Selecting a design's X source auto-enables its analysis method.
   useEffect(() => {
@@ -183,95 +146,6 @@ export function AnalyzePanel({
     }
   }, [xSource]);
 
-  const pickDesign = (method: DesignMethod) => {
-    setXSource({ kind: "design", method });
-    setYData(null);
-    setError(null);
-  };
-
-  const pickUploaded = (x: Float64Array, label: string) => {
-    setXSource({ kind: "uploaded" });
-    setGivenX(x);
-    setGivenXLabel(label);
-    setSelected({
-      sobol: false,
-      morris: false,
-      kucherenko: false,
-      efast: false,
-      pce: true,
-      shapley: false,
-      borgonovo: false,
-      pawn: false,
-    });
-    setYData(null);
-    setError(null);
-  };
-
-  const onUploadX = (parsed: ParsedCsv) => {
-    if (!problem) return;
-
-    try {
-      const flat = parseXGiven(parsed, problem);
-      pickUploaded(
-        flat,
-        `uploaded X · ${flat.length / problem.names.length} rows × ${problem.names.length} cols`,
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  const onDemoCloud = () => {
-    if (!demo) return;
-    const { x, y, n } = loadDemoCloud(demo, 1024);
-    pickUploaded(x, `example point cloud (${demo.label}) · ${n} rows`);
-    setYData(scalarYData(y, `demo model (${demo.label}) · ${n} outputs`));
-  };
-
-  const onUploadY = (parsed: ParsedCsv) => {
-    if (!problem) return;
-    setError(null);
-
-    try {
-      const { columns, runIds, rowCount } = parseYColumns(parsed, problem);
-
-      if (xSource?.kind === "design") {
-        const design = designs[xSource.method];
-
-        if (!design) return;
-
-        if (runIds === null) {
-          throw new Error(
-            'the Y file must contain a "run_id" column matching the design download',
-          );
-        }
-
-        const aligned = alignColumnsByRunId(columns, runIds, design);
-        setYData({ columns: aligned, rowCount, label: `uploaded Y · ${rowCount} runs` });
-      } else {
-        const N = givenX ? givenX.length / problem.names.length : 0;
-
-        if (rowCount !== N) {
-          throw new Error(`X has ${N} rows but Y has ${rowCount} values`);
-        }
-
-        setYData({ columns, rowCount, label: `uploaded Y · ${rowCount} outputs` });
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  const onDemoY = () => {
-    if (!demo || xSource?.kind !== "design") return;
-    const design = designs[xSource.method];
-
-    if (!design) return;
-    setError(null);
-    const y = demo.evaluate(design);
-    setYData(scalarYData(y, `demo model (${demo.label}) · ${y.length} runs`));
-  };
-
   const selectedAvailable = ALL_METHODS.filter(
     (m) => selected[m] && avail[m].available,
   );
@@ -279,7 +153,6 @@ export function AnalyzePanel({
   const compatibleMethods = ALL_METHODS.filter((m) => avail[m].available);
 
   const onRun = async () => {
-    if (!problem || !yData) return;
     const methods = ALL_METHODS.filter((m) => selected[m] && avail[m].available);
 
     if (methods.length === 0) {
@@ -291,7 +164,7 @@ export function AnalyzePanel({
     const design = xSource?.kind === "design" ? designs[xSource.method] : null;
     const x = design ? design.samples : givenX;
 
-    if (!x) return;
+    if (!x || !yData) return;
 
     setError(null);
     setRunning({ current: 0, total: methods.length, label: methods[0] });
@@ -321,181 +194,29 @@ export function AnalyzePanel({
     onGoResults();
   };
 
-  const onResetMethods = () =>
-    setSelected({
-      sobol: xSource?.kind === "design" && xSource.method === "sobol",
-      morris: xSource?.kind === "design" && xSource.method === "morris",
-      kucherenko: xSource?.kind === "design" && xSource.method === "kucherenko",
-      efast: xSource?.kind === "design" && xSource.method === "efast",
-      pce: xSource?.kind === "uploaded" && avail.pce.available,
-      shapley: false,
-      borgonovo: false,
-      pawn: false,
-    });
-
-  if (!problem) {
-    return (
-      <Card>
-        <CardContent className="py-8 text-center text-sm text-muted-foreground">
-          Define a problem in section 01 first.
-        </CardContent>
-      </Card>
-    );
-  }
-
   const xLabel =
     xSource?.kind === "design"
-      ? `X = ${xSource.method} design · ${designs[xSource.method]?.nRuns} runs (sampled in section 02)`
-      : givenXLabel;
-
-  const activeDesign =
-    xSource?.kind === "design" ? designs[xSource.method] ?? null : null;
+      ? `X = ${xSource.method} design · ${designs[xSource.method]?.nRuns} runs (from step 02)`
+      : xSource?.kind === "uploaded"
+        ? givenX
+          ? `X = uploaded · ${givenX.length / problem.names.length} rows`
+          : "X = uploaded"
+        : "no X loaded";
 
   return (
-    <div className="space-y-4">
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base font-normal tracking-tight">
-            Input data
-          </CardTitle>
-          <CardDescription>
-            Choose a sampled design or upload your own inputs. Dedicated
-            designs are paired with their estimator; PCE, Shapley, Borgonovo
-            and PAWN fit any input–output data.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid gap-4 md:grid-cols-[auto_minmax(0,1fr)] md:items-start">
-            <div className="space-y-2">
-              <span className="block text-xs font-medium text-muted-foreground">X source</span>
-              <MonoSelect
-              value={
-                xSource === null
-                  ? "none"
-                  : xSource.kind === "design"
-                    ? xSource.method
-                    : "uploaded"
-              }
-              onChange={(v) => {
-                if (v === "uploaded") {
-                  if (givenX) {
-                    pickUploaded(givenX, givenXLabel);
-                  } else {
-                    setError(
-                      "Upload an X CSV/Parquet (or load a demo cloud) to use your own data.",
-                    );
-                  }
-                } else if (isDesignMethod(v) && designs[v]) {
-                  pickDesign(v);
-                }
-              }}
-              >
-              <option value="none" disabled>
-                no X loaded
-              </option>
-              {designMethods.map((m) => (
-                <option key={m} value={m}>
-                  {m} design · {designs[m]?.nRuns} runs
-                </option>
-              ))}
-              <option value="uploaded">my own X</option>
-              </MonoSelect>
-              <p className="max-w-52 font-mono text-[11px] leading-relaxed text-muted-foreground">
-                {xLabel}
-              </p>
-            </div>
-            <FileUpload
-              label="Upload X"
-              hint={`header must be exactly: ${problem.names.join(", ")} — one row per run, in order. No run_id.`}
-              disabled={busy || running !== null}
-              onLoaded={onUploadX}
-              onError={setError}
-              exampleLabel={demo ? `Try PCE/Shapley example (${demo.label})` : undefined}
-              onExample={demo ? onDemoCloud : undefined}
-              exampleDisabled={busy || running !== null}
-            />
-          </div>
+    <Card>
+      <CardContent className="space-y-5 pt-5">
+        <PanelHeading
+          kicker="analyze"
+          title="Which question do you ask of these runs?"
+          sub="Each method pairs an estimator with the (X, Y) data chosen in step 02. Unavailable methods explain what they need."
+        />
 
-          {activeDesign && activeDesign.summary.length > 0 && (
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-sm border border-border/60 bg-muted/20 px-3 py-2">
-              <span className="font-mono text-[11px] uppercase tracking-widest text-muted-foreground">
-                {activeDesign.method} settings
-              </span>
-              {activeDesign.summary.map(([k, v]) => (
-                <span key={k} className="font-mono text-xs">
-                  <span className="text-muted-foreground">{k}: </span>
-                  <span className="tabular-nums">{v}</span>
-                </span>
-              ))}
-            </div>
-          )}
+        <p className="font-mono text-xs text-muted-foreground">{xLabel}</p>
 
-          {designMethods.length === 0 && (
-            <div className="flex flex-wrap items-center gap-2">
-              <p className="text-xs text-muted-foreground">
-                No designs sampled yet — generate one in section 02, or upload
-                your own X above.
-              </p>
-              <Button type="button" variant="outline" size="sm" onClick={onGoSample}>
-                Sample a design
-              </Button>
-            </div>
-          )}
-
-          <div className="border-t border-border pt-4">
-            <FileUpload
-              label="Upload outputs (Y)"
-              hint={
-                xSource?.kind === "design"
-                  ? "must include run_id — the row numbers 0…N−1 from the downloaded design CSV · outputs: y, or name_t0, name_t0.5… for time-resolved data"
-                  : xSource === null
-                    ? "load X first"
-                    : "no run_id needed — one output column per output slice (y, or name_t0, name_t0.5…), one value per X row, same row order"
-              }
-              disabled={!xSource || busy || running !== null}
-              onLoaded={onUploadY}
-              onError={setError}
-              exampleLabel={
-                demo && xSource?.kind === "design"
-                  ? `Evaluate demo model (${demo.label})`
-                  : undefined
-              }
-              onExample={demo && xSource?.kind === "design" ? onDemoY : undefined}
-              exampleDisabled={busy || running !== null}
-            />
-            <p className="mt-2 font-mono text-xs text-muted-foreground">
-              {yData ? `${yData.label} · ${describeY(yData)}` : "no outputs loaded"}
-            </p>
-          </div>
-
-          <SchemaGuide
-            problem={problem}
-            route={xSource === null ? "none" : xSource.kind === "design" ? "design" : "uploaded"}
-            method={xSource?.kind === "design" ? xSource.method : undefined}
-          />
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader className="flex-row items-center justify-between space-y-0">
-          <div>
-            <CardTitle className="text-base font-normal tracking-tight">
-              Methods
-            </CardTitle>
-            <CardDescription>
-              Choose the question to ask of these model runs. Unavailable
-              methods explain what they need.
-            </CardDescription>
-          </div>
-          {xSource && compatibleMethods.length > 1 && (
-            <Button type="button" variant="ghost" size="sm" onClick={onResetMethods}>
-              reset
-            </Button>
-          )}
-        </CardHeader>
-        <CardContent className="space-y-4">
+        <div>
           {xSource?.kind === "uploaded" && (
-            <div className="flex flex-wrap items-end gap-4 rounded-sm border border-border/60 bg-muted/20 p-3">
+            <div className="mb-3 flex flex-wrap items-end gap-4 rounded-sm border border-border/60 bg-muted/20 p-3">
               <div className="space-y-1.5">
                 <Label htmlFor="order" className="font-mono text-xs">
                   PCE polynomial order
@@ -518,88 +239,86 @@ export function AnalyzePanel({
           )}
           {xSource === null ? (
             <div className="rounded-sm border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
-              Select a sampled design or upload X to see compatible analyses.
+              No data selected — go back to step 02 to choose the data source.
             </div>
           ) : (
-          <div className="grid gap-3 md:grid-cols-2">
-            {ALL_METHODS.map((m) => {
-              const on = selected[m] && avail[m].available;
-              const enabled = avail[m].available;
+            <div className="grid gap-3 md:grid-cols-2">
+              {ALL_METHODS.map((m) => {
+                const on = selected[m] && avail[m].available;
+                const enabled = avail[m].available;
 
-              return (
-                <label
-                  key={m}
-                  className={`rounded-sm border p-3 transition-colors ${
-                    !enabled
+                return (
+                  <label
+                    key={m}
+                    className={`rounded-sm border p-3 transition-colors ${
+                      !enabled
                         ? "cursor-not-allowed border-border/60 bg-muted/10"
                         : on
-                        ? "cursor-pointer border-primary/50 bg-accent/30"
-                        : "cursor-pointer border-border hover:bg-muted/40"
-                  }`}
-                >
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      checked={on}
-                      disabled={!enabled}
-                      onChange={(e) =>
-                        setSelected((s) => ({ ...s, [m]: e.target.checked }))
-                      }
-                      className="size-4 accent-primary"
-                    />
-                    <span className={`font-mono text-sm ${enabled ? "" : "text-muted-foreground"}`}>{m}</span>
-                    <span className="ml-auto flex items-center gap-2">
+                          ? "cursor-pointer border-primary/50 bg-accent/30"
+                          : "cursor-pointer border-border hover:bg-muted/40"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        disabled={!enabled}
+                        onChange={(e) =>
+                          setSelected((s) => ({ ...s, [m]: e.target.checked }))
+                        }
+                        className="size-4 accent-primary"
+                      />
                       <span
-                        className={`rounded-sm border px-1.5 py-0.5 font-mono text-[10px] ${
-                          enabled
-                            ? "border-primary/40 bg-primary/10 text-primary"
-                            : "border-border text-muted-foreground"
-                        }`}
+                        className={`font-mono text-sm ${enabled ? "" : "text-muted-foreground"}`}
                       >
-                        {enabled ? "available" : "unavailable"}
+                        {m}
                       </span>
-                      <span className="font-mono text-[10px] text-muted-foreground">
-                        {METHOD_META[m].tag}
+                      <span className="ml-auto flex items-center gap-2">
+                        <span
+                          className={`rounded-sm border px-1.5 py-0.5 font-mono text-[10px] ${
+                            enabled
+                              ? "border-primary/40 bg-primary/10 text-primary"
+                              : "border-border text-muted-foreground"
+                          }`}
+                        >
+                          {enabled ? "available" : "unavailable"}
+                        </span>
+                        <span className="font-mono text-[10px] text-muted-foreground">
+                          {METHOD_META[m].tag}
+                        </span>
                       </span>
-                    </span>
-                  </div>
-                  <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
-                    {enabled ? METHOD_META[m].blurb : avail[m].reason}
-                  </p>
-                </label>
-              );
-            })}
-          </div>
+                    </div>
+                    <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
+                      {enabled ? METHOD_META[m].blurb : avail[m].reason}
+                    </p>
+                  </label>
+                );
+              })}
+            </div>
           )}
-          {xSource && (
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              {xSource.kind === "design"
-                ? `The ${xSource.method} estimator uses its paired design. PCE and Shapley can also fit these model runs when the input distributions are supported.`
-                : "PCE and PCE-backed Shapley can share this uploaded point cloud. Sobol and Morris require designs generated in section 02."}
-            </p>
-          )}
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <p className="font-mono text-xs text-muted-foreground">
-              {compatibleMethods.length > 1
-                ? "selected methods share this (X, Y)"
-                : "design and estimator are paired"}
-            </p>
-            <Button
-              type="button"
-              disabled={!yData || busy || running !== null || selectedAvailable.length === 0}
-              onClick={() => void onRun()}
-            >
-              {running
-                ? `Running ${running.label} (${running.current + 1}/${running.total})…`
-                : busy
-                  ? "Computing…"
-                  : `Run selected (${selectedAvailable.length})`}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
+        </div>
 
-      {error && <ErrorBanner title="analysis error" message={error} />}
-    </div>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="font-mono text-xs text-muted-foreground">
+            {compatibleMethods.length > 1
+              ? "selected methods share this (X, Y)"
+              : "design and estimator are paired"}
+          </p>
+          <Button
+            type="button"
+            disabled={!yData || busy || running !== null || selectedAvailable.length === 0}
+            onClick={() => void onRun()}
+          >
+            {running
+              ? `Running ${running.label} (${running.current + 1}/${running.total})…`
+              : busy
+                ? "Computing…"
+                : `Run selected (${selectedAvailable.length})`}
+          </Button>
+        </div>
+
+        {error && <ErrorBanner title="analysis error" message={error} />}
+      </CardContent>
+    </Card>
   );
 }
