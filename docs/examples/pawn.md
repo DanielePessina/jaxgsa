@@ -65,7 +65,7 @@ n_valid_bins: [10 10 10]
 ```
 
 The block above the arrays is the verbose summary, printed because
-`verbose=True` is the 1.0 default on every `analyze`. It records what was
+`verbose=True` is the default on every `analyze`. It records what was
 analyzed and how, which is worth keeping in a log: three uniform inputs, 5000
 rows, no non-finite values, median aggregation over 10 bins. Pass
 `verbose=False` when you do not want it.
@@ -85,7 +85,7 @@ Fixing x3 does change the output distribution. It widens or narrows it
 without moving its centre, and that is exactly the kind of effect the CDF
 comparison sees and the variance decomposition does not.
 
-`n_valid_bins` is new in 1.0 and reports how many bins actually contributed
+`n_valid_bins` reports how many bins actually contributed
 per input. All 10 of 10 here. When that number drops, read
 [the sparse-bin warning](#when-bins-run-out-of-samples).
 
@@ -204,7 +204,7 @@ are dropped, and the index rests on whatever survives. This happens when an
 input was logged at a handful of settings, which is common with real data:
 someone ran the rig at three flow rates, not at 5000 of them.
 
-New in 1.0, `analyze` warns when an input keeps fewer than half its bins, and
+`analyze` warns when an input keeps fewer than half its bins, and
 `n_valid_bins` tells you which one.
 
 ```python

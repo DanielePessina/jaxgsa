@@ -1,59 +1,132 @@
 # Global sensitivity analysis concepts
 
-Global sensitivity analysis (GSA) asks how uncertainty in a model's inputs
-relates to uncertainty in its outputs. Unlike a local derivative, it considers
-the full input distributions rather than behaviour at one nominal point.
+Global sensitivity analysis (GSA) asks which uncertain inputs matter to a model's
+output. It looks across the input ranges and distributions you specify, rather
+than at one chosen set of input values.
 
-The practical questions are usually:
+A result is always relative to that choice of inputs. If you change their ranges,
+probabilities, or correlations, you may change the ranking of important inputs.
 
-- Which parameters account for most of the output variation?
-- Which parameters can be fixed with little effect?
-- Which parameters matter mainly through interactions?
-- Does a parameter change only the mean, or the whole output distribution?
-- How does dependence between parameters affect the answer?
+## What does “important” mean?
 
-There is no single sensitivity index that answers all of these questions.
-Choose the quantity you want to interpret before choosing an estimator. See
-[Choosing a method](/guide/methods) for the package-wide comparison.
+Imagine a model with two uncertain inputs. If the output is `x1 + x2`, each input
+contributes on its own: changing `x1` has the same effect whatever `x2` is. If
+the output is `x1 * x2`, the effect of `x1` depends on `x2`. That is an
+**interaction**.
 
-## Variance-based indices
+For independent inputs, Sobol' indices separate these effects:
 
-Variance-based methods express importance as a fraction of output variance.
-For independent inputs, a square-integrable model can be decomposed into main
-effects and interactions:
+| Index | Read it as |
+| --- | --- |
+| $S_1(i)$, first order | The share of output variance due to input $i$ on its own. |
+| $S_T(i)$, total order | The share involving input $i$, on its own or through interactions. |
+| $S_2(i,j)$, second order | The share due to the interaction between inputs $i$ and $j$, beyond their separate effects. |
+
+For an additive model, $S_1$ and $S_T$ agree. A gap between them points to
+interactions. For example, an input with $S_1$ near zero and $S_T$ around 0.25
+matters through interactions even though it has little effect alone. A small
+$S_T$ supports fixing that input **within the model and input distributions you
+analysed**.
+
+These are shares of **variance**, not shares of the mean output or probabilities
+that an input matters. [Sobol'](/api/sobol) and [eFAST](/api/efast) estimate them
+from planned model runs; [PCE](/api/pce) and [HDMR](/api/hdmr) can derive them
+from a fitted surrogate.
+
+Estimates from a finite number of runs can be noisy. Small negative estimates,
+or an estimated $S_1$ slightly above $S_T$, do not change the definitions.
+Check confidence intervals or increase the design before interpreting small
+differences. See the [Sobol' API](/api/sobol) for sampling requirements.
+
+## Other questions need other measures
+
+A variance share may not answer your question. Use [Choosing a method](/guide/methods)
+to match the result to the decision you need to make.
+
+### Which inputs can I screen out?
+
+[Morris](/api/morris) measures how much the output changes in short moves across
+the input space. Its $\mu^*$ summarizes the size of those changes; a large
+$\sigma$ suggests a nonlinear effect or interactions. [DGSM](/api/dgsm) measures
+derivatives across the input domain and can give bounds on total effects.
+
+These are screening measures, **not variance percentages**. They are useful for
+finding clearly inactive inputs before a more detailed analysis. A large
+$\sigma$ alone does not tell you whether nonlinearity or interactions caused it.
+
+### Does an input change the whole output distribution?
+
+Two inputs can have similar variance effects but change different parts of an
+output distribution. This matters for skewed, multimodal, or heavy-tailed
+outputs. Distribution-based methods compare outputs across input values:
+
+- [PAWN](/api/pawn) compares cumulative distributions.
+- [Borgonovo delta](/api/borgonovo) compares densities.
+- [Optimal transport](/api/optimal-transport) measures how far distributions
+  move and separates changes in mean from changes in shape.
+- [HSIC](/api/hsic) measures statistical dependence with kernels and can report
+  permutation p-values.
+
+Their scores are **not Sobol' indices**. They can rank inputs differently because
+they measure different changes.
+
+### What if inputs are dependent?
+
+If inputs are correlated, one input can carry information about another even
+when the model uses only the latter. The usual Sobol' variance decomposition
+assumes independent inputs, so there is no single replacement index under
+dependence.
+
+[Kucherenko](/api/kucherenko), [VKOGA](/api/vkoga), and [HDMR](/api/hdmr) report
+different conditional or structural and correlative variance quantities.
+Distribution-based scores can include influence carried through correlation.
+Do not compare these values as though they were interchangeable. See
+[Sensitivity with dependent inputs](/guide/dependent-inputs) for a worked choice.
+
+### Can I have one share per input?
+
+[Shapley effects](/api/shapley) allocate variance across inputs so that the
+shares sum to one. They divide interactions among participating inputs; they
+do not show a separate pairwise interaction index.
+
+## Before trusting a result
+
+1. **Check the input distribution.** Indices refer to the specified ranges,
+   marginal distributions, and correlations.
+2. **Check the output.** Different outputs or time points can have different
+   rankings; averaging them can hide that difference.
+3. **Check uncertainty.** Sampling error matters when estimates are small or
+   close together.
+4. **Check surrogate fit.** PCE, HDMR, and VKOGA report sensitivity of a fitted
+   model. Poor fit or sparse coverage can make its indices misleading. Check
+   predictions on held-out data where possible. A bootstrap that keeps the
+   fitted surrogate fixed does not include uncertainty from refitting it.
+
+## Formal definitions of variance indices
+
+For independent inputs and a square-integrable model, the output can be
+decomposed into main effects and interactions:
 
 $$
 f(\mathbf{X}) = f_0 + \sum_i f_i(X_i)
   + \sum_{i<j} f_{ij}(X_i, X_j) + \cdots
 $$
 
-The corresponding variance components add to the total output variance:
+The variance components then add to the total output variance:
 
 $$
 \operatorname{Var}(Y) = \sum_i V_i + \sum_{i<j} V_{ij} + \cdots
 $$
 
-This gives three commonly reported Sobol' indices.
-
-| Index | Meaning |
-| --- | --- |
-| $S_1(i)$ | Variance attributed to parameter $i$ alone. |
-| $S_2(i,j)$ | Additional variance attributed to the interaction between $i$ and $j$. |
-| $S_T(i)$ | Variance involving parameter $i$, including all of its interactions. |
-
-More formally,
+The first-order, second-order, and total-order indices are
 
 $$
 S_1(i) =
 \frac{\operatorname{Var}_{X_i}(\mathbb{E}[Y \mid X_i])}
 {\operatorname{Var}(Y)},
-$$
-
-$$
+\qquad
 S_2(i,j) = \frac{V_{ij}}{\operatorname{Var}(Y)},
 $$
-
-and
 
 $$
 S_T(i) =
@@ -62,110 +135,8 @@ S_T(i) =
 {\operatorname{Var}(Y)}.
 $$
 
-Here, $\mathbf{X}_{\sim i}$ means every input except $X_i$. For the population
-indices, $S_T(i) \geq S_1(i)$. The gap $S_T(i)-S_1(i)$ shows how much of the
-parameter's influence is associated with interactions. A value of
-$S_T(i) \approx 0$ supports fixing that parameter within the distributions and
-model configuration that were analysed.
-
-Finite-sample estimates can be noisy. Small negative estimates, or an estimated
-$S_1$ slightly above $S_T$, do not change the mathematical definitions. Use
-confidence intervals and larger designs before interpreting small differences.
-See the [Sobol' API](/api/sobol) for estimators and sampling requirements.
-
-[Sobol'](/api/sobol) and [eFAST](/api/efast) estimate variance indices from
-dedicated model evaluations. [PCE](/api/pce) and [HDMR](/api/hdmr) derive them
-from fitted surrogates. [Shapley effects](/api/shapley) instead divide the
-variance into one allocation per parameter.
-
-### Dependent inputs
-
-The usual Sobol' decomposition assumes independent inputs. Under dependence,
-"importance" can include the model's structural response, information carried
-through correlation, or both. These are different estimands and need not give
-the same ranking.
-
-jaxgsa provides several routes for dependent inputs:
-
-- [Kucherenko](/api/kucherenko) estimates conditional-variance indices from a
-  dedicated design.
-- [VKOGA](/api/vkoga) estimates correlated and uncorrelated variance
-  contributions through a kernel surrogate.
-- [HDMR](/api/hdmr) separates each fitted component into structural and
-  correlative contributions.
-- Distribution-based methods can measure dependence-inclusive influence
-  without constructing a Sobol' decomposition.
-
-Do not compare these values as though they were interchangeable versions of
-the same index. The [methods guide](/guide/methods) explains which dependent-
-input question each route answers.
-
-## Screening measures
-
-Screening methods look for inputs that are negligible or worth investigating
-further. They are useful when the parameter count is large or the model-run
-budget is too small for a precise variance decomposition.
-
-[Morris](/api/morris) summarizes elementary effects with $\mu^*$ and $\sigma$.
-A small $\mu^*$ suggests little overall influence; a large $\sigma$ suggests a
-nonlinear response or interactions. [DGSM](/api/dgsm) uses derivatives across
-the input domain and can provide bounds on total effects.
-
-These quantities are not variance fractions. Use them to remove clearly inert
-parameters or to plan a second analysis, not to read off percentages of
-explained variance. A common workflow is to screen first, then apply a
-variance-based method to the remaining parameters.
-
-## Distribution-based measures
-
-Variance can be an incomplete description of skewed, multimodal, or
-heavy-tailed outputs. Distribution-based methods compare the unconditional
-output distribution with the output conditioned on an input. They detect
-changes in location, spread, and shape, but their scores are not Sobol' indices.
-
-- [HSIC](/api/hsic) measures statistical dependence between an input and the
-  output using kernels.
-- [PAWN](/api/pawn) compares conditional and unconditional cumulative
-  distributions with the Kolmogorov--Smirnov distance.
-- [Borgonovo delta](/api/borgonovo) compares output densities.
-- [Optimal transport](/api/optimal-transport) uses Wasserstein distance and
-  separates mean-shift and shape-change contributions.
-
-Use these methods when the question is "does this input change the output
-distribution?" rather than "what fraction of variance does it explain?"
-
-## Allocation and surrogate-based methods
-
-[Shapley effects](/api/shapley) allocate importance across parameters so the
-reported shares sum to one. Interactions are divided among their participants,
-which gives one number per parameter but no separate pairwise interaction
-index.
-
-[PCE](/api/pce), [HDMR](/api/hdmr), and [VKOGA](/api/vkoga) fit a surrogate and
-derive sensitivity measures from that fitted model. This is valuable when you
-have an existing set of input-output pairs or also need a fast emulator.
-However, the reported sensitivity is sensitivity of the fitted surrogate.
-Poor fit, sparse coverage, or a restrictive basis can produce confident-looking
-indices that do not describe the original model.
-
-Check predictive error on held-out data where possible, inspect diagnostics,
-and include surrogate refitting in uncertainty estimates. A bootstrap that
-only resamples a fixed surrogate understates fit uncertainty.
-
-## Interpreting an analysis
-
-Keep four points attached to every result:
-
-1. **The estimand.** A screening score, variance fraction, dependence measure,
-   and distributional distance answer different questions.
-2. **The input distribution.** Sensitivity is defined over the ranges,
-   marginals, and correlations supplied to the analysis. Change them and the
-   result can change.
-3. **The output.** Indices may differ across scalar outputs or across time. A
-   single aggregation can hide that structure.
-4. **The uncertainty.** Sampling error and, where applicable, surrogate error
-   matter most when indices are small or rankings are close.
-
-Once the question and estimand are clear, use [Choosing a method](/guide/methods)
-to select an implementation and follow its API page for sampling, assumptions,
-and result fields.
+Here, $\mathbf{X}_{\sim i}$ contains every input except $X_i$. For population
+indices, $S_T(i) \geq S_1(i)$, and their difference is the contribution involving
+interactions with input $i$. For a model with nonzero output variance, an input's
+indices lie between zero and one. Finite-sample estimates may fall outside
+these bounds.

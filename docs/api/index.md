@@ -123,10 +123,12 @@ anywhere the print is noise.
 ### Failed model runs
 
 Every `analyze()` function takes `on_invalid`, which says what to do when the
-model output holds `NaN` or `Inf`. It accepts `"raise"` (the default),
-`"propagate"` and `"drop"`. See
-[Failed model runs](#failed-model-runs) for what each one does
-and which unit of data `"drop"` removes.
+model output holds `NaN` or `Inf`. It accepts `"raise"` (the default, which
+stops the analysis), `"propagate"` (warns and computes), `"drop"` (removes the
+method's invalid row or design block), and `"none"` (skips the finite-value
+and constant-output scans for data you have already checked). See
+[When a model run fails](/guide/getting-started#when-a-model-run-fails)
+for advice on failed model runs.
 
 Two supporting types live at the package root.
 
@@ -135,8 +137,8 @@ Two supporting types live at the package root.
 `jaxgsa.InvalidReport` — what the non-finite check found, carried by every
 result as `result.invalid`. It records `n_invalid`, `n_units`, `n_kept`,
 `unit_indices`, `bad_row_indices`, `row_indices`, `sources` and the `policy`
-that ran. A report with `n_invalid == 0` means the check ran and found
-nothing.
+that ran. A report with `n_invalid == 0` means the check found nothing,
+except with `on_invalid="none"`, where the check was skipped.
 
 `bad_row_indices` names the rows that actually held a non-finite value;
 `row_indices` names every row of the blocks those rows condemn, which is what
@@ -512,8 +514,8 @@ Y = model(samples.samples)
 result = jaxgsa.efast.analyze(samples, Y)
 ```
 
-`EFASTSamples` gained `save(path)` and `load(path)` in 1.0, so all four design
-classes now persist the same way.
+`EFASTSamples` supports `save(path)` and `load(path)`, so all four design
+classes persist the same way.
 
 ## Kucherenko
 

@@ -29,9 +29,10 @@ pass; `scripts/benchmark_irregular.py` measures it.
 
 ### Release summary
 
-Version 0.9.1 is a performance and behavior-contract release with no API
-changes. All thirteen methods keep their 0.9.0 interface; the work is in the
-kernels and in the entry path.
+Version 0.9.1 improves performance and the behavior contract. It also adds
+the irregular-output form of `Y`, the `on_invalid='none'` policy, and
+`Problem.with_output_names()`. The thirteen analysis methods retain their
+existing call patterns.
 
 ### Performance
 

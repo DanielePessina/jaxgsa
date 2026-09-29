@@ -45,7 +45,7 @@ rows to evaluate: 4096
 file size (bytes): 68501
 ```
 
-The first line is the sampler's verbose summary, on by default in 1.0. Read
+The first line is the sampler's verbose summary, printed by default. Read
 `n_runs=4096` as the number of times your model has to run. 67 KB buys you the
 right to lose the process.
 
@@ -179,8 +179,8 @@ np.savez_compressed("runs/ishigami_Y.npz", Y=np.asarray(Y))
 
 ## Every design class round-trips
 
-Four samplers, four design classes, one save/load contract. `EFASTSamples`
-gained `save()` and `.load()` in 1.0 and now matches the other three.
+Four samplers, four design classes, one save/load contract. Each design class,
+including `EFASTSamples`, provides `save()` and `.load()`.
 
 ```python
 designs = {

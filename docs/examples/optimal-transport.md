@@ -79,7 +79,7 @@ above_dummy: None
 ```
 
 The block above the arrays is the verbose summary, printed because
-`verbose=True` is the 1.0 default on every `analyze`. Pass `verbose=False`
+`verbose=True` is the default on every `analyze`. Pass `verbose=False`
 for a silent run.
 
 Now read the split. x1 and x2 are dominated by their advective parts
@@ -99,11 +99,10 @@ and x3, not just a difference in magnitude.
 
 ## S1 is a free cross-check
 
-New in 1.0, the result carries `S1` and `S1_conf`. It is exactly
+The result also carries `S1` and `S1_conf`. `S1` is exactly
 `2 * advective * N / (N - 1)`, where the `N / (N - 1)` factor puts the
 conditional and unconditional variances on the same ddof=0 convention that
-[borgonovo](/examples/borgonovo) uses, so the identity `advective = S1 / 2`
-holds with no small print.
+[borgonovo](/examples/borgonovo) uses.
 
 That makes it a cheap consistency test. Two given-data estimators, entirely
 different machinery, one that sorts quantiles and one that fits kernel
@@ -243,7 +242,7 @@ baseline.
 
 `dummy=True` pushes one synthetic input, independent of the output by
 construction, through the identical pipeline and reports its index as
-`ot_dummy`. New in 1.0, the result also carries `above_dummy`, which is
+`ot_dummy`. The result also carries `above_dummy`, which is
 `max(ot - ot_dummy, 0)`. It is `None` unless you passed `dummy=True`.
 
 The example below adds an `inert` input the model never reads, and analyzes
@@ -303,7 +302,7 @@ draw and carries error of that size. Only the two large values, 0.458 and
 
 All four floors read the same 0.0547 because all four parameters are
 continuous and share one class count. They are separate draws all the same:
-since 1.0 each parameter is permuted against its own partition, so a
+each parameter is permuted against its own partition, so a
 categorical parameter meets a floor built from its own number of levels
 instead of the continuous default.
 
@@ -323,8 +322,7 @@ if you set `dummy=True` or `n_bootstrap > 0` without one.
 ## Standardizing outputs in the joint modes
 
 `standardize_outputs=True` (the default) divides each output column by its
-standard deviation before the transport cost is built. This is the 1.0
-spelling; the old `standardize=` keyword is gone.
+standard deviation before the transport cost is built.
 
 It only applies to the joint modes. `univariate` normalizes each column by
 its own variance regardless, so the setting does nothing there.
@@ -435,7 +433,7 @@ outputs, D the number of inputs.
 | `multivariate` | any | `(D,)` |
 | `trajectory` | `(N, T, K)` only | `(K, D)` |
 
-Every `*_conf` adds a leading axis of size 2. Since 1.0 each parameter is
+Every `*_conf` adds a leading axis of size 2. Each parameter is
 permuted against its own partition, so `ot_dummy` has the same shape as `ot`,
 one floor per parameter, and so does `above_dummy`.
 

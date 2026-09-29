@@ -92,7 +92,7 @@ rmse: 0.49884835
 std(Y): 3.7769964
 ```
 
-The summary block above `terms:` prints by default in 1.0. Pass
+The summary block above `terms:` prints by default. Pass
 `verbose=False` to silence it. It restates the problem it was handed, which
 catches a wrong `bounds` array or a misread output shape before you read an
 index.

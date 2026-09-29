@@ -60,7 +60,7 @@ jaxgsa.efast.sample: D=3, n_curves=3, n_per_curve=1024, n_runs=3072, M=4, omega_
 
 ### save and load
 
-New in 1.0. `EFASTSamples` now persists like every other design class:
+You can save and reload `EFASTSamples` like the other design classes:
 
 ```python
 samples.save("run.npz")
