@@ -6,9 +6,17 @@
 
 import type { DesignMethod, GivenDataMethod } from "./engine";
 
-/** Methods exposed in the UI. Kucherenko compute exists but its correlated
- * sampling route is not exposed yet, so it is intentionally absent here. */
-export type MethodKey = "sobol" | "morris" | "pce" | "shapley";
+/** Methods exposed in the UI. All compute routes exist in the WASM ports;
+ * kucherenko was added alongside the others. */
+export type MethodKey =
+  | "sobol"
+  | "morris"
+  | "kucherenko"
+  | "efast"
+  | "pce"
+  | "shapley"
+  | "borgonovo"
+  | "pawn";
 
 export interface MethodMeta {
   name: string;
@@ -24,8 +32,8 @@ export const DESIGN_METHOD_META: Record<DesignMethod, MethodMeta> = {
     tag: "Saltelli design · S1, ST",
     input: { kind: "dedicated", design: "sobol" },
     blurb:
-      "The reference variance decomposition — first-order (S1) and total (ST) indices from a Saltelli design. " +
-      "Use it when you can still choose where to run the model.",
+      "Estimate each input's share of output variation alone (S1) and with interactions (ST). " +
+      "Use it when you can evaluate your model at the inputs generated here.",
   },
   kucherenko: {
     name: "kucherenko",
@@ -40,8 +48,16 @@ export const DESIGN_METHOD_META: Record<DesignMethod, MethodMeta> = {
     tag: "trajectory screening · mu, mu*, sigma",
     input: { kind: "dedicated", design: "morris" },
     blurb:
-      "Cheap trajectory-based screening that ranks inputs by elementary-effect means (mu, mu*) and spreads (sigma). " +
-      "Use it on a tight budget to drop dead inputs before a full Sobol' run.",
+      "Screen many inputs with fewer model runs. " +
+      "Mu-star ranks overall influence; sigma suggests interactions or nonlinear effects.",
+  },
+  efast: {
+    name: "efast",
+    tag: "Fourier design · S1, ST",
+    input: { kind: "dedicated", design: "efast" },
+    blurb:
+      "Estimate S1 and ST from a deterministic sinusoidal search-curve design. " +
+      "No bootstrap by design — rerun with different phases to gauge stability.",
   },
 };
 
@@ -51,16 +67,32 @@ export const GIVEN_METHOD_META: Record<GivenDataMethod, MethodMeta> = {
     tag: "polynomial chaos · S1, ST",
     input: { kind: "given" },
     blurb:
-      "Fits a polynomial-chaos surrogate to any (X, Y) data and reads S1/ST off its coefficients — the given-data route to Sobol indices. " +
-      "Best for smooth models; fewest samples per unit of accuracy.",
+      "Fit a polynomial approximation to model runs you already have, then estimate S1 and ST. " +
+      "Best for smooth models; check the fit before trusting its indices.",
   },
   shapley: {
     name: "shapley",
     tag: "PCE-based · Sh",
     input: { kind: "given" },
     blurb:
-      "One number per input that sums to exactly 1. " +
-      "Computed from a PCE fit, with no permutation Monte Carlo.",
+      "Allocate the fitted model's output variation across inputs, including interactions. " +
+      "The shares sum to one; check the PCE fit before interpreting them.",
+  },
+  borgonovo: {
+    name: "borgonovo",
+    tag: "moment-independent · delta",
+    input: { kind: "given" },
+    blurb:
+      "Measure how much fixing a parameter shifts the whole output distribution, " +
+      "not just its variance. Useful when the output is skewed or multimodal.",
+  },
+  pawn: {
+    name: "pawn",
+    tag: "distribution screening · KS",
+    input: { kind: "given" },
+    blurb:
+      "Compare each parameter's conditioned output distributions with the overall one " +
+      "by the Kolmogorov-Smirnov distance. A screening complement to variance indices.",
   },
 };
 
@@ -72,6 +104,10 @@ export const METHOD_META: Record<MethodKey, MethodMeta> = {
 export const ALL_METHODS: MethodKey[] = [
   "sobol",
   "morris",
+  "kucherenko",
+  "efast",
   "pce",
   "shapley",
+  "borgonovo",
+  "pawn",
 ];

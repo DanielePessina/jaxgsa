@@ -148,11 +148,14 @@ export function ProblemPanel({
   onProblemChange,
   onDemoChange,
   onLoadDemo,
+  demoRequest,
 }: {
   problem: ProblemSpec | null;
   onProblemChange: (p: ProblemSpec) => void;
   onDemoChange?: (demo: Demo) => void;
   onLoadDemo?: (demo: Demo) => void;
+  /** Hero-CTA pipeline request: mirror this demo into the table rows. */
+  demoRequest?: { demo: Demo } | null;
 }) {
   const [rows, setRows] = useState<ProblemRow[]>(() =>
     rowsFromProblem(demoById("linear").problem),
@@ -220,6 +223,15 @@ export function ProblemPanel({
     onDemoChange?.(demoById(demoId));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [demoId]);
+
+  // A hero/CTA demo request loads the demo both into the pipeline and this
+  // table so both stay in sync (the App-level load alone would desync rows).
+  useEffect(() => {
+    if (!demoRequest) return;
+    setRows(rowsFromProblem(demoRequest.demo.problem));
+    setDemoId(demoRequest.demo.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [demoRequest]);
 
   const current = validSpec ?? problem;
 

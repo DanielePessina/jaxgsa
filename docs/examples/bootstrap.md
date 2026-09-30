@@ -262,11 +262,9 @@ index. Two reasons to keep the draws: re-cut the interval at another level
 without re-running the analysis, as the 68% line does above, and plot the
 bootstrap distribution when you suspect it is skewed rather than bell-shaped.
 
-New in 1.0, the kept `S2` draws are symmetric with a NaN diagonal, which is
-exactly the layout of the reported `S2` and `S2_conf`. Before, the draws held a
-raw upper triangle and the two disagreed, so `replicates["S2"][:, 1, 0]` and
-`result.S2[1, 0]` were different things. Now `np.quantile` over the draws
-reproduces `S2_conf` entry for entry.
+The kept `S2` draws are symmetric with a NaN diagonal, matching the layout of
+`S2` and `S2_conf`. With `ci_method="quantile"`, you can take quantiles over
+the draws to reproduce the reported confidence bounds.
 
 They are not free. 1000 resamples of a `(T=100, K=5, D=20)` index array is
 80 MB, more than the rest of the result put together. Leave the flag off unless

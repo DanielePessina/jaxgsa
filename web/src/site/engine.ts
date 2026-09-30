@@ -10,10 +10,14 @@
  */
 
 import { defaultDevice, init, numpy as np } from "@jax-js/jax";
+import { analyzeBorgonovo, type BorgonovoIndices } from "@/jaxgsa/borgonovo/analyze";
+import { analyzeEfast } from "@/jaxgsa/efast/analyze";
+import { sampleEfast, type EfastDesign } from "@/jaxgsa/efast/sample";
 import { analyzeKucherenko } from "@/jaxgsa/kucherenko";
 import { sampleKucherenkoDesign, type KucherenkoDesign } from "@/jaxgsa/kucherenko/sample";
 import { analyzeMorris, type MorrisMeasures } from "@/jaxgsa/morris/analyze";
 import { sampleMorris, type MorrisDesign } from "@/jaxgsa/morris/sample";
+import { analyzePawn, type PawnIndices } from "@/jaxgsa/pawn/analyze";
 import { analyzePce, type PceIndices } from "@/jaxgsa/pce/analyze";
 import { analyzeSobol, type SobolIndices } from "@/jaxgsa/sobol/analyze";
 import { sample, type SobolDesign } from "@/jaxgsa/sobol/sample";
@@ -381,9 +385,9 @@ export function alignColumnsByRunId(
 // Design generation (workflow A)
 // ---------------------------------------------------------------------------
 
-export type DesignMethod = "sobol" | "morris" | "kucherenko";
+export type DesignMethod = "sobol" | "morris" | "kucherenko" | "efast";
 
-export type GivenDataMethod = "pce" | "shapley";
+export type GivenDataMethod = "pce" | "shapley" | "borgonovo" | "pawn";
 
 /** Where the X input comes from: a sampled design or an uploaded point cloud. */
 export type XSource = { kind: "design"; method: DesignMethod } | { kind: "uploaded" };
@@ -405,9 +409,15 @@ export interface KucherenkoConfig {
   seed: number;
 }
 
-export type DesignConfig = SobolConfig | MorrisConfig | KucherenkoConfig;
+export interface EfastConfig {
+  nPerCurve: number;
+  M: number;
+  seed: number;
+}
 
-export type PortDesign = SobolDesign | MorrisDesign | KucherenkoDesign;
+export type DesignConfig = SobolConfig | MorrisConfig | KucherenkoConfig | EfastConfig;
+
+export type PortDesign = SobolDesign | MorrisDesign | KucherenkoDesign | EfastDesign;
 
 export interface GeneratedDesign {
   method: DesignMethod;
@@ -504,6 +514,31 @@ export function generateDesign(
     };
   }
 
+  if (method === "efast") {
+    // SAFETY: this branch is selected by the method discriminator; callers pass EfastConfig here.
+    const cfg = config as EfastConfig;
+    const port = sampleEfast(problem, cfg.nPerCurve, { M: cfg.M, seed: cfg.seed });
+    const nRuns = port.samples.length / D;
+
+    return {
+      method,
+      problem,
+      samples: port.samples,
+      nRuns,
+      nParams: D,
+      port,
+      summary: [
+        ["n_per_curve", String(cfg.nPerCurve)],
+        ["M", String(cfg.M)],
+        ["n_runs", String(nRuns)],
+      ],
+      notes: [
+        "eFAST has no bootstrap by design: a search curve is an ordered sweep, " +
+          "so dropping a point changes what the Fourier transform computes.",
+      ],
+    };
+  }
+
   // SAFETY: the remaining method branch is Kucherenko and therefore uses KucherenkoConfig.
   const cfg = config as KucherenkoConfig;
   const port = sampleKucherenkoDesign(problem, cfg.nSamples, cfg.seed);
@@ -570,7 +605,7 @@ function result(
  * the scalar ports. Fresh device arrays are built per port call; nothing is
  * reused.
  */
-export function analyzeGenerated(gen: GeneratedDesign, y: YData): AnalysisResult {
+export async function analyzeGenerated(gen: GeneratedDesign, y: YData): Promise<AnalysisResult> {
   const params = gen.problem.names;
   const slices: ResultSlice[] = [];
 
@@ -602,6 +637,19 @@ export function analyzeGenerated(gen: GeneratedDesign, y: YData): AnalysisResult
           { key: "mu", label: "mu", values: mu },
           { key: "mu_star", label: "mu*", values: mu_star },
           { key: "sigma", label: "sigma", values: sigma },
+        ],
+      });
+    } else if (gen.method === "efast") {
+      // SAFETY: the generated design's method discriminator matches its eFAST port.
+      const design = gen.port as EfastDesign;
+
+      const { S1, ST } = await analyzeEfast(design, col.values);
+      slices.push({
+        output: col.output,
+        time: col.time,
+        columns: [
+          { key: "S1", label: "S1", values: S1 },
+          { key: "ST", label: "ST", values: ST },
         ],
       });
     } else {
@@ -680,7 +728,7 @@ export function analyzeCloud(
           { key: "ST", label: "ST", values: ST },
         ],
       });
-    } else {
+    } else if (method === "shapley") {
       const { Sh, S1, ST }: ShapleyIndices = analyzeShapleyPce(problem, xf, col.values, {
         order,
       });
@@ -693,6 +741,23 @@ export function analyzeCloud(
           { key: "S1", label: "S1", values: S1 },
           { key: "ST", label: "ST", values: ST },
         ],
+      });
+    } else if (method === "borgonovo") {
+      const { delta, S1 }: BorgonovoIndices = analyzeBorgonovo(problem, xf, col.values);
+      slices.push({
+        output: col.output,
+        time: col.time,
+        columns: [
+          { key: "delta", label: "delta", values: delta },
+          { key: "S1", label: "S1", values: S1 },
+        ],
+      });
+    } else {
+      const { pawn }: PawnIndices = analyzePawn(problem, xf, col.values);
+      slices.push({
+        output: col.output,
+        time: col.time,
+        columns: [{ key: "pawn", label: "PAWN", values: pawn }],
       });
     }
   }
@@ -815,7 +880,7 @@ export function buildSessionJson(
 ): SessionJson {
   const designEntries: SessionJson["designs"] = {};
 
-  for (const method of ["sobol", "morris", "kucherenko"] as const) {
+  for (const method of ["sobol", "morris", "kucherenko", "efast"] as const) {
     if (!designs[method]) continue;
     const gen = designs[method];
 

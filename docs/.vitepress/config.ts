@@ -110,8 +110,13 @@ export default defineConfig({
             { text: 'Sobol', link: '/api/sobol' },
             { text: 'Morris', link: '/api/morris' },
             { text: 'eFAST', link: '/api/efast' },
-            { text: 'DGSM', link: '/api/dgsm' },
             { text: 'Kucherenko', link: '/api/kucherenko' },
+          ],
+        },
+        {
+          text: 'Gradient methods',
+          items: [
+            { text: 'DGSM', link: '/api/dgsm' },
           ],
         },
         {

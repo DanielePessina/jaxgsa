@@ -52,6 +52,10 @@ one-dimensional, finite, and unique. `values` may be `(N, T_k)` or `(N,)` for a
 single-time channel. jaxgsa sorts each time grid in ascending order and carries
 the corresponding value columns with it.
 
+Rectangular numeric nested lists follow the regular `(N, T, K)` output path.
+For a single sample at a single time, use named channel pairs in a dict to
+distinguish irregular input from a rectangular list.
+
 When `problem.output_names` is declared, a list follows that order. A dict is
 also accepted and must contain exactly those keys; its insertion order does not
 override the declared output order:

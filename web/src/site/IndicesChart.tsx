@@ -12,7 +12,23 @@ const HEIGHT = 400;
 
 const MARGIN = { top: 24, right: 18, bottom: 70, left: 54 };
 
-const PALETTE = ["#5cc3c8", "#4f8fe5", "#d6a25c", "#bd72c7", "#62b68c"];
+const PALETTE = [
+  "var(--chart-bar-1)",
+  "var(--chart-bar-2)",
+  "var(--chart-bar-3)",
+  "var(--chart-bar-4)",
+  "var(--chart-bar-5)",
+];
+
+const CHART_COLORS = [
+  "--chart-surface",
+  "--chart-grid",
+  "--chart-zero",
+  "--chart-tick",
+  "--chart-label",
+  "--chart-negative",
+  ...PALETTE.map((_, index) => `--chart-bar-${index + 1}`),
+];
 
 export interface ChartDataRow {
   parameter: string;
@@ -63,7 +79,18 @@ function toCsv(result: AnalysisResult, sliceIndex: number): string {
 }
 
 function downloadPng(svg: SVGSVGElement, fileName: string) {
-  const source = new XMLSerializer().serializeToString(svg);
+  // Embed the active theme colors so the downloaded SVG image is self-contained.
+  const themedSvg = svg.cloneNode(true);
+
+  if (!(themedSvg instanceof SVGSVGElement)) return;
+
+  const colors = getComputedStyle(document.documentElement);
+
+  for (const name of CHART_COLORS) {
+    themedSvg.style.setProperty(name, colors.getPropertyValue(name).trim());
+  }
+
+  const source = new XMLSerializer().serializeToString(themedSvg);
   const url = URL.createObjectURL(new Blob([source], { type: "image/svg+xml;charset=utf-8" }));
   const image = new Image();
   image.onload = () => {
@@ -75,7 +102,7 @@ function downloadPng(svg: SVGSVGElement, fileName: string) {
 
     if (!ctx) return;
     ctx.scale(scale, scale);
-    ctx.fillStyle = "#111318";
+    ctx.fillStyle = colors.getPropertyValue("--chart-surface").trim();
     ctx.fillRect(0, 0, WIDTH, HEIGHT);
     ctx.drawImage(image, 0, 0, WIDTH, HEIGHT);
     const link = document.createElement("a");
@@ -140,11 +167,11 @@ export function IndicesChart({ result, sliceIndex, fileName }: {
 
       <svg ref={svgRef} viewBox={`0 0 ${WIDTH} ${HEIGHT}`} role="img" aria-labelledby={titleId} className="block h-auto w-full" xmlns="http://www.w3.org/2000/svg">
         <title id={titleId}>{result.method} sensitivity indices for {slice.output} at time {slice.time}</title>
-        <rect width={WIDTH} height={HEIGHT} fill="#111318" rx="6" />
+        <rect width={WIDTH} height={HEIGHT} fill="var(--chart-surface)" rx="6" />
         {chart.ticks.map((tick) => (
           <g key={tick}>
-            <line x1={MARGIN.left} x2={WIDTH - MARGIN.right} y1={chart.y(tick)} y2={chart.y(tick)} stroke={tick === 0 ? "#6e7683" : "#2a2e35"} strokeWidth={tick === 0 ? 1.2 : 1} />
-            <text x={MARGIN.left - 10} y={chart.y(tick)} dy="0.35em" textAnchor="end" fill="#8d949e" fontFamily="Geist Mono, monospace" fontSize="11">{formatIndex(tick)}</text>
+            <line x1={MARGIN.left} x2={WIDTH - MARGIN.right} y1={chart.y(tick)} y2={chart.y(tick)} stroke={tick === 0 ? "var(--chart-zero)" : "var(--chart-grid)"} strokeWidth={tick === 0 ? 1.2 : 1} />
+            <text x={MARGIN.left - 10} y={chart.y(tick)} dy="0.35em" textAnchor="end" fill="var(--chart-tick)" fontFamily="Geist Mono, monospace" fontSize="11">{formatIndex(tick)}</text>
           </g>
         ))}
         {chart.data.flatMap((row) =>
@@ -155,14 +182,14 @@ export function IndicesChart({ result, sliceIndex, fileName }: {
             const height = Math.max(1, Math.abs(chart.y(value) - chart.zero));
 
             return (
-              <rect key={`${row.parameter}-${column.key}`} x={x} y={y} width={chart.series.bandwidth()} height={height} rx="2" fill={value < 0 ? "#df6b63" : PALETTE[seriesIndex % PALETTE.length]}>
+              <rect key={`${row.parameter}-${column.key}`} x={x} y={y} width={chart.series.bandwidth()} height={height} rx="2" fill={value < 0 ? "var(--chart-negative)" : PALETTE[seriesIndex % PALETTE.length]}>
                 <title>{row.parameter} · {column.label}: {formatIndex(value)}</title>
               </rect>
             );
           }),
         )}
         {result.parameters.map((parameter) => (
-          <text key={parameter} x={chart.x(parameter)! + chart.x.bandwidth() / 2} y={HEIGHT - MARGIN.bottom + 26} textAnchor="middle" fill="#a5abb4" fontFamily="Geist Mono, monospace" fontSize="12">{parameter}</text>
+          <text key={parameter} x={chart.x(parameter)! + chart.x.bandwidth() / 2} y={HEIGHT - MARGIN.bottom + 26} textAnchor="middle" fill="var(--chart-label)" fontFamily="Geist Mono, monospace" fontSize="12">{parameter}</text>
         ))}
       </svg>
     </div>

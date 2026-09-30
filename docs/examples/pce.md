@@ -98,8 +98,8 @@ LOO RMSE: 0.07379977
 std(Y): 3.7769964
 ```
 
-The block above `S1:` is the verbose summary. `analyze` prints it by default
-in 1.0. It restates the problem it was given, so a wrong `bounds` array or a
+The block above `S1:` is the verbose summary. `analyze` prints it by default.
+It restates the problem it was given, so a wrong `bounds` array or a
 misread output shape shows up before you read a single index. Pass
 `verbose=False` to silence it.
 

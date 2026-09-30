@@ -1,31 +1,45 @@
-# Comparing eight methods on Ishigami
+# Comparing Methods on Ishigami
 
-This page compares eight jaxgsa methods on one model — the Ishigami function — along accuracy, cost (model evaluations), and wall time, to support method choice.
+Different sensitivity methods answer different questions. This example runs
+eight methods on the same three-input model so you can see what each result
+means, then compare model evaluations and accuracy where the quantities are
+comparable.
 
-The full script is [`examples/method_comparison.py`](https://github.com/danielepessina/jaxgsa/blob/master/examples/method_comparison.py), run with `uv run python examples/method_comparison.py`.
+The Ishigami function has a useful surprise: its third input has almost no
+effect on its own, but matters through an interaction with the first input.
+Its analytical first-order indices are $S_1 = [0.3139, 0.4424, 0.0000]$;
+its total-order indices, which include interactions, are
+$S_T = [0.5576, 0.4424, 0.2437]$. Looking only at the third input's
+first-order index would miss its contribution.
 
-Every number below is printed by that script as it runs. The wall times come from one run on one machine and depend on hardware and JAX compile state, so read them as an order of magnitude, not as a benchmark.
+The full script is [`examples/method_comparison.py`](https://github.com/danielepessina/jaxgsa/blob/master/examples/method_comparison.py), run with `uv run examples/method_comparison.py`.
 
-## What is compared
+The script prints the numbers below. Its wall times come from one machine and
+depend on hardware and JAX compilation. Use them only as a rough indication
+of cost.
 
-Each method estimates first-order ($S_1$) and total-order ($S_T$) indices, and accuracy is the mean absolute error (MAE) of those estimates against Ishigami's analytical indices:
+## Start with the question
 
-- $S_1 = [0.3139,\ 0.4424,\ 0.0000]$
-- $S_T = [0.5576,\ 0.4424,\ 0.2437]$
+| Question | Methods in this example | What to read |
+| --- | --- | --- |
+| Which inputs explain output variation, alone and with interactions? | Sobol, eFAST, HDMR, PCE | `S1` and `ST` |
+| Which inputs can I rule out cheaply? | Morris, DGSM | Screening measure or bound, not a variance share |
+| How should variation be shared among inputs, including interactions? | Shapley | Shapley effects |
+| Which inputs change the whole output distribution? | Borgonovo delta | Delta measure |
 
-Three rows of the results table need a different reading.
+Start with [Sobol](/api/sobol) if you need both first and total effects and
+possibly pairwise interactions. Try [Morris](/api/morris) if you need to narrow
+many inputs before paying for a more detailed analysis. If you already have
+input and output samples, methods such as [HDMR](/api/hdmr) and
+[PCE](/api/pce) can use them directly. The [method guide](/guide/methods)
+covers the remaining choices and assumptions.
 
-- **DGSM contributes its Poincaré upper-bound gap instead of $S_T$.** DGSM has no point estimate for the total index, only bounds, so its ST row is the MAE of the upper bound against the analytical $S_T$.
-- **Morris is on its own scale.** $\mu^*$ is a mean absolute slope, not a variance share, so the Morris row is a ranking check only and carries no MAE columns.
-- **Shapley and Borgonovo $S_1$ come from their given-data estimators.** Shapley reads $S_1$ out of the same PCE surrogate used for the PCE row (same 2,000 samples and order 4, which is why the two rows match exactly). Borgonovo reports $S_1$ from its built-in density estimator.
+## What the comparison shows
 
-## Methodology
-
-Timing note, verbatim from the script's printed output:
-
-> Timing note: Sobol, eFAST, and Morris times are end-to-end (sample + evaluate + analyze). HDMR, PCE, Shapley, and Borgonovo times are analyze-only (shared pre-computed samples). DGSM time is analyze-only (internally evaluates via autodiff).
-
-## Results
+For methods that estimate `S1` or `ST`, the table reports mean absolute error
+(MAE) against the analytical values above. Smaller is closer for this run.
+`N evals` counts model evaluations. A dash means that the method does not
+produce a comparable estimate.
 
 | Method | S1 MAE | ST MAE | N evals | Wall time (s) |
 | --- | ---: | ---: | ---: | ---: |
@@ -38,29 +52,28 @@ Timing note, verbatim from the script's printed output:
 | Shapley (Sh) | 0.0271 | 0.0254 | 2,000 | 0.23 |
 | Borgonovo delta | 0.0109 | — | 2,000 | 0.48 |
 
-A "—" means the method does not produce that quantity: DGSM has no $S_T$ point estimate, Morris has no variance-share indices at all, and Borgonovo reports no $S_T$.
+For this model and these sample sizes, eFAST's first-order estimates are closer
+to the analytical values than Sobol's, but use three times as many model
+evaluations. Sobol also gives pairwise interaction indices when its
+second-order option is enabled. Morris gives a screening ranking with only 64
+evaluations; it does not estimate a share of output variance.
 
-Four readings decide most method choices.
+The DGSM row needs special care: 3.7270 is the error of its *upper bound* for
+`ST`, not an index estimate. The bound is loose for this non-monotone model,
+so use DGSM here to screen inputs rather than to estimate their total effects.
+Shapley and Borgonovo report `S1` through their given-data estimators; the
+Shapley run uses the same PCE surrogate as the PCE row, explaining their
+matching `S1` values.
 
-- **eFAST is the most accurate first-order method on this budget.** Its $S_1$ MAE is 0.0021, about six times smaller than Sobol's 0.0136, at three times the evaluations (12,288 vs 4,096).
-- **Sobol is the reference for second order.** It is the only method here that reports $S_2$, and its $S_T$ MAE of 0.0243 is close behind eFAST's 0.0106 at a third of the evaluations. If you need pairwise interactions, this is the row to build on.
-- **DGSM's bound gap is huge on Ishigami, and that is expected.** The 3.7270 gap means the Poincaré upper bound misses the true $S_T$ by nearly four. Ishigami's response is strongly non-monotone — $x_1$ enters linearly and again inside $x_3^4 \sin(x_1)$ — which is exactly the curved regime where the bound is loose. The script warns that the smallest upper bound is 2.20, above the maximum possible $S_T$ of 1, and that more samples will not tighten it. Use DGSM here to screen, not to estimate $S_T$.
-- **Morris costs 64 evaluations.** That is the whole point: a screening check at a fraction of any other row's budget, in exchange for a ranking instead of indices.
+The time columns also cover different work. Sobol, eFAST, and Morris include
+sampling, model evaluation, and analysis. HDMR, PCE, Shapley, and Borgonovo
+time analysis of shared precomputed samples. DGSM times analysis that evaluates
+the model internally with automatic differentiation. Do not compare the wall
+times as if all rows included the same steps.
 
-## When to use each method
-
-| Method | Best for |
-| --- | --- |
-| [Sobol'](/api/sobol) | Gold standard for $S_2$ |
-| [eFAST](/api/efast) | Screening at $N \times D$ |
-| [DGSM](/api/dgsm) | Differentiable models via autodiff |
-| [HDMR](/api/hdmr) | Arbitrary $(X, Y)$ data |
-| [PCE](/api/pce) | Emulation with a reusable surrogate |
-| [Morris](/api/morris) | Cheapest screening / factor fixing |
-| [Shapley](/api/shapley) | Fair variance shares summing to 1 |
-| [Borgonovo delta](/api/borgonovo) | Moment-independent influence on the whole output density |
-
-HSIC and PAWN are given-data methods that sit outside this variance-share comparison: they measure dependence and distributional distance rather than variance shares, and they are the better choice when the output is skewed or heavy-tailed. For the estimator details behind every row, see [Methods](/guide/methods).
+HSIC and PAWN are given-data methods outside this comparison. They measure
+dependence or changes in the output distribution. See [Choosing a method](/guide/methods)
+for the full method comparison and assumptions behind each choice.
 
 ## Figures
 

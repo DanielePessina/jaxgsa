@@ -25,7 +25,7 @@ transcripts below and draws the three plots discussed at the end.
 ## What the run prints
 
 The script form prints the sampler line, the output shape, and the verbose
-analysis summary that `analyze` emits by default in 1.0:
+analysis summary that `analyze` emits by default:
 
 ```
 jaxgsa.sobol.sample: D=3, mode=second-order, base_n=512, requested_runs>=4096, n_runs=4096, n_expanded=4096, duplicates_removed=0 (0.0%), scramble=True

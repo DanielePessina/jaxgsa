@@ -3,8 +3,8 @@ layout: home
 
 hero:
   name: jaxgsa
-  text: Global Sensitivity Analysis in JAX
-  tagline: Thirteen methods for screening, variance decomposition, and distribution-based sensitivity—with a common JAX interface.
+  text: Find which inputs matter
+  tagline: Global sensitivity analysis for computational models. Explore how changing your inputs changes the output, then choose a method that fits your question and data.
   actions:
     - theme: brand
       text: Get Started
@@ -15,46 +15,49 @@ hero:
     - theme: alt
       text: API Reference
       link: /api/problem
+    - theme: alt
+      text: Browser Workbench
+      link: https://danielepessina.github.io/jaxgsa/workbench/
 features:
-  - title: Choose among thirteen methods
-    details: Compare the question each method answers, its sampling cost, and its support for dependent or categorical inputs before running it.
-  - title: Reuse data or build a design
-    details: Four methods create dedicated sample designs. Nine work with ordinary input samples, including simulation runs you already have.
-  - title: Analyze every output together
-    details: Use scalar, multi-output, or time-series model outputs. The same result contract carries parameter and output labels into xarray.
-  - title: Keep irregular output grids
-    details: Give each output channel its own time coordinates. Compatible channels are bucketed automatically without padding, and the result preserves those coordinates.
-  - title: Differentiate the analysis
-    details: Eleven methods expose JAX-transformable estimator cores. DGSM separately uses automatic differentiation of the model to construct derivative-based measures.
-  - title: Work with dependent inputs
-    details: Kucherenko, VKOGA, HDMR, and distribution-based methods offer distinct dependence-aware quantities. The guide explains which question each one answers.
-  - title: Scale with JAX
-    details: Vectorized estimator cores avoid per-output Python loops and can be compiled for repeated analyses. Reproducible benchmarks document where this matters.
+  - title: Start with one result
+    details: Define the inputs, run the model, and read which inputs matter on their own or through interactions.
+  - title: Choose a useful measure
+    details: Screen many inputs, measure shares of output variation, or study how inputs change the output distribution.
+  - title: Use the data you have
+    details: Some methods choose new model runs. Others analyze input and output samples you already collected.
+  - title: Go beyond one output
+    details: Analyze several outputs or a time series, including channels measured on different time grids.
 ---
 
-## Which method should I use?
+## Your first analysis
 
-The methods measure different quantities, cost different numbers of model
-runs, and do not all accept the same problems. Four build their own sampling
-design, and the other nine work on $(X, Y)$ pairs you already have.
+Suppose a model has three uncertain inputs. You want to know which ones explain
+changes in its output. The [getting started guide](/guide/getting-started) takes
+you from defining those inputs to interpreting a Sobol result. In that result,
+`S1` measures an input's contribution on its own; `ST` also includes its
+interactions with other inputs. A large gap between them tells you that the
+input matters in combination with others.
 
-Start at [Choosing a method](/guide/methods). It walks through three
-questions: can you still choose where to run the model, what should the number
-mean, and what is your evaluation budget.
+After the first run, [Concepts](/guide/concepts) explains the ideas behind
+those numbers. The [basic example](/examples/basic) shows how to check whether
+the estimates have settled as you add samples.
 
-For a high-dimensional study, read [Scaling to large problems](/guide/scale) before
-choosing a design. It records the main cost drivers and the settings that move
-each method's practical limit.
+## Where to go next
 
-The [method capability table](/guide/methods#method-capabilities) records which
-methods accept dependent or categorical parameters and which report bootstrap
-confidence intervals.
+- [Choose a method](/guide/methods) when you know the question but are unsure
+  which analysis to run.
+- [Use non-uniform inputs](/examples/non-uniform-inputs) when a range alone does
+  not describe how likely each input value is.
+- [Plan a larger study](/guide/scale) when model evaluations are expensive or
+  you have many inputs.
+- [Look up the API](/api/) for arguments, return values, and supported input
+  types.
 
 ## Performance
 
-Performance depends on the method, sample count, parameter count, and output
-shape. The [benchmarks guide](/guide/benchmarks) reports complete workloads,
-hardware, and baselines rather than a single headline number.
+Performance depends on the method, sample count, number of inputs, and output
+shape. See the [benchmarks guide](/guide/benchmarks) for measured workloads and
+hardware.
 
 jaxgsa's Sobol sampling and analysis workflow follows
 [SALib](https://salib.readthedocs.io/), reimplemented for JAX.

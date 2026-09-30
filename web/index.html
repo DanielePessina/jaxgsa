@@ -1,9 +1,24 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="dark" />
+    <script>
+      // Apply the saved choice before paint; otherwise follow the device theme.
+      try {
+        const savedTheme = localStorage.getItem("jaxgsa-theme");
+        const prefersDark = matchMedia("(prefers-color-scheme: dark)").matches;
+        document.documentElement.classList.toggle(
+          "dark",
+          savedTheme === "dark" || (savedTheme !== "light" && prefersDark),
+        );
+      } catch {
+        document.documentElement.classList.toggle(
+          "dark",
+          matchMedia("(prefers-color-scheme: dark)").matches,
+        );
+      }
+    </script>
     <title>jaxgsa — sensitivity analysis in your browser</title>
   </head>
   <body>

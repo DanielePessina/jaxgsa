@@ -137,7 +137,15 @@ def _indices_3d(
     if backend == "pce":
         from jaxgsa.pce._analyze import _fit_pce_core
 
-        fit = _fit_pce_core(problem, X, Y_3d, **backend_kwargs)
+        # indices() and the bootstrap replicates read only the coefficients
+        # (the variance allocation below), never the LOO RMSE or the
+        # fitted-value variance. The pce core defaults diagnostics=True, so
+        # pass False explicitly to skip the Cholesky factor, the
+        # (n_terms, N) triangular solve and the (N, T*K) residual array the
+        # coefficient extraction never touches. See _fit_pce_core's
+        # diagnostics docstring; the coefficients are bit-identical either
+        # way (verified on the benchmark shape).
+        fit = _fit_pce_core(problem, X, Y_3d, diagnostics=False, **backend_kwargs)
         # Orthonormality makes each squared non-constant coefficient a
         # partial variance; multi_index[1:] > 0 IS the membership matrix.
         partial = fit.coefficients[..., 1:] ** 2

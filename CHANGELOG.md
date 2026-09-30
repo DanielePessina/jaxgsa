@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.0.0
+
+First stable release. The API contract of 0.9.1 is unchanged; 1.0.0 marks it
+as supported.
+
+### New: the browser workbench
+
+A [WASM/React companion](https://danielepessina.github.io/jaxgsa/workbench/)
+runs eight ported methods locally
+in the browser (float64, no data leaves the page): define a problem, sample a
+Sobol/Morris/Kucherenko/eFAST design, bring the model outputs back, and read
+the indices — plus the fit-any-data estimators (PCE, Shapley, Borgonovo,
+PAWN) on uploaded point clouds. The tolerances are pinned against the Python
+package through golden fixtures in `goldens/`.
+
+### Release summary
+
+The Python API retains the call patterns of 0.9.1. Version 1.0.0 is the
+API-stability statement: breaking changes now require a major version.
+
+- Faster optimal-transport and PAWN kernels, and reduced Shapley fitting
+  overhead, preserve the numerical results of the previous implementations.
+- Rectangular nested lists and tuples with two time slices now follow the
+  same analysis path as arrays. Irregular channels retain their input
+  precision until the analyzer can warn about float32 downcasting.
+- Nightly CI runs the ordinary numerical regression suite in both supported
+  precision settings. Publication validates every test, including slow tests,
+  against the pinned release commit before building and publishing.
+- Built-wheel checks cover sampling persistence, analytical indices, NetCDF
+  export and surrogate prediction in a fresh installation. Source archives
+  explicitly select release files and exclude local build dependencies.
+- Manual publication requires an existing release tag and uses the same
+  validation gates as publication triggered by a GitHub release.
+
 ## 0.9.1
 
 ### New: irregularly sampled outputs
@@ -29,9 +63,10 @@ pass; `scripts/benchmark_irregular.py` measures it.
 
 ### Release summary
 
-Version 0.9.1 is a performance and behavior-contract release with no API
-changes. All thirteen methods keep their 0.9.0 interface; the work is in the
-kernels and in the entry path.
+Version 0.9.1 improves performance and the behavior contract. It also adds
+the irregular-output form of `Y`, the `on_invalid='none'` policy, and
+`Problem.with_output_names()`. The thirteen analysis methods retain their
+existing call patterns.
 
 ### Performance
 

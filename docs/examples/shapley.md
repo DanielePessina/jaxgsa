@@ -106,7 +106,7 @@ ST: [0.55818665 0.4418516  0.24404898]
 explained_variance: 1.0339365
 ```
 
-The summary block prints by default in 1.0. `verbose=False` silences it. The
+The summary block prints by default. `verbose=False` silences it. The
 `backend: pce` line is worth a glance, because it is the default and the rest
 of the page depends on which one ran.
 
@@ -233,8 +233,7 @@ structural ANCOVA variances, truncated at `maxorder`. Its knobs are `maxorder`
 (default 2), `m`, `maxiter`, `lambdax` and `slice_chunk_size`. It accepts a
 declared correlation with `include_correlative=True`.
 
-Both take `(N,)`, `(N, K)` and `(N, T, K)` outputs as of 1.0. Older docs
-saying the PCE backend is scalar-only are wrong.
+Both take `(N,)`, `(N, K)` and `(N, T, K)` outputs.
 
 Backend knobs are not shared. Passing `maxorder=3` with `backend="pce"` raises
 `TypeError: analyze() got an unexpected keyword argument 'maxorder'` rather

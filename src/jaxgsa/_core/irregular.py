@@ -32,6 +32,7 @@ import jax.numpy as jnp
 import numpy as np
 import xarray as xr
 from jax import Array
+from numpy.typing import NDArray
 
 from jaxgsa._core import verbose as _verbose
 
@@ -70,9 +71,11 @@ def _is_irregular_y(Y: Any) -> bool:
     """Report whether ``Y`` is the ragged per-channel input form.
 
     The ragged form is a ``list``/``tuple`` of ``(times, values)`` pairs, or
-    a ``dict`` mapping output name to such a pair. Anything else — a plain
-    array, a list of scalars, a list of arrays — is the regular input and
-    reads ``False`` here.
+    a ``dict`` mapping output name to such a pair. Numeric rectangular
+    sequences take the regular path: in particular, ``(N, 2, K)`` outputs
+    must behave identically whether passed as an array or nested lists.
+    A name-keyed dict disambiguates a one-sample, one-time channel pair
+    that is also a valid rectangular output.
 
     Args:
         Y: The caller's output argument, before any ``jnp.asarray``.
@@ -83,7 +86,16 @@ def _is_irregular_y(Y: Any) -> bool:
     if isinstance(Y, dict):
         return bool(Y) and all(_is_channel_pair(value) for value in Y.values())
     if isinstance(Y, (list, tuple)):
-        return bool(Y) and all(_is_channel_pair(item) for item in Y)
+        if not Y or not all(_is_channel_pair(item) for item in Y):
+            return False
+        try:
+            rectangular = np.asarray(Y)
+        except (TypeError, ValueError):
+            return True
+        return not (
+            rectangular.ndim == 3
+            and (np.issubdtype(rectangular.dtype, np.number) or rectangular.dtype == np.bool_)
+        )
     return False
 
 
@@ -111,7 +123,7 @@ def _coerce_irregular(
     Y: Any,
     problem: "Problem",
     n_expected: int,
-) -> list[tuple[str, Array, Array]]:
+) -> list[tuple[str, Array, NDArray[Any]]]:
     """Validate the ragged input and normalize it to per-channel tensors.
 
     Accepts a ``dict`` of ``name -> (times, values)`` or a ``list``/``tuple``
@@ -168,7 +180,7 @@ def _coerce_irregular(
     if len(set(names)) != len(names):
         raise ValueError(f"irregular Y output names must be unique, got {names}")
 
-    normalized: list[tuple[str, Array, Array]] = []
+    normalized: list[tuple[str, Array, NDArray[Any]]] = []
     for name, pair in channels:
         if not _is_channel_pair(pair):
             raise ValueError(
@@ -207,7 +219,9 @@ def _coerce_irregular(
         # are caught instead of silently merging into one coordinate.
         order = np.argsort(times, kind="stable")
         times = jnp.asarray(times[order])
-        values = jnp.asarray(values[:, order])
+        # Preserve the host dtype until the regular analyzer checks for
+        # precision loss, before it converts the channel values to JAX.
+        values = values[:, order]
         if np.any(np.diff(np.asarray(times)) == 0):
             raise ValueError(f"output channel {name!r}: times must not repeat")
         normalized.append((name, times, values))

@@ -183,6 +183,46 @@ def test_regular_array_stays_on_the_regular_path():
     assert not isinstance(result, IrregularResult)
 
 
+@pytest.mark.parametrize("container", [list, tuple])
+def test_nested_two_time_outputs_match_regular_array(container):
+    """Two time slices are output data, even when their rows look like pairs."""
+    design = _sobol_design()
+    X = np.asarray(design.samples)
+    values = np.stack((X[:, :2], X[:, :2] ** 2), axis=1)
+    regular = jaxgsa.sobol.analyze(design, jnp.asarray(values))
+    nested = jaxgsa.sobol.analyze(design, container(values.tolist()))
+
+    assert not isinstance(regular, IrregularResult)
+    assert not isinstance(nested, IrregularResult)
+    np.testing.assert_array_equal(nested.S1, regular.S1)
+    np.testing.assert_array_equal(nested.ST, regular.ST)
+    np.testing.assert_array_equal(nested.S2, regular.S2)
+
+
+@pytest.mark.parametrize("container", [list, tuple])
+def test_python_channel_pairs_remain_irregular(container):
+    """Explicit channels need no NumPy/JAX arrays to route correctly."""
+    design = _sobol_design()
+    ragged = _ragged_y(design.n_runs)
+    pairs = container([(times.tolist(), values.tolist()) for times, values in ragged])
+    result = _irregular(jaxgsa.sobol.analyze(design, pairs))
+
+    assert list(result.channels) == list(OUTPUT_NAMES)
+    np.testing.assert_array_equal(result.times["conc"], T_CONC)
+    np.testing.assert_array_equal(result.times["d43"], T_D43)
+
+
+def test_irregular_values_warn_before_float32_downcast():
+    """Bucketing retains the regular path's actionable precision diagnostic."""
+    design = _sobol_design()
+    values = np.asarray(design.samples)[:, 0] * 1e-50
+    with jax.enable_x64(False), pytest.warns(jaxgsa.JaxgsaWarning, match="passed as float64"):
+        result = _irregular(
+            jaxgsa.sobol.analyze(design, {"conc": ([0.0], values), "d43": ([0.0], values)})
+        )
+    assert list(result.channels) == list(OUTPUT_NAMES)
+
+
 def test_dgsm_explicitly_rejects_irregular_outputs():
     X = jnp.asarray(monte_carlo(PROBLEM, n=N, seed=1))
     with pytest.raises(NotImplementedError, match="irregular"):

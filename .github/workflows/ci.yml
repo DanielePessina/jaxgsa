@@ -6,7 +6,7 @@ on:
   pull_request:
   workflow_dispatch:
   schedule:
-    # 03:17 UTC daily, for the `slow` tests that pytest deselects by default.
+    # 03:17 UTC daily, for the numerical regression suite and slow tests.
     - cron: "17 3 * * *"
 
 concurrency:
@@ -33,7 +33,7 @@ jobs:
           enable-cache: true
 
       - name: Install project and dev dependencies
-        run: uv sync --extra dev
+        run: uv sync --locked --extra dev
 
       - name: Ruff format check
         run: uv run ruff format --check .
@@ -68,12 +68,33 @@ jobs:
           enable-cache: true
 
       - name: Install project and dev dependencies
-        run: uv sync --extra dev
+        run: uv sync --locked --extra dev
 
       - name: Run tests in double precision
         env:
           JAX_ENABLE_X64: "1"
         run: uv run pytest -q tests/test_feature_matrix.py tests/test_registry.py tests/test_imports.py
+
+  numerical-tests:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        x64: ["0", "1"]
+    env:
+      JAX_ENABLE_X64: ${{ matrix.x64 }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - name: Install project and dev dependencies
+        run: uv sync --locked --extra dev
+      - name: Run all ordinary numerical regressions
+        run: uv run pytest -m "not slow" -q
 
   # The joint-mode optimal-transport tests that run every Sinkhorn solve at
   # full sample size. `addopts = "-m 'not slow'"` in pyproject.toml keeps them
@@ -93,7 +114,7 @@ jobs:
           enable-cache: true
 
       - name: Install project and dev dependencies
-        run: uv sync --extra dev
+        run: uv sync --locked --extra dev
 
       - name: Run the deselected slow tests
         run: uv run pytest -m slow -v
