@@ -1,0 +1,32 @@
+# Adapted from paper_GLP_GSA/paper/plotting_files/direct_convergence.
+# Font sizes are increased for documentation figures rather than manuscript panels.
+font.family: monospace
+font.size: 10
+axes.titlesize: 11
+axes.labelsize: 10
+xtick.labelsize: 9
+ytick.labelsize: 9
+legend.fontsize: 8
+legend.frameon: False
+figure.facecolor: white
+axes.facecolor: white
+axes.prop_cycle: cycler('color', ['1b4f9c', 'c85200', '117a3d', 'a52c3c', '7570b3', '8c564b', 'c04f87', '666666', '9a861b', '17868b'])
+axes.linewidth: 0.8
+lines.linewidth: 1.6
+lines.markersize: 4.5
+xtick.minor.visible: True
+ytick.minor.visible: True
+xtick.major.size: 3
+ytick.major.size: 3
+xtick.minor.size: 1.8
+ytick.minor.size: 1.8
+xtick.major.width: 0.8
+ytick.major.width: 0.8
+xtick.minor.width: 0.6
+ytick.minor.width: 0.6
+figure.dpi: 220
+savefig.dpi: 220
+savefig.bbox: tight
+svg.fonttype: none
+pdf.fonttype: 42
+ps.fonttype: 42

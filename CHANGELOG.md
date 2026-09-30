@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.2
+
+Publish the validated 1.0 code under a fresh version number because PyPI
+cannot reuse the filenames from a previously deleted 1.0.0 upload. There
+are no Python API or numerical implementation changes from the archived
+1.0.0 release. The original GitHub tag and Zenodo record remain available.
+
+Documentation figures now share the paper-style fonts, palette and minor
+ticks. A new worked example fits input ranges to target Sobol indices and
+checks the result against an independent design and analytical solution.
+
 ## 1.0.0
 
 First stable release. The API contract of 0.9.1 is unchanged; 1.0.0 marks it

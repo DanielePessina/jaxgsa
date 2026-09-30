@@ -191,6 +191,10 @@ gradient simply cannot pass back through the sensitivity analysis itself.
 
 ## A practical workflow
 
+For a complete inverse problem, see [Fit input ranges to target Sobol
+indices](/examples/inverse-sobol-bounds). It optimizes two uniform ranges and
+checks the fitted indices against an analytical solution and a fresh design.
+
 1. Run `analyze()` once on representative data and inspect its warnings and
    diagnostics.
 2. Reproduce the fields you need with `indices()` on the same clean data.
