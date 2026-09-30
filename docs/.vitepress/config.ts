@@ -40,7 +40,7 @@ export default defineConfig({
   },
 
   head: [
-    ['meta', { name: 'google-site-verification', content: 'google05262a1df685974f' }],
+    ['meta', { name: 'google-site-verification', content: 'UlELoB8SayaGMeLWNeIYBQ8T1xKkLPLi1kGBmWbOpmQ' }],
     ['meta', { property: 'og:type', content: 'website' }],
     ['meta', { property: 'og:site_name', content: 'jaxgsa' }],
     ['meta', { name: 'twitter:card', content: 'summary' }],
