@@ -42,6 +42,33 @@ After the first run, [Concepts](/guide/concepts) explains the ideas behind
 those numbers. The [basic example](/examples/basic) shows how to check whether
 the estimates have settled as you add samples.
 
+## Please cite
+
+If you use jaxgsa in research, please cite it. For the software citation, use
+the general DOI
+[10.5281/zenodo.22099117](https://doi.org/10.5281/zenodo.22099117), which
+covers all versions:
+
+```bibtex
+@software{pessina2026jaxgsa,
+  author    = {Pessina, Daniele and Papathanasiou, Maria M.},
+  title     = {jaxgsa: Global Sensitivity Analysis in JAX},
+  year      = {2026},
+  doi       = {10.5281/zenodo.22099117},
+  publisher = {Zenodo},
+  url       = {https://doi.org/10.5281/zenodo.22099117}
+}
+```
+
+As a text citation:
+
+> Daniele Pessina and Maria M. Papathanasiou (2026). *jaxgsa: Global
+> Sensitivity Analysis in JAX*. Zenodo.
+> https://doi.org/10.5281/zenodo.22099117
+
+To cite a specific release, use its version DOI instead — for v1.0.2 that is
+[10.5281/zenodo.23057233](https://doi.org/10.5281/zenodo.23057233).
+
 ## Where to go next
 
 - [Choose a method](/guide/methods) when you know the question but are unsure
