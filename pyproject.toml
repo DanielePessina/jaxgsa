@@ -65,6 +65,34 @@ examples = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build.targets.sdist]
+# Ship the Python package and its reproducible tests, examples and documentation.
+include = [
+    "/src",
+    "/tests",
+    "/scripts",
+    "/examples",
+    "/docs",
+    "/goldens",
+    "/skills/jaxgsa",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+    "/CONTRIBUTING.md",
+    "/CITATION.cff",
+    "/.zenodo.json",
+    "/pyproject.toml",
+    "/ruff.toml",
+    "/uv.lock",
+]
+exclude = [
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.DS_Store",
+    "/docs/.vitepress/dist",
+    "/docs/.vitepress/cache",
+]
+
 [dependency-groups]
 dev = []
 

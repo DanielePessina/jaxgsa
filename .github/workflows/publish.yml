@@ -10,12 +10,68 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to validate and publish (e.g. v1.0.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
 
 jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.release.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ github.event.release.tag_name || inputs.release_tag }}
+      - name: Pin the release commit for validation and building
+        id: release
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  validate:
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        x64: ["0", "1"]
+    env:
+      JAX_ENABLE_X64: ${{ matrix.x64 }}
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Verify release tag matches package version
+        run: |
+          package_version="$(uv run --no-project python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          test "$RELEASE_TAG" = "v$package_version"
+      - name: Install project and dev dependencies
+        run: uv sync --locked --extra dev
+      - name: Check formatting, lint, and types
+        run: |
+          uv run ruff format --check .
+          uv run ruff check .
+          uv run ty check src/jaxgsa scripts/release_smoke.py
+      - name: Run every test, including slow tests
+        run: uv run pytest -m "" -q
+
   build:
+    needs: [resolve, validate]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -23,9 +79,8 @@ jobs:
           python-version: "3.12"
 
       - name: Verify release tag matches package version
-        if: github.event_name == 'release'
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
         run: |
           package_version="$(uv run --no-project python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
           test "$RELEASE_TAG" = "v$package_version" || {
@@ -35,6 +90,16 @@ jobs:
 
       - name: Build sdist and wheel
         run: uv build
+
+      - name: Verify a fresh installation of the built wheel
+        run: |
+          smoke_dir="$(mktemp -d)"
+          uv init --bare --python 3.12 "$smoke_dir"
+          uv add --directory "$smoke_dir" "$GITHUB_WORKSPACE"/dist/*.whl
+          cp scripts/release_smoke.py "$smoke_dir/release_smoke.py"
+          cd "$smoke_dir"
+          JAX_ENABLE_X64=0 uv run --locked release_smoke.py
+          JAX_ENABLE_X64=1 uv run --locked release_smoke.py
 
       - uses: actions/upload-artifact@v7
         with:
