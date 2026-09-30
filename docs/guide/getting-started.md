@@ -131,5 +131,7 @@ precision settings.
 - [API reference](/api/) lists the full signatures and result fields.
 
 If you use jaxgsa in research, cite the version you ran and the paper for
-your sensitivity method. See [`CITATION.cff`](https://github.com/DanielePessina/jaxgsa/blob/master/CITATION.cff)
+your sensitivity method. For v1.0.0, use
+[10.5281/zenodo.23054912](https://doi.org/10.5281/zenodo.23054912).
+See [`CITATION.cff`](https://github.com/DanielePessina/jaxgsa/blob/master/CITATION.cff)
 and the [methods guide](/guide/methods).
