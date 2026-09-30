@@ -115,8 +115,10 @@ covering the API and method-specific caveats.
 ## Cite jaxgsa
 
 For research, cite the exact jaxgsa version used and the primary paper for
-each sensitivity method. For v1.0.0, use
-[10.5281/zenodo.23054912](https://doi.org/10.5281/zenodo.23054912).
+each sensitivity method. For v1.0.2, use
+[10.5281/zenodo.23057233](https://doi.org/10.5281/zenodo.23057233)
+(the archived v1.0.0 record is
+[10.5281/zenodo.23054912](https://doi.org/10.5281/zenodo.23054912)).
 Use [CITATION.cff](CITATION.cff) for software citation
 metadata and the [methods guide](https://danielepessina.github.io/jaxgsa/guide/methods)
 for method references.
