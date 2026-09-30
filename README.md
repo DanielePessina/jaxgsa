@@ -3,6 +3,7 @@
 **Global sensitivity analysis in JAX**
 
 [![PyPI](https://img.shields.io/pypi/v/jaxgsa)](https://pypi.org/project/jaxgsa/)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22099117.svg)](https://doi.org/10.5281/zenodo.22099117)
 [![CI](https://github.com/DanielePessina/jaxgsa/actions/workflows/ci.yml/badge.svg)](https://github.com/DanielePessina/jaxgsa/actions/workflows/ci.yml)
 [![Documentation](https://img.shields.io/badge/docs-online-blue)](https://danielepessina.github.io/jaxgsa/)
 [![Browser workbench](https://img.shields.io/badge/browser%20workbench-WASM-16a6c7)](https://danielepessina.github.io/jaxgsa/workbench/)
@@ -114,7 +115,9 @@ covering the API and method-specific caveats.
 ## Cite jaxgsa
 
 For research, cite the exact jaxgsa version used and the primary paper for
-each sensitivity method. Use [CITATION.cff](CITATION.cff) for software citation
+each sensitivity method. For v1.0.0, use
+[10.5281/zenodo.23054912](https://doi.org/10.5281/zenodo.23054912).
+Use [CITATION.cff](CITATION.cff) for software citation
 metadata and the [methods guide](https://danielepessina.github.io/jaxgsa/guide/methods)
 for method references.
 
