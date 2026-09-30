@@ -66,6 +66,7 @@ export default defineConfig({
             { text: 'Screen first, then quantify', link: '/examples/advanced-workflow' },
             { text: 'Method comparison', link: '/examples/method-comparison' },
             { text: 'Bootstrap intervals', link: '/examples/bootstrap' },
+            { text: 'Fit input ranges', link: '/examples/inverse-sobol-bounds' },
             { text: 'Save and reload', link: '/examples/save-load' },
           ],
         },
