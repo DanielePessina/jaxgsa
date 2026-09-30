@@ -119,8 +119,29 @@ each sensitivity method. For v1.0.2, use
 [10.5281/zenodo.23057233](https://doi.org/10.5281/zenodo.23057233)
 (the archived v1.0.0 record is
 [10.5281/zenodo.23054912](https://doi.org/10.5281/zenodo.23054912)).
-Use [CITATION.cff](CITATION.cff) for software citation
-metadata and the [methods guide](https://danielepessina.github.io/jaxgsa/guide/methods)
+
+In BibTeX:
+
+```bibtex
+@software{pessina2026jaxgsa,
+  author    = {Pessina, Daniele and Papathanasiou, Maria M.},
+  title     = {jaxgsa: Global Sensitivity Analysis in JAX},
+  year      = {2026},
+  version   = {1.0.2},
+  publisher = {Zenodo},
+  doi       = {10.5281/zenodo.23057233},
+  url       = {https://doi.org/10.5281/zenodo.23057233}
+}
+```
+
+Or as a text citation:
+
+> Daniele Pessina and Maria M. Papathanasiou (2026). *jaxgsa: Global
+> Sensitivity Analysis in JAX*, version 1.0.2. Zenodo.
+> https://doi.org/10.5281/zenodo.23057233
+
+Use [CITATION.cff](CITATION.cff) for machine-readable citation metadata and
+the [methods guide](https://danielepessina.github.io/jaxgsa/guide/methods)
 for method references.
 
 ## License
