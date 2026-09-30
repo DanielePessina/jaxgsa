@@ -1,11 +1,68 @@
 import { defineConfig } from 'vitepress'
+import type { HeadConfig } from 'vitepress'
+
+const siteUrl = 'https://danielepessina.github.io/jaxgsa'
+
+const description = 'Global Sensitivity Analysis in JAX'
+
+const softwareSchema = {
+  '@context': 'https://schema.org',
+  '@type': 'SoftwareSourceCode',
+  name: 'jaxgsa',
+  description,
+  codeRepository: 'https://github.com/DanielePessina/jaxgsa',
+  programmingLanguage: 'Python',
+  runtimePlatform: 'Python 3.12+',
+  license: 'https://github.com/DanielePessina/jaxgsa/blob/master/LICENSE',
+  url: siteUrl,
+  sameAs: [
+    'https://pypi.org/project/jaxgsa/',
+    'https://doi.org/10.5281/zenodo.22099117',
+    'https://github.com/DanielePessina/jaxgsa',
+  ],
+  author: [
+    { '@type': 'Person', name: 'Daniele Pessina' },
+    { '@type': 'Person', name: 'Maria M. Papathanasiou' },
+  ],
+}
+
+function pageUrl(relativePath: string): string {
+  if (relativePath === 'index.md') return siteUrl
+  return `${siteUrl}${relativePath.replace(/\.md$/, '.html')}`
+}
 
 export default defineConfig({
   title: 'jaxgsa',
-  description: 'Global Sensitivity Analysis in JAX',
+  description,
   base: '/jaxgsa/',
   markdown: {
     math: true,
+  },
+
+  head: [
+    ['meta', { property: 'og:type', content: 'website' }],
+    ['meta', { property: 'og:site_name', content: 'jaxgsa' }],
+    ['meta', { name: 'twitter:card', content: 'summary' }],
+  ],
+
+  sitemap: {
+    hostname: siteUrl,
+    transformItems(items) {
+      return [...items, { url: `${siteUrl}workbench/` }]
+    },
+  },
+
+  transformHead({ pageData, title, description: pageDescription }) {
+    const head: HeadConfig[] = [
+      ['link', { rel: 'canonical', href: pageUrl(pageData.relativePath) }],
+      ['meta', { property: 'og:title', content: title }],
+      ['meta', { property: 'og:description', content: pageDescription || description }],
+      ['meta', { property: 'og:url', content: pageUrl(pageData.relativePath) }],
+    ]
+    if (pageData.relativePath === 'index.md') {
+      head.push(['script', { type: 'application/ld+json' }, JSON.stringify(softwareSchema)])
+    }
+    return head
   },
 
   themeConfig: {

@@ -1,0 +1,40 @@
+# jaxgsa
+
+> Global sensitivity analysis in JAX
+
+jaxgsa tells you which inputs drive variation in a model's output. You choose
+input distributions, evaluate your model at sample points, and use jaxgsa to
+estimate each input's effect. It does not run your model for you.
+
+Analyses are JIT-compiled in JAX and run on CPU, GPU, or TPU. Thirteen methods
+cover variance-based indices (Sobol, eFAST, Kucherenko), screening (Morris,
+DGSM), surrogate-based analysis (PCE, RS-HDMR, Shapley effects, VKOGA), and
+given-data measures (HSIC, PAWN, Borgonovo delta, optimal transport).
+
+## Documentation
+
+- [Home](https://danielepessina.github.io/jaxgsa/): Project overview, quick start, and citation.
+- [Getting started](https://danielepessina.github.io/jaxgsa/guide/getting-started.html): First Sobol analysis, step by step.
+- [Choosing a method](https://danielepessina.github.io/jaxgsa/guide/methods.html): Which of the thirteen methods fits your question and data.
+- [Concepts](https://danielepessina.github.io/jaxgsa/guide/concepts.html): What sensitivity indices mean and how to interpret them.
+- [API reference](https://danielepessina.github.io/jaxgsa/api/): Full exported surface, parameter contracts, and result fields.
+- [Examples](https://danielepessina.github.io/jaxgsa/examples/basic.html): Worked examples for every method and workflow.
+- [Benchmarks](https://danielepessina.github.io/jaxgsa/guide/benchmarks.html): Measured performance for representative workloads.
+
+## Source
+
+- [GitHub repository](https://github.com/DanielePessina/jaxgsa): Source code, issue tracker, changelog, contributing guide.
+- [PyPI](https://pypi.org/project/jaxgsa/): pip and uv installation.
+- [Zenodo DOI](https://doi.org/10.5281/zenodo.22099117): Software citation for research use.
+
+## Browser workbench
+
+- [WASM workbench](https://danielepessina.github.io/jaxgsa/workbench/): Run jaxgsa in the browser without installing Python.
+
+## Agent skill
+
+- [Skill: SKILL.md](https://github.com/DanielePessina/jaxgsa/blob/master/skills/jaxgsa/SKILL.md): Guidance for writing or reviewing code that uses jaxgsa.
+- [Skill reference: variance-based](https://github.com/DanielePessina/jaxgsa/blob/master/skills/jaxgsa/reference/variance-based.md)
+- [Skill reference: moment-independent](https://github.com/DanielePessina/jaxgsa/blob/master/skills/jaxgsa/reference/moment-independent.md)
+- [Skill reference: screening](https://github.com/DanielePessina/jaxgsa/blob/master/skills/jaxgsa/reference/screening.md)
+- [Skill reference: dependent-inputs](https://github.com/DanielePessina/jaxgsa/blob/master/skills/jaxgsa/reference/dependent-inputs.md)

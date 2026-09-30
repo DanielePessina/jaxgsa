@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://danielepessina.github.io/jaxgsa/sitemap.xml
