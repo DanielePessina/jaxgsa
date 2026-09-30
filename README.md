@@ -114,11 +114,12 @@ covering the API and method-specific caveats.
 
 ## Cite jaxgsa
 
-For research, cite the exact jaxgsa version used and the primary paper for
-each sensitivity method. For v1.0.2, use
-[10.5281/zenodo.23057233](https://doi.org/10.5281/zenodo.23057233)
-(the archived v1.0.0 record is
-[10.5281/zenodo.23054912](https://doi.org/10.5281/zenodo.23054912)).
+For research, please cite jaxgsa and the primary paper for each sensitivity
+method (see the
+[methods guide](https://danielepessina.github.io/jaxgsa/guide/methods)).
+For the software citation, use the general DOI
+[10.5281/zenodo.22099117](https://doi.org/10.5281/zenodo.22099117), which
+covers all versions:
 
 In BibTeX:
 
@@ -127,22 +128,21 @@ In BibTeX:
   author    = {Pessina, Daniele and Papathanasiou, Maria M.},
   title     = {jaxgsa: Global Sensitivity Analysis in JAX},
   year      = {2026},
-  version   = {1.0.2},
   publisher = {Zenodo},
-  doi       = {10.5281/zenodo.23057233},
-  url       = {https://doi.org/10.5281/zenodo.23057233}
+  doi       = {10.5281/zenodo.22099117},
+  url       = {https://doi.org/10.5281/zenodo.22099117}
 }
 ```
 
 Or as a text citation:
 
 > Daniele Pessina and Maria M. Papathanasiou (2026). *jaxgsa: Global
-> Sensitivity Analysis in JAX*, version 1.0.2. Zenodo.
-> https://doi.org/10.5281/zenodo.23057233
+> Sensitivity Analysis in JAX*. Zenodo.
+> https://doi.org/10.5281/zenodo.22099117
 
-Use [CITATION.cff](CITATION.cff) for machine-readable citation metadata and
-the [methods guide](https://danielepessina.github.io/jaxgsa/guide/methods)
-for method references.
+To cite a specific release, use its version DOI instead — for v1.0.2 that is
+[10.5281/zenodo.23057233](https://doi.org/10.5281/zenodo.23057233). See
+[CITATION.cff](CITATION.cff) for machine-readable citation metadata.
 
 ## License
 

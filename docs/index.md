@@ -44,27 +44,30 @@ the estimates have settled as you add samples.
 
 ## Please cite
 
-If you use jaxgsa in research, please cite it. Cite the exact version you ran;
-for v1.0.2, use DOI
-[10.5281/zenodo.23057233](https://doi.org/10.5281/zenodo.23057233).
+If you use jaxgsa in research, please cite it. For the software citation, use
+the general DOI
+[10.5281/zenodo.22099117](https://doi.org/10.5281/zenodo.22099117), which
+covers all versions:
 
 ```bibtex
 @software{pessina2026jaxgsa,
   author    = {Pessina, Daniele and Papathanasiou, Maria M.},
   title     = {jaxgsa: Global Sensitivity Analysis in JAX},
   year      = {2026},
-  version   = {1.0.2},
-  doi       = {10.5281/zenodo.23057233},
+  doi       = {10.5281/zenodo.22099117},
   publisher = {Zenodo},
-  url       = {https://doi.org/10.5281/zenodo.23057233}
+  url       = {https://doi.org/10.5281/zenodo.22099117}
 }
 ```
 
 As a text citation:
 
 > Daniele Pessina and Maria M. Papathanasiou (2026). *jaxgsa: Global
-> Sensitivity Analysis in JAX*, version 1.0.2. Zenodo.
-> https://doi.org/10.5281/zenodo.23057233
+> Sensitivity Analysis in JAX*. Zenodo.
+> https://doi.org/10.5281/zenodo.22099117
+
+To cite a specific release, use its version DOI instead — for v1.0.2 that is
+[10.5281/zenodo.23057233](https://doi.org/10.5281/zenodo.23057233).
 
 ## Where to go next
 
