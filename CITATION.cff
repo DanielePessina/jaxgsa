@@ -11,7 +11,7 @@ abstract: >-
   GPU or TPU. Kucherenko and VKOGA are host NumPy and SciPy by design.
 type: software
 version: 1.0.0
-date-released: "2026-09-29"
+date-released: "2026-09-30"
 authors:
   - family-names: Pessina
     given-names: Daniele
