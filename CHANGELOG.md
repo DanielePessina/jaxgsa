@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.2
+
+Publish the validated 1.0 code under a fresh version number because PyPI
+cannot reuse the filenames from a previously deleted 1.0.0 upload. There
+are no Python API or numerical implementation changes from the archived
+1.0.0 release. The original GitHub tag and Zenodo record remain available.
+
 ## 1.0.0
 
 First stable release. The API contract of 0.9.1 is unchanged; 1.0.0 marks it
