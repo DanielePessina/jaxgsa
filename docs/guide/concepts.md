@@ -14,7 +14,11 @@ contributes on its own: changing `x1` has the same effect whatever `x2` is. If
 the output is `x1 * x2`, the effect of `x1` depends on `x2`. That is an
 **interaction**.
 
-For independent inputs, Sobol' indices separate these effects:
+For independent inputs, Sobol' indices separate these effects.
+
+This decomposition follows [Sobol' (1993)](/api/sobol#ref-sobol-1993);
+the [Sobol' references](/api/sobol#references) also distinguish the estimators
+used to calculate the indices.
 
 | Index | Read it as |
 | --- | --- |
@@ -37,6 +41,8 @@ Estimates from a finite number of runs can be noisy. Small negative estimates,
 or an estimated $S_1$ slightly above $S_T$, do not change the definitions.
 Check confidence intervals or increase the design before interpreting small
 differences. See the [Sobol' API](/api/sobol) for sampling requirements.
+For a study of convergence and validation, see
+[Sarrazin, Pianosi & Wagener (2016)](#ref-sarrazin-2016).
 
 ## Other questions need other measures
 
@@ -49,6 +55,10 @@ to match the result to the decision you need to make.
 the input space. Its $\mu^*$ summarizes the size of those changes; a large
 $\sigma$ suggests a nonlinear effect or interactions. [DGSM](/api/dgsm) measures
 derivatives across the input domain and can give bounds on total effects.
+
+See [Morris (1991) and Campolongo et al. (2007)](/api/morris#references)
+for elementary-effects screening, and
+[Sobol' & Kucherenko (2009)](/api/dgsm#references) for derivative-based measures.
 
 These are screening measures, **not variance percentages**. They are useful for
 finding clearly inactive inputs before a more detailed analysis. A large
@@ -70,6 +80,11 @@ outputs. Distribution-based methods compare outputs across input values:
 Their scores are **not Sobol' indices**. They can rank inputs differently because
 they measure different changes.
 
+For the definitions and implemented estimators, see the references for
+[PAWN](/api/pawn#references), [Borgonovo delta](/api/borgonovo#references),
+[optimal transport](/api/optimal-transport#references), and
+[HSIC](/api/hsic#references).
+
 ### What if inputs are dependent?
 
 If inputs are correlated, one input can carry information about another even
@@ -88,6 +103,11 @@ Do not compare these values as though they were interchangeable. See
 [Shapley effects](/api/shapley) allocate variance across inputs so that the
 shares sum to one. They divide interactions among participating inputs; they
 do not show a separate pairwise interaction index.
+
+For independent inputs, the allocation follows
+[Owen (2014)](/api/shapley#references). The
+[dependent-input guide](/guide/dependent-inputs#shapley-with-the-hdmr-backend)
+explains the different ANCOVA allocation used with the HDMR backend.
 
 ## Before trusting a result
 
@@ -140,3 +160,19 @@ indices, $S_T(i) \geq S_1(i)$, and their difference is the contribution involvin
 interactions with input $i$. For a model with nonzero output variance, an input's
 indices lie between zero and one. Finite-sample estimates may fall outside
 these bounds.
+
+## References and further reading
+
+- <a id="ref-primer-2008"></a>**Introduction to GSA and study design:**
+  Saltelli, A., Ratto, M., Andres, T., Campolongo, F., Cariboni, J., Gatelli,
+  D., Saisana, M., & Tarantola, S. (2008).
+  [Global Sensitivity Analysis. The Primer](https://doi.org/10.1002/9780470725184).
+  John Wiley & Sons. ISBN 978-0-470-05997-5.
+- <a id="ref-sarrazin-2016"></a>**Convergence and validation:** Sarrazin, F.,
+  Pianosi, F., & Wagener, T. (2016).
+  [Global Sensitivity Analysis of environmental models: Convergence and validation](https://doi.org/10.1016/j.envsoft.2016.02.005).
+  *Environmental Modelling & Software*, 79, 135–152.
+
+For the definitions of variance indices and total-order importance, see
+[Sobol' (2001)](/api/sobol#ref-sobol-2001) and
+[Homma & Saltelli (1996)](/api/sobol#ref-homma-saltelli-1996).

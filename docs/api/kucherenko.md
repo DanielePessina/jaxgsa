@@ -11,7 +11,8 @@ jaxgsa.kucherenko.analyze(sampling_result, Y, *, n_bootstrap=0, conf_level=0.95,
 ```
 
 `jaxgsa.kucherenko` estimates the Sobol' indices generalised to dependent
-inputs (Kucherenko, Tarantola & Annoni, 2012). It runs the estimators on your
+inputs ([Kucherenko, Tarantola & Annoni, 2012](https://doi.org/10.1016/j.cpc.2011.12.020)).
+It runs the estimators on your
 actual model outputs, evaluated on a conditional-copula design. No surrogate is
 fitted anywhere. That makes it the design-based counterpart to
 [`jaxgsa.vkoga`](/api/vkoga), which reaches the same two quantities by querying
@@ -150,8 +151,10 @@ and when `n_samples < 2`.
 
 ## Analysis
 
-`analyze` applies the single-loop estimators of the 2012 paper: the paired
-product over the shared-$X_i$ rows for `S1`, and the Jansen squared difference
+`analyze` applies the single-loop estimators of
+[Kucherenko, Tarantola & Annoni (2012)](https://doi.org/10.1016/j.cpc.2011.12.020): the paired
+product over the shared-$X_i$ rows for `S1`, and the
+[Jansen (1999)](https://doi.org/10.1016/S0010-4655(98)00154-4) squared difference
 over the shared-$\mathbf{X}_{\sim i}$ rows for `ST`. The exact formulas are in
 the `jaxgsa.kucherenko._analyze` module docstring.
 
@@ -211,9 +214,15 @@ not for deduplication.
 one-file NPZ format as the other design classes. The stored problem metadata
 carries the correlation matrix, so a loaded design analyzes identically.
 
-## Reference
+## References
 
-- Kucherenko, S., Tarantola, S. & Annoni, P. (2012). Estimation of global sensitivity indices for models with dependent variables. *Computer Physics Communications*, 183(4), 937-946.
+- **Dependent-input indices and conditional-copula sampling:** Kucherenko, S.,
+  Tarantola, S., & Annoni, P. (2012).
+  [Estimation of global sensitivity indices for models with dependent variables](https://doi.org/10.1016/j.cpc.2011.12.020).
+  *Computer Physics Communications*, 183(4), 937–946.
+- **Squared-difference total-order estimator:** Jansen, M. J. W. (1999).
+  [Analysis of variance designs for model output](https://doi.org/10.1016/S0010-4655(98)00154-4).
+  *Computer Physics Communications*, 117(1–2), 35–43.
 
 See the [Kucherenko example](/examples/kucherenko), [Methods](/guide/methods),
 and the [API overview](/api/).

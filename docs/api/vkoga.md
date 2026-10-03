@@ -23,11 +23,22 @@ jaxgsa.vkoga.analyze(
 ```
 
 `analyze` fits a Vectorial Kernel Orthogonal Greedy Algorithm surrogate to
-given `(X, Y)` data, then estimates the five correlated indices of Li et al.
-(2010) against that surrogate under a Gaussian copula. It is the only method in
+given `(X, Y)` data, then estimates the five correlated indices of
+[Li et al. (2010)](https://doi.org/10.1021/jp9096919) against that surrogate under
+a Gaussian copula. This surrogate-based sensitivity workflow follows
+[Hilhorst et al. (2024)](https://doi.org/10.1002/cnm.3797). It is the only method in
 jaxgsa that separates correlated from uncorrelated contributions out of a
 single fitted surrogate, and the only one that gets a correlated total without
 re-running the model.
+
+The kernel centres use the target-independent **P-greedy** rule of
+[De Marchi et al. (2005)](https://doi.org/10.1007/s10444-004-1829-1): selection
+maximises the power function without reading `Y`. The Newton basis and
+regularised coefficient fit follow
+[Santin & Haasdonk (2021)](https://doi.org/10.1515/9783110498967-009).
+The VKOGA name comes from
+[Wirtz & Haasdonk (2013)](https://doi.org/10.14658/PUPJ-DRNA-2013-Special_Issue-10),
+whose target-dependent selection differs from the rule implemented here.
 
 The design-based alternative is [`jaxgsa.kucherenko`](/api/kucherenko), which
 evaluates the real model on a conditional-copula design instead of querying a
@@ -129,6 +140,11 @@ methods are estimating the same two quantities, one through a surrogate and one
 through 28672 model runs.
 
 ## Index reference
+
+The correlated/uncorrelated decomposition follows
+[Li et al. (2010)](https://doi.org/10.1021/jp9096919), with the surrogate-based
+estimators described by
+[Hilhorst et al. (2024)](https://doi.org/10.1002/cnm.3797).
 
 Every index has shape `(..., D)`. The leading axes follow the shape contract:
 `(D,)` for `Y` of shape `(N,)`, `(K, D)` for `(N, K)`, `(T, K, D)` for
@@ -272,9 +288,11 @@ the correlated-training-design case described at the top of this page.
 
 ## References
 
-- Hilhorst, G., Quicken, S., van de Vosse, F.N. & Huberts, W. (2024). Efficient sensitivity analysis for biomechanical models with correlated inputs. *International Journal for Numerical Methods in Biomedical Engineering*, 40(2), e3797.
-- Li, G., Rabitz, H., Yelvington, P.E., Oluwole, O.O., Bacon, F., Kolb, C.E. & Schoendorf, J. (2010). Global sensitivity analysis for systems with independent and/or correlated inputs. *Journal of Physical Chemistry A*, 114(19), 6022-6032.
-- Wirtz, D. & Haasdonk, B. (2013). A vectorial kernel orthogonal greedy algorithm. *Dolomites Research Notes on Approximation*, 6, 83-100.
+- Hilhorst, P. L. J., Quicken, S., van de Vosse, F. N. & Huberts, W. (2024). [Efficient sensitivity analysis for biomechanical models with correlated inputs](https://doi.org/10.1002/cnm.3797). *International Journal for Numerical Methods in Biomedical Engineering*, 40(2), e3797. Surrogate-based correlated sensitivity analysis.
+- Li, G., Rabitz, H., Yelvington, P. E., Oluwole, O. O., Bacon, F., Kolb, C. E. & Schoendorf, J. (2010). [Global sensitivity analysis for systems with independent and/or correlated inputs](https://doi.org/10.1021/jp9096919). *Journal of Physical Chemistry A*, 114(19), 6022–6032. Structural and correlative variance decomposition.
+- De Marchi, S., Schaback, R. & Wendland, H. (2005). [Near-optimal data-independent point locations for radial basis function interpolation](https://doi.org/10.1007/s10444-004-1829-1). *Advances in Computational Mathematics*, 23, 317–330. P-greedy centre selection implemented here.
+- Santin, G. & Haasdonk, B. (2021). [Kernel methods for surrogate modeling](https://doi.org/10.1515/9783110498967-009). In *Model Order Reduction, Volume 1: System- and Data-Driven Methods and Algorithms*, 311–354. De Gruyter. Newton basis and regularised kernel approximation.
+- Wirtz, D. & Haasdonk, B. (2013). [A vectorial kernel orthogonal greedy algorithm](https://doi.org/10.14658/PUPJ-DRNA-2013-Special_Issue-10). *Dolomites Research Notes on Approximation*, 6, 83–100. Source of the VKOGA name and a target-dependent selection variant.
 
 See the [VKOGA example](/examples/vkoga), [Methods](/guide/methods), and the
 [API overview](/api/).

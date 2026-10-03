@@ -27,6 +27,11 @@ spread, tails and shape that a variance-based index cannot report. Any
 the given-data first-order Sobol index `S1` computed from the same class
 partition, which costs nothing extra and is useful for comparison.
 
+[Borgonovo (2007)](https://doi.org/10.1016/j.ress.2006.04.015) introduced
+the delta measure. The class partition and density-based given-data estimator
+used here follow
+[Plischke, Borgonovo and Smith (2013)](https://doi.org/10.1016/j.ejor.2012.11.047).
+
 ## A run
 
 ```python
@@ -83,6 +88,9 @@ That gap is the whole reason to run this method.
 The consequence to internalise: adding `n_bootstrap=100` to a default call does
 not only add intervals. It changes the reported `delta` from the plug-in
 estimate to the corrected one.
+
+The correction `2*d_hat - mean(d_boot)` is the bootstrap bias reduction in
+[Plischke et al. (2013, equation 30)](https://doi.org/10.1016/j.ejor.2012.11.047).
 
 ```python
 import jax
@@ -193,6 +201,11 @@ bandwidth="silverman", slice_chunk_size=None, degenerate_tol=0.01,
 degenerate_bandwidth="auto")` returns `(delta, S1)` as bare arrays with none of
 the checks, so it composes with `jit`, `vmap` and `jacrev`. There is no bias
 correction there, because there is no bootstrap.
+
+## References
+
+- Borgonovo, E. (2007). [A new uncertainty importance measure](https://doi.org/10.1016/j.ress.2006.04.015). *Reliability Engineering & System Safety*, 92(6), 771–784. Defines the moment-independent delta measure.
+- Plischke, E., Borgonovo, E., and Smith, C. L. (2013). [Global sensitivity measures from given data](https://doi.org/10.1016/j.ejor.2012.11.047). *European Journal of Operational Research*, 226(3), 536–550. Provides the given-data estimator and bootstrap bias correction.
 
 See the [Borgonovo delta example](/examples/borgonovo),
 [Methods](/guide/methods), and the [API overview](/api/).

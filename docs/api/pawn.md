@@ -25,6 +25,13 @@ Kolmogorov-Smirnov statistic, the largest vertical gap between the two curves,
 a number in `[0, 1]`. The per-bin values are then aggregated into one index per
 parameter.
 
+The PAWN index and KS comparison were introduced by
+[Pianosi and Wagener (2015)](https://doi.org/10.1016/j.envsoft.2015.01.004).
+The binned estimator used here follows their
+[given-data formulation (2018)](https://doi.org/10.1016/j.envsoft.2018.07.019),
+which reuses an existing input-output sample instead of requiring dedicated
+conditional model runs.
+
 Any `(X, Y)` pair works. PAWN earns its place when the output is skewed or
 multimodal, where a variance-based index summarises the uncertainty badly.
 
@@ -165,6 +172,11 @@ slice_chunk_size=None)` returns a one-element tuple holding the index array,
 with none of the checks, so it composes with `jit`, `vmap` and `jacrev`. It is a
 tuple for consistency with the other `indices` functions, which return several
 arrays. `n_valid_bins` is not among them, and neither is the sparse-bin warning.
+
+## References
+
+- Pianosi, F., and Wagener, T. (2015). [A simple and efficient method for global sensitivity analysis based on cumulative distribution functions](https://doi.org/10.1016/j.envsoft.2015.01.004). *Environmental Modelling & Software*, 67, 1–11. Introduces the PAWN index and its KS statistic.
+- Pianosi, F., and Wagener, T. (2018). [Distribution-based sensitivity analysis from a generic input-output sample](https://doi.org/10.1016/j.envsoft.2018.07.019). *Environmental Modelling & Software*, 108, 197–207. Develops the given-data estimator used here.
 
 See the [PAWN example](/examples/pawn), [Methods](/guide/methods), and the
 [API overview](/api/).

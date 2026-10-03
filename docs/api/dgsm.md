@@ -4,17 +4,22 @@ DGSM ranks inputs by how strongly the output reacts to them on average. The
 measure is `nu_i = E[(df/dx_i)^2]`, the mean squared partial derivative over
 the input distribution. When the model is JAX-differentiable this is the
 cheapest useful method in the package: one autodiff sweep over an ordinary
-Monte Carlo sample replaces a whole Saltelli design.
+Monte Carlo sample replaces a whole Saltelli design. The derivative measure
+and its link to total-order indices follow
+[Sobol' & Kucherenko (2009)](https://doi.org/10.1016/j.matcom.2009.01.023).
 
 Those moments turn into two numbers that frame the total Sobol index:
 
 - `upper_bound_i = C_i * nu_i / Var(Y)`, where `C_i` is the Poincare constant
-  of input `i`'s marginal. The Poincare / Sobol-Kucherenko inequality makes
+  of input `i`'s marginal. The Poincare / Sobol-Kucherenko inequality
+  ([Sobol' & Kucherenko, 2009](https://doi.org/10.1016/j.matcom.2009.01.023);
+  [Lamboni et al., 2013](https://doi.org/10.1016/j.matcom.2013.02.002)) makes
   this a genuine cap: `ST_i` is never above it, for every marginal this
   package supports.
 - `lower_bound_i = Var(x_i) * sigma_i^2 / Var(Y)`, where
-  `sigma_i = E[df/dx_i]` is the mean signed derivative. Kucherenko & Song
-  (2016), Theorem 6 (Section 4.1, eq. 31), prove `ST_i >=` this **when input
+  `sigma_i = E[df/dx_i]` is the mean signed derivative.
+  [Kucherenko & Song (2016)](https://doi.org/10.1007/978-3-319-33507-0_23),
+  Theorem 6 (Section 4.1, eq. 31), prove `ST_i >=` this **when input
   `i`'s marginal is an untruncated Gaussian**, and only then. On a uniform or truncated marginal it
   is an estimate: exact when the response is linear in that input, and able to
   sit above the true `ST_i` when it is strongly curved. The
@@ -190,7 +195,9 @@ axis_constants(problem: Problem) -> tuple[np.ndarray, np.ndarray]
 
 `poincare_constant` returns `C(p)` for one marginal: `(high - low)^2 / pi^2`
 for a uniform, `variance` for an unbounded Gaussian, and a numerical spectral
-solve for a truncated one. An open side of a truncated Gaussian is stood in for
+solve for a truncated one, using the spectral approach described by
+[Roustant, Barthe & Iooss (2017)](https://doi.org/10.1214/17-EJS1310).
+An open side of a truncated Gaussian is stood in for
 at 8 sigma, which carries the whole mass to float precision. A categorical
 marginal raises, since the inequality needs a continuous density.
 
@@ -217,6 +224,26 @@ The four measures as plain arrays, with no checks and no result object, so it
 composes with `jax.jit`, `jax.vmap`, `jax.grad` and `jax.jacrev`. That last one
 matters here: it is what lets you differentiate a bound with respect to
 something upstream.
+
+## References
+
+- **Derivative measure and uniform/Gaussian upper bounds:** Sobol', I. M., &
+  Kucherenko, S. (2009).
+  [Derivative based global sensitivity measures and their link with global sensitivity indices](https://doi.org/10.1016/j.matcom.2009.01.023).
+  *Mathematics and Computers in Simulation*, 79(10), 3009–3017.
+- **General Poincare upper-bound link:** Lamboni, M., Iooss, B., Popelin, A.-L., &
+  Gamboa, F. (2013).
+  [Derivative-based global sensitivity measures: General links with Sobol' indices and numerical tests](https://doi.org/10.1016/j.matcom.2013.02.002).
+  *Mathematics and Computers in Simulation*, 87, 45–54.
+- **Gaussian lower bound and its assumptions:** Kucherenko, S., & Song, S. (2016).
+  [Derivative-Based Global Sensitivity Measures and Their Link with Sobol' Sensitivity Indices](https://doi.org/10.1007/978-3-319-33507-0_23).
+  In *Monte Carlo and Quasi-Monte Carlo Methods*, Springer Proceedings in
+  Mathematics & Statistics, 163, 455–469.
+  [Open author manuscript](https://arxiv.org/abs/1605.07830).
+- **Poincare constants for truncated distributions:** Roustant, O., Barthe, F., &
+  Iooss, B. (2017).
+  [Poincaré inequalities on intervals – application to sensitivity analysis](https://doi.org/10.1214/17-EJS1310).
+  *Electronic Journal of Statistics*, 11(2), 3081–3119.
 
 Related docs:
 

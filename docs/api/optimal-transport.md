@@ -31,6 +31,10 @@ diffusive part (spread and shape). Variance-based indices react only to the
 first. Any `(X, Y)` pair works, and the method handles mixed marginals,
 categorical parameters and correlated inputs natively.
 
+The index, advective/diffusive decomposition and given-data estimator follow
+[Borgonovo et al. (2025)](https://doi.org/10.1287/mnsc.2023.01796), first
+published online in 2024.
+
 ## A run
 
 ```python
@@ -181,6 +185,11 @@ how far `c3` needs to clear noise before it counts as influential.
 `standardize_outputs`, `epsilon`, `max_iter` and `tol` apply to the two
 point-cloud modes only.
 
+The entropic transport solves use the Sinkhorn approach of
+[Cuturi (2013)](https://papers.nips.cc/paper/2013/hash/af21d0c97db2e27e13572cbf59eb343d-Abstract.html).
+This is the computational algorithm; the sensitivity measure comes from
+Borgonovo et al.
+
 ## Arguments
 
 | Argument | Default | What it changes |
@@ -264,6 +273,11 @@ n_partitions=None, standardize_outputs=True, epsilon=0.01, max_iter=2000,
 tol=None, slice_chunk_size=None)` returns `(ot, advective, diffusive)` as bare
 arrays with none of the checks, so it composes with `jit`, `vmap` and `jacrev`.
 `S1`, `above_dummy` and the intervals live on the result object only.
+
+## References
+
+- Borgonovo, E., Figalli, A., Plischke, E., and Savaré, G. (2025; first published online 2024). [Global Sensitivity Analysis via Optimal Transport](https://doi.org/10.1287/mnsc.2023.01796). *Management Science*, 71(5), 3809–3828. Defines the OT sensitivity measures, their decomposition and the given-data estimation strategy.
+- Cuturi, M. (2013). [Sinkhorn Distances: Lightspeed Computation of Optimal Transport](https://papers.nips.cc/paper/2013/hash/af21d0c97db2e27e13572cbf59eb343d-Abstract.html). *Advances in Neural Information Processing Systems*, 26, 2292–2300. Provides the entropic Sinkhorn algorithm used in the point-cloud modes.
 
 See the [Optimal transport example](/examples/optimal-transport),
 [Methods](/guide/methods), and the [API overview](/api/).

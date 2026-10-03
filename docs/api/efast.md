@@ -7,6 +7,10 @@ oscillates at the high frequency `omega_0` while every other parameter
 oscillates slowly. Power at `omega_0` and its first `M` harmonics is `i`'s
 own variance contribution; power below `omega_0 / 2` belongs to the others.
 
+The extension from FAST to total-order indices follows
+[Saltelli, Tarantola & Chan (1999)](https://doi.org/10.1080/00401706.1999.10485594).
+The original Fourier sensitivity construction is due to
+[Cukier et al. (1973)](https://doi.org/10.1063/1.1680571).
 It gives `S1` and `ST` from `n_per_curve * D` model runs, and no `S2`.
 
 ## sample
@@ -149,6 +153,17 @@ indices(sampling_result, Y, *, slice_chunk_size=None) -> tuple[Array, Array]
 
 `S1` and `ST` as plain arrays, with no checks and no result object, so it runs
 inside `jax.jit`, `jax.vmap` and `jax.jacrev`.
+
+## References
+
+- **Original Fourier sensitivity construction:** Cukier, R. I., Fortuin, C. M.,
+  Shuler, K. E., Petschek, A. G., & Schaibly, J. H. (1973).
+  [Study of the sensitivity of coupled reaction systems to uncertainties in rate coefficients. I Theory](https://doi.org/10.1063/1.1680571).
+  *Journal of Chemical Physics*, 59(8), 3873–3878.
+- **Extended FAST and total-order estimation:** Saltelli, A., Tarantola, S., &
+  Chan, K. P.-S. (1999).
+  [A Quantitative Model-Independent Method for Global Sensitivity Analysis of Model Output](https://doi.org/10.1080/00401706.1999.10485594).
+  *Technometrics*, 41(1), 39–56.
 
 Related docs:
 

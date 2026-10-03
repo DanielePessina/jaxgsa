@@ -7,6 +7,12 @@ Four namespaces build a design: `jaxgsa.sobol.sample` for Saltelli designs,
 dependent inputs. `jaxgsa.sampling` holds the plain draws and the correlation
 helpers that the given-data methods use.
 
+The method pages give the scientific sources for their designs:
+[Saltelli designs](/api/sobol#references),
+[Morris trajectories and radial designs](/api/morris#references),
+[eFAST search curves](/api/efast#references), and
+[Kucherenko conditional designs](/api/kucherenko#references).
+
 ## Seeds
 
 Every function that draws anything takes the same keyword:
@@ -29,7 +35,9 @@ reporting.
 The seed feeds the scrambling, not the sequence. `sobol.sample`,
 `morris.sample` and `kucherenko.sample` take `scramble: bool = True`; the
 underlying Sobol' sequence is deterministic, and the seed only chooses the
-Owen scramble applied to it. `kucherenko.sample` makes that explicit and
+linear matrix scramble and digital shift applied to it, as implemented by
+[SciPy's Sobol' engine](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.qmc.Sobol.html)
+following [Matoušek (1998)](#ref-matousek-1998). `kucherenko.sample` makes that explicit and
 raises rather than accepting a seed that would do nothing:
 
 ```python
@@ -45,6 +53,9 @@ nothing. Use scramble=True, or drop the seed.
 Use `scramble=False` only to reproduce an unscrambled reference design.
 Scrambling is what removes the Sobol' sequence's structural duplicates, and
 without it a Saltelli design loses real blocks to deduplication.
+
+The underlying SciPy engine uses the direction numbers of
+[Joe & Kuo (2008)](#ref-joe-kuo-2008).
 
 `jaxgsa.efast.sample` has no `scramble`: its randomness is the phase shift of
 each search curve, which the seed sets directly.
@@ -62,7 +73,8 @@ correlation_from_covariance(cov) -> np.ndarray                 # (D, D)
 its declared inverse CDF, so a categorical column comes back as level codes.
 There is no low-discrepancy structure and no Saltelli layout, which is exactly
 what the nine given-data methods want. When `problem.correlation` is set it
-draws correlated latent normals first (the NORTA construction), so every
+draws correlated latent normals first (a normal-to-anything construction;
+see [Gaussian-copula sampling in Hilhorst et al. (2024)](/api/vkoga#references)), so every
 column keeps its declared marginal and the joint sample carries the declared
 dependence. An independent problem keeps the plain uniform path bit-for-bit,
 so old seeds still reproduce old samples.
@@ -84,7 +96,7 @@ array([[0.5500, 0.5102],
 
 `correlate` goes the other way. It takes a sample you already have and
 reorders each column so the ranks follow the declared correlation, using the
-Iman-Conover method. Every output column is a permutation of the matching
+[Iman–Conover method (1982)](#ref-iman-conover-1982). Every output column is a permutation of the matching
 input column, so the marginal values survive untouched, including whatever
 structure a low-discrepancy design put into them. Only the pairing changes.
 It raises if `problem` has no correlation, or if `X` holds a non-finite
@@ -177,3 +189,18 @@ number of rows, and a derivative through it has no meaning.
 
 See [Save and Reload Samples](/examples/save-load) and the
 [API reference](/api/).
+
+## References
+
+- <a id="ref-matousek-1998"></a>Matoušek, J. (1998).
+  [On the L2-discrepancy for anchored boxes](https://doi.org/10.1006/jcom.1998.0489).
+  *Journal of Complexity*, 14(4), 527–556. Linear scrambling used by SciPy's
+  LMS-plus-shift Sobol' engine.
+- <a id="ref-joe-kuo-2008"></a>Joe, S., & Kuo, F. Y. (2008).
+  [Constructing Sobol' sequences with better two-dimensional projections](https://doi.org/10.1137/070709359).
+  *SIAM Journal on Scientific Computing*, 30(5), 2635–2654. Direction numbers
+  used by the underlying Sobol' sequence generator.
+- <a id="ref-iman-conover-1982"></a>Iman, R. L., & Conover, W. J. (1982).
+  [A distribution-free approach to inducing rank correlation among input variables](https://doi.org/10.1080/03610918208812265).
+  *Communications in Statistics — Simulation and Computation*, 11(3), 311–334.
+  Rank reordering that preserves the observed marginal values in `correlate`.

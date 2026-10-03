@@ -19,7 +19,8 @@ jaxgsa.pce.analyze(
 
 `analyze` fits an orthogonal polynomial surrogate to arbitrary `(X, Y)` pairs,
 then reads the first-, total- and second-order Sobol indices straight off the
-expansion coefficients (Sudret, 2008). No structured design, and no extra model
+expansion coefficients ([Sudret, 2008](https://doi.org/10.1016/j.ress.2007.04.002)).
+No structured design, and no extra model
 evaluations once the fit is done. On a smooth response it needs far fewer
 samples than a Monte-Carlo Sobol estimator.
 
@@ -200,7 +201,8 @@ not a positive integer, when `on_invalid` is unknown or refuses the sample, when
 (after `on_invalid` has run) cannot fit even the order-1 expansion at the given
 `fit_ratio`, and in two structural cases:
 
-- `problem.correlation` declares a dependence. The Wiener-Askey basis is
+- `problem.correlation` declares a dependence. The Wiener-Askey basis
+  ([Xiu & Karniadakis, 2002](https://doi.org/10.1137/S1064827501387826)) is
   orthogonal only under independent inputs, so the coefficient-to-index reading
   would be wrong. Use [`jaxgsa.hdmr`](/api/hdmr),
   [`jaxgsa.vkoga`](/api/vkoga), or [`jaxgsa.kucherenko`](/api/kucherenko).
@@ -215,5 +217,14 @@ batch_size=None)` returns `(S1, ST, S2)` as bare arrays with none of the checks,
 so it composes with `jit`, `vmap` and `jacrev`. It has no result object, so it
 reports neither the reduced order nor `loo_rmse`. Use `effective_order` for the
 first.
+
+## References
+
+- **Sobol indices from expansion coefficients:** Sudret, B. (2008).
+  [Global sensitivity analysis using polynomial chaos expansions](https://doi.org/10.1016/j.ress.2007.04.002).
+  *Reliability Engineering & System Safety*, 93(7), 964–979.
+- **Wiener-Askey orthogonal polynomial basis:** Xiu, D., & Karniadakis, G. E. (2002).
+  [The Wiener–Askey Polynomial Chaos for Stochastic Differential Equations](https://doi.org/10.1137/S1064827501387826).
+  *SIAM Journal on Scientific Computing*, 24(2), 619–644.
 
 See the [PCE example](/examples/pce) and the [API overview](/api/).

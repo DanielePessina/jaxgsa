@@ -23,11 +23,13 @@ RS-HDMR fits B-spline component functions to arbitrary `(X, Y)` pairs: one per
 parameter, one per parameter pair, and so on up to `maxorder`. The ANCOVA
 sensitivity indices then come from the fitted components. No structured design
 is needed, so it suits existing datasets and models too expensive for a Sobol or
-eFAST scheme.
+eFAST scheme. The B-spline construction follows
+[Li, Wang & Rabitz (2002)](https://doi.org/10.1021/jp014567t).
 
 Its distinguishing feature is the ANCOVA split. Each term's variance share
 divides into a structural part `Sa` and a correlation-induced part `Sb`, and
-that split stays meaningful when the inputs are dependent.
+that split stays meaningful when the inputs are dependent
+([Li et al., 2010](https://doi.org/10.1021/jp9096919)).
 
 `analyze` requires `N >= 300`.
 
@@ -82,7 +84,8 @@ are independent here, so every `Sb` sits near zero, as it should.
 `select` is the F-test significance count per term. `x3`, `x1/x2` and `x2/x3`
 scored 0 out of 1 output slice, so the F-test did not keep them.
 
-`S.sum() = 0.928` is the precondition check, not a decoration. Li et al. attach
+`S.sum() = 0.928` is the precondition check, not a decoration.
+[Li et al. (2010)](https://doi.org/10.1021/jp9096919), Eq. (24), attach
 their totals to the condition that the per-term `S` values sum to about 1; the
 shortfall is unexplained variance. Read it before ranking anything.
 
@@ -171,7 +174,8 @@ Correlated inputs are supported and a declared `problem.correlation` is welcome.
 `result.shapley(include_correlative=True)` folds it into the Shapley allocation.
 
 `ST` is the SCSA total: `ST_i` sums `Sa_u + Sb_u` over every term `u` containing
-parameter `i`. That is the convention of Li et al. (2010) Section 2.2.3,
+parameter `i`. That is the convention of
+[Li et al. (2010)](https://doi.org/10.1021/jp9096919) Section 2.2.3,
 restated as Eq. (8) by Sarazin, Viaud & Cournede (2017), and the same one SALib
 and Vrugt's `HDMR_end.m` use. With independent inputs the `Sb` shares vanish and
 it reduces to the ordinary Sobol total-order index.
@@ -216,5 +220,16 @@ lambdax=0.01, slice_chunk_size=None, batch_size=None)` returns
 `(Sa, Sb, S, ST)` as bare arrays with none of the checks, so it composes with
 `jit`, `vmap` and `jacrev`. The first three carry the `n_terms` axis, `ST`
 carries `D`, and there is no `terms` tuple to label them with.
+
+## References
+
+- **RS-HDMR component fitting with B-splines:** Li, G., Wang, S.-W., & Rabitz, H.
+  (2002).
+  [Practical Approaches To Construct RS-HDMR Component Functions](https://doi.org/10.1021/jp014567t).
+  *Journal of Physical Chemistry A*, 106(37), 8721–8733.
+- **ANCOVA structural/correlative split and SCSA totals:** Li, G., Rabitz, H.,
+  Yelvington, P. E., Oluwole, O. O., Bacon, F., Kolb, C. E., & Schoendorf, J. (2010).
+  [Global Sensitivity Analysis for Systems with Independent and/or Correlated Inputs](https://doi.org/10.1021/jp9096919).
+  *Journal of Physical Chemistry A*, 114(19), 6022–6032.
 
 See the [HDMR example](/examples/hdmr) and the [API overview](/api/).

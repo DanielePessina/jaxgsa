@@ -2,11 +2,14 @@
 
 Morris screening ranks parameters by one-at-a-time finite differences, called
 elementary effects, taken at points spread across the whole input domain. It
-is the cheap first pass: rank many parameters, drop the dead ones, then spend
+is the screening method introduced by [Morris (1991)](https://doi.org/10.1080/00401706.1991.10484804).
+Use it as a cheap first pass: rank many parameters, drop the dead ones, then spend
 the model budget on a variance-based method for the rest.
 
 The measures are `mu_star`, the mean absolute elementary effect, and `sigma`,
-their standard deviation. `mu_star` is the importance ranking. A `sigma` that
+their standard deviation. The absolute-effect measure `mu_star` follows
+[Campolongo, Cariboni & Saltelli (2007)](https://doi.org/10.1016/j.envsoft.2006.10.004)
+and is the importance ranking. A `sigma` that
 is large next to `mu_star` means the effect changes across the domain, so the
 parameter is nonlinear or interacting.
 
@@ -37,8 +40,10 @@ duplicate rows are removed.
 unequally probable and lands steps off-grid, and jaxgsa warns about it. The
 radial design ignores this argument.
 
-`method` picks the design generator. `"trajectory"` walks the Morris (1991)
-grid. `"radial"` builds Campolongo (2011) star designs around
+`method` picks the design generator. `"trajectory"` walks the
+[Morris (1991)](https://doi.org/10.1080/00401706.1991.10484804)
+grid. `"radial"` builds the star designs of
+[Campolongo, Saltelli & Cariboni (2011)](https://doi.org/10.1016/j.cpc.2010.12.039) around
 scrambled-Sobol' base points, which spreads points quasi-randomly instead of
 on a coarse grid and leaves far fewer duplicates to remove. `scramble` applies
 only to the radial design.
@@ -208,6 +213,19 @@ a block failed it, which the design itself does not store. The analysis warning
 is the one that survives `save()` and `load()`, so a design read back from disk
 still tells you it is lossy. Reporting it once would mean putting per-design
 state on `MorrisSamples`, which is frozen.
+
+## References
+
+- **Elementary effects and trajectory design:** Morris, M. D. (1991).
+  [Factorial Sampling Plans for Preliminary Computational Experiments](https://doi.org/10.1080/00401706.1991.10484804).
+  *Technometrics*, 33(2), 161–174.
+- **Mean absolute elementary effect (`mu_star`):** Campolongo, F., Cariboni, J., &
+  Saltelli, A. (2007).
+  [An effective screening design for sensitivity analysis of large models](https://doi.org/10.1016/j.envsoft.2006.10.004).
+  *Environmental Modelling & Software*, 22(10), 1509–1518.
+- **Radial design:** Campolongo, F., Saltelli, A., & Cariboni, J. (2011).
+  [From screening to quantitative sensitivity analysis. A unified approach](https://doi.org/10.1016/j.cpc.2010.12.039).
+  *Computer Physics Communications*, 182(4), 978–988.
 
 Related docs:
 

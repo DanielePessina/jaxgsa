@@ -64,6 +64,9 @@ Use Kucherenko when you can still evaluate the model and want the
 conditional-variance quantities directly. It samples conditionally on the
 correlation declared on the `Problem`.
 
+The conditional-variance estimators follow
+[Kucherenko, Tarantola & Annoni (2012)](/api/kucherenko#references).
+
 - $S_1$ is correlation-inclusive.
 - $S_T$ is correlation-exclusive.
 - There is no fitted surrogate between the model and the estimator.
@@ -77,6 +80,8 @@ See the [Kucherenko example](/examples/kucherenko) and the broader
 Use VKOGA when you have existing runs or want to reuse the same fitted model
 under several correlation assumptions. It fits a kernel surrogate, then
 samples that surrogate to estimate correlated-input variance indices.
+
+This surrogate workflow follows [Hilhorst et al. (2024)](/api/vkoga#references).
 
 Its two main decision measures match the Kucherenko quantities:
 
@@ -92,7 +97,8 @@ See the [VKOGA example](/examples/vkoga).
 ### HDMR
 
 Use HDMR when you care about *where* variance appears in the fitted model. Its
-ANCOVA decomposition separates every component function into:
+ANCOVA decomposition follows [Li et al. (2010)](/api/hdmr#references) and
+separates every component function into:
 
 - $S_a$: the structural contribution that would remain without correlation;
 - $S_b$: the contribution driven by correlation.
@@ -119,6 +125,13 @@ This is an ANCOVA-based attribution. It is not the conditional-variance
 Shapley effect of Song et al. (2016), and its correlative shares can be
 negative. It should not be interpreted as the same quantity as Kucherenko or
 VKOGA.
+
+For the conditional-variance definition under dependence, see
+[Song, Nelson & Staum (2016)](https://doi.org/10.1137/15M1048070),
+*Shapley Effects for Global Sensitivity Analysis: Theory and Computation*,
+SIAM/ASA Journal on Uncertainty Quantification, 4(1), 1060–1083.
+The [Shapley API references](/api/shapley#references) cover the independent-input
+allocation and the ANCOVA source used by jaxgsa.
 
 See the [Shapley example](/examples/shapley).
 

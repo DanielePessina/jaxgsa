@@ -4,6 +4,13 @@
 variance-based Sobol indices: `S1` per parameter, `ST` per parameter, and `S2`
 per pair when the design carries second order.
 
+The variance decomposition is due to [Sobol' (1993)](#ref-sobol-1993), with
+variance indices and Monte Carlo estimation developed further in
+[Sobol' (2001)](#ref-sobol-2001). The total-order importance measure is
+described by [Homma & Saltelli (1996)](#ref-homma-saltelli-1996).
+The sampling layout and estimators are distinct contributions; cite the
+sources for the estimator you use below.
+
 ```python
 analyze(
     sampling_result: SobolSamples,
@@ -127,6 +134,19 @@ accepted names are `"saltelli-jansen"`, `"jansen"`, `"janon-monod"`,
 `"martinez"`, `"mauntz-kucherenko"` and `"azzini-rosati"`. Anything else raises
 a `ValueError` before any array is touched.
 
+| `estimator` | First-order source | Total-order source |
+| --- | --- | --- |
+| `"saltelli-jansen"` | [Sobol' et al. (2007)](#ref-sobol-2007), recommended by [Saltelli et al. (2010)](#ref-saltelli-2010) | [Jansen (1999)](#ref-jansen-1999) |
+| `"jansen"` | [Jansen (1999)](#ref-jansen-1999), using the complementary squared-difference estimate | [Jansen (1999)](#ref-jansen-1999) |
+| `"janon-monod"` | [Monod et al. (2006)](#ref-monod-2006); [Janon et al. (2014)](#ref-janon-2014) | The same paired estimator applied to the complementary variance |
+| `"martinez"` | [Martinez (2011)](#ref-martinez-2011), using empirical correlation | The complementary correlation estimate from the same source |
+| `"mauntz-kucherenko"` | [Sobol' et al. (2007)](#ref-sobol-2007) | [Sobol' et al. (2007)](#ref-sobol-2007) |
+| `"azzini-rosati"` | [Azzini, Mara & Rosati (2021)](#ref-azzini-2021) | [Azzini, Mara & Rosati (2021)](#ref-azzini-2021) |
+
+For every option, `S2` uses the cross-moment construction of
+[Saltelli (2002)](#ref-saltelli-2002), subtracting the selected first-order
+estimates. jaxgsa averages the two directional estimates as described above.
+
 ```python
 result = jaxgsa.sobol.analyze(samples, Y, estimator="azzini-rosati")
 ```
@@ -212,3 +232,54 @@ Related docs:
 - [Bootstrap Confidence Intervals](/examples/bootstrap)
 - [xarray Output](/examples/xarray)
 - [Methods](/guide/methods)
+
+## References
+
+- <a id="ref-sobol-2001"></a>**Variance indices and Monte Carlo estimation:**
+  Sobol', I. M. (2001).
+  [Global sensitivity indices for nonlinear mathematical models and their Monte Carlo estimates](https://doi.org/10.1016/S0378-4754(00)00270-6).
+  *Mathematics and Computers in Simulation*, 55(1–3), 271–280.
+- <a id="ref-homma-saltelli-1996"></a>**Total-order importance measure:**
+  Homma, T., & Saltelli, A. (1996).
+  [Importance measures in global sensitivity analysis of nonlinear models](https://doi.org/10.1016/0951-8320(96)00002-6).
+  *Reliability Engineering & System Safety*, 52(1), 1–17.
+- <a id="ref-sobol-1993"></a>**Index definition:** Sobol', I. M. (1993).
+  *Sensitivity estimates for nonlinear mathematical models.* Mathematical
+  Modelling and Computational Experiments, 1(4), 407–414.
+  [Paper](https://www.andreasaltelli.eu/file/repository/sobol1993.pdf).
+- <a id="ref-sobol-2007"></a>**Improved cross-moment estimators:** Sobol', I. M.,
+  Tarantola, S., Gatelli, D., Kucherenko, S. S., & Mauntz, W. (2007).
+  *Estimating the approximation error when fixing unessential factors in
+  global sensitivity analysis.* Reliability Engineering & System Safety,
+  92(7), 957–960. [DOI](https://doi.org/10.1016/j.ress.2006.07.001).
+- <a id="ref-jansen-1999"></a>**Squared-difference estimators:** Jansen, M. J. W.
+  (1999). *Analysis of variance designs for model output.* Computer Physics
+  Communications, 117(1–2), 35–43.
+  [DOI](https://doi.org/10.1016/S0010-4655(98)00154-4).
+- <a id="ref-saltelli-2002"></a>**Sampling layout and second-order estimator:**
+  Saltelli, A. (2002). *Making best use of model evaluations to compute
+  sensitivity indices.* Computer Physics Communications, 145(2), 280–297.
+  [DOI](https://doi.org/10.1016/S0010-4655(02)00280-1).
+- <a id="ref-saltelli-2010"></a>**Estimator comparison and recommended pairing:**
+  Saltelli, A., Annoni, P., Azzini, I., Campolongo, F., Ratto, M., & Tarantola,
+  S. (2010). *Variance based sensitivity analysis of model output. Design and
+  estimator for the total sensitivity index.* Computer Physics Communications,
+  181(2), 259–270. [DOI](https://doi.org/10.1016/j.cpc.2009.09.018).
+- <a id="ref-monod-2006"></a>**Paired estimator:** Monod, H., Naud, C., &
+  Makowski, D. (2006). *Uncertainty and sensitivity analysis for crop models.*
+  In *Working with Dynamic Crop Models*, 55–100. Elsevier.
+  [Author repository](https://hal.inrae.fr/hal-02823185).
+- <a id="ref-janon-2014"></a>**Paired estimator efficiency:** Janon, A., Klein,
+  T., Lagnoux, A., Nodet, M., & Prieur, C. (2014). *Asymptotic normality and
+  efficiency of two Sobol index estimators.* ESAIM: Probability and Statistics,
+  18, 342–364. [DOI](https://doi.org/10.1051/ps/2013040).
+- <a id="ref-martinez-2011"></a>**Correlation estimator:** Martinez, J.-M.
+  (2011). *Analyse de sensibilité globale par décomposition de la variance.*
+  Presentation, meeting of GdR Ondes and GdR MASCOT-NUM, Institut Henri
+  Poincaré, Paris, 13 January 2011. This is a presentation, rather than a
+  journal article; see the [CEA Uranie estimator documentation](https://uranie.cea.fr/documentation/methodology/ch05s05)
+  for the documented attribution.
+- <a id="ref-azzini-2021"></a>**Four-block estimators:** Azzini, I., Mara, T. A.,
+  & Rosati, R. (2021). *Comparison of two sets of Monte Carlo estimators of
+  Sobol' indices.* Environmental Modelling & Software, 144, 105167.
+  [DOI](https://doi.org/10.1016/j.envsoft.2021.105167).

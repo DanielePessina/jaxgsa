@@ -131,7 +131,8 @@ precision settings.
 - [API reference](/api/) lists the full signatures and result fields.
 
 If you use jaxgsa in research, cite the version you ran and the paper for
-your sensitivity method. For v1.0.2, use
+your sensitivity method (see the [Sobol' references](/api/sobol#references)
+for this tutorial's estimators). For v1.0.2, use
 [10.5281/zenodo.23057233](https://doi.org/10.5281/zenodo.23057233)
 (the archived v1.0.0 record is
 [10.5281/zenodo.23054912](https://doi.org/10.5281/zenodo.23054912)).

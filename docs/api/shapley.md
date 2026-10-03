@@ -1,9 +1,12 @@
 # Shapley effects
 
-Shapley effects allocate the output variance among the parameters so that the
-allocation sums to one and every parameter gets a non-negative share. They come
-from a fitted surrogate's variance decomposition, so `jaxgsa.shapley` has no
-pipeline of its own.
+For independent inputs, Shapley effects split each interaction's variance equally
+among its participating parameters, giving non-negative shares that sum to one
+([Owen, 2014](https://doi.org/10.1137/130936233)). In jaxgsa they come from a fitted
+surrogate's variance decomposition, so `jaxgsa.shapley` has no pipeline of its own.
+For correlated inputs, the HDMR route provides an ANCOVA variance allocation;
+it does not compute the conditional-variance Shapley effects of
+[Owen & Prieur (2017)](https://doi.org/10.1137/16M1097717).
 
 The canonical form is a result method. Fit a PCE or HDMR surrogate, then ask it
 for the effects:
@@ -42,7 +45,8 @@ This is the reason to reach for Shapley effects. `x3` has `S1 = 0` and
 and neither is a share of anything. `Sh = 0.122` splits the `x1`/`x3`
 interaction evenly between the two parameters and lands between them. The three
 effects sum to 1, so they are directly readable as percentages of output
-variance.
+variance. For independent inputs, the first-order and total indices bound the
+Shapley effect, as shown by [Owen (2014)](https://doi.org/10.1137/130936233).
 
 `x1` shows the same pattern more mildly: `S1 = 0.315`, `ST = 0.558`,
 `Sh = 0.436`.
@@ -102,7 +106,7 @@ summary.
 | Argument | Default | What it changes |
 | --- | --- | --- |
 | `backend` | `"pce"` | Which surrogate supplies the variance decomposition. `"pce"` reads subset variances off orthonormal polynomial coefficients. `"hdmr"` fits B-spline component functions and also separates correlation-induced variance, which makes it the only route to a correlated problem here. |
-| `include_correlative` | `False` | HDMR only. Allocates `Sa + Sb` instead of `Sa` alone, which keeps the allocation meaningful under correlated inputs. Passing it with `backend="pce"` raises. `Sh` under `True` is an ANCOVA variance allocation, not the conditional-variance Shapley effect (Owen 2014; Owen & Prieur 2017): on an exact linear-Gaussian check (D=2, rho=0.5) the true Shapley effects are `[0.339, 0.661]` against this allocation's `[0.287, 0.713]`. Under `False` on a correlated problem the reported `Sh` is the structural share `Sa` renormalized to sum to 1, which drops the correlative share; both `jaxgsa.shapley.analyze` and `HDMRResult.shapley()` warn about it, and the warning is raised once, by `HDMRResult.shapley()`. |
+| `include_correlative` | `False` | HDMR only. Allocates `Sa + Sb` instead of `Sa` alone, including the correlative share. Passing it with `backend="pce"` raises. `Sh` under `True` is an ANCOVA variance allocation, not the conditional-variance Shapley effect ([Owen, 2014](https://doi.org/10.1137/130936233); [Owen & Prieur, 2017](https://doi.org/10.1137/16M1097717)): on an exact linear-Gaussian check (D=2, rho=0.5) the true Shapley effects are `[0.339, 0.661]` against this allocation's `[0.287, 0.713]`. Under `False` on a correlated problem the reported `Sh` is the structural share `Sa` renormalized to sum to 1, which drops the correlative share; both `jaxgsa.shapley.analyze` and `HDMRResult.shapley()` warn about it, and the warning is raised once, by `HDMRResult.shapley()`. |
 | `on_invalid` | `"raise"` | Named here rather than left to `backend_kwargs` on purpose: naming it forwards it to exactly one backend `analyze`, which applies the policy exactly once. `ShapleyResult.invalid` is that backend's report. |
 | `n_bootstrap` | `0` | Row resamples on `Sh`, `S1` and `ST`. See below. |
 | `key` | `None` | A `jax.random` key. Required when `n_bootstrap > 0`. |
@@ -147,7 +151,13 @@ sits inside every interval. `explained_variance` is what reports that.
 The HDMR route allocates each fitted ANCOVA term's variance share equally among
 the parameters that take part in that term. `include_correlative=True` allocates
 `Sa + Sb`; the default allocates `Sa` alone. The PCE route does the same over
-polynomial subset variances.
+polynomial subset variances. With independent inputs, this equal allocation of
+orthogonal subset variances is the Shapley formula of
+[Owen (2014)](https://doi.org/10.1137/130936233). HDMR's structural/correlative
+decomposition follows [Li et al. (2010)](https://doi.org/10.1021/jp9096919);
+allocating those ANCOVA terms under dependence does not reproduce the
+conditional-variance construction of
+[Owen & Prieur (2017)](https://doi.org/10.1137/16M1097717).
 
 `VKOGAResult.shapley()` raises `NotImplementedError`. A kernel expansion is a
 sum over centres and every centre involves every parameter, so there is no
@@ -171,5 +181,11 @@ underlying `analyze` rejects its inputs.
 include_correlative=False, **backend_kwargs)` returns `(Sh, S1, ST)` as bare
 arrays with none of the checks, so it composes with `jit`, `vmap` and `jacrev`.
 `explained_variance` lives on the result object only.
+
+## References
+
+- Owen, A. B. (2014). [Sobol' indices and Shapley value](https://doi.org/10.1137/130936233). *SIAM/ASA Journal on Uncertainty Quantification*, 2(1), 245–251. Independent-input allocation and bounds between first-order and total indices.
+- Owen, A. B. & Prieur, C. (2017). [On Shapley value for measuring importance of dependent inputs](https://doi.org/10.1137/16M1097717). *SIAM/ASA Journal on Uncertainty Quantification*, 5(1), 986–1002. Conditional-variance Shapley effects for dependent inputs, which differ from this implementation's correlated HDMR allocation.
+- Li, G., Rabitz, H., Yelvington, P. E., Oluwole, O. O., Bacon, F., Kolb, C. E. & Schoendorf, J. (2010). [Global sensitivity analysis for systems with independent and/or correlated inputs](https://doi.org/10.1021/jp9096919). *Journal of Physical Chemistry A*, 114(19), 6022–6032. ANCOVA structural and correlative decomposition used by the HDMR backend.
 
 See the [Shapley example](/examples/shapley) and the [API overview](/api/).

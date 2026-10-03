@@ -58,6 +58,11 @@ assumptions, sampling instructions, result fields, and uncertainty options.
 "Own design" means you must evaluate the model at points produced by
 `sample()`.
 
+Each method's API page includes a **References** section with the original
+method and the estimator used by jaxgsa. When reporting an analysis, cite
+those sources alongside the software. For Sobol', use the
+[estimator-specific citation table](/api/sobol#choosing-an-estimator).
+
 | Method | Main question and result | Data needed | Watch for |
 | --- | --- | --- | --- |
 | [Sobol'](/api/sobol) | How much variance comes from each independent input alone and with interactions? $S_1$, $S_T$, optional $S_2$ | Own design | Requires independent inputs. |

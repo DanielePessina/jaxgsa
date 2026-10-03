@@ -19,6 +19,15 @@ a stated significance level.
 
 Any `(X, Y)` pair works. No design is required.
 
+The HSIC V-statistic estimator comes from
+[Gretton et al. (2005)](https://doi.org/10.1007/11564089_7); the normalized
+`R2_HSIC` sensitivity measure follows
+[Da Veiga (2015)](https://doi.org/10.1080/00949655.2014.945932).
+`T_HSIC` uses products of augmented centered kernels, `1 + k_c`, to capture
+interactions of all orders, following
+[Larsen and Alexanderian (2026)](https://arxiv.org/abs/2603.00849), currently
+an arXiv preprint.
+
 ## A run
 
 ```python
@@ -163,6 +172,12 @@ x64 on before you trust a small index or a close ranking.
 returns `(R2_HSIC, T_HSIC, p_values, hsic_raw)` as bare arrays with none of the
 checks, so it composes with `jit`, `vmap` and `jacrev`. `key` is keyword-only
 and has no default there either.
+
+## References
+
+- Gretton, A., Bousquet, O., Smola, A., and Schölkopf, B. (2005). [Measuring Statistical Dependence with Hilbert-Schmidt Norms](https://doi.org/10.1007/11564089_7). *Algorithmic Learning Theory*, Lecture Notes in Computer Science, 3734, 63–77. Introduces HSIC and the V-statistic estimator used here.
+- Da Veiga, S. (2015). [Global sensitivity analysis with dependence measures](https://doi.org/10.1080/00949655.2014.945932). *Journal of Statistical Computation and Simulation*, 85(7), 1283–1305. Develops dependence-based sensitivity measures, including normalized HSIC.
+- Larsen, T., and Alexanderian, A. (2026). [A new kernel-based approach for the global sensitivity analysis of models with correlated inputs](https://arxiv.org/abs/2603.00849). *arXiv preprint*, arXiv:2603.00849. Develops total HSIC indices using augmented kernels.
 
 See the [HSIC example](/examples/hsic), [Methods](/guide/methods), and the
 [API overview](/api/).
