@@ -14,6 +14,12 @@ from jaxgsa._core.copula import (
     fit_gaussian_copula,
     latent_to_physical,
 )
+from jaxgsa._core.dependence import (
+    ConditionalSampler as ConditionalSampler,
+)
+from jaxgsa._core.dependence import (
+    JointSampler as JointSampler,
+)
 from jaxgsa._core.sampling import _transform_samples
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.problem import Problem

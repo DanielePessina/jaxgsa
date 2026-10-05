@@ -32,6 +32,8 @@ class KucherenkoResult(SchemaResult):
         ST: Total-order (correlation-exclusive) indices, shape ``(..., D)``.
             Rank parameters by ``ST`` to decide which ones to fix.
         problem: Problem definition used for the analysis.
+        dependence_source: ``"gaussian"`` for the built-in sampling path or
+            ``"custom"`` for user-supplied joint and conditional draws.
         variance: Output variance under the joint input measure, one value per
             output slice (shape ``()``, ``(K,)``, or ``(T, K)``).
         invalid: What the non-finite check found and what it did about it. A
@@ -57,6 +59,7 @@ class KucherenkoResult(SchemaResult):
     S1_conf: Array | None = None
     ST_conf: Array | None = None
     ci: CIInfo | None = None
+    dependence_source: str = "gaussian"
 
     _schema = ResultSchema(
         primary="S1",
@@ -65,10 +68,12 @@ class KucherenkoResult(SchemaResult):
             FieldSpec("ST", interval=True),
             FieldSpec("variance", "slice"),
         ),
-        meta=("is_correlated",),
+        meta=("is_correlated", "dependence_source"),
     )
 
     @property
-    def is_correlated(self) -> bool:
-        """Return ``True`` when the problem declares a non-identity correlation."""
+    def is_correlated(self) -> bool | None:
+        """Return declared correlation status, or ``None`` for custom dependence."""
+        if self.dependence_source == "custom":
+            return None
         return self.problem.has_correlated_inputs

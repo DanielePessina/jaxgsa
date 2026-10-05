@@ -133,3 +133,13 @@ no row-bootstrap interval, while HSIC reports permutation p-values. The
 For a complete run and interpretation, continue with the
 [basic example](/examples/basic). The [API overview](/api/) describes shared
 inputs and results.
+
+## Supplying your own input distribution
+
+Kucherenko and VKOGA accept paired joint and conditional sampling callbacks
+for dependence beyond Gaussian copulas. Kucherenko assembles the design;
+VKOGA integrates its fitted surrogate under the supplied distribution.
+A joint sampler alone is insufficient. These callbacks use Monte Carlo and do
+not need a user-provided Sobol-sequence sampler. See the
+[custom-dependence example](/examples/correlated-inputs#custom-dependence-without-a-copula).
+PAWN, Borgonovo, optimal transport and HSIC retain their direct `X, Y` APIs.

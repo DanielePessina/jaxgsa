@@ -126,7 +126,8 @@ The rest of this page is the mechanics.
 
 ## How jaxgsa models dependence
 
-jaxgsa uses a Gaussian copula. A copula separates two questions: what each
+The built-in path uses a Gaussian copula. Custom joint and conditional samplers
+for Kucherenko and VKOGA can represent other dependence structures. A copula separates two questions: what each
 parameter's own distribution looks like, and how the parameters move together.
 Every parameter keeps its declared marginal (uniform, Gaussian, or truncated
 Gaussian) exactly as written. A `(D, D)` correlation matrix couples the
@@ -267,6 +268,10 @@ problem = problem.with_correlation(R_fit)
 The fit works on Spearman ranks, so it is invariant to the declared
 marginals. Heavy ties (discrete or heavily rounded columns) bias the rank
 estimate toward zero. A polychoric estimator is future work.
+
+Fitting is explicit: supplied `X, Y` do not automatically trigger a Gaussian
+copula fit. A fitted pairwise rank matrix cannot describe every dependence
+structure.
 
 ## Retrofit correlation onto an existing sample
 
@@ -458,18 +463,13 @@ matrix explicitly with `problem.with_correlation(None)`.
 
 ## Practical notes
 
-- A Gaussian copula fixes the whole dependence family, not only the
-  correlation. It has no tail dependence. On the latent scale, the variables
-  are conditionally independent given the rest. Real data may carry
-  asymmetric or tail dependence that this smooths away.
-- **The Gaussian copula is the dependence model jaxgsa implements, and that
-  is a fixed scope rather than a gap waiting to be filled.** Every method
-  that reads `problem.correlation` assumes a Gaussian conditional, so other
-  copula families are not planned. Your declared rank correlation
-  still holds, so the marginals and the pairwise ranks are right, but the
-  joint behaviour in the tails is not what your data does. If tail dependence
-  drives your problem, GlobalSensitivity.jl with Copulas.jl covers Clayton,
-  Frank, Gumbel and t, and is the honest recommendation.
+- A Gaussian copula fixes a dependence family, not only a correlation matrix.
+  For correlations strictly below one in magnitude it has no asymptotic tail
+  dependence. Real data may carry asymmetric or tail dependence it cannot model.
+- `problem.correlation` selects the built-in Gaussian copula. Custom joint and
+  conditional callbacks let Kucherenko and VKOGA integrate under other copulas
+  or other joint distributions. The package does not infer such a model from
+  observed rows; supply consistent samplers for your target distribution.
 - For non-Gaussian marginals, the Pearson correlation of the physical samples
   usually differs from the latent matrix. This is the NORTA
   correlation-matching problem. The Spearman rank correlation is the
@@ -489,3 +489,100 @@ matrix explicitly with `problem.with_correlation(None)`.
 - [Optimal Transport](/examples/optimal-transport) and
   [Borgonovo Delta](/examples/borgonovo) for the distribution-based indices.
 - [Methods guide](/guide/methods) for which method to pick under correlation.
+
+## Custom dependence without a copula
+
+A joint sampler and a matching conditional sampler let Kucherenko and VKOGA
+integrate under dependence beyond Gaussian copulas. Both are necessary;
+representative correlated rows alone do not determine conditional redraws.
+PAWN, Borgonovo, optimal transport and HSIC still accept `X, Y` directly.
+
+Here both marginals are uniform on `[-1, 1]`, and `x2` randomly equals `x1` or
+`-x1`. Pearson correlation is zero, but their magnitudes are identical. An
+independent Gaussian copula cannot represent this dependence.
+
+```python
+import jax
+
+jax.config.update("jax_enable_x64", True)
+
+import numpy as np
+import jaxgsa
+
+
+def draw_joint(n, rng):
+    x1 = rng.uniform(-1.0, 1.0, size=n)
+    signs = rng.choice([-1.0, 1.0], size=n)
+    return np.column_stack((x1, signs * x1))
+
+
+def draw_conditional(anchors, fixed_indices, rng):
+    fixed = tuple(fixed_indices)
+    if not fixed:
+        return draw_joint(len(anchors), rng)
+    rows = anchors.copy()
+    if len(fixed) == 2:
+        return rows
+    if len(fixed) != 1 or fixed[0] not in (0, 1):
+        raise ValueError("Expected fixed indices from (0, 1)")
+    held = fixed[0]
+    signs = rng.choice([-1.0, 1.0], size=len(rows))
+    rows[:, 1 - held] = signs * rows[:, held]
+    return rows
+
+
+problem = jaxgsa.Problem(names=("x1", "x2"), bounds=((-1.0, 1.0),) * 2)
+design = jaxgsa.kucherenko.sample(
+    problem,
+    10_000,  # exactly this many base points; no power-of-two rounding
+    joint_sampler=draw_joint,
+    conditional_sampler=draw_conditional,
+    seed=7,
+)
+Y = design.samples.sum(axis=1)
+result = jaxgsa.kucherenko.analyze(design, Y)
+print(result.S1)  # approaches [0.5, 0.5]
+print(result.ST)  # approaches [0.5, 0.5]
+```
+
+The package assembles the blocks in the correct order. Callbacks receive
+positional arguments and a NumPy `Generator`, and return finite real arrays in
+physical input units and `problem.names` order. Conditional rows must be
+independent draws given the held columns; never mutate anchors or redraw fixed
+columns. The two callbacks must describe the same joint distribution. A matrix
+on `problem.correlation` cannot be combined with callbacks. The public typing
+aliases are `jaxgsa.sampling.JointSampler` and `ConditionalSampler`.
+
+Use the same callbacks to integrate a VKOGA surrogate. Training data and the
+target distribution are separate inputs. This independent training design
+covers the square; the integration distribution lives on the two diagonals:
+
+```python
+X_train = jaxgsa.sampling.monte_carlo(problem, n=512, seed=1)
+Y_train = X_train.sum(axis=1)
+vk = jaxgsa.vkoga.analyze(
+    problem,
+    X_train,
+    Y_train,
+    joint_sampler=draw_joint,
+    conditional_sampler=draw_conditional,
+    gamma=1.0,
+    ridge=1e-8,
+    max_centers=100,
+    n_outer=512,
+    n_inner=128,
+    key=jax.random.key(7),
+)
+print(vk.S_TC)  # approaches [0.5, 0.5], subject to surrogate error
+print(vk.S_TU)  # approaches [0.5, 0.5], subject to surrogate error
+```
+
+VKOGA's declared marginals must match the callbacks' marginals because its
+coordinate transform and component basis still use `Problem`. Both uniforms
+match here. Custom callbacks use Monte Carlo; the built-in Gaussian path uses
+quasi-random integration. See [VKOGA's API](/api/vkoga#custom-input-dependence)
+for estimator and decomposition limitations.
+
+Save a Kucherenko design and its evaluated outputs to analyze it later. The
+sampled rows and sampling provenance are saved, but Python callbacks are not.
+Retain callback code separately to generate another design.

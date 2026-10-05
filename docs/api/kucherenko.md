@@ -2,7 +2,8 @@
 
 ```python
 jaxgsa.kucherenko.sample(problem, n_samples, *, scramble=True, seed=None,
-                         verbose=True) -> KucherenkoSamples
+                         verbose=True, joint_sampler=None, conditional_sampler=None)
+                         -> KucherenkoSamples
 
 jaxgsa.kucherenko.analyze(sampling_result, Y, *, n_bootstrap=0, conf_level=0.95,
                           ci_method="quantile", key=None, on_invalid="raise",
@@ -49,7 +50,7 @@ how it differs from VKOGA, HDMR's ANCOVA split, and the ANCOVA Shapley
 allocation.
 :::
 
-`sample` warns when `problem.correlation` is `None`. The conditional redraws
+Without custom callbacks, `sample` warns when `problem.correlation` is `None`. The conditional redraws
 are plain independent draws in that case, so the design collapses to a Saltelli
 column-swap scheme and you pay `base_n * (2D + 1)` runs for indices
 [`jaxgsa.sobol`](/api/sobol) gives from `base_n * (D + 2)`, with `S2` available
@@ -121,7 +122,7 @@ Under independent inputs both reduce exactly to the classic Sobol' `S1` and
 ## The design
 
 `sample` builds `base_n * (2D + 1)` rows, where `base_n` is `n_samples` rounded
-up to the next power of two. The Sobol' sequence keeps its balance guarantees
+up to the next power of two on the built-in path. The Sobol' sequence keeps its balance guarantees
 only at powers of two, so 4096 stays 4096 and 4097 becomes 8192.
 
 The design holds one joint block, then two blocks per parameter. The first keeps
@@ -137,9 +138,9 @@ column-swap scheme and the analysis reproduces the classic Sobol' indices.
 
 | Argument | Default | What it changes |
 | --- | --- | --- |
-| `n_samples` | required | Base points per block, at least 2, rounded up to a power of two. It is the only knob on accuracy: everything else in the design is fixed by `D`. |
+| `n_samples` | required | Base points per block, at least 2; rounded up to a power of two on the built-in path, exact for custom callbacks. It is the only knob on accuracy: everything else in the design is fixed by `D`. |
 | `scramble` | `True` | Owen-scrambles the Sobol' sequence. Keep it on, because it is what makes different seeds give statistically independent designs. Off, the sequence is deterministic and repeated runs are identical. |
-| `seed` | `None` | `int`, `np.random.Generator`, or `None`. It seeds the scrambling only, so it does nothing with `scramble=False` and passing both raises `ValueError`. `seed=0` reproduces the design earlier versions produced by default. |
+| `seed` | `None` | `int`, `np.random.Generator`, or `None`. On the built-in path it seeds the scrambling only, so it does nothing with `scramble=False` and passing both raises `ValueError`. `seed=0` reproduces the design earlier versions produced by default. |
 | `verbose` | `True` | Prints the one-line design summary shown above. |
 
 `sample` raises `ValueError` when the problem declares a categorical parameter
@@ -148,6 +149,36 @@ column-swap scheme and the analysis reproduces the classic Sobol' indices.
 [`jaxgsa.borgonovo`](/api/borgonovo), [`jaxgsa.pawn`](/api/pawn), or the
 Saltelli-based Sobol pipeline), when the problem has fewer than two parameters,
 and when `n_samples < 2`.
+
+## Custom input dependence
+
+Pass `joint_sampler` and `conditional_sampler` together to replace the Gaussian
+copula. Leave `problem.correlation` unset; combining callbacks with a declared
+matrix raises `ValueError`. No dependence model is fitted automatically.
+
+The public aliases `jaxgsa.sampling.JointSampler` and `ConditionalSampler`
+describe these positional-argument callbacks:
+
+```python
+joint_sampler(n, rng)                            # -> (n, D)
+conditional_sampler(anchors, fixed_indices, rng) # -> anchors.shape
+```
+
+`rng` is a NumPy `Generator`. Return finite real arrays in physical units and
+`problem.names` column order. Conditional draws must preserve all fixed
+columns, leave anchors unmodified, and independently redraw each row from the
+conditional of the **same joint distribution** as the joint sampler. An empty
+fixed subset means a joint redraw; fixing all columns returns an anchor copy.
+Overwriting columns of an unconditional sample is not conditional sampling.
+
+Shapes, finite values and fixed-column preservation are checked. Statistical
+correctness and consistency remain the callback author's responsibility.
+Custom callbacks use Monte Carlo with exactly `n_samples` base rows, without
+power-of-two rounding. `seed` seeds the generator; `scramble` only affects the
+built-in Sobol sequence. The package assembles all blocks and their ordering;
+you do not supply a Sobol-sequence sampler.
+
+See the [complete example](/examples/correlated-inputs#custom-dependence-without-a-copula).
 
 ## Analysis
 
@@ -190,7 +221,8 @@ Drop that slice, or widen the input ranges so the output varies.
 | `S1`, `ST` | The two index arrays, `(..., D)`. |
 | `S1_conf`, `ST_conf` | `(2, ..., D)` intervals, `None` when `n_bootstrap=0`. |
 | `variance` | Output variance under the joint input measure, per output slice. |
-| `is_correlated` | Whether the problem declared a dependence. |
+| `is_correlated` | Declared Gaussian correlation status; `None` for custom sampling. |
+| `dependence_source` | `"gaussian"` or `"custom"`. |
 | `invalid` | What the non-finite check found and which policy ran. |
 | `ci` | Confidence level, endpoint rule, resample count, and the draws when `keep_replicates=True`. |
 
@@ -204,15 +236,16 @@ Drop that slice, or widen the input ranges so the output varies.
 conditional block per parameter for `S1`, then one per parameter for `ST`.
 `n_runs`, `base_n`, `n_params` and `problem` describe it.
 
-Every conditional draw is a distinct continuous point, so this design has no
-duplicate rows: `n_expanded == n_runs`, `expanded_to_unique` is the identity,
+The design keeps all rows, including repeated points from custom callbacks: `n_expanded == n_runs`, `expanded_to_unique` is the identity,
 and `expand_outputs(Y)` returns `Y` unchanged. The shared
 `UniqueDesignSamples` base is here for the NPZ format and the metadata schema,
 not for deduplication.
 
 `KucherenkoSamples.save(path)` and `KucherenkoSamples.load(path)` use the same
 one-file NPZ format as the other design classes. The stored problem metadata
-carries the correlation matrix, so a loaded design analyzes identically.
+carries the sampling provenance, so a loaded design analyzes identically.
+Custom callbacks are not serialized: sampled rows and their evaluated outputs
+suffice for analysis; retain callback code separately to generate new designs.
 
 ## References
 

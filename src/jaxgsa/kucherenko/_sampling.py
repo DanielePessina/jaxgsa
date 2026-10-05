@@ -44,6 +44,13 @@ from jaxgsa._core.copula import (
     latent_normal_sample,
     latent_to_physical,
 )
+from jaxgsa._core.dependence import (
+    ConditionalSampler,
+    JointSampler,
+    draw_conditional_samples,
+    draw_joint_samples,
+    validate_sampler_pair,
+)
 from jaxgsa._core.samples import UniqueDesignSamples
 from jaxgsa._core.sampling import _next_power_of_2
 from jaxgsa._core.validation import _raise_categorical_design
@@ -62,18 +69,18 @@ class KucherenkoSamples(UniqueDesignSamples):
     The design is stored as ``2D + 1`` stacked blocks of ``base_n`` rows each.
     The joint block comes first. Then comes one conditional block per parameter
     for the first-order index, and one per parameter for the total index. Every
-    conditional draw is a distinct continuous point, so the design has no
-    duplicate rows and the expansion map is the identity. The
+    row is retained, including repeats under deterministic dependence, and the
+    expansion map is the identity. The
     :class:`~jaxgsa._core.samples.UniqueDesignSamples` base is used for its NPZ
     persistence and metadata schema, not for deduplication.
 
     Attributes:
         samples: Rows to evaluate in the problem's physical units, shape
             ``(base_n * (2D + 1), D)``.
-        n_expanded: Equal to ``n_runs``, because the design has no duplicate
-            rows.
+        n_expanded: Equal to ``n_runs``; every design row is retained.
         expanded_to_unique: Identity index map, shape ``(n_runs,)``.
-        base_n: Base points ``n`` per block, a power of two.
+        base_n: Base points per block; a power of two for built-in sampling.
+        dependence_source: ``"custom"`` for callbacks, ``"gaussian"`` otherwise.
         n_params: Number of parameters ``D``.
         problem: Problem definition used for the analysis, including its
             ``correlation``.
@@ -85,17 +92,18 @@ class KucherenkoSamples(UniqueDesignSamples):
     base_n: int
     n_params: int
     problem: Problem
+    dependence_source: str = "gaussian"
 
     def __repr__(self) -> str:
         """Return a concise summary of the design dimensions."""
         return (
             f"KucherenkoSamples(n_runs={self.n_runs}, base_n={self.base_n}, "
-            f"n_params={self.n_params}, correlated={self.problem.has_correlated_inputs})"
+            f"n_params={self.n_params}, dependence_source={self.dependence_source!r})"
         )
 
     def _extra_metadata(self) -> dict[str, Any]:
         """Persist the design parameters in the metadata blob."""
-        return {"base_n": self.base_n}
+        return {"base_n": self.base_n, "dependence_source": self.dependence_source}
 
     @classmethod
     def _from_payload(
@@ -119,6 +127,7 @@ class KucherenkoSamples(UniqueDesignSamples):
             base_n=int(meta["base_n"]),
             n_params=problem.num_vars,
             problem=problem,
+            dependence_source=str(meta.get("dependence_source", "gaussian")),
         )
 
 
@@ -169,12 +178,20 @@ def sample(
     scramble: bool = True,
     seed: int | np.random.Generator | None = None,
     verbose: bool = True,
+    joint_sampler: JointSampler | None = None,
+    conditional_sampler: ConditionalSampler | None = None,
 ) -> KucherenkoSamples:
     """Generate the conditional-copula design for :func:`jaxgsa.kucherenko.analyze`.
 
     The design costs ``base_n * (2D + 1)`` model evaluations, where ``base_n``
     is ``n_samples`` rounded up to the next power of two (the Sobol' sequence
     keeps its balance guarantees only at powers of two).
+
+    Custom callbacks use ordinary Monte Carlo with exactly ``n_samples`` base
+    rows; ``scramble`` is ignored. They operate in physical units, bypassing
+    marginal CDFs, so problem marginals provide metadata rather than fitting
+    the custom distribution. Repeated rows under deterministic dependence are
+    retained. Saved designs can be analyzed without the original callbacks.
 
     The dependence structure comes from ``problem.correlation``. An
     uncorrelated problem gives the classic Saltelli column-swap design, and
@@ -190,11 +207,20 @@ def sample(
         problem: Problem definition with parameter names, marginals, and an
             optional ``correlation``.
         n_samples: Requested base points per block, at least 2. Rounded up to
-            the next power of two.
+            the next power of two only for built-in sampling.
         scramble: Whether to Owen-scramble the Sobol' sequence. Keep it on:
             different seeds then give statistically independent designs.
+            Ignored for custom Monte Carlo callbacks.
         seed: Random seed or generator for reproducibility. It seeds the
-            scrambling, so it only applies with ``scramble=True``.
+            scrambling for built-in sampling, where it requires
+            ``scramble=True``; seeds Monte Carlo for custom callbacks.
+        joint_sampler: Optional ``(n, rng) -> X`` joint sampling callback.
+            Must be supplied together with ``conditional_sampler``.
+        conditional_sampler: Optional ``(anchors, fixed_indices, rng) -> X``
+            callback preserving fixed columns and redrawing all others from
+            their conditional distribution. Both callbacks must describe the
+            same distribution. Custom callbacks cannot accompany a declared
+            ``problem.correlation``.
         verbose: If ``True`` (default), print a one-line summary of the
             design: base points, blocks, total runs, and whether the design
             conditions on a declared correlation. Pass ``False`` for a
@@ -204,17 +230,20 @@ def sample(
         A :class:`KucherenkoSamples` carrying the stacked design.
 
     Warns:
-        JaxgsaWarning: If the problem declares no correlation. The design then
+        JaxgsaWarning: If built-in sampling declares no correlation. The design then
             reduces to a Saltelli column-swap scheme and ``jaxgsa.sobol``
             reaches the same two indices for fewer model runs.
 
     Raises:
         ValueError: If the problem has fewer than two parameters or any
-            categorical parameter, if ``n_samples < 2``, or if a ``seed`` is
+            categorical parameter, if ``n_samples < 2``, or if a built-in ``seed`` is
             given with ``scramble=False`` (the unscrambled sequence is
             deterministic, so the seed would do nothing).
     """
-    if not scramble and seed is not None:
+    custom = validate_sampler_pair(joint_sampler, conditional_sampler)
+    if custom and problem.correlation is not None:
+        raise ValueError("Custom samplers cannot be combined with problem.correlation.")
+    if not custom and not scramble and seed is not None:
         raise ValueError(
             "jaxgsa.kucherenko.sample: seed has no effect with scramble=False. "
             "The unscrambled Sobol' sequence is deterministic, so the seed "
@@ -226,40 +255,56 @@ def sample(
         raise ValueError(f"Kucherenko indices need at least 2 parameters, got {D}")
     if n_samples < 2:
         raise ValueError(f"n_samples must be >= 2, got {n_samples}")
-    n = _next_power_of_2(n_samples)
-    _warn_independent_problem(problem, n)
+    if custom:
+        assert joint_sampler is not None and conditional_sampler is not None
+        n = n_samples
+        rng = np.random.default_rng(seed)
+        joint = draw_joint_samples(joint_sampler, n, D, rng)
+        blocks = [joint]
+        for i in range(D):
+            blocks.append(draw_conditional_samples(conditional_sampler, joint, (i,), rng))
+        for i in range(D):
+            others = tuple(j for j in range(D) if j != i)
+            blocks.append(draw_conditional_samples(conditional_sampler, joint, others, rng))
+        X = np.concatenate(blocks, axis=0)
+    else:
+        n = _next_power_of_2(n_samples)
+        _warn_independent_problem(problem, n)
 
-    R = problem.correlation
-    if R is None:
-        R = independent_correlation(D)
-    plan = build_conditional_plan(R)
+        R = problem.correlation
+        if R is None:
+            R = independent_correlation(D)
+        plan = build_conditional_plan(R)
 
-    # One scrambled Sobol' block of dimension 2D: the first D columns drive
-    # the joint sample, the last D the conditional redraws. Pairing them
-    # inside one QMC point set is the Saltelli (A, B) construction.
-    draws = latent_normal_sample(n, 2 * D, seed=seed, scramble=scramble)
-    base = draws[:, :D]
-    redraw = draws[:, D:]
-    Z_joint = base @ plan.chol_full.T
+        # One scrambled Sobol' block of dimension 2D: the first D columns drive
+        # the joint sample, the last D the conditional redraws. Pairing them
+        # inside one QMC point set is the Saltelli (A, B) construction.
+        draws = latent_normal_sample(n, 2 * D, seed=seed, scramble=scramble)
+        base = draws[:, :D]
+        redraw = draws[:, D:]
+        Z_joint = base @ plan.chol_full.T
 
-    blocks = [Z_joint]
-    # First-order blocks: keep Z_i, redraw the rest from p(z_rest | z_i).
-    for i in range(D):
-        others = plan.others[i]
-        z_rest = draw_rest_given_self(plan, i, Z_joint[:, i], redraw[:, others])
-        blocks.append(assemble_latent(i, others, Z_joint[:, i], z_rest))
-    # Total blocks: keep Z_rest, redraw Z_i from p(z_i | z_rest).
-    for i in range(D):
-        others = plan.others[i]
-        z_self = draw_self_given_rest(plan, i, Z_joint[:, others], redraw[:, i])
-        blocks.append(assemble_latent(i, others, z_self, Z_joint[:, others]))
+        blocks = [Z_joint]
+        # First-order blocks: keep Z_i, redraw the rest from p(z_rest | z_i).
+        for i in range(D):
+            others = plan.others[i]
+            z_rest = draw_rest_given_self(plan, i, Z_joint[:, i], redraw[:, others])
+            blocks.append(assemble_latent(i, others, Z_joint[:, i], z_rest))
+        # Total blocks: keep Z_rest, redraw Z_i from p(z_i | z_rest).
+        for i in range(D):
+            others = plan.others[i]
+            z_self = draw_self_given_rest(plan, i, Z_joint[:, others], redraw[:, i])
+            blocks.append(assemble_latent(i, others, z_self, Z_joint[:, others]))
 
-    X = latent_to_physical(problem, np.concatenate(blocks, axis=0))
+        X = latent_to_physical(problem, np.concatenate(blocks, axis=0))
     n_total = n * (2 * D + 1)
     if verbose:
-        dependence = "copula-conditional" if problem.has_correlated_inputs else "independent"
-        # The conditional redraws make every row distinct, so there is no
-        # deduplication to report: n_runs equals the expanded size.
+        dependence = (
+            "custom-conditional"
+            if custom
+            else ("copula-conditional" if problem.has_correlated_inputs else "independent")
+        )
+        # Retain conditional rows, including deterministic repeats.
         _verbose.sample_summary(
             method="jaxgsa.kucherenko.sample",
             problem=problem,
@@ -278,4 +323,5 @@ def sample(
         base_n=n,
         n_params=D,
         problem=problem,
+        dependence_source="custom" if custom else "gaussian",
     )

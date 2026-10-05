@@ -135,7 +135,7 @@ indices of Li et al. (2010) against it. Given data.
 import jax
 jax.config.update("jax_enable_x64", True)      # before fitting
 
-# Train on an INDEPENDENT design, even though the analysis is correlated.
+# An independent design can cover the integration support.
 X_train = jnp.asarray(
     jaxgsa.sampling.monte_carlo(problem.with_correlation(None), 2000, seed=1)
 )
@@ -165,7 +165,8 @@ buys you almost nothing.
 Signature:
 
 ```python
-jaxgsa.vkoga.analyze(problem, X, Y, *, correlation=None, gamma=None, ridge=None,
+jaxgsa.vkoga.analyze(problem, X, Y, *, correlation=None,
+                     joint_sampler=None, conditional_sampler=None, gamma=None, ridge=None,
                      max_centers=None, n_folds=10, n_outer=512, n_inner=128,
                      n_variance=8192, n_bootstrap=0, conf_level=0.95,
                      ci_method="quantile", key=None, batch_size=None,
@@ -178,16 +179,11 @@ actually used comes back on `result.correlation`.
 
 Keep in mind:
 
-- **Train on an independent, space-filling design.** This is the easy way to get
-  wrong answers, and it is why the example above drops the correlation before
-  drawing `X_train`. A correlated sample concentrates on a ridge through the
-  parameter space, but `S_TU` conditions on the other parameters and then
-  resamples `X_i` across its whole marginal, which is precisely the off-ridge
-  region a correlated training set never visited. The surrogate extrapolates
-  exactly where the estimator leans on it hardest. `analyze` warns when it
-  detects correlation in the training `X`. If your data is observational you can
-  still fit the copula from it, but read `S_TU`, and so `S_U`, `S_C` and `S_IU`,
-  as carrying that extrapolation error.
+- **Train on data covering the integration support.** Conditional integration
+  stays on the target joint support, rather than redrawing inputs from their
+  unconditional marginals. An independent, space-filling design can help when
+  the model is evaluable throughout the domain, but is not mandatory.
+  Correlated training data can be suitable; check `cv_rmse` and coverage.
 - **Use float64.** The coefficient step forms the normal matrix, which squares
   the condition number of the cross kernel, and for small `gamma` that exceeds
   what single precision carries. `analyze` warns when x64 is off.
@@ -207,8 +203,8 @@ disagree on the same data.
 
 | Route | What it estimates | What it needs |
 | --- | --- | --- |
-| `kucherenko` | `S1 = V(E(Y given X_i))/V(Y)` and `ST = E(V(Y given X_~i))/V(Y)`, exactly, under the declared copula | Its own design, `N(2D+1)` model runs, a declared correlation |
-| `vkoga` | The same two, as `S_TC` and `S_TU`, plus `S_U`, `S_C`, `S_IU`, from a fitted kernel surrogate | Any (X, Y) pairs, a declared correlation |
+| `kucherenko` | `S1 = V(E(Y given X_i))/V(Y)` and `ST = E(V(Y given X_~i))/V(Y)` under the target joint distribution | Its own design, `N(2D+1)` model runs, a Gaussian correlation or custom joint/conditional samplers |
+| `vkoga` | The same two, as `S_TC` and `S_TU`, plus `S_U`, `S_C`, `S_IU`, from a fitted kernel surrogate | Training (X, Y) pairs, a Gaussian correlation or custom joint/conditional samplers |
 | `hdmr` ANCOVA split | Per term, not per parameter: each component's variance split into a structural share `Sa` and a coupling share `Sb` | Any (X, Y) pairs. The correlation is read implicitly out of X |
 | `shapley(backend="hdmr", include_correlative=True)` | One allocation per parameter summing to 1, splitting each term's `Sa + Sb` among its participants | Any (X, Y) pairs |
 
@@ -239,3 +235,28 @@ indices are correlation-inclusive: a parameter the model never reads scores
 above zero when it correlates with one the model does read. That is the correct
 reading of those indices, not an estimation error, and it is why they cannot
 answer the fixing question the way `S_TU` can. See `moment-independent.md`.
+
+## Custom joint and conditional samplers
+
+Kucherenko `sample` and VKOGA `analyze` accept optional `joint_sampler` and
+`conditional_sampler` callbacks together. Their public aliases live in
+`jaxgsa.sampling`: `JointSampler`, `ConditionalSampler`. Calls are positional:
+`joint_sampler(n, rng)` returns `(n, D)`; `conditional_sampler(anchors,
+fixed_indices, rng)` returns the anchor shape. Values are real, finite physical
+inputs in `problem.names` order. Do not mutate anchors; preserve fixed columns
+and draw each remaining row independently from the matching joint conditional.
+Empty fixed indices mean joint redraw; all fixed means anchor copy. Both
+callbacks are required, and cannot coexist with `problem.correlation` or a
+VKOGA `correlation=` override. Shapes and fixed columns are validated;
+statistical consistency is the user's responsibility.
+
+Custom integration uses NumPy `Generator` Monte Carlo with exact counts rather
+than rounded Sobol-sequence counts. Kucherenko owns block assembly; no user
+Sobol sampler is required. Its `seed` controls callbacks; `scramble` only
+applies to the built-in Gaussian path. Saved designs retain sampled rows and
+provenance, not callable code. VKOGA's `key` controls integration randomness,
+and its declared marginals must match the callbacks because transforms and
+component bases still use them. Its IID inner-variance correction can yield
+small negative first-order estimates. Training data must cover integration
+support; an independent training design is optional. Dependence fitting remains
+explicit, never triggered just by supplying data.

@@ -559,6 +559,7 @@
   },
   "kucherenko@multi": {
     "attrs": [
+      "dependence_source",
       "is_correlated"
     ],
     "coords": [
@@ -583,6 +584,7 @@
   },
   "kucherenko@scalar": {
     "attrs": [
+      "dependence_source",
       "is_correlated"
     ],
     "coords": [
@@ -605,6 +607,7 @@
   },
   "kucherenko@series": {
     "attrs": [
+      "dependence_source",
       "is_correlated"
     ],
     "coords": [
@@ -1380,6 +1383,7 @@
   "vkoga@multi": {
     "attrs": [
       "cv_rmse",
+      "dependence_source",
       "gamma",
       "is_correlated",
       "n_centers",
@@ -1422,6 +1426,7 @@
   "vkoga@scalar": {
     "attrs": [
       "cv_rmse",
+      "dependence_source",
       "gamma",
       "is_correlated",
       "n_centers",
@@ -1462,6 +1467,7 @@
   "vkoga@series": {
     "attrs": [
       "cv_rmse",
+      "dependence_source",
       "gamma",
       "is_correlated",
       "n_centers",

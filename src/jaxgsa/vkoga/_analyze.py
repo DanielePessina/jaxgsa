@@ -3,12 +3,14 @@
 Implements the surrogate-based sensitivity analysis (SSA) of Hilhorst et al.
 (2024). Stage one fits a greedy kernel surrogate to the given ``(X, Y)`` data.
 Stage two computes the correlated variance-based indices of Li et al. (2010)
-against that surrogate under a Gaussian copula. The split is what makes the
+against that surrogate under a Gaussian copula or custom joint and
+conditional samplers. The split is what makes the
 method affordable. The indices need nested conditional sampling, which is
 unaffordable against an expensive model but cheap against a kernel expansion.
 
-**This module has no pure core.** Stage two is a host NumPy/SciPy quasi-Monte
--Carlo loop end to end, so there is no ``indices()`` here that returns bare
+**This module has no pure core.** Stage two is a host NumPy/SciPy
+Monte Carlo loop (quasi-Monte Carlo for the built-in copula), so there is no
+``indices()`` here that returns bare
 arrays and survives ``jit``, ``vmap`` and ``jacrev``. That is a declared
 exemption (see ``jaxgsa._core.registry.MethodRecord.pure_core``), not a gap:
 no traceable core exists to export.
@@ -42,6 +44,7 @@ from jaxgsa._core.copula import (
     independent_correlation,
     is_independent,
 )
+from jaxgsa._core.dependence import ConditionalSampler, JointSampler, validate_sampler_pair
 from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare, require
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.irregular import (
@@ -58,6 +61,7 @@ from jaxgsa._core.surrogate import _PredictPlan
 from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.problem import Problem
+from jaxgsa.vkoga._custom_indices import checked_unit_samples, estimate_custom_indices
 from jaxgsa.vkoga._engine import _cross_validate, _fit_vkoga, _predict_vkoga
 from jaxgsa.vkoga._indices import estimate_correlated_indices
 from jaxgsa.vkoga._result import VKOGAResult
@@ -67,6 +71,8 @@ from jaxgsa.vkoga._result import VKOGAResult
 # the engine owns it.
 _IRREGULAR_KWARGS = (
     "correlation",
+    "joint_sampler",
+    "conditional_sampler",
     "gamma",
     "ridge",
     "max_centers",
@@ -120,7 +126,7 @@ _CV_RMSE_WARN_FRACTION = 0.5
 # with many parameters this can fire on an independent design; at the
 # training sizes the surrogate needs to be any good (hundreds of rows) the
 # noise sits well below 0.3. A training set actually drawn from the analysis
-# copula, the mistake this check catches, fits near the declared entries,
+# copula fits near the declared entries,
 # which sit well above 0.3 whenever the correlation matters at all. The
 # consequence of a false positive is one warning, not a wrong number.
 _TRAINING_CORRELATION_WARN = 0.3
@@ -138,6 +144,8 @@ def analyze(
     Y: Array | IrregularY,
     *,
     correlation: Array | np.ndarray | None = None,
+    joint_sampler: JointSampler | None = None,
+    conditional_sampler: ConditionalSampler | None = None,
     gamma: float | None = None,
     ridge: float | None = None,
     max_centers: int | None = None,
@@ -158,13 +166,12 @@ def analyze(
 
     Fits a Vectorial Kernel Orthogonal Greedy Algorithm surrogate to given
     ``(X, Y)`` data, then estimates the five correlated indices of Li et al.
-    (2010) against it under a Gaussian copula.
+    (2010) against it under a Gaussian copula or user-supplied distribution.
 
-    The training design must be independent and space-filling even when the
-    analysis is correlated. The correlated measure concentrates on a ridge, but
-    ``S_TU`` conditions on the other parameters and then resamples ``X_i``
-    across its whole marginal. A surrogate trained only on correlated data
-    would be extrapolating for exactly those draws.
+    The training data should cover the support of the target joint distribution
+    well enough to fit an accurate surrogate. Custom samplers use independent
+    Monte Carlo conditional draws and preserve the requested sample counts.
+    Their marginals must match the declarations in ``problem``.
 
     Args:
         problem: Problem defining the parameters and their marginals.
@@ -176,6 +183,13 @@ def analyze(
             problem's declaration for this call. To fit a matrix from data,
             use :func:`jaxgsa.sampling.fit_correlation` and attach it with
             ``problem.with_correlation(...)``.
+        joint_sampler: Optional callable ``(n, rng)`` returning physical joint
+            rows of shape ``(n, D)``. Supply with ``conditional_sampler``;
+            neither a correlation argument nor problem correlation is allowed.
+        conditional_sampler: Callable ``(anchors, fixed_indices, rng)`` returning
+            IID conditional rows, preserving the fixed columns. The two
+            samplers must describe the same target distribution and match
+            the declared marginals; statistical consistency is not checked.
         gamma: RBF shape parameter, finite and positive when given. ``None``
             cross-validates over a grid.
         ridge: Kernel regularisation, finite and positive when given. ``None``
@@ -184,9 +198,13 @@ def analyze(
             Defaults to 300, capped at ``N``.
         n_folds: Folds for hyperparameter cross-validation, at least 2.
         n_outer: Outer (conditioning) sample size per parameter, at least 2.
-            Rounded up to the next power of two (Sobol' balance).
+            Rounded up to the next power of two for the built-in Gaussian copula;
+            used exactly as requested for custom Monte Carlo.
         n_inner: Inner (conditional) sample size per outer point, at least 2.
-            Rounded up to the next power of two. ``S_TC`` reuses one inner
+            Rounded up to the next power of two only for built-in sampling.
+            With custom samplers, draws are IID and S_TC subtracts the
+            inner-noise correction; the requested count is preserved.
+            For the built-in copula, ``S_TC`` reuses one inner
             block across every outer point and drops the iid inner-noise
             correction, so do not lower ``n_inner`` below the default to buy
             speed there: a small ``n_inner`` inflates a small ``S_TC``, and
@@ -196,7 +214,8 @@ def analyze(
             ``n_outer`` grows; raise ``n_outer`` when a noisy ``S_TU`` is the
             concern.
         n_variance: Sample size for the output variance and the component-
-            function fit, at least 2. Rounded up to the next power of two.
+            function fit, at least 2. Rounded up to the next power of two for the
+            built-in copula only; custom sampling preserves the count.
         n_bootstrap: Number of bootstrap resamples for confidence intervals.
             ``0`` (default) computes no intervals, and leaving it there is
             the right call for a routine analysis: **each replicate refits
@@ -207,7 +226,7 @@ def analyze(
             The interval measures **total uncertainty in the reported index
             given this training sample**: the training rows are resampled
             with replacement, a new surrogate is fitted to each resample, and
-            a fresh quasi-random stream integrates against it. So it folds
+            a fresh random stream integrates against it. So it folds
             two sources together, the sampling error of the ``(X, Y)`` data
             and the Monte-Carlo error of the integration, and it is the
             interval to quote when asking "how much would this index move if
@@ -237,7 +256,7 @@ def analyze(
             ``"gaussian"`` centres them on the point estimate and takes
             ``+/- z * sd`` of the bootstrap draws, which is smoother for a
             small ``n_bootstrap`` but assumes the draws are normal.
-        key: JAX PRNG key that drives the quasi-random index integration.
+        key: JAX PRNG key that drives the index integration.
             Required: the indices are a Monte-Carlo estimate, so there is no
             sensible default. Write ``jax.random.key(0)`` if you only want
             reproducibility. A key rather than an integer seed because a key
@@ -285,11 +304,13 @@ def analyze(
             deviation, which makes every index untrustworthy. ``S_U`` had to be
             clipped to ``S_TU`` by a wide margin, which says the additive
             component functions cannot represent the model's interactions.
-            The analysis is correlated but the training ``X`` is itself
-            correlated, so the surrogate extrapolates on the conditional
-            draws; train on an independent design and declare the dependence
-            in ``problem.correlation`` instead.
+            The built-in analysis and training ``X`` are both correlated,
+            which prompts a reminder to check target-support coverage and
+            validate the surrogate. Correlated training data is allowed.
     """
+    custom_sampling = validate_sampler_pair(joint_sampler, conditional_sampler)
+    if custom_sampling and (correlation is not None or problem.correlation is not None):
+        raise ValueError("Custom samplers cannot be combined with correlation")
     if _is_irregular_y(Y):
         return analyze_irregular(
             analyze,
@@ -363,21 +384,27 @@ def analyze(
     # The latent draws come from Sobol' sequences, which need power-of-two
     # sizes to keep their balance guarantees (scipy warns otherwise). The
     # defaults are already powers of two, so they pass through unchanged.
-    n_outer = _next_power_of_2(n_outer)
-    n_inner = _next_power_of_2(n_inner)
-    n_variance = _next_power_of_2(n_variance)
+    if not custom_sampling:
+        n_outer = _next_power_of_2(n_outer)
+        n_inner = _next_power_of_2(n_inner)
+        n_variance = _next_power_of_2(n_variance)
 
     Y_canonical = ctx.Y3
     n_time, n_out = Y_canonical.shape[1], Y_canonical.shape[2]
     Y_flat = Y_canonical.reshape(Y_canonical.shape[0], n_time * n_out)
 
     _warn_single_precision()
-    R = _resolve_correlation(problem, correlation)
-    _warn_correlated_training_design(problem, X, R)
+    R = None if custom_sampling else _resolve_correlation(problem, correlation)
+    if R is not None:
+        _warn_correlated_training_design(problem, X, R)
 
     # The RBF kernel is isotropic, so every column must share a scale; the
     # marginal CDF map is the same transform HDMR uses for its basis.
-    U = cdf_to_unit_interval(X, problem)
+    U = (
+        jnp.asarray(checked_unit_samples(np.asarray(X), problem))
+        if custom_sampling
+        else cdf_to_unit_interval(X, problem)
+    )
     # VKOGA carries no constant term, so a non-zero output mean would have to
     # be reconstructed by the kernel expansion itself. Centring removes that
     # burden and measurably improves the fit.
@@ -395,7 +422,7 @@ def analyze(
         seed=seed,
     )
     _warn_poor_surrogate(cv_rmse, Y_centered)
-    plan = build_conditional_plan(R)
+    plan = None if R is None else build_conditional_plan(R)
     state, indices = _fit_and_estimate(
         U,
         Y_flat,
@@ -410,6 +437,8 @@ def analyze(
         entropy=seed,
         batch_size=batch_size,
         param_names=problem.names,
+        joint_sampler=joint_sampler,
+        conditional_sampler=conditional_sampler,
     )
 
     def _shape_index(flat: np.ndarray) -> Array:
@@ -439,6 +468,8 @@ def analyze(
             key=key,
             n_bootstrap=n_bootstrap,
             batch_size=batch_size,
+            joint_sampler=joint_sampler,
+            conditional_sampler=conditional_sampler,
         )
         # _shape_index already squeezes to the caller's own rank; interval()
         # reads a shape only to broadcast [lower, upper], so it works the
@@ -464,6 +495,7 @@ def analyze(
         S_IU=_shape_index(indices.S_IU),
         problem=problem,
         correlation=R,
+        dependence_source="custom" if custom_sampling else "gaussian",
         variance=_shape_slice(indices.variance),
         n_centers=int(state.n_centers),
         gamma=float(gamma_value),
@@ -493,6 +525,9 @@ def analyze(
         )
         _verbose.analysis_summary(
             method="jaxgsa.vkoga.analyze",
+            dependence_description=(
+                "custom (user-supplied conditionals)" if custom_sampling else None
+            ),
             problem=problem,
             n_runs=int(ctx.Y.shape[0]),
             T=n_time,
@@ -519,7 +554,7 @@ def _fit_and_estimate(
     gamma: float,
     ridge: float,
     max_centers: int,
-    plan: _ConditionalPlan,
+    plan: _ConditionalPlan | None,
     problem: Problem,
     n_outer: int,
     n_inner: int,
@@ -527,6 +562,8 @@ def _fit_and_estimate(
     entropy: int,
     batch_size: int | None,
     param_names: Sequence[str] | None = None,
+    joint_sampler: JointSampler | None = None,
+    conditional_sampler: ConditionalSampler | None = None,
 ):
     """Fit one surrogate to one training set and read the indices off it.
 
@@ -574,17 +611,32 @@ def _fit_and_estimate(
         centers=state.centers[:n_selected],
         coefficients=state.coefficients[:n_selected],
     )
-    indices = estimate_correlated_indices(
-        problem=problem,
-        plan=plan,
-        predict=_make_unit_predictor(state, y_mean, batch_size),
-        n_outer=n_outer,
-        n_inner=n_inner,
-        n_variance=n_variance,
-        entropy=entropy,
-        batch_size=batch_size,
-        param_names=param_names,
-    )
+    predictor = _make_unit_predictor(state, y_mean, batch_size)
+    if joint_sampler is not None and conditional_sampler is not None:
+        indices = estimate_custom_indices(
+            problem=problem,
+            joint_sampler=joint_sampler,
+            conditional_sampler=conditional_sampler,
+            predict=predictor,
+            n_outer=n_outer,
+            n_inner=n_inner,
+            n_variance=n_variance,
+            entropy=entropy,
+            param_names=param_names,
+        )
+    else:
+        assert plan is not None
+        indices = estimate_correlated_indices(
+            problem=problem,
+            plan=plan,
+            predict=predictor,
+            n_outer=n_outer,
+            n_inner=n_inner,
+            n_variance=n_variance,
+            entropy=entropy,
+            batch_size=batch_size,
+            param_names=param_names,
+        )
     return state, indices
 
 
@@ -595,7 +647,7 @@ def _bootstrap_replicates(
     gamma: float,
     ridge: float,
     max_centers: int,
-    plan: _ConditionalPlan,
+    plan: _ConditionalPlan | None,
     problem: Problem,
     n_outer: int,
     n_inner: int,
@@ -603,6 +655,8 @@ def _bootstrap_replicates(
     key: Array,
     n_bootstrap: int,
     batch_size: int | None,
+    joint_sampler: JointSampler | None = None,
+    conditional_sampler: ConditionalSampler | None = None,
 ) -> dict[str, np.ndarray]:
     """Refit the surrogate on resampled training rows, once per replicate.
 
@@ -660,6 +714,8 @@ def _bootstrap_replicates(
                 n_variance=n_variance,
                 entropy=_seed_from_key(index_key),
                 batch_size=batch_size,
+                joint_sampler=joint_sampler,
+                conditional_sampler=conditional_sampler,
             )
         for name in _INTERVAL_FIELDS:
             draws[name].append(np.asarray(getattr(indices, name)))
@@ -718,20 +774,19 @@ def _warn_correlated_training_design(
 ) -> None:
     """Warn when a correlated analysis is fed a correlated training design.
 
-    The estimator requires an independent, space-filling training ``X`` even
-    when the analysis correlation is not the identity. The correlated measure
-    concentrates on a ridge, but ``S_TU`` conditions on the other parameters
-    and then resamples ``X_i`` across its whole marginal, so the surrogate is
-    evaluated far off that ridge. A surrogate trained only on correlated data
-    extrapolates for exactly those draws, and every index quietly inherits
-    the extrapolation error.
+    Strongly correlated training rows can concentrate coverage in a small
+    region. The surrogate must be accurate on the target joint support,
+    including regions that differ from the training distribution. Correct
+    conditional sampling remains on that support; it does not resample each
+    input independently across its marginal. Correlated training data is
+    therefore allowed, and this warning is a reminder to check coverage.
 
     The check fits the training design's own empirical latent correlation
     (rank-based, so it is invariant to the marginals) and compares its
     largest off-diagonal entry against ``_TRAINING_CORRELATION_WARN``. It
     runs only when the analysis correlation is not the identity: an
-    independent analysis never conditions, so a structured training design is
-    then the user's own business. The fit's data-quality warnings are
+    independent analysis keeps its existing silent behavior. The fit's
+    data-quality warnings are
     suppressed here — this is a diagnostic on a sample the invalid check has
     already vetted, not a fit the user asked for.
 
@@ -761,14 +816,12 @@ def _warn_correlated_training_design(
     warnings.warn(
         f"jaxgsa.vkoga: the training X is itself correlated (fitted latent "
         f"correlation between {problem.names[int(i)]!r} and "
-        f"{problem.names[int(j)]!r} is {largest:.2f}). The estimator needs an "
-        "independent, space-filling training design even for a correlated "
-        "analysis: S_TU conditions on the other parameters and then resamples "
-        "each X_i across its whole marginal, so a surrogate trained only on "
-        "correlated data extrapolates for exactly those conditional draws. "
-        "Train on an independent design; the dependence structure belongs in "
-        "problem.correlation (or the correlation= argument), not in the "
-        "training data.",
+        f"{problem.names[int(j)]!r} is {largest:.2f}). Check that the training "
+        "data cover the target joint support and validate the surrogate on "
+        "held-out samples. Correlated training data is allowed; the target "
+        "dependence is declared separately in problem.correlation (or the "
+        "correlation= argument). An independent design is another option for "
+        "covering the target support. This diagnostic does not fit the analysis dependence.",
         stacklevel=3,
         category=JaxgsaWarning,
     )

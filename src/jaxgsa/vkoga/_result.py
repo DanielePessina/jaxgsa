@@ -62,7 +62,10 @@ class VKOGAResult(SchemaResult, SurrogateResult):
         problem: Problem definition used for the analysis.
         correlation: Gaussian-copula correlation matrix the indices were
             computed under, shape ``(D, D)``. The identity when inputs were
-            treated as independent.
+            treated as independent. ``None`` for custom sampling, whose
+            dependence is not inferred.
+        dependence_source: ``"gaussian"`` for built-in integration or
+            ``"custom"`` for user-supplied joint and conditional sampling.
         variance: Output variance under the correlated input measure, one value
             per output slice (shape ``()``, ``(K,)``, or ``(T, K)``).
         n_centers: Number of kernel centres the greedy selected.
@@ -107,12 +110,13 @@ class VKOGAResult(SchemaResult, SurrogateResult):
     S_C: Array
     S_IU: Array
     problem: Problem
-    correlation: np.ndarray
+    correlation: np.ndarray | None
     variance: Array
     n_centers: int
     gamma: float
     ridge: float
     invalid: InvalidReport
+    dependence_source: str = "gaussian"
     rmse: Array | None = None
     cv_rmse: float | None = None
     _fit: _VKOGAState | None = field(default=None, repr=False)
@@ -143,7 +147,7 @@ class VKOGAResult(SchemaResult, SurrogateResult):
         # the whole fit, on no output axis, and every index is only as good
         # as it is. A fit that ran no cross-validation carries ``None``, and
         # the derived export drops the key rather than writing a null.
-        meta=("n_centers", "gamma", "ridge", "is_correlated", "cv_rmse"),
+        meta=("n_centers", "gamma", "ridge", "is_correlated", "cv_rmse", "dependence_source"),
     )
 
     def _predict_plan(self, X: Array) -> _PredictPlan:
@@ -187,11 +191,11 @@ class VKOGAResult(SchemaResult, SurrogateResult):
         )
 
     @property
-    def is_correlated(self) -> bool:
+    def is_correlated(self) -> bool | None:
         """Whether the indices were computed under a non-trivial dependency.
 
-        Delegates to the same identity test as
-        ``Problem.has_correlated_inputs``, so the two classifications always
-        agree.
+        Tests the resolved Gaussian-copula matrix, including a per-call
+        override. Custom samplers have unknown correlation status and return
+        ``None``; the package does not infer their dependence.
         """
-        return not is_independent(self.correlation)
+        return None if self.correlation is None else not is_independent(self.correlation)

@@ -154,6 +154,7 @@ def analysis_summary(
     values: Any,
     conf: Any | None = None,
     notes: Sequence[str] = (),
+    dependence_description: str | None = None,
 ) -> None:
     """Print the three verbose sections for one finished analysis.
 
@@ -182,13 +183,18 @@ def analysis_summary(
             ``None`` when the caller did not bootstrap.
         notes: Extra lines for the timing section, already formatted, e.g.
             ``"slice_chunk_size: 8 (resolved from the memory budget)"``.
+        dependence_description: Description of the input dependence when it
+            comes from a source other than ``problem.correlation``. ``None``
+            uses the problem's declared Gaussian copula or independence.
     """
     emit(method)
     emit(f"{_INDENT}problem: D={problem.num_vars} ({_preview_names(problem.names)})")
     emit(f"{_INDENT}{_INDENT}marginals: {_marginal_counts(problem)}")
-    correlation = (
-        "correlated (Gaussian copula)" if problem.has_correlated_inputs else "independent"
-    )
+    correlation = dependence_description
+    if correlation is None:
+        correlation = (
+            "correlated (Gaussian copula)" if problem.has_correlated_inputs else "independent"
+        )
     emit(f"{_INDENT}{_INDENT}correlation: {correlation}")
     slices = "slice" if T * K == 1 else "slices"
     emit(f"{_INDENT}{_INDENT}output: N={n_runs} runs, T={T} x K={K} output {slices}")

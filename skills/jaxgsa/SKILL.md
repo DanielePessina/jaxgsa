@@ -835,15 +835,11 @@ Y_pred = result.predict(X_new, batch_size=2048)
 
 Keep in mind:
 
-- **Train on an independent, space-filling design, even when the analysis is
-  correlated.** This is the easy way to get wrong answers. A correlated sample
-  concentrates on a ridge through the parameter space, but `S_TU` conditions on
-  the other parameters and then resamples `X_i` across its whole marginal, which
-  is precisely the off-ridge region a correlated training set never visited. The
-  surrogate extrapolates exactly where the estimator leans on it hardest. If
-  your data is observational, you can still fit the copula from it with
-  `fit_correlation`, but read `S_TU`, and so `S_U`, `S_C`, and `S_IU`, as
-  carrying that extrapolation error.
+- **Train on data covering the integration support.** Conditional integration
+  stays on the target joint support, rather than redrawing inputs from their
+  unconditional marginals. An independent, space-filling design can help when
+  the model is evaluable throughout the domain, but is not mandatory.
+  Correlated training data can be suitable; check `cv_rmse` and coverage.
 - **Use float64.** The coefficient step forms the normal matrix, which squares
   the condition number of the cross kernel, and for small `gamma` that exceeds
   what single precision carries. The surrogate can come out an order of
@@ -885,3 +881,28 @@ from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate, ANALYTICAL_S1
 ```
 
 Use them to check an estimator, or to measure how fast it converges.
+
+## Custom joint and conditional samplers
+
+Kucherenko `sample` and VKOGA `analyze` accept optional `joint_sampler` and
+`conditional_sampler` callbacks together. Their public aliases live in
+`jaxgsa.sampling`: `JointSampler`, `ConditionalSampler`. Calls are positional:
+`joint_sampler(n, rng)` returns `(n, D)`; `conditional_sampler(anchors,
+fixed_indices, rng)` returns the anchor shape. Values are real, finite physical
+inputs in `problem.names` order. Do not mutate anchors; preserve fixed columns
+and draw each remaining row independently from the matching joint conditional.
+Empty fixed indices mean joint redraw; all fixed means anchor copy. Both
+callbacks are required, and cannot coexist with `problem.correlation` or a
+VKOGA `correlation=` override. Shapes and fixed columns are validated;
+statistical consistency is the user's responsibility.
+
+Custom integration uses NumPy `Generator` Monte Carlo with exact counts rather
+than rounded Sobol-sequence counts. Kucherenko owns block assembly; no user
+Sobol sampler is required. Its `seed` controls callbacks; `scramble` only
+applies to the built-in Gaussian path. Saved designs retain sampled rows and
+provenance, not callable code. VKOGA's `key` controls integration randomness,
+and its declared marginals must match the callbacks because transforms and
+component bases still use them. Its IID inner-variance correction can yield
+small negative first-order estimates. Training data must cover integration
+support; an independent training design is optional. Dependence fitting remains
+explicit, never triggered just by supplying data.
