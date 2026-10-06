@@ -260,3 +260,19 @@ component bases still use them. Its IID inner-variance correction can yield
 small negative first-order estimates. Training data must cover integration
 support; an independent training design is optional. Dependence fitting remains
 explicit, never triggered just by supplying data.
+
+### Higher-order dependence
+
+Independent uniforms `U, V` with `W = (U + V) % 1` give three pairwise
+independent inputs whose joint distribution is constrained. An identity
+Gaussian copula loses that constraint. For `Y = W`, the true `S1` is
+`[0, 0, 1]` and conditional `ST` is `[0, 0, 0]`, because the other two inputs
+determine any missing input. Zero conditional total means redundant
+information, not causal inactivity; independent uniforms would give
+`ST = [0, 0, 1]`. Use this example to test higher-order support rather than
+only zero pairwise correlations. Check every fixed subset, including empty
+and all columns. Runnable joint and conditional callbacks are in
+`docs/examples/correlated-inputs.md`. These per-input indices do not identify
+groups responsible for dependence; the full joint law is supplied, not
+inferred. VKOGA uses the same callbacks and still needs matching `Problem`
+marginals.

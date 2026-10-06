@@ -76,10 +76,9 @@ The steps:
 
 1. Declare the marginal distribution of each input with `Problem.from_dict`.
 2. Build the training design with `sampling.monte_carlo` and evaluate the
-   model on it. The training design is independent even though the analysis is
-   correlated. See
-   [the training design must be independent](#the-training-design-must-be-independent)
-   for why.
+   model on it. This example uses an independent design for broad coverage;
+   correlated training data also work when they cover the
+   [target distribution](#training-data-must-cover-the-target-distribution).
 3. Declare the dependency structure with `with_correlation`. `analyze` reads
    `problem.correlation` by default. Passing a `(D, D)` matrix as
    `correlation=` overrides the declaration for one call.
@@ -105,7 +104,7 @@ problem = jaxgsa.Problem.from_dict(
     }
 )
 
-# Independent, space-filling training design. Any (X, Y) pairs work.
+# Independent training design for broad coverage of the target distribution.
 X = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, 2048, seed=0))
 Y = X @ jnp.array([2.0, 1.0, 0.5])
 
@@ -198,89 +197,27 @@ matches. The residual gap is surrogate error plus Monte-Carlo noise. Raise
 `n_outer`, `n_inner` or `n_variance`, which only touch the cheap surrogate, or
 raise the training sample size, to shrink it.
 
-## The training design must be independent
+<a id="the-training-design-must-be-independent"></a>
 
-This is the mistake that costs the most, and the reason is worth spelling out.
+## Training data must cover the target distribution
 
-`S_TU` conditions on the other parameters and then resamples `X_i` across its
-whole marginal. Those resampled points are, by construction, off the ridge that
-a correlated sample concentrates on. If the surrogate only ever saw correlated
-data, it has no information there and is extrapolating at exactly the points
-the estimator leans on hardest. Every index then inherits that extrapolation
-error.
+The training rows need not be independent. Correlated training data can support
+valid sensitivity estimates when the surrogate predicts accurately over the
+target joint distribution. Joint and conditional integration points follow that
+distribution: `S_TU` redraws an input conditional on the others, rather than
+across its entire marginal.
 
-`analyze` checks the training design and warns:
+An independent training design is one option for broad coverage, especially
+when reusing a surrogate under several target distributions. It is not a
+requirement. Check predictive accuracy where integration places probability
+mass; cross-validation on training rows alone may miss a mismatch between
+training and target distributions. The component terms also depend on how well
+the surrogate represents the model over that support.
 
-```python
-ridge_problem = jaxgsa.Problem.from_dict(
-    {
-        "x1": {"dist": "gaussian", "mean": 0.0, "variance": 1.0},
-        "x2": {"dist": "gaussian", "mean": 0.0, "variance": 1.0},
-    }
-).with_correlation([[1.0, 0.99], [0.99, 1.0]])
-X_ridge = jnp.asarray(jaxgsa.sampling.monte_carlo(ridge_problem, 4096, seed=0))
-Y_ridge = (X_ridge[:, 0] - X_ridge[:, 1]) ** 2
-
-bad = jaxgsa.vkoga.analyze(
-    ridge_problem, X_ridge, Y_ridge, key=jax.random.key(0), verbose=False
-)
-print("cv_rmse:", round(float(bad.cv_rmse), 4), " std(Y):", round(float(np.std(Y_ridge)), 4))
-print("S_TU:", np.round(bad.S_TU, 3))
-```
-
-```
-JaxgsaWarning: jaxgsa.vkoga: the training X is itself correlated (fitted latent
-correlation between 'x1' and 'x2' is 0.99). The estimator needs an independent,
-space-filling training design even for a correlated analysis: S_TU conditions on
-the other parameters and then resamples each X_i across its whole marginal, so a
-surrogate trained only on correlated data extrapolates for exactly those
-conditional draws. Train on an independent design; the dependence structure
-belongs in problem.correlation (or the correlation= argument), not in the
-training data.
-
-cv_rmse: 0.007  std(Y): 0.0276
-S_TU: [1.008 1.001]
-```
-
-`S_TU` is a variance fraction, so 1.008 and 1.001 are impossible. That is the
-useful part of this example: the failure is loud only because the true answer
-happens to sit near the boundary. Note what did *not* catch it. `cv_rmse` is
-0.007, well inside the surrogate warning threshold, because the held-out folds
-come from the same correlated ridge as the training rows. Cross-validation
-scores the surrogate where the data is, and the problem is where the data is
-not.
-
-Kucherenko, which runs the model rather than a surrogate, gives the reference:
-
-```python
-ks = jaxgsa.kucherenko.sample(ridge_problem, 65536, seed=0, verbose=False)
-kr = jaxgsa.kucherenko.analyze(ks, (ks.samples[:, 0] - ks.samples[:, 1]) ** 2, verbose=False)
-print("S1:", np.round(kr.S1, 3), " ST:", np.round(kr.ST, 3))
-```
-
-```
-S1: [0. 0.]  ST: [0.999 1.   ]
-```
-
-The fix is to train on an independent design and put the dependence in the
-problem, not in the data:
-
-```python
-X_indep = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, 2048, seed=0))
-Y_indep = X_indep @ jnp.array([2.0, 1.0, 0.5])
-good = jaxgsa.vkoga.analyze(problem_corr, X_indep, Y_indep, key=jax.random.key(0), verbose=False)
-print("S_TU:", np.round(good.S_TU, 3))
-```
-
-```
-S_TU: [0.341 0.085 0.034]
-```
-
-That is the scalar example from the top of this page, and it matches the closed
-form. If your data is observational and you cannot re-run the model, VKOGA is
-being asked a question it cannot answer from that sample. Use
-[Kucherenko](/examples/kucherenko) instead, or read only `S_TC`, which is
-evaluated on the correlated measure the training data already covers.
+Population variance fractions lie in `[0, 1]`, but finite integration estimates
+can slightly exceed those bounds. Such excursions alone do not establish
+extrapolation or invalidate correlated training data. Increase integration
+budgets and assess surrogate error separately.
 
 ## Two more things that can go wrong
 
@@ -373,9 +310,6 @@ print("S_TU:", np.round(emp.S_TU, 3))
 ```
 
 ```
-JaxgsaWarning: jaxgsa.vkoga: the training X is itself correlated (fitted latent
-correlation between 'x1' and 'x2' is 0.61). ...
-
 [[1.    0.609 0.041]
  [0.609 1.    0.003]
  [0.041 0.003 1.   ]]
@@ -386,13 +320,11 @@ S_TU: [0.328 0.082 0.033]
 The fit recovers `rho_12 = 0.6` as 0.609, and the two entries that should be
 zero come out at 0.041 and 0.003. That is sampling scatter at N=2048.
 
-This run trips the training-design warning, and it should: the training sample
-and the copula are the same correlated data. `S_TC` is still meaningful,
-because it is evaluated on the measure the sample covers. `S_TU` lands within
-0.007 of the closed form here, which is luck you should not count on: the model
-is linear, and a linear response is the one case where extrapolating off the
-ridge costs nothing. Treat `S_TU`, `S_U` and `S_IU` from a run like this as
-unverified, or move to [Kucherenko](/examples/kucherenko).
+The training rows cover the same correlated distribution used for integration.
+Both `S_TC` and `S_TU` agree with the closed form to within 0.011 here. As with
+any surrogate estimate, check predictive accuracy over the target support and
+integration convergence. Correlation in the training data alone does not
+invalidate these indices.
 
 ## Independent inputs collapse to S1 / ST
 
@@ -584,8 +516,9 @@ the input model, not of any output slice, so it stays `(D, D)` throughout.
 
 ## Practical caveats
 
-- Train on an independent, space-filling design, even when the analysis is
-  correlated. See [above](#the-training-design-must-be-independent).
+- Training data must cover the target distribution well enough for accurate
+  surrogate predictions. Independent and correlated designs are both allowed;
+  see [above](#training-data-must-cover-the-target-distribution).
 - Use float64. The normal equations square the condition number of the cross
   kernel, which float32 cannot carry for small `gamma`. Cross validation
   partly self-corrects, since the scores are computed in the same arithmetic

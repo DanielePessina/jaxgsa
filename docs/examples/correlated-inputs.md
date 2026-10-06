@@ -351,9 +351,9 @@ surrogate error. VKOGA fits a kernel surrogate to `(X, Y)` you already have and
 needs no new model runs, at the cost of the surrogate. VKOGA also splits the
 totals further into `S_U`, `S_C` and `S_IU`.
 
-One trap worth stating twice: VKOGA needs an **independent** training design
-even when the analysis is correlated. See its
-[training-design section](/examples/vkoga#the-training-design-must-be-independent).
+VKOGA training data must cover the target distribution accurately; correlated
+training data are allowed. See its
+[training-data section](/examples/vkoga#training-data-must-cover-the-target-distribution).
 
 ### HDMR: the split per term, not per parameter
 
@@ -497,41 +497,48 @@ integrate under dependence beyond Gaussian copulas. Both are necessary;
 representative correlated rows alone do not determine conditional redraws.
 PAWN, Borgonovo, optimal transport and HSIC still accept `X, Y` directly.
 
-Here both marginals are uniform on `[-1, 1]`, and `x2` randomly equals `x1` or
-`-x1`. Pearson correlation is zero, but their magnitudes are identical. An
-independent Gaussian copula cannot represent this dependence.
+Consider independent uniform variables `u` and `v`, and set
+`w = (u + v) % 1`. All three marginals are uniform on `[0, 1]`, and every pair
+is independent, yet knowing any two determines the third. This is higher-order
+dependence, stronger evidence than merely having zero pairwise correlations.
+A Gaussian copula with an identity correlation matrix would instead generate
+three independent variables and lose this constraint.
 
 ```python
 import jax
+import jax.numpy as jnp
+import numpy as np
+
+import jaxgsa
 
 jax.config.update("jax_enable_x64", True)
 
-import numpy as np
-import jaxgsa
-
 
 def draw_joint(n, rng):
-    x1 = rng.uniform(-1.0, 1.0, size=n)
-    signs = rng.choice([-1.0, 1.0], size=n)
-    return np.column_stack((x1, signs * x1))
+    u, v = rng.uniform(size=(2, n))
+    return np.column_stack((u, v, (u + v) % 1.0))
 
 
 def draw_conditional(anchors, fixed_indices, rng):
-    fixed = tuple(fixed_indices)
+    fixed = frozenset(fixed_indices)
+    if len(fixed) != len(fixed_indices) or not fixed <= {0, 1, 2}:
+        raise ValueError("Expected distinct fixed indices from (0, 1, 2)")
     if not fixed:
         return draw_joint(len(anchors), rng)
     rows = anchors.copy()
-    if len(fixed) == 2:
-        return rows
-    if len(fixed) != 1 or fixed[0] not in (0, 1):
-        raise ValueError("Expected fixed indices from (0, 1)")
-    held = fixed[0]
-    signs = rng.choice([-1.0, 1.0], size=len(rows))
-    rows[:, 1 - held] = signs * rows[:, held]
+    if len(fixed) == 1:
+        free = 1 if 0 in fixed else 0
+        rows[:, free] = rng.uniform(size=len(rows))
+    if 2 not in fixed:
+        rows[:, 2] = (rows[:, 0] + rows[:, 1]) % 1.0
+    elif 1 not in fixed:
+        rows[:, 1] = (rows[:, 2] - rows[:, 0]) % 1.0
+    elif 0 not in fixed:
+        rows[:, 0] = (rows[:, 2] - rows[:, 1]) % 1.0
     return rows
 
 
-problem = jaxgsa.Problem(names=("x1", "x2"), bounds=((-1.0, 1.0),) * 2)
+problem = jaxgsa.Problem(names=("u", "v", "w"), bounds=((0.0, 1.0),) * 3)
 design = jaxgsa.kucherenko.sample(
     problem,
     10_000,  # exactly this many base points; no power-of-two rounding
@@ -539,11 +546,22 @@ design = jaxgsa.kucherenko.sample(
     conditional_sampler=draw_conditional,
     seed=7,
 )
-Y = design.samples.sum(axis=1)
+Y = jnp.asarray(design.samples[:, 2])  # the model is Y = w
 result = jaxgsa.kucherenko.analyze(design, Y)
-print(result.S1)  # approaches [0.5, 0.5]
-print(result.ST)  # approaches [0.5, 0.5]
+assert isinstance(result, jaxgsa.kucherenko.KucherenkoResult)
+print(result.S1)  # approaches [0.0, 0.0, 1.0]
+print(result.ST)  # [0.0, 0.0, 0.0], up to floating-point noise
 ```
+
+`u` and `v` each tell us nothing about `Y` individually, while `w` tells us
+everything. However, the conditional total index of `w` is zero: once `u` and
+`v` are known, `w` has no remaining uncertainty. This means redundant
+information under the joint distribution, not that `w` is causally inactive.
+With three independent uniforms instead, `Y = w` has `ST = [0, 0, 1]`.
+These per-input summaries respect the supplied higher-order dependence; they
+do not identify which groups of inputs create it. The callbacks must supply
+the full joint law and its conditionals; fitting a pairwise matrix cannot
+recover this constraint.
 
 The package assembles the blocks in the correct order. Callbacks receive
 positional arguments and a NumPy `Generator`, and return finite real arrays in
@@ -555,11 +573,11 @@ aliases are `jaxgsa.sampling.JointSampler` and `ConditionalSampler`.
 
 Use the same callbacks to integrate a VKOGA surrogate. Training data and the
 target distribution are separate inputs. This independent training design
-covers the square; the integration distribution lives on the two diagonals:
+covers the cube; the integration distribution obeys the modular constraint:
 
 ```python
-X_train = jaxgsa.sampling.monte_carlo(problem, n=512, seed=1)
-Y_train = X_train.sum(axis=1)
+X_train = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, n=512, seed=1))
+Y_train = X_train[:, 2]
 vk = jaxgsa.vkoga.analyze(
     problem,
     X_train,
@@ -573,12 +591,13 @@ vk = jaxgsa.vkoga.analyze(
     n_inner=128,
     key=jax.random.key(7),
 )
-print(vk.S_TC)  # approaches [0.5, 0.5], subject to surrogate error
-print(vk.S_TU)  # approaches [0.5, 0.5], subject to surrogate error
+assert isinstance(vk, jaxgsa.vkoga.VKOGAResult)
+print(vk.S_TC)  # approaches [0.0, 0.0, 1.0], subject to surrogate error
+print(vk.S_TU)  # approaches [0.0, 0.0, 0.0], subject to surrogate error
 ```
 
 VKOGA's declared marginals must match the callbacks' marginals because its
-coordinate transform and component basis still use `Problem`. Both uniforms
+coordinate transform and component basis still use `Problem`. All three uniforms
 match here. Custom callbacks use Monte Carlo; the built-in Gaussian path uses
 quasi-random integration. See [VKOGA's API](/api/vkoga#custom-input-dependence)
 for estimator and decomposition limitations.

@@ -906,3 +906,16 @@ component bases still use them. Its IID inner-variance correction can yield
 small negative first-order estimates. Training data must cover integration
 support; an independent training design is optional. Dependence fitting remains
 explicit, never triggered just by supplying data.
+
+Custom callbacks can preserve higher-order dependence, not just pairwise
+correlations. Use the documented `U, V ~ Uniform(0, 1)`, `W = (U + V) % 1`
+example when explaining or testing this: every pair is independent but any two
+determine the third. For `Y = W`, population `S1 = [0, 0, 1]` and conditional
+`ST = [0, 0, 0]`; zero `ST` expresses redundant information, not causal
+inactivity. An identity Gaussian copula loses the constraint and gives
+`ST = [0, 0, 1]`. A two-variable example with zero correlations alone does not
+test higher-order dependence. Validate all fixed subsets, including empty/all,
+and preserve held coordinates. These are per-input sensitivity summaries, not
+discovery of dependent groups. VKOGA requires matching declared marginals and
+both callbacks; there is no automatic dependence fitting from training data.
+See `docs/examples/correlated-inputs.md` for runnable callbacks.
