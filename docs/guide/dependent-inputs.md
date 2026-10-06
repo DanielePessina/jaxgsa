@@ -53,16 +53,19 @@ jaxgsa provides four routes, each with a different estimand.
 
 | Route | What it estimates | What it needs |
 | --- | --- | --- |
-| [Kucherenko](/api/kucherenko) | $S_1 = V(\mathbb{E}(Y \mid X_i))/V(Y)$ and $S_T = \mathbb{E}(V(Y \mid \mathbf{X}_{\sim i}))/V(Y)$ under the declared copula | A dedicated design, $N(2D+1)$ model runs, and a declared correlation matrix |
-| [VKOGA](/api/vkoga) | The same conditional-variance quantities as $S_{TC}$ and $S_{TU}$, plus $S_U$, $S_C$, and $S_{IU}$ | Existing $(X, Y)$ pairs and a declared correlation matrix |
+| [Kucherenko](/api/kucherenko) | $S_1 = V(\mathbb{E}(Y \mid X_i))/V(Y)$ and $S_T = \mathbb{E}(V(Y \mid \mathbf{X}_{\sim i}))/V(Y)$ under the supplied joint distribution | A dedicated design, $N(2D+1)$ model runs, and either a Gaussian-copula correlation matrix or a custom joint/conditional sampler |
+| [VKOGA](/api/vkoga) | The same conditional-variance quantities as $S_{TC}$ and $S_{TU}$, plus $S_U$, $S_C$, and $S_{IU}$ | Existing $(X, Y)$ pairs and either a Gaussian-copula correlation matrix or a custom joint/conditional sampler |
 | [HDMR](/api/hdmr) | For each fitted component, a structural share $S_a$ and a correlation-driven share $S_b$ | Existing $(X, Y)$ pairs; dependence is inferred from $X$ |
 | [Shapley with HDMR](/api/shapley) | One ANCOVA allocation per parameter, formed by splitting each term's $S_a + S_b$ among its participants | Existing $(X, Y)$ pairs |
 
 ### Kucherenko
 
 Use Kucherenko when you can still evaluate the model and want the
-conditional-variance quantities directly. It samples conditionally on the
-correlation declared on the `Problem`.
+conditional-variance quantities directly. It samples conditionally from either
+the Gaussian copula declared on `Problem` or a custom `sampler`. A custom
+sampler transforms uniform points into joint and conditional physical inputs,
+so it can express dependence beyond a pairwise correlation matrix. See the
+[custom-dependence example](/examples/correlated-inputs#custom-dependence-without-a-copula).
 
 The conditional-variance estimators follow
 [Kucherenko, Tarantola & Annoni (2012)](/api/kucherenko#references).
@@ -78,8 +81,12 @@ See the [Kucherenko example](/examples/kucherenko) and the broader
 ### VKOGA
 
 Use VKOGA when you have existing runs or want to reuse the same fitted model
-under several correlation assumptions. It fits a kernel surrogate, then
-samples that surrogate to estimate correlated-input variance indices.
+under several input-distribution assumptions. It fits a kernel surrogate, then
+samples that surrogate to estimate dependent-input variance indices. Declare
+the integration distribution with a Gaussian-copula matrix or the same custom
+sampler interface used by Kucherenko; neither is automatically inferred from
+the training rows. The declared `Problem` marginals must still match the
+custom distribution, and training data must cover its support.
 
 This surrogate workflow follows [Hilhorst et al. (2024)](/api/vkoga#references).
 
@@ -161,7 +168,7 @@ Worked examples are available for [HSIC](/examples/hsic),
 Keep these boundaries clear when interpreting results:
 
 - Kucherenko and VKOGA estimate the same pair of conditional-variance
-  quantities. They should agree up to surrogate and Monte Carlo error.
+  quantities. They should agree up to surrogate and numerical integration error.
 - HDMR and HDMR-backed Shapley estimate different quantities. They do not need
   to agree with Kucherenko or VKOGA.
 - HDMR's $S_T$ under dependence is not a conditional-variance total-effect
@@ -173,7 +180,10 @@ Keep these boundaries clear when interpreting results:
 
 ## A practical workflow
 
-1. Declare the input distributions and their correlation on the `Problem`.
+1. Declare the marginal distributions on `Problem`. For Kucherenko or VKOGA,
+   specify dependence through either a Gaussian-copula correlation matrix or
+   a custom sampler implementing joint and conditional transformations. For
+   given-data methods, use rows representative of the target joint distribution.
 2. Decide whether your question is correlation-inclusive,
    correlation-exclusive, term-level, allocative, or distribution-based.
 3. Decide whether you can run a dedicated design or must use existing data.

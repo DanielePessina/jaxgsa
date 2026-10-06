@@ -4,8 +4,9 @@
 jaxgsa.vkoga.analyze(
     problem, X, Y, *,
     correlation=None,
-    joint_sampler=None,
-    conditional_sampler=None,
+    sampler=None,
+    sampler_dimension=None,
+    sequence="sobol",
     gamma=None,
     ridge=None,
     max_centers=None,
@@ -162,27 +163,32 @@ copula matrix.
 
 ## Custom input dependence
 
-Pass `joint_sampler` and `conditional_sampler` together, with neither a declared
-`problem.correlation` nor a `correlation=` override. Their contract is the
-[same as Kucherenko's](/api/kucherenko#custom-input-dependence): positional
-arguments, finite physical values in problem column order, a NumPy `Generator`,
-independent conditional draws per row, and preserved fixed columns and anchors.
-A joint sampler alone is insufficient. Dependence is not estimated from `X`.
+Pass `sampler` to replace the Gaussian copula, with neither a declared
+`problem.correlation` nor a `correlation=` override. The callback contract is
+[the same as Kucherenko's](/api/kucherenko#custom-input-dependence).
+It transforms package-generated uniform points into joint or conditional
+physical samples. It must be deterministic for identical arguments, with no
+hidden randomness or mutable sampling state. Dependence is not
+estimated from `X`.
 
-`X, Y` train the surrogate; callbacks define the distribution under which its
-sensitivity is integrated. The custom joint marginals must match `Problem`:
-VKOGA still uses the declared marginal CDFs for its coordinate transform and
-component-function basis. Supplying callbacks does not replace those marginals.
+`X, Y` train the surrogate; the sampler defines the integration distribution.
+Its joint marginals must match `Problem`, because the declared marginal CDFs
+still define the coordinate transform and component-function basis.
 
-Custom integration uses ordinary Monte Carlo with exactly `n_outer`, `n_inner`
-and `n_variance` draws, rather than rounded Sobol-sequence counts. The first-order
-estimate corrects for independent inner-sampling noise; finite-sample estimates
-can be slightly negative. Increasing integration counts reduces sampling noise
-but cannot repair surrogate error. The extra `S_U`, `S_C`, `S_IU` fields also
-inherit the approximation of the fitted additive component functions; they do
-not prove that a general dependence structure has a unique causal decomposition.
-The required `key` makes the integration reproducible, including bootstrap
-replicates. Callbacks must use the generator provided rather than global state.
+Custom counts are exact. The default `sequence="sobol"` requires power-of-two
+`n_outer`, `n_inner`, and `n_variance`; `sequence="monte_carlo"` permits arbitrary
+counts. The required `key` controls integration and bootstrap reproducibility.
+Each conditional mean uses two independently randomized blocks of `n_inner`
+points. Products of their means estimate squared conditional expectations,
+without an IID inner-variance correction. Two joint blocks of `n_variance`
+points similarly estimate the output variance. This applies to both sequences
+and costs roughly twice as many surrogate predictions as a single-block
+integration. Finite-sample index estimates can still be slightly negative.
+Increasing counts reduces integration error but cannot repair surrogate error.
+The internal `_custom_indices.py` computes the same five VKOGA indices under
+the supplied distribution; it does not define new sensitivity indices.
+The extra `S_U`, `S_C`, `S_IU` fields inherit the fitted additive-component
+approximation and do not establish a unique causal decomposition.
 
 See the [runnable custom-dependence example](/examples/correlated-inputs#custom-dependence-without-a-copula).
 
@@ -194,11 +200,14 @@ See the [runnable custom-dependence example](/examples/correlated-inputs#custom-
 | `ridge` | `None` | RKHS regularisation. `None` cross-validates over a grid. |
 | `max_centers` | `None` | Cap on greedily selected kernel centres. `None` means 300, itself capped at `N`. Lower it to cut fit time; too low and the surrogate underfits, which `cv_rmse` reports. |
 | `n_folds` | `10` | Folds for the hyperparameter cross-validation. At least 2. |
-| `n_outer` | `512` | Outer (conditioning) sample size per parameter. Rounded up to the next power of two for Sobol' balance on the built-in path; exact for callbacks. Increasing it reduces outer sampling noise. Built-in `S_TC` also has error from a shared inner block that increasing `n_outer` cannot remove; custom sampling uses independent inner blocks with a noise correction. |
-| `n_inner` | `128` | Inner (conditional) sample size per outer point, rounded up to a power of two on the built-in path (exact for callbacks). On the built-in path, `S_TC` drops the i.i.d. inner-noise correction and leans on a large shared inner block, so do not lower `n_inner` to buy speed there: a small `n_inner` inflates a small `S_TC`, and raising `n_outer` will not fix it. |
-| `n_variance` | `8192` | Sample size for the output variance and the component-function fit, rounded up to a power of two on the built-in path; exact for callbacks. |
-| `key` | `None`, but required | A `jax.random` key driving the index integration: quasi-random draws by default or NumPy generators passed to custom callbacks. Use `jax.random.key(0)` for reproducibility. |
-| `batch_size` | `None` | Rows per device call for surrogate evaluation. Built-in nested sampling groups outer anchors within the memory budget; custom sampling draws one anchor's `n_inner` conditional rows at a time. One complete conditional block is the minimum sampling allocation, even when `batch_size < n_inner`. Changing prediction batching does not change the random sample. |
+| `n_outer` | `512` | Outer (conditioning) sample size per parameter. Rounded up to the next power of two for Sobol' balance on the built-in path; exact for custom samplers; Sobol counts must be powers of two. Increasing it reduces outer sampling noise. Built-in `S_TC` also has error from a shared inner block that increasing `n_outer` cannot remove; custom sampling uses two independent inner randomizations. |
+| `n_inner` | `128` | Inner (conditional) sample size per outer point, rounded up to a power of two on the built-in path (exact for custom samplers; Sobol counts must be powers of two). On the built-in path, `S_TC` drops the i.i.d. inner-noise correction and leans on a large shared inner block, so do not lower `n_inner` to buy speed there: a small `n_inner` inflates a small `S_TC`, and raising `n_outer` will not fix it. |
+| `n_variance` | `8192` | Sample size for the output variance and the component-function fit, rounded up to a power of two on the built-in path; exact for custom samplers; Sobol counts must be powers of two. |
+| `key` | `None`, but required | A `jax.random` key driving the index integration: Sobol points by default, or Monte Carlo points for custom samplers. Use `jax.random.key(0)` for reproducibility. |
+| `sampler` | `None` | Uniform-point transformation implementing joint and conditional sampling; replaces the Gaussian copula. |
+| `sampler_dimension` | `None` | Uniform coordinates required by the sampler; defaults to the number of inputs. |
+| `sequence` | `"sobol"` | Custom integration point sequence: `"sobol"` or `"monte_carlo"`. |
+| `batch_size` | `None` | Rows per device call for surrogate evaluation. Built-in nested sampling groups outer conditioning rows within the memory budget; custom sampling draws one conditioning row's `n_inner` conditional rows at a time. One complete conditional block is the minimum sampling allocation, even when `batch_size < n_inner`. Changing prediction batching does not change the random sample. |
 | `on_invalid` | `"raise"` | One training row is one unit, so `"drop"` removes the `(X, Y)` pair. The check runs before the hyperparameter search on purpose: one non-finite `Y` makes every cross-validation score non-finite, and the caller would otherwise meet a `RuntimeError` about failed kernel solves that names the wrong cause. `"drop"` needs at least `n_folds` rows to survive. |
 | `verbose` | `True` | Prints the summary block shown above. |
 
@@ -243,7 +252,7 @@ Diagnostics:
 
 | Field | Meaning |
 | --- | --- |
-| `correlation` | The `(D, D)` copula matrix for built-in integration; `None` for custom callbacks. |
+| `correlation` | The `(D, D)` copula matrix for built-in integration; `None` for custom samplers. |
 | `variance` | Output variance under the correlated input measure, per output slice. |
 | `n_centers` | Kernel centres in the fitted surrogate. |
 | `gamma`, `ridge` | The hyperparameters the fit used, cross-validated or passed. |

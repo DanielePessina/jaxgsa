@@ -6,6 +6,7 @@ import warnings
 
 import numpy as np
 import numpy.typing as npt
+from scipy.special import ndtri
 from scipy.stats import norm
 
 from jaxgsa._core.copula import (
@@ -15,10 +16,12 @@ from jaxgsa._core.copula import (
     latent_to_physical,
 )
 from jaxgsa._core.dependence import (
-    ConditionalSampler as ConditionalSampler,
+    InputSampler as InputSampler,
 )
 from jaxgsa._core.dependence import (
-    JointSampler as JointSampler,
+    generate_uniform_points,
+    transform_samples,
+    validate_sampler,
 )
 from jaxgsa._core.sampling import _transform_samples
 from jaxgsa._core.warning_types import JaxgsaWarning
@@ -266,4 +269,63 @@ def fit_correlation(problem: Problem, X: npt.ArrayLike) -> np.ndarray:
     return fit_gaussian_copula(problem, np.asarray(X, dtype=np.float64))
 
 
-__all__ = ["correlate", "correlation_from_covariance", "fit_correlation", "monte_carlo"]
+__all__ = [
+    "InputSampler",
+    "sample",
+    "correlate",
+    "correlation_from_covariance",
+    "fit_correlation",
+    "monte_carlo",
+]
+
+
+def sample(
+    problem: Problem,
+    n: int,
+    *,
+    sampler: InputSampler | None = None,
+    sampler_dimension: int | None = None,
+    sequence: str = "sobol",
+    seed: int | np.random.Generator | None = None,
+    scramble: bool = True,
+) -> np.ndarray:
+    """Generate ordinary input rows for a model or given-data GSA method.
+
+    Args:
+        problem: Input names and built-in distributions. With a custom sampler,
+            the marginals describe metadata only.
+        n: Exact row count; Sobol requires a power of two.
+        sampler: Optional transformation from uniforms to joint physical rows.
+        sampler_dimension: Number of uniforms per row; defaults to input count.
+        sequence: ``"sobol"`` or ``"monte_carlo"``.
+        seed: Random seed or existing generator.
+        scramble: Scramble Sobol points; ignored for Monte Carlo.
+
+    Returns:
+        Physical input rows of shape ``(n, problem.num_vars)``.
+    """
+    # Built-in Monte Carlo retains the existing reproducible sampling path.
+    if sampler is None and sequence == "monte_carlo":
+        if sampler_dimension is not None:
+            raise ValueError("sampler_dimension requires sampler")
+        return monte_carlo(problem, n, seed=seed)
+    dimension = validate_sampler(sampler, sampler_dimension, problem.num_vars, sequence)
+    if sampler is not None and problem.correlation is not None:
+        raise ValueError("Custom samplers cannot be combined with problem.correlation.")
+    if sequence == "sobol" and not scramble and seed is not None:
+        raise ValueError("seed has no effect with scramble=False")
+    points = generate_uniform_points(
+        n,
+        problem.num_vars if dimension is None else dimension,
+        sequence=sequence,
+        rng=np.random.default_rng(seed),
+        scramble=scramble,
+    )
+    if sampler is not None:
+        return transform_samples(sampler, points, problem.num_vars)
+    if not problem.has_correlated_inputs:
+        return _transform_samples(problem, points)
+    correlation = problem.correlation
+    assert correlation is not None
+    normal = ndtri(np.clip(points, 1e-12, 1 - 1e-12))
+    return latent_to_physical(problem, normal @ _safe_cholesky(correlation).T)

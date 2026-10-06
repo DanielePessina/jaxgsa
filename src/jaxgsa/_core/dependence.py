@@ -1,41 +1,78 @@
-"""Shared contracts and validation for user-supplied input samplers.
-
-Callbacks draw independent Monte Carlo rows in physical input units. Joint
-and conditional callbacks must describe the same distribution. Shape checks
-cannot establish that statistical consistency.
-"""
+"""Uniform-point transformations for user-supplied joint distributions."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from typing import Protocol
 
 import numpy as np
 import numpy.typing as npt
-
-JointSampler = Callable[[int, np.random.Generator], npt.ArrayLike]
-ConditionalSampler = Callable[[np.ndarray, tuple[int, ...], np.random.Generator], npt.ArrayLike]
+from scipy.stats import qmc
 
 
-def validate_sampler_pair(
-    joint_sampler: JointSampler | None,
-    conditional_sampler: ConditionalSampler | None,
-) -> bool:
-    """Check that custom joint and conditional samplers are supplied together.
+class InputSampler(Protocol):
+    """Transform uniforms into joint or conditional physical input rows."""
 
-    Returns:
-        Whether a custom sampler pair was supplied.
+    def __call__(
+        self,
+        uniform_points: np.ndarray,
+        /,
+        *,
+        conditioning_rows: np.ndarray | None = None,
+        fixed_indices: tuple[int, ...] = (),
+    ) -> npt.ArrayLike:
+        """Return one physical input row per uniform point."""
+        ...
 
-    Raises:
-        ValueError: If exactly one callback is supplied.
-        TypeError: If a supplied callback is not callable.
-    """
-    if (joint_sampler is None) != (conditional_sampler is None):
-        raise ValueError("joint_sampler and conditional_sampler must be supplied together")
-    if joint_sampler is None:
-        return False
-    if not callable(joint_sampler) or not callable(conditional_sampler):
-        raise TypeError("joint_sampler and conditional_sampler must be callable")
-    return True
+
+def validate_sampler(
+    sampler: InputSampler | None,
+    sampler_dimension: int | None,
+    n_params: int,
+    sequence: str,
+) -> int | None:
+    """Validate sampling options and return the custom uniform dimension."""
+    if sequence not in {"sobol", "monte_carlo"}:
+        raise ValueError("sequence must be 'sobol' or 'monte_carlo'")
+    if sampler is None:
+        if sampler_dimension is not None:
+            raise ValueError("sampler_dimension requires sampler")
+        if sequence != "sobol":
+            raise ValueError("sequence='monte_carlo' requires sampler")
+        return None
+    if not callable(sampler):
+        raise TypeError("sampler must be callable")
+    dimension = n_params if sampler_dimension is None else sampler_dimension
+    if (
+        isinstance(dimension, bool)
+        or not isinstance(dimension, (int, np.integer))
+        or dimension < 1
+    ):
+        raise ValueError("sampler_dimension must be a positive integer")
+    return int(dimension)
+
+
+def generate_uniform_points(
+    n: int,
+    dimension: int,
+    *,
+    sequence: str,
+    rng: np.random.Generator,
+    scramble: bool = True,
+) -> np.ndarray:
+    """Generate exact-count Monte Carlo or power-of-two Sobol uniform rows."""
+    if any(
+        isinstance(v, bool) or not isinstance(v, (int, np.integer)) or v < 1
+        for v in (n, dimension)
+    ):
+        raise ValueError("n and dimension must be positive integers")
+    n, dimension = int(n), int(dimension)
+    if sequence == "monte_carlo":
+        return rng.random((n, dimension))
+    if sequence != "sobol":
+        raise ValueError("sequence must be 'sobol' or 'monte_carlo'")
+    if n & (n - 1):
+        raise ValueError("Sobol sampling requires a power-of-two sample count")
+    return qmc.Sobol(d=dimension, scramble=scramble, seed=rng).random_base2(n.bit_length() - 1)
 
 
 def _sample_array(values: npt.ArrayLike, shape: tuple[int, int], name: str) -> np.ndarray:
@@ -51,65 +88,55 @@ def _sample_array(values: npt.ArrayLike, shape: tuple[int, int], name: str) -> n
     return result
 
 
-def draw_joint_samples(
-    sampler: JointSampler,
-    n: int,
+def transform_samples(
+    sampler: InputSampler,
+    uniform_points: np.ndarray,
     n_params: int,
-    rng: np.random.Generator,
+    *,
+    conditioning_rows: np.ndarray | None = None,
+    fixed_indices: tuple[int, ...] = (),
 ) -> np.ndarray:
-    """Draw and validate independent joint rows in physical units.
+    """Transform joint or conditional rows, protecting callback inputs.
 
     Args:
-        sampler: Callback taking the row count and RNG positionally.
-        n: Positive number of rows.
-        n_params: Positive number of input columns.
-        rng: Generator supplied to the callback.
+        sampler: Distribution transformation receiving uniforms and optional
+            conditioning rows. An empty fixed subset requests joint draws.
+        uniform_points: Uniform coordinates of shape ``(n, sampler_dimension)``.
+        n_params: Number of physical input columns returned by the sampler.
+        conditioning_rows: Physical rows containing the values to hold fixed.
+        fixed_indices: Distinct physical input columns to preserve exactly.
 
     Returns:
-        Owned float64 array of shape ``(n, n_params)``.
+        Owned finite float64 input rows of shape ``(n, n_params)``.
     """
-    if n < 1 or n_params < 1:
-        raise ValueError("n and n_params must be positive")
-    return _sample_array(sampler(n, rng), (n, n_params), "joint_sampler")
-
-
-def draw_conditional_samples(
-    sampler: ConditionalSampler,
-    anchors: np.ndarray,
-    fixed_indices: tuple[int, ...],
-    rng: np.random.Generator,
-) -> np.ndarray:
-    """Draw one independent conditional row per anchor in physical units.
-
-    Args:
-        sampler: Callback taking anchor rows, fixed column indices and RNG
-            positionally. Redraw the other columns conditionally on the fixed
-            values, independently across rows and across callback invocations.
-        anchors: Two-dimensional physical input rows.
-        fixed_indices: Distinct input column indices to preserve exactly.
-        rng: Generator supplied to the callback.
-
-    Returns:
-        Owned float64 array matching the anchor shape.
-
-    Raises:
-        ValueError: If samples are malformed or fixed values change.
-    """
-    if anchors.ndim != 2 or min(anchors.shape) < 1:
-        raise ValueError("anchors must be a nonempty two-dimensional array")
-    shape = (anchors.shape[0], anchors.shape[1])
-    original = _sample_array(anchors, shape, "anchors")
+    u = np.asarray(uniform_points)
+    if u.ndim != 2 or min(u.shape) < 1:
+        raise ValueError("uniform_points must be a nonempty two-dimensional array")
+    u = _sample_array(u, (u.shape[0], u.shape[1]), "uniform_points")
+    if np.any((u < 0) | (u > 1)):
+        raise ValueError("uniform_points must lie in [0, 1]")
     if not isinstance(fixed_indices, tuple) or any(
         isinstance(i, bool) or not isinstance(i, (int, np.integer)) for i in fixed_indices
     ):
         raise ValueError("fixed_indices must be a tuple of distinct integer column indices")
     if len(set(fixed_indices)) != len(fixed_indices) or any(
-        i < 0 or i >= shape[1] for i in fixed_indices
+        i < 0 or i >= n_params for i in fixed_indices
     ):
         raise ValueError("fixed_indices must be distinct valid column indices")
+    shape = (len(u), n_params)
+    original = None
+    if conditioning_rows is not None:
+        original = _sample_array(conditioning_rows, shape, "conditioning_rows")
+    elif fixed_indices:
+        raise ValueError("conditioning_rows is required when fixed_indices is nonempty")
+    callback_rows = None if original is None else original.copy()
     result = _sample_array(
-        sampler(original.copy(), fixed_indices, rng), shape, "conditional_sampler"
+        sampler(u.copy(), conditioning_rows=callback_rows, fixed_indices=fixed_indices),
+        shape,
+        "sampler",
     )
-    if not np.array_equal(result[:, fixed_indices], original[:, fixed_indices]):
-        raise ValueError("conditional_sampler must preserve fixed columns exactly")
+    if original is not None and not np.array_equal(
+        result[:, fixed_indices], original[:, fixed_indices]
+    ):
+        raise ValueError("sampler must preserve fixed columns exactly")
     return result

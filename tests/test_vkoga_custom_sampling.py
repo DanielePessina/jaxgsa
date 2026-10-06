@@ -17,12 +17,17 @@ def joint(n: int, rng: np.random.Generator) -> np.ndarray:
     return rng.random((n, 2))
 
 
-def conditional(
-    anchors: np.ndarray, fixed: tuple[int, ...], rng: np.random.Generator
+def sampler(
+    u: np.ndarray,
+    *,
+    conditioning_rows: np.ndarray | None = None,
+    fixed_indices: tuple[int, ...] = (),
 ) -> np.ndarray:
-    """Resample unfixed columns independently."""
-    result = joint(len(anchors), rng)
-    result[:, fixed] = anchors[:, fixed]
+    """Transform uniforms and preserve any conditioning columns."""
+    result = u.copy()
+    if fixed_indices:
+        assert conditioning_rows is not None
+        result[:, fixed_indices] = conditioning_rows[:, fixed_indices]
     return result
 
 
@@ -30,8 +35,8 @@ def test_inner_noise_corrected_for_irrelevant_input() -> None:
     """Small IID inner budgets must not systematically inflate first order."""
     result = estimate_custom_indices(
         problem=PROBLEM,
-        joint_sampler=joint,
-        conditional_sampler=conditional,
+        sampler=sampler,
+        sequence="monte_carlo",
         predict=lambda u: u[:, :1],
         n_outer=4000,
         n_inner=2,
@@ -52,14 +57,22 @@ def test_correlated_nonlinear_distribution() -> None:
         }
     )
 
-    def draw(n: int, rng: np.random.Generator) -> np.ndarray:
-        a = rng.normal(size=n)
-        return np.column_stack((a, a * rng.choice([-1, 1], size=n)))
+    def draw(
+        u: np.ndarray,
+        *,
+        conditioning_rows: np.ndarray | None = None,
+        fixed_indices: tuple[int, ...] = (),
+    ) -> np.ndarray:
+        from scipy.special import ndtri
 
-    def given(x: np.ndarray, fixed: tuple[int, ...], rng: np.random.Generator) -> np.ndarray:
-        y = x.copy()
-        i = 1 - fixed[0]
-        y[:, i] = x[:, fixed[0]] * rng.choice([-1, 1], size=len(x))
+        signs = np.where(u[:, 1] < 0.5, -1, 1)
+        if not fixed_indices:
+            a = ndtri(u[:, 0])
+            return np.column_stack((a, a * signs))
+        assert conditioning_rows is not None
+        y = conditioning_rows.copy()
+        i = 1 - fixed_indices[0]
+        y[:, i] = y[:, fixed_indices[0]] * signs
         return y
 
     from scipy.stats import norm
@@ -67,12 +80,12 @@ def test_correlated_nonlinear_distribution() -> None:
     with jax.enable_x64():
         result = estimate_custom_indices(
             problem=problem,
-            joint_sampler=draw,
-            conditional_sampler=given,
+            sampler=draw,
+            sequence="sobol",
             predict=lambda u: norm.ppf(u[:, :1]) ** 2,
-            n_outer=5000,
+            n_outer=2048,
             n_inner=2,
-            n_variance=50000,
+            n_variance=16384,
             entropy=8,
         )
     np.testing.assert_allclose(result.S_TC, [[1, 1]], atol=0.15)
@@ -83,9 +96,14 @@ def test_analyze_reproducible_batched_bootstrap_and_counts() -> None:
     """Custom callbacks reach integration and bootstrap without QMC rounding."""
     counts: list[int] = []
 
-    def draw(n: int, rng: np.random.Generator) -> np.ndarray:
-        counts.append(n)
-        return joint(n, rng)
+    def draw(
+        u: np.ndarray,
+        *,
+        conditioning_rows: np.ndarray | None = None,
+        fixed_indices: tuple[int, ...] = (),
+    ) -> np.ndarray:
+        counts.append(len(u))
+        return sampler(u, conditioning_rows=conditioning_rows, fixed_indices=fixed_indices)
 
     with jax.enable_x64():
         x = jnp.asarray(joint(70, np.random.default_rng(1)))
@@ -96,8 +114,8 @@ def test_analyze_reproducible_batched_bootstrap_and_counts() -> None:
                 x,
                 x[:, 0],
                 batch_size=batch_size,
-                joint_sampler=draw,
-                conditional_sampler=conditional,
+                sampler=draw,
+                sequence="monte_carlo",
                 gamma=2.0,
                 ridge=1e-6,
                 max_centers=15,
@@ -113,7 +131,7 @@ def test_analyze_reproducible_batched_bootstrap_and_counts() -> None:
 
         result = run(3)
         other = run(11)
-    assert set(counts) == {9, 31}
+    assert set(counts) == {1, 3, 9, 31}
     assert result.correlation is None
     assert result.is_correlated is None
     assert result.dependence_source == "custom"
@@ -136,8 +154,8 @@ def test_conflicting_correlation_rejected_before_fit() -> None:
             PROBLEM,
             jnp.ones((4, 2)),
             jnp.ones(4),
-            joint_sampler=joint,
-            conditional_sampler=conditional,
+            sampler=sampler,
+            sequence="monte_carlo",
             correlation=np.eye(2),
         )
 
@@ -154,22 +172,27 @@ def test_correlated_gaussian_conditional_indices() -> None:
     )
     rho = 0.6
 
-    def draw(n: int, rng: np.random.Generator) -> np.ndarray:
-        z = rng.normal(size=(n, 2))
-        z[:, 1] = rho * z[:, 0] + np.sqrt(1 - rho**2) * z[:, 1]
-        return z
-
-    def given(x: np.ndarray, fixed: tuple[int, ...], rng: np.random.Generator) -> np.ndarray:
-        y = x.copy()
-        i = 1 - fixed[0]
-        y[:, i] = rho * x[:, fixed[0]] + np.sqrt(1 - rho**2) * rng.normal(size=len(x))
+    def draw(
+        u: np.ndarray,
+        *,
+        conditioning_rows: np.ndarray | None = None,
+        fixed_indices: tuple[int, ...] = (),
+    ) -> np.ndarray:
+        z = norm.ppf(u)
+        if not fixed_indices:
+            z[:, 1] = rho * z[:, 0] + np.sqrt(1 - rho**2) * z[:, 1]
+            return z
+        assert conditioning_rows is not None
+        y = conditioning_rows.copy()
+        i = 1 - fixed_indices[0]
+        y[:, i] = rho * y[:, fixed_indices[0]] + np.sqrt(1 - rho**2) * z[:, i]
         return y
 
     with jax.enable_x64():
         result = estimate_custom_indices(
             problem=problem,
-            joint_sampler=draw,
-            conditional_sampler=given,
+            sampler=draw,
+            sequence="monte_carlo",
             predict=lambda u: (norm.ppf(u) @ np.array([1.0, 2.0]))[:, None],
             n_outer=2000,
             n_inner=8,
@@ -199,8 +222,8 @@ def test_irregular_channels_forward_custom_samplers() -> None:
             PROBLEM,
             x,
             y,
-            joint_sampler=joint,
-            conditional_sampler=conditional,
+            sampler=sampler,
+            sequence="monte_carlo",
             gamma=2.0,
             ridge=1e-6,
             max_centers=10,
@@ -229,8 +252,8 @@ def test_time_multi_output_export_and_receipt(capsys: pytest.CaptureFixture[str]
             PROBLEM,
             x,
             y,
-            joint_sampler=joint,
-            conditional_sampler=conditional,
+            sampler=sampler,
+            sequence="monte_carlo",
             gamma=2.0,
             ridge=1e-6,
             max_centers=10,
@@ -245,3 +268,41 @@ def test_time_multi_output_export_and_receipt(capsys: pytest.CaptureFixture[str]
     assert dataset.attrs["dependence_source"] == "custom"
     assert "correlation" not in dataset
     assert "custom (user-supplied conditionals)" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("sequence", ["sobol", "monte_carlo"])
+def test_offset_and_small_inner_replicates(sequence: str) -> None:
+    """Large constants and tiny inner blocks must not inflate irrelevant indices."""
+    with jax.enable_x64():
+        results = [
+            estimate_custom_indices(
+                problem=PROBLEM,
+                sampler=sampler,
+                sequence=sequence,
+                predict=lambda u, offset=offset: u[:, :1] + offset,
+                n_outer=256,
+                n_inner=2,
+                n_variance=4096,
+                entropy=31,
+            )
+            for offset in (0.0, 1e8)
+        ]
+    if sequence == "sobol":
+        for result in results:
+            np.testing.assert_allclose(result.S_TC, [[1, 0]], atol=0.06)
+            np.testing.assert_allclose(result.S_TU, [[1, 0]], atol=0.06)
+    np.testing.assert_allclose(results[0].S_TC, results[1].S_TC, atol=1e-7)
+    np.testing.assert_allclose(results[0].S_TU, results[1].S_TU, atol=1e-7)
+
+
+def test_custom_sobol_counts_are_not_rounded() -> None:
+    """Reject an unbalanced Sobol budget before fitting the surrogate."""
+    with pytest.raises(ValueError, match="n_outer must be a power of two"):
+        vkoga.analyze(
+            PROBLEM,
+            jnp.ones((4, 2)),
+            jnp.ones(4),
+            sampler=sampler,
+            n_outer=9,
+            key=jax.random.key(0),
+        )

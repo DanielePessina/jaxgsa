@@ -467,7 +467,7 @@ matrix explicitly with `problem.with_correlation(None)`.
   For correlations strictly below one in magnitude it has no asymptotic tail
   dependence. Real data may carry asymmetric or tail dependence it cannot model.
 - `problem.correlation` selects the built-in Gaussian copula. Custom joint and
-  conditional callbacks let Kucherenko and VKOGA integrate under other copulas
+  conditional transformations let Kucherenko and VKOGA integrate under other copulas
   or other joint distributions. The package does not infer such a model from
   observed rows; supply consistent samplers for your target distribution.
 - For non-Gaussian marginals, the Pearson correlation of the physical samples
@@ -492,8 +492,8 @@ matrix explicitly with `problem.with_correlation(None)`.
 
 ## Custom dependence without a copula
 
-A joint sampler and a matching conditional sampler let Kucherenko and VKOGA
-integrate under dependence beyond Gaussian copulas. Both are necessary;
+One uniform-point sampler lets Kucherenko and VKOGA integrate under dependence
+beyond Gaussian copulas. It must implement joint and conditional sampling;
 representative correlated rows alone do not determine conditional redraws.
 PAWN, Borgonovo, optimal transport and HSIC still accept `X, Y` directly.
 
@@ -514,21 +514,17 @@ import jaxgsa
 jax.config.update("jax_enable_x64", True)
 
 
-def draw_joint(n, rng):
-    u, v = rng.uniform(size=(2, n))
-    return np.column_stack((u, v, (u + v) % 1.0))
-
-
-def draw_conditional(anchors, fixed_indices, rng):
+def sample_modular(uniform_points, *, conditioning_rows=None, fixed_indices=()):
     fixed = frozenset(fixed_indices)
-    if len(fixed) != len(fixed_indices) or not fixed <= {0, 1, 2}:
-        raise ValueError("Expected distinct fixed indices from (0, 1, 2)")
     if not fixed:
-        return draw_joint(len(anchors), rng)
-    rows = anchors.copy()
+        u, v = uniform_points[:, 0], uniform_points[:, 1]
+        return np.column_stack((u, v, (u + v) % 1.0))
+    if conditioning_rows is None:
+        raise ValueError("conditioning_rows is required")
+    rows = conditioning_rows.copy()
     if len(fixed) == 1:
         free = 1 if 0 in fixed else 0
-        rows[:, free] = rng.uniform(size=len(rows))
+        rows[:, free] = uniform_points[:, 0]
     if 2 not in fixed:
         rows[:, 2] = (rows[:, 0] + rows[:, 1]) % 1.0
     elif 1 not in fixed:
@@ -537,13 +533,12 @@ def draw_conditional(anchors, fixed_indices, rng):
         rows[:, 0] = (rows[:, 2] - rows[:, 1]) % 1.0
     return rows
 
-
 problem = jaxgsa.Problem(names=("u", "v", "w"), bounds=((0.0, 1.0),) * 3)
 design = jaxgsa.kucherenko.sample(
     problem,
-    10_000,  # exactly this many base points; no power-of-two rounding
-    joint_sampler=draw_joint,
-    conditional_sampler=draw_conditional,
+    8192,  # exact power-of-two count for Sobol integration
+    sampler=sample_modular,
+    sampler_dimension=2,
     seed=7,
 )
 Y = jnp.asarray(design.samples[:, 2])  # the model is Y = w
@@ -559,19 +554,43 @@ everything. However, the conditional total index of `w` is zero: once `u` and
 information under the joint distribution, not that `w` is causally inactive.
 With three independent uniforms instead, `Y = w` has `ST = [0, 0, 1]`.
 These per-input summaries respect the supplied higher-order dependence; they
-do not identify which groups of inputs create it. The callbacks must supply
+do not identify which groups of inputs create it. The sampler must supply
 the full joint law and its conditionals; fitting a pairwise matrix cannot
 recover this constraint.
 
-The package assembles the blocks in the correct order. Callbacks receive
-positional arguments and a NumPy `Generator`, and return finite real arrays in
-physical input units and `problem.names` order. Conditional rows must be
-independent draws given the held columns; never mutate anchors or redraw fixed
-columns. The two callbacks must describe the same joint distribution. A matrix
-on `problem.correlation` cannot be combined with callbacks. The public typing
-aliases are `jaxgsa.sampling.JointSampler` and `ConditionalSampler`.
+The package generates scrambled Sobol points by default and assembles the
+analysis blocks. The sampler returns physical values in `problem.names` order.
+Conditional calls preserve fixed columns and leave `conditioning_rows`
+unmodified. Empty fixed indices mean joint sampling. The same callback must
+implement conditionals of that joint law. Use `sequence="monte_carlo"` for
+ordinary random points and arbitrary exact counts. Custom Sobol counts must
+already be powers of two. A declared correlation matrix cannot be combined
+with the sampler. Its public callable type is `jaxgsa.sampling.InputSampler`.
 
-Use the same callbacks to integrate a VKOGA surrogate. Training data and the
+You can also generate points yourself and reuse the transformation:
+
+```python
+from scipy.stats import qmc
+
+uniform_points = qmc.Sobol(d=2, scramble=True, seed=7).random_base2(m=10)
+X = sample_modular(uniform_points)
+```
+
+Or let the shared sampler generate an ordinary input matrix for given-data
+methods such as PAWN, HSIC, Borgonovo, optimal transport or HDMR:
+
+```python
+X = jaxgsa.sampling.sample(
+    problem, 1024, sampler=sample_modular, sampler_dimension=2, seed=7,
+)
+Y = jnp.asarray(X[:, 2])
+pawn_result = jaxgsa.pawn.analyze(problem, jnp.asarray(X), Y)
+```
+
+These calls generate joint observations. Kucherenko still needs its own block
+design, and VKOGA also calls the conditional branch during index integration.
+
+Use the same sampler to integrate a VKOGA surrogate. Training data and the
 target distribution are separate inputs. This independent training design
 covers the cube; the integration distribution obeys the modular constraint:
 
@@ -582,8 +601,8 @@ vk = jaxgsa.vkoga.analyze(
     problem,
     X_train,
     Y_train,
-    joint_sampler=draw_joint,
-    conditional_sampler=draw_conditional,
+    sampler=sample_modular,
+    sampler_dimension=2,
     gamma=1.0,
     ridge=1e-8,
     max_centers=100,
@@ -596,10 +615,9 @@ print(vk.S_TC)  # approaches [0.0, 0.0, 1.0], subject to surrogate error
 print(vk.S_TU)  # approaches [0.0, 0.0, 0.0], subject to surrogate error
 ```
 
-VKOGA's declared marginals must match the callbacks' marginals because its
+VKOGA's declared marginals must match the sampler's marginals because its
 coordinate transform and component basis still use `Problem`. All three uniforms
-match here. Custom callbacks use Monte Carlo; the built-in Gaussian path uses
-quasi-random integration. See [VKOGA's API](/api/vkoga#custom-input-dependence)
+match here. Custom integration supports both Sobol and Monte Carlo points. See [VKOGA's API](/api/vkoga#custom-input-dependence)
 for estimator and decomposition limitations.
 
 Save a Kucherenko design and its evaluated outputs to analyze it later. The

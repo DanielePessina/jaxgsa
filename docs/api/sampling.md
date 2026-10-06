@@ -63,16 +63,48 @@ each search curve, which the seed sets directly.
 ## jaxgsa.sampling
 
 ```python
+sample(problem, n, *, sampler=None, sampler_dimension=None,
+       sequence="sobol", seed=None, scramble=True) -> np.ndarray # (n, D)
 monte_carlo(problem, n, *, seed=None) -> np.ndarray            # (n, D)
 correlate(X, problem, *, seed=None) -> np.ndarray              # (N, D)
 fit_correlation(problem, X) -> np.ndarray                      # (D, D)
 correlation_from_covariance(cov) -> np.ndarray                 # (D, D)
 ```
 
+`sample` generates an ordinary joint input matrix, rather than a method-specific
+analysis design. With no custom sampler it transforms points through the
+problem's declared marginals and Gaussian copula, if present. With `sampler`,
+it calls the uniform-point transformation with empty `fixed_indices`; see
+[the callback contract](/api/kucherenko#custom-input-dependence).
+`sampler_dimension` defaults to the number of model inputs. Sobol points are
+the default, and `n` must be a power of two; Monte Carlo accepts arbitrary
+exact counts. Custom sampling cannot be combined with `problem.correlation`.
+
+```python
+X = jaxgsa.sampling.sample(
+    problem, 1024, sampler=sample_inputs, sampler_dimension=2, seed=7,
+)
+Y = model(X)
+result = jaxgsa.pawn.analyze(problem, X, Y)
+```
+
+The same `X, Y` workflow applies to given-data methods such as HSIC,
+Borgonovo, optimal transport and HDMR. Their interpretations under dependence
+remain method-specific. In particular, PCE orthogonal variance decompositions
+retain their independence assumptions; custom samples do not remove them.
+Sobol rows are dependent across observations. For IID row-bootstrap intervals
+or permutation tests such as HSIC's, use `sequence="monte_carlo"` with a
+transformation that yields independent joint draws, unless you use inference
+that accounts for the sampling design. Dependence between input columns is
+allowed; this requirement concerns independence between sampled rows.
+A plain input matrix does not replace Kucherenko's
+conditional design or make a Saltelli design valid for dependent inputs.
+You may also generate uniform points externally and call your sampler directly.
+
 `monte_carlo` draws plain pseudo-random rows and pushes each column through
 its declared inverse CDF, so a categorical column comes back as level codes.
-There is no low-discrepancy structure and no Saltelli layout, which is exactly
-what the nine given-data methods want. When `problem.correlation` is set it
+There is no low-discrepancy structure and no Saltelli layout. Given-data
+methods consume the resulting ordinary input rows and their outputs. When `problem.correlation` is set it
 draws correlated latent normals first (a normal-to-anything construction;
 see [Gaussian-copula sampling in Hilhorst et al. (2024)](/api/vkoga#references)), so every
 column keeps its declared marginal and the joint sample carries the declared

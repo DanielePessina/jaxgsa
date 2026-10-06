@@ -3,13 +3,13 @@
 Implements the surrogate-based sensitivity analysis (SSA) of Hilhorst et al.
 (2024). Stage one fits a greedy kernel surrogate to the given ``(X, Y)`` data.
 Stage two computes the correlated variance-based indices of Li et al. (2010)
-against that surrogate under a Gaussian copula or custom joint and
-conditional samplers. The split is what makes the
+against that surrogate under a Gaussian copula or a custom uniform-point
+transformation. The split is what makes the
 method affordable. The indices need nested conditional sampling, which is
 unaffordable against an expensive model but cheap against a kernel expansion.
 
 **This module has no pure core.** Stage two is a host NumPy/SciPy
-Monte Carlo loop (quasi-Monte Carlo for the built-in copula), so there is no
+Monte Carlo or quasi-Monte Carlo loop, so there is no
 ``indices()`` here that returns bare
 arrays and survives ``jit``, ``vmap`` and ``jacrev``. That is a declared
 exemption (see ``jaxgsa._core.registry.MethodRecord.pure_core``), not a gap:
@@ -44,7 +44,7 @@ from jaxgsa._core.copula import (
     independent_correlation,
     is_independent,
 )
-from jaxgsa._core.dependence import ConditionalSampler, JointSampler, validate_sampler_pair
+from jaxgsa._core.dependence import InputSampler, validate_sampler
 from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare, require
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.irregular import (
@@ -71,8 +71,9 @@ from jaxgsa.vkoga._result import VKOGAResult
 # the engine owns it.
 _IRREGULAR_KWARGS = (
     "correlation",
-    "joint_sampler",
-    "conditional_sampler",
+    "sampler",
+    "sampler_dimension",
+    "sequence",
     "gamma",
     "ridge",
     "max_centers",
@@ -144,8 +145,9 @@ def analyze(
     Y: Array | IrregularY,
     *,
     correlation: Array | np.ndarray | None = None,
-    joint_sampler: JointSampler | None = None,
-    conditional_sampler: ConditionalSampler | None = None,
+    sampler: InputSampler | None = None,
+    sampler_dimension: int | None = None,
+    sequence: str = "sobol",
     gamma: float | None = None,
     ridge: float | None = None,
     max_centers: int | None = None,
@@ -169,8 +171,8 @@ def analyze(
     (2010) against it under a Gaussian copula or user-supplied distribution.
 
     The training data should cover the support of the target joint distribution
-    well enough to fit an accurate surrogate. Custom samplers use independent
-    Monte Carlo conditional draws and preserve the requested sample counts.
+    well enough to fit an accurate surrogate. Custom sampling uses independently
+    randomized Sobol or Monte Carlo replicates and preserves sample counts.
     Their marginals must match the declarations in ``problem``.
 
     Args:
@@ -183,13 +185,11 @@ def analyze(
             problem's declaration for this call. To fit a matrix from data,
             use :func:`jaxgsa.sampling.fit_correlation` and attach it with
             ``problem.with_correlation(...)``.
-        joint_sampler: Optional callable ``(n, rng)`` returning physical joint
-            rows of shape ``(n, D)``. Supply with ``conditional_sampler``;
-            neither a correlation argument nor problem correlation is allowed.
-        conditional_sampler: Callable ``(anchors, fixed_indices, rng)`` returning
-            IID conditional rows, preserving the fixed columns. The two
-            samplers must describe the same target distribution and match
-            the declared marginals; statistical consistency is not checked.
+        sampler: Transformation from uniform points to physical joint or
+            conditional samples; an empty ``fixed_indices`` requests joint rows.
+        sampler_dimension: Uniform coordinates, defaulting to input dimension.
+        sequence: Custom points: ``sobol`` (default) or ``monte_carlo``.
+            Sobol integration counts must be exact powers of two.
         gamma: RBF shape parameter, finite and positive when given. ``None``
             cross-validates over a grid.
         ridge: Kernel regularisation, finite and positive when given. ``None``
@@ -202,8 +202,9 @@ def analyze(
             used exactly as requested for custom Monte Carlo.
         n_inner: Inner (conditional) sample size per outer point, at least 2.
             Rounded up to the next power of two only for built-in sampling.
-            With custom samplers, draws are IID and S_TC subtracts the
-            inner-noise correction; the requested count is preserved.
+            Custom integration uses two independently randomized replicates,
+            each with this many points, to estimate products of conditional
+            means without applying an IID correction to Sobol points.
             For the built-in copula, ``S_TC`` reuses one inner
             block across every outer point and drops the iid inner-noise
             correction, so do not lower ``n_inner`` below the default to buy
@@ -215,7 +216,8 @@ def analyze(
             concern.
         n_variance: Sample size for the output variance and the component-
             function fit, at least 2. Rounded up to the next power of two for the
-            built-in copula only; custom sampling preserves the count.
+            built-in copula only. Custom integration uses two independent
+            replicates of this size for normalization and component fitting.
         n_bootstrap: Number of bootstrap resamples for confidence intervals.
             ``0`` (default) computes no intervals, and leaving it there is
             the right call for a routine analysis: **each replicate refits
@@ -308,7 +310,8 @@ def analyze(
             which prompts a reminder to check target-support coverage and
             validate the surrogate. Correlated training data is allowed.
     """
-    custom_sampling = validate_sampler_pair(joint_sampler, conditional_sampler)
+    sampler_dimension = validate_sampler(sampler, sampler_dimension, problem.num_vars, sequence)
+    custom_sampling = sampler is not None
     if custom_sampling and (correlation is not None or problem.correlation is not None):
         raise ValueError("Custom samplers cannot be combined with correlation")
     if _is_irregular_y(Y):
@@ -394,6 +397,15 @@ def analyze(
     Y_flat = Y_canonical.reshape(Y_canonical.shape[0], n_time * n_out)
 
     _warn_single_precision()
+    if custom_sampling and sequence == "sobol":
+        for name, count in (
+            ("n_outer", n_outer),
+            ("n_inner", n_inner),
+            ("n_variance", n_variance),
+        ):
+            if count & (count - 1):
+                raise ValueError(f"{name} must be a power of two for Sobol integration")
+
     R = None if custom_sampling else _resolve_correlation(problem, correlation)
     if R is not None:
         _warn_correlated_training_design(problem, X, R)
@@ -437,8 +449,9 @@ def analyze(
         entropy=seed,
         batch_size=batch_size,
         param_names=problem.names,
-        joint_sampler=joint_sampler,
-        conditional_sampler=conditional_sampler,
+        sampler=sampler,
+        sampler_dimension=sampler_dimension,
+        sequence=sequence,
     )
 
     def _shape_index(flat: np.ndarray) -> Array:
@@ -468,8 +481,9 @@ def analyze(
             key=key,
             n_bootstrap=n_bootstrap,
             batch_size=batch_size,
-            joint_sampler=joint_sampler,
-            conditional_sampler=conditional_sampler,
+            sampler=sampler,
+            sampler_dimension=sampler_dimension,
+            sequence=sequence,
         )
         # _shape_index already squeezes to the caller's own rank; interval()
         # reads a shape only to broadcast [lower, upper], so it works the
@@ -562,8 +576,9 @@ def _fit_and_estimate(
     entropy: int,
     batch_size: int | None,
     param_names: Sequence[str] | None = None,
-    joint_sampler: JointSampler | None = None,
-    conditional_sampler: ConditionalSampler | None = None,
+    sampler: InputSampler | None = None,
+    sampler_dimension: int | None = None,
+    sequence: str = "sobol",
 ):
     """Fit one surrogate to one training set and read the indices off it.
 
@@ -612,11 +627,12 @@ def _fit_and_estimate(
         coefficients=state.coefficients[:n_selected],
     )
     predictor = _make_unit_predictor(state, y_mean, batch_size)
-    if joint_sampler is not None and conditional_sampler is not None:
+    if sampler is not None:
         indices = estimate_custom_indices(
             problem=problem,
-            joint_sampler=joint_sampler,
-            conditional_sampler=conditional_sampler,
+            sampler=sampler,
+            sampler_dimension=sampler_dimension,
+            sequence=sequence,
             predict=predictor,
             n_outer=n_outer,
             n_inner=n_inner,
@@ -655,8 +671,9 @@ def _bootstrap_replicates(
     key: Array,
     n_bootstrap: int,
     batch_size: int | None,
-    joint_sampler: JointSampler | None = None,
-    conditional_sampler: ConditionalSampler | None = None,
+    sampler: InputSampler | None = None,
+    sampler_dimension: int | None = None,
+    sequence: str = "sobol",
 ) -> dict[str, np.ndarray]:
     """Refit the surrogate on resampled training rows, once per replicate.
 
@@ -714,8 +731,9 @@ def _bootstrap_replicates(
                 n_variance=n_variance,
                 entropy=_seed_from_key(index_key),
                 batch_size=batch_size,
-                joint_sampler=joint_sampler,
-                conditional_sampler=conditional_sampler,
+                sampler=sampler,
+                sampler_dimension=sampler_dimension,
+                sequence=sequence,
             )
         for name in _INTERVAL_FIELDS:
             draws[name].append(np.asarray(getattr(indices, name)))

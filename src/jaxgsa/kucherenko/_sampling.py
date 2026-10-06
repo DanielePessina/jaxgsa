@@ -9,7 +9,7 @@ base point ``k`` contributes three input rows:
 3. ``(y'_k, z_k)`` with ``y'_k`` drawn from the conditional ``p(y | z = z_k)``.
 
 Row 1 is shared by every parameter, so the full design has ``n * (2D + 1)``
-rows. The dependence structure is the problem's Gaussian copula. Both
+rows. By default, the dependence structure is the problem's Gaussian copula. Both
 conditionals are closed-form Gaussians in the latent standard-normal space
 (:func:`jaxgsa._core.copula.build_conditional_plan`). The marginal inverse CDFs
 map the latent draws to physical units at the very end. Under an identity
@@ -20,7 +20,10 @@ design is exactly the Saltelli column-swap scheme with ``A``,
 The base draws come from one scrambled Sobol' sequence of dimension ``2D``. The
 first ``D`` columns drive the joint block and the last ``D`` drive the
 conditional redraws. That is the same pairing the Saltelli ``(A, B)``
-construction uses.
+construction uses. A custom transformation follows the same paired-uniform
+layout, with ``2 * sampler_dimension`` uniform coordinates. It receives joint
+points with no fixed columns, and conditional points with ``conditioning_rows``
+and the columns to preserve. Custom designs support Sobol or Monte Carlo.
 
 References:
     Kucherenko, Tarantola & Annoni (2012). Comput. Phys. Commun. 183:937-946.
@@ -45,11 +48,10 @@ from jaxgsa._core.copula import (
     latent_to_physical,
 )
 from jaxgsa._core.dependence import (
-    ConditionalSampler,
-    JointSampler,
-    draw_conditional_samples,
-    draw_joint_samples,
-    validate_sampler_pair,
+    InputSampler,
+    generate_uniform_points,
+    transform_samples,
+    validate_sampler,
 )
 from jaxgsa._core.samples import UniqueDesignSamples
 from jaxgsa._core.sampling import _next_power_of_2
@@ -79,7 +81,7 @@ class KucherenkoSamples(UniqueDesignSamples):
             ``(base_n * (2D + 1), D)``.
         n_expanded: Equal to ``n_runs``; every design row is retained.
         expanded_to_unique: Identity index map, shape ``(n_runs,)``.
-        base_n: Base points per block; a power of two for built-in sampling.
+        base_n: Base points per block; a power of two for Sobol sampling.
         dependence_source: ``"custom"`` for callbacks, ``"gaussian"`` otherwise.
         n_params: Number of parameters ``D``.
         problem: Problem definition used for the analysis, including its
@@ -178,8 +180,9 @@ def sample(
     scramble: bool = True,
     seed: int | np.random.Generator | None = None,
     verbose: bool = True,
-    joint_sampler: JointSampler | None = None,
-    conditional_sampler: ConditionalSampler | None = None,
+    sampler: InputSampler | None = None,
+    sampler_dimension: int | None = None,
+    sequence: str = "sobol",
 ) -> KucherenkoSamples:
     """Generate the conditional-copula design for :func:`jaxgsa.kucherenko.analyze`.
 
@@ -187,11 +190,13 @@ def sample(
     is ``n_samples`` rounded up to the next power of two (the Sobol' sequence
     keeps its balance guarantees only at powers of two).
 
-    Custom callbacks use ordinary Monte Carlo with exactly ``n_samples`` base
-    rows; ``scramble`` is ignored. They operate in physical units, bypassing
-    marginal CDFs, so problem marginals provide metadata rather than fitting
-    the custom distribution. Repeated rows under deterministic dependence are
-    retained. Saved designs can be analyzed without the original callbacks.
+    A custom ``sampler`` transforms uniform points into physical input rows.
+    Empty ``fixed_indices`` requests joint draws; otherwise it preserves those
+    columns from ``conditioning_rows`` and draws the remaining inputs from
+    their conditional distribution. Custom sampling uses exactly ``n_samples``
+    rows: Sobol requires a power of two; Monte Carlo accepts any count. Problem
+    marginals provide metadata rather than fitting the custom distribution.
+    Saved designs can be analyzed without the original callback.
 
     The dependence structure comes from ``problem.correlation``. An
     uncorrelated problem gives the classic Saltelli column-swap design, and
@@ -207,20 +212,19 @@ def sample(
         problem: Problem definition with parameter names, marginals, and an
             optional ``correlation``.
         n_samples: Requested base points per block, at least 2. Rounded up to
-            the next power of two only for built-in sampling.
+            the next power of two only for built-in sampling. Custom Sobol
+            counts must already be powers of two.
         scramble: Whether to Owen-scramble the Sobol' sequence. Keep it on:
             different seeds then give statistically independent designs.
-            Ignored for custom Monte Carlo callbacks.
+            Ignored for Monte Carlo.
         seed: Random seed or generator for reproducibility. It seeds the
-            scrambling for built-in sampling, where it requires
-            ``scramble=True``; seeds Monte Carlo for custom callbacks.
-        joint_sampler: Optional ``(n, rng) -> X`` joint sampling callback.
-            Must be supplied together with ``conditional_sampler``.
-        conditional_sampler: Optional ``(anchors, fixed_indices, rng) -> X``
-            callback preserving fixed columns and redrawing all others from
-            their conditional distribution. Both callbacks must describe the
-            same distribution. Custom callbacks cannot accompany a declared
-            ``problem.correlation``.
+            Sobol scrambling (requires ``scramble=True``), or Monte Carlo.
+        sampler: Optional joint/conditional transformation from uniform points.
+            Cannot accompany a declared ``problem.correlation``.
+        sampler_dimension: Uniform coordinates needed by the transformation;
+            defaults to the number of problem inputs.
+        sequence: Custom integration points, ``"sobol"`` (default) or
+            ``"monte_carlo"``. Built-in sampling uses Sobol.
         verbose: If ``True`` (default), print a one-line summary of the
             design: base points, blocks, total runs, and whether the design
             conditions on a declared correlation. Pass ``False`` for a
@@ -240,10 +244,11 @@ def sample(
             given with ``scramble=False`` (the unscrambled sequence is
             deterministic, so the seed would do nothing).
     """
-    custom = validate_sampler_pair(joint_sampler, conditional_sampler)
+    dimension = validate_sampler(sampler, sampler_dimension, problem.num_vars, sequence)
+    custom = dimension is not None
     if custom and problem.correlation is not None:
         raise ValueError("Custom samplers cannot be combined with problem.correlation.")
-    if not custom and not scramble and seed is not None:
+    if sequence == "sobol" and not scramble and seed is not None:
         raise ValueError(
             "jaxgsa.kucherenko.sample: seed has no effect with scramble=False. "
             "The unscrambled Sobol' sequence is deterministic, so the seed "
@@ -256,16 +261,26 @@ def sample(
     if n_samples < 2:
         raise ValueError(f"n_samples must be >= 2, got {n_samples}")
     if custom:
-        assert joint_sampler is not None and conditional_sampler is not None
+        assert sampler is not None and dimension is not None
         n = n_samples
         rng = np.random.default_rng(seed)
-        joint = draw_joint_samples(joint_sampler, n, D, rng)
+        points = generate_uniform_points(
+            n, 2 * dimension, sequence=sequence, rng=rng, scramble=scramble
+        )
+        joint = transform_samples(sampler, points[:, :dimension], D)
+        redraw = points[:, dimension:]
         blocks = [joint]
         for i in range(D):
-            blocks.append(draw_conditional_samples(conditional_sampler, joint, (i,), rng))
+            blocks.append(
+                transform_samples(sampler, redraw, D, conditioning_rows=joint, fixed_indices=(i,))
+            )
         for i in range(D):
             others = tuple(j for j in range(D) if j != i)
-            blocks.append(draw_conditional_samples(conditional_sampler, joint, others, rng))
+            blocks.append(
+                transform_samples(
+                    sampler, redraw, D, conditioning_rows=joint, fixed_indices=others
+                )
+            )
         X = np.concatenate(blocks, axis=0)
     else:
         n = _next_power_of_2(n_samples)

@@ -882,32 +882,52 @@ from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate, ANALYTICAL_S1
 
 Use them to check an estimator, or to measure how fast it converges.
 
-## Custom joint and conditional samplers
+## Custom input sampler
 
-Kucherenko `sample` and VKOGA `analyze` accept optional `joint_sampler` and
-`conditional_sampler` callbacks together. Their public aliases live in
-`jaxgsa.sampling`: `JointSampler`, `ConditionalSampler`. Calls are positional:
-`joint_sampler(n, rng)` returns `(n, D)`; `conditional_sampler(anchors,
-fixed_indices, rng)` returns the anchor shape. Values are real, finite physical
-inputs in `problem.names` order. Do not mutate anchors; preserve fixed columns
-and draw each remaining row independently from the matching joint conditional.
-Empty fixed indices mean joint redraw; all fixed means anchor copy. Both
-callbacks are required, and cannot coexist with `problem.correlation` or a
-VKOGA `correlation=` override. Shapes and fixed columns are validated;
-statistical consistency is the user's responsibility.
+Kucherenko `sample` and VKOGA `analyze` accept one optional `sampler`, typed as
+`jaxgsa.sampling.InputSampler`:
 
-Custom integration uses NumPy `Generator` Monte Carlo with exact counts rather
-than rounded Sobol-sequence counts. Kucherenko owns block assembly; no user
-Sobol sampler is required. Its `seed` controls callbacks; `scramble` only
-applies to the built-in Gaussian path. Saved designs retain sampled rows and
-provenance, not callable code. VKOGA's `key` controls integration randomness,
-and its declared marginals must match the callbacks because transforms and
-component bases still use them. Its IID inner-variance correction can yield
-small negative first-order estimates. Training data must cover integration
-support; an independent training design is optional. Dependence fitting remains
-explicit, never triggered just by supplying data.
+```python
+sampler(uniform_points, *, conditioning_rows=None, fixed_indices=())
+```
 
-Custom callbacks can preserve higher-order dependence, not just pairwise
+The package supplies `(n, sampler_dimension)` uniform points; return `(n, D)`
+finite real physical inputs in `problem.names` order. `sampler_dimension`
+defaults to `D`, but can differ when the transformation needs more or fewer
+uniform coordinates. Empty `fixed_indices` means joint sampling. Otherwise,
+use `conditioning_rows` to draw the remaining inputs from the matching joint
+conditional, preserving fixed columns without mutating the supplied rows.
+All fixed indices mean a copy of the conditioning rows. Overwriting fixed
+columns after a joint draw is valid only for independent inputs.
+
+`sequence="sobol"` is the default; custom counts must be powers of two.
+`sequence="monte_carlo"` accepts exact arbitrary counts. The callback transforms
+the supplied points deterministically: identical arguments must give identical
+outputs. Do not use hidden randomness or mutable sampling state. Kucherenko's `seed`
+and `scramble`, or VKOGA's required `key`, control point generation. The package
+assembles analysis blocks. A custom sampler cannot coexist with a declared
+`problem.correlation` or a VKOGA `correlation=` override. Shapes, finite values,
+and fixed columns are checked; statistical consistency is the user's responsibility.
+
+Use `jaxgsa.sampling.sample(problem, n, sampler=sampler, sampler_dimension=...)`
+to generate joint rows for given-data methods. The callback can also transform
+externally generated uniforms to produce `X`
+for given-data methods. Sobol rows are dependent across observations: use `sequence="monte_carlo"`
+and a transformation yielding independent rows for IID row-bootstrap intervals
+or HSIC permutation tests, unless inference accounts for the sampling design.
+Dependence between input columns remains allowed. This does not turn an ordinary `X` matrix into a
+Kucherenko analysis design. Saved designs retain sampled rows and provenance,
+not callable code. VKOGA's declared marginals must match the sampler because
+its coordinate transform and component bases still use them. Training data must
+cover integration support; an independent training design is optional.
+Custom VKOGA integration uses two independent randomized inner blocks and
+products of their means, avoiding an IID variance correction for Sobol points.
+Two independent joint blocks estimate output variance. This also applies to
+Monte Carlo; finite-sample indices can still be slightly negative.
+`_custom_indices.py` computes the existing VKOGA indices for the supplied
+distribution, not new index definitions. Dependence fitting remains explicit, never triggered just by supplying data.
+
+Custom samplers can preserve higher-order dependence, not just pairwise
 correlations. Use the documented `U, V ~ Uniform(0, 1)`, `W = (U + V) % 1`
 example when explaining or testing this: every pair is independent but any two
 determine the third. For `Y = W`, population `S1 = [0, 0, 1]` and conditional
@@ -917,5 +937,5 @@ inactivity. An identity Gaussian copula loses the constraint and gives
 test higher-order dependence. Validate all fixed subsets, including empty/all,
 and preserve held coordinates. These are per-input sensitivity summaries, not
 discovery of dependent groups. VKOGA requires matching declared marginals and
-both callbacks; there is no automatic dependence fitting from training data.
-See `docs/examples/correlated-inputs.md` for runnable callbacks.
+a sampler implementing both joint and conditional draws; there is no automatic dependence fitting from training data.
+See `docs/examples/correlated-inputs.md` for a runnable sampler.

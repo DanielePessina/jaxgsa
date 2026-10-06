@@ -8,32 +8,30 @@ import numpy as np
 import pytest
 
 from jaxgsa import JaxgsaWarning, kucherenko, sampling
-from jaxgsa._core.dependence import draw_conditional_samples
+from jaxgsa._core.dependence import transform_samples
 from jaxgsa.problem import Problem
 from jaxgsa.vkoga._custom_indices import estimate_custom_indices
 
 PROBLEM = Problem(names=("u", "v", "w"), bounds=((0.0, 1.0),) * 3)
 
 
-def joint(n: int, rng: np.random.Generator) -> np.ndarray:
-    """Draw pairwise-independent uniforms with a deterministic triple relation."""
-    uv = rng.random((n, 2))
-    return np.column_stack((uv, uv.sum(axis=1) % 1.0))
-
-
-def conditional(
-    anchors: np.ndarray, fixed: tuple[int, ...], rng: np.random.Generator
+def sampler(
+    u: np.ndarray,
+    *,
+    conditioning_rows: np.ndarray | None = None,
+    fixed_indices: tuple[int, ...] = (),
 ) -> np.ndarray:
-    """Draw from the modular-sum joint conditional on any fixed subset."""
-    if not fixed:
-        return joint(len(anchors), rng)
-    rows = anchors.copy()
-    held = set(fixed)
+    """Transform uniforms under the modular-sum joint and its conditionals."""
+    if not fixed_indices:
+        return np.column_stack((u[:, :2], u[:, :2].sum(axis=1) % 1.0))
+    assert conditioning_rows is not None
+    rows = conditioning_rows.copy()
+    held = set(fixed_indices)
     if len(held) == 3:
         return rows
     if len(held) == 1:
         free = 1 if 0 in held else 0
-        rows[:, free] = rng.random(len(rows))
+        rows[:, free] = u[:, 0]
         held.add(free)
     if 2 not in held:
         rows[:, 2] = (rows[:, 0] + rows[:, 1]) % 1.0
@@ -47,12 +45,18 @@ def conditional(
 def test_conditionals_preserve_the_joint_constraint_for_every_subset() -> None:
     """Pairwise independence must not turn conditional redraws independent."""
     rng = np.random.default_rng(4)
-    anchors = joint(1024, rng)
+    conditioning_rows = sampler(rng.random((1024, 2)))
     for size in range(4):
         for fixed in combinations(range(3), size):
-            rows = draw_conditional_samples(conditional, anchors, fixed, rng)
+            rows = transform_samples(
+                sampler,
+                rng.random((1024, 2)),
+                3,
+                conditioning_rows=conditioning_rows,
+                fixed_indices=fixed,
+            )
             np.testing.assert_allclose(rows[:, 2], (rows[:, 0] + rows[:, 1]) % 1.0, atol=1e-15)
-            np.testing.assert_array_equal(rows[:, fixed], anchors[:, fixed])
+            np.testing.assert_array_equal(rows[:, fixed], conditioning_rows[:, fixed])
 
 
 def test_kucherenko_retains_higher_order_dependence() -> None:
@@ -61,8 +65,8 @@ def test_kucherenko_retains_higher_order_dependence() -> None:
         design = kucherenko.sample(
             PROBLEM,
             32768,
-            joint_sampler=joint,
-            conditional_sampler=conditional,
+            sampler=sampler,
+            sampler_dimension=2,
             seed=7,
             verbose=False,
         )
@@ -90,8 +94,8 @@ def test_vkoga_conditional_integration_retains_higher_order_dependence() -> None
     with jax.enable_x64():
         result = estimate_custom_indices(
             problem=PROBLEM,
-            joint_sampler=joint,
-            conditional_sampler=conditional,
+            sampler=sampler,
+            sampler_dimension=2,
             predict=lambda unit: unit[:, 2:3],
             n_outer=2048,
             n_inner=8,
