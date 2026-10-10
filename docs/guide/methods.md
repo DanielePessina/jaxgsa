@@ -136,10 +136,12 @@ inputs and results.
 
 ## Supplying your own input distribution
 
-Kucherenko and VKOGA accept paired joint and conditional sampling callbacks
-for dependence beyond Gaussian copulas. Kucherenko assembles the design;
-VKOGA integrates its fitted surrogate under the supplied distribution.
-A joint sampler alone is insufficient. These callbacks use Monte Carlo and do
-not need a user-provided Sobol-sequence sampler. See the
+Kucherenko and VKOGA accept a custom sampler for dependence beyond Gaussian
+copulas. Declare it on the problem with
+`problem.with_sampler(f, dimension=k)`. The sampler maps uniform points to
+joint and conditional rows. Kucherenko assembles the design. VKOGA integrates
+its fitted surrogate under the supplied distribution. A joint sampler alone is
+not enough. Draw `X` for given-data methods with `jaxgsa.sampling.monte_carlo`.
+See the
 [custom-dependence example](/examples/correlated-inputs#custom-dependence-without-a-copula).
 PAWN, Borgonovo, optimal transport and HSIC retain their direct `X, Y` APIs.

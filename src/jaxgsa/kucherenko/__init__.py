@@ -34,12 +34,17 @@ it is the fastest method here, so there is no ``indices()`` that survives
 ``jaxgsa._core.registry.MethodSpec.pure_core``), not a gap: no traceable
 core exists to export.
 
-Gating: ``sample`` conditions on a declared ``problem.correlation``, so it is
-exempt from the correlated-design refusal that ``sobol``, ``morris``, and
-``efast`` apply. It refuses categorical parameters. The copula conditionals
-need a continuous marginal CDF on every coordinate. Use
-:mod:`jaxgsa.optimal_transport` or :mod:`jaxgsa.borgonovo` for categorical
-inputs.
+Gating: ``sample`` conditions on the problem's declared dependence, either a
+``problem.correlation`` or a custom sampler declared with
+``problem.with_sampler(f, dimension=k)``, so it is exempt from the
+correlated-design refusal that ``sobol``, ``morris``, and ``efast`` apply. It
+refuses categorical parameters. The copula conditionals need a continuous
+marginal CDF on every coordinate. Use :mod:`jaxgsa.optimal_transport` or
+:mod:`jaxgsa.borgonovo` for categorical inputs.
+
+A custom sampler maps uniform points to physical input rows. It receives exactly
+three call shapes: joint draws (``fixed_indices=()``), draws that keep ``x_i``
+(``fixed_indices=(i,)``), and draws that keep every column except ``i``.
 
 Example::
 

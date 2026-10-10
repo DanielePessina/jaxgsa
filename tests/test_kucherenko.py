@@ -56,7 +56,7 @@ def test_closed_form_linear_gaussian(correlated_result):
     np.testing.assert_allclose(np.asarray(correlated_result.S1), S1_true, atol=5e-3)
     np.testing.assert_allclose(np.asarray(correlated_result.ST), ST_true, atol=5e-3)
     np.testing.assert_allclose(float(np.asarray(correlated_result.variance)), var_y, rtol=2e-2)
-    assert correlated_result.is_correlated
+    assert correlated_result.dependence == "gaussian"
     # Under correlation ST < S1 is the expected picture for coupled inputs.
     assert float(correlated_result.ST[0]) < float(correlated_result.S1[0])
 
@@ -150,7 +150,7 @@ def test_correlated_problem_is_accepted():
     """kucherenko.sample is exempt from the correlated-design guard."""
     problem = GAUSS_PROBLEM.with_correlation(R_GAUSS)
     ks = jaxgsa.kucherenko.sample(problem, 64, seed=0)
-    assert ks.problem.has_correlated_inputs
+    assert ks.problem.dependence == "gaussian"
     # The guarded samplers refuse the same problem.
     with pytest.raises(ValueError, match="independent"):
         jaxgsa.sobol.sample(problem, 64, verbose=False)
@@ -166,7 +166,7 @@ def test_an_independent_problem_warns_and_quotes_the_cheaper_design():
     """
     D = GAUSS_PROBLEM.num_vars
     base_n = 64
-    with pytest.warns(JaxgsaWarning, match="problem.correlation is None") as caught:
+    with pytest.warns(JaxgsaWarning, match="the problem declares no dependence") as caught:
         jaxgsa.kucherenko.sample(GAUSS_PROBLEM, base_n, seed=0)
     message = str(caught[0].message)
     assert f"{base_n * (2 * D + 1)} runs" in message
@@ -178,7 +178,7 @@ def test_an_independent_problem_warns_and_quotes_the_cheaper_design():
     with warnings.catch_warnings(record=True) as quiet:
         warnings.simplefilter("always")
         jaxgsa.kucherenko.sample(correlated, base_n, seed=0)
-    assert [w for w in quiet if "problem.correlation is None" in str(w.message)] == []
+    assert [w for w in quiet if "the problem declares no dependence" in str(w.message)] == []
 
 
 def test_sampler_validation_errors():

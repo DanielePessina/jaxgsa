@@ -203,7 +203,7 @@ HDMR and PCE record `streamed`, and PCE adds the `order` it actually fitted,
 which can be below the one you asked for. eFAST records `omega_0` and `M`.
 Morris records its `space`. Optimal transport records its `mode`. Shapley
 records `backend`, `order` and `include_correlative`. Kucherenko and VKOGA
-record `is_correlated`, and VKOGA adds the fitted `n_centers`, `gamma`, `ridge`
+record `dependence`, and VKOGA adds the fitted `n_centers`, `gamma`, `ridge`
 and `cv_rmse`.
 
 Every value is a plain string, number or boolean, so `ds.to_netcdf(...)` writes

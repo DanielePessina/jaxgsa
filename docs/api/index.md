@@ -187,7 +187,7 @@ together with `correlation_type="latent"` (the default) or
 as `problem.correlation`.
 
 Methods whose indices assume independent inputs raise a `ValueError` on a
-correlated problem. Use `jaxgsa.kucherenko` or `jaxgsa.vkoga` instead. The
+correlated problem. They refuse a problem with a custom sampler the same way. Use `jaxgsa.kucherenko` or `jaxgsa.vkoga` instead. The
 [method capability table](/guide/methods#method-capabilities) lists which
 routes accept a correlated problem.
 
@@ -521,8 +521,8 @@ classes persist the same way.
 
 `jaxgsa.kucherenko` estimates Sobol' indices for dependent inputs. It
 evaluates the actual model on a conditional-copula design and uses no
-surrogate. It reads `problem.correlation` and is exempt from the
-correlated-design error. With no declared correlation it reduces to the
+surrogate. It reads `problem.correlation` or `problem.sampler` and is exempt from the
+correlated-design error. With no declared dependence it reduces to the
 classic Saltelli column-swap scheme and the classic `S1` and `ST`:
 
 ```python

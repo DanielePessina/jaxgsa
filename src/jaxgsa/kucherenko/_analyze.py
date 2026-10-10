@@ -330,31 +330,25 @@ def analyze(
         S1_conf=S1_conf,
         ST_conf=ST_conf,
         ci=ci,
-        dependence_source=sampling_result.dependence_source,
+        dependence=sampling_result.dependence,
     )
 
     if verbose:
         elapsed = _verbose.stop(t0, result.S1, result.ST)
         n_kept = f_joint.shape[0]
-        design = (
-            "custom-conditional"
-            if sampling_result.dependence_source == "custom"
-            else ("copula-conditional" if problem.has_correlated_inputs else "independent")
-        )
         _verbose.analysis_summary(
             method="jaxgsa.kucherenko.analyze",
             problem=problem,
-            dependence_description=(
-                "custom (user-supplied conditionals)"
-                if sampling_result.dependence_source == "custom"
-                else None
-            ),
+            dependence=sampling_result.dependence,
             n_runs=(2 * D + 1) * n_kept,
             T=n_time,
             K=n_out,
             invalid=invalid,
             timings=[("compute", elapsed)],
-            notes=[f"design: {design} (2D+1 = {2 * D + 1} blocks of {n_kept} base points)"],
+            notes=[
+                f"design: {sampling_result.dependence} "
+                f"(2D+1 = {2 * D + 1} blocks of {n_kept} base points)"
+            ],
             index_name="ST",
             values=result.ST,
             conf=result.ST_conf,

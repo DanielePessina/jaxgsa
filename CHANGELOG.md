@@ -1,5 +1,77 @@
 # Changelog
 
+## Unreleased
+
+### New: custom input samplers
+
+A problem can now carry a custom sampler. A custom sampler describes any joint
+distribution, not only a Gaussian copula. Kucherenko and VKOGA analyse such a
+problem.
+
+Declare the sampler on the problem:
+
+- `jaxgsa.Problem(names=..., bounds=..., sampler=f, sampler_dimension=2)`
+- `jaxgsa.Problem.from_dict(..., sampler=f, sampler_dimension=2)`
+- `problem.with_sampler(f, dimension=2)`. Use `problem.with_sampler(None)` to
+  drop it.
+
+A problem has either a Gaussian-copula `correlation` or a `sampler`, never
+both. Declaring both raises `ValueError`.
+
+The sampler is called as `sampler(uniform_points, *, conditioning_rows=None,
+fixed_indices=())`. jaxgsa makes three kinds of call: a joint draw
+(`fixed_indices=()`), a draw that keeps `x_i` (`fixed_indices=(i,)`), and a
+draw that keeps every input except `x_i`. The sampler must return `(n, D)`
+finite rows and copy the fixed columns exactly. It must be deterministic.
+`jaxgsa.sampling.InputSampler` is the public type of the callback.
+
+- `jaxgsa.kucherenko.sample(problem, n)` and
+  `jaxgsa.vkoga.analyze(problem, X, Y, key=...)` read the sampler from the
+  problem.
+- `jaxgsa.sampling.monte_carlo(problem, n)` honours the sampler. Use it to
+  draw `X` for given-data methods such as PAWN, Borgonovo, optimal transport
+  and HSIC.
+- Sobol, Morris and eFAST designs and the independence-only analyses refuse a
+  custom-sampler problem. They refuse it in the same way as a correlated
+  problem.
+- Verbose output prints `dependence: independent | gaussian copula | custom
+  sampler` instead of `correlation: ...`.
+- A saved design or result does not store the sampler function. A loaded
+  problem still reports `dependence == "custom"`, so the independence checks
+  still refuse it. It raises if you ask it to draw new rows. Attach the
+  sampler again with `problem.with_sampler(f, dimension=k)`.
+
+### Changed: VKOGA training-data guidance
+
+The old guidance was wrong. It said the training design must be independent.
+Both nested estimators draw from conditionals of the joint distribution. They
+never draw an input from its whole marginal. A surrogate trained on draws from
+the analysis distribution works well. In a check on the Ishigami function with
+a Gaussian copula (`rho_ab = 0.8`, `rho_bc = -0.4`, 400 training rows, 4
+seeds), the index error against Kucherenko at 2^16 base points was 0.007 for
+copula training draws and 0.010 for independent draws.
+
+The new rule: the surrogate must be accurate where the analysis distribution
+puts its mass. An independent design is a safe default when the correlation is
+not fixed yet, or when you reuse one fit under several correlations. Avoid
+training data that misses regions the analysis covers.
+
+`jaxgsa.vkoga.analyze` no longer warns about correlated training data.
+
+### Breaking changes
+
+jaxgsa is published but not yet announced, so these changes land without a
+deprecation period.
+
+- `Problem.has_correlated_inputs` is removed. Use `problem.dependence`. It
+  returns `"independent"`, `"gaussian"` or `"custom"`.
+- `KucherenkoResult.is_correlated` and `VKOGAResult.is_correlated` are
+  removed. Use `result.dependence`, with the same three values. The saved
+  dataset attribute `is_correlated` is now `dependence`.
+- Kucherenko and VKOGA share one estimator for the Gaussian copula and for a
+  custom sampler. The random streams of Kucherenko's built-in designs changed.
+  A given `seed` no longer reproduces the design of an earlier version.
+
 ## 1.0.2
 
 Publish the validated 1.0 code under a fresh version number because PyPI

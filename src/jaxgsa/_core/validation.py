@@ -158,7 +158,7 @@ def _validate_output(
 # listed here sorts after these, alphabetically. The value is the hand-kept
 # parenthetical for that route, or "" for a route that needs none. Keying
 # order and note together in one dict is what stops the list drifting: a new
-# correlation-tolerant method appears in the message the moment it registers,
+# dependence-tolerant method appears in the message the moment it registers,
 # note or no note.
 _CORRELATION_ROUTES: dict[str, str] = {
     "vkoga": " (variance-based indices from given data, through a kernel surrogate)",
@@ -212,8 +212,8 @@ def _tolerant_names(kind: str, order: tuple[str, ...]) -> list[tuple[str, bool]]
     return [(spec.name, spec.is_design_based) for spec in accepting]
 
 
-def _correlation_tolerant_methods() -> str:
-    """Name every correlation-tolerant route, for a rejection message."""
+def _dependence_tolerant_methods() -> str:
+    """Name every dependence-tolerant route, for a rejection message."""
     named = _tolerant_names("correlation", tuple(_CORRELATION_ROUTES))
     items = [f"jaxgsa.{n}{_CORRELATION_ROUTES.get(n, '')}" for n, _ in named]
     items.append(_EXTRA_CORRELATION_ROUTE)
@@ -244,7 +244,7 @@ def _raise_categorical_and_correlated(method: str, names: list[str], *, design: 
 
     This combination has no variance-based route. The categorical-tolerant
     variance-based method (``jaxgsa.sobol``) refuses a declared correlation.
-    The correlation-tolerant variance-based methods (``jaxgsa.vkoga``,
+    The dependence-tolerant variance-based methods (``jaxgsa.vkoga``,
     ``jaxgsa.kucherenko``) refuse a categorical parameter. Naming only one of
     the two faults would send the user to a method that then refuses the
     other. All four gates therefore route the combined case here: design and
@@ -269,7 +269,7 @@ def _raise_categorical_and_correlated(method: str, names: list[str], *, design: 
     lead = "cannot build a design for" if design else "cannot analyze"
     if design:
         action = (
-            "Draw correlated samples with jaxgsa.sampling.monte_carlo and "
+            "Draw dependent samples with jaxgsa.sampling.monte_carlo and "
             "analyze them with jaxgsa.optimal_transport, jaxgsa.borgonovo or "
             "jaxgsa.pawn, which handle both."
         )
@@ -280,14 +280,30 @@ def _raise_categorical_and_correlated(method: str, names: list[str], *, design: 
         )
     raise ValueError(
         f"{method} {lead} this problem: parameters {names} "
-        "are categorical and problem.correlation declares a dependence "
-        "structure, and no variance-based method supports categorical plus "
-        "correlated inputs yet. The categorical-tolerant methods refuse a "
-        "correlation, and the correlation-tolerant ones refuse a categorical "
-        "parameter, so naming either route alone would send you in a circle. "
-        f"{action} To drop one of the two constraints, use "
-        "problem.with_correlation(None) or declare the parameter continuous."
+        "are categorical and the problem declares dependent inputs "
+        "(problem.correlation or problem.sampler). No variance-based method "
+        "supports categorical plus dependent inputs yet. The "
+        "categorical-tolerant methods refuse a dependence, and the "
+        "dependence-tolerant ones refuse a categorical parameter, so naming "
+        f"either route alone would send you in a circle. {action} To drop one "
+        "of the two constraints, use problem.with_correlation(None) or "
+        "problem.with_sampler(None), or declare the parameter continuous."
     )
+
+
+def _drop_dependence_hint(problem: Problem) -> str:
+    """Name the call that removes a problem's declared dependence.
+
+    Args:
+        problem: A problem that declares dependent inputs.
+
+    Returns:
+        ``"problem.with_sampler(None)"`` for a custom sampler, otherwise
+        ``"problem.with_correlation(None)"``.
+    """
+    if problem.dependence == "custom":
+        return "problem.with_sampler(None)"
+    return "problem.with_correlation(None)"
 
 
 def _raise_correlated_design(problem: Problem, method: str) -> None:
@@ -313,19 +329,19 @@ def _raise_correlated_design(problem: Problem, method: str) -> None:
             message names the combined dead end when ``problem`` also declares
             a categorical parameter.
     """
-    if not problem.has_correlated_inputs:
+    if problem.dependence == "independent":
         return
     names = _categorical_param_names(problem)
     if names:
         _raise_categorical_and_correlated(method, names, design=True)
     raise ValueError(
         f"{method} builds a structured design whose sensitivity indices assume "
-        "independent inputs, but problem.correlation declares a dependence "
-        "structure. Draw correlated samples with jaxgsa.sampling.monte_carlo "
-        "(which honors problem.correlation) and analyze them with a "
-        f"correlation-tolerant given-data method: {_correlation_tolerant_methods()}. "
-        "To analyze the independent problem instead, drop the matrix with "
-        "problem.with_correlation(None)."
+        "independent inputs. This problem declares dependent inputs "
+        "(problem.correlation or problem.sampler). Draw dependent samples with "
+        "jaxgsa.sampling.monte_carlo (it honors both) and analyze them with a "
+        f"dependence-tolerant given-data method: {_dependence_tolerant_methods()}. "
+        f"To analyze the independent problem instead, drop the dependence with "
+        f"{_drop_dependence_hint(problem)}."
     )
 
 
@@ -350,17 +366,18 @@ def _raise_correlated_analysis(problem: Problem, method: str) -> None:
             message names the combined dead end when ``problem`` also declares
             a categorical parameter.
     """
-    if not problem.has_correlated_inputs:
+    if problem.dependence == "independent":
         return
     names = _categorical_param_names(problem)
     if names:
         _raise_categorical_and_correlated(method, names, design=False)
     raise ValueError(
-        f"{method} computes indices that assume independent inputs, and they are "
-        "invalid — not merely approximate — when problem.correlation declares a "
-        "dependence structure. Use a correlation-tolerant given-data method "
-        f"instead: {_correlation_tolerant_methods()}. To analyze the independent "
-        "problem instead, drop the matrix with problem.with_correlation(None)."
+        f"{method} computes indices that assume independent inputs. They are "
+        "invalid, not merely approximate, when the problem declares dependent "
+        "inputs (problem.correlation or problem.sampler). Use a "
+        f"dependence-tolerant given-data method instead: {_dependence_tolerant_methods()}. "
+        f"To analyze the independent problem instead, drop the dependence with "
+        f"{_drop_dependence_hint(problem)}."
     )
 
 
@@ -389,7 +406,7 @@ def _raise_categorical_design(problem: Problem, method: str) -> None:
     names = _categorical_param_names(problem)
     if not names:
         return
-    if problem.has_correlated_inputs:
+    if problem.dependence != "independent":
         _raise_categorical_and_correlated(method, names, design=True)
     raise ValueError(
         f"{method} requires continuous (orderable) inputs, but parameters "
@@ -421,7 +438,7 @@ def _raise_categorical_analysis(problem: Problem, method: str) -> None:
     names = _categorical_param_names(problem)
     if not names:
         return
-    if problem.has_correlated_inputs:
+    if problem.dependence != "independent":
         _raise_categorical_and_correlated(method, names, design=False)
     raise ValueError(
         f"{method} treats every input as continuous, but parameters {names} "

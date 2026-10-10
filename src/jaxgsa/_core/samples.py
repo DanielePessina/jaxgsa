@@ -104,7 +104,32 @@ def _problem_to_meta(problem: Problem) -> dict[str, Any]:
         "input_specs": [_normalized_input_to_dict(spec) for spec in problem.input_specs],
         "output_names": list(problem.output_names) if problem.output_names is not None else None,
         "correlation": correlation.tolist() if correlation is not None else None,
+        "sampler_dimension": problem.sampler_dimension,
     }
+
+
+def _unsaved_sampler(
+    uniform_points: np.ndarray,
+    /,
+    *,
+    conditioning_rows: np.ndarray | None = None,
+    fixed_indices: tuple[int, ...] = (),
+) -> np.ndarray:
+    """Stand in for a custom sampler that a saved file cannot store.
+
+    A loaded problem keeps ``dependence == "custom"`` through this stand-in, so
+    the independence checks still refuse it. Drawing new rows needs the real
+    sampler.
+
+    Raises:
+        ValueError: Always.
+    """
+    del uniform_points, conditioning_rows, fixed_indices
+    raise ValueError(
+        "This problem was loaded from a file. The file does not store the "
+        "custom sampler, so it cannot draw new rows. Attach it again with "
+        "problem.with_sampler(f, dimension=k)."
+    )
 
 
 def _problem_from_meta(problem_meta: Mapping[str, Any]) -> Problem:
@@ -123,6 +148,9 @@ def _problem_from_meta(problem_meta: Mapping[str, Any]) -> Problem:
         correlation=_canonical_correlation(
             problem_meta.get("correlation"), names, input_specs, policy="fitted"
         ),
+        # `.get`: files written before the custom sampler carry no key.
+        sampler=_unsaved_sampler if problem_meta.get("sampler_dimension") is not None else None,
+        sampler_dimension=problem_meta.get("sampler_dimension"),
     )
 
 

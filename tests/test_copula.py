@@ -19,7 +19,7 @@ from jaxgsa._core.copula import (
     latent_normal_sample,
     latent_to_physical,
 )
-from jaxgsa._core.validation import _correlation_tolerant_methods
+from jaxgsa._core.validation import _dependence_tolerant_methods
 from jaxgsa.problem import GaussianInputSpec, Problem
 
 # An indefinite candidate: pairwise entries are individually valid but jointly
@@ -379,14 +379,14 @@ def test_sampler_guard_message_names_alternatives():
 
     ``tests/test_entry_preamble.py`` makes this claim for the *analysis*
     gate. This is the design gate, whose message is built at a different call
-    site. Asserting against ``_correlation_tolerant_methods()`` rather than a
+    site. Asserting against ``_dependence_tolerant_methods()`` rather than a
     transcribed ordering means adding a tolerant method cannot make the test
     stale without also making the message wrong.
     """
     with pytest.raises(ValueError) as excinfo:
         jaxgsa.sobol.sample(_correlated_problem(), 64, seed=1, verbose=False)
     message = str(excinfo.value)
-    assert _correlation_tolerant_methods() in message
+    assert _dependence_tolerant_methods() in message
     # The design gate additionally has to say how to draw the samples.
     assert "jaxgsa.sampling.monte_carlo" in message
 

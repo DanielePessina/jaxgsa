@@ -482,7 +482,7 @@ def indices(
     from jaxgsa.dgsm import SPEC
 
     # The same capability gates analyze applies through prepare().
-    # problem.has_correlated_inputs is static host-side metadata, so the check
+    # problem.dependence is static host-side metadata, so the check
     # runs at trace time and the core still composes with jit/vmap/grad.
     gates(SPEC, problem, method="jaxgsa.dgsm.indices")
     use_autodiff = _resolve_call_style(fn, X, Y, dfdx)

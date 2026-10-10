@@ -138,7 +138,7 @@ def test_closed_form_total_indices(gauss_result):
     np.testing.assert_allclose(np.asarray(gauss_result.S_TC), S_TC_true, atol=1e-2)
     np.testing.assert_allclose(np.asarray(gauss_result.S_TU), S_TU_true, atol=2e-2)
     np.testing.assert_allclose(float(np.asarray(gauss_result.variance)), var_y, rtol=5e-2)
-    assert gauss_result.is_correlated
+    assert gauss_result.dependence == "gaussian"
     assert 0 < gauss_result.n_centers <= 150
 
 
@@ -175,7 +175,7 @@ def test_independent_inputs_recover_sobol_indices():
             n_variance=4096,
             key=jax.random.key(0),
         )
-    assert not result.is_correlated
+    assert result.dependence == "independent"
     np.testing.assert_allclose(result.correlation, np.eye(3), atol=1e-12)
     S_TC = np.asarray(result.S_TC)
     np.testing.assert_allclose(S_TC, S1_true, atol=3e-2)
@@ -385,7 +385,7 @@ def test_problem_correlation_is_read_by_default():
         from_override = jaxgsa.vkoga.analyze(
             GAUSS_PROBLEM, X, Y, correlation=R_GAUSS, **SMALL_KWARGS
         )
-    assert from_problem.is_correlated
+    assert from_problem.dependence == "gaussian"
     np.testing.assert_array_equal(from_problem.correlation, from_override.correlation)
     for field in ("S_TC", "S_TU", "S_U", "S_C", "S_IU"):
         np.testing.assert_array_equal(
@@ -401,7 +401,9 @@ def test_explicit_matrix_overrides_problem_correlation():
     problem_corr = GAUSS_PROBLEM.with_correlation(R_GAUSS)
     with single_precision_warning():
         result = jaxgsa.vkoga.analyze(problem_corr, X, Y, correlation=np.eye(3), **SMALL_KWARGS)
-    assert not result.is_correlated
+    # The label follows the matrix the indices were computed under, not the
+    # problem's declaration.
+    assert result.dependence == "independent"
     np.testing.assert_allclose(result.correlation, np.eye(3), atol=1e-12)
 
 
@@ -433,7 +435,7 @@ def test_indefinite_correlation_is_repaired():
         result = jaxgsa.vkoga.analyze(GAUSS_PROBLEM, X, Y, correlation=R, **SMALL_KWARGS)
     assert np.linalg.eigvalsh(result.correlation).min() > 0
     np.testing.assert_allclose(np.diag(result.correlation), 1.0, atol=1e-12)
-    assert result.is_correlated
+    assert result.dependence == "gaussian"
     assert np.all(np.isfinite(np.asarray(result.S_TC)))
 
 
@@ -490,12 +492,12 @@ def test_batch_size_bounds_the_index_estimator_too(monkeypatch):
     full ``n_outer * n_inner`` block. This pins both halves: the value
     arrives at the estimator, and the estimator honours it.
     """
-    from jaxgsa._core.copula import build_conditional_plan
+    from jaxgsa._core.dependence import GaussianDraws
     from jaxgsa.vkoga import _analyze as vkoga_analyze
     from jaxgsa.vkoga._indices import estimate_correlated_indices
 
     n_outer, n_inner = 64, 16
-    plan = build_conditional_plan(np.array([[1.0, 0.4], [0.4, 1.0]]))
+    draws = GaussianDraws(UNIFORM_PROBLEM.with_correlation(np.array([[1.0, 0.4], [0.4, 1.0]])))
     rows: list[int] = []
 
     def predict(U: np.ndarray) -> np.ndarray:
@@ -504,7 +506,7 @@ def test_batch_size_bounds_the_index_estimator_too(monkeypatch):
 
     kwargs = dict(
         problem=UNIFORM_PROBLEM,
-        plan=plan,
+        draws=draws,
         predict=predict,
         n_outer=n_outer,
         n_inner=n_inner,
@@ -523,7 +525,7 @@ def test_batch_size_bounds_the_index_estimator_too(monkeypatch):
 
     assert nested_auto == n_outer * n_inner  # the whole block, as before
     assert nested_batched == 32  # two outer points, 16 inner draws each
-    # Chunking is a memory decision: the latent draws are made up front, so
+    # Chunking is a memory decision: the uniform noise is drawn up front, so
     # the estimate itself must not move.
     np.testing.assert_allclose(auto.S_TC, batched.S_TC, rtol=1e-12, atol=0.0)
     np.testing.assert_allclose(auto.S_TU, batched.S_TU, rtol=1e-12, atol=0.0)
@@ -560,7 +562,7 @@ def test_to_dataset_carries_the_coordinate_and_attribute_values(gauss_result):
     assert list(ds.coords["param"].values) == ["x1", "x2", "x3"]
     assert list(ds.coords["param_i"].values) == ["x1", "x2", "x3"]
     np.testing.assert_allclose(ds["correlation"].values, R_GAUSS, atol=1e-12)
-    assert ds.attrs["is_correlated"] is True
+    assert ds.attrs["dependence"] == "gaussian"
     assert ds.attrs["n_centers"] == gauss_result.n_centers
 
 
@@ -666,11 +668,12 @@ def test_s_tu_sampling_error_shrinks_with_n_outer():
     """
     from scipy.stats import norm
 
-    from jaxgsa._core.copula import build_conditional_plan, latent_normal_sample
+    from jaxgsa._core.dependence import GaussianDraws, sobol_uniforms
     from jaxgsa.vkoga._indices import _total_uncorrelated_and_conditional
 
     R = np.array([[1.0, 0.6, -0.3], [0.6, 1.0, 0.15], [-0.3, 0.15, 1.0]])
-    plan = build_conditional_plan(R)
+    problem = Problem(names=("x1", "x2", "x3"), bounds=((0.0, 1.0),) * 3)
+    draws = GaussianDraws(problem.with_correlation(R))
 
     def model(X):
         return X[:, 0] * X[:, 1] + X[:, 2] ** 2 + np.sin(X[:, 0]) + 0.5 * X[:, 1]
@@ -678,16 +681,14 @@ def test_s_tu_sampling_error_shrinks_with_n_outer():
     def predict(U):
         return model(norm.ppf(U))[:, None]
 
-    V = np.var(
-        model(norm.ppf(norm.cdf(latent_normal_sample(2**14, 3, seed=0) @ plan.chol_full.T)))
-    )
+    V = np.var(model(norm.ppf(draws.to_unit(draws.joint(sobol_uniforms(2**14, 3, seed=0))))))
 
     def s_tu_over_seeds(n_outer, n_seeds=6):
         vals = []
         for seed in range(n_seeds):
             component_dummy = np.zeros((6, 1))
             stu, _ = _total_uncorrelated_and_conditional(
-                plan=plan,
+                draws=draws,
                 index=2,
                 predict=predict,
                 component=component_dummy,
@@ -738,7 +739,7 @@ def test_an_integer_seed_survives_the_key_wrapper():
 
 
 def test_index_streams_are_spawned_and_not_offset(monkeypatch):
-    """Every latent draw takes a seed spawned from the root, never ``seed + k``.
+    """Every uniform draw takes a seed spawned from the root, never ``seed + k``.
 
     T4 internal consistency, and deliberately so: two QMC engines seeded
     ``s`` and ``s + 1`` produce no *visible* defect on a small model, which is
@@ -755,19 +756,19 @@ def test_index_streams_are_spawned_and_not_offset(monkeypatch):
     Both assertions fail against the old ``seed + 1 + i`` / ``seed + 7919``
     derivation.
     """
-    from jaxgsa._core.copula import build_conditional_plan
+    from jaxgsa._core.dependence import GaussianDraws
     from jaxgsa.vkoga import _indices
 
-    real = _indices.latent_normal_sample
+    real = _indices.sobol_uniforms
     seen: list[int] = []
 
-    def recording(n: int, dim: int, *, seed: int, scramble: bool = True) -> np.ndarray:
+    def recording(n: int, dimension: int, *, seed: int, scramble: bool = True) -> np.ndarray:
         seen.append(int(seed))
-        return real(n, dim, seed=seed, scramble=scramble)
+        return real(n, dimension, seed=seed, scramble=scramble)
 
-    monkeypatch.setattr(_indices, "latent_normal_sample", recording)
+    monkeypatch.setattr(_indices, "sobol_uniforms", recording)
 
-    plan = build_conditional_plan(np.array([[1.0, 0.4], [0.4, 1.0]]))
+    draws = GaussianDraws(UNIFORM_PROBLEM.with_correlation(np.array([[1.0, 0.4], [0.4, 1.0]])))
 
     def predict(U: np.ndarray) -> np.ndarray:
         return U[:, :1] + 0.5 * U[:, 1:2] ** 2
@@ -776,7 +777,7 @@ def test_index_streams_are_spawned_and_not_offset(monkeypatch):
         seen.clear()
         _indices.estimate_correlated_indices(
             problem=UNIFORM_PROBLEM,
-            plan=plan,
+            draws=draws,
             predict=predict,
             n_outer=64,
             n_inner=16,
@@ -1124,52 +1125,34 @@ class TestBootstrap:
             assert f"{name}_upper" in ds
 
 
-class TestTrainingDesignIndependenceCheck:
-    """Tier T4 (internal consistency): the correlated-training-X warning.
+def test_training_on_the_analysis_copula_recovers_the_closed_form():
+    """Tier T0 (closed form): training rows may follow the analysis copula.
 
-    The estimator needs an independent, space-filling training design even
-    for a correlated analysis, because S_TU resamples each X_i across its
-    whole marginal. These tests pin when the check speaks and when it stays
-    silent.
+    Both nested estimators draw from conditionals of the joint, never from a
+    whole marginal with the rest held fixed, so the surrogate is only ever
+    evaluated where the joint puts mass. A training design drawn from the
+    correlated analysis distribution must therefore give the closed-form
+    indices too, and no warning about the design.
     """
-
-    _R = np.array([[1.0, 0.7], [0.7, 1.0]])
-
-    @staticmethod
-    def _independent_X(n: int = 256) -> np.ndarray:
-        rng = np.random.default_rng(3)
-        return rng.uniform(0.0, 1.0, size=(n, 2))
-
-    @staticmethod
-    def _correlated_X(n: int = 256) -> np.ndarray:
-        from scipy.stats import norm
-
-        rng = np.random.default_rng(3)
-        Z = rng.standard_normal((n, 2))
-        Z[:, 1] = 0.8 * Z[:, 0] + 0.6 * Z[:, 1]  # latent correlation 0.8
-        return norm.cdf(Z)  # uniform marginals on [0, 1], dependent columns
-
-    def _run(self, X: np.ndarray, correlation: np.ndarray | None):
-        Y = _uniform_scalar(X)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, correlation=correlation, **SMALL_KWARGS)
-        return [w for w in caught if "training X is itself correlated" in str(w.message)]
-
-    def test_correlated_training_x_warns_and_names_the_fix(self):
-        X = self._correlated_X()
-        Y = _uniform_scalar(X)
-        with pytest.warns(JaxgsaWarning, match="training X is itself correlated"):
-            jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, correlation=self._R, **SMALL_KWARGS)
-        # And it warns once, saying where the correlation belongs instead.
-        found = self._run(self._correlated_X(), self._R)
-        assert len(found) == 1
-        assert "problem.correlation" in str(found[0].message)
-        assert "independent design" in str(found[0].message)
-
-    def test_independent_training_x_stays_silent(self):
-        assert self._run(self._independent_X(), self._R) == []
-
-    def test_independent_analysis_skips_the_check(self):
-        """With an identity analysis matrix nothing conditions, so no check."""
-        assert self._run(self._correlated_X(), None) == []
+    problem = GAUSS_PROBLEM.with_correlation(R_GAUSS)
+    S_TC_true, S_TU_true, _ = analytic_indices(A_COEF, R_GAUSS)
+    with jax.enable_x64():
+        X = jaxgsa.sampling.monte_carlo(problem, 1536, seed=7)
+        Y = X @ A_COEF
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", JaxgsaWarning)
+            result = jaxgsa.vkoga.analyze(
+                problem,
+                X,
+                Y,
+                gamma=2.0,
+                ridge=1e-10,
+                max_centers=150,
+                n_outer=256,
+                n_inner=64,
+                n_variance=4096,
+                key=jax.random.key(0),
+                verbose=False,
+            )
+    np.testing.assert_allclose(np.asarray(result.S_TC), S_TC_true, atol=1e-2)
+    np.testing.assert_allclose(np.asarray(result.S_TU), S_TU_true, atol=2e-2)

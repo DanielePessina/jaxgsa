@@ -63,27 +63,22 @@ each search curve, which the seed sets directly.
 ## jaxgsa.sampling
 
 ```python
-sample(problem, n, *, sampler=None, sampler_dimension=None,
-       sequence="sobol", seed=None, scramble=True) -> np.ndarray # (n, D)
 monte_carlo(problem, n, *, seed=None) -> np.ndarray            # (n, D)
 correlate(X, problem, *, seed=None) -> np.ndarray              # (N, D)
 fit_correlation(problem, X) -> np.ndarray                      # (D, D)
 correlation_from_covariance(cov) -> np.ndarray                 # (D, D)
+InputSampler                                                   # protocol type
 ```
 
-`sample` generates an ordinary joint input matrix, rather than a method-specific
-analysis design. With no custom sampler it transforms points through the
-problem's declared marginals and Gaussian copula, if present. With `sampler`,
-it calls the uniform-point transformation with empty `fixed_indices`; see
+`monte_carlo` generates an ordinary joint input matrix, rather than a
+method-specific analysis design. It follows the problem's dependence. A
+problem with a custom sampler (`problem.with_sampler(f, dimension=k)`) gets
+pseudo-random uniform points of width `k`, passed through the joint branch of
+the sampler (`fixed_indices=()`). See
 [the callback contract](/api/kucherenko#custom-input-dependence).
-`sampler_dimension` defaults to the number of model inputs. Sobol points are
-the default, and `n` must be a power of two; Monte Carlo accepts arbitrary
-exact counts. Custom sampling cannot be combined with `problem.correlation`.
 
 ```python
-X = jaxgsa.sampling.sample(
-    problem, 1024, sampler=sample_inputs, sampler_dimension=2, seed=7,
-)
+X = jaxgsa.sampling.monte_carlo(problem, 1024, seed=7)
 Y = model(X)
 result = jaxgsa.pawn.analyze(problem, X, Y)
 ```
@@ -92,14 +87,13 @@ The same `X, Y` workflow applies to given-data methods such as HSIC,
 Borgonovo, optimal transport and HDMR. Their interpretations under dependence
 remain method-specific. In particular, PCE orthogonal variance decompositions
 retain their independence assumptions; custom samples do not remove them.
-Sobol rows are dependent across observations. For IID row-bootstrap intervals
-or permutation tests such as HSIC's, use `sequence="monte_carlo"` with a
-transformation that yields independent joint draws, unless you use inference
-that accounts for the sampling design. Dependence between input columns is
-allowed; this requirement concerns independence between sampled rows.
-A plain input matrix does not replace Kucherenko's
-conditional design or make a Saltelli design valid for dependent inputs.
-You may also generate uniform points externally and call your sampler directly.
+`monte_carlo` rows are independent draws, so row-bootstrap intervals and
+permutation tests such as HSIC's stay valid. A plain input matrix does not
+replace Kucherenko's conditional design or make a Saltelli design valid for
+dependent inputs.
+
+`jaxgsa.sampling.InputSampler` is the protocol type of the sampler callback.
+Use it to annotate your own function.
 
 `monte_carlo` draws plain pseudo-random rows and pushes each column through
 its declared inverse CDF, so a categorical column comes back as level codes.
@@ -146,11 +140,11 @@ diagonal. Use it when a paper reports `Cov` and jaxgsa wants a correlation.
 
 ## Correlated designs
 
-One design builder reads `problem.correlation` rather than refusing it.
+One design builder reads the problem's dependence rather than refusing it.
 `jaxgsa.kucherenko.sample(problem, n_samples, seed=...)` places its blocks with
-the declared copula's conditionals, so the indices it feeds are valid under
+the conditionals of the declared copula or custom sampler, so the indices it feeds are valid under
 dependence. `sobol.sample`, `morris.sample` and `efast.sample` all raise a
-`ValueError` on a correlated problem instead of quietly producing indices that
+`ValueError` on a correlated or custom-sampler problem instead of quietly producing indices that
 assume independence. See the [Kucherenko page](/api/kucherenko). To analyze
 correlated data you already have, see [VKOGA](/api/vkoga).
 

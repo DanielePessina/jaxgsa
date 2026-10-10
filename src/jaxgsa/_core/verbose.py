@@ -30,7 +30,7 @@ import numpy as np
 
 if TYPE_CHECKING:
     from jaxgsa._core.invalid import InvalidReport
-    from jaxgsa.problem import Problem
+    from jaxgsa.problem import Dependence, Problem
 
 __all__ = [
     "analysis_summary",
@@ -48,6 +48,11 @@ _TOP_K = 5
 _MAX_NAMES = 8
 
 _INDENT = "  "
+_DEPENDENCE_LABELS: dict[str, str] = {
+    "independent": "independent",
+    "gaussian": "gaussian copula",
+    "custom": "custom sampler",
+}
 
 
 def emit(text: str) -> None:
@@ -154,12 +159,12 @@ def analysis_summary(
     values: Any,
     conf: Any | None = None,
     notes: Sequence[str] = (),
-    dependence_description: str | None = None,
+    dependence: Dependence | None = None,
 ) -> None:
     """Print the three verbose sections for one finished analysis.
 
     Section one is the problem and the data: dimensionality, parameter
-    names, marginal kinds, correlation status, output layout, and what the
+    names, marginal kinds, dependence status, output layout, and what the
     non-finite check found. Section two is the timings the caller measured,
     plus any notes (resolved batch or chunk widths, backend names). Section
     three ranks the top ``min(D, 5)`` parameters by the method's headline
@@ -183,19 +188,14 @@ def analysis_summary(
             ``None`` when the caller did not bootstrap.
         notes: Extra lines for the timing section, already formatted, e.g.
             ``"slice_chunk_size: 8 (resolved from the memory budget)"``.
-        dependence_description: Description of the input dependence when it
-            comes from a source other than ``problem.correlation``. ``None``
-            uses the problem's declared Gaussian copula or independence.
+        dependence: Kind of input dependence to print. ``None`` uses
+            ``problem.dependence``.
     """
     emit(method)
     emit(f"{_INDENT}problem: D={problem.num_vars} ({_preview_names(problem.names)})")
     emit(f"{_INDENT}{_INDENT}marginals: {_marginal_counts(problem)}")
-    correlation = dependence_description
-    if correlation is None:
-        correlation = (
-            "correlated (Gaussian copula)" if problem.has_correlated_inputs else "independent"
-        )
-    emit(f"{_INDENT}{_INDENT}correlation: {correlation}")
+    kind = problem.dependence if dependence is None else dependence
+    emit(f"{_INDENT}{_INDENT}dependence: {_DEPENDENCE_LABELS[kind]}")
     slices = "slice" if T * K == 1 else "slices"
     emit(f"{_INDENT}{_INDENT}output: N={n_runs} runs, T={T} x K={K} output {slices}")
     emit(f"{_INDENT}{_INDENT}{_invalid_line(invalid)}")

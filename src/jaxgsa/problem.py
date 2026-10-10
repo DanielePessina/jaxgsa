@@ -587,7 +587,7 @@ def _validated_sampler(
     """
     if sampler is None:
         if dimension is not None:
-            raise ValueError("sampler_dimension requires a sampler")
+            raise ValueError("a sampler dimension requires a sampler")
         return None, None
     if not callable(sampler):
         raise TypeError("sampler must be callable")

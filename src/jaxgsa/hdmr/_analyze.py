@@ -263,11 +263,12 @@ def _warn_correlated_index_reading(problem: Problem) -> None:
         problem: Problem definition for the analysis; nothing is emitted
             unless it declares a dependence structure.
     """
-    if not problem.has_correlated_inputs:
+    if problem.dependence == "independent":
         return
 
     warnings.warn(
-        "jaxgsa.hdmr: problem.correlation declares dependent inputs. HDMRResult.ST "
+        "jaxgsa.hdmr: this problem declares dependent inputs (problem.correlation "
+        "or problem.sampler). HDMRResult.ST "
         "is then the SCSA total, sum over every term u containing i of "
         "(Sa_u + Sb_u) (Li et al. 2010, Section 2.2.3; the SALib HDMR "
         "convention). It is not a Sobol total-order index: it can be "

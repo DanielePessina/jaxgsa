@@ -60,7 +60,7 @@ def test_sobol_analyze_prints_the_three_sections(capsys):
     # Section 1: the problem and the data.
     assert "problem: D=3" in out
     assert "marginals: uniform=3" in out
-    assert "correlation: independent" in out
+    assert "dependence: independent" in out
     assert "invalid: none found" in out
     assert "Saltelli groups" in out
     # Section 2: timings, with the resolved chunk width.

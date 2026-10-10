@@ -796,7 +796,7 @@ def indices(
         )
     )
     # The same capability gate analyze applies through prepare().
-    # problem.has_correlated_inputs is static host-side metadata, so the check
+    # problem.dependence is static host-side metadata, so the check
     # runs at trace time and the core still composes with jit/vmap/grad.
     gates(SPEC, problem, method="jaxgsa.pce.indices")
     Y_3d, layout = _prepare_Y(Y)

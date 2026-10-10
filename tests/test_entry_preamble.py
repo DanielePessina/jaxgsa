@@ -43,7 +43,7 @@ from jaxgsa._core.precision import _loses_precision, unit_clip_bounds
 from jaxgsa._core.registry import methods
 from jaxgsa._core.sampling import UNIT_CLIP
 from jaxgsa._core.transforms import cdf_to_unit_interval
-from jaxgsa._core.validation import _correlation_tolerant_methods
+from jaxgsa._core.validation import _dependence_tolerant_methods
 
 D = 3
 PROBLEM = jaxgsa.Problem(("x1", "x2", "x3"), ((0.0, 1.0),) * D)
@@ -279,7 +279,7 @@ class TestTheGatesComeFromTheRegistry:
         ):
             with pytest.raises(ValueError) as excinfo:
                 call()
-            assert _correlation_tolerant_methods() in str(excinfo.value)
+            assert _dependence_tolerant_methods() in str(excinfo.value)
 
 
 class TestACleanSampleStaysSilent:

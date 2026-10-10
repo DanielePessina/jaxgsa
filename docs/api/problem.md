@@ -14,6 +14,8 @@ Problem(
     output_names: tuple[str, ...] | None = None,
     correlation: ArrayLike | None = None,
     correlation_type: Literal["latent", "spearman"] = "latent",
+    sampler: InputSampler | None = None,
+    sampler_dimension: int | None = None,
 )
 ```
 
@@ -28,6 +30,8 @@ Problem.from_dict(
     truncate_gaussians: float | None = None,
     correlation: ArrayLike | None = None,
     correlation_type: Literal["latent", "spearman"] = "latent",
+    sampler: InputSampler | None = None,
+    sampler_dimension: int | None = None,
 )
 ```
 
@@ -174,8 +178,9 @@ p.with_correlation(R).correlation          # correlation_type="latent"
 ```
 
 `problem.correlation` always returns the validated latent matrix, whatever
-scale you declared, as a fresh NumPy array. `problem.has_correlated_inputs` is
-`True` when a non-identity matrix is set.
+scale you declared, as a fresh NumPy array. `problem.dependence` tells you which
+kind of dependence is declared: `"independent"`, `"gaussian"` or `"custom"`.
+An identity matrix counts as independent.
 
 `Problem` is frozen, so `with_correlation` returns a copy rather than mutating.
 Pass `None` to drop a matrix. The fit-then-attach workflow reads:
@@ -218,6 +223,29 @@ accepted. The check runs on the matrix as you declared it, before the
 positive-definiteness repair, so repair noise is never read as a declared
 coupling.
 
+### A custom sampler instead of a copula
+
+A custom sampler declares any other joint distribution. It maps uniform points
+to joint and conditional rows. Declare it with the problem, or attach it later:
+
+```python
+Problem(names, bounds, sampler=f, sampler_dimension=2)
+Problem.from_dict(params, sampler=f, sampler_dimension=2)
+problem.with_sampler(f, dimension=2)   # copy with the sampler
+problem.with_sampler(None)             # copy without it
+```
+
+`sampler_dimension` is the number of uniform coordinates per row. It defaults
+to `D`. A problem has either a `correlation` or a `sampler`, never both, and
+declaring both raises `ValueError`. Drop one first with
+`with_correlation(None)` or `with_sampler(None)`. The callback contract is in
+[Kucherenko](/api/kucherenko#custom-input-dependence). The type is
+`jaxgsa.sampling.InputSampler`.
+
+Methods whose indices assume independent inputs refuse a custom-sampler problem
+exactly as they refuse a correlated one. `jaxgsa.sampling.monte_carlo` honours
+the sampler, so given-data methods can analyse its draws.
+
 ## Properties
 
 | Property | Returns |
@@ -228,7 +256,9 @@ coupling.
 | `num_vars` | `D`, the number of parameters |
 | `input_specs` | the canonical spec dataclass per parameter |
 | `correlation` | the validated latent matrix, or `None` |
-| `has_correlated_inputs` | `True` if a non-identity matrix is set |
+| `sampler` | the custom sampler, or `None` |
+| `sampler_dimension` | uniform coordinates per row for the sampler, or `None` |
+| `dependence` | `"independent"`, `"gaussian"` or `"custom"` |
 | `has_non_uniform_inputs` | `True` if any marginal is not uniform |
 | `has_categorical_inputs` | `True` if any marginal is categorical |
 | `categorical_labels` | `{name: labels}` for the categorical parameters |

@@ -168,7 +168,7 @@ def test_correlation_with_identity_categorical_rows_passes():
         },
         correlation=[[1.0, 0.5, 0.0], [0.5, 1.0, 0.0], [0.0, 0.0, 1.0]],
     )
-    assert p.has_correlated_inputs is True
+    assert p.dependence == "gaussian"
     X = jaxgsa.sampling.monte_carlo(p, 20_000, seed=0)
     freqs = np.bincount(X[:, 2].astype(int), minlength=2) / X.shape[0]
     np.testing.assert_allclose(freqs, [0.5, 0.5], atol=0.02)
@@ -927,7 +927,7 @@ def test_categorical_design_error_is_honest_about_correlation():
     R = np.eye(3)
     R[0, 1] = R[1, 0] = 0.5  # couples the continuous pair; identity row for c
     correlated = problem.with_correlation(R)
-    with pytest.raises(ValueError, match="no variance-based method") as excinfo:
+    with pytest.raises(ValueError, match="(?i)no variance-based method") as excinfo:
         jaxgsa.kucherenko.sample(correlated, 64)
     message = str(excinfo.value)
     assert "sobol.sample" not in message
@@ -976,7 +976,7 @@ def test_combined_categorical_and_correlated_message(name, call):
     combined text, so the order the two checks run in does not matter.
     """
     problem = _categorical_and_correlated_problem()
-    with pytest.raises(ValueError, match="no variance-based method") as excinfo:
+    with pytest.raises(ValueError, match="(?i)no variance-based method") as excinfo:
         call(problem)
     message = str(excinfo.value)
     # The message opens by naming the refusing sampler.
@@ -1004,7 +1004,7 @@ def test_combined_categorical_and_correlated_message(name, call):
         ("hdmr", lambda p, X, Y: hdmr.analyze(p, X, Y)),
         ("hsic", lambda p, X, Y: hsic.analyze(p, X, Y)),
         # pawn is absent on purpose: it takes categorical inputs (one bin per
-        # level) and is correlation-tolerant, so it accepts the combined
+        # level) and is dependence-tolerant, so it accepts the combined
         # problem instead of refusing it. See the companion accept test.
         ("shapley", lambda p, X, Y: shapley.analyze(p, X, Y)),
         ("vkoga", lambda p, X, Y: jaxgsa.vkoga.analyze(p, X, Y)),
@@ -1019,12 +1019,12 @@ def test_combined_message_on_the_analysis_side(name, call):
     recommends the design-based jaxgsa.sobol pipeline, which refuses a
     declared correlation. Both analysis gates route the combination to the
     shared message, so the order they run in does not matter. Note that the
-    correlation-tolerant analyzers (hdmr, hsic, vkoga) reach it through
+    dependence-tolerant analyzers (hdmr, hsic, vkoga) reach it through
     the categorical gate, and the correlation-naive ones (dgsm, pce, shapley)
     through whichever gate their caller runs first.
     """
     problem, X, Y = _categorical_and_correlated_data()
-    with pytest.raises(ValueError, match="no variance-based method") as excinfo:
+    with pytest.raises(ValueError, match="(?i)no variance-based method") as excinfo:
         call(problem, X, Y)
     message = str(excinfo.value)
     assert message.startswith(f"jaxgsa.{name}.analyze ")
@@ -1058,13 +1058,13 @@ def test_correlated_only_message_is_unchanged_without_categoricals():
     """A purely correlated problem keeps the correlated-only recommendation."""
     problem = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
     R = np.array([[1.0, 0.5], [0.5, 1.0]])
-    with pytest.raises(ValueError, match="correlation-tolerant") as excinfo:
+    with pytest.raises(ValueError, match="dependence-tolerant") as excinfo:
         morris.sample(problem.with_correlation(R), 8)
     assert "jaxgsa.vkoga" in str(excinfo.value)
 
     X = jaxgsa.sampling.monte_carlo(problem.with_correlation(R), 128, seed=0)
     Y = np.asarray(X)[:, 0]
-    with pytest.raises(ValueError, match="correlation-tolerant") as excinfo:
+    with pytest.raises(ValueError, match="dependence-tolerant") as excinfo:
         pce_mod.analyze(problem.with_correlation(R), X, Y)
     assert "jaxgsa.vkoga" in str(excinfo.value)
 

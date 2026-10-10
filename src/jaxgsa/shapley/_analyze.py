@@ -37,7 +37,7 @@ from jaxgsa._core.irregular import (
     analyze_irregular,
 )
 from jaxgsa._core.validation import (
-    _correlation_tolerant_methods,
+    _dependence_tolerant_methods,
     _is_constant_slice,
     _prepare_Y,
 )
@@ -84,22 +84,22 @@ def _raise_correlated_pce_backend(problem: "Problem", method: str) -> None:
 
     Raises:
         ValueError: If ``problem`` declares a non-identity correlation. The
-            message names the HDMR alternative and the correlation-tolerant
+            message names the HDMR alternative and the dependence-tolerant
             methods.
     """
-    if not problem.has_correlated_inputs:
+    if problem.dependence == "independent":
         return
     # The delegated pce core would compute silently wrong numbers; this
     # guard names the Shapley-specific alternative in the message.
     raise ValueError(
         f"{method} with backend='pce' computes a variance "
-        "allocation that assumes independent inputs, but "
-        "problem.correlation declares a dependence structure. Use "
+        "allocation that assumes independent inputs, but this problem "
+        "declares dependent inputs (problem.correlation or problem.sampler). Use "
         "backend='hdmr' with include_correlative=True, which allocates "
         "the ANCOVA (structural + correlative) decomposition instead — "
         "an ANCOVA-based attribution, not conditional-variance Shapley "
-        "effects — or one of the correlation-tolerant methods: "
-        f"{_correlation_tolerant_methods()}. Those methods do not "
+        "effects — or one of the dependence-tolerant methods: "
+        f"{_dependence_tolerant_methods()}. Those methods do not "
         "return Shapley effects."
     )
 

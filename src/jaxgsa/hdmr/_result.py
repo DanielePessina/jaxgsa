@@ -258,7 +258,7 @@ class HDMRResult(SchemaResult, SurrogateResult):
             ValueError: If this result carries no fitted surrogate state.
 
         Warns:
-            JaxgsaWarning: If the problem declares a correlation and
+            JaxgsaWarning: If the problem declares dependent inputs and
                 ``include_correlative`` is ``False``.
         """
         from jaxgsa.shapley._engine import _shapley_result_from_variances, build_membership
@@ -266,10 +266,10 @@ class HDMRResult(SchemaResult, SurrogateResult):
         fit = self._fit
         if fit is None:
             raise ValueError("HDMRResult does not contain fitted surrogate state")
-        if self.problem.has_correlated_inputs and not include_correlative:
+        if self.problem.dependence != "independent" and not include_correlative:
             warnings.warn(
                 "HDMRResult.shapley: include_correlative=False on a "
-                "correlated problem allocates the structural ANCOVA share "
+                "problem with dependent inputs allocates the structural ANCOVA share "
                 "(Sa) only, renormalized to sum to 1. That drops the "
                 "correlative share (Sb) the correlation carries, so Sh reads "
                 "too high for parameters whose correlation opposes their "

@@ -76,9 +76,9 @@ The steps:
 
 1. Declare the marginal distribution of each input with `Problem.from_dict`.
 2. Build the training design with `sampling.monte_carlo` and evaluate the
-   model on it. This example uses an independent design for broad coverage;
-   correlated training data also work when they cover the
-   [target distribution](#training-data-must-cover-the-target-distribution).
+   model on it. This example uses an independent design for broad coverage.
+   Rows drawn from the analysis distribution also work. See
+   [training data](#training-data-must-cover-the-analysis-distribution).
 3. Declare the dependency structure with `with_correlation`. `analyze` reads
    `problem.correlation` by default. Passing a `(D, D)` matrix as
    `correlation=` overrides the declaration for one call.
@@ -104,7 +104,7 @@ problem = jaxgsa.Problem.from_dict(
     }
 )
 
-# Independent training design for broad coverage of the target distribution.
+# Independent training design for broad coverage of the input space.
 X = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, 2048, seed=0))
 Y = X @ jnp.array([2.0, 1.0, 0.5])
 
@@ -131,24 +131,24 @@ print("S_IU:", np.round(result.S_IU, 3))
 jaxgsa.vkoga.analyze
   problem: D=3 (x1, x2, x3)
     marginals: gaussian=3
-    correlation: correlated (Gaussian copula)
+    dependence: gaussian copula
     output: N=2048 runs, T=1 x K=1 output slice
     invalid: none found in 2048 rows (policy 'raise')
   timing:
-    fit + compute: 5.96 s
+    fit + compute: 16.01 s
     n_centers: 300
     gamma: 7.533
     ridge: 5.995e-05
     batch_size: auto (resolved from the memory budget)
   results: top 3 of 3 parameters by S_TC
-    1. x1  S_TC=0.8824
-    2. x2  S_TC=0.6307
+    1. x1  S_TC=0.8827
+    2. x2  S_TC=0.6325
     3. x3  S_TC=0.03245
-S_TC: [0.882 0.631 0.032]
-S_TU: [0.341 0.085 0.034]
+S_TC: [0.883 0.633 0.032]
+S_TU: [0.34  0.085 0.034]
 S_U:  [0.337 0.083 0.033]
-S_C:  [ 0.546  0.548 -0.   ]
-S_IU: [0.004 0.002 0.001]
+S_C:  [ 0.546  0.55  -0.   ]
+S_IU: [0.003 0.002 0.001]
 ```
 
 Almost all of that time is the hyperparameter search. The default run
@@ -161,15 +161,15 @@ the next call and the search disappears.
 ## Reading the five indices
 
 - `x1` and `x2` both look important (`S_TC` 0.88 and 0.63), but neither is
-  individually necessary (`S_TU` 0.34 and 0.08). They share correlated
+  individually necessary (`S_TU` 0.34 and 0.09). They share correlated
   variance. Each explains a large slice of the output, but most of that slice
   is also reachable through the other. So measuring either one more accurately
   pays off, while fixing either one and leaving the other free does not.
-- `S_C` is 0.546 for `x1` and 0.548 for `x2`, and 0.000 for `x3`. That is the
+- `S_C` is 0.546 for `x1` and 0.550 for `x2`, and 0.000 for `x3`. That is the
   correlation-borne part. It is symmetric here because the correlation is what
   carries it. `x3` is uncorrelated, so it has none. A negative `S_C` is a valid
   reading, not a bug: it is a correlation working against a direct effect.
-- `S_IU` is at most 0.004, near zero for every parameter, as it must be. The
+- `S_IU` is at most 0.003, near zero for every parameter, as it must be. The
   model is additive, so there are no independent interactions to find. `S_IU`
   is never negative, because it is `S_TU - S_U` and `S_U` is clipped to `S_TU`
   (see below).
@@ -197,27 +197,38 @@ matches. The residual gap is surrogate error plus Monte-Carlo noise. Raise
 `n_outer`, `n_inner` or `n_variance`, which only touch the cheap surrogate, or
 raise the training sample size, to shrink it.
 
+<a id="train-on-an-independent-design"></a>
 <a id="the-training-design-must-be-independent"></a>
+<a id="training-data-must-cover-the-target-distribution"></a>
 
-## Training data must cover the target distribution
+## Training data must cover the analysis distribution
 
-The training rows need not be independent. Correlated training data can support
-valid sensitivity estimates when the surrogate predicts accurately over the
-target joint distribution. Joint and conditional integration points follow that
-distribution: `S_TU` redraws an input conditional on the others, rather than
-across its entire marginal.
+The analysis distribution is the one in `problem`: independent, a Gaussian
+copula, or a custom sampler. The surrogate must be accurate wherever that
+distribution puts its mass. The training rows are a separate choice.
 
-An independent training design is one option for broad coverage, especially
-when reusing a surrogate under several target distributions. It is not a
-requirement. Check predictive accuracy where integration places probability
-mass; cross-validation on training rows alone may miss a mismatch between
-training and target distributions. The component terms also depend on how well
-the surrogate represents the model over that support.
+Both nested estimators draw from conditionals of the joint distribution.
+`S_TU` redraws an input given the others, and `S_TC` redraws the others given
+one input. Neither one draws an input from its whole marginal while the others
+stay fixed. So every surrogate query lies where the joint distribution puts
+mass. Training rows drawn from the analysis distribution therefore work.
 
-Population variance fractions lie in `[0, 1]`, but finite integration estimates
-can slightly exceed those bounds. Such excursions alone do not establish
-extrapolation or invalidate correlated training data. Increase integration
-budgets and assess surrogate error separately.
+An independent design is a safe default in two cases. Use it when the
+correlation is not fixed yet. Use it also when you reuse one fit under several
+correlations. Avoid training data that misses regions the analysis covers. For
+example, do not train under a correlation of +0.8 and analyse under -0.8.
+
+One measured case: the Ishigami function, a Gaussian copula with
+`rho_ab = 0.8` and `rho_bc = -0.4`, 400 training rows, 4 seeds. The reference
+was Kucherenko at 2^16 base points. The RMSE of the indices was 0.007 when the
+surrogate trained on copula draws and 0.010 when it trained on independent
+draws.
+
+Cross-validation on the training rows can miss a mismatch between the training
+and analysis distributions. Check the accuracy where the integration places its
+mass. Finite integration estimates can slightly leave `[0, 1]`. That alone does
+not show extrapolation. Raise the integration sizes and assess the surrogate
+error separately.
 
 ## Two more things that can go wrong
 
@@ -313,18 +324,18 @@ print("S_TU:", np.round(emp.S_TU, 3))
 [[1.    0.609 0.041]
  [0.609 1.    0.003]
  [0.041 0.003 1.   ]]
-S_TC: [0.889 0.632 0.044]
-S_TU: [0.328 0.082 0.033]
+S_TC: [0.889 0.635 0.044]
+S_TU: [0.328 0.082 0.032]
 ```
 
 The fit recovers `rho_12 = 0.6` as 0.609, and the two entries that should be
 zero come out at 0.041 and 0.003. That is sampling scatter at N=2048.
 
-The training rows cover the same correlated distribution used for integration.
-Both `S_TC` and `S_TU` agree with the closed form to within 0.011 here. As with
-any surrogate estimate, check predictive accuracy over the target support and
-integration convergence. Correlation in the training data alone does not
-invalidate these indices.
+The training rows follow the same correlated distribution used for
+integration. Both `S_TC` and `S_TU` agree with the closed form to within 0.011
+here. As with any surrogate estimate, check predictive accuracy over the
+analysis support and integration convergence. Correlation in the training data
+alone does not invalidate these indices.
 
 ## Independent inputs collapse to S1 / ST
 
@@ -339,7 +350,7 @@ print("S_TC:", np.round(indep.S_TC, 3))
 print("S_TU:", np.round(indep.S_TU, 3))
 print("S_C: ", np.round(indep.S_C, 4))
 print("analytical S1 = ST:", np.round(a**2 / (a**2).sum(), 3))
-print("is_correlated:", indep.is_correlated)
+print("dependence:", indep.dependence)
 ```
 
 ```
@@ -347,7 +358,7 @@ S_TC: [0.762 0.189 0.047]
 S_TU: [0.77  0.192 0.049]
 S_C:  [0.0008 0.0003 0.    ]
 analytical S1 = ST: [0.762 0.19  0.048]
-is_correlated: False
+dependence: independent
 ```
 
 `S_TC` and `S_TU` now agree with each other and with the analytic answer to
@@ -411,20 +422,20 @@ Coordinates:
   * param_i      (param_i) <U2 24B 'x1' 'x2' 'x3'
   * param_j      (param_j) <U2 24B 'x1' 'x2' 'x3'
 Data variables:
-    S_TC         (param) float64 24B 0.8824 0.6307 0.03245
-    S_TU         (param) float64 24B 0.3406 0.08459 0.03393
-    S_U          (param) float64 24B 0.3368 0.08298 0.03268
-    S_C          (param) float64 24B 0.5456 0.5477 -0.0002319
-    S_IU         (param) float64 24B 0.00376 0.001608 0.001243
+    S_TC         (param) float64 24B 0.8827 0.6325 0.03245
+    S_TU         (param) float64 24B 0.3401 0.0846 0.03391
+    S_U          (param) float64 24B 0.3366 0.08286 0.03268
+    S_C          (param) float64 24B 0.5462 0.5496 -0.0002307
+    S_IU         (param) float64 24B 0.003461 0.001739 0.001227
     variance     float64 8B 7.462
     rmse         float64 8B 0.1596
     correlation  (param_i, param_j) float64 72B 1.0 0.6 0.0 0.6 ... 0.0 0.0 1.0
 Attributes:
-    n_centers:      300
-    gamma:          7.533150951473334
-    ridge:          5.994842503189409e-05
-    is_correlated:  True
-    cv_rmse:        0.2133223694760349
+    n_centers:   300
+    gamma:       7.533150951473334
+    ridge:       5.994842503189409e-05
+    dependence:  gaussian
+    cv_rmse:     0.2133223694760349
 ```
 
 The indices sit on the `param` dimension, so you can select by parameter name
@@ -459,21 +470,21 @@ print("S_TC:", np.round(multi.S_TC, 3))
 jaxgsa.vkoga.analyze
   problem: D=3 (x1, x2, x3)
     marginals: gaussian=3
-    correlation: correlated (Gaussian copula)
+    dependence: gaussian copula
     output: N=2048 runs, T=1 x K=2 output slices
     invalid: none found in 2048 rows (policy 'raise')
   timing:
-    fit + compute: 4.65 s
+    fit + compute: 15.05 s
     n_centers: 300
     gamma: 7.533
     ridge: 0.001292
     batch_size: auto (resolved from the memory budget)
   results: top 3 of 3 parameters by S_TC, mean over 2 output slices
-    1. x1  S_TC=0.6766
-    2. x2  S_TC=0.5451
-    3. x3  S_TC=0.1571
-S_TC: [[0.882 0.631 0.032]
- [0.471 0.459 0.282]]
+    1. x1  S_TC=0.6773
+    2. x2  S_TC=0.5495
+    3. x3  S_TC=0.1572
+S_TC: [[0.883 0.632 0.032]
+ [0.472 0.466 0.282]]
 ```
 
 Two outputs give a `(2, 3)` index array: one row of three parameter indices per
@@ -516,9 +527,9 @@ the input model, not of any output slice, so it stays `(D, D)` throughout.
 
 ## Practical caveats
 
-- Training data must cover the target distribution well enough for accurate
+- Training data must cover the analysis distribution well enough for accurate
   surrogate predictions. Independent and correlated designs are both allowed;
-  see [above](#training-data-must-cover-the-target-distribution).
+  see [above](#training-data-must-cover-the-analysis-distribution).
 - Use float64. The normal equations square the condition number of the cross
   kernel, which float32 cannot carry for small `gamma`. Cross validation
   partly self-corrects, since the scores are computed in the same arithmetic

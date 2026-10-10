@@ -105,21 +105,21 @@ print("ST:", np.round(result.ST, 3))
 ```
 
 ```
-jaxgsa.kucherenko.sample: D=3, base_n=4096, n_blocks=7, n_runs=28672, dependence=copula-conditional, scramble=True
+jaxgsa.kucherenko.sample: D=3, base_n=4096, n_blocks=7, n_runs=28672, dependence=gaussian, scramble=True
 jaxgsa.kucherenko.analyze
   problem: D=3 (x1, x2, x3)
     marginals: gaussian=3
-    correlation: correlated (Gaussian copula)
+    dependence: gaussian copula
     output: N=28672 runs, T=1 x K=1 output slice
     invalid: none found in 4096 base points (policy 'raise')
   timing:
-    compute: 0.02234 s
-    design: copula-conditional (2D+1 = 7 blocks of 4096 base points)
+    compute: 0.03114 s
+    design: gaussian (2D+1 = 7 blocks of 4096 base points)
   results: top 3 of 3 parameters by ST
-    1. x1  ST=0.3351
-    2. x2  ST=0.08364
+    1. x1  ST=0.335
+    2. x2  ST=0.08367
     3. x3  ST=0.0327
-S1: [0.883 0.632 0.031]
+S1: [0.884 0.632 0.032]
 ST: [0.335 0.084 0.033]
 ```
 
@@ -141,7 +141,7 @@ closed S1: [0.884 0.633 0.033]
 closed ST: [0.335 0.084 0.033]
 ```
 
-`ST` matches to all three decimals. `S1` is off by 0.001 on `x1` and `x2`.
+`ST` matches to all three decimals. `S1` is off by 0.001 on `x2` and `x3`.
 
 ## Reading the numbers
 
@@ -151,7 +151,7 @@ closed ST: [0.335 0.084 0.033]
   ranks them for measurement, and `ST` ranks them for fixing. Measuring either
   one more accurately pays off. Fixing either one while the other stays free
   does not.
-- `x3` has `S1` and `ST` within 0.002 of each other (0.031 and 0.033). It is
+- `x3` has `S1` and `ST` within 0.002 of each other (0.032 and 0.033). It is
   uncorrelated with the rest, so the correlation-inclusive and
   correlation-exclusive readings coincide, as they do for every input of an
   independent problem.
@@ -177,8 +177,8 @@ print("analytic S1 = ST:", np.round(a**2 / (a**2).sum(), 3))
 ```
 
 ```
-S1: [0.762 0.19  0.046]
-ST: [0.763 0.19  0.048]
+S1: [0.762 0.19  0.047]
+ST: [0.763 0.191 0.048]
 analytic S1 = ST: [0.762 0.19  0.048]
 ```
 
@@ -198,8 +198,7 @@ warning with a filter on `jaxgsa.JaxgsaWarning`.
 `kucherenko.sample` takes `seed: int | np.random.Generator | None = None`, the
 same interface as the other samplers. Pass an int for a reproducible run, a
 `Generator` when the design is one draw in a larger seeded workflow, or nothing
-at all for a fresh design each call. `seed=0` reproduces the design that older
-versions produced by default.
+at all for a fresh design each call.
 
 The seed drives the Sobol' scrambling. Asking for an unscrambled sequence and a
 seed at the same time is a contradiction, so it raises rather than quietly
@@ -227,11 +226,11 @@ designs, correlation included:
 ```python
 ks.save("design.npz")
 ks2 = jaxgsa.kucherenko.KucherenkoSamples.load("design.npz")
-print(ks2.samples.shape, ks2.problem.has_correlated_inputs)
+print(ks2.samples.shape, ks2.problem.dependence)
 ```
 
 ```
-(28672, 3) True
+(28672, 3) gaussian
 ```
 
 Saving the design matters here because the model runs are the expensive part.
@@ -250,14 +249,14 @@ Dimensions:   (param: 3)
 Coordinates:
   * param     (param) <U2 24B 'x1' 'x2' 'x3'
 Data variables:
-    S1        (param) float64 24B 0.8835 0.6321 0.03135
-    ST        (param) float64 24B 0.3351 0.08364 0.0327
-    variance  float64 8B 7.647
+    S1        (param) float64 24B 0.8837 0.6324 0.03218
+    ST        (param) float64 24B 0.335 0.08367 0.0327
+    variance  float64 8B 7.645
 Attributes:
-    is_correlated:  True
+    dependence:  gaussian
 ```
 
-`variance` is 7.647 against the closed-form 7.65, and it is the denominator of
+`variance` is 7.645 against the closed-form 7.65, and it is the denominator of
 both indices.
 
 ## Kucherenko or VKOGA?
@@ -274,7 +273,7 @@ test suite pins them to the same closed form, and to each other.
 Use Kucherenko when the model is still runnable and cheap enough for the
 design. Use VKOGA when the data is fixed, or when you want the finer
 correlated/uncorrelated split. When a VKOGA run reports an index outside
-`[0, 1]`, or warns about its training design, Kucherenko is the check that
+`[0, 1]`, Kucherenko is the check that
 settles it.
 
 ## Reference

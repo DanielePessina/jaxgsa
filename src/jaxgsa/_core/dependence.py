@@ -172,16 +172,31 @@ def transform_samples(
 class Draws(Protocol):
     """Joint and conditional draws of a problem's inputs.
 
-    Rows are ``(n, D)`` arrays in the implementation's own space. Every method
-    takes ``(n, dimension)`` uniform points. A conditional method also takes
-    ``(n, D)`` conditioning rows from the same space and keeps their fixed
-    columns exactly.
+    Rows are ``(n, D)`` arrays in the implementation's own space. Each method
+    takes uniform points of its own width: :attr:`dimension` for
+    :meth:`joint`, :attr:`rest_dimension` for :meth:`rest_given_self` and
+    :attr:`self_dimension` for :meth:`self_given_rest`. The widths differ
+    because the Gaussian copula needs one noise column to redraw ``x_i`` but a
+    custom sampler always reads ``dimension`` columns. A conditional method
+    also takes ``(n, D)`` conditioning rows from the same space and keeps
+    their fixed columns exactly.
     """
 
     dimension: int
+    rest_dimension: int
+    self_dimension: int
 
     def joint(self, u: np.ndarray) -> np.ndarray:
         """Return joint rows."""
+        ...
+
+    def joint_led_by(self, u: np.ndarray, index: int) -> np.ndarray:
+        """Return joint rows whose column ``index`` depends on ``u[:, 0]`` alone.
+
+        An outer loop that conditions on ``x_i`` then keeps the 1-D
+        stratification of the Sobol' points in that column. An
+        implementation that cannot do this returns :meth:`joint`.
+        """
         ...
 
     def rest_given_self(self, u: np.ndarray, rows: np.ndarray, index: int) -> np.ndarray:
@@ -210,7 +225,9 @@ class GaussianDraws:
     Attributes:
         problem: Problem supplying the marginals and the correlation.
         plan: Precomputed Gaussian conditionals.
-        dimension: Uniform coordinates per row, one per parameter.
+        dimension: Uniform coordinates per joint row, one per parameter.
+        rest_dimension: Noise columns to redraw ``Z_-i``, ``D - 1``.
+        self_dimension: Noise columns to redraw ``Z_i``, one.
     """
 
     def __init__(self, problem: Problem) -> None:
@@ -226,27 +243,46 @@ class GaussianDraws:
             independent_correlation(problem.num_vars) if R is None else R
         )
         self.dimension = problem.num_vars
+        self.rest_dimension = problem.num_vars - 1
+        self.self_dimension = 1
 
     @staticmethod
     def _normal(u: np.ndarray) -> np.ndarray:
         return ndtri(np.clip(u, _UNIT_CLIP, 1.0 - _UNIT_CLIP))
 
+    @staticmethod
+    def _check_width(u: np.ndarray, width: int, method: str) -> None:
+        if u.ndim != 2 or u.shape[1] != width:
+            raise ValueError(
+                f"GaussianDraws.{method} needs uniform points of shape (n, {width}), got {u.shape}"
+            )
+
     def joint(self, u: np.ndarray) -> np.ndarray:
         """Return correlated latent rows."""
+        self._check_width(u, self.dimension, "joint")
         return self._normal(u) @ self.plan.chol_full.T
 
+    def joint_led_by(self, u: np.ndarray, index: int) -> np.ndarray:
+        """Draw ``Z_i`` from ``u[:, 0]``, then ``Z_-i | Z_i`` from the rest of ``u``."""
+        self._check_width(u, self.dimension, "joint_led_by")
+        z_self = self._normal(u[:, 0])
+        z_rest = draw_rest_given_self(self.plan, index, z_self, self._normal(u[:, 1:]))
+        return assemble_latent(index, self.plan.others[index], z_self, z_rest)
+
     def rest_given_self(self, u: np.ndarray, rows: np.ndarray, index: int) -> np.ndarray:
-        """Redraw ``Z_-i | Z_i`` from the columns of ``u`` other than ``index``."""
+        """Redraw ``Z_-i | Z_i`` from ``(n, D - 1)`` uniforms ``u``."""
+        self._check_width(u, self.rest_dimension, "rest_given_self")
         others = self.plan.others[index]
         z_self = rows[:, index]
-        z_rest = draw_rest_given_self(self.plan, index, z_self, self._normal(u[:, others]))
+        z_rest = draw_rest_given_self(self.plan, index, z_self, self._normal(u))
         return assemble_latent(index, others, z_self, z_rest)
 
     def self_given_rest(self, u: np.ndarray, rows: np.ndarray, index: int) -> np.ndarray:
-        """Redraw ``Z_i | Z_-i`` from column ``index`` of ``u``."""
+        """Redraw ``Z_i | Z_-i`` from ``(n, 1)`` uniforms ``u``."""
+        self._check_width(u, self.self_dimension, "self_given_rest")
         others = self.plan.others[index]
         z_rest = rows[:, others]
-        z_self = draw_self_given_rest(self.plan, index, z_rest, self._normal(u[:, index]))
+        z_self = draw_self_given_rest(self.plan, index, z_rest, self._normal(u[:, 0]))
         return assemble_latent(index, others, z_self, z_rest)
 
     def to_physical(self, rows: np.ndarray) -> np.ndarray:
@@ -264,7 +300,9 @@ class CustomDraws:
     Attributes:
         problem: Problem declaring the sampler.
         sampler: The user transformation.
-        dimension: Uniform coordinates per row.
+        dimension: Uniform coordinates per row, for every kind of draw.
+        rest_dimension: Equal to ``dimension``.
+        self_dimension: Equal to ``dimension``.
     """
 
     def __init__(self, problem: Problem) -> None:
@@ -279,10 +317,17 @@ class CustomDraws:
         self.problem = problem
         self.sampler: InputSampler = sampler
         self.dimension: int = dimension
+        self.rest_dimension: int = dimension
+        self.self_dimension: int = dimension
 
     def joint(self, u: np.ndarray) -> np.ndarray:
         """Return joint physical rows."""
         return transform_samples(self.sampler, u, self.problem.num_vars)
+
+    def joint_led_by(self, u: np.ndarray, index: int) -> np.ndarray:
+        """Return :meth:`joint` rows; a custom sampler fixes its own column map."""
+        del index
+        return self.joint(u)
 
     def rest_given_self(self, u: np.ndarray, rows: np.ndarray, index: int) -> np.ndarray:
         """Keep ``x_i`` and redraw the rest through the sampler."""

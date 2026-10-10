@@ -4,9 +4,6 @@
 jaxgsa.vkoga.analyze(
     problem, X, Y, *,
     correlation=None,
-    sampler=None,
-    sampler_dimension=None,
-    sequence="sobol",
     gamma=None,
     ridge=None,
     max_centers=None,
@@ -28,7 +25,8 @@ jaxgsa.vkoga.analyze(
 `analyze` fits a Vectorial Kernel Orthogonal Greedy Algorithm surrogate to
 given `(X, Y)` data, then estimates the five correlated indices of
 [Li et al. (2010)](https://doi.org/10.1021/jp9096919) against that surrogate under
-a Gaussian copula by default, or a user-supplied joint distribution. This surrogate-based sensitivity workflow follows
+independent inputs, a Gaussian copula, or a custom sampler declared on the
+problem. This surrogate-based sensitivity workflow follows
 [Hilhorst et al. (2024)](https://doi.org/10.1002/cnm.3797). It is the only method in
 jaxgsa that separates correlated from uncorrelated contributions out of a
 single fitted surrogate, and the only one that gets a correlated total without
@@ -47,18 +45,33 @@ The design-based alternative is [`jaxgsa.kucherenko`](/api/kucherenko), which
 evaluates the real model on a conditional-copula design instead of querying a
 surrogate.
 
-## Choose training data that covers the integration support
+<a id="train-on-an-independent-design"></a>
+<a id="the-training-design-must-be-independent"></a>
+<a id="training-data-must-cover-the-target-distribution"></a>
 
-The training data and the target input distribution are separate choices.
-Conditional integration queries the surrogate on the target joint support,
-including draws from its conditional distributions. Training must represent
-that support accurately. An independent, space-filling design can help when
-you can evaluate the model throughout the domain, but it is not a requirement
-for conditional-variance indices. Correlated training data can be suitable.
-Check `cv_rmse` and whether training covers the points integration will query.
+## Training data must cover the analysis distribution
 
-The built-in path warns when it detects correlated training data. This is a
-coverage diagnostic, not an automatic fit of the integration copula.
+The training data and the analysis distribution are separate choices. The
+analysis distribution is the one in `problem` (independent, a Gaussian copula,
+or a custom sampler). The surrogate must be accurate wherever that
+distribution puts its mass.
+
+Both nested estimators draw from conditionals of the joint distribution. They
+never draw `X_i` from its whole marginal while the other inputs stay fixed. So
+every surrogate evaluation lies where the joint distribution puts mass.
+Training rows drawn from the analysis distribution therefore work.
+
+An independent, space-filling design is a safe default in two cases. Use it
+when the correlation is not fixed yet. Use it also when you reuse one fit under
+several correlations. Avoid training data that misses regions the analysis
+covers. For example, do not train under a correlation of +0.8 and analyse under
+-0.8.
+
+One measured case: Ishigami, Gaussian copula with `rho_ab = 0.8` and
+`rho_bc = -0.4`, 400 training rows, 4 seeds, compared with Kucherenko at 2^16
+base points. The RMSE of the indices was 0.007 when the surrogate trained on
+copula draws and 0.010 when it trained on independent draws. Check `cv_rmse`
+and ask whether training covers the points the analysis will query.
 
 ## A run
 
@@ -87,37 +100,37 @@ for name in ("S_TC", "S_TU", "S_U", "S_C", "S_IU"):
 jaxgsa.vkoga.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: correlated (Gaussian copula)
+    dependence: gaussian copula
     output: N=512 runs, T=1 x K=1 output slice
     invalid: none found in 512 rows (policy 'raise')
   timing:
-    fit + compute: 3.647 s
+    fit + compute: 5.86 s
     n_centers: 120
     gamma: 7.533
     ridge: 0.01
     batch_size: auto (resolved from the memory budget)
   results: top 3 of 3 parameters by S_TC
-    1. x2  S_TC=0.4992
-    2. x1  S_TC=0.3475
-    3. x3  S_TC=0.0009807
+    1. x2  S_TC=0.4913
+    2. x1  S_TC=0.3447
+    3. x3  S_TC=0.0009869
 
-S_TC [0.3475 0.4992 0.001 ]
-S_TU [0.4325 0.4251 0.247 ]
-S_U  [0.2534 0.4016 0.0009]
-S_C  [0.0941 0.0976 0.    ]
-S_IU [0.1791 0.0235 0.2461]
+S_TC [0.3447 0.4913 0.001 ]
+S_TU [0.4323 0.4185 0.247 ]
+S_U [0.2535 0.401  0.0009]
+S_C [0.0912 0.0903 0.    ]
+S_IU [0.1788 0.0175 0.2461]
 ```
 
 `x3` has `S_TC = 0.001` and `S_TU = 0.247`. It has essentially no first-order
 effect and a large interaction effect, so it is the case where prioritisation
-and fixing disagree completely. `x1` and `x2` each pick up about 0.09 to 0.10 of
+and fixing disagree completely. `x1` and `x2` each pick up about 0.09 of
 `S_C`, the share that arrives through their 0.7 correlation with each other.
 `x3` correlates with nothing and its `S_C` is 0.
 
 The same problem run through
 [`jaxgsa.kucherenko`](/api/kucherenko) on the real model gives
-`S1 = [0.331, 0.523, 0.003]` against `S_TC = [0.348, 0.499, 0.001]`, and
-`ST = [0.425, 0.423, 0.243]` against `S_TU = [0.433, 0.425, 0.247]`. The two
+`S1 = [0.325, 0.525, -0.001]` against `S_TC = [0.345, 0.491, 0.001]`, and
+`ST = [0.412, 0.425, 0.243]` against `S_TU = [0.432, 0.419, 0.247]`. The two
 methods are estimating the same two quantities, one through a surrogate and one
 through 28672 model runs.
 
@@ -158,35 +171,33 @@ To fit a matrix from observed data use
 `problem.with_correlation(...)`. Making that a separate step keeps it explicit
 which sample the copula came from. A string value raises `ValueError`.
 
-The built-in matrix used is on `result.correlation`; custom sampling has no
-copula matrix.
+The matrix used is on `result.correlation`. A custom sampler has no copula
+matrix, so it is `None` there.
 
 ## Custom input dependence
 
-Pass `sampler` to replace the Gaussian copula, with neither a declared
-`problem.correlation` nor a `correlation=` override. The callback contract is
+Declare the sampler on the problem, with
+`problem.with_sampler(f, dimension=k)` or `Problem(..., sampler=f)`. A problem
+with a sampler cannot also declare a `correlation`, and `analyze` raises
+`ValueError` if you pass `correlation=` for it. The callback contract is
 [the same as Kucherenko's](/api/kucherenko#custom-input-dependence).
 It transforms package-generated uniform points into joint or conditional
-physical samples. It must be deterministic for identical arguments, with no
-hidden randomness or mutable sampling state. Dependence is not
-estimated from `X`.
+physical samples. It must be deterministic for identical arguments. Dependence
+is not estimated from `X`.
 
-`X, Y` train the surrogate; the sampler defines the integration distribution.
+`X, Y` train the surrogate. The sampler defines the integration distribution.
 Its joint marginals must match `Problem`, because the declared marginal CDFs
 still define the coordinate transform and component-function basis.
 
-Custom counts are exact. The default `sequence="sobol"` requires power-of-two
-`n_outer`, `n_inner`, and `n_variance`; `sequence="monte_carlo"` permits arbitrary
-counts. The required `key` controls integration and bootstrap reproducibility.
-Each conditional mean uses two independently randomized blocks of `n_inner`
-points. Products of their means estimate squared conditional expectations,
-without an IID inner-variance correction. Two joint blocks of `n_variance`
-points similarly estimate the output variance. This applies to both sequences
-and costs roughly twice as many surrogate predictions as a single-block
-integration. Finite-sample index estimates can still be slightly negative.
-Increasing counts reduces integration error but cannot repair surrogate error.
-The internal `_custom_indices.py` computes the same five VKOGA indices under
-the supplied distribution; it does not define new sensitivity indices.
+```python
+problem = jaxgsa.Problem(names=..., bounds=..., sampler=f, sampler_dimension=2)
+res = jaxgsa.vkoga.analyze(problem, X_train, Y_train, key=jax.random.key(0))
+res.dependence   # "custom"
+```
+
+A custom sampler and the Gaussian copula share one estimator. The custom path
+costs about the same time. The default sizes round up to powers of two for
+both. The required `key` controls integration and bootstrap reproducibility.
 The extra `S_U`, `S_C`, `S_IU` fields inherit the fitted additive-component
 approximation and do not establish a unique causal decomposition.
 
@@ -200,14 +211,11 @@ See the [runnable custom-dependence example](/examples/correlated-inputs#custom-
 | `ridge` | `None` | RKHS regularisation. `None` cross-validates over a grid. |
 | `max_centers` | `None` | Cap on greedily selected kernel centres. `None` means 300, itself capped at `N`. Lower it to cut fit time; too low and the surrogate underfits, which `cv_rmse` reports. |
 | `n_folds` | `10` | Folds for the hyperparameter cross-validation. At least 2. |
-| `n_outer` | `512` | Outer (conditioning) sample size per parameter. Rounded up to the next power of two for Sobol' balance on the built-in path; exact for custom samplers; Sobol counts must be powers of two. Increasing it reduces outer sampling noise. Built-in `S_TC` also has error from a shared inner block that increasing `n_outer` cannot remove; custom sampling uses two independent inner randomizations. |
-| `n_inner` | `128` | Inner (conditional) sample size per outer point, rounded up to a power of two on the built-in path (exact for custom samplers; Sobol counts must be powers of two). On the built-in path, `S_TC` drops the i.i.d. inner-noise correction and leans on a large shared inner block, so do not lower `n_inner` to buy speed there: a small `n_inner` inflates a small `S_TC`, and raising `n_outer` will not fix it. |
-| `n_variance` | `8192` | Sample size for the output variance and the component-function fit, rounded up to a power of two on the built-in path; exact for custom samplers; Sobol counts must be powers of two. |
-| `key` | `None`, but required | A `jax.random` key driving the index integration: Sobol points by default, or Monte Carlo points for custom samplers. Use `jax.random.key(0)` for reproducibility. |
-| `sampler` | `None` | Uniform-point transformation implementing joint and conditional sampling; replaces the Gaussian copula. |
-| `sampler_dimension` | `None` | Uniform coordinates required by the sampler; defaults to the number of inputs. |
-| `sequence` | `"sobol"` | Custom integration point sequence: `"sobol"` or `"monte_carlo"`. |
-| `batch_size` | `None` | Rows per device call for surrogate evaluation. Built-in nested sampling groups outer conditioning rows within the memory budget; custom sampling draws one conditioning row's `n_inner` conditional rows at a time. One complete conditional block is the minimum sampling allocation, even when `batch_size < n_inner`. Changing prediction batching does not change the random sample. |
+| `n_outer` | `512` | Outer (conditioning) sample size per parameter. Rounded up to the next power of two for Sobol' balance. Raise this when `S_TU` looks noisy: it draws a fresh inner block per outer point, so its sampling error falls as `n_outer` grows. It does not help `S_TC`, which reuses one inner block across every outer point. |
+| `n_inner` | `128` | Inner (conditional) sample size per outer point, rounded up to a power of two. `S_TC` drops the i.i.d. inner-noise correction and leans on a large shared inner block, so do not lower `n_inner` to buy speed there: a small `n_inner` inflates a small `S_TC`, and raising `n_outer` will not fix it. |
+| `n_variance` | `8192` | Sample size for the output variance and the component-function fit, rounded up to a power of two. |
+| `key` | `None`, but required | A `jax.random` key driving the quasi-random index integration. No default, because the indices are a Monte-Carlo estimate. Use `jax.random.key(0)` for reproducibility. |
+| `batch_size` | `None` | Rows per device call. It bounds every row-wise step: the surrogate evaluations behind `predict`, and the nested conditional draws. `None` derives one from the memory budget. It never changes the answer. |
 | `on_invalid` | `"raise"` | One training row is one unit, so `"drop"` removes the `(X, Y)` pair. The check runs before the hyperparameter search on purpose: one non-finite `Y` makes every cross-validation score non-finite, and the caller would otherwise meet a `RuntimeError` about failed kernel solves that names the wrong cause. `"drop"` needs at least `n_folds` rows to survive. |
 | `verbose` | `True` | Prints the summary block shown above. |
 
@@ -252,14 +260,13 @@ Diagnostics:
 
 | Field | Meaning |
 | --- | --- |
-| `correlation` | The `(D, D)` copula matrix for built-in integration; `None` for custom samplers. |
+| `correlation` | The `(D, D)` copula matrix the indices were computed under; `None` for custom samplers. |
 | `variance` | Output variance under the correlated input measure, per output slice. |
 | `n_centers` | Kernel centres in the fitted surrogate. |
 | `gamma`, `ridge` | The hyperparameters the fit used, cross-validated or passed. |
 | `rmse` | Training-fit RMSE, per output slice. |
 | `cv_rmse` | Cross-validated RMSE. This is the one that tells you whether to trust the indices at all. |
-| `is_correlated` | Whether built-in integration used a non-identity correlation; `None` for custom sampling. |
-| `dependence_source` | `"gaussian"` or `"custom"`. |
+| `dependence` | The dependence the indices were computed under: `"independent"`, `"gaussian"` or `"custom"`. A per-call `correlation=` override shows here. |
 | `invalid`, `ci` | The non-finite report and the interval provenance. |
 
 Operations: `result.predict(X_new, batch_size=None)` evaluates the fitted
@@ -298,11 +305,10 @@ method-specific cases:
 It raises `RuntimeError` when every cross-validation score is non-finite. Since
 the non-finite check now runs first, that is a genuine solver failure.
 
-It warns in five cases: a zero-variance output slice; float32; a cross-validated
+It warns in four cases: a zero-variance output slice; float32; a cross-validated
 error that is a large fraction of the output standard deviation, which makes
-every index untrustworthy; `S_U` clipped to `S_TU` by a wide margin, which says
-the additive component functions cannot represent the model's interactions; and
-the correlated-training-design case described at the top of this page.
+every index untrustworthy; and `S_U` clipped to `S_TU` by a wide margin, which says
+the additive component functions cannot represent the model's interactions.
 
 ## References
 

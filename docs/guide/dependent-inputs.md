@@ -62,8 +62,8 @@ jaxgsa provides four routes, each with a different estimand.
 
 Use Kucherenko when you can still evaluate the model and want the
 conditional-variance quantities directly. It samples conditionally from either
-the Gaussian copula declared on `Problem` or a custom `sampler`. A custom
-sampler transforms uniform points into joint and conditional physical inputs,
+the Gaussian copula declared on `Problem` or a custom sampler declared on the
+`Problem` with `with_sampler`. A custom sampler transforms uniform points into joint and conditional physical inputs,
 so it can express dependence beyond a pairwise correlation matrix. See the
 [custom-dependence example](/examples/correlated-inputs#custom-dependence-without-a-copula).
 
@@ -83,10 +83,11 @@ See the [Kucherenko example](/examples/kucherenko) and the broader
 Use VKOGA when you have existing runs or want to reuse the same fitted model
 under several input-distribution assumptions. It fits a kernel surrogate, then
 samples that surrogate to estimate dependent-input variance indices. Declare
-the integration distribution with a Gaussian-copula matrix or the same custom
-sampler interface used by Kucherenko; neither is automatically inferred from
-the training rows. The declared `Problem` marginals must still match the
-custom distribution, and training data must cover its support.
+the integration distribution on the `Problem`, with a Gaussian-copula matrix or
+the same custom sampler used by Kucherenko. Neither is inferred from the
+training rows. The declared `Problem` marginals must still match the custom
+distribution. The training data must cover the region the analysis puts its
+mass on.
 
 This surrogate workflow follows [Hilhorst et al. (2024)](/api/vkoga#references).
 
@@ -176,7 +177,8 @@ Keep these boundaries clear when interpreting results:
 - HDMR-backed Shapley is not conditional-variance Shapley.
 - None of these dependent-input indices should be placed beside
   `jaxgsa.sobol` as if they had the same meaning. Sobol' analysis assumes
-  independent inputs and refuses a problem with declared correlation.
+  independent inputs and refuses a problem with a declared correlation or a
+  custom sampler.
 
 ## A practical workflow
 

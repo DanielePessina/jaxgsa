@@ -26,7 +26,7 @@ problem = jaxgsa.Problem.from_dict(
     },
     correlation=R,                # or correlation_type="spearman"
 )
-problem.has_correlated_inputs     # True
+problem.dependence                # "gaussian"
 problem.correlation               # the validated latent matrix
 ```
 
@@ -166,7 +166,7 @@ Signature:
 
 ```python
 jaxgsa.vkoga.analyze(problem, X, Y, *, correlation=None,
-                     sampler=None, sampler_dimension=None, sequence="sobol", gamma=None, ridge=None,
+                     gamma=None, ridge=None,
                      max_centers=None, n_folds=10, n_outer=512, n_inner=128,
                      n_variance=8192, n_bootstrap=0, conf_level=0.95,
                      ci_method="quantile", key=None, batch_size=None,
@@ -175,15 +175,20 @@ jaxgsa.vkoga.analyze(problem, X, Y, *, correlation=None,
 
 `key` is required, because the index stage uses randomized integration points.
 `correlation=` overrides `problem.correlation` for one call, and the matrix
-actually used comes back on `result.correlation`.
+actually used comes back on `result.correlation`. `result.dependence` is
+`"independent"`, `"gaussian"` or `"custom"`.
 
 Keep in mind:
 
-- **Train on data covering the integration support.** Conditional integration
-  stays on the target joint support, rather than redrawing inputs from their
-  unconditional marginals. An independent, space-filling design can help when
-  the model is evaluable throughout the domain, but is not mandatory.
-  Correlated training data can be suitable; check `cv_rmse` and coverage.
+- **Training data must cover the analysis distribution.** The surrogate must
+  be accurate where the distribution in `problem` puts its mass. Both nested
+  estimators draw from conditionals of the joint distribution, never from a
+  whole marginal with the rest held fixed. So rows drawn from the analysis
+  distribution work. An independent design is a safe default when the
+  correlation is not fixed yet, or when one fit is reused under several
+  correlations. Avoid training data that misses regions the analysis covers,
+  for example trained under rho=+0.8 and analysed under rho=-0.8. Check
+  `cv_rmse`.
 - **Use float64.** The coefficient step forms the normal matrix, which squares
   the condition number of the cross kernel, and for small `gamma` that exceeds
   what single precision carries. `analyze` warns when x64 is off.
@@ -238,48 +243,61 @@ answer the fixing question the way `S_TU` can. See `moment-independent.md`.
 
 ## Custom input sampler
 
-Kucherenko `sample` and VKOGA `analyze` accept one optional `sampler`, typed as
-`jaxgsa.sampling.InputSampler`:
+A problem can carry a custom sampler. It declares a joint distribution that is
+not a Gaussian copula. Declare it with the problem:
+
+```python
+problem = jaxgsa.Problem(names=..., bounds=..., sampler=f, sampler_dimension=2)
+problem = jaxgsa.Problem.from_dict(..., sampler=f, sampler_dimension=2)
+problem = problem.with_sampler(f, dimension=2)   # copy with a sampler
+problem = problem.with_sampler(None)             # copy without it
+```
+
+A problem has either a Gaussian-copula `correlation` or a `sampler`, never both
+(`ValueError`). `problem.dependence` is `"independent"`, `"gaussian"` or
+`"custom"`. Kucherenko and VKOGA results carry the same `dependence` field.
+
+The sampler type is `jaxgsa.sampling.InputSampler`:
 
 ```python
 sampler(uniform_points, *, conditioning_rows=None, fixed_indices=())
 ```
 
-The package supplies `(n, sampler_dimension)` uniform points; return `(n, D)`
+The package supplies `(n, sampler_dimension)` uniform points. Return `(n, D)`
 finite real physical inputs in `problem.names` order. `sampler_dimension`
-defaults to `D`, but can differ when the transformation needs more or fewer
-uniform coordinates. Empty `fixed_indices` means joint sampling. Otherwise,
-use `conditioning_rows` to draw the remaining inputs from the matching joint
-conditional, preserving fixed columns without mutating the supplied rows.
-All fixed indices mean a copy of the conditioning rows. Overwriting fixed
-columns after a joint draw is valid only for independent inputs.
+defaults to `D`. The package makes exactly three kinds of call:
 
-`sequence="sobol"` is the default; custom counts must be powers of two.
-`sequence="monte_carlo"` accepts exact arbitrary counts. The callback transforms
-the supplied points deterministically: identical arguments must give identical
-outputs. Do not use hidden randomness or mutable sampling state. Kucherenko's `seed`
-and `scramble`, or VKOGA's required `key`, control point generation. The package
-assembles analysis blocks. A custom sampler cannot coexist with a declared
-`problem.correlation` or a VKOGA `correlation=` override. Shapes, finite values,
-and fixed columns are checked; statistical consistency is the user's responsibility.
+- `fixed_indices=()`: joint draws, `conditioning_rows=None`.
+- `fixed_indices=(i,)`: keep column `i` of `conditioning_rows`, redraw the rest
+  given `x_i`.
+- `fixed_indices` holding every index except `i`: keep those columns, redraw
+  `x_i` given the rest.
 
-Use `jaxgsa.sampling.sample(problem, n, sampler=sampler, sampler_dimension=...)`
-to generate joint rows for given-data methods. The callback can also transform
-externally generated uniforms to produce `X`
-for given-data methods. Sobol rows are dependent across observations: use `sequence="monte_carlo"`
-and a transformation yielding independent rows for IID row-bootstrap intervals
-or HSIC permutation tests, unless inference accounts for the sampling design.
-Dependence between input columns remains allowed. This does not turn an ordinary `X` matrix into a
-Kucherenko analysis design. Saved designs retain sampled rows and provenance,
-not callable code. VKOGA's declared marginals must match the sampler because
-its coordinate transform and component bases still use them. Training data must
-cover integration support; an independent training design is optional.
-Custom VKOGA integration uses two independent randomized inner blocks and
-products of their means, avoiding an IID variance correction for Sobol points.
-Two independent joint blocks estimate output variance. This also applies to
-Monte Carlo; finite-sample indices can still be slightly negative.
-`_custom_indices.py` computes the existing VKOGA indices for the supplied
-distribution, not new index definitions. Dependence fitting remains explicit, never triggered just by supplying data.
+Copy the fixed columns exactly. Overwriting fixed columns after a joint draw is
+valid only for independent inputs. The callback must be deterministic: identical
+arguments give identical outputs. The package passes copies, so changing the
+arguments does no harm. All randomness comes from the package: Kucherenko's
+`seed` and `scramble`, or VKOGA's required `key`. Everything uses scrambled Sobol' points, and sample sizes round up to
+the next power of two. Shapes, finite values and fixed columns are checked.
+Statistical consistency is the user's responsibility.
+
+`kucherenko.sample(problem, n, seed=...)` and
+`vkoga.analyze(problem, X_train, Y_train, key=...)` read the sampler from the
+problem. VKOGA's `correlation=` override raises for a custom-sampler problem.
+Kucherenko and VKOGA share one estimator for both dependence kinds, and the
+custom path costs about the same time.
+
+Sobol, Morris and eFAST designs and the independence-only analyses refuse a
+custom-sampler problem, as they refuse a correlated one. For given-data
+methods, draw `X` with `jaxgsa.sampling.monte_carlo(problem, n, seed=...)`. It
+sends pseudo-random uniforms through the joint branch, so rows are independent
+draws and row bootstrap and HSIC permutation tests stay valid. This does not
+turn an ordinary `X` matrix into a Kucherenko analysis design. Saved designs
+retain sampled rows and provenance, not callable code. VKOGA's declared
+marginals must match the sampler, because its coordinate transform and
+component bases still use them. Training data must cover the analysis
+distribution. Dependence fitting remains explicit, never triggered just by
+supplying data.
 
 ### Higher-order dependence
 

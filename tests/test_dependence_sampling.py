@@ -1,12 +1,19 @@
-"""Validation of the shared custom dependence sampling contract."""
+"""The shared draw strategies and the sampler contract in ``_core/dependence.py``."""
 
 import numpy as np
 import pytest
 
 from jaxgsa._core.dependence import (
-    generate_uniform_points,
+    CustomDraws,
+    GaussianDraws,
+    draws_for,
     transform_samples,
-    validate_sampler,
+)
+from jaxgsa.problem import Problem
+
+INDEPENDENT = Problem.from_dict({"a": (0.0, 1.0), "b": (0.0, 1.0)})
+GAUSSIAN = Problem.from_dict(
+    {"a": (0.0, 1.0), "b": (0.0, 1.0)}, correlation=[[1.0, 0.8], [0.8, 1.0]]
 )
 
 
@@ -18,26 +25,7 @@ def identity_sampler(uniform_points, *, conditioning_rows=None, fixed_indices=()
     return result
 
 
-def test_sampler_validation():
-    assert validate_sampler(None, None, 2, "sobol") is None
-    assert validate_sampler(identity_sampler, None, 2, "sobol") == 2
-    assert validate_sampler(identity_sampler, 3, 2, "monte_carlo") == 3
-    with pytest.raises(ValueError, match="requires sampler"):
-        validate_sampler(None, 3, 2, "sobol")
-    with pytest.raises(ValueError, match="sequence"):
-        validate_sampler(identity_sampler, None, 2, "invalid")
-
-
-@pytest.mark.parametrize("sampler", [3, "sampler"])
-def test_sampler_requires_callable(sampler):
-    with pytest.raises(TypeError, match="callable"):
-        validate_sampler(sampler, None, 2, "sobol")
-
-
-@pytest.mark.parametrize("dimension", [0, -1, True, 1.5])
-def test_sampler_requires_positive_integer_dimension(dimension):
-    with pytest.raises(ValueError, match="positive integer"):
-        validate_sampler(identity_sampler, dimension, 2, "sobol")
+CUSTOM = INDEPENDENT.with_sampler(identity_sampler)
 
 
 @pytest.mark.parametrize(
@@ -85,59 +73,62 @@ def test_conditional_protects_inputs_and_checks_fixed_columns():
     np.testing.assert_array_equal(uniforms, np.full((3, 2), 0.25))
     np.testing.assert_array_equal(output[:, 0], original[:, 0])
     assert not np.array_equal(output[:, 1], original[:, 1])
-    with pytest.raises(ValueError, match="preserve"):
+    with pytest.raises(ValueError, match="fixed columns"):
         transform_samples(sampler, uniforms, 2, conditioning_rows=rows, fixed_indices=(1,))
     np.testing.assert_array_equal(rows, original)
 
 
-@pytest.mark.parametrize("fixed", [(0, 0), (-1,), (2,), (True,), (0.5,), [0]])
-def test_conditional_rejects_invalid_fixed_indices(fixed):
-    with pytest.raises(ValueError, match="fixed_indices"):
-        transform_samples(identity_sampler, np.zeros((3, 2)), 2, fixed_indices=fixed)
+def test_draws_for_picks_the_strategy():
+    assert isinstance(draws_for(INDEPENDENT), GaussianDraws)
+    assert isinstance(draws_for(GAUSSIAN), GaussianDraws)
+    assert isinstance(draws_for(CUSTOM), CustomDraws)
 
 
-@pytest.mark.parametrize("fixed", [(), (0, 1)])
-def test_conditional_supports_empty_and_full_subsets(fixed):
-    rows = np.ones((3, 2))
-    output = transform_samples(
-        identity_sampler, np.zeros((3, 2)), 2, conditioning_rows=rows, fixed_indices=fixed
-    )
-    expected = rows if fixed else np.zeros((3, 2))
-    np.testing.assert_array_equal(output, expected)
+def test_custom_draws_needs_a_sampler():
+    with pytest.raises(ValueError, match="needs a problem with a sampler"):
+        CustomDraws(INDEPENDENT)
 
 
-def test_nonempty_subset_requires_conditioning_rows():
-    with pytest.raises(ValueError, match="conditioning_rows is required"):
-        transform_samples(identity_sampler, np.zeros((3, 2)), 2, fixed_indices=(0,))
+@pytest.mark.parametrize("problem", [GAUSSIAN, CUSTOM], ids=["gaussian", "custom"])
+def test_conditional_redraws_keep_fixed_columns(problem):
+    draws = draws_for(problem)
+    rng = np.random.default_rng(0)
+    rows = draws.joint(rng.random((32, draws.dimension)))
+    for index in (0, 1):
+        kept = draws.rest_given_self(rng.random((32, draws.rest_dimension)), rows, index)
+        np.testing.assert_array_equal(kept[:, index], rows[:, index])
+        kept = draws.self_given_rest(rng.random((32, draws.self_dimension)), rows, index)
+        rest = 1 - index
+        np.testing.assert_array_equal(kept[:, rest], rows[:, rest])
 
 
-@pytest.mark.parametrize("value", [-0.1, 1.1, np.nan, np.inf])
-def test_uniform_points_reject_invalid_values(value):
-    with pytest.raises(ValueError, match="finite|lie in"):
-        transform_samples(identity_sampler, np.full((3, 2), value), 2)
+def test_gaussian_draws_on_an_independent_problem_are_independent():
+    draws = draws_for(INDEPENDENT)
+    rows = draws.joint(np.random.default_rng(1).random((20_000, 2)))
+    assert abs(np.corrcoef(rows[:, 0], rows[:, 1])[0, 1]) < 0.03
+    noise = np.random.default_rng(2).random((20_000, draws.rest_dimension))
+    redrawn = draws.rest_given_self(noise, rows, 0)
+    assert abs(np.corrcoef(redrawn[:, 0], redrawn[:, 1])[0, 1]) < 0.03
 
 
-@pytest.mark.parametrize("shape", [(0, 2), (3, 0), (3,)])
-def test_uniform_points_reject_invalid_shape(shape):
-    with pytest.raises(ValueError, match="nonempty two-dimensional"):
-        transform_samples(identity_sampler, np.zeros(shape), 2)
+def test_gaussian_draws_on_a_correlated_problem_are_correlated():
+    draws = draws_for(GAUSSIAN)
+    rows = draws.joint(np.random.default_rng(1).random((20_000, 2)))
+    assert np.corrcoef(rows[:, 0], rows[:, 1])[0, 1] > 0.7
+    unit = draws.to_unit(rows)
+    assert np.all((unit >= 0) & (unit <= 1))
 
 
-@pytest.mark.parametrize("sequence, n", [("sobol", 8), ("monte_carlo", 7)])
-def test_uniform_generation_is_reproducible_with_exact_count(sequence, n):
-    first = generate_uniform_points(n, 3, sequence=sequence, rng=np.random.default_rng(4))
-    second = generate_uniform_points(n, 3, sequence=sequence, rng=np.random.default_rng(4))
-    np.testing.assert_array_equal(first, second)
-    assert first.shape == (n, 3)
-    assert np.all((first >= 0) & (first <= 1))
+def test_custom_draws_to_unit_maps_rows_in_support():
+    draws = draws_for(CUSTOM)
+    rows = np.array([[0.1, 0.9], [0.5, 0.5]])
+    np.testing.assert_allclose(draws.to_unit(rows), rows, atol=1e-6)
+    np.testing.assert_array_equal(draws.to_physical(rows), rows)
 
 
-@pytest.mark.parametrize("n, dimension", [(0, 2), (2, 0), (True, 2), (2, 1.5)])
-def test_uniform_generation_requires_positive_integer_sizes(n, dimension):
-    with pytest.raises(ValueError, match="positive integers"):
-        generate_uniform_points(n, dimension, sequence="sobol", rng=np.random.default_rng(0))
-
-
-def test_sobol_requires_power_of_two_count():
-    with pytest.raises(ValueError, match="power-of-two"):
-        generate_uniform_points(3, 2, sequence="sobol", rng=np.random.default_rng(0))
+@pytest.mark.parametrize("bad", [[1.5, 0.5], [0.5, -0.1]])
+def test_custom_draws_to_unit_rejects_out_of_support_rows(bad):
+    draws = draws_for(CUSTOM)
+    rows = np.array([[0.2, 0.2], bad])
+    with pytest.raises(ValueError, match="outside the declared support"):
+        draws.to_unit(rows)

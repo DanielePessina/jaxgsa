@@ -323,7 +323,7 @@ class TestPureCoresShareTheGates:
     def test_an_identity_correlation_passes_every_core(self, spec):
         """``with_correlation(I)`` declares independence, so no gate may fire.
 
-        ``has_correlated_inputs`` is ``not is_independent(R)``, and the gates
+        ``problem.dependence`` is ``"independent"`` for an identity matrix, and the gates
         must preserve that: an explicit identity matrix is the independent
         problem, spelled out.
         """

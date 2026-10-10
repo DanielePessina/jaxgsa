@@ -35,17 +35,20 @@ share of ``Var(f_i)`` and this one removes it. The pair ``(S_U, S_C)`` splits
 ``S_TC`` along exactly the boundary this module's estimator draws.
 
 ``f_i`` is fitted in the basis each parameter's own marginal is orthonormal
-under: probabilists' Hermite polynomials of the latent normal ``Z_i`` for an
-untruncated Gaussian marginal, shifted Legendre polynomials of the copula
-uniform ``U_i`` otherwise (:func:`_component_basis_kinds`). A Legendre fit of
+under: probabilists' Hermite polynomials of the normal score ``Z_i`` for an
+untruncated Gaussian marginal, shifted Legendre polynomials of the marginal
+CDF value ``U_i`` otherwise (:func:`_component_basis_kinds`). A Legendre fit of
 a polynomial or exponential response in ``Z_i`` converges slowly, because
 ``Z_i = Phi^{-1}(U_i)`` is steep near the tails; picking the basis the
 marginal matches removes that gap.
 
-Every expectation is taken under a Gaussian copula, whose conditionals are
-closed-form in the latent normal space. Every model evaluation goes through a
-fitted surrogate. That is the point of the two-stage approach: the nested
-conditional sampling would be unaffordable against the original model.
+Every expectation is taken under the problem's input distribution, reached
+through a :class:`~jaxgsa._core.dependence.Draws` object: the closed-form
+conditionals of the built-in Gaussian copula, or the joint and conditional
+draws of a custom sampler declared on the problem. Both consume the same
+uniform points, so one estimator serves both. Every model evaluation goes
+through a fitted surrogate. That is the point of the two-stage approach: the
+nested conditional sampling would be unaffordable against the original model.
 
 References:
     Li, Rabitz, Yelvington et al. (2010). J. Phys. Chem. A 114:6022-6032.
@@ -57,21 +60,15 @@ References:
 from __future__ import annotations
 
 import warnings
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from math import factorial
 from typing import Callable, NamedTuple
 
 import numpy as np
-from scipy.stats import norm
+from scipy.special import ndtri
 
 from jaxgsa._core.batching import resolve_batch_size
-from jaxgsa._core.copula import (
-    _ConditionalPlan,
-    assemble_latent,
-    draw_rest_given_self,
-    draw_self_given_rest,
-    latent_normal_sample,
-)
+from jaxgsa._core.dependence import Draws, sobol_uniforms
 from jaxgsa._core.legendre import legendre_orthonormal
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.problem import GaussianSpec, Problem
@@ -83,9 +80,12 @@ from jaxgsa.problem import GaussianSpec, Problem
 _COMPONENT_DEGREE = 6
 
 # Largest dimension a scipy Sobol' engine has direction numbers for. The
-# inner draw in _total_uncorrelated_and_conditional uses one dimension per
-# outer point, so it splits into blocks above this width.
+# inner draw in _total_uncorrelated_and_conditional uses ``draws.self_dimension``
+# Sobol' dimensions per outer point, so it splits into blocks above this width.
 _MAX_QMC_DIM = 21201
+
+# Keeps the probit of a marginal CDF coordinate finite at exact 0 and 1.
+_UNIT_CLIP = 1e-12
 
 # Ridge added to the component-function normal equations. The basis is
 # marginally orthonormal, so the Gram matrix is well conditioned unless two
@@ -192,7 +192,7 @@ class CorrelatedIndices(NamedTuple):
 def estimate_correlated_indices(
     *,
     problem: Problem,
-    plan: _ConditionalPlan,
+    draws: Draws,
     predict: Callable[[np.ndarray], np.ndarray],
     n_outer: int,
     n_inner: int,
@@ -203,19 +203,23 @@ def estimate_correlated_indices(
 ) -> CorrelatedIndices:
     """Estimate the five correlated variance-based indices by quasi-Monte-Carlo.
 
-    Everything stays in copula (unit-cube) coordinates. ``u_i = Phi(z_i)`` is
-    exactly the marginal CDF value ``F_i(x_i)``, and that is the space the
-    surrogate is fitted in. The millions of conditional draws below therefore
-    need no round-trip through physical units.
+    The surrogate is fitted in marginal CDF coordinates ``u_i = F_i(x_i)``,
+    so every draw reaches it through :meth:`Draws.to_unit`. While
+    conditioning, the draws stay in the implementation's own space: latent
+    normal for the Gaussian copula, physical for a custom sampler.
+
+    Every stage takes its noise as scrambled Sobol' points of width
+    ``draws.dimension``. Conditioning rows are tiled ``n_inner`` times, so
+    one chunk of outer points costs one conditional draw and one surrogate
+    call, whichever implementation ``draws`` is.
 
     Args:
         problem: Problem whose declared marginals pick each parameter's
             component-fit basis (see :func:`_component_basis_kinds`).
-        plan: Precomputed Gaussian conditionals from
-            :func:`jaxgsa._core.copula.build_conditional_plan`. Its
-            ``chol_full`` field supplies the joint factor for the
-            unconditional variance sample, so the conditionals and the joint
-            draw always come from the same correlation matrix.
+        draws: Joint and conditional draws of the inputs, from
+            :func:`jaxgsa._core.dependence.draws_for` or built directly. The
+            conditionals and the joint draw come from the same object, so
+            they always describe the same distribution.
         predict: Fitted surrogate. It maps ``(n, D)`` unit-cube samples to
             ``(n, S)`` outputs.
         n_outer: Outer (conditioning) sample size per parameter.
@@ -238,15 +242,16 @@ def estimate_correlated_indices(
     Returns:
         A :class:`CorrelatedIndices` whose index arrays have shape ``(S, D)``.
     """
-    D = plan.chol_full.shape[0]
+    D = problem.num_vars
     streams = _spawn_streams(entropy, D)
     basis_kinds = _component_basis_kinds(problem)
 
     # --- Unconditional variance, and the additive component functions --------
-    Z_var = (
-        latent_normal_sample(n_variance, D, seed=_qmc_seed(streams.variance)) @ plan.chol_full.T
+    rows_var = draws.joint(
+        sobol_uniforms(n_variance, draws.dimension, seed=_qmc_seed(streams.variance))
     )
-    U_var = norm.cdf(Z_var)
+    U_var = draws.to_unit(rows_var)
+    Z_var = _probit(U_var)
     Y_var = np.asarray(predict(U_var), dtype=np.float64)
     variance = Y_var.var(axis=0)
     # A zero-variance slice makes every index undefined rather than zero; NaN
@@ -262,7 +267,7 @@ def estimate_correlated_indices(
 
     for i in range(D):
         S_TC[:, i] = _total_correlated(
-            plan=plan,
+            draws=draws,
             index=i,
             predict=predict,
             n_outer=n_outer,
@@ -272,7 +277,7 @@ def estimate_correlated_indices(
             batch_size=batch_size,
         )
         total_uncorrelated, conditional_component_var = _total_uncorrelated_and_conditional(
-            plan=plan,
+            draws=draws,
             index=i,
             predict=predict,
             component=coefficients[:, i, :],
@@ -307,6 +312,22 @@ def estimate_correlated_indices(
         S_IU=S_TU - S_U,
         variance=variance,
     )
+
+
+def _probit(u: np.ndarray) -> np.ndarray:
+    """Map marginal CDF coordinates to normal scores ``Phi^-1(u)``.
+
+    For the Gaussian copula this recovers the latent normal draw. For a
+    custom sampler it is the same transform of its CDF coordinates, so the
+    Hermite component basis reads the same coordinate under either.
+
+    Args:
+        u: Values in ``[0, 1]``, any shape.
+
+    Returns:
+        Finite normal scores, same shape as ``u``.
+    """
+    return ndtri(np.clip(u, _UNIT_CLIP, 1.0 - _UNIT_CLIP))
 
 
 def _clip_independent_part(
@@ -417,11 +438,11 @@ def _component_basis_kinds(problem: Problem) -> tuple[str, ...]:
     """Pick each parameter's component-fit basis from its declared marginal.
 
     ``"hermite"`` for an untruncated Gaussian marginal, where the physical
-    variable is an affine map of the latent normal ``Z_i`` and Hermite
+    variable is an affine map of the normal score ``Z_i`` and Hermite
     polynomials of ``Z_i`` represent a polynomial response exactly.
     ``"legendre"`` otherwise (uniform, or a truncated Gaussian, whose CDF
     is not the standard normal CDF, so ``Z_i`` no longer maps affinely to
-    the physical variable): the copula uniform ``U_i`` is always exactly
+    the physical variable): the marginal CDF value ``U_i`` is always exactly
     uniform, whatever the marginal, so Legendre stays a safe fallback there.
 
     Args:
@@ -444,8 +465,8 @@ def _component_value(u: np.ndarray, z: np.ndarray, kind: str) -> np.ndarray:
     """Pick the coordinate a component-fit basis of the given kind reads.
 
     Args:
-        u: Copula-uniform values for one parameter, shape ``(...,)``.
-        z: Latent-normal values for the same parameter, shape ``(...,)``.
+        u: Marginal CDF values for one parameter, shape ``(...,)``.
+        z: Normal scores ``Phi^-1(u)`` for the same parameter, shape ``(...,)``.
         kind: ``"hermite"`` or ``"legendre"``, from
             :func:`_component_basis_kinds`.
 
@@ -467,8 +488,8 @@ def _fit_component_functions(
     to be extracted afterwards by conditioning.
 
     Args:
-        U: Copula-uniform values of the sample, shape ``(N, D)``.
-        Z: Latent-normal values of the sample, shape ``(N, D)``.
+        U: Marginal CDF values of the sample, shape ``(N, D)``.
+        Z: Normal scores ``Phi^-1(u)`` of the sample, shape ``(N, D)``.
         Y: Surrogate outputs, shape ``(N, S)``.
         basis_kinds: Per-parameter basis choice from
             :func:`_component_basis_kinds`, length ``D``.
@@ -512,9 +533,9 @@ def _outer_chunk(n_outer: int, n_inner: int, n_columns: int, batch_size: int | N
     """Return how many outer points fit in the transient-memory budget.
 
     Each outer point expands into ``n_inner`` rows. Each row holds the
-    ``D``-column latent block plus the ``S``-column prediction, in float64.
-    Thin wrapper over the shared :func:`resolve_batch_size` with one outer
-    point as the "row".
+    uniform noise, the tiled conditioning row, the drawn row, its unit-cube
+    image and the ``S``-column prediction, in float64. Thin wrapper over the
+    shared :func:`resolve_batch_size` with one outer point as the "row".
 
     ``batch_size`` counts sample rows, not outer points, so a caller's value
     is divided by the expansion factor before it is applied here. Passing it
@@ -524,7 +545,7 @@ def _outer_chunk(n_outer: int, n_inner: int, n_columns: int, batch_size: int | N
     Args:
         n_outer: Total outer points.
         n_inner: Inner draws per outer point.
-        n_columns: Columns held per expanded row (``D + S``).
+        n_columns: Columns held per expanded row (``dimension + 3 * D + S``).
         batch_size: Caller's row budget, or ``None`` to derive one from the
             memory budget. A budget smaller than one outer point's expansion
             still processes one outer point: the inner block is the smallest
@@ -539,7 +560,7 @@ def _outer_chunk(n_outer: int, n_inner: int, n_columns: int, batch_size: int | N
 
 def _total_correlated(
     *,
-    plan: _ConditionalPlan,
+    draws: Draws,
     index: int,
     predict: Callable[[np.ndarray], np.ndarray],
     n_outer: int,
@@ -550,11 +571,15 @@ def _total_correlated(
 ) -> np.ndarray:
     """Estimate ``V(E(Y|X_i))`` for one parameter.
 
-    Outer points are processed in memory-budgeted chunks. Only the
-    ``(n_outer, S)`` inner means stay resident; the full
-    ``(n_outer * n_inner, S)`` block is never materialised. All latent draws
-    are made up front, so chunking changes evaluation batching only, not the
-    sample.
+    The outer points are joint draws, of which only column ``index`` is kept:
+    that column follows the marginal of ``X_i``. Each one is tiled
+    ``n_inner`` times and the rest is redrawn from ``X_-i | X_i``.
+
+    Outer points are processed in memory-budgeted chunks, one conditional
+    draw and one surrogate call per chunk. Only the ``(n_outer, S)`` inner
+    means stay resident; the full ``(n_outer * n_inner, S)`` block is never
+    materialised. All uniform noise is drawn up front, so chunking changes
+    evaluation batching only, not the sample.
 
     Note:
         The estimator drops the usual ``inner_var / n_inner`` correction and
@@ -566,7 +591,7 @@ def _total_correlated(
         ``n_outer`` instead.
 
     Args:
-        plan: Precomputed Gaussian conditionals for the copula.
+        draws: Joint and conditional draws of the inputs.
         index: Position of the parameter ``X_i`` being conditioned on.
         predict: Fitted surrogate. It maps ``(n, D)`` unit-cube samples to
             ``(n, S)`` outputs.
@@ -581,24 +606,23 @@ def _total_correlated(
     Returns:
         Conditional-expectation variance, shape ``(S,)``. Not yet normalised.
     """
-    others = plan.others[index]
-    D_rest = others.shape[0]
     outer_stream, inner_stream = stream.spawn(2)
-    z_self = latent_normal_sample(n_outer, 1, seed=_qmc_seed(outer_stream))[:, 0]
+    outer = draws.joint_led_by(
+        sobol_uniforms(n_outer, draws.dimension, seed=_qmc_seed(outer_stream)), index
+    )
     # One inner block, reused across every outer point. Sharing it makes the
     # inner integration rule identical for all conditioning values, which
     # cancels much of its error out of the outer variance.
-    inner = latent_normal_sample(n_inner, D_rest, seed=_qmc_seed(inner_stream))
+    inner = sobol_uniforms(n_inner, draws.rest_dimension, seed=_qmc_seed(inner_stream))
 
     inner_mean = np.empty((n_outer, n_slices), dtype=np.float64)
-    chunk = _outer_chunk(n_outer, n_inner, D_rest + 1 + n_slices, batch_size)
+    n_columns = draws.rest_dimension + 3 * outer.shape[1] + n_slices
+    chunk = _outer_chunk(n_outer, n_inner, n_columns, batch_size)
     for start in range(0, n_outer, chunk):
-        z_chunk = z_self[start : start + chunk]
-        # Z_-i | Z_i, broadcast to (chunk, n_inner, D_rest).
-        z_rest = draw_rest_given_self(plan, index, z_chunk[:, None], inner)
-        z_self_tiled = np.repeat(z_chunk, n_inner)
-        Z = assemble_latent(index, others, z_self_tiled, z_rest.reshape(-1, D_rest))
-        Y = np.asarray(predict(norm.cdf(Z)), dtype=np.float64)
+        conditioning = np.repeat(outer[start : start + chunk], n_inner, axis=0)
+        noise = np.tile(inner, (conditioning.shape[0] // n_inner, 1))
+        rows = draws.rest_given_self(noise, conditioning, index)
+        Y = np.asarray(predict(draws.to_unit(rows)), dtype=np.float64)
         inner_mean[start : start + chunk] = Y.reshape(-1, n_inner, n_slices).mean(axis=1)
 
     # No inner-noise correction. The textbook term ``inner_var / n_inner``
@@ -610,43 +634,48 @@ def _total_correlated(
     return inner_mean.var(axis=0)
 
 
-def _inner_noise(n_inner: int, n_outer: int, stream: np.random.SeedSequence) -> np.ndarray:
+def _inner_noise(
+    n_inner: int, n_outer: int, dimension: int, stream: np.random.SeedSequence
+) -> Iterator[tuple[int, np.ndarray]]:
     """Draw one independent stratified inner block per outer point.
 
-    Each outer point gets its own column of a scrambled Sobol' set, so the
-    inner integration error is independent across outer points and averages
-    away in ``S_TU``. The block comes out transposed, ``(n_outer, n_inner)``.
+    Each outer point gets its own ``dimension`` columns of a scrambled Sobol'
+    set, so the inner integration error is independent across outer points
+    and averages away in ``S_TU``.
 
-    A Sobol' engine carries direction numbers for at most
-    ``_MAX_QMC_DIM`` dimensions, so one call cannot serve more than that many
+    A Sobol' engine carries direction numbers for at most ``_MAX_QMC_DIM``
+    dimensions, so one call serves at most ``_MAX_QMC_DIM // dimension``
     outer points. A larger ``n_outer`` is split into consecutive blocks of
-    columns, each drawn from its own spawned child stream. The columns stay
-    independent across the split, which is all this estimator asks of them.
+    outer points, each drawn from its own spawned child stream. The blocks
+    stay independent across the split, which is all this estimator asks of
+    them. Blocks are yielded one at a time, so at most one block of noise is
+    resident.
 
     Args:
         n_inner: Inner draws per outer point.
-        n_outer: Number of outer points, one column each.
+        n_outer: Number of outer points.
+        dimension: Uniform coordinates per draw, ``draws.self_dimension``.
         stream: This estimator's inner :class:`numpy.random.SeedSequence`.
 
-    Returns:
-        Standard normal noise, shape ``(n_outer, n_inner)``.
+    Yields:
+        ``(start, noise)`` pairs: the first outer point the block covers and
+        its uniform noise, shape ``(width, n_inner, dimension)``.
     """
-    if n_outer <= _MAX_QMC_DIM:
-        return latent_normal_sample(n_inner, n_outer, seed=_qmc_seed(stream)).T
-    n_blocks = -(-n_outer // _MAX_QMC_DIM)
-    blocks = []
-    for width, child in zip(
-        [min(_MAX_QMC_DIM, n_outer - start) for start in range(0, n_outer, _MAX_QMC_DIM)],
-        stream.spawn(n_blocks),
-        strict=True,
-    ):
-        blocks.append(latent_normal_sample(n_inner, width, seed=_qmc_seed(child)).T)
-    return np.concatenate(blocks, axis=0)
+    per_block = max(1, _MAX_QMC_DIM // dimension)
+    if n_outer <= per_block:
+        starts, seeds = [0], [stream]
+    else:
+        starts = list(range(0, n_outer, per_block))
+        seeds = stream.spawn(len(starts))
+    for start, seed in zip(starts, seeds, strict=True):
+        width = min(per_block, n_outer - start)
+        block = sobol_uniforms(n_inner, width * dimension, seed=_qmc_seed(seed))
+        yield start, block.reshape(n_inner, width, dimension).transpose(1, 0, 2)
 
 
 def _total_uncorrelated_and_conditional(
     *,
-    plan: _ConditionalPlan,
+    draws: Draws,
     index: int,
     predict: Callable[[np.ndarray], np.ndarray],
     component: np.ndarray,
@@ -664,12 +693,13 @@ def _total_uncorrelated_and_conditional(
     the fitted component function evaluated on the same draws gives the
     conditional expectation that ``S_U`` subtracts from ``V(f_i)``.
 
-    Outer points are processed in memory-budgeted chunks, as in
+    The outer points are joint draws, of which every column except ``index``
+    is kept. Outer points are processed in memory-budgeted chunks, as in
     :func:`_total_correlated`. Only ``(n_outer, S)`` accumulators stay
-    resident, and chunking does not change the latent sample.
+    resident, and chunking does not change the sample.
 
     Args:
-        plan: Precomputed Gaussian conditionals for the copula.
+        draws: Joint and conditional draws of the inputs.
         index: Position of the parameter ``X_i`` being resampled.
         predict: Fitted surrogate. It maps ``(n, D)`` unit-cube samples to
             ``(n, S)`` outputs.
@@ -688,39 +718,36 @@ def _total_uncorrelated_and_conditional(
         ``(conditional_variance_mean, component_conditional_variance)``, each
         shape ``(S,)``. Neither is normalised by ``V(Y)``.
     """
-    others = plan.others[index]
-    D_rest = others.shape[0]
     outer_stream, inner_stream = stream.spawn(2)
-    z_rest = (
-        latent_normal_sample(n_outer, D_rest, seed=_qmc_seed(outer_stream))
-        @ plan.chol_marginal[index].T
-    )
-    # One inner draw per outer point: latent_normal_sample(n_inner, n_outer, ...)
-    # gives an (n_inner, n_outer) scrambled Sobol' block, one column per outer
-    # point, transposed here to (n_outer, n_inner). A single shared column
-    # (the old behaviour) freezes the inner sampling error into a per-run bias
-    # that a mean over outer points cannot average away, because S_TU is a
-    # mean of inner variances, not a variance of inner means (contrast
-    # :func:`_total_correlated`, where the shared block is correct).
-    inner = _inner_noise(n_inner, n_outer, inner_stream)
+    outer = draws.joint(sobol_uniforms(n_outer, draws.dimension, seed=_qmc_seed(outer_stream)))
 
     inner_var = np.empty((n_outer, n_slices), dtype=np.float64)
     f_hat = np.empty((n_outer, n_slices), dtype=np.float64)
-    chunk = _outer_chunk(n_outer, n_inner, D_rest + 1 + n_slices, batch_size)
-    for start in range(0, n_outer, chunk):
-        stop = start + chunk
-        # Z_i | Z_-i, broadcast to (chunk, n_inner) via the batched mean.
-        z_self = draw_self_given_rest(plan, index, z_rest[start:stop, None, :], inner[start:stop])
-        z_rest_tiled = np.repeat(z_rest[start:stop], n_inner, axis=0)
-        Z = assemble_latent(index, others, z_self.reshape(-1), z_rest_tiled)
+    n_columns = draws.self_dimension + 3 * outer.shape[1] + n_slices
+    chunk = _outer_chunk(n_outer, n_inner, n_columns, batch_size)
+    # A fresh inner block per outer point (see _inner_noise). A single shared
+    # block (the old behaviour) freezes the inner sampling error into a
+    # per-run bias that a mean over outer points cannot average away, because
+    # S_TU is a mean of inner variances, not a variance of inner means
+    # (contrast :func:`_total_correlated`, where the shared block is correct).
+    width = draws.self_dimension
+    for block_start, block in _inner_noise(n_inner, n_outer, width, inner_stream):
+        for offset in range(0, block.shape[0], chunk):
+            start = block_start + offset
+            noise = block[offset : offset + chunk]
+            stop = start + noise.shape[0]
+            conditioning = np.repeat(outer[start:stop], n_inner, axis=0)
+            rows = draws.self_given_rest(noise.reshape(-1, width), conditioning, index)
+            U = draws.to_unit(rows)
 
-        Y = np.asarray(predict(norm.cdf(Z)), dtype=np.float64)
-        inner_var[start:stop] = Y.reshape(-1, n_inner, n_slices).var(axis=1, ddof=1)
+            Y = np.asarray(predict(U), dtype=np.float64)
+            inner_var[start:stop] = Y.reshape(-1, n_inner, n_slices).var(axis=1, ddof=1)
 
-        # E(f_i | X_-i), averaged over the same inner draws of X_i. Its
-        # variance over the outer sample is the correlation-explained part of
-        # f_i that Equation (25) removes.
-        value = z_self if basis_kind == "hermite" else norm.cdf(z_self)
-        f_hat[start:stop] = _evaluate_component(value, component, basis_kind).mean(axis=1)
+            # E(f_i | X_-i), averaged over the same inner draws of X_i. Its
+            # variance over the outer sample is the correlation-explained part
+            # of f_i that Equation (25) removes.
+            u_self = U[:, index].reshape(-1, n_inner)
+            value = _component_value(u_self, _probit(u_self), basis_kind)
+            f_hat[start:stop] = _evaluate_component(value, component, basis_kind).mean(axis=1)
 
     return inner_var.mean(axis=0), f_hat.var(axis=0)
