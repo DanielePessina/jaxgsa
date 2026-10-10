@@ -45,6 +45,7 @@ from jaxgsa import (
     optimal_transport,
     pawn,
     pce,
+    rank,
     shapley,
     sobol,
     vkoga,
@@ -357,6 +358,12 @@ def _m_pawn(case: Case, X: jax.Array, Y: jax.Array) -> Any:
     )
 
 
+def _m_rank(case: Case, X: jax.Array, Y: jax.Array) -> Any:
+    return rank.analyze(
+        case.problem, X, Y, n_bootstrap=20, key=jax.random.key(SEED), verbose=False
+    )
+
+
 def _m_hsic(case: Case, X: jax.Array, Y: jax.Array) -> Any:
     return hsic.analyze(case.problem, X, Y, n_perms=50, key=jax.random.key(SEED), verbose=False)
 
@@ -474,6 +481,7 @@ GIVEN_DATA_METHODS: dict[str, Callable[[Case, jax.Array, jax.Array], Any]] = {
     "optimal_transport_trajectory": _m_optimal_transport_trajectory,
     "pawn": _m_pawn,
     "pce": _m_pce,
+    "rank": _m_rank,
     "shapley": _m_shapley,
     "vkoga": _m_vkoga,
 }

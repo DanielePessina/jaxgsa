@@ -233,6 +233,11 @@ def _run_pawn() -> Any:
     )
 
 
+def _run_rank() -> Any:
+    X, Y = _given_data(CONTINUOUS)
+    return jaxgsa.rank.analyze(CONTINUOUS, X, jnp.stack([Y, Y**2], axis=1), verbose=False)
+
+
 def _run_pce() -> Any:
     X, Y = _given_data(CONTINUOUS)
     return jaxgsa.pce.analyze(CONTINUOUS, X, Y, order=2, verbose=False)
@@ -357,6 +362,13 @@ MATRIX = (
         (2, 3),
         frozenset({"given-data", "multi-output", "surrogate"}),
         _run_pce,
+    ),
+    FeatureCase(
+        "rank-multi-output",
+        "rank",
+        (2, 2, 3),
+        frozenset({"given-data", "time-series", "multi-output"}),
+        _run_rank,
     ),
     FeatureCase(
         "shapley-scalar-surrogate",

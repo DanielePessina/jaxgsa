@@ -1164,6 +1164,84 @@
       "loo_rmse:time,output"
     ]
   },
+  "rank@multi": {
+    "dims": [
+      "output",
+      "param"
+    ],
+    "coords": [
+      "output",
+      "param"
+    ],
+    "data_vars": [
+      "S1",
+      "S1_lower",
+      "S1_upper"
+    ],
+    "var_dims": [
+      "S1:output,param",
+      "S1_lower:output,param",
+      "S1_upper:output,param"
+    ],
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap"
+    ],
+    "type": "RankResult"
+  },
+  "rank@scalar": {
+    "dims": [
+      "param"
+    ],
+    "coords": [
+      "param"
+    ],
+    "data_vars": [
+      "S1",
+      "S1_lower",
+      "S1_upper"
+    ],
+    "var_dims": [
+      "S1:param",
+      "S1_lower:param",
+      "S1_upper:param"
+    ],
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap"
+    ],
+    "type": "RankResult"
+  },
+  "rank@series": {
+    "dims": [
+      "output",
+      "param",
+      "time"
+    ],
+    "coords": [
+      "output",
+      "param",
+      "time"
+    ],
+    "data_vars": [
+      "S1",
+      "S1_lower",
+      "S1_upper"
+    ],
+    "var_dims": [
+      "S1:time,output,param",
+      "S1_lower:time,output,param",
+      "S1_upper:time,output,param"
+    ],
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap"
+    ],
+    "type": "RankResult"
+  },
   "shapley@multi": {
     "attrs": [
       "backend",
@@ -1312,7 +1390,8 @@
       "S2_upper",
       "ST",
       "ST_lower",
-      "ST_upper"
+      "ST_upper",
+      "variance"
     ],
     "dims": [
       "param",
@@ -1329,7 +1408,8 @@
       "S2_upper:param_i,param_j",
       "ST:param",
       "ST_lower:param",
-      "ST_upper:param"
+      "ST_upper:param",
+      "variance:"
     ]
   },
   "sobol@series": {
@@ -1355,7 +1435,8 @@
       "S2_upper",
       "ST",
       "ST_lower",
-      "ST_upper"
+      "ST_upper",
+      "variance"
     ],
     "dims": [
       "output",
@@ -1374,7 +1455,8 @@
       "S2_upper:time,output,param_i,param_j",
       "ST:time,output,param",
       "ST_lower:time,output,param",
-      "ST_upper:time,output,param"
+      "ST_upper:time,output,param",
+      "variance:time,output"
     ]
   },
   "vkoga@multi": {

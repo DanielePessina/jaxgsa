@@ -31,6 +31,7 @@ from jaxgsa import (
     optimal_transport,
     pawn,
     pce,
+    rank,
     shapley,
     sobol,
     vkoga,
@@ -122,6 +123,11 @@ def _borgonovo(shape: str) -> Any:
 def _pawn(shape: str) -> Any:
     X, Y = _given_data(shape)
     return pawn.analyze(PROBLEM, X, Y, n_bins=4, n_bootstrap=2, key=jax.random.key(SEED))
+
+
+def _rank(shape: str) -> Any:
+    X, Y = _given_data(shape)
+    return rank.analyze(PROBLEM, X, Y, n_bootstrap=2, key=jax.random.key(SEED))
 
 
 def _hsic(shape: str) -> Any:
@@ -221,6 +227,7 @@ BUILDERS: dict[str, Callable[[str], Any]] = {
     "optimal_transport_trajectory": _ot_trajectory,
     "pawn": _pawn,
     "pce": _pce,
+    "rank": _rank,
     "shapley": _shapley,
     "sobol": _sobol,
     "vkoga": _vkoga,
