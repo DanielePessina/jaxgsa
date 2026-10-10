@@ -118,3 +118,35 @@ jobs:
 
       - name: Run the deselected slow tests
         run: uv run pytest -m slow -v -n auto
+
+  # Browser app in web/: lint, types, unit tests and a production build.
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Install the browser for the end-to-end tests
+        run: npx playwright install --with-deps chromium
+      - name: Run the end-to-end tests
+        run: npm run test:e2e
+      - name: Upload the end-to-end report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-report
+          path: |
+            web/e2e/playwright-report
+            web/e2e/test-results
+          retention-days: 7
