@@ -14,9 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Keep the pull-request gate small and explicit: this exercises one public
-  # analyze path for every registered method without running the long-form
-  # numerical/oracle suite.
+  # Fast smoke gate: one public analyze path for every registered method. The
+  # full default suite runs in numerical-tests below, on every pull request.
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -75,10 +74,11 @@ jobs:
           JAX_ENABLE_X64: "1"
         run: uv run pytest -q tests/test_feature_matrix.py tests/test_registry.py tests/test_imports.py
 
+  # The whole default tier (`-m 'not slow'`), in float32 and float64. It takes
+  # a few minutes with pytest-xdist, so it gates every pull request.
   numerical-tests:
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    timeout-minutes: 60
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -96,11 +96,11 @@ jobs:
       - name: Run all ordinary numerical regressions
         run: uv run pytest -m "not slow" -q -n auto
 
-  # The joint-mode optimal-transport tests that run every Sinkhorn solve at
-  # full sample size. `addopts = "-m 'not slow'"` in pyproject.toml keeps them
-  # out of every ordinary run, because together they cost more than the rest
-  # of the suite. They still have to run somewhere, so they run here: nightly,
-  # and on demand through workflow_dispatch.
+  # The oracle and convergence tests at full sample size (SALib, POT and
+  # closed-form references). `addopts = "-m 'not slow'"` in pyproject.toml
+  # keeps them out of every ordinary run, because together they cost more than
+  # the rest of the suite. Each has a cheap default-tier counterpart. They run
+  # here: nightly, on demand through workflow_dispatch, and before publishing.
   slow-tests:
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
