@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 /**
  * Uniform panel heading: normal-case sentence for the instructional landmark
  * the user reads to learn the flow. Mono/uppercase stays reserved for small
- * machine labels (kicker line), matching the workbench's existing voice.
+ * machine labels (kicker line), matching the studio's existing voice.
  */
 export function PanelHeading({
   kicker,

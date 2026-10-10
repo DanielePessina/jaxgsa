@@ -14,6 +14,7 @@ import {
   type YData,
 } from "./engine";
 import { IndicesChart } from "./IndicesChart";
+import { formatIndex } from "./format";
 import { ResultsTable } from "./ResultsTable";
 import type { ProblemSpec } from "@/jaxgsa/sampling";
 
@@ -39,6 +40,40 @@ function interpretation(result: AnalysisResult): string | null {
     default:
       return null;
   }
+}
+
+/** Settings the card shows as one phrase, not as separate `key: value` pairs. */
+const FOLDED_SETTINGS = new Set(["order", "order_requested"]);
+
+/** "8" or "8 (requested 10)": the order fitted, and the request if it differs. */
+export function orderLabel(settings: AnalysisResult["settings"]): string | null {
+  const effective = settings.order;
+
+  if (effective == null) return null;
+
+  const requested = settings.order_requested;
+
+  return requested != null && requested !== effective
+    ? `${effective} (requested ${requested})`
+    : String(effective);
+}
+
+function FitLine({ fit }: { fit: NonNullable<AnalysisResult["slices"][number]["fit"]> }) {
+  const ratio = fit.looRmse / fit.stdY;
+
+  return (
+    <p className="font-mono text-[11px] text-muted-foreground">
+      fit: explained variance{" "}
+      <span className="tabular-nums">{formatIndex(fit.explainedVariance)}</span> · LOO RMSE{" "}
+      <span className="tabular-nums">{formatIndex(fit.looRmse)}</span>
+      {Number.isFinite(ratio) && (
+        <>
+          {" "}
+          (<span className="tabular-nums">{formatIndex(ratio)}</span> × std Y)
+        </>
+      )}
+    </p>
+  );
 }
 
 function SliceTabs({
@@ -87,7 +122,10 @@ function ResultCard({
   const [sliceIndex, setSliceIndex] = useState(0);
   const ref = referenceLine(result, demo);
   const interp = interpretation(result);
-  const settings = Object.entries(result.settings);
+  const settings = Object.entries(result.settings).filter(([k]) => !FOLDED_SETTINGS.has(k));
+  const order = orderLabel(result.settings);
+  const fit = result.slices[sliceIndex]?.fit;
+  const warnings = result.warnings ?? [];
   const multi = result.slices.length > 1;
   const fileName = `jaxgsa-${result.method}-${index}`;
 
@@ -106,8 +144,13 @@ function ResultCard({
               <h3 className="text-base font-medium tracking-tight">
                 {result.method}
               </h3>
-              {settings.length > 0 && (
+              {(settings.length > 0 || order) && (
                 <span className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-muted-foreground">
+                  {order && (
+                    <span>
+                      order: <span className="tabular-nums">{order}</span>
+                    </span>
+                  )}
                   {settings.map(([k, v]) => (
                     <span key={k}>
                       {k}: <span className="tabular-nums">{String(v)}</span>
@@ -127,7 +170,22 @@ function ResultCard({
             <SliceTabs slices={result.slices} active={sliceIndex} onSelect={setSliceIndex} />
           )}
 
+          {warnings.length > 0 && (
+            <div
+              role="alert"
+              className="space-y-1.5 rounded-sm border border-destructive/40 bg-destructive/5 p-3 text-xs leading-relaxed text-foreground"
+            >
+              <p className="font-mono text-[11px] uppercase tracking-[0.12em] text-destructive">
+                check this result
+              </p>
+              {warnings.map((w) => (
+                <p key={w}>{w}</p>
+              ))}
+            </div>
+          )}
+
           <IndicesChart result={result} sliceIndex={sliceIndex} fileName={fileName} />
+          {fit && <FitLine fit={fit} />}
           <ResultsTable result={result} sliceIndex={sliceIndex} />
 
           {result.notes.length > 0 && (
@@ -209,13 +267,13 @@ export function ResultsPanel({
           <CardContent className="py-12 sm:py-16">
             <div className="mx-auto max-w-md text-center">
               <div className="mx-auto mb-5 flex size-12 items-center justify-center rounded-full border border-border bg-muted/35 font-mono text-sm text-muted-foreground">
-                03
+                04
               </div>
               <p className="text-base text-foreground">Your analysis will appear here</p>
               <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
                 Load a demo for a quick tour, or attach your own model outputs
-                in Analyze. Results include an interactive chart, exact values,
-                and reproducible downloads.
+                in step 02 Data. Results include a chart, exact values, and
+                downloads you can reproduce.
               </p>
             </div>
           </CardContent>

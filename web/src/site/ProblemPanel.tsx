@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -17,223 +16,45 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { demoById, DEMOS, type Demo, type DemoId } from "./demos";
+import {
+  blankRow,
+  type DistKind,
+  type ProblemRow,
+  type ProblemValidation,
+} from "./problemRows";
 import { MonoSelect } from "./primitives";
-import type { MarginalSpec, ProblemSpec } from "@/jaxgsa/sampling";
-
-type DistKind = "uniform" | "gaussian";
-
-interface ProblemRow {
-  name: string;
-  dist: DistKind;
-  low: string;
-  high: string;
-  mean: string;
-  variance: string;
-  gLow: string;
-  gHigh: string;
-}
-
-interface RowSpecResult {
-  spec: MarginalSpec | null;
-  error: string | null;
-}
-
-/**
- * Comma-separated optional output labels, normalized to a trimmed list.
- * Empty input yields `null` (the package default: outputs are just `y`).
- */
-function outputNamesFromInput(raw: string): string[] | null {
-  const names = raw
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s !== "");
-
-  if (names.length === 0) return null;
-  const dup = names.find((n, i) => names.indexOf(n) !== i);
-
-  if (dup !== undefined) throw new Error(`duplicate output name: ${dup}`);
-
-  return names;
-}
-
-function blankRow(): ProblemRow {
-  return {
-    name: "",
-    dist: "uniform",
-    low: "0",
-    high: "1",
-    mean: "",
-    variance: "",
-    gLow: "",
-    gHigh: "",
-  };
-}
-
-function rowToSpec(row: ProblemRow): RowSpecResult {
-  const name = row.name.trim();
-
-  if (name === "") return { spec: null, error: "name is required" };
-
-  if (row.dist === "uniform") {
-    const low = Number(row.low);
-    const high = Number(row.high);
-
-    if (row.low.trim() === "" || row.high.trim() === "" || Number.isNaN(low) || Number.isNaN(high)) {
-      return { spec: null, error: "low and high must be numbers" };
-    }
-
-    if (low >= high) return { spec: null, error: "low must be < high" };
-
-    return { spec: { kind: "uniform", low, high }, error: null };
-  }
-
-  const mean = Number(row.mean);
-  const variance = Number(row.variance);
-
-  if (row.mean.trim() === "" || row.variance.trim() === "" || Number.isNaN(mean) || Number.isNaN(variance)) {
-    return { spec: null, error: "mean and variance must be numbers" };
-  }
-
-  if (variance <= 0) return { spec: null, error: "variance must be > 0" };
-  const low = row.gLow.trim() === "" ? undefined : Number(row.gLow);
-  const high = row.gHigh.trim() === "" ? undefined : Number(row.gHigh);
-
-  if (low !== undefined && Number.isNaN(low)) return { spec: null, error: "lower bound must be a number" };
-
-  if (high !== undefined && Number.isNaN(high)) return { spec: null, error: "upper bound must be a number" };
-
-  if (low !== undefined && high !== undefined && low >= high) {
-    return { spec: null, error: "lower bound must be < upper bound" };
-  }
-
-  return { spec: { kind: "gaussian", mean, variance, low, high }, error: null };
-}
-
-function rowsFromProblem(p: ProblemSpec): ProblemRow[] {
-  return p.names.map((name, j) => {
-    const m = p.marginals[j];
-
-    if (m.kind === "uniform") {
-      return {
-        name,
-        dist: "uniform" as const,
-        low: String(m.low),
-        high: String(m.high),
-        mean: "",
-        variance: "",
-        gLow: "",
-        gHigh: "",
-      };
-    }
-
-    if (m.kind !== "gaussian") {
-      throw new Error("categorical marginals are not ported yet");
-    }
-
-    return {
-      name,
-      dist: "gaussian" as const,
-      low: "",
-      high: "",
-      mean: String(m.mean),
-      variance: String(m.variance),
-      gLow: m.low === undefined ? "" : String(m.low),
-      gHigh: m.high === undefined ? "" : String(m.high),
-    };
-  });
-}
+import type { ProblemSpec } from "@/jaxgsa/sampling";
 
 export function ProblemPanel({
   problem,
-  onProblemChange,
-  onDemoChange,
+  rows,
+  onRowsChange,
+  outputNamesRaw,
+  onOutputNamesChange,
+  demoId,
+  onDemoIdChange,
+  validation,
   onLoadDemo,
-  demoRequest,
 }: {
+  /** The problem the rest of the app is using right now. */
   problem: ProblemSpec | null;
-  onProblemChange: (p: ProblemSpec) => void;
-  onDemoChange?: (demo: Demo) => void;
-  onLoadDemo?: (demo: Demo) => void;
-  /** Hero-CTA pipeline request: mirror this demo into the table rows. */
-  demoRequest?: { demo: Demo } | null;
+  rows: ProblemRow[];
+  onRowsChange: (rows: ProblemRow[]) => void;
+  outputNamesRaw: string;
+  onOutputNamesChange: (raw: string) => void;
+  /** The demo picked in the dropdown. It is not loaded until the user clicks. */
+  demoId: DemoId;
+  onDemoIdChange: (id: DemoId) => void;
+  validation: ProblemValidation;
+  onLoadDemo: (demo: Demo) => void;
 }) {
-  const [rows, setRows] = useState<ProblemRow[]>(() =>
-    rowsFromProblem(demoById("linear").problem),
-  );
-
-  const [demoId, setDemoId] = useState<DemoId>("linear");
-  const [outputNamesRaw, setOutputNamesRaw] = useState("");
-
-  const specs = rows.map(rowToSpec);
-  const names = rows.map((r) => r.name.trim());
-  const dupNames = names.some((n, i) => n !== "" && names.indexOf(n) !== i);
-
-  let outputNames: string[] | null = null;
-  let outputNamesError: string | null = null;
-
-  if (outputNamesRaw.trim() !== "") {
-    try {
-      outputNames = outputNamesFromInput(outputNamesRaw);
-    } catch (err) {
-      outputNames = null;
-      outputNamesError = err instanceof Error ? err.message : String(err);
-    }
-  }
-
-  let validSpec: ProblemSpec | null = null;
-
-  if (
-    specs.every((s) => s.error === null) &&
-    !dupNames &&
-    rows.length >= 1 &&
-    outputNamesError === null
-  ) {
-    const marginals: ProblemSpec["marginals"] = specs.map((s) => {
-      if (s.spec === null) throw new Error("validated problem has a missing marginal");
-
-      return s.spec;
-    });
-
-    validSpec = { names: rows.map((r) => r.name.trim()), marginals };
-
-    if (outputNames) validSpec.outputNames = outputNames;
-  }
-
-  // `rows` only changes identity on a real edit (set/add/remove/load), so
-  // this fires exactly when the problem definition changes — never on
-  // unrelated re-renders from the parent.
-  useEffect(() => {
-    if (validSpec) onProblemChange(validSpec);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, onProblemChange]);
+  const { rowErrors, outputNamesError } = validation;
 
   const set = (i: number, patch: Partial<ProblemRow>) => {
-    setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+    onRowsChange(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
   };
 
-  const loadDemo = () => {
-    const demo = demoById(demoId);
-    setRows(rowsFromProblem(demo.problem));
-    onLoadDemo?.(demo);
-  };
-
-  // Keep the app informed of the demo selected here so the Analyze section's
-  // "Load Demo Results" tracks this tab, not just Ishigami.
-  useEffect(() => {
-    onDemoChange?.(demoById(demoId));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [demoId]);
-
-  // A hero/CTA demo request loads the demo both into the pipeline and this
-  // table so both stay in sync (the App-level load alone would desync rows).
-  useEffect(() => {
-    if (!demoRequest) return;
-    setRows(rowsFromProblem(demoRequest.demo.problem));
-    setDemoId(demoRequest.demo.id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [demoRequest]);
-
-  const current = validSpec ?? problem;
+  const current = validation.problem ?? problem;
 
   return (
     <div className="space-y-4">
@@ -268,7 +89,7 @@ export function ProblemPanel({
               </thead>
               <tbody>
                 {rows.map((row, i) => {
-                  const err = specs[i].error ?? (dupNames ? "names must be unique" : null);
+                  const err = rowErrors[i];
 
                   return (
                     <tr key={i} className="border-b border-border/60">
@@ -356,9 +177,7 @@ export function ProblemPanel({
                           variant="ghost"
                           size="sm"
                           disabled={rows.length <= 1}
-                          onClick={() =>
-                            setRows((rs) => rs.filter((_, j) => j !== i))
-                          }
+                          onClick={() => onRowsChange(rows.filter((_, j) => j !== i))}
                           className="font-mono text-xs"
                         >
                           Remove
@@ -380,11 +199,11 @@ export function ProblemPanel({
                 id="output-names"
                 value={outputNamesRaw}
                 placeholder="y (default)"
-                onChange={(e) => setOutputNamesRaw(e.target.value)}
+                onChange={(e) => onOutputNamesChange(e.target.value)}
                 className="w-72 font-mono"
               />
               <span className="text-xs text-muted-foreground">
-                comma-separated; used to name the Y columns you upload
+                comma-separated; shown as the expected Y column names in the schema guide. The headers of your uploaded file name the results.
               </span>
             </div>
             {outputNamesError && (
@@ -397,7 +216,7 @@ export function ProblemPanel({
               type="button"
               variant="outline"
               size="sm"
-              onClick={() => setRows((rs) => [...rs, blankRow()])}
+              onClick={() => onRowsChange([...rows, blankRow()])}
             >
               + Add parameter
             </Button>
@@ -409,7 +228,7 @@ export function ProblemPanel({
               value={demoId}
               onChange={(v) => {
                 // SAFETY: MonoSelect options are generated exclusively from DEMOS.
-                setDemoId(v as DemoId);
+                onDemoIdChange(v as DemoId);
               }}
             >
               {DEMOS.map((d) => (
@@ -418,7 +237,7 @@ export function ProblemPanel({
                 </option>
               ))}
             </MonoSelect>
-            <Button type="button" variant="outline" size="sm" onClick={loadDemo}>
+            <Button type="button" variant="outline" size="sm" onClick={() => onLoadDemo(demoById(demoId))}>
               Start Sobol demo
             </Button>
           </div>

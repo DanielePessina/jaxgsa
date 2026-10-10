@@ -22,11 +22,11 @@ export function StageNav({
   onGo: (i: number) => void;
 }) {
   return (
-    <nav aria-label="workflow steps" className="overflow-x-auto">
-      <ol className="flex min-w-max items-center gap-1">
+    <nav aria-label="workflow steps">
+      <ol className="flex flex-wrap items-center gap-x-0.5 gap-y-1 sm:gap-x-1">
         {stages.map((s, i) => (
           <li key={s.id} className="flex items-center gap-1">
-            {i > 0 && <span className="mx-1 text-muted-foreground/30">/</span>}
+            {i > 0 && <span className="mx-1 hidden text-muted-foreground/30 sm:inline">/</span>}
             <button
               type="button"
               disabled={s.locked}
@@ -41,7 +41,7 @@ export function StageNav({
               }
               aria-current={i === active ? "step" : undefined}
               onClick={() => onGo(i)}
-              className={`relative flex items-center gap-2 rounded-full px-3 py-1.5 text-xs transition-colors ${
+              className={`relative flex items-center gap-1.5 rounded-full px-2.5 py-1.5 sm:gap-2 sm:px-3 text-xs transition-colors ${
                 s.locked
                   ? "cursor-not-allowed text-muted-foreground/40"
                   : i === active

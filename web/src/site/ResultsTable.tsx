@@ -24,7 +24,9 @@ export function ResultsTable({
   const maxAbs = slice.columns.map((c) => {
     let m = 0;
 
-    for (const v of c.values) m = Math.max(m, Math.abs(v));
+    for (const v of c.values) {
+      if (Number.isFinite(v)) m = Math.max(m, Math.abs(v));
+    }
 
     return m;
   });
@@ -45,7 +47,7 @@ export function ResultsTable({
             <TableCell className="font-mono">{name}</TableCell>
             {slice.columns.map((c, j) => {
               const v = c.values[i];
-              const pct = maxAbs[j] > 0 ? (Math.abs(v) / maxAbs[j]) * 100 : 0;
+              const pct = maxAbs[j] > 0 && Number.isFinite(v) ? (Math.abs(v) / maxAbs[j]) * 100 : 0;
               const negative = v < 0;
 
               return (

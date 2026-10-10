@@ -10,12 +10,19 @@
  * are rejected as unusable.
  */
 
-import { parquetReadObjects } from "hyparquet";
+import { parquetMetadata, parquetReadObjects } from "hyparquet";
 import { compressors } from "hyparquet-compressors";
-import { parseCsv, type ParsedCsv } from "./engine";
+import { MAX_CELLS, parseCsv, parseDecimal, type ParsedCsv } from "./engine";
 
 /** Human cap on the number of cells we parse (rows x cols) before bailing. */
-export const MAX_CELLS = 5_000_000;
+export { MAX_CELLS };
+
+function tooLarge(rows: number, cols: number, maxCells: number): Error {
+  return new Error(
+    `file is too large: ${rows} rows x ${cols} ` +
+      `columns exceeds the ${maxCells.toLocaleString()} cell limit`,
+  );
+}
 
 /** Hard cap on the raw file size (bytes). */
 export const MAX_FILE_BYTES = 512 * 1024 * 1024;
@@ -88,25 +95,48 @@ type ParquetCell = number | bigint | boolean | string | null | undefined;
 /** Coerce one parquet cell to a finite number, matching CSV tolerance. */
 function cellToNumber(name: string, row: number, v: ParquetCell): number {
   const kind = Object.prototype.toString.call(v);
+  const where = `row ${row + 1}, column "${name}"`;
 
-  if (kind === "[object Number]") return Number(v);
+  if (kind === "[object Number]" || kind === "[object BigInt]") {
+    const n = Number(v);
 
-  if (kind === "[object BigInt]") return Number(v);
+    if (!Number.isFinite(n)) throw new Error(`${where}: ${String(v)} is not a finite number`);
+
+    return n;
+  }
 
   if (kind === "[object Boolean]") return v === true ? 1 : 0;
 
   if (kind === "[object String]" && String(v).trim() !== "") {
-    const n = Number(v);
+    const parsed = parseDecimal(String(v));
 
-    if (!Number.isNaN(n)) return n;
+    if ("value" in parsed) return parsed.value;
+
+    throw new Error(`${where}: ${String(v)} is ${parsed.reason}`);
   }
 
-  throw new Error(`row ${row + 1}, column "${name}": ${String(v)} is not a number`);
+  throw new Error(`${where}: ${String(v)} is not a number`);
 }
 
 /** Parse a Parquet file (with full codec support) into the shared CSV shape. */
-async function parseParquet(file: File): Promise<ParsedCsv> {
+async function parseParquet(file: File, maxCells: number): Promise<ParsedCsv> {
   const buf = await file.arrayBuffer();
+
+  // Check the size from the footer before any row is decoded.
+  try {
+    const meta = parquetMetadata(buf);
+    const cols = Math.max(meta.schema.length - 1, 1);
+    const rowCount = Number(meta.num_rows);
+
+    if (rowCount * cols > maxCells) throw tooLarge(rowCount, cols, maxCells);
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("file is too large")) throw err;
+
+    throw new Error(
+      `could not read parquet: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
   let rows;
 
   try {
@@ -149,7 +179,10 @@ async function parseParquet(file: File): Promise<ParsedCsv> {
  * format by extension first, then by magic bytes (so a misnamed parquet still
  * parses). Rejects unsafe formats and over-size inputs.
  */
-export async function parseUpload(file: File): Promise<ParsedCsv> {
+export async function parseUpload(
+  file: File,
+  maxCells: number = MAX_CELLS,
+): Promise<ParsedCsv> {
   if (file.size > MAX_FILE_BYTES) {
     throw new Error(
       `file is ${(file.size / 1024 / 1024).toFixed(1)} MB — the limit is ` +
@@ -164,21 +197,13 @@ export async function parseUpload(file: File): Promise<ParsedCsv> {
   const ext = fileExtension(file.name);
 
   if (ext === ".parquet" || ext === ".pq") {
-    return parseParquet(file);
+    return parseParquet(file, maxCells);
   }
 
   const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
 
-  if (isParquetMagic(head)) return parseParquet(file);
+  if (isParquetMagic(head)) return parseParquet(file, maxCells);
 
-  const parsed = parseCsv(await file.text());
-
-  if (parsed.headers.length * parsed.rows.length > MAX_CELLS) {
-    throw new Error(
-      `file is too large: ${parsed.rows.length} rows x ${parsed.headers.length} ` +
-        `columns exceeds the ${MAX_CELLS.toLocaleString()} cell limit`,
-    );
-  }
-
-  return parsed;
+  // `parseCsv` rejects an oversize file from the line count, before it builds any row.
+  return parseCsv(await file.text(), maxCells);
 }
