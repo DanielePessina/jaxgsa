@@ -1,11 +1,19 @@
 """Result container for Sobol sensitivity analysis."""
 
+import dataclasses
 from dataclasses import dataclass
+from typing import Literal, Self
 
 from jax import Array
 
 from jaxgsa._core.invalid import InvalidReport
-from jaxgsa._core.result import CIInfo, FieldSpec, ResultSchema, SchemaResult
+from jaxgsa._core.result import (
+    CIInfo,
+    FieldSpec,
+    ResultSchema,
+    SchemaResult,
+    aggregate_indices,
+)
 from jaxgsa.problem import Problem
 
 
@@ -59,6 +67,12 @@ class SobolResult(SchemaResult):
             endpoint rule, the resample count, and the bootstrap draws when
             the analysis ran with ``keep_replicates=True``. ``None`` without
             a bootstrap. See :class:`jaxgsa._core.result.CIInfo`.
+        variance: Variance of each output slice, shape ``()`` / ``(K,)`` /
+            ``(T, K)``, or ``None`` for a result saved before this field
+            existed. It is the variance over every row of the expanded
+            Saltelli layout, which is the number the estimator divides by
+            when it standardizes the outputs. :meth:`aggregate` uses it as
+            the weight of each output.
     """
 
     S1: Array  # (D,), (K, D), or (T, K, D)
@@ -71,6 +85,7 @@ class SobolResult(SchemaResult):
     S2_conf: Array | None = None
     ci: CIInfo | None = None
     estimator: str = "saltelli-jansen"
+    variance: Array | None = None
 
     _schema = ResultSchema(
         primary="S1",
@@ -78,6 +93,56 @@ class SobolResult(SchemaResult):
             FieldSpec("S1", "param", interval=True),
             FieldSpec("ST", "param", interval=True),
             FieldSpec("S2", "pair", interval=True),
+            FieldSpec("variance", "slice"),
         ),
         meta=("estimator",),
     )
+
+    def aggregate(self, *, weights: Literal["variance", "equal"] = "variance") -> Self:
+        """Collapse the output axes into one index per input.
+
+        Computes ``S_agg_i = sum_t w_t * S_{i,t}`` over every output slice
+        ``t`` (the ``T`` and ``K`` axes together). With ``weights="variance"``
+        the weight is ``w_t = V_t / sum(V)``, where ``V_t`` is the variance
+        of output ``t``. This is the generalised Sobol index of Gamboa,
+        Janon, Klein and Lagnoux (2014, Electron. J. Stat. 8:575-603,
+        doi:10.1214/14-EJS895), also used by Lamboni, Monod and Makowski
+        (2011, Reliab. Eng. Syst. Saf. 96:450-459,
+        doi:10.1016/j.ress.2010.12.002). It is the share of the total output
+        variance that the input explains. With ``weights="equal"`` every
+        output counts the same, ``w_t = 1 / n_outputs``.
+
+        The method applies to every index field this result holds. The
+        result keeps its class and its output axes, now of size 1, so
+        ``to_dataset`` and the printed summary work as before.
+
+        The ``variance`` of the returned result holds the summed variance of
+        the outputs.
+
+        A slice of zero variance (a constant output) has weight 0 and adds
+        nothing. A result with one output slice comes back with the same
+        index values.
+
+        Confidence intervals do not aggregate bound by bound. When the
+        analysis ran with ``keep_replicates=True``, each bootstrap draw is
+        aggregated and the interval is drawn again from those draws, at the
+        same level and with the same rule. The weights stay fixed at the
+        point-estimate values in every draw, so the interval leaves out the
+        sampling noise of the weights themselves. Otherwise the new ``*_conf``
+        fields are ``NaN``.
+
+        Args:
+            weights: ``"variance"`` (default) or ``"equal"``.
+
+        Returns:
+            A result of the same class with output axes of size 1.
+
+        Raises:
+            ValueError: If ``weights`` is not one of the two names, or if
+                ``weights="variance"`` and the result carries no ``variance``
+                (an old result). Use ``weights="equal"`` then..
+        """
+        updates = aggregate_indices(self, weights=weights, variance=self.variance)
+        if self.variance is not None and updates:
+            updates["variance"] = self.variance.sum(keepdims=True)
+        return dataclasses.replace(self, **updates)

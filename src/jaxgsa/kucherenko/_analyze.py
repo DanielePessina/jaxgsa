@@ -74,6 +74,7 @@ from jaxgsa._core.validation import (
 )
 from jaxgsa.kucherenko._result import KucherenkoResult
 from jaxgsa.kucherenko._sampling import KucherenkoSamples
+from jaxgsa.kucherenko._subsets import subset_matrix
 
 # Keyword-only parameters the irregular engine forwards unchanged to the
 # per-channel recursive analyze() calls. verbose is excluded:
@@ -86,6 +87,56 @@ _IRREGULAR_KWARGS = (
     "on_invalid",
     "keep_replicates",
 )
+
+
+def _closed_estimate(
+    f_joint: np.ndarray, f_block: np.ndarray, safe_variance: np.ndarray
+) -> np.ndarray:
+    """Single-loop closed (first-order) estimator for a stack of blocks.
+
+    Args:
+        f_joint: Joint-block outputs, shape ``(N, S)``.
+        f_block: Outputs of blocks that keep some columns of the joint rows,
+            shape ``(M, N, S)``.
+        safe_variance: Output variance with ``NaN`` where it is not positive,
+            shape ``(S,)``.
+
+    Returns:
+        ``V(E(Y | kept columns)) / V(Y)`` per block, shape ``(M, S)``.
+    """
+    N = f_joint.shape[0]
+    # Shift both factors by one shared constant (the joint-block mean)
+    # before the product. The estimator is algebraically unchanged: for any
+    # shift c, mean((a-c)(b-c)) - mean(a-c) mean(b-c) == mean(ab) - mean(a)
+    # mean(b). Numerically it is decisive: the uncentered product form loses
+    # the O(1) covariance in rounding when Y carries a large mean, because
+    # mean(f_joint f_first) and f0_joint f0_first are both O(mean^2). The ST
+    # estimator is a squared difference and the variance is a central moment,
+    # so both are already shift-safe.
+    f0_joint = f_joint.mean(axis=0)  # (S,)
+    g_joint = f_joint - f0_joint  # (N, S), centered
+    g_block = f_block - f0_joint[None, None]  # (M, N, S), same shift
+    # The cross-moment is a sum over the sample axis of a per-(m, s) dot
+    # product. The broadcast-multiply-then-mean form materialises a
+    # (M, N, S) intermediate; einsum accumulates the same dot without it.
+    # Both operate on the *centred* factors, so the shift-safety the
+    # estimator was designed for is unchanged (the two agree to ~1e-17 in
+    # float64, pure reassociation noise).
+    return (
+        np.einsum("dns,ns->ds", g_block, g_joint) / N
+        - g_joint.mean(axis=0)[None] * g_block.mean(axis=1)
+    ) / safe_variance
+
+
+def _jansen_estimate(
+    f_joint: np.ndarray, f_block: np.ndarray, safe_variance: np.ndarray
+) -> np.ndarray:
+    """Jansen squared-difference estimator of ``E(V(Y | kept columns)) / V(Y)``.
+
+    The arguments are as in :func:`_closed_estimate`. The result has shape
+    ``(M, S)`` and is exactly 0 when the model ignores the redrawn columns.
+    """
+    return 0.5 * ((f_joint[None] - f_block) ** 2).mean(axis=1) / safe_variance
 
 
 def _estimate(
@@ -109,31 +160,53 @@ def _estimate(
     """
     variance = f_joint.var(axis=0)  # (S,)
     safe_variance = np.where(variance > 0.0, variance, np.nan)
-    N = f_joint.shape[0]
-
-    # Shift both S1 factors by one shared constant (the joint-block mean)
-    # before the product. The estimator is algebraically unchanged: for any
-    # shift c, mean((a-c)(b-c)) - mean(a-c) mean(b-c) == mean(ab) - mean(a)
-    # mean(b). Numerically it is decisive: the uncentered product form loses
-    # the O(1) covariance in rounding when Y carries a large mean, because
-    # mean(f_joint f_first) and f0_joint f0_first are both O(mean^2). The ST
-    # estimator is a squared difference and the variance is a central moment,
-    # so both are already shift-safe.
-    f0_joint = f_joint.mean(axis=0)  # (S,)
-    g_joint = f_joint - f0_joint  # (N, S), centered
-    g_first = f_first - f0_joint[None, None]  # (D, N, S), same shift
-    # The S1 cross-moment is a sum over the sample axis of a per-(d, s)
-    # dot product. The broadcast-multiply-then-mean form materialises a
-    # (D, N, S) intermediate; einsum accumulates the same dot without it.
-    # Both operate on the *centred* factors, so the shift-safety the
-    # estimator was designed for is unchanged (the two agree to ~1e-17 in
-    # float64, pure reassociation noise).
-    S1 = (
-        np.einsum("dns,ns->ds", g_first, g_joint) / N
-        - g_joint.mean(axis=0)[None] * g_first.mean(axis=1)
-    ) / safe_variance
-    ST = 0.5 * ((f_joint[None] - f_total) ** 2).mean(axis=1) / safe_variance
+    S1 = _closed_estimate(f_joint, f_first, safe_variance)
+    # ST is a squared difference and the variance a central moment, so both
+    # are already shift-safe.
+    ST = _jansen_estimate(f_joint, f_total, safe_variance)
     return S1, ST, variance
+
+
+def _estimate_subsets(
+    f_a: np.ndarray, f_b: np.ndarray, f_blocks: np.ndarray, n_params: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Closed and total index of every subset from the ``subsets="all"`` design.
+
+    Block ``m`` keeps the columns of the bitmask ``m`` and redraws the others
+    from their conditional. It gives two estimates:
+
+    * the closed index of ``m``, ``V(E(Y | X_m)) / V(Y)``, with the same
+      arithmetic as ``S1`` (Kucherenko, Tarantola & Annoni 2012);
+    * the total index of the complement of ``m``,
+      ``E(V(Y | X_m)) / V(Y)``, with the same Jansen form as ``ST``.
+
+    The variance is taken over the two independent joint blocks ``A`` and
+    ``B`` together. The full set has closed and total index 1, and the empty
+    set is left out.
+
+    Args:
+        f_a: Outputs of the joint block ``A``, shape ``(N, S)``.
+        f_b: Outputs of the independent joint block ``B``, shape ``(N, S)``.
+        f_blocks: Outputs of blocks for the masks ``1 .. 2^D - 2``, shape
+            ``(2^D - 2, N, S)``.
+        n_params: Number of parameters ``D``.
+
+    Returns:
+        ``(closed, total, variance)``. The first two are shaped
+        ``(2^D - 1, S)`` with mask ``m`` at row ``m - 1``. ``variance`` is
+        ``(S,)``.
+    """
+    n_masks = 2**n_params - 1
+    variance = np.concatenate([f_a, f_b], axis=0).var(axis=0)
+    safe_variance = np.where(variance > 0.0, variance, np.nan)
+    closed_blocks = _closed_estimate(f_a, f_blocks, safe_variance)
+    total_of_complement = _jansen_estimate(f_a, f_blocks, safe_variance)
+    one = np.where(variance > 0.0, 1.0, np.nan)
+    closed = np.concatenate([closed_blocks, one[None]], axis=0)
+    # total(u) comes from the block that keeps the complement of u.
+    complement = np.arange(1, n_masks) ^ n_masks  # for u = 1 .. 2^D - 2
+    total = np.concatenate([total_of_complement[complement - 1], one[None]], axis=0)
+    return closed, total, variance
 
 
 def analyze(
@@ -157,6 +230,13 @@ def analyze(
     kernel surrogate. Under independent inputs the indices are the classic
     Sobol' ``S1`` and ``ST``.
 
+    A design drawn with ``subsets="all"`` also gives the closed index
+    ``closed`` and the total index ``subset_total`` of every subset of the
+    inputs. ``result.shapley()`` and ``result.pme()`` turn them into exact
+    Shapley effects and proportional marginal effects. The singleton entries
+    come from the singleton blocks, and the variance is taken over the two
+    independent joint blocks ``A`` and ``B`` together.
+
     Args:
         sampling_result: Design from :func:`jaxgsa.kucherenko.sample`.
         Y: Model outputs evaluated at each row of
@@ -170,7 +250,8 @@ def analyze(
             resampling them is a clean bootstrap of the design; resampling
             individual rows would not be, because dropping part of a
             conditional block would leave the estimator reading rows that no
-            longer line up. ``S1`` and ``ST`` get intervals. ``variance``
+            longer line up. ``S1`` and ``ST`` get intervals, and so do
+            ``closed`` and ``subset_total`` on a ``subsets="all"`` design. ``variance``
             does not: it is the denominator of both indices, a property of
             the joint block rather than a sensitivity measure, and its
             uncertainty is already inside the two index intervals.
@@ -195,7 +276,9 @@ def analyze(
             parameters by ``ST``. Pass ``False`` for a silent run.
         keep_replicates: Keep the per-resample indices on
             ``KucherenkoResult.ci.replicates``. Off by default because they
-            are large: ``n_bootstrap`` copies of two index arrays.
+            are large: ``n_bootstrap`` copies of two index arrays, or of four
+            on a ``subsets="all"`` design. ``result.shapley()`` and
+            ``result.pme()`` need them to give an interval.
 
     Returns:
         A :class:`KucherenkoResult` with ``S1`` and ``ST`` shaped ``(D,)``,
@@ -235,6 +318,8 @@ def analyze(
     problem = sampling_result.problem
     N = sampling_result.base_n
     D = sampling_result.n_params
+    all_subsets = sampling_result.subsets == "all"
+    n_blocks = sampling_result.n_blocks
 
     ctx = prepare(
         SPEC,
@@ -258,7 +343,7 @@ def analyze(
         n_units=N,
         # The map is the interleaved base-point pattern, built on the host
         # only where the check reads it (never under on_invalid='none').
-        unit_of_row=_unit_of_row_for_policy(on_invalid, lambda: np.tile(np.arange(N), 2 * D + 1)),
+        unit_of_row=_unit_of_row_for_policy(on_invalid, lambda: np.tile(np.arange(N), n_blocks)),
         min_kept=2,
         # The denominator of both indices is the variance of the joint block
         # alone, not of the whole design, so the zero-variance check has to
@@ -269,14 +354,19 @@ def analyze(
     Y_canonical = ctx.Y3
     n_time, n_out = Y_canonical.shape[1], Y_canonical.shape[2]
     n_slices = n_time * n_out
-    # (2D+1, N, S) — block-major, matching the design's stacking order.
-    F = np.asarray(Y_canonical, dtype=np.float64).reshape(2 * D + 1, N, n_slices)
+    # (n_blocks, N, S) — block-major, matching the design's stacking order.
+    F = np.asarray(Y_canonical, dtype=np.float64).reshape(n_blocks, N, n_slices)
     if not keep.all():
         F = F[:, keep, :]
 
     f_joint = F[0]  # (N, S)
-    f_first = F[1 : D + 1]  # (D, N, S) — z redrawn given x_i
-    f_total = F[D + 1 :]  # (D, N, S) — x_i redrawn given z
+    if all_subsets:
+        f_other = F[1]  # (N, S) — independent joint block B
+        f_sub = F[2:]  # (2^D - 2, N, S) — block for mask m at row m - 1
+        f_first = f_total = None
+    else:
+        f_first = F[1 : D + 1]  # (D, N, S) — z redrawn given x_i
+        f_total = F[D + 1 :]  # (D, N, S) — x_i redrawn given z
 
     _warn_zero_variance_slices(
         f_joint.reshape(-1, n_time, n_out),
@@ -284,18 +374,69 @@ def analyze(
         method="jaxgsa.kucherenko.analyze",
     )
     t0 = _verbose.tic()
-    S1, ST, variance = _estimate(f_joint, f_first, f_total)
+    closed = subset_total = None
+    if all_subsets:
+        closed, subset_total, variance = _estimate_subsets(f_joint, f_other, f_sub, D)
+        # The singleton indices come from the singleton blocks: S1_i from the
+        # block that keeps {i}, ST_i from the block that keeps every column
+        # but i (read through the total index of {i}).
+        singles = (1 << np.arange(D)) - 1
+        S1, ST = closed[singles], subset_total[singles]
+    else:
+        assert f_first is not None and f_total is not None
+        S1, ST, variance = _estimate(f_joint, f_first, f_total)
 
     def _shape(index: np.ndarray) -> Array:
-        """Reshape a ``(..., D, S)`` block to the output contract, params last."""
+        """Reshape a ``(..., M, S)`` block to the output contract, ``M`` last."""
         lead = index.shape[:-2]
-        arr = jnp.asarray(np.moveaxis(index, -2, -1).reshape(*lead, n_time, n_out, D))
+        arr = jnp.asarray(
+            np.moveaxis(index, -2, -1).reshape(*lead, n_time, n_out, index.shape[-2])
+        )
         return ctx.squeeze(arr, n_trailing=1)
 
     S1_conf: Array | None = None
     ST_conf: Array | None = None
+    closed_conf: Array | None = None
+    subset_total_conf: Array | None = None
     ci: CIInfo | None = None
-    if n_bootstrap > 0:
+    if n_bootstrap > 0 and all_subsets:
+        assert key is not None  # refused by the missing-key check above
+        assert closed is not None and subset_total is not None
+        n_kept = f_joint.shape[0]
+        idx = np.asarray(
+            jax.random.randint(key, shape=(n_bootstrap, n_kept), minval=0, maxval=n_kept)
+        )
+        singles = (1 << np.arange(D)) - 1
+        boot_closed, boot_total = [], []
+        for i in idx:
+            c, t, _ = _estimate_subsets(f_joint[i], f_other[i], f_sub[:, i], D)
+            boot_closed.append(c)
+            boot_total.append(t)
+        boot_closed_a = np.stack(boot_closed)  # (R, 2^D - 1, S)
+        boot_total_a = np.stack(boot_total)
+        point = {
+            "S1": _shape(S1),
+            "ST": _shape(ST),
+            "closed": _shape(closed),
+            "subset_total": _shape(subset_total),
+        }
+        draws = {
+            "S1": _shape(boot_closed_a[:, singles]),
+            "ST": _shape(boot_total_a[:, singles]),
+            "closed": _shape(boot_closed_a),
+            "subset_total": _shape(boot_total_a),
+        }
+        confs, ci = interval(
+            point,
+            draws,
+            level=conf_level,
+            method=ci_method,
+            n_bootstrap=n_bootstrap,
+            keep_replicates=keep_replicates,
+        )
+        S1_conf, ST_conf = confs["S1"], confs["ST"]
+        closed_conf, subset_total_conf = confs["closed"], confs["subset_total"]
+    elif n_bootstrap > 0:
         assert key is not None  # refused by the missing-key check above
         n_kept = f_joint.shape[0]
         idx = np.asarray(
@@ -304,6 +445,7 @@ def analyze(
         # One resample takes the same base points out of all 2D+1 blocks, so
         # every conditional row still sits beside the joint row it was drawn
         # around.
+        assert f_first is not None and f_total is not None  # single-design branch
         replicates = [_estimate(f_joint[i], f_first[:, i], f_total[:, i]) for i in idx]
         boot_S1 = np.stack([d[0] for d in replicates])  # (R, D, S)
         boot_ST = np.stack([d[1] for d in replicates])
@@ -331,6 +473,11 @@ def analyze(
         ST_conf=ST_conf,
         ci=ci,
         dependence=sampling_result.dependence,
+        closed=None if closed is None else _shape(closed),
+        subset_total=None if subset_total is None else _shape(subset_total),
+        subsets=subset_matrix(D) if all_subsets else None,
+        closed_conf=closed_conf,
+        subset_total_conf=subset_total_conf,
     )
 
     if verbose:
@@ -340,14 +487,15 @@ def analyze(
             method="jaxgsa.kucherenko.analyze",
             problem=problem,
             dependence=sampling_result.dependence,
-            n_runs=(2 * D + 1) * n_kept,
+            n_runs=n_blocks * n_kept,
             T=n_time,
             K=n_out,
             invalid=invalid,
             timings=[("compute", elapsed)],
             notes=[
                 f"design: {sampling_result.dependence} "
-                f"(2D+1 = {2 * D + 1} blocks of {n_kept} base points)"
+                f"({'subsets=all, 2^D' if all_subsets else '2D+1'} = {n_blocks} "
+                f"blocks of {n_kept} base points)"
             ],
             index_name="ST",
             values=result.ST,

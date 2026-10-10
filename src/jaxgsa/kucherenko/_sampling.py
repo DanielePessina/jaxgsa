@@ -27,15 +27,27 @@ The base draws come from one scrambled Sobol' sequence. Its first
 drive the conditional redraws. That is the same pairing the Saltelli
 ``(A, B)`` construction uses.
 
+``subsets="all"`` builds a larger design for exact Shapley effects and
+proportional marginal effects. For each proper non-empty subset ``w`` of the
+inputs it adds one block that keeps ``X_w`` from the joint block and redraws
+``X_{~w}`` from ``p(X_{~w} | X_w)``, with
+:meth:`~jaxgsa._core.dependence.Draws.free_given_fixed`. The joint block ``A``
+and an independent joint block ``B`` complete the design, so it has
+``n * 2^D`` rows. The singleton blocks are the same two families of blocks
+that ``subsets="singletons"`` builds: keeping ``{i}`` is the first-order block,
+and keeping every column except ``i`` is the total block.
+
 References:
     Kucherenko, Tarantola & Annoni (2012). Comput. Phys. Commun. 183:937-946.
+    Owen (2014). SIAM/ASA J. Uncertain. Quantif. 2:245-251.
+    Song, Nelson & Staum (2016). SIAM/ASA J. Uncertain. Quantif. 4:1060-1083.
 """
 
 from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 
 import numpy as np
 
@@ -56,9 +68,13 @@ class KucherenkoSamples(UniqueDesignSamples):
     ``(n_runs, D)``), then pass this object and the outputs to
     :func:`jaxgsa.kucherenko.analyze`.
 
-    The design is stored as ``2D + 1`` stacked blocks of ``base_n`` rows each.
-    The joint block comes first. Then comes one conditional block per parameter
-    for the first-order index, and one per parameter for the total index. Every
+    The default design is stored as ``2D + 1`` stacked blocks of ``base_n``
+    rows each. The joint block comes first. Then comes one conditional block
+    per parameter for the first-order index, and one per parameter for the
+    total index. With ``subsets="all"`` it is ``2^D`` blocks instead: the
+    joint block ``A``, an independent joint block ``B``, and one conditional
+    block for each subset ``w`` with ``1 <= |w| <= D - 1``, in the order of the
+    bitmask of ``w`` (bit ``j`` is parameter ``j``). Every
     row is retained, including repeats under deterministic dependence, and the
     expansion map is the identity. The
     :class:`~jaxgsa._core.samples.UniqueDesignSamples` base is used for its NPZ
@@ -78,6 +94,9 @@ class KucherenkoSamples(UniqueDesignSamples):
         n_params: Number of parameters ``D``.
         problem: Problem definition used for the analysis, including its
             ``correlation``.
+        subsets: ``"singletons"`` for the ``2D + 1`` block design, or
+            ``"all"`` for the ``2^D`` block design that supports exact
+            Shapley effects and proportional marginal effects.
     """
 
     samples: np.ndarray
@@ -87,17 +106,24 @@ class KucherenkoSamples(UniqueDesignSamples):
     n_params: int
     problem: Problem
     dependence: Dependence = "independent"
+    subsets: Literal["singletons", "all"] = "singletons"
+
+    @property
+    def n_blocks(self) -> int:
+        """Number of stacked blocks: ``2D + 1``, or ``2^D`` for ``subsets="all"``."""
+        return n_blocks_for(self.n_params, self.subsets)
 
     def __repr__(self) -> str:
         """Return a concise summary of the design dimensions."""
         return (
             f"KucherenkoSamples(n_runs={self.n_runs}, base_n={self.base_n}, "
-            f"n_params={self.n_params}, dependence={self.dependence!r})"
+            f"n_params={self.n_params}, dependence={self.dependence!r}, "
+            f"subsets={self.subsets!r})"
         )
 
     def _extra_metadata(self) -> dict[str, Any]:
         """Persist the design parameters in the metadata blob."""
-        return {"base_n": self.base_n, "dependence": self.dependence}
+        return {"base_n": self.base_n, "dependence": self.dependence, "subsets": self.subsets}
 
     @classmethod
     def _from_payload(
@@ -122,7 +148,26 @@ class KucherenkoSamples(UniqueDesignSamples):
             n_params=problem.num_vars,
             problem=problem,
             dependence=_parse_dependence(meta.get("dependence"), problem),
+            subsets=_parse_subsets(meta.get("subsets")),
         )
+
+
+MAX_SUBSET_PARAMS = 12
+"""Largest ``D`` that ``subsets="all"`` accepts. The design has ``n * 2^D`` rows."""
+
+
+def n_blocks_for(n_params: int, subsets: str) -> int:
+    """Return the number of design blocks for ``n_params`` and a ``subsets`` mode."""
+    return 2**n_params if subsets == "all" else 2 * n_params + 1
+
+
+def _parse_subsets(value: Any) -> Literal["singletons", "all"]:
+    """Read the stored ``subsets`` label. Old files have none, so they are singletons."""
+    if value is None:
+        return "singletons"
+    if value == "singletons" or value == "all":
+        return value
+    raise ValueError(f"Unknown subsets {value!r} in saved Kucherenko design")
 
 
 def _parse_dependence(value: Any, problem: Problem) -> Dependence:
@@ -179,6 +224,7 @@ def sample(
     problem: Problem,
     n_samples: int,
     *,
+    subsets: Literal["singletons", "all"] = "singletons",
     scramble: bool = True,
     seed: int | np.random.Generator | None = None,
     verbose: bool = True,
@@ -209,11 +255,23 @@ def sample(
     ``morris``, and ``efast``. Conditioning on the declared dependence is
     exactly what the Kucherenko estimators are for.
 
+    ``subsets="all"`` builds the design for exact Shapley effects and
+    proportional marginal effects. It costs ``base_n * 2^D`` runs and is
+    limited to ``D <= 12``. For each proper non-empty subset ``w`` it keeps
+    ``X_w`` from the joint block and redraws the other inputs from their
+    conditional given ``X_w``. A custom sampler must then accept any sorted
+    ``fixed_indices`` and act as a conditional-quantile (inverse Rosenblatt)
+    map; see :class:`~jaxgsa._core.dependence.InputSampler`.
+
     Args:
         problem: Problem definition with parameter names, marginals, and an
             optional ``correlation`` or custom ``sampler``.
         n_samples: Requested base points per block, at least 2. Rounded up to
             the next power of two.
+        subsets: ``"singletons"`` (default) builds the ``2D + 1`` block design
+            for ``S1`` and ``ST``. ``"all"`` builds the ``2^D`` block design
+            that adds closed and total indices of every subset, and with them
+            ``result.shapley()`` and ``result.pme()``.
         scramble: Whether to Owen-scramble the Sobol' sequence. Keep it on:
             different seeds then give statistically independent designs.
         seed: Random seed or generator for the Sobol' scrambling. Requires
@@ -231,7 +289,9 @@ def sample(
             ``jaxgsa.sobol`` reaches the same two indices for fewer model runs.
 
     Raises:
-        ValueError: If the problem has fewer than two parameters or any
+        ValueError: If ``subsets`` is not ``"singletons"`` or ``"all"``, if
+            ``subsets="all"`` and the problem has more than 12 parameters, if
+            the problem has fewer than two parameters or any
             categorical parameter, if ``n_samples < 2``, if a ``seed`` is
             given with ``scramble=False`` (the unscrambled sequence is
             deterministic, so the seed would do nothing), or if a custom
@@ -249,7 +309,19 @@ def sample(
         raise ValueError(f"Kucherenko indices need at least 2 parameters, got {D}")
     if n_samples < 2:
         raise ValueError(f"n_samples must be >= 2, got {n_samples}")
+    if subsets not in ("singletons", "all"):
+        raise ValueError(f"subsets must be 'singletons' or 'all', got {subsets!r}")
     n = _next_power_of_2(n_samples)
+    if subsets == "all":
+        if D > MAX_SUBSET_PARAMS:
+            raise ValueError(
+                f"subsets='all' needs {n} * 2^{D} = {n * 2**D} model runs for {D} "
+                f"parameters, and it supports at most {MAX_SUBSET_PARAMS} parameters. "
+                "The cost doubles with every parameter. For more parameters, use a "
+                "method that works on given data, such as jaxgsa.shapley.analyze "
+                "with a fitted surrogate, or jaxgsa.vkoga."
+            )
+        return _sample_all_subsets(problem, n, scramble=scramble, seed=seed, verbose=verbose)
     _warn_independent_problem(problem, n)
 
     draws = draws_for(problem)
@@ -291,4 +363,69 @@ def sample(
         n_params=D,
         problem=problem,
         dependence=problem.dependence,
+        subsets="singletons",
+    )
+
+
+def subset_fixed(mask: int, n_params: int) -> tuple[int, ...]:
+    """Return the sorted parameter indices in a subset bitmask (bit ``j`` is parameter ``j``)."""
+    return tuple(j for j in range(n_params) if (mask >> j) & 1)
+
+
+def _sample_all_subsets(
+    problem: Problem,
+    n: int,
+    *,
+    scramble: bool,
+    seed: int | np.random.Generator | None,
+    verbose: bool,
+) -> KucherenkoSamples:
+    """Build the ``2^D`` block design: ``A``, ``B``, then one block per proper subset.
+
+    Block ``m`` (bitmask ``m`` in ``1 .. 2^D - 2``) keeps the columns of ``m``
+    from ``A`` and redraws the others from their conditional. All blocks read
+    the leading columns of one shared noise block, as the singleton design does.
+    """
+    D = problem.num_vars
+    draws = draws_for(problem)
+    k = draws.dimension
+    masks = range(1, 2**D - 1)
+    fixed_sets = {m: subset_fixed(m, D) for m in masks}
+    width = max(draws.free_dimension(f) for f in fixed_sets.values())
+    points = sobol_uniforms(n, 2 * k + width, seed=seed, scramble=scramble)
+    block_a = draws.joint(points[:, :k])
+    block_b = draws.joint(points[:, k : 2 * k])
+    noise = points[:, 2 * k :]
+    blocks = [block_a, block_b]
+    for m in masks:
+        fixed = fixed_sets[m]
+        blocks.append(
+            draws.free_given_fixed(noise[:, : draws.free_dimension(fixed)], block_a, fixed)
+        )
+    X = draws.to_physical(np.concatenate(blocks, axis=0))
+
+    n_blocks = 2**D
+    n_total = n * n_blocks
+    if verbose:
+        _verbose.sample_summary(
+            method="jaxgsa.kucherenko.sample",
+            problem=problem,
+            entries=[
+                ("base_n", n),
+                ("subsets", "all"),
+                ("n_blocks", n_blocks),
+                ("n_runs", n_total),
+                ("dependence", problem.dependence),
+                ("scramble", scramble),
+            ],
+        )
+    return KucherenkoSamples(
+        samples=X,
+        n_expanded=n_total,
+        expanded_to_unique=np.arange(n_total, dtype=np.int64),
+        base_n=n,
+        n_params=D,
+        problem=problem,
+        dependence=problem.dependence,
+        subsets="all",
     )

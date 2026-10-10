@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, Self
 
+import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
 from jaxgsa._core.invalid import InvalidReport
-from jaxgsa._core.result import CIInfo, FieldSpec, ResultSchema, SchemaResult
+from jaxgsa._core.result import (
+    CIInfo,
+    FieldSpec,
+    ResultSchema,
+    SchemaResult,
+    aggregate_indices,
+)
 from jaxgsa._core.surrogate import SurrogateResult, _PredictPlan
 from jaxgsa.problem import Problem
 
@@ -174,3 +182,71 @@ class PCEResult(SchemaResult, SurrogateResult):
             order=self.order,
             invalid=self.invalid,
         )
+
+    def aggregate(self, *, weights: Literal["variance", "equal"] = "variance") -> Self:
+        """Collapse the output axes into one index per input.
+
+        Computes ``S_agg_i = sum_t w_t * S_{i,t}`` over every output slice
+        ``t`` (the ``T`` and ``K`` axes together). With ``weights="variance"``
+        the weight is ``w_t = V_t / sum(V)``, where ``V_t`` is the variance
+        of output ``t``. This is the generalised Sobol index of Gamboa,
+        Janon, Klein and Lagnoux (2014, Electron. J. Stat. 8:575-603,
+        doi:10.1214/14-EJS895), also used by Lamboni, Monod and Makowski
+        (2011, Reliab. Eng. Syst. Saf. 96:450-459,
+        doi:10.1016/j.ress.2010.12.002). It is the share of the total output
+        variance that the input explains. With ``weights="equal"`` every
+        output counts the same, ``w_t = 1 / n_outputs``.
+
+        The method applies to every index field this result holds. The
+        result keeps its class and its output axes, now of size 1, so
+        ``to_dataset`` and the printed summary work as before.
+
+        The weight of an output is the variance of the fitted surrogate under
+        the input measure. The basis is orthonormal, so that variance is the
+        sum of the squared non-constant coefficients. This is the same
+        variance the indices divide by.
+
+        The aggregated result is a summary, not a surrogate. Its
+        ``coefficients`` are ``NaN`` (so :meth:`predict` and :meth:`shapley`
+        give ``NaN``), and ``loo_rmse`` and ``explained_variance`` are
+        ``None``, because none of them aggregates across outputs.
+
+        A slice of zero variance (a constant output) has weight 0 and adds
+        nothing. A result with one output slice comes back with the same
+        index values.
+
+        Confidence intervals do not aggregate bound by bound. When the
+        analysis ran with ``keep_replicates=True``, each bootstrap draw is
+        aggregated and the interval is drawn again from those draws, at the
+        same level and with the same rule. The weights stay fixed at the
+        point-estimate values in every draw, so the interval leaves out the
+        sampling noise of the weights themselves. Otherwise the new ``*_conf``
+        fields are ``NaN``.
+
+        Args:
+            weights: ``"variance"`` (default) or ``"equal"``.
+
+        Returns:
+            A result of the same class with output axes of size 1.
+
+        Raises:
+            ValueError: If ``weights`` is not one of the two names.
+        """
+        coefficients = jnp.asarray(self.coefficients)
+        variance = jnp.sum(coefficients[..., 1:] ** 2, axis=-1)
+        # A constant output has NaN indices, but its fitted coefficients are
+        # only near zero. Give it weight 0, as the exact variance would. A
+        # failed fit has non-finite coefficients: its variance is unknown, not
+        # zero, so its NaN weight makes the aggregate NaN.
+        constant = jnp.isnan(jnp.asarray(self.S1)).all(axis=-1) & jnp.isfinite(coefficients).all(
+            axis=-1
+        )
+        variance = jnp.where(constant, 0.0, variance)
+        updates = aggregate_indices(self, weights=weights, variance=variance)
+        if updates:
+            lead = updates["S1"].shape[:-1]
+            n_terms = np.shape(self.coefficients)[-1]
+            updates["coefficients"] = jnp.full((*lead, n_terms), jnp.nan)
+            updates["loo_rmse"] = None
+            updates["explained_variance"] = None
+        return dataclasses.replace(self, **updates)

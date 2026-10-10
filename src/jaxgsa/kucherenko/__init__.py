@@ -59,8 +59,22 @@ Example::
     result.S1   # correlation-inclusive first-order indices
     result.ST   # correlation-exclusive total indices
 
+Exact Shapley effects and proportional marginal effects: draw the design with
+``subsets="all"`` (``N * 2^D`` runs, ``D <= 12``). It adds one block for every
+proper subset of the inputs. The result then holds the closed index ``closed``
+and the total index ``subset_total`` of every subset, ordered by bitmask::
+
+    ks = jaxgsa.kucherenko.sample(problem, 4096, subsets="all", seed=0)
+    result = jaxgsa.kucherenko.analyze(ks, model(ks.samples))
+    result.shapley().Sh   # Owen (2014); sums to 1
+    result.pme().Sh       # Herin et al. (2024); 0 for an exogenous input
+
 References:
     Kucherenko, Tarantola & Annoni (2012). Comput. Phys. Commun. 183:937-946.
+    Owen (2014). SIAM/ASA J. Uncertain. Quantif. 2:245-251.
+    Song, Nelson & Staum (2016). SIAM/ASA J. Uncertain. Quantif. 4:1060-1083.
+    Herin, Il Idrissi, Chabridon & Iooss (2024). SIAM/ASA J. Uncertain.
+    Quantif. 12(2):667-692.
 """
 
 from jaxgsa._core.invalid import InvalidUnit

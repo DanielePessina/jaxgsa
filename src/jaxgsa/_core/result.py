@@ -34,6 +34,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
+import jax.numpy as jnp
 import numpy as np
 import xarray as xr
 
@@ -396,3 +397,127 @@ class SchemaResult:
         if ci is not None:
             parts.append(f"ci={ci!r}")
         return f"{type(self).__name__}({', '.join(parts)})"
+
+
+AggregateWeights = Literal["variance", "equal"]
+"""How :func:`aggregate_indices` weights the output slices."""
+
+
+def aggregate_indices(
+    result: SchemaResult,
+    *,
+    weights: AggregateWeights,
+    variance: Any,
+) -> dict[str, Any]:
+    """Collapse the output axes of a result's index fields into one index per input.
+
+    This is the shared core of ``aggregate()`` on ``SobolResult``,
+    ``KucherenkoResult`` and ``PCEResult``. It acts on every declared field
+    that has an interval companion and the axes ``"param"`` or ``"pair"``
+    (``S1``, ``ST``, ``S2``). Each one becomes ``sum_t w_t * field_t`` over
+    the leading output axes, which stay in place with size 1.
+
+    A slice with weight exactly 0 (a constant output) adds 0, even when its
+    index is ``NaN``. A slice with a positive weight and a ``NaN`` index makes
+    the aggregate ``NaN``.
+
+    The interval is never aggregated bound by bound, because that is not a
+    valid interval. When the result kept its bootstrap draws, each draw is
+    aggregated and the interval is drawn again from the aggregated draws.
+    Otherwise the new interval is ``NaN``.
+
+    Args:
+        result: A result whose primary field has 1, 2 or 3 dimensions.
+        weights: ``"variance"`` weights slice ``t`` by ``V_t / sum(V)``.
+            ``"equal"`` weights every slice by ``1 / n_slices``.
+        variance: Output variance per slice, shape ``()``, ``(K,)`` or
+            ``(T, K)``. It is read only for ``weights="variance"``.
+
+    Returns:
+        A mapping of field name to new value, ready for
+        :func:`dataclasses.replace`. It holds the aggregated index fields,
+        their ``*_conf`` fields and ``ci``.
+
+    Raises:
+        ValueError: If ``weights`` is not ``"variance"`` or ``"equal"``, if
+            the result has no regular output layout, or if ``weights`` is
+            ``"variance"`` and ``variance`` is missing or has the wrong shape.
+    """
+    if weights not in ("variance", "equal"):
+        raise ValueError(f"weights must be 'variance' or 'equal', got {weights!r}")
+    schema = result._schema
+    primary = getattr(result, schema.primary)
+    ndim = np.ndim(primary)
+    if ndim not in (1, 2, 3):
+        raise ValueError(
+            f"cannot aggregate a result whose {schema.primary} has {ndim} dimensions: "
+            "only the regular (D,), (K, D) and (T, K, D) layouts have output axes to collapse"
+        )
+    lead = tuple(np.shape(primary)[:-1])
+    names = [
+        spec
+        for spec in schema.fields
+        if spec.interval
+        and spec.axes in ("param", "pair")
+        and getattr(result, spec.name) is not None
+    ]
+    n_slices = int(np.prod(lead)) if lead else 1
+
+    ci = getattr(result, "ci", None)
+    out: dict[str, Any] = {}
+    if n_slices == 1:
+        # One output slice: the weights are 1, so the indices and their
+        # intervals are already the aggregate.
+        return out
+
+    if weights == "equal":
+        w = jnp.full(lead, 1.0 / n_slices)
+    else:
+        if variance is None:
+            raise ValueError(
+                "weights='variance' needs the per-output variance, but this result "
+                "carries none (it was made before the variance field existed). "
+                "Use weights='equal', or run the analysis again."
+            )
+        v = jnp.asarray(variance)
+        if v.shape != lead:
+            raise ValueError(f"variance has shape {v.shape}, expected {lead}")
+        w = v / jnp.sum(v)
+
+    def collapse(arr: Any, n_trailing: int, offset: int) -> Any:
+        arr = jnp.asarray(arr)
+        wb = w.reshape((1,) * offset + lead + (1,) * n_trailing).astype(arr.dtype)
+        terms = jnp.where(wb == 0, 0.0, wb * arr)
+        axes = tuple(range(offset, offset + len(lead)))
+        return jnp.sum(terms, axis=axes, keepdims=True)
+
+    points: dict[str, Any] = {}
+    for spec in names:
+        n_trailing = 1 if spec.axes == "param" else 2
+        points[spec.name] = collapse(getattr(result, spec.name), n_trailing, 0)
+        out[spec.name] = points[spec.name]
+
+    replicates = ci.replicates if ci is not None else None
+    have_conf = [s for s in names if getattr(result, f"{s.name}_conf", None) is not None]
+    if ci is not None and replicates is not None and all(s.name in replicates for s in have_conf):
+        from jaxgsa._core.bootstrap import interval
+
+        draws = {
+            s.name: collapse(replicates[s.name], 1 if s.axes == "param" else 2, 1)
+            for s in have_conf
+        }
+        conf, new_ci = interval(
+            {s.name: points[s.name] for s in have_conf},
+            draws,
+            level=ci.level,
+            method=ci.method,
+            n_bootstrap=ci.n_bootstrap,
+            keep_replicates=True,
+        )
+        for s in have_conf:
+            out[f"{s.name}_conf"] = conf[s.name]
+        out["ci"] = new_ci
+    else:
+        for s in have_conf:
+            out[f"{s.name}_conf"] = jnp.full((2, *points[s.name].shape), jnp.nan)
+    return out

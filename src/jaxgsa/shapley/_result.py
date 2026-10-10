@@ -56,7 +56,9 @@ class ShapleyResult(SchemaResult):
         ST: Total-order indices from the same surrogate, shape ``(D,)`` /
             ``(K, D)`` / ``(T, K, D)``.
         problem: Problem definition used for the analysis.
-        backend: Surrogate backend used, ``"hdmr"`` or ``"pce"``.
+        backend: Surrogate backend used, ``"hdmr"`` or ``"pce"``, or ``"exact"``
+            for an allocation of design-based subset costs from
+            :meth:`jaxgsa.kucherenko.KucherenkoResult.shapley` or ``.pme()``.
         explained_variance: How much of the output variance the surrogate
             captured, shape ``()`` / ``(K,)`` / ``(T, K)``. The quantity
             depends on the backend. For ``"pce"`` it is the coefficient of
@@ -104,7 +106,7 @@ class ShapleyResult(SchemaResult):
     S1: Array
     ST: Array
     problem: Problem
-    backend: Literal["hdmr", "pce"]
+    backend: Literal["hdmr", "pce", "exact"]
     explained_variance: Array
     order: int
     invalid: InvalidReport

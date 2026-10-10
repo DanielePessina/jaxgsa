@@ -648,6 +648,33 @@ def _squeeze_indices(
     return S1_out, ST_out, S2_out
 
 
+def _output_variance(Y: Array, expand_map: Array | None) -> Array:
+    """Variance of each output slice over every row of the expanded layout.
+
+    This is the squared divisor of the standardization in
+    :func:`_separate_output_values`, so ``SobolResult.aggregate`` weights the
+    outputs by the same scale the estimator removed. It reads ``Y`` only and
+    changes no index.
+
+    Args:
+        Y: Expanded outputs, or the unique-row outputs when ``expand_map`` is
+            given.
+        expand_map: The design's ``expanded_to_unique`` map, when ``Y`` holds
+            one output per unique run. Each row is then counted as often as
+            the map repeats it, without building the expanded array.
+
+    Returns:
+        The variance per output slice, shape ``Y.shape[1:]``.
+    """
+    if expand_map is None:
+        return jnp.var(Y, axis=0)
+    counts = jnp.bincount(expand_map, length=Y.shape[0]).astype(Y.dtype)
+    counts = counts.reshape((-1,) + (1,) * (Y.ndim - 1))
+    n = jnp.sum(counts)
+    mean = jnp.sum(counts * Y, axis=0) / n
+    return jnp.sum(counts * (Y - mean) ** 2, axis=0) / n
+
+
 def _analyze_no_bootstrap(
     sampling_result: SobolSamples,
     Y: Array,
@@ -1247,6 +1274,8 @@ def analyze(
             invalid=invalid,
             expand_map=expand_map,
         )
+
+    result = dataclasses.replace(result, variance=_output_variance(Y, expand_map))
 
     if verbose:
         elapsed = _verbose.stop(t0, result.S1, result.ST)
