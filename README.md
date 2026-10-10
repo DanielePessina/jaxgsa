@@ -6,7 +6,7 @@
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22099117.svg)](https://doi.org/10.5281/zenodo.22099117)
 [![CI](https://github.com/DanielePessina/jaxgsa/actions/workflows/ci.yml/badge.svg)](https://github.com/DanielePessina/jaxgsa/actions/workflows/ci.yml)
 [![Documentation](https://img.shields.io/badge/docs-online-blue)](https://danielepessina.github.io/jaxgsa/)
-[![Browser workbench](https://img.shields.io/badge/browser%20workbench-WASM-16a6c7)](https://danielepessina.github.io/jaxgsa/workbench/)
+[![jaxgsa studio](https://img.shields.io/badge/jaxgsa-studio-16a6c7)](https://danielepessina.github.io/jaxgsa/studio/)
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org)
 
@@ -54,7 +54,7 @@ explains each step and how to interpret the result.
 
 ## Choose a method
 
-jaxgsa provides thirteen analysis methods. A useful starting point depends
+jaxgsa provides fourteen analysis methods. A useful starting point depends
 on the data you can collect and the question you want answered:
 
 | If you have… | Start with… | Why |
@@ -65,11 +65,11 @@ on the data you can collect and the question you want answered:
 | Correlated inputs | [Methods guide](https://danielepessina.github.io/jaxgsa/guide/methods) | Choose a method whose indices have the meaning you need under dependence. |
 
 The [methods guide](https://danielepessina.github.io/jaxgsa/guide/methods)
-covers all thirteen methods and their assumptions. The
+covers all fourteen methods and their assumptions. The
 [API reference](https://danielepessina.github.io/jaxgsa/api/) gives signatures
 and result fields.
 
-Scalar, multi-output, and time-series results are supported. Twelve methods
+Scalar, multi-output, and time-series results are supported. Thirteen methods
 also accept output channels with separate, irregular time grids. See the
 [multi-output](https://danielepessina.github.io/jaxgsa/examples/multi-output)
 and [irregular-output](https://danielepessina.github.io/jaxgsa/examples/irregular-outputs)
@@ -86,9 +86,9 @@ examples.
 - [Benchmarks](https://danielepessina.github.io/jaxgsa/guide/benchmarks):
   measurement methods and performance results.
 
-## Browser workbench
+## jaxgsa studio
 
-The separate [browser workbench](https://danielepessina.github.io/jaxgsa/workbench/)
+The separate [jaxgsa studio](https://danielepessina.github.io/jaxgsa/studio/)
 runs ported analyses locally in the browser. Its source and development instructions
 are in `web/`. The Python
 package and documentation site have separate builds.

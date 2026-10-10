@@ -49,7 +49,7 @@ export default defineConfig({
   sitemap: {
     hostname: siteUrl,
     transformItems(items) {
-      return [...items, { url: `${siteUrl}workbench/` }]
+      return [...items, { url: `${siteUrl}studio/` }]
     },
   },
 

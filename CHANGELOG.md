@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Changed: the browser workbench is now jaxgsa studio
+
+The browser app moved from `/jaxgsa/workbench/` to
+[`/jaxgsa/studio/`](https://danielepessina.github.io/jaxgsa/studio/). It is
+now called jaxgsa studio. The old `/workbench/` address redirects to the new
+one and keeps the query and hash. The web CI now runs lint, type checks, unit
+tests and the build for `web/`.
+
+### Fixed in jaxgsa studio
+
+- Opening step 01 again no longer deletes the design, the outputs and the
+  results. A custom problem stays when you move between steps.
+- The studio saves the problem, the form settings and the method selection in
+  the browser. A reload restores them. "Reset session" clears them. Uploaded
+  data and results are not saved.
+- PCE and PCE-based Shapley results show the explained variance and the
+  leave-one-out error. A warning shows when the explained variance is below
+  0.5, as in the Python package.
+- The demo uses PCE order 8, so its PCE indices match the analytic Ishigami
+  values. The default order for your own data stays 3.
+- The PCE order must be a whole number of 1 or more. The result shows the order
+  that the fit actually used.
+- Uploads reject `Infinity`, `1e999` and hexadecimal values. CSV files can use
+  commas, semicolons or tabs, quoted fields and a byte order mark.
+- A downloaded design CSV works as X on the "completed model runs" route.
+- The upload check mark shows only after the file passes validation.
+- The output names field now changes the expected Y columns.
+- The analytical reference line shows only for demo outputs.
+- PAWN and Borgonovo now run on truncated Gaussian inputs.
+- The step bar fits on a phone screen. Method checkboxes and form fields have
+  accessible names.
+
 ### New: custom input samplers
 
 A problem can now carry a custom sampler. A custom sampler describes any joint
@@ -150,9 +182,9 @@ checks the result against an independent design and analytical solution.
 First stable release. The API contract of 0.9.1 is unchanged; 1.0.0 marks it
 as supported.
 
-### New: the browser workbench
+### New: jaxgsa studio
 
-A [WASM/React companion](https://danielepessina.github.io/jaxgsa/workbench/)
+A [WASM/React companion](https://danielepessina.github.io/jaxgsa/studio/)
 runs eight ported methods locally
 in the browser (float64, no data leaves the page): define a problem, sample a
 Sobol/Morris/Kucherenko/eFAST design, bring the model outputs back, and read

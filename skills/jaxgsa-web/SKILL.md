@@ -1,20 +1,27 @@
 ---
 name: jaxgsa-web
-description: Use when working on the jaxgsa browser workbench under web/, especially the three-step problem → data → analysis flow, the X/Y CSV/Parquet upload contracts, run_id alignment, the expected-schema UI, and the site engine. Covers where each piece lives, what file formats and column layouts the uploaders accept, the exact error strings users can hit, and the tests that pin the contract.
+description: Use when working on the jaxgsa studio (the browser app) under web/, especially the three-step problem → data → analysis flow, the X/Y CSV/Parquet upload contracts, run_id alignment, the expected-schema UI, and the site engine. Covers where each piece lives, what file formats and column layouts the uploaders accept, the exact error strings users can hit, and the tests that pin the contract.
 ---
 
 # jaxgsa-web
 
-The WASM/React workbench at `web/` runs ported sensitivity analyses locally in the
-browser (float64, no data leaves the page). The user flow is four stages rendered
+jaxgsa studio, the WASM/React browser app at `web/` (live at https://danielepessina.github.io/jaxgsa/studio/; `/workbench/` is only a redirect page from `web/redirect/workbench.html`), runs ported sensitivity analyses locally in the
+browser (float64, no data leaves the page). The user flow is four stages shown
 one at a time by the stepper: **01 Problem → 02 Data → 03 Analyze → 04 Results**
 (`App.tsx` stage state + `StageNav`; data route readiness via `DataPanel.dataRouteStatus`).
+All four stage panels stay mounted; inactive ones use the `hidden` attribute. Never
+make a panel's state depend on mounting: opening or collapsing a stage must not
+change data. Only a change of the validated problem key clears designs, Y and results.
 
 ```ts
 web/src/App.tsx                 // stage state machine: stage 0..3, problem, designs, givenX, yData, results
 web/src/site/StageNav.tsx       // stepper rail (done/locked states, locked = upstream data missing)
 web/src/site/PanelHeading.tsx   // shared panel heading (kicker + title + sub)
-web/src/site/ProblemPanel.tsx   // marginals + optional output names; accepts hero `demoRequest`
+web/src/site/ProblemPanel.tsx   // controlled table: rows/outputNames/demoId live in App
+web/src/site/problemRows.ts     // row model, validateProblem, problemKey, demo matching, clampStage
+web/src/site/session.ts         // localStorage autosave (keys prefixed "jaxgsa-studio:")
+web/src/site/designForm.ts      // design form model + validation (power-of-2 base N, ...)
+web/src/site/analysisGuards.ts  // PCE order parsing, run guard (drops stale runs), warnings
 web/src/site/DataPanel.tsx      // ONE place for data: route cards (new design vs. uploads),
                                 // design generation (ex-SamplePanel), X/Y uploads, SchemaGuide
 web/src/site/AnalyzePanel.tsx   // method selection + run (no uploads); exports `availability()`
@@ -46,7 +53,9 @@ web/src/jaxgsa/                 // ported method math (borgonovo, efast, pawn, .
 ### X upload ("my own X", given-data route)
 
 - Header must be **exactly the problem parameter names, in order**.
-- One numeric row per model run. **No `run_id` column.**
+- One numeric row per model run. A `run_id` column is allowed anywhere (so a downloaded
+  design CSV works as X); it is dropped and the file's row order is kept, because Y on
+  this route is positional.
 - Errors: `the X CSV has no data rows`, `the X CSV header must be exactly: <names>`,
   `line <n>: expected <D> columns, found <k>`.
 
@@ -90,6 +99,25 @@ web/src/jaxgsa/                 // ported method math (borgonovo, efast, pawn, .
   `PAR1` magic. Unsafe formats (`.pkl`, `.npy`, `.xlsx`, `.h5`, …) are rejected with
   per-format messages. Guards: 512 MB file size, 5M cells.
 
+### Number and CSV parsing (`engine.ts` `parseCsv` / `parseDecimal`)
+
+- Delimiter is detected from the header line: comma, semicolon or tab.
+- Double-quoted fields and headers work (R `write.csv`), as do `""` escapes, a UTF-8
+  BOM, CRLF and trailing blank lines. A decimal comma in a `;` or tab file gives a
+  targeted error.
+- Values must be finite decimals. `Infinity`, `1e999` → "not a finite number";
+  `0x10`, `NaN` → "not a number". Parquet cells follow the same rules.
+- The cell count is estimated before rows are built, so oversized files fail early.
+- `validateParameterName` rejects commas, quotes, semicolons, tabs, newlines,
+  `run_id` and `_t<number>` suffixes, because they break the design CSV header.
+
+### Autosave (`session.ts`)
+
+- Saved: problem rows, output names, demo id, stage, design form, method selection,
+  PCE order. Never saved: uploaded data, designs, results. After a reload the stage
+  is clamped to the furthest unlocked one. "Reset session" clears every
+  `jaxgsa-studio:` key.
+
 ### Design CSV download
 
 - Header `run_id,<param names>`; `run_id` is the row index `0..N-1`. This is the
@@ -98,7 +126,7 @@ web/src/jaxgsa/                 // ported method math (borgonovo, efast, pawn, .
 ## The "expected schema" UI
 
 `SchemaGuide.tsx` renders small CSV sample tables under an "expected schema" box in
-section 03. It has three states keyed off `xSource`:
+step 02 (Data). It has three states keyed off `xSource`:
 
 - `route="none"` (no X loaded) — neutral message: "Load X first — the file format
   depends on your X source."
@@ -142,5 +170,10 @@ sync — they pin the same contract.
   `pytest` is not.
 - `npm run lint` (oxlint), `npx tsc --noEmit`, and `npm run build` in `web/` are the
   verification steps for UI changes.
-- The workbench theme follows the system `prefers-color-scheme` with a
+- The studio theme follows the system `prefers-color-scheme` with a
   `localStorage` override ("jaxgsa-theme") and a light fallback.
+## Deploy and CI
+
+- `.github/workflows/docs.yml` builds with `VITE_BASE=/jaxgsa/studio/` and copies `web/dist` to `dist/studio`. It also writes `web/redirect/workbench.html` to `dist/workbench/index.html`.
+- `web/public/` holds static files such as `favicon.svg`. `@jax-js/jax` is pinned to an exact version.
+- The `web` job in `.github/workflows/ci.yml` runs lint, typecheck, tests and build.
