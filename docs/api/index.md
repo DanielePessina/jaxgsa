@@ -89,7 +89,7 @@ those produces numbers that look fine and mean less than they appear to.
 
 ### Printed run summaries
 
-All thirteen `analyze()` functions and all four `sample()` functions take a
+All fourteen `analyze()` functions and all four `sample()` functions take a
 keyword-only `verbose: bool = True`. The default prints, so a bare call writes
 to stdout:
 
@@ -266,8 +266,8 @@ result.to_dataset()                   # time_concentration and time_diameter
 ```
 
 Ragged `Y` automatically selects bucketing; there is no mode keyword. The
-analysis does not pad channels or fabricate values. It is implemented on twelve
-of the thirteen `analyze` entry points; `dgsm` refuses the ragged form because
+analysis does not pad channels or fabricate values. It is implemented on thirteen
+of the fourteen `analyze` entry points; `dgsm` refuses the ragged form because
 it requires a fixed-layout Jacobian. There is no mask mode: a padded/masked
 estimator would be a separate missing-data contract rather than the
 per-channel analysis described here. See [Irregular output grids](/examples/irregular-outputs)
@@ -305,7 +305,7 @@ result, so it works inside `jax.jit`, `jax.vmap` and `jax.grad`. Pair it with
 `transform` to differentiate an index with respect to the input distribution
 parameters. See [Sobol](/api/sobol).
 
-Eleven of the thirteen methods expose an `indices()` with the same deal: raw
+Twelve of the fourteen methods expose an `indices()` with the same deal: raw
 arrays, no checks, no result object, safe under a JAX transformation. Only
 `kucherenko` and `vkoga` do not. `kucherenko` is host NumPy from end to end,
 which is what makes it the fastest method here, and `vkoga`'s index stage is
@@ -313,7 +313,7 @@ a host quasi-Monte-Carlo loop. Neither has a traceable core to export.
 
 ## Confidence intervals
 
-Eleven of the thirteen `analyze()` functions compute bootstrap confidence
+Twelve of the fourteen `analyze()` functions compute bootstrap confidence
 intervals. Only `jaxgsa.efast` and `jaxgsa.hsic` do not, and in both cases
 that is a decision rather than a gap.
 
@@ -329,7 +329,7 @@ duplicate rows onto the kernel diagonal where the kernel is exactly 1. That
 biases the resampled statistic upward by construction. HSIC still requires
 `key`, because the permutation test needs randomness.
 
-The keyword is `n_bootstrap` on all eleven, and it defaults to `0`, meaning no
+The keyword is `n_bootstrap` on all twelve, and it defaults to `0`, meaning no
 interval. Three more keywords travel with it, everywhere with the same
 meaning:
 
@@ -357,7 +357,7 @@ interval, or how many resamples it rests on. `CIInfo` does:
 
 ### Keeping the bootstrap draws
 
-All eleven take `keep_replicates`. It defaults to `False`, which throws the
+All twelve take `keep_replicates`. It defaults to `False`, which throws the
 draws away once the interval is computed. Pass `keep_replicates=True` to keep
 them in `result.ci.replicates`, a mapping from the name of an estimate
 (`"S1"`, `"mu_star"`, and so on) to an array whose leading axis has length
@@ -381,7 +381,7 @@ they are dropped by default.
 
 ## Given-data methods
 
-These nine methods analyze arbitrary aligned `(X, Y)` pairs. They need no
+These ten methods analyze arbitrary aligned `(X, Y)` pairs. They need no
 design of their own.
 
 | Namespace | Command | Result |
@@ -393,6 +393,7 @@ design of their own.
 | `jaxgsa.optimal_transport` | `analyze` | `OTResult` |
 | `jaxgsa.pawn` | `analyze` | `PAWNResult` |
 | `jaxgsa.pce` | `analyze` | `PCEResult` |
+| `jaxgsa.rank` | `analyze` | `RankResult` |
 | `jaxgsa.shapley` | `analyze` | `ShapleyResult` |
 | `jaxgsa.vkoga` | `analyze` | `VKOGAResult` |
 

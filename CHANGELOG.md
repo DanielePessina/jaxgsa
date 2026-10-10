@@ -41,6 +41,68 @@ finite rows and copy the fixed columns exactly. It must be deterministic.
   still refuse it. It raises if you ask it to draw new rows. Attach the
   sampler again with `problem.with_sampler(f, dimension=k)`.
 
+### New: condition on any subset of the inputs
+
+The Gaussian copula and custom samplers can now keep any sorted subset of
+inputs and draw the others from their joint conditional law. The Gaussian
+copula uses a Schur complement in latent space. Before, only one input, or all
+inputs but one, could be fixed.
+
+The `jaxgsa.sampling.InputSampler` contract is stronger. A sampler must now be
+a deterministic inverse Rosenblatt map, also called a conditional-quantile map.
+It must accept any sorted `fixed_indices`. Rejection sampling and MCMC are not
+valid. Existing joint and one-input calls do not change.
+
+### New: exact Shapley effects and PME from Kucherenko
+
+`jaxgsa.kucherenko.sample(problem, n, subsets="all")` builds a design with one
+block for every subset of inputs. The design has `n * 2^D` runs. It needs
+`2 <= D <= 12`. The default `subsets="singletons"` design is unchanged.
+
+On the new design, `KucherenkoResult` gains:
+
+- `closed` and `subset_total`: the closed and total index of every subset,
+  with `closed_conf` and `subset_total_conf` intervals, and the `subsets`
+  membership matrix.
+- `result.shapley(cost="total")`: exact conditional-variance Shapley effects
+  (Owen 2014; Song, Nelson and Staum 2016). Use `cost="closed"` for the closed
+  cost.
+- `result.pme()`: proportional marginal effects (Herin et al. 2024). An input
+  that the model does not use gets exactly 0.
+
+Both methods return a `ShapleyResult` with `backend="exact"`. Intervals need
+`n_bootstrap > 0` and `keep_replicates=True`. Saved designs store `subsets`.
+Older files load as `"singletons"`.
+
+### New: `jaxgsa.rank`
+
+`jaxgsa.rank.analyze(problem, X, Y)` estimates the first-order Sobol' index
+from one existing sample, with the rank statistic of Gamboa, Gremaud, Klein and
+Lagnoux (2022). It accepts independent, Gaussian-copula and custom-sampler
+problems. It refuses categorical inputs. It supports scalar, multi-output and
+time-series outputs, and `n_bootstrap` intervals. `jaxgsa.rank.indices` is the
+traceable core. See the [rank page](https://danielepessina.github.io/jaxgsa/api/rank).
+
+The intervals use 80% subsamples without replacement, rescaled to full size.
+The reported interval is the hull of an interval around the estimate and one
+around a bias-corrected estimate. This rule is a heuristic, checked by
+simulation. The estimator divides by `n`, as in the paper. R
+`sensitivity::sobolrank` divides by `n - 1`.
+
+### New: `result.aggregate()`
+
+`SobolResult`, `KucherenkoResult` and `PCEResult` have
+`aggregate(*, weights="variance")`. It collapses the output axes into one index
+per input. The weights are the output variances (Gamboa, Janon, Klein and
+Lagnoux 2014; Lamboni, Monod and Makowski 2011). Use `weights="equal"` for equal
+weights. The result keeps its class, with output axes of size 1. With
+`keep_replicates=True`, each bootstrap draw is aggregated and the interval is
+drawn again. Otherwise the intervals are NaN.
+
+`SobolResult` has a new optional field `variance`, set by `sobol.analyze`.
+Results built without it accept `weights="equal"` only. The Sobol' indices
+are unchanged.
+
 ### Changed: VKOGA training-data guidance
 
 The old guidance was wrong. It said the training design must be independent.

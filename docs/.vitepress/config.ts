@@ -183,6 +183,7 @@ export default defineConfig({
           items: [
             { text: 'HSIC', link: '/api/hsic' },
             { text: 'PAWN', link: '/api/pawn' },
+            { text: 'Rank-based S1', link: '/api/rank' },
             { text: 'Borgonovo delta', link: '/api/borgonovo' },
             { text: 'Optimal transport', link: '/api/optimal-transport' },
           ],

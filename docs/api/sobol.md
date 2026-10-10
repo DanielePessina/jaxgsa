@@ -233,6 +233,29 @@ Related docs:
 - [xarray Output](/examples/xarray)
 - [Methods](/guide/methods)
 
+## Aggregating outputs
+
+`result.aggregate(*, weights="variance")` collapses the `T` and `K` axes into
+one index per input. With `weights="variance"` each output counts in proportion
+to its variance. This is the generalised Sobol' index of [Gamboa, Janon, Klein
+and Lagnoux (2014)](#ref-gamboa-2014), also used by [Lamboni, Monod and Makowski
+(2011)](#ref-lamboni-2011). It is the share of the total output variance that
+the input explains. With `weights="equal"` every output counts the same.
+
+The result keeps its class. Its output axes have size 1. A constant output has
+weight 0. A result with one output slice comes back unchanged.
+
+The weights use `result.variance`, the output variance over all rows of the
+expanded Saltelli layout. `analyze` sets this field. A result without it
+(`variance=None`) accepts `aggregate(weights="equal")` only. `aggregate` applies
+to `S1`, `ST` and `S2`.
+
+With `keep_replicates=True`, each bootstrap draw is aggregated and the interval
+is drawn again from those draws. Otherwise the intervals are NaN. The weights
+stay fixed at their point estimates, so the interval leaves out the noise in the
+weights. A ragged result (`IrregularResult`) has no `aggregate`. Aggregate each
+channel instead.
+
 ## References
 
 - <a id="ref-sobol-2001"></a>**Variance indices and Monte Carlo estimation:**
@@ -283,3 +306,11 @@ Related docs:
   & Rosati, R. (2021). *Comparison of two sets of Monte Carlo estimators of
   Sobol' indices.* Environmental Modelling & Software, 144, 105167.
   [DOI](https://doi.org/10.1016/j.envsoft.2021.105167).
+- <a id="ref-gamboa-2014"></a>**Aggregated indices for multiple outputs:** Gamboa, F.,
+  Janon, A., Klein, T., & Lagnoux, A. (2014).
+  [Sensitivity analysis for multidimensional and functional outputs](https://doi.org/10.1214/14-EJS895).
+  *Electronic Journal of Statistics*, 8(1), 575–603.
+- <a id="ref-lamboni-2011"></a>**Aggregated indices for dynamic models:** Lamboni, M.,
+  Monod, H., & Makowski, D. (2011).
+  [Multivariate sensitivity analysis to measure global contribution of input factors in dynamic models](https://doi.org/10.1016/j.ress.2010.12.002).
+  *Reliability Engineering & System Safety*, 96(4), 450–459.

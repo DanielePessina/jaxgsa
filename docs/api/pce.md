@@ -169,6 +169,33 @@ Operations:
 All output slices share one basis and are fitted in a single multi-right-hand-
 side solve. Indices are computed independently per `(t, k)` slice.
 
+## Aggregating outputs
+
+`result.aggregate(*, weights="variance")` collapses the `T` and `K` axes into
+one index per input. With `weights="variance"` each output counts in proportion
+to its variance. This is the generalised Sobol' index of [Gamboa, Janon, Klein
+and Lagnoux (2014)](#ref-gamboa-2014), also used by [Lamboni, Monod and Makowski
+(2011)](#ref-lamboni-2011). It is the share of the total output variance that
+the input explains. With `weights="equal"` every output counts the same.
+
+The result keeps its class. Its output axes have size 1. A constant output has
+weight 0. A result with one output slice comes back unchanged.
+
+The weights come from the variance of the fitted surrogate under the input
+measure. That is the sum of the squared non-constant coefficients. A slice whose
+indices are all NaN and whose coefficients are finite (a constant output) gets
+weight 0. A slice with non-finite coefficients (a failed fit) has an unknown
+variance, so the aggregate is NaN. `aggregate` applies to
+`S1`, `ST` and `S2`.
+
+The aggregated `PCEResult` is a summary, not a surrogate. Its `coefficients`
+are NaN, so `predict()` and `shapley()` return NaN. Its `loo_rmse` and
+`explained_variance` are `None`.
+
+With `keep_replicates=True`, each bootstrap draw is aggregated and the interval
+is drawn again from those draws. Otherwise the intervals are NaN. The weights
+stay fixed at their point estimates.
+
 ## effective_order
 
 ```python
@@ -226,5 +253,13 @@ first.
 - **Wiener-Askey orthogonal polynomial basis:** Xiu, D., & Karniadakis, G. E. (2002).
   [The Wiener–Askey Polynomial Chaos for Stochastic Differential Equations](https://doi.org/10.1137/S1064827501387826).
   *SIAM Journal on Scientific Computing*, 24(2), 619–644.
+- <a id="ref-gamboa-2014"></a>**Aggregated indices for multiple outputs:** Gamboa, F.,
+  Janon, A., Klein, T., & Lagnoux, A. (2014).
+  [Sensitivity analysis for multidimensional and functional outputs](https://doi.org/10.1214/14-EJS895).
+  *Electronic Journal of Statistics*, 8(1), 575–603.
+- <a id="ref-lamboni-2011"></a>**Aggregated indices for dynamic models:** Lamboni, M.,
+  Monod, H., & Makowski, D. (2011).
+  [Multivariate sensitivity analysis to measure global contribution of input factors in dynamic models](https://doi.org/10.1016/j.ress.2010.12.002).
+  *Reliability Engineering & System Safety*, 96(4), 450–459.
 
 See the [PCE example](/examples/pce) and the [API overview](/api/).

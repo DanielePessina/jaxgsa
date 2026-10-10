@@ -16,7 +16,9 @@ Choose the method from the question you need to answer:
 | What does each input explain, including what it carries through correlation? | Kucherenko $S_1$ or VKOGA $S_{TC}$ |
 | What can only this input explain, after accounting for the others? | Kucherenko $S_T$ or VKOGA $S_{TU}$ |
 | Which model terms carry variance, and how much comes from structure or correlation? | HDMR |
-| How can I allocate the fitted variance to one number per input? | Shapley with the HDMR backend |
+| How can I split the output variance into one share per input, with the right conditional-variance meaning? | Kucherenko Shapley effects (`subsets="all"`) |
+| Which inputs does the model actually use, with zero for an input it never reads? | Kucherenko PME (`subsets="all"`) |
+| How can I split the fitted variance into one number per input from existing data? | Shapley with the HDMR backend |
 | Does an input change the output distribution, rather than only its variance? | HSIC, PAWN, Borgonovo delta, or optimal transport |
 
 Then choose between a dedicated design and existing data:
@@ -26,8 +28,11 @@ Then choose between a dedicated design and existing data:
 - If you already have $(X, Y)$ data, use **VKOGA** for conditional-variance
   indices, **HDMR** for a term-level ANCOVA split, or a distribution-based
   method when variance is not the quantity you care about.
-- If you need one allocation per parameter, use **Shapley with the HDMR
-  backend**, but read its interpretation carefully.
+- If you need one share per parameter and you can run the model, use
+  **Kucherenko Shapley effects or PME**. They are exact conditional-variance
+  quantities. The design needs $D \le 12$.
+- If you need one allocation per parameter from existing data, use **Shapley
+  with the HDMR backend**, but read its interpretation carefully.
 
 ## Why familiar indices split
 
@@ -49,12 +54,13 @@ very differently.
 ## The four variance-based routes
 
 There is no single generalisation of Sobol' indices to dependent inputs.
-jaxgsa provides four routes, each with a different estimand.
+jaxgsa provides five routes, each with a different estimand.
 
 | Route | What it estimates | What it needs |
 | --- | --- | --- |
 | [Kucherenko](/api/kucherenko) | $S_1 = V(\mathbb{E}(Y \mid X_i))/V(Y)$ and $S_T = \mathbb{E}(V(Y \mid \mathbf{X}_{\sim i}))/V(Y)$ under the supplied joint distribution | A dedicated design, $N(2D+1)$ model runs, and either a Gaussian-copula correlation matrix or a custom joint/conditional sampler |
 | [VKOGA](/api/vkoga) | The same conditional-variance quantities as $S_{TC}$ and $S_{TU}$, plus $S_U$, $S_C$, and $S_{IU}$ | Existing $(X, Y)$ pairs and either a Gaussian-copula correlation matrix or a custom joint/conditional sampler |
+| [Kucherenko Shapley and PME](/api/kucherenko#shapley-effects-and-pme) | The exact Shapley effect and the proportional marginal effect of each input, from conditional variances, with $\sum_i = 1$ | A dedicated `subsets="all"` design, $N\,2^D$ model runs, $D \le 12$, and a Gaussian-copula matrix or a custom sampler that supports every subset |
 | [HDMR](/api/hdmr) | For each fitted component, a structural share $S_a$ and a correlation-driven share $S_b$ | Existing $(X, Y)$ pairs; dependence is inferred from $X$ |
 | [Shapley with HDMR](/api/shapley) | One ANCOVA allocation per parameter, formed by splitting each term's $S_a + S_b$ among its participants | Existing $(X, Y)$ pairs |
 
@@ -74,6 +80,19 @@ The conditional-variance estimators follow
 - $S_T$ is correlation-exclusive.
 - There is no fitted surrogate between the model and the estimator.
 - The design costs $N(2D+1)$ model evaluations.
+
+For one share per input, draw the design with `subsets="all"` and call
+`result.shapley()` or `result.pme()`. See
+[Shapley effects and PME](/api/kucherenko#shapley-effects-and-pme).
+The design costs $N\,2^D$ runs and needs $D \le 12$.
+
+- Shapley effects ([Owen, 2014](#references)) split the output variance among
+  the inputs. A correlated input that the model never reads still gets a share,
+  because it carries information about an input that the model reads.
+- PME ([Herin et al., 2024](#references)) gives zero to an input that the model
+  does not use, even when that input is correlated with one the model uses.
+- Both sum to 1 and are nonnegative in expectation. Choose Shapley to credit
+  correlation. Choose PME to find the inputs the model uses.
 
 See the [Kucherenko example](/examples/kucherenko) and the broader
 [correlated-inputs example](/examples/correlated-inputs).
@@ -97,7 +116,8 @@ Its two main decision measures match the Kucherenko quantities:
 - $S_{TU}$ is the correlation-exclusive fixing measure.
 
 VKOGA also reports $S_U$, $S_C$, and $S_{IU}$ to separate uncorrelated,
-correlated, and independent-interaction contributions. Because these values
+correlated, and independent-interaction contributions. This full and
+independent index family follows [Mara, Tarantola & Annoni (2015)](#references). Because these values
 come from a surrogate, their quality depends on the fit.
 
 See the [VKOGA example](/examples/vkoga).
@@ -124,24 +144,50 @@ See the [HDMR example](/examples/hdmr).
 
 ### Shapley with the HDMR backend
 
-Use
-`shapley.analyze(backend="hdmr", include_correlative=True)` when you want one
-allocation per parameter from the HDMR decomposition. It splits each term's
+If you can run the model, prefer the exact route above. Use
+`shapley.analyze(backend="hdmr", include_correlative=True)` when you only have
+existing $(X, Y)$ data and want one allocation per parameter from the HDMR
+decomposition. It splits each term's
 $S_a + S_b$ among the parameters in that term, and the allocations sum to 1.
 
 This is an ANCOVA-based attribution. It is not the conditional-variance
 Shapley effect of Song et al. (2016), and its correlative shares can be
-negative. It should not be interpreted as the same quantity as Kucherenko or
+negative. The Kucherenko route computes that conditional-variance Shapley
+effect. It should not be interpreted as the same quantity as Kucherenko or
 VKOGA.
 
 For the conditional-variance definition under dependence, see
-[Song, Nelson & Staum (2016)](https://doi.org/10.1137/15M1048070),
-*Shapley Effects for Global Sensitivity Analysis: Theory and Computation*,
-SIAM/ASA Journal on Uncertainty Quantification, 4(1), 1060–1083.
+[Song, Nelson & Staum (2016)](https://doi.org/10.1137/15M1048070).
 The [Shapley API references](/api/shapley#references) cover the independent-input
 allocation and the ANCOVA source used by jaxgsa.
 
 See the [Shapley example](/examples/shapley).
+
+## What a custom sampler must do
+
+A `subsets="all"` design asks the sampler for any subset of the inputs. The
+default design asks only for one input, or for all inputs but one. The
+`InputSampler` contract is now stronger. For any sorted set `fixed_indices` of
+inputs, the sampler must keep those columns exactly. It must draw the other
+columns from their joint law given the fixed ones.
+
+The sampler must be a deterministic inverse Rosenblatt map
+([Rosenblatt, 1952](#references)). This is a conditional-quantile map. It
+turns the uniform points $u$ into the free columns by inverting the
+conditional distribution function given the fixed columns. In the chain-rule
+form, the first free column uses $F_1^{-1}(u_1)$. The next uses
+$F_2^{-1}(u_2 \mid x_1)$, and so on. Two rules follow.
+
+- Do not use rejection sampling or MCMC. Their output is not a deterministic
+  function of the uniform points. The package then cannot control the
+  randomness, and the Sobol' balance is lost.
+- Do not use hidden random state. The same arguments must give the same rows.
+
+The built-in Gaussian copula meets this contract. Its conditional law is
+Gaussian in latent space, so the map is closed form. This is the Nataf
+transform ([Lebrun & Dutfoy, 2009](#references)): a Gaussian copula with the
+declared marginals. See also
+[supplying your own input distribution](/guide/methods#supplying-your-own-input-distribution).
 
 ## Distribution-based alternatives
 
@@ -174,7 +220,8 @@ Keep these boundaries clear when interpreting results:
   to agree with Kucherenko or VKOGA.
 - HDMR's $S_T$ under dependence is not a conditional-variance total-effect
   index.
-- HDMR-backed Shapley is not conditional-variance Shapley.
+- HDMR-backed Shapley is not conditional-variance Shapley. Kucherenko Shapley
+  is.
 - None of these dependent-input indices should be placed beside
   `jaxgsa.sobol` as if they had the same meaning. Sobol' analysis assumes
   independent inputs and refuses a problem with a declared correlation or a
@@ -196,3 +243,24 @@ Keep these boundaries clear when interpreting results:
 
 For setup, code, and a side-by-side comparison, continue to
 [Correlated Inputs](/examples/correlated-inputs).
+
+## References
+
+- Owen, A. B. (2014).
+  [Sobol' indices and Shapley value](https://doi.org/10.1137/130936233).
+  *SIAM/ASA Journal on Uncertainty Quantification*, 2(1), 245–251.
+- Song, E., Nelson, B. L., & Staum, J. (2016).
+  [Shapley effects for global sensitivity analysis: theory and computation](https://doi.org/10.1137/15M1048070).
+  *SIAM/ASA Journal on Uncertainty Quantification*, 4(1), 1060–1083.
+- Herin, M., Il Idrissi, M., Chabridon, V., & Iooss, B. (2024).
+  [Proportional marginal effects for global sensitivity analysis](https://doi.org/10.1137/22M153032X).
+  *SIAM/ASA Journal on Uncertainty Quantification*, 12(2), 667–692.
+- Rosenblatt, M. (1952).
+  [Remarks on a multivariate transformation](https://doi.org/10.1214/aoms/1177729394).
+  *Annals of Mathematical Statistics*, 23(3), 470–472.
+- Lebrun, R., & Dutfoy, A. (2009).
+  [An innovating analysis of the Nataf transformation from the copula viewpoint](https://doi.org/10.1016/j.probengmech.2008.08.001).
+  *Probabilistic Engineering Mechanics*, 24(3), 312–320.
+- Mara, T. A., Tarantola, S., & Annoni, P. (2015).
+  [Non-parametric methods for global sensitivity analysis of model output with dependent inputs](https://doi.org/10.1016/j.envsoft.2015.07.010).
+  *Environmental Modelling & Software*, 72, 173–183.

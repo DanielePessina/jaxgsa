@@ -48,7 +48,7 @@ For ordinary analysis, use a method's `analyze()` function. It validates the
 data, applies the non-finite policy, emits warnings, computes optional
 confidence intervals, and returns a labelled result object.
 
-Eleven methods also expose a smaller `indices()` function. It runs the same
+Twelve methods also expose a smaller `indices()` function. It runs the same
 estimator on clean inputs but returns bare JAX arrays and performs no
 data-dependent host-side diagnostics. This makes it suitable for composition
 with transformations such as `jax.jit`, `jax.vmap`, `jax.grad`, `jax.jacfwd`,
@@ -67,6 +67,7 @@ and `jax.jacrev`.
 | PAWN | `jaxgsa.pawn.indices` | Traceable, but gradients need care |
 | Borgonovo | `jaxgsa.borgonovo.indices` | Reverse and forward mode |
 | Optimal transport | `jaxgsa.optimal_transport.indices` | Reverse and forward mode |
+| Rank | `jaxgsa.rank.indices` | Traces. The index is piecewise constant in `X`, so `d/dX` is 0. `d/dY` is not |
 | Kucherenko | None | Host NumPy implementation |
 | VKOGA | None | Host quasi-Monte Carlo index stage |
 

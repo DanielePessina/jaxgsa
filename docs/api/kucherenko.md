@@ -1,8 +1,9 @@
 # Kucherenko (dependent-input Sobol' indices)
 
 ```python
-jaxgsa.kucherenko.sample(problem, n_samples, *, scramble=True, seed=None,
-                         verbose=True) -> KucherenkoSamples
+jaxgsa.kucherenko.sample(problem, n_samples, *, subsets="singletons",
+                         scramble=True, seed=None, verbose=True)
+                         -> KucherenkoSamples
 
 jaxgsa.kucherenko.analyze(sampling_result, Y, *, n_bootstrap=0, conf_level=0.95,
                           ci_method="quantile", key=None, on_invalid="raise",
@@ -19,7 +20,7 @@ fitted anywhere. That makes it the design-based counterpart to
 a fitted kernel surrogate instead.
 
 The trade is straightforward. Kucherenko costs `base_n * (2D + 1)` model
-evaluations and has no surrogate error. VKOGA costs one `(X, Y)` sample of any
+evaluations (`base_n * 2^D` with `subsets="all"`) and has no surrogate error. VKOGA costs one `(X, Y)` sample of any
 size and inherits whatever the surrogate gets wrong.
 
 `analyze` also accepts ragged outputs. Pass a list or dict of `(times, values)`
@@ -126,6 +127,9 @@ up to the next power of two, for built-in and custom dependence alike. The
 Sobol' sequence keeps its balance guarantees only at powers of two, so 4096
 stays 4096 and 4097 becomes 8192.
 
+With `subsets="all"` the layout is different. See
+[Shapley effects and PME](#shapley-effects-and-pme).
+
 The design holds one joint block, then two blocks per parameter. The first keeps
 $X_i$ and redraws the rest from $p(\mathbf{X}_{\sim i} \mid X_i)$. The second
 keeps the rest and redraws $X_i$ from $p(X_i \mid \mathbf{X}_{\sim i})$. Both
@@ -142,6 +146,7 @@ column-swap scheme and the analysis reproduces the classic Sobol' indices.
 
 | Argument | Default | What it changes |
 | --- | --- | --- |
+| `subsets` | `"singletons"` | `"singletons"` builds the `2D + 1` block design. `"all"` builds `2^D` blocks for exact Shapley effects and PME. See [Shapley effects and PME](#shapley-effects-and-pme). |
 | `n_samples` | required | Base points per block, at least 2; rounded up to a power of two. It is the only knob on accuracy: everything else in the design is fixed by `D`. |
 | `scramble` | `True` | Owen-scrambles the Sobol' sequence. Keep it on, because it is what makes different seeds give statistically independent designs. Off, the sequence is deterministic and repeated runs are identical. |
 | `seed` | `None` | `int`, `np.random.Generator`, or `None`. It seeds the scrambling only, so it does nothing with `scramble=False` and passing both raises `ValueError`. The random streams changed in this release, so a seed does not reproduce designs from earlier versions. |
@@ -153,6 +158,106 @@ column-swap scheme and the analysis reproduces the classic Sobol' indices.
 [`jaxgsa.borgonovo`](/api/borgonovo), [`jaxgsa.pawn`](/api/pawn), or the
 Saltelli-based Sobol pipeline), when the problem has fewer than two parameters,
 and when `n_samples < 2`.
+
+## Shapley effects and PME
+
+The default design gives one number per input, `S1` and `ST`. Under
+dependence these two numbers can disagree a lot. Sometimes you need one share
+per input that sums to 1. Draw the design with `subsets="all"` for that.
+
+```python
+ks = jaxgsa.kucherenko.sample(problem, 4096, subsets="all", seed=0)
+res = jaxgsa.kucherenko.analyze(ks, Y)
+res.shapley()   # exact Shapley effects
+res.pme()       # proportional marginal effects
+```
+
+The `"all"` design holds one block per subset of inputs. Each block keeps a
+subset $u$ of the inputs and redraws the others from their conditional law
+given $u$. The design has `base_n * 2^D` rows. It also holds a second,
+independent joint block, which only pools the variance estimate. The design
+refuses `D < 2` and `D > 12`. At `D = 12` and `base_n = 1024` the design has
+4 million rows. Plan the memory before you ask for it.
+
+From each block the analysis reads two costs for a subset $u$:
+
+- the closed index $\mathrm{Var}(\mathbb{E}(Y \mid X_u)) / \mathrm{Var}(Y)$, from
+  the same single-loop product as `S1`;
+- the total index $\mathbb{E}(\mathrm{Var}(Y \mid X_{\sim u})) / \mathrm{Var}(Y)$ of
+  the complement, from the same Jansen difference as `ST`.
+
+Both are conditional variances under the joint input law. The two costs give
+the same Shapley effects in theory. They differ by sampling noise only.
+
+| Field or method | Meaning |
+| --- | --- |
+| `closed` | Closed index of every subset, shape `(..., 2^D - 1)`. |
+| `subset_total` | Total index of every subset. It is not `ST`. The two agree for single inputs only. |
+| `subsets` | Boolean membership matrix, shape `(2^D - 1, D)`. Subset with bitmask `m` (bit `j` is input `j`) sits at row `m - 1`. The last row is the full set, with index exactly 1. |
+| `closed_conf`, `subset_total_conf` | `(2, ..., 2^D - 1)` intervals, `None` when `n_bootstrap=0`. |
+| `shapley(cost="total")` | Exact Shapley effects ([Owen, 2014](#ref-owen-2014)). Use `cost="closed"` for the closed cost. |
+| `pme()` | Proportional marginal effects ([Herin et al., 2024](#ref-herin-2024)). |
+
+`S1` and `ST` of an `"all"` design come from the singleton blocks inside it.
+`shapley()` and `pme()` return a `ShapleyResult` with `backend="exact"`.
+`explained_variance` is 1 because no surrogate is fitted. For `pme()`, the
+`Sh` field holds the PME values. They are not Shapley effects.
+
+Intervals need `n_bootstrap > 0` and `keep_replicates=True`. Each kept draw is
+transformed, and the interval comes from the transformed draws. Without kept
+draws, `Sh_conf` is NaN. A call to `shapley()` or `pme()` on a result from the
+default design raises `ValueError`.
+
+### Shapley or PME
+
+Both methods give nonnegative shares that sum to 1. They treat an input that
+the model does not use in different ways.
+
+Take $Y = X_1 + 0.5 X_3$ with $X_2$ correlated with $X_1$ ($\rho = 0.8$).
+The model never reads $X_2$.
+
+```python
+problem = jaxgsa.Problem(names=("x1", "x2", "x3"), bounds=((-1.0, 1.0),) * 3)
+rho = np.array([[1.0, 0.8, 0.0], [0.8, 1.0, 0.0], [0.0, 0.0, 1.0]])
+problem = problem.with_correlation(rho)
+
+ks = jaxgsa.kucherenko.sample(problem, 4096, subsets="all", seed=0)
+Y = ks.samples[:, 0] + 0.5 * ks.samples[:, 2]
+res = jaxgsa.kucherenko.analyze(ks, Y, verbose=False)
+print(np.asarray(res.S1).round(3))
+print(np.asarray(res.ST).round(3))
+print(np.asarray(res.shapley().Sh).round(3))
+print(np.asarray(res.pme().Sh).round(3))
+```
+
+```
+[0.8   0.498 0.2  ]
+[0.302 0.    0.2  ]
+[0.552 0.248 0.201]
+[0.8 0.  0.2]
+```
+
+- `S1` gives $X_2$ half of the variance, because $X_2$ carries information
+  about $X_1$.
+- `ST` gives $X_2$ zero, because nothing is left once the others are known.
+- Shapley gives $X_2$ a share of 0.25. It shares the variance of $X_1$ between
+  $X_1$ and $X_2$ through their correlation.
+- PME gives $X_2$ exactly zero. It gives all of the variance to the inputs
+  that the model uses.
+
+Use Shapley when you want to know who explains the output, including by
+correlation. Use PME when you want to know which inputs the model uses. PME
+gives zero to an input the model does not read. Shapley does not.
+
+PME detects a null input as one whose cost is exactly zero. The Jansen
+estimator gives exactly zero when the model ignores the redrawn inputs. An
+input that the model uses only a little gets a small positive PME. There is
+no tolerance argument.
+
+Shapley and PME of an `"all"` design use the same total cost. The
+[Plischke, Rabitti and Borgonovo (2021)](#ref-plischke-2021) paper compares
+other ways to estimate Shapley effects. [Iooss and Prieur (2019)](#ref-iooss-2019)
+compare Shapley effects with Sobol' indices under dependence.
 
 ## Custom input dependence
 
@@ -179,18 +284,25 @@ sampler(uniform_points, *, conditioning_rows=None, fixed_indices=())
 ```
 
 The package supplies `(n, sampler_dimension)` uniform points. Return `(n, D)`
-finite real physical inputs in `problem.names` order. The package makes exactly
-three kinds of call:
+finite real physical inputs in `problem.names` order. The default design makes exactly
+three kinds of call. A `subsets="all"` design adds a fourth:
 
 | `fixed_indices` | `conditioning_rows` | What to return |
 | --- | --- | --- |
 | `()` | `None` | Joint draws. |
 | `(i,)` | physical rows | Keep column `i` of `conditioning_rows`. Draw the other columns from their conditional given `x_i`. |
 | every index except `i` | physical rows | Keep those columns. Draw `x_i` from its conditional given the rest. |
+| any sorted subset `u` (`subsets="all"` only) | physical rows | Keep the columns in `u`. Draw the others from their joint conditional given `x_u`. |
 
 Copy the fixed columns exactly. Overwriting fixed columns after a joint draw is
 valid only for independent inputs. The package passes copies, so changing the
 arguments in place does no harm.
+
+For `subsets="all"`, the sampler must be a deterministic inverse Rosenblatt
+map ([Rosenblatt, 1952](/guide/dependent-inputs#references)). That is a
+conditional-quantile map. It sends the uniform points to the free columns
+through the conditional law given the fixed columns. Rejection sampling and
+MCMC do not qualify. The free columns must not depend on hidden state.
 
 The callback must be deterministic: identical arguments give identical outputs.
 Do not use hidden randomness or mutable sampling state. All randomness comes
@@ -258,12 +370,39 @@ Drop that slice, or widen the input ranges so the output varies.
 | `S1`, `ST` | The two index arrays, `(..., D)`. |
 | `S1_conf`, `ST_conf` | `(2, ..., D)` intervals, `None` when `n_bootstrap=0`. |
 | `variance` | Output variance under the joint input measure, per output slice. |
+| `closed`, `subset_total`, `subsets` | Subset indices and their membership matrix. `None` unless the design used `subsets="all"`. See [Shapley effects and PME](#shapley-effects-and-pme). |
 | `dependence` | How the inputs depend on each other: `"independent"`, `"gaussian"` or `"custom"`. |
 | `invalid` | What the non-finite check found and which policy ran. |
 | `ci` | Confidence level, endpoint rule, resample count, and the draws when `keep_replicates=True`. |
 
 `result.to_dataset(time_coords=None)` gives the labeled xarray view of `S1`,
-`ST` and `variance`.
+`ST` and `variance`. With subset indices it adds `closed` and `subset_total` on
+a `subset` dimension, labelled like `x1+x3`, and a boolean `subset_members`.
+
+## Aggregating outputs
+
+```python
+result.aggregate(*, weights="variance")
+```
+
+`aggregate` collapses the `T` and `K` axes into one index per input. With
+`weights="variance"` each output counts in proportion to its variance. This is
+the generalised Sobol' index of [Gamboa, Janon, Klein and Lagnoux
+(2014)](#ref-gamboa-2014), also used by [Lamboni, Monod and Makowski
+(2011)](#ref-lamboni-2011). It is the share of the total output variance that
+the input explains. With `weights="equal"` every output counts the same.
+
+The result keeps its class. Its output axes have size 1. A constant output has
+weight 0. A result with one output slice comes back unchanged. When subset
+indices are present they collapse with the same weights, so `shapley()` of the
+aggregated result equals the variance-weighted mean of the per-output Shapley
+effects.
+
+Intervals do not aggregate bound by bound. With `keep_replicates=True`, each
+kept draw is aggregated and the interval is drawn again. Otherwise the
+intervals are NaN. The weights stay fixed at their point estimates, so the
+interval leaves out the noise in the weights. A ragged result
+(`IrregularResult`) has no `aggregate`; aggregate each channel instead.
 
 ## KucherenkoSamples
 
@@ -295,6 +434,33 @@ sampler again with `problem.with_sampler(f, dimension=k)`.
 - **Squared-difference total-order estimator:** Jansen, M. J. W. (1999).
   [Analysis of variance designs for model output](https://doi.org/10.1016/S0010-4655(98)00154-4).
   *Computer Physics Communications*, 117(1–2), 35–43.
+- <a id="ref-owen-2014"></a>**Shapley value of Sobol' indices:** Owen, A. B. (2014).
+  [Sobol' indices and Shapley value](https://doi.org/10.1137/130936233).
+  *SIAM/ASA Journal on Uncertainty Quantification*, 2(1), 245–251.
+- <a id="ref-song-2016"></a>**Shapley effects and the total cost:** Song, E., Nelson, B. L.,
+  & Staum, J. (2016).
+  [Shapley effects for global sensitivity analysis: theory and computation](https://doi.org/10.1137/15M1048070).
+  *SIAM/ASA Journal on Uncertainty Quantification*, 4(1), 1060–1083.
+- <a id="ref-iooss-2019"></a>**Shapley effects with correlated inputs:** Iooss, B., &
+  Prieur, C. (2019).
+  [Shapley effects for sensitivity analysis with correlated inputs: comparisons with Sobol' indices, numerical estimation and applications](https://doi.org/10.1615/Int.J.UncertaintyQuantification.2019028372).
+  *International Journal for Uncertainty Quantification*, 9(5), 493–514.
+- <a id="ref-plischke-2021"></a>**Computing Shapley effects:** Plischke, E.,
+  Rabitti, G., & Borgonovo, E. (2021).
+  [Computing Shapley effects for sensitivity analysis](https://doi.org/10.1137/19M1304738).
+  *SIAM/ASA Journal on Uncertainty Quantification*, 9(4), 1411–1437.
+- <a id="ref-herin-2024"></a>**Proportional marginal effects:** Herin, M.,
+  Il Idrissi, M., Chabridon, V., & Iooss, B. (2024).
+  [Proportional marginal effects for global sensitivity analysis](https://doi.org/10.1137/22M153032X).
+  *SIAM/ASA Journal on Uncertainty Quantification*, 12(2), 667–692.
+- <a id="ref-gamboa-2014"></a>**Aggregated indices for multiple outputs:** Gamboa, F.,
+  Janon, A., Klein, T., & Lagnoux, A. (2014).
+  [Sensitivity analysis for multidimensional and functional outputs](https://doi.org/10.1214/14-EJS895).
+  *Electronic Journal of Statistics*, 8(1), 575–603.
+- <a id="ref-lamboni-2011"></a>**Aggregated indices for dynamic models:** Lamboni, M.,
+  Monod, H., & Makowski, D. (2011).
+  [Multivariate sensitivity analysis to measure global contribution of input factors in dynamic models](https://doi.org/10.1016/j.ress.2010.12.002).
+  *Reliability Engineering & System Safety*, 96(4), 450–459.
 
 See the [Kucherenko example](/examples/kucherenko), [Methods](/guide/methods),
 and the [API overview](/api/).
