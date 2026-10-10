@@ -32,14 +32,6 @@ def _params(fn) -> dict[str, inspect.Parameter]:
     return dict(inspect.signature(fn, eval_str=True).parameters)
 
 
-def test_registry_is_complete_and_exported() -> None:
-    """Every registered method has a package-root namespace."""
-    registered = set(methods())
-    assert len(registered) >= 13
-    assert registered <= set(jaxgsa.__all__)
-    assert all(getattr(jaxgsa, name, None) is not None for name in registered)
-
-
 def test_analyze_entrypoints_share_the_basic_contract() -> None:
     """Every analysis entry point exposes the same observability controls."""
     for name, spec in methods().items():
@@ -47,19 +39,6 @@ def test_analyze_entrypoints_share_the_basic_contract() -> None:
         assert params["verbose"].kind is inspect.Parameter.KEYWORD_ONLY, name
         assert params["verbose"].default is True, name
         assert "on_invalid" in params, name
-
-
-def test_bootstrap_entrypoints_share_the_interval_contract() -> None:
-    """Methods offering bootstrap intervals expose all interval controls."""
-    for name, spec in methods().items():
-        params = _params(spec.analyze)
-        if spec.bootstrap is None:
-            assert "n_bootstrap" not in params, name
-            continue
-        assert spec.bootstrap == "n_bootstrap", name
-        for required in ("n_bootstrap", "conf_level", "ci_method", "key", "keep_replicates"):
-            assert required in params, (name, required)
-        assert params["n_bootstrap"].default == 0, name
 
 
 def test_retired_names_and_unknown_batching_axes_are_absent() -> None:

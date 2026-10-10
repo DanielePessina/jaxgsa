@@ -483,14 +483,23 @@ def test_matrix_capability_coverage_is_explicit_and_supported() -> None:
 def test_every_matrix_case_completes_with_a_finite_primary_result(case: FeatureCase) -> None:
     """Every row reaches the public result object on deterministic data."""
     spec = methods()[case.method]
-    with warnings.catch_warnings():
-        # The matrix is not the warning-policy suite. These are expected for
-        # deliberately tiny fixtures (single precision, a small conditional
-        # design, or a last-iterate Sinkhorn solve) and would otherwise bury a
-        # real failure in CI's warning summary.
-        warnings.simplefilter("ignore", jaxgsa.JaxgsaWarning)
+    with warnings.catch_warnings(record=True) as caught:
+        # The matrix is not the warning-policy suite. Warnings are expected
+        # for deliberately tiny fixtures (single precision, a small
+        # conditional design, or a last-iterate Sinkhorn solve), so they are
+        # recorded and only the one that would mean a wrong answer is checked.
+        warnings.simplefilter("always")
         warnings.filterwarnings("ignore", message="Explicitly requested dtype int64")
         result = case.run()
+
+    # Every row has a varying output, so a zero-variance warning on clean data
+    # is a spurious one.
+    zero_variance = [
+        str(w.message)
+        for w in caught
+        if issubclass(w.category, jaxgsa.JaxgsaWarning) and "zero variance" in str(w.message)
+    ]
+    assert zero_variance == []
 
     assert isinstance(result, spec.result)
     assert result.invalid.n_invalid == 0

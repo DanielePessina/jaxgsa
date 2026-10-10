@@ -1,7 +1,7 @@
 """Shared linear-Gaussian closed-form reference for correlated-index tests.
 
-One model serves ``test_vkoga.py``, ``test_kucherenko.py``, and
-``test_correlated_agreement.py``: ``Y = a . X`` with ``X ~ N(0, R)`` under a
+One model serves ``test_vkoga.py``, ``test_kucherenko.py`` and the
+custom-sampler tests: ``Y = a . X`` with ``X ~ N(0, R)`` under a
 Gaussian copula, where every correlated variance-based index is closed form:
 
     V(Y)   = a' R a
@@ -44,6 +44,7 @@ silently produces an index outside ``[0, 1]``: for
 from __future__ import annotations
 
 import numpy as np
+from scipy.special import ndtri
 
 from jaxgsa.problem import Problem
 
@@ -84,6 +85,48 @@ for (_i, _j), _rho in zip(
 ):
     R_ASYM[_i, _j] = R_ASYM[_j, _i] = _rho
 assert np.linalg.eigvalsh(R_ASYM).min() > 0, "R_ASYM must be positive definite"
+
+
+def gaussian_sampler(R: np.ndarray):
+    """Build a custom sampler for ``N(0, R)`` written by hand.
+
+    It follows the ``InputSampler`` contract (``sampler(uniform_points, *,
+    conditioning_rows=None, fixed_indices=())``). The joint draw is
+    ``z @ chol(R).T``. A conditional draw keeps the fixed columns exactly and
+    draws the free ones from the closed-form Gaussian conditional. It does not
+    use :mod:`jaxgsa._core.copula`, so it is an independent route to the same
+    distribution.
+
+    Args:
+        R: Correlation matrix of the inputs. The marginals are ``N(0, 1)``.
+
+    Returns:
+        The sampler. Pair it with ``GAUSS_PROBLEM.with_sampler(sampler)``.
+    """
+    D = R.shape[0]
+    chol = np.linalg.cholesky(R)
+
+    def sampler(
+        u: np.ndarray,
+        *,
+        conditioning_rows: np.ndarray | None = None,
+        fixed_indices: tuple[int, ...] = (),
+    ) -> np.ndarray:
+        z = ndtri(np.clip(u, 1e-12, 1 - 1e-12))
+        if not fixed_indices:
+            return z @ chol.T
+        assert conditioning_rows is not None
+        rows = conditioning_rows.copy()
+        fixed = list(fixed_indices)
+        free = [j for j in range(D) if j not in fixed]
+        if not free:
+            return rows
+        beta = R[np.ix_(free, fixed)] @ np.linalg.inv(R[np.ix_(fixed, fixed)])
+        cov = R[np.ix_(free, free)] - beta @ R[np.ix_(fixed, free)]
+        rows[:, free] = rows[:, fixed] @ beta.T + z[:, free] @ np.linalg.cholesky(cov).T
+        return rows
+
+    return sampler
 
 
 def analytic_indices(a: np.ndarray, R: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:

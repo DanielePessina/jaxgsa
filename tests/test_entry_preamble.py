@@ -89,22 +89,54 @@ class TestScalarCheckHelpers:
             check_scalars(checks)
 
 
-class TestConfLevelIsValidatedEverywhere:
-    """Defect 1: sobol and morris accepted any conf_level at all.
+def _bootstrap_call(name: str, **kwargs: Any):
+    """Return a callable that runs ``name`` with a bootstrap keyword set.
 
-    Before this change ``sobol.analyze(..., conf_level=-0.2)`` returned an
-    inverted interval, lower above upper, with no error and no warning.
+    The scalar keywords are checked before any data work, so the sample only
+    has to be well formed. The design-based methods get a design that is just
+    big enough to build.
+    """
+    X, Y = _xy()
+    if name == "dgsm":
+        return lambda: jaxgsa.dgsm.analyze(PROBLEM, lambda x: jnp.sum(x**2), X, **kwargs)
+    spec = methods()[name]
+    if spec.sample is not None:
+        design = (
+            _morris_design()
+            if name == "morris"
+            else jaxgsa.efast.sample(PROBLEM, 129, seed=0, verbose=False)
+            if name == "efast"
+            else jaxgsa.kucherenko.sample(PROBLEM, 16, seed=0, verbose=False)
+            if name == "kucherenko"
+            else _sobol_design()
+        )
+        return lambda: spec.analyze(design, jnp.ones(design.n_runs), **kwargs)
+    return lambda: spec.analyze(PROBLEM, X, Y, **kwargs)
+
+
+BOOTSTRAP_METHODS = sorted(name for name, spec in methods().items() if spec.bootstrap)
+
+
+class TestBootstrapScalarsAreValidatedEverywhere:
+    """Defects 1 and 3: bad interval settings came back as silent nonsense.
+
+    Before the shared preamble ``sobol.analyze(..., conf_level=-0.2)`` returned
+    an inverted interval, and ``n_bootstrap=-1`` failed the ``> 0`` test, so the
+    no-bootstrap path ran and the result came back with no interval at all.
+    Both are scalar checks, so they fire before any data work and cost nothing.
+    The method list comes from the registry, so a new bootstrapping method is
+    covered when it registers.
     """
 
-    def test_design_methods_refuse_conf_levels_outside_the_unit_interval(self):
-        sr = _sobol_design()
-        Y = jnp.asarray(np.asarray(sr.samples)[:, 0])
-        with pytest.raises(ValueError, match="conf_level must be in"):
-            jaxgsa.sobol.analyze(sr, Y, n_bootstrap=4, key=jax.random.key(0), conf_level=-0.2)
-        sr = _morris_design()
-        Y = jnp.asarray(np.asarray(sr.samples)[:, 0])
-        with pytest.raises(ValueError, match="conf_level must be in"):
-            jaxgsa.morris.analyze(sr, Y, n_bootstrap=4, key=jax.random.key(0), conf_level=1.5)
+    def test_every_bootstrapping_method_refuses_a_conf_level_outside_the_unit_interval(self):
+        for name in BOOTSTRAP_METHODS:
+            with pytest.raises(ValueError, match="conf_level must be in"):
+                _bootstrap_call(name, n_bootstrap=4, key=jax.random.key(0), conf_level=1.5)()
+
+    def test_every_bootstrapping_method_refuses_a_negative_resample_count(self):
+        for name in BOOTSTRAP_METHODS:
+            with pytest.raises(ValueError, match="n_bootstrap must be >= 0"):
+                _bootstrap_call(name, n_bootstrap=-1)()
 
 
 class TestChunkSizeIsValidatedOnEveryPath:
@@ -127,30 +159,13 @@ class TestChunkSizeIsValidatedOnEveryPath:
                 call()
 
 
-class TestNegativeResampleCountsAreRefused:
-    """Defect 3: a negative count silently disabled the intervals.
-
-    ``n_bootstrap=-1`` failed the ``> 0`` test, so the no-bootstrap path
-    ran and the result came back with ``S1_conf=None``, as though the caller
-    had asked for no interval.
-    """
-
-    def test_every_bootstrapping_entry_point_refuses_negative_counts(self):
-        sr = _sobol_design()
-        sobol_y = jnp.asarray(np.asarray(sr.samples)[:, 0])
-        morris = _morris_design()
-        morris_y = jnp.asarray(np.asarray(morris.samples)[:, 0])
-        X, Y = _xy()
-        cases = [
-            lambda: jaxgsa.sobol.analyze(sr, sobol_y, n_bootstrap=-1),
-            lambda: jaxgsa.morris.analyze(morris, morris_y, n_bootstrap=-1),
-            lambda: jaxgsa.pawn.analyze(PROBLEM, X, Y, n_bootstrap=-1),
-            lambda: jaxgsa.optimal_transport.analyze(PROBLEM, X, Y, n_bootstrap=-1),
-            lambda: jaxgsa.borgonovo.analyze(PROBLEM, X, Y, n_bootstrap=-1),
-        ]
-        for call in cases:
-            with pytest.raises(ValueError, match="n_bootstrap must be >= 0"):
-                call()
+_CHEAP_CONSTANT_KW: dict[str, dict[str, Any]] = {
+    "hdmr": {"maxorder": 1, "maxiter": 3},
+    "pce": {"order": 2},
+    "borgonovo": {"grid_size": 24},
+    "pawn": {"n_bins": 3},
+    "optimal_transport": {"max_iter": 50},
+}
 
 
 def _constant_output_call(name):
@@ -181,7 +196,7 @@ def _constant_output_call(name):
             PROBLEM,
             X,
             Y,
-            max_centers=8,
+            max_centers=4,
             n_outer=4,
             n_inner=4,
             n_variance=4,
@@ -189,14 +204,12 @@ def _constant_output_call(name):
             key=jax.random.key(0),
         )
     if name == "hsic":
-        return lambda: jaxgsa.hsic.analyze(PROBLEM, X, Y, key=jax.random.key(0))
+        return lambda: jaxgsa.hsic.analyze(PROBLEM, X, Y, n_perms=3, key=jax.random.key(0))
     if name == "shapley":
         return lambda: jaxgsa.shapley.analyze(PROBLEM, X, Y, order=2)
-    # Borgonovo is the one method whose bootstrap is on by default, so it is
-    # the one that needs a key to run at all.
-    if name == "borgonovo":
-        return lambda: jaxgsa.borgonovo.analyze(PROBLEM, X, Y, key=jax.random.key(0))
-    return lambda: getattr(jaxgsa, name).analyze(PROBLEM, X, Y)
+    # Only the guard is under test, so each remaining method gets the
+    # smallest settings it accepts. No bootstrap runs by default, so no key.
+    return lambda: getattr(jaxgsa, name).analyze(PROBLEM, X, Y, **_CHEAP_CONSTANT_KW.get(name, {}))
 
 
 ZERO_VARIANCE_IDS = sorted(methods())
@@ -280,43 +293,6 @@ class TestTheGatesComeFromTheRegistry:
             with pytest.raises(ValueError) as excinfo:
                 call()
             assert _dependence_tolerant_methods() in str(excinfo.value)
-
-
-class TestACleanSampleStaysSilent:
-    """The new warnings must not fire on data that is fine.
-
-    Six methods gained the zero-variance check. A sample with a varying
-    output must be as quiet as it was before.
-    """
-
-    def test_varying_outputs_do_not_trigger_zero_variance_warning(self):
-        X, Y = _xy()
-        calls = {
-            "borgonovo": lambda: jaxgsa.borgonovo.analyze(PROBLEM, X, Y),
-            "dgsm": lambda: jaxgsa.dgsm.analyze(PROBLEM, lambda x: jnp.sum(x**2), X),
-            "pawn": lambda: jaxgsa.pawn.analyze(PROBLEM, X, Y),
-            "optimal_transport": lambda: jaxgsa.optimal_transport.analyze(PROBLEM, X, Y),
-            "hsic": lambda: jaxgsa.hsic.analyze(PROBLEM, X, Y, key=jax.random.key(0)),
-            "pce": lambda: jaxgsa.pce.analyze(PROBLEM, X, Y),
-        }
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            for call in calls.values():
-                call()
-        # Two warnings here are not about the data, and both fire on a clean
-        # sample by design. The single-precision one is about the arithmetic,
-        # and hsic and vkoga both raise it. The dgsm lower-bound one is about
-        # the problem definition: PROBLEM has uniform marginals, so
-        # lower_bound is outside the case Kucherenko & Song prove, whatever
-        # the sample looks like.
-        exempt = ("single precision", "untruncated Gaussian")
-        left = [
-            w
-            for w in caught
-            if issubclass(w.category, JaxgsaWarning)
-            and not any(phrase in str(w.message) for phrase in exempt)
-        ]
-        assert left == []
 
 
 class TestExtraArraysRideWithY:

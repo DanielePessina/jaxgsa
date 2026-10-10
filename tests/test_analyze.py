@@ -1,3 +1,5 @@
+"""Tests for ``jaxgsa.sobol.analyze``: bootstrap, invariances, layouts and policies."""
+
 import warnings
 
 import jax
@@ -11,27 +13,8 @@ from jaxgsa.benchmarks.ishigami import ANALYTICAL_S1, ANALYTICAL_ST, PROBLEM, ev
 from jaxgsa.problem import GaussianInputSpec
 from jaxgsa.sobol import SobolSamples
 
-
-@pytest.fixture(scope="module")
-def ishigami_bootstrap_result():
-    """Run Ishigami analysis with bootstrap CIs once for all tests."""
-    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**14 * 8, seed=42, verbose=False)
-    Y = evaluate(jnp.asarray(sr.samples))
-    return jaxgsa.sobol.analyze(sr, Y, n_bootstrap=200, key=jax.random.key(0))
-
-
-@pytest.fixture(scope="module")
-def ishigami_bootstrap_result_gaussian():
-    """Run Ishigami analysis with gaussian bootstrap CIs once for all tests."""
-    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**14 * 8, seed=42, verbose=False)
-    Y = evaluate(jnp.asarray(sr.samples))
-    return jaxgsa.sobol.analyze(
-        sr,
-        Y,
-        n_bootstrap=200,
-        ci_method="gaussian",
-        key=jax.random.key(0),
-    )
+# One bootstrap size for the default-tier tests, so they share compiles.
+R = 32
 
 
 def _assert_bootstrap_ci_contains_point_estimate(result):
@@ -59,19 +42,41 @@ def _assert_bootstrap_ci_contains_point_estimate(result):
     assert np.all(S2[upper] <= S2_hi[upper])
 
 
-def test_bootstrap_ci_contains_point_estimate(ishigami_bootstrap_result):
-    """Point estimates should lie within their bootstrap CIs."""
-    _assert_bootstrap_ci_contains_point_estimate(ishigami_bootstrap_result)
+def test_bootstrap_intervals_bracket_the_estimates_and_are_reproducible(sobol_ishigami_2k):
+    """Both interval rules bracket the point estimates, and a repeat call changes nothing.
+
+    The rules must also differ: ``CIInfo.method`` records the name the caller
+    asked for, so a gaussian branch that quietly returned percentile endpoints
+    would still record ``"gaussian"`` and pass every other test in the suite.
+    Whether an estimate sits inside its own interval does not depend on N.
+    """
+    sr, Y = sobol_ishigami_2k
+    key = jax.random.key(0)
+    quantile = jaxgsa.sobol.analyze(sr, Y, n_bootstrap=R, key=key)
+    repeat = jaxgsa.sobol.analyze(sr, Y, n_bootstrap=R, key=key)
+    gaussian = jaxgsa.sobol.analyze(sr, Y, n_bootstrap=R, ci_method="gaussian", key=key)
+
+    _assert_bootstrap_ci_contains_point_estimate(quantile)
+    _assert_bootstrap_ci_contains_point_estimate(gaussian)
+
+    for field in ("S1", "ST", "S2", "S1_conf", "ST_conf", "S2_conf"):
+        np.testing.assert_allclose(
+            np.asarray(getattr(quantile, field)),
+            np.asarray(getattr(repeat, field)),
+            rtol=1e-6,
+            atol=1e-6,
+            equal_nan=True,
+            err_msg=field,
+        )
+    assert not np.allclose(np.asarray(gaussian.S1_conf), np.asarray(quantile.S1_conf))
 
 
-def test_gaussian_bootstrap_ci_contains_point_estimate(ishigami_bootstrap_result_gaussian):
-    """Gaussian mode should still return endpoint arrays around the estimates."""
-    _assert_bootstrap_ci_contains_point_estimate(ishigami_bootstrap_result_gaussian)
-
-
-def test_bootstrap_ci_contains_analytical(ishigami_bootstrap_result):
+@pytest.mark.slow
+def test_bootstrap_ci_contains_analytical():
     """95% bootstrap CIs should contain the known analytical Ishigami values."""
-    r = ishigami_bootstrap_result
+    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**14 * 8, seed=42, verbose=False)
+    Y = evaluate(jnp.asarray(sr.samples))
+    r = jaxgsa.sobol.analyze(sr, Y, n_bootstrap=200, key=jax.random.key(0))
     S1_lo, S1_hi = np.array(r.S1_conf[0]), np.array(r.S1_conf[1])
     ST_lo, ST_hi = np.array(r.ST_conf[0]), np.array(r.ST_conf[1])
     for i, expected in enumerate(ANALYTICAL_S1):
@@ -84,74 +89,42 @@ def test_bootstrap_ci_contains_analytical(ishigami_bootstrap_result):
         )
 
 
-def test_point_estimates_are_affine_invariant():
-    """``Y -> a*Y + b`` must not move a Sobol point estimate.
+def test_estimates_and_intervals_are_affine_invariant(sobol_ishigami_1k):
+    """``Y -> a*Y + b`` must not move a Sobol point estimate or its interval.
 
     Tier T0 (closed form): every index is a variance ratio, so the shift
     drops out and the scale cancels. The estimators do not get that for free
-    — the first-order and second-order formulas are uncentred products — so
+    -- the first-order and second-order formulas are uncentred products -- so
     ``analyze`` standardizes the outputs before they run. This test is the
     guard on that: before it was unconditional, an offset of 1e4 turned
     Ishigami's S1 into ``[6.26, 0.434, 1.71]``.
-    """
-    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**10, seed=19, verbose=False)
-    Y = evaluate(jnp.asarray(sr.samples))
-    Y_affine = 3.0 * Y + 1e4
 
-    base = jaxgsa.sobol.analyze(sr, Y)
-    shifted = jaxgsa.sobol.analyze(sr, Y_affine)
+    The bootstrap path standardizes too. It does so once, before the
+    resampling, so every replicate reads the same standardized array and an
+    interval stays centred on the point estimate. The bootstrap point
+    estimates equal the plain ones exactly (see
+    ``test_bootstrap_point_estimates_equal_the_plain_path_exactly``), so one
+    bootstrap run covers both paths.
+    """
+    sr, Y = sobol_ishigami_1k
+    Y_affine = 3.0 * Y + 1e4
+    key = jax.random.key(321)
+
+    base = jaxgsa.sobol.analyze(sr, Y, n_bootstrap=R, key=key)
+    shifted = jaxgsa.sobol.analyze(sr, Y_affine, n_bootstrap=R, key=key)
 
     # The tolerance is float32 cancellation in the standardization itself:
     # subtracting a mean of 1e4 from a float32 array costs about four digits,
     # which lands near 1e-5 on an index. The bias this replaces was 1e0.
-    np.testing.assert_allclose(np.asarray(base.S1), np.asarray(shifted.S1), rtol=1e-3, atol=1e-4)
-    np.testing.assert_allclose(np.asarray(base.ST), np.asarray(shifted.ST), rtol=1e-3, atol=1e-4)
-    np.testing.assert_allclose(
-        np.asarray(base.S2),
-        np.asarray(shifted.S2),
-        rtol=1e-3,
-        atol=1e-4,
-        equal_nan=True,
-    )
-
-
-def test_repeated_bootstrap_calls_identical():
-    """Repeated identical bootstrap calls should preserve point estimates and CI shapes."""
-    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**10, seed=11)
-    Y = evaluate(jnp.asarray(sr.samples))
-    key = jax.random.key(123)
-
-    first = jaxgsa.sobol.analyze(sr, Y, n_bootstrap=20, key=key)
-    second = jaxgsa.sobol.analyze(sr, Y, n_bootstrap=20, key=key)
-
-    np.testing.assert_allclose(np.asarray(first.S1), np.asarray(second.S1), rtol=1e-6, atol=1e-6)
-    np.testing.assert_allclose(np.asarray(first.ST), np.asarray(second.ST), rtol=1e-6, atol=1e-6)
-    np.testing.assert_allclose(
-        np.asarray(first.S2),
-        np.asarray(second.S2),
-        rtol=1e-6,
-        atol=1e-6,
-        equal_nan=True,
-    )
-    np.testing.assert_allclose(
-        np.asarray(first.S1_conf),
-        np.asarray(second.S1_conf),
-        rtol=1e-6,
-        atol=1e-6,
-    )
-    np.testing.assert_allclose(
-        np.asarray(first.ST_conf),
-        np.asarray(second.ST_conf),
-        rtol=1e-6,
-        atol=1e-6,
-    )
-    np.testing.assert_allclose(
-        np.asarray(first.S2_conf),
-        np.asarray(second.S2_conf),
-        rtol=1e-6,
-        atol=1e-6,
-        equal_nan=True,
-    )
+    for field in ("S1", "ST", "S2", "S1_conf", "ST_conf", "S2_conf"):
+        np.testing.assert_allclose(
+            np.asarray(getattr(base, field)),
+            np.asarray(getattr(shifted, field)),
+            rtol=1e-3,
+            atol=1e-4,
+            equal_nan=True,
+            err_msg=field,
+        )
 
 
 def test_mixed_uniform_and_gaussian_linear_model_has_consistent_indices():
@@ -198,51 +171,6 @@ def test_mixed_uniform_and_gaussian_linear_model_has_consistent_indices():
     assert result.S2 is None
 
 
-def test_bootstrap_is_affine_invariant():
-    """The bootstrap path standardizes too, so its endpoints move with nothing.
-
-    Tier T0 (closed form). The standardization happens once, before the
-    resampling, so every replicate reads the same standardized array and an
-    interval stays centred on the point estimate.
-    """
-    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**10, seed=23, verbose=False)
-    Y = evaluate(jnp.asarray(sr.samples))
-    Y_affine = 3.0 * Y + 1e4
-    key = jax.random.key(321)
-
-    base = jaxgsa.sobol.analyze(sr, Y, n_bootstrap=20, key=key)
-    shifted = jaxgsa.sobol.analyze(sr, Y_affine, n_bootstrap=20, key=key)
-
-    np.testing.assert_allclose(np.asarray(base.S1), np.asarray(shifted.S1), rtol=1e-3, atol=1e-4)
-    np.testing.assert_allclose(np.asarray(base.ST), np.asarray(shifted.ST), rtol=1e-3, atol=1e-4)
-    np.testing.assert_allclose(
-        np.asarray(base.S2),
-        np.asarray(shifted.S2),
-        rtol=1e-3,
-        atol=1e-4,
-        equal_nan=True,
-    )
-    np.testing.assert_allclose(
-        np.asarray(base.S1_conf),
-        np.asarray(shifted.S1_conf),
-        rtol=1e-3,
-        atol=1e-4,
-    )
-    np.testing.assert_allclose(
-        np.asarray(base.ST_conf),
-        np.asarray(shifted.ST_conf),
-        rtol=1e-3,
-        atol=1e-4,
-    )
-    np.testing.assert_allclose(
-        np.asarray(base.S2_conf),
-        np.asarray(shifted.S2_conf),
-        rtol=1e-3,
-        atol=1e-4,
-        equal_nan=True,
-    )
-
-
 def _legacy_sampling_result(sr: SobolSamples) -> SobolSamples:
     n_expanded = sr.n_expanded
     expanded_samples = sr.samples[sr.expanded_to_unique]
@@ -285,66 +213,29 @@ def test_hand_built_design_with_ragged_expanded_layout_raises():
         jaxgsa.sobol.indices(hand_built, Y_ragged)
 
 
-def test_unique_analysis_matches_expanded_layout():
-    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=1024, seed=7, verbose=False)
-    Y_unique = evaluate(jnp.asarray(sr.samples))
-    result_unique = jaxgsa.sobol.analyze(sr, Y_unique)
+def test_unique_analysis_matches_expanded_layout(sobol_ishigami_1k):
+    """Tier T4: the unique-row layout and the expanded layout give one answer.
 
-    legacy_sr = _legacy_sampling_result(sr)
-    Y_expanded = Y_unique[sr.expanded_to_unique]
-    result_expanded = jaxgsa.sobol.analyze(legacy_sr, Y_expanded)
-
-    assert np.allclose(np.asarray(result_unique.S1), np.asarray(result_expanded.S1))
-    assert np.allclose(np.asarray(result_unique.ST), np.asarray(result_expanded.ST))
-    assert np.allclose(
-        np.asarray(result_unique.S2),
-        np.asarray(result_expanded.S2),
-        equal_nan=True,
-    )
-
-
-def test_unique_bootstrap_matches_expanded_layout():
-    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=1024, seed=7, verbose=False)
-    Y_unique = evaluate(jnp.asarray(sr.samples))
-    key = jax.random.key(123)
-    result_unique = jaxgsa.sobol.analyze(sr, Y_unique, n_bootstrap=50, key=key)
-
-    legacy_sr = _legacy_sampling_result(sr)
-    Y_expanded = Y_unique[sr.expanded_to_unique]
-    result_expanded = jaxgsa.sobol.analyze(legacy_sr, Y_expanded, n_bootstrap=50, key=key)
-
-    assert np.allclose(np.asarray(result_unique.S1), np.asarray(result_expanded.S1))
-    assert np.allclose(np.asarray(result_unique.ST), np.asarray(result_expanded.ST))
-    assert np.allclose(
-        np.asarray(result_unique.S2),
-        np.asarray(result_expanded.S2),
-        equal_nan=True,
-    )
-    assert np.allclose(np.asarray(result_unique.S1_conf), np.asarray(result_expanded.S1_conf))
-    assert np.allclose(np.asarray(result_unique.ST_conf), np.asarray(result_expanded.ST_conf))
-    assert np.allclose(
-        np.asarray(result_unique.S2_conf),
-        np.asarray(result_expanded.S2_conf),
-        equal_nan=True,
-    )
-
-
-def test_gaussian_and_quantile_bootstrap_endpoints_differ():
-    """The ci_method switch must exercise distinct endpoint calculations.
-
-    This is the only observable difference between the two endpoint rules.
-    ``CIInfo.method`` records the name the caller asked for, so a gaussian
-    branch that quietly returned percentile endpoints would still record
-    ``"gaussian"`` and pass every other test in the suite.
+    Both layouts are built from the same design in the same run, on the plain
+    and the bootstrap path.
     """
-    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**10, seed=61, verbose=False)
-    Y = evaluate(jnp.asarray(sr.samples))
-    key = jax.random.key(222)
+    sr, Y_unique = sobol_ishigami_1k
+    key = jax.random.key(123)
+    legacy_sr = _legacy_sampling_result(sr)
+    Y_expanded = Y_unique[sr.expanded_to_unique]
 
-    quantile = jaxgsa.sobol.analyze(sr, Y, n_bootstrap=50, ci_method="quantile", key=key)
-    gaussian = jaxgsa.sobol.analyze(sr, Y, n_bootstrap=50, ci_method="gaussian", key=key)
-
-    assert not np.allclose(np.asarray(gaussian.S1_conf), np.asarray(quantile.S1_conf))
+    for n_bootstrap, fields in (
+        (0, ("S1", "ST", "S2")),
+        (R, ("S1", "ST", "S2", "S1_conf", "ST_conf", "S2_conf")),
+    ):
+        unique = jaxgsa.sobol.analyze(sr, Y_unique, n_bootstrap=n_bootstrap, key=key)
+        expanded = jaxgsa.sobol.analyze(legacy_sr, Y_expanded, n_bootstrap=n_bootstrap, key=key)
+        for field in fields:
+            assert np.allclose(
+                np.asarray(getattr(unique, field)),
+                np.asarray(getattr(expanded, field)),
+                equal_nan=True,
+            ), (n_bootstrap, field)
 
 
 def _assert_sobol_fields_match(chunked, full, fields):
@@ -370,13 +261,13 @@ def _assert_sobol_fields_match(chunked, full, fields):
         )
 
 
-def test_slice_chunk_size_invariance():
+def test_slice_chunk_size_invariance(sobol_ishigami_1k):
     """Tier T4 (internal consistency): chunking changes no index, on both paths.
 
     ``sobol.analyze`` dispatches on ``n_bootstrap``, and ``slice_chunk_size``
     means a different thing on each side, so the test runs both halves.
 
-    * ``n_bootstrap=32`` takes ``_analyze_bootstrap``. There
+    * ``n_bootstrap=R`` takes ``_analyze_bootstrap``. There
       ``slice_chunk_size`` caps the *output slices* per device call, and the
       resamples of a slice ride along inside that call. So it chunks the
       point estimates and the draws alike, and all six fields are sensitive
@@ -390,14 +281,13 @@ def test_slice_chunk_size_invariance():
     Both halves share one design, one key and one seed, so every compared
     field must match to floating-point noise.
     """
-    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**10, seed=7, verbose=False)
-    Y = evaluate(jnp.asarray(sr.samples))
+    sr, Y = sobol_ishigami_1k
     Y_multi = jnp.stack([Y, 2.0 * Y, jnp.sin(Y)], axis=-1)
 
     # Bootstrap path: the *_conf fields are what slice_chunk_size touches.
-    full = jaxgsa.sobol.analyze(sr, Y_multi, n_bootstrap=32, key=jax.random.key(3))
+    full = jaxgsa.sobol.analyze(sr, Y_multi, n_bootstrap=R, key=jax.random.key(3))
     chunked = jaxgsa.sobol.analyze(
-        sr, Y_multi, n_bootstrap=32, key=jax.random.key(3), slice_chunk_size=1
+        sr, Y_multi, n_bootstrap=R, key=jax.random.key(3), slice_chunk_size=1
     )
     _assert_sobol_fields_match(chunked, full, ("S1", "ST", "S2", "S1_conf", "ST_conf", "S2_conf"))
 
@@ -545,38 +435,46 @@ def test_the_bootstrap_batches_slices_and_resamples(monkeypatch):
         )
 
 
-def test_constant_output_with_float32_rounding_noise_still_reads_as_zero_variance():
-    """A constant Y whose sample variance is not bit-exact zero still warns and returns NaN.
+@pytest.mark.parametrize("on_invalid", ["raise", "none"])
+def test_constant_output_with_float32_rounding_noise_still_reads_as_zero_variance(on_invalid):
+    """A constant Y whose sample variance is not bit-exact zero gives NaN indices.
 
     Regression for M1 (REVIEW-1.0.md): the guard used to test ``var == 0``,
     which almost never holds for a constant float32 output because the mean
     itself rounds. ``Y = full(N, 0.1)`` has a naive sample variance of about
     2e-16, not zero, so this fixture would have slipped past the old guard
-    silently instead of warning.
+    silently instead of warning. Under the default policy the guard warns.
+    Under ``on_invalid="none"`` no scan runs, so it stays silent.
     """
     sr = jaxgsa.sobol.sample(PROBLEM, n_samples=256, base_n=64, seed=0, verbose=False)
     Y = jnp.full(sr.n_runs, 0.1)
     assert float(jnp.var(Y)) != 0.0, "the naive variance must be nonzero for this to test the fix"
-    with pytest.warns(UserWarning, match="zero variance"):
-        result = jaxgsa.sobol.analyze(sr, Y, verbose=False)
+    if on_invalid == "raise":
+        with pytest.warns(UserWarning, match="zero variance"):
+            result = jaxgsa.sobol.analyze(sr, Y, verbose=False)
+    else:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            result = jaxgsa.sobol.analyze(sr, Y, on_invalid="none", verbose=False)
     assert jnp.all(jnp.isnan(result.S1))
     assert jnp.all(jnp.isnan(result.ST))
 
 
-def test_on_invalid_none_matches_raise_exactly_on_clean_data():
-    """on_invalid='none' skips the scans; on clean data the indices are bit-identical.
+def test_on_invalid_none_matches_raise_on_clean_data(sobol_ishigami_1k):
+    """on_invalid='none' skips the scans; on clean data the indices are equal.
 
     The estimator sees the same standardized arrays under both policies, so
-    nothing but the missing validation can differ -- and validation cannot
-    change a clean sample. The report records that the check never ran.
+    nothing but the missing validation can differ. The values are equal up to
+    float32 reassociation (about 1 ulp). The report records that the check
+    never ran.
     """
-    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=2**12 * 8, seed=0, verbose=False)
-    Y = evaluate(jnp.asarray(sr.samples))
+    sr, Y = sobol_ishigami_1k
     ref = jaxgsa.sobol.analyze(sr, Y, verbose=False)
     fast = jaxgsa.sobol.analyze(sr, Y, on_invalid="none", verbose=False)
-    assert np.array_equal(np.array(fast.S1), np.array(ref.S1))
-    assert np.array_equal(np.array(fast.ST), np.array(ref.ST))
-    assert np.array_equal(np.array(fast.S2), np.array(ref.S2), equal_nan=True)
+    for name in ("S1", "ST", "S2"):
+        np.testing.assert_allclose(
+            np.array(getattr(fast, name)), np.array(getattr(ref, name)), rtol=0, atol=1e-6
+        )
     assert fast.invalid.policy == "none"
     assert not fast.invalid.any_invalid
     assert fast.invalid.n_units == ref.invalid.n_units
@@ -588,16 +486,5 @@ def test_on_invalid_none_lets_nan_reach_the_indices_without_raising():
     Y = evaluate(jnp.asarray(sr.samples))
     Y_broken = Y.at[0].set(jnp.nan)
     result = jaxgsa.sobol.analyze(sr, Y_broken, on_invalid="none", verbose=False)
-    assert jnp.all(jnp.isnan(result.S1))
-    assert jnp.all(jnp.isnan(result.ST))
-
-
-def test_on_invalid_none_skips_the_zero_variance_warning():
-    """A constant slice under 'none' produces NaN indices without a warning."""
-    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=256, base_n=64, seed=0, verbose=False)
-    Y = jnp.full(sr.n_runs, 0.1)
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        result = jaxgsa.sobol.analyze(sr, Y, on_invalid="none", verbose=False)
     assert jnp.all(jnp.isnan(result.S1))
     assert jnp.all(jnp.isnan(result.ST))

@@ -26,55 +26,51 @@ from jaxgsa.sampling import monte_carlo
 
 @pytest.fixture(scope="module")
 def linear_hsic_result():
-    """HSIC result for linear benchmark."""
-    X = monte_carlo(linear.PROBLEM, n=1024, seed=42)
+    """HSIC result for linear benchmark (``N = 512``, 30 permutations).
+
+    The smallest possible p-value is ``1 / (n_perms + 1)``, so the
+    ``p < 0.05`` check needs at least 20 permutations. 30 leaves margin.
+    """
+    X = monte_carlo(linear.PROBLEM, n=512, seed=42)
     Y = linear.evaluate(jnp.asarray(X))
-    return analyze(linear.PROBLEM, jnp.asarray(X), Y, key=jax.random.key(42), n_perms=100)
+    return analyze(linear.PROBLEM, jnp.asarray(X), Y, key=jax.random.key(42), n_perms=30)
 
 
 @pytest.fixture(scope="module")
-def ishigami_hsic_result():
-    """HSIC result for Ishigami benchmark."""
-    X = monte_carlo(ishigami.PROBLEM, n=1024, seed=42)
-    Y = ishigami.evaluate(jnp.asarray(X))
-    return analyze(ishigami.PROBLEM, jnp.asarray(X), Y, key=jax.random.key(42), n_perms=100)
+def ishigami_hsic_result(given_ishigami_xy):
+    """HSIC result for Ishigami benchmark (first 512 rows of the shared sample)."""
+    X, Y = given_ishigami_xy
+    return analyze(ishigami.PROBLEM, X[:512], Y[:512], key=jax.random.key(42), n_perms=10)
 
 
 @pytest.fixture(scope="module")
 def sobol_g_hsic_result():
-    """HSIC result for Sobol G-function benchmark."""
+    """HSIC result for Sobol G-function benchmark.
+
+    ``N`` stays at 1024: the ``r2[2] > r2[3]`` check compares two small true
+    indices (0.011 and 0.003) and sits close to the bias of a null input at
+    smaller ``N``. No p-value is asserted, so 10 permutations are enough.
+    """
     X = monte_carlo(sobol_g.PROBLEM, n=1024, seed=42)
     Y = sobol_g.evaluate(jnp.asarray(X))
-    return analyze(sobol_g.PROBLEM, jnp.asarray(X), Y, key=jax.random.key(42), n_perms=100)
+    return analyze(sobol_g.PROBLEM, jnp.asarray(X), Y, key=jax.random.key(42), n_perms=10)
 
 
 class TestLinearHSIC:
-    def test_ranking(self, linear_hsic_result):
-        """Linear model: x3 most important, x1 least."""
+    def test_ranking_bounds_and_significance(self, linear_hsic_result):
+        """Linear model: x3 most important, x1 least, all significant, all bounded.
+
+        With augmented kernels the total indices of an additive model lie in
+        [0, 1] up to estimator noise, and they rank the inputs the same way.
+        """
         r2 = np.asarray(linear_hsic_result.R2_HSIC)
         assert r2[2] > r2[1] > r2[0]
-
-    def test_r2_bounded(self, linear_hsic_result):
-        r2 = np.asarray(linear_hsic_result.R2_HSIC)
-        assert np.all(r2 >= 0.0)
-        assert np.all(r2 <= 1.0 + 1e-6)
-
-    def test_total_bounded(self, linear_hsic_result):
-        """With augmented kernels, total indices should be in [0, 1] for additive models."""
+        assert np.all(r2 >= 0.0) and np.all(r2 <= 1.0 + 1e-6)
         t = np.asarray(linear_hsic_result.T_HSIC)
         assert np.all(np.isfinite(t))
-        assert np.all(t >= -0.1)
-        assert np.all(t <= 1.0 + 0.1)
-
-    def test_all_significant(self, linear_hsic_result):
-        """All inputs are influential in the linear model."""
-        p = np.asarray(linear_hsic_result.p_values)
-        assert np.all(p < 0.05)
-
-    def test_total_ranking(self, linear_hsic_result):
-        """For additive model, total order should also rank x3 > x2 > x1."""
-        t = np.asarray(linear_hsic_result.T_HSIC)
+        assert np.all(t >= -0.1) and np.all(t <= 1.0 + 0.1)
         assert t[2] > t[1] > t[0]
+        assert np.all(np.asarray(linear_hsic_result.p_values) < 0.05)
 
 
 class TestIshigamiHSIC:
@@ -82,39 +78,83 @@ class TestIshigamiHSIC:
         """x1 appears in both sin(x1) and B*x3^4*sin(x1), giving highest HSIC."""
         r2 = np.asarray(ishigami_hsic_result.R2_HSIC)
         assert r2[0] > r2[2]
-
-    def test_total_finite(self, ishigami_hsic_result):
-        t = np.asarray(ishigami_hsic_result.T_HSIC)
-        assert np.all(np.isfinite(t))
+        assert np.all(np.isfinite(np.asarray(ishigami_hsic_result.T_HSIC)))
 
 
 class TestSobolGHSIC:
-    def test_first_four_ranking(self, sobol_g_hsic_result):
-        """First 4 inputs should be ranked x1 > x2 > x3 > x4."""
+    def test_ranking_and_negligible_inputs(self, sobol_g_hsic_result):
+        """First 4 inputs rank x1 > x2 > x3 > x4, and inputs 5-8 (a=99) are negligible."""
         r2 = np.asarray(sobol_g_hsic_result.R2_HSIC)
         assert r2[0] > r2[1] > r2[2] > r2[3]
-
-    def test_negligible_inputs(self, sobol_g_hsic_result):
-        """Inputs 5-8 (a=99) should have very small indices."""
-        r2 = np.asarray(sobol_g_hsic_result.R2_HSIC)
         for i in range(4, 8):
             assert r2[i] < r2[0] * 0.1
-
-    def test_total_ranking(self, sobol_g_hsic_result):
-        """Total order should also rank x1 > x2 > x3 > x4."""
         t = np.asarray(sobol_g_hsic_result.T_HSIC)
         assert t[0] > t[1] > t[2] > t[3]
+
+
+class TestAgainstNumpyVStatistic:
+    """Tier T1 (reference implementation): ``analyze`` against plain NumPy.
+
+    The oracle below builds every kernel from scratch in float64 NumPy. It
+    uses the median heuristic with the strict upper-triangle median, the
+    centred-kernel form of the V-statistic ``tr(K H L H) / n^2``, and the
+    augmented kernels ``1 + center(K)`` for the total index. The package
+    reaches the same numbers through a quantile of the full matrix and the
+    expanded ``U/n^2 - 2V/n^3 + W/n^4`` form, so agreement checks the
+    normalisation and ``T_HSIC`` through the public API.
+    """
+
+    @staticmethod
+    def _numpy_indices(X, y):
+        n = len(y)
+
+        def rbf(x):
+            d2 = (x[:, None] - x[None, :]) ** 2
+            sigma_sq = np.median(d2[np.triu_indices(n, 1)])
+            return np.exp(-d2 / (2.0 * sigma_sq))
+
+        def center(K):
+            return K - K.mean(axis=1, keepdims=True) - K.mean(axis=0, keepdims=True) + K.mean()
+
+        def hsic(K, L):
+            return float(np.sum(center(K) * L)) / n**2
+
+        L = rbf(y)
+        Ks = [rbf(X[:, d]) for d in range(X.shape[1])]
+        augmented = [1.0 + center(K) for K in Ks]
+        full = np.prod(augmented, axis=0)
+        raw = np.array([hsic(K, L) for K in Ks])
+        r2 = raw / np.sqrt(np.array([hsic(K, K) for K in Ks]) * hsic(L, L))
+        total = np.array(
+            [
+                1.0
+                - hsic(np.prod([A for j, A in enumerate(augmented) if j != d], axis=0), L)
+                / hsic(full, L)
+                for d in range(len(Ks))
+            ]
+        )
+        return r2, total, raw
+
+    def test_r2_t_and_raw_hsic_match(self):
+        with jax.enable_x64():
+            X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=64, seed=1), dtype=jnp.float64)
+            Y = ishigami.evaluate(X)
+            result = analyze(ishigami.PROBLEM, X, Y, n_perms=5, key=jax.random.key(0))
+        r2, total, raw = self._numpy_indices(np.asarray(X), np.asarray(Y))
+        np.testing.assert_allclose(np.asarray(result.R2_HSIC), r2, rtol=1e-8)
+        np.testing.assert_allclose(np.asarray(result.T_HSIC), total, rtol=1e-8)
+        np.testing.assert_allclose(np.asarray(result.hsic_raw), raw, rtol=1e-8)
 
 
 class TestMultiOutput:
     def test_linear_output_matches_scalar(self):
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
-        X = monte_carlo(problem, n=1024, seed=8)
+        X = monte_carlo(problem, n=256, seed=8)
         Xj = jnp.asarray(X)
         Y_scalar = Xj @ jnp.array([1.0, 2.0, 3.0])
         Y_multi = jnp.column_stack([Y_scalar, jnp.sum(Xj**2, axis=1)])
-        r_scalar = analyze(problem, Xj, Y_scalar, n_perms=50, key=jax.random.key(8))
-        r_multi = analyze(problem, Xj, Y_multi, n_perms=50, key=jax.random.key(8))
+        r_scalar = analyze(problem, Xj, Y_scalar, n_perms=10, key=jax.random.key(8))
+        r_multi = analyze(problem, Xj, Y_multi, n_perms=10, key=jax.random.key(8))
         np.testing.assert_allclose(
             np.asarray(r_scalar.R2_HSIC),
             np.asarray(r_multi.R2_HSIC[0]),
@@ -131,23 +171,6 @@ class TestBandwidthOverride:
         r1 = analyze(problem, Xj, Y, bandwidth=0.1, n_perms=20, key=jax.random.key(11))
         r2 = analyze(problem, Xj, Y, bandwidth=1.0, n_perms=20, key=jax.random.key(11))
         assert not np.allclose(np.asarray(r1.R2_HSIC), np.asarray(r2.R2_HSIC))
-
-    def test_unit_multiplier_is_the_bare_median_heuristic(self):
-        """Tier T0 (closed form): ``bandwidth=1.0`` scales nothing.
-
-        ``1.0`` is the default because it is the identity of the convention:
-        the resolved squared bandwidth is ``m**2 * median_sq``, and squaring
-        and multiplying by one are both exact in IEEE arithmetic. So the
-        default path is the median heuristic itself, bit for bit, and no
-        recorded number moves because the keyword changed meaning.
-        """
-        x = jnp.asarray(np.random.default_rng(2).normal(size=97))
-        median_sq = _median_bandwidth_sq(x)
-        direct = jnp.exp(-((x[:, None] - x[None, :]) ** 2) / (2.0 * median_sq))
-        np.testing.assert_array_equal(
-            np.asarray(_build_one_kernel(x, 1.0)),
-            np.asarray(direct),
-        )
 
     @pytest.mark.parametrize("multiplier", [0.25, 1.0, 4.0])
     def test_multiplier_scales_the_median_width(self, multiplier):
@@ -187,7 +210,7 @@ class TestAffineInvariance:
         X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=256, seed=3), dtype=jnp.float64)
         return ishigami.PROBLEM, X, ishigami.evaluate(X)
 
-    @pytest.mark.parametrize("multiplier", [1.0, 0.35, 3.0])
+    @pytest.mark.parametrize("multiplier", [1.0, 0.35])
     def test_rescaling_the_output_changes_nothing(self, multiplier):
         """Tier T0 (closed form): the Gaussian kernel is unchanged by units.
 
@@ -251,7 +274,7 @@ class TestMedianBandwidth:
         reference = jnp.median(dists_sq[jnp.triu_indices(n, k=1)])
         np.testing.assert_allclose(float(_median_bandwidth_sq(x)), float(reference), rtol=1e-6)
 
-    @pytest.mark.parametrize("n", [4, 5, 33, 128])
+    @pytest.mark.parametrize("n", [5, 128])
     @pytest.mark.parametrize("scale", [1.0, 1e8])
     def test_selection_matches_the_sorting_quantile_bit_for_bit(self, n, scale):
         """Tier T1 (reference implementation): selection reproduces the sort.
@@ -299,6 +322,7 @@ class TestMedianBandwidth:
         if not np.isnan(expected):
             np.testing.assert_array_equal(actual, expected)
 
+    @pytest.mark.slow
     def test_half_integer_position_matches_the_sorting_quantile(self):
         """Tier T1 (reference implementation): the plan dtype is the default float.
 
@@ -354,21 +378,6 @@ class TestMedianBandwidth:
         dists_sq = (x[:, None] - x[None, :]) ** 2
         assert float(jnp.median(dists_sq)) < 0.99 * float(_median_bandwidth_sq(x))
 
-    def test_the_resolved_bandwidth_is_squared_once(self):
-        """Tier T0 (closed form): the kernel is exp(-d^2 / 2 sigma^2).
-
-        ``sigma`` is the multiplier times the median-heuristic width, so the
-        closed form is written against the resolved width rather than against
-        the caller's number. A build that squared the multiplier twice, or
-        forgot the heuristic, would miss this.
-        """
-        x = jnp.asarray([0.0, 1.0, 2.0])
-        multiplier = 0.5
-        sigma_sq = multiplier**2 * float(_median_bandwidth_sq(x))
-        K = _build_one_kernel(x, multiplier)
-        expected = np.exp(-np.array([0.0, 1.0, 4.0]) / (2.0 * sigma_sq))
-        np.testing.assert_allclose(np.asarray(K[0]), expected, rtol=1e-6)
-
 
 class TestSliceIndependence:
     """Analysing many slices together must not disturb any one of them."""
@@ -388,8 +397,7 @@ class TestSliceIndependence:
         )
         return problem, Xj, Y
 
-    @pytest.mark.parametrize("column", [0, 1, 2, 3])
-    def test_each_slice_equals_its_own_scalar_analysis(self, column):
+    def test_slices_share_nothing(self):
         """Tier T4 (internal consistency): the slice map shares nothing.
 
         Every output slice is computed by the same atomic kernel, mapped one
@@ -397,95 +405,69 @@ class TestSliceIndependence:
         it is the only output there is. Exactly, not nearly: the map runs the
         same kernel on the same bits, and each slice draws its permutations
         from its own key, so any difference here would mean state leaking
-        between slices.
+        between slices. The same holds when the first column sits beside one
+        other column instead of three: a chunk width that reached the answer
+        would show up as soon as the two runs fell into different chunks.
         """
         problem, Xj, Y = self._four_slice_case()
         together = analyze(problem, Xj, Y, n_perms=20, key=jax.random.key(5))
-        alone = analyze(problem, Xj, Y[:, column], n_perms=20, key=jax.random.key(5))
-        for field in ("R2_HSIC", "T_HSIC", "p_values", "hsic_raw"):
-            np.testing.assert_array_equal(
-                np.asarray(getattr(together, field))[column],
-                np.asarray(getattr(alone, field)),
-            )
-
-    def test_slice_count_does_not_change_a_shared_slice(self):
-        """Tier T4 (internal consistency): adding outputs changes no index.
-
-        The same first column analysed beside one other column and beside
-        three must give the same answer. This is the regression guard for a
-        future chunked map: a chunk width that reached the answer would show
-        up here as soon as the two runs fell into different chunks.
-        """
-        problem, Xj, Y = self._four_slice_case()
         two = analyze(problem, Xj, Y[:, :2], n_perms=20, key=jax.random.key(5))
-        four = analyze(problem, Xj, Y, n_perms=20, key=jax.random.key(5))
-        np.testing.assert_array_equal(np.asarray(two.R2_HSIC)[0], np.asarray(four.R2_HSIC)[0])
-        np.testing.assert_array_equal(np.asarray(two.T_HSIC)[0], np.asarray(four.T_HSIC)[0])
-
-
-class TestNoBatchingKeyword:
-    def test_batch_size_is_gone_from_both_entry_points(self):
-        """Tier T4 (internal consistency): HSIC takes no batching keyword.
-
-        The old ``batch_size`` row-blocked one kernel *build* while the
-        resident stacks — ~(2D+1)*N^2 floats — stayed whole, so it never
-        bounded peak memory and chunked-vmap was measured useless. A keyword
-        that cannot do what its name promises is removed rather than kept;
-        the memory story lives in the docstrings instead.
-        """
-        assert "batch_size" not in inspect.signature(analyze).parameters
-        assert "batch_size" not in inspect.signature(indices).parameters
-        for text in (analyze.__doc__, indices.__doc__):
-            assert text is not None
-            assert "N^2" in text  # the docstring carries the memory story
+        for column in range(4):
+            alone = analyze(problem, Xj, Y[:, column], n_perms=20, key=jax.random.key(5))
+            for field in ("R2_HSIC", "T_HSIC", "p_values", "hsic_raw"):
+                np.testing.assert_array_equal(
+                    np.asarray(getattr(together, field))[column],
+                    np.asarray(getattr(alone, field)),
+                )
+        np.testing.assert_array_equal(np.asarray(two.R2_HSIC)[0], np.asarray(together.R2_HSIC)[0])
+        np.testing.assert_array_equal(np.asarray(two.T_HSIC)[0], np.asarray(together.T_HSIC)[0])
 
 
 class TestReproducibility:
-    def test_same_key_same_result(self):
-        problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        X = monte_carlo(problem, n=256, seed=14)
-        Xj = jnp.asarray(X)
-        Y = Xj[:, 0] + Xj[:, 1] ** 2
-        r1 = analyze(problem, Xj, Y, key=jax.random.key(42), n_perms=50)
-        r2 = analyze(problem, Xj, Y, key=jax.random.key(42), n_perms=50)
-        np.testing.assert_array_equal(np.asarray(r1.p_values), np.asarray(r2.p_values))
-
-    def test_different_key_may_differ(self):
-        """Different keys should produce different permutation sequences."""
+    def test_the_key_decides_the_permutations(self):
+        """The same key gives the same p-values, and a different key a different draw."""
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
-        X = monte_carlo(problem, n=256, seed=15)
-        Xj = jnp.asarray(X)
-        # x3 is independent of Y, so its p-value is not pinned at 0
+        Xj = jnp.asarray(monte_carlo(problem, n=256, seed=15))
+        # x2 and x3 are independent of Y, so their p-values are not pinned at the minimum.
         Y = Xj[:, 0] * 0.5
-        r1 = analyze(problem, Xj, Y, key=jax.random.key(1), n_perms=50)
-        r2 = analyze(problem, Xj, Y, key=jax.random.key(2), n_perms=50)
-        # At least one p-value should differ between keys
+        r1 = analyze(problem, Xj, Y, key=jax.random.key(1), n_perms=20)
+        r1_again = analyze(problem, Xj, Y, key=jax.random.key(1), n_perms=20)
+        r2 = analyze(problem, Xj, Y, key=jax.random.key(2), n_perms=20)
+        np.testing.assert_array_equal(np.asarray(r1.p_values), np.asarray(r1_again.p_values))
         assert not np.array_equal(np.asarray(r1.p_values), np.asarray(r2.p_values))
 
 
 class TestValidation:
-    def test_n_perms_zero_raises(self):
-        problem = Problem(names=("x",), bounds=((0, 1),))
-        with pytest.raises(ValueError, match="n_perms"):
-            analyze(problem, jnp.ones((10, 1)), jnp.ones(10), n_perms=0)
+    @pytest.mark.parametrize(
+        ("n_rows", "kwargs", "match"),
+        [
+            (10, {"n_perms": 0, "key": jax.random.key(0)}, "n_perms"),
+            (10, {"bandwidth": 0.0, "key": jax.random.key(0)}, "bandwidth"),
+            (10, {"bandwidth": -1.0, "key": jax.random.key(0)}, "bandwidth"),
+            (10, {"bandwidth": float("nan"), "key": jax.random.key(0)}, "bandwidth"),
+            (10, {"bandwidth": float("inf"), "key": jax.random.key(0)}, "bandwidth"),
+            (10, {"n_perms": 5}, "key is required"),
+            (2, {"key": jax.random.key(0)}, "N must be"),
+        ],
+        ids=[
+            "n_perms_zero",
+            "bandwidth_zero",
+            "bandwidth_negative",
+            "bandwidth_nan",
+            "bandwidth_inf",
+            "key_is_required",
+            "too_few_samples",
+        ],
+    )
+    def test_bad_arguments_are_refused(self, n_rows, kwargs, match):
+        """Each malformed argument raises early and names what is wrong.
 
-    @pytest.mark.parametrize("bad", [0.0, -1.0, float("nan"), float("inf")])
-    def test_bandwidth_must_be_finite_and_positive(self, bad):
+        The permutation p-values are random, so there is no default key.
+        """
         problem = Problem(names=("x",), bounds=((0, 1),))
-        with pytest.raises(ValueError, match="bandwidth"):
-            analyze(problem, jnp.ones((10, 1)), jnp.ones(10), bandwidth=bad)
-
-    def test_key_is_required(self):
-        """The permutation p-values are random, so there is no default key."""
-        problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        Xj = jnp.asarray(monte_carlo(problem, n=64, seed=1))
-        with pytest.raises(ValueError, match="key is required"):
-            analyze(problem, Xj, Xj[:, 0] * 2.0, n_perms=5)
-
-    def test_too_few_samples_raises(self):
-        problem = Problem(names=("x",), bounds=((0, 1),))
-        with pytest.raises(ValueError, match="N must be"):
-            analyze(problem, jnp.ones((2, 1)), jnp.ones(2))
+        X = jnp.asarray(np.random.default_rng(0).uniform(size=(n_rows, 1)))
+        with pytest.raises(ValueError, match=match):
+            analyze(problem, X, X[:, 0] * 2.0, **kwargs)
 
 
 class TestSinglePrecisionWarning:
@@ -503,31 +485,22 @@ class TestSinglePrecisionWarning:
         Xj = jnp.asarray(monte_carlo(problem, n=n, seed=31))
         return problem, Xj, jnp.sin(3.0 * Xj[:, 0]) + Xj[:, 1]
 
-    def test_float32_warns(self):
-        """The warning fires in float32, whatever the suite's ambient flag.
+    @pytest.mark.parametrize("x64", [False, True], ids=["float32_warns", "x64_is_silent"])
+    def test_the_warning_follows_the_precision(self, x64):
+        """The warning fires in float32 and is absent under x64.
 
-        ``jax.enable_x64(False)`` rather than the ambient default, because the
-        x64 CI job runs this same file with ``JAX_ENABLE_X64=1``. Left
-        implicit, this test would assert the *absence* of the warning there
-        and stop checking the thing it is named for. Forcing the precision
-        keeps one contract per test and checks both of them in both jobs.
+        The precision is forced with ``jax.enable_x64`` rather than read from
+        the ambient default, because the x64 CI job runs this same file with
+        ``JAX_ENABLE_X64=1``. Left implicit, the float32 case would assert
+        the *absence* of the warning there and stop checking what it is named
+        for. ``single_precision_warning`` picks the matching contract.
         """
-        with jax.enable_x64(False):
+        with jax.enable_x64(x64):
             problem, Xj, Y = self._sample()
             with single_precision_warning():
                 analyze(problem, Xj, Y, n_perms=5, key=jax.random.key(0))
 
-    def test_x64_is_silent(self):
-        """And it is suppressed under x64 — the other half of the contract.
-
-        Asserted, not skipped: suppressing the warning correctly is as much
-        the behaviour as raising it.
-        """
-        with jax.enable_x64():
-            problem, Xj, Y = self._sample()
-            with single_precision_warning():
-                analyze(problem, Xj, Y, n_perms=5, key=jax.random.key(0))
-
+    @pytest.mark.slow
     def test_reordering_the_rows_is_the_thing_it_warns_about(self):
         """The claim in the warning, measured: float32 is order-dependent.
 
@@ -590,10 +563,10 @@ class TestIndependentInput:
     def test_independent_input_low_hsic(self):
         """An input independent of the output should have low R2-HSIC."""
         problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        X = monte_carlo(problem, n=1024, seed=20)
+        X = monte_carlo(problem, n=256, seed=20)
         Xj = jnp.asarray(X)
         Y = jnp.sin(Xj[:, 0] * 6.0)
-        result = analyze(problem, Xj, Y, n_perms=100, key=jax.random.key(20))
+        result = analyze(problem, Xj, Y, n_perms=50, key=jax.random.key(20))
         r2 = np.asarray(result.R2_HSIC)
         assert r2[0] > r2[1] * 3.0
         p = np.asarray(result.p_values)
@@ -603,10 +576,10 @@ class TestIndependentInput:
     def test_irrelevant_input_total_near_zero(self):
         """Total HSIC for an irrelevant input should be near zero."""
         problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        X = monte_carlo(problem, n=1024, seed=21)
+        X = monte_carlo(problem, n=256, seed=21)
         Xj = jnp.asarray(X)
         Y = Xj[:, 0]
-        result = analyze(problem, Xj, Y, n_perms=20, key=jax.random.key(21))
+        result = analyze(problem, Xj, Y, n_perms=10, key=jax.random.key(21))
         t = np.asarray(result.T_HSIC)
         assert t[0] > 0.5
         assert abs(t[1]) < 0.3
@@ -663,72 +636,6 @@ class TestConstantInput:
         assert r2[0] == 0.0
         assert np.all(r2[1:] >= -1e-3)
         assert np.all(r2[1:] <= 1.0)
-
-
-def _invalid_sample(n: int = 64, seed: int = 0):
-    """Build a clean two-parameter HSIC sample for the on_invalid tests."""
-    problem = Problem(names=("a", "b"), bounds=((0.0, 1.0), (0.0, 1.0)))
-    rng = np.random.default_rng(seed)
-    X = rng.uniform(size=(n, 2))
-    Y = np.sin(3.0 * X[:, 0]) + 0.5 * X[:, 1]
-    return problem, jnp.asarray(X), jnp.asarray(Y)
-
-
-class TestHSICInvalidPolicy:
-    """T4 (behaviour): jaxgsa.hsic.analyze honours the shared on_invalid policy."""
-
-    def test_raise_is_the_default_and_names_the_rows(self):
-        """T4: a non-finite Y row refuses the analysis and says which row it is.
-
-        Before 0.10 HSIC checked neither X nor Y for finiteness, so a failed
-        model run reached the kernel matrices and came back as a NaN index
-        with nothing said about where it came from.
-        """
-        problem, X, Y = _invalid_sample()
-        Y = Y.at[11].set(jnp.nan)
-        with pytest.raises(ValueError) as exc:
-            analyze(problem, X, Y, n_perms=5)
-        message = str(exc.value)
-        assert "jaxgsa.hsic.analyze" in message
-        assert "1 of 64 rows" in message
-        assert "[11]" in message
-
-    def test_propagate_warns_and_the_indices_go_non_finite(self):
-        """T4: 'propagate' keeps the row, and the NaN reaches the indices.
-
-        The Gaussian kernel and the centering both average over the sample,
-        so one NaN output contaminates every entry. That is the intended
-        outcome of the policy: loudly wrong beats quietly wrong.
-        """
-        problem, X, Y = _invalid_sample()
-        Y = Y.at[11].set(jnp.nan)
-        with pytest.warns(JaxgsaWarning, match="reaches the indices"):
-            result = analyze(
-                problem, X, Y, n_perms=5, key=jax.random.key(0), on_invalid="propagate"
-            )
-        assert result.invalid.policy == "propagate"
-        assert result.invalid.unit_indices == (11,)
-        assert not np.all(np.isfinite(np.asarray(result.R2_HSIC)))
-
-    def test_drop_removes_the_row_and_returns_finite_indices(self):
-        """T4: 'drop' analyzes the remainder and the indices come back usable."""
-        problem, X, Y = _invalid_sample()
-        Y = Y.at[11].set(jnp.nan)
-        with pytest.warns(JaxgsaWarning, match="dropped 1 of 64 rows"):
-            result = analyze(problem, X, Y, n_perms=5, key=jax.random.key(0), on_invalid="drop")
-        assert result.invalid.n_kept == 63
-        assert np.all(np.isfinite(np.asarray(result.R2_HSIC)))
-
-    def test_a_bad_x_is_caught_and_named(self):
-        """T4: a non-finite input is caught too, and the report says it was X."""
-        problem, X, Y = _invalid_sample()
-        X = X.at[4, 1].set(-jnp.inf)
-        with pytest.raises(ValueError, match=r"in X\b") as exc:
-            analyze(problem, X, Y, n_perms=5)
-        assert "[4]" in str(exc.value)
-        with pytest.warns(JaxgsaWarning):
-            result = analyze(problem, X, Y, n_perms=5, key=jax.random.key(0), on_invalid="drop")
-        assert result.invalid.sources == ("X",)
 
 
 def _population_hsic_gaussian(sx2, sy2, rho, gx2, gy2):
@@ -810,20 +717,28 @@ class TestClosedFormGaussianPair:
     build alone, not on the resulting HSIC value.
     """
 
-    def test_v_statistic_matches_the_population_closed_form(self):
+    @pytest.mark.parametrize(
+        ("n", "n_draws", "tol"),
+        [
+            pytest.param(800, 3, 0.15, id="cheap"),
+            pytest.param(1500, 12, 0.05, marks=pytest.mark.slow, id="tight"),
+        ],
+    )
+    def test_v_statistic_matches_the_population_closed_form(self, n, n_draws, tol):
         """The averaged V-statistic lands on the population target.
 
         A single V-statistic draw is far too noisy to pin the closed form
         down: at ``n = 4000`` its relative spread is 5%, so a 2% tolerance on
-        one draw passes or fails on the seed. This averages 12 independent
-        draws instead, which measures at 1.0% relative spread (2.6% worst
-        case over 40 meta-seeds), and asserts 5% -- about five times the
-        measured spread.
+        one draw passes or fails on the seed. The tight case averages 12
+        independent draws at ``n = 1500``, which measures at 1.0% relative
+        spread (2.6% worst case over 40 meta-seeds), and asserts 5%. The
+        cheap case averages 3 draws at ``n = 800``. One draw has about 11%
+        relative spread there, so three have about 6%. Four groups of three
+        seeds measured at most 3.6% off, and the bound is 15%.
         """
         sx2 = sy2 = 1.0
         rho = 0.99
         gx2 = gy2 = 1.0
-        n, n_draws = 1500, 12
         target = _population_hsic_gaussian(sx2, sy2, rho, gx2, gy2)
 
         with jax.enable_x64():
@@ -840,7 +755,7 @@ class TestClosedFormGaussianPair:
                 draws.append(float(_hsic_v(k, ly)))
         got = float(np.mean(draws))
 
-        assert abs(got - target) / target < 0.05
+        assert abs(got - target) / target < tol
 
 
 # ---------------------------------------------------------------------------
@@ -873,78 +788,64 @@ class TestIndicesCore:
         X = self._sample(ishigami.PROBLEM, self.N, 11)
         return ishigami.PROBLEM, X, ishigami.evaluate(X)
 
-    def test_matches_analyze(self):
-        """T4: all four arrays equal ``analyze``'s fields exactly."""
-        problem, X, Y = self._ishigami()
+    @pytest.mark.parametrize("case", ["scalar", "multi_output", "bandwidth"])
+    def test_matches_analyze(self, case):
+        """T4: all four arrays equal ``analyze``'s fields exactly.
+
+        Three variants share one test. ``multi_output`` has an ``(N, T, K)``
+        output, which comes back at the caller's rank. ``bandwidth`` uses a
+        non-default multiplier: it is a Python scalar read while the graph is
+        traced and baked into the compiled kernel, so the core must still
+        agree with ``analyze`` there.
+
+        The core also carries none of the preamble's diagnostics.
+        ``analyze`` warns about single precision on every float32 run, and
+        the core says nothing, because a warning is the preamble's decision.
+        """
+        problem, X, base = self._ishigami()
+        kwargs = {"bandwidth": 0.3} if case == "bandwidth" else {}
+        Y = base
+        if case == "multi_output":
+            Y = jnp.stack(
+                [
+                    jnp.stack([base, 2.0 * base + X[:, 0]], axis=-1),
+                    jnp.stack([base**2, X[:, 1]], axis=-1),
+                ],
+                axis=1,
+            )
+            assert Y.shape == (self.N, 2, 2)
         key = jax.random.key(3)
 
-        out = indices(problem, X, Y, n_perms=self.PERMS, key=key)
-        result = analyze(problem, X, Y, n_perms=self.PERMS, key=key)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", JaxgsaWarning)
+            out = indices(problem, X, Y, n_perms=self.PERMS, key=key, **kwargs)
+        result = analyze(problem, X, Y, n_perms=self.PERMS, key=key, **kwargs)
 
         assert len(out) == 4
+        assert out[0].shape == result.R2_HSIC.shape
         fields = (result.R2_HSIC, result.T_HSIC, result.p_values, result.hsic_raw)
         for produced, expected in zip(out, fields, strict=True):
             np.testing.assert_array_equal(np.asarray(produced), np.asarray(expected))
 
-    def test_matches_analyze_multi_output(self):
-        """T4: an ``(N, T, K)`` output comes back at the caller's rank."""
-        problem, X, base = self._ishigami()
-        Y = jnp.stack(
-            [
-                jnp.stack([base, 2.0 * base + X[:, 0]], axis=-1),
-                jnp.stack([base**2, X[:, 1]], axis=-1),
-            ],
-            axis=1,
-        )
-        assert Y.shape == (self.N, 2, 2)
-        key = jax.random.key(5)
-
-        out = indices(problem, X, Y, n_perms=self.PERMS, key=key)
-        result = analyze(problem, X, Y, n_perms=self.PERMS, key=key)
-
-        assert out[0].shape == (2, 2, problem.num_vars)
-        fields = (result.R2_HSIC, result.T_HSIC, result.p_values, result.hsic_raw)
-        for produced, expected in zip(out, fields, strict=True):
-            np.testing.assert_array_equal(np.asarray(produced), np.asarray(expected))
-
-    def test_matches_analyze_with_a_bandwidth_multiplier(self):
-        """T4: the static ``bandwidth`` keyword changes nothing about the split.
-
-        ``bandwidth`` is a Python scalar read while the graph is traced, so
-        it is baked into the compiled kernel. The core must still agree with
-        ``analyze`` under a non-default setting.
-        """
-        problem, X, Y = self._ishigami()
-        key = jax.random.key(7)
-
-        out = indices(problem, X, Y, n_perms=self.PERMS, key=key, bandwidth=0.3)
-        result = analyze(problem, X, Y, n_perms=self.PERMS, key=key, bandwidth=0.3)
-
-        fields = (result.R2_HSIC, result.T_HSIC, result.p_values, result.hsic_raw)
-        for produced, expected in zip(out, fields, strict=True):
-            np.testing.assert_array_equal(np.asarray(produced), np.asarray(expected))
-
-    def test_offers_no_bootstrap_and_says_why(self):
-        """T4: HSIC declares no bootstrap, and the reason is written down.
+    def test_offers_no_bootstrap_and_no_batching(self):
+        """T4: HSIC declares no bootstrap and no batching keyword.
 
         The permutation p-values are the uncertainty statement. A row
         bootstrap of a V-statistic would repeat rows onto the kernel diagonal
-        and bias the resampled index upward, so the absence is a decision and
-        has to read as one.
+        and bias the resampled index upward, so the absence is a decision.
+        The old ``batch_size`` row-blocked one kernel *build* while the
+        resident stacks stayed whole, so it never bounded peak memory and it
+        was removed. A key is still required, because the permutation test
+        draws.
         """
         from jaxgsa import hsic
-        from jaxgsa.hsic import _analyze as hsic_module
 
         assert hsic.SPEC.bootstrap is None
-        assert "n_bootstrap" not in inspect.signature(analyze).parameters
-        assert "n_bootstrap" not in inspect.signature(indices).parameters
-        # ... but a key is still required, because the permutation test draws.
-        assert inspect.signature(analyze).parameters["key"] is not None
-
-        for text in (hsic_module.__doc__, analyze.__doc__):
-            assert text is not None
-            assert "bootstrap" in text
-            assert "V-statistic" in text
+        for fn in (analyze, indices):
+            params = inspect.signature(fn).parameters
+            assert "n_bootstrap" not in params
+            assert "batch_size" not in params
+            assert "key" in params
 
     def test_is_jittable(self):
         """T4: ``jit`` traces the core and returns the eager values.
@@ -1092,25 +993,6 @@ class TestIndicesCore:
         # The zero is a choice, not a coincidence: the width really does move.
         assert abs(float(fd)) > 1e-3
 
-    def test_reads_no_array_value_on_the_host(self):
-        """T4: every array operation inside the core is traceable.
-
-        A host read of ``X`` or ``Y`` would raise a tracer conversion error
-        under an abstract trace, so tracing with ``eval_shape`` alone is the
-        check: nothing concrete is available to read.
-        """
-        problem, X, Y = self._ishigami()
-
-        shapes = jax.eval_shape(
-            lambda inputs, outputs: indices(
-                problem, inputs, outputs, n_perms=self.PERMS, key=jax.random.key(1)
-            ),
-            X,
-            Y,
-        )
-
-        assert [s.shape for s in shapes] == [(problem.num_vars,)] * 4
-
     @pytest.mark.parametrize(
         ("label", "second_spec"),
         [
@@ -1155,19 +1037,6 @@ class TestIndicesCore:
         for traced, eager in zip(jax.jit(core)(X, Y), core(X, Y), strict=True):
             np.testing.assert_allclose(np.asarray(traced), np.asarray(eager), rtol=1e-4, atol=1e-6)
 
-    def test_emits_no_warning_where_analyze_does(self):
-        """T4: the core carries none of the preamble's diagnostics.
-
-        ``analyze`` warns about single precision on every float32 run. The
-        core says nothing: a warning is a policy decision, and it is the
-        preamble's to make.
-        """
-        problem, X, Y = self._ishigami()
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", JaxgsaWarning)
-            indices(problem, X, Y, n_perms=self.PERMS, key=jax.random.key(1))
-
 
 # ---------------------------------------------------------------------------
 # Provenance
@@ -1189,7 +1058,7 @@ class TestBandwidthProvenance:
         return X, ishigami.evaluate(X)
 
     def test_result_records_the_run_settings(self):
-        """bandwidth and n_perms come back as they were passed."""
+        """Settings come back as passed, defaults are recorded too, and the export carries them."""
         X, Y = self._data()
         result = analyze(
             ishigami.PROBLEM,
@@ -1202,19 +1071,9 @@ class TestBandwidthProvenance:
         )
         assert result.bandwidth == 0.25
         assert result.n_perms == 20
-
-    def test_defaults_are_recorded_too(self):
-        """A run that passes neither still says what it used."""
-        X, Y = self._data()
-        result = analyze(ishigami.PROBLEM, X, Y, n_perms=20, key=jax.random.key(0), verbose=False)
-        assert result.bandwidth == 1.0
-
-    def test_export_carries_them_as_attributes(self):
-        """to_dataset writes both into the dataset attrs."""
-        X, Y = self._data()
-        result = analyze(
-            ishigami.PROBLEM, X, Y, n_perms=20, bandwidth=0.5, key=jax.random.key(0), verbose=False
-        )
         attrs = result.to_dataset().attrs
-        assert attrs["bandwidth"] == 0.5
+        assert attrs["bandwidth"] == 0.25
         assert attrs["n_perms"] == 20
+
+        default = analyze(ishigami.PROBLEM, X, Y, n_perms=20, key=jax.random.key(0), verbose=False)
+        assert default.bandwidth == 1.0

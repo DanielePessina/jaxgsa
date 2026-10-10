@@ -28,28 +28,24 @@ def test_linear_fixture_has_equal_first_and_total_indices():
     np.testing.assert_allclose(result.ST, result.S1, atol=0.05)
 
 
-def test_sampler_is_reproducible_and_respects_bounds():
+def test_sampler_bounds_multi_output_shapes_and_m():
+    """One M=6 design: reproducible, in bounds, multi-output, ``M`` carried into analysis."""
     problem = Problem(("a", "b"), ((2.0, 5.0), (-1.0, 3.0)))
-    first = sample(problem, n_per_curve=257, M=4, seed=4, verbose=False)
-    second = sample(problem, n_per_curve=257, M=4, seed=4, verbose=False)
-    np.testing.assert_array_equal(first.samples, second.samples)
-    assert np.all(np.asarray(first.samples[:, 0]) >= 2.0)
-    assert np.all(np.asarray(first.samples[:, 0]) <= 5.0)
+    design = sample(problem, n_per_curve=257, M=6, seed=4, verbose=False)
+    again = sample(problem, n_per_curve=257, M=6, seed=4, verbose=False)
+    np.testing.assert_array_equal(design.samples, again.samples)
+    assert np.all(np.asarray(design.samples[:, 0]) >= 2.0)
+    assert np.all(np.asarray(design.samples[:, 0]) <= 5.0)
+    assert np.all(np.asarray(design.samples[:, 1]) >= -1.0)
+    assert np.all(np.asarray(design.samples[:, 1]) <= 3.0)
 
-
-def test_multi_output_and_time_series_shapes():
-    design = sample(linear.PROBLEM, n_per_curve=257, M=4, seed=5, verbose=False)
-    y = linear.evaluate(jnp.asarray(design.samples))
+    X = jnp.asarray(design.samples)
+    y = X[:, 0] + 2.0 * X[:, 1]
     outputs = jnp.stack([y, 2.0 * y], axis=-1)
     series = jnp.stack([outputs, outputs + 1.0], axis=1)
     result = analyze(design, series, verbose=False)
-    assert result.S1.shape == (2, 2, 3)
-    assert result.ST.shape == (2, 2, 3)
-
-
-def test_design_carries_m_into_analysis():
-    design = sample(ishigami.PROBLEM, n_per_curve=1024, M=6, seed=6, verbose=False)
-    result = analyze(design, ishigami.evaluate(jnp.asarray(design.samples)), verbose=False)
+    assert result.S1.shape == (2, 2, 2)
+    assert result.ST.shape == (2, 2, 2)
     assert result.M == 6
     assert result.omega_0 > 0
 

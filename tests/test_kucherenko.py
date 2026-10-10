@@ -13,6 +13,7 @@ Tolerances are set from the measured estimator error at the test sample sizes
 
 from __future__ import annotations
 
+import functools
 import warnings
 
 import jax
@@ -22,11 +23,10 @@ import pytest
 import jaxgsa
 from jaxgsa import JaxgsaWarning
 from jaxgsa._core.invalid import InvalidUnit
-from jaxgsa.benchmarks import ishigami
 from jaxgsa.problem import Problem
 
-# Closed-form linear-Gaussian reference, shared with test_vkoga.py and
-# test_correlated_agreement.py.
+# Closed-form linear-Gaussian reference, shared with test_vkoga.py. The
+# correlated and Ishigami designs are session fixtures (``_fixtures_dependence``).
 from _linear_gaussian import (  # isort: skip
     A_COEF,
     A_COEF_ASYM,
@@ -39,26 +39,17 @@ from _linear_gaussian import (  # isort: skip
 )
 
 
-@pytest.fixture(scope="module")
-def correlated_result():
-    """Kucherenko analysis of the correlated linear-Gaussian model."""
-    problem = GAUSS_PROBLEM.with_correlation(R_GAUSS)
-    ks = jaxgsa.kucherenko.sample(problem, 4096, seed=1)
-    Y = ks.samples @ A_COEF
-    return jaxgsa.kucherenko.analyze(ks, Y)
-
-
 # --- closed-form validation --------------------------------------------------
 
 
-def test_closed_form_linear_gaussian(correlated_result):
+def test_closed_form_linear_gaussian(lg_corr_kucherenko):
     S1_true, ST_true, var_y = analytic_indices(A_COEF, R_GAUSS)
-    np.testing.assert_allclose(np.asarray(correlated_result.S1), S1_true, atol=5e-3)
-    np.testing.assert_allclose(np.asarray(correlated_result.ST), ST_true, atol=5e-3)
-    np.testing.assert_allclose(float(np.asarray(correlated_result.variance)), var_y, rtol=2e-2)
-    assert correlated_result.dependence == "gaussian"
+    np.testing.assert_allclose(np.asarray(lg_corr_kucherenko.S1), S1_true, atol=5e-3)
+    np.testing.assert_allclose(np.asarray(lg_corr_kucherenko.ST), ST_true, atol=5e-3)
+    np.testing.assert_allclose(float(np.asarray(lg_corr_kucherenko.variance)), var_y, rtol=2e-2)
+    assert lg_corr_kucherenko.dependence == "gaussian"
     # Under correlation ST < S1 is the expected picture for coupled inputs.
-    assert float(correlated_result.ST[0]) < float(correlated_result.S1[0])
+    assert float(lg_corr_kucherenko.ST[0]) < float(lg_corr_kucherenko.S1[0])
 
 
 def test_asymmetric_correlation_structure():
@@ -181,22 +172,22 @@ def test_an_independent_problem_warns_and_quotes_the_cheaper_design():
     assert [w for w in quiet if "the problem declares no dependence" in str(w.message)] == []
 
 
-def test_sampler_validation_errors():
-    with pytest.raises(ValueError, match="at least 2 parameters"):
-        jaxgsa.kucherenko.sample(Problem(names=("x",), bounds=((0.0, 1.0),)), 64)
-    with pytest.raises(ValueError, match="n_samples"):
-        jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 1)
-
-
-def test_seed_with_scramble_false_raises():
-    """Tier T4: the inert seed/scramble combination is refused.
-
-    The unscrambled Sobol' sequence is deterministic, so a seed passed with
-    ``scramble=False`` would do nothing. The policy is to raise on a setting
-    that cannot do what it says, never to ignore it silently.
-    """
-    with pytest.raises(ValueError, match="scramble=False"):
-        jaxgsa.kucherenko.sample(GAUSS_PROBLEM, 64, scramble=False, seed=0)
+@pytest.mark.parametrize(
+    "problem, kwargs, message",
+    [
+        (Problem(names=("x",), bounds=((0.0, 1.0),)), {"n_samples": 64}, "at least 2 parameters"),
+        (GAUSS_PROBLEM, {"n_samples": 1}, "n_samples"),
+        # Tier T4: the inert seed/scramble combination is refused. The
+        # unscrambled Sobol' sequence is deterministic, so a seed passed with
+        # ``scramble=False`` would do nothing. The policy is to raise on a
+        # setting that cannot do what it says, never to ignore it silently.
+        (GAUSS_PROBLEM, {"n_samples": 64, "scramble": False, "seed": 0}, "scramble=False"),
+    ],
+    ids=["one-parameter", "too-few-samples", "seed-with-scramble-false"],
+)
+def test_sampler_guards(problem, kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        jaxgsa.kucherenko.sample(problem, **kwargs, verbose=False)
 
 
 # --- analyze contracts --------------------------------------------------------
@@ -231,6 +222,15 @@ def test_zero_variance_slice_warns_and_yields_nan():
     assert np.all(np.isnan(np.asarray(result.ST)[1]))
 
 
+@functools.cache
+def _linear_gaussian_design(n: int):
+    """A linear-Gaussian design and its finite outputs, one row per run (read-only)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", JaxgsaWarning)
+        ks = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, n, seed=0, verbose=False)
+    return ks, np.asarray(ks.samples @ A_COEF, dtype=np.float64)
+
+
 class TestOnInvalidPolicy:
     """T4 (behavioural): kucherenko.analyze applies the shared non-finite policy.
 
@@ -244,9 +244,9 @@ class TestOnInvalidPolicy:
     N = 128
 
     def _design_and_Y(self):
-        """A linear-Gaussian design plus its finite outputs, one row per run."""
-        ks = jaxgsa.kucherenko.sample(GAUSS_PROBLEM, self.N, seed=0)
-        return ks, np.asarray(ks.samples @ A_COEF, dtype=np.float64)
+        """A linear-Gaussian design plus a fresh copy of its finite outputs."""
+        ks, Y = _linear_gaussian_design(self.N)
+        return ks, Y.copy()
 
     def _rows_of(self, ks, base_point: int) -> list[int]:
         """Return every row that the given base point occupies."""
@@ -346,19 +346,12 @@ def test_save_load_round_trip(tmp_path):
 # --- bootstrap confidence intervals ------------------------------------------
 
 
-def _small_design(n=512, seed=2):
-    """Return an evaluated Ishigami design, small enough to resample quickly."""
-    problem = ishigami.PROBLEM
-    ks = jaxgsa.kucherenko.sample(problem, n, seed=seed)
-    return ks, ishigami.evaluate(ks.samples)
-
-
 class TestBootstrap:
     """Base-point resampling, the one unit this design can drop safely."""
 
-    def test_no_bootstrap_leaves_every_interval_unset_and_key_is_required(self):
+    def test_no_bootstrap_leaves_every_interval_unset_and_key_is_required(self, kuch_ishigami_512):
         """The plainest call reports no interval and no CI record."""
-        ks, Y = _small_design()
+        ks, Y = kuch_ishigami_512
         result = jaxgsa.kucherenko.analyze(ks, Y)
         assert result.ci is None
         assert result.S1_conf is None
@@ -366,9 +359,9 @@ class TestBootstrap:
         with pytest.raises(ValueError, match="key is required"):
             jaxgsa.kucherenko.analyze(ks, Y, n_bootstrap=8)
 
-    def test_intervals_bracket_the_estimate_and_variance_has_none(self):
+    def test_intervals_bracket_the_estimate_and_variance_has_none(self, kuch_ishigami_512):
         """Both indices get an interval; the denominator deliberately does not."""
-        ks, Y = _small_design()
+        ks, Y = kuch_ishigami_512
         result = jaxgsa.kucherenko.analyze(ks, Y, n_bootstrap=64, key=jax.random.key(1))
         assert result.ci.n_bootstrap == 64
         assert result.ci.level == 0.95
@@ -381,7 +374,9 @@ class TestBootstrap:
             assert (conf[0] <= point + 1e-5).all()
             assert (point <= conf[1] + 1e-5).all()
 
-    def test_a_replicate_keeps_each_conditional_block_beside_its_base_point(self):
+    def test_a_replicate_keeps_each_conditional_block_beside_its_base_point(
+        self, kuch_ishigami_512
+    ):
         """The unit is the base point, and this is what says so numerically.
 
         A replicate that resampled rows independently in each block would
@@ -390,7 +385,7 @@ class TestBootstrap:
         pair, so a misaligned replicate inflates it towards
         ``2 * V(Y) / V(Y) = 2``. Every replicate here stays in range.
         """
-        ks, Y = _small_design()
+        ks, Y = kuch_ishigami_512
         result = jaxgsa.kucherenko.analyze(
             ks, Y, n_bootstrap=32, key=jax.random.key(2), keep_replicates=True
         )
@@ -399,9 +394,9 @@ class TestBootstrap:
         assert (ST_draws >= -0.05).all()
         assert (ST_draws <= 1.2).all()
 
-    def test_gaussian_endpoints_are_symmetric_about_the_estimate(self):
+    def test_gaussian_endpoints_are_symmetric_about_the_estimate(self, kuch_ishigami_512):
         """T0: the normal-approximation interval is ``estimate +/- z*sd``."""
-        ks, Y = _small_design()
+        ks, Y = kuch_ishigami_512
         result = jaxgsa.kucherenko.analyze(
             ks, Y, n_bootstrap=64, ci_method="gaussian", key=jax.random.key(4)
         )
@@ -409,17 +404,17 @@ class TestBootstrap:
         point = np.asarray(result.S1)
         np.testing.assert_allclose(conf[1] - point, point - conf[0], rtol=1e-5)
 
-    def test_a_time_series_keeps_its_layout(self):
+    def test_a_time_series_keeps_its_layout(self, kuch_ishigami_512):
         """T4: an interval mirrors the output rank the caller passed."""
-        ks, Y = _small_design(n=256)
+        ks, Y = kuch_ishigami_512
         Y_ts = np.stack([Y, 2.0 * Y], axis=-1)[:, None, :]  # (n_runs, 1, 2)
         result = jaxgsa.kucherenko.analyze(ks, Y_ts, n_bootstrap=16, key=jax.random.key(6))
         assert np.asarray(result.S1).shape == (1, 2, ks.n_params)
         assert np.asarray(result.S1_conf).shape == (2, 1, 2, ks.n_params)
 
-    def test_the_dataset_carries_the_endpoints(self):
+    def test_the_dataset_carries_the_endpoints(self, kuch_ishigami_512):
         """An interval is only reported if it also exports."""
-        ks, Y = _small_design(n=256)
+        ks, Y = kuch_ishigami_512
         result = jaxgsa.kucherenko.analyze(ks, Y, n_bootstrap=8, key=jax.random.key(7))
         ds = result.to_dataset()
         for name in ("S1", "ST"):

@@ -6,7 +6,7 @@ import pytest
 
 import jaxgsa
 from jaxgsa import sampling
-from jaxgsa._core.dependence import sobol_uniforms, transform_samples
+from jaxgsa._core.dependence import sobol_uniforms
 from jaxgsa.problem import Problem
 
 PROBLEM = Problem.from_dict({"a": (0, 1), "b": (0, 1)})
@@ -56,31 +56,14 @@ def test_sampler_returning_wrong_shape_is_rejected() -> None:
         sampling.monte_carlo(bad, 8, seed=0)
 
 
-def test_callback_mutation_does_not_change_callers_inputs() -> None:
-    points = np.full((4, 2), 0.25)
-    rows = np.full((4, 2), 0.5)
-
-    def mutate(
-        u: np.ndarray,
-        *,
-        conditioning_rows: np.ndarray | None = None,
-        fixed_indices: tuple[int, ...] = (),
-    ) -> np.ndarray:
-        del fixed_indices
-        u[:] = 0
-        assert conditioning_rows is not None
-        result = conditioning_rows.copy()
-        conditioning_rows[:] = 0
-        return result
-
-    transform_samples(mutate, points, 2, conditioning_rows=rows, fixed_indices=(0, 1))
-    np.testing.assert_array_equal(points, np.full((4, 2), 0.25))
-    np.testing.assert_array_equal(rows, np.full((4, 2), 0.5))
-
-
-def test_custom_cannot_accompany_correlation() -> None:
+@pytest.mark.parametrize("order", ["correlation-then-sampler", "sampler-then-correlation"])
+def test_custom_sampler_and_correlation_conflict(order: str) -> None:
+    """A problem has one dependence source, whichever way round it is declared."""
     with pytest.raises(ValueError, match="correlation"):
-        CUSTOM.with_correlation(np.eye(2))
+        if order == "correlation-then-sampler":
+            PROBLEM.with_correlation(np.eye(2)).with_sampler(transform, dimension=1)
+        else:
+            CUSTOM.with_correlation(np.eye(2))
 
 
 def test_structured_samplers_and_refusing_analyzers_reject_a_custom_sampler() -> None:

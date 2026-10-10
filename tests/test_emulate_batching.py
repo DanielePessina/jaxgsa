@@ -12,6 +12,7 @@ term-axis reduction differently for different batch shapes, giving ~1e-6
 relative differences).
 """
 
+import functools
 from typing import Any
 
 import jax
@@ -21,7 +22,7 @@ import pytest
 from jax import Array
 
 from jaxgsa import hdmr, pce
-from jaxgsa._core.batching import apply_batched, resolve_batch_size
+from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.surrogate import SurrogateResult, _PredictPlan
 from jaxgsa.problem import Problem
 
@@ -30,9 +31,12 @@ N_FIT = 800
 N_NEW = 257  # deliberately not a multiple of any batch size used below
 
 
+PROBLEM = Problem.from_dict({f"x{i}": (-1.0, 1.0) for i in range(D)})
+
+
 @pytest.fixture(scope="module")
 def problem() -> Problem:
-    return Problem.from_dict({f"x{i}": (-1.0, 1.0) for i in range(D)})
+    return PROBLEM
 
 
 def _make_xy(shape: str) -> tuple[Array, Array]:
@@ -51,34 +55,48 @@ def _make_xy(shape: str) -> tuple[Array, Array]:
     return jnp.asarray(X), jnp.asarray(Y)
 
 
+@functools.cache
+def _pce_fit(shape: str):
+    """The order-3 PCE fit for one output layout, built once per module."""
+    X, Y = _make_xy(shape)
+    return pce.analyze(PROBLEM, X, Y, order=3)
+
+
+@functools.cache
+def _hdmr_fit(shape: str):
+    """The second-order HDMR fit for one output layout, built once per module."""
+    X, Y = _make_xy(shape)
+    return hdmr.analyze(PROBLEM, X, Y, maxorder=2)
+
+
 def _x_new() -> Array:
     rng = np.random.default_rng(1)
     return jnp.asarray(rng.uniform(-1.0, 1.0, size=(N_NEW, D)))
 
 
+# ``batch_size=100`` leaves a remainder of 57 rows (257 = 2 * 100 + 57), so one
+# size covers both the full blocks and the short last block.
 @pytest.mark.parametrize("shape", ["scalar", "multi", "timeseries"])
-@pytest.mark.parametrize("batch_size", [1, 100])
-def test_pce_batched_matches_single_shot(problem, shape, batch_size):
-    X, Y = _make_xy(shape)
-    result = pce.analyze(problem, X, Y, order=3)
+def test_pce_batched_matches_single_shot(shape):
+    result = _pce_fit(shape)
     X_new = _x_new()
 
     single = result.predict(X_new, batch_size=N_NEW)
-    batched = result.predict(X_new, batch_size=batch_size)
+    batched = result.predict(X_new, batch_size=100)
 
+    assert isinstance(batched, jax.Array)
+    assert batched.dtype == single.dtype == X_new.dtype
     assert batched.shape == single.shape
     np.testing.assert_allclose(np.asarray(batched), np.asarray(single), rtol=1e-5, atol=1e-6)
 
 
 @pytest.mark.parametrize("shape", ["scalar", "multi", "timeseries"])
-@pytest.mark.parametrize("batch_size", [1, 100])
-def test_hdmr_batched_matches_single_shot(problem, shape, batch_size):
-    X, Y = _make_xy(shape)
-    result = hdmr.analyze(problem, X, Y, maxorder=2)
+def test_hdmr_batched_matches_single_shot(shape):
+    result = _hdmr_fit(shape)
     X_new = _x_new()
 
     single = result.predict(X_new, batch_size=N_NEW)
-    batched = result.predict(X_new, batch_size=batch_size)
+    batched = result.predict(X_new, batch_size=100)
 
     assert batched.shape == single.shape
     np.testing.assert_allclose(np.asarray(batched), np.asarray(single), rtol=1e-5, atol=1e-6)
@@ -95,11 +113,15 @@ def test_hdmr_third_order_batched_matches_single_shot(problem):
     np.testing.assert_allclose(np.asarray(batched), np.asarray(single), rtol=1e-5, atol=1e-6)
 
 
-def test_invalid_batch_size_raises(problem):
-    X, Y = _make_xy("scalar")
-    result = pce.analyze(problem, X, Y, order=3)
+def test_invalid_batch_size_raises():
+    result = _pce_fit("scalar")
     with pytest.raises(ValueError, match="batch_size"):
         result.predict(_x_new(), batch_size=0)
+    # A fractional batch size would blow up in ``range(...)`` later, so it is
+    # refused up front instead of two layers deeper.
+    fractional: Any = 2.5
+    with pytest.raises(TypeError, match="batch_size must be an integer"):
+        result.predict(_x_new(), batch_size=fractional)
 
 
 def test_resolve_batch_size_bounds():
@@ -110,29 +132,6 @@ def test_resolve_batch_size_bounds():
     assert resolve_batch_size(10**12, 50, None) == 1
     # Auto: cheap rows fall back to single-shot.
     assert resolve_batch_size(8, 50, None) == 50
-
-
-def test_resolve_batch_size_rejects_non_integral_values():
-    """A fractional batch size would blow up in ``range(...)`` later, so it is
-    refused here instead of two layers deeper."""
-    fractional: Any = 2.5
-    with pytest.raises(TypeError, match="batch_size must be an integer"):
-        resolve_batch_size(1000, 50, fractional)
-
-
-def test_apply_batched_host_buffer_matches_single_shot():
-    """The host-staged batched path returns a jax Array identical to fn(X)."""
-    X = jnp.asarray(np.random.default_rng(3).normal(size=(11, 4)))
-
-    def fn(x: Array) -> Array:
-        return jnp.stack([x.sum(axis=1), x.prod(axis=1)], axis=-1)
-
-    single = fn(X)
-    # 4 does not divide 11, so the last batch is a short remainder.
-    batched = apply_batched(fn, X, 4)
-    assert isinstance(batched, jax.Array)
-    assert batched.dtype == single.dtype
-    np.testing.assert_allclose(np.asarray(batched), np.asarray(single), rtol=1e-6)
 
 
 class _FakeSurrogate(SurrogateResult):
@@ -155,8 +154,7 @@ class _FakeSurrogate(SurrogateResult):
 
 def test_pce_hdmr_reject_wrong_shaped_x_identically(problem):
     """Both result types reject malformed X with the same shared error."""
-    X, Y = _make_xy("scalar")
-    results = [pce.analyze(problem, X, Y, order=2), hdmr.analyze(problem, X, Y, maxorder=1)]
+    results = [_pce_fit("scalar"), _hdmr_fit("scalar")]
 
     messages_1d = []
     messages_wide = []
@@ -185,10 +183,9 @@ def test_pce_hdmr_reject_wrong_shaped_x_identically(problem):
     assert fake.batch_row_counts == []  # kernel never ran on invalid input
 
 
-def test_pce_batched_jit_compatible(problem):
+def test_pce_batched_jit_compatible():
     """predict stays jit-traceable when batching kicks in."""
-    X, Y = _make_xy("scalar")
-    result = pce.analyze(problem, X, Y, order=3)
+    result = _pce_fit("scalar")
     X_new = _x_new()
 
     fn = jax.jit(lambda x: result.predict(x, batch_size=100))

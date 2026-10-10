@@ -105,24 +105,18 @@ class TestOrientation:
             m = dataclasses.replace(m, ee_idx_before=m.ee_idx_after, ee_idx_after=m.ee_idx_before)
         return np.asarray(morris.analyze(m, Y).mu)
 
-    def test_monotone_model_gives_positive_mu(self):
+    def test_monotone_model_gives_signed_mu_and_a_swap_flips_it(self):
         problem = Problem(names=("x1", "x2"), bounds=((0.0, 1.0), (0.0, 1.0)))
 
         def model(X):
             return 4.0 * X[:, 0] + 2.0 * X[:, 1]
 
-        mu = self._signed_mu(problem, model, swap=False)
         # The derived design must report the true slopes, sign included.
+        mu = self._signed_mu(problem, model, swap=False)
         np.testing.assert_allclose(mu, [4.0, 2.0], rtol=1e-4)
-
-    def test_swapping_before_and_after_flips_the_sign(self):
-        problem = Problem(names=("x1", "x2"), bounds=((0.0, 1.0), (0.0, 1.0)))
-
-        def model(X):
-            return 4.0 * X[:, 0] + 2.0 * X[:, 1]
-
-        mu = self._signed_mu(problem, model, swap=True)
-        np.testing.assert_allclose(mu, [-4.0, -2.0], rtol=1e-4)
+        # Swapping before and after flips the sign.
+        mu_swapped = self._signed_mu(problem, model, swap=True)
+        np.testing.assert_allclose(mu_swapped, [-4.0, -2.0], rtol=1e-4)
 
 
 class TestJansenIdentity:
@@ -198,27 +192,32 @@ class TestGaussianInputs:
         # source Sobol design, including when its physical rows are Gaussian.
         np.testing.assert_allclose(m.ee_delta, delta, atol=1e-12)
 
-    def test_warning_names_only_unbounded_params(self):
-        s = sobol.sample(self.PROBLEM, 0, base_n=64, seed=1, verbose=False)
-        with pytest.warns(UserWarning, match=r"\['unbounded'\]"):
-            s.to_morris(verbose=False)
-
-    def test_one_sided_truncation_still_warns(self):
-        """GaussianInputSpec takes low and/or high; one bound leaves a tail open."""
-        for spec in (
-            GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0, low=-2.0),
-            GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0, high=2.0),
-        ):
+    @pytest.mark.parametrize(
+        "spec,named",
+        [
+            (None, "unbounded"),
+            # GaussianInputSpec takes low and/or high; one bound leaves a tail open.
+            (GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0, low=-2.0), "half"),
+            (GaussianInputSpec(dist="gaussian", mean=0.0, variance=1.0, high=2.0), "half"),
+            ("bounded", None),
+        ],
+        ids=["unbounded", "low-only", "high-only", "bounded-is-silent"],
+    )
+    def test_warning_names_only_the_open_tailed_params(self, spec, named):
+        if spec is None:
+            problem = self.PROBLEM
+        elif spec == "bounded":
+            problem = ishigami.PROBLEM
+        else:
             problem = Problem.from_dict({"half": spec, "uni": (0.0, 1.0)})
-            s = sobol.sample(problem, 0, base_n=64, seed=1, verbose=False)
-            with pytest.warns(UserWarning, match=r"\['half'\]"):
+        s = sobol.sample(problem, 0, base_n=64, seed=1, verbose=False)
+        if named is None:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
                 s.to_morris(verbose=False)
-
-    def test_bounded_problem_is_silent(self):
-        s = sobol.sample(ishigami.PROBLEM, 0, base_n=64, seed=1, verbose=False)
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            s.to_morris(verbose=False)
+        else:
+            with pytest.warns(UserWarning, match=rf"\['{named}'\]"):
+                s.to_morris(verbose=False)
 
 
 class TestDegenerateBlocks:

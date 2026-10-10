@@ -65,6 +65,22 @@ call before it ever got there.
 """
 DEFAULT_GIVEN_DATA_SIZE = 64
 
+CHEAP_KW: dict[str, dict] = {
+    "vkoga": {"max_centers": 4, "n_folds": 2, "n_outer": 4, "n_inner": 4, "n_variance": 16},
+    "hdmr": {"maxorder": 1, "maxiter": 3},
+    "hsic": {"n_perms": 3},
+    "optimal_transport": {"max_iter": 50},
+    "borgonovo": {"grid_size": 24},
+    "pawn": {"n_bins": 3},
+    "pce": {"order": 2},
+}
+"""Tiny settings for the given-data methods.
+
+Each call here only has to get past the capability gate or run to the end, so
+the numerical settings are the smallest the method accepts. The gate does not
+read them.
+"""
+
 MIN_METHODS = 13
 """The count at the time this test was written. Methods are only ever added."""
 
@@ -117,6 +133,7 @@ def _invoke(spec: MethodSpec, problem: jaxgsa.Problem) -> Callable[[], object]:
     if spec.name == "dgsm":
         return lambda: spec.analyze(problem, _point_model, X)
     extra = {"key": jax.random.key(0)} if spec.name in NEEDS_A_KEY else {}
+    extra |= CHEAP_KW.get(spec.name, {})
     return lambda: spec.analyze(problem, X, _batch_model(X), **extra)
 
 
@@ -138,6 +155,7 @@ def _invoke_core(spec: MethodSpec, problem: jaxgsa.Problem) -> Callable[[], obje
     if spec.name == "dgsm":
         return lambda: core(problem, _point_model, X)
     extra = {"key": jax.random.key(0)} if spec.name in NEEDS_A_KEY else {}
+    extra |= CHEAP_KW.get(spec.name, {})
     return lambda: core(problem, X, _batch_model(X), **extra)
 
 
@@ -258,24 +276,28 @@ class TestTheSpecsAreTrue:
             f"{'fired' if fired else 'did not fire'}"
         )
 
-    @pytest.mark.parametrize("spec", ALL_SPECS, ids=SPEC_IDS)
-    def test_the_bootstrap_keyword_exists_when_claimed(self, spec):
+    def test_the_bootstrap_claim_matches_the_signature(self):
+        """A method claims a bootstrap exactly when it offers the full interval controls.
+
+        Only one spelling is legal, so the check is for that one. A set of two
+        would keep passing for a method that regressed to a retired name.
+        """
         import inspect
 
-        params = inspect.signature(spec.analyze).parameters
-        if spec.bootstrap is None:
-            # Only one spelling is legal, so check for that one. Checking a
-            # set of two would keep passing for a method that regressed to
-            # the retired name, which is the failure this guards against.
-            assert "n_bootstrap" not in params, (
-                f"{spec.name} declares no bootstrap but its signature offers one"
-            )
-        else:
+        for spec in ALL_SPECS:
+            params = inspect.signature(spec.analyze, eval_str=True).parameters
+            if spec.bootstrap is None:
+                assert "n_bootstrap" not in params, (
+                    f"{spec.name} declares no bootstrap but its signature offers one"
+                )
+                continue
             assert spec.bootstrap == "n_bootstrap", (
                 f"{spec.name} declares bootstrap={spec.bootstrap!r}; the only "
                 "legal spelling is 'n_bootstrap'"
             )
-            assert spec.bootstrap in params
+            for required in ("n_bootstrap", "conf_level", "ci_method", "key", "keep_replicates"):
+                assert required in params, (spec.name, required)
+            assert params["n_bootstrap"].default == 0, spec.name
 
 
 class TestPureCoresShareTheGates:
@@ -371,26 +393,26 @@ class TestPureCoreDeclaration:
     checks is the same as an absence, so these assert both directions.
     """
 
-    @pytest.mark.parametrize("spec", ALL_SPECS, ids=SPEC_IDS)
-    def test_a_declared_core_exists_and_is_exported(self, spec):
+    def test_a_declared_core_exists_and_is_exported(self):
         """``pure_core=True`` means the package really exports ``indices``."""
         import importlib
 
-        module = importlib.import_module(f"jaxgsa.{spec.name}")
-        has_indices = hasattr(module, "indices")
-        if spec.pure_core:
-            assert has_indices, (
-                f"{spec.name} declares pure_core=True but exports no indices(). "
-                "Either build the core or declare the exemption."
-            )
-            assert "indices" in module.__all__, (
-                f"{spec.name}.indices exists but is missing from __all__"
-            )
-        else:
-            assert not has_indices, (
-                f"{spec.name} declares pure_core=False but exports indices(). "
-                "Flip the declaration."
-            )
+        for spec in ALL_SPECS:
+            module = importlib.import_module(f"jaxgsa.{spec.name}")
+            has_indices = hasattr(module, "indices")
+            if spec.pure_core:
+                assert has_indices, (
+                    f"{spec.name} declares pure_core=True but exports no indices(). "
+                    "Either build the core or declare the exemption."
+                )
+                assert "indices" in module.__all__, (
+                    f"{spec.name}.indices exists but is missing from __all__"
+                )
+            else:
+                assert not has_indices, (
+                    f"{spec.name} declares pure_core=False but exports indices(). "
+                    "Flip the declaration."
+                )
 
     def test_exactly_the_two_documented_methods_are_exempt(self):
         """The exemption list is closed.

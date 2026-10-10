@@ -70,6 +70,7 @@ def test_bootstrap_returns_bracketed_effects(linear_data):
         linear.PROBLEM, X, Y, backend="pce", order=2, n_bootstrap=4, key=jax.random.key(3)
     )
     assert result.Sh_conf is not None
+    assert np.asarray(result.Sh_conf).shape == (2, 3)
     assert np.all(np.asarray(result.Sh_conf[0]) <= np.asarray(result.Sh_conf[1]))
 
 

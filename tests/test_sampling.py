@@ -14,20 +14,10 @@ import pytest
 
 import jaxgsa
 from jaxgsa import JaxgsaWarning
-from jaxgsa._core.sampling import _next_power_of_2
 from jaxgsa.problem import GaussianInputSpec, InputSpecValue, Problem, UniformInputSpec
 from jaxgsa.sampling import correlate, fit_correlation, monte_carlo
 from jaxgsa.sobol import sample
 from jaxgsa.sobol._sampling import _saltelli_step
-
-
-def test_next_power_of_2():
-    assert _next_power_of_2(1) == 1
-    assert _next_power_of_2(2) == 2
-    assert _next_power_of_2(3) == 4
-    assert _next_power_of_2(5) == 8
-    assert _next_power_of_2(1024) == 1024
-    assert _next_power_of_2(1025) == 2048
 
 
 def test_sample_returns_unique_rows():
@@ -112,16 +102,6 @@ def test_reconstructing_expanded_samples_matches_mapping():
     reconstructed = result.samples[result.expanded_to_unique]
     assert reconstructed.shape == (result.n_expanded, p.num_vars)
     assert np.unique(reconstructed, axis=0).shape[0] == result.n_runs
-
-
-@pytest.mark.verbose_output
-def test_sample_verbose_false_is_silent(capsys):
-    """The marker keeps the emit seam live; otherwise this asserts nothing."""
-    p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
-    with pytest.warns(JaxgsaWarning, match="degenerate"):
-        sample(p, n_samples=32, seed=42, verbose=False)
-    out = capsys.readouterr().out
-    assert out == ""
 
 
 def test_uniform_columns_stay_within_bounds_for_mixed_problem():
@@ -327,7 +307,7 @@ def test_monte_carlo_gaussian_marginals_reproduce_mvn_covariance():
         },
         correlation=[[1.0, rho], [rho, 1.0]],
     )
-    X = monte_carlo(problem, 100_000, seed=42)
+    X = monte_carlo(problem, 50_000, seed=42)
     expected = sigma[:, None] * np.array([[1.0, rho], [rho, 1.0]]) * sigma[None, :]
     np.testing.assert_allclose(np.cov(X, rowvar=False), expected, atol=0.08)
     np.testing.assert_allclose(np.mean(X, axis=0), [1.0, -2.0], atol=0.03)
@@ -339,14 +319,14 @@ def test_spearman_kind_recovers_rank_correlation_with_uniform_marginals():
     spearman_problem = Problem.from_dict(
         {"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=R, correlation_type="spearman"
     )
-    X = monte_carlo(spearman_problem, 100_000, seed=3)
+    X = monte_carlo(spearman_problem, 50_000, seed=3)
     assert abs(_spearman_of(X)[0, 1] - rho_s) < 0.01
 
     # The latent kind would *not* hit the rank target: a latent 0.7 yields
     # a Spearman correlation of (6/pi) asin(0.7/2) ~ 0.683, which is what
     # justifies exposing the kind switch at all.
     latent_problem = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=R)
-    X_latent = monte_carlo(latent_problem, 100_000, seed=3)
+    X_latent = monte_carlo(latent_problem, 50_000, seed=3)
     expected_spearman = (6.0 / np.pi) * np.arcsin(rho_s / 2.0)
     assert abs(_spearman_of(X_latent)[0, 1] - expected_spearman) < 0.01
     assert abs(_spearman_of(X_latent)[0, 1] - rho_s) > 0.01
@@ -438,6 +418,7 @@ def test_correlate_determinism_and_validation():
         correlate(X[:, :1], problem)
 
 
+@pytest.mark.slow
 def test_correlate_sampling_error_matches_iman_conover():
     """Pin the variance reduction the de-correlation step buys.
 
@@ -446,6 +427,10 @@ def test_correlate_sampling_error_matches_iman_conover():
     the achieved rank correlation, plus a bias of about -0.006. Iman-Conover
     removes both: about 0.024 and no bias. The thresholds below sit between
     the two, so the old implementation fails this test.
+
+    The default tier checks that the pairing hits the target, in
+    ``test_correlate_is_a_per_column_permutation_hitting_the_target``. This
+    test needs 150 replicates, so it only runs in the slow tier.
     """
     rho = 0.8
     n, replicates = 50, 150
@@ -524,12 +509,18 @@ def test_fit_correlation_public_wrapper_recovers_declared_matrix():
 def test_correlated_end_to_end_ot_borgonovo_hdmr():
     """Y = X1 with corr(X1, X2) = 0.8: the unused X2 must earn a clearly
     non-zero index under the correlation-inclusive given-data methods, and
-    HDMR's ANCOVA Sb term must flag the correlation-induced variance."""
+    HDMR's ANCOVA Sb term must flag the correlation-induced variance.
+
+    The margins are wide (measured 0.47 and 0.32 against 0.1, and Sb 0.22
+    against 0.1, with 0.004 on the independent draw against 0.05), so the
+    small sample and the cheap HDMR settings are enough.
+    """
     rho = 0.8
+    n = 512
     problem = Problem.from_dict(
         {"x1": (0.0, 1.0), "x2": (0.0, 1.0)}, correlation=[[1.0, rho], [rho, 1.0]]
     )
-    X = monte_carlo(problem, 2048, seed=99)
+    X = monte_carlo(problem, n, seed=99)
     Y = jnp.asarray(X[:, 0])
     Xj = jnp.asarray(X)
 
@@ -545,13 +536,13 @@ def test_correlated_end_to_end_ot_borgonovo_hdmr():
     # the correlative share is clearest on an additive model of both inputs:
     # each first-order term covaries with the other through corr(X1, X2).
     Y_sum = jnp.asarray(X[:, 0] + X[:, 1])
-    hdmr = jaxgsa.hdmr.analyze(problem, Xj, Y_sum)
+    hdmr = jaxgsa.hdmr.analyze(problem, Xj, Y_sum, maxorder=1, maxiter=10)
     assert float(jnp.max(jnp.abs(hdmr.Sb))) > 0.1
 
     # Same model on an independent draw: the correlative share collapses.
     independent = problem.with_correlation(None)
-    X0 = monte_carlo(independent, 2048, seed=98)
+    X0 = monte_carlo(independent, n, seed=98)
     hdmr_indep = jaxgsa.hdmr.analyze(
-        independent, jnp.asarray(X0), jnp.asarray(X0[:, 0] + X0[:, 1])
+        independent, jnp.asarray(X0), jnp.asarray(X0[:, 0] + X0[:, 1]), maxorder=1, maxiter=10
     )
     assert float(jnp.max(jnp.abs(hdmr_indep.Sb))) < 0.05

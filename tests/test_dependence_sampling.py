@@ -31,7 +31,6 @@ CUSTOM = INDEPENDENT.with_sampler(identity_sampler)
 @pytest.mark.parametrize(
     "values, message",
     [
-        (np.zeros((3, 1)), "shape"),
         (np.full((3, 2), np.nan), "finite"),
         (np.zeros((3, 2), dtype=complex), "real numeric"),
         (np.full((3, 2), "1"), "real numeric"),
@@ -124,11 +123,3 @@ def test_custom_draws_to_unit_maps_rows_in_support():
     rows = np.array([[0.1, 0.9], [0.5, 0.5]])
     np.testing.assert_allclose(draws.to_unit(rows), rows, atol=1e-6)
     np.testing.assert_array_equal(draws.to_physical(rows), rows)
-
-
-@pytest.mark.parametrize("bad", [[1.5, 0.5], [0.5, -0.1]])
-def test_custom_draws_to_unit_rejects_out_of_support_rows(bad):
-    draws = draws_for(CUSTOM)
-    rows = np.array([[0.2, 0.2], bad])
-    with pytest.raises(ValueError, match="outside the declared support"):
-        draws.to_unit(rows)

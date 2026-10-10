@@ -349,21 +349,20 @@ def test_sampler_round_trip_through_constructor_from_dict_and_with_sampler():
     assert default.sampler_dimension == 2
 
 
-def test_with_correlation_on_a_sampler_problem_raises():
-    p = Problem.from_dict(_SAMPLER_SPECS, sampler=_copy_sampler)
-    with pytest.raises(ValueError, match="correlation or a custom"):
-        p.with_correlation(_SAMPLER_R)
-
-
-def test_with_sampler_on_a_correlated_problem_raises():
-    p = Problem.from_dict(_SAMPLER_SPECS, correlation=_SAMPLER_R)
-    with pytest.raises(ValueError, match="correlation or a custom"):
-        p.with_sampler(_copy_sampler)
-
-
-def test_constructor_rejects_both_correlation_and_sampler():
-    with pytest.raises(ValueError, match="correlation or a custom"):
-        Problem.from_dict(_SAMPLER_SPECS, correlation=_SAMPLER_R, sampler=_copy_sampler)
+def test_a_sampler_and_a_correlation_exclude_each_other():
+    """Every route to a problem with both raises, in either order."""
+    routes = [
+        lambda: Problem.from_dict(_SAMPLER_SPECS, sampler=_copy_sampler).with_correlation(
+            _SAMPLER_R
+        ),
+        lambda: Problem.from_dict(_SAMPLER_SPECS, correlation=_SAMPLER_R).with_sampler(
+            _copy_sampler
+        ),
+        lambda: Problem.from_dict(_SAMPLER_SPECS, correlation=_SAMPLER_R, sampler=_copy_sampler),
+    ]
+    for route in routes:
+        with pytest.raises(ValueError, match="correlation or a custom"):
+            route()
 
 
 def test_sampler_dimension_without_sampler_raises():

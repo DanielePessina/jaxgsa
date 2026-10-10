@@ -94,7 +94,7 @@ jobs:
       - name: Install project and dev dependencies
         run: uv sync --locked --extra dev
       - name: Run all ordinary numerical regressions
-        run: uv run pytest -m "not slow" -q
+        run: uv run pytest -m "not slow" -q -n auto
 
   # The joint-mode optimal-transport tests that run every Sinkhorn solve at
   # full sample size. `addopts = "-m 'not slow'"` in pyproject.toml keeps them
@@ -117,4 +117,4 @@ jobs:
         run: uv sync --locked --extra dev
 
       - name: Run the deselected slow tests
-        run: uv run pytest -m slow -v
+        run: uv run pytest -m slow -v -n auto

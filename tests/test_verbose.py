@@ -20,6 +20,8 @@ routes through the one helper this file exercises.
 
 from __future__ import annotations
 
+import re
+
 import jax
 import jax.numpy as jnp
 import pytest
@@ -85,7 +87,10 @@ def test_bootstrapped_sobol_prints_intervals(capsys):
     out = capsys.readouterr().out
     # A ranked line with an interval reads "1. x2  ST=0.62  [0.55, 0.69]".
     results = out[out.index("results:") :]
-    assert "[" in results and "]" in results
+    ranked = [line for line in results.splitlines() if "ST=" in line]
+    assert len(ranked) == len(PROBLEM.names)
+    for line in ranked:
+        assert re.search(r"ST=\S+\s+\[\S+, \S+\]", line), line
 
 
 def test_pawn_analyze_prints_and_can_be_silenced(capsys):

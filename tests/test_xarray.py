@@ -133,16 +133,19 @@ class TestSAResultToDataset:
         with pytest.raises(ValueError, match="output_names length"):
             r.to_dataset()
 
-    @pytest.mark.parametrize("ci_method", ["quantile", "gaussian"])
-    def test_analyze_bootstrap_export_preserves_lower_upper_variables(self, ci_method):
-        """Real bootstrap analyze() output exports lower/upper CI variables."""
+    def test_analyze_bootstrap_export_preserves_lower_upper_variables(self):
+        """Real bootstrap analyze() output exports lower/upper CI variables.
+
+        The export does not depend on how the interval was built, so one
+        ``ci_method`` is enough.
+        """
         problem = Problem.from_dict(
             {"x1": (0.0, 1.0), "x2": (0.0, 1.0), "x3": (0.0, 1.0)},
             output_names=("response",),
         )
         sampling_result = jaxgsa.sobol.sample(
             problem,
-            n_samples=256,
+            n_samples=128,
             calc_second_order=True,
             seed=7,
             verbose=False,
@@ -153,9 +156,8 @@ class TestSAResultToDataset:
         result = jaxgsa.sobol.analyze(
             sampling_result,
             Y,
-            n_bootstrap=20,
+            n_bootstrap=8,
             conf_level=0.9,
-            ci_method=ci_method,
             key=jax.random.key(123),
         )
         assert result.S1_conf is not None

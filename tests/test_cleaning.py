@@ -181,13 +181,15 @@ class TestOnInvalidPolicy:
         expected_st = 0.5 * np.mean((A[:, None] - AB) ** 2, axis=0) / var
         np.testing.assert_allclose(np.asarray(dropped.ST), expected_st, rtol=1e-4, atol=1e-6)
 
-    @pytest.mark.parametrize("policy", ["raise", "propagate", "drop"])
-    def test_a_clean_sample_reports_nothing_and_stays_silent(
-        self, simple_problem, policy, recwarn
-    ):
-        """T4: a clean run gives an empty report under every policy."""
+    def test_a_clean_sample_reports_nothing_and_stays_silent(self, simple_problem, recwarn):
+        """T4: a clean run gives an empty report and no warning under ``drop``.
+
+        The other two policies on clean data are covered by
+        ``test_invalid_policy.py`` and by the feature matrix, which asserts
+        ``invalid.n_invalid == 0`` for every method.
+        """
         sr = self._sample(simple_problem)
-        result = jaxgsa.sobol.analyze(sr, jnp.asarray(_finite_Y(sr)), on_invalid=policy)
+        result = jaxgsa.sobol.analyze(sr, jnp.asarray(_finite_Y(sr)), on_invalid="drop")
         assert result.invalid.n_invalid == 0
         assert not result.invalid.any_invalid
         assert result.invalid.unit is InvalidUnit.SALTELLI_GROUP

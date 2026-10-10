@@ -66,10 +66,11 @@ def test_conditionals_preserve_the_joint_constraint_for_every_subset() -> None:
 def test_kucherenko_retains_higher_order_dependence() -> None:
     """For Y=W, first order is (0,0,1) and every conditional total is zero."""
     with jax.enable_x64():
-        design = kucherenko.sample(PROBLEM, 32768, seed=7, verbose=False)
+        design = kucherenko.sample(PROBLEM, 8192, seed=7, verbose=False)
         result = kucherenko.analyze(design, jnp.asarray(design.samples[:, 2]), verbose=False)
     assert isinstance(result, kucherenko.KucherenkoResult)
-    np.testing.assert_allclose(result.S1, [0, 0, 1], atol=0.025)
+    # Worst S1 error over eight seeds at base 8192 is 0.016.
+    np.testing.assert_allclose(result.S1, [0, 0, 1], atol=0.05)
     np.testing.assert_allclose(result.ST, [0, 0, 0], atol=1e-25)
     # The constraint is invisible to every pairwise statistic.
     base = design.samples[: design.base_n]
@@ -81,9 +82,10 @@ def test_identity_copula_loses_the_triple_constraint() -> None:
     """An independent joint model gives W a total index of one instead."""
     with jax.enable_x64():
         with pytest.warns(JaxgsaWarning, match="plain independent draws"):
-            design = kucherenko.sample(BASE, 8192, seed=7, verbose=False)
+            design = kucherenko.sample(BASE, 1024, seed=7, verbose=False)
         result = kucherenko.analyze(design, jnp.asarray(design.samples[:, 2]), verbose=False)
     assert isinstance(result, kucherenko.KucherenkoResult)
+    # The error is 6e-6 even at base 1024; the tolerance is far above it.
     np.testing.assert_allclose(result.ST, [0, 0, 1], atol=0.015)
 
 
@@ -97,11 +99,12 @@ def test_vkoga_conditional_integration_retains_higher_order_dependence() -> None
         problem=PROBLEM,
         draws=CustomDraws(PROBLEM),
         predict=lambda unit: unit[:, 2:3],
-        n_outer=2048,
-        n_inner=128,
-        n_variance=16384,
+        n_outer=512,
+        n_inner=64,
+        n_variance=4096,
         entropy=7,
         batch_size=None,
     )
-    np.testing.assert_allclose(result.S_TC, [[0, 0, 1]], atol=0.02)
+    # Worst error over eight entropies at this budget is 0.008.
+    np.testing.assert_allclose(result.S_TC, [[0, 0, 1]], atol=0.04)
     np.testing.assert_allclose(result.S_TU, [[0, 0, 0]], atol=1e-25)

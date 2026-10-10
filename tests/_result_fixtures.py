@@ -69,7 +69,7 @@ MODELS: dict[str, Callable[[jax.Array], jax.Array]] = {
 }
 
 
-def _given_data(shape: str, n: int = 256) -> tuple[jax.Array, jax.Array]:
+def _given_data(shape: str, n: int = 64) -> tuple[jax.Array, jax.Array]:
     """Return a Monte Carlo ``(X, Y)`` pair for one output shape."""
     X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n, seed=SEED))
     return X, MODELS[shape](X)
@@ -88,23 +88,23 @@ def _point_model(shape: str) -> Callable[[jax.Array], jax.Array]:
 def _sobol(shape: str) -> Any:
     sr = sobol.sample(PROBLEM, n_samples=128, seed=SEED, verbose=False)
     Y = MODELS[shape](jnp.asarray(sr.samples))
-    return sobol.analyze(sr, Y, n_bootstrap=8, key=jax.random.key(SEED))
+    return sobol.analyze(sr, Y, n_bootstrap=2, key=jax.random.key(SEED))
 
 
 def _morris(shape: str) -> Any:
-    sr = morris.sample(PROBLEM, n_trajectories=8, seed=SEED, verbose=False)
+    sr = morris.sample(PROBLEM, n_trajectories=4, seed=SEED, verbose=False)
     Y = MODELS[shape](jnp.asarray(sr.samples))
-    return morris.analyze(sr, Y, n_bootstrap=8, key=jax.random.key(SEED))
+    return morris.analyze(sr, Y, n_bootstrap=2, key=jax.random.key(SEED))
 
 
 def _efast(shape: str) -> Any:
-    sr = efast.sample(PROBLEM, n_per_curve=257, seed=SEED)
+    sr = efast.sample(PROBLEM, n_per_curve=129, seed=SEED)
     Y = MODELS[shape](jnp.asarray(sr.samples))
     return efast.analyze(sr, Y)
 
 
 def _kucherenko(shape: str) -> Any:
-    sr = kucherenko.sample(PROBLEM, n_samples=128, seed=SEED)
+    sr = kucherenko.sample(PROBLEM, n_samples=16, seed=SEED)
     Y = MODELS[shape](jnp.asarray(sr.samples))
     return kucherenko.analyze(sr, Y)
 
@@ -116,59 +116,80 @@ def _dgsm(shape: str) -> Any:
 
 def _borgonovo(shape: str) -> Any:
     X, Y = _given_data(shape)
-    return borgonovo.analyze(PROBLEM, X, Y, n_bootstrap=8, key=jax.random.key(SEED))
+    return borgonovo.analyze(PROBLEM, X, Y, grid_size=24, n_bootstrap=2, key=jax.random.key(SEED))
 
 
 def _pawn(shape: str) -> Any:
     X, Y = _given_data(shape)
-    return pawn.analyze(PROBLEM, X, Y, n_bins=4, n_bootstrap=8, key=jax.random.key(SEED))
+    return pawn.analyze(PROBLEM, X, Y, n_bins=4, n_bootstrap=2, key=jax.random.key(SEED))
 
 
 def _hsic(shape: str) -> Any:
     X, Y = _given_data(shape)
-    return hsic.analyze(PROBLEM, X, Y, n_perms=20, key=jax.random.key(SEED))
+    return hsic.analyze(PROBLEM, X, Y, n_perms=3, key=jax.random.key(SEED))
 
 
 def _ot(shape: str) -> Any:
     X, Y = _given_data(shape)
     return optimal_transport.analyze(
-        PROBLEM, X, Y, n_partitions=4, n_bootstrap=4, dummy=True, key=jax.random.key(SEED)
+        PROBLEM,
+        X,
+        Y,
+        n_partitions=4,
+        max_iter=100,
+        n_bootstrap=2,
+        dummy=True,
+        key=jax.random.key(SEED),
     )
 
 
 def _ot_multivariate(shape: str) -> Any:
     X, Y = _given_data(shape)
     return optimal_transport.analyze(
-        PROBLEM, X, Y, mode="multivariate", n_partitions=4, n_bootstrap=4, key=jax.random.key(SEED)
+        PROBLEM,
+        X,
+        Y,
+        mode="multivariate",
+        n_partitions=4,
+        max_iter=300,
+        n_bootstrap=2,
+        key=jax.random.key(SEED),
     )
 
 
 def _ot_trajectory(shape: str) -> Any:
     X, Y = _given_data(shape)
     return optimal_transport.analyze(
-        PROBLEM, X, Y, mode="trajectory", n_partitions=4, n_bootstrap=4, key=jax.random.key(SEED)
+        PROBLEM,
+        X,
+        Y,
+        mode="trajectory",
+        n_partitions=4,
+        max_iter=300,
+        n_bootstrap=2,
+        key=jax.random.key(SEED),
     )
 
 
 def _pce(shape: str) -> Any:
     X, Y = _given_data(shape)
-    return pce.analyze(PROBLEM, X, Y, order=3)
+    return pce.analyze(PROBLEM, X, Y, order=2)
 
 
 def _hdmr(shape: str) -> Any:
     # RS-HDMR refuses fewer than 300 rows: the B-spline fit needs them.
-    X, Y = _given_data(shape, n=384)
-    return hdmr.analyze(PROBLEM, X, Y, maxorder=2, maxiter=20)
+    X, Y = _given_data(shape, n=300)
+    return hdmr.analyze(PROBLEM, X, Y, maxorder=2, maxiter=3)
 
 
 def _hdmr_third_order(shape: str) -> Any:
-    X, Y = _given_data(shape, n=384)
-    return hdmr.analyze(PROBLEM, X, Y, maxorder=3, maxiter=20)
+    X, Y = _given_data(shape, n=300)
+    return hdmr.analyze(PROBLEM, X, Y, maxorder=3, maxiter=3)
 
 
 def _shapley(shape: str) -> Any:
     X, Y = _given_data(shape)
-    return shapley.analyze(PROBLEM, X, Y, backend="pce", order=3)
+    return shapley.analyze(PROBLEM, X, Y, backend="pce", order=2)
 
 
 def _vkoga(shape: str) -> Any:
@@ -177,11 +198,11 @@ def _vkoga(shape: str) -> Any:
         PROBLEM,
         X,
         Y,
-        max_centers=16,
-        n_folds=3,
-        n_outer=32,
-        n_inner=16,
-        n_variance=128,
+        max_centers=4,
+        n_folds=2,
+        n_outer=4,
+        n_inner=4,
+        n_variance=16,
         key=jax.random.key(SEED),
     )
 

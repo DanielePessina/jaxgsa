@@ -14,11 +14,20 @@ import numpy as np
 import pytest
 from scipy.special import ndtr, ndtri
 
-from jaxgsa import vkoga
+from jaxgsa import sampling, vkoga
 from jaxgsa._core.dependence import CustomDraws, GaussianDraws
 from jaxgsa._core.irregular import IrregularResult
 from jaxgsa.problem import Problem
 from jaxgsa.vkoga._indices import estimate_correlated_indices
+
+# Closed-form linear-Gaussian reference and a hand-written Gaussian sampler.
+from _linear_gaussian import (  # isort: skip
+    A_COEF,
+    GAUSS_PROBLEM,
+    R_GAUSS,
+    analytic_indices,
+    gaussian_sampler,
+)
 
 PROBLEM = Problem(names=("a", "b"), bounds=((0.0, 1.0),) * 2)
 
@@ -98,72 +107,128 @@ def gaussian_copula_sampler(R: np.ndarray, low: float, high: float):
 _R3 = np.array([[1.0, 0.8, 0.0], [0.8, 1.0, -0.4], [0.0, -0.4, 1.0]])
 
 
-def _estimate(problem: Problem, draws, predict, entropy: int):
-    """Run the shared estimator at the default analysis budget."""
+# Estimator budgets. The cheap one runs in the default tier on one seed; the
+# full one is the analysis default over four seeds and runs as a slow test.
+_CHEAP = dict(n_outer=256, n_inner=64, n_variance=8192, n_seeds=1)
+_FULL = dict(n_outer=512, n_inner=128, n_variance=8192, n_seeds=4)
+_BUDGETS = [
+    pytest.param(_CHEAP, id="cheap"),
+    pytest.param(_FULL, id="full", marks=pytest.mark.slow),
+]
+
+
+def _estimate(problem: Problem, draws, predict, entropy: int, budget: dict | None = None):
+    """Run the shared estimator at the analysis budget, or at ``budget``."""
+    budget = budget or _FULL
     return estimate_correlated_indices(
         problem=problem,
         draws=draws,
         predict=predict,
-        n_outer=512,
-        n_inner=128,
-        n_variance=8192,
+        n_outer=budget["n_outer"],
+        n_inner=budget["n_inner"],
+        n_variance=budget["n_variance"],
         entropy=entropy,
         batch_size=None,
     )
 
 
-def _index_spread(problem: Problem, draws, n_seeds: int = 4) -> tuple[np.ndarray, np.ndarray]:
+def _index_spread(problem: Problem, draws, budget: dict) -> tuple[np.ndarray, np.ndarray]:
     """Mean and spread of (S_TC, S_TU, S_U) over seeds with the exact predictor."""
     runs = []
-    for seed in range(n_seeds):
-        result = _estimate(problem, draws, _ishigami_unit, 100 + seed)
+    for seed in range(budget["n_seeds"]):
+        result = _estimate(problem, draws, _ishigami_unit, 100 + seed, budget)
         runs.append(np.stack([result.S_TC[0], result.S_TU[0], result.S_U[0]]))
     stacked = np.array(runs)
     return stacked.mean(axis=0), stacked.std(axis=0)
 
 
-def test_custom_independent_sampler_matches_the_built_in_path() -> None:
+@pytest.mark.parametrize("budget", _BUDGETS)
+def test_custom_independent_sampler_matches_the_built_in_path(budget) -> None:
     """A custom sampler of independent inputs gives the classical Ishigami indices.
 
     Same estimator, same budget: the custom path must agree with the built-in
-    independent path within Monte-Carlo noise, and both with the closed form
-    (``S_TC = S1``, ``S_TU = ST``, ``S_U = S1``).
+    independent path, and both with the closed form (``S_TC = S1``,
+    ``S_TU = ST``, ``S_U = S1``). The default tier checks both against the
+    closed form on one seed (worst error 0.015 at this budget, 3x headroom in
+    the tolerance). The full budget also compares the two paths within their
+    seed-to-seed spread.
     """
     custom = CustomDraws(ISHIGAMI.with_sampler(ishigami_independent_sampler))
     built_in = GaussianDraws(ISHIGAMI)
-    custom_mean, custom_sd = _index_spread(ISHIGAMI, custom)
-    built_in_mean, built_in_sd = _index_spread(ISHIGAMI, built_in)
+    custom_mean, custom_sd = _index_spread(ISHIGAMI, custom, budget)
+    built_in_mean, built_in_sd = _index_spread(ISHIGAMI, built_in, budget)
 
-    tolerance = 4 * np.hypot(custom_sd, built_in_sd) + 2e-3
-    assert np.all(np.abs(custom_mean - built_in_mean) <= tolerance)
     S1 = np.array([0.3139, 0.4424, 0.0])
     ST = np.array([0.5576, 0.4424, 0.2437])
     # The ddof=1 inner variance over a stratified QMC block reads S_TU about
     # n_inner / (n_inner - 1) high, under 1 percent at n_inner=128.
-    np.testing.assert_allclose(custom_mean[0], S1, atol=0.01)
-    np.testing.assert_allclose(custom_mean[1], ST, atol=0.01)
-    np.testing.assert_allclose(custom_mean[2], S1, atol=0.01)
+    atol = 0.01 if budget is _FULL else 0.05
+    for mean in (custom_mean, built_in_mean):
+        np.testing.assert_allclose(mean[0], S1, atol=atol)
+        np.testing.assert_allclose(mean[1], ST, atol=atol)
+        np.testing.assert_allclose(mean[2], S1, atol=atol)
+    if budget is _FULL:
+        tolerance = 4 * np.hypot(custom_sd, built_in_sd) + 2e-3
+        assert np.all(np.abs(custom_mean - built_in_mean) <= tolerance)
 
 
-def test_custom_gaussian_copula_matches_the_built_in_copula() -> None:
+@pytest.mark.parametrize("budget", _BUDGETS)
+def test_custom_gaussian_copula_matches_the_built_in_copula(budget) -> None:
     """A hand-written Gaussian-copula sampler agrees with the built-in copula.
 
     The two paths share the estimator but not the conditional algebra, so this
     is a T1 cross-check of :class:`CustomDraws` against
-    :class:`GaussianDraws` on a correlated, non-additive model.
+    :class:`GaussianDraws` on a correlated, non-additive model. The default
+    tier compares one seed (worst gap 0.02 at this budget); the full budget
+    compares the means within the seed-to-seed spread.
     """
     custom = CustomDraws(ISHIGAMI.with_sampler(gaussian_copula_sampler(_R3, _LOW, _HIGH)))
     built_in = GaussianDraws(ISHIGAMI.with_correlation(_R3))
-    custom_mean, custom_sd = _index_spread(ISHIGAMI, custom)
-    built_in_mean, built_in_sd = _index_spread(ISHIGAMI, built_in)
-    tolerance = 4 * np.hypot(custom_sd, built_in_sd) + 2e-3
+    custom_mean, custom_sd = _index_spread(ISHIGAMI, custom, budget)
+    built_in_mean, built_in_sd = _index_spread(ISHIGAMI, built_in, budget)
+    tolerance = 4 * np.hypot(custom_sd, built_in_sd) + 2e-3 if budget is _FULL else 0.06
     assert np.all(np.abs(custom_mean - built_in_mean) <= tolerance), (
         custom_mean,
         built_in_mean,
     )
     # The correlation must actually matter, or the check above is vacuous.
-    independent_mean, _ = _index_spread(ISHIGAMI, GaussianDraws(ISHIGAMI))
+    independent_mean, _ = _index_spread(ISHIGAMI, GaussianDraws(ISHIGAMI), budget)
     assert np.max(np.abs(custom_mean - independent_mean)) > 0.1
+
+
+def test_analyze_recovers_the_linear_gaussian_closed_form_with_a_custom_sampler() -> None:
+    """End to end: ``vkoga.analyze`` under a hand-written Gaussian sampler.
+
+    Tier T0 (closed form). The problem declares no correlation; its dependence
+    comes only from ``with_sampler``. The sampler is written by hand
+    (``gaussian_sampler``), so the surrogate trains on its rows, the
+    estimator integrates through its conditionals, and the result has to land
+    on the analytic indices of ``Y = a . X`` with ``X ~ N(0, R)``. The budget
+    is small: the worst error measured over three keys is 0.012, the tolerance
+    is 0.04.
+    """
+    problem = GAUSS_PROBLEM.with_sampler(gaussian_sampler(R_GAUSS))
+    S_TC_true, S_TU_true, var_y = analytic_indices(A_COEF, R_GAUSS)
+    with jax.enable_x64():
+        X = jnp.asarray(sampling.monte_carlo(problem, 512, seed=7))
+        result = vkoga.analyze(
+            problem,
+            X,
+            X @ A_COEF,
+            gamma=2.0,
+            ridge=1e-10,
+            max_centers=64,
+            n_outer=128,
+            n_inner=32,
+            n_variance=2048,
+            key=jax.random.key(0),
+            verbose=False,
+        )
+    assert isinstance(result, vkoga.VKOGAResult)
+    assert result.dependence == "custom"
+    np.testing.assert_allclose(np.asarray(result.S_TC), S_TC_true, atol=0.04)
+    np.testing.assert_allclose(np.asarray(result.S_TU), S_TU_true, atol=0.04)
+    np.testing.assert_allclose(float(np.asarray(result.variance)), var_y, rtol=0.1)
 
 
 def test_correlated_gaussian_conditional_indices() -> None:
@@ -259,14 +324,14 @@ def test_analyze_rounds_custom_sizes_and_labels_the_result() -> None:
         )
 
     with jax.enable_x64():
-        x = jnp.asarray(np.random.default_rng(1).random((70, 2)))
+        x = jnp.asarray(np.random.default_rng(1).random((128, 2)))
         result = vkoga.analyze(
             PROBLEM.with_sampler(recording),
             x,
             x[:, 0],
             gamma=2.0,
             ridge=1e-6,
-            max_centers=15,
+            max_centers=32,
             n_outer=9,
             n_inner=3,
             n_variance=31,
@@ -283,7 +348,7 @@ def test_analyze_rounds_custom_sizes_and_labels_the_result() -> None:
 def test_batch_size_does_not_move_a_custom_estimate() -> None:
     """Chunking is a memory decision for the custom path too."""
     with jax.enable_x64():
-        x = jnp.asarray(np.random.default_rng(1).random((70, 2)))
+        x = jnp.asarray(np.random.default_rng(1).random((128, 2)))
 
         def run(batch_size: int) -> vkoga.VKOGAResult:
             value = vkoga.analyze(
@@ -293,7 +358,7 @@ def test_batch_size_does_not_move_a_custom_estimate() -> None:
                 batch_size=batch_size,
                 gamma=2.0,
                 ridge=1e-6,
-                max_centers=15,
+                max_centers=32,
                 n_outer=16,
                 n_inner=4,
                 n_variance=32,
@@ -327,14 +392,14 @@ def test_sampler_outside_the_declared_support_is_rejected() -> None:
         return rows + 0.5
 
     with jax.enable_x64(), pytest.raises(ValueError, match="outside the declared support"):
-        x = jnp.asarray(np.random.default_rng(1).random((40, 2)))
+        x = jnp.asarray(np.random.default_rng(1).random((128, 2)))
         vkoga.analyze(
             PROBLEM.with_sampler(drifting),
             x,
             x[:, 0],
             gamma=2.0,
             ridge=1e-6,
-            max_centers=10,
+            max_centers=32,
             n_outer=8,
             n_inner=4,
             n_variance=32,
@@ -358,7 +423,7 @@ def test_correlation_override_is_refused_for_a_custom_problem() -> None:
 def test_irregular_channels_inherit_the_custom_sampler() -> None:
     """Each irregular channel integrates the problem's custom distribution."""
     with jax.enable_x64():
-        x = jnp.asarray(np.random.default_rng(4).random((45, 2)))
+        x = jnp.asarray(np.random.default_rng(4).random((128, 2)))
         y = {
             "first": (jnp.array([0.0, 1.0]), jnp.stack((x[:, 0], x[:, 0] + 1), axis=1)),
             "second": (jnp.array([0.0]), x[:, 1:2]),
@@ -369,7 +434,7 @@ def test_irregular_channels_inherit_the_custom_sampler() -> None:
             y,
             gamma=2.0,
             ridge=1e-6,
-            max_centers=10,
+            max_centers=32,
             n_outer=8,
             n_inner=4,
             n_variance=32,
@@ -388,7 +453,7 @@ def test_irregular_channels_inherit_the_custom_sampler() -> None:
 def test_time_multi_output_export_and_receipt(capsys: pytest.CaptureFixture[str]) -> None:
     """Custom dependence stays explicit in the receipt and exported metadata."""
     with jax.enable_x64():
-        x = jnp.asarray(np.random.default_rng(4).random((45, 2)))
+        x = jnp.asarray(np.random.default_rng(4).random((128, 2)))
         outputs = jnp.stack((x[:, 0], x[:, 1]), axis=1)
         y = jnp.stack((outputs, 2 * outputs), axis=1)
         result = vkoga.analyze(
@@ -397,7 +462,7 @@ def test_time_multi_output_export_and_receipt(capsys: pytest.CaptureFixture[str]
             y,
             gamma=2.0,
             ridge=1e-6,
-            max_centers=10,
+            max_centers=32,
             n_outer=8,
             n_inner=4,
             n_variance=32,

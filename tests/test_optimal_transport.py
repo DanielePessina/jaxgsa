@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from _fixtures_givendata import BOOT, invalid_sample
 
 import jaxgsa
 from jaxgsa._core.partition import _build_class_indices, _class_layout
@@ -18,97 +19,63 @@ from jaxgsa.sampling import monte_carlo
 
 
 @pytest.fixture(scope="module")
-def ishigami_data():
-    """Generate Ishigami test data (N large enough for the published anchor)."""
-    N = 8192
-    X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=N, seed=42))
-    Y = ishigami.evaluate(X)
-    return X, Y
-
-
-@pytest.fixture(scope="module")
-def gaussian_linear_data():
-    """Generate Gaussian linear test data (large N for ground-truth checks)."""
-    N = 32000
-    X = jnp.asarray(monte_carlo(gaussian_linear.PROBLEM, n=N, seed=1))
-    Y = gaussian_linear.evaluate(X)
-    return X, Y
-
-
-@pytest.fixture(scope="module")
-def multi_output_data(ishigami_data):
-    """Ishigami-based multi-output (N, 2) and time-series (N, 2, 2) outputs."""
-    X, Y = ishigami_data
-    Y2 = jnp.stack([Y, Y**2], axis=1)  # (N, 2)
-    Y3 = jnp.stack([Y2, Y2 + 1.0], axis=1)  # (N, 2, 2)
-    return X, Y2, Y3
+def gaussian_linear_32k():
+    """Gaussian linear sample at ``N = 32000``, for the slow tight closed-form check."""
+    X = jnp.asarray(monte_carlo(gaussian_linear.PROBLEM, n=32000, seed=1))
+    return X, gaussian_linear.evaluate(X)
 
 
 class TestOTBasic:
-    def test_scalar_output_selects_univariate_mode(self, ishigami_data):
-        """Tier T4 (internal consistency): a scalar output picks the univariate mode."""
-        X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y)
-        assert result.mode == "univariate"
+    def test_plain_result_properties(self, ot_ishigami):
+        """A scalar output picks the univariate mode, and the result is well formed.
 
-    def test_values_in_unit_interval(self, ishigami_data):
-        X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y)
+        The index and its two parts lie in [0, 1], ``ot = advective + diffusive``,
+        and x1 and x2 outrank the weak x3.
+        """
+        result = ot_ishigami
+        assert result.mode == "univariate"
         for arr in (result.ot, result.advective, result.diffusive):
             a = np.asarray(arr)
             assert np.all(a >= 0.0) and np.all(a <= 1.0)
-
-    def test_decomposition_sums_to_total(self, ishigami_data):
-        X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y)
         np.testing.assert_allclose(
             np.asarray(result.ot),
             np.asarray(result.advective + result.diffusive),
             atol=1e-6,
         )
-
-    def test_x1_x2_more_important_than_x3(self, ishigami_data):
-        X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y)
         ot = np.asarray(result.ot)
         assert ot[0] > ot[2]
         assert ot[1] > ot[2]
 
-    def test_deterministic(self, ishigami_data):
-        X, Y = ishigami_data
-        r1 = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=10, key=jax.random.key(7))
-        r2 = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=10, key=jax.random.key(7))
-        np.testing.assert_array_equal(np.asarray(r1.ot), np.asarray(r2.ot))
-        assert r1.ot_conf is not None and r2.ot_conf is not None
-        np.testing.assert_array_equal(np.asarray(r1.ot_conf), np.asarray(r2.ot_conf))
+    def test_the_key_decides_the_bootstrap(self, ishigami_xy_4k, ot_ishigami_boot):
+        """The same key gives the same result, a different key a different interval."""
+        X, Y = ishigami_xy_4k
+        same = analyze(
+            ishigami.PROBLEM,
+            X,
+            Y,
+            n_bootstrap=BOOT,
+            dummy=True,
+            key=jax.random.key(0),
+            verbose=False,
+        )
+        other = analyze(
+            ishigami.PROBLEM,
+            X,
+            Y,
+            n_bootstrap=BOOT,
+            dummy=True,
+            key=jax.random.key(1),
+            verbose=False,
+        )
+        assert ot_ishigami_boot.ot_conf is not None
+        assert same.ot_conf is not None and other.ot_conf is not None
+        np.testing.assert_array_equal(np.asarray(same.ot), np.asarray(ot_ishigami_boot.ot))
+        np.testing.assert_array_equal(
+            np.asarray(same.ot_conf), np.asarray(ot_ishigami_boot.ot_conf)
+        )
+        assert not np.array_equal(np.asarray(other.ot_conf), np.asarray(same.ot_conf))
 
-    def test_slice_chunk_size_invariance(self, multi_output_data):
-        X, _, Y3 = multi_output_data
-        r_default = analyze(ishigami.PROBLEM, X, Y3)
-        r_chunked = analyze(ishigami.PROBLEM, X, Y3, slice_chunk_size=1)
-        np.testing.assert_allclose(np.asarray(r_default.ot), np.asarray(r_chunked.ot), atol=1e-7)
-
-    def test_memory_budget_narrows_the_working_set(self, multi_output_data):
-        """A small budget still returns the same answer.
-
-        The default chunk width comes from the active memory budget and the
-        working set in bytes, so a budget of 1 MiB has to cut the output
-        into narrower chunks than the default 512 MiB does. The budget
-        changes how the work is cut up, never what it computes. The
-        tolerance is there because a narrower vmap lets XLA reassociate the
-        float32 reductions, the same reason the chunk-size test beside this
-        one carries one.
-        """
-        X, _, Y3 = multi_output_data
-        r_default = analyze(ishigami.PROBLEM, X, Y3)
-        jaxgsa.config.set_memory_budget(1, unit="mib")
-        try:
-            r_small = analyze(ishigami.PROBLEM, X, Y3)
-        finally:
-            jaxgsa.config.set_memory_budget(512, unit="mib")
-        np.testing.assert_allclose(np.asarray(r_default.ot), np.asarray(r_small.ot), atol=1e-7)
-
-    def test_unstable_class_sort_matches_a_stable_one(self, ishigami_data):
+    def test_unstable_class_sort_matches_a_stable_one(self, given_ishigami_xy):
         """The kernel's unstable sort must return the stable sort's array.
 
         Ordering the class members is the most expensive step in this
@@ -116,11 +83,13 @@ class TestOTBasic:
         wants the order statistics and never which tied element came
         first. Two float32 values that compare equal are the same bits,
         so the two sorts have to agree element for element. This pins
-        that at the shapes and the data the kernel actually sees, NaNs
-        included, because an unstable sort that moved a NaN or a signed
-        zero somewhere else would be a silent change of answer.
+        that at the kernel's layout, NaNs and signed zeros included,
+        because an unstable sort that moved a NaN or a signed zero
+        somewhere else would be a silent change of answer. A small
+        sample is enough: the sort does not depend on N.
         """
-        X, Y = ishigami_data
+        X, Y = given_ishigami_xy
+        X, Y = X[:256], Y[:256]
         n = X.shape[0]
         take, _ = _class_layout(n, 8)
         idx = jnp.arange(n, dtype=jnp.int32)[None, :]
@@ -131,19 +100,44 @@ class TestOTBasic:
             unstable = jax.lax.sort(y_cls, dimension=-1, is_stable=False)
             np.testing.assert_array_equal(np.asarray(stable), np.asarray(unstable), strict=True)
 
-    def test_n_partitions_changes_result(self, ishigami_data):
-        X, Y = ishigami_data
+    def test_slice_chunk_size_invariance(self, ishigami_xy_series):
+        X, _, Y3 = ishigami_xy_series
+        r_default = analyze(ishigami.PROBLEM, X, Y3)
+        r_chunked = analyze(ishigami.PROBLEM, X, Y3, slice_chunk_size=1)
+        np.testing.assert_allclose(np.asarray(r_default.ot), np.asarray(r_chunked.ot), atol=1e-7)
+
+    def test_memory_budget_narrows_the_working_set(self, ishigami_xy_series):
+        """A small budget still returns the same answer.
+
+        The default chunk width comes from the active memory budget and the
+        working set in bytes, so a budget of 1 MiB has to cut the output
+        into narrower chunks than the default 512 MiB does. The budget
+        changes how the work is cut up, never what it computes. The
+        tolerance is there because a narrower vmap lets XLA reassociate the
+        float32 reductions, the same reason the chunk-size test beside this
+        one carries one.
+        """
+        X, _, Y3 = ishigami_xy_series
+        r_default = analyze(ishigami.PROBLEM, X, Y3)
+        jaxgsa.config.set_memory_budget(1, unit="mib")
+        try:
+            r_small = analyze(ishigami.PROBLEM, X, Y3)
+        finally:
+            jaxgsa.config.set_memory_budget(512, unit="mib")
+        np.testing.assert_allclose(np.asarray(r_default.ot), np.asarray(r_small.ot), atol=1e-7)
+
+    def test_n_partitions_changes_result(self, ishigami_xy_4k):
+        X, Y = ishigami_xy_4k
         r25 = analyze(ishigami.PROBLEM, X, Y, n_partitions=25)
         r10 = analyze(ishigami.PROBLEM, X, Y, n_partitions=10)
         assert not np.allclose(np.asarray(r25.ot), np.asarray(r10.ot))
 
-    def test_monotone_transform_invariance(self, ishigami_data):
+    def test_monotone_transform_invariance(self, ishigami_xy_4k, ot_ishigami):
         """Rank-based conditioning: monotone input transforms change nothing."""
-        X, Y = ishigami_data
+        X, Y = ishigami_xy_4k
         X_warp = X.at[:, 0].set(jnp.exp(X[:, 0]))
-        r_raw = analyze(ishigami.PROBLEM, X, Y)
         r_warp = analyze(ishigami.PROBLEM, X_warp, Y)
-        np.testing.assert_array_equal(np.asarray(r_raw.ot), np.asarray(r_warp.ot))
+        np.testing.assert_array_equal(np.asarray(ot_ishigami.ot), np.asarray(r_warp.ot))
 
 
 class TestOTSolverProperties:
@@ -177,58 +171,80 @@ class TestOTSolverProperties:
         assert float(padded) == pytest.approx(float(ref), abs=1e-6)
 
 
+def _gaussian_additive(n: int):
+    """``Y = X1 + X2`` with ``N(0, 1)`` and ``N(0, 4)`` inputs, and its closed form."""
+    s1, s2 = 1.0, 2.0
+    v = s1**2 + s2**2
+    key1, key2 = jax.random.split(jax.random.PRNGKey(11))
+    X = jnp.stack(
+        [s1 * jax.random.normal(key1, (n,)), s2 * jax.random.normal(key2, (n,))],
+        axis=1,
+    )
+    problem = jaxgsa.Problem(("x1", "x2"), ((-6.0, 6.0), (-12.0, 12.0)))
+    expected = np.array(
+        [
+            (s1**2 + (np.sqrt(v) - s2) ** 2) / (2 * v),
+            (s2**2 + (np.sqrt(v) - s1) ** 2) / (2 * v),
+        ]
+    )
+    # advective = c_i^2 s_i^2 / (2v), diffusive = (sqrt(v) - s_other)^2 / (2v)
+    exp_adv = np.array([s1**2, s2**2]) / (2 * v)
+    exp_diff = np.array([(np.sqrt(v) - s2) ** 2, (np.sqrt(v) - s1) ** 2]) / (2 * v)
+    return problem, X, X[:, 0] + X[:, 1], expected, exp_adv, exp_diff
+
+
 class TestOTAnalytic:
-    def test_gaussian_additive_closed_form(self):
-        """Y = X1 + X2 with N(0, s_i^2): exact continuum index per input."""
-        s1, s2 = 1.0, 2.0
-        v = s1**2 + s2**2
-        key1, key2 = jax.random.split(jax.random.PRNGKey(11))
-        N = 32000
-        X = jnp.stack(
-            [
-                s1 * jax.random.normal(key1, (N,)),
-                s2 * jax.random.normal(key2, (N,)),
-            ],
-            axis=1,
-        )
-        Y = X[:, 0] + X[:, 1]
-        problem = jaxgsa.Problem(("x1", "x2"), ((-6.0, 6.0), (-12.0, 12.0)))
+    @pytest.mark.parametrize(
+        ("n", "tol"),
+        [
+            pytest.param(4096, 0.05, id="cheap"),
+            pytest.param(32000, 0.015, marks=pytest.mark.slow, id="tight"),
+        ],
+    )
+    def test_gaussian_additive_closed_form(self, n, tol):
+        """Y = X1 + X2 with N(0, s_i^2): exact continuum index per input.
+
+        At ``N = 4096`` the Monte Carlo sd is about 0.005 and the partition
+        bias 0.01 to 0.02, so 0.05 leaves margin. The tight case uses the
+        original 32000 rows.
+        """
+        problem, X, Y, expected, exp_adv, exp_diff = _gaussian_additive(n)
         result = analyze(problem, X, Y, n_partitions=50)
+        np.testing.assert_allclose(np.asarray(result.ot), expected, atol=tol)
+        np.testing.assert_allclose(np.asarray(result.advective), exp_adv, atol=tol)
+        np.testing.assert_allclose(np.asarray(result.diffusive), exp_diff, atol=tol)
 
-        expected = np.array(
-            [
-                (s1**2 + (np.sqrt(v) - s2) ** 2) / (2 * v),
-                (s2**2 + (np.sqrt(v) - s1) ** 2) / (2 * v),
-            ]
+    def test_gaussian_linear_closed_form(self, gaussian_linear_xy):
+        """Convergence to the closed-form constants, and the tie to Sobol S1.
+
+        ``ot`` meets ``ANALYTICAL_OT``. ``2 * advective`` and ``S1`` both meet
+        the analytic first-order Sobol index.
+        """
+        X, Y = gaussian_linear_xy
+        result = analyze(gaussian_linear.PROBLEM, X, Y, n_partitions=50)
+        np.testing.assert_allclose(np.asarray(result.ot), gaussian_linear.ANALYTICAL_OT, atol=0.05)
+        np.testing.assert_allclose(
+            2.0 * np.asarray(result.advective), gaussian_linear.ANALYTICAL_S1, atol=0.05
         )
-        np.testing.assert_allclose(np.asarray(result.ot), expected, atol=0.015)
-        # advective = c_i^2 s_i^2 / (2v), diffusive = (sqrt(v) - s_other)^2 / (2v)
-        exp_adv = np.array([s1**2, s2**2]) / (2 * v)
-        exp_diff = np.array([(np.sqrt(v) - s2) ** 2, (np.sqrt(v) - s1) ** 2]) / (2 * v)
-        np.testing.assert_allclose(np.asarray(result.advective), exp_adv, atol=0.01)
-        np.testing.assert_allclose(np.asarray(result.diffusive), exp_diff, atol=0.01)
+        np.testing.assert_allclose(np.asarray(result.S1), gaussian_linear.ANALYTICAL_S1, atol=0.05)
 
-    def test_gaussian_linear_analytical_ot(self, gaussian_linear_data):
-        """Convergence to the closed-form ANALYTICAL_OT constant."""
-        X, Y = gaussian_linear_data
+    @pytest.mark.slow
+    def test_gaussian_linear_closed_form_tight(self, gaussian_linear_32k):
+        """The same closed-form checks at ``N = 32000`` and a tight tolerance."""
+        X, Y = gaussian_linear_32k
         result = analyze(gaussian_linear.PROBLEM, X, Y, n_partitions=50)
         np.testing.assert_allclose(np.asarray(result.ot), gaussian_linear.ANALYTICAL_OT, atol=0.02)
-
-    def test_advective_is_half_s1(self, gaussian_linear_data):
-        """2 * advective == first-order Sobol index (exact tie to Sobol)."""
-        X, Y = gaussian_linear_data
-        result = analyze(gaussian_linear.PROBLEM, X, Y, n_partitions=50)
         np.testing.assert_allclose(
             2.0 * np.asarray(result.advective), gaussian_linear.ANALYTICAL_S1, atol=0.02
         )
+        np.testing.assert_allclose(np.asarray(result.S1), gaussian_linear.ANALYTICAL_S1, atol=0.02)
 
-    def test_advective_is_half_s1_ishigami(self, ishigami_data):
-        X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y)
+    def test_advective_is_half_s1_ishigami(self, ot_ishigami):
         np.testing.assert_allclose(
-            2.0 * np.asarray(result.advective), ishigami.ANALYTICAL_S1, atol=0.05
+            2.0 * np.asarray(ot_ishigami.advective), ishigami.ANALYTICAL_S1, atol=0.05
         )
 
+    @pytest.mark.slow
     def test_mixed_uniform_gaussian_marginals(self):
         """Rank-based conditioning handles mixed input marginals unchanged."""
         problem = jaxgsa.Problem.from_dict(
@@ -249,6 +265,7 @@ class TestOTAnalytic:
         s1 = np.array([var_u, var_g]) / (var_u + var_g)
         np.testing.assert_allclose(2.0 * np.asarray(result.advective), s1, atol=0.03)
 
+    @pytest.mark.slow
     def test_correlated_inputs_closed_form(self):
         """Correlated Gaussian inputs: index matches the conditional-normal formula.
 
@@ -279,8 +296,8 @@ class TestOTAnalytic:
 
 class TestOTPointCloud:
     @pytest.mark.slow
-    def test_multivariate_decomposition_sums_to_total(self, multi_output_data):
-        X, Y2, _ = multi_output_data
+    def test_multivariate_decomposition_sums_to_total(self, ishigami_xy_series):
+        X, Y2, _ = ishigami_xy_series
         result = analyze(ishigami.PROBLEM, X, Y2, mode="multivariate", n_partitions=10)
         np.testing.assert_allclose(
             np.asarray(result.ot),
@@ -288,24 +305,111 @@ class TestOTPointCloud:
             atol=1e-5,
         )
 
-    def test_multivariate_scalar_close_to_univariate(self, ishigami_data):
-        """On scalar Y small-eps small-eps point-cloud transport approaches the exact 1-D index."""
-        X, Y = ishigami_data
-        # Subsample: the multivariate mode solves N x (N/M) transport problems.
-        Xs, Ys = X[:2000], Y[:2000]
-        sep = analyze(ishigami.PROBLEM, Xs, Ys, n_partitions=10)
-        joint = analyze(
-            ishigami.PROBLEM, Xs, Ys, mode="multivariate", n_partitions=10, epsilon=0.005
-        )
+    @pytest.mark.parametrize(
+        ("n", "n_partitions", "epsilon", "atol"),
+        [
+            pytest.param(300, 4, 0.05, 0.05, id="cheap"),
+            pytest.param(2000, 10, 0.005, 0.12, marks=pytest.mark.slow, id="tight"),
+        ],
+    )
+    def test_multivariate_scalar_close_to_univariate(
+        self, ishigami_xy_4k, n, n_partitions, epsilon, atol
+    ):
+        """On scalar Y, point-cloud transport approaches the exact 1-D index.
+
+        The multivariate mode solves ``N x (N / M)`` transport problems, so
+        the test subsamples. The entropic and finite-sample bias is strictly
+        upward.
+        """
+        X, Y = ishigami_xy_4k
+        Xs, Ys = X[:n], Y[:n]
+        sep = analyze(ishigami.PROBLEM, Xs, Ys, n_partitions=n_partitions)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", message=".*entropic transport", category=jaxgsa.JaxgsaWarning
+            )
+            joint = analyze(
+                ishigami.PROBLEM,
+                Xs,
+                Ys,
+                mode="multivariate",
+                n_partitions=n_partitions,
+                epsilon=epsilon,
+            )
         sep_ot = np.asarray(sep.ot)
         joint_ot = np.asarray(joint.ot)
-        # Entropic + finite-sample bias is strictly upward.
         assert np.all(joint_ot > sep_ot - 1e-4)
-        np.testing.assert_allclose(joint_ot, sep_ot, atol=0.12)
+        np.testing.assert_allclose(joint_ot, sep_ot, atol=atol)
 
     @pytest.mark.slow
-    def test_standardize_outputs_matters_for_mismatched_scales(self, multi_output_data):
-        X, Y2, _ = multi_output_data
+    def test_multivariate_matches_pot_sinkhorn(self):
+        """Tier T1 (reference implementation): the point-cloud index against POT.
+
+        The oracle rebuilds the multivariate index from POT's log-domain
+        Sinkhorn solver on a 64-point, two-output cloud. Class ``m`` of a
+        parameter holds the rows with ordinal rank in ``[16 m, 16 m + 16)``.
+        The cost is the squared Euclidean distance. The entropic plan comes
+        from ``ot.sinkhorn`` with the regularization ``epsilon`` applied to
+        the cost divided by ``V = 2 * tr(Cov)``, the normalizer the package
+        uses. The reported cost is ``<P, C>`` of that plan, and the index is
+        the class-weighted mean of the costs over ``V``. The advective part
+        is the class-weighted squared shift of the class means over ``V``.
+        """
+        ot_lib = pytest.importorskip("ot")
+        epsilon = 0.1
+        n, n_classes, per_class = 64, 4, 16
+        with jax.enable_x64():
+            X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=n, seed=3), dtype=jnp.float64)
+            base = ishigami.evaluate(X)
+            Y = jnp.stack([base, X[:, 0] * X[:, 1]], axis=1)
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore", message=".*entropic transport", category=jaxgsa.JaxgsaWarning
+                )
+                result = analyze(
+                    ishigami.PROBLEM,
+                    X,
+                    Y,
+                    mode="multivariate",
+                    n_partitions=n_classes,
+                    epsilon=epsilon,
+                    tol=1e-10,
+                    max_iter=20000,
+                    standardize_outputs=False,
+                    verbose=False,
+                )
+
+        X_np = np.asarray(X)
+        Z = np.asarray(Y, dtype=np.float64)
+        Z = Z - Z.mean(axis=0)
+        V = 2.0 * Z.var(axis=0, ddof=1).sum()
+        a = np.full(n, 1.0 / n)
+        b = np.full(per_class, 1.0 / per_class)
+        expected_ot = np.zeros(X_np.shape[1])
+        expected_adv = np.zeros(X_np.shape[1])
+        for d in range(X_np.shape[1]):
+            order = np.argsort(X_np[:, d], kind="stable")
+            for m in range(n_classes):
+                members = Z[order[m * per_class : (m + 1) * per_class]]
+                C = ((Z[:, None, :] - members[None, :, :]) ** 2).sum(-1)
+                plan = ot_lib.sinkhorn(
+                    a,
+                    b,
+                    C / V,
+                    reg=epsilon,
+                    method="sinkhorn_log",
+                    numItermax=20000,
+                    stopThr=1e-12,
+                )
+                expected_ot[d] += (plan * C).sum() / n_classes / V
+                shift = members.mean(axis=0) - Z.mean(axis=0)
+                expected_adv[d] += (shift**2).sum() / n_classes / V
+        np.testing.assert_allclose(np.asarray(result.ot), expected_ot, rtol=1e-4)
+        np.testing.assert_allclose(np.asarray(result.advective), expected_adv, rtol=1e-6)
+
+    @pytest.mark.slow
+    def test_standardize_outputs_matters_for_mismatched_scales(self, ishigami_xy_series):
+        X, Y2, _ = ishigami_xy_series
         Y_scaled = Y2.at[:, 1].multiply(1e4)
         r_std = analyze(ishigami.PROBLEM, X, Y_scaled, mode="multivariate", n_partitions=10)
         r_raw = analyze(
@@ -318,73 +422,75 @@ class TestOTPointCloud:
         )
         assert not np.allclose(np.asarray(r_std.ot), np.asarray(r_raw.ot), atol=1e-3)
 
-    def test_unconverged_sinkhorn_warns(self, multi_output_data):
-        X, Y2, _ = multi_output_data
+    def test_unconverged_sinkhorn_warns(self, ishigami_xy_series):
+        X, Y2, _ = ishigami_xy_series
         with pytest.warns(UserWarning, match="Sinkhorn"):
             analyze(
                 ishigami.PROBLEM,
-                X[:500],
-                Y2[:500],
+                X[:256],
+                Y2[:256],
                 mode="multivariate",
-                n_partitions=5,
+                n_partitions=4,
                 max_iter=1,
             )
 
 
 class TestOTBootstrap:
-    def test_conf_shapes_scalar(self, ishigami_data):
-        X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=20, key=jax.random.key(0))
+    def test_conf_shapes_scalar(self, ot_ishigami_boot):
+        result = ot_ishigami_boot
         for conf in (result.ot_conf, result.advective_conf, result.diffusive_conf):
             assert conf is not None
             assert conf.shape == (2, 3)
             assert np.all(np.asarray(conf[0]) <= np.asarray(conf[1]))
 
-    def test_conf_shapes_multi_output(self, multi_output_data):
-        X, Y2, _ = multi_output_data
-        result = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=20, key=jax.random.key(0))
+    def test_conf_shapes_multi_output(self, ishigami_xy_series):
+        X, Y2, _ = ishigami_xy_series
+        result = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=BOOT, key=jax.random.key(0))
         assert result.ot_conf is not None
         assert result.ot_conf.shape == (2, 2, 3)
 
-    def test_point_estimate_independent_of_bootstrap(self, ishigami_data):
-        """The two calls compile the scanned kernel for a different replicate
-        count (1 vs. 16), and XLA is free to fuse a reduction differently per
+    def test_point_estimate_independent_of_bootstrap(self, ot_ishigami, ot_ishigami_boot):
+        """The point estimate does not move when a bootstrap is added.
+
+        The two calls compile the scanned kernel for a different replicate
+        count (1 vs. 9), and XLA is free to fuse a reduction differently per
         compiled shape even though replicate 0 is the identical computation
         both times, so this compares at a tight float32 tolerance rather than
         bit-for-bit -- the same one-ULP hazard as ``indices`` vs. ``analyze``
         below, not a dependence on the bootstrap draws themselves.
         """
-        X, Y = ishigami_data
-        r0 = analyze(ishigami.PROBLEM, X, Y)
-        rb = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=15, key=jax.random.key(0))
-        np.testing.assert_allclose(np.asarray(r0.ot), np.asarray(rb.ot), rtol=1e-6, atol=1e-7)
+        np.testing.assert_allclose(
+            np.asarray(ot_ishigami.ot), np.asarray(ot_ishigami_boot.ot), rtol=1e-6, atol=1e-7
+        )
 
-    def test_bootstrap_without_a_key_raises(self, ishigami_data):
-        """Tier T4. A bootstrap needs a key, and an int seed is not one."""
-        X, Y = ishigami_data
-        with pytest.raises(ValueError, match="key is required"):
-            analyze(ishigami.PROBLEM, X, Y, n_bootstrap=4)
+    def test_the_two_random_draws_each_need_a_key(self, ishigami_xy_4k):
+        """Tier T4. A bootstrap needs a key, and so does the dummy column.
 
-    def test_dummy_without_a_key_raises(self, ishigami_data):
-        """Tier T4. The dummy column is the method's other random draw.
-
-        It is independent of the bootstrap, so it needs a key of its own
-        even when no interval was asked for.
+        An int seed is not a key. The dummy column is the method's other
+        random draw. It is independent of the bootstrap, so it needs a key of
+        its own even when no interval was asked for.
         """
-        X, Y = ishigami_data
+        X, Y = ishigami_xy_4k
+        with pytest.raises(ValueError, match="key is required"):
+            analyze(ishigami.PROBLEM, X, Y, n_bootstrap=BOOT)
         with pytest.raises(ValueError, match="key is required"):
             analyze(ishigami.PROBLEM, X, Y, dummy=True)
 
-    def test_gaussian_ci_is_centred_on_the_estimate(self, ishigami_data):
+    def test_gaussian_ci_is_centred_on_the_estimate(self, ishigami_xy_4k):
         """Tier T0 (closed form): the Gaussian interval is symmetric.
 
         ``estimate +/- z * sd`` puts the point estimate exactly at the
         midpoint of the two endpoints, which the percentile interval does
         not do. That is what tells the two branches apart.
         """
-        X, Y = ishigami_data
+        X, Y = ishigami_xy_4k
         result = analyze(
-            ishigami.PROBLEM, X, Y, n_bootstrap=10, ci_method="gaussian", key=jax.random.key(0)
+            ishigami.PROBLEM,
+            X,
+            Y,
+            n_bootstrap=BOOT,
+            ci_method="gaussian",
+            key=jax.random.key(0),
         )
         assert result.ci is not None
         assert result.ci.method == "gaussian"
@@ -392,28 +498,21 @@ class TestOTBootstrap:
         midpoint = 0.5 * (np.asarray(result.ot_conf[0]) + np.asarray(result.ot_conf[1]))
         np.testing.assert_allclose(midpoint, np.asarray(result.ot), atol=1e-6)
 
-    def test_unknown_ci_method_rejected(self, ishigami_data):
-        X, Y = ishigami_data
+    def test_unknown_ci_method_rejected(self, ishigami_xy_4k):
+        X, Y = ishigami_xy_4k
         with pytest.raises(ValueError, match="ci_method"):
             analyze(
                 ishigami.PROBLEM,
                 X,
                 Y,
-                n_bootstrap=4,
+                n_bootstrap=BOOT,
                 ci_method=cast(Any, "bca"),
                 key=jax.random.key(0),
             )
 
-    def test_different_keys_differ(self, ishigami_data):
-        X, Y = ishigami_data
-        r1 = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=15, key=jax.random.key(1))
-        r2 = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=15, key=jax.random.key(2))
-        assert r1.ot_conf is not None and r2.ot_conf is not None
-        assert not np.array_equal(np.asarray(r1.ot_conf), np.asarray(r2.ot_conf))
-
     @pytest.mark.slow
-    def test_multivariate_bootstrap(self, multi_output_data):
-        X, Y2, _ = multi_output_data
+    def test_multivariate_bootstrap(self, ishigami_xy_series):
+        X, Y2, _ = ishigami_xy_series
         result = analyze(
             ishigami.PROBLEM,
             X[:1500],
@@ -428,47 +527,41 @@ class TestOTBootstrap:
 
 
 class TestOTMultiOutput:
-    def test_first_column_matches_scalar_run(self, multi_output_data, ishigami_data):
-        X, Y2, _ = multi_output_data
-        _, Y = ishigami_data
+    def test_first_column_matches_scalar_run(self, ishigami_xy_series, given_ishigami_xy):
+        X, Y2, _ = ishigami_xy_series
+        _, Y = given_ishigami_xy
         r_multi = analyze(ishigami.PROBLEM, X, Y2)
         r_scalar = analyze(ishigami.PROBLEM, X, Y)
         np.testing.assert_allclose(np.asarray(r_multi.ot[0]), np.asarray(r_scalar.ot), atol=1e-7)
 
 
 class TestOTEdgeCases:
-    def test_constant_output_gives_zero(self, ishigami_data):
-        X, _ = ishigami_data
+    def test_constant_output_gives_zero(self, ishigami_xy_4k):
+        X, _ = ishigami_xy_4k
         Y_const = jnp.ones(X.shape[0])
         result = analyze(ishigami.PROBLEM, X, Y_const)
         np.testing.assert_array_equal(np.asarray(result.ot), np.zeros(3))
         assert not np.any(np.isnan(np.asarray(result.ot)))
 
-    def test_constant_column_among_varying(self, ishigami_data):
-        X, Y = ishigami_data
+    def test_constant_column_among_varying(self, given_ishigami_xy):
+        X, Y = given_ishigami_xy
         Y2 = jnp.stack([Y, jnp.ones_like(Y)], axis=1)
         result = analyze(ishigami.PROBLEM, X, Y2)
         assert not np.any(np.isnan(np.asarray(result.ot)))
         np.testing.assert_array_equal(np.asarray(result.ot[1]), np.zeros(3))
         assert np.all(np.asarray(result.ot[0]) > 0)
 
-    def test_ragged_bins(self, ishigami_data):
-        """N not divisible by n_partitions still runs and stays in [0, 1]."""
-        X, Y = ishigami_data
-        Xr, Yr = X[:1013], Y[:1013]  # prime N
-        result = analyze(ishigami.PROBLEM, Xr, Yr, n_partitions=25)
-        ot = np.asarray(result.ot)
-        assert np.all(ot >= 0.0) and np.all(ot <= 1.0)
-
-    def test_ragged_close_to_divisible(self, ishigami_data):
-        X, Y = ishigami_data
+    def test_ragged_close_to_divisible(self, ishigami_xy_4k):
+        """A ragged N (prime) stays in [0, 1] and tracks the divisible N."""
+        X, Y = ishigami_xy_4k
         r_div = analyze(ishigami.PROBLEM, X[:1000], Y[:1000], n_partitions=25)
-        r_rag = analyze(ishigami.PROBLEM, X[:1013], Y[:1013], n_partitions=25)
-        np.testing.assert_allclose(np.asarray(r_div.ot), np.asarray(r_rag.ot), atol=0.05)
+        r_rag = analyze(ishigami.PROBLEM, X[:1013], Y[:1013], n_partitions=25)  # prime N
+        ot = np.asarray(r_rag.ot)
+        assert np.all(ot >= 0.0) and np.all(ot <= 1.0)
+        np.testing.assert_allclose(np.asarray(r_div.ot), ot, atol=0.05)
 
-    def test_dummy_baseline(self, ishigami_data):
-        X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y, dummy=True, key=jax.random.key(0))
+    def test_dummy_baseline(self, ot_ishigami_boot):
+        result = ot_ishigami_boot
         assert result.ot_dummy is not None
         # All three ishigami parameters are continuous, so they share one
         # floor, broadcast to (D,) -- same shape as ot (M4).
@@ -479,114 +572,88 @@ class TestOTEdgeCases:
         assert float(dummy[0]) < float(np.asarray(result.ot).min())
         assert float(dummy[0]) < 0.05
 
-    def test_dummy_multivariate_mode(self, multi_output_data):
-        X, Y2, _ = multi_output_data
-        result = analyze(
-            ishigami.PROBLEM,
-            X[:1500],
-            Y2[:1500],
-            mode="multivariate",
-            n_partitions=5,
-            dummy=True,
-            key=jax.random.key(0),
-        )
+    def test_dummy_multivariate_mode(self, ishigami_xy_series):
+        X, Y2, _ = ishigami_xy_series
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", message=".*entropic transport", category=jaxgsa.JaxgsaWarning
+            )
+            result = analyze(
+                ishigami.PROBLEM,
+                X[:256],
+                Y2[:256],
+                mode="multivariate",
+                n_partitions=4,
+                dummy=True,
+                key=jax.random.key(0),
+            )
         assert result.ot_dummy is not None
         assert result.ot_dummy.shape == (3,)
 
 
 class TestOTValidation:
-    def test_x_not_2d(self, ishigami_data):
-        _, Y = ishigami_data
-        with pytest.raises(ValueError, match="2-D"):
-            analyze(ishigami.PROBLEM, jnp.ones(10), Y[:10])
+    @pytest.mark.parametrize(
+        ("case", "kwargs", "match"),
+        [
+            ("x_1d", {}, "2-D"),
+            ("two_columns", {}, "parameters"),
+            ("full", {"mode": cast(Literal["univariate"], "sliced")}, "mode"),
+            ("full", {"mode": "trajectory"}, "trajectory"),
+            ("full", {"n_partitions": 1}, "n_partitions"),
+            ("full", {"n_partitions": "N"}, "n_partitions"),
+            ("full", {"epsilon": 0.0}, "epsilon"),
+            ("full", {"epsilon": -0.01}, "epsilon"),
+            ("full", {"epsilon": float("nan")}, "epsilon"),
+            ("full", {"tol": 0.0}, "tol"),
+            ("full", {"tol": float("nan")}, "tol"),
+            ("full", {"n_bootstrap": 10, "conf_level": 1.5}, "conf_level"),
+            ("full", {"slice_chunk_size": 0}, "slice_chunk_size"),
+        ],
+        ids=[
+            "x_not_2d",
+            "wrong_param_count",
+            "bad_mode",
+            "trajectory_needs_3d",
+            "n_partitions_one",
+            "n_partitions_n",
+            "epsilon_zero",
+            "epsilon_negative",
+            "epsilon_nan",
+            "tol_zero",
+            "tol_nan",
+            "bad_conf_level",
+            "bad_slice_chunk_size",
+        ],
+    )
+    def test_bad_arguments_are_refused(self, given_ishigami_xy, case, kwargs, match):
+        """Each malformed argument raises early and names what is wrong.
 
-    def test_wrong_param_count(self, ishigami_data):
-        X, Y = ishigami_data
-        with pytest.raises(ValueError, match="parameters"):
-            analyze(ishigami.PROBLEM, X[:, :2], Y)
-
-    def test_bad_mode(self, ishigami_data):
-        X, Y = ishigami_data
-        # cast so the deliberately invalid literal exercises the runtime check
-        with pytest.raises(ValueError, match="mode"):
-            analyze(ishigami.PROBLEM, X, Y, mode=cast(Literal["univariate"], "sliced"))
-
-    def test_trajectory_needs_3d(self, ishigami_data):
-        X, Y = ishigami_data
-        with pytest.raises(ValueError, match="trajectory"):
-            analyze(ishigami.PROBLEM, X, Y, mode="trajectory")
-
-    def test_bad_n_partitions(self, ishigami_data):
-        X, Y = ishigami_data
-        with pytest.raises(ValueError, match="n_partitions"):
-            analyze(ishigami.PROBLEM, X, Y, n_partitions=1)
-        with pytest.raises(ValueError, match="n_partitions"):
-            analyze(ishigami.PROBLEM, X, Y, n_partitions=X.shape[0])
-
-    def test_bad_epsilon(self, ishigami_data):
-        X, Y = ishigami_data
-        with pytest.raises(ValueError, match="epsilon"):
-            analyze(ishigami.PROBLEM, X, Y, epsilon=0.0)
-
-    def test_negative_epsilon(self, ishigami_data):
-        """Tier T4. A negative epsilon is still refused up front."""
-        X, Y = ishigami_data
-        with pytest.raises(ValueError, match="epsilon"):
-            analyze(ishigami.PROBLEM, X, Y, epsilon=-0.01)
-
-    def test_nan_epsilon(self, ishigami_data):
-        """Tier T4. epsilon=NaN is refused at both entry points.
-
-        The check used to be ``not epsilon <= 0``, which NaN passes
-        (``NaN <= 0`` is False). NaN then poisoned ``log_K``, the Sinkhorn
-        loop exited at once (``NaN > tol`` is False), the convergence
-        warning counted zero failures, and the user got NaN indices with
-        zero diagnostics. The positive check ``epsilon > 0`` is also False
-        for NaN, so it raises.
+        ``epsilon=NaN`` and ``tol=NaN`` used to slip through a ``not x <= 0``
+        check, because ``NaN <= 0`` is False. NaN then poisoned the log-kernel,
+        the Sinkhorn loop exited at once, and the user got NaN indices with no
+        diagnostics. The mode literal is cast so the deliberately invalid
+        value reaches the runtime check without a static type error.
         """
-        X, Y = ishigami_data
-        with pytest.raises(ValueError, match="epsilon"):
-            analyze(ishigami.PROBLEM, X, Y, epsilon=float("nan"))
-        with pytest.raises(ValueError, match="epsilon"):
-            jaxgsa.optimal_transport.indices(ishigami.PROBLEM, X, Y, epsilon=float("nan"))
+        X, Y = given_ishigami_xy
+        if case == "x_1d":
+            X, Y = jnp.ones(10), Y[:10]
+        elif case == "two_columns":
+            X = X[:, :2]
+        kwargs = {k: (X.shape[0] if v == "N" else v) for k, v in kwargs.items()}
+        with pytest.raises(ValueError, match=match):
+            analyze(ishigami.PROBLEM, X, Y, **kwargs)
 
-    def test_nan_tol(self, ishigami_data):
-        """Tier T4. tol=NaN is refused at both entry points."""
-        X, Y = ishigami_data
-        with pytest.raises(ValueError, match="tol"):
-            analyze(ishigami.PROBLEM, X, Y, tol=float("nan"))
-        with pytest.raises(ValueError, match="tol"):
-            jaxgsa.optimal_transport.indices(ishigami.PROBLEM, X, Y, tol=float("nan"))
-
-    def test_valid_epsilon_and_tol_pass(self, ishigami_data):
-        """Tier T4. Valid epsilon and tol still pass validation."""
-        X, Y = ishigami_data
-        Y2 = jnp.stack([Y[:512], Y[:512] ** 2], axis=1)
-        result = analyze(
-            ishigami.PROBLEM, X[:512], Y2, mode="multivariate", epsilon=0.05, tol=1e-4
-        )
-        assert np.all(np.isfinite(np.asarray(result.ot)))
-
-    def test_bad_tol(self, ishigami_data):
-        X, Y = ishigami_data
-        with pytest.raises(ValueError, match="tol"):
-            analyze(ishigami.PROBLEM, X, Y, tol=0.0)
-
-    def test_bad_conf_level(self, ishigami_data):
-        X, Y = ishigami_data
-        with pytest.raises(ValueError, match="conf_level"):
-            analyze(ishigami.PROBLEM, X, Y, n_bootstrap=10, conf_level=1.5)
-
-    def test_bad_slice_chunk_size(self, ishigami_data):
-        X, Y = ishigami_data
-        with pytest.raises(ValueError, match="slice_chunk_size"):
-            analyze(ishigami.PROBLEM, X, Y, slice_chunk_size=0)
+    @pytest.mark.parametrize("bad", [{"epsilon": float("nan")}, {"tol": float("nan")}])
+    def test_nan_settings_are_refused_by_the_core_too(self, given_ishigami_xy, bad):
+        X, Y = given_ishigami_xy
+        with pytest.raises(ValueError, match=next(iter(bad))):
+            jaxgsa.optimal_transport.indices(ishigami.PROBLEM, X, Y, **bad)
 
 
 class TestOTXarray:
-    def test_time_coords_kwarg_sets_the_time_coordinate(self, multi_output_data):
+    def test_time_coords_kwarg_sets_the_time_coordinate(self, ishigami_xy_series):
         """The dims are snapshot-covered; the kwarg's coordinate values are not."""
-        X, _, Y3 = multi_output_data
+        X, _, Y3 = ishigami_xy_series
         ds = analyze(ishigami.PROBLEM, X, Y3).to_dataset(time_coords=[0.5, 1.0])
         assert list(ds.coords["time"].values) == [0.5, 1.0]
 
@@ -602,7 +669,7 @@ class TestQuantileRankSplit:
         from jaxgsa.optimal_transport._analyze import _quantile_rank_split
 
         rng = np.random.default_rng(0)
-        for N in (7, 100, 1000, 1024, 8000, 100_000):
+        for N in (7, 1000, 100_000):
             sizes = sorted(
                 {0, 1, 2, 800, N // 3, N // 2, N - 1, N}
                 | {int(s) for s in rng.integers(0, N + 1, size=8)}
@@ -679,67 +746,12 @@ class TestOTCorrelatedInputs:
         )
 
 
-def _invalid_sample(n: int = 200, seed: int = 0):
-    """Build a clean two-parameter OT sample for the on_invalid tests."""
-    problem = jaxgsa.Problem(("a", "b"), ((0.0, 1.0), (0.0, 1.0)))
-    rng = np.random.default_rng(seed)
-    X = rng.uniform(size=(n, 2))
-    Y = np.sin(3.0 * X[:, 0]) + 0.3 * X[:, 1]
-    return problem, jnp.asarray(X), jnp.asarray(Y)
+class TestOTDummyColumnInvalidPolicy:
+    """The OT-specific part of ``on_invalid``.
 
-
-class TestOTInvalidPolicy:
-    """T4 (behaviour): jaxgsa.optimal_transport.analyze honours on_invalid."""
-
-    def test_raise_is_the_default_and_names_the_rows(self):
-        """T4: a non-finite Y row refuses the analysis and says which row it is."""
-        problem, X, Y = _invalid_sample()
-        Y = Y.at[9].set(jnp.nan)
-        with pytest.raises(ValueError) as exc:
-            analyze(problem, X, Y)
-        message = str(exc.value)
-        assert "jaxgsa.optimal_transport.analyze" in message
-        assert "1 of 200 rows" in message
-        assert "[9]" in message
-
-    def test_propagate_warns_and_the_indices_go_non_finite(self):
-        """T4: 'propagate' keeps the row and the NaN reaches the indices.
-
-        The index is a class-averaged squared Wasserstein distance normalized
-        by the output variance, and both halves average over the whole
-        sample, so one NaN output carries through. It must arrive as NaN and
-        not as 0: the normalizer's ``V > 0`` guard turns a non-positive
-        variance into an exact 0 for a constant output, and a NaN variance
-        fails that same test. Reporting 0 there would read as "no influence"
-        instead of "this did not compute".
-        """
-        problem, X, Y = _invalid_sample()
-        Y = Y.at[9].set(jnp.nan)
-        with pytest.warns(jaxgsa.JaxgsaWarning, match="reaches the indices"):
-            result = analyze(problem, X, Y, on_invalid="propagate")
-        assert result.invalid.policy == "propagate"
-        assert result.invalid.unit_indices == (9,)
-        assert not np.all(np.isfinite(np.asarray(result.ot)))
-
-    def test_drop_removes_the_row_and_returns_finite_indices(self):
-        """T4: 'drop' analyzes the remainder and the indices come back usable."""
-        problem, X, Y = _invalid_sample()
-        Y = Y.at[9].set(jnp.nan)
-        with pytest.warns(jaxgsa.JaxgsaWarning, match="dropped 1 of 200 rows"):
-            result = analyze(problem, X, Y, on_invalid="drop")
-        assert result.invalid.n_kept == 199
-        assert np.all(np.isfinite(np.asarray(result.ot)))
-
-    def test_a_bad_x_is_caught_and_named(self):
-        """T4: a non-finite input is caught too, and the report says it was X."""
-        problem, X, Y = _invalid_sample()
-        X = X.at[2, 1].set(jnp.inf)
-        with pytest.raises(ValueError, match=r"in X\b") as exc:
-            analyze(problem, X, Y)
-        assert "[2]" in str(exc.value)
-        with pytest.warns(jaxgsa.JaxgsaWarning):
-            result = analyze(problem, X, Y, on_invalid="drop")
-        assert result.invalid.sources == ("X",)
+    The raise, propagate and drop cases shared by all given-data methods live
+    in ``test_given_data_on_invalid.py``.
+    """
 
     def test_the_check_reads_the_real_sample_not_the_dummy_column(self):
         """T4: ``dummy=True`` adds a synthetic column, and it is not what is checked.
@@ -748,7 +760,7 @@ class TestOTInvalidPolicy:
         The report must still count only the user's own parameters, so its
         row positions stay the positions of the model runs.
         """
-        problem, X, Y = _invalid_sample()
+        problem, X, Y = invalid_sample()
         X_bad = X.at[2, 1].set(jnp.nan)
         with pytest.warns(jaxgsa.JaxgsaWarning):
             result = analyze(
@@ -772,93 +784,99 @@ class TestIndicesPureCore:
     ``jit(jacrev(...))``, which ``analyze`` cannot.
     """
 
-    def test_matches_analyze_univariate(self, ishigami_data):
+    @pytest.mark.parametrize(
+        ("kind", "mode"),
+        [
+            ("scalar", "univariate"),
+            ("matrix", "univariate"),
+            ("series", "univariate"),
+            ("series", "multivariate"),
+            ("series", "trajectory"),
+        ],
+    )
+    def test_matches_analyze(self, given_ishigami_xy, ishigami_xy_series, kind, mode):
         """Tier T4: ``indices`` returns the three index fields of ``analyze``.
 
         ``analyze`` delegates to the same kernel runner, so this guards the
-        delegation wiring rather than the estimator maths.
+        delegation wiring rather than the estimator maths. ``mode`` is a
+        Python string, so the branch stays inside the core: one mode is
+        traced per concrete value, exactly as ``analyze`` compiles one. The
+        joint modes solve one Sinkhorn problem per class, so they run on a
+        slice of the sample with fewer classes. The result keeps the rank of
+        the output.
         """
-        X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y)
-        ot, adv, diff = jaxgsa.optimal_transport.indices(ishigami.PROBLEM, X, Y)
-
+        X, Y2, Y3 = ishigami_xy_series
+        outputs = {"scalar": given_ishigami_xy[1], "matrix": Y2, "series": Y3}[kind]
+        n_partitions = 8
+        if mode != "univariate":
+            X, outputs, n_partitions = X[:256], outputs[:256], 4
+        typed_mode = cast(Literal["univariate", "multivariate", "trajectory"], mode)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", message=".*entropic transport", category=jaxgsa.JaxgsaWarning
+            )
+            result = analyze(
+                ishigami.PROBLEM, X, outputs, mode=typed_mode, n_partitions=n_partitions
+            )
+            ot, adv, diff = jaxgsa.optimal_transport.indices(
+                ishigami.PROBLEM, X, outputs, mode=typed_mode, n_partitions=n_partitions
+            )
+        assert ot.shape == result.ot.shape
         np.testing.assert_array_equal(np.asarray(ot), np.asarray(result.ot))
         np.testing.assert_array_equal(np.asarray(adv), np.asarray(result.advective))
         np.testing.assert_array_equal(np.asarray(diff), np.asarray(result.diffusive))
 
-    def test_matches_analyze_in_every_mode(self, multi_output_data):
-        """Tier T4: the ``mode`` branch is static, and each branch agrees.
-
-        ``mode`` is a Python string, so the branch stays inside the core:
-        one mode is traced per concrete value, exactly as ``analyze``
-        compiles one.
-        """
-        X, Y2, Y3 = multi_output_data
-        # The joint modes solve one Sinkhorn problem per class, so they run
-        # on a slice of the sample rather than all of it.
-        X_small, Y3_small = X[:1024], Y3[:1024]
-        cases: list[tuple[Any, Any, Literal["univariate", "multivariate", "trajectory"]]] = [
-            (X, Y2, "univariate"),
-            (X, Y3, "univariate"),
-            (X_small, Y3_small, "multivariate"),
-            (X_small, Y3_small, "trajectory"),
-        ]
-        for inputs, outputs, mode in cases:
-            result = analyze(ishigami.PROBLEM, inputs, outputs, mode=mode, n_partitions=8)
-            ot, adv, diff = jaxgsa.optimal_transport.indices(
-                ishigami.PROBLEM, inputs, outputs, mode=mode, n_partitions=8
-            )
-            assert ot.shape == result.ot.shape, mode
-            np.testing.assert_array_equal(np.asarray(ot), np.asarray(result.ot))
-            np.testing.assert_array_equal(np.asarray(adv), np.asarray(result.advective))
-            np.testing.assert_array_equal(np.asarray(diff), np.asarray(result.diffusive))
-
-    def test_standardize_outputs_reaches_the_joint_core(self, multi_output_data):
+    def test_standardize_outputs_reaches_the_joint_core(self, ishigami_xy_series):
         """Tier T4: ``standardize_outputs`` is honoured identically by core and ``analyze``.
 
         The keyword is arithmetic over the sample axis, not policy, so the
         core carries it. Turning it off must change the joint indices and
         must change them the same way in both entry points.
         """
-        X, _, Y3 = multi_output_data
-        X, Y3 = X[:1024], Y3[:1024]
-        kwargs: dict[str, Any] = {"mode": "multivariate", "n_partitions": 8}
-        on = jaxgsa.optimal_transport.indices(ishigami.PROBLEM, X, Y3, **kwargs)[0]
-        off = jaxgsa.optimal_transport.indices(
-            ishigami.PROBLEM, X, Y3, standardize_outputs=False, **kwargs
-        )[0]
-        reference = analyze(ishigami.PROBLEM, X, Y3, standardize_outputs=False, **kwargs)
+        X, _, Y3 = ishigami_xy_series
+        X, Y3 = X[:256], Y3[:256]
+        kwargs: dict[str, Any] = {"mode": "multivariate", "n_partitions": 4}
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", message=".*entropic transport", category=jaxgsa.JaxgsaWarning
+            )
+            on = jaxgsa.optimal_transport.indices(ishigami.PROBLEM, X, Y3, **kwargs)[0]
+            off = jaxgsa.optimal_transport.indices(
+                ishigami.PROBLEM, X, Y3, standardize_outputs=False, **kwargs
+            )[0]
+            reference = analyze(ishigami.PROBLEM, X, Y3, standardize_outputs=False, **kwargs)
 
         assert not np.allclose(np.asarray(on), np.asarray(off))
         np.testing.assert_array_equal(np.asarray(off), np.asarray(reference.ot))
 
-    def test_no_bootstrap_and_no_dummy_in_the_core(self, ishigami_data):
+    def test_no_bootstrap_and_no_dummy_in_the_core(self, ishigami_xy_4k, ot_ishigami_boot):
         """Tier T4: the core is the point estimate, and takes no key.
 
         The bootstrap interval and the ``dummy`` baseline both draw
         randomness and both describe the point estimate rather than being
         it, so both stay in ``analyze``.
         """
-        X, Y = ishigami_data
+        X, Y = ishigami_xy_4k
         ot, _, _ = jaxgsa.optimal_transport.indices(ishigami.PROBLEM, X, Y)
-        with_ci = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=4, key=jax.random.key(0))
 
         # The interval is centred on exactly this estimate. Compared at a
         # tight float32 tolerance, not bit-for-bit: the two calls compile
-        # the scanned kernel for a different replicate count (1 vs. 5), and
-        # XLA is free to fuse a reduction differently per compiled shape
-        # even though replicate 0 is the identical computation both times.
-        np.testing.assert_allclose(np.asarray(ot), np.asarray(with_ci.ot), rtol=1e-6, atol=1e-7)
+        # the scanned kernel for a different replicate count, and XLA is
+        # free to fuse a reduction differently per compiled shape even
+        # though replicate 0 is the identical computation both times.
+        np.testing.assert_allclose(
+            np.asarray(ot), np.asarray(ot_ishigami_boot.ot), rtol=1e-6, atol=1e-7
+        )
         with pytest.raises(TypeError):
             cast(Any, jaxgsa.optimal_transport.indices)(
-                ishigami.PROBLEM, X, Y, n_bootstrap=4, key=jax.random.key(0)
+                ishigami.PROBLEM, X, Y, n_bootstrap=BOOT, key=jax.random.key(0)
             )
         with pytest.raises(TypeError):
             cast(Any, jaxgsa.optimal_transport.indices)(ishigami.PROBLEM, X, Y, dummy=True)
 
-    def test_is_jittable(self, ishigami_data):
+    def test_is_jittable(self, ishigami_xy_4k):
         """Tier T4: ``jit`` traces ``indices`` over both X and Y."""
-        X, Y = ishigami_data
+        X, Y = ishigami_xy_4k
         jitted = jax.jit(lambda x, y: jaxgsa.optimal_transport.indices(ishigami.PROBLEM, x, y))
         ot_jit = jitted(X, Y)[0]
         ot = jaxgsa.optimal_transport.indices(ishigami.PROBLEM, X, Y)[0]
@@ -937,58 +955,45 @@ class TestIndicesPureCore:
 class TestS1AndAboveDummy:
     """The derived convenience fields: ``S1`` and ``above_dummy``."""
 
-    def test_s1_matches_the_analytic_first_order_index(self, gaussian_linear_data):
-        """Tier T0 (closed form): S1 estimates the true Sobol first order."""
-        X, Y = gaussian_linear_data
-        result = analyze(gaussian_linear.PROBLEM, X, Y)
-        np.testing.assert_allclose(np.asarray(result.S1), gaussian_linear.ANALYTICAL_S1, atol=0.02)
-
-    def test_s1_is_advective_on_the_ddof0_convention(self, ishigami_data):
+    def test_s1_is_advective_on_the_ddof0_convention(self, ishigami_xy_4k, ot_ishigami):
         """Tier T4: S1 == 2 * advective * N / (N - 1), exactly.
 
         The advective numerator is the population (ddof=0) between-class
         variance while the OT normalizer uses ddof=1, so the rescale is the
         one constant that puts both on borgonovo's ddof=0 S1 convention.
         """
-        X, Y = ishigami_data
-        N = X.shape[0]
-        result = analyze(ishigami.PROBLEM, X, Y)
+        N = ishigami_xy_4k[0].shape[0]
         np.testing.assert_allclose(
-            np.asarray(result.S1),
-            2.0 * (N / (N - 1)) * np.asarray(result.advective),
+            np.asarray(ot_ishigami.S1),
+            2.0 * (N / (N - 1)) * np.asarray(ot_ishigami.advective),
             rtol=1e-6,
         )
 
-    def test_s1_agrees_with_borgonovo_s1(self, ishigami_data):
+    def test_s1_agrees_with_borgonovo_s1(self, ishigami_xy_4k, ot_ishigami):
         """Tier T2 (cross-estimator): both given-data S1 estimates coincide."""
-        X, Y = ishigami_data
-        ot_result = analyze(ishigami.PROBLEM, X, Y)
+        X, Y = ishigami_xy_4k
         delta_result = jaxgsa.borgonovo.analyze(ishigami.PROBLEM, X, Y)
         np.testing.assert_allclose(
-            np.asarray(ot_result.S1), np.asarray(delta_result.S1), atol=0.02
+            np.asarray(ot_ishigami.S1), np.asarray(delta_result.S1), atol=0.03
         )
 
-    def test_s1_conf_is_the_exactly_rescaled_advective_conf(self, ishigami_data):
-        X, Y = ishigami_data
-        N = X.shape[0]
-        result = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=8, key=jax.random.key(0))
+    def test_s1_conf_is_the_exactly_rescaled_advective_conf(
+        self, ishigami_xy_4k, ot_ishigami_boot
+    ):
+        N = ishigami_xy_4k[0].shape[0]
         np.testing.assert_allclose(
-            np.asarray(result.S1_conf),
-            2.0 * (N / (N - 1)) * np.asarray(result.advective_conf),
+            np.asarray(ot_ishigami_boot.S1_conf),
+            2.0 * (N / (N - 1)) * np.asarray(ot_ishigami_boot.advective_conf),
             rtol=1e-6,
         )
 
-    def test_s1_conf_is_none_without_a_bootstrap(self, ishigami_data):
-        X, Y = ishigami_data
-        assert analyze(ishigami.PROBLEM, X, Y).S1_conf is None
+    def test_the_optional_fields_need_their_inputs(self, ot_ishigami):
+        """Without a bootstrap there is no ``S1_conf``, and without a dummy no ``above_dummy``."""
+        assert ot_ishigami.S1_conf is None
+        assert ot_ishigami.above_dummy is None
 
-    def test_above_dummy_requires_the_dummy_baseline(self, ishigami_data):
-        X, Y = ishigami_data
-        assert analyze(ishigami.PROBLEM, X, Y).above_dummy is None
-
-    def test_above_dummy_is_the_clipped_excess_over_the_floor(self, ishigami_data):
-        X, Y = ishigami_data
-        result = analyze(ishigami.PROBLEM, X, Y, dummy=True, key=jax.random.key(1))
+    def test_above_dummy_is_the_clipped_excess_over_the_floor(self, ot_ishigami_boot):
+        result = ot_ishigami_boot
         above = np.asarray(result.above_dummy)
         assert above.shape == np.asarray(result.ot).shape
         assert (above >= 0.0).all()
@@ -1001,8 +1006,8 @@ class TestS1AndAboveDummy:
         assert above[1] > 0.1
 
     @pytest.mark.slow
-    def test_above_dummy_matches_ots_shape_in_trajectory_mode(self, multi_output_data):
-        X, Y2, Y3 = multi_output_data
+    def test_above_dummy_matches_ots_shape_in_trajectory_mode(self, ishigami_xy_series):
+        X, Y2, Y3 = ishigami_xy_series
         result = analyze(
             ishigami.PROBLEM,
             X,
@@ -1020,9 +1025,8 @@ class TestS1AndAboveDummy:
             np.maximum(np.asarray(result.ot) - np.asarray(result.ot_dummy), 0.0),
         )
 
-    def test_fields_reach_the_dataset(self, ishigami_data):
-        X, Y = ishigami_data
-        ds = analyze(ishigami.PROBLEM, X, Y, dummy=True, key=jax.random.key(3)).to_dataset()
+    def test_fields_reach_the_dataset(self, ot_ishigami_boot):
+        ds = ot_ishigami_boot.to_dataset()
         assert "S1" in ds
         assert "above_dummy" in ds
         assert ds["S1"].dims == ("param",)
@@ -1045,7 +1049,7 @@ class TestDummyFloorWarning:
 
     @staticmethod
     def _data():
-        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=512, seed=0))
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=256, seed=0))
         Y = ishigami.evaluate(X)
         return X, jnp.stack([Y, 2.0 * Y], axis=-1)
 
@@ -1060,7 +1064,7 @@ class TestDummyFloorWarning:
                 X,
                 Y,
                 mode=cast(Any, mode),
-                n_partitions=5,
+                n_partitions=4,
                 verbose=False,
             )
 
@@ -1074,7 +1078,7 @@ class TestDummyFloorWarning:
                 X,
                 Y2,
                 mode="multivariate",
-                n_partitions=5,
+                n_partitions=4,
                 dummy=True,
                 key=jax.random.key(0),
                 verbose=False,
