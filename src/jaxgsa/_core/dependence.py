@@ -19,6 +19,7 @@ the end with :meth:`Draws.to_physical` (Kucherenko designs) or
 
 from __future__ import annotations
 
+from operator import index as _as_index
 from typing import Protocol
 
 import jax.numpy as jnp
@@ -29,8 +30,11 @@ from scipy.stats import qmc
 
 from jaxgsa._core.copula import (
     _ConditionalPlan,
+    _SubsetPlan,
     assemble_latent,
     build_conditional_plan,
+    build_subset_plan,
+    draw_free_given_fixed,
     draw_rest_given_self,
     draw_self_given_rest,
     independent_correlation,
@@ -50,7 +54,8 @@ class InputSampler(Protocol):
     ``problem.with_sampler(f, dimension=k)``. jaxgsa supplies the uniform
     points and assembles every design. The sampler only maps points to rows.
 
-    jaxgsa makes exactly three kinds of call:
+    jaxgsa may request any sorted subset of fixed columns. The three most
+    common calls are:
 
     * ``fixed_indices=()``: return joint draws. ``conditioning_rows`` is
       ``None``.
@@ -59,10 +64,18 @@ class InputSampler(Protocol):
     * ``fixed_indices`` = every column except ``i``: keep those columns and
       draw ``x_i`` from its conditional given the rest.
 
+    Other subsets follow the same rule: keep the columns in
+    ``fixed_indices`` and draw the remaining columns from their conditional
+    given the kept ones.
+
     The return value must have shape ``(n, D)``, hold finite real values in
     ``problem.names`` order, and copy the fixed columns exactly. The sampler
-    must be deterministic: the same arguments give the same rows. jaxgsa
-    passes copies, so the sampler may modify its arguments.
+    must be deterministic: the same arguments give the same rows. It must be
+    a conditional-quantile map from uniform points to rows, that is, an
+    inverse Rosenblatt transform. Do not use rejection sampling or MCMC.
+    Then the same uniform points under different conditioning give coupled
+    draws, and jaxgsa relies on this. jaxgsa passes copies, so the sampler may
+    modify its arguments.
     """
 
     def __call__(
@@ -169,6 +182,24 @@ def transform_samples(
     return result
 
 
+def check_fixed(fixed: tuple[int, ...], n_params: int) -> tuple[int, ...]:
+    """Return ``fixed`` as a tuple of ints after checking it.
+
+    Raises:
+        ValueError: If ``fixed`` is not sorted, has repeats, or holds an index
+            outside ``range(n_params)``.
+    """
+    try:
+        checked = tuple(_as_index(j) for j in fixed)
+    except TypeError:
+        raise ValueError(f"fixed must hold integer column indices, got {fixed!r}") from None
+    if any(j < 0 or j >= n_params for j in checked):
+        raise ValueError(f"fixed indices must lie in [0, {n_params}), got {checked}")
+    if any(b <= a for a, b in zip(checked, checked[1:])):
+        raise ValueError(f"fixed must be sorted and unique, got {checked}")
+    return checked
+
+
 class Draws(Protocol):
     """Joint and conditional draws of a problem's inputs.
 
@@ -205,6 +236,21 @@ class Draws(Protocol):
 
     def self_given_rest(self, u: np.ndarray, rows: np.ndarray, index: int) -> np.ndarray:
         """Keep every column except ``index`` and redraw it from its conditional."""
+        ...
+
+    def free_given_fixed(
+        self, u: np.ndarray, rows: np.ndarray, fixed: tuple[int, ...]
+    ) -> np.ndarray:
+        """Keep the ``fixed`` columns and redraw the others from their conditional.
+
+        ``fixed`` must be sorted, unique and in range. ``()`` is a joint draw.
+        Every column fixed returns a copy of ``rows``. ``u`` has
+        :meth:`free_dimension` columns.
+        """
+        ...
+
+    def free_dimension(self, fixed: tuple[int, ...]) -> int:
+        """Return the uniform columns that :meth:`free_given_fixed` consumes."""
         ...
 
     def to_physical(self, rows: np.ndarray) -> np.ndarray:
@@ -245,6 +291,8 @@ class GaussianDraws:
         self.dimension = problem.num_vars
         self.rest_dimension = problem.num_vars - 1
         self.self_dimension = 1
+        self._correlation = independent_correlation(problem.num_vars) if R is None else R
+        self._subset_plans: dict[tuple[int, ...], _SubsetPlan] = {}
 
     @staticmethod
     def _normal(u: np.ndarray) -> np.ndarray:
@@ -284,6 +332,52 @@ class GaussianDraws:
         z_rest = rows[:, others]
         z_self = draw_self_given_rest(self.plan, index, z_rest, self._normal(u[:, 0]))
         return assemble_latent(index, others, z_self, z_rest)
+
+    def free_dimension(self, fixed: tuple[int, ...]) -> int:
+        """Return ``D - len(fixed)``, one noise column per free parameter."""
+        return self.dimension - len(check_fixed(fixed, self.dimension))
+
+    def free_given_fixed(
+        self, u: np.ndarray, rows: np.ndarray, fixed: tuple[int, ...]
+    ) -> np.ndarray:
+        """Keep the ``fixed`` latent columns and redraw ``Z_F | Z_K``.
+
+        Plans are cached per subset, so a design that visits many subsets
+        builds each one once. Categorical inputs need no special case: the
+        correlation holds the identity on their rows, as in
+        :meth:`rest_given_self`.
+
+        Args:
+            u: ``(n, D - len(fixed))`` uniform points.
+            rows: ``(n, D)`` latent rows holding the fixed values. Ignored
+                when ``fixed`` is empty.
+            fixed: Sorted, unique column indices to keep.
+
+        Returns:
+            ``(n, D)`` latent rows. Fixed columns are copied exactly.
+
+        Raises:
+            ValueError: If ``fixed`` is invalid or the shapes do not match.
+        """
+        fixed = check_fixed(fixed, self.dimension)
+        self._check_width(u, self.dimension - len(fixed), "free_given_fixed")
+        if not fixed:
+            return self.joint(u)
+        if rows.ndim != 2 or rows.shape != (u.shape[0], self.dimension):
+            raise ValueError(
+                f"GaussianDraws.free_given_fixed needs rows of shape "
+                f"({u.shape[0]}, {self.dimension}), got {rows.shape}"
+            )
+        plan = self._subset_plans.get(fixed)
+        if plan is None:
+            plan = build_subset_plan(self._correlation, fixed)
+            self._subset_plans[fixed] = plan
+        result = np.array(rows, dtype=np.float64, copy=True)
+        if plan.free.shape[0]:
+            result[:, plan.free] = draw_free_given_fixed(
+                plan, rows[:, plan.fixed], self._normal(u)
+            )
+        return result
 
     def to_physical(self, rows: np.ndarray) -> np.ndarray:
         """Map latent rows through the marginal inverse CDFs."""
@@ -340,6 +434,27 @@ class CustomDraws:
         fixed = tuple(j for j in range(self.problem.num_vars) if j != index)
         return transform_samples(
             self.sampler, u, self.problem.num_vars, conditioning_rows=rows, fixed_indices=fixed
+        )
+
+    def free_dimension(self, fixed: tuple[int, ...]) -> int:
+        """Return ``dimension``; a custom sampler always reads every column."""
+        check_fixed(fixed, self.problem.num_vars)
+        return self.dimension
+
+    def free_given_fixed(
+        self, u: np.ndarray, rows: np.ndarray, fixed: tuple[int, ...]
+    ) -> np.ndarray:
+        """Pass ``fixed`` straight to the sampler.
+
+        An empty ``fixed`` is a joint draw: the sampler gets no rows.
+        """
+        fixed = check_fixed(fixed, self.problem.num_vars)
+        return transform_samples(
+            self.sampler,
+            u,
+            self.problem.num_vars,
+            conditioning_rows=rows if fixed else None,
+            fixed_indices=fixed,
         )
 
     def to_physical(self, rows: np.ndarray) -> np.ndarray:
