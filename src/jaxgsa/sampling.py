@@ -6,7 +6,6 @@ import warnings
 
 import numpy as np
 import numpy.typing as npt
-from scipy.special import ndtri
 from scipy.stats import norm
 
 from jaxgsa._core.copula import (
@@ -15,14 +14,8 @@ from jaxgsa._core.copula import (
     fit_gaussian_copula,
     latent_to_physical,
 )
-from jaxgsa._core.dependence import (
-    InputSampler as InputSampler,
-)
-from jaxgsa._core.dependence import (
-    generate_uniform_points,
-    transform_samples,
-    validate_sampler,
-)
+from jaxgsa._core.dependence import InputSampler as InputSampler
+from jaxgsa._core.dependence import transform_samples
 from jaxgsa._core.sampling import _transform_samples
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.problem import Problem
@@ -51,10 +44,13 @@ def monte_carlo(
     dependence structure. Independent problems keep the plain uniform-draw
     path bit-for-bit, so existing seeds reproduce existing samples.
 
+    A custom ``problem.sampler`` is honored too: pseudo-random uniform points
+    of width ``problem.sampler_dimension`` go through its joint branch.
+
     Args:
         problem: Problem definition with parameter names and distributions;
             its marginals determine how each column is transformed, and its
-            optional ``correlation`` couples the columns.
+            optional ``correlation`` or ``sampler`` couples the columns.
         n: Number of samples (rows) to draw. Must be at least 1.
         seed: Seed for NumPy's default RNG, or an existing
             ``np.random.Generator`` to draw from. ``None`` (default) uses
@@ -72,11 +68,13 @@ def monte_carlo(
     if n < 1:
         raise ValueError(f"n must be >= 1, got {n}")
     rng = np.random.default_rng(seed)
-    if not problem.has_correlated_inputs:
+    if problem.sampler is not None and problem.sampler_dimension is not None:
+        u = rng.random((n, problem.sampler_dimension))
+        return transform_samples(problem.sampler, u, problem.num_vars)
+    R = problem.correlation
+    if problem.dependence == "independent" or R is None:
         return _transform_samples(problem, rng.random((n, problem.num_vars)))
 
-    R = problem.correlation
-    assert R is not None  # has_correlated_inputs implies a stored matrix
     Z = rng.standard_normal((n, problem.num_vars)) @ _safe_cholesky(R).T
     return latent_to_physical(problem, Z)
 
@@ -271,61 +269,8 @@ def fit_correlation(problem: Problem, X: npt.ArrayLike) -> np.ndarray:
 
 __all__ = [
     "InputSampler",
-    "sample",
     "correlate",
     "correlation_from_covariance",
     "fit_correlation",
     "monte_carlo",
 ]
-
-
-def sample(
-    problem: Problem,
-    n: int,
-    *,
-    sampler: InputSampler | None = None,
-    sampler_dimension: int | None = None,
-    sequence: str = "sobol",
-    seed: int | np.random.Generator | None = None,
-    scramble: bool = True,
-) -> np.ndarray:
-    """Generate ordinary input rows for a model or given-data GSA method.
-
-    Args:
-        problem: Input names and built-in distributions. With a custom sampler,
-            the marginals describe metadata only.
-        n: Exact row count; Sobol requires a power of two.
-        sampler: Optional transformation from uniforms to joint physical rows.
-        sampler_dimension: Number of uniforms per row; defaults to input count.
-        sequence: ``"sobol"`` or ``"monte_carlo"``.
-        seed: Random seed or existing generator.
-        scramble: Scramble Sobol points; ignored for Monte Carlo.
-
-    Returns:
-        Physical input rows of shape ``(n, problem.num_vars)``.
-    """
-    # Built-in Monte Carlo retains the existing reproducible sampling path.
-    if sampler is None and sequence == "monte_carlo":
-        if sampler_dimension is not None:
-            raise ValueError("sampler_dimension requires sampler")
-        return monte_carlo(problem, n, seed=seed)
-    dimension = validate_sampler(sampler, sampler_dimension, problem.num_vars, sequence)
-    if sampler is not None and problem.correlation is not None:
-        raise ValueError("Custom samplers cannot be combined with problem.correlation.")
-    if sequence == "sobol" and not scramble and seed is not None:
-        raise ValueError("seed has no effect with scramble=False")
-    points = generate_uniform_points(
-        n,
-        problem.num_vars if dimension is None else dimension,
-        sequence=sequence,
-        rng=np.random.default_rng(seed),
-        scramble=scramble,
-    )
-    if sampler is not None:
-        return transform_samples(sampler, points, problem.num_vars)
-    if not problem.has_correlated_inputs:
-        return _transform_samples(problem, points)
-    correlation = problem.correlation
-    assert correlation is not None
-    normal = ndtri(np.clip(points, 1e-12, 1 - 1e-12))
-    return latent_to_physical(problem, normal @ _safe_cholesky(correlation).T)
