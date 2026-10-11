@@ -59,7 +59,7 @@ from jaxgsa.benchmarks import ishigami, sobol_g
 SEED = 20260818
 """The one seed used by every sampler, bootstrap and permutation test."""
 
-DEFAULT_OUT = Path(__file__).resolve().parent / "baseline" / "baseline-1.0.0.json"
+DEFAULT_OUT = Path(__file__).resolve().parent / "baseline" / "baseline-1.1.0.json"
 
 INLINE_ARRAY_LIMIT = 1024
 """Arrays with at most this many elements are written out element by element.
@@ -354,7 +354,7 @@ def _m_borgonovo(case: Case, X: jax.Array, Y: jax.Array) -> Any:
 
 def _m_pawn(case: Case, X: jax.Array, Y: jax.Array) -> Any:
     return pawn.analyze(
-        case.problem, X, Y, n_bins=8, n_bootstrap=20, key=jax.random.key(SEED), verbose=False
+        case.problem, X, Y, n_classes=8, n_bootstrap=20, key=jax.random.key(SEED), verbose=False
     )
 
 

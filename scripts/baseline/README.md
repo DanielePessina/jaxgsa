@@ -1,12 +1,13 @@
 # Numerical baseline
 
-`baseline-1.0.0.json` is the file the check runs against. It is a fixed-seed
+`baseline-1.1.0.json` is the file the check runs against. It is a fixed-seed
 record of what jaxgsa computes. It exists so that a change with no
 behavioural target — a rename, a shared helper, a reordered call — can be
 proved not to have moved a number.
 
-`baseline-0.8.0.json` is kept beside it as the earlier record. Nothing reads
-it; it is there so the one place a number was allowed to move stays auditable.
+`baseline-1.0.0.json` and `baseline-0.8.0.json` are kept beside it as earlier
+records. Nothing reads them. They are there so that every place where a number
+was allowed to move stays auditable.
 
 **A changed number is a wiring error, not a tolerance issue.** Most of the
 work this file guards is declared "plumbing only": it moves code, renames
@@ -264,6 +265,27 @@ and H4 adds its own, larger, case-dependent swing on top. `vkoga` moved up to
 0.063 (`S_IU`, `S_TU`), matching H3's and M5's measured bias corrections.
 `optimal_transport` moved up to 0.011 (`above_dummy`), the M4 per-column floor
 taking effect.
+
+## The 1.1.0 interface cleanup (2026-10-11)
+
+1.1.0 is the interface cleanup before the public announcement. The check
+against `baseline-1.0.0.json` reported 708 moved values and many renamed,
+added or removed fields. The maintainer accepted the 1.1.0 numbers as the new
+baseline without a value-by-value review. These are the known causes:
+
+- **Borgonovo.** `bias_correct` now defaults to `False`. The 1.0.0 default
+  subtracted a bootstrap bias estimate. `delta` moves by about 0.01.
+- **Kucherenko.** The sampler was rebuilt on the shared conditional-draw
+  code. The same seed now gives different draws, so every Kucherenko index
+  moves. The baseline passes `base_n`, so the design size is unchanged.
+- **Float32 noise.** Sobol and some other methods move in the last digits
+  because the operations are done in a different order.
+- **Field changes.** These change no numbers. The fields were renamed or
+  added as listed in the 1.1.0 CHANGELOG, for example `cv_rmse`,
+  `explained_variance`, `n_valid_classes`, `variance` and the HDMR `order`.
+
+From 1.1.0 on, the rule in this file applies again. A changed number is a
+wiring error until someone records why it is not.
 
 ## How to use it
 
