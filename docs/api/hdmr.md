@@ -157,6 +157,7 @@ trailing `D` axis.
 | `rmse` | `()` / `(K,)` / `(T, K)` | In-sample RMSE of the fit per output slice, in the units of `Y`. |
 | `cv_rmse` | same | Out-of-sample RMSE. HDMR computes none, so it is always `None`. |
 | `explained_variance` | same | `1 - rmse**2 / Var(Y)` per output slice, NaN on a constant slice. Not the same as `S.sum()`, which is `Var(f_hat) / Var(Y)`. |
+| `order` | | The expansion order actually used. HDMR cuts the requested `order` down to `D` when `order > D`. |
 | `streamed` | | Which fit path ran. |
 | `Sa_conf`, `Sb_conf`, `S_conf`, `ST_conf` | leading `(2, ...)` | `None` when `n_bootstrap=0`. |
 | `problem`, `invalid`, `ci` | | Problem, non-finite report, interval provenance. |

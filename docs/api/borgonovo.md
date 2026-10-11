@@ -17,7 +17,7 @@ jaxgsa.borgonovo.analyze(
     on_invalid="raise",
     verbose=True,
     keep_replicates=False,
-) -> DeltaResult | IrregularResult
+) -> BorgonovoResult | IrregularResult
 ```
 
 The delta index is moment-independent. It measures how much fixing an input
@@ -130,7 +130,9 @@ only the ranking.
 
 `conf_level` and `ci_method` behave as on every other method.
 
-## DeltaResult
+## BorgonovoResult
+
+`DeltaResult` is a kept alias of `BorgonovoResult`. Old code that imports it still works.
 
 | Field | Shape | Meaning |
 | --- | --- | --- |

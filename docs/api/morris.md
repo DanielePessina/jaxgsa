@@ -20,7 +20,7 @@ sample(
     problem: Problem,
     n_trajectories: int,
     *,
-    num_levels: int = 4,
+    n_levels: int = 4,
     method: Literal["trajectory", "radial"] = "trajectory",
     scramble: bool = True,
     seed: int | np.random.Generator | None = None,
@@ -35,7 +35,7 @@ contributes exactly one elementary effect per parameter. It must be at least
 `n_trajectories * (D + 1)` model runs, and usually fewer, because exact
 duplicate rows are removed.
 
-`num_levels` is the grid resolution `p` of the trajectory design, with step
+`n_levels` is the grid resolution `p` of the trajectory design, with step
 `delta = p / (2 * (p - 1))`. Keep it even. An odd value makes the grid levels
 unequally probable and lands steps off-grid, and jaxgsa warns about it. The
 radial design ignores this argument.
@@ -81,7 +81,7 @@ along a grid has no meaning for an unordered level code.
 - `expanded_to_unique` — the map back to `samples`.
 - `ee_idx_before`, `ee_idx_after`, `ee_delta` — `(r, D)` each, the
   bookkeeping for `EE = (Y[after] - Y[before]) / delta`.
-- `n_trajectories`, `num_levels`, `method`, `n_params`, `problem` — the design
+- `n_trajectories`, `n_levels`, `method`, `n_params`, `problem` — the design
   metadata.
 - `n_blocks_dropped` — blocks lost at construction because their step was not
   measurable. Always 0 for a design `sample()` built. It can be positive only
@@ -91,10 +91,10 @@ along a grid has no meaning for an unordered level code.
 
 Deduplication earns its keep here. A 512-trajectory grid design over 3
 parameters expands to 2048 rows and collapses to 64 unique ones, because
-trajectories on a `num_levels=4` grid keep landing on the same points:
+trajectories on a `n_levels=4` grid keep landing on the same points:
 
 ```
-jaxgsa.morris.sample: D=3, method=trajectory, n_trajectories=512, num_levels=4,
+jaxgsa.morris.sample: D=3, method=trajectory, n_trajectories=512, n_levels=4,
 n_expanded=2048, n_runs=64, duplicates_removed=1984 (96.9%)
 ```
 
@@ -109,7 +109,7 @@ analyze(
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
-    key: Array | None = None,
+    key: Array | int | None = None,
     resample_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,

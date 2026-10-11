@@ -20,7 +20,7 @@ analyze(
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
-    key: Array | None = None,
+    key: Array | int | None = None,
     slice_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
@@ -75,6 +75,7 @@ Drop `verbose=False` to get the printed run summary described in the
 | `S1`, `ST` | `(D,)` / `(K, D)` / `(T, K, D)` | mirrors the layout of `Y` |
 | `S2` | `(D, D)` / `(K, D, D)` / `(T, K, D, D)` | `None` for a first-order-only design |
 | `S1_conf`, `ST_conf`, `S2_conf` | one extra leading axis of length 2 | `None` without a bootstrap |
+| `variance` | `()` / `(K,)` / `(T, K)` | variance of each output slice over every row of the expanded Saltelli layout; the weight `aggregate` uses; `None` for a hand-built result |
 | `ci` | — | the `CIInfo` record, or `None` |
 | `estimator` | — | the estimator name that ran |
 | `problem`, `invalid` | — | the problem, and the non-finite report |
@@ -132,8 +133,8 @@ The return is a `SobolIndices` named tuple with the fields `S1`, `ST` and `S2`,
 the same names as the fields of `SobolResult`. It always has three fields.
 `S2` is `None` when the design was drawn with `calc_second_order=False`.
 
-`morris`, `efast` and `dgsm` each expose an `indices()` under the same
-contract.
+Twelve methods expose an `indices()` under the same contract. Only
+`kucherenko` and `vkoga` do not.
 
 ## Choosing an estimator
 

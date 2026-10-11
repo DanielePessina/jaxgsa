@@ -263,13 +263,13 @@ print("expansion map length:   ", m.expanded_to_unique.shape)
 ```
 
 ```
-jaxgsa.morris.sample: D=3, method=trajectory, n_trajectories=64, num_levels=4, n_expanded=256, n_runs=64, duplicates_removed=192 (75.0%)
+jaxgsa.morris.sample: D=3, method=trajectory, n_trajectories=64, n_levels=4, n_expanded=256, n_runs=64, duplicates_removed=192 (75.0%)
 unique rows to evaluate: 64
 rows in the raw design:  256
 expansion map length:    (256,)
 ```
 
-Morris walks a grid of `num_levels=4` values per parameter, and in three
+Morris walks a grid of `n_levels=4` values per parameter, and in three
 dimensions that grid has only 4^3 = 64 points. The 64 trajectories keep
 revisiting them, so 192 of the 256 rows are repeats. jaxgsa evaluates each
 distinct row once and rebuilds the full 256-row design inside `analyze`

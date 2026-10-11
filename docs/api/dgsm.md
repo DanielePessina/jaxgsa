@@ -44,7 +44,7 @@ analyze(
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
-    key: Array | None = None,
+    key: Array | int | None = None,
     batch_size: int | None = None,
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,

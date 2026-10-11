@@ -124,7 +124,7 @@ print("advective :", np.round(ot_result.advective, 3))
 print("delta     :", np.round(delta_result.delta, 3))
 print("delta's S1:", np.round(delta_result.S1, 3))
 print("pawn      :", np.round(pawn_result.pawn, 3))
-print("valid bins:", pawn_result.n_valid_bins)
+print("valid bins:", pawn_result.n_valid_classes)
 ```
 
 ```
@@ -146,13 +146,13 @@ they were the same quantity. Compare within a column.
 Two extras worth reading here. `advective` is the share of the
 optimal-transport index that comes from a shift in the output mean, as opposed
 to a change in the distribution's shape. For `catalyst` it is 0.110 out of
-0.154, so most of what the catalyst does is move the mean. `n_valid_bins` is
+0.154, so most of what the catalyst does is move the mean. `n_valid_classes` is
 `[10, 3]`: ten quantile bins for the continuous temperature, and exactly three
 for the catalyst, one per level. If that second number ever comes back below
 `L`, a declared level was too rare to estimate and PAWN dropped it.
 
 A declared level with no observed samples is dropped from the class average,
-with a `JaxgsaWarning`. `n_bins` (PAWN) and `n_classes` (Borgonovo, OT) apply to the
+with a `JaxgsaWarning`. `n_classes` (PAWN, Borgonovo, OT) applies to the
 continuous columns only. PAWN gives a level with too few samples a `NaN` KS
 value and drops it from the median, max, or mean over bins, so a rare level
 cannot distort the index.

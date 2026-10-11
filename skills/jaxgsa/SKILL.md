@@ -116,7 +116,7 @@ Keep in mind:
 # Design builders. The method must be able to run your model at its points.
 jaxgsa.sobol.sample(problem, n_samples=None, *, base_n=None, calc_second_order=True,
                     scramble=True, seed=None, verbose=True)      -> SobolSamples
-jaxgsa.morris.sample(problem, n_trajectories, *, num_levels=4,
+jaxgsa.morris.sample(problem, n_trajectories, *, n_levels=4,
                      method="trajectory", scramble=True, seed=None,
                      truncation_quantile=1e-4, verbose=True)     -> MorrisSamples
 jaxgsa.efast.sample(problem, n_per_curve, *, M=4, seed=None,
@@ -148,7 +148,7 @@ Keep in mind:
 - Duplicate rows are removed, so `n_runs` is below `n_expanded`. Evaluate
   exactly the rows in `samples.samples`, in order, and pass the outputs straight
   to `analyze`, which rebuilds the blocks itself.
-- The seed feeds the Owen scramble, not the sequence. Keep `scramble=True`.
+- The seed feeds the scramble (a linear matrix scramble with a digital shift), not the sequence. Keep `scramble=True`.
   Scrambling is what removes the Sobol sequence's structural duplicates, and
   without it a Saltelli design loses real blocks to deduplication.
   `kucherenko.sample` raises on `scramble=False, seed=...` rather than accept a
@@ -445,7 +445,7 @@ Keep in mind:
 ### morris, elementary-effects screening
 
 ```python
-samples = jaxgsa.morris.sample(problem, n_trajectories=50, num_levels=4,
+samples = jaxgsa.morris.sample(problem, n_trajectories=50, n_levels=4,
                                method="trajectory", seed=0)
 Y = model(samples.samples)
 result = jaxgsa.morris.analyze(samples, Y, n_bootstrap=0,
@@ -724,24 +724,24 @@ Keep in mind:
 ### pawn, CDF-based sensitivity
 
 ```python
-result = jaxgsa.pawn.analyze(problem, X, Y, n_bins=10, statistic="median",
+result = jaxgsa.pawn.analyze(problem, X, Y, n_classes=10, statistic="median",
                              n_bootstrap=0, slice_chunk_size=None)
-result.pawn, result.n_valid_bins
+result.pawn, result.n_valid_classes
 ```
 
 `statistic` is `"median"`, `"max"`, or `"mean"` over the per-bin KS distances.
 
 Keep in mind:
 
-- `n_bins` trades conditioning resolution against sample density per bin. Check
-  `result.n_valid_bins`, which counts the bins that held at least 2 samples per
+- `n_classes` trades conditioning resolution against sample density per bin. Check
+  `result.n_valid_classes`, which counts the bins that held at least 2 samples per
   parameter. Bins below that are dropped, and `analyze` warns when a parameter
   keeps fewer than half its bins.
 - Bins are equal-probability on the marginal's own CDF, so a skewed marginal
   does not by itself starve a tail bin. What empties one is a small `N`, a large
-  `n_bins`, or samples that land outside the declared marginal.
+  `n_classes`, or samples that land outside the declared marginal.
 - Categorical parameters need no binning. The level code already names the
-  conditioning class, so PAWN uses one bin per level, `n_bins` does not apply,
+  conditioning class, so PAWN uses one bin per level, `n_classes` does not apply,
   and relabelling the levels gives the same number.
 - The KS distance is a supremum, so it reacts to the single largest gap between
   two CDFs and ignores everything else. It is the sharper instrument when a

@@ -299,6 +299,10 @@ distributions are applied, and `SobolSamples.transform(theta)` applies a set
 of distribution parameters to it. See
 [Sampling](/api/sampling#sobolsamples).
 
+Every samples class has the same `load`. It raises a clear error when the file
+holds a different samples class, for example a Morris file read with
+`SobolSamples.load`.
+
 `jaxgsa.sobol.indices(samples, Y)` returns a `SobolIndices(S1, ST, S2)` named
 tuple of plain arrays. `S2` is `None` for a first-order design. It
 runs the same estimator as `analyze`, but it checks nothing and builds no
@@ -324,7 +328,7 @@ does not shrink the sample, it changes what the estimator computes. An eFAST
 interval needs replicated designs at different random phase shifts, which
 would be a change to `efast.sample`, not a keyword on `analyze`.
 
-HSIC already reports its uncertainty as a permutation `p_value`. Its index is
+`eFAST` and `hsic` do not accept `n_bootstrap`. Passing it raises a `TypeError`. An eFAST result always has `ci=None`. HSIC reports its uncertainty as permutation `p_values`. Its index is
 a V-statistic, a double sum over all `N^2` pairs, so a row bootstrap would
 duplicate rows onto the kernel diagonal where the kernel is exactly 1. That
 biases the resampled statistic upward by construction. HSIC still requires
@@ -340,10 +344,12 @@ meaning:
   distribution. `"gaussian"` centres them on the point estimate and takes
   `± z · sd` of the draws, which is smoother at small `n_bootstrap` but
   assumes the draws are normal.
-- `key: jax.Array | None = None` — a `jax.random` key for the resampling.
+- `key: jax.Array | int | None = None` — a `jax.random` key for the resampling.
+  An `int` also works. jaxgsa converts it with `jax.random.key`.
   Required as soon as `n_bootstrap > 0`; the call raises without it rather
-  than seeding itself, so a reported interval is always reproducible. Pass
-  `jax.random.key(0)` if all you have is an integer.
+  than seeding itself, so a reported interval is always reproducible. Every
+  analyze function that takes a `key` takes the same type. This includes `hsic` and `vkoga`,
+  where `key` is required.
 
 Every interval comes with `result.ci`, a `CIInfo` record that says how it was
 made. A bare `*_conf` array does not say whether it is a 95% or a 68%
@@ -387,7 +393,7 @@ design of their own.
 
 | Namespace | Command | Result |
 | --- | --- | --- |
-| `jaxgsa.borgonovo` | `analyze` | `DeltaResult` |
+| `jaxgsa.borgonovo` | `analyze` | `BorgonovoResult` |
 | `jaxgsa.dgsm` | `analyze` | `DGSMResult` |
 | `jaxgsa.hdmr` | `analyze` | `HDMRResult` |
 | `jaxgsa.hsic` | `analyze` | `HSICResult` |
@@ -479,7 +485,7 @@ and it never selects a different algorithm, so the answer does not depend on it
 beyond float summation order. `None` derives a width from the memory budget; an
 explicit value always overrides the budget.
 
-`hsic`, `shapley` and `kucherenko` take none of the three.
+`hsic` and `kucherenko` take none of the three. `shapley.analyze` has no batching keyword of its own, but it passes `batch_size` (PCE and HDMR) and `slice_chunk_size` (HDMR) on to its backend through `**backend_kwargs`.
 `jaxgsa.hsic.analyze(..., batch_size=...)` raises a `TypeError`. HSIC holds
 `2D+1` kernel matrices of shape `(N, N)` at once, and no keyword bounds that,
 so `N` is the only knob.
@@ -548,7 +554,7 @@ with `result.shapley(...)`. There is no separate Shapley pipeline.
 `jaxgsa.shapley.analyze(problem, X, Y, backend="pce")` is a thin convenience
 that fits the chosen surrogate and calls `.shapley()` in one step.
 
-All result objects support `to_dataset(...)` for labeled xarray export.
+All result objects support `to_dataset(...)` for labeled xarray export. The dataset `attrs` include `method` (the method name) and `jaxgsa_version` (the version that made the result).
 
 ## Benchmarks
 

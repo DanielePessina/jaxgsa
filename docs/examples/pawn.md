@@ -1,7 +1,7 @@
 # PAWN: sensitivity read off the output CDF
 
 PAWN works on the output's cumulative distribution function, not on its
-variance. For each input it splits the sample into `n_bins` conditioning bins,
+variance. For each input it splits the sample into `n_classes` conditioning bins,
 builds the output CDF inside each bin, and compares that conditional CDF with
 the unconditional one using the Kolmogorov-Smirnov statistic, the largest
 vertical gap between two CDF curves. The per-bin gaps are then reduced to one
@@ -41,7 +41,7 @@ Y = evaluate(X)
 result = jaxgsa.pawn.analyze(PROBLEM, X, Y)
 
 print("pawn:        ", result.pawn)
-print("n_valid_bins:", result.n_valid_bins)
+print("n_valid_classes:", result.n_valid_classes)
 ```
 
 ```
@@ -55,13 +55,13 @@ jaxgsa.pawn.analyze
     estimator (includes compile on the first call): 0.4539 s
     slice_chunk_size: 1 (resolved from the memory budget)
     statistic: median
-    n_bins: 10
+    n_classes: 10
   results: top 3 of 3 parameters by PAWN
     1. x2  PAWN=0.4066
     2. x1  PAWN=0.2419
     3. x3  PAWN=0.08334
 pawn:         [0.2419315  0.40658885 0.08334284]
-n_valid_bins: [10 10 10]
+n_valid_classes: [10 10 10]
 ```
 
 The block above the arrays is the verbose summary, printed because
@@ -85,17 +85,17 @@ Fixing x3 does change the output distribution. It widens or narrows it
 without moving its centre, and that is exactly the kind of effect the CDF
 comparison sees and the variance decomposition does not.
 
-`n_valid_bins` reports how many bins actually contributed
+`n_valid_classes` reports how many bins actually contributed
 per input. All 10 of 10 here. When that number drops, read
 [the sparse-bin warning](#when-bins-run-out-of-samples).
 
-## Choosing n_bins
+## Choosing n_classes
 
 Bin count is the parameter people get wrong, so it deserves the space.
 
 The bins are equal-width on the CDF-transformed unit interval, which makes
 them equal-probability under the input's own marginal. Each holds roughly
-`N / n_bins` samples. That single ratio is the whole trade-off. More bins
+`N / n_classes` samples. That single ratio is the whole trade-off. More bins
 condition each input more tightly, which reduces the bias from treating a
 whole slice as "fixed". Fewer samples per bin make each KS statistic noisier,
 and KS noise is one-sided: a KS distance is a maximum, so noise can only push
@@ -105,15 +105,15 @@ Watch both ends of that trade-off in one sweep:
 
 ```python
 for nb in (5, 10, 20, 50):
-    r = jaxgsa.pawn.analyze(PROBLEM, X, Y, n_bins=nb, verbose=False)
-    print(f"n_bins={nb:3d}: pawn={r.pawn}  n_valid_bins={r.n_valid_bins}")
+    r = jaxgsa.pawn.analyze(PROBLEM, X, Y, n_classes=nb, verbose=False)
+    print(f"n_classes={nb:3d}: pawn={r.pawn}  n_valid_classes={r.n_valid_classes}")
 ```
 
 ```
-n_bins=  5: pawn=[0.18761349 0.28084224 0.08781385]  n_valid_bins=[5 5 5]
-n_bins= 10: pawn=[0.2419315  0.40658885 0.08334284]  n_valid_bins=[10 10 10]
-n_bins= 20: pawn=[0.2354129  0.40557504 0.09115449]  n_valid_bins=[20 20 20]
-n_bins= 50: pawn=[0.24619085 0.43429956 0.10700866]  n_valid_bins=[50 50 50]
+n_classes=  5: pawn=[0.18761349 0.28084224 0.08781385]  n_valid_classes=[5 5 5]
+n_classes= 10: pawn=[0.2419315  0.40658885 0.08334284]  n_valid_classes=[10 10 10]
+n_classes= 20: pawn=[0.2354129  0.40557504 0.09115449]  n_valid_classes=[20 20 20]
+n_classes= 50: pawn=[0.24619085 0.43429956 0.10700866]  n_valid_classes=[50 50 50]
 ```
 
 Five bins is too few. Each bin covers a fifth of x2's range, x2 is far from
@@ -130,7 +130,7 @@ showing, not a newly discovered effect.
 The recipe: start at the default 10, then run 2x that. If the two agree, keep
 the answer. If they do not, you are on the noisy side and you need more
 samples rather than a different bin count. Keep at least 100 samples per bin
-as a floor, so `n_bins <= N / 100`.
+as a floor, so `n_classes <= N / 100`.
 
 ## Choosing the aggregation statistic
 
@@ -205,7 +205,7 @@ input was logged at a handful of settings, which is common with real data:
 someone ran the rig at three flow rates, not at 5000 of them.
 
 `analyze` warns when an input keeps fewer than half its bins, and
-`n_valid_bins` tells you which one.
+`n_valid_classes` tells you which one.
 
 ```python
 X_coarse = X.at[:, 2].set(jnp.round(X[:, 2] / 2.5) * 2.5)   # x3 logged at 3 settings
@@ -213,14 +213,14 @@ Y_coarse = evaluate(X_coarse)
 
 r = jaxgsa.pawn.analyze(PROBLEM, X_coarse, Y_coarse)
 print("pawn:        ", r.pawn)
-print("n_valid_bins:", r.n_valid_bins)
+print("n_valid_classes:", r.n_valid_classes)
 ```
 
 ```
 JaxgsaWarning: PAWN: parameters 'x3' (3/10) have fewer than half of their
 conditioning bins contributing (a bin needs at least 2 samples to define a
 conditional CDF; the rest are dropped). The reported indices rest on those few
-bins. Use fewer bins (lower n_bins) or more samples.
+bins. Use fewer bins (lower n_classes) or more samples.
 
 jaxgsa.pawn.analyze
   problem: D=3 (x1, x2, x3)
@@ -232,13 +232,13 @@ jaxgsa.pawn.analyze
     estimator (includes compile on the first call): 0.3991 s
     slice_chunk_size: 1 (resolved from the memory budget)
     statistic: median
-    n_bins: 10
+    n_classes: 10
   results: top 3 of 3 parameters by PAWN
     1. x2  PAWN=0.3367
     2. x1  PAWN=0.3177
     3. x3  PAWN=0.07878
 pawn:         [0.31772962 0.33670652 0.07877553]
-n_valid_bins: [10 10  3]
+n_valid_classes: [10 10  3]
 ```
 
 The warning names x3 and says 3 of 10. What it means is that x3's index is a
@@ -247,17 +247,17 @@ though nothing in the printed value says so.
 
 Two fixes, and which one you pick depends on why the bins are empty.
 
-If the input genuinely has only a few settings, lower `n_bins` to match. The
+If the input genuinely has only a few settings, lower `n_classes` to match. The
 extra bins were never going to be filled, and asking for them only throws
 information away:
 
 ```python
-r = jaxgsa.pawn.analyze(PROBLEM, X_coarse, Y_coarse, n_bins=3, verbose=False)
-print("n_bins=3 pawn:", r.pawn, " n_valid_bins:", r.n_valid_bins)
+r = jaxgsa.pawn.analyze(PROBLEM, X_coarse, Y_coarse, n_classes=3, verbose=False)
+print("n_classes=3 pawn:", r.pawn, " n_valid_classes:", r.n_valid_classes)
 ```
 
 ```
-n_bins=3 pawn: [0.2720249  0.1078375  0.07877553]  n_valid_bins: [3 3 3]
+n_classes=3 pawn: [0.2720249  0.1078375  0.07877553]  n_valid_classes: [3 3 3]
 ```
 
 The warning is gone, and x3's index is unchanged at 0.0788, because three
@@ -267,10 +267,10 @@ under-resolves a continuous input badly. So this fix silences the warning at
 the cost of the inputs that were fine.
 
 If instead you want to keep the resolution on the well-sampled inputs, keep
-`n_bins` where it is, accept the warning, and treat x3's number as a weak
+`n_classes` where it is, accept the warning, and treat x3's number as a weak
 signal rather than a measurement. Declaring x3 categorical is the clean
 answer when it really is a discrete setting: a categorical input gets one bin
-per level, `n_bins` does not apply to it, and relabelling the levels changes
+per level, `n_classes` does not apply to it, and relabelling the levels changes
 nothing. See [Categorical inputs](/examples/categorical-inputs).
 
 ## Multiple outputs
@@ -302,7 +302,7 @@ Coordinates:
   * param         (param) <U2 24B 'x1' 'x2' 'x3'
 Data variables:
     pawn          (output, param) float32 24B 0.2503 0.4081 ... 0.2067 0.2169
-    n_valid_bins  (output, param) int32 24B 10 10 10 10 10 10
+    n_valid_classes  (output, param) int32 24B 10 10 10 10 10 10
 ```
 
 Row 0 is the Ishigami output and keeps the familiar ranking. Row 1 is the sum
@@ -323,7 +323,7 @@ when you asked for them.
 N is the number of samples, T the number of time steps, K the number of
 outputs, D the number of inputs.
 
-| `Y` shape | `pawn`, `n_valid_bins` | `pawn_conf` |
+| `Y` shape | `pawn`, `n_valid_classes` | `pawn_conf` |
 |---|---|---|
 | `(N,)` | `(D,)` | `(2, D)` or `None` |
 | `(N, K)` | `(K, D)` | `(2, K, D)` or `None` |
@@ -335,9 +335,9 @@ PAWN pushes the flattened `T*K` output columns through one vmapped kernel, in
 chunks of at most `slice_chunk_size` columns.
 
 The chunk is not sized by the result. The inner `vmap` builds a full
-`(N, n_bins)` ECDF table for every (column, input) pair and holds two such
+`(N, n_classes)` ECDF table for every (column, input) pair and holds two such
 arrays at once, so peak memory is about
-`2 * slice_chunk_size * D * N * n_bins` elements. That is `N` times the size
+`2 * slice_chunk_size * D * N * n_classes` elements. That is `N` times the size
 of the result, which is why the default is derived rather than fixed.
 
 `slice_chunk_size=None` (the default) sizes the chunk against the active

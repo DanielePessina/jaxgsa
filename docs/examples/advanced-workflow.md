@@ -61,7 +61,7 @@ screen = jaxgsa.morris.analyze(screen_design, model(screen_design.samples))
 ```
 
 ```
-jaxgsa.morris.sample: D=20, method=trajectory, n_trajectories=40, num_levels=4, n_expanded=840, n_runs=840, duplicates_removed=0 (0.0%)
+jaxgsa.morris.sample: D=20, method=trajectory, n_trajectories=40, n_levels=4, n_expanded=840, n_runs=840, duplicates_removed=0 (0.0%)
 jaxgsa.morris.analyze
   problem: D=20 (x1, x2, x3, x4, x5, x6, x7, x8, ... 12 more)
     marginals: uniform=20

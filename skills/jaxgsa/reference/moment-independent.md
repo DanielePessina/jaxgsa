@@ -173,7 +173,7 @@ CDF conditional on one parameter, aggregated over conditioning bins.
 result = jaxgsa.pawn.analyze(PROBLEM, X, Y)
 
 result.pawn           # [0.248, 0.402, 0.087]
-result.n_valid_bins   # [10, 10, 10]   <- check this
+result.n_valid_classes   # [10, 10, 10]   <- check this
 ```
 
 All 10 bins survived for all three parameters, so those indices stand on the
@@ -182,7 +182,7 @@ full sample.
 Signature:
 
 ```python
-jaxgsa.pawn.analyze(problem, X, Y, *, n_bins=10, statistic="median",
+jaxgsa.pawn.analyze(problem, X, Y, *, n_classes=10, statistic="median",
                     n_bootstrap=0, conf_level=0.95, ci_method="quantile",
                     key=None, slice_chunk_size=None, on_invalid="raise",
                     verbose=True, keep_replicates=False)
@@ -192,15 +192,15 @@ jaxgsa.pawn.analyze(problem, X, Y, *, n_bins=10, statistic="median",
 
 Keep in mind:
 
-- `n_bins` trades conditioning resolution against sample density per bin. Bins
-  holding fewer than 2 samples are dropped, `n_valid_bins` counts what is left,
+- `n_classes` trades conditioning resolution against sample density per bin. Bins
+  holding fewer than 2 samples are dropped, `n_valid_classes` counts what is left,
   and `analyze` warns when a parameter keeps fewer than half its bins. A
   parameter down to 3 bins has a median over 3 numbers.
 - Bins are equal-probability on the marginal's own CDF, so a skewed marginal
   does not by itself starve a tail bin. What empties one is a small `N`, a large
-  `n_bins`, or samples that land outside the declared marginal.
+  `n_classes`, or samples that land outside the declared marginal.
 - Categorical parameters need no binning. The level code already names the
-  conditioning class, so PAWN uses one bin per level, `n_bins` does not apply,
+  conditioning class, so PAWN uses one bin per level, `n_classes` does not apply,
   and relabelling the levels gives the same number.
 - The KS distance is a supremum, so it reacts to the single largest gap between
   two CDFs and ignores everything else. It is the sharper instrument when a

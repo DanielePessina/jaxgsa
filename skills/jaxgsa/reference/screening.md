@@ -42,14 +42,14 @@ drop what sits near the origin. Here nothing does: all three parameters matter,
 which is the correct screening answer even though the ranking is wrong. `x2`
 leads on `mu_star` while the true `ST` leads with `x1`.
 
-60 rows, not 200. The default `num_levels=4` grid collides often in low
+60 rows, not 200. The default `n_levels=4` grid collides often in low
 dimensions, and jaxgsa evaluates each distinct row once. Cost is `r(D + 1)`
 model runs before deduplication, against `N(2D + 2)` for Sobol.
 
 Signature:
 
 ```python
-jaxgsa.morris.sample(problem, n_trajectories, *, num_levels=4,
+jaxgsa.morris.sample(problem, n_trajectories, *, n_levels=4,
                      method="trajectory", scramble=True, seed=None,
                      truncation_quantile=1e-4, verbose=True)
 jaxgsa.morris.analyze(samples, Y, *, standardize_outputs=False, n_bootstrap=0,

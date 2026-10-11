@@ -309,7 +309,7 @@ struggled.
 - Other result types export their own fields. Optimal transport gives `ot`,
   `advective`, `diffusive`, `S1` and `above_dummy`, plus a per-parameter
   `ot_dummy` when you passed `dummy=True`, and the `*_lower` / `*_upper` pairs when you
-  bootstrapped. PAWN gives `pawn` and `n_valid_bins`, the per-parameter count of
+  bootstrapped. PAWN gives `pawn` and `n_valid_classes`, the per-parameter count of
   bins that held at least 2 samples.
 - `ds.to_netcdf(path)` writes the whole thing, attributes included. NaN slices
   survive the round trip.

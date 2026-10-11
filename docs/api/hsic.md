@@ -110,7 +110,7 @@ own.
 | Argument | Default | What it changes |
 | --- | --- | --- |
 | `n_perms` | `200` | Permutations behind the p-values. Cost is linear in it. The smallest reachable p-value is `1 / (n_perms + 1)`, so 200 bottoms out at 0.005. Raise it only when you need to separate parameters that all hit that floor. |
-| `key` | required, keyword-only | A `jax.random` key for the permutations. There is no default because the p-values are random. `jax.random.key(0)` if you just want reproducibility. It is a key rather than an int seed so nested analyses can split it and draw independent permutations. |
+| `key` | required, keyword-only | A `jax.random` key for the permutations. There is no default because the p-values are random. An `int` also works and jaxgsa converts it with `jax.random.key`. Pass a key if you want to split it for nested analyses. |
 | `bandwidth` | `1.0` | Multiplier on the Gaussian bandwidth, applied to every input and to the output. The width itself always comes from the median heuristic per variable: the Gaussian standard deviation is `bandwidth * sqrt(m)`, with `m` the median off-diagonal squared pairwise distance. `0.5` halves every width, `2.0` doubles them. There is no absolute-width setting, because one fixed number cannot be right for both a parameter on `[0, 1]` and an output in megapascals. |
 | `on_invalid` | `"raise"` | Policy for non-finite rows. `"drop"` removes the `(X, Y)` pair, `"propagate"` warns and computes anyway. `X` and `Y` are checked together, so a bad input takes its output with it. |
 | `verbose` | `True` | Prints the summary block shown above. |

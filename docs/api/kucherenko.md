@@ -155,7 +155,7 @@ column-swap scheme and the analysis reproduces the classic Sobol' indices.
 | `subsets` | `"singletons"` | `"singletons"` builds the `2D + 1` block design. `"all"` builds `2^D` blocks for exact Shapley effects and PME. See [Shapley effects and PME](#shapley-effects-and-pme). |
 | `n_samples` | `None` | Minimum number of model runs. The smallest power-of-two `base_n` whose design reaches it is used. Give exactly one of `n_samples` and `base_n`. |
 | `base_n` | `None` | Base points per block, a power of two, at least 2. It is the only knob on accuracy: everything else in the design is fixed by `D`. Give exactly one of `n_samples` and `base_n`. |
-| `scramble` | `True` | Owen-scrambles the Sobol' sequence. Keep it on, because it is what makes different seeds give statistically independent designs. Off, the sequence is deterministic and repeated runs are identical. |
+| `scramble` | `True` | Scrambles the Sobol' sequence with a linear matrix scramble and a digital shift (`scipy.stats.qmc.Sobol(scramble=True)`). Keep it on, because it is what makes different seeds give statistically independent designs. Off, the sequence is deterministic and repeated runs are identical. |
 | `seed` | `None` | `int`, `np.random.Generator`, or `None`. It seeds the scrambling only, so it does nothing with `scramble=False` and passing both raises `ValueError`. The random streams changed in this release, so a seed does not reproduce designs from earlier versions. |
 | `verbose` | `True` | Prints the one-line design summary shown above. |
 
@@ -207,7 +207,7 @@ the same Shapley effects in theory. They differ by sampling noise only.
 
 `S1` and `ST` of an `"all"` design come from the singleton blocks inside it.
 `shapley()` and `pme()` return a `ShapleyResult` with `backend="exact"`.
-`explained_variance` is 1 because no surrogate is fitted. For `pme()`, the
+No surrogate is fitted, so the surrogate-only fields (`order` and `explained_variance`) are `None`. For `pme()`, the
 `Sh` field holds the PME values. They are not Shapley effects.
 
 Intervals need `n_bootstrap > 0` and `keep_replicates=True`. Each kept draw is
