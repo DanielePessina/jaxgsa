@@ -9,9 +9,10 @@ import itertools
 import math
 import warnings
 from collections.abc import Callable
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import Literal, NamedTuple, cast
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
@@ -288,6 +289,37 @@ def _compute_ST(
     ST = ST.at[..., c3[:, 2]].add(S3)
 
     return ST
+
+
+@partial(jax.jit, static_argnames=("T", "K", "n", "n1"))
+def _assemble_indices(
+    Sa: Array,
+    Sb: Array,
+    S: Array,
+    select: Array,
+    c2: Array,
+    c3: Array,
+    *,
+    T: int,
+    K: int,
+    n: int,
+    n1: int,
+) -> tuple[Array, Array, Array, Array, Array]:
+    """Reshape the flat fit indices to ``(T, K, n)`` and derive ``ST``.
+
+    One jit, so these small array ops compile together.
+
+    Returns:
+        ``(Sa, Sb, S, ST, select_sum)``.
+    """
+    S_out = S.reshape(T, K, n)
+    return (
+        Sa.reshape(T, K, n),
+        Sb.reshape(T, K, n),
+        S_out,
+        _compute_ST(S_out, c2, c3, n1),
+        jnp.sum(select, axis=0),
+    )
 
 
 def _reshape_emulator_value(value: Array, T: int, K_out: int, layout: YLayout) -> Array:
@@ -715,14 +747,9 @@ def _hdmr_core(
         batch_size=batch_size,
         slice_chunk_size=slice_chunk_size,
     )
-    select_sum = jnp.sum(fit.select, axis=0)
-
-    # Reassemble into the full (T, K, n_terms) index arrays.
-    Sa_out = fit.Sa.reshape(T, K_out, n)
-    Sb_out = fit.Sb.reshape(T, K_out, n)
-    S_out = fit.S.reshape(T, K_out, n)
-    # Aggregate per-term S into per-parameter total-order indices.
-    ST_out = _compute_ST(S_out, c2_idx, c3_idx, n1)
+    Sa_out, Sb_out, S_out, ST_out, select_sum = _assemble_indices(
+        fit.Sa, fit.Sb, fit.S, fit.select, c2_idx, c3_idx, T=T, K=K_out, n=n, n1=n1
+    )
 
     return _HDMRCore(
         Sa=Sa_out,
