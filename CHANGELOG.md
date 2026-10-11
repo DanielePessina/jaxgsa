@@ -1,16 +1,330 @@
 # Changelog
 
-## Unreleased
+## 1.1.0
 
-### Changed: the browser workbench is now jaxgsa studio
+jaxgsa 1.0.x had no users. This release therefore removes and renames some API
+without a deprecation period. From 1.1.0 on, the API follows semantic
+versioning.
+
+### Breaking changes
+
+#### Interface cleanup before the announcement
+
+Each line shows the old form, then the new form.
+
+##### Names and constructors
+
+- `Problem.num_vars` → `Problem.n_params`.
+- `Problem(...)`: every argument after `bounds` is now keyword-only.
+- `Problem.from_dict(...)`: every argument after `params` is now keyword-only.
+- `Problem` raises `TypeError` for a bare string as `names` or `output_names`.
+- `Problem.with_sampler(f, dimension=k)` → `with_sampler(f, sampler_dimension=k)`.
+- `Problem.has_correlated_inputs` → `problem.dependence`. It returns
+  `"independent"`, `"gaussian"` or `"custom"`. An identity correlation matrix
+  still gives `"independent"`.
+- `KucherenkoResult.is_correlated` and `VKOGAResult.is_correlated` →
+  `result.dependence`, with the same three values. The saved dataset attribute
+  `is_correlated` is now `dependence`.
+- `Theta` is no longer exported from `jaxgsa`. Import it from `jaxgsa.sobol`.
+- `SPEC`, `MethodSpec`, `register` and `InvalidUnit` no longer appear in the
+  method packages. `jaxgsa.sampling` and `jaxgsa.config` no longer export their
+  imports.
+
+##### Sampling and failed runs
+
+- `on_invalid="none"` → `on_invalid="skip"`. `"none"` now raises `ValueError`.
+- `sampling.monte_carlo(problem, n, *, seed)` →
+  `monte_carlo(problem, n_samples, *, seed=None)`.
+- `sampling.correlate(X, problem, *, seed)` → `correlate(problem, X, *, seed=None)`.
+- A custom sampler is now checked against the support of each input. Uniform and
+  truncated bounds, and integer codes for categorical inputs, are enforced.
+  A value that overshoots a bound by float32 rounding is clipped to the bound.
+  A value further out raises `ValueError`.
+- `sobol.sample(scramble=False, seed=...)` now raises `ValueError`, as
+  `kucherenko.sample` already did.
+- `config.get_memory_budget()` now returns megabytes by default, like
+  `set_memory_budget()`. Pass `unit="b"` for bytes. `set_memory_budget()` no
+  longer rejects large unit-less values.
+
+##### Design-based methods
+
+- `sobol.sample(problem, n_samples, ...)` →
+  `sobol.sample(problem, n_samples=None, *, base_n=None, ...)`. Give exactly one
+  of `n_samples` and `base_n`. Otherwise `ValueError`.
+- `kucherenko.sample(problem, n, ...)` →
+  `kucherenko.sample(problem, n_samples=None, *, base_n=None, subsets=...)`.
+  `n_samples` is now the minimum number of model runs, like Sobol. It was the
+  number of base points per block. Use `base_n=` for the old meaning. The same
+  `base_n` and `seed` give the same design.
+- The first parameter of design-based `analyze()` and `indices()` →
+  `samples`. It was `sampling_result`. Passing a `Problem` raises `TypeError`
+  that points to the given-data methods.
+- `sobol.indices` now always returns three fields. `S2` is `None` for a
+  first-order design.
+- `indices()` of every method returns a named tuple: `SobolIndices(S1, ST, S2)`,
+  `MorrisIndices(mu, mu_star, sigma)`, `EFASTIndices(S1, ST)`, `DGSMIndices`,
+  `HDMRIndices(Sa, Sb, S, ST)`, `PCEIndices(S1, ST, S2)`,
+  `ShapleyIndices(Sh, S1, ST)`, `HSICIndices(R2, T, p_values, hsic_raw)`,
+  `BorgonovoIndices(delta, S1)`, `OTIndices(ot, advective, diffusive, S1)`,
+  `PAWNIndices(pawn)` and `RankIndices(S1)`. Plain tuple unpacking still works,
+  but the field count of `OTIndices` grew (see below).
+
+##### DGSM, Morris and eFAST
+
+- `dgsm.analyze(problem, fn, X, *, Y, dfdx)` →
+  `dgsm.analyze(problem, X, Y=None, *, fn=None, dfdx=None)`. `dgsm.indices`
+  changes the same way. Model path: `dgsm.analyze(problem, X, fn=f)`. Precomputed
+  path: `dgsm.analyze(problem, X, Y, dfdx=J)`.
+- `DGSMResult.sigma` → `DGSMResult.mu`. `sigma_conf` → `mu_conf`. The value is
+  the mean signed derivative.
+- `DGSMResult.var_y` → `DGSMResult.variance`. `to_dataset()` now includes it.
+- `MorrisResult.to_physical_units()` on a result that is already physical now
+  returns `self`.
+- `EFASTResult.ci` is now always `None`.
+
+##### HDMR, PCE and Shapley
+
+- `hdmr.analyze` and `hdmr.indices`: `maxorder` → `order`, `maxiter` →
+  `max_iter`, `lambdax` → `ridge`, `m` → `n_intervals`.
+- `shapley(backend="hdmr", order=3)` now works with the new names.
+- HDMR with fewer than 300 rows now warns. It raises only below
+  `(n_intervals + 3)**min(order, D) + 1` rows. It used to raise below 300.
+- `PCEResult.loo_rmse` → `PCEResult.cv_rmse`. `PCEResult.rmse` is new.
+- Surrogate fit fields now hold one value per output slice. `rmse` is in-sample.
+  `cv_rmse` is out-of-sample. `explained_variance` is `1 - MSE / Var(Y)`.
+  `HDMRResult` gains `explained_variance`, and its `cv_rmse` is `None`.
+  `VKOGAResult.cv_rmse` was one pooled float. It is now per output slice.
+  `VKOGAResult` gains `explained_variance`.
+- Error messages from every method start with `jaxgsa.<method>: `.
+
+##### VKOGA and HSIC
+
+- `vkoga.analyze(..., correlation=R)` is removed. The dependence comes from the
+  problem only. Use `problem.with_correlation(R)`.
+- `VKOGAResult.correlation` is removed. Use `result.problem.correlation`.
+- `VKOGAResult.shapley()` is removed.
+- `key` is now required and keyword-only on `hsic.analyze` and `vkoga.analyze`.
+- `HSICResult.R2_HSIC` → `R2`. `HSICResult.T_HSIC` → `T`.
+- `HSICResult.ci` is now always `None`.
+
+##### Borgonovo, OT, PAWN and rank
+
+- `optimal_transport.analyze` and `indices`: `n_partitions` → `n_classes`.
+- `borgonovo.analyze(bias_correct=None)` → `bias_correct: bool = False`.
+  `False` always gives the plain estimate. `True` gives the bias-corrected
+  estimate and needs `n_bootstrap > 0`. Any other value, such as `None`,
+  raises `TypeError`. The first-use warning is gone.
+- `OTIndices` has a fourth field, `S1`. Code that unpacks three names breaks.
+
+#### Other breaking changes
+
+- Kucherenko: the default design keeps its blocks, but a given `seed` now gives
+  new draws. This holds for every problem, including independent ones. The
+  indices are statistically unchanged.
+- VKOGA: the same `key` now gives slightly different indices. The outer and
+  inner quasi-Monte Carlo draws changed. The differences are Monte Carlo noise,
+  about 1e-4 to 2.5e-3. `variance` is bit-identical.
+- `Problem.__eq__` and `__hash__` now include the sampler. A custom-sampler
+  problem loaded from a file is not equal to the original.
+- Messages changed. Exception types are the same, but `pytest.raises(match=...)`
+  on the old text fails.
+  - The verbose line `correlation: correlated (Gaussian copula)` is now
+    `dependence: gaussian copula`. The Kucherenko sample line
+    `dependence=copula-conditional` is now `dependence=gaussian`.
+  - The `repr` of `KucherenkoSamples` shows `dependence=...` and `subsets=...`
+    instead of `correlated=...`.
+  - Every independence refusal and dependent-input warning has new text. It
+    says "dependence-tolerant" instead of "correlation-tolerant", lists
+    `jaxgsa.rank`, and names `problem.sampler`.
+  - The HDMR `ST` warning, `HDMRResult.shapley(include_correlative=False)` and
+    the Shapley `backend="pce"` refusal now also apply to custom-sampler
+    problems.
+  - `jaxgsa.vkoga.analyze` no longer warns about correlated training data.
+
+### Added
+
+- `jaxgsa.sampling.transform(problem, U)` maps your own unit-cube design
+  through the problem's marginals, copula or custom sampler. Use it with a
+  Latin hypercube of your own.
+- Every `analyze(key=...)` accepts an `int` and calls `jax.random.key` on it.
+  A bad `key` raises `TypeError`. A JAX key as `seed=` on a sampler raises
+  `TypeError`. Both messages use jaxgsa wording.
+- `Problem.from_dict` accepts `[low, high]` lists as bounds.
+- `SobolSamples`, `MorrisSamples` and `EFASTSamples` have a compact `repr`.
+- `SobolResult.to_dataset()` has a new `variance` variable.
+- `VKOGAResult.S1` and `VKOGAResult.ST` are read-only aliases of `S_TC` and
+  `S_TU`.
+- `PCEResult.rmse` and the `explained_variance` fields listed above.
+- Error messages are clearer. They name the method and the knob that applies.
+
+### New
+
+#### Custom input samplers
+
+A problem can carry a custom sampler. A custom sampler describes any joint
+distribution, not only a Gaussian copula.
+
+Declare the sampler on the problem:
+
+- `jaxgsa.Problem(names=..., bounds=..., sampler=f, sampler_dimension=2)`
+- `jaxgsa.Problem.from_dict(..., sampler=f, sampler_dimension=2)`
+- `problem.with_sampler(f, sampler_dimension=2)`. Use `problem.with_sampler(None)` to
+  drop it.
+
+`Problem.sampler` and `Problem.sampler_dimension` hold the values. The type
+alias `jaxgsa.problem.Dependence = Literal["independent", "gaussian",
+"custom"]` is new. `jaxgsa.sampling.InputSampler` is the public type of the
+callback.
+
+The sampler contract:
+
+- jaxgsa calls `sampler(uniform_points, *, conditioning_rows=None,
+  fixed_indices=())`.
+- The sampler must be a deterministic inverse Rosenblatt map, also called a
+  conditional-quantile map. Rejection sampling and MCMC are not valid.
+- It must accept any sorted `fixed_indices`. On the default Kucherenko design
+  it gets three kinds of call: a joint draw, a draw that keeps `x_i`, and a draw
+  that keeps every input except `x_i`. With `subsets="all"` it also gets every
+  other subset.
+- It must return `(n, D)` finite rows, copy the fixed columns exactly, and give
+  values inside the support of each input. A new check raises `ValueError` for
+  values outside the support. It clips values within float32 rounding of a
+  bound.
+
+A problem has either a Gaussian-copula `correlation` or a `sampler`, never
+both. New validation errors:
+
+| Input | Error |
+|---|---|
+| `correlation=` and `sampler=` together | `ValueError` |
+| `sampler_dimension` without a sampler | `ValueError` |
+| `with_sampler(3)` | `TypeError`: sampler must be callable |
+| `sampler_dimension=0` or `True` | `ValueError`: positive integer needed |
+| wrong output shape | `ValueError` |
+| non-finite output | `ValueError` |
+| fixed columns changed | `ValueError` |
+
+Where a sampler works:
+
+- `jaxgsa.kucherenko.sample(problem, n_samples)` and
+  `jaxgsa.vkoga.analyze(problem, X, Y, key=...)` read the sampler from the
+  problem.
+- `jaxgsa.sampling.monte_carlo(problem, n_samples)` honours the sampler. Use it to
+  draw `X` for given-data methods such as PAWN, Borgonovo, optimal transport,
+  HSIC, HDMR and rank.
+- Sobol, Morris and eFAST designs and the independence-only analyses refuse a
+  custom-sampler problem. They refuse it in the same way as a correlated
+  problem.
+- A saved design or result does not store the sampler function. A loaded
+  problem still reports `dependence == "custom"`, so the independence checks
+  still refuse it. It raises if you ask it to draw new rows. Attach the
+  sampler again with `problem.with_sampler(f, sampler_dimension=k)`.
+- Verbose output prints `dependence: independent | gaussian copula | custom
+  sampler`.
+
+Kucherenko and VKOGA share one estimator for the Gaussian copula and for a
+custom sampler.
+
+#### Exact Shapley effects and PME from Kucherenko
+
+`jaxgsa.kucherenko.sample(problem, base_n=n, subsets="all")` builds a design with one
+block for every proper non-empty subset of inputs, plus the joint blocks A and
+B. The design has `base_n * 2^D` runs. It needs `2 <= D <= 12`. To build it,
+jaxgsa asks the copula or the custom sampler to hold any group of inputs fixed
+and redraw the rest. The default `subsets="singletons"` design keeps its
+layout.
+
+On the new design, `KucherenkoResult` gains:
+
+- `closed` and `subset_total`: the closed and total index of every subset,
+  with `closed_conf` and `subset_total_conf` intervals, and the `subsets`
+  membership matrix.
+- `result.shapley(cost="total")`: exact conditional-variance Shapley effects
+  (Owen 2014; Song, Nelson and Staum 2016). Use `cost="closed"` for the closed
+  cost.
+- `result.pme()`: proportional marginal effects (Herin et al. 2024). An input
+  that the model does not use gets exactly 0.
+
+Both methods return a `ShapleyResult` with `backend="exact"`. Intervals need
+`n_bootstrap > 0` and `keep_replicates=True`. `shapley()` on a singletons
+design raises `ValueError` and points to `subsets="all"`. `D > 12` raises and
+points to `shapley` or `vkoga`.
+
+On a `subsets="all"` design, `S1` and `ST` come from the subset blocks. They
+differ slightly from a singletons run.
+
+`KucherenkoSamples` has new attributes `dependence`, `subsets` and `n_blocks`.
+Saved designs and results store `subsets` and the metadata keys `dependence`,
+`subsets` and `sampler_dimension`. Results store `closed*`, `subset_total*` and
+`subset_members`. Older files load as `"gaussian"` or `"independent"` with
+`subsets="singletons"`.
+
+#### `jaxgsa.rank`
+
+`jaxgsa.rank.analyze(problem, X, Y)` estimates the first-order Sobol' index
+from one existing sample, with the rank statistic of Gamboa, Gremaud, Klein and
+Lagnoux (2022). `jaxgsa.rank.indices` is the traceable core. See the
+[rank page](https://danielepessina.github.io/jaxgsa/api/rank).
+
+- It accepts independent, Gaussian-copula and custom-sampler problems.
+- It supports scalar, multi-output, time-series and irregular `Y`.
+- It refuses categorical inputs and needs at least 3 rows.
+- `n_bootstrap > 0` needs `key`.
+- `S1` is not clipped, so it can be negative.
+- The intervals use 80% subsamples without replacement, rescaled to full size.
+  The reported interval is the hull of an interval around the estimate and one
+  around a bias-corrected estimate. This rule is a heuristic, checked by
+  simulation.
+- The estimator divides by `n`, as in the paper. R `sensitivity::sobolrank`
+  divides by `n - 1`.
+
+#### `result.aggregate()`
+
+`SobolResult`, `KucherenkoResult` and `PCEResult` have
+`aggregate(*, weights="variance")`. It collapses the output axes into one index
+per input. The weights are the output variances (Gamboa, Janon, Klein and
+Lagnoux 2014; Lamboni, Monod and Makowski 2011). Use `weights="equal"` for equal
+weights.
+
+- The output axes of the result collapse to size 1. A result with no output
+  axes is returned unchanged.
+- The single output of an aggregated result is named `"aggregate"`, so
+  `to_dataset()` works on a problem with output names.
+- With `keep_replicates=True`, each bootstrap draw is aggregated and the
+  interval is drawn again.
+- With a bootstrap but without `keep_replicates=True`, the intervals are `None`
+  and a warning says why.
+- An aggregated `PCEResult` holds indices only. `predict()` and `shapley()`
+  raise `ValueError`.
+- `SobolResult` has a new optional field `variance`, set by `sobol.analyze`.
+  Results built without it accept `weights="equal"` only. The Sobol' indices
+  are unchanged.
+
+### Changed
+
+- VKOGA training-data guidance. The old guidance said the training design must
+  be independent. That was wrong. Both nested estimators draw from conditionals
+  of the joint distribution. They never draw an input from its whole marginal.
+  A surrogate trained on draws from the analysis distribution works well. In a
+  check on the Ishigami function with a Gaussian copula (`rho_ab = 0.8`,
+  `rho_bc = -0.4`, 400 training rows, 4 seeds), the index error against
+  Kucherenko at 2^16 base points was 0.007 for copula training draws and 0.010
+  for independent draws. The new rule: the surrogate must be accurate where the
+  analysis distribution puts its mass. An independent design is a safe default
+  when the correlation is not fixed yet, or when you reuse one fit under
+  several correlations.
+
+### Fixed
+
+- The dependent-input warnings now also fire for custom samplers.
+- `hsic.analyze` no longer gives int64 dtype warnings in float32.
+
+### Studio
 
 The browser app moved from `/jaxgsa/workbench/` to
 [`/jaxgsa/studio/`](https://danielepessina.github.io/jaxgsa/studio/). It is
 now called jaxgsa studio. The old `/workbench/` address redirects to the new
-one and keeps the query and hash. The web CI now runs lint, type checks, unit
-tests and the build for `web/`.
-
-### Fixed in jaxgsa studio
+one and keeps the query and hash.
 
 - Opening step 01 again no longer deletes the design, the outputs and the
   results. A custom problem stays when you move between steps.
@@ -33,138 +347,21 @@ tests and the build for `web/`.
 - PAWN and Borgonovo now run on truncated Gaussian inputs.
 - The step bar fits on a phone screen. Method checkboxes and form fields have
   accessible names.
+- `@jax-js/jax` is pinned to 0.1.24.
 
-### New: custom input samplers
+### Docs and CI
 
-A problem can now carry a custom sampler. A custom sampler describes any joint
-distribution, not only a Gaussian copula. Kucherenko and VKOGA analyse such a
-problem.
-
-Declare the sampler on the problem:
-
-- `jaxgsa.Problem(names=..., bounds=..., sampler=f, sampler_dimension=2)`
-- `jaxgsa.Problem.from_dict(..., sampler=f, sampler_dimension=2)`
-- `problem.with_sampler(f, dimension=2)`. Use `problem.with_sampler(None)` to
-  drop it.
-
-A problem has either a Gaussian-copula `correlation` or a `sampler`, never
-both. Declaring both raises `ValueError`.
-
-The sampler is called as `sampler(uniform_points, *, conditioning_rows=None,
-fixed_indices=())`. jaxgsa makes three kinds of call: a joint draw
-(`fixed_indices=()`), a draw that keeps `x_i` (`fixed_indices=(i,)`), and a
-draw that keeps every input except `x_i`. The sampler must return `(n, D)`
-finite rows and copy the fixed columns exactly. It must be deterministic.
-`jaxgsa.sampling.InputSampler` is the public type of the callback.
-
-- `jaxgsa.kucherenko.sample(problem, n)` and
-  `jaxgsa.vkoga.analyze(problem, X, Y, key=...)` read the sampler from the
-  problem.
-- `jaxgsa.sampling.monte_carlo(problem, n)` honours the sampler. Use it to
-  draw `X` for given-data methods such as PAWN, Borgonovo, optimal transport
-  and HSIC.
-- Sobol, Morris and eFAST designs and the independence-only analyses refuse a
-  custom-sampler problem. They refuse it in the same way as a correlated
-  problem.
-- Verbose output prints `dependence: independent | gaussian copula | custom
-  sampler` instead of `correlation: ...`.
-- A saved design or result does not store the sampler function. A loaded
-  problem still reports `dependence == "custom"`, so the independence checks
-  still refuse it. It raises if you ask it to draw new rows. Attach the
-  sampler again with `problem.with_sampler(f, dimension=k)`.
-
-### New: condition on any subset of the inputs
-
-The Gaussian copula and custom samplers can now keep any sorted subset of
-inputs and draw the others from their joint conditional law. The Gaussian
-copula uses a Schur complement in latent space. Before, only one input, or all
-inputs but one, could be fixed.
-
-The `jaxgsa.sampling.InputSampler` contract is stronger. A sampler must now be
-a deterministic inverse Rosenblatt map, also called a conditional-quantile map.
-It must accept any sorted `fixed_indices`. Rejection sampling and MCMC are not
-valid. Existing joint and one-input calls do not change.
-
-### New: exact Shapley effects and PME from Kucherenko
-
-`jaxgsa.kucherenko.sample(problem, n, subsets="all")` builds a design with one
-block for every subset of inputs. The design has `n * 2^D` runs. It needs
-`2 <= D <= 12`. The default `subsets="singletons"` design is unchanged.
-
-On the new design, `KucherenkoResult` gains:
-
-- `closed` and `subset_total`: the closed and total index of every subset,
-  with `closed_conf` and `subset_total_conf` intervals, and the `subsets`
-  membership matrix.
-- `result.shapley(cost="total")`: exact conditional-variance Shapley effects
-  (Owen 2014; Song, Nelson and Staum 2016). Use `cost="closed"` for the closed
-  cost.
-- `result.pme()`: proportional marginal effects (Herin et al. 2024). An input
-  that the model does not use gets exactly 0.
-
-Both methods return a `ShapleyResult` with `backend="exact"`. Intervals need
-`n_bootstrap > 0` and `keep_replicates=True`. Saved designs store `subsets`.
-Older files load as `"singletons"`.
-
-### New: `jaxgsa.rank`
-
-`jaxgsa.rank.analyze(problem, X, Y)` estimates the first-order Sobol' index
-from one existing sample, with the rank statistic of Gamboa, Gremaud, Klein and
-Lagnoux (2022). It accepts independent, Gaussian-copula and custom-sampler
-problems. It refuses categorical inputs. It supports scalar, multi-output and
-time-series outputs, and `n_bootstrap` intervals. `jaxgsa.rank.indices` is the
-traceable core. See the [rank page](https://danielepessina.github.io/jaxgsa/api/rank).
-
-The intervals use 80% subsamples without replacement, rescaled to full size.
-The reported interval is the hull of an interval around the estimate and one
-around a bias-corrected estimate. This rule is a heuristic, checked by
-simulation. The estimator divides by `n`, as in the paper. R
-`sensitivity::sobolrank` divides by `n - 1`.
-
-### New: `result.aggregate()`
-
-`SobolResult`, `KucherenkoResult` and `PCEResult` have
-`aggregate(*, weights="variance")`. It collapses the output axes into one index
-per input. The weights are the output variances (Gamboa, Janon, Klein and
-Lagnoux 2014; Lamboni, Monod and Makowski 2011). Use `weights="equal"` for equal
-weights. The result keeps its class, with output axes of size 1. With
-`keep_replicates=True`, each bootstrap draw is aggregated and the interval is
-drawn again. Otherwise the intervals are NaN.
-
-`SobolResult` has a new optional field `variance`, set by `sobol.analyze`.
-Results built without it accept `weights="equal"` only. The Sobol' indices
-are unchanged.
-
-### Changed: VKOGA training-data guidance
-
-The old guidance was wrong. It said the training design must be independent.
-Both nested estimators draw from conditionals of the joint distribution. They
-never draw an input from its whole marginal. A surrogate trained on draws from
-the analysis distribution works well. In a check on the Ishigami function with
-a Gaussian copula (`rho_ab = 0.8`, `rho_bc = -0.4`, 400 training rows, 4
-seeds), the index error against Kucherenko at 2^16 base points was 0.007 for
-copula training draws and 0.010 for independent draws.
-
-The new rule: the surrogate must be accurate where the analysis distribution
-puts its mass. An independent design is a safe default when the correlation is
-not fixed yet, or when you reuse one fit under several correlations. Avoid
-training data that misses regions the analysis covers.
-
-`jaxgsa.vkoga.analyze` no longer warns about correlated training data.
-
-### Breaking changes
-
-jaxgsa is published but not yet announced, so these changes land without a
-deprecation period.
-
-- `Problem.has_correlated_inputs` is removed. Use `problem.dependence`. It
-  returns `"independent"`, `"gaussian"` or `"custom"`.
-- `KucherenkoResult.is_correlated` and `VKOGAResult.is_correlated` are
-  removed. Use `result.dependence`, with the same three values. The saved
-  dataset attribute `is_correlated` is now `dependence`.
-- Kucherenko and VKOGA share one estimator for the Gaussian copula and for a
-  custom sampler. The random streams of Kucherenko's built-in designs changed.
-  A given `seed` no longer reproduces the design of an earlier version.
+- New `api/rank.md` page. The Kucherenko, VKOGA and dependent-inputs pages were
+  rewritten. Every API page now has citations. The method count is fourteen.
+- SEO: sitemap, canonical and Open Graph tags, JSON-LD, `llms.txt` and
+  `robots.txt`. The canonical and sitemap URLs now keep the `/jaxgsa/` path.
+- `CITATION.cff` uses the concept DOI 10.5281/zenodo.22099117. It always
+  resolves to the latest version. The README has BibTeX.
+- CI runs the f32 and f64 numerical tests on every pull request. Tests run with
+  `pytest-xdist` (`-n auto`, added to the `dev` extra). A new fast end-to-end
+  test suite exists.
+- The web CI runs lint, type checks, unit tests, a Playwright suite and the
+  build for `web/`, on Node 24.
 
 ## 1.0.2
 
