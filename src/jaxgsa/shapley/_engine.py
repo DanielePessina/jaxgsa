@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Literal
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
@@ -49,7 +50,7 @@ def build_membership(subsets: Sequence[tuple[int, ...]], D: int) -> np.ndarray:
 
 def shapley_from_variances(
     V: Array,
-    membership: np.ndarray,
+    membership: Array | np.ndarray,
 ) -> tuple[Array, Array, Array]:
     """Aggregate per-term variance fractions into Shapley, S1, and ST indices.
 
@@ -103,6 +104,29 @@ def _normalize_partial_variances(
     return jnp.where(invalid, jnp.nan, partial / jnp.where(invalid, 1.0, total))
 
 
+@jax.jit
+def _allocate_variances(
+    partial: Array, explained: Array, membership: Array | np.ndarray
+) -> tuple[Array, Array, Array]:
+    """Normalize ``partial`` and allocate it to ``(Sh, S1, ST)`` in one jitted call.
+
+    Run eagerly, the normalization and the three weighted matmuls compile as
+    a dozen tiny programs on the first call. Jitted, they compile once per
+    shape. The membership matrix is an argument, not a constant, so a new
+    matrix of the same shape does not compile again.
+
+    Args:
+        partial: Per-term variance contributions, shape ``(..., n_terms)``.
+        explained: Per-slice fit diagnostic, shape ``(...,)``.
+        membership: Boolean membership matrix, shape ``(n_terms, D)``.
+
+    Returns:
+        Tuple ``(Sh, S1, ST)``, each of shape ``(..., D)``.
+    """
+    normalized = _normalize_partial_variances(partial, explained)
+    return shapley_from_variances(normalized, membership)
+
+
 def _shapley_result_from_variances(
     partial: Array,
     membership: np.ndarray,
@@ -147,8 +171,7 @@ def _shapley_result_from_variances(
         the same diagnostic and warned about it before this result existed,
         and warning again would report one problem twice.
     """
-    normalized = _normalize_partial_variances(partial, explained)
-    Sh, S1, ST = shapley_from_variances(normalized, membership)
+    Sh, S1, ST = _allocate_variances(partial, explained, membership)
     return ShapleyResult(
         Sh=Sh,
         S1=S1,

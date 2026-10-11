@@ -43,6 +43,7 @@ from jaxgsa._core.validation import (
     as_key,
 )
 from jaxgsa.shapley._engine import (
+    _allocate_variances,
     _normalize_partial_variances,
     build_membership,
     shapley_from_variances,
@@ -121,6 +122,36 @@ def _raise_correlated_pce_backend(problem: "Problem", method: str) -> None:
     )
 
 
+@jax.jit
+def _pce_allocation(
+    coefficients: Array, Y_3d: Array, membership: Array | np.ndarray
+) -> tuple[Array, Array, Array]:
+    """Allocate PCE partial variances to ``(Sh, S1, ST)`` in one jitted call.
+
+    Everything after the fit is one compiled computation: the partial
+    variances, the constant-slice gate, the explained variance and the
+    allocation.
+
+    Args:
+        coefficients: PCE coefficients, shape ``(T, K, n_terms)``.
+        Y_3d: Outputs, shape ``(N, T, K)``.
+        membership: Boolean membership matrix, shape ``(n_terms - 1, D)``.
+
+    Returns:
+        Tuple ``(Sh, S1, ST)``, each of shape ``(T, K, D)``.
+    """
+    partial = coefficients[..., 1:] ** 2
+    total = partial.sum(axis=-1)
+    total_var = jnp.var(Y_3d, axis=0)
+    # A constant slice's sample variance is almost never bit-exact zero
+    # in float32 (the mean itself rounds), so gate on the slice being
+    # numerically constant instead of on var == 0.
+    is_constant = _is_constant_slice(Y_3d.reshape(Y_3d.shape[0], -1)).reshape(Y_3d.shape[1:])
+    explained = jnp.where(is_constant, jnp.nan, total / total_var)
+    normalized = _normalize_partial_variances(partial, explained)
+    return shapley_from_variances(normalized, membership)
+
+
 def _indices_3d(
     problem: "Problem",
     X: Array,
@@ -165,15 +196,8 @@ def _indices_3d(
         fit = _fit_pce_core(problem, X, Y_3d, diagnostics=False, **backend_kwargs)
         # Orthonormality makes each squared non-constant coefficient a
         # partial variance; multi_index[1:] > 0 IS the membership matrix.
-        partial = fit.coefficients[..., 1:] ** 2
         membership = np.asarray(fit.multi_index[1:] > 0)
-        total = partial.sum(axis=-1)
-        total_var = jnp.var(Y_3d, axis=0)
-        # A constant slice's sample variance is almost never bit-exact zero
-        # in float32 (the mean itself rounds), so gate on the slice being
-        # numerically constant instead of on var == 0.
-        is_constant = _is_constant_slice(Y_3d.reshape(Y_3d.shape[0], -1)).reshape(Y_3d.shape[1:])
-        explained = jnp.where(is_constant, jnp.nan, total / total_var)
+        return _pce_allocation(fit.coefficients, Y_3d, membership)
     else:
         from jaxgsa.hdmr._analyze import _hdmr_core
 
@@ -188,8 +212,7 @@ def _indices_3d(
         total = partial.sum(axis=-1)
         explained = total
 
-    normalized = _normalize_partial_variances(partial, explained)
-    return shapley_from_variances(normalized, membership)
+    return _allocate_variances(partial, explained, membership)
 
 
 def indices(
