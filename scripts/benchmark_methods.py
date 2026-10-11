@@ -132,6 +132,7 @@ from jaxgsa import (
     optimal_transport,
     pawn,
     pce,
+    rank,
     shapley,
     sobol,
     vkoga,
@@ -369,6 +370,12 @@ def _prep_optimal_transport(case: Case) -> Callable[[], Any]:
     )
 
 
+def _prep_rank(case: Case) -> Callable[[], Any]:
+    return lambda: rank.analyze(
+        case.problem, case.X, case.Y, n_bootstrap=20, key=jax.random.key(SEED)
+    )
+
+
 def _prep_pce(case: Case) -> Callable[[], Any]:
     return lambda: pce.analyze(case.problem, case.X, case.Y, order=3)
 
@@ -411,6 +418,7 @@ PREPARE: dict[str, Callable[[Case], Callable[[], Any]]] = {
     "optimal_transport": _prep_optimal_transport,
     "pawn": _prep_pawn,
     "pce": _prep_pce,
+    "rank": _prep_rank,
     "shapley": _prep_shapley,
     "sobol": _prep_sobol,
     "vkoga": _prep_vkoga,

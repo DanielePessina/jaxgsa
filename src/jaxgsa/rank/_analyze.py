@@ -42,6 +42,7 @@ References:
 from __future__ import annotations
 
 from collections.abc import Sequence
+from functools import partial
 from typing import Literal, NamedTuple, cast
 
 import jax
@@ -108,6 +109,7 @@ def _prefixed(checks: Sequence[ScalarCheck]) -> tuple[ScalarCheck, ...]:
     )
 
 
+@jax.jit
 def _rank_core(X: Array, Y_3d: Array) -> Array:
     """Compute rank-based first-order indices for every output slice.
 
@@ -132,6 +134,31 @@ def _rank_core(X: Array, Y_3d: Array) -> Array:
 
     s1 = jax.lax.map(one_param, order.T)  # (D, T, K)
     return jnp.moveaxis(s1, 0, -1)
+
+
+@partial(jax.jit, static_argnames=("m",))
+def _subsample_estimates(keys: Array, X: Array, Y_3d: Array, m: int) -> Array:
+    """Compute the index on one subsample of ``m`` distinct rows per key.
+
+    One compiled program runs every draw. The draws run one after another,
+    so the peak memory is one subsample, not all of them.
+
+    Args:
+        keys: PRNG keys, one per resample, shape ``(n_resamples,)``.
+        X: Input samples, shape ``(N, D)``.
+        Y_3d: Outputs, shape ``(N, T, K)``.
+        m: Rows kept in each subsample.
+
+    Returns:
+        Indices per resample, shape ``(n_resamples, T, K, D)``.
+    """
+    n = X.shape[0]
+
+    def one_draw(subkey: Array) -> Array:
+        rows = jax.random.permutation(subkey, n)[:m]
+        return _rank_core(X[rows], Y_3d[rows])
+
+    return jax.lax.map(one_draw, keys)
 
 
 def _subsample_draws(
@@ -184,11 +211,7 @@ def _subsample_draws(
     n = int(X.shape[0])
     m = min(max(int(_SUBSAMPLE_FRACTION * n), 2), n - 1)
     scale = (m / (n - m)) ** 0.5
-    raw = []
-    for subkey in jax.random.split(key, n_resamples):
-        rows = jax.random.permutation(subkey, n)[:m]
-        raw.append(_rank_core(X[rows], Y_3d[rows]))
-    stacked = jnp.stack(raw)
+    stacked = _subsample_estimates(jax.random.split(key, n_resamples), X, Y_3d, m)
     mean = jnp.mean(stacked, axis=0)
     spread = scale * (stacked - mean)
     # The estimator carries a bias of order 1/N. Under that model the
