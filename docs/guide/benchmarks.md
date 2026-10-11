@@ -182,7 +182,7 @@ uv run .auto/bench_gsa.py --repeats 9 --out benchmark.json
 Run the correctness-checked Sobol and HDMR comparison:
 
 ```bash
-uv run --extra dev benchmark_salib.py
+uv run --extra dev scripts/benchmark_salib.py
 ```
 
 Regenerate the four-method cache and figures:

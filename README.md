@@ -14,6 +14,25 @@ jaxgsa helps you find which inputs drive variation in a model's output. You
 choose input distributions, evaluate your model at sample points, and use
 jaxgsa to estimate each input's effect. It does not run your model for you.
 
+## Why jaxgsa
+
+- **Many outputs in one call.** Time series and multi-output models are
+  analysed in one compiled JAX call, not one Python loop per output. On 300
+  output slices, Sobol with second-order indices is 35x faster than SALib, and
+  HDMR is about 1000x faster
+  ([benchmarks](https://danielepessina.github.io/jaxgsa/guide/benchmarks)).
+  For one scalar output, SALib is as fast or faster.
+- **Gradients come free.** DGSM gets model derivatives from JAX, and the
+  estimator cores are differentiable, so an index can sit inside a larger
+  JAX computation
+  ([differentiation guide](https://danielepessina.github.io/jaxgsa/guide/differentiation)).
+- **Fourteen methods behind one interface.** Variance-based, screening,
+  moment-independent, kernel and surrogate methods share the same `Problem`,
+  sample and result types.
+- **Dependent inputs.** Correlated, custom-sampled and categorical inputs are
+  supported, with methods whose indices keep their meaning under dependence.
+- **CPU, GPU or TPU.** The same code runs on any device JAX supports.
+
 ## Install
 
 ```bash
@@ -140,9 +159,10 @@ Or as a text citation:
 > Sensitivity Analysis in JAX*. Zenodo.
 > https://doi.org/10.5281/zenodo.22099117
 
-To cite a specific release, use its version DOI instead — for v1.0.2 that is
-[10.5281/zenodo.23057233](https://doi.org/10.5281/zenodo.23057233). See
-[CITATION.cff](CITATION.cff) for machine-readable citation metadata.
+To cite a specific release, use its version DOI instead. The
+[Zenodo record](https://doi.org/10.5281/zenodo.22099117) lists the DOI of
+each release. See [CITATION.cff](CITATION.cff) for machine-readable citation
+metadata.
 
 ## License
 

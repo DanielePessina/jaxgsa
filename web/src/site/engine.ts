@@ -2,7 +2,7 @@
  * The site engine: jax-js device bootstrap, CSV/run_id exchange helpers, and
  * the thin typed wrappers that wire the React layer to the method ports.
  *
- * Ownership rule (see PLAN-WASM.md): every port call consumes its input
+ * Ownership rule (see web/docs/PLAN-WASM.md): every port call consumes its input
  * arrays. The analyze ports build their own device copies from the host
  * arrays they receive, and `analyzeKucherenko` additionally consumes the
  * `np.Array` objects this module builds — so each workflow call creates
@@ -80,7 +80,7 @@ export interface ParsedCsv {
 }
 
 // ---------------------------------------------------------------------------
-// Y exchange model (PLAN-WEB-UI.md D1)
+// Y exchange model (web/docs/PLAN-WEB-UI.md D1)
 // ---------------------------------------------------------------------------
 
 /** One output column of a Y upload: an output at a single time point. */

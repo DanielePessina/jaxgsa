@@ -1,5 +1,5 @@
 /**
- * Secure upload handling (PLAN-WEB-UI.md D2): format detection, unsafe-format
+ * Secure upload handling (web/docs/PLAN-WEB-UI.md D2): format detection, unsafe-format
  * rejection, size guards, and CSV/Parquet parsing to the shared `ParsedCsv`
  * shape the engine consumes.
  *
