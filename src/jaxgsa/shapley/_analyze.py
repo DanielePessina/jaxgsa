@@ -21,10 +21,9 @@ from jax import Array
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.bootstrap import interval
 from jaxgsa._core.entry import (
-    at_least,
+    bootstrap_checks,
     check_scalars,
     gates,
-    in_open_interval,
     one_of,
     require,
 )
@@ -290,7 +289,8 @@ def indices(
                 not (include_correlative and backend == "pce"),
                 "include_correlative requires backend='hdmr'",
             ),
-        )
+        ),
+        method="jaxgsa.shapley.indices",
     )
     if backend == "pce":
         _raise_correlated_pce_backend(problem, "jaxgsa.shapley.indices")
@@ -499,15 +499,8 @@ def analyze(
     # tolerated depends on the backend, so it is settled below instead.
     gates(_SPEC, problem, method="jaxgsa.shapley.analyze", check=("categorical",))
     check_scalars(
-        (
-            at_least("n_bootstrap", n_bootstrap, 0),
-            one_of("ci_method", ci_method, ("quantile", "gaussian")),
-            in_open_interval("conf_level", conf_level, 0.0, 1.0),
-            require(
-                n_bootstrap == 0 or key is not None,
-                "key is required when n_bootstrap > 0",
-            ),
-        )
+        (*bootstrap_checks(n_bootstrap, ci_method, conf_level, key),),
+        method="jaxgsa.shapley.analyze",
     )
     # The backend prints no summary of its own: one shapley call prints one
     # block. A caller-supplied verbose inside backend_kwargs is stripped, not

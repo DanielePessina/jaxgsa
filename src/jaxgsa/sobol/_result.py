@@ -151,6 +151,4 @@ class SobolResult(SchemaResult):
                 replicates, so the intervals are dropped.
         """
         updates = aggregate_indices(self, weights=weights, variance=self.variance)
-        if self.variance is not None and updates:
-            updates["variance"] = self.variance.sum(keepdims=True)
         return dataclasses.replace(self, **updates)

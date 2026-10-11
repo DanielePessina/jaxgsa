@@ -17,7 +17,6 @@ from jaxgsa.hsic import analyze, indices
 from jaxgsa.hsic._analyze import (
     _build_one_kernel,
     _hsic_v,
-    _linear_quantile_by_selection,
     _median_bandwidth_sq,
     _pairwise_quantile_by_selection,
 )
@@ -273,40 +272,17 @@ class TestMedianBandwidth:
         reference = jnp.median(dists_sq[jnp.triu_indices(n, k=1)])
         np.testing.assert_allclose(float(_median_bandwidth_sq(x)), float(reference), rtol=1e-6)
 
-    @pytest.mark.parametrize("n", [5, 128])
-    @pytest.mark.parametrize("scale", [1.0, 1e8])
-    def test_selection_matches_the_sorting_quantile_bit_for_bit(self, n, scale):
-        """Tier T1 (reference implementation): selection reproduces the sort.
-
-        The bandwidth reads two order statistics of the ``(N, N)`` distance
-        matrix. ``jnp.quantile`` gets them by sorting; the estimator gets them
-        by bisecting on the float bit pattern, which is what makes HSIC fast.
-        The oracle is therefore ``jnp.quantile`` itself, and the tolerance is
-        zero: a selection that returned a neighbouring element, or blended it
-        differently, would be a different bandwidth and a different index.
-        The large scale is here because the blend can land on an exact tie
-        between two float32 values, which is where a hand-written weighted
-        sum stops agreeing with the library one.
-        """
-        x = jnp.asarray(np.random.default_rng(n).normal(size=n) * scale, dtype=jnp.float32)
-        dists_sq = (x[:, None] - x[None, :]) ** 2
-        q = (n**2 + n - 1) / (2 * (n**2 - 1))
-        np.testing.assert_array_equal(
-            np.asarray(_linear_quantile_by_selection(dists_sq, q)),
-            np.asarray(jnp.quantile(dists_sq, q)),
-        )
-
     @pytest.mark.parametrize("n", [4, 5, 6, 7, 8, 9, 31, 50, 127, 128, 333])
     @pytest.mark.parametrize(
         "kind", ["normal", "ties", "constant", "dupes", "huge", "tiny", "negative"]
     )
     @pytest.mark.parametrize("x64", [False, True], ids=["f32", "f64"])
-    def test_pairwise_selection_matches_the_matrix_selection_bit_for_bit(self, n, kind, x64):
+    def test_pairwise_selection_matches_the_sorting_quantile_bit_for_bit(self, n, kind, x64):
         """Tier T1 (reference implementation): no matrix, same order statistic.
 
         ``_pairwise_quantile_by_selection`` finds the median-heuristic order
-        statistic from the sorted sample alone. The oracle is the radix
-        selection over the explicit ``(N, N)`` matrix. The tolerance is
+        statistic from the sorted sample alone. The oracle is
+        ``jnp.quantile`` over the explicit ``(N, N)`` matrix, which sorts it. The tolerance is
         zero, over odd and even sizes, ties, a constant column, heavy
         duplication, overflow to infinity, subnormal squares and negatives.
         """
@@ -325,7 +301,7 @@ class TestMedianBandwidth:
         with jax.enable_x64(x64):
             x = jnp.asarray(raw, dtype=jnp.float64 if x64 else jnp.float32)
             dists_sq = (x[:, None] - x[None, :]) ** 2
-            expected = np.asarray(_linear_quantile_by_selection(dists_sq, q))
+            expected = np.asarray(jnp.quantile(dists_sq, q))
             actual = np.asarray(_pairwise_quantile_by_selection(x, q))
         np.testing.assert_array_equal(actual, expected)
 
@@ -342,33 +318,8 @@ class TestMedianBandwidth:
         x = x.at[7].set(poison)
         dists_sq = (x[:, None] - x[None, :]) ** 2
         q = (40**2 + 40 - 1) / (2 * (40**2 - 1))
-        assert np.isnan(np.asarray(_linear_quantile_by_selection(dists_sq, q)))
+        assert np.isnan(np.asarray(jnp.quantile(dists_sq, q)))
         assert np.isnan(np.asarray(_pairwise_quantile_by_selection(x, q)))
-
-    @pytest.mark.parametrize(
-        "poison", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "-inf"]
-    )
-    def test_non_finite_values_match_the_sorting_quantile(self, poison):
-        """Tier T1 (reference implementation): non-finite parity with the sort.
-
-        The selection bisects on the float bit pattern, which orders finite
-        non-negative floats correctly but says nothing useful about NaN. The
-        estimator therefore carries an explicit NaN branch, and infinities
-        ride on the bit ordering alone. Both behaviours only matter because
-        they must agree with ``jnp.quantile``, so ``jnp.quantile`` is the
-        oracle and the tolerance is zero.
-
-        This reaches the analyzer through invalid data, which is the only way
-        a non-finite distance appears in practice.
-        """
-        values = jnp.asarray(np.abs(np.random.default_rng(0).normal(size=64)), dtype=jnp.float32)
-        values = values.at[7].set(poison)
-        q = 0.5
-        expected = np.asarray(jnp.quantile(values, q))
-        actual = np.asarray(_linear_quantile_by_selection(values, q))
-        np.testing.assert_array_equal(np.isnan(actual), np.isnan(expected))
-        if not np.isnan(expected):
-            np.testing.assert_array_equal(actual, expected)
 
     @pytest.mark.slow
     def test_half_integer_position_matches_the_sorting_quantile(self):
@@ -380,18 +331,19 @@ class TestMedianBandwidth:
         copy that split.
 
         This is the case that tells the two apart. With x64 on, a
-        ``float32`` array of ``4096**2`` elements puts the median position
+        ``float32`` matrix of ``4096**2`` entries puts the median position
         at ``8390655.5``, which ``float32`` cannot hold. Reading the plan in
-        the *array's* dtype collapses it to the single rank ``8390655`` and
-        returns ``8390655.0``, while ``jnp.quantile`` blends in ``float64``
-        and returns ``8390656.0``.
+        the *array's* dtype collapses it to the single rank ``8390655``,
+        while ``jnp.quantile`` blends in ``float64``. A ``float32`` ramp
+        keeps every squared distance exact (``4095**2 < 2**24``).
         """
         n = 4096
         with jax.enable_x64():
-            values = jnp.arange(n * n, dtype=jnp.float32)
+            x = jnp.arange(n, dtype=jnp.float32)
+            dists_sq = (x[:, None] - x[None, :]) ** 2
             q = (n**2 + n - 1) / (2 * (n**2 - 1))
-            expected = np.asarray(jnp.quantile(values, q))
-            actual = np.asarray(_linear_quantile_by_selection(values, q))
+            expected = np.asarray(jnp.quantile(dists_sq, q))
+            actual = np.asarray(_pairwise_quantile_by_selection(x, q))
         np.testing.assert_array_equal(actual, expected)
 
     @pytest.mark.parametrize("n", [64, 257])

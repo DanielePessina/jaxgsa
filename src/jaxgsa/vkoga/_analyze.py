@@ -35,9 +35,8 @@ from jax import Array
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import apply_batched, resolve_batch_size
 from jaxgsa._core.bootstrap import interval
-from jaxgsa._core.copula import independent_correlation
-from jaxgsa._core.dependence import CustomDraws, Draws, GaussianDraws
-from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare, require
+from jaxgsa._core.dependence import Draws, draws_for
+from jaxgsa._core.entry import at_least, bootstrap_checks, prepare, require
 from jaxgsa._core.invalid import OnInvalid
 from jaxgsa._core.irregular import (
     IrregularResult,
@@ -54,7 +53,7 @@ from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa._core.validation import _is_constant_slice, as_key
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.problem import Problem
-from jaxgsa.vkoga._engine import _cross_validate, _fit_vkoga, _predict_vkoga
+from jaxgsa.vkoga._engine import _content_digest, _cross_validate, _fit_vkoga, _predict_vkoga
 from jaxgsa.vkoga._indices import estimate_correlated_indices
 from jaxgsa.vkoga._result import VKOGAResult
 
@@ -317,9 +316,7 @@ def analyze(
                 )
             ),
             at_least("batch_size", batch_size, 1),
-            at_least("n_bootstrap", n_bootstrap, 0),
-            one_of("ci_method", ci_method, ("quantile", "gaussian")),
-            in_open_interval("conf_level", conf_level, 0.0, 1.0),
+            *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
             require(
                 D >= 2,
                 f"Correlated sensitivity indices need at least 2 parameters, got {D}",
@@ -327,8 +324,9 @@ def analyze(
         ),
         min_kept=n_folds,
     )
-    # Checked after the preamble so a problem this method refuses outright
-    # (categorical parameters) still reports that, and not a missing key.
+    # The index estimate needs a key even with no bootstrap. This check runs
+    # after the preamble, so with n_bootstrap=0 a problem this method refuses
+    # outright (categorical parameters) still reports that, not a missing key.
     if key is None:
         raise ValueError("key is required for the Monte-Carlo index estimate")
     seed = _seed_from_key(key)
@@ -355,14 +353,7 @@ def analyze(
     # The input draws are built once and shared by the point estimate and every
     # bootstrap replicate. The dependence comes from the problem alone, so the
     # result's ``dependence`` always equals ``problem.dependence``.
-    input_draws: Draws
-    if problem.sampler is not None:
-        input_draws = CustomDraws(problem)
-    else:
-        declared = problem.correlation
-        if declared is None:
-            declared = independent_correlation(problem.n_params)
-        input_draws = GaussianDraws(problem.with_correlation(declared))
+    input_draws = draws_for(problem)
 
     # The RBF kernel is isotropic, so every column must share a scale; the
     # marginal CDF map is the same transform HDMR uses for its basis.
@@ -456,7 +447,6 @@ def analyze(
         S_C=_shape_index(indices.S_C),
         S_IU=_shape_index(indices.S_IU),
         problem=problem,
-        dependence=problem.dependence,
         variance=_shape_slice(indices.variance),
         n_centers=int(state.n_centers),
         gamma=float(gamma_value),
@@ -871,13 +861,10 @@ def _make_unit_predictor(state, y_mean: Array, batch_size: int | None):
         A callable mapping ``(n, D)`` unit-cube rows to ``(n, S)`` outputs.
     """
     # The kernel reads centres, coefficients and gamma, and adds ``y_mean``;
-    # those four arrays decide the compiled executable, so the memo key is
-    # their full content plus the (runtime) batch policy.
+    # those four arrays decide the compiled executable, so the memo key is a
+    # digest of their full content plus the (runtime) batch policy.
     key = (
-        np.asarray(state.centers).tobytes(),
-        np.asarray(state.coefficients).tobytes(),
-        np.asarray(state.gamma).tobytes(),
-        np.asarray(y_mean).tobytes(),
+        _content_digest(state.centers, state.coefficients, state.gamma, y_mean),
         batch_size,
     )
     pred = _PREDICTOR_CACHE.get(key)
@@ -890,7 +877,7 @@ def _make_unit_predictor(state, y_mean: Array, batch_size: int | None):
     def predict(U: np.ndarray) -> np.ndarray:
         U_device = jnp.asarray(U)
         batch = resolve_batch_size(bytes_per_row, U_device.shape[0], batch_size)
-        return np.asarray(apply_batched(compiled, U_device, batch))
+        return apply_batched(compiled, U_device, batch, to_host=True)
 
     if len(_PREDICTOR_CACHE) >= _PREDICTOR_CACHE_MAX:
         _PREDICTOR_CACHE.pop(next(iter(_PREDICTOR_CACHE)))

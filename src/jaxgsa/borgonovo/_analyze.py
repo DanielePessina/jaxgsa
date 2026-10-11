@@ -53,7 +53,7 @@ from __future__ import annotations
 
 import math
 import warnings
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from functools import lru_cache
 from typing import Literal, NamedTuple, cast
 
@@ -66,11 +66,9 @@ from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import interval
 from jaxgsa._core.entry import (
-    ScalarCheck,
     at_least,
+    bootstrap_checks,
     check_scalars,
-    in_open_interval,
-    one_of,
     prepare,
     require,
     validate_inputs,
@@ -206,24 +204,6 @@ _MIN_GRID_TILE = 2
 # Fewest samples that still build two conditioning classes with a density
 # each. Below this there is nothing to compare.
 _MIN_KEPT = 4
-
-
-def _prefixed(checks: Sequence[ScalarCheck]) -> tuple[ScalarCheck, ...]:
-    """Prefix each failing-argument message with ``jaxgsa.borgonovo: ``.
-
-    Args:
-        checks: Scalar verdicts built with the shared helpers.
-
-    Returns:
-        The same verdicts, each message starting ``jaxgsa.borgonovo: `` unless
-        it already starts with ``jaxgsa``.
-    """
-    return tuple(
-        c
-        if c.message.startswith("jaxgsa")
-        else ScalarCheck(c.ok, f"jaxgsa.borgonovo: {c.message}")
-        for c in checks
-    )
 
 
 def _plischke_n_classes(n_samples: int) -> int:
@@ -1090,27 +1070,19 @@ def analyze(
         Y,
         X=X,
         on_invalid=on_invalid,
-        checks=_prefixed(
-            (
-                at_least("grid_size", grid_size, 2),
-                at_least("n_bootstrap", n_bootstrap, 0),
-                one_of("ci_method", ci_method, ("quantile", "gaussian")),
-                in_open_interval("conf_level", conf_level, 0.0, 1.0),
-                require(
-                    0 <= float(degenerate_tol) < 1,
-                    f"degenerate_tol must be in [0, 1), got {degenerate_tol}",
-                ),
-                at_least("slice_chunk_size", slice_chunk_size, 1),
-                require(
-                    not (bias_correct and n_bootstrap == 0),
-                    "bias_correct=True needs bootstrap replicates, but "
-                    "n_bootstrap is 0. Pass n_bootstrap=100 (and a key), or leave "
-                    "bias_correct=False for the plain estimate.",
-                ),
-                require(
-                    n_bootstrap == 0 or key is not None,
-                    "key is required when n_bootstrap > 0",
-                ),
+        checks=(
+            at_least("grid_size", grid_size, 2),
+            *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
+            require(
+                0 <= float(degenerate_tol) < 1,
+                f"degenerate_tol must be in [0, 1), got {degenerate_tol}",
+            ),
+            at_least("slice_chunk_size", slice_chunk_size, 1),
+            require(
+                not (bias_correct and n_bootstrap == 0),
+                "bias_correct=True needs bootstrap replicates, but "
+                "n_bootstrap is 0. Pass n_bootstrap=100 (and a key), or leave "
+                "bias_correct=False for the plain estimate.",
             ),
         ),
         min_kept=_MIN_KEPT,
@@ -1434,18 +1406,15 @@ def indices(
             positive float; or if any parameter is categorical.
     """
     check_scalars(
-        _prefixed(
-            (
-                (
-                    at_least("grid_size", grid_size, 2),
-                    require(
-                        0 <= float(degenerate_tol) < 1,
-                        f"degenerate_tol must be in [0, 1), got {degenerate_tol}",
-                    ),
-                    at_least("slice_chunk_size", slice_chunk_size, 1),
-                )
-            )
-        )
+        (
+            at_least("grid_size", grid_size, 2),
+            require(
+                0 <= float(degenerate_tol) < 1,
+                f"degenerate_tol must be in [0, 1), got {degenerate_tol}",
+            ),
+            at_least("slice_chunk_size", slice_chunk_size, 1),
+        ),
+        method="jaxgsa.borgonovo.indices",
     )
     X = validate_inputs(problem, X)
     Y = _validate_output(Y, int(X.shape[0]), problem)

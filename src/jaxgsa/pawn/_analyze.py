@@ -61,7 +61,6 @@ References:
 from __future__ import annotations
 
 import warnings
-from collections.abc import Sequence
 from functools import lru_cache, partial
 from typing import Literal, NamedTuple, cast
 
@@ -74,11 +73,9 @@ from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import interval
 from jaxgsa._core.entry import (
-    ScalarCheck,
     at_least,
+    bootstrap_checks,
     check_scalars,
-    in_open_interval,
-    one_of,
     prepare,
     require,
     validate_inputs,
@@ -123,22 +120,6 @@ _MIN_KEPT = 4
 # fewer than two samples, so a heavily depleted parameter reports an index
 # that rests on a handful of bins without saying so.
 _MIN_VALID_BIN_FRACTION = 0.5
-
-
-def _prefixed(checks: Sequence[ScalarCheck]) -> tuple[ScalarCheck, ...]:
-    """Prefix each failing-argument message with ``jaxgsa.pawn: ``.
-
-    Args:
-        checks: Scalar verdicts built with the shared helpers.
-
-    Returns:
-        The same verdicts, each message starting ``jaxgsa.pawn: `` unless
-        it already starts with ``jaxgsa``.
-    """
-    return tuple(
-        c if c.message.startswith("jaxgsa") else ScalarCheck(c.ok, f"jaxgsa.pawn: {c.message}")
-        for c in checks
-    )
 
 
 def _count_valid_bins(bin_idx: Array, n_eff: int) -> np.ndarray:
@@ -273,12 +254,12 @@ def _bin_indices(problem: Problem, X: Array, n_classes: int) -> tuple[Array, int
         return _equal_width_bins(cdf_to_unit_interval(X, problem), n_classes), n_classes
 
     n_eff = max(n_classes, max(n_levels for _, n_levels in dims_levels))
-    cat_positions = {d: j for j, (d, _) in enumerate(dims_levels)}
+    levels_of_dim = dict(dims_levels)
 
     # cdf_to_unit_interval refuses a categorical parameter by design, so the
     # continuous columns are transformed through a continuous-only problem.
-    cont_dims = [d for d in range(problem.n_params) if d not in cat_positions]
-    cont_columns: list[Array] = []
+    cont_dims = [d for d in range(problem.n_params) if d not in levels_of_dim]
+    columns: dict[int, Array] = {}
     if cont_dims:
         cont_problem = Problem._from_normalized_inputs(
             names=tuple(problem.names[d] for d in cont_dims),
@@ -287,15 +268,11 @@ def _bin_indices(problem: Problem, X: Array, n_classes: int) -> tuple[Array, int
         cont_idx = _equal_width_bins(
             cdf_to_unit_interval(X[:, jnp.asarray(cont_dims)], cont_problem), n_classes
         )
-        cont_columns = [cont_idx[:, j].astype(jnp.int32) for j in range(len(cont_dims))]
-
-    cont_iter = iter(cont_columns)
-    levels_of_dim = dict(dims_levels)
-    columns = [
-        _level_codes(X[:, d], levels_of_dim[d]) if d in cat_positions else next(cont_iter)
-        for d in range(problem.n_params)
-    ]
-    return jnp.stack(columns, axis=1), n_eff
+        for j, d in enumerate(cont_dims):
+            columns[d] = cont_idx[:, j].astype(jnp.int32)
+    for d, n_levels in dims_levels:
+        columns[d] = _level_codes(X[:, d], n_levels)
+    return jnp.stack([columns[d] for d in range(problem.n_params)], axis=1), n_eff
 
 
 def _level_codes(column: Array, n_levels: int) -> Array:
@@ -802,18 +779,15 @@ def indices(
             ``slice_chunk_size`` is given and is below 1.
     """
     check_scalars(
-        _prefixed(
-            (
-                (
-                    require(
-                        statistic in ("median", "max", "mean"),
-                        f"statistic must be 'median', 'max', or 'mean', got {statistic!r}",
-                    ),
-                    at_least("n_classes", n_classes, 2),
-                    at_least("slice_chunk_size", slice_chunk_size, 1),
-                )
-            )
-        )
+        (
+            require(
+                statistic in ("median", "max", "mean"),
+                f"statistic must be 'median', 'max', or 'mean', got {statistic!r}",
+            ),
+            at_least("n_classes", n_classes, 2),
+            at_least("slice_chunk_size", slice_chunk_size, 1),
+        ),
+        method="jaxgsa.pawn.indices",
     )
     X_arr = validate_inputs(problem, X)
     Y_arr = _validate_output(Y, int(X_arr.shape[0]), problem)
@@ -972,22 +946,14 @@ def analyze(
         Y,
         X=X,
         on_invalid=on_invalid,
-        checks=_prefixed(
-            (
-                require(
-                    statistic in ("median", "max", "mean"),
-                    f"statistic must be 'median', 'max', or 'mean', got {statistic!r}",
-                ),
-                at_least("n_classes", n_classes, 2),
-                at_least("n_bootstrap", n_bootstrap, 0),
-                one_of("ci_method", ci_method, ("quantile", "gaussian")),
-                in_open_interval("conf_level", conf_level, 0.0, 1.0),
-                at_least("slice_chunk_size", slice_chunk_size, 1),
-                require(
-                    n_bootstrap == 0 or key is not None,
-                    "key is required when n_bootstrap > 0",
-                ),
-            )
+        checks=(
+            require(
+                statistic in ("median", "max", "mean"),
+                f"statistic must be 'median', 'max', or 'mean', got {statistic!r}",
+            ),
+            at_least("n_classes", n_classes, 2),
+            *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
+            at_least("slice_chunk_size", slice_chunk_size, 1),
         ),
         min_kept=_MIN_KEPT,
         # A constant slice leaves every conditional distribution equal to

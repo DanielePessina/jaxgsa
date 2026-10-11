@@ -331,6 +331,6 @@ class TestPaddingIsInert:
             junk = jnp.full((n_pad, *A.shape[1:]), 1.0e6, dtype=A.dtype)
             return jnp.concatenate([A, junk], axis=0)
 
-        monkeypatch.setattr(fit_mod, "_pad_rows", loud_pad)
+        monkeypatch.setattr(fit_mod, "pad_rows", loud_pad)
         loud_padded = fit_mod._fit_hdmr(X_n, lanes3, **kw)
         self._assert_lanes_identical(zero_padded, loud_padded, 3)

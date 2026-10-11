@@ -91,6 +91,7 @@ __all__ = [
     "Context",
     "ScalarCheck",
     "at_least",
+    "bootstrap_checks",
     "check_scalars",
     "gates",
     "in_open_interval",
@@ -150,18 +151,52 @@ def one_of(name: str, value: object, options: Sequence[object]) -> ScalarCheck:
     )
 
 
-def check_scalars(checks: Sequence[ScalarCheck]) -> None:
+def bootstrap_checks(
+    n_bootstrap: int, ci_method: object, conf_level: float, key: object
+) -> tuple[ScalarCheck, ...]:
+    """The argument checks every bootstrapped ``analyze()`` shares.
+
+    The key check sits with the other cheap argument checks, so a missing key
+    is reported before the point estimate is paid for.
+
+    Args:
+        n_bootstrap: Bootstrap replicates requested.
+        ci_method: How the interval is built.
+        conf_level: Confidence level of the interval.
+        key: PRNG key for the resampling, or ``None``.
+
+    Returns:
+        The verdicts, in the order they are reported.
+    """
+    return (
+        at_least("n_bootstrap", n_bootstrap, 0),
+        one_of("ci_method", ci_method, ("quantile", "gaussian")),
+        in_open_interval("conf_level", conf_level, 0.0, 1.0),
+        require(
+            not (n_bootstrap > 0 and key is None),
+            "key is required when n_bootstrap > 0",
+        ),
+    )
+
+
+def check_scalars(checks: Sequence[ScalarCheck], method: str | None = None) -> None:
     """Raise on the first failing scalar argument.
 
     Args:
         checks: The verdicts, in the order the caller wants them reported.
+        method: The public entry point, such as ``"jaxgsa.rank.analyze"``.
+            When set, the message starts with its module (``jaxgsa.rank: ``)
+            unless it already names ``jaxgsa``.
 
     Raises:
         ValueError: On the first check that did not pass.
     """
     for check in checks:
         if not check.ok:
-            raise ValueError(check.message)
+            message = check.message
+            if method is not None and not message.startswith("jaxgsa"):
+                message = f"{method.rsplit('.', 1)[0]}: {message}"
+            raise ValueError(message)
 
 
 def gates(
@@ -277,7 +312,6 @@ def prepare(
     method: str | None = None,
     extra: Mapping[str, Any] | None = None,
     n_expected: int | None = None,
-    expected_from: str = "X",
     expand: Callable[[Array], Array] | None = None,
     n_units: int | None = None,
     unit_of_row: npt.NDArray[np.intp] | None = None,
@@ -339,9 +373,6 @@ def prepare(
         n_expected: Rows ``Y`` must have. Defaults to ``X``'s row count; pass
             it explicitly for a design-based method, whose row count comes
             from the design.
-        expected_from: What fixes ``n_expected`` in the row-count error.
-            ``"X"`` for a given-data method. A design-based method passes the
-            design attribute, such as ``"samples.samples"``.
         expand: How to rebuild the full design layout from one output per
             unique design row, normally ``SamplingResult.expand_outputs``. It
             runs after the shape contract and before the non-finite check, so
@@ -399,7 +430,7 @@ def prepare(
         unit=unit,
         allow_drop=unit is not InvalidUnit.CURVE,
     )
-    check_scalars(checks)
+    check_scalars(checks, method)
 
     # The design-based methods gated in sample(). There is no design to
     # analyze that the sampler did not already agree to build, so re-gating
@@ -417,7 +448,8 @@ def prepare(
         X = validate_inputs(problem, X)
         if n_expected is None:
             n_expected = int(X.shape[0])
-    Y = _validate_output(Y, n_expected, problem, expected_from)
+    # Without X, the row count comes from the design the sampler built.
+    Y = _validate_output(Y, n_expected, problem, "X" if X is not None else "samples.samples")
     deferred_expand: Callable[[Array], Array] | None = None
     if expand is not None:
         # The user evaluated the model once per unique row. The estimator,

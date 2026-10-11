@@ -26,7 +26,7 @@ from jax import Array
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
-from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare
+from jaxgsa._core.entry import at_least, bootstrap_checks, prepare
 from jaxgsa._core.invalid import OnInvalid, _unit_of_row_for_policy
 from jaxgsa._core.irregular import (
     IrregularResult,
@@ -36,6 +36,7 @@ from jaxgsa._core.irregular import (
     analyze_irregular,
 )
 from jaxgsa._core.result import CIInfo
+from jaxgsa._core.sampling import require_design
 from jaxgsa._core.validation import (
     YLayout,
     _prepare_Y,
@@ -46,7 +47,6 @@ from jaxgsa._core.validation import (
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.morris._result import MorrisResult
 from jaxgsa.morris._sampling import MorrisSamples
-from jaxgsa.problem import Problem
 
 # Keyword-only parameters the irregular engine forwards unchanged to the
 # per-channel recursive analyze() calls. verbose is excluded:
@@ -230,24 +230,6 @@ class MorrisIndices(NamedTuple):
     sigma: Array
 
 
-def _require_samples(samples: object, qualname: str) -> None:
-    """Raise a clear error when the first argument is not the design.
-
-    Args:
-        samples: The first positional argument the caller gave.
-        qualname: The public name of the function, for the message.
-
-    Raises:
-        TypeError: If ``samples`` is not a :class:`MorrisSamples`.
-    """
-    if not isinstance(samples, MorrisSamples):
-        got = "a Problem" if isinstance(samples, Problem) else f"a {type(samples).__name__}"
-        raise TypeError(
-            f"jaxgsa.morris.{qualname} takes the MorrisSamples from jaxgsa.morris.sample "
-            f"as its first argument, not {got}."
-        )
-
-
 def indices(
     samples: MorrisSamples,
     Y: Array,
@@ -310,7 +292,7 @@ def indices(
         ValueError: If ``Y`` is not 1-D, 2-D, or 3-D, or its first axis does
             not match ``samples.n_runs``.
     """
-    _require_samples(samples, "indices")
+    require_design(samples, MorrisSamples, "jaxgsa.morris.indices", "jaxgsa.morris.sample")
     _validate_output(Y, None, None)
     Y3, layout = _prepare_Y(samples.expand_outputs(Y))
     # Design facts, not facts about Y: moving them to the device under trace
@@ -478,7 +460,7 @@ def analyze(
             for is deliberate, so it gives no warning.
         JaxgsaWarning: If an output slice has zero variance.
     """
-    _require_samples(samples, "analyze")
+    require_design(samples, MorrisSamples, "jaxgsa.morris.analyze", "jaxgsa.morris.sample")
     key = as_key(key, "morris")
     if _is_irregular_y(Y):
         return analyze_irregular(
@@ -507,13 +489,10 @@ def analyze(
         Y,
         on_invalid=on_invalid,
         checks=(
-            one_of("ci_method", ci_method, ("quantile", "gaussian")),
+            *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
             at_least("resample_chunk_size", resample_chunk_size, 1),
-            at_least("n_bootstrap", n_bootstrap, 0),
-            in_open_interval("conf_level", conf_level, 0.0, 1.0),
         ),
         n_expected=int(samples.samples.shape[0]),
-        expected_from="samples.samples",
         expand=samples.expand_outputs,
         n_units=r,
         # Under on_invalid='skip' the check never reads the row map
@@ -533,11 +512,6 @@ def analyze(
     )
     Y = ctx.Y3
     keep, invalid = ctx.keep, ctx.invalid
-
-    # Checked here, with the other cheap argument checks, so a missing key is
-    # reported before the point estimate is paid for.
-    if n_bootstrap > 0 and key is None:
-        raise ValueError("key is required when n_bootstrap > 0")
 
     idx_after, idx_before, delta = _reindex_after_drop(samples, keep)
     if not keep.all():

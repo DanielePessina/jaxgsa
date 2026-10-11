@@ -46,7 +46,7 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from jaxgsa._core.batching import get_memory_budget, resolve_batch_size
+from jaxgsa._core.batching import get_memory_budget, pad_rows, resolve_batch_size
 from jaxgsa.hdmr._engine import _build_B1, _build_B2, _build_B3, term_order_map
 
 # ---------------------------------------------------------------------------
@@ -567,13 +567,6 @@ def _get_finalize(n: int, n1: int, n2: int, m1: int, m2: int, m3: int, N: int):
 # ---------------------------------------------------------------------------
 
 
-def _pad_rows(A: Array, n_pad: int) -> Array:
-    """Pad ``A`` with ``n_pad`` zero rows on the sample axis."""
-    if n_pad == 0:
-        return A
-    return jnp.concatenate([A, jnp.zeros((n_pad, *A.shape[1:]), dtype=A.dtype)], axis=0)
-
-
 class _FitHDMR(NamedTuple):
     """The raw fit :func:`_fit_hdmr` returns, one field per name.
 
@@ -701,8 +694,8 @@ def _fit_hdmr(
     # slice that is sliced off at the end.
     n_row_batches = math.ceil(N / b)
     n_chunks = math.ceil(L / cs)
-    X_p = _pad_rows(X_n, n_row_batches * b - N)
-    Y_p = _pad_rows(Y_nl, n_row_batches * b - N)
+    X_p = pad_rows(X_n, n_row_batches * b - N)
+    Y_p = pad_rows(Y_nl, n_row_batches * b - N)
     if n_chunks * cs != L:
         Y_p = jnp.concatenate(
             [Y_p, jnp.zeros((Y_p.shape[0], n_chunks * cs - L), dtype=Y_p.dtype)], axis=1

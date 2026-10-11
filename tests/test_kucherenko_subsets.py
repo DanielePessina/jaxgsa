@@ -426,12 +426,13 @@ def test_singleton_design_round_trip_keeps_the_default(tmp_path):
     assert kucherenko.KucherenkoSamples.load(tmp_path / "design.npz").subsets == "singletons"
 
 
-def test_old_saved_design_without_subsets_loads_as_singletons():
+def test_saved_design_with_a_bad_or_missing_subsets_label_is_refused():
     from jaxgsa.kucherenko._sampling import _parse_subsets
 
-    assert _parse_subsets(None) == "singletons"
     with pytest.raises(ValueError, match="Unknown subsets"):
         _parse_subsets("some")
+    with pytest.raises(ValueError, match="Unknown subsets"):
+        _parse_subsets(None)
 
 
 def test_result_with_subsets_round_trips_through_netcdf(result4, tmp_path):

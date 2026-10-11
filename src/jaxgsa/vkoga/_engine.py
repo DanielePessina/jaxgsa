@@ -52,6 +52,7 @@ References:
 from __future__ import annotations
 
 import functools
+import hashlib
 from collections.abc import Callable
 from typing import Any, NamedTuple
 
@@ -517,6 +518,26 @@ def _predict_vkoga(state: _VKOGAState, X_new: Array) -> Array:
 # repeated analysis on the same data reuse the exact compiled executable --
 # bit-identical, and ~100x faster -- while fresh data still re-traces
 # exactly as before. The cache is bounded so frozen constants cannot accumulate.
+def _content_digest(*arrays: ArrayLike) -> bytes:
+    """Return a digest of the dtype, shape and bytes of ``arrays``.
+
+    A cache keyed on this digest holds 16 bytes per entry, not a host copy of
+    the data.
+
+    Args:
+        *arrays: Arrays to hash, in order.
+
+    Returns:
+        A 16-byte BLAKE2b digest.
+    """
+    h = hashlib.blake2b(digest_size=16)
+    for array in arrays:
+        a = np.ascontiguousarray(array)
+        h.update(f"{a.dtype.str}{a.shape}".encode())
+        h.update(a.data)
+    return h.digest()
+
+
 _CV_SCORER_CACHE_MAX = 4
 _CV_SCORER_CACHE: dict[tuple[Any, ...], Callable[[Array], Array]] = {}
 
@@ -600,14 +621,10 @@ def _cross_validate(
 
     # The scorer must freeze the per-call data as constants (see
     # :data:`_CV_SCORER_CACHE`). A repeated analysis on the same data is the
-    # common bootstrap / parameter-sweep pattern, so the cache key is the
-    # full data content; the host copy for the key is a few KiB here and is
-    # dwarfed by the fold fits either way.
+    # common bootstrap / parameter-sweep pattern, so the cache key is a digest
+    # of the full data content.
     cache_key = (
-        np.asarray(X).tobytes(),
-        np.asarray(Y).tobytes(),
-        np.asarray(fold_of).tobytes(),
-        np.asarray(ridge_vec).tobytes(),
+        _content_digest(X, Y, fold_of, ridge_vec),
         n_slices,
         n_folds,
         max_centers,

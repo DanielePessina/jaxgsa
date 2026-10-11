@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from operator import index as _as_index
-from typing import Any, Protocol
+from typing import Protocol
 
 import jax.numpy as jnp
 import numpy as np
@@ -46,6 +46,19 @@ from jaxgsa.problem import CategoricalSpec, InputSpec, Problem, UniformSpec
 
 # Keeps the probit and the marginal inverse CDFs finite at exact 0 and 1.
 _UNIT_CLIP = 1e-12
+
+
+def probit(u: np.ndarray) -> np.ndarray:
+    """Map unit-interval coordinates to standard normal scores ``Phi^-1(u)``.
+
+    Args:
+        u: Coordinates in ``[0, 1]``. Exact 0 and 1 are clipped, so the
+            scores stay finite.
+
+    Returns:
+        Normal scores, same shape as ``u``.
+    """
+    return ndtri(np.clip(u, _UNIT_CLIP, 1.0 - _UNIT_CLIP))
 
 
 class InputSampler(Protocol):
@@ -303,9 +316,20 @@ class Draws(Protocol):
     their fixed columns exactly.
     """
 
-    dimension: int
-    rest_dimension: int
-    self_dimension: int
+    @property
+    def dimension(self) -> int:
+        """Uniform columns for :meth:`joint`."""
+        ...
+
+    @property
+    def rest_dimension(self) -> int:
+        """Uniform columns for :meth:`rest_given_self`."""
+        ...
+
+    @property
+    def self_dimension(self) -> int:
+        """Uniform columns for :meth:`self_given_rest`."""
+        ...
 
     def joint(self, u: np.ndarray) -> np.ndarray:
         """Return joint rows."""
@@ -374,19 +398,15 @@ class GaussianDraws:
                 ``"gaussian"``.
         """
         R = problem.correlation
+        if R is None:
+            R = independent_correlation(problem.n_params)
         self.problem = problem
-        self.plan: _ConditionalPlan = build_conditional_plan(
-            independent_correlation(problem.n_params) if R is None else R
-        )
+        self.plan: _ConditionalPlan = build_conditional_plan(R)
         self.dimension = problem.n_params
         self.rest_dimension = problem.n_params - 1
         self.self_dimension = 1
-        self._correlation = independent_correlation(problem.n_params) if R is None else R
+        self._correlation = R
         self._subset_plans: dict[tuple[int, ...], _SubsetPlan] = {}
-
-    @staticmethod
-    def _normal(u: np.ndarray) -> np.ndarray:
-        return ndtri(np.clip(u, _UNIT_CLIP, 1.0 - _UNIT_CLIP))
 
     @staticmethod
     def _check_width(u: np.ndarray, width: int, method: str) -> None:
@@ -398,13 +418,13 @@ class GaussianDraws:
     def joint(self, u: np.ndarray) -> np.ndarray:
         """Return correlated latent rows."""
         self._check_width(u, self.dimension, "joint")
-        return self._normal(u) @ self.plan.chol_full.T
+        return probit(u) @ self.plan.chol_full.T
 
     def joint_led_by(self, u: np.ndarray, index: int) -> np.ndarray:
         """Draw ``Z_i`` from ``u[:, 0]``, then ``Z_-i | Z_i`` from the rest of ``u``."""
         self._check_width(u, self.dimension, "joint_led_by")
-        z_self = self._normal(u[:, 0])
-        z_rest = draw_rest_given_self(self.plan, index, z_self, self._normal(u[:, 1:]))
+        z_self = probit(u[:, 0])
+        z_rest = draw_rest_given_self(self.plan, index, z_self, probit(u[:, 1:]))
         return assemble_latent(index, self.plan.others[index], z_self, z_rest)
 
     def rest_given_self(self, u: np.ndarray, rows: np.ndarray, index: int) -> np.ndarray:
@@ -412,7 +432,7 @@ class GaussianDraws:
         self._check_width(u, self.rest_dimension, "rest_given_self")
         others = self.plan.others[index]
         z_self = rows[:, index]
-        z_rest = draw_rest_given_self(self.plan, index, z_self, self._normal(u))
+        z_rest = draw_rest_given_self(self.plan, index, z_self, probit(u))
         return assemble_latent(index, others, z_self, z_rest)
 
     def self_given_rest(self, u: np.ndarray, rows: np.ndarray, index: int) -> np.ndarray:
@@ -420,7 +440,7 @@ class GaussianDraws:
         self._check_width(u, self.self_dimension, "self_given_rest")
         others = self.plan.others[index]
         z_rest = rows[:, others]
-        z_self = draw_self_given_rest(self.plan, index, z_rest, self._normal(u[:, 0]))
+        z_self = draw_self_given_rest(self.plan, index, z_rest, probit(u[:, 0]))
         return assemble_latent(index, others, z_self, z_rest)
 
     def free_dimension(self, fixed: tuple[int, ...]) -> int:
@@ -464,9 +484,7 @@ class GaussianDraws:
             self._subset_plans[fixed] = plan
         result = np.array(rows, dtype=np.float64, copy=True)
         if plan.free.shape[0]:
-            result[:, plan.free] = draw_free_given_fixed(
-                plan, rows[:, plan.fixed], self._normal(u)
-            )
+            result[:, plan.free] = draw_free_given_fixed(plan, rows[:, plan.fixed], probit(u))
         return result
 
     def to_physical(self, rows: np.ndarray) -> np.ndarray:
@@ -501,16 +519,20 @@ class CustomDraws:
         self.problem = problem
         self.sampler: InputSampler = sampler
         self.dimension: int = dimension
-        self.rest_dimension: int = dimension
-        self.self_dimension: int = dimension
 
-    def _checks(self) -> dict[str, Any]:
-        """Return the support-check keywords for :func:`transform_samples`."""
-        return {"input_specs": self.problem.input_specs, "names": self.problem.names}
+    @property
+    def rest_dimension(self) -> int:
+        """Uniform columns for :meth:`rest_given_self`; a sampler reads all of them."""
+        return self.dimension
+
+    @property
+    def self_dimension(self) -> int:
+        """Uniform columns for :meth:`self_given_rest`; a sampler reads all of them."""
+        return self.dimension
 
     def joint(self, u: np.ndarray) -> np.ndarray:
         """Return joint physical rows."""
-        return transform_samples(self.sampler, u, self.problem.n_params, **self._checks())
+        return self.free_given_fixed(u, u, ())  # ``rows`` is ignored when nothing is fixed
 
     def joint_led_by(self, u: np.ndarray, index: int) -> np.ndarray:
         """Return :meth:`joint` rows; a custom sampler fixes its own column map."""
@@ -519,26 +541,12 @@ class CustomDraws:
 
     def rest_given_self(self, u: np.ndarray, rows: np.ndarray, index: int) -> np.ndarray:
         """Keep ``x_i`` and redraw the rest through the sampler."""
-        return transform_samples(
-            self.sampler,
-            u,
-            self.problem.n_params,
-            conditioning_rows=rows,
-            fixed_indices=(index,),
-            **self._checks(),
-        )
+        return self.free_given_fixed(u, rows, (index,))
 
     def self_given_rest(self, u: np.ndarray, rows: np.ndarray, index: int) -> np.ndarray:
         """Keep ``x_-i`` and redraw ``x_i`` through the sampler."""
         fixed = tuple(j for j in range(self.problem.n_params) if j != index)
-        return transform_samples(
-            self.sampler,
-            u,
-            self.problem.n_params,
-            conditioning_rows=rows,
-            fixed_indices=fixed,
-            **self._checks(),
-        )
+        return self.free_given_fixed(u, rows, fixed)
 
     def free_dimension(self, fixed: tuple[int, ...]) -> int:
         """Return ``dimension``; a custom sampler always reads every column."""
@@ -559,7 +567,8 @@ class CustomDraws:
             self.problem.n_params,
             conditioning_rows=rows if fixed else None,
             fixed_indices=fixed,
-            **self._checks(),
+            input_specs=self.problem.input_specs,
+            names=self.problem.names,
         )
 
     def to_physical(self, rows: np.ndarray) -> np.ndarray:
@@ -569,22 +578,9 @@ class CustomDraws:
     def to_unit(self, rows: np.ndarray) -> np.ndarray:
         """Map physical rows through the declared marginal CDFs.
 
-        Raises:
-            ValueError: If a row falls outside a declared bounded support,
-                which means the sampler disagrees with the problem's
-                marginals.
+        Every row comes from the sampler through :func:`transform_samples`,
+        which has already checked it against the declared support.
         """
-        for i, spec in enumerate(self.problem.input_specs):
-            low, high = getattr(spec, "low", None), getattr(spec, "high", None)
-            column = rows[:, i]
-            if (low is not None and np.any(column < low)) or (
-                high is not None and np.any(column > high)
-            ):
-                raise ValueError(
-                    f"The custom sampler returned values outside the declared "
-                    f"support of {self.problem.names[i]!r}. Declare marginals "
-                    "that match the sampler."
-                )
         unit = cdf_to_unit_interval(jnp.asarray(rows), self.problem)
         return np.asarray(unit, dtype=np.float64)
 

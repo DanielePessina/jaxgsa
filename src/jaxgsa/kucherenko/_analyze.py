@@ -59,7 +59,7 @@ from jax import Array
 
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.bootstrap import interval
-from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare, require
+from jaxgsa._core.entry import bootstrap_checks, prepare
 from jaxgsa._core.invalid import OnInvalid, _unit_of_row_for_policy
 from jaxgsa._core.irregular import (
     IrregularResult,
@@ -69,14 +69,13 @@ from jaxgsa._core.irregular import (
     analyze_irregular,
 )
 from jaxgsa._core.result import CIInfo
+from jaxgsa._core.sampling import require_design
 from jaxgsa._core.validation import (
     _warn_zero_variance_slices,
     as_key,
 )
 from jaxgsa.kucherenko._result import KucherenkoResult
 from jaxgsa.kucherenko._sampling import KucherenkoSamples
-from jaxgsa.kucherenko._subsets import subset_matrix
-from jaxgsa.sobol._sampling import _require_samples
 
 # Keyword-only parameters the irregular engine forwards unchanged to the
 # per-channel recursive analyze() calls. verbose is excluded:
@@ -303,7 +302,7 @@ def analyze(
             NaN), or if non-finite outputs are found under a policy that does
             not raise.
     """
-    _require_samples(
+    require_design(
         samples, KucherenkoSamples, "jaxgsa.kucherenko.analyze", "jaxgsa.kucherenko.sample"
     )
     key = as_key(key, "kucherenko")
@@ -333,17 +332,8 @@ def analyze(
         problem,
         Y,
         on_invalid=on_invalid,
-        checks=(
-            at_least("n_bootstrap", n_bootstrap, 0),
-            one_of("ci_method", ci_method, ("quantile", "gaussian")),
-            in_open_interval("conf_level", conf_level, 0.0, 1.0),
-            require(
-                n_bootstrap == 0 or key is not None,
-                "key is required when n_bootstrap > 0",
-            ),
-        ),
+        checks=bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
         n_expected=samples.n_runs,
-        expected_from="samples.samples",
         # A base point k feeds the joint row and every conditional row with
         # the same k, so one non-finite output anywhere invalidates all of
         # them. The design is block-major, so base point k sits at rows
@@ -383,12 +373,12 @@ def analyze(
     )
     t0 = _verbose.tic()
     closed = subset_total = None
+    # The singleton indices of a subsets="all" design sit at the masks 2^i:
+    # S1_i from the block that keeps {i}, ST_i from the block that keeps every
+    # column but i (read through the total index of {i}).
+    singles = (1 << np.arange(D)) - 1
     if all_subsets:
         closed, subset_total, variance = _estimate_subsets(f_joint, f_other, f_sub, D)
-        # The singleton indices come from the singleton blocks: S1_i from the
-        # block that keeps {i}, ST_i from the block that keeps every column
-        # but i (read through the total index of {i}).
-        singles = (1 << np.arange(D)) - 1
         S1, ST = closed[singles], subset_total[singles]
     else:
         assert f_first is not None and f_total is not None
@@ -407,33 +397,49 @@ def analyze(
     closed_conf: Array | None = None
     subset_total_conf: Array | None = None
     ci: CIInfo | None = None
-    if n_bootstrap > 0 and all_subsets:
+    if n_bootstrap > 0:
         assert key is not None  # refused by the missing-key check above
-        assert closed is not None and subset_total is not None
         n_kept = f_joint.shape[0]
         idx = np.asarray(
             jax.random.randint(key, shape=(n_bootstrap, n_kept), minval=0, maxval=n_kept)
         )
-        singles = (1 << np.arange(D)) - 1
-        boot_closed, boot_total = [], []
-        for i in idx:
-            c, t, _ = _estimate_subsets(f_joint[i], f_other[i], f_sub[:, i], D)
-            boot_closed.append(c)
-            boot_total.append(t)
-        boot_closed_a = np.stack(boot_closed)  # (R, 2^D - 1, S)
-        boot_total_a = np.stack(boot_total)
-        point = {
-            "S1": _shape(S1),
-            "ST": _shape(ST),
-            "closed": _shape(closed),
-            "subset_total": _shape(subset_total),
-        }
-        draws = {
-            "S1": _shape(boot_closed_a[:, singles]),
-            "ST": _shape(boot_total_a[:, singles]),
-            "closed": _shape(boot_closed_a),
-            "subset_total": _shape(boot_total_a),
-        }
+
+        # One transpose makes each resample's gather contiguous.
+        f_sub_t = np.ascontiguousarray(f_sub.transpose(1, 0, 2)) if all_subsets else None
+
+        def replicate(i: np.ndarray) -> tuple[np.ndarray, ...]:
+            """Index estimates of one resample of the base points.
+
+            One resample takes the same base points out of every block, so
+            every conditional row still sits beside the joint row it was
+            drawn around.
+            """
+            if all_subsets:
+                assert f_sub_t is not None
+                return _estimate_subsets(f_joint[i], f_other[i], f_sub_t[i].transpose(1, 0, 2), D)[
+                    :2
+                ]
+            assert f_first is not None and f_total is not None
+            return _estimate(f_joint[i], f_first[:, i], f_total[:, i])[:2]
+
+        replicates = [replicate(i) for i in idx]
+        boot_first = np.stack([r[0] for r in replicates])  # (R, D or 2^D - 1, S)
+        boot_second = np.stack([r[1] for r in replicates])
+        # _shape already squeezes to the caller's own rank; interval() reads
+        # a shape only to broadcast [lower, upper], so it works the same on
+        # this squeezed layout as on the raw (T, K, D) one.
+        point = {"S1": _shape(S1), "ST": _shape(ST)}
+        if all_subsets:
+            assert closed is not None and subset_total is not None
+            point |= {"closed": _shape(closed), "subset_total": _shape(subset_total)}
+            draws = {
+                "S1": _shape(boot_first[:, singles]),
+                "ST": _shape(boot_second[:, singles]),
+                "closed": _shape(boot_first),
+                "subset_total": _shape(boot_second),
+            }
+        else:
+            draws = {"S1": _shape(boot_first), "ST": _shape(boot_second)}
         confs, ci = interval(
             point,
             draws,
@@ -443,32 +449,8 @@ def analyze(
             keep_replicates=keep_replicates,
         )
         S1_conf, ST_conf = confs["S1"], confs["ST"]
-        closed_conf, subset_total_conf = confs["closed"], confs["subset_total"]
-    elif n_bootstrap > 0:
-        assert key is not None  # refused by the missing-key check above
-        n_kept = f_joint.shape[0]
-        idx = np.asarray(
-            jax.random.randint(key, shape=(n_bootstrap, n_kept), minval=0, maxval=n_kept)
-        )
-        # One resample takes the same base points out of all 2D+1 blocks, so
-        # every conditional row still sits beside the joint row it was drawn
-        # around.
-        assert f_first is not None and f_total is not None  # single-design branch
-        replicates = [_estimate(f_joint[i], f_first[:, i], f_total[:, i]) for i in idx]
-        boot_S1 = np.stack([d[0] for d in replicates])  # (R, D, S)
-        boot_ST = np.stack([d[1] for d in replicates])
-        # _shape already squeezes to the caller's own rank; interval() reads
-        # a shape only to broadcast [lower, upper], so it works the same on
-        # this squeezed layout as on the raw (T, K, D) one.
-        confs, ci = interval(
-            {"S1": _shape(S1), "ST": _shape(ST)},
-            {"S1": _shape(boot_S1), "ST": _shape(boot_ST)},
-            level=conf_level,
-            method=ci_method,
-            n_bootstrap=n_bootstrap,
-            keep_replicates=keep_replicates,
-        )
-        S1_conf, ST_conf = confs["S1"], confs["ST"]
+        if all_subsets:
+            closed_conf, subset_total_conf = confs["closed"], confs["subset_total"]
 
     variance_shaped = ctx.squeeze(jnp.asarray(variance.reshape(n_time, n_out)), n_trailing=0)
     result = KucherenkoResult(
@@ -480,10 +462,8 @@ def analyze(
         S1_conf=S1_conf,
         ST_conf=ST_conf,
         ci=ci,
-        dependence=samples.dependence,
         closed=None if closed is None else _shape(closed),
         subset_total=None if subset_total is None else _shape(subset_total),
-        subsets=subset_matrix(D) if all_subsets else None,
         closed_conf=closed_conf,
         subset_total_conf=subset_total_conf,
     )
@@ -494,14 +474,14 @@ def analyze(
         _verbose.analysis_summary(
             method="jaxgsa.kucherenko.analyze",
             problem=problem,
-            dependence=samples.dependence,
+            dependence=problem.dependence,
             n_runs=n_blocks * n_kept,
             T=n_time,
             K=n_out,
             invalid=invalid,
             timings=[("compute", elapsed)],
             notes=[
-                f"design: {samples.dependence} "
+                f"design: {problem.dependence} "
                 f"({'subsets=all, 2^D' if all_subsets else '2D+1'} = {n_blocks} "
                 f"blocks of {n_kept} base points)"
             ],

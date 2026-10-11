@@ -132,8 +132,6 @@ only the ranking.
 
 ## BorgonovoResult
 
-`DeltaResult` is a kept alias of `BorgonovoResult`. Old code that imports it still works.
-
 | Field | Shape | Meaning |
 | --- | --- | --- |
 | `delta` | `(..., D)` | The delta index. 0 means the output distribution does not change with the parameter, 1 means it fully determines it. Bias-corrected when the correction applied. |

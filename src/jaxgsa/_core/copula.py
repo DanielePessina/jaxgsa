@@ -24,7 +24,7 @@ from typing import Literal, NamedTuple
 
 import numpy as np
 import numpy.typing as npt
-from scipy.stats import norm, qmc, rankdata
+from scipy.stats import norm, rankdata
 
 from jaxgsa._core.sampling import _transform_samples
 from jaxgsa._core.warning_types import JaxgsaWarning
@@ -922,45 +922,6 @@ def _safe_cholesky(cov: np.ndarray, lifts: list[float] | None = None) -> np.ndar
             lifts.append(float(_MIN_EIGENVALUE - eigenvalues.min()))
         lifted = eigenvectors @ np.diag(np.maximum(eigenvalues, _MIN_EIGENVALUE)) @ eigenvectors.T
         return np.linalg.cholesky(lifted)
-
-
-def latent_normal_sample(
-    n: int,
-    dim: int,
-    *,
-    seed: int | np.random.Generator | None,
-    scramble: bool = True,
-) -> np.ndarray:
-    """Draw ``(n, dim)`` standard normal variates from a scrambled Sobol' set.
-
-    Every integrand here runs on a cheap surrogate, so memory rather than
-    model cost limits the sample size. The better equidistribution of a
-    quasi-random set is therefore free, and this module uses one throughout.
-
-    Args:
-        n: Number of points. Pass a power of two: the Sobol' engine loses its
-            balance guarantees (and scipy warns) otherwise. jaxgsa callers
-            round their sample sizes up before calling; the value is used
-            as-is here.
-        dim: Dimension of each point.
-        seed: Random seed or generator for the scrambling.
-        scramble: Whether to scramble the sequence. With ``scramble=False``
-            the sequence's first point (the origin) is skipped: the probit
-            would map it to the clipped extreme deviate, a point no normal
-            sample should contain. The scrambled path is unaffected.
-
-    Returns:
-        ``(n, dim)`` array of standard normal variates.
-    """
-    engine = qmc.Sobol(d=dim, scramble=scramble, seed=seed)
-    if not scramble:
-        # Skip the all-zeros origin point instead of clipping it to -7 sigma
-        # in every coordinate.
-        engine.fast_forward(1)
-    unit = engine.random(n)
-    # Sobol' points can land on exactly 0 or 1 when unscrambled; clip before the
-    # probit so the deviates stay finite.
-    return norm.ppf(np.clip(unit, 1e-12, 1.0 - 1e-12))
 
 
 def latent_to_physical(problem: Problem, Z: np.ndarray) -> np.ndarray:

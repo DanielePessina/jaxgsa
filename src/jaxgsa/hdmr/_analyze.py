@@ -22,9 +22,8 @@ from jaxgsa._core.bootstrap import bootstrap_draws, interval
 from jaxgsa._core.entry import (
     ScalarCheck,
     at_least,
+    bootstrap_checks,
     check_scalars,
-    in_open_interval,
-    one_of,
     prepare,
     require,
 )
@@ -80,11 +79,6 @@ _IRREGULAR_KWARGS = (
 _RELIABLE_ROWS = 300
 
 
-def _prefixed(*checks: ScalarCheck) -> tuple[ScalarCheck, ...]:
-    """Prefix each check's message with ``jaxgsa.hdmr: `` so errors name the method."""
-    return tuple(ScalarCheck(c.ok, f"jaxgsa.hdmr: {c.message}") for c in checks)
-
-
 def _min_rows(D: int, order: int, n_intervals: int) -> int:
     """Fewest rows the B-spline fit can be computed on.
 
@@ -135,7 +129,7 @@ def _fit_scalar_checks(max_iter: int, n_intervals: int, ridge: float) -> tuple[S
     Returns:
         The checks, ready for ``prepare(checks=...)`` or ``check_scalars``.
     """
-    return _prefixed(
+    return (
         at_least("max_iter", max_iter, 1),
         at_least("n_intervals", n_intervals, 1),
         at_least("ridge", ridge, 0.0),
@@ -471,24 +465,12 @@ def analyze(
         X=X,
         on_invalid=on_invalid,
         checks=(
-            *_prefixed(
-                require(
-                    order in (1, 2, 3),
-                    f"order must be 1, 2, or 3, got {order}",
-                )
+            require(
+                order in (1, 2, 3),
+                f"order must be 1, 2, or 3, got {order}",
             ),
             *_fit_scalar_checks(max_iter, n_intervals, ridge),
-            *_prefixed(
-                at_least("n_bootstrap", n_bootstrap, 0),
-                one_of("ci_method", ci_method, ("quantile", "gaussian")),
-                in_open_interval("conf_level", conf_level, 0.0, 1.0),
-                # Checked here, with the other cheap argument checks, so a
-                # missing key is reported before the point estimate is paid for.
-                require(
-                    not (n_bootstrap > 0 and key is None),
-                    "key is required when n_bootstrap > 0",
-                ),
-            ),
+            *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
         ),
         # An invalid order is refused by the checks above; do not size its floor.
         min_kept=_min_rows(problem.n_params, order, n_intervals) if order in (1, 2, 3) else 0,
@@ -672,7 +654,9 @@ def _hdmr_core(
     N, D = X.shape
     if order not in (1, 2, 3):
         raise ValueError(f"jaxgsa.hdmr: order must be 1, 2, or 3, got {order}")
-    check_scalars(_fit_scalar_checks(max_iter, n_intervals, ridge))
+    check_scalars(
+        _fit_scalar_checks(max_iter, n_intervals, ridge), method="jaxgsa.hdmr._hdmr_core"
+    )
     # Below the 300 rows of `_RELIABLE_ROWS` the fit runs, and `analyze` warns.
     # Below this floor it cannot be computed at all.
     floor = _min_rows(D, order, n_intervals)

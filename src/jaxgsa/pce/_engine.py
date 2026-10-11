@@ -8,6 +8,7 @@ by a multi-index set.
 
 from __future__ import annotations
 
+from functools import lru_cache
 from itertools import combinations
 from math import comb, factorial
 
@@ -83,6 +84,7 @@ def _positive_compositions(total: int, n_parts: int):
         yield tuple(parts)
 
 
+@lru_cache(maxsize=32)
 def build_multi_index(D: int, p: int) -> np.ndarray:
     """Enumerate the graded total-degree multi-index set.
 
@@ -95,7 +97,9 @@ def build_multi_index(D: int, p: int) -> np.ndarray:
         p: Maximum total polynomial degree.
 
     Returns:
-        Integer array of shape ``(n_terms, D)`` where n_terms = C(D+p, p).
+        Read-only integer array of shape ``(n_terms, D)`` where
+        n_terms = C(D+p, p). The result is cached per ``(D, p)``, so a
+        refit or a bootstrap replicate does not enumerate it again.
     """
     # Enumerated by support rather than by dimension. A depth-first walk over
     # the D dimensions recurses once per dimension, so its depth is D and it
@@ -128,6 +132,7 @@ def build_multi_index(D: int, p: int) -> np.ndarray:
     for start, stop in degree_bounds:
         block = result[start:stop]
         block[:] = block[np.lexsort(block.T[::-1])]
+    result.setflags(write=False)
     return result
 
 

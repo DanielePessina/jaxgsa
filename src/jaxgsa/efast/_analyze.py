@@ -46,11 +46,11 @@ from jaxgsa._core.irregular import (
     _is_irregular_y,
     analyze_irregular,
 )
+from jaxgsa._core.sampling import require_design
 from jaxgsa._core.validation import YLayout, _prepare_Y
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.efast._result import EFASTResult
 from jaxgsa.efast._sampling import EFASTSamples, _frequency_plan
-from jaxgsa.problem import Problem
 
 # Keyword-only parameters the irregular engine forwards unchanged to the
 # per-channel recursive analyze() calls. verbose is excluded:
@@ -265,24 +265,6 @@ class EFASTIndices(NamedTuple):
     ST: Array
 
 
-def _require_samples(samples: object, qualname: str) -> None:
-    """Raise a clear error when the first argument is not the design.
-
-    Args:
-        samples: The first positional argument the caller gave.
-        qualname: The public name of the function, for the message.
-
-    Raises:
-        TypeError: If ``samples`` is not a :class:`EFASTSamples`.
-    """
-    if not isinstance(samples, EFASTSamples):
-        got = "a Problem" if isinstance(samples, Problem) else f"a {type(samples).__name__}"
-        raise TypeError(
-            f"jaxgsa.efast.{qualname} takes the EFASTSamples from jaxgsa.efast.sample "
-            f"as its first argument, not {got}."
-        )
-
-
 def indices(
     samples: EFASTSamples,
     Y: Array,
@@ -334,7 +316,7 @@ def indices(
             does not equal ``samples.n_runs``, or if
             ``slice_chunk_size`` is given and is below 1.
     """
-    _require_samples(samples, "indices")
+    require_design(samples, EFASTSamples, "jaxgsa.efast.indices", "jaxgsa.efast.sample")
     problem = samples.problem
     D = problem.n_params
     N = samples.n_per_curve
@@ -436,7 +418,7 @@ def analyze(
             if the sample holds a non-finite value under
             ``on_invalid="raise"``.
     """
-    _require_samples(samples, "analyze")
+    require_design(samples, EFASTSamples, "jaxgsa.efast.analyze", "jaxgsa.efast.sample")
     if _is_irregular_y(Y):
         return analyze_irregular(
             analyze,
@@ -475,7 +457,6 @@ def analyze(
             ),
         ),
         n_expected=samples.n_runs,
-        expected_from="samples.samples",
         # The design lays the D search curves out contiguously, N rows each.
         # A curve cannot be dropped, so `keep` is always all-True; the report
         # still names the curve to investigate.

@@ -354,10 +354,11 @@ jaxgsa.morris.sample(problem, n_trajectories=16)
 
 ```
 ValueError: jaxgsa.morris.sample requires continuous (orderable) inputs, but
-parameters ['catalyst'] are categorical. Use jaxgsa.sobol.sample (the Saltelli
-column-swap scheme is distribution-agnostic; it requires a problem with no
-declared correlation), or analyze given data with jaxgsa.optimal_transport,
-jaxgsa.borgonovo or jaxgsa.pawn.
+parameters ['catalyst'] are categorical. Use a categorical-aware method instead:
+jaxgsa.optimal_transport, jaxgsa.borgonovo, and jaxgsa.pawn (one conditioning
+class per level), or the design-based jaxgsa.sobol Saltelli pipeline. The
+Saltelli design comes from jaxgsa.sobol.sample and needs a problem with no
+declared correlation.
 ```
 
 Morris and eFAST are the two that cannot be repaired, and they fail for the

@@ -15,7 +15,6 @@ from jaxgsa._core.copula import (
     canonicalize_correlation,
     correlation_from_covariance,
     fit_gaussian_copula,
-    latent_normal_sample,
 )
 from jaxgsa._core.validation import _dependence_tolerant_methods
 from jaxgsa.problem import Problem
@@ -287,21 +286,6 @@ def test_fit_gaussian_copula_rejects_bad_shapes():
         fit_gaussian_copula(problem, np.zeros((10, 3)))
     with pytest.raises(ValueError, match="at least 3 samples"):
         fit_gaussian_copula(problem, np.zeros((2, 2)))
-
-
-def test_unscrambled_latent_sample_skips_the_origin():
-    """The unscrambled sequence starts past the origin, not at a clipped extreme.
-
-    The origin maps through the probit to the clipped ~-7-sigma corner in
-    every coordinate — a point no normal sample should contain. The sampler
-    fast-forwards past it, so the first returned point is the sequence's
-    second point (0.5, ..., 0.5), which maps to the origin of the latent
-    space.
-    """
-    Z = latent_normal_sample(8, 3, seed=0, scramble=False)
-    assert np.all(np.isfinite(Z))
-    assert np.abs(Z).max() < 6.0
-    np.testing.assert_allclose(Z[0], 0.0, atol=1e-12)
 
 
 # ---------------------------------------------------------------------------

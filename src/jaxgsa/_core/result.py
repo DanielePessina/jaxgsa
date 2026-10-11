@@ -441,6 +441,7 @@ def aggregate_indices(
     *,
     weights: AggregateWeights,
     variance: Any,
+    extra_fields: tuple[FieldSpec, ...] = (),
 ) -> dict[str, Any]:
     """Collapse the output axes of a result's index fields into one index per input.
 
@@ -468,11 +469,14 @@ def aggregate_indices(
             ``"equal"`` weights every slice by ``1 / n_slices``.
         variance: Output variance per slice, shape ``()``, ``(K,)`` or
             ``(T, K)``. It is read only for ``weights="variance"``.
+        extra_fields: Index fields to collapse in addition to the schema's
+            own, for a result that holds optional extra indices.
 
     Returns:
         A mapping of field name to new value, ready for
         :func:`dataclasses.replace`. It holds the aggregated index fields,
-        their ``*_conf`` fields and ``ci``.
+        their ``*_conf`` fields and ``ci``, and the summed ``variance`` when
+        the result has a ``variance`` field.
 
     Warns:
         JaxgsaWarning: If the result has a bootstrap interval but kept no
@@ -496,7 +500,7 @@ def aggregate_indices(
     lead = tuple(np.shape(primary)[:-1])
     names = [
         spec
-        for spec in schema.fields
+        for spec in (*schema.fields, *extra_fields)
         if spec.interval
         and spec.axes in ("param", "pair")
         and getattr(result, spec.name) is not None
@@ -523,6 +527,11 @@ def aggregate_indices(
         if v.shape != lead:
             raise ValueError(f"variance has shape {v.shape}, expected {lead}")
         w = v / jnp.sum(v)
+
+    # A result that stores its own output variance keeps the summed variance.
+    own_variance = getattr(result, "variance", None)
+    if own_variance is not None:
+        out["variance"] = jnp.asarray(own_variance).sum(keepdims=True)
 
     # The output axis now holds one slice, so its label is "aggregate". Keeping
     # the original output names would break to_dataset (K names, one slice).

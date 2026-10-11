@@ -36,9 +36,6 @@ from jaxgsa._core.registry import register as _register
 from jaxgsa.borgonovo._analyze import BorgonovoIndices, analyze, indices
 from jaxgsa.borgonovo._result import BorgonovoResult
 
-# Former name of BorgonovoResult, kept as an alias.
-DeltaResult = BorgonovoResult
-
 __all__ = ["BorgonovoIndices", "BorgonovoResult", "analyze", "indices"]
 
 _SPEC = _register(

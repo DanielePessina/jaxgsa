@@ -941,9 +941,3 @@ class TestBiasCorrectFlag:
         X, Y = given_ishigami_xy
         with pytest.raises(TypeError, match="bias_correct must be True or False"):
             analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0, bias_correct=None)  # type: ignore[arg-type]
-
-
-def test_delta_result_alias():
-    from jaxgsa.borgonovo import BorgonovoResult, DeltaResult
-
-    assert DeltaResult is BorgonovoResult

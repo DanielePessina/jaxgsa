@@ -4,7 +4,10 @@
  * form still matches the design in use.
  */
 
+import { minNPerCurve } from "@/jaxgsa/efast/sample";
 import { kucherenkoBaseN, kucherenkoRuns } from "@/jaxgsa/kucherenko/sample";
+import { isPowerOfTwo } from "@/jaxgsa/sampling";
+import { saltelliStep } from "@/jaxgsa/sobol/sample";
 import { EFAST_LOW_N } from "./analysisGuards";
 import type { DesignConfig, DesignMethod, GeneratedDesign } from "./engine";
 
@@ -33,7 +36,7 @@ const EFAST_M = 4;
 
 /** eFAST minimum points per curve: 4*M^2*max(D-1, 1) + 1. */
 export function efastMinPoints(D: number): number {
-  return 4 * EFAST_M * EFAST_M * Math.max(D - 1, 1) + 1;
+  return minNPerCurve(D, EFAST_M);
 }
 
 /**
@@ -73,10 +76,6 @@ export function mergeStoredForm(stored: StoredForm): DesignForm {
 
 function isInt(text: string): boolean {
   return text.trim() !== "" && Number.isInteger(Number(text));
-}
-
-function isPowerOfTwo(n: number): boolean {
-  return n >= 1 && (n & (n - 1)) === 0;
 }
 
 /** Field name to message, for every field of `method` that is not valid. */
@@ -141,7 +140,7 @@ export function designConfig(method: DesignMethod, form: DesignForm, D: number):
 export function plannedRuns(method: DesignMethod, form: DesignForm, D: number): number | null {
   if (Object.keys(designFormErrors(method, form, D)).length > 0) return null;
 
-  if (method === "sobol") return Number(form.baseN) * (D + 2);
+  if (method === "sobol") return Number(form.baseN) * saltelliStep(D, false);
 
   if (method === "morris") return Number(form.nTrajectories) * (D + 1);
 

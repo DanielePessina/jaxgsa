@@ -838,19 +838,3 @@ def test_morris_load_rejects_other_samples_file(tmp_path):
     sobol.sample(ishigami.PROBLEM, base_n=8, seed=0).save(path)
     with pytest.raises(ValueError, match="holds a SobolSamples; load it with jaxgsa.sobol"):
         type(sample(ishigami.PROBLEM, 4, seed=0)).load(path)
-
-
-def test_morris_load_reads_old_num_levels_key(tmp_path):
-    import json
-
-    samples = sample(ishigami.PROBLEM, 4, seed=0)
-    path = tmp_path / "morris.npz"
-    samples.save(path)
-    with np.load(path, allow_pickle=False) as data:
-        arrays = {name: data[name] for name in data.files}
-    meta = json.loads(arrays["metadata"].item())
-    meta["num_levels"] = meta.pop("n_levels")
-    arrays["metadata"] = np.asarray(json.dumps(meta))
-    old = tmp_path / "old.npz"
-    np.savez_compressed(old, **arrays)
-    assert type(samples).load(old).n_levels == samples.n_levels

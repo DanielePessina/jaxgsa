@@ -304,7 +304,7 @@ def _unit_finite(array: Array, n_units: int, unit_stride: int) -> Array:
     Reduces over the trailing axis first and over the short unit axis second;
     see the fast path of :func:`_finite_by_unit` for why the order matters.
     """
-    row_ok = jnp.all(jnp.isfinite(array.reshape(array.shape[0], -1)), axis=1)
+    row_ok = _row_finite(array)
     return jnp.all(row_ok.reshape(n_units, unit_stride), axis=1)
 
 

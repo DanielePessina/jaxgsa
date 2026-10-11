@@ -37,7 +37,9 @@ from jaxgsa._core.sampling import (
     _power_of_2_error,
     _stable_unique_rows,
     _transform_samples,
+    check_budget_choice,
     check_seed,
+    check_seed_scramble,
 )
 from jaxgsa._core.validation import _raise_categorical_design, _raise_correlated_design
 from jaxgsa._core.warning_types import JaxgsaWarning
@@ -667,79 +669,6 @@ def _print_sampling_summary(
     )
 
 
-def _check_budget_choice(n_samples: int | None, base_n: int | None, where: str) -> None:
-    """Require exactly one of ``n_samples`` and ``base_n``.
-
-    Args:
-        n_samples: Minimum run budget, or ``None``.
-        base_n: Exact base-point count, or ``None``.
-        where: Fully qualified name of the calling sampler, for the message.
-
-    Raises:
-        TypeError: If a given value is not an int (``bool`` included).
-        ValueError: If both or neither are given, or a value is below 1.
-    """
-    if n_samples is None and base_n is None:
-        raise ValueError(
-            f"{where}: give exactly one of n_samples (minimum number of model "
-            "runs) or base_n (exact number of base points). Neither was given."
-        )
-    if n_samples is not None and base_n is not None:
-        raise ValueError(
-            f"{where}: give exactly one of n_samples (minimum number of model "
-            "runs) or base_n (exact number of base points), not both."
-        )
-    for name, value in (("n_samples", n_samples), ("base_n", base_n)):
-        if value is None:
-            continue
-        if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
-            raise TypeError(f"{where}: {name} must be an int, got {type(value).__name__}")
-        if value < 1:
-            raise ValueError(f"{where}: {name} must be >= 1, got {value}")
-
-
-def _require_samples(obj: object, cls: type, function: str, sampler: str) -> None:
-    """Require the design class that ``function`` analyzes.
-
-    Args:
-        obj: The first argument the caller passed.
-        cls: The design class the function accepts.
-        function: Fully qualified name of the analyzing function.
-        sampler: Fully qualified name of the sampler that builds ``cls``.
-
-    Raises:
-        TypeError: If ``obj`` is not an instance of ``cls``. The message names
-            the type received and points given-data users to the right methods.
-    """
-    if isinstance(obj, cls):
-        return
-    received = "a Problem" if isinstance(obj, Problem) else f"a {type(obj).__name__}"
-    raise TypeError(
-        f"{function} takes the {cls.__name__} from {sampler} as its first "
-        f"argument, not {received}. For given-data X and Y, use a given-data "
-        "method such as jaxgsa.rank or jaxgsa.pce."
-    )
-
-
-def _check_seed_scramble(scramble: bool, seed: Any, where: str) -> None:
-    """Reject a seed when the Sobol' sequence is not scrambled.
-
-    Args:
-        scramble: Whether the sequence is scrambled.
-        seed: The seed the caller passed.
-        where: Fully qualified name of the calling sampler, for the message.
-
-    Raises:
-        ValueError: If ``scramble`` is false and a seed is given.
-    """
-    if not scramble and seed is not None:
-        raise ValueError(
-            f"{where}: seed has no effect with scramble=False. "
-            "The unscrambled Sobol' sequence is deterministic, so the seed "
-            "would do nothing. Use scramble=True, or drop the seed."
-        )
-
-
 def sample(
     problem: Problem,
     n_samples: int | None = None,
@@ -810,8 +739,8 @@ def sample(
             design may be a deliberate probe.
     """
     check_seed(seed, "jaxgsa.sobol.sample")
-    _check_budget_choice(n_samples, base_n, "jaxgsa.sobol.sample")
-    _check_seed_scramble(scramble, seed, "jaxgsa.sobol.sample")
+    check_budget_choice(n_samples, base_n, "jaxgsa.sobol.sample")
+    check_seed_scramble(scramble, seed, "jaxgsa.sobol.sample")
     _raise_correlated_design(problem, "jaxgsa.sobol.sample")
     D = problem.n_params
     # Rows per base point: sets the ratio between base_n and total expanded rows.

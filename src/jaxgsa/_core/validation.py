@@ -341,146 +341,110 @@ def _drop_dependence_hint(problem: Problem) -> str:
     return "problem.with_correlation(None)"
 
 
-def _raise_correlated_design(problem: Problem, method: str) -> None:
-    """Reject a correlated problem in a structured design sampler.
-
-    A structured design places its points assuming independent marginals.
-    Under a declared correlation the downstream estimators are undefined, not
-    merely approximate. Sampling therefore refuses up front, rather than
-    handing back a design whose analysis would be silently wrong. ``method``
-    names the sampler, so this text does not have to list the callers.
-
-    A problem that is also categorical gets the combined message instead. The
-    correlated-only text would recommend methods that then refuse it for being
-    categorical. This check therefore does not depend on being ordered before
-    or after :func:`_raise_categorical_design`.
+def _unsupported_message(
+    problem: Problem, method: str, kind: str, design: bool, names: list[str]
+) -> str:
+    """Build the single-cause rejection text for one gate.
 
     Args:
-        problem: Problem the design was requested for.
-        method: Fully qualified sampler name for the error message.
+        problem: Problem being rejected.
+        method: Fully qualified method name for the message.
+        kind: ``"correlated"`` or ``"categorical"``.
+        design: True for a design sampler, False for an analyzer.
+        names: Names of the categorical parameters.
 
-    Raises:
-        ValueError: If ``problem`` declares a non-identity correlation. The
-            message names the combined dead end when ``problem`` also declares
-            a categorical parameter.
+    Returns:
+        The error message.
     """
-    if problem.dependence == "independent":
-        return
-    names = _categorical_param_names(problem)
-    if names:
-        _raise_categorical_and_correlated(method, names, design=True)
-    raise ValueError(
-        f"{method} builds a structured design whose sensitivity indices assume "
-        "independent inputs. This problem declares dependent inputs "
-        "(problem.correlation or problem.sampler). Draw dependent samples with "
-        "jaxgsa.sampling.monte_carlo (it honors both) and analyze them with a "
-        f"dependence-tolerant given-data method: {_dependence_tolerant_methods()}. "
-        f"To analyze the independent problem instead, drop the dependence with "
-        f"{_drop_dependence_hint(problem)}."
-    )
-
-
-def _raise_correlated_analysis(problem: Problem, method: str) -> None:
-    """Reject a correlated problem in a correlation-naive analyzer.
-
-    The indices such a method computes are invalid, not merely approximate,
-    once ``problem.correlation`` declares a dependence structure, so the gate
-    raises instead of warning.
-
-    A problem that is also categorical gets the combined message instead. The
-    correlated-only text would recommend methods that then refuse it for being
-    categorical. This check therefore does not depend on being ordered before
-    or after :func:`_raise_categorical_analysis`.
-
-    Args:
-        problem: Problem the analysis was requested for.
-        method: Fully qualified analyzer name for the error message.
-
-    Raises:
-        ValueError: If ``problem`` declares a non-identity correlation. The
-            message names the combined dead end when ``problem`` also declares
-            a categorical parameter.
-    """
-    if problem.dependence == "independent":
-        return
-    names = _categorical_param_names(problem)
-    if names:
-        _raise_categorical_and_correlated(method, names, design=False)
-    raise ValueError(
-        f"{method} computes indices that assume independent inputs. They are "
-        "invalid, not merely approximate, when the problem declares dependent "
-        "inputs (problem.correlation or problem.sampler). Use a "
-        f"dependence-tolerant given-data method instead: {_dependence_tolerant_methods()}. "
-        f"To analyze the independent problem instead, drop the dependence with "
-        f"{_drop_dependence_hint(problem)}."
-    )
-
-
-def _raise_categorical_design(problem: Problem, method: str) -> None:
-    """Reject a categorical problem in an incompatible design sampler.
-
-    The Morris and eFAST designs walk or sweep a continuous input space. An
-    unordered categorical axis has no meaningful step or frequency, so
-    sampling refuses up front. The copula conditionals of
-    ``jaxgsa.kucherenko.sample`` refuse it for a different reason: they need a
-    continuous marginal CDF on every coordinate.
-
-    A problem that is also correlated gets the combined message instead, so
-    this check does not depend on being ordered before or after
-    :func:`_raise_correlated_design`.
-
-    Args:
-        problem: Problem the design was requested for.
-        method: Fully qualified sampler name for the error message.
-
-    Raises:
-        ValueError: If ``problem`` declares any categorical parameter. The
-            message names the combined dead end when ``problem`` also declares
-            a non-identity correlation.
-    """
-    names = _categorical_param_names(problem)
-    if not names:
-        return
-    if problem.dependence != "independent":
-        _raise_categorical_and_correlated(method, names, design=True)
-    raise ValueError(
-        f"{method} requires continuous (orderable) inputs, but parameters "
-        f"{names} are categorical. Use jaxgsa.sobol.sample (the Saltelli "
-        "column-swap scheme is distribution-agnostic; it requires a problem "
-        "with no declared correlation), or analyze given data with "
-        "jaxgsa.optimal_transport, jaxgsa.borgonovo or jaxgsa.pawn."
-    )
-
-
-def _raise_categorical_analysis(problem: Problem, method: str) -> None:
-    """Reject a categorical problem in a categorical-naive analyzer.
-
-    A problem that is also correlated gets the combined message instead. The
-    categorical-only text recommends the design-based ``jaxgsa.sobol``
-    pipeline, which refuses a declared correlation, so it would send the user
-    in a circle. This check therefore does not depend on being ordered before
-    or after :func:`_raise_correlated_analysis`.
-
-    Args:
-        problem: Problem the analysis was requested for.
-        method: Fully qualified analyzer name for the error message.
-
-    Raises:
-        ValueError: If ``problem`` declares any categorical parameter. The
-            message names the combined dead end when ``problem`` also declares
-            a non-identity correlation.
-    """
-    names = _categorical_param_names(problem)
-    if not names:
-        return
-    if problem.dependence != "independent":
-        _raise_categorical_and_correlated(method, names, design=False)
-    raise ValueError(
+    if kind == "correlated" and design:
+        return (
+            f"{method} builds a structured design whose sensitivity indices assume "
+            "independent inputs. This problem declares dependent inputs "
+            "(problem.correlation or problem.sampler). Draw dependent samples with "
+            "jaxgsa.sampling.monte_carlo (it honors both) and analyze them with a "
+            f"dependence-tolerant given-data method: {_dependence_tolerant_methods()}. "
+            f"To analyze the independent problem instead, drop the dependence with "
+            f"{_drop_dependence_hint(problem)}."
+        )
+    if kind == "correlated":
+        return (
+            f"{method} computes indices that assume independent inputs. They are "
+            "invalid, not merely approximate, when the problem declares dependent "
+            "inputs (problem.correlation or problem.sampler). Use a "
+            f"dependence-tolerant given-data method instead: {_dependence_tolerant_methods()}. "
+            f"To analyze the independent problem instead, drop the dependence with "
+            f"{_drop_dependence_hint(problem)}."
+        )
+    if design:
+        return (
+            f"{method} requires continuous (orderable) inputs, but parameters "
+            f"{names} are categorical. Use a categorical-aware method instead: "
+            f"{_categorical_tolerant_methods()}. The Saltelli design comes from "
+            "jaxgsa.sobol.sample and needs a problem with no declared correlation."
+        )
+    return (
         f"{method} treats every input as continuous, but parameters {names} "
         "are categorical (unordered level codes); its indices would depend on "
         "the arbitrary code order. Use a categorical-aware method instead: "
         f"{_categorical_tolerant_methods()}."
     )
+
+
+def _raise_unsupported(problem: Problem, method: str, *, kind: str, design: bool) -> None:
+    """Reject a problem whose dependence or categorical inputs a method cannot handle.
+
+    A structured design places its points assuming independent marginals, and
+    a correlation-naive analyzer computes indices that are invalid, not merely
+    approximate, under a declared dependence. The Morris and eFAST designs walk
+    or sweep a continuous space, so an unordered categorical axis has no
+    meaningful step or frequency. The copula conditionals of
+    ``jaxgsa.kucherenko.sample`` need a continuous marginal CDF on every
+    coordinate. Each gate therefore refuses up front instead of returning
+    something silently wrong.
+
+    A problem that is both correlated and categorical gets the combined message
+    from either gate. Either single-cause text would recommend methods that
+    then refuse the other cause, so the result does not depend on the order in
+    which the two gates run.
+
+    Args:
+        problem: Problem the design or analysis was requested for.
+        method: Fully qualified sampler or analyzer name for the error message.
+        kind: ``"correlated"`` to reject a declared dependence, or
+            ``"categorical"`` to reject any categorical parameter.
+        design: True when ``method`` is a design sampler, False for an analyzer.
+
+    Raises:
+        ValueError: If ``problem`` has the rejected property. The message names
+            the combined dead end when it also has the other one.
+    """
+    names = _categorical_param_names(problem)
+    correlated = problem.dependence != "independent"
+    if not (correlated if kind == "correlated" else names):
+        return
+    if names and correlated:
+        _raise_categorical_and_correlated(method, names, design=design)
+    raise ValueError(_unsupported_message(problem, method, kind, design, names))
+
+
+def _raise_correlated_design(problem: Problem, method: str) -> None:
+    """Reject a correlated problem in a structured design sampler."""
+    _raise_unsupported(problem, method, kind="correlated", design=True)
+
+
+def _raise_correlated_analysis(problem: Problem, method: str) -> None:
+    """Reject a correlated problem in a correlation-naive analyzer."""
+    _raise_unsupported(problem, method, kind="correlated", design=False)
+
+
+def _raise_categorical_design(problem: Problem, method: str) -> None:
+    """Reject a categorical problem in an incompatible design sampler."""
+    _raise_unsupported(problem, method, kind="categorical", design=True)
+
+
+def _raise_categorical_analysis(problem: Problem, method: str) -> None:
+    """Reject a categorical problem in a categorical-naive analyzer."""
+    _raise_unsupported(problem, method, kind="categorical", design=False)
 
 
 def _dims_and_coords(

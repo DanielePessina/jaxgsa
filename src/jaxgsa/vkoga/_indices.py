@@ -65,10 +65,9 @@ from math import factorial
 from typing import Callable, NamedTuple
 
 import numpy as np
-from scipy.special import ndtri
 
 from jaxgsa._core.batching import resolve_batch_size
-from jaxgsa._core.dependence import Draws, sobol_uniforms
+from jaxgsa._core.dependence import Draws, probit, sobol_uniforms
 from jaxgsa._core.legendre import legendre_orthonormal
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.problem import GaussianSpec, Problem
@@ -83,9 +82,6 @@ _COMPONENT_DEGREE = 6
 # inner draw in _total_uncorrelated_and_conditional uses ``draws.self_dimension``
 # Sobol' dimensions per outer point, so it splits into blocks above this width.
 _MAX_QMC_DIM = 21201
-
-# Keeps the probit of a marginal CDF coordinate finite at exact 0 and 1.
-_UNIT_CLIP = 1e-12
 
 # Ridge added to the component-function normal equations. The basis is
 # marginally orthonormal, so the Gram matrix is well conditioned unless two
@@ -251,7 +247,7 @@ def estimate_correlated_indices(
         sobol_uniforms(n_variance, draws.dimension, seed=_qmc_seed(streams.variance))
     )
     U_var = draws.to_unit(rows_var)
-    Z_var = _probit(U_var)
+    Z_var = probit(U_var)
     Y_var = np.asarray(predict(U_var), dtype=np.float64)
     variance = Y_var.var(axis=0)
     # A zero-variance slice makes every index undefined rather than zero; NaN
@@ -332,22 +328,6 @@ def estimate_correlated_indices(
         S_IU=S_TU - S_U,
         variance=variance,
     )
-
-
-def _probit(u: np.ndarray) -> np.ndarray:
-    """Map marginal CDF coordinates to normal scores ``Phi^-1(u)``.
-
-    For the Gaussian copula this recovers the latent normal draw. For a
-    custom sampler it is the same transform of its CDF coordinates, so the
-    Hermite component basis reads the same coordinate under either.
-
-    Args:
-        u: Values in ``[0, 1]``, any shape.
-
-    Returns:
-        Finite normal scores, same shape as ``u``.
-    """
-    return ndtri(np.clip(u, _UNIT_CLIP, 1.0 - _UNIT_CLIP))
 
 
 def _clip_independent_part(
@@ -829,7 +809,7 @@ def _total_uncorrelated_and_conditional(
             # variance over the outer sample is the correlation-explained part
             # of f_i that Equation (25) removes.
             u_self = U[:, index].reshape(-1, n_inner)
-            value = _component_value(u_self, _probit(u_self), basis_kind)
+            value = _component_value(u_self, probit(u_self), basis_kind)
             f_hat[start:stop] = _evaluate_component(value, component, basis_kind).mean(axis=1)
 
     return lambda: (inner_var.mean(axis=0), f_hat.var(axis=0))

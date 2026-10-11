@@ -36,8 +36,8 @@ from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints, interval
 from jaxgsa._core.entry import (
     at_least,
+    bootstrap_checks,
     check_scalars,
-    in_open_interval,
     one_of,
     prepare,
     require,
@@ -51,6 +51,7 @@ from jaxgsa._core.irregular import (
     analyze_irregular,
 )
 from jaxgsa._core.result import CIInfo
+from jaxgsa._core.sampling import require_design
 from jaxgsa._core.validation import (
     YLayout,
     _prepare_Y,
@@ -72,7 +73,7 @@ from jaxgsa.sobol._estimators import (
     second_order_kernel,
 )
 from jaxgsa.sobol._result import SobolResult
-from jaxgsa.sobol._sampling import SobolSamples, _require_samples, _saltelli_step
+from jaxgsa.sobol._sampling import SobolSamples, _saltelli_step
 
 # Keyword-only parameters the irregular engine forwards unchanged to the
 # per-channel recursive analyze() calls. verbose is excluded:
@@ -789,7 +790,7 @@ def indices(
             match ``samples.n_runs``; or if ``slice_chunk_size`` is
             below 1.
     """
-    _require_samples(samples, SobolSamples, "jaxgsa.sobol.indices", "jaxgsa.sobol.sample")
+    require_design(samples, SobolSamples, "jaxgsa.sobol.indices", "jaxgsa.sobol.sample")
     check_scalars(_estimator_checks(estimator, samples.calc_second_order))
     S1, ST, S2 = _indices_from_expanded(
         samples.expand_outputs(Y),
@@ -1181,7 +1182,7 @@ def analyze(
         JaxgsaWarning: If an output slice has zero variance, which makes its
             indices NaN.
     """
-    _require_samples(samples, SobolSamples, "jaxgsa.sobol.analyze", "jaxgsa.sobol.sample")
+    require_design(samples, SobolSamples, "jaxgsa.sobol.analyze", "jaxgsa.sobol.sample")
     key = as_key(key, "sobol")
     if _is_irregular_y(Y):
         return analyze_irregular(
@@ -1218,19 +1219,10 @@ def analyze(
         on_invalid=on_invalid,
         checks=(
             *_estimator_checks(estimator, samples.calc_second_order),
-            one_of("ci_method", ci_method, ("quantile", "gaussian")),
-            at_least("n_bootstrap", n_bootstrap, 0),
+            *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
             at_least("slice_chunk_size", slice_chunk_size, 1),
-            in_open_interval("conf_level", conf_level, 0.0, 1.0),
-            # Checked here, with the other cheap argument checks, so a
-            # missing key is reported before the point estimate is paid for.
-            require(
-                not (n_bootstrap > 0 and key is None),
-                "key is required when n_bootstrap > 0",
-            ),
         ),
         n_expected=int(samples.samples.shape[0]),
-        expected_from="samples.samples",
         expand=samples.expand_outputs,
         n_units=base_n,
         unit_of_row=unit_of_row,

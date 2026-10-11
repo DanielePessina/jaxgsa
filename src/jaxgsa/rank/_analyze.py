@@ -41,7 +41,6 @@ References:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from functools import partial
 from typing import Literal, NamedTuple, cast
 
@@ -52,13 +51,9 @@ from jax import Array
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.bootstrap import interval
 from jaxgsa._core.entry import (
-    ScalarCheck,
-    at_least,
+    bootstrap_checks,
     gates,
-    in_open_interval,
-    one_of,
     prepare,
-    require,
     validate_inputs,
 )
 from jaxgsa._core.invalid import OnInvalid
@@ -91,22 +86,6 @@ _MIN_KEPT = 3
 # Share of the rows each confidence-interval resample keeps. Same default as
 # the R package ``sensitivity`` (``nsample = round(0.8 * nrow(X))``).
 _SUBSAMPLE_FRACTION = 0.8
-
-
-def _prefixed(checks: Sequence[ScalarCheck]) -> tuple[ScalarCheck, ...]:
-    """Prefix each failing-argument message with ``jaxgsa.rank: ``.
-
-    Args:
-        checks: Scalar verdicts built with the shared helpers.
-
-    Returns:
-        The same verdicts, each message starting ``jaxgsa.rank: `` unless
-        it already starts with ``jaxgsa``.
-    """
-    return tuple(
-        c if c.message.startswith("jaxgsa") else ScalarCheck(c.ok, f"jaxgsa.rank: {c.message}")
-        for c in checks
-    )
 
 
 @jax.jit
@@ -395,17 +374,7 @@ def analyze(
         Y,
         X=X,
         on_invalid=on_invalid,
-        checks=_prefixed(
-            (
-                at_least("n_bootstrap", n_bootstrap, 0),
-                one_of("ci_method", ci_method, ("quantile", "gaussian")),
-                in_open_interval("conf_level", conf_level, 0.0, 1.0),
-                require(
-                    n_bootstrap == 0 or key is not None,
-                    "key is required when n_bootstrap > 0",
-                ),
-            )
-        ),
+        checks=bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
         min_kept=_MIN_KEPT,
     )
 

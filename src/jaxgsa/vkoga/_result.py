@@ -115,7 +115,6 @@ class VKOGAResult(SchemaResult, SurrogateResult):
     gamma: float
     ridge: float
     invalid: InvalidReport
-    dependence: Dependence = "independent"
     rmse: Array | None = None
     cv_rmse: Array | None = None
     explained_variance: Array | None = None
@@ -146,6 +145,11 @@ class VKOGAResult(SchemaResult, SurrogateResult):
         ),
         meta=("n_centers", "gamma", "ridge", "dependence"),
     )
+
+    @property
+    def dependence(self) -> Dependence:
+        """The input dependence the indices were computed under."""
+        return self.problem.dependence
 
     @property
     def S1(self) -> Array:

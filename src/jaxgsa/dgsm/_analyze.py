@@ -30,10 +30,9 @@ from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import _bootstrap_ci_endpoints
 from jaxgsa._core.entry import (
     at_least,
+    bootstrap_checks,
     check_scalars,
     gates,
-    in_open_interval,
-    one_of,
     prepare,
     validate_inputs,
 )
@@ -743,9 +742,7 @@ def analyze(
     # calling conventions are refused for a correlated problem.
     checks = (
         at_least("batch_size", batch_size, 1),
-        at_least("n_bootstrap", n_bootstrap, 0),
-        one_of("ci_method", ci_method, ("quantile", "gaussian")),
-        in_open_interval("conf_level", conf_level, 0.0, 1.0),
+        *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
     )
     unit = _SPEC.invalid_unit
     assert unit is not None  # dgsm declares InvalidUnit.ROW
@@ -757,8 +754,6 @@ def analyze(
     )
     check_scalars(checks)
     gates(_SPEC, problem, method=_METHOD)
-    if n_bootstrap > 0 and key is None:
-        raise ValueError("key is required when n_bootstrap > 0")
     # Say once, before the expensive work, that lower_bound is only a proven
     # bound for untruncated Gaussian marginals. The gates above already
     # rejected categorical parameters, so the check only separates untruncated
@@ -783,8 +778,12 @@ def analyze(
         # Free shape-only trace: catches a batch (N, D) callable here, instead
         # of as an IndexError from inside the autodiff.
         n_outputs = _check_point_callable(fn, X)
-        moments = jacobian_sums(fn, X, batch_size, n_outputs=n_outputs)
         N = int(X.shape[0])
+        # With a bootstrap, the resampling joins the Jacobian sweep itself, so
+        # the model is not differentiated a second time. The draw is made for
+        # all N rows, which is right unless rows are dropped below.
+        full_idx = _draw_rows(key, n_bootstrap, N) if n_bootstrap > 0 and key is not None else None
+        moments = jacobian_sums(fn, X, batch_size, n_outputs=n_outputs, idx=full_idx)
         # The Jacobian never leaves the device whole, so it reaches the check
         # as a per-row verdict rather than as its own array. The verdict is
         # the same one the batch loop masked with. It rides in as an extra
@@ -900,22 +899,29 @@ def analyze(
     ci: CIInfo | None = None
     if n_bootstrap > 0:
         assert key is not None  # checked before the point estimate ran
-        batches: Iterator[tuple[Array, Array]]
-        if use_autodiff:
-            assert fn is not None
-            # ctx.X is X with the dropped rows already removed, so the
-            # resample draws from the same rows the point estimate averaged.
-            assert ctx.X is not None  # the autodiff path always passes X to prepare()
-            batches = ((jac, y) for jac, y, _ in jac_batches(fn, ctx.X, batch_size))
+        n_rows = int(Y_3d.shape[0])
+        if use_autodiff and keep.all():
+            # No row was dropped, so the sweep above already did the work.
+            assert moments.resample is not None
+            sums = moments.resample
         else:
-            batches = _array_batches(dfdx_arr, Y_3d, batch_size)
+            idx = _draw_rows(key, n_bootstrap, n_rows)
+            batches: Iterator[tuple[Array, Array]]
+            if use_autodiff:
+                assert fn is not None
+                # ctx.X is X with the dropped rows already removed, so the
+                # resample draws from the same rows the point estimate averaged.
+                assert ctx.X is not None  # the autodiff path always passes X to prepare()
+                batches = ((jac, y) for jac, y, _ in jac_batches(fn, ctx.X, batch_size))
+            else:
+                batches = _array_batches(dfdx_arr, Y_3d, batch_size)
+            sums = resample_moment_sums(batches, idx)
         draws = _bootstrap_draws(
             problem,
-            batches=batches,
-            n_rows=int(Y_3d.shape[0]),
+            sums=sums,
+            n_rows=n_rows,
             slice_shape=(int(Y_3d.shape[1]), int(Y_3d.shape[2])),
             n_params=D,
-            key=key,
             n_bootstrap=n_bootstrap,
             standardize_outputs=standardize_outputs,
         )
@@ -1031,14 +1037,27 @@ def _array_batches(
         yield dfdx[start:end], Y_3d[start:end]
 
 
+def _draw_rows(key: Array, n_bootstrap: int, n_rows: int) -> Array:
+    """Draw the bootstrap row indices, with replacement.
+
+    Args:
+        key: PRNG key for the row draws.
+        n_bootstrap: Number of replicates.
+        n_rows: Number of rows to draw from, which is also the resample size.
+
+    Returns:
+        Integer array of shape ``(n_bootstrap, n_rows)``.
+    """
+    return jax.random.randint(key, shape=(n_bootstrap, n_rows), minval=0, maxval=n_rows)
+
+
 def _bootstrap_draws(
     problem: Problem,
     *,
-    batches: Iterator[tuple[Array, Array]],
+    sums: tuple[Array, Array, Array, Array],
     n_rows: int,
     slice_shape: tuple[int, int],
     n_params: int,
-    key: Array,
     n_bootstrap: int,
     standardize_outputs: bool,
 ) -> dict[str, Array]:
@@ -1052,11 +1071,11 @@ def _bootstrap_draws(
 
     Args:
         problem: Problem definition, for the bound constants.
-        batches: ``(jac, Y)`` per batch, over the surviving rows only.
+        sums: The four resampled sums of :func:`resample_moment_sums`, over
+            the surviving rows only.
         n_rows: Number of surviving rows, which is also the resample size.
         slice_shape: ``(T, K)``, the canonical output slice axes.
         n_params: ``D``.
-        key: PRNG key for the row draws.
         n_bootstrap: Number of replicates.
         standardize_outputs: As in :func:`analyze`.
 
@@ -1064,8 +1083,7 @@ def _bootstrap_draws(
         Mapping from field name to a ``(n_bootstrap, T, K, D)`` array of
         replicate values.
     """
-    idx = jax.random.randint(key, shape=(n_bootstrap, n_rows), minval=0, maxval=n_rows)
-    sum_jac, sum_jac2, sum_y, sum_y2 = resample_moment_sums(batches, idx)
+    sum_jac, sum_jac2, sum_y, sum_y2 = sums
 
     T, K = slice_shape
     mu = sum_jac.reshape(n_bootstrap, T, K, n_params) / n_rows

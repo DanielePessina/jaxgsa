@@ -176,19 +176,6 @@ def test_independent_custom_sampler_matches_builtin_independent_path() -> None:
     np.testing.assert_allclose(r_custom.ST, r_builtin.ST, atol=0.02)
 
 
-def test_missing_dependence_metadata_defaults_to_problem() -> None:
-    design = kucherenko.sample(PROBLEM, base_n=8, verbose=False)
-    loaded = kucherenko.KucherenkoSamples._from_payload(
-        samples=design.samples,
-        n_expanded=design.n_expanded,
-        expanded_to_unique=design.expanded_to_unique,
-        problem=PROBLEM,
-        arrays={},
-        meta={"base_n": 8},
-    )
-    assert loaded.dependence == "custom"
-
-
 def test_custom_time_resolved_and_irregular_outputs_keep_dependence_metadata() -> None:
     from jaxgsa._core.irregular import IrregularResult
 

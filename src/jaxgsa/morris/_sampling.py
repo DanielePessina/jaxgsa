@@ -244,18 +244,11 @@ class MorrisSamples(UniqueDesignSamples):
         required_arrays = ("ee_idx_after", "ee_idx_before", "ee_delta")
         if (
             any(key not in meta for key in required_meta)
-            or ("n_levels" not in meta and "num_levels" not in meta)
+            or "n_levels" not in meta
             or any(name not in arrays for name in required_arrays)
         ):
             # Name the class the file claims, when the metadata stores one.
-            stored = next(
-                (
-                    str(meta[key])
-                    for key in ("samples_class", "class_name", "class")
-                    if key in meta
-                ),
-                None,
-            )
+            stored = meta.get("samples_class")
             held = f"; it holds a {stored}" if stored is not None else ""
             raise ValueError(
                 f"jaxgsa.morris: this file was not saved by MorrisSamples{held}. "
@@ -269,8 +262,7 @@ class MorrisSamples(UniqueDesignSamples):
             n_expanded=n_expanded,
             expanded_to_unique=expanded_to_unique,
             n_trajectories=int(meta["n_trajectories"]),
-            # Files written before the rename store the old key.
-            n_levels=int(meta["n_levels"] if "n_levels" in meta else meta["num_levels"]),
+            n_levels=int(meta["n_levels"]),
             method=method,
             ee_idx_after=arrays["ee_idx_after"],
             ee_idx_before=arrays["ee_idx_before"],

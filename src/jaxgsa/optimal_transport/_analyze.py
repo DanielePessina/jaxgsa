@@ -51,7 +51,6 @@ from __future__ import annotations
 
 import functools
 import warnings
-from collections.abc import Sequence
 from typing import Literal, NamedTuple, cast
 
 import jax
@@ -63,11 +62,9 @@ from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import interval
 from jaxgsa._core.entry import (
-    ScalarCheck,
     at_least,
+    bootstrap_checks,
     check_scalars,
-    in_open_interval,
-    one_of,
     prepare,
     require,
     validate_inputs,
@@ -140,24 +137,6 @@ _POINT_CLOUD_MODES = ("multivariate", "trajectory")
 # Fewest samples that still build two conditioning classes of two points
 # each, which is what the default ``M = min(25, N // 2)`` already assumes.
 _MIN_KEPT = 4
-
-
-def _prefixed(checks: Sequence[ScalarCheck]) -> tuple[ScalarCheck, ...]:
-    """Prefix each failing-argument message with ``jaxgsa.optimal_transport: ``.
-
-    Args:
-        checks: Scalar verdicts built with the shared helpers.
-
-    Returns:
-        The same verdicts, each message starting ``jaxgsa.optimal_transport: `` unless
-        it already starts with ``jaxgsa``.
-    """
-    return tuple(
-        c
-        if c.message.startswith("jaxgsa")
-        else ScalarCheck(c.ok, f"jaxgsa.optimal_transport: {c.message}")
-        for c in checks
-    )
 
 
 def _aggregate_normalized(per_class: Array, weights: Array, V: Array) -> Array:
@@ -1272,28 +1251,21 @@ def analyze(
         Y,
         X=X,
         on_invalid=on_invalid,
-        checks=_prefixed(
-            (
-                require(mode in _MODES, f"mode must be one of {_MODES}, got {mode!r}"),
-                # Written as a positive comparison so NaN is rejected too:
-                # ``epsilon > 0`` is False for NaN, while ``not epsilon <= 0``
-                # was True for NaN and let it flow into log_K, where the
-                # Sinkhorn loop exits at once (NaN > tol is False) and returns
-                # NaN indices with zero diagnostics.
-                require(epsilon > 0, f"epsilon must be > 0, got {epsilon}"),
-                at_least("max_iter", max_iter, 1),
-                require(tol is None or tol > 0, f"tol must be > 0, got {tol}"),
-                at_least("n_bootstrap", n_bootstrap, 0),
-                one_of("ci_method", ci_method, ("quantile", "gaussian")),
-                in_open_interval("conf_level", conf_level, 0.0, 1.0),
-                at_least("slice_chunk_size", slice_chunk_size, 1),
-                # The bootstrap and the dummy baseline are the two consumers of
-                # ``key``, so it fires before the data is touched, not after.
-                require(
-                    key is not None or n_bootstrap == 0, "key is required when n_bootstrap > 0"
-                ),
-                require(key is not None or not dummy, "key is required when dummy=True"),
-            )
+        checks=(
+            require(mode in _MODES, f"mode must be one of {_MODES}, got {mode!r}"),
+            # Written as a positive comparison so NaN is rejected too:
+            # ``epsilon > 0`` is False for NaN, while ``not epsilon <= 0``
+            # was True for NaN and let it flow into log_K, where the
+            # Sinkhorn loop exits at once (NaN > tol is False) and returns
+            # NaN indices with zero diagnostics.
+            require(epsilon > 0, f"epsilon must be > 0, got {epsilon}"),
+            at_least("max_iter", max_iter, 1),
+            require(tol is None or tol > 0, f"tol must be > 0, got {tol}"),
+            # The bootstrap and the dummy baseline are the two consumers of
+            # ``key``, so it fires before the data is touched, not after.
+            *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
+            at_least("slice_chunk_size", slice_chunk_size, 1),
+            require(key is not None or not dummy, "key is required when dummy=True"),
         ),
         min_kept=_MIN_KEPT,
         # A constant slice leaves every conditional distribution equal to
@@ -1679,22 +1651,19 @@ def indices(
             parameter is categorical.
     """
     check_scalars(
-        _prefixed(
-            (
-                (
-                    require(mode in _MODES, f"mode must be one of {_MODES}, got {mode!r}"),
-                    # Written as a positive comparison so NaN is rejected too:
-                    # ``epsilon > 0`` is False for NaN, while ``not epsilon <= 0``
-                    # was True for NaN and let it flow into log_K, where the
-                    # Sinkhorn loop exits at once (NaN > tol is False) and returns
-                    # NaN indices with zero diagnostics.
-                    require(epsilon > 0, f"epsilon must be > 0, got {epsilon}"),
-                    at_least("max_iter", max_iter, 1),
-                    require(tol is None or tol > 0, f"tol must be > 0, got {tol}"),
-                    at_least("slice_chunk_size", slice_chunk_size, 1),
-                )
-            )
-        )
+        (
+            require(mode in _MODES, f"mode must be one of {_MODES}, got {mode!r}"),
+            # Written as a positive comparison so NaN is rejected too:
+            # ``epsilon > 0`` is False for NaN, while ``not epsilon <= 0``
+            # was True for NaN and let it flow into log_K, where the
+            # Sinkhorn loop exits at once (NaN > tol is False) and returns
+            # NaN indices with zero diagnostics.
+            require(epsilon > 0, f"epsilon must be > 0, got {epsilon}"),
+            at_least("max_iter", max_iter, 1),
+            require(tol is None or tol > 0, f"tol must be > 0, got {tol}"),
+            at_least("slice_chunk_size", slice_chunk_size, 1),
+        ),
+        method="jaxgsa.optimal_transport.indices",
     )
     X = validate_inputs(problem, X)
     Y = _validate_output(Y, int(X.shape[0]), problem)

@@ -13,14 +13,13 @@ import numpy as np
 from jax import Array
 
 from jaxgsa._core import verbose as _verbose
-from jaxgsa._core.batching import get_memory_budget, resolve_batch_size
+from jaxgsa._core.batching import get_memory_budget, pad_rows, resolve_batch_size
 from jaxgsa._core.bootstrap import bootstrap_draws, interval
 from jaxgsa._core.entry import (
     at_least,
+    bootstrap_checks,
     check_scalars,
     gates,
-    in_open_interval,
-    one_of,
     prepare,
     require,
 )
@@ -344,13 +343,6 @@ def _get_streamed_steps(input_types: tuple[str, ...], order: int):
     return acc_normal, acc_loo
 
 
-def _pad_rows(A: Array, n_pad: int) -> Array:
-    """Pad ``A`` with ``n_pad`` zero rows on the sample axis."""
-    if n_pad == 0:
-        return A
-    return jnp.concatenate([A, jnp.zeros((n_pad, *A.shape[1:]), dtype=A.dtype)], axis=0)
-
-
 def _fit_pce_streamed(
     X_ref: Array,
     Y_flat: Array,
@@ -416,8 +408,8 @@ def _fit_pce_streamed(
     # nothing to either pass.
     n_batches = math.ceil(N / b)
     n_pad = n_batches * b - N
-    X_p = _pad_rows(X_ref, n_pad)
-    Y_p = _pad_rows(Y_flat, n_pad)
+    X_p = pad_rows(X_ref, n_pad)
+    Y_p = pad_rows(Y_flat, n_pad)
     w = jnp.concatenate([jnp.ones((N,), dtype=dtype), jnp.zeros((n_pad,), dtype=dtype)])
     rows = [(i * b, i * b + b) for i in range(n_batches)]
 
@@ -891,7 +883,8 @@ def indices(
                 f"order-1 expansion ({min_terms} terms for D={D} parameters); "
                 "raise fit_ratio or provide more rows",
             ),
-        )
+        ),
+        method="jaxgsa.pce.indices",
     )
     # The same capability gate analyze applies through prepare().
     # problem.dependence is static host-side metadata, so the check
@@ -1068,15 +1061,7 @@ def analyze(
             at_least("fit_ratio", fit_ratio, 0.0),
             require(fit_ratio <= 1.0, f"fit_ratio must be <= 1, got {fit_ratio}"),
             at_least("batch_size", batch_size, 1),
-            at_least("n_bootstrap", n_bootstrap, 0),
-            one_of("ci_method", ci_method, ("quantile", "gaussian")),
-            in_open_interval("conf_level", conf_level, 0.0, 1.0),
-            # Checked here, with the other cheap argument checks, so a
-            # missing key is reported before the point estimate is paid for.
-            require(
-                not (n_bootstrap > 0 and key is None),
-                "key is required when n_bootstrap > 0",
-            ),
+            *bootstrap_checks(n_bootstrap, ci_method, conf_level, key),
         ),
         min_kept=_MIN_ROWS,
     )

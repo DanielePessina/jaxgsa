@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal, Self, cast
 
 import jax.numpy as jnp
@@ -20,7 +19,7 @@ from jaxgsa._core.result import (
     SchemaResult,
     aggregate_indices,
 )
-from jaxgsa.kucherenko._subsets import pme_from_total, shapley_from_cost
+from jaxgsa.kucherenko._subsets import pme_from_total, shapley_from_cost, subset_matrix
 from jaxgsa.problem import Dependence, Problem
 
 if TYPE_CHECKING:
@@ -48,8 +47,6 @@ class KucherenkoResult(SchemaResult):
         ST: Total-order (correlation-exclusive) indices, shape ``(..., D)``.
             Rank parameters by ``ST`` to decide which ones to fix.
         problem: Problem definition used for the analysis.
-        dependence: How the inputs depend on each other: ``"independent"``,
-            ``"gaussian"`` or ``"custom"`` (a sampler declared on the problem).
         variance: Output variance under the joint input measure, one value per
             output slice (shape ``()``, ``(K,)``, or ``(T, K)``).
         invalid: What the non-finite check found and what it did about it. A
@@ -76,8 +73,6 @@ class KucherenkoResult(SchemaResult):
             entries equal ``ST``. This is the cost that ``shapley()`` and
             ``pme()`` use. It is named ``subset_total`` so that it does not
             read as ``ST``, which is the same index for single inputs only.
-        subsets: Membership matrix of the subsets, boolean, shape
-            ``(2^D - 1, D)``. Row ``m - 1`` marks the members of subset ``m``.
         closed_conf: Bootstrap interval for ``closed``, shape
             ``(2, ..., 2^D - 1)``.
         subset_total_conf: Bootstrap interval for ``subset_total``, the same
@@ -92,10 +87,8 @@ class KucherenkoResult(SchemaResult):
     S1_conf: Array | None = None
     ST_conf: Array | None = None
     ci: CIInfo | None = None
-    dependence: Dependence = "independent"
     closed: Array | None = None
     subset_total: Array | None = None
-    subsets: np.ndarray | None = None
     closed_conf: Array | None = None
     subset_total_conf: Array | None = None
 
@@ -108,6 +101,24 @@ class KucherenkoResult(SchemaResult):
         ),
         meta=("dependence",),
     )
+
+    @property
+    def dependence(self) -> Dependence:
+        """How the inputs depend on each other: ``"independent"``, ``"gaussian"`` or ``"custom"``.
+
+        It is the dependence the problem declares. ``"custom"`` means a sampler
+        declared on the problem.
+        """
+        return self.problem.dependence
+
+    @property
+    def subsets(self) -> np.ndarray | None:
+        """Membership matrix of the subsets, boolean, shape ``(2^D - 1, D)``.
+
+        Row ``m - 1`` marks the members of subset ``m``. ``None`` unless the
+        result holds subset indices.
+        """
+        return None if self.closed is None else subset_matrix(self.problem.n_params)
 
     def aggregate(self, *, weights: Literal["variance", "equal"] = "variance") -> Self:
         """Collapse the output axes into one index per input.
@@ -165,27 +176,16 @@ class KucherenkoResult(SchemaResult):
             JaxgsaWarning: If the result has bootstrap intervals but kept no
                 replicates, so the intervals are dropped.
         """
-        view = self
-        if self.closed is not None:
-            # Treat the subset indices as extra index fields. The collapse acts
-            # on the last axis whatever its length, so the same code serves.
-            view = cast(
-                Self,
-                SimpleNamespace(
-                    **{f.name: getattr(self, f.name) for f in dataclasses.fields(self)},
-                    _schema=ResultSchema(
-                        primary="S1",
-                        fields=(
-                            *self._schema.fields,
-                            FieldSpec("closed", interval=True),
-                            FieldSpec("subset_total", interval=True),
-                        ),
-                    ),
-                ),
-            )
-        updates = aggregate_indices(view, weights=weights, variance=self.variance)
-        if updates:
-            updates["variance"] = self.variance.sum(keepdims=True)
+        # With subset indices, the collapse treats them as extra index fields.
+        # It acts on the last axis whatever its length, so the same code serves.
+        extra = (
+            ()
+            if self.closed is None
+            else (FieldSpec("closed", interval=True), FieldSpec("subset_total", interval=True))
+        )
+        updates = aggregate_indices(
+            self, weights=weights, variance=self.variance, extra_fields=extra
+        )
         return dataclasses.replace(self, **updates)
 
     # -- subset allocations ------------------------------------------------
@@ -354,9 +354,8 @@ class KucherenkoResult(SchemaResult):
         base, _ = self._base_dims(time_coords)
         lead = base[:-1]
         D = self.problem.n_params
-        masks = np.arange(1, 2**D)
-        names = list(self.problem.names)
-        labels = ["+".join(names[j] for j in range(D) if (m >> j) & 1) for m in masks.tolist()]
+        names = np.asarray(self.problem.names)
+        labels = ["+".join(names[row]) for row in subset_matrix(D)]
         ds = ds.assign_coords(subset=labels)
         dims = (*lead, "subset")
         for name in ("closed", "subset_total"):

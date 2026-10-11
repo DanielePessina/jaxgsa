@@ -122,7 +122,7 @@ def _proportional_values(value: np.ndarray, n_params: int) -> np.ndarray:
     Columns with no zero-valued non-empty subset use the plain definition,
     ``PV_i = R(D) / R(D - i)`` (Eq. 12), in one vectorised pass. Other columns
     use the continuous extension to nonnegative games (Theorem 1, Eq. 15), one
-    column at a time.
+    vectorised pass per group of columns with the same null coalitions.
     """
     full_mask = 2**n_params - 1
     batch = value.shape[1]
@@ -137,17 +137,26 @@ def _proportional_values(value: np.ndarray, n_params: int) -> np.ndarray:
         for i in range(n_params):
             out[i, plain] = ratio[full_mask] / ratio[full_mask ^ (1 << i)]
 
-    for col in np.flatnonzero(finite & has_null):
-        out[:, col] = _extended_proportional_value(value[:, [col]], n_params)[:, 0]
+    # Columns that share the same null coalitions share the same sets in
+    # Eq. 15, so each group runs the recursion once, across its columns.
+    extended = np.flatnonzero(finite & has_null)
+    if extended.size:
+        patterns, group = np.unique(value[:, extended] <= 0.0, axis=1, return_inverse=True)
+        for g in range(patterns.shape[1]):
+            cols = extended[np.ravel(group) == g]
+            out[:, cols] = _extended_proportional_value(value[:, cols], n_params)
     return out
 
 
 def _extended_proportional_value(value: np.ndarray, n_params: int) -> np.ndarray:
-    """Eq. 15 of Herin et al. (2024) for one game, shape ``(2^D, 1)`` -> ``(D, 1)``.
+    """Eq. 15 of Herin et al. (2024) for games with one null pattern.
 
-    ``K`` holds the null coalitions (cost exactly 0) of the largest size
-    ``kmax``. Input ``i`` gets 0 if it is in every member of ``K``. Otherwise
-    it gets ``sum_{A in K, i not in A} 1/R(D - i - A, v_A) / sum_{A in K}
+    Shape ``(2^D, B)`` -> ``(D, B)``. Every column must have the same null
+    coalitions (cost exactly 0).
+
+    ``K`` holds the null coalitions of the largest size ``kmax``. Input ``i``
+    gets 0 if it is in every member of ``K``. Otherwise it gets
+    ``sum_{A in K, i not in A} 1/R(D - i - A, v_A) / sum_{A in K}
     1/R(D - A, v_A)``.
     """
     full_mask = 2**n_params - 1
@@ -155,16 +164,16 @@ def _extended_proportional_value(value: np.ndarray, n_params: int) -> np.ndarray
     null = value[:, 0] <= 0.0
     kmax = int(sizes[null].max())  # the empty set is null, so this is >= 0
     members = [m for m in range(2**n_params) if null[m] and sizes[m] == kmax]
-    numerator = np.zeros(n_params)
-    denominator = 0.0
+    numerator = np.zeros((n_params, value.shape[1]))
+    denominator = np.zeros(value.shape[1])
     for a in members:
         ground = full_mask & ~a
         ratio = _ratio_potential(value, ground, a, n_params)
-        denominator += 1.0 / ratio[ground, 0]
+        denominator += 1.0 / ratio[ground]
         for i in range(n_params):
             if not (a >> i) & 1:
-                numerator[i] += 1.0 / ratio[ground ^ (1 << i), 0]
-    return (numerator / denominator)[:, None]
+                numerator[i] += 1.0 / ratio[ground ^ (1 << i)]
+    return numerator / denominator
 
 
 def pme_from_total(total: np.ndarray, n_params: int) -> np.ndarray:

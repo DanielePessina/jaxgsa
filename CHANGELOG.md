@@ -117,11 +117,11 @@ Each line shows the old form, then the new form.
 - `pawn.analyze` and `indices`: `n_bins` → `n_classes`, like Borgonovo and OT.
   `PAWNResult.n_valid_bins` → `PAWNResult.n_valid_classes`.
 - `morris.sample(num_levels=...)` → `n_levels=...`. `MorrisSamples.num_levels` →
-  `MorrisSamples.n_levels`. `MorrisSamples.load` still reads old files.
+  `MorrisSamples.n_levels`. `MorrisSamples.load` does not read files saved
+  with `num_levels`.
   It now raises `ValueError`, not `KeyError`, for a file saved by another
   samples class.
-- `borgonovo.DeltaResult` → `borgonovo.BorgonovoResult`. `DeltaResult` stays as
-  an alias.
+- `borgonovo.DeltaResult` → `borgonovo.BorgonovoResult`. There is no alias.
 - `OTIndices` has a fourth field, `S1`. Code that unpacks three names breaks.
 
 #### Other breaking changes
@@ -342,6 +342,9 @@ weights.
     rows.
   - `EFASTSamples.load` and the other `load` methods name the right class
     when you load the wrong file.
+- The shared argument checks of every `analyze()` and `indices()` start the
+  error with the method, such as `jaxgsa.sobol: `. Before, only five methods
+  did this.
 - The `scramble` docs say that SciPy uses a linear matrix scramble with a
   digital shift. They no longer say Owen scrambling.
 
@@ -363,6 +366,13 @@ Measured on Ishigami (D = 3, N = 1024, float32) on an Apple M1 Pro CPU.
   closed form, with M times less working memory.
 - The shared input checks compile once instead of once per operation, which
   shortens the first call of every method.
+- `dgsm.analyze` with a bootstrap evaluates the model and its Jacobian once,
+  not twice. It still makes a second pass when it drops non-finite rows.
+- The Kucherenko Shapley and PME allocation handles a game with a zero-effect
+  input in one vectorised step per pattern. Before, it looped in Python over
+  every bootstrap column, which was 150 to 200 times slower.
+- `pce` builds its multi-index once per dimension and order. Before, every
+  bootstrap and Shapley refit built it again (63 ms at D = 50, order 3).
 
 These changes move some float32 results at rounding level, by at most 4e-6.
 No HSIC p-value changed. The fitted VKOGA hyperparameters and centres did

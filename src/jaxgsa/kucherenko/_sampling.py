@@ -54,11 +54,18 @@ import numpy as np
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.dependence import draws_for, sobol_uniforms
 from jaxgsa._core.samples import UniqueDesignSamples
-from jaxgsa._core.sampling import _is_power_of_2, _next_power_of_2, _power_of_2_error, check_seed
+from jaxgsa._core.sampling import (
+    _is_power_of_2,
+    _next_power_of_2,
+    _power_of_2_error,
+    check_budget_choice,
+    check_seed,
+    check_seed_scramble,
+)
 from jaxgsa._core.validation import _raise_categorical_design
 from jaxgsa._core.warning_types import JaxgsaWarning
+from jaxgsa.kucherenko._subsets import subset_matrix
 from jaxgsa.problem import Dependence, Problem
-from jaxgsa.sobol._sampling import _check_budget_choice, _check_seed_scramble
 
 
 @dataclass(frozen=True)
@@ -87,11 +94,6 @@ class KucherenkoSamples(UniqueDesignSamples):
         n_expanded: Equal to ``n_runs``; every design row is retained.
         expanded_to_unique: Identity index map, shape ``(n_runs,)``.
         base_n: Base points per block; a power of two for Sobol sampling.
-        dependence: How the inputs depend on each other, as the design was
-            drawn: ``"independent"``, ``"gaussian"`` or ``"custom"``. A saved
-            file keeps this label and the sampler dimension, but not the
-            sampler function. A loaded custom problem still reports
-            ``"custom"``, and it raises if asked to draw new rows.
         n_params: Number of parameters ``D``.
         problem: Problem definition used for the analysis, including its
             ``correlation``.
@@ -106,8 +108,12 @@ class KucherenkoSamples(UniqueDesignSamples):
     base_n: int
     n_params: int
     problem: Problem
-    dependence: Dependence = "independent"
     subsets: Literal["singletons", "all"] = "singletons"
+
+    @property
+    def dependence(self) -> Dependence:
+        """How the inputs depend on each other, as the problem declares it."""
+        return self.problem.dependence
 
     @property
     def n_blocks(self) -> int:
@@ -124,7 +130,7 @@ class KucherenkoSamples(UniqueDesignSamples):
 
     def _extra_metadata(self) -> dict[str, Any]:
         """Persist the design parameters in the metadata blob."""
-        return {"base_n": self.base_n, "dependence": self.dependence, "subsets": self.subsets}
+        return {"base_n": self.base_n, "subsets": self.subsets}
 
     @classmethod
     def _from_payload(
@@ -148,7 +154,6 @@ class KucherenkoSamples(UniqueDesignSamples):
             base_n=int(meta["base_n"]),
             n_params=problem.n_params,
             problem=problem,
-            dependence=_parse_dependence(meta.get("dependence"), problem),
             subsets=_parse_subsets(meta.get("subsets")),
         )
 
@@ -163,21 +168,10 @@ def n_blocks_for(n_params: int, subsets: str) -> int:
 
 
 def _parse_subsets(value: Any) -> Literal["singletons", "all"]:
-    """Read the stored ``subsets`` label. Old files have none, so they are singletons."""
-    if value is None:
-        return "singletons"
+    """Read the stored ``subsets`` label."""
     if value == "singletons" or value == "all":
         return value
     raise ValueError(f"Unknown subsets {value!r} in saved Kucherenko design")
-
-
-def _parse_dependence(value: Any, problem: Problem) -> Dependence:
-    """Read the stored dependence label, falling back to the problem's."""
-    if value is None:
-        return problem.dependence
-    if value == "independent" or value == "gaussian" or value == "custom":
-        return value
-    raise ValueError(f"Unknown dependence {value!r} in saved Kucherenko design")
 
 
 def _warn_independent_problem(problem: Problem, n: int) -> None:
@@ -317,8 +311,8 @@ def sample(
             sampler returns invalid rows.
     """
     check_seed(seed, "jaxgsa.kucherenko.sample")
-    _check_budget_choice(n_samples, base_n, "jaxgsa.kucherenko.sample")
-    _check_seed_scramble(scramble, seed, "jaxgsa.kucherenko.sample")
+    check_budget_choice(n_samples, base_n, "jaxgsa.kucherenko.sample")
+    check_seed_scramble(scramble, seed, "jaxgsa.kucherenko.sample")
     _raise_categorical_design(problem, "jaxgsa.kucherenko.sample")
     D = problem.n_params
     if D < 2:
@@ -381,7 +375,30 @@ def sample(
     blocks.extend(draws.self_given_rest(self_noise, joint, i) for i in range(D))
     X = draws.to_physical(np.concatenate(blocks, axis=0))
 
-    n_total = n * (2 * D + 1)
+    return _finish_design(
+        X,
+        problem,
+        n,
+        subsets="singletons",
+        requested=requested,
+        scramble=scramble,
+        verbose=verbose,
+    )
+
+
+def _finish_design(
+    X: np.ndarray,
+    problem: Problem,
+    n: int,
+    *,
+    subsets: Literal["singletons", "all"],
+    requested: int | None,
+    scramble: bool,
+    verbose: bool,
+) -> KucherenkoSamples:
+    """Print the design summary and wrap the stacked rows in a ``KucherenkoSamples``."""
+    n_blocks = n_blocks_for(problem.n_params, subsets)
+    n_total = n * n_blocks
     if verbose:
         _verbose.sample_summary(
             method="jaxgsa.kucherenko.sample",
@@ -389,7 +406,8 @@ def sample(
             entries=[
                 *_requested_entry(requested),
                 ("base_n", n),
-                ("n_blocks", 2 * D + 1),
+                *([("subsets", "all")] if subsets == "all" else []),
+                ("n_blocks", n_blocks),
                 ("n_runs", n_total),
                 ("dependence", problem.dependence),
                 ("scramble", scramble),
@@ -400,21 +418,15 @@ def sample(
         n_expanded=n_total,
         expanded_to_unique=np.arange(n_total, dtype=np.int64),
         base_n=n,
-        n_params=D,
+        n_params=problem.n_params,
         problem=problem,
-        dependence=problem.dependence,
-        subsets="singletons",
+        subsets=subsets,
     )
 
 
 def _requested_entry(requested: int | None) -> list[tuple[str, object]]:
     """Return the ``requested_runs>=N`` verbose entry, or nothing when ``base_n`` was set."""
     return [] if requested is None else [("requested_runs>", requested)]
-
-
-def subset_fixed(mask: int, n_params: int) -> tuple[int, ...]:
-    """Return the sorted parameter indices in a subset bitmask (bit ``j`` is parameter ``j``)."""
-    return tuple(j for j in range(n_params) if (mask >> j) & 1)
 
 
 def _sample_all_subsets(
@@ -436,7 +448,8 @@ def _sample_all_subsets(
     draws = draws_for(problem)
     k = draws.dimension
     masks = range(1, 2**D - 1)
-    fixed_sets = {m: subset_fixed(m, D) for m in masks}
+    members = subset_matrix(D)  # row m - 1 marks the members of mask m
+    fixed_sets = {m: tuple(np.flatnonzero(members[m - 1]).tolist()) for m in masks}
     width = max(draws.free_dimension(f) for f in fixed_sets.values())
     points = sobol_uniforms(n, 2 * k + width, seed=seed, scramble=scramble)
     block_a = draws.joint(points[:, :k])
@@ -450,29 +463,6 @@ def _sample_all_subsets(
         )
     X = draws.to_physical(np.concatenate(blocks, axis=0))
 
-    n_blocks = 2**D
-    n_total = n * n_blocks
-    if verbose:
-        _verbose.sample_summary(
-            method="jaxgsa.kucherenko.sample",
-            problem=problem,
-            entries=[
-                *_requested_entry(requested),
-                ("base_n", n),
-                ("subsets", "all"),
-                ("n_blocks", n_blocks),
-                ("n_runs", n_total),
-                ("dependence", problem.dependence),
-                ("scramble", scramble),
-            ],
-        )
-    return KucherenkoSamples(
-        samples=X,
-        n_expanded=n_total,
-        expanded_to_unique=np.arange(n_total, dtype=np.int64),
-        base_n=n,
-        n_params=D,
-        problem=problem,
-        dependence=problem.dependence,
-        subsets="all",
+    return _finish_design(
+        X, problem, n, subsets="all", requested=requested, scramble=scramble, verbose=verbose
     )

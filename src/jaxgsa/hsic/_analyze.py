@@ -123,29 +123,6 @@ def _linear_quantile_plan(q: float, n_elements: int) -> tuple[int, int, Array]:
     return int(low), int(high), jnp.asarray(high_weight)
 
 
-def _from_order_key(key: Array, sign_bit: Array, dtype: DTypeLike) -> Array:
-    """Undo the total-ordering bit transform and read the float back.
-
-    Args:
-        key: Order key produced by the transform in
-            :func:`_linear_quantile_by_selection`.
-        sign_bit: The sign bit of the unsigned type the key lives in.
-        dtype: Float dtype to bitcast back to.
-
-    Returns:
-        The float whose order key is ``key``.
-    """
-    raw = jnp.where(key & sign_bit != 0, key ^ sign_bit, ~key)
-    return jax.lax.bitcast_convert_type(raw, dtype)
-
-
-# Bits per radix-selection level. A level is one bincount pass over the
-# data into 2^_RADIX_BITS buckets plus a tiny reduction over the bucket axis;
-# the 16-bit split keeps every bucket table at 64Ki entries. The number of
-# levels is itemsize*8//16: 1 for float16, 2 for float32, 4 for float64.
-_RADIX_BITS = 16
-
-
 def _count_dtype() -> DTypeLike:
     """Return the widest integer dtype the current JAX mode really supports.
 
@@ -157,143 +134,6 @@ def _count_dtype() -> DTypeLike:
         ``jnp.int64`` in x64 mode, otherwise ``jnp.int32``.
     """
     return jnp.int64 if x64_enabled() else jnp.int32
-
-
-def _select_order_statistic(bits: Array, rank: int) -> Array:
-    """Return the exact ``rank``-th order statistic of a total-order bit array.
-
-    The total-order transform in :func:`_linear_quantile_by_selection` maps
-    floats to monotone unsigned integers, so the order statistics of ``bits``
-    are the order statistics of the original values. ``rank`` is 0-based into
-    the ascending order of ``bits`` (ties count as separate positions).
-
-    The selection is a radix pass rather than a bitwise bisection. The
-    bisection resolves the answer one bit at a time, 32 sequential
-    compare-and-count passes over the data on a float32 input; the radix
-    resolves *buckets* of bits at a time, 16 per level, so float32 needs two
-    passes and float64 four, regardless of how many bits the values actually
-    span. Each pass is one bincount into 2^16 buckets (a scatter-add) plus a
-    cumulative-sum and a search over the 64Ki-entry bucket axis, and the
-    passes are independent of the data size except for the scatter itself. On
-    the ``(N, N)`` pairwise distance matrix this measured 23x faster than the
-    bisection at N=512 (2.0 ms vs 45 ms per kernel build) and bit-identical
-    to the sort at every rank probed from N=128 to N=4096.
-
-    Args:
-        bits: Total-order bit array of one of :data:`_UINT_BY_ITEMSIZE`
-            dtypes, any shape (treated as flat).
-        rank: 0-based position into the ascending order of ``bits``. Must be
-            ``< bits.size``.
-
-    Returns:
-        Scalar of ``bits.dtype``: the exact order statistic at ``rank``.
-    """
-    n_buckets = 1 << _RADIX_BITS
-    bucket_mask = n_buckets - 1
-    total_bits = jnp.dtype(bits.dtype).itemsize * 8
-    n_levels = total_bits // _RADIX_BITS
-    count_dtype = _count_dtype()
-    k = jnp.asarray(rank, dtype=count_dtype)
-    # ``mask`` marks the elements that still share the high bits resolved so
-    # far. ``ans`` accumulates the resolved prefix, widened by one bucket per
-    # level, so after ``n_levels`` levels it holds the full bit pattern of the
-    # answer.
-    mask = jnp.ones(bits.shape, dtype=bool)
-    ans = jnp.zeros((), dtype=bits.dtype)
-    for level in range(n_levels):
-        shift = total_bits - _RADIX_BITS * (level + 1)
-        seg = ((bits >> shift) & bucket_mask).astype(count_dtype)
-        # Elements outside the current prefix are mapped to bucket 0 but given
-        # zero weight, so they cannot be selected. counts are int64 under
-        # x64 and int32 otherwise. The cumulative sums stay exact while the
-        # element count is below 2^31, which memory limits keep true in
-        # practice.
-        counts = jnp.bincount(
-            jnp.where(mask, seg, 0),
-            weights=mask.astype(count_dtype),
-            length=n_buckets,
-        )
-        cum = jnp.cumsum(counts)
-        b = jnp.searchsorted(cum, k, side="right")
-        below = jnp.where(b > 0, cum[b - 1], jnp.asarray(0, dtype=count_dtype))
-        k = k - below
-        ans = (ans << jnp.asarray(_RADIX_BITS, dtype=bits.dtype)) | b.astype(bits.dtype)
-        mask = mask & (seg == b)
-    return ans
-
-
-def _linear_quantile_by_selection(values: Array, q: float) -> Array:
-    """Take a linear-interpolated quantile without sorting the input.
-
-    ``jnp.quantile`` sorts. On the ``(N, N)`` matrix of pairwise squared
-    distances that is an ``N^2 log N^2`` sort of a million elements for every
-    output slice, and it measured as 92% of the whole HSIC analysis. Only two
-    adjacent order statistics are ever read, so a *selection* answers the same
-    question, and a selection needs no sort.
-
-    The selection is a radix pass, not a bitwise bisection. The raw unsigned
-    integer sharing the storage is monotone in the float only for
-    non-negative values -- a negative float has its sign bit set, so it reads
-    as a *large* unsigned integer, and ``-inf`` would come back as the
-    maximum instead of the minimum. The standard total ordering fixes that:
-    flip every bit of a negative, set the sign bit of a non-negative. The
-    result is monotone across the whole float line, so the order statistics
-    of the integer bit patterns are the order statistics of the values, and
-    :func:`_select_order_statistic` recovers the two needed ranks with one
-    bincount pass per 16 bits of width instead of a 32-step bisection or an
-    ``N^2 log N^2`` sort. Each pass is a scatter-add over the data, which is
-    bandwidth-bound and parallel, where a sort is neither.
-
-    The result is bit-for-bit what ``jnp.quantile`` returns: the same two
-    order statistics, blended with the same weights, in the same dtype. NaN
-    is handled the same way too — ``jnp.quantile`` poisons the whole array if
-    any element is NaN, so a NaN anywhere gives NaN here as well.
-
-    Args:
-        values: Values to take the quantile over. Any shape; it is treated
-            as flat. Negatives and infinities are ordered correctly.
-        q: Quantile in [0, 1], as a Python float.
-
-    Returns:
-        Scalar quantile, in the dtype ``jnp.quantile`` would return.
-
-    Raises:
-        TypeError: If the float width of ``values`` has no unsigned integer
-            counterpart to bisect over.
-    """
-    flat = values.ravel()
-    itemsize = jnp.dtype(flat.dtype).itemsize
-    if itemsize not in _UINT_BY_ITEMSIZE:
-        raise TypeError(f"cannot select order statistics of dtype {flat.dtype}")
-    uint = _UINT_BY_ITEMSIZE[itemsize]
-    sign_bit = jnp.asarray(1, uint) << jnp.asarray(itemsize * 8 - 1, uint)
-    raw = jax.lax.bitcast_convert_type(flat, uint)
-    bits = jnp.where(raw & sign_bit != 0, ~raw, raw | sign_bit)
-
-    low_rank, high_rank, high_weight = _linear_quantile_plan(q, flat.shape[0])
-
-    lo_bits = _select_order_statistic(bits, low_rank)
-    low_value = _from_order_key(lo_bits, sign_bit, flat.dtype)
-
-    # The high rank is the low rank plus one, so its value is either the same
-    # element again (when the low value is repeated) or the next distinct
-    # value up. Both are one masked reduction away, which is cheaper than a
-    # second bisection.
-    n_at_or_below = jnp.sum(bits <= lo_bits)
-    all_ones = ~jnp.zeros((), uint)
-    above = jnp.where(bits > lo_bits, bits, all_ones)
-    next_value = _from_order_key(jnp.min(above), sign_bit, flat.dtype)
-    high_value = jnp.where(n_at_or_below >= high_rank + 1, low_value, next_value)
-
-    # Blend the pair through ``jnp.quantile`` itself rather than by writing
-    # the weighted sum out here. On a two-element array the same function
-    # reduces to exactly this blend -- the sort is a no-op, the position is
-    # ``high_weight``, and the two weights come back unchanged -- so the last
-    # bit is guaranteed to agree with the sorting implementation even when the
-    # sum lands on a tie that a fused multiply-add rounds one way and a
-    # separate multiply and add round the other.
-    blended = jnp.quantile(jnp.stack([low_value, high_value]), high_weight)
-    return jnp.where(jnp.any(jnp.isnan(flat)), jnp.nan, blended)
 
 
 def _pair_boundaries(y: Array, t: Array) -> tuple[Array, Array]:
@@ -342,19 +182,19 @@ def _pair_boundaries(y: Array, t: Array) -> tuple[Array, Array]:
 def _pairwise_quantile_by_selection(x: Array, q: float) -> Array:
     """Take a linear quantile of all ``N^2`` squared distances without forming them.
 
-    This returns bit for bit what :func:`_linear_quantile_by_selection`
-    returns on ``(x[:, None] - x[None, :]) ** 2``, but it never builds the
-    ``(N, N)`` matrix. After one sort of ``x``, every row of that matrix is
+    This returns bit for bit what ``jnp.quantile`` returns on
+    ``(x[:, None] - x[None, :]) ** 2``, but it never builds the ``(N, N)``
+    matrix. After one sort of ``x``, every row of that matrix is
     unimodal around its diagonal entry (see :func:`_pair_boundaries`), so the
     number of entries ``<= t`` costs ``O(N log N)``. A bisection over the bit
     pattern of the answer then finds the exact order statistic. Squared
     distances are non-negative, so the raw bit pattern is already ordered
     like the value. The pair set is the full matrix: the ``N`` zero
-    diagonal entries and both copies of each pair, as in the reference.
+    diagonal entries and both copies of each pair.
 
-    NaN follows the reference. Any NaN or infinity in ``x`` puts a NaN in the
+    NaN follows ``jnp.quantile``. Any NaN or infinity in ``x`` puts a NaN in the
     distance matrix (``inf - inf`` on the diagonal), so the result is NaN.
-    The selection is not differentiable, as in the reference.
+    The selection is not differentiable.
 
     Args:
         x: Values, shape ``(N,)``.
@@ -448,7 +288,7 @@ def _median_bandwidth_sq(x: Array) -> Array:
     4 to 1024.
 
     The quantile is taken by selection rather than by sorting — see
-    :func:`_linear_quantile_by_selection`, which returns exactly what
+    :func:`_pairwise_quantile_by_selection`, which returns exactly what
     ``jnp.quantile`` would return and is roughly 40x faster here.
 
     Args:
