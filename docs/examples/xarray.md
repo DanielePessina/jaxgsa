@@ -53,10 +53,10 @@ sobol = jaxgsa.sobol.analyze(
 
 bounds = jnp.array(problem.bounds)
 X_hdmr = jax.random.uniform(
-    jax.random.key(1), (1500, problem.num_vars), minval=bounds[:, 0], maxval=bounds[:, 1]
+    jax.random.key(1), (1500, problem.n_params), minval=bounds[:, 0], maxval=bounds[:, 1]
 )
 Y_hdmr = model(X_hdmr)
-hdmr = jaxgsa.hdmr.analyze(problem, X_hdmr, Y_hdmr, maxorder=2, verbose=False)
+hdmr = jaxgsa.hdmr.analyze(problem, X_hdmr, Y_hdmr, order=2, verbose=False)
 
 ds_sobol = sobol.to_dataset(time_coords=time_values)
 ds_hdmr = hdmr.to_dataset(time_coords=time_values)
@@ -259,7 +259,7 @@ HDMR puts frequency at 0.13 where Sobol puts it at 0.97, and its three indices
 sum to 0.20 rather than to something near 1. The ranking survives, but nothing
 else does.
 
-Neither number is a bug. A B-spline HDMR expansion at `maxorder=2` cannot
+Neither number is a bug. A B-spline HDMR expansion at `order=2` cannot
 represent $\sin(2\pi f t)$ across $f \in [1, 5]$ at $t = 5$, where the output
 turns over 25 times inside the input range. The surrogate fits a nearly flat
 function, honestly reports that it did, and returns the sensitivity of the flat
@@ -268,7 +268,7 @@ surrogate, and they are only about your model to the extent that the surrogate
 is. Read `rmse` before you read anything else on an HDMR dataset.
 
 For a fair comparison against Sobol on this model you would need a far higher
-`maxorder`, more `m` basis functions per term, and many more than 1500 points.
+`order`, more `n_intervals` basis functions per term, and many more than 1500 points.
 On a smooth model HDMR is much cheaper than Sobol for the same accuracy. On an
 oscillator sampled this coarsely it is not competitive.
 

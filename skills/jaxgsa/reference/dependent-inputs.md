@@ -43,9 +43,9 @@ R = jaxgsa.sampling.fit_correlation(problem, X_observed)
 problem = problem.with_correlation(R)
 ```
 
-`jaxgsa.sampling.monte_carlo(problem, n, seed=...)` honors a declared
+`jaxgsa.sampling.monte_carlo(problem, n_samples, seed=...)` honors a declared
 correlation through the NORTA construction, so it draws correlated rows that
-keep every declared marginal. `jaxgsa.sampling.correlate(X, problem)` imposes
+keep every declared marginal. `jaxgsa.sampling.correlate(problem, X)` imposes
 the correlation on an existing sample by rank re-pairing, leaving the marginal
 values untouched.
 
@@ -75,7 +75,7 @@ Evaluates the real model on a conditional-copula design. No surrogate.
 def model(X):
     return X[:, 0] + X[:, 1] + X[:, 2]
 
-ks = jaxgsa.kucherenko.sample(problem, 8192, seed=0)   # reads problem.correlation
+ks = jaxgsa.kucherenko.sample(problem, base_n=8192, seed=0)   # reads problem.correlation
 Y = model(jnp.asarray(ks.samples))
 result = jaxgsa.kucherenko.analyze(ks, Y)
 
@@ -94,14 +94,15 @@ does not hold under dependence.
 Signature:
 
 ```python
-jaxgsa.kucherenko.sample(problem, n_samples, *, scramble=True, seed=None,
+jaxgsa.kucherenko.sample(problem, n_samples=None, *, base_n=None,
+                         subsets="singletons", scramble=True, seed=None,
                          verbose=True)
 jaxgsa.kucherenko.analyze(samples, Y, *, n_bootstrap=0, conf_level=0.95,
                           ci_method="quantile", key=None, on_invalid="raise",
                           verbose=True, keep_replicates=False)
 ```
 
-Cost is `N(2D + 1)` model runs. Every parameter needs its own pair of blocks,
+Cost is `N(2D + 1)` model runs for `N` base points. `n_samples` is the minimum number of model runs, as in `sobol`. `base_n=N` sets the base points exactly. Every parameter needs its own pair of blocks,
 because the redraw for parameter `i` comes from a conditional that depends on
 `i`, which is why the design cannot reuse one `B` block the way `sobol` does.
 
@@ -165,17 +166,16 @@ buys you almost nothing.
 Signature:
 
 ```python
-jaxgsa.vkoga.analyze(problem, X, Y, *, correlation=None,
+jaxgsa.vkoga.analyze(problem, X, Y, *, key,
                      gamma=None, ridge=None,
                      max_centers=None, n_folds=10, n_outer=512, n_inner=128,
                      n_variance=8192, n_bootstrap=0, conf_level=0.95,
-                     ci_method="quantile", key=None, batch_size=None,
+                     ci_method="quantile", batch_size=None,
                      on_invalid="raise", verbose=True, keep_replicates=False)
 ```
 
-`key` is required, because the index stage uses randomized integration points.
-`correlation=` overrides `problem.correlation` for one call, and the matrix
-actually used comes back on `result.correlation`. `result.dependence` is
+`key` is required and keyword-only, because the index stage uses randomized integration points.
+The dependence comes from the problem only. Read the matrix on `result.problem.correlation`. `result.dependence` is
 `"independent"`, `"gaussian"` or `"custom"`.
 
 Keep in mind:
@@ -198,7 +198,7 @@ Keep in mind:
 - Cost is dominated by a 10 by 10 grid of k-fold refits. Pass `gamma` and
   `ridge` explicitly once you know good values. `n_outer`, `n_inner` and
   `n_variance` only touch the surrogate, so they are cheap to raise.
-- `result.shapley()` raises `NotImplementedError`, and there is no `S2`.
+- `VKOGAResult` has no `shapley()` method, and there is no `S2`.
 
 ## Four indices under dependence
 
@@ -208,7 +208,7 @@ disagree on the same data.
 
 | Route | What it estimates | What it needs |
 | --- | --- | --- |
-| `kucherenko` | `S1 = V(E(Y given X_i))/V(Y)` and `ST = E(V(Y given X_~i))/V(Y)` under the target joint distribution | Its own design, `N(2D+1)` model runs, a Gaussian correlation or a custom input sampler |
+| `kucherenko` | `S1 = V(E(Y given X_i))/V(Y)` and `ST = E(V(Y given X_~i))/V(Y)` under the target joint distribution | Its own design, `N(2D+1)` model runs for `N` base points, a Gaussian correlation or a custom input sampler |
 | `vkoga` | The same two, as `S_TC` and `S_TU`, plus `S_U`, `S_C`, `S_IU`, from a fitted kernel surrogate | Training (X, Y) pairs, a Gaussian correlation or a custom input sampler |
 | `hdmr` ANCOVA split | Per term, not per parameter: each component's variance split into a structural share `Sa` and a coupling share `Sb` | Any (X, Y) pairs. The correlation is read implicitly out of X |
 | `shapley(backend="hdmr", include_correlative=True)` | One allocation per parameter summing to 1, splitting each term's `Sa + Sb` among its participants | Any (X, Y) pairs |
@@ -249,7 +249,7 @@ not a Gaussian copula. Declare it with the problem:
 ```python
 problem = jaxgsa.Problem(names=..., bounds=..., sampler=f, sampler_dimension=2)
 problem = jaxgsa.Problem.from_dict(..., sampler=f, sampler_dimension=2)
-problem = problem.with_sampler(f, dimension=2)   # copy with a sampler
+problem = problem.with_sampler(f, sampler_dimension=2)   # copy with a sampler
 problem = problem.with_sampler(None)             # copy without it
 ```
 
@@ -281,15 +281,14 @@ arguments does no harm. All randomness comes from the package: Kucherenko's
 the next power of two. Shapes, finite values and fixed columns are checked.
 Statistical consistency is the user's responsibility.
 
-`kucherenko.sample(problem, n, seed=...)` and
+`kucherenko.sample(problem, n_samples, seed=...)` and
 `vkoga.analyze(problem, X_train, Y_train, key=...)` read the sampler from the
-problem. VKOGA's `correlation=` override raises for a custom-sampler problem.
-Kucherenko and VKOGA share one estimator for both dependence kinds, and the
+problem.Kucherenko and VKOGA share one estimator for both dependence kinds, and the
 custom path costs about the same time.
 
 Sobol, Morris and eFAST designs and the independence-only analyses refuse a
 custom-sampler problem, as they refuse a correlated one. For given-data
-methods, draw `X` with `jaxgsa.sampling.monte_carlo(problem, n, seed=...)`. It
+methods, draw `X` with `jaxgsa.sampling.monte_carlo(problem, n_samples, seed=...)`. It
 sends pseudo-random uniforms through the joint branch, so rows are independent
 draws and row bootstrap and HSIC permutation tests stay valid. This does not
 turn an ordinary `X` matrix into a Kucherenko analysis design. Saved designs

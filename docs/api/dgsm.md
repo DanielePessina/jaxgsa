@@ -16,8 +16,8 @@ Those moments turn into two numbers that frame the total Sobol index:
   [Lamboni et al., 2013](https://doi.org/10.1016/j.matcom.2013.02.002)) makes
   this a genuine cap: `ST_i` is never above it, for every marginal this
   package supports.
-- `lower_bound_i = Var(x_i) * sigma_i^2 / Var(Y)`, where
-  `sigma_i = E[df/dx_i]` is the mean signed derivative.
+- `lower_bound_i = Var(x_i) * mu_i^2 / Var(Y)`, where
+  `mu_i = E[df/dx_i]` is the mean signed derivative.
   [Kucherenko & Song (2016)](https://doi.org/10.1007/978-3-319-33507-0_23),
   Theorem 6 (Section 4.1, eq. 31), prove `ST_i >=` this **when input
   `i`'s marginal is an untruncated Gaussian**, and only then. On a uniform or truncated marginal it
@@ -35,10 +35,10 @@ Confirm anything that rests on `lower_bound` with `jaxgsa.sobol`.
 ```python
 analyze(
     problem: Problem,
-    fn: Callable | None = None,
-    X: Array | None = None,
-    *,
+    X: Array,
     Y: Array | None = None,
+    *,
+    fn: Callable | None = None,
     dfdx: Array | None = None,
     standardize_outputs: bool = False,
     n_bootstrap: int = 0,
@@ -54,13 +54,15 @@ analyze(
 
 There are two calling conventions. Use exactly one.
 
-- Autodiff path: `analyze(problem, fn, X)`. JAX differentiates the model, and
+- Autodiff path: `analyze(problem, X, fn=fn)`. JAX differentiates the model, and
   one pass returns both the Jacobian and the forward outputs.
-- Pre-computed path: `analyze(problem, Y=Y, dfdx=dfdx)`. Use it when the model
+- Pre-computed path: `analyze(problem, X, Y, dfdx=dfdx)`. Use it when the model
   is not JAX-differentiable, or when the Jacobian comes from somewhere else.
 
-Arguments from both groups, or one group only half filled, raise a
-`ValueError` that names the argument. Nothing is dropped in silence.
+`X` is always required. `fn` together with `Y` or `dfdx`, neither convention,
+or only one of `Y` and `dfdx`, raises a `ValueError` that names the argument.
+A callable passed as `X` raises a `TypeError`: pass the model as `fn=...`.
+Nothing is dropped in silence.
 
 ```python
 X = jaxgsa.sampling.monte_carlo(problem, 4096, seed=0)
@@ -68,19 +70,19 @@ X = jaxgsa.sampling.monte_carlo(problem, 4096, seed=0)
 def ishigami_one(x):        # one row (D,) -> scalar ()
     return jnp.sin(x[0]) + 7.0 * jnp.sin(x[1]) ** 2 + 0.1 * x[2] ** 4 * jnp.sin(x[0])
 
-result = jaxgsa.dgsm.analyze(problem, ishigami_one, X, verbose=False)
+result = jaxgsa.dgsm.analyze(problem, X, fn=ishigami_one, verbose=False)
 
 result.nu           # Array([ 7.8056626, 24.486486 , 10.771026 ], dtype=float32)
-result.sigma        # Array([-0.06197319, -0.01710795, -0.00092443], dtype=float32)
+result.mu        # Array([-0.06197319, -0.01710795, -0.00092443], dtype=float32)
 result.upper_bound  # Array([2.2949116, 7.1991735, 3.1667461], dtype=float32)
 result.lower_bound  # Array([9.2871493e-04, 7.0773523e-05, 2.0664183e-07], dtype=float32)
-result.var_y        # Array(13.6051655, dtype=float32)
+result.variance        # Array(13.6051655, dtype=float32)
 ```
 
 The upper bounds are all above 1 here, so on Ishigami they exclude nothing.
 That is the honest cost of a bound that must hold for every model with these
 marginals. `nu` still ranks the inputs, and it agrees with the Sobol answer
-that `x2` dominates. Read the near-zero `sigma` values as a warning too: every
+that `x2` dominates. Read the near-zero `mu` values as a warning too: every
 Ishigami derivative averages to about zero over the symmetric domain, which
 makes the lower bound useless and is exactly the non-monotonic case `mu` in
 Morris also misses.
@@ -96,7 +98,7 @@ per row.
 Wrap a batch model like this:
 
 ```python
-result = jaxgsa.dgsm.analyze(problem, lambda x: model(x[None, :])[0], X)
+result = jaxgsa.dgsm.analyze(problem, X, fn=lambda x: model(x[None, :])[0])
 ```
 
 A batch model passed straight in raises a `ValueError` that names the expected
@@ -138,17 +140,17 @@ or analyze each channel with its own derivative array.
 `dfdx` mirrors `Y`'s layout with one extra trailing `(D,)` axis: `(N, D)` for a
 `(N,)` `Y`, `(N, K, D)` for `(N, K)`, and `(N, T, K, D)` for `(N, T, K)`.
 
-`standardize_outputs=True` reports `nu`, `sigma` and `var_y` for the
+`standardize_outputs=True` reports `nu`, `mu` and `variance` for the
 standardized output `(Y - mean) / std`, one mean and one standard deviation per
 output slice. DGSM returns dimensional quantities: under `Y -> a*Y + b`,
-`sigma` scales by `a` and `nu` by `a^2`. Dividing them out puts every slice in
+`mu` scales by `a` and `nu` by `a^2`. Dividing them out puts every slice in
 units of its own standard deviation, so slices of different magnitude compare
 directly. `upper_bound` and `lower_bound` are ratios and do not move.
 
 `n_bootstrap` resamples rows with replacement. That is exactly the right unit
-here: `nu` and `sigma` are plain i.i.d. means over rows, and both bounds are
+here: `nu` and `mu` are plain i.i.d. means over rows, and both bounds are
 plug-in ratios of those means to `Var(Y)`, recomputed on the same resampled
-rows. Intervals come back for all four. `var_y` gets none, because it is the
+rows. Intervals come back for all four. `variance` gets none, because it is the
 denominator rather than a sensitivity measure, and its uncertainty is already
 inside the two bound intervals. The cost is one extra sweep of the Jacobian
 over the sample, not one sweep per replicate, because a replicate is a
@@ -176,11 +178,11 @@ unordered level code has no meaning.
 | Field | Meaning |
 | --- | --- |
 | `nu` | `E[(df/dx_i)^2]`, shape `(D,)` / `(K, D)` / `(T, K, D)` |
-| `sigma` | `E[df/dx_i]`, the mean signed derivative, same shape |
+| `mu` | `E[df/dx_i]`, the mean signed derivative, same shape |
 | `upper_bound` | Poincare upper bound on `ST`, valid for every supported marginal |
-| `lower_bound` | `Var(x_i) * sigma_i^2 / Var(Y)`; a lower bound on `ST` for a Gaussian marginal, an estimate otherwise |
-| `var_y` | output variance per slice, the denominator of both bounds |
-| `nu_conf`, `sigma_conf`, `upper_bound_conf`, `lower_bound_conf` | `(2, ...)` for `[lower, upper]`, or `None` |
+| `lower_bound` | `Var(x_i) * mu_i^2 / Var(Y)`; a lower bound on `ST` for a Gaussian marginal, an estimate otherwise |
+| `variance` | output variance per slice, the denominator of both bounds |
+| `nu_conf`, `mu_conf`, `upper_bound_conf`, `lower_bound_conf` | `(2, ...)` for `[lower, upper]`, or `None` |
 | `ci`, `problem`, `invalid` | the interval record, the problem, the non-finite report |
 
 A zero-variance output slice makes both bounds NaN for that slice and raises a
@@ -216,8 +218,8 @@ For a uniform on `[-pi, pi]` that is `(2pi)^2 / pi^2 = 4` and
 ## indices
 
 ```python
-indices(problem, fn=None, X=None, *, Y=None, dfdx=None,
-        standardize_outputs=False, batch_size=None) -> tuple[Array, ...]
+indices(problem, X, Y=None, *, fn=None, dfdx=None,
+        standardize_outputs=False, batch_size=None) -> DGSMIndices
 ```
 
 The four measures as plain arrays, with no checks and no result object, so it

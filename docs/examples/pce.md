@@ -17,7 +17,7 @@ and S2 the share owned by one pair acting together.
 
 That arithmetic is exact for the polynomial. It says nothing about the model.
 If the polynomial misses the model, the indices describe the polynomial and
-you will publish them anyway unless you look at `loo_rmse`. The contrast
+you will publish them anyway unless you look at `cv_rmse`. The contrast
 further down is the most useful thing on this page.
 
 Reach for PCE when you already have `(X, Y)` pairs and cannot re-run the
@@ -45,7 +45,7 @@ without it.
 Four steps. Draw 2000 uniform samples inside the bounds, because a
 least-squares fit only needs points that cover the input space and any design
 will do. Run the model on them once. Fit the surrogate. Read the indices and
-`loo_rmse` together, never apart.
+`cv_rmse` together, never apart.
 
 ```python
 import jax
@@ -57,7 +57,7 @@ from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 key = jax.random.PRNGKey(42)
 bounds = jnp.array(PROBLEM.bounds)
 X = jax.random.uniform(
-    key, (2000, PROBLEM.num_vars),
+    key, (2000, PROBLEM.n_params),
     minval=bounds[:, 0], maxval=bounds[:, 1],
 )
 Y = evaluate(X)
@@ -68,7 +68,7 @@ print("S1:", result.S1)
 print("ST:", result.ST)
 print("S2:", result.S2)
 print("order:", result.order)
-print("LOO RMSE:", result.loo_rmse)
+print("CV RMSE:", result.cv_rmse)
 print("std(Y):", jnp.std(Y))
 ```
 
@@ -76,7 +76,7 @@ print("std(Y):", jnp.std(Y))
 jaxgsa.pce.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=2000 runs, T=1 x K=1 output slice
     invalid: none found in 2000 rows (policy 'raise')
   timing:
@@ -88,13 +88,13 @@ jaxgsa.pce.analyze
     1. x1  ST=0.5571
     2. x2  ST=0.4429
     3. x3  ST=0.2432
-S1: [3.1396714e-01 4.4286707e-01 1.3369902e-06]
-ST: [0.557123   0.44291067 0.2431572 ]
-S2: [[          nan 8.7611215e-06 2.4312086e-01]
- [8.7611215e-06           nan 8.7074231e-06]
- [2.4312086e-01 8.7074231e-06           nan]]
+S1: [3.1396696e-01 4.4286722e-01 1.3369385e-06]
+ST: [0.55712277 0.44291088 0.24315709]
+S2: [[          nan 8.7613635e-06 2.4312074e-01]
+ [8.7613635e-06           nan 8.7073577e-06]
+ [2.4312074e-01 8.7073577e-06           nan]]
 order: 8
-LOO RMSE: 0.07379977
+CV RMSE: 0.073799685
 std(Y): 3.7769964
 ```
 
@@ -111,13 +111,13 @@ x3 acts only through its interaction with x1. The S2 diagonal is NaN on
 purpose, because an input has no pairwise interaction with itself, and NaN
 refuses to be summed by accident where a 0 would slip through.
 
-Now the number that matters. `loo_rmse` is 0.0738 against a `std(Y)` of 3.777,
+Now the number that matters. `cv_rmse` is 0.0738 against a `std(Y)` of 3.777,
 so the surrogate's out-of-sample error is 2% of the output spread. That is a
 faithful stand-in.
 
 ## The fit decides everything
 
-`loo_rmse` is a leave-one-out cross-validation error. Each sample is scored by
+`cv_rmse` is a leave-one-out cross-validation error. Each sample is scored by
 a fit that excludes it, which measures the surrogate on data it did not see.
 jaxgsa gets it from the hat matrix rather than by refitting N times, so it is
 free.
@@ -131,14 +131,14 @@ data, same call, `order=3` instead of 8:
 low = jaxgsa.pce.analyze(PROBLEM, X, Y, order=3)
 print("S1:", low.S1)
 print("ST:", low.ST)
-print("LOO RMSE:", low.loo_rmse)
+print("CV RMSE:", low.cv_rmse)
 ```
 
 ```text
 jaxgsa.pce.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=2000 runs, T=1 x K=1 output slice
     invalid: none found in 2000 rows (policy 'raise')
   timing:
@@ -152,7 +152,7 @@ jaxgsa.pce.analyze
     3. x2  ST=0.06529
 S1: [0.63639057 0.05677766 0.0026459 ]
 ST: [0.9375337  0.06528562 0.3023086 ]
-LOO RMSE: 2.7552462
+CV RMSE: 2.7552462
 ```
 
 Nothing here errors. Nothing warns. The indices are finite, ordered, and
@@ -161,13 +161,13 @@ wrong.
 x2's true S1 is 0.4424 and the degree-3 fit reports 0.0568, low by a factor of
 eight. The ranking inverts. x2 falls from second to last and x3 climbs past
 it. Present this table to a modelling team and they will stop measuring x2.
-The only signal that anything is amiss is `loo_rmse = 2.755` against a
+The only signal that anything is amiss is `cv_rmse = 2.755` against a
 `std(Y)` of 3.777, which is 73% of the output spread. A degree-3 polynomial
 cannot bend the way $\sin^2(x_2)$ bends over $[-\pi, \pi]$, so it fits x2's
 contribution as noise and hands the leftover variance to whoever will take it.
 
 This is the failure mode of every surrogate method, and it is quiet. Check
-`loo_rmse` first, then read the indices. If it is high, raise `order` and refit
+`cv_rmse` first, then read the indices. If it is high, raise `order` and refit
 until it stops falling.
 
 `order` is not free. The term count is $\binom{D + \text{order}}{\text{order}}$,
@@ -181,7 +181,7 @@ count within the sample budget (fit_ratio=0.5, N=100)
 ```
 
 That was the same problem with only the first 100 rows. The resulting
-`loo_rmse` is 3.627 against that subset's `std(Y)` of 3.934, so 92%. Do not
+`cv_rmse` is 3.627 against that subset's `std(Y)` of 3.934, so 92%. Do not
 treat a reduction warning as advice. Treat it
 as a demand for more samples. Always compare `result.order` against what you
 asked for.
@@ -224,7 +224,7 @@ fit above streams:
 ```
 
 `batch_size` is clamped to N, so any value at or above N means one block. The
-streamed `loo_rmse` is 0.07380029 against the single-pass 0.07379977. That
+streamed `cv_rmse` is 0.07380029 against the single-pass 0.07379977. That
 gap, 7e-7, is float32 reassociation and nothing more. The `fit:` and
 `batch_size:` lines in the verbose block are how you confirm which path ran.
 
@@ -236,14 +236,14 @@ The fitted expansion stays on the result:
 print("coefficients:", result.coefficients.shape)
 print("multi_index:", result.multi_index.shape)
 print("order:", result.order)
-print("loo_rmse:", result.loo_rmse)
+print("cv_rmse:", result.cv_rmse)
 ```
 
 ```text
 coefficients: (165,)
 multi_index: (165, 3)
 order: 8
-loo_rmse: 0.07379977
+cv_rmse: 0.073799685
 ```
 
 165 is the term count for degree 8 in 3 inputs. Each term has one coefficient
@@ -264,7 +264,7 @@ emulator, and it costs a polynomial evaluation instead of a model run:
 
 ```python
 X_new = jax.random.uniform(
-    jax.random.PRNGKey(99), (100, PROBLEM.num_vars),
+    jax.random.PRNGKey(99), (100, PROBLEM.n_params),
     minval=bounds[:, 0], maxval=bounds[:, 1],
 )
 Y_pred = result.predict(X_new)
@@ -280,8 +280,8 @@ Max error: 0.1725297
 ```
 
 100 predictions for 100 new rows. The 0.17 is a worst case over those rows,
-not an average, which is why it sits above `loo_rmse = 0.0738`. Both are small
-against `std(Y) = 3.777`. A max error many times `loo_rmse` usually means the
+not an average, which is why it sits above `cv_rmse = 0.0738`. Both are small
+against `std(Y) = 3.777`. A max error many times `cv_rmse` usually means the
 new points reach into a corner of the input space your training design left
 thin.
 
@@ -297,7 +297,7 @@ print(ds.S1.sel(param="x1").values)
 ```
 
 ```text
-<xarray.Dataset> Size: 140B
+<xarray.Dataset> Size: 144B
 Dimensions:             (param: 3, param_i: 3, param_j: 3)
 Coordinates:
   * param               (param) <U2 24B 'x1' 'x2' 'x3'
@@ -307,20 +307,21 @@ Data variables:
     S1                  (param) float32 12B 0.314 0.4429 1.337e-06
     ST                  (param) float32 12B 0.5571 0.4429 0.2432
     S2                  (param_i, param_j) float32 36B nan 8.761e-06 ... nan
-    loo_rmse            float32 4B 0.0738
+    rmse                float32 4B 0.06139
+    cv_rmse             float32 4B 0.0738
     explained_variance  float32 4B 0.9997
 Attributes:
     order:     8
     streamed:  False
-0.31396714
+0.31396696
 ```
 
 S1 and ST carry one `param` dimension. S2 is a matrix, so it needs `param_i`
-for rows and `param_j` for columns. Both diagnostics travel with the indices:
-`loo_rmse` and `explained_variance`, the fraction of the sample `Var(Y)` the
+for rows and `param_j` for columns. The diagnostics travel with the indices:
+`rmse` (in-sample), `cv_rmse` (leave-one-out) and `explained_variance`, the fraction of the sample `Var(Y)` the
 fitted expansion reproduces, which is 0.9997 here. That one is the in-sample
 R^2, so it cannot pass 1; a fit that memorises the sample reads near 1 while
-`loo_rmse` climbs, which is why the two travel together. The
+`cv_rmse` climbs, which is why the two travel together. The
 `streamed: False` attribute records which fit path produced the numbers.
 
 ## Limitations
@@ -338,7 +339,7 @@ the alternatives: [RS-HDMR](/examples/hdmr), [VKOGA](/examples/vkoga) and
 indices are worse than no indices.
 
 Everything the polynomial cannot represent is missing from the indices, and
-its absence is reported through `loo_rmse` alone.
+its absence is reported through `cv_rmse` alone.
 
 ## See also
 

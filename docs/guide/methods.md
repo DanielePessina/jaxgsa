@@ -141,7 +141,7 @@ inputs and results.
 
 Kucherenko and VKOGA accept a custom sampler for dependence beyond Gaussian
 copulas. Declare it on the problem with
-`problem.with_sampler(f, dimension=k)`. The sampler maps uniform points to
+`problem.with_sampler(f, sampler_dimension=k)`. The sampler maps uniform points to
 joint and conditional rows. Kucherenko assembles the design. VKOGA integrates
 its fitted surrogate under the supplied distribution. A joint sampler alone is
 not enough. For `subsets="all"` the sampler must accept any subset of fixed

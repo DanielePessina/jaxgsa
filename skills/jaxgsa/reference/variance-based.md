@@ -64,7 +64,7 @@ jaxgsa.sobol.analyze
 Signature:
 
 ```python
-jaxgsa.sobol.sample(problem, n_samples, *, base_n=None, calc_second_order=True,
+jaxgsa.sobol.sample(problem, n_samples=None, *, base_n=None, calc_second_order=True,
                     scramble=True, seed=None, verbose=True)
 jaxgsa.sobol.analyze(samples, Y, *, estimator="saltelli-jansen",
                      n_bootstrap=0, conf_level=0.95, ci_method="quantile",
@@ -136,13 +136,13 @@ Variance fractions read analytically off a fitted polynomial. Given data, and it
 keeps a surrogate.
 
 ```python
-X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n=4000, seed=0))
+X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n_samples=4000, seed=0))
 Y = ishigami.evaluate(X)
 
 result = jaxgsa.pce.analyze(PROBLEM, X, Y, order=10)
 
 result.explained_variance   # 1.0      <- read this first
-result.loo_rmse             # 0.006    <- and this, against Y.std() = 3.692
+result.cv_rmse              # 0.006    <- and this, against Y.std() = 3.692
 result.S1                   # [0.3139, 0.4424, 0.0   ]
 result.ST                   # [0.5576, 0.4424, 0.2437]
 
@@ -155,7 +155,7 @@ The order sweep is the whole story of this method:
 ```python
 for order in (3, 6, 10):
     r = jaxgsa.pce.analyze(PROBLEM, X, Y, order=order, verbose=False)
-    print(order, float(r.explained_variance), float(r.loo_rmse), r.S1)
+    print(order, float(r.explained_variance), float(r.cv_rmse), r.S1)
 ```
 
 ```
@@ -178,17 +178,17 @@ jaxgsa.pce.analyze(problem, X, Y, *, order=3, ridge=1e-8, fit_ratio=0.5,
 jaxgsa.pce.effective_order(problem, n_samples, *, order=3, fit_ratio=0.5)
 ```
 
-Result: `S1`, `S2`, `ST`, `coefficients`, `multi_index`, `order`, `loo_rmse`,
+Result: `S1`, `S2`, `ST`, `coefficients`, `multi_index`, `order`, `rmse`, `cv_rmse`,
 `explained_variance`, `streamed`, `predict`, `shapley`.
 
 Keep in mind:
 
 - **Check the fit before you read the indices.** `analyze` warns when
   `explained_variance` falls below 0.5 on any output slice, and separately when
-  `loo_rmse` passes 0.71 times `std(Y)`. A silent run means both passed.
+  `cv_rmse` passes 0.71 times `std(Y)`. A silent run means both passed.
   `indices()` warns about neither, because it traces.
 - `explained_variance` is in-sample, so it climbs as you add terms and cannot
-  detect an overfit on its own. `loo_rmse` turning back up is the overfit
+  detect an overfit on its own. `cv_rmse` turning back up is the overfit
   signal. Raise `order` until it stops falling.
 - A total-degree basis at order p in D parameters has `C(D+p, p)` terms: 286 at
   D=3, p=10, but 3003 at D=10, p=5. `effective_order` returns the order the data
@@ -209,7 +209,7 @@ into a structural share and a coupling share. Given data, and it keeps a
 surrogate.
 
 ```python
-result = jaxgsa.hdmr.analyze(PROBLEM, X, Y, maxorder=2)
+result = jaxgsa.hdmr.analyze(PROBLEM, X, Y, order=2)
 
 result.terms   # ('x1', 'x2', 'x3', 'x1/x2', 'x1/x3', 'x2/x3')
 result.Sa      # [0.3004, 0.3638, 0.0006, 0.0013, 0.2313, 0.0020]
@@ -233,8 +233,8 @@ tensor layouts.
 Signature:
 
 ```python
-jaxgsa.hdmr.analyze(problem, X, Y, *, maxorder=2, maxiter=100, m=2,
-                    lambdax=0.01, slice_chunk_size=None, batch_size=None,
+jaxgsa.hdmr.analyze(problem, X, Y, *, order=2, max_iter=100, n_intervals=2,
+                    ridge=0.01, slice_chunk_size=None, batch_size=None,
                     n_bootstrap=0, conf_level=0.95, ci_method="quantile",
                     key=None, on_invalid="raise", verbose=True,
                     keep_replicates=False)
@@ -245,13 +245,13 @@ Keep in mind:
 - **`result.S.sum()` must be near 1 before you rank anything.** The 0.9174 above
   means 8% of the variance is unaccounted for, and `Sa`, `Sb`, `S` and `ST` all
   inherit that shortfall. `analyze` warns below 0.5 and above 1.3, which is the
-  Li et al. (2010, Eq. 24) precondition. Raise `maxorder` or `m`, or accept that
+  Li et al. (2010, Eq. 24) precondition. Raise `order` or `n_intervals`, or accept that
   this model does not decompose into low-order terms.
 - **Under correlated inputs `ST` is not a total-effect index.** It is the SCSA
   term-membership sum: `Sa + Sb` over every term containing the parameter. It
   can be negative, is not bounded in [0, 1], and does not answer the
   parameter-fixing question. See `dependent-inputs.md`.
-- Only the first-order components are backfitted, up to `maxiter` sweeps with an
+- Only the first-order components are backfitted, up to `max_iter` sweeps with an
   early stop once the coefficients settle. Every higher-order component is a
   single ridge solve.
 - The surrogate is trained on the outputs you supply, so `predict` and `rmse`
@@ -276,7 +276,7 @@ result.ST                  # [0.5576, 0.4424, 0.2437]
 result.explained_variance  # 1.0    <- read this first
 
 # The HDMR backend, on the same data.
-jaxgsa.hdmr.analyze(PROBLEM, X, Y, maxorder=2, verbose=False).shapley()
+jaxgsa.hdmr.analyze(PROBLEM, X, Y, order=2, verbose=False).shapley()
 # Sh [0.4633, 0.4063, 0.1304], explained_variance 0.8994
 
 # One-step convenience wrapper.
@@ -316,8 +316,8 @@ Keep in mind:
 - Shapley dissolves interactions into the participants by design. For the
   interaction itself read `S2` from `sobol` or `pce`, or HDMR's per-term `S`.
 - Backend keyword arguments are forwarded unchecked, so `backend="pce",
-  maxorder=3` raises a plain `TypeError` from `pce.analyze`.
-- `VKOGAResult.shapley()` raises `NotImplementedError` on purpose, because a
+  n_intervals=3` raises a plain `TypeError` from `pce.analyze`.
+- `VKOGAResult` has no `shapley()` method on purpose, because a
   kernel expansion has no term-wise variance decomposition to allocate from.
 - The surrogate-free Song et al. (2016) conditional-variance estimator is not
   implemented.

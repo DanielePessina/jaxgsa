@@ -4,7 +4,7 @@
 jaxgsa.hsic.analyze(
     problem, X, Y, *,
     n_perms=200,
-    key=None,
+    key,
     bandwidth=1.0,
     on_invalid="raise",
     verbose=True,
@@ -21,9 +21,9 @@ Any `(X, Y)` pair works. No design is required.
 
 The HSIC V-statistic estimator comes from
 [Gretton et al. (2005)](https://doi.org/10.1007/11564089_7); the normalized
-`R2_HSIC` sensitivity measure follows
+`R2` sensitivity measure follows
 [Da Veiga (2015)](https://doi.org/10.1080/00949655.2014.945932).
-`T_HSIC` uses products of augmented centered kernels, `1 + k_c`, to capture
+`T` uses products of augmented centered kernels, `1 + k_c`, to capture
 interactions of all orders, following
 [Larsen and Alexanderian (2026)](https://arxiv.org/abs/2603.00849), currently
 an arXiv preprint.
@@ -44,8 +44,8 @@ X = monte_carlo(problem, 1024, seed=0)
 Y = np.sin(X[:, 0]) + 7.0 * np.sin(X[:, 1]) ** 2 + 0.1 * X[:, 2] ** 4 * np.sin(X[:, 0])
 
 res = jaxgsa.hsic.analyze(problem, X, Y, key=jax.random.key(0))
-print(np.asarray(res.R2_HSIC).round(4))
-print(np.asarray(res.T_HSIC).round(4))
+print(np.asarray(res.R2).round(4))
+print(np.asarray(res.T).round(4))
 print(np.asarray(res.p_values).round(4))
 ```
 
@@ -53,17 +53,17 @@ print(np.asarray(res.p_values).round(4))
 jaxgsa.hsic.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=1024 runs, T=1 x K=1 output slice
     invalid: none found in 1024 rows (policy 'raise')
   timing:
     estimator (includes compile on the first call): 3.172 s
     n_perms: 200
     bandwidth: 1.0 (median-heuristic multiplier)
-  results: top 3 of 3 parameters by T_HSIC
-    1. x1  T_HSIC=0.7996
-    2. x3  T_HSIC=0.1873
-    3. x2  T_HSIC=0.07121
+  results: top 3 of 3 parameters by T
+    1. x1  T=0.7996
+    2. x3  T=0.1873
+    3. x2  T=0.07121
 
 [0.135  0.0097 0.0252]
 [0.7996 0.0712 0.1873]
@@ -71,7 +71,7 @@ jaxgsa.hsic.analyze
 ```
 
 That is the Ishigami function. `x3` enters it only through the `x3^4 * sin(x1)`
-term, so its first-order `R2_HSIC` is 0.025 while its total `T_HSIC` is 0.187.
+term, so its first-order `R2` is 0.025 while its total `T` is 0.187.
 The gap is the interaction. All three p-values sit at `1 / (n_perms + 1)`,
 the smallest value 200 permutations can resolve, so all three parameters are
 significant and none of them is more significant than the others.
@@ -110,7 +110,7 @@ own.
 | Argument | Default | What it changes |
 | --- | --- | --- |
 | `n_perms` | `200` | Permutations behind the p-values. Cost is linear in it. The smallest reachable p-value is `1 / (n_perms + 1)`, so 200 bottoms out at 0.005. Raise it only when you need to separate parameters that all hit that floor. |
-| `key` | `None`, but required | A `jax.random` key for the permutations. There is no default because the p-values are random. `jax.random.key(0)` if you just want reproducibility. It is a key rather than an int seed so nested analyses can split it and draw independent permutations. |
+| `key` | required, keyword-only | A `jax.random` key for the permutations. There is no default because the p-values are random. `jax.random.key(0)` if you just want reproducibility. It is a key rather than an int seed so nested analyses can split it and draw independent permutations. |
 | `bandwidth` | `1.0` | Multiplier on the Gaussian bandwidth, applied to every input and to the output. The width itself always comes from the median heuristic per variable: the Gaussian standard deviation is `bandwidth * sqrt(m)`, with `m` the median off-diagonal squared pairwise distance. `0.5` halves every width, `2.0` doubles them. There is no absolute-width setting, because one fixed number cannot be right for both a parameter on `[0, 1]` and an output in megapascals. |
 | `on_invalid` | `"raise"` | Policy for non-finite rows. `"drop"` removes the `(X, Y)` pair, `"propagate"` warns and computes anyway. `X` and `Y` are checked together, so a bad input takes its output with it. |
 | `verbose` | `True` | Prints the summary block shown above. |
@@ -124,14 +124,15 @@ overflow float32 long before the index would care.
 
 | Field | Shape | Meaning |
 | --- | --- | --- |
-| `R2_HSIC` | `(..., D)` | `HSIC(x_i, Y) / sqrt(HSIC(x_i, x_i) * HSIC(Y, Y))`, in `[0, 1]`. The first-order view. 0 means independence. |
-| `T_HSIC` | `(..., D)` | Fraction of the joint dependence lost when `x_i` is removed. The analogue of a total-order index, so it counts interactions. |
+| `R2` | `(..., D)` | `HSIC(x_i, Y) / sqrt(HSIC(x_i, x_i) * HSIC(Y, Y))`, in `[0, 1]`. The first-order view. 0 means independence. |
+| `T` | `(..., D)` | Fraction of the joint dependence lost when `x_i` is removed. The analogue of a total-order index, so it counts interactions. |
 | `p_values` | `(..., D)` | Permutation-test p-values against the null that `x_i` and `Y` are independent. |
 | `hsic_raw` | `(..., D)` | Unnormalized `HSIC(x_i, Y)`. Kernel- and scale-dependent, so compare only within one analysis. |
 | `problem` | | The problem the analysis ran on. |
 | `invalid` | | What the non-finite check found and which policy ran. |
-| `bandwidth` | | The median-heuristic multiplier the kernels were built with. The index moves with it, so a stored `R2_HSIC` without it does not say what it measured. |
+| `bandwidth` | | The median-heuristic multiplier the kernels were built with. The index moves with it, so a stored `R2` without it does not say what it measured. |
 | `n_perms` | | How many permutations the p-values rest on. A p-value cannot fall below `1 / (n_perms + 1)`. |
+| `ci` | | Always `None`. HSIC reports permutation `p_values` and no interval. |
 
 The leading axes follow the shape contract: `(D,)` for `Y` of shape `(N,)`,
 `(K, D)` for `(N, K)`, `(T, K, D)` for `(N, T, K)`.
@@ -156,7 +157,7 @@ one that matters. That is the right answer, not an estimation error.
 
 `analyze` raises `ValueError` for a non-2-D `X`, a column count that disagrees
 with the problem, mismatched row counts, `n_perms < 1`, `N < 4`, a non-positive
-or non-finite `bandwidth`, an unknown `on_invalid`, a missing `key`, a sample
+or non-finite `bandwidth`, an unknown `on_invalid`, a sample
 the non-finite policy refuses, and any categorical parameter. Categorical
 parameters are rejected because the Gaussian input kernel would read a level
 code as a distance, and the code order is arbitrary.
@@ -169,7 +170,7 @@ x64 on before you trust a small index or a close ranking.
 ## Traceable core
 
 `jaxgsa.hsic.indices(problem, X, Y, *, n_perms=200, key, bandwidth=1.0)`
-returns `(R2_HSIC, T_HSIC, p_values, hsic_raw)` as bare arrays with none of the
+returns an `HSICIndices` named tuple `(R2, T, p_values, hsic_raw)` of bare arrays with none of the
 checks, so it composes with `jit`, `vmap` and `jacrev`. `key` is keyword-only
 and has no default there either.
 

@@ -58,7 +58,7 @@ print(np.asarray(res.n_valid_bins))
 jaxgsa.pawn.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=4000 runs, T=1 x K=1 output slice
     invalid: none found in 4000 rows (policy 'raise')
   timing:
@@ -168,10 +168,10 @@ than an answer, and for the sparse-bin case above.
 ## Traceable core
 
 `jaxgsa.pawn.indices(problem, X, Y, *, n_bins=10, statistic="median",
-slice_chunk_size=None)` returns a one-element tuple holding the index array,
-with none of the checks, so it composes with `jit`, `vmap` and `jacrev`. It is a
-tuple for consistency with the other `indices` functions, which return several
-arrays. `n_valid_bins` is not among them, and neither is the sparse-bin warning.
+slice_chunk_size=None)` returns a `PAWNIndices` named tuple with one field, `pawn`,
+holding the index array, with none of the checks, so it composes with `jit`,
+`vmap` and `jacrev`. It is a tuple for consistency with the other `indices`
+functions. `n_valid_bins` is not among them, and neither is the sparse-bin warning.
 
 ## References
 

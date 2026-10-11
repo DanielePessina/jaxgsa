@@ -148,8 +148,8 @@ it:
 ```python
 import jaxgsa
 
-print(jaxgsa.config.get_memory_budget())            # bytes, the default
-print(jaxgsa.config.get_memory_budget(unit="mb"))
+print(jaxgsa.config.get_memory_budget())            # MB, the default
+print(jaxgsa.config.get_memory_budget(unit="b"))
 
 jaxgsa.config.set_memory_budget(256)                # 256 MiB
 jaxgsa.config.set_memory_budget(1.5, unit="gb")     # 1.5 GiB
@@ -158,9 +158,9 @@ print(jaxgsa.config.get_memory_budget())
 ```
 
 ```
-536870912
 512.0
-65536
+536870912
+0.0625
 ```
 
 Lower the budget on a memory-constrained device and you get more, smaller
@@ -207,11 +207,10 @@ ValueError: unknown memory unit 'megabytes'; accepted units are: b, bytes, gb, g
 The value may be an `int` or a `float`, must be positive and finite, and is
 rounded to the nearest whole byte, which must come to at least one.
 
-`get_memory_budget()` still returns **bytes** by default, and does not mirror
-the setter. Changing what an existing call returns would be a silent break:
-code that divides an array size by it would quietly compute the wrong block
-size and never raise. Pass `unit=` and you get a `float`, because the budget
-need not be a whole number of them.
+`get_memory_budget()` reads megabytes by default, the same as the setter, so
+`set_memory_budget(get_memory_budget())` restores the current budget. The
+return value is a `float`, because the budget need not be a whole number of
+megabytes. Pass `unit="b"` to get an exact `int` of bytes.
 
 A new budget applies only to calls made after it. An analysis already running
 keeps the budget it started with.
@@ -267,9 +266,9 @@ X = jnp.asarray(np.random.default_rng(0).uniform(-np.pi, np.pi, size=(4096, 3)))
 def f(x):  # DGSM differentiates a one-row function
     return jnp.sin(x[0]) + 7.0 * jnp.sin(x[1]) ** 2 + 0.1 * x[2] ** 4 * jnp.sin(x[0])
 
-jaxgsa.dgsm.analyze(problem, f, X)                       # None
-jaxgsa.dgsm.analyze(problem, f, X, batch_size=256)       # explicit
-jaxgsa.dgsm.analyze(problem, f, X, batch_size=10**9)     # clamped to 4096
+jaxgsa.dgsm.analyze(problem, X, fn=f)                       # None
+jaxgsa.dgsm.analyze(problem, X, fn=f, batch_size=256)       # explicit
+jaxgsa.dgsm.analyze(problem, X, fn=f, batch_size=10**9)     # clamped to 4096
 ```
 
 The three summaries differ in one line and agree on every index. Trimmed to the

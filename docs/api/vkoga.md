@@ -3,7 +3,6 @@
 ```python
 jaxgsa.vkoga.analyze(
     problem, X, Y, *,
-    correlation=None,
     gamma=None,
     ridge=None,
     max_centers=None,
@@ -14,7 +13,7 @@ jaxgsa.vkoga.analyze(
     n_bootstrap=0,
     conf_level=0.95,
     ci_method="quantile",
-    key=None,
+    key,
     batch_size=None,
     on_invalid="raise",
     verbose=True,
@@ -159,27 +158,28 @@ equals `S_TC`, and `S_C` is zero.
 
 ## Dependency structure
 
-`correlation` declares the Gaussian copula the indices are computed under.
-
-| Value | Meaning |
-| --- | --- |
-| `None` (default) | Read `problem.correlation`. Independent (identity) when the problem declares none. |
-| `(D, D)` array | Override the problem's declaration for this call. The matrix must be symmetric with a unit diagonal. A non-positive-definite matrix is repaired by clipping its negative eigenvalues and renormalising the diagonal, with a `JaxgsaWarning`. This is a cheap heuristic, not Higham's nearest correlation matrix; the two can disagree by a visible margin. |
+The dependence comes from the problem alone. `analyze` has no `correlation`
+argument. Declare a Gaussian copula with `problem.with_correlation(R)`. The
+matrix must be symmetric with a unit diagonal. A non-positive-definite matrix is
+repaired by clipping its negative eigenvalues and renormalising the diagonal,
+with a `JaxgsaWarning`. This is a cheap heuristic, not Higham's nearest
+correlation matrix; the two can disagree by a visible margin. A problem with no
+correlation is treated as independent.
 
 To fit a matrix from observed data use
 `jaxgsa.sampling.fit_correlation(problem, X_data)` and attach it with
 `problem.with_correlation(...)`. Making that a separate step keeps it explicit
-which sample the copula came from. A string value raises `ValueError`.
+which sample the copula came from. To analyse one fit under several
+correlations, call `analyze` once per `problem.with_correlation(R)`.
 
-The matrix used is on `result.correlation`. A custom sampler has no copula
-matrix, so it is `None` there.
+The matrix used is `result.problem.correlation`. A custom sampler has no copula
+matrix.
 
 ## Custom input dependence
 
 Declare the sampler on the problem, with
-`problem.with_sampler(f, dimension=k)` or `Problem(..., sampler=f)`. A problem
-with a sampler cannot also declare a `correlation`, and `analyze` raises
-`ValueError` if you pass `correlation=` for it. The callback contract is
+`problem.with_sampler(f, sampler_dimension=k)` or `Problem(..., sampler=f)`. A problem
+with a sampler cannot also declare a `correlation`. The callback contract is
 [the same as Kucherenko's](/api/kucherenko#custom-input-dependence).
 It transforms package-generated uniform points into joint or conditional
 physical samples. It must be deterministic for identical arguments. Dependence
@@ -214,7 +214,7 @@ See the [runnable custom-dependence example](/examples/correlated-inputs#custom-
 | `n_outer` | `512` | Outer (conditioning) sample size per parameter. Rounded up to the next power of two for Sobol' balance. Raise this when `S_TU` looks noisy: it draws a fresh inner block per outer point, so its sampling error falls as `n_outer` grows. It does not help `S_TC`, which reuses one inner block across every outer point. |
 | `n_inner` | `128` | Inner (conditional) sample size per outer point, rounded up to a power of two. `S_TC` drops the i.i.d. inner-noise correction and leans on a large shared inner block, so do not lower `n_inner` to buy speed there: a small `n_inner` inflates a small `S_TC`, and raising `n_outer` will not fix it. |
 | `n_variance` | `8192` | Sample size for the output variance and the component-function fit, rounded up to a power of two. |
-| `key` | `None`, but required | A `jax.random` key driving the quasi-random index integration. No default, because the indices are a Monte-Carlo estimate. Use `jax.random.key(0)` for reproducibility. |
+| `key` | required, keyword-only | A `jax.random` key driving the quasi-random index integration. No default, because the indices are a Monte-Carlo estimate. Use `jax.random.key(0)` for reproducibility. |
 | `batch_size` | `None` | Rows per device call. It bounds every row-wise step: the surrogate evaluations behind `predict`, and the nested conditional draws. `None` derives one from the memory budget. It never changes the answer. |
 | `on_invalid` | `"raise"` | One training row is one unit, so `"drop"` removes the `(X, Y)` pair. The check runs before the hyperparameter search on purpose: one non-finite `Y` makes every cross-validation score non-finite, and the caller would otherwise meet a `RuntimeError` about failed kernel solves that names the wrong cause. `"drop"` needs at least `n_folds` rows to survive. |
 | `verbose` | `True` | Prints the summary block shown above. |
@@ -260,24 +260,25 @@ Diagnostics:
 
 | Field | Meaning |
 | --- | --- |
-| `correlation` | The `(D, D)` copula matrix the indices were computed under; `None` for custom samplers. |
+| `S1`, `ST` | Read-only aliases of `S_TC` and `S_TU`, for comparison with Kucherenko. Under independent inputs they are the first-order and total Sobol' indices. |
 | `variance` | Output variance under the correlated input measure, per output slice. |
 | `n_centers` | Kernel centres in the fitted surrogate. |
 | `gamma`, `ridge` | The hyperparameters the fit used, cross-validated or passed. |
 | `rmse` | Training-fit RMSE, per output slice. |
-| `cv_rmse` | Cross-validated RMSE. This is the one that tells you whether to trust the indices at all. |
-| `dependence` | The dependence the indices were computed under: `"independent"`, `"gaussian"` or `"custom"`. A per-call `correlation=` override shows here. |
+| `cv_rmse` | Cross-validated RMSE, per output slice. This is the one that tells you whether to trust the indices at all. `None` when you fixed both `gamma` and `ridge`. |
+| `explained_variance` | `1 - rmse**2 / var(Y)` per output slice, in-sample. |
+| `dependence` | The dependence the indices were computed under: `"independent"`, `"gaussian"` or `"custom"`. It always equals `problem.dependence`. |
 | `invalid`, `ci` | The non-finite report and the interval provenance. |
 
 Operations: `result.predict(X_new, batch_size=None)` evaluates the fitted
 surrogate, and `result.to_dataset(time_coords=None)` gives the labeled xarray
 view.
 
-`result.shapley()` raises `NotImplementedError`. Shapley effects need a variance
-decomposition indexed by parameter subsets. A kernel expansion is a sum over
-centres and every centre involves every parameter, so there is no membership
-matrix to allocate from. Use [`jaxgsa.hdmr`](/api/hdmr) or
-[`jaxgsa.pce`](/api/pce) for Shapley effects.
+VKOGA has no `shapley()` method. Shapley effects need a variance decomposition
+indexed by parameter subsets. A kernel expansion is a sum over centres and every
+centre involves every parameter, so there is no membership matrix to allocate
+from. Use [`jaxgsa.hdmr`](/api/hdmr) or [`jaxgsa.pce`](/api/pce) for Shapley
+effects.
 
 ## Enable float64
 
@@ -290,8 +291,7 @@ the cross kernel. float32 cannot carry that for a small `gamma`. Call
 
 `analyze` raises `ValueError` when `X`/`Y` violate the shape contract, when
 `gamma` or `ridge` is not finite and positive, when a size argument is out of
-range, when `correlation` is neither `None` nor a valid matrix, when `key` is
-`None`, when `on_invalid` is unknown or refuses the sample, and in two
+range, when `on_invalid` is unknown or refuses the sample, and in two
 method-specific cases:
 
 - Fewer than two parameters. Conditioning on the other parameters means nothing

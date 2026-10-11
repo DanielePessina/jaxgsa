@@ -102,7 +102,7 @@ n_expanded=2048, n_runs=64, duplicates_removed=1984 (96.9%)
 
 ```python
 analyze(
-    sampling_result: MorrisSamples,
+    samples: MorrisSamples,
     Y: Array,
     *,
     standardize_outputs: bool = False,
@@ -170,21 +170,21 @@ divides the output change by a step in `[0, 1]` coordinates, which makes
 `mu_star` comparable across parameters with different ranges.
 `result.to_physical_units()` divides each measure by the parameter range
 `high - low` and returns a copy with `space == "physical"`. That is a
-derivative scale, directly comparable to DGSM's `sigma`:
+derivative scale, directly comparable to DGSM's `mu` (mean signed derivative) and `nu` (mean squared derivative):
 
 ```python
 result.to_physical_units().mu_star   # Array([1.1795, 1.2533, 1.0645], dtype=float32)
 ```
 
 It raises for a Gaussian problem, where the transform is nonlinear and no
-single range exists, and for a result that is already physical. Any kept
+single range exists. A result that is already physical comes back unchanged. Any kept
 bootstrap draws are rescaled along with the measures.
 
 ## indices
 
 ```python
-indices(sampling_result, Y, *, standardize_outputs=False)
-    -> tuple[Array, Array, Array]     # mu, mu_star, sigma
+indices(samples, Y, *, standardize_outputs=False)
+    -> MorrisIndices                  # mu, mu_star, sigma
 ```
 
 Raw arrays, no checks, no result object. Safe inside `jax.jit` and `jax.vmap`,
@@ -196,7 +196,7 @@ where `analyze` is not.
 a radial Morris design, so the screening measures cost no extra model runs:
 
 ```python
-samples = jaxgsa.sobol.sample(problem, 8192, seed=0)
+samples = jaxgsa.sobol.sample(problem, n_samples=8192, seed=0)
 Y = model(samples.samples)
 sobol_result = jaxgsa.sobol.analyze(samples, Y)
 morris_result = jaxgsa.morris.analyze(samples.to_morris(), Y)

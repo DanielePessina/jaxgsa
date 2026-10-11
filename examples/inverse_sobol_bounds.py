@@ -98,7 +98,7 @@ def main() -> None:
     jax.config.update("jax_enable_x64", True)
     problem = jaxgsa.Problem.from_dict({"x1": (-1.0, 1.0), "x2": (-2.0, 2.0)})
     design = jaxgsa.sobol.sample(
-        problem, n_samples=1, base_n=4096, calc_second_order=False, seed=42, verbose=False
+        problem, base_n=4096, calc_second_order=False, seed=42, verbose=False
     )
 
     def first_order(widths: jax.Array) -> jax.Array:
@@ -161,7 +161,7 @@ def main() -> None:
     np.testing.assert_allclose(exact_s1, TARGET, atol=0.002)
 
     # New scramble and more points; include second order to check the interaction.
-    validation = jaxgsa.sobol.sample(problem, n_samples=1, base_n=32768, seed=123, verbose=False)
+    validation = jaxgsa.sobol.sample(problem, base_n=32768, seed=123, verbose=False)
     fitted_theta = {
         name: {"low": -fitted[i], "high": fitted[i]} for i, name in enumerate(problem.names)
     }

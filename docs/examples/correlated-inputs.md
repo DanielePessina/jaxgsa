@@ -29,7 +29,7 @@ problem = jaxgsa.Problem.from_dict(
     correlation=[[1.0, 0.8], [0.8, 1.0]],
 )
 
-X = jaxgsa.sampling.monte_carlo(problem, n=8192, seed=42)
+X = jaxgsa.sampling.monte_carlo(problem, n_samples=8192, seed=42)
 Y = X[:, 0]  # the model reads x1 and ignores x2
 
 ot = jaxgsa.optimal_transport.analyze(problem, X, Y)
@@ -39,7 +39,7 @@ ot = jaxgsa.optimal_transport.analyze(problem, X, Y)
 jaxgsa.optimal_transport.analyze
   problem: D=2 (x1, x2)
     marginals: gaussian=2
-    correlation: correlated (Gaussian copula)
+    dependence: gaussian copula
     output: N=8192 runs, T=1 x K=1 output slice
     invalid: none found in 8192 rows (policy 'raise')
   timing:
@@ -80,7 +80,7 @@ Now put the same model through Kucherenko, which runs it on a
 conditional-copula design:
 
 ```python
-ks = jaxgsa.kucherenko.sample(problem, 8192, seed=0)
+ks = jaxgsa.kucherenko.sample(problem, base_n=8192, seed=0)
 result = jaxgsa.kucherenko.analyze(ks, ks.samples[:, 0])
 
 print("S1:", np.round(result.S1, 3))
@@ -92,7 +92,7 @@ jaxgsa.kucherenko.sample: D=2, base_n=8192, n_blocks=5, n_runs=40960, dependence
 jaxgsa.kucherenko.analyze
   problem: D=2 (x1, x2)
     marginals: gaussian=2
-    correlation: correlated (Gaussian copula)
+    dependence: gaussian copula
     output: N=40960 runs, T=1 x K=1 output slice
     invalid: none found in 8192 base points (policy 'raise')
   timing:
@@ -178,7 +178,7 @@ p_s = jaxgsa.Problem.from_dict(
 )
 
 print("latent:", round(float(p_s.correlation[0, 1]), 4))
-Xs = jaxgsa.sampling.monte_carlo(p_s, n=100_000, seed=7)
+Xs = jaxgsa.sampling.monte_carlo(p_s, n_samples=100_000, seed=7)
 print("achieved spearman:", round(float(stats.spearmanr(Xs).statistic), 4))
 ```
 
@@ -249,7 +249,7 @@ CDF). Problems without a correlation keep the previous pseudo-random path
 bit-for-bit.
 
 ```python
-X = jaxgsa.sampling.monte_carlo(problem, n=4096, seed=42)
+X = jaxgsa.sampling.monte_carlo(problem, n_samples=4096, seed=42)
 ```
 
 Each column follows its declared marginal exactly, and the ranks across
@@ -285,8 +285,8 @@ p = jaxgsa.Problem.from_dict(
     {"x1": (0.0, 1.0), "x2": (0.0, 1.0)},
     correlation=[[1.0, 0.8], [0.8, 1.0]],
 )
-X_independent = jaxgsa.sampling.monte_carlo(p.with_correlation(None), n=4096, seed=1)
-X_correlated = jaxgsa.sampling.correlate(X_independent, p, seed=2)
+X_independent = jaxgsa.sampling.monte_carlo(p.with_correlation(None), n_samples=4096, seed=1)
+X_correlated = jaxgsa.sampling.correlate(p, X_independent, seed=2)
 
 print("spearman before:", round(float(stats.spearmanr(X_independent).statistic), 4))
 print("spearman after :", round(float(stats.spearmanr(X_correlated).statistic), 4))
@@ -327,7 +327,7 @@ problem = jaxgsa.Problem.from_dict(
     },
     correlation=[[1.0, 0.8], [0.8, 1.0]],
 )
-X = jaxgsa.sampling.monte_carlo(problem, n=8192, seed=42)
+X = jaxgsa.sampling.monte_carlo(problem, n_samples=8192, seed=42)
 Y = X[:, 0]  # the model reads x1 and ignores x2
 
 ot = jaxgsa.optimal_transport.analyze(problem, X, Y)
@@ -557,7 +557,7 @@ problem = jaxgsa.Problem(
 )
 print(problem.dependence)  # custom
 
-design = jaxgsa.kucherenko.sample(problem, 8192, seed=7)
+design = jaxgsa.kucherenko.sample(problem, base_n=8192, seed=7)
 Y = jnp.asarray(design.samples[:, 2])  # the model is Y = w
 result = jaxgsa.kucherenko.analyze(design, Y)
 print(result.S1)  # [-0.0018 -0.0044  1.], so [0, 0, 1] within noise
@@ -566,7 +566,7 @@ print(result.ST)  # [0. 0. 0.], up to floating-point noise
 
 `sampler_dimension=2` says the sampler uses two uniform coordinates per row,
 because `u` and `v` are the only free inputs. You can also attach a sampler
-to an existing problem with `problem.with_sampler(sample_modular, dimension=2)`.
+to an existing problem with `problem.with_sampler(sample_modular, sampler_dimension=2)`.
 `problem.with_sampler(None)` drops it. A problem has either a `correlation` or
 a `sampler`, never both.
 
@@ -608,7 +608,7 @@ covers the cube. The integration distribution obeys the modular constraint:
 
 ```python
 X_train = jnp.asarray(
-    jaxgsa.sampling.monte_carlo(problem.with_sampler(None), n=512, seed=1)
+    jaxgsa.sampling.monte_carlo(problem.with_sampler(None), n_samples=512, seed=1)
 )
 Y_train = X_train[:, 2]
 vk = jaxgsa.vkoga.analyze(

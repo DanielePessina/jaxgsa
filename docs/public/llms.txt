@@ -9,7 +9,8 @@ estimate each input's effect. It does not run your model for you.
 Analyses are JIT-compiled in JAX and run on CPU, GPU, or TPU. Fourteen methods
 cover variance-based indices (Sobol, eFAST, Kucherenko), screening (Morris,
 DGSM), surrogate-based analysis (PCE, RS-HDMR, Shapley effects, VKOGA), and
-given-data measures (HSIC, PAWN, Borgonovo delta, optimal transport).
+given-data measures (HSIC, PAWN, Borgonovo delta, optimal transport, rank-based
+first-order indices).
 
 ## Documentation
 

@@ -80,8 +80,8 @@ The steps:
    Rows drawn from the analysis distribution also work. See
    [training data](#training-data-must-cover-the-analysis-distribution).
 3. Declare the dependency structure with `with_correlation`. `analyze` reads
-   `problem.correlation` by default. Passing a `(D, D)` matrix as
-   `correlation=` overrides the declaration for one call.
+   `problem.correlation`. It has no `correlation=` argument, so the problem is
+   the only place the dependence lives.
 4. Call `vkoga.analyze` with the problem, the inputs, the outputs, and a JAX
    `key`. The key is required: the index estimate is Monte-Carlo against the
    surrogate, so there is randomness to seed.
@@ -135,19 +135,19 @@ jaxgsa.vkoga.analyze
     output: N=2048 runs, T=1 x K=1 output slice
     invalid: none found in 2048 rows (policy 'raise')
   timing:
-    fit + compute: 16.01 s
+    fit + compute: 14.7 s
     n_centers: 300
     gamma: 7.533
     ridge: 5.995e-05
     batch_size: auto (resolved from the memory budget)
   results: top 3 of 3 parameters by S_TC
     1. x1  S_TC=0.8827
-    2. x2  S_TC=0.6325
+    2. x2  S_TC=0.6311
     3. x3  S_TC=0.03245
-S_TC: [0.883 0.633 0.032]
+S_TC: [0.883 0.631 0.032]
 S_TU: [0.34  0.085 0.034]
 S_U:  [0.337 0.083 0.033]
-S_C:  [ 0.546  0.55  -0.   ]
+S_C:  [ 0.546  0.548 -0.   ]
 S_IU: [0.003 0.002 0.001]
 ```
 
@@ -165,7 +165,7 @@ the next call and the search disappears.
   variance. Each explains a large slice of the output, but most of that slice
   is also reachable through the other. So measuring either one more accurately
   pays off, while fixing either one and leaving the other free does not.
-- `S_C` is 0.546 for `x1` and 0.550 for `x2`, and 0.000 for `x3`. That is the
+- `S_C` is 0.546 for `x1` and 0.548 for `x2`, and 0.000 for `x3`. That is the
   correlation-borne part. It is symmetric here because the correlation is what
   carries it. `x3` is uncorrelated, so it has none. A negative `S_C` is a valid
   reading, not a bug: it is a correlation working against a direct effect.
@@ -315,7 +315,7 @@ R_fit = jaxgsa.sampling.fit_correlation(problem, X_corr)
 emp = jaxgsa.vkoga.analyze(
     problem.with_correlation(R_fit), X_corr, Y_corr, key=jax.random.key(0), verbose=False
 )
-print(np.round(emp.correlation, 3))
+print(np.round(emp.problem.correlation, 3))
 print("S_TC:", np.round(emp.S_TC, 3))
 print("S_TU:", np.round(emp.S_TU, 3))
 ```
@@ -324,7 +324,7 @@ print("S_TU:", np.round(emp.S_TU, 3))
 [[1.    0.609 0.041]
  [0.609 1.    0.003]
  [0.041 0.003 1.   ]]
-S_TC: [0.889 0.635 0.044]
+S_TC: [0.889 0.633 0.044]
 S_TU: [0.328 0.082 0.032]
 ```
 
@@ -339,7 +339,7 @@ alone does not invalidate these indices.
 
 ## Independent inputs collapse to S1 / ST
 
-When neither the problem nor the call declares a correlation, the five indices
+When the problem declares no correlation, the five indices
 reduce to the familiar picture. `S_TC` is the first-order Sobol' index, `S_TU`
 is the total index, and `S_C` vanishes.
 
@@ -407,41 +407,37 @@ training design.
 
 ## xarray export
 
-`VKOGAResult.to_dataset()` converts results to a labeled `xarray.Dataset`,
-including the copula matrix on its own pair of parameter dimensions.
+`VKOGAResult.to_dataset()` converts results to a labeled `xarray.Dataset`.
 
 ```python
 print(result.to_dataset())
 ```
 
 ```
-<xarray.Dataset> Size: 280B
-Dimensions:      (param: 3, param_i: 3, param_j: 3)
+<xarray.Dataset> Size: 176B
+Dimensions:             (param: 3)
 Coordinates:
-  * param        (param) <U2 24B 'x1' 'x2' 'x3'
-  * param_i      (param_i) <U2 24B 'x1' 'x2' 'x3'
-  * param_j      (param_j) <U2 24B 'x1' 'x2' 'x3'
+  * param               (param) <U2 24B 'x1' 'x2' 'x3'
 Data variables:
-    S_TC         (param) float64 24B 0.8827 0.6325 0.03245
-    S_TU         (param) float64 24B 0.3401 0.0846 0.03391
-    S_U          (param) float64 24B 0.3366 0.08286 0.03268
-    S_C          (param) float64 24B 0.5462 0.5496 -0.0002307
-    S_IU         (param) float64 24B 0.003461 0.001739 0.001227
-    variance     float64 8B 7.462
-    rmse         float64 8B 0.1596
-    correlation  (param_i, param_j) float64 72B 1.0 0.6 0.0 0.6 ... 0.0 0.0 1.0
+    S_TC                (param) float64 24B 0.8827 0.6311 0.03245
+    S_TU                (param) float64 24B 0.3401 0.0846 0.03391
+    S_U                 (param) float64 24B 0.3366 0.08286 0.03268
+    S_C                 (param) float64 24B 0.5462 0.5482 -0.0002369
+    S_IU                (param) float64 24B 0.003461 0.001739 0.001227
+    variance            float64 8B 7.462
+    rmse                float64 8B 0.1596
+    cv_rmse             float64 8B 0.2133
+    explained_variance  float64 8B 0.9952
 Attributes:
     n_centers:   300
     gamma:       7.533150951473334
     ridge:       5.994842503189409e-05
     dependence:  gaussian
-    cv_rmse:     0.2133223694760349
 ```
 
 The indices sit on the `param` dimension, so you can select by parameter name
 instead of by position (`ds.S_TC.sel(param="x1")`). The correlation matrix
-needs two parameter axes, which is why `param_i` and `param_j` appear alongside
-`param`. For time-series results, pass `time_coords` to label the time
+is not in the dataset. Read it from `result.problem.correlation`. For time-series results, pass `time_coords` to label the time
 dimension.
 
 ## Multi-output
@@ -474,17 +470,17 @@ jaxgsa.vkoga.analyze
     output: N=2048 runs, T=1 x K=2 output slices
     invalid: none found in 2048 rows (policy 'raise')
   timing:
-    fit + compute: 15.05 s
+    fit + compute: 12.32 s
     n_centers: 300
     gamma: 7.533
     ridge: 0.001292
     batch_size: auto (resolved from the memory budget)
   results: top 3 of 3 parameters by S_TC, mean over 2 output slices
     1. x1  S_TC=0.6773
-    2. x2  S_TC=0.5495
-    3. x3  S_TC=0.1572
-S_TC: [[0.883 0.632 0.032]
- [0.472 0.466 0.282]]
+    2. x2  S_TC=0.5457
+    3. x3  S_TC=0.157
+S_TC: [[0.883 0.631 0.032]
+ [0.472 0.46  0.282]]
 ```
 
 Two outputs give a `(2, 3)` index array: one row of three parameter indices per
@@ -496,34 +492,23 @@ index. Read the rows.
 
 ## No Shapley effects
 
-`VKOGAResult.shapley()` raises `NotImplementedError` on purpose:
-
-```python
-result.shapley()
-```
-
-```
-NotImplementedError: VKOGAResult has no term-wise variance decomposition, so
-Shapley effects are undefined for it; use jaxgsa.hdmr or jaxgsa.pce instead
-```
-
-Shapley effects allocate variance across parameter subsets. A kernel expansion
-is a sum over centres instead, and every centre involves every parameter, so
-there is no membership matrix to allocate from. Use
-[`jaxgsa.hdmr`](/examples/hdmr), whose ANCOVA terms are labelled and which
-supports `shapley(include_correlative=True)` for dependent inputs, or
-[`jaxgsa.pce`](/examples/pce).
+`VKOGAResult` has no `shapley()` method. Shapley effects allocate variance
+across parameter subsets. A kernel expansion is a sum over centres instead,
+and every centre involves every parameter, so there is no membership matrix to
+allocate from. Use [`jaxgsa.hdmr`](/examples/hdmr), whose ANCOVA terms are
+labelled and which supports `shapley(include_correlative=True)` for dependent
+inputs, or [`jaxgsa.pce`](/examples/pce).
 
 ## Shape rules
 
-| `Y` shape | `S_TC` / `S_TU` / `S_U` / `S_C` / `S_IU` | `variance` / `rmse` |
+| `Y` shape | `S_TC` / `S_TU` / `S_U` / `S_C` / `S_IU` | `variance` / `rmse` / `cv_rmse` / `explained_variance` |
 |---|---|---|
 | `(N,)` | `(D,)` | `()` |
 | `(N, K)` | `(K, D)` | `(K,)` |
 | `(N, T, K)` | `(T, K, D)` | `(T, K)` |
 
-D is always the last axis of the index arrays. `correlation` is a property of
-the input model, not of any output slice, so it stays `(D, D)` throughout.
+D is always the last axis of the index arrays. `S1` and `ST` are read-only
+aliases of `S_TC` and `S_TU`.
 
 ## Practical caveats
 

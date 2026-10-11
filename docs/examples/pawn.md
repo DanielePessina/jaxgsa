@@ -35,7 +35,7 @@ import jax.numpy as jnp
 import jaxgsa
 from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
-X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n=5000, seed=42))
+X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n_samples=5000, seed=42))
 Y = evaluate(X)
 
 result = jaxgsa.pawn.analyze(PROBLEM, X, Y)
@@ -48,7 +48,7 @@ print("n_valid_bins:", result.n_valid_bins)
 jaxgsa.pawn.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=5000 runs, T=1 x K=1 output slice
     invalid: none found in 5000 rows (policy 'raise')
   timing:
@@ -225,7 +225,7 @@ bins. Use fewer bins (lower n_bins) or more samples.
 jaxgsa.pawn.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=5000 runs, T=1 x K=1 output slice
     invalid: none found in 5000 rows (policy 'raise')
   timing:
@@ -279,7 +279,7 @@ nothing. See [Categorical inputs](/examples/categorical-inputs).
 output, and the conditioning is built once and shared.
 
 ```python
-X3 = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n=3000, seed=42))
+X3 = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n_samples=3000, seed=42))
 Y1 = evaluate(X3)
 Y2 = jnp.sum(X3**2, axis=1)
 

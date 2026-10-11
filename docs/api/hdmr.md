@@ -3,10 +3,10 @@
 ```python
 jaxgsa.hdmr.analyze(
     problem, X, Y, *,
-    maxorder=2,
-    maxiter=100,
-    m=2,
-    lambdax=0.01,
+    order=2,
+    max_iter=100,
+    n_intervals=2,
+    ridge=0.01,
     slice_chunk_size=None,
     batch_size=None,
     n_bootstrap=0,
@@ -20,7 +20,7 @@ jaxgsa.hdmr.analyze(
 ```
 
 RS-HDMR fits B-spline component functions to arbitrary `(X, Y)` pairs: one per
-parameter, one per parameter pair, and so on up to `maxorder`. The ANCOVA
+parameter, one per parameter pair, and so on up to `order`. The ANCOVA
 sensitivity indices then come from the fitted components. No structured design
 is needed, so it suits existing datasets and models too expensive for a Sobol or
 eFAST scheme. The B-spline construction follows
@@ -31,7 +31,10 @@ divides into a structural part `Sa` and a correlation-induced part `Sb`, and
 that split stays meaningful when the inputs are dependent
 ([Li et al., 2010](https://doi.org/10.1021/jp9096919)).
 
-`analyze` requires `N >= 300`.
+`analyze` warns below `N = 300`, where the fit may be unstable. It raises only
+when `N` is too small to compute the fit at all: the largest term has
+`(n_intervals + 3) ** order` coefficients, and the fit needs more rows than
+that (26 at the defaults).
 
 ## A run
 
@@ -56,12 +59,12 @@ print("S.sum ", float(np.asarray(res.S).sum()))
 jaxgsa.hdmr.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=2000 runs, T=1 x K=1 output slice
     invalid: none found in 2000 rows (policy 'raise')
   timing:
     fit + estimator (includes compile on the first call): 1.559 s
-    maxorder: 2
+    order: 2
     slice_chunk_size: auto (resolved from the memory budget)
     batch_size: auto (resolved from the memory budget)
   results: top 3 of 3 parameters by ST
@@ -96,12 +99,12 @@ silent run.
 
 | Argument | Default | What it changes |
 | --- | --- | --- |
-| `maxorder` | `2` | Largest interaction size modelled, 1, 2 or 3. Order 2 captures pairwise interactions. Order 3 adds triples, and both the term count and the fit cost grow combinatorially. Clamped to `D` with a warning when `D < maxorder`. |
-| `maxiter` | `100` | Backfitting iterations for the first-order terms. It rarely needs raising, because iteration stops early once the coefficients stop moving. |
-| `m` | `2` | B-spline intervals per dimension, giving a basis of size `m + 3`. A larger `m` resolves sharper features in the component functions. It also multiplies the coefficient count, since a per-term basis grows as `(m+3)^order`, and it needs more samples to avoid overfitting. |
-| `lambdax` | `0.01` | Tikhonov regularization strength. Raise it for noisy `Y` or small `N`, which smooths and stabilises the components. Lower it when genuine sharp features are being flattened. |
+| `order` | `2` | Largest interaction size modelled, 1, 2 or 3. Order 2 captures pairwise interactions. Order 3 adds triples, and both the term count and the fit cost grow combinatorially. Clamped to `D` with a warning when `D < order`. |
+| `max_iter` | `100` | Backfitting iterations for the first-order terms. It rarely needs raising, because iteration stops early once the coefficients stop moving. |
+| `n_intervals` | `2` | B-spline intervals per dimension, giving a basis of size `n_intervals + 3`. A larger value resolves sharper features in the component functions. It also multiplies the coefficient count, since a per-term basis grows as `(n_intervals+3)^order`, and it needs more samples to avoid overfitting. |
+| `ridge` | `0.01` | Tikhonov regularization strength. Raise it for noisy `Y` or small `N`, which smooths and stabilises the components. Lower it when genuine sharp features are being flattened. |
 | `slice_chunk_size` | `None` | Maximum `(T, K)` output slices fitted per vmap. It bounds the per-slice statistics transient, about `batch_size * slice_chunk_size * n_terms`. `None` derives it from the memory budget. |
-| `batch_size` | `None` | Rows per batch during the fit. It bounds the B-spline basis tensors, roughly `batch_size * (m+3)^2 * n2` floats at order 2 and `batch_size * (m+3)^3 * n3` at order 3, where `n2` and `n3` count parameter pairs and triples. `None` derives it from the memory budget, which resolves to a single batch whenever the whole fit fits. |
+| `batch_size` | `None` | Rows per batch during the fit. It bounds the B-spline basis tensors, roughly `batch_size * (n_intervals+3)^2 * n2` floats at order 2 and `batch_size * (n_intervals+3)^3 * n3` at order 3, where `n2` and `n3` count parameter pairs and triples. `None` derives it from the memory budget, which resolves to a single batch whenever the whole fit fits. |
 | `n_bootstrap` | `0` | Row resamples on `Sa`, `Sb`, `S` and `ST`. See below. |
 | `key` | `None` | A `jax.random` key for the resampling. Required when `n_bootstrap > 0`. |
 | `on_invalid` | `"raise"` | Policy for non-finite rows. One row is one unit, so `"drop"` removes the `(X, Y)` pair and fits on the rest. |
@@ -151,7 +154,9 @@ trailing `D` axis.
 | `ST` | `(..., D)` | SCSA total per parameter. See the warning below. |
 | `terms` | | Human-readable term labels, e.g. `("x1", "x2", "x1/x2")`. Interaction terms join names with `/`. |
 | `select` | `(n_terms,)` | F-test significance count per term, summed over the `T*K` output slices, so the maximum is `T*K`. A low count marks a term the F-test deems insignificant. |
-| `rmse` | `()` / `(K,)` / `(T, K)` | Emulator fit RMSE per output slice, in the units of `Y`. |
+| `rmse` | `()` / `(K,)` / `(T, K)` | In-sample RMSE of the fit per output slice, in the units of `Y`. |
+| `cv_rmse` | same | Out-of-sample RMSE. HDMR computes none, so it is always `None`. |
+| `explained_variance` | same | `1 - rmse**2 / Var(Y)` per output slice, NaN on a constant slice. Not the same as `S.sum()`, which is `Var(f_hat) / Var(Y)`. |
 | `streamed` | | Which fit path ran. |
 | `Sa_conf`, `Sb_conf`, `S_conf`, `ST_conf` | leading `(2, ...)` | `None` when `n_bootstrap=0`. |
 | `problem`, `invalid`, `ci` | | Problem, non-finite report, interval provenance. |
@@ -201,8 +206,8 @@ this.
 
 ## What it refuses
 
-`ValueError` when `X` or `Y` violates the shape contract, when `N < 300`, when
-`maxorder` is not 1, 2 or 3, when an explicit `slice_chunk_size < 1` or
+`ValueError` when `X` or `Y` violates the shape contract, when `N` is below the
+computable floor above, when `order` is not 1, 2 or 3, when an explicit `slice_chunk_size < 1` or
 `batch_size < 1` is passed, when `on_invalid` is unknown or refuses the sample,
 when `n_bootstrap > 0` without a `key`, and when the problem has any categorical
 parameter. The B-spline component functions need an orderable axis, which an
@@ -215,10 +220,10 @@ entry, in which case the columns are `T` timepoints of that single output.
 
 ## Traceable core
 
-`jaxgsa.hdmr.indices(problem, X, Y, *, maxorder=2, maxiter=100, m=2,
-lambdax=0.01, slice_chunk_size=None, batch_size=None)` returns
-`(Sa, Sb, S, ST)` as bare arrays with none of the checks, so it composes with
-`jit`, `vmap` and `jacrev`. The first three carry the `n_terms` axis, `ST`
+`jaxgsa.hdmr.indices(problem, X, Y, *, order=2, max_iter=100, n_intervals=2,
+ridge=0.01, slice_chunk_size=None, batch_size=None)` returns an `HDMRIndices`
+named tuple `(Sa, Sb, S, ST)` of bare arrays with none of the checks, so it composes with
+`jit`, `vmap` and `jacfwd`. The first three carry the `n_terms` axis, `ST`
 carries `D`, and there is no `terms` tuple to label them with.
 
 ## References

@@ -1,11 +1,12 @@
 # Kucherenko (dependent-input Sobol' indices)
 
 ```python
-jaxgsa.kucherenko.sample(problem, n_samples, *, subsets="singletons",
-                         scramble=True, seed=None, verbose=True)
+jaxgsa.kucherenko.sample(problem, n_samples=None, *, base_n=None,
+                         subsets="singletons", scramble=True, seed=None,
+                         verbose=True)
                          -> KucherenkoSamples
 
-jaxgsa.kucherenko.analyze(sampling_result, Y, *, n_bootstrap=0, conf_level=0.95,
+jaxgsa.kucherenko.analyze(samples, Y, *, n_bootstrap=0, conf_level=0.95,
                           ci_method="quantile", key=None, on_invalid="raise",
                           verbose=True, keep_replicates=False)
                           -> KucherenkoResult | IrregularResult
@@ -68,7 +69,7 @@ problem = jaxgsa.Problem(names=("x1", "x2", "x3"), bounds=((-np.pi, np.pi),) * 3
 rho = np.array([[1.0, 0.7, 0.0], [0.7, 1.0, 0.0], [0.0, 0.0, 1.0]])
 corr_problem = problem.with_correlation(rho)
 
-ks = jaxgsa.kucherenko.sample(corr_problem, 4096, seed=0)
+ks = jaxgsa.kucherenko.sample(corr_problem, base_n=4096, seed=0)
 X = ks.samples
 Y = np.sin(X[:, 0]) + 7.0 * np.sin(X[:, 1]) ** 2 + 0.1 * X[:, 2] ** 4 * np.sin(X[:, 0])
 
@@ -122,10 +123,15 @@ Under independent inputs both reduce exactly to the classic Sobol' `S1` and
 
 ## The design
 
-`sample` builds `base_n * (2D + 1)` rows, where `base_n` is `n_samples` rounded
-up to the next power of two, for built-in and custom dependence alike. The
-Sobol' sequence keeps its balance guarantees only at powers of two, so 4096
-stays 4096 and 4097 becomes 8192.
+`sample` builds `base_n * (2D + 1)` rows, for built-in and custom dependence
+alike. You set the size in one of two ways, the same as
+[`jaxgsa.sobol.sample`](/api/sobol). `n_samples` is the minimum number of model
+runs. `sample` picks the smallest power-of-two `base_n` whose design reaches
+it. `base_n=` sets the base points per block exactly, and it must be a power of
+two. The Sobol' sequence keeps its balance guarantees only at powers of two.
+At `D = 3` the design has 7 blocks, so `n_samples=28672` and `base_n=4096` give
+the same design, and `n_samples=28673` gives `base_n=8192`. Give exactly one of
+the two. A `base_n` below 16 warns that the design is degenerate.
 
 With `subsets="all"` the layout is different. See
 [Shapley effects and PME](#shapley-effects-and-pme).
@@ -147,7 +153,8 @@ column-swap scheme and the analysis reproduces the classic Sobol' indices.
 | Argument | Default | What it changes |
 | --- | --- | --- |
 | `subsets` | `"singletons"` | `"singletons"` builds the `2D + 1` block design. `"all"` builds `2^D` blocks for exact Shapley effects and PME. See [Shapley effects and PME](#shapley-effects-and-pme). |
-| `n_samples` | required | Base points per block, at least 2; rounded up to a power of two. It is the only knob on accuracy: everything else in the design is fixed by `D`. |
+| `n_samples` | `None` | Minimum number of model runs. The smallest power-of-two `base_n` whose design reaches it is used. Give exactly one of `n_samples` and `base_n`. |
+| `base_n` | `None` | Base points per block, a power of two, at least 2. It is the only knob on accuracy: everything else in the design is fixed by `D`. Give exactly one of `n_samples` and `base_n`. |
 | `scramble` | `True` | Owen-scrambles the Sobol' sequence. Keep it on, because it is what makes different seeds give statistically independent designs. Off, the sequence is deterministic and repeated runs are identical. |
 | `seed` | `None` | `int`, `np.random.Generator`, or `None`. It seeds the scrambling only, so it does nothing with `scramble=False` and passing both raises `ValueError`. The random streams changed in this release, so a seed does not reproduce designs from earlier versions. |
 | `verbose` | `True` | Prints the one-line design summary shown above. |
@@ -157,7 +164,7 @@ column-swap scheme and the analysis reproduces the classic Sobol' indices.
 [`jaxgsa.optimal_transport`](/api/optimal-transport),
 [`jaxgsa.borgonovo`](/api/borgonovo), [`jaxgsa.pawn`](/api/pawn), or the
 Saltelli-based Sobol pipeline), when the problem has fewer than two parameters,
-and when `n_samples < 2`.
+when both or neither of `n_samples` and `base_n` are given, when `base_n` is not a power of two, and when `n_samples < 2` or `base_n < 2`.
 
 ## Shapley effects and PME
 
@@ -166,7 +173,7 @@ dependence these two numbers can disagree a lot. Sometimes you need one share
 per input that sums to 1. Draw the design with `subsets="all"` for that.
 
 ```python
-ks = jaxgsa.kucherenko.sample(problem, 4096, subsets="all", seed=0)
+ks = jaxgsa.kucherenko.sample(problem, base_n=4096, subsets="all", seed=0)
 res = jaxgsa.kucherenko.analyze(ks, Y)
 res.shapley()   # exact Shapley effects
 res.pme()       # proportional marginal effects
@@ -221,7 +228,7 @@ problem = jaxgsa.Problem(names=("x1", "x2", "x3"), bounds=((-1.0, 1.0),) * 3)
 rho = np.array([[1.0, 0.8, 0.0], [0.8, 1.0, 0.0], [0.0, 0.0, 1.0]])
 problem = problem.with_correlation(rho)
 
-ks = jaxgsa.kucherenko.sample(problem, 4096, subsets="all", seed=0)
+ks = jaxgsa.kucherenko.sample(problem, base_n=4096, subsets="all", seed=0)
 Y = ks.samples[:, 0] + 0.5 * ks.samples[:, 2]
 res = jaxgsa.kucherenko.analyze(ks, Y, verbose=False)
 print(np.asarray(res.S1).round(3))
@@ -267,7 +274,7 @@ attach it afterwards:
 ```python
 problem = jaxgsa.Problem(names=..., bounds=..., sampler=f, sampler_dimension=2)
 problem = jaxgsa.Problem.from_dict(..., sampler=f, sampler_dimension=2)
-problem = problem.with_sampler(f, dimension=2)   # copy with a sampler
+problem = problem.with_sampler(f, sampler_dimension=2)   # copy with a sampler
 problem = problem.with_sampler(None)             # copy without it
 ```
 
@@ -313,7 +320,7 @@ assembles the analysis blocks. Shapes, finite values and fixed columns are
 checked. Statistical consistency is your responsibility. VKOGA's
 `correlation=` override cannot be combined with a custom sampler.
 
-For given-data methods, draw `X` with `jaxgsa.sampling.monte_carlo(problem, n)`.
+For given-data methods, draw `X` with `jaxgsa.sampling.monte_carlo(problem, n_samples)`.
 It sends pseudo-random uniforms through the joint branch of your sampler. This
 does not turn an ordinary `X` matrix into a Kucherenko analysis design.
 `sobol`, `morris`, `efast` and the independence-only analyses refuse a
@@ -423,7 +430,7 @@ The file does not store a custom sampler function. The sampled rows and their
 outputs are enough for the analysis. A loaded custom problem still reports
 `dependence == "custom"`, so the independence checks still refuse it. It
 raises if you ask it to draw new rows. To draw a new design, attach the
-sampler again with `problem.with_sampler(f, dimension=k)`.
+sampler again with `problem.with_sampler(f, sampler_dimension=k)`.
 
 ## References
 

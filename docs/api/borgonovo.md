@@ -9,7 +9,7 @@ jaxgsa.borgonovo.analyze(
     n_bootstrap=0,
     conf_level=0.95,
     ci_method="quantile",
-    bias_correct=None,
+    bias_correct=False,
     key=None,
     slice_chunk_size=None,
     degenerate_tol=0.01,
@@ -52,7 +52,7 @@ print(np.asarray(res.S1).round(4))
 jaxgsa.borgonovo.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=4000 runs, T=1 x K=1 output slice
     invalid: none found in 4000 rows (policy 'raise')
   timing:
@@ -74,20 +74,14 @@ output mean. Its `delta` is 0.161, third of three but far from nothing, because
 fixing it does reshape the output density through the `x3^4 * sin(x1)` term.
 That gap is the whole reason to run this method.
 
-## bias_correct is a tri-state
+## bias_correct
 
-`bias_correct` takes `True`, `False`, or `None`, and `None` is the default. What
-`None` does depends on `n_bootstrap`.
+`bias_correct` is a plain bool, `False` by default.
 
-| Value | With `n_bootstrap > 0` | With `n_bootstrap == 0` |
-| --- | --- | --- |
-| `None` (default) | Applies the Plischke correction `2*d_hat - mean(d_boot)` and warns once per process. | Does nothing. |
-| `True` | Applies the correction, silently. | Cannot deliver it, so it warns. |
-| `False` | Never applies it. `delta` is the plug-in estimate. | Never applies it. |
-
-The consequence to internalise: adding `n_bootstrap=100` to a default call does
-not only add intervals. It changes the reported `delta` from the plug-in
-estimate to the corrected one.
+| Value | What `delta` is |
+| --- | --- |
+| `False` (default) | The plug-in estimate, always. `n_bootstrap` only adds intervals, as in every other method. |
+| `True` | The Plischke correction `2*d_hat - mean(d_boot)`. It needs `n_bootstrap > 0`. With `n_bootstrap=0` it raises a `ValueError`. |
 
 The correction `2*d_hat - mean(d_boot)` is the bootstrap bias reduction in
 [Plischke et al. (2013, equation 30)](https://doi.org/10.1016/j.ejor.2012.11.047).
@@ -100,30 +94,21 @@ r = jaxgsa.borgonovo.analyze(problem, X, Y, n_bootstrap=50,
 print(np.asarray(r.delta).round(4))
 
 r = jaxgsa.borgonovo.analyze(problem, X, Y, n_bootstrap=50,
-                             key=jax.random.key(0), bias_correct=False,
+                             key=jax.random.key(0), bias_correct=True,
                              verbose=False)
 print(np.asarray(r.delta).round(4))
 ```
 
 ```
-JaxgsaWarning: jaxgsa.borgonovo: bias_correct was left at its default (None)
-and n_bootstrap > 0, so the Plischke bias correction IS applied: the delta
-reported is 2*d_hat - mean(d_boot), not the plug-in estimate. Pass
-bias_correct=True to keep this and silence this warning, or bias_correct=False
-for the uncorrected delta. This warning is shown once per process.
-
-[0.2106 0.3347 0.1562]
 [0.2149 0.3387 0.1606]
+[0.2106 0.3347 0.1562]
 ```
 
 The correction is small here, about 0.004 on each parameter, and it moves in the
-direction you would expect. The uncorrected delta is positively biased: a KDE
+direction you would expect. The plug-in delta is positively biased: a KDE
 separation is a distance, so sampling noise can only push it up. Use
-`n_bootstrap >= 100` when the value matters and not only the ranking.
-
-The tri-state exists because the correction needs replicates and replicates are
-opt-in. A plain `bias_correct=True` default next to `n_bootstrap=0` would be a
-contradiction that warned on every default call.
+`bias_correct=True` with `n_bootstrap >= 100` when the value matters and not
+only the ranking.
 
 `S1` is never bias-corrected, matching SALib.
 
@@ -134,7 +119,7 @@ contradiction that warned on every default call.
 | `n_classes` | `None` | Equal-frequency conditioning classes per continuous parameter. `None` uses the Plischke sample-size heuristic, roughly `N**(2/7)` classes saturating at 48, identical to SALib's rule. More classes condition more tightly and leave fewer samples per class, which makes each conditional KDE noisier. A passed value is validated against `[2, N]`. A categorical parameter ignores it and uses one class per level, sized by the observed level counts; declared levels with no samples are dropped with a warning. When every parameter is categorical, a `JaxgsaWarning` says the value is ignored. |
 | `grid_size` | `100` | Points on the shared output grid the densities are compared on, spanning `[Y.min(), Y.max()]` per column. It is the knob that moves the answer for near-atomic conditional classes, because `grid_step` sets the floored bandwidth. `grid_size < 2` raises. |
 | `bandwidth` | `"silverman"` | KDE bandwidth rule, or a positive float used directly. |
-| `bias_correct` | `None` | See above. |
+| `bias_correct` | `False` | `True` reports the bias-corrected `delta` and needs `n_bootstrap > 0`. See above. |
 | `key` | `None` | A `jax.random` key for the resampling. Required when `n_bootstrap > 0`. |
 | `slice_chunk_size` | `None` | Flattened `T*K` output columns per kernel call. `None` derives it from the memory budget and the real class layout. One column costs the summed padded class layout `sum_g(Dg * Mg * Pg)` per output-grid point, which is about `D * N` for continuous parameters. An imbalanced categorical parameter pads every level up to the largest one, so it can cost many times `D * N`. The grid is then evaluated in tiles, so peak memory follows the tile rather than the whole grid, and narrowing this chunk is rarely the thing that saves memory here. |
 | `degenerate_tol` | `0.01` | A conditioning class counts as degenerate when its KDE bandwidth falls below this fraction of the full-sample bandwidth. Degenerate classes get the floor below. Lowering it lets narrower classes keep their own bandwidth. Raising it above the floor fraction biases the result: a class whose own bandwidth sits between the floor and this tolerance is then *narrowed* to the floor, which inflates delta for exactly the classes the higher tolerance said to distrust. Valid range `[0, 1)`. |
@@ -198,8 +183,8 @@ A class the output grid cannot resolve gets the floored KDE bandwidth and one
 
 `jaxgsa.borgonovo.indices(problem, X, Y, *, n_classes=None, grid_size=100,
 bandwidth="silverman", slice_chunk_size=None, degenerate_tol=0.01,
-degenerate_bandwidth="auto")` returns `(delta, S1)` as bare arrays with none of
-the checks, so it composes with `jit`, `vmap` and `jacrev`. There is no bias
+degenerate_bandwidth="auto")` returns a `BorgonovoIndices` named tuple
+`(delta, S1)` of bare arrays with none of the checks, so it composes with `jit`, `vmap` and `jacrev`. There is no bias
 correction there, because there is no bootstrap.
 
 ## References

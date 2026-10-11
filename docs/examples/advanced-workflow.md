@@ -65,7 +65,7 @@ jaxgsa.morris.sample: D=20, method=trajectory, n_trajectories=40, num_levels=4, 
 jaxgsa.morris.analyze
   problem: D=20 (x1, x2, x3, x4, x5, x6, x7, x8, ... 12 more)
     marginals: uniform=20
-    correlation: independent
+    dependence: independent
     output: N=840 runs, T=1 x K=1 output slice
     invalid: none found in 40 trajectories (policy 'raise')
   timing:
@@ -210,7 +210,7 @@ jaxgsa.sobol.sample: D=4, mode=second-order, base_n=1024, requested_runs>=10240,
 jaxgsa.sobol.analyze
   problem: D=4 (x1, x2, x3, x4)
     marginals: uniform=4
-    correlation: independent
+    dependence: independent
     output: N=10240 runs, T=1 x K=1 output slice
     invalid: none found in 1024 Saltelli groups (policy 'raise')
   timing:

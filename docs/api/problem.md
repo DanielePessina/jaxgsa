@@ -11,6 +11,7 @@ sampling and analysis function takes one. It is a frozen dataclass, so one
 Problem(
     names: tuple[str, ...],
     bounds: tuple[tuple[float, float], ...],
+    *,
     output_names: tuple[str, ...] | None = None,
     correlation: ArrayLike | None = None,
     correlation_type: Literal["latent", "spearman"] = "latent",
@@ -20,13 +21,15 @@ Problem(
 ```
 
 The direct constructor takes uniform marginals only, as finite `(low, high)`
-pairs. It is the short form for the common case.
+pairs. It is the short form for the common case. Every argument after `bounds`
+is keyword-only. `names` and `output_names` must be sequences of strings: a
+bare string such as `output_names="temp"` raises `TypeError`.
 
 ```python
 Problem.from_dict(
     params: dict[str, InputSpecValue],
-    output_names: tuple[str, ...] | None = None,
     *,
+    output_names: tuple[str, ...] | None = None,
     truncate_gaussians: float | None = None,
     correlation: ArrayLike | None = None,
     correlation_type: Literal["latent", "spearman"] = "latent",
@@ -56,7 +59,7 @@ problem = jaxgsa.Problem.from_dict(
     }
 )
 problem.names        # ('x1', 'x2', 'x3')
-problem.num_vars     # 3
+problem.n_params     # 3
 problem.bounds       # None
 problem.input_specs
 ```
@@ -231,7 +234,7 @@ to joint and conditional rows. Declare it with the problem, or attach it later:
 ```python
 Problem(names, bounds, sampler=f, sampler_dimension=2)
 Problem.from_dict(params, sampler=f, sampler_dimension=2)
-problem.with_sampler(f, dimension=2)   # copy with the sampler
+problem.with_sampler(f, sampler_dimension=2)   # copy with the sampler
 problem.with_sampler(None)             # copy without it
 ```
 
@@ -253,7 +256,7 @@ the sampler, so given-data methods can analyse its draws.
 | `names` | parameter names in model-input order |
 | `bounds` | `(low, high)` per parameter, or `None` if any marginal is not uniform |
 | `output_names` | output labels, or `None` |
-| `num_vars` | `D`, the number of parameters |
+| `n_params` | `D`, the number of parameters |
 | `input_specs` | the canonical spec dataclass per parameter |
 | `correlation` | the validated latent matrix, or `None` |
 | `sampler` | the custom sampler, or `None` |

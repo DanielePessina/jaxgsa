@@ -170,8 +170,8 @@ because it is a ratio to the output variance.
 
 ## Traceable core
 
-`jaxgsa.rank.indices(problem, X, Y)` returns a one-element tuple holding the
-index array, with none of the diagnostics, so it composes with `jit` and
+`jaxgsa.rank.indices(problem, X, Y)` returns a `RankIndices` named tuple with one field,
+`S1`, holding the index array, with none of the diagnostics, so it composes with `jit` and
 `vmap`. It still refuses categorical problems, because that check reads only
 static problem metadata. The estimator reads the ranks of `X`, so the gradient
 with respect to `X` is 0 almost everywhere. The gradient with respect to `Y` is

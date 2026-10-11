@@ -94,7 +94,7 @@ R = np.array(
 )
 problem = problem.with_correlation(R)
 
-ks = jaxgsa.kucherenko.sample(problem, 4096, seed=0)
+ks = jaxgsa.kucherenko.sample(problem, base_n=4096, seed=0)
 
 a = np.array([2.0, 1.0, 0.5])
 Y = ks.samples @ a  # your model here
@@ -168,7 +168,7 @@ scheme and the indices are the classic ones:
 
 ```python
 plain = problem.with_correlation(None)
-ks0 = jaxgsa.kucherenko.sample(plain, 4096, seed=0, verbose=False)
+ks0 = jaxgsa.kucherenko.sample(plain, base_n=4096, seed=0, verbose=False)
 r0 = jaxgsa.kucherenko.analyze(ks0, ks0.samples @ a, verbose=False)
 
 print("S1:", np.round(r0.S1, 3))
@@ -205,7 +205,7 @@ seed at the same time is a contradiction, so it raises rather than quietly
 ignoring one of the two:
 
 ```python
-jaxgsa.kucherenko.sample(problem, 128, scramble=False, seed=0)
+jaxgsa.kucherenko.sample(problem, base_n=128, scramble=False, seed=0)
 ```
 
 ```

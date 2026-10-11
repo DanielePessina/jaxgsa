@@ -13,7 +13,7 @@ sources for the estimator you use below.
 
 ```python
 analyze(
-    sampling_result: SobolSamples,
+    samples: SobolSamples,
     Y: Array,
     *,
     estimator: Estimator = "saltelli-jansen",
@@ -28,7 +28,7 @@ analyze(
 ) -> SobolResult | IrregularResult
 ```
 
-`Y` holds the model outputs at each unique row of `sampling_result.samples`,
+`Y` holds the model outputs at each unique row of `samples.samples`,
 in that row order. Accepted shapes are `(n_runs,)`, `(n_runs, K)` and
 `(n_runs, T, K)`. Indices are computed independently for every `(t, k)` slice.
 
@@ -55,6 +55,13 @@ result.S1        # Array([0.3223, 0.4361, 0.0014], dtype=float32)
 result.ST        # Array([0.556 , 0.4417, 0.2413], dtype=float32)
 result.S2.shape  # (3, 3)
 ```
+
+`sample(problem, n_samples=None, *, base_n=None, ...)` takes exactly one of two
+size arguments. `n_samples` is the minimum number of model runs. `base_n` sets
+the base points exactly and must be a power of two. Giving both, or neither,
+raises `ValueError`. `scramble=False` with a `seed` also raises, because the
+unscrambled sequence is deterministic. `repr(samples)` prints the run counts
+and `base_n`, not the arrays.
 
 The analytical answer for Ishigami is `S1 = [0.3139, 0.4424, 0.0]` and
 `ST = [0.5576, 0.4424, 0.2437]`, so 1024 base samples land within about 0.01.
@@ -103,8 +110,8 @@ was measured for coverage.
 ## jaxgsa.sobol.indices()
 
 ```python
-indices(sampling_result, Y, *, estimator="saltelli-jansen", slice_chunk_size=None)
-    -> tuple[Array, ...]
+indices(samples, Y, *, estimator="saltelli-jansen", slice_chunk_size=None)
+    -> SobolIndices
 ```
 
 `indices` returns the same numbers as `analyze`, as plain arrays. It does
@@ -118,11 +125,12 @@ number, so it cannot run under `jax.jit` or `jax.vmap`. `indices` reads
 nothing, so it can.
 
 ```python
-S1, ST = jaxgsa.sobol.indices(samples, Y)
+S1, ST, S2 = jaxgsa.sobol.indices(samples, Y)
 ```
 
-The return is a tuple of two arrays for a first-order design and three
-(`S1, ST, S2`) for a second-order one, so unpack it accordingly.
+The return is a `SobolIndices` named tuple with the fields `S1`, `ST` and `S2`,
+the same names as the fields of `SobolResult`. It always has three fields.
+`S2` is `None` when the design was drawn with `calc_second_order=False`.
 
 `morris`, `efast` and `dgsm` each expose an `indices()` under the same
 contract.

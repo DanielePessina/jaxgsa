@@ -20,7 +20,7 @@ Two indices come back:
 - **R2-HSIC**, the first-order view. `HSIC(x_i, Y)` divided by
   `sqrt(HSIC(x_i, x_i) * HSIC(Y, Y))`, so it lands in [0, 1] and reads like a
   kernel correlation coefficient.
-- **T_HSIC**, the total-order view. The fraction of the joint dependence that
+- **T**, the total-order view. The fraction of the joint dependence that
   is lost when x_i is removed, so it also counts influence carried through
   interactions with other inputs.
 
@@ -56,38 +56,38 @@ import jax.numpy as jnp
 import jaxgsa
 from jaxgsa.benchmarks.ishigami import PROBLEM, evaluate
 
-X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n=2048, seed=42))
+X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n_samples=2048, seed=42))
 Y = evaluate(X)
 
 result = jaxgsa.hsic.analyze(PROBLEM, X, Y, key=jax.random.key(0))
 
-print("R2_HSIC: ", result.R2_HSIC)
-print("T_HSIC:  ", result.T_HSIC)
+print("R2: ", result.R2)
+print("T:  ", result.T)
 print("p_values:", result.p_values)
 print("hsic_raw:", result.hsic_raw)
-print("sum of R2_HSIC:", float(result.R2_HSIC.sum()))
+print("sum of R2:", float(result.R2.sum()))
 ```
 
 ```
 jaxgsa.hsic.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=2048 runs, T=1 x K=1 output slice
     invalid: none found in 2048 rows (policy 'raise')
   timing:
     estimator (includes compile on the first call): 6.441 s
     n_perms: 200
     bandwidth: 1.0 (median-heuristic multiplier)
-  results: top 3 of 3 parameters by T_HSIC
-    1. x1  T_HSIC=0.8192
-    2. x3  T_HSIC=0.1662
-    3. x2  T_HSIC=0.05517
-R2_HSIC:  [0.17024249 0.01001166 0.02882576]
-T_HSIC:   [0.8192214  0.05516746 0.16617651]
+  results: top 3 of 3 parameters by T
+    1. x1  T=0.8192
+    2. x3  T=0.1662
+    3. x2  T=0.05517
+R2:  [0.17024249 0.01001166 0.02882576]
+T:   [0.8192214  0.05516746 0.16617651]
 p_values: [0.00497512 0.00497512 0.00497512]
 hsic_raw: [0.01507914 0.00089377 0.0025357 ]
-sum of R2_HSIC: 0.20907990634441376
+sum of R2: 0.20907990634441376
 ```
 
 The block above the arrays is the verbose summary. `verbose=True` is the 1.0
@@ -101,7 +101,7 @@ silent run.
 Each of the four arrays has one entry per input, in the order the parameters
 appear in `PROBLEM`. Read them together.
 
-`R2_HSIC` ranks x1 first, then x3, then x2. That ranking disagrees with the
+`R2` ranks x1 first, then x3, then x2. That ranking disagrees with the
 published first-order Sobol indices for Ishigami, which put x2 first (0.442),
 then x1 (0.314), then x3 (0.000). The disagreement is real and it is not a
 bug. Sobol asks how much variance an input explains; x2 enters Ishigami
@@ -110,7 +110,7 @@ how much a kernel can tell x2 apart from noise at the chosen bandwidth, and
 `sin^2` is an even, oscillating function that a wide Gaussian kernel smooths
 away. Change the bandwidth and x2 comes back, as the next section shows.
 
-`T_HSIC[i]` sits above `R2_HSIC[i]` for every input here. The gap is the
+`T[i]` sits above `R2[i]` for every input here. The gap is the
 dependence carried through interactions. On x1 it is enormous (0.170 to
 0.819), which is correct: x1 multiplies the `x3^4` term, so almost every
 interaction in this model runs through it.
@@ -150,13 +150,13 @@ surprises you.
 for b in (0.5, 1.0, 2.0):
     r = jaxgsa.hsic.analyze(PROBLEM, X, Y, key=jax.random.key(0),
                             bandwidth=b, verbose=False)
-    print(f"bandwidth={b}: R2_HSIC={r.R2_HSIC}  T_HSIC={r.T_HSIC}")
+    print(f"bandwidth={b}: R2={r.R2}  T={r.T}")
 ```
 
 ```
-bandwidth=0.5: R2_HSIC=[0.10485364 0.07125119 0.03178893]  T_HSIC=[0.5324777  0.38032645 0.19353473]
-bandwidth=1.0: R2_HSIC=[0.17024249 0.01001166 0.02882576]  T_HSIC=[0.8192214  0.05516746 0.16617651]
-bandwidth=2.0: R2_HSIC=[0.21803978 0.00576837 0.01242837]  T_HSIC=[0.9236343  0.02539974 0.06154101]
+bandwidth=0.5: R2=[0.10485364 0.07125119 0.03178893]  T=[0.5324777  0.38032645 0.19353473]
+bandwidth=1.0: R2=[0.17024249 0.01001166 0.02882576]  T=[0.8192214  0.05516746 0.16617651]
+bandwidth=2.0: R2=[0.21803978 0.00576837 0.01242837]  T=[0.9236343  0.02539974 0.06154101]
 ```
 
 This is the failure mode to know about. At `bandwidth=2.0` the kernel is wide
@@ -205,11 +205,11 @@ problem = jaxgsa.Problem.from_dict(
     {"x1": (-3.14159, 3.14159), "x2": (-3.14159, 3.14159),
      "x3": (-3.14159, 3.14159), "inert": (-3.14159, 3.14159)}
 )
-X4 = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, n=2048, seed=42))
+X4 = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, n_samples=2048, seed=42))
 Y4 = evaluate(X4[:, :3])          # the model never reads `inert`
 
 r = jaxgsa.hsic.analyze(problem, X4, Y4, key=jax.random.key(0))
-print("R2_HSIC: ", r.R2_HSIC)
+print("R2: ", r.R2)
 print("p_values:", r.p_values)
 ```
 
@@ -217,19 +217,19 @@ print("p_values:", r.p_values)
 jaxgsa.hsic.analyze
   problem: D=4 (x1, x2, x3, inert)
     marginals: uniform=4
-    correlation: independent
+    dependence: independent
     output: N=2048 runs, T=1 x K=1 output slice
     invalid: none found in 2048 rows (policy 'raise')
   timing:
     estimator (includes compile on the first call): 5.263 s
     n_perms: 200
     bandwidth: 1.0 (median-heuristic multiplier)
-  results: top 4 of 4 parameters by T_HSIC
-    1. x1     T_HSIC=0.8092
-    2. x3     T_HSIC=0.1708
-    3. x2     T_HSIC=0.05836
-    4. inert  T_HSIC=0.01558
-R2_HSIC: [0.16442999 0.00859407 0.02879681 0.00051462]
+  results: top 4 of 4 parameters by T
+    1. x1     T=0.8092
+    2. x3     T=0.1708
+    3. x2     T=0.05836
+    4. inert  T=0.01558
+R2: [0.16442999 0.00859407 0.02879681 0.00051462]
 p_values: [0.00497512 0.00497512 0.00497512 0.80597013]
 ```
 
@@ -260,33 +260,33 @@ problem = jaxgsa.Problem.from_dict(
     {"x1": (0.0, 1.0), "x2": (0.0, 1.0), "x3": (0.0, 1.0)},
     output_names=("linear", "quadratic"),
 )
-X = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, n=2048, seed=42))
+X = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, n_samples=2048, seed=42))
 Y = jnp.column_stack([
     X @ jnp.array([1.0, 2.0, 3.0]),
     jnp.sum(X**2, axis=1),
 ])
 
 result = jaxgsa.hsic.analyze(problem, X, Y, key=jax.random.key(0))
-print("R2_HSIC shape:", result.R2_HSIC.shape)
-print(result.R2_HSIC)
+print("R2 shape:", result.R2.shape)
+print(result.R2)
 ```
 
 ```
 jaxgsa.hsic.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=2048 runs, T=1 x K=2 output slices
     invalid: none found in 2048 rows (policy 'raise')
   timing:
     estimator (includes compile on the first call): 7.946 s
     n_perms: 200
     bandwidth: 1.0 (median-heuristic multiplier)
-  results: top 3 of 3 parameters by T_HSIC, mean over 2 output slices
-    1. x3  T_HSIC=0.5441
-    2. x2  T_HSIC=0.3587
-    3. x1  T_HSIC=0.2289
-R2_HSIC shape: (2, 3)
+  results: top 3 of 3 parameters by T, mean over 2 output slices
+    1. x3  T=0.5441
+    2. x2  T=0.3587
+    3. x1  T=0.2289
+R2 shape: (2, 3)
 [[0.0531356  0.18776427 0.52900743]
  [0.22435711 0.23674569 0.22942325]]
 ```
@@ -298,7 +298,7 @@ Row 0 ranks the inputs 3 > 2 > 1, matching the coefficients (1, 2, 3) in the
 linear combination. Row 1 is almost flat at 0.23, which is correct for a sum
 of squares that treats all three inputs alike.
 
-Note the header line: `top 3 of 3 parameters by T_HSIC, mean over 2 output
+Note the header line: `top 3 of 3 parameters by T, mean over 2 output
 slices`. The verbose table averages across outputs to produce a single
 ranking. That average is a convenience for a quick look. When two outputs
 disagree, as they do here, read the full array instead.
@@ -311,7 +311,7 @@ can index by name instead of counting positions.
 ```python
 ds = result.to_dataset()
 print(ds)
-print(ds.R2_HSIC.sel(param="x1"))
+print(ds.R2.sel(param="x1"))
 print(ds.p_values.sel(output="linear"))
 ```
 
@@ -322,12 +322,15 @@ Coordinates:
   * output    (output) <U9 72B 'linear' 'quadratic'
   * param     (param) <U2 24B 'x1' 'x2' 'x3'
 Data variables:
-    R2_HSIC   (output, param) float32 24B 0.05314 0.1878 0.529 ... 0.2367 0.2294
-    T_HSIC    (output, param) float32 24B 0.08565 0.3215 0.717 ... 0.396 0.3711
+    R2        (output, param) float32 24B 0.05314 0.1878 0.529 ... 0.2367 0.2294
+    T         (output, param) float32 24B 0.08565 0.3215 0.717 ... 0.396 0.3711
     p_values  (output, param) float32 24B 0.004975 0.004975 ... 0.004975
     hsic_raw  (output, param) float32 24B 0.004868 0.01734 ... 0.02192 0.02094
+Attributes:
+    bandwidth:  1.0
+    n_perms:    200
 
-<xarray.DataArray 'R2_HSIC' (output: 2)> Size: 8B
+<xarray.DataArray 'R2' (output: 2)> Size: 8B
 array([0.0531356 , 0.22435711], dtype=float32)
 Coordinates:
   * output   (output) <U9 72B 'linear' 'quadratic'
@@ -349,7 +352,7 @@ dimension only.
 N is the number of samples, T the number of time steps, K the number of
 outputs, and D the number of inputs.
 
-| `Y` shape | `R2_HSIC`, `T_HSIC`, `p_values`, `hsic_raw` |
+| `Y` shape | `R2`, `T`, `p_values`, `hsic_raw` |
 |---|---|
 | `(N,)` | `(D,)` |
 | `(N, K)` | `(K, D)` |

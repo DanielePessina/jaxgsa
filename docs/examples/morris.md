@@ -64,7 +64,7 @@ jaxgsa.morris.sample: D=3, method=trajectory, n_trajectories=50, num_levels=4, n
 jaxgsa.morris.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=200 runs, T=1 x K=1 output slice
     invalid: none found in 50 trajectories (policy 'raise')
   timing:
@@ -299,7 +299,7 @@ and `AB_j` differ in exactly one input. That is a radial star, so
 `SobolSamples.to_morris()` just relabels the design.
 
 ```python
-samples = jaxgsa.sobol.sample(PROBLEM, 0, base_n=512, seed=0)
+samples = jaxgsa.sobol.sample(PROBLEM, base_n=512, seed=0)
 Y = evaluate(jnp.asarray(samples.samples))
 
 sobol_result = jaxgsa.sobol.analyze(samples, Y)
@@ -314,7 +314,7 @@ jaxgsa.sobol.sample: D=3, mode=second-order, base_n=512, requested_runs>=4096, n
 jaxgsa.sobol.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=4096 runs, T=1 x K=1 output slice
     invalid: none found in 512 Saltelli groups (policy 'raise')
   timing:
@@ -329,7 +329,7 @@ jaxgsa.sobol.SobolSamples.to_morris: D=3, mode=second-order, base_n=512, blocks=
 jaxgsa.morris.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=2048 runs, T=1 x K=1 output slice
     invalid: none found in 512 trajectories (policy 'raise')
   timing:
@@ -415,7 +415,7 @@ jaxgsa.morris.sample: D=3, method=trajectory, n_trajectories=50, num_levels=4, n
 jaxgsa.morris.analyze
   problem: D=3 (amplitude, frequency, damping)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=200 runs, T=1 x K=2 output slices
     invalid: none found in 50 trajectories (policy 'raise')
   timing:
@@ -499,7 +499,7 @@ jaxgsa.morris.sample: D=2, method=trajectory, n_trajectories=50, num_levels=4, n
 jaxgsa.morris.analyze
   problem: D=2 (x1, x2)
     marginals: uniform=1, gaussian=1
-    correlation: independent
+    dependence: independent
     output: N=150 runs, T=1 x K=1 output slice
     invalid: none found in 50 trajectories (policy 'raise')
   timing:

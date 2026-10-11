@@ -22,8 +22,8 @@ def ishigami_fn(x):
     return jnp.sin(x[0]) + A * jnp.sin(x[1]) ** 2 + B * x[2] ** 4 * jnp.sin(x[0])
 
 
-X_ish = monte_carlo(ishigami.PROBLEM, n=50_000, seed=42)
-result_ish = jaxgsa.dgsm.analyze(ishigami.PROBLEM, ishigami_fn, jnp.asarray(X_ish))
+X_ish = monte_carlo(ishigami.PROBLEM, n_samples=50_000, seed=42)
+result_ish = jaxgsa.dgsm.analyze(ishigami.PROBLEM, jnp.asarray(X_ish), fn=ishigami_fn)
 
 _st = np.array(ishigami.ANALYTICAL_ST)
 _ub = np.asarray(result_ish.upper_bound)
@@ -50,16 +50,16 @@ plt.show()
 
 _st = np.array(ishigami.ANALYTICAL_ST)
 _nu = np.asarray(result_ish.nu)
-_sigma = np.asarray(result_ish.sigma)
+_mu = np.asarray(result_ish.mu)
 _lb = np.asarray(result_ish.lower_bound)
 _ub = np.asarray(result_ish.upper_bound)
 _names = list(ishigami.PROBLEM.names)
 
-print("| Param | $\\nu_i$ | $\\sigma_i$ | Lower | $S_T$ | Upper |")
+print("| Param | $\\nu_i$ | $\\mu_i$ | Lower | $S_T$ | Upper |")
 print("| --- | ---: | ---: | ---: | ---: | ---: |")
 for _i, _name in enumerate(_names):
     print(
-        f"| {_name} | {_nu[_i]:.4f} | {_sigma[_i]:+.4f} | "
+        f"| {_name} | {_nu[_i]:.4f} | {_mu[_i]:+.4f} | "
         f"{_lb[_i]:.4f} | {_st[_i]:.4f} | {_ub[_i]:.4f} |"
     )
 
@@ -70,8 +70,8 @@ def linear_fn(x):
     return jnp.dot(c, x)
 
 
-X_lin = monte_carlo(linear.PROBLEM, n=10_000, seed=123)
-result_lin = jaxgsa.dgsm.analyze(linear.PROBLEM, linear_fn, jnp.asarray(X_lin))
+X_lin = monte_carlo(linear.PROBLEM, n_samples=10_000, seed=123)
+result_lin = jaxgsa.dgsm.analyze(linear.PROBLEM, jnp.asarray(X_lin), fn=linear_fn)
 
 _st = np.array(linear.ANALYTICAL_ST)
 _ub = np.asarray(result_lin.upper_bound)

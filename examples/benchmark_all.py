@@ -67,12 +67,12 @@ OAKH_PROB = oakley_ohagan.PROBLEM
 _ishi_bounds = ISHI_PROB.bounds
 assert _ishi_bounds is not None
 SALIB_ISHI = {
-    "num_vars": 3,
+    "n_params": 3,
     "names": list(ISHI_PROB.names),
     "bounds": [list(b) for b in _ishi_bounds],
 }
 SALIB_OAKH = {
-    "num_vars": 15,
+    "n_params": 15,
     "names": [f"x{i + 1}" for i in range(15)],
     "bounds": [[-5.0, 5.0]] * 15,
 }
@@ -392,8 +392,8 @@ else:
             # Warmup autodiff path
             jaxgsa.dgsm.analyze(
                 _prob,
-                _fn,
                 _Xmc,
+                fn=_fn,
                 verbose=False,
             ).nu.block_until_ready()
 
@@ -408,6 +408,7 @@ else:
             # jaxgsa: pre-computed analysis only
             jaxgsa.dgsm.analyze(
                 _prob,
+                _Xmc,
                 Y=_Yd,
                 dfdx=_dfdx,
                 verbose=False,
@@ -417,6 +418,7 @@ else:
                 _t0 = time.perf_counter()
                 _r = jaxgsa.dgsm.analyze(
                     _prob,
+                    _Xmc,
                     Y=_Yd,
                     dfdx=_dfdx,
                     verbose=False,
@@ -481,8 +483,8 @@ else:
                 _prob,
                 _Xjax_h,
                 _Yj,
-                maxorder=2,
-                m=2,
+                order=2,
+                n_intervals=2,
                 verbose=False,
             ).Sa.block_until_ready()
             _g = (
@@ -491,8 +493,8 @@ else:
                         p,
                         X,
                         Y,
-                        maxorder=2,
-                        m=2,
+                        order=2,
+                        n_intervals=2,
                         verbose=False,
                     ),
                 )

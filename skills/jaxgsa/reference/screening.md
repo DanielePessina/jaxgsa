@@ -124,18 +124,18 @@ your model with JAX, so it needs no design of its own beyond plain Monte Carlo
 points.
 
 ```python
-X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n=1024, seed=0))
+X = jnp.asarray(jaxgsa.sampling.monte_carlo(PROBLEM, n_samples=1024, seed=0))
 
 # fn takes ONE sample row, shape (D,), and returns a scalar, (K,) or (T, K).
 result = jaxgsa.dgsm.analyze(
-    PROBLEM, lambda x: ishigami.evaluate(x[None, :])[0], X
+    PROBLEM, X, fn=lambda x: ishigami.evaluate(x[None, :])[0]
 )
 
 result.nu           # [7.7500, 24.4051, 10.2674]   mean squared derivative
-result.sigma        # mean derivative, near zero on a symmetric response
+result.mu           # mean signed derivative, near zero on a symmetric response
 result.lower_bound  # [0.0010, 0.0074, 0.0022]
 result.upper_bound  # [2.3450, 7.3846, 3.1067]
-result.var_y
+result.variance
 ```
 
 Both bounds hold. Neither is usable. The true `ST` is
@@ -149,13 +149,13 @@ A batch model must be wrapped, as above. Passing one unwrapped raises a
 pass it directly and skip `fn`:
 
 ```python
-result = jaxgsa.dgsm.analyze(PROBLEM, Y=Y, dfdx=dfdx)
+result = jaxgsa.dgsm.analyze(PROBLEM, X, Y, dfdx=dfdx)
 ```
 
 Signature:
 
 ```python
-jaxgsa.dgsm.analyze(problem, fn=None, X=None, *, Y=None, dfdx=None,
+jaxgsa.dgsm.analyze(problem, X, Y=None, *, fn=None, dfdx=None,
                     standardize_outputs=False, n_bootstrap=0, conf_level=0.95,
                     ci_method="quantile", key=None, batch_size=None,
                     on_invalid="raise", verbose=True, keep_replicates=False)

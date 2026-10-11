@@ -76,7 +76,7 @@ print("S1:", np.asarray(result.S1))
 jaxgsa.sobol.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=4096 runs, T=1 x K=1 output slice
     invalid: none found in 512 Saltelli groups (policy 'raise')
   timing:
@@ -187,7 +187,7 @@ designs = {
     "sobol": jaxgsa.sobol.sample(PROBLEM, n_samples=1024, seed=42, verbose=False),
     "morris": jaxgsa.morris.sample(PROBLEM, n_trajectories=64, seed=42, verbose=False),
     "efast": jaxgsa.efast.sample(PROBLEM, n_per_curve=257, seed=42, verbose=False),
-    "kucherenko": jaxgsa.kucherenko.sample(PROBLEM, n_samples=1024, seed=42, verbose=False),
+    "kucherenko": jaxgsa.kucherenko.sample(PROBLEM, base_n=1024, seed=42, verbose=False),
 }
 
 for name, design in designs.items():
@@ -230,7 +230,7 @@ jaxgsa.efast.sample: D=3, n_curves=3, n_per_curve=257, n_runs=771, M=4, omega_0=
 jaxgsa.efast.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=771 runs, T=1 x K=1 output slice
     invalid: none found in 3 search curves (policy 'raise')
   timing:

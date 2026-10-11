@@ -41,7 +41,7 @@ following [Matoušek (1998)](#ref-matousek-1998). `kucherenko.sample` makes that
 raises rather than accepting a seed that would do nothing:
 
 ```python
-jaxgsa.kucherenko.sample(problem, 4096, scramble=False, seed=0)
+jaxgsa.kucherenko.sample(problem, base_n=4096, scramble=False, seed=0)
 ```
 
 ```
@@ -63,8 +63,9 @@ each search curve, which the seed sets directly.
 ## jaxgsa.sampling
 
 ```python
-monte_carlo(problem, n, *, seed=None) -> np.ndarray            # (n, D)
-correlate(X, problem, *, seed=None) -> np.ndarray              # (N, D)
+monte_carlo(problem, n_samples, *, seed=None) -> np.ndarray            # (n, D)
+correlate(problem, X, *, seed=None) -> np.ndarray              # (N, D)
+transform(problem, U) -> np.ndarray                           # (n, D)
 fit_correlation(problem, X) -> np.ndarray                      # (D, D)
 correlation_from_covariance(cov) -> np.ndarray                 # (D, D)
 InputSampler                                                   # protocol type
@@ -72,7 +73,7 @@ InputSampler                                                   # protocol type
 
 `monte_carlo` generates an ordinary joint input matrix, rather than a
 method-specific analysis design. It follows the problem's dependence. A
-problem with a custom sampler (`problem.with_sampler(f, dimension=k)`) gets
+problem with a custom sampler (`problem.with_sampler(f, sampler_dimension=k)`) gets
 pseudo-random uniform points of width `k`, passed through the joint branch of
 the sampler (`fixed_indices=()`). See
 [the callback contract](/api/kucherenko#custom-input-dependence).
@@ -91,6 +92,22 @@ retain their independence assumptions; custom samples do not remove them.
 permutation tests such as HSIC's stay valid. A plain input matrix does not
 replace Kucherenko's conditional design or make a Saltelli design valid for
 dependent inputs.
+
+`transform` is the last step of every sampler, exposed for your own design.
+It maps an `(n, D)` array of unit-cube points (or `(n, sampler_dimension)` for
+a custom sampler) through the problem's custom sampler, Gaussian copula, or
+marginals, and returns physical rows. `monte_carlo` is `transform` applied to
+pseudo-random points.
+
+```python
+from scipy.stats import qmc
+
+U = qmc.LatinHypercube(d=problem.n_params, seed=0).random(256)
+X = jaxgsa.sampling.transform(problem, U)
+```
+
+`seed` takes an `int` or a NumPy `Generator`. A JAX key raises `TypeError`:
+JAX keys go to `analyze(key=...)`, which also accepts a plain `int`.
 
 `jaxgsa.sampling.InputSampler` is the protocol type of the sampler callback.
 Use it to annotate your own function.
@@ -141,7 +158,7 @@ diagonal. Use it when a paper reports `Cov` and jaxgsa wants a correlation.
 ## Correlated designs
 
 One design builder reads the problem's dependence rather than refusing it.
-`jaxgsa.kucherenko.sample(problem, n_samples, seed=...)` places its blocks with
+`jaxgsa.kucherenko.sample(problem, base_n=..., seed=...)` places its blocks with
 the conditionals of the declared copula or custom sampler, so the indices it feeds are valid under
 dependence. `sobol.sample`, `morris.sample` and `efast.sample` all raise a
 `ValueError` on a correlated or custom-sampler problem instead of quietly producing indices that
@@ -200,7 +217,7 @@ narrow = samples.transform({"x1": {"low": 0.0, "high": 1.0}, ...})
 wide   = samples.transform({"x1": {"low": -1.0, "high": 2.0}, ...})
 ```
 
-`theta` has the type `jaxgsa.Theta`: a mapping keyed by parameter name, then
+`theta` has the type `jaxgsa.sobol.Theta`: a mapping keyed by parameter name, then
 by the field names of that parameter's distribution. `low` and `high` for a
 uniform, `mean` and `variance` for a Gaussian, and all four for a truncated
 Gaussian.

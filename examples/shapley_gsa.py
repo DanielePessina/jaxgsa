@@ -20,7 +20,7 @@ plt.rcParams["figure.dpi"] = 150
 
 shapley_problem = ishigami.PROBLEM
 
-X = jnp.asarray(jaxgsa.sampling.monte_carlo(shapley_problem, n=2000, seed=42))
+X = jnp.asarray(jaxgsa.sampling.monte_carlo(shapley_problem, n_samples=2000, seed=42))
 Y = ishigami.evaluate(X)
 
 result = jaxgsa.pce.analyze(shapley_problem, X, Y, order=8).shapley()

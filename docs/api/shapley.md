@@ -81,7 +81,7 @@ res = jaxgsa.shapley.analyze(problem, X, Y, backend="pce", order=8)
 jaxgsa.shapley.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=2000 runs, T=1 x K=1 output slice
     invalid: none found in 2000 rows (policy 'raise')
   timing:
@@ -111,7 +111,7 @@ summary.
 | `n_bootstrap` | `0` | Row resamples on `Sh`, `S1` and `ST`. See below. |
 | `key` | `None` | A `jax.random` key. Required when `n_bootstrap > 0`. |
 | `verbose` | `True` | Prints the summary block shown above. |
-| `**backend_kwargs` | | Passed through unchanged to the selected backend's `analyze`: `order`, `ridge`, `fit_ratio` for PCE, `maxorder`, `m`, `lambdax` for HDMR. A keyword the backend does not accept raises `TypeError`. |
+| `**backend_kwargs` | | Passed through unchanged to the selected backend's `analyze`: `order`, `ridge`, `fit_ratio` for PCE, `order`, `max_iter`, `n_intervals`, `ridge` for HDMR. A keyword the backend does not accept raises `TypeError`. |
 
 Python requires `**kwargs` to come last in a signature, which is why
 `keep_replicates` is not the final parameter here as it is on every other
@@ -159,7 +159,7 @@ allocating those ANCOVA terms under dependence does not reproduce the
 conditional-variance construction of
 [Owen & Prieur (2017)](https://doi.org/10.1137/16M1097717).
 
-`VKOGAResult.shapley()` raises `NotImplementedError`. A kernel expansion is a
+`VKOGAResult` has no `shapley()` method. A kernel expansion is a
 sum over centres and every centre involves every parameter, so there is no
 membership matrix to allocate from.
 
@@ -178,7 +178,8 @@ underlying `analyze` rejects its inputs.
 ## Traceable core
 
 `jaxgsa.shapley.indices(problem, X, Y, *, backend="pce",
-include_correlative=False, **backend_kwargs)` returns `(Sh, S1, ST)` as bare
+include_correlative=False, **backend_kwargs)` returns a `ShapleyIndices`
+named tuple `(Sh, S1, ST)` of bare
 arrays with none of the checks, so it composes with `jit`, `vmap` and `jacrev`.
 `explained_variance` lives on the result object only.
 

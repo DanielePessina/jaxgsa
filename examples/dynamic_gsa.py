@@ -44,19 +44,19 @@ def oscillator(X):
     return y
 
 
-sampling_result = jaxgsa.sobol.sample(
+samples_design = jaxgsa.sobol.sample(
     problem,
     n_samples=4096,
     seed=0,
     calc_second_order=False,
 )
 
-X_sobol = jnp.asarray(sampling_result.samples)
+X_sobol = jnp.asarray(samples_design.samples)
 Y_sobol = oscillator(X_sobol)
 Y_sobol = Y_sobol[..., None]
 
 sobol_result = jaxgsa.sobol.analyze(
-    sampling_result,
+    samples_design,
     Y_sobol,
     n_bootstrap=200,
     conf_level=0.95,
@@ -172,8 +172,8 @@ def oscillator_unbatched(x):
     return y
 
 
-X_dgsm = monte_carlo(problem, n=50_000, seed=7)
-dgsm_result = jaxgsa.dgsm.analyze(problem, oscillator_unbatched, jnp.asarray(X_dgsm))
+X_dgsm = monte_carlo(problem, n_samples=50_000, seed=7)
+dgsm_result = jaxgsa.dgsm.analyze(problem, jnp.asarray(X_dgsm), fn=oscillator_unbatched)
 print(dgsm_result)
 
 _names = list(problem.names)

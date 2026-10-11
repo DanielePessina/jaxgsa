@@ -28,8 +28,8 @@ def model(x):
 
 
 problem = jaxgsa.Problem.from_dict({"x1": (-1.0, 1.0), "x2": (-1.0, 1.0)})
-X = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, n=2048, seed=0))
-result = jaxgsa.dgsm.analyze(problem, model, X)
+X = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, n_samples=2048, seed=0))
+result = jaxgsa.dgsm.analyze(problem, X, fn=model)
 ```
 
 The function passed to DGSM maps **one input row** to one scalar, a vector, or
@@ -125,7 +125,7 @@ theta = {
 def first_order(parameters):
     X = samples.transform(parameters)
     Y = ishigami(X)
-    S1, _ = jaxgsa.sobol.indices(samples, Y)
+    S1 = jaxgsa.sobol.indices(samples, Y).S1
     return S1
 
 
