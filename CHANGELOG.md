@@ -345,6 +345,29 @@ weights.
 - The `scramble` docs say that SciPy uses a linear matrix scramble with a
   digital shift. They no longer say Owen scrambling.
 
+### Performance
+
+Measured on Ishigami (D = 3, N = 1024, float32) on an Apple M1 Pro CPU.
+
+- `rank.analyze` compiled a new program on every call. With 20 resamples a
+  call took 770 ms. It now takes 9 ms.
+- `pawn.analyze` with a bootstrap had the same fault in its resample keys.
+  A one-slice call now takes 3 ms instead of 7 ms. A new test checks that a
+  second call of every method compiles nothing.
+- The first call of `pce.analyze` and `shapley.analyze` takes 0.4 s instead
+  of 1.3 to 1.5 s. Later calls are 5 times faster.
+- `hsic.analyze` finds the median bandwidth from the sorted sample, with no
+  N x N distance matrix. A one-slice call takes 33 ms instead of 75 ms and
+  peaks 130 MiB lower.
+- `optimal_transport.analyze` computes the W2 term of a continuous input in
+  closed form, with M times less working memory.
+- The shared input checks compile once instead of once per operation, which
+  shortens the first call of every method.
+
+These changes move some float32 results at rounding level, by at most 4e-6.
+No HSIC p-value changed. The fitted VKOGA hyperparameters and centres did
+not change on any of five test problems at the default settings.
+
 ### Fixed
 
 - The dependent-input warnings now also fire for custom samplers.
