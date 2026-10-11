@@ -94,7 +94,7 @@ the registry, because the signatures genuinely differ:
   and ``Y``;
 * ``dgsm`` takes a callable that maps one row, not a matrix of outputs;
 * every method has its own accuracy knobs (``order``, ``max_iter``,
-  ``n_bins``, ``n_perms``, ``max_centers``), and leaving them at their
+  ``n_classes``, ``n_perms``, ``max_centers``), and leaving them at their
   defaults would make the timings hostage to a later change of default.
 
 So the registry decides *which* methods are measured and the table below
@@ -349,7 +349,7 @@ def _prep_borgonovo(case: Case) -> Callable[[], Any]:
 
 def _prep_pawn(case: Case) -> Callable[[], Any]:
     return lambda: pawn.analyze(
-        case.problem, case.X, case.Y, n_bins=8, n_bootstrap=10, key=jax.random.key(SEED)
+        case.problem, case.X, case.Y, n_classes=8, n_bootstrap=10, key=jax.random.key(SEED)
     )
 
 

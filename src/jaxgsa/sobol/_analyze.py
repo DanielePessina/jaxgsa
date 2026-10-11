@@ -1230,6 +1230,7 @@ def analyze(
             ),
         ),
         n_expected=int(samples.samples.shape[0]),
+        expected_from="samples.samples",
         expand=samples.expand_outputs,
         n_units=base_n,
         unit_of_row=unit_of_row,

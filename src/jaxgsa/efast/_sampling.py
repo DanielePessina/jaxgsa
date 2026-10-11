@@ -124,6 +124,10 @@ class EFASTSamples:
         """
         meta = {
             "jaxgsa_version": _jaxgsa_version(),
+            "samples_class": type(self).__name__,
+            "samples_class_path": ".".join(
+                [*type(self).__module__.split(".")[:2], type(self).__name__]
+            ),
             "problem": _problem_to_meta(self.problem),
             "n_per_curve": self.n_per_curve,
             "M": self.M,
@@ -151,11 +155,21 @@ class EFASTSamples:
 
         Raises:
             FileNotFoundError: If no file exists at the resolved path.
+            ValueError: If the file holds a different samples class. Files
+                saved by older versions carry no class name and skip this
+                check.
             KeyError: If the file is missing required arrays or metadata
                 entries (i.e. it was not written by :meth:`save`).
         """
         with np.load(_npz_path(path), allow_pickle=False) as data:
             meta = json.loads(data["metadata"].item())
+            saved_class = meta.get("samples_class")
+            if saved_class is not None and saved_class != cls.__name__:
+                saved_path = meta.get("samples_class_path", saved_class)
+                raise ValueError(
+                    f"this file holds a {saved_class}; load it with {saved_path}.load, "
+                    f"not {cls.__name__}.load"
+                )
             return cls(
                 samples=data["samples"],
                 n_per_curve=int(meta["n_per_curve"]),

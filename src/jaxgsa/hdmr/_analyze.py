@@ -1106,6 +1106,7 @@ def _analyze_hdmr_core(
         cv_rmse=None,
         explained_variance=_reshape_emulator_value(core.explained_variance, T, K_out, layout),
         streamed=core.streamed,
+        order=core.order,
         _c2=core.c2,
         _c3=core.c3,
         Sa_conf=conf["Sa_conf"],

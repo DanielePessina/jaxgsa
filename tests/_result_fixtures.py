@@ -122,7 +122,7 @@ def _borgonovo(shape: str) -> Any:
 
 def _pawn(shape: str) -> Any:
     X, Y = _given_data(shape)
-    return pawn.analyze(PROBLEM, X, Y, n_bins=4, n_bootstrap=2, key=jax.random.key(SEED))
+    return pawn.analyze(PROBLEM, X, Y, n_classes=4, n_bootstrap=2, key=jax.random.key(SEED))
 
 
 def _rank(shape: str) -> Any:

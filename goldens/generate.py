@@ -129,11 +129,9 @@ def summarize(method: str, doc_: dict) -> None:
 
 
 def build_sobol() -> dict:
-    # base_n=512 gives the requested 512 base points; n_samples is ignored
-    # when base_n is given. First/total only: 512 * (D+2) = 2560 rows.
+    # base_n=512 gives exactly 512 base points. First/total only: 512 * (D+2) = 2560 rows.
     sr = sobol.sample(
         PROBLEM,
-        n_samples=1,
         base_n=N_SOBOL_BASE,
         calc_second_order=False,
         seed=SEED,
@@ -159,7 +157,7 @@ def build_kucherenko() -> dict:
     # Saltelli column-swap scheme"); it is intentional and silenced.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        kr = kucherenko.sample(PROBLEM, n_samples=N_KUCHERENKO, seed=SEED, verbose=False)
+        kr = kucherenko.sample(PROBLEM, base_n=N_KUCHERENKO, seed=SEED, verbose=False)
         X = np.asarray(kr.samples)
         Y = evaluate(X)
         res = kucherenko.analyze(kr, jnp.asarray(Y), verbose=False)
@@ -188,11 +186,12 @@ def build_morris() -> dict:
         X,
         Y,
         {"mu": res.mu, "mu_star": res.mu_star, "sigma": res.sigma},
+        # The labels "num_levels" and "n_bins" are kept as the v1.0.0 fixture keys.
         {"n_trajectories": N_TRAJECTORIES, "num_levels": 4, "method": "trajectory", "seed": SEED},
         design={
             "n_expanded": mr.n_expanded,
             "n_trajectories": mr.n_trajectories,
-            "num_levels": mr.num_levels,
+            "num_levels": mr.n_levels,
             "expanded_to_unique": to_list(mr.expanded_to_unique),
             "ee_idx_after": to_list(mr.ee_idx_after),
             "ee_idx_before": to_list(mr.ee_idx_before),
@@ -209,7 +208,6 @@ def build_cloud() -> tuple[np.ndarray, np.ndarray]:
     """
     sr = sobol.sample(
         PROBLEM,
-        n_samples=1,
         base_n=N_SOBOL_BASE,
         calc_second_order=False,
         seed=SEED,

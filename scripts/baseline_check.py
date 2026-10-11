@@ -53,6 +53,7 @@ RENAMED_FIELDS: dict[tuple[str, str], str] = {
     ("dgsm", "sigma"): "mu",
     ("dgsm", "sigma_conf"): "mu_conf",
     ("dgsm", "var_y"): "variance",
+    ("pawn", "n_valid_bins"): "n_valid_classes",
 }
 """Result fields renamed in 1.1.0, as ``(method, old name) -> new name``.
 

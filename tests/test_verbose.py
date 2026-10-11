@@ -95,14 +95,14 @@ def test_bootstrapped_sobol_prints_intervals(capsys):
 
 def test_pawn_analyze_prints_and_can_be_silenced(capsys):
     X, Y = _given_data()
-    jaxgsa.pawn.analyze(PROBLEM, X, Y, n_bins=4)
+    jaxgsa.pawn.analyze(PROBLEM, X, Y, n_classes=4)
     out = capsys.readouterr().out
     assert "jaxgsa.pawn.analyze" in out
     assert "problem: D=3" in out
     assert "timing:" in out
     assert "by PAWN" in out
 
-    jaxgsa.pawn.analyze(PROBLEM, X, Y, n_bins=4, verbose=False)
+    jaxgsa.pawn.analyze(PROBLEM, X, Y, n_classes=4, verbose=False)
     assert capsys.readouterr().out == ""
 
 

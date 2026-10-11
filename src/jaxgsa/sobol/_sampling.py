@@ -725,7 +725,7 @@ def _check_seed_scramble(scramble: bool, seed: Any, where: str) -> None:
     """Reject a seed when the Sobol' sequence is not scrambled.
 
     Args:
-        scramble: Whether the sequence is Owen-scrambled.
+        scramble: Whether the sequence is scrambled.
         seed: The seed the caller passed.
         where: Fully qualified name of the calling sampler, for the message.
 
@@ -782,9 +782,10 @@ def sample(
             first/total-order indices. That nearly halves the evaluation
             budget: the Saltelli step becomes ``D + 2`` instead of
             ``2*D + 2``.
-        scramble: Whether to apply Owen scrambling to the Sobol sequence
-            (recommended; randomizes the sequence so different seeds give
-            statistically independent designs).
+        scramble: Whether to scramble the Sobol sequence with a linear
+            matrix scramble plus a digital shift (recommended; randomizes the
+            sequence so different seeds give statistically independent
+            designs).
         seed: Random seed or generator for reproducibility.
         verbose: If ``True`` (default), print a short summary describing the
             requested unique count, returned unique count, expanded Saltelli

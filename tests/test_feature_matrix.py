@@ -227,7 +227,7 @@ def _run_pawn() -> Any:
         CATEGORICAL,
         X,
         jnp.stack([Y, Y**2], axis=1),
-        n_bins=3,
+        n_classes=3,
         statistic="median",
         verbose=False,
     )

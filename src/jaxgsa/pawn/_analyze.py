@@ -21,7 +21,7 @@ not only for continuous ones.
 Bin assignment (via ``searchsorted``) depends only on the inputs, so it is
 computed once and shared across all output columns. One JIT-compiled kernel
 is vmapped over the flattened ``T*K`` output columns, with one compilation
-per unique ``(N, D, n_bins)`` and output-column count. The columns run in
+per unique ``(N, D, n_classes)`` and output-column count. The columns run in
 chunks of at most ``slice_chunk_size``, which bounds the working arrays, so
 the column count is the chunk width. A trailing part-chunk is padded back to
 that width and the answer sliced back, which keeps the kernel at one
@@ -29,18 +29,18 @@ compilation instead of two; the padded columns are separate ``vmap`` lanes, so
 a padded column cannot change a real column's answer. The ``statistic``
 aggregation runs outside JIT so all three statistics share one compilation.
 
-The kernel's working set is not the ``(chunk, D, n_bins)`` result. The
-nested ``vmap`` builds a full ``(N, n_bins)`` ECDF table per (column,
-parameter) pair, so the live arrays are ``(chunk, D, N, n_bins)``. That is
+The kernel's working set is not the ``(chunk, D, n_classes)`` result. The
+nested ``vmap`` builds a full ``(N, n_classes)`` ECDF table per (column,
+parameter) pair, so the live arrays are ``(chunk, D, N, n_classes)``. That is
 ``N`` times larger than the result, which is why the default chunk width is
-derived from ``N``, ``D`` and ``n_bins`` rather than fixed.
+derived from ``N``, ``D`` and ``n_classes`` rather than fixed.
 
 A categorical parameter needs no binning: its level code is already a bin
 index. Continuous and categorical columns share one kernel, compiled at
-``n_eff = max(n_bins, max_levels)``. The shorter columns leave their
+``n_eff = max(n_classes, max_levels)``. The shorter columns leave their
 trailing bins empty, the kernel returns ``NaN`` for an empty bin, and the
 nan-aware aggregation drops it. A continuous-only problem has
-``n_eff == n_bins`` and is bit-for-bit unaffected.
+``n_eff == n_classes`` and is bit-for-bit unaffected.
 
 References:
     Pianosi & Wagener (2015). A simple and efficient method for global
@@ -100,7 +100,7 @@ from jaxgsa.problem import Problem, _categorical_dims
 # per-channel recursive analyze() calls. verbose is excluded:
 # the engine owns it.
 _IRREGULAR_KWARGS = (
-    "n_bins",
+    "n_classes",
     "statistic",
     "n_bootstrap",
     "conf_level",
@@ -166,7 +166,7 @@ def _count_valid_bins(bin_idx: Array, n_eff: int) -> np.ndarray:
     return (counts >= 2).sum(axis=1)
 
 
-def _warn_sparse_bins(problem: Problem, n_valid: np.ndarray, n_bins: int) -> None:
+def _warn_sparse_bins(problem: Problem, n_valid: np.ndarray, n_classes: int) -> None:
     """Warn once when parameters keep fewer than half their bins contributing.
 
     Args:
@@ -174,7 +174,7 @@ def _warn_sparse_bins(problem: Problem, n_valid: np.ndarray, n_bins: int) -> Non
             counts of categorical parameters.
         n_valid: Contributing-bin counts from :func:`_count_valid_bins`,
             shape ``(D,)``.
-        n_bins: Requested bin count for continuous parameters. A categorical
+        n_classes: Requested bin count for continuous parameters. A categorical
             parameter is measured against its own level count instead.
 
     Warns:
@@ -185,7 +185,7 @@ def _warn_sparse_bins(problem: Problem, n_valid: np.ndarray, n_bins: int) -> Non
     levels_of_dim = dict(_categorical_dims(problem))
     sparse = []
     for d, count in enumerate(n_valid):
-        expected = levels_of_dim.get(d, n_bins)
+        expected = levels_of_dim.get(d, n_classes)
         if 0 < count < _MIN_VALID_BIN_FRACTION * expected:
             sparse.append(f"{problem.names[d]!r} ({int(count)}/{expected})")
     if sparse:
@@ -194,13 +194,13 @@ def _warn_sparse_bins(problem: Problem, n_valid: np.ndarray, n_bins: int) -> Non
             "their conditioning bins contributing (a bin needs at least 2 "
             "samples to define a conditional CDF; the rest are dropped). The "
             "reported indices rest on those few bins. Use fewer bins "
-            "(lower n_bins) or more samples.",
+            "(lower n_classes) or more samples.",
             stacklevel=3,
             category=JaxgsaWarning,
         )
 
 
-def _equal_width_bins(X_u01: Array, n_bins: int) -> Array:
+def _equal_width_bins(X_u01: Array, n_classes: int) -> Array:
     """Assign each sample to an equal-width bin in ``[0, 1]``.
 
     A sample outside ``[0, 1]`` gets the sentinel ``-1``, so it matches no bin
@@ -219,19 +219,19 @@ def _equal_width_bins(X_u01: Array, n_bins: int) -> Array:
 
     Args:
         X_u01: Unit-interval inputs, shape ``(N, D)``.
-        n_bins: Number of equal-width bins.
+        n_classes: Number of equal-width bins.
 
     Returns:
-        Integer bin indices, shape ``(N, D)``, in ``[0, n_bins)``, or ``-1``
+        Integer bin indices, shape ``(N, D)``, in ``[0, n_classes)``, or ``-1``
         for out-of-range or ``NaN`` samples.
     """
-    bin_edges = jnp.linspace(0.0, 1.0, n_bins + 1)
-    idx = jnp.clip(jnp.searchsorted(bin_edges, X_u01, side="right") - 1, 0, n_bins - 1)
+    bin_edges = jnp.linspace(0.0, 1.0, n_classes + 1)
+    idx = jnp.clip(jnp.searchsorted(bin_edges, X_u01, side="right") - 1, 0, n_classes - 1)
     in_range = (X_u01 >= 0.0) & (X_u01 <= 1.0)
     return jnp.where(in_range, idx, -1)
 
 
-def _bin_indices(problem: Problem, X: Array, n_bins: int) -> tuple[Array, int]:
+def _bin_indices(problem: Problem, X: Array, n_classes: int) -> tuple[Array, int]:
     """Assign every parameter column to conditioning bins, categorical or not.
 
     A continuous column keeps equal-width binning on the CDF-transformed unit
@@ -240,10 +240,10 @@ def _bin_indices(problem: Problem, X: Array, n_bins: int) -> tuple[Array, int]:
     already names the conditioning class, so the code serves as the bin index.
 
     The two kinds share one kernel, so the kernel is compiled at
-    ``n_eff = max(n_bins, max_levels)`` and the shorter columns leave their
+    ``n_eff = max(n_classes, max_levels)`` and the shorter columns leave their
     trailing bins empty. An empty bin yields ``NaN`` from the KS kernel and
     the nan-aware aggregation drops it, so the padding changes no index. A
-    continuous-only problem has ``n_eff == n_bins`` and is unaffected.
+    continuous-only problem has ``n_eff == n_classes`` and is unaffected.
 
     Nothing here reads an array value on the host, and every branch is on
     ``problem`` metadata, which is a plain Python value and never a tracer. So
@@ -258,7 +258,7 @@ def _bin_indices(problem: Problem, X: Array, n_bins: int) -> tuple[Array, int]:
         problem: Problem definition with D parameters.
         X: Input samples in physical units, shape ``(N, D)``. A categorical
             column holds its integer level codes as floats.
-        n_bins: Number of conditioning bins for the continuous columns.
+        n_classes: Number of conditioning bins for the continuous columns.
 
     Returns:
         ``(bin_idx, n_eff)``. ``bin_idx`` holds integer bin indices of shape
@@ -267,9 +267,9 @@ def _bin_indices(problem: Problem, X: Array, n_bins: int) -> tuple[Array, int]:
     """
     dims_levels = _categorical_dims(problem)
     if not dims_levels:
-        return _equal_width_bins(cdf_to_unit_interval(X, problem), n_bins), n_bins
+        return _equal_width_bins(cdf_to_unit_interval(X, problem), n_classes), n_classes
 
-    n_eff = max(n_bins, max(n_levels for _, n_levels in dims_levels))
+    n_eff = max(n_classes, max(n_levels for _, n_levels in dims_levels))
     cat_positions = {d: j for j, (d, _) in enumerate(dims_levels)}
 
     # cdf_to_unit_interval refuses a categorical parameter by design, so the
@@ -282,7 +282,7 @@ def _bin_indices(problem: Problem, X: Array, n_bins: int) -> tuple[Array, int]:
             input_specs=tuple(problem.input_specs[d] for d in cont_dims),
         )
         cont_idx = _equal_width_bins(
-            cdf_to_unit_interval(X[:, jnp.asarray(cont_dims)], cont_problem), n_bins
+            cdf_to_unit_interval(X[:, jnp.asarray(cont_dims)], cont_problem), n_classes
         )
         cont_columns = [cont_idx[:, j].astype(jnp.int32) for j in range(len(cont_dims))]
 
@@ -334,19 +334,19 @@ def _check_categorical_codes(problem: Problem, X: Array) -> None:
 
 
 @lru_cache(maxsize=32)
-def _get_pawn_ks(n_bins: int):
-    """Return a JIT-compiled KS kernel for the given ``n_bins``.
+def _get_pawn_ks(n_classes: int):
+    """Return a JIT-compiled KS kernel for the given ``n_classes``.
 
     The kernel maps precomputed bin indices and a batch of output columns
     to per-bin KS statistics, vmapped over the output columns.
 
     Args:
-        n_bins: Number of equal-width conditioning bins (static).
+        n_classes: Number of equal-width conditioning bins (static).
 
     Returns:
         A jitted callable that maps ``bin_idx`` of shape ``(N, D)`` and
         ``Y_cols`` of shape ``(N, M)`` to KS statistics of shape
-        ``(M, D, n_bins)``, where ``M`` is the number of output columns.
+        ``(M, D, n_classes)``, where ``M`` is the number of output columns.
     """
 
     def _impl(bin_idx: Array, Y_cols: Array) -> Array:
@@ -358,14 +358,14 @@ def _get_pawn_ks(n_bins: int):
             Y_cols: Output columns, shape ``(N, M)``.
 
         Returns:
-            KS statistics, shape ``(M, D, n_bins)``, with ``NaN`` where a bin
+            KS statistics, shape ``(M, D, n_classes)``, with ``NaN`` where a bin
             has fewer than two samples.
         """
         N = bin_idx.shape[0]
-        param_bins = jnp.arange(n_bins)
+        param_bins = jnp.arange(n_classes)
 
         def _ks_one_col(y: Array) -> Array:
-            """Compute KS statistics of shape ``(D, n_bins)`` for one output column."""
+            """Compute KS statistics of shape ``(D, n_classes)`` for one output column."""
             dtype = jnp.result_type(y.dtype, jnp.float32)
             order = jnp.argsort(y, stable=False)
             y_sorted = y[order]
@@ -381,7 +381,7 @@ def _get_pawn_ks(n_bins: int):
             is_group_end = jnp.concatenate([y_sorted[:-1] != y_sorted[1:], jnp.array([True])])
             bin_idx_sorted = bin_idx[order]
             uncond_cdf = jnp.arange(1, N + 1, dtype=dtype) / N
-            # One vectorized (D, n_bins) ECDF table instead of D separate
+            # One vectorized (D, n_classes) ECDF table instead of D separate
             # per-parameter tables: the one-hot, cumulative sum, normalization
             # and max-diff are batched over the parameter axis in a single
             # pass, which is bit-for-bit identical (the per-parameter columns
@@ -429,7 +429,7 @@ def _aggregate_ks(
     ks: Array,
     statistic: Literal["median", "max", "mean"],
 ) -> Array:
-    """Reduce KS values over the trailing ``n_bins`` axis to PAWN indices.
+    """Reduce KS values over the trailing ``n_classes`` axis to PAWN indices.
 
     All three statistics are nan-aware. A bin with fewer than two samples is
     dropped rather than propagated, whether it is an empty padding bin or a
@@ -437,13 +437,13 @@ def _aggregate_ks(
     therefore yields ``NaN``, which is the honest answer.
 
     Args:
-        ks: KS statistics with bins on the last axis, shape ``(..., n_bins)``.
+        ks: KS statistics with bins on the last axis, shape ``(..., n_classes)``.
             The function ignores ``NaN`` entries, which mark bins with fewer
             than two samples.
         statistic: Aggregation across bins.
 
     Returns:
-        PAWN indices with the ``n_bins`` axis removed.
+        PAWN indices with the ``n_classes`` axis removed.
     """
     if statistic == "median":
         return jnp.nanmedian(ks, axis=-1)
@@ -555,7 +555,7 @@ def indices(
     X: Array,
     Y: Array,
     *,
-    n_bins: int = 10,
+    n_classes: int = 10,
     statistic: Literal["median", "max", "mean"] = "median",
     slice_chunk_size: int | None = None,
 ) -> PAWNIndices:
@@ -599,7 +599,7 @@ def indices(
         problem: Problem definition with D parameters.
         X: Input samples, shape ``(N, D)``.
         Y: Model outputs, shape ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
-        n_bins: Number of conditioning bins per continuous parameter, as in
+        n_classes: Number of conditioning bins per continuous parameter, as in
             :func:`analyze`.
         statistic: Aggregation of the KS values across bins, as in
             :func:`analyze`. All three are plain nan-aware reductions, so the
@@ -618,7 +618,7 @@ def indices(
         ValueError: If ``X`` is not 2-D, if its column count does not match
             the problem, if ``X`` and ``Y`` have differing row counts, if
             ``Y`` has an invalid rank, if ``statistic`` is not one of
-            ``"median"``/``"max"``/``"mean"``, if ``n_bins < 2``, or if
+            ``"median"``/``"max"``/``"mean"``, if ``n_classes < 2``, or if
             ``slice_chunk_size`` is given and is below 1.
     """
     check_scalars(
@@ -629,7 +629,7 @@ def indices(
                         statistic in ("median", "max", "mean"),
                         f"statistic must be 'median', 'max', or 'mean', got {statistic!r}",
                     ),
-                    at_least("n_bins", n_bins, 2),
+                    at_least("n_classes", n_classes, 2),
                     at_least("slice_chunk_size", slice_chunk_size, 1),
                 )
             )
@@ -639,7 +639,7 @@ def indices(
     Y_arr = _validate_output(Y, int(X_arr.shape[0]), problem)
 
     Y3, layout = _prepare_Y(Y_arr)
-    bin_idx, n_eff = _bin_indices(problem, X_arr, n_bins)
+    bin_idx, n_eff = _bin_indices(problem, X_arr, n_classes)
     pawn_3d = _pawn_core(bin_idx, Y3, n_eff, statistic, slice_chunk_size, warn=False)
     return PAWNIndices(pawn=layout.squeeze(pawn_3d))
 
@@ -649,7 +649,7 @@ def analyze(
     X: Array,
     Y: Array | IrregularY,
     *,
-    n_bins: int = 10,
+    n_classes: int = 10,
     statistic: Literal["median", "max", "mean"] = "median",
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
@@ -664,7 +664,7 @@ def analyze(
 
     PAWN measures how much fixing a parameter changes the whole output
     distribution, not just its variance. For each parameter, the samples are
-    split into ``n_bins`` conditioning bins. The bins are equal-width on the
+    split into ``n_classes`` conditioning bins. The bins are equal-width on the
     CDF-transformed unit interval, so they are equal-probability under the
     parameter's marginal. Each bin's conditional output CDF is then compared
     with the unconditional CDF by the Kolmogorov-Smirnov (KS) statistic, the
@@ -693,10 +693,10 @@ def analyze(
         problem: Problem definition with D parameters.
         X: Input samples, shape ``(N, D)``.
         Y: Model outputs, shape ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
-        n_bins: Number of conditioning bins per continuous parameter, which
+        n_classes: Number of conditioning bins per continuous parameter, which
             are equal-probability under that parameter's marginal. More bins
             condition each parameter more tightly but leave fewer samples per
-            bin, roughly ``N / n_bins``, which makes each KS value noisier.
+            bin, roughly ``N / n_classes``, which makes each KS value noisier.
             The default of 10 suits N in the thousands. A categorical
             parameter ignores this and uses one bin per level.
         statistic: Aggregation of KS values across bins. ``"median"``
@@ -720,10 +720,10 @@ def analyze(
             the active memory budget, which
             :func:`jaxgsa.config.set_memory_budget` sets. Pass a positive
             integer to override it. Peak memory is dominated by the kernel's
-            ECDF tables, about ``2 * slice_chunk_size * D * N * n_bins``
-            elements: the inner ``vmap`` holds a full ``(N, n_bins)`` table
+            ECDF tables, about ``2 * slice_chunk_size * D * N * n_classes``
+            elements: the inner ``vmap`` holds a full ``(N, n_classes)`` table
             per (column, parameter) pair. The ``slice_chunk_size * D *
-            n_bins`` KS result is smaller by a factor of ``N`` and does not
+            n_classes`` KS result is smaller by a factor of ``N`` and does not
             drive the peak. Lower it if a time-series output runs the device
             out of memory. It changes no index: every output column is
             independent of every other.
@@ -745,14 +745,14 @@ def analyze(
     Returns:
         A :class:`PAWNResult` with ``pawn`` shaped ``(D,)``, ``(K, D)``, or
         ``(T, K, D)``, optional confidence intervals in ``pawn_conf``, the
-        per-parameter contributing-bin diagnostic in ``n_valid_bins``, how
+        per-parameter contributing-bin diagnostic in ``n_valid_classes``, how
         those intervals were made in ``ci``, and the non-finite report in
         ``invalid``.
 
     Raises:
         ValueError: If X is not 2-D, its column count does not match the
             problem, X and Y have differing row counts, ``statistic`` is
-            not one of ``"median"``/``"max"``/``"mean"``, ``n_bins < 2``,
+            not one of ``"median"``/``"max"``/``"mean"``, ``n_classes < 2``,
             ``conf_level`` is not in ``(0, 1)``, ``slice_chunk_size`` is
             given and is not a positive integer, ``on_invalid`` is not one
             of the three policies, ``n_bootstrap < 0``, ``ci_method`` is not
@@ -798,7 +798,7 @@ def analyze(
                     statistic in ("median", "max", "mean"),
                     f"statistic must be 'median', 'max', or 'mean', got {statistic!r}",
                 ),
-                at_least("n_bins", n_bins, 2),
+                at_least("n_classes", n_classes, 2),
                 at_least("n_bootstrap", n_bootstrap, 0),
                 one_of("ci_method", ci_method, ("quantile", "gaussian")),
                 in_open_interval("conf_level", conf_level, 0.0, 1.0),
@@ -823,12 +823,12 @@ def analyze(
     # Refusing a malformed categorical column needs concrete values, so it
     # runs here and not in the traceable binning it guards.
     _check_categorical_codes(problem, X)
-    bin_idx, n_eff = _bin_indices(problem, X, n_bins)
+    bin_idx, n_eff = _bin_indices(problem, X, n_classes)
 
     # The contributing-bin diagnostic depends on the binning alone, so it is
     # computed once here, from the same bin assignment the kernel uses.
-    n_valid_bins_per_param = _count_valid_bins(bin_idx, n_eff)
-    _warn_sparse_bins(problem, n_valid_bins_per_param, n_bins)
+    n_valid_classes_per_param = _count_valid_bins(bin_idx, n_eff)
+    _warn_sparse_bins(problem, n_valid_classes_per_param, n_classes)
 
     pawn_3d = _pawn_core(bin_idx, Y_3d, n_eff, statistic, slice_chunk_size)
 
@@ -865,7 +865,7 @@ def analyze(
         pawn_conf=pawn_conf,
         # Constant across the output axes (bin occupancy never reads Y);
         # broadcast to pawn's shape so the exported dataset aligns the two.
-        n_valid_bins=jnp.broadcast_to(jnp.asarray(n_valid_bins_per_param), pawn_out.shape),
+        n_valid_classes=jnp.broadcast_to(jnp.asarray(n_valid_classes_per_param), pawn_out.shape),
         problem=problem,
         invalid=invalid,
         ci=ci,
@@ -892,7 +892,7 @@ def analyze(
             notes=[
                 f"slice_chunk_size: {cs} ({origin})",
                 f"statistic: {statistic}",
-                f"n_bins: {n_bins}",
+                f"n_classes: {n_classes}",
             ],
             index_name="PAWN",
             values=result.pawn,

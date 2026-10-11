@@ -385,6 +385,10 @@ class UniqueDesignSamples:
         )
         meta = {
             "jaxgsa_version": _jaxgsa_version(),
+            "samples_class": type(self).__name__,
+            "samples_class_path": ".".join(
+                [*type(self).__module__.split(".")[:2], type(self).__name__]
+            ),
             "problem": _problem_to_meta(self.problem),
             "n_expanded": self.n_expanded,
             "identity_mapping": identity_mapping,
@@ -414,11 +418,22 @@ class UniqueDesignSamples:
 
         Raises:
             FileNotFoundError: If no file exists at the resolved path.
+            ValueError: If the file holds a different samples class, for
+                example a ``SobolSamples`` file loaded with
+                ``MorrisSamples.load``. Files saved by older versions carry
+                no class name and skip this check.
             KeyError: If the file is missing required arrays or metadata
                 entries (i.e. it was not written by :meth:`save`).
         """
         with np.load(_npz_path(path), allow_pickle=False) as data:
             meta = json.loads(data["metadata"].item())
+            saved_class = meta.get("samples_class")
+            if saved_class is not None and saved_class != cls.__name__:
+                saved_path = meta.get("samples_class_path", saved_class)
+                raise ValueError(
+                    f"this file holds a {saved_class}; load it with {saved_path}.load, "
+                    f"not {cls.__name__}.load"
+                )
             problem = _problem_from_meta(meta["problem"])
             n_expanded = int(meta["n_expanded"])
             if meta["identity_mapping"]:

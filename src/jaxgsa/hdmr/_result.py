@@ -135,6 +135,10 @@ class HDMRResult(SchemaResult, SurrogateResult):
             ``N``, or when a single batch would exceed the memory budget (see
             :func:`jaxgsa.config.set_memory_budget`). Read it when a fit takes
             much longer than expected: True means the budget engaged.
+        order: The expansion order the fit used. It equals the requested
+            ``order`` unless that was larger than the number of parameters
+            ``D``, and then it is ``D``. ``None`` only on a result built by
+            hand without it.
         invalid: What the non-finite check found in ``(X, Y)`` and what the
             ``on_invalid`` policy did about it. See
             :class:`jaxgsa._core.invalid.InvalidReport`. ``n_invalid == 0``
@@ -177,6 +181,7 @@ class HDMRResult(SchemaResult, SurrogateResult):
     cv_rmse: Array | None = None
     explained_variance: Array | None = None
     streamed: bool = False
+    order: int | None = None
     _c2: tuple[tuple[int, int], ...] = field(default=(), repr=False)
     _c3: tuple[tuple[int, int, int], ...] = field(default=(), repr=False)
     Sa_conf: Array | None = None
@@ -202,7 +207,7 @@ class HDMRResult(SchemaResult, SurrogateResult):
             FieldSpec("cv_rmse", "slice"),
             FieldSpec("explained_variance", "slice"),
         ),
-        meta=("streamed",),
+        meta=("order", "streamed"),
     )
 
     def _extra_coords(self) -> dict[str, Any]:

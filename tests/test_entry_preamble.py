@@ -163,7 +163,7 @@ _CHEAP_CONSTANT_KW: dict[str, dict[str, Any]] = {
     "hdmr": {"order": 1, "max_iter": 3},
     "pce": {"order": 2},
     "borgonovo": {"grid_size": 24},
-    "pawn": {"n_bins": 3},
+    "pawn": {"n_classes": 3},
     "optimal_transport": {"max_iter": 50},
 }
 
@@ -245,7 +245,7 @@ class TestScalarsAreCheckedBeforeTheData:
     def test_bad_scalars_and_policy_are_reported_before_bad_data(self):
         X, Y = self._poisoned()
         cases = [
-            (lambda: jaxgsa.pawn.analyze(PROBLEM, X, Y, n_bins=1), "n_bins must be >= 2"),
+            (lambda: jaxgsa.pawn.analyze(PROBLEM, X, Y, n_classes=1), "n_classes must be >= 2"),
             (
                 lambda: jaxgsa.borgonovo.analyze(PROBLEM, X, Y, grid_size=1),
                 "grid_size must be >= 2",
@@ -268,7 +268,9 @@ class TestScalarsAreCheckedBeforeTheData:
         )
         cases.append(
             (
-                lambda: jaxgsa.pawn.analyze(PROBLEM, X, Y, n_bins=1, on_invalid=cast(Any, "nope")),
+                lambda: jaxgsa.pawn.analyze(
+                    PROBLEM, X, Y, n_classes=1, on_invalid=cast(Any, "nope")
+                ),
                 "on_invalid must be one of",
             )
         )

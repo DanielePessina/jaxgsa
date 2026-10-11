@@ -209,7 +209,6 @@ class KucherenkoResult(SchemaResult):
         """Wrap an ``(..., D)`` allocation in a :class:`ShapleyResult`."""
         from jaxgsa.shapley import ShapleyResult
 
-        variance = jnp.asarray(self.variance)
         return ShapleyResult(
             Sh=jnp.asarray(values),
             S1=self.S1,
@@ -218,8 +217,10 @@ class KucherenkoResult(SchemaResult):
             # No surrogate is fitted. "exact" marks an allocation of exact
             # subset indices; the field is typed for the two surrogate backends.
             backend="exact",
-            explained_variance=jnp.ones_like(variance),
-            order=self.problem.n_params,
+            # A surrogate fit quality and a surrogate order mean nothing for an
+            # exact design, so both are None rather than a made-up value.
+            explained_variance=None,
+            order=None,
             invalid=self.invalid,
             Sh_conf=conf,
             S1_conf=self.S1_conf,
@@ -292,8 +293,10 @@ class KucherenkoResult(SchemaResult):
 
         Returns:
             A :class:`~jaxgsa.shapley.ShapleyResult` with ``backend="exact"``.
-            ``explained_variance`` is 1 because no surrogate is fitted.
-            ``S1`` and ``ST`` are this result's own indices.
+            No surrogate is fitted, so the surrogate-only fields
+            ``explained_variance`` and ``order`` are ``None``. They are left
+            out of ``to_dataset()``. ``S1`` and ``ST``
+            are this result's own indices.
 
         Raises:
             ValueError: If the result does not hold subset indices, because the
@@ -325,8 +328,9 @@ class KucherenkoResult(SchemaResult):
 
         Returns:
             A :class:`~jaxgsa.shapley.ShapleyResult` whose ``Sh`` holds the
-            PME and whose ``backend`` is ``"exact"``. ``S1`` and ``ST`` are
-            this result's own indices.
+            PME and whose ``backend`` is ``"exact"``. ``explained_variance``
+            and ``order`` are ``None``, as for :meth:`shapley`. ``S1`` and
+            ``ST`` are this result's own indices.
 
         Raises:
             ValueError: If the result does not hold subset indices, because the

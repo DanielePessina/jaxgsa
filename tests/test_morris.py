@@ -63,7 +63,7 @@ class TestSampling:
         """Shapes, grid, step size and the ee bookkeeping agree with the design."""
         p, n, D = 4, 25, 3
         sr = sample(
-            UNIT_PROBLEM, n_trajectories=n, num_levels=p, method=method, seed=5, verbose=False
+            UNIT_PROBLEM, n_trajectories=n, n_levels=p, method=method, seed=5, verbose=False
         )
         assert sr.n_expanded == n * (D + 1)
         assert sr.samples.shape[1] == D
@@ -111,15 +111,15 @@ class TestSampling:
         assert np.all(sr.samples[:, 1] >= -1.0 - 1e-10)
         assert np.all(sr.samples[:, 1] <= 3.0 + 1e-10)
 
-    def test_odd_num_levels_warns(self):
+    def test_odd_n_levels_warns(self):
         with pytest.warns(UserWarning, match="odd"):
-            sample(UNIT_PROBLEM, n_trajectories=5, num_levels=5, seed=1, verbose=False)
+            sample(UNIT_PROBLEM, n_trajectories=5, n_levels=5, seed=1, verbose=False)
 
     def test_invalid_args_raise(self):
         with pytest.raises(ValueError, match="n_trajectories"):
             sample(UNIT_PROBLEM, n_trajectories=1, verbose=False)
-        with pytest.raises(ValueError, match="num_levels"):
-            sample(UNIT_PROBLEM, n_trajectories=5, num_levels=1, verbose=False)
+        with pytest.raises(ValueError, match="n_levels"):
+            sample(UNIT_PROBLEM, n_trajectories=5, n_levels=1, verbose=False)
         with pytest.raises(ValueError, match="method"):
             sample(UNIT_PROBLEM, n_trajectories=5, method=cast(Any, "star"), verbose=False)
 
@@ -829,3 +829,28 @@ class TestInterfaceCleanup:
         text = repr(sr)
         assert "n_runs=" in text and "n_trajectories=8" in text
         assert "array" not in text and len(text) < 200
+
+
+def test_morris_load_rejects_other_samples_file(tmp_path):
+    from jaxgsa import sobol
+
+    path = tmp_path / "sobol.npz"
+    sobol.sample(ishigami.PROBLEM, base_n=8, seed=0).save(path)
+    with pytest.raises(ValueError, match="holds a SobolSamples; load it with jaxgsa.sobol"):
+        type(sample(ishigami.PROBLEM, 4, seed=0)).load(path)
+
+
+def test_morris_load_reads_old_num_levels_key(tmp_path):
+    import json
+
+    samples = sample(ishigami.PROBLEM, 4, seed=0)
+    path = tmp_path / "morris.npz"
+    samples.save(path)
+    with np.load(path, allow_pickle=False) as data:
+        arrays = {name: data[name] for name in data.files}
+    meta = json.loads(arrays["metadata"].item())
+    meta["num_levels"] = meta.pop("n_levels")
+    arrays["metadata"] = np.asarray(json.dumps(meta))
+    old = tmp_path / "old.npz"
+    np.savez_compressed(old, **arrays)
+    assert type(samples).load(old).n_levels == samples.n_levels

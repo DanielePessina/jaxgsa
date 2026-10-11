@@ -591,12 +591,12 @@ def test_level_permutation_invariance(method):
 # ---------------------------------------------------------------------------
 
 
-def test_pawn_pads_the_kernel_when_levels_exceed_n_bins():
+def test_pawn_pads_the_kernel_when_levels_exceed_n_classes():
     p = Problem.from_dict({"c": {"dist": "categorical", "probs": [1 / 6] * 6}})
     X = jaxgsa.sampling.monte_carlo(p, 600, seed=0)
     rng = np.random.default_rng(0)
     Y = np.asarray(X)[:, 0] + 0.1 * rng.standard_normal(600)
-    res = pawn.analyze(p, X, Y, n_bins=4)
+    res = pawn.analyze(p, X, Y, n_classes=4)
     # Six levels exceed the four bins, so the kernel is padded. The two unused
     # bins are NaN and the nan-aware reduction drops them.
     assert np.isfinite(np.asarray(res.pawn)).all()

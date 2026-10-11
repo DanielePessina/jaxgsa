@@ -10,7 +10,7 @@ from jaxgsa.problem import Problem
 
 
 @dataclass(frozen=True, repr=False)
-class DeltaResult(SchemaResult):
+class BorgonovoResult(SchemaResult):
     """Borgonovo delta sensitivity analysis results.
 
     The delta index is moment-independent: it says how much knowing a

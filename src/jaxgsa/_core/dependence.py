@@ -120,7 +120,9 @@ def sobol_uniforms(
         n: Number of points, a power of two. Callers round up before calling.
         dimension: Coordinates per point.
         seed: Seed for the scrambling.
-        scramble: Owen-scramble the sequence. Unscrambled, the origin is
+        scramble: Scramble the sequence. SciPy applies a linear matrix
+            scramble and a digital random shift, not Owen nested scrambling.
+            Unscrambled, the origin is
             skipped, because it maps to the clipped extreme of every marginal.
 
     Returns:

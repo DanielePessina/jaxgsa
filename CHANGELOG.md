@@ -114,6 +114,14 @@ Each line shows the old form, then the new form.
   `False` always gives the plain estimate. `True` gives the bias-corrected
   estimate and needs `n_bootstrap > 0`. Any other value, such as `None`,
   raises `TypeError`. The first-use warning is gone.
+- `pawn.analyze` and `indices`: `n_bins` → `n_classes`, like Borgonovo and OT.
+  `PAWNResult.n_valid_bins` → `PAWNResult.n_valid_classes`.
+- `morris.sample(num_levels=...)` → `n_levels=...`. `MorrisSamples.num_levels` →
+  `MorrisSamples.n_levels`. `MorrisSamples.load` still reads old files.
+  It now raises `ValueError`, not `KeyError`, for a file saved by another
+  samples class.
+- `borgonovo.DeltaResult` → `borgonovo.BorgonovoResult`. `DeltaResult` stays as
+  an alias.
 - `OTIndices` has a fourth field, `S1`. Code that unpacks three names breaks.
 
 #### Other breaking changes
@@ -156,6 +164,10 @@ Each line shows the old form, then the new form.
   `S_TU`.
 - `PCEResult.rmse` and the `explained_variance` fields listed above.
 - Error messages are clearer. They name the method and the knob that applies.
+- `HDMRResult.order` holds the order the fit used, after it is cut down to D.
+- `to_dataset()` attrs include `method` and `jaxgsa_version` for every result.
+- A saved samples file records its class. Loading it with the wrong class
+  raises an error that names the right one. Old files still load.
 
 ### New
 
@@ -313,6 +325,25 @@ weights.
   analysis distribution puts its mass. An independent design is a safe default
   when the correlation is not fixed yet, or when you reuse one fit under
   several correlations.
+
+- `KucherenkoResult.shapley()` and `pme()` set `explained_variance` and
+  `order` to `None`, because no surrogate is fitted.
+- New clear errors:
+  - `dgsm.analyze` and `dgsm.indices` tell you to use `fn=` when you pass the
+    model as the third argument.
+  - `sampling.correlate`, `monte_carlo` and `transform` show the correct
+    argument order when the first argument is not a `Problem`.
+  - `to_dataset(time_coords=...)` checks the length and names both lengths.
+  - The error for a wrong number of `Y` rows names the source of the count.
+    For `sobol`, `morris`, `kucherenko` and `efast`, it says the design has
+    that many rows and points to `samples.samples`. For the other methods, it
+    says `X` has that many rows.
+  - `dgsm.analyze` checks that `X`, `Y` and `dfdx` have the same number of
+    rows.
+  - `EFASTSamples.load` and the other `load` methods name the right class
+    when you load the wrong file.
+- The `scramble` docs say that SciPy uses a linear matrix scramble with a
+  digital shift. They no longer say Owen scrambling.
 
 ### Fixed
 

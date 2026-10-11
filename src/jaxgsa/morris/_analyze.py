@@ -513,6 +513,7 @@ def analyze(
             in_open_interval("conf_level", conf_level, 0.0, 1.0),
         ),
         n_expected=int(samples.samples.shape[0]),
+        expected_from="samples.samples",
         expand=samples.expand_outputs,
         n_units=r,
         # Under on_invalid='skip' the check never reads the row map

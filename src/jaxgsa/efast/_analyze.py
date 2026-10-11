@@ -475,6 +475,7 @@ def analyze(
             ),
         ),
         n_expected=samples.n_runs,
+        expected_from="samples.samples",
         # The design lays the D search curves out contiguously, N rows each.
         # A curve cannot be dropped, so `keep` is always all-True; the report
         # still names the curve to investigate.

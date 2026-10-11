@@ -343,6 +343,7 @@ def analyze(
             ),
         ),
         n_expected=samples.n_runs,
+        expected_from="samples.samples",
         # A base point k feeds the joint row and every conditional row with
         # the same k, so one non-finite output anywhere invalidates all of
         # them. The design is block-major, so base point k sits at rows

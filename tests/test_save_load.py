@@ -49,7 +49,7 @@ def _assert_morris_equal(left: MorrisSamples, right: MorrisSamples) -> None:
     _assert_array_identical(left.ee_delta, right.ee_delta)
     assert left.n_expanded == right.n_expanded
     assert left.n_trajectories == right.n_trajectories
-    assert left.num_levels == right.num_levels
+    assert left.n_levels == right.n_levels
     assert left.method == right.method
     assert left.n_params == right.n_params
     assert left.n_blocks_dropped == right.n_blocks_dropped

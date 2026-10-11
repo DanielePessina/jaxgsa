@@ -275,6 +275,7 @@ def prepare(
     method: str | None = None,
     extra: Mapping[str, Any] | None = None,
     n_expected: int | None = None,
+    expected_from: str = "X",
     expand: Callable[[Array], Array] | None = None,
     n_units: int | None = None,
     unit_of_row: npt.NDArray[np.intp] | None = None,
@@ -336,6 +337,9 @@ def prepare(
         n_expected: Rows ``Y`` must have. Defaults to ``X``'s row count; pass
             it explicitly for a design-based method, whose row count comes
             from the design.
+        expected_from: What fixes ``n_expected`` in the row-count error.
+            ``"X"`` for a given-data method. A design-based method passes the
+            design attribute, such as ``"samples.samples"``.
         expand: How to rebuild the full design layout from one output per
             unique design row, normally ``SamplingResult.expand_outputs``. It
             runs after the shape contract and before the non-finite check, so
@@ -411,7 +415,7 @@ def prepare(
         X = validate_inputs(problem, X)
         if n_expected is None:
             n_expected = int(X.shape[0])
-    Y = _validate_output(Y, n_expected, problem)
+    Y = _validate_output(Y, n_expected, problem, expected_from)
     deferred_expand: Callable[[Array], Array] | None = None
     if expand is not None:
         # The user evaluated the model once per unique row. The estimator,

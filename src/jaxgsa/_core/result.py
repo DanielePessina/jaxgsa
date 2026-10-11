@@ -39,6 +39,7 @@ import jax.numpy as jnp
 import numpy as np
 import xarray as xr
 
+from jaxgsa._core.samples import _jaxgsa_version
 from jaxgsa._core.validation import _dims_and_coords
 from jaxgsa._core.warning_types import JaxgsaWarning
 
@@ -46,6 +47,29 @@ if TYPE_CHECKING:
     from jax import Array
 
     from jaxgsa.problem import Problem
+
+
+def _method_name(cls: type) -> str:
+    """Return the jaxgsa method package that defines a result class.
+
+    Walks the class hierarchy for the first class defined inside ``jaxgsa``
+    and returns its package name, for example ``"sobol"``. A subclass defined
+    in user code therefore reports the method of its jaxgsa parent.
+
+    Args:
+        cls: A result class.
+
+    Returns:
+        The second part of the module path of the first jaxgsa class found.
+        Falls back to the module's own second part, or its full name, when no
+        class in the hierarchy lives in ``jaxgsa``.
+    """
+    for klass in cls.__mro__:
+        parts = klass.__module__.split(".")
+        if parts[0] == "jaxgsa" and len(parts) > 1:
+            return parts[1]
+    parts = cls.__module__.split(".")
+    return parts[1] if len(parts) > 1 else parts[0]
 
 
 @dataclass(frozen=True)
@@ -261,6 +285,10 @@ class SchemaResult:
         override that reproduces this mapping is drift waiting to happen; no
         result class needs one today.
 
+        Every dataset also gets ``method`` (the method's package name, such
+        as ``"sobol"``) and ``jaxgsa_version``, so a saved file says which
+        analysis and which release made it.
+
         A saved interval must say what it is, so a result that carries a
         ``ci`` (a :class:`CIInfo`) also gets ``ci_level``, ``ci_method`` and
         ``ci_n_bootstrap`` written here, under those exact names. ``ci`` is
@@ -274,7 +302,10 @@ class SchemaResult:
         Returns:
             A mapping written to ``xr.Dataset.attrs``.
         """
-        attrs: dict[str, Any] = {}
+        attrs: dict[str, Any] = {
+            "method": _method_name(type(self)),
+            "jaxgsa_version": _jaxgsa_version(),
+        }
         for name in self._schema.meta:
             value = getattr(self, name)
             if value is None:

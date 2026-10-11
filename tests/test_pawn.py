@@ -29,7 +29,7 @@ class TestPAWNBasic:
     def test_closed_form_for_a_single_active_input(self, statistic):
         """Tier T0 (closed form): ``Y = x1`` has a known KS distance per bin.
 
-        With ``n_bins = b`` equal-width bins of a uniform ``x1``, the
+        With ``n_classes = b`` equal-width bins of a uniform ``x1``, the
         conditional law of ``Y`` in bin ``i`` is uniform on ``[i/b, (i+1)/b]``.
         Its KS distance from the unconditional uniform law is
         ``max(i/b, 1 - (i+1)/b)``. The ``"max"`` statistic is the largest of
@@ -44,7 +44,7 @@ class TestPAWNBasic:
         b = 8
         X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=2048, seed=0))
         result = analyze(
-            ishigami.PROBLEM, X, X[:, 0], n_bins=b, statistic=statistic, verbose=False
+            ishigami.PROBLEM, X, X[:, 0], n_classes=b, statistic=statistic, verbose=False
         )
         bin_ks = np.maximum(np.arange(b) / b, 1.0 - (np.arange(b) + 1) / b)
         target = 1.0 - 1.0 / b if statistic == "max" else float(np.median(bin_ks))
@@ -149,8 +149,8 @@ class TestPAWNBasic:
         widths: list[int] = []
         real_get = pawn_analyze._get_pawn_ks
 
-        def recording_get(n_bins: int):
-            kernel = real_get(n_bins)
+        def recording_get(n_classes: int):
+            kernel = real_get(n_classes)
 
             def recorder(bin_idx, Y_cols):
                 widths.append(int(Y_cols.shape[1]))
@@ -248,7 +248,7 @@ class TestPAWNTiedOutputs:
 
     def test_discrete_output_is_finite_and_bounded(self):
         rng = np.random.default_rng(0)
-        D, N, n_bins = 3, 400, 8
+        D, N, n_classes = 3, 400, 8
         problem = Problem(
             names=("a", "b", "c"),
             bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0)),
@@ -257,7 +257,9 @@ class TestPAWNTiedOutputs:
         # Heavily quantized output with many tied values.
         y = np.round((2 * X[:, 0] + X[:, 1] - 0.5 * X[:, 2]) * 4) / 4
 
-        got = np.asarray(analyze(problem, jnp.asarray(X), jnp.asarray(y), n_bins=n_bins).pawn)
+        got = np.asarray(
+            analyze(problem, jnp.asarray(X), jnp.asarray(y), n_classes=n_classes).pawn
+        )
         assert np.all(np.isfinite(got))
         assert np.all(got >= 0.0) and np.all(got <= 1.0)
 
@@ -266,7 +268,7 @@ class TestPAWNTiedOutputs:
         problem = Problem(names=("a",), bounds=((0.0, 1.0),))
         X = np.linspace(0.0, 1.0, 100).reshape(-1, 1)
         y = np.full(100, 3.0)
-        result = analyze(problem, jnp.asarray(X), jnp.asarray(y), n_bins=5)
+        result = analyze(problem, jnp.asarray(X), jnp.asarray(y), n_classes=5)
         np.testing.assert_allclose(np.asarray(result.pawn), 0.0, atol=1e-6)
 
 
@@ -290,7 +292,7 @@ class TestPAWNEmptyBinWarning:
         import warnings as _warnings
 
         problem = Problem(names=("a",), bounds=((0.0, 1.0),))
-        # N < n_bins with spread inputs => every bin has < 2 samples.
+        # N < n_classes with spread inputs => every bin has < 2 samples.
         X = np.linspace(0.02, 0.98, 8).reshape(-1, 1)
         y = np.arange(8, dtype=float)
         with _warnings.catch_warnings(record=True) as rec:
@@ -299,7 +301,7 @@ class TestPAWNEmptyBinWarning:
                 problem,
                 jnp.asarray(X),
                 jnp.asarray(y),
-                n_bins=20,
+                n_classes=20,
                 n_bootstrap=5,
                 key=jax.random.key(0),
             )
@@ -341,7 +343,7 @@ class TestPAWNEmptyBinWarning:
 
         with _warnings.catch_warnings(record=True) as rec:
             _warnings.simplefilter("always")
-            analyze(problem, jnp.asarray(X), Y_3d, n_bins=20, slice_chunk_size=4)
+            analyze(problem, jnp.asarray(X), Y_3d, n_classes=20, slice_chunk_size=4)
         msgs = [str(r.message) for r in rec if "all bins empty" in str(r.message)]
         assert len(msgs) == 1
         assert "parameter 0" in msgs[0]
@@ -378,7 +380,7 @@ class TestPAWNInvalidInput:
 class TestPureCore:
     def test_indices_is_a_named_tuple(self, given_ishigami_xy):
         X, Y = given_ishigami_xy
-        out = indices(ishigami.PROBLEM, X, Y, n_bins=8)
+        out = indices(ishigami.PROBLEM, X, Y, n_classes=8)
         assert isinstance(out, PAWNIndices)
         assert out._fields == ("pawn",)
 
@@ -398,7 +400,7 @@ class TestPureCore:
     def test_matches_analyze_for_every_statistic(self, given_ishigami_xy, statistic):
         """T4: the aggregation choice is a Python branch, shared by both paths."""
         X, Y = given_ishigami_xy
-        kwargs: dict[str, Any] = {"n_bins": 8, "statistic": statistic}
+        kwargs: dict[str, Any] = {"n_classes": 8, "statistic": statistic}
 
         result = analyze(ishigami.PROBLEM, X, Y, **kwargs)
         (pawn,) = indices(ishigami.PROBLEM, X, Y, **kwargs)
@@ -417,8 +419,8 @@ class TestPureCore:
         )
         assert Y.shape == (X.shape[0], 2, 2)
 
-        result = analyze(ishigami.PROBLEM, X, Y, n_bins=8)
-        (pawn,) = indices(ishigami.PROBLEM, X, Y, n_bins=8)
+        result = analyze(ishigami.PROBLEM, X, Y, n_classes=8)
+        (pawn,) = indices(ishigami.PROBLEM, X, Y, n_classes=8)
 
         assert pawn.shape == (2, 2, 3)
         np.testing.assert_array_equal(np.asarray(pawn), np.asarray(result.pawn))
@@ -434,8 +436,8 @@ class TestPureCore:
         X = jnp.asarray(monte_carlo(problem, n_samples=1000, seed=4))
         Y = 2.0 * X[:, 0] + X[:, 1]
 
-        result = analyze(problem, X, Y, n_bins=5)
-        (pawn,) = indices(problem, X, Y, n_bins=5)
+        result = analyze(problem, X, Y, n_classes=5)
+        (pawn,) = indices(problem, X, Y, n_classes=5)
 
         np.testing.assert_array_equal(np.asarray(pawn), np.asarray(result.pawn))
 
@@ -443,9 +445,9 @@ class TestPureCore:
         """T4: ``jit`` traces ``indices`` and returns the eager values."""
         X, Y = given_ishigami_xy
 
-        jitted = jax.jit(lambda outputs: indices(ishigami.PROBLEM, X, outputs, n_bins=8))
+        jitted = jax.jit(lambda outputs: indices(ishigami.PROBLEM, X, outputs, n_classes=8))
         (pawn_jit,) = jitted(Y)
-        (pawn,) = indices(ishigami.PROBLEM, X, Y, n_bins=8)
+        (pawn,) = indices(ishigami.PROBLEM, X, Y, n_classes=8)
 
         np.testing.assert_allclose(np.asarray(pawn_jit), np.asarray(pawn), rtol=1e-6)
 
@@ -454,13 +456,13 @@ class TestPureCore:
         X, base = given_ishigami_xy
         batch = jnp.stack([base, X[:, 0], X[:, 1] ** 2])
 
-        (pawn_batch,) = jax.vmap(lambda outputs: indices(ishigami.PROBLEM, X, outputs, n_bins=8))(
-            batch
-        )
+        (pawn_batch,) = jax.vmap(
+            lambda outputs: indices(ishigami.PROBLEM, X, outputs, n_classes=8)
+        )(batch)
 
         assert pawn_batch.shape == (3, 3)
         for row, outputs in enumerate(batch):
-            (pawn,) = indices(ishigami.PROBLEM, X, outputs, n_bins=8)
+            (pawn,) = indices(ishigami.PROBLEM, X, outputs, n_classes=8)
             np.testing.assert_allclose(
                 np.asarray(pawn_batch[row]), np.asarray(pawn), rtol=1e-5, atol=1e-6
             )
@@ -478,7 +480,7 @@ class TestPureCore:
         X, Y = given_ishigami_xy
 
         def total(scale):
-            return indices(ishigami.PROBLEM, X, Y * scale, n_bins=8)[0].sum()
+            return indices(ishigami.PROBLEM, X, Y * scale, n_classes=8)[0].sum()
 
         jac = float(jax.jit(jax.jacrev(total))(1.0))
 
@@ -516,11 +518,11 @@ class TestPureCore:
         X = X.at[:, 0].set(1e6)
 
         with pytest.warns(JaxgsaWarning, match="all bins empty"):
-            result = analyze(ishigami.PROBLEM, X, Y, n_bins=8)
+            result = analyze(ishigami.PROBLEM, X, Y, n_classes=8)
         assert np.isnan(np.asarray(result.pawn)[0])
 
         recwarn.clear()
-        (pawn,) = indices(ishigami.PROBLEM, X, Y, n_bins=8)
+        (pawn,) = indices(ishigami.PROBLEM, X, Y, n_classes=8)
 
         assert np.isnan(np.asarray(pawn)[0])
         assert [w for w in recwarn if issubclass(w.category, JaxgsaWarning)] == []
@@ -530,9 +532,9 @@ class TestPureCore:
         X, Y = given_ishigami_xy
 
         with pytest.raises(ValueError, match="rows"):
-            indices(ishigami.PROBLEM, X, Y[:-1], n_bins=8)
+            indices(ishigami.PROBLEM, X, Y[:-1], n_classes=8)
         with pytest.raises(ValueError, match="columns"):
-            indices(ishigami.PROBLEM, X[:, :2], Y, n_bins=8)
+            indices(ishigami.PROBLEM, X[:, :2], Y, n_classes=8)
 
     # Each marginal family reaches ``cdf_to_unit_interval`` by a different
     # branch, and two of those branches used to break tracing in different
@@ -577,21 +579,21 @@ class TestPureCore:
         X = jnp.asarray(monte_carlo(problem, n_samples=1200, seed=17))
         Y = jnp.sin(X[:, 0]) + 0.5 * X[:, 1]
 
-        result = analyze(problem, X, Y, n_bins=6)
-        (pawn,) = indices(problem, X, Y, n_bins=6)
+        result = analyze(problem, X, Y, n_classes=6)
+        (pawn,) = indices(problem, X, Y, n_classes=6)
         np.testing.assert_array_equal(np.asarray(pawn), np.asarray(result.pawn))
 
-        (pawn_jit,) = jax.jit(lambda outputs: indices(problem, X, outputs, n_bins=6))(Y)
+        (pawn_jit,) = jax.jit(lambda outputs: indices(problem, X, outputs, n_classes=6))(Y)
         np.testing.assert_allclose(np.asarray(pawn_jit), np.asarray(pawn), rtol=1e-6)
 
 
 class TestBinCountDiagnostic:
     """Tier T4 (internal consistency): the contributing-bin diagnostic."""
 
-    def test_full_bins_report_n_bins_and_match_pawn_shape(self, given_ishigami_xy):
+    def test_full_bins_report_n_classes_and_match_pawn_shape(self, given_ishigami_xy):
         X, Y = given_ishigami_xy
-        result = analyze(ishigami.PROBLEM, X, Y, n_bins=10)
-        n_valid = np.asarray(result.n_valid_bins)
+        result = analyze(ishigami.PROBLEM, X, Y, n_classes=10)
+        n_valid = np.asarray(result.n_valid_classes)
         assert n_valid.shape == np.asarray(result.pawn).shape
         # 2048 samples over 10 equal-probability bins: every bin holds
         # about two hundred samples, so every bin contributes.
@@ -601,16 +603,16 @@ class TestBinCountDiagnostic:
         """Bin occupancy never reads Y, so the count repeats across (T, K)."""
         X, Y = given_ishigami_xy
         Y3 = jnp.stack([jnp.stack([Y, Y**2], axis=1)] * 2, axis=1)  # (N, 2, 2)
-        result = analyze(ishigami.PROBLEM, X, Y3, n_bins=8)
-        n_valid = np.asarray(result.n_valid_bins)
+        result = analyze(ishigami.PROBLEM, X, Y3, n_classes=8)
+        n_valid = np.asarray(result.n_valid_classes)
         assert n_valid.shape == (2, 2, 3)
         assert (n_valid == n_valid[0, 0]).all()
 
     def test_to_dataset_carries_the_diagnostic(self, given_ishigami_xy):
         X, Y = given_ishigami_xy
         ds = analyze(ishigami.PROBLEM, X, Y).to_dataset()
-        assert "n_valid_bins" in ds
-        assert ds["n_valid_bins"].dims == ("param",)
+        assert "n_valid_classes" in ds
+        assert ds["n_valid_classes"].dims == ("param",)
 
     def test_sparse_bins_warn_and_name_the_fix(self):
         """A parameter whose samples pile into few bins gets one warning."""
@@ -626,8 +628,8 @@ class TestBinCountDiagnostic:
         )
         Y = X[:, 0] + X[:, 1]
         with pytest.warns(JaxgsaWarning, match="fewer bins .* or more samples"):
-            result = analyze(problem, jnp.asarray(X), jnp.asarray(Y), n_bins=10)
-        n_valid = np.asarray(result.n_valid_bins)
+            result = analyze(problem, jnp.asarray(X), jnp.asarray(Y), n_classes=10)
+        n_valid = np.asarray(result.n_valid_classes)
         assert n_valid[0] == 1
         assert n_valid[1] > 5
 
@@ -637,7 +639,7 @@ class TestBinCountDiagnostic:
         X, Y = given_ishigami_xy
         with _warnings.catch_warnings():
             _warnings.simplefilter("error", JaxgsaWarning)
-            analyze(ishigami.PROBLEM, X, Y, n_bins=10)
+            analyze(ishigami.PROBLEM, X, Y, n_classes=10)
 
     def test_all_empty_warning_is_not_doubled(self):
         """A fully out-of-range parameter keeps its own warning, once."""
@@ -653,8 +655,17 @@ class TestBinCountDiagnostic:
         Y = X[:, 1]
         with _warnings.catch_warnings(record=True) as caught:
             _warnings.simplefilter("always")
-            analyze(problem, jnp.asarray(X), jnp.asarray(Y), n_bins=4)
+            analyze(problem, jnp.asarray(X), jnp.asarray(Y), n_classes=4)
         empty = [w for w in caught if "all bins empty" in str(w.message)]
         sparse = [w for w in caught if "fewer bins" in str(w.message)]
         assert len(empty) == 1
         assert not sparse
+
+
+def test_pawn_n_classes_and_n_valid_classes(given_ishigami_xy):
+    X, Y = given_ishigami_xy
+    result = analyze(ishigami.PROBLEM, X, Y, n_classes=5, verbose=False)
+    assert result.n_valid_classes.shape == result.pawn.shape
+    kwargs: dict[str, Any] = {"n_bins": 5, "verbose": False}
+    with pytest.raises(TypeError):
+        analyze(ishigami.PROBLEM, X, Y, **kwargs)

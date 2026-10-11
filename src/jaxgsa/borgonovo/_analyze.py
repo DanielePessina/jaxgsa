@@ -90,7 +90,7 @@ from jaxgsa._core.partition import (
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import _prepare_Y, _validate_output, as_key
 from jaxgsa._core.warning_types import JaxgsaWarning
-from jaxgsa.borgonovo._result import DeltaResult
+from jaxgsa.borgonovo._result import BorgonovoResult
 from jaxgsa.problem import Problem, _categorical_dims
 
 # Keyword-only parameters the irregular engine forwards unchanged to the
@@ -850,7 +850,7 @@ def analyze(
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
     keep_replicates: bool = False,
-) -> DeltaResult | IrregularResult:
+) -> BorgonovoResult | IrregularResult:
     """Compute Borgonovo delta and given-data first-order Sobol indices.
 
     The delta index measures how much knowing a parameter's value shifts the
@@ -969,7 +969,7 @@ def analyze(
             problem and the data, the wall-clock timing, and the top
             parameters by ``delta``. Pass ``False`` for a silent run.
         keep_replicates: Keep the per-resample indices on
-            ``DeltaResult.ci.replicates``. Off by default because they are
+            ``BorgonovoResult.ci.replicates``. Off by default because they are
             large: ``n_bootstrap`` copies of both index arrays. Turn it on to
             recompute an interval at another level without re-running the
             analysis. The ``delta`` draws are the ones the interval was taken
@@ -1003,7 +1003,7 @@ def analyze(
         conditional spread are unaffected.
 
     Returns:
-        A :class:`DeltaResult` with the delta and ``S1`` indices and the
+        A :class:`BorgonovoResult` with the delta and ``S1`` indices and the
         optional confidence intervals. The underlying delta index is
         defined on ``[0, 1]`` and the plug-in estimate stays in that range.
         The bias-corrected estimate and its confidence bounds can
@@ -1289,7 +1289,7 @@ def analyze(
     if delta_conf is not None:
         _warn_conf_out_of_range(problem, delta_conf, allow_non_finite=propagated)
 
-    result = DeltaResult(
+    result = BorgonovoResult(
         delta=ctx.squeeze(delta),
         delta_conf=delta_conf,
         S1=ctx.squeeze(S1),
@@ -1358,7 +1358,7 @@ def indices(
     kernel on the same data and returns the same numbers, but it does
     nothing else: no non-finite check, no discrete-output refusal, no
     zero-variance warning, no bandwidth-floor warning, no ``[0, 1]`` range
-    check, no :class:`jaxgsa.borgonovo.DeltaResult`, and no read of any
+    check, no :class:`jaxgsa.borgonovo.BorgonovoResult`, and no read of any
     array value on the host. So it composes with ``jax.jit``, ``jax.vmap``,
     ``jax.grad`` and ``jax.jacrev``, which :func:`analyze` cannot, because
     a policy decision needs a concrete value and a tracer has none.

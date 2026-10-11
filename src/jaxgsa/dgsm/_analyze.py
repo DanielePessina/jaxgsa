@@ -217,9 +217,15 @@ def _resolve_call_style(
         ``(Y, dfdx)``.
 
     Raises:
+        TypeError: If ``Y`` is a callable, which means the model was passed
+            in the position of the outputs.
         ValueError: If arguments from both groups are given, if neither group
             is given, or if the pre-computed group is only partly filled.
     """
+    if callable(Y):
+        raise TypeError(
+            "jaxgsa.dgsm: the third argument is Y, the model outputs. Pass the model as fn=..."
+        )
     precomputed_given = [name for name, v in (("Y", Y), ("dfdx", dfdx)) if v is not None]
 
     if fn is not None and precomputed_given:
@@ -829,6 +835,12 @@ def analyze(
         # Pre-computed path: the caller supplies the Jacobian and the forward
         # outputs directly.
         dfdx_arr = jnp.asarray(dfdx)
+        n_x, n_y, n_d = (int(np.shape(a)[0]) if np.ndim(a) else 0 for a in (X, Y, dfdx_arr))
+        if not n_x == n_y == n_d:
+            raise ValueError(
+                f"X has {n_x} rows, Y has {n_y} rows and dfdx has {n_d} rows; "
+                "pass one row of Y and one row of dfdx for each row of X"
+            )
         # Both arrays are in hand here, so the derivative needs no stand-in:
         # it goes into the check whole, on the model side with Y, and comes
         # back compacted by the same mask.

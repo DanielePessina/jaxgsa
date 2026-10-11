@@ -20,6 +20,24 @@ from jaxgsa._core.warning_types import JaxgsaWarning as _JaxgsaWarning
 from jaxgsa.problem import Problem as _Problem
 
 
+def _require_problem(value: object, name: str, signature: str) -> None:
+    """Reject a first argument that is not a Problem, with the right order.
+
+    Args:
+        value: What the caller passed as ``problem``.
+        name: Public function name, such as ``"correlate"``.
+        signature: The correct call order, such as ``"correlate(problem, X)"``.
+
+    Raises:
+        TypeError: If ``value`` is not a :class:`~jaxgsa.problem.Problem`.
+    """
+    if not isinstance(value, _Problem):
+        raise TypeError(
+            f"jaxgsa.sampling.{name}: the first argument must be a Problem; "
+            f"the order is {signature}"
+        )
+
+
 def monte_carlo(
     problem: _Problem,
     n_samples: int,
@@ -66,8 +84,10 @@ def monte_carlo(
 
     Raises:
         ValueError: If ``n_samples`` is less than 1.
-        TypeError: If ``seed`` is a JAX key. Keys go to ``analyze(key=...)``.
+        TypeError: If ``problem`` is not a ``Problem``, or if ``seed`` is a
+            JAX key. Keys go to ``analyze(key=...)``.
     """
+    _require_problem(problem, "monte_carlo", "monte_carlo(problem, n_samples)")
     _check_seed(seed, "jaxgsa.sampling.monte_carlo")
     if n_samples < 1:
         raise ValueError(f"n_samples must be >= 1, got {n_samples}")
@@ -127,9 +147,11 @@ def transform(problem: _Problem, U: _npt.ArrayLike) -> _np.ndarray:
         ``(n, D)`` float64 array in physical units.
 
     Raises:
+        TypeError: If ``problem`` is not a ``Problem``.
         ValueError: If ``U`` is not 2-D with the expected width, or holds
             values that are non-finite or outside ``[0, 1]``.
     """
+    _require_problem(problem, "transform", "transform(problem, U)")
     u = _np.asarray(U, dtype=_np.float64)
     width = problem.n_params if problem.sampler_dimension is None else problem.sampler_dimension
     if u.ndim != 2 or u.shape[1] != width:
@@ -221,6 +243,8 @@ def correlate(
         column permuted) and ranks following the declared correlation.
 
     Raises:
+        TypeError: If ``problem`` is not a ``Problem``, for example when the
+            arguments are in the order ``(X, problem)``.
         ValueError: If ``problem`` has no correlation set, ``X`` is not
             ``(N, D)`` with ``D == problem.n_params``, or ``X`` holds
             non-finite values (they would be paired deterministically with
@@ -231,6 +255,7 @@ def correlate(
             step cannot run and the re-pairing does not follow the declared
             matrix.
     """
+    _require_problem(problem, "correlate", "correlate(problem, X)")
     _check_seed(seed, "jaxgsa.sampling.correlate")
     R = problem.correlation
     if R is None:

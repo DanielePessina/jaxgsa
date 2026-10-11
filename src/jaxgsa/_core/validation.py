@@ -114,6 +114,7 @@ def _validate_output(
     Y: Array,
     n_expected: int | None,
     problem: Problem | None = None,
+    expected_from: str = "X",
 ) -> Array:
     """Validate a model output using the canonical jaxgsa axis layouts.
 
@@ -125,6 +126,10 @@ def _validate_output(
         n_expected: Expected sample count, or ``None`` when it is derived by
             the calling method.
         problem: Optional problem definition used to validate output labels.
+        expected_from: What fixes ``n_expected``. ``"X"`` (the default) means
+            the caller's input matrix. Any other value names the design
+            attribute to evaluate, such as ``"samples.samples"``, and the
+            error then talks about the design.
 
     Returns:
         The validated JAX array.
@@ -138,9 +143,14 @@ def _validate_output(
     if Y.shape[0] == 0:
         raise ValueError("Y must have at least one row, got 0")
     if n_expected is not None and Y.shape[0] != n_expected:
+        if expected_from == "X":
+            raise ValueError(
+                f"Y has {Y.shape[0]} rows but X has {n_expected}; "
+                "pass one row of Y for each row of X, as (N,), (N, K), or (N, T, K)"
+            )
         raise ValueError(
-            f"Y has {Y.shape[0]} sample rows but {n_expected} were expected; "
-            "pass Y as (N,), (N, K), or (N, T, K)"
+            f"Y has {Y.shape[0]} rows but the design has {n_expected}; "
+            f"evaluate the model once per row of {expected_from}"
         )
     if problem is not None and problem.output_names is not None:
         n_outputs = 1 if Y.ndim == 1 else Y.shape[-1]
@@ -471,7 +481,8 @@ def _dims_and_coords(
         ``xr.Dataset``.
 
     Raises:
-        ValueError: If ``ndim`` is not 1, 2, or 3.
+        ValueError: If ``ndim`` is not 1, 2, or 3, or if ``time_coords`` does
+            not have one value per time step.
     """
     param_names = list(problem.names)
     if ndim == 1:
@@ -485,6 +496,11 @@ def _dims_and_coords(
         K = shape[1]
         onames = _default_output_names(K, problem)
         tcoords = list(time_coords) if time_coords is not None else list(range(T))
+        if len(tcoords) != T:
+            raise ValueError(
+                f"time_coords has {len(tcoords)} values but the result has {T} time steps; "
+                "pass one coordinate per time step"
+            )
         return (
             ("time", "output", "param"),
             {"time": tcoords, "output": onames, "param": param_names},

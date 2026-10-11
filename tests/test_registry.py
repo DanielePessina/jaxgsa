@@ -71,7 +71,7 @@ CHEAP_KW: dict[str, dict] = {
     "hsic": {"n_perms": 3},
     "optimal_transport": {"max_iter": 50},
     "borgonovo": {"grid_size": 24},
-    "pawn": {"n_bins": 3},
+    "pawn": {"n_classes": 3},
     "pce": {"order": 2},
 }
 """Tiny settings for the given-data methods.

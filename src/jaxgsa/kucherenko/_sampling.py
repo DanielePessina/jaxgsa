@@ -283,7 +283,9 @@ def sample(
             for ``S1`` and ``ST``. ``"all"`` builds the ``2^D`` block design
             that adds closed and total indices of every subset, and with them
             ``result.shapley()`` and ``result.pme()``.
-        scramble: Whether to Owen-scramble the Sobol' sequence. Keep it on:
+        scramble: Whether to scramble the Sobol' sequence. SciPy applies a
+            linear matrix scramble and a digital random shift, not Owen
+            nested scrambling. Keep it on:
             different seeds then give statistically independent designs.
         seed: Random seed or generator for the Sobol' scrambling. Requires
             ``scramble=True``.
