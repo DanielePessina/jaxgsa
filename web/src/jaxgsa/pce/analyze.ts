@@ -6,7 +6,7 @@
  * output): autoOrder -> mapToReference -> buildDesignMatrix ->
  * gram + ridge*I -> linalg.solve -> sobolFromCoefficients, all in float64 on
  * the jax-js wasm device. The fit-quality diagnostics (`explained_variance`
- * and the exact leave-one-out `loo_rmse`) are ported too. S2 and
+ * and the exact leave-one-out `cv_rmse`) are ported too. S2 and
  * bootstrapping are not ported yet.
  */
 
@@ -28,7 +28,7 @@ export interface PceFitOptions {
   ridge?: number;
   /** Maximum ratio of terms to samples before order is reduced (default 0.5). */
   fitRatio?: number;
-  /** Also compute `explained_variance` and `loo_rmse` (default false). */
+  /** Also compute `explained_variance` and `cv_rmse` (default false). */
   diagnostics?: boolean;
 }
 
@@ -40,8 +40,8 @@ export interface PceDiagnostics {
   /** Sample variance of the fitted values over the sample variance of Y. */
   explainedVariance: number;
   /** Exact leave-one-out RMSE from the hat-matrix diagonal, in the units of Y. */
-  looRmse: number;
-  /** Sample standard deviation of Y (the scale `looRmse` is judged against). */
+  cvRmse: number;
+  /** Sample standard deviation of Y (the scale `cvRmse` is judged against). */
   stdY: number;
 }
 
@@ -72,12 +72,12 @@ export interface PceFit {
 const LEVERAGE_CLIP = 1e-10;
 
 /**
- * Port of the `explained_variance` and `loo_rmse` definitions in
+ * Port of the `explained_variance` and `cv_rmse` definitions in
  * `pce/_analyze.py`, on host arrays.
  *
  * - explained_variance = var(Phi c) / var(Y), both sample (ddof 0) variances
  *   over the fitted rows; NaN when Y is constant (`_is_constant_slice`).
- * - loo_rmse = sqrt(mean(((Y - Phi c) / (1 - h))^2)), h the hat-matrix
+ * - cv_rmse = sqrt(mean(((Y - Phi c) / (1 - h))^2)), h the hat-matrix
  *   diagonal clipped to [0, 1 - 1e-10] (`loo_error` + `hat_diagonal`).
  */
 export function fitDiagnostics(
@@ -117,7 +117,7 @@ export function fitDiagnostics(
 
   return {
     explainedVariance: yMax === yMin ? NaN : varHat / varY,
-    looRmse: Math.sqrt(sse / n),
+    cvRmse: Math.sqrt(sse / n),
     stdY: Math.sqrt(varY),
   };
 }

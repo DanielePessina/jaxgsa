@@ -12,7 +12,7 @@ import type { DesignConfig, DesignMethod, GeneratedDesign } from "./engine";
 export interface DesignForm {
   baseN: string;
   nTrajectories: string;
-  numLevels: string;
+  nLevels: string;
   nSamples: string;
   /** Empty means "use the studio default" (see `efastDefaultPoints`). */
   nPerCurve: string;
@@ -22,7 +22,7 @@ export interface DesignForm {
 export const DEFAULT_DESIGN_FORM: DesignForm = {
   baseN: "128",
   nTrajectories: "20",
-  numLevels: "4",
+  nLevels: "4",
   nSamples: "1024",
   nPerCurve: "",
   seed: "0",
@@ -44,7 +44,7 @@ export function efastDefaultPoints(D: number): number {
   return Math.max(efastMinPoints(D), EFAST_LOW_N);
 }
 
-const DESIGN_FORM_KEYS = ["baseN", "nTrajectories", "numLevels", "nSamples", "nPerCurve", "seed"] as const satisfies readonly (keyof DesignForm)[];
+const DESIGN_FORM_KEYS = ["baseN", "nTrajectories", "nLevels", "nSamples", "nPerCurve", "seed"] as const satisfies readonly (keyof DesignForm)[];
 
 /** What storage may hold for the form. Any field can be wrong at run time. */
 export type StoredForm = Partial<Record<keyof DesignForm, string>> | null;
@@ -100,8 +100,8 @@ export function designFormErrors(
       errors.nTrajectories = "Use a whole number, at least 2.";
     }
 
-    if (!isInt(form.numLevels) || Number(form.numLevels) < 2) {
-      errors.numLevels = "Use a whole number, at least 2.";
+    if (!isInt(form.nLevels) || Number(form.nLevels) < 2) {
+      errors.nLevels = "Use a whole number, at least 2.";
     }
   } else if (method === "kucherenko") {
     if (!isInt(form.nSamples) || Number(form.nSamples) < 2) {
@@ -127,7 +127,7 @@ export function designConfig(method: DesignMethod, form: DesignForm, D: number):
   if (method === "morris") {
     return {
       nTrajectories: Number(form.nTrajectories),
-      numLevels: Number(form.numLevels),
+      nLevels: Number(form.nLevels),
       seed,
     };
   }
@@ -164,7 +164,7 @@ export function describeDesign(method: DesignMethod, design: GeneratedDesign): s
   if (method === "morris") {
     return (
       `${summaryValue(design, "trajectories")} trajectories, ` +
-      `${summaryValue(design, "grid levels")} levels`
+      `${summaryValue(design, "n_levels")} levels`
     );
   }
 
@@ -180,7 +180,7 @@ export function describeForm(method: DesignMethod, form: DesignForm, D: number):
   }
 
   if (method === "morris") {
-    return `${form.nTrajectories} trajectories, ${form.numLevels} levels`;
+    return `${form.nTrajectories} trajectories, ${form.nLevels} levels`;
   }
 
   return `${form.nPerCurve || efastDefaultPoints(D)} points per curve`;

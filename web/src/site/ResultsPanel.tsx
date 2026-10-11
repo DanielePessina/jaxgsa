@@ -59,13 +59,13 @@ export function orderLabel(settings: AnalysisResult["settings"]): string | null 
 }
 
 function FitLine({ fit }: { fit: NonNullable<AnalysisResult["slices"][number]["fit"]> }) {
-  const ratio = fit.looRmse / fit.stdY;
+  const ratio = fit.cvRmse / fit.stdY;
 
   return (
     <p className="font-mono text-[11px] text-muted-foreground">
       fit: explained variance{" "}
-      <span className="tabular-nums">{formatIndex(fit.explainedVariance)}</span> · LOO RMSE{" "}
-      <span className="tabular-nums">{formatIndex(fit.looRmse)}</span>
+      <span className="tabular-nums">{formatIndex(fit.explainedVariance)}</span> · CV RMSE{" "}
+      <span className="tabular-nums">{formatIndex(fit.cvRmse)}</span>
       {Number.isFinite(ratio) && (
         <>
           {" "}

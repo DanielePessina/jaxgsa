@@ -287,9 +287,9 @@ function DesignMethodCell({
             <FormField
               id={`${method}-levels`}
               label="Levels"
-              value={form.numLevels}
-              onChange={(v) => setField("numLevels", v)}
-              error={errors.numLevels}
+              value={form.nLevels}
+              onChange={(v) => setField("nLevels", v)}
+              error={errors.nLevels}
               min={2}
             />
           </>

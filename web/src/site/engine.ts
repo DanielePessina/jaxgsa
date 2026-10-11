@@ -635,7 +635,7 @@ export interface SobolConfig {
 
 export interface MorrisConfig {
   nTrajectories: number;
-  numLevels: number;
+  nLevels: number;
   seed: number;
 }
 
@@ -725,7 +725,7 @@ export function generateDesign(
     const cfg = config as MorrisConfig;
 
     const port = sampleMorris(problem, cfg.nTrajectories, {
-      numLevels: cfg.numLevels,
+      nLevels: cfg.nLevels,
       seed: cfg.seed,
       verbose: false,
     });
@@ -741,7 +741,7 @@ export function generateDesign(
       port,
       summary: [
         ["trajectories", String(port.nTrajectories)],
-        ["grid levels", String(port.numLevels)],
+        ["n_levels", String(port.nLevels)],
         ["n_expanded", String(port.nExpanded)],
         ["n_runs", String(nRuns)],
       ],

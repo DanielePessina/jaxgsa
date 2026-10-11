@@ -76,10 +76,10 @@ describe("createRunGuard", () => {
   });
 });
 
-const fit = (label: string, explainedVariance: number, looRmse: number, stdY = 1): SliceFit => ({
+const fit = (label: string, explainedVariance: number, cvRmse: number, stdY = 1): SliceFit => ({
   label,
   explainedVariance,
-  looRmse,
+  cvRmse,
   stdY,
 });
 

@@ -43,7 +43,7 @@ describe("designFormErrors", () => {
   it("checks the seed and Morris fields", () => {
     expect(designFormErrors("morris", form({ seed: "x" }), 3).seed).toBeDefined();
     expect(designFormErrors("morris", form({ nTrajectories: "1" }), 3).nTrajectories).toBeDefined();
-    expect(designFormErrors("morris", form({ numLevels: "1.5" }), 3).numLevels).toBeDefined();
+    expect(designFormErrors("morris", form({ nLevels: "1.5" }), 3).nLevels).toBeDefined();
   });
 });
 

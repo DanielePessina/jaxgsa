@@ -125,7 +125,7 @@ export function pceFitWarnings(
   }
 
   const ratios = fits.flatMap((f) => {
-    const ratio = f.looRmse / f.stdY;
+    const ratio = f.cvRmse / f.stdY;
 
     return Number.isFinite(ratio) ? [{ f, ratio }] : [];
   });

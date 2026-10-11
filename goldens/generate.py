@@ -52,7 +52,7 @@ SEED = 42
 
 # Per-method sizes (small but stable).
 N_SOBOL_BASE = 512  # sobol base points (passed as base_n=...)
-N_KUCHERENKO = 512  # kucherenko base points
+N_KUCHERENKO = 512  # kucherenko base points (passed as base_n=...)
 N_TRAJECTORIES = 40  # morris trajectories
 N_CLOUD = 512  # pce / hdmr / shapley rows
 N_EFAST_CURVE = 256  # efast points per search curve (>= 4*M^2*(D-1)+1)
@@ -166,7 +166,7 @@ def build_kucherenko() -> dict:
         X,
         Y,
         {"S1": res.S1, "ST": res.ST, "variance": res.variance},
-        {"n_samples": N_KUCHERENKO, "seed": SEED},
+        {"base_n": N_KUCHERENKO, "seed": SEED},
     )
 
 
@@ -186,12 +186,11 @@ def build_morris() -> dict:
         X,
         Y,
         {"mu": res.mu, "mu_star": res.mu_star, "sigma": res.sigma},
-        # The labels "num_levels" and "n_bins" are kept as the v1.0.0 fixture keys.
-        {"n_trajectories": N_TRAJECTORIES, "num_levels": 4, "method": "trajectory", "seed": SEED},
+        {"n_trajectories": N_TRAJECTORIES, "n_levels": 4, "method": "trajectory", "seed": SEED},
         design={
             "n_expanded": mr.n_expanded,
             "n_trajectories": mr.n_trajectories,
-            "num_levels": mr.n_levels,
+            "n_levels": mr.n_levels,
             "expanded_to_unique": to_list(mr.expanded_to_unique),
             "ee_idx_after": to_list(mr.ee_idx_after),
             "ee_idx_before": to_list(mr.ee_idx_before),
@@ -241,7 +240,7 @@ def build_hdmr() -> dict:
         X,
         Y,
         {"S1": res.S1, "ST": res.ST},
-        {"n": N_CLOUD, "seed": SEED, "maxorder": 2, "maxiter": 100, "lambdax": 0.01},
+        {"n": N_CLOUD, "seed": SEED, "order": 2, "max_iter": 100, "ridge": 0.01},
     )
 
 
@@ -285,7 +284,7 @@ def build_pawn() -> dict:
         X,
         Y,
         {"pawn": res.pawn},
-        {"n": N_CLOUD, "seed": SEED, "n_bins": 10, "statistic": "median"},
+        {"n": N_CLOUD, "seed": SEED, "n_classes": 10, "statistic": "median"},
     )
 
 

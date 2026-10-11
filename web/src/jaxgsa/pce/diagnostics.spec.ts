@@ -38,14 +38,14 @@ function cloud(n: number) {
 }
 
 const CASES = [
-  // n, order, fitRatio, effective order, explained_variance, loo_rmse, std(Y), S1
+  // n, order, fitRatio, effective order, explained_variance, cv_rmse, std(Y), S1
   { n: 200, order: 1, fitRatio: 0.5, eff: 1, ev: 0.1867227723210198, loo: 3.388397857241682, std: 3.670962792833174, s1x1: 0.9953625557174193 },
   { n: 200, order: 2, fitRatio: 0.5, eff: 2, ev: 0.25007307458892336, loo: 3.3663113588135447, std: 3.670962792833174, s1x1: 0.7158675863686902 },
   { n: 200, order: 3, fitRatio: 0.5, eff: 3, ev: 0.506873032350081, loo: 2.879326645774798, std: 3.670962792833174, s1x1: 0.5908732457986507 },
   // The request (8) does not fit 200 rows at fit_ratio 0.5: autoOrder lowers it to 6.
   { n: 200, order: 8, fitRatio: 0.5, eff: 6, ev: 0.9915594578671498, loo: 0.8778739430424995, std: 3.670962792833174, s1x1: 0.3175190324117311 },
   { n: 400, order: 8, fitRatio: 0.5, eff: 8, ev: 0.9998562765129839, loo: 0.16610926440965085, std: 3.6868271210262757, s1x1: 0.3124134009314542 },
-  // Overfit: in-sample 0.98, but LOO RMSE is 41 times std(Y).
+  // Overfit: in-sample 0.98, but CV RMSE is 41 times std(Y).
   { n: 64, order: 5, fitRatio: 0.9, eff: 5, ev: 0.9823563272526447, loo: 158.6496235135393, std: 3.8716315397281296, s1x1: 0.062401492619454914 },
 ];
 
@@ -69,7 +69,7 @@ describe("PCE fit diagnostics vs jaxgsa.pce.analyze", () => {
       expect(r.S1[0]).toBeCloseTo(c.s1x1, 7);
       expect(r.diagnostics).toBeDefined();
       expect(r.diagnostics!.explainedVariance).toBeCloseTo(c.ev, 8);
-      expect(r.diagnostics!.looRmse / c.loo).toBeCloseTo(1, 6);
+      expect(r.diagnostics!.cvRmse / c.loo).toBeCloseTo(1, 6);
       expect(r.diagnostics!.stdY).toBeCloseTo(c.std, 9);
     });
   }
@@ -80,7 +80,7 @@ describe("PCE fit diagnostics vs jaxgsa.pce.analyze", () => {
 
     expect(r.order).toBe(3);
     expect(r.diagnostics!.explainedVariance).toBeCloseTo(0.506873032350081, 8);
-    expect(r.diagnostics!.looRmse / 2.879326645774798).toBeCloseTo(1, 6);
+    expect(r.diagnostics!.cvRmse / 2.879326645774798).toBeCloseTo(1, 6);
   });
 
   it("skips the diagnostics unless asked", () => {
@@ -108,6 +108,6 @@ describe("fitDiagnostics", () => {
       Float64Array.from([0.2, 0.2, 0.2, 1]),
     );
 
-    expect(Number.isFinite(d.looRmse)).toBe(true);
+    expect(Number.isFinite(d.cvRmse)).toBe(true);
   });
 });
