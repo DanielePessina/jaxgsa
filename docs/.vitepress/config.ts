@@ -1,7 +1,7 @@
 import { defineConfig } from 'vitepress'
 import type { HeadConfig } from 'vitepress'
 
-const siteUrl = 'https://danielepessina.github.io/jaxgsa'
+const siteUrl = 'https://danielepessina.github.io/jaxgsa/'
 
 const description = 'Global Sensitivity Analysis in JAX'
 
@@ -49,7 +49,7 @@ export default defineConfig({
   sitemap: {
     hostname: siteUrl,
     transformItems(items) {
-      return [...items, { url: `${siteUrl}studio/` }]
+      return [...items, { url: 'studio/' }]
     },
   },
 
