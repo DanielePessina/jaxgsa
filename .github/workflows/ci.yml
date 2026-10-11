@@ -143,7 +143,7 @@ jobs:
         run: npm run test:e2e
       - name: Upload the end-to-end report
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-report
           path: |
