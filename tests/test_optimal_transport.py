@@ -572,6 +572,29 @@ class TestOTEdgeCases:
         assert float(dummy[0]) < float(np.asarray(result.ot).min())
         assert float(dummy[0]) < 0.05
 
+    def test_categorical_dummy_uses_the_observed_level_sizes(self):
+        """A categorical floor is matched to that column's own level counts.
+
+        The levels here have unequal sizes (about 600, 300 and 100 rows). A
+        floor built with equal-frequency class sizes instead compares the
+        output with a wrongly weighted mixture and gives a value near 0.5,
+        far above the real index of a weak input.
+        """
+        problem = jaxgsa.Problem.from_dict(
+            {
+                "a": (-np.pi, np.pi),
+                "b": (-np.pi, np.pi),
+                "c": {"dist": "categorical", "probs": [0.6, 0.3, 0.1]},
+            }
+        )
+        rng = np.random.default_rng(0)
+        X = rng.uniform(-np.pi, np.pi, (1000, 3))
+        X[:, 2] = rng.choice(3, 1000, p=[0.6, 0.3, 0.1])
+        Y = np.sin(X[:, 0]) + 7 * np.sin(X[:, 1]) ** 2 + 2 * X[:, 2]
+        result = analyze(problem, jnp.asarray(X), jnp.asarray(Y), n_classes=7, dummy=True, key=3)
+        assert result.ot_dummy is not None
+        assert float(np.asarray(result.ot_dummy)[2]) < 0.05
+
     def test_dummy_multivariate_mode(self, ishigami_xy_series):
         X, Y2, _ = ishigami_xy_series
         with warnings.catch_warnings():

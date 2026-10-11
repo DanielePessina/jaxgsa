@@ -127,6 +127,9 @@ _IRREGULAR_KWARGS = (
 # transient-memory budget at any dtype. Counting elements instead would be
 # wrong by the item size, and wrong by a further factor of two under x64.
 _CHUNK_LIVE_TENSORS = 2
+# Live copies of the continuous group's (D, M, P) tensors; see
+# ``_ot_1d_chunked``. Each is of size about ``D * N``.
+_CONT_LIVE_TENSORS = 6
 
 _MODES = ("univariate", "multivariate", "trajectory")
 
@@ -266,6 +269,85 @@ def _quantile_rank_split(counts: Array, N: int) -> tuple[Array, Array, Array]:
     return j_left, j_right, frac_left
 
 
+class _SlotTables(NamedTuple):
+    """Device copies of :func:`_slot_tables` for one continuous group."""
+
+    idx: Array  # (U, Cmax, L) sorted-sample positions
+    w: Array  # (U, Cmax, L) overlap weights
+    cmap: Array  # (M,) class -> distinct-size row
+    a_m: Array  # (M, P) slot weights per class, zero on padding
+
+
+def _make_slots(cls_idx: Array, N: int, dtype) -> _SlotTables:
+    """Build the closed-form W2 tables for a continuous group.
+
+    Args:
+        cls_idx: Group class indices ``(Dg, M, P)``; only ``M`` and ``P`` are read.
+        N: Number of samples.
+        dtype: Working float dtype.
+
+    Returns:
+        The tables as device arrays at ``dtype``.
+    """
+    M, P = cls_idx.shape[-2:]
+    _, sizes = _class_layout(N, M)
+    idx, w, a, cmap = _slot_tables(sizes, N)
+    a_m = np.zeros((M, P))
+    a_m[:, : a.shape[-1]] = a[cmap][:, :P]
+    a_m = np.where(np.arange(P)[None, :] < sizes[:, None], a_m, 0.0)
+    return _SlotTables(
+        jnp.asarray(idx),
+        jnp.asarray(w, dtype=dtype),
+        jnp.asarray(cmap),
+        jnp.asarray(a_m, dtype=dtype),
+    )
+
+
+def _slot_tables(sizes: np.ndarray, N: int) -> tuple[np.ndarray, ...]:
+    """Static overlap tables for the closed-form continuous-group W2.
+
+    The sample's quantile function is constant on ``N`` intervals of width
+    ``1/N``, and a class of size ``c`` has a constant value on each of its
+    ``c`` slots of width ``1/c``. Slot ``k`` therefore overlaps a few
+    consecutive intervals, with integer overlap lengths in units of
+    ``1 / (N * c)``. Equal-frequency class sizes take at most two distinct
+    values, so the tables are tiny and depend only on ``(sizes, N)``.
+
+    Args:
+        sizes: Static class sizes, shape ``(M,)``.
+        N: Number of samples.
+
+    Returns:
+        ``(idx, w, a, cmap)``. ``idx (U, Cmax, L)`` holds the sorted-sample
+        positions each slot overlaps, ``w`` the matching overlap weights
+        (they sum to ``1/c`` per slot, zero on padding), ``a (U, Cmax)`` the
+        slot weights ``1/c`` (zero on padding), and ``cmap (M,)`` maps each
+        class to its distinct-size row ``U``. Empty classes map to row 0.
+    """
+    uniq = sorted({int(c) for c in sizes if c > 0})
+    c_max = max(uniq)
+    tabs = []
+    for c in uniq:
+        k = np.arange(c, dtype=np.int64)[:, None]
+        i_lo = (k * N) // c
+        n_i = -(-((k + 1) * N) // c) - i_lo
+        length = int(n_i.max())
+        i = i_lo + np.arange(length, dtype=np.int64)[None, :]
+        ov = np.minimum((i + 1) * c, (k + 1) * N) - np.maximum(i * c, k * N)
+        ov = np.maximum(ov, 0)
+        tabs.append((np.minimum(i, N - 1), ov / float(N * c), c))
+    length = max(t[0].shape[1] for t in tabs)
+    idx = np.zeros((len(uniq), c_max, length), dtype=np.int32)
+    w = np.zeros((len(uniq), c_max, length), dtype=np.float64)
+    a = np.zeros((len(uniq), c_max), dtype=np.float64)
+    for u, (ti, tw, c) in enumerate(tabs):
+        idx[u, :c, : ti.shape[1]] = ti
+        w[u, :c, : tw.shape[1]] = tw
+        a[u, :c] = 1.0 / c
+    cmap = np.array([uniq.index(int(c)) if c > 0 else 0 for c in sizes], dtype=np.int32)
+    return idx, w, a, cmap
+
+
 @functools.partial(jax.jit, static_argnames=("group_levels",))
 def _ot_1d_kernel(
     Y_cols: Array,
@@ -330,7 +412,15 @@ def _ot_1d_kernel(
     # the pre-sorted column back at those ranks yields the same order
     # statistics to the last bit.
     Y_sorted = jax.lax.sort(Y_cols, dimension=0, is_stable=False)  # (N, C)
-    pos2rank = jnp.argsort(jnp.argsort(Y_cols, axis=0), axis=0).astype(jnp.int32)  # (N, C)
+    order = jnp.argsort(Y_cols, axis=0).astype(jnp.int32)  # (N, C)
+    # Inverting the permutation by scatter replaces a second argsort.
+    pos2rank = jnp.put_along_axis(
+        jnp.zeros_like(order),
+        order,
+        jnp.broadcast_to(jnp.arange(N, dtype=jnp.int32)[:, None], order.shape),
+        axis=0,
+        inplace=False,
+    )  # (N, C)
 
     def _group_stats(
         y, y_sorted, mean_r, V, cls_idx, mask_b, counts_b, j_b, y_sorted_col, pos2rank_col
@@ -364,20 +454,41 @@ def _ot_1d_kernel(
                 N - 1,
             )
         ]
-        j_left_b, j_right_b, frac_left_b = j_b
-        shape = (y_cls.shape[0],) + j_left_b.shape[-2:]
-        j_left_full = jnp.broadcast_to(j_left_b, shape)
-        j_right_full = jnp.broadcast_to(j_right_b, shape)
-        frac_left_full = jnp.broadcast_to(frac_left_b, shape)
-        q_left = jnp.take_along_axis(y_cls_sorted, j_left_full, axis=-1)  # (Dg, M, N)
-        q_right = jnp.take_along_axis(y_cls_sorted, j_right_full, axis=-1)  # (Dg, M, N)
-        # Exact 1-D W2^2: every one of the N mass intervals couples to at
-        # most two class members (see _quantile_rank_split), so this is the
-        # exact integral, not the midpoint-rule approximation.
-        y_b = y_sorted[None, None, :]
-        w2 = (
-            frac_left_full * (y_b - q_left) ** 2 + (1.0 - frac_left_full) * (y_b - q_right) ** 2
-        ).mean(axis=-1)  # (Dg, M)
+        if isinstance(j_b, _SlotTables):
+            # Closed form for the continuous group. Class sizes are the same
+            # for every parameter, so slot ``k`` of a size-``c`` class sees
+            # the same run of sorted-sample values for all of them. Write the
+            # weighted squared gap on slot ``k`` as ``S_k + A_k (ybar_k -
+            # q_k)^2``, the weighted variance of that run plus the squared gap
+            # of its mean to the class quantile. Both terms are non-negative.
+            # Only ``q_k`` depends on the parameter, so the work is
+            # ``O(D * M * P)`` instead of ``O(D * M * N)``.
+            yk = y_sorted[j_b.idx]  # (U, Cmax, L)
+            a_w = j_b.w.sum(axis=-1)  # (U, Cmax)
+            a_safe = jnp.where(a_w > 0, a_w, 1.0)
+            ybar = (j_b.w * yk).sum(axis=-1) / a_safe  # (U, Cmax)
+            s_tot = (j_b.w * (yk - ybar[..., None]) ** 2).sum(axis=(-2, -1))  # (U,)
+            P = y_cls_sorted.shape[-1]
+            ybar_m = jnp.pad(ybar, ((0, 0), (0, P - ybar.shape[-1])))[j_b.cmap]  # (M, P)
+            a_m = j_b.a_m  # (M, P)
+            gap = jnp.where(a_m > 0, y_cls_sorted - ybar_m[None], 0.0)
+            w2 = s_tot[j_b.cmap][None] + (a_m[None] * gap**2).sum(axis=-1)  # (Dg, M)
+        else:
+            j_left_b, j_right_b, frac_left_b = j_b
+            shape = (y_cls.shape[0],) + j_left_b.shape[-2:]
+            j_left_full = jnp.broadcast_to(j_left_b, shape)
+            j_right_full = jnp.broadcast_to(j_right_b, shape)
+            frac_left_full = jnp.broadcast_to(frac_left_b, shape)
+            q_left = jnp.take_along_axis(y_cls_sorted, j_left_full, axis=-1)  # (Dg, M, N)
+            q_right = jnp.take_along_axis(y_cls_sorted, j_right_full, axis=-1)  # (Dg, M, N)
+            # Exact 1-D W2^2: every one of the N mass intervals couples to at
+            # most two class members (see _quantile_rank_split), so this is
+            # the exact integral, not the midpoint-rule approximation.
+            y_b = y_sorted[None, None, :]
+            w2 = (
+                frac_left_full * (y_b - q_left) ** 2
+                + (1.0 - frac_left_full) * (y_b - q_right) ** 2
+            ).mean(axis=-1)  # (Dg, M)
 
         cls_mean = (y_cls * mask_b.astype(dtype)).sum(axis=-1) / safe_counts  # (Dg, M)
         adv = (cls_mean - mean_r) ** 2
@@ -398,8 +509,9 @@ def _ot_1d_kernel(
     def _col_stats(y: Array, y_sorted_col: Array, pos2rank_col: Array, r: Array, layouts):
         """OT/advective/diffusive indices for one column and replicate."""
         y_r = y[r]  # resampled column
-        # Order statistics only, so an unstable sort is both equivalent
-        # and cheaper; see the class sort in _group_stats.
+        # Order statistics only, so sorting the int32 ranks and gathering
+        # from the pre-sorted column is bitwise equal to a float sort; see
+        # the class sort in _group_stats.
         y_sorted = jax.lax.sort(y_r, dimension=-1, is_stable=False)
         mean_r = y_r.mean()
         V = 2.0 * jnp.var(y_r, ddof=1)
@@ -419,10 +531,12 @@ def _ot_1d_kernel(
     # A continuous group's equal-frequency class sizes are the same in
     # every replicate (only the categorical group's class sizes vary with
     # the resample), so its quantile lookup is the same table every time.
-    # Build it once here rather than R times inside the scan.
+    # Build it once here rather than R times inside the scan. For a
+    # continuous group it is the static slot-overlap table of the closed-form
+    # W2, see _SlotTables.
     shared_j = tuple(
-        _quantile_rank_split(counts_g[0], N) if is_shared else None
-        for counts_g, is_shared in zip(counts_list, group_is_shared, strict=True)
+        _make_slots(cls_g, N, dtype) if is_shared else None
+        for cls_g, is_shared in zip(cls_list, group_is_shared, strict=True)
     )
 
     def _one_replicate(carry, xs):
@@ -660,9 +774,21 @@ def _run_univariate(
     D_run = sum(g[0].shape[1] for g in groups)
     # Peak memory scales with the summed per-group D_g * M_g
     # conditional-quantile tensors, in bytes at the kernel's working dtype.
-    layout_elems = sum(g[0].shape[1] * g[0].shape[2] for g in groups)
+    # The categorical groups still build (D, M, N) tensors. The continuous
+    # group works on (D, M, P) tensors only, where M * P is about N, and keeps
+    # a few of them live (class members, their ranks, sorted members, gaps).
+    layout_elems = sum(
+        g[0].shape[1] * g[0].shape[2] for g, lv in zip(groups, group_levels) if lv is not None
+    )
+    cont_elems = sum(
+        g[0].shape[1] * g[0].shape[2] * g[0].shape[3]
+        for g, lv in zip(groups, group_levels)
+        if lv is None
+    )
     itemsize = jnp.dtype(jnp.result_type(Y_cols.dtype, jnp.float32)).itemsize
-    bytes_per_column = _CHUNK_LIVE_TENSORS * layout_elems * N * itemsize
+    bytes_per_column = (
+        _CHUNK_LIVE_TENSORS * layout_elems * N + _CONT_LIVE_TENSORS * cont_elems
+    ) * itemsize
     cs = resolve_batch_size(bytes_per_column, total, slice_chunk_size)
     levels_static = tuple(tuple(lv) if lv is not None else None for lv in group_levels)
     parts: tuple[list[Array], list[Array], list[Array], list[Array]] = ([], [], [], [])
@@ -905,6 +1031,7 @@ def _matched_dummy_group(key: Array, N: int, sizes: np.ndarray) -> PartitionGrou
     return cls_idx, jnp.asarray(sizes)[None, None, :]
 
 
+@jax.jit
 def _boot_replicates(vals_all: Array, hat: Array, degen_all: Array) -> Array:
     """The bootstrap draws the interval is taken from.
 
@@ -1312,9 +1439,15 @@ def analyze(
         assert key_dummy is not None  # a missing key was refused above
         dummy_keys = jax.random.split(key_dummy, 1 + len(cat_dims))
 
-        def _dummy_value(group: PartitionGroup) -> Array:
-            """Point-estimate OT of one synthetic parameter, slice-shaped."""
-            ot, _, _, _, n_bad, solves = _run(identity, [group], [None], None)
+        def _dummy_value(group: PartitionGroup, levels: list[int] | None) -> Array:
+            """Point-estimate OT of one synthetic parameter, slice-shaped.
+
+            ``levels`` is ``None`` for the continuous floor, whose classes
+            follow the equal-frequency layout. A categorical floor passes
+            its level count, so the estimator uses the group's own class
+            sizes instead of the equal-frequency ones.
+            """
+            ot, _, _, _, n_bad, solves = _run(identity, [group], [levels], None)
             n_bad_parts.append(n_bad)
             n_solves_parts.append(solves)
             return ot[0][..., 0]
@@ -1325,7 +1458,7 @@ def analyze(
             dummy_col = jax.random.permutation(dummy_keys[0], N)[:, None]
             dummy_cls_idx = _build_class_indices(dummy_col, identity, jnp.asarray(take_np))
             cont_group = (dummy_cls_idx, jnp.asarray(sizes_np)[None, None, :])  # (1, 1, M, P)
-            cont_dummy = _dummy_value(cont_group)
+            cont_dummy = _dummy_value(cont_group, None)
             dummy_vals.extend([cont_dummy] * len(cont_dims))
         if cat_dims:
             # The categorical group is always last (build_partition_groups'
@@ -1335,7 +1468,8 @@ def analyze(
             for j, key_j in enumerate(dummy_keys[1:]):
                 sizes_j = cat_counts0[j]
                 sizes_j = sizes_j[sizes_j > 0]
-                dummy_vals.append(_dummy_value(_matched_dummy_group(key_j, N, sizes_j)))
+                dummy_group = _matched_dummy_group(key_j, N, sizes_j)
+                dummy_vals.append(_dummy_value(dummy_group, [len(sizes_j)]))
         ot_dummy_grouped = jnp.stack(dummy_vals, axis=-1)  # (..., D) in group order
         ot_dummy = ot_dummy_grouped if col_order is None else ot_dummy_grouped[..., col_order]
 
