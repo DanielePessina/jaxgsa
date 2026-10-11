@@ -110,6 +110,31 @@ def _validate_x(problem: Problem, X: Array) -> None:
         )
 
 
+def to_device(a: object) -> Array:
+    """Bring an array-like onto the device without compiling a copy.
+
+    ``jnp.asarray`` on a NumPy float array stages a small compiled program
+    for every new shape, which is a first-call compile. ``jax.device_put``
+    moves the same bytes with no compile. With x64 off a float64 array is
+    cast on the host first, which gives the same float32 values (both round
+    to nearest even).
+
+    Args:
+        a: Anything ``jnp.asarray`` accepts.
+
+    Returns:
+        The array on the device, in the dtype ``jnp.asarray`` would give it.
+    """
+    # Only a plain ndarray: subclasses such as masked arrays keep the
+    # jnp.asarray path, which refuses them instead of dropping the mask.
+    if type(a) is np.ndarray and a.dtype.kind == "f":
+        target = jax.dtypes.canonicalize_dtype(a.dtype)
+        if target != a.dtype:
+            a = np.asarray(a, dtype=target)
+        return jax.device_put(a)
+    return jnp.asarray(a)
+
+
 def _validate_output(
     Y: Array,
     n_expected: int | None,
@@ -137,7 +162,7 @@ def _validate_output(
     Raises:
         ValueError: If the rank or leading sample dimension is invalid.
     """
-    Y = jnp.asarray(Y)
+    Y = to_device(Y)
     if Y.ndim not in (1, 2, 3):
         raise ValueError(f"Y must be 1-D (N,), 2-D (N, K), or 3-D (N, T, K), got ndim={Y.ndim}")
     if Y.shape[0] == 0:
@@ -508,6 +533,15 @@ def _dims_and_coords(
     raise ValueError(f"Unexpected index array ndim={ndim}")
 
 
+def _layout_of(Y: Array) -> YLayout:
+    """Name the layout :func:`_prepare_Y` would record for ``Y``."""
+    if Y.ndim == 1:
+        return YLayout.SCALAR
+    if Y.ndim == 2:
+        return YLayout.MULTI_OUTPUT
+    return YLayout.TIME_SERIES
+
+
 def _prepare_Y(Y: Array) -> tuple[Array, YLayout]:
     """Promote Y to the canonical 3-D shape ``(N, T, K)``.
 
@@ -588,6 +622,42 @@ def _zero_variance_mask(flat: Array) -> Array:
     return _is_constant_slice(flat) | (jnp.var(flat, axis=0) == 0)
 
 
+@jax.jit
+def _zero_variance_stats(flat: Array) -> tuple[Array, Array]:
+    """The zero-variance mask and how many slices it flags, in one program.
+
+    Args:
+        flat: ``(N, S)`` array, one column per output slice.
+
+    Returns:
+        The mask of :func:`_zero_variance_mask` and its sum.
+    """
+    mask = _zero_variance_mask(flat)
+    return mask, jnp.sum(mask)
+
+
+@jax.jit
+def _promote_with_zero_stats(Y: Array) -> tuple[Array | None, Array, Array]:
+    """Promote ``Y`` to ``(N, T, K)`` and compute its zero-variance stats at once.
+
+    Fuses what :func:`_prepare_Y` and the zero-variance check would each
+    compile on their own. A rank-3 ``Y`` is not returned, so the caller keeps
+    the array it has instead of receiving a copy.
+
+    Args:
+        Y: Model output with 1, 2 or 3 dimensions.
+
+    Returns:
+        ``(Y3, mask, count)``. ``Y3`` is ``None`` when ``Y`` is already rank 3.
+    """
+    mask, count = _zero_variance_stats(Y.reshape(Y.shape[0], -1))
+    if Y.ndim == 1:
+        return Y[:, None, None], mask, count
+    if Y.ndim == 2:
+        return Y[:, None, :], mask, count
+    return None, mask, count
+
+
 def _join_capped(labels: list[str], *, limit: int = 5) -> str:
     """Join warning labels, capping the list so a long warning stays readable.
 
@@ -613,6 +683,7 @@ def _warn_zero_variance_slices(
     outcome: str = "nan",
     stacklevel: int = 2,
     method: str = "jaxgsa",
+    zero_stats: tuple[Array, Array] | None = None,
 ) -> None:
     """Check for zero-variance output slices before analysis and warn.
 
@@ -637,11 +708,13 @@ def _warn_zero_variance_slices(
         stacklevel: Frames to skip so the warning points at the user's
             ``analyze()`` call rather than at this helper.
         method: Fully qualified analyzer name to prefix the warning with.
+        zero_stats: The ``(mask, count)`` pair :func:`_zero_variance_stats`
+            returns for ``Y``, when the caller already computed it inside a
+            larger jitted program. ``None`` computes it here.
     """
     single_tail, plural_tail = _ZERO_VARIANCE_OUTCOMES[outcome]
     # Collapse trailing dims so variance is computed per (t, k) slice.
-    flat = Y.reshape(Y.shape[0], -1)
-    n_outputs = flat.shape[1]
+    n_outputs = int(np.prod(Y.shape[1:], dtype=np.int64))
 
     # Recover K from the original shape to map flat indices back to named outputs.
     trailing = Y.shape[1:]
@@ -666,8 +739,11 @@ def _warn_zero_variance_slices(
     # because a constant float32 slice rarely has a bit-exact zero variance.
     # A slice that does vary, but so little that its variance underflows to
     # zero in the working dtype: only the variance test sees that one.
-    zero_mask = _zero_variance_mask(flat)
-    n_zero = int(jnp.sum(zero_mask))
+    if zero_stats is None:
+        zero_mask, n_zero_dev = _zero_variance_stats(Y.reshape(Y.shape[0], -1))
+    else:
+        zero_mask, n_zero_dev = zero_stats
+    n_zero = int(n_zero_dev)
 
     if n_zero == 0:
         return

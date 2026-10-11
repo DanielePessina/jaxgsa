@@ -20,6 +20,7 @@ import os
 import warnings
 from pathlib import Path
 
+import jax
 import jax.numpy as jnp
 from jax import Array
 
@@ -62,6 +63,56 @@ OVERFIT_THRESHOLD = 1.3
 CV_RATIO_THRESHOLD = math.sqrt(1.0 - POORFIT_THRESHOLD)
 
 
+@jax.jit
+def _finite_range(values: Array) -> tuple[Array, Array, Array]:
+    """Count the finite entries and find their smallest and largest.
+
+    One compiled program replaces a boolean-mask gather and two reductions,
+    each of which would compile on its first eager call. The masked min and
+    max return the same elements the gather would have picked.
+
+    Args:
+        values: Any array.
+
+    Returns:
+        ``(count, lowest, highest)``. The extremes are meaningless when the
+        count is zero.
+    """
+    values = jnp.asarray(values)
+    ok = jnp.isfinite(values)
+    lowest = jnp.min(jnp.where(ok, values, jnp.inf))
+    highest = jnp.max(jnp.where(ok, values, -jnp.inf))
+    return jnp.sum(ok), lowest, highest
+
+
+@jax.jit
+def _cv_ratio_stats(
+    cv_rmse: Array, std_y: Array, explained: Array | None
+) -> tuple[Array, Array, Array, Array]:
+    """Everything :func:`warn_cv_overfit` reads, from one compiled program.
+
+    Args:
+        cv_rmse: Leave-one-out RMSE per output slice.
+        std_y: Standard deviation of ``Y`` per output slice.
+        explained: The in-sample variance fraction, or ``None``.
+
+    Returns:
+        ``(n_finite, worst, n_healthy, lowest_in_sample)``: the count of
+        finite ratios, the largest of them, and the count and smallest of the
+        finite in-sample fractions (zero and ``inf`` when ``explained`` is
+        ``None``).
+    """
+    ratio = jnp.asarray(cv_rmse) / jnp.asarray(std_y)
+    ok = jnp.isfinite(ratio)
+    worst = jnp.max(jnp.where(ok, ratio, -jnp.inf))
+    if explained is None:
+        return jnp.sum(ok), worst, jnp.zeros((), jnp.int32), jnp.asarray(jnp.inf, ratio.dtype)
+    in_sample = jnp.asarray(explained)
+    healthy = jnp.isfinite(in_sample)
+    lowest = jnp.min(jnp.where(healthy, in_sample, jnp.inf))
+    return jnp.sum(ok), worst, jnp.sum(healthy), lowest
+
+
 def warn_variance_fit(
     namespace: str,
     explained: Array | None,
@@ -94,12 +145,11 @@ def warn_variance_fit(
     """
     if explained is None:
         return
-    values = jnp.asarray(explained)
-    finite = values[jnp.isfinite(values)]
-    if finite.size == 0:
+    n_finite, lowest_dev, highest_dev = _finite_range(explained)
+    if int(n_finite) == 0:
         return
-    lowest = float(jnp.min(finite))
-    highest = float(jnp.max(finite))
+    lowest = float(lowest_dev)
+    highest = float(highest_dev)
     if lowest < POORFIT_THRESHOLD:
         warnings.warn(
             f"{namespace}: {quantity} is {lowest:.2f} on at least one output slice, "
@@ -157,18 +207,14 @@ def warn_cv_overfit(
     """
     if cv_rmse is None:
         return
-    ratio = jnp.asarray(cv_rmse) / jnp.asarray(std_y)
-    finite = ratio[jnp.isfinite(ratio)]
-    if finite.size == 0:
+    n_finite, worst_dev, n_healthy, lowest_dev = _cv_ratio_stats(cv_rmse, std_y, explained)
+    if int(n_finite) == 0:
         return
-    worst = float(jnp.max(finite))
+    worst = float(worst_dev)
     if worst <= CV_RATIO_THRESHOLD:
         return
-    if explained is not None:
-        in_sample = jnp.asarray(explained)
-        healthy = in_sample[jnp.isfinite(in_sample)]
-        if healthy.size and float(jnp.min(healthy)) < POORFIT_THRESHOLD:
-            return
+    if explained is not None and int(n_healthy) and float(lowest_dev) < POORFIT_THRESHOLD:
+        return
     warnings.warn(
         f"{namespace}: cv_rmse is {worst:.2f} times std(Y) on at least one output "
         "slice, so the surrogate predicts less than half of the output variance out "

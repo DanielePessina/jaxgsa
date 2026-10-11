@@ -58,7 +58,6 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-import jax.numpy as jnp
 import numpy as np
 import numpy.typing as npt
 from jax import Array
@@ -73,12 +72,15 @@ from jaxgsa._core.invalid import (
 from jaxgsa._core.precision import warn_on_float64_downcast
 from jaxgsa._core.validation import (
     YLayout,
+    _layout_of,
     _prepare_Y,
+    _promote_with_zero_stats,
     _raise_categorical_analysis,
     _raise_correlated_analysis,
     _validate_output,
     _validate_x,
     _warn_zero_variance_slices,
+    to_device,
 )
 
 if TYPE_CHECKING:
@@ -409,7 +411,7 @@ def prepare(
     # extra digits with x64 off, and the dtype it had is unreadable
     # afterwards. X is not a candidate; see warn_on_float64_downcast.
     warn_on_float64_downcast(method, {"Y": Y})
-    extra_arrays = {name: jnp.asarray(a) for name, a in (extra or {}).items()}
+    extra_arrays = {name: to_device(a) for name, a in (extra or {}).items()}
 
     if X is not None:
         X = validate_inputs(problem, X)
@@ -454,16 +456,25 @@ def prepare(
             X = X[mask]
         extra_arrays = {name: a[mask] for name, a in extra_arrays.items()}
 
-    Y3, layout = _prepare_Y(Y)
+    zero_stats: tuple[Array, Array] | None = None
+    check_zero = warn_zero_variance and policy != "skip"
+    # The warning has to see what the estimator will see. For a grouped
+    # unit the caller has not compacted yet, so the surviving rows are
+    # selected here; leaving the dropped rows in would hide a constant
+    # slice behind the non-finite values that were removed.
+    Y_kept = Y
+    if check_zero and unit_of_row is not None and not keep.all():
+        Y_kept = Y[np.asarray(keep)[unit_of_row]]
+    if check_zero and Y_kept is Y:
+        # Promotion and the zero-variance scan share one compiled program,
+        # so the first call compiles once instead of once per eager op.
+        Y3_new, mask, count = _promote_with_zero_stats(Y)
+        zero_stats = (mask, count)
+        Y3, layout = (Y if Y3_new is None else Y3_new), _layout_of(Y)
+    else:
+        Y3, layout = _prepare_Y(Y)
 
-    if warn_zero_variance and policy != "skip":
-        # The warning has to see what the estimator will see. For a grouped
-        # unit the caller has not compacted yet, so the surviving rows are
-        # selected here; leaving the dropped rows in would hide a constant
-        # slice behind the non-finite values that were removed.
-        Y_kept = Y
-        if unit_of_row is not None and not keep.all():
-            Y_kept = Y[np.asarray(keep)[unit_of_row]]
+    if check_zero:
         # Warned on the caller's own rank, not on Y3: a (N, K) output then
         # gets "k=2" rather than the fabricated "(t=0, k=2)" that the
         # inserted singleton time axis would produce.
@@ -480,6 +491,7 @@ def prepare(
             outcome=zero_variance_outcome,
             stacklevel=4,
             method=method,
+            zero_stats=zero_stats,
         )
 
     return Context(
@@ -517,6 +529,6 @@ def validate_inputs(problem: Problem, X: Any) -> Array:
     Raises:
         ValueError: If ``X`` is not ``(N, D)`` for the problem's ``D``.
     """
-    X = jnp.asarray(X)
+    X = to_device(X)
     _validate_x(problem, X)
     return X
