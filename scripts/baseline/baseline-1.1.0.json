@@ -1,7 +1,7 @@
 {
   "header": {
     "excluded_fields": {},
-    "git_commit": "58a06abf8fb526992387f71e90c754e6c1ce69f6",
+    "git_commit": "b6f89e57d88a2115d38bce9695963074920eb7f3",
     "inline_array_limit": 1024,
     "jax_default_backend": "cpu",
     "jax_version": "0.10.2",
@@ -1399,7 +1399,6 @@
             "ci": null,
             "closed": null,
             "closed_conf": null,
-            "dependence": "independent",
             "invalid": {
               "bad_row_indices": [],
               "n_invalid": 0,
@@ -1422,7 +1421,6 @@
             },
             "subset_total": null,
             "subset_total_conf": null,
-            "subsets": null,
             "variance": {
               "__array__": true,
               "dtype": "float32",
@@ -2954,7 +2952,6 @@
               "shape": [],
               "values": 0.46122053265571594
             },
-            "dependence": "independent",
             "explained_variance": {
               "__array__": true,
               "dtype": "float32",
@@ -3564,7 +3561,6 @@
             "ci": null,
             "closed": null,
             "closed_conf": null,
-            "dependence": "gaussian",
             "invalid": {
               "bad_row_indices": [],
               "n_invalid": 0,
@@ -3587,7 +3583,6 @@
             },
             "subset_total": null,
             "subset_total_conf": null,
-            "subsets": null,
             "variance": {
               "__array__": true,
               "dtype": "float32",
@@ -4519,7 +4514,6 @@
               "shape": [],
               "values": 2.5445783138275146
             },
-            "dependence": "gaussian",
             "explained_variance": {
               "__array__": true,
               "dtype": "float32",
@@ -5259,7 +5253,6 @@
             "ci": null,
             "closed": null,
             "closed_conf": null,
-            "dependence": "independent",
             "invalid": {
               "bad_row_indices": [],
               "n_invalid": 0,
@@ -5282,7 +5275,6 @@
             },
             "subset_total": null,
             "subset_total_conf": null,
-            "subsets": null,
             "variance": {
               "__array__": true,
               "dtype": "float32",
@@ -6814,7 +6806,6 @@
               "shape": [],
               "values": 2.8374178409576416
             },
-            "dependence": "independent",
             "explained_variance": {
               "__array__": true,
               "dtype": "float32",
@@ -9219,7 +9210,6 @@
             "ci": null,
             "closed": null,
             "closed_conf": null,
-            "dependence": "independent",
             "invalid": {
               "bad_row_indices": [],
               "n_invalid": 0,
@@ -9242,7 +9232,6 @@
             },
             "subset_total": null,
             "subset_total_conf": null,
-            "subsets": null,
             "variance": {
               "__array__": true,
               "dtype": "float32",
@@ -13434,7 +13423,6 @@
                 ]
               ]
             },
-            "dependence": "independent",
             "explained_variance": {
               "__array__": true,
               "dtype": "float32",
@@ -14937,7 +14925,6 @@
             "ci": null,
             "closed": null,
             "closed_conf": null,
-            "dependence": "independent",
             "invalid": {
               "bad_row_indices": [],
               "n_invalid": 0,
@@ -14965,7 +14952,6 @@
             },
             "subset_total": null,
             "subset_total_conf": null,
-            "subsets": null,
             "variance": {
               "__array__": true,
               "dtype": "float32",
@@ -18468,7 +18454,6 @@
                 1.273337483406067
               ]
             },
-            "dependence": "independent",
             "explained_variance": {
               "__array__": true,
               "dtype": "float32",
