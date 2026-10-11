@@ -287,6 +287,29 @@ baseline without a value-by-value review. These are the known causes:
 From 1.1.0 on, the rule in this file applies again. A changed number is a
 wiring error until someone records why it is not.
 
+## The 1.1.0 performance pass (2026-10-11)
+
+A performance pass before the 1.1.0 release moved some float32 values at
+rounding level. The maintainer accepted changes up to about 1e-5 relative in
+float32 and 1e-10 in float64, with no change to which value a method selects
+(ridge, centres, p-values). The file was re-recorded after the pass. These are
+the causes, all checked against the previous record:
+
+- **pce, shapley.** The fit, the leave-one-out error and the index extraction
+  now run in a few jits instead of eagerly. 208 values moved, all by less than
+  1e-5 absolute. The largest relative change, 1.7e-4, is on a coefficient close
+  to zero.
+- **optimal_transport.** For continuous inputs, W2 is computed in closed form
+  from per-slot statistics. 109 values moved, by at most 6e-8. In float64 the
+  new values are closer to an exact reference than the old ones, which built
+  the quantile split fraction in float32.
+- **rank.** The kernel is jitted, so XLA fuses it differently. 10 values moved,
+  by at most 2e-7.
+- **vkoga.** Cross-validation predicts only the held-out rows. Only `cv_rmse`
+  moved, by 2e-7.
+
+borgonovo, pawn, hdmr, hsic and the shared entry checks changed no value.
+
 ## How to use it
 
 Re-run the check after every batch:
