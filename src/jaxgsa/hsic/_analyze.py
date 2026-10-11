@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import math
 import warnings
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import NamedTuple, cast
 
 import jax
@@ -296,6 +296,126 @@ def _linear_quantile_by_selection(values: Array, q: float) -> Array:
     return jnp.where(jnp.any(jnp.isnan(flat)), jnp.nan, blended)
 
 
+def _pair_boundaries(y: Array, t: Array) -> tuple[Array, Array]:
+    """Find, in every row, where the squared distances cross a threshold.
+
+    ``y`` is sorted ascending. In row ``i`` the value
+    ``fl((y_j - y_i)^2)`` does not decrease as ``j`` moves away from ``i`` in
+    either direction. Floating-point subtraction and squaring both round
+    monotonically, so the claim holds exactly, not just in real arithmetic.
+    The entries ``<= t`` of a row are therefore one contiguous block around
+    the diagonal, and two binary searches find its ends.
+
+    Args:
+        y: Sorted values, shape ``(N,)``.
+        t: Scalar threshold of the same dtype, not NaN.
+
+    Returns:
+        ``(right, left)`` integer arrays of shape ``(N,)``. ``right[i]`` is
+        the first ``j >= i`` with ``d2(i, j) > t`` (``N`` if none).
+        ``left[i]`` is the first ``j <= i`` with ``d2(i, j) <= t``. Row ``i``
+        holds ``right[i] - left[i]`` entries ``<= t``, the diagonal included.
+    """
+    n = y.shape[0]
+    i = jnp.arange(n, dtype=jnp.int32)
+
+    def d2(j: Array) -> Array:
+        return (y[j] - y) ** 2
+
+    right_lo, right_hi = i, jnp.full((n,), n, dtype=jnp.int32)
+    left_lo, left_hi = jnp.zeros((n,), dtype=jnp.int32), i
+    for _ in range(n.bit_length()):
+        active = right_lo < right_hi
+        mid = (right_lo + right_hi) // 2
+        ok = d2(jnp.minimum(mid, n - 1)) <= t
+        right_lo = jnp.where(active & ok, mid + 1, right_lo)
+        right_hi = jnp.where(active & ~ok, mid, right_hi)
+
+        active = left_lo < left_hi
+        mid = (left_lo + left_hi) // 2
+        ok = d2(mid) <= t
+        left_hi = jnp.where(active & ok, mid, left_hi)
+        left_lo = jnp.where(active & ~ok, mid + 1, left_lo)
+    return right_lo, left_lo
+
+
+def _pairwise_quantile_by_selection(x: Array, q: float) -> Array:
+    """Take a linear quantile of all ``N^2`` squared distances without forming them.
+
+    This returns bit for bit what :func:`_linear_quantile_by_selection`
+    returns on ``(x[:, None] - x[None, :]) ** 2``, but it never builds the
+    ``(N, N)`` matrix. After one sort of ``x``, every row of that matrix is
+    unimodal around its diagonal entry (see :func:`_pair_boundaries`), so the
+    number of entries ``<= t`` costs ``O(N log N)``. A bisection over the bit
+    pattern of the answer then finds the exact order statistic. Squared
+    distances are non-negative, so the raw bit pattern is already ordered
+    like the value. The pair set is the full matrix: the ``N`` zero
+    diagonal entries and both copies of each pair, as in the reference.
+
+    NaN follows the reference. Any NaN or infinity in ``x`` puts a NaN in the
+    distance matrix (``inf - inf`` on the diagonal), so the result is NaN.
+    The selection is not differentiable, as in the reference.
+
+    Args:
+        x: Values, shape ``(N,)``.
+        q: Quantile in [0, 1], as a Python float.
+
+    Returns:
+        Scalar quantile, in the dtype of ``x``.
+
+    Raises:
+        TypeError: If the float width of ``x`` has no unsigned integer
+            counterpart.
+    """
+    itemsize = jnp.dtype(x.dtype).itemsize
+    if itemsize not in _UINT_BY_ITEMSIZE:
+        raise TypeError(f"cannot select order statistics of dtype {x.dtype}")
+    uint = _UINT_BY_ITEMSIZE[itemsize]
+    n_bits = itemsize * 8
+    n = x.shape[0]
+    count_dtype = _count_dtype()
+
+    finite = jnp.all(jnp.isfinite(x))
+    y = jnp.sort(jax.lax.stop_gradient(x))
+    inf_bits = jax.lax.bitcast_convert_type(jnp.asarray(jnp.inf, dtype=x.dtype), uint)
+    one = jnp.asarray(1, dtype=uint)
+
+    def count_at_or_below(bits: Array) -> tuple[Array, Array, Array]:
+        # Patterns above infinity are NaN. Every entry is below them, which
+        # is the same count as at infinity.
+        t = jax.lax.bitcast_convert_type(jnp.minimum(bits, inf_bits), x.dtype)
+        right, left = _pair_boundaries(y, t)
+        return jnp.sum((right - left).astype(count_dtype)), right, left
+
+    def select(rank: int) -> Array:
+        """Return the bit pattern of the entry at 0-based ``rank``."""
+        r = jnp.asarray(rank, dtype=count_dtype)
+
+        def step(k: Array, ans: Array) -> Array:
+            cand = ans | (one << (n_bits - 2 - k).astype(uint))
+            below, _, _ = count_at_or_below(cand - one)
+            return jnp.where(below <= r, cand, ans)
+
+        # The sign bit is never set: every entry is non-negative.
+        return jax.lax.fori_loop(0, n_bits - 1, step, jnp.zeros((), dtype=uint))
+
+    low_rank, high_rank, high_weight = _linear_quantile_plan(q, n * n)
+    lo_bits = select(low_rank)
+    low_value = jax.lax.bitcast_convert_type(lo_bits, x.dtype)
+
+    # The next distinct value above ``low_value`` sits at a row boundary:
+    # the first entry past the block of entries ``<= low_value``.
+    n_at_or_below, right, left = count_at_or_below(lo_bits)
+    top = jnp.asarray(jnp.inf, dtype=x.dtype)
+    right_next = jnp.where(right < n, (y[jnp.minimum(right, n - 1)] - y) ** 2, top)
+    left_next = jnp.where(left > 0, (y[jnp.maximum(left - 1, 0)] - y) ** 2, top)
+    next_value = jnp.minimum(jnp.min(right_next), jnp.min(left_next))
+    high_value = jnp.where(n_at_or_below >= high_rank + 1, low_value, next_value)
+
+    blended = jnp.quantile(jnp.stack([low_value, high_value]), high_weight)
+    return jnp.where(finite, blended, jnp.nan)
+
+
 def _median_bandwidth_sq(x: Array) -> Array:
     """Compute the median-heuristic squared bandwidth for one variable.
 
@@ -338,9 +458,8 @@ def _median_bandwidth_sq(x: Array) -> Array:
         Scalar median of the off-diagonal squared distances, floored at 1e-20.
     """
     N = x.shape[0]
-    dists_sq = (x[:, None] - x[None, :]) ** 2
     q = (N**2 + N - 1) / (2 * (N**2 - 1))
-    return jnp.maximum(_linear_quantile_by_selection(dists_sq, q), 1e-20)
+    return jnp.maximum(_pairwise_quantile_by_selection(x, q), 1e-20)
 
 
 def _center_kernel(K: Array) -> Array:
@@ -465,6 +584,40 @@ def _complement_kernels(Ks_stack: Array) -> tuple[Array, Array]:
 
     K_full = prefix[-1] * Ks_stack[-1]
     return K_full, jnp.stack([prefix[d] * suffix[d] for d in range(D)])
+
+
+@partial(jax.jit, static_argnames=("total", "bandwidth"))
+def _input_setup(
+    X_unit: Array, key: Array, total: int, bandwidth: float
+) -> tuple[Array, Array, Array, Array, Array]:
+    """Build everything that depends only on ``X`` and the key, in one jit.
+
+    Running this op by op outside ``jit`` cost far more in dispatch than in
+    arithmetic. The input kernels and augmented products are built once
+    (independent of Y). They are stacked directly and the augmented and
+    complement kernels are built from the stack, so no per-input Python list
+    of ``(N, N)`` matrices survives to the kernel call -- resident memory is
+    the two stacks and the full product, ``(2D + 1) * N^2`` floats.
+
+    Args:
+        X_unit: Inputs mapped to the unit interval, shape ``(N, D)``.
+        key: PRNG key for the permutation test.
+        total: Number of output slices (static).
+        bandwidth: Multiplier on the median-heuristic bandwidth (static).
+
+    Returns:
+        ``(Ks_stack, K_aug_compls_stack, K_aug_full, hsic_xxs, keys)`` with
+        the shapes :func:`_get_hsic_kernel` documents, and ``keys`` of shape
+        ``(total,)`` holding ``fold_in(key, i)`` for each slice.
+    """
+    D = X_unit.shape[1]
+    Ks_stack = jnp.stack([_build_one_kernel(X_unit[:, d], bandwidth) for d in range(D)])
+    K_aug_full, K_aug_compls_stack = _complement_kernels(_augmented_kernels(Ks_stack))
+    # Self-HSIC HSIC(K_d, K_d) is output-independent, so compute it once
+    # here and share it across every output slice.
+    hsic_xxs = jax.vmap(lambda K: _hsic_v(K, K))(Ks_stack)
+    keys = jax.vmap(lambda i: jax.random.fold_in(key, i))(jnp.arange(total))
+    return Ks_stack, K_aug_compls_stack, K_aug_full, hsic_xxs, keys
 
 
 @lru_cache(maxsize=32)
@@ -631,7 +784,8 @@ def _warn_constant_inputs(problem: Problem, X: Array) -> None:
         JaxgsaWarning: If any column of ``X`` is constant (``max == min``),
             naming the parameter.
     """
-    const = np.max(np.asarray(X), axis=0) == np.min(np.asarray(X), axis=0)
+    X_host = np.asarray(X)
+    const = np.max(X_host, axis=0) == np.min(X_host, axis=0)
     dims = np.flatnonzero(const)
     if dims.size == 0:
         return
@@ -797,25 +951,15 @@ def indices(
     Y_3d, layout = _prepare_Y(Y)
     _N, T, K = Y_3d.shape
 
-    # Build input kernels and augmented products once (independent of Y).
-    # Stack directly and build the augmented/complement kernels from the
-    # stack, so no per-input Python list of (N, N) matrices survives to the
-    # kernel call below -- resident memory is the two stacks and the full
-    # product, (2D + 1) * N^2 floats, not 5D + 1.
-    Ks_stack = jnp.stack([_build_one_kernel(X_unit[:, d], bandwidth) for d in range(D)])
-    K_aug_full, K_aug_compls_stack = _complement_kernels(_augmented_kernels(Ks_stack))
-
-    # Self-HSIC HSIC(K_d, K_d) is output-independent, so compute it once
-    # here and share it across every output slice.
-    hsic_xxs = jax.vmap(lambda K: _hsic_v(K, K))(Ks_stack)
-
     # One column per output slice, in the same (t, k) order the indices are
     # written back in, and one key per column. Each slice reads its own key,
     # so the permutation draws do not depend on how the columns are grouped.
     N = X_unit.shape[0]
     total = T * K
     Y_cols = Y_3d.reshape(N, total)
-    keys = jax.vmap(lambda i: jax.random.fold_in(key, i))(jnp.arange(total))
+    Ks_stack, K_aug_compls_stack, K_aug_full, hsic_xxs, keys = _input_setup(
+        X_unit, key, total, bandwidth
+    )
 
     kernel = _get_hsic_kernel(n_perms, bandwidth)
     r2_all, t_all, p_all, raw_all = kernel(

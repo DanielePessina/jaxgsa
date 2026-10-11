@@ -19,6 +19,7 @@ from jaxgsa.hsic._analyze import (
     _hsic_v,
     _linear_quantile_by_selection,
     _median_bandwidth_sq,
+    _pairwise_quantile_by_selection,
 )
 from jaxgsa.problem import Problem
 from jaxgsa.sampling import monte_carlo
@@ -294,6 +295,55 @@ class TestMedianBandwidth:
             np.asarray(_linear_quantile_by_selection(dists_sq, q)),
             np.asarray(jnp.quantile(dists_sq, q)),
         )
+
+    @pytest.mark.parametrize("n", [4, 5, 6, 7, 8, 9, 31, 50, 127, 128, 333])
+    @pytest.mark.parametrize(
+        "kind", ["normal", "ties", "constant", "dupes", "huge", "tiny", "negative"]
+    )
+    @pytest.mark.parametrize("x64", [False, True], ids=["f32", "f64"])
+    def test_pairwise_selection_matches_the_matrix_selection_bit_for_bit(self, n, kind, x64):
+        """Tier T1 (reference implementation): no matrix, same order statistic.
+
+        ``_pairwise_quantile_by_selection`` finds the median-heuristic order
+        statistic from the sorted sample alone. The oracle is the radix
+        selection over the explicit ``(N, N)`` matrix. The tolerance is
+        zero, over odd and even sizes, ties, a constant column, heavy
+        duplication, overflow to infinity, subnormal squares and negatives.
+        """
+        rng = np.random.default_rng(n)
+        raw = {
+            "normal": rng.normal(size=n),
+            "ties": rng.integers(0, 3, size=n).astype(float),
+            "constant": np.full(n, 0.7),
+            "dupes": np.repeat(rng.normal(size=max(n // 4, 1)), 4)[:n],
+            "huge": rng.normal(size=n) * 1e30,
+            "tiny": rng.normal(size=n) * 1e-21,
+            "negative": -np.abs(rng.normal(size=n)) - 5.0,
+        }[kind]
+        raw = np.resize(raw, n)
+        q = (n**2 + n - 1) / (2 * (n**2 - 1))
+        with jax.enable_x64(x64):
+            x = jnp.asarray(raw, dtype=jnp.float64 if x64 else jnp.float32)
+            dists_sq = (x[:, None] - x[None, :]) ** 2
+            expected = np.asarray(_linear_quantile_by_selection(dists_sq, q))
+            actual = np.asarray(_pairwise_quantile_by_selection(x, q))
+        np.testing.assert_array_equal(actual, expected)
+
+    @pytest.mark.parametrize(
+        "poison", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "-inf"]
+    )
+    def test_pairwise_selection_is_nan_for_non_finite_input(self, poison):
+        """Tier T1 (reference implementation): non-finite input gives NaN, as the matrix does.
+
+        ``inf - inf`` on the diagonal puts a NaN in the distance matrix, so
+        the reference returns NaN for any infinity as well as for NaN.
+        """
+        x = jnp.asarray(np.random.default_rng(0).normal(size=40), dtype=jnp.float32)
+        x = x.at[7].set(poison)
+        dists_sq = (x[:, None] - x[None, :]) ** 2
+        q = (40**2 + 40 - 1) / (2 * (40**2 - 1))
+        assert np.isnan(np.asarray(_linear_quantile_by_selection(dists_sq, q)))
+        assert np.isnan(np.asarray(_pairwise_quantile_by_selection(x, q)))
 
     @pytest.mark.parametrize(
         "poison", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "-inf"]
