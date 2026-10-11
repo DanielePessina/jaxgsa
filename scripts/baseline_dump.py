@@ -341,7 +341,7 @@ def _m_efast(case: Case) -> Any:
 
 
 def _m_kucherenko(case: Case) -> Any:
-    sr = kucherenko.sample(case.problem, n_samples=case.n, seed=SEED, verbose=False)
+    sr = kucherenko.sample(case.problem, base_n=case.n, seed=SEED, verbose=False)
     Y = case.model(jnp.asarray(sr.samples))
     return kucherenko.analyze(sr, Y, verbose=False)
 
@@ -373,7 +373,7 @@ def _m_optimal_transport(case: Case, X: jax.Array, Y: jax.Array) -> Any:
         case.problem,
         X,
         Y,
-        n_partitions=8,
+        n_classes=8,
         n_bootstrap=10,
         dummy=True,
         key=jax.random.key(SEED),
@@ -395,7 +395,7 @@ def _m_optimal_transport_multivariate(case: Case, X: jax.Array, Y: jax.Array) ->
         X,
         Y,
         mode="multivariate",
-        n_partitions=8,
+        n_classes=8,
         n_bootstrap=10,
         dummy=True,
         key=jax.random.key(SEED),
@@ -414,7 +414,7 @@ def _m_optimal_transport_trajectory(case: Case, X: jax.Array, Y: jax.Array) -> A
         X,
         Y,
         mode="trajectory",
-        n_partitions=8,
+        n_classes=8,
         n_bootstrap=10,
         dummy=True,
         key=jax.random.key(SEED),
@@ -427,7 +427,7 @@ def _m_pce(case: Case, X: jax.Array, Y: jax.Array) -> Any:
 
 
 def _m_hdmr(case: Case, X: jax.Array, Y: jax.Array) -> Any:
-    return hdmr.analyze(case.problem, X, Y, maxorder=2, maxiter=50, verbose=False)
+    return hdmr.analyze(case.problem, X, Y, order=2, max_iter=50, verbose=False)
 
 
 def _m_shapley(case: Case, X: jax.Array, Y: jax.Array) -> Any:
@@ -451,7 +451,7 @@ def _m_vkoga(case: Case, X: jax.Array, Y: jax.Array) -> Any:
 
 def _m_dgsm(case: Case, X: jax.Array, _Y: jax.Array) -> Any:
     # dgsm.analyze differentiates a one-sample function, not a batch one.
-    return dgsm.analyze(case.problem, _as_point_model(case.model), X, verbose=False)
+    return dgsm.analyze(case.problem, X, fn=_as_point_model(case.model), verbose=False)
 
 
 DESIGN_METHODS: dict[str, Callable[[Case], Any]] = {
@@ -536,7 +536,7 @@ def build_dump(verbose: bool = True) -> dict[str, Any]:
             "output_shape": case.shape,
             "n": case.n,
             "names": list(case.problem.names),
-            "has_correlated_inputs": bool(case.problem.has_correlated_inputs),
+            "has_correlated_inputs": case.problem.dependence != "independent",
             "has_categorical_inputs": bool(case.problem.has_categorical_inputs),
             "methods": {},
         }

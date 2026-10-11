@@ -61,15 +61,16 @@ References:
     Wirtz & Haasdonk (2013). Dolomites Res. Notes Approx. 6:83-100.
 """
 
-from jaxgsa._core.invalid import InvalidUnit
-from jaxgsa._core.registry import MethodSpec, register
+from jaxgsa._core.invalid import InvalidUnit as _InvalidUnit
+from jaxgsa._core.registry import MethodSpec as _MethodSpec
+from jaxgsa._core.registry import register as _register
 from jaxgsa.vkoga._analyze import analyze
 from jaxgsa.vkoga._result import VKOGAResult
 
 __all__ = ["VKOGAResult", "analyze"]
 
-SPEC = register(
-    MethodSpec(
+_SPEC = _register(
+    _MethodSpec(
         name="vkoga",
         analyze=analyze,
         sample=None,
@@ -82,6 +83,6 @@ SPEC = register(
         # this method is not jit-able, vmap-able or differentiable, and the
         # declaration keeps that apart from an oversight.
         pure_core=False,
-        invalid_unit=InvalidUnit.ROW,
+        invalid_unit=_InvalidUnit.ROW,
     )
 )

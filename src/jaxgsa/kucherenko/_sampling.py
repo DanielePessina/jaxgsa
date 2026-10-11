@@ -54,10 +54,11 @@ import numpy as np
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.dependence import draws_for, sobol_uniforms
 from jaxgsa._core.samples import UniqueDesignSamples
-from jaxgsa._core.sampling import _next_power_of_2
+from jaxgsa._core.sampling import _is_power_of_2, _next_power_of_2, _power_of_2_error, check_seed
 from jaxgsa._core.validation import _raise_categorical_design
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.problem import Dependence, Problem
+from jaxgsa.sobol._sampling import _check_budget_choice, _check_seed_scramble
 
 
 @dataclass(frozen=True)
@@ -145,7 +146,7 @@ class KucherenkoSamples(UniqueDesignSamples):
             n_expanded=n_expanded,
             expanded_to_unique=expanded_to_unique,
             base_n=int(meta["base_n"]),
-            n_params=problem.num_vars,
+            n_params=problem.n_params,
             problem=problem,
             dependence=_parse_dependence(meta.get("dependence"), problem),
             subsets=_parse_subsets(meta.get("subsets")),
@@ -203,7 +204,7 @@ def _warn_independent_problem(problem: Problem, n: int) -> None:
     """
     if problem.dependence != "independent":
         return
-    D = problem.num_vars
+    D = problem.n_params
     warnings.warn(
         "jaxgsa.kucherenko.sample: the problem declares no dependence. The "
         "conditional redraws are then plain independent draws, so this design "
@@ -214,7 +215,7 @@ def _warn_independent_problem(problem: Problem, n: int) -> None:
         f"from {n * (2 * D + 2)} runs (base_n x (2D+2)). Run kucherenko on an "
         "independent problem only to cross-check a correlated analysis, or "
         "declare the dependence with problem.with_correlation(R) or "
-        "problem.with_sampler(f, dimension=k).",
+        "problem.with_sampler(f, sampler_dimension=k).",
         category=JaxgsaWarning,
         stacklevel=3,
     )
@@ -222,8 +223,9 @@ def _warn_independent_problem(problem: Problem, n: int) -> None:
 
 def sample(
     problem: Problem,
-    n_samples: int,
+    n_samples: int | None = None,
     *,
+    base_n: int | None = None,
     subsets: Literal["singletons", "all"] = "singletons",
     scramble: bool = True,
     seed: int | np.random.Generator | None = None,
@@ -231,16 +233,20 @@ def sample(
 ) -> KucherenkoSamples:
     """Generate the conditional design for :func:`jaxgsa.kucherenko.analyze`.
 
-    The design costs ``base_n * (2D + 1)`` model evaluations, where ``base_n``
-    is ``n_samples`` rounded up to the next power of two (the Sobol' sequence
-    keeps its balance guarantees only at powers of two).
+    ``n_samples`` is the minimum number of model runs, as in
+    :func:`jaxgsa.sobol.sample`. The design has ``base_n * (2D + 1)`` rows, and
+    ``base_n`` is the smallest power of two whose design reaches ``n_samples``
+    (the Sobol' sequence keeps its balance guarantees only at powers of two).
+    Pass ``base_n`` instead to set the base points per block exactly.
 
     The dependence structure comes from the problem. ``problem.correlation``
     declares a Gaussian copula. A sampler declared with
-    ``problem.with_sampler(f, dimension=k)`` supplies custom joint and
-    conditional draws instead. The sampler receives exactly three call shapes:
-    joint draws (``fixed_indices=()``), draws that keep ``x_i``
-    (``fixed_indices=(i,)``), and draws that keep every column except ``i``.
+    ``problem.with_sampler(f, sampler_dimension=k)`` supplies custom joint and
+    conditional draws instead. On the default design the sampler receives
+    three kinds of call: joint draws (``fixed_indices=()``), draws that keep
+    ``x_i`` (``fixed_indices=(i,)``), and draws that keep every column except
+    ``i``. With ``subsets="all"`` it also receives every other subset of fixed
+    columns.
     Problem marginals then give metadata, not a fit of the custom distribution.
     Saved designs can be analyzed without the original sampler. The file does
     not store the sampler function, so attach it again with
@@ -266,8 +272,13 @@ def sample(
     Args:
         problem: Problem definition with parameter names, marginals, and an
             optional ``correlation`` or custom ``sampler``.
-        n_samples: Requested base points per block, at least 2. Rounded up to
-            the next power of two.
+        n_samples: Minimum number of model runs. The design may contain more
+            rows than this, never fewer. Give exactly one of ``n_samples`` and
+            ``base_n``.
+        base_n: Exact number of base points per block, a power of two of at
+            least 2. The design has ``base_n * (2D + 1)`` rows (``base_n *
+            2^D`` with ``subsets="all"``). Give exactly one of ``n_samples``
+            and ``base_n``.
         subsets: ``"singletons"`` (default) builds the ``2D + 1`` block design
             for ``S1`` and ``ST``. ``"all"`` builds the ``2^D`` block design
             that adds closed and total indices of every subset, and with them
@@ -287,41 +298,67 @@ def sample(
         JaxgsaWarning: If ``problem.dependence`` is ``"independent"``. The
             design then reduces to a Saltelli column-swap scheme and
             ``jaxgsa.sobol`` reaches the same two indices for fewer model runs.
+            Also if the resolved ``base_n`` is below 16. The design is
+            then degenerate and the indices are unreliable; this is a
+            warning, not an error, because a tiny design may be a deliberate
+            probe.
 
     Raises:
-        ValueError: If ``subsets`` is not ``"singletons"`` or ``"all"``, if
+        ValueError: If both or neither of ``n_samples`` and ``base_n`` are
+            given, if ``base_n`` is not a power of two, if ``subsets`` is not
+            ``"singletons"`` or ``"all"``, if
             ``subsets="all"`` and the problem has more than 12 parameters, if
             the problem has fewer than two parameters or any
-            categorical parameter, if ``n_samples < 2``, if a ``seed`` is
+            categorical parameter, if ``n_samples < 2`` or ``base_n < 2``, if a ``seed`` is
             given with ``scramble=False`` (the unscrambled sequence is
             deterministic, so the seed would do nothing), or if a custom
             sampler returns invalid rows.
     """
-    if not scramble and seed is not None:
-        raise ValueError(
-            "jaxgsa.kucherenko.sample: seed has no effect with scramble=False. "
-            "The unscrambled Sobol' sequence is deterministic, so the seed "
-            "would do nothing. Use scramble=True, or drop the seed."
-        )
+    check_seed(seed, "jaxgsa.kucherenko.sample")
+    _check_budget_choice(n_samples, base_n, "jaxgsa.kucherenko.sample")
+    _check_seed_scramble(scramble, seed, "jaxgsa.kucherenko.sample")
     _raise_categorical_design(problem, "jaxgsa.kucherenko.sample")
-    D = problem.num_vars
+    D = problem.n_params
     if D < 2:
         raise ValueError(f"Kucherenko indices need at least 2 parameters, got {D}")
-    if n_samples < 2:
-        raise ValueError(f"n_samples must be >= 2, got {n_samples}")
     if subsets not in ("singletons", "all"):
         raise ValueError(f"subsets must be 'singletons' or 'all', got {subsets!r}")
-    n = _next_power_of_2(n_samples)
+    if subsets == "all" and D > MAX_SUBSET_PARAMS:
+        raise ValueError(
+            f"subsets='all' needs base_n * 2^{D}"
+            + (f" = {base_n * 2**D}" if base_n is not None else "")
+            + f" model runs for {D} parameters, and "
+            f"it supports at most {MAX_SUBSET_PARAMS} parameters. The cost doubles "
+            "with every parameter. For more parameters, use a method that works on "
+            "given data, such as jaxgsa.shapley.analyze with a fitted surrogate, or "
+            "jaxgsa.vkoga."
+        )
+    n_blocks = n_blocks_for(D, subsets)
+    if base_n is not None:
+        if base_n < 2:
+            raise ValueError(f"base_n must be >= 2, got {base_n}")
+        if not _is_power_of_2(base_n):
+            raise ValueError(_power_of_2_error("base_n", base_n, reason="Sobol' sequence balance"))
+        n = base_n
+        requested = None
+    else:
+        assert n_samples is not None
+        if n_samples < 2:
+            raise ValueError(f"n_samples must be >= 2, got {n_samples}")
+        requested = n_samples
+        n = max(2, _next_power_of_2(-(-n_samples // n_blocks)))
+    if n < 16:
+        warnings.warn(
+            f"jaxgsa.kucherenko.sample: base_n={n} is below the floor of 16 "
+            "base points. The design is degenerate: the indices will be "
+            "unreliable. Raise n_samples (or base_n) for a usable design.",
+            stacklevel=2,
+            category=JaxgsaWarning,
+        )
     if subsets == "all":
-        if D > MAX_SUBSET_PARAMS:
-            raise ValueError(
-                f"subsets='all' needs {n} * 2^{D} = {n * 2**D} model runs for {D} "
-                f"parameters, and it supports at most {MAX_SUBSET_PARAMS} parameters. "
-                "The cost doubles with every parameter. For more parameters, use a "
-                "method that works on given data, such as jaxgsa.shapley.analyze "
-                "with a fitted surrogate, or jaxgsa.vkoga."
-            )
-        return _sample_all_subsets(problem, n, scramble=scramble, seed=seed, verbose=verbose)
+        return _sample_all_subsets(
+            problem, n, requested=requested, scramble=scramble, seed=seed, verbose=verbose
+        )
     _warn_independent_problem(problem, n)
 
     draws = draws_for(problem)
@@ -348,6 +385,7 @@ def sample(
             method="jaxgsa.kucherenko.sample",
             problem=problem,
             entries=[
+                *_requested_entry(requested),
                 ("base_n", n),
                 ("n_blocks", 2 * D + 1),
                 ("n_runs", n_total),
@@ -367,6 +405,11 @@ def sample(
     )
 
 
+def _requested_entry(requested: int | None) -> list[tuple[str, object]]:
+    """Return the ``requested_runs>=N`` verbose entry, or nothing when ``base_n`` was set."""
+    return [] if requested is None else [("requested_runs>", requested)]
+
+
 def subset_fixed(mask: int, n_params: int) -> tuple[int, ...]:
     """Return the sorted parameter indices in a subset bitmask (bit ``j`` is parameter ``j``)."""
     return tuple(j for j in range(n_params) if (mask >> j) & 1)
@@ -376,6 +419,7 @@ def _sample_all_subsets(
     problem: Problem,
     n: int,
     *,
+    requested: int | None,
     scramble: bool,
     seed: int | np.random.Generator | None,
     verbose: bool,
@@ -386,7 +430,7 @@ def _sample_all_subsets(
     from ``A`` and redraws the others from their conditional. All blocks read
     the leading columns of one shared noise block, as the singleton design does.
     """
-    D = problem.num_vars
+    D = problem.n_params
     draws = draws_for(problem)
     k = draws.dimension
     masks = range(1, 2**D - 1)
@@ -411,6 +455,7 @@ def _sample_all_subsets(
             method="jaxgsa.kucherenko.sample",
             problem=problem,
             entries=[
+                *_requested_entry(requested),
                 ("base_n", n),
                 ("subsets", "all"),
                 ("n_blocks", n_blocks),

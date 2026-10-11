@@ -16,7 +16,7 @@ Array shape conventions used throughout:
 
 import warnings
 from functools import lru_cache
-from typing import Literal, cast
+from typing import Literal, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -41,10 +41,12 @@ from jaxgsa._core.validation import (
     _prepare_Y,
     _standardize_outputs,
     _validate_output,
+    as_key,
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.morris._result import MorrisResult
 from jaxgsa.morris._sampling import MorrisSamples
+from jaxgsa.problem import Problem
 
 # Keyword-only parameters the irregular engine forwards unchanged to the
 # per-channel recursive analyze() calls. verbose is excluded:
@@ -154,7 +156,7 @@ def _get_morris_fused_measures(D: int, standardize_outputs: bool):
     """Build the one-executable take + standardize + measures caller.
 
     The expansion gather is fused into the estimator when the non-finite
-    check was skipped (``on_invalid='none'``, see
+    check was skipped (``on_invalid='skip'``, see
     :func:`jaxgsa._core.entry.prepare`): the expanded array is then read by
     nothing but the estimator, so materialising it as an eager pass wastes a
     write and a read of the whole array. Measured ~1.3x faster than the
@@ -214,12 +216,44 @@ def _resample_stats(idx_chunk: Array, ee: Array) -> tuple[Array, Array, Array]:
     return jax.vmap(single)(idx_chunk)
 
 
+class MorrisIndices(NamedTuple):
+    """The arrays :func:`indices` returns, named like the :class:`MorrisResult` fields.
+
+    Attributes:
+        mu: Mean elementary effect, signed.
+        mu_star: Mean absolute elementary effect.
+        sigma: Standard deviation of the elementary effects (ddof=1).
+    """
+
+    mu: Array
+    mu_star: Array
+    sigma: Array
+
+
+def _require_samples(samples: object, qualname: str) -> None:
+    """Raise a clear error when the first argument is not the design.
+
+    Args:
+        samples: The first positional argument the caller gave.
+        qualname: The public name of the function, for the message.
+
+    Raises:
+        TypeError: If ``samples`` is not a :class:`MorrisSamples`.
+    """
+    if not isinstance(samples, MorrisSamples):
+        got = "a Problem" if isinstance(samples, Problem) else f"a {type(samples).__name__}"
+        raise TypeError(
+            f"jaxgsa.morris.{qualname} takes the MorrisSamples from jaxgsa.morris.sample "
+            f"as its first argument, not {got}."
+        )
+
+
 def indices(
-    sampling_result: MorrisSamples,
+    samples: MorrisSamples,
     Y: Array,
     *,
     standardize_outputs: bool = False,
-) -> tuple[Array, Array, Array]:
+) -> MorrisIndices:
     """Compute the Morris screening measures as plain arrays, with no diagnostics.
 
     This is the transformable core of :func:`analyze`. It runs the same
@@ -251,10 +285,10 @@ def indices(
     into NaN.
 
     Args:
-        sampling_result: The design from :func:`jaxgsa.morris.sample`, used
+        samples: The design from :func:`jaxgsa.morris.sample`, used
             only for its expansion map and its elementary-effect bookkeeping.
         Y: Model outputs evaluated at each unique row of
-            ``sampling_result.samples``, in the same row order. Shapes are
+            ``samples.samples``, in the same row order. Shapes are
             those :func:`analyze` accepts: ``(n_runs,)``, ``(n_runs, K)`` or
             ``(n_runs, T, K)``.
         standardize_outputs: As in :func:`analyze`. It is kept on the core
@@ -268,28 +302,27 @@ def indices(
             and a different scale whenever the design deduplicated a row.
 
     Returns:
-        ``(mu, mu_star, sigma)``, shaped ``(D,)``, ``(K, D)`` or
+        A :class:`MorrisIndices` ``(mu, mu_star, sigma)``, shaped ``(D,)``, ``(K, D)`` or
         ``(T, K, D)`` to match the rank of ``Y``, exactly as ``analyze``
         reports them.
 
     Raises:
         ValueError: If ``Y`` is not 1-D, 2-D, or 3-D, or its first axis does
-            not match ``sampling_result.n_runs``.
+            not match ``samples.n_runs``.
     """
+    _require_samples(samples, "indices")
     _validate_output(Y, None, None)
-    Y3, layout = _prepare_Y(sampling_result.expand_outputs(Y))
+    Y3, layout = _prepare_Y(samples.expand_outputs(Y))
     # Design facts, not facts about Y: moving them to the device under trace
     # is a constant fold, never a host read of an array.
-    idx_after = jnp.asarray(sampling_result.ee_idx_after)
-    idx_before = jnp.asarray(sampling_result.ee_idx_before)
-    delta = jnp.asarray(sampling_result.ee_delta)
+    idx_after = jnp.asarray(samples.ee_idx_after)
+    idx_before = jnp.asarray(samples.ee_idx_before)
+    delta = jnp.asarray(samples.ee_delta)
     _, mu, mu_star, sigma = _measures(Y3, idx_after, idx_before, delta, standardize_outputs)
-    return layout.squeeze(mu), layout.squeeze(mu_star), layout.squeeze(sigma)
+    return MorrisIndices(layout.squeeze(mu), layout.squeeze(mu_star), layout.squeeze(sigma))
 
 
-def _reindex_after_drop(
-    sampling_result: MorrisSamples, keep: np.ndarray
-) -> tuple[Array, Array, Array]:
+def _reindex_after_drop(samples: MorrisSamples, keep: np.ndarray) -> tuple[Array, Array, Array]:
     """Rebuild the elementary-effect bookkeeping against the compacted layout.
 
     Removing whole trajectories shifts every later block down, so the global
@@ -298,7 +331,7 @@ def _reindex_after_drop(
     strip the old block offset and add the new one.
 
     Args:
-        sampling_result: Sampling metadata with the original bookkeeping.
+        samples: Sampling metadata with the original bookkeeping.
         keep: Boolean mask of shape ``(r,)``, True for surviving trajectories.
 
     Returns:
@@ -308,15 +341,15 @@ def _reindex_after_drop(
     """
     if keep.all():
         return (
-            jnp.asarray(sampling_result.ee_idx_after),
-            jnp.asarray(sampling_result.ee_idx_before),
-            jnp.asarray(sampling_result.ee_delta),
+            jnp.asarray(samples.ee_idx_after),
+            jnp.asarray(samples.ee_idx_before),
+            jnp.asarray(samples.ee_delta),
         )
 
-    idx_after = np.asarray(sampling_result.ee_idx_after)
-    idx_before = np.asarray(sampling_result.ee_idx_before)
-    delta = np.asarray(sampling_result.ee_delta)
-    rows_per_traj = sampling_result.n_params + 1
+    idx_after = np.asarray(samples.ee_idx_after)
+    idx_before = np.asarray(samples.ee_idx_before)
+    delta = np.asarray(samples.ee_delta)
+    rows_per_traj = samples.n_params + 1
     kept = np.flatnonzero(keep)
     old_offsets = (idx_after // rows_per_traj) * rows_per_traj
     local_after = idx_after - old_offsets
@@ -330,14 +363,14 @@ def _reindex_after_drop(
 
 
 def analyze(
-    sampling_result: MorrisSamples,
+    samples: MorrisSamples,
     Y: Array | IrregularY,
     *,
     standardize_outputs: bool = False,
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
-    key: Array | None = None,
+    key: Array | int | None = None,
     resample_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
@@ -367,10 +400,10 @@ def analyze(
     composes with ``jit``, ``vmap`` and ``jacrev``.
 
     Args:
-        sampling_result: Result from :func:`jaxgsa.morris.sample` with the
+        samples: Result from :func:`jaxgsa.morris.sample` with the
             unique sample matrix plus elementary-effect bookkeeping.
         Y: Model outputs evaluated at each unique row of
-            ``sampling_result.samples``. Accepted shapes:
+            ``samples.samples``. Accepted shapes:
                 (n_runs,)       — scalar output, single time step
                 (n_runs, K)     — K outputs, single time step
                 (n_runs, T, K)  — K outputs over T time steps
@@ -430,7 +463,7 @@ def analyze(
 
     Raises:
         ValueError: If ``Y`` does not have 1, 2, or 3 dimensions; if ``Y``'s
-            first axis does not match ``sampling_result.n_runs``; if
+            first axis does not match ``samples.n_runs``; if
             ``on_invalid`` is not one of the three policies; if the sample
             holds a non-finite value under ``on_invalid="raise"``; if fewer
             than 2 trajectories survive; if ``ci_method`` is invalid; if
@@ -445,30 +478,32 @@ def analyze(
             for is deliberate, so it gives no warning.
         JaxgsaWarning: If an output slice has zero variance.
     """
+    _require_samples(samples, "analyze")
+    key = as_key(key, "morris")
     if _is_irregular_y(Y):
         return analyze_irregular(
             analyze,
-            channel_data=sampling_result,
-            problem=sampling_result.problem,
+            channel_data=samples,
+            problem=samples.problem,
             Y=Y,
-            n_expected=int(sampling_result.n_runs),
+            n_expected=int(samples.n_runs),
             design_based=True,
             verbose=verbose,
             kwargs=_fwd_kwargs(locals(), _IRREGULAR_KWARGS),
         )
     Y = cast(Array, Y)
 
-    from jaxgsa.morris import SPEC
+    from jaxgsa.morris import _SPEC
 
     # A trajectory is an indivisible sampling unit: it occupies a contiguous
     # block of D+1 expanded rows, and one bad row corrupts every elementary
     # effect that references it.
-    r = sampling_result.n_trajectories
-    rows_per_traj = sampling_result.n_params + 1
+    r = samples.n_trajectories
+    rows_per_traj = samples.n_params + 1
 
     ctx = prepare(
-        SPEC,
-        sampling_result.problem,
+        _SPEC,
+        samples.problem,
         Y,
         on_invalid=on_invalid,
         checks=(
@@ -477,10 +512,10 @@ def analyze(
             at_least("n_bootstrap", n_bootstrap, 0),
             in_open_interval("conf_level", conf_level, 0.0, 1.0),
         ),
-        n_expected=int(sampling_result.samples.shape[0]),
-        expand=sampling_result.expand_outputs,
+        n_expected=int(samples.samples.shape[0]),
+        expand=samples.expand_outputs,
         n_units=r,
-        # Under on_invalid='none' the check never reads the row map
+        # Under on_invalid='skip' the check never reads the row map
         # (measured ~0.3 ms at r=16384), so it is built only where it is used.
         unit_of_row=_unit_of_row_for_policy(
             on_invalid, lambda: np.repeat(np.arange(r), rows_per_traj)
@@ -489,7 +524,7 @@ def analyze(
         unit_stride=rows_per_traj,
         # Y is checked expanded, but the caller evaluated one output per
         # unique run. Report the rows they hold, not the expanded ones.
-        row_labels=sampling_result.expanded_to_unique,
+        row_labels=samples.expanded_to_unique,
         min_kept=2,
         # A constant slice gives elementary effects of exactly 0 (0/delta), so
         # the measures come out 0, not NaN as in the variance-based methods.
@@ -503,7 +538,7 @@ def analyze(
     if n_bootstrap > 0 and key is None:
         raise ValueError("key is required when n_bootstrap > 0")
 
-    idx_after, idx_before, delta = _reindex_after_drop(sampling_result, keep)
+    idx_after, idx_before, delta = _reindex_after_drop(samples, keep)
     if not keep.all():
         trailing = Y.shape[1:]
         kept_rows = np.flatnonzero(np.asarray(keep))
@@ -517,7 +552,7 @@ def analyze(
     # SobolSamples.to_morris dropped for having no measurable step. The
     # non-finite loss reports itself, through check_invalid. The message also
     # carries the reliability floor when the survivors fall below it.
-    n_lost_upstream = sampling_result.n_blocks_dropped
+    n_lost_upstream = samples.n_blocks_dropped
     if n_lost_upstream > 0:
         requested = r + n_lost_upstream
         message = (
@@ -540,24 +575,22 @@ def analyze(
         and keep.all()
         and ctx.layout is YLayout.SCALAR
     ):
-        # on_invalid='none' held the expansion back (see
+        # on_invalid='skip' held the expansion back (see
         # Context.deferred_expand). The scalar no-bootstrap path fuses the
         # gather into the estimator -- one executable, measured ~1.3x
         # faster than the eager expansion on a half-million-row design.
         # Wide layouts run slower fused, and the bootstrap resamples from
         # the expanded rows, so both expand eagerly below.
-        ee, mu, mu_star, sigma = _get_morris_fused_measures(
-            sampling_result.n_params, standardize_outputs
-        )(
+        ee, mu, mu_star, sigma = _get_morris_fused_measures(samples.n_params, standardize_outputs)(
             ctx.Y,
-            sampling_result._expanded_to_unique_jax,
+            samples._expanded_to_unique_jax,
             idx_after,
             idx_before,
             delta,
         )
     else:
         if ctx.deferred_expand is not None:
-            # Deferral only happens under on_invalid='none', where keep is
+            # Deferral only happens under on_invalid='skip', where keep is
             # all-True, so the compaction above never ran and Y is still
             # the raw promoted rows; expanding here is exactly what prepare
             # would have done under any other policy.
@@ -638,7 +671,7 @@ def analyze(
         mu=mu,
         mu_star=mu_star,
         sigma=sigma,
-        problem=sampling_result.problem,
+        problem=samples.problem,
         invalid=invalid,
         mu_conf=mu_conf,
         mu_star_conf=mu_star_conf,
@@ -661,7 +694,7 @@ def analyze(
             notes = []
         _verbose.analysis_summary(
             method="jaxgsa.morris.analyze",
-            problem=sampling_result.problem,
+            problem=samples.problem,
             n_runs=int(Y.shape[0]),
             T=T,
             K=K,

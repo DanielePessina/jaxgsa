@@ -93,7 +93,7 @@ the registry, because the signatures genuinely differ:
 * design-based methods take a sample result, given-data methods take ``X``
   and ``Y``;
 * ``dgsm`` takes a callable that maps one row, not a matrix of outputs;
-* every method has its own accuracy knobs (``order``, ``maxorder``,
+* every method has its own accuracy knobs (``order``, ``max_iter``,
   ``n_bins``, ``n_perms``, ``max_centers``), and leaving them at their
   defaults would make the timings hostage to a later change of default.
 
@@ -335,7 +335,7 @@ def _prep_efast(case: Case) -> Callable[[], Any]:
 
 
 def _prep_kucherenko(case: Case) -> Callable[[], Any]:
-    sr = kucherenko.sample(case.problem, n_samples=N_SOBOL, seed=SEED)
+    sr = kucherenko.sample(case.problem, base_n=N_SOBOL, seed=SEED)
     y = widen(ishigami.evaluate(jnp.asarray(sr.samples)), case.shape)
     jax.block_until_ready(y)
     return lambda: kucherenko.analyze(sr, y)
@@ -362,7 +362,7 @@ def _prep_optimal_transport(case: Case) -> Callable[[], Any]:
         case.problem,
         case.X,
         case.Y,
-        n_partitions=8,
+        n_classes=8,
         n_bootstrap=10,
         dummy=False,
         key=jax.random.key(SEED),
@@ -374,7 +374,7 @@ def _prep_pce(case: Case) -> Callable[[], Any]:
 
 
 def _prep_hdmr(case: Case) -> Callable[[], Any]:
-    return lambda: hdmr.analyze(case.problem, case.X, case.Y, maxorder=2, maxiter=50)
+    return lambda: hdmr.analyze(case.problem, case.X, case.Y, order=2, max_iter=50)
 
 
 def _prep_shapley(case: Case) -> Callable[[], Any]:
@@ -397,7 +397,7 @@ def _prep_vkoga(case: Case) -> Callable[[], Any]:
 
 def _prep_dgsm(case: Case) -> Callable[[], Any]:
     model = _shaped_point_model(case.shape)
-    return lambda: dgsm.analyze(case.problem, model, case.X)
+    return lambda: dgsm.analyze(case.problem, case.X, fn=model)
 
 
 PREPARE: dict[str, Callable[[Case], Callable[[], Any]]] = {

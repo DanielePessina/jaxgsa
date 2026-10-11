@@ -76,9 +76,9 @@ def test_indices_matches_analyze(case):
     no F counts.
     """
     problem, X, Y = case
-    result = hdmr.analyze(problem, X, Y, maxorder=2, maxiter=50)
-    out = hdmr.indices(problem, X, Y, maxorder=2, maxiter=50)
-    assert type(out) is tuple
+    result = hdmr.analyze(problem, X, Y, order=2, max_iter=50)
+    out = hdmr.indices(problem, X, Y, order=2, max_iter=50)
+    assert isinstance(out, hdmr.HDMRIndices)
     assert len(out) == 4
     assert all(isinstance(a, jax.Array) for a in out)
     Sa, Sb, S, ST = out
@@ -94,8 +94,8 @@ def test_indices_matches_analyze_for_a_time_series(case):
     problem, X, Y = case
     Y3 = jnp.stack([jnp.stack([Y, 2.0 * Y], axis=-1), jnp.stack([-Y, 0.5 * Y], axis=-1)], axis=1)
 
-    result = hdmr.analyze(problem, X, Y3, maxorder=2, maxiter=50)
-    Sa, _, _, ST = hdmr.indices(problem, X, Y3, maxorder=2, maxiter=50)
+    result = hdmr.analyze(problem, X, Y3, order=2, max_iter=50)
+    Sa, _, _, ST = hdmr.indices(problem, X, Y3, order=2, max_iter=50)
 
     assert Sa.shape == result.Sa.shape == (2, 2, 6)
     assert ST.shape == result.ST.shape == (2, 2, 3)
@@ -103,7 +103,7 @@ def test_indices_matches_analyze_for_a_time_series(case):
     np.testing.assert_array_equal(np.asarray(ST), np.asarray(result.ST))
 
 
-def test_indices_clamps_maxorder_without_warning():
+def test_indices_clamps_order_without_warning():
     """Tier T4: the core takes the clamp silently; ``analyze`` warns about it."""
     rng = np.random.default_rng(3)
     problem = Problem.from_dict({"a": (0.0, 1.0), "b": (0.0, 1.0)})
@@ -114,10 +114,10 @@ def test_indices_clamps_maxorder_without_warning():
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        _, _, _, ST = hdmr.indices(problem, X, Y, maxorder=3, maxiter=50)
+        _, _, _, ST = hdmr.indices(problem, X, Y, order=3, max_iter=50)
 
-    with pytest.warns(Warning, match="maxorder clamped"):
-        result = hdmr.analyze(problem, X, Y, maxorder=3, maxiter=50)
+    with pytest.warns(Warning, match="order clamped"):
+        result = hdmr.analyze(problem, X, Y, order=3, max_iter=50)
     np.testing.assert_array_equal(np.asarray(ST), np.asarray(result.ST))
 
 
@@ -154,10 +154,10 @@ def test_jit_then_eager_shares_the_f_crit_cache(case):
     problem, X, Y = case
     _compute_f_crits.cache_clear()
 
-    jitted = jax.jit(lambda outputs: hdmr.indices(problem, X, outputs, maxorder=2, maxiter=50))
+    jitted = jax.jit(lambda outputs: hdmr.indices(problem, X, outputs, order=2, max_iter=50))
     ST_jit = jitted(Y)[3]
 
-    result = hdmr.analyze(problem, X, Y, maxorder=2, maxiter=50)
+    result = hdmr.analyze(problem, X, Y, order=2, max_iter=50)
 
     np.testing.assert_allclose(np.asarray(ST_jit), np.asarray(result.ST), rtol=1e-3, atol=1e-4)
 
@@ -167,11 +167,11 @@ def test_indices_is_vmappable(case):
     problem, X, Y = case
     batch = jnp.stack([Y, 2.0 * Y + 1.0])
 
-    ST_batch = jax.vmap(lambda outputs: hdmr.indices(problem, X, outputs, maxorder=2, maxiter=50))(
+    ST_batch = jax.vmap(lambda outputs: hdmr.indices(problem, X, outputs, order=2, max_iter=50))(
         batch
     )[3]
 
-    assert ST_batch.shape == (2, problem.num_vars)
+    assert ST_batch.shape == (2, problem.n_params)
     # An affine rescaling of Y leaves every variance fraction unchanged, so
     # the two lanes must agree. That is a real check on the batching, not a
     # restatement of it: a mis-mapped axis would mix the two.
@@ -192,7 +192,7 @@ def test_jit_of_jvp_of_the_inputs(case):
     problem, X, Y = case
 
     def total_st(inputs):
-        return hdmr.indices(problem, inputs, Y, maxorder=2, maxiter=20)[3].sum()
+        return hdmr.indices(problem, inputs, Y, order=2, max_iter=20)[3].sum()
 
     direction = np.random.default_rng(0).standard_normal(X.shape)
     direction /= np.linalg.norm(direction)
@@ -214,7 +214,7 @@ def test_jit_of_jacfwd_of_the_inputs(case):
     problem, X, Y = case
 
     def total_st(inputs):
-        return hdmr.indices(problem, inputs, Y, maxorder=2, maxiter=20)[3].sum()
+        return hdmr.indices(problem, inputs, Y, order=2, max_iter=20)[3].sum()
 
     jac = jax.jit(jax.jacfwd(total_st))(X)
 
@@ -262,7 +262,7 @@ def test_reverse_mode_is_refused_by_the_backfitting_loop():
     problem, X, Y = _truncated_case()
 
     with pytest.raises(ValueError, match="while_loop"):
-        jax.jacrev(lambda outputs: hdmr.indices(problem, X, outputs, maxorder=2, maxiter=20)[3])(Y)
+        jax.jacrev(lambda outputs: hdmr.indices(problem, X, outputs, order=2, max_iter=20)[3])(Y)
 
 
 def test_analyze_is_not_jittable(case):

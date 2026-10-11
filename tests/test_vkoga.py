@@ -87,10 +87,9 @@ def asym_result():
         X = jaxgsa.sampling.monte_carlo(ASYM_PROBLEM, 2048, seed=7)
         Y = X @ A_COEF_ASYM
         return jaxgsa.vkoga.analyze(
-            ASYM_PROBLEM,
+            ASYM_PROBLEM.with_correlation(R_ASYM),
             X,
             Y,
-            correlation=R_ASYM,
             gamma=2.0,
             ridge=1e-10,
             max_centers=200,
@@ -155,11 +154,11 @@ def test_closed_form_split_identities(gauss_result):
 
 @pytest.mark.slow
 def test_independent_inputs_recover_sobol_indices():
-    """With correlation=None the indices collapse to the classical ones.
+    """With no declared correlation the indices collapse to the classical ones.
 
     Slow: an x64 fit at the full budget. The default tier keeps the
     ``independent`` label under test in
-    ``test_explicit_matrix_overrides_problem_correlation`` and the independent
+    ``test_dependence_always_equals_the_problems`` and the independent
     estimator in ``test_vkoga_custom_sampling.py``.
     """
     S1_true = A_COEF**2 / np.sum(A_COEF**2)
@@ -170,7 +169,6 @@ def test_independent_inputs_recover_sobol_indices():
             GAUSS_PROBLEM,
             X,
             Y,
-            correlation=None,
             gamma=2.0,
             ridge=1e-10,
             max_centers=150,
@@ -180,7 +178,7 @@ def test_independent_inputs_recover_sobol_indices():
             key=jax.random.key(0),
         )
     assert result.dependence == "independent"
-    np.testing.assert_allclose(result.correlation, np.eye(3), atol=1e-12)
+    assert result.problem.correlation is None
     S_TC = np.asarray(result.S_TC)
     np.testing.assert_allclose(S_TC, S1_true, atol=3e-2)
     np.testing.assert_allclose(np.asarray(result.S_C), 0.0, atol=3e-2)
@@ -243,14 +241,13 @@ def test_parameter_permutation_equivariance():
     with jax.enable_x64():
         X = np.asarray(jaxgsa.sampling.monte_carlo(ASYM_PROBLEM, 2048, seed=7))
         Y = X @ A_COEF_ASYM
-        base = jaxgsa.vkoga.analyze(ASYM_PROBLEM, X, Y, correlation=R_ASYM, **kwargs)
+        base = jaxgsa.vkoga.analyze(ASYM_PROBLEM.with_correlation(R_ASYM), X, Y, **kwargs)
         # Same model, parameters relabelled: permute the columns, the
         # coefficients, and the correlation matrix together.
         permuted = jaxgsa.vkoga.analyze(
-            ASYM_PROBLEM,
+            ASYM_PROBLEM.with_correlation(R_ASYM[np.ix_(perm, perm)]),
             X[:, perm],
             X[:, perm] @ A_COEF_ASYM[perm],
-            correlation=R_ASYM[np.ix_(perm, perm)],
             **kwargs,
         )
     for name in ("S_TC", "S_TU", "S_U", "S_C", "S_IU"):
@@ -293,10 +290,9 @@ def test_interaction_model_clips_s_u_and_warns():
         Y = _interaction_model(X)
         with pytest.warns(UserWarning, match="S_U exceeded S_TU"):
             result = jaxgsa.vkoga.analyze(
-                GAUSS_PROBLEM,
+                GAUSS_PROBLEM.with_correlation(R_INTERACTION),
                 X,
                 Y,
-                correlation=R_INTERACTION,
                 gamma=2.0,
                 ridge=1e-10,
                 max_centers=150,
@@ -347,89 +343,83 @@ def test_oscillatory_model_warns_that_the_surrogate_failed():
     # The honest out-of-sample score reaches the result, and it is the thing
     # the warning fired on: the surrogate explains nothing.
     assert result.cv_rmse is not None
-    assert result.cv_rmse > 0.5 * float(Y.std())
+    assert float(result.cv_rmse) > 0.5 * float(Y.std())
 
 
 # --- correlation handling -----------------------------------------------------
 
 
-def test_problem_correlation_is_read_by_default():
-    """analyze() with no correlation argument reads problem.correlation.
+def test_problem_correlation_is_read_and_keys_are_deterministic():
+    """analyze() reads problem.correlation, the only source of dependence.
 
-    A problem that declares R and a plain problem with R passed per-call must
-    produce identical results on the same key: same matrix, same draws. The
-    same key twice is bit-for-bit deterministic. A different key is a
+    The same key twice is bit-for-bit deterministic. A different key is a
     different quasi-random stream: it moves the estimates, but not by much.
     """
     X = jaxgsa.sampling.monte_carlo(GAUSS_PROBLEM, 256, seed=2)
     Y = X @ A_COEF
     problem_corr = GAUSS_PROBLEM.with_correlation(R_GAUSS)
     with single_precision_warning():
-        from_problem = jaxgsa.vkoga.analyze(problem_corr, X, Y, **SMALL_KWARGS)
+        first = jaxgsa.vkoga.analyze(problem_corr, X, Y, **SMALL_KWARGS)
     with single_precision_warning():
-        from_override = jaxgsa.vkoga.analyze(
-            GAUSS_PROBLEM, X, Y, correlation=R_GAUSS, **SMALL_KWARGS
-        )
-    assert from_problem.dependence == "gaussian"
-    np.testing.assert_array_equal(from_problem.correlation, from_override.correlation)
+        again = jaxgsa.vkoga.analyze(problem_corr, X, Y, **SMALL_KWARGS)
+    assert first.dependence == "gaussian"
     for field in ("S_TC", "S_TU", "S_U", "S_C", "S_IU"):
         np.testing.assert_array_equal(
-            np.asarray(getattr(from_problem, field)),
-            np.asarray(getattr(from_override, field)),
+            np.asarray(getattr(first, field)), np.asarray(getattr(again, field))
         )
 
     with single_precision_warning():
         other = jaxgsa.vkoga.analyze(
             problem_corr, X, Y, **dict(SMALL_KWARGS, key=jax.random.key(1))
         )
-    assert not np.allclose(np.asarray(from_problem.S_TC), np.asarray(other.S_TC), atol=1e-6)
-    np.testing.assert_allclose(np.asarray(from_problem.S_TC), np.asarray(other.S_TC), atol=0.25)
+    assert not np.allclose(np.asarray(first.S_TC), np.asarray(other.S_TC), atol=1e-6)
+    np.testing.assert_allclose(np.asarray(first.S_TC), np.asarray(other.S_TC), atol=0.25)
 
 
-def test_explicit_matrix_overrides_problem_correlation():
-    """A per-call matrix wins over the problem's declaration."""
+def test_dependence_always_equals_the_problems():
+    """The label cannot differ from the problem: there is no per-call override."""
     X = jaxgsa.sampling.monte_carlo(GAUSS_PROBLEM, 256, seed=2)
     Y = X @ A_COEF
-    problem_corr = GAUSS_PROBLEM.with_correlation(R_GAUSS)
     with single_precision_warning():
-        result = jaxgsa.vkoga.analyze(problem_corr, X, Y, correlation=np.eye(3), **SMALL_KWARGS)
-    # The label follows the matrix the indices were computed under, not the
-    # problem's declaration.
-    assert result.dependence == "independent"
-    np.testing.assert_allclose(result.correlation, np.eye(3), atol=1e-12)
+        plain = jaxgsa.vkoga.analyze(GAUSS_PROBLEM, X, Y, **SMALL_KWARGS)
+    with single_precision_warning():
+        declared = jaxgsa.vkoga.analyze(
+            GAUSS_PROBLEM.with_correlation(R_GAUSS), X, Y, **SMALL_KWARGS
+        )
+    for result in (plain, declared):
+        assert result.dependence == result.problem.dependence
+    assert plain.dependence == "independent"
+    assert declared.dependence == "gaussian"
+    assert not hasattr(declared, "correlation")
 
 
-@pytest.mark.parametrize(
-    "value, message",
-    [
-        ("empirical", "fit_correlation"),
-        ("bogus", "fit_correlation"),
-        (np.eye(2), r"must be \(3, 3\)"),
-    ],
-    ids=["empirical-string", "other-string", "wrong-size-matrix"],
-)
-def test_bad_correlation_is_refused(value, message):
-    """Every string is refused (the error names the one supported workflow),
-    and a matrix of the wrong size is refused, naming the size.
-
-    The single-precision warning fires before validation raises.
-    """
+def test_correlation_argument_is_gone():
+    """The per-call ``correlation=`` argument was removed; the problem owns it."""
     X = jaxgsa.sampling.monte_carlo(GAUSS_PROBLEM, 32, seed=0)
     Y = X @ A_COEF
-    with pytest.raises(ValueError, match=message), single_precision_warning():
-        jaxgsa.vkoga.analyze(GAUSS_PROBLEM, X, Y, correlation=value, **SMALL_KWARGS)
+    with pytest.raises(TypeError, match="correlation"):
+        jaxgsa.vkoga.analyze(GAUSS_PROBLEM, X, Y, **dict(SMALL_KWARGS, correlation=R_GAUSS))
+
+
+def test_key_is_required_by_the_signature():
+    """``key`` is keyword-only with no default."""
+    import inspect
+
+    param = inspect.signature(jaxgsa.vkoga.analyze).parameters["key"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default is inspect.Parameter.empty
 
 
 def test_indefinite_correlation_is_repaired():
-    """A mildly indefinite matrix is projected to PD, not rejected."""
+    """A mildly indefinite matrix is projected to PD by the problem, not rejected."""
     R = np.array([[1.0, 0.52, 0.52], [0.52, 1.0, -0.52], [0.52, -0.52, 1.0]])
     assert np.linalg.eigvalsh(R).min() < 0  # genuinely indefinite as declared
-    X = jaxgsa.sampling.monte_carlo(GAUSS_PROBLEM, 256, seed=2)
+    problem = GAUSS_PROBLEM.with_correlation(R)
+    X = jaxgsa.sampling.monte_carlo(problem, 256, seed=2)
     Y = X @ A_COEF
     with single_precision_warning():
-        result = jaxgsa.vkoga.analyze(GAUSS_PROBLEM, X, Y, correlation=R, **SMALL_KWARGS)
-    assert np.linalg.eigvalsh(result.correlation).min() > 0
-    np.testing.assert_allclose(np.diag(result.correlation), 1.0, atol=1e-12)
+        result = jaxgsa.vkoga.analyze(problem, X, Y, **SMALL_KWARGS)
+    assert np.linalg.eigvalsh(result.problem.correlation).min() > 0
     assert result.dependence == "gaussian"
     assert np.all(np.isfinite(np.asarray(result.S_TC)))
 
@@ -540,10 +530,26 @@ def test_batch_size_bounds_the_index_estimator_too(monkeypatch):
     assert seen["batch_size"] == 64
 
 
-def test_shapley_raises_not_implemented(uniform_fits):
+def test_shapley_is_removed(uniform_fits):
     _, _, fits = uniform_fits
-    with pytest.raises(NotImplementedError, match="Shapley"):
-        fits["scalar"].shapley()
+    assert not hasattr(fits["scalar"], "shapley")
+
+
+def test_s1_and_st_alias_the_total_correlated_and_uncorrelated(uniform_fits):
+    _, _, fits = uniform_fits
+    result = fits["scalar"]
+    assert result.S1 is result.S_TC
+    assert result.ST is result.S_TU
+
+
+def test_fit_quality_fields_are_per_slice(uniform_fits):
+    _, _, fits = uniform_fits
+    for result in fits.values():
+        shape = result.variance.shape
+        assert result.rmse.shape == shape
+        assert result.explained_variance.shape == shape
+        if result.cv_rmse is not None:
+            assert result.cv_rmse.shape == shape
 
 
 def test_to_dataset_carries_the_coordinate_and_attribute_values(gauss_result):
@@ -555,8 +561,7 @@ def test_to_dataset_carries_the_coordinate_and_attribute_values(gauss_result):
     """
     ds = gauss_result.to_dataset()
     assert list(ds.coords["param"].values) == ["x1", "x2", "x3"]
-    assert list(ds.coords["param_i"].values) == ["x1", "x2", "x3"]
-    np.testing.assert_allclose(ds["correlation"].values, R_GAUSS, atol=1e-12)
+    assert "correlation" not in ds  # the copula lives on result.problem
     assert ds.attrs["dependence"] == "gaussian"
     assert ds.attrs["n_centers"] == gauss_result.n_centers
 
@@ -1013,7 +1018,7 @@ class TestBootstrap:
         """
         result, _ = vkoga_boot
         draws = np.asarray(result.ci.replicates["S_TC"])
-        assert draws.shape == (8, UNIFORM_PROBLEM.num_vars)
+        assert draws.shape == (8, UNIFORM_PROBLEM.n_params)
         assert draws.std(axis=0).max() > 0.0
         assert not np.allclose(draws, np.asarray(result.S_TC))
         pairs = {tuple(np.round(row, 12)) for row in draws}
@@ -1065,8 +1070,8 @@ class TestBootstrap:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", JaxgsaWarning)
             result = jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, n_bootstrap=2, **TINY_KWARGS)
-        assert np.asarray(result.S_TC).shape == (3, UNIFORM_PROBLEM.num_vars)
-        assert np.asarray(result.S_TC_conf).shape == (2, 3, UNIFORM_PROBLEM.num_vars)
+        assert np.asarray(result.S_TC).shape == (3, UNIFORM_PROBLEM.n_params)
+        assert np.asarray(result.S_TC_conf).shape == (2, 3, UNIFORM_PROBLEM.n_params)
 
     def test_the_dataset_carries_the_endpoints(self, vkoga_boot):
         """An interval is only reported if it also exports."""
@@ -1081,7 +1086,7 @@ class TestBootstrap:
 def test_independent_training_design_recovers_the_closed_form():
     """Tier T0 (closed form): the training rows need not follow the copula.
 
-    The analysis copula comes from ``correlation=``, while the surrogate
+    The analysis copula comes from the problem, while the surrogate
     trains on independent draws. The estimator evaluates the surrogate under
     conditionals of the correlated joint, so the closed form must still come
     out. The default tier trains on the analysis copula (``lg_corr_vkoga``); this
@@ -1091,10 +1096,9 @@ def test_independent_training_design_recovers_the_closed_form():
     with jax.enable_x64():
         X = jaxgsa.sampling.monte_carlo(GAUSS_PROBLEM, 1536, seed=7)
         result = jaxgsa.vkoga.analyze(
-            GAUSS_PROBLEM,
+            GAUSS_PROBLEM.with_correlation(R_GAUSS),
             X,
             X @ A_COEF,
-            correlation=R_GAUSS,
             gamma=2.0,
             ridge=1e-10,
             max_centers=150,
@@ -1106,3 +1110,15 @@ def test_independent_training_design_recovers_the_closed_form():
         )
     np.testing.assert_allclose(np.asarray(result.S_TC), S_TC_true, atol=1e-2)
     np.testing.assert_allclose(np.asarray(result.S_TU), S_TU_true, atol=2e-2)
+
+
+def test_constant_slice_has_nan_explained_variance():
+    """A constant output column has no variance to explain: NaN, not float noise."""
+    X = jaxgsa.sampling.monte_carlo(UNIFORM_PROBLEM, 256, seed=11)
+    y0 = _uniform_scalar(X)
+    Y = np.stack([y0, np.full_like(y0, 0.1)], axis=-1)
+    with single_precision_warning():
+        result = jaxgsa.vkoga.analyze(UNIFORM_PROBLEM, X, Y, **SMALL_KWARGS)
+    ev = np.asarray(result.explained_variance)
+    assert np.isnan(ev[1])
+    assert np.isfinite(ev[0])

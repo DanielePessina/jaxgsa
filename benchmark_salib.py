@@ -86,7 +86,7 @@ def jaxgsa_problem_to_salib(problem: jaxgsa.Problem) -> dict:
     if bounds is None:
         raise ValueError("SALib conversion requires a uniform-only problem with finite bounds")
     return {
-        "num_vars": problem.num_vars,
+        "n_params": problem.n_params,
         "names": list(problem.names),
         "bounds": [list(b) for b in bounds],
     }
@@ -105,7 +105,7 @@ def salib_sobol_point_estimates(
     calc_second_order: bool,
 ) -> dict[str, np.ndarray]:
     """Compute SALib Sobol point estimates without confidence-interval resampling."""
-    D = salib_problem["num_vars"]
+    D = salib_problem["n_params"]
     step = 2 * D + 2 if calc_second_order else D + 2
     if Y_np.size % step != 0:
         raise RuntimeError("Incorrect number of samples for SALib Sobol point-estimate path.")
@@ -154,7 +154,7 @@ def salib_symmetric_s2(salib_problem: dict, Y_np: np.ndarray) -> np.ndarray:
         A ``(D, D)`` matrix. Both triangles hold the averaged estimate. The
         diagonal is NaN, as it is in jaxgsa's own output.
     """
-    D = salib_problem["num_vars"]
+    D = salib_problem["n_params"]
     Y_norm = (Y_np - Y_np.mean()) / Y_np.std()
     N = Y_norm.size // (2 * D + 2)
     A, B, AB, BA = salib_separate_output_values(Y_norm, D, N, True)
@@ -177,7 +177,7 @@ def salib_symmetric_s2(salib_problem: dict, Y_np: np.ndarray) -> np.ndarray:
 def benchmark_correctness() -> bool:
     """Validate jaxgsa analyze and analyze_hdmr against SALib and analytical values."""
     base_n = 1024
-    D = ISHIGAMI_PROBLEM.num_vars
+    D = ISHIGAMI_PROBLEM.n_params
     salib_problem = jaxgsa_problem_to_salib(ISHIGAMI_PROBLEM)
     analytical_S1 = np.array(ISHIGAMI_ANALYTICAL_S1)
     analytical_ST = np.array(ISHIGAMI_ANALYTICAL_ST)
@@ -264,7 +264,7 @@ def benchmark_correctness() -> bool:
     Y_hdmr_jax = jnp.asarray(Y_hdmr_np)
 
     jaxgsa_hdmr = jaxgsa.hdmr.analyze(
-        ISHIGAMI_PROBLEM, X_jax_hdmr, Y_hdmr_jax, maxorder=2, m=2, verbose=False
+        ISHIGAMI_PROBLEM, X_jax_hdmr, Y_hdmr_jax, order=2, n_intervals=2, verbose=False
     )
 
     with warnings.catch_warnings():
@@ -517,7 +517,7 @@ def _time_salib_sobol(
 def _time_jaxgsa_hdmr(problem, X_jax, Y_jax) -> float:
     """Time jaxgsa.analyze_hdmr, best of N_TIMING_ITERS."""
     return _best_of_n(
-        lambda: jaxgsa.hdmr.analyze(problem, X_jax, Y_jax, maxorder=2, m=2, verbose=False),
+        lambda: jaxgsa.hdmr.analyze(problem, X_jax, Y_jax, order=2, n_intervals=2, verbose=False),
         _block_hdmr_result,
     )
 
@@ -655,7 +655,7 @@ def benchmark_timing(base_n: int = 1024) -> None:
         _, X_hdmr_jax, Y_hdmr_jax, _ = scenario_hdmr_data[(scenario_label, T, K)]
         _block_hdmr_result(
             jaxgsa.hdmr.analyze(
-                BENCH_PROBLEM, X_hdmr_jax, Y_hdmr_jax, maxorder=2, m=2, verbose=False
+                BENCH_PROBLEM, X_hdmr_jax, Y_hdmr_jax, order=2, n_intervals=2, verbose=False
             )
         )
     print("done.")

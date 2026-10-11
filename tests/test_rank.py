@@ -30,13 +30,13 @@ BOOT = 8
 @pytest.fixture(scope="module")
 def ishigami_big():
     """Ishigami Monte Carlo sample large enough for a 0.03 absolute check."""
-    X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=N_BIG, seed=7))
+    X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=N_BIG, seed=7))
     return X, ishigami.evaluate(X)
 
 
 @pytest.fixture(scope="module")
 def ishigami_small():
-    X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=1024, seed=3))
+    X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=1024, seed=3))
     return X, ishigami.evaluate(X)
 
 
@@ -64,7 +64,7 @@ class TestAnalytic:
     def test_linear_gaussian_with_correlation(self):
         """``S1_i = (R a)_i^2 / (a' R a)`` holds under a Gaussian copula."""
         problem = GAUSS_PROBLEM.with_correlation(R_GAUSS)
-        X = jnp.asarray(monte_carlo(problem, n=N_BIG, seed=11))
+        X = jnp.asarray(monte_carlo(problem, n_samples=N_BIG, seed=11))
         Y = X @ jnp.asarray(A_COEF, dtype=X.dtype)
         result = rank.analyze(problem, X, Y, verbose=False)
         s_tc, _, _ = analytic_indices(A_COEF, R_GAUSS)
@@ -72,7 +72,7 @@ class TestAnalytic:
 
     def test_linear_gaussian_with_custom_sampler(self):
         problem = GAUSS_PROBLEM.with_sampler(gaussian_sampler(R_GAUSS))
-        X = jnp.asarray(monte_carlo(problem, n=N_BIG, seed=12))
+        X = jnp.asarray(monte_carlo(problem, n_samples=N_BIG, seed=12))
         Y = X @ jnp.asarray(A_COEF, dtype=X.dtype)
         result = rank.analyze(problem, X, Y, verbose=False)
         s_tc, _, _ = analytic_indices(A_COEF, R_GAUSS)
@@ -169,12 +169,12 @@ class TestRefusals:
     )
 
     def test_categorical_inputs_are_refused_by_analyze(self):
-        X = jnp.asarray(monte_carlo(self.CATEGORICAL, n=64, seed=0))
+        X = jnp.asarray(monte_carlo(self.CATEGORICAL, n_samples=64, seed=0))
         with pytest.raises(ValueError, match="categorical"):
             rank.analyze(self.CATEGORICAL, X, X[:, 1], verbose=False)
 
     def test_categorical_inputs_are_refused_by_indices(self):
-        X = jnp.asarray(monte_carlo(self.CATEGORICAL, n=64, seed=0))
+        X = jnp.asarray(monte_carlo(self.CATEGORICAL, n_samples=64, seed=0))
         with pytest.raises(ValueError, match="categorical"):
             rank.indices(self.CATEGORICAL, X, X[:, 1])
 
@@ -329,7 +329,7 @@ class TestBootstrap:
         n, n_rep = 1500, 24
         estimates, spreads = [], []
         for seed in range(n_rep):
-            X = jnp.asarray(monte_carlo(problem, n=n, seed=100 + seed))
+            X = jnp.asarray(monte_carlo(problem, n_samples=n, seed=100 + seed))
             Y = ishigami.evaluate(X)
             r = rank.analyze(
                 problem,
@@ -370,6 +370,19 @@ class TestPureCore:
         (s1,) = rank.indices(ishigami.PROBLEM, X, Y)
         result = rank.analyze(ishigami.PROBLEM, X, Y, verbose=False)
         np.testing.assert_array_equal(np.asarray(s1), np.asarray(result.S1))
+
+    def test_indices_is_a_named_tuple(self, ishigami_small):
+        X, Y = ishigami_small
+        out = rank.indices(ishigami.PROBLEM, X, Y)
+        assert isinstance(out, rank.RankIndices)
+        assert out._fields == ("S1",)
+
+    def test_too_few_rows_error_names_the_method(self, ishigami_small):
+        X, Y = ishigami_small
+        with pytest.raises(
+            ValueError, match=r"^jaxgsa\.rank: analyze needs at least 3 rows, got 2"
+        ):
+            rank.analyze(ishigami.PROBLEM, X[:2], Y[:2], verbose=False)
 
     def test_jit_and_vmap(self, ishigami_small):
         X, Y = ishigami_small

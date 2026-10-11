@@ -66,7 +66,7 @@ def _pce_fit(shape: str):
 def _hdmr_fit(shape: str):
     """The second-order HDMR fit for one output layout, built once per module."""
     X, Y = _make_xy(shape)
-    return hdmr.analyze(PROBLEM, X, Y, maxorder=2)
+    return hdmr.analyze(PROBLEM, X, Y, order=2)
 
 
 def _x_new() -> Array:
@@ -104,7 +104,7 @@ def test_hdmr_batched_matches_single_shot(shape):
 
 def test_hdmr_third_order_batched_matches_single_shot(problem):
     X, Y = _make_xy("scalar")
-    result = hdmr.analyze(problem, X, Y, maxorder=3, m=2)
+    result = hdmr.analyze(problem, X, Y, order=3, n_intervals=2)
     X_new = _x_new()
 
     single = result.predict(X_new, batch_size=N_NEW)

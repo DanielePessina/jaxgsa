@@ -49,7 +49,7 @@ from __future__ import annotations
 import math
 import warnings
 from functools import lru_cache
-from typing import cast
+from typing import NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -69,7 +69,7 @@ from jaxgsa._core.irregular import (
 )
 from jaxgsa._core.precision import x64_enabled
 from jaxgsa._core.transforms import cdf_to_unit_interval
-from jaxgsa._core.validation import _prepare_Y
+from jaxgsa._core.validation import _prepare_Y, as_key
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.hsic._result import HSICResult
 from jaxgsa.problem import Problem
@@ -146,6 +146,19 @@ def _from_order_key(key: Array, sign_bit: Array, dtype: DTypeLike) -> Array:
 _RADIX_BITS = 16
 
 
+def _count_dtype() -> DTypeLike:
+    """Return the widest integer dtype the current JAX mode really supports.
+
+    Asking for ``int64`` while ``jax_enable_x64`` is off makes JAX truncate to
+    ``int32`` and emit a ``UserWarning`` on every call. Choosing the dtype from
+    the mode gives the same arithmetic with no warning in either mode.
+
+    Returns:
+        ``jnp.int64`` in x64 mode, otherwise ``jnp.int32``.
+    """
+    return jnp.int64 if x64_enabled() else jnp.int32
+
+
 def _select_order_statistic(bits: Array, rank: int) -> Array:
     """Return the exact ``rank``-th order statistic of a total-order bit array.
 
@@ -179,7 +192,8 @@ def _select_order_statistic(bits: Array, rank: int) -> Array:
     bucket_mask = n_buckets - 1
     total_bits = jnp.dtype(bits.dtype).itemsize * 8
     n_levels = total_bits // _RADIX_BITS
-    k = jnp.asarray(rank, dtype=jnp.int64)
+    count_dtype = _count_dtype()
+    k = jnp.asarray(rank, dtype=count_dtype)
     # ``mask`` marks the elements that still share the high bits resolved so
     # far. ``ans`` accumulates the resolved prefix, widened by one bucket per
     # level, so after ``n_levels`` levels it holds the full bit pattern of the
@@ -188,19 +202,20 @@ def _select_order_statistic(bits: Array, rank: int) -> Array:
     ans = jnp.zeros((), dtype=bits.dtype)
     for level in range(n_levels):
         shift = total_bits - _RADIX_BITS * (level + 1)
-        seg = ((bits >> shift) & bucket_mask).astype(jnp.int64)
+        seg = ((bits >> shift) & bucket_mask).astype(count_dtype)
         # Elements outside the current prefix are mapped to bucket 0 but given
-        # zero weight, so they cannot be selected. int64 counts keep the
-        # cumulative sums exact however large the input (an all-fit-in-memory
-        # pairwise matrix never reaches 2^63 elements).
+        # zero weight, so they cannot be selected. counts are int64 under
+        # x64 and int32 otherwise. The cumulative sums stay exact while the
+        # element count is below 2^31, which memory limits keep true in
+        # practice.
         counts = jnp.bincount(
             jnp.where(mask, seg, 0),
-            weights=mask.astype(jnp.int64),
+            weights=mask.astype(count_dtype),
             length=n_buckets,
         )
         cum = jnp.cumsum(counts)
         b = jnp.searchsorted(cum, k, side="right")
-        below = jnp.where(b > 0, cum[b - 1], jnp.asarray(0, dtype=jnp.int64))
+        below = jnp.where(b > 0, cum[b - 1], jnp.asarray(0, dtype=count_dtype))
         k = k - below
         ans = (ans << jnp.asarray(_RADIX_BITS, dtype=bits.dtype)) | b.astype(bits.dtype)
         mask = mask & (seg == b)
@@ -492,7 +507,7 @@ def _get_hsic_kernel(n_perms: int, bandwidth: float):
             output kernel (static; it is a compile-time constant).
 
     Returns:
-        A jitted callable that returns ``(R2_HSIC, T_HSIC, p_values,
+        A jitted callable that returns ``(R2, T, p_values,
         hsic_raw)``, each of shape ``(total, D)``. It takes the stacked input
         kernels, the precomputed self-HSIC values, the ``(N, total)`` output
         columns, and one PRNG key per column.
@@ -519,7 +534,7 @@ def _get_hsic_kernel(n_perms: int, bandwidth: float):
             key: PRNG key for the permutation test.
 
         Returns:
-            ``(R2_HSIC, T_HSIC, p_values, hsic_raw)`` each of shape ``(D,)``.
+            ``(R2, T, p_values, hsic_raw)`` each of shape ``(D,)``.
         """
         # The barrier stops XLA fusing the kernel build into the reductions
         # that read it. Fused, the exponential is recomputed inside each
@@ -587,7 +602,7 @@ def _get_hsic_kernel(n_perms: int, bandwidth: float):
             keys: One PRNG key per column, shape ``(total,)``.
 
         Returns:
-            ``(R2_HSIC, T_HSIC, p_values, hsic_raw)`` each ``(total, D)``.
+            ``(R2, T, p_values, hsic_raw)`` each ``(total, D)``.
         """
 
         def _step(column: tuple[Array, Array]) -> tuple[Array, Array, Array, Array]:
@@ -625,7 +640,7 @@ def _warn_constant_inputs(problem: Problem, X: Array) -> None:
     warnings.warn(
         f"jaxgsa.hsic: parameter{plural} {names} {'are' if dims.size > 1 else 'is'} "
         "constant in the sample, so their Gaussian kernel is identically 1 "
-        "and R2_HSIC is exactly 0 — a constant input has provably zero "
+        "and R2 is exactly 0 — a constant input has provably zero "
         "dependence on any output",
         stacklevel=2,
         category=JaxgsaWarning,
@@ -668,15 +683,33 @@ def _warn_single_precision() -> None:
         )
 
 
+class HSICIndices(NamedTuple):
+    """HSIC indices as plain arrays, in the order :func:`indices` returns them.
+
+    Tuple unpacking works: ``R2, T, p_values, hsic_raw = indices(...)``.
+
+    Attributes:
+        R2: Normalized first-order HSIC indices, as ``HSICResult.R2``.
+        T: Total-order HSIC indices, as ``HSICResult.T``.
+        p_values: Permutation-test p-values, as ``HSICResult.p_values``.
+        hsic_raw: Unnormalized ``HSIC(x_i, Y)``, as ``HSICResult.hsic_raw``.
+    """
+
+    R2: Array
+    T: Array
+    p_values: Array
+    hsic_raw: Array
+
+
 def indices(
     problem: Problem,
     X: Array,
     Y: Array,
     *,
     n_perms: int = 200,
-    key: Array,
+    key: Array | int,
     bandwidth: float = 1.0,
-) -> tuple[Array, Array, Array, Array]:
+) -> HSICIndices:
     """Compute HSIC indices as plain arrays, with no diagnostics.
 
     This is the transformable core of :func:`analyze`. It builds the same
@@ -705,7 +738,7 @@ def indices(
     redundant.
 
     Tier T4 (behavioural contract): the returned arrays must equal
-    ``R2_HSIC``, ``T_HSIC``, ``p_values`` and ``hsic_raw`` of ``analyze``'s
+    ``R2``, ``T``, ``p_values`` and ``hsic_raw`` of ``analyze``'s
     result on clean outputs, and the function must survive ``jit``, ``vmap``
     and ``jit(jacrev(...))``. Checked in ``tests/test_hsic.py``.
 
@@ -714,7 +747,7 @@ def indices(
     columns alike, and the T4 test covers all three.
 
     A parameter that is constant in the sample yields an exact 0 for
-    ``R2_HSIC`` from inside the kernel, as in :func:`analyze`; only the
+    ``R2`` from inside the kernel, as in :func:`analyze`; only the
     warning is missing here, because a warning needs a concrete value.
 
     Use :func:`analyze` for ordinary analysis. Nothing here checks the
@@ -747,9 +780,9 @@ def indices(
             it also moves the median, so it will not match.
 
     Returns:
-        ``(R2_HSIC, T_HSIC, p_values, hsic_raw)``, each of shape
-        ``(D,)``, ``(K, D)`` or ``(T, K, D)`` to match the rank of ``Y``,
-        exactly as ``analyze`` reports them.
+        An :class:`HSICIndices` named tuple ``(R2, T, p_values, hsic_raw)``,
+        each of shape ``(D,)``, ``(K, D)`` or ``(T, K, D)`` to match the rank
+        of ``Y``, exactly as ``analyze`` reports them.
 
     Raises:
         ValueError: If any parameter is categorical. The Gaussian input
@@ -757,7 +790,8 @@ def indices(
         TypeError: If the float width of ``X`` or ``Y`` has no unsigned
             integer counterpart for the median-heuristic selection.
     """
-    D = problem.num_vars
+    key = as_key(key, "hsic")
+    D = problem.n_params
     X_unit = cdf_to_unit_interval(X, problem)
 
     Y_3d, layout = _prepare_Y(Y)
@@ -787,11 +821,11 @@ def indices(
     r2_all, t_all, p_all, raw_all = kernel(
         Ks_stack, K_aug_compls_stack, K_aug_full, hsic_xxs, Y_cols, keys
     )
-    return (
-        layout.squeeze(r2_all.reshape(T, K, D)),
-        layout.squeeze(t_all.reshape(T, K, D)),
-        layout.squeeze(p_all.reshape(T, K, D)),
-        layout.squeeze(raw_all.reshape(T, K, D)),
+    return HSICIndices(
+        R2=layout.squeeze(r2_all.reshape(T, K, D)),
+        T=layout.squeeze(t_all.reshape(T, K, D)),
+        p_values=layout.squeeze(p_all.reshape(T, K, D)),
+        hsic_raw=layout.squeeze(raw_all.reshape(T, K, D)),
     )
 
 
@@ -801,7 +835,7 @@ def analyze(
     Y: Array | IrregularY,
     *,
     n_perms: int = 200,
-    key: Array | None = None,
+    key: Array | int,
     bandwidth: float = 1.0,
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
@@ -820,7 +854,7 @@ def analyze(
       parameter that is constant in the sample yields exactly 0: its kernel
       is identically 1, and a constant input has provably zero dependence on
       any output. This is the first-order view.
-    - **Total HSIC (T_HSIC)**: the fraction of the joint dependence lost when
+    - **Total HSIC (T)**: the fraction of the joint dependence lost when
       x_i is removed. It is analogous to a total-order Sobol index, so it also
       counts influence carried through interactions with other parameters.
 
@@ -913,9 +947,9 @@ def analyze(
             See :mod:`jaxgsa._core.invalid`.
         verbose: If ``True`` (default), print a short summary to stdout: the
             problem and the data, the wall-clock timing, and the top
-            parameters by ``T_HSIC``. Pass ``False`` for a silent run.
+            parameters by ``T``. Pass ``False`` for a silent run.
     Returns:
-        An :class:`HSICResult` with ``R2_HSIC``, ``T_HSIC``, ``p_values``, and
+        An :class:`HSICResult` with ``R2``, ``T``, ``p_values``, and
         ``hsic_raw``, each shaped ``(D,)``, ``(K, D)``, or ``(T, K, D)``, the
         non-finite report in ``invalid``, and the ``bandwidth`` and
         ``n_perms`` the run used. Those two are on the result because the
@@ -935,12 +969,13 @@ def analyze(
 
     Warns:
         JaxgsaWarning: If an output slice has zero variance (all indices NaN),
-            if a parameter is constant in the sample (its R2_HSIC is exactly
+            if a parameter is constant in the sample (its R2 is exactly
             0), or if JAX is in single precision. The V-statistic subtracts
             three sums of the same magnitude, so float32 keeps only three or
             four correct digits and the index moves with the order of the
             sample rows.
     """
+    key = as_key(key, "hsic")
     if _is_irregular_y(Y):
         return analyze_irregular(
             analyze,
@@ -954,10 +989,10 @@ def analyze(
         )
     Y = cast(Array, Y)
 
-    from jaxgsa.hsic import SPEC
+    from jaxgsa.hsic import _SPEC
 
     ctx = prepare(
-        SPEC,
+        _SPEC,
         problem,
         Y,
         X=X,
@@ -1001,8 +1036,8 @@ def analyze(
     raw_all = ctx.squeeze(raw_all)
 
     result = HSICResult(
-        R2_HSIC=r2_all,
-        T_HSIC=t_all,
+        R2=r2_all,
+        T=t_all,
         p_values=p_all,
         hsic_raw=raw_all,
         problem=problem,
@@ -1012,7 +1047,7 @@ def analyze(
     )
 
     if verbose:
-        elapsed = _verbose.stop(t0, result.T_HSIC)
+        elapsed = _verbose.stop(t0, result.T)
         n_runs, T, K = ctx.Y3.shape
         _verbose.analysis_summary(
             method="jaxgsa.hsic.analyze",
@@ -1026,7 +1061,7 @@ def analyze(
                 f"n_perms: {n_perms}",
                 f"bandwidth: {bandwidth} (median-heuristic multiplier)",
             ],
-            index_name="T_HSIC",
-            values=result.T_HSIC,
+            index_name="T",
+            values=result.T,
         )
     return result

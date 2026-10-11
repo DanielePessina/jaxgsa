@@ -34,13 +34,13 @@ class TestResolvePolicy:
         ``True`` is included because ``bool`` is an ``int`` subclass and a bare
         truthy value must not be read as a policy.
         """
-        for bad in ("Raise", "skip", "", None, 0, True, ["drop"]):
+        for bad in ("Raise", "none", "", None, 0, True, ["drop"]):
             with pytest.raises(ValueError, match="on_invalid must be one of") as exc:
                 resolve_policy(bad, method=METHOD, unit=InvalidUnit.ROW)
             message = str(exc.value)
             assert repr(bad) in message
             assert METHOD in message
-            for policy in ("raise", "propagate", "drop", "none"):
+            for policy in ("raise", "propagate", "drop", "skip"):
                 assert repr(policy) in message
 
     def test_drop_refused_where_it_is_undefined(self):
@@ -88,22 +88,22 @@ class TestCleanSample:
 
 
 class TestNonePolicy:
-    """T4: on_invalid='none' skips the scan entirely."""
+    """T4: on_invalid='skip' skips the scan entirely."""
 
     def test_resolve_accepts_none_for_every_unit(self):
-        """T4: 'none' survives allow_drop=False, where 'drop' does not."""
+        """T4: 'skip' survives allow_drop=False, where 'drop' does not."""
         for unit in InvalidUnit:
-            assert resolve_policy("none", method=METHOD, unit=unit, allow_drop=False) == "none"
+            assert resolve_policy("skip", method=METHOD, unit=unit, allow_drop=False) == "skip"
 
     def test_nan_data_is_not_looked_at(self):
-        """T4: bad data under 'none' keeps everything and reports clean.
+        """T4: bad data under 'skip' keeps everything and reports clean.
 
         The check never runs, so the verdict is the clean one even though two
         rows hold NaN. The keep mask stays all-True, so the caller applies no
         compaction, and the report cannot name rows that were never scanned.
         """
         keep, report = check_invalid(
-            policy="none",
+            policy="skip",
             method=METHOD,
             unit=InvalidUnit.ROW,
             n_units=6,
@@ -111,7 +111,7 @@ class TestNonePolicy:
             X=_rows(3),
         )
         assert keep.all()
-        assert report.policy == "none"
+        assert report.policy == "skip"
         assert report.n_invalid == 0
         assert not report.any_invalid
         assert report.n_kept == 6
@@ -124,7 +124,7 @@ class TestNonePolicy:
         different row count is a design error, not a data-quality question.
         """
         keep, report = check_invalid(
-            policy="none",
+            policy="skip",
             method=METHOD,
             unit=InvalidUnit.SALTELLI_GROUP,
             n_units=2,
@@ -136,7 +136,7 @@ class TestNonePolicy:
         assert report.n_invalid == 0
         with pytest.raises(ValueError, match="same number of sample rows"):
             check_invalid(
-                policy="none",
+                policy="skip",
                 method=METHOD,
                 unit=InvalidUnit.ROW,
                 n_units=6,

@@ -83,8 +83,8 @@ def test_indices_multi_output():
     )
     assert Y.shape == (sr.n_runs, 2, 2)
 
-    # A first-order design yields ``(S1, ST)`` with no S2 slot.
-    S1, ST = sobol.indices(sr, Y)
+    # A first-order design yields S2=None.
+    S1, ST, _ = sobol.indices(sr, Y)
     result = sobol.analyze(sr, Y)
 
     np.testing.assert_array_equal(np.asarray(S1), np.asarray(result.S1))
@@ -101,7 +101,6 @@ def test_indices_t0_ishigami_first_order():
     """
     sr = sobol.sample(
         ishigami.PROBLEM,
-        1,
         base_n=2**16,
         calc_second_order=False,
         seed=0,
@@ -109,7 +108,7 @@ def test_indices_t0_ishigami_first_order():
     )
     Y = ishigami.evaluate(jnp.asarray(sr.samples))
 
-    S1, _ = sobol.indices(sr, Y)
+    S1, _, _ = sobol.indices(sr, Y)
 
     np.testing.assert_allclose(np.asarray(S1), ishigami.ANALYTICAL_S1, atol=1e-4)
 
@@ -159,7 +158,7 @@ def test_categorical_unit_and_samples_have_different_row_counts():
             "b": {"dist": "categorical", "probs": [0.2, 0.3, 0.5]},
         }
     )
-    sr = sobol.sample(problem, 1, base_n=64, verbose=False)
+    sr = sobol.sample(problem, base_n=64, verbose=False)
 
     assert sr.unit is not None
     assert sr.n_runs < sr.unit.shape[0]
@@ -193,7 +192,7 @@ def test_transform_refuses(case, theta, message):
         problem = Problem.from_dict(
             {"a": {"dist": "categorical", "probs": [0.5, 0.5]}, "b": (0.0, 1.0)}
         )
-        sr = sobol.sample(problem, 1, base_n=64, verbose=False)
+        sr = sobol.sample(problem, base_n=64, verbose=False)
     else:
         sr = sobol.sample(GRAD_PROBLEM, 256, seed=2, verbose=False)
     if case == "hand_built":
@@ -229,7 +228,6 @@ def test_jacrev_matches_central_finite_differences():
     with jax.enable_x64():
         sr = sobol.sample(
             GRAD_PROBLEM,
-            1,
             base_n=FD_BASE_N,
             calc_second_order=False,
             seed=17,
@@ -276,7 +274,6 @@ def test_gradient_of_a_uniform_bound_has_the_right_sign():
     with jax.enable_x64():
         sr = sobol.sample(
             ishigami.PROBLEM,
-            1,
             base_n=GRAD_BASE_N,
             calc_second_order=False,
             seed=23,
@@ -296,9 +293,7 @@ def test_gradient_of_a_uniform_bound_has_the_right_sign():
 def test_downsample_keeps_the_unit_design_aligned():
     """Tier T4: a prefix slice carries a unit design that still transforms."""
     with jax.enable_x64():
-        sr = sobol.sample(
-            GRAD_PROBLEM, 1, base_n=256, calc_second_order=False, seed=8, verbose=False
-        )
+        sr = sobol.sample(GRAD_PROBLEM, base_n=256, calc_second_order=False, seed=8, verbose=False)
         small = sr.downsample(64)
         X = np.asarray(small.transform())
 

@@ -145,8 +145,12 @@ class KucherenkoResult(SchemaResult):
         aggregated and the interval is drawn again from those draws, at the
         same level and with the same rule. The weights stay fixed at the
         point-estimate values in every draw, so the interval leaves out the
-        sampling noise of the weights themselves. Otherwise the new ``*_conf``
-        fields are ``NaN``.
+        sampling noise of the weights themselves. Otherwise the ``*_conf`` fields
+        and ``ci`` become ``None`` and one ``JaxgsaWarning`` says that
+        ``keep_replicates=True`` is needed.
+
+        The output axes collapse to size 1. A result with no output axes
+        (``S1`` of shape ``(D,)``) is returned unchanged.
 
         Args:
             weights: ``"variance"`` (default) or ``"equal"``.
@@ -156,6 +160,10 @@ class KucherenkoResult(SchemaResult):
 
         Raises:
             ValueError: If ``weights`` is not one of the two names.
+
+        Warns:
+            JaxgsaWarning: If the result has bootstrap intervals but kept no
+                replicates, so the intervals are dropped.
         """
         view = self
         if self.closed is not None:
@@ -190,7 +198,7 @@ class KucherenkoResult(SchemaResult):
                 "comes from a design with subsets='singletons'. Draw the design with "
                 "jaxgsa.kucherenko.sample(problem, n, subsets='all') and analyze that."
             )
-        return np.asarray(self.subset_total), self.problem.num_vars
+        return np.asarray(self.subset_total), self.problem.n_params
 
     def _allocation_result(
         self,
@@ -211,7 +219,7 @@ class KucherenkoResult(SchemaResult):
             # subset indices; the field is typed for the two surrogate backends.
             backend="exact",
             explained_variance=jnp.ones_like(variance),
-            order=self.problem.num_vars,
+            order=self.problem.n_params,
             invalid=self.invalid,
             Sh_conf=conf,
             S1_conf=self.S1_conf,
@@ -341,7 +349,7 @@ class KucherenkoResult(SchemaResult):
             return ds
         base, _ = self._base_dims(time_coords)
         lead = base[:-1]
-        D = self.problem.num_vars
+        D = self.problem.n_params
         masks = np.arange(1, 2**D)
         names = list(self.problem.names)
         labels = ["+".join(names[j] for j in range(D) if (m >> j) & 1) for m in masks.tolist()]

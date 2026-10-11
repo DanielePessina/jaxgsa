@@ -213,3 +213,17 @@ class TestEveryMethodIsDumped:
             assert name not in getattr(baseline_dump, other), (
                 f"{name} is listed in {other}, which calls it the wrong way"
             )
+
+
+def test_renamed_fields_in_an_old_baseline_still_compare():
+    """A 1.0 baseline holds old field names. A rename is not a lost field."""
+
+    def entry(**fields: Any) -> dict[str, Any]:
+        return {"case": {"methods": {"hsic": {"status": "ok", "fields": fields}}}}
+
+    old = entry(R2_HSIC=_array([0.5]), T_HSIC=_array([0.1]))
+    new = entry(R2=_array([0.5]), T=_array([0.1]))
+    assert not compare(old, new)
+    moved = compare(old, entry(R2=_array([0.6]), T=_array([0.1])))
+    assert moved.schema == []
+    assert len(moved.values) == 1

@@ -23,7 +23,7 @@ BAD_X_ROW = 4
 # name -> (module, extra analyze kwargs, result field holding the main index)
 METHODS = {
     "pawn": (pawn, {}, "pawn"),
-    "hsic": (hsic, {"n_perms": 5, "key": jax.random.key(0)}, "R2_HSIC"),
+    "hsic": (hsic, {"n_perms": 5, "key": jax.random.key(0)}, "R2"),
     "borgonovo": (borgonovo, {"n_bootstrap": 0}, "delta"),
     "optimal_transport": (optimal_transport, {}, "ot"),
 }

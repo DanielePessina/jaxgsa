@@ -192,7 +192,7 @@ def analysis_summary(
             ``problem.dependence``.
     """
     emit(method)
-    emit(f"{_INDENT}problem: D={problem.num_vars} ({_preview_names(problem.names)})")
+    emit(f"{_INDENT}problem: D={problem.n_params} ({_preview_names(problem.names)})")
     emit(f"{_INDENT}{_INDENT}marginals: {_marginal_counts(problem)}")
     kind = problem.dependence if dependence is None else dependence
     emit(f"{_INDENT}{_INDENT}dependence: {_DEPENDENCE_LABELS[kind]}")
@@ -215,7 +215,7 @@ def _results_section(
     conf: Any | None,
 ) -> None:
     """Rank the top ``min(D, 5)`` parameters by the headline index."""
-    D = problem.num_vars
+    D = problem.n_params
     flat = np.asarray(values, dtype=np.float64).reshape(-1, D)
     n_slices = flat.shape[0]
     point = flat.mean(axis=0)
@@ -263,4 +263,4 @@ def sample_summary(
             with ``str``; format fractions at the call site.
     """
     pairs = ", ".join(f"{key}={value}" for key, value in entries)
-    emit(f"{method}: D={problem.num_vars}, {pairs}")
+    emit(f"{method}: D={problem.n_params}, {pairs}")

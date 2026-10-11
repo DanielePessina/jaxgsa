@@ -22,16 +22,24 @@ sample. An interval needs replicated designs with different random phase
 shifts, which is a sampling change rather than an ``analyze`` keyword.
 """
 
-from jaxgsa._core.invalid import InvalidUnit
-from jaxgsa._core.registry import MethodSpec, register
-from jaxgsa.efast._analyze import analyze, indices
+from jaxgsa._core.invalid import InvalidUnit as _InvalidUnit
+from jaxgsa._core.registry import MethodSpec as _MethodSpec
+from jaxgsa._core.registry import register as _register
+from jaxgsa.efast._analyze import EFASTIndices, analyze, indices
 from jaxgsa.efast._result import EFASTResult
 from jaxgsa.efast._sampling import EFASTSamples, sample
 
-__all__ = ["EFASTResult", "EFASTSamples", "analyze", "indices", "sample"]
+__all__ = [
+    "EFASTIndices",
+    "EFASTResult",
+    "EFASTSamples",
+    "analyze",
+    "indices",
+    "sample",
+]
 
-SPEC = register(
-    MethodSpec(
+_SPEC = _register(
+    _MethodSpec(
         name="efast",
         analyze=analyze,
         sample=sample,
@@ -42,6 +50,6 @@ SPEC = register(
         # A search curve is an ordered sweep read by a discrete Fourier
         # transform, so it cannot be dropped at all: removing a point does not
         # shrink the sample, it changes what the estimator computes.
-        invalid_unit=InvalidUnit.CURVE,
+        invalid_unit=_InvalidUnit.CURVE,
     )
 )

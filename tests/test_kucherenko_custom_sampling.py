@@ -32,7 +32,7 @@ def sampler(
     return result
 
 
-PROBLEM = BASE_PROBLEM.with_sampler(sampler, dimension=1)
+PROBLEM = BASE_PROBLEM.with_sampler(sampler, sampler_dimension=1)
 
 
 @pytest.mark.verbose_output
@@ -41,7 +41,7 @@ def test_nonlinear_dependence_and_repeated_rows(
 ) -> None:
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        design = kucherenko.sample(PROBLEM, 1024, seed=31)
+        design = kucherenko.sample(PROBLEM, base_n=1024, seed=31)
     assert not caught
     assert design.base_n == 1024
     assert design.n_runs == 5 * 1024
@@ -67,17 +67,17 @@ def test_nonlinear_dependence_and_repeated_rows(
     assert loaded.problem.sampler_dimension == PROBLEM.sampler_dimension
     assert loaded.dependence == "custom"
     with pytest.raises(ValueError, match="does not store the custom sampler"):
-        kucherenko.sample(loaded.problem, 4, seed=0, verbose=False)
+        kucherenko.sample(loaded.problem, base_n=4, seed=0, verbose=False)
     restored = kucherenko.analyze(loaded, jnp.asarray(loaded.samples[:, 1]), verbose=False)
     assert isinstance(restored, kucherenko.KucherenkoResult)
     assert restored.dependence == "custom"
     np.testing.assert_array_equal(restored.S1, result.S1)
-    repeat = kucherenko.sample(PROBLEM, 1024, seed=31, verbose=False)
+    repeat = kucherenko.sample(PROBLEM, base_n=1024, seed=31, verbose=False)
     np.testing.assert_array_equal(repeat.samples, design.samples)
 
 
 def test_custom_sample_size_rounds_up_to_power_of_two() -> None:
-    design = kucherenko.sample(PROBLEM, 1025, seed=3, verbose=False)
+    design = kucherenko.sample(PROBLEM, 1025 * 5, seed=3, verbose=False)
     assert design.base_n == 2048
     assert design.n_runs == 5 * 2048
 
@@ -93,7 +93,9 @@ def test_conditional_output_must_preserve_fixed_columns() -> None:
         return sampler(u) if conditioning_rows is None else conditioning_rows + 1
 
     with pytest.raises(ValueError, match="fixed columns"):
-        kucherenko.sample(BASE_PROBLEM.with_sampler(bad, dimension=1), 8, verbose=False)
+        kucherenko.sample(
+            BASE_PROBLEM.with_sampler(bad, sampler_dimension=1), base_n=8, verbose=False
+        )
 
 
 def _gaussian_sampler(rho: float):
@@ -124,11 +126,11 @@ def _gaussian_sampler(rho: float):
 def test_gaussian_custom_conditionals_match_analytic_indices() -> None:
     rho = 0.7
     problem = Problem.from_dict({"x": (-10, 10), "y": (-10, 10)}).with_sampler(
-        _gaussian_sampler(rho), dimension=2
+        _gaussian_sampler(rho), sampler_dimension=2
     )
     # Measured error at base 4096 over eight seeds is under 3e-4, against the
     # tolerances below.
-    design = kucherenko.sample(problem, 4096, seed=19, verbose=False)
+    design = kucherenko.sample(problem, base_n=4096, seed=19, verbose=False)
     result = kucherenko.analyze(design, jnp.asarray(design.samples.sum(axis=1)), verbose=False)
     assert isinstance(result, kucherenko.KucherenkoResult)
     np.testing.assert_allclose(result.S1, [(1 + rho) / 2] * 2, atol=0.015)
@@ -159,9 +161,11 @@ def test_independent_custom_sampler_matches_builtin_independent_path() -> None:
         return x[:, 0] + 0.5 * x[:, 1] ** 2 + 0.3 * x[:, 0] * x[:, 2]
 
     base = Problem.from_dict({"a": bounds, "b": bounds, "c": bounds})
-    custom = kucherenko.sample(base.with_sampler(independent, dimension=3), 2**12, seed=4)
+    custom = kucherenko.sample(
+        base.with_sampler(independent, sampler_dimension=3), base_n=2**12, seed=4
+    )
     with pytest.warns(Warning, match="declares no dependence"):
-        builtin = kucherenko.sample(base, 2**12, seed=5, verbose=False)
+        builtin = kucherenko.sample(base, base_n=2**12, seed=5, verbose=False)
     r_custom = kucherenko.analyze(custom, jnp.asarray(model(custom.samples)), verbose=False)
     r_builtin = kucherenko.analyze(builtin, jnp.asarray(model(builtin.samples)), verbose=False)
     assert isinstance(r_custom, kucherenko.KucherenkoResult)
@@ -173,7 +177,7 @@ def test_independent_custom_sampler_matches_builtin_independent_path() -> None:
 
 
 def test_missing_dependence_metadata_defaults_to_problem() -> None:
-    design = kucherenko.sample(PROBLEM, 8, verbose=False)
+    design = kucherenko.sample(PROBLEM, base_n=8, verbose=False)
     loaded = kucherenko.KucherenkoSamples._from_payload(
         samples=design.samples,
         n_expanded=design.n_expanded,
@@ -190,8 +194,8 @@ def test_custom_time_resolved_and_irregular_outputs_keep_dependence_metadata() -
 
     problem = Problem.from_dict(
         {"x": (-1, 1), "square": (0, 1)}, output_names=("a", "b")
-    ).with_sampler(sampler, dimension=1)
-    design = kucherenko.sample(problem, 32, seed=5, verbose=False)
+    ).with_sampler(sampler, sampler_dimension=1)
+    design = kucherenko.sample(problem, base_n=32, seed=5, verbose=False)
     y = jnp.asarray(design.samples[:, 1])
     values = jnp.stack((jnp.stack((y, 2 * y), axis=1), jnp.stack((3 * y, 4 * y), axis=1)), axis=2)
     regular = kucherenko.analyze(design, values, verbose=False)

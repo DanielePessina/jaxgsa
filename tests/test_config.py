@@ -68,9 +68,9 @@ def test_default_budget_is_512_mib_and_512_restates_it(_restore_memory_budget):
     claim the unit change rests on is that the new spelling of the default
     resolves to the old one.
     """
-    assert jaxgsa.config.get_memory_budget() == 536870912
+    assert jaxgsa.config.get_memory_budget() == 512.0
     jaxgsa.config.set_memory_budget(512)
-    assert jaxgsa.config.get_memory_budget() == 536870912
+    assert jaxgsa.config.get_memory_budget() == 512.0
 
 
 def test_each_unit_resolves_to_its_exact_byte_count(_restore_memory_budget):
@@ -83,9 +83,9 @@ def test_each_unit_resolves_to_its_exact_byte_count(_restore_memory_budget):
     """
     for unit, factor in (("b", 1), ("kb", 1024), ("kib", 1024)):
         jaxgsa.config.set_memory_budget(3, unit=unit)
-        assert jaxgsa.config.get_memory_budget() == 3 * factor
+        assert jaxgsa.config.get_memory_budget(unit="b") == 3 * factor
     jaxgsa.config.set_memory_budget(7, unit="\tMiB\n")
-    assert jaxgsa.config.get_memory_budget() == 7 * 1024**2
+    assert jaxgsa.config.get_memory_budget() == 7.0
 
     with pytest.raises(ValueError, match="unknown memory unit") as exc:
         jaxgsa.config.set_memory_budget(1, unit="megabytes")
@@ -97,13 +97,13 @@ def test_each_unit_resolves_to_its_exact_byte_count(_restore_memory_budget):
 def test_values_convert_to_bytes(_restore_memory_budget):
     """T4: a bare number is megabytes, a float is legal, a fractional byte rounds."""
     jaxgsa.config.set_memory_budget(256)
-    assert jaxgsa.config.get_memory_budget() == 256 * 1024**2
+    assert jaxgsa.config.get_memory_budget() == 256.0
 
     jaxgsa.config.set_memory_budget(1.5, unit="gb")
-    assert jaxgsa.config.get_memory_budget() == 1536 * 1024**2
+    assert jaxgsa.config.get_memory_budget() == 1536.0
 
     jaxgsa.config.set_memory_budget(1.6, unit="b")
-    budget = jaxgsa.config.get_memory_budget()
+    budget = jaxgsa.config.get_memory_budget(unit="b")
     assert budget == 2
     assert isinstance(budget, int)
 
@@ -118,31 +118,21 @@ def test_invalid_values_are_rejected():
         jaxgsa.config.set_memory_budget(0.4, unit="b")
 
 
-def test_bytes_shaped_guard(_restore_memory_budget):
-    """T4: pre-0.9 byte counts without a unit raise instead of meaning TB.
-
-    ``512 * 1024**2`` used to mean 512 MiB. Under the MB default it would mean
-    512 TB. The guard turns that silent reinterpretation into an error, and
-    leaves large but real MB figures (64000 MB = 62.5 GiB) alone.
-    """
-    for legacy in (512 * 1024**2, 1024**2, 2**30, 1e9):
-        with pytest.raises(ValueError, match="megabytes by default") as exc:
-            jaxgsa.config.set_memory_budget(legacy)
-        message = str(exc.value)
-        assert "unit='b'" in message
-        assert f"set_memory_budget({legacy / 1024**2:g})" in message
-
-    for plausible in (512, 64000, 1024**2 - 1):
-        jaxgsa.config.set_memory_budget(plausible)
-        assert jaxgsa.config.get_memory_budget() == plausible * 1024**2
+def test_large_unitless_value_is_megabytes(_restore_memory_budget):
+    """T4: there is no bytes-shaped guard. A bare number is always megabytes."""
+    jaxgsa.config.set_memory_budget(512 * 1024**2)
+    assert jaxgsa.config.get_memory_budget() == 512 * 1024**2
 
 
-def test_get_memory_budget_returns_int_bytes_by_default(_restore_memory_budget):
-    """T4: the no-argument return value is bytes, as an int."""
+def test_get_memory_budget_defaults_to_megabytes_like_the_setter(_restore_memory_budget):
+    """T4: the no-argument return value is MB, and bytes are an int on request."""
     jaxgsa.config.set_memory_budget(256)
-    budget = jaxgsa.config.get_memory_budget()
+    assert jaxgsa.config.get_memory_budget() == 256.0
+    budget = jaxgsa.config.get_memory_budget(unit="b")
     assert budget == 268435456
     assert isinstance(budget, int)
+    jaxgsa.config.set_memory_budget(jaxgsa.config.get_memory_budget())
+    assert jaxgsa.config.get_memory_budget(unit="b") == 268435456
     jaxgsa.config.set_memory_budget(1536, unit="mb")
     assert jaxgsa.config.get_memory_budget(unit="mb") == 1536.0
     assert jaxgsa.config.get_memory_budget(unit="gb") == 1.5

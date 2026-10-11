@@ -26,11 +26,10 @@ class DeltaResult(SchemaResult):
         delta: Borgonovo delta index per parameter, shape ``(..., D)``. A
             value of 0 means the output distribution does not change with
             the parameter, and 1 means the parameter fully determines it.
-            The index is bias-corrected whenever ``n_bootstrap > 0`` and
-            ``bias_correct`` is not ``False`` -- that includes the default
-            ``bias_correct=None``, which applies the correction and warns
-            once per process that it did. The corrected estimate can fall
-            marginally below 0 for weak parameters.
+            The index is the plain estimate unless ``bias_correct=True``
+            was passed, which reports the bias-corrected estimate. The
+            corrected estimate can fall marginally below 0 for weak
+            parameters.
         delta_conf: Bootstrap confidence interval for ``delta``,
             shape ``(2, ...)`` for ``[lower, upper]``. ``None`` when
             ``n_bootstrap=0``.

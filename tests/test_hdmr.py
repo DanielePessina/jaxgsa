@@ -19,7 +19,7 @@ from jaxgsa.hdmr import analyze as analyze_hdmr
 from jaxgsa.problem import GaussianInputSpec, Problem
 from jaxgsa.sampling import monte_carlo
 
-# One Ishigami data set and one fit per ``maxorder``, shared with
+# One Ishigami data set and one fit per ``order``, shared with
 # test_hdmr_batching.py so the whole suite pays for each fit once.
 
 
@@ -44,7 +44,7 @@ def _assert_matches_analytical_s1_st(S1: np.ndarray, ST: np.ndarray) -> None:
 
 @pytest.fixture(scope="module")
 def hdmr_result(hdmr_by_order):
-    """The ``maxorder=2`` fit of the shared Ishigami data."""
+    """The ``order=2`` fit of the shared Ishigami data."""
     return hdmr_by_order[2]
 
 
@@ -61,7 +61,7 @@ def test_st_accuracy(hdmr_result):
     ST = np.array(hdmr_result.ST)
     _assert_matches_analytical_s1_st(np.array(hdmr_result.S1), ST)
 
-    D = PROBLEM.num_vars
+    D = PROBLEM.n_params
     # First-order terms (D) + second-order interactions C(D,2) = D(D-1)/2.
     n_terms = D + D * (D - 1) // 2
     assert hdmr_result.Sa.shape == (n_terms,)
@@ -88,7 +88,7 @@ def test_hdmr_accepts_gaussian_inputs():
     x3 = jax.random.uniform(jax.random.PRNGKey(101), (N,), minval=0.0, maxval=1.0)
     X = jnp.column_stack([x1, x2, x3])
     Y = X[:, 0] + X[:, 1] ** 2 + X[:, 2]
-    result = analyze_hdmr(problem, X, Y, maxorder=1)
+    result = analyze_hdmr(problem, X, Y, order=1)
     assert result.S1.shape == (3,)
     assert result.ST.shape == (3,)
     # x2 ~ N(0, 1) enters as x2**2 (variance 2); each uniform adds only 1/12.
@@ -116,7 +116,7 @@ def test_indices_are_affine_invariant(hdmr_ishigami_xy, hdmr_result):
     Y_affine = 3.0 * Y + 17.0
 
     base = hdmr_result
-    affine = analyze_hdmr(PROBLEM, X, Y_affine, maxorder=2, m=2)
+    affine = analyze_hdmr(PROBLEM, X, Y_affine, order=2, n_intervals=2)
 
     np.testing.assert_allclose(np.asarray(base.S1), np.asarray(affine.S1), rtol=1e-5, atol=1e-5)
     np.testing.assert_allclose(np.asarray(base.ST), np.asarray(affine.ST), rtol=1e-5, atol=1e-5)
@@ -152,8 +152,8 @@ def test_backfitting_stop_rule_does_not_depend_on_y_scale_or_m():
     problem, X, Y = _correlated_additive_case()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        s1_ref = np.asarray(analyze_hdmr(problem, X, Y, m=2, maxiter=100).S1)
-        small = analyze_hdmr(problem, X, Y * 1e-3, m=4, maxiter=100)
+        s1_ref = np.asarray(analyze_hdmr(problem, X, Y, n_intervals=2, max_iter=100).S1)
+        small = analyze_hdmr(problem, X, Y * 1e-3, n_intervals=4, max_iter=100)
     np.testing.assert_allclose(np.asarray(small.S1), s1_ref, atol=0.02)
 
 
@@ -163,23 +163,23 @@ def test_backfitting_stop_rule_full_scale_and_m_grid():
     problem, X, Y = _correlated_additive_case()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        s1_ref = np.asarray(analyze_hdmr(problem, X, Y, m=2, maxiter=100).S1)
+        s1_ref = np.asarray(analyze_hdmr(problem, X, Y, n_intervals=2, max_iter=100).S1)
         for m in (4, 8):
             for scale in (1e-3, 1.0, 1e3):
-                result = analyze_hdmr(problem, X, Y * scale, m=m, maxiter=100)
+                result = analyze_hdmr(problem, X, Y * scale, n_intervals=m, max_iter=100)
                 np.testing.assert_allclose(np.asarray(result.S1), s1_ref, atol=0.02)
 
 
 # ---------------------------------------------------------------------------
-# maxorder tests
+# order tests
 # ---------------------------------------------------------------------------
 
 
-def test_maxorder_selects_the_term_count(hdmr_by_order):
-    """For D=3 the term count is 3, 6 and 7 at maxorder 1, 2 and 3."""
-    assert PROBLEM.num_vars == 3
-    for maxorder, n_terms in ((1, 3), (2, 6), (3, 7)):
-        result = hdmr_by_order[maxorder]
+def test_order_selects_the_term_count(hdmr_by_order):
+    """For D=3 the term count is 3, 6 and 7 at order 1, 2 and 3."""
+    assert PROBLEM.n_params == 3
+    for order, n_terms in ((1, 3), (2, 6), (3, 7)):
+        result = hdmr_by_order[order]
         assert result.Sa.shape == (n_terms,)
         assert len(result.terms) == n_terms
 
@@ -194,7 +194,7 @@ def test_multi_output_analytical_ishigami_emulator(hdmr_ishigami_xy):
     X, Y = hdmr_ishigami_xy
     Y_multi = jnp.stack([Y, 2.0 * Y], axis=1)
 
-    result = analyze_hdmr(PROBLEM, X, Y_multi, maxorder=2, m=2)
+    result = analyze_hdmr(PROBLEM, X, Y_multi, order=2, n_intervals=2)
     Y_pred = result.predict(X)
 
     assert result._fit is not None
@@ -227,7 +227,7 @@ def test_time_series_multi_output_emulator_preserves_axes(hdmr_ishigami_xy):
         axis=1,
     )
 
-    result = analyze_hdmr(PROBLEM, X, Y_tk, maxorder=2, m=2)
+    result = analyze_hdmr(PROBLEM, X, Y_tk, order=2, n_intervals=2)
     Y_pred = result.predict(X)
 
     assert result._fit is not None
@@ -257,31 +257,33 @@ def test_constant_output_with_float32_rounding_noise_still_reads_as_zero_varianc
     2e-16, not zero, so this case would have slipped past the old guard.
     """
     N = 500
-    D = PROBLEM.num_vars
+    D = PROBLEM.n_params
     key = jax.random.PRNGKey(99)
     bounds = jnp.array(PROBLEM.bounds)
     X = jax.random.uniform(key, shape=(N, D), minval=bounds[:, 0], maxval=bounds[:, 1])
     Y = jnp.full(N, 0.1)
     assert float(jnp.var(Y)) != 0.0, "the naive variance must be nonzero for this to test the fix"
     with pytest.warns(UserWarning, match="zero variance"):
-        result = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2)
+        result = analyze_hdmr(PROBLEM, X, Y, order=2, n_intervals=2)
     assert jnp.all(jnp.isnan(result.Sa))
     assert jnp.all(jnp.isnan(result.ST))
 
 
 def test_validation_errors():
     """Input validation should raise on bad inputs."""
-    X = jnp.ones((100, 3))
-    Y = jnp.ones(100)
+    # Order 2, n_intervals 2: the largest term has 5**2 = 25 coefficients, so
+    # the floor is 26 rows. Below it the fit is not computable.
+    X = jnp.ones((25, 3))
+    Y = jnp.ones(25)
 
-    with pytest.raises(ValueError, match="at least 300"):
+    with pytest.raises(ValueError, match=r"jaxgsa\.hdmr: N=25 rows is too few"):
         analyze_hdmr(PROBLEM, X, Y)
 
     X = jnp.ones((500, 3))
     Y = jnp.ones(500)
 
-    with pytest.raises(ValueError, match="maxorder"):
-        analyze_hdmr(PROBLEM, X, Y, maxorder=4)
+    with pytest.raises(ValueError, match="order"):
+        analyze_hdmr(PROBLEM, X, Y, order=4)
 
     with pytest.raises(ValueError, match="slice_chunk_size"):
         analyze_hdmr(PROBLEM, X, Y, slice_chunk_size=0)
@@ -298,7 +300,7 @@ def test_validation_errors():
 
 
 def test_fit_scalars_rejected_in_analyze_and_indices():
-    """T4: m, maxiter and lambdax are validated, in both entry points.
+    """T4: n_intervals, max_iter and ridge are validated, in both entry points.
 
     Each of the three used to reach the fit unchecked and degrade it
     silently. Both ``analyze`` and ``indices`` run the same checks (one
@@ -309,10 +311,10 @@ def test_fit_scalars_rejected_in_analyze_and_indices():
     X = jnp.ones((500, 3))
     Y = jnp.ones(500)
     cases = [
-        ({"m": 0}, "m must be >= 1"),
-        ({"m": -1}, "m must be >= 1"),
-        ({"maxiter": 0}, "maxiter must be >= 1"),
-        ({"lambdax": -1.0}, "lambdax must be >= 0"),
+        ({"n_intervals": 0}, "n_intervals must be >= 1"),
+        ({"n_intervals": -1}, "n_intervals must be >= 1"),
+        ({"max_iter": 0}, "max_iter must be >= 1"),
+        ({"ridge": -1.0}, "ridge must be >= 0"),
     ]
     for kwargs, match in cases:
         with pytest.raises(ValueError, match=match):
@@ -324,13 +326,13 @@ def test_fit_scalars_rejected_in_analyze_and_indices():
 def test_fit_scalars_valid_edges_pass(hdmr_ishigami_xy):
     """T4: the smallest legal values fit without an error.
 
-    ``m=1`` is the minimal cubic basis (one knot interval, four functions),
-    ``maxiter=1`` is one backfitting sweep, ``lambdax=0.0`` is an
+    ``n_intervals=1`` is the minimal cubic basis (one knot interval, four functions),
+    ``max_iter=1`` is one backfitting sweep, ``ridge=0.0`` is an
     unregularized solve. All three are degraded-but-defined, so they must
     run, not raise.
     """
     X, Y = hdmr_ishigami_xy
-    result = analyze_hdmr(PROBLEM, X, Y, maxorder=1, m=1, maxiter=1, lambdax=0.0)
+    result = analyze_hdmr(PROBLEM, X, Y, order=1, n_intervals=1, max_iter=1, ridge=0.0)
     assert np.all(np.isfinite(np.asarray(result.S1)))
 
 
@@ -346,12 +348,12 @@ def _term_index(result, label: str) -> int:
 
 def test_s2_property_shape_and_symmetry(hdmr_result):
     """S2 is symmetric, indexed by terms, and has no diagonal."""
-    D = PROBLEM.num_vars
+    D = PROBLEM.n_params
     S2 = np.array(hdmr_result.S2)
     assert S2.shape == (D, D)
     # Diagonal has no pairwise term, so it stays NaN.
     assert np.all(np.isnan(np.diag(S2)))
-    # Off-diagonal pairs are populated (Ishigami, maxorder=2) and symmetric.
+    # Off-diagonal pairs are populated (Ishigami, order=2) and symmetric.
     offdiag = S2[~np.eye(D, dtype=bool)]
     assert np.all(np.isfinite(offdiag))
     np.testing.assert_array_equal(S2, S2.T)
@@ -366,9 +368,9 @@ def test_s2_property_shape_and_symmetry(hdmr_result):
     assert S2[0, 2] > S2[1, 2]
 
 
-def test_s2_s3_all_nan_when_maxorder_1(hdmr_by_order):
+def test_s2_s3_all_nan_when_order_1(hdmr_by_order):
     """With no interaction terms, S2 and S3 are entirely NaN."""
-    D = PROBLEM.num_vars
+    D = PROBLEM.n_params
     result = hdmr_by_order[1]
     assert result.S2.shape == (D, D)
     assert bool(jnp.all(jnp.isnan(result.S2)))
@@ -376,10 +378,10 @@ def test_s2_s3_all_nan_when_maxorder_1(hdmr_by_order):
     assert bool(jnp.all(jnp.isnan(result.S3)))
 
 
-def test_s3_property_maxorder_3(hdmr_by_order):
+def test_s3_property_order_3(hdmr_by_order):
     """S3 is a symmetric (D, D, D) tensor matching the triple's Sa entry."""
     names = PROBLEM.names
-    D = PROBLEM.num_vars
+    D = PROBLEM.n_params
     result = hdmr_by_order[3]
     S3 = np.array(result.S3)
     Sa = np.array(result.Sa)
@@ -423,7 +425,7 @@ def correlated_hdmr_fit():
     Y = _linear_interaction(X)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        result = analyze_hdmr(problem, X, Y, maxorder=2, m=2)
+        result = analyze_hdmr(problem, X, Y, order=2, n_intervals=2)
     return result, caught
 
 
@@ -435,7 +437,7 @@ def test_st_is_scsa_total_under_correlation(correlated_hdmr_fit):
     fields so a change of convention cannot pass silently.
     """
     result, _ = correlated_hdmr_fit
-    D = result.problem.num_vars
+    D = result.problem.n_params
 
     def _scatter(per_term):
         out = np.zeros(D)
@@ -485,7 +487,7 @@ class TestHDMROnInvalid:
     free of it so no caller can trigger the policy twice.
     """
 
-    HDMR_KWARGS: dict[str, Any] = dict(maxorder=2, m=2)
+    HDMR_KWARGS: dict[str, Any] = dict(order=2, n_intervals=2)
 
     def test_raise_is_the_default_and_names_the_rows(self, hdmr_ishigami_xy):
         """T4: a non-finite Y refuses the analysis and says which rows carry it."""
@@ -576,7 +578,7 @@ class TestBootstrapIntervals:
         """
         X, Y = self._data()
         result = analyze_hdmr(
-            PROBLEM, X, Y, maxorder=2, maxiter=50, n_bootstrap=5, key=jax.random.key(0)
+            PROBLEM, X, Y, order=2, max_iter=50, n_bootstrap=5, key=jax.random.key(0)
         )
 
         for point, conf in (
@@ -606,8 +608,8 @@ class TestBootstrapIntervals:
             PROBLEM,
             X,
             Y,
-            maxorder=2,
-            maxiter=50,
+            order=2,
+            max_iter=50,
             n_bootstrap=4,
             conf_level=0.9,
             ci_method="gaussian",
@@ -625,7 +627,7 @@ class TestBootstrapIntervals:
         """T4: no key means no interval, and it is refused rather than seeded."""
         X, Y = self._data()
         with pytest.raises(ValueError, match="key is required"):
-            analyze_hdmr(PROBLEM, X, Y, maxorder=2, maxiter=50, n_bootstrap=3)
+            analyze_hdmr(PROBLEM, X, Y, order=2, max_iter=50, n_bootstrap=3)
 
 
 # ---------------------------------------------------------------------------
@@ -653,7 +655,7 @@ class TestUnexplainedVarianceWarning:
         """A decomposition that captures 7% of the variance says so."""
         problem, X, Y = self._oscillatory()
         with pytest.warns(JaxgsaWarning, match=r"result\.S\.sum\(\) is 0\.\d+"):
-            result = analyze_hdmr(problem, X, Y, maxorder=1, m=2, verbose=False)
+            result = analyze_hdmr(problem, X, Y, order=1, n_intervals=2, verbose=False)
         assert float(np.asarray(result.S).sum()) < 0.5
 
     def test_a_complete_decomposition_is_silent(self, hdmr_result):
@@ -664,3 +666,30 @@ class TestUnexplainedVarianceWarning:
         test already proves it was silent.
         """
         assert 0.5 <= float(np.asarray(hdmr_result.S).sum()) <= 1.3
+
+
+def test_below_300_rows_warns_instead_of_raising():
+    """N5: between the computable floor and 300 rows the fit runs and warns."""
+    rng = np.random.default_rng(0)
+    X = jnp.asarray(rng.uniform(-np.pi, np.pi, (150, 3)))
+    Y = jnp.sin(X[:, 0]) + 0.5 * X[:, 1] ** 2
+    with pytest.warns(JaxgsaWarning, match=r"jaxgsa\.hdmr: N=150 rows is below the 300"):
+        result = analyze_hdmr(PROBLEM, X, Y, verbose=False)
+    assert np.isfinite(np.asarray(result.S1)).all()
+
+
+def test_drop_below_floor_refuses_in_the_policy_words():
+    """N5: on_invalid="drop" refuses once the survivors fall under the floor."""
+    rng = np.random.default_rng(0)
+    X = jnp.asarray(rng.uniform(-np.pi, np.pi, (60, 3)))
+    Y = np.array(jnp.sin(X[:, 0]))
+    Y[:40] = np.nan
+    with pytest.raises(ValueError, match="every usable row was removed"):
+        analyze_hdmr(PROBLEM, X, jnp.asarray(Y), on_invalid="drop", verbose=False)
+
+
+def test_invalid_order_is_refused_before_the_row_floor_with_drop():
+    X = monte_carlo(PROBLEM, 64, seed=0)
+    Y = np.asarray(X).sum(axis=1)
+    with pytest.raises(ValueError, match="order must be 1, 2, or 3"):
+        analyze_hdmr(PROBLEM, X, Y, order=5, on_invalid="drop")

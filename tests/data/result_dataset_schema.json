@@ -103,9 +103,10 @@
     ],
     "data_vars": [
       "lower_bound",
+      "mu",
       "nu",
-      "sigma",
-      "upper_bound"
+      "upper_bound",
+      "variance"
     ],
     "dims": [
       "output",
@@ -114,9 +115,10 @@
     "type": "DGSMResult",
     "var_dims": [
       "lower_bound:output,param",
+      "mu:output,param",
       "nu:output,param",
-      "sigma:output,param",
-      "upper_bound:output,param"
+      "upper_bound:output,param",
+      "variance:output"
     ]
   },
   "dgsm@scalar": {
@@ -126,9 +128,10 @@
     ],
     "data_vars": [
       "lower_bound",
+      "mu",
       "nu",
-      "sigma",
-      "upper_bound"
+      "upper_bound",
+      "variance"
     ],
     "dims": [
       "param"
@@ -136,9 +139,10 @@
     "type": "DGSMResult",
     "var_dims": [
       "lower_bound:param",
+      "mu:param",
       "nu:param",
-      "sigma:param",
-      "upper_bound:param"
+      "upper_bound:param",
+      "variance:"
     ]
   },
   "dgsm@series": {
@@ -150,9 +154,10 @@
     ],
     "data_vars": [
       "lower_bound",
+      "mu",
       "nu",
-      "sigma",
-      "upper_bound"
+      "upper_bound",
+      "variance"
     ],
     "dims": [
       "output",
@@ -162,9 +167,10 @@
     "type": "DGSMResult",
     "var_dims": [
       "lower_bound:time,output,param",
+      "mu:time,output,param",
       "nu:time,output,param",
-      "sigma:time,output,param",
-      "upper_bound:time,output,param"
+      "upper_bound:time,output,param",
+      "variance:time,output"
     ]
   },
   "efast@multi": {
@@ -253,6 +259,7 @@
       "ST",
       "Sa",
       "Sb",
+      "explained_variance",
       "rmse",
       "select"
     ],
@@ -270,6 +277,7 @@
       "ST:output,param",
       "Sa:output,term",
       "Sb:output,term",
+      "explained_variance:output",
       "rmse:output",
       "select:term"
     ]
@@ -290,6 +298,7 @@
       "ST",
       "Sa",
       "Sb",
+      "explained_variance",
       "rmse",
       "select"
     ],
@@ -306,6 +315,7 @@
       "ST:param",
       "Sa:term",
       "Sb:term",
+      "explained_variance:",
       "rmse:",
       "select:term"
     ]
@@ -328,6 +338,7 @@
       "ST",
       "Sa",
       "Sb",
+      "explained_variance",
       "rmse",
       "select"
     ],
@@ -346,6 +357,7 @@
       "ST:time,output,param",
       "Sa:time,output,term",
       "Sb:time,output,term",
+      "explained_variance:time,output",
       "rmse:time,output",
       "select:term"
     ]
@@ -369,6 +381,7 @@
       "ST",
       "Sa",
       "Sb",
+      "explained_variance",
       "rmse",
       "select"
     ],
@@ -388,6 +401,7 @@
       "ST:output,param",
       "Sa:output,term",
       "Sb:output,term",
+      "explained_variance:output",
       "rmse:output",
       "select:term"
     ]
@@ -410,6 +424,7 @@
       "ST",
       "Sa",
       "Sb",
+      "explained_variance",
       "rmse",
       "select"
     ],
@@ -428,6 +443,7 @@
       "ST:param",
       "Sa:term",
       "Sb:term",
+      "explained_variance:",
       "rmse:",
       "select:term"
     ]
@@ -452,6 +468,7 @@
       "ST",
       "Sa",
       "Sb",
+      "explained_variance",
       "rmse",
       "select"
     ],
@@ -472,6 +489,7 @@
       "ST:time,output,param",
       "Sa:time,output,term",
       "Sb:time,output,term",
+      "explained_variance:time,output",
       "rmse:time,output",
       "select:term"
     ]
@@ -486,8 +504,8 @@
       "param"
     ],
     "data_vars": [
-      "R2_HSIC",
-      "T_HSIC",
+      "R2",
+      "T",
       "hsic_raw",
       "p_values"
     ],
@@ -497,8 +515,8 @@
     ],
     "type": "HSICResult",
     "var_dims": [
-      "R2_HSIC:output,param",
-      "T_HSIC:output,param",
+      "R2:output,param",
+      "T:output,param",
       "hsic_raw:output,param",
       "p_values:output,param"
     ]
@@ -512,8 +530,8 @@
       "param"
     ],
     "data_vars": [
-      "R2_HSIC",
-      "T_HSIC",
+      "R2",
+      "T",
       "hsic_raw",
       "p_values"
     ],
@@ -522,8 +540,8 @@
     ],
     "type": "HSICResult",
     "var_dims": [
-      "R2_HSIC:param",
-      "T_HSIC:param",
+      "R2:param",
+      "T:param",
       "hsic_raw:param",
       "p_values:param"
     ]
@@ -539,8 +557,8 @@
       "time"
     ],
     "data_vars": [
-      "R2_HSIC",
-      "T_HSIC",
+      "R2",
+      "T",
       "hsic_raw",
       "p_values"
     ],
@@ -551,8 +569,8 @@
     ],
     "type": "HSICResult",
     "var_dims": [
-      "R2_HSIC:time,output,param",
-      "T_HSIC:time,output,param",
+      "R2:time,output,param",
+      "T:time,output,param",
       "hsic_raw:time,output,param",
       "p_values:time,output,param"
     ]
@@ -1080,8 +1098,9 @@
       "S1",
       "S2",
       "ST",
+      "cv_rmse",
       "explained_variance",
-      "loo_rmse"
+      "rmse"
     ],
     "dims": [
       "output",
@@ -1094,8 +1113,9 @@
       "S1:output,param",
       "S2:output,param_i,param_j",
       "ST:output,param",
+      "cv_rmse:output",
       "explained_variance:output",
-      "loo_rmse:output"
+      "rmse:output"
     ]
   },
   "pce@scalar": {
@@ -1112,8 +1132,9 @@
       "S1",
       "S2",
       "ST",
+      "cv_rmse",
       "explained_variance",
-      "loo_rmse"
+      "rmse"
     ],
     "dims": [
       "param",
@@ -1125,8 +1146,9 @@
       "S1:param",
       "S2:param_i,param_j",
       "ST:param",
+      "cv_rmse:",
       "explained_variance:",
-      "loo_rmse:"
+      "rmse:"
     ]
   },
   "pce@series": {
@@ -1145,8 +1167,9 @@
       "S1",
       "S2",
       "ST",
+      "cv_rmse",
       "explained_variance",
-      "loo_rmse"
+      "rmse"
     ],
     "dims": [
       "output",
@@ -1160,14 +1183,16 @@
       "S1:time,output,param",
       "S2:time,output,param_i,param_j",
       "ST:time,output,param",
+      "cv_rmse:time,output",
       "explained_variance:time,output",
-      "loo_rmse:time,output"
+      "rmse:time,output"
     ]
   },
   "rank@multi": {
-    "dims": [
-      "output",
-      "param"
+    "attrs": [
+      "ci_level",
+      "ci_method",
+      "ci_n_bootstrap"
     ],
     "coords": [
       "output",
@@ -1178,21 +1203,22 @@
       "S1_lower",
       "S1_upper"
     ],
+    "dims": [
+      "output",
+      "param"
+    ],
+    "type": "RankResult",
     "var_dims": [
       "S1:output,param",
       "S1_lower:output,param",
       "S1_upper:output,param"
-    ],
+    ]
+  },
+  "rank@scalar": {
     "attrs": [
       "ci_level",
       "ci_method",
       "ci_n_bootstrap"
-    ],
-    "type": "RankResult"
-  },
-  "rank@scalar": {
-    "dims": [
-      "param"
     ],
     "coords": [
       "param"
@@ -1202,23 +1228,21 @@
       "S1_lower",
       "S1_upper"
     ],
+    "dims": [
+      "param"
+    ],
+    "type": "RankResult",
     "var_dims": [
       "S1:param",
       "S1_lower:param",
       "S1_upper:param"
-    ],
+    ]
+  },
+  "rank@series": {
     "attrs": [
       "ci_level",
       "ci_method",
       "ci_n_bootstrap"
-    ],
-    "type": "RankResult"
-  },
-  "rank@series": {
-    "dims": [
-      "output",
-      "param",
-      "time"
     ],
     "coords": [
       "output",
@@ -1230,17 +1254,17 @@
       "S1_lower",
       "S1_upper"
     ],
+    "dims": [
+      "output",
+      "param",
+      "time"
+    ],
+    "type": "RankResult",
     "var_dims": [
       "S1:time,output,param",
       "S1_lower:time,output,param",
       "S1_upper:time,output,param"
-    ],
-    "attrs": [
-      "ci_level",
-      "ci_method",
-      "ci_n_bootstrap"
-    ],
-    "type": "RankResult"
+    ]
   },
   "shapley@multi": {
     "attrs": [
@@ -1348,7 +1372,8 @@
       "S2_upper",
       "ST",
       "ST_lower",
-      "ST_upper"
+      "ST_upper",
+      "variance"
     ],
     "dims": [
       "output",
@@ -1366,7 +1391,8 @@
       "S2_upper:output,param_i,param_j",
       "ST:output,param",
       "ST_lower:output,param",
-      "ST_upper:output,param"
+      "ST_upper:output,param",
+      "variance:output"
     ]
   },
   "sobol@scalar": {
@@ -1461,7 +1487,6 @@
   },
   "vkoga@multi": {
     "attrs": [
-      "cv_rmse",
       "dependence",
       "gamma",
       "n_centers",
@@ -1469,9 +1494,7 @@
     ],
     "coords": [
       "output",
-      "param",
-      "param_i",
-      "param_j"
+      "param"
     ],
     "data_vars": [
       "S_C",
@@ -1479,15 +1502,14 @@
       "S_TC",
       "S_TU",
       "S_U",
-      "correlation",
+      "cv_rmse",
+      "explained_variance",
       "rmse",
       "variance"
     ],
     "dims": [
       "output",
-      "param",
-      "param_i",
-      "param_j"
+      "param"
     ],
     "type": "VKOGAResult",
     "var_dims": [
@@ -1496,23 +1518,21 @@
       "S_TC:output,param",
       "S_TU:output,param",
       "S_U:output,param",
-      "correlation:param_i,param_j",
+      "cv_rmse:output",
+      "explained_variance:output",
       "rmse:output",
       "variance:output"
     ]
   },
   "vkoga@scalar": {
     "attrs": [
-      "cv_rmse",
       "dependence",
       "gamma",
       "n_centers",
       "ridge"
     ],
     "coords": [
-      "param",
-      "param_i",
-      "param_j"
+      "param"
     ],
     "data_vars": [
       "S_C",
@@ -1520,14 +1540,13 @@
       "S_TC",
       "S_TU",
       "S_U",
-      "correlation",
+      "cv_rmse",
+      "explained_variance",
       "rmse",
       "variance"
     ],
     "dims": [
-      "param",
-      "param_i",
-      "param_j"
+      "param"
     ],
     "type": "VKOGAResult",
     "var_dims": [
@@ -1536,14 +1555,14 @@
       "S_TC:param",
       "S_TU:param",
       "S_U:param",
-      "correlation:param_i,param_j",
+      "cv_rmse:",
+      "explained_variance:",
       "rmse:",
       "variance:"
     ]
   },
   "vkoga@series": {
     "attrs": [
-      "cv_rmse",
       "dependence",
       "gamma",
       "n_centers",
@@ -1552,8 +1571,6 @@
     "coords": [
       "output",
       "param",
-      "param_i",
-      "param_j",
       "time"
     ],
     "data_vars": [
@@ -1562,15 +1579,14 @@
       "S_TC",
       "S_TU",
       "S_U",
-      "correlation",
+      "cv_rmse",
+      "explained_variance",
       "rmse",
       "variance"
     ],
     "dims": [
       "output",
       "param",
-      "param_i",
-      "param_j",
       "time"
     ],
     "type": "VKOGAResult",
@@ -1580,7 +1596,8 @@
       "S_TC:time,output,param",
       "S_TU:time,output,param",
       "S_U:time,output,param",
-      "correlation:param_i,param_j",
+      "cv_rmse:time,output",
+      "explained_variance:time,output",
       "rmse:time,output",
       "variance:time,output"
     ]

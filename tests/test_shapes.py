@@ -33,7 +33,7 @@ def test_result_ranks_follow_the_output_layout(suffix, n_bootstrap):
     bootstrap the point estimates keep the same ranks and no interval is set.
     """
     p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (0.0, 1.0)})
-    D = p.num_vars
+    D = p.n_params
     sr = jaxgsa.sobol.sample(p, n_samples=64, seed=42, verbose=False)
     Y = jax.random.normal(jax.random.key(1), (sr.n_runs, *suffix))
     result = jaxgsa.sobol.analyze(sr, Y, n_bootstrap=n_bootstrap, key=jax.random.key(99))
@@ -58,9 +58,9 @@ def test_single_parameter_without_second_order_has_no_s2():
     Y = jax.random.normal(jax.random.key(1), (sr.n_runs,))
     result = jaxgsa.sobol.analyze(sr, Y, n_bootstrap=N_BOOTSTRAP, key=jax.random.key(99))
 
-    assert result.S1.shape == (p.num_vars,)
-    assert result.ST.shape == (p.num_vars,)
-    assert result.S1_conf.shape == (2, p.num_vars)
-    assert result.ST_conf.shape == (2, p.num_vars)
+    assert result.S1.shape == (p.n_params,)
+    assert result.ST.shape == (p.n_params,)
+    assert result.S1_conf.shape == (2, p.n_params)
+    assert result.ST_conf.shape == (2, p.n_params)
     assert result.S2 is None
     assert result.S2_conf is None

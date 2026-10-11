@@ -68,8 +68,8 @@ class SobolResult(SchemaResult):
             the analysis ran with ``keep_replicates=True``. ``None`` without
             a bootstrap. See :class:`jaxgsa._core.result.CIInfo`.
         variance: Variance of each output slice, shape ``()`` / ``(K,)`` /
-            ``(T, K)``, or ``None`` for a result saved before this field
-            existed. It is the variance over every row of the expanded
+            ``(T, K)``, or ``None`` for a result built without it (for example by
+            hand). It is the variance over every row of the expanded
             Saltelli layout, which is the number the estimator divides by
             when it standardizes the outputs. :meth:`aggregate` uses it as
             the weight of each output.
@@ -128,8 +128,12 @@ class SobolResult(SchemaResult):
         aggregated and the interval is drawn again from those draws, at the
         same level and with the same rule. The weights stay fixed at the
         point-estimate values in every draw, so the interval leaves out the
-        sampling noise of the weights themselves. Otherwise the new ``*_conf``
-        fields are ``NaN``.
+        sampling noise of the weights themselves. Otherwise the ``*_conf`` fields
+        and ``ci`` become ``None`` and one ``JaxgsaWarning`` says that
+        ``keep_replicates=True`` is needed.
+
+        The output axes collapse to size 1. A result with no output axes
+        (``S1`` of shape ``(D,)``) is returned unchanged.
 
         Args:
             weights: ``"variance"`` (default) or ``"equal"``.
@@ -140,7 +144,11 @@ class SobolResult(SchemaResult):
         Raises:
             ValueError: If ``weights`` is not one of the two names, or if
                 ``weights="variance"`` and the result carries no ``variance``
-                (an old result). Use ``weights="equal"`` then..
+                (built by hand without it). Use ``weights="equal"`` then.
+
+        Warns:
+            JaxgsaWarning: If the result has bootstrap intervals but kept no
+                replicates, so the intervals are dropped.
         """
         updates = aggregate_indices(self, weights=weights, variance=self.variance)
         if self.variance is not None and updates:

@@ -62,9 +62,9 @@ class ShapleyResult(SchemaResult):
         explained_variance: How much of the output variance the surrogate
             captured, shape ``()`` / ``(K,)`` / ``(T, K)``. The quantity
             depends on the backend. For ``"pce"`` it is the coefficient of
-            determination of the fit, the sample variance of the fitted
-            values over the sample variance of ``Y``, so it lies in
-            ``[0, 1]``; read ``loo_rmse`` on the PCE result for the
+            determination of the fit, ``1 - rmse**2 / Var(Y)`` from the
+            in-sample residuals, so it is at most 1 and can be negative for a
+            poor fit; read ``cv_rmse`` on the PCE result for the
             out-of-sample view. For ``"hdmr"`` it is ``sum_u V_u / Var(Y)``,
             which can go above 1 when an overfit surrogate over-counts
             shared variance. Both are close to 1 for a good fit and below 1

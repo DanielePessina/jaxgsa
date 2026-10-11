@@ -185,7 +185,7 @@ def test_custom_forwards_exact_tuple() -> None:
         return out
 
     problem = Problem.from_dict({f"x{i}": (0.0, 1.0) for i in range(4)}).with_sampler(
-        sampler, dimension=2
+        sampler, sampler_dimension=2
     )
     draws = CustomDraws(problem)
     u, rows = np.full((5, 2), 0.25), np.full((5, 4), 0.9)

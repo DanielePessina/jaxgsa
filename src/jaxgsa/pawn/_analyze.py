@@ -58,8 +58,9 @@ References:
 from __future__ import annotations
 
 import warnings
+from collections.abc import Sequence
 from functools import lru_cache
-from typing import Literal, cast
+from typing import Literal, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -70,6 +71,7 @@ from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import bootstrap_draws, interval
 from jaxgsa._core.entry import (
+    ScalarCheck,
     at_least,
     check_scalars,
     in_open_interval,
@@ -89,7 +91,7 @@ from jaxgsa._core.irregular import (
 from jaxgsa._core.partition import _extract_categorical_codes
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.transforms import cdf_to_unit_interval
-from jaxgsa._core.validation import _prepare_Y, _validate_output
+from jaxgsa._core.validation import _prepare_Y, _validate_output, as_key
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.pawn._result import PAWNResult
 from jaxgsa.problem import Problem, _categorical_dims
@@ -118,6 +120,22 @@ _MIN_KEPT = 4
 # fewer than two samples, so a heavily depleted parameter reports an index
 # that rests on a handful of bins without saying so.
 _MIN_VALID_BIN_FRACTION = 0.5
+
+
+def _prefixed(checks: Sequence[ScalarCheck]) -> tuple[ScalarCheck, ...]:
+    """Prefix each failing-argument message with ``jaxgsa.pawn: ``.
+
+    Args:
+        checks: Scalar verdicts built with the shared helpers.
+
+    Returns:
+        The same verdicts, each message starting ``jaxgsa.pawn: `` unless
+        it already starts with ``jaxgsa``.
+    """
+    return tuple(
+        c if c.message.startswith("jaxgsa") else ScalarCheck(c.ok, f"jaxgsa.pawn: {c.message}")
+        for c in checks
+    )
 
 
 def _count_valid_bins(bin_idx: Array, n_eff: int) -> np.ndarray:
@@ -256,7 +274,7 @@ def _bin_indices(problem: Problem, X: Array, n_bins: int) -> tuple[Array, int]:
 
     # cdf_to_unit_interval refuses a categorical parameter by design, so the
     # continuous columns are transformed through a continuous-only problem.
-    cont_dims = [d for d in range(problem.num_vars) if d not in cat_positions]
+    cont_dims = [d for d in range(problem.n_params) if d not in cat_positions]
     cont_columns: list[Array] = []
     if cont_dims:
         cont_problem = Problem._from_normalized_inputs(
@@ -272,7 +290,7 @@ def _bin_indices(problem: Problem, X: Array, n_bins: int) -> tuple[Array, int]:
     levels_of_dim = dict(dims_levels)
     columns = [
         _level_codes(X[:, d], levels_of_dim[d]) if d in cat_positions else next(cont_iter)
-        for d in range(problem.num_vars)
+        for d in range(problem.n_params)
     ]
     return jnp.stack(columns, axis=1), n_eff
 
@@ -519,6 +537,19 @@ def _pawn_core(
     return pawn.reshape(T, K, D)
 
 
+class PAWNIndices(NamedTuple):
+    """Plain-array PAWN indices, as returned by :func:`indices`.
+
+    Fields are named like the matching result fields. Tuple unpacking
+    works as for a plain tuple.
+
+    Attributes:
+        pawn: PAWN index per parameter.
+    """
+
+    pawn: Array
+
+
 def indices(
     problem: Problem,
     X: Array,
@@ -527,7 +558,7 @@ def indices(
     n_bins: int = 10,
     statistic: Literal["median", "max", "mean"] = "median",
     slice_chunk_size: int | None = None,
-) -> tuple[Array]:
+) -> PAWNIndices:
     """Compute PAWN indices as plain arrays, with no diagnostics.
 
     This is the transformable core of :func:`analyze`. It runs the same KS
@@ -579,7 +610,7 @@ def indices(
             budget. It changes no index.
 
     Returns:
-        A one-element tuple ``(pawn,)``, shaped ``(D,)``, ``(K, D)`` or
+        A one-field :class:`PAWNIndices` named tuple ``(pawn,)``, shaped ``(D,)``, ``(K, D)`` or
         ``(T, K, D)`` to mirror the layout of ``Y``. A tuple, not a bare
         array, because every method's core returns one.
 
@@ -591,13 +622,17 @@ def indices(
             ``slice_chunk_size`` is given and is below 1.
     """
     check_scalars(
-        (
-            require(
-                statistic in ("median", "max", "mean"),
-                f"statistic must be 'median', 'max', or 'mean', got {statistic!r}",
-            ),
-            at_least("n_bins", n_bins, 2),
-            at_least("slice_chunk_size", slice_chunk_size, 1),
+        _prefixed(
+            (
+                (
+                    require(
+                        statistic in ("median", "max", "mean"),
+                        f"statistic must be 'median', 'max', or 'mean', got {statistic!r}",
+                    ),
+                    at_least("n_bins", n_bins, 2),
+                    at_least("slice_chunk_size", slice_chunk_size, 1),
+                )
+            )
         )
     )
     X_arr = validate_inputs(problem, X)
@@ -606,7 +641,7 @@ def indices(
     Y3, layout = _prepare_Y(Y_arr)
     bin_idx, n_eff = _bin_indices(problem, X_arr, n_bins)
     pawn_3d = _pawn_core(bin_idx, Y3, n_eff, statistic, slice_chunk_size, warn=False)
-    return (layout.squeeze(pawn_3d),)
+    return PAWNIndices(pawn=layout.squeeze(pawn_3d))
 
 
 def analyze(
@@ -619,7 +654,7 @@ def analyze(
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
-    key: Array | None = None,
+    key: Array | int | None = None,
     slice_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
@@ -732,6 +767,7 @@ def analyze(
             samples): the index then rests on the few bins that survive, and
             the fix is fewer bins or more samples.
     """
+    key = as_key(key, "pawn")
     if _is_irregular_y(Y):
         return analyze_irregular(
             analyze,
@@ -745,31 +781,33 @@ def analyze(
         )
     Y = cast(Array, Y)
 
-    from jaxgsa.pawn import SPEC
+    from jaxgsa.pawn import _SPEC
 
     # The non-finite check runs before any transform, and before binning above
     # all: a non-finite input would otherwise take the out-of-range sentinel
     # and leave every conditional set without a word.
     ctx = prepare(
-        SPEC,
+        _SPEC,
         problem,
         Y,
         X=X,
         on_invalid=on_invalid,
-        checks=(
-            require(
-                statistic in ("median", "max", "mean"),
-                f"statistic must be 'median', 'max', or 'mean', got {statistic!r}",
-            ),
-            at_least("n_bins", n_bins, 2),
-            at_least("n_bootstrap", n_bootstrap, 0),
-            one_of("ci_method", ci_method, ("quantile", "gaussian")),
-            in_open_interval("conf_level", conf_level, 0.0, 1.0),
-            at_least("slice_chunk_size", slice_chunk_size, 1),
-            require(
-                n_bootstrap == 0 or key is not None,
-                "key is required when n_bootstrap > 0",
-            ),
+        checks=_prefixed(
+            (
+                require(
+                    statistic in ("median", "max", "mean"),
+                    f"statistic must be 'median', 'max', or 'mean', got {statistic!r}",
+                ),
+                at_least("n_bins", n_bins, 2),
+                at_least("n_bootstrap", n_bootstrap, 0),
+                one_of("ci_method", ci_method, ("quantile", "gaussian")),
+                in_open_interval("conf_level", conf_level, 0.0, 1.0),
+                at_least("slice_chunk_size", slice_chunk_size, 1),
+                require(
+                    n_bootstrap == 0 or key is not None,
+                    "key is required when n_bootstrap > 0",
+                ),
+            )
         ),
         min_kept=_MIN_KEPT,
         # A constant slice leaves every conditional distribution equal to
@@ -840,7 +878,7 @@ def analyze(
         # arithmetic, reported rather than re-derived by hand.
         itemsize = jnp.result_type(Y_3d.dtype, jnp.float32).itemsize
         cs = resolve_batch_size(
-            2 * problem.num_vars * N * n_eff * itemsize, T * K, slice_chunk_size
+            2 * problem.n_params * N * n_eff * itemsize, T * K, slice_chunk_size
         )
         origin = "user-set" if slice_chunk_size is not None else "resolved from the memory budget"
         _verbose.analysis_summary(

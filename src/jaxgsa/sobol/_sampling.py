@@ -37,6 +37,7 @@ from jaxgsa._core.sampling import (
     _power_of_2_error,
     _stable_unique_rows,
     _transform_samples,
+    check_seed,
 )
 from jaxgsa._core.validation import _raise_categorical_design, _raise_correlated_design
 from jaxgsa._core.warning_types import JaxgsaWarning
@@ -117,6 +118,14 @@ class SobolSamples(UniqueDesignSamples):
     unit: np.ndarray | None = None
     expanded_to_unit: np.ndarray | None = None
 
+    def __repr__(self) -> str:
+        """Return a concise summary of the design dimensions, with no arrays."""
+        return (
+            f"SobolSamples(n_runs={self.n_runs}, n_expanded={self.n_expanded}, "
+            f"base_n={self.base_n}, n_params={self.n_params}, "
+            f"calc_second_order={self.calc_second_order})"
+        )
+
     def transform(self, theta: Theta | None = None) -> Array:
         """Re-derive the physical design from the unit cube, differentiably.
 
@@ -136,7 +145,7 @@ class SobolSamples(UniqueDesignSamples):
 
             theta = {"a": {"low": 0.0, "high": 1.0},
                      "b": {"mean": 3.0, "variance": 9.0}}
-            X = sampling_result.transform(theta)
+            X = samples.transform(theta)
 
         Tier T4 (behavioural contract): the returned array must reproduce
         :attr:`samples` when ``theta`` is ``None``, and its Jacobian with
@@ -447,7 +456,7 @@ class SobolSamples(UniqueDesignSamples):
             n_expanded=n_expanded,
             expanded_to_unique=expanded_to_unique,
             base_n=int(meta["base_n"]),
-            n_params=problem.num_vars,
+            n_params=problem.n_params,
             calc_second_order=bool(meta["calc_second_order"]),
             problem=problem,
             # `.get`: a hand-built design can be saved without a unit-cube
@@ -480,7 +489,7 @@ def _max_distinct_rows(problem: Problem) -> int | None:
     then ``None`` is returned.
     """
     dims_levels = _categorical_dims(problem)
-    if len(dims_levels) != problem.num_vars:
+    if len(dims_levels) != problem.n_params:
         return None
     return math.prod(n_levels for _, n_levels in dims_levels)
 
@@ -658,9 +667,82 @@ def _print_sampling_summary(
     )
 
 
+def _check_budget_choice(n_samples: int | None, base_n: int | None, where: str) -> None:
+    """Require exactly one of ``n_samples`` and ``base_n``.
+
+    Args:
+        n_samples: Minimum run budget, or ``None``.
+        base_n: Exact base-point count, or ``None``.
+        where: Fully qualified name of the calling sampler, for the message.
+
+    Raises:
+        TypeError: If a given value is not an int (``bool`` included).
+        ValueError: If both or neither are given, or a value is below 1.
+    """
+    if n_samples is None and base_n is None:
+        raise ValueError(
+            f"{where}: give exactly one of n_samples (minimum number of model "
+            "runs) or base_n (exact number of base points). Neither was given."
+        )
+    if n_samples is not None and base_n is not None:
+        raise ValueError(
+            f"{where}: give exactly one of n_samples (minimum number of model "
+            "runs) or base_n (exact number of base points), not both."
+        )
+    for name, value in (("n_samples", n_samples), ("base_n", base_n)):
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+            raise TypeError(f"{where}: {name} must be an int, got {type(value).__name__}")
+        if value < 1:
+            raise ValueError(f"{where}: {name} must be >= 1, got {value}")
+
+
+def _require_samples(obj: object, cls: type, function: str, sampler: str) -> None:
+    """Require the design class that ``function`` analyzes.
+
+    Args:
+        obj: The first argument the caller passed.
+        cls: The design class the function accepts.
+        function: Fully qualified name of the analyzing function.
+        sampler: Fully qualified name of the sampler that builds ``cls``.
+
+    Raises:
+        TypeError: If ``obj`` is not an instance of ``cls``. The message names
+            the type received and points given-data users to the right methods.
+    """
+    if isinstance(obj, cls):
+        return
+    received = "a Problem" if isinstance(obj, Problem) else f"a {type(obj).__name__}"
+    raise TypeError(
+        f"{function} takes the {cls.__name__} from {sampler} as its first "
+        f"argument, not {received}. For given-data X and Y, use a given-data "
+        "method such as jaxgsa.rank or jaxgsa.pce."
+    )
+
+
+def _check_seed_scramble(scramble: bool, seed: Any, where: str) -> None:
+    """Reject a seed when the Sobol' sequence is not scrambled.
+
+    Args:
+        scramble: Whether the sequence is Owen-scrambled.
+        seed: The seed the caller passed.
+        where: Fully qualified name of the calling sampler, for the message.
+
+    Raises:
+        ValueError: If ``scramble`` is false and a seed is given.
+    """
+    if not scramble and seed is not None:
+        raise ValueError(
+            f"{where}: seed has no effect with scramble=False. "
+            "The unscrambled Sobol' sequence is deterministic, so the seed "
+            "would do nothing. Use scramble=True, or drop the seed."
+        )
+
+
 def sample(
     problem: Problem,
-    n_samples: int,
+    n_samples: int | None = None,
     *,
     base_n: int | None = None,
     calc_second_order: bool = True,
@@ -687,9 +769,10 @@ def sample(
         problem: Problem definition with parameter names and distributions.
         n_samples: Minimum desired number of unique model evaluations. The
             returned design may contain somewhat more rows than this, never
-            fewer. Ignored when ``base_n`` is provided.
+            fewer. Give exactly one of ``n_samples`` and ``base_n``.
         base_n: If given, use this exact Sobol base size (must be a power
-            of 2) instead of searching for one. The expanded Saltelli
+            of 2) instead of searching for one. Give exactly one of
+            ``n_samples`` and ``base_n``. The expanded Saltelli
             design will have ``base_n * (2*D + 2)`` rows (second order)
             or ``base_n * (D + 2)`` rows (first/total only). This gives
             direct control over the sampling budget.
@@ -712,7 +795,10 @@ def sample(
         later Sobol analysis.
 
     Raises:
-        ValueError: If ``base_n`` is not a power of 2, or
+        ValueError: If both or neither of ``n_samples`` and ``base_n`` are
+            given, if ``base_n`` is not a power of 2, if a ``seed`` is given
+            with ``scramble=False`` (the unscrambled sequence is
+            deterministic, so the seed would do nothing), or if
             ``problem.correlation`` declares a dependence structure (the
             Saltelli design and its estimators assume independent inputs).
 
@@ -722,8 +808,11 @@ def sample(
             unreliable; this is a warning, not an error, because a tiny
             design may be a deliberate probe.
     """
+    check_seed(seed, "jaxgsa.sobol.sample")
+    _check_budget_choice(n_samples, base_n, "jaxgsa.sobol.sample")
+    _check_seed_scramble(scramble, seed, "jaxgsa.sobol.sample")
     _raise_correlated_design(problem, "jaxgsa.sobol.sample")
-    D = problem.num_vars
+    D = problem.n_params
     # Rows per base point: sets the ratio between base_n and total expanded rows.
     step = _saltelli_step(D, calc_second_order)
 
@@ -732,7 +821,7 @@ def sample(
             raise ValueError(_power_of_2_error("base_n", base_n, reason="Sobol' sequence balance"))
         target_n = None
     else:
-        target_n = max(1, n_samples)
+        target_n = max(1, n_samples if n_samples is not None else 1)
         # Estimate initial base_n from requested unique count,
         # rounding up to next power of 2 (Sobol sequence requirement).
         base_n = _next_power_of_2(math.ceil(target_n / step))

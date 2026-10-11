@@ -538,14 +538,16 @@ def _cross_validate(
     tol_power: float = _DEFAULT_TOL_POWER,
     tol_residual: float = _DEFAULT_TOL_RESIDUAL,
     seed: int | None = None,
-) -> Array:
+) -> tuple[Array, Array]:
     """Score a ``(gamma, ridge)`` grid by k-fold held-out RMSE.
 
     Each fold refits from scratch on the other ``k-1`` folds. The greedy centre
     selection is part of what is being validated, so it must not see the
     held-out rows. The folds partition the rows, so every row is predicted
     exactly once out-of-sample. The returned score is the RMSE over that full
-    set of out-of-sample predictions, pooled across output slices.
+    set of out-of-sample predictions. The score is kept per output slice, and
+    the pooled score is returned beside it, reduced on device as
+    ``sqrt(sum(sse) / (n * S))``.
 
     Centre selection, the normal-equation matrices, and the prediction
     kernel do not depend on ``ridge``, so each ``(fold, gamma)`` pair builds
@@ -569,8 +571,11 @@ def _cross_validate(
             anything that correlates with the output.
 
     Returns:
-        Pooled out-of-sample RMSE, shape ``(len(gammas), len(ridges))``. Take
-        ``argmin`` over the flattened grid to pick the hyperparameters.
+        A pair ``(per_slice, pooled)``. ``per_slice`` is the out-of-sample
+        RMSE per output slice, shape ``(len(gammas), len(ridges), S)``.
+        ``pooled`` is the RMSE over all slices, shape
+        ``(len(gammas), len(ridges))``. Take ``argmin`` of ``pooled`` to pick
+        the hyperparameters.
 
     Raises:
         ValueError: If ``n_folds < 2``. A single fold holds out every row, so
@@ -613,8 +618,8 @@ def _cross_validate(
     if scorer is None:
 
         @jax.jit
-        def _score_gamma(gamma: Array) -> Array:
-            def _fold_sse(fold: Array) -> Array:
+        def _score_gamma(gamma: Array) -> tuple[Array, Array]:
+            def _fold_sse(fold: Array) -> tuple[Array, Array]:
                 train = fold_of != fold
                 # One greedy sweep per (fold, gamma): selection is ridge-free.
                 idx, m = _select_centers(
@@ -632,17 +637,23 @@ def _cross_validate(
                 eq = _normal_equations(X, Y, idx, m, gamma=gamma, train_mask=train)
                 K_pred = _gaussian_kernel(X, eq.centers, gamma)
 
-                def _ridge_sse(ridge: Array) -> Array:
+                def _ridge_sse(ridge: Array) -> tuple[Array, Array]:
                     err = Y - K_pred @ _solve_ridge(eq, ridge)
-                    return jnp.sum(jnp.where(train[:, None], 0.0, err**2))
+                    held = jnp.where(train[:, None], 0.0, err**2)
+                    # Per-slice sums for cv_rmse; the pooled sum is reduced
+                    # straight from the full array so the grid choice keeps
+                    # its original summation order.
+                    return jnp.sum(held, axis=0), jnp.sum(held)
 
-                return jax.lax.map(_ridge_sse, ridge_vec)  # (n_ridges,)
+                return jax.lax.map(_ridge_sse, ridge_vec)  # ((n_ridges, S), (n_ridges,))
 
             # lax.map runs the folds sequentially: vmap would hold n_folds
             # copies of the (n, n) kernel work live at once, which is the
             # memory wall here long before it is a speed win.
-            sse = jnp.sum(jax.lax.map(_fold_sse, fold_ids), axis=0)
-            return jnp.sqrt(sse / (n * n_slices))
+            sse_slice, sse_total = jax.lax.map(_fold_sse, fold_ids)
+            per_slice = jnp.sqrt(jnp.sum(sse_slice, axis=0) / n)  # (n_ridges, n_slices)
+            pooled = jnp.sqrt(jnp.sum(sse_total, axis=0) / (n * n_slices))  # (n_ridges,)
+            return per_slice, pooled
 
         scorer = _score_gamma
         _CV_SCORER_CACHE[cache_key] = scorer
@@ -651,5 +662,5 @@ def _cross_validate(
     # The gamma grid is host-side and static, so loop over it in Python; the
     # jitted body is traced once per distinct input and reused for every
     # gamma value and every later call on the same data.
-    scores = [scorer(jnp.asarray(g, dtype=X.dtype)) for g in gamma_grid]
-    return jnp.asarray(scores)
+    scored = [scorer(jnp.asarray(g, dtype=X.dtype)) for g in gamma_grid]
+    return jnp.asarray([s[0] for s in scored]), jnp.asarray([s[1] for s in scored])

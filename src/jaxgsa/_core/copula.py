@@ -349,13 +349,13 @@ def fit_gaussian_copula(problem: Problem, X: np.ndarray) -> np.ndarray:
         positive definite if the rank estimate was not.
 
     Raises:
-        ValueError: If ``X`` is not ``(N, D)`` with ``D == problem.num_vars``,
+        ValueError: If ``X`` is not ``(N, D)`` with ``D == problem.n_params``,
             or holds fewer than three rows.
     """
     from jaxgsa.problem import _categorical_dims
 
     X = np.asarray(X, dtype=np.float64)
-    D = problem.num_vars
+    D = problem.n_params
     if X.ndim != 2 or X.shape[1] != D:
         raise ValueError(f"X must be (N, {D}) to fit a copula for this problem, got {X.shape}")
     if X.shape[0] < 3:

@@ -30,8 +30,8 @@ class _HDMRFit(TypedDict):
     C2: Array | None
     C3: Array | None
     f0: Array
-    m: int
-    maxorder: int
+    n_intervals: int
+    order: int
 
 
 @dataclass(frozen=True, repr=False)
@@ -40,7 +40,7 @@ class HDMRResult(SchemaResult, SurrogateResult):
 
     Stores ANCOVA-decomposed sensitivity indices. A term is one component
     function of the HDMR expansion: a single parameter, a pair, or a triple,
-    up to the ``maxorder`` used. ``terms`` holds their names. The per-term
+    up to the ``order`` used. ``terms`` holds their names. The per-term
     indices (Sa, Sb, S) have a trailing ``n_terms`` axis. The per-parameter
     ST has a trailing ``D`` axis.
 
@@ -120,8 +120,13 @@ class HDMRResult(SchemaResult, SurrogateResult):
         select: F-test significance count per term, summed over the T*K
             output slices (maximum value T*K), or None. A low count marks a
             term the F-test deems insignificant.
-        rmse: Emulator fit RMSE per output slice in the units of ``Y``,
-            shape ``()`` / ``(K,)`` / ``(T, K)``, or None.
+        rmse: In-sample RMSE of the fit per output slice, in the units of
+            ``Y``, shape ``()`` / ``(K,)`` / ``(T, K)``, or None.
+        cv_rmse: Out-of-sample RMSE. HDMR computes none, so it is always
+            None. The field exists so every surrogate result reads alike.
+        explained_variance: ``1 - MSE / Var(Y)`` of the in-sample fit per
+            output slice, same shape as ``rmse``. NaN on a zero-variance
+            slice. It is not ``S.sum()``: that is ``Var(f_hat) / Var(Y)``.
         streamed: True when the fit read the rows in batches, False when one
             batch held them all. Batching is exact: the fit accumulates the
             same Gram matrices, picks the same F-test term set and reports the
@@ -136,10 +141,10 @@ class HDMRResult(SchemaResult, SurrogateResult):
             means the check ran and found nothing.
         _c2: Private parameter index pairs of the second-order terms, in the
             order they occupy in the ``n_terms`` axis. Empty at
-            ``maxorder=1``.
+            ``order=1``.
         _c3: Private parameter index triples of the third-order terms, in the
             order they occupy in the ``n_terms`` axis. Empty below
-            ``maxorder=3``.
+            ``order=3``.
         Sa_conf: Bootstrap confidence interval for ``Sa``, shape ``(2, ...)``
             for ``[lower, upper]``. ``None`` when ``n_bootstrap=0``. Each
             replicate refits the expansion on a row resample, so the interval
@@ -169,6 +174,8 @@ class HDMRResult(SchemaResult, SurrogateResult):
     _fit: _HDMRFit | None = field(default=None, repr=False)
     select: Array | None = None
     rmse: Array | None = None
+    cv_rmse: Array | None = None
+    explained_variance: Array | None = None
     streamed: bool = False
     _c2: tuple[tuple[int, int], ...] = field(default=(), repr=False)
     _c3: tuple[tuple[int, int, int], ...] = field(default=(), repr=False)
@@ -192,6 +199,8 @@ class HDMRResult(SchemaResult, SurrogateResult):
             FieldSpec("S3", "triple"),
             FieldSpec("select", "term_only"),
             FieldSpec("rmse", "slice"),
+            FieldSpec("cv_rmse", "slice"),
+            FieldSpec("explained_variance", "slice"),
         ),
         meta=("streamed",),
     )
@@ -204,7 +213,7 @@ class HDMRResult(SchemaResult, SurrogateResult):
         """Skip the interaction tensors when the fit has no terms of that order.
 
         ``S2`` and ``S3`` always materialize, filled with NaN where a term is
-        absent. Exporting an all-NaN tensor from a ``maxorder=1`` fit would
+        absent. Exporting an all-NaN tensor from a ``order=1`` fit would
         claim an interaction structure the fit never modelled.
         """
         omit = set()
@@ -221,7 +230,7 @@ class HDMRResult(SchemaResult, SurrogateResult):
         kernel that rebuilds the B-spline tensor-product bases and contracts
         them with the fitted component coefficients. Those bases are a large
         per-row constant: up to ``m1^3`` floats per interaction term at
-        ``maxorder=3``. See :meth:`predict` for the full contract.
+        ``order=3``. See :meth:`predict` for the full contract.
 
         Raises:
             ValueError: If this result carries no fitted surrogate state.
@@ -265,7 +274,7 @@ class HDMRResult(SchemaResult, SurrogateResult):
 
         fit = self._fit
         if fit is None:
-            raise ValueError("HDMRResult does not contain fitted surrogate state")
+            raise ValueError("jaxgsa.hdmr: HDMRResult does not contain fitted surrogate state")
         if self.problem.dependence != "independent" and not include_correlative:
             warnings.warn(
                 "HDMRResult.shapley: include_correlative=False on a "
@@ -280,10 +289,10 @@ class HDMRResult(SchemaResult, SurrogateResult):
                 category=JaxgsaWarning,
             )
         partial = self.Sa + self.Sb if include_correlative else self.Sa
-        subsets: list[tuple[int, ...]] = [(i,) for i in range(self.problem.num_vars)]
+        subsets: list[tuple[int, ...]] = [(i,) for i in range(self.problem.n_params)]
         subsets.extend(self._c2)
         subsets.extend(self._c3)
-        membership = build_membership(subsets, self.problem.num_vars)
+        membership = build_membership(subsets, self.problem.n_params)
         # For HDMR the per-term sum doubles as the explained-variance
         # diagnostic: indices are already output-variance fractions.
         explained = partial.sum(axis=-1)
@@ -293,7 +302,7 @@ class HDMRResult(SchemaResult, SurrogateResult):
             explained,
             problem=self.problem,
             backend="hdmr",
-            order=fit["maxorder"],
+            order=fit["order"],
             include_correlative=include_correlative,
             invalid=self.invalid,
         )
@@ -316,7 +325,7 @@ class HDMRResult(SchemaResult, SurrogateResult):
         Returns:
             Array of shape ``(D,)`` / ``(K, D)`` / ``(T, K, D)``.
         """
-        D = self.problem.num_vars
+        D = self.problem.n_params
         return self.Sa[..., :D]
 
     @cached_property
@@ -327,17 +336,17 @@ class HDMRResult(SchemaResult, SurrogateResult):
         dense ``(D, D)`` matrix. Entry ``[i, j]`` is the structural variance
         fraction of the ``(x_i, x_j)`` interaction component, and the matrix
         is symmetric. Cells for the diagonal and for any parameter pair absent
-        from the expansion (e.g. ``maxorder < 2``) are ``NaN``.
+        from the expansion (e.g. ``order < 2``) are ``NaN``.
 
         Returns:
             Array of shape ``(D, D)`` / ``(K, D, D)`` / ``(T, K, D, D)``.
         """
-        D = self.problem.num_vars
+        D = self.problem.n_params
         n2 = len(self._c2)
         out = jnp.full(self.Sa.shape[:-1] + (D, D), jnp.nan, dtype=self.Sa.dtype)
         if n2 == 0:
             return out
-        n1 = self.problem.num_vars
+        n1 = self.problem.n_params
         vals = self.Sa[..., n1 : n1 + n2]  # (..., n2)
         pairs = jnp.asarray(self._c2)  # (n2, 2)
         i, j = pairs[:, 0], pairs[:, 1]
@@ -357,19 +366,19 @@ class HDMRResult(SchemaResult, SurrogateResult):
         structural variance fraction of the ``(x_i, x_j, x_k)`` interaction
         component, and the tensor is symmetric under permutation of its axes.
         Cells where any two axes share an index, and any triple absent from
-        the expansion (e.g. ``maxorder < 3``), are ``NaN``.
+        the expansion (e.g. ``order < 3``), are ``NaN``.
 
         Returns:
             Array of shape ``(D, D, D)`` / ``(K, D, D, D)`` /
             ``(T, K, D, D, D)``.
         """
-        D = self.problem.num_vars
+        D = self.problem.n_params
         n2 = len(self._c2)
         n3 = len(self._c3)
         out = jnp.full(self.Sa.shape[:-1] + (D, D, D), jnp.nan, dtype=self.Sa.dtype)
         if n3 == 0:
             return out
-        vals = self.Sa[..., self.problem.num_vars + n2 :]  # (..., n3)
+        vals = self.Sa[..., self.problem.n_params + n2 :]  # (..., n3)
         combos = jnp.asarray(self._c3)  # (n3, 3)
         # Concatenate the six axis permutations of each index triple into one
         # (6*n3,) index set so a single scatter makes the tensor symmetric

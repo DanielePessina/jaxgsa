@@ -242,7 +242,7 @@ def estimate_correlated_indices(
     Returns:
         A :class:`CorrelatedIndices` whose index arrays have shape ``(S, D)``.
     """
-    D = problem.num_vars
+    D = problem.n_params
     streams = _spawn_streams(entropy, D)
     basis_kinds = _component_basis_kinds(problem)
 

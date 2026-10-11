@@ -163,7 +163,7 @@ def _resolve_slice_chunk_size(
     """
     if slice_chunk_size is not None:
         if slice_chunk_size < 1:
-            raise ValueError(f"slice_chunk_size must be >= 1, got {slice_chunk_size}")
+            raise ValueError(f"jaxgsa.hdmr: slice_chunk_size must be >= 1, got {slice_chunk_size}")
         return min(slice_chunk_size, L)
     auto = get_memory_budget() // max(b * slice_bytes, 1)
     return max(1, min(L, auto))
@@ -175,11 +175,11 @@ def _resolve_slice_chunk_size(
 
 
 @lru_cache(maxsize=32)
-def _get_gram_backfit(m1: int, n1: int, maxiter: int, lambdax: float):
+def _get_gram_backfit(m1: int, n1: int, max_iter: int, ridge: float):
     """Build and cache the vmapped Gram-space first-order backfit.
 
     Coordinate-descent backfitting (Breiman & Friedman, 1985) written in
-    coefficient space. With ``M_j = G1[j, j] + lambdax * I``, a backfit step
+    coefficient space. With ``M_j = G1[j, j] + ridge * I``, a backfit step
     only needs ``B1_j^T`` of the current partial residual, which the Gram
     blocks already hold:
 
@@ -189,7 +189,7 @@ def _get_gram_backfit(m1: int, n1: int, maxiter: int, lambdax: float):
     the coefficients when the basis functions are nearly collinear or the
     sample count is low. Iteration stops when the largest change in any
     dimension's coefficient energy falls below one part in a thousand of the
-    largest energy itself, or after ``maxiter`` sweeps. The test is relative,
+    largest energy itself, or after ``max_iter`` sweeps. The test is relative,
     not absolute: the coefficients scale with ``Y`` and with ``m**-3``, so an
     absolute cutoff stops the sweep after one pass whenever ``Y`` is small or
     ``m`` is large (H4).
@@ -201,7 +201,7 @@ def _get_gram_backfit(m1: int, n1: int, maxiter: int, lambdax: float):
     """
 
     def backfit(G1: Array, G1_diag: Array, b1res: Array) -> Array:
-        lam_eye = lambdax * jnp.eye(m1)
+        lam_eye = ridge * jnp.eye(m1)
         M = G1_diag + lam_eye  # (n1, m1, m1)
 
         # Initial fit: C1_j = M_j^{-1} B1_j^T Y_res, one solve per dimension.
@@ -224,7 +224,7 @@ def _get_gram_backfit(m1: int, n1: int, maxiter: int, lambdax: float):
             # basis is scaled by m**3), so an absolute cutoff stops a
             # correlated fit after one sweep whenever Y is small or m is
             # large, well before the coupling terms have converged.
-            return (varmax > 1e-3 * jnp.max(var)) & (it < maxiter)
+            return (varmax > 1e-3 * jnp.max(var)) & (it < max_iter)
 
         def _backfit_body(state: tuple) -> tuple:
             C1, var_old, _, it = state
@@ -241,12 +241,12 @@ def _get_gram_backfit(m1: int, n1: int, maxiter: int, lambdax: float):
 
 
 @lru_cache(maxsize=32)
-def _get_gram_higher_solver(m_basis: int, lambdax: float):
+def _get_gram_higher_solver(m_basis: int, ridge: float):
     """Build and cache the vmapped Gram-space higher-order solver.
 
     Higher-order terms are fit in a single shot, with no backfitting: each
     term is solved independently against the same lower-order residual,
-    ``C_j = (B_j^T B_j + lambdax * I)^{-1} B_j^T Y_res``, from the accumulated
+    ``C_j = (B_j^T B_j + ridge * I)^{-1} B_j^T Y_res``, from the accumulated
     per-term Gram blocks and moments. The lower-order structure is already
     removed, so same-order tensor-product terms overlap little and one
     joint-free pass is accurate in practice.
@@ -259,7 +259,7 @@ def _get_gram_higher_solver(m_basis: int, lambdax: float):
     """
 
     def solve_lane(BtB: Array, BtY: Array) -> Array:
-        lam_eye = lambdax * jnp.eye(m_basis)
+        lam_eye = ridge * jnp.eye(m_basis)
         C = jax.vmap(lambda btb, bty: jnp.linalg.solve(btb + lam_eye, bty))(BtB, BtY)
         return C.T  # (m_basis, n_terms)
 
@@ -503,7 +503,8 @@ def _get_finalize(n: int, n1: int, n2: int, m1: int, m2: int, m3: int, N: int):
     """Build and cache the elementwise finish: indices, selection, RMSE.
 
     Returns:
-        A jitted function ``(V_Y, Y, w, acc, f_crits) -> (Sa, Sb, S, select, rmse)``
+        A jitted function
+        ``(V_Y, Y, w, acc, f_crits) -> (Sa, Sb, S, select, rmse, explained)``
         over every lane at once, where ``w`` is the row mask marking real
         rows. It is elementwise in the lane axis, so it does not need
         chunking.
@@ -516,7 +517,7 @@ def _get_finalize(n: int, n1: int, n2: int, m1: int, m2: int, m3: int, N: int):
         w: Array,
         acc: tuple[Array, Array, Array, Array, Array, Array, Array],
         f_crits: Array,
-    ) -> tuple[Array, Array, Array, Array, Array]:
+    ) -> tuple[Array, Array, Array, Array, Array, Array]:
         acc_var_f, acc_cov_fy, acc_cov_fy0m, acc_ssr, acc_cross, acc_fsq, acc_res2 = acc
         # A slice counts as zero-variance when it is numerically constant
         # (max == min, which survives float32 where var == 0 does not) or when
@@ -552,7 +553,11 @@ def _get_finalize(n: int, n1: int, n2: int, m1: int, m2: int, m3: int, N: int):
         F_stat = ((SSR0 - SSR1) / p1) / (SSR1 / R_minus_p)
         select = (F_stat > f_crit_per_term[None]).astype(jnp.float32)
 
-        return Sa, Sb, S, select, jnp.sqrt(acc_res2 / N)
+        mse = acc_res2 / N
+        # 1 - in-sample MSE / Var(Y), NaN on a zero-variance slice like the
+        # indices above. It reuses the residual sum the RMSE already reads.
+        explained = jnp.where(zero_var[:, 0], jnp.nan, 1.0 - mse / V_Y_safe[:, 0])
+        return Sa, Sb, S, select, jnp.sqrt(mse), explained
 
     return finalize
 
@@ -582,11 +587,12 @@ class _FitHDMR(NamedTuple):
         S: ``Sa + Sb``, same shape.
         select: F-test significance flag per term, same shape.
         rmse: Per-slice fit RMSE, shape ``(L,)``.
+        explained_variance: Per-slice ``1 - MSE / Var(Y)``, shape ``(L,)``.
         C1: First-order component coefficients, shape ``(L, m1, n1)``.
         C2: Second-order coefficients, shape ``(L, m2, n2)``, or ``None``
-            below ``maxorder=2``.
+            below ``order=2``.
         C3: Third-order coefficients, shape ``(L, m3, n3)``, or ``None``
-            below ``maxorder=3``.
+            below ``order=3``.
         f0: Grand mean per slice, shape ``(L,)``.
         streamed: Whether the sample axis was actually split into row
             batches.
@@ -597,6 +603,7 @@ class _FitHDMR(NamedTuple):
     S: Array
     select: Array
     rmse: Array
+    explained_variance: Array
     C1: Array
     C2: Array | None
     C3: Array | None
@@ -608,10 +615,10 @@ def _fit_hdmr(
     X_n: Array,
     Y_nl: Array,
     *,
-    m: int,
-    maxorder: int,
-    maxiter: int,
-    lambdax: float,
+    n_intervals: int,
+    order: int,
+    max_iter: int,
+    ridge: float,
     f_crits: Array,
     c2_idx: Array,
     c3_idx: Array,
@@ -629,7 +636,7 @@ def _fit_hdmr(
 ) -> _FitHDMR:
     """Fit RS-HDMR over row batches and output-slice chunks.
 
-    Runs ``1 + (maxorder - 1) + 1`` passes over the row batches. Each pass
+    Runs ``1 + (order - 1) + 1`` passes over the row batches. Each pass
     rebuilds the per-batch B-spline bases once and then walks the slice
     chunks, so a full-``N`` basis is never resident and the basis build is
     not repeated per chunk:
@@ -637,9 +644,9 @@ def _fit_hdmr(
     1. Accumulate the first-order cross-Gram ``G1``, the basis column sums,
        the per-lane moments ``B1^T Y`` and the Y statistics (mean, shifted
        variance), then solve the backfit in Gram space -> ``C1``.
-    2. (maxorder >= 2) Recompute the exact first-order residual per batch
+    2. (order >= 2) Recompute the exact first-order residual per batch
        from ``C1`` and accumulate the per-term ``B2^T B2`` / ``B2^T Y_res``
-       -> ``C2``; likewise a third pass for ``C3`` at maxorder 3.
+       -> ``C2``; likewise a third pass for ``C3`` at order 3.
     3. Final pass: materialize the per-term contributions per batch and
        accumulate the ANCOVA covariances, the F-test sums of squares and
        cross-products, and the RMSE residual sum.
@@ -648,10 +655,10 @@ def _fit_hdmr(
         X_n: CDF-normalized inputs in [0, 1], shape ``(N, D)``.
         Y_nl: Response with the output slices flattened to the last axis,
             shape ``(N, L)``. Column ``t*K + k`` is slice ``(t, k)``.
-        m: Number of B-spline intervals.
-        maxorder: HDMR expansion order (1, 2, or 3), post-clamping.
-        maxiter: Maximum backfitting iterations.
-        lambdax: Tikhonov regularization strength.
+        n_intervals: Number of B-spline intervals.
+        order: HDMR expansion order (1, 2, or 3), post-clamping.
+        max_iter: Maximum backfitting iterations.
+        ridge: Tikhonov regularization strength.
         f_crits: Precomputed critical F values per order, shape ``(3,)``.
         c2_idx: Parameter index pairs, shape ``(n2, 2)``.
         c3_idx: Parameter index triples, shape ``(n3, 3)``.
@@ -686,8 +693,8 @@ def _fit_hdmr(
     )
     cs = _resolve_slice_chunk_size(slice_chunk_size, L, b, slice_bytes)
 
-    order2 = maxorder >= 2 and n2 > 0
-    order3 = maxorder >= 3 and n3 > 0
+    order2 = order >= 2 and n2 > 0
+    order3 = order >= 3 and n3 > 0
 
     # Pad both axes so each jitted step compiles once. A padded row is masked
     # to zero in every accumulator; a padded lane is an independent constant
@@ -709,7 +716,7 @@ def _fit_hdmr(
     # ---- Pass 1: first-order Gram + moments and Y statistics -------------
     # This pass only needs the first-order basis. Higher-order tensor products
     # are expensive and would otherwise be built and discarded here.
-    build_bases1 = _get_build_bases(m, False, False)
+    build_bases1 = _get_build_bases(n_intervals, False, False)
     shift = Y_p[0]  # (L_pad,)
     G1 = jnp.zeros((n1, m1, n1, m1), dtype=dtype)
     colsum1 = jnp.zeros((m1, n1), dtype=dtype)
@@ -732,7 +739,7 @@ def _fit_hdmr(
     # subtraction, which a float32 fit of an offset response needs.
     diag = jnp.arange(n1)
     G1_diag = G1[diag, :, diag, :]  # (n1, m1, m1)
-    backfit = _get_gram_backfit(m1, n1, maxiter, lambdax)
+    backfit = _get_gram_backfit(m1, n1, max_iter, ridge)
     C1_chunks = [
         backfit(G1, G1_diag, carry1[j][0] - mean_z[s:e, None, None] * colsum1.T[None])
         for j, (s, e) in enumerate(lanes)
@@ -741,8 +748,8 @@ def _fit_hdmr(
     # ---- Passes 2/3: higher orders on the exact sequential residual -------
     colsums = [colsum1]
     coef_chunks = [C1_chunks]
-    for order, (n_terms, m_basis) in enumerate(((n2, m2), (n3, m3)), start=2):
-        if not (order2 if order == 2 else order3):
+    for term_order, (n_terms, m_basis) in enumerate(((n2, m2), (n3, m3)), start=2):
+        if not (order2 if term_order == 2 else order3):
             break
         BtB = jnp.zeros((n_terms, m_basis, m_basis), dtype=dtype)
         colsum = jnp.zeros((m_basis, n_terms), dtype=dtype)
@@ -750,22 +757,22 @@ def _fit_hdmr(
         # Solving order ``k`` needs the bases up through order ``k`` to
         # reconstruct the exact sequential residual. Do not build a higher
         # order basis that this pass cannot consume.
-        build_bases_order = _get_build_bases(m, order >= 2, order >= 3)
+        build_bases_order = _get_build_bases(n_intervals, term_order >= 2, term_order >= 3)
         for lo, hi in rows:
             B_all = build_bases_order(X_p[lo:hi], w_full[lo:hi], c2_idx, c3_idx, beta2, beta3)
-            B_new = B_all[order - 1]
+            B_new = B_all[term_order - 1]
             BtB, colsum = _acc_gram(B_new, BtB, colsum)
             for j, (s, e) in enumerate(lanes):
                 BtY[j] = _acc_higher_moment(
                     B_new,
-                    B_all[: order - 1],
+                    B_all[: term_order - 1],
                     [c[j] for c in coef_chunks],
                     Y_p[lo:hi, s:e],
                     shift[s:e],
                     mean_z[s:e],
                     BtY[j],
                 )
-        solver = _get_gram_higher_solver(m_basis, lambdax)
+        solver = _get_gram_higher_solver(m_basis, ridge)
         colsums.append(colsum)
         coef_chunks.append([solver(BtB, BtY[j]) for j in range(n_chunks)])
 
@@ -785,7 +792,7 @@ def _fit_hdmr(
     mean_y0m = [jnp.sum(mf, axis=1, keepdims=True) - mf for mf in mean_f]
 
     # ---- Final pass: ANCOVA / F-test / RMSE reductions ---------------------
-    build_bases_final = _get_build_bases(m, order2, order3)
+    build_bases_final = _get_build_bases(n_intervals, order2, order3)
     stats_step = _get_stats_step(n1, n2)
     accs = [
         (
@@ -815,7 +822,7 @@ def _fit_hdmr(
             )
 
     acc = tuple(jnp.concatenate([a[k] for a in accs]) for k in range(7))
-    Sa, Sb, S, select, rmse = _get_finalize(n, n1, n2, m1, m2, m3, N)(
+    Sa, Sb, S, select, rmse, explained = _get_finalize(n, n1, n2, m1, m2, m3, N)(
         V_Y, Y_p, w_full, acc, f_crits
     )
 
@@ -826,6 +833,7 @@ def _fit_hdmr(
         S=S[:L],
         select=select[:L],
         rmse=rmse[:L],
+        explained_variance=explained[:L],
         C1=C[0],
         C2=C[1] if order2 else None,
         C3=C[2] if order3 else None,

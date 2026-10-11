@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import warnings
+from typing import Any, cast
 
 import jax.numpy as jnp
 import numpy as np
@@ -10,7 +11,7 @@ import pytest
 
 from jaxgsa import JaxgsaWarning
 from jaxgsa.benchmarks import ishigami, linear
-from jaxgsa.efast import analyze, indices, sample
+from jaxgsa.efast import EFASTIndices, analyze, indices, sample
 from jaxgsa.problem import Problem
 
 
@@ -78,3 +79,20 @@ def test_traceable_core_matches_public_result():
     core = indices(design, outputs)
     np.testing.assert_allclose(result.S1, core[0], atol=1e-6)
     np.testing.assert_allclose(result.ST, core[1], atol=1e-6)
+
+
+def test_first_argument_must_be_efast_samples():
+    for fn in (analyze, indices):
+        with pytest.raises(TypeError, match="takes the EFASTSamples.*not a Problem"):
+            fn(cast(Any, linear.PROBLEM), jnp.zeros(8))
+
+
+def test_indices_named_tuple_ci_and_repr():
+    design = sample(linear.PROBLEM, n_per_curve=1024, M=4, seed=3, verbose=False)
+    Y = jnp.asarray(design.samples) @ jnp.asarray([1.0, 2.0, 3.0])
+    out = indices(design, Y)
+    assert isinstance(out, EFASTIndices)
+    result = analyze(design, Y, verbose=False)
+    assert result.ci is None
+    text = repr(design)
+    assert "n_per_curve=1024" in text and "M=4" in text and len(text) < 200

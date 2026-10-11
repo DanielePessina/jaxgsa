@@ -67,7 +67,7 @@ def ishigami_data_ntk(hdmr_ishigami_xy):
 
 @pytest.fixture(scope="module")
 def full_result(hdmr_by_order):
-    """Unbatched maxorder=2 reference fit, shared with test_hdmr.py."""
+    """Unbatched order=2 reference fit, shared with test_hdmr.py."""
     return hdmr_by_order[2]
 
 
@@ -75,7 +75,7 @@ def full_result(hdmr_by_order):
 def full_ntk(ishigami_data_ntk):
     """Unbatched (N, T, K) reference fit, computed once."""
     X, Y_tk = ishigami_data_ntk
-    return analyze_hdmr(PROBLEM, X, Y_tk, maxorder=2, m=2)
+    return analyze_hdmr(PROBLEM, X, Y_tk, order=2, n_intervals=2)
 
 
 def _fit_kwargs(N: int, batch_size: int, slice_chunk_size: int) -> dict:
@@ -85,10 +85,10 @@ def _fit_kwargs(N: int, batch_size: int, slice_chunk_size: int) -> dict:
 
     sd = _get_hdmr_static_data(3, 2, 2)
     return dict(
-        m=2,
-        maxorder=2,
-        maxiter=50,
-        lambdax=0.01,
+        n_intervals=2,
+        order=2,
+        max_iter=50,
+        ridge=0.01,
         f_crits=_compute_f_crits(0.95, sd.m1, sd.m2, sd.m3, N),
         c2_idx=jnp.asarray(sd.c2, dtype=int),
         c3_idx=jnp.zeros((0, 3), dtype=int),
@@ -127,7 +127,7 @@ def _assert_results_match(batched, full):
         np.asarray(batched._fit["C1"]), np.asarray(full._fit["C1"]), COEF_RTOL, COEF_ATOL
     )
     if full._fit["C2"] is None:
-        # maxorder=1 has no second-order coefficients on either side.
+        # order=1 has no second-order coefficients on either side.
         assert batched._fit["C2"] is None
     else:
         assert batched._fit["C2"] is not None
@@ -141,25 +141,25 @@ class TestRowBatching:
 
     def test_scalar_output_matches(self, hdmr_ishigami_xy, full_result):
         X, Y = hdmr_ishigami_xy
-        batched = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2, batch_size=137)
+        batched = analyze_hdmr(PROBLEM, X, Y, order=2, n_intervals=2, batch_size=137)
         _assert_results_match(batched, full_result)
 
         # Tier T4 (internal consistency): batch_size >= N is a single batch.
         # ``streamed`` reports whether the sample axis was actually split, so a
         # batch size the data never reaches leaves it False.
-        single = analyze_hdmr(PROBLEM, X, Y, maxorder=2, m=2, batch_size=10**6)
+        single = analyze_hdmr(PROBLEM, X, Y, order=2, n_intervals=2, batch_size=10**6)
         assert single.streamed is False
         _assert_results_match(single, full_result)
 
-    def test_maxorder1_matches(self, hdmr_ishigami_xy, hdmr_by_order):
+    def test_order1_matches(self, hdmr_ishigami_xy, hdmr_by_order):
         X, Y = hdmr_ishigami_xy
-        batched = analyze_hdmr(PROBLEM, X, Y, maxorder=1, m=2, batch_size=250)
+        batched = analyze_hdmr(PROBLEM, X, Y, order=1, n_intervals=2, batch_size=250)
         _assert_results_match(batched, hdmr_by_order[1])
 
-    def test_maxorder3_matches(self, hdmr_ishigami_xy, hdmr_by_order):
+    def test_order3_matches(self, hdmr_ishigami_xy, hdmr_by_order):
         X, Y = hdmr_ishigami_xy
         full = hdmr_by_order[3]
-        batched = analyze_hdmr(PROBLEM, X, Y, maxorder=3, m=2, batch_size=333)
+        batched = analyze_hdmr(PROBLEM, X, Y, order=3, n_intervals=2, batch_size=333)
         _assert_results_match(batched, full)
         # Raw C3 is not comparable element-wise: with a 125-wide tensor-product
         # basis per triple, the per-term Gram is nearly singular, so f32 noise
@@ -176,7 +176,7 @@ class TestRowBatching:
 
     def test_ntk_output_matches(self, ishigami_data_ntk, full_ntk):
         X, Y_tk = ishigami_data_ntk
-        batched = analyze_hdmr(PROBLEM, X, Y_tk, maxorder=2, m=2, batch_size=111)
+        batched = analyze_hdmr(PROBLEM, X, Y_tk, order=2, n_intervals=2, batch_size=111)
         n_terms = 3 + 3
         assert batched.Sa.shape == (2, 2, n_terms)
         assert batched.rmse is not None and batched.rmse.shape == (2, 2)
@@ -233,11 +233,11 @@ class TestBothAxesCompose:
         """Widths that do not divide N or T*K are padded, not truncated."""
         X, Y_tk = ishigami_data_ntk  # N=1000, T*K = 4
         ragged = analyze_hdmr(
-            PROBLEM, X, Y_tk, maxorder=2, m=2, batch_size=333, slice_chunk_size=3
+            PROBLEM, X, Y_tk, order=2, n_intervals=2, batch_size=333, slice_chunk_size=3
         )
         _assert_results_match(ragged, full_ntk)
         # Slice chunking alone, in one row batch, must not change the answer either.
-        sliced = analyze_hdmr(PROBLEM, X, Y_tk, maxorder=2, m=2, slice_chunk_size=1)
+        sliced = analyze_hdmr(PROBLEM, X, Y_tk, order=2, n_intervals=2, slice_chunk_size=1)
         _assert_results_match(sliced, full_ntk)
 
     def test_both_axes_under_a_tiny_budget(self, ishigami_data_ntk, full_ntk):
@@ -252,7 +252,7 @@ class TestBothAxesCompose:
         X, Y_tk = ishigami_data_ntk
         assert full_ntk.streamed is False
         jaxgsa.config.set_memory_budget(256 * 1024, unit="b")  # 256 KiB
-        batched = analyze_hdmr(PROBLEM, X, Y_tk, maxorder=2, m=2, slice_chunk_size=1)
+        batched = analyze_hdmr(PROBLEM, X, Y_tk, order=2, n_intervals=2, slice_chunk_size=1)
         assert batched.streamed is True
         _assert_results_match(batched, full_ntk)
 

@@ -90,8 +90,10 @@ def _assert_results_match(a, b, *, rtol=RTOL, atol=ATOL):
     np.testing.assert_allclose(
         np.asarray(a.explained_variance), np.asarray(b.explained_variance), rtol, atol
     )
-    assert a.loo_rmse is not None and b.loo_rmse is not None
-    np.testing.assert_allclose(np.asarray(a.loo_rmse), np.asarray(b.loo_rmse), rtol, atol)
+    assert a.rmse is not None and b.rmse is not None
+    np.testing.assert_allclose(np.asarray(a.rmse), np.asarray(b.rmse), rtol, atol)
+    assert a.cv_rmse is not None and b.cv_rmse is not None
+    np.testing.assert_allclose(np.asarray(a.cv_rmse), np.asarray(b.cv_rmse), rtol, atol)
     assert a.order == b.order
     np.testing.assert_array_equal(a.multi_index, b.multi_index)
 
@@ -103,7 +105,7 @@ class TestForcedStreaming:
         X, Y3 = data_4d_ntk
         streamed = pce.analyze(problem_4d, X, Y3, order=3, batch_size=257)
         assert streamed.S1.shape == (2, 2, 4)
-        assert streamed.loo_rmse is not None and streamed.loo_rmse.shape == (2, 2)
+        assert streamed.cv_rmse is not None and streamed.cv_rmse.shape == (2, 2)
         _assert_results_match(streamed, single_4d_ntk)
 
     def test_batch_size_at_least_n_degenerates_to_single_pass(
@@ -208,7 +210,7 @@ class TestAutoEngage:
         single = single_4d
         assert single.streamed is False
 
-        saved = jaxgsa.config.get_memory_budget()
+        saved = jaxgsa.config.get_memory_budget(unit="b")
         try:
             jaxgsa.config.set_memory_budget(64 * 1024, unit="b")  # 64 KiB: forces streaming
             streamed = pce.analyze(problem_4d, X, Y, order=3)
@@ -216,7 +218,7 @@ class TestAutoEngage:
             forced_full = pce.analyze(problem_4d, X, Y, order=3, batch_size=X.shape[0])
         finally:
             jaxgsa.config.set_memory_budget(saved, unit="b")
-        assert jaxgsa.config.get_memory_budget() == saved
+        assert jaxgsa.config.get_memory_budget(unit="b") == saved
         assert forced_full.streamed is False
         assert streamed.streamed is True
         _assert_results_match(streamed, single)

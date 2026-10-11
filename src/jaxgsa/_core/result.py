@@ -30,6 +30,7 @@ would end up labelled ``param`` in an exported netCDF file.
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
@@ -39,6 +40,7 @@ import numpy as np
 import xarray as xr
 
 from jaxgsa._core.validation import _dims_and_coords
+from jaxgsa._core.warning_types import JaxgsaWarning
 
 if TYPE_CHECKING:
     from jax import Array
@@ -415,7 +417,9 @@ def aggregate_indices(
     ``KucherenkoResult`` and ``PCEResult``. It acts on every declared field
     that has an interval companion and the axes ``"param"`` or ``"pair"``
     (``S1``, ``ST``, ``S2``). Each one becomes ``sum_t w_t * field_t`` over
-    the leading output axes, which stay in place with size 1.
+    the leading output axes, which stay in place with size 1. A result with
+    no output axes (a ``(D,)`` index) comes back unchanged, and so does one
+    whose output axes already have a single slice.
 
     A slice with weight exactly 0 (a constant output) adds 0, even when its
     index is ``NaN``. A slice with a positive weight and a ``NaN`` index makes
@@ -424,7 +428,8 @@ def aggregate_indices(
     The interval is never aggregated bound by bound, because that is not a
     valid interval. When the result kept its bootstrap draws, each draw is
     aggregated and the interval is drawn again from the aggregated draws.
-    Otherwise the new interval is ``NaN``.
+    Otherwise the interval is dropped (``None``, ``ci`` too) and one
+    :class:`JaxgsaWarning` says so.
 
     Args:
         result: A result whose primary field has 1, 2 or 3 dimensions.
@@ -437,6 +442,10 @@ def aggregate_indices(
         A mapping of field name to new value, ready for
         :func:`dataclasses.replace`. It holds the aggregated index fields,
         their ``*_conf`` fields and ``ci``.
+
+    Warns:
+        JaxgsaWarning: If the result has a bootstrap interval but kept no
+            replicates, so the interval cannot be aggregated and is dropped.
 
     Raises:
         ValueError: If ``weights`` is not ``"variance"`` or ``"equal"``, if
@@ -476,13 +485,19 @@ def aggregate_indices(
         if variance is None:
             raise ValueError(
                 "weights='variance' needs the per-output variance, but this result "
-                "carries none (it was made before the variance field existed). "
+                "carries none (it was built without one). "
                 "Use weights='equal', or run the analysis again."
             )
         v = jnp.asarray(variance)
         if v.shape != lead:
             raise ValueError(f"variance has shape {v.shape}, expected {lead}")
         w = v / jnp.sum(v)
+
+    # The output axis now holds one slice, so its label is "aggregate". Keeping
+    # the original output names would break to_dataset (K names, one slice).
+    problem = getattr(result, "problem", None)
+    if problem is not None:
+        out["problem"] = problem.with_output_names(("aggregate",))
 
     def collapse(arr: Any, n_trailing: int, offset: int) -> Any:
         arr = jnp.asarray(arr)
@@ -518,6 +533,15 @@ def aggregate_indices(
             out[f"{s.name}_conf"] = conf[s.name]
         out["ci"] = new_ci
     else:
-        for s in have_conf:
-            out[f"{s.name}_conf"] = jnp.full((2, *points[s.name].shape), jnp.nan)
+        if have_conf:
+            warnings.warn(
+                "aggregate() dropped the confidence intervals, because it needs the "
+                "bootstrap replicates to aggregate them. Run analyze again with "
+                "keep_replicates=True.",
+                JaxgsaWarning,
+                stacklevel=3,
+            )
+            for s in have_conf:
+                out[f"{s.name}_conf"] = None
+            out["ci"] = None
     return out

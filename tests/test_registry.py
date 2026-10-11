@@ -67,7 +67,7 @@ DEFAULT_GIVEN_DATA_SIZE = 64
 
 CHEAP_KW: dict[str, dict] = {
     "vkoga": {"max_centers": 4, "n_folds": 2, "n_outer": 4, "n_inner": 4, "n_variance": 16},
-    "hdmr": {"maxorder": 1, "maxiter": 3},
+    "hdmr": {"order": 1, "max_iter": 3},
     "hsic": {"n_perms": 3},
     "optimal_transport": {"max_iter": 50},
     "borgonovo": {"grid_size": 24},
@@ -131,7 +131,7 @@ def _invoke(spec: MethodSpec, problem: jaxgsa.Problem) -> Callable[[], object]:
     n = GIVEN_DATA_SIZE.get(spec.name, DEFAULT_GIVEN_DATA_SIZE)
     X = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, n, seed=0))
     if spec.name == "dgsm":
-        return lambda: spec.analyze(problem, _point_model, X)
+        return lambda: spec.analyze(problem, X, fn=_point_model)
     extra = {"key": jax.random.key(0)} if spec.name in NEEDS_A_KEY else {}
     extra |= CHEAP_KW.get(spec.name, {})
     return lambda: spec.analyze(problem, X, _batch_model(X), **extra)
@@ -153,7 +153,7 @@ def _invoke_core(spec: MethodSpec, problem: jaxgsa.Problem) -> Callable[[], obje
     n = GIVEN_DATA_SIZE.get(spec.name, DEFAULT_GIVEN_DATA_SIZE)
     X = jnp.asarray(jaxgsa.sampling.monte_carlo(problem, n, seed=0))
     if spec.name == "dgsm":
-        return lambda: core(problem, _point_model, X)
+        return lambda: core(problem, X, fn=_point_model)
     extra = {"key": jax.random.key(0)} if spec.name in NEEDS_A_KEY else {}
     extra |= CHEAP_KW.get(spec.name, {})
     return lambda: core(problem, X, _batch_model(X), **extra)

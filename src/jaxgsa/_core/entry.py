@@ -224,7 +224,7 @@ class Context:
             :func:`prepare`, under the same names, checked with ``Y`` and
             compacted with it.
         deferred_expand: The design's output re-expansion, held back from
-            the eager preamble. Only set under ``on_invalid="none"`` (the
+            the eager preamble. Only set under ``on_invalid="skip"`` (the
             non-finite check never reads the expanded rows then), so the
             expansion can ride along with the estimator instead of
             materialising the expanded array first. ``None`` when the
@@ -319,7 +319,7 @@ def prepare(
         Y: The caller's model output.
         X: The input matrix, or ``None`` for a design-based method.
         on_invalid: The caller's non-finite policy, unvalidated. Under
-            ``"none"`` (see :mod:`jaxgsa._core.invalid`) the non-finite scan
+            ``"skip"`` (see :mod:`jaxgsa._core.invalid`) the non-finite scan
             does not run, no row is dropped, and the constant-slice warning is
             skipped with it: the analysis runs on the data exactly as given.
             The shape contracts still run, because they cost no scan.
@@ -416,12 +416,12 @@ def prepare(
     if expand is not None:
         # The user evaluated the model once per unique row. The estimator,
         # and the unit the check works in, both live in the expanded layout.
-        # Under on_invalid='none' the check never reads the expanded rows,
+        # Under on_invalid='skip' the check never reads the expanded rows,
         # so the expansion is deferred to the estimator (which may fuse it
         # with the standardization; see Context.deferred_expand); under
         # every other policy it must happen here, before the check sees the
         # data, and the context carries the already-expanded layout.
-        if policy == "none":
+        if policy == "skip":
             deferred_expand = expand
         else:
             Y = expand(Y)
@@ -452,7 +452,7 @@ def prepare(
 
     Y3, layout = _prepare_Y(Y)
 
-    if warn_zero_variance and policy != "none":
+    if warn_zero_variance and policy != "skip":
         # The warning has to see what the estimator will see. For a grouped
         # unit the caller has not compacted yet, so the surviving rows are
         # selected here; leaving the dropped rows in would hide a constant

@@ -18,7 +18,7 @@ A model that fails on some of its runs returns ``NaN`` or ``inf``. Every
     Remove the affected data and analyze what is left. What "affected data"
     means depends on the design; see :class:`InvalidUnit`.
 
-``"none"``
+``"skip"``
     Skip the non-finite check entirely. The analysis runs on the data exactly
     as given, and the constant-slice warning is skipped with it. On a design
     with millions of expanded rows the two scans are most of the fixed cost
@@ -29,7 +29,7 @@ A model that fails on some of its runs returns ``NaN`` or ``inf``. Every
     a block split, and checking the shape costs no data scan.
 
 Whatever the policy, the count and the position of the affected data are
-recorded in an :class:`InvalidReport` — under ``"none"`` the check never
+recorded in an :class:`InvalidReport` — under ``"skip"`` the check never
 ran, so the report always says clean. The report is the part that matters in
 practice: it names the runs to investigate.
 
@@ -72,9 +72,9 @@ __all__ = [
     "resolve_policy",
 ]
 
-OnInvalid: TypeAlias = Literal["raise", "propagate", "drop", "none"]
+OnInvalid: TypeAlias = Literal["raise", "propagate", "drop", "skip"]
 
-_POLICIES: tuple[str, ...] = ("raise", "propagate", "drop", "none")
+_POLICIES: tuple[str, ...] = ("raise", "propagate", "drop", "skip")
 
 # Below this many surviving units the estimate is not worth reporting without
 # saying so. One floor, applied everywhere a "drop" policy can leave a sample
@@ -152,9 +152,9 @@ class InvalidReport:
 
     Attributes:
         policy: The policy that ran: ``"raise"``, ``"propagate"``,
-            ``"drop"`` or ``"none"``. A report with ``policy="raise"`` only
+            ``"drop"`` or ``"skip"``. A report with ``policy="raise"`` only
             exists when nothing was found, since otherwise the call raised. A
-            report with ``policy="none"`` means the check never ran: it is
+            report with ``policy="skip"`` means the check never ran: it is
             always clean, because nothing was looked at.
         unit: The block of data one bad value invalidates. See
             :class:`InvalidUnit`.
@@ -386,7 +386,7 @@ def _unit_of_row_for_policy(
 ) -> npt.NDArray[np.intp] | None:
     """Build the row map only where the non-finite check will read it.
 
-    Under ``on_invalid='none'`` :func:`check_invalid` returns before it ever
+    Under ``on_invalid='skip'`` :func:`check_invalid` returns before it ever
     touches the map (a per-row map over the expanded design is exactly the
     scan the policy skips, and building it on the host costs ~0.3-0.6 ms at
     million-row scales), so the call sites pass ``None`` there instead of
@@ -400,9 +400,9 @@ def _unit_of_row_for_policy(
         build: How to build the map, called only when a check will read it.
 
     Returns:
-        The built map, or ``None`` under ``on_invalid='none'``.
+        The built map, or ``None`` under ``on_invalid='skip'``.
     """
-    if on_invalid == "none":
+    if on_invalid == "skip":
         return None
     return build()
 
@@ -431,7 +431,7 @@ def check_invalid(
 
     Args:
         policy: The validated policy, from :func:`resolve_policy`. Under
-            ``"none"`` the scan does not run at all: the verdict is that every
+            ``"skip"`` the scan does not run at all: the verdict is that every
             unit is clean, the report is the clean report, and the caller
             applies no mask. The shape consistency check on the companion
             arrays still runs, because a misnumbered array would silently
@@ -489,13 +489,13 @@ def check_invalid(
     extra_arrays = tuple(_as_array(array) for array in extras)
     _check_extra_row_counts(y_array, x_array, extra_arrays, unit_of_row=unit_of_row)
 
-    if policy == "none":
+    if policy == "skip":
         # No scan: the caller has asserted the data is clean. The keep mask is
         # all-True and the report is the clean one, so the estimator's book-
         # keeping sees exactly what it sees under "propagate" on a clean
         # sample, without a single pass over the expanded rows. The contract
         # the other policies hold -- keep + report decide the rest -- is
-        # intact, so the callers below need no "none" branches of their own.
+        # intact, so the callers below need no "skip" branches of their own.
         return np.ones(n_units, dtype=bool), _clean_report(unit, n_units, policy)
 
     y_ok, y_rows = _finite_by_unit(

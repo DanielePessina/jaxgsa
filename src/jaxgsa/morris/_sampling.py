@@ -36,6 +36,7 @@ from jaxgsa._core.sampling import (
     _next_power_of_2,
     _stable_unique_rows,
     _transform_samples,
+    check_seed,
 )
 from jaxgsa._core.validation import _raise_categorical_design, _raise_correlated_design
 from jaxgsa._core.warning_types import JaxgsaWarning
@@ -118,6 +119,14 @@ class MorrisSamples(UniqueDesignSamples):
     n_params: int
     problem: Problem
     n_blocks_dropped: int = 0
+
+    def __repr__(self) -> str:
+        """Return a compact summary with no arrays."""
+        return (
+            f"MorrisSamples(n_runs={self.n_runs}, n_params={self.n_params}, "
+            f"n_trajectories={self.n_trajectories}, num_levels={self.num_levels}, "
+            f"method={self.method!r})"
+        )
 
     @overload
     def downsample(self, n_trajectories: int) -> MorrisSamples: ...
@@ -244,7 +253,7 @@ class MorrisSamples(UniqueDesignSamples):
             ee_idx_after=arrays["ee_idx_after"],
             ee_idx_before=arrays["ee_idx_before"],
             ee_delta=arrays["ee_delta"],
-            n_params=problem.num_vars,
+            n_params=problem.n_params,
             problem=problem,
             # Files written before this field existed have no entry for it.
             n_blocks_dropped=int(meta.get("n_blocks_dropped", 0)),
@@ -289,7 +298,7 @@ def _radial_samples_from_blocks(
         JaxgsaWarning: If any block is dropped because its base and perturbed
             points coincide at the model's floating-point resolution.
     """
-    D = problem.num_vars
+    D = problem.n_params
     # The elementary-effect denominator must be the unit-cube step, matching
     # what ``sample()`` records, so recover unit coordinates in float64.
     samples_unit = _inverse_transform_samples(problem, samples)
@@ -623,6 +632,7 @@ def sample(
             design steps each parameter along a grid and a grid has no meaning
             for unordered level codes.
     """
+    check_seed(seed, "jaxgsa.morris.sample")
     _raise_correlated_design(problem, "jaxgsa.morris.sample")
     _raise_categorical_design(problem, "jaxgsa.morris.sample")
     if not 0.0 < truncation_quantile < 0.5:
@@ -641,7 +651,7 @@ def sample(
             category=JaxgsaWarning,
         )
 
-    D = problem.num_vars
+    D = problem.n_params
     if method == "trajectory":
         rng = np.random.default_rng(seed)
         expanded_unit, ee_idx_after, ee_idx_before, ee_delta = _build_trajectories(

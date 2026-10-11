@@ -25,7 +25,7 @@ Array shape conventions used throughout:
 
 import dataclasses
 from functools import lru_cache
-from typing import Literal, cast
+from typing import Literal, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -55,6 +55,7 @@ from jaxgsa._core.validation import (
     YLayout,
     _prepare_Y,
     _standardize_outputs,
+    as_key,
 )
 from jaxgsa.sobol._bootstrap import _bootstrap_indices
 from jaxgsa.sobol._chunking import (
@@ -71,7 +72,7 @@ from jaxgsa.sobol._estimators import (
     second_order_kernel,
 )
 from jaxgsa.sobol._result import SobolResult
-from jaxgsa.sobol._sampling import SobolSamples, _saltelli_step
+from jaxgsa.sobol._sampling import SobolSamples, _require_samples, _saltelli_step
 
 # Keyword-only parameters the irregular engine forwards unchanged to the
 # per-channel recursive analyze() calls. verbose is excluded:
@@ -118,7 +119,7 @@ def _get_fused_scalar_indices(D: int, calc_second_order: bool, estimator: str):
     """Build the one-executable take + standardize + split + flatten + kernel.
 
     The expansion gather is fused into the scalar front half when the
-    non-finite check was skipped (``on_invalid='none'``, see
+    non-finite check was skipped (``on_invalid='skip'``, see
     :func:`jaxgsa._core.entry.prepare`): the expanded array is then read by
     nothing but the estimator, so materialising it as an eager pass wastes a
     write and a read of the whole array. Measured ~2.2x faster than the
@@ -145,7 +146,7 @@ def _get_fused_scalar_indices(D: int, calc_second_order: bool, estimator: str):
         Y3 = jnp.take(Y_raw, index_map, axis=0).reshape(-1, 1, 1)
         # A constant float64 slice can acquire a tiny nonzero pooled variance
         # when XLA reassociates the fused standardization and estimator. Keep
-        # the ``on_invalid='none'`` contract (constant output -> NaN indices)
+        # the ``on_invalid='skip'`` contract (constant output -> NaN indices)
         # without bringing the host-side validation scan back into the hot
         # path: this exact-equality reduction is fused into the same device
         # executable as the gather and estimator.
@@ -590,7 +591,7 @@ def _indices_from_expanded(
         ValueError: If ``slice_chunk_size`` is below 1.
     """
     if expand_map is not None:
-        # The non-finite check was skipped (on_invalid='none'), so nothing
+        # The non-finite check was skipped (on_invalid='skip'), so nothing
         # read the expanded rows before here. The scalar layout fuses the
         # gather into the front half (one executable, measured ~2.2x faster
         # than the eager pipeline); wide layouts run slower fused, so they
@@ -676,7 +677,7 @@ def _output_variance(Y: Array, expand_map: Array | None) -> Array:
 
 
 def _analyze_no_bootstrap(
-    sampling_result: SobolSamples,
+    samples: SobolSamples,
     Y: Array,
     *,
     slice_chunk_size: int | None,
@@ -687,8 +688,8 @@ def _analyze_no_bootstrap(
     """Wrap the estimator core in a ``SobolResult``, without a bootstrap."""
     S1_out, ST_out, S2_out = _indices_from_expanded(
         Y,
-        sampling_result.n_params,
-        sampling_result.calc_second_order,
+        samples.n_params,
+        samples.calc_second_order,
         slice_chunk_size,
         estimator,
         expand_map=expand_map,
@@ -697,19 +698,36 @@ def _analyze_no_bootstrap(
         S1=S1_out,
         ST=ST_out,
         S2=S2_out,
-        problem=sampling_result.problem,
+        problem=samples.problem,
         invalid=invalid,
         estimator=estimator,
     )
 
 
+class SobolIndices(NamedTuple):
+    """Sobol indices as plain arrays, returned by :func:`indices`.
+
+    Tuple unpacking works: ``S1, ST, S2 = indices(samples, Y)``.
+
+    Attributes:
+        S1: First-order indices, the same array as ``SobolResult.S1``.
+        ST: Total-order indices, the same array as ``SobolResult.ST``.
+        S2: Second-order indices, the same array as ``SobolResult.S2``, or
+            ``None`` when the design was drawn with ``calc_second_order=False``.
+    """
+
+    S1: Array
+    ST: Array
+    S2: Array | None
+
+
 def indices(
-    sampling_result: SobolSamples,
+    samples: SobolSamples,
     Y: Array,
     *,
     estimator: Estimator = DEFAULT_ESTIMATOR,
     slice_chunk_size: int | None = None,
-) -> tuple[Array, ...]:
+) -> SobolIndices:
     """Compute Sobol indices as plain arrays, with no diagnostics.
 
     This is the transformable core of :func:`analyze`. It runs the same
@@ -724,8 +742,8 @@ def indices(
     an index with respect to the input distribution parameters::
 
         def s1(theta):
-            Y = model(sampling_result.transform(theta))
-            return jaxgsa.sobol.indices(sampling_result, Y)[0]
+            Y = model(samples.transform(theta))
+            return jaxgsa.sobol.indices(samples, Y)[0]
 
         dS1_dtheta = jax.jacrev(s1)(theta)
 
@@ -744,10 +762,10 @@ def indices(
     in ``tests/test_sobol_gradients.py``.
 
     Args:
-        sampling_result: The design from :func:`jaxgsa.sobol.sample`, used
+        samples: The design from :func:`jaxgsa.sobol.sample`, used
             only for its expansion map and its Saltelli layout flags.
         Y: Model outputs evaluated at each unique row of
-            ``sampling_result.samples``, in the same row order. Shapes are
+            ``samples.samples``, in the same row order. Shapes are
             those :func:`analyze` accepts: ``(n_runs,)``, ``(n_runs, K)`` or
             ``(n_runs, T, K)``.
         estimator: Which estimator pair to use, as in :func:`analyze`. Every
@@ -760,30 +778,31 @@ def indices(
             device out-of-memory errors.
 
     Returns:
-        ``(S1, ST)``, or ``(S1, ST, S2)`` when the design was drawn with
-        ``calc_second_order=True``. The shapes are those ``analyze`` reports.
+        A :class:`SobolIndices` named tuple ``(S1, ST, S2)``. ``S2`` is
+        ``None`` when the design was drawn with ``calc_second_order=False``.
+        The shapes are those ``analyze`` reports.
 
     Raises:
+        TypeError: If ``samples`` is not a ``SobolSamples``.
         ValueError: If ``estimator`` is not a known name; if it needs the BA
             blocks and the design has none; if ``Y``'s first axis does not
-            match ``sampling_result.n_runs``; or if ``slice_chunk_size`` is
+            match ``samples.n_runs``; or if ``slice_chunk_size`` is
             below 1.
     """
-    check_scalars(_estimator_checks(estimator, sampling_result.calc_second_order))
+    _require_samples(samples, SobolSamples, "jaxgsa.sobol.indices", "jaxgsa.sobol.sample")
+    check_scalars(_estimator_checks(estimator, samples.calc_second_order))
     S1, ST, S2 = _indices_from_expanded(
-        sampling_result.expand_outputs(Y),
-        sampling_result.n_params,
-        sampling_result.calc_second_order,
+        samples.expand_outputs(Y),
+        samples.n_params,
+        samples.calc_second_order,
         slice_chunk_size,
         estimator,
     )
-    if S2 is None:
-        return S1, ST
-    return S1, ST, S2
+    return SobolIndices(S1, ST, S2)
 
 
 def _analyze_bootstrap(
-    sampling_result: SobolSamples,
+    samples: SobolSamples,
     Y: Array,
     *,
     estimator: str,
@@ -811,8 +830,8 @@ def _analyze_bootstrap(
     to assembling the full public draw arrays.
     """
     Y, layout = _prepare_Y(Y)
-    D = sampling_result.n_params
-    calc_second_order = sampling_result.calc_second_order
+    D = samples.n_params
+    calc_second_order = samples.calc_second_order
 
     _, T, K = Y.shape
     A_flat, AB_flat, BA_flat, B_flat = _separate_flattened(Y, D, calc_second_order)
@@ -998,7 +1017,7 @@ def _analyze_bootstrap(
         S1=S1_out,
         ST=ST_out,
         S2=S2_out,
-        problem=sampling_result.problem,
+        problem=samples.problem,
         invalid=invalid,
         estimator=estimator,
         S1_conf=S1_conf,
@@ -1009,14 +1028,14 @@ def _analyze_bootstrap(
 
 
 def analyze(
-    sampling_result: SobolSamples,
+    samples: SobolSamples,
     Y: Array | IrregularY,
     *,
     estimator: Estimator = DEFAULT_ESTIMATOR,
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
-    key: Array | None = None,
+    key: Array | int | None = None,
     slice_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
@@ -1049,10 +1068,10 @@ def analyze(
     estimators and skips every check.
 
     Args:
-        sampling_result: Result from ``jaxgsa.sobol.sample()`` with the unique
+        samples: Result from ``jaxgsa.sobol.sample()`` with the unique
             sample matrix plus expansion metadata.
         Y: Model outputs evaluated at each unique row of
-            ``sampling_result.samples``, in the same row order, where
+            ``samples.samples``, in the same row order, where
             ``n_runs`` is the unique row count. Accepted shapes:
                 ``(n_runs,)``: scalar output, single time step
                 ``(n_runs, K)``: K outputs, single time step
@@ -1148,6 +1167,7 @@ def analyze(
             invalid: What the non-finite check found, and what it did
 
     Raises:
+        TypeError: If ``samples`` is not a ``SobolSamples``.
         ValueError: If ``estimator`` is not a known name, or needs the BA
             blocks and the design has none; if ``on_invalid`` is not one of
             the three policies; if
@@ -1161,41 +1181,43 @@ def analyze(
         JaxgsaWarning: If an output slice has zero variance, which makes its
             indices NaN.
     """
+    _require_samples(samples, SobolSamples, "jaxgsa.sobol.analyze", "jaxgsa.sobol.sample")
+    key = as_key(key, "sobol")
     if _is_irregular_y(Y):
         return analyze_irregular(
             analyze,
-            channel_data=sampling_result,
-            problem=sampling_result.problem,
+            channel_data=samples,
+            problem=samples.problem,
             Y=Y,
-            n_expected=int(sampling_result.n_runs),
+            n_expected=int(samples.n_runs),
             design_based=True,
             verbose=verbose,
             kwargs=_fwd_kwargs(locals(), _IRREGULAR_KWARGS),
         )
     Y = cast(Array, Y)
 
-    from jaxgsa.sobol import SPEC
+    from jaxgsa.sobol import _SPEC
 
-    D = sampling_result.n_params
+    D = samples.n_params
     # step = rows per Saltelli group: D+2 (first-order only) or 2D+2 (with S2)
-    step = _saltelli_step(D, sampling_result.calc_second_order)
+    step = _saltelli_step(D, samples.calc_second_order)
     # A Saltelli group [A_i, AB_{i,0}, …, B_i] is one indivisible sampling
     # unit, so the check runs at group granularity: a single bad row condemns
     # the whole block of `step` rows, and a partial group would corrupt the
     # A/B/AB/BA split. The group count comes from the design, not from Y, so
     # it is known before Y is looked at.
-    base_n = sampling_result.n_expanded // step
-    # Under on_invalid='none' the check never reads the row map (measured
+    base_n = samples.n_expanded // step
+    # Under on_invalid='skip' the check never reads the row map (measured
     # ~0.6 ms of the fixed cost at base_n=16384), so it is built only where
     # it is used.
     unit_of_row = _unit_of_row_for_policy(on_invalid, lambda: np.repeat(np.arange(base_n), step))
     ctx = prepare(
-        SPEC,
-        sampling_result.problem,
+        _SPEC,
+        samples.problem,
         Y,
         on_invalid=on_invalid,
         checks=(
-            *_estimator_checks(estimator, sampling_result.calc_second_order),
+            *_estimator_checks(estimator, samples.calc_second_order),
             one_of("ci_method", ci_method, ("quantile", "gaussian")),
             at_least("n_bootstrap", n_bootstrap, 0),
             at_least("slice_chunk_size", slice_chunk_size, 1),
@@ -1207,17 +1229,17 @@ def analyze(
                 "key is required when n_bootstrap > 0",
             ),
         ),
-        n_expected=int(sampling_result.samples.shape[0]),
-        expand=sampling_result.expand_outputs,
+        n_expected=int(samples.samples.shape[0]),
+        expand=samples.expand_outputs,
         n_units=base_n,
         unit_of_row=unit_of_row,
         # The Saltelli layout groups units contiguously, step rows each.
         unit_stride=step,
         # Y is checked expanded, but the caller passed one output per unique
         # run. Report the rows they hold, not the expanded ones.
-        row_labels=sampling_result.expanded_to_unique,
+        row_labels=samples.expanded_to_unique,
         min_kept=2,
-        # Under on_invalid='none' the check never reads the expanded rows, so
+        # Under on_invalid='skip' the check never reads the expanded rows, so
         # the expansion is deferred to the estimator, which fuses the gather
         # into the scalar front half (see _get_fused_scalar_indices). Every
         # other policy expands here, inside prepare.
@@ -1233,7 +1255,7 @@ def analyze(
         grouped = np.asarray(Y).reshape(base_n, step, *trailing)[ctx.keep]
         Y = jnp.asarray(grouped.reshape(-1, *trailing))
 
-    # on_invalid='none' held the expansion back from the preamble (see
+    # on_invalid='skip' held the expansion back from the preamble (see
     # Context.deferred_expand). A scalar analysis without a bootstrap
     # fuses the gather into the estimator front half -- measured ~2.2x
     # faster than the eager expansion, the gather becoming part of one
@@ -1244,7 +1266,7 @@ def analyze(
     expand_map = None
     if ctx.deferred_expand is not None:
         if n_bootstrap == 0 and ctx.keep.all() and ctx.layout is YLayout.SCALAR:
-            expand_map = sampling_result._expanded_to_unique_jax
+            expand_map = samples._expanded_to_unique_jax
         else:
             Y = ctx.deferred_expand(Y)
 
@@ -1254,7 +1276,7 @@ def analyze(
     if n_bootstrap > 0:
         assert key is not None  # checked above, in checks=
         result = _analyze_bootstrap(
-            sampling_result,
+            samples,
             Y,
             estimator=estimator,
             n_bootstrap=n_bootstrap,
@@ -1267,7 +1289,7 @@ def analyze(
         )
     else:
         result = _analyze_no_bootstrap(
-            sampling_result,
+            samples,
             Y,
             slice_chunk_size=slice_chunk_size,
             estimator=estimator,
@@ -1287,7 +1309,7 @@ def analyze(
             T * K,
             int(Y.shape[0]) // step,
             D,
-            sampling_result.calc_second_order,
+            samples.calc_second_order,
             Y.dtype.itemsize,
         )
         origin = "user-set" if slice_chunk_size is not None else "resolved from the memory budget"
@@ -1300,14 +1322,14 @@ def analyze(
                 n_bootstrap,
                 int(Y.shape[0]) // step,
                 D,
-                sampling_result.calc_second_order,
+                samples.calc_second_order,
                 Y.dtype.itemsize,
                 cs,
             )
             notes.insert(1, f"bootstrap resample_chunk_size: {boot_rs} ({origin})")
         _verbose.analysis_summary(
             method="jaxgsa.sobol.analyze",
-            problem=sampling_result.problem,
+            problem=samples.problem,
             n_runs=int(Y.shape[0]),
             T=T,
             K=K,

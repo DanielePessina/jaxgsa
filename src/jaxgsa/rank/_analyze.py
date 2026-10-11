@@ -41,7 +41,8 @@ References:
 
 from __future__ import annotations
 
-from typing import Literal, cast
+from collections.abc import Sequence
+from typing import Literal, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -50,6 +51,7 @@ from jax import Array
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.bootstrap import interval
 from jaxgsa._core.entry import (
+    ScalarCheck,
     at_least,
     gates,
     in_open_interval,
@@ -67,7 +69,7 @@ from jaxgsa._core.irregular import (
     analyze_irregular,
 )
 from jaxgsa._core.result import CIInfo
-from jaxgsa._core.validation import _prepare_Y, _validate_output
+from jaxgsa._core.validation import _prepare_Y, _validate_output, as_key
 from jaxgsa.problem import Problem
 from jaxgsa.rank._result import RankResult
 
@@ -88,6 +90,22 @@ _MIN_KEPT = 3
 # Share of the rows each confidence-interval resample keeps. Same default as
 # the R package ``sensitivity`` (``nsample = round(0.8 * nrow(X))``).
 _SUBSAMPLE_FRACTION = 0.8
+
+
+def _prefixed(checks: Sequence[ScalarCheck]) -> tuple[ScalarCheck, ...]:
+    """Prefix each failing-argument message with ``jaxgsa.rank: ``.
+
+    Args:
+        checks: Scalar verdicts built with the shared helpers.
+
+    Returns:
+        The same verdicts, each message starting ``jaxgsa.rank: `` unless
+        it already starts with ``jaxgsa``.
+    """
+    return tuple(
+        c if c.message.startswith("jaxgsa") else ScalarCheck(c.ok, f"jaxgsa.rank: {c.message}")
+        for c in checks
+    )
 
 
 def _rank_core(X: Array, Y_3d: Array) -> Array:
@@ -180,7 +198,20 @@ def _subsample_draws(
     return s1_3d + spread, corrected + spread
 
 
-def indices(problem: Problem, X: Array, Y: Array) -> tuple[Array]:
+class RankIndices(NamedTuple):
+    """Plain-array rank-based indices, as returned by :func:`indices`.
+
+    Fields are named like the matching result fields. Tuple unpacking
+    works as for a plain tuple.
+
+    Attributes:
+        S1: Rank-based first-order index per parameter.
+    """
+
+    S1: Array
+
+
+def indices(problem: Problem, X: Array, Y: Array) -> RankIndices:
     """Compute rank-based first-order indices as plain arrays, with no diagnostics.
 
     This is the transformable core of :func:`analyze`. It runs the same kernel
@@ -204,7 +235,7 @@ def indices(problem: Problem, X: Array, Y: Array) -> tuple[Array]:
         Y: Model outputs, shape ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
 
     Returns:
-        A one-element tuple ``(S1,)``, shaped ``(D,)``, ``(K, D)`` or
+        A one-field :class:`RankIndices` named tuple ``(S1,)``, shaped ``(D,)``, ``(K, D)`` or
         ``(T, K, D)`` to mirror the layout of ``Y``. A tuple, not a bare
         array, because every method's core returns one.
 
@@ -213,13 +244,13 @@ def indices(problem: Problem, X: Array, Y: Array) -> tuple[Array]:
             2-D, if its column count does not match the problem, if ``X`` and
             ``Y`` have differing row counts, or if ``Y`` has an invalid rank.
     """
-    from jaxgsa.rank import SPEC
+    from jaxgsa.rank import _SPEC
 
-    gates(SPEC, problem, method="jaxgsa.rank.indices")
+    gates(_SPEC, problem, method="jaxgsa.rank.indices")
     X_arr = validate_inputs(problem, X)
     Y_arr = _validate_output(Y, int(X_arr.shape[0]), problem)
     Y3, layout = _prepare_Y(Y_arr)
-    return (layout.squeeze(_rank_core(X_arr, Y3)),)
+    return RankIndices(S1=layout.squeeze(_rank_core(X_arr, Y3)))
 
 
 def analyze(
@@ -230,7 +261,7 @@ def analyze(
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
-    key: Array | None = None,
+    key: Array | int | None = None,
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
     keep_replicates: bool = False,
@@ -319,6 +350,7 @@ def analyze(
         JaxgsaWarning: If an output slice has zero variance. The index is then
             ``NaN``, because it is a ratio to the output variance.
     """
+    key = as_key(key, "rank")
     if _is_irregular_y(Y):
         return analyze_irregular(
             analyze,
@@ -332,22 +364,24 @@ def analyze(
         )
     Y = cast(Array, Y)
 
-    from jaxgsa.rank import SPEC
+    from jaxgsa.rank import _SPEC
 
     ctx = prepare(
-        SPEC,
+        _SPEC,
         problem,
         Y,
         X=X,
         on_invalid=on_invalid,
-        checks=(
-            at_least("n_bootstrap", n_bootstrap, 0),
-            one_of("ci_method", ci_method, ("quantile", "gaussian")),
-            in_open_interval("conf_level", conf_level, 0.0, 1.0),
-            require(
-                n_bootstrap == 0 or key is not None,
-                "key is required when n_bootstrap > 0",
-            ),
+        checks=_prefixed(
+            (
+                at_least("n_bootstrap", n_bootstrap, 0),
+                one_of("ci_method", ci_method, ("quantile", "gaussian")),
+                in_open_interval("conf_level", conf_level, 0.0, 1.0),
+                require(
+                    n_bootstrap == 0 or key is not None,
+                    "key is required when n_bootstrap > 0",
+                ),
+            )
         ),
         min_kept=_MIN_KEPT,
     )
@@ -355,7 +389,7 @@ def analyze(
     assert ctx.X is not None  # a given-data method always passes X to prepare()
     X, invalid = ctx.X, ctx.invalid
     if X.shape[0] < _MIN_KEPT:
-        raise ValueError(f"jaxgsa.rank.analyze needs at least {_MIN_KEPT} rows, got {X.shape[0]}")
+        raise ValueError(f"jaxgsa.rank: analyze needs at least {_MIN_KEPT} rows, got {X.shape[0]}")
     Y_3d = ctx.Y3
     t0 = _verbose.tic()
     s1_3d = _rank_core(X, Y_3d)

@@ -67,8 +67,12 @@ class TestDeltaBasic:
     def test_the_key_decides_the_bootstrap(self, given_ishigami_xy, delta_ishigami_boot):
         """Tier T4. The same key gives the same result, a different key a different one."""
         X, Y = given_ishigami_xy
-        same = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=BOOT, key=jax.random.key(0))
-        other = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=BOOT, key=jax.random.key(2))
+        same = analyze(
+            ishigami.PROBLEM, X, Y, n_bootstrap=BOOT, bias_correct=True, key=jax.random.key(0)
+        )
+        other = analyze(
+            ishigami.PROBLEM, X, Y, n_bootstrap=BOOT, bias_correct=True, key=jax.random.key(2)
+        )
         assert delta_ishigami_boot.delta_conf is not None
         assert same.delta_conf is not None and other.delta_conf is not None
         np.testing.assert_array_equal(
@@ -352,7 +356,9 @@ class TestDeltaMultiOutput:
         """Column 0 of a multi-output run must equal the scalar-output run."""
         X, Y = given_ishigami_xy
         Y2 = jnp.stack([Y, Y**2], axis=1)
-        r_multi = analyze(ishigami.PROBLEM, X, Y2, n_bootstrap=BOOT, key=jax.random.key(0))
+        r_multi = analyze(
+            ishigami.PROBLEM, X, Y2, n_bootstrap=BOOT, bias_correct=True, key=jax.random.key(0)
+        )
         np.testing.assert_allclose(
             np.asarray(r_multi.delta[0]), np.asarray(delta_ishigami_boot.delta), rtol=1e-6
         )
@@ -451,7 +457,7 @@ class TestDeltaRegression:
         ``analyze`` supports a continuous output only. A rare-event
         indicator has two atoms, which no output grid resolves.
         """
-        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=1000, seed=1))
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=1000, seed=1))
         Y_np = np.zeros(1000)
         Y_np[np.random.default_rng(0).integers(1000)] = 1.0
         with pytest.raises(ValueError, match="continuous output distribution only"):
@@ -465,7 +471,7 @@ class TestDeltaRegression:
         analyze returned a delta that describes ``grid_size`` rather than
         the model. The rule is now an average-multiplicity test.
         """
-        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=150, seed=2))
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=150, seed=2))
         binary = jnp.asarray(np.random.default_rng(1).integers(0, 2, size=150).astype(np.float64))
         with pytest.raises(ValueError, match="continuous output distribution only"):
             analyze(ishigami.PROBLEM, X, binary)
@@ -476,7 +482,7 @@ class TestDeltaRegression:
         Under the old fraction rule this needed N > 1000. At N=500 each
         level repeats 50 times on average, which continuity cannot do.
         """
-        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=500, seed=3))
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=500, seed=3))
         ten = jnp.asarray(np.random.default_rng(2).integers(0, 10, size=500).astype(np.float64))
         with pytest.raises(ValueError, match="continuous output distribution only"):
             analyze(ishigami.PROBLEM, X, ten)
@@ -487,7 +493,7 @@ class TestDeltaRegression:
         It has ~100 distinct values, above the 20-value cap, so it is
         structurally safe whatever the multiplicity term says.
         """
-        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=100, seed=4))
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=100, seed=4))
         result = analyze(ishigami.PROBLEM, X, ishigami.evaluate(X))
         assert np.all(np.isfinite(np.asarray(result.delta)))
 
@@ -517,7 +523,7 @@ class TestDeltaRegression:
         continuous distribution; the spike still dominates it by two orders
         of magnitude.
         """
-        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=1000, seed=1))
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=1000, seed=1))
         rng = np.random.default_rng(0)
         Y_np = 0.01 * rng.standard_normal(1000)
         Y_np[rng.integers(1000)] = 1.0
@@ -534,7 +540,7 @@ class TestDeltaRegression:
         Every resample of a constant column is itself constant, so this
         exercises the degenerate-replicate branch of the bias correction.
         """
-        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=800, seed=2))
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=800, seed=2))
         Y = jnp.stack([ishigami.evaluate(X), jnp.ones(800)], axis=1)
         result = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=BOOT, key=jax.random.key(0))
         np.testing.assert_allclose(np.asarray(result.delta)[1], 0.0)
@@ -771,6 +777,17 @@ class TestDegenerateBandwidthIsNotAPrecondition:
 
 
 class TestIndicesPureCore:
+    def test_indices_is_a_named_tuple(self, given_ishigami_xy):
+        X, Y = given_ishigami_xy
+        out = jaxgsa.borgonovo.indices(ishigami.PROBLEM, X, Y)
+        assert isinstance(out, jaxgsa.borgonovo.BorgonovoIndices)
+        assert out._fields == ("delta", "S1")
+
+    def test_scalar_error_names_the_method(self, given_ishigami_xy):
+        X, Y = given_ishigami_xy
+        with pytest.raises(ValueError, match=r"^jaxgsa\.borgonovo: grid_size"):
+            jaxgsa.borgonovo.indices(ishigami.PROBLEM, X, Y, grid_size=1)
+
     """The transformable core ``borgonovo.indices``.
 
     Two claims. The core returns exactly what ``analyze`` reports on clean
@@ -824,14 +841,14 @@ class TestIndicesPureCore:
     def test_is_vmappable(self):
         """Tier T4: ``vmap`` maps ``indices`` over a batch of output vectors."""
         N = 512
-        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=N, seed=7))
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=N, seed=7))
         batch = jnp.stack([ishigami.evaluate(X), X[:, 0], X[:, 1] ** 2])
 
         mapped = jax.vmap(
             lambda y: jaxgsa.borgonovo.indices(ishigami.PROBLEM, X, y, grid_size=30)
         )(batch)
 
-        assert mapped[0].shape == (3, ishigami.PROBLEM.num_vars)
+        assert mapped[0].shape == (3, ishigami.PROBLEM.n_params)
         for row, outputs in enumerate(batch):
             delta, S1 = jaxgsa.borgonovo.indices(ishigami.PROBLEM, X, outputs, grid_size=30)
             np.testing.assert_allclose(np.asarray(mapped[0][row]), np.asarray(delta), rtol=1e-4)
@@ -847,7 +864,7 @@ class TestIndicesPureCore:
         """
         with jax.enable_x64():
             N = 256
-            X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=N, seed=3))
+            X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=N, seed=3))
             Y = ishigami.evaluate(X)
 
             def total_delta(outputs):
@@ -882,7 +899,7 @@ class TestIndicesPureCore:
         computes the discrete one without complaint.
         """
         problem = Problem.from_dict({"a": (0.0, 1.0), "b": (0.0, 1.0)})
-        X = jnp.asarray(monte_carlo(problem, n=400, seed=5))
+        X = jnp.asarray(monte_carlo(problem, n_samples=400, seed=5))
         constant = jnp.full((400,), 2.5)
         discrete = jnp.where(X[:, 0] > 0.5, 1.0, 0.0)
 
@@ -897,40 +914,30 @@ class TestIndicesPureCore:
             analyze(problem, X, discrete)
 
 
-class TestBiasCorrectDefaultWarning:
-    """The tri-state default warns once per process when None resolves to True."""
+class TestBiasCorrectFlag:
+    """``bias_correct`` is a plain bool: False is the plain estimate always."""
 
-    @staticmethod
-    def _reset(monkeypatch, value: bool):
-        import jaxgsa.borgonovo._analyze as mod
-
-        monkeypatch.setattr(mod, "_warned_bias_correct_default", value)
-
-    def test_default_with_bootstrap_warns_once(self, given_ishigami_xy, monkeypatch):
-        self._reset(monkeypatch, False)
+    def test_default_is_false_and_bootstrap_only_adds_intervals(self, given_ishigami_xy):
         X, Y = given_ishigami_xy
-        with pytest.warns(JaxgsaWarning, match="jaxgsa.borgonovo: bias_correct"):
-            analyze(ishigami.PROBLEM, X, Y, n_bootstrap=BOOT, key=jax.random.key(0))
-        # Second default call in the same process: silent.
+        plain = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0)
         with warnings.catch_warnings():
             warnings.simplefilter("error", JaxgsaWarning)
-            analyze(ishigami.PROBLEM, X, Y, n_bootstrap=BOOT, key=jax.random.key(0))
+            boot = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=BOOT, key=jax.random.key(0))
+        np.testing.assert_allclose(np.asarray(boot.delta), np.asarray(plain.delta), rtol=1e-6)
 
-    def test_explicit_values_never_warn(self, given_ishigami_xy, monkeypatch):
-        self._reset(monkeypatch, False)
+    def test_true_changes_delta(self, given_ishigami_xy):
         X, Y = given_ishigami_xy
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", JaxgsaWarning)
-            analyze(
-                ishigami.PROBLEM, X, Y, n_bootstrap=BOOT, bias_correct=True, key=jax.random.key(0)
-            )
-            analyze(
-                ishigami.PROBLEM, X, Y, n_bootstrap=BOOT, bias_correct=False, key=jax.random.key(0)
-            )
+        key = jax.random.key(0)
+        off = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=BOOT, key=key)
+        on = analyze(ishigami.PROBLEM, X, Y, n_bootstrap=BOOT, bias_correct=True, key=key)
+        assert not np.allclose(np.asarray(on.delta), np.asarray(off.delta), rtol=1e-6)
 
-    def test_default_without_bootstrap_stays_silent(self, given_ishigami_xy, monkeypatch):
-        self._reset(monkeypatch, False)
+    def test_true_without_bootstrap_raises(self, given_ishigami_xy):
         X, Y = given_ishigami_xy
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", JaxgsaWarning)
-            analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0)
+        with pytest.raises(ValueError, match="jaxgsa.borgonovo: bias_correct=True"):
+            analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0, bias_correct=True)
+
+    def test_non_bool_raises_type_error(self, given_ishigami_xy):
+        X, Y = given_ishigami_xy
+        with pytest.raises(TypeError, match="bias_correct must be True or False"):
+            analyze(ishigami.PROBLEM, X, Y, n_bootstrap=0, bias_correct=None)  # type: ignore[arg-type]

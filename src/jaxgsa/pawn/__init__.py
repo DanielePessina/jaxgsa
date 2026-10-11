@@ -16,7 +16,7 @@ Example::
     from jaxgsa import pawn
     from jaxgsa.sampling import monte_carlo
 
-    X = monte_carlo(problem, n=5000, seed=42)
+    X = monte_carlo(problem, n_samples=5000, seed=42)
     Y = model(X)
     result = pawn.analyze(problem, X, Y)
 
@@ -26,15 +26,16 @@ estimate only: a bootstrap draws randomness and forms an interval, which is
 policy, so ``n_bootstrap`` stays on ``analyze``.
 """
 
-from jaxgsa._core.invalid import InvalidUnit
-from jaxgsa._core.registry import MethodSpec, register
-from jaxgsa.pawn._analyze import analyze, indices
+from jaxgsa._core.invalid import InvalidUnit as _InvalidUnit
+from jaxgsa._core.registry import MethodSpec as _MethodSpec
+from jaxgsa._core.registry import register as _register
+from jaxgsa.pawn._analyze import PAWNIndices, analyze, indices
 from jaxgsa.pawn._result import PAWNResult
 
-__all__ = ["PAWNResult", "analyze", "indices"]
+__all__ = ["PAWNIndices", "PAWNResult", "analyze", "indices"]
 
-SPEC = register(
-    MethodSpec(
+_SPEC = _register(
+    _MethodSpec(
         name="pawn",
         analyze=analyze,
         sample=None,
@@ -42,6 +43,6 @@ SPEC = register(
         correlation="accepts",
         categorical="accepts",
         bootstrap="n_bootstrap",
-        invalid_unit=InvalidUnit.ROW,
+        invalid_unit=_InvalidUnit.ROW,
     )
 )

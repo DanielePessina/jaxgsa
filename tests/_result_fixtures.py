@@ -105,14 +105,14 @@ def _efast(shape: str) -> Any:
 
 
 def _kucherenko(shape: str) -> Any:
-    sr = kucherenko.sample(PROBLEM, n_samples=16, seed=SEED)
+    sr = kucherenko.sample(PROBLEM, base_n=16, seed=SEED)
     Y = MODELS[shape](jnp.asarray(sr.samples))
     return kucherenko.analyze(sr, Y)
 
 
 def _dgsm(shape: str) -> Any:
     X, _ = _given_data(shape)
-    return dgsm.analyze(PROBLEM, _point_model(shape), X)
+    return dgsm.analyze(PROBLEM, X, fn=_point_model(shape))
 
 
 def _borgonovo(shape: str) -> Any:
@@ -141,7 +141,7 @@ def _ot(shape: str) -> Any:
         PROBLEM,
         X,
         Y,
-        n_partitions=4,
+        n_classes=4,
         max_iter=100,
         n_bootstrap=2,
         dummy=True,
@@ -156,7 +156,7 @@ def _ot_multivariate(shape: str) -> Any:
         X,
         Y,
         mode="multivariate",
-        n_partitions=4,
+        n_classes=4,
         max_iter=300,
         n_bootstrap=2,
         key=jax.random.key(SEED),
@@ -170,7 +170,7 @@ def _ot_trajectory(shape: str) -> Any:
         X,
         Y,
         mode="trajectory",
-        n_partitions=4,
+        n_classes=4,
         max_iter=300,
         n_bootstrap=2,
         key=jax.random.key(SEED),
@@ -185,12 +185,12 @@ def _pce(shape: str) -> Any:
 def _hdmr(shape: str) -> Any:
     # RS-HDMR refuses fewer than 300 rows: the B-spline fit needs them.
     X, Y = _given_data(shape, n=300)
-    return hdmr.analyze(PROBLEM, X, Y, maxorder=2, maxiter=3)
+    return hdmr.analyze(PROBLEM, X, Y, order=2, max_iter=3)
 
 
 def _hdmr_third_order(shape: str) -> Any:
     X, Y = _given_data(shape, n=300)
-    return hdmr.analyze(PROBLEM, X, Y, maxorder=3, maxiter=3)
+    return hdmr.analyze(PROBLEM, X, Y, order=3, max_iter=3)
 
 
 def _shapley(shape: str) -> Any:

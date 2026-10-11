@@ -71,10 +71,12 @@ from jaxgsa._core.irregular import (
 from jaxgsa._core.result import CIInfo
 from jaxgsa._core.validation import (
     _warn_zero_variance_slices,
+    as_key,
 )
 from jaxgsa.kucherenko._result import KucherenkoResult
 from jaxgsa.kucherenko._sampling import KucherenkoSamples
 from jaxgsa.kucherenko._subsets import subset_matrix
+from jaxgsa.sobol._sampling import _require_samples
 
 # Keyword-only parameters the irregular engine forwards unchanged to the
 # per-channel recursive analyze() calls. verbose is excluded:
@@ -210,13 +212,13 @@ def _estimate_subsets(
 
 
 def analyze(
-    sampling_result: KucherenkoSamples,
+    samples: KucherenkoSamples,
     Y: Array | IrregularY,
     *,
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
-    key: Array | None = None,
+    key: Array | int | None = None,
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
     keep_replicates: bool = False,
@@ -238,9 +240,9 @@ def analyze(
     independent joint blocks ``A`` and ``B`` together.
 
     Args:
-        sampling_result: Design from :func:`jaxgsa.kucherenko.sample`.
+        samples: Design from :func:`jaxgsa.kucherenko.sample`.
         Y: Model outputs evaluated at each row of
-            ``sampling_result.samples``, in the same row order. Accepted
+            ``samples.samples``, in the same row order. Accepted
             shapes: ``(n_runs,)``, ``(n_runs, K)``, or ``(n_runs, T, K)``.
             Indices are computed independently for every output slice.
         n_bootstrap: Number of bootstrap resamples for confidence intervals.
@@ -287,6 +289,7 @@ def analyze(
         plus the ``invalid`` report.
 
     Raises:
+        TypeError: If ``samples`` is not a ``KucherenkoSamples``.
         ValueError: If ``Y``'s shape violates the output contract; if
             ``on_invalid`` is not one of the three policies; if the sample
             holds a non-finite value under ``on_invalid="raise"``; if fewer
@@ -300,29 +303,33 @@ def analyze(
             NaN), or if non-finite outputs are found under a policy that does
             not raise.
     """
+    _require_samples(
+        samples, KucherenkoSamples, "jaxgsa.kucherenko.analyze", "jaxgsa.kucherenko.sample"
+    )
+    key = as_key(key, "kucherenko")
     if _is_irregular_y(Y):
         return analyze_irregular(
             analyze,
-            channel_data=sampling_result,
-            problem=sampling_result.problem,
+            channel_data=samples,
+            problem=samples.problem,
             Y=Y,
-            n_expected=int(sampling_result.n_runs),
+            n_expected=int(samples.n_runs),
             design_based=True,
             verbose=verbose,
             kwargs=_fwd_kwargs(locals(), _IRREGULAR_KWARGS),
         )
     Y = cast(Array, Y)
 
-    from jaxgsa.kucherenko import SPEC
+    from jaxgsa.kucherenko import _SPEC
 
-    problem = sampling_result.problem
-    N = sampling_result.base_n
-    D = sampling_result.n_params
-    all_subsets = sampling_result.subsets == "all"
-    n_blocks = sampling_result.n_blocks
+    problem = samples.problem
+    N = samples.base_n
+    D = samples.n_params
+    all_subsets = samples.subsets == "all"
+    n_blocks = samples.n_blocks
 
     ctx = prepare(
-        SPEC,
+        _SPEC,
         problem,
         Y,
         on_invalid=on_invalid,
@@ -335,14 +342,14 @@ def analyze(
                 "key is required when n_bootstrap > 0",
             ),
         ),
-        n_expected=sampling_result.n_runs,
+        n_expected=samples.n_runs,
         # A base point k feeds the joint row and every conditional row with
         # the same k, so one non-finite output anywhere invalidates all of
         # them. The design is block-major, so base point k sits at rows
         # k, N + k, 2N + k, … rather than in a contiguous run.
         n_units=N,
         # The map is the interleaved base-point pattern, built on the host
-        # only where the check reads it (never under on_invalid='none').
+        # only where the check reads it (never under on_invalid='skip').
         unit_of_row=_unit_of_row_for_policy(on_invalid, lambda: np.tile(np.arange(N), n_blocks)),
         min_kept=2,
         # The denominator of both indices is the variance of the joint block
@@ -472,7 +479,7 @@ def analyze(
         S1_conf=S1_conf,
         ST_conf=ST_conf,
         ci=ci,
-        dependence=sampling_result.dependence,
+        dependence=samples.dependence,
         closed=None if closed is None else _shape(closed),
         subset_total=None if subset_total is None else _shape(subset_total),
         subsets=subset_matrix(D) if all_subsets else None,
@@ -486,14 +493,14 @@ def analyze(
         _verbose.analysis_summary(
             method="jaxgsa.kucherenko.analyze",
             problem=problem,
-            dependence=sampling_result.dependence,
+            dependence=samples.dependence,
             n_runs=n_blocks * n_kept,
             T=n_time,
             K=n_out,
             invalid=invalid,
             timings=[("compute", elapsed)],
             notes=[
-                f"design: {sampling_result.dependence} "
+                f"design: {samples.dependence} "
                 f"({'subsets=all, 2^D' if all_subsets else '2D+1'} = {n_blocks} "
                 f"blocks of {n_kept} base points)"
             ],

@@ -12,7 +12,7 @@ from _fixtures_givendata import BOOT, invalid_sample
 
 from jaxgsa import JaxgsaWarning
 from jaxgsa.benchmarks import ishigami
-from jaxgsa.pawn import analyze, indices
+from jaxgsa.pawn import PAWNIndices, analyze, indices
 from jaxgsa.problem import InputSpecValue, Problem
 from jaxgsa.sampling import monte_carlo
 
@@ -42,7 +42,7 @@ class TestPAWNBasic:
         three times that) and at most 0.07 on ``x2`` (the bound is twice that).
         """
         b = 8
-        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=2048, seed=0))
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=2048, seed=0))
         result = analyze(
             ishigami.PROBLEM, X, X[:, 0], n_bins=b, statistic=statistic, verbose=False
         )
@@ -376,6 +376,17 @@ class TestPAWNInvalidInput:
 
 
 class TestPureCore:
+    def test_indices_is_a_named_tuple(self, given_ishigami_xy):
+        X, Y = given_ishigami_xy
+        out = indices(ishigami.PROBLEM, X, Y, n_bins=8)
+        assert isinstance(out, PAWNIndices)
+        assert out._fields == ("pawn",)
+
+    def test_scalar_error_names_the_method(self, given_ishigami_xy):
+        X, Y = given_ishigami_xy
+        with pytest.raises(ValueError, match=r"^jaxgsa\.pawn: "):
+            indices(ishigami.PROBLEM, X, Y, slice_chunk_size=0)
+
     """The transformable core ``pawn.indices``.
 
     Tier T4 throughout (internal consistency and transformability). The
@@ -420,7 +431,7 @@ class TestPureCore:
                 "b": (0.0, 1.0),
             }
         )
-        X = jnp.asarray(monte_carlo(problem, n=1000, seed=4))
+        X = jnp.asarray(monte_carlo(problem, n_samples=1000, seed=4))
         Y = 2.0 * X[:, 0] + X[:, 1]
 
         result = analyze(problem, X, Y, n_bins=5)
@@ -563,7 +574,7 @@ class TestPureCore:
         host read inside the transform breaks only the second.
         """
         problem = Problem.from_dict({"a": self._MARGINALS[marginal], "b": (0.0, 1.0)})
-        X = jnp.asarray(monte_carlo(problem, n=1200, seed=17))
+        X = jnp.asarray(monte_carlo(problem, n_samples=1200, seed=17))
         Y = jnp.sin(X[:, 0]) + 0.5 * X[:, 1]
 
         result = analyze(problem, X, Y, n_bins=6)

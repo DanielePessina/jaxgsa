@@ -87,14 +87,14 @@ class MorrisResult(SchemaResult):
         derivative scale, comparable to DGSM's mean derivative.
 
         Returns:
-            A new :class:`MorrisResult` with ``space == "physical"``.
+            A new :class:`MorrisResult` with ``space == "physical"``, or
+            ``self`` when the result is already in physical units.
 
         Raises:
-            ValueError: If the result is already in physical units or the
-                problem has no finite bounds.
+            ValueError: If the problem has no finite bounds.
         """
         if self.space == "physical":
-            raise ValueError("Result is already in physical units")
+            return self
         if self.problem.bounds is None:
             raise ValueError("to_physical_units requires a problem with finite uniform bounds")
 

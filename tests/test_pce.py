@@ -132,7 +132,15 @@ def test_linear_model_end_to_end(linear_pce_result, linear_pce_data):
     np.testing.assert_allclose(np.asarray(result.predict(X)), np.asarray(Y), atol=0.05, rtol=0.05)
 
     y_range = float(jnp.max(Y) - jnp.min(Y))
-    loo = float(result.loo_rmse)
+    loo = float(result.cv_rmse)
+    # In-sample RMSE is below the leave-one-out RMSE, and explained_variance
+    # is 1 - rmse**2 / Var(Y) by definition.
+    assert float(result.rmse) <= loo
+    np.testing.assert_allclose(
+        float(result.explained_variance),
+        1.0 - float(result.rmse) ** 2 / float(jnp.var(Y)),
+        atol=1e-5,
+    )
     assert loo / y_range < 0.05, f"LOO RMSE / range = {loo / y_range:.4f}, expected < 0.05"
 
     ds = result.to_dataset()
@@ -245,7 +253,7 @@ class TestLooRmse:
         With ``N == C(D + order, order)`` and ``fit_ratio=1.0`` the least
         squares fit interpolates, every leverage is (up to the tiny ridge)
         1, and the LOO shortcut divides by ``1 - h_i``. In float32 the old
-        no-op clip let that become residual/0 and an inf/NaN ``loo_rmse``
+        no-op clip let that become residual/0 and an inf/NaN ``cv_rmse``
         propagated to every slice. The number is legitimately huge — an
         interpolating fit has no honest LOO — but it must be finite, in
         float32 and under x64 alike.
@@ -264,13 +272,13 @@ class TestLooRmse:
             )
 
         result32 = _fit()
-        assert result32.loo_rmse is not None
-        assert np.all(np.isfinite(np.asarray(result32.loo_rmse)))
+        assert result32.cv_rmse is not None
+        assert np.all(np.isfinite(np.asarray(result32.cv_rmse)))
 
         with jax.enable_x64():
             result64 = _fit()
-            assert result64.loo_rmse is not None
-            assert np.all(np.isfinite(np.asarray(result64.loo_rmse)))
+            assert result64.cv_rmse is not None
+            assert np.all(np.isfinite(np.asarray(result64.cv_rmse)))
 
 
 # ---------------------------------------------------------------------------
@@ -386,7 +394,7 @@ class TestTruncatedGaussianBasis:
 
         # Same basis, so the two fits agree to numerical noise.
         np.testing.assert_allclose(np.asarray(wide.S1), np.asarray(unbounded.S1), atol=1e-6)
-        assert float(wide.loo_rmse) == pytest.approx(float(unbounded.loo_rmse), rel=1e-4)
+        assert float(wide.cv_rmse) == pytest.approx(float(unbounded.cv_rmse), rel=1e-4)
         assert np.max(np.abs(np.asarray(wide.S1) - analytic)) < 0.003
 
 
@@ -439,14 +447,14 @@ class TestMultiOutput:
         assert res2.ST.shape == (2, 3)
         assert res2.S2.shape == (2, 3, 3)
         assert res2.coefficients.shape == (2, n_terms)
-        assert res2.loo_rmse is not None and res2.loo_rmse.shape == (2,)
+        assert res2.cv_rmse is not None and res2.cv_rmse.shape == (2,)
 
         Y3 = jnp.stack([Y2, 0.5 * Y2], axis=1)  # (N, T=2, K=2)
         res3 = pce.analyze(linear.PROBLEM, X, Y3, order=2)
         assert res3.S1.shape == (2, 2, 3)
         assert res3.S2.shape == (2, 2, 3, 3)
         assert res3.coefficients.shape == (2, 2, n_terms)
-        assert res3.loo_rmse is not None and res3.loo_rmse.shape == (2, 2)
+        assert res3.cv_rmse is not None and res3.cv_rmse.shape == (2, 2)
 
         # predict mirrors the training layout. The linear benchmark is
         # exactly representable at order 2.
@@ -460,7 +468,7 @@ class TestMultiOutput:
         ds = res3.to_dataset(time_coords=[0.0, 0.5])
         assert ds["S1"].dims == ("time", "output", "param")
         assert ds["S2"].dims == ("time", "output", "param_i", "param_j")
-        assert ds["loo_rmse"].dims == ("time", "output")
+        assert ds["cv_rmse"].dims == ("time", "output")
         np.testing.assert_allclose(ds.coords["time"].values, [0.0, 0.5])
 
 
@@ -523,8 +531,8 @@ class TestPCEOnInvalid:
         with pytest.warns(JaxgsaWarning, match="dropped 1 of 400 rows"):
             result = pce.analyze(linear.PROBLEM, X, Y, on_invalid="drop", order=2)
         assert np.all(np.isfinite(np.asarray(result.S1)))
-        assert result.loo_rmse is not None
-        assert np.all(np.isfinite(np.asarray(result.loo_rmse)))
+        assert result.cv_rmse is not None
+        assert np.all(np.isfinite(np.asarray(result.cv_rmse)))
         assert result.invalid.unit_indices == (7,)
         assert result.invalid.sources == ("Y",)
 
@@ -696,7 +704,7 @@ class TestExplainedVariance:
         bounds = jnp.array(problem.bounds)
         X = jax.random.uniform(
             jax.random.PRNGKey(3),
-            shape=(500, problem.num_vars),
+            shape=(500, problem.n_params),
             minval=bounds[:, 0],
             maxval=bounds[:, 1],
         )
@@ -742,7 +750,7 @@ class TestFitQualityWarnings:
         """A fit with too few rows per term is caught out of sample only."""
         X, Y = ishigami_pce_data
         Xs, Ys = X[:64], Y[:64]
-        with pytest.warns(JaxgsaWarning, match=r"loo_rmse is \d+\.\d+ times std\(Y\)"):
+        with pytest.warns(JaxgsaWarning, match=r"cv_rmse is \d+\.\d+ times std\(Y\)"):
             result = pce.analyze(ishigami.PROBLEM, Xs, Ys, order=5, fit_ratio=0.9, verbose=False)
         # The in-sample number reports nothing wrong at all, which is the
         # reason the out-of-sample check exists.

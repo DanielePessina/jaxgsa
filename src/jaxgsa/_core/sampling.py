@@ -14,6 +14,7 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING, Any, Mapping, TypeAlias
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
@@ -25,6 +26,27 @@ from jaxgsa.problem import CategoricalSpec, UniformSpec
 
 if TYPE_CHECKING:
     from jaxgsa.problem import Problem
+
+
+def check_seed(seed: object, who: str) -> None:
+    """Refuse a JAX key passed as a sampler ``seed``.
+
+    A sampler draws on the host with NumPy and SciPy, so it takes an ``int``
+    or a ``numpy.random.Generator``. A JAX key would otherwise fail deep in
+    NumPy with an error that does not name the mistake.
+
+    Args:
+        seed: The value the user passed as ``seed=``.
+        who: Qualified function name for the message, such as
+            ``"jaxgsa.sobol.sample"``.
+
+    Raises:
+        TypeError: If ``seed`` is a JAX array, which includes typed keys.
+    """
+    if isinstance(seed, jax.Array):
+        raise TypeError(
+            f"{who}: seed takes an int or numpy Generator; jax keys go to analyze(key=...)"
+        )
 
 
 # Distribution parameters keyed by parameter name, then by field name. The

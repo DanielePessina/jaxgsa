@@ -323,7 +323,7 @@ def hat_diagonal(Phi: Array, gram_chol: Array) -> Array:
         Leverage per row, shape ``(b,)``, clipped to ``[0, high]`` with
         ``high`` strictly below 1 in the leverage's own dtype. The upper clip
         keeps ``1 - h_i`` away from zero: a row the fit interpolates exactly
-        has ``h_i = 1``, which would divide by zero and turn ``loo_rmse``
+        has ``h_i = 1``, which would divide by zero and turn ``cv_rmse``
         into inf/NaN for every output slice. The nominal bound is
         ``1 - 1e-10``, but in float32 that rounds back to exactly 1.0 (the
         spacing below 1.0 is about ``6e-8``), which made the clip a silent

@@ -171,7 +171,7 @@ def test_mixed_uniform_and_gaussian_linear_model_has_consistent_indices():
     assert result.S2 is None
 
 
-def _legacy_sampling_result(sr: SobolSamples) -> SobolSamples:
+def _legacy_samples(sr: SobolSamples) -> SobolSamples:
     n_expanded = sr.n_expanded
     expanded_samples = sr.samples[sr.expanded_to_unique]
     return SobolSamples(
@@ -221,7 +221,7 @@ def test_unique_analysis_matches_expanded_layout(sobol_ishigami_1k):
     """
     sr, Y_unique = sobol_ishigami_1k
     key = jax.random.key(123)
-    legacy_sr = _legacy_sampling_result(sr)
+    legacy_sr = _legacy_samples(sr)
     Y_expanded = Y_unique[sr.expanded_to_unique]
 
     for n_bootstrap, fields in (
@@ -435,7 +435,7 @@ def test_the_bootstrap_batches_slices_and_resamples(monkeypatch):
         )
 
 
-@pytest.mark.parametrize("on_invalid", ["raise", "none"])
+@pytest.mark.parametrize("on_invalid", ["raise", "skip"])
 def test_constant_output_with_float32_rounding_noise_still_reads_as_zero_variance(on_invalid):
     """A constant Y whose sample variance is not bit-exact zero gives NaN indices.
 
@@ -444,9 +444,9 @@ def test_constant_output_with_float32_rounding_noise_still_reads_as_zero_varianc
     itself rounds. ``Y = full(N, 0.1)`` has a naive sample variance of about
     2e-16, not zero, so this fixture would have slipped past the old guard
     silently instead of warning. Under the default policy the guard warns.
-    Under ``on_invalid="none"`` no scan runs, so it stays silent.
+    Under ``on_invalid="skip"`` no scan runs, so it stays silent.
     """
-    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=256, base_n=64, seed=0, verbose=False)
+    sr = jaxgsa.sobol.sample(PROBLEM, base_n=64, seed=0, verbose=False)
     Y = jnp.full(sr.n_runs, 0.1)
     assert float(jnp.var(Y)) != 0.0, "the naive variance must be nonzero for this to test the fix"
     if on_invalid == "raise":
@@ -455,13 +455,13 @@ def test_constant_output_with_float32_rounding_noise_still_reads_as_zero_varianc
     else:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            result = jaxgsa.sobol.analyze(sr, Y, on_invalid="none", verbose=False)
+            result = jaxgsa.sobol.analyze(sr, Y, on_invalid="skip", verbose=False)
     assert jnp.all(jnp.isnan(result.S1))
     assert jnp.all(jnp.isnan(result.ST))
 
 
 def test_on_invalid_none_matches_raise_on_clean_data(sobol_ishigami_1k):
-    """on_invalid='none' skips the scans; on clean data the indices are equal.
+    """on_invalid='skip' skips the scans; on clean data the indices are equal.
 
     The estimator sees the same standardized arrays under both policies, so
     nothing but the missing validation can differ. The values are equal up to
@@ -470,21 +470,21 @@ def test_on_invalid_none_matches_raise_on_clean_data(sobol_ishigami_1k):
     """
     sr, Y = sobol_ishigami_1k
     ref = jaxgsa.sobol.analyze(sr, Y, verbose=False)
-    fast = jaxgsa.sobol.analyze(sr, Y, on_invalid="none", verbose=False)
+    fast = jaxgsa.sobol.analyze(sr, Y, on_invalid="skip", verbose=False)
     for name in ("S1", "ST", "S2"):
         np.testing.assert_allclose(
             np.array(getattr(fast, name)), np.array(getattr(ref, name)), rtol=0, atol=1e-6
         )
-    assert fast.invalid.policy == "none"
+    assert fast.invalid.policy == "skip"
     assert not fast.invalid.any_invalid
     assert fast.invalid.n_units == ref.invalid.n_units
 
 
 def test_on_invalid_none_lets_nan_reach_the_indices_without_raising():
-    """A NaN under 'none' is not looked at: no raise, no warning, NaN indices."""
-    sr = jaxgsa.sobol.sample(PROBLEM, n_samples=256, base_n=64, seed=0, verbose=False)
+    """A NaN under 'skip' is not looked at: no raise, no warning, NaN indices."""
+    sr = jaxgsa.sobol.sample(PROBLEM, base_n=64, seed=0, verbose=False)
     Y = evaluate(jnp.asarray(sr.samples))
     Y_broken = Y.at[0].set(jnp.nan)
-    result = jaxgsa.sobol.analyze(sr, Y_broken, on_invalid="none", verbose=False)
+    result = jaxgsa.sobol.analyze(sr, Y_broken, on_invalid="skip", verbose=False)
     assert jnp.all(jnp.isnan(result.S1))
     assert jnp.all(jnp.isnan(result.ST))

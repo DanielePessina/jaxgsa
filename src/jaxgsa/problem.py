@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar, Literal, NotRequired, TypeAlias, TypedDict
 
@@ -263,6 +264,7 @@ InputSpec: TypeAlias = UniformSpec | GaussianSpec | CategoricalSpec
 # Public-facing input union -- users pass one of these per parameter.
 InputSpecValue: TypeAlias = (
     tuple[float, float]
+    | list[float]
     | UniformInputSpec
     | GaussianInputSpec
     | CategoricalInputSpec
@@ -283,9 +285,9 @@ def _normalize_input_spec(spec: InputSpecValue) -> InputSpec:
     """
     if isinstance(spec, UniformSpec | GaussianSpec | CategoricalSpec):
         return spec  # already canonical and validated by its own __post_init__
-    if isinstance(spec, tuple):  # bare (low, high) tuple is shorthand for uniform
+    if isinstance(spec, tuple | list):  # bare (low, high) pair is shorthand for uniform
         if len(spec) != 2:
-            raise ValueError("Tuple input specs must have exactly two values: (low, high)")
+            raise ValueError("Bounds must have exactly two values: (low, high)")
         return UniformSpec(spec[0], spec[1])
     if not isinstance(spec, dict):
         raise ValueError(
@@ -517,6 +519,44 @@ def _check_correlation_touches_categorical(
             )
 
 
+def _reject_bare_str(value: object, label: str) -> None:
+    """Refuse a bare ``str`` where a sequence of strings is expected.
+
+    ``tuple("temp")`` is ``('t', 'e', 'm', 'p')``, so a single name passed
+    without a tuple around it would silently become four names.
+
+    Args:
+        value: The user-supplied sequence.
+        label: Argument name for the message.
+
+    Raises:
+        TypeError: If ``value`` is a ``str`` or ``bytes``.
+    """
+    if isinstance(value, str | bytes):
+        raise TypeError(
+            f"{label} must be a sequence of strings, not a single string {value!r}. "
+            f"Write ({value!r},) for one name."
+        )
+
+
+def _output_names_tuple(output_names: Sequence[str] | None) -> tuple[str, ...] | None:
+    """Return ``output_names`` as a tuple, refusing a bare string.
+
+    Args:
+        output_names: User-supplied output labels, or ``None``.
+
+    Returns:
+        The labels as a tuple, or ``None``.
+
+    Raises:
+        TypeError: If ``output_names`` is a ``str``.
+    """
+    if output_names is None:
+        return None
+    _reject_bare_str(output_names, "output_names")
+    return tuple(output_names)
+
+
 def _validate_names(names: tuple[str, ...]) -> None:
     """Reject parameter names that are not strings or not unique.
 
@@ -651,9 +691,10 @@ class Problem:
 
     def __init__(
         self,
-        names: tuple[str, ...],
-        bounds: tuple[tuple[float, float], ...],
-        output_names: tuple[str, ...] | None = None,
+        names: Sequence[str],
+        bounds: Sequence[Sequence[float]],
+        *,
+        output_names: Sequence[str] | None = None,
         correlation: "npt.ArrayLike | None" = None,
         correlation_type: Literal["latent", "spearman"] = "latent",
         sampler: InputSampler | None = None,
@@ -685,6 +726,7 @@ class Problem:
             sampler_dimension: Uniform coordinates the sampler consumes per
                 row. ``None`` (default) means one per parameter.
         """
+        _reject_bare_str(names, "names")
         normalized_names = tuple(names)
         normalized_bounds = tuple((float(low), float(high)) for low, high in bounds)
         if len(normalized_names) != len(normalized_bounds):
@@ -697,7 +739,7 @@ class Problem:
         self._set_fields(
             names=normalized_names,
             input_specs=input_specs,
-            output_names=output_names,
+            output_names=_output_names_tuple(output_names),
             # User-declared matrices deserve the repair warning.
             correlation=_canonical_correlation(
                 correlation,
@@ -714,8 +756,8 @@ class Problem:
     def from_dict(
         cls,
         params: dict[str, InputSpecValue],
-        output_names: tuple[str, ...] | None = None,
         *,
+        output_names: Sequence[str] | None = None,
         truncate_gaussians: float | None = None,
         correlation: "npt.ArrayLike | None" = None,
         correlation_type: Literal["latent", "spearman"] = "latent",
@@ -781,7 +823,7 @@ class Problem:
         return cls._from_normalized_inputs(
             names=names,
             input_specs=input_specs,
-            output_names=output_names,
+            output_names=_output_names_tuple(output_names),
             correlation=_canonical_correlation(
                 correlation,
                 names,
@@ -839,7 +881,7 @@ class Problem:
         self,
         sampler: InputSampler | None,
         *,
-        dimension: int | None = None,
+        sampler_dimension: int | None = None,
     ) -> "Problem":
         """Return a copy of this problem with the given custom sampler.
 
@@ -848,14 +890,14 @@ class Problem:
 
         .. code-block:: python
 
-            problem = problem.with_sampler(sample_modular, dimension=2)
+            problem = problem.with_sampler(sample_modular, sampler_dimension=2)
 
         Args:
             sampler: Joint and conditional transformation from uniform points
                 to physical rows (see :class:`jaxgsa.sampling.InputSampler`),
                 or ``None`` to drop a previously declared sampler.
-            dimension: Uniform coordinates the sampler consumes per row.
-                ``None`` (default) means one per parameter.
+            sampler_dimension: Uniform coordinates the sampler consumes per
+                row. ``None`` (default) means one per parameter.
 
         Returns:
             A new ``Problem`` with the same marginals, names, and output
@@ -870,7 +912,7 @@ class Problem:
             output_names=self.output_names,
             correlation=self._correlation,
             sampler=sampler,
-            sampler_dimension=dimension,
+            sampler_dimension=sampler_dimension,
         )
 
     def with_output_names(self, output_names: tuple[str, ...] | None) -> "Problem":
@@ -891,7 +933,7 @@ class Problem:
         return Problem._from_normalized_inputs(
             names=self.names,
             input_specs=self._input_specs,
-            output_names=None if output_names is None else tuple(output_names),
+            output_names=_output_names_tuple(output_names),
             correlation=self._correlation,
             sampler=self._sampler,
             sampler_dimension=self._sampler_dimension,
@@ -949,8 +991,7 @@ class Problem:
         )
         # Bypass frozen dataclass protection -- only called during construction.
         object.__setattr__(self, "names", names)
-        normalized = tuple(output_names) if output_names is not None else None
-        object.__setattr__(self, "output_names", normalized)
+        object.__setattr__(self, "output_names", output_names)
         object.__setattr__(self, "_input_specs", input_specs)
         object.__setattr__(self, "_correlation", correlation)
         object.__setattr__(self, "_sampler", sampler)
@@ -1067,6 +1108,6 @@ class Problem:
         }
 
     @property
-    def num_vars(self) -> int:
+    def n_params(self) -> int:
         """Return the number of parameters."""
         return len(self.names)

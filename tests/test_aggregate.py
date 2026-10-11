@@ -26,6 +26,7 @@ import numpy as np
 import pytest
 
 from jaxgsa import kucherenko, pce, sobol
+from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.problem import Problem
 
 # Two outputs of very different variance, so the two weightings disagree.
@@ -50,7 +51,7 @@ def sobol_res():
 
 @pytest.fixture(scope="module")
 def kuch_res():
-    sr = kucherenko.sample(PROBLEM, n_samples=4096, seed=0, verbose=False)
+    sr = kucherenko.sample(PROBLEM, base_n=4096, seed=0, verbose=False)
     return kucherenko.analyze(sr, _model(sr.samples), verbose=False)
 
 
@@ -98,9 +99,19 @@ def test_aggregate_closed_form_pce(pce_res):
 
 def test_pce_aggregate_drops_what_does_not_aggregate(pce_res):
     agg = pce_res.aggregate()
-    assert agg.loo_rmse is None and agg.explained_variance is None
+    assert agg.cv_rmse is None and agg.explained_variance is None
     assert agg.coefficients.shape == (1, pce_res.coefficients.shape[-1])
     assert np.isnan(np.asarray(agg.coefficients)).all()
+
+
+def test_pce_aggregate_is_not_a_surrogate(pce_res):
+    agg = pce_res.aggregate()
+    with pytest.raises(ValueError, match="not a surrogate"):
+        agg.predict(jnp.zeros((2, 3)))
+    with pytest.raises(ValueError, match="not a surrogate"):
+        agg.shapley()
+    pce_res.shapley()  # the original still works
+    assert "_aggregated" not in repr(agg)
 
 
 # --- T4: algebra on the result's own numbers ---------------------------------
@@ -140,11 +151,11 @@ def test_sobol_indices_do_not_depend_on_the_variance_field():
 
 
 def test_sobol_variance_fused_scalar_path_matches_eager():
-    """``on_invalid='none'`` defers the row expansion; the variance must agree."""
+    """``on_invalid='skip'`` defers the row expansion; the variance must agree."""
     sr = sobol.sample(PROBLEM, n_samples=512, seed=3, verbose=False)
     y = _model(sr.samples)[:, 0]
     eager = sobol.analyze(sr, y, verbose=False)
-    fused = sobol.analyze(sr, y, on_invalid="none", verbose=False)
+    fused = sobol.analyze(sr, y, on_invalid="skip", verbose=False)
     np.testing.assert_allclose(float(fused.variance), float(eager.variance), rtol=1e-5)
 
 
@@ -200,15 +211,17 @@ def test_replicates_give_an_interval_from_aggregated_draws():
     assert (conf[0] <= np.asarray(agg.S1)).all() and (np.asarray(agg.S1) <= conf[1]).all()
 
 
-def test_without_replicates_the_interval_is_nan():
+def test_without_replicates_the_interval_is_dropped_with_a_warning():
     sr = sobol.sample(PROBLEM, n_samples=256, seed=7, verbose=False)
     res = sobol.analyze(
         sr, _model(sr.samples), n_bootstrap=5, key=jax.random.key(2), verbose=False
     )
-    agg = res.aggregate()
-    assert agg.S1_conf.shape == (2, 1, 3)
-    assert np.isnan(np.asarray(agg.S1_conf)).all()
-    assert np.isnan(np.asarray(agg.ST_conf)).all()
+    with pytest.warns(JaxgsaWarning, match="keep_replicates=True") as record:
+        agg = res.aggregate()
+    assert len(record) == 1
+    assert agg.S1_conf is None and agg.ST_conf is None and agg.ci is None
+    assert "S1" in repr(agg)
+    agg.to_dataset()
 
 
 def test_no_bootstrap_stays_without_an_interval(sobol_res):
@@ -236,7 +249,7 @@ def test_constant_output_gets_zero_weight():
     sr = sobol.sample(PROBLEM, n_samples=512, seed=8, verbose=False)
     y = _model(sr.samples)
     Y = jnp.stack([y[:, 0], jnp.full_like(y[:, 0], 3.0)], axis=1)
-    res = sobol.analyze(sr, Y, verbose=False, on_invalid="none")
+    res = sobol.analyze(sr, Y, verbose=False, on_invalid="skip")
     assert np.isnan(np.asarray(res.S1)[1]).all()
     agg = res.aggregate()
     np.testing.assert_allclose(np.asarray(agg.S1)[0], S1_TRUE[0], atol=3e-2)
@@ -295,3 +308,17 @@ def test_pce_failed_fit_makes_the_aggregate_nan():
     res = pce.analyze(PROBLEM, X, Y, order=2, on_invalid="propagate", verbose=False)
     assert not np.isfinite(np.asarray(res.coefficients)[1]).all()
     assert np.isnan(np.asarray(res.aggregate().S1)).all()
+
+
+def test_aggregate_shape_rule():
+    """Output axes collapse to size 1; a result with no output axes is unchanged."""
+    cases = {}
+    sr = sobol.sample(PROBLEM, n_samples=256, seed=1, verbose=False)
+    X = sr.samples
+    Y2 = _model(X)  # (N, 2)
+    cases["scalar"] = sobol.analyze(sr, Y2[:, 0], verbose=False)
+    cases["n1"] = sobol.analyze(sr, Y2[:, :1], verbose=False)
+    cases["k2"] = sobol.analyze(sr, Y2, verbose=False)
+    cases["ts"] = sobol.analyze(sr, jnp.stack([Y2, 2 * Y2, 3 * Y2], axis=1), verbose=False)
+    got = {k: tuple(v.aggregate().S1.shape) for k, v in cases.items()}
+    assert got == {"scalar": (3,), "n1": (1, 3), "k2": (1, 3), "ts": (1, 1, 3)}

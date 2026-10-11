@@ -342,7 +342,6 @@ def test_analyze_rounds_custom_sizes_and_labels_the_result() -> None:
     # n_outer 9 -> 16, n_inner 3 -> 4 (16 * 4 = 64 inner rows), n_variance 31 -> 32.
     assert sizes == {16, 32, 64}
     assert result.dependence == "custom"
-    assert result.correlation is None
 
 
 def test_batch_size_does_not_move_a_custom_estimate() -> None:
@@ -391,7 +390,7 @@ def test_sampler_outside_the_declared_support_is_rejected() -> None:
         )
         return rows + 0.5
 
-    with jax.enable_x64(), pytest.raises(ValueError, match="outside the declared support"):
+    with jax.enable_x64(), pytest.raises(ValueError, match="outside the support of"):
         x = jnp.asarray(np.random.default_rng(1).random((128, 2)))
         vkoga.analyze(
             PROBLEM.with_sampler(drifting),
@@ -405,18 +404,6 @@ def test_sampler_outside_the_declared_support_is_rejected() -> None:
             n_variance=32,
             key=jax.random.key(0),
             verbose=False,
-        )
-
-
-def test_correlation_override_is_refused_for_a_custom_problem() -> None:
-    """A problem with a sampler has one dependence source; correlation= cannot replace it."""
-    with pytest.raises(ValueError, match="custom sampler"):
-        vkoga.analyze(
-            PROBLEM.with_sampler(independent_sampler),
-            jnp.ones((4, 2)),
-            jnp.ones(4),
-            correlation=np.eye(2),
-            key=jax.random.key(0),
         )
 
 
@@ -446,7 +433,6 @@ def test_irregular_channels_inherit_the_custom_sampler() -> None:
     for channel in result.channels.values():
         assert isinstance(channel, vkoga.VKOGAResult)
         assert channel.dependence == "custom"
-        assert channel.correlation is None
 
 
 @pytest.mark.verbose_output

@@ -11,7 +11,7 @@ convenience over those result methods.
 from __future__ import annotations
 
 import dataclasses
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -40,6 +40,7 @@ from jaxgsa._core.validation import (
     _dependence_tolerant_methods,
     _is_constant_slice,
     _prepare_Y,
+    as_key,
 )
 from jaxgsa.shapley._engine import (
     _normalize_partial_variances,
@@ -67,6 +68,22 @@ if TYPE_CHECKING:
 
 _INDEX_FIELDS = ("Sh", "S1", "ST")
 """The index arrays an interval is reported for, in ``indices`` order."""
+
+
+class ShapleyIndices(NamedTuple):
+    """Shapley indices as plain arrays, as :func:`indices` returns them.
+
+    Tuple unpacking works: ``Sh, S1, ST = indices(...)``.
+
+    Attributes:
+        Sh: Shapley effects, shape ``(D,)`` / ``(K, D)`` / ``(T, K, D)``.
+        S1: First-order lower bound, same shape as ``Sh``.
+        ST: Total-order upper bound, same shape as ``Sh``.
+    """
+
+    Sh: Array
+    S1: Array
+    ST: Array
 
 
 def _raise_correlated_pce_backend(problem: "Problem", method: str) -> None:
@@ -162,10 +179,10 @@ def _indices_3d(
 
         core = _hdmr_core(problem, X, Y_3d, **backend_kwargs)
         partial = core.Sa + core.Sb if include_correlative else core.Sa
-        subsets: list[tuple[int, ...]] = [(i,) for i in range(problem.num_vars)]
+        subsets: list[tuple[int, ...]] = [(i,) for i in range(problem.n_params)]
         subsets.extend(core.c2)
         subsets.extend(core.c3)
-        membership = build_membership(subsets, problem.num_vars)
+        membership = build_membership(subsets, problem.n_params)
         # For HDMR the per-term sum doubles as the explained-variance
         # diagnostic, so it is both the normalizer and the diagnostic.
         total = partial.sum(axis=-1)
@@ -183,7 +200,7 @@ def indices(
     backend: Literal["pce", "hdmr"] = "pce",
     include_correlative: bool = False,
     **backend_kwargs: Any,
-) -> tuple[Array, ...]:
+) -> ShapleyIndices:
     """Compute Shapley effects as plain arrays, with no diagnostics.
 
     This is the transformable core of :func:`analyze`. It fits the same
@@ -224,11 +241,12 @@ def indices(
         include_correlative: HDMR-only flag, as in :func:`analyze`.
         **backend_kwargs: Fit arguments passed to the chosen backend's core:
             ``order``/``ridge``/``fit_ratio``/``batch_size`` for PCE,
-            ``maxorder``/``maxiter``/``m``/``lambdax``/``slice_chunk_size``/
-            ``batch_size`` for HDMR.
+            ``order``/``max_iter``/``n_intervals``/``ridge``/
+            ``slice_chunk_size``/``batch_size`` for HDMR.
 
     Returns:
-        ``(Sh, S1, ST)``, at the shapes ``analyze`` reports for this ``Y``.
+        A :class:`ShapleyIndices` ``(Sh, S1, ST)``, at the shapes ``analyze``
+        reports for this ``Y``.
 
     Raises:
         ValueError: If ``backend`` is unknown, ``include_correlative`` is
@@ -237,11 +255,11 @@ def indices(
             dependence structure with the PCE backend — exactly the refusals
             :func:`analyze` makes.
     """
-    from jaxgsa.shapley import SPEC
+    from jaxgsa.shapley import _SPEC
 
     # The same gates analyze applies, in the same order: categorical for both
     # backends from the registry record, correlation per backend below.
-    gates(SPEC, problem, method="jaxgsa.shapley.indices", check=("categorical",))
+    gates(_SPEC, problem, method="jaxgsa.shapley.indices", check=("categorical",))
     check_scalars(
         (
             one_of("backend", backend, ("pce", "hdmr")),
@@ -254,17 +272,15 @@ def indices(
     if backend == "pce":
         _raise_correlated_pce_backend(problem, "jaxgsa.shapley.indices")
     Y_3d, layout = _prepare_Y(Y)
-    return tuple(
-        layout.squeeze(a)
-        for a in _indices_3d(
-            problem,
-            jnp.asarray(X),
-            Y_3d,
-            backend=backend,
-            include_correlative=include_correlative,
-            backend_kwargs=backend_kwargs,
-        )
+    Sh, S1, ST = _indices_3d(
+        problem,
+        jnp.asarray(X),
+        Y_3d,
+        backend=backend,
+        include_correlative=include_correlative,
+        backend_kwargs=backend_kwargs,
     )
+    return ShapleyIndices(Sh=layout.squeeze(Sh), S1=layout.squeeze(S1), ST=layout.squeeze(ST))
 
 
 def _bootstrap_indices(
@@ -328,7 +344,7 @@ def analyze(
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
-    key: Array | None = None,
+    key: Array | int | None = None,
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
     keep_replicates: bool = False,
@@ -398,7 +414,7 @@ def analyze(
             ``result.ci``. Off by default: the draws are large.
         **backend_kwargs: Passed through unchanged to the selected backend's
             ``analyze`` (e.g. ``order``/``ridge``/``fit_ratio`` for PCE,
-            ``maxorder``/``m``/``lambdax`` for HDMR). Python requires
+            ``order``/``n_intervals``/``ridge`` for HDMR). Python requires
             ``**kwargs`` to come last in a signature, which is why
             ``keep_replicates`` is not the final parameter here as it is on
             every other method.
@@ -425,7 +441,7 @@ def analyze(
             backend also warns when it sits above 1. On the PCE backend
             ``explained_variance`` is a true in-sample R-squared, which an
             overfit expansion drives *towards* 1, so overfitting is caught
-            out of sample instead: the fit's ``loo_rmse`` approaching
+            out of sample instead: the fit's ``cv_rmse`` approaching
             ``std(Y)`` means the expansion predicts no better than the output
             mean.
         JaxgsaWarning: If ``backend="hdmr"``, ``problem`` declares a
@@ -435,6 +451,7 @@ def analyze(
             The warning comes from :meth:`HDMRResult.shapley`, so the direct
             route raises it too.
     """
+    key = as_key(key, "shapley")
     if _is_irregular_y(Y):
         return analyze_irregular(
             analyze,
@@ -451,13 +468,13 @@ def analyze(
         )
     Y = cast(Array, Y)
 
-    from jaxgsa.shapley import SPEC
+    from jaxgsa.shapley import _SPEC
 
     # Both backends fit smooth surrogates over the inputs, which is undefined
     # for unordered level codes; reject with the Shapley-specific name. Only
     # the categorical half is gated from the record: whether a correlation is
     # tolerated depends on the backend, so it is settled below instead.
-    gates(SPEC, problem, method="jaxgsa.shapley.analyze", check=("categorical",))
+    gates(_SPEC, problem, method="jaxgsa.shapley.analyze", check=("categorical",))
     check_scalars(
         (
             at_least("n_bootstrap", n_bootstrap, 0),

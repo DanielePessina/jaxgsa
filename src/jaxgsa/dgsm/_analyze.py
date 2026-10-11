@@ -1,6 +1,6 @@
 """DGSM analysis: compute derivative-based sensitivity measures and bounds.
 
-Computes the DGSM moments (nu, sigma) from a JAX-differentiable function
+Computes the DGSM moments (nu, mu) from a JAX-differentiable function
 via autodiff — forward mode when the output slices outnumber the inputs,
 reverse mode otherwise — then derives Poincare upper bounds and
 Kucherenko-Song lower bounds on the total Sobol index ST.
@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable, Iterator
-from typing import Literal, cast
+from typing import Literal, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -38,9 +38,9 @@ from jaxgsa._core.entry import (
     validate_inputs,
 )
 from jaxgsa._core.invalid import InvalidUnit, OnInvalid, resolve_policy
-from jaxgsa._core.irregular import IrregularY, _is_irregular_y
+from jaxgsa._core.irregular import _is_irregular_y
 from jaxgsa._core.result import CIInfo
-from jaxgsa._core.validation import _prepare_Y, _warn_zero_variance_slices
+from jaxgsa._core.validation import _prepare_Y, _warn_zero_variance_slices, as_key
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.dgsm._core import (
     _jac_bytes_per_row,
@@ -69,11 +69,11 @@ _SOURCE_NAMES = ("X", "Y or its derivative")
 
 _METHOD = "jaxgsa.dgsm.analyze"
 
-# The fields a bootstrap reports an interval for. ``var_y`` is left out on
+# The fields a bootstrap reports an interval for. ``variance`` is left out on
 # purpose: it is the denominator of both bounds, a property of the output
 # sample rather than a sensitivity measure, and its uncertainty is already
 # carried inside the two bound intervals.
-_INTERVAL_FIELDS = ("nu", "sigma", "upper_bound", "lower_bound")
+_INTERVAL_FIELDS = ("nu", "mu", "upper_bound", "lower_bound")
 
 # How many offending parameter names the lower-bound warning prints before it
 # stops and counts the rest. A 50-parameter uniform problem must not paste 50
@@ -84,7 +84,7 @@ _MAX_NAMED = 8
 def _meets_lower_bound_condition(spec: InputSpec) -> bool:
     """Report whether a marginal satisfies the Kucherenko-Song condition.
 
-    ``lower_bound`` is ``Var(x_i) * sigma_i^2 / Var(Y)``. Kucherenko & Song
+    ``lower_bound`` is ``Var(x_i) * mu_i^2 / Var(Y)``. Kucherenko & Song
     (2016), Theorem 6 (Section 4.1, eq. 31), prove it is a lower bound on
     ``ST_i`` through Stein's identity ``Cov(f, x_i) = E[tau(x_i) * df/dx_i]``.
     The kernel ``tau`` is the constant ``Var(x_i)`` only for an untruncated
@@ -181,54 +181,57 @@ def _warn_vacuous_upper_bounds(upper: Array) -> None:
     )
 
 
+def _check_x_is_array(X: object) -> None:
+    """Reject a callable passed where the sample matrix belongs.
+
+    Args:
+        X: The argument given as the sample matrix.
+
+    Raises:
+        TypeError: If ``X`` is callable. Older versions took the model as the
+            second positional argument, so this is the likeliest mistake.
+    """
+    if callable(X):
+        raise TypeError("X must be an array; pass the model as fn=...")
+
+
 def _resolve_call_style(
     fn: Callable | None,
-    X: Array | None,
     Y: Array | None,
     dfdx: Array | None,
 ) -> bool:
     """Pick one calling convention, and reject an ambiguous or incomplete call.
 
-    ``analyze`` accepts two argument groups: ``(fn, X)`` for the autodiff path
-    and ``(Y, dfdx)`` for the pre-computed path. Exactly one group must be
-    complete. Resolving this once, before any computation, stops an
-    over-specified call such as ``analyze(problem, X=X, Y=Y, dfdx=J)`` from
-    silently dropping ``X`` and the bounds check that goes with it.
+    ``analyze`` accepts two argument groups next to the sample ``X``: ``fn``
+    for the autodiff path and ``(Y, dfdx)`` for the pre-computed path. Exactly
+    one group must be complete. Resolving this once, before any computation,
+    stops an over-specified call from silently dropping an argument.
 
     Args:
         fn: The model function, or None.
-        X: The sample matrix, or None.
         Y: Pre-computed outputs, or None.
         dfdx: Pre-computed Jacobian, or None.
 
     Returns:
-        True for the autodiff path ``(fn, X)``, False for the pre-computed
-        path ``(Y, dfdx)``.
+        True for the autodiff path ``fn``, False for the pre-computed path
+        ``(Y, dfdx)``.
 
     Raises:
         ValueError: If arguments from both groups are given, if neither group
-            is given, or if one group is only partly filled.
+            is given, or if the pre-computed group is only partly filled.
     """
-    autodiff_given = [name for name, v in (("fn", fn), ("X", X)) if v is not None]
     precomputed_given = [name for name, v in (("Y", Y), ("dfdx", dfdx)) if v is not None]
 
-    if autodiff_given and precomputed_given:
+    if fn is not None and precomputed_given:
         raise ValueError(
-            f"Provide either (fn, X) or (Y, dfdx), not both: got "
-            f"{', '.join(autodiff_given)} from the autodiff path and "
-            f"{', '.join(precomputed_given)} from the pre-computed path. "
+            f"Provide either fn or (Y, dfdx), not both: got fn from the autodiff "
+            f"path and {', '.join(precomputed_given)} from the pre-computed path. "
             f"Drop {', '.join(precomputed_given)} to differentiate the model, or drop "
-            f"{', '.join(autodiff_given)} to use the values you already have."
+            "fn to use the values you already have."
         )
 
-    if autodiff_given:
-        if len(autodiff_given) == 2:
-            return True
-        missing = "X" if fn is not None else "fn"
-        raise ValueError(
-            f"The autodiff path needs both fn and X: {autodiff_given[0]} was given, "
-            f"{missing} was not."
-        )
+    if fn is not None:
+        return True
 
     if precomputed_given:
         if len(precomputed_given) == 2:
@@ -239,7 +242,7 @@ def _resolve_call_style(
             f"given, {missing} was not."
         )
 
-    raise ValueError("Provide either (fn, X) or (Y, dfdx)")
+    raise ValueError("Provide either fn=... or both Y and dfdx")
 
 
 def _looks_like_missing_axis(exc: BaseException) -> bool:
@@ -377,7 +380,7 @@ def _check_dfdx(dfdx: Array, Y: Array, D: int) -> Array:
         raise ValueError("dfdx ndim must equal Y.ndim + 1 and end with the derivative axis")
     if dfdx.shape[-1] != D:
         raise ValueError(
-            f"dfdx last dimension ({dfdx.shape[-1]}) must match problem.num_vars ({D})"
+            f"dfdx last dimension ({dfdx.shape[-1]}) must match problem.n_params ({D})"
         )
     if dfdx.shape[:-1] != Y.shape:
         raise ValueError(
@@ -386,7 +389,7 @@ def _check_dfdx(dfdx: Array, Y: Array, D: int) -> Array:
     return promote_jac(dfdx)
 
 
-def _check_moment_layout(sigma: Array, Y_3d: Array) -> None:
+def _check_moment_layout(mu: Array, Y_3d: Array) -> None:
     """Check the moments' slice axes against the canonicalized ``Y``.
 
     The moments were realigned in lockstep with ``Y``'s canonicalization, so
@@ -395,30 +398,49 @@ def _check_moment_layout(sigma: Array, Y_3d: Array) -> None:
     could not recover.
 
     Args:
-        sigma: The mean derivative, shape ``(T, K, D)``.
+        mu: The mean derivative, shape ``(T, K, D)``.
         Y_3d: The canonicalized output, shape ``(N, T, K)``.
 
     Raises:
         ValueError: If the two slice shapes disagree.
     """
-    if sigma.shape[:2] != Y_3d.shape[1:3]:
+    if mu.shape[:2] != Y_3d.shape[1:3]:
         raise ValueError(
             f"dfdx ndim/shape is incompatible with Y: derivative slice dims "
-            f"{sigma.shape[:2]} do not match Y's output dims {Y_3d.shape[1:3]}; "
+            f"{mu.shape[:2]} do not match Y's output dims {Y_3d.shape[1:3]}; "
             "dfdx must mirror Y's layout with one extra trailing (D,) axis"
         )
 
 
+class DGSMIndices(NamedTuple):
+    """The arrays :func:`indices` returns, named like the :class:`DGSMResult` fields.
+
+    Attributes:
+        nu: Mean squared partial derivative ``E[(df/dx_i)^2]``.
+        mu: Mean signed partial derivative ``E[df/dx_i]``.
+        upper_bound: Poincare upper bound on the total Sobol index.
+        lower_bound: ``Var(x_i) * mu_i^2 / Var(Y)``, a proven floor on the
+            total Sobol index for untruncated Gaussian marginals only.
+        variance: Output variance per slice.
+    """
+
+    nu: Array
+    mu: Array
+    upper_bound: Array
+    lower_bound: Array
+    variance: Array
+
+
 def indices(
     problem: Problem,
-    fn: Callable | None = None,
-    X: Array | None = None,
-    *,
+    X: Array,
     Y: Array | None = None,
+    *,
+    fn: Callable | None = None,
     dfdx: Array | None = None,
     standardize_outputs: bool = False,
     batch_size: int | None = None,
-) -> tuple[Array, ...]:
+) -> DGSMIndices:
     """Compute the DGSM moments and bounds as plain arrays, with no diagnostics.
 
     This is the transformable core of :func:`analyze`. It differentiates the
@@ -434,7 +456,7 @@ def indices(
     Differentiating a bound with respect to the sample is one line::
 
         def upper(X):
-            return jaxgsa.dgsm.indices(problem, fn, X)[2]
+            return jaxgsa.dgsm.indices(problem, X, fn=fn)[2]
 
         d_upper = jax.jacrev(upper)(X)
 
@@ -455,10 +477,10 @@ def indices(
         problem: Problem definition with D parameters. Read for the Poincare
             constants and the marginal variances only, and both are static, so
             passing one never turns a marginal parameter into a tracer.
-        fn: JAX-differentiable **one-sample** function, as in :func:`analyze`.
         X: Sample matrix in the problem's physical units, shape ``(N, D)``.
         Y: Forward model outputs for the pre-computed path, shape ``(N,)`` /
             ``(N, K)`` / ``(N, T, K)``.
+        fn: JAX-differentiable **one-sample** function, as in :func:`analyze`.
         dfdx: Pre-computed Jacobian mirroring ``Y``'s layout with one extra
             trailing ``(D,)`` axis.
         standardize_outputs: As in :func:`analyze`.
@@ -467,9 +489,9 @@ def indices(
             as in :func:`analyze`.
 
     Returns:
-        ``(nu, sigma, upper_bound, lower_bound, var_y)``. The first four have
-        the shapes ``analyze`` reports for them, and ``var_y`` is the
-        per-slice output variance.
+        A :class:`DGSMIndices` ``(nu, mu, upper_bound, lower_bound, variance)``.
+        The first four have the shapes ``analyze`` reports for them, and
+        ``variance`` is the per-slice output variance.
 
     Raises:
         ValueError: If the calling convention is ambiguous or incomplete, if
@@ -479,60 +501,63 @@ def indices(
             they would be silently wrong, exactly as in :func:`analyze`), or
             if ``problem`` has a categorical parameter.
     """
-    from jaxgsa.dgsm import SPEC
+    from jaxgsa.dgsm import _SPEC
 
     # The same capability gates analyze applies through prepare().
     # problem.dependence is static host-side metadata, so the check
     # runs at trace time and the core still composes with jit/vmap/grad.
-    gates(SPEC, problem, method="jaxgsa.dgsm.indices")
-    use_autodiff = _resolve_call_style(fn, X, Y, dfdx)
-    D = problem.num_vars
+    gates(_SPEC, problem, method="jaxgsa.dgsm.indices")
+    _check_x_is_array(X)
+    use_autodiff = _resolve_call_style(fn, Y, dfdx)
+    # A shape check on static metadata, so it stays traceable.
+    X = validate_inputs(problem, X)
+    D = problem.n_params
 
     if use_autodiff:
-        assert fn is not None and X is not None  # guaranteed by _resolve_call_style
+        assert fn is not None  # guaranteed by _resolve_call_style
         n_outputs = _check_point_callable(fn, X)
         sum_jac, sum_jac2, Y_raw = moment_sums(fn, X, batch_size, n_outputs=n_outputs)
         n_rows = X.shape[0]
-        sigma = promote_moments(sum_jac / n_rows)
+        mu = promote_moments(sum_jac / n_rows)
         nu = promote_moments(sum_jac2 / n_rows)
         Y_3d, layout = _prepare_Y(jnp.asarray(Y_raw))
     else:
         assert Y is not None and dfdx is not None  # guaranteed by _resolve_call_style
         Y_arr = jnp.asarray(Y)
         dfdx_arr = _check_dfdx(jnp.asarray(dfdx), Y_arr, D)
-        sigma = jnp.mean(dfdx_arr, axis=0)
+        mu = jnp.mean(dfdx_arr, axis=0)
         nu = jnp.mean(dfdx_arr**2, axis=0)
         Y_3d, layout = _prepare_Y(Y_arr)
 
-    _check_moment_layout(sigma, Y_3d)
-    nu, sigma, upper, lower, var_y = bounds_from_moments(
+    _check_moment_layout(mu, Y_3d)
+    nu, mu, upper, lower, variance = bounds_from_moments(
         problem,
         nu=nu,
-        sigma=sigma,
-        var_y=jnp.var(Y_3d, axis=0),
+        mu=mu,
+        variance=jnp.var(Y_3d, axis=0),
         standardize_outputs=standardize_outputs,
     )
-    return (
+    return DGSMIndices(
         layout.squeeze(nu),
-        layout.squeeze(sigma),
+        layout.squeeze(mu),
         layout.squeeze(upper),
         layout.squeeze(lower),
-        layout.squeeze(var_y, n_trailing=0),
+        layout.squeeze(variance, n_trailing=0),
     )
 
 
 def analyze(
     problem: Problem,
-    fn: Callable | None = None,
-    X: Array | None = None,
+    X: Array,
+    Y: Array | None = None,
     *,
-    Y: Array | IrregularY | None = None,
+    fn: Callable | None = None,
     dfdx: Array | None = None,
     standardize_outputs: bool = False,
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
-    key: Array | None = None,
+    key: Array | int | None = None,
     batch_size: int | None = None,
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
@@ -555,8 +580,8 @@ def analyze(
       inequality holds (see :mod:`jaxgsa.dgsm._poincare`). This holds for
       every marginal this package supports, so an input whose upper bound is
       near zero is provably negligible.
-    - **Lower bound**: ``Var(x_i) * sigma_i^2 / Var(Y)``, with
-      ``sigma_i = E[df/dx_i]``, the mean (signed) derivative. Kucherenko &
+    - **Lower bound**: ``Var(x_i) * mu_i^2 / Var(Y)``, with
+      ``mu_i = E[df/dx_i]``, the mean (signed) derivative. Kucherenko &
       Song (2016), Theorem 6 (Section 4.1, eq. 31), prove ``ST_i >=`` this
       expression when input i's marginal is an **untruncated Gaussian**. That
       condition is not decoration: the proof needs Stein's identity, which
@@ -575,17 +600,19 @@ def analyze(
 
     There are two calling conventions, and you must use exactly one of them:
 
-    - **Autodiff path** (primary): pass ``fn`` and ``X``. JAX differentiates
+    - **Autodiff path** (primary): pass ``X`` and ``fn=``. JAX differentiates
       the function, and one pass returns both the Jacobian and the forward
       outputs. The autodiff mode is selected from the shapes: ``jax.jacfwd``
       when the output slices outnumber the inputs (``T*K > D``), ``jax.jacrev``
       otherwise. The two modes compute the same Jacobian; only float
       arithmetic order differs.
-    - **Pre-computed path**: pass ``Y`` and ``dfdx``. Use it when the model is
+    - **Pre-computed path**: pass ``X``, ``Y`` and ``dfdx=``. Use it when the model is
       not JAX-differentiable, or when the Jacobian comes from elsewhere.
 
-    Arguments from both groups, or one group only partly filled, raise a
-    ``ValueError``. Nothing is dropped silently.
+    ``X`` is always required. ``fn`` together with ``Y`` or ``dfdx``, neither
+    convention, or ``Y`` without ``dfdx`` (or the reverse) raises a
+    ``ValueError``. Nothing is dropped silently. A callable passed as ``X``
+    raises a ``TypeError``.
 
     ``fn`` takes **one sample**, not a batch. Unlike the other methods in this
     package, which call the model on the whole ``(N, D)`` matrix, ``fn`` maps a
@@ -594,18 +621,19 @@ def analyze(
 
     Args:
         problem: Problem definition with D parameters.
+        X: Sample matrix in the problem's physical units, shape ``(N, D)``.
+        Y: Forward model outputs for the pre-computed path, shape ``(N,)`` /
+            ``(N, K)`` / ``(N, T, K)``. Irregular outputs are not supported.
         fn: JAX-differentiable **one-sample** function: ``(D,) -> ()``,
             ``(D,) -> (K,)``, or ``(D,) -> (T, K)`` for time-series outputs.
             It is called on one row at a time; ``analyze`` does the batching.
-        X: Sample matrix in the problem's physical units, shape ``(N, D)``.
-        Y: Forward model outputs, shape ``(N,)`` / ``(N, K)`` / ``(N, T, K)``.
         dfdx: Pre-computed Jacobian, mirroring ``Y``'s layout with one extra
             trailing ``(D,)`` axis: ``(N, D)`` for ``(N,)`` Y, ``(N, K, D)``
             for ``(N, K)``, and ``(N, T, K, D)`` for ``(N, T, K)``.
-        standardize_outputs: When ``True``, report ``nu``, ``sigma`` and
-            ``var_y`` for the standardized output ``(Y - mean) / std``, one
+        standardize_outputs: When ``True``, report ``nu``, ``mu`` and
+            ``variance`` for the standardized output ``(Y - mean) / std``, one
             mean and one standard deviation per output slice. DGSM returns
-            dimensional quantities: under ``Y -> a*Y + b``, ``sigma`` scales
+            dimensional quantities: under ``Y -> a*Y + b``, ``mu`` scales
             by ``a`` and ``nu`` by ``a^2``. Dividing them out puts every
             output slice in units of its own standard deviation, so slices of
             different magnitude compare directly. ``upper_bound`` and
@@ -613,12 +641,12 @@ def analyze(
             ``False``, which reports the moments in the output's own units.
         n_bootstrap: Number of bootstrap resamples for confidence intervals.
             ``0`` (default) computes no intervals. The resampling unit is one
-            row of the sample. ``nu`` and ``sigma`` are plain i.i.d. means
+            row of the sample. ``nu`` and ``mu`` are plain i.i.d. means
             over rows, so a row bootstrap is exactly the right resample for
             them, and both bounds are the plug-in ratios of those means to
             ``Var(Y)``, recomputed on the same resampled rows. Intervals are
-            reported for all four: ``nu``, ``sigma``, ``upper_bound`` and
-            ``lower_bound``. ``var_y`` gets none. It is the denominator, a
+            reported for all four: ``nu``, ``mu``, ``upper_bound`` and
+            ``lower_bound``. ``variance`` gets none. It is the denominator, a
             property of the output sample rather than a sensitivity measure,
             and its uncertainty is already inside the two bound intervals.
             The cost is one extra sweep of the Jacobian over the sample, not
@@ -658,18 +686,19 @@ def analyze(
             ``DGSMResult.ci.replicates``. Off by default because they are
             large: ``n_bootstrap`` copies of four index arrays.
     Returns:
-        A ``DGSMResult`` with ``nu``, ``sigma``, ``upper_bound``, and
+        A ``DGSMResult`` with ``nu``, ``mu``, ``upper_bound``, and
         ``lower_bound``, each of shape ``(D,)`` / ``(K, D)`` / ``(T, K, D)``
-        mirroring the output layout, plus ``var_y``, the optional ``*_conf``
+        mirroring the output layout, plus ``variance``, the optional ``*_conf``
         intervals with the ``ci`` record that describes them, and the
         non-finite report in ``invalid``.
 
     Raises:
+        TypeError: ``X`` is a callable. The model goes in ``fn=...``.
         ValueError: In any of these cases. ``on_invalid`` is not one of the
             three policies, or the non-finite policy refuses the sample.
-            Arguments from both ``(fn, X)`` and
-            ``(Y, dfdx)`` were given. Neither pair was given. One pair was only
-            partly filled, such as ``fn`` without ``X``. ``fn`` takes a batch
+            ``fn`` was given together with ``Y`` or ``dfdx``. Neither ``fn`` nor
+            ``(Y, dfdx)`` was given. Only one of ``Y`` and ``dfdx`` was
+            given. ``fn`` takes a batch
             ``(N, D)`` instead of one ``(D,)`` row, or cannot be traced on one
             row. ``dfdx`` has an unexpected shape, or does
             not match ``Y`` or the problem dimension. ``problem.correlation``
@@ -686,6 +715,8 @@ def analyze(
             bound only there; the warning names the marginals that fail the
             condition. ``upper_bound`` is never in question.
     """
+    key = as_key(key, "dgsm")
+    _check_x_is_array(X)
     if _is_irregular_y(Y):
         raise NotImplementedError(
             "jaxgsa.dgsm.analyze does not support irregularly sampled outputs yet: "
@@ -693,9 +724,8 @@ def analyze(
             "Analyze with a method that supports ragged Y instead, "
             "or re-grid the outputs to a shared grid first."
         )
-    Y = cast(Array | None, Y)
 
-    from jaxgsa.dgsm import SPEC
+    from jaxgsa.dgsm import _SPEC
 
     # DGSM cannot call the one-shot prepare(), because on the autodiff path
     # the model output is what the preamble would validate and it does not
@@ -711,7 +741,7 @@ def analyze(
         one_of("ci_method", ci_method, ("quantile", "gaussian")),
         in_open_interval("conf_level", conf_level, 0.0, 1.0),
     )
-    unit = SPEC.invalid_unit
+    unit = _SPEC.invalid_unit
     assert unit is not None  # dgsm declares InvalidUnit.ROW
     resolve_policy(
         on_invalid,
@@ -720,7 +750,7 @@ def analyze(
         allow_drop=unit is not InvalidUnit.CURVE,
     )
     check_scalars(checks)
-    gates(SPEC, problem, method=_METHOD)
+    gates(_SPEC, problem, method=_METHOD)
     if n_bootstrap > 0 and key is None:
         raise ValueError("key is required when n_bootstrap > 0")
     # Say once, before the expensive work, that lower_bound is only a proven
@@ -732,18 +762,18 @@ def analyze(
     # the autodiff path the Jacobian sweep is the expensive work, so it
     # belongs inside the timed span.
     t0 = _verbose.tic()
-    D = problem.num_vars
+    D = problem.n_params
 
     # Resolve the calling convention once, before any computation, so that an
     # over-specified call cannot pick one branch and drop the other group's
     # arguments unchecked.
-    use_autodiff = _resolve_call_style(fn, X, Y, dfdx)
+    use_autodiff = _resolve_call_style(fn, Y, dfdx)
+    # X is checked here rather than in the data half on the autodiff path,
+    # because the model is about to be differentiated on it.
+    X = validate_inputs(problem, X)
 
     if use_autodiff:
-        assert fn is not None and X is not None  # guaranteed by _resolve_call_style
-        # X is checked here rather than in the data half, because the model is
-        # about to be differentiated on it.
-        X = validate_inputs(problem, X)
+        assert fn is not None  # guaranteed by _resolve_call_style
         # Free shape-only trace: catches a batch (N, D) callable here, instead
         # of as an IndexError from inside the autodiff.
         n_outputs = _check_point_callable(fn, X)
@@ -754,7 +784,7 @@ def analyze(
         # the same one the batch loop masked with. It rides in as an extra
         # array, which puts it on the model side of the check with Y.
         ctx = prepare(
-            SPEC,
+            _SPEC,
             problem,
             moments.Y,
             X=X,
@@ -774,7 +804,7 @@ def analyze(
             # No row was removed, so the totals over every row are the ones
             # to divide. Under "propagate" this is the branch that lets the
             # non-finite value through, which is what it is for.
-            sigma = moments.sum_jac / N
+            mu = moments.sum_jac / N
             nu = moments.sum_jac2 / N
         else:
             # The batch loop masked with its own copy of this verdict, built
@@ -790,9 +820,9 @@ def analyze(
                     "rows the moments were computed from. Please report this bug."
                 )
             n_kept = int(keep.sum())
-            sigma = moments.sum_jac_kept / n_kept
+            mu = moments.sum_jac_kept / n_kept
             nu = moments.sum_jac2_kept / n_kept
-        sigma = promote_moments(sigma)
+        mu = promote_moments(mu)
         nu = promote_moments(nu)
     else:
         assert Y is not None and dfdx is not None  # guaranteed by _resolve_call_style
@@ -803,9 +833,10 @@ def analyze(
         # it goes into the check whole, on the model side with Y, and comes
         # back compacted by the same mask.
         ctx = prepare(
-            SPEC,
+            _SPEC,
             problem,
             Y,
+            X=X,
             on_invalid=on_invalid,
             checks=checks,
             method=_METHOD,
@@ -822,23 +853,23 @@ def analyze(
         # prepare() was told to expect one Y row per Jacobian row.
         dfdx_arr = _check_dfdx(ctx.extra["derivative"], Y_valid, D)
         # One vectorized reduction over N covers every (t, k) slice at once.
-        sigma = jnp.mean(dfdx_arr, axis=0)  # E[df/dx_i], (T, K, D)
+        mu = jnp.mean(dfdx_arr, axis=0)  # E[df/dx_i], (T, K, D)
         nu = jnp.mean(dfdx_arr**2, axis=0)  # E[(df/dx_i)^2]
 
     # Canonicalize Y to (N, T, K), then check the moments line up with it.
     Y_3d = ctx.Y3
-    _check_moment_layout(sigma, Y_3d)
+    _check_moment_layout(mu, Y_3d)
 
     # Var(Y) per (t, k) output slice, denominator of both bounds. A constant
     # slice makes both bounds NaN, so say so rather than returning it silently.
-    var_y = jnp.var(Y_3d, axis=0)  # (T, K)
+    variance = jnp.var(Y_3d, axis=0)  # (T, K)
     _warn_zero_variance_slices(Y_valid, output_names=problem.output_names, method=_METHOD)
 
-    nu, sigma, upper, lower, var_y = bounds_from_moments(
+    nu, mu, upper, lower, variance = bounds_from_moments(
         problem,
         nu=nu,
-        sigma=sigma,
-        var_y=var_y,
+        mu=mu,
+        variance=variance,
         standardize_outputs=standardize_outputs,
     )
 
@@ -876,7 +907,7 @@ def analyze(
             n_bootstrap=n_bootstrap,
             standardize_outputs=standardize_outputs,
         )
-        point = {"nu": nu, "sigma": sigma, "upper_bound": upper, "lower_bound": lower}
+        point = {"nu": nu, "mu": mu, "upper_bound": upper, "lower_bound": lower}
         for name in _INTERVAL_FIELDS:
             lo, hi = _bootstrap_ci_endpoints(
                 point[name], draws[name], conf_level=conf_level, ci_method=ci_method
@@ -895,24 +926,24 @@ def analyze(
             ),
         )
 
-    # Drop the singleton axes the preamble inserted; var_y has no trailing
+    # Drop the singleton axes the preamble inserted; variance has no trailing
     # param axis, so it passes n_trailing=0.
-    sigma = ctx.squeeze(sigma)
+    mu = ctx.squeeze(mu)
     nu = ctx.squeeze(nu)
     upper = ctx.squeeze(upper)
     lower = ctx.squeeze(lower)
-    var_y = ctx.squeeze(var_y, n_trailing=0)
+    variance = ctx.squeeze(variance, n_trailing=0)
 
     result = DGSMResult(
         nu=nu,
-        sigma=sigma,
+        mu=mu,
         upper_bound=upper,
         lower_bound=lower,
-        var_y=var_y,
+        variance=variance,
         problem=problem,
         invalid=invalid,
         nu_conf=confs["nu"],
-        sigma_conf=confs["sigma"],
+        mu_conf=confs["mu"],
         upper_bound_conf=confs["upper_bound"],
         lower_bound_conf=confs["lower_bound"],
         ci=ci,
@@ -929,8 +960,8 @@ def analyze(
             else "estimator (includes compile on the first call)"
         )
         if use_autodiff:
-            mode = jacobian_mode(n_inputs=problem.num_vars, n_outputs=T * K)
-            gradients = f"gradients: {mode}-mode autodiff (T*K={T * K}, D={problem.num_vars})"
+            mode = jacobian_mode(n_inputs=problem.n_params, n_outputs=T * K)
+            gradients = f"gradients: {mode}-mode autodiff (T*K={T * K}, D={problem.n_params})"
         else:
             gradients = "gradients: user-supplied dfdx"
         batching = (
@@ -1025,22 +1056,22 @@ def _bootstrap_draws(
     sum_jac, sum_jac2, sum_y, sum_y2 = resample_moment_sums(batches, idx)
 
     T, K = slice_shape
-    sigma = sum_jac.reshape(n_bootstrap, T, K, n_params) / n_rows
+    mu = sum_jac.reshape(n_bootstrap, T, K, n_params) / n_rows
     nu = sum_jac2.reshape(n_bootstrap, T, K, n_params) / n_rows
     mean_y = sum_y.reshape(n_bootstrap, T, K) / n_rows
     # Var(Y) from the two raw moments, because a replicate never materialises
     # the rows it drew. Clipped at zero: the raw-moment form can go a rounding
     # step negative on a near-constant slice, and a negative variance would
     # turn into a NaN standard deviation.
-    var_y = jnp.maximum(sum_y2.reshape(n_bootstrap, T, K) / n_rows - mean_y**2, 0.0)
+    variance = jnp.maximum(sum_y2.reshape(n_bootstrap, T, K) / n_rows - mean_y**2, 0.0)
 
     # Every step below broadcasts over the leading replicate axis, so a
     # replicate runs through exactly the arithmetic the point estimate did.
-    nu, sigma, upper, lower, _ = bounds_from_moments(
+    nu, mu, upper, lower, _ = bounds_from_moments(
         problem,
         nu=nu,
-        sigma=sigma,
-        var_y=var_y,
+        mu=mu,
+        variance=variance,
         standardize_outputs=standardize_outputs,
     )
-    return {"nu": nu, "sigma": sigma, "upper_bound": upper, "lower_bound": lower}
+    return {"nu": nu, "mu": mu, "upper_bound": upper, "lower_bound": lower}

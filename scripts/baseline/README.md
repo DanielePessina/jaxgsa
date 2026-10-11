@@ -307,9 +307,9 @@ down its Legendre path and DGSM through the finite-element Poincare solve,
 and the unbounded marginal is the only thing that makes
 `morris._squash_open_sides` do any work.
 
-All thirteen methods run against every case: `borgonovo`, `dgsm`, `efast`,
+All fourteen methods run against every case: `borgonovo`, `dgsm`, `efast`,
 `hdmr`, `hsic`, `kucherenko`, `morris`, `optimal_transport`, `pawn`, `pce`,
-`shapley`, `sobol`, `vkoga`. A method that refuses a case is recorded as
+`rank`, `shapley`, `sobol`, `vkoga`. A method that refuses a case is recorded as
 `{"status": "raised", "exception": "ValueError"}`. That is data too: a
 refactor that removes a gate shows up as a status change. The exception
 message is deliberately not recorded, because wording is allowed to change.

@@ -91,7 +91,7 @@ def test_indices_matches_analyze(case):
     """Tier T4: ``indices`` returns exactly what ``analyze`` reports.
 
     ``analyze`` fits through the same core, so this guards the wiring rather
-    than the estimator maths. The core returns a bare tuple of three arrays,
+    than the estimator maths. The core returns a named tuple of three arrays,
     with no result object to unwrap, and the ``(N, T, K)`` layout comes back
     at the same shapes.
     """
@@ -99,7 +99,7 @@ def test_indices_matches_analyze(case):
     result = pce.analyze(problem, X, Y, order=3)
     out = pce.indices(problem, X, Y, order=3)
 
-    assert type(out) is tuple
+    assert isinstance(out, tuple)
     assert len(out) == 3
     assert all(isinstance(a, jax.Array) for a in out)
     S1, ST, S2 = out
@@ -143,7 +143,7 @@ def test_indices_is_jittable_and_vmappable(case):
 
     S1_batch, _, _ = jax.vmap(lambda outputs: pce.indices(problem, X, outputs, order=2))(batch)
 
-    assert S1_batch.shape == (3, problem.num_vars)
+    assert S1_batch.shape == (3, problem.n_params)
     for row, outputs in enumerate(batch):
         S1, _, _ = pce.indices(problem, X, outputs, order=2)
         np.testing.assert_allclose(np.asarray(S1_batch[row]), np.asarray(S1), rtol=1e-4, atol=1e-6)

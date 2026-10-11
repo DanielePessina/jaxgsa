@@ -51,7 +51,8 @@ from __future__ import annotations
 
 import functools
 import warnings
-from typing import Literal, cast
+from collections.abc import Sequence
+from typing import Literal, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -62,6 +63,7 @@ from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import interval
 from jaxgsa._core.entry import (
+    ScalarCheck,
     at_least,
     check_scalars,
     in_open_interval,
@@ -90,6 +92,7 @@ from jaxgsa._core.validation import (
     _prepare_Y,
     _standardize_outputs,
     _validate_output,
+    as_key,
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.optimal_transport._result import OTResult
@@ -101,7 +104,7 @@ from jaxgsa.problem import Problem, _categorical_dims
 # the engine owns it.
 _IRREGULAR_KWARGS = (
     "mode",
-    "n_partitions",
+    "n_classes",
     "standardize_outputs",
     "epsilon",
     "max_iter",
@@ -134,6 +137,24 @@ _POINT_CLOUD_MODES = ("multivariate", "trajectory")
 # Fewest samples that still build two conditioning classes of two points
 # each, which is what the default ``M = min(25, N // 2)`` already assumes.
 _MIN_KEPT = 4
+
+
+def _prefixed(checks: Sequence[ScalarCheck]) -> tuple[ScalarCheck, ...]:
+    """Prefix each failing-argument message with ``jaxgsa.optimal_transport: ``.
+
+    Args:
+        checks: Scalar verdicts built with the shared helpers.
+
+    Returns:
+        The same verdicts, each message starting ``jaxgsa.optimal_transport: `` unless
+        it already starts with ``jaxgsa``.
+    """
+    return tuple(
+        c
+        if c.message.startswith("jaxgsa")
+        else ScalarCheck(c.ok, f"jaxgsa.optimal_transport: {c.message}")
+        for c in checks
+    )
 
 
 def _aggregate_normalized(per_class: Array, weights: Array, V: Array) -> Array:
@@ -768,11 +789,56 @@ def _resolve_tol(tol: float | None, dtype: jnp.dtype) -> float:
     return 1e-9 if dtype == jnp.float64 else 1e-6
 
 
-def _resolve_n_classes(n_partitions: int | None, N: int, *, needs_M: bool) -> int:
-    """Resolve ``M``, the equal-frequency class count, from ``n_partitions``.
+class OTIndices(NamedTuple):
+    """Plain-array optimal-transport indices, as returned by :func:`indices`.
+
+    Fields are named like the matching :class:`OTResult` fields. Plain tuple
+    unpacking of the first three fields keeps working; ``S1`` comes last.
+
+    Attributes:
+        ot: Total optimal-transport index per parameter.
+        advective: Advective part of ``ot``.
+        diffusive: Diffusive part of ``ot``.
+        S1: Given-data first-order Sobol index, ``2 N / (N - 1)`` times
+            ``advective``.
+    """
+
+    ot: Array
+    advective: Array
+    diffusive: Array
+    S1: Array
+
+
+def _s1_scale(N: int) -> float:
+    """Return the factor that turns ``advective`` into the given-data ``S1``.
+
+    Args:
+        N: Number of samples.
+
+    Returns:
+        ``2 N / (N - 1)``, which moves the OT normalizer from ddof=1 to ddof=0.
+    """
+    return 2.0 * N / (N - 1)
+
+
+def _s1_from_advective(advective: Array, N: int) -> Array:
+    """Return the given-data ``S1`` from the advective index.
+
+    Args:
+        advective: Advective index, any shape.
+        N: Number of samples.
+
+    Returns:
+        ``advective`` rescaled by :func:`_s1_scale`.
+    """
+    return _s1_scale(N) * advective
+
+
+def _resolve_n_classes(n_classes: int | None, N: int, *, needs_M: bool) -> int:
+    """Resolve ``M``, the equal-frequency class count, from ``n_classes``.
 
     Shared between :func:`analyze` and :func:`indices`: both default
-    ``n_partitions`` to ``min(25, N // 2)`` and validate an explicit value
+    ``n_classes`` to ``min(25, N // 2)`` and validate an explicit value
     against ``[2, N // 2]``. Only the default path can skip the too-small
     floor check, and only when nothing in this call actually consumes
     ``M`` -- an all-categorical problem, whose parameters and whose dummy
@@ -780,29 +846,34 @@ def _resolve_n_classes(n_partitions: int | None, N: int, *, needs_M: bool) -> in
     ``M``, since it refuses categorical parameters outright.
 
     Args:
-        n_partitions: The caller's ``n_partitions`` argument.
+        n_classes: The caller's ``n_classes`` argument.
         N: Sample size.
         needs_M: Whether anything in this call consumes ``M``. Only
-            relevant when ``n_partitions is None``.
+            relevant when ``n_classes is None``.
 
     Returns:
         ``M``, resolved and validated.
 
     Raises:
-        ValueError: If ``n_partitions`` is outside ``[2, N // 2]``, or the
+        ValueError: If ``n_classes`` is outside ``[2, N // 2]``, or the
             default is used, ``needs_M`` is true, and ``N`` is too small to
             build two classes.
     """
-    if n_partitions is None:
+    if n_classes is None:
         # The customary 25 classes, clamped so small samples do not raise
         # over a default the user never passed.
         M = min(25, N // 2)
         if needs_M and M < 2:
-            raise ValueError(f"building conditioning classes needs N >= 4 samples, got N={N}")
+            raise ValueError(
+                "jaxgsa.optimal_transport: building conditioning classes needs N >= 4 "
+                f"samples, got N={N}"
+            )
         return M
-    M = int(n_partitions)
+    M = int(n_classes)
     if not 2 <= M <= N // 2:
-        raise ValueError(f"n_partitions must be in [2, N//2={N // 2}], got {n_partitions}")
+        raise ValueError(
+            f"jaxgsa.optimal_transport: n_classes must be in [2, N//2={N // 2}], got {n_classes}"
+        )
     return M
 
 
@@ -861,7 +932,7 @@ def analyze(
     Y: Array | IrregularY,
     *,
     mode: Literal["univariate", "multivariate", "trajectory"] = "univariate",
-    n_partitions: int | None = None,
+    n_classes: int | None = None,
     standardize_outputs: bool = True,
     epsilon: float = 0.03,
     max_iter: int = 2000,
@@ -870,7 +941,7 @@ def analyze(
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
-    key: Array | None = None,
+    key: Array | int | None = None,
     slice_chunk_size: int | None = None,
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
@@ -924,7 +995,7 @@ def analyze(
             entropic Sinkhorn transport. ``"trajectory"`` does the same
             per output, with each output's time course as the cloud, shape
             ``(K, D)``. It requires a 3-D ``Y``.
-        n_partitions: Number of equal-frequency conditioning classes per
+        n_classes: Number of equal-frequency conditioning classes per
             continuous parameter. More classes localize the conditioning
             and lower the discretization bias, but they leave fewer
             samples per class and raise the estimation noise. About 25 is
@@ -982,7 +1053,7 @@ def analyze(
         n_bootstrap: Number of bootstrap resamples for confidence
             intervals. ``0`` (default) skips them, and the ``*_conf``
             fields are ``None``. Joint modes solve
-            ``n_bootstrap * D * n_partitions`` transport problems, so keep
+            ``n_bootstrap * D * n_classes`` transport problems, so keep
             the value modest there.
         conf_level: Confidence level for the bootstrap intervals.
         ci_method: How the interval endpoints are formed. ``"quantile"``
@@ -1034,7 +1105,7 @@ def analyze(
         ValueError: If X is not 2-D, its column count does not match the
             problem, Y is not 1-D/2-D/3-D, X and Y have differing row
             counts, ``mode`` is unknown, ``mode="trajectory"`` is
-            used with a non-3-D Y, a passed ``n_partitions`` is not in
+            used with a non-3-D Y, a passed ``n_classes`` is not in
             ``[2, N // 2]``, a categorical column of X holds
             values other than its integer level codes, ``epsilon <= 0``,
             ``max_iter < 1``,
@@ -1049,6 +1120,7 @@ def analyze(
             conditional distribution then equals the unconditional one, so
             the corresponding indices are an exact 0 rather than an answer.
     """
+    key = as_key(key, "optimal_transport")
     if _is_irregular_y(Y):
         return analyze_irregular(
             analyze,
@@ -1062,35 +1134,39 @@ def analyze(
         )
     Y = cast(Array, Y)
 
-    from jaxgsa.optimal_transport import SPEC
+    from jaxgsa.optimal_transport import _SPEC
 
     # The check runs on the user's own sample, before any partition layout is
     # built and before the dummy column exists. The dummy is synthetic and
     # finite by construction, so it is not part of what is checked here.
     ctx = prepare(
-        SPEC,
+        _SPEC,
         problem,
         Y,
         X=X,
         on_invalid=on_invalid,
-        checks=(
-            require(mode in _MODES, f"mode must be one of {_MODES}, got {mode!r}"),
-            # Written as a positive comparison so NaN is rejected too:
-            # ``epsilon > 0`` is False for NaN, while ``not epsilon <= 0``
-            # was True for NaN and let it flow into log_K, where the
-            # Sinkhorn loop exits at once (NaN > tol is False) and returns
-            # NaN indices with zero diagnostics.
-            require(epsilon > 0, f"epsilon must be > 0, got {epsilon}"),
-            at_least("max_iter", max_iter, 1),
-            require(tol is None or tol > 0, f"tol must be > 0, got {tol}"),
-            at_least("n_bootstrap", n_bootstrap, 0),
-            one_of("ci_method", ci_method, ("quantile", "gaussian")),
-            in_open_interval("conf_level", conf_level, 0.0, 1.0),
-            at_least("slice_chunk_size", slice_chunk_size, 1),
-            # The bootstrap and the dummy baseline are the two consumers of
-            # ``key``, so it fires before the data is touched, not after.
-            require(key is not None or n_bootstrap == 0, "key is required when n_bootstrap > 0"),
-            require(key is not None or not dummy, "key is required when dummy=True"),
+        checks=_prefixed(
+            (
+                require(mode in _MODES, f"mode must be one of {_MODES}, got {mode!r}"),
+                # Written as a positive comparison so NaN is rejected too:
+                # ``epsilon > 0`` is False for NaN, while ``not epsilon <= 0``
+                # was True for NaN and let it flow into log_K, where the
+                # Sinkhorn loop exits at once (NaN > tol is False) and returns
+                # NaN indices with zero diagnostics.
+                require(epsilon > 0, f"epsilon must be > 0, got {epsilon}"),
+                at_least("max_iter", max_iter, 1),
+                require(tol is None or tol > 0, f"tol must be > 0, got {tol}"),
+                at_least("n_bootstrap", n_bootstrap, 0),
+                one_of("ci_method", ci_method, ("quantile", "gaussian")),
+                in_open_interval("conf_level", conf_level, 0.0, 1.0),
+                at_least("slice_chunk_size", slice_chunk_size, 1),
+                # The bootstrap and the dummy baseline are the two consumers of
+                # ``key``, so it fires before the data is touched, not after.
+                require(
+                    key is not None or n_bootstrap == 0, "key is required when n_bootstrap > 0"
+                ),
+                require(key is not None or not dummy, "key is required when dummy=True"),
+            )
         ),
         min_kept=_MIN_KEPT,
         # A constant slice leaves every conditional distribution equal to
@@ -1102,7 +1178,10 @@ def analyze(
     X, Y, invalid = ctx.X, ctx.Y, ctx.invalid
 
     if mode == "trajectory" and Y.ndim != 3:
-        raise ValueError(f"mode='trajectory' requires a 3-D (N, T, K) Y, got ndim={Y.ndim}")
+        raise ValueError(
+            "jaxgsa.optimal_transport: mode='trajectory' requires a 3-D (N, T, K) Y, "
+            f"got ndim={Y.ndim}"
+        )
     if mode in _POINT_CLOUD_MODES and not dummy:
         # The univariate mode reads a closed-form 1-D transport cost, but the
         # point-cloud modes solve an entropic problem, and that regularization
@@ -1121,17 +1200,17 @@ def analyze(
             category=JaxgsaWarning,
         )
     N = X.shape[0]
-    # n_partitions applies to the continuous columns only. Categorical
+    # n_classes applies to the continuous columns only. Categorical
     # columns always get one class per level, and so does the matched dummy
     # each of them is measured against (M4), so an all-categorical problem
     # has no consumer for the value even when it asks for a dummy floor.
     dims_levels = _categorical_dims(problem)
     cat_dims = [d for d, _ in dims_levels]
-    cont_dims = [d for d in range(problem.num_vars) if d not in set(cat_dims)]
-    M = _resolve_n_classes(n_partitions, N, needs_M=bool(cont_dims))
-    if n_partitions is not None and not cont_dims:
+    cont_dims = [d for d in range(problem.n_params) if d not in set(cat_dims)]
+    M = _resolve_n_classes(n_classes, N, needs_M=bool(cont_dims))
+    if n_classes is not None and not cont_dims:
         warnings.warn(
-            "jaxgsa.optimal_transport: n_partitions is ignored because every parameter is "
+            "jaxgsa.optimal_transport: n_classes is ignored because every parameter is "
             "categorical (one conditioning class per level, and each dummy floor "
             "matches its own parameter's level sizes)",
             stacklevel=2,
@@ -1319,7 +1398,7 @@ def analyze(
     # the identity "advective = S1 / 2" holds with no ddof caveat. Every
     # bootstrap resample also has N rows, so the same constant rescales the
     # interval exactly.
-    ddof_scale = 2.0 * N / (N - 1)
+    ddof_scale = _s1_scale(N)
     S1 = ddof_scale * hats["advective"]
     S1_conf = None if confs["advective"] is None else ddof_scale * confs["advective"]
 
@@ -1379,13 +1458,13 @@ def indices(
     Y: Array,
     *,
     mode: Literal["univariate", "multivariate", "trajectory"] = "univariate",
-    n_partitions: int | None = None,
+    n_classes: int | None = None,
     standardize_outputs: bool = True,
     epsilon: float = 0.03,
     max_iter: int = 2000,
     tol: float | None = None,
     slice_chunk_size: int | None = None,
-) -> tuple[Array, Array, Array]:
+) -> OTIndices:
     """Compute optimal-transport indices as plain arrays, with no diagnostics.
 
     This is the transformable core of :func:`analyze`. It runs the same
@@ -1430,7 +1509,7 @@ def indices(
         X: Parameter sample matrix, shape ``(N, D)``.
         Y: Model output, shape ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
         mode: Output treatment, as in :func:`analyze`.
-        n_partitions: Number of equal-frequency conditioning classes.
+        n_classes: Number of equal-frequency conditioning classes.
             ``None`` selects ``min(25, N // 2)``, which reads ``N`` only, so
             it stays static under a trace.
         standardize_outputs: Joint modes only. Divide each output column by its
@@ -1449,7 +1528,8 @@ def indices(
             kernel call, as in :func:`analyze`.
 
     Returns:
-        ``(ot, advective, diffusive)``. In ``"univariate"`` mode the shapes
+        An :class:`OTIndices` named tuple ``(ot, advective, diffusive, S1)``,
+        so unpacking the first three fields still works. In ``"univariate"`` mode the shapes
         are those of the caller's ``Y``: ``(D,)`` for a 1-D ``Y``,
         ``(K, D)`` for 2-D, ``(T, K, D)`` for 3-D. ``"multivariate"``
         returns ``(D,)`` and ``"trajectory"`` returns ``(K, D)``. The shapes
@@ -1459,34 +1539,41 @@ def indices(
         ValueError: If ``X`` is not ``(N, D)`` for the problem's ``D``; if
             ``Y`` is not 1-D, 2-D or 3-D, or its row count does not match
             ``X``; if ``mode`` is unknown; if ``mode="trajectory"`` is used
-            with a non-3-D ``Y``; if ``n_partitions`` is not in
+            with a non-3-D ``Y``; if ``n_classes`` is not in
             ``[2, N // 2]``; if ``epsilon <= 0``, ``max_iter < 1`` or
             ``tol <= 0``; if ``slice_chunk_size`` is below 1; or if any
             parameter is categorical.
     """
     check_scalars(
-        (
-            require(mode in _MODES, f"mode must be one of {_MODES}, got {mode!r}"),
-            # Written as a positive comparison so NaN is rejected too:
-            # ``epsilon > 0`` is False for NaN, while ``not epsilon <= 0``
-            # was True for NaN and let it flow into log_K, where the
-            # Sinkhorn loop exits at once (NaN > tol is False) and returns
-            # NaN indices with zero diagnostics.
-            require(epsilon > 0, f"epsilon must be > 0, got {epsilon}"),
-            at_least("max_iter", max_iter, 1),
-            require(tol is None or tol > 0, f"tol must be > 0, got {tol}"),
-            at_least("slice_chunk_size", slice_chunk_size, 1),
+        _prefixed(
+            (
+                (
+                    require(mode in _MODES, f"mode must be one of {_MODES}, got {mode!r}"),
+                    # Written as a positive comparison so NaN is rejected too:
+                    # ``epsilon > 0`` is False for NaN, while ``not epsilon <= 0``
+                    # was True for NaN and let it flow into log_K, where the
+                    # Sinkhorn loop exits at once (NaN > tol is False) and returns
+                    # NaN indices with zero diagnostics.
+                    require(epsilon > 0, f"epsilon must be > 0, got {epsilon}"),
+                    at_least("max_iter", max_iter, 1),
+                    require(tol is None or tol > 0, f"tol must be > 0, got {tol}"),
+                    at_least("slice_chunk_size", slice_chunk_size, 1),
+                )
+            )
         )
     )
     X = validate_inputs(problem, X)
     Y = _validate_output(Y, int(X.shape[0]), problem)
     if mode == "trajectory" and Y.ndim != 3:
-        raise ValueError(f"mode='trajectory' requires a 3-D (N, T, K) Y, got ndim={Y.ndim}")
+        raise ValueError(
+            "jaxgsa.optimal_transport: mode='trajectory' requires a 3-D (N, T, K) Y, "
+            f"got ndim={Y.ndim}"
+        )
     dims_levels = _categorical_dims(problem)
     if dims_levels:
         names = ", ".join(repr(problem.names[d]) for d, _ in dims_levels)
         raise ValueError(
-            "jaxgsa.optimal_transport.indices supports continuous parameters "
+            "jaxgsa.optimal_transport: indices supports continuous parameters "
             f"only, but {names} is categorical. A categorical parameter "
             "conditions on one class per observed level, and both the class "
             "count and the padded class width are read off the sample on the "
@@ -1496,7 +1583,7 @@ def indices(
         )
 
     N = X.shape[0]
-    M = _resolve_n_classes(n_partitions, N, needs_M=True)
+    M = _resolve_n_classes(n_classes, N, needs_M=True)
 
     Y_3d, layout = _prepare_Y(Y)
     _, T, K = Y_3d.shape
@@ -1522,7 +1609,12 @@ def indices(
             col_order,
             slice_chunk_size,
         )
-        return layout.squeeze(ot[0]), layout.squeeze(adv[0]), layout.squeeze(diff[0])
+        return OTIndices(
+            ot=layout.squeeze(ot[0]),
+            advective=layout.squeeze(adv[0]),
+            diffusive=layout.squeeze(diff[0]),
+            S1=layout.squeeze(_s1_from_advective(adv[0], N)),
+        )
 
     tol_v = _resolve_tol(tol, dtype)
     ot, adv, diff, _, _, _ = _run_joint(
@@ -1536,4 +1628,6 @@ def indices(
         jnp.asarray(max_iter, jnp.int32),
         jnp.asarray(tol_v, dtype),
     )
-    return ot[0], adv[0], diff[0]
+    return OTIndices(
+        ot=ot[0], advective=adv[0], diffusive=diff[0], S1=_s1_from_advective(adv[0], N)
+    )

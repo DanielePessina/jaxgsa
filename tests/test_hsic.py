@@ -31,7 +31,7 @@ def linear_hsic_result():
     The smallest possible p-value is ``1 / (n_perms + 1)``, so the
     ``p < 0.05`` check needs at least 20 permutations. 30 leaves margin.
     """
-    X = monte_carlo(linear.PROBLEM, n=512, seed=42)
+    X = monte_carlo(linear.PROBLEM, n_samples=512, seed=42)
     Y = linear.evaluate(jnp.asarray(X))
     return analyze(linear.PROBLEM, jnp.asarray(X), Y, key=jax.random.key(42), n_perms=30)
 
@@ -51,7 +51,7 @@ def sobol_g_hsic_result():
     indices (0.011 and 0.003) and sits close to the bias of a null input at
     smaller ``N``. No p-value is asserted, so 10 permutations are enough.
     """
-    X = monte_carlo(sobol_g.PROBLEM, n=1024, seed=42)
+    X = monte_carlo(sobol_g.PROBLEM, n_samples=1024, seed=42)
     Y = sobol_g.evaluate(jnp.asarray(X))
     return analyze(sobol_g.PROBLEM, jnp.asarray(X), Y, key=jax.random.key(42), n_perms=10)
 
@@ -63,10 +63,10 @@ class TestLinearHSIC:
         With augmented kernels the total indices of an additive model lie in
         [0, 1] up to estimator noise, and they rank the inputs the same way.
         """
-        r2 = np.asarray(linear_hsic_result.R2_HSIC)
+        r2 = np.asarray(linear_hsic_result.R2)
         assert r2[2] > r2[1] > r2[0]
         assert np.all(r2 >= 0.0) and np.all(r2 <= 1.0 + 1e-6)
-        t = np.asarray(linear_hsic_result.T_HSIC)
+        t = np.asarray(linear_hsic_result.T)
         assert np.all(np.isfinite(t))
         assert np.all(t >= -0.1) and np.all(t <= 1.0 + 0.1)
         assert t[2] > t[1] > t[0]
@@ -76,19 +76,19 @@ class TestLinearHSIC:
 class TestIshigamiHSIC:
     def test_x1_strongest_hsic(self, ishigami_hsic_result):
         """x1 appears in both sin(x1) and B*x3^4*sin(x1), giving highest HSIC."""
-        r2 = np.asarray(ishigami_hsic_result.R2_HSIC)
+        r2 = np.asarray(ishigami_hsic_result.R2)
         assert r2[0] > r2[2]
-        assert np.all(np.isfinite(np.asarray(ishigami_hsic_result.T_HSIC)))
+        assert np.all(np.isfinite(np.asarray(ishigami_hsic_result.T)))
 
 
 class TestSobolGHSIC:
     def test_ranking_and_negligible_inputs(self, sobol_g_hsic_result):
         """First 4 inputs rank x1 > x2 > x3 > x4, and inputs 5-8 (a=99) are negligible."""
-        r2 = np.asarray(sobol_g_hsic_result.R2_HSIC)
+        r2 = np.asarray(sobol_g_hsic_result.R2)
         assert r2[0] > r2[1] > r2[2] > r2[3]
         for i in range(4, 8):
             assert r2[i] < r2[0] * 0.1
-        t = np.asarray(sobol_g_hsic_result.T_HSIC)
+        t = np.asarray(sobol_g_hsic_result.T)
         assert t[0] > t[1] > t[2] > t[3]
 
 
@@ -101,7 +101,7 @@ class TestAgainstNumpyVStatistic:
     augmented kernels ``1 + center(K)`` for the total index. The package
     reaches the same numbers through a quantile of the full matrix and the
     expanded ``U/n^2 - 2V/n^3 + W/n^4`` form, so agreement checks the
-    normalisation and ``T_HSIC`` through the public API.
+    normalisation and ``T`` through the public API.
     """
 
     @staticmethod
@@ -137,27 +137,27 @@ class TestAgainstNumpyVStatistic:
 
     def test_r2_t_and_raw_hsic_match(self):
         with jax.enable_x64():
-            X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=64, seed=1), dtype=jnp.float64)
+            X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=64, seed=1), dtype=jnp.float64)
             Y = ishigami.evaluate(X)
             result = analyze(ishigami.PROBLEM, X, Y, n_perms=5, key=jax.random.key(0))
         r2, total, raw = self._numpy_indices(np.asarray(X), np.asarray(Y))
-        np.testing.assert_allclose(np.asarray(result.R2_HSIC), r2, rtol=1e-8)
-        np.testing.assert_allclose(np.asarray(result.T_HSIC), total, rtol=1e-8)
+        np.testing.assert_allclose(np.asarray(result.R2), r2, rtol=1e-8)
+        np.testing.assert_allclose(np.asarray(result.T), total, rtol=1e-8)
         np.testing.assert_allclose(np.asarray(result.hsic_raw), raw, rtol=1e-8)
 
 
 class TestMultiOutput:
     def test_linear_output_matches_scalar(self):
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
-        X = monte_carlo(problem, n=256, seed=8)
+        X = monte_carlo(problem, n_samples=256, seed=8)
         Xj = jnp.asarray(X)
         Y_scalar = Xj @ jnp.array([1.0, 2.0, 3.0])
         Y_multi = jnp.column_stack([Y_scalar, jnp.sum(Xj**2, axis=1)])
         r_scalar = analyze(problem, Xj, Y_scalar, n_perms=10, key=jax.random.key(8))
         r_multi = analyze(problem, Xj, Y_multi, n_perms=10, key=jax.random.key(8))
         np.testing.assert_allclose(
-            np.asarray(r_scalar.R2_HSIC),
-            np.asarray(r_multi.R2_HSIC[0]),
+            np.asarray(r_scalar.R2),
+            np.asarray(r_multi.R2[0]),
             atol=1e-4,
         )
 
@@ -165,12 +165,12 @@ class TestMultiOutput:
 class TestBandwidthOverride:
     def test_different_bandwidth_different_result(self):
         problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        X = monte_carlo(problem, n=256, seed=11)
+        X = monte_carlo(problem, n_samples=256, seed=11)
         Xj = jnp.asarray(X)
         Y = Xj[:, 0] * 2.0 + Xj[:, 1]
         r1 = analyze(problem, Xj, Y, bandwidth=0.1, n_perms=20, key=jax.random.key(11))
         r2 = analyze(problem, Xj, Y, bandwidth=1.0, n_perms=20, key=jax.random.key(11))
-        assert not np.allclose(np.asarray(r1.R2_HSIC), np.asarray(r2.R2_HSIC))
+        assert not np.allclose(np.asarray(r1.R2), np.asarray(r2.R2))
 
     @pytest.mark.parametrize("multiplier", [0.25, 1.0, 4.0])
     def test_multiplier_scales_the_median_width(self, multiplier):
@@ -200,14 +200,14 @@ class TestAffineInvariance:
     tracks the spread of the data, so an affine change of units cancels out
     of the Gaussian kernel exactly. That is the whole reason the keyword is
     relative: under the older convention, where a float was an absolute
-    width, the same rescaling moved ``R2_HSIC`` by 0.56 relative because the
+    width, the same rescaling moved ``R2`` by 0.56 relative because the
     fixed width did not follow ``a``.
     """
 
     @staticmethod
     def _case():
         """Ishigami inputs and outputs, in float64 so the check has digits."""
-        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=256, seed=3), dtype=jnp.float64)
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=256, seed=3), dtype=jnp.float64)
         return ishigami.PROBLEM, X, ishigami.evaluate(X)
 
     @pytest.mark.parametrize("multiplier", [1.0, 0.35])
@@ -240,11 +240,9 @@ class TestAffineInvariance:
                 problem, X, -2.5 * Y + 4.0, n_perms=5, key=jax.random.key(0), bandwidth=0.6
             )
         np.testing.assert_allclose(
-            np.asarray(base.R2_HSIC), np.asarray(moved.R2_HSIC), rtol=1e-10, atol=1e-12
+            np.asarray(base.R2), np.asarray(moved.R2), rtol=1e-10, atol=1e-12
         )
-        np.testing.assert_allclose(
-            np.asarray(base.T_HSIC), np.asarray(moved.T_HSIC), rtol=1e-10, atol=1e-12
-        )
+        np.testing.assert_allclose(np.asarray(base.T), np.asarray(moved.T), rtol=1e-10, atol=1e-12)
 
 
 class TestMedianBandwidth:
@@ -386,7 +384,7 @@ class TestSliceIndependence:
     def _four_slice_case():
         """Build a four-output problem with slices of unlike shape."""
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
-        Xj = jnp.asarray(monte_carlo(problem, n=256, seed=5))
+        Xj = jnp.asarray(monte_carlo(problem, n_samples=256, seed=5))
         Y = jnp.column_stack(
             [
                 linear.evaluate(Xj),
@@ -414,20 +412,20 @@ class TestSliceIndependence:
         two = analyze(problem, Xj, Y[:, :2], n_perms=20, key=jax.random.key(5))
         for column in range(4):
             alone = analyze(problem, Xj, Y[:, column], n_perms=20, key=jax.random.key(5))
-            for field in ("R2_HSIC", "T_HSIC", "p_values", "hsic_raw"):
+            for field in ("R2", "T", "p_values", "hsic_raw"):
                 np.testing.assert_array_equal(
                     np.asarray(getattr(together, field))[column],
                     np.asarray(getattr(alone, field)),
                 )
-        np.testing.assert_array_equal(np.asarray(two.R2_HSIC)[0], np.asarray(together.R2_HSIC)[0])
-        np.testing.assert_array_equal(np.asarray(two.T_HSIC)[0], np.asarray(together.T_HSIC)[0])
+        np.testing.assert_array_equal(np.asarray(two.R2)[0], np.asarray(together.R2)[0])
+        np.testing.assert_array_equal(np.asarray(two.T)[0], np.asarray(together.T)[0])
 
 
 class TestReproducibility:
     def test_the_key_decides_the_permutations(self):
         """The same key gives the same p-values, and a different key a different draw."""
         problem = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
-        Xj = jnp.asarray(monte_carlo(problem, n=256, seed=15))
+        Xj = jnp.asarray(monte_carlo(problem, n_samples=256, seed=15))
         # x2 and x3 are independent of Y, so their p-values are not pinned at the minimum.
         Y = Xj[:, 0] * 0.5
         r1 = analyze(problem, Xj, Y, key=jax.random.key(1), n_perms=20)
@@ -446,7 +444,6 @@ class TestValidation:
             (10, {"bandwidth": -1.0, "key": jax.random.key(0)}, "bandwidth"),
             (10, {"bandwidth": float("nan"), "key": jax.random.key(0)}, "bandwidth"),
             (10, {"bandwidth": float("inf"), "key": jax.random.key(0)}, "bandwidth"),
-            (10, {"n_perms": 5}, "key is required"),
             (2, {"key": jax.random.key(0)}, "N must be"),
         ],
         ids=[
@@ -455,7 +452,6 @@ class TestValidation:
             "bandwidth_negative",
             "bandwidth_nan",
             "bandwidth_inf",
-            "key_is_required",
             "too_few_samples",
         ],
     )
@@ -482,7 +478,7 @@ class TestSinglePrecisionWarning:
 
     def _sample(self, n: int = 256):
         problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        Xj = jnp.asarray(monte_carlo(problem, n=n, seed=31))
+        Xj = jnp.asarray(monte_carlo(problem, n_samples=n, seed=31))
         return problem, Xj, jnp.sin(3.0 * Xj[:, 0]) + Xj[:, 1]
 
     @pytest.mark.parametrize("x64", [False, True], ids=["float32_warns", "x64_is_silent"])
@@ -535,8 +531,8 @@ class TestSinglePrecisionWarning:
                     n_perms=5,
                     key=jax.random.key(0),
                 )
-            a = np.asarray(straight.R2_HSIC, np.float64)
-            b = np.asarray(shuffled.R2_HSIC, np.float64)
+            a = np.asarray(straight.R2, np.float64)
+            b = np.asarray(shuffled.R2, np.float64)
             return float(np.max(np.abs(a - b) / np.abs(a)))
 
         with jax.enable_x64(False):
@@ -550,7 +546,7 @@ class TestSinglePrecisionWarning:
 class TestToDataset:
     def test_timeseries_output(self):
         problem = Problem(names=("x1",), bounds=((0, 1),))
-        X = monte_carlo(problem, n=128, seed=17)
+        X = monte_carlo(problem, n_samples=128, seed=17)
         Xj = jnp.asarray(X)
         Y = jnp.ones((128, 2, 1)) * Xj[:, 0:1, None]
         result = analyze(problem, Xj, Y, n_perms=10, key=jax.random.key(17))
@@ -563,11 +559,11 @@ class TestIndependentInput:
     def test_independent_input_low_hsic(self):
         """An input independent of the output should have low R2-HSIC."""
         problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        X = monte_carlo(problem, n=256, seed=20)
+        X = monte_carlo(problem, n_samples=256, seed=20)
         Xj = jnp.asarray(X)
         Y = jnp.sin(Xj[:, 0] * 6.0)
         result = analyze(problem, Xj, Y, n_perms=50, key=jax.random.key(20))
-        r2 = np.asarray(result.R2_HSIC)
+        r2 = np.asarray(result.R2)
         assert r2[0] > r2[1] * 3.0
         p = np.asarray(result.p_values)
         assert p[0] < 0.05
@@ -576,24 +572,24 @@ class TestIndependentInput:
     def test_irrelevant_input_total_near_zero(self):
         """Total HSIC for an irrelevant input should be near zero."""
         problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        X = monte_carlo(problem, n=256, seed=21)
+        X = monte_carlo(problem, n_samples=256, seed=21)
         Xj = jnp.asarray(X)
         Y = Xj[:, 0]
         result = analyze(problem, Xj, Y, n_perms=10, key=jax.random.key(21))
-        t = np.asarray(result.T_HSIC)
+        t = np.asarray(result.T)
         assert t[0] > 0.5
         assert abs(t[1]) < 0.3
 
 
 class TestSingleParamTotal:
     def test_d1_total_equals_one(self):
-        """With D=1, the complement is ones → T_HSIC should be ~1.0."""
+        """With D=1, the complement is ones → T should be ~1.0."""
         problem = Problem(names=("x",), bounds=((0.0, 1.0),))
-        X = monte_carlo(problem, n=512, seed=22)
+        X = monte_carlo(problem, n_samples=512, seed=22)
         Xj = jnp.asarray(X)
         Y = jnp.sin(Xj[:, 0])
         result = analyze(problem, Xj, Y, n_perms=20, key=jax.random.key(22))
-        t = np.asarray(result.T_HSIC)
+        t = np.asarray(result.T)
         assert t[0] > 0.8
 
 
@@ -601,24 +597,24 @@ class TestZeroVarianceOutput:
     def test_constant_output_produces_nan(self):
         """Constant Y should produce NaN indices, consistent with the warning."""
         problem = Problem(names=("x1", "x2"), bounds=((0, 1), (0, 1)))
-        X = monte_carlo(problem, n=64, seed=23)
+        X = monte_carlo(problem, n_samples=64, seed=23)
         Xj = jnp.asarray(X)
         Y = jnp.ones(64)
         result = analyze(problem, Xj, Y, n_perms=5, key=jax.random.key(23))
-        r2 = np.asarray(result.R2_HSIC)
-        t = np.asarray(result.T_HSIC)
+        r2 = np.asarray(result.R2)
+        t = np.asarray(result.T)
         assert np.all(np.isnan(r2))
         assert np.all(np.isnan(t))
 
 
 class TestConstantInput:
     def test_constant_input_column_yields_exact_zero(self):
-        """A constant input has provably zero dependence: R2_HSIC is exactly 0.
+        """A constant input has provably zero dependence: R2 is exactly 0.
 
         A constant column's Gaussian kernel is identically 1, so the
         self-HSIC vanishes and the normalized index is the ratio of two
         round-off residues — before the fix it came out as spurious values
-        above 1 (R2_HSIC = 1.31 at N = 100). The kernel now masks those
+        above 1 (R2 = 1.31 at N = 100). The kernel now masks those
         parameters to exactly 0, matching PAWN, and the other parameters are
         unaffected.
         """
@@ -632,7 +628,7 @@ class TestConstantInput:
             result = analyze(
                 problem, jnp.asarray(X), jnp.asarray(Y), n_perms=20, key=jax.random.key(0)
             )
-        r2 = np.asarray(result.R2_HSIC)
+        r2 = np.asarray(result.R2)
         assert r2[0] == 0.0
         assert np.all(r2[1:] >= -1e-3)
         assert np.all(r2[1:] <= 1.0)
@@ -781,7 +777,7 @@ class TestIndicesCore:
     @staticmethod
     def _sample(problem, n, seed):
         """Monte-Carlo inputs for ``problem`` as a device array."""
-        return jnp.asarray(monte_carlo(problem, n=n, seed=seed))
+        return jnp.asarray(monte_carlo(problem, n_samples=n, seed=seed))
 
     def _ishigami(self):
         """Inputs and scalar outputs for the Ishigami benchmark."""
@@ -822,8 +818,8 @@ class TestIndicesCore:
         result = analyze(problem, X, Y, n_perms=self.PERMS, key=key, **kwargs)
 
         assert len(out) == 4
-        assert out[0].shape == result.R2_HSIC.shape
-        fields = (result.R2_HSIC, result.T_HSIC, result.p_values, result.hsic_raw)
+        assert out[0].shape == result.R2.shape
+        fields = (result.R2, result.T, result.p_values, result.hsic_raw)
         for produced, expected in zip(out, fields, strict=True):
             np.testing.assert_array_equal(np.asarray(produced), np.asarray(expected))
 
@@ -840,7 +836,7 @@ class TestIndicesCore:
         """
         from jaxgsa import hsic
 
-        assert hsic.SPEC.bootstrap is None
+        assert hsic._SPEC.bootstrap is None
         for fn in (analyze, indices):
             params = inspect.signature(fn).parameters
             assert "n_bootstrap" not in params
@@ -911,7 +907,7 @@ class TestIndicesCore:
             lambda outputs: indices(problem, X, outputs, n_perms=self.PERMS, key=key)
         )(batch)
 
-        assert stacked[0].shape == (3, problem.num_vars)
+        assert stacked[0].shape == (3, problem.n_params)
         for row, outputs in enumerate(batch):
             eager = indices(problem, X, outputs, n_perms=self.PERMS, key=key)
             for produced, expected in zip(stacked, eager, strict=True):
@@ -1046,7 +1042,7 @@ class TestIndicesCore:
 class TestBandwidthProvenance:
     """The index moves with the bandwidth, so the result must carry it.
 
-    A stored ``R2_HSIC`` without its bandwidth does not say what it measured:
+    A stored ``R2`` without its bandwidth does not say what it measured:
     the same data at 0.25 and at the default 1.0 can rank the parameters
     differently. This is the same reason ``SobolResult`` carries
     ``estimator``.
@@ -1054,7 +1050,7 @@ class TestBandwidthProvenance:
 
     @staticmethod
     def _data():
-        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=200, seed=0))
+        X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=200, seed=0))
         return X, ishigami.evaluate(X)
 
     def test_result_records_the_run_settings(self):
@@ -1077,3 +1073,52 @@ class TestBandwidthProvenance:
 
         default = analyze(ishigami.PROBLEM, X, Y, n_perms=20, key=jax.random.key(0), verbose=False)
         assert default.bandwidth == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Interface cleanup: named tuple, ci, key signature, no dtype warning
+# ---------------------------------------------------------------------------
+
+
+def _small_problem():
+    problem = Problem(names=("a", "b"), bounds=[(0.0, 1.0)] * 2)
+    X = monte_carlo(problem, 64, seed=0)
+    return problem, X, X[:, 0] ** 2 + 0.1 * X[:, 1]
+
+
+def test_indices_returns_a_named_tuple_that_unpacks():
+    from jaxgsa.hsic import HSICIndices
+
+    problem, X, Y = _small_problem()
+    out = indices(problem, X, Y, n_perms=3, key=0)
+    assert isinstance(out, HSICIndices)
+    assert out._fields == ("R2", "T", "p_values", "hsic_raw")
+    R2, T, p_values, hsic_raw = out
+    assert R2 is out.R2 and T is out.T and p_values is out.p_values and hsic_raw is out.hsic_raw
+
+
+def test_result_has_ci_none_and_renamed_fields():
+    problem, X, Y = _small_problem()
+    with single_precision_warning():
+        result = analyze(problem, X, Y, n_perms=3, key=0, verbose=False)
+    assert result.ci is None
+    assert result.R2.shape == (2,) and result.T.shape == (2,)
+    assert not hasattr(result, "R2_HSIC")
+    assert {"R2", "T"} <= set(result.to_dataset().data_vars)
+
+
+def test_key_is_keyword_only_without_default():
+    for fn in (analyze, indices):
+        param = inspect.signature(fn).parameters["key"]
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY
+        assert param.default is inspect.Parameter.empty
+
+
+def test_no_dtype_truncation_warning_in_single_precision():
+    """The radix selection must not request int64 while x64 is off."""
+    problem, X, Y = _small_problem()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        analyze(problem, X, Y, n_perms=3, key=0, verbose=False)
+    user = [w for w in caught if issubclass(w.category, UserWarning) and "dtype" in str(w.message)]
+    assert user == []

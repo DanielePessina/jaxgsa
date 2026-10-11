@@ -123,8 +123,8 @@ def _run_dgsm() -> Any:
     X, _ = _given_data(CONTINUOUS)
     return jaxgsa.dgsm.analyze(
         CONTINUOUS,
-        _point_model(_series_model),
         X,
+        fn=_point_model(_series_model),
         standardize_outputs=True,
         verbose=False,
     )
@@ -138,7 +138,7 @@ def _run_efast() -> Any:
 
 def _run_hdmr() -> Any:
     X, Y = _given_data(CONTINUOUS, n=300)
-    return jaxgsa.hdmr.analyze(CONTINUOUS, X, Y[:, 0], maxorder=2, maxiter=3, verbose=False)
+    return jaxgsa.hdmr.analyze(CONTINUOUS, X, Y[:, 0], order=2, max_iter=3, verbose=False)
 
 
 def _run_hsic() -> Any:
@@ -154,7 +154,7 @@ def _run_hsic() -> Any:
 
 
 def _run_kucherenko() -> Any:
-    design = jaxgsa.kucherenko.sample(CONTINUOUS, n_samples=16, seed=SEED, verbose=False)
+    design = jaxgsa.kucherenko.sample(CONTINUOUS, base_n=16, seed=SEED, verbose=False)
     Y = _series_model(jnp.asarray(design.samples))
     return jaxgsa.kucherenko.analyze(
         design,
@@ -183,7 +183,7 @@ def _run_ot_categorical() -> Any:
         CATEGORICAL,
         X,
         Y,
-        n_partitions=4,
+        n_classes=4,
         dummy=True,
         n_bootstrap=2,
         key=jax.random.key(SEED),
@@ -198,7 +198,7 @@ def _run_ot_multivariate() -> Any:
         X,
         Y,
         mode="multivariate",
-        n_partitions=4,
+        n_classes=4,
         epsilon=0.05,
         max_iter=100,
         tol=1e-4,
@@ -213,7 +213,7 @@ def _run_ot_trajectory() -> Any:
         X,
         _series_model(X),
         mode="trajectory",
-        n_partitions=4,
+        n_classes=4,
         epsilon=0.05,
         max_iter=100,
         tol=1e-4,

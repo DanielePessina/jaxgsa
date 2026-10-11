@@ -681,20 +681,20 @@ def _all_categorical_data(n=2000, seed=2):
     return p, X, Y
 
 
-def test_all_categorical_problem_validates_passed_n_partitions():
+def test_all_categorical_problem_validates_passed_n_classes():
     p, X, Y = _all_categorical_data()
     # A passed value is validated even when nothing uses it.
-    with pytest.raises(ValueError, match="n_partitions"):
-        optimal_transport.analyze(p, X, Y, n_partitions=10**9)
+    with pytest.raises(ValueError, match="n_classes"):
+        optimal_transport.analyze(p, X, Y, n_classes=10**9)
     with pytest.raises(ValueError, match="n_classes"):
         borgonovo.analyze(p, X, Y, n_classes=10**9, n_bootstrap=0)
 
 
-def test_all_categorical_problem_warns_ignored_n_partitions():
+def test_all_categorical_problem_warns_ignored_n_classes():
     p, X, Y = _all_categorical_data()
     # A valid value that nothing uses draws an "ignored" warning.
-    with pytest.warns(UserWarning, match="n_partitions is ignored"):
-        res = optimal_transport.analyze(p, X, Y, n_partitions=10)
+    with pytest.warns(UserWarning, match="n_classes is ignored"):
+        res = optimal_transport.analyze(p, X, Y, n_classes=10)
     assert float(res.ot[0]) > 0.5
     assert float(res.ot[1]) < 0.05
     with pytest.warns(UserWarning, match="n_classes is ignored"):
@@ -702,16 +702,16 @@ def test_all_categorical_problem_warns_ignored_n_partitions():
     assert float(res_b.S1[0]) > 0.7
 
 
-def test_all_categorical_problem_default_n_partitions_is_silent():
+def test_all_categorical_problem_default_n_classes_is_silent():
     p, X, Y = _all_categorical_data()
     res = optimal_transport.analyze(p, X, Y)
     assert float(res.ot[0]) > 0.5
-    # With a dummy the passed value is used; out of range names n_partitions.
-    # M4: no dummy reads n_partitions any more (each categorical column gets
+    # With a dummy the passed value is used; out of range names n_classes.
+    # M4: no dummy reads n_classes any more (each categorical column gets
     # its own permutation floor), so the scope text this used to match is
     # gone; the bound itself still applies.
-    with pytest.raises(ValueError, match="n_partitions"):
-        optimal_transport.analyze(p, X, Y, n_partitions=10**9, dummy=True, key=jax.random.key(0))
+    with pytest.raises(ValueError, match="n_classes"):
+        optimal_transport.analyze(p, X, Y, n_classes=10**9, dummy=True, key=jax.random.key(0))
     # The dummy default adapts to small N instead of raising over a bare 25.
     p_small, X_small, Y_small = _all_categorical_data(n=40, seed=5)
     res_small = optimal_transport.analyze(
@@ -842,13 +842,13 @@ def test_categorical_design_error_is_honest_about_correlation():
     # kucherenko.sample is exempt from the correlated-design guard, so its
     # categorical refusal is where the combined case actually surfaces.
     with pytest.raises(ValueError, match=r"jaxgsa\.sobol\.sample"):
-        jaxgsa.kucherenko.sample(problem, 64)
+        jaxgsa.kucherenko.sample(problem, base_n=64)
 
     R = np.eye(3)
     R[0, 1] = R[1, 0] = 0.5  # couples the continuous pair; identity row for c
     correlated = problem.with_correlation(R)
     with pytest.raises(ValueError, match="(?i)no variance-based method") as excinfo:
-        jaxgsa.kucherenko.sample(correlated, 64)
+        jaxgsa.kucherenko.sample(correlated, base_n=64)
     message = str(excinfo.value)
     assert "sobol.sample" not in message
     assert "optimal_transport" in message and "borgonovo" in message
@@ -883,7 +883,7 @@ def _categorical_and_correlated_data(n=128):
         ("morris", lambda p: morris.sample(p, 8)),
         ("efast", lambda p: efast.sample(p, 65)),
         ("sobol", lambda p: sobol.sample(p, 64, seed=0, verbose=False)),
-        ("kucherenko", lambda p: jaxgsa.kucherenko.sample(p, 64)),
+        ("kucherenko", lambda p: jaxgsa.kucherenko.sample(p, base_n=64)),
     ],
 )
 def test_combined_categorical_and_correlated_message(name, call):
@@ -919,15 +919,15 @@ def test_combined_categorical_and_correlated_message(name, call):
 @pytest.mark.parametrize(
     "name,call",
     [
-        ("dgsm", lambda p, X, Y: dgsm.analyze(p, fn=lambda x: x[:, 0], X=X)),
+        ("dgsm", lambda p, X, Y: dgsm.analyze(p, X, fn=lambda x: x[:, 0])),
         ("pce", lambda p, X, Y: pce_mod.analyze(p, X, Y)),
         ("hdmr", lambda p, X, Y: hdmr.analyze(p, X, Y)),
-        ("hsic", lambda p, X, Y: hsic.analyze(p, X, Y)),
+        ("hsic", lambda p, X, Y: hsic.analyze(p, X, Y, key=jax.random.key(0))),
         # pawn is absent on purpose: it takes categorical inputs (one bin per
         # level) and is dependence-tolerant, so it accepts the combined
         # problem instead of refusing it. See the companion accept test.
         ("shapley", lambda p, X, Y: shapley.analyze(p, X, Y)),
-        ("vkoga", lambda p, X, Y: jaxgsa.vkoga.analyze(p, X, Y)),
+        ("vkoga", lambda p, X, Y: jaxgsa.vkoga.analyze(p, X, Y, key=jax.random.key(0))),
     ],
 )
 def test_combined_message_on_the_analysis_side(name, call):
@@ -992,5 +992,5 @@ def test_categorical_only_analysis_message_is_unchanged():
     """A purely categorical problem keeps the categorical-only recommendation."""
     problem, X, Y = _mixed_data(n=256)
     with pytest.raises(ValueError, match="categorical-aware method") as excinfo:
-        hsic.analyze(problem, X, Y)
+        hsic.analyze(problem, X, Y, key=jax.random.key(0))
     assert "jaxgsa.sobol" in str(excinfo.value)

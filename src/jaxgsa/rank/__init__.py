@@ -16,7 +16,7 @@ Example::
     from jaxgsa import rank
     from jaxgsa.sampling import monte_carlo
 
-    X = monte_carlo(problem, n=5000, seed=42)
+    X = monte_carlo(problem, n_samples=5000, seed=42)
     Y = model(X)
     result = rank.analyze(problem, X, Y)
 
@@ -24,15 +24,16 @@ Example::
 arrays that ``jit`` and ``vmap`` accept.
 """
 
-from jaxgsa._core.invalid import InvalidUnit
-from jaxgsa._core.registry import MethodSpec, register
-from jaxgsa.rank._analyze import analyze, indices
+from jaxgsa._core.invalid import InvalidUnit as _InvalidUnit
+from jaxgsa._core.registry import MethodSpec as _MethodSpec
+from jaxgsa._core.registry import register as _register
+from jaxgsa.rank._analyze import RankIndices, analyze, indices
 from jaxgsa.rank._result import RankResult
 
-__all__ = ["RankResult", "analyze", "indices"]
+__all__ = ["RankIndices", "RankResult", "analyze", "indices"]
 
-SPEC = register(
-    MethodSpec(
+_SPEC = _register(
+    _MethodSpec(
         name="rank",
         analyze=analyze,
         sample=None,
@@ -40,6 +41,6 @@ SPEC = register(
         correlation="accepts",
         categorical="refuses",
         bootstrap="n_bootstrap",
-        invalid_unit=InvalidUnit.ROW,
+        invalid_unit=_InvalidUnit.ROW,
     )
 )

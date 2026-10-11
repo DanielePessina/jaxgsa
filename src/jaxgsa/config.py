@@ -7,11 +7,11 @@ mutates global state the host application may also depend on, so it changes
 behavior only when you call the helper yourself.
 """
 
-import math
-from pathlib import Path
+import math as _math
+from pathlib import Path as _Path
 
-import jax
-import numpy as np
+import jax as _jax
+import numpy as _np
 
 from jaxgsa._core import batching as _batching
 
@@ -38,23 +38,9 @@ _UNIT_BYTES: dict[str, int] = {
     "tib": 1024**4,
 }
 
-# Guard threshold for a unit-less call, in the default unit of MB.
-#
-# ``set_memory_budget`` took bytes before the 0.9.0 rename to megabytes (see
-# CHANGELOG.md). A call written for the old signature, such as
-# ``set_memory_budget(536870912)``, still runs under the new default unit, but
-# now asks for 512 TB instead of 512 MiB. Nothing would fail at the call site,
-# so the mistake would only show up much later as strange batching. This
-# threshold separates the two readings: 1048576 MB is 1 TiB of *transient*
-# batching memory, far more than any real machine gives one process, while a
-# genuinely large MB figure (64000 MB = 62.5 GiB, say) stays well below it. Any
-# unit-less value at or above it is therefore read as a leftover bytes figure
-# and rejected. Passing ``unit=`` explicitly skips the check.
-_BYTES_SHAPED_THRESHOLD_MB: int = 1024**2
-
 
 def enable_compilation_cache(
-    path: str | Path,
+    path: str | _Path,
     *,
     min_compile_time_secs: float = 1.0,
     min_entry_size_bytes: int = 0,
@@ -88,12 +74,12 @@ def enable_compilation_cache(
     """
     # expanduser() handles ``~``; absolute() pins the cache to a fixed location
     # independent of cwd (JAX would otherwise resolve a relative path at each write).
-    cache_dir = str(Path(path).expanduser().absolute())
-    jax.config.update("jax_compilation_cache_dir", cache_dir)
-    jax.config.update("jax_persistent_cache_min_compile_time_secs", min_compile_time_secs)
+    cache_dir = str(_Path(path).expanduser().absolute())
+    _jax.config.update("jax_compilation_cache_dir", cache_dir)
+    _jax.config.update("jax_persistent_cache_min_compile_time_secs", min_compile_time_secs)
     # This flag is strict-int in JAX; coerce so a float like 1e6 does not raise
     # partway through after the two updates above have already taken effect.
-    jax.config.update("jax_persistent_cache_min_entry_size_bytes", int(min_entry_size_bytes))
+    _jax.config.update("jax_persistent_cache_min_entry_size_bytes", int(min_entry_size_bytes))
     return cache_dir
 
 
@@ -168,32 +154,14 @@ def set_memory_budget(budget: int | float, *, unit: str | None = None) -> None:
     Raises:
         ValueError: If ``budget`` is not a positive, finite number, if it is a
             ``bool``, if it rounds to less than one byte, if ``unit`` is not an
-            accepted name, or if ``unit`` was left out and ``budget`` is large
-            enough to be a leftover bytes figure (see below).
-
-    Warning:
-        This function took bytes before jaxgsa 0.9.0. A unit-less call of
-        ``1048576`` or more is therefore rejected, because such a value is
-        almost certainly a bytes figure written for the old signature and would
-        now silently mean a budget a million times larger. Pass ``unit="b"`` to
-        keep the old meaning, or restate the value in megabytes.
+            accepted name.
     """
-    if isinstance(budget, bool | np.bool_) or not isinstance(
-        budget, int | float | np.integer | np.floating
+    if isinstance(budget, bool | _np.bool_) or not isinstance(
+        budget, int | float | _np.integer | _np.floating
     ):
         raise ValueError(f"memory budget must be a positive, finite number, got {budget!r}")
-    if not math.isfinite(budget) or budget <= 0:
+    if not _math.isfinite(budget) or budget <= 0:
         raise ValueError(f"memory budget must be a positive, finite number, got {budget!r}")
-
-    if unit is None and budget >= _BYTES_SHAPED_THRESHOLD_MB:
-        as_mb = budget / 1024**2
-        raise ValueError(
-            f"set_memory_budget now reads its value in megabytes by default, and {budget!r} "
-            "is too large to be a plausible MB figure. It looks like a byte count written "
-            "for the old bytes-only signature. Say which you mean: "
-            f"set_memory_budget({budget!r}, unit='b') for the old meaning, or "
-            f"set_memory_budget({as_mb:g}) for the same budget in MB."
-        )
 
     multiplier = _resolve_unit("mb" if unit is None else unit)
     budget_bytes = round(budget * multiplier)
@@ -204,19 +172,15 @@ def set_memory_budget(budget: int | float, *, unit: str | None = None) -> None:
     _batching._set_memory_budget(budget_bytes)
 
 
-def get_memory_budget(*, unit: str = "b") -> int | float:
+def get_memory_budget(*, unit: str = "mb") -> int | float:
     """Return the active transient-memory budget.
 
-    The default unit is bytes, not megabytes. This is deliberate and does not
-    mirror :func:`set_memory_budget`. Changing what an existing
-    ``get_memory_budget()`` call returns would be a silent change: the number
-    would still look reasonable, and code that divides an array size by it
-    would quietly compute the wrong batch size. The symmetry is available, but
-    you have to ask for it.
+    The default unit is megabytes, the same as :func:`set_memory_budget`, so
+    ``set_memory_budget(get_memory_budget())`` restores the current budget.
 
     Args:
         unit: Unit of the returned value. Accepts the same names as
-            :func:`set_memory_budget`. Defaults to bytes.
+            :func:`set_memory_budget`. Defaults to megabytes.
 
     Returns:
         The budget set by the most recent :func:`set_memory_budget` call, or

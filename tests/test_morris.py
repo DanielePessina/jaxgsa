@@ -14,7 +14,7 @@ import pytest
 from jaxgsa import JaxgsaWarning
 from jaxgsa._core.invalid import InvalidUnit
 from jaxgsa.benchmarks import ishigami, linear, sobol_g
-from jaxgsa.morris import analyze, indices, sample
+from jaxgsa.morris import MorrisIndices, analyze, indices, sample
 from jaxgsa.problem import GaussianInputSpec, Problem
 
 UNIT_PROBLEM = Problem(names=("x1", "x2", "x3"), bounds=((0, 1), (0, 1), (0, 1)))
@@ -225,7 +225,7 @@ class TestGaussianInputs:
         res = analyze(sr, Y)
         np.testing.assert_allclose(np.asarray(res.mu), [3.0, 5.0], rtol=1e-5)
 
-    def test_to_physical_units_raises(self):
+    def test_to_physical_units_needs_finite_bounds(self):
         sr = sample(self.PROBLEM, n_trajectories=10, seed=3, verbose=False)
         res = analyze(sr, jnp.asarray(np.sum(sr.samples, axis=1)))
         with pytest.raises(ValueError, match="finite uniform bounds"):
@@ -459,10 +459,10 @@ class TestPhysicalUnits:
             rtol=1e-6,
         )
 
-    def test_double_call_raises(self, ishigami_morris_result):
+    def test_double_call_returns_self(self, ishigami_morris_result):
         _, _, res = ishigami_morris_result
-        with pytest.raises(ValueError, match="already in physical units"):
-            res.to_physical_units().to_physical_units()
+        phys = res.to_physical_units()
+        assert phys.to_physical_units() is phys
 
 
 class TestThinningWarning:
@@ -801,3 +801,31 @@ class TestIndicesCore:
         assert np.isfinite(float(grad))
         np.testing.assert_allclose(float(grad), float(eager), rtol=1e-10)
         np.testing.assert_allclose(float(grad), float(fd), rtol=1e-6)
+
+
+class TestInterfaceCleanup:
+    def test_first_argument_must_be_morris_samples(self):
+        for fn in (analyze, indices):
+            with pytest.raises(TypeError, match="takes the MorrisSamples.*not a Problem"):
+                fn(cast(Any, UNIT_PROBLEM), jnp.zeros(8))
+
+    def test_indices_is_a_named_tuple(self):
+        sr = sample(UNIT_PROBLEM, n_trajectories=8, seed=1, verbose=False)
+        Y = jnp.asarray(np.sum(sr.samples, axis=1))
+        out = indices(sr, Y)
+        assert isinstance(out, MorrisIndices)
+        mu, mu_star, sigma = out
+        np.testing.assert_allclose(out.mu_star, mu_star)
+
+    def test_to_physical_units_is_idempotent(self):
+        problem = Problem(names=("a", "b"), bounds=((0, 2), (0, 4)))
+        sr = sample(problem, n_trajectories=8, seed=1, verbose=False)
+        res = analyze(sr, jnp.asarray(np.sum(sr.samples, axis=1)), verbose=False)
+        phys = res.to_physical_units()
+        assert phys.to_physical_units() is phys
+
+    def test_samples_repr_is_compact(self):
+        sr = sample(UNIT_PROBLEM, n_trajectories=8, seed=1, verbose=False)
+        text = repr(sr)
+        assert "n_runs=" in text and "n_trajectories=8" in text
+        assert "array" not in text and len(text) < 200

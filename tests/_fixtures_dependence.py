@@ -46,7 +46,7 @@ def hdmr_ishigami_xy() -> tuple[jax.Array, jax.Array]:
 
 @pytest.fixture(scope="session")
 def hdmr_by_order(hdmr_ishigami_xy):
-    """HDMR fits (m=2) of ``hdmr_ishigami_xy`` at ``maxorder`` 1, 2 and 3, keyed by order.
+    """HDMR fits (n_intervals=2) of ``hdmr_ishigami_xy`` at ``order`` 1, 2 and 3, keyed by order.
 
     The order-2 fit is built with every ``JaxgsaWarning`` promoted to an
     error. That fit is a complete decomposition, so it must stay silent, and
@@ -54,10 +54,10 @@ def hdmr_by_order(hdmr_ishigami_xy):
     """
     X, Y = hdmr_ishigami_xy
     fits = {}
-    for maxorder in (1, 2, 3):
+    for order in (1, 2, 3):
         with warnings.catch_warnings():
-            warnings.simplefilter("error" if maxorder == 2 else "ignore", JaxgsaWarning)
-            fits[maxorder] = analyze_hdmr(ishigami.PROBLEM, X, Y, maxorder=maxorder, m=2)
+            warnings.simplefilter("error" if order == 2 else "ignore", JaxgsaWarning)
+            fits[order] = analyze_hdmr(ishigami.PROBLEM, X, Y, order=order, n_intervals=2)
     return fits
 
 
@@ -97,7 +97,7 @@ def lg_corr_vkoga():
 @pytest.fixture(scope="session")
 def lg_corr_kucherenko():
     """Kucherenko design (base 4096, seed 1) and analysis of the same model."""
-    design = jaxgsa.kucherenko.sample(CORRELATED_PROBLEM, 4096, seed=1, verbose=False)
+    design = jaxgsa.kucherenko.sample(CORRELATED_PROBLEM, base_n=4096, seed=1, verbose=False)
     return jaxgsa.kucherenko.analyze(design, design.samples @ A_COEF, verbose=False)
 
 
@@ -109,5 +109,5 @@ def kuch_ishigami_512():
     """An evaluated Kucherenko design on Ishigami (independent inputs), base 512."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", JaxgsaWarning)
-        design = jaxgsa.kucherenko.sample(ishigami.PROBLEM, 512, seed=2, verbose=False)
+        design = jaxgsa.kucherenko.sample(ishigami.PROBLEM, base_n=512, seed=2, verbose=False)
     return design, np.asarray(ishigami.evaluate(design.samples))

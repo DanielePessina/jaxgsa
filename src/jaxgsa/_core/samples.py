@@ -128,7 +128,7 @@ def _unsaved_sampler(
     raise ValueError(
         "This problem was loaded from a file. The file does not store the "
         "custom sampler, so it cannot draw new rows. Attach it again with "
-        "problem.with_sampler(f, dimension=k)."
+        "problem.with_sampler(f, sampler_dimension=k)."
     )
 
 
@@ -240,7 +240,7 @@ class UniqueDesignSamples:
         """
         if Y.shape[0] != self.n_runs:
             raise ValueError(
-                f"Y.shape[0] must match sampling_result.n_runs ({self.n_runs}), got {Y.shape[0]}"
+                f"Y.shape[0] must match samples.n_runs ({self.n_runs}), got {Y.shape[0]}"
             )
         # expanded_to_unique[i] gives the unique-row index for expanded
         # position i. The map was warmed at construction (see

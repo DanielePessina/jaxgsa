@@ -19,8 +19,9 @@ the end with :meth:`Draws.to_physical` (Kucherenko designs) or
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from operator import index as _as_index
-from typing import Protocol
+from typing import Any, Protocol
 
 import jax.numpy as jnp
 import numpy as np
@@ -41,7 +42,7 @@ from jaxgsa._core.copula import (
     latent_to_physical,
 )
 from jaxgsa._core.transforms import cdf_to_unit_interval
-from jaxgsa.problem import Problem
+from jaxgsa.problem import CategoricalSpec, InputSpec, Problem, UniformSpec
 
 # Keeps the probit and the marginal inverse CDFs finite at exact 0 and 1.
 _UNIT_CLIP = 1e-12
@@ -51,7 +52,7 @@ class InputSampler(Protocol):
     """Transform uniform points into joint or conditional physical input rows.
 
     Attach one to a problem with ``Problem(..., sampler=f)`` or
-    ``problem.with_sampler(f, dimension=k)``. jaxgsa supplies the uniform
+    ``problem.with_sampler(f, sampler_dimension=k)``. jaxgsa supplies the uniform
     points and assembles every design. The sampler only maps points to rows.
 
     jaxgsa may request any sorted subset of fixed columns. The three most
@@ -69,10 +70,16 @@ class InputSampler(Protocol):
     given the kept ones.
 
     The return value must have shape ``(n, D)``, hold finite real values in
-    ``problem.names`` order, and copy the fixed columns exactly. The sampler
-    must be deterministic: the same arguments give the same rows. It must be
-    a conditional-quantile map from uniform points to rows, that is, an
-    inverse Rosenblatt transform. Do not use rejection sampling or MCMC.
+    ``problem.names`` order, and copy the fixed columns exactly. Every value
+    must lie in the support of its declared marginal: inside ``[low, high]``
+    for a uniform or truncated Gaussian input, and an integer level code in
+    ``0 .. L-1`` for a categorical input. A continuous value may overshoot a
+    bound by float32 rounding (a few units in the last place); jaxgsa clips
+    it to the bound. Anything further out raises. An unbounded Gaussian
+    input has no limit. The sampler must be deterministic: the same arguments give
+    the same rows. It must be a conditional-quantile map from uniform points
+    to rows, that is, an inverse Rosenblatt transform. Do not use rejection
+    sampling or MCMC.
     Then the same uniform points under different conditioning give coupled
     draws, and jaxgsa relies on this. jaxgsa passes copies, so the sampler may
     modify its arguments.
@@ -138,6 +145,77 @@ def _sample_array(values: npt.ArrayLike, shape: tuple[int, int], name: str) -> n
     return result
 
 
+# A float32 sampler can overshoot a bound by one unit in the last place:
+# float32(0.3) > 0.3. Allow a few float32 ulps, relative to the bound's size.
+_SUPPORT_RTOL = 4 * float(np.finfo(np.float32).eps)
+
+
+def _check_support(
+    rows: np.ndarray, input_specs: Sequence[InputSpec], names: Sequence[str]
+) -> None:
+    """Raise if any entry of ``rows`` lies outside its marginal's support.
+
+    A continuous value within float32 rounding of a bound is clipped to it in
+    place, so a sampler written in single precision is not refused for an
+    overshoot of one unit in the last place. Categorical codes are checked
+    exactly. One min/max pass finds the columns that need a closer look, so
+    valid output costs two reductions and no per-row work.
+    """
+    if rows.shape[0] == 0:
+        return
+    low = np.full(len(input_specs), -np.inf)
+    high = np.full(len(input_specs), np.inf)
+    levels: dict[int, int] = {}
+    for i, spec in enumerate(input_specs):
+        if isinstance(spec, CategoricalSpec):
+            low[i], high[i] = 0.0, len(spec.probs) - 1
+            levels[i] = len(spec.probs)
+        else:
+            if spec.low is not None:
+                low[i] = spec.low
+            if spec.high is not None:
+                high[i] = spec.high
+    continuous = [i for i in range(len(input_specs)) if i not in levels]
+    if continuous:
+        lo, hi = low[continuous], high[continuous]
+        scale = np.maximum(
+            1.0,
+            np.fmax(
+                np.abs(np.where(np.isfinite(lo), lo, 0.0)),
+                np.abs(np.where(np.isfinite(hi), hi, 0.0)),
+            ),
+        )
+        tol = _SUPPORT_RTOL * scale
+        rows[:, continuous] = np.where(
+            (rows[:, continuous] < lo) & (rows[:, continuous] >= lo - tol), lo, rows[:, continuous]
+        )
+        rows[:, continuous] = np.where(
+            (rows[:, continuous] > hi) & (rows[:, continuous] <= hi + tol), hi, rows[:, continuous]
+        )
+    bad = np.flatnonzero((rows.min(axis=0) < low) | (rows.max(axis=0) > high))
+    for i in levels:
+        if i not in bad and np.any(rows[:, i] != np.rint(rows[:, i])):
+            bad = np.sort(np.append(bad, i))
+    if bad.size == 0:
+        return
+    i = int(bad[0])
+    spec = input_specs[i]
+    column = rows[:, i]
+    if i in levels:
+        wrong = (column < 0) | (column > levels[i] - 1) | (column != np.rint(column))
+        support = f"categorical, integer codes 0 to {levels[i] - 1}"
+    else:
+        wrong = (column < low[i]) | (column > high[i])
+        kind = "uniform" if isinstance(spec, UniformSpec) else "truncated Gaussian"
+        support = f"{kind} on [{low[i]:g}, {high[i]:g}]"
+    first = int(np.flatnonzero(wrong)[0])
+    raise ValueError(
+        f"sampler returned values outside the support of {names[i]!r} ({support}): "
+        f"{int(wrong.sum())} rows, first at row {first} of this sampler call, "
+        f"value {column[first]:g}"
+    )
+
+
 def transform_samples(
     sampler: InputSampler,
     uniform_points: np.ndarray,
@@ -145,6 +223,8 @@ def transform_samples(
     *,
     conditioning_rows: np.ndarray | None = None,
     fixed_indices: tuple[int, ...] = (),
+    input_specs: Sequence[InputSpec] | None = None,
+    names: Sequence[str] | None = None,
 ) -> np.ndarray:
     """Call a user sampler and check what it returns.
 
@@ -154,13 +234,19 @@ def transform_samples(
         n_params: Number of physical input columns ``D``.
         conditioning_rows: ``(n, D)`` physical rows with the fixed values.
         fixed_indices: Distinct columns the sampler must keep exactly.
+        input_specs: Marginal spec of each column. When given, every returned
+            value must lie in its marginal's support. ``None`` skips that
+            check.
+        names: Parameter names for the error message. Defaults to
+            ``x0, x1, ...``.
 
     Returns:
         Owned finite float64 rows of shape ``(n, D)``.
 
     Raises:
         ValueError: If the sampler returns the wrong shape, non-finite or
-            non-real values, or changes a fixed column.
+            non-real values, values outside a marginal's support, or changes
+            a fixed column.
     """
     shape = (uniform_points.shape[0], n_params)
     original = None
@@ -179,6 +265,8 @@ def transform_samples(
         result[:, fixed_indices], original[:, fixed_indices]
     ):
         raise ValueError("sampler must copy the fixed columns of conditioning_rows exactly")
+    if input_specs is not None:
+        _check_support(result, input_specs, names or [f"x{i}" for i in range(n_params)])
     return result
 
 
@@ -286,12 +374,12 @@ class GaussianDraws:
         R = problem.correlation
         self.problem = problem
         self.plan: _ConditionalPlan = build_conditional_plan(
-            independent_correlation(problem.num_vars) if R is None else R
+            independent_correlation(problem.n_params) if R is None else R
         )
-        self.dimension = problem.num_vars
-        self.rest_dimension = problem.num_vars - 1
+        self.dimension = problem.n_params
+        self.rest_dimension = problem.n_params - 1
         self.self_dimension = 1
-        self._correlation = independent_correlation(problem.num_vars) if R is None else R
+        self._correlation = independent_correlation(problem.n_params) if R is None else R
         self._subset_plans: dict[tuple[int, ...], _SubsetPlan] = {}
 
     @staticmethod
@@ -414,9 +502,13 @@ class CustomDraws:
         self.rest_dimension: int = dimension
         self.self_dimension: int = dimension
 
+    def _checks(self) -> dict[str, Any]:
+        """Return the support-check keywords for :func:`transform_samples`."""
+        return {"input_specs": self.problem.input_specs, "names": self.problem.names}
+
     def joint(self, u: np.ndarray) -> np.ndarray:
         """Return joint physical rows."""
-        return transform_samples(self.sampler, u, self.problem.num_vars)
+        return transform_samples(self.sampler, u, self.problem.n_params, **self._checks())
 
     def joint_led_by(self, u: np.ndarray, index: int) -> np.ndarray:
         """Return :meth:`joint` rows; a custom sampler fixes its own column map."""
@@ -426,19 +518,29 @@ class CustomDraws:
     def rest_given_self(self, u: np.ndarray, rows: np.ndarray, index: int) -> np.ndarray:
         """Keep ``x_i`` and redraw the rest through the sampler."""
         return transform_samples(
-            self.sampler, u, self.problem.num_vars, conditioning_rows=rows, fixed_indices=(index,)
+            self.sampler,
+            u,
+            self.problem.n_params,
+            conditioning_rows=rows,
+            fixed_indices=(index,),
+            **self._checks(),
         )
 
     def self_given_rest(self, u: np.ndarray, rows: np.ndarray, index: int) -> np.ndarray:
         """Keep ``x_-i`` and redraw ``x_i`` through the sampler."""
-        fixed = tuple(j for j in range(self.problem.num_vars) if j != index)
+        fixed = tuple(j for j in range(self.problem.n_params) if j != index)
         return transform_samples(
-            self.sampler, u, self.problem.num_vars, conditioning_rows=rows, fixed_indices=fixed
+            self.sampler,
+            u,
+            self.problem.n_params,
+            conditioning_rows=rows,
+            fixed_indices=fixed,
+            **self._checks(),
         )
 
     def free_dimension(self, fixed: tuple[int, ...]) -> int:
         """Return ``dimension``; a custom sampler always reads every column."""
-        check_fixed(fixed, self.problem.num_vars)
+        check_fixed(fixed, self.problem.n_params)
         return self.dimension
 
     def free_given_fixed(
@@ -448,13 +550,14 @@ class CustomDraws:
 
         An empty ``fixed`` is a joint draw: the sampler gets no rows.
         """
-        fixed = check_fixed(fixed, self.problem.num_vars)
+        fixed = check_fixed(fixed, self.problem.n_params)
         return transform_samples(
             self.sampler,
             u,
-            self.problem.num_vars,
+            self.problem.n_params,
             conditioning_rows=rows if fixed else None,
             fixed_indices=fixed,
+            **self._checks(),
         )
 
     def to_physical(self, rows: np.ndarray) -> np.ndarray:

@@ -58,7 +58,7 @@ def salib_class_count(n_samples: int) -> int:
     salib_delta.bias_reduced_delta = spy
     try:
         rng = np.random.default_rng(0)
-        problem = {"num_vars": 1, "names": ["x"], "bounds": [[0.0, 1.0]]}
+        problem = {"n_params": 1, "names": ["x"], "bounds": [[0.0, 1.0]]}
         X = rng.random((n_samples, 1))
         Y = X[:, 0].copy()
         salib_delta.analyze(

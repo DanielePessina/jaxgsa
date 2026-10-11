@@ -57,7 +57,7 @@ def _cost_arrays(a: np.ndarray, R: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 @pytest.fixture(scope="module")
 def design4():
-    return kucherenko.sample(PROBLEM4, N, subsets="all", seed=3, verbose=False)
+    return kucherenko.sample(PROBLEM4, base_n=N, subsets="all", seed=3, verbose=False)
 
 
 @pytest.fixture(scope="module")
@@ -95,13 +95,13 @@ def test_block_b_is_an_independent_joint_draw(design4):
 
 def test_unknown_subsets_mode_is_refused():
     with pytest.raises(ValueError, match="subsets"):
-        kucherenko.sample(PROBLEM3, 64, subsets="some", verbose=False)  # type: ignore[arg-type]
+        kucherenko.sample(PROBLEM3, base_n=64, subsets="some", verbose=False)  # type: ignore[arg-type]
 
 
 def test_more_than_twelve_parameters_are_refused():
     problem = Problem.from_dict({f"x{i}": (0.0, 1.0) for i in range(13)})
     with pytest.raises(ValueError, match=r"2\^13") as excinfo:
-        kucherenko.sample(problem, 1024, subsets="all", verbose=False)
+        kucherenko.sample(problem, base_n=1024, subsets="all", verbose=False)
     message = str(excinfo.value)
     assert str(1024 * 2**13) in message
     assert "given data" in message
@@ -110,11 +110,11 @@ def test_more_than_twelve_parameters_are_refused():
 def test_one_parameter_is_refused():
     problem = Problem.from_dict({"x": (0.0, 1.0)})
     with pytest.raises(ValueError, match="at least 2"):
-        kucherenko.sample(problem, 64, subsets="all", verbose=False)
+        kucherenko.sample(problem, base_n=64, subsets="all", verbose=False)
 
 
 def test_singleton_design_refuses_shapley_and_pme():
-    design = kucherenko.sample(PROBLEM3, 256, seed=1, verbose=False)
+    design = kucherenko.sample(PROBLEM3, base_n=256, seed=1, verbose=False)
     res = kucherenko.analyze(design, jnp.asarray(design.samples @ A_COEF), verbose=False)
     assert res.closed is None and res.subset_total is None and res.subsets is None
     for call in (res.shapley, res.pme):
@@ -123,7 +123,7 @@ def test_singleton_design_refuses_shapley_and_pme():
 
 
 def test_default_design_is_unchanged():
-    design = kucherenko.sample(PROBLEM3, 256, seed=1, verbose=False)
+    design = kucherenko.sample(PROBLEM3, base_n=256, seed=1, verbose=False)
     assert design.subsets == "singletons"
     assert design.n_blocks == 7
     assert design.n_runs == 256 * 7
@@ -131,7 +131,7 @@ def test_default_design_is_unchanged():
 
 def test_default_estimator_matches_a_plain_numpy_formula():
     """S1 and ST on the default design equal the textbook single-loop sums."""
-    design = kucherenko.sample(PROBLEM3, 1024, seed=2, verbose=False)
+    design = kucherenko.sample(PROBLEM3, base_n=1024, seed=2, verbose=False)
     y = design.samples @ A_COEF
     res = kucherenko.analyze(design, jnp.asarray(y), verbose=False)
     n, D = 1024, 3
@@ -207,7 +207,7 @@ def test_pme_matches_the_closed_form(result4):
 
 
 def test_d3_design_and_shapley():
-    design = kucherenko.sample(PROBLEM3, N, subsets="all", seed=4, verbose=False)
+    design = kucherenko.sample(PROBLEM3, base_n=N, subsets="all", seed=4, verbose=False)
     res = kucherenko.analyze(design, jnp.asarray(design.samples @ A_COEF), verbose=False)
     _, total = analytic_costs(A_COEF, R_GAUSS)
     np.testing.assert_allclose(
@@ -219,7 +219,7 @@ def test_d3_design_and_shapley():
 def test_all_design_first_order_and_total_match_the_closed_form():
     from _linear_gaussian import analytic_indices
 
-    design = kucherenko.sample(PROBLEM3, N, subsets="all", seed=4, verbose=False)
+    design = kucherenko.sample(PROBLEM3, base_n=N, subsets="all", seed=4, verbose=False)
     res = kucherenko.analyze(design, jnp.asarray(design.samples @ A_COEF), verbose=False)
     S_TC, S_TU, _ = analytic_indices(A_COEF, R_GAUSS)
     np.testing.assert_allclose(np.asarray(res.S1), S_TC, atol=0.01)
@@ -233,7 +233,7 @@ def test_exogenous_input_gets_zero_pme_and_positive_shapley():
     rho = 0.8
     R = np.array([[1.0, rho], [rho, 1.0]])
     problem = _gauss_problem(2, R)
-    design = kucherenko.sample(problem, 4096, subsets="all", seed=5, verbose=False)
+    design = kucherenko.sample(problem, base_n=4096, subsets="all", seed=5, verbose=False)
     Y = jnp.asarray(design.samples[:, 0])  # Y = X1; X2 is exogenous
     res = kucherenko.analyze(design, Y, verbose=False)
     pme = np.asarray(res.pme().Sh)
@@ -248,7 +248,9 @@ def test_exogenous_input_gets_zero_pme_and_positive_shapley():
 def test_exogenous_input_among_three():
     """X3 is independent and unused, X2 is correlated with X1 and unused."""
     R = np.array([[1.0, 0.7, 0.0], [0.7, 1.0, 0.0], [0.0, 0.0, 1.0]])
-    design = kucherenko.sample(_gauss_problem(3, R), 2048, subsets="all", seed=6, verbose=False)
+    design = kucherenko.sample(
+        _gauss_problem(3, R), base_n=2048, subsets="all", seed=6, verbose=False
+    )
     res = kucherenko.analyze(design, jnp.asarray(design.samples[:, 0] + 0.0), verbose=False)
     pme = np.asarray(res.pme().Sh)
     np.testing.assert_array_equal(pme[1:], [0.0, 0.0])
@@ -337,7 +339,7 @@ def test_nonfinite_cost_gives_nan():
 
 
 def test_shapley_interval_needs_kept_replicates():
-    design = kucherenko.sample(PROBLEM3, 1024, subsets="all", seed=7, verbose=False)
+    design = kucherenko.sample(PROBLEM3, base_n=1024, subsets="all", seed=7, verbose=False)
     Y = jnp.asarray(design.samples @ A_COEF)
     plain = kucherenko.analyze(design, Y, n_bootstrap=20, key=jax.random.key(0), verbose=False)
     assert plain.closed_conf is not None and plain.closed_conf.shape == (2, 7)
@@ -360,7 +362,7 @@ def test_shapley_interval_needs_kept_replicates():
 
 
 def test_multi_output_shapes_and_aggregate():
-    design = kucherenko.sample(PROBLEM3, 2048, subsets="all", seed=8, verbose=False)
+    design = kucherenko.sample(PROBLEM3, base_n=2048, subsets="all", seed=8, verbose=False)
     a2 = np.array([0.3, -1.0, 2.0])
     Y = jnp.asarray(np.stack([design.samples @ A_COEF, design.samples @ a2], axis=1))
     res = kucherenko.analyze(design, Y, verbose=False)
@@ -386,14 +388,14 @@ def test_multi_output_shapes_and_aggregate():
 
 
 def test_aggregate_without_subsets_is_unchanged():
-    design = kucherenko.sample(PROBLEM3, 512, seed=1, verbose=False)
+    design = kucherenko.sample(PROBLEM3, base_n=512, seed=1, verbose=False)
     Y = jnp.asarray(np.stack([design.samples @ A_COEF, design.samples[:, 0]], axis=1))
     agg = kucherenko.analyze(design, Y, verbose=False).aggregate()
     assert agg.closed is None and agg.S1.shape == (1, 3)
 
 
 def test_invalid_rows_drop_whole_base_points():
-    design = kucherenko.sample(PROBLEM3, 256, subsets="all", seed=1, verbose=False)
+    design = kucherenko.sample(PROBLEM3, base_n=256, subsets="all", seed=1, verbose=False)
     y = np.asarray(design.samples @ A_COEF)
     y[300] = np.nan  # a row of block 1 (block B), base point 44
     with pytest.raises(ValueError):
@@ -408,7 +410,7 @@ def test_invalid_rows_drop_whole_base_points():
 
 
 def test_subset_design_round_trips(tmp_path):
-    design = kucherenko.sample(PROBLEM3, 64, subsets="all", seed=1, verbose=False)
+    design = kucherenko.sample(PROBLEM3, base_n=64, subsets="all", seed=1, verbose=False)
     design.save(tmp_path / "design")
     back = kucherenko.KucherenkoSamples.load(tmp_path / "design.npz")
     assert back.subsets == "all"
@@ -419,7 +421,7 @@ def test_subset_design_round_trips(tmp_path):
 
 
 def test_singleton_design_round_trip_keeps_the_default(tmp_path):
-    design = kucherenko.sample(PROBLEM3, 64, seed=1, verbose=False)
+    design = kucherenko.sample(PROBLEM3, base_n=64, seed=1, verbose=False)
     design.save(tmp_path / "design")
     assert kucherenko.KucherenkoSamples.load(tmp_path / "design.npz").subsets == "singletons"
 
@@ -448,7 +450,7 @@ def test_result_with_subsets_round_trips_through_netcdf(result4, tmp_path):
 
 
 def test_result_without_subsets_exports_as_before():
-    design = kucherenko.sample(PROBLEM3, 64, seed=1, verbose=False)
+    design = kucherenko.sample(PROBLEM3, base_n=64, seed=1, verbose=False)
     res = kucherenko.analyze(design, jnp.asarray(design.samples @ A_COEF), verbose=False)
     assert "closed" not in res.to_dataset()
     assert "closed" not in repr(res)
@@ -459,10 +461,10 @@ def test_result_without_subsets_exports_as_before():
 
 def test_custom_gaussian_sampler_gives_the_same_shapley():
     sampler = gaussian_sampler(R_SUBSET4)
-    custom = PROBLEM4.with_correlation(None).with_sampler(sampler, dimension=4)
+    custom = PROBLEM4.with_correlation(None).with_sampler(sampler, sampler_dimension=4)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        design = kucherenko.sample(custom, N, subsets="all", seed=9, verbose=False)
+        design = kucherenko.sample(custom, base_n=N, subsets="all", seed=9, verbose=False)
     assert design.dependence == "custom"
     res = kucherenko.analyze(design, jnp.asarray(design.samples @ A_SUBSET4), verbose=False)
     _, total = analytic_costs(A_SUBSET4, R_SUBSET4)
@@ -474,8 +476,8 @@ def test_custom_gaussian_sampler_gives_the_same_shapley():
 
 def test_custom_and_copula_designs_agree_within_error(result4):
     sampler = gaussian_sampler(R_SUBSET4)
-    custom = PROBLEM4.with_correlation(None).with_sampler(sampler, dimension=4)
-    design = kucherenko.sample(custom, N, subsets="all", seed=12, verbose=False)
+    custom = PROBLEM4.with_correlation(None).with_sampler(sampler, sampler_dimension=4)
+    design = kucherenko.sample(custom, base_n=N, subsets="all", seed=12, verbose=False)
     res = kucherenko.analyze(design, jnp.asarray(design.samples @ A_SUBSET4), verbose=False)
     np.testing.assert_allclose(
         np.asarray(res.shapley().Sh), np.asarray(result4.shapley().Sh), atol=0.02
@@ -527,6 +529,6 @@ def test_pme_matches_r_pme_knn_loosely():
         packages=("sensitivity", "gtools", "RANN"),
         outputs=("pme",),
     )
-    design = kucherenko.sample(PROBLEM3, 8192, subsets="all", seed=2, verbose=False)
+    design = kucherenko.sample(PROBLEM3, base_n=8192, subsets="all", seed=2, verbose=False)
     res = kucherenko.analyze(design, jnp.asarray(design.samples @ A_COEF), verbose=False)
     np.testing.assert_allclose(np.asarray(res.pme().Sh), out["pme"].ravel(), atol=0.08)

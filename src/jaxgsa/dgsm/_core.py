@@ -563,8 +563,8 @@ def bounds_from_moments(
     problem: Problem,
     *,
     nu: Array,
-    sigma: Array,
-    var_y: Array,
+    mu: Array,
+    variance: Array,
     standardize_outputs: bool,
 ) -> tuple[Array, Array, Array, Array, Array]:
     """Turn the derivative moments into the two Sobol-index bounds.
@@ -574,7 +574,7 @@ def bounds_from_moments(
 
     - upper (Poincare / Sobol-Kucherenko): ``ST_i <= C_i * nu_i / Var(Y)``,
       which holds for every marginal this package supports.
-    - lower: ``Var(x_i) * sigma_i^2 / Var(Y)``. Kucherenko & Song (2016),
+    - lower: ``Var(x_i) * mu_i^2 / Var(Y)``. Kucherenko & Song (2016),
       Theorem 6 (Section 4.1, eq. 31), prove ``ST_i >=`` this for a Gaussian
       marginal only. On a uniform or truncated marginal it is an estimate.
       It is exact for a linear response and can overshoot ``ST_i`` for a
@@ -591,14 +591,14 @@ def bounds_from_moments(
             and the marginal variances. Not an array, so reading it is a host
             operation on static data and stays traceable.
         nu: ``E[(df/dx_i)^2]``, shape ``(T, K, D)``.
-        sigma: ``E[df/dx_i]``, shape ``(T, K, D)``.
-        var_y: Output variance per slice, shape ``(T, K)``.
+        mu: ``E[df/dx_i]``, shape ``(T, K, D)``.
+        variance: Output variance per slice, shape ``(T, K)``.
         standardize_outputs: Whether to report the moments for the
             standardized output ``(Y - mean) / std``. The map is affine, so
             the standardized moments are the ones already computed, rescaled.
 
     Returns:
-        ``(nu, sigma, upper, lower, var_y)``, the first four shaped
+        ``(nu, mu, upper, lower, variance)``, the first four shaped
         ``(T, K, D)`` and the last ``(T, K)``.
     """
     if standardize_outputs:
@@ -607,11 +607,11 @@ def bounds_from_moments(
         # differentiating a wrapped function leaves the autodiff sweep alone.
         # Both bounds are ratios of quantities that scale the same way, so
         # they come out unchanged, which the tests assert.
-        y_std = jnp.sqrt(var_y)  # (T, K)
+        y_std = jnp.sqrt(variance)  # (T, K)
         safe_scale = jnp.where(y_std == 0, jnp.ones_like(y_std), y_std)
-        sigma = sigma / safe_scale[..., None]
+        mu = mu / safe_scale[..., None]
         nu = nu / (safe_scale**2)[..., None]
-        var_y = var_y / safe_scale**2
+        variance = variance / safe_scale**2
 
     # Per-axis constants: C for the Poincare upper bound, Var for the lower.
     C, Var = axis_constants(problem)
@@ -620,9 +620,9 @@ def bounds_from_moments(
 
     # A constant output slice has zero variance; map it to NaN bounds rather
     # than dividing by zero.
-    denom = jnp.where(var_y == 0, jnp.nan, var_y)[..., None]  # (T, K, 1)
+    denom = jnp.where(variance == 0, jnp.nan, variance)[..., None]  # (T, K, 1)
 
     # The (D,) constants broadcast against (T, K, D) on the trailing axis.
     upper = C_jnp * nu / denom
-    lower = Var_jnp * sigma**2 / denom
-    return nu, sigma, upper, lower, var_y
+    lower = Var_jnp * mu**2 / denom
+    return nu, mu, upper, lower, variance

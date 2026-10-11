@@ -38,32 +38,32 @@ FIRST_ORDER_DESIGN_ESTIMATORS: list[Estimator] = [
 ]
 
 
-def _analyze_with_bad_name(sampling_result, Y, name: str):
+def _analyze_with_bad_name(samples, Y, name: str):
     """Call ``analyze`` with a name the type checker would never allow.
 
     The cast is the point. A bad ``estimator=`` is a runtime concern, and a
     static type checker would refuse the literal before the library ever saw
     it, so these tests would prove nothing about the library.
     """
-    return jaxgsa.sobol.analyze(sampling_result, Y, estimator=cast("Estimator", name))
+    return jaxgsa.sobol.analyze(samples, Y, estimator=cast("Estimator", name))
 
 
-def _indices_with_bad_name(sampling_result, Y, name: str):
+def _indices_with_bad_name(samples, Y, name: str):
     """Call ``indices`` with a name the type checker would never allow."""
-    return jaxgsa.sobol.indices(sampling_result, Y, estimator=cast("Estimator", name))
+    return jaxgsa.sobol.indices(samples, Y, estimator=cast("Estimator", name))
 
 
 @pytest.fixture(scope="module")
 def ishigami_design():
     """A second-order Ishigami design and its outputs, shared by the module."""
-    sr = jaxgsa.sobol.sample(ishigami.PROBLEM, n_samples=1, base_n=4096, seed=11, verbose=False)
+    sr = jaxgsa.sobol.sample(ishigami.PROBLEM, base_n=4096, seed=11, verbose=False)
     return sr, ishigami.evaluate(jnp.asarray(sr.samples))
 
 
 @pytest.fixture(scope="module")
 def sobol_g_design():
     """A second-order Sobol-G design and its outputs, shared by the module."""
-    sr = jaxgsa.sobol.sample(sobol_g.PROBLEM, n_samples=1, base_n=4096, seed=13, verbose=False)
+    sr = jaxgsa.sobol.sample(sobol_g.PROBLEM, base_n=4096, seed=13, verbose=False)
     return sr, sobol_g.evaluate(jnp.asarray(sr.samples))
 
 
@@ -168,9 +168,7 @@ class TestStructuralProperties:
         """
         crossed_elsewhere = False
         for seed in range(12):
-            sr = jaxgsa.sobol.sample(
-                sobol_g.PROBLEM, n_samples=1, base_n=32, seed=seed, verbose=False
-            )
+            sr = jaxgsa.sobol.sample(sobol_g.PROBLEM, base_n=32, seed=seed, verbose=False)
             Y = sobol_g.evaluate(jnp.asarray(sr.samples))
             S1, ST, _ = jaxgsa.sobol.indices(sr, Y, estimator="azzini-rosati")
             assert np.all(np.asarray(S1) <= np.asarray(ST) + 1e-6)
@@ -183,9 +181,7 @@ class TestStructuralProperties:
     def test_jansen_total_order_is_never_negative(self, estimator):
         """A mean of squares cannot be negative, however small the sample."""
         for seed in range(12):
-            sr = jaxgsa.sobol.sample(
-                sobol_g.PROBLEM, n_samples=1, base_n=16, seed=seed, verbose=False
-            )
+            sr = jaxgsa.sobol.sample(sobol_g.PROBLEM, base_n=16, seed=seed, verbose=False)
             Y = sobol_g.evaluate(jnp.asarray(sr.samples))
             _, ST, _ = jaxgsa.sobol.indices(sr, Y, estimator=estimator)
             assert np.all(np.asarray(ST) >= 0.0)
@@ -207,9 +203,7 @@ class TestStructuralProperties:
         """
         seen_negative = 0
         for seed in range(8):
-            sr = jaxgsa.sobol.sample(
-                ishigami.PROBLEM, n_samples=1, base_n=8192, seed=seed, verbose=False
-            )
+            sr = jaxgsa.sobol.sample(ishigami.PROBLEM, base_n=8192, seed=seed, verbose=False)
             Y = ishigami.evaluate(jnp.asarray(sr.samples))
             result = jaxgsa.sobol.analyze(sr, Y, estimator=DEFAULT_ESTIMATOR)
             seen_negative += int(np.asarray(result.S1)[2] < 0.0)
@@ -253,7 +247,6 @@ class TestValidation:
         """It reads the BA blocks, and an N(D+2) design has none."""
         sr = jaxgsa.sobol.sample(
             ishigami.PROBLEM,
-            n_samples=1,
             base_n=64,
             seed=3,
             verbose=False,
@@ -275,7 +268,7 @@ def test_indices_stays_transformable(estimator):
     would show.
     """
     problem = ishigami.PROBLEM
-    sr = jaxgsa.sobol.sample(problem, n_samples=1, base_n=64, seed=5, verbose=False)
+    sr = jaxgsa.sobol.sample(problem, base_n=64, seed=5, verbose=False)
     theta = {name: {"low": float(-np.pi), "high": float(np.pi)} for name in problem.names}
 
     def first_index(theta):

@@ -27,7 +27,7 @@ from jaxgsa._core.samples import (
     _problem_to_meta,
     _save_target,
 )
-from jaxgsa._core.sampling import _transform_samples
+from jaxgsa._core.sampling import _transform_samples, check_seed
 from jaxgsa._core.validation import _raise_categorical_design, _raise_correlated_design
 from jaxgsa.problem import Problem
 
@@ -80,7 +80,7 @@ class EFASTSamples:
         """
         if self.M < 1:
             raise ValueError(f"M must be >= 1, got {self.M}")
-        D = self.problem.num_vars
+        D = self.problem.n_params
         _check_n_per_curve(D, self.M, self.n_per_curve)
         expected = (self.n_per_curve * D, D)
         if self.samples.shape != expected:
@@ -89,10 +89,17 @@ class EFASTSamples:
                 f"(n_per_curve * D, D) = {expected}"
             )
 
+    def __repr__(self) -> str:
+        """Return a compact summary with no arrays."""
+        return (
+            f"EFASTSamples(n_runs={self.n_runs}, n_params={self.problem.n_params}, "
+            f"n_per_curve={self.n_per_curve}, M={self.M})"
+        )
+
     @property
     def n_runs(self) -> int:
         """Number of rows in ``samples``, which is the number of model runs."""
-        return self.n_per_curve * self.problem.num_vars
+        return self.n_per_curve * self.problem.n_params
 
     def save(self, path: str | Path) -> None:
         """Save the full design to one compressed NPZ file.
@@ -374,12 +381,13 @@ def sample(
             search curve sweeps each input continuously, which has no meaning
             for unordered level codes.
     """
+    check_seed(seed, "jaxgsa.efast.sample")
     _raise_correlated_design(problem, "jaxgsa.efast.sample")
     _raise_categorical_design(problem, "jaxgsa.efast.sample")
     if M < 1:
         raise ValueError(f"M must be >= 1, got {M}")
 
-    D = problem.num_vars
+    D = problem.n_params
 
     # One plan, shared with analyze(). It validates n_per_curve on the way.
     plan = _frequency_plan(D, n_per_curve, M)

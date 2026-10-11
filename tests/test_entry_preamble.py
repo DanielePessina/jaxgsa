@@ -98,7 +98,7 @@ def _bootstrap_call(name: str, **kwargs: Any):
     """
     X, Y = _xy()
     if name == "dgsm":
-        return lambda: jaxgsa.dgsm.analyze(PROBLEM, lambda x: jnp.sum(x**2), X, **kwargs)
+        return lambda: jaxgsa.dgsm.analyze(PROBLEM, X, fn=lambda x: jnp.sum(x**2), **kwargs)
     spec = methods()[name]
     if spec.sample is not None:
         design = (
@@ -106,7 +106,7 @@ def _bootstrap_call(name: str, **kwargs: Any):
             if name == "morris"
             else jaxgsa.efast.sample(PROBLEM, 129, seed=0, verbose=False)
             if name == "efast"
-            else jaxgsa.kucherenko.sample(PROBLEM, 16, seed=0, verbose=False)
+            else jaxgsa.kucherenko.sample(PROBLEM, base_n=16, seed=0, verbose=False)
             if name == "kucherenko"
             else _sobol_design()
         )
@@ -136,7 +136,7 @@ class TestBootstrapScalarsAreValidatedEverywhere:
     def test_every_bootstrapping_method_refuses_a_negative_resample_count(self):
         for name in BOOTSTRAP_METHODS:
             with pytest.raises(ValueError, match="n_bootstrap must be >= 0"):
-                _bootstrap_call(name, n_bootstrap=-1)()
+                _bootstrap_call(name, n_bootstrap=-1, key=jax.random.key(0))()
 
 
 class TestChunkSizeIsValidatedOnEveryPath:
@@ -160,7 +160,7 @@ class TestChunkSizeIsValidatedOnEveryPath:
 
 
 _CHEAP_CONSTANT_KW: dict[str, dict[str, Any]] = {
-    "hdmr": {"maxorder": 1, "maxiter": 3},
+    "hdmr": {"order": 1, "max_iter": 3},
     "pce": {"order": 2},
     "borgonovo": {"grid_size": 24},
     "pawn": {"n_bins": 3},
@@ -187,10 +187,10 @@ def _constant_output_call(name):
         efast_design = jaxgsa.efast.sample(PROBLEM, 400, seed=0)
         return lambda: jaxgsa.efast.analyze(efast_design, jnp.full(efast_design.n_runs, 0.1))
     if name == "kucherenko":
-        kuch_design = jaxgsa.kucherenko.sample(PROBLEM, 64, seed=0)
+        kuch_design = jaxgsa.kucherenko.sample(PROBLEM, base_n=64, seed=0)
         return lambda: jaxgsa.kucherenko.analyze(kuch_design, jnp.full(kuch_design.n_runs, 0.1))
     if name == "dgsm":
-        return lambda: jaxgsa.dgsm.analyze(PROBLEM, lambda x: jnp.asarray(0.1), X)
+        return lambda: jaxgsa.dgsm.analyze(PROBLEM, X, fn=lambda x: jnp.asarray(0.1))
     if name == "vkoga":
         return lambda: jaxgsa.vkoga.analyze(
             PROBLEM,

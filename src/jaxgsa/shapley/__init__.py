@@ -15,14 +15,15 @@ Example::
 plain arrays and no diagnostics.
 """
 
-from jaxgsa._core.registry import MethodSpec, register
-from jaxgsa.shapley._analyze import analyze, indices
+from jaxgsa._core.registry import MethodSpec as _MethodSpec
+from jaxgsa._core.registry import register as _register
+from jaxgsa.shapley._analyze import ShapleyIndices, analyze, indices
 from jaxgsa.shapley._result import ShapleyResult
 
-__all__ = ["ShapleyResult", "analyze", "indices"]
+__all__ = ["ShapleyIndices", "ShapleyResult", "analyze", "indices"]
 
-SPEC = register(
-    MethodSpec(
+_SPEC = _register(
+    _MethodSpec(
         name="shapley",
         analyze=analyze,
         sample=None,

@@ -42,6 +42,7 @@ from jaxgsa._core.transforms import cdf_to_unit_interval
 from jaxgsa._core.validation import (
     YLayout,
     _prepare_Y,
+    as_key,
 )
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.hdmr._engine import (
@@ -58,10 +59,10 @@ from jaxgsa.problem import Problem
 # per-channel recursive analyze() calls. verbose is excluded:
 # the engine owns it.
 _IRREGULAR_KWARGS = (
-    "maxorder",
-    "maxiter",
-    "m",
-    "lambdax",
+    "order",
+    "max_iter",
+    "n_intervals",
+    "ridge",
     "slice_chunk_size",
     "batch_size",
     "n_bootstrap",
@@ -72,14 +73,41 @@ _IRREGULAR_KWARGS = (
     "keep_replicates",
 )
 
-# Fewest rows the B-spline backfitting fit can run on. It is the module's own
-# documented minimum, re-used as the floor for ``on_invalid="drop"`` so that
-# dropping past it refuses in the policy's words rather than in the generic
-# "Need at least 300 samples" check further down.
-_MIN_ROWS = 300
+# Row count below which the fit still runs but its indices are unreliable. It
+# is a practical figure, not a computability limit: see :func:`_min_rows` for
+# the hard floor.
+_RELIABLE_ROWS = 300
 
 
-def _fit_scalar_checks(maxiter: int, m: int, lambdax: float) -> tuple[ScalarCheck, ...]:
+def _prefixed(*checks: ScalarCheck) -> tuple[ScalarCheck, ...]:
+    """Prefix each check's message with ``jaxgsa.hdmr: `` so errors name the method."""
+    return tuple(ScalarCheck(c.ok, f"jaxgsa.hdmr: {c.message}") for c in checks)
+
+
+def _min_rows(D: int, order: int, n_intervals: int) -> int:
+    """Fewest rows the B-spline fit can be computed on.
+
+    The largest single regression in the fit is the highest-order term, which
+    has ``(n_intervals + 3) ** order`` coefficients, with ``order`` clamped to
+    ``D``. The F-test that selects terms divides by ``N - p`` for a term with
+    ``p`` coefficients, so it is undefined once ``N <= p``, and the
+    regression itself is under-determined there. The floor is therefore one
+    row more than that coefficient count. It is not the total coefficient
+    count over all terms, because the terms are fitted one at a time (each
+    solve sees only its own ``p`` columns plus a ridge term).
+
+    Args:
+        D: Number of parameters.
+        order: Requested maximum expansion order.
+        n_intervals: B-spline intervals per dimension.
+
+    Returns:
+        The smallest row count for which the fit is computable.
+    """
+    return (n_intervals + 3) ** max(1, min(order, D)) + 1
+
+
+def _fit_scalar_checks(max_iter: int, n_intervals: int, ridge: float) -> tuple[ScalarCheck, ...]:
     """Build the scalar checks the HDMR fit arguments must pass.
 
     One definition serves both entry points: :func:`analyze` hands these to
@@ -88,32 +116,53 @@ def _fit_scalar_checks(maxiter: int, m: int, lambdax: float) -> tuple[ScalarChec
 
     The bounds are where the fit degenerates silently rather than loudly:
 
-    * ``m >= 1``: the cubic B-spline basis is scaled by ``m**3``
-      (see ``_engine._bspline_basis``), so ``m = 0`` makes every basis
-      function exactly zero and every index silently 0. ``m = 1`` is the
-      smallest valid basis — one knot interval, ``m + 3 = 4`` functions.
-    * ``maxiter >= 1``: zero iterations skips backfitting entirely and
+    * ``n_intervals >= 1``: the cubic B-spline basis is scaled by
+      ``n_intervals**3`` (see ``_engine._bspline_basis``), so
+      ``n_intervals = 0`` makes every basis function exactly zero and every
+      index silently 0. ``n_intervals = 1`` is the smallest valid basis, one
+      knot interval and ``n_intervals + 3 = 4`` functions.
+    * ``max_iter >= 1``: zero iterations skips backfitting entirely and
       returns the unfitted coefficients without a word.
-    * ``lambdax >= 0``: a negative value subtracts from the Gram diagonal,
+    * ``ridge >= 0``: a negative value subtracts from the Gram diagonal,
       which turns the regularized solve into NaN coefficients.
 
     Args:
-        maxiter: Maximum backfitting iterations.
-        m: B-spline intervals per dimension.
-        lambdax: Tikhonov regularization strength.
+        max_iter: Maximum backfitting iterations.
+        n_intervals: B-spline intervals per dimension.
+        ridge: Tikhonov regularization strength.
 
     Returns:
         The checks, ready for ``prepare(checks=...)`` or ``check_scalars``.
     """
-    return (
-        at_least("maxiter", maxiter, 1),
-        at_least("m", m, 1),
-        at_least("lambdax", lambdax, 0.0),
+    return _prefixed(
+        at_least("max_iter", max_iter, 1),
+        at_least("n_intervals", n_intervals, 1),
+        at_least("ridge", ridge, 0.0),
     )
 
 
+class HDMRIndices(NamedTuple):
+    """HDMR indices as plain arrays, as :func:`indices` returns them.
+
+    Tuple unpacking works: ``Sa, Sb, S, ST = indices(...)``.
+
+    Attributes:
+        Sa: Structural variance fraction per term, shape ``(n_terms,)`` /
+            ``(K, n_terms)`` / ``(T, K, n_terms)``.
+        Sb: Correlative variance fraction per term, same shape as ``Sa``.
+        S: ``Sa + Sb``, same shape as ``Sa``.
+        ST: SCSA total per parameter, shape ``(D,)`` / ``(K, D)`` /
+            ``(T, K, D)``.
+    """
+
+    Sa: Array
+    Sb: Array
+    S: Array
+    ST: Array
+
+
 class _HDMRStaticData(NamedTuple):
-    """Term metadata and basis index tables for one ``(D, maxorder, m)``.
+    """Term metadata and basis index tables for one ``(D, order, n_intervals)``.
 
     Every field is host-side and shared by all output slices. The names
     matter: the values used to travel as a bare twelve-tuple unpacked
@@ -124,13 +173,13 @@ class _HDMRStaticData(NamedTuple):
 
     Attributes:
         c1: First-order parameter indices, one per dimension.
-        c2: Second-order parameter index pairs, empty below ``maxorder=2``.
-        c3: Third-order parameter index triples, empty below ``maxorder=3``.
+        c2: Second-order parameter index pairs, empty below ``order=2``.
+        c3: Third-order parameter index triples, empty below ``order=3``.
         n1: Number of first-order terms (``= D``).
         n2: Number of second-order terms.
         n3: Number of third-order terms.
         n: Total number of terms, ``n1 + n2 + n3``.
-        m1: Number of B-spline basis functions per dimension, ``m + 3``.
+        m1: Number of B-spline basis functions per dimension, ``n_intervals + 3``.
         m2: Tensor-product basis size of a second-order term, ``m1 ** 2``.
         m3: Tensor-product basis size of a third-order term, ``m1 ** 3``.
         beta2: Flat index -> ``(i, j)`` lookup for the order-2 tensor
@@ -154,21 +203,21 @@ class _HDMRStaticData(NamedTuple):
 
 
 @lru_cache(maxsize=None)
-def _get_hdmr_static_data(D: int, maxorder: int, m: int) -> _HDMRStaticData:
+def _get_hdmr_static_data(D: int, order: int, n_intervals: int) -> _HDMRStaticData:
     """Build and cache the HDMR term metadata and basis index tables (host side)."""
-    # Enumerate all parameter index combinations up to maxorder.
+    # Enumerate all parameter index combinations up to order.
     # c1: single dimensions, c2: pairs, c3: triples.
     c1 = tuple(range(D))
-    c2 = tuple(itertools.combinations(range(D), 2)) if maxorder >= 2 else tuple()
-    c3 = tuple(itertools.combinations(range(D), 3)) if maxorder >= 3 else tuple()
+    c2 = tuple(itertools.combinations(range(D), 2)) if order >= 2 else tuple()
+    c3 = tuple(itertools.combinations(range(D), 3)) if order >= 3 else tuple()
     n1 = D
     n2 = len(c2)
     n3 = len(c3)
     # Total number of HDMR component functions across all active orders.
     n = n1 + n2 + n3
-    # m1 = basis functions per dimension (m intervals + 3 for cubic B-spline
+    # m1 = basis functions per dimension (n_intervals + 3 for cubic B-spline
     # boundary support); m2, m3 = tensor-product basis sizes for orders 2, 3.
-    m1 = m + 3
+    m1 = n_intervals + 3
     m2 = m1**2
     m3 = m1**3
     # beta tables enumerate all multi-index pairs/triples into the 1-D basis.
@@ -291,16 +340,16 @@ def analyze(
     X: Array,
     Y: Array | IrregularY,
     *,
-    maxorder: int = 2,
-    maxiter: int = 100,
-    m: int = 2,
-    lambdax: float = 0.01,
+    order: int = 2,
+    max_iter: int = 100,
+    n_intervals: int = 2,
+    ridge: float = 0.01,
     slice_chunk_size: int | None = None,
     batch_size: int | None = None,
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
-    key: Array | None = None,
+    key: Array | int | None = None,
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
     keep_replicates: bool = False,
@@ -364,6 +413,7 @@ def analyze(
             ``key``. :func:`_analyze_hdmr_core` raises for the remaining
             argument checks.
     """
+    key = as_key(key, "hdmr")
     if _is_irregular_y(Y):
         return analyze_irregular(
             analyze,
@@ -377,33 +427,49 @@ def analyze(
         )
     Y = cast(Array, Y)
 
-    from jaxgsa.hdmr import SPEC
+    from jaxgsa.hdmr import _SPEC
 
     # The preamble runs in this public wrapper only. Callers routing through
     # `_analyze_hdmr_core` (Shapley) must not have the policy applied, or the
     # zero-variance warning issued, a second time.
     ctx = prepare(
-        SPEC,
+        _SPEC,
         problem,
         Y,
         X=X,
         on_invalid=on_invalid,
         checks=(
-            *_fit_scalar_checks(maxiter, m, lambdax),
-            at_least("n_bootstrap", n_bootstrap, 0),
-            one_of("ci_method", ci_method, ("quantile", "gaussian")),
-            in_open_interval("conf_level", conf_level, 0.0, 1.0),
-            # Checked here, with the other cheap argument checks, so a
-            # missing key is reported before the point estimate is paid for.
-            require(
-                not (n_bootstrap > 0 and key is None),
-                "key is required when n_bootstrap > 0",
+            *_prefixed(
+                require(
+                    order in (1, 2, 3),
+                    f"order must be 1, 2, or 3, got {order}",
+                )
+            ),
+            *_fit_scalar_checks(max_iter, n_intervals, ridge),
+            *_prefixed(
+                at_least("n_bootstrap", n_bootstrap, 0),
+                one_of("ci_method", ci_method, ("quantile", "gaussian")),
+                in_open_interval("conf_level", conf_level, 0.0, 1.0),
+                # Checked here, with the other cheap argument checks, so a
+                # missing key is reported before the point estimate is paid for.
+                require(
+                    not (n_bootstrap > 0 and key is None),
+                    "key is required when n_bootstrap > 0",
+                ),
             ),
         ),
-        min_kept=_MIN_ROWS,
+        # An invalid order is refused by the checks above; do not size its floor.
+        min_kept=_min_rows(problem.n_params, order, n_intervals) if order in (1, 2, 3) else 0,
     )
     assert ctx.X is not None
     X, Y, invalid = ctx.X, ctx.Y, ctx.invalid
+    if X.shape[0] < _RELIABLE_ROWS:
+        warnings.warn(
+            f"jaxgsa.hdmr: N={X.shape[0]} rows is below the {_RELIABLE_ROWS} the "
+            "B-spline fit needs to be reliable; the indices may be unstable",
+            stacklevel=2,
+            category=JaxgsaWarning,
+        )
     # ST and S1 change meaning under dependence; say so once per analyze call,
     # in the public wrapper only, so Shapley routing through the core stays
     # quiet.
@@ -413,10 +479,10 @@ def analyze(
         problem,
         X,
         Y,
-        maxorder=maxorder,
-        maxiter=maxiter,
-        m=m,
-        lambdax=lambdax,
+        order=order,
+        max_iter=max_iter,
+        n_intervals=n_intervals,
+        ridge=ridge,
         slice_chunk_size=slice_chunk_size,
         batch_size=batch_size,
         invalid=invalid,
@@ -437,7 +503,7 @@ def analyze(
         quantity="result.S.sum()",
         advice_low=(
             "Li et al. (2010, Eq. 24) require the per-term S values to sum to about 1 "
-            "before the indices are read. Raise maxorder or m, or accept that this "
+            "before the indices are read. Raise order or n_intervals, or accept that this "
             "model does not decompose into low-order terms."
         ),
         advice_high=(
@@ -468,7 +534,7 @@ def analyze(
             K=K,
             invalid=invalid,
             timings=[("fit + estimator (includes compile on the first call)", elapsed)],
-            notes=[f"maxorder: {maxorder}", slice_note, batch_note],
+            notes=[f"order: {order}", slice_note, batch_note],
             index_name="ST",
             values=result.ST,
             conf=result.ST_conf,
@@ -490,12 +556,13 @@ class _HDMRCore(NamedTuple):
         S: ``Sa + Sb``, same shape.
         ST: SCSA total per parameter, shape ``(T, K, D)``.
         select: F-test significance count per term, shape ``(n_terms,)``.
-        rmse: Per-slice fit RMSE, shape ``(T*K,)``.
+        rmse: Per-slice in-sample fit RMSE, shape ``(T*K,)``.
+        explained_variance: Per-slice ``1 - MSE / Var(Y)``, shape ``(T*K,)``.
         C1: First-order component coefficients, flat slice axis leading.
-        C2: Second-order coefficients, or ``None`` below ``maxorder=2``.
-        C3: Third-order coefficients, or ``None`` below ``maxorder=3``.
+        C2: Second-order coefficients, or ``None`` below ``order=2``.
+        C3: Third-order coefficients, or ``None`` below ``order=3``.
         f0: Grand mean per slice.
-        maxorder: The expansion order actually fitted, clamped to ``D``.
+        order: The expansion order actually fitted, clamped to ``D``.
         streamed: Whether the sample axis was split into row batches.
         c2: Parameter index pairs, in term order.
         c3: Parameter index triples, in term order.
@@ -508,11 +575,12 @@ class _HDMRCore(NamedTuple):
     ST: Array
     select: Array
     rmse: Array
+    explained_variance: Array
     C1: Array
     C2: Array | None
     C3: Array | None
     f0: Array
-    maxorder: int
+    order: int
     streamed: bool
     c2: tuple[tuple[int, int], ...]
     c3: tuple[tuple[int, int, int], ...]
@@ -524,10 +592,10 @@ def _hdmr_core(
     X: Array,
     Y: Array,
     *,
-    maxorder: int = 2,
-    maxiter: int = 100,
-    m: int = 2,
-    lambdax: float = 0.01,
+    order: int = 2,
+    max_iter: int = 100,
+    n_intervals: int = 2,
+    ridge: float = 0.01,
     slice_chunk_size: int | None = None,
     batch_size: int | None = None,
 ) -> _HDMRCore:
@@ -552,10 +620,10 @@ def _hdmr_core(
         problem: Parameter names and distributions.
         X: Input samples, shape ``(N, D)``.
         Y: Model outputs, at any of the three accepted ranks.
-        maxorder: Requested maximum expansion order; clamped to ``D``.
-        maxiter: Maximum backfitting iterations.
-        m: B-spline intervals per dimension.
-        lambdax: Tikhonov regularization strength.
+        order: Requested maximum expansion order; clamped to ``D``.
+        max_iter: Maximum backfitting iterations.
+        n_intervals: B-spline intervals per dimension.
+        ridge: Tikhonov regularization strength.
         slice_chunk_size: Output slices per vmap batch, or ``None``.
         batch_size: Rows per fit batch, or ``None``.
 
@@ -563,31 +631,38 @@ def _hdmr_core(
         The :class:`_HDMRCore` bundle.
 
     Raises:
-        ValueError: If ``N < 300``, ``maxorder`` is not 1/2/3, ``maxiter``
-            or ``m`` is below 1, ``lambdax`` is negative, or a chunk size is
+        ValueError: If ``N`` is below the fit's floor (see :func:`_min_rows`),
+            ``order`` is not 1/2/3, ``max_iter``
+            or ``n_intervals`` is below 1, ``ridge`` is negative, or a chunk size is
             below 1. All are decided on Python scalars. See
             :func:`_fit_scalar_checks` for why those bounds.
     """
     N, D = X.shape
-    # B-spline regression with backfitting needs a reasonable sample size
-    # to avoid overfitting; 300 is a practical lower bound.
-    if N < 300:
-        raise ValueError(f"Need at least 300 samples, got {N}")
-    if maxorder not in (1, 2, 3):
-        raise ValueError(f"maxorder must be 1, 2, or 3, got {maxorder}")
-    check_scalars(_fit_scalar_checks(maxiter, m, lambdax))
+    if order not in (1, 2, 3):
+        raise ValueError(f"jaxgsa.hdmr: order must be 1, 2, or 3, got {order}")
+    check_scalars(_fit_scalar_checks(max_iter, n_intervals, ridge))
+    # Below the 300 rows of `_RELIABLE_ROWS` the fit runs, and `analyze` warns.
+    # Below this floor it cannot be computed at all.
+    floor = _min_rows(D, order, n_intervals)
+    if N < floor:
+        raise ValueError(
+            f"jaxgsa.hdmr: N={N} rows is too few to fit order={min(order, D)} "
+            f"with n_intervals={n_intervals}. The largest term has "
+            f"{floor - 1} coefficients and the fit needs more rows than that "
+            f"(at least {floor}). Add rows, lower order, or lower n_intervals."
+        )
     # Clamped silently: there is no more expansion order available than there
     # are parameters. `analyze` warns about it; this is the traceable half,
-    # and the clamped value comes back on `_HDMRCore.maxorder`.
-    maxorder = min(maxorder, D)
+    # and the clamped value comes back on `_HDMRCore.order`.
+    order = min(order, D)
     if slice_chunk_size is not None and slice_chunk_size < 1:
-        raise ValueError(f"slice_chunk_size must be >= 1, got {slice_chunk_size}")
+        raise ValueError(f"jaxgsa.hdmr: slice_chunk_size must be >= 1, got {slice_chunk_size}")
     if batch_size is not None and batch_size < 1:
-        raise ValueError(f"batch_size must be >= 1, got {batch_size}")
-    lambdax = float(lambdax)
+        raise ValueError(f"jaxgsa.hdmr: batch_size must be >= 1, got {batch_size}")
+    ridge = float(ridge)
 
-    # Build term metadata (cached on host; only computed once per D/maxorder/m).
-    static = _get_hdmr_static_data(D, maxorder, m)
+    # Build term metadata (cached on host; only computed once per D/order/n_intervals).
+    static = _get_hdmr_static_data(D, order, n_intervals)
     c2, c3 = static.c2, static.c3
     n1, n2, n3, n = static.n1, static.n2, static.n3, static.n
     m1, m2, m3 = static.m1, static.m2, static.m3
@@ -621,10 +696,10 @@ def _hdmr_core(
     fit = _fit_hdmr(
         X_n,
         Y_nl,
-        m=m,
-        maxorder=maxorder,
-        maxiter=maxiter,
-        lambdax=lambdax,
+        n_intervals=n_intervals,
+        order=order,
+        max_iter=max_iter,
+        ridge=ridge,
         f_crits=f_crits,
         c2_idx=c2_idx,
         c3_idx=c3_idx,
@@ -656,11 +731,12 @@ def _hdmr_core(
         ST=ST_out,
         select=select_sum,
         rmse=fit.rmse,
+        explained_variance=fit.explained_variance,
         C1=fit.C1,
         C2=fit.C2,
         C3=fit.C3,
         f0=fit.f0,
-        maxorder=maxorder,
+        order=order,
         streamed=fit.streamed,
         c2=tuple(c2),
         c3=tuple(c3),
@@ -677,13 +753,13 @@ def indices(
     X: Array,
     Y: Array,
     *,
-    maxorder: int = 2,
-    maxiter: int = 100,
-    m: int = 2,
-    lambdax: float = 0.01,
+    order: int = 2,
+    max_iter: int = 100,
+    n_intervals: int = 2,
+    ridge: float = 0.01,
     slice_chunk_size: int | None = None,
     batch_size: int | None = None,
-) -> tuple[Array, ...]:
+) -> HDMRIndices:
     """Compute HDMR indices as plain arrays, with no diagnostics.
 
     This is the transformable core of :func:`analyze`. It fits the same
@@ -714,7 +790,7 @@ def indices(
         ``jacfwd`` works and is the right tool anyway here: the Jacobian this
         core has is tall, one row per index against ``N`` outputs. Making
         ``jacrev`` work means replacing the loop with a fixed-trip
-        ``lax.scan`` of ``maxiter`` iterations, which costs every fit the
+        ``lax.scan`` of ``max_iter`` iterations, which costs every fit the
         iterations the early stop currently saves. That is a real trade, not
         an oversight, so it is not made here.
 
@@ -723,21 +799,23 @@ def indices(
         X: Input samples, shape ``(N, D)``.
         Y: Model outputs, shape ``(N,)``, ``(N, K)`` or ``(N, T, K)``, as
             :func:`analyze` accepts them.
-        maxorder: Maximum expansion order, clamped to ``D`` silently rather
+        order: Maximum expansion order, clamped to ``D`` silently rather
             than with the warning :func:`analyze` gives.
-        maxiter: Maximum backfitting iterations.
-        m: B-spline intervals per dimension.
-        lambdax: Tikhonov regularization strength.
+        max_iter: Maximum backfitting iterations.
+        n_intervals: B-spline intervals per dimension.
+        ridge: Tikhonov regularization strength.
         slice_chunk_size: Output slices per vmap batch, or ``None``.
         batch_size: Rows per fit batch, or ``None``.
 
     Returns:
-        ``(Sa, Sb, S, ST)``, at the shapes ``analyze`` reports for this
-        ``Y``. ``Sa``/``Sb``/``S`` are per term and ``ST`` is per parameter.
+        An :class:`HDMRIndices` ``(Sa, Sb, S, ST)``, at the shapes
+        ``analyze`` reports for this ``Y``. ``Sa``/``Sb``/``S`` are per term
+        and ``ST`` is per parameter.
 
     Raises:
-        ValueError: If ``N < 300``, ``maxorder`` is not 1/2/3, ``maxiter``
-            or ``m`` is below 1, ``lambdax`` is negative, a chunk size is
+        ValueError: If ``N`` is below the fit's floor (see :func:`_min_rows`),
+            ``order`` is not 1/2/3, ``max_iter``
+            or ``n_intervals`` is below 1, ``ridge`` is negative, a chunk size is
             below 1, or ``problem`` has a categorical parameter, whose step
             CDF has no unit-interval image.
     """
@@ -745,14 +823,14 @@ def indices(
         problem,
         X,
         Y,
-        maxorder=maxorder,
-        maxiter=maxiter,
-        m=m,
-        lambdax=lambdax,
+        order=order,
+        max_iter=max_iter,
+        n_intervals=n_intervals,
+        ridge=ridge,
         slice_chunk_size=slice_chunk_size,
         batch_size=batch_size,
     )
-    return tuple(core.layout.squeeze(getattr(core, name)) for name in _INDEX_FIELDS)
+    return HDMRIndices(*(core.layout.squeeze(getattr(core, name)) for name in _INDEX_FIELDS))
 
 
 def _bootstrap_indices(
@@ -762,10 +840,10 @@ def _bootstrap_indices(
     key: Array,
     *,
     n_bootstrap: int,
-    maxorder: int,
-    maxiter: int,
-    m: int,
-    lambdax: float,
+    order: int,
+    max_iter: int,
+    n_intervals: int,
+    ridge: float,
     slice_chunk_size: int | None,
     batch_size: int | None,
 ) -> dict[str, Array]:
@@ -787,10 +865,10 @@ def _bootstrap_indices(
         Y: Outputs at the caller's own rank.
         key: A ``jax.random`` key, split once per replicate.
         n_bootstrap: Number of replicates.
-        maxorder: Requested maximum expansion order.
-        maxiter: Maximum backfitting iterations.
-        m: B-spline intervals per dimension.
-        lambdax: Tikhonov regularization strength.
+        order: Requested maximum expansion order.
+        max_iter: Maximum backfitting iterations.
+        n_intervals: B-spline intervals per dimension.
+        ridge: Tikhonov regularization strength.
         slice_chunk_size: Output slices per vmap batch, or ``None``.
         batch_size: Rows per fit batch, or ``None``.
 
@@ -805,10 +883,10 @@ def _bootstrap_indices(
             problem,
             X[rows],
             Y[rows],
-            maxorder=maxorder,
-            maxiter=maxiter,
-            m=m,
-            lambdax=lambdax,
+            order=order,
+            max_iter=max_iter,
+            n_intervals=n_intervals,
+            ridge=ridge,
             slice_chunk_size=slice_chunk_size,
             batch_size=batch_size,
         )
@@ -822,10 +900,10 @@ def _analyze_hdmr_core(
     X: Array,
     Y: Array,
     *,
-    maxorder: int = 2,
-    maxiter: int = 100,
-    m: int = 2,
-    lambdax: float = 0.01,
+    order: int = 2,
+    max_iter: int = 100,
+    n_intervals: int = 2,
+    ridge: float = 0.01,
     slice_chunk_size: int | None = None,
     batch_size: int | None = None,
     invalid: InvalidReport,
@@ -855,19 +933,20 @@ def _analyze_hdmr_core(
             array is read as ``(N, K)`` unless ``problem.output_names`` has
             exactly one entry. In that case the columns are T timepoints of
             that single output.
-        maxorder: Maximum HDMR expansion order (1, 2, or 3), which is the
+        order: Maximum HDMR expansion order (1, 2, or 3), which is the
             largest interaction size modelled. Order 2 (default) captures
             pairwise interactions. Order 3 adds triples, but the term count
             and the fit cost grow combinatorially. Clamped to D (with a
-            warning) when D < maxorder.
-        maxiter: Maximum backfitting iterations for the first-order terms.
+            warning) when D < order.
+        max_iter: Maximum backfitting iterations for the first-order terms.
             The default rarely needs raising, because iteration stops early
             once the coefficients stop changing.
-        m: Number of B-spline intervals per dimension (basis size m + 3).
-            Larger m resolves sharper features of the component functions.
-            It also multiplies the coefficient count (the per-term basis grows
-            as (m+3)^order) and needs more samples to avoid overfitting.
-        lambdax: Tikhonov regularization strength. Increase it for noisy Y or
+        n_intervals: Number of B-spline intervals per dimension (basis size
+            ``n_intervals + 3``). Larger values resolve sharper features of
+            the component functions. It also multiplies the coefficient count
+            (the per-term basis grows as ``(n_intervals+3)^order``) and needs more
+            samples to avoid overfitting.
+        ridge: Tikhonov regularization strength. Increase it for noisy Y or
             small N, which gives smoother and more stable components.
             Decrease it if genuine sharp features are being oversmoothed.
         slice_chunk_size: Maximum number of (T, K) output slices fitted per
@@ -924,7 +1003,8 @@ def _analyze_hdmr_core(
         this.
 
     Raises:
-        ValueError: If ``N < 300``, ``maxorder`` is not 1/2/3, an explicit
+        ValueError: If ``N`` is below the fit's floor (see :func:`_min_rows`),
+            ``order`` is not 1/2/3, an explicit
             ``slice_chunk_size < 1`` or ``batch_size < 1`` is passed, or
             ``problem`` has categorical parameters. The B-spline component
             functions need an orderable axis, which an unordered level code
@@ -933,8 +1013,8 @@ def _analyze_hdmr_core(
 
     Note:
         The fit materializes B-spline basis tensors of roughly
-        ``batch_size * (m+3)^2 * n2`` floats at order 2 and
-        ``batch_size * (m+3)^3 * n3`` floats at order 3 (``n2``/``n3`` =
+        ``batch_size * (n_intervals+3)^2 * n2`` floats at order 2 and
+        ``batch_size * (n_intervals+3)^3 * n3`` floats at order 3 (``n2``/``n3`` =
         number of parameter pairs/triples). That footprint is what
         ``batch_size`` bounds; ``slice_chunk_size`` bounds the per-slice
         statistics transient, ``batch_size * slice_chunk_size * n_terms``.
@@ -944,27 +1024,26 @@ def _analyze_hdmr_core(
         problem,
         X,
         Y,
-        maxorder=maxorder,
-        maxiter=maxiter,
-        m=m,
-        lambdax=lambdax,
+        order=order,
+        max_iter=max_iter,
+        n_intervals=n_intervals,
+        ridge=ridge,
         slice_chunk_size=slice_chunk_size,
         batch_size=batch_size,
     )
-    if core.maxorder < maxorder:
+    if core.order < order:
         # This runs inside _analyze_hdmr_core, one call below the public
         # analyze() the user actually called, so it needs stacklevel=3 (one
         # more than a warning raised directly in analyze()'s own body) to
         # report the user's line instead of the internal call site.
         warnings.warn(
-            f"jaxgsa.hdmr: maxorder clamped to {core.maxorder} "
-            f"(need D >= maxorder, got D={X.shape[1]})",
+            f"jaxgsa.hdmr: order clamped to {core.order} (need D >= order, got D={X.shape[1]})",
             stacklevel=3,
             category=JaxgsaWarning,
         )
     layout = core.layout
     T, K_out = core.Sa.shape[:2]
-    term_labels = _build_term_labels(problem, tuple(range(problem.num_vars)), core.c2, core.c3)
+    term_labels = _build_term_labels(problem, tuple(range(problem.n_params)), core.c2, core.c3)
 
     # Bundle all fitted state needed to reconstruct predictions at new points.
     fit_state: _HDMRFit = {
@@ -972,8 +1051,8 @@ def _analyze_hdmr_core(
         "C2": None if core.C2 is None else _reshape_emulator_value(core.C2, T, K_out, layout),
         "C3": None if core.C3 is None else _reshape_emulator_value(core.C3, T, K_out, layout),
         "f0": _reshape_emulator_value(core.f0, T, K_out, layout),
-        "m": m,
-        "maxorder": core.maxorder,
+        "n_intervals": n_intervals,
+        "order": core.order,
     }
 
     conf: dict[str, Array | None] = {f"{name}_conf": None for name in _INDEX_FIELDS}
@@ -986,10 +1065,10 @@ def _analyze_hdmr_core(
             Y,
             key,
             n_bootstrap=n_bootstrap,
-            maxorder=maxorder,
-            maxiter=maxiter,
-            m=m,
-            lambdax=lambdax,
+            order=order,
+            max_iter=max_iter,
+            n_intervals=n_intervals,
+            ridge=ridge,
             slice_chunk_size=slice_chunk_size,
             batch_size=batch_size,
         )
@@ -1024,6 +1103,8 @@ def _analyze_hdmr_core(
         _fit=fit_state,
         select=core.select,
         rmse=_reshape_emulator_value(core.rmse, T, K_out, layout),
+        cv_rmse=None,
+        explained_variance=_reshape_emulator_value(core.explained_variance, T, K_out, layout),
         streamed=core.streamed,
         _c2=core.c2,
         _c3=core.c3,
@@ -1073,11 +1154,11 @@ def _hdmr_predict_plan(result: HDMRResult, X_new: Array) -> _PredictPlan:
     em = result._fit
     if em is None:
         raise ValueError(
-            "HDMRResult carries no fitted surrogate state; "
+            "jaxgsa.hdmr: HDMRResult carries no fitted surrogate state; "
             "obtain results from jaxgsa.hdmr.analyze()"
         )
 
-    maxorder = em["maxorder"]
+    order = em["order"]
     C1 = em["C1"]
     f0 = em["f0"]
 
@@ -1095,8 +1176,8 @@ def _hdmr_predict_plan(result: HDMRResult, X_new: Array) -> _PredictPlan:
     slices = math.prod(C1.shape[:-2])
     higher_orders: list[tuple[Callable[[Array, Array, Array], Array], Array, Array, Array]] = []
     elems_per_row = m1 * D + slices * D
-    if maxorder >= 2:
-        static = _get_hdmr_static_data(result.problem.num_vars, maxorder, em["m"])
+    if order >= 2:
+        static = _get_hdmr_static_data(result.problem.n_params, order, em["n_intervals"])
         beta2_host, beta3_host = static.beta2, static.beta3
         C2 = em["C2"]
         if C2 is not None:
@@ -1104,7 +1185,7 @@ def _hdmr_predict_plan(result: HDMRResult, X_new: Array) -> _PredictPlan:
             higher_orders.append((_build_B2, c2, jnp.asarray(beta2_host, dtype=int), C2))
             elems_per_row += (3 * m1**2 + slices) * len(result._c2)
         C3 = em["C3"]
-        if maxorder >= 3 and C3 is not None:
+        if order >= 3 and C3 is not None:
             c3 = jnp.asarray(result._c3, dtype=int)
             higher_orders.append((_build_B3, c3, jnp.asarray(beta3_host, dtype=int), C3))
             elems_per_row += (4 * m1**3 + slices) * len(result._c3)
@@ -1112,7 +1193,7 @@ def _hdmr_predict_plan(result: HDMRResult, X_new: Array) -> _PredictPlan:
     def _predict(X_chunk: Array) -> Array:
         # Reconstruct prediction as f0 + sum of component functions.
         # Start with first-order: sum_j B1_j @ C1_j.
-        B1 = _build_B1(X_chunk, em["m"])  # (batch, m1, D)
+        B1 = _build_B1(X_chunk, em["n_intervals"])  # (batch, m1, D)
         Y_total = _emulator_contract(B1, C1)
         for build, c_idx, beta, C in higher_orders:
             Y_total = Y_total + _emulator_contract(build(B1, c_idx, beta), C)

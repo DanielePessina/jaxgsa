@@ -23,6 +23,13 @@ RETIRED_NAMES = {
     "prenormalize",
     "correlation_kind",
     "kind",
+    "sampling_result",
+    "num_vars",
+    "n_partitions",
+    "maxorder",
+    "maxiter",
+    "lambdax",
+    "loo_rmse",
 }
 BATCHING_NAMES = {"batch_size", "slice_chunk_size", "resample_chunk_size"}
 
@@ -59,10 +66,8 @@ def test_method_entrypoint_shape_is_consistent() -> None:
     for name, spec in methods().items():
         assert (spec.sample is not None) == spec.is_design_based, name
         first = next(iter(_params(spec.analyze)))
-        if name == "dgsm":
-            continue
-        expected = "sampling_result" if spec.is_design_based else "problem"
-        assert first == expected, (name, first, expected)
+        expected = ("samples",) if spec.is_design_based else ("problem",)
+        assert first in expected, (name, first, expected)
 
 
 def test_problem_correlation_surface_uses_one_keyword() -> None:

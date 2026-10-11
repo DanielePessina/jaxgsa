@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, Self
 
 import jax.numpy as jnp
@@ -62,21 +62,23 @@ class PCEResult(SchemaResult, SurrogateResult):
             ``on_invalid`` policy did about it. See
             :class:`jaxgsa._core.invalid.InvalidReport`. ``n_invalid == 0``
             means the check ran and found nothing.
-        loo_rmse: Leave-one-out cross-validation RMSE per output slice, shape
-            ``()`` / ``(K,)`` / ``(T, K)``, or None. It is in the units of
-            ``Y``. Compare it against ``Y.std()``: a ratio near or above 1
-            means the surrogate (and its indices) is unreliable.
+        rmse: In-sample root-mean-square error of the fit per output slice,
+            shape ``()`` / ``(K,)`` / ``(T, K)``, or None. It is in the units
+            of ``Y``.
+        cv_rmse: Exact leave-one-out cross-validation RMSE per output slice,
+            same shape as ``rmse``, or None. It is in the units of ``Y``.
+            Compare it against ``Y.std()``: a ratio near or above 1 means the
+            surrogate (and its indices) is unreliable.
         explained_variance: Fraction of each output slice's sample variance
             captured by the expansion, shape ``()`` / ``(K,)`` / ``(T, K)``
-            to match ``loo_rmse``, or None. Computed as the sample variance
-            of the fitted values divided by the sample variance of ``Y`` for
-            that slice, both over the rows that were fitted, and NaN for
+            to match ``rmse``, or None. Computed as ``1 - rmse**2 / Var(Y)``
+            for that slice, over the rows that were fitted, and NaN for
             constant (zero-variance) slices. This is the coefficient of
             determination of the fit, so it lies in ``[0, 1]``: values near 1
             mean the expansion reproduces the sample, and values well below 1
             mean it misses variance. It measures the fit *in sample* and says
-            nothing about prediction; ``loo_rmse`` is the out-of-sample
-            number, and a high ``explained_variance`` beside a ``loo_rmse``
+            nothing about prediction; ``cv_rmse`` is the out-of-sample
+            number, and a high ``explained_variance`` beside a ``cv_rmse``
             near ``Y.std()`` is the signature of an overfit.
         streamed: True when the fit ran the row-streamed path, False when it
             ran in one pass. Both paths solve the same normal equations and
@@ -92,7 +94,7 @@ class PCEResult(SchemaResult, SurrogateResult):
             resample, so the interval measures the sampling variability of
             ``(X, Y)`` propagated through the fit. It says nothing about
             truncation error: every replicate uses the same basis and
-            inherits the same bias. ``loo_rmse`` and ``explained_variance``
+            inherits the same bias. ``cv_rmse`` and ``explained_variance``
             are what report that.
         ST_conf: Bootstrap confidence interval for ``ST``, as ``S1_conf``.
         S2_conf: Bootstrap confidence interval for ``S2``, as ``S1_conf``.
@@ -110,13 +112,15 @@ class PCEResult(SchemaResult, SurrogateResult):
     multi_index: np.ndarray
     order: int
     invalid: InvalidReport
-    loo_rmse: Array | None = None
+    rmse: Array | None = None
+    cv_rmse: Array | None = None
     explained_variance: Array | None = None
     streamed: bool = False
     S1_conf: Array | None = None
     ST_conf: Array | None = None
     S2_conf: Array | None = None
     ci: CIInfo | None = None
+    _aggregated: bool = field(default=False, repr=False, compare=False)
 
     _schema = ResultSchema(
         primary="S1",
@@ -124,11 +128,20 @@ class PCEResult(SchemaResult, SurrogateResult):
             FieldSpec("S1", interval=True),
             FieldSpec("ST", interval=True),
             FieldSpec("S2", "pair", interval=True),
-            FieldSpec("loo_rmse", "slice"),
+            FieldSpec("rmse", "slice"),
+            FieldSpec("cv_rmse", "slice"),
             FieldSpec("explained_variance", "slice"),
         ),
         meta=("order", "streamed"),
     )
+
+    def _require_surrogate(self, method: str) -> None:
+        """Raise if this result was aggregated and so holds indices only."""
+        if self._aggregated:
+            raise ValueError(
+                "this PCEResult was aggregated over outputs, so it holds indices only "
+                f"and is not a surrogate. Call {method} on the result before aggregate()."
+            )
 
     def _predict_plan(self, X: Array) -> _PredictPlan:
         """Plan a batched evaluation of the fitted expansion at ``X``.
@@ -140,6 +153,8 @@ class PCEResult(SchemaResult, SurrogateResult):
         See :meth:`predict` for the full contract.
         """
         from jaxgsa.pce._analyze import _pce_predict_plan
+
+        self._require_surrogate("predict()")
 
         return _pce_predict_plan(self, X)
 
@@ -156,8 +171,9 @@ class PCEResult(SchemaResult, SurrogateResult):
             this result's ``explained_variance`` diagnostic.
 
         Raises:
-            ValueError: If this result carries no ``explained_variance``
-                diagnostic (e.g. constructed by hand without one).
+            ValueError: If this result was aggregated over outputs, or
+                carries no ``explained_variance`` diagnostic (e.g. constructed
+                by hand without one).
 
         Warns:
             JaxgsaWarning: If ``explained_variance`` sits well below 1, so the
@@ -166,6 +182,7 @@ class PCEResult(SchemaResult, SurrogateResult):
         """
         from jaxgsa.shapley._engine import _shapley_result_from_variances
 
+        self._require_surrogate("shapley()")
         explained = self.explained_variance
         if explained is None:
             raise ValueError("PCEResult does not contain explained-variance diagnostics")
@@ -207,9 +224,10 @@ class PCEResult(SchemaResult, SurrogateResult):
         variance the indices divide by.
 
         The aggregated result is a summary, not a surrogate. Its
-        ``coefficients`` are ``NaN`` (so :meth:`predict` and :meth:`shapley`
-        give ``NaN``), and ``loo_rmse`` and ``explained_variance`` are
-        ``None``, because none of them aggregates across outputs.
+        ``coefficients`` are ``NaN``, and ``rmse``, ``cv_rmse`` and
+        ``explained_variance`` are ``None``, because none of them aggregates
+        across outputs. :meth:`predict` and :meth:`shapley` raise
+        ``ValueError`` on it. Call them before ``aggregate()``.
 
         A slice of zero variance (a constant output) has weight 0 and adds
         nothing. A result with one output slice comes back with the same
@@ -220,8 +238,12 @@ class PCEResult(SchemaResult, SurrogateResult):
         aggregated and the interval is drawn again from those draws, at the
         same level and with the same rule. The weights stay fixed at the
         point-estimate values in every draw, so the interval leaves out the
-        sampling noise of the weights themselves. Otherwise the new ``*_conf``
-        fields are ``NaN``.
+        sampling noise of the weights themselves. Otherwise the ``*_conf`` fields
+        and ``ci`` become ``None`` and one ``JaxgsaWarning`` says that
+        ``keep_replicates=True`` is needed.
+
+        The output axes collapse to size 1. A result with no output axes
+        (``S1`` of shape ``(D,)``) is returned unchanged.
 
         Args:
             weights: ``"variance"`` (default) or ``"equal"``.
@@ -231,6 +253,10 @@ class PCEResult(SchemaResult, SurrogateResult):
 
         Raises:
             ValueError: If ``weights`` is not one of the two names.
+
+        Warns:
+            JaxgsaWarning: If the result has bootstrap intervals but kept no
+                replicates, so the intervals are dropped.
         """
         coefficients = jnp.asarray(self.coefficients)
         variance = jnp.sum(coefficients[..., 1:] ** 2, axis=-1)
@@ -247,6 +273,8 @@ class PCEResult(SchemaResult, SurrogateResult):
             lead = updates["S1"].shape[:-1]
             n_terms = np.shape(self.coefficients)[-1]
             updates["coefficients"] = jnp.full((*lead, n_terms), jnp.nan)
-            updates["loo_rmse"] = None
+            updates["rmse"] = None
+            updates["cv_rmse"] = None
             updates["explained_variance"] = None
+            updates["_aggregated"] = True
         return dataclasses.replace(self, **updates)

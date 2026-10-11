@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from jax import Array
 
 from jaxgsa._core.invalid import InvalidReport
-from jaxgsa._core.result import FieldSpec, ResultSchema, SchemaResult
+from jaxgsa._core.result import CIInfo, FieldSpec, ResultSchema, SchemaResult
 from jaxgsa.problem import Problem
 
 
@@ -19,12 +19,12 @@ class HSICResult(SchemaResult):
     multi-output model, and ``(T, K, D)`` for a time-resolved analysis.
 
     Attributes:
-        R2_HSIC: Normalized first-order HSIC indices, shape ``(..., D)``.
+        R2: Normalized first-order HSIC indices, shape ``(..., D)``.
             Each entry is ``HSIC(x_i, Y)`` divided by
             ``sqrt(HSIC(x_i, x_i) * HSIC(Y, Y))`` and lies in [0, 1]. A value
             of 0 means the parameter and the output are independent, and
             larger values mean stronger dependence.
-        T_HSIC: Total-order HSIC indices, shape ``(..., D)``. Each entry is
+        T: Total-order HSIC indices, shape ``(..., D)``. Each entry is
             the fraction of the joint dependence lost when parameter i is
             removed, so it also counts influence carried through interactions
             (analogous to ST).
@@ -41,27 +41,32 @@ class HSICResult(SchemaResult):
         bandwidth: The median-heuristic multiplier the kernels were built
             with. It is carried because the index depends on it: the same
             data at ``0.25`` and at the default ``1.0`` can rank the
-            parameters differently, so a stored ``R2_HSIC`` without its
+            parameters differently, so a stored ``R2`` without its
             bandwidth does not say what it measured.
         n_perms: How many permutations the p-values rest on. A p-value
             cannot fall below ``1 / (n_perms + 1)``, so the floor of the
             reported values is a property of this number.
+        ci: Always ``None``. HSIC reports permutation ``p_values`` and no
+            confidence interval, because a row bootstrap of a V-statistic is
+            biased upward. The field exists so every result carries ``ci``.
+            See :class:`jaxgsa._core.result.CIInfo` for the other methods.
     """
 
-    R2_HSIC: Array
-    T_HSIC: Array
+    R2: Array
+    T: Array
     p_values: Array
     hsic_raw: Array
     problem: Problem
     invalid: InvalidReport
     bandwidth: float = 1.0
     n_perms: int = 200
+    ci: CIInfo | None = None
 
     _schema = ResultSchema(
-        primary="R2_HSIC",
+        primary="R2",
         fields=(
-            FieldSpec("R2_HSIC"),
-            FieldSpec("T_HSIC"),
+            FieldSpec("R2"),
+            FieldSpec("T"),
             FieldSpec("p_values"),
             FieldSpec("hsic_raw"),
         ),

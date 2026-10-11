@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from jax import Array
 
 from jaxgsa._core.invalid import InvalidReport
-from jaxgsa._core.result import FieldSpec, ResultSchema, SchemaResult
+from jaxgsa._core.result import CIInfo, FieldSpec, ResultSchema, SchemaResult
 from jaxgsa.problem import Problem
 
 
@@ -33,6 +33,9 @@ class EFASTResult(SchemaResult):
             :class:`jaxgsa._core.invalid.InvalidReport`.
         omega_0: Primary frequency used in the analysis.
         M: Interference factor, the number of harmonics summed.
+        ci: Always ``None``. eFAST has no bootstrap by design: its resampling
+            unit is a search curve, which cannot be resampled. The field exists
+            so generic code can read ``result.ci`` on any result.
     """
 
     S1: Array
@@ -41,6 +44,7 @@ class EFASTResult(SchemaResult):
     invalid: InvalidReport
     omega_0: int
     M: int
+    ci: CIInfo | None = None
 
     _schema = ResultSchema(
         primary="S1",

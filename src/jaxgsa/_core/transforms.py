@@ -110,7 +110,7 @@ def cdf_to_unit_interval(X: Array, problem: Problem) -> Array:
     """
     from jax.scipy.stats import norm as jax_norm
 
-    D = problem.num_vars
+    D = problem.n_params
     cols = []  # one column per dimension, stacked at the end into (N, D)
 
     # CDF-to-unit-interval mapping: apply F(x) per dimension. For Gaussian

@@ -347,10 +347,10 @@ def _correlated_xy(D: int = 2, N: int = 64):
 def test_dgsm_analyze_rejects_correlated_problem_on_both_paths():
     problem, X, Y = _correlated_xy()
     with pytest.raises(ValueError, match=r"jaxgsa\.dgsm\.analyze.*independent inputs"):
-        jaxgsa.dgsm.analyze(problem, fn=lambda x: x[0], X=X)
+        jaxgsa.dgsm.analyze(problem, X, fn=lambda x: x[0])
     dfdx = jnp.zeros((X.shape[0], 2))
     with pytest.raises(ValueError, match=r"jaxgsa\.dgsm\.analyze.*independent inputs"):
-        jaxgsa.dgsm.analyze(problem, Y=Y, dfdx=dfdx)
+        jaxgsa.dgsm.analyze(problem, X, Y, dfdx=dfdx)
 
 
 class TestDegenerateConditionalWarning:
@@ -372,7 +372,7 @@ class TestDegenerateConditionalWarning:
         problem = _uniform_problem(D=2).with_correlation(np.array([[1.0, 0.999], [0.999, 1.0]]))
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            jaxgsa.kucherenko.sample(problem, 64, seed=0)
+            jaxgsa.kucherenko.sample(problem, base_n=64, seed=0)
         found = [w for w in caught if "deterministic function" in str(w.message)]
         assert len(found) == 1
         assert issubclass(found[0].category, jaxgsa.JaxgsaWarning)

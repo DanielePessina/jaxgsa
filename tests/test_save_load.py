@@ -271,7 +271,9 @@ def _every_design(problem: Problem):
             "SobolSamples": jaxgsa.sobol.sample(problem, 16, seed=1, verbose=False),
             "MorrisSamples": jaxgsa.morris.sample(problem, 4, seed=1, verbose=False),
             "EFASTSamples": jaxgsa.efast.sample(problem, 65, seed=1, verbose=False),
-            "KucherenkoSamples": jaxgsa.kucherenko.sample(problem, 16, seed=1, verbose=False),
+            "KucherenkoSamples": jaxgsa.kucherenko.sample(
+                problem, base_n=16, seed=1, verbose=False
+            ),
         }
 
 

@@ -143,18 +143,18 @@ class TestSAResultToDataset:
             {"x1": (0.0, 1.0), "x2": (0.0, 1.0), "x3": (0.0, 1.0)},
             output_names=("response",),
         )
-        sampling_result = jaxgsa.sobol.sample(
+        samples = jaxgsa.sobol.sample(
             problem,
             n_samples=128,
             calc_second_order=True,
             seed=7,
             verbose=False,
         )
-        X = jnp.asarray(sampling_result.samples)
+        X = jnp.asarray(samples.samples)
         Y = 2.0 * X[:, 0] + 0.5 * X[:, 1] ** 2 + X[:, 0] * X[:, 2]
 
         result = jaxgsa.sobol.analyze(
-            sampling_result,
+            samples,
             Y,
             n_bootstrap=8,
             conf_level=0.9,

@@ -7,7 +7,7 @@ take the fixtures by name with no import. Plain helpers (``BOOT``,
 ``invalid_sample``) are imported normally.
 
 Keep the shapes and static arguments below fixed. A new ``n_bootstrap`` or
-``n_partitions`` value costs a new compile, so the result fixtures all use one
+``n_classes`` value costs a new compile, so the result fixtures all use one
 bootstrap size, ``BOOT``.
 """
 
@@ -30,14 +30,14 @@ BOOT = 8
 @pytest.fixture(scope="session")
 def given_ishigami_xy():
     """Ishigami Monte Carlo sample, ``N = 2048``, seed 42."""
-    X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=2048, seed=42))
+    X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=2048, seed=42))
     return X, ishigami.evaluate(X)
 
 
 @pytest.fixture(scope="session")
 def ishigami_xy_4k():
     """Ishigami Monte Carlo sample, ``N = 4096``, seed 42 (OT closed-form checks)."""
-    X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n=4096, seed=42))
+    X = jnp.asarray(monte_carlo(ishigami.PROBLEM, n_samples=4096, seed=42))
     return X, ishigami.evaluate(X)
 
 
@@ -53,7 +53,7 @@ def ishigami_xy_series(given_ishigami_xy):
 @pytest.fixture(scope="session")
 def gaussian_linear_xy():
     """Gaussian linear sample, ``N = 4096``, seed 1 (closed-form smoke tests)."""
-    X = jnp.asarray(monte_carlo(gaussian_linear.PROBLEM, n=4096, seed=1))
+    X = jnp.asarray(monte_carlo(gaussian_linear.PROBLEM, n_samples=4096, seed=1))
     return X, gaussian_linear.evaluate(X)
 
 

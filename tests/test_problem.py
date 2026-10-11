@@ -22,7 +22,7 @@ def test_from_dict_tuple_shorthand_still_produces_uniform_bounds():
     p = Problem.from_dict({"x1": (0.0, 1.0), "x2": (-1.0, 1.0)})
     assert p.names == ("x1", "x2")
     assert p.bounds == ((0.0, 1.0), (-1.0, 1.0))
-    assert p.num_vars == 2
+    assert p.n_params == 2
     assert p.has_non_uniform_inputs is False
 
 
@@ -43,7 +43,7 @@ def test_from_dict_accepts_uniform_and_gaussian_typed_dict_specs():
 
     assert p.names == ("x1", "x2", "x3")
     assert p.bounds is None
-    assert p.num_vars == 3
+    assert p.n_params == 3
     assert p.has_non_uniform_inputs is True
 
 
@@ -341,7 +341,7 @@ def test_sampler_round_trip_through_constructor_from_dict_and_with_sampler():
         sampler=_copy_sampler,
         sampler_dimension=3,
     )
-    via_with = Problem.from_dict(_SAMPLER_SPECS).with_sampler(_copy_sampler, dimension=3)
+    via_with = Problem.from_dict(_SAMPLER_SPECS).with_sampler(_copy_sampler, sampler_dimension=3)
     for p in (via_dict, via_ctor, via_with):
         assert p.sampler is _copy_sampler
         assert p.sampler_dimension == 3

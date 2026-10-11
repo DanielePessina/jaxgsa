@@ -43,7 +43,7 @@ def sampler(
 
 
 # W = (U + V) mod 1: every pair is independent, but the triple is degenerate.
-PROBLEM = BASE.with_sampler(sampler, dimension=2)
+PROBLEM = BASE.with_sampler(sampler, sampler_dimension=2)
 
 
 def test_conditionals_preserve_the_joint_constraint_for_every_subset() -> None:
@@ -66,7 +66,7 @@ def test_conditionals_preserve_the_joint_constraint_for_every_subset() -> None:
 def test_kucherenko_retains_higher_order_dependence() -> None:
     """For Y=W, first order is (0,0,1) and every conditional total is zero."""
     with jax.enable_x64():
-        design = kucherenko.sample(PROBLEM, 8192, seed=7, verbose=False)
+        design = kucherenko.sample(PROBLEM, base_n=8192, seed=7, verbose=False)
         result = kucherenko.analyze(design, jnp.asarray(design.samples[:, 2]), verbose=False)
     assert isinstance(result, kucherenko.KucherenkoResult)
     # Worst S1 error over eight seeds at base 8192 is 0.016.
@@ -82,7 +82,7 @@ def test_identity_copula_loses_the_triple_constraint() -> None:
     """An independent joint model gives W a total index of one instead."""
     with jax.enable_x64():
         with pytest.warns(JaxgsaWarning, match="plain independent draws"):
-            design = kucherenko.sample(BASE, 1024, seed=7, verbose=False)
+            design = kucherenko.sample(BASE, base_n=1024, seed=7, verbose=False)
         result = kucherenko.analyze(design, jnp.asarray(design.samples[:, 2]), verbose=False)
     assert isinstance(result, kucherenko.KucherenkoResult)
     # The error is 6e-6 even at base 1024; the tolerance is far above it.

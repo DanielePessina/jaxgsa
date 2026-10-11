@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import warnings
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, overload
 
 import jax
 import jax.numpy as jnp
@@ -93,7 +93,7 @@ def _validate_x(problem: Problem, X: Array) -> None:
     """Validate the shared ``(N, D)`` input-matrix contract.
 
     Args:
-        problem: Problem definition with ``num_vars`` parameters.
+        problem: Problem definition with ``n_params`` parameters.
         X: Input sample matrix, expected shape ``(N, D)``.
 
     Raises:
@@ -104,9 +104,9 @@ def _validate_x(problem: Problem, X: Array) -> None:
         raise ValueError(f"X must be 2-D (N, D), got ndim={X.ndim}")
     if X.shape[0] == 0:
         raise ValueError("X must have at least one row, got 0")
-    if X.shape[1] != problem.num_vars:
+    if X.shape[1] != problem.n_params:
         raise ValueError(
-            f"X has {X.shape[1]} columns but problem has {problem.num_vars} parameters"
+            f"X has {X.shape[1]} columns but problem has {problem.n_params} parameters"
         )
 
 
@@ -718,3 +718,46 @@ def _standardize_outputs(Y: Array) -> tuple[Array, Array, Array, Array]:
     safe_scale = jnp.where(constant | (y_std == 0), jnp.ones_like(y_std), y_std)
     Y_norm = (Y - y_mean) / safe_scale
     return Y_norm, y_mean, y_std, safe_scale
+
+
+@overload
+def as_key(key: None, method: str) -> None: ...
+
+
+@overload
+def as_key(key: Array | int, method: str) -> Array: ...
+
+
+@overload
+def as_key(key: object, method: str) -> Array | None: ...
+
+
+def as_key(key: object, method: str) -> Array | None:
+    """Coerce a user-supplied ``key`` to a JAX PRNG key.
+
+    An ``int`` becomes ``jax.random.key(int)``. A typed key, or a raw
+    ``uint32`` key array, passes through unchanged. ``None`` stays ``None``,
+    so the caller keeps deciding whether a key is required.
+
+    Args:
+        key: The value the user passed as ``key=``.
+        method: Method name for the error message, such as ``"pawn"``.
+
+    Returns:
+        A JAX PRNG key, or ``None`` when ``key`` is ``None``.
+
+    Raises:
+        TypeError: If ``key`` is not ``None``, an ``int``, or a JAX key
+            (a ``bool``, a float, a NumPy ``Generator`` and similar).
+    """
+    if key is None:
+        return None
+    if isinstance(key, int | np.integer) and not isinstance(key, bool | np.bool_):
+        return jax.random.key(int(key))
+    dtype = getattr(key, "dtype", None)
+    if isinstance(key, jax.Array | np.ndarray) and dtype is not None:
+        if jnp.issubdtype(dtype, jax.dtypes.prng_key) or dtype == np.uint32:
+            return key if isinstance(key, jax.Array) else jnp.asarray(key)
+    raise TypeError(
+        f"jaxgsa.{method}: key must be a jax.random.key(...) or an int, got {type(key).__name__}"
+    )

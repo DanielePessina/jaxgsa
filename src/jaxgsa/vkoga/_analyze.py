@@ -35,7 +35,7 @@ from jax import Array
 from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import apply_batched, resolve_batch_size
 from jaxgsa._core.bootstrap import interval
-from jaxgsa._core.copula import canonicalize_correlation, independent_correlation
+from jaxgsa._core.copula import independent_correlation
 from jaxgsa._core.dependence import CustomDraws, Draws, GaussianDraws
 from jaxgsa._core.entry import at_least, in_open_interval, one_of, prepare, require
 from jaxgsa._core.invalid import OnInvalid
@@ -51,6 +51,7 @@ from jaxgsa._core.result import CIInfo
 from jaxgsa._core.sampling import _next_power_of_2
 from jaxgsa._core.surrogate import _PredictPlan
 from jaxgsa._core.transforms import cdf_to_unit_interval
+from jaxgsa._core.validation import _is_constant_slice, as_key
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.problem import Problem
 from jaxgsa.vkoga._engine import _cross_validate, _fit_vkoga, _predict_vkoga
@@ -61,7 +62,6 @@ from jaxgsa.vkoga._result import VKOGAResult
 # per-channel recursive analyze() calls. verbose is excluded:
 # the engine owns it.
 _IRREGULAR_KWARGS = (
-    "correlation",
     "gamma",
     "ridge",
     "max_centers",
@@ -119,7 +119,6 @@ def analyze(
     X: Array,
     Y: Array | IrregularY,
     *,
-    correlation: Array | np.ndarray | None = None,
     gamma: float | None = None,
     ridge: float | None = None,
     max_centers: int | None = None,
@@ -130,7 +129,7 @@ def analyze(
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
-    key: Array | None = None,
+    key: Array | int,
     batch_size: int | None = None,
     on_invalid: OnInvalid = "raise",
     verbose: bool = True,
@@ -159,13 +158,6 @@ def analyze(
         problem: Problem defining the parameters and their marginals.
         X: Inputs in physical units, shape ``(N, D)``.
         Y: Model outputs, shape ``(N,)``, ``(N, K)``, or ``(N, T, K)``.
-        correlation: Gaussian-copula dependency structure. ``None`` (default)
-            reads ``problem.correlation`` and falls back to independent inputs
-            when the problem declares none. A ``(D, D)`` matrix overrides the
-            problem's declaration for this call. To fit a matrix from data,
-            use :func:`jaxgsa.sampling.fit_correlation` and attach it with
-            ``problem.with_correlation(...)``. Must be ``None`` when the
-            problem declares a custom sampler.
         gamma: RBF shape parameter, finite and positive when given. ``None``
             cross-validates over a grid.
         ridge: Kernel regularisation, finite and positive when given. ``None``
@@ -257,8 +249,6 @@ def analyze(
     Raises:
         ValueError: If ``X``/``Y`` violate the output contract, if the problem
             has fewer than two parameters or any categorical parameter, if
-            ``correlation`` is not ``None`` or a valid matrix, if
-            ``correlation`` is given for a problem with a custom sampler, if
             the custom sampler returns rows outside a declared bounded
             support, if ``gamma`` or
             ``ridge`` is not finite and positive, or if a size argument is out
@@ -279,11 +269,7 @@ def analyze(
             clipped to ``S_TU`` by a wide margin, which says the additive
             component functions cannot represent the model's interactions.
     """
-    if correlation is not None and problem.sampler is not None:
-        raise ValueError(
-            "correlation= cannot override the dependence of a problem with a custom "
-            "sampler; drop the sampler with problem.with_sampler(None) first"
-        )
+    key = as_key(key, "vkoga")
     if _is_irregular_y(Y):
         return analyze_irregular(
             analyze,
@@ -297,14 +283,14 @@ def analyze(
         )
     Y = cast(Array, Y)
 
-    from jaxgsa.vkoga import SPEC
+    from jaxgsa.vkoga import _SPEC
 
-    D = problem.num_vars
+    D = problem.n_params
     # Every scalar argument is checked before any expensive work
     # (cross-validation, fitting, index estimation). The preamble runs them
     # first, so that ordering is structural rather than a convention.
     ctx = prepare(
-        SPEC,
+        _SPEC,
         problem,
         Y,
         X=X,
@@ -367,23 +353,16 @@ def analyze(
 
     _warn_single_precision()
     # The input draws are built once and shared by the point estimate and every
-    # bootstrap replicate. A per-call correlation override is folded into a
-    # copy of the problem, so the result's dependence label describes the
-    # distribution the indices were actually computed under.
+    # bootstrap replicate. The dependence comes from the problem alone, so the
+    # result's ``dependence`` always equals ``problem.dependence``.
     input_draws: Draws
-    R: np.ndarray | None
     if problem.sampler is not None:
-        R = None
         input_draws = CustomDraws(problem)
-        dependence = problem.dependence
     else:
-        R = _resolve_correlation(problem, correlation)
-        analysis_problem = problem.with_correlation(R)
-        # Report the matrix the draws actually use, so the result can never
-        # disagree with the conditionals behind its indices.
-        R = analysis_problem.correlation
-        input_draws = GaussianDraws(analysis_problem)
-        dependence = analysis_problem.dependence
+        declared = problem.correlation
+        if declared is None:
+            declared = independent_correlation(problem.n_params)
+        input_draws = GaussianDraws(problem.with_correlation(declared))
 
     # The RBF kernel is isotropic, so every column must share a scale; the
     # marginal CDF map is the same transform HDMR uses for its basis.
@@ -464,6 +443,11 @@ def analyze(
         )
         confs.update(interval_confs)
 
+    # 1 - in-sample MSE / output variance, from the training rows.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        explained = 1.0 - np.asarray(state.rmse) ** 2 / np.asarray(Y_flat).var(axis=0)
+    # A constant slice has no variance to explain; float32 var is ~1e-16, not 0.
+    explained = np.where(np.asarray(_is_constant_slice(Y_flat)), np.nan, explained)
     output_shape = ctx.squeeze(jnp.zeros((n_time, n_out)), n_trailing=0).shape
     result = VKOGAResult(
         S_TC=_shape_index(indices.S_TC),
@@ -472,15 +456,15 @@ def analyze(
         S_C=_shape_index(indices.S_C),
         S_IU=_shape_index(indices.S_IU),
         problem=problem,
-        correlation=R,
-        dependence=dependence,
+        dependence=problem.dependence,
         variance=_shape_slice(indices.variance),
         n_centers=int(state.n_centers),
         gamma=float(gamma_value),
         ridge=float(ridge_value),
         invalid=invalid,
         rmse=_shape_slice(np.asarray(state.rmse)),
-        cv_rmse=cv_rmse,
+        cv_rmse=None if cv_rmse is None else _shape_slice(cv_rmse),
+        explained_variance=_shape_slice(explained),
         _fit=state,
         _y_mean=y_mean,
         _output_shape=output_shape,
@@ -503,7 +487,7 @@ def analyze(
         )
         _verbose.analysis_summary(
             method="jaxgsa.vkoga.analyze",
-            dependence=dependence,
+            dependence=problem.dependence,
             problem=problem,
             n_runs=int(ctx.Y.shape[0]),
             T=n_time,
@@ -722,42 +706,6 @@ def _warn_single_precision() -> None:
         )
 
 
-def _resolve_correlation(
-    problem: Problem,
-    correlation: Array | np.ndarray | None,
-) -> np.ndarray:
-    """Turn the ``correlation`` argument into a validated latent matrix.
-
-    ``None`` reads ``problem.correlation``, and falls back to independent
-    inputs when the problem declares none. A matrix is an explicit per-call
-    override and is canonicalized like a constructor argument. The one
-    workflow for fitting a matrix from data is
-    ``problem.with_correlation(jaxgsa.sampling.fit_correlation(problem, X))``,
-    which states in the call which sample the copula comes from.
-
-    Args:
-        problem: Problem whose declared correlation is the fallback.
-        correlation: Per-call override, shape ``(D, D)``, or ``None``.
-
-    Returns:
-        A canonicalized latent correlation matrix, shape ``(D, D)``.
-
-    Raises:
-        ValueError: If ``correlation`` is not a valid matrix.
-    """
-    if correlation is None:
-        declared = problem.correlation
-        if declared is None:
-            return independent_correlation(problem.num_vars)
-        # Problem construction already canonicalized the declared matrix.
-        return declared
-    # A per-call override is user-declared, so it takes the strict repair
-    # policy: a matrix that has to move materially is rejected, not repaired.
-    return canonicalize_correlation(
-        correlation, problem.num_vars, policy="declared", method="jaxgsa.vkoga.analyze"
-    )
-
-
 def _resolve_hyperparameters(
     U: Array,
     Y: Array,
@@ -767,7 +715,7 @@ def _resolve_hyperparameters(
     max_centers: int,
     n_folds: int,
     seed: int,
-) -> tuple[float, float, float | None]:
+) -> tuple[float, float, np.ndarray | None]:
     """Return ``(gamma, ridge, cv_rmse)``, cross-validating what was not given.
 
     A partially specified pair is handled by searching a one-element grid for
@@ -783,9 +731,12 @@ def _resolve_hyperparameters(
         seed: Seed for the fold assignment.
 
     Returns:
-        The chosen ``gamma`` and ``ridge``, plus the pooled out-of-sample RMSE
-        of the winning grid point. The score is ``None`` when the caller fixed
-        both hyperparameters, because no cross-validation ran.
+        The chosen ``gamma`` and ``ridge``, plus the out-of-sample RMSE of the
+        winning grid point, one value per output slice, shape ``(S,)``. The
+        grid point is chosen on the RMSE pooled over the slices, and the
+        per-slice values come from the same fold residuals. The score is
+        ``None`` when the caller fixed both hyperparameters, because no
+        cross-validation ran.
 
     Raises:
         RuntimeError: If every cross-validation score is non-finite. Argmin
@@ -797,17 +748,18 @@ def _resolve_hyperparameters(
 
     gammas = np.asarray([gamma]) if gamma is not None else _GAMMA_GRID
     ridges = np.asarray([ridge]) if ridge is not None else _RIDGE_GRID
-    scores = np.asarray(
-        _cross_validate(
-            U,
-            Y,
-            gammas=gammas,
-            ridges=ridges,
-            max_centers=max_centers,
-            n_folds=n_folds,
-            seed=seed,
-        )
+    per_slice_jax, pooled_jax = _cross_validate(
+        U,
+        Y,
+        gammas=gammas,
+        ridges=ridges,
+        max_centers=max_centers,
+        n_folds=n_folds,
+        seed=seed,
     )
+    per_slice = np.asarray(per_slice_jax)
+    # The grid choice uses the pooled score computed on device.
+    scores = np.asarray(pooled_jax)
     finite = np.isfinite(scores)
     if not finite.any():
         raise RuntimeError(
@@ -819,10 +771,10 @@ def _resolve_hyperparameters(
     # as the worst possible rather than letting argmin pick a NaN.
     scores = np.where(finite, scores, np.inf)
     best = np.unravel_index(int(np.argmin(scores)), scores.shape)
-    return float(gammas[best[0]]), float(ridges[best[1]]), float(scores[best])
+    return float(gammas[best[0]]), float(ridges[best[1]]), per_slice[best]
 
 
-def _warn_poor_surrogate(cv_rmse: float | None, Y_centered: Array) -> None:
+def _warn_poor_surrogate(cv_rmse: np.ndarray | None, Y_centered: Array) -> None:
     """Warn when the cross-validated fit is too weak to carry the indices.
 
     Every index is measured against the surrogate, not against the model, so a
@@ -832,8 +784,8 @@ def _warn_poor_surrogate(cv_rmse: float | None, Y_centered: Array) -> None:
     for the user to notice.
 
     Args:
-        cv_rmse: Pooled out-of-sample RMSE of the chosen hyperparameters, or
-            ``None`` when the caller fixed both and no cross-validation ran.
+        cv_rmse: Per-slice out-of-sample RMSE of the chosen hyperparameters,
+            shape ``(S,)``, or ``None`` when the caller fixed both and no cross-validation ran.
         Y_centered: Centred training outputs, shape ``(N, S)``. They set the
             scale to compare against.
 
@@ -844,9 +796,10 @@ def _warn_poor_surrogate(cv_rmse: float | None, Y_centered: Array) -> None:
     if cv_rmse is None:
         return
     scale = float(jnp.sqrt(jnp.mean(Y_centered**2)))
-    if scale <= 0.0 or not np.isfinite(cv_rmse):
+    pooled = float(np.sqrt(np.mean(np.asarray(cv_rmse) ** 2)))
+    if scale <= 0.0 or not np.isfinite(pooled):
         return
-    relative = cv_rmse / scale
+    relative = pooled / scale
     if relative <= _CV_RMSE_WARN_FRACTION:
         return
     warnings.warn(

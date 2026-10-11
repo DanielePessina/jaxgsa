@@ -13,8 +13,9 @@ The estimator supports a continuous output distribution only, because a KDE
 on a fixed grid cannot represent an atom. ``analyze`` refuses a discrete
 output up front and points the caller at ``jaxgsa.optimal_transport``.
 
-The plug-in estimator is biased upward at finite N. By default the central
-estimate is therefore bias-corrected with bootstrap resamples, as
+The plug-in estimator is biased upward at finite N. With
+``bias_correct=True`` the central estimate is therefore bias-corrected with
+bootstrap resamples, as
 ``2*d_hat - mean(d_boot)`` (Plischke et al. eqn 30), where ``d_hat`` comes
 from the original sample. The same replicates give the percentile confidence
 intervals. The original sample and the bootstrap replicates run through one
@@ -52,9 +53,9 @@ from __future__ import annotations
 
 import math
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from functools import lru_cache
-from typing import Literal, cast
+from typing import Literal, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -65,6 +66,7 @@ from jaxgsa._core import verbose as _verbose
 from jaxgsa._core.batching import resolve_batch_size
 from jaxgsa._core.bootstrap import interval
 from jaxgsa._core.entry import (
+    ScalarCheck,
     at_least,
     check_scalars,
     in_open_interval,
@@ -86,7 +88,7 @@ from jaxgsa._core.partition import (
     build_partition_groups,
 )
 from jaxgsa._core.result import CIInfo
-from jaxgsa._core.validation import _prepare_Y, _validate_output
+from jaxgsa._core.validation import _prepare_Y, _validate_output, as_key
 from jaxgsa._core.warning_types import JaxgsaWarning
 from jaxgsa.borgonovo._result import DeltaResult
 from jaxgsa.problem import Problem, _categorical_dims
@@ -112,11 +114,6 @@ _IRREGULAR_KWARGS = (
 
 _SQRT_2PI = math.sqrt(2.0 * math.pi)
 _MAX_CLASSES = 48
-# One-time-per-process flag for the bias_correct=None resolution warning. The
-# default is a tri-state, and a silent resolution to True surprised users, so
-# the first default call that applies the correction says so once. An explicit
-# True or False never warns, and never sets this.
-_warned_bias_correct_default = False
 # A class whose KDE bandwidth falls below this fraction of the full-sample
 # bandwidth counts as degenerate. Two failures live below this line. The
 # first is an exactly zero variance, that is a point mass, such as one
@@ -209,6 +206,24 @@ _MIN_GRID_TILE = 2
 # Fewest samples that still build two conditioning classes with a density
 # each. Below this there is nothing to compare.
 _MIN_KEPT = 4
+
+
+def _prefixed(checks: Sequence[ScalarCheck]) -> tuple[ScalarCheck, ...]:
+    """Prefix each failing-argument message with ``jaxgsa.borgonovo: ``.
+
+    Args:
+        checks: Scalar verdicts built with the shared helpers.
+
+    Returns:
+        The same verdicts, each message starting ``jaxgsa.borgonovo: `` unless
+        it already starts with ``jaxgsa``.
+    """
+    return tuple(
+        c
+        if c.message.startswith("jaxgsa")
+        else ScalarCheck(c.ok, f"jaxgsa.borgonovo: {c.message}")
+        for c in checks
+    )
 
 
 def _plischke_n_classes(n_samples: int) -> int:
@@ -683,7 +698,7 @@ def _raise_discrete_output(problem: Problem, Y: Array) -> None:
         where = f"{bad.size} of {flat.shape[1]} output columns are discrete ({detail}{extra})"
 
     raise ValueError(
-        "jaxgsa.borgonovo.analyze supports a continuous output distribution "
+        "jaxgsa.borgonovo: analyze supports a continuous output distribution "
         f"only, but {where} in {N} samples. The delta estimator compares "
         "Gaussian kernel density estimates on a shared output grid; an "
         "atomic density is a spike that no grid resolves, so the index "
@@ -827,8 +842,8 @@ def analyze(
     n_bootstrap: int = 0,
     conf_level: float = 0.95,
     ci_method: Literal["quantile", "gaussian"] = "quantile",
-    bias_correct: bool | None = None,
-    key: Array | None = None,
+    bias_correct: bool = False,
+    key: Array | int | None = None,
     slice_chunk_size: int | None = None,
     degenerate_tol: float = _DEGENERATE_BW_TOL,
     degenerate_bandwidth: float | Literal["auto"] = "auto",
@@ -890,30 +905,18 @@ def analyze(
             ``+/- z * sd`` of the bootstrap draws, which is smoother for a
             small ``n_bootstrap`` but assumes the draws are normal.
         bias_correct: Apply the Plischke bias reduction
-            ``2*d_hat - mean(d_boot)`` to the delta estimate.
+            ``2*d_hat - mean(d_boot)`` to the delta estimate. ``False``
+            (default) reports the plain estimate always: ``n_bootstrap``
+            only adds intervals, as in every other method. ``True`` reports
+            the corrected estimate and needs ``n_bootstrap > 0``, because
+            the correction is built from the replicates; otherwise a
+            ``ValueError`` is raised. S1 is never bias-corrected, matching
+            SALib.
 
-            **This default is a tri-state, and what ``None`` does depends on
-            ``n_bootstrap``.** ``None`` (the default) applies the correction
-            whenever there are replicates to apply it with — that is,
-            whenever ``n_bootstrap > 0`` — and does nothing when
-            ``n_bootstrap == 0``. So adding ``n_bootstrap=100`` to a default
-            call does not only add intervals: it also changes the reported
-            ``delta`` from the plug-in estimate to the corrected one. The
-            first default call per process that resolves ``None`` to the
-            correction says so with a one-time ``JaxgsaWarning``; pass an
-            explicit ``True`` or ``False`` to silence it. ``True`` asks for
-            the correction explicitly, and warns if ``n_bootstrap`` is ``0``,
-            because then it cannot be delivered. ``False`` never applies it.
-
-            The tri-state exists because the correction needs replicates and
-            replicates are opt-in: a plain ``bias_correct=True`` default
-            beside ``n_bootstrap=0`` would be a contradiction that warns on
-            every default call. S1 is never bias-corrected, matching SALib.
-
-            The uncorrected delta is positively biased: a KDE separation is
-            a distance, so sampling noise can only push it up. Prefer
-            ``n_bootstrap >= 100`` when the value matters, not only the
-            ranking.
+            The plain delta is positively biased: a KDE separation is
+            a distance, so sampling noise can only push it up. Use
+            ``bias_correct=True`` with ``n_bootstrap >= 100`` when the value
+            matters, not only the ranking.
         key: A ``jax.random`` key for the bootstrap resampling. Required
             when ``n_bootstrap > 0``. Pass ``jax.random.key(0)`` if you have
             an integer seed.
@@ -1003,7 +1006,7 @@ def analyze(
         A :class:`DeltaResult` with the delta and ``S1`` indices and the
         optional confidence intervals. The underlying delta index is
         defined on ``[0, 1]`` and the plug-in estimate stays in that range.
-        The default bias-corrected estimate and its confidence bounds can
+        The bias-corrected estimate and its confidence bounds can
         fall marginally below 0 for weak or near-noninfluential parameters
         at small sample sizes. A constant output column yields
         ``delta = S1 = 0``, where SALib raises an error, and so does a
@@ -1025,7 +1028,8 @@ def analyze(
             of X holds values other than its integer level codes;
             ``grid_size < 2``; ``bandwidth`` is neither ``"silverman"`` nor
             a positive float; ``n_bootstrap < 0``; ``n_bootstrap > 0`` and no
-            ``key`` was given; ``ci_method`` is neither ``"quantile"`` nor
+            ``key`` was given; ``bias_correct=True`` with
+            ``n_bootstrap=0``; ``ci_method`` is neither ``"quantile"`` nor
             ``"gaussian"``; ``conf_level`` is not in
             ``(0, 1)``; ``slice_chunk_size`` is not a positive integer;
             ``degenerate_tol`` is not in ``[0, 1)``; or
@@ -1039,20 +1043,16 @@ def analyze(
             computation failed rather than returned an estimate.
 
     Warns:
-        JaxgsaWarning: On any of six conditions. An output slice has zero
+        JaxgsaWarning: On any of four conditions. An output slice has zero
             variance, so every conditional density equals the unconditional
             one and delta is an exact 0 rather than an answer. A parameter is
             constant in the sample, so its delta and S1 are exactly 0 — a
             constant input cannot shift the output distribution. A passed
             ``n_classes`` is ignored because every parameter is categorical.
-            ``bias_correct=True`` was given but ``n_bootstrap=0``, so no
-            correction ran and the raw, upward-biased delta is returned.
-            ``bias_correct`` was left at its default (``None``) and
-            ``n_bootstrap > 0``, so the Plischke bias correction runs
-            silently unless this warning is read; shown once per process.
             At least one conditioning class is too narrow for the output
             grid, and its bandwidth was floored.
     """
+    key = as_key(key, "borgonovo")
     if _is_irregular_y(Y):
         return analyze_irregular(
             analyze,
@@ -1066,30 +1066,42 @@ def analyze(
         )
     Y = cast(Array, Y)
 
-    from jaxgsa.borgonovo import SPEC
+    from jaxgsa.borgonovo import _SPEC
 
+    if not isinstance(bias_correct, bool):
+        raise TypeError(
+            f"jaxgsa.borgonovo: bias_correct must be True or False, got {bias_correct!r}"
+        )
     # A non-finite value has to be settled before the KDE runs. Left alone it
     # would survive the whole estimate and the bootstrap, and then surface as
     # an out-of-range delta, which reads as a bandwidth problem and is not one.
     ctx = prepare(
-        SPEC,
+        _SPEC,
         problem,
         Y,
         X=X,
         on_invalid=on_invalid,
-        checks=(
-            at_least("grid_size", grid_size, 2),
-            at_least("n_bootstrap", n_bootstrap, 0),
-            one_of("ci_method", ci_method, ("quantile", "gaussian")),
-            in_open_interval("conf_level", conf_level, 0.0, 1.0),
-            require(
-                0 <= float(degenerate_tol) < 1,
-                f"degenerate_tol must be in [0, 1), got {degenerate_tol}",
-            ),
-            at_least("slice_chunk_size", slice_chunk_size, 1),
-            require(
-                n_bootstrap == 0 or key is not None,
-                "key is required when n_bootstrap > 0",
+        checks=_prefixed(
+            (
+                at_least("grid_size", grid_size, 2),
+                at_least("n_bootstrap", n_bootstrap, 0),
+                one_of("ci_method", ci_method, ("quantile", "gaussian")),
+                in_open_interval("conf_level", conf_level, 0.0, 1.0),
+                require(
+                    0 <= float(degenerate_tol) < 1,
+                    f"degenerate_tol must be in [0, 1), got {degenerate_tol}",
+                ),
+                at_least("slice_chunk_size", slice_chunk_size, 1),
+                require(
+                    not (bias_correct and n_bootstrap == 0),
+                    "bias_correct=True needs bootstrap replicates, but "
+                    "n_bootstrap is 0. Pass n_bootstrap=100 (and a key), or leave "
+                    "bias_correct=False for the plain estimate.",
+                ),
+                require(
+                    n_bootstrap == 0 or key is not None,
+                    "key is required when n_bootstrap > 0",
+                ),
             ),
         ),
         min_kept=_MIN_KEPT,
@@ -1127,7 +1139,7 @@ def analyze(
     # always gets one conditioning class per level.
     dims_levels = _categorical_dims(problem)
     cat_dims = [d for d, _ in dims_levels]
-    cont_dims = [d for d in range(problem.num_vars) if d not in set(cat_dims)]
+    cont_dims = [d for d in range(problem.n_params) if d not in set(cat_dims)]
     if n_classes is None:
         M = _plischke_n_classes(N)
     else:
@@ -1135,7 +1147,7 @@ def analyze(
         # A passed value is always validated, even when nothing uses it.
         # Silently accepting nonsense hides bugs in the caller.
         if not 2 <= M <= N:
-            raise ValueError(f"n_classes must be in [2, N={N}], got {n_classes}")
+            raise ValueError(f"jaxgsa.borgonovo: n_classes must be in [2, N={N}], got {n_classes}")
         if not cont_dims:
             warnings.warn(
                 "jaxgsa.borgonovo: n_classes is ignored because every parameter is "
@@ -1149,45 +1161,19 @@ def analyze(
 
     Y_3d = ctx.Y3
     _, T, K = Y_3d.shape
-    D = problem.num_vars
+    D = problem.n_params
     Y_cols = Y_3d.reshape(N, T * K)
 
     # Replicate 0 is the identity permutation, that is the original sample.
     # The remaining rows are the bootstrap resamples. Building them together
     # means the point estimate and its interval share one code path.
     identity = jnp.arange(N, dtype=jnp.int32)[None, :]
-    if bias_correct is True and n_bootstrap == 0:
-        warnings.warn(
-            "jaxgsa.borgonovo: bias_correct=True needs bootstrap replicates, and "
-            "n_bootstrap is 0, so no bias correction was applied. The delta "
-            "returned is the raw estimate, which is biased upward because a KDE "
-            "separation is a distance and sampling noise can only increase it. "
-            "Pass n_bootstrap=100 (and a key) for the corrected value.",
-            JaxgsaWarning,
-            stacklevel=2,
-        )
-    apply_bias_correction = bias_correct is not False
+    apply_bias_correction = bias_correct
 
     if n_bootstrap > 0:
         # key is required by then, checked in the checks= above (fires
         # before prepare() has done any work).
         assert key is not None
-        # Warn after that, so the one shot lands on a call that actually
-        # runs; a failed first call must not burn the warning.
-        if bias_correct is None:
-            global _warned_bias_correct_default
-            if not _warned_bias_correct_default:
-                _warned_bias_correct_default = True
-                warnings.warn(
-                    "jaxgsa.borgonovo: bias_correct was left at its default (None) and "
-                    "n_bootstrap > 0, so the Plischke bias correction IS applied: the "
-                    "delta reported is 2*d_hat - mean(d_boot), not the plug-in "
-                    "estimate. Pass bias_correct=True to keep this and silence this "
-                    "warning, or bias_correct=False for the uncorrected delta. "
-                    "This warning is shown once per process.",
-                    JaxgsaWarning,
-                    stacklevel=2,
-                )
         boot = jax.random.randint(key, (n_bootstrap, N), 0, N, dtype=jnp.int32)
         all_idx = jnp.concatenate([identity, boot], axis=0)
     else:
@@ -1339,6 +1325,21 @@ def analyze(
     return result
 
 
+class BorgonovoIndices(NamedTuple):
+    """Plain-array Borgonovo indices, as returned by :func:`indices`.
+
+    Fields are named like the matching result fields. Tuple unpacking
+    works as for a plain tuple.
+
+    Attributes:
+        delta: Borgonovo delta per parameter.
+        S1: Given-data first-order Sobol index per parameter.
+    """
+
+    delta: Array
+    S1: Array
+
+
 def indices(
     problem: Problem,
     X: Array,
@@ -1350,7 +1351,7 @@ def indices(
     slice_chunk_size: int | None = None,
     degenerate_tol: float = _DEGENERATE_BW_TOL,
     degenerate_bandwidth: float | Literal["auto"] = "auto",
-) -> tuple[Array, Array]:
+) -> BorgonovoIndices:
     """Compute Borgonovo delta and given-data S1 as plain arrays.
 
     This is the transformable core of :func:`analyze`. It runs the same
@@ -1409,8 +1410,9 @@ def indices(
             :func:`analyze`.
 
     Returns:
-        ``(delta, S1)``, at the rank the caller's ``Y`` had: ``(D,)`` for a
-        1-D ``Y``, ``(K, D)`` for 2-D, ``(T, K, D)`` for 3-D. The shapes
+        A :class:`BorgonovoIndices` named tuple ``(delta, S1)``, at the rank
+        the caller's ``Y`` had: ``(D,)`` for a 1-D ``Y``, ``(K, D)`` for 2-D,
+        ``(T, K, D)`` for 3-D. The shapes
         are those ``analyze`` reports.
 
     Raises:
@@ -1423,13 +1425,17 @@ def indices(
             positive float; or if any parameter is categorical.
     """
     check_scalars(
-        (
-            at_least("grid_size", grid_size, 2),
-            require(
-                0 <= float(degenerate_tol) < 1,
-                f"degenerate_tol must be in [0, 1), got {degenerate_tol}",
-            ),
-            at_least("slice_chunk_size", slice_chunk_size, 1),
+        _prefixed(
+            (
+                (
+                    at_least("grid_size", grid_size, 2),
+                    require(
+                        0 <= float(degenerate_tol) < 1,
+                        f"degenerate_tol must be in [0, 1), got {degenerate_tol}",
+                    ),
+                    at_least("slice_chunk_size", slice_chunk_size, 1),
+                )
+            )
         )
     )
     X = validate_inputs(problem, X)
@@ -1438,7 +1444,7 @@ def indices(
     if dims_levels:
         names = ", ".join(repr(problem.names[d]) for d, _ in dims_levels)
         raise ValueError(
-            "jaxgsa.borgonovo.indices supports continuous parameters only, "
+            "jaxgsa.borgonovo: indices supports continuous parameters only, "
             f"but {names} is categorical. A categorical parameter conditions "
             "on one class per observed level, and both the class count and "
             "the padded class width are read off the sample on the host, so "
@@ -1450,7 +1456,7 @@ def indices(
     N = X.shape[0]
     M = _plischke_n_classes(N) if n_classes is None else int(n_classes)
     if not 2 <= M <= N:
-        raise ValueError(f"n_classes must be in [2, N={N}], got {n_classes}")
+        raise ValueError(f"jaxgsa.borgonovo: n_classes must be in [2, N={N}], got {n_classes}")
     bw_factor = _resolve_sentinel_float(bandwidth, "bandwidth", "silverman")
     degenerate_bw = _resolve_sentinel_float(degenerate_bandwidth, "degenerate_bandwidth", "auto")
 
@@ -1476,23 +1482,25 @@ def indices(
         degenerate_bw=degenerate_bw,
         slice_chunk_size=slice_chunk_size,
     )
-    D = problem.num_vars
+    D = problem.n_params
     delta = layout.squeeze(d_all.reshape(1, T, K, D)[0])
     S1 = layout.squeeze(s1_all.reshape(1, T, K, D)[0])
     # Same provably-zero mask as analyze: a constant input cannot shift the
     # output distribution. Computed traceably, so indices stays jittable.
     const_cols = jnp.max(X, axis=0) == jnp.min(X, axis=0)
-    return jnp.where(const_cols, 0.0, delta), jnp.where(const_cols, 0.0, S1)
+    return BorgonovoIndices(
+        delta=jnp.where(const_cols, 0.0, delta), S1=jnp.where(const_cols, 0.0, S1)
+    )
 
 
 def _out_of_range_columns(
-    values: Array, num_vars: int, allow_non_finite: bool = False
+    values: Array, n_params: int, allow_non_finite: bool = False
 ) -> tuple[np.ndarray, np.ndarray]:
     """Find parameter columns whose estimates leave the delta range.
 
     Args:
         values: Estimates with the parameter axis last ``(..., D)``.
-        num_vars: Number of parameters D.
+        n_params: Number of parameters D.
         allow_non_finite: Treat a non-finite estimate as acceptable. Set
             only under ``on_invalid="propagate"``, where the caller asked
             for the bad value to reach the indices and already has a
@@ -1503,7 +1511,7 @@ def _out_of_range_columns(
         A tuple ``(flat, cols)`` where ``flat`` is the ``(-1, D)`` view of
         ``values`` and ``cols`` holds the indices of the failing columns.
     """
-    flat = np.asarray(values).reshape(-1, num_vars)
+    flat = np.asarray(values).reshape(-1, n_params)
     # A NaN compares False both ways, so the range tests alone never flag
     # one; an infinity does trip them. Both kinds are handled together.
     finite = np.isfinite(flat)
@@ -1550,7 +1558,7 @@ def _raise_delta_out_of_range(
             ``1 + _DELTA_RANGE_TOL``, or, unless ``allow_non_finite``, not
             finite.
     """
-    flat, cols = _out_of_range_columns(delta, problem.num_vars, allow_non_finite)
+    flat, cols = _out_of_range_columns(delta, problem.n_params, allow_non_finite)
     if cols.size == 0:
         return
     detail = ", ".join(
@@ -1558,7 +1566,7 @@ def _raise_delta_out_of_range(
         for d in cols
     )
     raise ValueError(
-        "jaxgsa: delta is a half L1 distance between densities, so it lies "
+        "jaxgsa.borgonovo: delta is a half L1 distance between densities, so it lies "
         f"in [0, 1]. The estimate left that range for {detail}. This is a "
         "failed computation, not a result. The cause is a conditioning "
         "class the output grid cannot resolve: a class that is a point "
@@ -1591,7 +1599,7 @@ def _warn_conf_out_of_range(
     """
     parts = []
     for bound, arr in (("lower", delta_conf[0]), ("upper", delta_conf[1])):
-        flat, cols = _out_of_range_columns(arr, problem.num_vars, allow_non_finite)
+        flat, cols = _out_of_range_columns(arr, problem.n_params, allow_non_finite)
         if cols.size == 0:
             continue
         detail = ", ".join(
@@ -1634,7 +1642,7 @@ def _resolve_sentinel_float(value: float | str, name: str, sentinel: str) -> flo
             real number. Booleans are rejected: ``bool`` is an ``int``
             subclass but is never a meaningful factor.
     """
-    message = f"{name} must be {sentinel!r} or a positive float, got {value!r}"
+    message = f"jaxgsa.borgonovo: {name} must be {sentinel!r} or a positive float, got {value!r}"
     if isinstance(value, str):
         if value == sentinel:
             return None

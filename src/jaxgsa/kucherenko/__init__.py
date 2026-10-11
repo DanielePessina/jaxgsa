@@ -36,7 +36,7 @@ core exists to export.
 
 Gating: ``sample`` conditions on the problem's declared dependence, either a
 ``problem.correlation`` or a custom sampler declared with
-``problem.with_sampler(f, dimension=k)``, so it is exempt from the
+``problem.with_sampler(f, sampler_dimension=k)``, so it is exempt from the
 correlated-design refusal that ``sobol``, ``morris``, and ``efast`` apply. It
 refuses categorical parameters. The copula conditionals need a continuous
 marginal CDF on every coordinate. Use :mod:`jaxgsa.optimal_transport` or
@@ -53,7 +53,7 @@ Example::
     problem = jaxgsa.Problem(names=("x1", "x2"), bounds=[(0, 1)] * 2)
     problem = problem.with_correlation(R)      # optional dependence
 
-    ks = jaxgsa.kucherenko.sample(problem, 4096, seed=0)
+    ks = jaxgsa.kucherenko.sample(problem, n_samples=4096, seed=0)
     Y = model(ks.samples)                      # (n_runs,) evaluations
     result = jaxgsa.kucherenko.analyze(ks, Y)
     result.S1   # correlation-inclusive first-order indices
@@ -77,16 +77,17 @@ References:
     Quantif. 12(2):667-692.
 """
 
-from jaxgsa._core.invalid import InvalidUnit
-from jaxgsa._core.registry import MethodSpec, register
+from jaxgsa._core.invalid import InvalidUnit as _InvalidUnit
+from jaxgsa._core.registry import MethodSpec as _MethodSpec
+from jaxgsa._core.registry import register as _register
 from jaxgsa.kucherenko._analyze import analyze
 from jaxgsa.kucherenko._result import KucherenkoResult
 from jaxgsa.kucherenko._sampling import KucherenkoSamples, sample
 
 __all__ = ["KucherenkoResult", "KucherenkoSamples", "analyze", "sample"]
 
-SPEC = register(
-    MethodSpec(
+_SPEC = _register(
+    _MethodSpec(
         name="kucherenko",
         analyze=analyze,
         sample=sample,
@@ -105,6 +106,6 @@ SPEC = register(
         # instead of treating the missing core as a defect.
         pure_core=False,
         # One base point carries the 2D+1 conditional rows drawn around it.
-        invalid_unit=InvalidUnit.BASE_POINT,
+        invalid_unit=_InvalidUnit.BASE_POINT,
     )
 )

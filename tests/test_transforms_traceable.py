@@ -32,7 +32,7 @@ PLAIN_GAUSSIAN = jaxgsa.Problem.from_dict(
 def _sample(problem):
     """Return a small in-range sample for a two-parameter problem."""
     rng = np.random.default_rng(0)
-    return jnp.asarray(rng.uniform(-1.0, 1.0, size=(16, problem.num_vars)))
+    return jnp.asarray(rng.uniform(-1.0, 1.0, size=(16, problem.n_params)))
 
 
 @pytest.mark.parametrize("problem", [TRUNCATED, PLAIN_GAUSSIAN], ids=["truncated", "untruncated"])
