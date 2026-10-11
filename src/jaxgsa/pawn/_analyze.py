@@ -62,7 +62,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Sequence
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import Literal, NamedTuple, cast
 
 import jax
@@ -456,6 +456,7 @@ def _get_pawn_ks(n_classes: int):
     return jax.jit(_impl)
 
 
+@partial(jax.jit, static_argnames=("n_bootstrap",))
 def _bootstrap_subkeys(key: Array, n_bootstrap: int) -> Array:
     """Return the per-replicate keys of the sequential ``split`` chain.
 
@@ -471,6 +472,8 @@ def _bootstrap_subkeys(key: Array, n_bootstrap: int) -> Array:
         Stacked keys, leading axis of length ``n_bootstrap``.
     """
 
+    # Jitted at module level: a lax.scan outside jit traces and compiles
+    # again on every call, because its body is a new function each time.
     def step(k, _):
         k, sub = jax.random.split(k)
         return k, sub
