@@ -355,8 +355,10 @@ def _get_delta_kernel(
         n = y.shape[0]
         safe_h = jnp.where(h > 0, h, 1.0)
 
+        inv_h = 1.0 / safe_h
+
         def _tile(grid_tile: Array) -> Array:
-            u = (grid_tile[:, None] - y[None, :]) / safe_h
+            u = (grid_tile[:, None] - y[None, :]) * inv_h
             return jnp.exp(-0.5 * u * u).sum(axis=1) / (n * safe_h * _SQRT_2PI)
 
         f = _over_grid(_tile, grid)
@@ -415,6 +417,7 @@ def _get_delta_kernel(
             floored_cls = (counts_b > 0) & (h < degenerate_tol * h_full)
             h = jnp.where(floored_cls, floor, h)
             safe_h = jnp.where(h > 0, h, 1.0)
+            inv_h = 1.0 / safe_h
 
             def _density_tile(grid_tile: Array) -> Array:
                 """Conditional class densities on one tile of the output grid.
@@ -423,7 +426,7 @@ def _get_delta_kernel(
                 ``(Dg, M, len(grid_tile), P)``. Tiling the grid is what
                 keeps it, and with it the method's peak memory, bounded.
                 """
-                u = (grid_tile[None, None, :, None] - y_cls[:, :, None, :]) / safe_h[
+                u = (grid_tile[None, None, :, None] - y_cls[:, :, None, :]) * inv_h[
                     ..., None, None
                 ]
                 k = jnp.exp(-0.5 * u * u) * mask_b[..., None, :]
@@ -647,6 +650,13 @@ def _slice_label(flat_index: int, trailing: tuple[int, ...], problem: Problem) -
     return f"(t={t}, {_k_label(k)})"
 
 
+@jax.jit
+def _count_distinct(flat: Array) -> Array:
+    """Count the distinct values in every column of ``flat (N, C)``."""
+    ordered = jnp.sort(flat, axis=0)
+    return 1 + jnp.sum(ordered[1:] != ordered[:-1], axis=0)
+
+
 def _raise_discrete_output(problem: Problem, Y: Array) -> None:
     """Reject a discrete output up front.
 
@@ -676,8 +686,7 @@ def _raise_discrete_output(problem: Problem, Y: Array) -> None:
     flat = Y.reshape(N, -1)
     if N < 2:
         return
-    ordered = jnp.sort(flat, axis=0)
-    n_distinct = np.asarray(1 + jnp.sum(ordered[1:] != ordered[:-1], axis=0))
+    n_distinct = np.asarray(_count_distinct(flat))
     discrete = (
         (n_distinct > 1)
         & (n_distinct <= _DISCRETE_MAX_DISTINCT)
