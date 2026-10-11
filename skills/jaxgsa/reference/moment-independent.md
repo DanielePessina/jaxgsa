@@ -6,7 +6,8 @@ bimodal or heavy-tailed, so `Var(Y)` is a poor denominator, or when you want a
 statement variance cannot make.
 
 All four are given-data methods: they take any aligned `(X, Y)` pairs and need
-no design. All four accept a correlated problem. `borgonovo`,
+no design. All four accept a correlated or custom-sampler problem. The fifth given-data
+index, `rank`, is in `variance-based.md`. `borgonovo`,
 `optimal_transport` and `pawn` accept categorical parameters; `hsic` does not.
 
 Their indices are correlation-inclusive. A parameter the model never reads
@@ -64,7 +65,7 @@ Signature:
 jaxgsa.borgonovo.analyze(problem, X, Y, *, n_classes=None, grid_size=100,
                          bandwidth="silverman", n_bootstrap=0, conf_level=0.95,
                          ci_method="quantile", bias_correct=False, key=None,
-                         slice_chunk_size=None, degenerate_tol=...,
+                         slice_chunk_size=None, degenerate_tol=0.01,
                          degenerate_bandwidth="auto", on_invalid="raise",
                          verbose=True, keep_replicates=False)
 ```

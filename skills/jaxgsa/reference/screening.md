@@ -8,7 +8,7 @@ Ishigami's top two.
 Use them to decide what to **drop**, fix the negligible parameters, then spend
 the remaining budget on `sobol` for the survivors.
 
-Both refuse a correlated or categorical problem.
+Both refuse a correlated, custom-sampler or categorical problem.
 
 The examples use Ishigami, whose true `ST` is `[0.5576, 0.4424, 0.2437]`:
 

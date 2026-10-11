@@ -1,8 +1,8 @@
 # Dependent inputs
 
 `sobol`, `efast`, `pce`, `morris`, `dgsm` and PCE-backed `shapley` all assume
-independent parameters and raise a `ValueError` when `problem.correlation` is
-declared. Two methods are built for dependence instead: `kucherenko`, which
+independent parameters and raise a `ValueError` when the problem declares
+dependence (`problem.correlation` or `problem.sampler`). Two methods are built for dependence instead: `kucherenko`, which
 needs its own design, and `vkoga`, which works from data you already have.
 
 ## Declaring the dependence
@@ -45,7 +45,9 @@ problem = problem.with_correlation(R)
 
 `jaxgsa.sampling.monte_carlo(problem, n_samples, seed=...)` honors a declared
 correlation through the NORTA construction, so it draws correlated rows that
-keep every declared marginal. `jaxgsa.sampling.correlate(problem, X)` imposes
+keep every declared marginal. `jaxgsa.sampling.transform(problem, U)` maps your
+own unit-cube design (for example a Latin hypercube) through the marginals and
+the copula or sampler. `jaxgsa.sampling.correlate(problem, X)` imposes
 the correlation on an existing sample by rank re-pairing, leaving the marginal
 values untouched.
 
@@ -72,6 +74,8 @@ of the same information. That gap is the whole subject.
 Evaluates the real model on a conditional-copula design. No surrogate.
 
 ```python
+import jax.numpy as jnp
+
 def model(X):
     return X[:, 0] + X[:, 1] + X[:, 2]
 
@@ -95,14 +99,17 @@ Signature:
 
 ```python
 jaxgsa.kucherenko.sample(problem, n_samples=None, *, base_n=None,
-                         subsets="singletons", scramble=True, seed=None,
-                         verbose=True)
+                         subsets="singletons",   # or "all"
+                         scramble=True, seed=None, verbose=True)
 jaxgsa.kucherenko.analyze(samples, Y, *, n_bootstrap=0, conf_level=0.95,
                           ci_method="quantile", key=None, on_invalid="raise",
                           verbose=True, keep_replicates=False)
 ```
 
-Cost is `N(2D + 1)` model runs for `N` base points. `n_samples` is the minimum number of model runs, as in `sobol`. `base_n=N` sets the base points exactly. Every parameter needs its own pair of blocks,
+Cost is `N(2D + 1)` model runs for `N` base points. `n_samples` is the minimum
+number of model runs, as in `sobol`. Give exactly one of `n_samples` and
+`base_n`. `base_n=N` sets the base points exactly and must be a power of two.
+Every parameter needs its own pair of blocks,
 because the redraw for parameter `i` comes from a conditional that depends on
 `i`, which is why the design cannot reuse one `B` block the way `sobol` does.
 
@@ -126,6 +133,28 @@ Keep in mind:
   normal space, which means tail-dependent or non-monotone dependence is not
   representable here.
 - No `S2`, no surrogate, and a categorical parameter raises.
+
+### Exact Shapley effects and PME
+
+`subsets="all"` builds one block for every proper non-empty subset of inputs,
+plus the joint blocks A and B. It costs `base_n * 2^D` runs and needs
+`2 <= D <= 12`.
+
+```python
+ka = jaxgsa.kucherenko.sample(problem, base_n=1024, subsets="all", seed=0)
+ra = jaxgsa.kucherenko.analyze(ka, model(jnp.asarray(ka.samples)),
+                               n_bootstrap=20, key=0, keep_replicates=True)
+ra.shapley().Sh              # [0.39, 0.39, 0.22]  conditional-variance Shapley effects, sum 1
+ra.shapley(cost="closed")    # closed-cost variant (default cost="total")
+ra.pme().Sh                  # proportional marginal effects; an unused input gets exactly 0
+ra.closed, ra.subset_total, ra.subsets   # per-subset indices and the membership matrix
+```
+
+Both methods return a `ShapleyResult` with `backend="exact"`. Intervals need
+`n_bootstrap > 0` and `keep_replicates=True`. On a `subsets="singletons"` result,
+`shapley()` and `pme()` raise `ValueError`. `D > 12` raises. Use `vkoga` or
+`shapley` instead. On this design `S1` and `ST` come from the subset blocks, so
+they differ slightly from a singletons run.
 
 ## vkoga
 
@@ -166,7 +195,7 @@ buys you almost nothing.
 Signature:
 
 ```python
-jaxgsa.vkoga.analyze(problem, X, Y, *, key,
+jaxgsa.vkoga.analyze(problem, X, Y, *, key,   # key: JAX key or int
                      gamma=None, ridge=None,
                      max_centers=None, n_folds=10, n_outer=512, n_inner=128,
                      n_variance=8192, n_bootstrap=0, conf_level=0.95,
@@ -174,9 +203,12 @@ jaxgsa.vkoga.analyze(problem, X, Y, *, key,
                      on_invalid="raise", verbose=True, keep_replicates=False)
 ```
 
-`key` is required and keyword-only, because the index stage uses randomized integration points.
-The dependence comes from the problem only. Read the matrix on `result.problem.correlation`. `result.dependence` is
-`"independent"`, `"gaussian"` or `"custom"`.
+`key` is required and keyword-only, because the index stage uses randomized
+integration points. The dependence comes from the problem only. Read the matrix
+on `result.problem.correlation`. `result.dependence` is `"independent"`,
+`"gaussian"` or `"custom"`. `result.S1` and `result.ST` are aliases of `S_TC`
+and `S_TU`. `rmse` is in-sample. `cv_rmse` and `explained_variance` hold one
+value per output slice.
 
 Keep in mind:
 
@@ -200,16 +232,17 @@ Keep in mind:
   `n_variance` only touch the surrogate, so they are cheap to raise.
 - `VKOGAResult` has no `shapley()` method, and there is no `S2`.
 
-## Four indices under dependence
+## Five routes under dependence
 
 There is no single generalisation of the Sobol indices to dependent inputs.
-jaxgsa ships four variance-based routes, they measure different things, and they
+jaxgsa ships five variance-based routes, they measure different things, and they
 disagree on the same data.
 
 | Route | What it estimates | What it needs |
 | --- | --- | --- |
 | `kucherenko` | `S1 = V(E(Y given X_i))/V(Y)` and `ST = E(V(Y given X_~i))/V(Y)` under the target joint distribution | Its own design, `N(2D+1)` model runs for `N` base points, a Gaussian correlation or a custom input sampler |
 | `vkoga` | The same two, as `S_TC` and `S_TU`, plus `S_U`, `S_C`, `S_IU`, from a fitted kernel surrogate | Training (X, Y) pairs, a Gaussian correlation or a custom input sampler |
+| `kucherenko` with `subsets="all"` | Exact conditional-variance Shapley effects (`.shapley()`) and PME (`.pme()`), one allocation per parameter summing to 1 | Its own design, `base_n * 2^D` runs, `2 <= D <= 12` |
 | `hdmr` ANCOVA split | Per term, not per parameter: each component's variance split into a structural share `Sa` and a coupling share `Sb` | Any (X, Y) pairs. The correlation is read implicitly out of X |
 | `shapley(backend="hdmr", include_correlative=True)` | One allocation per parameter summing to 1, splitting each term's `Sa + Sb` among its participants | Any (X, Y) pairs |
 
@@ -219,7 +252,7 @@ Three things to hold on to:
   `kucherenko` and `vkoga` estimate the same pair and should agree up to
   surrogate and Monte Carlo error, as they do above. The other two estimate
   something else and have no reason to match.
-- **Only two of the four are conditional-variance indices.** HDMR's `ST` under
+- **Only the `kucherenko` and `vkoga` indices are conditional-variance indices.** HDMR's `ST` under
   dependence is a term-membership sum, not a total-effect index. On
   `Y = X1 + X2 + X3` with `corr(X1, X2) = 0.95` and 8192 samples, HDMR reports
   `ST = [0.398, 0.397, 0.207]` where the true conditional-variance totals are
@@ -234,7 +267,7 @@ Three things to hold on to:
 
 ## The distribution-based alternatives
 
-`optimal_transport`, `borgonovo`, `hsic` and `pawn` never assumed independence
+`optimal_transport`, `borgonovo`, `hsic`, `pawn` and `rank` never assumed independence
 in the first place, so they accept a correlated problem without complaint. Their
 indices are correlation-inclusive: a parameter the model never reads scores
 above zero when it correlates with one the model does read. That is the correct
@@ -265,7 +298,9 @@ sampler(uniform_points, *, conditioning_rows=None, fixed_indices=())
 
 The package supplies `(n, sampler_dimension)` uniform points. Return `(n, D)`
 finite real physical inputs in `problem.names` order. `sampler_dimension`
-defaults to `D`. The package makes exactly three kinds of call:
+defaults to `D`. On the default Kucherenko design and in VKOGA, the package makes three kinds
+of call. With `subsets="all"`, the sampler also gets every other sorted
+subset in `fixed_indices`, so write it to accept any subset.
 
 - `fixed_indices=()`: joint draws, `conditioning_rows=None`.
 - `fixed_indices=(i,)`: keep column `i` of `conditioning_rows`, redraw the rest
@@ -278,13 +313,17 @@ valid only for independent inputs. The callback must be deterministic: identical
 arguments give identical outputs. The package passes copies, so changing the
 arguments does no harm. All randomness comes from the package: Kucherenko's
 `seed` and `scramble`, or VKOGA's required `key`. Everything uses scrambled Sobol' points, and sample sizes round up to
-the next power of two. Shapes, finite values and fixed columns are checked.
+the next power of two. Shapes, finite values, fixed columns and the support of each input (uniform and
+truncated bounds, integer codes for categorical inputs) are checked. A value
+that overshoots a bound by float32 rounding is clipped. A value further out
+raises `ValueError`. The sampler must be a deterministic inverse Rosenblatt
+(conditional-quantile) map. Rejection sampling and MCMC are not valid.
 Statistical consistency is the user's responsibility.
 
 `kucherenko.sample(problem, n_samples, seed=...)` and
 `vkoga.analyze(problem, X_train, Y_train, key=...)` read the sampler from the
-problem.Kucherenko and VKOGA share one estimator for both dependence kinds, and the
-custom path costs about the same time.
+problem. Kucherenko and VKOGA share one estimator for both dependence kinds, and
+the custom path costs about the same time.
 
 Sobol, Morris and eFAST designs and the independence-only analyses refuse a
 custom-sampler problem, as they refuse a correlated one. For given-data
@@ -292,7 +331,9 @@ methods, draw `X` with `jaxgsa.sampling.monte_carlo(problem, n_samples, seed=...
 sends pseudo-random uniforms through the joint branch, so rows are independent
 draws and row bootstrap and HSIC permutation tests stay valid. This does not
 turn an ordinary `X` matrix into a Kucherenko analysis design. Saved designs
-retain sampled rows and provenance, not callable code. VKOGA's declared
+retain sampled rows and provenance, not callable code. A loaded problem still
+reports `dependence == "custom"` but raises if asked to draw rows. Attach the
+sampler again with `problem.with_sampler(f, sampler_dimension=k)`. VKOGA's declared
 marginals must match the sampler, because its coordinate transform and
 component bases still use them. Training data must cover the analysis
 distribution. Dependence fitting remains explicit, never triggered just by

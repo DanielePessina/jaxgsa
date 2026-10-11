@@ -1,7 +1,8 @@
 # Variance-based methods
 
 Five methods that split the output variance into the share each parameter owns.
-All five assume independent inputs and refuse a correlated `Problem`. For
+All five assume independent inputs and refuse a correlated or custom-sampler
+`Problem`. A sixth, `rank`, gives only `S1` and accepts dependent inputs. For
 dependent inputs see `dependent-inputs.md`.
 
 `sobol` and `efast` build their own design, so you must be able to run the model
@@ -48,7 +49,7 @@ jaxgsa.sobol.sample: D=3, mode=second-order, base_n=1024, requested_runs>=8192,
 jaxgsa.sobol.analyze
   problem: D=3 (x1, x2, x3)
     marginals: uniform=3
-    correlation: independent
+    dependence: independent
     output: N=8192 runs, T=1 x K=1 output slice
     invalid: none found in 1024 Saltelli groups (policy 'raise')
   timing:
@@ -75,8 +76,11 @@ jaxgsa.sobol.analyze(samples, Y, *, estimator="saltelli-jansen",
 Estimators: `"saltelli-jansen"` (default), `"jansen"`, `"janon-monod"`,
 `"martinez"`, `"mauntz-kucherenko"`, `"azzini-rosati"`.
 
-Result: `S1`, `ST`, `S2`, `estimator`, `problem`, `invalid`, the `*_conf`
-intervals, `ci`.
+Result: `S1`, `ST`, `S2`, `variance`, `estimator`, `problem`, `invalid`, the
+`*_conf` intervals, `ci`. `S2` is `None` when the design has
+`calc_second_order=False`. `n_bootstrap > 0` needs `key`. For several outputs,
+`result.aggregate()` collapses them into one index per input, weighted by the
+output variances (`weights="equal"` for equal weights).
 
 Cost is `N(D + 2)` model runs, or `N(2D + 2)` with `calc_second_order=True`.
 
@@ -178,8 +182,10 @@ jaxgsa.pce.analyze(problem, X, Y, *, order=3, ridge=1e-8, fit_ratio=0.5,
 jaxgsa.pce.effective_order(problem, n_samples, *, order=3, fit_ratio=0.5)
 ```
 
-Result: `S1`, `S2`, `ST`, `coefficients`, `multi_index`, `order`, `rmse`, `cv_rmse`,
-`explained_variance`, `streamed`, `predict`, `shapley`.
+Result: `S1`, `S2`, `ST`, `coefficients`, `multi_index`, `order`, `rmse`
+(in-sample), `cv_rmse` (out-of-sample), `explained_variance`, `streamed`,
+`predict`, `shapley`, `aggregate`. The fit fields hold one value per output
+slice.
 
 Keep in mind:
 
@@ -242,6 +248,9 @@ jaxgsa.hdmr.analyze(problem, X, Y, *, order=2, max_iter=100, n_intervals=2,
 
 Keep in mind:
 
+- HDMR with fewer than 300 rows warns. It raises only below
+  `(n_intervals + 3)**min(order, D) + 1` rows.
+- `cv_rmse` is `None` on an HDMR result. Read `explained_variance` and `rmse`.
 - **`result.S.sum()` must be near 1 before you rank anything.** The 0.9174 above
   means 8% of the variance is unaccounted for, and `Sa`, `Sb`, `S` and `ST` all
   inherit that shortfall. `analyze` warns below 0.5 and above 1.3, which is the
@@ -319,5 +328,30 @@ Keep in mind:
   n_intervals=3` raises a plain `TypeError` from `pce.analyze`.
 - `VKOGAResult` has no `shapley()` method on purpose, because a
   kernel expansion has no term-wise variance decomposition to allocate from.
-- The surrogate-free Song et al. (2016) conditional-variance estimator is not
-  implemented.
+- This module has no surrogate-free estimator. For exact conditional-variance
+  Shapley effects (Song et al. 2016) from your own model runs, use
+  `jaxgsa.kucherenko.sample(problem, base_n=n, subsets="all")` and
+  `result.shapley()`. See `dependent-inputs.md`.
+
+## rank
+
+First-order `S1` only, from any `(X, Y)` sample, with no binning choice and no
+surrogate. It sorts the rows by each parameter and pairs each output with the
+output of the next-ranked row (Gamboa et al. 2022).
+
+```python
+result = jaxgsa.rank.analyze(PROBLEM, X, Y, n_bootstrap=20, key=0)
+result.S1        # [0.287, 0.465, 0.002]   on 4000 Ishigami rows
+result.S1_conf   # (2, D) interval
+jaxgsa.rank.analyze(problem, X, Y, *, n_bootstrap=0, conf_level=0.95,
+                    ci_method="quantile", key=None, on_invalid="raise",
+                    verbose=True, keep_replicates=False)
+```
+
+Keep in mind:
+
+- It accepts a correlated or custom-sampler problem. The index then includes
+  the influence a parameter carries through its partners.
+- It refuses categorical parameters, because level codes are heavily tied.
+- `S1` is not clipped, so it can be negative. The intervals use 80% subsamples
+  without replacement, not a bootstrap. `n_bootstrap > 0` needs `key`.
