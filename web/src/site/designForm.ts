@@ -4,6 +4,7 @@
  * form still matches the design in use.
  */
 
+import { kucherenkoBaseN, kucherenkoRuns } from "@/jaxgsa/kucherenko/sample";
 import { EFAST_LOW_N } from "./analysisGuards";
 import type { DesignConfig, DesignMethod, GeneratedDesign } from "./engine";
 
@@ -22,7 +23,7 @@ export const DEFAULT_DESIGN_FORM: DesignForm = {
   baseN: "128",
   nTrajectories: "20",
   numLevels: "4",
-  nSamples: "128",
+  nSamples: "1024",
   nPerCurve: "",
   seed: "0",
 };
@@ -76,14 +77,6 @@ function isInt(text: string): boolean {
 
 function isPowerOfTwo(n: number): boolean {
   return n >= 1 && (n & (n - 1)) === 0;
-}
-
-function nextPowerOfTwo(n: number): number {
-  let p = 1;
-
-  while (p < n) p *= 2;
-
-  return p;
 }
 
 /** Field name to message, for every field of `method` that is not valid. */
@@ -152,8 +145,8 @@ export function plannedRuns(method: DesignMethod, form: DesignForm, D: number): 
 
   if (method === "morris") return Number(form.nTrajectories) * (D + 1);
 
-  // Kucherenko rounds its sample count up to a power of 2.
-  if (method === "kucherenko") return nextPowerOfTwo(Number(form.nSamples)) * (2 * D + 1);
+  // Kucherenko reads the field as a minimum run budget and rounds base N up to a power of 2.
+  if (method === "kucherenko") return kucherenkoRuns(Number(form.nSamples), D);
 
   return Number(form.nPerCurve || efastDefaultPoints(D)) * D;
 }
@@ -183,7 +176,7 @@ export function describeForm(method: DesignMethod, form: DesignForm, D: number):
   if (method === "sobol") return `base N ${form.baseN}`;
 
   if (method === "kucherenko") {
-    return `base N ${nextPowerOfTwo(Math.max(2, Number(form.nSamples)))}`;
+    return `base N ${kucherenkoBaseN(Number(form.nSamples), D)}`;
   }
 
   if (method === "morris") {

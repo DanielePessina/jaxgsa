@@ -56,8 +56,14 @@ describe("designConfig and plannedRuns", () => {
     expect(plannedRuns("efast", form(), 3)).toBe(n * 3);
   });
 
-  it("rounds Kucherenko samples up to a power of 2", () => {
-    expect(plannedRuns("kucherenko", form({ nSamples: "100" }), 3)).toBe(128 * 7);
+  it("reads Kucherenko samples as a minimum run budget", () => {
+    // D=3: 7 blocks. ceil(100 / 7) = 15, next power of 2 is 16, so 16 * 7 = 112 runs.
+    expect(plannedRuns("kucherenko", form({ nSamples: "100" }), 3)).toBe(16 * 7);
+    // ceil(4096 / 7) = 586, next power of 2 is 1024.
+    expect(plannedRuns("kucherenko", form({ nSamples: "4096" }), 3)).toBe(1024 * 7);
+    // An exact fit stays: 16 * 7 = 112 gives base N 16.
+    expect(plannedRuns("kucherenko", form({ nSamples: "112" }), 3)).toBe(112);
+    expect(plannedRuns("kucherenko", form({ nSamples: "2" }), 3)).toBe(2 * 7);
   });
 
   it("returns null for an invalid form", () => {
@@ -89,7 +95,7 @@ describe("designMismatch", () => {
   });
 
   it("compares Kucherenko after rounding", () => {
-    const kuch = fakeDesign("kucherenko", [["base_n", "128"]]);
+    const kuch = fakeDesign("kucherenko", [["base_n", "16"]]);
     expect(designMismatch("kucherenko", form({ nSamples: "100" }), kuch, 3)).toBeNull();
   });
 });

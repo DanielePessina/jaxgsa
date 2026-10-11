@@ -10,7 +10,7 @@ import { defaultDevice, init, numpy as np } from "@jax-js/jax";
 import { ishigami } from "@/jaxgsa/benchmarks";
 import { analyzeKucherenko } from "@/jaxgsa/kucherenko";
 import { loadKucherenkoGolden } from "@/goldens";
-import { sampleKucherenkoDesign } from "./sample";
+import { kucherenkoBaseN, kucherenkoRuns, sampleKucherenkoDesign } from "./sample";
 import { ISHIGAMI_PROBLEM } from "@/site/engine";
 
 /**
@@ -85,8 +85,9 @@ describe("kucherenko sampler: block-major sharing structure", () => {
 
   it("has baseN * (2D+1) rows with a power-of-two base", () => {
     const design = sampleKucherenkoDesign(ISHIGAMI_PROBLEM, 300, 1);
-    expect(design.baseN).toBe(512);
-    expect(design.samples.length / design.nParams).toBe(512 * 7);
+    // ceil(300 / 7) = 43, next power of 2 is 64.
+    expect(design.baseN).toBe(64);
+    expect(design.samples.length / design.nParams).toBe(64 * 7);
   });
 
   it("is deterministic per seed and differs across seeds", () => {
@@ -95,6 +96,23 @@ describe("kucherenko sampler: block-major sharing structure", () => {
     const c = sampleKucherenkoDesign(ISHIGAMI_PROBLEM, 64, 8);
     expect(Array.from(a.samples)).toEqual(Array.from(b.samples));
     expect(Array.from(a.samples)).not.toEqual(Array.from(c.samples));
+  });
+});
+
+describe("kucherenko run budget (python: max(2, next_pow2(ceil(n_samples / n_blocks))))", () => {
+  it("rounds the budget up to a power-of-2 base N", () => {
+    expect(kucherenkoBaseN(100, 3)).toBe(16);
+    expect(kucherenkoBaseN(112, 3)).toBe(16);
+    expect(kucherenkoBaseN(113, 3)).toBe(32);
+    expect(kucherenkoBaseN(2, 3)).toBe(2);
+    expect(kucherenkoBaseN(4096, 3)).toBe(1024);
+    expect(kucherenkoBaseN(4096, 5)).toBe(512);
+  });
+
+  it("gives at least the requested runs", () => {
+    for (const n of [2, 50, 111, 112, 113, 1000, 4096, 5000]) {
+      expect(kucherenkoRuns(n, 3)).toBeGreaterThanOrEqual(n);
+    }
   });
 });
 

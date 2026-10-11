@@ -12,7 +12,7 @@ export const POORFIT_THRESHOLD = 0.5;
 
 /**
  * `LOO_RATIO_THRESHOLD` in `fit_quality.py`: the leave-one-out R-squared
- * falls to `POORFIT_THRESHOLD` when `loo_rmse / std(Y)` reaches this value.
+ * falls to `POORFIT_THRESHOLD` when `cv_rmse / std(Y)` reaches this value.
  */
 export const LOO_RATIO_THRESHOLD = Math.sqrt(1 - POORFIT_THRESHOLD);
 
@@ -88,7 +88,7 @@ function fixed(v: number): string {
  *
  * - order reduced to fit the sample budget,
  * - `explained_variance` below 0.5 on the worst slice,
- * - `loo_rmse / std(Y)` above sqrt(0.5) on the worst slice, unless the
+ * - `cv_rmse / std(Y)` above sqrt(0.5) on the worst slice, unless the
  *   in-sample fit already failed (that is underfitting, not overfitting).
  *
  * Slices whose numbers are not finite are skipped, as in Python.

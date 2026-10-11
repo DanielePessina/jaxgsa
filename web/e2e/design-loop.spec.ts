@@ -19,7 +19,7 @@ interface Case {
 const CASES: Case[] = [
   { method: "sobol", fields: { "Base N": "4096" } },
   { method: "morris", fields: { Trajectories: "50" } },
-  { method: "kucherenko", fields: { Samples: "4096" } },
+  { method: "kucherenko", fields: { "Model runs": "4096" } },
   { method: "efast", fields: { "Points per curve": "1025" } },
 ];
 

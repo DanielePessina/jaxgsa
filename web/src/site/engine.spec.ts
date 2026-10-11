@@ -458,8 +458,8 @@ describe("sampleKucherenkoDesign", () => {
   it("builds base_n * (2D + 1) rows in physical units with the block layout", () => {
     const design = sampleKucherenkoDesign(ISHIGAMI_PROBLEM, 100, 42);
     const D = 3;
-    expect(design.baseN).toBe(128);
-    expect(design.samples.length / D).toBe(128 * (2 * D + 1));
+    expect(design.baseN).toBe(16);
+    expect(design.samples.length / D).toBe(16 * (2 * D + 1));
 
     for (let i = 0; i < design.samples.length; i++) {
       expect(design.samples[i]).toBeGreaterThanOrEqual(-Math.PI);

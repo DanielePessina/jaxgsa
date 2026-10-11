@@ -297,10 +297,10 @@ function DesignMethodCell({
         {method === "kucherenko" && (
           <FormField
             id={`${method}-samples`}
-            label="Samples"
+            label="Model runs"
             value={form.nSamples}
             onChange={(v) => setField("nSamples", v)}
-            hint="Rounded up to a power of 2."
+            hint="Minimum number of model runs. Base N is the smallest power of 2 that reaches it, so the design may have more runs."
             error={errors.nSamples}
             min={2}
           />
