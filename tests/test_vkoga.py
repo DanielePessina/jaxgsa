@@ -508,7 +508,10 @@ def test_batch_size_bounds_the_index_estimator_too(monkeypatch):
     batched = estimate_correlated_indices(**kwargs, batch_size=32)
     nested_batched = max(rows[1:])
 
-    assert nested_auto == n_outer * n_inner  # the whole block, as before
+    # Without a batch size, the nested blocks of every parameter share one
+    # surrogate call: two blocks per parameter (correlated and uncorrelated
+    # totals), each n_outer * n_inner rows, and no more.
+    assert nested_auto == 2 * UNIFORM_PROBLEM.n_params * n_outer * n_inner
     assert nested_batched == 32  # two outer points, 16 inner draws each
     # Chunking is a memory decision: the uniform noise is drawn up front, so
     # the estimate itself must not move.
@@ -669,7 +672,7 @@ def test_s_tu_sampling_error_shrinks_with_n_outer():
     from scipy.stats import norm
 
     from jaxgsa._core.dependence import GaussianDraws, sobol_uniforms
-    from jaxgsa.vkoga._indices import _total_uncorrelated_and_conditional
+    from jaxgsa.vkoga._indices import _PredictQueue, _total_uncorrelated_and_conditional
 
     R = np.array([[1.0, 0.6, -0.3], [0.6, 1.0, 0.15], [-0.3, 0.15, 1.0]])
     problem = Problem(names=("x1", "x2", "x3"), bounds=((0.0, 1.0),) * 3)
@@ -687,10 +690,11 @@ def test_s_tu_sampling_error_shrinks_with_n_outer():
         vals = []
         for seed in range(n_seeds):
             component_dummy = np.zeros((6, 1))
-            stu, _ = _total_uncorrelated_and_conditional(
+            queue = _PredictQueue(predict, 1 << 20)
+            finish = _total_uncorrelated_and_conditional(
                 draws=draws,
                 index=2,
-                predict=predict,
+                queue=queue,
                 component=component_dummy,
                 basis_kind="legendre",
                 n_outer=n_outer,
@@ -699,6 +703,8 @@ def test_s_tu_sampling_error_shrinks_with_n_outer():
                 stream=np.random.SeedSequence(seed),
                 batch_size=None,
             )
+            queue.flush()
+            stu, _ = finish()
             vals.append(stu[0] / V)
         return np.array(vals)
 

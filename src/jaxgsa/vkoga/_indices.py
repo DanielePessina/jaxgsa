@@ -265,29 +265,49 @@ def estimate_correlated_indices(
     S_TU = np.empty((n_slices, D), dtype=np.float64)
     S_U = np.empty((n_slices, D), dtype=np.float64)
 
+    # Every nested draw goes through one queue, so the surrogate sees a few
+    # large calls instead of 2D small ones. Draws do not depend on the
+    # predictions, so evaluation can wait until the queue is flushed.
+    flush_rows = (
+        batch_size
+        if batch_size is not None
+        else resolve_batch_size(8 * (2 * draws.dimension + n_slices), 1 << 62, None)
+    )
+    queue = _PredictQueue(predict, flush_rows)
+    finish_total: list[Callable[[], np.ndarray]] = []
+    finish_uncorrelated: list[Callable[[], tuple[np.ndarray, np.ndarray]]] = []
     for i in range(D):
-        S_TC[:, i] = _total_correlated(
-            draws=draws,
-            index=i,
-            predict=predict,
-            n_outer=n_outer,
-            n_inner=n_inner,
-            n_slices=n_slices,
-            stream=streams.total_correlated[i],
-            batch_size=batch_size,
+        finish_total.append(
+            _total_correlated(
+                draws=draws,
+                index=i,
+                queue=queue,
+                n_outer=n_outer,
+                n_inner=n_inner,
+                n_slices=n_slices,
+                stream=streams.total_correlated[i],
+                batch_size=batch_size,
+            )
         )
-        total_uncorrelated, conditional_component_var = _total_uncorrelated_and_conditional(
-            draws=draws,
-            index=i,
-            predict=predict,
-            component=coefficients[:, i, :],
-            basis_kind=basis_kinds[i],
-            n_outer=n_outer,
-            n_inner=n_inner,
-            n_slices=n_slices,
-            stream=streams.total_uncorrelated[i],
-            batch_size=batch_size,
+        finish_uncorrelated.append(
+            _total_uncorrelated_and_conditional(
+                draws=draws,
+                index=i,
+                queue=queue,
+                component=coefficients[:, i, :],
+                basis_kind=basis_kinds[i],
+                n_outer=n_outer,
+                n_inner=n_inner,
+                n_slices=n_slices,
+                stream=streams.total_uncorrelated[i],
+                batch_size=batch_size,
+            )
         )
+    queue.flush()
+
+    for i in range(D):
+        S_TC[:, i] = finish_total[i]()
+        total_uncorrelated, conditional_component_var = finish_uncorrelated[i]()
         S_TU[:, i] = total_uncorrelated
         # The independent contribution is what f_i explains beyond the part of
         # itself that X_-i already determines through the correlation. V(f_i)
@@ -558,17 +578,73 @@ def _outer_chunk(n_outer: int, n_inner: int, n_columns: int, batch_size: int | N
     return resolve_batch_size(8 * n_inner * n_columns, n_outer, requested)
 
 
+class _PredictQueue:
+    """Collect unit-cube blocks and evaluate them in few surrogate calls.
+
+    Prediction is row-independent, so blocks from different estimators can
+    share one device call. The queue holds at most ``flush_rows`` rows, so
+    host memory stays bounded. Each block carries a callback that receives
+    the predictions for exactly its own rows.
+
+    Attributes:
+        predict: Fitted surrogate on unit-cube rows.
+        flush_rows: Pending row count that triggers a flush.
+    """
+
+    def __init__(self, predict: Callable[[np.ndarray], np.ndarray], flush_rows: int) -> None:
+        """Create an empty queue.
+
+        Args:
+            predict: Fitted surrogate. It maps ``(n, D)`` unit-cube samples
+                to ``(n, S)`` outputs.
+            flush_rows: Pending row count that triggers a flush, at least 1.
+        """
+        self.predict = predict
+        self.flush_rows = max(1, flush_rows)
+        self._blocks: list[np.ndarray] = []
+        self._callbacks: list[Callable[[np.ndarray], None]] = []
+        self._pending = 0
+
+    def submit(self, U: np.ndarray, callback: Callable[[np.ndarray], None]) -> None:
+        """Queue a block, flushing first if it would not fit.
+
+        Args:
+            U: Unit-cube rows, shape ``(n, D)``.
+            callback: Called with the float64 predictions for ``U``, shape
+                ``(n, S)``, when the block is evaluated.
+        """
+        if self._pending + U.shape[0] > self.flush_rows:
+            self.flush()
+        self._blocks.append(U)
+        self._callbacks.append(callback)
+        self._pending += U.shape[0]
+
+    def flush(self) -> None:
+        """Evaluate every pending block in one surrogate call."""
+        if not self._blocks:
+            return
+        blocks, callbacks = self._blocks, self._callbacks
+        self._blocks, self._callbacks, self._pending = [], [], 0
+        joined = blocks[0] if len(blocks) == 1 else np.concatenate(blocks, axis=0)
+        Y = np.asarray(self.predict(joined), dtype=np.float64)
+        start = 0
+        for block, callback in zip(blocks, callbacks, strict=True):
+            stop = start + block.shape[0]
+            callback(Y[start:stop])
+            start = stop
+
+
 def _total_correlated(
     *,
     draws: Draws,
     index: int,
-    predict: Callable[[np.ndarray], np.ndarray],
+    queue: _PredictQueue,
     n_outer: int,
     n_inner: int,
     n_slices: int,
     stream: np.random.SeedSequence,
     batch_size: int | None,
-) -> np.ndarray:
+) -> Callable[[], np.ndarray]:
     """Estimate ``V(E(Y|X_i))`` for one parameter.
 
     The outer points are joint draws, of which only column ``index`` is kept:
@@ -593,8 +669,7 @@ def _total_correlated(
     Args:
         draws: Joint and conditional draws of the inputs.
         index: Position of the parameter ``X_i`` being conditioned on.
-        predict: Fitted surrogate. It maps ``(n, D)`` unit-cube samples to
-            ``(n, S)`` outputs.
+        queue: Prediction queue for the fitted surrogate.
         n_outer: Outer (conditioning) sample size.
         n_inner: Inner (conditional) sample size per outer point.
         n_slices: Number of output slices ``S``.
@@ -604,7 +679,8 @@ def _total_correlated(
             from the memory budget.
 
     Returns:
-        Conditional-expectation variance, shape ``(S,)``. Not yet normalised.
+        A function to call after ``queue`` has been flushed. It returns the
+        conditional-expectation variance, shape ``(S,)``. Not yet normalised.
     """
     outer_stream, inner_stream = stream.spawn(2)
     outer = draws.joint_led_by(
@@ -622,8 +698,12 @@ def _total_correlated(
         conditioning = np.repeat(outer[start : start + chunk], n_inner, axis=0)
         noise = np.tile(inner, (conditioning.shape[0] // n_inner, 1))
         rows = draws.rest_given_self(noise, conditioning, index)
-        Y = np.asarray(predict(draws.to_unit(rows)), dtype=np.float64)
-        inner_mean[start : start + chunk] = Y.reshape(-1, n_inner, n_slices).mean(axis=1)
+
+        def _store(Y: np.ndarray, start: int = start) -> None:
+            means = Y.reshape(-1, n_inner, n_slices).mean(axis=1)
+            inner_mean[start : start + means.shape[0]] = means
+
+        queue.submit(draws.to_unit(rows), _store)
 
     # No inner-noise correction. The textbook term ``inner_var / n_inner``
     # assumes iid inner draws. Here the inner block is QMC and shared across
@@ -631,7 +711,7 @@ def _total_correlated(
     # the outer variance. Chosen empirically against the linear-Gaussian
     # closed form: the correction clamps small true S_TC to near zero, while
     # the uncorrected estimator is unbiased at equal spread.
-    return inner_mean.var(axis=0)
+    return lambda: inner_mean.var(axis=0)
 
 
 def _inner_noise(
@@ -677,7 +757,7 @@ def _total_uncorrelated_and_conditional(
     *,
     draws: Draws,
     index: int,
-    predict: Callable[[np.ndarray], np.ndarray],
+    queue: _PredictQueue,
     component: np.ndarray,
     basis_kind: str,
     n_outer: int,
@@ -685,7 +765,7 @@ def _total_uncorrelated_and_conditional(
     n_slices: int,
     stream: np.random.SeedSequence,
     batch_size: int | None,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> Callable[[], tuple[np.ndarray, np.ndarray]]:
     """Estimate ``E(V(Y|X_-i))`` and ``V(E(f_i|X_-i))`` for one parameter.
 
     Both quantities condition on ``X_-i`` and resample ``X_i``, so they share
@@ -701,8 +781,7 @@ def _total_uncorrelated_and_conditional(
     Args:
         draws: Joint and conditional draws of the inputs.
         index: Position of the parameter ``X_i`` being resampled.
-        predict: Fitted surrogate. It maps ``(n, D)`` unit-cube samples to
-            ``(n, S)`` outputs.
+        queue: Prediction queue for the fitted surrogate.
         component: Basis coefficients of ``f_i``, shape ``(degree, S)``.
         basis_kind: ``"hermite"`` or ``"legendre"``, the basis ``component``
             was fitted in (see :func:`_component_basis_kinds`).
@@ -715,6 +794,7 @@ def _total_uncorrelated_and_conditional(
             from the memory budget.
 
     Returns:
+        A function to call after ``queue`` has been flushed. It returns
         ``(conditional_variance_mean, component_conditional_variance)``, each
         shape ``(S,)``. Neither is normalised by ``V(Y)``.
     """
@@ -740,8 +820,10 @@ def _total_uncorrelated_and_conditional(
             rows = draws.self_given_rest(noise.reshape(-1, width), conditioning, index)
             U = draws.to_unit(rows)
 
-            Y = np.asarray(predict(U), dtype=np.float64)
-            inner_var[start:stop] = Y.reshape(-1, n_inner, n_slices).var(axis=1, ddof=1)
+            def _store(Y: np.ndarray, start: int = start, stop: int = stop) -> None:
+                inner_var[start:stop] = Y.reshape(-1, n_inner, n_slices).var(axis=1, ddof=1)
+
+            queue.submit(U, _store)
 
             # E(f_i | X_-i), averaged over the same inner draws of X_i. Its
             # variance over the outer sample is the correlation-explained part
@@ -750,4 +832,4 @@ def _total_uncorrelated_and_conditional(
             value = _component_value(u_self, _probit(u_self), basis_kind)
             f_hat[start:stop] = _evaluate_component(value, component, basis_kind).mean(axis=1)
 
-    return inner_var.mean(axis=0), f_hat.var(axis=0)
+    return lambda: (inner_var.mean(axis=0), f_hat.var(axis=0))

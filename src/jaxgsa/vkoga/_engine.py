@@ -635,11 +635,15 @@ def _cross_validate(
                 # ridge-free: build them once per (fold, gamma) and reuse them for
                 # the whole ridge grid. Only the assembly-and-solve repeats.
                 eq = _normal_equations(X, Y, idx, m, gamma=gamma, train_mask=train)
-                K_pred = _gaussian_kernel(X, eq.centers, gamma)
+                block = -(-n // n_folds)
+                (held_idx,) = jnp.nonzero(~train, size=block, fill_value=0)
+                valid = jnp.arange(block) < jnp.sum(~train)
+                K_pred = _gaussian_kernel(X[held_idx], eq.centers, gamma)
+                Y_held = Y[held_idx]
 
                 def _ridge_sse(ridge: Array) -> tuple[Array, Array]:
-                    err = Y - K_pred @ _solve_ridge(eq, ridge)
-                    held = jnp.where(train[:, None], 0.0, err**2)
+                    err = Y_held - K_pred @ _solve_ridge(eq, ridge)
+                    held = jnp.where(valid[:, None], err**2, 0.0)
                     # Per-slice sums for cv_rmse; the pooled sum is reduced
                     # straight from the full array so the grid choice keeps
                     # its original summation order.
